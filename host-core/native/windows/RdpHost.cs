@@ -27,6 +27,29 @@ namespace ELauncher.Shower
         }
     }
 
+    internal sealed class RdpWindow : Form
+    {
+        private bool background = true;
+
+        protected override bool ShowWithoutActivation { get { return background; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams parameters = base.CreateParams;
+                if (background) parameters.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
+                return parameters;
+            }
+        }
+
+        internal void SetBackground(bool value)
+        {
+            background = value;
+            UpdateStyles();
+        }
+    }
+
     /// <summary>
     /// Parent-session host. Owns the STA RDP child-session connection, the child session lifecycle and the
     /// named pipe server to the child-session agent. Capture and injection happen only in the agent, so this
@@ -98,7 +121,7 @@ namespace ELauncher.Shower
         private readonly ManualResetEventSlim loginComplete = new ManualResetEventSlim(false);
         private readonly ManualResetEventSlim rdpDisconnected = new ManualResetEventSlim(true);
 
-        private Form ui;
+        private RdpWindow ui;
         private RdpControl control;
         private IMsRdpClient9 client;
         private ShowerCredentials pendingCredential;
@@ -215,13 +238,13 @@ namespace ELauncher.Shower
             try
             {
                 Application.EnableVisualStyles();
-                ui = new Form();
+                ui = new RdpWindow();
                 ui.Text = "e-launcher shower";
                 ui.FormBorderStyle = FormBorderStyle.SizableToolWindow;
                 ui.MinimizeBox = false;
                 ui.ShowInTaskbar = false;
                 ui.StartPosition = FormStartPosition.Manual;
-                ui.Location = new Point(PreviewOrigin, PreviewOrigin);
+                ui.Location = new Point(-32000, -32000);
                 ui.Size = new Size(DefaultDesktopWidth, DefaultDesktopHeight);
                 ui.FormClosing += delegate(object sender, FormClosingEventArgs e)
                 {
@@ -683,8 +706,7 @@ namespace ELauncher.Shower
                 loginFault = null;
                 loginComplete.Reset();
             }
-            // The RDP logon, the credential prompt and the bootstrap steps all continue in the background so
-            // the caller never waits on a local UAC or credentials dialog.
+            // RDP logon and bootstrap continue in the background without blocking the caller.
             SetPhase("starting", null, null);
             var worker = new Thread(delegate() { StartSession(expectedGeneration, width, height); });
             worker.IsBackground = true;
@@ -715,7 +737,7 @@ namespace ELauncher.Shower
                 }
                 ConnectRdp(width, height);
                 SetPhaseFor(expectedGeneration, "starting", null, null);
-                // 凭据输入由本机 UI 完成；自动登录在后台等待，不阻塞 RPC。
+                // 使用已保存凭据在后台等待登录，不阻塞 RPC。
                 while (!loginComplete.Wait(500)) RequireCurrent(expectedGeneration);
                 RequireCurrent(expectedGeneration);
                 string fault;
@@ -723,7 +745,9 @@ namespace ELauncher.Shower
                 {
                     fault = loginFault;
                 }
-                if (fault != null) throw new HostFault(HostErrorCodes.BackendFailed, fault);
+                if (fault != null) throw new HostFault(
+                    credentialRejected ? HostErrorCodes.AuthRequired : HostErrorCodes.BackendFailed,
+                    credentialRejected ? "Windows 虚拟屏登录失败；请更新凭据管理器中的 e-launcher/Shower/localhost 后释放并重建" : fault);
                 int child = WaitForChildSession();
                 if (child <= 0) throw new HostFault(HostErrorCodes.Unavailable, "no child session was created after logon");
                 if (child == parentSessionId) throw new HostFault(HostErrorCodes.SessionMismatch, "the reported child session is the parent session");
@@ -911,8 +935,7 @@ namespace ELauncher.Shower
             {
                 if (ui == null) throw new HostFault(HostErrorCodes.Unavailable, "the rdp window is not available");
                 // Recreating an AxHost while its parent is hidden leaves GetOcx() uninitialized.
-                ui.ShowInTaskbar = true;
-                ui.Visible = true;
+                ApplyPreview("offscreen");
                 if (client != null)
                 {
                     // Reuse the initialized ActiveX control across child sessions.
@@ -982,12 +1005,11 @@ namespace ELauncher.Shower
             string account = string.IsNullOrEmpty(domain) ? user : domain + "\\" + user;
             client.UserName = user;
             client.Domain = domain;
-            pendingCredential = credentialRejected ? null : ShowerCredentials.Read(account);
+            pendingCredential = ShowerCredentials.Read(account);
             if (pendingCredential == null)
             {
-                SetPhase("authentication-required", HostErrorCodes.AuthRequired, "请在本机配置 Windows 虚拟屏凭据");
-                ui.Activate();
-                pendingCredential = ShowerCredentials.Prompt(ui.Handle, account, credentialRejected);
+                throw new HostFault(HostErrorCodes.AuthRequired,
+                    "请在 Windows 凭据管理器中配置或更新普通凭据 e-launcher/Shower/localhost，账户为 " + account);
             }
             pendingCredential.Apply(ocx);
         }
@@ -1061,6 +1083,7 @@ namespace ELauncher.Shower
                     switch (mode)
                     {
                         case "visible":
+                            ui.SetBackground(false);
                             ui.ShowInTaskbar = true;
                             ui.WindowState = FormWindowState.Normal;
                             ui.Location = new Point(PreviewOrigin, PreviewOrigin);
@@ -1073,6 +1096,7 @@ namespace ELauncher.Shower
                             ui.ShowInTaskbar = false;
                             break;
                         case "offscreen":
+                            ui.SetBackground(true);
                             ui.ShowInTaskbar = false;
                             ui.WindowState = FormWindowState.Normal;
                             ui.Location = new Point(-32000, -32000);

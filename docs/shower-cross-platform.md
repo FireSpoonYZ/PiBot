@@ -61,6 +61,11 @@ no video streaming.
 | native preview capability | false (shared frame preview) | true, via native preview modes | false (shared frame preview) |
 | concurrent sessions | one per chat | one per machine | one per owning record |
 
+Windows' one-session limit comes from the OS: Microsoft documents that only one
+active, connected [child session](https://learn.microsoft.com/en-us/windows/win32/termserv/child-sessions)
+can exist on a system at a time. Removing `maxSessions: 1` cannot provide multiple
+independent desktops; that requires a different backend.
+
 Key names are `ENTER TAB ESCAPE SPACE BACKSPACE DELETE LEFT RIGHT UP DOWN HOME END
 PAGEUP PAGEDOWN A..Z 0..9 F1..F12` plus the Android extras. Scroll deltas are
 integer wheel notches in `-20..20`, positive Y down and positive X right; Android
@@ -83,8 +88,8 @@ user's rights, and the model, the human preview and the desktop share one accoun
 Do not describe Shower as a way to run untrusted code.
 
 Credentials never travel over RPC: the Windows backend accepts them only through
-the native Windows prompt, and no backend returns platform handles, tokens or file
-contents for another session. Frames and inputs are only reachable through the
+the current user's Windows Credential Manager, and no backend returns platform
+handles, tokens or file contents for another session. Frames and inputs are only reachable through the
 existing authenticated local-bearer / device-link control call.
 
 ## Takeover and abort
@@ -168,11 +173,13 @@ session on a host that was not prepared during this process lifetime.
 
 The control connects to localhost with CredSSP, `AuthenticationLevel=0` and
 `ConnectToChildSession=true`; the child session id is validated before and after
-connecting, and the phase stays `authentication-required` while the native prompt
-waits, so a human login never blocks the RPC for 20 seconds. Native preview modes
+connecting. Missing or rejected stored credentials return `authentication-required`
+without opening a local dialog. Native preview modes
 are `visible`, `minimized`, `offscreen` and `hidden`; the default after login is
-`hidden`, and an explicit preview request may show it. Real-machine capture and
-input passed with the host visible, offscreen and hidden. Native minimization
+`hidden`, and an explicit preview request may show it. Startup initializes the
+ActiveX control offscreen with `WS_EX_NOACTIVATE`, without a taskbar entry; the
+initial Host window is also offscreen and never activates on show. Real-machine
+capture and input passed with the host visible, offscreen and hidden. Native minimization
 failed input/capture, so `minimized` is implemented as `hidden`, and the native
 window's minimize button is disabled.
 
@@ -212,23 +219,19 @@ On the acceptance machine, the Microsoft-account/Hello session instead returned
 RDP error 2055 (`SSL_ERR_LOGON_FAILURE`). Changing account hints, removing
 CredSSP, or retaining only ActiveX memory did not provide unattended recreation.
 
-At the operator's explicit request, Windows credentials are now enrolled in a
-native `CredUIPromptForWindowsCredentialsW` dialog. Use the prefilled current
-Windows account and its account password. The password is committed **only after**
-RDP logon and the child-user ownership check succeed, via `CredWriteW` under the
-generic target **`e-launcher/Shower/localhost`**, with
-`CRED_PERSIST_LOCAL_MACHINE`. This is the current user's local credential vault,
-not a roaming credential, center setting or application JSON file. Each connection
-reads it with `CredReadW` and supplies it directly to the ActiveX password property.
-Temporary native buffers are cleared; no password is included in Node IPC, tool
-results, command arguments or logs.
+Configure the current Windows account and its account password (not the Hello
+PIN) in **Credential Manager → Windows Credentials → Add a generic credential**,
+using target **`e-launcher/Shower/localhost`**. The account name is included in
+the `authentication-required` status when setup is needed. This is the current
+user's local credential vault, not a center setting or application JSON file.
+Each connection reads it with `CredReadW` and supplies it directly to the ActiveX
+password property. No password is included in Node IPC, tool results, command
+arguments or logs.
 
-The vault follows Windows user-account permissions: it is not isolation from other
-processes running as the same user. Manage or remove the entry in Windows
-**Credential Manager → Windows Credentials → Generic Credentials**. Deleting it
-causes local enrollment on the next creation. A rejected or expired password is
-re-entered locally on a subsequent release/create and replaces the old value only
-after successful validation.
+Missing or rejected credentials no longer open a dialog during desktop creation.
+Update the entry in Credential Manager, then release/create the session again.
+Existing saved credentials continue to work. The vault follows Windows
+user-account permissions and is accessible to processes running as that user.
 
 After enrollment, creation and recreation within a running Host require neither a
 password prompt nor another UAC. A newly started Host still needs one administrator
@@ -531,3 +534,31 @@ verification used the emulator. K90 was tested before the last chat UI fix and
 can receive the final ARM64 APK when reconnected. Linux's physical seat was a GDM
 greeter; mobile checks used device automation, not physical fingers.
 Per-application compatibility work, Xpra and Wayland remain outside this change.
+
+
+### Background startup acceptance — 2026-10-31
+
+The final native build was deployed on the Windows Host and exercised through its
+existing authenticated HTTP control API. Cold creation and release/recreation
+created child sessions 39 and 40. Both produced 1280×800 screenshots, accepted
+Chinese text, and delivered a mouse click verified by the application's text and
+click-counter readback. Both sessions were released afterward.
+
+A native window observer sampled the parent desktop 7,662 times over 120 seconds,
+covering Host startup and both creations. It found the RDP host window in 7,425
+samples; none placed it onscreen, in the foreground, or with an APPWINDOW taskbar
+style. All visible offscreen samples retained WS_EX_NOACTIVATE. The final Host
+remained running, center ready and relay online; Shower returned to idle.
+
+Deployment: `D:/services/e-launcher/native/20261031-background/`.
+Executable SHA-256:
+`33c11f0e602bff57a12841734805f7dba1f10fecb4d7ce3c47e9573d3253f4d4`.
+Evidence and screenshots: `D:/temp/shower-background-20261031/`, outside the repo.
+Host startup still requires the existing UAC authorization; one cancelled attempt
+was restarted with the user's approval before the successful final run.
+
+Linux was reviewed statically, not run. Missing/expired credential handling was
+reviewed but not exercised against the user's credential vault. Windows concurrent
+desktop capacity remains one because of the Child Session OS constraint above;
+no multi-desktop backend was implemented. The 300-second idle-release policy is
+unchanged.
