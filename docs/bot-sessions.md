@@ -69,6 +69,9 @@ scope 消息账本（MessageLog）仍是消息事实的唯一权威，主会话�
   释放 Bot 准入后唤醒用户队列。恢复 scope 时同样优先处理排队用户。
 - **旧数据**：work 原生会话历史不删除；成员工作 API 继续可读旧历史，新的共享执行
   在主会话中呈现并带正确归属，不把其他 scope 的工作标成所选 scope。
+  普通聊天记录只显示 primary 轮：dm/room 归因的协作过程轮、scope 导入消息与 host
+  触发记录一律隐藏（replyTarget 为 primary 的生成与回复仍正常显示），协作内容只在
+  专门通信页呈现。
 - **离线**：`scopeHistory`/`getScopeMessage`/`getScopeMessageDelivery`/`getScopeState`/
   `listScopeStates`/`listScopeReplicas` 为纯本地账本读取，离线放行给被动浏览；
   scope 写路径仍受 Center 门禁。HTTP `OFFLINE_ALLOWED` 放行同一批被动只读

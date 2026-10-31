@@ -7,6 +7,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { BotLiveState, BotRecord, LiveTool } from '../../../host-core/index.js';
 import { Markdown } from '../../../web/src/Markdown';
 import {
+  latestEntryChannel,
   parseHistoryEntries,
   resolveActiveTurnStartedAt,
   formatTurnDuration,
@@ -105,28 +106,34 @@ export function ChatTranscript({
     () => normalizeAttribution((live?.generation as { attribution?: unknown } | null | undefined)?.attribution),
     [live?.generation],
   );
-  // dm/room 触发的流式生成是协作过程：文本走 is-collab 块，不混进普通回答气泡。
-  const liveIsCollaborative =
-    liveAttribution !== undefined && liveAttribution.channel !== 'primary';
-
-  const allTurns = useMemo<ChatTurn[]>(() => {
+  const mergedItems = useMemo(() => {
     // 与手机端 Host.tsx 相同：live 投影窗口先放，raw 分页后放（同 id 覆盖，细节更全）。
     const byId = new Map<string, Record<string, unknown>>();
     for (const item of asArray<Record<string, unknown>>(live?.history)) {
       byId.set(String(item.id), item);
     }
     for (const item of entries) byId.set(String(item.id), item as unknown as Record<string, unknown>);
-    const sorted = [...byId.values()].sort((a, b) => numericId(a) - numericId(b));
-    return parseHistoryEntries(sorted, 0, {
+    return [...byId.values()].sort((a, b) => numericId(a) - numericId(b));
+  }, [entries, live?.history]);
+
+  // dm/room 触发的生成是协作过程，不进普通聊天：generation.attribution 缺失但 tools
+  // 仍活跃时退回合并历史中最新执行来源（与 parser 内部同一判断）。
+  const liveIsCollaborative =
+    isBusy && (liveAttribution?.channel ?? latestEntryChannel(mergedItems, bot.botId)) !== 'primary';
+  const displayGeneratingText = liveIsCollaborative ? '' : liveGeneratingText;
+
+  const allTurns = useMemo<ChatTurn[]>(() =>
+    parseHistoryEntries(mergedItems, 0, {
       liveTools: asArray<Record<string, unknown>>(live?.tools),
       isBusy,
-      liveGeneratingText: liveIsCollaborative ? '' : liveGeneratingText,
+      liveGeneratingText: displayGeneratingText,
       selfBotId: bot.botId,
       liveAttribution,
-    });
-  }, [entries, live, isBusy, liveGeneratingText, liveIsCollaborative, liveAttribution, bot.botId]);
+    }),
+  [mergedItems, live, isBusy, displayGeneratingText, liveAttribution, bot.botId]);
 
   const activeLiveToolName = useMemo(() => {
+    if (liveIsCollaborative) return null;
     const tools = asArray<LiveTool>(live?.tools);
     for (let i = tools.length - 1; i >= 0; i -= 1) {
       const name = typeof tools[i]?.name === 'string' ? tools[i].name.trim() : '';
@@ -134,7 +141,7 @@ export function ChatTranscript({
     }
     const last = tools[tools.length - 1];
     return typeof last?.name === 'string' && isBusy && !liveGeneratingText ? last.name.trim() : null;
-  }, [live?.tools, isBusy, liveGeneratingText]);
+  }, [live?.tools, isBusy, liveGeneratingText, liveIsCollaborative]);
 
   const visibleTurns = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -204,7 +211,7 @@ export function ChatTranscript({
         </div>
       ) : null}
 
-      {visibleTurns.length === 0 && !liveGeneratingText && !liveIsCollaborative ? (
+      {visibleTurns.length === 0 && !displayGeneratingText ? (
         <div className="desktop-transcript-empty bot-chat-empty">
           <GrokBotAvatar preset={avatarPreset} isPrimary={bot.isPrimary} starBadge={bot.isPrimary} platformBadge={platformBadge} size={84} />
           <h2>{bot.role}</h2>
@@ -230,11 +237,8 @@ export function ChatTranscript({
           return (
             <article
               key={turn.id}
-              className={`bot-chat-bubble ${turn.role}${turn.isStreaming ? ' streaming' : ''}${turn.collaborative ? ' is-collab' : ''}`}
+              className={`bot-chat-bubble ${turn.role}${turn.isStreaming ? ' streaming' : ''}`}
             >
-              {turn.collaborative ? (
-                <div className="bot-chat-collab-label">{t('协作过程', 'Collaboration')}</div>
-              ) : null}
               {showAttribution && turnAttr ? (
                 <MessageAttributionBadge attribution={turnAttr} />
               ) : null}
@@ -321,21 +325,14 @@ export function ChatTranscript({
         })
       )}
 
-      {liveIsCollaborative ? (
-        <div className="bot-chat-collab" role="status">
-          <div className="bot-chat-collab-label">{t('协作过程', 'Collaboration')}</div>
-          {liveAttribution ? <MessageAttributionBadge attribution={liveAttribution} /> : null}
-          {liveGeneratingText ? <Markdown text={liveGeneratingText} onOpenLink={openLink} /> : null}
-        </div>
-      ) : null}
       <GrokBotWorkingSlot
         key={botKey}
         botKey={botKey}
         preset={avatarPreset}
         isBusy={isBusy}
-        isStreaming={Boolean(liveGeneratingText)}
+        isStreaming={Boolean(displayGeneratingText)}
         activeToolName={activeLiveToolName}
-        hasThinking={Boolean(lastTurn?.role === 'assistant' && lastTurn.thinking && !liveGeneratingText)}
+        hasThinking={Boolean(lastTurn?.role === 'assistant' && lastTurn.thinking && !displayGeneratingText)}
         queuedCount={live?.queuedCount ?? 0}
         hasError={Boolean(lastTurn?.error)}
         startedAt={activeTurnStartedAt}

@@ -56,7 +56,8 @@ export interface ChatTurn {
   createdAt?: string;
   /** 该轮真实来源（用户/对端 Bot/Host 触发器、DM/群聊/主聊、原始 messageId/replyTo）。 */
   attribution?: MessageAttribution;
-  /** assistant 轮：本轮生成源自 dm/room 触发（协作过程文本，不是投递给用户的消息）。 */
+  /** assistant 轮：本轮生成源自 dm/room 触发（协作过程文本，不是投递给用户的消息）；
+   *  普通聊天经 parseHistoryEntries 过滤不返回此类轮。 */
   collaborative?: boolean;
 }
 
@@ -395,6 +396,47 @@ export function entryAttribution(
   return single;
 }
 
+/**
+ * 单条目的执行来源 channel：带来源条目的 attribution.channel；
+ * host.work-trigger 用冻结 turn.replyTarget.kind（真正回复目标，
+ * data.scopeId 是工作协调域不是目标）。host.scope-message 是纯导入
+ * 事件、不算执行来源。无来源信息返回 undefined。
+ */
+function entryChannel(
+  item: Record<string, unknown>,
+  selfBotId?: string,
+): MessageAttribution['channel'] | undefined {
+  if (item.kind === 'host.work-trigger') {
+    const target = asRecord(asRecord(asRecord(item.data).turn).replyTarget);
+    const kind = target.kind;
+    return typeof kind === 'string' && ATTRIBUTION_CHANNELS.has(kind)
+      ? (kind as MessageAttribution['channel'])
+      : undefined;
+  }
+  if (item.kind === 'host.scope-message') return undefined;
+  // 真实用户消息（含旧的无 attribution 历史）把执行来源重置回 primary。
+  if (item.kind === 'host.user-message' || item.kind === 'pi.user') {
+    return entryAttribution(item, selfBotId)?.channel ?? 'primary';
+  }
+  return entryAttribution(item, selfBotId)?.channel;
+}
+
+/**
+ * 合并历史中最新可识别执行来源的 channel；无来源条目跳过，全部无来源视为 'primary'。
+ * 用于 generation.attribution 缺失但 tools 仍活跃时判断当前是否协作工作。
+ */
+export function latestEntryChannel(
+  items: Array<Record<string, unknown>>,
+  selfBotId?: string,
+): MessageAttribution['channel'] {
+  let channel: MessageAttribution['channel'] = 'primary';
+  for (const item of items) {
+    const c = entryChannel(item, selfBotId);
+    if (c !== undefined) channel = c;
+  }
+  return channel;
+}
+
 export function parseHistoryEntries(
   items: Array<Record<string, unknown>>,
   clearedAfterEntryId = 0,
@@ -403,6 +445,7 @@ export function parseHistoryEntries(
   const turns: ChatTurn[] = [];
   let activeUserStartMs: number | undefined;
   let currentAssistant: AssistantTurnAccumulator | null = null;
+  let lastBoundaryChannel: MessageAttribution['channel'] = 'primary';
 
   const ensureAssistant = (id: string, numericId: number, fallbackStartMs?: number, attribution?: MessageAttribution): AssistantTurnAccumulator => {
     // 来源检查在此处闭合内完成：仅当新旧条目都带实际归属且归属不同时才终结上轮，
@@ -416,8 +459,22 @@ export function parseHistoryEntries(
     ) {
       finalizeCurrentAssistant(false);
     }
+    // originKey 任一为空无法精确比较时，显式新归属的 primary/协作类别与当前轮
+    // 已推断类别不同也先终结上轮：协作流式不并入旧普通轮，用户答案不并入隐藏协作轮。
+    if (
+      currentAssistant &&
+      attribution !== undefined &&
+      (attribution.channel !== 'primary') !== (currentAssistant.turn.collaborative === true)
+    ) {
+      finalizeCurrentAssistant(false);
+    }
     if (currentAssistant) return currentAssistant;
     const startMs = activeUserStartMs ?? fallbackStartMs;
+    // 无归属条目继承最近执行来源：dm/room 触发后的无归属生成仍是协作过程，
+    // 与 live 活轮同一判断（不参与 originKey，后续真实归属条目照常并入）。
+    const collaborative = attribution
+      ? attribution.channel !== 'primary'
+      : lastBoundaryChannel !== 'primary';
     const turn: ChatTurn = {
       id,
       role: 'assistant',
@@ -425,6 +482,7 @@ export function parseHistoryEntries(
       text: '',
       startedAt: startMs,
       ...(attribution ? { attribution } : {}),
+      ...(collaborative ? { collaborative: true } : {}),
     };
     turns.push(turn);
     currentAssistant = {
@@ -481,13 +539,20 @@ export function parseHistoryEntries(
     // 明确的轮边界——此前的助手累积轮在此终结，下一轮触发（不同 requestId/来源）
     // 产生的生成文本绝不并入上一条回答。
     if (item.kind === 'host.work-trigger') {
+      const c = entryChannel(item, selfBotId);
+      if (c !== undefined) lastBoundaryChannel = c;
       finalizeCurrentAssistant(false);
       continue;
     }
-    // host.scope-message 导入条目的 model 文本是 JSON 序列化来源标签；
-    // 渲染用保留的原始信封正文，来源信息由 attribution 徽标呈现。
-    const envelope = item.kind === 'host.scope-message' ? asRecord(asRecord(item.data).message) : {};
-    const envelopeText = typeof envelope.text === 'string' ? envelope.text : '';
+    // host.scope-message 导入条目（含 self echo 与群用户发言）不在普通聊天中展示：
+    // 它仍是明确的轮边界——先终结当前助手累积轮，再整条跳过，隐藏内容不合入前后轮。
+    if (item.kind === 'host.scope-message') {
+      finalizeCurrentAssistant(false);
+      continue;
+    }
+    // 最新执行来源 channel：真实用户消息/生成归属/host 触发边界，scope 导入跳过。
+    const itemChannel = entryChannel(item, selfBotId);
+    if (itemChannel !== undefined) lastBoundaryChannel = itemChannel;
     // raw 条目用 model 块（含工具/思考）；Host live 投影条目有 messages:[{role,text,truncated,toolCalls,timestamp,durationMs}]。
     // host.user-message 的图片附件元数据在条目级 data.attachments（不在单个 message 上）。
     const entryAttachments = readMessageAttachments(asRecord(item.data).attachments);
@@ -528,7 +593,7 @@ export function parseHistoryEntries(
             }
           }
         }
-        const joinedText = (envelopeText || textParts.join('\n')).trim();
+        const joinedText = textParts.join('\n').trim();
         if (!joinedText && attachments.length === 0) continue;
 
         finalizeCurrentAssistant(false);
@@ -688,7 +753,9 @@ export function parseHistoryEntries(
               const fromData = asRecord(data.presentation);
               return Object.keys(fromData).length > 0 ? fromData : null;
             })();
-        if (!currentAssistant && !toolCallId && !toolName) continue;
+        // 分页截断且没有任何可识别所属轮的孤立 toolResult 不新造气泡，
+        // 等加载到其工具调用条目后正常归轮。
+        if (!currentAssistant && itemAttr === undefined) continue;
 
         const fallbackStart =
           msgTimestamp !== undefined ? Math.max(0, msgTimestamp - (msgDurationMs ?? 0)) : undefined;
@@ -743,13 +810,18 @@ export function parseHistoryEntries(
   const streamingText = typeof options?.liveGeneratingText === 'string' ? options.liveGeneratingText.trim() : '';
 
   let activeAcc: AssistantTurnAccumulator | null = currentAssistant;
-  if (isBusy && (liveTools.length > 0 || streamingText !== '') && !activeAcc) {
+  if (isBusy && (liveTools.length > 0 || streamingText !== '')) {
     const lastEntryId = turns.at(-1)?.entryId ?? 0;
-    activeAcc = ensureAssistant('live-assistant', lastEntryId + 0.5, activeUserStartMs, options?.liveAttribution);
-  }
-  // 流式活轮的归属来自 LiveGeneration.attribution：dm/room 触发的生成同样是协作过程。
-  if (activeAcc && options?.liveAttribution && options.liveAttribution.channel !== 'primary') {
-    activeAcc.turn.collaborative = true;
+    if (options?.liveAttribution !== undefined) {
+      // 明确的 liveAttribution 按完整来源键换轮/并轮（ensureAssistant 内部判定）。
+      activeAcc = ensureAssistant('live-assistant', lastEntryId + 0.5, activeUserStartMs, options.liveAttribution);
+    } else if (activeAcc === null) {
+      // generation.attribution 缺失：已有累积轮直接复用其真实归属，不用残缺 key 拆轮；
+      // 仅新造活轮时按最近执行来源 channel 标记归属。
+      const liveOrigin: MessageAttribution | undefined =
+        lastBoundaryChannel !== 'primary' ? { kind: 'bot', channel: lastBoundaryChannel } : undefined;
+      activeAcc = ensureAssistant('live-assistant', lastEntryId + 0.5, activeUserStartMs, liveOrigin);
+    }
   }
 
   if (activeAcc && isBusy) {
@@ -819,13 +891,17 @@ export function parseHistoryEntries(
 
   finalizeCurrentAssistant(isBusy);
 
+  // 普通聊天只显示 primary 轮：dm/room 归因的协作过程轮（文本/思考/工具/错误）
+  // 与 scope 导入一律隐藏；replyTarget 为 primary 的生成 channel 仍是 primary，不误删。
   return turns.filter(
     (turn) =>
-      turn.role === 'user' ||
-      Boolean(turn.text) ||
-      Boolean(turn.tools && turn.tools.length > 0) ||
-      Boolean(turn.error) ||
-      Boolean(turn.thinking),
+      turn.collaborative !== true &&
+      (turn.attribution === undefined || turn.attribution.channel === 'primary') &&
+      (turn.role === 'user' ||
+        Boolean(turn.text) ||
+        Boolean(turn.tools && turn.tools.length > 0) ||
+        Boolean(turn.error) ||
+        Boolean(turn.thinking)),
   );
 }
 

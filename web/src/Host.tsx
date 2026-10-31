@@ -83,6 +83,7 @@ import {
 } from './GrokBotAvatar';
 import {
   formatTurnDuration,
+  latestEntryChannel,
   parseHistoryEntries,
   resolveActiveTurnStartedAt,
   type ChatToolCallItem,
@@ -2974,11 +2975,7 @@ ${newer}` : draftSnapshot;
       : undefined;
 
   const recoveringChat = chatPending?.botKey === activeBot?.key && chatPending?.phase === 'recovering';
-  // peer/room 轮仍在生成：公共 LiveGeneration 带 attribution 时按来源标记，
-  // 不能让协作过程的流式文本被当成发给用户的普通回答。
   const liveGenerationAttr = chatLive?.generation?.attribution;
-  const liveGeneratingIsPeer = !!liveGenerationAttr && liveGenerationAttr.kind !== 'host' &&
-    liveGenerationAttr.channel !== undefined && liveGenerationAttr.channel !== 'primary';
   const liveGeneratingText = recoveringChat ? '' : chatLive?.generation?.text ?? '';
 
   // 当前会话的按轮受理状态：优先 live turnAdmission，其次提交回执/持久化 pending 上的 admission。
@@ -3105,8 +3102,8 @@ ${newer}` : draftSnapshot;
     })();
   }, [isBotBusy, screen, active, activeBot]);
 
-  const allChatTurns = useMemo(() => {
-    if (!activeBot) return [];
+  const allChatItems = useMemo(() => {
+    if (!activeBot) return [] as Array<Record<string, unknown>>;
     const clearedAfter = clearedMap[activeBot.key] ?? 0;
     // raw history 是旧页，live 投影是新窗口：按 entry id 去重排序；同 id 保留 raw（工具/思考细节更全）。
     const byId = new Map<string, Record<string, unknown>>();
@@ -3138,15 +3135,31 @@ ${newer}` : draftSnapshot;
         });
       }
     }
-    return parseHistoryEntries(sorted, clearedAfter, {
+    return sorted;
+  }, [chatHistory, chatLive, activeBot, clearedMap, chatPending]);
+
+  // generation.attribution 缺失但 tools 仍活跃时，用合并历史中最新执行来源判断当前是否协作工作。
+  const chatLiveIsCollaborative = Boolean(
+    isBotBusy &&
+      (liveGenerationAttr?.channel ?? latestEntryChannel(allChatItems, activeBot?.botId)) !== 'primary',
+  );
+  // 协作工作的流式文本/工具名不渲染进普通聊天忙状态。
+  const displayLiveToolName = chatLiveIsCollaborative ? null : activeLiveToolName;
+  const displayGeneratingText = chatLiveIsCollaborative ? '' : liveGeneratingText;
+
+  const allChatTurns = useMemo(() => {
+    if (!activeBot) return [];
+    const clearedAfter = clearedMap[activeBot.key] ?? 0;
+    return parseHistoryEntries(allChatItems, clearedAfter, {
       liveTools: recoveringChat ? undefined : array<Record<string, unknown>>(chatLive?.tools),
       isBusy: isBotBusy,
-      liveGeneratingText,
+      // 协作（dm/room）生成的流式文本不进普通聊天：隐藏轮由 parser 归轮过滤。
+      liveGeneratingText: displayGeneratingText,
       // 当前 Bot 为 self echo（outgoing）判定锚点；live 流式轮的 attribution 由生成帧携带。
       selfBotId: activeBot.botId,
       liveAttribution: liveGenerationAttr,
     });
-  }, [chatHistory, chatLive, activeBot, clearedMap, chatPending, recoveringChat, isBotBusy, liveGeneratingText, liveGenerationAttr]);
+  }, [allChatItems, chatLive, activeBot, clearedMap, recoveringChat, isBotBusy, liveGeneratingText, liveGenerationAttr, chatLiveIsCollaborative]);
 
   const activeTurnStartedAt = useMemo(
     () =>
@@ -3180,7 +3193,7 @@ ${newer}` : draftSnapshot;
     if (screen === 'chat' && chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
-  }, [screen, visibleTurns.length, latestTurnToolCount, liveGeneratingText, isBotBusy, activeLiveToolName, submissionFailure]);
+  }, [screen, visibleTurns.length, latestTurnToolCount, displayGeneratingText, isBotBusy, displayLiveToolName, submissionFailure]);
 
   const [hubRefreshing, setHubRefreshing] = useState(false);
   const hubRefreshRunning = useRef(false);
@@ -4117,7 +4130,7 @@ ${newer}` : draftSnapshot;
               if (chatTopMenuOpen) setChatTopMenuOpen(false);
             }}
           >
-            {visibleTurns.length === 0 && !liveGeneratingText ? (
+            {visibleTurns.length === 0 && !displayGeneratingText ? (
               <div className="bot-chat-empty">
                 <button
                   type="button"
@@ -4153,15 +4166,10 @@ ${newer}` : draftSnapshot;
                   turn.durationMs > 0 &&
                   !(isLastAssistantTurn && isBotBusy);
                 const attribution = turn.attribution;
-                // peer = 来自 dm/room 的导入消息；host 触发/主会话普通消息不套 peer 样式。
-                const isPeer = !!attribution && attribution.kind !== 'host' &&
-                  attribution.channel !== undefined && attribution.channel !== 'primary';
-
-                // 外层 peer 气泡（dm/room 消息）保留统一署名行，与消息原文一起进主聊天。
                 return (
                   <article
                     key={turn.id}
-                    className={`bot-chat-bubble ${turn.role}${turn.isStreaming ? ' streaming' : ''}${isPeer ? ' is-peer' : ''}`}
+                    className={`bot-chat-bubble ${turn.role}${turn.isStreaming ? ' streaming' : ''}`}
                   >
                     {attribution && attribution.kind !== 'host' && (
                       <MessageAttribution
@@ -4215,17 +4223,6 @@ ${newer}` : draftSnapshot;
                 );
               })
             )}
-            {liveGeneratingIsPeer && liveGenerationAttr ? (
-              <div className="bot-chat-peer-working" role="status">
-                <MessageAttribution
-                  attribution={liveGenerationAttr}
-                  className="bot-chat-attribution"
-                />
-                <span className="bot-chat-peer-working-text">
-                  {t('协作回复生成中…', 'Collaboration reply generating…')}
-                </span>
-              </div>
-            ) : null}
             <GrokBotWorkingSlot
               key={activeBot.key}
               botKey={activeBot.key}
@@ -4233,12 +4230,12 @@ ${newer}` : draftSnapshot;
               isBusy={isBotBusy}
               isSending={chatPending?.botKey === activeBot.key && chatPending.phase === 'sending'}
               isRecovering={chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering'}
-              isStreaming={Boolean(liveGeneratingText) && !liveGeneratingIsPeer}
-              activeToolName={activeLiveToolName}
+              isStreaming={Boolean(displayGeneratingText)}
+              activeToolName={displayLiveToolName}
               hasThinking={Boolean(
                 visibleTurns[visibleTurns.length - 1]?.role === 'assistant' &&
                   visibleTurns[visibleTurns.length - 1]?.thinking &&
-                  !liveGeneratingText,
+                  !displayGeneratingText,
               )}
               queuedCount={chatLive?.queuedCount ?? 0}
               hasError={Boolean(submissionFailure) || chatReceipt?.status === 'unanswered'}
