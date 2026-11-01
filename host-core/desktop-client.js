@@ -728,6 +728,24 @@ export function openDesktopClient(options) {
     );
   }
 
+  async function opCenterBotCwd(params, reqSignal, write) {
+    requireCenter();
+    rejectUnknownFields(params, new Set(write ? ['deviceId', 'botId', 'expectedRevision', 'value'] : ['deviceId', 'botId']), 'center bot cwd params');
+    const deviceId = pathId(params.deviceId, 'deviceId');
+    const botId = pathId(params.botId, 'botId');
+    if (write) {
+      if (!Number.isSafeInteger(params.expectedRevision) || params.expectedRevision < 0) throw invalid('invalid expectedRevision');
+      if (typeof params.value !== 'string' || params.value.length === 0 || params.value.length > 1024 ||
+          params.value.trim() !== params.value || /[\x00-\x1f]/.test(params.value) ||
+          !(params.value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(params.value) || /^\\\\[^\\/]+[\\/]+[^\\/]+/.test(params.value))) {
+        throw invalid('cwd must be a non-empty absolute path on the target Host');
+      }
+    }
+    return runCenterAction(client => write
+      ? client.botCwdSet(deviceId, botId, { expectedRevision: params.expectedRevision, value: params.value }, reqSignal)
+      : client.botCwdGet(deviceId, botId, reqSignal));
+  }
+
   async function avatarOperation(params, reqSignal, write) {
     requireCenter();
     rejectUnknownFields(params, new Set(write ? ['deviceId', 'botId', 'expectedRevision', 'value'] : ['deviceId', 'botId']), 'bot avatar params');
@@ -1220,7 +1238,13 @@ export function openDesktopClient(options) {
     const known = new Map(central.bots.map(bot => [JSON.stringify([bot.deviceId, bot.botId]), bot]));
     directory.bots = directory.bots.map(bot => {
       const shared = known.get(JSON.stringify([bot.deviceId, bot.botId]));
-      return shared ? { ...bot, avatar: shared.avatar ?? null, avatarRevision: shared.avatarRevision ?? 0 } : bot;
+      // 中心权威字段覆盖 Host 本地报告：avatar 与 cwd 都以中心为准。
+      return shared ? {
+        ...bot,
+        avatar: shared.avatar ?? null, avatarRevision: shared.avatarRevision ?? 0,
+        ...(shared.cwd !== undefined ? { cwd: shared.cwd } : {}),
+        cwdRevision: shared.cwdRevision ?? 0,
+      } : bot;
     });
     const unavailable = new Set(directory.devices.filter(device => !device.online).map(device => device.deviceId));
     for (const err of directory.errors) unavailable.add(err.deviceId);
@@ -1233,6 +1257,7 @@ export function openDesktopClient(options) {
         lastActivityAt: bot.lastActivityAt ?? null, lastPreview: bot.lastPreview ?? null,
         archivedAt: bot.archivedAt ?? null, deviceName: bot.deviceName || bot.deviceId, online: false,
         avatar: bot.avatar ?? null, avatarRevision: bot.avatarRevision ?? 0,
+        cwdRevision: bot.cwdRevision ?? 0,
       });
     }
     return directory;
@@ -1662,6 +1687,8 @@ export function openDesktopClient(options) {
     ['center_bot_model_set', (params, signal) => ownerOperation(params, signal, 'set')],
     ['center_bot_avatar_get', (params, signal) => avatarOperation(params, signal, false)],
     ['center_bot_avatar_set', (params, signal) => avatarOperation(params, signal, true)],
+    ['center_bot_cwd_get', (params, signal) => opCenterBotCwd(params, signal, false)],
+    ['center_bot_cwd_set', (params, signal) => opCenterBotCwd(params, signal, true)],
     ['center_bot_capabilities_get', opCenterBotCapabilitiesGet],
     ['center_bot_capability_set', opCenterBotCapabilitySet],
     ['center_runtime_status', opCenterRuntimeStatus],

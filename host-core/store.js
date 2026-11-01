@@ -167,14 +167,7 @@ export function openStore(dataRoot) {
       'SELECT * FROM bots WHERE archived_at IS NOT NULL AND archived_at <= ? ORDER BY archived_at ASC, bot_id ASC'
     );
     const stmtGetBotExtensionSettings = db.prepare('SELECT * FROM bot_extension_settings WHERE bot_id = ?');
-    const stmtInsertBotExtensionSettings = db.prepare(
-      'INSERT INTO bot_extension_settings (bot_id, revision, extensions_json, retention_floor) VALUES (?, ?, ?, ?)'
-    );
-    const stmtUpdateBotExtensionSettings = db.prepare(
-      'UPDATE bot_extension_settings SET revision = ?, extensions_json = ?, retention_floor = ? WHERE bot_id = ? AND revision = ?'
-    );
-
-    const stmtUpdateBotModel = db.prepare('UPDATE bots SET model_ref = ? WHERE bot_id = ?');
+    const stmtUpdateBotCwd = db.prepare('UPDATE bots SET cwd = ? WHERE bot_id = ?');
     const stmtUpdateBotProfile = db.prepare('UPDATE bots SET role = COALESCE(?, role), description = COALESCE(?, description) WHERE bot_id = ?');
 
     const getPrimaryBotId = () => {
@@ -191,12 +184,14 @@ export function openStore(dataRoot) {
       };
     };
     const getBot = (botId) => toBot(stmtGetBot.get(botId), getPrimaryBotId());
-    const setBotModel = (botId, modelRef) => {
-      stmtUpdateBotModel.run(modelRef == null ? null : modelRef, botId);
-      return getBot(botId);
-    };
     const updateBotProfile = (botId, name, description) => {
       stmtUpdateBotProfile.run(name ?? null, description ?? null, botId);
+      return getBot(botId);
+    };
+    // Center-driven cwd switch: rewrites only the persisted directory; runtime apply
+    // performs the idle check and profile refresh, and nothing moves files.
+    const setBotCwd = (botId, cwd) => {
+      stmtUpdateBotCwd.run(cwd, botId);
       return getBot(botId);
     };
     const findByRequest = (requestId) => {
@@ -342,37 +337,11 @@ export function openStore(dataRoot) {
 
     const getBotExtensionSettings = (botId) => toBotExtensionSettings(stmtGetBotExtensionSettings.get(botId));
 
-    // 首次初始化：事务内查重后写入缺省值；重复调用返回既有行，绝不覆写已持久化选择。
-    const ensureBotExtensionSettings = (botId, extensions, retentionFloor) => {
-      db.exec('BEGIN IMMEDIATE');
-      let committed = false;
-      try {
-        if (!stmtGetBotExtensionSettings.get(botId)) {
-          stmtInsertBotExtensionSettings.run(botId, 0, JSON.stringify(extensions), retentionFloor);
-        }
-        db.exec('COMMIT');
-        committed = true;
-      } finally {
-        if (!committed) {
-          try { db.exec('ROLLBACK'); } catch { /* rollback 失败不掩盖原错误 */ }
-        }
-      }
-      return getBotExtensionSettings(botId);
-    };
-
-    // CAS：仅当库内 revision 等于 expectedRevision 时写入并 +1；版本不符（含并发写入）返回 null。
-    const updateBotExtensionSettings = (botId, expectedRevision, extensions, retentionFloor) => {
-      const result = stmtUpdateBotExtensionSettings.run(
-        expectedRevision + 1, JSON.stringify(extensions), retentionFloor, botId, expectedRevision
-      );
-      return result.changes === 1 ? getBotExtensionSettings(botId) : null;
-    };
-
     return {
       deviceId, getPrimaryBotId, getHostProfile,
-      createBot, getBot, setBotModel, updateBotProfile, findByRequest, listBots,
+      createBot, getBot, setBotCwd, updateBotProfile, findByRequest, listBots,
       setPrimaryBot, archiveBot, unarchiveBot, deleteBot, recordBotActivity, listExpiredArchivedBots,
-      ensureBotExtensionSettings, getBotExtensionSettings, updateBotExtensionSettings,
+      getBotExtensionSettings,
       close,
     };
   } catch (err) {

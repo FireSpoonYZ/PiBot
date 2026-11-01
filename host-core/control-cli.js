@@ -4,11 +4,11 @@ import { once } from 'node:events';
 import { createControlClient } from './control-client.js';
 import { invalid, readInputObject } from './cli-input.js';
 
-const USAGE = `usage: node host-core/control-cli.js <host|create|list|get|find-request|send|status|history|abort|context|live|work-get|work-sync|work-history|work-context|work-activity|work-stop|work-resume|scope-list|scope-get|scope-create|scope-update|scope-send|scope-replicas|memory-status|memory-recall|memory-reflect|memory-retain|memory-get|memory-source|memory-correct|memory-retry|extensions|bot-extensions|bot-extensions-set|bot-soul|bot-soul-set> [options]
+const USAGE = `usage: node host-core/control-cli.js <host|create|list|get|find-request|send|status|history|abort|context|live|work-get|work-sync|work-history|work-context|work-activity|work-stop|work-resume|scope-list|scope-get|scope-create|scope-update|scope-send|scope-replicas|memory-status|memory-recall|memory-reflect|memory-retain|memory-get|memory-source|memory-correct|memory-retry|bot-soul|bot-soul-set> [options]
 
 commands:
   host             print host info
-  create           register a bot; requires --request-id --role --cwd [--model-ref]
+  create           register a bot; requires --request-id --role --cwd
   list             print all bot records
   get              print one bot; requires --bot-id
   find-request     print bot by request; requires --request-id
@@ -40,9 +40,6 @@ commands:
   memory-correct    correct/invalidate a memory fact (admission only); requires --bot-id --input
   memory-retry      retry an outbox operation (admission only); requires --bot-id --input
   models           print the chat model catalog (no backend request)
-  extensions       print the extension catalog (installed/enabled/available/default)
-  bot-extensions   print one bot's extension settings and effective state; requires --bot-id
-  bot-extensions-set  replace one bot's extension settings (CAS on expectedRevision; requires --bot-id --input {expectedRevision,extensions})
   bot-soul         print one bot's SOUL.md text/path/revision; requires --bot-id
   bot-soul-set     replace one bot's SOUL.md (CAS on expectedRevision; requires --bot-id --input {expectedRevision,text})
   service-status    print the unified host service status
@@ -62,7 +59,6 @@ options:
   --request-id <id>
   --role <text>
   --cwd <dir>
-  --model-ref <value>
   --text <text>
   --input <file>       input JSON file: max 1MiB, UTF-8, a single plain object (never stdin) (scope-create/scope-update/scope-send, memory-* and bot-*-set commands)
   --limit <int>       strict decimal positive integer (1..200 for scope-history; history, work-sync, work-history, scope-list, scope-replicas)
@@ -79,7 +75,6 @@ const OPTIONS = {
   'request-id': { type: 'string' },
   role: { type: 'string' },
   cwd: { type: 'string' },
-  'model-ref': { type: 'string' },
   text: { type: 'string' },
   input: { type: 'string' },
   limit: { type: 'string' },
@@ -121,9 +116,6 @@ const REQUIRED = {
   'scope-send': ['scope-id', 'input'],
   'scope-replicas': ['scope-id'],
   models: [],
-  extensions: [],
-  'bot-extensions': ['bot-id'],
-  'bot-extensions-set': ['bot-id', 'input'],
   'bot-soul': ['bot-id'],
   'bot-soul-set': ['bot-id', 'input'],
   'service-status': [],
@@ -136,7 +128,7 @@ const REQUIRED = {
 };
 
 // host/list 不接受资源参数；work-* 只接受各自的必需项及分页项。
-const RESOURCE_OPTIONS = ['bot-id', 'scope-id', 'message-id', 'request-id', 'role', 'cwd', 'model-ref', 'text', 'input', 'limit', 'cursor'];
+const RESOURCE_OPTIONS = ['bot-id', 'scope-id', 'message-id', 'request-id', 'role', 'cwd', 'text', 'input', 'limit', 'cursor'];
 
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -254,13 +246,7 @@ async function main() {
         throw invalid(`${command} does not take --${key}`);
       }
     }
-  } else if (command === 'extensions') {
-    for (const key of RESOURCE_OPTIONS) {
-      if (values[key] !== undefined) {
-        throw invalid(`${command} does not take --${key}`);
-      }
-    }
-  } else if (command === 'bot-extensions' || command === 'bot-extensions-set' || command === 'bot-soul' || command === 'bot-soul-set') {
+  } else if (command === 'bot-soul' || command === 'bot-soul-set') {
     for (const key of RESOURCE_OPTIONS) {
       if (values[key] !== undefined && !REQUIRED[command].includes(key)) {
         throw invalid(`${command} does not take --${key}`);
@@ -300,7 +286,6 @@ async function main() {
         requestId: values['request-id'],
         role: values.role,
         cwd: values.cwd,
-        modelRef: values['model-ref'] ?? null,
       });
       break;
     case 'list':
@@ -392,15 +377,6 @@ async function main() {
       break;
     case 'models':
       result = await client.getModelCatalog();
-      break;
-    case 'extensions':
-      result = await client.getExtensionCatalog();
-      break;
-    case 'bot-extensions':
-      result = await client.getBotExtensions(values['bot-id']);
-      break;
-    case 'bot-extensions-set':
-      result = await client.setBotExtensions(values['bot-id'], input);
       break;
     case 'bot-soul':
       result = await client.getBotSoul(values['bot-id']);

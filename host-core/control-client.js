@@ -342,23 +342,11 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     getServiceStatus(options) {
       return request('GET', ['v1', 'service'], callOptions(options));
     },
-    getExtensionCatalog(options) {
-      return request('GET', ['v1', 'extensions'], callOptions(options));
-    },
-    getBotExtensions(botId, options) {
-      return request('GET', ['v1', 'bots', botId, 'extensions'], callOptions(options));
-    },
-    setBotExtensions(botId, input, options) {
-      return request('PUT', ['v1', 'bots', botId, 'extensions'], { ...callOptions(options), body: input });
-    },
     getBotSoul(botId, options) {
       return request('GET', ['v1', 'bots', botId, 'soul'], callOptions(options));
     },
     setBotSoul(botId, input, options) {
       return request('PUT', ['v1', 'bots', botId, 'soul'], { ...callOptions(options), body: input });
-    },
-    setBotModel(botId, input, options) {
-      return request('PUT', ['v1', 'bots', botId, 'model'], { ...callOptions(options), body: input });
     },
     scheduleTask(botId, input, options) {
       return request('POST', ['v1', 'bots', botId, 'schedules'], { ...callOptions(options), body: input });

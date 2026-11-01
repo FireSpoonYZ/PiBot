@@ -283,13 +283,8 @@ const METHOD_HANDLERS = new Map([
   ['getMemorySource', (control, params, signal) => control.getMemorySource(params.botId, params.input, { signal })],
   ['correctMemory', (control, params, signal) => control.correctMemory(params.botId, params.input, { signal })],
   ['retryMemory', (control, params, signal) => control.retryMemory(params.botId, params.input, { signal })],
-  ['getExtensionCatalog', (control, params, signal) => control.getExtensionCatalog({ signal })],
-  ['getBotExtensions', (control, params, signal) => control.getBotExtensions(params.botId, { signal })],
-  ['setBotExtensions', (control, params, signal) =>
-    control.setBotExtensions(params.botId, params.input, { signal })],
   ['getBotSoul', (control, params, signal) => control.getBotSoul(params.botId, { signal })],
   ['setBotSoul', (control, params, signal) => control.setBotSoul(params.botId, params.input, { signal })],
-  ['setBotModel', (control, params, signal) => control.setBotModel(params.botId, params.input, { signal })],
   ['scheduleTask', (control, params, signal) => control.scheduleTask(params.botId, params.input, { signal })],
   ['discoverProviderModels', (control, params, signal) => control.discoverProviderModels(params.input, { signal })],
   ['validateCenterProvider', (control, params, signal) => control.validateCenterProvider(params, { signal })],

@@ -90,12 +90,8 @@ const routes = [
   { method: 'GET', key: '/v1/scopes/:scopeKey/messages/:messageKey/delivery', pattern: /^\/v1\/scopes\/([^/]+)\/messages\/([^/]+)\/delivery\/?$/, params: ['scopeKey', 'messageKey'], hasBody: false, handler: scopeMessageDelivery },
   { method: 'GET', key: '/v1/settings', pattern: /^\/v1\/settings\/?$/, params: [], hasBody: false, handler: getSettings },
   { method: 'PUT', key: '/v1/settings', pattern: /^\/v1\/settings\/?$/, params: [], hasBody: true, handler: putSettings },
-  { method: 'GET', key: '/v1/extensions', pattern: /^\/v1\/extensions\/?$/, params: [], hasBody: false, handler: getExtensionCatalog },
-  { method: 'GET', key: '/v1/bots/:botId/extensions', pattern: /^\/v1\/bots\/([^/]+)\/extensions\/?$/, params: ['botId'], hasBody: false, handler: getBotExtensions },
-  { method: 'PUT', key: '/v1/bots/:botId/extensions', pattern: /^\/v1\/bots\/([^/]+)\/extensions\/?$/, params: ['botId'], hasBody: true, handler: setBotExtensions },
   { method: 'GET', key: '/v1/bots/:botId/soul', pattern: /^\/v1\/bots\/([^/]+)\/soul\/?$/, params: ['botId'], hasBody: false, handler: getBotSoul },
   { method: 'PUT', key: '/v1/bots/:botId/soul', pattern: /^\/v1\/bots\/([^/]+)\/soul\/?$/, params: ['botId'], hasBody: true, handler: setBotSoul },
-  { method: 'PUT', key: '/v1/bots/:botId/model', pattern: /^\/v1\/bots\/([^/]+)\/model\/?$/, params: ['botId'], hasBody: true, handler: setBotModel },
   { method: 'POST', key: '/v1/bots/:botId/schedules', pattern: /^\/v1\/bots\/([^/]+)\/schedules\/?$/, params: ['botId'], hasBody: true, handler: botSchedules },
   { method: 'GET', key: '/v1/service', pattern: /^\/v1\/service\/?$/, params: [], hasBody: false, handler: serviceStatus },
   { method: 'GET', key: '/v1/scopes/:scopeKey', pattern: /^\/v1\/scopes\/([^/]+)\/?$/, params: ['scopeKey'], hasBody: false, handler: getScopeState },
@@ -725,24 +721,6 @@ function requireBot(host, botId) {
   if (!host.getBot(botId)) throw new ControlHttpError(404, 'BOT_NOT_FOUND', 'bot not found');
 }
 
-async function getExtensionCatalog(host, runtime, params, body, req, res) {
-  assertNoQuery(req);
-  writeControlJson(res, 200, await runtime.getExtensionCatalog());
-}
-
-async function getBotExtensions(host, runtime, params, body, req, res) {
-  assertNoQuery(req);
-  requireBot(host, params.botId);
-  writeControlJson(res, 200, await runtime.getBotExtensions(params.botId));
-}
-
-async function setBotExtensions(host, runtime, params, body, req, res, ctx) {
-  assertNoQuery(req);
-  if (ctx.centerManaged) throw new ControlHttpError(403, 'INVALID_ARGUMENT', 'bot extensions are managed by the center');
-  requireBot(host, params.botId);
-  writeControlJson(res, 200, await runtime.setBotExtensions(params.botId, body));
-}
-
 async function getBotSoul(host, runtime, params, body, req, res) {
   assertNoQuery(req);
   requireBot(host, params.botId);
@@ -753,13 +731,6 @@ async function setBotSoul(host, runtime, params, body, req, res) {
   assertNoQuery(req);
   requireBot(host, params.botId);
   writeControlJson(res, 200, await runtime.setBotSoul(params.botId, body));
-}
-
-async function setBotModel(host, runtime, params, body, req, res, ctx) {
-  assertNoQuery(req);
-  if (ctx.centerManaged) throw new ControlHttpError(403, 'INVALID_ARGUMENT', 'bot models are managed by the center');
-  requireBot(host, params.botId);
-  writeControlJson(res, 200, await runtime.setBotModel(params.botId, body));
 }
 
 async function botSchedules(host, runtime, params, body, req, res) {

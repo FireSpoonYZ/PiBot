@@ -102,6 +102,12 @@ export function initialToolsChange(removeTools) {
  */
 export function agentProfileChange(state, profile) {
   const change = {};
+  // Center-authoritative Bot cwd: rewritten on idle apply/binding re-entry so new
+  // work runs in the new directory while history stays on the same conversation.
+  const cwd = profile?.cwd;
+  if (cwd !== undefined && (state?.cwd ?? null) !== cwd) {
+    change.cwd = cwd;
+  }
   const model = profile?.model;
   if (model && typeof model.provider === 'string' && typeof model.modelId === 'string') {
     const cur = state?.model;

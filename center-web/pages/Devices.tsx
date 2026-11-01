@@ -22,7 +22,7 @@ import type {
   ModelSelection,
   Provider,
 } from '@e-launcher/center-contract';
-import { api } from '../api';
+import { api, CenterApiError } from '../api';
 import { RuntimeStatusSummary } from '../components/RuntimeStatus';
 import { SheetModal } from '../components/SheetModal';
 
@@ -361,6 +361,8 @@ export default function Devices() {
     botId: string;
     name: string;
     description: string;
+    cwd: string;
+    cwdRevision: number;
   }>();
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string>();
   const [error, setError] = useState('');
@@ -720,8 +722,8 @@ export default function Devices() {
                     </Link>
                     <button
                       className="quiet-button"
-                      disabled={busy || !device.online}
-                      title={!device.online ? '设备离线' : undefined}
+                      disabled={busy}
+                      title={!device.online ? '设备离线：仅工作目录可保存' : undefined}
                       onClick={() => {
                         setError('');
                         setEditingBot({
@@ -729,10 +731,12 @@ export default function Devices() {
                           botId: bot.botId,
                           name: bot.name || '',
                           description: bot.description || '',
+                          cwd: bot.cwd ?? '',
+                          cwdRevision: bot.cwdRevision ?? 0,
                         });
                       }}
                     >
-                      重命名/编辑描述
+                      编辑 Bot
                     </button>
                     {!bot.isPrimary && (
                       <button
@@ -992,10 +996,18 @@ export default function Devices() {
         onOpenChange={isOpen => {
           if (!isOpen) setEditingBot(undefined);
         }}
-        title="重命名 / 编辑 Bot 描述"
+        title="重命名 / 编辑 Bot"
         description={editingBot ? `Bot ID: ${editingBot.botId}` : undefined}
       >
-        {editingBot && (
+        {editingBot && (() => {
+          const current = bots[editingBot.deviceId]?.find(b => b.botId === editingBot.botId);
+          const profileChanged = !current || current.name !== editingBot.name.trim() || (current.description ?? '') !== editingBot.description;
+          const cwdChanged = (current?.cwd ?? '') !== editingBot.cwd.trim();
+          const trimmedCwd = editingBot.cwd.trim();
+          // 资料 PATCH 需 Host 在线；仅目录变化在离线时也可提交，且不再附带未变的资料字段。
+          const profileBlocked = profileChanged && !editingBotDevice?.online;
+          const canSave = Boolean(editingBot.name.trim()) && trimmedCwd !== '' && (profileChanged || cwdChanged) && !profileBlocked;
+          return (
           <div>
             {error && (
               <p className="inline-error" role="alert">
@@ -1006,15 +1018,42 @@ export default function Devices() {
               className="form"
               onSubmit={e => {
                 e.preventDefault();
-                if (!editingBot.name.trim()) return;
+                if (!editingBot.name.trim() || !canSave) return;
                 void run(async () => {
-                  await api.updateBot(editingBot.deviceId, editingBot.botId, {
-                    name: editingBot.name.trim(),
-                    description: editingBot.description,
-                  });
+                  if (profileChanged) {
+                    await api.updateBot(editingBot.deviceId, editingBot.botId, {
+                      name: editingBot.name.trim(),
+                      description: editingBot.description,
+                    });
+                  }
+                  if (cwdChanged) {
+                    try {
+                      const config = await api.putBotCwd(editingBot.deviceId, editingBot.botId, {
+                        expectedRevision: editingBot.cwdRevision,
+                        value: trimmedCwd,
+                      });
+                      setEditingBot(prev => (prev && prev.botId === editingBot.botId
+                        ? { ...prev, cwd: config.value ?? prev.cwd, cwdRevision: config.revision }
+                        : prev));
+                    } catch (e) {
+                      // 修订冲突：重读中心权威修订回填表单，保留用户刚输入的目录。
+                      if (e instanceof CenterApiError && e.code === 'REVISION_CONFLICT') {
+                        const fresh = await api.getBotCwd(editingBot.deviceId, editingBot.botId);
+                        setEditingBot(prev => (prev && prev.botId === editingBot.botId
+                          ? { ...prev, cwdRevision: fresh.revision }
+                          : prev));
+                        throw new Error('工作目录已被其他修改占用，已重新读取修订；请确认目录后再保存。');
+                      }
+                      throw e;
+                    }
+                  }
                   await syncBotsNow();
                   setEditingBot(undefined);
-                  setNotice('Bot 资料已更新');
+                  setNotice(cwdChanged
+                    ? (editingBotDevice?.online
+                      ? 'Bot 资料已保存；工作目录将在目标 Host 空闲后生效，不会移动文件'
+                      : '工作目录已保存到中心；设备待同步，连线后目标 Host 空闲时生效，不会移动文件')
+                    : 'Bot 资料已更新');
                 });
               }}
             >
@@ -1035,11 +1074,24 @@ export default function Devices() {
                   disabled={busy || !editingBotDevice?.online}
                 />
               </label>
+              <label>
+                工作目录
+                <input
+                  value={editingBot.cwd}
+                  onChange={e => setEditingBot({ ...editingBot, cwd: e.target.value })}
+                  placeholder="目标 Host 上的绝对路径"
+                  disabled={busy}
+                />
+              </label>
+              <p className="secondary" style={{ marginTop: 0 }}>
+                目标 Host 上的绝对路径；离线设备也可保存，空闲后生效；不会移动文件。
+                {profileBlocked ? '（设备离线：名称/描述暂不可保存，请先连线或仅修改工作目录）' : ''}
+              </p>
               <div className="action-row">
                 <button
                   className="button"
                   type="submit"
-                  disabled={busy || !editingBotDevice?.online || !editingBot.name.trim()}
+                  disabled={busy || !canSave}
                 >
                   保存
                 </button>
@@ -1049,7 +1101,8 @@ export default function Devices() {
               </div>
             </form>
           </div>
-        )}
+          );
+        })()}
       </SheetModal>
 
       <SheetModal

@@ -1,7 +1,5 @@
 import { openStore } from './store.js';
 import { ensureSoul, setSoulText } from './bot-soul.js';
-// Bot 扩展设置的形状由 extension-manager 统一归一化（B lane），host 不重复定义规则。
-import { normalizeBotExtensions } from './extension-manager.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -143,17 +141,27 @@ export function openHost(options) {
       assertId(botId, 'botId');
       return store.getBot(botId);
     },
-    setBotModel(botId, input) {
-      requireBot(botId);
+    /** Absolute-path + existing-directory check; returns the normalized path. */
+    assertBotCwd(input) {
       if (typeof input !== 'object' || input === null) throw invalidArgument('input must be an object');
-      let resolvedModelRef = null;
-      if (input.modelRef !== undefined && input.modelRef !== null) {
-        if (typeof input.modelRef !== 'string' || input.modelRef.trim() === '') {
-          throw invalidArgument('modelRef must be null or a non-blank string');
-        }
-        resolvedModelRef = input.modelRef.trim();
+      const cwd = input.cwd;
+      if (typeof cwd !== 'string' || !path.isAbsolute(cwd)) throw invalidArgument('cwd must be an absolute path');
+      const normalizedCwd = path.resolve(cwd);
+      let stat;
+      try {
+        stat = fs.statSync(normalizedCwd);
+      } catch (err) {
+        if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') throw invalidCwd(normalizedCwd);
+        throw err;
       }
-      return store.setBotModel(botId, resolvedModelRef);
+      if (!stat.isDirectory()) throw invalidCwd(normalizedCwd);
+      return normalizedCwd;
+    },
+    /** Internal center-driven cwd switch; only the runtime apply boundary calls this. */
+    setBotCwd(botId, input) {
+      requireBot(botId);
+      const normalizedCwd = this.assertBotCwd(input);
+      return store.setBotCwd(botId, normalizedCwd);
     },
     findByRequest(requestId) {
       assertId(requestId, 'requestId');
@@ -162,42 +170,10 @@ export function openHost(options) {
     listBots() {
       return store.listBots();
     },
-    // 内部快照 {botId, revision, extensions, retentionFloor}；缺省值只在首次初始化时复制一次。
-    ensureBotExtensions(botId, defaults) {
-      requireBot(botId);
-      return store.ensureBotExtensionSettings(botId, normalizeBotExtensions(defaults), 0);
-    },
     // 行未初始化返回 null；未知 Bot 由调用方先用 getBot 区分。
     getBotExtensions(botId) {
       assertId(botId, 'botId');
       return store.getBotExtensionSettings(botId);
-    },
-    // options.retentionFloor 只由 Runtime 在离开关闭/只读期时提供，公开调用方不传。
-    setBotExtensions(botId, input, options = {}) {
-      requireBot(botId);
-      if (typeof input !== 'object' || input === null) throw invalidArgument('input must be an object');
-      const expectedRevision = input.expectedRevision;
-      if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
-        throw invalidArgument('expectedRevision must be a non-negative integer');
-      }
-      const extensions = normalizeBotExtensions(input.extensions);
-      let retentionFloor;
-      if (options?.retentionFloor !== undefined) {
-        if (!Number.isSafeInteger(options.retentionFloor) || options.retentionFloor < 0) {
-          throw invalidArgument('retentionFloor must be a non-negative integer');
-        }
-        retentionFloor = options.retentionFloor;
-      }
-      const current = store.getBotExtensionSettings(botId);
-      if (!current || current.revision !== expectedRevision) throw requestConflict();
-      const next = store.updateBotExtensionSettings(
-        botId,
-        expectedRevision,
-        extensions,
-        retentionFloor === undefined ? current.retentionFloor : retentionFloor
-      );
-      if (!next) throw requestConflict();
-      return next;
     },
     // SOUL：首次/缺失时按持久化 role 一次性补建，已有内容永不覆盖。
     ensureBotSoul(botId) {
@@ -235,12 +211,6 @@ function invalidCwd(cwd) {
 function botNotFound(botId) {
   const err = new Error(`bot not found: ${botId}`);
   err.code = 'BOT_NOT_FOUND';
-  return err;
-}
-
-function requestConflict() {
-  const err = new Error('bot settings revision does not match the current state');
-  err.code = 'REQUEST_CONFLICT';
   return err;
 }
 

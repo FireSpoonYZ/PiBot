@@ -161,6 +161,8 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
   };
   const botModelPath = (targetDeviceId, botId) => '/api/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/model-config';
   const hostBotModelPath = (targetDeviceId, botId) => '/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/model-config';
+  const botCwdPath = (targetDeviceId, botId) => '/api/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/cwd';
+  const hostBotCwdPath = (targetDeviceId, botId) => '/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/cwd';
   const botCapabilitiesPath = (targetDeviceId, botId) => '/api/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/capabilities';
   const hostBotCapabilitiesPath = (targetDeviceId, botId) => '/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/capabilities';
   const runtimeStatusPath = (targetDeviceId) => '/api/devices/' + encodeURIComponent(targetDeviceId) + '/runtime-status';
@@ -221,6 +223,8 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     botAvatarSet: (targetDeviceId, botId, input, signal) => request('/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/avatar', { method: 'PUT', body: input, signal }),
     botModelGet: (targetDeviceId, botId, signal) => request(hostBotModelPath(targetDeviceId, botId), { signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botModelPath(targetDeviceId, botId), { signal }) : Promise.reject(err)),
     botModelSet: (targetDeviceId, botId, input, signal) => request(hostBotModelPath(targetDeviceId, botId), { method: 'PUT', body: input, signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botModelPath(targetDeviceId, botId), { method: 'PUT', body: input, signal }) : Promise.reject(err)),
+    botCwdGet: (targetDeviceId, botId, signal) => request(hostBotCwdPath(targetDeviceId, botId), { signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botCwdPath(targetDeviceId, botId), { signal }) : Promise.reject(err)),
+    botCwdSet: (targetDeviceId, botId, input, signal) => request(hostBotCwdPath(targetDeviceId, botId), { method: 'PUT', body: input, signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botCwdPath(targetDeviceId, botId), { method: 'PUT', body: input, signal }) : Promise.reject(err)),
     botCapabilitiesGet: (targetDeviceId, botId, signal) => request(hostBotCapabilitiesPath(targetDeviceId, botId), { signal }).catch(err => {
       if (err?.code !== 'CENTER_REQUEST_FAILED') return Promise.reject(err);
       return ownerRequest(botCapabilitiesPath(targetDeviceId, botId), { signal }).catch(async (ownerErr) => {

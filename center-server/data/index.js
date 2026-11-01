@@ -57,6 +57,7 @@ function normalizeBotRef(deviceId, bot) {
     name: bot.name,
     ...(typeof bot.description === 'string' ? { description: bot.description } : {}),
     ...(typeof bot.cwd === 'string' ? { cwd: bot.cwd } : {}),
+    ...(Number.isSafeInteger(bot.cwdRevision) && bot.cwdRevision >= 0 ? { cwdRevision: bot.cwdRevision } : {}),
     ...(bot.modelRef !== undefined ? { modelRef: bot.modelRef } : {}),
     ...(typeof bot.primaryConversationId === 'string' ? { primaryConversationId: bot.primaryConversationId } : {}),
     ...(typeof bot.createdAt === 'string' ? { createdAt: bot.createdAt } : {}),
@@ -274,7 +275,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
         })),
       };
     });
-    return { botId: bot.botId, model, capabilities };
+    return { botId: bot.botId, cwd: bot.cwd, model, capabilities };
   }
   /** Single-Bot turn context: same content shape as a device snapshot, plus the secret-free set checksum. */
   function turnContent(deviceId, bot) {
@@ -288,7 +289,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       providers: providers.map((provider) => pick(provider, providerFields)),
       models: Object.entries(models).map(([id, list]) => [id, list.map((model) => pick(model, modelFields))]),
       bot: {
-        botId: entry.botId, model: entry.model,
+        botId: entry.botId, cwd: entry.cwd ?? null, model: entry.model,
         capabilities: entry.capabilities.filter((capability) => capability.enabled).map((capability) => pick(capability, capabilityFields)),
       },
       credentials: Object.entries(credentialRevisions),
@@ -309,7 +310,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       providers: content.providers.map((provider) => pick(provider, providerFields)),
       models: Object.entries(content.models).map(([id, list]) => [id, list.map((model) => pick(model, modelFields))]),
       bots: [...content.bots].sort((a, b) => a.botId < b.botId ? -1 : a.botId > b.botId ? 1 : 0).map((bot) => ({
-        botId: bot.botId, model: bot.model,
+        botId: bot.botId, cwd: bot.cwd ?? null, model: bot.model,
         capabilities: bot.capabilities.filter((capability) => capability.enabled).map((capability) => pick(capability, capabilityFields)),
       })),
       credentials: [...content.refs].sort().map((id) => [id, credential(id)?.revision ?? null]),
@@ -474,6 +475,13 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             // Avatar configuration belongs to the center, never to Host directory reports.
             normalized.avatar = previous?.avatar ?? null;
             normalized.avatarRevision = previous?.avatarRevision ?? 0;
+            // cwd belongs to the center, never to Host directory reports: bootstrap
+            // and bots-sync only preserve an existing center value; a Host-supplied
+            // cwd is dropped even for new records. The Host initializes a missing
+            // value once through the cwd CAS API, never through the report itself.
+            delete normalized.cwd;
+            if (previous?.cwd !== undefined) normalized.cwd = previous.cwd;
+            normalized.cwdRevision = previous?.cwdRevision ?? 0;
             const serialized = json(normalized);
             if (oldSerialized !== serialized) {
               seq += 1;
@@ -512,7 +520,16 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
         const bot = store.upsertDeviceBot(deviceId, { botId }, { value, expectedRevision });
         return { value: bot.avatar, revision: bot.avatarRevision };
       },
-      upsertDeviceBot(deviceId, bot, avatarChange) {
+      getBotCwd(deviceId, botId) {
+        const bot = parse(db.prepare('SELECT json FROM device_bots WHERE device_id = ? AND bot_id = ?').get(deviceId, botId));
+        if (!bot) throw error('NOT_FOUND', 'Bot not found');
+        return { value: bot.cwd ?? null, revision: bot.cwdRevision ?? 0 };
+      },
+      putBotCwd(deviceId, botId, expectedRevision, value) {
+        const bot = store.upsertDeviceBot(deviceId, { botId }, { value, expectedRevision, kind: 'cwd' });
+        return { value: bot.cwd ?? null, revision: bot.cwdRevision ?? 0 };
+      },
+      upsertDeviceBot(deviceId, bot, fieldChange) {
         assertId(deviceId);
         assertObject(bot);
         assertId(bot.botId);
@@ -528,11 +545,25 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           });
           merged.avatar = existing?.avatar ?? null;
           merged.avatarRevision = existing?.avatarRevision ?? 0;
-          if (avatarChange) {
+          // cwd belongs to the center: generic upserts (profile/primary/avatar receipts)
+          // never seed it from a Host-supplied record; only fieldChange.kind === 'cwd' writes it.
+          delete merged.cwd;
+          if (existing?.cwd !== undefined) merged.cwd = existing.cwd;
+          merged.cwdRevision = existing?.cwdRevision ?? 0;
+          let executionChanged = false;
+          if (fieldChange) {
             if (!existing) throw error('NOT_FOUND', 'Bot not found');
-            assertRevision(avatarChange.expectedRevision, merged.avatarRevision);
-            merged.avatar = avatarChange.value;
-            merged.avatarRevision += 1;
+            if (fieldChange.kind === 'cwd') {
+              assertRevision(fieldChange.expectedRevision, merged.cwdRevision);
+              merged.cwd = fieldChange.value;
+              merged.cwdRevision += 1;
+              // cwd is execution content: a change must reach the next device snapshot.
+              executionChanged = true;
+            } else {
+              assertRevision(fieldChange.expectedRevision, merged.avatarRevision);
+              merged.avatar = fieldChange.value;
+              merged.avatarRevision += 1;
+            }
           }
           const meta = db.prepare('SELECT epoch, seq FROM sync_meta WHERE id = 1').get();
           let seq = meta.seq;
@@ -565,8 +596,8 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             if (seq > 5000) {
               db.prepare('DELETE FROM bot_events WHERE seq <= ?').run(seq - 5000);
             }
-            // Only a real Bot addition changes execution content; profile edits stay display-only.
-            if (!existingRow) bump();
+            // Only a real Bot addition or an execution-field change bumps; profile edits stay display-only.
+            if (!existingRow || executionChanged) bump();
           }
           if (!existingRow) initializeBotHindsight(merged);
           return { ...merged, seq: targetSeq };

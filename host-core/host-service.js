@@ -44,7 +44,6 @@ export async function openHostService(options) {
         botId: bot.botId,
         name: bot.role,
         description: bot.description ?? '',
-        cwd: bot.cwd,
         modelRef: bot.modelRef ?? null,
         primaryConversationId: bot.primaryConversationId,
         createdAt: bot.createdAt,
@@ -253,8 +252,9 @@ export async function openHostService(options) {
     const current = client;
     const gen = generation;
     if (!current) throw offlineError();
-    const snapshot = bootstrap ? (await current.bootstrap(readBots())).snapshot : await current.getSnapshot();
+    let snapshot = bootstrap ? (await current.bootstrap(readBots())).snapshot : await current.getSnapshot();
     try {
+      snapshot = await initializeBotCwd(snapshot, current, gen);
       return await apply(snapshot, current, gen);
     } catch (err) {
       if (current !== client || closed) throw err;
@@ -266,6 +266,34 @@ export async function openHostService(options) {
         status: 'failed', appliedRevision: state.appliedRevision, error, bots: [], capabilityErrors: [] }).catch(() => {});
       throw Object.assign(new Error('center configuration could not be applied'), { code: 'CENTER_APPLY_FAILED', cause: err });
     }
+  }
+  /** 一次性 cwd 初始化：只对本次快照中缺值的本机 Bot 各尝试一次 expectedRevision:0 CAS；
+   * 冲突即中心值胜出、绝不重试覆盖。发生过写入时返回一次最新快照，否则原样返回。 */
+  async function initializeBotCwd(snapshot, current, gen) {
+    if (gen !== generation || current !== client || closed) throw offlineError();
+    if (snapshot.deviceId !== deviceId || snapshot.protocol !== 1) throw invalidArgument('invalid center snapshot');
+    const pending = new Set();
+    for (const bot of snapshot.bots ?? []) {
+      if ((bot.cwd === undefined || bot.cwd === null) && typeof bot.botId === 'string' && bot.botId) pending.add(bot.botId);
+    }
+    if (pending.size === 0) return snapshot;
+    const localCwds = new Map();
+    const host = openHost({ dataRoot });
+    try {
+      for (const bot of host.listBots()) if (pending.has(bot.botId)) localCwds.set(bot.botId, bot.cwd);
+    } finally { host.close(); }
+    if (localCwds.size === 0) return snapshot;
+    for (const [botId, cwd] of localCwds) {
+      if (gen !== generation || current !== client || closed) throw offlineError();
+      try {
+        await current.botCwdSet(deviceId, botId, { expectedRevision: 0, value: cwd });
+      } catch (err) {
+        if (err?.code !== 'REQUEST_CONFLICT' && err?.code !== 'REVISION_CONFLICT') throw err;
+      }
+    }
+    const updatedSnapshot = await current.getSnapshot();
+    if (gen !== generation || current !== client || closed) throw offlineError();
+    return updatedSnapshot;
   }
   /** 串行合并刷新：刷新期间的新事件只置脏，本轮结束后补拉最新一次。 */
   function requestRefresh({ bootstrap = false } = {}) {
@@ -331,7 +359,7 @@ export async function openHostService(options) {
     try {
       current = await connect();
       const connectedGeneration = generation;
-      const snapshot = (await current.bootstrap(readBots())).snapshot;
+      const snapshot = await initializeBotCwd((await current.bootstrap(readBots())).snapshot, current, connectedGeneration);
       await apply(snapshot, current, connectedGeneration);
     } catch (err) {
       if (!current || isOffline(err)) {
@@ -353,7 +381,7 @@ export async function openHostService(options) {
     activeRevision = lastRevision = settings.revision;
     const current = await connect();
     const initialGeneration = generation;
-    const snapshot = (await current.bootstrap(readBots())).snapshot;
+    const snapshot = await initializeBotCwd((await current.bootstrap(readBots())).snapshot, current, initialGeneration);
     if (snapshot.deviceId !== deviceId || snapshot.protocol !== 1) throw invalidArgument('invalid center snapshot');
     parseRelayUrl(snapshot.linkUrl);
     let installedNpmPath = npmPath;

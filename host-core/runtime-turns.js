@@ -39,7 +39,7 @@ function boundedTurnError(err) {
 /**
  * deps:
  *  host, getHarness, context, centerRuntime（含 transport 注入的 prepareTurn/confirmTurn/restoreTurn）,
- *  plugins, models, getBotModels, setBotModels, profileFor, botExecutionFingerprint,
+ *  plugins, models, getBotModels, setBotModels, profileFor, botExecutionFingerprint, applyBotCwd,
  *  setBotAppliedRevision(botId, revision), setBotFingerprint(botId, fingerprint),
  *  live（protocol lane 补 setTurnAdmission；缺席时静默跳过）, admitBot,
  *  getEpoch()（断线 epoch，网络 await 期间变更即放弃提交）,
@@ -50,7 +50,7 @@ function boundedTurnError(err) {
 export function createTurnAdmission(deps) {
   const {
     host, getHarness, context, centerRuntime, plugins, models,
-    getBotModels, setBotModels, profileFor, botExecutionFingerprint,
+    getBotModels, setBotModels, profileFor, botExecutionFingerprint, applyBotCwd,
     setBotAppliedRevision, setBotFingerprint, live, admitBot, getEpoch,
     trackSubmission, recordCompletedSubmission, initializeBot, attachments, sessions,
   } = deps;
@@ -240,12 +240,18 @@ export function createTurnAdmission(deps) {
         throw errWithCode('center selected model is unavailable', 'TURN_SYNC_FAILED');
       }
     }
+    // 目录校验在任何模型/插件/cwd 状态变化之前完成；非法 set 即同步失败。
+    const pinnedCwd = typeof target?.cwd === 'string' && target.cwd !== bot.cwd ? target.cwd : null;
+    if (pinnedCwd !== null) host.assertBotCwd({ cwd: pinnedCwd });
     if (selection) {
       const nextModels = { ...getBotModels() };
       nextModels[bot.botId] = selection;
       setBotModels(nextModels);
     }
-    const applied = await plugins.applyBot(bot, capabilities, {
+    // pinned set 的目录先于插件与 profile 落地：持久化、会话 AgentDoc 与执行
+    // 环境都完成后才算本 set 生效；恢复轮重放同一快照即恢复同一目录。
+    const current = pinnedCwd !== null ? await applyBotCwd(bot, pinnedCwd) : bot;
+    const applied = await plugins.applyBot(current, capabilities, {
       deviceId: host.deviceId,
       credentials,
       atomic: true,
@@ -254,7 +260,7 @@ export function createTurnAdmission(deps) {
     if ((applied?.capabilityErrors ?? []).length > 0) {
       throw errWithCode('turn capability set could not be applied', 'TURN_SYNC_FAILED');
     }
-    setBotFingerprint(bot.botId, botExecutionFingerprint(selection, capabilities, credentials));
+    setBotFingerprint(bot.botId, botExecutionFingerprint(selection, capabilities, credentials, current.cwd));
     if (Number.isSafeInteger(snapshot.revision)) setBotAppliedRevision(bot.botId, snapshot.revision);
     appliedSetIds.set(bot.botId, preparation.setId);
   }
@@ -385,14 +391,16 @@ export function createTurnAdmission(deps) {
       }
     }
     const profile = profileFor(bot.botId, null);
-    let conversation = await getPrimaryConversation(harness(), bot, {}, context);
+    // applyPreparation 可能已切换 cwd：会话创建与绑定一律读取持久化的最新记录。
+    const current = host.getBot(bot.botId) ?? bot;
+    let conversation = await getPrimaryConversation(harness(), current, {}, context);
     if (!conversation) {
       const modelRef = getBotModels()[bot.botId]?.modelRef;
       const ref = parseModelRef(modelRef);
       if (!models.getModel(ref.provider, ref.modelId)) {
         throw errWithCode('model not found: ' + modelRef, 'TURN_SYNC_FAILED');
       }
-      conversation = await getPrimaryConversation(harness(), { ...bot, modelRef }, {
+      conversation = await getPrimaryConversation(harness(), { ...current, modelRef }, {
         create: true,
         defaultModel: modelRef,
         thinkingLevel: profile.thinkingLevel,

@@ -57,9 +57,6 @@ import type {
   HostServiceStatus,
   CenterProviderProbe,
   CenterActionCall,
-  ExtensionCatalog,
-  BotExtensionSnapshot,
-  BotExtensionsUpdate,
   BotSoul,
   BotSoulUpdate,
   WorkLiveFrame,
@@ -174,10 +171,7 @@ export interface ControlClient {
   getLocalSettings(options?: ControlClientCallOptions): Promise<LocalSettingsSnapshot>;
   replaceLocalSettings(input: SettingsUpdate, options?: ControlClientCallOptions): Promise<LocalSettingsSnapshot>;
   getServiceStatus(options?: ControlClientCallOptions): Promise<HostServiceStatus>;
-  /* Managed extensions and per-Bot SOUL; set methods are CAS and never replayed. */
-  getExtensionCatalog(options?: ControlClientCallOptions): Promise<ExtensionCatalog>;
-  getBotExtensions(botId: string, options?: ControlClientCallOptions): Promise<BotExtensionSnapshot>;
-  setBotExtensions(botId: string, input: BotExtensionsUpdate, options?: ControlClientCallOptions): Promise<BotExtensionSnapshot>;
+  /* Per-Bot SOUL; set methods are CAS and never replayed. */
   getBotSoul(botId: string, options?: ControlClientCallOptions): Promise<BotSoul>;
   setBotSoul(botId: string, input: BotSoulUpdate, options?: ControlClientCallOptions): Promise<BotSoul>;
   /*

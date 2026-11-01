@@ -71,23 +71,17 @@ export interface Host {
   recordBotActivity(botId: string, activity?: BotActivityInput): BotRecord | null;
   listExpiredArchivedBots(cutoffIso: string): BotRecord[];
   getBot(botId: string): BotRecord | null;
-  setBotModel(botId: string, input: { modelRef?: string | null }): BotRecord;
+  /** Validates an absolute, existing directory path on this Host; returns the normalized path. */
+  assertBotCwd(input: { cwd: string }): string;
+  /**
+   * Internal center-driven cwd switch; only the runtime apply boundary calls this.
+   * Not a remote method — the center remains the only write path for cwd.
+   */
+  setBotCwd(botId: string, input: { cwd: string }): BotRecord;
   findByRequest(requestId: string): BotRecord | null;
   listBots(): BotRecord[];
-  /*
-   * Managed Bot extensions and SOUL: synchronous store/file CAS only; the
-   * runtime busy check and profile refresh live in Runtime, not here.
-   */
-  /** Ensure the row once from `defaults`; returns the internal snapshot including retentionFloor. */
-  ensureBotExtensions(botId: string, defaults: BotExtensions): BotExtensionState;
   /** Internal row snapshot; null when not initialized (callers distinguish unknown Bots via getBot). */
   getBotExtensions(botId: string): BotExtensionState | null;
-  /** CAS on expectedRevision; options.retentionFloor is internal to the runtime, never a public input. */
-  setBotExtensions(
-    botId: string,
-    input: BotExtensionsUpdate,
-    options?: { retentionFloor?: number },
-  ): BotExtensionState;
   /** Create SOUL.md once from the persisted role; existing content is never overwritten. */
   ensureBotSoul(botId: string): BotSoul;
   /** Reading also idempotently bootstraps a missing legacy document. */
@@ -677,13 +671,8 @@ export interface Runtime {
   getScopeMessageDelivery(scopeId: string, messageId: string): Promise<MessageDeliveryStatus>;
   /** Read-only chat model whitelist; no credentials/base URLs/env names. */
   getModelCatalog(): Promise<ModelCatalog>;
-  /* Managed extensions and per-Bot SOUL. */
-  /** Idempotent Bot initialization (extension defaults once + SOUL.md); retried by create/startup. */
-  initializeBot(botId: string): Promise<BotExtensionSnapshot>;
-  getExtensionCatalog(): Promise<ExtensionCatalog>;
-  getBotExtensions(botId: string): Promise<BotExtensionSnapshot>;
-  /** CAS on expectedRevision; busy Bot rejects RUNTIME_BUSY before the settings change. */
-  setBotExtensions(botId: string, input: BotExtensionsUpdate): Promise<BotExtensionSnapshot>;
+  /** Idempotent Bot initialization (SOUL.md); retried by create/startup. */
+  initializeBot(botId: string): Promise<void>;
   getBotSoul(botId: string): Promise<BotSoul>;
   /** CAS on the file SHA-256; conflict rejects REQUEST_CONFLICT without overwriting. */
   setBotSoul(botId: string, input: BotSoulUpdate): Promise<BotSoul>;
@@ -1065,12 +1054,8 @@ export interface ControlClient {
   getLocalSettings(options?: ControlClientCallOptions): Promise<LocalSettingsSnapshot>;
   replaceLocalSettings(input: SettingsUpdate, options?: ControlClientCallOptions): Promise<LocalSettingsSnapshot>;
   getServiceStatus(options?: ControlClientCallOptions): Promise<HostServiceStatus>;
-  getExtensionCatalog(options?: ControlClientCallOptions): Promise<ExtensionCatalog>;
-  getBotExtensions(botId: string, options?: ControlClientCallOptions): Promise<BotExtensionSnapshot>;
-  setBotExtensions(botId: string, input: BotExtensionsUpdate, options?: ControlClientCallOptions): Promise<BotExtensionSnapshot>;
   getBotSoul(botId: string, options?: ControlClientCallOptions): Promise<BotSoul>;
   setBotSoul(botId: string, input: BotSoulUpdate, options?: ControlClientCallOptions): Promise<BotSoul>;
-  setBotModel(botId: string, input: { modelRef?: string | null }, options?: ControlClientCallOptions): Promise<BotRecord>;
   scheduleTask(botId: string, input: Record<string, unknown>, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
   getShowerStatus(target: ShowerTarget, options?: ControlClientCallOptions): Promise<ShowerSession>;
   createShowerSession(target: ShowerTarget, input?: ShowerCreateOptions, options?: ControlClientCallOptions): Promise<ShowerSession>;
@@ -1175,56 +1160,6 @@ export function parseRuntimeConfig(raw: unknown): ParsedRuntimeConfig;
 export function describeModelCatalog(models: Models, defaultModel?: string | null): ModelCatalog;
 export function loadRuntimeConfig(file: string): Promise<ParsedRuntimeConfig>;
 
-/**
- * Managed Bot extensions (Pi Durable native registry/configure/AgentDoc) and
- * the per-Bot SOUL.md persona. The Host owns the catalog, availability and the
- * common connection/secret reference; each Bot persists explicit settings that
- * are copied once from the defaults (never inherited dynamically).
- */
-
-export type BotExtensionMode = 'read-write' | 'read-only';
-
-/** Per-Bot extension settings; hindsight is the only managed extension. */
-export interface BotExtensions {
-  hindsight: { enabled: boolean; mode: BotExtensionMode };
-}
-
-/** CAS input for setBotExtensions and PUT /v1/bots/:botId/extensions. */
-export interface BotExtensionsUpdate {
-  expectedRevision: number;
-  extensions: BotExtensions;
-}
-
-/** Explicit Bot settings plus the effective state and why it differs. */
-export interface BotExtensionSnapshot {
-  botId: string;
-  revision: number;
-  extensions: BotExtensions;
-  effective: {
-    hindsight: {
-      enabled: boolean;
-      mode: BotExtensionMode;
-      reason: null | 'bot-disabled' | 'host-disabled' | 'not-configured';
-    };
-  };
-}
-
-/** Catalog entry; installed/availability/default state only, never a secret value. */
-export interface ExtensionCatalogEntry {
-  id: 'hindsight';
-  name: 'Hindsight';
-  version: '1';
-  scope: 'bot';
-  enabled: boolean;
-  available: boolean;
-  defaultEnabled: boolean;
-  reason: null | 'host-disabled' | 'not-configured';
-}
-
-export interface ExtensionCatalog {
-  extensions: ExtensionCatalogEntry[];
-}
-
 /** Real UTF-8 SOUL.md at dataRoot/bots/<botId>/SOUL.md; path is relative, revision its SHA-256. */
 export interface BotSoul {
   botId: string;
@@ -1252,7 +1187,6 @@ export interface RuntimeExtensionsConfig {
   hindsight?: HindsightExtensionConfig;
 }
 
-export function normalizeBotExtensions(value: unknown): BotExtensions;
 /** Strict canonical map; undefined input stays undefined (unconfigured). */
 export function normalizeRuntimeExtensions(value: unknown): RuntimeExtensionsConfig | undefined;
 /** Effective map: explicit extensions win; legacy runtime.hindsight falls back to enabled+default. */
@@ -1261,45 +1195,12 @@ export function resolveRuntimeExtensions(input: {
   hindsight?: HindsightOptions;
 }): RuntimeExtensionsConfig;
 
-/** Internal Bot extension row snapshot; retentionFloor is never public. */
+/** Internal Bot extension row snapshot (legacy schema kept for the persisted retentionFloor). */
 export interface BotExtensionState {
   botId: string;
   revision: number;
-  extensions: BotExtensions;
+  extensions: Record<string, unknown>;
   retentionFloor: number;
-}
-
-/** Effective per-Bot policy enforced by the runtime/tool layer. */
-export interface BotExtensionPolicy {
-  enabled: boolean;
-  mode: BotExtensionMode;
-  canRead: boolean;
-  canWrite: boolean;
-  retentionFloor: number;
-}
-
-/** Host-owned catalog, persistence and resource lifecycle for managed extensions. */
-export interface HostExtensionManager {
-  /** Raw Hindsight options only when the Host extension is available and enabled. */
-  readonly hindsightConfig: HindsightOptions | undefined;
-  /** Ensure the Bot row and its SOUL exist; BOT_NOT_FOUND for an unknown Bot. */
-  ensureBot(botId: string): BotExtensionState;
-  getBotExtensions(botId: string): BotExtensionSnapshot;
-  /** CAS; options.retentionFloor is internal to the runtime, never a public input. */
-  setBotExtensions(
-    botId: string,
-    input: BotExtensionsUpdate,
-    options?: { retentionFloor?: number },
-  ): BotExtensionSnapshot;
-  getPolicy(botId: string): BotExtensionPolicy;
-  listExtensions(): ExtensionCatalog;
-  /** Native extension definition kept in the durable registry even while disabled. */
-  registerRuntime(id: 'hindsight', resources: { extension: unknown; quiesce: () => unknown; close: () => unknown }): void;
-  install(registry: unknown): void;
-  /** Tool names removed from the Bot's callable set; all eight when off, three writes when read-only. */
-  disabledToolNames(botId: string): string[];
-  quiesce(): Promise<void>;
-  close(): Promise<void>;
 }
 
 /**
@@ -1929,10 +1830,7 @@ export interface RemoteControlMethodMap {
   getMemorySource: { params: { botId: string; input: MemorySourceInput }; result: MemorySourceResult };
   correctMemory: { params: { botId: string; input: MemoryCorrectionInput }; result: MemoryCorrectionReceipt };
   retryMemory: { params: { botId: string; input: MemoryRetryInput }; result: MemoryReceipt };
-  /* Managed extension/SOUL additions; setters are CAS and never replayed. */
-  getExtensionCatalog: { params: Record<string, never>; result: ExtensionCatalog };
-  getBotExtensions: { params: { botId: string }; result: BotExtensionSnapshot };
-  setBotExtensions: { params: { botId: string; input: BotExtensionsUpdate }; result: BotExtensionSnapshot };
+  /* Per-Bot SOUL; setters are CAS and never replayed. */
   getBotSoul: { params: { botId: string }; result: BotSoul };
   setBotSoul: { params: { botId: string; input: BotSoulUpdate }; result: BotSoul };
   /* Unified Shower: same names/shapes on every platform; no platform handles or credentials. */
@@ -1954,8 +1852,6 @@ export interface RemoteControlMethodMap {
     params: { botId: string; scopeId?: string; sessionId: string };
     result: Record<string, unknown>;
   };
-  setBotCwd: { params: { botId: string; input: { cwd: string } }; result: BotRecord };
-  setBotModel: { params: { botId: string; input: { modelRef?: string | null } }; result: BotRecord };
   scheduleTask: { params: { botId: string; input: Record<string, unknown> }; result: Record<string, unknown> };
   /* Image attachments: upload is per-Bot and content-addressed; read returns metadata + base64 data. */
   uploadAttachment: { params: AttachmentUploadInput & { botId: string }; result: ImageAttachment };
@@ -2003,6 +1899,8 @@ export interface DevicesDirectoryItem {
 export interface BotDirectoryEntry extends BotRecord {
   avatar?: BotAvatar | null;
   avatarRevision?: number;
+  /** Center CAS revision for the authoritative cwd; absent on legacy centers/local-only records. */
+  cwdRevision?: number;
   deviceName: string;
   platform?: string;
   online: boolean;

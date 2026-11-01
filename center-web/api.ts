@@ -1,5 +1,5 @@
 import type {
-  Accepted, ActionRequest, ActionResult, ApiError, ArtifactUploadReceipt, BotCapabilityConfig, CapabilityToolsListResponse,
+  Accepted, ActionRequest, ActionResult, ApiError, ArtifactUploadReceipt, BotCapabilityConfig, BotCwdConfig, CapabilityToolsListResponse,
   BotCapabilityEntry, BotModelConfig, BotRef, BotSyncResponse, CenterCreateBotRequest, CenterUpdateBotRequest, CredentialInfo, CredentialWrite, DeploymentReceipt, Device, DeviceRuntimeStatus, DiscoveryResult,
   EnableRequest,
   InstallRequest, Installation, InstallationConfig, LoginRequest, Model, ModelConfig, ModelSelection,
@@ -77,6 +77,8 @@ export const api = {
   archiveBot: (deviceId: string, botId: string) => request<BotRef>(`${botPath(deviceId, botId)}/archive`, 'POST'),
   unarchiveBot: (deviceId: string, botId: string) => request<BotRef>(`${botPath(deviceId, botId)}/unarchive`, 'POST'),
   deleteBot: (deviceId: string, botId: string) => request<void>(botPath(deviceId, botId), 'DELETE'),
+  getBotCwd: (deviceId: string, botId: string) => request<BotCwdConfig>(`${botPath(deviceId, botId)}/cwd`),
+  putBotCwd: (deviceId: string, botId: string, body: RevisionWrite<string>) => request<BotCwdConfig>(`${botPath(deviceId, botId)}/cwd`, 'PUT', body),
   getBotModelConfig: (deviceId: string, botId: string) => request<BotModelConfig>(`${botPath(deviceId, botId)}/model-config`),
   putBotModelConfig: (deviceId: string, botId: string, body: RevisionWrite<ModelSelection>) => request<BotModelConfig>(`${botPath(deviceId, botId)}/model-config`, 'PUT', body),
   getCredential: (credentialId: string) => request<CredentialInfo>(`/api/credentials/${id(credentialId)}`),

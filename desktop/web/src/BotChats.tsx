@@ -33,7 +33,7 @@ import {
   type PickedImageSource,
 } from '../../../web/src/imageAttachments';
 import type { ImageAttachment } from '../../../host-core/index.js';
-import type { DesktopIdentity, DesktopPanelApi, DesktopViewApi } from './types';
+import type { DesktopIdentity, DesktopPanelApi } from './types';
 import type { DesktopObservationEvent } from './types';
 import { useText } from '../../../web/src/ui';
 import type {
@@ -839,18 +839,81 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, attachme
   );
 }
 
-function BotProfile({ api, bot, onSaved }: { api: DesktopViewApi; bot: BotRecord; onSaved: (bot: BotRecord) => void }) {
+function BotProfile({ api, centerApi, bot, onSaved }: { api: DesktopPanelApi; centerApi: DesktopPanelApi; bot: BotRecord; onSaved: (bot: BotRecord) => void }) {
   const [name, setName] = useState(bot.role);
   const [description, setDescription] = useState(bot.description ?? '');
+  const [cwd, setCwd] = useState(bot.cwd);
+  const [cwdRevision, setCwdRevision] = useState<number | null>(null);
+  const [cwdFailed, setCwdFailed] = useState(false);
+  const [cwdNotice, setCwdNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [locked, setLocked] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
   const dirty = useRef(false);
+  const cwdDirty = useRef(false);
+  const cwdFetchRef = useRef(0);
+  // 最近一次中心权威（或回退）值：编辑比对基准，不以目录侧旧值判定变化。
+  const cwdBaseline = useRef(bot.cwd);
   const isArchived = Boolean(bot.archivedAt);
+  // cwd 读写走中心 api（broker ops 不需要目标 Host 在线）；profile 仍用 scopedApi。
+  const centerOnline = centerApi.transportConnected;
+  const centerSess = sessionKey(centerApi.identity);
   useEffect(() => {
     if (!dirty.current && !locked) { setName(bot.role); setDescription(bot.description ?? ''); }
-  }, [bot.role, bot.description, locked]);
+    if (!cwdDirty.current) setCwd(bot.cwd);
+  }, [bot.role, bot.description, bot.cwd, locked]);
+  // bot.cwd 变化（目录合并中心值）时同步基准。
+  useEffect(() => {
+    if (!cwdDirty.current) cwdBaseline.current = bot.cwd;
+  }, [bot.cwd]);
+
+  // 中心权威 cwd 读取；identity/目标在 effect 入口快照，迟到结果被 fetchRef 丢弃。
+  const loadCwd = useCallback(async () => {
+    const fetchId = ++cwdFetchRef.current;
+    const identity = centerApi.identity;
+    if (!identity || !centerApi.transportConnected) {
+      setCwdRevision(null);
+      setCwdFailed(false);
+      return;
+    }
+    try {
+      const config = await centerApi.broker(identity, 'center_bot_cwd_get', { deviceId: bot.deviceId, botId: bot.botId });
+      if (cwdFetchRef.current !== fetchId) return;
+      setCwdRevision(config.revision);
+      setCwdFailed(false);
+      if (!cwdDirty.current) setCwd(config.value ?? bot.cwd);
+      cwdBaseline.current = config.value ?? bot.cwd;
+    } catch {
+      if (cwdFetchRef.current !== fetchId) return;
+      setCwdRevision(null);
+      setCwdFailed(true);
+    }
+  }, [centerApi, bot.deviceId, bot.botId, bot.cwd]);
+  const loadCwdRef = useRef(loadCwd);
+  useEffect(() => { loadCwdRef.current = loadCwd; }, [loadCwd]);
+
+  // 只有真实目标/会话身份变化才清草稿；目录更新、引用变化不清。
+  // 中心重连也重读修订（可能在他处变更），但不丢草稿。
+  const cwdIdentity = bot.botId + '@' + bot.deviceId;
+  const lastIdentityRef = useRef('');
+  useEffect(() => {
+    const identityKey = cwdIdentity + '|' + centerSess;
+    const changed = lastIdentityRef.current !== identityKey;
+    lastIdentityRef.current = identityKey;
+    if (changed) {
+      cwdDirty.current = false;
+      cwdBaseline.current = bot.cwd;
+      setCwdNotice(null);
+      setCwd(bot.cwd);
+    }
+    // 修订一律作废再重读：同会话重连、身份切换、离开/挂载都会先失效旧请求。
+    cwdFetchRef.current++;
+    setCwdRevision(null);
+    setCwdFailed(false);
+    void loadCwdRef.current();
+    return () => { cwdFetchRef.current++; };
+  }, [cwdIdentity, centerSess, centerOnline]);
 
   async function save() {
     const identity = api.identity;
@@ -866,6 +929,7 @@ function BotProfile({ api, bot, onSaved }: { api: DesktopViewApi; bot: BotRecord
       setName(updated.role);
       setDescription(updated.description ?? '');
       onSaved(updated);
+      setCwdNotice(null);
     } catch (e) {
       if (sessionKey(api.identity) !== sessionKey(identity)) return;
       if (!isNotSent(e) && !(e && typeof e === 'object' && (e as { outcome?: string }).outcome === 'responded')) setLocked(true);
@@ -900,14 +964,72 @@ function BotProfile({ api, bot, onSaved }: { api: DesktopViewApi; bot: BotRecord
     }
   }
 
+  const trimmedCwd = cwd.trim();
+  const cwdChanged = trimmedCwd !== cwdBaseline.current && trimmedCwd !== '';
+  const cwdSavable = cwdChanged && cwdRevision !== null;
+
+  async function saveCwd() {
+    const identity = centerApi.identity;
+    if (!identity || !centerOnline || inFlight.current || isArchived || !cwdSavable) return;
+    inFlight.current = true;
+    setBusy(true);
+    setError(null);
+    setCwdNotice(null);
+    try {
+      const config = await centerApi.broker(identity, 'center_bot_cwd_set', {
+        deviceId: bot.deviceId,
+        botId: bot.botId,
+        expectedRevision: cwdRevision,
+        value: trimmedCwd,
+      });
+      if (sessionKey(centerApi.identity) !== sessionKey(identity)) return;
+      setCwdRevision(config.revision);
+      cwdDirty.current = false;
+      cwdBaseline.current = config.value ?? trimmedCwd;
+      setCwd(config.value ?? trimmedCwd);
+      setCwdNotice('已保存到中心；目标 Host 空闲后生效，运行中的任务保持原目录，不会移动文件。');
+      onSaved({ ...bot, cwd: config.value ?? trimmedCwd });
+    } catch (e) {
+      if (sessionKey(centerApi.identity) !== sessionKey(identity)) return;
+      const code = (e as { code?: string })?.code;
+      if (code === 'REVISION_CONFLICT' || code === 'REQUEST_CONFLICT') {
+        setCwdRevision(null);
+        setError('工作目录已被其他修改占用；请重新读取后再保存。');
+      } else {
+        setError('工作目录保存失败：' + errText(e));
+      }
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="form-grid inspector-profile-form">
       <label className="field">名称<input value={name} maxLength={120} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setName(e.target.value); }} /></label>
       <label className="field">职责<textarea value={description} maxLength={2000} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setDescription(e.target.value); }} /></label>
+      <label className="field">
+        工作目录
+        <input
+          value={cwd}
+          disabled={busy || isArchived}
+          placeholder="目标 Host 上的绝对路径"
+          onChange={(e) => { cwdDirty.current = true; setCwd(e.target.value); setCwdNotice(null); }}
+        />
+      </label>
+      <p className="hint">
+        目标 Host 上的绝对路径；保存到中心后该 Bot 空闲时生效；不会移动文件。
+        {cwdFailed ? '（未能从中心读取修订，请重新读取后再保存）' : cwdRevision === null ? '（正在读取中心修订…）' : ''}
+      </p>
+      {cwdNotice ? <div className="status" role="status">{cwdNotice}</div> : null}
       {error ? <div className="error-banner" role="alert">{error}</div> : null}
       <div className="form-actions">
         {locked ? (
           <button type="button" className="secondary-button" disabled={busy || !api.transportConnected} onClick={() => void adoptRemote()}>读取并采用远端资料（丢弃草稿）</button>
+        ) : null}
+        <button type="button" className="secondary-button" onClick={() => void saveCwd()} disabled={busy || isArchived || !centerOnline || !cwdSavable}>保存工作目录</button>
+        {(cwdFailed || (error && cwdRevision === null)) ? (
+          <button type="button" className="secondary-button" disabled={busy || !centerOnline} onClick={() => void loadCwdRef.current()}>重新读取目录修订</button>
         ) : null}
         <button type="button" className="primary-button" onClick={() => void save()} disabled={busy || locked || isArchived || !api.transportConnected}>保存资料</button>
       </div>
@@ -919,6 +1041,7 @@ type InspectorTab = 'profile' | 'settings' | 'raw' | 'shower';
 
 function PrimaryChatPane({
   api,
+  centerApi,
   bot,
   deviceName,
   devicePlatform,
@@ -930,6 +1053,8 @@ function PrimaryChatPane({
   pageActive = true,
 }: {
   api: DesktopPanelApi;
+  /** 未按目标在线收窄的原 api：仅中心权威操作（cwd get/set）使用。 */
+  centerApi: DesktopPanelApi;
   bot: BotRecord;
   /** 目录侧设备显示名（仅展示）。 */
   deviceName: string;
@@ -2172,7 +2297,7 @@ function PrimaryChatPane({
                     isPrimary={isPrimary && !isArchived}
                     onChanged={() => { setAvatarVersion((v) => v + 1); onLiveActivity?.(); }}
                   />
-                  <BotProfile api={api} bot={bot} onSaved={onProfileSaved} />
+                  <BotProfile api={api} centerApi={centerApi} bot={bot} onSaved={onProfileSaved} />
                   <div className="inspector-meta-card">
                     <div className="metadata">设备：{deviceName}（{bot.deviceId}）</div>
                     <div className="metadata">botId：{bot.botId}</div>
@@ -2733,6 +2858,7 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
           <PrimaryChatPane
             key={`${sess}:${selectedBot.deviceId}:${selectedBot.botId}`}
             api={scopedApi}
+            centerApi={api}
             bot={selectedBot}
             deviceName={selectedDeviceName}
             devicePlatform={selectedDevicePlatform}

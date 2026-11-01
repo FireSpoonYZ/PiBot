@@ -79,12 +79,6 @@ node host-core/cli.js find-request --data-root '/path/to/data-root' --request-id
 node host-core/cli.js list --data-root '/path/to/data-root'
 ```
 
-可选 `--model-ref`：不传则记录为 null；传入时须为非空白字符串，例如 `--model-ref 'provider/model-name'`：
-
-```bash
-node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id req-002   --role assistant   --cwd '/path/to/cwd'   --model-ref 'provider/model-name'
-```
-
 - `init` 输出 {deviceId, dataRoot}；`create`/`get`/`find-request` 输出 BotRecord 或 null；`list` 输出数组。一条 JSON 到 stdout。
 - 应用错误以一条 `{"error":{"code":...,"message":...}}` 输出到 stderr，exitCode=1，finally 中 close。Node 22 的内置 SQLite 还会向 stderr 输出原生 `ExperimentalWarning`，stdout 的 JSON 格式不受影响。
 - `--help` 无须 `--data-root`。
@@ -95,10 +89,10 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `store.js`：openStore(dataRoot)，返回 {deviceId, createBot, getBot, findByRequest, listBots, close}。
 - `host.js`：openHost({dataRoot})，返回 {deviceId, dataRoot, createBot, getBot, findByRequest, listBots, close}。
 - `cli.js`：CLI 入口。
-- `index.js`：导出 `openHost`、`openRuntime`、`openControlServer`、`openMessageLog`、`openRelayRegistry`、`openRelayServer`、`openDeviceLink`、`openRemoteControl`、`RemoteControlError` 与控制 IO 辅助（`ControlHttpError`、`createControlAuthorizer`、`readControlBody`、`writeControlJson`、`writeControlError`）；模块 14 起另导出 `openHostService`、`openPendingClient`、`openHostSettings`/`normalizeHostSettings`、`normalizeRuntimeConfig`/`parseRuntimeConfig`/`describeModelCatalog`/`loadRuntimeConfig`（随父助手集成）；扩展增量另导出 `normalizeBotExtensions`/`normalizeRuntimeExtensions`/`resolveRuntimeExtensions`/`createHostExtensionManager`（内部工具构造器，不属于公开 RPC）。
+- `index.js`：导出 `openHost`、`openRuntime`、`openControlServer`、`openMessageLog`、`openRelayRegistry`、`openRelayServer`、`openDeviceLink`、`openRemoteControl`、`RemoteControlError` 与控制 IO 辅助（`ControlHttpError`、`createControlAuthorizer`、`readControlBody`、`writeControlJson`、`writeControlError`）；模块 14 起另导出 `openHostService`、`openPendingClient`、`openHostSettings`/`normalizeHostSettings`、`normalizeRuntimeConfig`/`parseRuntimeConfig`/`describeModelCatalog`/`loadRuntimeConfig`（随父助手集成）；扩展增量另导出 `normalizeRuntimeExtensions`/`resolveRuntimeExtensions`（内部工具构造器，不属于公开 RPC）。
 - `index.d.ts`：登记接口，以及 `Runtime`、`PrimarySubmission`、`HistoryPage`、`OpenRuntimeOptions`（含可选 `bashPath`/`toolPaths`）、模块 6 直播预览类型（`LiveMessage`/`LiveHistoryItem`/`LiveTool`/`LiveGeneration`/`BotLiveState`/`BotLiveChanges`/`BotLiveSnapshot`/`BotLiveUpdate`/`BotLiveDataFrame`/`BotLiveEnd`/`BotLiveFrame`/`BotWatchEnd`/`BotWatch`）、模块 7 消息账本类型（`MessageMember`/`MessageAuthor`/`MessageScope`/`PublishMessageInput`/`MessageEnvelope`/`MessagePeer`/`MessageAck`/`StoredMessage`/`MessageCursor`/`MessagePageOptions`/`MessageOutboxOptions`/`MessageStreamStatus`/`MessageHistoryPage`/`MessageInboxPage`/`MessageOutboxPage`/`MessageDeliveryStatus`/`MessageLog`/`openMessageLog`）、模块 8 中继类型（`RelayDevice`/`RelayRegistry`/`RelayServerStatus`/`RelayServer`/`DeliveryPumpStatus`/`DeviceLinkStatus`/`DeviceLink`/`openRelayRegistry`/`openRelayServer`/`openDeviceLink`，`OpenDeviceLinkOptions.control` 可选）、模块 9 远程控制类型（`RemoteControlOutcome`/`RemoteControlMethodMap`/`OpenRemoteControlOptions`/`RemoteControl`/`RemoteControlError`/`openRemoteControl`）等类型。模块 12 的类型增量（`ScopeCreateInput`/`ScopeUpdateInput`/`ScopeRecord`/`ScopeInfo`/`ScopeAck`/`ScopeListOptions`/`ScopeListPage`/`ScopeOfferOptions`/`ScopeOfferPage`/`ReplicaStream`/`InventoryQuery`/`InventoryPage`/`ReplicaHistoryQuery`/`ReplicaHistoryPage`/`MissingRangeQuery`/`ReplicaListOptions`/`ReplicaListPage`/`UserMessageInput`、MessageLog 新增 17 个门面方法、Runtime 与 ControlClient 各六个方法、`DeviceLinkStatus.scopeDelivery`/`replicaSync`）由模块 12 类型 lane 在 `index.d.ts`/`control-client.d.ts` 补充，随父助手集成。
 - 模块 13 的 Hindsight 配置、target、游标、投递/纠正回执类型和八个 Runtime 记忆方法签名，见 `index.d.ts` 与 `control-client.d.ts`。
-- `index.d.ts` 的扩展增量：`BotExtensions`、`BotExtensionsUpdate`、`BotExtensionSnapshot`、`BotExtensionPolicy`、`BotExtensionState`、`BotSoul`、`BotSoulUpdate`、`ExtensionCatalog`/`ExtensionCatalogEntry`、`RuntimeExtensionsConfig`/`HindsightExtensionConfig`，以及 Runtime 的 `initializeBot`/`getExtensionCatalog`/`getBotExtensions`/`setBotExtensions`/`getBotSoul`/`setBotSoul`、`ControlMethodMap` 的五个新方法与 `normalizeBotExtensions`/`normalizeRuntimeExtensions`/`resolveRuntimeExtensions` 声明。
+- `index.d.ts` 的扩展增量：`BotExtensionState`、`BotSoul`、`BotSoulUpdate`、`RuntimeExtensionsConfig`/`HindsightExtensionConfig`，以及 Runtime 的 `initializeBot`/`getBotSoul`/`setBotSoul`、`ControlMethodMap` 的两个新方法与 `normalizeRuntimeExtensions`/`resolveRuntimeExtensions` 声明。
 - `index.d.ts` 的模块 10 增量：`MessageInboxOptions`、`WorkContextRecord`、`WorkSyncOptions`、`WorkSyncResult`、`WorkHistoryCursor`、`WorkHistoryPage`、`WorkContextStatus` 与 Runtime 的四个工作上下文方法；不新增根 JS 导出。
 - `work-context-docs.js` / `work-context-codec.js` / `runtime-work-contexts.js`：模块 10 的内部持久文档、来源事件编码与被动导入引擎，不作为根 API 导出。
 - `index.d.ts` 的模块 11 增量：`MessagePublishGuard`、`MessageInboxItem`、`MessageRepliesPage`、`WorkActivity`；`MessageLog.publish(input, guard?)`、`MessageLog.replies` 和 Runtime 的 `getWorkActivity`/`stopWork`/`resumeWork`。`control-client.d.ts` 为三个本机控制方法复用 `WorkActivity`；不扩展远端方法或根 JS 导出。
@@ -117,11 +111,11 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `replica-sync.js`：模块 12 副本修复泵（`createReplicaSync`：服务并主动发起 inventory/history/缺口补齐与 `recordReplicaScan`）。
 - `host-environment.js`：HostExecutionEnv（NodeExecutionEnv 子类）；仅命令字符串经 Git Bash/bash 执行，argv 数组与文件操作直接透传。
 - `grep-tool.js` / `find-tool.js` / `ls-tool.js`：grep（rg）、find（fd）、ls 工具。
-- `extension-manager.js`：Host 扩展管理（`normalizeBotExtensions`/`normalizeRuntimeExtensions`/`resolveRuntimeExtensions` 与 `createHostExtensionManager({host,extensions,hindsight})`）：目录/可用性、每 Bot 策略、工具禁用名单、注册与反向拆解；不加载任意代码、不自带第二套扩展运行时。
+- `extension-manager.js`：旧 Host 扩展设置读取归一化（`normalizeRuntimeExtensions`/`resolveRuntimeExtensions`）：运行时策略来自中心快照，本模块只解析持久配置形状。
 - `bot-soul.js`：每 Bot 真实 `SOUL.md` 文件（`ensureSoul`/`setSoulText`，同目录临时文件 + rename，`SOUL_MAX_BYTES` = 64 KiB）；路径只由内部 botId 生成，不接受调用方拼路径。
 - `search-bin.js`：rg/fd 固定版本、asset 规格与解析顺序；`prepare-tools.js`：显式下载并安装 rg/fd 的 CLI。
-- `control-client.js` / `control-client.d.ts`：控制客户端（`./control-client` 子路径导出），由协作任务提供；模块 12 增加 `listScopeStates`/`createScope`/`getScopeState`/`updateScope`/`publishUserMessage`/`listScopeReplicas` 六个方法（scope 段沿用 `'~'+encodeURIComponent(scopeId)`，无 Node 导入）；模块 14 增加 `getModelCatalog`/`workLive`/`scopeHistory`/`getScopeMessage`/`getScopeMessageDelivery`/`getLocalSettings`/`replaceLocalSettings`/`getServiceStatus`，扩展增量增加 `getExtensionCatalog`/`getBotExtensions`/`setBotExtensions`/`getBotSoul`/`setBotSoul`，仍为 web-standard fetch only。
-- `control-server-cli.js` / `control-cli.js`：模块 5 两个 CLI；`control-cli.js` 的 `live` 子命令在模块 6 增加，模块 10 增加 `work-get`/`work-sync`/`work-history`/`work-context`，模块 11 增加 `work-activity`/`work-stop`/`work-resume`，模块 12 增加 `scope-list`/`scope-get`/`scope-create`/`scope-update`/`scope-send`/`scope-replicas`（新增通用 `--input` 标志），模块 14 再增加 `models`/`service-status`/`settings-get`/`settings-set`/`work-live`/`scope-history`/`scope-message`/`scope-delivery`，扩展增量再增加 `extensions`/`bot-extensions`/`bot-extensions-set`/`bot-soul`/`bot-soul-set`，仍经同一本机 HTTP 服务调用；新增命令拒绝无关 flag，重复歧义 flag 拒绝（parseArgs tokens）。
+- `control-client.js` / `control-client.d.ts`：控制客户端（`./control-client` 子路径导出），由协作任务提供；模块 12 增加 `listScopeStates`/`createScope`/`getScopeState`/`updateScope`/`publishUserMessage`/`listScopeReplicas` 六个方法（scope 段沿用 `'~'+encodeURIComponent(scopeId)`，无 Node 导入）；模块 14 增加 `getModelCatalog`/`workLive`/`scopeHistory`/`getScopeMessage`/`getScopeMessageDelivery`/`getLocalSettings`/`replaceLocalSettings`/`getServiceStatus`，扩展增量增加 `getBotSoul`/`setBotSoul`，仍为 web-standard fetch only。
+- `control-server-cli.js` / `control-cli.js`：模块 5 两个 CLI；`control-cli.js` 的 `live` 子命令在模块 6 增加，模块 10 增加 `work-get`/`work-sync`/`work-history`/`work-context`，模块 11 增加 `work-activity`/`work-stop`/`work-resume`，模块 12 增加 `scope-list`/`scope-get`/`scope-create`/`scope-update`/`scope-send`/`scope-replicas`（新增通用 `--input` 标志），模块 14 再增加 `models`/`service-status`/`settings-get`/`settings-set`/`work-live`/`scope-history`/`scope-message`/`scope-delivery`，扩展增量再增加 `bot-soul`/`bot-soul-set`，仍经同一本机 HTTP 服务调用；新增命令拒绝无关 flag，重复歧义 flag 拒绝（parseArgs tokens）。
 - `runtime-live-projection.js` / `runtime-live.js`：模块 6 直播预览投影与 `Runtime.watch`。
 - `control-live.js`：模块 6 SSE 路由 `GET /v1/bots/:botId/live`。
 - `control-live-client.js`：模块 6 SSE 流式解析与 `readControlLive`。
@@ -135,7 +129,7 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `local-control-adapter.js`：`createLocalControlAdapter({url,token})`，目标本机回环 Control API 适配（仅字面 `http://127.0.0.1` 或 `http://[::1]`，路径 `/`）。
 - `host-control.js`：`createHostControlReceiver({deviceId,execute,send})`，Host 侧控制接收器（最多 8 个活动调用、无队列）。
 - `remote-control-client.js`：模块 9 Node 控制客户端（`openRemoteControl`/`RemoteControlError`）。
-- `remote-control-cli.js`：模块 9 一次性控制 CLI；模块 14 起按 `CONTROL_METHODS` 动态列出现行方法表（现共 40 个），另有保留命令 `listDevices`/`live`（非 Host JSON 方法），`--input` 经 `normalizeControlCall`/`normalizeDevicesOptions`/`normalizeLiveTarget` 校验；SIGINT/SIGTERM 退出 130/143，EPIPE 取消观察正常退 0，任何取消不发送 abort 控制方法。
+- `remote-control-cli.js`：模块 9 一次性控制 CLI；模块 14 起按 `CONTROL_METHODS` 动态列出现行方法表（现共 37 个），另有保留命令 `listDevices`/`live`（非 Host JSON 方法），`--input` 经 `normalizeControlCall`/`normalizeDevicesOptions`/`normalizeLiveTarget` 校验；SIGINT/SIGTERM 退出 130/143，EPIPE 取消观察正常退 0，任何取消不发送 abort 控制方法。
 
 ### Cua driver（内置计算机控制驱动）
 
@@ -346,7 +340,7 @@ await control.close(); // 幂等：先关 listener/连接与进行中 handler，
 | --- | --- | --- |
 | GET `/v1/host` | — | 200 `{protocolVersion:1, deviceId, platform, arch}`（不含 dataRoot/模型凭证） |
 | GET `/v1/bots` | — | 200 `BotRecord[]` |
-| POST `/v1/bots` | `{requestId, role, cwd, modelRef?}` | 201 `BotRecord`（Host 确认真实 cwd 并去重，注册成功以 Host 回执为准） |
+| POST `/v1/bots` | `{requestId, role, cwd}` | 201 `BotRecord`（Host 确认真实 cwd 并去重，注册成功以 Host 回执为准） |
 | GET `/v1/bots/:botId` | — | 200 `BotRecord`，否则 404 `BOT_NOT_FOUND` |
 | GET `/v1/bot-requests/:requestId` | — | 200 `BotRecord`，否则 404 `BOT_REQUEST_NOT_FOUND` |
 | POST `/v1/bots/:botId/submissions` | `{requestId, text}` | 202 `PrimarySubmission`（只受理，决不等待回答） |
@@ -387,7 +381,7 @@ node host-core/control-cli.js <host|create|list|get|find-request|send|status|his
   --url http://127.0.0.1:8787 --token-env CONTROL_TOKEN [核心 CLI 风格参数]
 ```
 
-- `create` 需要 `--request-id --role --cwd [--model-ref]`；`get` 用 `--bot-id`；`find-request` 用 `--request-id`；`send` 用 `--bot-id --request-id --text`；`status` 用 `--bot-id --request-id`；`history` 支持 `--limit --cursor`；`abort`/`context` 用 `--bot-id`。
+- `create` 需要 `--request-id --role --cwd`；`get` 用 `--bot-id`；`find-request` 用 `--request-id`；`send` 用 `--bot-id --request-id --text`；`status` 用 `--bot-id --request-id`；`history` 支持 `--limit --cursor`；`abort`/`context` 用 `--bot-id`。
 - `send` **只受理**：输出受理回执一行 JSON，不等待回答；回执为 terminal unanswered 时退出 2。参数/配置/存储错误把 JSON error 写到 stderr 并退出 1。
 
 ### 客户端
@@ -690,7 +684,7 @@ node host-core/remote-control-cli.js listBots \
   [--input control-input.json] [--ca /path/to/ca.pem]
 ```
 
-- METHOD 必须精确等于上述 10 个方法名之一，无别名；`--input` 可选，缺省 `{}`，为 ≤1MiB 的普通 UTF-8 JSON 对象（`uploadAttachment` 为 ≤32MiB）。（模块 14 起该方法表扩展为固定 v2 方法，现共 40 个（含扩展/SOUL 5 个），并新增保留命令 `listDevices`/`live`，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)与[Bot 级扩展与 SOUL.md](#bot-级扩展与-soulmdhost-契约增量)两节。）
+- METHOD 必须精确等于上述 10 个方法名之一，无别名；`--input` 可选，缺省 `{}`，为 ≤1MiB 的普通 UTF-8 JSON 对象（`uploadAttachment` 为 ≤32MiB）。（模块 14 起该方法表扩展为固定 v2 方法，现共 37 个（含 SOUL 2 个），并新增保留命令 `listDevices`/`live`，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)与[Bot 级扩展与 SOUL.md](#bot-级扩展与-soulmdhost-契约增量)两节。）
 - 成功：stdout 输出一行原始 JSON 结果，exit 0。失败：stderr 输出 `{"error":{"code":...,"message":...,"outcome":...}}`；unconfirmed 结果 exit 2，其他错误 exit 1，`--help` exit 0。信号只关闭客户端，绝不发送 abort 方法；错误输出不含令牌/调用负载。
 
 ### JS API（`./host-core/index.js` 新增导出）
@@ -835,7 +829,7 @@ node host-core/control-cli.js work-context --url http://127.0.0.1:8787 \
 ### 后续边界与未实测
 
 - 上述模块 10 验收不覆盖模块 11 的自动收件调度、工作上下文推理/发言或沉默、Bot 通信工具；模块 11 已独立完成父助手验收，接口与实测范围见下节。模块 12 的成员同步/历史补齐已完成父助手限定范围验收（122/122 检查点，见下节）；模块 13 已完成 Host 侧适配及限定范围验收，不新增 Session 产品或 UI。
-- 模块 9 远程协议保持原 **10 个方法**，未增加远程工作上下文控制；版本化接线属于模块 14（M9–M12；M14 v2 起已扩展为固定 v2 方法表，现共 40 个，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)一节）。
+- 模块 9 远程协议保持原 **10 个方法**，未增加远程工作上下文控制；版本化接线属于模块 14（M9–M12；M14 v2 起已扩展为固定 v2 方法表，现共 37 个，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)一节）。
 - 未实测：跨物理设备/WAN、Linux、Android、arm64、Tauri/TUI、浏览器 native-fetch 适配集成、真实外部付费模型。
 - 未实测直接 JS AbortSignal 与直接 `Runtime.close` 并发调用/关闭竞态；已实跑服务端 HTTP 断连继续导入和进程优雅关闭。全局 128 pending/256 连接负载、中继慢接收者压力测试及模块 9 原有未实测项继续保留。
 
@@ -1123,7 +1117,7 @@ CLI 均要求 `--bot-id`。`memory-status` 可选 `--input`，其余命令必须
 
 ## 模块 14：统一 Host 服务与设备接入（已完成父助手限定范围验收）
 
-模块 14 把模块 5 本机控制面、模块 8/9 认证中继与远程控制、模块 10–12 工作上下文/scope、模块 13 记忆整合为**统一本机服务**（`openHostService`），并新增本机设置持久化、远端协议 v2（M14 交付时 35 个方法；含后续扩展/SOUL 增量现为 40 个）、受控远端实时预览与客户端待发送/对账。
+模块 14 把模块 5 本机控制面、模块 8/9 认证中继与远程控制、模块 10–12 工作上下文/scope、模块 13 记忆整合为**统一本机服务**（`openHostService`），并新增本机设置持久化、远端协议 v2（M14 交付时 35 个方法；含后续 SOUL 增量现为 37 个）、受控远端实时预览与客户端待发送/对账。
 
 **状态**：模块 14 已完成交付并获父助手限定范围验收，总完成数 **14/20**；模块 15–18 后续已交付（见下节与末节），M19 已移出本期（本期不交付）、M20 进行中（见末节模块 20-01）。
 
@@ -1141,6 +1135,7 @@ CLI 均要求 `--bot-id`。`memory-status` 可选 `--input`，其余命令必须
 - 默认命令为 `serve`，也支持显式 `serve` 与离线 `settings-get`/`settings-set`。启动仅输出一行 JSONL `{"event":"listening","deviceId":...,"url":...}`——只表示本机回环控制监听成功，不声称 relay 在线/ready。stdin 一行 `shutdown`、SIGINT、SIGTERM 走同一幂等 `close()`：成功 exit 0，失败 stderr 输出 `{"error":{"code":...,"message":...}}` 后 exit 1；stdin EOF 不关服务；关闭不持久 abort Agent。
 - 状态 `getStatus()`/GET `/v1/service` 包含本机控制、relay、中心状态与设置 revision；`phase:'running'` 不代替远端在线状态。关闭后状态冻结，不再查询已关数据库。`getHostInfo` 旧字段形状保持。
 - 局部启动失败按已打开资源关闭。保留既有独立 `control-server-cli`/`device-link-cli` 可用，统一服务不删除 legacy 用法。
+- Windows 当前用户登录自启动见下文「Windows 登录自启动」一节；它不是系统服务，不保证 Host 始终在线，也不由 Tauri 桌面客户端管理。
 
 ### 本机设置持久化（host-settings.sqlite）
 
@@ -1150,6 +1145,19 @@ CLI 均要求 `--bot-id`。`memory-status` 可选 `--input`，其余命令必须
 - HTTP 更新与本机离线 CLI 都可用：GET/PUT `/v1/settings`（Bearer + 拒任何 Origin；PUT 严格 `{expectedRevision,settings}`，无 query）；离线 `host-service-cli settings-get/settings-set` 只需 `--data-root`（settings-set 另需 `--input`），不启动 Runtime/模型/链路、不解析 env——上次服务因 Hindsight/tokenEnv 缺失启动失败后也能读取并修正本机设置，是配置错误救援入口。
 - DTO `LocalSettingsSnapshot = {...Snapshot, activeRevision, restartRequired:revision!==activeRevision}`。更新只持久化、下次重开生效；不热替换 Models/Runtime/链路、不自动重启、不修改已持久会话的 model。未配置 store/callback 时新设置路由返回 CONTROL_UNAVAILABLE 503，不影响旧服务；activeSettingsRevision 固定于本次启动，getStatus 实时读当前持久 revision 对比。
 - 模型目录白名单：`getModelCatalog`/GET `/v1/models` 只返回 `{defaultModel, models:[{modelRef,name,contextWindow,maxTokens,reasoning}]}`，无 baseUrl/header/secret/env 名；同步 getModels 白名单仅 chat，不 refresh/getAuth/网络，不唤醒模型。
+
+### Windows 登录自启动（autostart-enable / autostart-disable / autostart-status）
+
+`host-service-cli.js` 的三个 autostart 命令在当前 Windows 用户的 Startup 目录（`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`）管理一个本项目专属 `.cmd` 启动文件；非 Windows 调用返回 `INVALID_ARGUMENT`，不提供 Linux/macOS 自启动。它不是系统服务、不需要管理员权限、不包含崩溃重启监督器，也不启动/停止当前正在运行的 Host。
+
+- **文件名**：`e-launcher-host-<dataRoot 规范化路径 SHA-256 前 16 hex>.cmd`——同一规范化 `--data-root` 始终映射到同一文件，重复 enable 幂等覆盖；不同 dataRoot 是互相独立的自启动实例，disable 只删除对应文件。
+- **enable** 复用 serve 的全部必需/可选启动参数与校验（重复 flag、env 名格式、`validateCenterUrl`、port 十进制、绝对 data-root 等），但**不读取 token 值、不要求中心在线、不打开 runtime owner**。写入的是一条完整的 `"node.exe" "<cli 绝对路径>" serve --data-root ...` 命令行；`--center-ca-file`/`--initial-settings` 与 serve 一样允许相对输入、注册时 resolve 为绝对路径，`--npm-path` 保持绝对要求（均不读文件内容），这些路径必须在登录时仍然有效。写入走同目录临时文件 + rename 原子替换；必要时创建 dataRoot 目录供重定向打开日志，但不初始化 Runtime。
+- **字符边界**：.cmd 以 UTF-8 写入并在首行 `chcp 65001>nul`；每个参数完整双引号引用，`%` 转义为 `%%`（不使用 `call`，无二次展开），参数末尾连续反斜杠按 Windows argv 引号规则翻倍，`setlocal DisableDelayedExpansion` 防 `!` 被展开。含中文等 Unicode、空格、`&`、`()`、`!`、`%` 的合法路径可用；仅 NUL/CR/LF/双引号等无法表达的输入被拒绝。
+- **status** 输出单行 JSON `{registered, file}`；disable 输出 `{registered:false, file}`。**registered 只表示启动文件存在，不表示该 Host 已在登录会话中运行过或当前在线**。
+- **启动行为**：登录后 Windows 以当前用户身份执行该 .cmd；脚本把 `stdout/stderr` 追加到固定的 `<dataRoot>\autostart.log`。启动的 Host 仍是直接 `node serve` 进程，stdin EOF 不会停止它。
+- **Shower 授权提示**：Windows 上 Host 每次启动都执行 Shower `prepare`（`runtime.js` 无条件调用，经一次性 SYSTEM bootstrap 任务请求管理员授权）。实测每次新 Host 启动都会弹出一次 UAC；取消该授权会让整个启动以 `SHOWER_PERMISSION_REQUIRED` 失败退出。登录自启动保留这一既有行为——登录启动的 Host 同样需要用户在桌面确认该次 UAC，自启动不改变、不绕过它。
+- **持久环境（必要前提）**：启动文件只保存参数与 token 环境变量**名**；`--token-env`/`--device-token-env` 指向的变量值、运行时设置中的 `apiKeyEnv`/`tokenEnv` 必须在 **Windows 用户或系统环境变量**中持久配置（「系统属性 → 环境变量」或 `setx`），仅在终端 `set`/`$env:` 的临时变量不会跨登录保留，登录启动的 Host 会因缺少变量而在启动时失败（错误记录在 `autostart.log`）。
+- **--env-file 与非秘密原生路径**：`autostart-enable` 会把注册进程 `node --env-file=<file>`（`--env-file path` 形式同样支持）规范化为绝对路径写进生成命令行，登录启动用同一份 env 文件提供变量值；文件内容不读取、不复制。`E_LAUNCHER_SHOWER_WINDOWS_EXE` 存在时以 `set "E_LAUNCHER_SHOWER_WINDOWS_EXE=..."`（规范化绝对路径）写入启动脚本，让登录会话找到非秘密的 Shower 原生后端；其他 `execArgv`（debug/preload 等）与环境变量一律不继承。生产部署典型用法：`node --env-file=D:\services\e-launcher\secrets\host.env host-core/host-service-cli.js autostart-enable ...`，并以 `E_LAUNCHER_SHOWER_WINDOWS_EXE` 指向已部署的 `shower-windows.exe`。
 
 ### 本机控制面新增路由
 
@@ -1168,10 +1176,10 @@ scopeKey/messageKey 固定 `~` 前缀再逐段编码，保护 `.`/`..`/Unicode/�
 ### 远程协议与握手（40 方法）
 
 - relay 协议不变：protocolVersion 1；scopeProtocol 仅 host 侧 1。Host hello controlProtocol 可为 1 或 2，client hello 可省略（legacy）或声明 2（client 声明 1 无效）。ready 可带 controlProtocol:2，省略即 legacy。**v2 client/link 必须要求 ready 回显 2**；旧 client/host 经 v1 方法兼容。
-- 控制方法表 `CONTROL_METHODS` 共 40 个：旧 v1 十方法（getHostInfo/listBots/createBot/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus）+ v2 30 个 = M14 原 25 个（getModelCatalog/getWorkContext/syncWorkContext/workHistory/workContextStatus/getWorkActivity/stopWork/resumeWork/listScopeStates/createScope/getScopeState/updateScope/publishUserMessage/listScopeReplicas/scopeHistory/getScopeMessage/getScopeMessageDelivery/memoryStatus/recallMemory/reflectMemory/retainMemory/getMemory/getMemorySource/correctMemory/retryMemory）不变 + 扩展/SOUL 5 个（getExtensionCatalog/getBotExtensions/setBotExtensions/getBotSoul/setBotSoul）。memory 方法 wire params 均为 `{botId,input}`；分页/scope 参数提取 limit/cursor；扩展 setter 也是 `{botId,input}`，input 分别带 `expectedRevision` 数字/`expectedRevision` SHA-256/`extensions`/`text`。
+- 控制方法表 `CONTROL_METHODS` 共 37 个：旧 v1 十方法（getHostInfo/listBots/createBot/getBot/findByRequest/submit/getSubmission/history/abort/contextStatus）+ v2 27 个 = M14 原 25 个（getModelCatalog/getWorkContext/syncWorkContext/workHistory/workContextStatus/getWorkActivity/stopWork/resumeWork/listScopeStates/createScope/getScopeState/updateScope/publishUserMessage/listScopeReplicas/scopeHistory/getScopeMessage/getScopeMessageDelivery/memoryStatus/recallMemory/reflectMemory/retainMemory/getMemory/getMemorySource/correctMemory/retryMemory）不变 + SOUL 2 个（getBotSoul/setBotSoul）。memory 方法 wire params 均为 `{botId,input}`；分页/scope 参数提取 limit/cursor；SOUL setter 也是 `{botId,input}`，input 带 `expectedRevision` SHA-256 与 `text`。
 - 能力门控：legacy client（省略 controlProtocol）只能 v1 方法；v2 client 可用 v1/v2，但目标 host.controlProtocol 必须 ≥ controlMethodVersion。无 capability 回 CONTROL_UNAVAILABLE/not-sent；离线 OFFLINE/not-sent；不转发不支持的方法、不创建中央邮箱。settings/status 不加入远端表，无通用代理。结果三态（not-sent/unconfirmed/responded）沿用。
 - 聊天命令增量：`CONTROL_METHODS` 追加 `clearHistory`/`compact` 两个 additive v2 方法，params 仅 `{botId}`，见“对话命令”一节。
-- 阶段澄清：M10–M13 历史验收记录的“远端仅十方法/远程 work 不可用”在该时间点成立；M14 v2 起远端已是固定方法表（M14 交付时 35 个，含扩展/SOUL 增量现为 40 个），支持固定 work/memory RPC；各模块历史验收文字中的“35 方法”是该次验收时的方法数，不是当前契约。relay 仅有界瞬时转发业务，不持久保存业务正文/工作上下文/模型与 Hindsight API 凭证，也不运行推理；中心仅持久保存设备登记、名称/平台与认证校验信息（设备 token 哈希/credentialVersion），设备认证校验数据不与模型/Hindsight 业务凭证混同。无通用代理、中心变更邮箱、自动重放或 E2E 作者签名/加密声明。
+- 阶段澄清：M10–M13 历史验收记录的“远端仅十方法/远程 work 不可用”在该时间点成立；M14 v2 起远端已是固定方法表（M14 交付时 35 个，含 SOUL 增量现为 37 个），支持固定 work/memory RPC；各模块历史验收文字中的“35 方法”是该次验收时的方法数，不是当前契约。relay 仅有界瞬时转发业务，不持久保存业务正文/工作上下文/模型与 Hindsight API 凭证，也不运行推理；中心仅持久保存设备登记、名称/平台与认证校验信息（设备 token 哈希/credentialVersion），设备认证校验数据不与模型/Hindsight 业务凭证混同。无通用代理、中心变更邮箱、自动重放或 E2E 作者签名/加密声明。
 - 设备目录：`devices-list` 是中继自有帧，不转发给 Host；新客户端请求 `names:1` 后返回持久化的 `displayName` 和可选 `platform`，旧请求仍仅返回原四个字段。未命名设备回退 deviceId，离线设备也保留名称；`deviceId` 始终是路由键。认证的 controlProtocol 2 client 可调用 `renameDevice({deviceId, displayName})`（CLI 用 `renameDevice --input`），只能改名有效注册的设备；Host 重连只填首次默认名，不覆盖已有名称。注册可选 `--display-name`，凭据仍只从环境变量读取。注册/轮换/撤销仍是本地特权动作。
 - **升级顺序：先中继，再 Host 和客户端。** 新 Host hello 和新客户端设备目录请求使用扩展字段，旧中继会拒绝并断开，不能把该错误当成功；旧 Host/客户端仍可连接新版中继。中继数据库在事务中从版本 1 添加名称/平台字段，不改变设备凭据或撤销状态。
 
@@ -1214,6 +1222,13 @@ node host-core/host-service-cli.js serve --data-root "$DATA_ROOT" --token-env CO
 # 离线设置读取/修复（不启动 Runtime/模型/链路）
 node host-core/host-service-cli.js settings-get --data-root "$DATA_ROOT"
 node host-core/host-service-cli.js settings-set --data-root "$DATA_ROOT" --input settings-update.json
+# Windows 登录自启动（仅 Windows；参数要求与 serve 相同，不读 token 值、不启动服务）
+node host-core/host-service-cli.js autostart-enable --data-root "$DATA_ROOT" --token-env CONTROL_TOKEN \
+  --center-url https://center.example.com:8443 --device-token-env HOST_DEVICE_TOKEN \
+  [--center-ca-file "C:\path\to\ca.pem"] [--npm-path "C:\absolute\path\to\npm-cli.js"] \
+  [--initial-settings "C:\path\to\initial-settings.json"] [--port 8787]
+node host-core/host-service-cli.js autostart-status --data-root "$DATA_ROOT"
+node host-core/host-service-cli.js autostart-disable --data-root "$DATA_ROOT"
 # settings-update.json 完整合法内容示例：
 # {
 #   "expectedRevision": 1,
@@ -1447,7 +1462,7 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 ### 进程与协议
 
 - `android-runtime.js` 新增 `mode === 'client'`：只 `openDesktopClient({dataRoot})`（ui store + pending 账本 + 固定传输），ready id 用 broker 的 `clientId`；**从不**打开 Host/Runtime、不读模型凭据、不发 native 工具调用。与 Host 共用 `BotHostProcess`（Node Mobile）单例生命周期，但由 `BotHostClient` 以独立 `files/bot-client` 懒启动，与 `files/bot-host` 隔离。
-- 桥的私有入口只新增 `clientRequest`/`clientObserve`/`clientUnobserve` 与观察事件 `clientFrame`（`data` 即 `DesktopObservationEvent`）；**没有** `clientClose`，公开仍是 4 个 Tauri 命令与 Host 方法表（M20-01 交付时 35 个，含后续扩展/SOUL 增量现为 40 个）。`clientUnobserve` 与 `pause` 为保留清理操作，不受普通 8 个在途上限约束；普通 RPC 仍 8 个、观察仍 8 路。
+- 桥的私有入口只新增 `clientRequest`/`clientObserve`/`clientUnobserve` 与观察事件 `clientFrame`（`data` 即 `DesktopObservationEvent`）；**没有** `clientClose`，公开仍是 4 个 Tauri 命令与 Host 方法表（M20-01 交付时 35 个，含后续 SOUL 增量现为 37 个）。`clientUnobserve` 与 `pause` 为保留清理操作，不受普通 8 个在途上限约束；普通 RPC 仍 8 个、观察仍 8 路。
 - broker 侧 `unobserve` 是纯本地取消：不排到 8 个普通 RPC 或 connect/disconnect 切换后面，否则取消的观察会泄漏槽位；它同步返回、不会堆积。普通请求/观察的 8/8/25 s 上限与行为不变。
 - 生命周期：默认进程内单例管理器（冷态只构造）；一个 `clientRoot` 同时只允许一个 UI 会话持有，其余按 BUSY 拒绝；UI 关闭/EOF 只释放本会话观察与该 client child，不 stop/abort 远端 Agent，不自动重连、不重放变更。批量取消用 owned 8 槽与串行幂等清理。
 - 凭据：连接 token 与 relay CA 只在会话内存，不进 `desktop-ui.sqlite`/pending/localStorage，也不写日志。
@@ -1464,7 +1479,7 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 
 ## Bot 级扩展与 SOUL.md（Host 契约增量）
 
-本节记录托管扩展（当前只有 Hindsight）与每 Bot SOUL.md 的技术契约。它是 v2 方法的**增量**：原 35 个方法（旧 10 + M14 v2 25）wire 形状不变，新增 5 个方法，没有第二套扩展运行时、插件市场或任意 npm 安装。
+本节记录每 Bot SOUL.md 的技术契约与旧 Host 扩展设置的读取形状。Bot 级扩展/能力管理已全部移至中心接口；旧本机扩展目录与每 Bot 扩展 HTTP/远端方法已移除，没有第二套扩展运行时、插件市场或任意 npm 安装。
 
 ### Host 配置：runtime.extensions（兼容 legacy runtime.hindsight）
 
@@ -1487,13 +1502,9 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 
 ### 每 Bot 策略与生效语义
 
-- `BotExtensions = {hindsight:{enabled:boolean, mode:'read-write'|'read-only'}}`；每个 Bot 持久保存自己的设置，编辑一个 Bot 不影响其他 Bot。
-- 生效判定（`effective.hindsight`）：Bot 关闭 → `reason:'bot-disabled'`；Host 未配置 → `'not-configured'`；Host 关闭 → `'host-disabled'`；否则 `enabled:true` 且 reason 为 null。
-- 关闭：隐藏全部 `hindsight_*` 工具，并跳过该 Bot 的自动 recall/retain 与后台工作；`memoryStatus` 仍是正常的 `enabled:false` 状态（不产生新写入）。只读：允许 status/recall/reflect/get/source，拒绝 retain/correct/retry（`EXTENSION_READ_ONLY`），自动写入暂停但自动召回仍可用。其余未生效操作回 `EXTENSION_DISABLED`。
-- 原生扩展定义即使禁用也注册在 Durable registry（历史/恢复可用）；策略只控制会话内可见/可调用与后台执行，不是只隐藏 schema。工具过滤器重算时用完整的 manager 工具集清掉旧排除项，再追加当前排除项，因此 `关闭→启用` 与 `只读→读写` 都能恢复被移除的工具；同时保留非托管过滤器与 `modelTools`/延迟选择。
-- Bot 编辑仅在其实主/工作上下文没有 queued/placed 提交与挂起工作决策时允许，否则沿用 `RUNTIME_BUSY`；编辑不重置/分叉会话，下一次请求生效。
-- CAS：Bot 扩展 `revision` 从 0 起的非负安全整数（新 Bot 的 0 有效），成功写入递增；不匹配回 `REQUEST_CONFLICT`，不回放、不自动重试、不静默重连。未知 Bot 回 `BOT_NOT_FOUND`，输入错误回 `INVALID_ARGUMENT`。
-- 从关闭/只读转入读写时冻结当时的 native entry id 作为写入下限（`retentionFloor`），关闭/只读期间完成的交换不回填；已冻结的 job/run 不删除、ID 不改，恢复写权限后继续。后台投递泵先按“可写 Bot”在 SQL 内过滤（`dueJobs(now, limit, eligibleBotIds)`）再取本轮上限，所以暂停 Bot 的到期行不会占住其他 Bot 的投递窗口；省略 eligibleBotIds 保留旧的内部“不过滤”语义，`[]` 直接返回空。
+- 每 Bot 扩展策略由中心权威快照决定；Host 内只保留 `bot_extension_settings` 历史行（含 `retentionFloor`）供插件读取旧写入下限，不再接受本机写入。
+- 原生扩展定义即使禁用也注册在 Durable registry（历史/恢复可用）；策略只控制会话内可见/可调用与后台执行，不是只隐藏 schema。
+- 关闭/只读期间冻结的 native entry id 写入下限（`retentionFloor`）按持久行读取；已冻结的 job/run 不删除、ID 不改。
 
 ### SOUL.md
 
@@ -1506,13 +1517,10 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 
 | Runtime / 控制方法 | HTTP | CLI |
 | --- | --- | --- |
-| `getExtensionCatalog()` | GET `/v1/extensions` | `extensions` |
-| `getBotExtensions(botId)` | GET `/v1/bots/:botId/extensions` | `bot-extensions --bot-id` |
-| `setBotExtensions(botId, input)` | PUT `/v1/bots/:botId/extensions` | `bot-extensions-set --bot-id --input` |
 | `getBotSoul(botId)` | GET `/v1/bots/:botId/soul` | `bot-soul --bot-id` |
 | `setBotSoul(botId, input)` | PUT `/v1/bots/:botId/soul` | `bot-soul-set --bot-id --input` |
 
-- 只有上述 5 个新方法，`CONTROL_METHODS` 现共 **40**（旧 10 + v2 30）。通用桌面/移动 broker 的 `call` 直接携带这五个方法，没有新增 Tauri 命令或 broker 操作。
+- 本增量只有上述 2 个方法，`CONTROL_METHODS` 现共 **37**（旧 10 + v2 27）。通用桌面/移动 broker 的 `call` 直接携带这两个方法，没有新增 Tauri 命令或 broker 操作。
 - `POST /v1/bots` 在 `host.createBot` 后调用 `runtime.initializeBot(bot.botId)`，去重重试也重复幂等初始化；Runtime 启动时初始化既有 Bot，遗留 Bot 在首次运行使用前初始化。
 - setter 是 CAS 请求，不做静默重连或重放；结果未知一律视为未确认，由 UI 显式重读对账。
 

@@ -18,7 +18,7 @@ import type {
   PendingListPage,
   LiveTarget,
 } from './index.js';
-import type { BotAvatar, BotAvatarConfig, BotCapabilityConfig, Installation, JsonObject } from '../center-contract/index.js';
+import type { BotAvatar, BotAvatarConfig, BotCapabilityConfig, BotCwdConfig, Installation, JsonObject } from '../center-contract/index.js';
 
 /** Re-exported contract shapes so UI files only need this module. */
 export type { BotCapabilityConfig, Installation, JsonObject, JsonSchema, JsonValue } from '../center-contract/index.js';
@@ -239,6 +239,9 @@ export interface DesktopOperationMap {
   center_bot_model_set: { params: { deviceId: string; botId: string; expectedRevision: number; value: CenterModelSelection }; result: CenterBotModelConfig };
   center_bot_avatar_get: { params: { deviceId: string; botId: string }; result: BotAvatarConfig };
   center_bot_avatar_set: { params: { deviceId: string; botId: string; expectedRevision: number; value: BotAvatar | null }; result: BotAvatarConfig };
+  /** Center-authoritative Bot working directory; applies on the target Host at its next idle boundary. */
+  center_bot_cwd_get: { params: { deviceId: string; botId: string }; result: BotCwdConfig };
+  center_bot_cwd_set: { params: { deviceId: string; botId: string; expectedRevision: number; value: string }; result: BotCwdConfig };
   center_bot_capabilities_get: { params: { deviceId: string; botId: string }; result: CenterBotCapabilityEntry[] };
   center_bot_capability_set: {
     params: {

@@ -5,7 +5,7 @@ const USAGE = `usage: node host-core/cli.js <init|create|list|get|find-request> 
 
 commands:
   init             print {deviceId, dataRoot}
-  create           register a bot; requires --request-id --role --cwd [--model-ref]
+  create           register a bot; requires --request-id --role --cwd
   list             print all bot records
   get              print one bot; requires --bot-id
   find-request     print bot by request; requires --request-id
@@ -15,7 +15,6 @@ options:
   --request-id <id>
   --role <text>
   --cwd <dir>
-  --model-ref <value>
   --bot-id <id>
   -h, --help          show this help
 `;
@@ -25,7 +24,6 @@ const OPTIONS = {
   'request-id': { type: 'string' },
   role: { type: 'string' },
   cwd: { type: 'string' },
-  'model-ref': { type: 'string' },
   'bot-id': { type: 'string' },
   help: { type: 'boolean', short: 'h' },
 };
@@ -76,7 +74,6 @@ function main() {
           requestId: values['request-id'],
           role: values.role,
           cwd: values.cwd,
-          modelRef: values['model-ref'] ?? null,
         });
         break;
       case 'list':

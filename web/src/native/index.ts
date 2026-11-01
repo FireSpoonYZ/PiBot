@@ -1,8 +1,5 @@
 import type {
-  BotExtensionSnapshot,
-  BotExtensions,
   BotSoul,
-  ExtensionCatalog,
   HindsightOptions as SharedHindsightOptions,
   HistoryEntryChunk,
   RuntimeExtensionsConfig,
@@ -39,9 +36,9 @@ export type HostSettingsModel = {
 };
 export type HostProviderConfig = { id: string; name?: string; api?: string; baseUrl: string; apiKeyEnv?: string; models: HostSettingsModel[] };
 export type HostRelayConfig = { url: string; tokenEnv: string; caFile?: string };
-// Canonical extension/SOUL DTOs are declared once in host-core/index.d.ts and
+// Canonical SOUL/extension DTOs are declared once in host-core/index.d.ts and
 // re-exported here for the local Host UI (types only, no runtime import).
-export type { BotExtensionSnapshot, BotExtensions, BotSoul, ExtensionCatalog, RuntimeExtensionsConfig };
+export type { BotSoul, RuntimeExtensionsConfig };
 /** Connection config; unset timeouts keep the Host defaults (30s / reflect 120s). */
 export type HostHindsightConfig = SharedHindsightOptions & { timeoutMs?: number; reflectTimeoutMs?: number };
 export type HostRuntimeSettings = {
@@ -63,6 +60,8 @@ export interface HostBot {
   role: string;
   description?: string;
   cwd: string;
+  /** Center CAS revision for the authoritative cwd (absent on legacy/local records). */
+  cwdRevision?: number;
   modelRef: string | null;
   primaryConversationId: string;
   createdAt: string;

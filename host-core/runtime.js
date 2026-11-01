@@ -241,6 +241,24 @@ export async function openRuntime(options) {
     }
     return env;
   };
+  // Drop cached environments for one bot's mapped conversations and its plugin lane;
+  // called only inside the idle apply boundary so no in-flight tool run loses its env.
+  const dropBotEnvs = async (nativeIds, botId) => {
+    const dropped = [];
+    const ids = new Set(nativeIds.map((id) => String(id)));
+    const pluginKey = 'plugin:' + botId + '\u0000';
+    for (const [key, env] of [...envCache]) {
+      const conv = key.split('\u0000')[0];
+      if (!ids.has(conv) && !key.startsWith(pluginKey)) continue;
+      envCache.delete(key);
+      dropped.push(env);
+    }
+    const results = await Promise.allSettled(dropped.map((env) => env.cleanup(CTX)));
+    const failures = results.filter((result) => result.status === 'rejected');
+    if (failures.length > 0) {
+      throw new AggregateError(failures.map((result) => result.reason), 'bot env cleanup failed');
+    }
+  };
   const cleanupEnvs = async () => {
     const envs = [...envCache.values()];
     envCache.clear();
@@ -535,6 +553,7 @@ export async function openRuntime(options) {
     dataRoot: host.dataRoot,
     releaseOwner,
     cleanupEnvs,
+    dropBotEnvs,
     live,
     workContexts,
     decisions,
@@ -587,6 +606,8 @@ function botProfile(host, plugins, botModels, coreExtensions, codemodeExtension,
   ];
   // thinkingLevel 总是给出：(null 表示 SDK 默认) 才能让 reload 后重应用人格时回写变更。
   return {
+    // 中心权威 cwd：空闲边界/绑定重入时经 agentProfileChange 写回已映射会话。
+    cwd: host.getBot(botId)?.cwd,
     instructions,
     selectedExtensions,
     pluginTools: pluginExtensions.flatMap((extension) => extension.tools ?? []),
@@ -606,7 +627,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, live, workContexts, decisions, sessions, plugins, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower, schedules }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, live, workContexts, decisions, sessions, plugins, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower, schedules }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -841,6 +862,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     setBotModels,
     profileFor,
     botExecutionFingerprint,
+    applyBotCwd,
     setBotAppliedRevision: (botId, revision) => botAppliedRevision.set(botId, revision),
     setBotFingerprint: (botId, fingerprint) => botFingerprints.set(botId, fingerprint),
     live,
@@ -878,6 +900,19 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       if (pair !== null && pair[0] === bot.botId) nativeIds.push(binding.nativeId);
     }
     return nativeIds;
+  }
+
+  /**
+   * 中心权威 cwd 切换（已确认空闲/准入边界内调用）：
+   * 持久化新目录、写回主会话与全部 work 会话的 AgentDoc cwd、丢弃该 Bot 的
+   * 缓存执行环境；不移动文件、不触碰其他 Bot。返回最新 BotRecord。
+   */
+  async function applyBotCwd(bot, cwd) {
+    const nativeIds = await botConversations(bot);
+    const updated = host.setBotCwd(bot.botId, { cwd });
+    await refreshBotProfiles(updated);
+    await dropBotEnvs(nativeIds, bot.botId);
+    return updated;
   }
 
   /** 按已绑定会话重新应用人格/工具；无变化不提交。 */
@@ -991,14 +1026,14 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   }
 
   /** Bot 执行内容摘要：模型选择 + 启用的能力（含配置与凭证值），不含展示名称与 revision。 */
-  function botExecutionFingerprint(selection, capabilities, credentials) {
+  function botExecutionFingerprint(selection, capabilities, credentials, cwd) {
     const entries = (capabilities ?? []).filter((capability) => capability.enabled).map((capability) => [
       capability.installationId, capability.kind, capability.target, capability.targetVersion,
       capability.effectiveConfig ?? null,
       (capability.target === 'host' ? capability.credentialRefs ?? [] : []).map((ref) => [ref, credentials?.[ref] ?? null]),
     ]);
     entries.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-    return createHash('sha256').update(JSON.stringify([selection ?? null, entries])).digest('hex');
+    return createHash('sha256').update(JSON.stringify([selection ?? null, cwd ?? null, entries])).digest('hex');
   }
 
   /**
@@ -1176,7 +1211,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
    * 单个 Bot 的配置应用（已在它的 admission lane 内，与 send/设置严格串行）：
    * 先收紧发生变化能力的授权（幂等），再只结束该能力的失效任务，最后在空闲边界切换模型/能力/profile。
    */
-  async function applyBotConfiguration(record, selection, capabilities, deployment, credentials) {
+  async function applyBotConfiguration(record, selection, capabilities, deployment, credentials, desiredCwd) {
     const botId = record.botId;
     try {
       // 1. 授权先收紧（幂等；新快照到达时 HostService 已先做过一次）。
@@ -1192,9 +1227,21 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     // 只是崩溃残留；此刻先恢复已授权模型/插件/profile，resume 后任务才有工具。
     // 但被钉住的轮（pin/排队准入）不能用最新快照覆盖其绑定：保持 waiting-idle，
     // 由准入泵/恢复流程负责该 Bot 的 set（撤权仍在上一步即时生效）。
+    const cwdChange = desiredCwd !== undefined && desiredCwd !== record.cwd;
+    // 目标目录合法性在任何模型/插件状态变化之前校验，非法即本次应用失败。
+    if (cwdChange) {
+      try {
+        host.assertBotCwd({ cwd: desiredCwd });
+      } catch (err) {
+        return { status: 'failed', error: toRuntimeError(err), capabilityErrors: [] };
+      }
+    }
     try {
       const scheduling = (await harness.inspect(CTX)).scheduling;
-      if (scheduling !== 'paused' && !(await botIsIdle(record))) {
+      const idle = await botIsIdle(record);
+      // 调度暂停的冷恢复窗口只允许沿用既有 cwd：目录切换必须等真实空闲，
+      // 绝不在未完成轮上换目录。
+      if ((scheduling !== 'paused' || cwdChange) && !idle) {
         return { status: 'waiting-idle', error: null, capabilityErrors: [] };
       }
       if (await turns.hasActivePin(botId)) {
@@ -1215,8 +1262,10 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       if (selection && (selection.modelRef != null || selection.thinkingLevel != null || selection.codemode != null || selection.codemodeOnly != null)) nextModels[botId] = selection;
       else delete nextModels[botId];
       setBotModels(nextModels);
-      const applied = await plugins.applyBot(record, capabilities, { deviceId: host.deviceId, credentials });
-      await refreshBotProfiles(record);
+      let current = record;
+      if (cwdChange) current = await applyBotCwd(record, desiredCwd);
+      const applied = await plugins.applyBot(current, capabilities, { deviceId: host.deviceId, credentials });
+      await refreshBotProfiles(current);
       if (applied.capabilityErrors.length === 0) return { status: 'applied', error: null, capabilityErrors: [] };
       // 只有“目标版本未装且部署仍在进行中”才算等待；无计划或部署已失败一律报 failed，不得永久 waiting-idle。
       const pendingDeployment = applied.capabilityErrors.every((item) => item.error.code === 'CAPABILITY_NOT_INSTALLED' &&
@@ -1269,9 +1318,10 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         const target = desired.get(botId) ?? null;
         const selection = target?.model ?? null;
         const capabilities = target?.capabilities ?? [];
+        const desiredCwd = target?.cwd ?? undefined;
         const receipt = { botId, desiredRevision: snapshot.revision,
           appliedRevision: botAppliedRevision.get(botId) ?? null, status: 'pending', error: null };
-        const fingerprint = botExecutionFingerprint(selection, capabilities, credentials);
+        const fingerprint = botExecutionFingerprint(selection, capabilities, credentials, desiredCwd ?? record.cwd);
         if (plugins.isActive() && botFingerprints.get(botId) === fingerprint) {
           botAppliedRevision.set(botId, snapshot.revision);
           bots.push({ ...receipt, appliedRevision: snapshot.revision, status: 'applied' });
@@ -1281,7 +1331,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         let ran = false;
         try {
           ran = await botAdmissions.tryExclusive(botId, async () => {
-            outcome = await applyBotConfiguration(record, selection, capabilities, deployment, credentials);
+            outcome = await applyBotConfiguration(record, selection, capabilities, deployment, credentials, desiredCwd);
           });
         } catch (err) {
           if (closing) throw errWithCode('host is closing', 'NOT_CONNECTED');
@@ -1426,10 +1476,6 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       return schedules.execute(bot, input, { taskId: 1 });
     },
 
-    getExtensionCatalog() { throw errWithCode('capabilities are managed by the center', 'INVALID_STATE'); },
-    getBotExtensions() { throw errWithCode('capabilities are managed by the center', 'INVALID_STATE'); },
-    setBotExtensions() { throw errWithCode('capabilities are managed by the center', 'INVALID_STATE'); },
-
     async getBotSoul(botId) {
       await requireBot(botId);
       return host.getBotSoul(botId);
@@ -1442,8 +1488,6 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       await refreshBotProfiles(bot);
       return soul;
     }),
-
-    setBotModel() { throw errWithCode('models are managed by the center', 'INVALID_STATE'); },
 
     // 附件：先落盘再引用。上传幂等（内容定址），getAttachment 只回该 Bot 归属的图。
     // 与 deleteBot 同 lane：上传在校验期间 Bot 不会被删，绝不留下孤立附件目录。

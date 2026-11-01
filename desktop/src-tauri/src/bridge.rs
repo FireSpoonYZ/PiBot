@@ -60,6 +60,8 @@ const PUBLIC_OPERATIONS: &[&str] = &[
   "center_bot_model_set",
   "center_bot_avatar_get",
   "center_bot_avatar_set",
+  "center_bot_cwd_get",
+  "center_bot_cwd_set",
   "center_bot_capabilities_get",
   "center_bot_capability_set",
   "center_runtime_status",

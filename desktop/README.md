@@ -104,14 +104,17 @@ Windows/Linux 构建的并行度由 Cargo 自行决定，本文不设固定 job 
 
 ## 连接外部 Host 服务
 
-桌面客户端启动后不会自动拉起 Host。可先在终端独立运行统一本机服务（默认 `serve`）或中继服务（以下均为合成示例，不含真实密钥）：
+桌面客户端启动后不会自动拉起 Host。可先在终端独立运行统一本机服务（默认 `serve`）或中继服务（以下均为合成示例，不含真实密钥）；Windows 登录自启动属外部 Host 部署能力，见 `host-core/README.md`「Windows 登录自启动」，不由本客户端管理：
 
 ```bash
-# 启动外部本机 Host 服务（监听 127.0.0.1:8787）
+# 启动外部本机 Host 服务（监听 127.0.0.1:8787；两种 token 各从环境变量读取且必须不同）
 export CONTROL_TOKEN="replace_with_32_to_512_chars_urlsafe_token"
-node host-core/host-service-cli.js \
+export HOST_DEVICE_TOKEN="replace_with_registered_device_token"
+node host-core/host-service-cli.js serve \
   --data-root "/path/to/host-data" \
   --token-env CONTROL_TOKEN \
+  --center-url https://center.example.com:8443 \
+  --device-token-env HOST_DEVICE_TOKEN \
   --port 8787
 ```
 

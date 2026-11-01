@@ -183,6 +183,8 @@ export interface UnifiedBotItem {
   role: string;
   description?: string;
   cwd: string;
+  /** Center CAS revision for the authoritative cwd (absent for local-only records). */
+  cwdRevision?: number;
   modelRef: string | null;
   createdAt: string;
   lastActivityAt?: string;
@@ -1250,6 +1252,12 @@ export function HostPage({
   const [editName, setEditName] = useState('');
   const [editSubtitle, setEditSubtitle] = useState('');
   const [editCwd, setEditCwd] = useState('');
+  const [editCwdRevision, setEditCwdRevision] = useState<number | null>(null);
+  const [editCwdError, setEditCwdError] = useState('');
+  // 单调递增 token：编辑目标/连接变化丢弃迟到的 cwd 回填结果。
+  const editCwdFetchRef = useRef(0);
+  // 用户已编辑目录后，异步回填不得覆盖输入。
+  const editCwdDirtyRef = useRef(false);
   const [editTargetHost, setEditTargetHost] = useState('local');
   const [editAvatarPreset, setEditAvatarPreset] = useState<GrokAvatarPreset>(GROK_AVATAR_PRESETS[0]);
   const [editInitialSoul, setEditInitialSoul] = useState('');
@@ -1523,6 +1531,7 @@ export function HostPage({
         role: b.role,
         description: (b as HostBot & { description?: string }).description ?? '',
         cwd: b.cwd,
+        cwdRevision: b.cwdRevision ?? 0,
         modelRef: b.modelRef,
         createdAt: b.createdAt,
         lastActivityAt: b.lastActivityAt || b.createdAt,
@@ -1555,6 +1564,7 @@ export function HostPage({
         role: b.role,
         description: b.description ?? '',
         cwd: b.cwd,
+        cwdRevision: b.cwdRevision ?? 0,
         modelRef: b.modelRef,
         createdAt: b.createdAt,
         lastActivityAt: b.lastActivityAt || b.createdAt,
@@ -2212,31 +2222,81 @@ export function HostPage({
     void loadBotSchedules(bot);
   };
 
+  // 经中心权威通道重新读取 cwd 与 CAS revision；整条链路异常都不得逃逸，
+  // 迟到的结果只由 fetchRef 身份令牌拦截，不写新表单。
+  const loadEditCwd = useCallback(async (bot: UnifiedBotItem) => {
+    const fetchId = ++editCwdFetchRef.current;
+    try {
+      const api = await ensureRemoteApi();
+      const identity = api?.identity;
+      if (!api || !identity) throw new Error(t('中心连接不可用，无法读取工作目录；连接后可重试', 'Center unavailable; cannot load the working directory. Retry once connected'));
+      const config = await api.broker(identity, 'center_bot_cwd_get', { deviceId: bot.deviceId, botId: bot.botId });
+      if (editCwdFetchRef.current !== fetchId) return false;
+      if (!editCwdDirtyRef.current) setEditCwd(config.value ?? bot.cwd ?? '');
+      setEditCwdRevision(config.revision);
+      setEditCwdError('');
+      return true;
+    } catch (error) {
+      if (editCwdFetchRef.current !== fetchId) return false;
+      setEditCwdRevision(null);
+      setEditCwdError(t('工作目录读取失败：', 'Failed to load the working directory: ') + errorText(error));
+      return false;
+    }
+  }, [ensureRemoteApi, t]);
+
   const openBotEdit = (bot: UnifiedBotItem) => {
     const meta = botMetaMap[bot.key];
     const preset = resolveBotAvatarPreset(botAvatarKey(bot), bot.role, bot.isPrimary);
+    editCwdFetchRef.current++;
     setEditMode('edit');
     setEditMakePrimary(Boolean(bot.isPrimary));
     setEditName(bot.role);
     setEditSubtitle(bot.description ?? '');
+    editCwdDirtyRef.current = false;
     setEditCwd(bot.cwd || localHost?.workspace || '');
+    setEditCwdRevision(null);
+    setEditCwdError('');
     setEditAvatarPreset(preset);
     setEditVoiceTone(meta?.voiceTone ?? '未设置');
     setEditVoiceSpeed(meta?.voiceSpeed ?? '1x');
     setEditVoiceLang(meta?.voiceLang ?? '自动');
     setScreen('bot-edit');
     void loadBotSoul(bot);
+    // 中心权威 cwd+revision 异步回填；bot/连接变化以 fetchRef 隔离旧结果。
+    void loadEditCwd(bot);
   };
+
+  // 编辑期间以完整身份（设备+bot+连接 profile/generation）为键重读修订；
+  // 离开表单/切 create/换目标即失效旧请求，迟到结果不写新表单。
+  const editCwdIdentity = activeBot
+    ? activeBot.deviceId + ':' + activeBot.botId + ':' +
+      (activeBot.remoteIdentity
+        ? activeBot.remoteIdentity.profileId + '/' + activeBot.remoteIdentity.generation
+        : 'local')
+    : '';
+  useEffect(() => {
+    if (screen !== 'bot-edit' || editMode !== 'edit' || !activeBot) return;
+    void loadEditCwd(activeBot);
+    return () => {
+      // 身份/表单变化：旧修订立即作废，绝不允许旧 CAS 凭据写新目标。
+      editCwdFetchRef.current++;
+      setEditCwdRevision(null);
+    };
+  }, [screen, editMode, editCwdIdentity, remoteConnected, loadEditCwd]);
 
   const openCreateBotPage = useCallback((forcePrimary = false) => {
     const nextPreset = forcePrimary
       ? JARVIS_AVATAR_PRESET
       : GROK_AVATAR_PRESETS[listBotItems.length % GROK_AVATAR_PRESETS.length];
+    editCwdFetchRef.current++;
+    editCwdDirtyRef.current = false;
     setEditMode('create');
     setEditMakePrimary(forcePrimary);
     setEditName(forcePrimary ? DEFAULT_PRIMARY_ROLE : '');
     setEditSubtitle('');
     setEditCwd('');
+    setEditCwdRevision(null);
+    setEditCwdError('');
     setEditTargetHost('local');
     setEditAvatarPreset(nextPreset);
     setEditInitialSoul('');
@@ -2620,11 +2680,47 @@ ${newer}` : draftSnapshot;
         }
       } else if (activeBot) {
         // Editing an existing Bot updates the authoritative shared profile.
+        const trimmedCwd = editCwd.trim();
+        const cwdChanged = trimmedCwd !== (activeBot.cwd ?? '');
+        const profileChanged = roleName !== activeBot.role || editSubtitle.trim() !== (activeBot.description ?? '');
+        if (!trimmedCwd) throw new Error(t('工作目录不能为空', 'Working directory cannot be empty'));
+        const saveCwd = async () => {
+          if (!cwdChanged) return;
+          if (editCwdRevision === null) {
+            throw new Error(t('工作目录修订尚未读取，请重新读取后再保存', 'Working directory revision not loaded; reload before saving'));
+          }
+          const api = await ensureRemoteApi();
+          const identity = activeBot.hostKind === 'local' ? api?.identity : activeBot.remoteIdentity;
+          const broker = activeBot.hostKind === 'local' ? api : remoteClientRef.current?.api;
+          if (!broker || !identity) {
+            throw new Error(t('请先连接中心，再修改工作目录', 'Connect to the center before changing the working directory'));
+          }
+          try {
+            const config = await broker.broker(identity, 'center_bot_cwd_set', {
+              deviceId: activeBot.deviceId, botId: activeBot.botId,
+              expectedRevision: editCwdRevision, value: trimmedCwd,
+            });
+            setEditCwdRevision(config.revision);
+            editCwdDirtyRef.current = false;
+            setEditCwd(config.value ?? trimmedCwd);
+          } catch (error) {
+            const code = (error as { code?: string })?.code;
+            if (code === 'REVISION_CONFLICT' || code === 'REQUEST_CONFLICT') {
+              setEditCwdRevision(null);
+              setEditCwdError(t('工作目录已被其他修改占用，请重新读取后再保存', 'Working directory was changed elsewhere; reload and save again'));
+            }
+            throw error;
+          }
+        };
         if (activeBot.hostKind === 'local') {
-          await BotHost.call({ method: 'updateBotProfile', params: { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() } });
+          if (profileChanged) await BotHost.call({ method: 'updateBotProfile', params: { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() } });
+          // 本机 Bot 的 cwd 由中心权威管理：只经中心 CAS 通道写入，
+          // 没有中心连接时不静默绕开写 Host 本地。
+          await saveCwd();
           await syncLocalBots();
         } else if (activeBot.remoteIdentity && remoteClientRef.current) {
-          await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'updateBotProfile', { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() });
+          if (profileChanged) await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'updateBotProfile', { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() });
+          await saveCwd();
           await syncRemoteBots();
         } else throw new Error('Remote target unavailable');
         await saveAvatar(activeBot, editAvatarPreset);
@@ -5011,6 +5107,46 @@ ${newer}` : draftSnapshot;
             </div>
 
             <div className="grok-field-section">
+              <label className="grok-section-label">{t('工作目录', 'Working directory')}</label>
+              <div className="grok-card-group">
+                <input
+                  className="grok-card-input"
+                  value={editCwd}
+                  onChange={e => { editCwdDirtyRef.current = true; setEditCwd(e.target.value); }}
+                  placeholder={editMode === 'create'
+                    ? t('目标主机上的绝对路径（留空用默认工作区）', 'Absolute path on the target host (blank uses default workspace)')
+                    : t('目标 Host 上的绝对路径；空闲后生效', 'Absolute path on the target Host; applies when idle')}
+                />
+                {editMode === 'edit' && (
+                  <p className="secondary" style={{ margin: '0 18px 12px' }}>
+                    {t(
+                      '保存到中心后在该 Bot 空闲时生效；运行中的任务保持原目录，不会移动文件。',
+                      'Saved to the center and applied when this Bot is idle; running work keeps its directory and no files are moved.',
+                    )}
+                  </p>
+                )}
+                {editMode === 'edit' && editCwdError && (
+                  <div className="grok-card-row no-active">
+                    <span className="grok-row-label" style={{ color: 'var(--danger, #c0392b)' }}>{editCwdError}</span>
+                    <button
+                      type="button"
+                      className="hub-outline-btn"
+                      disabled={action.busy || !activeBot}
+                      onClick={() => activeBot && void loadEditCwd(activeBot)}
+                    >
+                      {t('重新读取', 'Reload')}
+                    </button>
+                  </div>
+                )}
+                {editMode === 'edit' && !editCwdError && editCwdRevision === null && (
+                  <p className="secondary" style={{ margin: '0 18px 12px' }}>
+                    {t('正在读取中心修订…', 'Loading the center revision…')}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="grok-field-section">
               <label className="grok-section-label">{t('外观', 'Appearance')}</label>
               <div className="grok-card-group">
                 <button
@@ -5034,7 +5170,7 @@ ${newer}` : draftSnapshot;
                     <select
                       className="grok-inline-select"
                       value={editTargetHost}
-                      onChange={e => { setEditTargetHost(e.target.value); setEditCwd(''); }}
+                      onChange={e => { setEditTargetHost(e.target.value); editCwdDirtyRef.current = false; setEditCwd(''); }}
                     >
                       <option value="local">{t('本机', 'Local')}</option>
                       {remoteDevices.filter(device => device.deviceId !== localHost?.deviceId).map(device => (

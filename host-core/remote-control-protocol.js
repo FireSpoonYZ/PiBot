@@ -38,7 +38,6 @@ import { normalizeBotFileChunk } from './bot-file-protocol.js';
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const MAX_SOUL_BYTES = 65536; // 64 KiB public SOUL.md text limit
-const EXTENSION_MODES = new Set(['read-write', 'read-only']);
 const MAX_SUBMIT_ATTACHMENTS = 16;
 const MAX_ATTACHMENT_NAME_BYTES = 256;
 const MAX_ATTACHMENT_BYTES = 16777216; // 16 MiB decoded image payload
@@ -146,12 +145,8 @@ const CONTROL_V2_METHODS = Object.freeze([
   'getMemorySource',
   'correctMemory',
   'retryMemory',
-  'getExtensionCatalog',
-  'getBotExtensions',
-  'setBotExtensions',
   'getBotSoul',
   'setBotSoul',
-  'setBotModel',
   'discoverProviderModels',
   'validateCenterProvider',
   'discoverCenterProviderModels',
@@ -309,22 +304,6 @@ function normalizeAttachmentIds(value) {
     out.push(item);
   }
   return out;
-}
-
-// Strict BotExtensions wire shape. Kept local (instead of importing the manager's
-// normalizer) so this pure boundary module never pulls the Host/SDK graph into
-// the client bundles; the shape is frozen by the shared DTO contract.
-function normalizeBotExtensionsParams(value) {
-  if (!isPlainObject(value)) throw invalid('extensions must be a plain object');
-  rejectUnknownFields(value, new Set(['hindsight']), 'extensions');
-  const hindsight = value.hindsight;
-  if (!isPlainObject(hindsight)) throw invalid('extensions.hindsight must be a plain object');
-  rejectUnknownFields(hindsight, new Set(['enabled', 'mode']), 'extensions.hindsight');
-  if (typeof hindsight.enabled !== 'boolean') throw invalid('extensions.hindsight.enabled must be a boolean');
-  if (typeof hindsight.mode !== 'string' || !EXTENSION_MODES.has(hindsight.mode)) {
-    throw invalid('extensions.hindsight.mode must be read-write or read-only');
-  }
-  return { hindsight: { enabled: hindsight.enabled, mode: hindsight.mode } };
 }
 
 // Unified Shower wire params stay flat ({botId,scopeId?,...}) to match
@@ -574,31 +553,10 @@ function normalizeControlParams(method, params) {
       assertId(params.botId, 'botId');
       return { botId: params.botId, input: normalizeMemoryRetry(params.input) };
     }
-    case 'getExtensionCatalog': {
-      rejectUnknownFields(params, new Set(), 'params');
-      return {};
-    }
-    case 'getBotExtensions':
     case 'getBotSoul': {
       rejectUnknownFields(params, new Set(['botId']), 'params');
       assertId(params.botId, 'botId');
       return { botId: params.botId };
-    }
-    case 'setBotExtensions': {
-      rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
-      assertId(params.botId, 'botId');
-      if (!isPlainObject(params.input)) throw invalid('input must be an object');
-      rejectUnknownFields(params.input, new Set(['expectedRevision', 'extensions']), 'input');
-      if (!Number.isSafeInteger(params.input.expectedRevision) || params.input.expectedRevision < 0) {
-        throw invalid('expectedRevision must be a non-negative safe integer');
-      }
-      return {
-        botId: params.botId,
-        input: {
-          expectedRevision: params.input.expectedRevision,
-          extensions: normalizeBotExtensionsParams(params.input.extensions),
-        },
-      };
     }
     case 'setBotSoul': {
       rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
@@ -617,21 +575,6 @@ function normalizeControlParams(method, params) {
       return {
         botId: params.botId,
         input: { expectedRevision: params.input.expectedRevision, text: params.input.text },
-      };
-    }
-    case 'setBotModel': {
-      rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
-      assertId(params.botId, 'botId');
-      if (!isPlainObject(params.input)) throw invalid('input must be an object');
-      rejectUnknownFields(params.input, new Set(['modelRef']), 'input');
-      let modelRef = null;
-      if (params.input.modelRef !== undefined && params.input.modelRef !== null) {
-        assertNonEmptyString(params.input.modelRef, 'modelRef');
-        modelRef = params.input.modelRef.trim();
-      }
-      return {
-        botId: params.botId,
-        input: { modelRef },
       };
     }
     case 'validateCenterProvider':

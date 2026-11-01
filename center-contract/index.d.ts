@@ -134,9 +134,20 @@ export interface BotAvatar {
   labelEn: string;
 }
 export interface BotAvatarConfig { value: BotAvatar | null; revision: number }
+/**
+ * Center-authoritative working directory for a Bot: GET/PUT
+ * /api/devices/:deviceId/bots/:botId/cwd ({value,revision} / {expectedRevision,value}).
+ * The value is a non-empty absolute path on the target Host; Host directory reports
+ * never carry cwd — a missing value is initialized once through the CAS write with
+ * expectedRevision:0, and an existing center value is never overwritten by reports.
+ * Applies on the Host at the next idle boundary; running turns keep the pinned
+ * directory and no files are moved.
+ */
+export interface BotCwdConfig { value: string | null; revision: number }
 export interface BotRef {
   avatar?: BotAvatar | null;
   avatarRevision?: number;
+  cwdRevision?: number;
   deviceId: string;
   botId: string;
   name: string;
@@ -260,6 +271,8 @@ export interface EffectiveCapability {
 }
 export interface RuntimeBot {
   botId: string;
+  /** Center-authoritative absolute working directory on this Host; absent on legacy centers. */
+  cwd?: string;
   model: ModelSelection;
   capabilities: EffectiveCapability[];
 }
@@ -367,7 +380,14 @@ export interface TurnPreparation {
   admission?: TurnAdmissionGrant;
 }
 export interface PutInstallationDisplayName { expectedRevision: number; displayName: string }
-export interface BootstrapRequest { deviceId: string; capabilityProtocol: 1; bots: BotRef[] }
+/**
+ * Host directory report entry: BotRef without the center-authoritative fields
+ * (cwd/cwdRevision/avatar/avatarRevision). Bootstrap and bots-sync reports carry
+ * directory/status fields only; the center keeps its own values and ignores any
+ * such fields a legacy Host still sends.
+ */
+export type HostBotReport = Omit<BotRef, 'cwd' | 'cwdRevision' | 'avatar' | 'avatarRevision'>;
+export interface BootstrapRequest { deviceId: string; capabilityProtocol: 1; bots: HostBotReport[] }
 export interface BootstrapResponse { snapshot: DeviceRuntimeSnapshot }
 export interface CapabilityToolsListRequest { botId: string }
 export interface CapabilityTool { name: string; description?: string; inputSchema: JsonObject }

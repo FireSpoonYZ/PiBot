@@ -47,6 +47,17 @@ const avatarWriteSchema = {
   },
   additionalProperties: false,
 };
+/** Owner-set Bot cwd: non-empty absolute-path shape (POSIX, drive letter, or \\\\server\\share UNC);
+ * control characters and incomplete UNC roots are unrepresentable on the wire; the Host revalidates existence. */
+const isAbsolutePath = (value) =>
+  typeof value === 'string' && value.length > 0 && value.length <= 1024 && value.trim() === value &&
+  !/[\x00-\x1f]/.test(value) &&
+  (value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\/]+[\\/]+[^\\/]+/.test(value));
+const cwdWriteSchema = {
+  type: 'object', required: ['expectedRevision', 'value'],
+  properties: { expectedRevision: revision, value: string },
+  additionalProperties: false,
+};
 const prepareTurnSchema = {
   type: 'object', required: ['botId', 'requestId', 'scopeKey', 'inputDigest'],
   properties: { botId: boundedId, requestId: boundedId, scopeKey: boundedId, inputDigest: { type: 'string', minLength: 1, maxLength: 128 }, knownSetId: boundedId },
@@ -156,12 +167,24 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
       ...(req.body?.cwd ? { cwd: text(req.body.cwd, 'cwd') } : {}),
       ...(typeof req.body?.makePrimary === 'boolean' ? { makePrimary: req.body.makePrimary } : {}),
     });
-    const bot = store.upsertDeviceBot(deviceId, {
+    let bot = store.upsertDeviceBot(deviceId, {
       ...created,
       deviceId,
       name: typeof created?.name === 'string' ? created.name : created?.role ?? text(req.body?.role, 'role'),
       ...(typeof req.body?.makePrimary === 'boolean' && created?.isPrimary === undefined ? { isPrimary: req.body.makePrimary } : {}),
     });
+    // 创建回执是新 Bot cwd 的唯一隐式初始化来源：中心仍缺值时按其声明的实际目录
+    // 做一次 expectedRevision:0 CAS（等价于创建初始化，不产生第二 revision）；
+    // 中心已有值绝不覆盖。不夹网络 await，返回的始终是最新记录。
+    if (bot.cwd === undefined && typeof created?.cwd === 'string' && isAbsolutePath(created.cwd)) {
+      try {
+        bot = store.upsertDeviceBot(deviceId, { botId: bot.botId, name: bot.name }, { kind: 'cwd', expectedRevision: 0, value: created.cwd });
+      } catch (err) {
+        if (err?.code !== 'REVISION_CONFLICT') throw err;
+        // 并发写入已先行：中心值胜出，重读最新记录返回。
+        bot = store.upsertDeviceBot(deviceId, { botId: bot.botId, name: bot.name });
+      }
+    }
     await packages.reconcileDevice(deviceId);
     notify(deviceId);
     return reply.code(201).send(bot);
@@ -231,6 +254,12 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   }
   route('GET', '/api/devices/:deviceId/bots/:botId/avatar', req => store.getBotAvatar(req.params.deviceId, req.params.botId));
   route('PUT', '/api/devices/:deviceId/bots/:botId/avatar', putAvatar, true);
+  route('GET', '/api/devices/:deviceId/bots/:botId/cwd', req => store.getBotCwd(req.params.deviceId, req.params.botId));
+  route('PUT', '/api/devices/:deviceId/bots/:botId/cwd', req => {
+    const body = validate(cwdWriteSchema, req.body);
+    if (!isAbsolutePath(body.value)) fail('INVALID_ARGUMENT', 'cwd must be a non-empty absolute path on the target Host');
+    return changed(store.putBotCwd(req.params.deviceId, req.params.botId, body.expectedRevision, body.value), req.params.deviceId);
+  }, true);
   route('GET', '/api/devices/:deviceId/bots/:botId/model-config', req => store.getBotModelConfig(req.params.deviceId, req.params.botId));
   route('PUT', '/api/devices/:deviceId/bots/:botId/model-config', req => { const b = object(req.body); return changed(store.putBotModelConfig(req.params.deviceId, req.params.botId, b.expectedRevision, validate(selectionSchema, b.value)), req.params.deviceId); }, true);
   const credentialId = assertPublicCredentialId;
@@ -391,6 +420,12 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   });
   host('GET', '/api/host/devices/:deviceId/bots/:botId/avatar', req => store.getBotAvatar(req.params.deviceId, req.params.botId));
   host('PUT', '/api/host/devices/:deviceId/bots/:botId/avatar', putAvatar);
+  host('GET', '/api/host/devices/:deviceId/bots/:botId/cwd', req => store.getBotCwd(req.params.deviceId, req.params.botId));
+  host('PUT', '/api/host/devices/:deviceId/bots/:botId/cwd', req => {
+    const body = validate(cwdWriteSchema, req.body);
+    if (!isAbsolutePath(body.value)) fail('INVALID_ARGUMENT', 'cwd must be a non-empty absolute path on the target Host');
+    return changed(store.putBotCwd(req.params.deviceId, req.params.botId, body.expectedRevision, body.value), req.params.deviceId);
+  });
   host('GET', '/api/host/devices/:deviceId/bots/:botId/model-config', req => store.getBotModelConfig(req.params.deviceId, req.params.botId));
   host('PUT', '/api/host/devices/:deviceId/bots/:botId/model-config', req => { const b = object(req.body); return changed(store.putBotModelConfig(req.params.deviceId, req.params.botId, b.expectedRevision, validate(selectionSchema, b.value)), req.params.deviceId); });
   host('GET', '/api/host/devices/:deviceId/bots/:botId/capabilities', req => {

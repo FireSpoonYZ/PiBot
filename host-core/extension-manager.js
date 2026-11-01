@@ -2,7 +2,6 @@
 import { normalizeHindsightConfig } from './hindsight-client.js';
 
 const EXTENSION_ID = 'hindsight';
-const BOT_MODES = new Set(['read-write', 'read-only']);
 
 function errWithCode(message, code) {
   const err = new Error(message);
@@ -26,22 +25,6 @@ function rejectUnknownFields(value, allowed, label) {
       throw invalidArgument(`${label} has unknown field: ${key}`);
     }
   }
-}
-
-/** 严格 Bot 扩展开关/策略；两字段都必填，mode 只接受 read-write/read-only。 */
-export function normalizeBotExtensions(value) {
-  if (!isPlainObject(value)) throw invalidArgument('bot extensions must be a plain object');
-  rejectUnknownFields(value, new Set(['hindsight']), 'bot extensions');
-  const hindsight = value.hindsight;
-  if (!isPlainObject(hindsight)) throw invalidArgument('bot extensions.hindsight must be a plain object');
-  rejectUnknownFields(hindsight, new Set(['enabled', 'mode']), 'bot extensions.hindsight');
-  if (typeof hindsight.enabled !== 'boolean') {
-    throw invalidArgument('bot extensions.hindsight.enabled must be a boolean');
-  }
-  if (typeof hindsight.mode !== 'string' || !BOT_MODES.has(hindsight.mode)) {
-    throw invalidArgument('bot extensions.hindsight.mode must be "read-write" or "read-only"');
-  }
-  return { hindsight: { enabled: hindsight.enabled, mode: hindsight.mode } };
 }
 
 /**
