@@ -32,11 +32,10 @@ scope 消息账本（MessageLog）仍是消息事实的唯一权威，主会话�
   路由事实，由 `sessions.beforeRequest` 按实际 SDK 任务/输入归属判定并写入请求路由指引；
   `sessions.getTurn` 只对匹配的当前任务返回。`workNativeId` 仅内部使用，不出现在
   UI/公开元数据。
-- 对外发布（send_dm/send_room 与 scope publication）用冻结轮的 replyTarget 与
+- 对外发布（统一 send_to 与 scope publication）用冻结轮的 replyTarget 与
   stale-input/member 校验；peer/room 轮不会把工作草稿自动发给用户。
 - 外发 request 类消息经 `sessions.recordOutgoing` 记录原始回复去向；
-  `read_dm_replies`/成功 `wait_dm_reply` 经 `sessions.markRepliesObserved` 记账，
-  已由发起工具观察到的回复不产生重复续接。
+  `sessions.markRepliesObserved` 记账已消费回复水位，未被消费的新回复才续接。
 
 ## 导入与水位
 
@@ -58,7 +57,12 @@ scope 消息账本（MessageLog）仍是消息事实的唯一权威，主会话�
 ## 迟到回复、Reset 与旧行为
 
 - **迟到回复**：`sessions.replyOrigin` 用外发请求的来源记账定位原始本地请求的
-  replyTarget；尚未被 read/wait 消费的新回复可续接其原始渠道（主会话或发起 scope）。
+  replyTarget；未被消费的新回复可续接其原始渠道（主会话或发起 scope）。
+  模型侧只有异步 `send_to`（DM/room 统一；回复关联由 Host 沿持久化
+  `responseMessageId` 还原到原始请求消息——recordOutgoing/replyOrigin/
+  冻结轮/触发批逐跳传递，多层嵌套委派不回退到触发消息或其 replyTo），
+  发完即结束本轮，对端应答经账本唤醒新一轮。同 DM 不同 request 消息
+  不合批，各自续轮；room public 仍按 scope 合批。
 - **Reset（/clear）**：先 `sessions.sync(botId)` 把未导入的账本消息推进水位
   （`lastImportedLocalId` 是 reset 唯一保留的导入边界），再 `conversation.reset()`，
   随后 `sessions.reset(botId)` — 账本导入水位、既有 ID/数据、回复回执与未决外发

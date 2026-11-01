@@ -857,7 +857,7 @@ node host-core/control-cli.js work-context --url http://127.0.0.1:8787 \
 
 - `MessagePublishGuard = {scopeId, afterLocalId}`；scopeId 是**决策来源 scope**，可以不同于发送目标（例如群决策向 DM 发送）；afterLocalId 必须为非负安全整数，来自实际 prepared 水位。
 - guard 仅用于 Bot 作者。省略/undefined 保留旧 publish 行为；显式 null、未知字段或无效值报 `INVALID_ARGUMENT`，不能静默关闭校验。目标 scope/类别/作者的既有校验不变；来源不存在为 `SCOPE_NOT_FOUND`，不再是来源成员为 `SCOPE_FORBIDDEN`。
-- 来源范围在水位之后有冻结面向该 Bot 的非自身事件即为 `STALE_INPUT`，包括另一个本机 Bot、人类及 DM notice/reply；其他 scope、只面向别的 Bot 的消息及本机自身回声不使旧稿失效。这个发布校验比“是否触发新推理”的类别规则更严格。
+- room 来源 scope 在水位之后有冻结面向该 Bot 的非自身事件即为 `STALE_INPUT`，包括另一个本机 Bot、人类及 DM notice/reply；其他 scope、只面向别的 Bot 的消息及本机自身回声不使旧稿失效。这个发布校验比“是否触发新推理”的类别规则更严格。DM 工作轮不用新鲜度 guard：冻结轮只处理本轮关联消息，其后到达的 DM 排队给后续决策轮，不使待发稿失效；成员撤销检查仍对所有 scope 生效（publishWork 内部按当前成员复核）。
 - `STALE_INPUT` 不写入消息/序号/outbox/目标。驱动持久标记 replan，旧生成不再发起下一次 provider 调用，保留未处理水位，随后用新批次重新考虑；不保证远端尚未到达的消息也被看见。
 - 合法的同 messageId、同发布指纹重试在数据库 guard/成员检查前返回原回执；异内容仍报 `REQUEST_CONFLICT`。guard 不进信封或指纹。已落盘发送在停止或崩溃后可对账，不能把失败/中止结果解释为此前绝无发布或其他副作用。
 
@@ -892,7 +892,7 @@ pi-durable 1.3.0 的 HookRunner 会吞掉普通 hook 抛错，因此请求阶段
 
 模型配置/生成错误仅阻塞对应 scope，不反复热重试；普通未回答失败为 `WORK_GENERATION_FAILED`，已记录的 `CONTEXT_LIMIT` 保留。修正原因后显式 `resumeWork` 清错误再试。意外存储/schema 故障不吞掉或重置：驱动停止轮询、保留 fatal 错误，activity/变更操作向调用方暴露，需正确关闭/重开并处理原因；主私聊不因工作驱动 fatal 被自动改成停止。
 
-### Bot 通信工具与 DM 首回复等待
+### Bot 通信工具与异步消息
 
 工具每次从实际调用 conversation 解析本机 Bot 身份；不信 cwd/角色/模型参数自报身份，不为解析身份新建会话。未知/非本机上下文为 `BOT_CONTEXT_REQUIRED`。模型不能提供 author、botId、messageId 或 guard，未知参数拒绝；发送统一注入 `{kind:'bot',botId:<实际Bot>}`。
 
@@ -900,22 +900,19 @@ pi-durable 1.3.0 的 HookRunner 会吞掉普通 hook 抛错，因此请求阶段
 | --- | --- |
 | `list_scopes` | `{offset?,limit?}`；offset 为非负整数、默认 0，limit 为 1..200 的整数、默认 50，仅列当前成员 scope；返回 `{deviceId,botId,scopes,nextOffset}`，offset 在成员变化时仅尽力分页，不是持久消息游标 |
 | `read_scope` | `{scopeId,limit?,cursor?}`；只读自身 scoped inbox，保留退出后的旧冻结目标权限，不读全 scope 或其他 Bot 的 inbox |
-| `send_room` | `{scopeId,text,replyTo?}`；仅已安装 room，类别 public |
-| `send_dm` | `{scopeId,category:'notice'\|'request'\|'reply',text,replyTo?}`；仅已安装 DM；reply 必须以 replyTo 指向原 request，不能把相关回复再次标为 request |
-| `read_dm_replies` | `{requestMessageId,limit?,cursor?}`；只查自己发出的本机 DM request 的对方直接 replyTo 回复，不产生新请求/推理 |
-| `wait_dm_reply` | `{requestMessageId}`；等该 request 的**首个对方回复**，返回至多一条回复的预览页并加 `status:'replied'\|'timeout'`，不是等对方工作全部结束 |
+| `send_to` | `{scopeId,text,files?}`；已安装 DM 或 room 均可；不暴露 request/reply/public 分类或 replyTo——本轮已在回应该 scope 某条消息时 Host 自动把发送挂到该轮的原始请求消息（嵌套委派经冻结轮还原原请求），其余发送成为可触发对端续轮的新消息 |
 
-read 工具分页默认 50、最大 200。发送只返回紧凑落盘回执 `{messageId,scopeId,author,category,rootId,replyTo,createdAt,status:'stored'}`，**stored 不代表远端收到或已回答**。每次发送工具的 messageId 保存在 Durable task memo 中，崩溃在账本写入后/工具回执前时重放沿用同 ID，并由账本指纹去重，不从模型 callId 派生。工具结果为 JSON 文本；已知消息/身份/工作策略错误以 `{code,message}` 和 `isError:true` 返回（如 `WORK_STOPPED`、`WORK_CONTEXT_INACTIVE`、`STALE_INPUT`），取消向上传递，未知存储故障不改报 `INVALID_ARGUMENT`。
+read 工具分页默认 50、最大 200。发送只返回紧凑落盘回执 `{messageId,scopeId,author,category,rootId,replyTo,createdAt,status:'stored'}`，**stored 不代表远端收到、开始工作或已交付**。每次发送工具的 messageId 保存在 Durable task memo 中，崩溃在账本写入后/工具回执前时重放沿用同 ID，并由账本指纹去重，不从模型 callId 派生。工具结果为 JSON 文本；已知消息/身份/工作策略错误以 `{code,message}` 和 `isError:true` 返回（如 `WORK_STOPPED`、`WORK_CONTEXT_INACTIVE`、`STALE_INPUT`），取消向上传递，未知存储故障不改报 `INVALID_ARGUMENT`。
 
-`wait_dm_reply` 每次工具调用最多等 30 秒，间隔不超过 1000ms，等待可取消。截止时刻持久保存在该 task memo，恢复/重放不会续满 30 秒；每次先查已有回复再判断截止，即使 Host 停机期间回复到达也能返回。timeout **不取消收件 Bot**、不发取消消息、不换 ID 重问；之后仍可针对同一个 requestMessageId 读取/等待。新的工具调用可有新的等待期限，重复等待已有回复仍返回首个回复，不是“下一条回复”。
+Bot 消息通信是异步的：`send_to` 落账后立即返回 stored 回执，对端应答由消息账本/工作扫描在接收 Bot 空闲时唤醒新一轮回到发起上下文；模型侧没有 wait/poll/read-replies 工具，发完必要消息且无独立工作时直接结束本轮。同一轮可多次 `send_to` 派给多个 Bot，不强制每次发送后结束；后续到达的回复经 `sessions.replyOrigin` 寻源回到发起轮（replyTarget 为 primary 时回到用户会话），多轮往返靠“发完即结束、回复再唤醒”而非轮内等待。
 
-底层新增同步被动 API `log.replies(botId, requestMessageId, {limit?,cursor?})` 返回 `MessageRepliesPage {botId,requestMessageId,scopeId,items,nextCursor}`，其中 items 是完整 `MessageInboxItem`（StoredMessage + selfEcho），此底层页不另加 deviceId。原请求不存在为 `MESSAGE_NOT_FOUND`；必须是当前 Host 上该 Bot 自己发出的 DM request，否则 `SCOPE_FORBIDDEN`。只匹配对方 `category:'reply'` 且 `replyTo===requestMessageId`，不是 rootId 下所有回复；不假设回复 localId 大于请求 localId，恢复/乱序到达也可查询。游标仍为 kind inbox，key 为 `'reply:'+sha256(JSON.stringify([botId,requestMessageId]))`，绑定设备/Bot/request，不能混用普通 inbox 或其他请求游标；不新增远端查询方法或 message-cli 子命令。
+底层同步被动 API `log.replies(botId, requestMessageId, {limit?,cursor?})` 保留作账本/对账用途，返回 `MessageRepliesPage {botId,requestMessageId,scopeId,items,nextCursor}`，其中 items 是完整 `MessageInboxItem`（StoredMessage + selfEcho），此底层页不另加 deviceId。原请求不存在为 `MESSAGE_NOT_FOUND`；必须是当前 Host 上该 Bot 自己发出的 DM request，否则 `SCOPE_FORBIDDEN`。只匹配对方 `category:'reply'` 且 `replyTo===requestMessageId`，不是 rootId 下所有回复；不假设回复 localId 大于请求 localId，恢复/乱序到达也可查询。游标仍为 kind inbox，key 为 `'reply:'+sha256(JSON.stringify([botId,requestMessageId]))`，绑定设备/Bot/request，不能混用普通 inbox 或其他请求游标；不新增远端查询方法或 message-cli 子命令。
 
 ### 有界工具预览不等于原文截断
 
 通信工具渲染的单次 JSON 文本最多 **50KiB UTF-8**。消息投影项为 `{localId,messageId,sourceDeviceId,scopeId,author,category,rootId,replyTo,text,createdAt,selfEcho,textTruncated}`；每条 text 最多 **4096 UTF-16 单元**，避免切开 Unicode 代理对，显式报告 `textTruncated`。这不是 ledger 信封替换，也不等于 M6 primary SSE 预览。
 
-`read_scope` 页为 `{deviceId,botId,scopeId,items,nextCursor}`；`read_dm_replies` 页再含 requestMessageId，wait 在该单条页上加 status。整页超过字节预算只在 item 边界缩短，游标从**最后实际返回**的 localId 继续，不能跳过未显示条目；未缩页时保留查询 nextCursor。`list_scopes` 同样按完整 scope 截页，不输出损坏/半截 JSON。单个 scope 经 JSON 转义后也可能超过 50KiB：若当前页已有可返回前缀，则返回该前缀，nextOffset 指向首个未返回的 scope；若从当前 offset 开始的第一项就放不下，则返回 `isError:true` 的 `RESPONSE_TOO_LARGE` 工具错误。不跳过 scope、不截断标识符，也不返回 nextOffset 不前进的空成功页。
+`read_scope` 页为 `{deviceId,botId,scopeId,items,nextCursor}`。整页超过字节预算只在 item 边界缩短，游标从**最后实际返回**的 localId 继续，不能跳过未显示条目；未缩页时保留查询 nextCursor。`list_scopes` 同样按完整 scope 截页，不输出损坏/半截 JSON。单个 scope 经 JSON 转义后也可能超过 50KiB：若当前页已有可返回前缀，则返回该前缀，nextOffset 指向首个未返回的 scope；若从当前 offset 开始的第一项就放不下，则返回 `isError:true` 的 `RESPONSE_TOO_LARGE` 工具错误。不跳过 scope、不截断标识符，也不返回 nextOffset 不前进的空成功页。
 
 预览限制不修改 `messages.sqlite` 信封、`MessageLog.history/inbox/replies` 原文或 `workHistory` 原始来源 Entries。需要完整正文时由已授权的 Host 原始查询读取；模型上下文原文过大则按前述 CONTEXT_LIMIT 阻塞，不通过截断假装已经处理。
 

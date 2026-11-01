@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { setTimeout as delay } from 'node:timers/promises';
 import { defineTool } from '@earendil-works/pi-durable';
 import { resolveBotIdentity } from './bot-identity.js';
-import { assertId, digest, messageError } from './message-protocol.js';
+import { assertId, messageError } from './message-protocol.js';
 import { inboxQueryKey } from './message-queries.js';
 import { CONTROL_ERROR_CODES } from './remote-control-protocol.js';
 import { BOT_FILE_MAX_COUNT } from './bot-file-protocol.js';
@@ -10,7 +9,6 @@ import { snapshotBotFiles, deliverBotFile } from './bot-files.js';
 
 const MAX_OUTPUT_BYTES = 50 * 1024;
 const MAX_TEXT_UNITS = 4096;
-const WAIT_MS = 30_000;
 const TOOL_ERROR_CODES = new Set([
   'INVALID_ARGUMENT', 'BOT_NOT_FOUND', 'BOT_CONTEXT_REQUIRED',
   'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'MESSAGE_NOT_FOUND', 'REQUEST_CONFLICT',
@@ -105,16 +103,6 @@ function previewPage(metadata, page, key) {
   return result;
 }
 
-function replyPage(identity, page, status) {
-  const metadata = {
-    deviceId: identity.deviceId,
-    botId: identity.botId,
-    requestMessageId: page.requestMessageId,
-    scopeId: page.scopeId,
-  };
-  if (status !== undefined) metadata.status = status;
-  return previewPage(metadata, page, 'reply:' + digest([identity.botId, page.requestMessageId]));
-}
 
 export function createCommunicationTools({ host, getHarness, getMessageLog, publishWork, collaboration, sessions }) {
   function tool({ name, description, properties, required = [], deferred, run }) {
@@ -156,10 +144,9 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     });
   }
 
-  async function send(kind, args, identity, log, api, context) {
+  async function send(args, identity, log, api, context, turn) {
     const scope = log.getScope(args.scopeId);
     if (!scope) throw messageError('SCOPE_NOT_FOUND', 'scope not installed');
-    if (scope.kind !== kind) throw messageError('SCOPE_FORBIDDEN', `target scope must be ${kind}`);
     let messageId = await api.memo('host.message-id', context);
     if (messageId === undefined) {
       messageId = await api.memo('host.message-id', randomUUID(), context);
@@ -200,17 +187,26 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
         }, context);
       }
     }
+    // 回复关联由 Host 从冻结轮推导，模型不填写：本轮默认回应的目标是
+    // responseMessageId（recordOutgoing/replyOrigin 链解析的原始请求消息；
+    // null 表示解析不到，降级为新 request 绝不冒充）。升级前的直接旧 DM
+    // 冻结轮（无 originRequestId、无该字段）才回退 triggerMessageId。
+    const replyTarget = turn?.replyTarget;
+    const originMessageId = turn?.responseMessageId !== undefined
+      ? turn.responseMessageId
+      : (turn?.originRequestId === undefined ? turn?.triggerMessageId : undefined);
+    const isReply = scope.kind === 'dm' && replyTarget?.kind === 'dm' &&
+      replyTarget.scopeId === args.scopeId && typeof originMessageId === 'string';
     const publication = {
       messageId,
       scopeId: args.scopeId,
       author: { kind: 'bot', botId: identity.botId },
-      category: kind === 'room' ? 'public' : args.category,
+      category: scope.kind === 'room' ? 'public' : (isReply ? 'reply' : 'request'),
       text: fileDelivery?.text ?? args.text,
-      replyTo: args.replyTo,
+      replyTo: isReply ? originMessageId : null,
     };
     // 统一主会话下，工作来源由冻结 turn 判定；旧原生工作会话仍按会话身份走同一路径。
-    const turn = await sessions.getTurn(api, context);
-    // 冻结路由是默认回复去向而非目标白名单：显式寻址的跨 scope DM 请求/通知合法，
+    // 冻结路由是默认回复去向而非目标白名单：显式寻址的跨 scope DM 发送合法，
     // 目标成员资格与作者校验由账本承担；只有源自工作决策的轮（带 workNativeId）才把
     // 原始轮传给 driver，由其工作 scope 做 stale-source/成员/预算门禁。
     const workTurn = turn !== null && typeof turn.workNativeId === 'number';
@@ -230,9 +226,7 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
       messageId: message.messageId,
       scopeId: message.scopeId,
       author: message.author,
-      category: message.category,
       rootId: message.rootId,
-      replyTo: message.replyTo,
       createdAt: message.createdAt,
       status: 'stored',
       ...(fileDelivery ? { files: fileDelivery.recipients } : {}),
@@ -508,7 +502,7 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     }),
     tool({
       name: 'create_room',
-      description: 'Create a managed room including this Bot and the specified members. This only creates a scope; use send_room to hand off work.',
+      description: 'Create a managed room including this Bot and the specified members. This only creates a scope; use send_to to hand off work.',
       properties: { members: MEMBERS_SCHEMA },
       required: ['members'],
       async run(args, identity, log, api, context) {
@@ -597,61 +591,15 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
       },
     }),
     tool({
-      name: 'send_room',
-      description: 'Publish a public message to an installed room as this Bot. Optional replyTo references a stored message in that room. The receipt means stored locally, not delivered remotely. Optional files are copied to every other member before publishing; all recipient Hosts must be online. Use original local paths, never base64 in text.',
-      properties: { scopeId: ID_SCHEMA, text: { type: 'string', minLength: 1 }, replyTo: ID_SCHEMA, files: FILES_SCHEMA },
-      required: ['scopeId', 'text'],
-      run: (args, identity, log, api, context) => send('room', args, identity, log, api, context),
-    }),
-    tool({
-      name: 'send_dm',
-      description: 'Send to an installed DM scope as this Bot: notice is informational, request asks for work, reply answers an original request and requires its messageId as replyTo. Do not turn a reply into a new request. Returns only a local stored receipt; no scopes are created. Optional files are copied to the peer before publishing; the peer Host must be online. Use local paths (including uploaded-image paths), never base64 in text.',
+      name: 'send_to',
+      description: 'Send a message as this Bot to an installed scope (a DM with one peer or a room for the group): dispatch work, add information, ask a question, or deliver a result. When this turn already answers a message in that scope, the Host links the send to the original message automatically; there is nothing extra to provide. Sending does not wait: answers and follow-ups arrive later as new rounds in this conversation, so end the turn when no independent work remains. Returns only a local stored receipt — not remote delivery, not a completed task; no scopes are created. Optional files are copied to every other member before publishing; all recipient Hosts must be online. Use original local paths (including uploaded-image paths), never base64 in text.',
       properties: {
         scopeId: ID_SCHEMA,
-        category: { type: 'string', enum: ['notice', 'request', 'reply'] },
         text: { type: 'string', minLength: 1 },
-        replyTo: ID_SCHEMA,
         files: FILES_SCHEMA,
       },
-      required: ['scopeId', 'category', 'text'],
-      run: (args, identity, log, api, context) => send('dm', args, identity, log, api, context),
-    }),
-    tool({
-      name: 'read_dm_replies',
-      description: 'Read counterpart replies directly linked to this Bot\'s original DM requestMessageId. Returns previews and a continuation cursor; does not send another request or start inference.',
-      properties: { requestMessageId: ID_SCHEMA, limit: LIMIT_SCHEMA, cursor: CURSOR_SCHEMA },
-      required: ['requestMessageId'],
-      async run(args, identity, log, api, context) {
-        const page = log.replies(identity.botId, args.requestMessageId, {
-          limit: args.limit, cursor: args.cursor,
-        });
-        if (page.items.length > 0) await sessions.markRepliesObserved(api, page.items, context);
-        return replyPage(identity, page);
-      },
-    }),
-    tool({
-      name: 'wait_dm_reply',
-      description: 'Wait up to 30 seconds for the first counterpart reply to this Bot\'s DM requestMessageId. A restart does not extend this invocation\'s deadline. Timeout never cancels the recipient; later read or wait calls use the same requestMessageId.',
-      properties: { requestMessageId: ID_SCHEMA },
-      required: ['requestMessageId'],
-      async run(args, identity, log, api, context) {
-        let deadline = await api.memo('host.wait-deadline', context);
-        if (deadline === undefined) {
-          deadline = await api.memo('host.wait-deadline', Date.now() + WAIT_MS, context);
-        }
-        for (;;) {
-          context.abortSignal?.throwIfAborted();
-          const page = log.replies(identity.botId, args.requestMessageId, { limit: 1 });
-          // Check stored replies before the deadline, including replies received during downtime.
-          if (page.items.length > 0) {
-            await sessions.markRepliesObserved(api, page.items, context);
-            return replyPage(identity, page, 'replied');
-          }
-          const remaining = deadline - Date.now();
-          if (remaining <= 0) return replyPage(identity, page, 'timeout');
-          await delay(Math.min(1000, remaining), undefined, { signal: context.abortSignal });
-        }
-      },
+      required: ['scopeId', 'text'],
+      run: async (args, identity, log, api, context) => send(args, identity, log, api, context, await sessions.getTurn(api, context)),
     }),
   ];
 }

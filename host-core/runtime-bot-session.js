@@ -50,6 +50,9 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
       ...(origin.triggerMessageId ? { triggerMessageId: origin.triggerMessageId } : {}),
       ...(origin.replyTo ? { replyTo: origin.replyTo } : {}),
       ...(origin.rootId ? { rootId: origin.rootId } : {}),
+      // 本轮默认回应的目标消息 ID（原始请求 messageId）：与触发消息分离持久化，
+      // 嵌套委派续轮绝不能把晚到回复的 replyTo/触发 ID 冒充成原目标。
+      ...(origin.responseMessageId !== undefined ? { responseMessageId: origin.responseMessageId } : {}),
       // 迟来回流的原始请求身份：回复仍归属发起轮，绝不改写其发起来源。
       ...(origin.originRequestId ? { originRequestId: origin.originRequestId } : {}),
       sender: origin.sender,
@@ -79,6 +82,7 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
         triggerMessageId: data.messageId ?? turn.triggerMessageId,
         replyTo: data.replyTo ?? turn.replyTo,
         rootId: data.rootId ?? turn.rootId,
+        responseMessageId: turn.responseMessageId !== undefined ? turn.responseMessageId : data.responseMessageId,
         originRequestId: turn.originRequestId ?? data.originRequestId,
         sender: senderAttribution(
           isObj(turn.sender) ? turn.sender : { kind: 'user', deviceId: host.deviceId }),
@@ -99,6 +103,7 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
         triggerMessageId: turn?.triggerMessageId ?? data.messageId,
         replyTo: turn?.replyTo ?? data.replyTo,
         rootId: turn?.rootId ?? data.rootId,
+        responseMessageId: turn?.responseMessageId !== undefined ? turn.responseMessageId : data.responseMessageId,
         originRequestId: turn?.originRequestId ?? data.originRequestId,
         sender: isObj(turn?.sender) ? senderAttribution(turn.sender, turn.sender.deviceId)
                                     : senderAttribution({ kind: 'host', deviceId: host.deviceId }),
@@ -261,6 +266,32 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
     return { messages: [guidance, ...(request?.messages ?? [])] };
   }
 
+  /**
+   * resolveResponseMessageId(state, rec)：从 outgoing 记录沿发起轮链解析原始
+   * 回应目标消息 ID。新记录直接带持久化 responseMessageId；旧记录沿
+   * completedTurns[originRequestId] 逐跳追溯到直接 DM 发起轮（其
+   * triggerMessageId 即原始请求消息），追到轮仍缺该字段时同法回退；
+   * 追溯不到来源返回 null，绝不把请求自身的 messageId/replyTo 当目标。
+   */
+  function resolveResponseMessageId(state, rec) {
+    if (rec?.responseMessageId !== undefined) return rec.responseMessageId;
+    const seen = new Set();
+    let traced = state?.completedTurns?.[rec?.requestId];
+    while (traced !== undefined && !seen.has(traced.requestId)) {
+      seen.add(traced.requestId);
+      if (traced.responseMessageId !== undefined) return traced.responseMessageId;
+      if (traced.originRequestId === undefined) {
+        // 直接发起轮：仅 DM-scope 轮的 triggerMessageId 是原始请求消息；
+        // primary/room 轮没有 DM 回应目标，返回 null 不冒充。
+        return traced.scopeId !== null && log().getScope(traced.scopeId)?.kind === 'dm'
+          ? (traced.triggerMessageId ?? null)
+          : null;
+      }
+      traced = state?.completedTurns?.[traced.originRequestId];
+    }
+    return null;
+  }
+
   /** getTurn(api,context)：只对本轮归属的任务返回冻结轮；工具/子任务经真实 task.owner 链回溯。 */
   async function getTurn(api, context) {
     const harness_ = harness();
@@ -270,7 +301,15 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
     let task = await harness_.getTask(api.taskId, context);
     for (let depth = 0; depth < OWNER_CHAIN_DEPTH && task; depth++) {
       const id = String(task.id);
-      if (id === active.taskId || state.turnByTask?.[id] === active.requestId) return active;
+      if (id === active.taskId || state.turnByTask?.[id] === active.requestId) {
+        // 升级前的旧冻结轮缺 responseMessageId：按同一解析路径补齐（不覆盖
+        // 已存在值），嵌套续轮仍能回到最初原请求。
+        if (active.responseMessageId === undefined) {
+          const resolved = resolveResponseMessageId(state, { requestId: active.requestId });
+          return { ...active, responseMessageId: resolved };
+        }
+        return active;
+      }
       task = task.owner !== undefined ? await harness_.getTask(task.owner, context) : null;
     }
     return null;
@@ -295,6 +334,9 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
         requestId: origin?.requestId ?? null,
         // 本条请求的回复应回到发起它的轮的 replyTarget（用户私聊 / 发起 scope）。
         replyTarget: origin?.replyTarget ?? { kind: 'primary' },
+        // 原始目标消息身份沿发起轮传递：B 转发 C 的请求被回复后，B 的续轮仍
+        // 回应 A 的原请求；无可追溯的 DM 来源时保留 null。
+        responseMessageId: origin?.responseMessageId ?? null,
         scopeId: message.scopeId ?? null,
         author: senderAttribution(message.author, identity.deviceId),
         observedThroughLocalId: 0,
@@ -305,8 +347,9 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
   }
 
   /**
-   * markRepliesObserved(api, items, context)：read_dm_replies / 成功 wait_dm_reply 之后，
-   * 把每条已读回复的 localId 记进其原始请求（message.replyTo 键）的 observedThroughLocalId。
+   * markRepliesObserved(api, items, context)：发起方已消费回复之后，
+   * 把每条已读回复的 localId 记进其原始请求（message.replyTo 键）的
+   * observedThroughLocalId；未消费的迟到回复仍触发续轮。
    */
   async function markRepliesObserved(api, items, context) {
     if (!Array.isArray(items) || items.length === 0) return;
@@ -331,11 +374,13 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
     if (!message?.replyTo) return null;
     const resolved = await primaryFor(botId);
     if (!resolved) return null;
-    const rec = (await snapshot(resolved.nativeId))?.outgoing?.[message.replyTo];
+    const state = await snapshot(resolved.nativeId);
+    const rec = state?.outgoing?.[message.replyTo];
     if (!rec) return null;
     return {
       replyTarget: rec.replyTarget,
       requestId: rec.requestId,
+      responseMessageId: resolveResponseMessageId(state, rec),
       observedThroughLocalId: rec.observedThroughLocalId ?? 0,
     };
   }

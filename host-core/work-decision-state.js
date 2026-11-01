@@ -27,6 +27,9 @@ export function toFrozenTurn(turn) {
     ...(Array.isArray(turn.triggerMessageIds) ? { triggerMessageIds: [...turn.triggerMessageIds] } : {}),
     ...(turn.replyTo !== undefined ? { replyTo: turn.replyTo } : {}),
     ...(turn.rootId !== undefined ? { rootId: turn.rootId } : {}),
+    // 本轮默认回应的目标消息 ID（原始请求）：与触发消息分离持久化，多层续轮
+    // 沿它续接原任务，绝不把晚到消息的 replyTo 或触发 ID 当回应目标。
+    ...(turn.responseMessageId !== undefined ? { responseMessageId: turn.responseMessageId } : {}),
     // 迟到回复恢复时的原始请求 messageId；与 codec 的 turn.originRequestId 同字段。
     ...(turn.originRequestId !== undefined ? { originRequestId: turn.originRequestId } : {}),
     sender: turn.sender ?? null,

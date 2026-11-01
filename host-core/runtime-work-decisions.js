@@ -12,7 +12,7 @@ import { parseModelRef } from './runtime-models.js';
 
 const CONTROL_ERRORS = new Set(['INVALID_ARGUMENT', 'BOT_NOT_FOUND', 'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'WORK_CONTEXT_INACTIVE', 'NOT_CONNECTED']);
 // NOT_CONNECTED 来自 Bot 准入队列关闭（runtime 已在关闭）：只拒绝新准入，不升级为 fatal。
-const AUTO_ERRORS = new Set(['WORK_CONTEXT_INACTIVE', 'NOT_CONNECTED']);
+const AUTO_ERRORS = new Set(['WORK_CONTEXT_INACTIVE', 'NOT_CONNECTED', 'BOT_NOT_FOUND']);
 const WORK_ERRORS = new Set(['WORK_STOPPED', 'WORK_CONTEXT_INACTIVE', 'STALE_INPUT', 'MODEL_REQUIRED', 'MODEL_NOT_FOUND', 'CONTEXT_LIMIT', 'WORK_GENERATION_FAILED']);
 const PUBLICATION_ERRORS = new Set([...WORK_ERRORS, 'INVALID_ARGUMENT', 'BOT_CONTEXT_REQUIRED', 'BOT_NOT_FOUND', 'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'MESSAGE_NOT_FOUND', 'REQUEST_CONFLICT']);
 const SCOPE_MESSAGE_KIND = 'host.scope-message';
@@ -493,10 +493,16 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
   }
 
   // 分批键：同一批只合并同一回复来源（迟到回复按原始请求 originRequestId；
-  // 新请求/public 按目标 scope）。同 DM 的多个不同入站请求仍并成一批、保留全部
-  // 触发 messageId；不同 originRequestId 的迟到回复绝不并入同一 pending。
+  // 新请求/public 按目标 scope）。同 DM 的不同入站请求按各自 responseMessageId
+  // 分批（回复必须回到正确原任务）；room public 仍按 scope 合批；不同
+  // originRequestId 的迟到回复绝不并入同一 pending。
   function batchKeyOf(origin) {
     if (origin.originRequestId !== undefined) return 'reply:' + origin.originRequestId;
+    // 同 DM 的多个不同入站请求不再合批：单条回复只挂其原始请求，跨请求来源
+    // 必须分批，保证每条回信回到正确原任务；room public 继续按 scope 合批。
+    if (origin.kind === 'dm' && origin.responseMessageId !== undefined) {
+      return 'dm:' + origin.responseMessageId;
+    }
     const t = origin.replyTarget ?? {};
     return 'new:' + (t.kind ?? '') + ':' + (t.scopeId ?? '') + ':' + (t.botId ?? '');
   }
@@ -522,7 +528,10 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
    * 本批截止且 handled 水位绝不跨过它，留待下轮 poll 重新寻源。已寻源为未知
    * 回复（Map 值为 null）或已观察回复按被动上下文处理，可并入批内。
    * 返回 {trigger: {kind, scopeId, triggerMessageId, triggerMessageIds, replyTo,
-   * rootId, sender, replyTarget, originRequestId?} | null, batchThrough}；
+   * rootId, sender, replyTarget, responseMessageId?, originRequestId?} | null,
+   * batchThrough}；responseMessageId 是本轮默认回应的原始请求消息 ID
+   * （DM request 触发即该请求自身；迟到回复沿 outgoing 记录逐跳还原），
+   * 发送侧只认它，绝不用触发消息或其 replyTo 冒充。
    * batchThrough 是本批最后消费的 localId（含批内被动条目），屏障/换批项不计入。
    */
   function collectTrigger(meta, items, replyOrigins) {
@@ -546,6 +555,9 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
             scopeId: meta.scopeId,
             sender: triggerSender(message),
             replyTarget: dmReplyTarget(meta),
+            // 本轮默认回应的目标消息 = 该请求自身；与触发消息同值但语义独立，
+            // 续轮/嵌套委派只沿 responseMessageId 续接，不用触发消息或其 replyTo 冒充。
+            responseMessageId: typeof message.messageId === 'string' ? message.messageId : undefined,
           };
         } else if (meta.kind === 'dm' && message.category === 'reply') {
           const key = typeof message.replyTo === 'string' ? message.replyTo : undefined;
@@ -562,6 +574,9 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
                 scopeId: target.kind === 'primary' ? null : (target.scopeId ?? meta.scopeId),
                 sender: triggerSender(message),
                 replyTarget: target,
+                // 多层续轮沿持久化原始目标消息传递：A->B->C 时 B 的回应仍回
+                // A 的原请求消息，与本次触发消息（C 的回复）及其 replyTo 无关。
+                responseMessageId: rec.responseMessageId,
                 originRequestId: rec.requestId,
               };
             }
@@ -647,6 +662,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
             triggerMessageIds: trigger.triggerMessageIds,
             replyTo: trigger.replyTo,
             rootId: trigger.rootId,
+            responseMessageId: trigger.responseMessageId,
             sender: trigger.sender,
             replyTarget: trigger.replyTarget,
             botId: bot.botId,
@@ -681,13 +697,21 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     let resolved;
     try { resolved = await getWorkContexts().resolveWorkContext(botId, scopeId); }
     catch (error) {
-      // Membership can disappear between discovery and authorization of an as-yet unbound scope.
-      if (error?.code === 'SCOPE_FORBIDDEN') return;
+      // Membership can disappear between discovery and authorization of an as-yet unbound scope;
+      // BOT_NOT_FOUND covers a Bot deleted between poll discovery and authorize.
+      if (error?.code === 'SCOPE_FORBIDDEN' || error?.code === 'BOT_NOT_FOUND') return;
       throw error;
     }
     if (!resolved.binding && !inboxAfter(botId, scopeId, 0, 1).items.length) return;
     const imported = await getWorkContexts().syncWorkContext(botId, scopeId, { limit: 200 });
-    const { bot, binding } = await getWorkContexts().resolveWorkContext(botId, scopeId);
+    let second;
+    try { second = await getWorkContexts().resolveWorkContext(botId, scopeId); }
+    catch (error) {
+      // Bot deleted between sync and the second authorize: same expected expiry.
+      if (error?.code === 'BOT_NOT_FOUND') return;
+      throw error;
+    }
+    const { bot, binding } = second;
     if (!binding) throw new Error('work import did not create a binding');
     if (closing || fatalError) return;
     await reconcile(binding, bot);
@@ -713,6 +737,9 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     const tasks = [];
     for (const [key, [botId, scopeId]] of pairs) {
       if (!active || closing) break;
+      // 跳过本机已删除的 Bot：旧 scope 成员与 WorkIndex 绑定保留为历史，
+      // 不删除数据，但已不存在的 Bot 不调度工作（authorize 只会 BOT_NOT_FOUND）。
+      if (!host.getBot(botId)) continue;
       if (!lanes.has(key)) tasks.push(admit(() => advance(botId, scopeId), key, AUTO_ERRORS, botId));
     }
     await Promise.all(tasks);
@@ -854,9 +881,11 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
   /**
    * publishWork(publication, api, toolContext, turn)：协调账本发布的决策侧守卫。
    * turn 由调用方（communication lane）经 sessions.getTurn 取得；协调文档按冻结轮
-   * workNativeId 解析（legacy 无冻结轮回退会话自身）。陈旧来源守卫恒在发起
-   * scope（协调 scope）；显式 request/notice 可发往其它已授权 scope，默认 response
-   * 发布走冻结 replyTarget——目标成员/作者校验由账本完成，不全局中止无关共享轮。
+   * workNativeId 解析（legacy 无冻结轮回退会话自身）。来源成员撤销检查恒在
+   * 发起 scope（协调 scope）；DM 轮不用“更新入站消息”新鲜度 guard（后到消息
+   * 排队给后续轮），room 沿用 scopeId/afterLocalId guard。显式 request/notice
+   * 可发往其它已授权 scope，默认 response 发布走冻结 replyTarget——目标成员/
+   * 作者校验由账本完成，不全局中止无关共享轮。
    */
   async function publishWork(publication, api, toolContext, turn = null) {
     return guarded(async () => {
@@ -879,8 +908,18 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         if (state.stopped) throw messageError('WORK_STOPPED', 'work context is stopped');
         if (!state.pending?.prepared || state.error) throw messageError('WORK_CONTEXT_INACTIVE', 'work context has no prepared decision');
         if (state.pending.replan || state.pending.takeover) throw messageError('STALE_INPUT', 'work decision needs newer input');
+        // 来源成员撤销对所有 scope 生效（与 log guard 同一语义，publishWork 内部
+        // 执行，不依赖发送目标）；异步 DM 不做“存在更新入站消息”的新鲜度 guard——
+        // 冻结轮只处理本轮关联消息，其后到达的 DM 留给后续决策轮，不使当前
+        // 待发布稿件失效；room 仍沿用来源 scopeId/afterLocalId 新鲜度 guard。
+        const guard = meta.kind === 'dm'
+          ? undefined
+          : { scopeId: meta.scopeId, afterLocalId: state.pending.prepared.throughLocalId };
         try {
-          const stored = log.publish(publication, { scopeId: meta.scopeId, afterLocalId: state.pending.prepared.throughLocalId });
+          if (!currentMember(meta)) {
+            throw messageError('SCOPE_FORBIDDEN', 'publisher bot must be a current member of the origin scope');
+          }
+          const stored = log.publish(publication, guard);
           state.pending.published = true;
           return stored;
         } catch (error) {
