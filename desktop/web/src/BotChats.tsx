@@ -2259,8 +2259,9 @@ function PrimaryChatPane({
   );
 }
 
-export function BotChats({ api, pageActive = true, onOpenCommunications, initialBotId, initialDeviceId }: {
+export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommunications, initialBotId, initialDeviceId }: {
   api: DesktopPanelApi;
+  currentDeviceId: string;
   pageActive?: boolean;
   onOpenCommunications?: (botId: string, scopeId?: string, deviceId?: string) => void;
   /** Scopes「打开 Bot」导航：按稳定 botId + deviceId 选中 Bot（同名 Bot 靠 ID 区分）；
@@ -2445,10 +2446,10 @@ export function BotChats({ api, pageActive = true, onOpenCommunications, initial
     () =>
       devices.filter(
         (d) =>
-          d.online &&
+          d.deviceId === currentDeviceId && d.online &&
           !bots.some((b) => b.deviceId === d.deviceId && b.isPrimary && !b.archivedAt),
       ),
-    [devices, bots],
+    [devices, bots, currentDeviceId],
   );
 
   const filteredBots = useMemo(() => {
@@ -2465,11 +2466,11 @@ export function BotChats({ api, pageActive = true, onOpenCommunications, initial
     const sortByRecent = (a: BotDirectoryEntry, b: BotDirectoryEntry) =>
       botSortTimestamp(b) - botSortTimestamp(a);
     const primary = filteredBots
-      .filter((b) => !b.archivedAt && b.isPrimary)
+      .filter((b) => !b.archivedAt && b.isPrimary && b.deviceId === currentDeviceId)
       .slice()
       .sort(sortByRecent);
     const regular = filteredBots
-      .filter((b) => !b.archivedAt && !b.isPrimary)
+      .filter((b) => !b.archivedAt && !(b.isPrimary && b.deviceId === currentDeviceId))
       .slice()
       .sort(sortByRecent);
     const archived = filteredBots
@@ -2477,7 +2478,7 @@ export function BotChats({ api, pageActive = true, onOpenCommunications, initial
       .slice()
       .sort(sortByRecent);
     return { primaryBots: primary, regularBots: regular, archivedBots: archived };
-  }, [filteredBots]);
+  }, [filteredBots, currentDeviceId]);
 
   const selectedBot = selected
     ? bots.find((b) => b.deviceId === selected.deviceId && b.botId === selected.botId) ?? null
@@ -2549,7 +2550,7 @@ export function BotChats({ api, pageActive = true, onOpenCommunications, initial
           <span className="hub-bot-row-main">
             <span className="hub-bot-row-title-line">
               <span className="hub-bot-row-title">
-                {isPrimaryActive ? `★ ${b.role}` : b.role}
+                {b.role}
               </span>
               {activityIso ? (
                 <span className="hub-bot-row-time" title={formatTime(activityIso)}>

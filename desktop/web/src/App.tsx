@@ -751,6 +751,7 @@ class App extends Component<AppProps, AppState> {
       return (
         <BotChats
           api={api}
+          currentDeviceId={this.state.status?.connection?.deviceId ?? ''}
           pageActive={pageActive}
           onOpenCommunications={this.openCommunications}
           initialBotId={nav?.botId}

@@ -1503,8 +1503,8 @@ export function HostPage({
     }
   }, [remoteBots, remoteIdentity, botMetaMap, updateBotMeta]);
 
-  // Build unified Bot list (Local Primary Bot + Pinned Remote Main Bots + Regular Bots + Archived Bots)
-  const { primaryBot, pinnedRemoteMainBots, listBotItems, archivedBots, allBotItems } = useMemo(() => {
+  // Only the local primary Bot is pinned; all other active Bots share recent-activity ordering.
+  const { primaryBot, listBotItems, archivedBots, allBotItems } = useMemo(() => {
     void avatarVersion;
     const localByIdentity = new Map(localBots.map(bot => [JSON.stringify([bot.deviceId, bot.botId]), bot] as const));
     for (const bot of remoteBots) {
@@ -1581,20 +1581,16 @@ export function HostPage({
       unarchivedLocal.find(b => b.isPrimary) ??
       null;
 
-    const pinnedRemoteMainBots = unarchivedRemote
-      .filter(b => b.isPrimary)
-      .sort((a, b) => getSortTime(b) - getSortTime(a) || a.botId.localeCompare(b.botId));
-
     const regularBots = [
       ...unarchivedLocal.filter(b => b.key !== primary?.key),
-      ...unarchivedRemote.filter(b => !b.isPrimary),
+      ...unarchivedRemote,
     ].sort((a, b) => getSortTime(b) - getSortTime(a) || a.botId.localeCompare(b.botId));
 
     const archived = [...allLocal.filter(b => Boolean(b.archivedAt)), ...allRemote.filter(b => Boolean(b.archivedAt))]
       .sort((a, b) => (Date.parse(b.archivedAt || '') || 0) - (Date.parse(a.archivedAt || '') || 0));
 
-    const allItems = [...(primary ? [primary] : []), ...pinnedRemoteMainBots, ...regularBots, ...archived];
-    return { primaryBot: primary, pinnedRemoteMainBots, listBotItems: regularBots, archivedBots: archived, allBotItems: allItems };
+    const allItems = [...(primary ? [primary] : []), ...regularBots, ...archived];
+    return { primaryBot: primary, listBotItems: regularBots, archivedBots: archived, allBotItems: allItems };
   }, [localBots, remoteBots, remoteDevices, remoteProfiles, remoteConnected, remoteIdentity, localHost?.deviceId, botMetaMap, avatarVersion, t]);
 
   const activeBot = useMemo<UnifiedBotItem | null>(() => {
@@ -3663,7 +3659,7 @@ ${newer}` : draftSnapshot;
             onTouchEnd={onHubScrollTouchEnd}
             onTouchCancel={() => { pullTouchRef.current = null; setPullDistance(0); }}
           >
-            {/* Hero Spotlight: Local + Remote Primary Assistants */}
+            {/* Local Primary Assistant */}
             <section className="hub-hero-section">
               {primaryBot ? (
                 <button
@@ -3710,28 +3706,6 @@ ${newer}` : draftSnapshot;
                   <span className="hub-hero-name">{t('创建主智能体', 'Create Primary Bot')}</span>
                 </button>
               )}
-              {pinnedRemoteMainBots.map(remoteMain => (
-                <button
-                  key={remoteMain.key}
-                  type="button"
-                  className="hub-hero-button"
-                  onClick={() => openBotChat(remoteMain)}
-                  aria-label={`${remoteMain.role} · ${remoteMain.hostLabel} - ${t('点击进入文字对话', 'Tap to chat')}`}
-                >
-                  <GrokBotAvatar
-                    preset={resolveBotAvatarPreset(remoteMain.key, remoteMain.role, true)}
-                    isPrimary
-                    starBadge
-                    platformBadge={<PlatformLogoIcon platform={remoteMain.platform} size={11} />}
-                    size={88}
-                  />
-                  <span className="hub-hero-name" title={remoteMain.role}>{remoteMain.role}</span>
-                  <span className={`hub-bot-host-badge remote${remoteMain.online === false ? ' is-offline' : ''}`} title={remoteMain.hostLabel}>
-                    <PlatformLogoIcon platform={remoteMain.platform} size={12} />
-                    <span className="hub-bot-host-text">{remoteMain.hostLabel}</span>
-                  </span>
-                </button>
-              ))}
             </section>
 
             {/* Regular and archived Bots */}
@@ -3760,7 +3734,7 @@ ${newer}` : draftSnapshot;
               ) : (
                 filteredBotItems.map(item => {
                   const meta = botMetaMap[item.key];
-                  const isPinnedMain = Boolean(item.isPrimary && !item.archivedAt);
+                  const isPrimaryActive = Boolean(item.isPrimary && !item.archivedAt);
                   const snippet =
                     item.lastPreview ||
                     meta?.lastText ||
@@ -3771,22 +3745,19 @@ ${newer}` : draftSnapshot;
                     meta?.updatedAt || 0,
                   );
                   const timeLabel = formatBotListTime(activityMs || undefined, item.createdAt, t);
-                  const preset = resolveBotAvatarPreset(item.key, item.role, isPinnedMain);
+                  const preset = resolveBotAvatarPreset(item.key, item.role, isPrimaryActive);
                   return (
                     <button
                       key={item.key}
                       type="button"
-                      className={`hub-bot-row${isPinnedMain ? ' is-pinned-main' : ''}${item.online === false ? ' is-offline' : ''}`}
+                      className={`hub-bot-row${item.online === false ? ' is-offline' : ''}`}
                       onClick={() => openBotChat(item)}
                     >
                       <div className="hub-bot-avatar-col">
                         <GrokBotAvatar
                           preset={preset}
-                          isPrimary={isPinnedMain}
-                          starBadge={isPinnedMain}
-                          platformBadge={
-                            isPinnedMain ? <PlatformLogoIcon platform={item.platform} size={10} /> : undefined
-                          }
+                          isPrimary={isPrimaryActive}
+                          starBadge={isPrimaryActive}
                           size={52}
                         />
                       </div>
