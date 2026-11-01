@@ -24,6 +24,29 @@ const modelSchema = {
   additionalProperties: false,
 };
 const selectionSchema = { type: 'object', properties: { modelRef: { anyOf: [string, { type: 'null' }] }, thinkingLevel: { anyOf: [string, { type: 'null' }] }, codemode: { anyOf: [{ type: 'boolean' }, { type: 'null' }] }, codemodeOnly: { anyOf: [{ type: 'boolean' }, { type: 'null' }] } }, additionalProperties: false };
+const avatarWriteSchema = {
+  type: 'object', required: ['expectedRevision', 'value'],
+  properties: {
+    expectedRevision: revision,
+    value: { anyOf: [
+      { type: 'null' },
+      {
+        type: 'object', required: ['id', 'shape', 'color', 'rotation', 'expressionIndex', 'labelZh', 'labelEn'],
+        properties: {
+          id: { type: 'string', maxLength: 128 },
+          shape: { enum: ['blob', 'cloud', 'squircle', 'gem', 'bean', 'arch', 'crystal', 'teardrop', 'pebble', 'wedge', 'shield', 'dome', 'hex', 'leaf', 'egg', 'tablet', 'capsule', 'cylinder'] },
+          color: { type: 'string', pattern: '^#[0-9a-fA-F]{6}$' },
+          rotation: { type: 'number', minimum: -360, maximum: 360 },
+          expressionIndex: { type: 'integer', minimum: 0, maximum: 5 },
+          labelZh: { type: 'string', maxLength: 128 },
+          labelEn: { type: 'string', maxLength: 128 },
+        },
+        additionalProperties: false,
+      },
+    ] },
+  },
+  additionalProperties: false,
+};
 const prepareTurnSchema = {
   type: 'object', required: ['botId', 'requestId', 'scopeKey', 'inputDigest'],
   properties: { botId: boundedId, requestId: boundedId, scopeKey: boundedId, inputDigest: { type: 'string', minLength: 1, maxLength: 128 }, knownSetId: boundedId },
@@ -197,6 +220,17 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
 
     return reply.code(204).send();
   }, true);
+  async function putAvatar(req) {
+    const body = validate(avatarWriteSchema, req.body);
+    const { deviceId, botId } = req.params;
+    if (!store.listDeviceBots(deviceId).some(bot => bot.botId === botId)) {
+      const bot = required((await bridge.call(deviceId, 'listBots', {})).find(bot => bot.botId === botId), 'Bot');
+      store.upsertDeviceBot(deviceId, { ...bot, name: bot.name ?? bot.role });
+    }
+    return store.putBotAvatar(deviceId, botId, body.expectedRevision, body.value);
+  }
+  route('GET', '/api/devices/:deviceId/bots/:botId/avatar', req => store.getBotAvatar(req.params.deviceId, req.params.botId));
+  route('PUT', '/api/devices/:deviceId/bots/:botId/avatar', putAvatar, true);
   route('GET', '/api/devices/:deviceId/bots/:botId/model-config', req => store.getBotModelConfig(req.params.deviceId, req.params.botId));
   route('PUT', '/api/devices/:deviceId/bots/:botId/model-config', req => { const b = object(req.body); return changed(store.putBotModelConfig(req.params.deviceId, req.params.botId, b.expectedRevision, validate(selectionSchema, b.value)), req.params.deviceId); }, true);
   const credentialId = assertPublicCredentialId;
@@ -355,6 +389,8 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     if (!device) fail('NOT_FOUND', 'Device not found');
     return store.getDeviceRuntimeStatus(device.deviceId, device.online);
   });
+  host('GET', '/api/host/devices/:deviceId/bots/:botId/avatar', req => store.getBotAvatar(req.params.deviceId, req.params.botId));
+  host('PUT', '/api/host/devices/:deviceId/bots/:botId/avatar', putAvatar);
   host('GET', '/api/host/devices/:deviceId/bots/:botId/model-config', req => store.getBotModelConfig(req.params.deviceId, req.params.botId));
   host('PUT', '/api/host/devices/:deviceId/bots/:botId/model-config', req => { const b = object(req.body); return changed(store.putBotModelConfig(req.params.deviceId, req.params.botId, b.expectedRevision, validate(selectionSchema, b.value)), req.params.deviceId); });
   host('GET', '/api/host/devices/:deviceId/bots/:botId/capabilities', req => {

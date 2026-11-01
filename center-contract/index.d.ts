@@ -124,7 +124,19 @@ export interface BotCapabilityConfig extends BotBinding {
 }
 export interface PutBotCapability { expectedRevision: number; enabled: boolean; overrides: JsonObject }
 export interface Device { deviceId: string; name: string; online: boolean }
+export interface BotAvatar {
+  id: string;
+  shape: string;
+  color: string;
+  rotation: number;
+  expressionIndex: number;
+  labelZh: string;
+  labelEn: string;
+}
+export interface BotAvatarConfig { value: BotAvatar | null; revision: number }
 export interface BotRef {
+  avatar?: BotAvatar | null;
+  avatarRevision?: number;
   deviceId: string;
   botId: string;
   name: string;

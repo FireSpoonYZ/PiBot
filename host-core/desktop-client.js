@@ -728,6 +728,20 @@ export function openDesktopClient(options) {
     );
   }
 
+  async function avatarOperation(params, reqSignal, write) {
+    requireCenter();
+    rejectUnknownFields(params, new Set(write ? ['deviceId', 'botId', 'expectedRevision', 'value'] : ['deviceId', 'botId']), 'bot avatar params');
+    const deviceId = pathId(params.deviceId, 'deviceId');
+    const botId = pathId(params.botId, 'botId');
+    if (write) {
+      if (!Number.isSafeInteger(params.expectedRevision) || params.expectedRevision < 0) throw invalid('invalid expectedRevision');
+      if (params.value !== null && !isPlainObject(params.value)) throw invalid('invalid avatar');
+    }
+    return runCenterAction(client => write
+      ? client.botAvatarSet(deviceId, botId, { expectedRevision: params.expectedRevision, value: params.value }, reqSignal)
+      : client.botAvatarGet(deviceId, botId, reqSignal));
+  }
+
   async function opCenterRuntimeStatus(params, reqSignal) {
     rejectUnknownFields(params, new Set(['deviceId']), 'center_runtime_status params');
     const deviceId = pathId(params.deviceId, 'deviceId');
@@ -1195,10 +1209,33 @@ export function openDesktopClient(options) {
 
   async function opBotDirectory(params, reqSignal) {
     rejectUnknownFields(params, new Set(), 'bot_directory params');
-    return collectBotDirectory({
-      listDevices: (options) => opDevices(options, reqSignal),
-      listBots: (deviceId) => opCall({ targetDeviceId: deviceId, method: 'listBots', params: {} }, reqSignal),
+    const [directory, central] = await Promise.all([
+      collectBotDirectory({
+        listDevices: (options) => opDevices(options, reqSignal),
+        listBots: (deviceId) => opCall({ targetDeviceId: deviceId, method: 'listBots', params: {} }, reqSignal),
+      }),
+      centerState === 'ready' ? centerClient.getBotSync({}, reqSignal) : null,
+    ]);
+    if (!central) return directory;
+    const known = new Map(central.bots.map(bot => [JSON.stringify([bot.deviceId, bot.botId]), bot]));
+    directory.bots = directory.bots.map(bot => {
+      const shared = known.get(JSON.stringify([bot.deviceId, bot.botId]));
+      return shared ? { ...bot, avatar: shared.avatar ?? null, avatarRevision: shared.avatarRevision ?? 0 } : bot;
     });
+    const unavailable = new Set(directory.devices.filter(device => !device.online).map(device => device.deviceId));
+    for (const err of directory.errors) unavailable.add(err.deviceId);
+    for (const bot of central.bots) {
+      if (!unavailable.has(bot.deviceId)) continue;
+      directory.bots.push({
+        ...bot, role: bot.name, description: bot.description ?? '', cwd: bot.cwd ?? '',
+        modelRef: bot.modelRef ?? null, primaryConversationId: bot.primaryConversationId ?? '',
+        createdAt: bot.createdAt ?? '', isPrimary: Boolean(bot.isPrimary),
+        lastActivityAt: bot.lastActivityAt ?? null, lastPreview: bot.lastPreview ?? null,
+        archivedAt: bot.archivedAt ?? null, deviceName: bot.deviceName || bot.deviceId, online: false,
+        avatar: bot.avatar ?? null, avatarRevision: bot.avatarRevision ?? 0,
+      });
+    }
+    return directory;
   }
 
   async function opBotSync(params, reqSignal) {
@@ -1623,6 +1660,8 @@ export function openDesktopClient(options) {
     ['center_owner_login', (params, signal) => ownerOperation(params, signal, 'login')],
     ['center_bot_model_get', (params, signal) => ownerOperation(params, signal, 'get')],
     ['center_bot_model_set', (params, signal) => ownerOperation(params, signal, 'set')],
+    ['center_bot_avatar_get', (params, signal) => avatarOperation(params, signal, false)],
+    ['center_bot_avatar_set', (params, signal) => avatarOperation(params, signal, true)],
     ['center_bot_capabilities_get', opCenterBotCapabilitiesGet],
     ['center_bot_capability_set', opCenterBotCapabilitySet],
     ['center_runtime_status', opCenterRuntimeStatus],

@@ -53,6 +53,7 @@ import { useDrafts } from './drafts';
 import type { DraftSnapshot } from './drafts';
 import { type QuestionnaireSubmitPayload } from '../../../web/src/ToolPresentation';
 import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
+import { botAvatarKey, syncBotAvatarConfigs } from '../../../web/src/botAvatarSync';
 import { BotSettings } from './BotSettings';
 import { ShowerPreview } from './ShowerPreview';
 import { ChatTranscript } from './ChatTranscript';
@@ -246,14 +247,6 @@ function formatRelativeTime(iso: string | null | undefined): string {
 
 function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;
-}
-
-/** 与手机端 avatar 持久化键约定一致。 */
-function botAvatarKey(identity: DesktopIdentity | null, bot: Pick<BotRecord, 'deviceId' | 'botId'>): string {
-  if (!identity) return `unknown:unknown:${bot.botId}`;
-  return identity.kind === 'local'
-    ? `local:local:${bot.botId}`
-    : `remote:${identity.profileId}:${bot.deviceId}:${bot.botId}`;
 }
 
 /** 按 pi-ai Message（pi-durable EntryRecord.model）真实结构提取安全文本行。 */
@@ -1790,7 +1783,7 @@ function PrimaryChatPane({
           title="打开 Bot 工作台（Ctrl+.）"
         >
           <GrokBotAvatar
-            botKey={botAvatarKey(identity, bot)}
+            botKey={botAvatarKey(bot)}
             roleName={bot.role}
             isPrimary={isPrimary && !isArchived}
             starBadge={isPrimary && !isArchived}
@@ -2039,7 +2032,7 @@ function PrimaryChatPane({
         entries={rawItems}
         live={live}
         bot={bot}
-        avatarKey={botAvatarKey(identity, bot)}
+        avatarKey={botAvatarKey(bot)}
         devicePlatform={devicePlatform}
         search={chatSearch}
         archived={isArchived}
@@ -2170,11 +2163,14 @@ function PrimaryChatPane({
               {inspectorTab === 'profile' ? (
                 <div className="inspector-section">
                   <BotAvatarStudio
-                    key={botAvatarKey(identity, bot)}
-                    botKey={botAvatarKey(identity, bot)}
+                    api={api}
+                    deviceId={bot.deviceId}
+                    botId={bot.botId}
+                    key={botAvatarKey(bot)}
+                    botKey={botAvatarKey(bot)}
                     roleName={bot.role}
                     isPrimary={isPrimary && !isArchived}
-                    onChanged={() => setAvatarVersion((v) => v + 1)}
+                    onChanged={() => { setAvatarVersion((v) => v + 1); onLiveActivity?.(); }}
                   />
                   <BotProfile api={api} bot={bot} onSaved={onProfileSaved} />
                   <div className="inspector-meta-card">
@@ -2307,6 +2303,8 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
     try {
       const directory = await api.broker(identity, 'bot_directory', {});
       if (seq.current !== n || sessionRef.current !== localSess) return;
+      await syncBotAvatarConfigs(api, directory.bots, currentDeviceId);
+      if (seq.current !== n || sessionRef.current !== localSess) return;
       const unavailable = new Set(directory.devices.filter((d) => !d.online).map((d) => d.deviceId));
       for (const error of directory.errors) unavailable.add(error.deviceId);
       setBots((old) => {
@@ -2350,7 +2348,7 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
         setRefreshVersion((v) => v + 1);
       }
     }
-  }, [api, sess, profileKey, online, pageActive, visible]);
+  }, [api, sess, profileKey, online, pageActive, visible, currentDeviceId]);
 
   const triggerLoadBots = useCallback(() => {
     if (inFlight.current) {
@@ -2539,7 +2537,7 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
           onClick={() => setSelected({ deviceId: b.deviceId, botId: b.botId })}
         >
           <GrokBotAvatar
-            botKey={botAvatarKey(identity, b)}
+            botKey={botAvatarKey(b)}
             roleName={b.role}
             isPrimary={isPrimaryActive}
             starBadge={isPrimaryActive}
@@ -2590,7 +2588,7 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
               onClick={() => setSelected({ deviceId: b.deviceId, botId: b.botId })}
             >
               <GrokBotAvatar
-                botKey={botAvatarKey(identity, b)}
+                botKey={botAvatarKey(b)}
                 roleName={b.role}
                 isPrimary
                 starBadge

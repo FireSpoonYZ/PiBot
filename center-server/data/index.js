@@ -469,8 +469,12 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           const insertEventStmt = db.prepare('INSERT INTO bot_events (seq, device_id, bot_id, op, json, updated_at) VALUES (?, ?, ?, ?, ?, ?)');
           let defaultsAdded = false;
           for (const normalized of normalizedList) {
-            const serialized = json(normalized);
             const oldSerialized = existingMap.get(normalized.botId);
+            const previous = oldSerialized ? JSON.parse(oldSerialized) : null;
+            // Avatar configuration belongs to the center, never to Host directory reports.
+            normalized.avatar = previous?.avatar ?? null;
+            normalized.avatarRevision = previous?.avatarRevision ?? 0;
+            const serialized = json(normalized);
             if (oldSerialized !== serialized) {
               seq += 1;
               upsertBotStmt.run(deviceId, normalized.botId, serialized, seq);
@@ -499,7 +503,16 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           return { epoch: meta.epoch, seq };
         });
       },
-      upsertDeviceBot(deviceId, bot) {
+      getBotAvatar(deviceId, botId) {
+        const bot = parse(db.prepare('SELECT json FROM device_bots WHERE device_id = ? AND bot_id = ?').get(deviceId, botId));
+        if (!bot) throw error('NOT_FOUND', 'Bot not found');
+        return { value: bot.avatar ?? null, revision: bot.avatarRevision ?? 0 };
+      },
+      putBotAvatar(deviceId, botId, expectedRevision, value) {
+        const bot = store.upsertDeviceBot(deviceId, { botId }, { value, expectedRevision });
+        return { value: bot.avatar, revision: bot.avatarRevision };
+      },
+      upsertDeviceBot(deviceId, bot, avatarChange) {
         assertId(deviceId);
         assertObject(bot);
         assertId(bot.botId);
@@ -513,6 +526,14 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             deviceId,
             ...(rawName !== undefined ? { name: rawName } : {}),
           });
+          merged.avatar = existing?.avatar ?? null;
+          merged.avatarRevision = existing?.avatarRevision ?? 0;
+          if (avatarChange) {
+            if (!existing) throw error('NOT_FOUND', 'Bot not found');
+            assertRevision(avatarChange.expectedRevision, merged.avatarRevision);
+            merged.avatar = avatarChange.value;
+            merged.avatarRevision += 1;
+          }
           const meta = db.prepare('SELECT epoch, seq FROM sync_meta WHERE id = 1').get();
           let seq = meta.seq;
           const nowIso = new Date().toISOString();

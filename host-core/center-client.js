@@ -217,6 +217,8 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
       const session = await ownerRequest('/api/session', { method: 'POST', body: { password }, signal });
       return { authenticated: session.authenticated };
     },
+    botAvatarGet: (targetDeviceId, botId, signal) => request('/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/avatar', { signal }),
+    botAvatarSet: (targetDeviceId, botId, input, signal) => request('/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/avatar', { method: 'PUT', body: input, signal }),
     botModelGet: (targetDeviceId, botId, signal) => request(hostBotModelPath(targetDeviceId, botId), { signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botModelPath(targetDeviceId, botId), { signal }) : Promise.reject(err)),
     botModelSet: (targetDeviceId, botId, input, signal) => request(hostBotModelPath(targetDeviceId, botId), { method: 'PUT', body: input, signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botModelPath(targetDeviceId, botId), { method: 'PUT', body: input, signal }) : Promise.reject(err)),
     botCapabilitiesGet: (targetDeviceId, botId, signal) => request(hostBotCapabilitiesPath(targetDeviceId, botId), { signal }).catch(err => {

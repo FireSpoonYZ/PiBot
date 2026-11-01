@@ -2,6 +2,14 @@
 
 中心（Center）是多设备 Bot 平台的权威配置面：管理 provider/模型目录、设备登记、托管插件/技能的安装与部署、Bot 绑定与生效配置，并经认证中继向 Host 下发快照与部署计划。服务为 Fastify 应用（`openCenterServer`），数据根下按域保存独立 SQLite 与 artifact 存储；控制台（center-web）与 Host 设备分别走不同的认证入口，Host 侧路由要求已登记的设备身份。
 
+## Bot 头像
+
+头像按 `deviceId + botId` 保存在中心 `center.sqlite` 的 Bot 目录记录中，包含形状、颜色、旋转和表情。手机、Windows 和 Linux 使用相同标识生成默认头像，客户端本地存储只保留展示缓存与旧版本自定义配置。
+
+`GET /api/host/devices/:deviceId/bots/:botId/avatar` 返回 `{value, revision}`；`PUT` 接受 `{expectedRevision, value}`，`value: null` 恢复默认。设备认证沿用现有 Bearer 与 X-Device-Id；管理端提供同名的不带 `/host` 路由，沿用 owner/CSRF 认证。写入使用修订检查，并通过 Bot 目录序列同步给客户端。Host 上报目录、改名或切换主助手会保留中心头像，头像修改不改变模型与插件执行配置。
+
+升级客户端后，旧的本地自定义头像会在读取目录时自动补传；只在中心从未保存过头像（revision 为 0）时导入，多个旧客户端同时导入时以中心首次接受的配置为准。中心已经保存的配置或“恢复默认”优先，旧缓存不会将其覆盖。新 Bot 创建时的头像先保留本地草稿，随下一次目录同步上传；已有 Bot 编辑头像需要中心保存成功后才显示完成。
+
 ## 每轮准入（turn admission）
 
 > **状态**：本节描述本轮实现的每轮准入契约，由父助手统一集成与端到端验收；在验收完成前以下为设计契约而非已验证事实。Host 侧语义见 [host-core/README.md](../host-core/README.md) 的「每轮集中插件同步」。

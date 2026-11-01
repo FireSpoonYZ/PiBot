@@ -1,6 +1,7 @@
 import type { Models, ModelCost, ModelInputLimits, ModelThinkingLevel, ThinkingLevelMap } from '@earendil-works/pi-ai';
 import type { CenterConnectionStatus, Provider, Model as CenterModel, ProviderCheckResult, DiscoveryResult, ActionRequest, ActionResult } from '../center-contract/index.js';
 import type { EntryRecord } from '@earendil-works/pi-durable';
+import type { BotAvatar } from '../center-contract/index.js';
 import type {
   ShowerCreateOptions,
   ShowerFrame,
@@ -2000,6 +2001,8 @@ export interface DevicesDirectoryItem {
 }
 
 export interface BotDirectoryEntry extends BotRecord {
+  avatar?: BotAvatar | null;
+  avatarRevision?: number;
   deviceName: string;
   platform?: string;
   online: boolean;

@@ -1,6 +1,4 @@
-// 桌面端 Bot 头像定制（仅本地展示层）。
-// 持久化复用与手机端同一 localStorage 键（bot-hub-avatar-config-v2）与 Grok preset 体系：
-// 形状/颜色/表情全部来自 GROK_* 常量，不自造存储格式；reset 回到按 botKey 派生的默认 preset。
+// Bot 头像由中心保存，本地缓存只用于展示。
 import { useEffect, useState } from 'react';
 import { RotateCcw } from 'lucide-react';
 import {
@@ -9,19 +7,25 @@ import {
   GROK_SHAPE_ORDER,
   GrokBotAvatar,
   getDefaultBotAvatarPreset,
-  resetBotAvatarConfig,
   resolveBotAvatarPreset,
-  saveBotAvatarConfig,
   type GrokAvatarPreset,
 } from '../../../web/src/GrokBotAvatar';
+import { saveCentralBotAvatar } from '../../../web/src/botAvatarSync';
+import { ErrorNotice, useAction } from '../../../web/src/ui';
+import type { DesktopPanelApi } from './types';
 
 export function BotAvatarStudio({
+  api,
+  deviceId,
+  botId,
   botKey,
   roleName,
   isPrimary,
   onChanged,
 }: {
-  /** 与手机端同一约定键：local:local:<botId> / remote:<profileId>:<deviceId>:<botId>。 */
+  api: DesktopPanelApi;
+  deviceId: string;
+  botId: string;
   botKey: string;
   roleName?: string;
   isPrimary?: boolean;
@@ -32,23 +36,20 @@ export function BotAvatarStudio({
     resolveBotAvatarPreset(botKey, roleName, isPrimary),
   );
   const [dirty, setDirty] = useState(false);
+  const action = useAction();
 
   useEffect(() => {
     setDraft(resolveBotAvatarPreset(botKey, roleName, isPrimary));
     setDirty(false);
   }, [botKey, roleName, isPrimary]);
 
-  function save() {
-    saveBotAvatarConfig(botKey, draft);
-    setDirty(false);
-    onChanged?.();
-  }
-
-  function reset() {
-    resetBotAvatarConfig(botKey);
-    setDraft({ ...getDefaultBotAvatarPreset(botKey, roleName, isPrimary) });
-    setDirty(false);
-    onChanged?.();
+  function persist(value: GrokAvatarPreset | null) {
+    void action.run(async () => {
+      await saveCentralBotAvatar(api, { deviceId, botId }, value);
+      setDraft(value ?? { ...getDefaultBotAvatarPreset(botKey, roleName, isPrimary) });
+      setDirty(false);
+      onChanged?.();
+    });
   }
 
   return (
@@ -139,7 +140,8 @@ export function BotAvatarStudio({
         <button
           type="button"
           className="secondary-button"
-          onClick={reset}
+          disabled={action.busy}
+          onClick={() => persist(null)}
           title="放弃自定义并恢复该 Bot 的默认头像"
         >
           <RotateCcw size={14} /> 恢复默认
@@ -147,15 +149,16 @@ export function BotAvatarStudio({
         <button
           type="button"
           className="primary-button"
-          disabled={!dirty}
-          onClick={save}
-          title="保存到本机，仅影响此 Bot 的展示形象"
+          disabled={!dirty || action.busy}
+          onClick={() => persist(draft)}
+          title="保存到中心并同步到其他客户端"
         >
-          {dirty ? '保存形象' : '已保存'}
+          {action.busy ? '保存中…' : dirty ? '保存形象' : '已保存'}
         </button>
       </div>
+      <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
       <p className="avatar-studio-hint">
-        头像仅保存在本机（与手机端同一存储约定），不上传中心、不影响 Bot 数据。
+        头像保存在中心，在其他客户端刷新后同步显示。
       </p>
     </div>
   );

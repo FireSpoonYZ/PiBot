@@ -90,6 +90,8 @@ export const BRIDGE_CLIENT_OPERATIONS = new Set([
   'center_owner_login',
   'center_bot_model_get',
   'center_bot_model_set',
+  'center_bot_avatar_get',
+  'center_bot_avatar_set',
   'center_bot_capabilities_get',
   'center_bot_capability_set',
   'center_runtime_status',

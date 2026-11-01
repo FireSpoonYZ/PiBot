@@ -75,12 +75,11 @@ import {
   GrokBotWorkingSlot,
   JARVIS_AVATAR_PRESET,
   getDefaultBotAvatarPreset,
-  getSavedAvatarConfigMap,
-  resetBotAvatarConfig,
   resolveBotAvatarPreset,
   saveBotAvatarConfig,
   type GrokAvatarPreset,
 } from './GrokBotAvatar';
+import { botAvatarKey, saveCentralBotAvatar, syncBotAvatarConfigs } from './botAvatarSync';
 import {
   formatTurnDuration,
   latestEntryChannel,
@@ -178,6 +177,7 @@ export type HubScreen =
 export interface UnifiedBotItem {
   /** Unique composite key: `${hostKind}:${hostId}:${botId}` */
   key: string;
+  deviceId: string;
   botId: string;
   primaryConversationId?: string;
   role: string;
@@ -1462,6 +1462,8 @@ export function HostPage({
     try {
       const directory = await api.broker(identity, 'bot_directory', {});
       if (generation !== directoryGeneration.current || api.identity?.generation !== identity.generation) return;
+      await syncBotAvatarConfigs(api, directory.bots, localHostRef.current?.deviceId ?? '');
+      if (generation !== directoryGeneration.current || api.identity?.generation !== identity.generation) return;
       setRemoteDevices(directory.devices);
       writeCachedRemoteDevices(directory.devices);
       setRemoteBots(previous => {
@@ -1493,12 +1495,10 @@ export function HostPage({
 
   useEffect(() => {
     if (!remoteIdentity?.targetDeviceId) return;
-    const avatars = getSavedAvatarConfigMap();
     for (const bot of remoteBots) {
       if (bot.deviceId !== remoteIdentity.targetDeviceId || remoteBots.filter(item => item.botId === bot.botId).length !== 1) continue;
       const oldKey = `remote:${remoteIdentity.profileId}:${bot.botId}`;
       const newKey = `remote:${remoteIdentity.profileId}:${bot.deviceId}:${bot.botId}`;
-      if (avatars[oldKey] && !avatars[newKey]) saveBotAvatarConfig(newKey, avatars[oldKey]);
       if (botMetaMap[oldKey] && !botMetaMap[newKey]) updateBotMeta(newKey, botMetaMap[oldKey]);
     }
   }, [remoteBots, remoteIdentity, botMetaMap, updateBotMeta]);
@@ -1517,6 +1517,7 @@ export function HostPage({
       const matchedDevice = remoteDevices.find(device => device.deviceId === b.deviceId);
       return {
         key,
+        deviceId: b.deviceId,
         botId: b.botId,
         primaryConversationId: b.primaryConversationId,
         role: b.role,
@@ -1548,6 +1549,7 @@ export function HostPage({
       const shortHostName = matchedDevice?.displayName || b.deviceName || b.deviceId.slice(0, 10);
       return {
         key,
+        deviceId: b.deviceId,
         botId: b.botId,
         primaryConversationId: b.primaryConversationId,
         role: b.role,
@@ -2212,7 +2214,7 @@ export function HostPage({
 
   const openBotEdit = (bot: UnifiedBotItem) => {
     const meta = botMetaMap[bot.key];
-    const preset = resolveBotAvatarPreset(bot.key, bot.role, bot.isPrimary);
+    const preset = resolveBotAvatarPreset(botAvatarKey(bot), bot.role, bot.isPrimary);
     setEditMode('edit');
     setEditMakePrimary(Boolean(bot.isPrimary));
     setEditName(bot.role);
@@ -2504,6 +2506,13 @@ ${newer}` : draftSnapshot;
       }
     });
 
+  const saveAvatar = async (bot: { deviceId: string; botId: string }, value: GrokAvatarPreset | null) => {
+    const api = await ensureRemoteApi();
+    if (!api) throw new Error(t('请先连接中心，再保存头像', 'Connect to the center before saving an avatar'));
+    await saveCentralBotAvatar(api, bot, value);
+    setAvatarVersion(v => v + 1);
+  };
+
   // Save in Edit Bot / Create Bot (15847.jpg "完成")
   const handleSaveBotEdit = () =>
     action.run(async () => {
@@ -2541,7 +2550,7 @@ ${newer}` : draftSnapshot;
           setCreateAttempt(null);
           const created = env.result as HostBot;
           const key = `local:local:${created.botId}`;
-          saveBotAvatarConfig(key, editAvatarPreset);
+          saveBotAvatarConfig(botAvatarKey(created), editAvatarPreset);
           setAvatarVersion(v => v + 1);
           updateBotMeta(key, {
             customName: roleName,
@@ -2570,6 +2579,7 @@ ${newer}` : draftSnapshot;
           await syncLocalBots(snap);
           openBotChat({
             key,
+            deviceId: created.deviceId,
             botId: created.botId,
             role: roleName,
             cwd: created.cwd,
@@ -2593,7 +2603,7 @@ ${newer}` : draftSnapshot;
           }).catch(error => { if (error?.outcome === 'not-sent') setCreateAttempt(null); throw error; })) as unknown as HostBot;
           setCreateAttempt(null);
           const key = `remote:${remoteIdentity.profileId}:${targetHost}:${created.botId}`;
-          saveBotAvatarConfig(key, editAvatarPreset);
+          saveBotAvatarConfig(botAvatarKey({ deviceId: targetHost, botId: created.botId }), editAvatarPreset);
           setAvatarVersion(v => v + 1);
           updateBotMeta(key, {
             customName: roleName,
@@ -2617,8 +2627,7 @@ ${newer}` : draftSnapshot;
           await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'updateBotProfile', { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() });
           await syncRemoteBots();
         } else throw new Error('Remote target unavailable');
-        saveBotAvatarConfig(activeBot.key, editAvatarPreset);
-        setAvatarVersion(v => v + 1);
+        await saveAvatar(activeBot, editAvatarPreset);
         updateBotMeta(activeBot.key, {
           customName: roleName,
           subtitle: editSubtitle.trim(),
@@ -3534,7 +3543,7 @@ ${newer}` : draftSnapshot;
   });
   const anyDrawerOpen = leftDrawerOpen;
   const primaryPreset = primaryBot
-    ? resolveBotAvatarPreset(primaryBot.key, primaryBot.role, true)
+    ? resolveBotAvatarPreset(botAvatarKey(primaryBot), primaryBot.role, true)
     : JARVIS_AVATAR_PRESET;
 
   // 电脑全屏视图（Grok Bot 风格）：本机与远程 Bot 共用同一全屏组件。
@@ -3745,7 +3754,7 @@ ${newer}` : draftSnapshot;
                     meta?.updatedAt || 0,
                   );
                   const timeLabel = formatBotListTime(activityMs || undefined, item.createdAt, t);
-                  const preset = resolveBotAvatarPreset(item.key, item.role, isPrimaryActive);
+                  const preset = resolveBotAvatarPreset(botAvatarKey(item), item.role, isPrimaryActive);
                   return (
                     <button
                       key={item.key}
@@ -3808,7 +3817,7 @@ ${newer}` : draftSnapshot;
                   {archivedExpanded &&
                     archivedBots.map(item => {
                       const daysLeft = formatArchivedRemainingDays(item.archivedAt);
-                      const preset = resolveBotAvatarPreset(item.key, item.role, false);
+                      const preset = resolveBotAvatarPreset(botAvatarKey(item), item.role, false);
                       return (
                         <div
                           key={item.key}
@@ -3943,7 +3952,7 @@ ${newer}` : draftSnapshot;
               aria-label={t('查看 Bot 资料与设定', 'View Bot profile & settings')}
             >
               <GrokBotAvatar
-                preset={resolveBotAvatarPreset(activeBot.key, activeBot.role, activeBot.isPrimary)}
+                preset={resolveBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary)}
                 isPrimary={activeBot.isPrimary}
                 busy={isBotBusy}
                 size={28}
@@ -4115,7 +4124,7 @@ ${newer}` : draftSnapshot;
                   onClick={() => openBotProfile(activeBot)}
                 >
                   <GrokBotAvatar
-                    preset={resolveBotAvatarPreset(activeBot.key, activeBot.role, activeBot.isPrimary)}
+                    preset={resolveBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary)}
                     isPrimary={activeBot.isPrimary}
                     starBadge={activeBot.isPrimary}
                     platformBadge={
@@ -4203,7 +4212,7 @@ ${newer}` : draftSnapshot;
             <GrokBotWorkingSlot
               key={activeBot.key}
               botKey={activeBot.key}
-              preset={resolveBotAvatarPreset(activeBot.key, activeBot.role, activeBot.isPrimary)}
+              preset={resolveBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary)}
               isBusy={isBotBusy}
               isSending={chatPending?.botKey === activeBot.key && chatPending.phase === 'sending'}
               isRecovering={chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering'}
@@ -4581,13 +4590,13 @@ ${newer}` : draftSnapshot;
                 onClick={() =>
                   openAvatarPicker(
                     'bot-profile',
-                    resolveBotAvatarPreset(activeBot.key, activeBot.role, activeBot.isPrimary),
+                    resolveBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary),
                   )
                 }
                 aria-label={t('更换头像', 'Change avatar')}
               >
                 <GrokBotAvatar
-                  preset={resolveBotAvatarPreset(activeBot.key, activeBot.role, activeBot.isPrimary)}
+                  preset={resolveBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary)}
                   isPrimary={activeBot.isPrimary}
                   starBadge={activeBot.isPrimary}
                   platformBadge={
@@ -4730,7 +4739,7 @@ ${newer}` : draftSnapshot;
                   className={`grok-toggle-switch${botMetaMap[activeBot.key]?.notifyEnabled !== false ? ' checked' : ''}`}
                   style={
                     botMetaMap[activeBot.key]?.notifyEnabled !== false
-                      ? { backgroundColor: resolveBotAvatarPreset(activeBot.key, activeBot.role, activeBot.isPrimary).color }
+                      ? { backgroundColor: resolveBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary).color }
                       : undefined
                   }
                   onClick={() =>
@@ -4824,7 +4833,7 @@ ${newer}` : draftSnapshot;
           botId={activeBot.botId}
           botName={activeBot.role}
           hostLabel={activeBot.hostKind === 'remote' ? `${t('远程', 'Remote')} · ${activeBot.hostLabel}` : activeBot.hostLabel}
-          avatarPreset={resolveBotAvatarPreset(activeBot.key, activeBot.role, activeBot.isPrimary)}
+          avatarPreset={resolveBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary)}
           isPrimary={activeBot.isPrimary}
           hostKind={activeBot.hostKind}
           open={screen === 'bot-screen'}
@@ -5138,20 +5147,21 @@ ${newer}` : draftSnapshot;
             <button
               type="button"
               className="grok-done-pill-btn"
-              onClick={() => {
+              disabled={action.busy}
+              onClick={() => void action.run(async () => {
                 setEditAvatarPreset(draftAvatar);
                 if (avatarReturnScreen === 'bot-profile' && activeBot) {
-                  saveBotAvatarConfig(activeBot.key, draftAvatar);
-                  setAvatarVersion(v => v + 1);
+                  await saveAvatar(activeBot, draftAvatar);
                 }
                 setScreen(avatarReturnScreen);
-              }}
+              })}
             >
               {t('完成', 'Done')}
             </button>
           </header>
 
           <div className="grok-subpage-scroll">
+            <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
             {/* Top Segmented Tabs (15848.jpg) */}
             <div className="grok-segmented-tabs" role="tablist">
               <button
@@ -5272,13 +5282,9 @@ ${newer}` : draftSnapshot;
                   className="grok-reset-link"
                   onClick={() => {
                     const def = activeBot
-                      ? getDefaultBotAvatarPreset(activeBot.key, activeBot.role, activeBot.isPrimary)
+                      ? getDefaultBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary)
                       : JARVIS_AVATAR_PRESET;
                     setDraftAvatar({ ...def });
-                    if (activeBot) {
-                      resetBotAvatarConfig(activeBot.key);
-                      setAvatarVersion(v => v + 1);
-                    }
                   }}
                 >
                   {t('重置为默认', 'Reset to default')}
@@ -5551,7 +5557,7 @@ ${newer}` : draftSnapshot;
                     {filteredTasks.map(task => {
                       const isEnabled = task.enabled !== false;
                       const accentColor = resolveBotAvatarPreset(
-                        activeBot.key,
+                        botAvatarKey(activeBot),
                         activeBot.role,
                         activeBot.isPrimary,
                       ).color;

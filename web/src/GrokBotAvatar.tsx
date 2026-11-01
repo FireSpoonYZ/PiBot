@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import type { BotAvatar } from '../../center-contract/index.js';
 import {
   GROK_EXPRESSIONS,
   GROK_HEAD_CENTER,
@@ -15,15 +16,7 @@ import {
   type GrokMascotState,
 } from './grokMascotEngine';
 
-export interface GrokAvatarPreset {
-  id: string;
-  shape: string;
-  color: string;
-  rotation: number;
-  expressionIndex: number;
-  labelZh: string;
-  labelEn: string;
-}
+export type GrokAvatarPreset = BotAvatar;
 
 export const GROK_COLOR_PALETTE: ReadonlyArray<{ id: string; hex: string; labelZh: string; labelEn: string }> = [
   { id: 'black', hex: '#080808', labelZh: '曜石黑', labelEn: 'Obsidian' },
@@ -143,9 +136,9 @@ export function saveBotAvatarPreset(botKey: string, presetOrId: string | GrokAva
   }
 }
 
-export function getDefaultBotAvatarPreset(botKey: string, roleName?: string, isPrimary?: boolean): GrokAvatarPreset {
+export function getDefaultBotAvatarPreset(botKey: string, _roleName?: string, isPrimary?: boolean): GrokAvatarPreset {
   if (isPrimary) return JARVIS_AVATAR_PRESET;
-  const seed = `${roleName || ''}:${botKey}`;
+  const seed = botKey;
   let hash = 0;
   for (let i = 0; i < seed.length; i++) {
     hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
