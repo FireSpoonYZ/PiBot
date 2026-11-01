@@ -4,7 +4,8 @@
 // readWorkLive: 远端工作上下文流（每帧校验 scopeId；conversationId 绑定前可为 null，
 // 绑定后过渡为非空 UUID，此后不许回退或改换；work 只发完整快照帧）。
 
-const MAX_FRAME_BYTES = 1024 * 1024; // 1 MiB upper bound per SSE frame/event (UTF-8 bytes)
+// SSE 帧/行上限 = 快照 JSON 上限 8 MiB + SSE 行封套余量 8192（与 MAX_LIVE_JSON_BYTES 对齐）。
+const MAX_FRAME_BYTES = 8 * 1024 * 1024 + 8192; // 8 MiB + 8 KiB per SSE frame/event (UTF-8 bytes)
 const END_REASONS = new Set([
   'stopped',
   'cancelled',
@@ -157,13 +158,13 @@ async function* readLive(response, { botId, scopeId, signal }) {
       if (line.startsWith(':')) {
         commentBytes += lineBytes;
         if (commentBytes > MAX_FRAME_BYTES) {
-          throw protocolError('comments exceed 1 MiB limit');
+          throw protocolError('comments exceed frame size limit');
         }
         continue;
       }
       eventBytes += lineBytes;
       if (eventBytes > MAX_FRAME_BYTES) {
-        throw protocolError('frame exceeds 1 MiB limit');
+        throw protocolError('frame exceeds frame size limit');
       }
       const colon = line.indexOf(':');
       const field = colon === -1 ? line : line.slice(0, colon);
@@ -175,7 +176,7 @@ async function* readLive(response, { botId, scopeId, signal }) {
       // id/retry/unknown fields are ignored
     }
     if (utf8Length(buffer) > MAX_FRAME_BYTES) {
-      throw protocolError('line exceeds 1 MiB limit');
+      throw protocolError('line exceeds frame size limit');
     }
     return frames;
   }

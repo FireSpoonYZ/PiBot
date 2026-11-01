@@ -46,7 +46,7 @@ const FRAME_LABEL = 'frame frame';
 const READY_LABEL = 'ready frame';
 const CLOSED_LABEL = 'closed frame';
 const NATIVE_LABEL = 'native_call frame';
-const MAX_QUEUED_OUTPUT_BYTES = 4 * 1024 * 1024; // bound queued stdout frames
+const MAX_QUEUED_OUTPUT_BYTES = 80 * 1024 * 1024; // bound queued stdout frames
 const DRAIN_TIMEOUT_MS = 5000;
 
 function fixedCode(err) {
@@ -125,10 +125,10 @@ class OversizeError extends Error {
 
 /**
  * Read JSONL frames from a readable byte stream. Raw-byte limits: init/ordinary
- * command frames <=1MiB (including whitespace), native_result <=20MiB. UTF-8
+ * command frames <=40MiB (including whitespace), native_result <=40MiB. UTF-8
  * and JSON decoding are fatal; a trailing partial line at EOF is a protocol
  * failure. Each incoming chunk is scanned once for newlines; the only repeated
- * scan is for a long unterminated partial line, which is capped at 20MiB.
+ * scan is for a long unterminated partial line, which is capped at 40MiB.
  */
 async function* readFrames(input) {
   const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -145,7 +145,7 @@ async function* readFrames(input) {
   // Incremental newline scan: the front chunk is only scanned forward from
   // headPos, so many lines inside one chunk cost O(chunk) total. A line that
   // spans chunks concatenates once; an unterminated partial line is capped by
-  // the 20MiB frame bound.
+  // the 40MiB frame bound.
   function takeLine() {
     if (chunks.length === 0) return null;
     const idx = chunks[0].indexOf(0x0a, headPos);
@@ -189,7 +189,7 @@ async function* readFrames(input) {
       const found = takeLine();
       if (!found) break;
       if (found.bytes > BRIDGE_MAX_FRAME_BYTES) {
-        throw messageError('BAD_FRAME', 'frame exceeds 20MiB limit');
+        throw messageError('BAD_FRAME', 'frame exceeds 40MiB limit');
       }
       let text;
       try {
@@ -204,16 +204,16 @@ async function* readFrames(input) {
         throw messageError('INVALID_JSON', 'frame is not valid JSON');
       }
       // Control frame raw-byte budget (including whitespace); native_result uses
-      // the 20MiB hard frame cap checked above.
+      // the 40MiB hard frame cap checked above.
       if (parsed && typeof parsed === 'object' && parsed.type !== 'native_result') {
         if (found.bytes > BRIDGE_MAX_CONTROL_BYTES) {
-          throw messageError('REQUEST_TOO_LARGE', 'command frame exceeds 1MiB');
+          throw messageError('REQUEST_TOO_LARGE', 'command frame exceeds 40MiB');
         }
       }
       yield parsed;
     }
     if (size > BRIDGE_MAX_FRAME_BYTES) {
-      throw messageError('BAD_FRAME', 'frame exceeds 20MiB limit');
+      throw messageError('BAD_FRAME', 'frame exceeds 40MiB limit');
     }
   }
   if (size > 0) throw messageError('BAD_FRAME', 'stream ended with an incomplete frame');
@@ -386,7 +386,7 @@ export function createAndroidBridge(options = {}) {
       return await sendResult(id, result);
     } catch (err) {
       if (err instanceof OversizeError) {
-        await sendError(id, messageError('RESPONSE_TOO_LARGE', 'result frame exceeds 1MiB'));
+        await sendError(id, messageError('RESPONSE_TOO_LARGE', 'result frame exceeds 40MiB'));
         return false;
       }
       throw err;
@@ -755,7 +755,7 @@ export function createAndroidBridge(options = {}) {
               await sendObserverFrame(cmd.id, frame);
             } catch (err) {
               if (err instanceof OversizeError) {
-                finishObserver(cmd.id, messageError('RESPONSE_TOO_LARGE', 'live frame exceeds 1MiB'));
+                finishObserver(cmd.id, messageError('RESPONSE_TOO_LARGE', 'live frame exceeds 40MiB'));
                 return;
               }
               throw err;
@@ -768,7 +768,7 @@ export function createAndroidBridge(options = {}) {
             ok = await sendObserverFrame(cmd.id, frame);
           } catch (err) {
             if (err instanceof OversizeError) {
-              finishObserver(cmd.id, messageError('RESPONSE_TOO_LARGE', 'live frame exceeds 1MiB'));
+              finishObserver(cmd.id, messageError('RESPONSE_TOO_LARGE', 'live frame exceeds 40MiB'));
               return;
             }
             throw err;
@@ -890,7 +890,7 @@ export function createAndroidBridge(options = {}) {
       }
     }).catch((err) => {
       finishObserver(id, err instanceof OversizeError
-        ? messageError('RESPONSE_TOO_LARGE', 'client frame exceeds 1MiB')
+        ? messageError('RESPONSE_TOO_LARGE', 'client frame exceeds 40MiB')
         : messageError('INTERNAL', 'client frame was not written'));
       releaseClientObservation(id, rec);
     }));

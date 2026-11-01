@@ -98,7 +98,7 @@ export type HostVoiceEvent = { type: 'partial'|'submitted'|'error'; botId: strin
 
 /** 系统选图/拍照返回的单张图片：data 为纯 base64（不含 dataURL），mimeType 限定 JPEG/PNG。 */
 export type BotHostImage = { name: string; mimeType: 'image/jpeg'|'image/png'; data: string; size: number; width: number; height: number };
-/** 最多 4 张，每张最长边 ≤1600 且 ≤512KB；取消返回 {images:[],cancelled:true}；失败 reject。 */
+/** 最多 16 张，每张最长边 ≤16384 且 ≤16MB；取消返回 {images:[],cancelled:true}；失败 reject。 */
 export type BotHostPickImagesResult = { images: BotHostImage[]; cancelled?: boolean };
 
 export interface BotHostPlugin {

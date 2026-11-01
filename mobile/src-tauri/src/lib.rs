@@ -31,8 +31,8 @@ const MAX_ERROR_MESSAGE_CHARS: usize = 512;
 const MAX_ORDINARY_IN_FLIGHT: usize = 8;
 /// 客户端观察清理（clientUnobserve）独立额度：不占普通 8 槽，也不会无界并发。
 const MAX_CLIENT_CLEANUP_IN_FLIGHT: usize = 2;
-/// 单个 request 序列化负载上限（2MiB），在进入 SDK 队列前拦截。
-const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+/// 单个 request 序列化负载上限（40MiB），在进入 SDK 队列前拦截。
+const MAX_REQUEST_BYTES: usize = 40 * 1024 * 1024;
 
 /// 唯一允许穿过 Rust→Kotlin 边界的方法集合：Kotlin 侧 UI-local 动作 + 固定 bridge op。
 /// 其他 method 一律在 Rust 拒绝，不做任何泛化转发。
@@ -394,7 +394,7 @@ async fn mobile_host_request(
   if encoded_len > MAX_REQUEST_BYTES {
     return Err(MobileHostError::new(
       "REQUEST_TOO_LARGE",
-      "Host 请求超过 2MiB",
+      "Host 请求超过 40MiB",
       "not-sent",
     ));
   }

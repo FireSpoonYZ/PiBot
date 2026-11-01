@@ -14,6 +14,8 @@ import { WorkIndex, WorkContextState } from './work-context-docs.js';
 import { WorkDecisionState } from './work-decision-state.js';
 
 const MAX_PREPARE_ATTEMPTS = 3;
+// 每条消息图片解码总字节上限（64MiB）：单张合法（≤16MiB）的图仍需满足本条消息总量限制。
+const MAX_ATTACHMENTS_TOTAL_BYTES = 64 * 1024 * 1024;
 const RETRY_BASE_MS = 5000;
 const RETRY_MAX_MS = 60000;
 const RETRY_MAX_ATTEMPTS = 5;
@@ -483,6 +485,11 @@ export function createTurnAdmission(deps) {
       if (item.text.trim() !== '') blocks.push({ type: 'text', text: item.text });
       for (const meta of attachmentMeta) {
         const loaded = await attachments.load(bot.botId, meta.id);
+        blocks.push({
+          type: 'text',
+          text: 'Attached image on this Host (use this path to read or send the file): ' +
+            JSON.stringify({ name: meta.name, path: attachments.path(bot.botId, meta.id) }),
+        });
         blocks.push({ type: 'image', data: loaded.data, mimeType: meta.mimeType });
       }
       content = blocks;
@@ -635,9 +642,15 @@ export function createTurnAdmission(deps) {
     const digest = turnDigest;
     // 队列只存 id+展示元数据；提交时从盘读字节，重启/重试不丢附件、不重新产生 requestId。
     const attachmentMeta = [];
+    let attachmentBytes = 0;
     for (const id of attachmentIds) {
       const meta = await attachments.load(botId, id);
+      attachmentBytes += meta.size;
       attachmentMeta.push({ id: meta.id, name: meta.name, mimeType: meta.mimeType, size: meta.size, width: meta.width, height: meta.height });
+    }
+    // 每条消息图片总字节上限：单张合法（≤16MiB）的图仍受总量限制，超限整体拒绝。
+    if (attachmentBytes > MAX_ATTACHMENTS_TOTAL_BYTES) {
+      throw errWithCode('attachments exceed the 64 MiB per-message total image byte limit', 'INVALID_ARGUMENT');
     }
     const now = new Date().toISOString();
     const item = await harness().commit(async (tx) => {

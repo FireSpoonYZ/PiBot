@@ -16,7 +16,7 @@ export const LIVE_MAX_CLIENT_SUBSCRIPTIONS = 8;
 export const LIVE_MAX_HOST_SUBSCRIPTIONS = 8;
 export const LIVE_MAX_SUBSCRIPTIONS = 128;
 export const LIVE_OPEN_TIMEOUT_MS = 20000;
-export const MAX_LIVE_JSON_BYTES = 1048576; // 1 MiB per frame, UTF-8 bytes
+export const MAX_LIVE_JSON_BYTES = 8388608; // 8 MiB per frame, UTF-8 bytes
 
 const END_REASONS = new Set([
   'stopped',
@@ -103,7 +103,65 @@ const MESSAGE_KEYS = new Set([
   'durationMs',
   'toolCalls',
   'presentation',
+  'attachments',
 ]);
+// User messages may carry uploaded image metadata only (no base64 data, no
+// paths); bounds mirror the upload contract in attachments.js.
+const ATTACHMENT_KEYS = new Set(['id', 'name', 'mimeType', 'size', 'width', 'height']);
+const ATTACHMENT_ID_RE = /^[0-9a-f]{64}$/;
+const ATTACHMENT_MIME_TYPES = new Set(['image/jpeg', 'image/png']);
+const MAX_MESSAGE_ATTACHMENTS = 16;
+const MAX_ATTACHMENT_NAME_BYTES = 256;
+const MAX_ATTACHMENT_SIZE = 16777216;
+const MAX_ATTACHMENT_DIMENSION = 16384;
+// 每条消息图片解码总字节上限（64MiB）：极端异常兜底。
+const MAX_ATTACHMENTS_TOTAL_BYTES = 67108864;
+
+function normalizeLiveAttachments(value) {
+  if (!Array.isArray(value) || value.length > MAX_MESSAGE_ATTACHMENTS) {
+    throw invalid('message attachments must be an array of at most 16 items');
+  }
+  let totalBytes = 0;
+  const out = value.map((item) => {
+    if (!isPlainObject(item)) throw invalid('message attachment must be a plain object');
+    rejectUnknownFields(item, ATTACHMENT_KEYS, 'message attachment');
+    if (typeof item.id !== 'string' || !ATTACHMENT_ID_RE.test(item.id)) {
+      throw invalid('attachment id must be a lowercase 64-character hex SHA-256');
+    }
+    if (
+      typeof item.name !== 'string' ||
+      !item.name.isWellFormed() ||
+      item.name.trim() === '' ||
+      Buffer.byteLength(item.name, 'utf8') > MAX_ATTACHMENT_NAME_BYTES
+    ) {
+      throw invalid('attachment name must be a well-formed non-blank string of at most 256 UTF-8 bytes');
+    }
+    if (!ATTACHMENT_MIME_TYPES.has(item.mimeType)) {
+      throw invalid('attachment mimeType must be image/jpeg or image/png');
+    }
+    if (!Number.isSafeInteger(item.size) || item.size < 1 || item.size > MAX_ATTACHMENT_SIZE) {
+      throw invalid('attachment size must be a positive safe integer of at most 16 MiB');
+    }
+    totalBytes += item.size;
+    if (totalBytes > MAX_ATTACHMENTS_TOTAL_BYTES) {
+      throw invalid('message attachments exceed the 64 MiB total image byte limit');
+    }
+    for (const field of ['width', 'height']) {
+      if (!Number.isSafeInteger(item[field]) || item[field] < 1 || item[field] > MAX_ATTACHMENT_DIMENSION) {
+        throw invalid('attachment ' + field + ' must be a positive safe integer of at most 16384');
+      }
+    }
+    return {
+      id: item.id,
+      name: item.name,
+      mimeType: item.mimeType,
+      size: item.size,
+      width: item.width,
+      height: item.height,
+    };
+  });
+  return out;
+}
 const MESSAGE_TOOL_CALL_KEYS = new Set(['callId', 'name']);
 const TOOL_KEYS = new Set([
   'callId',
@@ -230,6 +288,12 @@ function normalizeLiveState(state) {
       // Strict whitelist validation; replaces the value so any extra fields a
       // forged host added inside a presentation cannot reach clients.
       if (message.presentation !== undefined) message.presentation = normalizeToolPresentation(message.presentation);
+      // Metadata-only attachments are allowed on user messages; forged
+      // attachments on assistant/toolResult messages are rejected.
+      if (message.attachments !== undefined) {
+        if (message.role !== 'user') throw invalid('attachments are allowed only on user messages');
+        message.attachments = normalizeLiveAttachments(message.attachments);
+      }
       if (message.toolCalls !== undefined) {
         if (!Array.isArray(message.toolCalls)) throw invalid('message toolCalls must be an array');
         for (const call of message.toolCalls) {
@@ -286,7 +350,7 @@ function normalizeLiveState(state) {
  *    is bound;
  *  - primary: has no scopeId field at all and conversationId is a non-empty
  *    id.
- * The 1 MiB JSON budget is enforced before any traversal of untrusted arrays,
+ * The 8 MiB JSON budget is enforced before any traversal of untrusted arrays,
  * so oversized frames are rejected before deep state validation. When a
  * target is supplied, botId and the scopeId presence/value must match exactly.
  */
@@ -320,7 +384,7 @@ export function normalizeLiveSnapshot(frame, target) {
     throw invalid('snapshot frame must be JSON-serializable');
   }
   if (Buffer.byteLength(json, 'utf8') > MAX_LIVE_JSON_BYTES) {
-    throw messageError('REQUEST_TOO_LARGE', 'live frame exceeds 1 MiB');
+    throw messageError('REQUEST_TOO_LARGE', 'live frame exceeds 8 MiB');
   }
   const snapshot = {
     type: 'snapshot',

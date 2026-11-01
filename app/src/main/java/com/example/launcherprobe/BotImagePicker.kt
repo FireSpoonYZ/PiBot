@@ -23,6 +23,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 /**
  * 系统图片选择/拍照：Activity result → 解码 → EXIF 纠偏 → 限尺寸/限字节重编码 → base64。
@@ -91,7 +92,7 @@ internal class BotImagePicker(private val activity: Activity) {
             return
         }
         if (uris.size > MAX_IMAGES) {
-            finish(Outcome.Failed("TOO_MANY", "一次最多选择 4 张图片"))
+            finish(Outcome.Failed("TOO_MANY", "一次最多选择 16 张图片"))
             return
         }
         process(session, uris)
@@ -191,9 +192,15 @@ internal class BotImagePicker(private val activity: Activity) {
         Thread {
             val images = JSONArray()
             var failure: PickerException? = null
+            var totalBytes = 0L
             for (uri in uris) {
                 try {
-                    images.put(decode(uri))
+                    val image = decode(uri)
+                    totalBytes += image.getLong("size")
+                    if (totalBytes > MAX_TOTAL_BYTES) {
+                        throw PickerException("TOO_LARGE", "图片总大小超过 64MB")
+                    }
+                    images.put(image)
                 } catch (e: PickerException) {
                     failure = e
                     break
@@ -239,8 +246,12 @@ internal class BotImagePicker(private val activity: Activity) {
             || orientation == ExifInterface.ORIENTATION_TRANSVERSE
         val effectiveW = if (rotated) bounds.outHeight else bounds.outWidth
         val effectiveH = if (rotated) bounds.outWidth else bounds.outHeight
+        // bounds 先采样：除了长边上限，也按像素预算避免 16384² 级别的巨大 Bitmap。
         var sample = 1
-        while (max(effectiveW, effectiveH) / sample > 2 * MAX_DIM) sample *= 2
+        while (max(effectiveW, effectiveH) / sample > 2 * MAX_DIM ||
+               (effectiveW.toLong() / sample) * (effectiveH.toLong() / sample) > MAX_PIXELS) {
+            sample *= 2
+        }
         val options = BitmapFactory.Options().apply { inSampleSize = sample }
         var bitmap = try {
             resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
@@ -249,8 +260,12 @@ internal class BotImagePicker(private val activity: Activity) {
         } ?: throw PickerException("DECODE_FAILED", "无法解码所选图片")
         bitmap = applyOrientation(bitmap, orientation)
         bitmap = fitWithin(bitmap, MAX_DIM)
+        // 采样后仍可能超像素预算（极端宽高比）：再按 √ 比例缩一次，只防内存不报错。
+        if (bitmap.width.toLong() * bitmap.height.toLong() > MAX_PIXELS) {
+            bitmap = scale(bitmap, sqrt(MAX_PIXELS.toDouble() / (bitmap.width.toDouble() * bitmap.height)).toFloat())
+        }
 
-        // 源为 PNG 且未超限时保留 PNG；其余一律重编码 JPEG 并降质/缩尺寸至 ≤512KB。
+        // 源为 PNG 且未超限时保留 PNG；其余一律重编码 JPEG 并降质/缩尺寸至 ≤16MB。
         try {
             val sourceIsPng = bounds.outMimeType == "image/png"
             var outMime = if (sourceIsPng) MIME_PNG else MIME_JPEG
@@ -272,7 +287,7 @@ internal class BotImagePicker(private val activity: Activity) {
                 encoded = encodeJpeg(bitmap, quality)
             }
             if (encoded.size > MAX_BYTES) {
-                throw PickerException("TOO_LARGE", "图片压缩后仍超过 512KB")
+                throw PickerException("TOO_LARGE", "图片压缩后仍超过 16MB")
             }
 
             val image = JSONObject()
@@ -395,9 +410,12 @@ internal class BotImagePicker(private val activity: Activity) {
 
     private companion object {
         const val SOURCE_CAMERA = "camera"
-        const val MAX_IMAGES = 4
-        const val MAX_DIM = 1600
-        const val MAX_BYTES = 512 * 1024
+        const val MAX_IMAGES = 16
+        const val MAX_DIM = 16384
+        const val MAX_BYTES = 16 * 1024 * 1024
+        // 解码软像素预算：超预算自动采样/缩放保护内存，不对可缩放来源报错。
+        const val MAX_PIXELS = 32L * 1024 * 1024
+        const val MAX_TOTAL_BYTES = 64L * 1024 * 1024
         const val JPEG_START_QUALITY = 90
         const val JPEG_MIN_QUALITY = 40
         const val MAX_ENCODE_ATTEMPTS = 24

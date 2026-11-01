@@ -99,7 +99,7 @@ function attachmentMetaValid(value) {
 }
 function attachmentsValid(value) {
   if (value === undefined || value === null) return true;
-  return Array.isArray(value) && value.length <= 4 && value.every(attachmentMetaValid);
+  return Array.isArray(value) && value.length <= 16 && value.every(attachmentMetaValid);
 }
 
 // Host-queued turn admission on the receipt: id/phase/可选 error 的严格形状，

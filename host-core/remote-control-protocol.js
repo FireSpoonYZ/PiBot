@@ -33,17 +33,18 @@ import {
   normalizeShowerSessionId,
 } from './shower-protocol.js';
 import { normalizeScheduleControlParams } from './schedule-protocol.js';
+import { normalizeBotFileChunk } from './bot-file-protocol.js';
 
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const MAX_SOUL_BYTES = 65536; // 64 KiB public SOUL.md text limit
 const EXTENSION_MODES = new Set(['read-write', 'read-only']);
-const MAX_SUBMIT_ATTACHMENTS = 4;
+const MAX_SUBMIT_ATTACHMENTS = 16;
 const MAX_ATTACHMENT_NAME_BYTES = 256;
-const MAX_ATTACHMENT_BYTES = 524288; // 512 KiB decoded image payload
+const MAX_ATTACHMENT_BYTES = 16777216; // 16 MiB decoded image payload
 const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png']);
 
-export const MAX_CONTROL_JSON_BYTES = 1048576; // 1 MiB, params/result JSON UTF-8 bytes
+export const MAX_CONTROL_JSON_BYTES = 33554432; // 32 MiB, params/result JSON UTF-8 bytes
 export const CONTROL_TIMEOUT_MS = 20000;
 export const CONTROL_CLIENT_TIMEOUT_MS = 25000;
 export const CONTROL_MAX_CLIENT_CALLS = 8;
@@ -168,6 +169,7 @@ const CONTROL_V2_METHODS = Object.freeze([
   // 图片附件：上传与读取是 additive v2；submit 通过 attachments 引用已上传 ID。
   'uploadAttachment',
   'getAttachment',
+  'putBotFileChunk',
 ]);
 
 export const CONTROL_METHODS = Object.freeze([...CONTROL_V1_METHODS, ...CONTROL_V2_METHODS]);
@@ -296,7 +298,7 @@ function assertBase64(value, name) {
   }
 }
 
-// submit 附件引用：至多 4 个有序 64hex ID。
+// submit 附件引用：至多 16 个有序 64hex ID。
 function normalizeAttachmentIds(value) {
   if (!Array.isArray(value) || value.length < 1 || value.length > MAX_SUBMIT_ATTACHMENTS) {
     throw invalid(`attachments must be an array of 1-${MAX_SUBMIT_ATTACHMENTS} attachment IDs`);
@@ -696,6 +698,8 @@ function normalizeControlParams(method, params) {
     case 'scheduleTask': {
       return normalizeScheduleControlParams(params);
     }
+    case 'putBotFileChunk':
+      return normalizeBotFileChunk(params);
     case 'uploadAttachment': {
       rejectUnknownFields(params, new Set(['botId', 'name', 'mimeType', 'data']), 'params');
       assertId(params.botId, 'botId');
@@ -707,9 +711,9 @@ function normalizeControlParams(method, params) {
         throw invalid('mimeType must be image/jpeg or image/png');
       }
       assertBase64(params.data, 'data');
-      // base64 严格编码使解码长度可由长度推出；解码上限 512 KiB。
+      // base64 严格编码使解码长度可由长度推出；解码上限 16 MiB。
       if (Math.floor(params.data.length / 4) * 3 - (params.data.endsWith('==') ? 2 : params.data.endsWith('=') ? 1 : 0) > MAX_ATTACHMENT_BYTES) {
-        throw invalid('data exceeds the 512 KiB decoded image limit');
+        throw invalid('data exceeds the 16 MiB decoded image limit');
       }
       return { botId: params.botId, name: params.name, mimeType: params.mimeType, data: params.data };
     }
@@ -727,7 +731,7 @@ function normalizeControlParams(method, params) {
 /**
  * Validate a control method name and its params object against the fixed
  * method table. Throws messageError INVALID_ARGUMENT on unknown method/invalid
- * params, REQUEST_TOO_LARGE when normalized params exceed 1 MiB UTF-8.
+ * params, REQUEST_TOO_LARGE when normalized params exceed 32 MiB UTF-8.
  */
 export function normalizeControlCall(method, params) {
   if (typeof method !== 'string' || !CONTROL_METHODS.includes(method)) {
@@ -745,7 +749,7 @@ export function normalizeControlCall(method, params) {
     throw invalid('params must be JSON-serializable');
   }
   if (Buffer.byteLength(json, 'utf8') > MAX_CONTROL_JSON_BYTES) {
-    throw messageError('REQUEST_TOO_LARGE', 'control params exceed 1 MiB');
+    throw messageError('REQUEST_TOO_LARGE', 'control params exceed 32 MiB');
   }
   return { method, params: normalized };
 }
@@ -771,7 +775,7 @@ function normalizeControlResult(parsed, label) {
       throw invalid(`${label}.result must be JSON-serializable`);
     }
     if (Buffer.byteLength(json, 'utf8') > MAX_CONTROL_JSON_BYTES) {
-      throw messageError('RESPONSE_TOO_LARGE', `${label} result exceeds 1 MiB`);
+      throw messageError('RESPONSE_TOO_LARGE', `${label} result exceeds 32 MiB`);
     }
     return { ok: true, result: parsed.result };
   }

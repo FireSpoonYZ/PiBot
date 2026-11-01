@@ -23,7 +23,7 @@ const MAX_TOOLS = 32; // 工具槽总数上限（tools + nestedTools）
 const MAX_TOOL_OUTPUT_UNITS = 4096; // 工具运行输出保留尾部上限
 // Attribution 只由 Host 端冻结 turn/信封生成，字段小而固定；仍留字符上限防伪造放大帧。
 const MAX_ATTRIBUTION_TEXT_UNITS = 256;
-// 快照/更新帧整体不超过 MAX_LIVE_JSON_BYTES（1MiB UTF-8）。presentation 预算按
+// 快照/更新帧整体不超过 MAX_LIVE_JSON_BYTES（8MiB UTF-8）。presentation 预算按
 // 帧余量计算：外层 envelope 与 id 上限合计 <8KiB，先按该常量扣减，再按 state
 // 实际 JSON 字节收紧，保证任何有界投影（含最坏转义）都装得进一帧。
 const FRAME_ENVELOPE_RESERVE_BYTES = 8192;

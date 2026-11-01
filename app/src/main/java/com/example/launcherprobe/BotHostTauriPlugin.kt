@@ -31,7 +31,7 @@ private const val STREAM_CLOSED_MESSAGE = "事件流已关闭，请重新连接"
 // 私有终帧事件名（仅 Kotlin→Rust proxy→JS 内部消费）；公开 listener 仍是 hostFrame/voiceEvent。
 private const val STREAM_ERROR_EVENT = "streamError"
 private const val MAX_FRAMES = 8
-private const val MAX_BYTES = 4L * 1024 * 1024
+private const val MAX_BYTES = 80L * 1024 * 1024
 
 @InvokeArg
 internal class ListenArgs {

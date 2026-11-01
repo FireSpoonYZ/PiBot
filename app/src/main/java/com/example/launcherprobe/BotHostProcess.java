@@ -70,8 +70,8 @@ final class BotHostProcess {
     }
 
     private static final int PROTOCOL = 1;
-    private static final int MAX_RAW_FRAME = 20 * 1024 * 1024;
-    private static final int MAX_CONTROL_FRAME = 1024 * 1024;
+    private static final int MAX_RAW_FRAME = 40 * 1024 * 1024;
+    private static final int MAX_CONTROL_FRAME = 40 * 1024 * 1024;
     private static final int MAX_REQUESTS = 8;
     private static final int MAX_OBSERVERS = 8;
     private static final long WRITE_TIMEOUT_MS = 5_000;
@@ -82,7 +82,7 @@ final class BotHostProcess {
     private static final long CLOSE_TIMEOUT_MS = 30_000;
     private static final long EXIT_AWAIT_MS = 5_000;
     private static final int QUEUE_CAPACITY = 4;
-    private static final long QUEUE_BYTE_BUDGET = 24L * 1024 * 1024;
+    private static final long QUEUE_BYTE_BUDGET = 80L * 1024 * 1024;
     private static final List<String> REQUEST_TYPES =
             Arrays.asList("call", "status", "settings_get", "settings_set");
     /** 长运行方法（八个 Hindsight 记忆 + 手动压缩）；其余方法沿用 REQUEST_TIMEOUT_MS。 */

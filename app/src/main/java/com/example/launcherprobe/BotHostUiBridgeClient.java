@@ -62,7 +62,7 @@ public final class BotHostUiBridgeClient {
     /** 记忆方法外层等待：后端 reflect 最长 120s，留出协议/传输余量。 */
     private static final long MEMORY_REQUEST_DEADLINE_MS = 150_000L;
     /** 发送队列（排队+在写）字节预算，与 8 个请求槽独立。 */
-    private static final long MAX_WRITER_BYTES = 4L * 1024 * 1024;
+    private static final long MAX_WRITER_BYTES = 80L * 1024 * 1024;
     /** 预留给 pause 清理的字节容量：普通请求不得把它挤掉。 */
     private static final long RESERVED_CLEANUP_BYTES = 64L * 1024;
     /** 客户端清理（clientUnobserve）独立额度：不占普通 8 槽，也不会无界排队/堆 future。 */
@@ -122,7 +122,7 @@ public final class BotHostUiBridgeClient {
     private Job reservedPause;
     /** 待写出队列：由唯一 writer 线程消费，不持锁做 socket IO。 */
     private final ArrayDeque<Job> outbox = new ArrayDeque<>();
-    /** 有界事件投递队列（≤8 帧/4MiB，含正在交付的一项）。 */
+    /** 有界事件投递队列（≤8 帧/80MiB，含正在交付的一项）。 */
     private final List<Delivery> events = new ArrayList<>();
     private final Runnable drain = this::drainEvents;
 
@@ -580,7 +580,7 @@ public final class BotHostUiBridgeClient {
         }
     }
 
-    /** 唯一 drain：交付期间该项仍计入 8 帧/4MiB，交付返回后才移除并归还配额。 */
+    /** 唯一 drain：交付期间该项仍计入 8 帧/80MiB，交付返回后才移除并归还配额。 */
     private void drainEvents() {
         while (true) {
             Delivery delivery;

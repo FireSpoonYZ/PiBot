@@ -7,6 +7,8 @@ import type {
   AttachmentUploadInput,
   ImageAttachment,
   ImageAttachmentData,
+  BotFileChunkInput,
+  BotFileReceipt,
   HistoryOptions,
   HistoryPage,
   ClearHistoryResult,
@@ -126,6 +128,7 @@ export interface ControlClient {
   getSubmission(botId: string, requestId: string, options?: ControlClientCallOptions): Promise<PrimarySubmission>;
   uploadAttachment(botId: string, input: AttachmentUploadInput, options?: ControlClientCallOptions): Promise<ImageAttachment>;
   getAttachment(botId: string, attachmentId: string, options?: ControlClientCallOptions): Promise<ImageAttachmentData>;
+  putBotFileChunk(botId: string, input: BotFileChunkInput, options?: ControlClientCallOptions): Promise<BotFileReceipt>;
   history(botId: string, options?: HistoryClientOptions): Promise<HistoryPage>;
   clearHistory(botId: string, options?: ControlClientCallOptions): Promise<ClearHistoryResult>;
   compact(botId: string, options?: ControlClientCallOptions): Promise<CompactResult>;

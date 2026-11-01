@@ -10,13 +10,17 @@ import { useText } from './ui';
 export type { ImageAttachment, ImageAttachmentData };
 
 /** 与合同一致的本地归一化上限；上传前再按服务端校验。 */
-export const IMAGE_MAX_EDGE = 1600;
-export const IMAGE_MAX_BYTES = 512 * 1024;
-export const IMAGE_MAX_COUNT = 4;
+export const IMAGE_MAX_EDGE = 16384;
+export const IMAGE_MAX_BYTES = 16 * 1024 * 1024;
+export const IMAGE_MAX_COUNT = 16;
+/** 一次选图/每条消息的图片总字节上限（解码后）。 */
+export const IMAGE_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 /** 上传文件名上限（UTF-8 字节），与 native 统一。 */
 export const IMAGE_NAME_MAX_BYTES = 256;
 const JPEG_QUALITY_STEPS = [0.85, 0.72, 0.58, 0.45, 0.34];
 const MAX_SCALE_PASSES = 3;
+// canvas 解码软像素预算：超大图自动缩放到预算内（内存保护，不对可缩放来源报错）。
+const IMAGE_MAX_PIXELS = 32 * 1024 * 1024;
 
 type ImageMime = ImageAttachment['mimeType'];
 
@@ -66,7 +70,7 @@ function fileToBytes(file: File | Blob): Promise<Uint8Array> {
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
-  // 分块拼接避免参数上限；归一化后已 ≤512KiB，开销可控。
+  // 分块拼接避免参数上限；归一化后已 ≤16MiB，开销可控。
   const chunk = 0x8000;
   let binary = '';
   for (let i = 0; i < bytes.length; i += chunk) {
@@ -135,7 +139,8 @@ function hasAlphaFast(source: CanvasImageSource, width: number, height: number):
 }
 
 /**
- * 归一化到合同约束：最长边 ≤1600、文件 ≤512KiB、mime PNG/JPEG。
+ * 归一化到合同约束：最长边 ≤16384、文件 ≤16MiB、mime PNG/JPEG。
+ * canvas 软像素预算 32Mi px：超预算来源自动缩放进预算（内存保护，不直接报超限）。
  * JPEG 逐步降质；仍超限则等比缩放后重试；仍超限抛 IMAGE_TOO_LARGE，调用方必须可见化且不静默丢弃草稿。
  */
 export async function normalizeImageFile(file: File | Blob, name?: string): Promise<PickedImageSource> {
@@ -144,7 +149,12 @@ export async function normalizeImageFile(file: File | Blob, name?: string): Prom
   const sourceH = img.naturalHeight || img.height;
   if (!sourceW || !sourceH) throw new ImagePickError('IMAGE_DECODE_FAILED', '无法读取图片尺寸');
 
-  let scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(sourceW, sourceH));
+  // 先按长边，再按 canvas 软像素预算取更严的缩放（防 16384² 级内存峰值）。
+  let scale = Math.min(
+    1,
+    IMAGE_MAX_EDGE / Math.max(sourceW, sourceH),
+    Math.sqrt(IMAGE_MAX_PIXELS / (sourceW * sourceH)),
+  );
   const preferJpeg = (file.type === 'image/jpeg' || file.type === 'image/jpg' || file.type === 'image/webp' || file.type === '')
     && !hasAlphaFast(img, sourceW, sourceH);
 
@@ -168,7 +178,7 @@ export async function normalizeImageFile(file: File | Blob, name?: string): Prom
     }
     scale *= 0.7;
   }
-  throw new ImagePickError('IMAGE_TOO_LARGE', '图片超出大小限制（512KiB）');
+  throw new ImagePickError('IMAGE_TOO_LARGE', '图片超出大小限制（16MiB）');
 }
 
 /** 浏览器/桌面选图入口：多选、逐个归一化；任一张失败整体中止并抛错（不上传半成品）。

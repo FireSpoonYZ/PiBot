@@ -36,7 +36,7 @@ type Stream = {
 
 const STREAM_CLOSED = 'EVENT_STREAM_CLOSED';
 const PRE_ADMISSION_FRAMES = 8;
-const PRE_ADMISSION_BYTES = 4 * 1024 * 1024;
+const PRE_ADMISSION_BYTES = 80 * 1024 * 1024;
 
 /** 原生 SDK reject 的固定错误形状；消息不含凭据或原始请求体。 */
 export class MobileHostError extends Error {

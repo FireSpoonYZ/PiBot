@@ -57,6 +57,7 @@ const routes = [
   { method: 'GET', key: '/v1/bot-requests/:requestId', pattern: /^\/v1\/bot-requests\/([^/]+)\/?$/, params: ['requestId'], hasBody: false, handler: findByRequest },
   { method: 'POST', key: '/v1/bots/:botId/submissions', pattern: /^\/v1\/bots\/([^/]+)\/submissions\/?$/, params: ['botId'], hasBody: true, handler: submit },
   { method: 'POST', key: '/v1/bots/:botId/attachments', pattern: /^\/v1\/bots\/([^/]+)\/attachments\/?$/, params: ['botId'], hasBody: true, handler: uploadAttachment },
+  { method: 'POST', key: '/v1/bots/:botId/files/chunks', pattern: /^\/v1\/bots\/([^/]+)\/files\/chunks\/?$/, params: ['botId'], hasBody: true, handler: putBotFileChunk },
   { method: 'GET', key: '/v1/bots/:botId/attachments/:attachmentId', pattern: /^\/v1\/bots\/([^/]+)\/attachments\/([^/]+)\/?$/, params: ['botId', 'attachmentId'], hasBody: false, handler: getAttachment },
   { method: 'GET', key: '/v1/bots/:botId/submissions/:requestId', pattern: /^\/v1\/bots\/([^/]+)\/submissions\/([^/]+)\/?$/, params: ['botId', 'requestId'], hasBody: false, handler: getSubmission },
   { method: 'GET', key: '/v1/bots/:botId/history', pattern: /^\/v1\/bots\/([^/]+)\/history\/?$/, params: ['botId'], hasBody: false, handler: history },
@@ -423,6 +424,11 @@ async function uploadAttachment(host, runtime, params, body, req, res) {
   }));
 }
 
+async function putBotFileChunk(host, runtime, params, body, req, res) {
+  const { params: { botId, ...input } } = normalizeControlCall('putBotFileChunk', { ...body, botId: params.botId });
+  writeControlJson(res, 200, await runtime.putBotFileChunk(botId, input));
+}
+
 async function getAttachment(host, runtime, params, body, req, res) {
   assertNoQuery(req);
   const { params: input } = normalizeControlCall('getAttachment', params);
@@ -497,7 +503,6 @@ async function memoryCorrect(host, runtime, params, body, req, res) {
   assertNoQuery(req);
   writeControlJson(res, 202, await runtime.correctMemory(params.botId, body));
 }
-
 async function memoryRetry(host, runtime, params, body, req, res) {
   assertNoQuery(req);
   writeControlJson(res, 202, await runtime.retryMemory(params.botId, body));
@@ -583,7 +588,7 @@ function showerTarget(body, extraKeys) {
 }
 
 // create/frame 立即返回当前快照（starting/authentication-required 不阻塞），
-// 不延长控制请求的 20s 框架；帧大小上限由协议与 backend 保证 < 1MiB。
+// 不延长控制请求的 20s 框架；帧大小上限由协议与 backend 保证在通用线/帧预算内。
 async function showerStatus(host, runtime, params, body, req, res) {
   assertNoQuery(req);
   writeControlJson(res, 200, await runtime.getShowerStatus(showerTarget(body, [])));

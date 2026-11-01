@@ -44,10 +44,13 @@ import { createRuntimeShower } from './runtime-shower.js';
 import { createScheduleManager } from './host-schedules.js';
 import { createScheduleTools } from './schedule-tools.js';
 import {
+  attachmentPath,
   loadAttachment,
   removeBotAttachments,
   uploadAttachment,
 } from './attachments.js';
+import { putBotFileChunk } from './bot-files.js';
+import { normalizeBotFileChunk } from './bot-file-protocol.js';
 
 const CTX = BACKGROUND_CONTEXT;
 const BOTS_SYNC_THROTTLE_MS = 1000;
@@ -247,7 +250,6 @@ export async function openRuntime(options) {
       throw new AggregateError(failures.map((result) => result.reason), `env cleanup failed for ${failures.length} environment(s)`);
     }
   };
-
   // 每 Bot 准入队列归本 Runtime：send/设置/工作操作共用，关闭时先拒新准入再排空。
   const bots = createBotAdmission();
   bots.suspend();
@@ -747,7 +749,6 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     },
     end() { /* Session 关闭时观察自然结束；无需动作 */ },
   });
-
   // 14 天归档自动删除定时器（每 6 小时检查一次）。
   let archivePurgeTimer = setInterval(() => {
     void purgeExpiredArchivedBots();
@@ -820,6 +821,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   // 图片附件落盘：dataRoot/attachments/<botId>/<sha256>，随 Bot 删除清理（deleteBot/purge）。
   // 附件在 Bot lane 外也可上传（本地已鉴权动作），但归属校验先于任何写盘。
   const attachmentStore = {
+    path: (botId, id) => attachmentPath(dataRoot, botId, id),
     upload: (botId, input) => uploadAttachment(dataRoot, botId, input),
     load: (botId, attachmentId) => loadAttachment(dataRoot, botId, attachmentId),
     removeBot: (botId) => removeBotAttachments(dataRoot, botId),
@@ -1451,6 +1453,12 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
       }
       return attachmentStore.upload(botId, input);
+    }),
+
+    putBotFileChunk: (botId, input) => admitBot(botId, async () => {
+      const bot = await requireBot(botId);
+      if (bot.archivedAt != null) throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
+      return putBotFileChunk(dataRoot, botId, normalizeBotFileChunk({ ...input, botId }));
     }),
 
     async getAttachment(botId, attachmentId) {

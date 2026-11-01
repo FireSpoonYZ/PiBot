@@ -329,6 +329,11 @@ export function createCollaborationService({
     return { deviceId, botId, installationId, ...updated };
   }
 
+  async function putBotFileChunk({ deviceId, botId, input, signal }) {
+    if (deviceId === host.deviceId) return requireLocalRuntime().putBotFileChunk(botId, input);
+    return useClient((active) => active.call(deviceId, 'putBotFileChunk', { botId, ...input }, { signal }));
+  }
+
   async function getCurrentDevice() {
     if (relay && !closed && Date.now() >= nameFreshUntil) {
       if (!refresh) {
@@ -391,6 +396,7 @@ export function createCollaborationService({
     setBotModel,
     getBotCapabilities,
     setBotCapability,
+    putBotFileChunk,
     getCurrentDevice,
     close,
   };

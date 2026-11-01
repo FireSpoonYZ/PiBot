@@ -70,7 +70,7 @@ function rejectUpgrade(socket, status, body) {
 }
 
 // Bounded write: high-water check on every outbound frame (incl. ready).
-// Returns false when the socket is closed or the buffer would exceed 4 MiB.
+// Returns false when the socket is closed or the buffer would exceed RELAY_HIGH_WATER_BYTES (80 MiB).
 function writeFrame(ws, frame, onError) {
   let text;
   try {

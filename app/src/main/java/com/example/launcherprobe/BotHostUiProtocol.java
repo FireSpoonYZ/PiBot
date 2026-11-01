@@ -34,10 +34,10 @@ final class BotHostUiProtocol {
     /** 客户端生成、服务端校验并回显：端点只与本次事务配对。 */
     static final Pattern TOKEN = Pattern.compile("[A-Za-z0-9_-]{16,64}");
 
-    static final int MAX_LINE_BYTES = 2 * 1024 * 1024;
+    static final int MAX_LINE_BYTES = 40 * 1024 * 1024;
     static final int MAX_IN_FLIGHT = 8;
     static final int MAX_OUTPUT_FRAMES = 8;
-    static final long MAX_OUTPUT_BYTES = 4L * 1024 * 1024;
+    static final long MAX_OUTPUT_BYTES = 80L * 1024 * 1024;
 
     static final String TYPE_REQUEST = "request";
     static final String TYPE_RESPONSE = "response";

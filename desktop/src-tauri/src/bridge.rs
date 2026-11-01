@@ -24,7 +24,7 @@ use serde_json::{Map, Value, json};
 use tauri::{AppHandle, Manager, ipc::Channel, utils::platform};
 use tokio::sync::oneshot;
 
-const MAX_LINE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_LINE_BYTES: usize = 40 * 1024 * 1024;
 const MAX_PENDING_CALLS: usize = 8;
 const MAX_OBSERVERS: usize = 8;
 const WRITER_QUEUE_CAP: usize = 16;
@@ -45,7 +45,7 @@ const MEMORY_METHODS: &[&str] = &[
   "compact",
 ];
 const MAX_OBSERVER_FRAME_FIFO: usize = 8;
-const MAX_OBSERVER_FIFO_BYTES: usize = 4 * 1024 * 1024;
+const MAX_OBSERVER_FIFO_BYTES: usize = 80 * 1024 * 1024;
 const OBSERVE_ACK_OP: &str = "observe_ack";
 const SIDECAR_NAME: &str = "e-launcher-client-node";
 const CLIENT_SCRIPT_NAME: &str = "desktop-client.mjs";
@@ -619,7 +619,7 @@ impl DesktopBridge {
     if bytes.len() > MAX_LINE_BYTES {
       return Err(BridgeError::new(
         "REQUEST_TOO_LARGE",
-        "broker request exceeds 2 MiB line cap",
+        "broker request exceeds 40 MiB line cap",
         "not-sent",
       ));
     }
@@ -1120,7 +1120,7 @@ fn read_bounded_line<R: BufRead>(
         reader.consume(chunk_len);
         return Err(BridgeError::new(
           "RESPONSE_TOO_LARGE",
-          "child stdout line exceeds 2 MiB limit",
+          "child stdout line exceeds 40 MiB limit",
           "unconfirmed",
         ));
       }
@@ -1134,7 +1134,7 @@ fn read_bounded_line<R: BufRead>(
         reader.consume(chunk_len);
         return Err(BridgeError::new(
           "RESPONSE_TOO_LARGE",
-          "child stdout line exceeds 2 MiB limit",
+          "child stdout line exceeds 40 MiB limit",
           "unconfirmed",
         ));
       }

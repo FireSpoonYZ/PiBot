@@ -5,6 +5,8 @@ import { resolveBotIdentity } from './bot-identity.js';
 import { assertId, digest, messageError } from './message-protocol.js';
 import { inboxQueryKey } from './message-queries.js';
 import { CONTROL_ERROR_CODES } from './remote-control-protocol.js';
+import { BOT_FILE_MAX_COUNT } from './bot-file-protocol.js';
+import { snapshotBotFiles, deliverBotFile } from './bot-files.js';
 
 const MAX_OUTPUT_BYTES = 50 * 1024;
 const MAX_TEXT_UNITS = 4096;
@@ -18,6 +20,10 @@ const TOOL_ERROR_CODES = new Set([
   ...CONTROL_ERROR_CODES,
 ]);
 const ID_SCHEMA = { type: 'string', minLength: 1 };
+const FILES_SCHEMA = {
+  type: 'array', items: { type: 'string', minLength: 1 }, maxItems: BOT_FILE_MAX_COUNT,
+  description: 'Paths on this Bot\'s Host (absolute or relative to its cwd). Up to 4 regular files, no file-size limit; images keep their original bytes.',
+};
 const LIMIT_SCHEMA = { type: 'integer', minimum: 1, maximum: 200 };
 const THINKING_LEVEL_SCHEMA = {
   anyOf: [
@@ -158,12 +164,48 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     if (messageId === undefined) {
       messageId = await api.memo('host.message-id', randomUUID(), context);
     }
+    let fileDelivery = null;
+    if (args.files?.length) {
+      if (!scope.members.some((member) => isMember(member, identity))) {
+        throw messageError('SCOPE_FORBIDDEN', 'the sending Bot must belong to the scope');
+      }
+      fileDelivery = await api.memo('host.message-files-delivered', context);
+      if (fileDelivery === undefined) {
+        let snapshot = await api.memo('host.message-files-snapshot', context);
+        if (snapshot === undefined) {
+          const bot = host.getBot(identity.botId);
+          snapshot = await api.memo('host.message-files-snapshot', {
+            revision: scope.revision,
+            files: await snapshotBotFiles(host.dataRoot, bot, args.files, context.abortSignal),
+          }, context);
+        }
+        if (snapshot.revision !== scope.revision) {
+          throw messageError('STALE_INPUT', 'scope members changed; send files again to the current scope');
+        }
+        const recipients = [];
+        // shortcut: file-bearing sends require all recipient Hosts online; add offline blob delivery when needed.
+        for (const member of scope.members) {
+          if (isMember(member, identity)) continue;
+          const files = [];
+          for (const file of snapshot.files) {
+            files.push(await deliverBotFile(file, member, collaboration, context.abortSignal));
+          }
+          recipients.push({ ...member, files });
+        }
+        fileDelivery = await api.memo('host.message-files-delivered', {
+          revision: scope.revision,
+          recipients,
+          text: args.text + '\n\nTransferred files (choose your own deviceId/botId; paths are local to that recipient; use read to inspect files and images):\n' +
+            JSON.stringify(recipients),
+        }, context);
+      }
+    }
     const publication = {
       messageId,
       scopeId: args.scopeId,
       author: { kind: 'bot', botId: identity.botId },
       category: kind === 'room' ? 'public' : args.category,
-      text: args.text,
+      text: fileDelivery?.text ?? args.text,
       replyTo: args.replyTo,
     };
     // 统一主会话下，工作来源由冻结 turn 判定；旧原生工作会话仍按会话身份走同一路径。
@@ -172,6 +214,9 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     // 目标成员资格与作者校验由账本承担；只有源自工作决策的轮（带 workNativeId）才把
     // 原始轮传给 driver，由其工作 scope 做 stale-source/成员/预算门禁。
     const workTurn = turn !== null && typeof turn.workNativeId === 'number';
+    if (fileDelivery && !log.getMessage(messageId) && log.getScope(args.scopeId)?.revision !== fileDelivery.revision) {
+      throw messageError('STALE_INPUT', 'scope members changed during file transfer; message was not published');
+    }
     const stored = workTurn || identity.scopeId !== null
       ? await publishWork(publication, api, context, turn)
       : await api.commit(() => {
@@ -190,6 +235,7 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
       replyTo: message.replyTo,
       createdAt: message.createdAt,
       status: 'stored',
+      ...(fileDelivery ? { files: fileDelivery.recipients } : {}),
     };
   }
 
@@ -201,7 +247,6 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
 
   const isMember = (member, identity) =>
     member.deviceId === identity.deviceId && member.botId === identity.botId;
-
   function assertTargetBot(args) {
     assertId(args.deviceId, 'deviceId');
     assertId(args.botId, 'botId');
@@ -553,19 +598,20 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     }),
     tool({
       name: 'send_room',
-      description: 'Publish a public message to an installed room as this Bot. Optional replyTo references a stored message in that room. The receipt means stored locally, not delivered remotely.',
-      properties: { scopeId: ID_SCHEMA, text: { type: 'string', minLength: 1 }, replyTo: ID_SCHEMA },
+      description: 'Publish a public message to an installed room as this Bot. Optional replyTo references a stored message in that room. The receipt means stored locally, not delivered remotely. Optional files are copied to every other member before publishing; all recipient Hosts must be online. Use original local paths, never base64 in text.',
+      properties: { scopeId: ID_SCHEMA, text: { type: 'string', minLength: 1 }, replyTo: ID_SCHEMA, files: FILES_SCHEMA },
       required: ['scopeId', 'text'],
       run: (args, identity, log, api, context) => send('room', args, identity, log, api, context),
     }),
     tool({
       name: 'send_dm',
-      description: 'Send to an installed DM scope as this Bot: notice is informational, request asks for work, reply answers an original request and requires its messageId as replyTo. Do not turn a reply into a new request. Returns only a local stored receipt; no scopes are created.',
+      description: 'Send to an installed DM scope as this Bot: notice is informational, request asks for work, reply answers an original request and requires its messageId as replyTo. Do not turn a reply into a new request. Returns only a local stored receipt; no scopes are created. Optional files are copied to the peer before publishing; the peer Host must be online. Use local paths (including uploaded-image paths), never base64 in text.',
       properties: {
         scopeId: ID_SCHEMA,
         category: { type: 'string', enum: ['notice', 'request', 'reply'] },
         text: { type: 'string', minLength: 1 },
         replyTo: ID_SCHEMA,
+        files: FILES_SCHEMA,
       },
       required: ['scopeId', 'category', 'text'],
       run: (args, identity, log, api, context) => send('dm', args, identity, log, api, context),

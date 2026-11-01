@@ -3,7 +3,7 @@
 
 import { timingSafeEqual } from 'node:crypto';
 
-const MAX_BODY_BYTES = 1024 * 1024;
+const MAX_BODY_BYTES = 32 * 1024 * 1024;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,512}$/;
 const BEARER_PREFIX = 'Bearer ';
 const JSON_HEADERS = {
@@ -106,7 +106,7 @@ export function createControlAuthorizer(token) {
 /**
  * Read a request body as a plain JSON object. Empty body is allowed and yields
  * {}. Non-empty bodies must be Content-Type application/json (415), valid
- * UTF-8 (400), valid JSON (400), and a plain object (400). Bodies over 1 MiB
+ * UTF-8 (400), valid JSON (400), and a plain object (400). Bodies over 32 MiB
  * reject with 413 without destroying the connection, so the error response can
  * still flush; reading is paused and the caller closes with Connection: close.
  */
@@ -138,7 +138,7 @@ export async function readControlBody(request) {
     const onData = (chunk) => {
       size += chunk.length;
       if (size > MAX_BODY_BYTES) {
-        fail(new ControlHttpError(413, 'REQUEST_TOO_LARGE', 'request body exceeds 1 MiB limit'));
+        fail(new ControlHttpError(413, 'REQUEST_TOO_LARGE', 'request body exceeds 32 MiB limit'));
         return;
       }
       chunks.push(chunk);

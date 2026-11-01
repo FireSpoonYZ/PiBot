@@ -108,7 +108,7 @@ node host-core/cli.js create   --data-root '/path/to/data-root'   --request-id r
 - `message-store.js`：`openMessageStore(dataRoot, deviceId)`，建库 `messages.sqlite`（user_version=2）：v0 全新库在初始化事务内一次性建 M7+M12 表；v1 旧库先校验身份行且 deviceId 匹配，再原子执行 `SCOPE_SCHEMA_SQL` 增量迁移到 v2；更高版本拒绝且不 drop/reset。模块 12 在此实现托管作用域存储与副本导入（`createScope`/`updateScope`/`getScopeState`/`listScopeStates`/`getScopeRecord`/`acceptScopeOffer`/`acknowledgeScope`/`recordScopeError`/`scopeOffers`/`replicaInventory`/`replicaHistory`/`nextMissingRange`/`listScopeReplicas`/`listReplicaPeers`/`recordReplicaInventory`/`importReplicaHistory`/`recordReplicaScan`，共 17 个 M12 门面方法）。
 - `message-queries.js`：`createMessageQueries(db, {deviceId})` 只读查询（getScope/listScopes/getMessage/history/inbox/replies/outbox/deliveryStatus/streamStatus）；replies 为模块 11 的 DM 直接关联回复查询。
 - `message-cli.js`：模块 7 特权离线 CLI（scope/get-scope/scopes/publish/get/receive/ack/history/inbox/outbox/delivery/stream）；输入文件读取复用模块 12 新增的 `cli-input.js`（`readInputObject`）。
-- `cli-input.js`：模块 12 抽出的共享输入读取（`invalid`/`readInputObject`，≤1MiB 普通 UTF-8 JSON 文件，保留原有大小/竞态/关闭错误处理），`message-cli.js`、`control-cli.js`、`remote-control-cli.js`、`pending-cli.js` 与 `host-service.js` 共用；模块 14 起新增 `readTextFile`（普通文件 state/open/fstat、≤1MiB+1 有界 read、严格 UTF-8、size change/FD cleanup），供 CA 与 caFile 读取。
+- `cli-input.js`：模块 12 抽出的共享输入读取（`invalid`/`readInputObject`，≤1MiB 普通 UTF-8 JSON 文件，保留原有大小/竞态/关闭错误处理；`uploadAttachment` 调用可传 32MiB 读取预算），`message-cli.js`、`control-cli.js`、`remote-control-cli.js`、`pending-cli.js` 与 `host-service.js` 共用；模块 14 起新增 `readTextFile`（普通文件 state/open/fstat、≤1MiB+1 有界 read、严格 UTF-8、size change/FD cleanup），供 CA 与 caFile 读取。
 - `scope-protocol.js`：模块 12 协议校验与规范化（`MAX_SCOPE_SYNC_BYTES`/`MAX_SCOPE_CONTROL_BYTES`、`normalizeScopeCreate`/`normalizeScopeUpdate`/`normalizeScopeRecord`/`normalizeScopeListOptions`/`normalizeScopeOfferOptions`/`normalizeScopeAck`/`normalizeInventoryQuery`/`normalizeReplicaStream`/`normalizeInventoryPage`/`normalizeHistoryQuery`/`normalizeHistoryPage`/`normalizeMissingRangeQuery`/`normalizeReplicaListOptions`/`normalizeUserMessage`）。
 - `scope-store.js`：模块 12 托管作用域存储（`SCOPE_SCHEMA_SQL` 与 `createScopeStore(db,{deviceId,transaction,queries,installScopeRevision})`，12 个方法）。
 - `replica-queries.js`：模块 12 只读副本查询（`createReplicaQueries`：inventory/historyPage/nextMissingRange/listScopeReplicas）。
@@ -267,7 +267,7 @@ Runtime 保留 `contextStatus(botId)` 与 `workContextStatus(botId, scopeId)`，
 
 ### 大历史传输
 
-手机和桌面聊天使用 `history(..., {chunked:true})`，完整条目按约 256 KiB 的字节预算分页。单条记录较大时返回 `entryChunk:{entryId,offset,json,complete}`，`offset` 以 UTF-16 单元计数，客户端沿不透明的 `nextCursor` 收齐 JSON 后还原完整记录。分片可出现空 `items`，须继续读取；只有完整记录才进入聊天状态。该预算不限制历史总量或单条记录大小，不截断或修改持久化原文。未传 `chunked` 的 Runtime/CLI 查询仍返回原始条目。旧 Host 不识别此模式时，客户端回退普通分页并在超限时减少每页条数；单条记录超出旧帧上限时仍需更新该 Host。现有 1 MiB 控制帧上限保持不变。
+手机和桌面聊天使用 `history(..., {chunked:true})`，完整条目按约 256 KiB 的字节预算分页。单条记录较大时返回 `entryChunk:{entryId,offset,json,complete}`，`offset` 以 UTF-16 单元计数，客户端沿不透明的 `nextCursor` 收齐 JSON 后还原完整记录。分片可出现空 `items`，须继续读取；只有完整记录才进入聊天状态。该预算不限制历史总量或单条记录大小，不截断或修改持久化原文。未传 `chunked` 的 Runtime/CLI 查询仍返回原始条目。旧 Host 不识别此模式时，客户端回退普通分页并在超限时减少每页条数；单条记录超出旧帧上限时仍需更新该 Host。现有 32 MiB 控制帧上限保持不变。
 
 ### 模块 3 历史验收（迁移前内嵌实现）
 
@@ -460,7 +460,7 @@ SSE 与现有路由共用 Bearer 认证；不接受查询参数令牌，不改�
 
 ### 客户端与 CLI
 
-`ControlClient.live(botId, {signal?})` 返回 `AsyncIterable<BotLiveFrame>`，纯 JS 无 Node 导入，浏览器/WebView 可用（native fetch 适配，不发送 Origin）。解析按 SSE 语法（LF/CRLF、注释、多行 data、TextDecoder 流式、单帧上限 1MiB、忽略心跳），校验帧信封（已知类型、botId 匹配、非空公开 conversationId、安全非负 sequence、snapshot.state/update.changes 为对象、end.reason）；HTTP 错误信封仍是 `ControlApiError`。`return`/`break`/`abort` 只取消读取与连接，不发 abort API；意外 EOF/网络/协议错误抛出明确错误，显式 end 正常结束；不自动重连/轮询。
+`ControlClient.live(botId, {signal?})` 返回 `AsyncIterable<BotLiveFrame>`，纯 JS 无 Node 导入，浏览器/WebView 可用（native fetch 适配，不发送 Origin）。解析按 SSE 语法（LF/CRLF、注释、多行 data、TextDecoder 流式、单帧上限 8MiB+8KiB、忽略心跳），校验帧信封（已知类型、botId 匹配、非空公开 conversationId、安全非负 sequence、snapshot.state/update.changes 为对象、end.reason）；HTTP 错误信封仍是 `ControlApiError`。`return`/`break`/`abort` 只取消读取与连接，不发 abort API；意外 EOF/网络/协议错误抛出明确错误，显式 end 正常结束；不自动重连/轮询。
 
 ```bash
 node host-core/control-cli.js live --url http://127.0.0.1:8787 \
@@ -602,7 +602,7 @@ node host-core/message-cli.js stream --data-root "$DATA_ROOT" --scope-id room-1 
 
 - **ready ≠ 落盘 ACK**：relay 的 ready 只表示认证/传输就绪；消息确认始终是接收 Host 落盘后的 per-Host ACK。离线/未知 peer 目标的 source pending 保留，不改动、不删除，也不伪造 ACK。
 - **扫描是投递，不是模型调度**：`createMessageDelivery` 在线时按 1000ms 定时器 + wake 合并扫描模块 7 outbox（每 tick 一页 200 条，cursor 推进防止永久饥饿），每目标至多 1 条、全局至多 16 条在途；匹配失败按 1000→30000ms 指数退避重试。它从不启动模型、创建输入、调用 log.installScope/SQL，也不改信封（ID/正文/修订/targets）。
-- **缓冲有限**：单帧上限 2MiB，高水位 4MiB；目标 `bufferedAmount + frameBytes > 4MiB` 时中心发 `unavailable`（BACKPRESSURE）且不入队。
+- **缓冲有限**：单帧上限 40MiB，高水位 80MiB；目标 `bufferedAmount + frameBytes > 80MiB` 时中心发 `unavailable`（BACKPRESSURE）且不入队。
 - **诊断有限**：`lastProblem` 只是最新一条诊断（code/target/messageId/at），不代表全部目标状态；实际事实源仍是 `MessageLog.deliveryStatus`/outbox。
 
 ### 可执行流程（现有 deviceId → 所有者注册 → TLS 中继 → Host 链路）
@@ -690,7 +690,7 @@ node host-core/remote-control-cli.js listBots \
   [--input control-input.json] [--ca /path/to/ca.pem]
 ```
 
-- METHOD 必须精确等于上述 10 个方法名之一，无别名；`--input` 可选，缺省 `{}`，为 ≤1MiB 的普通 UTF-8 JSON 对象。（模块 14 起该方法表扩展为固定 v2 方法，现共 40 个（含扩展/SOUL 5 个），并新增保留命令 `listDevices`/`live`，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)与[Bot 级扩展与 SOUL.md](#bot-级扩展与-soulmdhost-契约增量)两节。）
+- METHOD 必须精确等于上述 10 个方法名之一，无别名；`--input` 可选，缺省 `{}`，为 ≤1MiB 的普通 UTF-8 JSON 对象（`uploadAttachment` 为 ≤32MiB）。（模块 14 起该方法表扩展为固定 v2 方法，现共 40 个（含扩展/SOUL 5 个），并新增保留命令 `listDevices`/`live`，见[模块 14](#模块-14统一-host-服务与设备接入已完成父助手限定范围验收)与[Bot 级扩展与 SOUL.md](#bot-级扩展与-soulmdhost-契约增量)两节。）
 - 成功：stdout 输出一行原始 JSON 结果，exit 0。失败：stderr 输出 `{"error":{"code":...,"message":...,"outcome":...}}`；unconfirmed 结果 exit 2，其他错误 exit 1，`--help` exit 0。信号只关闭客户端，绝不发送 abort 方法；错误输出不含令牌/调用负载。
 
 ### JS API（`./host-core/index.js` 新增导出）
@@ -719,7 +719,7 @@ try {
 - **令牌区分**：relay 凭证（`--token-env`）用于登录中继；`--control-url`/`--control-token-env` 是本机回环 Control API 的本地令牌（仅字面 `http://127.0.0.1` 或 `http://[::1]`，路径必须 `/`，不带 query/fragment）。
 - **信任模型**：传输仍依赖受信中继 + TLS 通道，不是端到端加密/签名；CA 可用但不能关闭校验。
 - **结果语义**：`not-sent` 未交给目标本地 Control API；`unconfirmed` 操作可能已被接受（超时/断线/取消后），不可认定无副作用；`responded` 目标本地 API 已返回（未必代表失败零副作用）。应用层请求幂等依赖显式 requestId 重试核对，不自动重试。
-- **上限**：请求参数与结果 JSON 各 ≤1MiB（UTF-8），整 relay 帧 ≤2MiB；客户端 8 个在途调用、25s 超时，Host 8 个活动调用、20s TTL，全局 128 条 pending。
+- **上限**：请求参数与结果 JSON 各 ≤32MiB（UTF-8），整 relay 帧 ≤40MiB；客户端 8 个在途调用、25s 超时，Host 8 个活动调用、20s TTL，全局 128 条 pending。
 - **边界**：仅 Node 客户端；SSE 直播、设备目录/枚举 UI、任意 URL/路径/头/端口 RPC、离线信箱或自动变更重试不在本模块。
 
 ### 模块 9 验收
@@ -1178,7 +1178,7 @@ scopeKey/messageKey 固定 `~` 前缀再逐段编码，保护 `.`/`..`/Unicode/�
 ### 远端实时预览（remote live）
 
 - 订阅目标精确为 `{kind:'primary',botId}` 或 `{kind:'work',botId,scopeId}`；work scopeId 恒非空，conversationId 可 null（未绑定）后一次性转为公开 UUID，不可回退/更换；primary 不带 scopeId 且 conversationId 恒非空。
-- 帧为**完整快照**：`{type:'snapshot',botId,conversationId,sequence,state,scopeId?}`；state 精确复用投影 8 键（history/historyTruncated/lastEntryId/generation/tools/toolsTruncated/busy/queuedCount），每帧 ≤1MiB，不做枚举假设；work 只发完整快照（无 update）。取消/断流只结束观察，不执行 Agent abort，不自动重连/重放。
+- 帧为**完整快照**：`{type:'snapshot',botId,conversationId,sequence,state,scopeId?}`；state 精确复用投影 8 键（history/historyTruncated/lastEntryId/generation/tools/toolsTruncated/busy/queuedCount），每帧 ≤8MiB，不做枚举假设；work 只发完整快照（无 update）。取消/断流只结束观察，不执行 Agent abort，不自动重连/重放。
 - 容量与打开：有界路由 8/client、8/host、128 总槽位；opening 期限 20s（首合法 snapshot 后移除），不是持续观察 lifetime；sequence 严格递增（第一帧允许 0）；正常结束 end 帧理由限 stopped/cancelled/session_closed/retired/listener_error/session_failed，不含 error；error 结束是单独异常（带固定 CONTROL_ERROR_CODES 码）。客户端反压不能无界排队或静默丢必要结束。验收实测见上节“实时预览实测”。
 - 本机控制面回环 HTTP 继续拒任何 Origin；浏览器/WebView 需要 native fetch 适配器（不发送 Origin）。
 
@@ -1423,7 +1423,7 @@ Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16Ki
 
 - **Host 没搬家**：默认 Java 进程里仍是用户显式启动的 specialUse FGS，Host 本体在它拉起的受监督 Node Mobile 子进程里运行；`files/bot-host`、`bot_host_credentials`、`bot_host_voice(_secrets)` 路径与语义不变；公开 v2 方法仍 **35 个**，不新增 HTTP/中继线路。
 - **界面在独立进程**：`:tauri_ui`（Tauri 2.12.5 / wry 0.57 的 Android 退出路径会 `std::process::exit`，同进程会杀死 Host）。UI 经私有、非导出、同 UID 校验的 Binder 服务打开 socket FD，业务走 JSONL；可调操作限定为既有 Host 数据操作加 `uiSettings`/`pause`，`start`/`stop`/`openLegacy`/`reconnect`/`hide` 是 UI 本地动作，不是 Host 方法。
-- **有界协议**：2 MiB 行/请求、8 个在途普通请求、8 帧/4 MiB 事件预算、保留 pause/清理通道、25 s 请求与 5 s 绑定截止、按 generation 的投递身份、单一原生事件代理与最多一个等待 ACK 的事件帧。
+- **有界协议**：40 MiB 行/请求、8 个在途普通请求、8 帧/80 MiB 事件预算、保留 pause/清理通道、25 s 请求与 5 s 绑定截止、按 generation 的投递身份、单一原生事件代理与最多一个等待 ACK 的事件帧。
 - **生命周期**：关闭界面/观察/EOF 只释放该会话的观察与语音捕获，不调用 manager 的 stop/suspend；Host 只在用户显式停止 FGS 或显式操作时结束，不自动重启、不重放已受理请求。
 - **语音**：沿用原冻结 botId/requestId 一次提交与事件形状；新增按 botId/requestId 限定作用域的 finish/cancel 重载，迟到回调不会取消他人捕获。
 

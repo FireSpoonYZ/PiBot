@@ -12,7 +12,7 @@ import { assertId } from './message-protocol.js';
 import { CONTROL_METHODS, normalizeControlCall } from './remote-control-protocol.js';
 import { normalizeLiveTarget } from './remote-live-protocol.js';
 import { openRemoteControl, RemoteControlError } from './remote-control-client.js';
-import { invalid, readTextFile, readInputObject } from './cli-input.js';
+import { invalid, readTextFile, readInputObject, MAX_UPLOAD_INPUT_BYTES } from './cli-input.js';
 
 const METHODS_LIST = CONTROL_METHODS.map((m) => `  ${m}`).join('\n');
 
@@ -32,7 +32,7 @@ options:
   --target-device-id <id>  target device id hosting the control API (required for methods and live; forbidden for listDevices)
   --url <url>              relay WebSocket URL (required; path must be /v1/link)
   --token-env <name>       environment variable holding the device token (required, must be set)
-  --input <file>           params JSON file: max 1MiB, UTF-8, a single plain object (optional for methods/listDevices; required for live)
+  --input <file>           params JSON file: max 1MiB (32MiB for uploadAttachment), UTF-8, a single plain object (optional for methods/listDevices; required for live)
   --ca <file>              custom CA bundle PEM file, regular UTF-8, max 1MiB (optional)
   -h, --help               show this help
 `;
@@ -178,7 +178,12 @@ async function main() {
       call = { method: null, target: normalizeLiveTarget(readInputObject(values.input)) };
     }
   } else {
-    const input = values.input === undefined ? {} : readInputObject(values.input);
+    // uploadAttachment 的 --input 可含单图 16MiB base64（约22.4MiB），使用更大读取预算；
+    // 其他方法与配置读取保持默认 1MiB。
+    const input = values.input === undefined ? {} : readInputObject(
+      values.input,
+      command === 'uploadAttachment' ? MAX_UPLOAD_INPUT_BYTES : undefined
+    );
     call = normalizeControlCall(command, input);
   }
 

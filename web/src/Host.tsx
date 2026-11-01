@@ -95,6 +95,7 @@ import {
 } from './ToolPresentation';
 import {
   IMAGE_MAX_COUNT,
+  IMAGE_MAX_TOTAL_BYTES,
   ImageAttachmentThumb,
   ImagePickError,
   SentAttachments,
@@ -3460,9 +3461,14 @@ ${newer}` : draftSnapshot;
       existing.add(id);
       queued.push(source);
     }
-    // 去重后总数上限校验：超限整体拒绝，保留原草稿（不静默丢最早附件）。
+    // 去重后总数/总字节上限校验：超限整体拒绝，保留原草稿（不静默丢最早附件）。
     if (readChatDraftAttachments(scope).length + queued.length > IMAGE_MAX_COUNT) {
       throw new ImagePickError('IMAGE_TOO_MANY', t(`最多 ${IMAGE_MAX_COUNT} 张图片，本次未上传。`, `At most ${IMAGE_MAX_COUNT} images; nothing uploaded.`));
+    }
+    const totalBytes = readChatDraftAttachments(scope).reduce((sum, a) => sum + a.size, 0)
+      + queued.reduce((sum, s) => sum + s.size, 0);
+    if (totalBytes > IMAGE_MAX_TOTAL_BYTES) {
+      throw new ImagePickError('IMAGE_TOO_LARGE', t(`图片总大小超过 ${IMAGE_MAX_TOTAL_BYTES / 1048576}MB，本次未上传。`, `Total image size exceeds ${IMAGE_MAX_TOTAL_BYTES / 1048576}MB; nothing uploaded.`));
     }
     for (const source of queued) {
       const env = await BotHost.call({
@@ -6239,7 +6245,7 @@ function RemotePendingComposer({
 
   /** 上传选图到目标 Host 并把元数据加入草稿；归属冻结在发起时 identity/botId/draftKey。
    *  addAttachment 的 expectedKey 是原子 guard（keyRef 实时比较）：切换 Bot/身份后未完成批次中止，
-   *  已上传结果不写新 scope 草稿。相同图片 id（content SHA-256）去重；去重后总数 ≤4，超限整体拒绝。 */
+   *  已上传结果不写新 scope 草稿。相同图片 id（content SHA-256）去重；去重后总数 ≤16，超限整体拒绝。 */
   const uploadRemoteImages = useCallback(async (sources: PickedImageSource[]) => {
     const draftKey = drafts.key;
     if (!draftKey || sources.length === 0) return;
@@ -6254,6 +6260,11 @@ function RemotePendingComposer({
     }
     if (drafts.attachments.length + queued.length > IMAGE_MAX_COUNT) {
       throw new ImagePickError('IMAGE_TOO_MANY', t(`最多 ${IMAGE_MAX_COUNT} 张图片，本次未上传。`, `At most ${IMAGE_MAX_COUNT} images; nothing uploaded.`));
+    }
+    const totalBytes = drafts.attachments.reduce((sum, a) => sum + a.size, 0)
+      + queued.reduce((sum, item) => sum + item.source.size, 0);
+    if (totalBytes > IMAGE_MAX_TOTAL_BYTES) {
+      throw new ImagePickError('IMAGE_TOO_LARGE', t(`图片总大小超过 ${IMAGE_MAX_TOTAL_BYTES / 1048576}MB，本次未上传。`, `Total image size exceeds ${IMAGE_MAX_TOTAL_BYTES / 1048576}MB; nothing uploaded.`));
     }
     for (const item of queued) {
       const att = await api.call(frozenIdentity, 'uploadAttachment', {

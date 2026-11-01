@@ -14,8 +14,8 @@ import { readScopeClientFrame, readScopeServerFrame } from './scope-wire.js';
 
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
 
-export const MAX_RELAY_FRAME_BYTES = 2097152; // 2 MiB, actual UTF-8 bytes
-export const RELAY_HIGH_WATER_BYTES = 4194304; // 4 MiB bufferedAmount + frame budget
+export const MAX_RELAY_FRAME_BYTES = 41943040; // 40 MiB, actual UTF-8 bytes
+export const RELAY_HIGH_WATER_BYTES = 83886080; // 80 MiB bufferedAmount + frame budget
 export const RELAY_HELLO_TIMEOUT_MS = 5000;
 export const RELAY_HEARTBEAT_MS = 15000;
 
@@ -44,7 +44,7 @@ export const DELIVERY_REJECT_CODES = new Set([
 
 const DEVICE_TOKEN_RE = /^[A-Za-z0-9_-]{32,512}$/;
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
-const FRAME_MAX_TEXT = 'relay frame exceeds 2 MiB';
+const FRAME_MAX_TEXT = 'relay frame exceeds 40 MiB';
 
 function invalid(message) {
   return messageError(INVALID_ARGUMENT, message);
@@ -397,7 +397,7 @@ export function readServerFrame(data, isBinary = false) {
 
 /**
  * Encode a known outbound frame (already validated by its caller) to JSON text
- * with the 2 MiB byte cap. No full schema revalidation here.
+ * with the 40 MiB byte cap. No full schema revalidation here.
  */
 export function encodeRelayFrame(frame) {
   if (!isPlainObject(frame)) {

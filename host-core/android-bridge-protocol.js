@@ -12,8 +12,8 @@ import { normalizeHostSettings } from './host-settings.js';
 import { normalizeDeviceName } from './device-metadata.js';
 
 export const BRIDGE_PROTOCOL_VERSION = 1;
-export const BRIDGE_MAX_FRAME_BYTES = 20971520; // 20 MiB hard frame cap (UTF-8 bytes)
-export const BRIDGE_MAX_CONTROL_BYTES = 1048576; // 1 MiB init/command/result frames
+export const BRIDGE_MAX_FRAME_BYTES = 41943040; // 40 MiB hard frame cap (UTF-8 bytes)
+export const BRIDGE_MAX_CONTROL_BYTES = 41943040; // 40 MiB init/command/result frames
 export const BRIDGE_MAX_CONTROL_CALLS = 8;
 export const BRIDGE_MAX_OBSERVERS = 8;
 export const BRIDGE_MAX_NATIVE_CALLS = 8;

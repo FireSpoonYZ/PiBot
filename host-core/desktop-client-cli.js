@@ -1,7 +1,7 @@
 // host-core/desktop-client-cli.js
 // Module 17: UTF-8 JSONL stdio sidecar CLI for the desktop Tauri client.
 // Inert on import; calls openDesktopClient({dataRoot,onEvent}) only after
-// receiving the initial init request. Strict UTF-8/JSON, 2 MiB line cap,
+// receiving the initial init request. Strict UTF-8/JSON, 40 MiB line cap,
 // 8 in-flight requests and 8 observations, stdout protocol only, stderr fixed
 // non-sensitive stage messages, serialized backpressure-aware stdout writer.
 import path from 'node:path';
@@ -13,8 +13,8 @@ import {
   DESKTOP_MAX_IN_FLIGHT_REQUESTS,
 } from './desktop-client.js';
 
-export const DESKTOP_WIRE_MAX_LINE_BYTES = 2097152; // 2 MiB
-const MAX_QUEUED_OUTPUT_BYTES = 4 * 1024 * 1024; // 4 MiB
+export const DESKTOP_WIRE_MAX_LINE_BYTES = 41943040; // 40 MiB
+const MAX_QUEUED_OUTPUT_BYTES = 80 * 1024 * 1024; // 80 MiB
 const DRAIN_TIMEOUT_MS = 5000;
 
 const STAGE_MESSAGES = Object.freeze({
@@ -59,7 +59,7 @@ function safeOff(stream, event, fn) {
 }
 
 /**
- * Read strict UTF-8 JSONL lines from a byte stream with a hard 2 MiB line cap.
+ * Read strict UTF-8 JSONL lines from a byte stream with a hard 40 MiB line cap.
  * Trailing partial line at EOF, invalid UTF-8, or invalid JSON are fatal
  * protocol errors.
  */
@@ -118,7 +118,7 @@ async function* readWireLines(input) {
       const found = takeLine();
       if (!found) break;
       if (found.bytes > DESKTOP_WIRE_MAX_LINE_BYTES) {
-        throw messageError('REQUEST_TOO_LARGE', 'input line exceeds 2 MiB limit');
+        throw messageError('REQUEST_TOO_LARGE', 'input line exceeds 40 MiB limit');
       }
       let text;
       try {
@@ -135,7 +135,7 @@ async function* readWireLines(input) {
       yield parsed;
     }
     if (size > DESKTOP_WIRE_MAX_LINE_BYTES) {
-      throw messageError('REQUEST_TOO_LARGE', 'input line exceeds 2 MiB limit');
+      throw messageError('REQUEST_TOO_LARGE', 'input line exceeds 40 MiB limit');
     }
   }
   if (size > 0) {
@@ -294,7 +294,7 @@ export function createDesktopClientCli(options = {}) {
           ok: false,
           error: {
             code: 'RESPONSE_TOO_LARGE',
-            message: 'response exceeds 2 MiB wire limit',
+            message: 'response exceeds 40 MiB wire limit',
             outcome: 'responded',
           },
         };
@@ -306,7 +306,7 @@ export function createDesktopClientCli(options = {}) {
           observationId: obj.observationId,
           error: {
             code: 'RESPONSE_TOO_LARGE',
-            message: 'live frame exceeds 2 MiB wire limit',
+            message: 'live frame exceeds 40 MiB wire limit',
             outcome: 'responded',
           },
         };

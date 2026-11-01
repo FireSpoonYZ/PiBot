@@ -14,7 +14,7 @@ const OWNER_DB = 'pending-owner.sqlite';
 const STATES = new Set(['pending', 'sending', 'unconfirmed', 'accepted', 'rejected']);
 const MAX_TEXT_BYTES = 262144;
 const MAX_RECEIPT_BYTES = 1048576; // 1 MiB
-const MAX_ATTACHMENTS = 4;
+const MAX_ATTACHMENTS = 16;
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 200;
@@ -95,7 +95,7 @@ function assertPendingText(value, attachments) {
   }
 }
 
-// 附件只按 ID 有序保留（最多 4 个 64hex SHA-256）；内容归属由 Host runtime 校验。
+// 附件只按 ID 有序保留（最多 16 个 64hex SHA-256）；内容归属由 Host runtime 校验。
 function normalizeAttachments(value) {
   if (!Array.isArray(value) || value.length < 1 || value.length > MAX_ATTACHMENTS) {
     throw messageError('INVALID_ARGUMENT', `attachments must be an array of 1-${MAX_ATTACHMENTS} attachment IDs`);

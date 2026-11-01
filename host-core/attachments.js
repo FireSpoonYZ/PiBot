@@ -2,7 +2,7 @@
 // 存储：dataRoot/attachments/<botId>/<sha256> 为图片字节，<sha256>.json 为上传时
 // 校验过的展示元数据（内容定址；同 id 重传覆盖 name）。并发/重试同 id 写同一文件，
 // 首次写经临时文件 rename 原子提交，绝不留下半截图片。
-// 边界：只接受 image/jpeg 与 image/png，解码后字节 <=512KiB、长边 <=1600、每条 <=4 张；
+// 边界：只接受 image/jpeg 与 image/png，解码后字节 <=16MiB、长边 <=16384、每条 <=16 张；
 // name 为必填非空字符串、<=256 UTF-8 bytes，仅展示用，绝不参与路径。
 // 生命周期：随 Bot 删除（含归档自动 purge）整目录清除；不做 TTL，旧会话永不改写。
 import { createHash } from 'node:crypto';
@@ -10,9 +10,9 @@ import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { decodeBase64, frameSize } from './shower-tools.js';
 
-const MAX_IMAGE_BYTES = 512 * 1024;
-const MAX_IMAGE_DIMENSION = 1600;
-const MAX_IMAGES_PER_MESSAGE = 4;
+const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
+const MAX_IMAGE_DIMENSION = 16384;
+const MAX_IMAGES_PER_MESSAGE = 16;
 const MAX_NAME_BYTES = 256;
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 const ATTACHMENT_ID_RE = /^[0-9a-f]{64}$/;
@@ -33,7 +33,7 @@ function errWithCode(message, code) {
 const invalidArgument = (message) => errWithCode(message, 'INVALID_ARGUMENT');
 
 /** botId 只作目录名一段：拒绝分隔符/驱动器/父遍历，绝不把 caller 输入拼成任意路径。 */
-function botDirectory(root, botId) {
+export function botAttachmentDirectory(root, botId) {
   if (typeof botId !== 'string' || botId === '' || botId === '.' || botId === '..' ||
       botId.includes('/') || botId.includes('\\') || botId.includes(':')) {
     throw invalidArgument('botId is not a safe directory name');
@@ -45,7 +45,7 @@ function botDirectory(root, botId) {
 }
 
 function assertBotAttachmentDir(root, botId) {
-  const dir = botDirectory(root, botId);
+  const dir = botAttachmentDirectory(root, botId);
   return dir;
 }
 
@@ -64,7 +64,7 @@ function decodeCanonicalBase64(data) {
   if (typeof data !== 'string' || data.length === 0 || data.length % 4 !== 0 || !BASE64_RE.test(data)) {
     throw invalidArgument('attachment data is not canonical base64');
   }
-  // 解码后上限 512KiB -> base64 上限 4*ceil(512KiB/3)；先挡掉明显超限输入再分配 Buffer。
+  // 解码后上限 16MiB -> base64 上限 4*ceil(16MiB/3)；先挡掉明显超限输入再分配 Buffer。
   if (data.length > 4 * Math.ceil(MAX_IMAGE_BYTES / 3)) {
     throw invalidArgument('attachment data exceeds the encoded size limit');
   }
@@ -137,6 +137,13 @@ export async function uploadAttachment(root, botId, input) {
   return meta;
 }
 
+export function attachmentPath(root, botId, attachmentId) {
+  if (typeof attachmentId !== 'string' || !ATTACHMENT_ID_RE.test(attachmentId)) {
+    throw invalidArgument('attachmentId must be a 64-char lowercase hex string');
+  }
+  return join(botAttachmentDirectory(root, botId), attachmentId);
+}
+
 /** 读已落盘的 metadata + base64（提交时组装模型内容、getAttachment 对外方法共用）。 */
 export async function loadAttachment(root, botId, attachmentId) {
   if (typeof attachmentId !== 'string' || !ATTACHMENT_ID_RE.test(attachmentId)) {
@@ -182,7 +189,7 @@ export async function removeBotAttachments(root, botId) {
   await rm(assertBotAttachmentDir(root, botId), { recursive: true, force: true });
 }
 
-/** 提交前校验：附件 id 列表形状（array<=4、全 64hex、无重复）。 */
+/** 提交前校验：附件 id 列表形状（array<=16、全 64hex、无重复）。 */
 export function normalizeAttachmentIds(attachments) {
   if (attachments === undefined || attachments === null) return [];
   if (!Array.isArray(attachments)) {

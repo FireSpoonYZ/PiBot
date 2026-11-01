@@ -196,6 +196,9 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     uploadAttachment(botId, input, options) {
       return request('POST', ['v1', 'bots', botId, 'attachments'], { ...callOptions(options), body: input });
     },
+    putBotFileChunk(botId, input, options) {
+      return request('POST', ['v1', 'bots', botId, 'files', 'chunks'], { ...callOptions(options), body: input });
+    },
     getAttachment(botId, attachmentId, options) {
       return request('GET', ['v1', 'bots', botId, 'attachments', attachmentId], callOptions(options));
     },

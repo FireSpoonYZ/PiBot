@@ -118,7 +118,7 @@ export interface SubmissionInput {
   requestId: string;
   /** With attachments present this may be an empty/blank string; text-only submits still require non-empty text. */
   text: string;
-  /** Ordered previously-uploaded image attachment IDs (lowercase hex SHA-256), at most 4. */
+  /** Ordered previously-uploaded image attachment IDs (lowercase hex SHA-256), at most 16. */
   attachments?: string[];
 }
 
@@ -135,8 +135,27 @@ export interface ImageAttachment {
 export interface AttachmentUploadInput {
   name: string;
   mimeType: 'image/jpeg' | 'image/png';
-  /** Canonical base64 of one image <= 512 KiB decoded, max edge 1600px. */
+  /** Canonical base64 of one image <= 16 MiB decoded, max edge 16384px. */
   data: string;
+}
+
+/** A content-addressed file transferred to a Bot in chunks. */
+export interface BotFileChunkInput {
+  id: string;
+  name: string;
+  size: number;
+  offset: number;
+  /** Canonical base64, at most 256 KiB decoded; no whole-file size cap. */
+  data: string;
+}
+export interface BotFileReceipt {
+  id: string;
+  name: string;
+  size: number;
+  received: number;
+  complete: boolean;
+  /** Recipient-local path, present only after complete SHA-256 verification. */
+  path?: string;
 }
 
 /** Attachment metadata plus the canonical base64 payload. */
@@ -597,6 +616,7 @@ export interface Runtime {
   uploadAttachment(botId: string, input: AttachmentUploadInput): Promise<ImageAttachment>;
   /** Rejects ATTACHMENT_NOT_FOUND when the ID is unknown to this Bot. */
   getAttachment(botId: string, attachmentId: string): Promise<ImageAttachmentData>;
+  putBotFileChunk(botId: string, input: BotFileChunkInput): Promise<BotFileReceipt>;
   history(botId: string, options?: HistoryOptions): Promise<HistoryPage>;
   /** /clear：清空主私聊可见历史并重置模型上下文（pi.reset，不新建 conversationId）。 */
   clearHistory(botId: string): Promise<ClearHistoryResult>;
@@ -1008,6 +1028,7 @@ export interface ControlClient {
   getSubmission(botId: string, requestId: string, options?: ControlClientCallOptions): Promise<PrimarySubmission>;
   uploadAttachment(botId: string, input: AttachmentUploadInput, options?: ControlClientCallOptions): Promise<ImageAttachment>;
   getAttachment(botId: string, attachmentId: string, options?: ControlClientCallOptions): Promise<ImageAttachmentData>;
+  putBotFileChunk(botId: string, input: BotFileChunkInput, options?: ControlClientCallOptions): Promise<BotFileReceipt>;
   history(botId: string, options?: HistoryOptions & ControlClientCallOptions): Promise<HistoryPage>;
   clearHistory(botId: string, options?: ControlClientCallOptions): Promise<ClearHistoryResult>;
   compact(botId: string, options?: ControlClientCallOptions): Promise<CompactResult>;
@@ -1938,6 +1959,7 @@ export interface RemoteControlMethodMap {
   /* Image attachments: upload is per-Bot and content-addressed; read returns metadata + base64 data. */
   uploadAttachment: { params: AttachmentUploadInput & { botId: string }; result: ImageAttachment };
   getAttachment: { params: { botId: string; attachmentId: string }; result: ImageAttachmentData };
+  putBotFileChunk: { params: BotFileChunkInput & { botId: string }; result: BotFileReceipt };
   validateCenterProvider: { params: CenterProviderProbe; result: ProviderCheckResult };
   discoverCenterProviderModels: { params: CenterProviderProbe; result: DiscoveryResult };
   callCapabilityAction: { params: CenterActionCall; result: ActionResult };
@@ -2087,7 +2109,7 @@ export type PendingEnqueueInput =
       requestId: string;
       /** Blank text is allowed only together with a non-empty attachments list. */
       text: string;
-      /** Ordered previously-uploaded image attachment IDs (lowercase hex SHA-256), at most 4. */
+      /** Ordered previously-uploaded image attachment IDs (lowercase hex SHA-256), at most 16. */
       attachments?: string[];
     }
   | { kind: 'room'; targetDeviceId: string; scopeId: string; messageId: string; text: string; replyTo?: string | null };

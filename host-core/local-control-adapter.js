@@ -133,7 +133,7 @@ function abortReason(signal) {
 
 /**
  * Bounded fetch: rejects redirects, and reads the response body with a real
- * <=1MiB byte cap. On excess, marks state.tooLarge, cancels the reader, and
+ * <=MAX_CONTROL_JSON_BYTES byte cap. On excess, marks state.tooLarge, cancels the reader, and
  * throws with no partial body, so the caller's state check maps it to
  * RESPONSE_TOO_LARGE (ControlClient would otherwise report NETWORK/BAD_RESPONSE).
  * Normal bounded bodies are returned as a fresh Response built from the bytes.
@@ -143,7 +143,7 @@ function boundedFetch(state, options = {}) {
     const signal = init.signal;
     const response = await globalThis.fetch(input, { ...init, redirect: 'error' });
     // 仅当请求本身是 SSE（Accept=text/event-stream）且响应 ok+SSE 时透传原始
-    // Response 给 SSE parser；JSON preflight 不论 content-type 都按 1MiB 读取。
+    // Response 给 SSE parser；JSON preflight 不论 content-type 都按 MAX_CONTROL_JSON_BYTES 读取。
     const acceptHeader = init.headers && (init.headers.Accept ?? init.headers.accept);
     const wantsSse = options.sseOk && acceptHeader === 'text/event-stream';
     if (
@@ -238,6 +238,8 @@ const METHOD_HANDLERS = new Map([
       { name: params.name, mimeType: params.mimeType, data: params.data },
       { signal },
     )],
+  ['putBotFileChunk', (control, { botId, ...input }, signal) =>
+    control.putBotFileChunk(botId, input, { signal })],
   ['getAttachment', (control, params, signal) =>
     control.getAttachment(params.botId, params.attachmentId, { signal })],
   ['getSubmission', (control, params, signal) =>
@@ -344,7 +346,7 @@ function dispatchError(err, state, signal) {
 
 async function executeCall(config, expectedDeviceId, method, params, { signal } = {}) {
   requireValidId(expectedDeviceId);
-  // 先按协议表规范化（含方法参数形状/未知键/1 MiB 限制）再映射。
+  // 先按协议表规范化（含方法参数形状/未知键/JSON 字节限制）再映射。
   let normalized;
   try {
     normalized = normalizeControlCall(method, params);
