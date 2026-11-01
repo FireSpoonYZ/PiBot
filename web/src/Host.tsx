@@ -1127,7 +1127,6 @@ export function HostPage({
   const [screen, setScreen] = useState<HubScreen>('hub');
   const [avatarReturnScreen, setAvatarReturnScreen] = useState<HubScreen>('bot-edit');
   const [subPageReturnScreen, setSubPageReturnScreen] = useState<HubScreen>('bot-profile');
-  const [computerReturnScreen, setComputerReturnScreen] = useState<'chat' | 'bot-profile'>('bot-profile');
 
   // Left drawer (always mounted in DOM for smooth slide-in & slide-out animation)
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
@@ -4066,19 +4065,6 @@ ${newer}` : draftSnapshot;
 
             <button
               type="button"
-              className="grok-chat-computer-btn"
-              onClick={() => {
-                setChatTopMenuOpen(false);
-                setComputerReturnScreen('chat');
-                setScreen('bot-screen');
-              }}
-            >
-              <Monitor size={18} />
-              <span>{t('查看桌面', 'View desktop')}</span>
-            </button>
-
-            <button
-              type="button"
               className="grok-floating-circle-btn grok-chat-header-more"
               aria-label={t('更多选项', 'More options')}
               aria-expanded={chatTopMenuOpen}
@@ -4815,7 +4801,7 @@ ${newer}` : draftSnapshot;
               <button
                 type="button"
                 className="grok-card-row"
-                onClick={() => { setComputerReturnScreen('bot-profile'); setScreen('bot-screen'); }}
+                onClick={() => setScreen('bot-screen')}
               >
                 <Monitor size={20} className="grok-row-icon" />
                 <span className="grok-row-label">{t('电脑', 'Computer')}</span>
@@ -4933,7 +4919,7 @@ ${newer}` : draftSnapshot;
           isPrimary={activeBot.isPrimary}
           hostKind={activeBot.hostKind}
           open={screen === 'bot-screen'}
-          onBack={() => setScreen(computerReturnScreen)}
+          onBack={() => setScreen('bot-profile')}
           showerTarget={showerTarget}
           showerCall={showerCall}
           showerConnected={showerConnected}
