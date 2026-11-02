@@ -8,6 +8,8 @@ const permanentCenterErrors = new Set(['UNAUTHENTICATED', 'UNAUTHORIZED', 'CONTR
 const transientCenterErrors = new Set(['NOT_CONNECTED', 'DISCONNECTED', 'EVENT_STREAM_CLOSED', 'RPC_BUSY', 'BUSY', 'TIMEOUT', 'TRANSPORT_RESET', 'CENTER_OFFLINE', 'CENTER_REQUEST_FAILED']);
 const centerErrorCode = (error: unknown) => typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : '';
 export const isTransientCenterError = (error: unknown) => transientCenterErrors.has(centerErrorCode(error));
+/** RPC 拥塞：host 忙不是断线，轮询应保留已确认状态继续等待，不得当离线处理。 */
+const isBusyCenterError = (error: unknown) => { const code = centerErrorCode(error); return code === 'RPC_BUSY' || code === 'BUSY'; };
 const centerErrorMessage = (error: unknown) => typeof error === 'string' ? error : error instanceof Error ? error.message : typeof error === 'object' && error !== null && 'message' in error ? String(error.message) : '';
 
 export const ActiveCenter = createContext('');
@@ -108,8 +110,9 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
       try {
         const next = await readStatus();
         if (live && issued === epoch.current) updateStatus(next);
-      } catch {
-        if (live && issued === epoch.current) setStatus(undefined);
+      } catch (failure) {
+        // BUSY/RPC_BUSY 只是 host 通道拥塞：保留上次已确认 status 继续轮询，不误判断线。
+        if (!isBusyCenterError(failure) && live && issued === epoch.current) setStatus(undefined);
       }
       if (live) timer = setTimeout(poll, 1000);
     };

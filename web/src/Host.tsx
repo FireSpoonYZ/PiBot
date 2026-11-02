@@ -561,6 +561,10 @@ function writeHasRemoteFlag(hasRemote: boolean): void {
 
 type CachedRemoteBot = HostBot & { deviceName: string; platform?: string; description?: string };
 
+/** 本机 bot 列表读取的 scope：connectionEpoch+activeCenter 组合，每次变化都换新对象（同值 A→B→A 也是新引用）。 */
+interface LocalBotsScope { key: string; center: string }
+interface LocalBotsFlight { scope: LocalBotsScope; task: Promise<HostBot[]> }
+
 function readCachedRemoteBots(): CachedRemoteBot[] {
   try {
     const raw = window.localStorage.getItem(REMOTE_BOTS_CACHE_KEY);
@@ -1194,7 +1198,10 @@ export function HostPage({
     }
   });
   const [localBotsLoaded, setLocalBotsLoaded] = useState(false);
-  const localBotsGeneration = useRef(0);
+  const localBotsFlight = useRef<LocalBotsFlight | null>(null);
+  const localBotsPending = useRef<LocalBotsScope | null>(null);
+  const localBotsScopeRef = useRef<LocalBotsScope>({ key: '', center: '' });
+  const localBotsMounted = useRef(true);
   const startingLocalRef = useRef<Promise<HostSnapshot | undefined> | null>(null);
 
   // Remote Host state
@@ -1362,40 +1369,86 @@ export function HostPage({
     });
   }, []);
 
-  // Transparently sync local bots
-  const syncLocalBots = useCallback(async (snap?: HostSnapshot): Promise<HostBot[]> => {
-    const generation = ++localBotsGeneration.current;
-    try {
-      const currentSnap = snap ?? (await BotHost.snapshot());
-      if (generation !== localBotsGeneration.current) return [];
-      setLocalHost(currentSnap);
-      if (currentSnap.phase !== 'running') {
-        setLocalBotsLoaded(false);
+  // connectionEpoch/activeCenter 变化 → 换新 scope 对象（引用比较，A→B→A 也不复用旧对象）；
+  // render 期同步赋值让后续调用立刻读到最新 scope，旧轮 valid() 即刻失效。
+  const localBotsScopeKey = connectionEpoch + ':' + activeCenter;
+  if (localBotsScopeRef.current.key !== localBotsScopeKey) {
+    localBotsScopeRef.current = { key: localBotsScopeKey, center: activeCenter };
+  }
+  useEffect(() => {
+    localBotsMounted.current = true;
+    return () => { localBotsMounted.current = false; };
+  }, []);
+
+  // Transparently sync local bots（单飞：任意时刻至多一轮在途；scope = connectionEpoch+activeCenter 的
+  // 单调对象，变化即作废旧轮——每个 await 后先验身份再请求/写状态，新调用在旧轮结束后接力最新 scope 一轮）。
+  const syncLocalBots = useCallback((snap?: HostSnapshot): Promise<HostBot[]> => {
+    // 一轮读取：scope 为单调对象引用（A→B→A 亦产生新对象），valid() 失效即不再发请求、不写任何 set*。
+    const runRound = async (scope: LocalBotsScope, passedSnap?: HostSnapshot): Promise<HostBot[]> => {
+      const valid = () => localBotsMounted.current && localBotsScopeRef.current === scope;
+      try {
+        // 传入的 snap 只属于发起时的 scope，接力轮不使用。
+        const currentSnap = passedSnap ?? (await BotHost.snapshot());
+        if (!valid()) return [];
+        setLocalHost(currentSnap);
+        if (currentSnap.phase !== 'running') {
+          setLocalBotsLoaded(false);
+          return [];
+        }
+        if (scope.center) {
+          try {
+            const status = await BotHost.status();
+            if (!valid()) return [];
+            if (status.center?.centerUrl && new URL(status.center.centerUrl).origin !== new URL(scope.center).origin) {
+              setLocalBots([]);
+              setLocalBotsLoaded(false);
+              return [];
+            }
+          } catch {
+            // Ignore transient status check errors while center is connecting
+          }
+        }
+        if (!valid()) return [];
+        const envelope = await BotHost.call({ method: 'listBots', params: {} });
+        if (!valid()) return [];
+        const list = array<HostBot>(envelope.result);
+        setLocalBots(list);
+        try { localStorage.setItem('e-launcher:cached-local-bots-v1', JSON.stringify(list)); } catch { /* ignore */ }
+        setLocalBotsLoaded(true);
+        return list;
+      } catch {
         return [];
       }
-      if (activeCenter) {
-        try {
-          const status = await BotHost.status();
-          if (status.center?.centerUrl && new URL(status.center.centerUrl).origin !== new URL(activeCenter).origin) {
-            setLocalBots([]);
-            setLocalBotsLoaded(false);
-            return [];
-          }
-        } catch {
-          // Ignore transient status check errors while center is connecting
+    };
+    const scope = localBotsScopeRef.current;
+    if (!localBotsMounted.current) return Promise.resolve([]);
+    const flight = localBotsFlight.current;
+    if (flight) {
+      // 已有在途轮：同 scope 直接共享；异 scope 预约最新 scope 接力一轮，不叠加网络请求。
+      // 传入的 snap 属调用方时刻的 scope，只用于本轮首个 round；接力轮一律重新 snapshot。
+      if (flight.scope !== scope) localBotsPending.current = scope;
+      return flight.task;
+    }
+    const task = (async (): Promise<HostBot[]> => {
+      let result = await runRound(scope, snap);
+      for (;;) {
+        const next = localBotsPending.current;
+        if (!next || !localBotsMounted.current) break;
+        localBotsPending.current = null;
+        if (next === localBotsScopeRef.current) {
+          flightEntry.scope = next;
+          result = await runRound(next);
         }
       }
-      const envelope = await BotHost.call({ method: 'listBots', params: {} });
-      const list = array<HostBot>(envelope.result);
-      if (generation !== localBotsGeneration.current) return [];
-      setLocalBots(list);
-      try { localStorage.setItem('e-launcher:cached-local-bots-v1', JSON.stringify(list)); } catch { /* ignore */ }
-      setLocalBotsLoaded(true);
-      return list;
-    } catch {
-      return [];
-    }
-  }, [activeCenter]);
+      return result;
+    })();
+    const flightEntry = { scope, task };
+    localBotsFlight.current = flightEntry;
+    void task.finally(() => {
+      if (localBotsFlight.current === flightEntry) localBotsFlight.current = null;
+    });
+    return task;
+  }, []);
 
   const ensureLocalHostRunning = useCallback(async (): Promise<HostSnapshot | undefined> => {
     if (startingLocalRef.current) return startingLocalRef.current;
@@ -1442,23 +1495,10 @@ export function HostPage({
   // cached local bots render immediately and Local Host starts on first bot interaction)
   useEffect(() => {
     if (!active) return;
-    let alive = true;
-    void (async () => {
-      try {
-        const snap = await BotHost.snapshot();
-        if (!alive) return;
-        setLocalHost(snap);
-        if (snap.phase === 'running') {
-          await syncLocalBots(snap);
-        }
-      } catch {
-        // Ignore cold read error
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [active, connectionEpoch, syncLocalBots]);
+    // 复用 syncLocalBots 单飞通道：内部自行 snapshot，不与 2s 轮询叠加请求；
+    // 作废保护由 scope/mounted 检查在请求通道内完成，effect 无需本地 alive 包装。
+    void syncLocalBots().catch(() => {});
+  }, [active, connectionEpoch, activeCenter, syncLocalBots]);
 
   useEffect(() => {
     if (!active) return;
@@ -4010,8 +4050,8 @@ ${newer}` : draftSnapshot;
           await ensureRemoteApi();
           await syncRemoteBots();
         })(),
-        // 下拉刷新同时刷新群聊列表（静默失败由 hook 自身 error 呈现）。
-        Promise.resolve(refreshRoomConversationsRef.current()),
+        // 下拉刷新同时刷新群聊列表：await 实际读取结束才收起刷新态（静默失败由 hook 自身 error 呈现）。
+        refreshRoomConversationsRef.current(),
       ]);
       if (results[1].status === 'rejected') setDirectoryError(errorText(results[1].reason));
     } finally {
