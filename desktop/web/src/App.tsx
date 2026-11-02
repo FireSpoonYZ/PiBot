@@ -18,11 +18,11 @@ import type {
   DesktopConnectionInput,
   DesktopUiProfile,
 } from '../../../host-core/desktop-client.js';
-import type { DevicesDirectoryItem } from '../../../host-core/index.js';
+import type { BotDirectoryEntry, DevicesDirectoryItem } from '../../../host-core/index.js';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import { PendingPanel } from './PendingPanel';
 import { SettingsPanel } from './SettingsPanel';
-import { BotChats } from './BotChats';
+import { BotChats, type BotChatsArchiveBridge } from './BotChats';
 import {
   CenterGate,
   useCenterConnection,
@@ -71,6 +71,7 @@ interface AppState {
   selectedDeviceId: string;
   settingsOpen: boolean;
   devices: DevicesSectionState;
+  archiveBridge: BotChatsArchiveBridge | null;
 }
 
 interface CenterConnectionBridge {
@@ -206,8 +207,18 @@ class App extends Component<AppProps, AppState> {
       selectedDeviceId: '',
       settingsOpen: false,
       devices: emptyDevices,
+      archiveBridge: null,
     };
   }
+
+  private handleArchiveBridge = (archiveBridge: BotChatsArchiveBridge | null): void => {
+    this.setState({ archiveBridge });
+  };
+
+  private handleOpenArchivedBotHistory = (bot: BotDirectoryEntry): void => {
+    this.state.archiveBridge?.openBotHistory(bot);
+    this.setState({ view: 'chat', settingsOpen: false });
+  };
 
   componentDidMount(): void {
     this.unsub = this.props.api.subscribe(() => {
@@ -668,6 +679,8 @@ class App extends Component<AppProps, AppState> {
                 onLoadMoreDevices={() => void this.loadMoreDevices()}
                 onRenameDevice={(item, name) => void this.renameDevice(item, name)}
                 onDeviceError={(message) => this.setState((s) => ({ devices: { ...s.devices, error: message } }))}
+                archiveBridge={this.state.archiveBridge}
+                onOpenArchivedBotHistory={this.handleOpenArchivedBotHistory}
               />
             </Dialog.Content>
           </Dialog.Portal>
@@ -717,26 +730,36 @@ class App extends Component<AppProps, AppState> {
     const pageActive = this.props.pageActive !== false;
     const snapshot = api.snapshot;
     if (!identity || !snapshot) return <div className="empty-state">请先连接 Host 或中继（左下角「设置」）。</div>;
-    if (view === 'chat') {
-      return (
-        <BotChats
-          api={api}
-          currentDeviceId={this.state.status?.connection?.deviceId ?? ''}
-          pageActive={pageActive}
-        />
-      );
-    }
-    const deviceId = this.state.selectedDeviceId;
-    if (!deviceId) return <div className="empty-state">请选择目标设备。</div>;
-    const key = identity.profileId + '|' + identity.kind + '|' + identity.generation + '|' + deviceId;
-    if (this.scopedKey !== key) {
-      this.scopedKey = key;
-      this.scopedApi = targetApi(api, deviceId);
+    let pendingNode: ReactNode = null;
+    if (view !== 'chat') {
+      const deviceId = this.state.selectedDeviceId;
+      if (!deviceId) {
+        pendingNode = <div className="empty-state">请选择目标设备。</div>;
+      } else {
+        const key = identity.profileId + '|' + identity.kind + '|' + identity.generation + '|' + deviceId;
+        if (this.scopedKey !== key) {
+          this.scopedKey = key;
+          this.scopedApi = targetApi(api, deviceId);
+        }
+        pendingNode = (
+          <div className="device-view">
+            <PendingPanel key={key} api={api} identity={this.scopedApi!.identity} transportConnected={transportConnected} />
+          </div>
+        );
+      }
     }
     return (
-      <div className="device-view">
-        <PendingPanel key={key} api={api} identity={this.scopedApi!.identity} transportConnected={transportConnected} />
-      </div>
+      <>
+        <div className={view === 'chat' ? 'chat-workspace-host' : 'chat-workspace-host workspace-hidden'}>
+          <BotChats
+            api={api}
+            currentDeviceId={this.state.status?.connection?.deviceId ?? ''}
+            pageActive={pageActive && (view === 'chat' || this.state.settingsOpen)}
+            onArchiveBridge={this.handleArchiveBridge}
+          />
+        </div>
+        {pendingNode}
+      </>
     );
   }
 }

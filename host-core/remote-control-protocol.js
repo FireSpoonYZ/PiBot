@@ -12,6 +12,7 @@ import {
   normalizeScopeListOptions,
   normalizeScopeCreate,
   normalizeScopeUpdate,
+  normalizeScopeDelete,
   normalizeUserMessage,
   normalizeReplicaListOptions,
 } from './scope-protocol.js';
@@ -132,6 +133,7 @@ const CONTROL_V2_METHODS = Object.freeze([
   'createScope',
   'getScopeState',
   'updateScope',
+  'deleteScope',
   'publishUserMessage',
   'listScopeReplicas',
   'scopeHistory',
@@ -487,6 +489,11 @@ function normalizeControlParams(method, params) {
       rejectUnknownFields(params, new Set(['scopeId', 'input']), 'params');
       assertId(params.scopeId, 'scopeId');
       return { scopeId: params.scopeId, input: normalizeScopeUpdate(params.input) };
+    }
+    case 'deleteScope': {
+      rejectUnknownFields(params, new Set(['scopeId', 'input']), 'params');
+      assertId(params.scopeId, 'scopeId');
+      return { scopeId: params.scopeId, input: normalizeScopeDelete(params.input) };
     }
     case 'publishUserMessage': {
       rejectUnknownFields(params, new Set(['scopeId', 'input']), 'params');

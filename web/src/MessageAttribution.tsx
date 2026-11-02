@@ -47,6 +47,8 @@ function senderLabel(a: MessageAttributionData, t: (zh: string, en: string) => s
 export function MessageAttribution({ attribution, className }: MessageAttributionProps) {
   const t = useText();
   const a = attribution;
+  // 普通用户与 Bot 主聊（primary）及 Host 内部触发器不展示来源胶囊；仅保留 dm/room 来源。
+  if (a.channel === 'primary' || a.kind === 'host') return null;
   const sender = senderLabel(a, t);
   const channel = channelLabel(a.channel, t);
   const directionOutgoing = a.direction === 'outgoing';

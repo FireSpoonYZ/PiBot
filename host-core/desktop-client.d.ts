@@ -109,7 +109,8 @@ export interface DesktopDraftEntry {
 export type DesktopIntentMethod =
   | 'createBot'
   | 'createScope'
-  | 'updateScope';
+  | 'updateScope'
+  | 'deleteScope';
 
 export interface DesktopUiIntent<M extends DesktopIntentMethod = DesktopIntentMethod> {
   id: string;

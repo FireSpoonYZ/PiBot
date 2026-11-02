@@ -7,6 +7,7 @@ import {
   assertId,
   assertRevision,
   normalizeScope,
+  normalizeScopeTitle,
   normalizePublish,
   normalizeEnvelope,
   streamIdForScope,
@@ -160,15 +161,18 @@ function normalizeReplicaListCursor(cursor, label) {
  */
 export function normalizeScopeCreate(input) {
   if (!isPlainObject(input)) throw invalid('scope create input must be an object');
-  rejectUnknownFields(input, new Set(['requestId', 'kind', 'members']), 'scope create input');
+  rejectUnknownFields(input, new Set(['requestId', 'kind', 'members', 'title']), 'scope create input');
   assertId(input.requestId, 'requestId');
   const scope = normalizeScope({
     scopeId: PLACEHOLDER_SCOPE_ID,
     kind: input.kind,
     revision: 1,
     members: input.members,
+    ...(input.title !== undefined ? { title: input.title } : {}),
   });
-  return { requestId: input.requestId, kind: scope.kind, members: scope.members };
+  const normalized = { requestId: input.requestId, kind: scope.kind, members: scope.members };
+  if (scope.title !== undefined) normalized.title = scope.title;
+  return normalized;
 }
 
 /**
@@ -180,22 +184,39 @@ export function normalizeScopeUpdate(input) {
   if (!isPlainObject(input)) throw invalid('scope update input must be an object');
   rejectUnknownFields(
     input,
-    new Set(['requestId', 'expectedRevision', 'members']),
+    new Set(['requestId', 'expectedRevision', 'members', 'title']),
     'scope update input'
   );
   assertId(input.requestId, 'requestId');
   assertRevision(input.expectedRevision, 'expectedRevision');
-  const scope = normalizeScope({
-    scopeId: PLACEHOLDER_SCOPE_ID,
-    kind: 'room',
-    revision: 1,
-    members: input.members,
-  });
-  return {
+  // members/title 各自可选，省略字段由 store 保留旧值；至少提供一项才构成更新。
+  const normalized = {
     requestId: input.requestId,
     expectedRevision: input.expectedRevision,
-    members: scope.members,
   };
+  if (input.members !== undefined) {
+    normalized.members = normalizeScope({
+      scopeId: PLACEHOLDER_SCOPE_ID,
+      kind: 'room',
+      revision: 1,
+      members: input.members,
+    }).members;
+  }
+  const title = normalizeScopeTitle(input.title);
+  if (title !== undefined) normalized.title = title;
+  return normalized;
+}
+
+/**
+ * Managed scope delete input（权威墓碑）：仅 requestId + expectedRevision；
+ * CAS/幂等与 update 同口径，成员表由 store 沿最新 revision 保留。
+ */
+export function normalizeScopeDelete(input) {
+  if (!isPlainObject(input)) throw invalid('scope delete input must be an object');
+  rejectUnknownFields(input, new Set(['requestId', 'expectedRevision']), 'scope delete input');
+  assertId(input.requestId, 'requestId');
+  assertRevision(input.expectedRevision, 'expectedRevision');
+  return { requestId: input.requestId, expectedRevision: input.expectedRevision };
 }
 
 /**

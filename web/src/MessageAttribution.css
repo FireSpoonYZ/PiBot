@@ -16,17 +16,31 @@
 }
 .msg-attr-channel {
   font-size: 10px;
-  padding: 0 5px;
-  border-radius: 6px;
-  background: var(--chip-bg, rgba(59, 130, 246, 0.1));
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--chip-bg, color-mix(in srgb, var(--accent, #2563eb) 14%, var(--surface, rgba(59, 130, 246, 0.1))));
   color: var(--accent, #2563eb);
 }
 .msg-attr-dir,
 .msg-attr-category {
   font-size: 10px;
-  padding: 0 5px;
-  border-radius: 6px;
-  background: var(--chip-bg, rgba(107, 114, 128, 0.1));
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--chip-bg, rgba(107, 114, 128, 0.12));
+}
+.bot-chat-bubble.user:not(.is-peer) .msg-attr {
+  color: rgba(255, 255, 255, 0.86);
+}
+.bot-chat-bubble.user:not(.is-peer) .msg-attr-sender,
+.bot-chat-bubble.user:not(.is-peer) .msg-attr-bot .msg-attr-sender {
+  color: #ffffff;
+}
+.bot-chat-bubble.user:not(.is-peer) .msg-attr-channel,
+.bot-chat-bubble.user:not(.is-peer) .msg-attr-dir,
+.bot-chat-bubble.user:not(.is-peer) .msg-attr-category {
+  background: rgba(255, 255, 255, 0.18);
+  color: #ffffff;
 }
 .msg-attr-out .msg-attr-dir {
   color: var(--accent, #2563eb);

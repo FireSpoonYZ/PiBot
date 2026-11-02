@@ -18,6 +18,7 @@ import {
 import {
   normalizeScopeCreate,
   normalizeScopeUpdate,
+  normalizeScopeDelete,
   normalizeScopeRecord,
   normalizeScopeListOptions,
   normalizeScopeOfferOptions,
@@ -142,10 +143,16 @@ export function openMessageLog(options) {
   const updateScope = (scopeId, input) => {
     assertId(scopeId, 'scopeId');
     const norm = normalizeScopeUpdate(input);
-    for (const member of norm.members) {
+    for (const member of norm.members ?? []) {
       if (member.deviceId === deviceId) assertLocalBot(member.botId);
     }
     return store.updateScope(scopeId, norm);
+  };
+
+  const deleteScope = (scopeId, input) => {
+    assertId(scopeId, 'scopeId');
+    const norm = normalizeScopeDelete(input);
+    return store.deleteScope(scopeId, norm);
   };
 
   const getScopeState = (scopeId, revision) => {
@@ -267,6 +274,7 @@ export function openMessageLog(options) {
     streamStatus,
     createScope,
     updateScope,
+    deleteScope,
     getScopeState,
     listScopeStates,
     getScopeRecord,

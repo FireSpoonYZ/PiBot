@@ -73,26 +73,29 @@ export function createScopeStore(db, { deviceId, transaction, queries, installSc
   const stmtSetDeliveryError = db.prepare(
     "UPDATE message_scope_deliveries SET last_error_code = ? WHERE scope_id = ? AND revision = ? AND target_device_id = ? AND state = 'pending'"
   );
+  // 活跃 scope 状态列表排除墓碑：已删除群只保留墓碑供传播/历史读取，不再列活跃项。
   const stmtListScopeStates = db.prepare(
-    `SELECT s.scope_id AS scope_id, s.kind AS kind, r.revision AS revision, r.members_json AS members_json
+    `SELECT s.scope_id AS scope_id, s.kind AS kind, r.revision AS revision, r.members_json AS members_json, r.title AS title, r.deleted_at AS deleted_at
        FROM message_scopes s
        JOIN message_scope_revisions r ON r.scope_id = s.scope_id
        WHERE r.revision = (SELECT MAX(revision) FROM message_scope_revisions WHERE scope_id = s.scope_id)
+         AND r.deleted_at IS NULL
        ORDER BY s.scope_id ASC
        LIMIT ?`
   );
   const stmtListScopeStatesAfter = db.prepare(
-    `SELECT s.scope_id AS scope_id, s.kind AS kind, r.revision AS revision, r.members_json AS members_json
+    `SELECT s.scope_id AS scope_id, s.kind AS kind, r.revision AS revision, r.members_json AS members_json, r.title AS title, r.deleted_at AS deleted_at
        FROM message_scopes s
        JOIN message_scope_revisions r ON r.scope_id = s.scope_id
        WHERE r.revision = (SELECT MAX(revision) FROM message_scope_revisions WHERE scope_id = s.scope_id)
+         AND r.deleted_at IS NULL
          AND s.scope_id > ?
        ORDER BY s.scope_id ASC
        LIMIT ?`
   );
   const stmtListOffers = db.prepare(
     `SELECT d.scope_id AS scope_id, d.revision AS revision, d.target_device_id AS target_device_id,
-            s.kind AS kind, r.members_json AS members_json, a.authority_device_id AS authority_device_id
+            s.kind AS kind, r.members_json AS members_json, r.title AS title, r.deleted_at AS deleted_at, a.authority_device_id AS authority_device_id
        FROM message_scope_deliveries d
        JOIN message_scope_revisions r ON r.scope_id = d.scope_id AND r.revision = d.revision
        JOIN message_scopes s ON s.scope_id = d.scope_id
@@ -103,7 +106,7 @@ export function createScopeStore(db, { deviceId, transaction, queries, installSc
   );
   const stmtListOffersAfter = db.prepare(
     `SELECT d.scope_id AS scope_id, d.revision AS revision, d.target_device_id AS target_device_id,
-            s.kind AS kind, r.members_json AS members_json, a.authority_device_id AS authority_device_id
+            s.kind AS kind, r.members_json AS members_json, r.title AS title, r.deleted_at AS deleted_at, a.authority_device_id AS authority_device_id
        FROM message_scope_deliveries d
        JOIN message_scope_revisions r ON r.scope_id = d.scope_id AND r.revision = d.revision
        JOIN message_scopes s ON s.scope_id = d.scope_id
@@ -112,6 +115,11 @@ export function createScopeStore(db, { deviceId, transaction, queries, installSc
          AND (d.scope_id > ? OR (d.scope_id = ? AND d.revision > ?) OR (d.scope_id = ? AND d.revision = ? AND d.target_device_id > ?))
        ORDER BY d.scope_id ASC, d.revision ASC, d.target_device_id ASC
        LIMIT ?`
+  );
+  // 墓碑投递目标：全部历史 revision 成员 deviceId 并集——中途被移除的成员
+  // 设备上仍持有旧副本，漏投会让其保留未删群并可继续发信/副本复活。
+  const stmtListRevisionMembers = db.prepare(
+    'SELECT members_json FROM message_scope_revisions WHERE scope_id = ?'
   );
   const stmtPeerMember = db.prepare(
     `SELECT 1 FROM message_scope_revisions r, json_each(r.members_json) m
@@ -139,12 +147,15 @@ export function createScopeStore(db, { deviceId, transaction, queries, installSc
   }
 
   function toScopeDefinition(row) {
-    return {
+    const scope = {
       scopeId: row.scope_id,
       kind: row.kind,
       revision: row.revision,
       members: JSON.parse(row.members_json),
     };
+    if (row.title !== null && row.title !== undefined) scope.title = row.title;
+    if (row.deleted_at !== null && row.deleted_at !== undefined) scope.deletedAt = row.deleted_at;
+    return scope;
   }
 
   // delivery 仅在本机是 authority 且该 revision 存在本地 create/update 操作记录时构建；
@@ -198,7 +209,8 @@ export function createScopeStore(db, { deviceId, transaction, queries, installSc
         throw messageError('SCOPE_FORBIDDEN', 'creator device must have a local member');
       }
       const scopeId = randomUUID();
-      installScopeRevision({ scopeId, kind: input.kind, revision: 1, members: input.members });
+      installScopeRevision({ scopeId, kind: input.kind, revision: 1, members: input.members,
+        ...(input.title !== undefined ? { title: input.title } : {}) });
       stmtInsertAuth.run(scopeId, deviceId);
       const remoteTargets = new Set();
       for (const member of input.members) {
@@ -237,21 +249,96 @@ export function createScopeStore(db, { deviceId, transaction, queries, installSc
       if (latest.revision !== input.expectedRevision) {
         throw messageError('REQUEST_CONFLICT', 'expectedRevision does not match latest revision');
       }
-      if (latest.kind === 'dm' && JSON.stringify(latest.members) !== JSON.stringify(input.members)) {
+      // 墓碑是终态：已删除 scope 不再接受成员/名称修改（只能经新 scope 重建）。
+      if (latest.deletedAt !== undefined) {
+        throw messageError('SCOPE_DELETED', 'scope has been deleted');
+      }
+      // title 是 room 元数据：DM 拒绝任何显式 title 更新（含清空）。
+      if (latest.kind === 'dm' && input.title !== undefined) {
+        throw messageError('REQUEST_CONFLICT', 'DM scopes have no room title');
+      }
+      const nextMembers = input.members !== undefined ? input.members : latest.members;
+      // ''/全空白 = 显式清空回成员拼接默认名：规范化为未设置（NULL），与
+      // normalizeScope 的“空 title 不携带键”一致，digest 不变。
+      const nextTitle = input.title !== undefined && input.title !== ''
+        ? input.title
+        : undefined;
+      const effectiveTitle = input.title === undefined ? latest.title : nextTitle;
+      if (latest.kind === 'dm' && JSON.stringify(latest.members) !== JSON.stringify(nextMembers)) {
         throw messageError('REQUEST_CONFLICT', 'DM participants are immutable');
       }
       const revision = latest.revision + 1;
       if (!Number.isSafeInteger(revision) || revision < 1) {
         throw messageError('REQUEST_CONFLICT', 'revision overflow');
       }
-      installScopeRevision({ scopeId, kind: latest.kind, revision, members: input.members });
+      installScopeRevision({ scopeId, kind: latest.kind, revision, members: nextMembers,
+        ...(effectiveTitle !== undefined ? { title: effectiveTitle } : {}) });
       // 目标集 = 上一版 scope.members device 并集新成员 device，剔除本机；不沿用旧 delivery 行。
       const targets = new Set();
       for (const member of latest.members) {
         targets.add(member.deviceId);
       }
-      for (const member of input.members) {
+      for (const member of nextMembers) {
         targets.add(member.deviceId);
+      }
+      targets.delete(deviceId);
+      for (const target of targets) {
+        stmtInsertDelivery.run(scopeId, revision, target);
+      }
+      stmtInsertOp.run(input.requestId, fingerprint, scopeId, revision);
+      return getScopeState(scopeId, revision);
+    });
+  }
+
+  // 权威删除：CAS + requestId 幂等（重复 requestId 返回原墓碑，不冲突）。
+  // 新 revision 冻结最终成员并携带 deletedAt 墓碑；墓碑经同一 offer/副本
+  // 通道传播，所有 peer 据此拒绝旧流量复活并清本地工作。
+  function deleteScope(scopeId, input) {
+    const fingerprint = digest({ operation: 'delete', scopeId, input });
+    return transaction(() => {
+      const prior = stmtGetOp.get(input.requestId);
+      if (prior) {
+        if (prior.fingerprint !== fingerprint) {
+          throw messageError('REQUEST_CONFLICT', 'requestId already used with a different definition');
+        }
+        if (prior.scope_id !== scopeId) {
+          throw messageError('REQUEST_CONFLICT', 'requestId already used for another scope');
+        }
+        return getScopeState(scopeId, prior.revision);
+      }
+      const latest = queries.getScope(scopeId);
+      if (!latest) throw messageError('SCOPE_NOT_FOUND', 'scope not found');
+      const authority = stmtGetAuth.get(scopeId);
+      if (!authority) {
+        throw messageError('SCOPE_UNMANAGED', 'scope is not managed');
+      }
+      if (authority.authority_device_id !== deviceId) {
+        throw messageError('SCOPE_AUTHORITY_REQUIRED', 'only the scope authority may delete');
+      }
+      if (latest.revision !== input.expectedRevision) {
+        throw messageError('REQUEST_CONFLICT', 'expectedRevision does not match latest revision');
+      }
+      // 重复删除（新 requestId 对已墓碑 scope）直接返回现有墓碑，保持幂等。
+      if (latest.deletedAt !== undefined) {
+        return getScopeState(scopeId, latest.revision);
+      }
+      if (latest.kind !== 'room') {
+        throw messageError('SCOPE_FORBIDDEN', 'only room scopes may be deleted');
+      }
+      const revision = latest.revision + 1;
+      if (!Number.isSafeInteger(revision) || revision < 1) {
+        throw messageError('REQUEST_CONFLICT', 'revision overflow');
+      }
+      const deletedAt = new Date().toISOString();
+      installScopeRevision({ scopeId, kind: latest.kind, revision, members: latest.members,
+        ...(latest.title !== undefined ? { title: latest.title } : {}), deletedAt });
+      // 墓碑要到达所有设备上的历史副本持有者：并集取本 scope 全部历史
+      // revision 的成员 deviceId（含已被移除成员），剔除本机。
+      const targets = new Set();
+      for (const row of stmtListRevisionMembers.all(scopeId)) {
+        for (const member of JSON.parse(row.members_json)) {
+          targets.add(member.deviceId);
+        }
       }
       targets.delete(deviceId);
       for (const target of targets) {
@@ -290,7 +377,8 @@ export function createScopeStore(db, { deviceId, transaction, queries, installSc
     const ackDigest = digest(record);
     return transaction(() => {
       const scopeId = record.scope.scopeId;
-      if (!queries.getScope(scopeId)) {
+      const latest = queries.getScope(scopeId);
+      if (!latest) {
         installScopeRevision(record.scope);
         stmtInsertAuth.run(scopeId, record.authorityDeviceId);
         return { scopeId, revision: record.scope.revision, digest: ackDigest };
@@ -301,6 +389,11 @@ export function createScopeStore(db, { deviceId, transaction, queries, installSc
       }
       if (authority.authority_device_id !== record.authorityDeviceId) {
         throw messageError('REQUEST_CONFLICT', 'installed authority is immutable');
+      }
+      // 已墓碑的 scope 只接受墓碑 revision：旧 offer/未删 revision 不得复活；
+      // 同一墓碑 revision 的重投递由 installScopeRevision 幂等冲突检查处理。
+      if (latest.deletedAt !== undefined && record.scope.deletedAt === undefined) {
+        throw messageError('SCOPE_DELETED', 'scope has been deleted');
       }
       installScopeRevision(record.scope);
       return { scopeId, revision: record.scope.revision, digest: ackDigest };
@@ -413,6 +506,11 @@ export function createScopeStore(db, { deviceId, transaction, queries, installSc
       if (authority.authority_device_id !== record.authorityDeviceId) {
         throw messageError('REQUEST_CONFLICT', 'record authority does not match installed authority');
       }
+      const latest = queries.getScope(scopeId);
+      // 墓碑终态同上：未删 record 不得覆盖已墓碑 scope；同/旧墓碑走幂等检查。
+      if (latest?.deletedAt !== undefined && record.scope.deletedAt === undefined) {
+        throw messageError('SCOPE_DELETED', 'scope has been deleted');
+      }
       return installScopeRevision(record.scope);
     }
     // Legacy 未托管 scope：绝不安装未知新 revision，只接受完全一致的已存定义。
@@ -433,6 +531,7 @@ export function createScopeStore(db, { deviceId, transaction, queries, installSc
   return {
     createScope,
     updateScope,
+    deleteScope,
     getAuthority,
     getScopeRecord,
     getScopeState,

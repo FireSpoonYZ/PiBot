@@ -639,6 +639,8 @@ export interface Runtime {
   /** Module 12: six managed-scope methods; exposed locally and via the module 14 remote v2 table. */
   createScope(input: ScopeCreateInput): Promise<ScopeInfo>;
   updateScope(scopeId: string, input: ScopeUpdateInput): Promise<ScopeInfo>;
+  /** Authority-only dissolve; resolves the deletedAt tombstone ScopeInfo. */
+  deleteScope(scopeId: string, input: ScopeDeleteInput): Promise<ScopeInfo>;
   /** Latest state; rejects SCOPE_NOT_FOUND when the scope is missing, never resolves null. */
   getScopeState(scopeId: string): Promise<ScopeInfo>;
   listScopeStates(options?: ScopeListOptions): Promise<ScopeListPage>;
@@ -1079,6 +1081,8 @@ export interface ControlClient {
   createScope(input: ScopeCreateInput, options?: ControlClientCallOptions): Promise<ScopeInfo>;
   getScopeState(scopeId: string, options?: ControlClientCallOptions): Promise<ScopeInfo>;
   updateScope(scopeId: string, input: ScopeUpdateInput, options?: ControlClientCallOptions): Promise<ScopeInfo>;
+  /** Authority-only dissolve; resolves the deletedAt tombstone ScopeInfo. */
+  deleteScope(scopeId: string, input: ScopeDeleteInput, options?: ControlClientCallOptions): Promise<ScopeInfo>;
   publishUserMessage(scopeId: string, input: UserMessageInput, options?: ControlClientCallOptions): Promise<StoredMessage>;
   listScopeReplicas(scopeId: string, options?: ReplicaListOptions & ControlClientCallOptions): Promise<ReplicaListPage>;
   live(botId: string, options?: ControlClientCallOptions): AsyncIterable<BotLiveFrame>;
@@ -1261,6 +1265,10 @@ export interface MessageScope {
   kind: 'dm' | 'room';
   revision: number;
   members: MessageMember[];
+  /** Room display name (<=120 chars, trimmed); absent/empty falls back to member join. */
+  title?: string;
+  /** Room dissolve tombstone (ISO UTC); present only on deleted scopes. */
+  deletedAt?: string;
 }
 
 export interface PublishMessageInput {
@@ -1432,13 +1440,24 @@ export interface ScopeCreateInput {
   requestId: string;
   kind: 'room' | 'dm';
   members: MessageMember[];
+  /** Optional room display name; omitted fields keep wire defaults. */
+  title?: string;
 }
 
 /** Managed scope update input; scopeId is a separate argument. */
 export interface ScopeUpdateInput {
   requestId: string;
   expectedRevision: number;
-  members: MessageMember[];
+  /** Omitted preserves stored members; supplied replaces the whole member list. */
+  members?: MessageMember[];
+  /** Omitted preserves the stored room title. */
+  title?: string;
+}
+
+/** Authority-only room dissolve input; scopeId is a separate argument. */
+export interface ScopeDeleteInput {
+  requestId: string;
+  expectedRevision: number;
 }
 
 /** Canonical fixed-order record; authorityDeviceId is null only for legacy unmanaged scopes. */
@@ -1853,6 +1872,7 @@ export interface RemoteControlMethodMap {
   createScope: { params: { input: ScopeCreateInput }; result: ScopeInfo };
   getScopeState: { params: { scopeId: string }; result: ScopeInfo };
   updateScope: { params: { scopeId: string; input: ScopeUpdateInput }; result: ScopeInfo };
+  deleteScope: { params: { scopeId: string; input: ScopeDeleteInput }; result: ScopeInfo };
   publishUserMessage: { params: { scopeId: string; input: UserMessageInput }; result: StoredMessage };
   listScopeReplicas: { params: { scopeId: string; limit?: number; cursor?: ReplicaListCursor | null }; result: ReplicaListPage };
   scopeHistory: { params: { scopeId: string; limit?: number; cursor?: MessageHistoryCursor | null; order?: 'ascending' | 'descending' }; result: MessageHistoryPage };

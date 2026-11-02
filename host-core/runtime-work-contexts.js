@@ -48,6 +48,11 @@ export function createWorkContextRuntime({ host, harness, context, onBound, getP
     const log = getMessageLog();
     const scope = log.getScope(scopeId);
     if (!scope) throw messageError('SCOPE_NOT_FOUND', 'scope not found: ' + scopeId);
+    // 已删除 scope 的工作上下文不再授权：历史账本仍在（scopeHistory 可读），
+    // 但不再导入/调度/恢复任何工作。
+    if (scope.deletedAt !== undefined) {
+      throw messageError('SCOPE_DELETED', 'scope has been deleted: ' + scopeId);
+    }
     const binding = await getWorkBinding(harness, botId, scopeId, context);
     if (
       !scope.members.some((member) => member.deviceId === host.deviceId && member.botId === botId) &&

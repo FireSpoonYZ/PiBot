@@ -157,9 +157,25 @@ export function streamIdForScope(scopeId, revision) {
   return 'scope:' + sha256Hex(JSON.stringify([scopeId, revision]));
 }
 
+const MAX_SCOPE_TITLE_CHARS = 120;
+
+// Room title：trim 后 ≤120 字符；undefined/缺省 = 保留语义由调用方决定；
+// ''/全空白 = 显式清空（恢复成员拼接默认名），非空白 = 设名。
+export function normalizeScopeTitle(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !value.isWellFormed()) {
+    throw invalid('scope.title must be a well-formed string');
+  }
+  const title = value.trim();
+  if ([...title].length > MAX_SCOPE_TITLE_CHARS) {
+    throw invalid('scope.title must be at most 120 characters');
+  }
+  return title;
+}
+
 export function normalizeScope(input) {
   if (!isPlainObject(input)) throw invalid('scope must be an object');
-  rejectUnknownFields(input, new Set(['scopeId', 'kind', 'revision', 'members']), 'scope');
+  rejectUnknownFields(input, new Set(['scopeId', 'kind', 'revision', 'members', 'title', 'deletedAt']), 'scope');
   assertId(input.scopeId, 'scopeId');
   const { kind, revision } = input;
   if (kind !== 'dm' && kind !== 'room') {
@@ -174,7 +190,21 @@ export function normalizeScope(input) {
   } else if (members.length < 2) {
     throw invalid('room scope must have at least 2 members');
   }
-  return { scopeId: input.scopeId, kind, revision, members };
+  const scope = { scopeId: input.scopeId, kind, revision, members };
+  // room 元数据仅 room 可携带：DM 拒绝 title/deletedAt，杜绝半规范形态。
+  if (kind === 'dm' && (input.title !== undefined || input.deletedAt !== undefined)) {
+    throw invalid('dm scope must not carry room metadata (title/deletedAt)');
+  }
+  const title = normalizeScopeTitle(input.title);
+  // 空 title 规范化为缺省（无 title 键）：'清空' 意图由 update 输入层携带，
+  // 规范化 scope 值上 title 只在有真实名称时出现，保持旧无字段 digest 不变。
+  if (title !== undefined && title !== '') scope.title = title;
+  // deletedAt 是 room 删除墓碑（ISO UTC）；只在规范化值上可选携带，旧记录无此键。
+  if (input.deletedAt !== undefined) {
+    assertIsoMsZ(input.deletedAt, 'deletedAt');
+    scope.deletedAt = input.deletedAt;
+  }
+  return scope;
 }
 
 export function normalizePublish(input) {

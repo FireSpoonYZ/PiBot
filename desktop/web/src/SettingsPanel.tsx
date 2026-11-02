@@ -2,13 +2,28 @@
 // Radix Dialog 由 App 提供 Portal/Overlay/Content；本组件渲染标题、页签与两块内容。
 // token/CA 仅为输入态，随连接尝试结束由 App 清空；不写 localStorage / 日志。
 import * as Dialog from '@radix-ui/react-dialog';
-import { Check, Copy, Pencil, X } from 'lucide-react';
+import {
+  Archive,
+  ArrowLeft,
+  Check,
+  ChevronRight,
+  Copy,
+  History,
+  Pencil,
+  RefreshCw,
+  RotateCcw,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import type { DesktopClientStatus, DesktopUiProfile } from '../../../host-core/desktop-client.js';
-import type { DevicesDirectoryItem } from '../../../host-core/index.js';
+import type { BotDirectoryEntry, DevicesDirectoryItem } from '../../../host-core/index.js';
 import type { DesktopIdentity } from './types';
 import { openCenterManagement } from './CenterGate';
+import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
+import { botAvatarKey } from '../../../web/src/botAvatarSync';
+import { remainingArchiveDays, type BotChatsArchiveBridge } from './BotChats';
 
 interface ProfileFormState {
   title: string;
@@ -64,6 +79,8 @@ export interface SettingsPanelProps {
   onLoadMoreDevices: () => void;
   onRenameDevice: (item: DevicesDirectoryItem, displayName: string) => void;
   onDeviceError: (message: string) => void;
+  archiveBridge?: BotChatsArchiveBridge | null;
+  onOpenArchivedBotHistory?: (bot: BotDirectoryEntry) => void;
 }
 
 /** 设备目录行：行内改名替代 window.prompt；保存前置 1–120 字符校验与 App 保持一致。 */
@@ -151,7 +168,11 @@ function DeviceRow(props: {
 
 export function SettingsPanel(props: SettingsPanelProps) {
   const [tab, setTab] = useState<'general' | 'profiles'>('general');
+  const [archivedPageOpen, setArchivedPageOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [busyBotKey, setBusyBotKey] = useState<string | null>(null);
+  const [archiveActionError, setArchiveActionError] = useState<string | null>(null);
+  const [confirmDeleteBot, setConfirmDeleteBot] = useState<BotDirectoryEntry | null>(null);
   const {
     identity,
     transportConnected,
@@ -161,7 +182,42 @@ export function SettingsPanel(props: SettingsPanelProps) {
     selectedProfile,
     devices,
     devicesIsRelay,
+    archiveBridge,
+    onOpenArchivedBotHistory,
   } = props;
+
+  async function handleUnarchive(bot: BotDirectoryEntry) {
+    if (!archiveBridge || busyBotKey !== null) return;
+    const key = `${bot.deviceId}:${bot.botId}`;
+    setBusyBotKey(key);
+    setArchiveActionError(null);
+    try {
+      await archiveBridge.unarchiveBot(bot);
+    } catch (e) {
+      setArchiveActionError(
+        '恢复失败：' + (e instanceof Error ? e.message : String(e)),
+      );
+    } finally {
+      setBusyBotKey(null);
+    }
+  }
+
+  async function handleConfirmDelete(bot: BotDirectoryEntry) {
+    if (!archiveBridge || busyBotKey !== null) return;
+    const key = `${bot.deviceId}:${bot.botId}`;
+    setBusyBotKey(key);
+    setArchiveActionError(null);
+    try {
+      await archiveBridge.deleteBot(bot);
+      setConfirmDeleteBot(null);
+    } catch (e) {
+      setArchiveActionError(
+        '永久删除失败：' + (e instanceof Error ? e.message : String(e)),
+      );
+    } finally {
+      setBusyBotKey(null);
+    }
+  }
 
   const copyClientId = () => {
     if (!centerStatus?.clientId) return;
@@ -185,16 +241,189 @@ export function SettingsPanel(props: SettingsPanelProps) {
         中心连接、设备目录与高级连接档案；凭据仅输入态，连接尝试结束即清空。
       </Dialog.Description>
       <div className="dialog-tabs pill-tabs" role="tablist">
-        <button type="button" role="tab" aria-selected={tab === 'general'} className={tab === 'general' ? 'active' : undefined} onClick={() => setTab('general')}>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'general'}
+          className={tab === 'general' ? 'active' : undefined}
+          onClick={() => {
+            setTab('general');
+            setArchivedPageOpen(false);
+          }}
+        >
           常规
         </button>
-        <button type="button" role="tab" aria-selected={tab === 'profiles'} className={tab === 'profiles' ? 'active' : undefined} onClick={() => setTab('profiles')}>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'profiles'}
+          className={tab === 'profiles' ? 'active' : undefined}
+          onClick={() => {
+            setTab('profiles');
+            setArchivedPageOpen(false);
+          }}
+        >
           高级档案
         </button>
       </div>
       <div className="dialog-body">
         {tab === 'general' ? (
-          <>
+          archivedPageOpen ? (
+            <div className="settings-section archived-bots-subpage">
+              <div className="archived-subpage-head">
+                <button
+                  type="button"
+                  className="secondary-button archived-back-btn"
+                  onClick={() => {
+                    setArchivedPageOpen(false);
+                    setConfirmDeleteBot(null);
+                    setArchiveActionError(null);
+                  }}
+                >
+                  <ArrowLeft size={14} aria-hidden /> 返回常规设置
+                </button>
+                <div className="archived-subpage-title">
+                  <h4>已归档智能体 ({archiveBridge?.archivedBots.length ?? 0})</h4>
+                  <span className="metadata">14 天后自动清理 · 可查看只读历史、恢复或永久删除</span>
+                </div>
+                {archiveBridge ? (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => archiveBridge.refresh()}
+                    disabled={!archiveBridge.online || archiveBridge.loading}
+                  >
+                    <RefreshCw size={13} aria-hidden /> 刷新
+                  </button>
+                ) : null}
+              </div>
+
+              {archiveActionError ? (
+                <div className="error-banner" role="alert">
+                  {archiveActionError}
+                  <button type="button" onClick={() => setArchiveActionError(null)}>关闭</button>
+                </div>
+              ) : null}
+
+              {archiveBridge?.error ? (
+                <div className="error-banner" role="alert">
+                  {archiveBridge.error}
+                  <button type="button" onClick={() => archiveBridge.refresh()}>重试</button>
+                </div>
+              ) : null}
+
+              {!identity || !archiveBridge ? (
+                <p className="empty-state">请先连接 Host 或中继后查看已归档智能体。</p>
+              ) : archiveBridge.archivedBots.length === 0 ? (
+                <p className="empty-state">暂无已归档智能体。</p>
+              ) : (
+                <ul className="archived-bot-list">
+                  {archiveBridge.archivedBots.map((bot) => {
+                    const key = `${bot.deviceId}:${bot.botId}`;
+                    const daysLeft = remainingArchiveDays(bot.archivedAt);
+                    const deviceName =
+                      archiveBridge.devices.find((d) => d.deviceId === bot.deviceId)?.displayName ||
+                      bot.deviceName ||
+                      '未命名设备';
+                    const isBotOnline = Boolean(bot.online && archiveBridge.online);
+                    const isBusy = busyBotKey === key;
+                    const isConfirmingDelete =
+                      confirmDeleteBot?.deviceId === bot.deviceId &&
+                      confirmDeleteBot?.botId === bot.botId;
+                    return (
+                      <li key={key} className="archived-bot-card">
+                        <div className="archived-bot-row">
+                          <button
+                            type="button"
+                            className="archived-bot-open"
+                            onClick={() => onOpenArchivedBotHistory?.(bot)}
+                            title="点击查看只读历史"
+                          >
+                            <GrokBotAvatar
+                              botKey={botAvatarKey(bot)}
+                              roleName={bot.role}
+                              isPrimary={false}
+                              starBadge={false}
+                              platformBadge={bot.platform || 'host'}
+                              size={40}
+                            />
+                            <span className="archived-bot-info">
+                              <span className="archived-bot-title-line">
+                                <span className="profile-title">{bot.role}</span>
+                                <span className="metadata">
+                                  {deviceName} · {isBotOnline ? '在线' : '离线'}
+                                </span>
+                                <span className="archive-countdown">
+                                  剩余 {daysLeft} 天自动删除
+                                </span>
+                              </span>
+                              <span className="archived-bot-preview">
+                                {bot.lastPreview || bot.description || '已归档 · 只读历史'}
+                              </span>
+                            </span>
+                          </button>
+                          <div className="archived-bot-actions">
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              onClick={() => onOpenArchivedBotHistory?.(bot)}
+                            >
+                              <History size={13} aria-hidden /> 查看历史
+                            </button>
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              disabled={!isBotOnline || busyBotKey !== null}
+                              onClick={() => void handleUnarchive(bot)}
+                            >
+                              <RotateCcw size={13} aria-hidden /> {isBusy ? '处理中…' : '恢复智能体'}
+                            </button>
+                            <button
+                              type="button"
+                              className="secondary-button danger-outline"
+                              disabled={!isBotOnline || busyBotKey !== null}
+                              onClick={() => {
+                                setArchiveActionError(null);
+                                setConfirmDeleteBot(bot);
+                              }}
+                            >
+                              <Trash2 size={13} aria-hidden /> 永久删除智能体
+                            </button>
+                          </div>
+                        </div>
+                        {isConfirmingDelete ? (
+                          <div className="confirm-delete-banner archived-confirm-banner" role="alert">
+                            <span>
+                              确定要永久删除智能体「{bot.role}」吗？此操作不可撤销。
+                            </span>
+                            <div className="confirm-delete-actions">
+                              <button
+                                type="button"
+                                className="primary-button danger-button"
+                                disabled={!isBotOnline || isBusy}
+                                onClick={() => void handleConfirmDelete(bot)}
+                              >
+                                {isBusy ? '删除中…' : '确认永久删除'}
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary-button"
+                                disabled={isBusy}
+                                onClick={() => setConfirmDeleteBot(null)}
+                              >
+                                取消
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          ) : (
+            <>
             <div className="settings-section">
               <div className="section-head"><h4>中心连接</h4></div>
               <div className="card-row">
@@ -275,7 +504,35 @@ export function SettingsPanel(props: SettingsPanelProps) {
               )}
               <p className="metadata">选择设备用于群聊与待发送；Bot 聊天按各自设备路由。</p>
             </div>
+
+            <div className="settings-section">
+              <div className="section-head">
+                <h4>已归档智能体</h4>
+                <span className="metadata">14 天后自动清理</span>
+              </div>
+              <button
+                type="button"
+                className="archived-entry-row"
+                onClick={() => {
+                  setArchiveActionError(null);
+                  setConfirmDeleteBot(null);
+                  setArchivedPageOpen(true);
+                }}
+              >
+                <span className="archived-entry-main">
+                  <Archive size={16} aria-hidden />
+                  <span className="profile-title">
+                    已归档智能体 ({archiveBridge?.archivedBots.length ?? 0})
+                  </span>
+                  <span className="metadata">
+                    查看只读历史、恢复智能体或永久删除智能体
+                  </span>
+                </span>
+                <ChevronRight size={16} aria-hidden />
+              </button>
+            </div>
           </>
+          )
         ) : (
           <>
             <div className="settings-section">

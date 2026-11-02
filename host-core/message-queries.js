@@ -18,7 +18,7 @@ export function inboxQueryKey(botId, scopeId) {
 // 只读查询层：仅 prepared SELECT，事务/写入/连接生命周期归 message-store.js。
 export function createMessageQueries(db, { deviceId }) {
   const stmtGetScopeLatest = db.prepare(
-    `SELECT s.kind AS kind, r.revision AS revision, r.members_json AS members_json
+    `SELECT s.kind AS kind, r.revision AS revision, r.members_json AS members_json, r.title AS title, r.deleted_at AS deleted_at
        FROM message_scopes s
        JOIN message_scope_revisions r ON r.scope_id = s.scope_id
        WHERE s.scope_id = ?
@@ -26,16 +26,18 @@ export function createMessageQueries(db, { deviceId }) {
        LIMIT 1`
   );
   const stmtGetScopeRevision = db.prepare(
-    `SELECT s.kind AS kind, r.revision AS revision, r.members_json AS members_json
+    `SELECT s.kind AS kind, r.revision AS revision, r.members_json AS members_json, r.title AS title, r.deleted_at AS deleted_at
        FROM message_scopes s
        JOIN message_scope_revisions r ON r.scope_id = s.scope_id
        WHERE s.scope_id = ? AND r.revision = ?`
   );
+  // 活跃列表只含未删除 scope：墓碑 revision 仍可读历史/状态，但不列活跃群。
   const stmtListScopes = db.prepare(
-    `SELECT s.scope_id AS scope_id, s.kind AS kind, r.revision AS revision, r.members_json AS members_json
+    `SELECT s.scope_id AS scope_id, s.kind AS kind, r.revision AS revision, r.members_json AS members_json, r.title AS title, r.deleted_at AS deleted_at
        FROM message_scopes s
        JOIN message_scope_revisions r ON r.scope_id = s.scope_id
        WHERE r.revision = (SELECT MAX(revision) FROM message_scope_revisions WHERE scope_id = s.scope_id)
+         AND r.deleted_at IS NULL
        ORDER BY s.scope_id ASC`
   );
   const stmtGetEventByMessageId = db.prepare('SELECT * FROM message_events WHERE message_id = ?');
@@ -239,19 +241,21 @@ export function createMessageQueries(db, { deviceId }) {
       );
   }
 
+  function rowToScope(row, scopeId) {
+    const scope = { scopeId, kind: row.kind, revision: row.revision, members: JSON.parse(row.members_json) };
+    if (row.title !== null && row.title !== undefined) scope.title = row.title;
+    if (row.deleted_at !== null && row.deleted_at !== undefined) scope.deletedAt = row.deleted_at;
+    return scope;
+  }
+
   function getScope(scopeId, revision) {
     const row = revision == null ? stmtGetScopeLatest.get(scopeId) : stmtGetScopeRevision.get(scopeId, revision);
     if (!row) return null;
-    return { scopeId, kind: row.kind, revision: row.revision, members: JSON.parse(row.members_json) };
+    return rowToScope(row, scopeId);
   }
 
   function listScopes() {
-    return stmtListScopes.all().map((row) => ({
-      scopeId: row.scope_id,
-      kind: row.kind,
-      revision: row.revision,
-      members: JSON.parse(row.members_json),
-    }));
+    return stmtListScopes.all().map((row) => rowToScope(row, row.scope_id));
   }
 
   function getMessage(messageId) {

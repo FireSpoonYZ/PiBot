@@ -40,6 +40,7 @@ export const INTENT_METHODS = new Set([
   'createBot',
   'createScope',
   'updateScope',
+  'deleteScope',
   'setPrimaryBot',
   'archiveBot',
   'unarchiveBot',

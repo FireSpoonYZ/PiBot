@@ -25,6 +25,7 @@ import type {
   BotLiveFrame,
   ScopeCreateInput,
   ScopeUpdateInput,
+  ScopeDeleteInput,
   ScopeInfo,
   ScopeListOptions,
   ScopeListPage,
@@ -147,6 +148,8 @@ export interface ControlClient {
   /** Latest state; a missing scope rejects with ControlApiError (404 SCOPE_NOT_FOUND), never null success. */
   getScopeState(scopeId: string, options?: ControlClientCallOptions): Promise<ScopeInfo>;
   updateScope(scopeId: string, input: ScopeUpdateInput, options?: ControlClientCallOptions): Promise<ScopeInfo>;
+  /** Authority-only room dissolve; resolves with the deletedAt tombstone ScopeInfo. */
+  deleteScope(scopeId: string, input: ScopeDeleteInput, options?: ControlClientCallOptions): Promise<ScopeInfo>;
   /** Room-public user message ledger receipt; not delivery/inference completion. */
   publishUserMessage(scopeId: string, input: UserMessageInput, options?: ControlClientCallOptions): Promise<StoredMessage>;
   listScopeReplicas(scopeId: string, options?: ReplicaListClientOptions): Promise<ReplicaListPage>;

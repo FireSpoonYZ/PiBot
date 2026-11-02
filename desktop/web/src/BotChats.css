@@ -202,7 +202,7 @@
 
 /* Bot 行右键菜单（gbot-ui 上下文菜单挂 body；桌面主题变量适配） */
 .gbot-context-menu {
-  min-width: 180px;
+  min-width: 196px;
   border-color: var(--line);
   background: var(--surface);
   box-shadow: var(--shadow-md);
@@ -211,9 +211,22 @@
 .gbot-context-menu .baby-grok-bot-context-menu__item {
   color: var(--text);
 }
-.gbot-context-menu .baby-grok-bot-context-menu__item:hover,
-.gbot-context-menu .baby-grok-bot-context-menu__item:focus-visible {
+.gbot-context-menu .baby-grok-bot-context-menu__item[data-danger="true"],
+.gbot-context-menu .baby-grok-bot-context-menu__item.danger {
+  color: var(--danger);
+}
+.gbot-context-menu .baby-grok-bot-context-menu__item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.gbot-context-menu .baby-grok-bot-context-menu__item:hover:not(:disabled),
+.gbot-context-menu .baby-grok-bot-context-menu__item:focus-visible:not(:disabled) {
   background: var(--accent-soft);
+}
+
+/* 普通用户与 Bot 主聊不展示 primary 来源胶囊，仅保留 room/dm */
+.bot-chat-bubble .msg-attr[data-channel="primary"] {
+  display: none;
 }
 
 /* 行选中态（gbot-ui 以 data-active 标记，复用 hub-bot-row.selected 视觉） */
@@ -860,6 +873,44 @@
   padding: 16px 18px;
 }
 .create-bot-dialog .form-actions { padding: 0 18px 16px; }
+
+.confirm-action-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 41;
+  width: min(460px, calc(100vw - 48px));
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 0.22);
+  overflow: hidden;
+}
+.confirm-action-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.confirm-action-body p {
+  margin: 0;
+}
+.confirm-action-body .error-banner,
+.confirm-action-body .status {
+  margin: 0;
+}
+.confirm-action-body .form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 4px 0 0;
+}
 
 /* 紧凑浮层遮罩：宽屏（≥1280px）下隐藏，抽屉与聊天并排可同时操作 */
 .inspector-scrim {

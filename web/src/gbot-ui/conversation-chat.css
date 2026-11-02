@@ -25,6 +25,7 @@
   box-shadow: 0 2px 10px rgb(0 0 0 / .06);
   transition: transform 160ms cubic-bezier(.22, 1, .36, 1);
 }
+.conversation-chat-header__circle svg { width: 18px; height: 18px; }
 .conversation-chat-header__circle:active { transform: scale(.93); }
 .conversation-chat-header__spacer { flex: none; width: 44px; }
 .conversation-chat-header__pill {

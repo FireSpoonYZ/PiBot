@@ -11,13 +11,13 @@ import { createWorkInput } from './work-decision-codec.js';
 import { RequestContext } from './request-context.js';
 import { parseModelRef } from './runtime-models.js';
 
-const CONTROL_ERRORS = new Set(['INVALID_ARGUMENT', 'BOT_NOT_FOUND', 'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'WORK_CONTEXT_INACTIVE', 'NOT_CONNECTED']);
+const CONTROL_ERRORS = new Set(['INVALID_ARGUMENT', 'BOT_NOT_FOUND', 'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'SCOPE_DELETED', 'WORK_CONTEXT_INACTIVE', 'NOT_CONNECTED']);
 // NOT_CONNECTED 来自 Bot 准入队列关闭（runtime 已在关闭）：只拒绝新准入，不升级为 fatal。
-const AUTO_ERRORS = new Set(['WORK_CONTEXT_INACTIVE', 'NOT_CONNECTED', 'BOT_NOT_FOUND']);
+const AUTO_ERRORS = new Set(['WORK_CONTEXT_INACTIVE', 'NOT_CONNECTED', 'BOT_NOT_FOUND', 'SCOPE_DELETED']);
 const WORK_ERRORS = new Set(['WORK_STOPPED', 'WORK_CONTEXT_INACTIVE', 'STALE_INPUT', 'MODEL_REQUIRED', 'MODEL_NOT_FOUND', 'CONTEXT_LIMIT', 'WORK_GENERATION_FAILED']);
 // 已知的确定模型配置失败：可立即请求级结算并回执；离线/忙碌/SessionFailed/未知仍按暂不可达处理。
 const DETERMINATE_CONFIG_CODES = new Set(['MODEL_REQUIRED', 'MODEL_NOT_FOUND']);
-const PUBLICATION_ERRORS = new Set([...WORK_ERRORS, 'INVALID_ARGUMENT', 'BOT_CONTEXT_REQUIRED', 'BOT_NOT_FOUND', 'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'MESSAGE_NOT_FOUND', 'REQUEST_CONFLICT']);
+const PUBLICATION_ERRORS = new Set([...WORK_ERRORS, 'INVALID_ARGUMENT', 'BOT_CONTEXT_REQUIRED', 'BOT_NOT_FOUND', 'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'SCOPE_DELETED', 'MESSAGE_NOT_FOUND', 'REQUEST_CONFLICT']);
 const SCOPE_MESSAGE_KIND = 'host.scope-message';
 const WORK_TRIGGER_KIND = 'host.work-trigger';
 
@@ -138,7 +138,8 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
   const inflight = new Set();
   const lanes = new Map();
   const getLog = () => getWorkContexts().getMessageLog();
-  const member = (scope, botId) => scope?.members.some((item) => item.deviceId === host.deviceId && item.botId === botId) === true;
+  // 墓碑 scope 一律视为无成员资格：已删除群不再触发/提交/恢复任何工作。
+  const member = (scope, botId) => scope?.deletedAt === undefined && scope?.members.some((item) => item.deviceId === host.deviceId && item.botId === botId) === true;
   const currentMember = (meta) => member(getLog().getScope(meta.scopeId), meta.botId);
 
   function assertHealthy() {
@@ -513,6 +514,51 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     // 下一次外部驱动才被拾取。
     try { turnGate.idle?.(botId); } catch { /* 通知失败不影响 Stop 结果 */ }
     return result;
+  }
+
+  /**
+   * stopScopeWork(scopeId)：群删除/墓碑接收后的整 scope 停止——只结算该 scope
+   * 下已绑定的工作 pending（标记 stopped + 精准取消任务族），不 abort 该 Bot
+   * 其它 scope 或主聊天工作。不走 scope/Bot 准入 lane（与 interruptBotWork 同
+   * 约束）：直接持久 commit + abortPending。绑定此后因墓碑 member 检查不再
+   * 被 reconcile/poll 重新调度；未绑定成员的积压由墓碑授权拦截在 authorize。
+   */
+  async function stopScopeWork(scopeId) {
+    assertId(scopeId, 'scopeId');
+    const harness = getHarness();
+    const index = await harness.snapshot(WorkIndex, context);
+    const bindings = [];
+    for (const [key, binding] of Object.entries(index?.byKey ?? {})) {
+      let pair = null;
+      try { pair = JSON.parse(key); } catch { pair = null; }
+      if (!Array.isArray(pair) || pair.length !== 2 || pair[1] !== scopeId) continue;
+      bindings.push({ botId: pair[0], nativeId: binding.nativeId });
+    }
+    for (const entry of bindings) {
+      await harness.commit(async (tx) => {
+        const state = await tx.doc(WorkDecisionState, entry.nativeId);
+        state.stopped = true;
+      }, context);
+      // abortPending 按快照 requestId 比对结算：并发落位的新 pending 不被误结算，
+      // 且墓碑 member 检查已阻止后续触发，无需水位捕获。
+      await abortPending({ nativeId: entry.nativeId }, true, false);
+      // 结算后清理该 scope 的工作持久记录：WorkIndex 解除绑定、协调会话的
+      // WorkContextState/WorkDecisionState 退休（pi-durable 无会话删除 API，
+      // 不可变 entries/tasks 属 SDK 账本不可删）；主会话/其它 scope 绑定不动。
+      await harness.commit(async (tx) => {
+        const idx = await tx.doc(WorkIndex);
+        for (const k of Object.keys(idx.byKey)) {
+          let pair = null;
+          try { pair = JSON.parse(k); } catch { pair = null; }
+          if (Array.isArray(pair) && pair.length === 2 && pair[1] === scopeId) {
+            delete idx.byKey[k];
+          }
+        }
+        await tx.retireDoc(WorkContextState, entry.nativeId);
+        await tx.retireDoc(WorkDecisionState, entry.nativeId);
+      }, context);
+      publishActivity(entry.botId);
+    }
   }
 
   async function resumeWork(botId, scopeId) {
@@ -1219,7 +1265,13 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     try { resolved = await getWorkContexts().resolveWorkContext(botId, scopeId); }
     catch (error) {
       // Membership can disappear between discovery and authorization of an as-yet unbound scope;
-      // BOT_NOT_FOUND covers a Bot deleted between poll discovery and authorize.
+      // BOT_NOT_FOUND covers a Bot deleted between poll discovery and authorize;
+      if (error?.code === 'SCOPE_DELETED') {
+        // 墓碑已安装（含 peer 接收路径）：结算该 scope 已绑定的排队/运行工作，
+        // 不 abort 同 Bot 其它 scope 或主聊天；失败下轮重试，不阻塞 poll。
+        await stopScopeWork(scopeId).catch(() => {});
+        return;
+      }
       if (error?.code === 'SCOPE_FORBIDDEN' || error?.code === 'BOT_NOT_FOUND') return;
       throw error;
     }
@@ -1505,7 +1557,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     return coordinationIdFor(await sessions.getTurn(api, toolContext));
   }
 
-  return { resume, close, beforeRequest, checkBudget, publishWork, getWorkActivity, stopWork, resumeWork, takeoverShower,
+  return { resume, close, beforeRequest, checkBudget, publishWork, getWorkActivity, stopWork, resumeWork, stopScopeWork, takeoverShower,
     interruptBotWork, setActivityListener,
     coordinationSelector,
     drainFailureNotices,

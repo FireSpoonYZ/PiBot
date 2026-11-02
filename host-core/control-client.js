@@ -298,6 +298,9 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     updateScope(scopeId, input, options) {
       return request('POST', ['v1', 'scopes', '~' + scopeId, 'members'], { ...callOptions(options), body: input });
     },
+    deleteScope(scopeId, input, options) {
+      return request('POST', ['v1', 'scopes', '~' + scopeId, 'delete'], { ...callOptions(options), body: input });
+    },
     publishUserMessage(scopeId, input, options) {
       return request('POST', ['v1', 'scopes', '~' + scopeId, 'messages'], { ...callOptions(options), body: input });
     },

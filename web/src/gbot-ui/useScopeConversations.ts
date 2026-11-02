@@ -63,6 +63,12 @@ function previewOf(message: StoredMessage): string {
   return message.message.text;
 }
 
+/** 判定 scope 是否带有删除墓碑（deletedAt 非空字符串）。 */
+function isScopeDeleted(info: ScopeInfo): boolean {
+  const raw = (info.scope as { deletedAt?: unknown }).deletedAt;
+  return typeof raw === 'string' && raw.trim().length > 0;
+}
+
 /** 来源稳定键：冻结身份四元组。 */
 function sourceKey(s: ScopeConversationSource): string {
   const id = s.identity;
@@ -76,15 +82,17 @@ function accountKey(s: ScopeConversationSource): string {
 }
 
 interface SourceSnapshot {
-  /** 已按 kind 过滤的 scope 列表。 */
+  /** 已按 kind 过滤且排除删除墓碑的活跃 scope 列表。 */
   scopes: ScopeInfo[];
+  /** 本次读取观测到的删除墓碑 scopeId 集合。 */
+  deletedScopeIds: Set<string>;
   history: Map<string, { preview: string; at: string | null }>;
   error: string | null;
 }
 
 /**
  * 汇总一个来源的全部 scope（沿 nextCursor 分页到无游标，不设人为页数上限），
- * 先按 kind 过滤再逐个 scopeHistory 取最新一条（room 列表不额外读 DM 历史）。
+ * 排除已删除墓碑并按 kind 过滤后再逐个 scopeHistory 取最新一条（room 列表不额外读 DM 历史）。
  * history 失败保留该 scope 的上次预览/时间；无上次数据时才放空值。
  * 失效由调用方判定；每个 await 后经 stillValid() 早退。
  */
@@ -95,7 +103,7 @@ async function loadSource(
   stillValid: () => boolean,
 ): Promise<SourceSnapshot> {
   const { api, identity } = source;
-  const scopes: ScopeInfo[] = [];
+  const rawScopes: ScopeInfo[] = [];
   let cursor: ScopeListCursor | null = null;
   do {
     const page: ScopeListPage = await api.call(identity, 'listScopeStates', {
@@ -103,11 +111,21 @@ async function loadSource(
       cursor,
     });
     if (!stillValid()) throw new Error('stale');
-    scopes.push(...page.items);
+    rawScopes.push(...page.items);
     cursor = page.nextCursor;
   } while (cursor);
 
-  const filtered = kind ? scopes.filter((s) => s.scope.kind === kind) : scopes;
+  const deletedScopeIds = new Set<string>();
+  const activeScopes: ScopeInfo[] = [];
+  for (const s of rawScopes) {
+    if (isScopeDeleted(s)) {
+      deletedScopeIds.add(s.scope.scopeId);
+    } else {
+      activeScopes.push(s);
+    }
+  }
+
+  const filtered = kind ? activeScopes.filter((s) => s.scope.kind === kind) : activeScopes;
 
   const history = new Map<string, { preview: string; at: string | null }>();
   let firstError: string | null = null;
@@ -143,7 +161,7 @@ async function loadSource(
     },
   );
   await Promise.all(workers);
-  return { scopes: filtered, history, error: firstError };
+  return { scopes: filtered, deletedScopeIds, history, error: firstError };
 }
 
 function buildItems(
@@ -151,27 +169,50 @@ function buildItems(
   snap: SourceSnapshot,
 ): ScopeConversation[] {
   const bots = source.bots ?? [];
-  return snap.scopes.map((scope) => {
-    const h = snap.history.get(scope.scope.scopeId);
-    return {
-      key: sourceKey(source) + ':' + scope.scope.scopeId,
-      api: source.api,
-      identity: source.identity,
-      scope,
-      title: conversationTitle(scope.scope, bots),
-      lastPreview: h?.preview ?? '',
-      lastActivityAt: h?.at ?? null,
-    };
-  });
+  return snap.scopes
+    .filter((scope) => !isScopeDeleted(scope) && !snap.deletedScopeIds.has(scope.scope.scopeId))
+    .map((scope) => {
+      const h = snap.history.get(scope.scope.scopeId);
+      return {
+        key: sourceKey(source) + ':' + scope.scope.scopeId,
+        api: source.api,
+        identity: source.identity,
+        scope,
+        title: conversationTitle(scope.scope, bots),
+        lastPreview: h?.preview ?? '',
+        lastActivityAt: h?.at ?? null,
+      };
+    });
 }
 
-/** 同全局 scopeId 的多设备副本合并：权威来源优先，其次 sources 顺序。 */
-function mergeItems(list: ScopeConversation[]): ScopeConversation[] {
+/**
+ * 同全局 scopeId 的多设备副本合并：
+ * - 任何来源已确认删除的 scopeId 一律排除，禁止旧副本或离线快照复活；
+ * - 更高 revision 优先（确保改名 title 等新 revision 覆盖滞后副本），同 revision 权威来源优先，其次 sources 顺序。
+ */
+function mergeItems(
+  list: ScopeConversation[],
+  deletedScopeIds?: ReadonlySet<string>,
+): ScopeConversation[] {
   const merged = new Map<string, ScopeConversation>();
   for (const item of list) {
-    const existing = merged.get(item.scope.scope.scopeId);
-    if (!existing || (item.scope.isAuthority && !existing.scope.isAuthority)) {
-      merged.set(item.scope.scope.scopeId, item);
+    const scopeId = item.scope.scope.scopeId;
+    if (isScopeDeleted(item.scope) || deletedScopeIds?.has(scopeId)) {
+      merged.delete(scopeId);
+      continue;
+    }
+    const existing = merged.get(scopeId);
+    if (!existing) {
+      merged.set(scopeId, item);
+      continue;
+    }
+    const itemRev = item.scope.scope.revision ?? 0;
+    const existingRev = existing.scope.scope.revision ?? 0;
+    if (
+      itemRev > existingRev ||
+      (itemRev === existingRev && item.scope.isAuthority && !existing.scope.isAuthority)
+    ) {
+      merged.set(scopeId, item);
     }
   }
   return [...merged.values()].sort((a, b) => {
@@ -202,6 +243,8 @@ export function useScopeConversations(
   const mountedRef = useRef(true);
   /** 每来源账户级最近数据（离线快照 + history 失败时的旧预览来源）。 */
   const snapshotRef = useRef<Map<string, { items: ScopeConversation[]; history: Map<string, { preview: string; at: string | null }> }>>(new Map());
+  /** 跨来源已确认删除的 scopeId 墓碑集：防止滞后副本、轮询失败回退或离线快照复活已删群。 */
+  const deletedScopeIdsRef = useRef<Set<string>>(new Set());
   /** 文档可见性：隐藏时暂停读取与定时，恢复时立即刷新一轮。 */
   const [docVisible, setDocVisible] = useState(() =>
     typeof document === 'undefined' ? true : document.visibilityState !== 'hidden',
@@ -236,32 +279,41 @@ export function useScopeConversations(
     /** 是否有在线来源参与读取：有则 mergedPool 为权威（空列表也覆盖旧快照）。 */
     let onlineAttempted = false;
 
+    const deletedScopeIds = deletedScopeIdsRef.current;
+    const purgeSnapshots = (idsToPurge: ReadonlySet<string>) => {
+      if (idsToPurge.size === 0) return;
+      for (const snap of snapshots.values()) {
+        snap.items = snap.items.filter(
+          (item) => !idsToPurge.has(item.scope.scope.scopeId) && !isScopeDeleted(item.scope),
+        );
+        for (const id of idsToPurge) {
+          snap.history.delete(id);
+        }
+      }
+    };
+
     try {
-      // 当前账户快照集（不含网络结果）：隐藏/离线/换账户等待期间只恢复它，不留旧账户项。
+      // 当前账户快照集（不含网络结果）：隐藏/离线/换账户等待期间只恢复它，不留旧账户项或已删项。
       const snapPool: ScopeConversation[] = [];
       for (const s of all) {
         const snap = snapshots.get(accountKey(s));
         if (snap) {
+          const bots = s.bots ?? [];
           for (const item of snap.items) {
+            const scopeId = item.scope.scope.scopeId;
+            if (deletedScopeIds.has(scopeId) || isScopeDeleted(item.scope)) continue;
             if (currentKind && item.scope.scope.kind !== currentKind) continue;
-            snapPool.push(item);
+            snapPool.push({
+              ...item,
+              title: conversationTitle(item.scope.scope, bots),
+            });
           }
         }
       }
       if (pageActive && docVisible) {
         const online = all.filter((s) => s.api.transportConnected);
-        // 离线来源的同账户缓存项并入结果：保留同 profile 不同设备离线的群聊。
-        for (const s of all) {
-          if (s.api.transportConnected) continue;
-          const cached = snapshots.get(accountKey(s));
-          if (!cached) continue;
-          for (const item of cached.items) {
-            if (currentKind && item.scope.scope.kind !== currentKind) continue;
-            mergedPool.push(item);
-          }
-        }
         // 先把显示收敛到当前账户快照（网络读取完成前不留旧账户项）。
-        setItems(mergeItems(snapPool));
+        setItems(mergeItems(snapPool, deletedScopeIds));
         if (online.length === 0) {
           // 无在线来源：离线快照即最终结果。
           mergedPool.push(...snapPool);
@@ -270,6 +322,7 @@ export function useScopeConversations(
           // inflight 只在真实网络读取前持有；finally 统一释放。
           inflightRef.current = true;
           setLoading(true);
+          const roundRemovedIds = new Set<string>();
           for (const source of online) {
             const label = source.label ?? source.identity.targetDeviceId;
             const acc = accountKey(source);
@@ -277,6 +330,26 @@ export function useScopeConversations(
             try {
               const snap = await loadSource(source, currentKind, prev?.history, stillValid);
               if (!stillValid()) return;
+              for (const deletedId of snap.deletedScopeIds) {
+                deletedScopeIds.add(deletedId);
+                roundRemovedIds.add(deletedId);
+              }
+              if (prev) {
+                const activeIds = new Set(snap.scopes.map((s) => s.scope.scopeId));
+                for (const prevItem of prev.items) {
+                  if (currentKind && prevItem.scope.scope.kind !== currentKind) continue;
+                  const prevId = prevItem.scope.scope.scopeId;
+                  if (!activeIds.has(prevId)) {
+                    roundRemovedIds.add(prevId);
+                    if (
+                      prevItem.scope.isAuthority ||
+                      prevItem.scope.authorityDeviceId === source.identity.targetDeviceId
+                    ) {
+                      deletedScopeIds.add(prevId);
+                    }
+                  }
+                }
+              }
               const produced = buildItems(source, snap);
               // 成功结果即权威（含空列表），快照替换，不回退旧快照。
               snapshots.set(acc, { items: produced, history: snap.history });
@@ -286,14 +359,41 @@ export function useScopeConversations(
               if (!stillValid()) return;
               const msg = errText(e);
               if (msg === 'stale') return;
-              // 单来源失败：保留同账户旧项 + 记错误，其他来源不受影响。
+              // 单来源失败：保留同账户未删除旧项 + 记错误，其他来源不受影响。
               if (prev) {
+                const bots = source.bots ?? [];
                 for (const item of prev.items) {
+                  const scopeId = item.scope.scope.scopeId;
+                  if (deletedScopeIds.has(scopeId) || isScopeDeleted(item.scope)) continue;
                   if (currentKind && item.scope.scope.kind !== currentKind) continue;
-                  mergedPool.push(item);
+                  mergedPool.push({
+                    ...item,
+                    title: conversationTitle(item.scope.scope, bots),
+                  });
                 }
               }
               errors.push(label + ': ' + msg);
+            }
+          }
+          purgeSnapshots(deletedScopeIds);
+          // 离线来源的同账户缓存项并入结果（排除本轮在线已确认删除或移除的群聊，防止离线快照复活）。
+          for (const s of all) {
+            if (s.api.transportConnected) continue;
+            const cached = snapshots.get(accountKey(s));
+            if (!cached) continue;
+            const bots = s.bots ?? [];
+            cached.items = cached.items.filter(
+              (item) =>
+                !deletedScopeIds.has(item.scope.scope.scopeId) &&
+                !roundRemovedIds.has(item.scope.scope.scopeId) &&
+                !isScopeDeleted(item.scope),
+            );
+            for (const item of cached.items) {
+              if (currentKind && item.scope.scope.kind !== currentKind) continue;
+              mergedPool.push({
+                ...item,
+                title: conversationTitle(item.scope.scope, bots),
+              });
             }
           }
         }
@@ -302,7 +402,10 @@ export function useScopeConversations(
       // 隐藏/页面非激活：不发请求；离线来源快照已在上方并入 mergedPool，
       // 隐藏时 mergedPool 为空，改用当前账户快照收敛显示（不留旧账户列表）。
       setItems(
-        mergeItems(onlineAttempted || mergedPool.length > 0 ? mergedPool : snapPool),
+        mergeItems(
+          onlineAttempted || mergedPool.length > 0 ? mergedPool : snapPool,
+          deletedScopeIds,
+        ),
       );
       setError(errors.length > 0 ? errors.join('；') : null);
     } finally {

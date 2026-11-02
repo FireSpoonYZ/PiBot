@@ -32,7 +32,7 @@ const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png']);
 const MAX_PATH_BYTES = 4096;
 const MAX_ERROR_MESSAGE_BYTES = 512;
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '[::1]']);
-const INTENT_METHODS = new Set(['createBot', 'setPrimaryBot', 'archiveBot', 'unarchiveBot', 'deleteBot', 'updateBotProfile', 'createScope', 'updateScope']);
+const INTENT_METHODS = new Set(['createBot', 'setPrimaryBot', 'archiveBot', 'unarchiveBot', 'deleteBot', 'updateBotProfile', 'createScope', 'updateScope', 'deleteScope']);
 const INITIAL_STATE = Object.freeze({
   version: 1,
   profiles: [],
@@ -275,7 +275,7 @@ function normalizeIntent(raw) {
   assertId(raw.profileId, 'intent.profileId');
   assertId(raw.targetDeviceId, 'intent.targetDeviceId');
   if (typeof raw.method !== 'string' || !INTENT_METHODS.has(raw.method)) {
-    throw invalid("intent.method must be 'createBot', 'createScope', or 'updateScope'");
+    throw invalid("intent.method must be a supported intent method");
   }
   const { params } = normalizeControlCall(raw.method, raw.params);
   if (typeof raw.outcome !== 'string' || !CONTROL_OUTCOMES.has(raw.outcome)) {

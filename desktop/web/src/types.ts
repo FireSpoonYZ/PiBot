@@ -35,6 +35,7 @@ import type {
   RemoteControlOutcome,
   ScopeCreateInput,
   ScopeUpdateInput,
+  ScopeDeleteInput,
   SettingsUpdate,
   TurnAdmissionStatus,
 } from '../../../host-core/index.js';
@@ -74,6 +75,7 @@ export type {
   CreateBotInput,
   ScopeCreateInput,
   ScopeUpdateInput,
+  ScopeDeleteInput,
 } from '../../../host-core/index.js';
 
 /** 前端冻结的操作身份：generation 标识连接，目标设备独立路由。 */

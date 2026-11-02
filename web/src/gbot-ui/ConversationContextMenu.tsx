@@ -6,21 +6,32 @@
 // 差异：本仓库无 GrokBotStore；菜单动作收缩为合同要求的单一“查看私聊”。
 import { createPortal } from 'react-dom';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import type { ConversationMenuPosition } from './useConversationRowInteractions';
 
 const MENU_MARGIN = 8;
 
+export interface ConversationMenuItem {
+  key: string;
+  label: string;
+  icon?: ReactNode;
+  onSelect: () => void;
+  danger?: boolean;
+  disabled?: boolean;
+}
+
 export interface ConversationContextMenuProps {
   position: ConversationMenuPosition | null;
   onClose: () => void;
-  onViewPrivateChats: () => void;
+  items?: ConversationMenuItem[];
+  onViewPrivateChats?: () => void;
 }
 
-/** 单一“查看私聊”动作的会话菜单；position 为 null 时不渲染。 */
+/** 会话上下文菜单：优先渲染 items，缺省回退 onViewPrivateChats 兼容旧调用方。 */
 export function ConversationContextMenu({
   position,
   onClose,
+  items,
   onViewPrivateChats,
 }: ConversationContextMenuProps) {
   const hostRef = useRef<HTMLSpanElement>(null);
@@ -36,8 +47,20 @@ export function ConversationContextMenu({
     setPortalTarget(host?.closest<HTMLElement>('.baby-grok-bot') ?? null);
   }, []);
 
+  const resolvedItems: ConversationMenuItem[] =
+    items ??
+    (onViewPrivateChats
+      ? [
+          {
+            key: 'view-private-chats',
+            label: '查看私聊',
+            onSelect: onViewPrivateChats,
+          },
+        ]
+      : []);
+
   useLayoutEffect(() => {
-    if (!position) {
+    if (!position || resolvedItems.length === 0) {
       setMenuPosition({ left: 0, top: 0, ready: false });
       return;
     }
@@ -54,7 +77,7 @@ export function ConversationContextMenu({
       Math.min(position.y, window.innerHeight - rect.height - MENU_MARGIN),
     );
     setMenuPosition({ left, top, ready: true });
-  }, [position]);
+  }, [position, resolvedItems.length]);
 
   const close = (restoreFocus = true) => {
     const returnTarget = focusReturnRef.current;
@@ -163,25 +186,42 @@ export function ConversationContextMenu({
       style={{ left: menuPosition.left, top: menuPosition.top }}
     >
       <div className="baby-grok-bot-context-menu__label">会话操作</div>
-      <button
-        className="baby-grok-bot-context-menu__item"
-        onClick={() => {
-          onViewPrivateChats();
-          close(true);
-        }}
-        role="menuitem"
-        tabIndex={-1}
-        type="button"
-      >
-        <span className="gbot-context-menu__item-label">查看私聊</span>
-      </button>
+      {resolvedItems.map((item) => (
+        <button
+          className={
+            item.danger
+              ? 'baby-grok-bot-context-menu__item baby-grok-bot-context-menu__item--danger danger'
+              : 'baby-grok-bot-context-menu__item'
+          }
+          data-danger={item.danger || undefined}
+          disabled={item.disabled}
+          key={item.key}
+          onClick={() => {
+            if (item.disabled) return;
+            item.onSelect();
+            close(true);
+          }}
+          role="menuitem"
+          tabIndex={-1}
+          type="button"
+        >
+          {item.icon ? (
+            <span aria-hidden="true" className="gbot-context-menu__item-icon">
+              {item.icon}
+            </span>
+          ) : null}
+          <span className="gbot-context-menu__item-label">{item.label}</span>
+        </button>
+      ))}
     </div>
   );
+
+  const shouldRenderMenu = Boolean(position && resolvedItems.length > 0);
 
   return (
     <>
       {anchor}
-      {position ? (portalTarget ? createPortal(menu, portalTarget) : menu) : null}
+      {shouldRenderMenu ? (portalTarget ? createPortal(menu, portalTarget) : menu) : null}
     </>
   );
 }

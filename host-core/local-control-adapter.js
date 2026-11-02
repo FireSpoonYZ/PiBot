@@ -263,6 +263,7 @@ const METHOD_HANDLERS = new Map([
   ['createScope', (control, params, signal) => control.createScope(params.input, { signal })],
   ['getScopeState', (control, params, signal) => control.getScopeState(params.scopeId, { signal })],
   ['updateScope', (control, params, signal) => control.updateScope(params.scopeId, params.input, { signal })],
+  ['deleteScope', (control, params, signal) => control.deleteScope(params.scopeId, params.input, { signal })],
   ['publishUserMessage', (control, params, signal) =>
     control.publishUserMessage(params.scopeId, params.input, { signal })],
   ['listScopeReplicas', (control, params, signal) =>

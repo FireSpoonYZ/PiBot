@@ -86,6 +86,8 @@
 
 /* ---------- 群聊 / 待发送 顶部设备选择器 ---------- */
 .desktop-shell .workspace-body { flex-direction: column; }
+.desktop-shell .chat-workspace-host { display: contents; }
+.desktop-shell .chat-workspace-host.workspace-hidden { display: none; }
 .desktop-shell .device-view { min-width: 0; }
 .desktop-shell .device-view {
   display: flex;
@@ -331,4 +333,131 @@
 .desktop-dialog .settings-connect textarea {
   min-height: 72px;
   resize: vertical;
+}
+
+/* ---------- 设置内已归档智能体入口与专页 ---------- */
+.desktop-dialog .archived-entry-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #e5e5df);
+  border-radius: var(--radius-sm, 12px);
+  background: var(--surface-elevated, #fff);
+  color: var(--text, #242622);
+  text-align: left;
+  cursor: pointer;
+}
+.desktop-dialog .archived-entry-row:hover {
+  background: var(--surface, #efeee9);
+  border-color: var(--accent, #2B70F6);
+}
+.desktop-dialog .archived-entry-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.desktop-dialog .archived-subpage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.desktop-dialog .archived-subpage-title {
+  flex: 1;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.desktop-dialog .archived-subpage-title h4 {
+  margin: 0;
+}
+.desktop-dialog .archived-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.desktop-dialog .archived-bot-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+}
+.desktop-dialog .archived-bot-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #e5e5df);
+  border-radius: 14px;
+  background: var(--surface-elevated, #fff);
+}
+.desktop-dialog .archived-bot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.desktop-dialog .archived-bot-open {
+  flex: 1;
+  min-width: 200px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text, #242622);
+  text-align: left;
+  cursor: pointer;
+}
+.desktop-dialog .archived-bot-open:hover {
+  background: var(--surface, #efeee9);
+}
+.desktop-dialog .archived-bot-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.desktop-dialog .archived-bot-title-line {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.desktop-dialog .archived-bot-preview {
+  font-size: 12px;
+  color: var(--muted, #70756f);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.desktop-dialog .archived-bot-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.desktop-dialog .archived-bot-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  padding: 5px 10px;
+}
+.desktop-dialog .archived-confirm-banner {
+  margin: 0;
 }

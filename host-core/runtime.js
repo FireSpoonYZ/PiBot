@@ -1850,6 +1850,14 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
     createScope: (input) => runMessageOperation((log) => log.createScope(input)),
     updateScope: (scopeId, input) => runMessageOperation((log) => log.updateScope(scopeId, input)),
+    // 权威删除：先落墓碑（CAS/幂等，失败即抛不触碰工作），墓碑可见后再停止该
+    // scope 下已绑定的工作 pending——只影响本 scope，不 abort 其它 scope/主聊天。
+    // 停止失败不翻转为删除失败：墓碑已提交，reconcile 的 member 检查会兜底取消。
+    deleteScope: async (scopeId, input) => {
+      const info = await runMessageOperation((log) => log.deleteScope(scopeId, input));
+      await decisions.stopScopeWork(scopeId).catch(() => {});
+      return info;
+    },
     getScopeState: (scopeId) => runMessageOperation((log) => log.getScopeState(scopeId)),
     listScopeStates: (options) => runMessageOperation((log) => log.listScopeStates(options)),
     publishUserMessage: (scopeId, input) => runMessageOperation((log) => log.publish(normalizeUserMessage(scopeId, input))),

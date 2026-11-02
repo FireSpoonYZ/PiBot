@@ -15,11 +15,14 @@ import {
   ExternalLink,
   FolderOpen,
   Globe,
+  MessageSquare,
   Mic,
   Monitor,
   MoreHorizontal,
   PanelLeft,
   Pencil,
+  Pin,
+  PinOff,
   Plus,
   Puzzle,
   RefreshCw,
@@ -32,6 +35,7 @@ import {
   Star,
   Trash2,
   User,
+  Users,
   X,
 } from 'lucide-react';
 import {
@@ -61,12 +65,15 @@ import {
   ConversationContextMenu,
   ConversationGroupAvatar,
   ConversationRow,
+  conversationTitle,
   useConversationRowInteractions,
   useScopeConversations,
   type ConversationBot,
   type ScopeConversation,
   type ScopeConversationSource,
 } from './gbot-ui';
+import { useChatPins } from './gbot-ui/chatPins';
+import { SortablePinnedChat } from './gbot-ui/SortablePinnedChat';
 import type { MessageMember } from '../../host-core/index.js';
 import { createLocalScopeReadApi } from './local-scope-api';
 import { MessageAttribution } from './MessageAttribution';
@@ -190,7 +197,32 @@ export type HubScreen =
   | 'bot-screen'
   | 'bot-model'
   | 'settings'
+  | 'archived-bots'
   | 'pending';
+
+interface RoomDeleteAttempt {
+  scopeId: string;
+  title: string;
+  authorityDeviceId: string;
+  requestId: string;
+  expectedRevision: number;
+  sessionKey: string;
+  unconfirmed: boolean;
+}
+
+interface RoomDeleteModalState {
+  room: ScopeConversation;
+  loadingLatest: boolean;
+  submitting: boolean;
+  attempt: RoomDeleteAttempt | null;
+  error: string;
+  conflictNeedReload: boolean;
+}
+
+interface BotConfirmModalState {
+  kind: 'archive' | 'delete';
+  bot: UnifiedBotItem;
+}
 
 export interface UnifiedBotItem {
   /** Unique composite key: `${hostKind}:${hostId}:${botId}` */
@@ -1118,23 +1150,35 @@ export function HostPage({
 
   // Screen stack navigation
   const [screen, setScreen] = useState<HubScreen>('hub');
+  const [chatReturnScreen, setChatReturnScreen] = useState<'hub' | 'archived-bots'>('hub');
+  const [profileReturnScreen, setProfileReturnScreen] = useState<HubScreen>('chat');
   const [avatarReturnScreen, setAvatarReturnScreen] = useState<HubScreen>('bot-edit');
   const [subPageReturnScreen, setSubPageReturnScreen] = useState<HubScreen>('bot-profile');
 
   // Left drawer (always mounted in DOM for smooth slide-in & slide-out animation)
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
 
-  // Hub search & Archived section
+  // Hub search
   const [searchQuery, setSearchQuery] = useState('');
-  const [archivedExpanded, setArchivedExpanded] = useState(false);
 
-  // Bot 行/主助手的“查看私聊”菜单与目标（长按/右键/键盘打开）。
-  const [botContextMenu, setBotContextMenu] = useState<{ x: number; y: number; bot: UnifiedBotItem } | null>(null);
-  // 群聊/私聊子页：目标 conversation + 打开来源（hub 或 chat），返回时还原。
+  // Hub 群聊 / Bot 长按·右键·键盘上下文菜单与目标。
+  const [hubContextMenu, setHubContextMenu] = useState<{
+    x: number;
+    y: number;
+    bot?: UnifiedBotItem;
+    room?: ScopeConversation;
+  } | null>(null);
+  // 群聊/私聊子页：目标 conversation + 打开来源（hub 或 chat），返回时还原；roomSettingsOpen 控制群详情设置面板。
   const [scopeConversationTarget, setScopeConversationTarget] = useState<ScopeConversation | null>(null);
   const [scopeReturnScreen, setScopeReturnScreen] = useState<HubScreen>('hub');
+  const [roomSettingsOpen, setRoomSettingsOpen] = useState(false);
   const [dmTarget, setDmTarget] = useState<{ bot: UnifiedBotItem; returnScreen: HubScreen } | null>(null);
   const [dmSelectedScopeId, setDmSelectedScopeId] = useState<string | null>(null);
+
+  // 确认弹窗状态（不使用全局 window.confirm，适配 Android WebView）
+  const [botConfirmModal, setBotConfirmModal] = useState<BotConfirmModalState | null>(null);
+  const [roomDeleteModal, setRoomDeleteModal] = useState<RoomDeleteModalState | null>(null);
+  const unconfirmedRoomDeletesRef = useRef(new Map<string, RoomDeleteAttempt>());
 
   // Local Host state (managed transparently in background)
   const [localHost, setLocalHost] = useState<HostSnapshot>();
@@ -1618,7 +1662,15 @@ export function HostPage({
   // 字符串签名作依赖（名字/在线/设备集合/代际真实变化才重建），不新增缓存层。
   const knownBotsSig = JSON.stringify(
     allBotItems
-      .map(item => [item.deviceId, item.botId, item.role, Boolean(item.isPrimary)] as const)
+      .map(item => [
+        item.deviceId,
+        item.botId,
+        item.role,
+        Boolean(item.isPrimary),
+        item.hostLabel ?? '',
+        item.platform ?? '',
+        item.description ?? '',
+      ] as const)
       .sort((a, b) => a[0] === b[0] ? (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0) : (a[0] < b[0] ? -1 : 1)),
   );
   const remoteScopeHostSig = [...new Set(
@@ -1628,13 +1680,17 @@ export function HostPage({
   const remoteDeviceNameSig = remoteDevices
     .map(d => d.deviceId + '\u0001' + (d.displayName ?? '') + '\u0001' + Boolean(d.online))
     .join('\u0002');
-  // Scopes knownBots prop 与群头像共用：同一内容签名，目录同内容刷新引用稳定。
+  // Scopes knownBots prop 与群头像共用：同一内容签名，目录同内容刷新引用稳定；透传自然设备标签/平台/简介。
   const knownBots = useMemo(
     () => allBotItems.map(item => ({
       deviceId: item.deviceId,
       botId: item.botId,
       role: item.role,
       isPrimary: Boolean(item.isPrimary),
+      deviceName: item.hostLabel,
+      hostLabel: item.hostLabel,
+      platform: item.platform,
+      description: item.description,
     })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [knownBotsSig],
@@ -1732,19 +1788,32 @@ export function HostPage({
     return roomWriteTargetApiMap.get(target) ?? null;
   }, [roomSendDeviceIdOf, roomWriteTargetApiMap]);
 
-  // 群成员候选只收未归档 Bot；字段与 ConversationBot 一致（deviceId/botId/role/isPrimary）。
-  // 独立签名含归档布尔：归档/恢复变化必须重建候选，目录同内容刷新引用稳定。
+  // 群成员候选只收未归档 Bot；字段与 ScopeBotInfo 一致（含 hostLabel/platform/description）。
+  // 独立签名含归档布尔与展示信息：归档/恢复或设备标签变化必须重建候选，目录同内容刷新引用稳定。
   const memberCandidatesSig = JSON.stringify(
     allBotItems
-      .map(item => [item.deviceId, item.botId, item.role, Boolean(item.isPrimary), Boolean(item.archivedAt)] as const)
+      .map(item => [
+        item.deviceId,
+        item.botId,
+        item.role,
+        Boolean(item.isPrimary),
+        Boolean(item.archivedAt),
+        item.hostLabel ?? '',
+        item.platform ?? '',
+        item.description ?? '',
+      ] as const)
       .sort((a, b) => a[0] === b[0] ? (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0) : (a[0] < b[0] ? -1 : 1)),
   );
-  const roomMemberCandidates = useMemo<ConversationBot[]>(
+  const roomMemberCandidates = useMemo(
     () => allBotItems.filter(item => !item.archivedAt).map(item => ({
       deviceId: item.deviceId,
       botId: item.botId,
       role: item.role,
       isPrimary: Boolean(item.isPrimary),
+      deviceName: item.hostLabel,
+      hostLabel: item.hostLabel,
+      platform: item.platform,
+      description: item.description,
     })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [memberCandidatesSig],
@@ -1760,23 +1829,73 @@ export function HostPage({
   const refreshRoomConversationsRef = useRef(refreshRoomConversations);
   refreshRoomConversationsRef.current = refreshRoomConversations;
 
-  // 群聊和普通 Bot 混排：key 带 room:/bot: 前缀，只按群聊最近消息排序，不把 DM 混入。
+  // 置顶分区：按 activeCenter 或本机稳定账号标识（不含 generation）。
+  const pinStorageScope = useMemo(() => {
+    const centerRaw = (activeCenter || centerConn.saved?.url || centerConn.url || '').trim();
+    if (centerRaw) {
+      try {
+        return `center:${new URL(centerRaw).origin}`;
+      } catch {
+        return `center:${centerRaw}`;
+      }
+    }
+    if (remoteIdentity?.profileId) {
+      return `profile:${remoteIdentity.profileId}:${remoteIdentity.kind}`;
+    }
+    const localDev = localHost?.deviceId || localBots[0]?.deviceId || 'local';
+    return `local:${localDev}`;
+  }, [activeCenter, centerConn.saved?.url, centerConn.url, remoteIdentity?.profileId, remoteIdentity?.kind, localHost?.deviceId, localBots]);
+
+  const chatPins = useChatPins(pinStorageScope);
+  const botPinKey = useCallback((bot: { deviceId: string; botId: string }) => `bot:${bot.deviceId}:${bot.botId}`, []);
+  const roomPinKey = useCallback((scopeId: string) => `room:${scopeId}`, []);
+
+  // 群聊和普通 Bot 混排：key 统一为 bot:${deviceId}:${botId} / room:${scopeId}。
+  // 置顶项按 pinnedKeys 顺序排在列表最上（不随消息时间变），普通项按最近时间倒序；
+  // 仅顶部 Hero 的本机主 Bot 不参与列表置顶，下方列表中的远端主 Bot 属于普通列表项可置顶/拖动。
   const mixedHubItems = useMemo(() => {
-    const entries: { key: string; bot?: UnifiedBotItem; room?: ScopeConversation; sortMs: number }[] = [];
+    const entries: {
+      key: string;
+      pinKey: string;
+      pinned: boolean;
+      pinIndex: number;
+      bot?: UnifiedBotItem;
+      room?: ScopeConversation;
+      sortMs: number;
+    }[] = [];
     for (const item of listBotItems) {
       const meta = botMetaMap[item.key];
+      const pKey = botPinKey(item);
+      const canPin = !item.archivedAt && item.key !== primaryBot?.key;
+      const pIdx = canPin ? chatPins.pinnedKeys.indexOf(pKey) : -1;
       entries.push({
-        key: 'bot:' + item.key,
+        key: pKey,
+        pinKey: pKey,
+        pinned: pIdx !== -1,
+        pinIndex: pIdx,
         bot: item,
         sortMs: Math.max(Date.parse(item.lastActivityAt || item.createdAt) || 0, meta?.updatedAt || 0),
       });
     }
     for (const room of roomConversations) {
-      entries.push({ key: 'room:' + room.key, room, sortMs: Date.parse(room.lastActivityAt || '') || 0 });
+      const pKey = roomPinKey(room.scope.scope.scopeId);
+      const pIdx = chatPins.pinnedKeys.indexOf(pKey);
+      entries.push({
+        key: pKey,
+        pinKey: pKey,
+        pinned: pIdx !== -1,
+        pinIndex: pIdx,
+        room,
+        sortMs: Date.parse(room.lastActivityAt || '') || 0,
+      });
     }
-    entries.sort((a, b) => b.sortMs - a.sortMs || a.key.localeCompare(b.key));
+    entries.sort((a, b) => {
+      if (a.pinned && b.pinned) return a.pinIndex - b.pinIndex;
+      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+      return b.sortMs - a.sortMs || a.key.localeCompare(b.key);
+    });
     return entries;
-  }, [listBotItems, roomConversations, botMetaMap]);
+  }, [listBotItems, primaryBot?.key, roomConversations, botMetaMap, botPinKey, roomPinKey, chatPins.pinnedKeys]);
 
   const filteredMixedHubItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -1797,14 +1916,35 @@ export function HostPage({
     });
   }, [mixedHubItems, searchQuery, botMetaMap]);
 
-  const openScopeConversation = (item: ScopeConversation) => {
+  // 当前可见置顶项 key 列表；重排时将可见顺序合并回完整 pinnedKeys，过滤/搜索不丢隐藏 pins。
+  const visiblePinnedKeys = useMemo(
+    () => filteredMixedHubItems.filter(e => e.pinned).map(e => e.pinKey),
+    [filteredMixedHubItems],
+  );
+  const handleReorderPinnedKeys = useCallback(
+    (nextVisibleKeys: string[]) => {
+      const visibleSet = new Set(visiblePinnedKeys);
+      let cursor = 0;
+      const merged = chatPins.pinnedKeys.map(k => (visibleSet.has(k) ? nextVisibleKeys[cursor++] ?? k : k));
+      for (; cursor < nextVisibleKeys.length; cursor++) {
+        const k = nextVisibleKeys[cursor];
+        if (!merged.includes(k)) merged.push(k);
+      }
+      chatPins.reorderPins(merged);
+    },
+    [visiblePinnedKeys, chatPins],
+  );
+
+  const openScopeConversation = (item: ScopeConversation, initialSettingsOpen = false) => {
     if (screen === 'chat' && chatScrollRef.current) {
       chatScrollRestoreRef.current = chatScrollRef.current.scrollTop;
     }
+    setHubContextMenu(null);
     setChatTopMenuOpen(false);
     setComposerMenuOpen(false);
     setChatSearchOpen(false);
     setChatSearchQuery('');
+    setRoomSettingsOpen(initialSettingsOpen);
     setScopeConversationTarget(item);
     setScopeReturnScreen(screen === 'dm' || screen === 'conversation' ? 'hub' : screen);
     setScreen('conversation');
@@ -1816,7 +1956,7 @@ export function HostPage({
       chatScrollRestoreRef.current = chatScrollRef.current.scrollTop;
     }
     // 进入私聊前收起主聊天临时控件（更多菜单/输入框菜单/搜索），返回时不拦截逐级返回。
-    setBotContextMenu(null);
+    setHubContextMenu(null);
     setChatTopMenuOpen(false);
     setComposerMenuOpen(false);
     setChatSearchOpen(false);
@@ -1834,13 +1974,24 @@ export function HostPage({
     if (scopeSessionRef.current === scopeSessionKey) return;
     scopeSessionRef.current = scopeSessionKey;
     setScopeConversationTarget(null);
+    setRoomSettingsOpen(false);
     setDmTarget(null);
     setDmSelectedScopeId(null);
-    setBotContextMenu(null);
+    setHubContextMenu(null);
+    setBotConfirmModal(null);
     if (screen === 'conversation') setScreen(scopeReturnScreen);
     else if (screen === 'dm') setScreen(dmTarget?.returnScreen ?? 'hub');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeSessionKey]);
+
+  const scopeAccountKey = `${localHost?.deviceId ?? 'nodev'}|${remoteIdentity?.profileId ?? '-'}|${remoteIdentity?.kind ?? '-'}`;
+  const scopeAccountRef = useRef(scopeAccountKey);
+  useEffect(() => {
+    if (scopeAccountRef.current === scopeAccountKey) return;
+    scopeAccountRef.current = scopeAccountKey;
+    unconfirmedRoomDeletesRef.current.clear();
+    setRoomDeleteModal(null);
+  }, [scopeAccountKey]);
 
   const scopeForBot = (bot: UnifiedBotItem) => {
     const deviceId = bot.hostKind === 'local'
@@ -2339,7 +2490,7 @@ export function HostPage({
     chatRequestId, chatReceiptStatus, chatResumeEpoch, chatPending?.scopeKey, updateBotMeta, syncLocalBots, syncRemoteBots,
   ]);
 
-  const openBotChat = (bot: UnifiedBotItem) => {
+  const openBotChat = (bot: UnifiedBotItem, fromScreen?: 'hub' | 'archived-bots') => {
     profileLoadGeneration.current += 1;
     scheduleLoadGeneration.current += 1;
     const scopeKey = scopeForBot(bot);
@@ -2366,12 +2517,14 @@ export function HostPage({
     setChatDraft(scopeKey ? readChatDraft(scopeKey) : '');
     setChatDraftAttachments(scopeKey ? readChatDraftAttachments(scopeKey) : []);
     setComposerImageError('');
+    setHubContextMenu(null);
     setComposerMenuOpen(false);
     setChatTopMenuOpen(false);
     setChatSearchOpen(false);
     setChatSearchQuery('');
     setClearNotice('');
     updateBotMeta(bot.key, { unread: false });
+    setChatReturnScreen(fromScreen ?? (screen === 'archived-bots' || bot.archivedAt ? 'archived-bots' : 'hub'));
     setScreen('chat');
   };
 
@@ -2426,10 +2579,12 @@ export function HostPage({
     [],
   );
 
-  const openBotProfile = (bot: UnifiedBotItem) => {
+  const openBotProfile = (bot: UnifiedBotItem, fromScreen?: HubScreen) => {
+    setHubContextMenu(null);
     setChatTopMenuOpen(false);
     setComposerMenuOpen(false);
     setActiveBotKey(bot.key);
+    setProfileReturnScreen(fromScreen ?? (screen === 'hub' || screen === 'archived-bots' || screen === 'chat' ? screen : 'chat'));
     setScreen('bot-profile');
     void loadBotSoul(bot);
     void loadBotSchedules(bot);
@@ -2978,7 +3133,20 @@ ${newer}` : draftSnapshot;
       } else {
         throw new Error(t('无法连接目标节点', 'Target host unavailable'));
       }
+      if (bot.hostKind === 'local') {
+        chatPins.removePin(botPinKey(bot));
+      }
     });
+
+  const requestArchiveBot = (bot: UnifiedBotItem) => {
+    setHubContextMenu(null);
+    setChatTopMenuOpen(false);
+    if (bot.isPrimary) {
+      action.setError(t('主智能体受保护，请先将其他智能体设为主智能体后再归档', 'Primary bot is protected. Switch primary bot before archiving.'));
+      return;
+    }
+    setBotConfirmModal({ kind: 'archive', bot });
+  };
 
   const handleArchiveBot = (bot: UnifiedBotItem) =>
     action.run(async () => {
@@ -3000,11 +3168,14 @@ ${newer}` : draftSnapshot;
       } else {
         throw new Error(t('无法连接目标节点', 'Target host unavailable'));
       }
-      setScreen('hub');
+      chatPins.removePin(botPinKey(bot));
+      setBotConfirmModal(null);
+      if (screen !== 'hub') setScreen('hub');
     });
 
   const handleUnarchiveBot = (bot: UnifiedBotItem) =>
     action.run(async () => {
+      setHubContextMenu(null);
       setChatTopMenuOpen(false);
       if (bot.hostKind === 'local') {
         const snap = await ensureLocalHostRunning();
@@ -3022,19 +3193,22 @@ ${newer}` : draftSnapshot;
       }
     });
 
+  const requestDeleteBot = (bot: UnifiedBotItem) => {
+    setHubContextMenu(null);
+    setChatTopMenuOpen(false);
+    if (bot.isPrimary) {
+      action.setError(t('主智能体受保护，不能直接删除。请先将其他智能体设为主智能体。', 'Primary bot is protected. Switch primary bot before deleting.'));
+      return;
+    }
+    setBotConfirmModal({ kind: 'delete', bot });
+  };
+
   const handleDeleteBot = (bot: UnifiedBotItem) =>
     action.run(async () => {
       setChatTopMenuOpen(false);
       if (bot.isPrimary) {
         throw new Error(t('主智能体受保护，不能直接删除。请先将其他智能体设为主智能体。', 'Primary bot is protected. Switch primary bot before deleting.'));
       }
-      const confirmed = window.confirm(
-        t(
-          `确定要永久删除「${bot.role}」及其所有历史对话与人设文档吗？此操作不可恢复。`,
-          `Permanently delete "${bot.role}" and all its conversation history? This cannot be undone.`,
-        ),
-      );
-      if (!confirmed) return;
       if (bot.hostKind === 'local') {
         const snap = await ensureLocalHostRunning();
         if (!snap || snap.phase !== 'running') throw new Error(t('本机服务未运行', 'Local host not running'));
@@ -3049,12 +3223,238 @@ ${newer}` : draftSnapshot;
       } else {
         throw new Error(t('无法连接目标节点', 'Target host unavailable'));
       }
+      chatPins.removePin(botPinKey(bot));
+      setBotConfirmModal(null);
       if (activeBotKey === bot.key) {
         cancelActiveObservation();
         setActiveBotKey(null);
       }
-      setScreen('hub');
+      const returnToArchived =
+        screen === 'archived-bots' ||
+        ((screen === 'chat' || screen === 'bot-profile') && chatReturnScreen === 'archived-bots');
+      setScreen(returnToArchived ? 'archived-bots' : 'hub');
     });
+
+  // 群行直接解散删除：走 authority resolved members API，先读最新 scope 冻结 requestId / expectedRevision，
+  // 二次确认后 mutateIntent('deleteScope')；未确认保留原请求可按原 ID 确认，绝不自动以新 ID 重发。
+  const roomDeleteFetchSeqRef = useRef(0);
+  const loadLatestRoomForDelete = useCallback(
+    async (room: ScopeConversation) => {
+      const scopeId = room.scope.scope.scopeId;
+      const fetchSeq = ++roomDeleteFetchSeqRef.current;
+      setRoomDeleteModal({
+        room,
+        loadingLatest: true,
+        submitting: false,
+        attempt: null,
+        error: '',
+        conflictNeedReload: false,
+      });
+      const authorityDeviceId = room.scope.authorityDeviceId;
+      if (!authorityDeviceId) {
+        setRoomDeleteModal({
+          room,
+          loadingLatest: false,
+          submitting: false,
+          attempt: null,
+          error: t('该群聊缺少权威节点信息，无法解散并删除群聊。', 'Missing authority node for this group; cannot disband.'),
+          conflictNeedReload: false,
+        });
+        return;
+      }
+      const wApi = resolveRoomApi(room.scope, 'members');
+      const wIdentity = wApi?.identity;
+      if (!wApi || !wIdentity || !wApi.transportConnected) {
+        setRoomDeleteModal({
+          room,
+          loadingLatest: false,
+          submitting: false,
+          attempt: null,
+          error: t('群聊权威节点当前未连接或离线，请恢复连接后再读取最新状态。', 'Authority node is offline or disconnected; reconnect and retry.'),
+          conflictNeedReload: true,
+        });
+        return;
+      }
+      const sess = `${wIdentity.profileId}|${wIdentity.kind}|${wIdentity.generation}|${wIdentity.targetDeviceId}`;
+      try {
+        const latest = await wApi.call(wIdentity, 'getScopeState', { scopeId });
+        if (roomDeleteFetchSeqRef.current !== fetchSeq) return;
+        if ((latest.scope as { deletedAt?: string }).deletedAt) {
+          unconfirmedRoomDeletesRef.current.delete(scopeId);
+          chatPins.removePin(roomPinKey(scopeId));
+          setRoomDeleteModal(null);
+          refreshRoomConversationsRef.current();
+          return;
+        }
+        const latestTitle =
+          (latest.scope as { title?: string }).title?.trim() ||
+          conversationTitle(latest.scope, knownBots) ||
+          room.title;
+        const attempt: RoomDeleteAttempt = {
+          scopeId,
+          title: latestTitle,
+          authorityDeviceId: latest.authorityDeviceId ?? authorityDeviceId,
+          requestId: uuid(),
+          expectedRevision: latest.scope.revision,
+          sessionKey: sess,
+          unconfirmed: false,
+        };
+        setRoomDeleteModal({
+          room: { ...room, scope: latest, title: latestTitle },
+          loadingLatest: false,
+          submitting: false,
+          attempt,
+          error: '',
+          conflictNeedReload: false,
+        });
+      } catch (err) {
+        if (roomDeleteFetchSeqRef.current !== fetchSeq) return;
+        setRoomDeleteModal({
+          room,
+          loadingLatest: false,
+          submitting: false,
+          attempt: null,
+          error: t('读取最新群状态失败：', 'Failed to read latest group state: ') + errorText(err),
+          conflictNeedReload: true,
+        });
+      }
+    },
+    [resolveRoomApi, chatPins, roomPinKey, knownBots, t],
+  );
+
+  const openRoomDeleteConfirm = useCallback(
+    (room: ScopeConversation) => {
+      setHubContextMenu(null);
+      const scopeId = room.scope.scope.scopeId;
+      const existing = unconfirmedRoomDeletesRef.current.get(scopeId);
+      if (existing) {
+        setRoomDeleteModal({
+          room,
+          loadingLatest: false,
+          submitting: false,
+          attempt: existing,
+          error: t(
+            '上次解散请求结果未确认，已保留原请求 ID，不会自动以新 ID 重发；请按原 ID 确认。',
+            'Previous disband request is unconfirmed. Original request ID is retained; confirm by original ID.',
+          ),
+          conflictNeedReload: false,
+        });
+        return;
+      }
+      void loadLatestRoomForDelete(room);
+    },
+    [loadLatestRoomForDelete, t],
+  );
+
+  const executeRoomDelete = useCallback(async () => {
+    const currentModal = roomDeleteModal;
+    const attempt = currentModal?.attempt;
+    if (!currentModal || !attempt || currentModal.submitting || currentModal.loadingLatest) return;
+    const wApi = resolveRoomApi(currentModal.room.scope, 'members');
+    const wIdentity = wApi?.identity;
+    if (!wApi || !wIdentity || !wApi.transportConnected) {
+      setRoomDeleteModal(prev =>
+        prev
+          ? {
+              ...prev,
+              error: t('群聊权威节点当前未连接或离线，请恢复连接后再确认。', 'Authority node is offline or disconnected; reconnect before confirming.'),
+            }
+          : null,
+      );
+      return;
+    }
+    setRoomDeleteModal(prev => (prev ? { ...prev, submitting: true, error: '' } : null));
+    try {
+      if (attempt.unconfirmed) {
+        try {
+          const check = await wApi.call(wIdentity, 'getScopeState', { scopeId: attempt.scopeId });
+          if ((check.scope as { deletedAt?: string }).deletedAt) {
+            unconfirmedRoomDeletesRef.current.delete(attempt.scopeId);
+            chatPins.removePin(roomPinKey(attempt.scopeId));
+            if (scopeConversationTarget?.scope.scope.scopeId === attempt.scopeId) {
+              setRoomSettingsOpen(false);
+              setScopeConversationTarget(null);
+              setScreen('hub');
+            }
+            setRoomDeleteModal(null);
+            refreshRoomConversationsRef.current();
+            return;
+          }
+        } catch (checkErr) {
+          const checkCode = (checkErr as { code?: string })?.code;
+          if (checkCode === 'NOT_FOUND' || checkCode === 'SCOPE_DELETED') {
+            unconfirmedRoomDeletesRef.current.delete(attempt.scopeId);
+            chatPins.removePin(roomPinKey(attempt.scopeId));
+            if (scopeConversationTarget?.scope.scope.scopeId === attempt.scopeId) {
+              setRoomSettingsOpen(false);
+              setScopeConversationTarget(null);
+              setScreen('hub');
+            }
+            setRoomDeleteModal(null);
+            refreshRoomConversationsRef.current();
+            return;
+          }
+        }
+      }
+      await (wApi as unknown as {
+        mutateIntent: (id: DesktopIdentity, method: string, params: Record<string, unknown>) => Promise<unknown>;
+      }).mutateIntent(wIdentity, 'deleteScope', {
+        scopeId: attempt.scopeId,
+        input: {
+          requestId: attempt.requestId,
+          expectedRevision: attempt.expectedRevision,
+        },
+      });
+      unconfirmedRoomDeletesRef.current.delete(attempt.scopeId);
+      chatPins.removePin(roomPinKey(attempt.scopeId));
+      if (scopeConversationTarget?.scope.scope.scopeId === attempt.scopeId) {
+        setRoomSettingsOpen(false);
+        setScopeConversationTarget(null);
+        setScreen('hub');
+      }
+      setRoomDeleteModal(null);
+      refreshRoomConversationsRef.current();
+    } catch (err) {
+      const code = (err as { code?: string })?.code;
+      const outcome = (err as { outcome?: string })?.outcome;
+      if (code === 'REVISION_CONFLICT' || code === 'REQUEST_CONFLICT') {
+        unconfirmedRoomDeletesRef.current.delete(attempt.scopeId);
+        setRoomDeleteModal(prev =>
+          prev
+            ? {
+                ...prev,
+                submitting: false,
+                attempt: null,
+                conflictNeedReload: true,
+                error: t('群聊状态已被更新，请重新读取最新群信息后再确认解散。', 'Group state changed elsewhere; reload latest group state before confirming.'),
+              }
+            : null,
+        );
+        return;
+      }
+      if (outcome === 'not-sent') {
+        setRoomDeleteModal(prev =>
+          prev ? { ...prev, submitting: false, error: errorText(err) } : null,
+        );
+        return;
+      }
+      const frozenUnconfirmed: RoomDeleteAttempt = { ...attempt, unconfirmed: true };
+      unconfirmedRoomDeletesRef.current.set(attempt.scopeId, frozenUnconfirmed);
+      setRoomDeleteModal(prev =>
+        prev
+          ? {
+              ...prev,
+              submitting: false,
+              attempt: frozenUnconfirmed,
+              error: t(
+                `解散结果未确认（${errorText(err)}）。已冻结原请求 ID，可按原 ID 确认，不会使用新 ID 自动重发。`,
+                `Disband unconfirmed (${errorText(err)}). Original request ID frozen; confirm by original ID without auto-resending.`,
+              ),
+            }
+          : null,
+      );
+    }
+  }, [roomDeleteModal, resolveRoomApi, chatPins, roomPinKey, scopeConversationTarget, t]);
 
   const openModelPickerSheet = (_target: 'bot-edit' | 'bot-profile', tab: BotSettingsTab = 'model') => {
     if (!activeBot || !remoteIdentity || !remoteConnected || !remoteClientRef.current) return;
@@ -3623,12 +4023,32 @@ ${newer}` : draftSnapshot;
 
   // Step-by-step Back Navigation for Android full-screen back gesture & hardware Back button
   const handleStepBack = useCallback((): boolean => {
+    if (roomDeleteModal) {
+      if (!roomDeleteModal.submitting) {
+        roomDeleteFetchSeqRef.current += 1;
+        setRoomDeleteModal(null);
+      }
+      return true;
+    }
+    if (botConfirmModal) {
+      if (!action.busy) setBotConfirmModal(null);
+      return true;
+    }
     if (modelTarget) {
       setModelTarget(null);
       return true;
     }
+    if (hubContextMenu) {
+      setHubContextMenu(null);
+      return true;
+    }
     // 群聊/私聊子页的逐级返回优先于隐藏状态的主聊控件关闭（控件虽隐藏但 state 可能仍在）。
     if (screen === 'conversation') {
+      if (roomSettingsOpen) {
+        setRoomSettingsOpen(false);
+        return true;
+      }
+      setRoomSettingsOpen(false);
       setScreen(scopeReturnScreen);
       return true;
     }
@@ -3638,10 +4058,6 @@ ${newer}` : draftSnapshot;
       } else {
         setScreen(dmTarget?.returnScreen ?? 'hub');
       }
-      return true;
-    }
-    if (botContextMenu) {
-      setBotContextMenu(null);
       return true;
     }
     if (chatTopMenuOpen) {
@@ -3689,7 +4105,7 @@ ${newer}` : draftSnapshot;
       return true;
     }
     if (screen === 'bot-profile') {
-      setScreen('chat');
+      setScreen(profileReturnScreen);
       return true;
     }
     if (screen === 'chat') {
@@ -3698,7 +4114,11 @@ ${newer}` : draftSnapshot;
       scheduleLoadGeneration.current += 1;
       cancelActiveObservation();
       setChatTopMenuOpen(false);
-      setScreen('hub');
+      setScreen(chatReturnScreen);
+      return true;
+    }
+    if (screen === 'archived-bots') {
+      setScreen('settings');
       return true;
     }
     if (screen === 'settings' || screen === 'pending') {
@@ -3711,14 +4131,21 @@ ${newer}` : draftSnapshot;
     }
     return false;
   }, [
+    roomDeleteModal,
+    botConfirmModal,
+    action.busy,
     modelTarget,
+    hubContextMenu,
     chatTopMenuOpen,
     composerMenuOpen,
     chatSearchOpen,
     leftDrawerOpen,
     screen,
+    roomSettingsOpen,
     avatarReturnScreen,
     subPageReturnScreen,
+    profileReturnScreen,
+    chatReturnScreen,
     scheduleEditing,
     editMode,
     mustCreatePrimaryBot,
@@ -3727,7 +4154,6 @@ ${newer}` : draftSnapshot;
     scopeReturnScreen,
     dmSelectedScopeId,
     dmTarget,
-    botContextMenu,
   ]);
 
   useEffect(() => {
@@ -4091,8 +4517,8 @@ ${newer}` : draftSnapshot;
                   bot={primaryBot}
                   preset={primaryPreset}
                   label={`${primaryBot.role} · ${primaryBot.hostLabel} - ${t('点击进入文字对话', 'Tap to chat')}`}
-                  onOpen={() => openBotChat(primaryBot)}
-                  onOpenMenu={(position) => setBotContextMenu({ ...position, bot: primaryBot })}
+                  onOpen={() => openBotChat(primaryBot, 'hub')}
+                  onOpenMenu={(position) => setHubContextMenu({ ...position, bot: primaryBot })}
                 />
               ) : (
                 <button
@@ -4121,13 +4547,13 @@ ${newer}` : draftSnapshot;
               )}
             </section>
 
-            {/* Regular and archived Bots */}
+            {/* Pinned & Regular Bots and Rooms (Archived section moved to Settings) */}
             <section className="hub-bot-list" aria-label={t('智能体列表', 'Bots')}>
               <ErrorNotice
-                error={directoryError || (!centerConn.ready ? centerConn.error : '')}
+                error={directoryError || (!centerConn.ready ? centerConn.error : '') || chatPins.error || action.error}
                 actionLabel={!centerConn.ready && centerConn.status?.error ? t('去设置', 'Settings') : directoryError ? t('刷新', 'Refresh') : undefined}
                 onAction={!centerConn.ready && centerConn.status?.error ? () => setScreen('settings') : directoryError ? () => void triggerHubRefresh() : undefined}
-                onDismiss={directoryError ? () => setDirectoryError('') : undefined}
+                onDismiss={directoryError ? () => setDirectoryError('') : action.error ? () => action.setError('') : undefined}
               />
               {remoteBots.length > 0 && !remoteConnected && (
                 <p className="hub-empty-list" role="status">
@@ -4163,14 +4589,15 @@ ${newer}` : draftSnapshot;
                 filteredMixedHubItems.map(entry => {
                   if (entry.room) {
                     const room = entry.room;
-                    return (
+                    const rowNode = (
                       <ConversationRow
-                        key={entry.key}
+                        key={entry.pinKey}
                         className="hub-bot-row hub-room-row"
                         title={room.title}
                         preview={room.lastPreview || t('暂无消息', 'No messages yet')}
                         timestamp={room.lastActivityAt}
                         badge={t('群聊', 'Group')}
+                        pinned={entry.pinned}
                         avatar={
                           <ConversationGroupAvatar
                             members={room.scope.scope.members}
@@ -4178,8 +4605,21 @@ ${newer}` : draftSnapshot;
                             size={52}
                           />
                         }
-                        onOpen={() => openScopeConversation(room)}
+                        onOpen={() => openScopeConversation(room, false)}
+                        onOpenMenu={(position) => setHubContextMenu({ ...position, room })}
                       />
+                    );
+                    return entry.pinned ? (
+                      <SortablePinnedChat
+                        key={entry.pinKey}
+                        chatKey={entry.pinKey}
+                        keys={visiblePinnedKeys}
+                        onReorder={handleReorderPinnedKeys}
+                      >
+                        {rowNode}
+                      </SortablePinnedChat>
+                    ) : (
+                      rowNode
                     );
                   }
                   const item = entry.bot!;
@@ -4191,100 +4631,33 @@ ${newer}` : draftSnapshot;
                     item.description ||
                     t('点击开始文字对话…', 'Tap to start chatting…');
                   const preset = resolveBotAvatarPreset(botAvatarKey(item), item.role, isPrimaryActive);
-                  return (
+                  const rowNode = (
                     <HubBotRow
-                      key={entry.key}
+                      key={entry.pinKey}
                       item={item}
                       preset={preset}
                       isPrimaryActive={isPrimaryActive}
                       snippet={snippet}
                       unread={Boolean(meta?.unread)}
                       timestampMs={entry.sortMs}
-                      onOpen={() => openBotChat(item)}
-                      onOpenMenu={(position) => setBotContextMenu({ ...position, bot: item })}
+                      pinned={entry.pinned}
+                      onOpen={() => openBotChat(item, 'hub')}
+                      onOpenMenu={(position) => setHubContextMenu({ ...position, bot: item })}
                     />
                   );
+                  return entry.pinned ? (
+                    <SortablePinnedChat
+                      key={entry.pinKey}
+                      chatKey={entry.pinKey}
+                      keys={visiblePinnedKeys}
+                      onReorder={handleReorderPinnedKeys}
+                    >
+                      {rowNode}
+                    </SortablePinnedChat>
+                  ) : (
+                    rowNode
+                  );
                 })
-              )}
-
-              {/* Archived Bots Collapsible Section */}
-              {archivedBots.length > 0 && (
-                <div className="hub-archived-section" style={{ marginTop: 12 }}>
-                  <button
-                    type="button"
-                    className="grok-card-row"
-                    style={{ borderRadius: 14, opacity: 0.82 }}
-                    onClick={() => setArchivedExpanded(v => !v)}
-                  >
-                    <Archive size={17} className="grok-row-icon" />
-                    <span className="grok-row-label">
-                      {t(`已归档智能体 (${archivedBots.length})`, `Archived (${archivedBots.length})`)}
-                    </span>
-                    <span className="grok-row-value">{t('14 天后自动清理', '14d auto-delete')}</span>
-                    {archivedExpanded ? (
-                      <ChevronDown size={17} className="grok-row-chevron" />
-                    ) : (
-                      <ChevronRight size={17} className="grok-row-chevron" />
-                    )}
-                  </button>
-                  {archivedExpanded &&
-                    archivedBots.map(item => {
-                      const daysLeft = formatArchivedRemainingDays(item.archivedAt);
-                      const preset = resolveBotAvatarPreset(botAvatarKey(item), item.role, false);
-                      return (
-                        <HubArchivedRow
-                          key={item.key}
-                          onOpen={() => openBotChat(item)}
-                          onOpenMenu={(position) => setBotContextMenu({ ...position, bot: item })}
-                        >
-                          <div className="hub-bot-avatar-col">
-                            <GrokBotAvatar preset={preset} size={46} />
-                          </div>
-                          <div className="hub-bot-content-col">
-                            <div className="hub-bot-title-line">
-                              <span className="hub-bot-title">{item.role}</span>
-                              {hasRemoteConfigured && (
-                                <span className={`hub-bot-host-badge ${item.hostKind}${item.online === false ? ' is-offline' : ''}`}>
-                                  <PlatformLogoIcon platform={item.platform} size={11} />
-                                  <span className="hub-bot-host-text">{item.hostLabel}</span>
-                                </span>
-                              )}
-                              <span className="hub-bot-time">
-                                {t(`${daysLeft} 天后删除`, `${daysLeft}d left`)}
-                              </span>
-                            </div>
-                            <div className="hub-bot-subtitle-line" style={{ gap: 8 }}>
-                              <span className="hub-bot-snippet">
-                                {item.lastPreview || item.description || t('已归档 · 只读历史', 'Archived · Read-only')}
-                              </span>
-                              <button
-                                type="button"
-                                className="hub-outline-btn"
-                                style={{ padding: '2px 8px', fontSize: '0.75rem' }}
-                                onClick={e => {
-                                  e.stopPropagation();
-                                  void handleUnarchiveBot(item);
-                                }}
-                              >
-                                {t('恢复', 'Restore')}
-                              </button>
-                              <button
-                                type="button"
-                                className="hub-outline-btn"
-                                style={{ padding: '2px 8px', fontSize: '0.75rem' }}
-                                onClick={e => {
-                                  e.stopPropagation();
-                                  void handleDeleteBot(item);
-                                }}
-                              >
-                                {t('删除', 'Delete')}
-                              </button>
-                            </div>
-                          </div>
-                        </HubArchivedRow>
-                      );
-                    })}
-                </div>
               )}
             </section>
           </div>
@@ -4340,14 +4713,14 @@ ${newer}` : draftSnapshot;
             <button
               type="button"
               className="grok-floating-circle-btn grok-chat-header-back"
-              aria-label={t('返回主页', 'Back')}
+              aria-label={t('返回', 'Back')}
               onClick={() => {
                 chatLoadGeneration.current += 1;
                 profileLoadGeneration.current += 1;
                 scheduleLoadGeneration.current += 1;
                 cancelActiveObservation();
                 setChatTopMenuOpen(false);
-                setScreen('hub');
+                setScreen(chatReturnScreen);
               }}
             >
               <ArrowLeft size={20} />
@@ -4357,7 +4730,7 @@ ${newer}` : draftSnapshot;
             <button
               type="button"
               className="grok-chat-center-pill"
-              onClick={() => openBotProfile(activeBot)}
+              onClick={() => openBotProfile(activeBot, 'chat')}
               aria-label={t('查看 Bot 资料与设定', 'View Bot profile & settings')}
             >
               <GrokBotAvatar
@@ -4379,17 +4752,6 @@ ${newer}` : draftSnapshot;
 
             <button
               type="button"
-              className="grok-chat-header-dm-btn"
-              onClick={() => {
-                setChatTopMenuOpen(false);
-                openBotDmList(activeBot);
-              }}
-            >
-              {t('私聊', 'DMs')}
-            </button>
-
-            <button
-              type="button"
               className="grok-floating-circle-btn grok-chat-header-more"
               aria-label={t('更多选项', 'More options')}
               aria-expanded={chatTopMenuOpen}
@@ -4406,10 +4768,18 @@ ${newer}` : draftSnapshot;
                   <button
                     type="button"
                     role="menuitem"
-                    onClick={() => openBotProfile(activeBot)}
+                    onClick={() => openBotProfile(activeBot, 'chat')}
                   >
                     <User size={19} />
                     <span>{t('查看资料', 'View Profile')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => openBotDmList(activeBot)}
+                  >
+                    <MessageSquare size={19} />
+                    <span>{t('查看 Bot 私聊', 'View Bot DMs')}</span>
                   </button>
                   <button
                     type="button"
@@ -4436,7 +4806,7 @@ ${newer}` : draftSnapshot;
                     <button
                       type="button"
                       role="menuitem"
-                      onClick={() => void handleArchiveBot(activeBot)}
+                      onClick={() => requestArchiveBot(activeBot)}
                     >
                       <Archive size={19} />
                       <span>{t('归档智能体', 'Archive Bot')}</span>
@@ -4452,29 +4822,31 @@ ${newer}` : draftSnapshot;
                       <span>{t('恢复智能体', 'Unarchive Bot')}</span>
                     </button>
                   )}
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="danger"
-                    onClick={() => {
-                      const scope = activeChatScope;
-                      void runSlashCommand('/clear').catch(error => {
-                        if (currentChatScope.current === scope) setClearNotice(errorText(error));
-                      });
-                    }}
-                  >
-                    <Trash2 size={19} />
-                    <span>{t('清空当前对话', 'Clear History')}</span>
-                  </button>
+                  {!activeBot.archivedAt && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="danger"
+                      onClick={() => {
+                        const scope = activeChatScope;
+                        void runSlashCommand('/clear').catch(error => {
+                          if (currentChatScope.current === scope) setClearNotice(errorText(error));
+                        });
+                      }}
+                    >
+                      <Trash2 size={19} />
+                      <span>{t('清空当前对话', 'Clear History')}</span>
+                    </button>
+                  )}
                   {!activeBot.isPrimary && (
                     <button
                       type="button"
                       role="menuitem"
                       className="danger"
-                      onClick={() => void handleDeleteBot(activeBot)}
+                      onClick={() => requestDeleteBot(activeBot)}
                     >
                       <Trash2 size={19} />
-                      <span>{t('永久删除智能体', 'Delete Bot')}</span>
+                      <span>{t('永久删除智能体', 'Permanently Delete Bot')}</span>
                     </button>
                   )}
                 </div>
@@ -4662,21 +5034,33 @@ ${newer}` : draftSnapshot;
               />
             )}
             {activeBot.archivedAt ? (
-              <div className="grok-card-group" style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-                <span style={{ fontSize: '0.86rem', opacity: 0.85 }}>
+              <div className="grok-card-group grok-archived-chat-banner">
+                <span className="grok-archived-chat-banner-text">
                   {t(
-                    `该智能体已归档（${formatArchivedRemainingDays(activeBot.archivedAt)} 天后自动删除），只读历史`,
-                    `Archived (${formatArchivedRemainingDays(activeBot.archivedAt)}d until auto-delete) · Read-only`,
+                    `该智能体已归档（14 天保留期剩余 ${formatArchivedRemainingDays(activeBot.archivedAt)} 天），当前为只读历史`,
+                    `Archived (${formatArchivedRemainingDays(activeBot.archivedAt)}d left of 14d retention) · Read-only history`,
                   )}
                 </span>
-                <button
-                  type="button"
-                  className="grok-done-pill-btn"
-                  disabled={action.busy}
-                  onClick={() => void handleUnarchiveBot(activeBot)}
-                >
-                  {t('立即恢复', 'Unarchive')}
-                </button>
+                <div className="grok-archived-chat-banner-actions">
+                  <button
+                    type="button"
+                    className="grok-done-pill-btn"
+                    disabled={action.busy}
+                    onClick={() => void handleUnarchiveBot(activeBot)}
+                  >
+                    {t('立即恢复', 'Restore')}
+                  </button>
+                  {!activeBot.isPrimary && (
+                    <button
+                      type="button"
+                      className="hub-outline-btn danger"
+                      disabled={action.busy}
+                      onClick={() => requestDeleteBot(activeBot)}
+                    >
+                      {t('永久删除智能体', 'Permanently Delete')}
+                    </button>
+                  )}
+                </div>
               </div>
             ) : activeBot.hostKind === 'remote' && activeBot.remoteIdentity && remoteClientRef.current ? (
               <RemotePendingComposer
@@ -4959,8 +5343,8 @@ ${newer}` : draftSnapshot;
             <button
               type="button"
               className="grok-floating-circle-btn"
-              aria-label={t('返回对话', 'Back to chat')}
-              onClick={() => setScreen('chat')}
+              aria-label={t('返回', 'Back')}
+              onClick={() => setScreen(profileReturnScreen)}
             >
               <ArrowLeft size={20} />
             </button>
@@ -5180,7 +5564,7 @@ ${newer}` : draftSnapshot;
                         type="button"
                         className="grok-card-row"
                         disabled={action.busy}
-                        onClick={() => void handleArchiveBot(activeBot)}
+                        onClick={() => requestArchiveBot(activeBot)}
                       >
                         <Archive size={19} className="grok-row-icon" />
                         <span className="grok-row-label">{t('归档智能体', 'Archive Bot')}</span>
@@ -5206,7 +5590,7 @@ ${newer}` : draftSnapshot;
                       type="button"
                       className="grok-card-row danger-text"
                       disabled={action.busy}
-                      onClick={() => void handleDeleteBot(activeBot)}
+                      onClick={() => requestDeleteBot(activeBot)}
                     >
                       <Trash2 size={19} />
                       <span className="grok-row-label">{t('永久删除智能体', 'Permanently Delete Bot')}</span>
@@ -6387,8 +6771,22 @@ ${newer}` : draftSnapshot;
                     scopeKind="room"
                     initialScopeId={scopeConversationTarget.scope.scope.scopeId}
                     knownBots={knownBots}
+                    settingsOpen={roomSettingsOpen}
+                    onSettingsOpenChange={setRoomSettingsOpen}
+                    onDeleted={() => {
+                      const deletedScopeId = scopeConversationTarget.scope.scope.scopeId;
+                      unconfirmedRoomDeletesRef.current.delete(deletedScopeId);
+                      chatPins.removePin(roomPinKey(deletedScopeId));
+                      setRoomSettingsOpen(false);
+                      setScopeConversationTarget(null);
+                      setScreen('hub');
+                      refreshRoomConversationsRef.current();
+                    }}
                     onOpenLink={openScopeLink}
-                    onBack={() => setScreen(scopeReturnScreen)}
+                    onBack={() => {
+                      setRoomSettingsOpen(false);
+                      setScreen(scopeReturnScreen);
+                    }}
                     onOpenBot={handleOpenBot}
                   />
                 </div>
@@ -6529,9 +6927,115 @@ ${newer}` : draftSnapshot;
           onRemoteUpdated={() => {
             void syncRemoteBots();
           }}
+          archivedCount={archivedBots.length}
+          onOpenArchivedBots={() => setScreen('archived-bots')}
           onOpenModelSheet={() => void openCenterManagement()}
           onOpenSystemSettings={onOpenSystemSettings}
         />
+      )}
+
+      {/* ==================== SCREEN 8B: ARCHIVED BOTS LIST VIEW ==================== */}
+      {screen === 'archived-bots' && (
+        <main className="grok-subpage grok-page-enter" aria-label={t('已归档智能体', 'Archived Bots')}>
+          <header className="grok-subpage-topbar">
+            <button
+              type="button"
+              className="grok-floating-circle-btn"
+              onClick={() => setScreen('settings')}
+              aria-label={t('返回设置', 'Back to settings')}
+            >
+              <ArrowLeft size={20} />
+            </button>
+            <h2 className="grok-subpage-header-title">
+              {t(`已归档智能体 (${archivedBots.length})`, `Archived Bots (${archivedBots.length})`)}
+            </h2>
+            <span style={{ width: 44 }} />
+          </header>
+
+          <div className="grok-subpage-scroll">
+            <p className="grok-card-footnote" style={{ marginTop: 2 }}>
+              {t(
+                '已归档的智能体保留 14 天，到期后自动清理。点击条目可查看只读历史对话，也可随时恢复或永久删除。',
+                'Archived bots are retained for 14 days before auto-deletion. Tap a bot to view read-only history, restore, or permanently delete.',
+              )}
+            </p>
+            <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
+
+            {archivedBots.length === 0 ? (
+              <section className="grok-card-group grok-schedule-empty">
+                <Archive size={28} className="grok-row-icon" />
+                <h4>{t('暂无已归档智能体', 'No Archived Bots')}</h4>
+                <p>
+                  {t(
+                    '归档后的智能体会收纳在此处并保留 14 天，不会继续显示在主页列表中。',
+                    'Archived bots are kept here for 14 days and hidden from the main Hub list.',
+                  )}
+                </p>
+              </section>
+            ) : (
+              <section className="grok-card-group grok-archived-list-group">
+                {archivedBots.map(item => {
+                  const daysLeft = formatArchivedRemainingDays(item.archivedAt);
+                  const preset = resolveBotAvatarPreset(botAvatarKey(item), item.role, false);
+                  return (
+                    <HubArchivedRow
+                      key={item.key}
+                      onOpen={() => openBotChat(item, 'archived-bots')}
+                      onOpenMenu={(position) => setHubContextMenu({ ...position, bot: item })}
+                    >
+                      <div className="hub-bot-avatar-col">
+                        <GrokBotAvatar preset={preset} size={46} />
+                      </div>
+                      <div className="hub-bot-content-col">
+                        <div className="hub-bot-title-line">
+                          <span className="hub-bot-title">{item.role}</span>
+                          {hasRemoteConfigured && (
+                            <span className={`hub-bot-host-badge ${item.hostKind}${item.online === false ? ' is-offline' : ''}`}>
+                              <PlatformLogoIcon platform={item.platform} size={11} />
+                              <span className="hub-bot-host-text">{item.hostLabel}</span>
+                            </span>
+                          )}
+                          <span className="hub-bot-time grok-archived-ttl-pill">
+                            {t(`剩余 ${daysLeft} 天（共 14 天）`, `${daysLeft}d / 14d left`)}
+                          </span>
+                        </div>
+                        <div className="hub-bot-subtitle-line" style={{ gap: 8 }}>
+                          <span className="hub-bot-snippet">
+                            {item.lastPreview || item.description || t('点击查看只读历史 · 14 天后自动清理', 'Tap for read-only history · 14d auto-delete')}
+                          </span>
+                          <button
+                            type="button"
+                            className="hub-outline-btn"
+                            style={{ padding: '3px 10px', fontSize: '0.76rem' }}
+                            disabled={action.busy}
+                            onClick={e => {
+                              e.stopPropagation();
+                              void handleUnarchiveBot(item);
+                            }}
+                          >
+                            {t('恢复', 'Restore')}
+                          </button>
+                          <button
+                            type="button"
+                            className="hub-outline-btn danger"
+                            style={{ padding: '3px 10px', fontSize: '0.76rem' }}
+                            disabled={action.busy}
+                            onClick={e => {
+                              e.stopPropagation();
+                              requestDeleteBot(item);
+                            }}
+                          >
+                            {t('永久删除智能体', 'Permanently Delete')}
+                          </button>
+                        </div>
+                      </div>
+                    </HubArchivedRow>
+                  );
+                })}
+              </section>
+            )}
+          </div>
+        </main>
       )}
 
       {modelTarget && activeBot?.key === modelTarget.botKey && activeBot.botId === modelTarget.botId &&
@@ -6601,16 +7105,266 @@ ${newer}` : draftSnapshot;
         </aside>
       </div>
 
-      {/* Bot 行/主助手长按·右键·键盘的“查看私聊”菜单 */}
+      {/* Hub 群聊 / Bot 长按·右键·键盘上下文菜单 */}
       <ConversationContextMenu
-        position={botContextMenu ? { x: botContextMenu.x, y: botContextMenu.y } : null}
-        onClose={() => setBotContextMenu(null)}
+        position={hubContextMenu ? { x: hubContextMenu.x, y: hubContextMenu.y } : null}
+        onClose={() => setHubContextMenu(null)}
+        items={
+          hubContextMenu?.room
+            ? (() => {
+                const room = hubContextMenu.room;
+                const pKey = roomPinKey(room.scope.scope.scopeId);
+                const pinned = chatPins.isPinned(pKey);
+                return [
+                  {
+                    key: 'room-details',
+                    label: t('查看群详情', 'Group Details'),
+                    icon: <Users size={16} />,
+                    onSelect: () => openScopeConversation(room, true),
+                  },
+                  {
+                    key: 'room-pin',
+                    label: pinned ? t('取消置顶', 'Unpin') : t('置顶', 'Pin'),
+                    icon: pinned ? <PinOff size={16} /> : <Pin size={16} />,
+                    onSelect: () => chatPins.togglePin(pKey),
+                  },
+                  {
+                    key: 'room-delete',
+                    label: t('解散并删除群聊', 'Disband & Delete Group'),
+                    icon: <Trash2 size={16} />,
+                    danger: true,
+                    onSelect: () => openRoomDeleteConfirm(room),
+                  },
+                ];
+              })()
+            : hubContextMenu?.bot
+              ? (() => {
+                  const bot = hubContextMenu.bot;
+                  if (bot.archivedAt) {
+                    return [
+                      {
+                        key: 'bot-history',
+                        label: t('查看只读历史', 'Read-only History'),
+                        icon: <Clock size={16} />,
+                        onSelect: () => openBotChat(bot, 'archived-bots'),
+                      },
+                      {
+                        key: 'bot-profile',
+                        label: t('查看资料', 'View Profile'),
+                        icon: <User size={16} />,
+                        onSelect: () => openBotProfile(bot, screen),
+                      },
+                      {
+                        key: 'bot-dm',
+                        label: t('查看 Bot 私聊', 'View Bot DMs'),
+                        icon: <MessageSquare size={16} />,
+                        onSelect: () => openBotDmList(bot),
+                      },
+                      {
+                        key: 'bot-unarchive',
+                        label: t('恢复智能体', 'Restore Bot'),
+                        icon: <RotateCcw size={16} />,
+                        onSelect: () => void handleUnarchiveBot(bot),
+                      },
+                      ...(!bot.isPrimary
+                        ? [
+                            {
+                              key: 'bot-delete',
+                              label: t('永久删除智能体', 'Permanently Delete Bot'),
+                              icon: <Trash2 size={16} />,
+                              danger: true,
+                              onSelect: () => requestDeleteBot(bot),
+                            },
+                          ]
+                        : []),
+                    ];
+                  }
+                  const canPin = bot.key !== primaryBot?.key;
+                  const canArchiveOrDelete = !bot.isPrimary;
+                  const pKey = botPinKey(bot);
+                  const pinned = chatPins.isPinned(pKey);
+                  return [
+                    {
+                      key: 'bot-profile',
+                      label: t('查看资料', 'View Profile'),
+                      icon: <User size={16} />,
+                      onSelect: () => openBotProfile(bot, screen),
+                    },
+                    ...(canPin
+                      ? [
+                          {
+                            key: 'bot-pin',
+                            label: pinned ? t('取消置顶', 'Unpin') : t('置顶', 'Pin'),
+                            icon: pinned ? <PinOff size={16} /> : <Pin size={16} />,
+                            onSelect: () => chatPins.togglePin(pKey),
+                          },
+                        ]
+                      : []),
+                    {
+                      key: 'bot-dm',
+                      label: t('查看 Bot 私聊', 'View Bot DMs'),
+                      icon: <MessageSquare size={16} />,
+                      onSelect: () => openBotDmList(bot),
+                    },
+                    ...(canArchiveOrDelete
+                      ? [
+                          {
+                            key: 'bot-archive',
+                            label: t('归档智能体', 'Archive Bot'),
+                            icon: <Archive size={16} />,
+                            onSelect: () => requestArchiveBot(bot),
+                          },
+                          {
+                            key: 'bot-delete',
+                            label: t('永久删除智能体', 'Permanently Delete Bot'),
+                            icon: <Trash2 size={16} />,
+                            danger: true,
+                            onSelect: () => requestDeleteBot(bot),
+                          },
+                        ]
+                      : []),
+                  ];
+                })()
+              : undefined
+        }
         onViewPrivateChats={() => {
-          const bot = botContextMenu?.bot;
+          const bot = hubContextMenu?.bot;
           if (bot) openBotDmList(bot);
-          else setBotContextMenu(null);
+          else setHubContextMenu(null);
         }}
       />
+
+      {/* Bot 归档 / 永久删除 二次确认弹窗（React 原生同风格卡片，不使用 window.confirm） */}
+      {botConfirmModal && (
+        <div
+          className="grok-confirm-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label={
+            botConfirmModal.kind === 'archive'
+              ? t('归档智能体', 'Archive Bot')
+              : t('永久删除智能体', 'Permanently Delete Bot')
+          }
+          onClick={() => {
+            if (!action.busy) setBotConfirmModal(null);
+          }}
+        >
+          <div className="grok-confirm-dialog" onClick={e => e.stopPropagation()}>
+            <h3 className="grok-confirm-title">
+              {botConfirmModal.kind === 'archive'
+                ? t('归档智能体', 'Archive Bot')
+                : t('永久删除智能体', 'Permanently Delete Bot')}
+            </h3>
+            <p className="grok-confirm-desc">
+              {botConfirmModal.kind === 'archive'
+                ? t(
+                    `确定要归档「${botConfirmModal.bot.role}」吗？归档后将移至「设置 · 已归档智能体」并保留 14 天，期间可查看只读历史或随时恢复，14 天后自动清理。`,
+                    `Archive "${botConfirmModal.bot.role}"? It will move to Settings > Archived Bots for 14 days (read-only history, restorable) before auto-deletion.`,
+                  )
+                : t(
+                    `确定要永久删除智能体「${botConfirmModal.bot.role}」及其所有历史对话与人设文档吗？此操作不可恢复。`,
+                    `Permanently delete "${botConfirmModal.bot.role}" and all its conversation history and persona? This cannot be undone.`,
+                  )}
+            </p>
+            <div className="grok-confirm-actions">
+              <button
+                type="button"
+                className="hub-outline-btn"
+                disabled={action.busy}
+                onClick={() => setBotConfirmModal(null)}
+              >
+                {t('取消', 'Cancel')}
+              </button>
+              <button
+                type="button"
+                className={`grok-done-pill-btn${botConfirmModal.kind === 'delete' ? ' danger' : ''}`}
+                disabled={action.busy}
+                onClick={() => {
+                  if (botConfirmModal.kind === 'archive') {
+                    void handleArchiveBot(botConfirmModal.bot);
+                  } else {
+                    void handleDeleteBot(botConfirmModal.bot);
+                  }
+                }}
+              >
+                {action.busy
+                  ? t('处理中…', 'Processing…')
+                  : botConfirmModal.kind === 'archive'
+                    ? t('归档智能体', 'Archive Bot')
+                    : t('永久删除智能体', 'Permanently Delete Bot')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 群聊解散并删除二次确认弹窗（先读 authority 最新 scope 冻结 requestId / expectedRevision，未确认可按原 ID 确认） */}
+      {roomDeleteModal && (
+        <div
+          className="grok-confirm-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t('解散并删除群聊', 'Disband & Delete Group')}
+          onClick={() => {
+            if (!roomDeleteModal.submitting) {
+              roomDeleteFetchSeqRef.current += 1;
+              setRoomDeleteModal(null);
+            }
+          }}
+        >
+          <div className="grok-confirm-dialog" onClick={e => e.stopPropagation()}>
+            <h3 className="grok-confirm-title">{t('解散并删除群聊', 'Disband & Delete Group')}</h3>
+            <p className="grok-confirm-desc">
+              {roomDeleteModal.loadingLatest
+                ? t('正在从权威节点读取最新群聊信息…', 'Reading latest group state from authority node…')
+                : t(
+                    `确定要解散并删除群聊「${roomDeleteModal.attempt?.title || roomDeleteModal.room.title}」吗？所有设备上的该群聊及全部群历史消息都将被删除，此操作不可恢复。`,
+                    `Disband and delete group "${roomDeleteModal.attempt?.title || roomDeleteModal.room.title}"? The group and all its message history across all devices will be deleted. This cannot be undone.`,
+                  )}
+            </p>
+            {roomDeleteModal.error && (
+              <ErrorNotice compact error={roomDeleteModal.error} />
+            )}
+            <div className="grok-confirm-actions">
+              <button
+                type="button"
+                className="hub-outline-btn"
+                disabled={roomDeleteModal.submitting}
+                onClick={() => {
+                  roomDeleteFetchSeqRef.current += 1;
+                  setRoomDeleteModal(null);
+                }}
+              >
+                {t('取消', 'Cancel')}
+              </button>
+              {roomDeleteModal.conflictNeedReload && !roomDeleteModal.attempt?.unconfirmed && (
+                <button
+                  type="button"
+                  className="hub-outline-btn"
+                  disabled={roomDeleteModal.loadingLatest || roomDeleteModal.submitting}
+                  onClick={() => void loadLatestRoomForDelete(roomDeleteModal.room)}
+                >
+                  {t('重新读取', 'Reload')}
+                </button>
+              )}
+              {roomDeleteModal.attempt && (
+                <button
+                  type="button"
+                  className="grok-done-pill-btn danger"
+                  disabled={roomDeleteModal.loadingLatest || roomDeleteModal.submitting}
+                  onClick={() => void executeRoomDelete()}
+                >
+                  {roomDeleteModal.submitting
+                    ? t('正在处理…', 'Processing…')
+                    : roomDeleteModal.attempt.unconfirmed
+                      ? t('按原 ID 确认', 'Confirm Original ID')
+                      : t('解散并删除群聊', 'Disband & Delete Group')}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -6661,6 +7415,7 @@ function HubBotRow({
   snippet,
   unread,
   timestampMs,
+  pinned,
   onOpen,
   onOpenMenu,
 }: {
@@ -6671,6 +7426,7 @@ function HubBotRow({
   unread: boolean;
   /** server/meta 最大值，与混排排序一致。 */
   timestampMs: number;
+  pinned?: boolean;
   onOpen: () => void;
   onOpenMenu: (position: { x: number; y: number }) => void;
 }) {
@@ -6681,6 +7437,7 @@ function HubBotRow({
       preview={snippet}
       timestamp={timestampMs || null}
       unread={unread}
+      pinned={pinned}
       avatar={
         <GrokBotAvatar
           preset={preset}
@@ -7433,6 +8190,8 @@ function HubSettingsView({
   remoteDevices,
   setRemoteDevices,
   onRemoteUpdated,
+  archivedCount,
+  onOpenArchivedBots,
   onOpenModelSheet,
   onOpenSystemSettings,
 }: {
@@ -7444,6 +8203,8 @@ function HubSettingsView({
   remoteDevices: DevicesDirectoryItem[];
   setRemoteDevices(items: DevicesDirectoryItem[]): void;
   onRemoteUpdated(): void;
+  archivedCount: number;
+  onOpenArchivedBots(): void;
   onOpenModelSheet?(): void;
   onOpenSystemSettings?(): void;
 }) {
@@ -7888,7 +8649,22 @@ function HubSettingsView({
           </p>
         </div>
 
-        {/* Section 2: System Permissions & Console */}
+        {/* Section 2: Archived Bots & Lifecycle */}
+        <div className="grok-field-section">
+          <label className="grok-section-label">{t('智能体与归档', 'Bots & Archive')}</label>
+          <section className="grok-card-group">
+            <button type="button" className="grok-card-row" onClick={onOpenArchivedBots}>
+              <Archive size={20} className="grok-row-icon" />
+              <span className="grok-row-label">
+                {t(`已归档智能体 (${archivedCount})`, `Archived Bots (${archivedCount})`)}
+              </span>
+              <span className="grok-row-value">{t('14 天后自动清理', '14d auto-delete')}</span>
+              <ChevronRight size={18} className="grok-row-chevron" />
+            </button>
+          </section>
+        </div>
+
+        {/* Section 3: System Permissions & Console */}
         <div className="grok-field-section">
           <label className="grok-section-label">{t('系统与控制台', 'System & Console')}</label>
           <section className="grok-card-group">

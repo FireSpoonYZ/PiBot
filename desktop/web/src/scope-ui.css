@@ -1,4 +1,4 @@
-/* scope-ui lane 增量样式：Scopes 受控导航与新聊天布局。
+/* scope-ui lane 增量样式：Scopes 受控导航、新聊天布局与独立 Grok 风格群设置详情页。
  * 保留导航/容器规则；消息呈现由共享 conversation-chat-* 组件样式提供。 */
 
 /* 新消息指示：钉在滚动容器底部。 */
@@ -18,14 +18,395 @@
   z-index: 3;
 }
 
+/* ————— 独立 Grok 风格群聊详情页（GroupSettings） —————
+ * 单一顶部栏 + 单一滚动区，不内嵌折叠、不叠双重头部、不产生外层多重滚动。 */
+
+.scope-shell .scope-settings-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+  animation: grok-page-in 220ms cubic-bezier(.22, 1, .36, 1) both;
+}
+
+.scope-shell .scope-settings-topbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: calc(var(--top, 0px) + 6px) 16px 8px;
+}
+
+.scope-shell .scope-settings-topbar-title {
+  margin: 0;
+  flex: 1;
+  text-align: center;
+  font-size: 1.04rem;
+  font-weight: 650;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.scope-shell .scope-settings-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 8px 18px calc(var(--bottom, env(safe-area-inset-bottom, 0px)) + 32px);
+}
+
+.scope-shell .scope-settings-container {
+  width: 100%;
+  max-width: 580px;
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.scope-shell .scope-settings-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 8px 0 4px;
+  gap: 8px;
+}
+
+.scope-shell .scope-settings-hero-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border-radius: 999px;
+  filter: drop-shadow(0 8px 20px rgb(0 0 0 / 0.08));
+}
+
+.scope-shell .scope-settings-hero-title {
+  margin: 2px 0 0;
+  font-size: 1.32rem;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.3;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.scope-shell .scope-settings-hero-subtitle {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.scope-shell .scope-settings-status-bar {
+  padding: 8px 12px;
+  border-radius: 14px;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+}
+
+.scope-shell .scope-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.scope-shell .scope-settings-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-inline: 10px;
+}
+
+.scope-shell .scope-settings-section-label {
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.scope-shell .scope-settings-section-meta {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.scope-shell .scope-settings-card {
+  border-radius: 22px;
+  background: color-mix(in srgb, var(--bg) 96%, #fff);
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 0.03);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+:root[data-theme="dark"] .scope-shell .scope-settings-card {
+  background: var(--surface);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] .scope-shell .scope-settings-card {
+    background: var(--surface);
+  }
+}
+
+.scope-shell .scope-title-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  min-height: 54px;
+}
+
+.scope-shell .scope-title-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 6px 4px;
+  min-height: 36px;
+  font-size: 0.96rem;
+  color: var(--text);
+  outline: none;
+}
+.scope-shell .scope-title-input:focus {
+  outline: none;
+  border: 0;
+}
+
+.scope-shell .scope-title-clear-btn {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+}
+
+.scope-shell .scope-title-actions-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 10px 14px 12px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
+}
+
+.scope-shell .scope-title-hint {
+  flex: 1 1 180px;
+  min-width: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.scope-shell .scope-title-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.scope-shell .scope-compact-btn {
+  min-height: 34px;
+  padding: 6px 15px;
+  font-size: 0.85rem;
+}
+
+.scope-shell .scope-settings-notice {
+  padding-inline: 10px;
+}
+
+.scope-shell .scope-inline-banner-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+}
+
+.scope-shell .scope-settings-member-list {
+  gap: 0;
+}
+
+.scope-shell .scope-settings-member-row {
+  padding: 11px 16px;
+  min-height: 58px;
+  gap: 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
+}
+.scope-shell .scope-settings-member-row:last-child {
+  border-bottom: 0;
+}
+
+.scope-shell .scope-settings-member-info {
+  gap: 2px;
+}
+
+.scope-shell .scope-settings-member-name {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.scope-shell .scope-settings-member-meta {
+  font-size: 0.78rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scope-shell .scope-settings-min-warning {
+  padding: 8px 16px;
+  font-size: 0.8rem;
+  color: var(--warn, #d97706);
+  background: color-mix(in srgb, var(--warn, #d97706) 10%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
+}
+
+.scope-shell .scope-settings-candidates-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
+  background: color-mix(in srgb, var(--surface) 45%, transparent);
+}
+
+.scope-shell .scope-settings-candidates-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.scope-shell .scope-settings-candidates-grid {
+  gap: 8px;
+}
+
+.scope-shell .scope-candidate-chip {
+  padding: 5px 12px 5px 6px;
+  min-height: 38px;
+  border-radius: 14px;
+  text-align: left;
+  gap: 8px;
+}
+
+.scope-shell .scope-candidate-chip-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.scope-shell .scope-candidate-chip-meta {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.scope-shell .scope-candidate-chip-plus {
+  color: var(--muted);
+  margin-left: 2px;
+  flex: none;
+}
+
+.scope-shell .scope-settings-inner-status {
+  padding: 8px 16px 0;
+}
+
+.scope-shell .scope-settings-inner-banner {
+  margin: 8px 14px 0;
+}
+
+.scope-shell .scope-settings-edit-actions {
+  justify-content: flex-end;
+  padding: 10px 16px 14px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
+}
+
+.scope-shell .scope-settings-danger-section {
+  margin-top: 4px;
+}
+
+.scope-shell .scope-danger-row-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 54px;
+  padding: 12px 18px;
+  border: 0;
+  background: transparent;
+  color: var(--danger, #ac3434);
+  font-size: 0.95rem;
+  font-weight: 650;
+  text-align: center;
+  cursor: pointer;
+  transition: background-color 140ms ease;
+}
+.scope-shell .scope-danger-row-btn:hover:not(:disabled),
+.scope-shell .scope-danger-row-btn:active:not(:disabled) {
+  background: color-mix(in srgb, var(--danger, #ac3434) 10%, transparent);
+}
+
+.scope-shell .scope-delete-confirm-card {
+  border-radius: 22px;
+  border: 1px solid color-mix(in srgb, var(--danger, #ac3434) 55%, var(--line));
+  background: color-mix(in srgb, var(--danger, #ac3434) 7%, var(--bg));
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.scope-shell .scope-delete-confirm-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--danger, #ac3434);
+  font-size: 0.96rem;
+}
+
+.scope-shell .scope-delete-confirm-desc {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.scope-shell .scope-delete-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.scope-shell .scope-settings-footnote {
+  margin: 0;
+  padding-inline: 10px;
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
 /* ————— 受控导航（detailOnly/DM 列表返回/单列退化） ————— */
 
 /* detailOnly：不渲染另一份会话列表（群聊从主列表直达内容）；
- * chat-pane 始终显示（加载/错误/详情都在其中，不受单列规则影响）。 */
+ * chat-pane 始终显示且禁止外层重复滚动（内部由消息区或设置页自身滚动）。 */
 .scope-shell.scope-shell-detail-only .scope-list {
   display: none !important;
 }
-.scope-shell.scope-shell-detail-only .chat-pane {
+.scope-shell.scope-shell-detail-only .chat-pane,
+.scope-main-stage .scope-shell .chat-pane {
   display: flex !important;
   overflow: hidden;
 }

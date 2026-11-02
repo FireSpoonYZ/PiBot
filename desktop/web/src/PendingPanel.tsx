@@ -39,6 +39,7 @@ const INTENT_METHOD_LABELS: Record<DesktopUiIntent['method'], string> = {
   createBot: '创建助手',
   createScope: '创建群聊',
   updateScope: '更新群聊',
+  deleteScope: '解散群聊',
 };
 
 /** 回执/结果 JSON 统一收进折叠 <details>，避免长 payload 直接铺满对账列表。 */

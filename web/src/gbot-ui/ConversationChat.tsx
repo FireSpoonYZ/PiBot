@@ -7,6 +7,7 @@
 // 名字一律用 BotRecord.role / 用户自然名，任何技术 ID 不出现在可视/aria/title。
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
+import { MoreHorizontal } from 'lucide-react';
 import type {
   BotRecord,
   MessageMember,
@@ -48,14 +49,16 @@ export function conversationMemberName(
 }
 
 /**
- * 会话标题：room 与 DM 都是成员名字并列（scope DM 两端都是 Bot，不含用户）；
- * 无群聊/私聊前缀或 ID。成员全部缺席目录（含 0 成员）时无名字可拼，
- * 回退会话类型自然名，避免重复多遍「已移除的 Bot」。
+ * 会话标题：优先使用 scope.title（trim 非空），缺省或空串回退成员名字并列
+ * （scope DM 两端都是 Bot，不含用户）；无群聊/私聊前缀或 ID。成员全部缺席目录
+ * （含 0 成员）时无名字可拼，回退会话类型自然名，避免重复多遍「已移除的 Bot」。
  */
 export function conversationTitle(
-  scope: MessageScope,
+  scope: MessageScope & { title?: string | null },
   bots: readonly ConversationBot[],
 ): string {
+  const customTitle = typeof scope.title === 'string' ? scope.title.trim() : '';
+  if (customTitle) return customTitle;
   const allUnknown = scope.members.every((m) => !findBot(m, bots));
   if (scope.members.length === 0 || allUnknown) {
     return scope.kind === 'room' ? '群聊' : '私聊';
@@ -72,6 +75,7 @@ export interface ConversationChatHeaderProps {
   onBack?: () => void;
   /** 只读徽标（DM/本机只读 room）。 */
   readOnly?: boolean;
+  onOpenMenu?: () => void;
   onShowMembers?: () => void;
 }
 
@@ -81,6 +85,7 @@ export function ConversationChatHeader({
   avatar,
   onBack,
   readOnly = false,
+  onOpenMenu,
   onShowMembers,
 }: ConversationChatHeaderProps) {
   const t = useText();
@@ -124,29 +129,14 @@ export function ConversationChatHeader({
         ) : null}
       </div>
 
-      {onShowMembers ? (
+      {onOpenMenu || onShowMembers ? (
         <button
-          aria-label={t('查看成员', 'View members')}
+          aria-label={onOpenMenu ? t('更多操作', 'More options') : t('查看成员', 'View members')}
           className="conversation-chat-header__circle"
-          onClick={onShowMembers}
+          onClick={onOpenMenu ?? onShowMembers}
           type="button"
         >
-          <svg aria-hidden="true" fill="none" height="17" viewBox="0 0 16 16" width="17">
-            <circle cx="5.5" cy="5.25" r="2.25" stroke="currentColor" strokeWidth="1.3" />
-            <path
-              d="M1.75 13.25c.5-2 2-3 3.75-3s3.25 1 3.75 3"
-              stroke="currentColor"
-              strokeLinecap="round"
-              strokeWidth="1.3"
-            />
-            <circle cx="11.25" cy="6" r="1.75" stroke="currentColor" strokeWidth="1.2" />
-            <path
-              d="M10.4 10.4c2.6-.2 3.9.8 4.15 2.85"
-              stroke="currentColor"
-              strokeLinecap="round"
-              strokeWidth="1.2"
-            />
-          </svg>
+          <MoreHorizontal aria-hidden="true" size={18} />
         </button>
       ) : (
         <span aria-hidden="true" className="conversation-chat-header__spacer" />

@@ -6,7 +6,10 @@ import './gbot-ui.css';
 export { ConversationRow } from './ConversationRow';
 export type { ConversationRowProps } from './ConversationRow';
 export { ConversationContextMenu } from './ConversationContextMenu';
-export type { ConversationContextMenuProps } from './ConversationContextMenu';
+export type {
+  ConversationContextMenuProps,
+  ConversationMenuItem,
+} from './ConversationContextMenu';
 export { useConversationRowInteractions } from './useConversationRowInteractions';
 export type {
   ConversationMenuPosition,

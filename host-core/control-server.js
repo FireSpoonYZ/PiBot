@@ -96,6 +96,7 @@ const routes = [
   { method: 'GET', key: '/v1/service', pattern: /^\/v1\/service\/?$/, params: [], hasBody: false, handler: serviceStatus },
   { method: 'GET', key: '/v1/scopes/:scopeKey', pattern: /^\/v1\/scopes\/([^/]+)\/?$/, params: ['scopeKey'], hasBody: false, handler: getScopeState },
   { method: 'POST', key: '/v1/scopes/:scopeKey/members', pattern: /^\/v1\/scopes\/([^/]+)\/members\/?$/, params: ['scopeKey'], hasBody: true, handler: updateScopeMembers },
+  { method: 'POST', key: '/v1/scopes/:scopeKey/delete', pattern: /^\/v1\/scopes\/([^/]+)\/delete\/?$/, params: ['scopeKey'], hasBody: true, handler: deleteScope },
   { method: 'POST', key: '/v1/scopes/:scopeKey/messages', pattern: /^\/v1\/scopes\/([^/]+)\/messages\/?$/, params: ['scopeKey'], hasBody: true, handler: publishUserMessage },
   { method: 'GET', key: '/v1/scopes/:scopeKey/replicas', pattern: /^\/v1\/scopes\/([^/]+)\/replicas\/?$/, params: ['scopeKey'], hasBody: false, handler: listScopeReplicas },
   // Unified Shower v2：body 恰为远端参数；认证/Origin 拒绝沿用全局 authorize。
@@ -559,6 +560,10 @@ async function getScopeState(host, runtime, params, body, req, res) {
 
 async function updateScopeMembers(host, runtime, params, body, req, res) {
   writeControlJson(res, 200, await runtime.updateScope(workScopeId(params.scopeKey), body));
+}
+
+async function deleteScope(host, runtime, params, body, req, res) {
+  writeControlJson(res, 200, await runtime.deleteScope(workScopeId(params.scopeKey), body));
 }
 
 async function publishUserMessage(host, runtime, params, body, req, res) {

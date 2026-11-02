@@ -13,7 +13,7 @@ import {
 import { SCOPE_SCHEMA_SQL, createScopeStore } from './scope-store.js';
 import { createReplicaQueries } from './replica-queries.js';
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const DB_FILE = 'messages.sqlite';
 
 // 模块 7 消息账本 schema：7 张表 + queries 需要的索引，参数化 SQL 各处使用。
@@ -31,6 +31,8 @@ const SCHEMA_SQL = `
     revision INTEGER NOT NULL,
     members_json TEXT NOT NULL,
     fingerprint TEXT NOT NULL,
+    title TEXT,
+    deleted_at TEXT,
     PRIMARY KEY (scope_id, revision),
     FOREIGN KEY (scope_id) REFERENCES message_scopes(scope_id)
   );
@@ -109,6 +111,13 @@ function initSchema(db, deviceId) {
       }
       if (version === 1) {
         db.exec(SCOPE_SCHEMA_SQL);
+        db.exec('PRAGMA user_version = 2');
+      }
+      // v2->v3：scope revision 增加 room title 与删除墓碑列；旧行保持 NULL，
+      // 规范化值不携带对应键，digest 与 v2 行为一致。
+      if (db.prepare('PRAGMA user_version').get().user_version === 2) {
+        db.exec('ALTER TABLE message_scope_revisions ADD COLUMN title TEXT');
+        db.exec('ALTER TABLE message_scope_revisions ADD COLUMN deleted_at TEXT');
         db.exec('PRAGMA user_version = ' + SCHEMA_VERSION);
       }
     }
@@ -158,7 +167,7 @@ export function openMessageStore(dataRoot, deviceId) {
     );
     const stmtInsertScope = db.prepare('INSERT INTO message_scopes (scope_id, kind) VALUES (?, ?)');
     const stmtInsertRevision = db.prepare(
-      'INSERT INTO message_scope_revisions (scope_id, revision, members_json, fingerprint) VALUES (?, ?, ?, ?)'
+      'INSERT INTO message_scope_revisions (scope_id, revision, members_json, fingerprint, title, deleted_at) VALUES (?, ?, ?, ?, ?, ?)'
     );
 
     const stmtGetEventByMsg = db.prepare('SELECT * FROM message_events WHERE message_id = ?');
@@ -210,6 +219,30 @@ export function openMessageStore(dataRoot, deviceId) {
         WHERE peer_device_id = ? AND source_device_id = ? AND stream_id = ?
           AND scope_id = ? AND revision = ?`
     );
+    // 墓碑安装时的 scope 数据清理：删除该 scope 的消息账本/投递/本地目标/
+    // 流进度/历史来源/副本观测行（同一事务）。托管 deliveries/operations/
+    // revisions 保留——墓碑与投递记录仍需传播与幂等对账。
+    const stmtDeleteScopeOutbox = db.prepare(
+      'DELETE FROM message_outbox WHERE message_id IN (SELECT message_id FROM message_events WHERE scope_id = ?)'
+    );
+    const stmtDeleteScopeLocalTargets = db.prepare(
+      'DELETE FROM message_local_targets WHERE message_id IN (SELECT message_id FROM message_events WHERE scope_id = ?)'
+    );
+    const stmtDeleteScopeHistorySources = db.prepare(
+      'DELETE FROM message_history_sources WHERE message_id IN (SELECT message_id FROM message_events WHERE scope_id = ?)'
+    );
+    const stmtDeleteScopeEvents = db.prepare('DELETE FROM message_events WHERE scope_id = ?');
+    const stmtDeleteScopeStreams = db.prepare('DELETE FROM message_streams WHERE scope_id = ?');
+    const stmtDeleteScopeReplicaStreams = db.prepare('DELETE FROM message_replica_streams WHERE scope_id = ?');
+    const purgeScopeData = (scopeId) => {
+      stmtDeleteScopeOutbox.run(scopeId);
+      stmtDeleteScopeLocalTargets.run(scopeId);
+      stmtDeleteScopeHistorySources.run(scopeId);
+      stmtDeleteScopeEvents.run(scopeId);
+      stmtDeleteScopeStreams.run(scopeId);
+      stmtDeleteScopeReplicaStreams.run(scopeId);
+    };
+
     const stmtReplicaPeers = db.prepare(
       `SELECT DISTINCT x.device_id AS device_id
          FROM (
@@ -353,6 +386,13 @@ export function openMessageStore(dataRoot, deviceId) {
     };
 
     // 无 BEGIN 的 M7 scope 安装体（scopeStore 回调与公开 installScope 共用）。
+    // 规范化行 -> 存储行：title/deletedAt 缺省存 NULL；行 -> 返回值只补已存键。
+    const scopeRowToValue = (row, scopeId, kind, revision) => {
+      const scope = { scopeId, kind, revision, members: JSON.parse(row.members_json) };
+      if (row.title !== null && row.title !== undefined) scope.title = row.title;
+      if (row.deleted_at !== null && row.deleted_at !== undefined) scope.deletedAt = row.deleted_at;
+      return scope;
+    };
     const installScopeRevision = (input) => {
       const fingerprint = digest(input);
       const existing = stmtGetScopeRev.get(input.scopeId, input.revision);
@@ -361,12 +401,7 @@ export function openMessageStore(dataRoot, deviceId) {
           throw messageError('REQUEST_CONFLICT', 'scope revision already installed with a different definition');
         }
         const kindRow = stmtGetScopeKind.get(input.scopeId);
-        return {
-          scopeId: input.scopeId,
-          kind: kindRow.kind,
-          revision: input.revision,
-          members: JSON.parse(existing.members_json),
-        };
+        return scopeRowToValue(existing, input.scopeId, kindRow.kind, input.revision);
       }
       const kindRow = stmtGetScopeKind.get(input.scopeId);
       if (kindRow && kindRow.kind !== input.kind) {
@@ -384,8 +419,22 @@ export function openMessageStore(dataRoot, deviceId) {
       if (!kindRow) {
         stmtInsertScope.run(input.scopeId, input.kind);
       }
-      stmtInsertRevision.run(input.scopeId, input.revision, JSON.stringify(input.members), fingerprint);
-      return { scopeId: input.scopeId, kind: input.kind, revision: input.revision, members: input.members };
+      stmtInsertRevision.run(
+        input.scopeId,
+        input.revision,
+        JSON.stringify(input.members),
+        fingerprint,
+        // 规范化层已把 '' 归一为空（不携带键）；防御性再映射，避免任何路径
+        // 把空串当真实 title 存储而破坏“title:''=缺省”的 digest 口径。
+        input.title === undefined || input.title === '' ? null : input.title,
+        input.deletedAt ?? null
+      );
+      // 墓碑落定即清该 scope 本地账本数据：权威删除与 peer 接收/导入同口径，
+      // 之后旧 replica/晚到消息在接收侧被墓碑检查拦截，本地不再残留可复活数据。
+      if (input.deletedAt !== undefined) purgeScopeData(input.scopeId);
+      return { scopeId: input.scopeId, kind: input.kind, revision: input.revision, members: input.members,
+        ...(input.title !== undefined ? { title: input.title } : {}),
+        ...(input.deletedAt !== undefined ? { deletedAt: input.deletedAt } : {}) };
     };
 
     // 公开遗留安装仍走自己的事务；托管 scope 仅接受完全一致的已装版本幂等重试。
@@ -397,12 +446,7 @@ export function openMessageStore(dataRoot, deviceId) {
           throw messageError('SCOPE_AUTHORITY_REQUIRED', 'managed scope requires the create/update APIs');
         }
         const kindRow = stmtGetScopeKind.get(input.scopeId);
-        return {
-          scopeId: input.scopeId,
-          kind: kindRow.kind,
-          revision: input.revision,
-          members: JSON.parse(existing.members_json),
-        };
+        return scopeRowToValue(existing, input.scopeId, kindRow.kind, input.revision);
       }
       return installScopeRevision(input);
     });
@@ -429,6 +473,10 @@ export function openMessageStore(dataRoot, deviceId) {
       const scope = stmtGetLatestScope.get(input.scopeId);
       if (!scope) {
         throw messageError('SCOPE_NOT_FOUND', 'scope not installed');
+      }
+      // 墓碑上的写入一律拒绝：已删除群不再产生新消息（历史仍可读）。
+      if (scope.deleted_at !== null && scope.deleted_at !== undefined) {
+        throw messageError('SCOPE_DELETED', 'scope has been deleted');
       }
       const members = JSON.parse(scope.members_json);
 
@@ -523,6 +571,12 @@ export function openMessageStore(dataRoot, deviceId) {
     const receive = (peer, envelope) => inTransaction(db, () => {
       if (peer.deviceId !== envelope.sourceDeviceId) {
         throw messageError('PEER_MISMATCH', 'peer deviceId does not match envelope sourceDeviceId');
+      }
+      // 墓碑先于历史 revision 命中检查：删除后一切晚到消息拒绝入库，
+      // 已删除 scope 绝不能被旧流量复活。
+      const latestScope = stmtGetLatestScope.get(envelope.scopeId);
+      if (latestScope && latestScope.deleted_at !== null && latestScope.deleted_at !== undefined) {
+        throw messageError('SCOPE_DELETED', 'scope has been deleted');
       }
       const scope = stmtGetScopeRev.get(envelope.scopeId, envelope.revision);
       if (!scope) {
@@ -628,6 +682,11 @@ export function openMessageStore(dataRoot, deviceId) {
       }
       return inTransaction(db, () => {
         scopeStore.assertReplicaPeer(peer, query.scopeId);
+        // 墓碑 scope 不再记录副本观测：已删除群的数据面已清理，观测行无意义。
+        const latestScope = stmtGetLatestScope.get(query.scopeId);
+        if (latestScope && latestScope.deleted_at !== null && latestScope.deleted_at !== undefined) {
+          throw messageError('SCOPE_DELETED', 'scope has been deleted');
+        }
         // 已装修订成员检查属 DB 依赖，必须在 peer 授权之后的同一写事务内执行，
         // 避免并发安装者在检查与提交之间把未知修订变为已知。
         for (const item of page.items) {
@@ -672,7 +731,17 @@ export function openMessageStore(dataRoot, deviceId) {
       if (!page.record.scope.members.some((member) => member.deviceId === query.sourceDeviceId)) {
         throw messageError('SCOPE_FORBIDDEN', 'source device must be a member of the record revision');
       }
+      // 墓碑 revision 没有合法历史页（删除后不允许任何封套）：整条拒绝，
+      // 绝不通过 ensureReplicaRecord 引入墓碑后再塞进同 revision 消息复活。
+      if (page.record.scope.deletedAt !== undefined) {
+        throw messageError('SCOPE_DELETED', 'deleted scope has no valid history pages');
+      }
       return inTransaction(db, () => {
+        // 已删除 scope 的副本历史同样拒绝：墓碑是终态，旧 history 导入不得复活。
+        const latestScope = stmtGetLatestScope.get(page.record.scope.scopeId);
+        if (latestScope && latestScope.deleted_at !== null && latestScope.deleted_at !== undefined) {
+          throw messageError('SCOPE_DELETED', 'scope has been deleted');
+        }
         scopeStore.ensureReplicaRecord(peer, page.record);
         let imported = 0;
         let duplicates = 0;
@@ -741,6 +810,7 @@ export function openMessageStore(dataRoot, deviceId) {
       acknowledge,
       createScope: scopeStore.createScope,
       updateScope: scopeStore.updateScope,
+      deleteScope: scopeStore.deleteScope,
       getScopeState: scopeStore.getScopeState,
       listScopeStates: scopeStore.listScopeStates,
       getScopeRecord: scopeStore.getScopeRecord,

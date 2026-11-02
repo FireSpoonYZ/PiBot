@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
 import {
   MessageSquare,
   Plus,
@@ -9,7 +8,7 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import type { DesktopIdentity, DesktopViewApi } from './types';
+import type { DesktopViewApi } from './types';
 import { isScopeWritableApi } from './scope-api';
 import type { RoomApiResolver, ScopeReadApi } from './scope-api';
 import type {
@@ -23,7 +22,6 @@ import type {
   ScopeInfo,
   StoredMessage,
 } from '../../../host-core/index.js';
-import { GrokBotAvatar, resolveBotAvatarPreset } from '../../../web/src/GrokBotAvatar';
 import { useDrafts } from './drafts';
 import {
   ConversationChatHeader,
@@ -35,42 +33,25 @@ import {
   conversationTitle,
   useScopeConversations,
 } from '../../../web/src/gbot-ui';
-import type { ConversationBot, ScopeConversationSource } from '../../../web/src/gbot-ui';
+import type {
+  ConversationBot,
+  ScopeConversationSource,
+} from '../../../web/src/gbot-ui';
+import {
+  GroupSettings,
+  isNotSent,
+  isScopeDeleted,
+  memberAvatar,
+  sessionKey,
+} from './GroupSettings';
+import type { ScopeBotInfo } from './GroupSettings';
 import './Scopes.css';
 import './scope-ui.css';
 
-function sessionKey(id: DesktopIdentity | null): string {
-  return id ? `${id.profileId}|${id.kind}|${id.generation}|${id.targetDeviceId}` : '';
-}
+export type { ScopeBotInfo } from './GroupSettings';
 
 function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;
-}
-
-/** 只有 error.outcome 明确 not-sent（未派发）才可判定未入队；其余一律视为结果未知。 */
-function isNotSent(e: unknown): boolean {
-  return !!e && typeof e === 'object' && (e as { outcome?: unknown }).outcome === 'not-sent';
-}
-
-/** 成员/消息作者与已知 Bot 匹配时复用其定制头像；否则按 deviceId:botId 种子给出稳定预设。 */
-function memberAvatar(member: { deviceId: string; botId: string }, bots: readonly ConversationBot[], size: number): ReactNode {
-  const known = bots.find((b) => b.deviceId === member.deviceId && b.botId === member.botId);
-  if (known) {
-    // 与本机 Hub 同一 botKey 约定（deviceId:botId），命中用户定制头像与主 Bot 预设。
-    return (
-      <GrokBotAvatar
-        preset={resolveBotAvatarPreset(`${known.deviceId}:${known.botId}`, known.role, known.isPrimary)}
-        size={size}
-      />
-    );
-  }
-  // 远端成员无本地 BotRecord：用稳定种子生成确定预设，不读定制映射。
-  return (
-    <GrokBotAvatar
-      preset={resolveBotAvatarPreset(`${member.deviceId}:${member.botId}`, member.botId, false)}
-      size={size}
-    />
-  );
 }
 
 /**
@@ -105,17 +86,20 @@ function dedupeAppend(prev: StoredMessage[], incoming: StoredMessage[]): StoredM
 
 /**
  * knownBots（宿主目录，含归档/远端）与 api.listBots（实时）按 deviceId+botId 合并：
- * 实时结果同身份优先，目录提供其他设备与归档名字。
+ * 实时结果同身份优先，同时保留目录提供的自然设备名、平台与描述信息。
  */
-function mergeKnownBots(listed: BotRecord[], known: readonly ConversationBot[] | undefined): ConversationBot[] {
-  const map = new Map<string, ConversationBot>();
-  for (const b of known ?? []) map.set(`${b.deviceId}:${b.botId}`, b);
+function mergeKnownBots(listed: BotRecord[], known: readonly ScopeBotInfo[] | undefined): ScopeBotInfo[] {
+  const map = new Map<string, ScopeBotInfo>();
+  for (const b of known ?? []) map.set(`${b.deviceId}:${b.botId}`, { ...b });
   for (const b of listed) {
+    const prev = map.get(`${b.deviceId}:${b.botId}`);
     map.set(`${b.deviceId}:${b.botId}`, {
+      ...prev,
       deviceId: b.deviceId,
       botId: b.botId,
       role: b.role,
       isPrimary: b.isPrimary,
+      description: b.description || prev?.description,
     });
   }
   return [...map.values()];
@@ -443,10 +427,24 @@ function MemberEditor({ current, candidates, names, onChange }: {
   );
 }
 
-function ScopeDetail({ api, scope, bots, onChanged, pageActive = true, canWrite, onBack, onOpenLink, resolveRoomApi, memberCandidates }: {
+function ScopeDetail({
+  api,
+  scope,
+  bots,
+  onChanged,
+  pageActive = true,
+  canWrite,
+  onBack,
+  onOpenLink,
+  resolveRoomApi,
+  memberCandidates,
+  onDeleted,
+  settingsOpen,
+  onSettingsOpenChange,
+}: {
   api: ScopeReadApi;
   scope: ScopeInfo;
-  bots: readonly ConversationBot[];
+  bots: readonly ScopeBotInfo[];
   onChanged: (s: ScopeInfo) => void;
   pageActive?: boolean;
   /** 完整写 API + !readOnly 才为 true；只读模式隐藏全部编辑/发送控件。 */
@@ -458,7 +456,13 @@ function ScopeDetail({ api, scope, bots, onChanged, pageActive = true, canWrite,
   /** 群聊写端解析器：send/members 分别路由真实 DesktopViewApi；返回 null 表示写端未连接。 */
   resolveRoomApi?: RoomApiResolver;
   /** 新增成员候选（未归档 Bot）；缺省用 bots；现有成员名字始终走 bots。 */
-  memberCandidates?: readonly ConversationBot[];
+  memberCandidates?: readonly ScopeBotInfo[];
+  /** 群详情删除成功或远端检测到群已删除时触发。 */
+  onDeleted?: () => void;
+  /** 受控群详情设置页开关（仅 room 生效；缺省走内部状态）。 */
+  settingsOpen?: boolean;
+  /** 群详情设置页开关变更回调。 */
+  onSettingsOpenChange?: (open: boolean) => void;
 }) {
   const identity = api.identity;
   const sess = sessionKey(identity);
@@ -466,7 +470,7 @@ function ScopeDetail({ api, scope, bots, onChanged, pageActive = true, canWrite,
   const isRoom = scope.scope.kind === 'room';
   /**
    * 群聊写端：resolver 路由（send 走成员所在可用 Host，members 只可达 authority）；
-   * 未提供 resolver 时回退“读取 api 本身是完整 DesktopViewApi”的原路径。
+   * 未提供 resolver 时回退“读取 api 本身是权威节点完整 DesktopViewApi”的原路径。
    * 按 resolver + scopeId/revision + api + 在线态缓存；DM 永不解析（外层已强制只读）。
    */
   const sendApi = useMemo<DesktopViewApi | null>(() => {
@@ -476,21 +480,26 @@ function ScopeDetail({ api, scope, bots, onChanged, pageActive = true, canWrite,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolveRoomApi, api, isRoom, scope.scope.scopeId, scope.scope.revision, online]);
   const membersApi = useMemo<DesktopViewApi | null>(() => {
-    if (!isRoom) return null;
+    if (!isRoom || !scope.authorityDeviceId) return null;
     if (resolveRoomApi) return resolveRoomApi(scope, 'members');
-    return isScopeWritableApi(api) ? api : null;
+    return scope.isAuthority && isScopeWritableApi(api) ? api : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolveRoomApi, api, isRoom, scope.scope.scopeId, scope.scope.revision, online]);
-  const [membersPanelOpen, setMembersPanelOpen] = useState(false);
-  const [editMembers, setEditMembers] = useState<MessageMember[]>(scope.scope.members);
-  const [editMode, setEditMode] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-  /** 「管理成员」点击后向写端读最新 scope 的在途标记；读取失败留在成员面板提示重试。 */
-  const [enteringEdit, setEnteringEdit] = useState(false);
-  const [enterEditError, setEnterEditError] = useState<string | null>(null);
-  /** 显式进入编辑时冻结的 expectedRevision；被动刷新/重连不改它（当前选择由 editMembers state 保存）。 */
-  const editBaselineRef = useRef<{ revision: number } | null>(null);
+  }, [resolveRoomApi, api, isRoom, scope.authorityDeviceId, scope.isAuthority, scope.scope.scopeId, scope.scope.revision, online]);
+
+  const [settingsOpenState, setSettingsOpenState] = useState(false);
+  const isSettingsControlled = settingsOpen !== undefined;
+  const showSettings = isRoom && (isSettingsControlled ? Boolean(settingsOpen) : settingsOpenState);
+
+  const changeSettingsOpen = useCallback(
+    (nextOpen: boolean) => {
+      if (!isSettingsControlled) {
+        setSettingsOpenState(nextOpen);
+      }
+      onSettingsOpenChange?.(nextOpen);
+    },
+    [isSettingsControlled, onSettingsOpenChange],
+  );
+
   const [roomReply, setRoomReply] = useState<string | null>(null);
   const [history, setHistory] = useState<MessageHistoryPage['items']>([]);
   /** 向更早历史翻页的 descending 游标（MessageHistoryCursor 'history-before'）；null 表示没有更早页。 */
@@ -505,10 +514,15 @@ function ScopeDetail({ api, scope, bots, onChanged, pageActive = true, canWrite,
   /** 同步在途标记：history 读取（reset/loadOlder/poll）合计最多一个在途；
    *  poll 与显式加载不会同时推进 seq 使对方丢 finally。 */
   const histBusyRef = useRef(false);
+  const statePollBusyRef = useRef(false);
   /** 本页未命中的引用消息正文缓存：messageId → quote；undefined 表示尚未加载。 */
   const [replyQuotes, setReplyQuotes] = useState<Record<string, { author: string; text: string } | null>>({});
   /** 消息区滚动容器：prepend 旧页与吸底/新消息指示都挂这里。 */
   const msgListRef = useRef<HTMLDivElement | null>(null);
+  /** 设置页打开前保存的消息滚动位置与底部标记：关闭设置页后原位恢复。 */
+  const savedScrollTopRef = useRef<number | null>(null);
+  const wasAtBottomRef = useRef(true);
+  const prevShowSettingsRef = useRef(showSettings);
   /** 新消息计数：有新条目且视口不在底部时累加，点指示器回到底部清零。 */
   const [newCount, setNewCount] = useState(0);
   /** prepend 待应用的滚动补偿（渲染前记录 scrollHeight/Top，layout 后恢复）。 */
@@ -530,8 +544,16 @@ function ScopeDetail({ api, scope, bots, onChanged, pageActive = true, canWrite,
     return () => { mountedRef.current = false; };
   }, []);
 
-  /** 当前视口是否在底部（允许 48px 容差，防小数/抖动）。 */
+  // 远端同步或属性检测到当前群已被删除时，立即触发退出。
+  useEffect(() => {
+    if (isScopeDeleted(scope)) {
+      onDeleted?.();
+    }
+  }, [scope, onDeleted]);
+
+  /** 当前视口是否在底部（设置页隐藏消息容器时复用进入设置前的底部布尔）。 */
   function listAtBottom(): boolean {
+    if (showSettings) return wasAtBottomRef.current;
     const el = msgListRef.current;
     if (!el) return true;
     return el.scrollHeight - el.scrollTop - el.clientHeight < 48;
@@ -675,23 +697,73 @@ function ScopeDetail({ api, scope, bots, onChanged, pageActive = true, canWrite,
     } finally {
       if (seq === histSeqRef.current) histBusyRef.current = false;
     }
-  }, [api, scope.scope.scopeId, identity, sess]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, scope.scope.scopeId, identity, sess, showSettings]);
 
-  // 渲染后应用滚动补偿：prepend 保持视口；吸底标记优先（新消息或初始页）。
+  /** 被动元数据检查：及时发现远端群解散（deletedAt）或群名/成员版本更新。 */
+  const pollScopeState = useCallback(async () => {
+    if (!isRoom || !mountedRef.current || statePollBusyRef.current) return;
+    const sourceApi = membersApi && membersApi.identity && membersApi.transportConnected ? membersApi : api;
+    const sourceId = sourceApi.identity;
+    if (!sourceId || !sourceApi.transportConnected) return;
+    const localSess = sessionKey(sourceId);
+    const localScope = scope.scope.scopeId;
+    statePollBusyRef.current = true;
+    try {
+      const latest = await sourceApi.call(sourceId, 'getScopeState', { scopeId: localScope });
+      if (!mountedRef.current || sessionKey(sourceApi.identity) !== localSess) return;
+      if (latest.scope.scopeId !== localScope) return;
+      if (isScopeDeleted(latest)) {
+        onDeleted?.();
+        return;
+      }
+      if (
+        latest.scope.revision !== scope.scope.revision ||
+        latest.isAuthority !== scope.isAuthority ||
+        latest.authorityDeviceId !== scope.authorityDeviceId
+      ) {
+        onChanged(latest);
+      }
+    } catch (e) {
+      if (
+        mountedRef.current &&
+        sessionKey(sourceApi.identity) === localSess &&
+        e &&
+        typeof e === 'object' &&
+        (e as { code?: unknown }).code === 'SCOPE_NOT_FOUND'
+      ) {
+        onDeleted?.();
+      }
+    } finally {
+      statePollBusyRef.current = false;
+    }
+  }, [isRoom, membersApi, api, scope, onChanged, onDeleted]);
+
+  // 渲染后应用滚动补偿：prepend 保持视口；吸底标记优先；设置页关闭后恢复进入设置前的滚动位置。
   useLayoutEffect(() => {
+    const justClosedSettings = prevShowSettingsRef.current && !showSettings;
+    prevShowSettingsRef.current = showSettings;
+    if (showSettings) return;
     const el = msgListRef.current;
     if (!el) return;
     const pending = prependScrollRef.current;
     if (pending) {
       prependScrollRef.current = null;
       el.scrollTop = el.scrollHeight - pending.height + pending.top;
+      savedScrollTopRef.current = el.scrollTop;
       return;
     }
     if (stickBottomRef.current) {
       stickBottomRef.current = false;
       el.scrollTop = el.scrollHeight;
+      savedScrollTopRef.current = el.scrollTop;
+      wasAtBottomRef.current = true;
+      return;
     }
-  }, [history]);
+    if (justClosedSettings && savedScrollTopRef.current !== null) {
+      el.scrollTop = savedScrollTopRef.current;
+    }
+  }, [history, showSettings]);
 
   // 被回复消息不在本页时按 messageId 单独取回；缓存防重复请求与重复渲染抖动。
   useEffect(() => {
@@ -721,28 +793,45 @@ function ScopeDetail({ api, scope, bots, onChanged, pageActive = true, canWrite,
   }, [history, replyQuotes, api, identity, sess, scope.scope.scopeId, bots]);
 
   function onMsgListScroll() {
-    if (listAtBottom()) setNewCount(0);
+    if (showSettings) return;
+    const el = msgListRef.current;
+    if (!el) return;
+    savedScrollTopRef.current = el.scrollTop;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    wasAtBottomRef.current = atBottom;
+    if (atBottom) setNewCount(0);
   }
 
   function jumpToLatest() {
     const el = msgListRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+      savedScrollTopRef.current = el.scrollTop;
+    }
+    wasAtBottomRef.current = true;
     setNewCount(0);
   }
 
-  // 被动 prop 刷新（同 revision 的 getScopeState/重连）不得覆盖编辑中的成员或基线。
-  useEffect(() => {
-    if (editMode) return;
-    setEditMembers(scope.scope.members.map((m) => ({ ...m })));
-  }, [scope.scope.scopeId, scope.scope.revision, scope.scope.members, editMode]);
+  function openSettings() {
+    if (!isRoom) return;
+    const el = msgListRef.current;
+    if (el && !showSettings) {
+      savedScrollTopRef.current = el.scrollTop;
+      wasAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    }
+    changeSettingsOpen(true);
+  }
 
-  // 真正换 scope：退出编辑、丢弃基线并使旧历史/轮询请求全部过期。
+  // 真正换 scope：重置内部设置视图并使旧历史/轮询请求全部过期。
   useEffect(() => {
     histSeqRef.current += 1;
     histBusyRef.current = false;
+    statePollBusyRef.current = false;
     histCursorRef.current = null;
     tailCursorRef.current = null;
     prependScrollRef.current = null;
+    savedScrollTopRef.current = null;
+    wasAtBottomRef.current = true;
     stickBottomRef.current = true;
     setHistory([]);
     setHistCursor(null);
@@ -750,12 +839,7 @@ function ScopeDetail({ api, scope, bots, onChanged, pageActive = true, canWrite,
     setHistLoading(false);
     setNewCount(0);
     setReplyQuotes({});
-    setMembersPanelOpen(false);
-    setEditMode(false);
-    editBaselineRef.current = null;
-    setSaveError(null);
-    setEnteringEdit(false);
-    setEnterEditError(null);
+    setSettingsOpenState(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope.scope.scopeId]);
 
@@ -764,253 +848,122 @@ function ScopeDetail({ api, scope, bots, onChanged, pageActive = true, canWrite,
     if (identity && api.transportConnected) void loadHistory(true);
   }, [loadHistory, identity, online]);
 
-  // 可见 + 在线 + 文档可见时每 2s 沿 tailCursor 增量轮询；隐藏/离线停表，
-  // 恢复时下一轮从 tailCursor 续读补齐离开期间的消息（tailCursor 不重置）。
+  // 可见 + 在线 + 文档可见时每 2s 沿 tailCursor 增量轮询并核对群状态；隐藏/离线停表。
   useEffect(() => {
     if (!identity || !online || !pageActive || !docVisible) return;
-    const timer = window.setInterval(() => { void pollNew(); }, 2000);
+    const timer = window.setInterval(() => {
+      void pollNew();
+      void pollScopeState();
+    }, 2000);
     return () => window.clearInterval(timer);
-  }, [pollNew, identity, online, pageActive, docVisible]);
-
-  function startEdit(latest: ScopeInfo) {
-    // 显式进入编辑才采集基线：冻结传入 scope 的 revision（成员选择在 editMembers state）。
-    editBaselineRef.current = { revision: latest.scope.revision };
-    setEditMembers(latest.scope.members.map((m) => ({ ...m })));
-    setSaveError(null);
-    setEnterEditError(null);
-    setEditMode(true);
-  }
-
-  async function enterEdit() {
-    // 写端在线时先经 authority 写端读最新 scope，避免本地快照 revision 过期导致保存永远冲突；
-    // 写端离线/暂 null 时退回当前最后快照进入编辑（保存仍按原禁用逻辑，后端 CAS 不放宽）。
-    const wApi = membersApi;
-    const wIdentity = wApi?.identity;
-    if (!wApi || !wIdentity || !wApi.transportConnected || enteringEdit) {
-      if (!enteringEdit) startEdit(scope);
-      return;
-    }
-    const localSess = sessionKey(wIdentity);
-    const localScope = scope.scope.scopeId;
-    setEnteringEdit(true);
-    setEnterEditError(null);
-    try {
-      const latest = await wApi.call(wIdentity, 'getScopeState', { scopeId: localScope });
-      if (!mountedRef.current || sessionKey(wApi.identity) !== localSess) return;
-      if (latest.scope.scopeId !== localScope) return;
-      // 详情同步到最新读取，再用最新 members/revision 初始化编辑。
-      onChanged(latest);
-      startEdit(latest);
-    } catch (e) {
-      if (mountedRef.current && sessionKey(wApi.identity) === localSess) {
-        // 留在成员面板：不开启陈旧编辑，可重试。
-        setEnterEditError('读取最新成员失败，请重试；未开启编辑。');
-        wApi.reportError(e);
-      }
-    } finally {
-      // 本地在途标记与 session 无关：卸载/换会话后重挂载由新组件态负责。
-      if (mountedRef.current) setEnteringEdit(false);
-    }
-  }
-
-  function cancelEdit() {
-    editBaselineRef.current = null;
-    setEditMembers(scope.scope.members.map((m) => ({ ...m })));
-    setSaveError(null);
-    setEditMode(false);
-  }
-
-  async function saveMembers() {
-    // 成员写端按 membersApi 判定：读取 api 的在线态不代表写端可达。
-    const wApi = membersApi;
-    if (!wApi || !wApi.identity) {
-      setSaveError('写通道未连接，不能保存成员变更；选择已保留，可稍后重试。');
-      return;
-    }
-    const wIdentity = wApi.identity;
-    if (saving || !wApi.transportConnected) return;
-    if (editMembers.length < 2) {
-      // 后端已拒绝单成员房间，前端提前按事实纠正。
-      setSaveError(isRoom ? '群聊至少保留 2 个成员 Bot' : '智能体私聊固定两个 Bot');
-      return;
-    }
-    const baseline = editBaselineRef.current;
-    if (!baseline) {
-      setSaveError('请重新进入编辑后再保存');
-      return;
-    }
-    const localSess = sessionKey(wIdentity);
-    setSaving(true);
-    setSaveError(null);
-    const requestId = crypto.randomUUID();
-    try {
-      const updated = await wApi.mutateIntent(wIdentity, 'updateScope', {
-        scopeId: scope.scope.scopeId,
-        input: {
-          requestId,
-          // 使用显式进入编辑时冻结的 revision，而不是后续 props。
-          expectedRevision: baseline.revision,
-          members: editMembers,
-        },
-      });
-      if (sessionKey(wApi.identity) === localSess && mountedRef.current) {
-        editBaselineRef.current = null;
-        setEditMode(false);
-        onChanged(updated);
-      }
-    } catch (e) {
-      if (mountedRef.current) {
-        setSaveError('成员保存失败，请重试；变更未确认完成不会自动重发。');
-        wApi.reportError(e);
-      }
-    } finally {
-      if (mountedRef.current) setSaving(false);
-    }
-  }
+  }, [pollNew, pollScopeState, identity, online, pageActive, docVisible]);
 
   const memberCount = scope.scope.members.length;
   return (
     <div className="scope-detail">
-      <ConversationChatHeader
-        title={conversationTitle(scope.scope, bots)}
-        subtitle={isRoom ? `${memberCount} 位成员` : undefined}
-        avatar={<ConversationGroupAvatar members={scope.scope.members} bots={bots} size={30} />}
-        onBack={onBack}
-        readOnly={!canWrite}
-        onShowMembers={isRoom ? () => setMembersPanelOpen((v) => !v) : undefined}
-      />
-      {isRoom && membersPanelOpen ? (
-        <div className="data-list scope-members-panel">
-          <ul className="member-list">
-            {scope.scope.members.map((m) => (
-              <li key={`${m.deviceId}:${m.botId}`} className="member-row">
-                <span className="member-row-avatar">{memberAvatar(m, bots, 26)}</span>
-                <span className="member-row-text">
-                  <span className="entity-title">{conversationMemberName(m, bots)}</span>
-                </span>
-              </li>
-            ))}
-          </ul>
-          {enterEditError ? (
-            <div className="error-banner" role="alert">
-              {enterEditError}
-              <button type="button" onClick={() => void enterEdit()} disabled={enteringEdit}>重试</button>
-            </div>
-          ) : null}
-          {canWrite && !editMode ? (
-            <div className="form-actions scope-members-panel-actions">
-              <button
-                type="button"
-                className="secondary-button scope-member-edit-btn"
-                onClick={() => void enterEdit()}
-                disabled={enteringEdit}
-              >
-                {enteringEdit ? '读取最新成员…' : '管理成员'}
-              </button>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-      {canWrite && editMode ? (
-        <div className="data-list scope-edit-panel">
-          <div className="form-grid">
-            <MemberEditor current={editMembers} candidates={memberCandidates ?? bots} names={bots} onChange={setEditMembers} />
-            {saveError ? <div className="error-banner" role="alert">{saveError}</div> : null}
-            {membersApi && membersApi.transportConnected ? null : (
-              <div className="status">写通道未连接，暂不能保存成员变更；选择已保留。</div>
-            )}
-            <div className="form-actions">
-              <button
-                type="button"
-                className="primary-button"
-                disabled={saving || !membersApi || !membersApi.transportConnected}
-                onClick={() => void saveMembers()}
-              >
-                {saving ? '保存中…' : '保存成员'}
-              </button>
-              <button type="button" className="secondary-button" onClick={() => cancelEdit()}>
-                取消
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <div
+        className={showSettings ? 'scope-chat-surface scope-chat-surface-hidden' : 'scope-chat-surface'}
+        aria-hidden={showSettings || undefined}
+      >
+        <ConversationChatHeader
+          title={conversationTitle(scope.scope, bots)}
+          subtitle={isRoom ? `${memberCount} 位成员` : undefined}
+          avatar={<ConversationGroupAvatar members={scope.scope.members} bots={bots} size={30} />}
+          onBack={onBack}
+          readOnly={!canWrite}
+          onOpenMenu={isRoom ? openSettings : undefined}
+        />
 
-      {/* room/DM 均可被动查看 scopeHistory 与分页；仅 room + 可写 API 允许用户消息输入。 */}
-      <div className="message-list scope-message-list" ref={msgListRef} onScroll={onMsgListScroll}>
-        {!online ? <div className="status">离线：显示最后读取的消息，不自动请求。</div> : null}
-        {histError ? (
-          <div className="error-banner" role="alert">
-            {histError}
-            <button type="button" onClick={() => void loadHistory(true)} disabled={!online}>重试</button>
-          </div>
-        ) : null}
-        {histCursor && !histLoading ? (
-          <button type="button" className="load-more scope-load-earlier" onClick={() => void loadOlder()} disabled={!online}>加载更早消息</button>
-        ) : null}
-        {history.length === 0 && !histLoading && !histError ? <div className="empty-state">暂无消息。</div> : null}
-        {history.map((msg, i) => {
-          const replyTo = msg.message.replyTo;
-          const replySource = replyTo ? history.find((m) => m.message.messageId === replyTo) : undefined;
-          const replyQuote = replyTo
-            ? replySource
-              ? { author: authorName(replySource, bots), text: replySource.message.text }
-              : replyQuotes[replyTo] ?? null
-            : null;
-          const divider = i === 0
-            ? <ConversationTimeDivider at={msg.message.createdAt} />
-            : <ConversationTimeDivider at={msg.message.createdAt} previousAt={history[i - 1].message.createdAt} />;
-          return (
-            <div key={msg.message.messageId} className="scope-message-wrap">
-              {divider}
-              <ConversationMessage
-                message={msg}
-                authorName={authorName(msg, bots)}
-                replyQuote={replyQuote}
-                onReply={canWrite && isRoom ? () => { setRoomReply(msg.message.messageId); cancelEdit(); } : undefined}
-                onOpenLink={onOpenLink}
-              />
+        {/* room/DM 均可被动查看 scopeHistory 与分页；仅 room + 可写 API 允许用户消息输入。 */}
+        <div className="message-list scope-message-list" ref={msgListRef} onScroll={onMsgListScroll}>
+          {!online ? <div className="status">离线：显示最后读取的消息，不自动请求。</div> : null}
+          {histError ? (
+            <div className="error-banner" role="alert">
+              {histError}
+              <button type="button" onClick={() => void loadHistory(true)} disabled={!online}>重试</button>
             </div>
-          );
-        })}
-        {histLoading ? <div className="status">加载中…</div> : null}
-        {newCount > 0 ? (
-          <button type="button" className="scope-new-banner" onClick={jumpToLatest}>
-            查看 {newCount} 条新消息
-          </button>
-        ) : null}
+          ) : null}
+          {histCursor && !histLoading ? (
+            <button type="button" className="load-more scope-load-earlier" onClick={() => void loadOlder()} disabled={!online}>加载更早消息</button>
+          ) : null}
+          {history.length === 0 && !histLoading && !histError ? <div className="empty-state">暂无消息。</div> : null}
+          {history.map((msg, i) => {
+            const replyTo = msg.message.replyTo;
+            const replySource = replyTo ? history.find((m) => m.message.messageId === replyTo) : undefined;
+            const replyQuote = replyTo
+              ? replySource
+                ? { author: authorName(replySource, bots), text: replySource.message.text }
+                : replyQuotes[replyTo] ?? null
+              : null;
+            const divider = i === 0
+              ? <ConversationTimeDivider at={msg.message.createdAt} />
+              : <ConversationTimeDivider at={msg.message.createdAt} previousAt={history[i - 1].message.createdAt} />;
+            return (
+              <div key={msg.message.messageId} className="scope-message-wrap">
+                {divider}
+                <ConversationMessage
+                  message={msg}
+                  authorName={authorName(msg, bots)}
+                  replyQuote={replyQuote}
+                  onReply={canWrite && isRoom ? () => setRoomReply(msg.message.messageId) : undefined}
+                  onOpenLink={onOpenLink}
+                />
+              </div>
+            );
+          })}
+          {histLoading ? <div className="status">加载中…</div> : null}
+          {newCount > 0 ? (
+            <button type="button" className="scope-new-banner" onClick={jumpToLatest}>
+              查看 {newCount} 条新消息
+            </button>
+          ) : null}
+        </div>
+
+        {canWrite && isRoom ? (
+          sendApi ? (
+            <RoomComposer
+              api={sendApi}
+              scopeId={scope.scope.scopeId}
+              replyTo={roomReply}
+              onReplyTo={setRoomReply}
+              onAccepted={() => void loadHistory(true)}
+            />
+          ) : (
+            /* 有 resolver 但写端未就绪：待连接禁用区，不标“只读”。 */
+            <div className="composer scope-composer">
+              <div className="status">写通道待连接，暂不能发送；连接后可正常输入。</div>
+              <div className="scope-composer-row">
+                <textarea
+                  className="composer-input scope-composer-input"
+                  rows={2}
+                  disabled
+                  placeholder="给群聊发消息…（Enter 发送，Shift+Enter 换行）"
+                />
+                <button type="button" className="primary-button scope-send-btn" disabled title="发送（Enter）">
+                  <SendHorizontal size={15} />
+                  发送
+                </button>
+              </div>
+            </div>
+          )
+        ) : (
+          <p className="hint scope-readonly-hint">仅供查看</p>
+        )}
       </div>
 
-      {canWrite && isRoom ? (
-        sendApi ? (
-          <RoomComposer
-            api={sendApi}
-            scopeId={scope.scope.scopeId}
-            replyTo={roomReply}
-            onReplyTo={setRoomReply}
-            onAccepted={() => void loadHistory(true)}
-          />
-        ) : (
-          /* 有 resolver 但写端未就绪：待连接禁用区，不标“只读”。 */
-          <div className="composer scope-composer">
-            <div className="status">写通道待连接，暂不能发送；连接后可正常输入。</div>
-            <div className="scope-composer-row">
-              <textarea
-                className="composer-input scope-composer-input"
-                rows={2}
-                disabled
-                placeholder="给群聊发消息…（Enter 发送，Shift+Enter 换行）"
-              />
-              <button type="button" className="primary-button scope-send-btn" disabled title="发送（Enter）">
-                <SendHorizontal size={15} />
-                发送
-              </button>
-            </div>
-          </div>
-        )
-      ) : (
-        <p className="hint scope-readonly-hint">仅供查看</p>
-      )}
+      {showSettings ? (
+        <GroupSettings
+          api={api}
+          membersApi={membersApi}
+          scope={scope}
+          bots={bots}
+          memberCandidates={memberCandidates ?? bots}
+          canWrite={canWrite}
+          onChanged={onChanged}
+          onClose={() => changeSettingsOpen(false)}
+          onDeleted={onDeleted}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1095,7 +1048,29 @@ function dmRowTitle(scope: ScopeInfo, bots: readonly ConversationBot[], self?: M
   return target.map((m) => conversationMemberName(m, bots)).join('、');
 }
 
-export function Scopes({ api, pageActive = true, initialBotId, initialScopeId, readOnly = false, onStopBot, onOpenBot, scopeKind, participant, participantName, selectedScopeId, onSelectScope, onBack, detailOnly = false, knownBots, onOpenLink, resolveRoomApi, memberCandidates }: {
+export function Scopes({
+  api,
+  pageActive = true,
+  initialBotId,
+  initialScopeId,
+  readOnly = false,
+  onStopBot,
+  onOpenBot,
+  scopeKind,
+  participant,
+  participantName,
+  selectedScopeId,
+  onSelectScope,
+  onBack,
+  detailOnly = false,
+  knownBots,
+  onOpenLink,
+  resolveRoomApi,
+  memberCandidates,
+  onDeleted,
+  settingsOpen,
+  onSettingsOpenChange,
+}: {
   /** 完整视图 API（远端桌面/移动远端）或本机只读窄 API（mobile lane 适配器）。 */
   api: DesktopViewApi | ScopeReadApi;
   pageActive?: boolean;
@@ -1124,14 +1099,23 @@ export function Scopes({ api, pageActive = true, initialBotId, initialScopeId, r
   /** 只渲染详情区（群聊从主列表直达内容）：不显示另一份群聊/私聊列表。 */
   detailOnly?: boolean;
   /** 宿主已知 Bot 目录（含归档/远端）：与 api.listBots 按 deviceId+botId 合并后统一命名。 */
-  knownBots?: readonly ConversationBot[];
+  knownBots?: readonly ScopeBotInfo[];
   /** Markdown 链接打开方式（桌面 Tauri 无 mobile 桥时传入）。 */
   onOpenLink?: (href: string) => void | Promise<unknown>;
   /** 群聊写端解析器：传入即表示群聊提供可写入口（写端未就绪时详情降级为待连接，不标只读）。 */
   resolveRoomApi?: RoomApiResolver;
   /** 新增成员候选（未归档 Bot）；缺省用合并目录；现有成员名字始终走 knownBots。 */
-  memberCandidates?: readonly ConversationBot[];
+  memberCandidates?: readonly ScopeBotInfo[];
+  /** 群详情删除成功或远端检测到群已删除时触发：父级回到 Hub / 清 stage 并刷新群列表、移除置顶。 */
+  onDeleted?: () => void;
+  /** 受控群详情设置页开关（仅 room 生效；缺省走内部状态）。 */
+  settingsOpen?: boolean;
+  /** 群详情设置页开关变更回调（三点进入 true，设置页返回 false）。 */
+  onSettingsOpenChange?: (open: boolean) => void;
 }) {
+  void initialBotId;
+  void onStopBot;
+  void onOpenBot;
   /** 写控件统一门槛：真实写方法全部存在 + 未声明只读。 */
   const canWrite = !readOnly && isScopeWritableApi(api);
   const identity = api.identity;
@@ -1150,7 +1134,7 @@ export function Scopes({ api, pageActive = true, initialBotId, initialScopeId, r
   const [detailError, setDetailError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [bots, setBots] = useState<BotRecord[]>([]);
-  /** 目录 + 实时 listBots 合并后的命名/头像表（已知优先 listBots，目录提供归档/远端名）。 */
+  /** 目录 + 实时 listBots 合并后的命名/头像表（已知优先 listBots，目录提供归档/远端名与设备名）。 */
   const mergedBots = useMemo(() => mergeKnownBots(bots, knownBots), [bots, knownBots]);
   const listTitle = participant
     ? (participantName ?? conversationMemberName(participant, mergedBots)) + '的私聊'
@@ -1177,9 +1161,10 @@ export function Scopes({ api, pageActive = true, initialBotId, initialScopeId, r
     pageActive,
     participant || scopeKind === 'dm' ? 'dm' : undefined,
   );
-  /** participant 过滤在 kind=dm 之上再要求 deviceId+botId 成员匹配；scopeKind 限定类型。 */
+  /** participant 过滤在 kind=dm 之上再要求 deviceId+botId 成员匹配；同时过滤已删除墓碑。 */
   const rowConversations = useMemo(
     () => convList.items.filter((c) => {
+      if (isScopeDeleted(c.scope)) return false;
       if (scopeKind && c.scope.scope.kind !== scopeKind) return false;
       if (participant) {
         return c.scope.scope.kind === 'dm'
@@ -1192,6 +1177,23 @@ export function Scopes({ api, pageActive = true, initialBotId, initialScopeId, r
   const scopesSeqRef = useRef(0);
   const botsSessRef = useRef('');
   const targetKeyRef = useRef<string | null>(null);
+  const refreshConversations = convList.refresh;
+
+  const handleScopeDeleted = useCallback(() => {
+    onSettingsOpenChange?.(false);
+    setSelected(null);
+    setDetailError(null);
+    if (!detailOnly) {
+      onSelectScope?.(null);
+      if (!isControlled) setSelectedIdState(null);
+      refreshConversations();
+    }
+    if (onDeleted) {
+      onDeleted();
+    } else if (detailOnly) {
+      onBack?.();
+    }
+  }, [detailOnly, isControlled, onSelectScope, onDeleted, onBack, onSettingsOpenChange, refreshConversations]);
 
   useEffect(() => () => { scopesSeqRef.current += 1; }, []);
 
@@ -1210,6 +1212,7 @@ export function Scopes({ api, pageActive = true, initialBotId, initialScopeId, r
       setSelectedId(null);
       setSelected(null);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetKey]);
 
   // 初次加载后应用 initialScopeId 导航（仅一次；换目标后重新生效）。
@@ -1220,6 +1223,7 @@ export function Scopes({ api, pageActive = true, initialBotId, initialScopeId, r
     if (initialNavDoneRef.current || !initialScopeId) return;
     initialNavDoneRef.current = true;
     setSelectedId(initialScopeId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialScopeId]);
 
   // 换目标（profile/target）时重新允许初始导航。
@@ -1239,6 +1243,10 @@ export function Scopes({ api, pageActive = true, initialBotId, initialScopeId, r
     let cancelled = false;
     void api.call(identity, 'getScopeState', { scopeId: selectedId }).then((s) => {
       if (!cancelled && sessionKey(api.identity) === localSess) {
+        if (isScopeDeleted(s)) {
+          handleScopeDeleted();
+          return;
+        }
         // 详情核对：scopeKind/participant 不匹配的内容绝不渲染。
         if (scopeKind && s.scope.kind !== scopeKind) {
           setSelected(null);
@@ -1255,12 +1263,16 @@ export function Scopes({ api, pageActive = true, initialBotId, initialScopeId, r
       }
     }).catch((e) => {
       if (!cancelled && sessionKey(api.identity) === localSess) {
+        if (e && typeof e === 'object' && (e as { code?: unknown }).code === 'SCOPE_NOT_FOUND') {
+          handleScopeDeleted();
+          return;
+        }
         setDetailError('会话加载失败，请重试。');
         api.reportError(e);
       }
     });
     return () => { cancelled = true; };
-  }, [api, sess, identity, selectedId, online, scopeKind, participant]);
+  }, [api, sess, identity, selectedId, online, scopeKind, participant, handleScopeDeleted]);
 
   useEffect(() => {
     if (!identity || botsSessRef.current === sess || !api.transportConnected) return;
@@ -1278,6 +1290,7 @@ export function Scopes({ api, pageActive = true, initialBotId, initialScopeId, r
   }, [api, sess, identity, online]);
 
   function selectScope(id: string) {
+    onSettingsOpenChange?.(false);
     setSelectedId(id);
   }
 
@@ -1290,7 +1303,10 @@ export function Scopes({ api, pageActive = true, initialBotId, initialScopeId, r
     && (resolveRoomApi != null || isScopeWritableApi(api)),
   );
   /** 详情返回：detailOnly 回宿主；受控 DM 内容页回 DM 列表；内部选择回列表。 */
-  const detailBack = detailOnly ? onBack : () => setSelectedId(null);
+  const detailBack = detailOnly ? onBack : () => {
+    onSettingsOpenChange?.(false);
+    setSelectedId(null);
+  };
 
   return (
     <div
@@ -1378,7 +1394,7 @@ export function Scopes({ api, pageActive = true, initialBotId, initialScopeId, r
         {convList.loading ? <div className="status">加载中…</div> : null}
       </aside>
       <section className="chat-pane">
-        {identity && selected && selected.scope.scopeId === selectedId
+        {identity && selected && selected.scope.scopeId === selectedId && !isScopeDeleted(selected)
           && (!scopeKind || selected.scope.kind === scopeKind)
           && (!participant || (selected.scope.kind === 'dm' && selected.scope.members.some((m) => m.deviceId === participant.deviceId && m.botId === participant.botId))) ? (
           <ScopeDetail
@@ -1387,6 +1403,10 @@ export function Scopes({ api, pageActive = true, initialBotId, initialScopeId, r
             scope={selected}
             bots={mergedBots}
             onChanged={(s) => {
+              if (isScopeDeleted(s)) {
+                handleScopeDeleted();
+                return;
+              }
               setSelected(s);
             }}
             pageActive={pageActive}
@@ -1396,6 +1416,9 @@ export function Scopes({ api, pageActive = true, initialBotId, initialScopeId, r
             onOpenLink={onOpenLink}
             resolveRoomApi={resolveRoomApi}
             memberCandidates={memberCandidates}
+            onDeleted={handleScopeDeleted}
+            settingsOpen={settingsOpen}
+            onSettingsOpenChange={onSettingsOpenChange}
           />
         ) : detailError ? (
           <div className="error-banner" role="alert">{detailError}</div>

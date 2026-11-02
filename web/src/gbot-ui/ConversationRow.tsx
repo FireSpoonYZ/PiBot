@@ -4,6 +4,7 @@
 // （title/preview 两行结构、选中/未读/徽标/时间槽位、pointer hook 展开到 button）。
 // 差异：agent 模型替换为合同 props；Tailwind utility 由 gbot-ui.css 中同名结构类替代。
 import type { ReactNode } from 'react';
+import { Pin } from 'lucide-react';
 import { useConversationRowInteractions } from './useConversationRowInteractions';
 import type { ConversationMenuPosition } from './useConversationRowInteractions';
 
@@ -16,6 +17,7 @@ export interface ConversationRowProps {
   meta?: string;
   selected?: boolean;
   unread?: boolean;
+  pinned?: boolean;
   onOpen: () => void;
   onOpenMenu?: (position: ConversationMenuPosition) => void;
   className?: string;
@@ -58,12 +60,13 @@ export function ConversationRow({
   meta,
   selected = false,
   unread = false,
+  pinned = false,
   onOpen,
   onOpenMenu,
   className,
 }: ConversationRowProps) {
   const interactions = useConversationRowInteractions({ onOpen, onOpenMenu });
-  const label = [title, unread ? '未读' : null, meta ?? null]
+  const label = [title, pinned ? '已置顶' : null, unread ? '未读' : null, meta ?? null]
     .filter(Boolean)
     .join('，');
 
@@ -77,6 +80,7 @@ export function ConversationRow({
         className,
       )}
       data-active={selected || undefined}
+      data-pinned={pinned || undefined}
       data-unread={unread || undefined}
       {...interactions}
       type="button"
@@ -86,6 +90,15 @@ export function ConversationRow({
       <span className="gbot-conversation-row__body">
         <span className="gbot-conversation-row__head">
           <span className="gbot-conversation-row__title">{title}</span>
+          {pinned ? (
+            <span
+              aria-hidden="true"
+              className="gbot-conversation-row__pin"
+              title="已置顶"
+            >
+              <Pin aria-hidden="true" size={12} />
+            </span>
+          ) : null}
           {badge ? (
             <span className="gbot-conversation-row__badge">{badge}</span>
           ) : null}

@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { createControlClient } from './control-client.js';
 import { invalid, readInputObject } from './cli-input.js';
 
-const USAGE = `usage: node host-core/control-cli.js <host|create|list|get|find-request|send|status|history|abort|context|live|work-get|work-sync|work-history|work-context|work-activity|work-stop|work-resume|scope-list|scope-get|scope-create|scope-update|scope-send|scope-replicas|memory-status|memory-recall|memory-reflect|memory-retain|memory-get|memory-source|memory-correct|memory-retry|bot-soul|bot-soul-set> [options]
+const USAGE = `usage: node host-core/control-cli.js <host|create|list|get|find-request|send|status|history|abort|context|live|work-get|work-sync|work-history|work-context|work-activity|work-stop|work-resume|scope-list|scope-get|scope-create|scope-update|scope-delete|scope-send|scope-replicas|memory-status|memory-recall|memory-reflect|memory-retain|memory-get|memory-source|memory-correct|memory-retry|bot-soul|bot-soul-set> [options]
 
 commands:
   host             print host info
@@ -29,6 +29,7 @@ commands:
   scope-get        print one scope; requires --scope-id
   scope-create     create a managed scope; requires --input
   scope-update     update scope members; requires --scope-id --input
+  scope-delete     dissolve/delete a scope; requires --scope-id --input
   scope-send       publish a user message; requires --scope-id --input
   scope-replicas   list replica observations; requires --scope-id [--limit] [--cursor]
   memory-status     show memory status (no backend request or DB creation); requires --bot-id [--input {target?,state?,limit?,cursor?}]
@@ -113,6 +114,7 @@ const REQUIRED = {
   'scope-get': ['scope-id'],
   'scope-create': ['input'],
   'scope-update': ['scope-id', 'input'],
+  'scope-delete': ['scope-id', 'input'],
   'scope-send': ['scope-id', 'input'],
   'scope-replicas': ['scope-id'],
   models: [],
@@ -344,6 +346,9 @@ async function main() {
       break;
     case 'scope-update':
       result = await client.updateScope(values['scope-id'], input);
+      break;
+    case 'scope-delete':
+      result = await client.deleteScope(values['scope-id'], input);
       break;
     case 'scope-send':
       result = await client.publishUserMessage(values['scope-id'], input);
