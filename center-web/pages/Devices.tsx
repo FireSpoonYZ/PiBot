@@ -114,7 +114,7 @@ function SelectionForm({
           className={`filter-chip ${tab === 'basic' ? 'is-active' : ''}`}
           onClick={() => setTab('basic')}
         >
-          基础设置
+          模型设置
         </button>
         <button
           type="button"
@@ -136,26 +136,45 @@ function SelectionForm({
       )}
 
       {tab === 'basic' ? (
-        <label>
-          模型选择
-          <select
-            value={modelRef === '__null' ? '__inherit' : modelRef}
-            onChange={e => updateString('modelRef', e.target.value)}
-          >
-            <option value="__inherit">{inherited ? `继承全局 (${inherited.modelRef ?? '未设置'})` : '未设置'}</option>
-            {modelRef !== '__inherit' && modelRef !== '__null' && !options.some(o => o.ref === modelRef) && (
-              <option value={modelRef}>{modelRef}（不可用）</option>
+        <div className="form-grid">
+          <label>
+            模型选择
+            <select
+              value={modelRef === '__null' ? '__inherit' : modelRef}
+              onChange={e => updateString('modelRef', e.target.value)}
+            >
+              <option value="__inherit">{inherited ? `继承全局 (${inherited.modelRef ?? '未设置'})` : '未设置'}</option>
+              {modelRef !== '__inherit' && modelRef !== '__null' && !options.some(o => o.ref === modelRef) && (
+                <option value={modelRef}>{modelRef}（不可用）</option>
+              )}
+              {options.map(o => (
+                <option key={o.ref} value={o.ref}>
+                  {o.name} · {o.ref}
+                </option>
+              ))}
+            </select>
+            {modelRef === '__null' && (
+              <span className="secondary">当前已在“高级设置”中设为显式清空模型覆盖。</span>
             )}
-            {options.map(o => (
-              <option key={o.ref} value={o.ref}>
-                {o.name} · {o.ref}
+          </label>
+          <label>
+            思考强度 (Thinking Level)
+            <select value={level} onChange={e => updateString('thinkingLevel', e.target.value)}>
+              <option value="__inherit">
+                {inherited ? `继承全局（${inherited.thinkingLevel ?? 'SDK 默认'}）` : '未设置（SDK 默认）'}
               </option>
-            ))}
-          </select>
-          {modelRef === '__null' && (
-            <span className="secondary">当前已在“高级设置”中设为显式清空模型覆盖。</span>
-          )}
-        </label>
+              <option value="__null">显式清空（强制使用 SDK 默认）</option>
+              {level !== '__inherit' && level !== '__null' && !levels.includes(level) && (
+                <option value={level}>{level}</option>
+              )}
+              {levels.map(v => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
       ) : (
         <div className="form" style={{ gap: 14 }}>
           <div className="card-group" style={{ padding: 14, margin: 0 }}>
@@ -192,28 +211,11 @@ function SelectionForm({
           </div>
 
           <div className="card-group" style={{ padding: 14, margin: 0 }}>
-            <strong style={{ display: 'block', marginBottom: 4 }}>推理与高级覆盖策略</strong>
+            <strong style={{ display: 'block', marginBottom: 4 }}>模型覆盖策略</strong>
             <p className="secondary" style={{ marginTop: 0, marginBottom: 12 }}>
-              大多数场景保持默认即可；需要特定推理强度或强制阻断全局继承时可在此覆写。
+              思考档位已移至“模型设置”分栏；此处仅在需要强制阻断全局模型继承时覆写。
             </p>
             <div className="form-grid">
-              <label>
-                思考档位 (Thinking Level)
-                <select value={level} onChange={e => updateString('thinkingLevel', e.target.value)}>
-                  <option value="__inherit">
-                    {inherited ? `继承全局（${inherited.thinkingLevel ?? 'SDK 默认'}）` : '未设置（SDK 默认）'}
-                  </option>
-                  <option value="__null">显式清空（强制使用 SDK 默认）</option>
-                  {level !== '__inherit' && level !== '__null' && !levels.includes(level) && (
-                    <option value={level}>{level}</option>
-                  )}
-                  {levels.map(v => (
-                    <option key={v} value={v}>
-                      {v}
-                    </option>
-                  ))}
-                </select>
-              </label>
               <label>
                 显式清空模型覆盖
                 <select
@@ -223,7 +225,7 @@ function SelectionForm({
                     else if (modelRef === '__null') updateString('modelRef', '__inherit');
                   }}
                 >
-                  <option value="__normal">正常（使用基础设置中的模型或继承全局）</option>
+                  <option value="__normal">正常（使用模型设置中的模型或继承全局）</option>
                   <option value="__null">显式清空（不继承全局模型）</option>
                 </select>
               </label>

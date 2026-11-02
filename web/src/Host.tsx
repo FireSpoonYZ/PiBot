@@ -5435,7 +5435,7 @@ ${newer}` : draftSnapshot;
                 <Settings size={20} className="grok-row-icon" />
                 <span className="grok-row-label">{t('高级设置', 'Advanced Settings')}</span>
                 <span className="grok-row-value grok-row-value-path">
-                  {getOrCreateRemoteClient ? t('Code Mode · 思考档位', 'Code Mode · Thinking') : t('请在独立助手中设置', 'Configure in standalone assistant')}
+                  {getOrCreateRemoteClient ? t('Code Mode · 覆盖策略', 'Code Mode · Overrides') : t('请在独立助手中设置', 'Configure in standalone assistant')}
                 </span>
                 <ChevronRight size={18} className="grok-row-chevron" />
               </button>

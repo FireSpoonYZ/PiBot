@@ -144,7 +144,7 @@ export function BotModelSheet({ api, identity, botId, initialTab = 'model', onCl
         </form>}
         {config && tab === 'model' && <>
           <p className="grok-card-footnote" style={{ marginTop: 0 }}>
-            {t('当前生效模型', 'Effective model')}: <strong>{describe(config.effective.modelRef)}</strong> · {describeCodemode(config.effective)}
+            {t('当前生效模型', 'Effective model')}: <strong>{describe(config.effective.modelRef)}</strong> · {t('思考强度', 'Thinking level')} {describe(config.effective.thinkingLevel)} · {describeCodemode(config.effective)}
           </p>
           <label className="grok-section-label">{t('模型选择', 'Model')}</label>
           <section className="grok-card-group">
@@ -158,6 +158,16 @@ export function BotModelSheet({ api, identity, botId, initialTab = 'model', onCl
           <section className="grok-card-group">
             {draft.modelRef && !catalog?.models.some(model => model.modelRef === draft.modelRef) && <p>{t('当前模型不在目录中', 'Current model not in catalog')}: {draft.modelRef}</p>}
             {catalog?.models.filter(model => !q || `${model.name} ${model.modelRef}`.toLowerCase().includes(q)).map(model => <button type="button" className="grok-card-row" key={model.modelRef} disabled={busy} onClick={() => update('modelRef', model.modelRef)}><span className="grok-row-label">{model.name} · {model.modelRef}</span>{draft.modelRef === model.modelRef && <Check size={18}/>}</button>)}
+          </section>
+          <section className="grok-card-group">
+            <div className="grok-card-row no-active">
+              <label className="grok-row-label" htmlFor="bot-thinking-level">{t('思考强度', 'Thinking level')}</label>
+              <select id="bot-thinking-level" className="grok-inline-select" disabled={busy} value={draft.thinkingLevel === undefined ? '__inherit' : draft.thinkingLevel === null ? '__null' : draft.thinkingLevel} onChange={e => update('thinkingLevel', e.target.value === '__inherit' ? undefined : e.target.value === '__null' ? null : e.target.value)}>
+                <option value="__inherit">{t('继承全局', 'Inherit global')}</option><option value="__null">{t('显式清空', 'Explicitly clear')}</option>
+                {draft.thinkingLevel && !levels.includes(draft.thinkingLevel) && <option value={draft.thinkingLevel}>{draft.thinkingLevel}</option>}
+                {levels.map(level => <option key={level} value={level}>{level}</option>)}
+              </select>
+            </div>
           </section>
           <button type="button" className="grok-done-pill-btn" disabled={busy} onClick={() => void save()}>{t('保存模型设置', 'Save Model')}</button>
           <section className="grok-card-group">
@@ -204,16 +214,8 @@ export function BotModelSheet({ api, identity, botId, initialTab = 'model', onCl
             </div>
           </section>
 
-          <label className="grok-section-label" htmlFor="bot-thinking-level">{t('推理与高级覆盖策略', 'Reasoning & Override Policy')}</label>
+          <label className="grok-section-label">{t('模型覆盖策略', 'Model Override Policy')}</label>
           <section className="grok-card-group">
-            <div className="grok-card-row no-active">
-              <span className="grok-row-label">{t('思考档位', 'Thinking level')}</span>
-              <select id="bot-thinking-level" className="grok-inline-select" disabled={busy} value={draft.thinkingLevel === undefined ? '__inherit' : draft.thinkingLevel === null ? '__null' : draft.thinkingLevel} onChange={e => update('thinkingLevel', e.target.value === '__inherit' ? undefined : e.target.value === '__null' ? null : e.target.value)}>
-                <option value="__inherit">{t('继承全局', 'Inherit global')}</option><option value="__null">{t('显式清空', 'Explicitly clear')}</option>
-                {draft.thinkingLevel && !levels.includes(draft.thinkingLevel) && <option value={draft.thinkingLevel}>{draft.thinkingLevel}</option>}
-                {levels.map(level => <option key={level} value={level}>{level}</option>)}
-              </select>
-            </div>
             <div className="grok-card-row no-active">
               <span className="grok-row-label">{t('显式清空模型覆盖', 'Explicitly Clear Model')}</span>
               <button

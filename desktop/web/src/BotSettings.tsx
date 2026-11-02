@@ -1,4 +1,4 @@
-// Bot 设置工作台（desktop/远程页）：SOUL.md 编辑、CPA 模型与推理配置、插件能力、定时任务。
+// Bot 设置工作台（desktop/远程页）：SOUL.md 编辑、CPA 模型设置、插件能力、定时任务。
 // 外层抽屉由 BotChats 负责；open=true 时直接展示内容，非活动 tab 的能力/任务面板不挂载、不轮询。
 // 显式读取 + CAS 保存：冲突/结果未确认只锁保存，只有显式“采用远端设置（丢弃本地修改）”才换基线；
 // 未保存草稿连同其原始基线（含 revision）按 profile+target+bot 保留，自动读取绝不替换 dirty 部分的基线，
@@ -40,7 +40,7 @@ type StudioTab = 'soul' | 'model' | 'capabilities' | 'schedules';
 
 const STUDIO_TABS: { id: StudioTab; label: string }[] = [
   { id: 'soul', label: '🎭 灵魂人设' },
-  { id: 'model', label: '🤖 模型与推理' },
+  { id: 'model', label: '🤖 模型设置' },
   { id: 'capabilities', label: '🔌 插件与能力' },
   { id: 'schedules', label: '⏰ 定时任务' },
 ];
@@ -326,7 +326,7 @@ export function BotSettings({
       if (stale(sel)) return;
       setModelConfig(updated);
       setModelDraft({ ...updated.overrides });
-      setNotice('Bot 模型与思考档位已保存并同步至中心。');
+      setNotice('Bot 模型设置已保存并同步至中心。');
     } catch (e) {
       if (!stale(sel)) setError(`保存模型配置失败：${toError(e).message}`);
     } finally {
@@ -540,9 +540,9 @@ export function BotSettings({
       ) : null}
 
       {studioTab === 'model' ? (
-        <div className="studio-card bot-studio-card" role="tabpanel" aria-label="模型与推理">
+        <div className="studio-card bot-studio-card" role="tabpanel" aria-label="模型设置">
           <div className="studio-card-header">
-            <label>🤖 模型与推理（CPA 中心下发）</label>
+            <label>🤖 模型设置（CPA 中心下发）</label>
             {modelConfig ? (
               <span className="studio-pill is-ok">
                 {`有效模型: ${describeVal(modelConfig.effective.modelRef)}`}
@@ -612,24 +612,10 @@ export function BotSettings({
                 </div>
               </div>
               <div className="bot-studio-field">
-                <span className="bot-studio-field-label">模型覆盖策略</span>
-                <select
-                  disabled={busy || !online}
-                  value={modelDraft.modelRef === null ? '__null' : '__normal'}
-                  onChange={(e) => {
-                    if (e.target.value === '__null') updateModelDraft('modelRef', null);
-                    else if (modelDraft.modelRef === null) updateModelDraft('modelRef', undefined);
-                  }}
-                >
-                  <option value="__normal">正常（继承全局或使用所选模型）</option>
-                  <option value="__null">显式清空（强制阻断继承全局模型）</option>
-                </select>
-              </div>
-              <div className="bot-studio-field">
                 <span className="bot-studio-field-label">
-                  {`思考档位 (Thinking Level) · 全局 ${describeVal(modelConfig.global.thinkingLevel)}`}
+                  {`思考强度 (Thinking Level) · 全局 ${describeVal(modelConfig.global.thinkingLevel)}`}
                 </span>
-                <div className="bot-studio-choices" role="radiogroup" aria-label="思考档位">
+                <div className="bot-studio-choices" role="radiogroup" aria-label="思考强度">
                   {['__inherit', '__null', ...THINKING_LEVELS].map((lv) => (
                     <button
                       key={lv}
@@ -648,7 +634,35 @@ export function BotSettings({
                       {lv === '__inherit' ? '继承' : lv === '__null' ? '显式清空' : lv}
                     </button>
                   ))}
+                  {thinkingValue !== '__inherit' &&
+                  thinkingValue !== '__null' &&
+                  !THINKING_LEVELS.includes(thinkingValue) ? (
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked="true"
+                      className="bot-studio-choice active"
+                      disabled={busy || !online}
+                      onClick={() => updateModelDraft('thinkingLevel', thinkingValue)}
+                    >
+                      {`${thinkingValue}（当前）`}
+                    </button>
+                  ) : null}
                 </div>
+              </div>
+              <div className="bot-studio-field">
+                <span className="bot-studio-field-label">模型覆盖策略</span>
+                <select
+                  disabled={busy || !online}
+                  value={modelDraft.modelRef === null ? '__null' : '__normal'}
+                  onChange={(e) => {
+                    if (e.target.value === '__null') updateModelDraft('modelRef', null);
+                    else if (modelDraft.modelRef === null) updateModelDraft('modelRef', undefined);
+                  }}
+                >
+                  <option value="__normal">正常（继承全局或使用所选模型）</option>
+                  <option value="__null">显式清空（强制阻断继承全局模型）</option>
+                </select>
               </div>
               <div className="bot-studio-field">
                 <span className="bot-studio-field-label">
@@ -685,7 +699,7 @@ export function BotSettings({
                   disabled={busy || !online}
                   onClick={() => void saveModelConfig()}
                 >
-                  {modelSaving ? '保存中…' : '保存模型与推理配置'}
+                  {modelSaving ? '保存中…' : '保存模型设置'}
                 </button>
               </div>
             </>
