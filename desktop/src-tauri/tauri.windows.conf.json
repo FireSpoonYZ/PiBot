@@ -3,6 +3,10 @@
     "windows": {
       "wix": {
         "language": "zh-CN"
+      },
+      "nsis": {
+        "installerIcon": "../build/icons/icon.ico",
+        "uninstallerIcon": "../build/icons/icon.ico"
       }
     }
   }

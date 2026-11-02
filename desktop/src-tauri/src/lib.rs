@@ -139,6 +139,7 @@ pub fn run() {
     .setup(|app| {
       if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_title("e-助手");
+        window.set_icon(tauri::include_image!("../build/icons/icon.png"))?;
       }
       Ok(())
     })
