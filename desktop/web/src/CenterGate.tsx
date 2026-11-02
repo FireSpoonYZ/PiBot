@@ -21,6 +21,12 @@ type Props = { children: ReactNode; onDisconnected(): void };
 const request = <T,>(op: string, params: object = {}) =>
   invoke<T>('desktop_request', { request: { op, params } });
 
+/** RPC 拥塞（host 忙）不是断线：poll/probe 遇 BUSY 保留已确认 status 继续原节奏。 */
+const isBusyCenterError = (error: unknown) => {
+  const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : '';
+  return code === 'RPC_BUSY' || code === 'BUSY';
+};
+
 type CenterConnection = { status: CenterStatus | undefined; disconnectCenter: () => Promise<void> };
 const CenterConnectionContext = createContext<CenterConnection>({ status: undefined, disconnectCenter: () => Promise.resolve() });
 
@@ -96,8 +102,8 @@ export function CenterGate({ children, onDisconnected }: Props) {
         setStatus(next);
         setSaved(next.savedConnection);
       }
-    } catch {
-      if (issued === epoch.current) setStatus(undefined);
+    } catch (failure) {
+      if (!isBusyCenterError(failure) && issued === epoch.current) setStatus(undefined);
     }
   };
 
@@ -164,8 +170,8 @@ export function CenterGate({ children, onDisconnected }: Props) {
             }
           }
         }
-      } catch {
-        if (live && issued === epoch.current) setStatus(undefined);
+      } catch (failure) {
+        if (!isBusyCenterError(failure) && live && issued === epoch.current) setStatus(undefined);
       }
       if (live) timer = setTimeout(poll, 1000);
     };
