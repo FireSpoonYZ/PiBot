@@ -8,6 +8,7 @@ def launcherAbis = (findProperty("launcherAbis") ?: "arm64-v8a").split(",").toLi
 
 def npmCommand = System.getProperty('os.name').toLowerCase().contains('windows') ? ['cmd', '/c', 'npm'] : ['npm']
 def sharedWebInputs = rootProject.files(
+        rootProject.fileTree('assets'),
         rootProject.fileTree('desktop/web/src'),
         rootProject.fileTree('host-core') { include '*.js', '*.d.ts' })
 

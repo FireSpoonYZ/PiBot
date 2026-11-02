@@ -1,3 +1,5 @@
+<p><a href="assets/logo.png"><img src="assets/icon.png" alt="e-launcher" width="112" height="112"></a></p>
+
 # e-launcher 独立 AI 助手
 
 普通 Android AI 助手应用，安装后显示为 **AI Assistant**，保留 Pi SDK 数据、后台与定时任务、通知、分享草稿、语音会话、系统语音助手、唤醒和朗读，以及 Shower 虚拟屏与接管。可把标准 Android App Widget 添加到其他桌面，不再充当默认 HOME，不提供桌面布局、应用网格／全局桌面搜索、壁纸／图标包管理、小组件宿主、模拟导航手势或自定义应用切换页。

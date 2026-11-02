@@ -89,7 +89,7 @@ Windows/Linux 构建的并行度由 Cargo 自行决定，本文不设固定 job 
 
 - `desktop/build/binaries/e-launcher-client-node-<target-triple>[.exe]`：从官方固定 SHA-256 归档提取的 Node.js `22.19.0` 可执行文件。
 - `desktop/build/desktop-client.mjs`：由 `esbuild` 打包的纯客户端 Node broker（`platform=node`、`format=esm`、`target=node22`）。
-- `desktop/build/icons/`：由 `tauri icon` 从仓库内 `desktop/icon.svg` 生成的应用图标（含 `icon.ico` 与 `icon.png`）。
+- `desktop/build/icons/`：由 `tauri icon` 从仓库内共享的 `assets/icon.png` 生成的应用图标（含 `icon.ico` 与 `icon.png`）。
 - `desktop/build/THIRD_PARTY_NOTICES.txt`：汇总完整的 Node.js `LICENSE`、根据 `esbuild` metafile 实际打入 `desktop-client.mjs` 的 npm 依赖许可证原文，以及根据 `cargo metadata` 解析出的第三方 Rust 依赖许可证原文（不含本机绝对路径）。crate 归档未自带许可证文本时，仅对已核实的精确 `package@version` + 声明匹配使用仓库内的补充文本（见 [`licenses/desktop/README.md`](../licenses/desktop/README.md)）；任何未匹配的缺失许可证仍终止构建。
 - `desktop/build/web/`：Vite 桌面前端构建输出目录。
 - `desktop/build/target/`：Cargo 编译输出目录（由 `desktop/.cargo/config.toml` 配置）。

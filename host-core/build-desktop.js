@@ -41,7 +41,7 @@ const CACHE_DIR = path.join(DESKTOP_BUILD, 'cache');
 const DOWNLOADS_DIR = path.join(CACHE_DIR, 'downloads');
 const TMP_DIR = path.join(CACHE_DIR, 'tmp');
 const MANIFEST_FILE = path.join(CACHE_DIR, 'desktop-prepare-manifest.json');
-const ICON_SVG = path.join(DESKTOP_DIR, 'icon.svg');
+const ICON_SOURCE = path.join(ROOT, 'assets', 'icon.png');
 const BROKER_ENTRY = path.join(HERE, 'desktop-client-cli.js');
 const BROKER_OUTFILE = path.join(DESKTOP_BUILD, 'desktop-client.mjs');
 const NOTICES_OUTFILE = path.join(DESKTOP_BUILD, 'THIRD_PARTY_NOTICES.txt');
@@ -518,8 +518,8 @@ async function prepareNodeSidecar() {
 }
 
 async function prepareIcons() {
-  assertStrictlyRegularFile(ICON_SVG, 'desktop/icon.svg');
-  const svgHash = sha256OfFile(ICON_SVG);
+  assertStrictlyRegularFile(ICON_SOURCE, 'assets/icon.png');
+  const sourceHash = sha256OfFile(ICON_SOURCE);
   const icoPath = path.join(ICONS_DIR, 'icon.ico');
   const pngPath = path.join(ICONS_DIR, 'icon.png');
   const manifest = readManifest() ?? { version: 1 };
@@ -530,7 +530,7 @@ async function prepareIcons() {
     const rec = manifest.icons;
     if (
       rec &&
-      rec.svgSha256 === svgHash &&
+      rec.sourceSha256 === sourceHash &&
       rec.icoSha256 === icoHash &&
       rec.pngSha256 === pngHash
     ) {
@@ -542,7 +542,7 @@ async function prepareIcons() {
   const cliEntry = resolveTauriCliEntry(ROOT);
   await spawnNodeScript(
     cliEntry,
-    ['icon', ICON_SVG, '--output', ICONS_DIR],
+    ['icon', ICON_SOURCE, '--output', ICONS_DIR],
     { cwd: DESKTOP_DIR, stdio: 'inherit' }
   );
 
@@ -554,7 +554,7 @@ async function prepareIcons() {
 
   const nextManifest = readManifest() ?? { version: 1 };
   nextManifest.icons = {
-    svgSha256: svgHash,
+    sourceSha256: sourceHash,
     icoSha256: sha256OfFile(icoPath),
     pngSha256: sha256OfFile(pngPath),
   };

@@ -9,6 +9,7 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
   root: path.join(ROOT, 'desktop', 'web'),
   base: './',
+  publicDir: path.join(ROOT, 'assets'),
   plugins: [react(), tailwindcss()],
   server: {
     host: '127.0.0.1',

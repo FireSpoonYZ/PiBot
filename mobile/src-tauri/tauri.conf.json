@@ -27,6 +27,6 @@
   "bundle": {
     "active": false,
     "targets": "all",
-    "icon": ["../../app/src/main/res/drawable-nodpi/ic_launcher_artwork.png"]
+    "icon": ["../../assets/icon.png"]
   }
 }
