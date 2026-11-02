@@ -1,11 +1,11 @@
 {
   "manifestVersion": 1,
   "id": "e-launcher.billion-context",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "kind": "plugin",
   "displayName": "Billion Context",
   "hostApi": "^1.0.0",
-  "durableApi": "1.3.0",
+  "durableApi": "1.4.0",
   "components": {
     "host": {
       "entry": "entry.js"

@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import type { BotAvatar } from '../../center-contract/index.js';
+import { botActivityText, type BotActivity } from './botActivity';
 import {
   GROK_EXPRESSIONS,
   GROK_HEAD_CENTER,
@@ -418,6 +419,7 @@ export function GrokBotWorkingSlot({
   isSending = false,
   isRecovering = false,
   startedAt,
+  activity,
   t,
 }: {
   botKey: string;
@@ -431,6 +433,7 @@ export function GrokBotWorkingSlot({
   isSending?: boolean;
   isRecovering?: boolean;
   startedAt?: number | null;
+  activity?: BotActivity;
   t: (zh: string, en: string) => string;
 }) {
   const resolveStartMs = () => {
@@ -451,7 +454,7 @@ export function GrokBotWorkingSlot({
   const [elapsedSec, setElapsedSec] = useState(() =>
     isBusy ? Math.max(0, Math.floor((Date.now() - resolveStartMs()) / 1000)) : 0,
   );
-  const [settlementOutcome, setSettlementOutcome] = useState<'success' | 'error' | null>(null);
+  const [settlementOutcome, setSettlementOutcome] = useState<'success' | 'error' | 'stopped' | null>(null);
   const [emphasized, setEmphasized] = useState(false);
   const [pulseThinkingMorph, setPulseThinkingMorph] = useState(false);
   const wasBusyRef = useRef(isBusy);
@@ -480,7 +483,10 @@ export function GrokBotWorkingSlot({
         setElapsedSec(Math.max(0, Math.floor((Date.now() - finalStartMs) / 1000)));
       }
       workingStartMsByBotKey.delete(botKey);
-      setSettlementOutcome(hasError ? 'error' : 'success');
+      // 'failed' 是驻留终态：由下方 terminalActivity 持续渲染，不走 1.45s 自动清除的 error 结算。
+      setSettlementOutcome(
+        activity?.phase === 'stopped' ? 'stopped' : hasError ? 'error' : 'success',
+      );
       const settleTimer = window.setTimeout(() => {
         setSettlementOutcome(null);
         setElapsedSec(0);
@@ -490,10 +496,23 @@ export function GrokBotWorkingSlot({
     workingStartMsByBotKey.delete(botKey);
     return undefined;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isBusy, startedAt, botKey, hasError, isRecovering]);
+  }, [isBusy, startedAt, botKey, hasError, isRecovering, activity?.phase]);
+
+  const isPhaseLed =
+    isBusy &&
+    (activity?.phase === 'queued' ||
+      activity?.phase === 'preparing' ||
+      activity?.phase === 'compacting' ||
+      activity?.phase === 'interrupting' ||
+      activity?.phase === 'stopping');
+  // Terminal activity phases still render the slot (a settled result, not a
+  // spinner): 'stopped' must not read as completed and 'failed' must not spin.
+  // 'failed' 驻留到下一次忙碌/新活动帧，是可见的失败提示而非一闪而过的结算动画。
+  const terminalActivity =
+    !isBusy && (activity?.phase === 'stopped' || activity?.phase === 'failed') ? activity : null;
 
   useEffect(() => {
-    if (!isBusy || isStreaming || activeToolName) {
+    if (!isBusy || isStreaming || activeToolName || isPhaseLed) {
       setPulseThinkingMorph(false);
       return undefined;
     }
@@ -502,27 +521,46 @@ export function GrokBotWorkingSlot({
       setPulseThinkingMorph(prev => !prev);
     }, 4200);
     return () => window.clearInterval(cycle);
-  }, [isBusy, isStreaming, activeToolName]);
+  }, [isBusy, isStreaming, activeToolName, isPhaseLed]);
 
-  if (!isBusy && (isRecovering || !settlementOutcome)) return null;
+  if (!isBusy && (isRecovering || (!settlementOutcome && !terminalActivity))) return null;
 
   const baseState = resolveGrokMascotState({
     isBusy,
     isStreaming,
     activeToolName,
     hasThinking,
-    settlementOutcome,
+    settlementOutcome:
+      settlementOutcome === 'stopped'
+        ? 'success'
+        : settlementOutcome,
   });
 
-  const mascotState: GrokMascotState =
-    baseState === 'working' && pulseThinkingMorph && !activeToolName && !isStreaming ? 'thinking' : baseState;
+  const mascotState: GrokMascotState = (() => {
+    if (isPhaseLed) {
+      if (activity?.phase === 'stopping') return 'powering-down';
+      // 压缩仍是真实执行中：用 working 而非等待态，配合「整理上下文中」文案。
+      if (activity?.phase === 'compacting') return 'working';
+      return 'waiting';
+    }
+    if (terminalActivity) {
+      return 'idle';
+    }
+    if (settlementOutcome === 'stopped') return 'idle';
+    return baseState === 'working' && pulseThinkingMorph && !activeToolName && !isStreaming
+      ? 'thinking'
+      : baseState;
+  })();
 
   const statusText = (() => {
     if (!isBusy) {
+      if (terminalActivity) return botActivityText(terminalActivity, t);
+      if (settlementOutcome === 'stopped') return t('已停止', 'Stopped');
       return settlementOutcome === 'error'
         ? t('执行中断', 'Interrupted')
         : t('已完成', 'Done');
     }
+    if (isPhaseLed && activity) return botActivityText(activity, t);
     if (isSending) return t('正在发送…', 'Sending…');
     if (isStreaming) {
       return t('正在回复…', 'Replying…');
@@ -558,7 +596,7 @@ export function GrokBotWorkingSlot({
 
   return (
     <div
-      className={`sand-activity-slot${!isBusy && settlementOutcome ? ' is-settling' : ''}`}
+      className={`sand-activity-slot${!isBusy && (settlementOutcome || terminalActivity) ? ' is-settling' : ''}`}
       data-role="assistant"
       data-grok-state={mascotState}
       aria-live="polite"
@@ -573,7 +611,7 @@ export function GrokBotWorkingSlot({
           eyeColor="#FAF8F5"
           state={mascotState}
           size={36}
-          isPlaying={true}
+          isPlaying={isBusy || Boolean(settlementOutcome)}
           isEmphasized={emphasized}
           interactivePoke={true}
         />
@@ -581,7 +619,7 @@ export function GrokBotWorkingSlot({
           <span className={`sand-activity-label-text${isBusy ? ' is-shimmering' : ''}`}>
             {statusText}
           </span>
-          {(isBusy || Boolean(settlementOutcome)) && (
+          {(isBusy || Boolean(settlementOutcome) || Boolean(terminalActivity)) && (
             <span className="sand-activity-elapsed">{formatWorkingElapsed(elapsedSec)}</span>
           )}
         </span>

@@ -952,6 +952,10 @@ async function writeThirdPartyNotices(nodeInfo, metafile) {
   const npmSections = await collectNpmLicenseSections(metafile);
   const uiSections = await collectUiNpmLicenseSections();
   const cargoSections = await collectCargoLicenseSections();
+  // web/src/gbot-ui adapts lenML/gbot-ui sources (MIT) at source level: it is in
+  // neither the npm nor the Cargo graph, so the vendored license text is appended
+  // directly from licenses/ (same read mechanism as UPSTREAM_LICENSE_ALLOWLIST).
+  const gbotUiLicense = (await readFile(path.join(ROOT, 'licenses', 'gbot-ui-MIT.txt'), 'utf8')).trim();
 
   const blocks = [
     '# Third-Party Notices (e-launcher Desktop Client)',
@@ -959,6 +963,8 @@ async function writeThirdPartyNotices(nodeInfo, metafile) {
     nodeInfo.licenseText.trim(),
     ...npmSections,
     ...uiSections,
+    '## source: lenML/gbot-ui (MIT)',
+    gbotUiLicense,
     ...cargoSections,
   ];
   const content = blocks.join('\n\n---\n\n') + '\n';

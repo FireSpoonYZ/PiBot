@@ -197,13 +197,36 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     const binding = bindingFor(deviceId, botId, id);
     return { ...binding, globalConfig: config.globalConfig, effectiveConfig: merge(config.globalConfig, binding.overrides), configSchema: config.configSchema };
   }
-  /** Default Hindsight binding for a newly registered Bot: projectId is name-botId. Existing rows (incl. explicit disables) are kept. Caller must hold a transaction. */
-  function initializeBotHindsight(bot) {
+  /** Managed capabilities that get an enabled binding by default; overrides() can supply per-Bot defaults. */
+  const DEFAULT_BINDINGS = {
+    'e-launcher.hindsight': { overrides: (bot) => ({ projectId: `${bot.name}-${bot.botId}` }) },
+    'e-launcher.billion-context': {},
+  };
+  /** Default bindings for a newly registered Bot: Hindsight projectId is name-botId; Billion Context uses the global config. Existing rows (incl. explicit disables) are kept. Caller must hold a transaction. */
+  function initializeBotDefaults(bot) {
     let added = false;
     for (const installation of store.listInstallations()) {
-      if (installation.packageId !== 'e-launcher.hindsight' || installation.kind !== 'plugin' || installation.target !== 'host' || !activeInstallation(installation)) continue;
+      const defaults = DEFAULT_BINDINGS[installation.packageId];
+      if (!defaults || installation.kind !== 'plugin' || installation.target !== 'host' || !activeInstallation(installation)) continue;
       if (bindingFor(bot.deviceId, bot.botId, installation.installationId).revision !== 0) continue;
-      const overrides = { projectId: `${bot.name}-${bot.botId}` };
+      const overrides = defaults.overrides?.(bot) ?? {};
+      const config = configFor(installation.installationId);
+      validate(config.configSchema, merge(config.globalConfig, overrides));
+      const binding = { deviceId: bot.deviceId, botId: bot.botId, installationId: installation.installationId, enabled: true, overrides, revision: 1 };
+      db.prepare('INSERT INTO bindings VALUES (?, ?, ?, ?)').run(bot.deviceId, bot.botId, installation.installationId, json(binding));
+      added = true;
+    }
+    return added;
+  }
+  /** Backfill default bindings on existing Bots when an installation reaches the active state; rows that already exist (incl. explicit disables/overrides) are untouched. Caller must hold a transaction. */
+  function seedBotDefaults(installation) {
+    const defaults = DEFAULT_BINDINGS[installation.packageId];
+    if (!defaults || installation.kind !== 'plugin' || installation.target !== 'host' || !activeInstallation(installation)) return false;
+    let added = false;
+    const bots = db.prepare('SELECT json FROM device_bots').all().map(parse);
+    for (const bot of bots) {
+      if (bindingFor(bot.deviceId, bot.botId, installation.installationId).revision !== 0) continue;
+      const overrides = defaults.overrides?.(bot) ?? {};
       const config = configFor(installation.installationId);
       validate(config.configSchema, merge(config.globalConfig, overrides));
       const binding = { deviceId: bot.deviceId, botId: bot.botId, installationId: installation.installationId, enabled: true, overrides, revision: 1 };
@@ -488,7 +511,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
               upsertBotStmt.run(deviceId, normalized.botId, serialized, seq);
               insertEventStmt.run(seq, deviceId, normalized.botId, 'upsert', serialized, nowIso);
             }
-            if (oldSerialized === undefined && initializeBotHindsight(normalized)) defaultsAdded = true;
+            if (oldSerialized === undefined && initializeBotDefaults(normalized)) defaultsAdded = true;
             existingMap.delete(normalized.botId);
           }
           const deleteBotStmt = db.prepare('DELETE FROM device_bots WHERE device_id = ? AND bot_id = ?');
@@ -599,7 +622,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             // Only a real Bot addition or an execution-field change bumps; profile edits stay display-only.
             if (!existingRow || executionChanged) bump();
           }
-          if (!existingRow) initializeBotHindsight(merged);
+          if (!existingRow) initializeBotDefaults(merged);
           return { ...merged, seq: targetSeq };
         });
       },
@@ -696,6 +719,8 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
         return transaction(() => {
           const current = requireInstallation(id);
           const result = { ...current, activation: { status: activation.status, error: safeActivationError(activation.error, activation.status), updatedAt: new Date().toISOString() } };
+          // An installation becoming active seeds default bindings for existing Bots that never chose.
+          if (!activeInstallation(current) && activeInstallation(result)) seedBotDefaults(result);
           if (activeInstallation(current) !== activeInstallation(result)) bump();
           save('installations', id, result);
           return result;

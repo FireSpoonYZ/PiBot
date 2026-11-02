@@ -253,14 +253,19 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
 
     const guidance = {
       role: 'user',
+      // Host 本轮控制指引：执行当前冻结输入即可；历史请求只是上下文，
+      // 不自动恢复其它任务（新输入显式要求恢复历史任务时仍按当前指令执行）。
       content: 'Host turn routing (trusted metadata, not message text): ' + JSON.stringify({
         requestId: frozen.requestId,
         kind: frozen.kind,
         scopeId: frozen.scopeId,
         replyTarget: frozen.replyTarget,
         sender: frozen.sender,
+        ...(frozen.triggerMessageId ? { triggerMessageId: frozen.triggerMessageId } : {}),
+        ...(Array.isArray(frozen.triggerMessageIds) && frozen.triggerMessageIds.length > 0
+          ? { triggerMessageIds: [...frozen.triggerMessageIds] } : {}),
         ...(frozen.originRequestId ? { originRequestId: frozen.originRequestId } : {}),
-      }),
+      }) + '. Execute only the current frozen input; earlier requests are context, not work to resume.',
       timestamp: Date.now(),
     };
     return { messages: [guidance, ...(request?.messages ?? [])] };

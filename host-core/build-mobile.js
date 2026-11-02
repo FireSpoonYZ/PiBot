@@ -338,8 +338,11 @@ async function collectAndroidRustNotices(abis) {
 async function writeNotices(abis) {
   const { graphs, blocks } = await collectAndroidRustNotices(abis);
   const header = ['# Third-Party Notices (e-Launcher Android Tauri UI)', `ABI graphs: ${graphs.join(', ')}`].join('\n');
+  // web/src/gbot-ui 是源码级 MIT 适配（lenML/gbot-ui）：不在 npm/Cargo 图上，
+  // 沿用 desktop 读 licenses 文件的方式直接把同一份文本附进 Android 产物。
+  const gbotUiLicense = (await readFile(path.join(ROOT, 'licenses', 'gbot-ui-MIT.txt'), 'utf8')).trim();
   const content =
-    [header, ...blocks.map((block) => block.join('\n\n---\n\n'))].join('\n\n---\n\n') + '\n';
+    [header, ...blocks.map((block) => block.join('\n\n---\n\n')), '## source: lenML/gbot-ui (MIT)', gbotUiLicense].join('\n\n---\n\n') + '\n';
   await mkdir(NOTICES_DIR, { recursive: true });
   await writeFile(NOTICES_OUT, content, 'utf8');
   return { outfile: NOTICES_OUT, sha256: sha256Buffer(Buffer.from(content, 'utf8')) };

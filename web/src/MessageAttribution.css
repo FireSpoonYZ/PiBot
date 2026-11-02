@@ -14,13 +14,6 @@
   font-weight: 600;
   color: var(--text, #111827);
 }
-.msg-attr-device {
-  font-size: 10px;
-  padding: 0 5px;
-  border-radius: 6px;
-  background: var(--chip-bg, rgba(107, 114, 128, 0.12));
-  color: var(--muted, #6b7280);
-}
 .msg-attr-channel {
   font-size: 10px;
   padding: 0 5px;

@@ -6,6 +6,7 @@
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import { getPrimaryConversation } from './runtime-docs.js';
 import { BotSessionState } from './bot-session-context.js';
+import { GenerationFailureState } from './generation-failure.js';
 import { emptyLiveState, projectLiveState, diffLiveState } from './runtime-live-projection.js';
 
 const CTX = BACKGROUND_CONTEXT;
@@ -28,6 +29,11 @@ function assertNonBlank(value, name) {
 const TURN_ADMISSION_PHASES = new Set(['queued', 'checking', 'synchronizing', 'failed']);
 const MAX_TURN_REQUEST_ID_CHARS = 128;
 const MAX_TURN_ERROR_CHARS = 256;
+// BotActivity 统一工作状态：Host 侧合并结果写进每个 primary 快照/更新；
+// 字段严格限长，activity 永远不可能把正文/凭据塞进 live 帧。
+const CONTROL_PHASES = new Set(['interrupting', 'stopping', 'stopped']);
+const WORK_PENDING_KINDS = new Set(['primary', 'room', 'dm']);
+const MAX_ACTIVITY_CHARS = 256;
 
 function boundText(value, max) {
   return value.length > max ? value.slice(0, max) : value;
@@ -78,6 +84,131 @@ function withTurnAdmission(projected, admission) {
   };
 }
 
+function boundActivityText(value) {
+  return typeof value === 'string' ? boundText(value, MAX_ACTIVITY_CHARS) : null;
+}
+
+function activity(phase, fields = {}) {
+  const out = {
+    phase,
+    source: fields.source ?? null,
+    scopeId: fields.scopeId ?? null,
+    requestId: fields.requestId ?? null,
+    startedAt: fields.startedAt ?? null,
+  };
+  if (fields.error !== undefined) out.error = fields.error;
+  return out;
+}
+
+function activityFieldsOf(item) {
+  return {
+    source: item.source ?? null,
+    scopeId: item.scopeId ?? null,
+    requestId: item.requestId ?? null,
+    startedAt: item.startedAt ?? null,
+  };
+}
+
+// 投影 activity 经 wire/白名单形态复投：剔除 error:undefined（非 wire 键），
+// 保留真实 error 诊断；返回纯净 {phase,source,scopeId,requestId,startedAt,error?}。
+function stripInternal(projected) {
+  const out = {
+    phase: projected.phase,
+    source: projected.source ?? null,
+    scopeId: projected.scopeId ?? null,
+    requestId: projected.requestId ?? null,
+    startedAt: projected.startedAt ?? null,
+  };
+  if (projected.error !== undefined && projected.error !== null) out.error = projected.error;
+  return out;
+}
+
+/** work lane 已固定协议：只复制存活 pending 的元数据字段，不加防御层。 */
+function copyWorkSummary(summary) {
+  if (summary === null) return null;
+  const pending = [];
+  for (const item of summary.pending) {
+    if (!WORK_PENDING_KINDS.has(item.kind)) continue;
+    pending.push({
+      requestId: boundActivityText(item.requestId),
+      kind: item.kind,
+      scopeId: boundActivityText(item.scopeId),
+      startedAt: boundActivityText(item.startedAt),
+    });
+  }
+  return { pending };
+}
+
+/**
+ * 按契约优先级合并此 Bot 的统一 activity：
+ * control stopping/interrupting > 真实运行 runActivity（running 或阻塞
+ * compacting；自动压缩不中断 startedAt 计时）> failed admission >
+ * Host admission（queued/preparing，用户直接输入优先）> 存活 work pending
+ * （queued）> 原生 pi.inbox 积压（queued）> 空闲/手动 compacting > stopped > idle。
+ * 例外：显式 stopped 优先于残留 failed（主动停止不被过期失败覆盖），
+ * 空闲/手动 compacting 优先于 stopped（进行中的后台整理仍算活跃）。
+ * stopped 只在无未完成工作时透出：新的 run/pending/admission 出现时由调用方
+ * 先清掉旧 stopped 再重投影，绝不靠覆盖把 stopped 留到新任务完结后。
+ */
+function resolveBotActivity(botId, runActivity, queuedCount, ctx) {
+  const control = ctx.controlByBot.get(botId) ?? null;
+  if (control === 'interrupting' || control === 'stopping') {
+    return activity(control, activityFieldsOf(runActivity?.activity ?? {}));
+  }
+  const projected = runActivity?.activity ?? null;
+  // 真实运行/阻塞压缩（hasRun 的 compacting）直接胜出；空闲/手动压缩
+  // （无 run）继续参与下方 admission/pending/queue 裁决，不在这里短路。
+  if (projected?.phase === 'running' ||
+      (projected?.phase === 'compacting' && runActivity.hasRun === true)) {
+    return stripInternal(projected);
+  }
+  // 真实终态失败（contract B）：runFailure + Host 诊断投影的 failed 相，
+  // 与 failed admission 同位——新的运行/排队出现时已先结算或胜出；投影只
+  // 在 runFailure 存活期间产出，过期 failed 绝不覆盖新成功。显式 user_stop
+  // （control stopped）优先：主动停止仍显示 stopped，不被残留失败覆盖。
+  if (projected?.phase === 'failed' && runActivity.isFailure === true &&
+      control !== 'stopped') {
+    return stripInternal(projected);
+  }
+  const admission = ctx.admissionByBot.get(botId) ?? null;
+  if (admission?.status?.phase === 'failed') return activity('failed');
+  if (admission?.status !== null && admission?.status !== undefined) {
+    return activity(admission.status.phase === 'queued' ? 'queued' : 'preparing', {
+      source: 'primary',
+      requestId: admission.status.requestId,
+    });
+  }
+  const pending = ctx.workByBot.get(botId)?.pending ?? [];
+  if (pending.length > 0) {
+    const item = pending[0];
+    // work summary 的 primary 是后台续轮，不是用户主聊天。
+    return activity('queued', {
+      source: item.kind === 'primary' ? 'background' : item.kind,
+      scopeId: item.scopeId,
+      requestId: item.requestId,
+      startedAt: item.startedAt,
+    });
+  }
+  // 原生 pi.inbox 已有 SDK 排队项但既无运行也无 admission/work pending：
+  // 真实工作已入队，绝不能报 idle。排在空闲/手动 compacting 之前：排队的
+  // 真实输入比后台压缩更贴近用户等待。
+  if (queuedCount > 0) return activity('queued', { source: 'primary' });
+  // 空闲/手动压缩低于真实排队：积压的真实输入比后台整理更贴近用户等待。
+  if (projected?.phase === 'compacting') return stripInternal(projected);
+  if (control === 'stopped') return activity('stopped');
+  return activity('idle');
+}
+
+/** 合并统一 activity 进 primary 快照（恒写入，同 turnAdmission）。 */
+function withBotActivity(projected, botId, runActivity, ctx) {
+  return { ...projected, activity: resolveBotActivity(botId, runActivity, projected.queuedCount, ctx) };
+}
+
+/** 新的真实工作/排队输入出现：清掉旧 stopped control，防止新任务完结后又误显已停止。 */
+function clearStoppedOnWork(ctx, botId) {
+  if (ctx.controlByBot.get(botId) === 'stopped') ctx.controlByBot.delete(botId);
+}
+
 // 投影 state 是纯 JSON 安全值：深冻结后对外暴露，防止任一消费者改写破坏后续 diff/帧。
 function deepFreeze(value) {
   if (value === null || typeof value !== 'object') return value;
@@ -107,6 +238,13 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
   // botId -> {status, hostQueued}：最近一次的 Host 队列 admission 发布；
   // primary watch 每次投影时并入，绝不进 work watch。
   const admissionByBot = new Map();
+  // botId -> 'interrupting'|'stopping'|'stopped'：Host 侧停止/让位控制阶段，
+  // 由 setBotControl 显式写入/清除；stopping/interrupting 不由投影自动解除。
+  const controlByBot = new Map();
+  // botId -> {pending:[…]}：work lane 推送的存活 pending 元数据快照；
+  // 只投影进 primary watch 的统一 activity，绝不进 work watch（保持原历史）。
+  const workByBot = new Map();
+  const activityCtx = { controlByBot, workByBot, admissionByBot };
 
   function track(task) {
     inflight.add(task);
@@ -127,7 +265,17 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       // 未并入 admission 的 pi.inbox 计数基线：admission 重算 queuedCount 时以此为底，
       // 避免把已并入的 hostQueued 再累加一遍。
       inboxQueued: 0,
-      current: deepFreeze(work ? emptyLiveState() : withTurnAdmission(emptyLiveState(), admissionByBot.get(botId) ?? null)),
+      current: deepFreeze(
+        work ? emptyLiveState()
+          : withBotActivity(
+            withTurnAdmission(emptyLiveState(), admissionByBot.get(botId) ?? null),
+            botId, null, activityCtx,
+          ),
+      ),
+      // 最近一次投影的真实运行/失败 activity：{activity, hasRun, isFailure}。
+      // hasRun 区分阻塞压缩（真实运行）与空闲/手动压缩；isFailure 标记
+      // runFailure 投影的 failed 相——优先级由 resolveBotActivity 统一裁决。
+      runActivity: null,
       delivered: null, // null = 尚未投递首个快照
       seq: 0,
       dirty: false,
@@ -279,9 +427,39 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
           }
           if (state.endReason !== null) return;
           state.sessionState = doc ?? null;
+          // contract B：runFailure 的真实终态失败读取 Host 失败诊断族文档；
+          // 空闲/手动压缩读取各压缩任务的持久 startedAt。同一装载循环内完成，
+          // 读取失败回落 null——投影以安全通用文案/无起点降级，绝不抛错断流。
+          let extras = null;
+          const live = view?.docs?.['pi.live'];
+          if (live != null && state.nativeId !== null) {
+            extras = {};
+            // aborted 也读取族文档：Host final guard abortTask 的具体诊断
+            // （如 CONTEXT_LIMIT）存于 GenerationFailureState；无 receipt 的
+            // 裸 abort 才是主动停止，投影按 stopped/idle 处理。
+            if (live.run == null && live.runFailure != null && live.runFailure.taskId != null) {
+              try {
+                extras.failureDoc = await getHarness().snapshot(
+                  GenerationFailureState, state.nativeId, String(live.runFailure.taskId), CTX);
+              } catch { extras.failureDoc = null; }
+            }
+            if (Array.isArray(live.compactions) && live.compactions.length > 0) {
+              extras.compactionStarts = {};
+              for (const c of live.compactions) {
+                if (c?.taskId == null) continue;
+                try {
+                  const rec = await getHarness().getTask(c.taskId, CTX);
+                  if (Number.isSafeInteger(rec?.startedAt) && rec.startedAt > 0) {
+                    extras.compactionStarts[String(c.taskId)] = rec.startedAt;
+                  }
+                } catch { /* 任务不可读则缺该起点，由投影回 null */ }
+              }
+            }
+          }
+          if (state.endReason !== null) return;
           if (state.pendingView === view) {
             state.pendingView = null;
-            publishView(view);
+            publishView(view, extras);
           }
           // pendingView 在 await 期间被替换：回到循环为最新 view 重取快照。
         }
@@ -291,12 +469,31 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     }
 
     // 用已装载的归属快照投影并投递一帧（diff 与原串行泵一致）。
-    function publishView(view) {
+    function publishView(view, extras = null) {
       let next;
       try {
-        next = projectLiveState(view, state.sessionState);
+        next = projectLiveState(view, state.sessionState, extras);
         state.inboxQueued = next.queuedCount;
-        if (!work) next = withTurnAdmission(next, admissionByBot.get(botId) ?? null);
+        if (!work) {
+          // 保留最近一次投影的 activity 及其来源标记（hasRun/isFailure）：
+          // running/真实运行的 compacting/真实 failed/空闲手动压缩均缓存，
+          // 供 resolveBotActivity 按新优先级裁决（运行>压缩>失败>…）。
+          const projected = next.activity;
+          state.runActivity = (projected != null && projected.phase !== 'idle')
+            ? { activity: projected, hasRun: extras?.activityHasRun === true, isFailure: extras?.activityIsFailure === true }
+            : null;
+          // 新真实工作出现：旧 stopped 不得残留到下次完结。手动 compact 也是
+          // 显式新工作，须清旧 stopped 透出压缩；失败投影不是工作，不清。
+          // 压缩被停止结算时调用方重写 stopped——清标不影响停止后仍 stopped。
+          const activeWork = state.runActivity !== null && state.runActivity.isFailure !== true;
+          if (activeWork || state.inboxQueued > 0) {
+            clearStoppedOnWork(activityCtx, botId);
+          }
+          next = withBotActivity(
+            withTurnAdmission(next, admissionByBot.get(botId) ?? null),
+            botId, state.runActivity, activityCtx,
+          );
+        }
       } catch (err) {
         end('listener_error', err);
         void stopNative().catch(() => {});
@@ -387,9 +584,26 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       if (work || targetBotId !== botId || state.endReason !== null) return;
       const previous = state.current;
       // 以 inboxQueued 为底重算：previous.queuedCount 已含上一次并入的 hostQueued。
-      const next = deepFreeze(
+      const next = deepFreeze(withBotActivity(
         withTurnAdmission({ ...previous, queuedCount: state.inboxQueued }, admissionByBot.get(botId) ?? null),
-      );
+        botId, state.runActivity, activityCtx,
+      ));
+      if (diffLiveState(previous, next) !== null) {
+        state.current = next;
+        state.seq++;
+        if (state.started) {
+          state.dirty = true;
+          kick();
+        }
+      }
+    }
+
+    // work pending 汇总或 Host control 阶段变化：只重投影统一 activity 字段，
+    // 以最近一次真实运行 runActivity 为准，不重算历史/工具。
+    function applyActivity(targetBotId) {
+      if (work || targetBotId !== botId || state.endReason !== null) return;
+      const previous = state.current;
+      const next = deepFreeze(withBotActivity({ ...previous }, botId, state.runActivity, activityCtx));
       if (diffLiveState(previous, next) !== null) {
         state.current = next;
         state.seq++;
@@ -402,6 +616,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
 
     const watch = {
       _applyAdmission: applyAdmission,
+      _applyActivity: applyActivity,
       get value() {
         return {
           type: 'snapshot',
@@ -550,9 +765,51 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       admissionByBot.delete(botId);
     } else {
       admissionByBot.set(botId, { status: normalized, hostQueued });
+      // 新 Host admission 受理/排队：旧 stopped 不得残留到下次完结。
+      clearStoppedOnWork(activityCtx, botId);
     }
     for (const w of watches) {
       w._applyAdmission(botId);
+    }
+    for (const w of watches) {
+      w._applyActivity(botId);
+    }
+  }
+
+  /**
+   * Work lane 推送的存活 pending 元数据快照（summary={pending:[…]}，null 清空）。
+   * 只进 primary watch 的统一 activity；缓存最新并去重，不唤醒模型、不轮询。
+   */
+  function setWorkActivity(botId, summary) {
+    assertNonBlank(botId, 'botId');
+    const normalized = copyWorkSummary(summary);
+    const previous = workByBot.get(botId) ?? null;
+    if (JSON.stringify(previous) === JSON.stringify(normalized)) return;
+    if (normalized === null || normalized.pending.length === 0) {
+      workByBot.delete(botId);
+    } else {
+      workByBot.set(botId, normalized);
+      // 新 work pending 出现：旧 stopped 不得残留到下次完结。
+      clearStoppedOnWork(activityCtx, botId);
+    }
+    for (const w of watches) {
+      w._applyActivity(botId);
+    }
+  }
+
+  /**
+   * Host 侧停止/让位控制阶段：'interrupting'|'stopping'|'stopped'，null 清除。
+   * stopping/interrupting 由调用者显式解除；stopped 在新工作出现时自动被覆盖。
+   */
+  function setBotControl(botId, phase) {
+    assertNonBlank(botId, 'botId');
+    if (phase !== null && !CONTROL_PHASES.has(phase)) {
+      throw errWithCode('control phase must be interrupting, stopping, stopped or null', 'INVALID_ARGUMENT');
+    }
+    if (phase === null) controlByBot.delete(botId);
+    else controlByBot.set(botId, phase);
+    for (const w of watches) {
+      w._applyActivity(botId);
     }
   }
 
@@ -569,7 +826,9 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     await Promise.allSettled([...inflight]);
     pendingByBot.clear();
     pendingByWork.clear();
+    controlByBot.clear();
+    workByBot.clear();
   }
 
-  return { watch, watchWork, bind, bindWork, setTurnAdmission, close };
+  return { watch, watchWork, bind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, close };
 }

@@ -1,115 +1,12 @@
-/* scope-ui lane 增量样式：统一主会话视图的消息流增强。
- * 全部限定在 .scope-shell 内，沿用 Scopes.css 的 .desktop-shell 前缀约定
- * （无 .desktop-shell 祖先的移动容器同样不命中，保持移动单列语义）。 */
-
-/* 消息列表自身滚动：prepend/吸底/新消息指示的滚动容器。 */
-.desktop-shell .scope-shell .scope-message-list {
-  max-height: 60vh;
-  overflow-y: auto;
-  position: relative;
-}
-
-/* 顶部按 Bot 筛选胶囊（与 member-chip 同一视觉语言，尺寸更小）。 */
-.desktop-shell .scope-shell .scope-msg-filter {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-left: auto;
-  margin-right: 6px;
-}
-.desktop-shell .scope-shell .scope-filter-chip {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid var(--line);
-  background: var(--surface);
-  border-radius: 999px;
-  min-height: 22px;
-  padding: 1px 10px;
-  font-size: 11px;
-  color: var(--muted);
-}
-.desktop-shell .scope-shell .scope-filter-chip.active {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  font-weight: 600;
-}
-.desktop-shell .scope-shell .member-chip.member-chip-filtered {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent) inset;
-}
-.desktop-shell .scope-shell .member-chip-filterclear {
-  border-style: dashed;
-  color: var(--muted);
-}
-
-/* 方向徽标与中文分类标签。 */
-.desktop-shell .scope-shell .scope-dir-badge {
-  font-size: 10.5px;
-  padding: 0 7px;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-}
-.desktop-shell .scope-shell .scope-dir-badge.scope-dir-in {
-  background: var(--surface);
-  color: var(--muted);
-  border: 1px solid var(--line);
-}
-
-/* 引用块：作者 + 截断正文。 */
-.desktop-shell .scope-shell .scope-reply-quote-text {
-  display: block;
-  margin-top: 2px;
-  overflow-wrap: anywhere;
-}
-
-/* 本机发出的消息右向气泡。 */
-.desktop-shell .scope-shell .scope-message-out .scope-message-bubble {
-  background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
-  border-radius: 14px 4px 14px 14px;
-  align-self: flex-end;
-}
-.desktop-shell .scope-shell .scope-message-out .scope-message-body {
-  align-items: flex-end;
-}
-
-/* 可读详情折叠：默认只剩一行摘要。 */
-.desktop-shell .scope-shell .scope-message-detail {
-  font-size: 11px;
-  color: var(--muted);
-}
-.desktop-shell .scope-shell .scope-message-detail > summary {
-  cursor: pointer;
-  list-style: none;
-  overflow-wrap: anywhere;
-}
-.desktop-shell .scope-shell .scope-message-detail > summary::-webkit-details-marker {
-  display: none;
-}
-.desktop-shell .scope-shell .scope-message-detail > summary::before {
-  content: '▸ ';
-}
-.desktop-shell .scope-shell .scope-message-detail[open] > summary::before {
-  content: '▾ ';
-}
-.desktop-shell .scope-shell .scope-message-detail-body {
-  margin: 4px 0 2px;
-  padding: 6px 8px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-  overflow-wrap: anywhere;
-  font-variant-numeric: tabular-nums;
-}
+/* scope-ui lane 增量样式：Scopes 受控导航与新聊天布局。
+ * 保留导航/容器规则；消息呈现由共享 conversation-chat-* 组件样式提供。 */
 
 /* 新消息指示：钉在滚动容器底部。 */
-.desktop-shell .scope-shell .scope-new-banner {
+.scope-shell .scope-new-banner {
   position: sticky;
   bottom: 8px;
-  display: block;
-  margin: 6px auto 0;
+  align-self: center;
+  margin-top: auto;
   padding: 6px 16px;
   border-radius: 999px;
   border: 1px solid var(--line);
@@ -121,27 +18,53 @@
   z-index: 3;
 }
 
-/* 成员观察面板：旧 work 记录提示 + 跳统一主 Bot 会话入口（沿用 .desktop-shell 前缀约定）。 */
-.desktop-shell .scope-shell .member-work-legacy-note {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 4px 0 6px;
+/* ————— 受控导航（detailOnly/DM 列表返回/单列退化） ————— */
+
+/* detailOnly：不渲染另一份会话列表（群聊从主列表直达内容）；
+ * chat-pane 始终显示（加载/错误/详情都在其中，不受单列规则影响）。 */
+.scope-shell.scope-shell-detail-only .scope-list {
+  display: none !important;
 }
-.desktop-shell .scope-shell .member-open-bot {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border: 1px solid var(--line);
-  background: var(--surface);
-  border-radius: 999px;
-  padding: 1px 10px;
-  font-size: 11px;
-  color: var(--accent-strong);
-  cursor: pointer;
+.scope-shell.scope-shell-detail-only .chat-pane {
+  display: flex !important;
+  overflow: hidden;
 }
-.desktop-shell .scope-shell .member-open-bot:hover {
-  border-color: var(--accent);
-  background: var(--accent-soft);
+
+/* 移动容器单列：未选会话时列表占满宽度、隐藏空 chat-pane；
+ * 打开详情时隐藏列表（DOM 保留，滚动位置不丢）、内容列占满。 */
+.grok-scopes-mobile-container .scope-shell:not(.scope-shell-detail-open) .chat-pane {
+  display: none;
+}
+.grok-scopes-mobile-container .scope-shell:not(.scope-shell-detail-open) .scope-list {
+  flex: 1;
+  width: auto;
+  border-right: 0;
+}
+.grok-scopes-mobile-container .scope-shell.scope-shell-detail-open .scope-list {
+  display: none;
+}
+.grok-scopes-mobile-container .scope-shell.scope-shell-detail-open .chat-pane {
+  flex: 1;
+}
+/* 移动容器自身是页面滚动流内的一员：scope 视图需要占满高度成为纵向 flex，
+ * 消息区才能独立滚动（否则整个列表把页面撑长）。 */
+.grok-scopes-mobile-container .scope-shell,
+.grok-scopes-mobile-container .scope-shell .scope-detail {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 桌面窄窗口同样退化为单列（未选只显示满宽列表，选中隐藏列表）。 */
+@media (max-width: 760px) {
+  .desktop-shell .scope-shell:not(.scope-shell-detail-open) .chat-pane {
+    display: none;
+  }
+  .desktop-shell .scope-shell:not(.scope-shell-detail-open) .scope-list {
+    flex: 1;
+    width: auto;
+    border-right: 0;
+  }
+  .desktop-shell .scope-shell.scope-shell-detail-open .scope-list {
+    display: none;
+  }
 }

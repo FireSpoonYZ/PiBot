@@ -8,12 +8,18 @@ import { defineDocFamily } from '@earendil-works/pi-durable';
 // 原生提交时恒生成 host.user-message 入口归属与冻结轮（缺席 origin 的遗留条目按 Host 记）。
 // TurnPin：每个已接纳轮一条 admissionId -> pin 记录，保存原准予的 setId 与安全快照引用，
 // 供冷启动 restoreTurns 复用；绝不保存正文、凭据值或快照全文的敏感字段。
+// TurnQueue.stopEpoch：停止此 Bot 最近一次的持久审计代次（仅记录，不作本地对账——
+// 对账用进程内计数）。stopPending：在飞停止协调的崩溃恢复标记，beginStop 落盘置位、
+// 取消成功结算时清除；冷启动在任何 harness.resume 前对置位 Bot 补完 user_stop 与
+// 主会话取消标记（quiesce=false），绝不自动恢复漏取消工作。
+// 队列条目 stopEpoch：受理时捕获的本进程停止代次；停止只作废代次 ≤ 停止值的条目，
+// 受理晚于停止的在飞 submit 在持久化同事务内以旧代次落 cancelled 回执，绝不复活旧工作。
 export const TurnQueue = defineDocFamily({
   kind: 'host.turn-queue',
   version: 1,
   scope: 'session',
   family: true,
-  initial: () => ({ items: [] }),
+  initial: () => ({ items: [], stopEpoch: 0, stopPending: false }),
   checkpointWhen: () => false,
 });
 

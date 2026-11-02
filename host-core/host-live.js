@@ -21,6 +21,7 @@ const STATE_KEYS = [
   'busy',
   'queuedCount',
   'turnAdmission',
+  'activity',
 ];
 
 const END_REASONS = new Set([

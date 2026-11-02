@@ -42,6 +42,7 @@ const STATE_KEYS = new Set([
   'busy',
   'queuedCount',
   'turnAdmission',
+  'activity',
 ]);
 const HISTORY_ITEM_KEYS = new Set(['id', 'kind', 'messages', 'attribution']);
 // Live attribution is already a safe projection (Host-side whitelist + bounds in
@@ -183,6 +184,78 @@ const TURN_ADMISSION_KEYS = new Set(['requestId', 'phase', 'error']);
 const TURN_ADMISSION_PHASES = new Set(['queued', 'checking', 'synchronizing', 'failed']);
 const TURN_ADMISSION_ERROR_KEYS = new Set(['code', 'message']);
 const MAX_TURN_ADMISSION_CHARS = 256;
+
+// Unified Bot activity is metadata-only: phase/source enums, bounded nullable
+// IDs, an ISO timestamp and a bounded safe failure diagnostic; it never carries
+// text, credentials, tool args or raw provider error bodies.
+const ACTIVITY_KEYS = new Set(['phase', 'source', 'scopeId', 'requestId', 'startedAt', 'error']);
+const ACTIVITY_ERROR_KEYS = new Set(['code', 'message']);
+const MAX_ACTIVITY_ERROR_CHARS = 256;
+const ACTIVITY_PHASES = new Set([
+  'idle',
+  'queued',
+  'preparing',
+  'running',
+  'compacting',
+  'interrupting',
+  'stopping',
+  'stopped',
+  'failed',
+]);
+const ACTIVITY_SOURCES = new Set(['primary', 'room', 'dm', 'background']);
+const ACTIVITY_ID_KEYS = new Set(['scopeId', 'requestId']);
+const ISO_MS_Z_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+function normalizeBotActivity(value) {
+  if (!isPlainObject(value)) throw invalid('state.activity must be a plain object');
+  rejectUnknownFields(value, ACTIVITY_KEYS, 'state.activity');
+  if (!ACTIVITY_PHASES.has(value.phase)) {
+    throw invalid('activity phase must be a known Bot activity phase');
+  }
+  const activity = { phase: value.phase };
+  if (value.source === null || ACTIVITY_SOURCES.has(value.source)) {
+    activity.source = value.source;
+  } else {
+    throw invalid("activity source must be 'primary', 'room', 'dm', 'background' or null");
+  }
+  for (const key of ACTIVITY_ID_KEYS) {
+    if (value[key] === undefined) {
+      throw invalid('activity ' + key + ' must be present (id string or null)');
+    }
+    if (value[key] !== null) assertId(value[key], 'activity ' + key);
+    activity[key] = value[key];
+  }
+  if (value.startedAt === undefined) {
+    throw invalid('activity startedAt must be present (ISO timestamp or null)');
+  }
+  if (
+    value.startedAt !== null &&
+    (typeof value.startedAt !== 'string' ||
+      !ISO_MS_Z_RE.test(value.startedAt) ||
+      Number.isNaN(Date.parse(value.startedAt)) ||
+      new Date(value.startedAt).toISOString() !== value.startedAt)
+  ) {
+    throw invalid('activity startedAt must be null or an ISO 8601 millisecond UTC string');
+  }
+  activity.startedAt = value.startedAt;
+  // failure-family 诊断只随 failed 相存在：其余相的 error 一律拒绝，
+  // 绝不把过期/误投诊断透传给客户端。
+  if (value.error !== undefined) {
+    if (value.phase !== 'failed') {
+      throw invalid('activity error is allowed only on the failed phase');
+    }
+    if (!isPlainObject(value.error)) throw invalid('activity error must be a plain object');
+    rejectUnknownFields(value.error, ACTIVITY_ERROR_KEYS, 'activity error');
+    assertText(value.error.code, 'activity error code');
+    assertText(value.error.message, 'activity error message');
+    if (value.error.code.length > MAX_ACTIVITY_ERROR_CHARS ||
+        value.error.message.length > MAX_ACTIVITY_ERROR_CHARS) {
+      throw invalid('activity error exceeds the bound');
+    }
+    activity.error = { code: value.error.code, message: value.error.message };
+  }
+  return activity;
+}
 
 function normalizeTurnAdmissionStatus(value) {
   if (!isPlainObject(value)) throw invalid('state.turnAdmission must be a plain object or null');
@@ -338,6 +411,11 @@ function normalizeLiveState(state) {
   // Optional on the wire: older Hosts omit it; null means nothing queued/waiting/failed.
   if (state.turnAdmission !== undefined && state.turnAdmission !== null) {
     state.turnAdmission = normalizeTurnAdmissionStatus(state.turnAdmission);
+  }
+  // Optional on the wire: older Hosts omit it; unlike turnAdmission there is no
+  // null sentinel — an explicit null is malformed and rejected.
+  if (state.activity !== undefined) {
+    state.activity = normalizeBotActivity(state.activity);
   }
   return state;
 }

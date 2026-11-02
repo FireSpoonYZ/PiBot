@@ -9,6 +9,11 @@
 // 统一会话：host.scope-message 只渲染对端原文（不渲染 Host 包装 JSON），
 // host.work-trigger 是内部触发标记不是人类气泡，一律隐藏；来源经
 // deriveEntryAttribution（byTaskId 精确归属，缺失时回退 data.attribution）投影。
+//
+// activity 是 UI 的统一工作状态：runtime-live.js 按优先级合并 control
+// （stopping/interrupting/stopped）→ 真实运行（pi.live.run + 冻结轮）→
+// 排队/准备/失败（work pending + Host admission）→ idle/stopped 后写入 state。
+// projectLiveState 只产出真实运行那一层，其余由 runtime-live 注入。
 
 import { projectToolPresentation, toolPresentationBytes } from './tool-presentation.js';
 import { MAX_LIVE_JSON_BYTES } from './remote-live-protocol.js';
@@ -19,6 +24,8 @@ const MAX_MESSAGES_PER_ENTRY = 8; // 每条目最多消息数（保留最新）
 const MAX_MESSAGE_UNITS = 4096; // 单条消息文本上限（UTF-16 单元）
 const MAX_TOTAL_TEXT_UNITS = 65536; // 历史窗口文本总上限，超限丢弃最旧整条
 const MAX_GENERATION_UNITS = 32768; // 当前生成文本上限
+// activity 字符串字段上限：与 remote-live-protocol 的 wire 校验一致。
+const MAX_ACTIVITY_TEXT_UNITS = 256;
 const MAX_TOOLS = 32; // 工具槽总数上限（tools + nestedTools）
 const MAX_TOOL_OUTPUT_UNITS = 4096; // 工具运行输出保留尾部上限
 // Attribution 只由 Host 端冻结 turn/信封生成，字段小而固定；仍留字符上限防伪造放大帧。
@@ -278,6 +285,97 @@ function projectGeneration(message, sessionState, runTaskId) {
   return generation;
 }
 
+/** idle activity：无真实运行/排队/控制时默认状态。 */
+function idleActivity() {
+  return { phase: 'idle', source: null, scopeId: null, requestId: null, startedAt: null };
+}
+
+/**
+ * 真实终态失败 activity（contract B）：runFailure 的真实终态失败经
+ * GenerationFailureState 族文档取 Host 已消毒的 {code,message}；缺失时
+ * 退化为固定安全 reason 文案，绝不读 runFailure.detail（可能含原始 provider
+ * 错误）。reason==='aborted' 且存在 Host failure receipt（failureDoc.failure）
+ * 时是 Host 中止的真实失败（如 final guard abortTask），仍投影 failed；
+ * aborted 且无 receipt 才是主动停止，返回 null 走 stopped/idle 路径——
+ * 绝不把真实 Host 取消误当用户停止，也不把裸 abort 误报失败。
+ */
+function failureActivity(runFailure, failureDoc) {
+  if (runFailure?.reason === 'aborted' && failureDoc?.failure == null) return null;
+  const diagnosed = failureDoc?.failure;
+  const error = (diagnosed !== null && typeof diagnosed === 'object' &&
+    typeof diagnosed.code === 'string' && typeof diagnosed.message === 'string')
+    ? { code: boundActivityString(diagnosed.code), message: boundActivityString(diagnosed.message) }
+    : { code: 'GENERATION_FAILED', message: 'generation failed: ' + safeFailureReason(runFailure?.reason) };
+  return { phase: 'failed', source: null, scopeId: null, requestId: null, startedAt: null, error };
+}
+
+// 与 runtime-live.js 的 boundActivityText 同上限；本文件内独立的小写 helper 保持投影自包含。
+function boundActivityString(value) {
+  return typeof value === 'string' && value.length > MAX_ACTIVITY_TEXT_UNITS ? value.slice(0, MAX_ACTIVITY_TEXT_UNITS) : value;
+}
+
+/** 安全 reason 码：只允许小写 SDK reason 词表，其他一律 generic。 */
+function safeFailureReason(reason) {
+  return typeof reason === 'string' && /^[a-z_]{1,64}$/.test(reason) ? reason : 'unanswered';
+}
+
+/**
+ * 真实运行 activity：从 pi.live.run.taskId 经 BotSessionState.turnByTask 解析到
+ * 冻结轮，取 kind/scopeId/requestId/frozenAt 为 source/scopeId/requestId/startedAt。
+ * 解析不到冻结轮（归属缺失）时 source=null，绝不从最新历史猜来源。
+ * 真实生成并行的非阻塞后台压缩保持 running；阻塞压缩（本次生成等它）或空闲/手动
+ * 压缩（无真实运行）才投影 compacting——activity 仍计入忙碌，与客户端约定一致。
+ */
+function projectRunActivity(runTaskId, sessionState, live) {
+  if (runTaskId === null || runTaskId === undefined) return null;
+  const hasBlockingCompaction = Array.isArray(live?.compactions)
+    && live.compactions.some((c) => c?.blocking === true);
+  const phase = hasBlockingCompaction ? 'compacting' : 'running';
+  const requestId = sessionState?.turnByTask?.[String(runTaskId)];
+  const turn = requestId !== undefined
+    ? (sessionState?.completedTurns?.[requestId] ??
+       (sessionState?.activeTurn?.requestId === requestId ? sessionState.activeTurn : null))
+    : null;
+  if (!turn) {
+    return { phase, source: null, scopeId: null, requestId: null, startedAt: null };
+  }
+  // 区分真实用户主聊天与 Host 计划任务/后台续轮：仅 primary 轮 + user 发送者
+  // + 无 workNativeId 才算 source primary；其余（含 host/bot 触发、协作续轮）
+  // 一律 background，绝不把后台工作显示成用户主聊天。
+  const source = turn.kind === 'room' ? 'room'
+    : turn.kind === 'dm' ? 'dm'
+    : turn.kind === 'primary' && turn.sender?.kind === 'user' && turn.workNativeId === undefined
+      ? 'primary'
+      : 'background';
+  return {
+    phase,
+    source,
+    scopeId: typeof turn.scopeId === 'string' ? turn.scopeId.slice(0, MAX_ACTIVITY_TEXT_UNITS) : null,
+    requestId: typeof turn.requestId === 'string' ? turn.requestId.slice(0, MAX_ACTIVITY_TEXT_UNITS) : null,
+    startedAt: typeof turn.frozenAt === 'string' ? turn.frozenAt : null,
+  };
+}
+
+/**
+ * 空闲/手动压缩轮的起点：优先 SDK 持久化的压缩任务 startedAt（毫秒）转规范
+ * ISO；任务记录不可读/旧版本缺失时取 null，由客户端按忙碌转场落锚——
+ * 绝不回退到历史用户消息时间。
+ */
+function compactionStartedAt(compactions, starts) {
+  if (starts !== null && typeof starts === 'object') {
+    for (const c of compactions) {
+      const ms = c?.taskId !== undefined ? starts[String(c.taskId)] : undefined;
+      if (Number.isSafeInteger(ms) && ms > 0) {
+        const iso = new Date(ms).toISOString();
+        return ISO_MS_Z.test(iso) ? iso : null;
+      }
+    }
+  }
+  return null;
+}
+
+const ISO_MS_Z = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
 /** 初始空状态。 */
 export function emptyLiveState() {
   return {
@@ -289,6 +387,7 @@ export function emptyLiveState() {
     toolsTruncated: false,
     busy: false,
     queuedCount: 0,
+    activity: idleActivity(),
   };
 }
 
@@ -297,7 +396,7 @@ export function emptyLiveState() {
  * 总文本超 65536 单元丢弃最旧整条并立即 break，保证窗口是连续最新段。工具仅映射
  * tools/nestedTools 前 32 个。busy 由 pi.live.run 存在决定，queuedCount 取 pi.inbox.items 长度。
  */
-export function projectLiveState(view, sessionState = null) {
+export function projectLiveState(view, sessionState = null, extras = null) {
   const live = view.docs?.['pi.live'] ?? null;
   const inbox = view.docs?.['pi.inbox'] ?? null;
 
@@ -348,6 +447,18 @@ export function projectLiveState(view, sessionState = null) {
     ? projectGeneration(live.generation.message, sessionState, live?.run?.taskId ?? null)
     : null;
 
+  // 优先级：真实运行 > 正在执行的压缩 > 旧终态失败 > idle。
+  // 失败后用户手动 compact 等当前活动先透出，旧 runFailure 诊断让位——
+  // runFailure 存活期内新工作已开始，残留失败不得盖住进行中的压缩。
+  const activity = projectRunActivity(live?.run?.taskId ?? null, sessionState, live)
+    ?? (Array.isArray(live?.compactions) && live.compactions.length > 0
+      ? { phase: 'compacting', source: null, scopeId: null, requestId: null,
+          startedAt: compactionStartedAt(live.compactions, extras?.compactionStarts) }
+      : (live?.runFailure != null
+        ? failureActivity(live.runFailure, extras?.failureDoc)
+        : null)
+      ?? idleActivity());
+
   const state = {
     history,
     historyTruncated,
@@ -357,7 +468,17 @@ export function projectLiveState(view, sessionState = null) {
     toolsTruncated: liveTools.length + nestedTools.length > MAX_TOOLS,
     busy: Boolean(live?.run),
     queuedCount: Array.isArray(inbox?.items) ? inbox.items.length : 0,
+    activity,
   };
+  // 内部提示写入 extras（out-param）：activity 是否源自真实 live.run（阻塞压缩
+  // 的 compacting 仍是真实运行，区别于无 run 的空闲/手动压缩）、是否来自真实
+  // 终态失败 runFailure——供 runtime-live 裁决优先级，不进 state/wire。
+  if (extras !== null && typeof extras === 'object') {
+    extras.activityHasRun = live?.run != null;
+    // aborted 仅在有 Host failure receipt 时才算真实失败（已在上文投影）。
+    extras.activityIsFailure = live?.run == null && live?.runFailure != null &&
+      (live.runFailure.reason !== 'aborted' || extras?.failureDoc?.failure != null);
+  }
   fitPresentationBudget(state);
   return state;
 }
@@ -466,6 +587,7 @@ const STATE_KEYS = [
   'busy',
   'queuedCount',
   'turnAdmission',
+  'activity',
 ];
 
 /**

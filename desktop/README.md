@@ -20,10 +20,9 @@
 
 连接是**显式**动作：客户端冷启动不自动连接，重开需再次点击「连接」或「重新连接」。连接成功后按 `local`（单 Host）或 `relay`（设备目录）显示 Bot 列表；目录项显示在线/离线与最后观测时间，transport 连接成功不等于目标当前在线，不用缓存冒充在线。
 
-四个主标签页：
+三个主标签页：
 
-- **聊天**：Bot 创建（冻结 requestId，回执丢失时按 requestId 查询，不盲建第二个）、主私聊历史分页、`LIVE` 被动预览与**原始历史分开**读取、显式发送与显式停止。发送流程先冻结完整输入、所属目标与业务 ID，再入队；本地草稿按 CAS 清空成功后才发送，清空失败不发送。发送后回执丢失保留冻结记录与原 ID 供只读对账（此时编辑框可能已清空），不自动重发。每条新消息在 Host 侧经过**每轮准入**（见下文「每轮插件同步」）：返回 queued 回执表示 Host 已持久保存并排队，不等于模型已受理执行。
-- **群聊与 Bot私聊**：房间发布与回复（`replyTo`）、成员 `expectedRevision` CAS 变更；DM 无用户输入框、无成员更换；作者按协议用户角色显示，不把 `kind=user` 当成已认证人类。工作范围有三种独立来源：`LIVE` 观察流（推送，不推理）、原始历史分页，以及仅当该成员被选中且在线时对 `getWorkActivity` 的每 1000ms 只读刷新（最多一个在途，显式 `stopWork` / `resumeWork` 期间不发新读，旧读不回退显式结果）；停止状态只有显式恢复才解除。
+- **聊天**：Bot 与群聊在同一名录混排（本机主 Bot 置顶区保留，其余按各自真实最近主聊/群聊消息时间排序）；Bot 创建（冻结 requestId，回执丢失时按 requestId 查询，不盲建第二个）、主私聊历史分页、`LIVE` 被动预览与**原始历史分开**读取、显式发送与显式停止。发送流程先冻结完整输入、所属目标与业务 ID，再入队；本地草稿按 CAS 清空成功后才发送，清空失败不发送。发送后回执丢失保留冻结记录与原 ID 供只读对账（此时编辑框可能已清空），不自动重发。每条新消息在 Host 侧经过**每轮准入**（见下文「每轮插件同步」）：返回 queued 回执表示 Host 已持久保存并排队，不等于模型已受理执行。Bot 行右键/键盘菜单与聊天标题「私聊」按钮打开该 Bot 参与的 bot-bot DM 列表（只读、默认不选对话，逐级返回保留来源与滚动）；群聊行点击直接进入消息内容：用户可发送消息（房间发布与回复 `replyTo`）并经成员面板添加/移除 Bot（`expectedRevision` CAS 变更）。写端经 RoomApiResolver 路由 —— 发送打成员所在在线 Host，成员变更只打 scope.authorityDeviceId，写端尚未连上时显示待连接而非只读；DM 无用户输入框、无成员更换；作者按协议用户角色显示，不把 `kind=user` 当成已认证人类。群聊/DM 内容页是用户聊天界面（单会话头、独立消息滚动、底部输入或只读提示）；作者、成员、标题与 aria 一律显示 Bot 名字（Scopes `knownBots` 全目录，含远端与归档），无名回退「已移除的 Bot」/「未命名设备」，不渲染 UUID、来源设备 ID 或协议调试字段，消息链接经 `desktop_open_center`（仅 HTTPS）打开。工作范围有三种独立来源：`LIVE` 观察流（推送，不推理）、原始历史分页，以及仅当该成员被选中且在线时对 `getWorkActivity` 的每 1000ms 只读刷新（最多一个在途，显式 `stopWork` / `resumeWork` 期间不发新读，旧读不回退显式结果）；停止状态只有显式恢复才解除。
 - **待发送**：本地 pending 队列（分页/筛选）、显式「发送」、「对账」（只读）、仅限 pending 的本机「取消」，以及冻结的创建/成员变更意图展示。Bot 创建只支持只读 `findByRequest` 对账；scope 创建/更新没有 request lookup，界面不虚构对账或自动重放。
 - **Host设置**：仅 `local` 连接可见（Relay 下明确提示到目标 Host 本机配置）；读取 `settings_get` / `service_status`，JSON 编辑后按 `expectedRevision` CAS 保存，显示 `restartRequired`（设置只在下一次重开 Host 生效）。
 
@@ -130,7 +129,16 @@ node host-core/host-service-cli.js serve \
 - 排队/等待状态经 LIVE 的 `turnAdmission` 字段以相位（queued/checking/synchronizing/failed）与错误码呈现，不含消息正文或凭据；无排队项时为 null。
 - 客户端待发送（pending）账本语义不变：它记录的是「客户端→Host」的已派发状态，Host 侧准入排队是其后一阶段；「对账」仍为只读查询，不触发模型。
 
+## 统一活动、抢占与手动停止
+
+> **状态**：已交付并经父助手**限定范围**验收（三端客户端连同一隔离 Linux Host 实测，范围与未覆盖项见 [`docs/bot-activity-and-interruption.md`](../docs/bot-activity-and-interruption.md)「验收」；Windows/Linux 桌面分别以 debug/release + WebKitWebDriver/Xvfb 实测）。
+
+- LIVE 的 `activity` 字段是 Bot 工作状态的统一依据（phase：idle/queued/preparing/running/interrupting/stopping/stopped/failed），UI 经共享 helper 解析；旧 Host 缺省该字段时按 busy/queuedCount/turnAdmission 回退，不误判 idle。
+- **停止此 Bot**：停止按钮独立于发送按钮，草稿/附件存在、排队/准备中、failed 受理均可停；stopping 有独立 disabled 防重，不被发送/上传/草稿锁禁用。停止是 Bot 级取消当前执行与已受理积压，保留历史与取消回执；scope 级「暂停此处工作 / 恢复此处工作」（stopWork/resumeWork）语义不变，不被即时停止改变。
+- 被停止的 Bot 明确显示「已停止」，不显示为已完成；failed 相位不一直转圈。群/DM 页面对选中 Bot 增加 primary 只读订阅，仅显示其统一活动与来源标注（如正在主聊天/其他对话工作），不混入 scope 历史；页面切换只关闭观察，不调用 abort。
+
 ## 错误恢复
+
 
 客户端刻意不做隐式重试，所有不确定结果都要用户显式处理：
 

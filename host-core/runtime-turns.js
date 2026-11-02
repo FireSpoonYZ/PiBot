@@ -43,6 +43,7 @@ function boundedTurnError(err) {
  *  setBotAppliedRevision(botId, revision), setBotFingerprint(botId, fingerprint),
  *  live（protocol lane 补 setTurnAdmission；缺席时静默跳过）, admitBot,
  *  getEpoch()（断线 epoch，网络 await 期间变更即放弃提交）,
+ *  preemptWork(botId)（用户轮 head 实际准入前抢占同 Bot 非用户来源 work，由 work lane 提供）,
  *  trackSubmission(submissionId, info), recordCompletedSubmission(botId, formatted),
  *  initializeBot(botId), attachments({upload,load,removeBot}),
  *  sessions（可选；统一 Bot 主会话的收件导入运行时，缺席时跳过统一导入）.
@@ -53,6 +54,7 @@ export function createTurnAdmission(deps) {
     getBotModels, setBotModels, profileFor, botExecutionFingerprint, applyBotCwd,
     setBotAppliedRevision, setBotFingerprint, live, admitBot, getEpoch,
     trackSubmission, recordCompletedSubmission, initializeBot, attachments, sessions,
+    preemptWork,
   } = deps;
 
   // 可信的发送方来源：只接受 Runtime 传入的结构化标记，deviceId 恒为本机，绝不采信正文。
@@ -116,7 +118,83 @@ export function createTurnAdmission(deps) {
   const retryAttempts = new Map();  // botId -> n（失败退避计数，成功清空）
   const appliedSetIds = new Map();  // botId -> 最近一次已确认/已恢复的完整 setId
   const workBackoff = new Map();    // nativeId -> ms epoch，工作决策准入退避
+  // 停止 gate：beginStop 在首个 await 前同步推进本进程代次并 arm gate；
+  // armed 期间所有原生忙检查/canRunWork 恒忙恒否，取消确认前另一轮不争用 Bot 资源。
+  // 代次跨进程单调：restoreTurns 冷启动先把各 Bot 持久代次预载入本地 map，
+  // beginStop 同步 ++ 即恒大于任何旧进程代次——旧进程遗留队列条目的
+  // stopEpoch 恒 ≤ 当前计数，cancelQueued 按代次覆盖绝不漏取消；
+  // 并发首批 submit 捕获同值（0 基线）不互相误作废。doc.stopPending 是崩溃恢复标记。
+  const stopArmed = new Set();      // botId：在飞停止协调（abort 未结算）
+  const stopEpochs = new Map();     // botId -> 停止代次（持久单调，预载对齐）
   let closing = false;
+
+  /** 该 Bot 停止 gate 是否激活：beginStop 已 arm，abort 尚未成功结算。 */
+  function stopped(botId) {
+    return stopArmed.has(botId);
+  }
+
+  /** 当前停止代次（恒定义整数）；runtime.submit 在任何 await/排队前捕获随受理持久化。 */
+  function stopEpoch(botId) {
+    return stopEpochs.get(botId) ?? 0;
+  }
+
+  /** 新输入已被接受且未被停止作废：仅清掉已结算的 stopped 覆盖。
+      stopping/interrupting 由停止协调与抢占窗口持有：在飞期间绝不覆盖。 */
+  function clearStopped(botId) {
+    if (stopped(botId) || pumpInFlight.has(botId)) return;
+    try { live?.setBotControl?.(botId, null); } catch { /* live lane 尚未实现时静默跳过 */ }
+  }
+
+  /** 停止 gate 第一步：armed 标记与本地代次推进必须在首个 await 前落地——
+      此后任何捕获旧代次的在飞 submit 均被同事务对账作废，在飞准入也恒见忙。
+      本地计数经 restoreTurns 预载已对齐持久值，同步 ++ 即跨进程单调；
+      持久提交只回写当前代次与 stopPending 崩溃恢复标记。落盘失败不解除 gate。
+      返回取消边界（推进前代次）：≤ 该值的受理属于停止前积压，由 cancelQueued 作废。 */
+  function beginStop(bot) {
+    const boundary = stopEpochs.get(bot.botId) ?? 0;
+    stopEpochs.set(bot.botId, boundary + 1);
+    stopArmed.add(bot.botId);
+    return harness().commit(async (tx) => {
+      const doc = await queueDoc(tx, bot.primaryConversationId);
+      doc.stopEpoch = stopEpochs.get(bot.botId);
+      doc.stopPending = true;
+    }, context).then(() => boundary);
+  }
+
+  /** 停止协调结算：仅取消成功才解除 gate、清持久 stopPending 并置 live stopped；
+      失败保留 gate 与调用方已置的可见 stopping，绝不伪装成功/偷偷放行旧工作。
+      stopPending 清理提交必须成功才释放 gate——提交失败时保持 armed 并抛错，
+      持久标记留给崩溃恢复路径重试。成功后 nudge：停止期间受理的新代次输入即可泵。 */
+  async function settleStop(botId, err = null) {
+    if (err !== null) return;
+    const bot = host.getBot(botId);
+    if (bot) {
+      await harness().commit(async (tx) => {
+        const doc = await queueDoc(tx, bot.primaryConversationId);
+        doc.stopPending = false;
+      }, context);
+    }
+    stopArmed.delete(botId);
+    try { live?.setBotControl?.(botId, 'stopped'); } catch { /* live 缺席 */ }
+    nudge(botId);
+  }
+
+  /** 冷启动恢复：进程崩溃丢失内存 gate，持久 stopPending 仍标记未完成停止。
+      返回带未完成停止标记的 Bot 并 arm 本进程 gate——恢复确认前任何在飞准入/
+      工作授予都恒见忙，绝不放行。调用方在任何 harness.resume 前逐个完成
+      user_stop 标记与主会话取消标记（quiesce=false），成功后 settleStop 清除。
+      快照失败直接抛出：绝不跳过未知停止假装干净。 */
+  async function pendingStops() {
+    const bots = [];
+    for (const bot of host.listBots()) {
+      const doc = await harness().snapshot(TurnQueue, bot.primaryConversationId, context);
+      if (doc?.stopPending === true) {
+        stopArmed.add(bot.botId);
+        bots.push(bot);
+      }
+    }
+    return bots;
+  }
 
   function publishStatus(botId, item, queuedCount) {
     try {
@@ -156,10 +234,17 @@ export function createTurnAdmission(deps) {
     return item;
   }
 
-  /** 对外可见的准入 head：跳过 cancelled 终态受理记录（其 receipt 为 unanswered，不占准入状态）。 */
+  /** 准入 head 选取（liveHead 与 pump 共用）：跳过 cancelled 终态受理记录，
+      各类内 FIFO（enqueuedAt 序），用户来源 head 先于 host 来源——
+      直接用户输入优先于计划任务等 Host 来源轮，绝不只取列表第一个。 */
+  function headItem(items) {
+    const alive = items.filter((entry) => entry.phase !== 'cancelled');
+    return alive.find((entry) => entry.origin?.sender?.kind === 'user') ?? alive[0] ?? null;
+  }
+
+  /** 对外可见的准入 head：与泵同一选取函数（用户优先、类内 FIFO）。 */
   async function liveHead(bot) {
-    const items = await readQueue(bot.primaryConversationId);
-    return items.find((entry) => entry.phase !== 'cancelled') ?? null;
+    return headItem(await readQueue(bot.primaryConversationId));
   }
 
   /** 条目仍在队列中且未被 abort/Stop 取消（cancelled 是终态，不视为存活可提交）。 */
@@ -195,8 +280,10 @@ export function createTurnAdmission(deps) {
 
   /** 该 Bot 全部映射会话上的原生未完结任务/提交（含 work 会话）。
       withPluginOps=false 时不把插件自身贡献调用算作忙：同 set 的排队轮
-      不解除绑定，不需要等插件调用排空。 */
+      不解除绑定，不需要等插件调用排空。
+      取消确认前另一轮不得争用 Bot 资源：停止 gate 激活时恒报忙，绝不放行在飞提交。 */
   async function botNativeBusy(bot, { withPluginOps = true } = {}) {
+    if (stopped(bot.botId)) return true;
     if (withPluginOps && plugins.hasActiveExecutions(bot.botId)) return true;
     const nativeIds = await mappedNativeIds(bot);
     if (nativeIds.length === 0) return false;
@@ -209,9 +296,10 @@ export function createTurnAdmission(deps) {
   /** 驱动层新工作授予 gate：排队的用户轮优先于后台工作（queued 即为显式
       用户优先，无需检查 phase），且本 Bot 任一原生会话仍忙（含遗留 work
       会话上的旧执行）时不得再发 grant。仅存在 background pending 记录本身
-      不算忙/死锁——本函数只看原生活动与 Host 队列。 */
+      不算忙/死锁——本函数只看原生活动与 Host 队列。
+      停止 gate 激活时恒为 false：取消确认前绝不给后台工作发新 grant。 */
   async function canRunWork(botId) {
-    if (closing) return false;
+    if (closing || stopped(botId)) return false;
     const bot = host.getBot(botId);
     if (!bot) return false;
     if ((await readQueue(bot.primaryConversationId))
@@ -224,6 +312,43 @@ export function createTurnAdmission(deps) {
   async function botBusyForSet(bot, needsSwitch) {
     if (needsSwitch) return botNativeBusy(bot, { withPluginOps: true });
     return botNativeBusy(bot, { withPluginOps: false });
+  }
+
+  /** 该 Bot 是否仍有可抢占的非用户 pending work：sender.kind=user 的群用户任务不动，
+      无存活 pending 时直接跳过，不为空转 Bot 闪让位提示。 */
+  async function hasPreemptableWork(botId) {
+    const h = harness();
+    const workIndex = await h.snapshot(WorkIndex, context);
+    for (const [key, binding] of Object.entries(workIndex?.byKey ?? {})) {
+      let pair = null;
+      try { pair = JSON.parse(key); } catch { pair = null; }
+      if (!Array.isArray(pair) || pair[0] !== botId) continue;
+      const state = await h.snapshot(WorkDecisionState, binding.nativeId, context);
+      const pending = state?.pending;
+      if (!pending || pending.interruption != null || state.stopped || state.error) continue;
+      if (pending.turn?.sender?.kind === 'user') continue;
+      return true;
+    }
+    return false;
+  }
+
+  /** 用户轮 head 实际准入前的抢占边界：直接用户输入让同 Bot 非用户来源 work
+      （群/DM/迟到续轮等）先停下，Host 来源轮与 pending.turn.sender.kind=user 的
+      群用户任务不动。preemptWork 由 work lane 提供；缺席时静默跳过（旧装配）。
+      无可抢占 work 时不置 interrupting：避免对无工作 Bot 不停闪让位提示。 */
+  async function preemptForUserTurn(bot, item) {
+    if (item.origin?.sender?.kind !== 'user' || !preemptWork) return;
+    if (!(await hasPreemptableWork(bot.botId))) return;
+    try { live?.setBotControl?.(bot.botId, 'interrupting'); } catch { /* live 缺席 */ }
+    try {
+      await preemptWork(bot.botId);
+    } finally {
+      // 仅停止 gate 未激活时才解除 interrupting：并发手停的 stopping/stopped
+      // 由停止协调持有，抢占窗口绝不覆盖；取消失败如实上抛给准入失败路径。
+      if (!stopped(bot.botId)) {
+        try { live?.setBotControl?.(bot.botId, null); } catch { /* live 缺席 */ }
+      }
+    }
   }
 
   /** 从 TurnPreparation 提取该 Bot 的目标选择/能力/凭据并原子切换；失败抛错（不留半 set）。 */
@@ -291,6 +416,8 @@ export function createTurnAdmission(deps) {
     let preparation = null;
     let grant = null;
     if (item.admissionId) {
+      // 恢复准入的用户 head 同样先抢占非用户 work：崩溃前的授权不豁免用户优先。
+      await preemptForUserTurn(bot, item);
       await setPhase(bot, item.requestId, 'synchronizing');
       preparation = await centerRuntime.restoreTurn({ botId: bot.botId, admissionId: item.admissionId });
       grant = { admissionId: item.admissionId, setId: preparation.setId };
@@ -300,6 +427,9 @@ export function createTurnAdmission(deps) {
       // 恢复时也会沿用旧 set（E2E：问卷等待期排队消息提前拿到旧版 grant）。
       // 本地 appliedSetIds 不足以证明就绪（后台 applyBot 可能已换绑定）：
       // 先用「同 set 仅需会话空闲」的保守 gate 拦住一切早授予，就绪后才真正 prepare/confirm。
+      // 用户输入在持久化后、实际准入前抢占同 Bot 非用户 work；被抢占 work 不推进
+      // handled 水位，用户队列排空后由 work lane 按相同原始消息重新触发。
+      await preemptForUserTurn(bot, item);
       if (await botBusyForSet(bot, false)) {
         await setPhase(bot, item.requestId, 'queued');
         return null;
@@ -359,7 +489,8 @@ export function createTurnAdmission(deps) {
     await harness().commit(async (tx) => {
       const doc = await queueDoc(tx, bot.primaryConversationId);
       const found = doc.items.find((entry) => entry.requestId === item.requestId);
-      if (!found) throw errWithCode('queued turn was cancelled', 'NOT_CONNECTED');
+      // pin 落盘前的最后取消核对：cancelled 是终态，绝不给已取消轮持久 pin。
+      if (!found || found.phase === 'cancelled') throw errWithCode('queued turn was cancelled', 'NOT_CONNECTED');
       found.admissionId = grant.admissionId;
       found.setId = grant.setId ?? preparation.setId;
       const pins = await tx.doc(TurnPin, bot.primaryConversationId, {});
@@ -502,6 +633,11 @@ export function createTurnAdmission(deps) {
       }
       content = blocks;
     }
+    // 停止 gate 内绝不放行在飞准入到原生提交：取消确认前无新执行。
+    if (stopped(bot.botId)) {
+      await setPhase(bot, item.requestId, 'queued');
+      return null;
+    }
     // 安全轮边界：提交前把该 Bot 全部收件 scope 增量导入统一主会话，
     // 迟到回复/群消息进入本轮上下文；导入水位在 sessions 内原子提交。
     if (sessions) await sessions.sync(bot.botId);
@@ -527,19 +663,27 @@ export function createTurnAdmission(deps) {
       }
       throw err;
     }
-    // 关闭提交竞态窗口：提交在飞期间 abort/Stop 已把条目转 cancelled——立即中止刚提交的
-    // 原生工作，绝不出现「停止后新执行」。conversation.abort 幂等，abort() 随后还会再调一次。
+    // 关闭提交竞态窗口：提交在飞期间 abort/Stop 已把条目转 cancelled——按 requestId 精准
+    // 中止刚提交的原生 submission，绝不 conversation.abort 误伤可能已进入的后轮。
     if (!(await itemAlive(bot, item.requestId)) || closing) {
-      try { await conversation.abort(context, { background: true }); } catch { /* 中止失败不掩盖取消事实 */ }
+      try {
+        const h = harness();
+        const record = await h.commit((tx) => tx.submissionByRequest(conversation.id, item.requestId), context);
+        if (record && (record.status === 'queued' || record.status === 'placed')) {
+          await h.abortSubmission(record.id, context, conversation.id);
+        }
+      } catch { /* 中止失败不掩盖取消事实 */ }
       throw errWithCode('queued turn was cancelled', 'NOT_CONNECTED');
     }
     const statusRecord = await submission.status(context);
     trackSubmission(statusRecord.id, { botId: bot.botId, nativeId: conversation.id });
     // 7. 原生提交成功：条目出队并把 submissionId 回写 pin（同一 commit）。
+    // 出队与 pin 链接同事务核对 cancelled：提交在飞被取消的条目按终态处理，
+    // 绝不复活为存活受理（其原生提交已由上一段 abort 兜底）。
     await harness().commit(async (tx) => {
       const doc = await queueDoc(tx, bot.primaryConversationId);
       const index = doc.items.findIndex((entry) => entry.requestId === item.requestId);
-      if (index >= 0) doc.items.splice(index, 1);
+      if (index >= 0 && doc.items[index].phase !== 'cancelled') doc.items.splice(index, 1);
       const pins = await tx.doc(TurnPin, bot.primaryConversationId, {});
       if (pins.admissions[grant.admissionId]) {
         pins.admissions[grant.admissionId].submissionId = statusRecord.id;
@@ -559,7 +703,7 @@ export function createTurnAdmission(deps) {
     if (closing) return;
     if (bot.archivedAt !== null && bot.archivedAt !== undefined) return;
     const items = await readQueue(bot.primaryConversationId);
-    const item = items.find((entry) => entry.phase !== 'cancelled') ?? null;
+    const item = headItem(items);
     if (!item) {
       publishStatus(bot.botId, null, await queuedCount(bot));
       return;
@@ -603,6 +747,10 @@ export function createTurnAdmission(deps) {
    * 立即返回 queued 回执；实际准入/提交由泵异步完成。
    */
   async function enqueue(botId, input) {
+    // 停止代次必须在任何 await/排队前由调用方捕获（input.stopEpoch，恒定义整数）：
+    // 受理晚于停止的在飞 submit 以旧代次持久化，同事务内被作废为 cancelled 回执，
+    // 绝不复活。停止之后受理的新代次输入允许新运行。
+    const capturedStopEpoch = Number.isSafeInteger(input?.stopEpoch) ? input.stopEpoch : 0;
     const requestId = input?.requestId;
     const text = input?.text;
     if (typeof requestId !== 'string' || requestId.trim() === '') {
@@ -663,22 +811,27 @@ export function createTurnAdmission(deps) {
     const now = new Date().toISOString();
     const item = await harness().commit(async (tx) => {
       const doc = await queueDoc(tx, bot.primaryConversationId);
+      // 停止 epoch 对账与受理持久化同一事务：捕获的进程代次落后于当前计数，
+      // 该受理按作废落 cancelled 终态（保留回执可答），绝不排队待泵。
+      // 计数恒定义（0 基线）：并发首批 submit 捕获同值不互相误作废；
+      // 持久 doc.stopEpoch 仅审计/崩溃恢复，不与本地计数比较。
+      const stale = capturedStopEpoch < (stopEpochs.get(botId) ?? 0);
       const existing = doc.items.find((entry) => entry.requestId === requestId);
       if (existing) {
         if (existing.digest !== digest) {
           throw errWithCode('requestId already used with different text: ' + requestId, 'REQUEST_CONFLICT');
         }
-        // 已取消的受理允许同 requestId/同文显式重新受理：复活为新的 queued 条目，
-        // 旧的 cancelled 记录在同 commit 内被同一条目覆盖（身份/摘要/来源随之刷新）。
-        if (existing.phase === 'cancelled') {
-          existing.phase = 'queued';
+        // 同 requestId 的重复重传：已取消终态绝不复活（真正重发用新 requestId）。
+        if (existing.phase === 'cancelled') return { ...existing };
+        if (stale) {
+          // 在飞重试撞上停止：受理作废为 cancelled，不再泵旧工作。
+          existing.stopEpoch = capturedStopEpoch;
+          existing.phase = 'cancelled';
           existing.error = null;
-          existing.admissionId = null;
-          existing.setId = null;
-          existing.submissionId = null;
-          existing.origin = origin;
           existing.updatedAt = now;
-        } else if (existing.phase === 'failed') {
+          return { ...existing };
+        }
+        if (existing.phase === 'failed') {
           // 同 requestId 的显式重试重新武装自动重试：耗尽的退避计数在重试时清零，
           // 避免这次显式尝试再失败后静默失去自动恢复。
           existing.error = null;
@@ -695,13 +848,18 @@ export function createTurnAdmission(deps) {
         text,
         origin,
         ...(attachmentMeta.length > 0 ? { attachments: attachmentMeta } : {}),
-        phase: 'queued',
+        phase: stale ? 'cancelled' : 'queued',
         error: null,
         admissionId: null,
         setId: null,
         submissionId: null,
         enqueuedAt: now,
         updatedAt: now,
+        // 受理时捕获的本进程停止代次：停止只作废旧代次受理，停止开始后受理的
+        // 新代次输入不被 cancelQueued 一锅取消（等停止结算后泵）。
+        // 持久化该值供跨进程对账：后续进程的本地计数经 beginStop max(...) 推进后
+        // 恒 ≥ 此值，cancelQueued 按代次覆盖旧进程遗留受理。
+        stopEpoch: capturedStopEpoch,
       };
       doc.items.push(next);
       return { ...next };
@@ -711,7 +869,11 @@ export function createTurnAdmission(deps) {
     await initializeBot(botId);
     const count = await queuedCount(bot);
     publishStatus(botId, item, count);
-    nudge(botId);
+    // 受理未被停止作废：新的真实输入允许新运行，清掉旧 stopped 覆盖后再泵。
+    if (item.phase !== 'cancelled') {
+      clearStopped(botId);
+      nudge(botId);
+    }
     return toQueuedReceipt(item);
   }
 
@@ -723,34 +885,50 @@ export function createTurnAdmission(deps) {
   }
 
   /**
-   * abort：把该 Bot 尚未原生提交的排队条目全部转为 cancelled 终态受理（不删除唯一记录，
+   * abort：把该 Bot 尚未原生提交的排队条目转为 cancelled 终态受理（不删除唯一记录，
    * getSubmission/wait/findByRequest 之后读为 unanswered 而不是 NOT_FOUND），同时清理
-   * 已授予但未提交的空 pin——取消绝不复活旧授权。
+   * 已授予但未提交的空 pin——取消绝不复活旧授权。队列取消与空 pin 清理在同一 commit：
+   * 原子边界内绝不出现「条目已取消而授权 pin 仍活」的中间态。
+   * throughStopEpoch 限定取消范围：只作废受理代次 ≤ 该值的条目（停止前已受理的
+   * 输入与工作积压）；停止开始后受理的新代次输入保留，等停止结算后由泵处理。
+   * pin 清理按本次受影响条目引用的 admissionId 精确删除（含先前已 cancelled 条目
+   * 的残留空 pin——它们同属本轮取消覆盖的受理代次，恢复时不得复活旧授权）；
+   * 仅清 submissionId 为空的 pin，绝不触碰停止开始后新代次轮或无关轮的 pin。
    */
-  async function cancelQueued(bot) {
+  async function cancelQueued(bot, throughStopEpoch = null) {
     const now = new Date().toISOString();
     const removed = await harness().commit(async (tx) => {
       const doc = await queueDoc(tx, bot.primaryConversationId);
       let count = 0;
+      const affected = new Set();
       for (const entry of doc.items) {
+        if (throughStopEpoch !== null && (entry.stopEpoch ?? 0) > throughStopEpoch) continue;
+        if (entry.admissionId) affected.add(entry.admissionId);
         if (entry.phase === 'cancelled') continue;
         entry.phase = 'cancelled';
         entry.error = null;
         entry.updatedAt = now;
         count += 1;
       }
+      if (affected.size > 0) {
+        // 空 submissionId 的 pin 来自已授予未提交的轮：cancel 后没有活动轮可保护，
+        // 保留会让 hasActivePin 永远为真并把 Bot 钉在旧 set。只清本次受影响条目
+        // 引用的 admissionId；停止开始后新代次轮的 pin 不在集合内，绝不误清。
+        const pins = await tx.doc(TurnPin, bot.primaryConversationId, {});
+        for (const admissionId of affected) {
+          const pin = pins.admissions[admissionId];
+          if (pin && (pin.submissionId === null || pin.submissionId === undefined)) {
+            delete pins.admissions[admissionId];
+          }
+        }
+      }
       return count;
     }, context);
+    // 发布用实时 head 而非 null：停止期间受理的新代次排队条目仍是可见准入状态，
+    // 不能用 null 覆盖假装队列已空。
     if (removed > 0) {
-      // 空 submissionId 的 pin 来自已授予未提交的轮：cancel 后没有活动轮可保护，
-      // 保留会让 hasActivePin 永远为真并把 Bot 钉在旧 set。与取消同事务清掉引用。
-      await harness().commit(async (tx) => {
-        const pins = await tx.doc(TurnPin, bot.primaryConversationId, {});
-        for (const [admissionId, pin] of Object.entries(pins.admissions)) {
-          if (pin.submissionId === null || pin.submissionId === undefined) delete pins.admissions[admissionId];
-        }
-      }, context);
-      publishStatus(bot.botId, null, await queuedCount(bot));
+      const head = await liveHead(bot);
+      publishStatus(bot.botId, head, await queuedCount(bot));
     }
     return removed;
   }
@@ -825,6 +1003,13 @@ export function createTurnAdmission(deps) {
   let recoveryPending = false;
 
   async function restoreTurns() {
+    // 服务暴露前的唯一初始化点：把各 Bot 持久停止代次预载入本进程 map——
+    // 旧进程遗留队列条目的 stopEpoch 从此恒 ≤ 当前计数，cancelQueued 按代次
+    // 覆盖绝不漏取消；缺席条目默认 0，新 Bot 首批并发捕获同值不误作废。
+    for (const bot of host.listBots()) {
+      const doc = await harness().snapshot(TurnQueue, bot.primaryConversationId, context);
+      stopEpochs.set(bot.botId, Math.max(doc?.stopEpoch ?? 0, stopEpochs.get(bot.botId) ?? 0));
+    }
     const restored = new Map(); // botId -> setId
     const failed = [];
     for (const { bot, admissionId } of await pinsToRestore()) {
@@ -879,6 +1064,14 @@ export function createTurnAdmission(deps) {
    * 新决策走 prepare/apply/confirm；已有 admissionId 的 pending 决策（恢复重投）走 restoreTurn。
    * 目标 set 与该 Bot 活动原生工作不同步时暂不提交（下次 poll 自然重试）。
    */
+  /** pending 仍可提交：身份匹配、无 stop/preempt interruption 标记、scope 未停止。 */
+  async function pendingViable(nativeId, requestId) {
+    const state = await harness().snapshot(WorkDecisionState, nativeId, context);
+    const pending = state?.pending;
+    return !!pending && pending.requestId === requestId &&
+      pending.interruption == null && !state.stopped;
+  }
+
   async function admitWorkDecision(binding, bot, input) {
     if (closing) return null;
     const now = Date.now();
@@ -889,7 +1082,9 @@ export function createTurnAdmission(deps) {
     const h = harness();
     const meta = await h.snapshot(WorkContextState, binding.nativeId, context);
     const state = await h.snapshot(WorkDecisionState, binding.nativeId, context);
-    if (!state?.pending || state.pending.requestId !== input.requestId) return null;
+    // stop/preempt 已在 pending 上落 interruption 或 scope stopped：绝不 resurrect pin/grant。
+    if (!state?.pending || state.pending.requestId !== input.requestId ||
+        state.pending.interruption != null || state.stopped) return null;
     const scopeKey = 'work:' + meta.scopeId;
     // 协调状态恒在 binding.nativeId；执行目标为 pending 记录的统一会话（缺省即遗留
     // work 会话本体，旧 pending 在结算/取消前保持原执行目标，绝不双执行）。
@@ -947,6 +1142,8 @@ export function createTurnAdmission(deps) {
         }
         await applyPreparation(bot, preparation);
       }
+      // 网络 await 后核对 pending 未被 stop/preempt 作旧：迟到提交绝不复活已取消工作。
+      if (!(await pendingViable(binding.nativeId, input.requestId))) return null;
       // 统一执行目标（primary）的提交前同步该 Bot 收件到主会话；遗留目标不导入，
       // 保持旧 work 会话的既有上下文边界。导入失败按暂不可达退避，保持 pending。
       if (unifiedExecution && sessions) {
@@ -959,9 +1156,17 @@ export function createTurnAdmission(deps) {
       // 提交前最后一次 gate 复核：上述 sync/restore 全部 await 之后，排队用户
       // 输入或原生工作可能已先到；忙即保持 pending，绝不在 grant 后硬塞 submit。
       if (!(await canRunWork(bot.botId))) return null;
+      // submit 前最后一次核对 pending 身份/标记：gate 复核与提交之间不得插入已取消工作。
+      if (!(await pendingViable(binding.nativeId, input.requestId))) return null;
       const conversation = await h.conversation(executionNativeId, context);
       if (!conversation) throw new Error('work conversation is missing');
       const submission = await conversation.submit(input, context);
+      // submit 在飞期间 stop/preempt 已作旧 pending：立即中止刚提交的原生工作，
+      // 绝不出现「停止后新执行」。abortSubmission 幂等，work lane 结算时再覆盖。
+      if (!(await pendingViable(binding.nativeId, input.requestId))) {
+        try { await h.abortSubmission(submission.id, context, executionNativeId); } catch { /* 中止失败不掩盖取消事实 */ }
+        return null;
+      }
       workBackoff.delete(binding.nativeId);
       return submission;
     } catch (err) {
@@ -995,6 +1200,13 @@ export function createTurnAdmission(deps) {
     admitWorkDecision,
     canRunWork,
     appliedSetIds,
+    // 停止 gate：runtime.abort 先 beginStop（持久推进 TurnQueue.stopEpoch 并 arm
+    // 本进程 gate）再统一取消，settleStop 结算；submit 捕获 stopEpoch 作废旧受理。
+    stopEpoch,
+    beginStop,
+    settleStop,
+    // 冷启动未完成停止清单：runtime.restoreTurns 在任何 harness.resume 前处理。
+    pendingStops,
     close,
   };
 }

@@ -2,6 +2,7 @@
 // 远端面板传入完整 DesktopViewApi；本机只读适配器（mobile lane）只需实现该子集，
 // 真实读取走 BotHost.call，不需要远端连接或伪造的写方法。
 import type { DesktopIdentity, DesktopViewApi } from './types';
+import type { ScopeInfo } from '../../../host-core/index.js';
 
 /**
  * 只读能力：list/history/message 读取、live 观察与错误上报。
@@ -14,6 +15,13 @@ export type ScopeReadApi = Pick<
 
 /** 写操作（成员编辑/会话创建/房间发送）所需的完整视图 API。 */
 export type ScopeWriteApi = DesktopViewApi;
+
+/**
+ * 群聊写端解析器：宿主按 scope 路由发送/成员写通道（members 只可达 authority，
+ * send 走成员所在可用 Host）。返回真实完整 DesktopViewApi；尚未连上写端返回 null，
+ * 详情按“待连接”降级而不是只读。内容相同/代际与在线态不变时返回值必须稳定。
+ */
+export type RoomApiResolver = (scope: ScopeInfo, purpose: 'send' | 'members') => DesktopViewApi | null;
 
 const WRITE_METHODS = ['pending', 'mutateIntent', 'saveDraft', 'clearDraft', 'draftKey', 'pickFile'] as const;
 

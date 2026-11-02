@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
   ArrowLeft,
@@ -15,7 +15,6 @@ import {
   ExternalLink,
   FolderOpen,
   Globe,
-  MessageSquare,
   Mic,
   Monitor,
   MoreHorizontal,
@@ -56,12 +55,25 @@ import { useDrafts } from '../../desktop/web/src/drafts';
 import { PendingPanel } from '../../desktop/web/src/PendingPanel';
 import { readHistoryPage } from '../../desktop/web/src/history';
 import { Scopes } from '../../desktop/web/src/Scopes';
+import { targetApi } from '../../desktop/web/src/targetApi';
+import type { RoomApiResolver } from '../../desktop/web/src/scope-api';
+import {
+  ConversationContextMenu,
+  ConversationGroupAvatar,
+  ConversationRow,
+  useConversationRowInteractions,
+  useScopeConversations,
+  type ConversationBot,
+  type ScopeConversation,
+  type ScopeConversationSource,
+} from './gbot-ui';
+import type { MessageMember } from '../../host-core/index.js';
 import { createLocalScopeReadApi } from './local-scope-api';
 import { MessageAttribution } from './MessageAttribution';
 import './bot-communications-mobile.css';
 import type { DesktopDraftEntry, DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../host-core/desktop-client.js';
-import type { BotLiveState, ClearHistoryResult, CompactResult, DevicesDirectoryItem, PendingCursor, PendingListPage, ShowerTarget } from '../../host-core/index.js';
+import type { BotLiveState, ClearHistoryResult, CompactResult, DevicesDirectoryItem, PendingCursor, PendingListPage, ScopeInfo, ShowerTarget } from '../../host-core/index.js';
 import type { ShowerCall } from './ShowerPreview';
 import { Markdown } from './Markdown';
 import { BotScreenPanel } from './BotScreenPanel';
@@ -80,6 +92,12 @@ import {
   type GrokAvatarPreset,
 } from './GrokBotAvatar';
 import { botAvatarKey, saveCentralBotAvatar, syncBotAvatarConfigs } from './botAvatarSync';
+import {
+  canStopBotActivity,
+  isBotActivityBusy,
+  resolveBotActivity,
+  type BotActivity,
+} from './botActivity';
 import {
   formatTurnDuration,
   latestEntryChannel,
@@ -162,6 +180,8 @@ const SOUL_SNIPPETS: { zh: string; en: string; text: string }[] = [
 export type HubScreen =
   | 'hub'
   | 'chat'
+  | 'conversation'
+  | 'dm'
   | 'bot-profile'
   | 'bot-edit'
   | 'bot-avatar'
@@ -170,8 +190,6 @@ export type HubScreen =
   | 'bot-screen'
   | 'bot-model'
   | 'settings'
-  | 'scopes'
-  | 'bot-scopes'
   | 'pending';
 
 export interface UnifiedBotItem {
@@ -555,31 +573,6 @@ function formatArchivedRemainingDays(archivedAt: string | null | undefined): num
   if (!Number.isFinite(archivedMs)) return 14;
   const remainingMs = archivedMs + ARCHIVE_RETENTION_MS - Date.now();
   return Math.max(1, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
-}
-
-function formatBotListTime(
-  timestampMs: number | undefined,
-  createdAt: string | undefined,
-  t: (zh: string, en: string) => string,
-): string {
-  const ms = timestampMs || (createdAt ? Date.parse(createdAt) : NaN);
-  if (!Number.isFinite(ms)) return '';
-  const date = new Date(ms);
-  const now = new Date();
-  const sameDay =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
-  if (sameDay) {
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-  }
-  const diffDays = Math.floor((now.getTime() - date.getTime()) / (1000 * 3600 * 24));
-  if (diffDays >= 0 && diffDays < 7) {
-    const weekdaysZh = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
-    const weekdaysEn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    return t(weekdaysZh[date.getDay()], weekdaysEn[date.getDay()]);
-  }
-  return `${date.getMonth() + 1}/${date.getDate()}`;
 }
 
 async function fetchBotHistoryPages(
@@ -1135,6 +1128,14 @@ export function HostPage({
   const [searchQuery, setSearchQuery] = useState('');
   const [archivedExpanded, setArchivedExpanded] = useState(false);
 
+  // Bot 行/主助手的“查看私聊”菜单与目标（长按/右键/键盘打开）。
+  const [botContextMenu, setBotContextMenu] = useState<{ x: number; y: number; bot: UnifiedBotItem } | null>(null);
+  // 群聊/私聊子页：目标 conversation + 打开来源（hub 或 chat），返回时还原。
+  const [scopeConversationTarget, setScopeConversationTarget] = useState<ScopeConversation | null>(null);
+  const [scopeReturnScreen, setScopeReturnScreen] = useState<HubScreen>('hub');
+  const [dmTarget, setDmTarget] = useState<{ bot: UnifiedBotItem; returnScreen: HubScreen } | null>(null);
+  const [dmSelectedScopeId, setDmSelectedScopeId] = useState<string | null>(null);
+
   // Local Host state (managed transparently in background)
   const [localHost, setLocalHost] = useState<HostSnapshot>();
   // 最新 localHost 的 ref：让 hostRunning/phase 读取始终拿到当前值，不依赖 useMemo 闭包快照。
@@ -1610,6 +1611,237 @@ export function HostPage({
     return allBotItems.find(b => b.key === activeBotKey) ?? null;
   }, [activeBotKey, primaryBot, allBotItems]);
 
+  /** 群聊/私聊读取来源：本机走只读适配器，远端按 host 分组固定其真实 identity，不污染全局 identity。
+      离线仍保留同账户来源（hook 内部停请求、保留最近快照）；targetApi 只按真实设备在线状态收敛。 */
+  // scopeConversationSources 只按「内容签名」重建：allBotItems/remoteDevices 每轮目录
+  // 刷新都换引用，数组/Map 依赖会让 detail 不断拿到新 api Proxy；改为内容相同的
+  // 字符串签名作依赖（名字/在线/设备集合/代际真实变化才重建），不新增缓存层。
+  const knownBotsSig = JSON.stringify(
+    allBotItems
+      .map(item => [item.deviceId, item.botId, item.role, Boolean(item.isPrimary)] as const)
+      .sort((a, b) => a[0] === b[0] ? (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0) : (a[0] < b[0] ? -1 : 1)),
+  );
+  const remoteScopeHostSig = [...new Set(
+    allBotItems.filter(item => item.hostKind === 'remote').map(item => item.hostId),
+  )].sort().join('\u0001');
+  // 设备签名含在线布尔：同 remoteConnected 下单设备上下线必须重建 targetApi。
+  const remoteDeviceNameSig = remoteDevices
+    .map(d => d.deviceId + '\u0001' + (d.displayName ?? '') + '\u0001' + Boolean(d.online))
+    .join('\u0002');
+  // Scopes knownBots prop 与群头像共用：同一内容签名，目录同内容刷新引用稳定。
+  const knownBots = useMemo(
+    () => allBotItems.map(item => ({
+      deviceId: item.deviceId,
+      botId: item.botId,
+      role: item.role,
+      isPrimary: Boolean(item.isPrimary),
+    })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [knownBotsSig],
+  );
+  const scopeConversationSources = useMemo<ScopeConversationSource[]>(() => {
+    // 内部按当前同内容值构建：sig 相同即语义相同，重建结果是同值数组。
+    const remoteHostIds = remoteScopeHostSig ? remoteScopeHostSig.split('\u0001') : [];
+    const nameByDevice = new Map(remoteDevices.map(d => [d.deviceId, d.displayName]));
+    const sources: ScopeConversationSource[] = [];
+    const localIdentity = localScopeApi?.identity;
+    if (localScopeApi && localIdentity && localHost?.deviceId) {
+      sources.push({
+        api: localScopeApi,
+        identity: localIdentity,
+        bots: knownBots,
+        label: t('本机', 'Local'),
+      });
+    }
+    const api = remoteClientRef.current?.api;
+    if (api && remoteIdentity) {
+      for (const hostId of remoteHostIds) {
+        const identity = api.identityForTarget(hostId);
+        if (!identity) continue;
+        const deviceOnline = Boolean(remoteConnected && remoteDevices.find(d => d.deviceId === hostId)?.online);
+        // 冻结 identity 到该 host：list/详情读取不能依赖可变的全局 target；
+        // 离线来源仍在（transportConnected=false），保留已缓存列表不静默清空。
+        sources.push({
+          api: targetApi(api, hostId, deviceOnline),
+          identity,
+          bots: knownBots,
+          label: nameByDevice.get(hostId) || t('未命名设备', 'Unnamed device'),
+        });
+      }
+    }
+    return sources;
+    // 依赖全是内容签名标量 + 真实身份标量；目录刷新同内容不重建，不同内容才重建。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localScopeApi, localHost?.deviceId, knownBotsSig, remoteScopeHostSig, remoteDeviceNameSig,
+      remoteIdentity?.generation, remoteIdentity?.profileId, remoteIdentity?.kind, remoteConnected, t]);
+
+  /**
+   * 群聊写端：复用中心/中继连接的完整 DesktopPanelApi（同一份 pending/草稿账本），
+   * 不新造本机写适配器。members 固定打 scope.authorityDeviceId（只有 authority 可
+   * updateScope，null 不伪造目标）；send 打当前成员所在 Host —— 本机成员优先本机，
+   * 其次在线 authority 成员、其他在线成员，全离线保留稳定成员目标供排队。
+   * local profile 的 identityForTarget 不能跨设备（api.ts 会抛），远端目标只在 relay 时取。
+   */
+  const roomWriteTargetApiMap = useMemo(() => {
+    const api = remoteClientRef.current?.api;
+    if (!api || !remoteIdentity) return new Map<string, DesktopPanelApi>();
+    const localId = localHost?.deviceId;
+    const running = localHost?.phase === 'running';
+    const candidates = new Set<string>(remoteDevices.map(d => d.deviceId));
+    if (localId) candidates.add(localId);
+    const map = new Map<string, DesktopPanelApi>();
+    for (const deviceId of candidates) {
+      const online = deviceId === localId
+        ? running
+        : Boolean(remoteConnected && remoteDevices.some(d => d.deviceId === deviceId && d.online));
+      // local profile 的 identityForTarget 只能绑当前 targetDeviceId：跨设备候选没有
+      // 写端，跳过而非回环本机（远端 authority 不得别名为本机）。targetApi 内部调用
+      // identityForTarget，异常时跳过该设备即可。
+      if (remoteIdentity.kind === 'local' && deviceId !== remoteIdentity.targetDeviceId) continue;
+      try {
+        map.set(deviceId, targetApi(api, deviceId, online));
+      } catch {
+        continue;
+      }
+    }
+    return map;
+    // 依赖为内容签名/标量：目录同内容刷新不重建 Proxy，在线布尔真实变化才重建。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remoteIdentity?.profileId, remoteIdentity?.kind, remoteIdentity?.targetDeviceId,
+      remoteIdentity?.generation, remoteConnected, remoteDeviceNameSig, localHost?.deviceId, localHost?.phase]);
+
+  const roomSendDeviceIdOf = useCallback((scope: ScopeInfo): string => {
+    const memberDevices = scope.scope.members.map(m => m.deviceId);
+    const localId = localHost?.deviceId;
+    if (localId && localHost?.phase === 'running' && memberDevices.includes(localId)) return localId;
+    const authority = scope.authorityDeviceId;
+    if (authority && memberDevices.includes(authority) && remoteDevices.some(d => d.deviceId === authority && d.online)) {
+      return authority;
+    }
+    const onlineMember = memberDevices.find(id => remoteDevices.some(d => d.deviceId === id && d.online));
+    if (onlineMember) return onlineMember;
+    if (authority && memberDevices.includes(authority)) return authority;
+    return memberDevices[0] ?? '';
+    // 在线布尔已含在 remoteDeviceNameSig；目录同内容刷新不换 resolver 引用。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localHost?.deviceId, localHost?.phase, remoteDeviceNameSig]);
+
+  const resolveRoomApi = useCallback<RoomApiResolver>((scope, purpose) => {
+    const target = purpose === 'members' ? scope.authorityDeviceId : roomSendDeviceIdOf(scope);
+    if (!target) return null;
+    return roomWriteTargetApiMap.get(target) ?? null;
+  }, [roomSendDeviceIdOf, roomWriteTargetApiMap]);
+
+  // 群成员候选只收未归档 Bot；字段与 ConversationBot 一致（deviceId/botId/role/isPrimary）。
+  // 独立签名含归档布尔：归档/恢复变化必须重建候选，目录同内容刷新引用稳定。
+  const memberCandidatesSig = JSON.stringify(
+    allBotItems
+      .map(item => [item.deviceId, item.botId, item.role, Boolean(item.isPrimary), Boolean(item.archivedAt)] as const)
+      .sort((a, b) => a[0] === b[0] ? (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0) : (a[0] < b[0] ? -1 : 1)),
+  );
+  const roomMemberCandidates = useMemo<ConversationBot[]>(
+    () => allBotItems.filter(item => !item.archivedAt).map(item => ({
+      deviceId: item.deviceId,
+      botId: item.botId,
+      role: item.role,
+      isPrimary: Boolean(item.isPrimary),
+    })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [memberCandidatesSig],
+  );
+
+  const {
+    items: roomConversations,
+    loading: roomConversationsLoading,
+    error: roomConversationsError,
+    refresh: refreshRoomConversations,
+  } = useScopeConversations(scopeConversationSources, active && screen === 'hub', 'room');
+  // 下拉刷新用最新 refresh：ref 免除把 hook 返回值塞进 triggerHubRefresh 依赖。
+  const refreshRoomConversationsRef = useRef(refreshRoomConversations);
+  refreshRoomConversationsRef.current = refreshRoomConversations;
+
+  // 群聊和普通 Bot 混排：key 带 room:/bot: 前缀，只按群聊最近消息排序，不把 DM 混入。
+  const mixedHubItems = useMemo(() => {
+    const entries: { key: string; bot?: UnifiedBotItem; room?: ScopeConversation; sortMs: number }[] = [];
+    for (const item of listBotItems) {
+      const meta = botMetaMap[item.key];
+      entries.push({
+        key: 'bot:' + item.key,
+        bot: item,
+        sortMs: Math.max(Date.parse(item.lastActivityAt || item.createdAt) || 0, meta?.updatedAt || 0),
+      });
+    }
+    for (const room of roomConversations) {
+      entries.push({ key: 'room:' + room.key, room, sortMs: Date.parse(room.lastActivityAt || '') || 0 });
+    }
+    entries.sort((a, b) => b.sortMs - a.sortMs || a.key.localeCompare(b.key));
+    return entries;
+  }, [listBotItems, roomConversations, botMetaMap]);
+
+  const filteredMixedHubItems = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return mixedHubItems;
+    return mixedHubItems.filter(entry => {
+      if (entry.bot) {
+        const item = entry.bot;
+        const meta = botMetaMap[item.key];
+        return (
+          item.role.toLowerCase().includes(q) ||
+          item.hostLabel.toLowerCase().includes(q) ||
+          (item.lastPreview ?? meta?.lastText ?? '').toLowerCase().includes(q) ||
+          (item.description ?? '').toLowerCase().includes(q)
+        );
+      }
+      const room = entry.room!;
+      return room.title.toLowerCase().includes(q) || room.lastPreview.toLowerCase().includes(q);
+    });
+  }, [mixedHubItems, searchQuery, botMetaMap]);
+
+  const openScopeConversation = (item: ScopeConversation) => {
+    if (screen === 'chat' && chatScrollRef.current) {
+      chatScrollRestoreRef.current = chatScrollRef.current.scrollTop;
+    }
+    setChatTopMenuOpen(false);
+    setComposerMenuOpen(false);
+    setChatSearchOpen(false);
+    setChatSearchQuery('');
+    setScopeConversationTarget(item);
+    setScopeReturnScreen(screen === 'dm' || screen === 'conversation' ? 'hub' : screen);
+    setScreen('conversation');
+  };
+
+  const openBotDmList = (bot: UnifiedBotItem) => {
+    // 从聊天进入私聊时记录 scrollTop：返回主聊天由 layout effect 恢复并跳过一次自动滚底。
+    if (screen === 'chat' && chatScrollRef.current) {
+      chatScrollRestoreRef.current = chatScrollRef.current.scrollTop;
+    }
+    // 进入私聊前收起主聊天临时控件（更多菜单/输入框菜单/搜索），返回时不拦截逐级返回。
+    setBotContextMenu(null);
+    setChatTopMenuOpen(false);
+    setComposerMenuOpen(false);
+    setChatSearchOpen(false);
+    setChatSearchQuery('');
+    setDmTarget({ bot, returnScreen: screen === 'dm' ? 'hub' : screen });
+    setDmSelectedScopeId(null);
+    setScreen('dm');
+  };
+
+  // 换账户/档案/代际/本机设备时，已打开的群聊/私聊子页不得残留旧会话内容：
+  // 清空目标并回来源页（dm 回其 returnScreen，conversation 回 scopeReturnScreen）。
+  const scopeSessionKey = `${localHost?.deviceId ?? 'nodev'}|${remoteIdentity?.profileId ?? '-'}|${remoteIdentity?.kind ?? '-'}|${remoteIdentity?.generation ?? 0}`;
+  const scopeSessionRef = useRef(scopeSessionKey);
+  useEffect(() => {
+    if (scopeSessionRef.current === scopeSessionKey) return;
+    scopeSessionRef.current = scopeSessionKey;
+    setScopeConversationTarget(null);
+    setDmTarget(null);
+    setDmSelectedScopeId(null);
+    setBotContextMenu(null);
+    if (screen === 'conversation') setScreen(scopeReturnScreen);
+    else if (screen === 'dm') setScreen(dmTarget?.returnScreen ?? 'hub');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeSessionKey]);
+
   const scopeForBot = (bot: UnifiedBotItem) => {
     const deviceId = bot.hostKind === 'local'
       ? localHost?.deviceId || localBots.find(item => item.botId === bot.botId)?.deviceId || ''
@@ -1692,20 +1924,6 @@ export function HostPage({
   }, [getOrCreateRemoteClient, active, screen, activeBot?.key, activeBot?.botId, activeBot?.hostKind, activeBot?.hostId, localHost?.deviceId]);
 
   const mustCreatePrimaryBot = Boolean(localHost?.phase === 'running' && localBotsLoaded && !primaryBot);
-
-  const filteredBotItems = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return listBotItems;
-    return listBotItems.filter(item => {
-      const meta = botMetaMap[item.key];
-      return (
-        item.role.toLowerCase().includes(q) ||
-        item.hostLabel.toLowerCase().includes(q) ||
-        (item.lastPreview ?? meta?.lastText ?? '').toLowerCase().includes(q) ||
-        (item.description ?? '').toLowerCase().includes(q)
-      );
-    });
-  }, [listBotItems, searchQuery, botMetaMap]);
 
   const unreadCount = useMemo(() => {
     return listBotItems.filter(item => botMetaMap[item.key]?.unread).length;
@@ -2202,6 +2420,12 @@ export function HostPage({
     if (bot) openBotChat(bot);
   }, [allBotItems, localBots, localHost?.deviceId]);
 
+  // Scopes 消息链接：与移动 Markdown 默认同一 openCenter 原生通道。
+  const openScopeLink = useCallback(
+    (href: string) => mobileLocalRequest('openCenter', { url: href }),
+    [],
+  );
+
   const openBotProfile = (bot: UnifiedBotItem) => {
     setChatTopMenuOpen(false);
     setComposerMenuOpen(false);
@@ -2261,8 +2485,6 @@ export function HostPage({
     setEditVoiceLang(meta?.voiceLang ?? '自动');
     setScreen('bot-edit');
     void loadBotSoul(bot);
-    // 中心权威 cwd+revision 异步回填；bot/连接变化以 fetchRef 隔离旧结果。
-    void loadEditCwd(bot);
   };
 
   // 编辑期间以完整身份（设备+bot+连接 profile/generation）为键重读修订；
@@ -2322,6 +2544,8 @@ export function HostPage({
 
   const [slashBusy, setSlashBusy] = useState<SlashCommandName>();
   const slashBusyRef = useRef(false);
+  /** 停止失败单独提示，与 action.error（发送等）分开保留；成功由 Host activity stopped 呈现。 */
+  const [stopError, setStopError] = useState('');
 
   // /clear 与 /compact 都先等后端成功，再用服务端边界重置本地可见历史；失败保留草稿与原历史。
   // 返回 true 表示服务端已成功（即使 UI 已切到别的会话），false 表示 UI 切走后不再报错的过期结果。
@@ -3067,7 +3291,13 @@ ${newer}` : draftSnapshot;
     });
 
   const submission = chatSubmissionRef.current;
-  const submissionFailure = submission && chatReceipt?.status === 'unanswered' &&
+  // 用户主动停止的 unanswered 回执（reason aborted/cancelled）是已停止结算，不是配置/模型故障：
+  // 既不弹“未获得回答/检查配置”卡，也不让 WorkingSlot 按 error 结算；真实 model_error 等仍显示。
+  const receiptUserCancelled =
+    chatReceipt?.status === 'unanswered' &&
+    typeof chatReceipt.reason === 'string' &&
+    /abort|cancel/i.test(chatReceipt.reason);
+  const submissionFailure = submission && chatReceipt?.status === 'unanswered' && !receiptUserCancelled &&
     submission.botKey === activeBot?.key && chatReceipt.requestId === submission.requestId &&
     !parseHistoryEntries(chatHistory).some(turn => turn.error && turn.entryId > submission.afterEntryId)
       ? chatReceipt.reason === 'model_error'
@@ -3101,14 +3331,66 @@ ${newer}` : draftSnapshot;
           ? t('正在同步插件…', 'Synchronizing plugins…')
           : t('排队等待受理…', 'Queued for admission…');
 
-  const isBotBusy = !recoveringChat && Boolean(
-    (chatPending?.botKey === activeBot?.key && chatPending?.phase === 'sending') ||
-    ((chatHostKind !== 'remote' || (chatRemoteConnected && activeBot?.online !== false)) &&
-      (chatLive?.busy || (chatLive?.queuedCount ?? 0) > 0)) ||
-      (submission?.botKey === activeBot?.key && chatPending?.phase !== 'recovering' && chatReceipt &&
-        (chatReceipt.status === 'queued' || chatReceipt.status === 'placed')) ||
-      (chatTurnAdmission && chatTurnAdmission.phase !== 'failed'),
+  // 统一活动状态：新 Host 帧带 activity 则以它为准；旧 Host 缺省走 resolveBotActivity 的旧字段 fallback。
+  // 只有尚未受理的发送中阶段才允许乐观叠加 queued；一旦 Host 有真实 activity（含 failed/stopped），
+  // 完全以 Host 为准，旧 queued/placed 回执仅在旧 Host fallback 内体现，不回写覆盖终态。恢复/离线不伪装工作。
+  const rawBotActivity = resolveBotActivity(
+    recoveringChat || (chatHostKind === 'remote' && !(chatRemoteConnected && activeBot?.online !== false))
+      ? null
+      : chatLive,
   );
+  /** 停止在途按 bot.key 去重：切换 Bot 不复用其他 Bot 的 abort Promise。 */
+  const stopInFlightRef = useRef(new Map<string, Promise<unknown>>());
+  const [stopping, setStopping] = useState<Set<string>>(() => new Set());
+  const isStoppingBot = Boolean(activeBot && stopping.has(activeBot.key));
+
+  const sendingOptimistic = !recoveringChat && chatPending?.botKey === activeBot?.key && chatPending?.phase === 'sending';
+  // 本地停止在途时无条件显示 stopping（覆盖 Host 尚未更新的 running）；
+  // 仅未受理的发送中阶段才在 Host 空闲/failed/stopped 上叠加乐观 queued，受理后完全以 Host activity 为准。
+  const botActivity: BotActivity = isStoppingBot
+    ? { ...rawBotActivity, phase: 'stopping' }
+    : sendingOptimistic && !isBotActivityBusy(rawBotActivity)
+      ? { ...rawBotActivity, phase: 'queued', source: 'primary' }
+      : rawBotActivity;
+  const isBotBusy = isBotActivityBusy(botActivity) || Boolean(sendingOptimistic);
+  // Host activity.error（phase 'failed' 附带的有界诊断）是最具体的失败原因：
+  // 直接展示 message/code 原文，不加「Host」字样或身份前缀；无此字段回落原回执提示。
+  const activityFailure =
+    botActivity.phase === 'failed' && botActivity.error
+      ? botActivity.error.message || botActivity.error.code
+      : undefined;
+  const failureNotice = activityFailure || submissionFailure;
+  const canStopBot = Boolean(
+    activeBot && !activeBot.archivedAt && canStopBotActivity(botActivity) &&
+    (activeBot.hostKind !== 'remote' || (remoteConnected && activeBot.online !== false)),
+  );
+  const requestStopBot = useCallback((bot: UnifiedBotItem): Promise<unknown> => {
+    const inflight = stopInFlightRef.current.get(bot.key);
+    if (inflight) return inflight;
+    const task = (async () => {
+      if (bot.hostKind === 'local') {
+        await BotHost.call({ method: 'abort', params: { botId: bot.botId } });
+      } else {
+        if (!bot.remoteIdentity || !remoteClientRef.current) {
+          throw new Error(t('目标离线，未停止。', 'Target offline; not stopped.'));
+        }
+        await remoteClientRef.current.api.call(bot.remoteIdentity, 'abort', { botId: bot.botId });
+      }
+    })();
+    stopInFlightRef.current.set(bot.key, task);
+    setStopping(prev => (prev.has(bot.key) ? prev : new Set(prev).add(bot.key)));
+    const cleanup = () => {
+      if (stopInFlightRef.current.get(bot.key) === task) stopInFlightRef.current.delete(bot.key);
+      setStopping(prev => {
+        if (!prev.has(bot.key)) return prev;
+        const next = new Set(prev);
+        next.delete(bot.key);
+        return next;
+      });
+    };
+    task.then(cleanup, cleanup);
+    return task;
+  }, [t]);
 
   /** 问卷提交走现有 callCapabilityAction；deviceId/botId 由宿主授权，不自建协议。 */
   const submitQuestionnaire = useCallback(
@@ -3263,12 +3545,8 @@ ${newer}` : draftSnapshot;
   }, [allChatItems, chatLive, activeBot, clearedMap, recoveringChat, isBotBusy, liveGeneratingText, liveGenerationAttr, chatLiveIsCollaborative]);
 
   const activeTurnStartedAt = useMemo(
-    () =>
-      resolveActiveTurnStartedAt(
-        allChatTurns,
-        chatPending?.botKey === activeBot?.key ? chatPending?.submittedAt : null,
-      ),
-    [allChatTurns, chatPending, activeBot?.key],
+    () => resolveActiveTurnStartedAt(botActivity),
+    [botActivity],
   );
 
   const visibleTurns = useMemo(() => {
@@ -3290,11 +3568,28 @@ ${newer}` : draftSnapshot;
 
   const latestTurnToolCount = visibleTurns.at(-1)?.tools?.length ?? 0;
 
+  // 从私聊/群聊返回聊天时恢复离开前 scrollTop：layout effect 先置位，
+  // 同一提交内的自动滚底 effect 看到 pending 标记即跳过这一次。
+  const chatScrollRestoreRef = useRef<number | null>(null);
+  const chatScrollRestorePending = useRef(false);
+  useLayoutEffect(() => {
+    if (screen !== 'chat') return;
+    const saved = chatScrollRestoreRef.current;
+    if (saved === null) return;
+    chatScrollRestoreRef.current = null;
+    chatScrollRestorePending.current = true;
+    if (chatScrollRef.current) chatScrollRef.current.scrollTop = saved;
+  }, [screen]);
   useEffect(() => {
     if (screen === 'chat' && chatScrollRef.current) {
+      if (chatScrollRestorePending.current) {
+        // 本帧是返回恢复，不覆盖刚置回的 scrollTop；后续新消息仍自动滚底。
+        chatScrollRestorePending.current = false;
+        return;
+      }
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
-  }, [screen, visibleTurns.length, latestTurnToolCount, displayGeneratingText, isBotBusy, displayLiveToolName, submissionFailure]);
+  }, [screen, visibleTurns.length, latestTurnToolCount, displayGeneratingText, isBotBusy, displayLiveToolName, failureNotice]);
 
   const [hubRefreshing, setHubRefreshing] = useState(false);
   const hubRefreshRunning = useRef(false);
@@ -3315,6 +3610,8 @@ ${newer}` : draftSnapshot;
           await ensureRemoteApi();
           await syncRemoteBots();
         })(),
+        // 下拉刷新同时刷新群聊列表（静默失败由 hook 自身 error 呈现）。
+        Promise.resolve(refreshRoomConversationsRef.current()),
       ]);
       if (results[1].status === 'rejected') setDirectoryError(errorText(results[1].reason));
     } finally {
@@ -3328,6 +3625,23 @@ ${newer}` : draftSnapshot;
   const handleStepBack = useCallback((): boolean => {
     if (modelTarget) {
       setModelTarget(null);
+      return true;
+    }
+    // 群聊/私聊子页的逐级返回优先于隐藏状态的主聊控件关闭（控件虽隐藏但 state 可能仍在）。
+    if (screen === 'conversation') {
+      setScreen(scopeReturnScreen);
+      return true;
+    }
+    if (screen === 'dm') {
+      if (dmSelectedScopeId) {
+        setDmSelectedScopeId(null);
+      } else {
+        setScreen(dmTarget?.returnScreen ?? 'hub');
+      }
+      return true;
+    }
+    if (botContextMenu) {
+      setBotContextMenu(null);
       return true;
     }
     if (chatTopMenuOpen) {
@@ -3387,11 +3701,7 @@ ${newer}` : draftSnapshot;
       setScreen('hub');
       return true;
     }
-    if (screen === 'bot-scopes') {
-      setScreen('chat');
-      return true;
-    }
-    if (screen === 'settings' || screen === 'scopes' || screen === 'pending') {
+    if (screen === 'settings' || screen === 'pending') {
       setScreen('hub');
       return true;
     }
@@ -3414,6 +3724,10 @@ ${newer}` : draftSnapshot;
     mustCreatePrimaryBot,
     searchQuery,
     cancelActiveObservation,
+    scopeReturnScreen,
+    dmSelectedScopeId,
+    dmTarget,
+    botContextMenu,
   ]);
 
   useEffect(() => {
@@ -3693,8 +4007,15 @@ ${newer}` : draftSnapshot;
       onTouchEnd={onTouchEnd}
     >
       {/* ==================== SCREEN 1: MAIN HUB (15844.jpg + PanelLeft icon) ==================== */}
-      {screen === 'hub' && (
-        <main className={`hub-main grok-page-enter${anyDrawerOpen ? ' is-scaled' : ''}`} aria-label={t('智能体主页', 'Bot Hub')}>
+      {/* 群聊/私聊子页打开时保持 hub DOM（隐藏不卸载）：返回来源滚动位置不丢。
+          用显式 class 而非 hidden 属性，避免 author CSS display 覆盖。 */}
+      {(screen === 'hub' || screen === 'conversation' || screen === 'dm') && (
+        <main
+          className={`hub-main grok-page-enter${anyDrawerOpen ? ' is-scaled' : ''}`}
+          aria-label={t('智能体主页', 'Bot Hub')}
+          aria-hidden={screen !== 'hub' || undefined}
+          style={screen === 'hub' ? undefined : { display: 'none' }}
+        >
           <header className="hub-top-bar">
             <button
               type="button"
@@ -3766,25 +4087,13 @@ ${newer}` : draftSnapshot;
             {/* Local Primary Assistant */}
             <section className="hub-hero-section">
               {primaryBot ? (
-                <button
-                  type="button"
-                  className="hub-hero-button"
-                  onClick={() => openBotChat(primaryBot)}
-                  aria-label={`${primaryBot.role} · ${primaryBot.hostLabel} - ${t('点击进入文字对话', 'Tap to chat')}`}
-                >
-                  <GrokBotAvatar
-                    preset={primaryPreset}
-                    isPrimary
-                    starBadge
-                    platformBadge={<PlatformLogoIcon platform={primaryBot.platform} size={11} />}
-                    size={88}
-                  />
-                  <span className="hub-hero-name" title={primaryBot.role}>{primaryBot.role}</span>
-                  <span className="hub-bot-host-badge local" title={primaryBot.hostLabel}>
-                    <PlatformLogoIcon platform={primaryBot.platform} size={12} />
-                    <span className="hub-bot-host-text">{primaryBot.hostLabel}</span>
-                  </span>
-                </button>
+                <HubPrimaryHero
+                  bot={primaryBot}
+                  preset={primaryPreset}
+                  label={`${primaryBot.role} · ${primaryBot.hostLabel} - ${t('点击进入文字对话', 'Tap to chat')}`}
+                  onOpen={() => openBotChat(primaryBot)}
+                  onOpenMenu={(position) => setBotContextMenu({ ...position, bot: primaryBot })}
+                />
               ) : (
                 <button
                   type="button"
@@ -3827,7 +4136,22 @@ ${newer}` : draftSnapshot;
                     : t('与中心未连接，远端设备状态待确认。下拉可尝试恢复。', 'Disconnected from center. Pull down to check and reconnect.')}
                 </p>
               )}
-              {filteredBotItems.length === 0 ? (
+              {roomConversationsError ? (
+                <p className="hub-empty-list hub-room-error" role="status">
+                  <span>{t('群聊列表加载失败：', 'Failed to load rooms: ')}{roomConversationsError}</span>
+                  <button
+                    type="button"
+                    className="hub-outline-btn"
+                    onClick={() => refreshRoomConversations()}
+                  >
+                    {t('重试', 'Retry')}
+                  </button>
+                </p>
+              ) : null}
+              {roomConversationsLoading && filteredMixedHubItems.every(e => !e.room) ? (
+                <p className="hub-empty-list" role="status">{t('正在加载群聊…', 'Loading rooms…')}</p>
+              ) : null}
+              {filteredMixedHubItems.length === 0 ? (
                 <div className="hub-empty-list">
                   <p>
                     {searchQuery.trim()
@@ -3836,7 +4160,29 @@ ${newer}` : draftSnapshot;
                   </p>
                 </div>
               ) : (
-                filteredBotItems.map(item => {
+                filteredMixedHubItems.map(entry => {
+                  if (entry.room) {
+                    const room = entry.room;
+                    return (
+                      <ConversationRow
+                        key={entry.key}
+                        className="hub-bot-row hub-room-row"
+                        title={room.title}
+                        preview={room.lastPreview || t('暂无消息', 'No messages yet')}
+                        timestamp={room.lastActivityAt}
+                        badge={t('群聊', 'Group')}
+                        avatar={
+                          <ConversationGroupAvatar
+                            members={room.scope.scope.members}
+                            bots={knownBots}
+                            size={52}
+                          />
+                        }
+                        onOpen={() => openScopeConversation(room)}
+                      />
+                    );
+                  }
+                  const item = entry.bot!;
                   const meta = botMetaMap[item.key];
                   const isPrimaryActive = Boolean(item.isPrimary && !item.archivedAt);
                   const snippet =
@@ -3844,47 +4190,19 @@ ${newer}` : draftSnapshot;
                     meta?.lastText ||
                     item.description ||
                     t('点击开始文字对话…', 'Tap to start chatting…');
-                  const activityMs = Math.max(
-                    Date.parse(item.lastActivityAt || item.createdAt) || 0,
-                    meta?.updatedAt || 0,
-                  );
-                  const timeLabel = formatBotListTime(activityMs || undefined, item.createdAt, t);
                   const preset = resolveBotAvatarPreset(botAvatarKey(item), item.role, isPrimaryActive);
                   return (
-                    <button
-                      key={item.key}
-                      type="button"
-                      className={`hub-bot-row${item.online === false ? ' is-offline' : ''}`}
-                      onClick={() => openBotChat(item)}
-                    >
-                      <div className="hub-bot-avatar-col">
-                        <GrokBotAvatar
-                          preset={preset}
-                          isPrimary={isPrimaryActive}
-                          starBadge={isPrimaryActive}
-                          size={52}
-                        />
-                      </div>
-                      <div className="hub-bot-content-col">
-                        <div className="hub-bot-title-line">
-                          <span className="hub-bot-title">{item.role}</span>
-                          {hasRemoteConfigured && (
-                            <span
-                              className={`hub-bot-host-badge ${item.hostKind}${item.online === false ? ' is-offline' : ''}`}
-                              title={`${item.hostLabel}${item.platform ? ` (${item.platform})` : ''}${item.online === false ? ` · ${remoteConnected ? t('离线', 'Offline') : t('状态待确认', 'Status unknown')}` : ''}`}
-                            >
-                              <PlatformLogoIcon platform={item.platform} size={12} />
-                              <span className="hub-bot-host-text">{item.hostLabel}</span>
-                            </span>
-                          )}
-                          <span className="hub-bot-time">{timeLabel}</span>
-                        </div>
-                        <div className="hub-bot-subtitle-line">
-                          <span className="hub-bot-snippet">{snippet}</span>
-                          <span className="hub-bot-unread-dot" aria-hidden="true" />
-                        </div>
-                      </div>
-                    </button>
+                    <HubBotRow
+                      key={entry.key}
+                      item={item}
+                      preset={preset}
+                      isPrimaryActive={isPrimaryActive}
+                      snippet={snippet}
+                      unread={Boolean(meta?.unread)}
+                      timestampMs={entry.sortMs}
+                      onOpen={() => openBotChat(item)}
+                      onOpenMenu={(position) => setBotContextMenu({ ...position, bot: item })}
+                    />
                   );
                 })
               )}
@@ -3914,19 +4232,10 @@ ${newer}` : draftSnapshot;
                       const daysLeft = formatArchivedRemainingDays(item.archivedAt);
                       const preset = resolveBotAvatarPreset(botAvatarKey(item), item.role, false);
                       return (
-                        <div
+                        <HubArchivedRow
                           key={item.key}
-                          className="hub-bot-row is-archived"
-                          style={{ opacity: 0.72 }}
-                          onClick={() => openBotChat(item)}
-                          role="button"
-                          tabIndex={0}
-                          onKeyDown={e => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault();
-                              openBotChat(item);
-                            }
-                          }}
+                          onOpen={() => openBotChat(item)}
+                          onOpenMenu={(position) => setBotContextMenu({ ...position, bot: item })}
                         >
                           <div className="hub-bot-avatar-col">
                             <GrokBotAvatar preset={preset} size={46} />
@@ -3972,7 +4281,7 @@ ${newer}` : draftSnapshot;
                               </button>
                             </div>
                           </div>
-                        </div>
+                        </HubArchivedRow>
                       );
                     })}
                 </div>
@@ -4019,8 +4328,13 @@ ${newer}` : draftSnapshot;
       )}
 
       {/* ==================== SCREEN 2: BOT CHAT VIEW (15845.jpg) ==================== */}
-      {screen === 'chat' && activeBot && (
-        <main className={`bot-chat-view grok-page-enter${anyDrawerOpen ? ' is-scaled' : ''}`}>
+      {/* dm 子页从聊天进入时保持 chat DOM（隐藏不卸载）：返回主聊天滚动位置不丢。 */}
+      {(screen === 'chat' || (screen === 'dm' && dmTarget?.returnScreen === 'chat')) && activeBot && (
+        <main
+          className={`bot-chat-view grok-page-enter${anyDrawerOpen ? ' is-scaled' : ''}`}
+          aria-hidden={screen !== 'chat' || undefined}
+          style={screen === 'chat' ? undefined : { display: 'none' }}
+        >
           {/* Floating Top Header Bar (15845.jpg) */}
           <header className="grok-chat-floating-header">
             <button
@@ -4065,6 +4379,17 @@ ${newer}` : draftSnapshot;
 
             <button
               type="button"
+              className="grok-chat-header-dm-btn"
+              onClick={() => {
+                setChatTopMenuOpen(false);
+                openBotDmList(activeBot);
+              }}
+            >
+              {t('私聊', 'DMs')}
+            </button>
+
+            <button
+              type="button"
               className="grok-floating-circle-btn grok-chat-header-more"
               aria-label={t('更多选项', 'More options')}
               aria-expanded={chatTopMenuOpen}
@@ -4096,17 +4421,6 @@ ${newer}` : draftSnapshot;
                   >
                     <Search size={19} />
                     <span>{t('在聊天中查找', 'Search in Chat')}</span>
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setChatTopMenuOpen(false);
-                      setScreen('bot-scopes');
-                    }}
-                  >
-                    <MessageSquare size={19} />
-                    <span>{t('Bot 通信', 'Bot Comm')}</span>
                   </button>
                   {!activeBot.isPrimary && !activeBot.archivedAt && (
                     <button
@@ -4306,14 +4620,15 @@ ${newer}` : draftSnapshot;
                   !displayGeneratingText,
               )}
               queuedCount={chatLive?.queuedCount ?? 0}
-              hasError={Boolean(submissionFailure) || chatReceipt?.status === 'unanswered'}
+              activity={botActivity}
+              hasError={Boolean(failureNotice) || (chatReceipt?.status === 'unanswered' && !receiptUserCancelled)}
               startedAt={activeTurnStartedAt}
               t={t}
             />
             <ErrorNotice
-              error={submissionFailure || (!centerConn.ready && centerConn.status?.error ? centerConn.error : '')}
-              actionLabel={submissionFailure ? t('检查配置', 'Check Settings') : !centerConn.ready && centerConn.status?.error ? t('去连接', 'Connect') : undefined}
-              onAction={submissionFailure ? () => openBotProfile(activeBot) : !centerConn.ready && centerConn.status?.error ? () => setScreen('settings') : undefined}
+              error={failureNotice || (!centerConn.ready && centerConn.status?.error ? centerConn.error : '')}
+              actionLabel={failureNotice ? t('检查配置', 'Check Settings') : !centerConn.ready && centerConn.status?.error ? t('去连接', 'Connect') : undefined}
+              onAction={failureNotice ? () => openBotProfile(activeBot) : !centerConn.ready && centerConn.status?.error ? () => setScreen('settings') : undefined}
             />
             {((chatLoadError && !(centerConn.status?.state === 'disconnected' && centerConn.status.error)) || (chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering')) && (
               <div className="bot-chat-system-notice" role="status">
@@ -4381,15 +4696,11 @@ ${newer}` : draftSnapshot;
                 }}
                 onRunCommand={runSlashCommand}
                 commandBusy={Boolean(slashBusy)}
-                onAbort={() =>
-                  void action.run(async () => {
-                    if (activeBot.remoteIdentity && remoteClientRef.current) {
-                      await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'abort', {
-                        botId: activeBot.botId,
-                      });
-                    }
-                  })
-                }
+                canStop={canStopBot}
+                stopping={isStoppingBot}
+                onAbort={async () => {
+                  await requestStopBot(activeBot);
+                }}
                 pending={chatPending?.scopeKey === activeChatScope ? chatPending : undefined}
                 fallbackDraft={chatDraft}
                 onFallbackTransferred={() => {
@@ -4432,7 +4743,7 @@ ${newer}` : draftSnapshot;
                 onNotSent={requestId => removePending(activeChatScope, requestId)}
               />
             ) : <>
-            <ErrorNotice error={action.error} compact onDismiss={() => action.setError('')} />
+            <ErrorNotice error={stopError || action.error} compact onDismiss={() => { setStopError(''); action.setError(''); }} />
             {!activeChatScope && <div className="bot-chat-system-notice" role="status">{t('正在读取目标身份…', 'Loading target identity…')}</div>}
 
             {slash.open && (
@@ -4594,26 +4905,7 @@ ${newer}` : draftSnapshot;
                   </button>
                 )}
 
-                {isBotBusy && !chatDraft.trim() && chatDraftAttachments.length === 0 ? (
-                  <button
-                    type="button"
-                    className="grok-composer-action-pill stop"
-                    aria-label={t('停止生成', 'Stop')}
-                    onClick={() =>
-                      action.run(async () => {
-                        if (activeBot.hostKind === 'local') {
-                          await BotHost.call({ method: 'abort', params: { botId: activeBot.botId } });
-                        } else if (activeBot.hostKind === 'remote' && activeBot.remoteIdentity && remoteClientRef.current) {
-                          await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'abort', {
-                            botId: activeBot.botId,
-                          });
-                        }
-                      })
-                    }
-                  >
-                    <Square size={15} />
-                  </button>
-                ) : chatDraft.trim() || chatDraftAttachments.length > 0 ? (
+                {chatDraft.trim() || chatDraftAttachments.length > 0 ? (
                   <button
                     type="button"
                     className="grok-composer-action-pill send"
@@ -4623,7 +4915,7 @@ ${newer}` : draftSnapshot;
                   >
                     <ArrowUp size={18} />
                   </button>
-                ) : (
+                ) : !canStopBot && !isBotBusy ? (
                   <button
                     type="button"
                     className="grok-composer-action-pill voice"
@@ -4632,8 +4924,28 @@ ${newer}` : draftSnapshot;
                   >
                     <AudioLines size={18} />
                   </button>
-                )}
+                ) : null}
               </div>
+
+              {/* 停止与发送并存：草稿/附件/发送准备/失败受理都可停止；不被 action.busy/上传/草稿锁禁用，只防重复。 */}
+              {canStopBot || isStoppingBot ? (
+                <button
+                  type="button"
+                  className="grok-composer-action-pill stop"
+                  aria-label={t('停止此 Bot', 'Stop this bot')}
+                  disabled={isStoppingBot}
+                  onClick={() => {
+                    if (isStoppingBot) return;
+                    setStopError('');
+                    requestStopBot(activeBot).then(
+                      () => setStopError(''),
+                      error => setStopError(errorText(error)),
+                    );
+                  }}
+                >
+                  {isStoppingBot ? <RefreshCw size={14} className="grok-spin" /> : <Square size={15} />}
+                </button>
+              ) : null}
             </div>
             </>}
           </footer>
@@ -6030,63 +6342,100 @@ ${newer}` : draftSnapshot;
         </main>
       )}
 
-      {(screen === 'scopes' || screen === 'bot-scopes' || screen === 'pending') && (
+      {(screen === 'conversation' || screen === 'dm' || screen === 'pending') && (
         <main className="grok-subpage grok-page-enter">
-          <header className="grok-subpage-topbar">
-            <button
-              type="button"
-              className="grok-floating-circle-btn"
-              onClick={() => setScreen(screen === 'bot-scopes' ? 'chat' : 'hub')}
-              aria-label={t('返回', 'Back')}
-            >
-              <ArrowLeft size={20} />
-            </button>
-            <h2 className="grok-subpage-header-title">
-              {screen === 'pending' ? t('待发送', 'Pending') : screen === 'bot-scopes' ? t('Bot 通信', 'Bot Comm') : t('群聊与 Bot 私聊', 'Rooms and DMs')}
-            </h2>
-            <span style={{ width: 44 }} />
-          </header>
-          <div className="grok-subpage-scroll">
-            {screen === 'bot-scopes' ? (
-              // 单个 Bot 的通信页：本机 Bot 用只读适配器（本地 ledger，无需远端），
-              // 远端 Bot 复用既有远程 DesktopViewApi（房间发送保留原行为）。
-              activeBot?.hostKind === 'remote' ? (
-                remoteClientRef.current && activeBot.remoteIdentity ? (
-                  <div className="grok-scopes-mobile-container">
-                    <Scopes
-                      key={`botcomm-r-${activeBot.remoteIdentity.profileId}|${activeBot.remoteIdentity.kind}|${activeBot.remoteIdentity.generation}|${activeBot.remoteIdentity.targetDeviceId}|${activeBot.botId}`}
-                      api={remoteClientRef.current.api}
-                      pageActive={active}
-                      initialBotId={activeBot.botId}
-                      onOpenBot={handleOpenBot}
-                    />
-                  </div>
-                ) : (
-                  <section className="grok-card-group grok-schedule-empty" style={{ marginTop: 12 }}>
-                    <Globe size={28} className="grok-row-icon" />
-                    <h4>{t('远端节点未连接', 'Remote node not connected')}</h4>
-                    <p>{t('连接远端节点后可查看该 Bot 的群聊与私聊。', 'Connect to the remote node to view this Bot\'s rooms and DMs.')}</p>
-                  </section>
-                )
-              ) : activeBot ? (
-                localScopeApi ? (
-                  <div className="grok-scopes-mobile-container">
-                    <Scopes
-                      key={`botcomm-l-${localScopeApi.identity?.targetDeviceId ?? 'nodevice'}|${localScopeApi.identity?.generation ?? 0}|${activeBot.botId}`}
-                      api={localScopeApi}
-                      pageActive={active}
-                      readOnly
-                      initialBotId={activeBot.botId}
-                      onOpenBot={handleOpenBot}
-                    />
-                  </div>
-                ) : (
-                  <section className="grok-card-group grok-schedule-empty" style={{ marginTop: 12 }}>
-                    <Globe size={28} className="grok-row-icon" />
-                    <h4>{t('本机 Host 未就绪', 'Local host not ready')}</h4>
-                    <p>{t('Host 启动后即可查看该 Bot 的群聊与私聊记录。', 'Once the host is running you can view this Bot\'s rooms and DMs.')}</p>
-                  </section>
-                )
+          {screen === 'pending' && (
+            <header className="grok-subpage-topbar">
+              <button
+                type="button"
+                className="grok-floating-circle-btn"
+                onClick={() => setScreen('hub')}
+                aria-label={t('返回', 'Back')}
+              >
+                <ArrowLeft size={20} />
+              </button>
+              <h2 className="grok-subpage-header-title">{t('待发送', 'Pending')}</h2>
+              <span style={{ width: 44 }} />
+            </header>
+          )}
+          {/* conversation/dm 页面头由 Scopes 会话头承担：宿主不再叠一层标题栏，
+              容器占满高、消息区独立滚动、底部输入不随页面滚动离开。 */}
+          <div className={screen === 'pending' ? 'grok-subpage-scroll' : 'grok-subpage-fill'}>
+            {screen === 'conversation' ? (
+              scopeConversationTarget ? (
+                // 打开时捕获的 api 可能带旧 targetOnline/失效代际；按稳定 profile/kind/device
+                // 重新解析当前来源 api，离线/上线切换即生效。
+                (() => {
+                  const tid = scopeConversationTarget.identity;
+                  const liveApi = scopeConversationSources.find(s =>
+                    s.identity?.profileId === tid.profileId &&
+                    s.identity?.kind === tid.kind &&
+                    s.identity?.targetDeviceId === tid.targetDeviceId,
+                  )?.api ?? scopeConversationTarget.api;
+                  return (
+                <div className="grok-scopes-mobile-container">
+                  <Scopes
+                    key={`room-${scopeConversationTarget.key}`}
+                    api={liveApi}
+                    pageActive={active}
+                    // 群聊开放用户写入口：写端由 resolver 路由（成员→authority、发送→成员 Host）；
+                    // 未接入写端显示待连接而非只读。DM 路径不受影响仍只读。
+                    readOnly={false}
+                    resolveRoomApi={resolveRoomApi}
+                    memberCandidates={roomMemberCandidates}
+                    detailOnly
+                    scopeKind="room"
+                    initialScopeId={scopeConversationTarget.scope.scope.scopeId}
+                    knownBots={knownBots}
+                    onOpenLink={openScopeLink}
+                    onBack={() => setScreen(scopeReturnScreen)}
+                    onOpenBot={handleOpenBot}
+                  />
+                </div>
+                  );
+                })()
+              ) : null
+            ) : screen === 'dm' ? (
+              dmTarget ? (
+                (() => {
+                  const bot = dmTarget.bot;
+                  const dmSource = scopeConversationSources.find(source => {
+                    if (bot.hostKind === 'local') return source.api === localScopeApi;
+                    return source.identity?.targetDeviceId === bot.hostId;
+                  });
+                  if (!dmSource) {
+                    return (
+                      <section className="grok-card-group grok-schedule-empty" style={{ marginTop: 12 }}>
+                        <Globe size={28} className="grok-row-icon" />
+                        <h4>{bot.hostKind === 'remote' ? t('远端节点未连接', 'Remote node not connected') : t('本机 Host 未就绪', 'Local host not ready')}</h4>
+                        <p>{bot.hostKind === 'remote'
+                          ? t('连接远端节点后可查看该 Bot 的私聊。', 'Connect to the remote node to view this Bot\'s private chats.')
+                          : t('Host 启动后即可查看该 Bot 的私聊记录。', 'Once the host is running you can view this Bot\'s private chats.')}</p>
+                      </section>
+                    );
+                  }
+                  const participant: MessageMember = { deviceId: bot.deviceId, botId: bot.botId };
+                  return (
+                    <div className="grok-scopes-mobile-container">
+                      <Scopes
+                        key={`dm-${dmSource.identity?.profileId ?? 'local'}|${dmSource.identity?.generation ?? 0}|${participant.deviceId}|${participant.botId}`}
+                        api={dmSource.api}
+                        pageActive={active}
+                        readOnly
+                        scopeKind="dm"
+                        participant={participant}
+                        participantName={bot.role}
+                        selectedScopeId={dmSelectedScopeId}
+                        onSelectScope={setDmSelectedScopeId}
+                        // DM 列表头返回其来源页；详情返回由受控 selectedScopeId 清空（见 handleStepBack）。
+                        onBack={dmSelectedScopeId ? undefined : () => setScreen(dmTarget.returnScreen)}
+                        knownBots={knownBots}
+                        onOpenLink={openScopeLink}
+                        onOpenBot={handleOpenBot}
+                      />
+                    </div>
+                  );
+                })()
               ) : null
             ) : remoteClientRef.current && remoteIdentity ? (
               <>
@@ -6127,20 +6476,11 @@ ${newer}` : draftSnapshot;
                     <h4>{t('请先选择目标节点设备', 'Select a Target Device')}</h4>
                     <p>
                       {t(
-                        '在上方下拉菜单中选择已连接的节点设备，即可管理该节点上的群聊房间或待发送队列。',
-                        'Choose a connected device above to view its rooms or pending queue.',
+                        '在上方下拉菜单中选择已连接的节点设备，即可查看该节点上的待发送队列。',
+                        'Choose a connected device above to view its pending queue.',
                       )}
                     </p>
                   </section>
-                ) : screen === 'scopes' ? (
-                  <div className="grok-scopes-mobile-container">
-                    <Scopes
-                      key={`${remoteIdentity.profileId}|${remoteIdentity.kind}|${remoteIdentity.targetDeviceId}`}
-                      api={remoteClientRef.current.api}
-                      pageActive={active}
-                      onOpenBot={handleOpenBot}
-                    />
-                  </div>
                 ) : (
                   <div className="grok-pending-mobile-container">
                     <PendingPanel
@@ -6234,19 +6574,6 @@ ${newer}` : draftSnapshot;
               className="hub-left-nav-btn"
               onClick={() => {
                 setLeftDrawerOpen(false);
-                setScreen('scopes');
-              }}
-            >
-              <MessageSquare size={19} />
-              <span>{t('群聊与 Bot 私聊', 'Rooms and DMs')}</span>
-              <ChevronRight size={16} className="hub-left-nav-chevron" />
-            </button>
-
-            <button
-              type="button"
-              className="hub-left-nav-btn"
-              onClick={() => {
-                setLeftDrawerOpen(false);
                 setScreen('pending');
               }}
             >
@@ -6273,6 +6600,132 @@ ${newer}` : draftSnapshot;
           </footer>
         </aside>
       </div>
+
+      {/* Bot 行/主助手长按·右键·键盘的“查看私聊”菜单 */}
+      <ConversationContextMenu
+        position={botContextMenu ? { x: botContextMenu.x, y: botContextMenu.y } : null}
+        onClose={() => setBotContextMenu(null)}
+        onViewPrivateChats={() => {
+          const bot = botContextMenu?.bot;
+          if (bot) openBotDmList(bot);
+          else setBotContextMenu(null);
+        }}
+      />
+    </div>
+  );
+}
+
+/** 主 Bot hero：复用上游长按/右键/键盘行交互 hook（顶层调用，非 map 内）。 */
+function HubPrimaryHero({
+  bot,
+  preset,
+  label,
+  onOpen,
+  onOpenMenu,
+}: {
+  bot: UnifiedBotItem;
+  preset: GrokAvatarPreset;
+  label: string;
+  onOpen: () => void;
+  onOpenMenu: (position: { x: number; y: number }) => void;
+}) {
+  const interactions = useConversationRowInteractions({ onOpen, onOpenMenu });
+  return (
+    <button
+      type="button"
+      className="hub-hero-button"
+      aria-label={label}
+      {...interactions}
+    >
+      <GrokBotAvatar
+        preset={preset}
+        isPrimary
+        starBadge
+        platformBadge={<PlatformLogoIcon platform={bot.platform} size={11} />}
+        size={88}
+      />
+      <span className="hub-hero-name" title={bot.role}>{bot.role}</span>
+      <span className="hub-bot-host-badge local" title={bot.hostLabel}>
+        <PlatformLogoIcon platform={bot.platform} size={12} />
+        <span className="hub-bot-host-text">{bot.hostLabel}</span>
+      </span>
+    </button>
+  );
+}
+
+/** 普通 Bot 行：ConversationRow 承载点击/长按/键盘菜单，保 host badge 与时间。 */
+function HubBotRow({
+  item,
+  preset,
+  isPrimaryActive,
+  snippet,
+  unread,
+  timestampMs,
+  onOpen,
+  onOpenMenu,
+}: {
+  item: UnifiedBotItem;
+  preset: GrokAvatarPreset;
+  isPrimaryActive: boolean;
+  snippet: string;
+  unread: boolean;
+  /** server/meta 最大值，与混排排序一致。 */
+  timestampMs: number;
+  onOpen: () => void;
+  onOpenMenu: (position: { x: number; y: number }) => void;
+}) {
+  return (
+    <ConversationRow
+      className={`hub-bot-row${item.online === false ? ' is-offline' : ''}`}
+      title={item.role}
+      preview={snippet}
+      timestamp={timestampMs || null}
+      unread={unread}
+      avatar={
+        <GrokBotAvatar
+          preset={preset}
+          isPrimary={isPrimaryActive}
+          starBadge={isPrimaryActive}
+          size={52}
+        />
+      }
+      onOpen={onOpen}
+      onOpenMenu={onOpenMenu}
+      meta={item.hostLabel}
+    />
+  );
+}
+
+/** 归档 Bot 行：div + 上游 hook 交互；内部操作按钮不触发长按菜单，也不进入聊天。 */
+function HubArchivedRow({
+  onOpen,
+  onOpenMenu,
+  children,
+}: {
+  onOpen: () => void;
+  onOpenMenu: (position: { x: number; y: number }) => void;
+  children: React.ReactNode;
+}) {
+  const interactions = useConversationRowInteractions({ onOpen, onOpenMenu });
+  // 共享 hook 已忽略嵌套控件起点；move/up/leave 无条件转发，否则按下行文本、
+  // 抬起在内按钮时会残留计时器。仅重写 Enter/Space 打开行为。
+  return (
+    <div
+      className="hub-bot-row is-archived"
+      style={{ opacity: 0.72 }}
+      role="button"
+      tabIndex={0}
+      {...interactions}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onOpen();
+          return;
+        }
+        interactions.onKeyDown(e);
+      }}
+    >
+      {children}
     </div>
   );
 }
@@ -6283,6 +6736,8 @@ function RemotePendingComposer({
   botId,
   botRole,
   isBotBusy,
+  canStop = false,
+  stopping = false,
   online,
   onOffline,
   composerMenuOpen,
@@ -6307,6 +6762,10 @@ function RemotePendingComposer({
   botId: string;
   botRole: string;
   isBotBusy: boolean;
+  /** 统一活动状态允许停止（排队/准备/运行/让位/失败受理）。 */
+  canStop?: boolean;
+  /** 停止已受理、正在确认；发送/草稿/上传都不解除它。 */
+  stopping?: boolean;
   online: boolean;
   onOffline(): void;
   composerMenuOpen: boolean;
@@ -6316,7 +6775,8 @@ function RemotePendingComposer({
   onRunCommand(command: SlashCommandName): Promise<boolean>;
   /** 顶栏菜单等 Host 侧发起的命令执行中：锁住输入与发送，避免绕过。 */
   commandBusy?: boolean;
-  onAbort(): void;
+  /** 停止此 Bot：调用方等待 Promise；失败由调用方统一提示，此处不吞错。 */
+  onAbort(): Promise<unknown>;
   onAccepted(receipt: HostSubmission): void;
   onStarted(requestId: string, text: string, draft: DesktopDraftEntry): void;
   onPersist(requestId: string): boolean;
@@ -6411,7 +6871,19 @@ function RemotePendingComposer({
   const [slashBusy, setSlashBusy] = useState<SlashCommandName>();
   const slashBusyRef = useRef(false);
   const sending = useRef(false);
+  const [stopError, setStopError] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  /** 停止与发送并存、独立：不被 attempt/上传/草稿/action.busy 锁禁，只防重复。 */
+  const stopBusy = Boolean(stopping);
+  const runAbort = async () => {
+    if (stopBusy) return;
+    setStopError('');
+    try {
+      await onAbort();
+    } catch (error) {
+      setStopError(errorText(error));
+    }
+  };
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -6733,7 +7205,7 @@ function RemotePendingComposer({
   return (
     <>
       <ErrorNotice
-        error={drafts.error || notice}
+        error={drafts.error || notice || stopError}
         compact
         onDismiss={notice && !drafts.error ? () => setNotice('') : undefined}
       />
@@ -6913,16 +7385,7 @@ function RemotePendingComposer({
             }}
           />
 
-          {isBotBusy && !drafts.text.trim() && drafts.attachments.length === 0 ? (
-            <button
-              type="button"
-              className="grok-composer-action-pill stop"
-              aria-label={t('停止生成', 'Stop')}
-              onClick={onAbort}
-            >
-              <Square size={15} />
-            </button>
-          ) : drafts.text.trim() || drafts.attachments.length > 0 ? (
+          {drafts.text.trim() || drafts.attachments.length > 0 ? (
             <button
               type="button"
               className="grok-composer-action-pill send"
@@ -6932,7 +7395,7 @@ function RemotePendingComposer({
             >
               <ArrowUp size={18} />
             </button>
-          ) : (
+          ) : !canStop && !isBotBusy ? (
             <button
               type="button"
               className="grok-composer-action-pill voice"
@@ -6941,7 +7404,20 @@ function RemotePendingComposer({
             >
               <AudioLines size={18} />
             </button>
-          )}
+          ) : null}
+
+          {/* 停止与发送并存：排队/准备/失败受理/草稿/附件状态下均可停止；不被发送/上传/草稿锁禁用。 */}
+          {canStop || stopBusy ? (
+            <button
+              type="button"
+              className="grok-composer-action-pill stop"
+              aria-label={t('停止此 Bot', 'Stop this bot')}
+              disabled={stopBusy}
+              onClick={() => void runAbort()}
+            >
+              {stopBusy ? <RefreshCw size={14} className="grok-spin" /> : <Square size={15} />}
+            </button>
+          ) : null}
         </div>
       </div>
     </>

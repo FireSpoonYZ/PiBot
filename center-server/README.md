@@ -10,6 +10,14 @@
 
 升级客户端后，旧的本地自定义头像会在读取目录时自动补传；只在中心从未保存过头像（revision 为 0）时导入，多个旧客户端同时导入时以中心首次接受的配置为准。中心已经保存的配置或“恢复默认”优先，旧缓存不会将其覆盖。新 Bot 创建时的头像先保留本地草稿，随下一次目录同步上传；已有 Bot 编辑头像需要中心保存成功后才显示完成。
 
+## 默认 Bot 绑定
+
+部分 Host 插件在中心注册为"默认绑定"能力：当安装处于已启用状态（`installation.enabled` 且 activation 为 `enabled`）时，新注册的 Bot 自动获得 `enabled: true`、revision 1 的绑定，沿用全局配置。已有 Bot 在安装首次变为已启用状态时同样补发默认绑定。**显式禁用、自定义 overrides 或既有 revision 不会被覆盖。**
+
+当前默认绑定能力：`e-launcher.hindsight`（默认 `projectId: <name>-<botId>`）、`e-launcher.billion-context`（使用全局配置）。默认绑定仅在 Bot 首次注册或安装首次激活时写入一次；之后所有变更走普通 `PUT /api/devices/:deviceId/bots/:botId/capabilities/:id` 修订检查路径。
+
+生产部署 Billion Context 时，经 owner session 上传 artifact 并完成 `POST /api/installations` + `POST /api/installations/:id/enable`；激活成功后所有尚无 BC 绑定记录的 Bot 自动获得默认启用绑定。无额外迁移步骤；已有显式禁用或自定义 overrides 的 Bot 不受影响。
+
 ## 每轮准入（turn admission）
 
 > **状态**：本节描述本轮实现的每轮准入契约，由父助手统一集成与端到端验收；在验收完成前以下为设计契约而非已验证事实。Host 侧语义见 [host-core/README.md](../host-core/README.md) 的「每轮集中插件同步」。

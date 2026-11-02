@@ -216,7 +216,7 @@ node host-core/runtime-cli.js wait --data-root "$DATA_ROOT" --config "$CONFIG" -
 
 冷启动顺序（openRuntime → 中心快照 apply → resume）：Harness open 把存活 running 任务改回 pending 但不派发，调度保持 paused。此阶段初始化只 ensureBotSoul，不用空模型/插件 profile 重写已持久化 AgentDoc（否则恢复任务丢工具、记 toolsRemoved/interrupted）；配置应用的空闲门槛在调度 paused 时把磁盘遗留 pending 视为可恢复而非忙碌，先恢复已授权模型/插件注册/profile，随后 HostService 才 resume 接管任务。正常调度期 botIsIdle 保护不变。
 
-Durable 自动 compaction 保持关闭；模块 3 的 BC 插件启用时负责上下文压缩，未启用时不压缩。本模块没有注册文件、命令或屏幕工具，没有替换旧 Android/Capacitor 运行链路。
+全部 Bot 沿用 SDK 默认自动 compaction（阈值/后台触发与一次 provider 溢出压缩重试），不再强制关闭；BC 插件与原生压缩可共存，两者不互斥。本模块没有注册文件、命令或屏幕工具，没有替换旧 Android/Capacitor 运行链路。
 
 ### 模块 2 验收
 
@@ -226,7 +226,7 @@ Durable 自动 compaction 保持关闭；模块 3 的 BC 插件启用时负责�
 
 ## 模块 3：受管 Billion Context 插件
 
-受管插件使用 [acp-kernel](https://github.com/ranxianglei/acp-kernel) 0.0.101 管理长期上下文，不需要另外启动 bili 或代理；新 Host 不内嵌 BC。迁移时先在中心上传并安装插件实例且保持 Bot 绑定关闭，停止旧 Host 并保留数据后才启用目标 Bot 绑定，再更新并启动新 Host，等待安装及 snapshot/profile 应用完成后恢复调度；不要在旧 Host 运行时下发启用，旧内置工具与插件原名冲突。详细步骤见 [插件 README](../plugins/billion-context/README.md)。未启用时使用未压缩请求并执行最终预算检查。上游负责范围选择、分层压缩、引用、摘要投影与搜索；摘要由模型通过工具提供。完整条款及署名见 [第三方声明](../THIRD_PARTY_NOTICES.md#acp-kernel)。
+受管插件使用 [acp-kernel](https://github.com/ranxianglei/acp-kernel) 0.0.101 管理长期上下文，不需要另外启动 bili 或代理；新 Host 不内嵌 BC。以下迁移步骤仅适用于从旧内嵌 BC 版本升级：先在中心上传并安装插件实例且保持 Bot 绑定关闭，停止旧 Host 并保留数据后才启用目标 Bot 绑定，再更新并启动新 Host，等待安装及 snapshot/profile 应用完成后恢复调度；不要在旧 Host 运行时下发启用，旧内置工具与插件原名冲突。详细步骤见 [插件 README](../plugins/billion-context/README.md)。中心安装并全局启用后给无显式绑定的既有/新 Bot 默认启用 BC（安装本身实例初始停用），显式 false 与已有 overrides 原样保留；未启用的 Bot 只跑 SDK 原生压缩与最终预算检查。上游负责范围选择、分层压缩、引用、摘要投影与搜索；摘要由模型通过工具提供。完整条款及署名见 [第三方声明](../THIRD_PARTY_NOTICES.md#acp-kernel)。
 
 ### 持久状态和请求投影
 
@@ -234,7 +234,7 @@ BC 状态按 Durable conversation 保存，公开 Bot/主私聊身份保持不�
 
 每次模型请求前，已启用的插件读取该生成任务 cutoff 对应的历史视图，把 kernel 状态、内容存储和请求投影放在同一次宿主 commit 中。它与随后保存模型回复的 commit 分开。相同逻辑请求的重试/恢复复用持久投影，不重复分配引用、推进块存活次数或追加提醒。缓存值在事务内复制为普通 JSON，不把已结束事务的草稿传给模型。
 
-kernel 的增长/压力决策由插件渲染为临时上下文提醒；窗口占用估计按已折叠投影计算。原始人类输入不带压缩标签，摘要和提醒不伪装成人类消息写回历史。Durable 自动 compaction 关闭，避免两套压缩策略同时改写上下文。
+kernel 的增长/压力决策由插件渲染为临时上下文提醒；窗口占用估计按已折叠投影计算。原始人类输入不带压缩标签，摘要和提醒不伪装成人类消息写回历史。SDK 原生摘要使上下文 head 前移后，BC 在其现有投影增量上重建；两套机制并行生效，不互相改写对方产物。
 
 本模块折叠纯文本 user/assistant 消息。system、thinking、工具调用/结果和图像等复杂内容原样保留并排除折叠，结构化参数与签名不被标签改写；工具结果不进一步卸载，模块 4 保持同一保护。
 
@@ -357,7 +357,7 @@ await control.close(); // 幂等：先关 listener/连接与进行中 handler，
 
 聊天输入框的 slash 命令只有这两个，均经控制面的同名 additive v2 方法（`clearHistory`/`compact`，params 仅 `{botId}`）执行，不进入模型 submit 或 pending 队列；执行中不接受第二个命令，后端成功后才清输入框，失败/离线保留命令草稿并显示原因。
 
-- `/clear`：`Runtime.clearHistory` 在 Bot 准入内先确认主会话无排队提交/活动任务（含手动压缩），再调用 SDK `conversation.reset(undefined, CTX)` 写入 `pi.reset` 开新上下文（自动压缩仍关闭，`settings.compaction.enabled:false` 不影响手动压缩）。原始持久条目保留以维持 requestId 回执/去重；`history` 读取时倒序沿 cursor 扫到最近一次 `pi.reset`（不设扫描上限），再用 `minEntryId` 只返回其后的条目，因此重开/其他客户端也不再显示清空前的消息。返回的 `clearedThroughEntryId` 是该 reset 条目的真实 id（取 `conversation.context().head`，不是猜测；无会话为 0），是客户端唯一可见历史水位。
+- `/clear`：`Runtime.clearHistory` 在 Bot 准入内先确认主会话无排队提交/活动任务（含手动压缩），再调用 SDK `conversation.reset(undefined, CTX)` 写入 `pi.reset` 开新上下文（自动压缩保持 SDK 默认开启；手动压缩是独立的 conversation 级任务，不受影响）。原始持久条目保留以维持 requestId 回执/去重；`history` 读取时倒序沿 cursor 扫到最近一次 `pi.reset`（不设扫描上限），再用 `minEntryId` 只返回其后的条目，因此重开/其他客户端也不再显示清空前的消息。返回的 `clearedThroughEntryId` 是该 reset 条目的真实 id（取 `conversation.context().head`，不是猜测；无会话为 0），是客户端唯一可见历史水位。
 - `/compact`：`Runtime.compact` 在准入内只创建手动压缩任务，`waitForTask` 等终态与摘要落地在准入外（不长期占用 Bot FIFO，第二个命令仍因活动任务而被 `RUNTIME_BUSY` 拒绝）。任务失败/中止抛 `COMPACTION_FAILED`；任务返回 `submissionId` 时还要求该 write 已 `done`（会话空闲时 SDK 在同一个 terminal commit 内落地），否则不算成功。返回 `compacted:false` 表示没有可压缩内容（无会话或任务结果无 summary）。压缩沿用长运行超时链（与 memory 方法同一组 135s/140s/145s 期限和 130s HTTP 空闲窗口），不把入队当成功。
 - 两个方法都是归档 Bot 只读（`BOT_ARCHIVED`），主会话有活动任务/排队提交时 `RUNTIME_BUSY`；手动压缩任务本身也计入该检查，避免对正在压缩的会话重复压缩或清空。
 
@@ -861,9 +861,16 @@ node host-core/control-cli.js work-context --url http://127.0.0.1:8787 \
 - `STALE_INPUT` 不写入消息/序号/outbox/目标。驱动持久标记 replan，旧生成不再发起下一次 provider 调用，保留未处理水位，随后用新批次重新考虑；不保证远端尚未到达的消息也被看见。
 - 合法的同 messageId、同发布指纹重试在数据库 guard/成员检查前返回原回执；异内容仍报 `REQUEST_CONFLICT`。guard 不进信封或指纹。已落盘发送在停止或崩溃后可对账，不能把失败/中止结果解释为此前绝无发布或其他副作用。
 
-BC 插件启用时负责压缩，原文不删；禁用时不执行压缩。Host 在插件和 Durable 贡献之后执行最终预算检查，超出上下文窗口时以 `CONTEXT_LIMIT` 阻止 provider 调用；不截掉最新大事件、不自动开启 Durable compaction。窗口估计不是 provider 接受请求的保证。
+BC 插件启用时负责其投影压缩，原文不删；SDK 原生自动压缩对所有 Bot 生效（含 BC 启用的 Bot），两者共存，原生 head 前移后 BC 在现有投影上重建。Host 在插件和 Durable 贡献之后执行最终预算检查：基线用 cutoff 视图的 SDK usage+尾部估计，插件投影按有序子序列 + 增量对齐，真实越限才以 `CONTEXT_LIMIT` 阻止 provider 调用；不截掉最新大事件、不按整包 JSON 估算误杀正常上下文。窗口估计不是 provider 接受请求的保证。
 
-pi-durable 1.3.0 的 HookRunner 会吞掉普通 hook 抛错，因此请求阶段失败需要按当前生成任务的取消保护处理；此前内嵌实现的故障验收不等于新插件链路已验证。
+pi-durable 的 HookRunner 会吞掉普通 hook 抛错，因此请求阶段失败需要按当前生成任务的取消保护处理；此前内嵌实现的故障验收不等于新插件链路已验证。
+
+### 当前约定：自动压缩与失败闭环
+
+- **压缩**：全部 Bot 默认 SDK 自动 compaction（阈值 blocking/background 与一次 overflow 重试）；中心安装并全局启用后对无显式绑定的既有/新 Bot 默认启用 BC（安装本身实例初始停用），显式 false/overrides 在再次全局启用后仍保留；两者共存，原生 head 变化后 BC 重建投影。已实跑：原 478 会话 threshold 自动压缩完成（任务 4908 completed）与 BC 共存、手动压缩完成（任务 4957 completed）、默认绑定与既有显式 false 均已核验。
+- **预算**：prepare 与最终守卫都用 cutoff 视图的 SDK usage+尾部估计，插件投影按有序子序列 + 增量计费；真实越限才 CONTEXT_LIMIT，不按整包 JSON 误杀。
+- **失败**：只结算本冻结请求批；诊断写 GenerationFailureState 家族（String(taskId) 键、固定安全文案），并向原请求 replyTo 发普通 bot-author `[Host 执行失败]` 回执（前缀只是标签，不提供可信 Host 身份，信封 author 仍是实际 Bot）。旧 scope 闸门错误经迁移边界封存、不重放 backlog，新到消息正常执行。已实跑：委派发起方插入 >20k token 填充后手动 compact，恢复接收方后收到一次稳定 messageId 的 MODEL_REQUIRED 普通 bot 回信（replyTo 原请求），发起方在原 primary 自动报告错误；修复模型后无 resumeWork/无重发旧请求，同一 DM 新请求与回信成功，双方 lastError 归零；Host 重启未重复发失败回执。
+- **LIVE**：blocking 与手动压缩显示 compacting（手动 compacting.startedAt 与原生任务一致），后台压缩不抢占 running；失败展示安全 failed.error；计时用冻结轮 frozenAt / nativeTask.startedAt，不取历史用户消息日期。
 
 ### 工作状态、逐 scope 停止与恢复
 
@@ -890,7 +897,7 @@ pi-durable 1.3.0 的 HookRunner 会吞掉普通 hook 抛错，因此请求阶段
 
 退出当前成员名单时不开始新推理，并终止/对账已绑定的待处理工作；旧冻结收件与历史仍可导入/读取。不把退群写成 owner stopped、不丢未处理输入；重入后若未被 owner 停止且无阻塞错误，可继续处理。
 
-模型配置/生成错误仅阻塞对应 scope，不反复热重试；普通未回答失败为 `WORK_GENERATION_FAILED`，已记录的 `CONTEXT_LIMIT` 保留。修正原因后显式 `resumeWork` 清错误再试。意外存储/schema 故障不吞掉或重置：驱动停止轮询、保留 fatal 错误，activity/变更操作向调用方暴露，需正确关闭/重开并处理原因；主私聊不因工作驱动 fatal 被自动改成停止。
+生成失败只结算本次冻结请求批：持久化 `lastError` 诊断（`GenerationFailureState` 家族按 String(taskId) 记安全 code/固定文案），并以普通 bot 作者身份向原请求 replyTo 发送 `[Host 执行失败]` 回执，不阻塞后续新到消息、不再要求 `resumeWork` 清 scope 闸门。旧 `state.error` 阻塞 scope 的历史积压由迁移边界封存、绝不重放；新到消息正常触发执行。意外存储/schema 故障不吞掉或重置：驱动停止轮询、保留 fatal 错误，activity/变更操作向调用方暴露，需正确关闭/重开并处理原因；主私聊不因工作驱动 fatal 被自动改成停止。
 
 ### Bot 通信工具与异步消息
 
@@ -1561,3 +1568,11 @@ Hindsight 后端 120s ≤ 本机控制 HTTP 空闲 130s ≤ 中继/目标执行 
 - **插件更新发布**：中心侧更新发布后，新轮在准入时取得新集合；同一 Bot 的进行中工作继续用已固定版本，不同 Bot 之间互不需要全局停顿。同一 Bot 若目标集合与活动集合不同，新轮排队等待该 Bot 现有工作结束；相同集合的并发工作可直接共用。
 - **回滚**：选择旧的已保留版本集合即可，不动数据库与共享数据；被引用的旧版本不因新版本发布而被回收。
 - **离线/失败**：中心不可达或集合无法就绪时消息保留并显式等待/重试；Host 端后台快照应用不得覆盖活动的 pin。
+
+## Bot 统一活动、用户抢占与手动停止
+
+> **状态**：已交付并经父助手**限定范围**验收（三端客户端连同一隔离 Linux Host 实测，范围与未覆盖项见 [docs/bot-activity-and-interruption.md](../docs/bot-activity-and-interruption.md)「验收」）。
+
+- LIVE 状态新增可选 `activity`（phase：idle/queued/preparing/running/interrupting/stopping/stopped/failed；source：primary/room/dm/background/null；scopeId/requestId/startedAt 可空），在 wire 边界严格验证，不携带正文或凭据；旧 busy/queuedCount 与 `getWorkActivity` 保留，不新增公共控制方法、不改 `abort` 请求形状。
+- **用户抢占**：直接用户输入持久化后、准入前抢占同 Bot 非用户来源 work（`reason:'preempted'`），不动主聊天、不清 Host 用户队列；被抢占 pending 标记 `interruption`、不推进 handled 水位，用户队列排空后按原消息重新触发，已发布批次已推进 `prepared.throughLocalId`，不会整批重发。
+- **手动停止**：`abort` 立停止 gate（stopEpoch/stopPending）→ 持久取消未原生提交条目（取消与空 pin 清理同事务）→ `interruptBotWork(reason:'user_stop')` → 主会话取消/离线标记；成功置 stopped，失败可见且抛错。user_stop 覆盖各 scope 积压并把消费边界推进到停止捕获的 inbox 水位，结算为主动取消；已取消 requestId 重传不复活，真正重发用新 requestId。`stopWork`/`resumeWork` 仍是 scope 级「暂停/恢复此处工作」，语义不变。

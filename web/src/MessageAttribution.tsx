@@ -1,7 +1,8 @@
 // Unified Bot session 消息来源徽标（web 共享，desktop/mobile 复用）。
-// 契约：kind/botId/deviceId/channel 为稳定身份，name 仅显示；messageId/replyTo
-// 用于稳定 key 与提示，不冒充可见身份。普通用户答案上隐藏 Host 触发器与
-// 私聊/内部协作工作文本的来源徽标（由调用方按 channel/category 过滤决定渲染）。
+// 契约：kind/botId/deviceId/channel 为稳定身份（仅内部 key/定位），名字仅显示；
+// 所有可见文本/aria 只用面向用户的名字与自然回退，永不渲染 UUID/短 ID。
+// 普通用户答案上隐藏 Host 触发器与私聊/内部协作工作文本的来源徽标（由调用方按
+// channel/category 过滤决定渲染）。消息正文里 Bot 自己写出的 ID 是历史内容，不篡改。
 import type { MessageAttribution as MessageAttributionData } from './chatTurnModel';
 import { useText } from './ui';
 import './MessageAttribution.css';
@@ -33,33 +34,23 @@ function kindLabel(kind: MessageAttributionData['kind'], t: (zh: string, en: str
   return l ? t(l.zh, l.en) : kind;
 }
 
-/** 来源可读名称：name 仅显示，缺省回退 kind 标签；kind=bot 时追加 botId 前 8 字符
- * 作可见区分（同名 Bot / 同设备多 Bot），完整 botId 仍在 title/aria 供核对。 */
+/** 来源可读名：有目录名用名字；bot 无名回退自然标签，绝不回退 botId。 */
 function senderLabel(a: MessageAttributionData, t: (zh: string, en: string) => string): string {
-  const base = a.name && a.name.trim() ? a.name : kindLabel(a.kind, t);
-  if (a.kind === 'bot' && a.botId) return `${base} · ${a.botId.slice(0, 8)}`;
-  return base;
+  if (a.name && a.name.trim()) return a.name;
+  return a.kind === 'bot' ? t('未命名 Bot', 'Unnamed Bot') : kindLabel(a.kind, t);
 }
 
 /**
- * 紧凑来源徽标：「名字 · 设备 · 频道」；Bot 来源可见名含 botId 前缀区分同名实例，
- * 完整 ID 进 title/aria 供核对。direction=outgoing 标记为本端发出；replyTo/category 作小标签。
+ * 紧凑来源徽标：「名字 · 频道」+ 可选方向/类别小标签。设备与 ID 不出现在可见
+ * 文本、title 或 aria-label 中（身份区分由宿主 knownBots 名字承担）。
  */
 export function MessageAttribution({ attribution, className }: MessageAttributionProps) {
   const t = useText();
   const a = attribution;
   const sender = senderLabel(a, t);
   const channel = channelLabel(a.channel, t);
-  const device = a.deviceId ?? '';
   const directionOutgoing = a.direction === 'outgoing';
   const isUser = a.kind === 'user';
-
-  const idParts: string[] = [];
-  if (a.botId) idParts.push(a.botId);
-  if (a.scopeId) idParts.push(a.scopeId);
-  if (a.messageId) idParts.push(a.messageId);
-  if (a.replyTo) idParts.push('reply:' + a.replyTo);
-  const ids = idParts.join(' · ');
 
   const categoryLabel =
     a.category === 'notice'
@@ -70,21 +61,19 @@ export function MessageAttribution({ attribution, className }: MessageAttributio
           ? t('回复', 'reply')
           : '';
 
-  const text = [sender, device, channel].filter(Boolean).join(' · ');
-  const full = [text, directionOutgoing ? t('发出', 'outgoing') : '', categoryLabel]
+  const full = [sender, channel, directionOutgoing ? t('发出', 'outgoing') : '', categoryLabel]
     .filter(Boolean)
     .join(' · ');
   return (
     <span
       className={`msg-attr msg-attr-${a.kind}${directionOutgoing ? ' msg-attr-out' : ' msg-attr-in'}${className ? ' ' + className : ''}`}
-      title={ids ? `${full} · ${ids}` : full}
-      aria-label={t(`来源：${full}`, `source: ${full}`) + (ids ? ` · ${ids}` : '')}
+      title={full}
+      aria-label={t(`来源：${full}`, `source: ${full}`)}
       data-channel={a.channel}
       data-kind={a.kind}
       data-user={isUser ? 'true' : undefined}
     >
       <span className="msg-attr-sender">{sender}</span>
-      {device ? <span className="msg-attr-device" title={a.deviceId}>{device}</span> : null}
       <span className="msg-attr-channel">{channel}</span>
       {directionOutgoing ? <span className="msg-attr-dir">{t('发出', 'out')}</span> : null}
       {categoryLabel ? <span className="msg-attr-category">{categoryLabel}</span> : null}

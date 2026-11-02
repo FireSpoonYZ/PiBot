@@ -6,7 +6,6 @@ import {
   formatTurnDuration,
   formatWorkingElapsed,
   parseHistoryEntries,
-  resolveActiveTurnStartedAt,
 } from '../src/chatTurnModel.ts';
 
 test('projectLiveState projects tool-only assistant entries, empty-text toolResults, and timestamps, and passes normalizeLiveSnapshot', () => {
@@ -130,7 +129,6 @@ test('parseHistoryEntries shows tool calls immediately on initiation and updates
   assert.equal(runningTurns[1].role, 'assistant');
   assert.deepEqual(runningTurns[1].tools, [{ id: 'call_1', name: 'bash', status: 'running' }]);
   assert.equal(runningTurns[1].durationMs, undefined);
-  assert.equal(resolveActiveTurnStartedAt(runningTurns), 1_730_000_010_000);
 
   // Phase 2: Tool 1 completed (toolResult arrived), Tool 2 initiated in liveTools
   const step2History = [

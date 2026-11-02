@@ -1,4 +1,5 @@
 import type { ImageAttachment } from '../../host-core/index.js';
+import { resolveActiveActivityStartedAt, type BotActivity } from './botActivity';
 
 /**
  * Unified Bot session UI attribution (contract: safe projection of backend
@@ -905,24 +906,11 @@ export function parseHistoryEntries(
   );
 }
 
+// 当前执行轮的计时起点：只认 Host activity.startedAt（含 compacting，自动压缩保持原轮起点）。
+// 旧 Host 没有该字段时返回 null，由 WorkingSlot 首次观测忙碌时落锚；历史用户轮/提交时间
+// 再也不是当前轮时钟的来源（曾把上一用户消息时间误当本轮起点显示成几十小时）。
 export function resolveActiveTurnStartedAt(
-  turns: ChatTurn[],
-  pendingSubmittedAt?: number | null,
+  activity?: BotActivity | null,
 ): number | null {
-  for (let i = turns.length - 1; i >= 0; i--) {
-    const turn = turns[i];
-    if (turn.role === 'user' && typeof turn.startedAt === 'number' && turn.startedAt > 0) {
-      return turn.startedAt;
-    }
-  }
-  for (let i = turns.length - 1; i >= 0; i--) {
-    const turn = turns[i];
-    if (typeof turn.startedAt === 'number' && turn.startedAt > 0) {
-      return turn.startedAt;
-    }
-  }
-  if (typeof pendingSubmittedAt === 'number' && Number.isFinite(pendingSubmittedAt) && pendingSubmittedAt > 0) {
-    return pendingSubmittedAt;
-  }
-  return null;
+  return resolveActiveActivityStartedAt(activity ?? null);
 }

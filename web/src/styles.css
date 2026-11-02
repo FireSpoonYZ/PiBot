@@ -604,6 +604,8 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .grok-composer-action-pill { height: 36px; min-width: 44px; padding: 0 12px; border-radius: 999px; background: var(--text); color: var(--bg); display: inline-flex; align-items: center; justify-content: center; flex: none; white-space: nowrap; transition: transform 160ms cubic-bezier(.22, 1, .36, 1); }
 .grok-composer-action-pill.send { background: #2B70F6; color: #fff; }
 .grok-composer-action-pill.stop { background: var(--danger); color: #fff; }
+/* 停止按钮独立于输入胶囊，与发送并存；与 + 按钮同高对齐。 */
+.grok-composer-row > .grok-composer-action-pill.stop { align-self: flex-end; width: 46px; height: 46px; min-width: 46px; padding: 0; border-radius: 50%; }
 .grok-subpage-topbar { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: calc(var(--top) + 6px) 18px 8px; }
 .grok-subpage-header-title { margin: 0; font-size: 1.08rem; font-weight: 650; text-align: center; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .grok-subpage-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
@@ -723,13 +725,15 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .grok-pending-freeze-desc { margin: 0; font-size: .84rem; color: var(--muted); line-height: 1.45; }
 .grok-pending-freeze-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .grok-composer-files-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-.grok-scopes-mobile-container, .grok-pending-mobile-container { display: flex; flex-direction: column; gap: 12px; }
-.grok-scopes-mobile-container .panel, .grok-pending-mobile-container .panel { border-radius: 22px; background: color-mix(in srgb, var(--bg) 96%, #fff); border: 1px solid color-mix(in srgb, var(--line) 75%, transparent); box-shadow: 0 2px 10px rgb(0 0 0 / .03); padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
-:root[data-theme=dark] .grok-scopes-mobile-container .panel, :root[data-theme=dark] .grok-pending-mobile-container .panel { background: var(--surface); }
-.grok-scopes-mobile-container .row, .grok-pending-mobile-container .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.grok-scopes-mobile-container button, .grok-pending-mobile-container button { min-height: 36px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); font-size: .84rem; font-weight: 600; }
-.grok-scopes-mobile-container .list, .grok-pending-mobile-container .list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
-.grok-scopes-mobile-container .list > li, .grok-pending-mobile-container .list > li { padding: 10px 12px; border-radius: 14px; border: 1px solid var(--line); background: var(--bg); display: flex; flex-direction: column; gap: 6px; }
+/* scope 容器不再套本组规则：通配 button 等旧调试页样式会污染新会话页；
+   scope 布局由 .grok-subpage-fill（bot-communications-mobile.css）承担，pending 原样保留。 */
+.grok-pending-mobile-container { display: flex; flex-direction: column; gap: 12px; }
+.grok-pending-mobile-container .panel { border-radius: 22px; background: color-mix(in srgb, var(--bg) 96%, #fff); border: 1px solid color-mix(in srgb, var(--line) 75%, transparent); box-shadow: 0 2px 10px rgb(0 0 0 / .03); padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+:root[data-theme=dark] .grok-pending-mobile-container .panel { background: var(--surface); }
+.grok-pending-mobile-container .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.grok-pending-mobile-container button { min-height: 36px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); font-size: .84rem; font-weight: 600; }
+.grok-pending-mobile-container .list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
+.grok-pending-mobile-container .list > li { padding: 10px 12px; border-radius: 14px; border: 1px solid var(--line); background: var(--bg); display: flex; flex-direction: column; gap: 6px; }
 .hub-remote-connect-box { padding-top: 8px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
 .grok-advanced-details { border-radius: 22px; background: color-mix(in srgb, var(--bg) 96%, #fff); border: 1px solid color-mix(in srgb, var(--line) 75%, transparent); box-shadow: 0 2px 10px rgb(0 0 0 / .03); overflow: hidden; }
 :root[data-theme=dark] .grok-advanced-details { background: var(--surface); }

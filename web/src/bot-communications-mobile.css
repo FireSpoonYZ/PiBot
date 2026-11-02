@@ -60,3 +60,85 @@
 .bot-chat-bubble.is-peer .bot-chat-attribution .attribution-channel.is-room {
   color: #1f8dff;
 }
+
+/* 群聊/私聊子页：内容页不再走 .grok-subpage-scroll 多重滚动——容器占满父高度，
+   页面头/消息滚动区/底部输入由 Scopes 会话布局自身负责，输入不离屏。 */
+.grok-subpage-fill {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* 原 styles.css 的 .grok-scopes-mobile-container display/flex-direction 移到这里：
+   旧调试页通配样式（button/.panel/.list 等）只保留给 pending，不再作用 scope 容器。 */
+.grok-subpage-fill > .grok-scopes-mobile-container {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Hub 混排：共享 .gbot-conversation-row 复用 .hub-bot-row 布局；群聊行徽章与 Bot 行 host badge 同风格。 */
+.hub-bot-row .gbot-conversation-row__badge {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: .68rem;
+  font-weight: 600;
+  line-height: 1.3;
+  background: color-mix(in srgb, var(--accent) 15%, var(--surface));
+  color: var(--accent);
+}
+
+/* 聊天标题右侧的“私聊”文字按钮：紧凑、不挤占中央标题。 */
+.grok-chat-header-dm-btn {
+  flex: none;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font-size: .82rem;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.grok-chat-header-dm-btn:hover,
+.grok-chat-header-dm-btn:active {
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+}
+
+/* Bot 行/主助手“查看私聊”菜单：共享上游 ContextMenu 定位/焦点/关闭逻辑，
+   本工程主题变量外壳；[data-ready] 前不显示（上游先定位再 reveal）。 */
+.baby-grok-bot-context-menu.gbot-context-menu {
+  position: fixed;
+  z-index: 300;
+  min-width: 168px;
+  padding: 6px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: 0 12px 32px rgb(0 0 0 / .22);
+}
+.baby-grok-bot-context-menu.gbot-context-menu:not([data-ready]) {
+  visibility: hidden;
+}
+.baby-grok-bot-context-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text);
+  font-size: .85rem;
+  text-align: left;
+  cursor: pointer;
+}
+.baby-grok-bot-context-menu__item:hover,
+.baby-grok-bot-context-menu__item:focus-visible {
+  background: color-mix(in srgb, var(--surface) 78%, var(--bg));
+  outline: none;
+}

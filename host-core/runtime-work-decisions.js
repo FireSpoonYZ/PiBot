@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { AgentDoc, configure, ConversationBusy, SessionFailed } from '@earendil-works/pi-durable';
+import { AgentDoc, configure, ConversationBusy, LiveDoc, SessionFailed } from '@earendil-works/pi-durable';
+import { GenerationFailureState } from './generation-failure.js';
 import { assertId, messageError } from './message-protocol.js';
 import { inboxQueryKey } from './message-queries.js';
 import { WorkIndex, WorkContextState, ensureWorkBinding, toWorkContextRecord } from './work-context-docs.js';
@@ -14,6 +15,8 @@ const CONTROL_ERRORS = new Set(['INVALID_ARGUMENT', 'BOT_NOT_FOUND', 'SCOPE_NOT_
 // NOT_CONNECTED 来自 Bot 准入队列关闭（runtime 已在关闭）：只拒绝新准入，不升级为 fatal。
 const AUTO_ERRORS = new Set(['WORK_CONTEXT_INACTIVE', 'NOT_CONNECTED', 'BOT_NOT_FOUND']);
 const WORK_ERRORS = new Set(['WORK_STOPPED', 'WORK_CONTEXT_INACTIVE', 'STALE_INPUT', 'MODEL_REQUIRED', 'MODEL_NOT_FOUND', 'CONTEXT_LIMIT', 'WORK_GENERATION_FAILED']);
+// 已知的确定模型配置失败：可立即请求级结算并回执；离线/忙碌/SessionFailed/未知仍按暂不可达处理。
+const DETERMINATE_CONFIG_CODES = new Set(['MODEL_REQUIRED', 'MODEL_NOT_FOUND']);
 const PUBLICATION_ERRORS = new Set([...WORK_ERRORS, 'INVALID_ARGUMENT', 'BOT_CONTEXT_REQUIRED', 'BOT_NOT_FOUND', 'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'MESSAGE_NOT_FOUND', 'REQUEST_CONFLICT']);
 const SCOPE_MESSAGE_KIND = 'host.scope-message';
 const WORK_TRIGGER_KIND = 'host.work-trigger';
@@ -21,18 +24,39 @@ const WORK_TRIGGER_KIND = 'host.work-trigger';
 function finishDecision(state, outcome) {
   const pending = state.pending;
   if (!pending) return;
+  // 主动取消不写 generationError：user_stop 结算为主动取消（aborted），
+  // 不是 WORK_GENERATION_FAILED；preempted 不推进 handled——未消费的触发
+  // 消息留待用户队列排空后按相同原始消息重新触发；已 published 的轮按
+  // prepared 水位结算消费，绝不用新 requestId 重触发再发重复消息。
+  const interruption = pending.interruption ?? null;
+  if (interruption?.reason === 'user_stop') {
+    state.handledLocalId = Math.max(state.handledLocalId, interruption.throughLocalId);
+  } else if (interruption?.reason === 'preempted' && pending.published) {
+    // 已产生发布的被抢占轮：prepared 记录的本批来源水位即已消费边界，
+    // 结算推进到它，余下未消费消息留给下轮触发（不重复已发布内容）。
+    state.handledLocalId = Math.max(state.handledLocalId, pending.prepared?.throughLocalId ?? 0);
+  }
   state.lastDecision = {
     requestId: pending.requestId,
     outcome,
-    throughLocalId: pending.takeover?.throughLocalId ?? pending.prepared?.throughLocalId ?? null,
+    throughLocalId: interruption?.reason === 'user_stop'
+      ? interruption.throughLocalId
+      : pending.takeover?.throughLocalId ?? pending.prepared?.throughLocalId ?? null,
     completedAt: new Date().toISOString(),
   };
   state.pending = null;
 }
 
 function finishTakeover(state) {
-  const takeover = state.pending?.takeover;
-  if (!takeover || takeover.requestId !== state.pending.requestId) return;
+  const pending = state.pending;
+  const takeover = pending?.takeover;
+  if (!takeover || takeover.requestId !== pending.requestId) return;
+  // 标记中断的 takeover 按中断结算：handled 推进由 interruption 水位决定，
+  // 不再取 takeover 水位（preempted 不推进，user_stop 用捕获边界）。
+  if (pending.interruption) {
+    finishDecision(state, 'aborted');
+    return;
+  }
   state.handledLocalId = Math.max(state.handledLocalId, takeover.throughLocalId);
   finishDecision(state, 'aborted');
 }
@@ -41,6 +65,50 @@ function generationError(reason) {
   // Native detail can contain provider responses or credentials; only retain its small reason code.
   const safeReason = typeof reason === 'string' && /^[a-z_]{1,64}$/.test(reason) ? reason : 'unanswered';
   return { code: 'WORK_GENERATION_FAILED', message: 'work generation failed: ' + safeReason };
+}
+
+// 请求级失败结算（contract C）：具体诊断保留在 lastError 供状态/ LIVE 展示，
+// 绝不写 scope 级 error 闸门；消费边界只推进到本决策已消费水位（本批不再
+// 重放，其后新到消息正常触发下轮）。同时按冻结 replyTarget 落一条 Host 执行
+// 失败回执草稿（稳定 messageId 幂等）；primary/无目标不伪造账本消息。
+function settleFailedDecision(state, meta, failure) {
+  const pending = state.pending;
+  if (!pending) return;
+  const safe = {
+    code: typeof failure?.code === 'string' && failure.code !== '' ? failure.code.slice(0, 64) : 'WORK_GENERATION_FAILED',
+    message: typeof failure?.message === 'string' && failure.message !== '' ? failure.message.slice(0, 200) : 'work generation failed',
+  };
+  // 请求级失败只记 lastError（可见诊断）；state.error 恒为 null——它是遗留
+  // scope 闸门，绝不再由本路径写入，后续新请求不被旧失败拦截。
+  state.lastError = safe;
+  state.handledLocalId = Math.max(
+    state.handledLocalId,
+    pending.prepared?.throughLocalId ?? pending.startedThroughLocalId ?? 0);
+  const turn = pending.turn ?? null;
+  const target = turn?.replyTarget ?? null;
+  if (target && (target.kind === 'dm' || target.kind === 'room') &&
+      typeof target.scopeId === 'string' && typeof meta?.botId === 'string') {
+    const replyTo = typeof turn.responseMessageId === 'string' ? turn.responseMessageId
+      : (typeof turn.triggerMessageId === 'string' ? turn.triggerMessageId : null);
+    state.notices[pending.requestId] = {
+      // 稳定持久化 ID：失败结算只跑一次，重启/重复 reconcile 重放同一草稿；
+      // 账本按 messageId+fingerprint 幂等去重，绝不发第二条。
+      messageId: 'host-failure-' + pending.requestId,
+      requestId: pending.requestId,
+      provenance: 'host-execution-failure',
+      author: { kind: 'bot', botId: meta.botId },
+      target: {
+        kind: target.kind, scopeId: target.scopeId,
+        ...(typeof target.botId === 'string' ? { botId: target.botId } : {}),
+      },
+      code: safe.code,
+      text: '[Host 执行失败] ' + safe.code + ': ' + safe.message,
+      replyTo,
+      published: false,
+      createdAt: new Date().toISOString(),
+    };
+  }
+  finishDecision(state, 'failed');
 }
 
 /** 账本消息作者 -> 冻结轮 sender（真实封套作者/设备，非 host 占位）。 */
@@ -120,10 +188,15 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     const task = guarded(() => previous ? previous.then(start, start) : Promise.resolve().then(start), expected);
     inflight.add(task);
     if (key !== undefined) lanes.set(key, task);
+    let settledBot = null;
     const release = () => {
       inflight.delete(task);
       if (key !== undefined && lanes.get(key) === task) lanes.delete(key);
+      // 每条 scope lane 操作落定后发布一次活动汇总：pending 创建/结算/取消/暂停
+      // 都在 admit 序列内完成，此处即变更边界；代次防迟到旧结果覆盖终态。
+      if (settledBot !== null) publishActivity(settledBot);
     };
+    if (botId !== null) settledBot = botId;
     task.then(release, release);
     return task;
   }
@@ -141,6 +214,18 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     });
   }
 
+  // 手停边界：该 scope 当前收件的最高 localId（含尚未导入页；其后到达的新消息不受影响）。
+  function inboxWatermark(botId, scopeId) {
+    let watermark = 0;
+    let afterLocalId = 0;
+    for (;;) {
+      const page = inboxAfter(botId, scopeId, afterLocalId);
+      for (const item of page.items) watermark = Math.max(watermark, item.localId);
+      if (!page.nextCursor) return watermark;
+      afterLocalId = page.nextCursor.afterLocalId;
+    }
+  }
+
   async function activity(botId, scopeId) {
     const { binding } = await getWorkContexts().resolveWorkContext(botId, scopeId);
     const harness = getHarness();
@@ -153,6 +238,97 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
   function getWorkActivity(botId, scopeId) {
     return admit(() => activity(botId, scopeId));
   }
+
+  // 活动汇总（contract：纯元数据快照，只含存活 pending；kind primary 的轮
+  // 由 live 侧识别为 source background）。pending.interruption 标记的请求
+  // 已转入取消终态流程，与 stopped/error 终态同样不算存活工作。
+  function pendingSummary(state, meta) {
+    const pending = state?.pending ?? null;
+    if (!pending || pending.interruption || state.stopped || state.error) return { pending: [] };
+    // 统一 pending 用冻结轮 kind；legacy 无 turn，回退协调 scope kind。
+    const rawKind = pending.turn?.kind ?? meta?.kind ?? 'room';
+    const kind = rawKind === 'dm' || rawKind === 'primary' ? rawKind : 'room';
+    return {
+      pending: [{
+        requestId: pending.requestId,
+        kind,
+        scopeId: kind === 'primary' ? null : (meta?.scopeId ?? null),
+        startedAt: pending.startedAt ?? null,
+      }],
+    };
+  }
+
+  // contract：单 listener 注册；per-Bot generation 丢弃迟到旧汇总结果，
+  // 在飞汇总与更新结算并发时绝不拿旧快照覆盖较新的终态。
+  let activityListener = null;
+  const activityGeneration = new Map(); // botId -> 最新发出的汇总序号
+  const activityCache = new Map();      // botId -> 已发布 signature（去重）
+
+  // 汇总签名即结构化 JSON：内容不变不重复发布，避免每次 settle 都投影。
+  function summarySignature(summary) {
+    return JSON.stringify(summary.pending);
+  }
+
+  function bumpActivity(botId) {
+    const generation = (activityGeneration.get(botId) ?? 0) + 1;
+    activityGeneration.set(botId, generation);
+    return generation;
+  }
+
+  // 在飞汇总完成时只有 generation 仍是当前最新才发布；内容不变也不重复发。
+  function emitActivity(botId, generation, summary) {
+    if (activityListener === null) return;
+    if (activityGeneration.get(botId) !== generation) return;
+    const signature = summarySignature(summary);
+    if (activityCache.get(botId) === signature) return;
+    activityCache.set(botId, signature);
+    try { activityListener(botId, summary); } catch { /* listener 失败不影响决策 */ }
+  }
+
+  function publishActivity(botId) {
+    if (activityListener === null) return;
+    const generation = bumpActivity(botId);
+    workSummary(botId)
+      .then((summary) => emitActivity(botId, generation, summary))
+      .catch(() => {});
+  }
+
+  function setActivityListener(listener) {
+    if (typeof listener !== 'function') throw messageError('INVALID_ARGUMENT', 'activity listener must be a function');
+    activityListener = listener;
+    // 注册即为已有 Bot 发布：逐 Bot bump 代次后汇总（host.getBot 校验本地身份）。
+    (async () => {
+      const harness = getHarness();
+      const index = await harness.snapshot(WorkIndex, context).catch(() => null);
+      const seen = new Set();
+      for (const key of Object.keys(index?.byKey ?? {})) {
+        let pair = null;
+        try { pair = JSON.parse(key); } catch { pair = null; }
+        if (!Array.isArray(pair) || pair.length !== 2 || pair.some((id) => typeof id !== 'string')) continue;
+        if (seen.has(pair[0])) continue;
+        seen.add(pair[0]);
+        if (!host.getBot(pair[0])) continue;
+        publishActivity(pair[0]);
+      }
+    })().catch(() => {});
+  }
+
+  // 该 Bot 全部 scope 工作 pending 的当前存活快照（metadata-only）。
+  async function workSummary(botId) {
+    const harness = getHarness();
+    const index = await harness.snapshot(WorkIndex, context);
+    const pending = [];
+    for (const [key, binding] of Object.entries(index?.byKey ?? {})) {
+      let pair = null;
+      try { pair = JSON.parse(key); } catch { pair = null; }
+      if (!Array.isArray(pair) || pair[0] !== botId) continue;
+      const state = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
+      const meta = await harness.snapshot(WorkContextState, binding.nativeId, context);
+      pending.push(...pendingSummary(state, meta).pending);
+    }
+    return { pending };
+  }
+
 
   async function conversationFor(binding) {
     const conversation = await getHarness().conversation(binding.nativeId, context);
@@ -169,15 +345,31 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
 
   // 中止该 pending 请求的任务族：先按持久化 submissionId/requestId 精准 abortSubmission，
   // 再 abortTask prepared 任务族（含 owned 工具后代）。绝不中止同主会话无关轮。
-  async function abortRequestFamily(executionId, requestId, preparedTaskId, submissionId) {
+  // quiesce=false（离线/恢复未完的手停）只提交取消标记，不 waitForTask——wait 会隐式 resume 调度器。
+  // strict（主动 stop/preempt）：真实取消错误上抛——取消确认前不得把失败伪装成
+  // 成功、让另一轮争用 Bot 资源；只有确认目标已终态/不存在可忽略。非 strict
+  // （恢复/兜底路径）保持旧的全吞语义。
+  // submissionId 只属于其登记 executionId 的提交索引：按 pending.executionNativeId
+  // 归属的目标传 id；另一目标（协调/遗留会话）只按 requestId 查询命中，
+  // 绝不把别会话的 submissionId 传进去（SDK abortSubmission 对 conversationId
+  // 不匹配返回 "not_found"——可忽略，但按归属传参避免误判真实错误）。
+  // SDK 语义（pi-durable）：abortSubmission 永不抛——"not_found"/"settled" 即
+  // 终态/不存在可忽略；abortTask 对不存在 id 抛错、terminal 返回 "terminal"。
+  async function abortRequestFamily(executionId, requestId, preparedTaskId, submissionId, quiesce = true, strict = false) {
     const harness = getHarness();
+    const ignore = (error) => {
+      // 确认目标终态/不存在可忽略；其余真实取消错误 strict 下上抛。
+      if (strict && typeof error?.message === 'string' && /does not exist$/.test(error.message)) return undefined;
+      if (!strict) return undefined;
+      throw error;
+    };
     if (submissionId) {
-      await harness.abortSubmission(submissionId, context, executionId).catch(() => {});
+      await harness.abortSubmission(submissionId, context, executionId).catch(ignore);
     }
     // 提交在飞/未登记 submissionId：requestId 是提交唯一标识，精准命中该 submission。
     const record = await harness.commit((tx) => tx.submissionByRequest(executionId, requestId), context);
     if (record && (record.status === 'queued' || record.status === 'placed')) {
-      await harness.abortSubmission(record.id, context, executionId).catch(() => {});
+      await harness.abortSubmission(record.id, context, executionId).catch(ignore);
     }
     if (preparedTaskId) {
       const inspection = await harness.inspect(context);
@@ -198,34 +390,48 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         }
       };
       visit(preparedTaskId);
-      for (const id of targets) await harness.abortTask(id, context).catch(() => {});
-      for (const id of targets) await harness.waitForTask(id, context).catch(() => {});
+      for (const id of targets) await harness.abortTask(id, context).catch(ignore);
+      if (quiesce) for (const id of targets) await harness.waitForTask(id, context).catch(ignore);
     }
   }
 
-  async function abortPending(binding) {
+  async function abortPending(binding, quiesce = true, strict = false) {
     const harness = getHarness();
     const state = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
-    const executionId = executionTargetOf(state, binding);
     if (unified) {
       // 统一执行：只中止本请求的任务族/submission，绝不 Conversation.abort 整主会话。
       // 同时覆盖协调会话：带 turn 但无 executionNativeId 的 pending（含轮 0 迁移期
       // 记录在案的错误提交）原执行目标是协调会话，按同一 requestId 精准中止。
       if (state?.pending) {
-        const ids = new Set([executionId, binding.nativeId]);
-        for (const id of ids) {
-          await abortRequestFamily(id, state.pending.requestId, state.pending.prepared?.taskId, state.pending.submissionId);
+        const pending = state.pending;
+        const executionId = executionTargetOf(state, binding);
+        for (const id of new Set([executionId, binding.nativeId])) {
+          // submissionId 只传给其登记目标（pending.executionNativeId 归属的
+          // 会话，缺省即 binding 自身）；另一目标按 requestId 查询命中。
+          const submissionId = id === executionId ? pending.submissionId : null;
+          await abortRequestFamily(id, pending.requestId, pending.prepared?.taskId, submissionId, quiesce, strict);
         }
       }
     } else {
+      const executionId = executionTargetOf(state, binding);
       const conversation = await conversationFor({ nativeId: executionId });
       // abort() marks cancellation and waits for ordinary work quiescence, never for a natural model answer.
-      await conversation.abort(context);
+      // quiesce=false 时不能用该路径：它会隐式 resume 调度器、唤醒未知旧任务（与 runtime.abort 同约束）。
+      if (!quiesce) {
+        await abortRequestFamily(executionId, state?.pending?.requestId ?? null, state?.pending?.prepared?.taskId, state?.pending?.submissionId ?? null, false, strict);
+      } else {
+        await conversation.abort(context);
+      }
     }
     await harness.commit(async (tx) => {
       const doc = await tx.doc(WorkDecisionState, binding.nativeId);
+      // 并发窗口：取消期间新 pending 可能已落位——按快照 requestId 比对，
+      // 只结算被取消的那一轮，绝不覆盖新 pending（被覆盖会吞新轮）。
+      if (doc.pending?.requestId !== state?.pending?.requestId) return;
       if (doc.pending?.takeover) finishTakeover(doc);
       else finishDecision(doc, 'aborted');
+      // 结算移除 pending（interruption 标记随之一并清除）：poll/reconcile
+      // 之后不再走取消路径，preempted 未消费消息由触发重选恢复。
     }, context);
   }
 
@@ -240,7 +446,8 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         if (!Array.isArray(pair) || pair.length !== 2 || pair[0] !== botId || typeof pair[1] !== 'string') continue;
         const state = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
         const pending = state?.pending;
-        if (!pending || state.stopped || state.error) continue;
+        // 已标中断的 pending 由中断/reconcile 结算，takeover 不再二次接管。
+        if (!pending || pending.interruption || state.stopped || state.error) continue;
         if (pending.takeover) {
           candidates.push({ nativeId: binding.nativeId, requestId: pending.requestId, takeover: pending.takeover });
           continue;
@@ -264,7 +471,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       await harness.commit(async (tx) => {
         for (const candidate of candidates) {
           const state = await tx.doc(WorkDecisionState, candidate.nativeId);
-          if (state.pending?.requestId !== candidate.requestId || state.stopped || state.error || state.pending.takeover) continue;
+          if (state.pending?.requestId !== candidate.requestId || state.stopped || state.error || state.pending.takeover || state.pending.interruption) continue;
           const record = await tx.submissionByRequest(candidate.nativeId, candidate.requestId);
           if (record?.status === 'queued' || record?.status === 'placed' ||
               (record?.status === 'unanswered' && record.reason === 'aborted')) {
@@ -297,7 +504,8 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         (await tx.doc(WorkDecisionState, bound.nativeId)).stopped = true;
         return bound;
       }, context);
-      await abortPending(binding);
+      // strict：显式暂停此处工作的取消失败同样上抛——不得伪装成功。
+      await abortPending(binding, true, true);
       return activity(botId, scopeId);
     }, JSON.stringify([botId, scopeId]), CONTROL_ERRORS, botId);
     // 取消已把该 scope pending 结算并释放 Bot 准入：按 reconcile 相同方式唤醒
@@ -345,6 +553,154 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     return result;
   }
 
+  /**
+   * interruptBotWork(botId, {reason, quiesce})：该 Bot 全部 scope 工作决策的
+   * 持久中断标记 + 任务族取消（contract：preempted 只选已有非用户 pending，
+   * 不动主聊天/Host 用户队列/scope.stopped；user_stop 覆盖各 scope 待处理积压
+   * ——含尚未创建 pending 的已收消息——与已有 pending，捕获停止水位到
+   * pending.interruption.throughLocalId，scope.stopped 原值保留）。
+   * 本方法绝不取第二条 Bot admission lane（preempt 在 Bot lane 内被准入侧
+   * 调用，再取即自锁），也不走 scope lane——只发持久 commit + 精准取消：
+   * 先一次性标记全部目标的 interruption（user_stop 同时一次性捕获各 scope
+   * 收件水位），再按捕获 requestId 取消任务族，最后按同 requestId 比对结算。
+   * 在飞准入以 interruption 标记为 fence（submitPending/beforeRequest/
+   * publishWork 均拒绝已标记请求），新提交由既有 Bot stop/pump 门阻止。
+   * quiesce=false 只落取消标记/abortSubmission/abortTask，不用会隐式 resume 的
+   * conversation.abort/wait（离线或恢复未完的手停路径）。
+   * 返回前先完成取消并提交结算：确认前绝不放另一轮争用 Bot 资源，失败抛错可见。
+   */
+  async function interruptBotWork(botId, { reason = 'user_stop', quiesce = true } = {}) {
+    assertId(botId, 'botId');
+    if (reason !== 'preempted' && reason !== 'user_stop') {
+      throw messageError('INVALID_ARGUMENT', 'interruption reason must be preempted or user_stop');
+    }
+    const bot = host.getBot(botId);
+    if (!bot) throw messageError('BOT_NOT_FOUND', 'bot not found: ' + botId);
+    const harness = getHarness();
+    const index = await harness.snapshot(WorkIndex, context);
+    const targets = [];
+    for (const [key, binding] of Object.entries(index?.byKey ?? {})) {
+      let pair = null;
+      try { pair = JSON.parse(key); } catch { pair = null; }
+      if (!Array.isArray(pair) || pair[0] !== botId || typeof pair[1] !== 'string') continue;
+      targets.push({ scopeId: pair[1], nativeId: binding.nativeId, key });
+    }
+    // contract：本方法不取第二条 Bot admission lane——preempt 已在 Bot lane
+    // 内被准入侧调用，user_stop 与在飞准入并发；再走 admit(...,botId) 会自
+    // 锁，等待排队的 scope chain 也会把迟取消错当已确认。改为：先一次持久
+    // commit 标记全部目标 pending 的 interruption（含无 pending 绑定的
+    // user_stop 水位推进），再按标记时捕获的 requestId/taskId/submissionId
+    // 精准取消任务族，最后 commit 内按同 requestId 比对结算 aborted——
+    // 在飞 admit 链若在标记后写入/替换 pending，requestId 比对即落空，
+    // 取消标记录重走的 reconcile/interrupt 兜底，绝不吞新轮。
+    // user_stop 先一次性捕获全部相关 scope 当前 inbox 水位（绑定/未绑定），
+    // 不等前一个 scope 取消完才捕获后者，否则后者晚捕获会吞掉其间新到消息。
+    const watermarks = new Map(); // scopeId -> localId（停止边界）
+    if (reason === 'user_stop') {
+      for (const scopeEntry of getLog().listScopes()) {
+        if (!member(scopeEntry, botId)) continue;
+        watermarks.set(scopeEntry.scopeId, inboxWatermark(botId, scopeEntry.scopeId));
+      }
+    }
+    const marked = [];
+    for (const target of targets) {
+      const scope = getLog().getScope(target.scopeId);
+      const profile = getProfile(botId, { botId, scopeId: target.scopeId, kind: scope?.kind });
+      const captured = await harness.commit(async (tx) => {
+        const bound = await ensureWorkBinding(tx, host.deviceId, bot, scope, profile);
+        const state = await tx.doc(WorkDecisionState, bound.nativeId);
+        const pending = state.pending;
+        if (!pending) {
+          // 无 pending 的绑定 scope：user_stop 直接把消费边界推进到停止水位，
+          // 尚未创建 pending 的积压消息一并结算，之后新到消息正常唤醒。
+          if (reason === 'user_stop') {
+            state.handledLocalId = Math.max(state.handledLocalId, watermarks.get(target.scopeId) ?? 0);
+          }
+          return null;
+        }
+        if (pending.interruption) {
+          // 已有标记仍要幂等完成取消：上次失败中断留下标记未结算，
+          // reconcile 可能没在跑——捕获同一 requestId 继续取消。user_stop
+          // 在已标 preempted 之上升级水位/原因（更强终态），不让旧工作重跑。
+          if (reason === 'user_stop' && pending.interruption.reason === 'preempted') {
+            pending.interruption = {
+              reason: 'user_stop',
+              throughLocalId: Math.max(
+                watermarks.get(target.scopeId) ?? 0,
+                pending.interruption.throughLocalId,
+                pending.prepared?.throughLocalId ?? 0,
+                pending.startedThroughLocalId ?? 0),
+            };
+          }
+        } else {
+          // preempted 不抢占同 Bot 主会话用户轮：pending.turn.sender.kind=user 的
+          // 群用户任务与 primary 轮都免疫；Host 来源计划任务不免疫（非用户轮）。
+          if (reason === 'preempted' && pending.turn?.sender?.kind === 'user') return null;
+          const throughLocalId = reason === 'user_stop'
+            ? watermarks.get(target.scopeId) ?? 0
+            : 0;
+          pending.interruption = {
+            reason,
+            throughLocalId: Math.max(throughLocalId, pending.prepared?.throughLocalId ?? 0, pending.startedThroughLocalId ?? 0),
+          };
+        }
+        return {
+          nativeId: bound.nativeId,
+          requestId: pending.requestId,
+          submissionId: pending.submissionId ?? null,
+          taskId: pending.prepared?.taskId ?? null,
+          executionId: typeof pending.executionNativeId === 'number' ? pending.executionNativeId : bound.nativeId,
+        };
+      }, context);
+      if (captured !== null) marked.push(captured);
+    }
+    // user_stop 覆盖未绑定 scope：先前已一次性捕获水位，此处只建绑定落水位。
+    if (reason === 'user_stop') {
+      for (const scopeEntry of getLog().listScopes()) {
+        const scopeId = scopeEntry.scopeId;
+        if (targets.some((t) => t.scopeId === scopeId)) continue;
+        if (!member(scopeEntry, botId)) continue;
+        const watermark = watermarks.get(scopeId) ?? 0;
+        if (watermark === 0) continue;
+        const profile = getProfile(botId, { botId, scopeId, kind: scopeEntry.kind });
+        await harness.commit(async (tx) => {
+          const bound = await ensureWorkBinding(tx, host.deviceId, bot, scopeEntry, profile);
+          const state = await tx.doc(WorkDecisionState, bound.nativeId);
+          if (state.pending) return; // 新 pending 留给常规路径
+          state.handledLocalId = Math.max(state.handledLocalId, watermark);
+        }, context);
+      }
+    }
+    // 持久标记完成后精准取消已捕获 requestId 的任务族：取消确认前不允许
+    // 另一轮争用 Bot 资源；失败抛错可见（不得把取消失败伪装成功）。
+    for (const captured of marked) {
+      const ids = unified ? new Set([captured.executionId, captured.nativeId]) : new Set([captured.executionId]);
+      for (const id of ids) {
+        // submissionId 只传给其登记目标；另一目标按 requestId 查询命中。
+        // strict：主动 stop/preempt 的真实取消错误上抛——取消确认前不得把
+        // 失败伪装成功放另一轮争用 Bot 资源；标记已持久，调用方可见重试。
+        const submissionId = id === captured.executionId ? captured.submissionId : null;
+        await abortRequestFamily(id, captured.requestId, captured.taskId, submissionId, quiesce, true);
+      }
+    }
+    // 结算：同 requestId 比对——在飞操作若在标记后替换 pending，不吞新轮；
+    // 结算失败/竞态落空时标记仍在，reconcile/恢复路径重走取消+结算。
+    for (const captured of marked) {
+      await harness.commit(async (tx) => {
+        const state = await tx.doc(WorkDecisionState, captured.nativeId);
+        if (state.pending?.requestId !== captured.requestId) return;
+        finishDecision(state, 'aborted');
+      }, context);
+    }
+    // 中断落定后唤醒 Host 用户泵与 poll：preempted 的存活触发消息下轮重走
+    // 相同原始消息路径（handled 不推进，已 published 按 prepared 水位结算）；
+    // user_stop 的边界外新消息正常唤醒。代次化发布：旧的在飞汇总结果
+    // 晚到时因 generation 过期被丢弃，不会覆盖本结算的终态。
+    try { turnGate.idle?.(botId); } catch { /* 通知失败不影响中断结果 */ }
+    if (reason === 'preempted') nudge();
+    publishActivity(botId);
+  }
+
   // 执行目标会话选择模型。统一执行时模型/人格/工具由准入管线（Center prepare→
   // applyPreparation）在提交前原子切换，本处不预检——新创建主会话此刻可能还没有
   // 模型，那是准入要解决的临时状态，不是决策失败。legacy 协调会话保持原有
@@ -369,8 +725,11 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       error = { code: 'MODEL_NOT_FOUND', message: 'work model is not available' };
     }
     if (error) {
-      state.error = error;
-      finishDecision(state, 'failed');
+      // 配置/模型缺失是可见失败但非 scope 闸门：记 lastError，绝不再写
+      // state.error——否则旧 setup 失败会永久拦截之后到的新消息。有 pending
+      // 时按请求级失败结算；无 pending（startDecision 预检）只留可见诊断。
+      state.lastError = { code: error.code, message: error.message };
+      if (state.pending) settleFailedDecision(state, meta, error);
       return false;
     }
     if (!agent.model) {
@@ -380,18 +739,26 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
   }
 
   /**
-   * 统一模式的安全边界导入：canRunWork 判定本 Bot 空闲（无排队用户轮/无原生活动）后，
-   * sessions.sync 在 commit 外把该 Bot 全部收件 scope 增量导入主会话一次；
-   * 只为已冻结统一 turn 而缺执行目标的 pending 回填真实主会话 ID——无 turn 的
-   * 旧 pending 保持原执行目标到结算/取消，绝不转换。
+   * 统一模式的安全边界导入：sessions.sync 把该 Bot 全部收件 scope 增量导入主会话。
+   * 返回真实主会话 {nativeId,conversationId}；null 表示暂不可达（离线/忙碌），下轮重试；
+   * {configFailure:{code,message}} 表示确定的模型配置失败，可立即请求级结算。
    */
   async function syncPrimaryImport(bot, binding) {
     if (!unified) return null;
     let result = null;
     try {
       result = await sessions.sync(bot.botId);
-    } catch {
-      // 主会话暂不可达（配置/模型未就绪等）：本轮放弃，下轮 poll 重试。
+    } catch (error) {
+      // 致命会话/Schema 故障必须上抛，不伪装成暂不可达。
+      if (error instanceof SessionFailed || error?.code === 'UNSUPPORTED_SCHEMA') throw error;
+      if (error?.code && DETERMINATE_CONFIG_CODES.has(error.code)) {
+        // 固定安全文案与已定错误契约一致，不回传原始 error.message。
+        return { configFailure: {
+          code: error.code,
+          message: error.code === 'MODEL_REQUIRED' ? 'center model is required' : 'work model is not available',
+        } };
+      }
+      // 主会话暂不可达（离线/忙碌/其它瞬时错误）：本轮放弃，下轮 poll 重试。
       return null;
     }
     if (!result?.nativeId) return null;
@@ -407,10 +774,29 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
 
   async function submitPending(binding, bot) {
     const harness = getHarness();
+    // 已有 pending 缺执行目标的回填/结算：统一 turn 无 executionNativeId 时先尝试
+    // syncPrimaryImport；确定的模型配置失败按同一 settleFailedDecision 结算（含
+    // notices 回执），暂不可达仍保留下轮重试，SessionFailed 继续上抛。
+    if (unified) {
+      const snap = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
+      if (snap?.pending?.turn && typeof snap.pending.executionNativeId !== 'number') {
+        const imported = await syncPrimaryImport(bot, binding);
+        if (imported?.configFailure) {
+          await harness.commit(async (tx) => {
+            const meta = await tx.doc(WorkContextState, binding.nativeId);
+            const state = await tx.doc(WorkDecisionState, binding.nativeId);
+            if (state.pending?.requestId === snap.pending.requestId) {
+              settleFailedDecision(state, meta, imported.configFailure);
+            }
+          }, context);
+          return;
+        }
+      }
+    }
     const prepared = await harness.commit(async (tx) => {
       const meta = await tx.doc(WorkContextState, binding.nativeId);
       const state = await tx.doc(WorkDecisionState, binding.nativeId);
-      if (closing || fatalError || state.stopped || state.error || !state.pending || state.pending.replan || state.pending.takeover || !currentMember(meta)) return null;
+      if (closing || fatalError || state.stopped || state.error || !state.pending || state.pending.replan || state.pending.takeover || state.pending.interruption || !currentMember(meta)) return null;
       // 统一 turn 而缺执行目标：等待下轮 syncPrimaryImport 回填，绝不在主会话/协调会话
       // 之间漂移执行目标。旧 pending（无 turn）用原协调会话到结算/取消。
       if (unified && state.pending.turn && typeof state.pending.executionNativeId !== 'number') return null;
@@ -436,6 +822,13 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       throw error;
     }
     if (!submission) return;
+    // 提交在飞期间的迟到 stop/preempt：pending 已标中断时立即中止刚提交的
+    // submission，绝不出现「中断后新执行」；结算由 reconcile/interrupt 完成。
+    const after = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
+    if (after?.pending?.requestId === input.requestId && after.pending.interruption) {
+      await abortRequestFamily(executionId, input.requestId, after.pending.prepared?.taskId, submission.id, false).catch(() => {});
+      return;
+    }
     await harness.commit(async (tx) => {
       const state = await tx.doc(WorkDecisionState, binding.nativeId);
       if (state.pending?.requestId === input.requestId) {
@@ -449,7 +842,9 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     const snapshot = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
     if (!snapshot?.pending) return;
     const requestId = snapshot.pending.requestId;
-    if (snapshot.pending.takeover) {
+    // 重启恢复/迟到 reconcile：中断标记先完成取消与结算（abort 幂等，
+    // quiesce 默认 true——在线 poll 路径可安全等待），绝不重投被取消请求。
+    if (snapshot.pending.interruption || snapshot.pending.takeover) {
       await abortPending(binding);
       return;
     }
@@ -463,7 +858,28 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       await submitPending(binding, bot);
       return;
     }
+    // 读取执行会话的 runFailure + Host 失败诊断族（contract A）的具体原因，
+    // 在结算提交外完成，失败读不阻塞本地终态。
+    const executionNativeId = executionTargetOf(snapshot, binding);
+    const live = await harness.snapshot(LiveDoc, executionNativeId, context).catch(() => null);
+    const preparedTaskKey = snapshot.pending?.prepared?.taskId != null
+      ? String(snapshot.pending.prepared.taskId) : null;
+    const runFailure = live?.runFailure ?? null;
+    // contract A：优先 LiveDoc.runFailure 记录的失败任务，回落本决策已持久化的
+    // prepared.taskId（字符串）。族文档在生成任务终结后仍存活，新一轮启动覆盖
+    // runFailure 后仍可按 prepared.taskId 找回本请求诊断。
+    // runFailure 只在其 inputs 含本提交 record.id 时才归属本 pending；
+    // 同 Bot 之后用户轮/别 scope 的新失败绝不能记到本请求头上。
+    const runFailureOwnsRecord = runFailure !== null &&
+      (runFailure.inputs ?? []).some((id) => String(id) === String(record.id));
+    const failureTaskKey = runFailureOwnsRecord && runFailure.taskId != null
+      ? String(runFailure.taskId) : preparedTaskKey;
+    const failureDoc = failureTaskKey !== null
+      ? await harness.snapshot(GenerationFailureState, executionNativeId, failureTaskKey, context).catch(() => null)
+      : null;
+    const diagnosed = failureDoc?.failure ?? null;
     await harness.commit(async (tx) => {
+      const meta = await tx.doc(WorkContextState, binding.nativeId);
       const state = await tx.doc(WorkDecisionState, binding.nativeId);
       const pending = state.pending;
       if (pending?.requestId !== requestId) return;
@@ -477,15 +893,20 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         state.handledLocalId = Math.max(state.handledLocalId, pending.prepared.throughLocalId);
         finishDecision(state, pending.published ? 'published' : 'silent');
       } else {
-        if (!state.error) {
+        // 请求级失败（contract C）：优先 contract A 的具体诊断；缺失时回落
+        // record/LiveDoc 安全原因，绝不读模型正文猜失败。
+        let failure = diagnosed !== null && typeof diagnosed === 'object' ? diagnosed : null;
+        if (failure === null) {
           if (record.reason === 'no_model') {
             const agent = await tx.doc(AgentDoc, executionTargetOf(state, binding));
-            state.error = agent.model
+            failure = agent.model
               ? { code: 'MODEL_NOT_FOUND', message: 'work model is not available' }
               : { code: 'MODEL_REQUIRED', message: 'work model is required' };
-          } else state.error = generationError(record.status === 'done' ? 'missing_prepared' : record.reason);
+          } else {
+            failure = generationError(record.status === 'done' ? 'missing_prepared' : record.reason);
+          }
         }
-        finishDecision(state, 'failed');
+        settleFailedDecision(state, meta, failure);
       }
     }, context);
     // 决策落定为安全切换边界：唤醒该 Bot 的 Host 排队轮泵。
@@ -609,10 +1030,18 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     // 不通过表示排队用户轮/原生工作优先，下轮 poll 重试。scope/legacy 导入仍走
     // syncWorkContext（archive 历史），不推进主会话水位。
     let primary = null;
+    let configFailure = null;
     if (unified) {
       if (turnGate.canRunWork && !(await turnGate.canRunWork(bot.botId))) return;
-      primary = await syncPrimaryImport(bot, binding);
-      if (primary === null || typeof primary.nativeId !== 'number') return;
+      const imported = await syncPrimaryImport(bot, binding);
+      if (imported?.configFailure) {
+        // 确定的模型配置失败：仍要冻结本请求再请求级结算——只消费当前批，
+        // 回执经 notices 回原 DM；绝不当暂不可达无限等待，也不吞 SessionFailed。
+        configFailure = imported.configFailure;
+      } else {
+        primary = imported;
+        if (primary === null || typeof primary.nativeId !== 'number') return;
+      }
     }
     // 迟到 DM 回复寻源在 commit 外做（replyOrigin 走 snapshot，绝不嵌进写事务）；
     // 只按当前未处理窗口查 replyTo 键。提交内重新导出的新回复若没预查过，
@@ -627,6 +1056,9 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         const items = inboxAfter(metaSnap.botId, metaSnap.scopeId, stateSnap?.handledLocalId ?? 0).items
           .filter((item) => item.localId <= metaSnap.lastImportedLocalId);
         for (const item of items) {
+          // selfEcho（本 Bot 自己的 Host 失败回执等）与 collectTrigger 同样排除：
+          // 只对真实入站 peer reply 寻源，避免对无需寻源的自回执调用 replyOrigin。
+          if (item.selfEcho) continue;
           const message = item.message ?? {};
           if (message.category === 'reply' && typeof message.replyTo === 'string' && !replyOrigins.has(message.replyTo)) {
             replyOrigins.set(message.replyTo, await sessions.replyOrigin(metaSnap.botId, message));
@@ -649,7 +1081,6 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         if (batchThrough > 0) state.handledLocalId = batchThrough;
         return false;
       }
-      if (!await selectModel(tx, binding.nativeId, meta, state, bot)) return false;
       const requestId = randomUUID();
       const turn = unified
         ? toFrozenTurn({
@@ -670,6 +1101,8 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
             originRequestId: trigger.originRequestId,
           })
         : null;
+      // 新一轮开始即清掉上一轮的请求级失败诊断：旧 lastError 不覆盖新成功。
+      state.lastError = null;
       state.pending = {
         requestId,
         submissionId: null,
@@ -686,10 +1119,98 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         // 迟到回复恢复时记录原始请求 messageId（审计/寻源，入 turn 供 codec 标注）。
         ...(trigger.originRequestId !== undefined ? { originRequestId: trigger.originRequestId } : {}),
       };
+      // 确定的模型配置失败：pending 已冻结，立即请求级结算（settleFailedDecision
+      // 推进 handled 到本批边界、落 lastError、按冻结 replyTarget 写 notices 回执），
+      // 不投 native、不阻塞后续新请求。legacy selectModel 同样移到冻结后判定。
+      if (configFailure !== null) {
+        settleFailedDecision(state, meta, configFailure);
+        return false;
+      }
+      if (!await selectModel(tx, binding.nativeId, meta, state, bot)) return false;
       return true;
     }, context);
     // Persist the request identity before admission; crash recovery resubmits this exact request, not another turn.
     if (created && !closing && !fatalError) await submitPending(binding, bot);
+  }
+
+  /**
+   * 升级遗留 fence（contract C）：v1 的 scope 级 error 会无限阻断新请求。
+   * 首次见到 state.error 时一次性捕获迁移边界：failureWatermark 记为已导入
+   * 水位，其前所有未消费 backlog 随 handledLocalId 一并结算、绝不自动重放
+   * （旧购物/用药任务不会复活）；失败本体经 lastError 保留可见，error 闸门
+   * 清除，其后新到消息正常进入触发评估。若 error 是本轮代码新写的请求级
+   * 值以外的残留（理论上 v2 不再写），同样只作一次性边界处理。
+   */
+  async function fenceLegacyError(binding, meta) {
+    const harness = getHarness();
+    const state = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
+    if (!state?.error || (state.failureWatermark ?? 0) > 0) return;
+    await harness.commit(async (tx) => {
+      const doc = await tx.doc(WorkDecisionState, binding.nativeId);
+      if (!doc.error || (doc.failureWatermark ?? 0) > 0) return;
+      const boundary = Math.max(meta?.lastImportedLocalId ?? 0, doc.handledLocalId ?? 0);
+      // 保留可见失败：error 的具体 code/message 转入 lastError 供活动/ LIVE 展示。
+      doc.lastError = { code: doc.error.code, message: doc.error.message };
+      doc.error = null;
+      doc.failureWatermark = boundary;
+      doc.handledLocalId = boundary;
+    }, context);
+  }
+
+  /**
+   * 把 state.notices 中尚未发布的 Host 执行失败回执落账本（contract D）。
+   * 每条一次 publish 即标记 published；账本按稳定 messageId+fingerprint 幂等，
+   * 重放安全（重启/重复 poll 不重复发）。room 目标发 category public（其协议只
+   * 允许 public），dm 目标发 reply 挂原请求 replyTo；primary/无目标不伪造。
+   * 只结算本 scope 的回执；publish 失败保留草稿下轮重试。
+   */
+  async function drainFailureNotices(botId, binding) {
+    const harness = getHarness();
+    const state = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
+    const drafts = Object.entries(state?.notices ?? {})
+      .filter(([, n]) => n && n.published !== true && n.delivery !== 'failed');
+    if (!drafts.length) return;
+    for (const [requestId, draft] of drafts) {
+      const target = draft.target ?? {};
+      if (target.kind !== 'dm' && target.kind !== 'room') continue;
+      if (typeof target.scopeId !== 'string') continue;
+      const scope = getLog().getScope(target.scopeId);
+      const isDm = scope?.kind === 'dm';
+      const mark = async (fields) => {
+        await harness.commit(async (tx) => {
+          const doc = await tx.doc(WorkDecisionState, binding.nativeId);
+          const notice = doc.notices?.[requestId];
+          if (notice && notice.messageId === draft.messageId) Object.assign(notice, fields);
+        }, context);
+      };
+      // scope 暂未安装/不可见：临时态，记 lastDeliveryError 下轮重试，绝不吞。
+      if (!scope) { await mark({ delivery: 'pending', lastDeliveryError: 'SCOPE_NOT_FOUND' }); continue; }
+      const category = isDm ? 'reply' : 'public';
+      const replyTo = isDm && typeof draft.replyTo === 'string' ? draft.replyTo : null;
+      try {
+        getLog().publish({
+          messageId: draft.messageId,
+          scopeId: target.scopeId,
+          author: { kind: 'bot', botId },
+          category,
+          text: draft.text,
+          replyTo,
+        });
+        // publish 返回即成功（新插入或同 messageId+fingerprint 幂等命中）。
+        await mark({ published: true, delivery: 'sent', lastDeliveryError: null });
+      } catch (error) {
+        const code = error?.code ?? 'PUBLISH_FAILED';
+        // MESSAGE_NOT_FOUND = 回复目标未入库（迟到历史），SCOPE_FORBIDDEN = 成员
+        // 资格/类别不符：均保留草稿+原因下轮重试，绝不伪装已送达。
+        // REQUEST_CONFLICT = 同 messageId 不同内容（稳定 ID 与原文一致时不应发生）：
+        // 记 failed 终态对账，不重试以免每轮无效写。
+        if (code === 'REQUEST_CONFLICT') {
+          await mark({ delivery: 'failed', lastDeliveryError: code });
+        } else {
+          await mark({ delivery: 'pending', lastDeliveryError: code });
+        }
+      }
+    }
   }
 
   async function advance(botId, scopeId) {
@@ -714,6 +1235,9 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     const { bot, binding } = second;
     if (!binding) throw new Error('work import did not create a binding');
     if (closing || fatalError) return;
+    const meta = await getHarness().snapshot(WorkContextState, binding.nativeId, context);
+    await fenceLegacyError(binding, meta);
+    await drainFailureNotices(botId, binding);
     await reconcile(binding, bot);
     if (!imported.hasMore && !closing && !fatalError) await startDecision(binding, bot);
   }
@@ -768,6 +1292,9 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     if (!state.pending) throw messageError('WORK_CONTEXT_INACTIVE', 'work context has no pending decision');
     if (!matchesRequest) throw messageError('STALE_INPUT', 'work request does not match the pending decision');
     if (state.pending.replan || state.pending.takeover) throw messageError('STALE_INPUT', 'work decision needs newer input');
+    // 中断标记是持久取消终态：迟到 beforeRequest/budget 决不让已取消请求
+    // 再进模型执行；结算由 reconcile/interrupt 路径完成。
+    if (state.pending.interruption) throw messageError('WORK_STOPPED', 'work decision was interrupted');
     if (meta.deviceId !== host.deviceId) throw messageError('WORK_CONTEXT_INACTIVE', 'work context is not local');
     if (!currentMember(meta)) {
       // Commit this fence before throwing, so a quick rejoin cannot turn revoked work into a model failure.
@@ -811,19 +1338,32 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       const pending = snapshot?.pending ?? null;
       const expectedRequestId = pending?.requestId ?? null;
       const batchThrough = pending?.startedThroughLocalId;
-      // 冻结本轮触发：按协调 pending.requestId 精确匹配本提交的 host.work-trigger，
-      // 不是最新可见触发（compaction 可能已裁掉旧触发，pending.requestId 仍是要核对的身份）。
+      // 冻结本轮触发：持久化 pending.requestId/turn 是权威身份，可见 host.work-trigger
+      // 仅作交叉确认——SDK 自动压缩可能把触发条目裁出可见视图，持久化身份绝不能丢。
+      const frozenTurn = pending?.turn ?? null;
       let requestId = null;
-      let triggerScopeId = null;
+      let triggerScopeId = frozenTurn?.scopeId ?? null;
       for (const entry of view.entries) {
         if (entry.kind !== WORK_TRIGGER_KIND) continue;
         if (expectedRequestId !== null && entry.data?.requestId === expectedRequestId) {
           requestId = expectedRequestId;
-          triggerScopeId = entry.data?.scopeId ?? entry.data?.turn?.scopeId ?? null;
+          triggerScopeId = entry.data?.scopeId ?? entry.data?.turn?.scopeId ?? triggerScopeId;
         }
       }
-      // 只统计本批次的 scope 来源水位：同一协调 scope、且不超过 pending
-      // startedThroughLocalId（其它 scope/下一批次的同 scope 消息不计入）。
+      // 视图里没有匹配触发条目（压缩裁掉/尚未落视图）：持久化冻结 turn 的
+      // requestId 与 pending.requestId 一致时仍按可信 durable 身份判定，绝不靠模型正文猜。
+      if (requestId === null && expectedRequestId !== null &&
+          frozenTurn?.requestId === expectedRequestId) {
+        requestId = expectedRequestId;
+      }
+      // 来源水位以持久化边界为权威，不依赖源消息仍留在可见视图：
+      //   prepared.throughLocalId（重试沿用上次已算水位）
+      //   > 可见 scope-message 贡献（本批、同 scope、≤ batchThrough）
+      //   > startedThroughLocalId（本批已消费边界下限，压缩裁掉源消息时兜底）。
+      // compaction 若保留 work-trigger 但裁掉其前源消息，仍按 startedThroughLocalId
+      // 结算，绝不把已决策批次当未消费重放；新到消息永不计入本批水位。
+      const preparedThrough = Number.isSafeInteger(pending?.prepared?.throughLocalId)
+        ? pending.prepared.throughLocalId : 0;
       let throughLocalId = 0;
       if (requestId !== null) {
         for (let i = 0; i < view.entries.length; i++) {
@@ -837,6 +1377,10 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
           throughLocalId = Math.max(throughLocalId, localId);
         }
       }
+      throughLocalId = Math.max(
+        preparedThrough,
+        throughLocalId,
+        requestId !== null && Number.isSafeInteger(batchThrough) ? batchThrough : 0);
       const inactive = await harness.commit(async (tx) => {
         const current = await tx.doc(WorkContextState, coordNativeId);
         const state = await tx.doc(WorkDecisionState, coordNativeId);
@@ -844,6 +1388,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         const error = checkWork(current, state, state.pending?.requestId === requestId);
         if (error) return error;
         // Native retries may re-prepare the same task with a new cutoff; capture the actual view each time.
+        // cutoff 一并持久化：重试换 cutoff 时以最新为准，不丢失执行边界。
         state.pending.prepared = { taskId: String(api.taskId), cutoff, throughLocalId };
         return null;
       }, toolContext);
@@ -869,7 +1414,9 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         }
         if (prepared.tokenCount >= prepared.contextWindow) {
           const failure = { code: 'CONTEXT_LIMIT', message: 'work context projection reaches the model context window' };
-          state.error = failure;
+          // 请求级预算失败：只结算本 pending，不落 scope 级 error 闸门
+          // （error 闸门会无限阻断后续新请求；reconcile 走 lastError/结算路径）。
+          settleFailedDecision(state, current, failure);
           return failure;
         }
         return null;
@@ -908,6 +1455,9 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         if (state.stopped) throw messageError('WORK_STOPPED', 'work context is stopped');
         if (!state.pending?.prepared || state.error) throw messageError('WORK_CONTEXT_INACTIVE', 'work context has no prepared decision');
         if (state.pending.replan || state.pending.takeover) throw messageError('STALE_INPUT', 'work decision needs newer input');
+        // 已中断 pending 不得再发布：已发布消息由 getMessage 幂等路径先行处理，
+        // 新稿件在中断后一律拒绝（取消确认前不允许另一轮争用 Bot 资源）。
+        if (state.pending.interruption) throw messageError('WORK_STOPPED', 'work decision was interrupted');
         // 来源成员撤销对所有 scope 生效（与 log guard 同一语义，publishWork 内部
         // 执行，不依赖发送目标）；异步 DM 不做“存在更新入站消息”的新鲜度 guard——
         // 冻结轮只处理本轮关联消息，其后到达的 DM 留给后续决策轮，不使当前
@@ -956,7 +1506,9 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
   }
 
   return { resume, close, beforeRequest, checkBudget, publishWork, getWorkActivity, stopWork, resumeWork, takeoverShower,
+    interruptBotWork, setActivityListener,
     coordinationSelector,
+    drainFailureNotices,
     setTurnGate: (fn, onIdle, canRunWork = null) => {
       turnGate.fn = fn;
       turnGate.idle = onIdle ?? null;

@@ -22,7 +22,8 @@ import { createFindTool } from './find-tool.js';
 import { createLsTool } from './ls-tool.js';
 import { getPrimaryConversation, RequestKeys, PrimaryIndex, applyAgentProfile } from './runtime-docs.js';
 import { formatPrimarySubmission, normalizeHistoryOptions, readPrimaryHistory } from './runtime-history.js';
-import { RequestContext, countMessageTokens, countRequestTokens } from './request-context.js';
+import { RequestContext, countMessageTokens, estimateContextTokensHost, budgetRequestTokens } from './request-context.js';
+import { GenerationFailureState } from './generation-failure.js';
 import { resolveBotIdentity } from './bot-identity.js';
 import { createPluginManager } from './plugins/manager.js';
 import { createRuntimeLive } from './runtime-live.js';
@@ -241,6 +242,31 @@ export async function openRuntime(options) {
     }
     return env;
   };
+  // 契约 A：Host 主动中止前的安全失败诊断，写入会话作用域家族文档
+  // （键 = String(生成任务 id)）。只记已知 Host 错误码对应的固定安全文案，
+  // 未知/插件/provider 错误一律固定通用消息——绝不透传 err.message
+  //（可能含凭据/请求细节）。存储层失败（SessionFailed）不吞，原样传播。
+  const HOST_FAILURE_MESSAGES = {
+    CENTER_OFFLINE: 'center is offline',
+    MODEL_REQUIRED: 'center model is required',
+    INVALID_STATE: 'request state is invalid',
+    CONTEXT_LIMIT: 'context limit reached',
+    BOT_CONTEXT_REQUIRED: 'conversation ownership is ambiguous',
+  };
+  const recordGenerationFailure = async (api, err, context) => {
+    try {
+      const known = typeof err?.code === 'string' && Object.hasOwn(HOST_FAILURE_MESSAGES, err.code);
+      const code = known ? err.code : 'GENERATION_FAILED';
+      const message = known ? HOST_FAILURE_MESSAGES[err.code] : 'generation failed before the provider request';
+      await harness.commit(async (tx) => {
+        const doc = await tx.doc(GenerationFailureState, api.conversationId, String(api.taskId));
+        doc.failure = { code, message };
+      }, context);
+    } catch (commitErr) {
+      if (commitErr instanceof durable.SessionFailed) throw commitErr;
+      /* 诊断尽力而为，绝不覆盖原错误 */
+    }
+  };
   // Drop cached environments for one bot's mapped conversations and its plugin lane;
   // called only inside the idle apply boundary so no in-flight tool run loses its env.
   const dropBotEnvs = async (nativeIds, botId) => {
@@ -407,7 +433,7 @@ export async function openRuntime(options) {
     assertCapabilityAllowed: (botId, id) => plugins.assertCapabilityAllowed(botId, id),
     getExecutionEnv: async (botId) => envFor({ conversationId: 'plugin:' + botId, cwd: host.getBot(botId).cwd }),
     getBotEntryWatermark: (botId) => getBotEntryWatermark(botId),
-    documents: { PrimaryIndex, RequestKeys, WorkIndex, WorkContextState, WorkDecisionState, RequestContext, ContextState: RequestContext },
+    documents: { PrimaryIndex, RequestKeys, WorkIndex, WorkContextState, WorkDecisionState, RequestContext, ContextState: RequestContext, GenerationFailureState },
     sdk: {
       ...durable,
       defineDoc: (definition) => durable.defineDoc({ checkpointWhen: () => false, ...definition }),
@@ -441,26 +467,47 @@ export async function openRuntime(options) {
           const task = await harness.getTask(api.taskId, context);
           const actual = task?.state?.checkpoint?.model;
           if (!actual || actual.provider !== expected.provider || actual.modelId !== expected.modelId) throw errWithCode('center model changed', 'INVALID_STATE');
-          // 统一会话冻结轮最先：sessions 判定/恢复本轮来源与回复目标并把可信路由指引写入请求，
-          // 之后才轮到工作决策、插件上下文管线与预算计数（它们看到的已是带路由指引的请求）。
+          // 统一会话冻结轮最先：sessions 判定/恢复本轮来源与回复目标（prepend-only，
+          // 只把可信 Host 路由指引追加到 request 头部）。该指引是本 helper 的明确
+          // prepend-only 产物，用长度差切出，不用对象 identity/正文分类。
           const routed = await sessions.beforeRequest(request, api, context);
+          const routingMessages = routed.messages.slice(0, routed.messages.length - request.messages.length);
           await decisions.beforeRequest(routed, api, context);
-          const requestView = await plugins.prepareContext(routed, api, context);
+          // prepareContext 收原始 request（不带 Host 注入）：BC 等上下文贡献返回的
+          // 完整视图不能覆盖、也不重复计费本轮 Host 控制指引；持久 prepared 预算
+          // 仍记真实投影，最终守卫按有序子序列增量把指引只计一次。
+          const requestView = await plugins.prepareContext(request, api, context);
           const checkpoint = task.state.checkpoint;
           const model = models.getModel(actual.provider, actual.modelId);
           if (!model || checkpoint.cutoff === undefined) throw errWithCode('request checkpoint is unavailable', 'INVALID_STATE');
+          // SDK 同口径预算基线：取 checkpoint.cutoff 的权威上下文视图，
+          // 用 estimateContext（最新 assistant usage + 尾部估计）算原始历史，
+          // 再按有序子序列 + 增量把 prepareContext（如 BC 投影、路由指引）的实际
+          // 有效请求计入 tokenCount；JSON 克隆内容匹配，BC 整体替换只计投影。
+          const preparedConversation = await harness.conversation(api.conversationId, context);
+          if (!preparedConversation) throw errWithCode('request conversation is missing', 'INVALID_STATE');
+          const cutoffView = await preparedConversation.context(context, { at: checkpoint.cutoff });
+          if (!cutoffView) throw errWithCode('request context view is unavailable', 'INVALID_STATE');
+          const preparedTokens = budgetRequestTokens(cutoffView.messages, estimateContextTokensHost(cutoffView), requestView.messages);
           await harness.commit(async (tx) => {
             const doc = await tx.doc(RequestContext, api.conversationId);
             doc.prepared = {
               taskId: String(api.taskId), cutoff: checkpoint.cutoff,
-              contextWindow: model.contextWindow, tokenCount: countRequestTokens(requestView),
+              contextWindow: model.contextWindow,
+              tokenCount: preparedTokens,
               messages: requestView.messages,
             };
           }, context);
           if (!online) throw errWithCode('center is offline', 'CENTER_OFFLINE');
-          return await plugins.beforeRequest(requestView, api, context);
+          const finalView = await plugins.beforeRequest(requestView, api, context);
+          // 只把 Host 本轮控制指引放到投影/recall 之后追加一次：任何插件
+          // （含会整体重建视图的 BC prepare）都不能丢掉冻结轮约束。
+          return { ...finalView, messages: [...finalView.messages, ...routingMessages] };
         } catch (err) {
           if (!context.abortSignal?.aborted) {
+            // Host 侧准备失败：先把安全诊断写入 GenerationFailureState（契约 A，
+            // work 对账/LIVE 可凭 taskId 读到具体失败），再中止当前任务。
+            await recordGenerationFailure(api, err, context);
             // SDK 会吞普通 hook 异常；用本次 invocation context 取消当前任务，避免 join 自身。
             try {
               await harness.abortTask(api.taskId, context);
@@ -474,17 +521,25 @@ export async function openRuntime(options) {
     })],
   }));
   // Selected after each Bot's plugin hooks, so this check sees their complete request.
+  // SDK 已用 estimateContext（权威 usage + 尾部估计）做阈值压缩与溢出重试；这里的
+  // 最终守卫只做越限硬止，且用同一口径：prepared.tokenCount 是 prepareContext 后
+  // 有效请求的 SDK 估计基线，插件 beforeRequest 之后再用同一有序子序列 + 增量
+  // 对齐当前 messages——新增的插件内容计入、被替换的投影只计有效值，
+  // 绝不做整包 JSON 估算，也绝不误杀后台压缩期间的正常请求。
   const finalBudgetExtension = defineExtension({ name: 'cap-final-budget', hooks: [hook(GenerationTask, {
     async beforeRequest(request, api, context) {
       try {
         if (!online) throw errWithCode('center is offline', 'CENTER_OFFLINE');
         const prepared = (await harness.snapshot(RequestContext, api.conversationId, context))?.prepared;
         if (!prepared || prepared.taskId !== String(api.taskId)) throw errWithCode('context is not prepared', 'INVALID_STATE');
-        const added = Math.max(0, countRequestTokens(request) - countRequestTokens({ messages: prepared.messages }));
-        if (prepared.tokenCount + added >= prepared.contextWindow) throw errWithCode('context limit reached', 'CONTEXT_LIMIT');
+        const total = budgetRequestTokens(prepared.messages, prepared.tokenCount, request.messages);
+        if (total >= prepared.contextWindow) throw errWithCode('context limit reached', 'CONTEXT_LIMIT');
         await decisions.checkBudget(request, api, context);
       } catch (err) {
-        if (!context.abortSignal?.aborted) await harness.abortTask(api.taskId, context);
+        if (!context.abortSignal?.aborted) {
+          await recordGenerationFailure(api, err, context);
+          await harness.abortTask(api.taskId, context);
+        }
         throw err;
       }
     },
@@ -512,7 +567,11 @@ export async function openRuntime(options) {
     harness = await Harness.open(storage, {
       models,
       registry,
-      settings: { compaction: { enabled: false }, extensions: coreExtensions },
+      // SDK 默认自动压缩：阈值触发（含后台压缩）与一次 provider 溢出压缩重试，
+      // 对全部 Bot 生效，包括启用 BC 的 Bot；各模型仍可按 settings.compaction
+      // modelOverrides 自行调整。不要恢复 enabled:false，也不要在 generation
+      // 内调用 idle-only 的 conversation.compact()。
+      settings: { extensions: coreExtensions },
       env: envFor,
     }, CTX);
   } catch (err) {
@@ -691,6 +750,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
   // 跟踪在飞的主会话提交：完成时记录 lastActivityAt 与 lastPreview。
   const trackedSubmissions = new Map(); // submissionId -> { botId, nativeId }
+  const stopInFlight = new Map();     // botId -> 在飞「停止此 Bot」Promise：重复 abort 共用同一协调，绝不并发争用。
   const completedSubmissions = new Set(); // submissionId
   let submissionCheckPromise = null;
   let checkSubmissionsAgain = false;
@@ -875,8 +935,74 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     recordCompletedSubmission,
     initializeBot,
     attachments: attachmentStore,
+    // 用户轮 head 实际准入前抢占同 Bot 非用户来源 work（群/DM/迟到续轮）；
+    // 不动主聊天用户轮、不清 Host 用户队列。work lane 未实现时静默跳过。
+    preemptWork: (botId) => decisions.interruptBotWork?.(botId, { reason: 'preempted' }),
   });
   decisions.setTurnGate(turns.admitWorkDecision, turns.pump, turns.canRunWork);
+  // 队列生命周期通知：pending 创建/结束/暂停/取消的纯元数据快照驱动统一 live 活动投影。
+  decisions.setActivityListener?.((botId, summary) => live.setWorkActivity?.(botId, summary));
+
+  /**
+   * 「停止此 Bot」统一协调：
+   * 1) turns.beginStop 立停止 gate（同步推进进程代次并 arm；持久审计代次与
+   *    stopPending 崩溃恢复标记随后落盘，取消确认前无新执行）；
+   * 2) cancelQueued 仅作废 ≤ 停止代次的已受理未提交条目（cancelled 终态保留回执，
+   *    同 requestId 绝不复活；停止开始后受理的新代次输入保留等结算后泵）；
+   * 3) decisions.interruptBotWork(user_stop) 覆盖该 Bot 各 scope 积压与 pending（捕获停止水位）；
+   * 4) 主会话取消 + 离线退化 abortSubmission/abortTask 标记；
+   * 成功置 live stopped，失败保留可见 stopping 并抛错（绝不伪装成功）；gate 内另一轮不争用资源。
+   */
+  async function stopBotWork(bot, botId) {
+    try { live.setBotControl?.(botId, 'stopping'); } catch { /* live lane 尚未实现时静默跳过 */ }
+    try {
+      // 先立停止 gate：beginStop 在首个 await 前同步推进进程代次并 arm gate，
+      // 持久审计代次与 stopPending 崩溃恢复标记随后落盘；取消确认前无新执行。
+      // beginStop 返回推进前代次（取消边界）：≤ 该值的受理属于停止前已受理的
+      // 输入与工作积压；本地计数经 restoreTurns 预载已对齐持久值，旧进程遗留
+      // 队列条目（其持久 stopEpoch ≤ 预载基线）同样落在边界内，绝不漏取消。
+      const epoch = await turns.beginStop(bot);
+      // 再撤掉 Host 队列中已受理的未原生提交条目：仅作废旧代次受理（停止前的输入
+      // 与工作积压）；停止开始后受理的新代次输入保留，等停止结算后由泵处理。
+      // 即使后续 HTTP/确认在飞，泵在提交前的存活核对会发现条目已取消，
+      // 绝不把已取消的轮送进模型。
+      await turns.cancelQueued(bot, epoch);
+      // 工作 lane 取消：user_stop 覆盖各 scope 待处理积压与已有 pending；
+      // 离线/恢复未完成时 quiesce=false（不调用会隐式 resume 的 abort/wait 路径）。
+      if (decisions.interruptBotWork) {
+        await decisions.interruptBotWork(botId, {
+          reason: 'user_stop',
+          quiesce: centerOnline && !turns.isRecoveryPending(),
+        });
+      }
+      const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
+      if (conversation) {
+        // 离线或恢复未完成时不能用 Conversation.abort/Submission.wait：
+        // 二者会隐式 resume 调度器、唤醒未知旧任务。退化为非调度入口——
+        // inspect/abortSubmission/abortTask 只提交取消标记，调度恢复后才执行 abort invocation。
+        if (!centerOnline || turns.isRecoveryPending()) {
+          const inspection = await harness.inspect(CTX);
+          for (const submission of inspection.submissions) {
+            if (submission.conversationId === conversation.id) {
+              await harness.abortSubmission(submission.id, CTX, conversation.id).catch(() => {});
+            }
+          }
+          for (const task of inspection.tasks) {
+            if (task.record.conversationId === conversation.id) {
+              await harness.abortTask(task.record.id, CTX).catch(() => {});
+            }
+          }
+        } else {
+          await conversation.abort(CTX);
+        }
+      }
+      // 取消确认成功才解除 gate 并置 stopped：失败保留 gate 与 stopping 可见状态，
+      // 绝不伪装成功/偷偷放行旧工作（stopPending 留作崩溃恢复边界）。
+      await turns.settleStop(botId);
+    } catch (err) {
+      throw err;
+    }
+  }
 
   // 统一图形环境的 Runtime 门面：Actor 只来自可信主会话或工作绑定，绝不采信调用方会话。
   const showerRuntime = createRuntimeShower({
@@ -1519,8 +1645,12 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     // wire 上调用方自带的任意 origin/author 字段绝不采信，由本边界重写。
     submit: async (botId, input) => {
       assertNonBlank(botId, 'botId');
+      // 停止代次必须在任何 await/排队前捕获：受理晚于停止的在飞 submit 以旧代次
+      // 持久化并在同事务内作废为 cancelled 回执；停止后受理的新代次输入允许新运行。
+      const stopEpoch = turns.stopEpoch(botId);
       const trustedInput = {
         ...input,
+        stopEpoch,
         origin: {
           sender: {
             kind: input?.origin?.sender?.kind === 'host' ? 'host' : 'user',
@@ -1672,29 +1802,14 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       assertNonBlank(botId, 'botId');
       const bot = host.getBot(botId);
       if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
-      // 先撤掉 Host 队列中尚未原生提交的条目：即使后续 HTTP/确认在飞，
-      // 泵在提交前的存活核对会发现条目已删，绝不把已取消的轮送进模型。
-      await turns.cancelQueued(bot);
-      const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
-      if (!conversation) return;
-      // 离线或恢复未完成时不能用 Conversation.abort/Submission.wait：
-      // 二者会隐式 resume 调度器、唤醒未知旧任务。退化为非调度入口——
-      // inspect/abortSubmission/abortTask 只提交取消标记，调度恢复后才执行 abort invocation。
-      if (!centerOnline || turns.isRecoveryPending()) {
-        const inspection = await harness.inspect(CTX);
-        for (const submission of inspection.submissions) {
-          if (submission.conversationId === conversation.id) {
-            await harness.abortSubmission(submission.id, CTX, conversation.id).catch(() => {});
-          }
-        }
-        for (const task of inspection.tasks) {
-          if (task.record.conversationId === conversation.id) {
-            await harness.abortTask(task.record.id, CTX).catch(() => {});
-          }
-        }
-        return;
-      }
-      await conversation.abort(CTX);
+      // 「停止此 Bot」在飞共用同一 Promise：重复 abort 等待同一次协调，绝不并发争用资源。
+      const existing = stopInFlight.get(botId);
+      if (existing) return existing;
+      const task = stopBotWork(bot, botId);
+      stopInFlight.set(botId, task);
+      const release = () => { if (stopInFlight.get(botId) === task) stopInFlight.delete(botId); };
+      task.then(release, release);
+      return task;
     },
 
     reloadModels() { throw errWithCode('models are managed by the center', 'INVALID_STATE'); },
@@ -1753,7 +1868,48 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
     // 冷启动：service 在全局 resume 前调用一次，恢复被钉住的旧 set。
     // 可恢复的准入无法恢复时保持调度暂停并抛错（绝不缺定义地 resume）。
-    restoreTurns: () => turns.restoreTurns(),
+    restoreTurns: async () => {
+      // 崩溃时丢失内存停止 gate：持久 stopPending 标记的 Bot 先补完未完成停止
+      // （user_stop 标记 + 主会话取消标记，quiesce=false 不隐式 resume 调度器），
+      // 绝不自动恢复漏取消工作。任一 Bot 恢复失败即向外传播
+      // TURN_RECOVERY_REQUIRED——gate 与 stopping 保留，绝不伪装成功后继续 resume。
+      for (const bot of await turns.pendingStops()) {
+        // 恢复期间 gate 已由 pendingStops arm：置 stopping 让该 Bot 可见在停，
+        // 恢复失败即向外传播——绝不置 stopped 伪装成功后继续恢复调度。
+        try { live.setBotControl?.(bot.botId, 'stopping'); } catch { /* live 缺席 */ }
+        try {
+          if (decisions.interruptBotWork) {
+            // 已有 pending.interruption 的 scope 沿用其已捕获 through 边界（宕机后
+            // 新到消息不被这次补停吞掉），由 work lane 的幂等标记保证。
+            await decisions.interruptBotWork(bot.botId, { reason: 'user_stop', quiesce: false });
+          }
+          const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
+          if (conversation) {
+            const inspection = await harness.inspect(CTX);
+            for (const submission of inspection.submissions) {
+              if (submission.conversationId === conversation.id) {
+                await harness.abortSubmission(submission.id, CTX, conversation.id).catch(() => {});
+              }
+            }
+            for (const task of inspection.tasks) {
+              if (task.record.conversationId === conversation.id) {
+                await harness.abortTask(task.record.id, CTX).catch(() => {});
+              }
+            }
+          }
+          await turns.settleStop(bot.botId);
+        } catch (err) {
+          // 停止恢复失败必须可见且阻断调度恢复：gate 与 stopping 保留，
+          // 错误码沿用恢复类（调用方按 TURN_RECOVERY_REQUIRED 处理恢复前状态）。
+          const failure = errWithCode(
+            `pending stop recovery failed for bot ${bot.botId}: ${err?.message ?? 'unknown'}`,
+            'TURN_RECOVERY_REQUIRED');
+          failure.cause = err;
+          throw failure;
+        }
+      }
+      return turns.restoreTurns();
+    },
 
     resume() {
       harness.resume();

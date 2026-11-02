@@ -161,6 +161,64 @@
 .hub-sidebar > .error-banner,
 .hub-sidebar > .status { margin: 4px 14px; flex: none; }
 
+/* 混排行内状态小条（列表滚动区内）：跟随列表内边距，不占 sidebar 外边距。 */
+.hub-list-scroll > .status { margin: 6px 10px; }
+
+/* 群聊行徽标与来源行（gbot-ui ConversationRow badge/meta，桌面主题色适配） */
+.hub-bot-row .gbot-conversation-row__badge {
+  flex: none;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.hub-bot-row .gbot-conversation-row__meta { font-size: 11.5px; color: var(--muted); }
+
+/* ————— 统一列表 ————— */
+
+/* PrimaryChatPane 隐藏宿主：子视图打开时保持挂载但隐藏（不依赖 UA hidden 样式）。 */
+.chat-stage-host { display: contents; }
+.chat-stage-host.stage-hidden { display: none; }
+
+/* 主舞台内的群聊/私聊子视图：Scopes 自身根为 .scope-shell（flex 行布局）。 */
+.scope-main-stage {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+.scope-main-stage .scope-shell {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.scope-main-stage .scope-shell .entity-list {
+  width: 250px;
+}
+.scope-main-stage .scope-shell .chat-pane {
+  overflow-y: auto;
+}
+
+/* Bot 行右键菜单（gbot-ui 上下文菜单挂 body；桌面主题变量适配） */
+.gbot-context-menu {
+  min-width: 180px;
+  border-color: var(--line);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  color: var(--text);
+}
+.gbot-context-menu .baby-grok-bot-context-menu__item {
+  color: var(--text);
+}
+.gbot-context-menu .baby-grok-bot-context-menu__item:hover,
+.gbot-context-menu .baby-grok-bot-context-menu__item:focus-visible {
+  background: var(--accent-soft);
+}
+
+/* 行选中态（gbot-ui 以 data-active 标记，复用 hub-bot-row.selected 视觉） */
+.hub-bot-row[data-active] { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+
 /* ————— 统一列表 ————— */
 
 .hub-list-scroll {
@@ -373,7 +431,6 @@
 }
 .chat-search-bar input:focus { outline: none; border: 0; }
 
-.stop-button { color: var(--danger); border-color: var(--danger); }
 .chat-more-wrap { position: relative; }
 .chat-more-menu,
 .composer-plus-menu {

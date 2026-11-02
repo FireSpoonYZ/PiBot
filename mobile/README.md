@@ -10,6 +10,7 @@ M18（Tauri Android 外壳）已交付并获父助手限定范围验收，交付
 - 后台已提交任务的完成／失败通知按 Bot 合并并持久去重；正在查看的聊天不弹完成通知。点击通知按设备 ID 与 Bot ID 打开聊天。Android 客户端凭据只通过 AndroidKeyStore 加密保存，broker 不另存明文 token。
 - 旧聊天界面入口已停用；历史聊天 Intent 打开当前 Tauri 客户端，不自动定位或迁移旧会话。旧数据、旧 Host 待确认与显式导入仍保留。分享确认仍保存至旧会话草稿、不会发送或自动转入当前客户端；保存后可选择「打开客户端」。
 - 主 Bot 横向滚动区铺满手机宽度，横屏不再受 680 px 宽度上限约束；普通列表、按钮和输入框保留内容内边距。
+- Bot Hub 列表将群聊（room scope）与普通/远端 Bot 同页混排：本机走只读 scope 适配器、远端按目标设备冻结 identity 后读取各节点可见 room，按最近消息时间与 Bot 行统一排序；后台 DM 不混入主聊摘要与排序。点击群聊行直接进内容：用户可发送消息并编辑成员 —— 发送经 RoomApiResolver 路由到成员所在在线 Host（本机群聊经中心/中继连接回环本机），成员变更只打 scope.authorityDeviceId，写端尚未连上时显示待连接而非只读，DM 仍只读。主 Bot 卡、普通与归档 Bot 行支持长按/右键/键盘（Shift+F10）「查看私聊」菜单；聊天标题也有可见「私聊」按钮，均打开仅该 Bot 参与的 bot-bot DM 列表（默认不选中，全部只读，不含停止回调）。原「Bot 通信」菜单项与抽屉「群聊与 Bot 私聊」入口已移除；系统返回按 详情 → DM 列表 → 来源（Hub 或主聊天）逐级回退。群聊/私聊内容页是面向用户的聊天界面：一个会话头（返回、头像、成员名标题）、独立消息滚动区与底部输入/只读提示，作者与成员一律显示 Bot 名字（宿主 knownBots 全目录解析，无名回退「已移除的 Bot」），不显示 UUID 或协议调试字段；宿主不再叠 subpage 标题栏与外层滚动。
 
 下方 M18/M20 的旧验收记录保留历史事实；涉及旧聊天入口、客户端/Host 启停、连接恢复和离线发送的旧说明，以本节为准。本次生命周期调整尚需设备端验收；厂商后台冻结与真人触摸仍需真机验证。
 
@@ -72,7 +73,16 @@ Tauri 的 Android 运行链路（App.run → tauri-runtime-wry.run → tao `Even
 - 轮内不切换版本：进行中的问卷回答、工具续轮属本轮内部续行，不是新输入；显式停止走既有 abort 取消排队与工作。
 - 排队/等待状态经 LIVE `turnAdmission` 字段（queued/checking/synchronizing/failed + 错误码）显示，不含正文与凭据。
 
+## 统一活动、抢占与手动停止
+
+> **状态**：已交付并经父助手**限定范围**验收（probe36 Android API 36 x86_64 模拟器客户端连隔离 Linux Host 实测，含真实 ADB 点按钮；范围与未覆盖项见 [`docs/bot-activity-and-interruption.md`](../docs/bot-activity-and-interruption.md)「验收」）。
+
+- LIVE 的 `activity` 字段是 Bot 工作状态的统一依据，本机页与「其他设备」远端页共用同一解析 helper；旧 Host 缺省该字段时按 busy/queuedCount/turnAdmission 回退，恢复/离线仍显示未知状态、不伪装工作中。
+- **停止此 Bot**：停止按钮独立于发送按钮，草稿/附件存在、排队/准备中、failed 受理均可停；stopping 有独立 disabled 防重，不被发送/上传/草稿锁禁用，`onAbort` 的 Promise 被正确等待，失败显示错误提示。停止是 Bot 级取消当前执行与已受理积压，保留历史与取消回执；scope 级「暂停此处工作 / 恢复此处工作」（stopWork/resumeWork）语义不变。
+- 本地发送的乐观状态在受理前可继续叠加，受理后以 Host activity 为准；被停止的 Bot 明确显示「已停止」而非已完成。
+
 ## 权限与语音
+
 
 麦克风权限由插件 `@TauriPlugin` 声明，Kotlin 侧在 `startVoice` 前检查真实前台与权限，权限回调按 generation 归属；语音沿用默认进程 Host 的既有“冻结 botId/requestId 只提交一次”语义与事件形状，重复/迟到回调不会串到新捕获。debug 构建开启 WebView 检查，release 保持关闭，未放松 CSP/Origin/TLS。
 

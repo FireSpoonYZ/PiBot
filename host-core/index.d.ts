@@ -320,6 +320,12 @@ export interface WorkActivity {
     completedAt: string;
   } | null;
   error: { code: string; message: string } | null;
+  /**
+   * Request-local failure diagnostic (work lane, contract C): the latest
+   * request's bounded safe failure, kept visible after settle without gating
+   * new requests — unlike `error`, which remains the legacy scope gate.
+   */
+  lastError: { code: string; message: string } | null;
 }
 
 /**
@@ -863,6 +869,34 @@ export interface TurnAdmissionStatus {
   error?: { code: string; message: string };
 }
 
+/**
+ * Unified Bot work activity for live watches. Metadata only (phase/source enums,
+ * bounded IDs, ISO startedAt); never message text, credentials or tool args.
+ * phase 'stopped' is the explicit manual-stop settlement, not idle; 'failed' is a
+ * failed admission pending cancellation, not a history error; 'compacting' is a
+ * blocking or idle/manual context compaction — it counts active/busy like
+ * 'running', while a nonblocking background compaction keeps phase 'running'.
+ * Optional on the wire: older Hosts omit it and clients fall back to
+ * busy/queuedCount; a host emitting 'compacting' requires a client that
+ * recognizes the value (strict wire validation rejects unknown phases).
+ */
+export interface BotActivity {
+  phase: 'idle' | 'queued' | 'preparing' | 'running' | 'compacting' | 'interrupting' | 'stopping' | 'stopped' | 'failed';
+  /** 'primary' | 'room' | 'dm' are real sources; 'background' marks a primary-kind background work continuation. */
+  source: 'primary' | 'room' | 'dm' | 'background' | null;
+  scopeId: string | null;
+  requestId: string | null;
+  /** ISO 8601 timestamp of the current activity start; null when unknown. */
+  startedAt: string | null;
+  /**
+   * Bounded safe diagnostic of the failed phase only — the Host-authored
+   * generation-failure family record or a fixed safe fallback, never a raw
+   * provider error body. Absent on every other phase; wire validation rejects
+   * it elsewhere.
+   */
+  error?: { code: string; message: string };
+}
+
 export interface BotLiveState {
   history: LiveHistoryItem[];
   historyTruncated: boolean;
@@ -875,6 +909,8 @@ export interface BotLiveState {
   queuedCount: number;
   /** Next waiting admission; optional — frames from older Hosts omit it. Never present on work watches. */
   turnAdmission?: TurnAdmissionStatus | null;
+  /** Unified work activity; optional — frames from older Hosts omit it. The single UI authority for working status. */
+  activity?: BotActivity;
 }
 
 /** Whole-field replacement of selected BotLiveState fields; never append/delta. */

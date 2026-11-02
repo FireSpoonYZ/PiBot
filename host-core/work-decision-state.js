@@ -7,6 +7,14 @@ export function initialDecisionState() {
     pending: null,
     lastDecision: null,
     error: null,
+    // 最近一次请求级失败的具体诊断（request-local，不当 scope 闸门）；
+    // 与 state.error 的区别：error 是遗留的全局失败闸门，lastError 只作可见展示。
+    lastError: null,
+    // requestId -> Host 执行失败回执草稿（见 runtime-work-decisions.js settleFailure）。（见 runtime-work-decisions.js settleFailure）。
+    notices: {},
+    // 升级边界：升级前已由 scope 级 error 终态吞掉的 backlog 水位（ledger localId），
+    // 不再自动重放；其后新到消息仍可正常触发新轮。仅旧文档迁移时写入。
+    failureWatermark: 0,
   };
 }
 
@@ -40,16 +48,31 @@ export function toFrozenTurn(turn) {
 
 export const WorkDecisionState = defineDoc({
   kind: 'host.work-decision',
-  version: 1,
+  version: 2,
   scope: 'conversation',
   history: 'latest',
   fork: 'initial',
   initial: initialDecisionState,
+  // v1 -> v2：新增 notices/failureWatermark。failureWatermark 只作为「存在过 scope
+  // 级失败」的标记边界写入；真正的不重放边界由 reconcile 在首次见到旧 error 时
+  // 用当批 localId 精确捕获（见 runtime-work-decisions.js）。这里给字段默认值即可。
+  migrate: (value) => ({
+    ...value,
+    lastError: value.lastError ?? null,
+    notices: value.notices ?? {},
+    failureWatermark: value.failureWatermark ?? 0,
+  }),
   checkpointWhen: () => false,
 });
 
 // 已删除的 host.work-stop 代次文档：作用域取消只靠 pending requestId/submissionId 精准
 // 中止（abortRequestFamily），不需要会话级额外文档，绝不中止无关共享轮。
+//
+// pending.interruption?: {reason:'preempted'|'user_stop', throughLocalId:number}
+// 持久中断标记（contract §5）：preempted 仅标记不推进 handled，待用户队列排空后
+// 按相同原始消息重触发；user_stop 把该 scope 消费边界推进到捕获的收件水位，
+// 结算为 aborted（非 WORK_GENERATION_FAILED），其后新到消息正常唤醒。
+// submitPending/beforeRequest/publishWork/reconcile 均尊重该标记；标记随结算随 pending 移除。
 
 /** 传入 tx.doc 草稿时须在 commit 内调用，逐字段复制，不能带出已结算的 overlay。 */
 export function toWorkActivity(botId, scopeId, meta, state, isMember) {
@@ -94,5 +117,6 @@ export function toWorkActivity(botId, scopeId, meta, state, isMember) {
       code: error.code,
       message: error.message,
     },
+    lastError: state.lastError ?? null,
   };
 }

@@ -3,6 +3,7 @@
 // 全部请求仍走既有 useDrafts / pending_enqueue / pending_send / observe 路径，
 // 保留 CAS、显式发送、结果未确认锁与离线只读语义。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
   Archive,
@@ -41,18 +42,27 @@ import type {
   BotDirectoryEntry,
   BotRecord,
   ClearHistoryResult,
+  MessageMember,
   CompactResult,
   DevicesDirectoryItem,
   PendingCursor,
   PendingEnqueueInput,
   PendingListPage,
   PendingRecord,
+  ScopeInfo,
 } from '../../../host-core/index.js';
 import { isTargetOfflineError } from './api';
 import { useDrafts } from './drafts';
 import type { DraftSnapshot } from './drafts';
 import { type QuestionnaireSubmitPayload } from '../../../web/src/ToolPresentation';
 import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
+import {
+  botActivityText,
+  canStopBotActivity,
+  isBotActivityBusy,
+  resolveBotActivity,
+  type BotActivity,
+} from '../../../web/src/botActivity';
 import { botAvatarKey, syncBotAvatarConfigs } from '../../../web/src/botAvatarSync';
 import { BotSettings } from './BotSettings';
 import { ShowerPreview } from './ShowerPreview';
@@ -60,6 +70,16 @@ import { ChatTranscript } from './ChatTranscript';
 import { BotAvatarStudio } from './BotAvatarStudio';
 import { targetApi } from './targetApi';
 import { readHistoryPage } from './history';
+import { Scopes } from './Scopes';
+import { invoke } from '@tauri-apps/api/core';
+import type { RoomApiResolver, ScopeReadApi } from './scope-api';
+import {
+  ConversationContextMenu,
+  ConversationGroupAvatar,
+  ConversationRow,
+  useConversationRowInteractions,
+  useScopeConversations,
+} from '../../../web/src/gbot-ui/index';
 import './BotChats.css';
 
 type AnyRawEntry = { id: unknown; kind: string; model?: unknown; data?: unknown };
@@ -147,6 +167,8 @@ function sessionKey(id: DesktopIdentity | null): string {
   return id ? `${id.profileId}|${id.generation}|${id.targetDeviceId}` : '';
 }
 
+
+
 function errText(e: unknown): string {
   if (e && typeof e === 'object') {
     const r = e as Record<string, unknown>;
@@ -227,22 +249,6 @@ function formatTime(iso: string | null | undefined): string {
   if (!iso) return '';
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
-}
-
-function formatRelativeTime(iso: string | null | undefined): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  const ms = d.getTime();
-  if (Number.isNaN(ms)) return '';
-  const now = new Date();
-  const diff = now.getTime() - ms;
-  const sameDay = d.toDateString() === now.toDateString();
-  if (sameDay) {
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-  if (diff < 2 * MS_PER_DAY) return '昨天';
-  if (diff < 7 * MS_PER_DAY) return `${Math.floor(diff / MS_PER_DAY)}天前`;
-  return d.toLocaleDateString();
 }
 
 function truncate(s: string, n: number): string {
@@ -1049,7 +1055,7 @@ function PrimaryChatPane({
   onBotUpdated,
   onBotDeleted,
   onLiveActivity,
-  onOpenCommunications,
+  onOpenPrivateChats,
   pageActive = true,
 }: {
   api: DesktopPanelApi;
@@ -1064,8 +1070,8 @@ function PrimaryChatPane({
   onBotUpdated: (patch: Partial<BotRecord> & { botId: string }) => void;
   onBotDeleted: (botId: string) => void;
   onLiveActivity?: () => void;
-  /** 打开该 Bot 的通信（DM/群聊）视图；deviceId 指向其真实设备。 */
-  onOpenCommunications?: (botId: string, scopeId?: string, deviceId?: string) => void;
+  /** 打开该 Bot 参与的私聊列表（只读，默认不选对话）。 */
+  onOpenPrivateChats?: (bot: BotRecord) => void;
   pageActive?: boolean;
 }) {
   const t = useText();
@@ -1876,7 +1882,24 @@ function PrimaryChatPane({
   const disabled =
     isArchived || sendState === 'sending' || slashBusy !== null || lockedRef.current || drafts.busy || !!drafts.attempt;
 
-  const liveBusy = Boolean(live && (live.busy || live.queuedCount > 0));
+  // 统一口径只在这里计算一次传给 ChatTranscript：Host activity 为准；
+  // 本地发送乐观只在 Host 未受理（idle/stopped）时叠加 queued；
+  // abort 进行中本地投影 stopping（Host 的 stopping/interrupting 优先）。
+  const liveActivity = resolveBotActivity(live);
+  const sendingActivity: BotActivity | null =
+    sendState === 'sending' &&
+    slashBusy === null &&
+    (liveActivity.phase === 'idle' || liveActivity.phase === 'stopped')
+      ? { phase: 'queued', source: 'primary', scopeId: null, requestId: null, startedAt: null }
+      : null;
+  const activity: BotActivity =
+    stopping && liveActivity.phase !== 'stopping' && liveActivity.phase !== 'interrupting'
+      ? { ...liveActivity, phase: 'stopping' }
+      : sendingActivity ?? liveActivity;
+  const liveBusy = isBotActivityBusy(activity);
+  const canStop = canStopBotActivity(activity);
+  // 停止独立门禁：只关联在线/归档/停止进行中，不被发送、草稿锁或附件上传禁用。
+  const stopDisabled = !online || isArchived || stopping;
   void avatarVersion; // 头像保存后 bump：重新计算 key 下各 GrokBotAvatar preset
 
   const statusText = !online
@@ -1886,11 +1909,7 @@ function PrimaryChatPane({
       : liveEnded
         ? '观察已结束（不断连 Agent）'
         : live
-          ? live.busy
-            ? '思考与工具调用中'
-            : live.queuedCount > 0
-              ? `队列等待 · ${live.queuedCount}`
-              : '空闲'
+          ? botActivityText(activity, t)
           : '正在建立观察…';
 
   function openInspector(tab: InspectorTab) {
@@ -1987,26 +2006,26 @@ function PrimaryChatPane({
           >
             人设与能力
           </button>
-          {onOpenCommunications ? (
+          {onOpenPrivateChats ? (
             <button
               type="button"
               className="secondary-button chat-action-pill"
-              onClick={() => onOpenCommunications(bot.botId, undefined, bot.deviceId)}
-              title="查看该 Bot 的通信（智能体私聊 / 群聊与最新消息）"
+              onClick={() => onOpenPrivateChats(bot)}
+              title="查看该 Bot 参与的智能体私聊（只读）"
             >
-              通信
+              私聊
             </button>
           ) : null}
-          {live && live.busy ? (
+          {canStop || stopping ? (
             <button
               type="button"
-              className="icon-button stop-button"
+              className={`secondary-button chat-action-pill stop-pill${stopping ? ' is-stopping' : ''}`}
               onClick={() => void stopTask()}
-              disabled={!online || stopping || disabled}
-              title="停止当前任务"
-              aria-label="停止当前任务"
+              disabled={stopDisabled}
+              title="停止此 Bot（取消排队与进行中的工作）"
+              aria-label="停止此 Bot"
             >
-              <Square size={15} />
+              <Square size={14} /> {stopping ? '正在停止…' : '停止此 Bot'}
             </button>
           ) : null}
           <div className="chat-more-wrap" ref={moreMenuRef}>
@@ -2157,6 +2176,7 @@ function PrimaryChatPane({
         entries={rawItems}
         live={live}
         bot={bot}
+        activity={activity}
         avatarKey={botAvatarKey(bot)}
         devicePlatform={devicePlatform}
         search={chatSearch}
@@ -2380,11 +2400,10 @@ function PrimaryChatPane({
   );
 }
 
-export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommunications, initialBotId, initialDeviceId }: {
+export function BotChats({ api, currentDeviceId, pageActive = true, initialBotId, initialDeviceId }: {
   api: DesktopPanelApi;
   currentDeviceId: string;
   pageActive?: boolean;
-  onOpenCommunications?: (botId: string, scopeId?: string, deviceId?: string) => void;
   /** Scopes「打开 Bot」导航：按稳定 botId + deviceId 选中 Bot（同名 Bot 靠 ID 区分）；
    *  initialDeviceId 缺省时只在当前目录中按 botId 匹配。 */
   initialBotId?: string;
@@ -2410,6 +2429,17 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
   const [listCollapsed, setListCollapsed] = useState(false);
   const [query, setQuery] = useState('');
   const [deviceFilter, setDeviceFilter] = useState<string>('all');
+  /** 主舞台内子视图：null = 选中 Bot 的主聊天；dm = 某 Bot 的私聊列表（readOnly）；scope = 群聊详情。
+   *  只保存稳定 deviceId/成员/scopeId，不保存 api：profileKey 不含 generation，
+   *  冻结的 targetApi 会在同 profile 重连后 identity 永久 null、targetOnline 不随目录更新。 */
+  const [stage, setStage] = useState<
+    | null
+    | { kind: 'dm'; member: MessageMember; name: string; deviceId: string }
+    | { kind: 'scope'; scopeId: string; deviceId: string }
+  >(null);
+  /** 私聊子视图受控选择：内容 → 列表逐级返回。 */
+  const [dmScopeId, setDmScopeId] = useState<string | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; member: MessageMember; name: string } | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const refreshQueued = useRef(false);
   const inFlight = useRef(false);
@@ -2527,6 +2557,11 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
       setSelected(null);
       setLoaded(Boolean(cached));
       setBotsError(null);
+      // 仅真实换 profile/kind 才放弃子视图/菜单/受控 DM 选择；同 profile 重连
+      // （新 generation）由 stageApi 随 sess 重建接续，普通刷新与可见性变化保留。
+      setStage(null);
+      setMenu(null);
+      setDmScopeId(null);
     }
     seq.current += 1;
     setLoading(false);
@@ -2603,6 +2638,68 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
     return { primaryBots: primary, regularBots: regular, archivedBots: archived };
   }, [filteredBots, currentDeviceId]);
 
+  // 群聊行只读来源：只枚举真实有 Bot 的 Host 设备（目录可能含无 Bot 的 center 节点，
+  // 对其调用 listScopeStates 会报错）；冻结 targetApi + identityForTarget，离线目标自然不可写。
+  const scopeSources = useMemo(() => {
+    const onlineByDevice = new Map(devices.map((d) => [d.deviceId, d.online]));
+    const nameByDevice = new Map(devices.map((d) => [d.deviceId, d.displayName || '未命名设备']));
+    const hostDeviceIds = [...new Set(bots.map((b) => b.deviceId))];
+    return hostDeviceIds.map((deviceId) => ({
+      key: deviceId,
+      label: nameByDevice.get(deviceId) ?? deviceId,
+      api: targetApi(api, deviceId, onlineByDevice.get(deviceId) ?? false),
+      identity: api.identityForTarget(deviceId),
+      bots,
+    }));
+  }, [api, sess, devices, bots]);
+  const {
+    items: groupItems,
+    loading: groupsLoading,
+    error: groupsError,
+    refresh: refreshGroups,
+  } = useScopeConversations(scopeSources, pageActive, 'room');
+
+  /** 群聊实际所在 Host：identity.targetDeviceId 是稳定字符串，不依赖 targetApi 对象引用。 */
+  function groupSourceOf(g: (typeof groupItems)[number]) {
+    const deviceId = g.identity.targetDeviceId;
+    const label = devices.find((d) => d.deviceId === deviceId)?.displayName || '未知设备';
+    return { deviceId, label };
+  }
+
+  const groupRows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return groupItems.filter((g) => {
+      // 设备筛选按 scope 成员涉及的真实 deviceId（同一 scopeId 跨设备副本都能命中）。
+      if (
+        deviceFilter !== 'all' &&
+        !g.scope.scope.members.some((m) => m.deviceId === deviceFilter)
+      ) {
+        return false;
+      }
+      if (!q) return true;
+      return `${g.title} ${g.lastPreview} ${g.scope.scope.scopeId}`
+        .toLowerCase()
+        .includes(q);
+    });
+  }, [groupItems, query, deviceFilter]);
+
+  // 普通 Bot 与群聊混排，按真实最近活动时间排序；归档 Bot 仍固定在底部折叠区。
+  const mixedRows = useMemo(() => {
+    const rows: (
+      | { kind: 'bot'; bot: BotDirectoryEntry; ts: number }
+      | { kind: 'group'; group: (typeof groupRows)[number]; ts: number }
+    )[] = regularBots.map((bot) => ({ kind: 'bot', bot, ts: botSortTimestamp(bot) }));
+    for (const group of groupRows) {
+      rows.push({
+        kind: 'group',
+        group,
+        ts: group.lastActivityAt ? Date.parse(group.lastActivityAt) || 0 : 0,
+      });
+    }
+    rows.sort((a, b) => b.ts - a.ts);
+    return rows;
+  }, [regularBots, groupRows]);
+
   const selectedBot = selected
     ? bots.find((b) => b.deviceId === selected.deviceId && b.botId === selected.botId) ?? null
     : null;
@@ -2613,10 +2710,96 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
         : null,
     [api, sess, selectedBot?.deviceId, selectedBot?.online],
   );
+  /** 子视图 api 按当前 api + sess（含 generation）+ 在线布尔重建：同 profile 重连后
+   *  identity 代际更新、设备上下线同步反映；不依赖 devices 数组引用（每轮目录刷新
+   *  都换引用，依赖它会反复给 Scopes 传新 api 对象导致历史清空/重置）。 */
+  const stageOnline = stage ? deviceOnlineOf(stage.deviceId) : false;
+  const stageApi = useMemo(
+    () => (stage ? targetApi(api, stage.deviceId, stageOnline) : null),
+    [api, sess, stage?.deviceId, stageOnline],
+  );
+  // Scopes 目录：bots 已含远端与归档记录，跨设备 DM 成员/作者名都由它解析，不回退 UUID。
+  const scopeKnownBots = useMemo(
+    () =>
+      bots.map((b) => ({
+        deviceId: b.deviceId,
+        botId: b.botId,
+        role: b.role,
+        isPrimary: Boolean(b.isPrimary),
+      })),
+    [bots],
+  );
+  // 群成员编辑候选只收未归档 Bot；knownBots 仍含归档用于名字解析。
+  const scopeMemberCandidates = useMemo(
+    () =>
+      bots.filter((b) => !b.archivedAt).map((b) => ({
+        deviceId: b.deviceId,
+        botId: b.botId,
+        role: b.role,
+        isPrimary: Boolean(b.isPrimary),
+      })),
+    [bots],
+  );
+  /**
+   * 群聊写端路由：复用当前全局 api（同一份 pending/草稿账本），targetApi 冻结到目标设备。
+   * 成员变更只打 scope.authorityDeviceId（null 不伪造目标）；发送打当前成员所在 Host ——
+   * 本机成员优先，其次在线 authority 成员、其他在线成员，全离线保留稳定成员目标供排队。
+   * 本机群聊走现有 local/relay 完整 api 回环本机；local profile 的 identityForTarget
+   * 不能跨设备（api.ts 会抛），relay 目标缺失的设备目录项返回 null 显示待连接。
+   */
+  // 设备目录每轮轮询换引用：写端映射与发送路由都按「设备+在线布尔」内容签名
+  // 重建，同内容刷新不给 Scopes 换 resolver/api 引用（避免 detail 重置）。
+  const roomDevicesSig = devices
+    .map((d) => d.deviceId + '\u0001' + Boolean(d.online))
+    .join('\u0002');
+  const roomWriteTargetApiMap = useMemo(() => {
+    const onlineByDevice = new Map(devices.map((d) => [d.deviceId, d.online]));
+    const map = new Map<string, DesktopPanelApi>();
+    for (const d of devices) {
+      try {
+        map.set(d.deviceId, targetApi(api, d.deviceId, onlineByDevice.get(d.deviceId) ?? false));
+      } catch {
+        // identityForTarget 跨设备被拒（local profile 指向其他设备）：该设备无写端。
+      }
+    }
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, sess, roomDevicesSig]);
+  const roomSendDeviceIdOf = useCallback(
+    (scope: ScopeInfo): string => {
+      const memberDevices = scope.scope.members.map((m) => m.deviceId);
+      if (memberDevices.includes(currentDeviceId) && deviceOnlineOf(currentDeviceId)) return currentDeviceId;
+      const authority = scope.authorityDeviceId;
+      if (authority && memberDevices.includes(authority) && deviceOnlineOf(authority)) return authority;
+      const onlineMember = memberDevices.find((id) => deviceOnlineOf(id));
+      if (onlineMember) return onlineMember;
+      if (authority && memberDevices.includes(authority)) return authority;
+      return memberDevices[0] ?? '';
+    },
+    // 在线布尔已含在 roomDevicesSig；目录同内容刷新不换 resolver 引用。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [currentDeviceId, roomDevicesSig],
+  );
+  const resolveRoomApi = useCallback<RoomApiResolver>(
+    (scope, purpose) => {
+      const target = purpose === 'members' ? scope.authorityDeviceId : roomSendDeviceIdOf(scope);
+      if (!target) return null;
+      return roomWriteTargetApiMap.get(target) ?? null;
+    },
+    [roomSendDeviceIdOf, roomWriteTargetApiMap],
+  );
+  // Scopes 消息链接与主聊同一通道：desktop_open_center 原生命令（仅放行 HTTPS），失败可见化。
+  const openScopeLink = useCallback(
+    (href: string) =>
+      invoke('desktop_open_center', { url: href }).catch((e: unknown) => {
+        setBotsError(e instanceof Error ? e.message : String(e));
+      }),
+    [],
+  );
   const selectedDeviceName = selectedBot
     ? devices.find((d) => d.deviceId === selectedBot.deviceId)?.displayName ||
       selectedBot.deviceName ||
-      selectedBot.deviceId
+      '未命名设备'
     : '';
   const selectedDevicePlatform = selectedBot
     ? devices.find((d) => d.deviceId === selectedBot.deviceId)?.platform ?? selectedBot.platform
@@ -2643,59 +2826,105 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
     initialNavRef.current = key;
     setDeviceFilter(target.deviceId);
     setSelected({ deviceId: target.deviceId, botId: target.botId });
+    setStage(null);
   }, [initialBotId, initialDeviceId, bots]);
 
   function deviceNameOf(deviceId: string): string {
-    return devices.find((d) => d.deviceId === deviceId)?.displayName || deviceId;
+    return devices.find((d) => d.deviceId === deviceId)?.displayName || '未命名设备';
+  }
+
+  function botDisplayNameOf(deviceId: string, botId: string): string {
+    return (
+      bots.find((b) => b.deviceId === deviceId && b.botId === botId)?.role ||
+      '已移除的 Bot'
+    );
+  }
+
+  function openDmList(member: MessageMember) {
+    setStage({
+      kind: 'dm',
+      member,
+      name: botDisplayNameOf(member.deviceId, member.botId),
+      deviceId: member.deviceId,
+    });
+    setDmScopeId(null);
+  }
+
+  function deviceOnlineOf(deviceId: string): boolean {
+    return devices.find((d) => d.deviceId === deviceId)?.online ?? false;
+  }
+
+  function renderGroupRow(g: (typeof groupRows)[number]) {
+    const source = groupSourceOf(g);
+    const isSelected =
+      stage?.kind === 'scope' && stage.scopeId === g.scope.scope.scopeId;
+    return (
+      <li key={g.key}>
+        <ConversationRow
+          className="hub-bot-row"
+          title={g.title}
+          preview={g.lastPreview || undefined}
+          timestamp={g.lastActivityAt}
+          selected={isSelected}
+          badge="群聊"
+          meta={source.label}
+          avatar={
+            <ConversationGroupAvatar members={g.scope.scope.members} bots={bots} size={46} />
+          }
+          onOpen={() => {
+            setStage({
+              kind: 'scope',
+              scopeId: g.scope.scope.scopeId,
+              deviceId: source.deviceId,
+            });
+          }}
+        />
+      </li>
+    );
   }
 
   function renderBotRow(b: BotDirectoryEntry, isArchivedSection = false) {
-    const isSelected = selected?.deviceId === b.deviceId && selected.botId === b.botId;
+    const isSelected =
+      !stage && selected?.deviceId === b.deviceId && selected.botId === b.botId;
     const isBotOnline = Boolean(b.online && online);
     const isPrimaryActive = Boolean(b.isPrimary && !b.archivedAt);
     const activityIso = b.lastActivityAt || b.createdAt;
     return (
       <li key={`${b.deviceId}:${b.botId}`}>
-        <button
-          type="button"
+        <ConversationRow
           className={`hub-bot-row${isSelected ? ' selected' : ''}${!isBotOnline ? ' offline' : ''}`}
-          onClick={() => setSelected({ deviceId: b.deviceId, botId: b.botId })}
-        >
-          <GrokBotAvatar
-            botKey={botAvatarKey(b)}
-            roleName={b.role}
-            isPrimary={isPrimaryActive}
-            starBadge={isPrimaryActive}
-            platformBadge={b.platform || 'host'}
-            busy={false}
-            size={46}
-          />
-          <span className="hub-bot-row-main">
-            <span className="hub-bot-row-title-line">
-              <span className="hub-bot-row-title">
-                {b.role}
-              </span>
-              {activityIso ? (
-                <span className="hub-bot-row-time" title={formatTime(activityIso)}>
-                  {formatRelativeTime(activityIso)}
-                </span>
-              ) : null}
-            </span>
-            <span className="hub-bot-row-sub">
-              {deviceNameOf(b.deviceId)} · {isBotOnline ? '在线' : '离线'}
-            </span>
-            {b.lastPreview ? (
-              <span className="hub-bot-row-preview">{truncate(b.lastPreview, 80)}</span>
-            ) : b.description ? (
-              <span className="hub-bot-row-preview">{truncate(b.description, 80)}</span>
-            ) : null}
-            {isArchivedSection && b.archivedAt ? (
-              <span className="hub-bot-row-sub archive-countdown">
-                已归档 · 剩余 {remainingArchiveDays(b.archivedAt)} 天自动删除
-              </span>
-            ) : null}
-          </span>
-        </button>
+          title={b.role}
+          preview={b.lastPreview || b.description || undefined}
+          timestamp={activityIso}
+          selected={isSelected}
+          meta={
+            isArchivedSection && b.archivedAt
+              ? `已归档 · 剩余 ${remainingArchiveDays(b.archivedAt)} 天自动删除`
+              : `${deviceNameOf(b.deviceId)} · ${isBotOnline ? '在线' : '离线'}`
+          }
+          avatar={
+            <GrokBotAvatar
+              botKey={botAvatarKey(b)}
+              roleName={b.role}
+              isPrimary={isPrimaryActive}
+              starBadge={isPrimaryActive}
+              platformBadge={b.platform || 'host'}
+              busy={false}
+              size={46}
+            />
+          }
+          onOpen={() => {
+            setSelected({ deviceId: b.deviceId, botId: b.botId });
+            setStage(null);
+          }}
+          onOpenMenu={(position) =>
+            setMenu({
+              ...position,
+              member: { deviceId: b.deviceId, botId: b.botId },
+              name: b.role,
+            })
+          }
+        />
       </li>
     );
   }
@@ -2705,12 +2934,21 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
       <aside className="hub-sidebar" aria-label="智能体名录">
         <div className="hub-hero-strip" role="list" aria-label="主智能体">
           {primaryBots.map((b) => (
-            <button
+            <HeroBotCard
               key={`${b.deviceId}:${b.botId}`}
-              type="button"
               role="listitem"
-              className={`hub-hero-card${selected?.deviceId === b.deviceId && selected.botId === b.botId ? ' selected' : ''}`}
-              onClick={() => setSelected({ deviceId: b.deviceId, botId: b.botId })}
+              className={`hub-hero-card${!stage && selected?.deviceId === b.deviceId && selected.botId === b.botId ? ' selected' : ''}`}
+              onOpen={() => {
+                setSelected({ deviceId: b.deviceId, botId: b.botId });
+                setStage(null);
+              }}
+              onOpenMenu={(position) =>
+                setMenu({
+                  ...position,
+                  member: { deviceId: b.deviceId, botId: b.botId },
+                  name: b.role,
+                })
+              }
             >
               <GrokBotAvatar
                 botKey={botAvatarKey(b)}
@@ -2724,7 +2962,7 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
               <span className={`hub-hero-node${b.online && online ? '' : ' offline'}`}>
                 {b.online && online ? deviceNameOf(b.deviceId) : `${deviceNameOf(b.deviceId)} · 离线`}
               </span>
-            </button>
+            </HeroBotCard>
           ))}
           {missingPrimaryDevices.map((d) => (
             <button
@@ -2732,7 +2970,7 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
               type="button"
               role="listitem"
               className="hub-hero-card hub-hero-create"
-              title={`在 ${d.displayName || d.deviceId} 创建主智能体`}
+              title={`在 ${d.displayName || '未命名设备'} 创建主智能体`}
               onClick={() => {
                 setCreateTargetDeviceId(d.deviceId);
                 setShowCreate(true);
@@ -2740,7 +2978,7 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
             >
               <span className="hub-hero-plus">＋</span>
               <span className="hub-hero-name">创建主智能体</span>
-              <span className="hub-hero-node">{d.displayName || d.deviceId}</span>
+              <span className="hub-hero-node">{d.displayName || '未命名设备'}</span>
             </button>
           ))}
         </div>
@@ -2751,8 +2989,8 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
             ref={searchInputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索智能体…（Ctrl+K）"
-            aria-label="搜索智能体"
+            placeholder="搜索智能体或群聊…（Ctrl+K）"
+            aria-label="搜索智能体或群聊"
           />
           {query ? (
             <button
@@ -2780,10 +3018,9 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
                 key={d.deviceId}
                 type="button"
                 className={deviceFilter === d.deviceId ? 'chip active' : 'chip'}
-                title={d.deviceId}
                 onClick={() => setDeviceFilter(d.deviceId)}
               >
-                {d.displayName || d.deviceId}
+                {d.displayName || '未命名设备'}
               </button>
             ))}
           </div>
@@ -2795,6 +3032,12 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
             <button type="button" onClick={() => triggerLoadBots()}>重试</button>
           </div>
         ) : null}
+        {groupsError ? (
+          <div className="error-banner" role="alert">
+            {'群聊列表读取失败：' + groupsError}
+            <button type="button" onClick={() => refreshGroups()}>重试</button>
+          </div>
+        ) : null}
         {!online ? <div className="status">离线：显示最后读取的 Bot 列表。</div> : null}
 
         <div className="hub-list-scroll">
@@ -2802,17 +3045,20 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
             <div className="status">加载中…</div>
           ) : !loaded ? (
             <div className="status">目录尚未读取。</div>
-          ) : filteredBots.length === 0 && !botsError ? (
+          ) : filteredBots.length === 0 && groupRows.length === 0 && !botsError ? (
             <div className="empty-state">
-              {query || deviceFilter !== 'all' ? '没有匹配的智能体。' : '暂无 Bot，点击“新建 Bot”创建。'}
+              {query || deviceFilter !== 'all' ? '没有匹配的智能体或群聊。' : '暂无 Bot，点击“新建 Bot”创建。'}
             </div>
           ) : (
             <>
-              {regularBots.length > 0 ? (
+              {mixedRows.length > 0 ? (
                 <ul className="hub-bot-list">
-                  {regularBots.map((b) => renderBotRow(b, false))}
+                  {mixedRows.map((row) =>
+                    row.kind === 'bot' ? renderBotRow(row.bot, false) : renderGroupRow(row.group),
+                  )}
                 </ul>
               ) : null}
+              {groupsLoading ? <div className="status">群聊加载中…</div> : null}
 
               {archivedBots.length > 0 ? (
                 <details className="hub-archived">
@@ -2843,7 +3089,10 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
           <button
             type="button"
             className="icon-button"
-            onClick={() => triggerLoadBots()}
+            onClick={() => {
+              triggerLoadBots();
+              refreshGroups();
+            }}
             disabled={!online || loading}
             aria-label="刷新列表"
             title="刷新列表"
@@ -2854,7 +3103,52 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
       </aside>
 
       <section className="main-stage">
+        {stage?.kind === 'dm' && stageApi ? (
+          <div className="scope-main-stage">
+            <Scopes
+              key={`dm:${sess}:${stage.member.deviceId}:${stage.member.botId}`}
+              api={stageApi}
+              pageActive={pageActive}
+              readOnly
+              scopeKind="dm"
+              participant={stage.member}
+              participantName={stage.name}
+              selectedScopeId={dmScopeId}
+              onSelectScope={setDmScopeId}
+              onBack={() => setStage(null)}
+              knownBots={scopeKnownBots}
+              onOpenLink={openScopeLink}
+              onOpenBot={(botId, deviceId) => {
+                setDeviceFilter(deviceId);
+                setSelected({ deviceId, botId });
+                setStage(null);
+              }}
+            />
+          </div>
+        ) : stage?.kind === 'scope' && stageApi ? (
+          <div className="scope-main-stage">
+            <Scopes
+              key={`scope:${sess}:${stage.deviceId}:${stage.scopeId}`}
+              api={stageApi}
+              pageActive={pageActive}
+              scopeKind="room"
+              detailOnly
+              initialScopeId={stage.scopeId}
+              resolveRoomApi={resolveRoomApi}
+              memberCandidates={scopeMemberCandidates}
+              onBack={() => setStage(null)}
+              knownBots={scopeKnownBots}
+              onOpenLink={openScopeLink}
+              onOpenBot={(botId, deviceId) => {
+                setDeviceFilter(deviceId);
+                setSelected({ deviceId, botId });
+                setStage(null);
+              }}
+            />
+          </div>
+        ) : null}
         {scopedApi && selectedBot ? (
+          <div className={stage ? 'chat-stage-host stage-hidden' : 'chat-stage-host'}>
           <PrimaryChatPane
             key={`${sess}:${selectedBot.deviceId}:${selectedBot.botId}`}
             api={scopedApi}
@@ -2895,15 +3189,19 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
               triggerLoadBots();
             }}
             onLiveActivity={handleLiveActivity}
-            onOpenCommunications={onOpenCommunications}
-            pageActive={pageActive}
+            onOpenPrivateChats={(bot) =>
+              openDmList({ deviceId: bot.deviceId, botId: bot.botId })
+            }
+            pageActive={pageActive && !stage}
           />
-        ) : (
+          </div>
+        ) : null}
+        {!stage && !(scopedApi && selectedBot) ? (
           <div className="empty-state stage-empty">
             <span className="title">选择左侧智能体开始对话</span>
             {onlineDevices.length > 0 ? '或使用 Ctrl+K 快速搜索' : null}
           </div>
-        )}
+        ) : null}
       </section>
 
       <Dialog.Root open={showCreate} onOpenChange={setShowCreate}>
@@ -2936,7 +3234,7 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
                       ...cleared.filter((b) => b.deviceId !== deviceId || b.botId !== bot.botId),
                       {
                         ...bot,
-                        deviceName: dev?.displayName || deviceId,
+                        deviceName: dev?.displayName || '未命名设备',
                         platform: dev?.platform,
                         online: true,
                       },
@@ -2949,6 +3247,42 @@ export function BotChats({ api, currentDeviceId, pageActive = true, onOpenCommun
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
+      <ConversationContextMenu
+        position={menu ? { x: menu.x, y: menu.y } : null}
+        onClose={() => setMenu(null)}
+        onViewPrivateChats={() => {
+          const target = menu;
+          setMenu(null);
+          if (target) openDmList(target.member);
+        }}
+      />
     </div>
+  );
+}
+
+/** 主 Bot 英雄卡：同样使用上游交互 hook（点击 + 右键/键盘/触摸菜单），不在 map 内直接调 hook。 */
+function HeroBotCard({
+  className,
+  role,
+  children,
+  onOpen,
+  onOpenMenu,
+}: {
+  className?: string;
+  role?: string;
+  children: ReactNode;
+  onOpen: () => void;
+  onOpenMenu: (position: { x: number; y: number }) => void;
+}) {
+  const interactions = useConversationRowInteractions({ onOpen, onOpenMenu });
+  return (
+    <button
+      type="button"
+      role={role}
+      className={className}
+      {...interactions}
+    >
+      {children}
+    </button>
   );
 }

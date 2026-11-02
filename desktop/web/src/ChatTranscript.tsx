@@ -9,7 +9,6 @@ import { Markdown } from '../../../web/src/Markdown';
 import {
   latestEntryChannel,
   parseHistoryEntries,
-  resolveActiveTurnStartedAt,
   formatTurnDuration,
   normalizeAttribution,
   type ChatTurn,
@@ -25,6 +24,11 @@ import {
   GrokBotWorkingSlot,
   resolveBotAvatarPreset,
 } from '../../../web/src/GrokBotAvatar';
+import {
+  isBotActivityBusy,
+  resolveActiveActivityStartedAt,
+  type BotActivity,
+} from '../../../web/src/botActivity';
 import { ErrorNotice, useText } from '../../../web/src/ui';
 import { SentAttachments, type AttachmentFetcher } from '../../../web/src/imageAttachments';
 import './ChatTranscript.css';
@@ -40,6 +44,9 @@ export interface ChatTranscriptProps {
   entries: ChatTranscriptEntry[];
   live: BotLiveState | null;
   bot: BotRecord;
+  /** 统一工作状态（含本地乐观发送/停止投影），由 BotChats 唯一口径计算后传入；
+   *  缺省（预览等无父级场景）按 idle 处理，不在此处二次推导。 */
+  activity?: BotActivity | null;
   /** 与 BotChats 持久化头像键一致（local:local:botId / remote:profileId:deviceId:botId）；
    *  缺省回退 deviceId:botId，仅供无持久化上下文的预览使用。 */
   avatarKey?: string;
@@ -73,6 +80,7 @@ export function ChatTranscript({
   entries,
   live,
   bot,
+  activity = null,
   avatarKey,
   devicePlatform,
   search,
@@ -91,6 +99,8 @@ export function ChatTranscript({
   const botKey = avatarKey ?? `${bot.deviceId}:${bot.botId}`;
   const isBusy = live?.busy === true;
   const liveGeneratingText = typeof live?.generation?.text === 'string' ? live.generation.text : '';
+  // 工作槽覆盖排队/准备/停止中/压缩阶段：Host 原生 isBusy 之外的统一口径由父级 activity 提供。
+  const slotBusy = isBusy || (activity !== null && isBotActivityBusy(activity));
 
   // 桌面端无 mobile 桥：Markdown 链接统一走 desktop_open_center 原生命令（仅放行 HTTPS），失败可见化。
   const openLink = useCallback((href: string) => {
@@ -153,8 +163,28 @@ export function ChatTranscript({
     );
   }, [allTurns, search]);
 
-  const activeTurnStartedAt = useMemo(() => resolveActiveTurnStartedAt(allTurns), [allTurns]);
   const lastTurn = visibleTurns.at(-1);
+
+  // 当前执行轮真实开始：共享 helper 取 Host activity.startedAt（冻结轮 frozenAt，
+  // 仅忙碌相位返回），旧 Host 返回 null 由 WorkingSlot 的 observed-busy 缓存落锚，
+  // 绝不回退历史用户/普通轮时间。
+  const workingSlotStartedAt = resolveActiveActivityStartedAt(activity);
+
+  // 持久失败可见化：Host 的 failed 终态持续显示（区别于用户主动停止），
+  // 优先 activity.error（执行失败有界诊断），回落 live.turnAdmission.error（受理失败）。
+  const phaseFailed = activity?.phase === 'failed';
+  const activityError = activity?.error?.message || activity?.error?.code || null;
+  const admissionError = useMemo(() => {
+    const adm = live?.turnAdmission;
+    if (!adm || adm.phase !== 'failed') return null;
+    const msg = adm.error?.message || adm.error?.code || '';
+    return msg ? String(msg) : null;
+  }, [live?.turnAdmission]);
+  const failureNotice = phaseFailed
+    ? (activityError ?? admissionError)
+      ? t('本次执行失败：', 'This run failed: ') + (activityError ?? admissionError)
+      : t('本次执行失败，请重试或检查配置。', 'This run failed. Retry or check the configuration.')
+    : null;
 
   // 仅当用户停留在底部附近时跟随新流；向上翻阅历史不打断滚动位置。
   const scrollRef = useRef<HTMLElement | null>(null);
@@ -329,15 +359,19 @@ export function ChatTranscript({
         key={botKey}
         botKey={botKey}
         preset={avatarPreset}
-        isBusy={isBusy}
+        isBusy={slotBusy}
+        activity={activity ?? undefined}
         isStreaming={Boolean(displayGeneratingText)}
         activeToolName={activeLiveToolName}
         hasThinking={Boolean(lastTurn?.role === 'assistant' && lastTurn.thinking && !displayGeneratingText)}
         queuedCount={live?.queuedCount ?? 0}
-        hasError={Boolean(lastTurn?.error)}
-        startedAt={activeTurnStartedAt}
+        hasError={Boolean(lastTurn?.error) || phaseFailed}
+        startedAt={workingSlotStartedAt}
         t={t}
       />
+      {failureNotice ? (
+        <ErrorNotice compact error={failureNotice} />
+      ) : null}
       <ErrorNotice error={linkError} onDismiss={() => setLinkError('')} compact />
     </section>
   );

@@ -1,4 +1,4 @@
-import { createContext, useContext, useState } from 'react';
+import { createContext, useCallback, useContext, useState } from 'react';
 import { CheckCircle2, ChevronDown, ChevronUp, CircleAlert, Info, RefreshCw, TriangleAlert, X } from 'lucide-react';
 
 export type UiLanguage = 'system' | 'zh' | 'en';
@@ -11,7 +11,7 @@ export function useText() {
     ((language === 'system' || language === undefined) &&
       typeof navigator !== 'undefined' &&
       navigator.language.startsWith('en'));
-  return (zh: string, english: string) => (en ? english : zh);
+  return useCallback((zh: string, english: string) => (en ? english : zh), [en]);
 }
 
 export const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));

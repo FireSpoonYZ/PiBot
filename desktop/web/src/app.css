@@ -706,6 +706,11 @@ dialog::backdrop { background: rgb(15 23 32 / .45); }
 .sand-activity-label-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sand-activity-label-text.is-shimmering { background: linear-gradient(90deg, var(--muted) 0%, var(--text) 48%, var(--muted) 100%); background-size: 220% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: sand-text-shimmer 2.1s linear infinite; }
 .sand-activity-elapsed { font: .76rem/1.2 var(--font-mono); color: var(--muted); opacity: 0.78; flex-shrink: 0; }
+/* 手动停止 pill：danger 配色 + 停止中文案脉冲（按钮 disabled 防重复点击，文案仍可见） */
+.stop-pill { color: var(--danger); border-color: var(--danger); }
+.stop-pill.is-stopping { opacity: 1; color: var(--danger); border-color: var(--danger); }
+.stop-pill.is-stopping svg { animation: sand-stop-pulse 1s ease-in-out infinite; }
+@keyframes sand-stop-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
 /* composer (grok pill family) */
 .grok-chat-composer-area { flex: none; position: relative; padding: 6px 14px 12px; background: var(--bg); }
