@@ -398,7 +398,7 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 @keyframes fade-in { from { opacity: 0; } }
 @media (min-width: 680px) { .messages { padding-inline: 32px; }.composer-wrap { padding-inline: 28px; }.page { padding-inline: 32px; } }
 .grok-bot-avatar { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; position: relative; transition: transform 240ms cubic-bezier(.22, 1, .36, 1); }
-.grok-bot-avatar > svg { width: 100%; height: 100%; stroke-width: 0; } .grok-bot-platform-badge svg { width: 64%; height: 64%; stroke-width: 0; }
+.grok-bot-avatar > svg { width: 100%; height: 100%; stroke-width: 0; } .grok-bot-platform-badge svg { width: 64%; height: 64%; }
 @keyframes grok-page-in { from { opacity: 0; transform: translate3d(18px, 0, 0) scale(.992); } to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); } }
 @keyframes grok-pop-in { from { opacity: 0; transform: scale(.88) translateY(-6px); } to { opacity: 1; transform: scale(1) translateY(0); } }
 @keyframes grok-pop-up { from { opacity: 0; transform: scale(.92) translateY(8px); } to { opacity: 1; transform: scale(1) translateY(0); } }

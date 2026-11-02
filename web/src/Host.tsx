@@ -4935,9 +4935,7 @@ ${newer}` : draftSnapshot;
                     preset={resolveBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary)}
                     isPrimary={activeBot.isPrimary}
                     starBadge={activeBot.isPrimary}
-                    platformBadge={
-                      activeBot.isPrimary ? <PlatformLogoIcon platform={activeBot.platform} size={11} /> : undefined
-                    }
+                    platformBadge={<PlatformLogoIcon platform={activeBot.platform} size={11} />}
                     size={76}
                   />
                 </button>
@@ -5417,9 +5415,7 @@ ${newer}` : draftSnapshot;
                   preset={resolveBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary)}
                   isPrimary={activeBot.isPrimary}
                   starBadge={activeBot.isPrimary}
-                  platformBadge={
-                    activeBot.isPrimary ? <PlatformLogoIcon platform={activeBot.platform} size={11} /> : undefined
-                  }
+                  platformBadge={<PlatformLogoIcon platform={activeBot.platform} size={11} />}
                   size={104}
                 />
               </button>
@@ -7024,7 +7020,11 @@ ${newer}` : draftSnapshot;
                       onOpenMenu={(position) => setHubContextMenu({ ...position, bot: item })}
                     >
                       <div className="hub-bot-avatar-col">
-                        <GrokBotAvatar preset={preset} size={46} />
+                        <GrokBotAvatar
+                          preset={preset}
+                          platformBadge={<PlatformLogoIcon platform={item.platform} size={11} />}
+                          size={46}
+                        />
                       </div>
                       <div className="hub-bot-content-col">
                         <div className="hub-bot-title-line">
@@ -7483,6 +7483,7 @@ function HubBotRow({
           preset={preset}
           isPrimary={isPrimaryActive}
           starBadge={isPrimaryActive}
+          platformBadge={<PlatformLogoIcon platform={item.platform} size={11} />}
           size={52}
         />
       }

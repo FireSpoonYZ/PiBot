@@ -525,7 +525,7 @@ dialog::backdrop { background: rgb(15 23 32 / .45); }
 
 .grok-bot-avatar { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; position: relative; transition: transform 240ms cubic-bezier(.22, 1, .36, 1); }
 .grok-bot-avatar > svg { width: 100%; height: 100%; stroke-width: 0; }
-.grok-bot-platform-badge svg { width: 64%; height: 64%; stroke-width: 0; }
+.grok-bot-platform-badge svg { width: 64%; height: 64%; }
 
 /* notice card / error notice (ui.tsx) */
 .inline-error { display: flex; flex-direction: column; gap: 6px; padding: 13px 15px; margin: 10px 0; border-radius: 18px; border: 1px solid color-mix(in srgb, var(--danger) 24%, var(--line)); background: var(--danger-soft); color: var(--text); font-size: .86rem; line-height: 1.45; overflow-wrap: anywhere; box-shadow: var(--shadow-sm); animation: grok-pop-up 200ms cubic-bezier(.22, 1, .36, 1) both; }
