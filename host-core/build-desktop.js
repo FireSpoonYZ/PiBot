@@ -981,6 +981,17 @@ export async function prepareDesktop() {
   await mkdir(DESKTOP_BUILD, { recursive: true });
   const nodeInfo = await prepareNodeSidecar();
   const iconsInfo = await prepareIcons();
+  if (process.platform === 'win32') {
+    const shellIconName = `shell-icon-${sha256OfFile(iconsInfo.icoPath).slice(0, 16)}.ico`;
+    for (const name of readdirSync(ICONS_DIR)) {
+      if (/^shell-icon-[a-f0-9]{16}\.ico$/.test(name) && name !== shellIconName) {
+        rmSync(path.join(ICONS_DIR, name));
+      }
+    }
+    const shellIconPath = path.join(ICONS_DIR, shellIconName);
+    if (!isRegularFile(shellIconPath)) writeFileSync(shellIconPath, readFileSync(iconsInfo.icoPath));
+    writeFileSync(path.join(ICONS_DIR, 'shell-icon.nsh'), `!define E_LAUNCHER_SHELL_ICON "${shellIconName}"\n`);
+  }
   const bundleInfo = await bundleDesktopClient();
   const noticesInfo = await writeThirdPartyNotices(nodeInfo, bundleInfo.metafile);
   return {

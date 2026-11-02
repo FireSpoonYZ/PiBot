@@ -140,6 +140,18 @@ pub fn run() {
       if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_title("e-助手");
         window.set_icon(tauri::include_image!("../build/icons/icon.png"))?;
+        #[cfg(windows)]
+        {
+          let hwnd = window.hwnd()?.0 as usize;
+          // Tao updates ICON_SMALL only; the Windows taskbar uses ICON_BIG.
+          window.run_on_main_thread(move || unsafe {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+              SendMessageW, ICON_BIG, ICON_SMALL, WM_GETICON, WM_SETICON,
+            };
+            let icon = SendMessageW(hwnd as _, WM_GETICON, ICON_SMALL as usize, 0);
+            SendMessageW(hwnd as _, WM_SETICON, ICON_BIG as usize, icon);
+          })?;
+        }
       }
       Ok(())
     })
