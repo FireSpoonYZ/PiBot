@@ -1436,7 +1436,7 @@ export function HostPage({
         if (!next || !localBotsMounted.current) break;
         localBotsPending.current = null;
         if (next === localBotsScopeRef.current) {
-          flightEntry.scope = next;
+          localBotsFlight.current!.scope = next;
           result = await runRound(next);
         }
       }
