@@ -1,0 +1,41 @@
+/* 手机端「插件 / 技能 / MCP」页（CapabilitiesPage）。全部以 .bs-cap- 前缀限定；颜色只用 CSS 变量，暗色自动适配。 */
+
+/* 列表顶部：运行态 + 诊断 */
+.bs-cap-runtime { display: flex; flex-direction: column; gap: 8px; }
+.bs-cap-messages { display: flex; flex-direction: column; gap: 8px; }
+.bs-cap-filters { display: flex; flex-direction: column; gap: 10px; }
+
+/* 弱化说明行 */
+.bs-cap-hints { display: flex; flex-direction: column; gap: 6px; padding: 0 4px; }
+.bs-cap-hint { margin: 0; padding: 0 4px; display: flex; align-items: baseline; gap: 7px; font-size: .78rem; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
+.bs-cap-hints .bs-cap-hint { padding: 0; }
+.bs-cap-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--muted); opacity: .7; transform: translateY(-1px); }
+.bs-cap-dot.is-ready { background: #22a559; opacity: 1; }
+.bs-cap-dot.is-danger { background: var(--danger); opacity: 1; }
+
+/* 列表行副标题的状态色 */
+.bs-cap-sub.is-danger { color: var(--danger); }
+.bs-cap-sub.is-warning { color: #b86e00; }
+:root[data-theme=dark] .bs-cap-sub.is-warning { color: #fbbf24; }
+@media (prefers-color-scheme: dark) { :root[data-theme=system] .bs-cap-sub.is-warning { color: #fbbf24; } }
+
+/* 详情：配置项 */
+.bs-cap-field { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; }
+.bs-cap-field + .bs-cap-field::before { content: ''; position: absolute; top: 0; left: 14px; right: 0; height: 1px; background: var(--bs-hairline); }
+.bs-cap-field-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; }
+.bs-cap-field-titles { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.bs-cap-field-title { font-size: .93rem; line-height: 1.35; font-weight: 500; color: var(--text); overflow-wrap: anywhere; }
+.bs-cap-field-key { font: .72rem/1.3 ui-monospace, Consolas, monospace; color: var(--muted); overflow-wrap: anywhere; }
+.bs-cap-field-switch { flex: none; display: inline-flex; align-items: center; gap: 8px; }
+.bs-cap-field-switch-text { font-size: .76rem; color: var(--muted); }
+.bs-cap-field.is-custom .bs-cap-field-switch-text { color: var(--bs-accent); font-weight: 550; }
+.bs-cap-field-desc { margin: 0; font-size: .78rem; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
+.bs-cap-field-inherit { margin: 0; font-size: .78rem; line-height: 1.45; color: var(--muted); overflow-wrap: anywhere; }
+.bs-cap-field-control { padding-top: 2px; }
+.bs-cap-json { min-height: 160px; background: var(--bs-card); }
+.bs-cap-empty-small .bs-state { padding: 18px 16px; border-radius: 16px; background: var(--bs-card); }
+
+/* 详情底部：低调的“载入远端” + 版本号 */
+.bs-cap-detail-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 4px; margin-top: -8px; }
+.bs-cap-detail-foot .bs-link:disabled { opacity: .4; }
+.bs-cap-rev { font: .7rem/1.3 ui-monospace, Consolas, monospace; color: var(--muted); opacity: .7; }
