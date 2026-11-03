@@ -2,6 +2,10 @@
 
 中心（Center）是多设备 Bot 平台的权威配置面：管理 provider/模型目录、设备登记、托管插件/技能的安装与部署、Bot 绑定与生效配置，并经认证中继向 Host 下发快照与部署计划。服务为 Fastify 应用（`openCenterServer`），数据根下按域保存独立 SQLite 与 artifact 存储；控制台（center-web）与 Host 设备分别走不同的认证入口，Host 侧路由要求已登记的设备身份。
 
+## 设备登记
+
+`POST /api/devices` 需要所有者会话与 `x-csrf-token`（与其他管理端写路由相同）。请求 `{displayName, platform}`：`displayName` 去除首尾空白后为 1–64 个字符，`platform` 为 `windows`、`linux`、`macos` 或 `android`；其他字段或取值返回 `400 INVALID_ARGUMENT`。成功返回 `201 {deviceId, deviceToken, displayName, platform}`：`deviceId` 为随机 UUID，`deviceToken` 为 32 字节随机数的 base64url。令牌只在此响应中出现一次，中心中继注册表（`relay.sqlite`）只保存其 SHA-256 哈希，不写日志；丢失后需删除设备重新登记。新设备立即出现在 `GET /api/devices`（未连接前 `online: false`），Host 连接时 hello 上报的平台会覆盖登记时的值。
+
 ## Bot 头像
 
 头像按 `deviceId + botId` 保存在中心 `center.sqlite` 的 Bot 目录记录中，包含形状、颜色、旋转和表情。手机、Windows 和 Linux 使用相同标识生成默认头像，客户端本地存储只保留展示缓存与旧版本自定义配置。

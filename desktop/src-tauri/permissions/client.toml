@@ -11,4 +11,8 @@ permissions = [
   "allow-desktop-observe",
   "allow-desktop-unobserve",
   "allow-desktop-pick-file",
+  "allow-desktop-host-status",
+  "allow-desktop-host-pair",
+  "allow-desktop-host-adopt",
+  "allow-desktop-host-control",
 ]

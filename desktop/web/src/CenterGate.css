@@ -115,3 +115,42 @@
   min-height: 40px;
   border-radius: 999px;
 }
+
+.gate-advanced > .gate-form { margin-top: 12px; }
+
+.gate-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.gate-steps {
+  list-style: none;
+  margin: 0;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.gate-step { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.gate-step.active { color: var(--text, inherit); font-weight: 600; }
+.gate-step.done { color: var(--ok, var(--accent)); }
+.gate-step.error { color: var(--danger); font-weight: 600; }
+
+.gate-step-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--line);
+}
+.gate-step.active .gate-step-dot { background: var(--accent); animation: tool-pulse 1.2s ease-in-out infinite; }
+.gate-step.done .gate-step-dot { background: var(--ok, var(--accent)); }
+.gate-step.error .gate-step-dot { background: var(--danger); }

@@ -1,3 +1,17 @@
 {
-  "productName": "e-launcher-desktop"
+  "productName": "e-launcher-desktop",
+  "bundle": {
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/lib/systemd/user/e-launcher-host.service": "../linux/e-launcher-host.service"
+        }
+      },
+      "rpm": {
+        "files": {
+          "/usr/lib/systemd/user/e-launcher-host.service": "../linux/e-launcher-host.service"
+        }
+      }
+    }
+  }
 }

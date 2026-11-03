@@ -124,6 +124,11 @@ export interface BotCapabilityConfig extends BotBinding {
 }
 export interface PutBotCapability { expectedRevision: number; enabled: boolean; overrides: JsonObject }
 export interface Device { deviceId: string; name: string; online: boolean }
+export type DevicePlatform = 'windows' | 'linux' | 'macos' | 'android';
+/** Owner-only `POST /api/devices` body; displayName is trimmed to 1..64 characters. */
+export interface CreateDeviceRequest { displayName: string; platform: DevicePlatform }
+/** `201` reply; deviceToken (32 random bytes, base64url) is returned only once. */
+export interface CreateDeviceResponse { deviceId: string; deviceToken: string; displayName: string; platform: DevicePlatform }
 export interface BotAvatar {
   id: string;
   shape: string;

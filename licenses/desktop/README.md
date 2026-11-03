@@ -23,6 +23,9 @@ removed, or rewritten.
 | `webview2-rs-MIT.txt` | webview2-com-macros | 0.8.1 | MIT | https://raw.githubusercontent.com/wravery/webview2-rs/dffa41a8a46d3f5565eefbff2de57d38d399f158/LICENSE (text identical to the webview2-com commit, shared file) |
 | `remark-math-6.0.0-MIT.txt` | remark-math | 6.0.0 | MIT | https://raw.githubusercontent.com/remarkjs/remark-math/main/license (monorepo root license; npm archive ships none) |
 | `rehype-katex-7.0.1-MIT.txt` | rehype-katex | 7.0.1 | MIT | same remarkjs/remark-math monorepo license text (verbatim copy) |
+| `aws-sdk-js-v3-Apache-2.0.txt` | @aws-sdk/credential-provider-http, @aws-sdk/credential-provider-login, @aws-sdk/nested-clients | 3.972.77, 3.972.82, 3.997.49 | Apache-2.0 | aws/aws-sdk-js-v3 monorepo root `LICENSE` (copied verbatim from sibling `@aws-sdk/client-bedrock-runtime/LICENSE`) |
+| `data-uri-to-buffer-4.0.1-MIT.txt` | data-uri-to-buffer | 4.0.1 | MIT | `License` section embedded in `data-uri-to-buffer@4.0.1/README.md` |
+| `proxy-agents-MIT.txt` | proxy-agent-negotiate | 1.1.0 | MIT | TooTallNate/proxy-agents monorepo root `LICENSE` (copied verbatim from sibling `https-proxy-agent/LICENSE`) |
 
 `plist@1.10.3` is not vendored: its crate archive contains a top-level
 `LICENCE` file, which the packaging script discovers directly via the

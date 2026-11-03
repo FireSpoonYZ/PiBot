@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod host_service;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -161,6 +162,10 @@ pub fn run() {
       desktop_observe,
       desktop_unobserve,
       desktop_pick_file,
+      host_service::desktop_host_status,
+      host_service::desktop_host_pair,
+      host_service::desktop_host_adopt,
+      host_service::desktop_host_control,
     ])
     .build(tauri::generate_context!())
     .expect("failed to build e-launcher desktop application");

@@ -5,7 +5,11 @@
 // Modes:
 //   (default) : prepares Node sidecar binary, bundles host-core/desktop-client-cli.js
 //               into desktop/build/desktop-client.mjs, generates icons into
-//               desktop/build/icons/, and emits desktop/build/THIRD_PARTY_NOTICES.txt.
+//               desktop/build/icons/, stages the bundled Host runtime into
+//               desktop/build/host-runtime/ (host-core sources + production
+//               node_modules incl. npm, Cua driver, Windows Shower native host),
+//               builds the desktop/host-launcher sidecar (e-launcher-host), and
+//               emits desktop/build/THIRD_PARTY_NOTICES.txt.
 //   --web     : prepares desktop resources, then typechecks and builds the desktop
 //               frontend (desktop/web -> desktop/build/web).
 //   --dev     : prepares desktop resources, then launches Vite dev server on
@@ -14,6 +18,7 @@ import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import {
   chmodSync,
+  copyFileSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -46,6 +51,32 @@ const BROKER_ENTRY = path.join(HERE, 'desktop-client-cli.js');
 const BROKER_OUTFILE = path.join(DESKTOP_BUILD, 'desktop-client.mjs');
 const NOTICES_OUTFILE = path.join(DESKTOP_BUILD, 'THIRD_PARTY_NOTICES.txt');
 const CARGO_TOML = path.join(DESKTOP_DIR, 'src-tauri', 'Cargo.toml');
+// Bundled Host (see desktop/README.md "内置 Host 与自启动"): Tauri maps
+// desktop/build/host-runtime/ to the resource dir host-runtime/ and installs the
+// e-launcher-host launcher next to the main binary via externalBin.
+const HOST_RUNTIME_DIR = path.join(DESKTOP_BUILD, 'host-runtime');
+// npm ci work tree mirroring the repo layout (<work>/host-core + <work>/build/pi-main)
+// so the lockfile's relative file:../build/pi-main/*.tgz specs resolve unchanged.
+const HOST_RUNTIME_DEPS_DIR = path.join(CACHE_DIR, 'host-runtime-deps');
+const HOST_RUNTIME_LAYOUT_VERSION = 1;
+const HOST_CORE_RUNTIME_SUBDIRS = ['capabilities', 'managed-install', 'plugins', 'third-party'];
+// Build/dev-only top-level host-core modules that the Host never loads.
+const HOST_CORE_RUNTIME_EXCLUDED = new Set(['desktop-tauri.js', 'package-lock.json', 'prepare-android-tools.js']);
+const HOST_RUNTIME_SOURCE_EXTENSIONS = ['.js', '.mjs', '.cjs', '.json'];
+// Type declarations / source maps / TS build info are never loaded by the Host;
+// pruning them roughly halves the installer file count (AWS/Smithy dist-types).
+const HOST_RUNTIME_PRUNED_SUFFIXES = ['.d.ts', '.d.mts', '.d.cts', '.map', '.tsbuildinfo'];
+const RELATIVE_IMPORT_RE = /(?:import|export)\s[^'"]*?from\s*(['"])(\.{1,2}\/[^'"]+)\1|import\s*\(\s*(['"])(\.{1,2}\/[^'"]+)\3\s*\)|import\s+(['"])(\.{1,2}\/[^'"]+)\5/g;
+const SHOWER_WINDOWS_DIR_ENV = 'E_LAUNCHER_SHOWER_WINDOWS_DIR';
+const SHOWER_WINDOWS_SOURCE_DIR = path.join(HERE, 'native', 'windows');
+const SHOWER_WINDOWS_BUILD_DIR = path.join(SHOWER_WINDOWS_SOURCE_DIR, 'build');
+const SHOWER_WINDOWS_FILES = ['shower-windows.exe', 'MSTSCLib.dll'];
+const CUA_DRIVER_ENV = 'E_LAUNCHER_CUA_DRIVER';
+const CUA_RELEASE_FILE = path.join(HERE, 'cua-driver-release.json');
+const CUA_LICENSE_SOURCE = path.join(ROOT, 'licenses', 'cua', 'LICENSE-MIT.txt');
+const HOST_LAUNCHER_DIR = path.join(DESKTOP_DIR, 'host-launcher');
+const HOST_LAUNCHER_CARGO_TOML = path.join(HOST_LAUNCHER_DIR, 'Cargo.toml');
+const HOST_LAUNCHER_BIN = 'e-launcher-host';
 
 const NODE_VERSION = '22.19.0';
 const TAURI_API_VERSION = '2.12.4';
@@ -202,6 +233,11 @@ const UPSTREAM_LICENSE_ALLOWLIST = new Map([
   // licenses/desktop/ (provenance recorded in licenses/desktop/README.md).
   ['remark-math', { version: '6.0.0', declared: 'MIT', license: 'desktop/remark-math-6.0.0-MIT.txt' }],
   ['rehype-katex', { version: '7.0.1', declared: 'MIT', license: 'desktop/rehype-katex-7.0.1-MIT.txt' }],
+  ['@aws-sdk/credential-provider-http', { version: '3.972.77', declared: 'Apache-2.0', license: 'desktop/aws-sdk-js-v3-Apache-2.0.txt' }],
+  ['@aws-sdk/credential-provider-login', { version: '3.972.82', declared: 'Apache-2.0', license: 'desktop/aws-sdk-js-v3-Apache-2.0.txt' }],
+  ['@aws-sdk/nested-clients', { version: '3.997.49', declared: 'Apache-2.0', license: 'desktop/aws-sdk-js-v3-Apache-2.0.txt' }],
+  ['data-uri-to-buffer', { version: '4.0.1', declared: 'MIT', license: 'desktop/data-uri-to-buffer-4.0.1-MIT.txt' }],
+  ['proxy-agent-negotiate', { version: '1.1.0', declared: 'MIT', license: 'desktop/proxy-agents-MIT.txt' }],
 ]);
 
 // UI packages explicitly used by the desktop frontend; their full licenses are
@@ -948,10 +984,630 @@ export async function collectCargoLicenseSections({
   return sections;
 }
 
-async function writeThirdPartyNotices(nodeInfo, metafile) {
+// ---------------------------------------------------------------------------
+// Bundled Host runtime (desktop/build/host-runtime/) and the e-launcher-host
+// launcher sidecar. Layout (relative to the Tauri resource dir host-runtime/):
+//   host-core/                     runtime host-core modules + package.json
+//   host-core/node_modules/        production deps for this platform (incl. npm)
+//   host-core/cua-driver/<key>/    pinned cua-driver-rs files (cua-driver.js path)
+//   plugins/<name>/                first-party plugin files host-core re-exports
+//   native/shower-windows.exe      Windows only, + MSTSCLib.dll (launcher exports
+//                                  E_LAUNCHER_SHOWER_WINDOWS_EXE)
+// ---------------------------------------------------------------------------
+
+function toPosixPath(relPath) {
+  return relPath.split(path.sep).join('/');
+}
+
+function isInsideDir(parent, child) {
+  const rel = path.relative(parent, child);
+  return rel !== '' && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
+}
+
+function hasRuntimeSourceExtension(name) {
+  return HOST_RUNTIME_SOURCE_EXTENSIONS.some((ext) => name.endsWith(ext)) && !/\.(?:test|spec)\.[cm]?js$/.test(name);
+}
+
+function listRuntimeSourceTree(dir, out) {
+  for (const entry of readdirSync(dir).sort()) {
+    if (entry.startsWith('.') || entry === 'node_modules' || entry === 'test' || entry === 'tests' || entry === '__tests__') {
+      continue;
+    }
+    const full = path.join(dir, entry);
+    const st = lstatSync(full);
+    if (st.isSymbolicLink()) {
+      throw fail(`host runtime source must not be a symbolic link: ${toPosixPath(path.relative(ROOT, full))}`);
+    }
+    if (st.isDirectory()) {
+      listRuntimeSourceTree(full, out);
+    } else if (st.isFile() && hasRuntimeSourceExtension(entry)) {
+      out.push(full);
+    }
+  }
+}
+
+// Map<destination relative to host-runtime/ (POSIX), absolute source path>.
+// Starts from every runtime host-core module (top-level *.js/*.mjs/*.cjs/*.json
+// minus build-only scripts, plus the runtime subdirectories), then follows
+// static/literal-dynamic relative imports so out-of-tree re-exports (e.g.
+// host-core/hindsight-protocol.js -> ../plugins/hindsight/*) are staged at the
+// same relative location. Imports leaving host-core/ must stay under plugins/.
+function collectHostRuntimeSources() {
+  const roots = [];
+  for (const entry of readdirSync(HERE).sort()) {
+    const full = path.join(HERE, entry);
+    if (!isRegularFile(full)) continue;
+    if (entry.startsWith('build-') || HOST_CORE_RUNTIME_EXCLUDED.has(entry)) continue;
+    if (!hasRuntimeSourceExtension(entry)) continue;
+    roots.push(full);
+  }
+  for (const sub of HOST_CORE_RUNTIME_SUBDIRS) {
+    const dir = path.join(HERE, sub);
+    const st = lstatSync(dir, { throwIfNoEntry: false });
+    if (!st || !st.isDirectory() || st.isSymbolicLink()) {
+      throw fail(`host-core/${sub}/ is missing; cannot stage the bundled Host runtime`);
+    }
+    listRuntimeSourceTree(dir, roots);
+  }
+  for (const required of ['host-service-cli.js', 'package.json']) {
+    if (!roots.includes(path.join(HERE, required))) {
+      throw fail(`host-core/${required} is missing; cannot stage the bundled Host runtime`);
+    }
+  }
+
+  const files = new Set(roots);
+  const queue = roots.filter((file) => /\.[cm]?js$/.test(file));
+  const pluginsDir = path.join(ROOT, 'plugins');
+  const pluginRoots = new Set();
+  while (queue.length > 0) {
+    const file = queue.pop();
+    const display = toPosixPath(path.relative(ROOT, file));
+    const source = readFileSync(file, 'utf8');
+    for (const match of source.matchAll(RELATIVE_IMPORT_RE)) {
+      const spec = match[2] ?? match[4] ?? match[6];
+      const target = path.resolve(path.dirname(file), spec.split(/[?#]/)[0]);
+      if (!isRegularFile(target)) {
+        throw fail(`host runtime module ${display} imports missing file ${spec}`);
+      }
+      if (!isInsideDir(HERE, target)) {
+        if (!isInsideDir(pluginsDir, target)) {
+          throw fail(`host runtime module ${display} imports ${spec} outside host-core/ and plugins/; it cannot be bundled`);
+        }
+        pluginRoots.add(path.join(pluginsDir, path.relative(pluginsDir, target).split(path.sep)[0]));
+      } else if (isInsideDir(path.join(HERE, 'node_modules'), target)) {
+        throw fail(`host runtime module ${display} imports node_modules by relative path: ${spec}`);
+      }
+      if (!files.has(target)) {
+        files.add(target);
+        if (/\.[cm]?js$/.test(target)) queue.push(target);
+      }
+    }
+  }
+  // Staged plugin files keep their package.json ("type": "module") and license.
+  for (const pluginRoot of pluginRoots) {
+    for (const entry of readdirSync(pluginRoot).sort()) {
+      const lower = entry.toLowerCase();
+      if (entry !== 'package.json' && !LICENSE_PREFIXES.some((prefix) => lower.startsWith(prefix))) continue;
+      const full = path.join(pluginRoot, entry);
+      if (isRegularFile(full)) files.add(full);
+    }
+  }
+
+  const sources = new Map();
+  for (const file of [...files].sort()) {
+    sources.set(toPosixPath(path.relative(ROOT, file)), file);
+  }
+  return sources;
+}
+
+function newestCsSourceMtimeMs() {
+  let newest = 0;
+  for (const name of readdirSync(SHOWER_WINDOWS_SOURCE_DIR)) {
+    if (!name.endsWith('.cs')) continue;
+    newest = Math.max(newest, statSync(path.join(SHOWER_WINDOWS_SOURCE_DIR, name)).mtimeMs);
+  }
+  return newest;
+}
+
+// Windows Shower native host: explicit prebuilt directory, else the outputs of
+// host-core/build-shower-windows.js (rebuilt when missing or older than any
+// native/windows/*.cs source).
+async function resolveShowerWindowsDir() {
+  const override = process.env[SHOWER_WINDOWS_DIR_ENV];
+  if (typeof override === 'string' && override.trim() !== '') {
+    if (!path.isAbsolute(override)) {
+      throw fail(`${SHOWER_WINDOWS_DIR_ENV} must be an absolute directory path: ${override}`);
+    }
+    const dir = path.normalize(override);
+    for (const name of SHOWER_WINDOWS_FILES) {
+      assertStrictlyRegularFile(path.join(dir, name), `${SHOWER_WINDOWS_DIR_ENV}${path.sep}${name}`);
+    }
+    return { dir, status: 'override' };
+  }
+  const outputs = SHOWER_WINDOWS_FILES.map((name) => path.join(SHOWER_WINDOWS_BUILD_DIR, name));
+  const upToDate =
+    outputs.every((file) => isRegularFile(file)) &&
+    Math.min(...outputs.map((file) => statSync(file).mtimeMs)) >= newestCsSourceMtimeMs();
+  if (upToDate) return { dir: SHOWER_WINDOWS_BUILD_DIR, status: 'cached' };
+  try {
+    await runExec(process.execPath, [path.join(HERE, 'build-shower-windows.js')], { cwd: ROOT });
+  } catch (err) {
+    throw fail(
+      `Windows Shower native host build failed (${err.message}); install .NET Framework 4.8 (Framework64 csc.exe) ` +
+        `or set ${SHOWER_WINDOWS_DIR_ENV} to an absolute directory containing prebuilt ${SHOWER_WINDOWS_FILES.join(' and ')}`
+    );
+  }
+  for (const file of outputs) {
+    assertStrictlyRegularFile(file, `built ${toPosixPath(path.relative(ROOT, file))}`);
+  }
+  return { dir: SHOWER_WINDOWS_BUILD_DIR, status: 'built' };
+}
+
+// Pinned cua-driver-rs file set staged where host-core/cua-driver.js resolves it
+// (host-core/cua-driver/<platform-arch>/). E_LAUNCHER_CUA_DRIVER points at a
+// prebuilt driver binary whose directory holds the full release file set.
+async function resolveCuaDriverFiles() {
+  let releaseSpec;
+  try {
+    releaseSpec = JSON.parse(readFileSync(CUA_RELEASE_FILE, 'utf8'));
+  } catch (err) {
+    throw fail(`cannot read host-core/cua-driver-release.json: ${err.message}`);
+  }
+  const key = `${process.platform}-${process.arch}`;
+  const target = releaseSpec.targets?.[key];
+  if (!target || !Array.isArray(target.entries) || typeof target.driverName !== 'string') {
+    throw fail(`host-core/cua-driver-release.json has no usable target for ${key}`);
+  }
+  let dir;
+  let status;
+  const override = process.env[CUA_DRIVER_ENV];
+  if (typeof override === 'string' && override.trim() !== '') {
+    if (!path.isAbsolute(override)) {
+      throw fail(`${CUA_DRIVER_ENV} must be the absolute path of ${target.driverName}: ${override}`);
+    }
+    const driver = path.normalize(override);
+    assertStrictlyRegularFile(driver, `${CUA_DRIVER_ENV} (${driver})`);
+    if (path.basename(driver) !== target.driverName) {
+      throw fail(`${CUA_DRIVER_ENV} must point at ${target.driverName}, got ${driver}`);
+    }
+    dir = path.dirname(driver);
+    status = 'override';
+  } else {
+    try {
+      const { prepareCuaDriver } = await import('./build-cua-driver.js');
+      const prepared = await prepareCuaDriver();
+      dir = prepared.dir;
+      status = prepared.status;
+    } catch (err) {
+      throw fail(
+        `Cua driver prepare failed (${err?.message ?? String(err)}); run node host-core/build-cua-driver.js ` +
+          `or set ${CUA_DRIVER_ENV} to the absolute path of a prebuilt ${target.driverName} whose directory ` +
+          `holds the full ${releaseSpec.release} file set (${target.entries.join(', ')})`
+      );
+    }
+  }
+  const files = [];
+  for (const entry of target.entries) {
+    const src = path.join(dir, entry);
+    assertStrictlyRegularFile(src, `Cua driver file ${entry} in ${dir}`);
+    files.push({ dest: `host-core/cua-driver/${key}/${entry}`, src, executable: !entry.endsWith('.h') });
+  }
+  assertBinaryHeader(readFileSync(path.join(dir, target.driverName)), process.platform, 'Cua driver binary');
+  const license = isRegularFile(path.join(dir, 'LICENSE')) ? path.join(dir, 'LICENSE') : CUA_LICENSE_SOURCE;
+  assertStrictlyRegularFile(license, 'Cua driver LICENSE');
+  files.push({ dest: `host-core/cua-driver/${key}/LICENSE`, src: license, executable: false });
+  return { release: releaseSpec.release, status, files, licensePath: license };
+}
+
+async function collectHostRuntimeNatives() {
+  const cua = await resolveCuaDriverFiles();
+  const files = [...cua.files];
+  let shower = null;
+  if (process.platform === 'win32') {
+    shower = await resolveShowerWindowsDir();
+    for (const name of SHOWER_WINDOWS_FILES) {
+      const src = path.join(shower.dir, name);
+      assertBinaryHeader(readFileSync(src), 'win32', `Windows Shower ${name}`);
+      files.push({ dest: `native/${name}`, src, executable: true });
+    }
+  }
+  return {
+    files,
+    cua: { release: cua.release, status: cua.status, licensePath: cua.licensePath },
+    shower: shower ? { status: shower.status } : null,
+  };
+}
+
+function hostRuntimeDepsInfo() {
+  const pkgPath = path.join(HERE, 'package.json');
+  const lockPath = path.join(HERE, 'package-lock.json');
+  assertStrictlyRegularFile(pkgPath, 'host-core/package.json');
+  assertStrictlyRegularFile(lockPath, 'host-core/package-lock.json');
+  const pkgRaw = readFileSync(pkgPath);
+  const lockRaw = readFileSync(lockPath);
+  let pkg;
+  try {
+    pkg = JSON.parse(pkgRaw.toString('utf8'));
+  } catch (err) {
+    throw fail(`host-core/package.json is invalid: ${err.message}`);
+  }
+  const tarballs = [];
+  for (const [name, spec] of Object.entries(pkg.dependencies ?? {})) {
+    if (typeof spec !== 'string' || !spec.startsWith('file:')) continue;
+    const rel = spec.slice('file:'.length);
+    const src = path.resolve(HERE, rel);
+    assertStrictlyRegularFile(src, `host-core dependency ${name} tarball ${rel} (run node scripts/prepare-pi-main.mjs)`);
+    const dest = path.resolve(HOST_RUNTIME_DEPS_DIR, 'host-core', rel);
+    if (!isInsideDir(HOST_RUNTIME_DEPS_DIR, dest)) {
+      throw fail(`host-core dependency ${name} file: spec escapes the npm work tree: ${spec}`);
+    }
+    tarballs.push({ name, src, dest, sha256: sha256OfFile(src) });
+  }
+  const hash = createHash('sha256');
+  hash.update(JSON.stringify({
+    layout: HOST_RUNTIME_LAYOUT_VERSION,
+    platform: process.platform,
+    arch: process.arch,
+    node: process.version,
+    pruned: HOST_RUNTIME_PRUNED_SUFFIXES,
+  }));
+  hash.update('\0package.json\0').update(pkgRaw);
+  hash.update('\0package-lock.json\0').update(lockRaw);
+  for (const tarball of tarballs) hash.update(`\0${tarball.name}\0${tarball.sha256}`);
+  return { key: hash.digest('hex'), pkg, pkgRaw, lockRaw, tarballs };
+}
+
+function hostRuntimeDepsComplete(nodeModulesDir, pkg) {
+  if (!isRegularFile(path.join(nodeModulesDir, 'npm', 'bin', 'npm-cli.js'))) return false;
+  for (const name of Object.keys(pkg.dependencies ?? {})) {
+    if (!isRegularFile(path.join(nodeModulesDir, ...name.split('/'), 'package.json'))) return false;
+  }
+  return true;
+}
+
+// Drops .bin shims and type/source-map files; any other symbolic link fails
+// (Tauri resources and installers must only carry regular files).
+function pruneHostRuntimeModules(nodeModulesDir) {
+  let removed = 0;
+  const stack = [nodeModulesDir];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    for (const entry of readdirSync(dir)) {
+      const full = path.join(dir, entry);
+      const st = lstatSync(full);
+      if (entry === '.bin') {
+        rmSync(full, { recursive: true, force: true });
+        continue;
+      }
+      if (st.isSymbolicLink()) {
+        throw fail(`bundled Host node_modules contains a symbolic link: ${toPosixPath(path.relative(nodeModulesDir, full))}`);
+      }
+      if (st.isDirectory()) {
+        // A TypeScript compiler package reads its lib*.d.ts at runtime; never prune it.
+        if (entry !== 'typescript') stack.push(full);
+        continue;
+      }
+      if (st.isFile() && HOST_RUNTIME_PRUNED_SUFFIXES.some((suffix) => entry.endsWith(suffix))) {
+        rmSync(full, { force: true });
+        removed += 1;
+      }
+    }
+  }
+  return removed;
+}
+
+// npm ci --omit=dev for the CURRENT platform in a work tree mirroring the repo
+// layout, using the pinned npm from host-core/node_modules (no shell, no PATH npm).
+// Install scripts stay disabled, matching the documented host-core install.
+async function installHostRuntimeDependencies(deps) {
+  rmSync(HOST_RUNTIME_DEPS_DIR, { recursive: true, force: true });
+  const workHostCore = path.join(HOST_RUNTIME_DEPS_DIR, 'host-core');
+  mkdirSync(workHostCore, { recursive: true });
+  writeFileSync(path.join(workHostCore, 'package.json'), deps.pkgRaw);
+  writeFileSync(path.join(workHostCore, 'package-lock.json'), deps.lockRaw);
+  for (const tarball of deps.tarballs) {
+    mkdirSync(path.dirname(tarball.dest), { recursive: true });
+    copyFileSync(tarball.src, tarball.dest);
+  }
+  const npmCli = path.join(HERE, 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  assertStrictlyRegularFile(npmCli, 'host-core/node_modules/npm/bin/npm-cli.js (run npm --prefix host-core ci first)');
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) {
+    // An outer `npm --prefix ... run` exports these; they must not redirect this install.
+    if (/^npm_config_(?:prefix|global|location|omit|include|production|dry_run|package_lock_only|ignore_scripts|bin_links)$/i.test(name)) {
+      delete env[name];
+    }
+  }
+  await runExec(
+    process.execPath,
+    [
+      npmCli,
+      'ci',
+      '--prefix',
+      workHostCore,
+      '--omit=dev',
+      '--ignore-scripts',
+      '--bin-links=false',
+      '--no-audit',
+      '--no-fund',
+      '--no-update-notifier',
+    ],
+    { cwd: workHostCore, env }
+  );
+  const nodeModules = path.join(workHostCore, 'node_modules');
+  if (!hostRuntimeDepsComplete(nodeModules, deps.pkg)) {
+    throw fail('npm ci for the bundled Host runtime finished without the expected production dependencies (incl. npm)');
+  }
+  pruneHostRuntimeModules(nodeModules);
+  return nodeModules;
+}
+
+function cleanupHostRuntimeTemps() {
+  for (const name of readdirSync(DESKTOP_BUILD)) {
+    if (/^\.host-runtime(?:-old)?\..+\.tmp$/.test(name)) {
+      rmSync(path.join(DESKTOP_BUILD, name), { recursive: true, force: true });
+    }
+  }
+}
+
+function copyStagedFile(stageDir, dest, src, executable) {
+  const target = path.join(stageDir, ...dest.split('/'));
+  mkdirSync(path.dirname(target), { recursive: true });
+  copyFileSync(src, target);
+  if (process.platform !== 'win32') chmodSync(target, executable ? 0o755 : 0o644);
+}
+
+// Stages desktop/build/host-runtime/. Reuses the previous tree when the content
+// key (sources + natives + deps key) matches; reuses the installed node_modules
+// when only sources/natives changed; otherwise runs npm ci. The tree is built in
+// a sibling temp dir and swapped in, so removed sources never linger.
+async function prepareHostRuntime() {
+  await mkdir(DESKTOP_BUILD, { recursive: true });
+  cleanupHostRuntimeTemps();
+  const sources = collectHostRuntimeSources();
+  const natives = await collectHostRuntimeNatives();
+  const deps = hostRuntimeDepsInfo();
+
+  const content = createHash('sha256');
+  content.update(`deps\0${deps.key}`);
+  for (const [dest, src] of sources) content.update(`\0src\0${dest}\0${sha256OfFile(src)}`);
+  for (const file of natives.files) {
+    content.update(`\0native\0${file.dest}\0${file.executable ? 1 : 0}\0${sha256OfFile(file.src)}`);
+  }
+  const contentKey = content.digest('hex');
+
+  const installedModules = path.join(HOST_RUNTIME_DIR, 'host-core', 'node_modules');
+  const rec = readManifest()?.hostRuntime;
+  const summary = (status, depsStatus) => ({
+    dir: HOST_RUNTIME_DIR,
+    status,
+    deps: depsStatus,
+    sourceFiles: sources.size,
+    nativeFiles: natives.files.length,
+    cua: natives.cua,
+    shower: natives.shower,
+  });
+  const depsReusable = rec?.depsKey === deps.key && hostRuntimeDepsComplete(installedModules, deps.pkg);
+  if (depsReusable && rec.contentKey === contentKey) {
+    return summary('cached', 'cached');
+  }
+
+  const stageDir = tempSibling(DESKTOP_BUILD, 'host-runtime');
+  let backupDir = null;
+  let depsStatus;
+  try {
+    mkdirSync(stageDir, { recursive: true });
+    for (const [dest, src] of sources) copyStagedFile(stageDir, dest, src, false);
+    for (const file of natives.files) copyStagedFile(stageDir, file.dest, file.src, file.executable);
+    const stagedModules = path.join(stageDir, 'host-core', 'node_modules');
+    if (depsReusable) {
+      renameSync(installedModules, stagedModules);
+      depsStatus = 'reused';
+    } else {
+      renameSync(await installHostRuntimeDependencies(deps), stagedModules);
+      depsStatus = 'installed';
+    }
+    if (lstatSync(HOST_RUNTIME_DIR, { throwIfNoEntry: false }) !== undefined) {
+      backupDir = tempSibling(DESKTOP_BUILD, 'host-runtime-old');
+      try {
+        renameSync(HOST_RUNTIME_DIR, backupDir);
+      } catch (err) {
+        backupDir = null;
+        throw fail(
+          `cannot replace ${HOST_RUNTIME_DIR} (${err.message}); stop any e-launcher-host / Host process ` +
+            'or tauri dev session using it and retry'
+        );
+      }
+    }
+    try {
+      renameSync(stageDir, HOST_RUNTIME_DIR);
+    } catch (err) {
+      if (backupDir) {
+        try {
+          renameSync(backupDir, HOST_RUNTIME_DIR);
+          backupDir = null;
+        } catch {
+          /* restore failed; the stale backup is a regenerable build artifact and is removed below */
+        }
+      }
+      throw fail(`failed to install ${HOST_RUNTIME_DIR}: ${err.message}`);
+    }
+  } finally {
+    rmSync(stageDir, { recursive: true, force: true });
+    if (backupDir) rmSync(backupDir, { recursive: true, force: true });
+    rmSync(HOST_RUNTIME_DEPS_DIR, { recursive: true, force: true });
+  }
+
+  const manifest = readManifest() ?? { version: 1 };
+  manifest.version = 1;
+  manifest.hostRuntime = { layout: HOST_RUNTIME_LAYOUT_VERSION, depsKey: deps.key, contentKey };
+  writeManifest(manifest);
+  return summary('staged', depsStatus);
+}
+
+// Builds desktop/host-launcher (binary e-launcher-host) in release mode and copies
+// it to desktop/build/binaries/e-launcher-host-<target-triple>[.exe] for Tauri
+// externalBin. The executable path comes from cargo's JSON artifact messages, so
+// desktop/.cargo/config.toml target-dir or CARGO_TARGET_DIR are honoured.
+async function prepareHostLauncher() {
+  const spec = currentNodeTarget();
+  if (!isRegularFile(HOST_LAUNCHER_CARGO_TOML)) {
+    throw fail('desktop/host-launcher/Cargo.toml is missing; the e-launcher-host launcher crate must be present before packaging');
+  }
+  const args = [
+    'build',
+    '--release',
+    '--manifest-path',
+    HOST_LAUNCHER_CARGO_TOML,
+    '--bin',
+    HOST_LAUNCHER_BIN,
+    '--message-format=json-render-diagnostics',
+  ];
+  if (isRegularFile(path.join(HOST_LAUNCHER_DIR, 'Cargo.lock'))) args.push('--locked');
+  const { stdout } = await runExec('cargo', args, { cwd: HOST_LAUNCHER_DIR });
+  let executable = null;
+  for (const line of String(stdout).split(/\r?\n/)) {
+    if (!line.startsWith('{')) continue;
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (
+      message.reason === 'compiler-artifact' &&
+      message.target?.name === HOST_LAUNCHER_BIN &&
+      Array.isArray(message.target?.kind) &&
+      message.target.kind.includes('bin') &&
+      typeof message.executable === 'string' &&
+      message.executable !== ''
+    ) {
+      executable = message.executable;
+    }
+  }
+  if (!executable) {
+    throw fail(`cargo build did not report the ${HOST_LAUNCHER_BIN} executable (check the [[bin]] name in desktop/host-launcher/Cargo.toml)`);
+  }
+  assertStrictlyRegularFile(executable, `built ${HOST_LAUNCHER_BIN} executable`);
+  const buffer = readFileSync(executable);
+  assertBinaryHeader(buffer, spec.platform, `${HOST_LAUNCHER_BIN} launcher binary`);
+  const sidecarName = `${HOST_LAUNCHER_BIN}-${spec.triple}${spec.platform === 'win32' ? '.exe' : ''}`;
+  const sidecarPath = path.join(BINARIES_DIR, sidecarName);
+  const binHash = sha256Buffer(buffer);
+  let status = 'cached';
+  if (!isRegularFile(sidecarPath) || sha256OfFile(sidecarPath) !== binHash) {
+    mkdirSync(BINARIES_DIR, { recursive: true });
+    const tmpBinary = tempSibling(BINARIES_DIR, sidecarName);
+    try {
+      writeFileSync(tmpBinary, buffer);
+      if (process.platform !== 'win32') chmodSync(tmpBinary, 0o755);
+      renameSync(tmpBinary, sidecarPath);
+    } finally {
+      rmSync(tmpBinary, { force: true });
+    }
+    status = 'installed';
+  }
+  return { triple: spec.triple, sidecarPath, sha256: binHash, status };
+}
+
+function npmPackageLicense(pkg) {
+  if (typeof pkg.license === 'string') return pkg.license;
+  if (pkg.license && typeof pkg.license.type === 'string') return pkg.license.type;
+  if (Array.isArray(pkg.licenses)) {
+    const names = pkg.licenses.map((item) => (typeof item === 'string' ? item : item?.type)).filter(Boolean);
+    if (names.length > 0) return names.join(' OR ');
+  }
+  return null;
+}
+
+// Every npm package installed in host-runtime/host-core/node_modules (nested
+// node_modules included, deduplicated by name@version) plus the Cua driver.
+async function collectHostRuntimeLicenseSections(hostRuntimeInfo) {
+  const modulesDir = path.join(HOST_RUNTIME_DIR, 'host-core', 'node_modules');
+  const packages = new Map();
+  const isRealDir = (dir) => {
+    const st = lstatSync(dir, { throwIfNoEntry: false });
+    return st !== undefined && st.isDirectory() && !st.isSymbolicLink();
+  };
+  const visitModulesDir = async (dir) => {
+    for (const entry of (await readdir(dir)).sort()) {
+      if (entry.startsWith('.')) continue;
+      const full = path.join(dir, entry);
+      if (!isRealDir(full)) continue;
+      if (entry.startsWith('@')) {
+        for (const child of (await readdir(full)).sort()) {
+          const childDir = path.join(full, child);
+          if (isRealDir(childDir)) await visitPackage(childDir);
+        }
+      } else {
+        await visitPackage(full);
+      }
+    }
+  };
+  const visitPackage = async (pkgDir) => {
+    const raw = await readIfPresent(path.join(pkgDir, 'package.json'));
+    let pkg = null;
+    if (raw) {
+      try {
+        pkg = JSON.parse(raw.toString('utf8'));
+      } catch {
+        pkg = null;
+      }
+      if (pkg && typeof pkg.name === 'string' && pkg.name !== '' && typeof pkg.version === 'string' && pkg.version !== '') {
+        const key = `${pkg.name}@${pkg.version}`;
+        if (!packages.has(key)) {
+          packages.set(key, { root: pkgDir, name: pkg.name, version: pkg.version, license: npmPackageLicense(pkg) });
+        }
+      }
+    }
+    // npm's own top-level LICENSE covers the npm application and its bundled
+    // dependencies under npm/node_modules.
+    if (pkg?.name === 'npm') return;
+    const nested = path.join(pkgDir, 'node_modules');
+    if (isRealDir(nested)) await visitModulesDir(nested);
+  };
+  if (!isRealDir(modulesDir)) {
+    throw fail(`bundled Host node_modules is missing: ${modulesDir}`);
+  }
+  await visitModulesDir(modulesDir);
+
+  const sections = ['# Bundled Host runtime (host-runtime/)'];
+  const sorted = [...packages.values()].sort((a, b) =>
+    `${a.name}@${a.version}`.localeCompare(`${b.name}@${b.version}`)
+  );
+  for (const pkg of sorted) {
+    const licenseFiles = await findLicenseFiles(pkg.root);
+    sections.push(`## npm (host runtime): ${pkg.name}@${pkg.version} (${pkg.license ?? 'unknown'})`);
+    if (licenseFiles.length === 0) {
+      const upstream = UPSTREAM_LICENSE_ALLOWLIST.get(pkg.name);
+      if (upstream && upstream.version === pkg.version && pkg.license === upstream.declared) {
+        const upstreamPath = path.join(ROOT, 'licenses', upstream.license);
+        const text = await readIfPresent(upstreamPath);
+        if (!text) throw fail(`in-repo upstream license missing: ${upstreamPath}`);
+        sections.push(text.toString('utf8').trim());
+      } else {
+        throw fail(`bundled Host runtime npm package ${pkg.name}@${pkg.version} has no license file`);
+      }
+    } else {
+      for (const file of licenseFiles) {
+        sections.push((await readFile(file, 'utf8')).trim());
+      }
+    }
+  }
+  sections.push(`## Cua driver ${hostRuntimeInfo.cua.release} (MIT)`);
+  sections.push((await readFile(hostRuntimeInfo.cua.licensePath, 'utf8')).trim());
+  return sections;
+}
+
+async function writeThirdPartyNotices(nodeInfo, metafile, hostRuntimeInfo) {
   const npmSections = await collectNpmLicenseSections(metafile);
   const uiSections = await collectUiNpmLicenseSections();
   const cargoSections = await collectCargoLicenseSections();
+  const hostRuntimeSections = await collectHostRuntimeLicenseSections(hostRuntimeInfo);
+  const launcherCargoSections = await collectCargoLicenseSections({
+    cargoToml: HOST_LAUNCHER_CARGO_TOML,
+    metadataFile: path.join(METAFILE_DIR, 'host-launcher-cargo-metadata.json'),
+  });
   // web/src/gbot-ui adapts lenML/gbot-ui sources (MIT) at source level: it is in
   // neither the npm nor the Cargo graph, so the vendored license text is appended
   // directly from licenses/ (same read mechanism as UPSTREAM_LICENSE_ALLOWLIST).
@@ -966,6 +1622,9 @@ async function writeThirdPartyNotices(nodeInfo, metafile) {
     '## source: lenML/gbot-ui (MIT)',
     gbotUiLicense,
     ...cargoSections,
+    ...hostRuntimeSections,
+    '# e-launcher-host launcher (Rust dependencies)',
+    ...launcherCargoSections,
   ];
   const content = blocks.join('\n\n---\n\n') + '\n';
   const tmpNotice = tempSibling(DESKTOP_BUILD, 'THIRD_PARTY_NOTICES.txt');
@@ -993,7 +1652,11 @@ export async function prepareDesktop() {
     writeFileSync(path.join(ICONS_DIR, 'shell-icon.nsh'), `!define E_LAUNCHER_SHELL_ICON "${shellIconName}"\n`);
   }
   const bundleInfo = await bundleDesktopClient();
-  const noticesInfo = await writeThirdPartyNotices(nodeInfo, bundleInfo.metafile);
+  // After bundleDesktopClient: its host-core dependency check guarantees the
+  // pinned npm (used for the staged npm ci) and node-tar (Cua prepare) exist.
+  const hostRuntimeInfo = await prepareHostRuntime();
+  const launcherInfo = await prepareHostLauncher();
+  const noticesInfo = await writeThirdPartyNotices(nodeInfo, bundleInfo.metafile, hostRuntimeInfo);
   return {
     done: true,
     outDir: DESKTOP_BUILD,
@@ -1007,6 +1670,20 @@ export async function prepareDesktop() {
     bundle: {
       outfile: path.relative(ROOT, bundleInfo.outfile).replace(/\\/g, '/'),
       sha256: sha256OfFile(bundleInfo.outfile),
+    },
+    hostRuntime: {
+      dir: path.relative(ROOT, hostRuntimeInfo.dir).replace(/\\/g, '/'),
+      status: hostRuntimeInfo.status,
+      deps: hostRuntimeInfo.deps,
+      sourceFiles: hostRuntimeInfo.sourceFiles,
+      nativeFiles: hostRuntimeInfo.nativeFiles,
+      cua: { release: hostRuntimeInfo.cua.release, status: hostRuntimeInfo.cua.status },
+      shower: hostRuntimeInfo.shower,
+    },
+    hostLauncher: {
+      sidecar: path.relative(ROOT, launcherInfo.sidecarPath).replace(/\\/g, '/'),
+      status: launcherInfo.status,
+      sha256: launcherInfo.sha256,
     },
     notices: {
       outfile: path.relative(ROOT, noticesInfo.noticesPath).replace(/\\/g, '/'),

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import Ajv from 'ajv';
 import { requireOwner, assertPublicCredentialId } from './auth.js';
 
@@ -83,6 +83,16 @@ function runtimeBotReceipt(value) {
   if (value.appliedRevision != null && (!Number.isSafeInteger(value.appliedRevision) || value.appliedRevision < 0)) fail('INVALID_ARGUMENT', 'Invalid runtime receipt');
   return { botId: text(value.botId, 'botId'), desiredRevision: value.desiredRevision, appliedRevision: value.appliedRevision ?? null, status: value.status, error: runtimeError(value.error) };
 }
+/** Owner-registered device platforms; the Host hello may refine the stored value later. */
+const devicePlatforms = ['windows', 'linux', 'macos', 'android'];
+function deviceRegistration(value) {
+  const body = object(value);
+  if (Object.keys(body).some(key => key !== 'displayName' && key !== 'platform')) fail('INVALID_ARGUMENT', 'Invalid device registration');
+  const displayName = typeof body.displayName === 'string' && body.displayName.isWellFormed() ? body.displayName.trim() : '';
+  if (displayName.length < 1 || displayName.length > 64 || /[\x00-\x1f\x7f]/.test(displayName)) fail('INVALID_ARGUMENT', 'displayName must contain 1-64 characters');
+  if (!devicePlatforms.includes(body.platform)) fail('INVALID_ARGUMENT', 'Invalid platform');
+  return { displayName, platform: body.platform };
+}
 function runtimeCapabilityError(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.error == null) fail('INVALID_ARGUMENT', 'Invalid runtime receipt');
   return { botId: text(value.botId, 'botId'), installationId: text(value.installationId, 'installationId'), error: runtimeError(value.error) };
@@ -132,6 +142,15 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('GET', '/api/model-config', () => store.getModelConfig());
   route('PUT', '/api/model-config', req => { const body = object(req.body); return changed(store.putModelConfig(body.expectedRevision, validate(selectionSchema, body.value))); }, true);
   route('GET', '/api/devices', () => bridge.listDevices());
+  // 所有者登记新设备：令牌只在本响应中返回一次，中心只保存其哈希，不写日志。
+  route('POST', '/api/devices', (req, reply) => {
+    const { displayName, platform } = deviceRegistration(req.body);
+    const deviceId = randomUUID();
+    const deviceToken = randomBytes(32).toString('base64url');
+    bridge.registry.register({ deviceId, token: deviceToken, displayName });
+    bridge.registry.updateMetadata(deviceId, { platform });
+    return reply.code(201).send({ deviceId, deviceToken, displayName, platform });
+  }, true);
   route('PATCH', '/api/devices/:deviceId', req => {
     const { deviceId } = req.params;
     if (deviceId === bridge.deviceId || !bridge.listDevices().some(device => device.deviceId === deviceId)) fail('NOT_FOUND', 'Device not found');

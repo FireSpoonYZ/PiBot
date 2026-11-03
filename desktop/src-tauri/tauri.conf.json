@@ -38,11 +38,13 @@
       "../build/icons/icon.png"
     ],
     "externalBin": [
-      "../build/binaries/e-launcher-client-node"
+      "../build/binaries/e-launcher-client-node",
+      "../build/binaries/e-launcher-host"
     ],
     "resources": {
       "../build/desktop-client.mjs": "desktop-client.mjs",
-      "../build/THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt"
+      "../build/THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt",
+      "../build/host-runtime/": "host-runtime/"
     }
   }
 }
