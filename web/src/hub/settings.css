@@ -1,1 +1,68 @@
 /* settings lane styles: loaded after web/src/styles.css via hub/lanes.css. */
+
+/* bs- primitives（bot-settings/primitives.tsx）的 --bs-* 变量只在 .bs-backdrop
+   内定义；设置页不在 Sheet 里，这里补一份同名变量。 */
+.hst-settings {
+  --bs-accent: #2b70f6;
+  --bs-card: color-mix(in srgb, var(--surface) 62%, var(--bg));
+  --bs-hairline: color-mix(in srgb, var(--line) 80%, transparent);
+  --bs-radius: 16px;
+}
+:root[data-theme=dark] .hst-settings { --bs-accent: #5b93ff; --bs-card: var(--surface); }
+@media (prefers-color-scheme: dark) {
+  :root[data-theme=system] .hst-settings { --bs-accent: #5b93ff; --bs-card: var(--surface); }
+}
+
+/* Section/Row 外的表单控件与动作行（bs-* 未覆盖的部分） */
+.hst-input-row,
+.hst-actions,
+.hst-device-row,
+.hst-row-static { position: relative; }
+/* 卡片内 hst 行与 bs-row 之间的分隔线（与 .bs-row + .bs-row::before 同样式） */
+.bs-card :is(.bs-row, .is-split, .hst-input-row, .hst-actions, .hst-device-row, .hst-row-static) + :is(.bs-row, .is-split, .hst-input-row, .hst-actions, .hst-device-row, .hst-row-static)::before {
+  content: ''; position: absolute; top: 0; left: 14px; right: 0; height: 1px; background: var(--bs-hairline);
+}
+.hst-input-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 10px 14px; }
+.hst-input-label { flex: none; width: 88px; font-size: .86rem; color: var(--muted); }
+.hst-input { flex: 1; min-width: 0; min-height: 36px; padding: 0; border: 0; background: transparent; color: var(--text); font-size: .92rem; text-align: right; }
+.hst-input:focus { outline: none; }
+.hst-input::placeholder { color: color-mix(in srgb, var(--muted) 65%, transparent); }
+
+.hst-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; min-height: 52px; padding: 8px 14px; }
+.hst-btn { min-height: 36px; padding: 0 16px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-size: .86rem; font-weight: 600; white-space: nowrap; color: var(--text); background: color-mix(in srgb, var(--text) 7%, transparent); }
+.hst-btn:active:not(:disabled) { transform: scale(.97); }
+.hst-btn:disabled { opacity: .35; }
+.hst-btn.is-primary { background: var(--text); color: var(--bg); }
+.hst-btn.is-ghost { background: transparent; color: var(--muted); padding: 0 10px; }
+.hst-btn.is-danger { background: transparent; color: var(--danger); }
+
+.hst-select-wrap { position: relative; flex: none; display: inline-flex; align-items: center; color: var(--muted); }
+.hst-select-wrap.is-end { margin-left: auto; }
+.hst-select-wrap select { min-height: 36px; padding: 0 26px 0 12px; border: 0; border-radius: 10px; background: color-mix(in srgb, var(--text) 7%, transparent); color: var(--text); font-size: .88rem; -webkit-appearance: none; appearance: none; }
+.hst-select-wrap select:focus { outline: none; }
+.hst-select-wrap > svg { position: absolute; right: 7px; pointer-events: none; }
+
+/* 设备目录行（徽标 + 名称 + 状态 + 改名） */
+.hst-device-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 52px; padding: 8px 14px; }
+.hst-device-badge { width: 30px; height: 30px; flex: none; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); background: color-mix(in srgb, var(--text) 6%, transparent); }
+.hst-device-badge.is-offline { opacity: .45; }
+.hst-device-name { flex: 1; min-width: 0; font-size: .92rem; font-weight: 500; overflow-wrap: anywhere; }
+.hst-device-name-input { flex: 1; min-width: 0; min-height: 36px; padding: 0 10px; border: 0; border-radius: 10px; background: color-mix(in srgb, var(--text) 7%, transparent); color: var(--text); font-size: .9rem; }
+.hst-device-name-input:focus { outline: none; }
+
+/* 静态行（不可点，同 bs-row 外观） */
+.hst-row-static { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 10px 14px; color: var(--text); }
+
+/* textarea 在 Disclosure 内 */
+.hst-textarea { width: 100%; min-height: 140px; padding: 10px 12px; border: 0; border-radius: 11px; background: var(--bg); color: var(--text); font: .82rem/1.5 ui-monospace, Consolas, monospace; resize: vertical; }
+.hst-textarea:focus { outline: none; }
+
+.hst-form { display: flex; flex-direction: column; gap: 10px; }
+.hst-form .bs-card { border-radius: var(--bs-radius); background: var(--bs-card); overflow: hidden; display: flex; flex-direction: column; }
+
+/* 顶部返回按钮占位 */
+.hst-topbar-spacer { width: 44px; flex: none; }
+
+/* 底部危险按钮 */
+.hst-exit { margin-top: 8px; }
+.hst-exit .hst-btn { width: 100%; min-height: 44px; }
