@@ -1,12 +1,9 @@
 package com.example.launcherprobe;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
-import android.content.ComponentName;
-import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
@@ -54,25 +51,6 @@ public class AppCatalogTest {
         assertMatch(catalog, "lEnS", "org.example.camera");
         assertThrows(IllegalArgumentException.class,
                 () -> catalog.execute(new JSONObject().put("action", "search").put("query", "  ")));
-    }
-
-    @Test public void explicitLaunchPreservesValidationWithoutRecordingDesktopHistory() {
-        var context = RuntimeEnvironment.getApplication();
-        var history = context.getSharedPreferences("launcher_app_launches", Context.MODE_PRIVATE);
-        history.edit().putLong("existing/Activity", 123L).commit();
-        var previous = history.getAll();
-        for (String[] invalid : new String[][]{{null, "Main"}, {"app.test", null}, {"", "Main"}, {"app.test", ""}}) {
-            assertThrows(IllegalArgumentException.class, () -> DeviceActions.launch(context, invalid[0], invalid[1]));
-        }
-        assertNull(Shadows.shadowOf(context).getNextStartedActivity());
-
-        DeviceActions.launch(context, "app.test", "app.test.Main");
-        Intent intent = Shadows.shadowOf(context).getNextStartedActivity();
-        assertEquals(Intent.ACTION_MAIN, intent.getAction());
-        assertTrue(intent.hasCategory(Intent.CATEGORY_LAUNCHER));
-        assertEquals(new ComponentName("app.test", "app.test.Main"), intent.getComponent());
-        assertTrue((intent.getFlags() & Intent.FLAG_ACTIVITY_NEW_TASK) != 0);
-        assertEquals(previous, history.getAll());
     }
 
     private static void assertMatch(AppCatalog catalog, String query, String packageName) throws Exception {

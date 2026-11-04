@@ -30,9 +30,13 @@ public class ShowerTextTest {
                 IShowerService.class.getClassLoader(), new Class<?>[]{IShowerService.class},
                 (proxy, method, args) -> {
                     if (method.getName().equals("asBinder")) return binder;
-                    if (method.getName().equals("touchDisplay")) {
+                    if (method.getName().equals("touchDisplay") || method.getName().equals("hasDisplay")) {
                         assertEquals(7, args[0]);
                         return true;
+                    }
+                    if (method.getName().equals("getDisplaySize")) {
+                        assertEquals(7, args[0]);
+                        return new int[]{720, 1280};
                     }
                     if (!method.getName().equals("injectKeyWithMeta")) {
                         throw new AssertionError("Unexpected Binder call: " + method.getName());

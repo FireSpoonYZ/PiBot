@@ -37,6 +37,9 @@ public class ShowerLifecycleTest {
                                 requested[index] = (Integer) args[index];
                             }
                             return 7;
+                        case "hasDisplay": return (Integer) args[0] == 7;
+                        case "getDisplaySize":
+                            return (Integer) args[0] == 7 ? new int[]{requested[0], requested[1]} : null;
                         case "attachClient":
                         case "touchDisplay":
                         case "tap": return true;
@@ -75,7 +78,10 @@ public class ShowerLifecycleTest {
                             active.add(id);
                             return id;
                         case "attachClient":
+                        case "hasDisplay":
                         case "touchDisplay": return active.contains((Integer) args[0]);
+                        case "getDisplaySize":
+                            return active.contains((Integer) args[0]) ? new int[]{1088, 1920} : null;
                         case "destroyDisplay": return active.remove((Integer) args[0]);
                         case "injectKeyWithMeta":
                             assertTrue("Input must target an existing nonzero display", active.contains((Integer) args[0]));
@@ -118,9 +124,9 @@ public class ShowerLifecycleTest {
         active.remove(recreated.getInt("displayId"));
         assertFalse("create must also recover expiry without a preceding failed input",
                 tools.executeOwner("chat-a", create).getBoolean("reused"));
-        tools.forgetConversation("chat-a");
+        tools.executeOwner("chat-a", new JSONObject().put("action", "release"));
         assertEquals(Set.of(b), active);
-        tools.forgetConversation("chat-b");
+        tools.shutdown();
         assertTrue(active.isEmpty());
     }
 }
