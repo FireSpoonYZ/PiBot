@@ -18,6 +18,7 @@ import {
 import { createMobileRemoteClient, type MobileRemoteClient } from './remote-client';
 import '../../../web/src/styles.css';
 import './mobile.css';
+import '../../../web/src/hub/lanes.css';
 
 const applyUi = (ui: MobileUiSettings) => {
   document.documentElement.dataset.theme = ui.appearance;
