@@ -4,16 +4,8 @@
 .grok-shapes-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 .grok-shape-cell { width: 46px; height: 46px; border-radius: 16px; }
 
-/* 11 个色块单行横向滚动，不出现孤立色块。 */
-.grok-colors-grid {
-  flex-wrap: nowrap;
-  justify-content: flex-start;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none;
-  padding: 4px;
-}
-.grok-colors-grid::-webkit-scrollbar { display: none; }
+/* 11 个色块按 6 列排两行，第二行 5 个居中，不出现孤立色块。 */
+.grok-colors-grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px calc((100% - 6 * 42px) / 6); padding: 4px 0; }
 .grok-color-swatch { flex: 0 0 auto; }
 
 /* 灵魂文档编辑器布局（替换原内联样式）。 */

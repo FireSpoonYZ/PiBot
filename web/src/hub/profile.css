@@ -35,10 +35,8 @@
 .profile-card-hint {
   margin: 0 18px 12px;
 }
-.profile-lifecycle-note {
-  white-space: normal;
-  text-align: right;
-}
+.profile-lifecycle-label { display: flex; flex-direction: column; gap: 2px; white-space: normal; }
+.profile-lifecycle-note { font-size: .78rem; font-weight: 400; color: var(--muted); }
 
 /* bot-profile: topbar spacer keeps title centered when back is hidden (forced primary create). */
 .bot-profile-topbar-spacer {

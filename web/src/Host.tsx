@@ -3265,7 +3265,11 @@ ${newer}` : draftSnapshot;
       setScreen('settings');
       return true;
     }
-    if (screen === 'settings' || screen === 'pending') {
+    if (screen === 'pending') {
+      setScreen('settings');
+      return true;
+    }
+    if (screen === 'settings') {
       setScreen('hub');
       return true;
     }
@@ -3704,23 +3708,11 @@ ${newer}` : draftSnapshot;
             <button
               type="button"
               className="hub-circle-btn hub-add-btn"
-              aria-label={t('新建', 'New')}
-              onClick={(e) => setHubAddMenuPos({ x: e.clientX, y: e.clientY })}
+              aria-label={t('新建智能体', 'New Bot')}
+              onClick={() => openCreateBotPage(false)}
             >
               <Plus size={22} strokeWidth={2.2} />
             </button>
-            <ConversationContextMenu
-              position={hubAddMenuPos}
-              onClose={() => setHubAddMenuPos(null)}
-              items={[
-                {
-                  key: 'new-bot',
-                  label: t('新建智能体', 'New Bot'),
-                  icon: <Plus size={16} />,
-                  onSelect: () => openCreateBotPage(false),
-                },
-              ]}
-            />
           </header>
 
           <div
@@ -4813,9 +4805,9 @@ ${newer}` : draftSnapshot;
                 {activeBot.isPrimary ? (
                   <div className="grok-card-row no-active">
                     <Star size={19} className="grok-row-icon" />
-                    <span className="grok-row-label">{t('主智能体', 'Primary Bot')}</span>
-                    <span className="grok-row-value profile-lifecycle-note">
-                      {t('切换主智能体后可归档或删除', 'Switch primary to archive/delete')}
+                    <span className="grok-row-label profile-lifecycle-label">
+                      {t('主智能体', 'Primary Bot')}
+                      <small className="profile-lifecycle-note">{t('切换主智能体后可归档或删除', 'Switch primary to archive/delete')}</small>
                     </span>
                   </div>
                 ) : (
@@ -5934,7 +5926,7 @@ ${newer}` : draftSnapshot;
               <button
                 type="button"
                 className="grok-floating-circle-btn"
-                onClick={() => setScreen('hub')}
+                onClick={() => setScreen('settings')}
                 aria-label={t('返回', 'Back')}
               >
                 <ArrowLeft size={20} />
@@ -6130,6 +6122,7 @@ ${newer}` : draftSnapshot;
           }}
           archivedCount={archivedBots.length}
           onOpenArchivedBots={() => setScreen('archived-bots')}
+          onOpenPending={() => setScreen('pending')}
           onOpenModelSheet={() => void openCenterManagement()}
           onOpenSystemSettings={onOpenSystemSettings}
         />
@@ -7331,6 +7324,7 @@ function HubSettingsView({
   onRemoteUpdated,
   archivedCount,
   onOpenArchivedBots,
+  onOpenPending,
   onOpenModelSheet,
   onOpenSystemSettings,
 }: {
@@ -7344,6 +7338,7 @@ function HubSettingsView({
   onRemoteUpdated(): void;
   archivedCount: number;
   onOpenArchivedBots(): void;
+  onOpenPending(): void;
   onOpenModelSheet?(): void;
   onOpenSystemSettings?(): void;
 }) {
@@ -7948,6 +7943,13 @@ function HubSettingsView({
             subtitle={t('14 天后自动清理', '14d auto-delete')}
             chevron
             onClick={onOpenArchivedBots}
+          />
+          <Row
+            icon={<Clock />}
+            title={t('待发送', 'Pending')}
+            subtitle={t('离线时保留、尚未确认送达的消息', 'Messages kept offline or not yet confirmed')}
+            chevron
+            onClick={onOpenPending}
           />
           {onOpenModelSheet && (
             <Row
