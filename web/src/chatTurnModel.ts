@@ -1,5 +1,5 @@
 import type { ImageAttachment } from '../../host-core/index.js';
-import { resolveActiveActivityStartedAt, type BotActivity } from './botActivity';
+import { resolveActiveActivityStartedAt, type BotActivity } from './botActivity.ts';
 
 /**
  * Unified Bot session UI attribution (contract: safe projection of backend

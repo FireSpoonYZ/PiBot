@@ -37,6 +37,7 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             host-core/package-lock.json
+            center-server/package-lock.json
 
       - uses: actions/cache@v6
         with:
@@ -87,6 +88,14 @@ jobs:
 
       - name: Install web dependencies
         run: npm ci
+
+      - name: Prepare Pi runtime packages
+        run: npm run prepare:pi-main
+
+      - name: Install host and center dependencies
+        run: |
+          npm --prefix host-core ci
+          npm --prefix center-server ci
 
       - name: Test web
         run: npm test

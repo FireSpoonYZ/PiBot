@@ -8,7 +8,7 @@ import { openStore } from '../../host-core/store.js';
 import { collectBotDirectory } from '../../host-core/bot-directory.js';
 import { openCenterStore } from '../../center-server/data/index.js';
 
-test('host-core store v5 rebuilds legacy v4 database, preserves deviceId, and wipes old bots directory', () => {
+test('host-core store v5 rejects legacy v4 database with UNSUPPORTED_SCHEMA and preserves existing host data', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'el-host-v5-test-'));
   try {
     const dbPath = path.join(tmpDir, 'host.sqlite');
@@ -26,12 +26,11 @@ test('host-core store v5 rebuilds legacy v4 database, preserves deviceId, and wi
     `);
     legacyDb.close();
 
-    const store = openStore(tmpDir);
-    assert.equal(store.deviceId, 'dev_preserved_123');
-    assert.deepEqual(store.listBots(), []);
-    assert.equal(store.getPrimaryBotId(), null);
-    assert.equal(fs.existsSync(oldBotDir), false);
-    store.close();
+    assert.throws(
+      () => openStore(tmpDir),
+      (err) => err?.code === 'UNSUPPORTED_SCHEMA',
+    );
+    assert.equal(fs.existsSync(path.join(oldBotDir, 'SOUL.md')), true);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
