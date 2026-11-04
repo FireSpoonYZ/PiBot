@@ -139,6 +139,7 @@ import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PRO
 // @lane-imports:settings
 // ---
 // @lane-imports:hub
+import { Chips } from './bot-settings/primitives';
 // ---
 // @lane-imports:chat
 // ---
@@ -3588,6 +3589,16 @@ ${newer}` : draftSnapshot;
   // @lane-hooks:settings
   // ---
   // @lane-hooks:hub
+  // 列表类型筛选：与搜索框同时生效。
+  const [hubFilter, setHubFilter] = useState<'all' | 'bots' | 'rooms'>('all');
+  // 右上角“+”弹出菜单的锚点坐标；null 表示关闭。
+  const [hubAddMenuPos, setHubAddMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const visibleHubItems = useMemo(
+    () => hubFilter === 'all'
+      ? filteredMixedHubItems
+      : filteredMixedHubItems.filter(e => (hubFilter === 'rooms' ? Boolean(e.room) : Boolean(e.bot))),
+    [filteredMixedHubItems, hubFilter],
+  );
   // ---
   // @lane-hooks:chat
   // ---
@@ -3615,19 +3626,18 @@ ${newer}` : draftSnapshot;
           用显式 class 而非 hidden 属性，避免 author CSS display 覆盖。 */}
       {(screen === 'hub' || screen === 'conversation' || screen === 'dm') && (
         <main
-          className={`hub-main grok-page-enter${anyDrawerOpen ? ' is-scaled' : ''}`}
+          className={`hub-main grok-page-enter${anyDrawerOpen ? ' is-scaled' : ''}${screen === 'hub' ? '' : ' hub-hidden'}`}
           aria-label={t('智能体主页', 'Bot Hub')}
           aria-hidden={screen !== 'hub' || undefined}
-          style={screen === 'hub' ? undefined : { display: 'none' }}
         >
           <header className="hub-top-bar">
             <button
               type="button"
               className="hub-circle-btn hub-left-trigger"
-              aria-label={t('打开左侧边栏', 'Open left sidebar')}
+              aria-label={t('设置', 'Settings')}
               onClick={() => setLeftDrawerOpen(true)}
             >
-              <PanelLeft size={20} strokeWidth={2} />
+              <Settings size={20} strokeWidth={2} />
             </button>
 
             {(() => {
@@ -3673,11 +3683,23 @@ ${newer}` : draftSnapshot;
             <button
               type="button"
               className="hub-circle-btn hub-add-btn"
-              aria-label={t('新建 Bot', 'New Bot')}
-              onClick={() => openCreateBotPage(false)}
+              aria-label={t('新建', 'New')}
+              onClick={(e) => setHubAddMenuPos({ x: e.clientX, y: e.clientY })}
             >
               <Plus size={22} strokeWidth={2.2} />
             </button>
+            <ConversationContextMenu
+              position={hubAddMenuPos}
+              onClose={() => setHubAddMenuPos(null)}
+              items={[
+                {
+                  key: 'new-bot',
+                  label: t('新建智能体', 'New Bot'),
+                  icon: <Plus size={16} />,
+                  onSelect: () => openCreateBotPage(false),
+                },
+              ]}
+            />
           </header>
 
           <div
@@ -3718,7 +3740,7 @@ ${newer}` : draftSnapshot;
                     isPrimary
                     starBadge
                     platformBadge={<PlatformLogoIcon platform="android" size={11} />}
-                    size={88}
+                    size={64}
                   />
                   <span className="hub-hero-name">{t('创建主智能体', 'Create Primary Bot')}</span>
                 </button>
@@ -3727,7 +3749,20 @@ ${newer}` : draftSnapshot;
 
             {/* Pinned & Regular Bots and Rooms (Archived section moved to Settings) */}
             <section className="hub-bot-list" aria-label={t('智能体列表', 'Bots')}>
+              <div className="hub-filter-chips">
+                <Chips
+                  value={hubFilter}
+                  onChange={setHubFilter}
+                  label={t('按类型筛选', 'Filter by type')}
+                  options={[
+                    { value: 'all', label: t('全部', 'All') },
+                    { value: 'bots', label: t('智能体', 'Bots') },
+                    { value: 'rooms', label: t('群聊', 'Groups') },
+                  ]}
+                />
+              </div>
               <ErrorNotice
+                compact
                 error={directoryError || (!centerConn.ready ? centerConn.error : '') || chatPins.error || action.error}
                 actionLabel={!centerConn.ready && centerConn.status?.error ? t('去设置', 'Settings') : directoryError ? t('刷新', 'Refresh') : undefined}
                 onAction={!centerConn.ready && centerConn.status?.error ? () => setScreen('settings') : directoryError ? () => void triggerHubRefresh() : undefined}
@@ -3741,21 +3776,18 @@ ${newer}` : draftSnapshot;
                 </p>
               )}
               {roomConversationsError ? (
-                <p className="hub-empty-list hub-room-error" role="status">
-                  <span>{t('群聊列表加载失败：', 'Failed to load rooms: ')}{roomConversationsError}</span>
-                  <button
-                    type="button"
-                    className="hub-outline-btn"
-                    onClick={() => refreshRoomConversations()}
-                  >
-                    {t('重试', 'Retry')}
-                  </button>
-                </p>
+                <ErrorNotice
+                  compact
+                  title={t('群聊列表加载失败', 'Failed to load groups')}
+                  detail={roomConversationsError}
+                  actionLabel={t('重试', 'Retry')}
+                  onAction={() => refreshRoomConversations()}
+                />
               ) : null}
-              {roomConversationsLoading && filteredMixedHubItems.every(e => !e.room) ? (
+              {roomConversationsLoading && visibleHubItems.every(e => !e.room) ? (
                 <p className="hub-empty-list" role="status">{t('正在加载群聊…', 'Loading rooms…')}</p>
               ) : null}
-              {filteredMixedHubItems.length === 0 ? (
+              {visibleHubItems.length === 0 ? (
                 <div className="hub-empty-list">
                   <p>
                     {searchQuery.trim()
@@ -3764,7 +3796,7 @@ ${newer}` : draftSnapshot;
                   </p>
                 </div>
               ) : (
-                filteredMixedHubItems.map(entry => {
+                visibleHubItems.map(entry => {
                   if (entry.room) {
                     const room = entry.room;
                     const rowNode = (
@@ -6599,7 +6631,7 @@ function HubPrimaryHero({
   return (
     <button
       type="button"
-      className="hub-hero-button"
+      className="hub-hero-button hub-hero-card"
       aria-label={label}
       {...interactions}
     >
@@ -6608,13 +6640,15 @@ function HubPrimaryHero({
         isPrimary
         starBadge
         platformBadge={<PlatformLogoIcon platform={bot.platform} size={11} />}
-        size={88}
+        size={64}
       />
-      <span className="hub-hero-name" title={bot.role}>{bot.role}</span>
-      <span className="hub-bot-host-badge local" title={bot.hostLabel}>
-        <PlatformLogoIcon platform={bot.platform} size={12} />
-        <span className="hub-bot-host-text">{bot.hostLabel}</span>
-      </span>
+      <div className="hub-hero-card-text">
+        <span className="hub-hero-name" title={bot.role}>{bot.role}</span>
+        <span className="hub-bot-host-badge local" title={bot.hostLabel}>
+          <PlatformLogoIcon platform={bot.platform} size={12} />
+          <span className="hub-bot-host-text">{bot.hostLabel}</span>
+        </span>
+      </div>
     </button>
   );
 }
@@ -6682,7 +6716,6 @@ function HubArchivedRow({
   return (
     <div
       className="hub-bot-row is-archived"
-      style={{ opacity: 0.72 }}
       role="button"
       tabIndex={0}
       {...interactions}
