@@ -58,7 +58,6 @@ import {
 import { mobileLocalRequest, onMobileStreamFailure } from './native/tauri-host';
 import { ActiveCenter, useCenterConnection } from './native/CenterGate';
 import { useDrafts } from '../../desktop/web/src/drafts';
-import { PendingPanel } from '../../desktop/web/src/PendingPanel';
 import { readHistoryPage } from '../../desktop/web/src/history';
 import { Scopes } from '../../desktop/web/src/Scopes';
 import { targetApi } from '../../desktop/web/src/targetApi';
@@ -158,6 +157,7 @@ import { Chips } from './bot-settings/primitives';
 import './hub/schedules.css';
 // ---
 // @lane-imports:scopes
+import { PendingInbox } from './hub/PendingInbox';
 // ---
 
 export interface HostPageProps {
@@ -6028,80 +6028,16 @@ ${newer}` : draftSnapshot;
                   );
                 })()
               ) : null
-            ) : remoteClientRef.current && remoteIdentity ? (
-              <>
-                <div className="grok-field-section">
-                  <label className="grok-section-label">{t('当前操作节点', 'Target Node')}</label>
-                  <section className="grok-card-group">
-                    <div className="grok-card-row no-active">
-                      <Server size={18} className="grok-row-icon" />
-                      <span className="grok-row-label">{t('目标设备', 'Target device')}</span>
-                      <label className="grok-select-wrap">
-                        <select
-                          value={remoteIdentity.targetDeviceId}
-                          onChange={e => {
-                            const api = remoteClientRef.current!.api;
-                            api.setIdentity({
-                              profileId: remoteIdentity.profileId,
-                              kind: remoteIdentity.kind,
-                              targetDeviceId: e.target.value,
-                            });
-                          }}
-                        >
-                          <option value="">{t('请选择设备', 'Select device')}</option>
-                          {remoteDevices.map(device => (
-                            <option key={device.deviceId} value={device.deviceId}>
-                              {device.displayName || device.deviceId}
-                            </option>
-                          ))}
-                        </select>
-                        <ChevronsUpDown size={15} />
-                      </label>
-                    </div>
-                  </section>
-                </div>
-
-                {!remoteIdentity.targetDeviceId ? (
-                  <section className="grok-card-group grok-schedule-empty">
-                    <Server size={28} className="grok-row-icon" />
-                    <h4>{t('请先选择目标节点设备', 'Select a Target Device')}</h4>
-                    <p>
-                      {t(
-                        '在上方下拉菜单中选择已连接的节点设备，即可查看该节点上的待发送队列。',
-                        'Choose a connected device above to view its pending queue.',
-                      )}
-                    </p>
-                  </section>
-                ) : (
-                  <div className="grok-pending-mobile-container">
-                    <PendingPanel
-                      key={`${remoteIdentity.profileId}|${remoteIdentity.kind}|${remoteIdentity.targetDeviceId}`}
-                      api={remoteClientRef.current.api}
-                      identity={remoteIdentity}
-                      transportConnected={remoteConnected}
-                    />
-                  </div>
-                )}
-              </>
             ) : (
-              <section className="grok-card-group grok-schedule-empty" style={{ marginTop: 12 }}>
-                <Globe size={28} className="grok-row-icon" />
-                <h4>{t('尚未连接中心或远程节点', 'Not Connected to Center or Remote Node')}</h4>
-                <p>
-                  {t(
-                    '请先在设置中配置并连接中心服务或远程节点，连接成功后即可使用群聊与待发送对账。',
-                    'Configure and connect to Center or a remote host in Settings first.',
-                  )}
-                </p>
-                <button
-                  type="button"
-                  className="grok-done-pill-btn"
-                  style={{ marginTop: 8 }}
-                  onClick={() => setScreen('settings')}
-                >
-                  {t('前往设置连接', 'Go to Settings')}
-                </button>
-              </section>
+              <PendingInbox
+                api={remoteClientRef.current && remoteIdentity ? remoteClientRef.current.api : null}
+                identity={remoteIdentity}
+                transportConnected={remoteConnected}
+                devices={remoteDevices}
+                bots={allBotItems}
+                rooms={roomConversations}
+                onOpenSettings={() => setScreen('settings')}
+              />
             )}
           </div>
         </main>
