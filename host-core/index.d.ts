@@ -796,6 +796,17 @@ export interface LiveMessageToolCall {
 }
 
 /**
+ * Ordered content block of an assistant message/generation: the original
+ * interleaved sequence of text and toolCall units, carrying only the same safe
+ * fields as text/toolCalls (never args, thinking or internal blocks).
+ * Optional on the wire: older Hosts omit it and the client falls back to
+ * message-level text→toolCalls order.
+ */
+export type LiveContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'toolCall'; callId: string; name: string };
+
+/**
  * Safe UI attribution for a history/live item: frozen turn origin and message
  * identity only. Never carries native control IDs, tool parameters, unrelated
  * documents or credentials; names are display only.
@@ -826,6 +837,8 @@ export interface LiveMessage {
   timestamp?: number;
   durationMs?: number;
   toolCalls?: LiveMessageToolCall[];
+  /** Original text/toolCall interleave for assistant messages; absent on older Hosts. */
+  blocks?: LiveContentBlock[];
   /** Whitelist projection of the toolResult details.presentation; read-only. */
   presentation?: ToolPresentation;
   /** Metadata only (no base64) on user messages carrying image attachments. */
@@ -859,6 +872,8 @@ export interface LiveGeneration {
   truncated: boolean;
   /** Frozen origin of the running generation; absent on older Hosts. */
   attribution?: Attribution;
+  /** Original text/toolCall interleave of the in-flight generation; absent on older Hosts. */
+  blocks?: LiveContentBlock[];
 }
 
 /**

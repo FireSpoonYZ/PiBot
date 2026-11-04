@@ -40,6 +40,17 @@ export interface ChatToolCallItem {
   presentationLive?: boolean;
 }
 
+/**
+ * 助手轮内的有序展示块：按 model.content / live blocks 原序保留文字/思考/工具组
+ * 位置；连续相邻工具合并为一个 tools 块（沿用折叠分组）。块内工具与 ChatTurn.tools
+ * 共享同一 ChatToolCallItem 引用，toolResult / live slot 状态更新原地生效，不重复插入。
+ * 消息缺有序信息（旧 Host live 投影）时按文本→工具回退顺序追加，不宣称恢复已丢失交错。
+ */
+export type ChatTurnBlock =
+  | { id: string; kind: 'text'; text: string }
+  | { id: string; kind: 'thinking'; text: string }
+  | { id: string; kind: 'tools'; tools: ChatToolCallItem[] };
+
 export interface ChatTurn {
   id: string;
   role: 'user' | 'assistant';
@@ -60,6 +71,9 @@ export interface ChatTurn {
   /** assistant 轮：本轮生成源自 dm/room 触发（协作过程文本，不是投递给用户的消息）；
    *  普通聊天经 parseHistoryEntries 过滤不返回此类轮。 */
   collaborative?: boolean;
+  /** assistant 轮的有序展示块（原始交错顺序）；user 轮与无展示内容轮不设置。
+   *  text/tools/thinking 派生字段仍供搜索/摘要与旧渲染路径使用。 */
+  blocks?: ChatTurnBlock[];
 }
 
 export interface ParseHistoryOptions {
@@ -70,6 +84,9 @@ export interface ParseHistoryOptions {
   selfBotId?: string;
   /** 仍在生成的 live 轮的 attribution（LiveGeneration.attribution），仅套用到流式活轮。 */
   liveAttribution?: MessageAttribution;
+  /** 当前生成的有序内容块投影（LiveGeneration.blocks，仅新 Host）；缺省时流式
+   *  文本/工具按工具→文本回退顺序追加到活轮末尾。 */
+  liveGeneratingBlocks?: unknown;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -251,6 +268,12 @@ export function formatWorkingElapsed(seconds: number): string {
   return `${hours}h ${String(remMins).padStart(2, '0')}m`;
 }
 
+/** 累积期展示块：tools 块持有自身工具子序列；工具引用与 acc.tools 共享。 */
+type AccBlock =
+  | { kind: 'text'; text: string }
+  | { kind: 'thinking'; text: string }
+  | { kind: 'tools'; tools: ChatToolCallItem[] };
+
 interface AssistantTurnAccumulator {
   /** 该累积轮所属来源（attribution 身份序列化）；同一轮工具链跨条目只认同来源，
    *  不同触发/频道的生成绝不合并。无归属条目同为 ''，沿用原有连续合并。 */
@@ -259,6 +282,8 @@ interface AssistantTurnAccumulator {
   textParts: string[];
   thinkingParts: string[];
   tools: ChatToolCallItem[];
+  /** 原始交错顺序的展示块序列；工具引用与 tools 同步（原地状态更新）。 */
+  blocks: AccBlock[];
   settledToolIds: Set<string>;
   startMs?: number;
   endMs?: number;
@@ -492,12 +517,70 @@ export function parseHistoryEntries(
       textParts: [],
       thinkingParts: [],
       tools: [],
+      blocks: [],
       settledToolIds: new Set<string>(),
       startMs,
       endMs: undefined,
       sumDurationMs: 0,
     };
     return currentAssistant;
+  };
+
+  /** 文本块追加：紧邻上一 text 块时换行续接，不拆出新块（与 textParts join 一致）。 */
+  const accPushText = (acc: AssistantTurnAccumulator, text: string) => {
+    const last = acc.blocks.at(-1);
+    if (last && last.kind === 'text') {
+      last.text = last.text + '\n' + text;
+    } else {
+      acc.blocks.push({ kind: 'text', text });
+    }
+  };
+  const accPushThinking = (acc: AssistantTurnAccumulator, text: string) => {
+    const last = acc.blocks.at(-1);
+    if (last && last.kind === 'thinking') {
+      last.text = last.text + '\n' + text;
+    } else {
+      acc.blocks.push({ kind: 'thinking', text });
+    }
+  };
+  /** 工具加入展示块：尾部 tools 块为同段连续工具组时并入，否则新开一组；
+   *  重复 callId 的工具不重复入块。 */
+  const accPushTool = (acc: AssistantTurnAccumulator, tool: ChatToolCallItem, joinAdjacent: boolean) => {
+    const last = acc.blocks.at(-1);
+    if (last && last.kind === 'tools' && joinAdjacent) {
+      last.tools.push(tool);
+      return;
+    }
+    acc.blocks.push({ kind: 'tools', tools: [tool] });
+  };
+
+  /** 工具进入 acc.tools（去重/补字段）与展示块：callId 已有工具原地复用不重复
+   *  入块（live/history 重叠区更新原位置）；joinAdjacent=true 表示与前一工具
+   *  同段连续，并入尾部 tools 组。 */
+  const accAddTool = (
+    acc: AssistantTurnAccumulator,
+    toolId: string,
+    name: string,
+    args: Record<string, unknown> | undefined,
+    joinAdjacent: boolean,
+  ): ChatToolCallItem => {
+    const summary = summarizeToolArgs(name, args);
+    const existing = acc.tools.find((itemTool) => itemTool.id === toolId);
+    if (existing) {
+      if (args && !existing.args) existing.args = args;
+      if (summary && !existing.argSummary) existing.argSummary = summary;
+      return existing;
+    }
+    const tool: ChatToolCallItem = {
+      id: toolId,
+      name,
+      status: 'running',
+      ...(args ? { args } : {}),
+      ...(summary ? { argSummary: summary } : {}),
+    };
+    acc.tools.push(tool);
+    accPushTool(acc, tool, joinAdjacent);
+    return tool;
   };
 
   const finalizeCurrentAssistant = (isStillActive: boolean) => {
@@ -525,6 +608,21 @@ export function parseHistoryEntries(
     acc.turn.thinking = acc.thinkingParts.length > 0 ? acc.thinkingParts.join('\n\n') : undefined;
     acc.turn.tools = acc.tools.length > 0 ? acc.tools : undefined;
     acc.turn.toolSummary = acc.tools.length > 0 ? acc.tools.map((tool) => tool.name) : undefined;
+    const out: ChatTurnBlock[] = [];
+    let blockSeq = 0;
+    for (const block of acc.blocks) {
+      if (block.kind === 'tools') {
+        if (block.tools.length === 0) continue;
+        blockSeq += 1;
+        out.push({ id: acc.turn.id + '-b' + blockSeq, kind: 'tools', tools: block.tools });
+      } else {
+        const text = block.text.trim();
+        if (!text) continue;
+        blockSeq += 1;
+        out.push({ id: acc.turn.id + '-b' + blockSeq, kind: block.kind, text });
+      }
+    }
+    acc.turn.blocks = out.length > 0 ? out : undefined;
   };
 
   const selfBotId = typeof options?.selfBotId === 'string' ? options.selfBotId : undefined;
@@ -615,61 +713,121 @@ export function parseHistoryEntries(
         const content = entry.content;
         const textParts: string[] = [];
         const thinkingParts: string[] = [];
-        const extractedTools: Array<{ callId: string; name: string; args?: Record<string, unknown> }> = [];
+        // 有序展示段：content 数组按块原序（文本/思考/工具交错）；纯 text/toolCalls
+        // 投影（旧 Host live、无 content 数组）回退为文本→工具的消息内顺序。
+        let messageHasDisplay = false;
+        let pendingText = '';
+        let pendingThinking = '';
+        let toolSeq = 0;
+        // 消息内有序段：工具段暂存描述（id/name/args），ensureAssistant 后统一
+        // 经 accAddTool 落实为共享 ChatToolCallItem，保证空消息不产生 acc。
+        const messageBlocks: AccBlock[] = [];
+        const flushText = () => {
+          if (pendingText) messageBlocks.push({ kind: 'text', text: pendingText });
+          pendingText = '';
+        };
+        const flushThinking = () => {
+          if (pendingThinking) messageBlocks.push({ kind: 'thinking', text: pendingThinking });
+          pendingThinking = '';
+        };
+        const noteText = (value: string) => {
+          textParts.push(value);
+          messageHasDisplay = true;
+          // 类型切换前先把对侧 pending 落段，保持原序。
+          flushThinking();
+          pendingText = pendingText ? pendingText + '\n' + value : value;
+        };
+        const noteThinking = (value: string) => {
+          thinkingParts.push(value);
+          messageHasDisplay = true;
+          flushText();
+          pendingThinking = pendingThinking ? pendingThinking + '\n' + value : value;
+        };
+        const noteTool = (callId: string, name: string, args: Record<string, unknown> | undefined) => {
+          const toolId = callId || String(item.id ?? i) + '-' + mIdx + '-tool-' + toolSeq;
+          toolSeq += 1;
+          flushText();
+          flushThinking();
+          const last = messageBlocks.at(-1);
+          const staged: ChatToolCallItem = { id: toolId, name, status: 'running', ...(args ? { args } : {}) };
+          if (last && last.kind === 'tools') {
+            last.tools.push(staged);
+          } else {
+            messageBlocks.push({ kind: 'tools', tools: [staged] });
+          }
+          messageHasDisplay = true;
+        };
 
         if (typeof content === 'string') {
-          textParts.push(content);
-        } else if (typeof entry.text === 'string') {
-          textParts.push(entry.text);
+          noteText(content);
         } else if (Array.isArray(content)) {
           for (const block of content) {
             if (typeof block === 'string') {
-              textParts.push(block);
+              noteText(block);
               continue;
             }
             const part = asRecord(block);
             if (part.type === 'text' && typeof part.text === 'string') {
-              textParts.push(part.text);
+              noteText(part.text);
             } else if (part.type === 'thinking' && typeof part.thinking === 'string') {
-              thinkingParts.push(part.thinking);
+              noteThinking(part.thinking);
             } else if (part.type === 'toolCall' && typeof part.name === 'string' && part.name.trim()) {
               const rawArgs = asRecord(part.arguments ?? part.args ?? part.input);
-              extractedTools.push({
-                callId: typeof part.id === 'string' ? part.id : '',
-                name: part.name.trim(),
-                ...(Object.keys(rawArgs).length > 0 ? { args: rawArgs } : {}),
-              });
+              noteTool(
+                typeof part.id === 'string' ? part.id : '',
+                part.name.trim(),
+                Object.keys(rawArgs).length > 0 ? rawArgs : undefined,
+              );
+            }
+          }
+        } else {
+          // live 投影消息：新 Host 的 blocks 携带真实交错顺序（text/toolCall 原序），
+          // 缺省（旧 Host）回退为 整条 text→toolCalls 顺序，不宣称恢复已丢失交错。
+          const projectedBlocks = asArray<Record<string, unknown>>(entry.blocks);
+          if (projectedBlocks.length > 0) {
+            for (const pb of projectedBlocks) {
+              if (pb.type === 'text' && typeof pb.text === 'string' && pb.text) {
+                noteText(pb.text);
+              } else if (pb.type === 'toolCall' && typeof pb.name === 'string' && pb.name.trim()) {
+                noteTool(
+                  typeof pb.callId === 'string' ? pb.callId : '',
+                  pb.name.trim(),
+                  undefined,
+                );
+              }
+            }
+          } else {
+            if (typeof entry.text === 'string' && entry.text) {
+              noteText(entry.text);
+            }
+            const projected = asArray<Record<string, unknown>>(entry.toolCalls);
+            if (projected.length > 0) {
+              for (const tc of projected) {
+                if (typeof tc.name !== 'string' || !tc.name.trim()) continue;
+                noteTool(
+                  typeof tc.callId === 'string' ? tc.callId : '',
+                  tc.name.trim(),
+                  undefined,
+                );
+              }
+            } else if (typeof entry.toolName === 'string' && entry.toolName.trim()) {
+              noteTool(
+                typeof entry.toolCallId === 'string' ? entry.toolCallId : '',
+                entry.toolName.trim(),
+                undefined,
+              );
             }
           }
         }
-
-        if (Array.isArray(entry.toolCalls)) {
-          for (const tc of entry.toolCalls) {
-            const call = asRecord(tc);
-            if (typeof call.name === 'string' && call.name.trim()) {
-              const rawArgs = asRecord(call.arguments ?? call.args ?? call.input);
-              extractedTools.push({
-                callId: typeof call.callId === 'string' ? call.callId : '',
-                name: call.name.trim(),
-                ...(Object.keys(rawArgs).length > 0 ? { args: rawArgs } : {}),
-              });
-            }
-          }
-        } else if (extractedTools.length === 0 && typeof entry.toolName === 'string' && entry.toolName.trim()) {
-          const rawArgs = asRecord(entry.arguments ?? entry.args ?? entry.input);
-          extractedTools.push({
-            callId: typeof entry.toolCallId === 'string' ? entry.toolCallId : '',
-            name: entry.toolName.trim(),
-            ...(Object.keys(rawArgs).length > 0 ? { args: rawArgs } : {}),
-          });
-        }
+        flushText();
+        flushThinking();
 
         const joinedText = textParts.join('\n').trim();
         const error =
           (typeof entry.errorMessage === 'string' ? entry.errorMessage.trim() : '') ||
           (entry.stopReason === 'error' || entry.isError === true ? 'model_error' : undefined);
 
-        if (!joinedText && extractedTools.length === 0 && !error && thinkingParts.length === 0) {
+        if (!messageHasDisplay && !error) {
           continue;
         }
 
@@ -678,7 +836,8 @@ export function parseHistoryEntries(
         if (Number.isFinite(numericId) && numericId > acc.turn.entryId) {
           acc.turn.entryId = numericId;
         }
-        if (joinedText && acc.textParts.at(-1) !== joinedText) {
+        // 不按文本内容去重：相邻不同发言/消息可能正文相同，判重会丢消息。
+        if (joinedText) {
           acc.textParts.push(joinedText);
         }
         if (thinkingParts.length > 0) {
@@ -687,22 +846,26 @@ export function parseHistoryEntries(
         if (error) {
           acc.turn.error = error;
         }
-        for (let tIdx = 0; tIdx < extractedTools.length; tIdx++) {
-          const tc = extractedTools[tIdx];
-          const toolId = tc.callId || `${String(item.id ?? i)}-${mIdx}-tool-${tIdx}`;
-          const summary = summarizeToolArgs(tc.name, tc.args);
-          const existing = acc.tools.find((itemTool) => itemTool.id === toolId);
-          if (!existing) {
-            acc.tools.push({
-              id: toolId,
-              name: tc.name,
-              status: 'running',
-              ...(tc.args ? { args: tc.args } : {}),
-              ...(summary ? { argSummary: summary } : {}),
-            });
+        // 按消息内记录顺序落实展示块：同消息内连续工具并入一组，不跨消息合并
+        // 工具组；同 callId 已由 accAddTool 去重，不会重复入块。
+        for (const seg of messageBlocks) {
+          if (seg.kind === 'text') {
+            accPushText(acc, seg.text);
+          } else if (seg.kind === 'thinking') {
+            accPushThinking(acc, seg.text);
           } else {
-            if (tc.args && !existing.args) existing.args = tc.args;
-            if (summary && !existing.argSummary) existing.argSummary = summary;
+            // 段内首个工具新开一组（不跨消息合并）；其后工具仅当上一已放置
+            // 工具是尾部工具组末位时才并入，保证同段连续工具同组。
+            let lastPlaced: ChatToolCallItem | null = null;
+            for (const staged of seg.tools) {
+              const tail = acc.blocks.at(-1);
+              const joinAdjacent =
+                lastPlaced !== null &&
+                tail !== undefined &&
+                tail.kind === 'tools' &&
+                tail.tools.at(-1) === lastPlaced;
+              lastPlaced = accAddTool(acc, staged.id, staged.name, staged.args, joinAdjacent);
+            }
           }
         }
         if (acc.startMs === undefined && msgTimestamp !== undefined) {
@@ -781,7 +944,7 @@ export function parseHistoryEntries(
           acc.settledToolIds.add(matched.id);
         } else if (toolName) {
           const id = toolCallId || `${String(item.id ?? i)}-${mIdx}-result`;
-          acc.tools.push({
+          const tool: ChatToolCallItem = {
             id,
             name: toolName,
             status: resolvedStatus,
@@ -789,7 +952,11 @@ export function parseHistoryEntries(
             ...(resultOutput ? { output: resultOutput } : {}),
             ...(resultTruncated ? { outputTruncated: true } : {}),
             ...(projectedPresentation ? { presentation: projectedPresentation, presentationLive: false } : {}),
-          });
+          };
+          acc.tools.push(tool);
+          // 孤立 toolResult（分页窗口内未见调用侧）在轮尾追加展示组；
+          // 已匹配的调用不移动位置，仅原地更新状态。
+          accPushTool(acc, tool, false);
           acc.settledToolIds.add(id);
         }
         if (acc.startMs === undefined && fallbackStart !== undefined) {
@@ -809,9 +976,12 @@ export function parseHistoryEntries(
   const isBusy = Boolean(options?.isBusy);
   const liveTools = asArray<Record<string, unknown>>(options?.liveTools);
   const streamingText = typeof options?.liveGeneratingText === 'string' ? options.liveGeneratingText.trim() : '';
+  const genBlocks = asArray<Record<string, unknown>>(options?.liveGeneratingBlocks);
 
   let activeAcc: AssistantTurnAccumulator | null = currentAssistant;
-  if (isBusy && (liveTools.length > 0 || streamingText !== '')) {
+  // 纯 toolCall 的 generation.blocks（尚无 live slot/流式文本）也要开活轮，
+  // 否则有序块被丢弃、流式归并不进轮。
+  if (isBusy && (liveTools.length > 0 || streamingText !== '' || genBlocks.length > 0)) {
     const lastEntryId = turns.at(-1)?.entryId ?? 0;
     if (options?.liveAttribution !== undefined) {
       // 明确的 liveAttribution 按完整来源键换轮/并轮（ensureAssistant 内部判定）。
@@ -829,6 +999,73 @@ export function parseHistoryEntries(
     const acc = activeAcc;
     const activeLiveIds = new Set<string>();
 
+    // 工具按 callId 建索引：先按 generation.blocks 放置当前生成的有序块，
+    // 再以 live slot 更新/补未定位工具状态——genBlocks 的 text→tool→text
+    // 原序不被 slot 顺序打乱；历史已定位 callId 不移动。
+    const slotByCallId = new Map<string, Record<string, unknown>>();
+    for (const slot of liveTools) {
+      const rec = asRecord(slot);
+      const callId = typeof rec.callId === 'string' ? rec.callId : '';
+      if (callId) slotByCallId.set(callId, rec);
+    }
+    const makeLiveTool = (
+      id: string,
+      name: string,
+      slot: Record<string, unknown> | undefined,
+    ): ChatToolCallItem => {
+      const slotStatus: ChatToolCallItem['status'] = slot && slot.status === 'done' ? 'done' : 'running';
+      const slotOutput = slot && typeof slot.output === 'string' ? slot.output.trim() : '';
+      const slotTruncated = slot?.truncated === true;
+      const slotPresentation = asRecord(slot?.presentation);
+      const hasPresentation = Object.keys(slotPresentation).length > 0;
+      return {
+        id,
+        name,
+        status: slotStatus,
+        ...(slotOutput ? { output: slotOutput } : {}),
+        ...(slotTruncated ? { outputTruncated: true } : {}),
+        ...(hasPresentation ? { presentation: slotPresentation, presentationLive: true } : {}),
+      };
+    };
+    const isPlaced = (callId: string) =>
+      callId !== '' && acc.blocks.some((b) => b.kind === 'tools' && b.tools.some((t) => t.id === callId));
+
+    // 1) generation.blocks（新 Host）：按块原序落 text/toolCall；toolCall 已在块内
+    //    （历史已展示或本轮已放置）原地保留，新工具用 slot 数据就位。
+    //    缺该字段（旧 Host）：不在此放工具，下面 slot 循环按尾部追加。
+    let prevWasGenTool = false;
+    for (const block of genBlocks) {
+      if (block.type === 'text' && typeof block.text === 'string' && block.text) {
+        accPushText(acc, block.text);
+        prevWasGenTool = false;
+      } else if (block.type === 'toolCall' && typeof block.name === 'string' && block.name.trim()) {
+        const callId = typeof block.callId === 'string' ? block.callId : '';
+        // generation 提到的工具计入活跃集合：未 settled 的不被下面
+        // running→done 扫描误标完成。
+        if (callId) activeLiveIds.add(callId);
+        if (!isPlaced(callId)) {
+          const name = block.name.trim();
+          // 已在 acc.tools 但未入块（slot 先行追加等）：移动既有引用就位不复制；
+          // 未见工具用 slot 数据（含 callId 时）或裸名新建。
+          const known = callId ? acc.tools.find((t) => t.id === callId) : undefined;
+          if (known) {
+            accPushTool(acc, known, prevWasGenTool);
+            activeLiveIds.add(known.id);
+          } else {
+            const slot = callId ? slotByCallId.get(callId) : undefined;
+            const id = callId || `live-block-tool-${name}`;
+            const tool = makeLiveTool(id, name, slot);
+            acc.tools.push(tool);
+            accPushTool(acc, tool, prevWasGenTool);
+            activeLiveIds.add(tool.id);
+          }
+        }
+        prevWasGenTool = true;
+      }
+    }
+
+    // 2) live slot 更新：已定位工具原地更新状态；genBlocks 未覆盖的新 slot
+    //    （旧 Host 或截断）按尾部追加展示。
     for (let sIdx = 0; sIdx < liveTools.length; sIdx++) {
       const slot = asRecord(liveTools[sIdx]);
       const callId = typeof slot.callId === 'string' ? slot.callId : '';
@@ -862,14 +1099,9 @@ export function parseHistoryEntries(
       } else {
         const id = callId || `live-tool-${sIdx}`;
         activeLiveIds.add(id);
-        acc.tools.push({
-          id,
-          name,
-          status: slotStatus,
-          ...(slotOutput ? { output: slotOutput } : {}),
-          ...(slotTruncated ? { outputTruncated: true } : {}),
-          ...(hasPresentation ? { presentation: slotPresentation, presentationLive: true } : {}),
-        });
+        const tool = makeLiveTool(id, name, slot);
+        acc.tools.push(tool);
+        accPushTool(acc, tool, true);
       }
     }
 
@@ -884,8 +1116,13 @@ export function parseHistoryEntries(
 
     if (streamingText !== '') {
       acc.turn.isStreaming = true;
-      if (acc.textParts.at(-1) !== streamingText) {
-        acc.textParts.push(streamingText);
+      // 不做文本内容去重：相邻不同消息可能文本相同，按内容判重会丢正文；
+      // textParts 仅供摘要/搜索，原样追加。
+      acc.textParts.push(streamingText);
+      // 旧 Host 无 generation.blocks 时流式文本按尾部追加；新 Host 经 genBlocks
+      // 有序段已经放置，不重复。
+      if (genBlocks.length === 0) {
+        accPushText(acc, streamingText);
       }
     }
   }

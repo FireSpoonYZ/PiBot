@@ -98,6 +98,51 @@ function toolCallsFromBlocks(content) {
   return calls;
 }
 
+/**
+ * 有序内容块的安全投影：只带 {type:'text',text} 与 {type:'toolCall',callId,name}
+ * （与 text/toolCalls 相同字段），绝不含 thinking/参数/内部块。单遍有界投影：
+ * 工具数沿用 MAX_TOOLS、块数 128、文本总长沿用 cap（与 text 字段同上限）；
+ * 任一上限截断即置 truncated。无可显示内容返回 null。
+ * 新 Host 恒在有可显示块时输出（含纯工具/纯文本），客户端凭其恢复
+ * 该消息/生成的真实顺序；旧 Host 无此字段，客户端回退 text→toolCalls。
+ */
+const MAX_ORDERED_BLOCKS = 128;
+function orderedBlocksFromContent(content, cap) {
+  if (!Array.isArray(content)) return null;
+  const blocks = [];
+  let textLen = 0;
+  let toolCount = 0;
+  let truncated = false;
+  for (const block of content) {
+    if (!block) continue;
+    if (block.type === 'text' && typeof block.text === 'string' && block.text !== '') {
+      if (blocks.length >= MAX_ORDERED_BLOCKS || textLen >= cap) {
+        truncated = true;
+        break;
+      }
+      const part = truncatePrefix(block.text, cap - textLen);
+      blocks.push({ type: 'text', text: part.text });
+      textLen += part.text.length;
+      if (part.truncated) {
+        truncated = true;
+        break;
+      }
+    } else if (block.type === 'toolCall' && typeof block.name === 'string' && block.name !== '') {
+      if (blocks.length >= MAX_ORDERED_BLOCKS || toolCount >= MAX_TOOLS) {
+        truncated = true;
+        break;
+      }
+      toolCount += 1;
+      blocks.push({
+        type: 'toolCall',
+        callId: typeof block.id === 'string' ? block.id : '',
+        name: block.name,
+      });
+    }
+  }
+  return blocks.length === 0 ? null : { blocks, truncated };
+}
+
 /** 投影一条消息；跳过 system/未知角色与无内容消息，只带文本和工具安全字段与时间戳。
     user 消息可携带附件展示元数据（不含 base64），图片-only 消息因此不会被空文本过滤掉。 */
 function projectMessage(message, budget, entry) {
@@ -140,6 +185,11 @@ function projectMessage(message, budget, entry) {
     }
   } else if (role === 'assistant') {
     if (toolCalls.length > 0) projected.toolCalls = toolCalls;
+    const ordered = orderedBlocksFromContent(message.content, MAX_MESSAGE_UNITS);
+    if (ordered) {
+      projected.blocks = ordered.blocks;
+      if (ordered.truncated) projected.truncated = true;
+    }
     if (isAssistantError) projected.isError = true;
   }
   if (Number.isSafeInteger(message.timestamp) && message.timestamp >= 0) {
@@ -276,6 +326,11 @@ function projectTool(slot, budget) {
 function projectGeneration(message, sessionState, runTaskId) {
   const { text, truncated } = textFromBlocks(message.content, MAX_GENERATION_UNITS);
   const generation = { text, truncated };
+  const ordered = orderedBlocksFromContent(message.content, MAX_GENERATION_UNITS);
+  if (ordered) {
+    generation.blocks = ordered.blocks;
+    if (ordered.truncated) generation.truncated = true;
+  }
   const attribution = runTaskId === null || runTaskId === undefined
     ? null
     : projectAttribution(
@@ -506,6 +561,21 @@ function fitPresentationBudget(state) {
     if (deficit <= 0) break;
   }
 
+  // 1.5) 有序 blocks：整条历史删除前先丢有序投影（回到 text→toolCalls 回退
+  // 渲染），按条目从最旧开始；置 truncated 标示该消息丢了顺序信息。
+  if (deficit > 0) {
+    for (const item of state.history) {
+      for (const message of item.messages) {
+        if (deficit <= 0) break;
+        if (message.blocks === undefined) continue;
+        deficit -= utf8JsonBytes(message.blocks);
+        delete message.blocks;
+        message.truncated = true;
+      }
+      if (deficit <= 0) break;
+    }
+  }
+
   // 2) 整条旧历史：从最旧向前删，保留连续最新窗口。
   if (deficit > 0) {
     let drop = 0;
@@ -543,10 +613,14 @@ function fitPresentationBudget(state) {
 
   // 4) 生成文本：压到 4096 单元再清空。绝不只删 attribution 留正文——
   // 无来源的协作草稿会被误认为对用户的答复；正文清空后整条置 null。
+  // blocks 随 text 同步压/删，避免残留有序块与 text 不一致。
   if (state.generation !== null && utf8JsonBytes(state) > FIT_FRAME_LIMIT) {
     const gen = state.generation;
     gen.text = truncateTail(gen.text, 4096).text;
     gen.truncated = true;
+    if (Array.isArray(gen.blocks)) {
+      delete gen.blocks;
+    }
     if (utf8JsonBytes(state) > FIT_FRAME_LIMIT) {
       state.generation = null;
     }

@@ -12,6 +12,7 @@ import {
   formatTurnDuration,
   normalizeAttribution,
   type ChatTurn,
+  type ChatToolCallItem,
 } from '../../../web/src/chatTurnModel';
 import { MessageAttribution as MessageAttributionBadge } from '../../../web/src/MessageAttribution';
 import {
@@ -137,6 +138,7 @@ export function ChatTranscript({
       liveTools: asArray<Record<string, unknown>>(live?.tools),
       isBusy,
       liveGeneratingText: displayGeneratingText,
+      liveGeneratingBlocks: liveIsCollaborative ? undefined : live?.generation?.blocks,
       selfBotId: bot.botId,
       liveAttribution,
     }),
@@ -185,6 +187,56 @@ export function ChatTranscript({
       ? t('本次执行失败：', 'This run failed: ') + (activityError ?? admissionError)
       : t('本次执行失败，请重试或检查配置。', 'This run failed. Retry or check the configuration.')
     : null;
+
+  // 工具芯片/卡片的单工具渲染：有序块与回退 tools 列表共用同一 JSX，
+  // 保证 live→历史 与块内/块外渲染一致。
+  const renderToolChip = (tool: ChatToolCallItem) => {
+    const presentation = tool.presentation ? readToolPresentation(tool.presentation) : null;
+    return (
+      <span key={tool.id} role="listitem" className="bot-chat-tool-wrap">
+        <span role="presentation" className={`bot-chat-tool-chip is-${tool.status}`}>
+          <span className="bot-tool-step-icon" aria-hidden="true">
+            {tool.status === 'running' ? (
+              <svg viewBox="0 0 16 16" fill="none">
+                <circle cx="8" cy="8" r="5.75" stroke="currentColor" strokeOpacity="0.24" strokeWidth="1.75" />
+                <path d="M8 2.25A5.75 5.75 0 0 1 13.75 8" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+              </svg>
+            ) : tool.status === 'error' ? (
+              <svg viewBox="0 0 16 16" fill="none">
+                <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.6" />
+                <path d="M8 5v3.5M8 11h.01" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 16 16" fill="none">
+                <path d="M3.75 8.25 6.6 11.1 12.25 5.25" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            )}
+          </span>
+          <span className="bot-tool-step-name">{tool.name}</span>
+          <span className="bot-tool-step-state">
+            {tool.status === 'running'
+              ? t('调用中', 'Calling')
+              : tool.status === 'error'
+                ? t('失败', 'Failed')
+                : t('已完成', 'Done')}
+          </span>
+        </span>
+        {presentation ? (
+          <ToolPresentationCard
+            key={`${botKey}:${presentation.kind === 'questionnaire' ? presentation.requestId : tool.id}`}
+            presentation={presentation}
+            active={tool.presentationLive === true && isBusy && !archived}
+            disabled={archived}
+            onSubmit={
+              presentation.kind === 'questionnaire'
+                ? (input) => onSubmitQuestionnaire(presentation.installationId, input)
+                : undefined
+            }
+          />
+        ) : null}
+      </span>
+    );
+  };
 
   // 仅当用户停留在底部附近时跟随新流；向上翻阅历史不打断滚动位置。
   const scrollRef = useRef<HTMLElement | null>(null);
@@ -272,67 +324,37 @@ export function ChatTranscript({
               {showAttribution && turnAttr ? (
                 <MessageAttributionBadge attribution={turnAttr} />
               ) : null}
-              {turn.thinking ? (
+              {turn.role === 'assistant' && turn.blocks
+                ? turn.blocks.map((block) =>
+                    block.kind === 'thinking' ? (
+                      <details key={block.id} className="bot-chat-thinking">
+                        <summary>{t('思考过程', 'Thinking')}</summary>
+                        <pre>{block.text}</pre>
+                      </details>
+                    ) : block.kind === 'tools' ? (
+                      <div key={block.id} className="bot-chat-tools" role="list" aria-label={t('工具调用', 'Tool calls')}>
+                        {block.tools.map((tool) => renderToolChip(tool))}
+                      </div>
+                    ) : (
+                      <Markdown key={block.id} text={block.text} onOpenLink={openLink} />
+                    ),
+                  )
+                : null}
+              {!turn.blocks && turn.thinking ? (
                 <details className="bot-chat-thinking">
                   <summary>{t('思考过程', 'Thinking')}</summary>
                   <pre>{turn.thinking}</pre>
                 </details>
               ) : null}
-              {turn.tools && turn.tools.length > 0 ? (
+              {!turn.blocks && turn.tools && turn.tools.length > 0 ? (
                 <div className="bot-chat-tools" role="list" aria-label={t('工具调用', 'Tool calls')}>
-                  {turn.tools.map((tool) => {
-                    const presentation = tool.presentation ? readToolPresentation(tool.presentation) : null;
-                    return (
-                      <span key={tool.id} role="listitem" className="bot-chat-tool-wrap">
-                        <span role="presentation" className={`bot-chat-tool-chip is-${tool.status}`}>
-                          <span className="bot-tool-step-icon" aria-hidden="true">
-                            {tool.status === 'running' ? (
-                              <svg viewBox="0 0 16 16" fill="none">
-                                <circle cx="8" cy="8" r="5.75" stroke="currentColor" strokeOpacity="0.24" strokeWidth="1.75" />
-                                <path d="M8 2.25A5.75 5.75 0 0 1 13.75 8" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-                              </svg>
-                            ) : tool.status === 'error' ? (
-                              <svg viewBox="0 0 16 16" fill="none">
-                                <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.6" />
-                                <path d="M8 5v3.5M8 11h.01" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-                              </svg>
-                            ) : (
-                              <svg viewBox="0 0 16 16" fill="none">
-                                <path d="M3.75 8.25 6.6 11.1 12.25 5.25" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                              </svg>
-                            )}
-                          </span>
-                          <span className="bot-tool-step-name">{tool.name}</span>
-                          <span className="bot-tool-step-state">
-                            {tool.status === 'running'
-                              ? t('调用中', 'Calling')
-                              : tool.status === 'error'
-                                ? t('失败', 'Failed')
-                                : t('已完成', 'Done')}
-                          </span>
-                        </span>
-                        {presentation ? (
-                          <ToolPresentationCard
-                            key={`${botKey}:${presentation.kind === 'questionnaire' ? presentation.requestId : tool.id}`}
-                            presentation={presentation}
-                            active={tool.presentationLive === true && isBusy && !archived}
-                            disabled={archived}
-                            onSubmit={
-                              presentation.kind === 'questionnaire'
-                                ? (input) => onSubmitQuestionnaire(presentation.installationId, input)
-                                : undefined
-                            }
-                          />
-                        ) : null}
-                      </span>
-                    );
-                  })}
+                  {turn.tools.map((tool) => renderToolChip(tool))}
                 </div>
               ) : null}
               {turn.role === 'user' && turn.attachments && turn.attachments.length > 0 ? (
                 <SentAttachments attachments={turn.attachments} fetcher={attachmentFetcher} />
               ) : null}
-              {turn.text ? <Markdown text={turn.text} onOpenLink={openLink} /> : null}
+              {!turn.blocks && turn.text ? <Markdown text={turn.text} onOpenLink={openLink} /> : null}
               <ErrorNotice
                 compact
                 error={

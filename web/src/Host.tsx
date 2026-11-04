@@ -111,6 +111,7 @@ import {
   parseHistoryEntries,
   resolveActiveTurnStartedAt,
   type ChatToolCallItem,
+  type ChatTurnBlock,
 } from './chatTurnModel';
 import {
   readToolPresentation,
@@ -613,14 +614,17 @@ function formatArchivedRemainingDays(archivedAt: string | null | undefined): num
 
 async function fetchBotHistoryPages(
   fetchPage: (cursor: Record<string, unknown> | null, limit: number, chunked: boolean) => Promise<HostHistoryPage | null>,
-): Promise<Array<Record<string, unknown>>> {
+): Promise<Array<Record<string, unknown>> | null> {
   const all: Array<Record<string, unknown>> = [];
   let cursor: Record<string, unknown> | null = null;
   for (;;) {
     const page = await readHistoryPage(fetchPage, cursor, 200);
-    const items = array<Record<string, unknown>>(page?.items);
+    // fetchPage 返回 null 表示本次读取已失效（scope 切换/请求作废）：丢弃已读部分页，
+    // 绝不把半截历史当成完整快照回填。
+    if (!page) return null;
+    const items = array<Record<string, unknown>>(page.items);
     if (items.length > 0) all.push(...items);
-    const next = page?.nextCursor;
+    const next = page.nextCursor;
     if (!next || typeof next !== 'object' || Array.isArray(next) || items.length === 0) break;
     cursor = next as Record<string, unknown>;
   }
@@ -631,6 +635,28 @@ function mergeHistory(previous: Array<Record<string, unknown>>, next: Array<Reco
   const items = new Map(previous.map(item => [String(item.id), item]));
   for (const item of next) items.set(String(item.id), item);
   return [...items.values()];
+}
+
+/** 同 scope+同代际的并发全量历史读取共用一个 flight；代际不符不共享（A→B→A、/clear、
+    连接代际变化都不复用旧读）。fresh() 在每页边界判废：scope 被更新 flight 顶掉或代际失效
+    时返回 null，读随之丢弃已读部分页，绝不回半截数据。 */
+function sharedHistoryRead(
+  flights: Map<string, { epoch: number; task: Promise<Array<Record<string, unknown>> | null> }>,
+  scopeKey: string,
+  epochRef: { current: number },
+  current: () => boolean,
+  read: (fresh: () => boolean) => Promise<Array<Record<string, unknown>> | null>,
+): Promise<Array<Record<string, unknown>> | null> {
+  const epoch = epochRef.current;
+  const existing = flights.get(scopeKey);
+  if (existing && existing.epoch === epoch) return existing.task;
+  const rec = { epoch, task: Promise.resolve(null) as Promise<Array<Record<string, unknown>> | null> };
+  const fresh = () => epochRef.current === epoch && current() && flights.get(scopeKey) === rec;
+  rec.task = Promise.resolve().then(() => read(fresh)).then(items => fresh() ? items : null).finally(() => {
+    if (flights.get(scopeKey) === rec) flights.delete(scopeKey);
+  });
+  flights.set(scopeKey, rec);
+  return rec.task;
 }
 
 function maxHistoryEntryId(items: Array<Record<string, unknown>>): number {
@@ -1252,6 +1278,14 @@ export function HostPage({
   // Active Bot & Chat state
   const [activeBotKey, setActiveBotKey] = useState<string | null>(null);
   const [chatHistory, setChatHistory] = useState<Array<Record<string, unknown>>>([]);
+  const chatHistoryRef = useRef(chatHistory);
+  chatHistoryRef.current = chatHistory;
+  // 同 scope+同代际并发全量历史读取的 flight 去重；代际失效后旧读不共享、结果丢弃。
+  const chatHistoryFlights = useRef(new Map<string, { epoch: number; task: Promise<Array<Record<string, unknown>> | null> }>());
+  // 历史读取代际：目标切换、/clear、连接代际变化都递增，旧代 flight 立即不被复用。
+  const chatHistoryEpoch = useRef(0);
+  // 正在全量读取历史的 scope 标识：每代换新对象（A→B→A 也是新标记），按身份清除不跨代误清。
+  const chatLoadingScope = useRef<{ key: string } | null>(null);
   // chatLive 保存累计的实时会话状态（BotLiveState），不是原始帧联合：
     // snapshot 全量替换、update 只把 changes 合并进现有快照，end 清空。
     // 字段访问直接读 BotLiveState，真实类型不含 state 包装。
@@ -1265,6 +1299,8 @@ export function HostPage({
   const [chatObservationError, setChatObservationError] = useState('');
   // 历史读取失败单独记录：观察恢复成功只清连接问题，不清掉这次历史错误，交给现有 2s 重试。
   const [chatHistoryError, setChatHistoryError] = useState('');
+  // 首屏全量历史在途标记：仅 scope 无已加载历史且加载未结束时为真，用于空态的加载提示。
+  const [chatHistoryLoading, setChatHistoryLoading] = useState(false);
   const chatLoadError = chatObservationError || chatHistoryError;
   const [chatResumeEpoch, setChatResumeEpoch] = useState(0);
   const chatSubmissionRef = useRef<{ botKey: string; requestId: string; afterEntryId: number } | undefined>(undefined);
@@ -2063,6 +2099,9 @@ export function HostPage({
   };
 
   const activeChatScope = activeBot ? scopeForBot(activeBot) : '';
+  // 恢复 pending 已带终态回执（done/unanswered）时首屏不再补乐观用户气泡，其真实轮次
+  // 由全量历史终态回读补齐；suppress 按 requestId 比对，仅本次进入 seed 的快照生效。
+  const suppressSeededPendingRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (!activeBot || screen !== 'chat' || !activeChatScope) return;
     if (currentChatScope.current === activeChatScope) {
@@ -2079,6 +2118,11 @@ export function HostPage({
     const entry = stored ? { ...stored, pending: { ...stored.pending, botKey: activeBot.key } } : undefined;
     if (entry) pendingByBot.current.set(activeChatScope, entry);
     chatSubmissionRef.current = entry ? { botKey: activeBot.key, requestId: entry.pending.requestId, afterEntryId: entry.pending.afterEntryId } : undefined;
+    suppressSeededPendingRef.current =
+      entry?.pending.requestId &&
+      (entry.receipt?.status === 'done' || entry.receipt?.status === 'unanswered')
+        ? entry.pending.requestId
+        : undefined;
     setChatPending(entry?.pending);
     setChatReceipt(entry?.receipt);
     setChatDraft(readChatDraft(activeChatScope));
@@ -2297,30 +2341,55 @@ export function HostPage({
       // 同一聊天前台恢复/重连时保留现有 live，直到新快照到达；旧消息只来自实时快照时不会被清空。
       const historyErrorText = t('历史记录暂时无法加载，正在重试…', 'History temporarily unavailable; retrying…');
 
+      // 历史读取与实时观察并行：观察快照尽早呈现最近轮次，全量历史经同 scope+代际 flight 后台补齐。
+      // token 在目标切换/代际变化时失效，被丢弃的读在最后边界之后触发一次新读补尾差，不吞增量。
+      const scopeKey = currentChatScope.current;
+      const historyEpoch = chatHistoryEpoch.current;
+      const loadingMarker = { key: scopeKey };
+      chatLoadingScope.current = loadingMarker;
+      const syncLoading = () =>
+        setChatHistoryLoading(Boolean(chatLoadingScope.current) && chatHistoryRef.current.length === 0);
+      syncLoading();
+      const loadHistory = (read: (fresh: () => boolean) => Promise<Array<Record<string, unknown>> | null>) => {
+        const start = async (): Promise<Array<Record<string, unknown>> | null> =>
+          sharedHistoryRead(chatHistoryFlights.current, scopeKey, chatHistoryEpoch,
+            () => currentChatScope.current === scopeKey && chatHistoryEpoch.current === historyEpoch, read);
+        const isCurrent = () => currentChatScope.current === scopeKey && chatHistoryEpoch.current === historyEpoch && current();
+        void (async () => {
+          try {
+            let items = await start();
+            if (items === null && isCurrent()) items = await start();
+            if (!isCurrent()) return;
+            if (items) {
+              setChatHistory(previous => mergeHistory(previous, items));
+              setChatHistoryError('');
+              const turns = parseHistoryEntries(items, clearedMap[bot.key] ?? 0);
+              const lastTurn = turns.at(-1);
+              if (lastTurn?.text) {
+                updateBotMeta(bot.key, { lastText: lastTurn.text, unread: false });
+              }
+            }
+
+          } catch {
+            if (isCurrent()) setChatHistoryError(historyErrorText);
+          } finally {
+            if (chatLoadingScope.current === loadingMarker) chatLoadingScope.current = null;
+            syncLoading();
+          }
+        })();
+      };
+
       if (bot.hostKind === 'local') {
         const snap = await ensureLocalHostRunning();
-        if (!snap || snap.phase !== 'running') return;
-        try {
-          const items = await fetchBotHistoryPages(async (cursor, limit, chunked) => {
-            if (!current()) return null;
-            const histEnv = await BotHost.call({
-              method: 'history',
-              params: { botId: bot.botId, limit, ...(chunked ? { chunked: true } : {}), ...(cursor ? { cursor } : {}) },
-            });
-            return (histEnv.result as HostHistoryPage) ?? null;
+        if (!snap || snap.phase !== 'running' || !current()) { if (chatLoadingScope.current === loadingMarker) { chatLoadingScope.current = null; syncLoading(); } return; }
+        loadHistory(fresh => fetchBotHistoryPages(async (cursor, limit, chunked) => {
+          if (!fresh()) return null;
+          const histEnv = await BotHost.call({
+            method: 'history',
+            params: { botId: bot.botId, limit, ...(chunked ? { chunked: true } : {}), ...(cursor ? { cursor } : {}) },
           });
-          if (!current()) return;
-          setChatHistory(previous => mergeHistory(previous, items));
-          const turns = parseHistoryEntries(items, clearedMap[bot.key] ?? 0);
-          const lastTurn = turns.at(-1);
-          if (lastTurn?.text) {
-            updateBotMeta(bot.key, { lastText: lastTurn.text, unread: false });
-          }
-          setChatHistoryError('');
-        } catch {
-          if (current()) setChatHistoryError(historyErrorText);
-        }
-        if (!current()) return;
+          return (histEnv.result as HostHistoryPage) ?? null;
+        }));
         try {
           const obsId = uuid();
           observeIdRef.current = obsId;
@@ -2332,31 +2401,18 @@ export function HostPage({
         }
       } else if (bot.hostKind === 'remote' && bot.remoteIdentity && remoteClientRef.current) {
         const api = remoteClientRef.current.api;
-        if (!api.transportConnected) return;
+        if (!api.transportConnected || !current()) { if (chatLoadingScope.current === loadingMarker) { chatLoadingScope.current = null; syncLoading(); } return; }
         const identity = bot.remoteIdentity;
-        try {
-          const items = await fetchBotHistoryPages(async (cursor, limit, chunked) => {
-            if (!current()) return null;
-            const page = await api.call(identity, 'history', {
-              botId: bot.botId,
-              limit,
-              ...(chunked ? { chunked: true } : {}),
-              ...(cursor ? { cursor } : {}),
-            });
-            return (page as unknown as HostHistoryPage) ?? null;
+        loadHistory(fresh => fetchBotHistoryPages(async (cursor, limit, chunked) => {
+          if (!fresh()) return null;
+          const page = await api.call(identity, 'history', {
+            botId: bot.botId,
+            limit,
+            ...(chunked ? { chunked: true } : {}),
+            ...(cursor ? { cursor } : {}),
           });
-          if (!current()) return;
-          setChatHistory(previous => mergeHistory(previous, items));
-          const turns = parseHistoryEntries(items, clearedMap[bot.key] ?? 0);
-          const lastTurn = turns.at(-1);
-          if (lastTurn?.text) {
-            updateBotMeta(bot.key, { lastText: lastTurn.text, unread: false });
-          }
-          setChatHistoryError('');
-        } catch {
-          if (current()) setChatHistoryError(historyErrorText);
-        }
-        if (!current()) return;
+          return (page as unknown as HostHistoryPage) ?? null;
+        }));
         try {
           const handle = api.observe(identity, { kind: 'primary', botId: bot.botId }, ev => {
             if (!current()) return;
@@ -2376,10 +2432,19 @@ export function HostPage({
           remoteObserveRef.current = null;
           if (current()) setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…'));
         }
+      } else if (chatLoadingScope.current === loadingMarker) {
+        // 目标既非 local 也非可观察 remote：没有历史来源，清掉刚置的加载标记不留死态。
+        chatLoadingScope.current = null;
+        syncLoading();
       }
     },
     [cancelActiveObservation, clearedMap, ensureLocalHostRunning, updateBotMeta, t],
   );
+
+  // 本机或远端传输更换后，历史读取不再复用旧连接的结果。
+  useEffect(() => {
+    chatHistoryEpoch.current += 1;
+  }, [connectionEpoch, activeBot?.remoteIdentity?.generation, remoteConnected]);
 
   useEffect(() => {
     if (screen !== 'chat' || !active || !activeBot || document.hidden) return;
@@ -2453,28 +2518,38 @@ export function HostPage({
         requestId,
       })) as unknown as HostSubmission | null;
     };
+    const scopeKey = chatPending?.scopeKey ?? currentChatScope.current;
+    // flight 内只判 scope+代际有效（不携带本 effect 的 alive/提交身份）；活过本次轮询的共享读
+    // 结果照样可用，但不带 stillOwned 的读绝不因本 effect 失效而返回半截。
     const readHistory = async (): Promise<Array<Record<string, unknown>> | null> => {
-      if (chatHostKind === 'local') {
-        return fetchBotHistoryPages(async (cursor, limit, chunked) => {
-          if (!alive) return null;
-          const env = await BotHost.call({
-            method: 'history',
-            params: { botId: chatBotId, limit, ...(chunked ? { chunked: true } : {}), ...(cursor ? { cursor } : {}) },
+      const read = (fresh: () => boolean): Promise<Array<Record<string, unknown>> | null> => {
+        if (chatHostKind === 'local') {
+          return fetchBotHistoryPages(async (cursor, limit, chunked) => {
+            if (!fresh()) return null;
+            const env = await BotHost.call({
+              method: 'history',
+              params: { botId: chatBotId, limit, ...(chunked ? { chunked: true } : {}), ...(cursor ? { cursor } : {}) },
+            });
+            return (env.result as HostHistoryPage) ?? null;
           });
-          return (env.result as HostHistoryPage) ?? null;
+        }
+        if (!remoteTarget) return Promise.resolve(null);
+        return fetchBotHistoryPages(async (cursor, limit, chunked) => {
+          if (!fresh()) return null;
+          const page = await remoteTarget.api.call(remoteTarget.identity, 'history', {
+            botId: chatBotId,
+            limit,
+            ...(chunked ? { chunked: true } : {}),
+            ...(cursor ? { cursor } : {}),
+          });
+          return (page as unknown as HostHistoryPage) ?? null;
         });
-      }
-      if (!remoteTarget) return null;
-      return fetchBotHistoryPages(async (cursor, limit, chunked) => {
-        if (!alive) return null;
-        const page = await remoteTarget.api.call(remoteTarget.identity, 'history', {
-          botId: chatBotId,
-          limit,
-          ...(chunked ? { chunked: true } : {}),
-          ...(cursor ? { cursor } : {}),
-        });
-        return (page as unknown as HostHistoryPage) ?? null;
-      });
+      };
+      if (!scopeKey) return read(() => true);
+      return sharedHistoryRead(
+        chatHistoryFlights.current, scopeKey, chatHistoryEpoch,
+        () => currentChatScope.current === scopeKey, read,
+      );
     };
 
     let alive = true;
@@ -2544,14 +2619,24 @@ export function HostPage({
     chatSubmissionRef.current = saved ? { botKey: bot.key, requestId: saved.pending.requestId, afterEntryId: saved.pending.afterEntryId } : undefined;
     setActiveBotKey(bot.key);
     if (!sameScope) {
-      // 切目标立即 fence 旧加载/观察，防旧 callback 回填新聊天。
+      // 切目标立即 fence 旧加载/观察，防旧 callback 回填新聊天；历史读取代际递进使在途旧读
+      // （A→B→A 同 scope 也算）不被复用/回填。空首屏先进入加载态，由 loadHistory 收尾清除。
       chatLoadGeneration.current += 1;
+      chatHistoryEpoch.current += 1;
       cancelActiveObservation();
       setChatHistory([]);
       setChatLive(undefined);
       setChatObservationError('');
       setChatHistoryError('');
+      chatLoadingScope.current = scopeKey ? { key: scopeKey } : null;
+      setChatHistoryLoading(Boolean(scopeKey));
     }
+    // 恢复 pending 带终态回执（done/unanswered）只 suppress 本次进入的快照。
+    suppressSeededPendingRef.current =
+      saved?.pending.requestId &&
+      (saved.receipt?.status === 'done' || saved.receipt?.status === 'unanswered')
+        ? saved.pending.requestId
+        : undefined;
     setChatPending(saved?.pending);
     setChatReceipt(saved?.receipt);
     setChatDraft(scopeKey ? readChatDraft(scopeKey) : '');
@@ -2794,6 +2879,7 @@ export function HostPage({
           return updated;
         });
         chatSubmissionRef.current = undefined;
+        chatHistoryEpoch.current += 1;
         if (chatPending) removePending(chatPending.scopeKey, chatPending.requestId);
         setChatPending(undefined);
         setChatHistory([]);
@@ -2914,14 +3000,18 @@ ${newer}` : draftSnapshot;
         }
         if (!stillOwned()) return;
         updatePending({ pending: { ...submission, phase: 'accepted', admission: (receipt as TurnAdmissionCarrier).admission ?? null }, receipt });
-        const items = await fetchBotHistoryPages(async (cursor, limit, chunked) => {
-          if (currentChatScope.current !== scopeKey || !stillOwned()) return null;
-          const env = await BotHost.call({
-            method: 'history',
-            params: { botId: bot.botId, limit, ...(chunked ? { chunked: true } : {}), ...(cursor ? { cursor } : {}) },
-          });
-          return (env.result as HostHistoryPage) ?? null;
-        }).catch(() => null);
+        const items = await sharedHistoryRead(
+          chatHistoryFlights.current, scopeKey, chatHistoryEpoch,
+          () => currentChatScope.current === scopeKey,
+          fresh => fetchBotHistoryPages(async (cursor, limit, chunked) => {
+            if (!fresh()) return null;
+            const env = await BotHost.call({
+              method: 'history',
+              params: { botId: bot.botId, limit, ...(chunked ? { chunked: true } : {}), ...(cursor ? { cursor } : {}) },
+            });
+            return (env.result as HostHistoryPage) ?? null;
+          }),
+        ).catch(() => null);
         if (currentChatScope.current === scopeKey && stillOwned() && items && items.length > 0) {
           setChatHistory(previous => mergeHistory(previous, items));
         }
@@ -3748,6 +3838,8 @@ ${newer}` : draftSnapshot;
   const recoveringChat = chatPending?.botKey === activeBot?.key && chatPending?.phase === 'recovering';
   const liveGenerationAttr = chatLive?.generation?.attribution;
   const liveGeneratingText = recoveringChat ? '' : chatLive?.generation?.text ?? '';
+  // generation.blocks 与 displayGeneratingText 同一过滤口径：协作生成/恢复中不传入，
+  // 避免协作文本经块投影漏进普通聊天（见 allChatTurns 的 liveGeneratingBlocks）。
 
   // 当前会话的按轮受理状态：优先 live turnAdmission，其次提交回执/持久化 pending 上的 admission。
   const liveTurnAdmission = chatLive?.turnAdmission ?? null;
@@ -3888,41 +3980,54 @@ ${newer}` : draftSnapshot;
     if (!wasBusy || isBotBusy || screen !== 'chat' || !active || !activeBot || document.hidden) return;
     const targetBot = activeBot;
     const scopeKey = currentChatScope.current;
-    void (async () => {
-      try {
-        if (targetBot.hostKind === 'local') {
-          const items = await fetchBotHistoryPages(async (cursor, limit, chunked) => {
-            if (currentChatScope.current !== scopeKey) return null;
-            const env = await BotHost.call({
-              method: 'history',
-              params: { botId: targetBot.botId, limit, ...(chunked ? { chunked: true } : {}), ...(cursor ? { cursor } : {}) },
-            });
-            return (env.result as HostHistoryPage) ?? null;
+    const read = (fresh: () => boolean): Promise<Array<Record<string, unknown>> | null> => {
+      if (targetBot.hostKind === 'local') {
+        return fetchBotHistoryPages(async (cursor, limit, chunked) => {
+          if (!fresh()) return null;
+          const env = await BotHost.call({
+            method: 'history',
+            params: { botId: targetBot.botId, limit, ...(chunked ? { chunked: true } : {}), ...(cursor ? { cursor } : {}) },
           });
-          if (currentChatScope.current === scopeKey && items.length > 0) {
-            setChatHistory(previous => mergeHistory(previous, items));
-          }
-        } else if (targetBot.hostKind === 'remote' && targetBot.remoteIdentity && remoteClientRef.current?.api.transportConnected) {
-          const api = remoteClientRef.current.api;
-          const identity = targetBot.remoteIdentity;
-          const items = await fetchBotHistoryPages(async (cursor, limit, chunked) => {
-            if (currentChatScope.current !== scopeKey) return null;
-            const page = await api.call(identity, 'history', {
-              botId: targetBot.botId,
-              limit,
-              ...(chunked ? { chunked: true } : {}),
-              ...(cursor ? { cursor } : {}),
-            });
-            return (page as unknown as HostHistoryPage) ?? null;
-          });
-          if (currentChatScope.current === scopeKey && items.length > 0) {
-            setChatHistory(previous => mergeHistory(previous, items));
-          }
-        }
-      } catch {
-        // Ignore background refresh error
+          return (env.result as HostHistoryPage) ?? null;
+        });
       }
-    })();
+      if (targetBot.hostKind === 'remote' && targetBot.remoteIdentity && remoteClientRef.current?.api.transportConnected) {
+        const api = remoteClientRef.current.api;
+        const identity = targetBot.remoteIdentity;
+        return fetchBotHistoryPages(async (cursor, limit, chunked) => {
+          if (!fresh()) return null;
+          const page = await api.call(identity, 'history', {
+            botId: targetBot.botId,
+            limit,
+            ...(chunked ? { chunked: true } : {}),
+            ...(cursor ? { cursor } : {}),
+          });
+          return (page as unknown as HostHistoryPage) ?? null;
+        });
+      }
+      return Promise.resolve(null);
+    };
+    const historyEpoch = chatHistoryEpoch.current;
+    const scopeStillCurrent = () => currentChatScope.current === scopeKey && chatHistoryEpoch.current === historyEpoch;
+    const go = () => sharedHistoryRead(chatHistoryFlights.current, scopeKey, chatHistoryEpoch, scopeStillCurrent, read);
+    // 共享到更早启动的读可能错过忙期收尾追加：复用他人 flight（非本 effect 发起）时再补读一次。
+    const shared = Boolean(scopeKey && chatHistoryFlights.current.get(scopeKey));
+    void (!scopeKey ? Promise.resolve(null) : go())
+      .then(items => {
+        if (items && items.length > 0 && scopeStillCurrent()) {
+          setChatHistory(previous => mergeHistory(previous, items));
+        }
+        if ((items === null || shared) && scopeStillCurrent()) {
+          void go().then(follow => {
+            if (follow && follow.length > 0 && scopeStillCurrent()) {
+              setChatHistory(previous => mergeHistory(previous, follow));
+            }
+          }).catch(() => {});
+        }
+      })
+      .catch(() => {
+        // Ignore background refresh error
+      });
   }, [isBotBusy, screen, active, activeBot]);
 
   const allChatItems = useMemo(() => {
@@ -3939,7 +4044,14 @@ ${newer}` : draftSnapshot;
       return Number.isFinite(id) ? id : 0;
     };
     const sorted = [...byId.values()].sort((a, b) => numericId(a) - numericId(b));
-    if (chatPending?.botKey === activeBot.key) {
+    // 恢复 pending 带终态回执（done/unanswered，本次进入由 openBotChat/scope 切换 seed 的
+    // requestId）：首屏不再单独补乐观用户气泡，其真实轮次由全量历史终态回读补齐；
+    // queued/placed/未确认请求仍照常占位。
+    const suppressPendingBubble =
+      Boolean(chatPending?.requestId) &&
+      suppressSeededPendingRef.current === chatPending?.requestId &&
+      (chatReceipt?.status === 'done' || chatReceipt?.status === 'unanswered');
+    if (chatPending?.botKey === activeBot.key && !suppressPendingBubble) {
       const alreadyInHistory = parseHistoryEntries(sorted, clearedAfter).some(
         turn => turn.role === 'user' && turn.entryId > chatPending.afterEntryId && turn.text === chatPending.text,
       );
@@ -3959,7 +4071,7 @@ ${newer}` : draftSnapshot;
       }
     }
     return sorted;
-  }, [chatHistory, chatLive, activeBot, clearedMap, chatPending]);
+  }, [chatHistory, chatLive, activeBot, clearedMap, chatPending, chatReceipt]);
 
   // generation.attribution 缺失但 tools 仍活跃时，用合并历史中最新执行来源判断当前是否协作工作。
   const chatLiveIsCollaborative = Boolean(
@@ -3978,6 +4090,9 @@ ${newer}` : draftSnapshot;
       isBusy: isBotBusy,
       // 协作（dm/room）生成的流式文本不进普通聊天：隐藏轮由 parser 归轮过滤。
       liveGeneratingText: displayGeneratingText,
+      // 与 displayGeneratingText 同一协作过滤口径：缺 attribution 的协作生成
+      // 块同样不渲染进普通聊天。
+      liveGeneratingBlocks: chatLiveIsCollaborative ? undefined : chatLive?.generation?.blocks,
       // 当前 Bot 为 self echo（outgoing）判定锚点；live 流式轮的 attribution 由生成帧携带。
       selfBotId: activeBot.botId,
       liveAttribution: liveGenerationAttr,
@@ -4925,6 +5040,11 @@ ${newer}` : draftSnapshot;
             }}
           >
             {visibleTurns.length === 0 && !displayGeneratingText ? (
+              chatHistoryLoading ? (
+                <div className="bot-chat-empty" role="status">
+                  <p>{t('正在加载历史记录…', 'Loading history…')}</p>
+                </div>
+              ) : (
               <div className="bot-chat-empty">
                 <button
                   type="button"
@@ -4948,6 +5068,7 @@ ${newer}` : draftSnapshot;
                     )}
                 </p>
               </div>
+              )
             ) : (
               visibleTurns.map((turn, turnIdx) => {
                 const isLastAssistantTurn =
@@ -4969,22 +5090,50 @@ ${newer}` : draftSnapshot;
                         className="bot-chat-attribution"
                       />
                     )}
-                    {turn.thinking && (
-                      <details className="bot-chat-thinking">
-                        <summary>{t('思考过程', 'Thinking')}</summary>
-                        <pre>{turn.thinking}</pre>
-                      </details>
-                    )}
-                    {turn.tools && turn.tools.length > 0 && (
-                      <TurnToolCallsSection
-                        tools={turn.tools}
-                        botKey={activeBot?.key ?? 'chat'}
-                        isBotBusy={isBotBusy}
-                        disabled={Boolean(activeBot?.archivedAt)}
-                        onSubmitQuestionnaire={submitQuestionnaire}
-                        t={t}
-                      />
-                    )}
+                    {turn.role === 'assistant' ? (
+                      turn.blocks ? (
+                        turn.blocks.map((block: ChatTurnBlock) =>
+                          block.kind === 'thinking' ? (
+                            <details key={block.id} className="bot-chat-thinking">
+                              <summary>{t('思考过程', 'Thinking')}</summary>
+                              <pre>{block.text}</pre>
+                            </details>
+                          ) : block.kind === 'tools' ? (
+                            <TurnToolCallsSection
+                              key={block.id}
+                              tools={block.tools}
+                              botKey={activeBot?.key ?? 'chat'}
+                              isBotBusy={isBotBusy}
+                              disabled={Boolean(activeBot?.archivedAt)}
+                              onSubmitQuestionnaire={submitQuestionnaire}
+                              t={t}
+                            />
+                          ) : (
+                            <Markdown key={block.id} text={block.text} />
+                          ),
+                        )
+                      ) : (
+                        <>
+                          {turn.thinking && (
+                            <details className="bot-chat-thinking">
+                              <summary>{t('思考过程', 'Thinking')}</summary>
+                              <pre>{turn.thinking}</pre>
+                            </details>
+                          )}
+                          {turn.tools && turn.tools.length > 0 && (
+                            <TurnToolCallsSection
+                              tools={turn.tools}
+                              botKey={activeBot?.key ?? 'chat'}
+                              isBotBusy={isBotBusy}
+                              disabled={Boolean(activeBot?.archivedAt)}
+                              onSubmitQuestionnaire={submitQuestionnaire}
+                              t={t}
+                            />
+                          )}
+                          {turn.text && <Markdown text={turn.text} />}
+                        </>
+                      )
+                    ) : null}
                     {turn.role === 'user' && turn.attachments && turn.attachments.length > 0 ? (
                       <SentAttachments
                         attachments={turn.attachments}
@@ -4993,7 +5142,7 @@ ${newer}` : draftSnapshot;
                           : localAttachmentFetcher}
                       />
                     ) : null}
-                    {turn.text && <Markdown text={turn.text} />}
+                    {turn.role === 'user' && turn.text && <Markdown text={turn.text} />}
                     <ErrorNotice
                       compact
                       error={turn.error === 'model_error'

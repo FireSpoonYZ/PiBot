@@ -105,6 +105,7 @@ const MESSAGE_KEYS = new Set([
   'toolCalls',
   'presentation',
   'attachments',
+  'blocks',
 ]);
 // User messages may carry uploaded image metadata only (no base64 data, no
 // paths); bounds mirror the upload contract in attachments.js.
@@ -164,6 +165,33 @@ function normalizeLiveAttachments(value) {
   return out;
 }
 const MESSAGE_TOOL_CALL_KEYS = new Set(['callId', 'name']);
+// Ordered content blocks: same safe fields as text/toolCalls, no args or thinking.
+const MAX_MESSAGE_BLOCKS = 128;
+const MAX_BLOCK_TEXT_CHARS = 65536;
+
+function normalizeLiveBlocks(value, label) {
+  if (!Array.isArray(value) || value.length > MAX_MESSAGE_BLOCKS) {
+    throw invalid(label + ' must be an array of at most 128 blocks');
+  }
+  const out = value.map((block) => {
+    if (!isPlainObject(block)) throw invalid(label + ' block must be a plain object');
+    rejectUnknownFields(block, new Set(['type', 'text', 'callId', 'name']), label + ' block');
+    if (block.type === 'text') {
+      assertText(block.text, label + ' block text');
+      if (block.text.length > MAX_BLOCK_TEXT_CHARS) {
+        throw invalid(label + ' block text exceeds the bound');
+      }
+      return { type: 'text', text: block.text };
+    }
+    if (block.type === 'toolCall') {
+      assertText(block.callId, label + ' block callId');
+      assertText(block.name, label + ' block name');
+      return { type: 'toolCall', callId: block.callId, name: block.name };
+    }
+    throw invalid(label + " block type must be 'text' or 'toolCall'");
+  });
+  return out;
+}
 const TOOL_KEYS = new Set([
   'callId',
   'name',
@@ -376,6 +404,12 @@ function normalizeLiveState(state) {
           assertText(call.name, 'message toolCall name');
         }
       }
+      // Ordered interleaved blocks are assistant-only; older Hosts omit them and
+      // clients fall back to text→toolCalls order for that message.
+      if (message.blocks !== undefined) {
+        if (message.role !== 'assistant') throw invalid('blocks are allowed only on assistant messages');
+        message.blocks = normalizeLiveBlocks(message.blocks, 'message blocks');
+      }
     }
   }
   for (const key of ['historyTruncated', 'toolsTruncated', 'busy']) {
@@ -384,9 +418,12 @@ function normalizeLiveState(state) {
   if (state.lastEntryId !== null) assertNonNegativeSafeInteger(state.lastEntryId, 'state.lastEntryId');
   if (state.generation !== null) {
     if (!isPlainObject(state.generation)) throw invalid('state.generation must be null or a plain object');
-    rejectUnknownFields(state.generation, new Set(['text', 'truncated', 'attribution']), 'generation');
+    rejectUnknownFields(state.generation, new Set(['text', 'truncated', 'attribution', 'blocks']), 'generation');
     assertText(state.generation.text, 'generation text');
     if (typeof state.generation.truncated !== 'boolean') throw invalid('generation truncated must be a boolean');
+    if (state.generation.blocks !== undefined) {
+      state.generation.blocks = normalizeLiveBlocks(state.generation.blocks, 'generation blocks');
+    }
     if (state.generation.attribution !== undefined && state.generation.attribution !== null) {
       state.generation.attribution = normalizeLiveAttribution(state.generation.attribution);
     }
