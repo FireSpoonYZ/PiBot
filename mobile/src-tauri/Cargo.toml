@@ -1,0 +1,17 @@
+[package]
+name = "e-launcher-mobile"
+version = "1.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "e_launcher_mobile"
+crate-type = ["cdylib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.4", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "=2.12.5", features = ["custom-protocol"] }

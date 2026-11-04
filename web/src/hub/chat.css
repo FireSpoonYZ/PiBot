@@ -1,0 +1,8 @@
+/* chat lane styles: loaded after web/src/styles.css via hub/lanes.css. */
+
+/* Divider above the destructive "clear history" item in the chat top menu. */
+.grok-menu-separator { height: 1px; margin: 4px 6px; background: var(--line); }
+
+/* Markdown tables fill the chat bubble; .table-scroll provides horizontal overflow for wide tables. */
+.bot-chat-bubble .table-scroll { width: 100%; }
+.bot-chat-bubble .table-scroll table { width: 100%; }

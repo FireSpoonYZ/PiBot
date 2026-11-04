@@ -1,0 +1,35 @@
+{
+  "release": "cua-driver-rs-v0.38.0",
+  "sourceCommit": "85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19",
+  "targets": {
+    "win32-x64": {
+      "url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.38.0/cua-driver-rs-0.38.0-windows-x86_64-binary.zip",
+      "archiveName": "cua-driver-rs-0.38.0-windows-x86_64-binary.zip",
+      "sha256": "5edaa74d0afa1b55a9668dbc4f32736507bd2bd4d75b18ca1dc8881bb12402b5",
+      "archiveFormat": "zip",
+      "driverName": "cua-driver.exe",
+      "entries": [
+        "cua-driver.exe",
+        "cua-cursor-theme.exe",
+        "cua-driver-uia.exe",
+        "cua_driver_sdk.dll",
+        "cua_driver_node_runtime.node",
+        "cua_driver_abi.h"
+      ]
+    },
+    "linux-x64": {
+      "url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.38.0/cua-driver-rs-0.38.0-linux-x86_64-binary.tar.gz",
+      "archiveName": "cua-driver-rs-0.38.0-linux-x86_64-binary.tar.gz",
+      "sha256": "31ab9709dd91ce73677e49b9f3e75c6f0d3e4d9625c286c9e58262bfbea698dd",
+      "archiveFormat": "tar.gz",
+      "driverName": "cua-driver",
+      "entries": [
+        "cua-driver",
+        "cua-cursor-theme",
+        "libcua_driver_sdk.so",
+        "cua_driver_node_runtime.node",
+        "cua_driver_abi.h"
+      ]
+    }
+  }
+}

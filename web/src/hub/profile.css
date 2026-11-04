@@ -1,0 +1,60 @@
+/* profile lane styles: loaded after web/src/styles.css via hub/lanes.css. */
+
+/* bot-profile: hero inline name/subtitle editing replaces the old display-only title. */
+.grok-profile-title-input,
+.grok-profile-subtitle-input {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  outline: none;
+  text-align: center;
+  color: var(--text);
+}
+.grok-profile-title-input {
+  font-size: 1.42rem;
+  font-weight: 700;
+}
+.grok-profile-title-input::placeholder,
+.grok-profile-subtitle-input::placeholder {
+  color: color-mix(in srgb, var(--muted) 55%, transparent);
+  font-weight: 400;
+}
+.grok-profile-subtitle-input {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+.grok-profile-subtitle-input::placeholder {
+  font-size: 0.85rem;
+}
+
+/* bot-profile: inline cwd error/hints inside the card. */
+.profile-inline-error {
+  color: var(--danger);
+  white-space: normal;
+}
+.profile-card-hint {
+  margin: 0 18px 12px;
+}
+.profile-lifecycle-label { display: flex; flex-direction: column; gap: 2px; white-space: normal; }
+.profile-lifecycle-note { font-size: .78rem; font-weight: 400; color: var(--muted); }
+
+/* bot-profile: topbar spacer keeps title centered when back is hidden (forced primary create). */
+.bot-profile-topbar-spacer {
+  width: 40px;
+  flex-shrink: 0;
+}
+
+/* bot-profile: required-primary notice card on the create screen. */
+.bot-profile-primary-notice {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.bot-profile-primary-notice strong {
+  display: block;
+}
+.bot-profile-primary-notice span {
+  font-size: 0.85rem;
+  opacity: 0.82;
+}

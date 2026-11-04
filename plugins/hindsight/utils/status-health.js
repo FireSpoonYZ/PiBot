@@ -1,0 +1,184 @@
+import { bankConfigOverrideSummaryLines, bankSettingsTargetDisplay, } from "../banks/bank-settings-presenter.js";
+import { resolveBankExistence } from "../banks/bank-operations.js";
+import { redactError } from "./sanitize.js";
+const STATUS_HEALTH_TIMEOUT_MS = 1_500;
+async function withStatusTimeout(promise, label) {
+    let timer;
+    try {
+        return await Promise.race([
+            promise,
+            new Promise((_resolve, reject) => {
+                timer = setTimeout(() => reject(new Error(`${label} timed out after ${STATUS_HEALTH_TIMEOUT_MS}ms`)), STATUS_HEALTH_TIMEOUT_MS);
+            }),
+        ]);
+    }
+    finally {
+        if (timer)
+            clearTimeout(timer);
+    }
+}
+function isRecord(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function numberField(value, key) {
+    return isRecord(value) && typeof value[key] === "number" ? value[key] : undefined;
+}
+function dateField(value, key) {
+    return isRecord(value) && typeof value[key] === "string" ? value[key] : undefined;
+}
+function bankRoutes(config, projectBankId) {
+    return [
+        ...(config.banks.project.enabled
+            ? [{ label: "Project bank", location: "Project", bankId: projectBankId }]
+            : []),
+        ...(config.banks.user.enabled && config.banks.user.bankId
+            ? [
+                {
+                    label: "User bank",
+                    location: "User",
+                    bankId: config.banks.user.bankId,
+                },
+            ]
+            : []),
+    ];
+}
+function textField(value, key) {
+    return isRecord(value) && typeof value[key] === "string" ? value[key] : undefined;
+}
+function nestedRecord(value, key) {
+    return isRecord(value) && isRecord(value[key]) ? value[key] : undefined;
+}
+function missionSummary(value) {
+    if (!value)
+        return undefined;
+    return value.length > 90 ? `${value.slice(0, 87)}...` : value;
+}
+function formatMissionConfig(configResponse) {
+    const config = nestedRecord(configResponse, "config");
+    const overrides = nestedRecord(configResponse, "overrides");
+    const retain = textField(overrides, "retain_custom_instructions") ??
+        textField(overrides, "retain_mission") ??
+        textField(config, "retain_custom_instructions") ??
+        textField(config, "retain_mission");
+    const reflect = textField(overrides, "reflect_mission") ?? textField(config, "reflect_mission");
+    const observations = textField(overrides, "observations_mission") ?? textField(config, "observations_mission");
+    const parts = [
+        retain ? `retain ${missionSummary(retain)}` : undefined,
+        reflect ? `reflect ${missionSummary(reflect)}` : undefined,
+        observations ? `observations ${missionSummary(observations)}` : undefined,
+    ].filter(Boolean);
+    return parts.length ? parts.join(" · ") : undefined;
+}
+function formatStats(stats) {
+    const memories = numberField(stats, "total_nodes");
+    const documents = numberField(stats, "total_documents");
+    const observations = numberField(stats, "total_observations");
+    const facts = numberField(stats, "fact_count");
+    const pending = numberField(stats, "pending_consolidation");
+    const failed = numberField(stats, "failed_consolidation");
+    const last = dateField(stats, "last_consolidated_at");
+    const lastDocument = dateField(stats, "last_document_at");
+    const parts = [
+        memories !== undefined ? `memories ${memories}` : undefined,
+        documents !== undefined ? `docs ${documents}` : undefined,
+        observations !== undefined ? `observations ${observations}` : undefined,
+        facts !== undefined ? `facts ${facts}` : undefined,
+        pending !== undefined ? `pending ${pending}` : undefined,
+        failed !== undefined ? `failed ${failed}` : undefined,
+        last ? `last consolidated ${last}` : undefined,
+        lastDocument ? `last document ${lastDocument}` : undefined,
+    ].filter(Boolean);
+    return parts.length ? parts.join(" · ") : undefined;
+}
+async function bankFact(client, route) {
+    const target = bankSettingsTargetDisplay({ location: route.location, bankId: route.bankId });
+    try {
+        // List-banks exact id, then profile fallback. Do not treat profile 410 as unreachable
+        // and do not use GET /config as existence (Hindsight #4127).
+        const exists = await withStatusTimeout(resolveBankExistence(client, route.bankId), `${route.label} existence`);
+        if (exists === false) {
+            return [[route.label, `unreachable · not found · ${target.reviewLine}`]];
+        }
+        const facts = [
+            [route.label, `reachable · ${route.bankId} · ${target.reviewLine}`],
+        ];
+        if (client.getBankConfig) {
+            try {
+                const config = await withStatusTimeout(client.getBankConfig(route.bankId), `${route.label} config`);
+                const summary = formatMissionConfig(config);
+                const overrideSummary = bankConfigOverrideSummaryLines(config).join(" · ");
+                facts.push([`${route.label} config`, overrideSummary]);
+                if (summary)
+                    facts.push([`${route.label} missions`, `db · ${summary}`]);
+            }
+            catch (error) {
+                facts.push([`${route.label} missions`, `unavailable · ${redactError(error)}`]);
+            }
+        }
+        if (client.getBankStats) {
+            try {
+                const stats = await withStatusTimeout(client.getBankStats(route.bankId), `${route.label} stats`);
+                const summary = formatStats(stats);
+                if (summary)
+                    facts.push([`${route.label} stats`, summary]);
+                const failed = numberField(stats, "failed_consolidation");
+                if (failed !== undefined && failed > 0)
+                    facts.push([
+                        `${route.label} consolidation`,
+                        `failed ${failed} · run hindsight_recover_consolidation`,
+                    ]);
+            }
+            catch (error) {
+                facts.push([`${route.label} stats`, `unavailable · ${redactError(error)}`]);
+            }
+        }
+        return facts;
+    }
+    catch (error) {
+        return [[route.label, `unreachable · ${redactError(error)}`]];
+    }
+}
+async function serverVersionFact(client) {
+    if (!client.getVersion)
+        return undefined;
+    try {
+        const version = await withStatusTimeout(client.getVersion(), "Hindsight version");
+        const apiVersion = textField(version, "api_version");
+        if (!apiVersion)
+            return undefined;
+        const features = nestedRecord(version, "features");
+        const enabled = features
+            ? Object.keys(features)
+                .filter((key) => features[key] === true)
+                .sort()
+            : [];
+        return [
+            "Server version",
+            enabled.length ? `${apiVersion} · features: ${enabled.join(", ")}` : apiVersion,
+        ];
+    }
+    catch {
+        // Version endpoint is optional enrichment; older servers lack /version.
+        return undefined;
+    }
+}
+export async function collectStatusHealthFacts(args) {
+    const facts = [];
+    try {
+        if (args.client.health)
+            await withStatusTimeout(args.client.health(), "Hindsight health");
+        facts.push(["Server", "reachable"]);
+        const versionFact = await serverVersionFact(args.client);
+        if (versionFact)
+            facts.push(versionFact);
+    }
+    catch (error) {
+        facts.push(["Server", `unreachable · ${redactError(error)}`]);
+    }
+    const routes = bankRoutes(args.config, args.projectBankId);
+    if (!routes.length)
+        return [...facts, ["Banks", "none configured"]];
+    for (const route of routes)
+        facts.push(...(await bankFact(args.client, route)));
+    return facts;
+}

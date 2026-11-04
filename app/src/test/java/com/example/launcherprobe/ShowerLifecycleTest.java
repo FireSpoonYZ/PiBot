@@ -49,12 +49,12 @@ public class ShowerLifecycleTest {
         serviceField.setAccessible(true);
         serviceField.set(managerField.get(tools), service);
 
-        JSONObject created = tools.execute("chat", new JSONObject().put("action", "create"));
+        JSONObject created = tools.executeOwner("chat", new JSONObject().put("action", "create"));
         assertArrayEquals(new int[]{3840, 1648, 320, 500}, requested);
         assertEquals(3840, created.getInt("width"));
         assertEquals(1648, created.getInt("height"));
         assertEquals(320, created.getInt("dpi"));
-        JSONObject tapped = tools.execute("chat", new JSONObject().put("action", "tap")
+        JSONObject tapped = tools.executeOwner("chat", new JSONObject().put("action", "tap")
                 .put("x", 3839).put("y", 1647));
         assertEquals(3839, tapped.getInt("x"));
         assertEquals(1647, tapped.getInt("y"));
@@ -91,33 +91,33 @@ public class ShowerLifecycleTest {
         serviceField.set(manager, service);
 
         JSONObject create = new JSONObject().put("action", "create");
-        assertThrows(IllegalArgumentException.class, () -> tools.execute(null, create));
-        int a = tools.execute("chat-a", create).getInt("displayId");
-        int b = tools.execute("chat-b", create).getInt("displayId");
+        assertThrows(IllegalArgumentException.class, () -> tools.executeOwner(null, create));
+        int a = tools.executeOwner("chat-a", create).getInt("displayId");
+        int b = tools.executeOwner("chat-b", create).getInt("displayId");
         assertNotEquals(a, b);
         assertEquals(Set.of(a, b), active);
-        assertTrue(tools.execute("chat-a", create).getBoolean("reused"));
-        assertEquals(300_000, tools.execute("chat-b", create).getInt("idleTimeoutMs"));
+        assertTrue(tools.executeOwner("chat-a", create).getBoolean("reused"));
+        assertEquals(300_000, tools.executeOwner("chat-b", create).getInt("idleTimeoutMs"));
 
         // Model-supplied IDs cannot redirect release to another conversation.
-        tools.execute("chat-a", new JSONObject().put("action", "release")
+        tools.executeOwner("chat-a", new JSONObject().put("action", "release")
                 .put("conversationId", "chat-b").put("displayId", b));
         assertEquals(Set.of(b), active);
         assertSame("Releasing one screen must not stop the shared service", service, serviceField.get(manager));
         JSONObject key = new JSONObject().put("action", "key").put("key", "BACK");
-        assertEquals(b, tools.execute("chat-b", key).getInt("displayId"));
+        assertEquals(b, tools.executeOwner("chat-b", key).getInt("displayId"));
 
-        a = tools.execute("chat-a", create).getInt("displayId");
+        a = tools.executeOwner("chat-a", create).getInt("displayId");
         active.remove(a); // Server reclaimed this chat's idle display while another chat stayed active.
-        assertThrows(IllegalStateException.class, () -> tools.execute("chat-a", key));
-        assertEquals(b, tools.execute("chat-b", key).getInt("displayId"));
-        JSONObject recreated = tools.execute("chat-a", create);
+        assertThrows(IllegalStateException.class, () -> tools.executeOwner("chat-a", key));
+        assertEquals(b, tools.executeOwner("chat-b", key).getInt("displayId"));
+        JSONObject recreated = tools.executeOwner("chat-a", create);
         assertFalse(recreated.getBoolean("reused"));
         assertNotEquals(a, recreated.getInt("displayId"));
 
         active.remove(recreated.getInt("displayId"));
         assertFalse("create must also recover expiry without a preceding failed input",
-                tools.execute("chat-a", create).getBoolean("reused"));
+                tools.executeOwner("chat-a", create).getBoolean("reused"));
         tools.forgetConversation("chat-a");
         assertEquals(Set.of(b), active);
         tools.forgetConversation("chat-b");

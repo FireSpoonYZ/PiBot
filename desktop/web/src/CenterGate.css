@@ -1,0 +1,156 @@
+/* CenterGate 迎宾卡片样式 — 仅在 .desktop-shell.gate-shell 作用域内生效。 */
+
+.desktop-shell.gate-shell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  padding: 24px;
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+.gate-card {
+  width: 100%;
+  max-width: 440px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 32px 28px;
+  border-radius: 24px;
+  background: var(--surface-elevated, var(--surface));
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-md, 0 8px 24px rgb(0 0 0 / 0.08));
+}
+
+.gate-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+}
+
+.gate-hero h1 { margin: 8px 0 0; font-size: 20px; }
+
+.gate-subtitle { margin: 0; color: var(--muted); font-size: 13.5px; }
+
+.gate-client-id {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.gate-client-id code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.gate-client-label { color: var(--muted); flex-shrink: 0; }
+.gate-copied { color: var(--accent); flex-shrink: 0; }
+
+.gate-form { display: flex; flex-direction: column; gap: 12px; }
+
+.gate-field { display: flex; flex-direction: column; gap: 6px; }
+
+.gate-field > span {
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gate-saved-badge {
+  font-style: normal;
+  font-weight: 500;
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--ok-soft, var(--accent-soft, var(--surface)));
+  color: var(--ok, var(--accent));
+}
+
+.gate-field input, .gate-advanced textarea { border-radius: 12px; padding: 10px 12px; }
+
+.gate-advanced {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+
+.gate-advanced summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.gate-advanced textarea {
+  margin-top: 10px;
+  width: 100%;
+  font-family: var(--mono, ui-monospace, Consolas, monospace);
+  font-size: 12px;
+}
+
+.gate-submit { width: 100%; min-height: 44px; border-radius: 999px; font-weight: 600; }
+
+.gate-manage {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 40px;
+  border-radius: 999px;
+}
+
+.gate-advanced > .gate-form { margin-top: 12px; }
+
+.gate-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.gate-steps {
+  list-style: none;
+  margin: 0;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.gate-step { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.gate-step.active { color: var(--text, inherit); font-weight: 600; }
+.gate-step.done { color: var(--ok, var(--accent)); }
+.gate-step.error { color: var(--danger); font-weight: 600; }
+
+.gate-step-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--line);
+}
+.gate-step.active .gate-step-dot { background: var(--accent); animation: tool-pulse 1.2s ease-in-out infinite; }
+.gate-step.done .gate-step-dot { background: var(--ok, var(--accent)); }
+.gate-step.error .gate-step-dot { background: var(--danger); }

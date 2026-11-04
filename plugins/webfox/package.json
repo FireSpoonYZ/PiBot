@@ -1,0 +1,11 @@
+{
+  "name": "@e-launcher/webfox",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "dependencies": {
+    "typebox": "1.3.27",
+    "webfox": "4.8.0"
+  }
+}

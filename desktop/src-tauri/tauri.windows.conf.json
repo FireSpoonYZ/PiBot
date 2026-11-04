@@ -1,0 +1,18 @@
+{
+  "bundle": {
+    "windows": {
+      "wix": {
+        "language": "zh-CN"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "../build/icons/icon.ico",
+        "uninstallerIcon": "../build/icons/icon.ico",
+        "installerHooks": "../windows/installer-hooks.nsh"
+      }
+    },
+    "resources": {
+      "../build/icons/shell-icon-*.ico": "icons/"
+    }
+  }
+}

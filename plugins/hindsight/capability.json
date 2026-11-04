@@ -1,0 +1,403 @@
+{
+  "manifestVersion": 1,
+  "id": "e-launcher.hindsight",
+  "version": "1.1.1",
+  "kind": "plugin",
+  "displayName": "Hindsight",
+  "hostApi": "^1.0.0",
+  "durableApi": "1.3.0",
+  "components": {
+    "host": {
+      "entry": "entry.js"
+    }
+  },
+  "platforms": [
+    "windows",
+    "linux",
+    "android"
+  ],
+  "configSchema": "config.schema.json",
+  "uiSchema": "ui.schema.json",
+  "stateVersion": 1,
+  "contributions": [
+    "tools",
+    "context",
+    "background",
+    "actions"
+  ],
+  "actions": [
+    {
+      "id": "memoryStatus",
+      "title": "Memory status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "primary",
+                  "shared",
+                  "scope"
+                ]
+              },
+              "scopeId": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "accepted",
+              "completed",
+              "failed"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "cursor": {
+            "type": "object",
+            "properties": {
+              "bankId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "state": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "accepted",
+                      "completed",
+                      "failed"
+                    ]
+                  }
+                ]
+              },
+              "afterOperationId": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "bankId",
+              "state",
+              "afterOperationId"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "recallMemory",
+      "title": "Recall memory",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "primary",
+                  "shared",
+                  "scope"
+                ]
+              },
+              "scopeId": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1
+          },
+          "maxTokens": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "reflectMemory",
+      "title": "Reflect on memory",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "primary",
+                  "shared",
+                  "scope"
+                ]
+              },
+              "scopeId": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1
+          },
+          "maxTokens": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "retainMemory",
+      "title": "Retain memory",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "primary",
+                  "shared",
+                  "scope"
+                ]
+              },
+              "scopeId": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          },
+          "requestId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "requestId",
+          "text"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "getMemory",
+      "title": "Get memory",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "primary",
+                  "shared",
+                  "scope"
+                ]
+              },
+              "scopeId": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          },
+          "memoryId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "memoryId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "getMemorySource",
+      "title": "Get memory source",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "primary",
+                  "shared",
+                  "scope"
+                ]
+              },
+              "scopeId": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          },
+          "documentId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "documentId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "correctMemory",
+      "title": "Correct memory",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "primary",
+                  "shared",
+                  "scope"
+                ]
+              },
+              "scopeId": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          },
+          "requestId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "memoryId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "state": {
+            "enum": [
+              "valid",
+              "invalidated"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "requestId",
+          "memoryId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "retryMemory",
+      "title": "Retry memory",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "primary",
+                  "shared",
+                  "scope"
+                ]
+              },
+              "scopeId": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          },
+          "operationId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "operationId"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ]
+}

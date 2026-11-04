@@ -1,0 +1,19 @@
+{
+  "identifier": "main",
+  "description": "Explicit local capability for the main desktop window only.",
+  "local": true,
+  "windows": ["main"],
+  "webviews": ["main"],
+  "platforms": ["windows", "linux"],
+  "permissions": [
+    "allow-desktop-request",
+  "allow-desktop-open-center",
+    "allow-desktop-observe",
+    "allow-desktop-unobserve",
+    "allow-desktop-pick-file",
+    "allow-desktop-host-status",
+    "allow-desktop-host-pair",
+    "allow-desktop-host-adopt",
+    "allow-desktop-host-control"
+  ]
+}

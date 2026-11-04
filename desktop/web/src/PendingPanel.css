@@ -1,0 +1,188 @@
+/* PendingPanel 桌面专属样式：全部限定在 .desktop-shell 作用域，
+ * 不影响 Android/移动端的 .grok-pending-mobile-container 共享结构。
+ * 颜色变量同时兼容旧 token（--accent）与新 Warm Paper token（--brand）。 */
+
+.desktop-shell .pending-panel {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.desktop-shell .pending-panel-head {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.desktop-shell .pending-panel-head h3 { margin: 0; }
+
+/* 状态过滤胶囊栏（仅桌面壳；移动容器见文件底部例外规则） */
+.desktop-shell .pending-filter-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.desktop-shell .pending-filter-tabs button {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-height: 32px;
+  padding: 5px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-elevated, var(--bg));
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.desktop-shell .pending-filter-tabs button:hover {
+  border-color: var(--accent, var(--line));
+  color: var(--text);
+}
+.desktop-shell .pending-filter-tabs button.active {
+  background: var(--brand, var(--accent));
+  border-color: var(--brand, var(--accent));
+  color: #fff;
+}
+
+/* 处理说明：默认折叠，不占据首屏。 */
+.desktop-shell .pending-howto {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.desktop-shell .pending-howto > summary { cursor: pointer; font-weight: 600; }
+.desktop-shell .pending-hint {
+  margin: 6px 0 0;
+  line-height: 1.55;
+}
+
+/* 桌面壳内用胶囊取代下拉；select 保留给移动容器（见底部例外规则）。 */
+.desktop-shell .pending-filter-select { display: none; }
+
+.desktop-shell .pending-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.desktop-shell .pending-panel-body h3 {
+  margin: 6px 0 0;
+  font-size: 14px;
+}
+.desktop-shell .pending-panel-body h3:first-of-type { margin-top: 0; }
+
+/* 对账卡片：沿用 entity-row/entity-main 基类，桌面壳内升级为圆角卡片。 */
+.desktop-shell .pending-card {
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface-elevated, var(--surface));
+  padding: 12px 14px 10px;
+}
+.desktop-shell .pending-card:hover { background: var(--surface-elevated, var(--surface)); }
+/* 冻结意图（创建/变更）用虚线边与消息卡片区分。 */
+.desktop-shell .pending-intent { border-style: dashed; }
+
+.desktop-shell .pending-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* 状态胶囊：沿用 .status 点状基类，按状态着色。 */
+.desktop-shell .pending-card .status {
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-weight: 600;
+}
+.desktop-shell .pending-state-pending { color: var(--warn); }
+.desktop-shell .pending-state-pending::before { background: var(--warn); }
+.desktop-shell .pending-state-sending { color: var(--brand, var(--accent)); }
+.desktop-shell .pending-state-sending::before { background: var(--brand, var(--accent)); }
+.desktop-shell .pending-state-unconfirmed { color: var(--warn); }
+.desktop-shell .pending-state-unconfirmed::before { background: var(--warn); }
+.desktop-shell .pending-state-accepted { color: var(--ok); }
+.desktop-shell .pending-state-accepted::before { background: var(--ok); }
+.desktop-shell .pending-state-rejected { color: var(--danger); }
+.desktop-shell .pending-state-rejected::before { background: var(--danger); }
+.desktop-shell .pending-outcome-unconfirmed { color: var(--warn); }
+.desktop-shell .pending-outcome-unconfirmed::before { background: var(--warn); }
+.desktop-shell .pending-outcome-responded { color: var(--ok); }
+.desktop-shell .pending-outcome-responded::before { background: var(--ok); }
+.desktop-shell .pending-outcome-not-sent { color: var(--muted); }
+.desktop-shell .pending-outcome-not-sent::before { background: var(--muted); }
+
+/* 消息正文预览：最多三行，避免长文本撑爆卡片。 */
+.desktop-shell .pending-text {
+  margin: 6px 0 0;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* 技术详情：业务 ID / JSON 默认折叠。 */
+.desktop-shell .pending-tech { margin-top: 8px; }
+.desktop-shell .pending-tech > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.desktop-shell .pending-tech[open] > summary { color: var(--text); }
+.desktop-shell .pending-tech-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+.desktop-shell .pending-mono { font-family: var(--mono, ui-monospace, monospace); }
+.desktop-shell .pending-raw > summary { cursor: pointer; color: var(--muted); }
+.desktop-shell .pending-raw[open] > summary { color: var(--text); }
+
+/* 卡片底部操作条：胶囊按钮，发送为主操作。 */
+.desktop-shell .pending-actions {
+  margin-top: 10px;
+  padding: 8px 0 0;
+  background: transparent;
+  border-top: 1px solid var(--line);
+}
+.desktop-shell .pending-actions button {
+  min-height: 32px;
+  padding: 5px 14px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.desktop-shell .pending-actions .pending-action-primary {
+  background: var(--brand, var(--accent));
+  border-color: var(--brand, var(--accent));
+  color: #fff;
+}
+.desktop-shell .pending-actions .pending-action-primary:hover:not(:disabled) {
+  background: var(--accent-strong, var(--accent));
+}
+
+/* ————— 移动容器最小兼容例外 —————
+ * Host.tsx 的 pending 页挂在 .grok-pending-mobile-container 下：隐藏桌面胶囊筛选，
+ * 面板内的 <select>（未加桌面类）成为该容器唯一筛选控件，避免双控件重复。
+ * 仅作用于本面板 own 的类，不动共享组件。 */
+.grok-pending-mobile-container .pending-filter-tabs { display: none; }

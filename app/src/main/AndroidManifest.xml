@@ -1,22 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
-    <!-- Granted through Shizuku or ADB; every repair verifies the resulting state. -->
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Requested at first dictation; used by the system recognizer and remote transcription. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.VIBRATE" />
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
 
     <queries>
@@ -40,94 +37,53 @@
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="${applicationId}.files"
-            android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
-        </provider>
-        <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"
             android:multiprocess="false"
             android:enabled="true"
             android:exported="true"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
-        <receiver android:name=".ScheduledTaskReceiver" android:exported="false">
+        <!-- M18：只在 :tauri_ui 提前初始化框架 lifecycle（ProcessLifecycleInitializer），让 Wry 的
+             ON_CREATE 能通知 Rust 创建 UI；不拉起 Host/FGS/Node，默认进程 provider 不动。 -->
+        <provider
+            android:name=".TauriInitializationProvider"
+            android:authorities="${applicationId}.tauri-startup"
+            android:exported="false"
+            android:process=":tauri_ui">
+            <meta-data
+                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+                android:value="androidx.startup" />
+        </provider>
+        <receiver android:name=".BotHostScheduleReceiver" android:exported="false">
             <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
                 <action android:name="android.intent.action.TIME_SET" />
                 <action android:name="android.intent.action.TIMEZONE_CHANGED" />
                 <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
             </intent-filter>
         </receiver>
         <service
-            android:name=".ChatExecutionService"
+            android:name=".BotHostService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
-        <service
-            android:name=".LauncherVoiceInteractionService"
-            android:exported="true"
-            android:label="E Launcher"
-            android:permission="android.permission.BIND_VOICE_INTERACTION">
-            <intent-filter>
-                <action android:name="android.service.voice.VoiceInteractionService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.voice_interaction"
-                android:resource="@xml/voice_interaction_service" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="On-device AI Host and remote link accompanying the user-started client" />
         </service>
         <service
-            android:name=".LauncherVoiceSessionService"
-            android:exported="true"
-            android:permission="android.permission.BIND_VOICE_INTERACTION" />
-        <service
-            android:name=".LauncherRecognitionService"
-            android:exported="true"
-            android:label="E Launcher">
-            <intent-filter>
-                <action android:name="android.speech.RecognitionService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.speech"
-                android:resource="@xml/recognition_service" />
+            android:name=".BotClientService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-started AI client and its background connection and task notifications" />
         </service>
+        <!-- M18 UI 桥：默认进程、同 UID 私有 Binder；绑定本身不启动 Host/模型。 -->
         <service
-            android:name=".WakeWordService"
-            android:exported="false"
-            android:foregroundServiceType="microphone" />
-        <receiver android:name=".TaskWidgetProvider" android:exported="false">
-            <intent-filter>
-                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-            </intent-filter>
-            <meta-data android:name="android.appwidget.provider" android:resource="@xml/task_widget_info" />
-        </receiver>
-        <activity android:name=".ShareReceiverActivity" android:exported="true"
-            android:label="导入到 E Launcher">
-            <intent-filter>
-                <action android:name="android.intent.action.SEND" />
-                <action android:name="android.intent.action.SEND_MULTIPLE" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="*/*" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.PROCESS_TEXT" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="text/plain" />
-            </intent-filter>
-        </activity>
-        <activity android:name=".TaskDetailActivity" android:exported="false" />
-        <activity
-            android:name=".PiSettingsActivity"
-            android:exported="false"
-            android:windowSoftInputMode="adjustResize" />
-        <activity
-            android:name=".VoiceSessionActivity"
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
-            android:exported="false"
-            android:launchMode="singleTop"
-            android:theme="@style/VoiceGlassTheme" />
+            android:name=".BotHostUiBridgeService"
+            android:exported="false" />
+        <!-- Bot 屏幕：默认进程、同 UID 私有 Binder；只观看/接管已有 Shower 虚拟屏，不创建屏幕或启动 Host。 -->
+        <service
+            android:name=".BotScreenService"
+            android:exported="false" />
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density|fontScale"
@@ -140,5 +96,25 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- 拍照输出：:tauri_ui 私有 cache 的 FileProvider，仅本次相机 Intent 按包名授权读写。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.imagepicker"
+            android:exported="false"
+            android:grantUriPermissions="true"
+            android:process=":tauri_ui">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/image_picker_paths" />
+        </provider>
+        <!-- M18 Tauri 界面：独立进程，SDK 退出只影响本进程；仅由 MainActivity/通知入口内部启动。 -->
+        <activity
+            android:name=".TauriMainActivity"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density|fontScale"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":tauri_ui"
+            android:theme="@style/WebAppTheme"
+            android:windowSoftInputMode="adjustResize" />
     </application>
 </manifest>

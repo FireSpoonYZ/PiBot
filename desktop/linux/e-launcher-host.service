@@ -1,0 +1,14 @@
+[Unit]
+Description=e-launcher Host (user)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/e-launcher-host run
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=default.target

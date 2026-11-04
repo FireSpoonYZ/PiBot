@@ -7,12 +7,4 @@
         <item name="android:navigationBarColor">@android:color/black</item>
         <item name="android:windowSoftInputMode">adjustResize</item>
     </style>
-    <style name="VoiceGlassTheme" parent="android:style/Theme.Material.NoActionBar">
-        <item name="android:windowIsTranslucent">true</item>
-        <item name="android:windowBackground">#55131B2A</item>
-        <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar">false</item>
-        <item name="android:backgroundDimEnabled">false</item>
-        <item name="android:windowNoTitle">true</item>
-    </style>
 </resources>

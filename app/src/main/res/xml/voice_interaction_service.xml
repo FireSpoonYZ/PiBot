@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- Makes the app selectable as the default digital assistant; see LauncherVoiceInteractionService. -->
-<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:recognitionService="com.example.launcherprobe.LauncherRecognitionService"
-    android:sessionService="com.example.launcherprobe.LauncherVoiceSessionService"
-    android:supportsAssist="true"
-    android:supportsLaunchVoiceAssistFromKeyguard="true" />

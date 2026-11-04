@@ -1,0 +1,276 @@
+/* 桌面端 Bot 能力面板（Lane 6）—— 仅在 .desktop-shell / .desktop-dialog 作用域内生效，
+   不影响 Android 端 .grok-model-sheet 作用域下的 .bot-cap-* 既有样式。
+   卡片、继承/覆盖行、拨动开关对齐 Warm Paper & Grok 视觉语言；
+   颜色 token 缺失时回退到中性桌面色，保证在任意主题变量状态下可用。 */
+
+.desktop-shell .bot-cap,
+.desktop-dialog .bot-cap {
+  display: grid;
+  gap: 12px;
+  font-size: 14.5px;
+}
+
+.desktop-shell .bot-cap p,
+.desktop-dialog .bot-cap p { margin: 0; }
+.desktop-shell .bot-cap .metadata,
+.desktop-dialog .bot-cap .metadata { font-size: .8rem; line-height: 1.45; color: var(--muted); overflow-wrap: anywhere; }
+.desktop-shell .bot-cap button:disabled,
+.desktop-dialog .bot-cap button:disabled { opacity: .45; }
+
+/* ————— 运行态 / 诊断 ————— */
+.desktop-shell .bot-cap-runtime,
+.desktop-dialog .bot-cap-runtime {
+  display: grid;
+  gap: 5px;
+  padding: 12px 14px;
+  border-radius: 18px;
+  background: var(--bg, #faf9f6);
+  border: 1px solid color-mix(in srgb, var(--line, #e5e5df) 75%, transparent);
+}
+.desktop-shell .bot-cap .bot-cap-runtime-main,
+.desktop-dialog .bot-cap .bot-cap-runtime-main {
+  display: flex; align-items: center; gap: 8px;
+  font-size: .9rem; font-weight: 600; color: var(--text);
+}
+.desktop-shell .bot-cap-dot,
+.desktop-dialog .bot-cap-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--muted); }
+.desktop-shell .bot-cap-dot.is-online,
+.desktop-dialog .bot-cap-dot.is-online { background: var(--ok, #16a34a); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok, #16a34a) 16%, transparent); }
+.desktop-shell .bot-cap-dot.is-offline,
+.desktop-dialog .bot-cap-dot.is-offline { background: var(--muted); }
+
+.desktop-shell .bot-cap-diag-toggle,
+.desktop-dialog .bot-cap-diag-toggle {
+  justify-self: start;
+  display: inline-flex; align-items: center; gap: 5px;
+  min-height: 26px; padding: 2px 10px;
+  border-radius: 999px; border: 1px solid color-mix(in srgb, var(--line, #e5e5df) 80%, transparent);
+  background: var(--surface, #efeee9); color: var(--muted); font-size: .76rem; font-weight: 600;
+}
+.desktop-shell .bot-cap-diag-toggle:hover,
+.desktop-dialog .bot-cap-diag-toggle:hover { color: var(--text); }
+.desktop-shell .bot-cap-diag-chevron,
+.desktop-dialog .bot-cap-diag-chevron { transition: transform 160ms ease; }
+.desktop-shell .bot-cap-diag-chevron.open,
+.desktop-dialog .bot-cap-diag-chevron.open { transform: rotate(180deg); }
+.desktop-shell .bot-cap-diag,
+.desktop-dialog .bot-cap-diag {
+  display: grid; gap: 4px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface, #efeee9) 60%, transparent);
+}
+.desktop-shell .bot-cap .bot-cap-runtime-detail,
+.desktop-dialog .bot-cap .bot-cap-runtime-detail { font-size: .74rem; font-variant-numeric: tabular-nums; }
+
+/* ————— 提示 / 错误 / 空态 ————— */
+.desktop-shell .bot-cap-error,
+.desktop-dialog .bot-cap-error {
+  padding: 10px 12px; border-radius: 14px;
+  font-size: .82rem; line-height: 1.45; overflow-wrap: anywhere; color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--danger, #ac3434) 24%, var(--line, #e5e5df));
+  background: color-mix(in srgb, var(--danger, #ac3434) 8%, var(--bg, #faf9f6));
+}
+.desktop-shell .bot-cap-notice,
+.desktop-dialog .bot-cap-notice {
+  padding: 10px 12px; border-radius: 14px;
+  font-size: .82rem; line-height: 1.45; color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--accent, #627565) 26%, var(--line, #e5e5df));
+  background: color-mix(in srgb, var(--accent, #627565) 10%, var(--bg, #faf9f6));
+}
+.desktop-shell .bot-cap-loading,
+.desktop-dialog .bot-cap-loading { padding: 18px 4px; text-align: center; color: var(--muted); font-size: .88rem; }
+.desktop-shell .bot-cap-empty,
+.desktop-dialog .bot-cap-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 28px 18px; text-align: center; color: var(--muted);
+  border-radius: 18px;
+  border: 1px dashed color-mix(in srgb, var(--line, #e5e5df) 90%, transparent);
+}
+
+/* ————— 管理员登录 ————— */
+.desktop-shell .bot-cap-login,
+.desktop-dialog .bot-cap-login {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 16px; border-radius: 20px;
+  background: var(--bg, #faf9f6);
+  border: 1px solid color-mix(in srgb, var(--line, #e5e5df) 75%, transparent);
+}
+.desktop-shell .bot-cap-login-head,
+.desktop-dialog .bot-cap-login-head {
+  display: flex; align-items: center; gap: 7px;
+  font-size: .83rem; color: var(--muted); line-height: 1.4;
+}
+.desktop-shell .bot-cap-field,
+.desktop-dialog .bot-cap-field { display: flex; flex-direction: column; gap: 8px; font-weight: 500; }
+.desktop-shell .bot-cap-field-label,
+.desktop-dialog .bot-cap-field-label { font-size: .85rem; font-weight: 500; color: var(--muted); }
+.desktop-shell .bot-cap-field input,
+.desktop-dialog .bot-cap-field input,
+.desktop-shell .bot-cap-field textarea,
+.desktop-dialog .bot-cap-field textarea {
+  width: 100%;
+  background: var(--surface, #efeee9); color: var(--text);
+  font-size: .95rem;
+  border: 1px solid color-mix(in srgb, var(--line, #e5e5df) 80%, transparent);
+  border-radius: 12px;
+}
+.desktop-shell .bot-cap-field textarea,
+.desktop-dialog .bot-cap-field textarea { font: .82rem/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace; }
+
+/* ————— 按钮 ————— */
+.desktop-shell .bot-cap-primary,
+.desktop-dialog .bot-cap-primary {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 40px; padding: 0 18px;
+  border-radius: 999px; border: 0;
+  background: var(--brand, #2B70F6); color: #fff;
+  font-size: .9rem; font-weight: 600;
+}
+.desktop-shell .bot-cap-secondary,
+.desktop-dialog .bot-cap-secondary {
+  display: inline-flex; align-items: center; gap: 6px;
+  min-height: 34px; padding: 0 14px;
+  border-radius: 999px;
+  background: var(--surface, #efeee9); color: var(--text);
+  font-size: .84rem; font-weight: 550;
+  border: 1px solid color-mix(in srgb, var(--line, #e5e5df) 85%, transparent);
+}
+
+/* ————— 能力卡片 ————— */
+.desktop-shell .bot-cap-item,
+.desktop-dialog .bot-cap-item {
+  display: grid; gap: 7px;
+  padding: 15px 16px;
+  border-radius: 20px;
+  background: var(--bg, #faf9f6);
+  border: 1px solid color-mix(in srgb, var(--line, #e5e5df) 75%, transparent);
+  box-shadow: var(--shadow-sm, 0 2px 10px rgb(0 0 0 / .03));
+}
+.desktop-shell .bot-cap-item.is-enabled,
+.desktop-dialog .bot-cap-item.is-enabled {
+  border-color: color-mix(in srgb, var(--brand, #2B70F6) 30%, var(--line, #e5e5df));
+}
+.desktop-shell .bot-cap-item-head,
+.desktop-dialog .bot-cap-item-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+}
+.desktop-shell .bot-cap-item-title,
+.desktop-dialog .bot-cap-item-title {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 3px 7px; min-width: 0;
+}
+.desktop-shell .bot-cap-item-icon,
+.desktop-dialog .bot-cap-item-icon { align-self: center; color: var(--muted); flex: none; }
+.desktop-shell .bot-cap-item-head strong,
+.desktop-dialog .bot-cap-item-head strong {
+  font-size: .98rem; font-weight: 650; color: var(--text); overflow-wrap: anywhere;
+}
+.desktop-shell .bot-cap-item-tags,
+.desktop-dialog .bot-cap-item-tags { font-size: .78rem; color: var(--muted); }
+.desktop-shell .bot-cap-item-global,
+.desktop-dialog .bot-cap-item-global { font-size: .78rem; }
+.desktop-shell .bot-cap-item-note,
+.desktop-dialog .bot-cap-item-note { font-size: .78rem; line-height: 1.45; }
+.desktop-shell .bot-cap-override-summary,
+.desktop-dialog .bot-cap-override-summary { font-weight: 550; }
+
+/* ————— iOS 风格拨动开关（通用 .bot-cap-toggle） ————— */
+.desktop-shell .bot-cap-toggle,
+.desktop-dialog .bot-cap-toggle {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-weight: 500; cursor: pointer;
+}
+.desktop-shell .bot-cap-toggle-text,
+.desktop-dialog .bot-cap-toggle-text {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
+}
+.desktop-shell .bot-cap-toggle input[type="checkbox"],
+.desktop-dialog .bot-cap-toggle input[type="checkbox"] {
+  -webkit-appearance: none; appearance: none;
+  position: relative; flex: none;
+  width: 46px; height: 27px; min-height: 27px;
+  margin: 0; padding: 0; border: 0; border-radius: 999px;
+  background: var(--line, #e5e5df); cursor: pointer;
+  transition: background-color 200ms ease;
+}
+.desktop-shell .bot-cap-toggle input[type="checkbox"]::before,
+.desktop-dialog .bot-cap-toggle input[type="checkbox"]::before {
+  content: ''; position: absolute; top: 3px; left: 3px;
+  width: 21px; height: 21px; border-radius: 50%;
+  background: #fff; box-shadow: 0 2px 6px rgb(0 0 0 / .18);
+  transition: transform 220ms cubic-bezier(.22, 1, .36, 1);
+}
+.desktop-shell .bot-cap-toggle input[type="checkbox"]:checked,
+.desktop-dialog .bot-cap-toggle input[type="checkbox"]:checked { background: var(--brand, #2B70F6); }
+.desktop-shell .bot-cap-toggle input[type="checkbox"]:checked::before,
+.desktop-dialog .bot-cap-toggle input[type="checkbox"]:checked::before { transform: translateX(19px); }
+.desktop-shell .bot-cap-toggle input[type="checkbox"]:disabled,
+.desktop-dialog .bot-cap-toggle input[type="checkbox"]:disabled { opacity: .4; cursor: not-allowed; }
+
+.desktop-shell .bot-cap-configure,
+.desktop-dialog .bot-cap-configure { justify-self: start; margin-top: 2px; }
+
+/* ————— 编辑器 ————— */
+.desktop-shell .bot-cap-editor,
+.desktop-dialog .bot-cap-editor {
+  margin-top: 6px; padding-top: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--line, #e5e5df) 70%, transparent);
+  gap: 10px !important;
+}
+.desktop-shell .bot-cap-editor-top,
+.desktop-dialog .bot-cap-editor-top {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+}
+.desktop-shell .bot-cap-rev,
+.desktop-dialog .bot-cap-rev {
+  font-size: .72rem; font-variant-numeric: tabular-nums; color: var(--muted);
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+}
+
+/* 字段级 继承/覆写 行 */
+.desktop-shell .bot-cap-override,
+.desktop-dialog .bot-cap-override { display: flex; flex-direction: column; gap: 6px; }
+.desktop-shell .bot-cap-override-head,
+.desktop-dialog .bot-cap-override-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: .84rem; color: var(--text); overflow-wrap: anywhere; font-weight: 500;
+}
+.desktop-shell .bot-cap-override-head input[type="checkbox"],
+.desktop-dialog .bot-cap-override-head input[type="checkbox"] {
+  width: 17px; height: 17px; flex: none;
+  accent-color: var(--brand, #2B70F6);
+}
+.desktop-shell .bot-cap-override-label,
+.desktop-dialog .bot-cap-override-label { font-weight: 600; }
+.desktop-shell .bot-cap-inherit-badge,
+.desktop-dialog .bot-cap-inherit-badge {
+  font-size: .72rem; font-weight: 600; padding: 2px 9px; border-radius: 999px;
+  background: var(--surface, #efeee9); color: var(--muted);
+}
+.desktop-shell .bot-cap-inherit-badge.is-override,
+.desktop-dialog .bot-cap-inherit-badge.is-override {
+  background: color-mix(in srgb, var(--brand, #2B70F6) 12%, transparent);
+  color: var(--brand, #2B70F6);
+}
+.desktop-shell .bot-cap-override-default,
+.desktop-dialog .bot-cap-override-default {
+  font-size: .76rem; color: var(--muted);
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+}
+.desktop-shell .bot-cap-override select,
+.desktop-dialog .bot-cap-override select,
+.desktop-shell .bot-cap-override input:not([type="checkbox"]),
+.desktop-dialog .bot-cap-override input:not([type="checkbox"]) {
+  width: 100%;
+  background: var(--surface, #efeee9); color: var(--text);
+  font-size: .9rem; border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--line, #e5e5df) 80%, transparent);
+}
+.desktop-shell .bot-cap-actions,
+.desktop-dialog .bot-cap-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.desktop-shell .bot-cap-cas-hint,
+.desktop-dialog .bot-cap-cas-hint {
+  display: inline-flex; align-items: center; gap: 5px;
+  flex-basis: 100%; font-size: .73rem; margin-top: 2px;
+}

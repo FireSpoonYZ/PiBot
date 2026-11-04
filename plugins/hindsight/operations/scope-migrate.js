@@ -1,0 +1,87 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { deriveProjectBankId, legacyRepoScopeTag, projectScopeTag, resolveProjectIdentity, } from "../banks/banking.js";
+/**
+ * Build a dry-run scope migration plan. Never mutates Hindsight banks or tags.
+ * Dual-tag retain/recall already covers the live window; this plan documents risk and next steps.
+ */
+export function buildScopeMigratePlan(args) {
+    const identity = resolveProjectIdentity(args.cwd, args.config);
+    const bankId = args.projectBankId ?? deriveProjectBankId(args.cwd, args.config);
+    const pathDerivedBank = !args.config.banks.project.bankId;
+    const projectTag = projectScopeTag(identity.projectId);
+    const legacyRepoTag = legacyRepoScopeTag(identity.legacyRepoKey);
+    const identityBasisWeak = identity.basis === "basename";
+    const findings = [];
+    const guidance = [];
+    findings.push(`Active dual-tag window: retain writes ${projectTag} and ${legacyRepoTag}; recall any_strict matches either.`);
+    findings.push(`Project id basis=${identity.basis} source=${identity.source} → ${projectTag}.`);
+    findings.push(`Legacy tag ${legacyRepoTag} is path-hash based (machine/path moves change the hash). Stable project: tag is the recovery path for new writes.`);
+    if (pathDerivedBank) {
+        findings.push(`Coding bank is path-derived (${bankId}); domain-tagged mode requires banks.project.bankId for a shared coding bank.`);
+        guidance.push("Set banks.project.bankId (and setupComplete) so repos share one coding bank; do not rely on path-hash bank ids.");
+    }
+    if (identityBasisWeak) {
+        findings.push("Project id is basename-derived; remotes or pins are more stable across clones and renames.");
+        guidance.push('Prefer scope.projectId pin or projectIdStrategy "remote" when a git origin exists.');
+    }
+    else {
+        findings.push(`Project id basis is ${identity.basis} (stable across absolute path moves when dual-tag project: is present).`);
+    }
+    let remoteTagCounts;
+    if (args.bankTags?.length) {
+        const otherRepoTags = [
+            ...new Set(args.bankTags.filter((t) => t.startsWith("repo:") && t !== legacyRepoTag)),
+        ].sort();
+        const projectTagHits = args.bankTags.filter((t) => t === projectTag).length;
+        const legacyRepoTagHits = args.bankTags.filter((t) => t === legacyRepoTag).length;
+        remoteTagCounts = {
+            projectTagHits,
+            legacyRepoTagHits,
+            otherRepoTags,
+            sampleSize: args.bankTags.length,
+        };
+        findings.push(`Remote tag sample (${args.bankTags.length}): project hits=${projectTagHits}, legacy hits=${legacyRepoTagHits}, other repo:* tags=${otherRepoTags.length}.`);
+        if (legacyRepoTagHits > 0 && projectTagHits === 0) {
+            findings.push("Sample has legacy repo tags without the stable project tag — reimport or dual-tag new retains before dropping dual-tag.");
+        }
+        if (otherRepoTags.length > 0) {
+            findings.push(`Other path-hash repo tags present (likely other machines/paths): ${otherRepoTags.slice(0, 5).join(", ")}${otherRepoTags.length > 5 ? "…" : ""}.`);
+            guidance.push("Other repo:* path-hashes are expected after path moves; dual-tag project: is the recovery path for new retains.");
+        }
+    }
+    else {
+        guidance.push("Optional: pass bank tag inventory (listTags) into dry-run for remote counts; this local plan never rewrites.");
+    }
+    guidance.push("No silent rewrite: this dry-run only writes a local receipt under .pi/hindsight/.");
+    guidance.push("When dual-tag can end: every active project memory carries project:<id> (or you completed export/import rebuild).");
+    return {
+        dryRun: true,
+        rewrite: "none",
+        bankId,
+        pathDerivedBank,
+        scopeMode: args.config.scope.mode,
+        projectTag,
+        legacyRepoTag,
+        projectId: identity.projectId,
+        projectIdBasis: identity.basis,
+        projectIdSource: identity.source,
+        dualTagWindow: true,
+        legacyPathHashTag: true,
+        identityBasisWeak,
+        findings,
+        guidance,
+        ...(remoteTagCounts ? { remoteTagCounts } : {}),
+        createdAt: (args.now ?? new Date()).toISOString(),
+    };
+}
+export function resolveScopeMigrateReceiptPath(cwd) {
+    return join(cwd, ".pi", "hindsight", "scope-migrate-receipt.json");
+}
+export async function writeScopeMigrateReceipt(cwd, plan) {
+    const receiptPath = resolveScopeMigrateReceiptPath(cwd);
+    await mkdir(dirname(receiptPath), { recursive: true });
+    const receipt = { ...plan, receiptPath };
+    await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
+    return receipt;
+}

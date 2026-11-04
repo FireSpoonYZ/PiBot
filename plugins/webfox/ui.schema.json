@@ -1,0 +1,11 @@
+{
+  "ui:order": [
+    "capabilities",
+    "providers",
+    "credentials",
+    "timeoutMs",
+    "researchTimeoutMs",
+    "retries",
+    "concurrency"
+  ]
+}

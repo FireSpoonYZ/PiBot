@@ -1,0 +1,28 @@
+/* hub lane styles: loaded after web/src/styles.css via hub/lanes.css. */
+
+/* Hub 主屏在 conversation/dm 子页打开时保持 DOM（隐藏不卸载），返回不丢滚动位置。 */
+.hub-hidden { display: none; }
+
+/* 主 Bot Hero：横向紧凑卡片（头像左、名称+节点徽章右），高度显著低于原纵向大卡。 */
+.hub-hero-section { padding: 8px 16px 10px; display: flex; }
+.hub-hero-section::before, .hub-hero-section::after { content: none; }
+.hub-hero-button.hub-hero-card {
+  flex: 1 1 auto;
+  max-width: 100%;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  border-radius: 18px;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  filter: none;
+}
+.hub-hero-card-text { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.hub-hero-card .hub-hero-name { font-size: .95rem; font-weight: 600; color: var(--text); }
+
+/* 列表顶部筛选 Chips（复用 bot-settings 原语 .bs-chips/.bs-chip）。 */
+.hub-filter-chips { padding: 2px 0 8px; }
+
+/* 归档行在 archived-bots 页里降低不透明度以区分。 */
+.hub-bot-row.is-archived { opacity: .72; }

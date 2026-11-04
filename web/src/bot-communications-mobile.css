@@ -1,0 +1,227 @@
+/* Lane 7：主聊天里 Bot 通信消息（dm/room 导入的 peer 消息）样式。
+   只作用于 .bot-chat-bubble.is-peer 与署名行，不动既有气泡/输入/语音/CUA。 */
+
+.bot-chat-bubble.is-peer {
+  background: color-mix(in srgb, var(--surface) 82%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 14px 14px 14px 4px;
+  align-self: flex-start;
+  max-width: 82%;
+}
+
+.bot-chat-bubble.is-peer .bot-chat-attribution {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: .72rem;
+  line-height: 1.3;
+  color: color-mix(in srgb, currentColor 62%, transparent);
+  margin-bottom: 4px;
+}
+
+/* peer/room 轮生成中：只显示来源，不把协作过程当发给用户的普通回答。 */
+.bot-chat-peer-working {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  max-width: 82%;
+  padding: 8px 12px;
+  margin-bottom: 6px;
+  border-radius: 14px 14px 14px 4px;
+  border: 1px dashed color-mix(in srgb, var(--line) 85%, transparent);
+  background: color-mix(in srgb, var(--surface) 78%, var(--bg));
+}
+.bot-chat-peer-working .bot-chat-attribution {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: .72rem;
+  color: color-mix(in srgb, currentColor 62%, transparent);
+}
+.bot-chat-peer-working .bot-chat-peer-working-text {
+  font-size: .78rem;
+  color: color-mix(in srgb, currentColor 55%, transparent);
+}
+
+/* 署名行的来源胶囊（dm=私聊 / room=群聊 / 设备）。字段名跟共享 Attribution schema 一致。 */
+.bot-chat-bubble.is-peer .bot-chat-attribution .attribution-channel {
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: .66rem;
+  font-weight: 600;
+  border: 1px solid color-mix(in srgb, var(--line) 85%, transparent);
+}
+.bot-chat-bubble.is-peer .bot-chat-attribution .attribution-channel.is-dm {
+  color: #8a5cf6;
+}
+.bot-chat-bubble.is-peer .bot-chat-attribution .attribution-channel.is-room {
+  color: #1f8dff;
+}
+
+/* 群聊/私聊子页：内容页不再走 .grok-subpage-scroll 多重滚动——容器占满父高度，
+   页面头/消息滚动区/底部输入由 Scopes 会话布局自身负责，输入不离屏。 */
+.grok-subpage-fill {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* 原 styles.css 的 .grok-scopes-mobile-container display/flex-direction 移到这里：
+   旧调试页通配样式（button/.panel/.list 等）只保留给 pending，不再作用 scope 容器。 */
+.grok-subpage-fill > .grok-scopes-mobile-container {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Hub 混排：共享 .gbot-conversation-row 复用 .hub-bot-row 布局；群聊行徽章与 Bot 行 host badge 同风格。 */
+.hub-bot-row .gbot-conversation-row__badge {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: .68rem;
+  font-weight: 600;
+  line-height: 1.3;
+  background: color-mix(in srgb, var(--accent) 15%, var(--surface));
+  color: var(--accent);
+}
+
+/* 置顶排序行：在 SortablePinnedChat 包装内与兄弟拖拽手柄并排自适应。 */
+.hub-bot-list .hub-bot-row {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Hub 群聊 / Bot 上下文菜单：共享上游 ContextMenu 定位/焦点/关闭逻辑，
+   本工程主题变量外壳；[data-ready] 前不显示（上游先定位再 reveal）。 */
+.baby-grok-bot-context-menu.gbot-context-menu {
+  position: fixed;
+  z-index: 300;
+  min-width: 184px;
+  padding: 6px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: 0 12px 32px rgb(0 0 0 / .22);
+}
+.baby-grok-bot-context-menu.gbot-context-menu:not([data-ready]) {
+  visibility: hidden;
+}
+.baby-grok-bot-context-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text);
+  font-size: .85rem;
+  text-align: left;
+  cursor: pointer;
+}
+.baby-grok-bot-context-menu__item:hover,
+.baby-grok-bot-context-menu__item:focus-visible {
+  background: color-mix(in srgb, var(--surface) 78%, var(--bg));
+  outline: none;
+}
+.baby-grok-bot-context-menu__item.danger,
+.baby-grok-bot-context-menu__item.is-danger,
+.baby-grok-bot-context-menu__item[data-danger] {
+  color: var(--danger, #c0392b);
+}
+
+/* 归档与删除二次确认弹窗（替代 window.confirm，适配 Android WebView） */
+.grok-confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 320;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgb(0 0 0 / .42);
+  backdrop-filter: blur(4px);
+}
+.grok-confirm-dialog {
+  width: min(100%, 380px);
+  padding: 20px;
+  border-radius: 22px;
+  border: 1px solid color-mix(in srgb, var(--line) 85%, transparent);
+  background: color-mix(in srgb, var(--bg) 98%, #fff);
+  color: var(--text);
+  box-shadow: 0 18px 48px rgb(0 0 0 / .24);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+:root[data-theme=dark] .grok-confirm-dialog {
+  background: var(--surface);
+}
+.grok-confirm-title {
+  margin: 0;
+  font-size: 1.06rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.grok-confirm-desc {
+  margin: 0;
+  font-size: .88rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.grok-confirm-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+.grok-done-pill-btn.danger {
+  background: var(--danger, #c0392b);
+  color: #fff;
+}
+.hub-outline-btn.danger {
+  color: var(--danger, #c0392b);
+  border-color: color-mix(in srgb, var(--danger, #c0392b) 42%, var(--line));
+}
+
+/* 独立已归档智能体列表页与只读历史底部横幅 */
+.grok-archived-list-group {
+  padding: 6px;
+  gap: 4px;
+}
+.grok-archived-ttl-pill {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: .72rem;
+  font-weight: 600;
+  background: color-mix(in srgb, var(--surface) 85%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+}
+.grok-archived-chat-banner {
+  padding: 10px 14px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.grok-archived-chat-banner-text {
+  flex: 1 1 180px;
+  font-size: .85rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.grok-archived-chat-banner-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}

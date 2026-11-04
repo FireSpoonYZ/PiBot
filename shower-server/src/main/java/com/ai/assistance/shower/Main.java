@@ -149,6 +149,14 @@ public final class Main {
                 return displayId > 0 && displays.containsKey(displayId);
             }
 
+            @Override public int[] getDisplaySize(int displayId) {
+                enforceCaller();
+                if (displayId <= 0 || !displays.containsKey(displayId)) return null;
+                com.ai.assistance.shower.device.DisplayInfo info = ServiceManager.getDisplayManager().getDisplayInfo(displayId);
+                if (info == null) return null;
+                return new int[] {info.getSize().getWidth(), info.getSize().getHeight()};
+            }
+
             @Override public boolean setPreviewSurface(int displayId, Surface surface, IShowerClient viewer) {
                 enforceCaller();
                 if (viewer == null) throw new IllegalArgumentException("Viewer token is required");
@@ -346,8 +354,9 @@ public final class Main {
     }
 
     private static void requireCoordinate(DisplaySession display, float x, float y) {
-        if (!Float.isFinite(x) || !Float.isFinite(y) || x < 0 || y < 0
-                || x >= display.width || y >= display.height) {
+        com.ai.assistance.shower.device.DisplayInfo info = ServiceManager.getDisplayManager().getDisplayInfo(display.id);
+        if (info == null || !Float.isFinite(x) || !Float.isFinite(y) || x < 0 || y < 0
+                || x >= info.getSize().getWidth() || y >= info.getSize().getHeight()) {
             throw new IllegalArgumentException("Coordinate is outside the virtual display");
         }
     }

@@ -1,0 +1,10 @@
+{
+  "name": "@e-launcher/center-contract",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": { "types": "./index.d.ts", "import": "./protocol.js" },
+    "./manifest.schema.json": "./manifest.schema.json"
+  }
+}

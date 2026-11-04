@@ -1,0 +1,38 @@
+[package]
+name = "e-launcher-host"
+version = "1.0.0"
+edition = "2021"
+publish = false
+description = "Supervisor/launcher for the bundled e-launcher Host service"
+
+# Standalone crate: never pulled into another workspace.
+[workspace]
+
+[[bin]]
+name = "e-launcher-host"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# rustls only (no OpenSSL); same rustls feature set as ureq so no second crypto provider is built.
+ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+getrandom = "0.2"
+base64 = "0.22"
+fs2 = "0.4"
+ctrlc = { version = "3.4", features = ["termination"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

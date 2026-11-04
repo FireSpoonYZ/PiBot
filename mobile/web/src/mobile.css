@@ -1,0 +1,76 @@
+/* M18 mobile（Tauri 辅助进程）外壳样式：全面屏沉浸，由内部顶栏/底栏按 --top / --bottom 单次让位。 */
+#root { padding-top: 0; padding-bottom: 0; height: 100dvh; }
+.mobile-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; background: var(--bg); }
+/* 工具栏控件变多（含本机/远端切换）：允许换行，自身不横向滚动/裁切，页面不产生横向溢出。 */
+.mobile-toolbar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--surface); min-width: 0; }
+.mobile-toolbar .button { min-height: 40px; min-width: 0; max-width: 100%; padding: 6px 12px; font-size: .85rem; white-space: nowrap; }
+/* 窄屏按行均分（360dp 下多行），点击高度仍 ≥40px 且标签完整；宽屏保持原左对齐外观。 */
+@media (max-width: 480px) {
+  .mobile-toolbar .button { flex: 1 1 auto; }
+}
+.mobile-body { flex: 1; min-height: 0; min-width: 0; height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+.mobile-body .bot-hub-shell { max-width: none; }
+.mobile-shell > .inline-error { flex: none; margin: 8px 12px; }
+/* desktop app.css 是全局样式（先加载）：在本机页容器内恢复 styles.css 的排版基线，
+ * 避免字体族/字号/行高/字重/段落下边距被桌面元素规则改变。 */
+.mobile-body { font-family: system-ui, -apple-system, "Noto Sans SC", sans-serif; font-size: 16px; line-height: 1.65; }
+.mobile-body :where(label) { font-weight: normal; }
+.mobile-body :where(p) { margin-bottom: 1em; }
+
+/* M20 远端页（其他设备）：复用 desktop app.css 的两栏布局，只在受限容器内折成上下两段。
+ * 配置/设备目录默认收进“连接与设备”按钮，聊天与发送区拿到剩余全部高度，横竖屏都能看见输入框。 */
+.remote-client { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+/* 保持挂载仅隐藏时必须真的不显示：作者样式的 display:flex 会盖掉 UA 的 [hidden]。 */
+.remote-client[hidden] { display: none; }
+/* 折叠按钮条：固定在容器顶部、不参与滚动；按钮触摸尺寸 ≥40px。 */
+.remote-panel-bar { flex: none; display: flex; align-items: center; padding: 6px 8px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.remote-panel-toggle { min-height: 40px; min-width: 40px; max-width: 100%; padding: 6px 12px; font-size: .85rem; text-align: left; }
+.remote-client .desktop-shell { flex: 1; min-width: 0; min-height: 0; height: auto; flex-direction: column; padding: 0; gap: 0; }
+.remote-client .app-sidebar {
+  width: auto; max-height: 42vh; min-height: 0;
+  border-right: 0; border-bottom: 1px solid var(--line);
+}
+/* 已显式选好目标/断开后：侧栏不占位，工作区拿整屏高度；桌面无此容器，布局不受影响。 */
+.remote-client[data-connection-panel='closed'] .app-sidebar { display: none; }
+.remote-client .app-sidebar > * { flex: none; }
+.remote-client .app-workspace { flex: 1; min-height: 0; }
+/* 手机纵向空间紧张：状态条/导航/输入区内边距各压一行高度，消息区滚动，输入与发送留在视口内。 */
+.remote-client .connection-strip { padding: 4px 10px; }
+.remote-client .app-workspace > .app-nav { padding: 4px 8px; }
+.remote-client .composer { padding: 8px 10px; }
+/* 横屏（高度受限）把配置区再压小，保证发送区仍在视口内。 */
+@media (max-height: 480px) {
+  .remote-client .app-sidebar { max-height: 30vh; }
+}
+/* 短视口（含软键盘弹出）聚焦输入框：隐藏聊天头部，把高度让给消息滚动区；失焦自动恢复，
+ * 不覆盖整屏、不移动焦点、不新增依赖。 */
+@media (max-height: 720px) {
+  .remote-client .chat-pane-inner:focus-within .chat-pane-header { display: none; }
+}
+
+/* 远端页已有专属 .remote-panel-toggle，隐藏桌面侧栏折叠按钮避免重复。 */
+.remote-client .sidebar-toggle-btn { display: none; }
+
+/* 本机 Host 页 Grok × Hermes 工作区聚焦胶囊栏 */
+.host-focus-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 12px;
+  min-width: 0;
+}
+.host-focus-chip {
+  min-height: 36px;
+  padding: 5px 11px;
+  font-size: .84rem;
+  font-weight: 600;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+}
+.host-focus-chip.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}

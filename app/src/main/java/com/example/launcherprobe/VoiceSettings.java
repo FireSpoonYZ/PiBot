@@ -11,13 +11,7 @@ import java.util.List;
 final class VoiceSettings {
     static final String SYSTEM = "system", REMOTE = "remote";
     static final String STT = "stt", TTS = "tts";
-    static final String SPEAK_OFF = "off", SPEAK_AFTER_VOICE = "afterVoice", SPEAK_ALWAYS = "always";
     static final List<String> ENGINES = Arrays.asList(SYSTEM, REMOTE);
-    static final List<String> SPEAK_MODES = Arrays.asList(SPEAK_OFF, SPEAK_AFTER_VOICE, SPEAK_ALWAYS);
-    static final String WAKE_LOW = "low", WAKE_MEDIUM = "medium", WAKE_HIGH = "high";
-    static final List<String> WAKE_SENSITIVITIES = Arrays.asList(WAKE_LOW, WAKE_MEDIUM, WAKE_HIGH);
-    static final String DEFAULT_WAKE_WORDS = "小E小E";
-
     /** OpenAI-compatible endpoint settings for one direction (transcription or speech). */
     static final class Remote {
         final String baseUrl, model, voice, apiKey;
@@ -29,38 +23,21 @@ final class VoiceSettings {
 
     private final SharedPreferences prefs, secrets;
 
-    VoiceSettings(Context context) {
-        prefs = context.getSharedPreferences("voice", Context.MODE_PRIVATE);
-        secrets = context.getSharedPreferences("voice_secrets", Context.MODE_PRIVATE);
+    /** Host 使用独立命名空间，不影响旧 voice/voice_secrets。 */
+    VoiceSettings(Context context, String prefsName, String secretsName) {
+        prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE);
+        secrets = context.getSharedPreferences(secretsName, Context.MODE_PRIVATE);
     }
 
     String sttEngine() { return oneOf(prefs.getString("sttEngine", SYSTEM), ENGINES, SYSTEM); }
     String ttsEngine() { return oneOf(prefs.getString("ttsEngine", SYSTEM), ENGINES, SYSTEM); }
-    String speakMode() { return oneOf(prefs.getString("speakMode", SPEAK_AFTER_VOICE), SPEAK_MODES, SPEAK_AFTER_VOICE); }
     /** BCP-47 tag, or empty to follow the system locale. */
     String language() { return prefs.getString("language", ""); }
     float speechRate() { return clampRate(prefs.getFloat("speechRate", 1f)); }
 
-    boolean wakeEnabled() { return prefs.getBoolean("wakeEnabled", false); }
-    /** Comma-separated wake words as the user typed them; see WakeWords.split. */
-    String wakeWords() { return prefs.getString("wakeWords", DEFAULT_WAKE_WORDS); }
-    String wakeSensitivity() { return oneOf(prefs.getString("wakeSensitivity", WAKE_MEDIUM), WAKE_SENSITIVITIES, WAKE_MEDIUM); }
-
-    void setWakeEnabled(boolean enabled) { prefs.edit().putBoolean("wakeEnabled", enabled).apply(); }
-    /** Callers validate with WakeWords against the model vocabulary first. */
-    void setWakeWords(String words) { prefs.edit().putString("wakeWords", String.join("，", WakeWords.split(words))).apply(); }
-    void setWakeSensitivity(String value) {
-        if (!WAKE_SENSITIVITIES.contains(value)) throw new IllegalArgumentException("灵敏度无效");
-        prefs.edit().putString("wakeSensitivity", value).apply();
-    }
-
     void setEngine(String kind, String engine) {
         if (!ENGINES.contains(engine)) throw new IllegalArgumentException("engine 无效");
         prefs.edit().putString(kind(kind) + "Engine", engine).apply();
-    }
-    void setSpeakMode(String mode) {
-        if (!SPEAK_MODES.contains(mode)) throw new IllegalArgumentException("朗读模式无效");
-        prefs.edit().putString("speakMode", mode).apply();
     }
     void setLanguage(String tag) {
         String value = tag == null ? "" : tag.trim();

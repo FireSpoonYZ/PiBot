@@ -1,0 +1,13 @@
+[default]
+description = "Default mobile Host bridge command permissions."
+permissions = ["host"]
+
+[[set]]
+identifier = "host"
+description = "Allows only the fixed mobile Host bridge commands."
+permissions = [
+  "allow-mobile-host-request",
+  "allow-mobile-host-listen",
+  "allow-mobile-host-ack",
+  "allow-mobile-host-unlisten",
+]

@@ -1,0 +1,14 @@
+{
+  "identifier": "main",
+  "description": "Explicit local capability for the Tauri mobile UI main window only.",
+  "local": true,
+  "windows": ["main"],
+  "webviews": ["main"],
+  "platforms": ["android"],
+  "permissions": [
+    "allow-mobile-host-request",
+    "allow-mobile-host-listen",
+    "allow-mobile-host-ack",
+    "allow-mobile-host-unlisten"
+  ]
+}

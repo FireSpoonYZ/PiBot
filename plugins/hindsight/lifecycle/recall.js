@@ -1,0 +1,318 @@
+import { emitRetrieval, telemetryEvent, telemetryFailure, retrievalId, resultTelemetry, resultIds, } from "./retrieval-telemetry.js";
+import { basename } from "node:path";
+import { RECALL_SCORE_FIELDS, } from "../types.js";
+import { isInjectedHindsightMemory, projectMessageText } from "../utils/messages.js";
+import { createMemoryIdentity } from "../operations/memory-identity.js";
+import { redactError } from "../utils/sanitize.js";
+import { withTimeout, isAbortError, throwIfAborted } from "../client/timeout.js";
+import { loadMentalModelsForScopes } from "./mental-models.js";
+function sourceFactText(value) {
+    if (!value || typeof value !== "object")
+        return undefined;
+    const text = value.text;
+    return typeof text === "string" && text.trim() ? text : undefined;
+}
+export function textFromRecallResponse(response) {
+    const record = response;
+    const raw = Array.isArray(record.results)
+        ? record.results
+        : Array.isArray(record.memories)
+            ? record.memories
+            : Array.isArray(response)
+                ? response
+                : [];
+    const sourceFacts = record.source_facts && typeof record.source_facts === "object"
+        ? record.source_facts
+        : undefined;
+    return raw.map((entry) => {
+        const item = entry;
+        if (!sourceFacts || !item.source_fact_ids?.length)
+            return item;
+        const evidence = item.source_fact_ids
+            .map((id) => sourceFactText(sourceFacts[id]))
+            .filter((text) => Boolean(text));
+        return evidence.length ? { ...item, sourceFacts: evidence } : item;
+    });
+}
+function itemText(item) {
+    return item.text ?? item.content ?? JSON.stringify(item);
+}
+function messageRole(message) {
+    return message.role ?? "unknown";
+}
+function messageContent(message) {
+    const content = projectMessageText(message).content;
+    return typeof content === "string" ? content : JSON.stringify(content ?? "");
+}
+function formatQueryMessage(message) {
+    const content = messageContent(message).trim();
+    return content ? `${messageRole(message)}: ${content}` : undefined;
+}
+export function truncateRecallQuery(query, maxChars) {
+    if (query.length <= maxChars)
+        return query;
+    return query.slice(query.length - maxChars).trimStart();
+}
+function truncateRecallQueryLines(prefixLines, messageLines, maxChars) {
+    const lines = [...prefixLines, ...messageLines];
+    const query = lines.join("\n\n").trim();
+    if (query.length <= maxChars)
+        return query;
+    const prefix = prefixLines.join("\n\n").trim();
+    if (!prefix)
+        return truncateRecallQuery(query, maxChars);
+    const separator = "\n\n";
+    const remaining = maxChars - prefix.length - separator.length;
+    if (remaining >= 20)
+        return `${prefix}${separator}${truncateRecallQuery(messageLines.join("\n\n"), remaining)}`;
+    return truncateRecallQuery(query, maxChars);
+}
+export function composeRecallQuery(messages, policy) {
+    const allowedRoles = new Set(policy.roles);
+    const selectedLines = messages
+        .filter((message) => allowedRoles.has(messageRole(message)))
+        .filter((message) => !isInjectedHindsightMemory(message))
+        .map(formatQueryMessage)
+        .filter((line) => Boolean(line))
+        .slice(-Math.max(1, policy.contextTurns));
+    const prefixLines = [
+        ...(policy.preamble?.trim() ? [policy.preamble.trim()] : []),
+        ...(policy.includeDate
+            ? [`Current date: ${(policy.now ?? new Date()).toISOString().slice(0, 10)}`]
+            : []),
+        ...(policy.hints?.length ? [`Context hints: ${policy.hints.join("; ")}`] : []),
+    ];
+    return truncateRecallQueryLines(prefixLines, selectedLines.length ? selectedLines : ["current Pi coding task"], policy.maxQueryChars);
+}
+const RECALL_SOURCE_FACT_LINES = 3;
+export function renderRecallBlocks(blocks, topK = 12) {
+    const nonEmpty = blocks.filter((block) => block.memoryCount > 0);
+    if (nonEmpty.length === 0)
+        return "";
+    const lines = [
+        "<hindsight-memory>",
+        "Relevant prior memory. Use as context; do not quote unless useful.",
+    ];
+    for (const block of nonEmpty) {
+        lines.push(`\nBank: ${block.bankId}`);
+        block.results.slice(0, topK).forEach((item, index) => {
+            const tags = item.tags?.length ? ` [${item.tags.join(", ")}]` : "";
+            lines.push(`${index + 1}. ${itemText(item)}${tags}`);
+            for (const fact of (item.sourceFacts ?? []).slice(0, RECALL_SOURCE_FACT_LINES)) {
+                lines.push(`   - evidence: ${fact}`);
+            }
+        });
+    }
+    lines.push("</hindsight-memory>");
+    return lines.join("\n");
+}
+function preambleForScope(config, scope) {
+    if (scope.kind === "project")
+        return config.recall.projectQueryPreamble;
+    if (scope.kind === "global")
+        return config.recall.globalQueryPreamble;
+    return config.recall.queryPreamble;
+}
+// User Bank recall is a smaller, durable supplement to project context, not an equal-weight
+// second corpus, so it gets its own (smaller by default) token budget. Project Bank recall
+// keeps recall.maxTokens unchanged so single-scope callers see no behavior change.
+function maxTokensForScope(config, scope) {
+    return scope.kind === "global" ? config.recall.userMaxTokens : config.recall.maxTokens;
+}
+function queryHints(cwd, config, scope) {
+    const hints = scope.kind ? [`scope:${scope.kind}`] : [];
+    if (!config.recall.includeRepoHintsInQuery || scope.kind === "global")
+        return hints;
+    const identity = createMemoryIdentity(cwd, config);
+    return [
+        ...hints,
+        `project:${identity.projectId}`,
+        `repo:${identity.repoKey}`,
+        `cwd:${basename(cwd)}`,
+    ];
+}
+export async function recallForContext(args) {
+    throwIfAborted(args.signal, "hindsight recall");
+    const blocks = [];
+    const failures = [];
+    // Scope recalls run concurrently: with two banks (project + user) a sequential
+    // loop paid the full per-bank latency twice at every turn start. Promise.all
+    // preserves input order, so blocks and failures still appear in scope order;
+    // the per-scope try/catch keeps one bank's failure from affecting the others.
+    const scopeOutcomes = await Promise.all(args.scopes.map(async (scope) => {
+        const query = composeRecallQuery(args.messages, {
+            roles: args.config.recall.roles,
+            contextTurns: args.config.recall.contextTurns,
+            maxQueryChars: args.config.recall.maxQueryChars,
+            preamble: preambleForScope(args.config, scope),
+            includeDate: args.config.recall.includeDateInQuery,
+            hints: args.cwd ? queryHints(args.cwd, args.config, scope) : [],
+        });
+        const started = Date.now();
+        const id = args.observer ? retrievalId() : undefined;
+        const emit = (fields) => emitRetrieval(args.observer, () => telemetryEvent(started, {
+            phase: "retrieval",
+            mode: "automatic",
+            cache: "miss",
+            status: "success",
+            retrievalId: id,
+            contextId: args.contextId,
+            bankId: scope.bankId,
+            kind: scope.kind,
+            query,
+            budget: args.config.recall.budget,
+            maxTokens: maxTokensForScope(args.config, scope),
+            timeoutMs: args.config.recall.timeoutMs,
+            ...(scope.tagGroups?.length ? { tagGroups: scope.tagGroups } : {}),
+            ...fields,
+        }));
+        try {
+            // Forward the timeout's AbortSignal into the client call: the adapted
+            // client treats options.signal as a parent signal, so when this outer
+            // recall timeout fires the underlying fetch is aborted and the server
+            // sees a client disconnect and cancels the recall instead of running it
+            // to completion. Without this the outer timeout rejects the turn-side
+            // promise while the request keeps running up to the client-level timeout.
+            // Pi's Esc abort is also forwarded as withTimeout's parentSignal.
+            const response = await withTimeout("hindsight recall", args.config.recall.timeoutMs, (signal) => args.client.recall(scope.bankId, query, {
+                budget: args.config.recall.budget,
+                maxTokens: maxTokensForScope(args.config, scope),
+                types: args.config.recall.types,
+                preferObservations: args.config.recall.preferObservations,
+                ...(args.config.recall.includeSourceFacts
+                    ? {
+                        includeSourceFacts: true,
+                        maxSourceFactsTokens: args.config.recall.maxSourceFactsTokens,
+                    }
+                    : {}),
+                ...(args.config.recall.queryTimestamp
+                    ? { queryTimestamp: args.config.recall.queryTimestamp }
+                    : {}),
+                ...(scope.tagGroups?.length ? { tagGroups: scope.tagGroups } : {}),
+                signal,
+            }), args.signal);
+            const raw = textFromRecallResponse(response);
+            const results = filterRecallQuality(raw, args.config.recall.minScores).items;
+            if (args.observer) {
+                const injected = results.slice(0, args.config.recall.topK);
+                emit({
+                    ...resultTelemetry(raw),
+                    keptIds: resultIds(results),
+                    keptCount: results.length,
+                    injectedIds: resultIds(injected),
+                    injectedCount: injected.length,
+                    status: results.length ? "success" : "empty",
+                });
+            }
+            return {
+                ok: true,
+                block: {
+                    bankId: scope.bankId,
+                    query,
+                    results,
+                    memoryCount: results.length,
+                    rendered: "",
+                },
+            };
+        }
+        catch (error) {
+            if (isAbortError(error) || args.signal?.aborted) {
+                return { ok: "aborted", error };
+            }
+            emit(telemetryFailure(error));
+            return {
+                ok: false,
+                failure: {
+                    bankId: scope.bankId,
+                    query,
+                    error: redactError(error),
+                    ...(scope.kind ? { kind: scope.kind } : {}),
+                    ...(scope.tagGroups?.length ? { tagGroups: scope.tagGroups } : {}),
+                },
+            };
+        }
+    }));
+    const aborted = scopeOutcomes.find((outcome) => outcome.ok === "aborted");
+    if (aborted)
+        throw aborted.error;
+    for (const outcome of scopeOutcomes) {
+        if (outcome.ok === true)
+            blocks.push(outcome.block);
+        else if (outcome.ok === false)
+            failures.push(outcome.failure);
+    }
+    throwIfAborted(args.signal, "hindsight recall");
+    const recallRendered = renderRecallBlocks(blocks, args.config.recall.topK);
+    const cwd = args.cwd ?? process.cwd();
+    const identity = createMemoryIdentity(cwd, args.config);
+    const mental = await loadMentalModelsForScopes({
+        client: args.client,
+        config: args.config,
+        bankIds: args.scopes.map((scope) => scope.bankId),
+        bankKinds: args.scopes.map((scope) => (scope.kind === "global" ? "user" : "project")),
+        projectId: identity.projectId,
+        ...(args.signal ? { signal: args.signal } : {}),
+    });
+    throwIfAborted(args.signal, "hindsight recall");
+    const rendered = [mental.rendered, recallRendered].filter(Boolean).join("\n\n");
+    return {
+        rendered,
+        blocks: blocks.map((block) => ({ ...block, rendered: recallRendered })),
+        failed: failures.length,
+        failures,
+    };
+}
+function normalizedMemoryText(item) {
+    return itemText(item).replace(/\s+/g, " ").trim().toLowerCase();
+}
+function isRecallContamination(text) {
+    return /<\/?hindsight[-_]memor(?:y|ies)>|<\/?hindsight-mental-models>|<\/?mental_models>|customType["']?\s*:\s*["']hindsight-(?:recall|mental-models)|last-recall\.json/.test(text);
+}
+function isBelowScoreFloor(item, minScores) {
+    if (!minScores)
+        return false;
+    const scores = item.scores;
+    // Fail open when Hindsight omits scores so BM25-only hits and passthrough rerankers
+    // are not silently discarded by local policy.
+    if (!scores)
+        return false;
+    for (const field of RECALL_SCORE_FIELDS) {
+        const floor = minScores[field];
+        const value = scores[field];
+        if (typeof floor === "number" && typeof value === "number" && value < floor)
+            return true;
+    }
+    return false;
+}
+export function classifyRecallQuality(item, seen, minScores) {
+    const text = normalizedMemoryText(item);
+    const reasons = [];
+    if (!text)
+        reasons.push("blank-memory");
+    if (isRecallContamination(itemText(item)))
+        reasons.push("recall-contamination");
+    if (text && seen.has(text))
+        reasons.push("duplicate-memory");
+    if (isBelowScoreFloor(item, minScores))
+        reasons.push("below-score-floor");
+    if (!reasons.length)
+        seen.add(text);
+    return { item, decision: reasons.length ? "drop" : "keep", reasons };
+}
+export function filterRecallQuality(items, minScores) {
+    const seen = new Set();
+    const decisions = items.map((item) => classifyRecallQuality(item, seen, minScores));
+    const reasonCounts = {};
+    for (const decision of decisions) {
+        for (const reason of decision.reasons)
+            reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1;
+    }
+    return {
+        items: decisions
+            .filter((decision) => decision.decision === "keep")
+            .map((decision) => decision.item),
+        decisions,
+        dropped: decisions.filter((decision) => decision.decision === "drop").length,
+        reasonCounts,
+    };
+}

@@ -29,12 +29,30 @@ final class ShowerManager {
     private static final String EXTRA_HANDOFF_TOKEN = "handoff_token";
     private static final long CONNECTION_TIMEOUT_MS = 12_000;
 
+    /** 进程级共享：本应用内所有 ShowerToolBridge 共用一台 Shower 服务，最后释放者才停服。 */
+    private static final Object SHARED_LOCK = new Object();
+    private static ShowerManager sharedInstance;
+    private static int sharedOwners;
+    private static boolean retiring;
+    private volatile boolean retired;
+
+    /** 非阻塞尝试：收尾期间不等待并返回 null（由调用方稍后在 worker 上再阻塞获取）。 */
+    static ShowerManager tryAcquire(Context context) {
+        synchronized (SHARED_LOCK) {
+            if (retiring) return null;
+            if (sharedInstance == null) sharedInstance = new ShowerManager(context);
+            sharedOwners++;
+            return sharedInstance;
+        }
+    }
+
     private final Context context;
     private final Object lock = new Object();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Shizuku.UserServiceArgs serviceArgs;
     private volatile IShowerService service;
     private volatile String expectedToken;
+    private volatile boolean serverStarted;
     private IOwnPermissionService shell;
     private boolean bindingShell;
 
@@ -98,6 +116,59 @@ final class ShowerManager {
                 ContextCompat.RECEIVER_EXPORTED);
     }
 
+    static ShowerManager acquire(Context context) {
+        synchronized (SHARED_LOCK) {
+            while (retiring) {
+                try {
+                    SHARED_LOCK.wait();
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("等待旧 Shower 服务收尾被中断");
+                }
+            }
+            if (sharedInstance == null) sharedInstance = new ShowerManager(context);
+            sharedOwners++;
+            return sharedInstance;
+        }
+    }
+
+    /** 归还租约；仅最后一位持有者在独占区外完成收尾，新 acquire 会等待其结束后再建新实例。 */
+    void release() {
+        boolean last;
+        synchronized (SHARED_LOCK) {
+            if (retired) return;
+            if (sharedOwners > 0) sharedOwners--;
+            last = sharedOwners <= 0 && !retiring;
+            if (last) {
+                retired = true;
+                retiring = true;
+                sharedInstance = null;
+            }
+        }
+        if (last) {
+            try {
+                teardown();
+            } finally {
+                synchronized (SHARED_LOCK) {
+                    retiring = false;
+                    SHARED_LOCK.notifyAll();
+                }
+            }
+        }
+    }
+
+    private void teardown() {
+        // 未启动过服务器或已空闲退出时，不为此绑定 Shizuku。
+        if (serverStarted && aliveService() != null) stopServer();
+        else unbindShell();
+        serverStarted = false;
+        try {
+            context.unregisterReceiver(receiver);
+        } catch (IllegalArgumentException ignored) {
+            // 未注册或已注销。
+        }
+    }
+
     synchronized IShowerService ensureService() throws Exception {
         IShowerService alive = aliveService();
         if (alive != null) return alive;
@@ -109,6 +180,7 @@ final class ShowerManager {
             expectedToken = null;
             throw new IllegalStateException("Operit Shower 启动失败：" + error);
         }
+        serverStarted = true;
         long deadline = android.os.SystemClock.elapsedRealtime() + CONNECTION_TIMEOUT_MS;
         synchronized (lock) {
             for (;;) {

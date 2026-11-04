@@ -1,0 +1,101 @@
+/* pending lane styles: 移动端待发送收件箱，卡片圆角/留白对齐 grok-card-group。 */
+
+.pending-inbox { display: flex; flex-direction: column; gap: 12px; }
+
+.pending-inbox-offline {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+  background: color-mix(in srgb, var(--bg) 96%, #fff);
+  color: var(--muted);
+  font-size: .84rem;
+  line-height: 1.45;
+}
+:root[data-theme=dark] .pending-inbox-offline { background: var(--surface); }
+
+.pending-card {
+  display: flex;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 22px;
+  background: color-mix(in srgb, var(--bg) 96%, #fff);
+  border: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+  box-shadow: 0 2px 10px rgb(0 0 0 / .03);
+}
+:root[data-theme=dark] .pending-card { background: var(--surface); }
+
+.pending-card-avatar { flex: none; width: 44px; height: 44px; }
+.pending-card-avatar .grok-bot-avatar, .pending-card-avatar svg { display: block; }
+
+.pending-card-fallback-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+}
+
+.pending-card-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+
+.pending-card-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.pending-card-title {
+  flex: 1;
+  min-width: 0;
+  font-size: .98rem;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pending-card-subtitle { flex: none; font-size: .78rem; color: var(--muted); }
+
+.pending-card-text {
+  margin: 0;
+  font-size: .88rem;
+  line-height: 1.45;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.pending-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+.pending-card-status { display: inline-flex; align-items: center; gap: 6px; font-size: .8rem; font-weight: 600; color: var(--muted); }
+.pending-card-status::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.pending-card-status.is-todo { color: var(--accent); }
+.pending-card-status.is-warn { color: #b7791f; }
+.pending-card-status.is-error { color: var(--danger); }
+.pending-card-status.is-ok { color: #2f855a; }
+.pending-card-hint { margin: 0; font-size: .78rem; color: var(--muted); }
+.pending-card-error { margin: 0; font-size: .82rem; color: var(--danger); }
+
+.pending-card-actions { display: flex; gap: 8px; margin-left: auto; }
+.pending-card-actions .grok-done-pill-btn { min-height: 34px; padding: 0 16px; font-size: .85rem; }
+.pending-card-actions .hub-outline-btn { min-height: 34px; padding: 0 14px; border-radius: 999px; font-size: .85rem; }
+
+.pending-done { display: flex; flex-direction: column; gap: 12px; }
+.pending-done-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: .82rem;
+  font-weight: 600;
+}
+:root[data-theme=dark] .pending-done-toggle { background: var(--surface); }
+
+.pending-inbox-empty { margin-top: 12px; }
+.pending-inbox-empty .grok-done-pill-btn { margin-top: 8px; }
+.pending-inbox-empty .grok-row-icon { width: 40px; height: 40px; opacity: .7; }

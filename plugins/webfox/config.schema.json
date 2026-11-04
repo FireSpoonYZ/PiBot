@@ -1,0 +1,787 @@
+{
+  "type": "object",
+  "title": "Webfox 联网",
+  "properties": {
+    "capabilities": {
+      "type": "object",
+      "title": "启用能力",
+      "description": "只有显式配置 provider 的能力才会注册对应工具；未配置的能力不注册。",
+      "properties": {
+        "search": {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "enum": [
+                "brave",
+                "cloudflare",
+                "exa",
+                "firecrawl",
+                "gemini",
+                "linkup",
+                "ollama",
+                "openai",
+                "parallel",
+                "perplexity",
+                "serpbase",
+                "serper",
+                "tavily",
+                "valyu",
+                "youcom"
+              ],
+              "title": "Provider"
+            },
+            "maxResults": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          "required": [
+            "provider"
+          ],
+          "additionalProperties": false,
+          "title": "搜索"
+        },
+        "contents": {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "enum": [
+                "brave",
+                "cloudflare",
+                "exa",
+                "firecrawl",
+                "gemini",
+                "linkup",
+                "ollama",
+                "openai",
+                "parallel",
+                "perplexity",
+                "serpbase",
+                "serper",
+                "tavily",
+                "valyu",
+                "youcom"
+              ],
+              "title": "Provider"
+            }
+          },
+          "required": [
+            "provider"
+          ],
+          "additionalProperties": false,
+          "title": "网页内容"
+        },
+        "answer": {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "enum": [
+                "brave",
+                "cloudflare",
+                "exa",
+                "firecrawl",
+                "gemini",
+                "linkup",
+                "ollama",
+                "openai",
+                "parallel",
+                "perplexity",
+                "serpbase",
+                "serper",
+                "tavily",
+                "valyu",
+                "youcom"
+              ],
+              "title": "Provider"
+            }
+          },
+          "required": [
+            "provider"
+          ],
+          "additionalProperties": false,
+          "title": "联网问答"
+        },
+        "research": {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "enum": [
+                "brave",
+                "cloudflare",
+                "exa",
+                "firecrawl",
+                "gemini",
+                "linkup",
+                "ollama",
+                "openai",
+                "parallel",
+                "perplexity",
+                "serpbase",
+                "serper",
+                "tavily",
+                "valyu",
+                "youcom"
+              ],
+              "title": "Provider"
+            }
+          },
+          "required": [
+            "provider"
+          ],
+          "additionalProperties": false,
+          "title": "深度调研"
+        }
+      },
+      "additionalProperties": false
+    },
+    "providers": {
+      "type": "object",
+      "title": "Provider 设置",
+      "description": "每个 provider 可填写 baseUrl（自建端点时）和按能力的默认 options（选项名与 Webfox 一致）。",
+      "properties": {
+        "brave": {
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "search": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "contents": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "answer": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "research": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "cloudflare": {
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "search": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "contents": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "answer": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "research": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "exa": {
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "search": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "contents": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "answer": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "research": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "firecrawl": {
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "search": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "contents": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "answer": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "research": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "gemini": {
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "search": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "contents": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "answer": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "research": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "linkup": {
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "search": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "contents": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "answer": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "research": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "ollama": {
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "search": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "contents": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "answer": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "research": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "openai": {
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "search": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "contents": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "answer": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "research": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "parallel": {
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "search": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "contents": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "answer": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "research": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "perplexity": {
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "search": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "contents": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "answer": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "research": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "serpbase": {
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "search": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "contents": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "answer": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "research": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "serper": {
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "search": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "contents": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "answer": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "research": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "tavily": {
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "search": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "contents": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "answer": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "research": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "valyu": {
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "search": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "contents": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "answer": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "research": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "youcom": {
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "search": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "contents": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "answer": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "research": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "credentials": {
+      "type": "object",
+      "title": "凭据引用",
+      "description": "只保存凭据库引用，不保存密钥明文。Brave 的搜索与问答是两套密钥；Cloudflare 需要 API token 与 Account ID 两项。",
+      "properties": {
+        "braveSearch": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "Brave 搜索密钥",
+          "description": "对应 BRAVE_SEARCH_API_KEY。"
+        },
+        "braveAnswers": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "Brave 问答密钥",
+          "description": "对应 BRAVE_ANSWERS_API_KEY（answer/research）。"
+        },
+        "cloudflareToken": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "Cloudflare API Token",
+          "description": "对应 CLOUDFLARE_API_TOKEN。"
+        },
+        "cloudflareAccountId": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "Cloudflare Account ID",
+          "description": "对应 CLOUDFLARE_ACCOUNT_ID。"
+        },
+        "exa": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "Exa API Key",
+          "description": "对应 EXA_API_KEY。"
+        },
+        "firecrawl": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "Firecrawl API Key",
+          "description": "对应 FIRECRAWL_API_KEY。"
+        },
+        "gemini": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "Google API Key",
+          "description": "对应 GOOGLE_API_KEY（Gemini）。"
+        },
+        "linkup": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "Linkup API Key",
+          "description": "对应 LINKUP_API_KEY。"
+        },
+        "ollama": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "Ollama API Key",
+          "description": "对应 OLLAMA_API_KEY。"
+        },
+        "openai": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "OpenAI API Key",
+          "description": "对应 OPENAI_API_KEY。"
+        },
+        "parallel": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "Parallel API Key",
+          "description": "对应 PARALLEL_API_KEY。"
+        },
+        "perplexity": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "Perplexity API Key",
+          "description": "对应 PERPLEXITY_API_KEY。"
+        },
+        "serpbase": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "SerpBase API Key",
+          "description": "对应 SERPBASE_API_KEY。"
+        },
+        "serper": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "Serper API Key",
+          "description": "对应 SERPER_API_KEY。"
+        },
+        "tavily": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "Tavily API Key",
+          "description": "对应 TAVILY_API_KEY。"
+        },
+        "valyu": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "Valyu API Key",
+          "description": "对应 VALYU_API_KEY。"
+        },
+        "youcom": {
+          "type": "string",
+          "format": "credential-ref",
+          "minLength": 1,
+          "title": "You.com API Key",
+          "description": "对应 YDC_API_KEY。"
+        }
+      },
+      "additionalProperties": false
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "title": "请求超时（毫秒）",
+      "description": "普通 search/contents/answer 请求的整体截止时间，包含凭据解析与重试。",
+      "minimum": 1000,
+      "maximum": 600000
+    },
+    "researchTimeoutMs": {
+      "type": "integer",
+      "title": "调研超时（毫秒）",
+      "description": "research 工具的整体截止时间，前台等待，超时返回错误。",
+      "minimum": 1000,
+      "maximum": 3600000
+    },
+    "retries": {
+      "type": "integer",
+      "title": "重试次数",
+      "description": "瞬态失败的重试次数（默认不重试）。",
+      "minimum": 0,
+      "maximum": 5
+    },
+    "concurrency": {
+      "type": "integer",
+      "title": "并发输入数",
+      "description": "一次调用中多个 query/URL 的并发数。",
+      "minimum": 1,
+      "maximum": 16
+    }
+  },
+  "additionalProperties": false
+}

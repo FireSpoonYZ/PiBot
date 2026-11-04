@@ -28,8 +28,13 @@ final class ShowerController {
     private int dpi;
     private IBinder displayService;
     private IShowerClient clientToken;
-    private Preview preview;
+    private volatile Preview preview;
     private boolean manualControl;
+    /** 新 Host Bot 屏幕面板的接管：用户输入与 Agent 工具并行，不阻塞工具。 */
+    private volatile boolean userControl;
+    /** 用户接管过且 Agent 尚未重新截图：非截图动作拒绝执行，避免按旧画面坐标操作。 */
+    private volatile boolean userDirty;
+    private String surfaceSessionId;
     private final java.util.LinkedHashSet<String> launchedPackages = new java.util.LinkedHashSet<>();
 
     static final class Preview {
@@ -115,14 +120,24 @@ final class ShowerController {
 
     synchronized Preview openPreview(android.view.Surface surface) throws Exception {
         IShowerService service = activeService();
-        Preview next = new Preview(displayId, width, height, service);
+        int[] size = displaySize();
+        if (size == null) throw new IllegalStateException("虚拟屏已结束");
+        Preview next = new Preview(displayId, size[0], size[1], service);
         if (!service.setPreviewSurface(displayId, surface, next.token)) {
             throw new IllegalStateException("无法连接虚拟桌面画面");
         }
         preview = next;
         manualControl = false;
+        userControl = false;
         notifyAll();
         return next;
+    }
+
+    /** 当前虚拟屏 {width, height, dpi}；没有屏幕时返回 null。不创建屏幕，也不延长空闲时间。 */
+    synchronized int[] displaySize() throws android.os.RemoteException {
+        if (!hasDisplay()) return null;
+        int[] size = manager.aliveService().getDisplaySize(displayId);
+        return size == null ? null : new int[] {size[0], size[1], dpi};
     }
 
     synchronized boolean keepPreviewAlive(Preview current) throws Exception {
@@ -134,8 +149,31 @@ final class ShowerController {
         // Unblock waiting tools even if the service has died.
         preview = null;
         manualControl = false;
+        userControl = false;
         notifyAll();
         current.service.setPreviewSurface(current.displayId, null, current.token);
+    }
+
+    /**
+     * Bot 屏幕面板接管：拿到控制器锁说明 Agent 当前动作已结束（调用方先中断在途工具），
+     * 之后接受用户输入，并要求 Agent 下一次非截图动作前重新截图。不阻塞后续工具调用。
+     */
+    synchronized void takeover(Preview current) {
+        requirePreview(current);
+        userControl = true;
+        userDirty = true;
+    }
+
+    boolean isUserDirty() {
+        return userDirty;
+    }
+
+    /** 与 Agent 工具并行：不取控制器锁，只校验仍是当前画面且已接管。 */
+    void userTouch(Preview current, android.view.MotionEvent event) throws Exception {
+        if (preview != current || !userControl) throw new IllegalStateException("请先接管操作");
+        if (!current.service.injectTouch(current.displayId, event)) {
+            throw new IllegalStateException("虚拟桌面触摸注入失败");
+        }
     }
 
     synchronized void setManualControl(Preview current, boolean enabled) throws Exception {
@@ -206,6 +244,70 @@ final class ShowerController {
     }
 
     synchronized JSONObject screenshot(int maxWidth, int maxHeight) throws Exception {
+        byte[] png = requestPng(maxWidth, maxHeight);
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(png, 0, png.length, bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            throw new IllegalStateException("无法读取截图尺寸");
+        }
+        userDirty = false;
+        return state("screenshot").put("imageWidth", bounds.outWidth)
+                .put("imageHeight", bounds.outHeight).put("mimeType", "image/png")
+                .put("data", Base64.encodeToString(png, Base64.NO_WRAP));
+    }
+
+    /** 统一 shower_surface：复用现有 PNG 获取，JPEG 缩放与 base64 预算在协议层完成。 */
+    synchronized byte[] capturePng(int maxWidth, int maxHeight) throws Exception {
+        return requestPng(maxWidth, maxHeight);
+    }
+
+    synchronized int surfaceWidth() throws android.os.RemoteException {
+        int[] size = displaySize();
+        return size == null ? 0 : size[0];
+    }
+
+    synchronized int surfaceHeight() throws android.os.RemoteException {
+        int[] size = displaySize();
+        return size == null ? 0 : size[1];
+    }
+
+    synchronized String surfaceSessionId() {
+        return surfaceSessionId;
+    }
+
+    /** manager 在首次 ensure 前分配 UUID；虚拟屏复用时只绑定该会话，不重建显示。 */
+    synchronized void adoptSurfaceSession(String sessionId) {
+        surfaceSessionId = sessionId;
+    }
+
+    /**
+     * 统一 surface 的空闲保活：只对已绑定 sessionId 且 binder 仍活的显示用现有 touchDisplay 延寿；
+     * 显示丢失时 clearDisplay（清 sessionId）后返回 false，绝不 ensureService、不重建。
+     */
+    synchronized boolean keepSurfaceAlive() {
+        if (surfaceSessionId == null) return false;
+        try {
+            activeService();
+            return surfaceSessionId != null;
+        } catch (Exception lost) {
+            return false;
+        }
+    }
+
+    /** 统一 text 输入：插入光标处（不做 select-all 替换），经系统剪贴板粘贴。 */
+    synchronized JSONObject surfaceText(String text) throws Exception {
+        if (text == null || text.isEmpty() || text.length() > 1000) {
+            throw new IllegalArgumentException("text 长度范围为 1..1000");
+        }
+        synchronized (clipboard) {
+            copy(text);
+            key(KeyEvent.KEYCODE_PASTE, 0, "PASTE");
+        }
+        return state("text").put("characters", text.length());
+    }
+
+    private byte[] requestPng(int maxWidth, int maxHeight) throws Exception {
         if (maxWidth < 160 || maxWidth > 1440 || maxHeight < 160 || maxHeight > 3200) {
             throw new IllegalArgumentException("截图尺寸范围为 160..1440 × 160..3200");
         }
@@ -227,15 +329,7 @@ final class ShowerController {
         }
         if (png.length < 24 || (png[0] & 0xff) != 0x89 || png[1] != 'P' || png[2] != 'N'
                 || png[3] != 'G') throw new IllegalStateException("Operit Shower 截图不是有效 PNG");
-        BitmapFactory.Options bounds = new BitmapFactory.Options();
-        bounds.inJustDecodeBounds = true;
-        BitmapFactory.decodeByteArray(png, 0, png.length, bounds);
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-            throw new IllegalStateException("无法读取截图尺寸");
-        }
-        return state("screenshot").put("imageWidth", bounds.outWidth)
-                .put("imageHeight", bounds.outHeight).put("mimeType", "image/png")
-                .put("data", Base64.encodeToString(png, Base64.NO_WRAP));
+        return png;
     }
 
     synchronized JSONObject tap(int x, int y) throws Exception {
@@ -340,22 +434,27 @@ final class ShowerController {
         return service;
     }
 
-    private void requireCoordinate(int x, int y) {
-        if (displayId == null) throw new IllegalStateException("虚拟屏尚未创建；先调用 create");
-        if (x < 0 || y < 0 || x >= width || y >= height) {
-            throw new IllegalArgumentException("坐标超出虚拟屏 " + width + "x" + height);
+    private void requireCoordinate(int x, int y) throws android.os.RemoteException {
+        int[] size = displaySize();
+        if (size == null) throw new IllegalStateException("虚拟屏尚未创建；先调用 create");
+        if (x < 0 || y < 0 || x >= size[0] || y >= size[1]) {
+            throw new IllegalArgumentException("坐标超出虚拟屏 " + size[0] + "x" + size[1]);
         }
     }
 
     private JSONObject state(String action) throws Exception {
+        int[] size = displaySize();
         return new JSONObject().put("ok", true).put("action", action).put("displayId", displayId)
-                .put("width", width).put("height", height).put("dpi", dpi)
+                .put("width", size == null ? 0 : size[0]).put("height", size == null ? 0 : size[1]).put("dpi", dpi)
                 .put("idleTimeoutMs", 300_000);
     }
 
     private void clearDisplay() {
         preview = null;
         manualControl = false;
+        userControl = false;
+        userDirty = false;
+        surfaceSessionId = null;
         launchedPackages.clear();
         notifyAll();
         displayId = null;

@@ -1,0 +1,26 @@
+services:
+  center:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: e-launcher-center:local
+    restart: unless-stopped
+    env_file:
+      - center.env
+    environment:
+      CENTER_DATA_ROOT: /data
+      CENTER_LISTEN_HOST: 0.0.0.0
+      CENTER_PORT: "8443"
+      CENTER_RELAY_PORT: "8790"
+      CENTER_WEB_ROOT: /app/center-web/dist
+      CENTER_TLS_CERT_FILE: /certs/cert.pem
+      CENTER_TLS_KEY_FILE: /certs/key.pem
+    ports:
+      - "8443:8443"
+      - "8790:8790"
+    volumes:
+      - center-data:/data
+      - ./center-certs:/certs:ro
+
+volumes:
+  center-data:

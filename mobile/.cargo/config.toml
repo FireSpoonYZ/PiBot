@@ -1,0 +1,3 @@
+# 故意的空配置：Android 目标的 linker/sysroot/16KiB 页对齐标志由 packaging lane 的
+# host-core/build-mobile.js 通过 CARGO_ENCODED_RUSTFLAGS 显式传给 cargo，
+# 这里不再重复设置 [target.*].rustflags，避免两处 argv 冲突。

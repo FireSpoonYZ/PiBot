@@ -1,0 +1,463 @@
+/* Lane 3：主壳 rail、设备选择器、设置弹窗的专属样式。
+   全部限定在 .desktop-shell / .desktop-dialog 作用域内，不影响 Android 复用的共享组件。
+   基础 token 与通用类（.desktop-shell .desktop-rail .app-workspace .workspace-body
+   .desktop-dialog .icon-button .primary-button .secondary-button .pill-tabs）由 app.css 提供；
+   下列 var() 回退值与 app.css 的 token 对齐，避免对 token 名的强依赖。 */
+
+/* ---------- 左窄导航轨 ---------- */
+.desktop-shell .desktop-rail {
+  flex: 0 0 68px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 6px;
+  border-right: 1px solid var(--line, #e5e5df);
+  background: var(--surface, #efeee9);
+}
+.desktop-shell .rail-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 56px;
+  min-height: 0;
+  padding: 8px 0 7px;
+  border: none;
+  border-radius: var(--radius-sm, 12px);
+  background: transparent;
+  color: var(--muted, #70756f);
+  cursor: pointer;
+}
+.desktop-shell .rail-item:hover {
+  background: var(--accent-soft, #e1e7df);
+  color: var(--text, #242622);
+}
+.desktop-shell .rail-item.active {
+  background: var(--brand-soft, rgb(43 112 246 / 0.12));
+  color: var(--brand, var(--accent, #2B70F6));
+}
+.desktop-shell .rail-label { font-size: 11px; line-height: 1.15; }
+.desktop-shell .rail-caption { font-size: 10px; color: var(--muted, #70756f); }
+.desktop-shell .rail-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+.desktop-shell .rail-spacer { flex: 1; }
+.desktop-shell .conn-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.desktop-shell .conn-dot.online { background: var(--ok, #16a34a); }
+.desktop-shell .conn-dot.offline { background: var(--danger, #ac3434); }
+
+/* 主题三档切换（浅色 / 跟随系统 / 深色） */
+.desktop-shell .theme-switch {
+  display: flex;
+  border: 1px solid var(--line, #e5e5df);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--surface-elevated, #fff);
+}
+.desktop-shell .theme-switch button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted, #70756f);
+  cursor: pointer;
+}
+.desktop-shell .theme-switch button + button { border-left: 1px solid var(--line, #e5e5df); }
+.desktop-shell .theme-switch button.active {
+  background: var(--brand-soft, rgb(43 112 246 / 0.12));
+  color: var(--brand, var(--accent, #2B70F6));
+}
+
+/* ---------- 群聊 / 待发送 顶部设备选择器 ---------- */
+.desktop-shell .workspace-body { flex-direction: column; }
+.desktop-shell .chat-workspace-host { display: contents; }
+.desktop-shell .chat-workspace-host.workspace-hidden { display: none; }
+.desktop-shell .device-view { min-width: 0; }
+.desktop-shell .device-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.desktop-shell .device-selector {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line-subtle, var(--line, #e5e5df));
+}
+.desktop-shell .device-selector-label {
+  font-size: 12px;
+  color: var(--muted, #70756f);
+  white-space: nowrap;
+}
+.desktop-shell .device-selector select {
+  min-width: 220px;
+  max-width: 340px;
+  border: 1px solid var(--line, #e5e5df);
+  border-radius: 999px;
+  background: var(--surface-elevated, #fff);
+  color: var(--text, #242622);
+  padding: 5px 12px;
+  font-size: 13px;
+}
+.desktop-shell .device-view > .empty-state { margin: auto; }
+
+/* ---------- 设置弹窗（Radix Dialog） ---------- */
+/* 设置弹窗独占 overlay 层级：裸 .desktop-dialog-overlay 归各 lane（如 create-bot-dialog z41），本 lane 不跨 lane 改写通用 overlay。 */
+.desktop-dialog-overlay.settings-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgb(0 0 0 / 0.35);
+}
+.desktop-dialog.settings-dialog {
+  position: fixed;
+  z-index: 51;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(640px, 94vw);
+  max-height: min(84vh, 760px);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+  background: var(--surface-elevated, #fff);
+  border: 1px solid var(--line, #e5e5df);
+  border-radius: var(--radius-lg, 22px);
+  box-shadow: var(--shadow-lg, 0 16px 42px rgb(0 0 0 / 0.14));
+}
+.desktop-dialog .dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px 6px;
+}
+.desktop-dialog .dialog-title { margin: 0; font-size: 16px; font-weight: 650; }
+.desktop-dialog .dialog-desc {
+  margin: 0 18px 10px;
+  font-size: 12px;
+  color: var(--muted, #70756f);
+}
+.desktop-dialog .dialog-tabs { margin: 0 18px 4px; }
+.desktop-dialog .dialog-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 18px 18px;
+}
+
+/* 弹窗内页签（叠加 .pill-tabs 基础类） */
+.desktop-dialog .pill-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line, #e5e5df);
+  border-radius: 999px;
+  background: var(--surface, #efeee9);
+}
+.desktop-dialog .pill-tabs button {
+  min-height: 0;
+  padding: 5px 14px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted, #70756f);
+  font-size: 13px;
+  cursor: pointer;
+}
+.desktop-dialog .pill-tabs button.active {
+  background: var(--surface-elevated, #fff);
+  color: var(--text, #242622);
+  box-shadow: var(--shadow-sm, 0 2px 10px rgb(0 0 0 / 0.04));
+}
+
+/* 弹窗分区 */
+.desktop-dialog .settings-section {
+  padding: 12px 0;
+  border-top: 1px solid var(--line-subtle, var(--line, #e5e5df));
+}
+.desktop-dialog .settings-section:first-child { border-top: none; }
+.desktop-dialog .settings-section h4 { margin: 0 0 8px; font-size: 13px; }
+.desktop-dialog .section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.desktop-dialog .section-head h4 { margin: 0; }
+.desktop-dialog .card-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.desktop-dialog .dialog-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.desktop-dialog .client-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--line, #e5e5df);
+  border-radius: 999px;
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  color: var(--muted, #70756f);
+}
+
+/* 档案与设备行 */
+.desktop-dialog .profile-list,
+.desktop-dialog .device-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 8px;
+}
+.desktop-dialog .device-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.desktop-dialog .profile-row,
+.desktop-dialog .device-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm, 12px);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.desktop-dialog .profile-row:hover,
+.desktop-dialog .device-row:hover { background: var(--surface, #efeee9); }
+.desktop-dialog li.selected > .profile-row,
+.desktop-dialog li.selected > .device-row {
+  background: var(--brand-soft, rgb(43 112 246 / 0.12));
+  border-color: var(--brand, var(--accent, #2B70F6));
+}
+.desktop-dialog .profile-title { font-weight: 600; }
+
+/* 设备行内改名 */
+.desktop-dialog .rename-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+}
+.desktop-dialog .rename-inline input {
+  flex: 1;
+  border: 1px solid var(--line, #e5e5df);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 13px;
+  background: var(--surface-elevated, #fff);
+  color: var(--text, #242622);
+}
+
+/* 弹窗表单 */
+.desktop-dialog .form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.desktop-dialog .form-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted, #70756f);
+}
+.desktop-dialog .form-grid .form-grid-full { grid-column: 1 / -1; }
+.desktop-dialog .form-grid input,
+.desktop-dialog .form-grid select {
+  border: 1px solid var(--line, #e5e5df);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  background: var(--surface-elevated, #fff);
+  color: var(--text, #242622);
+}
+.desktop-dialog .settings-connect {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.desktop-dialog .settings-connect label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted, #70756f);
+}
+.desktop-dialog .settings-connect input,
+.desktop-dialog .settings-connect textarea {
+  border: 1px solid var(--line, #e5e5df);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  background: var(--surface-elevated, #fff);
+  color: var(--text, #242622);
+}
+.desktop-dialog .settings-connect textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+/* ---------- 设置内已归档智能体入口与专页 ---------- */
+.desktop-dialog .archived-entry-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #e5e5df);
+  border-radius: var(--radius-sm, 12px);
+  background: var(--surface-elevated, #fff);
+  color: var(--text, #242622);
+  text-align: left;
+  cursor: pointer;
+}
+.desktop-dialog .archived-entry-row:hover {
+  background: var(--surface, #efeee9);
+  border-color: var(--accent, #2B70F6);
+}
+.desktop-dialog .archived-entry-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.desktop-dialog .archived-subpage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.desktop-dialog .archived-subpage-title {
+  flex: 1;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.desktop-dialog .archived-subpage-title h4 {
+  margin: 0;
+}
+.desktop-dialog .archived-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.desktop-dialog .archived-bot-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+}
+.desktop-dialog .archived-bot-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #e5e5df);
+  border-radius: 14px;
+  background: var(--surface-elevated, #fff);
+}
+.desktop-dialog .archived-bot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.desktop-dialog .archived-bot-open {
+  flex: 1;
+  min-width: 200px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text, #242622);
+  text-align: left;
+  cursor: pointer;
+}
+.desktop-dialog .archived-bot-open:hover {
+  background: var(--surface, #efeee9);
+}
+.desktop-dialog .archived-bot-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.desktop-dialog .archived-bot-title-line {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.desktop-dialog .archived-bot-preview {
+  font-size: 12px;
+  color: var(--muted, #70756f);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.desktop-dialog .archived-bot-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.desktop-dialog .archived-bot-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  padding: 5px 10px;
+}
+.desktop-dialog .archived-confirm-banner {
+  margin: 0;
+}

@@ -1,0 +1,85 @@
+{
+  "type": "object",
+  "properties": {
+    "baseUrl": {
+      "type": "string",
+      "title": "Hindsight 服务地址",
+      "description": "Hindsight 服务端点的 URL，例如 http://localhost:8888。",
+      "minLength": 1
+    },
+    "apiKeyRef": {
+      "type": "string",
+      "title": "API 密钥引用",
+      "description": "引用凭据库中已保存密钥的名称；这里只保存引用，不保存密钥明文。",
+      "format": "credential-ref",
+      "minLength": 1
+    },
+    "projectId": {
+      "type": "string",
+      "title": "项目标识",
+      "description": "标识记忆所属的项目。与旧字段 topic 填写相同值时继续沿用原有记忆库和待处理队列；修改该值会切换到另一套项目记忆。",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "agentUse": {
+      "type": "string",
+      "title": "记忆用途",
+      "description": "选择记忆的用途：coding 面向编程，conversation 面向生活对话；影响记忆库模板、mission 和上下文标签。不自动改写已有记忆库内容，也不改变捕获路由。",
+      "enum": [
+        "coding",
+        "conversation"
+      ],
+      "enumNames": [
+        "编程",
+        "生活对话"
+      ],
+      "default": "coding"
+    },
+    "mode": {
+      "type": "string",
+      "title": "读写权限",
+      "description": "read-write 允许自动留存和显式写入记忆；read-only 为只读，会阻止自动留存和显式写入，仍可检索已有记忆。",
+      "enum": [
+        "read-write",
+        "read-only"
+      ],
+      "enumNames": [
+        "读写",
+        "只读"
+      ],
+      "default": "read-write"
+    },
+    "sharedMemory": {
+      "type": "boolean",
+      "title": "共享笔记库",
+      "description": "启用后在同一 Bot 的当前项目下增加一个共享笔记库，仅保存显式写入的笔记，不自动保存全量对话，也不与其他 Bot 共享。",
+      "default": false
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "title": "请求超时（毫秒）",
+      "description": "普通 Hindsight 请求的最长等待时间。",
+      "minimum": 1,
+      "maximum": 120000
+    },
+    "reflectTimeoutMs": {
+      "type": "integer",
+      "title": "反思超时（毫秒）",
+      "description": "反思（reflect）请求的最长等待时间。",
+      "minimum": 1,
+      "maximum": 120000
+    },
+    "topic": {
+      "type": "string",
+      "title": "项目标识（旧字段）",
+      "description": "已废弃，请改用 projectId。仅为兼容旧配置保留；两者同时存在时以 projectId 为准。",
+      "deprecated": true,
+      "minLength": 1,
+      "maxLength": 256
+    }
+  },
+  "required": [
+    "baseUrl"
+  ],
+  "additionalProperties": false
+}

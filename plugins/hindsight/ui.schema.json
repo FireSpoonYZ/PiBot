@@ -1,0 +1,16 @@
+{
+  "ui:order": [
+    "baseUrl",
+    "apiKeyRef",
+    "projectId",
+    "agentUse",
+    "mode",
+    "sharedMemory",
+    "timeoutMs",
+    "reflectTimeoutMs",
+    "topic"
+  ],
+  "topic": {
+    "ui:widget": "hidden"
+  }
+}

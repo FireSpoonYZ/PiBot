@@ -1,0 +1,234 @@
+import { CLIENT_VERSION, HindsightClient, HindsightError, createClient, createConfig, sdk, } from "./hindsight-sdk.js";
+import { isGoneError } from "../banks/bank-operations.js";
+import { redactError } from "../utils/sanitize.js";
+import { PI_HINDSIGHT_USER_AGENT } from "../version.js";
+import { withRetry } from "./client-retry.js";
+import { installFetchRequestCompat } from "./fetch-compat.js";
+import { withTimeout } from "./timeout.js";
+function sdkHeaders(config) {
+    const headers = {
+        "User-Agent": PI_HINDSIGHT_USER_AGENT,
+    };
+    if (config.hindsight.apiKey)
+        headers.Authorization = `Bearer ${config.hindsight.apiKey}`;
+    return headers;
+}
+function createLowLevelClient(config) {
+    return createClient(createConfig({
+        baseUrl: config.hindsight.baseUrl.replace(/\/$/, ""),
+        headers: sdkHeaders(config),
+    }));
+}
+function unwrapSdkResponse(response, operation) {
+    if (response.data !== undefined)
+        return response.data;
+    const error = response.error;
+    const statusCode = response.response?.status;
+    const details = error?.detail ?? error?.message ?? error;
+    throw new HindsightError(`${operation} failed: ${JSON.stringify(details)}`, statusCode, details);
+}
+function reflectInclude(options) {
+    if (options?.includeFacts === undefined && options?.includeToolCalls === undefined) {
+        return undefined;
+    }
+    const include = {};
+    if (options?.includeFacts !== undefined) {
+        include.facts = options.includeFacts ? {} : null;
+    }
+    if (options?.includeToolCalls !== undefined) {
+        include.tool_calls = options.includeToolCalls
+            ? options.includeToolCallOutput === false
+                ? { output: false }
+                : {}
+            : null;
+    }
+    return include;
+}
+function reflectRequestBody(query, options) {
+    const body = {
+        query,
+        budget: options?.budget ?? "low",
+    };
+    if (options?.context)
+        body.context = options.context;
+    if (options?.maxTokens !== undefined)
+        body.max_tokens = options.maxTokens;
+    if (options?.responseSchema)
+        body.response_schema = options.responseSchema;
+    if (options?.factTypes)
+        body.fact_types = options.factTypes;
+    if (options?.excludeMentalModels !== undefined) {
+        body.exclude_mental_models = options.excludeMentalModels;
+    }
+    if (options?.excludeMentalModelIds) {
+        body.exclude_mental_model_ids = options.excludeMentalModelIds;
+    }
+    if (options?.tagGroups)
+        body.tag_groups = options.tagGroups;
+    else if (options?.tags)
+        body.tags = options.tags;
+    if (!options?.tagGroups && options?.tagsMatch)
+        body.tags_match = options.tagsMatch;
+    const include = reflectInclude(options);
+    if (include)
+        body.include = include;
+    return body;
+}
+function retainBatchItem(content, options) {
+    return {
+        content,
+        ...(options?.timestamp ? { timestamp: options.timestamp } : {}),
+        ...(options?.context ? { context: options.context } : {}),
+        ...(options?.metadata ? { metadata: options.metadata } : {}),
+        ...(options?.documentId ? { document_id: options.documentId } : {}),
+        ...(options?.entities?.length ? { entities: options.entities } : {}),
+        ...(options?.tags ? { tags: options.tags } : {}),
+        ...(options?.observationScopes?.length
+            ? { observation_scopes: options.observationScopes }
+            : {}),
+        ...(options?.updateMode ? { update_mode: options.updateMode } : {}),
+        ...(options?.strategy ? { strategy: options.strategy } : {}),
+    };
+}
+function retainSingle(raw, bankId, content, options, signal) {
+    if (options?.documentTags?.length) {
+        return raw.retainBatch(bankId, [retainBatchItem(content, options)], {
+            ...(options.async !== undefined ? { async: options.async } : {}),
+            ...(options.async === true && options.operationId != null
+                ? { operationId: options.operationId }
+                : {}),
+            documentTags: options.documentTags,
+            signal,
+        });
+    }
+    const { documentTags: _documentTags, signal: _signal, ...retainOptions } = options ?? {};
+    return raw.retain(bankId, content, { ...retainOptions, signal });
+}
+async function reflect(args, signal) {
+    if (args.options?.maxTokens !== undefined) {
+        const response = await sdk.reflect({
+            client: args.lowLevel,
+            path: { bank_id: args.bankId },
+            body: reflectRequestBody(args.query, args.options),
+            signal,
+        });
+        return unwrapSdkResponse(response, "reflect");
+    }
+    return args.raw.reflect(args.bankId, args.query, { ...args.options, signal });
+}
+async function importBankTemplate(lowLevel, bankId, manifest, options, signal) {
+    const response = await sdk.importBankTemplate({
+        client: lowLevel,
+        path: { bank_id: bankId },
+        ...(options?.dryRun ? { query: { dry_run: true } } : {}),
+        // The generated SDK types `body` as `never` for this endpoint: the OpenAPI schema
+        // declares a raw JSON object rather than a typed model. The request body is still the
+        // documented BankTemplateManifest shape (Hindsight's Bank Templates API docs).
+        body: manifest,
+        signal,
+    });
+    return unwrapSdkResponse(response, "importBankTemplate");
+}
+export function createHindsightClient(config) {
+    installFetchRequestCompat();
+    const raw = new HindsightClient({
+        baseUrl: config.hindsight.baseUrl,
+        ...(config.hindsight.apiKey ? { apiKey: config.hindsight.apiKey } : {}),
+        userAgent: PI_HINDSIGHT_USER_AGENT,
+    });
+    const lowLevel = createLowLevelClient(config);
+    const timeoutMs = config.hindsight.timeoutMs;
+    return {
+        retain: (bankId, content, options) => withTimeout("hindsight retain", timeoutMs, (signal) => retainSingle(raw, bankId, content, options, signal), options?.signal),
+        retainBatch: (...args) => withTimeout("hindsight retainBatch", timeoutMs, (signal) => {
+            const [bankId, items, options] = args;
+            return raw.retainBatch(bankId, items, { ...options, signal });
+        }, args[2]?.signal),
+        recall: (...args) => {
+            const [bankId, query, options] = args;
+            return withTimeout("hindsight recall", timeoutMs, (signal) => raw.recall(bankId, query, { ...options, signal }), options?.signal);
+        },
+        reflect: (bankId, query, options) => withTimeout("hindsight reflect", timeoutMs, (signal) => reflect({ raw, lowLevel, bankId, query, options }, signal), options?.signal),
+        createBank: (...args) => withTimeout("hindsight createBank", timeoutMs, (signal) => {
+            const [bankId, options] = args;
+            return raw.createBank(bankId, { ...options, signal });
+        }),
+        getBankProfile: (...args) => withTimeout("hindsight getBankProfile", timeoutMs, (signal) => withRetry("getBankProfile", () => raw.getBankProfile(args[0], { signal }))),
+        getBankStats: (bankId) => withTimeout("hindsight getBankStats", timeoutMs, (signal) => withRetry("getBankStats", async () => {
+            const response = await sdk.getAgentStats({
+                client: lowLevel,
+                path: { bank_id: bankId },
+                signal,
+            });
+            return unwrapSdkResponse(response, "getBankStats");
+        })),
+        getBankConfig: (bankId) => withTimeout("hindsight getBankConfig", timeoutMs, (signal) => withRetry("getBankConfig", () => raw.getBankConfig(bankId, { signal }))),
+        listBanks: (options) => withTimeout("hindsight listBanks", timeoutMs, (signal) => withRetry("listBanks", async () => {
+            // Hindsight 0.10 list-banks accepts q/limit/offset. The 0.9 generated
+            // client types still declare query as never; the HTTP query is documented.
+            const query = {
+                ...(options?.q ? { q: options.q } : {}),
+                ...(options?.limit !== undefined ? { limit: options.limit } : {}),
+                ...(options?.offset !== undefined ? { offset: options.offset } : {}),
+            };
+            const response = await sdk.listBanks({
+                client: lowLevel,
+                ...(Object.keys(query).length > 0 ? { query: query } : {}),
+                signal,
+            });
+            return unwrapSdkResponse(response, "listBanks");
+        }), options?.signal),
+        importBankTemplate: (bankId, manifest, options) => withTimeout("hindsight importBankTemplate", timeoutMs, (signal) => importBankTemplate(lowLevel, bankId, manifest, options, signal), options?.signal),
+        listMentalModels: (bankId, options) => withTimeout("hindsight listMentalModels", timeoutMs, (signal) => raw.listMentalModels(bankId, { ...options, signal }), options?.signal),
+        getMentalModel: (bankId, mentalModelId, options) => withTimeout("hindsight getMentalModel", timeoutMs, (signal) => raw.getMentalModel(bankId, mentalModelId, { ...options, signal }), options?.signal),
+        createMentalModel: (bankId, name, sourceQuery, options) => withTimeout("hindsight createMentalModel", timeoutMs, (signal) => raw.createMentalModel(bankId, name, sourceQuery, { ...options, signal }), options?.signal),
+        updateMentalModel: (bankId, mentalModelId, options) => withTimeout("hindsight updateMentalModel", timeoutMs, (signal) => raw.updateMentalModel(bankId, mentalModelId, { ...options, signal }), options?.signal),
+        refreshMentalModel: (bankId, mentalModelId, options) => withTimeout("hindsight refreshMentalModel", timeoutMs, (signal) => raw.refreshMentalModel(bankId, mentalModelId, { ...options, signal }), options?.signal),
+        deleteMentalModel: (bankId, mentalModelId, options) => withTimeout("hindsight deleteMentalModel", timeoutMs, async (signal) => {
+            if (options?.dryRun) {
+                return { dryRun: true, bankId, mentalModelId, wouldDelete: true };
+            }
+            await raw.deleteMentalModel(bankId, mentalModelId, { signal });
+            return { deleted: true, bankId, mentalModelId };
+        }, options?.signal),
+        getKnowledgeBaseTree: (bankId, options) => withTimeout("hindsight getKnowledgeBaseTree", timeoutMs, (signal) => raw.getKnowledgeBaseTree(bankId, { ...options, signal }), options?.signal),
+        createKnowledgeFolder: (bankId, name, options) => withTimeout("hindsight createKnowledgeFolder", timeoutMs, (signal) => raw.createKnowledgeFolder(bankId, name, { ...options, signal }), options?.signal),
+        createKnowledgePage: (bankId, name, sourceQuery, options) => withTimeout("hindsight createKnowledgePage", timeoutMs, (signal) => raw.createKnowledgePage(bankId, name, sourceQuery, { ...options, signal }), options?.signal),
+        getKnowledgePage: (bankId, pageId, options) => withTimeout("hindsight getKnowledgePage", timeoutMs, (signal) => raw.getKnowledgePage(bankId, pageId, { ...options, signal }), options?.signal),
+        searchKnowledgeBase: (bankId, query, options) => withTimeout("hindsight searchKnowledgeBase", timeoutMs, (signal) => raw.searchKnowledgeBase(bankId, query, { ...options, signal }), options?.signal),
+        updateKnowledgeNode: (bankId, nodeId, options) => withTimeout("hindsight updateKnowledgeNode", timeoutMs, (signal) => raw.updateKnowledgeNode(bankId, nodeId, { ...options, signal }), options?.signal),
+        deleteKnowledgeNode: (bankId, nodeId, options) => withTimeout("hindsight deleteKnowledgeNode", timeoutMs, (signal) => raw.deleteKnowledgeNode(bankId, nodeId, { ...options, signal }), options?.signal),
+        exportKnowledgeBase: (bankId, options) => withTimeout("hindsight exportKnowledgeBase", timeoutMs, (signal) => raw.exportKnowledgeBase(bankId, { ...options, signal }), options?.signal),
+        updateBankConfig: (bankId, options) => withTimeout("hindsight updateBankConfig", timeoutMs, (signal) => raw.updateBankConfig(bankId, { ...options, signal }), options?.signal),
+        health: () => withTimeout("hindsight health", timeoutMs, (signal) => withRetry("health", async () => {
+            const response = await sdk.healthEndpointHealthGet({ client: lowLevel, signal });
+            return unwrapSdkResponse(response, "health");
+        })),
+        getVersion: () => withTimeout("hindsight getVersion", timeoutMs, (signal) => withRetry("getVersion", () => raw.getVersion({ signal }))),
+    };
+}
+export async function checkHindsight(client, bankId) {
+    try {
+        if (client.health)
+            await client.health();
+        else if (client.listBanks)
+            await client.listBanks({ q: bankId, limit: 1 });
+        else if (client.getBankProfile) {
+            try {
+                await client.getBankProfile(bankId);
+            }
+            catch (error) {
+                // Profile retired in Hindsight v0.10; 410 still proves the server responded.
+                if (!isGoneError(error))
+                    throw error;
+            }
+        }
+        else
+            await client.recall(bankId, "health check", { maxTokens: 1, budget: "low" });
+        return { ok: true };
+    }
+    catch (error) {
+        return { ok: false, error: redactError(error) };
+    }
+}
+export const HINDSIGHT_CLIENT_VERSION = CLIENT_VERSION;

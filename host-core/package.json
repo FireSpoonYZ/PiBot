@@ -1,0 +1,38 @@
+{
+  "name": "@e-launcher/host-core",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build:shower-windows": "node build-shower-windows.js",
+    "build:cua-driver": "node build-cua-driver.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    },
+    "./control-client": {
+      "types": "./control-client.d.ts",
+      "import": "./control-client.js"
+    }
+  },
+  "dependencies": {
+    "@earendil-works/chord": "file:../build/pi-main/earendil-works-chord-1.4.0-main.35dfa757378b.tgz",
+    "@earendil-works/pi-ai": "file:../build/pi-main/earendil-works-pi-ai-1.4.0-main.35dfa757378b.tgz",
+    "@earendil-works/pi-codemode": "file:../build/pi-main/earendil-works-pi-codemode-1.4.0-main.35dfa757378b.tgz",
+    "@earendil-works/pi-durable": "file:../build/pi-main/earendil-works-pi-durable-1.4.0-main.35dfa757378b.tgz",
+    "@earendil-works/pi-mcp": "file:../build/pi-main/earendil-works-pi-mcp-1.4.0-main.35dfa757378b.tgz",
+    "@earendil-works/pi-telemetry": "file:../build/pi-main/earendil-works-pi-telemetry-1.4.0-main.35dfa757378b.tgz",
+    "@vectorize-io/hindsight-client": "0.9.2",
+    "ajv": "8.17.1",
+    "npm": "11.6.2",
+    "picomatch": "4.0.7",
+    "tar": "7.5.22",
+    "ws": "8.22.0",
+    "yaml": "2.9.0"
+  }
+}

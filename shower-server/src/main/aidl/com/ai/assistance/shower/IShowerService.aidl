@@ -19,4 +19,5 @@ interface IShowerService {
     boolean hasDisplay(int displayId);
     boolean setPreviewSurface(int displayId, in Surface surface, IShowerClient viewer);
     boolean injectTouch(int displayId, in MotionEvent event);
+    int[] getDisplaySize(int displayId);
 }

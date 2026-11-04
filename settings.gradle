@@ -16,4 +16,25 @@ dependencyResolutionManagement {
 
 rootProject.name = 'LauncherProbe'
 include ':app', ':shower-server'
-apply from: 'capacitor.settings.gradle'
+
+// Tauri Android SDK project (pinned tauri 2.12.5). The include snippet is resolved
+// from the mobile Cargo graph by `node host-core/build-mobile.js --sdk-path`
+// (metadata only); Gradle never guesses a cargo registry directory itself.
+def tauriSdkSettings = file('mobile/build/tauri-sdk.gradle')
+if (!tauriSdkSettings.isFile()) {
+    // 共享引导：片段是生成物且被忽略，plain Gradle、CI、scripts/verify.ps1 首次运行时
+    // 都在 settings 阶段同步生成后 apply；显式 argv，不依赖 shell、不猜 registry 路径。
+    def generated = providers.exec {
+        workingDir = rootDir
+        commandLine 'node', 'host-core/build-mobile.js', '--sdk-path'
+    }
+    int generatorExit = generated.result.get().exitValue
+    if (!tauriSdkSettings.isFile()) {
+        throw new GradleException("Missing ${tauriSdkSettings} after " +
+                "`node host-core/build-mobile.js --sdk-path` (exit ${generatorExit}). " +
+                'Install Node >= 22.19 and a Rust toolchain with the mobile package graph, then run ' +
+                '`node host-core/build-mobile.js --sdk-path` (or `npm run mobile:build`) yourself for details: ' +
+                'the :tauri-android project path comes from mobile/src-tauri/Cargo.lock.')
+    }
+}
+apply from: tauriSdkSettings

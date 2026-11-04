@@ -1,0 +1,29 @@
+/* Shared configuration & RJSF form refinements (variables defined in styles.css) */
+.config-form .form-group,
+.config-form .field {
+  margin-block: 10px;
+}
+
+.config-form .field-description,
+.config-form .help-block {
+  margin: 2px 0 6px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.config-form .error-detail,
+.config-form .text-danger {
+  color: var(--danger);
+  font-size: 0.84rem;
+  list-style: none;
+  padding-left: 0;
+  margin: 4px 0;
+}
+
+.config-form .array-item {
+  padding: 12px;
+  margin-block: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--card);
+}

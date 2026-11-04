@@ -1,0 +1,75 @@
+/* Unified Bot session 来源徽标（共享作用域类 .msg-attr）。
+   只负责紧凑来源标签视觉；不改动聊天气泡布局本身。 */
+.msg-attr {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--muted, #6b7280);
+  margin-bottom: 4px;
+}
+.msg-attr-sender {
+  font-weight: 600;
+  color: var(--text, #111827);
+}
+.msg-attr-channel {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--chip-bg, color-mix(in srgb, var(--accent, #2563eb) 14%, var(--surface, rgba(59, 130, 246, 0.1))));
+  color: var(--accent, #2563eb);
+}
+.msg-attr-dir,
+.msg-attr-category {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--chip-bg, rgba(107, 114, 128, 0.12));
+}
+.bot-chat-bubble.user:not(.is-peer) .msg-attr {
+  color: rgba(255, 255, 255, 0.86);
+}
+.bot-chat-bubble.user:not(.is-peer) .msg-attr-sender,
+.bot-chat-bubble.user:not(.is-peer) .msg-attr-bot .msg-attr-sender {
+  color: #ffffff;
+}
+.bot-chat-bubble.user:not(.is-peer) .msg-attr-channel,
+.bot-chat-bubble.user:not(.is-peer) .msg-attr-dir,
+.bot-chat-bubble.user:not(.is-peer) .msg-attr-category {
+  background: rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+}
+.msg-attr-out .msg-attr-dir {
+  color: var(--accent, #2563eb);
+}
+.msg-attr-host .msg-attr-channel {
+  background: var(--chip-bg, rgba(107, 114, 128, 0.12));
+  color: var(--muted, #6b7280);
+}
+.msg-attr-bot .msg-attr-sender {
+  color: var(--accent, #2563eb);
+}
+
+/* 协作过程（dm/room 触发的生成）：与投递给用户的回答气泡视觉区分，不算送达。
+   类挂在共享 ChatTurn 渲染上，desktop/mobile 复用同一组样式。 */
+.bot-chat-bubble.is-collab {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--surface) 78%, var(--bg, transparent));
+}
+.bot-chat-collab {
+  padding: 8px 12px;
+  margin: 4px 0;
+  border: 1px dashed var(--line, rgba(107, 114, 128, 0.4));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 78%, var(--bg, transparent));
+}
+.bot-chat-collab-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--muted, #6b7280);
+  margin-bottom: 4px;
+}

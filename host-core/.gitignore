@@ -1,0 +1,6 @@
+# Shower Windows 宿主只在构建时生成：Framework64 csc 产物、生成的 mstscax 互操作程序集
+# 以及构建中间文件都不入库（根 .gitignore 的 **/build/ 已覆盖，这里显式声明本目录）。
+native/windows/build/
+
+# Cua driver 由 host-core/build-cua-driver.js 下载解压生成，不入库。
+cua-driver/

@@ -1,0 +1,23 @@
+{
+  "name": "@e-launcher/center-server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "scripts": { "start": "node cli.js" },
+  "dependencies": {
+    "@e-launcher/center-contract": "file:../center-contract",
+    "@earendil-works/pi-mcp": "file:../build/pi-main/earendil-works-pi-mcp-1.4.0-main.35dfa757378b.tgz",
+    "@fastify/csrf-protection": "7.1.0",
+    "@fastify/multipart": "9.3.0",
+    "@fastify/rate-limit": "10.3.0",
+    "@fastify/secure-session": "8.2.0",
+    "@fastify/static": "8.3.0",
+    "ajv": "8.17.1",
+    "deepmerge": "4.3.1",
+    "fastify": "5.6.2",
+    "npm": "11.6.2",
+    "pacote": "21.0.4",
+    "semver": "7.8.5"
+  }
+}

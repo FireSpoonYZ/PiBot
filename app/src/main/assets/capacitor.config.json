@@ -1,8 +1,0 @@
-{
-	"appId": "com.example.launcherprobe",
-	"appName": "AI Assistant",
-	"webDir": "web/dist",
-	"android": {
-		"path": "."
-	}
-}

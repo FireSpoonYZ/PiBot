@@ -36,7 +36,7 @@ jobs:
           cache: npm
           cache-dependency-path: |
             package-lock.json
-            pi-runtime/package-lock.json
+            host-core/package-lock.json
 
       - uses: actions/cache@v6
         with:
@@ -59,6 +59,21 @@ jobs:
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platforms;android-36" "ndk;28.2.13676358" "cmake;3.22.1"
 
+      # settings.gradle 会在缺失时用 `node host-core/build-mobile.js --sdk-path` 生成 SDK include 片段，
+      # 该 metadata 需要 cargo；这里用 runner 自带的 rustup 准备好 stable + 两个 Android target。
+      - name: Install Rust toolchain and Android targets
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            echo "rustup not found on this runner image; the APK job needs the preinstalled Rust toolchain manager" >&2
+            exit 1
+          fi
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add --toolchain stable aarch64-linux-android x86_64-linux-android
+          rustc --version
+          cargo --version
+
       - name: Restore debug keystore
         env:
           DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
@@ -76,12 +91,9 @@ jobs:
       - name: Test web
         run: npm test
 
-      - name: Prepare Pi runtime
+      - name: Prepare Node Mobile
         shell: pwsh
-        run: ./scripts/prepare-pi-runtime.ps1 -SkipRuntimeBuild
-
-      - name: Test Pi runtime
-        run: npm --prefix pi-runtime test
+        run: ./scripts/prepare-node-mobile.ps1
 
       - name: Assemble APK
         run: ./gradlew --no-daemon --console=plain :app:testDebugUnitTest :app:lintDebug :shower-server:lintDebug :app:assembleDebug ${{ github.ref == 'refs/heads/main' && ':app:assembleRelease' || '' }}

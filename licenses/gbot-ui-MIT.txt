@@ -1,0 +1,35 @@
+lenML/gbot-ui
+
+Repository: https://github.com/lenML/gbot-ui
+Commit: 1614f854834f75db5fdb0cb6da1ee9f6fb4b88c5
+Adapted sources: src/components/grok-bot/MobileChatList.tsx (ConversationRow,
+useConversationRowInteractions), src/components/grok-bot/ContextMenu.tsx
+(menu positioning/focus/dismissal), src/components/grok-bot/AgentAvatar.tsx
+and src/styles/avatar.css (group avatar composition),
+src/components/grok-bot/GrokBotTranscript.tsx (MessageOriginHeader, MessageView,
+45-minute timestamp divider, message actions structure),
+src/components/grok-bot/MobileChat.tsx (floating chat header structure) and
+src/styles/iteration-mobile.css (message origin header styling), adapted into
+web/src/gbot-ui/ with this repository's theme variables and GrokBotAvatar.
+
+MIT License
+
+Copyright (c) 2026 lenML
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

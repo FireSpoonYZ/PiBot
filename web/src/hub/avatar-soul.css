@@ -1,0 +1,25 @@
+/* avatar-soul lane styles: loaded after web/src/styles.css via hub/lanes.css. */
+
+/* 18 个形状改 6 列 3 行；格子触控区域保持 >=44px。 */
+.grok-shapes-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+.grok-shape-cell { width: 46px; height: 46px; border-radius: 16px; }
+
+/* 11 个色块按 6 列排两行，第二行 5 个居中，不出现孤立色块。 */
+.grok-colors-grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px calc((100% - 6 * 42px) / 6); padding: 4px 0; }
+.grok-color-swatch { flex: 0 0 auto; }
+
+/* 灵魂文档编辑器布局（替换原内联样式）。 */
+.avatar-soul-card { padding: 14px; }
+.soul-snippet-bar { margin: 2px 2px 4px; }
+.soul-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-top: 10px;
+  font-size: .75rem;
+  color: var(--muted);
+}
+.soul-meta-limit { color: var(--muted); margin-right: 8px; }
+.soul-meta-limit.over { color: #b3261e; font-weight: 600; }

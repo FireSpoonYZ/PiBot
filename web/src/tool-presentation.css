@@ -1,0 +1,48 @@
+/* 工具交互呈现卡片：todo 列表与问卷；两条聊天 UI 共用，视觉对齐现有气泡/卡片变量。 */
+.bot-chat-tool-wrap { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; max-width: 100%; }
+.tp-card { display: grid; gap: 8px; padding: 10px 12px; border-radius: 14px; background: color-mix(in srgb, var(--bg, #fff) 70%, transparent); border: 1px solid color-mix(in srgb, var(--line, #d0d7de) 80%, transparent); font-size: .85rem; line-height: 1.45; color: var(--text, #1f2328); max-width: 100%; overflow-x: auto; }
+.tp-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tp-card-title { font-weight: 600; font-size: .82rem; }
+.tp-card-meta { font-size: .75rem; color: var(--muted, #656d76); }
+.tp-status-pill { font-size: .7rem; font-weight: 600; padding: 1px 8px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--line, #d0d7de) 85%, transparent); color: var(--muted, #656d76); }
+.tp-status-pill.is-pending { color: #2B70F6; border-color: color-mix(in srgb, #2B70F6 40%, transparent); }
+.tp-status-pill.is-answered { color: #22a559; border-color: color-mix(in srgb, #22a559 40%, transparent); }
+.tp-status-pill.is-cancelled { color: var(--muted, #656d76); }
+
+.tp-todo-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.tp-todo-item { display: flex; align-items: baseline; gap: 6px; overflow-wrap: anywhere; }
+.tp-todo-icon { flex: none; width: 1em; text-align: center; color: var(--muted, #656d76); }
+.tp-todo-item.is-completed .tp-todo-icon { color: #22a559; }
+.tp-todo-item.is-completed .tp-todo-subject { text-decoration: line-through; color: var(--muted, #656d76); }
+.tp-todo-item.is-in_progress .tp-todo-icon { color: #2B70F6; }
+.tp-todo-empty { color: var(--muted, #656d76); font-size: .8rem; }
+
+.tp-questions { display: grid; gap: 12px; }
+.tp-question { margin: 0; padding: 0; border: 0; display: grid; gap: 6px; min-width: 0; }
+.tp-question-text { font-size: .85rem; font-weight: 550; padding: 0; overflow-wrap: anywhere; }
+.tp-question-header { color: var(--muted, #656d76); font-weight: 600; }
+.tp-question-hint { font-weight: 400; color: var(--muted, #656d76); }
+.tp-options { display: grid; gap: 4px; }
+.tp-option { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: 10px; border: 1px solid transparent; cursor: pointer; }
+.tp-option:hover { background: color-mix(in srgb, var(--line, #d0d7de) 20%, transparent); }
+.tp-option.is-selected { border-color: color-mix(in srgb, #2B70F6 40%, transparent); background: color-mix(in srgb, #2B70F6 8%, transparent); }
+.tp-option input { margin-top: 3px; flex: none; }
+.tp-option-body { display: grid; gap: 2px; min-width: 0; }
+.tp-option-label { font-weight: 500; overflow-wrap: anywhere; }
+.tp-option-desc { font-size: .78rem; color: var(--muted, #656d76); overflow-wrap: anywhere; }
+.tp-preview { margin: 4px 0 0; padding: 6px 8px; border-radius: 8px; background: color-mix(in srgb, var(--bg, #fff) 55%, transparent); border: 1px solid color-mix(in srgb, var(--line, #d0d7de) 60%, transparent); font: .75rem/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12em; overflow-y: auto; }
+.tp-input { width: 100%; padding: 6px 10px; border-radius: 10px; border: 1px solid color-mix(in srgb, var(--line, #d0d7de) 85%, transparent); background: var(--surface, #fff); color: var(--text, #1f2328); font-size: .82rem; }
+.tp-input:disabled { opacity: .55; }
+.tp-error { padding: 6px 10px; border-radius: 10px; font-size: .8rem; color: var(--danger, #d1242f); border: 1px solid color-mix(in srgb, var(--danger, #d1242f) 30%, transparent); background: color-mix(in srgb, var(--danger, #d1242f) 8%, transparent); overflow-wrap: anywhere; }
+.tp-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.tp-btn { padding: 6px 14px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--line, #d0d7de) 90%, transparent); background: var(--surface, #fff); color: var(--text, #1f2328); font-size: .82rem; cursor: pointer; }
+.tp-btn:disabled { opacity: .5; cursor: not-allowed; }
+.tp-btn-primary { background: #2B70F6; border-color: #2B70F6; color: #fff; }
+.tp-btn-primary:disabled { opacity: .55; }
+
+.tp-result { display: grid; gap: 8px; }
+.tp-result-line { font-size: .82rem; color: var(--muted, #656d76); }
+.tp-answer { display: grid; gap: 2px; }
+.tp-answer-question { font-size: .8rem; font-weight: 550; overflow-wrap: anywhere; }
+.tp-answer-value { font-size: .85rem; overflow-wrap: anywhere; }
+.tp-answer-notes { font-size: .78rem; color: var(--muted, #656d76); overflow-wrap: anywhere; }

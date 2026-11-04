@@ -1,0 +1,7 @@
+{
+  "name": "@e-launcher/todo",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "license": "AGPL-3.0-only"
+}

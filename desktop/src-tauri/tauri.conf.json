@@ -1,0 +1,50 @@
+{
+  "productName": "e-助手",
+  "version": "1.0.0",
+  "identifier": "com.example.launcherprobe.desktop",
+  "build": {
+    "beforeBuildCommand": "node ../host-core/build-desktop.js --web",
+    "beforeDevCommand": "node ../host-core/build-desktop.js --dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../build/web"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "e-助手",
+        "width": 1200,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'",
+      "capabilities": ["main"],
+      "assetProtocol": {
+        "enable": false,
+        "scope": []
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "../build/icons/icon.ico",
+      "../build/icons/icon.png"
+    ],
+    "externalBin": [
+      "../build/binaries/e-launcher-client-node",
+      "../build/binaries/e-launcher-host"
+    ],
+    "resources": {
+      "../build/desktop-client.mjs": "desktop-client.mjs",
+      "../build/THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt",
+      "../build/host-runtime/": "host-runtime/"
+    }
+  }
+}

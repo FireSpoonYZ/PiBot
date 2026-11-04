@@ -1,12 +1,10 @@
 package com.example.launcherprobe;
 
 import android.content.Context;
-import android.util.Log;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -16,7 +14,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 
-/** Validated cached annual data plus the APK fallback; recurrence never waits for network. */
+/** Validated holiday data used by Host schedules. */
 final class ScheduleCalendar {
     static final String UNSUPPORTED = "所在国家或地区暂不支持法定节假日查询";
     static final ScheduleCalendar EMPTY = new ScheduleCalendar();
@@ -24,50 +22,15 @@ final class ScheduleCalendar {
             "Asia/Chongqing", "Asia/Harbin", "Asia/Kashgar", "PRC");
     private final Set<Integer> years = new TreeSet<>();
     private final Map<LocalDate, Boolean> offDays = new HashMap<>();
-    private final Map<Integer, JSONObject> annualData = new java.util.TreeMap<>();
 
     static boolean supports(ZoneId zone) { return CHINA_ZONES.contains(zone.getId()); }
 
     static ScheduleCalendar load(Context context) {
-        ScheduleCalendar calendar = EMPTY;
         try (java.io.InputStream input = context.getAssets().open("cn-holidays.json")) {
-            calendar = parse(new JSONObject(new String(input.readAllBytes(), StandardCharsets.UTF_8)));
+            return parse(new JSONObject(new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)));
         } catch (Exception failure) {
-            Log.e("ScheduledTasks", "Holiday snapshot unavailable; using explicit weekday fallback", failure);
+            return EMPTY;
         }
-        java.io.File directory = new java.io.File(context.getFilesDir(), "schedule-calendar");
-        java.io.File[] files = directory.listFiles((dir, name) -> name.matches("[0-9]{4}\\.json"));
-        if (files != null) {
-            java.util.Arrays.sort(files);
-            for (java.io.File file : files) {
-                try (java.io.InputStream input = new android.util.AtomicFile(file).openRead()) {
-                    JSONObject year = new JSONObject(new String(input.readAllBytes(), StandardCharsets.UTF_8));
-                    if (!file.getName().equals(ScheduleRule.integer(year, "year") + ".json"))
-                        throw new IllegalArgumentException("Calendar cache filename/year mismatch");
-                    calendar = calendar.withYear(year);
-                } catch (Exception failure) {
-                    Log.e("ScheduledTasks", "Ignoring invalid holiday cache " + file.getName(), failure);
-                }
-            }
-        }
-        return calendar;
-    }
-
-    ScheduleCalendar withYear(JSONObject entry) throws Exception {
-        int year = ScheduleRule.integer(entry, "year");
-        Map<Integer, JSONObject> merged = new java.util.TreeMap<>(annualData);
-        merged.put(year, entry);
-        JSONArray annual = new JSONArray();
-        for (JSONObject value : merged.values()) annual.put(value);
-        return parse(new JSONObject().put("years", annual));
-    }
-
-    String version() {
-        StringBuilder value = new StringBuilder();
-        for (Map.Entry<Integer, JSONObject> year : annualData.entrySet())
-            value.append(year.getKey()).append(":").append(year.getValue().optString("sourceBlobSha",
-                    year.getValue().optString("sourceCommit"))).append(";");
-        return value.toString();
     }
 
     static ScheduleCalendar parse(JSONObject value) throws Exception {
@@ -86,12 +49,11 @@ final class ScheduleCalendar {
             if (entry.has("sourceCommit")) {
                 if (!ScheduleRule.text(entry, "sourceCommit").matches("[a-f0-9]{40}"))
                     throw new IllegalArgumentException("Invalid calendar source commit");
-            } else if (!ScheduleCalendarRefresh.url(year).equals(ScheduleRule.text(entry, "sourceUrl"))
+            } else if (!("https://api.github.com/repos/NateScarlet/holiday-cn/contents/" + year + ".json?ref=master").equals(ScheduleRule.text(entry, "sourceUrl"))
                     || !ScheduleRule.text(entry, "sourceBlobSha").matches("[a-f0-9]{40}")
                     || !(entry.opt("fetchedAt") instanceof Number)) {
                 throw new IllegalArgumentException("Invalid calendar download provenance");
             }
-            calendar.annualData.put(year, entry);
             JSONArray papers = entry.getJSONArray("papers");
             if (papers.length() == 0) throw new IllegalArgumentException("Unpublished calendar");
             for (int j = 0; j < papers.length(); j++) {

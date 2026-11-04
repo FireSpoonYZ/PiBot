@@ -1,0 +1,560 @@
+/* Shower 虚拟桌面工作台（设计 5.5）：右侧分屏伴随 + 全窗口剧场双模式。
+ * 暗色舞台（#0f1110）与手机端 BotScreenPanel 同风格；桌面新增样式一律落在
+ * .desktop-shell（或剧场覆盖层 .desktop-shell .shower-theater）作用域内。
+ * .remote-client 下无 .desktop-shell 祖先（Android Capacitor / 手机远程容器），
+ * 因此另给无作用域的回退选择器，保证 Android 挂载时同一组件零回归。 */
+
+.desktop-shell .shower-preview,
+.remote-client .shower-preview {
+  --shower-bg: #0f1110;
+  --shower-surface: #161917;
+  --shower-surface-2: #1c201d;
+  --shower-line: #2a2f2b;
+  --shower-text: #eeeee8;
+  --shower-muted: #9aa49b;
+  --shower-live: #4ade80;
+  --shower-warn: #fbbf24;
+  --shower-danger: #ff9a92;
+  --shower-accent: #3b7dff;
+
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 16px;
+  padding: 12px;
+  border: 1px solid var(--shower-line);
+  border-radius: 18px;
+  background: var(--shower-bg);
+  color: var(--shower-text);
+  font-size: 12px;
+  max-height: 78vh;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* 子项按内容自然高度排列：任何子项不得被压缩（否则会被裁切的画幅反向溢出覆盖上下控件）。 */
+.desktop-shell .shower-preview > *,
+.remote-client .shower-preview > * { flex: 0 0 auto; }
+
+/* ————— 头部：标题 + 模式切换 + 关闭 ————— */
+
+.desktop-shell .shower-head,
+.remote-client .shower-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.desktop-shell .shower-head-text,
+.remote-client .shower-head-text { flex: 1 1 auto; min-width: 0; }
+
+.desktop-shell .shower-title,
+.remote-client .shower-title {
+  font-weight: 650;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.desktop-shell .shower-title svg,
+.remote-client .shower-title svg { flex: none; }
+
+.desktop-shell .shower-sub,
+.remote-client .shower-sub {
+  font-size: 11px;
+  color: var(--shower-muted);
+  overflow-wrap: anywhere;
+}
+
+.desktop-shell .shower-head-actions,
+.remote-client .shower-head-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 面板内小圆图标按钮；桌面态复用通用 .icon-button 类名（Lane 1 预留），
+ * 未定义时本文件给最小样式兜底，不影响 app.css 后续接管。 */
+.desktop-shell .shower-preview .icon-button,
+.desktop-shell .shower-theater .icon-button,
+.remote-client .shower-preview .icon-button,
+.shower-theater .icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 28px;
+  min-width: 28px;
+  padding: 3px 8px;
+  border: 1px solid var(--shower-line);
+  border-radius: 999px;
+  background: var(--shower-surface-2);
+  color: var(--shower-text);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.desktop-shell .shower-preview .icon-button:hover:not(:disabled),
+.desktop-shell .shower-theater .icon-button:hover:not(:disabled),
+.remote-client .shower-preview .icon-button:hover:not(:disabled),
+.shower-theater .icon-button:hover:not(:disabled) {
+  border-color: var(--shower-muted);
+}
+
+.desktop-shell .shower-preview .icon-button:disabled,
+.remote-client .shower-preview .icon-button:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ————— 状态行 / 能力 / 提示 ————— */
+
+.desktop-shell .shower-status,
+.remote-client .shower-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: 11px;
+  color: var(--shower-muted);
+  overflow-wrap: anywhere;
+}
+
+.desktop-shell .shower-dot,
+.remote-client .shower-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--shower-muted);
+}
+
+.desktop-shell .shower-dot.live,
+.remote-client .shower-dot.live {
+  background: var(--shower-live);
+  box-shadow: 0 0 8px rgb(74 222 128 / .55);
+}
+
+.desktop-shell .shower-dot.busy,
+.remote-client .shower-dot.busy { background: var(--shower-warn); }
+
+.desktop-shell .shower-offline,
+.remote-client .shower-offline { color: var(--shower-warn); }
+
+.desktop-shell .shower-caps,
+.remote-client .shower-caps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--shower-muted);
+  overflow-wrap: anywhere;
+}
+
+.desktop-shell .shower-unsupported,
+.remote-client .shower-unsupported { color: var(--shower-danger); }
+
+.desktop-shell .shower-guide,
+.remote-client .shower-guide {
+  font-size: 11px;
+  color: var(--shower-warn);
+  overflow-wrap: anywhere;
+}
+
+.desktop-shell .shower-notice,
+.remote-client .shower-notice {
+  font-size: 11px;
+  color: var(--shower-live);
+  overflow-wrap: anywhere;
+}
+
+/* 暗色面板内的错误横幅（覆盖 app.css 的浅色底，仅限本组件内部）。 */
+.desktop-shell .shower-preview .error-banner,
+.desktop-shell .shower-theater .error-banner,
+.remote-client .shower-preview .error-banner {
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--shower-danger) 45%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--shower-danger) 12%, var(--shower-bg));
+  color: var(--shower-danger);
+  font-size: 11px;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+}
+
+/* ————— 画面舞台 ————— */
+
+.desktop-shell .shower-surface,
+.remote-client .shower-surface {
+  border: 1px solid var(--shower-line);
+  border-radius: 12px;
+  background: #0a0c0b;
+  min-height: 140px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 占真实画面高度（不压缩），并保证图像绝不越出自身盒子覆盖上下控件。 */
+  flex: 0 0 auto;
+  overflow: hidden;
+}
+
+.desktop-shell .shower-frame,
+.remote-client .shower-frame {
+  display: block;
+  width: 100%;
+  height: auto;
+  user-select: none;
+  /* 未接管：允许在画面上纵向滑动面板；接管后由 .interactive 关掉手势给远程拖拽。 */
+  touch-action: pan-y;
+}
+
+.desktop-shell .shower-frame.interactive,
+.remote-client .shower-frame.interactive { cursor: crosshair; touch-action: none; }
+
+.desktop-shell .shower-empty,
+.remote-client .shower-empty {
+  padding: 30px 14px;
+  font-size: 11px;
+  color: var(--shower-muted);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.desktop-shell .shower-empty svg,
+.remote-client .shower-empty svg { opacity: .7; }
+
+.desktop-shell .shower-meta,
+.remote-client .shower-meta {
+  font-size: 10.5px;
+  color: var(--shower-muted);
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+/* ————— 操作行 ————— */
+
+.desktop-shell .shower-controls,
+.remote-client .shower-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.desktop-shell .shower-controls button,
+.desktop-shell .shower-footer button,
+.desktop-shell .shower-theater-bar button,
+.remote-client .shower-controls button,
+.remote-client .shower-footer button,
+.shower-theater-bar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 4px 12px;
+  border: 1px solid var(--shower-line);
+  border-radius: 999px;
+  background: var(--shower-surface-2);
+  color: var(--shower-text);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.desktop-shell .shower-controls button:hover:not(:disabled),
+.desktop-shell .shower-footer button:hover:not(:disabled),
+.desktop-shell .shower-theater-bar button:hover:not(:disabled),
+.remote-client .shower-controls button:hover:not(:disabled),
+.remote-client .shower-footer button:hover:not(:disabled),
+.shower-theater-bar button:hover:not(:disabled) {
+  border-color: var(--shower-muted);
+}
+
+.desktop-shell .shower-controls button.primary,
+.desktop-shell .shower-theater-bar button.primary,
+.remote-client .shower-controls button.primary,
+.shower-theater-bar button.primary {
+  background: var(--shower-accent);
+  border-color: var(--shower-accent);
+  color: #fff;
+}
+
+.desktop-shell .shower-controls button.primary:hover:not(:disabled),
+.desktop-shell .shower-theater-bar button.primary:hover:not(:disabled),
+.remote-client .shower-controls button.primary:hover:not(:disabled),
+.shower-theater-bar button.primary:hover:not(:disabled) {
+  border-color: var(--shower-accent);
+  filter: brightness(1.08);
+}
+
+.desktop-shell .shower-controls button.taken-over,
+.desktop-shell .shower-theater-bar button.taken-over,
+.remote-client .shower-controls button.taken-over,
+.shower-theater-bar button.taken-over {
+  background: color-mix(in srgb, var(--shower-live) 18%, var(--shower-surface-2));
+  border-color: color-mix(in srgb, var(--shower-live) 55%, transparent);
+  color: var(--shower-live);
+}
+
+/* ————— 人工输入槽 ————— */
+
+.desktop-shell .shower-input,
+.remote-client .shower-input { display: flex; flex-direction: column; gap: 4px; }
+
+.desktop-shell .shower-input-label,
+.remote-client .shower-input-label { font-size: 11px; color: var(--shower-muted); }
+
+.desktop-shell .shower-text,
+.remote-client .shower-text,
+.desktop-shell .shower-theater .shower-text,
+.shower-theater .shower-text {
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 1px solid var(--shower-line);
+  border-radius: 999px;
+  background: var(--shower-surface-2);
+  color: var(--shower-text);
+  font-size: 12px;
+}
+
+.desktop-shell .shower-text:focus,
+.remote-client .shower-text:focus,
+.shower-theater .shower-text:focus { border-color: var(--shower-accent); }
+
+.desktop-shell .shower-preview .hint,
+.remote-client .shower-preview .hint,
+.shower-theater .hint {
+  font-size: 10.5px;
+  color: var(--shower-muted);
+  overflow-wrap: anywhere;
+}
+
+/* ————— 底部：显式释放 ————— */
+
+.desktop-shell .shower-footer,
+.remote-client .shower-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.desktop-shell .shower-release,
+.remote-client .shower-release,
+.shower-theater .shower-release {
+  color: var(--shower-danger);
+  border-color: color-mix(in srgb, var(--shower-danger) 45%, transparent);
+  background: color-mix(in srgb, var(--shower-danger) 10%, var(--shower-surface-2));
+}
+
+/* ————— 全窗口剧场模式（Theater Full View） —————
+ * portal 到 <body>，position:fixed 全窗深色舞台；Escape 只退出剧场（走 React 合成
+ * keydown，不会到达输入框，因此绝不会把 Escape 误发给远端）；关闭/返回始终可达。 */
+
+.desktop-shell .shower-theater,
+.remote-client .shower-theater,
+.shower-theater {
+  --shower-bg: #0f1110;
+  --shower-surface: #161917;
+  --shower-surface-2: #1c201d;
+  --shower-line: #2a2f2b;
+  --shower-text: #eeeee8;
+  --shower-muted: #9aa49b;
+  --shower-live: #4ade80;
+  --shower-warn: #fbbf24;
+  --shower-danger: #ff9a92;
+  --shower-accent: #3b7dff;
+
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  background: var(--shower-bg);
+  color: var(--shower-text);
+  font-size: 12px;
+}
+
+.desktop-shell .shower-theater-top,
+.remote-client .shower-theater-top,
+.shower-theater-top {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: color-mix(in srgb, var(--shower-surface) 82%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--shower-line);
+}
+
+.desktop-shell .shower-theater-title,
+.remote-client .shower-theater-title,
+.shower-theater-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 650;
+  overflow: hidden;
+}
+
+.desktop-shell .shower-theater-title .shower-sub,
+.remote-client .shower-theater-title .shower-sub,
+.shower-theater-title .shower-sub { font-weight: 400; }
+
+.desktop-shell .shower-theater-stage,
+.remote-client .shower-theater-stage,
+.shower-theater-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 12px;
+}
+
+.desktop-shell .shower-theater-stage .shower-frame,
+.remote-client .shower-theater-stage .shower-frame,
+.shower-theater-stage .shower-frame {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 8px;
+}
+
+.desktop-shell .shower-theater-alerts,
+.remote-client .shower-theater-alerts,
+.shower-theater-alerts {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 16px;
+}
+
+.desktop-shell .shower-theater-bar,
+.remote-client .shower-theater-bar,
+.shower-theater-bar {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+  background: color-mix(in srgb, var(--shower-surface) 82%, transparent);
+  backdrop-filter: blur(8px);
+  border-top: 1px solid var(--shower-line);
+}
+
+.desktop-shell .shower-theater-bar .shower-text,
+.remote-client .shower-theater-bar .shower-text,
+.shower-theater-bar .shower-text {
+  flex: 1 1 220px;
+  min-width: 140px;
+  width: auto;
+}
+
+/* ————— 剧场内部子块兜底 —————
+ * 剧场通过 portal 挂到 <body>，.desktop-shell/.remote-client 都不是其祖先，
+ * 因此剧场内复用的面板子块一律需要裸 .shower-theater 作用域的样式。 */
+
+.shower-theater .shower-status {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 8px 16px;
+  font-size: 11px;
+  color: var(--shower-muted);
+  overflow-wrap: anywhere;
+}
+
+.shower-theater .shower-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--shower-muted);
+}
+
+.shower-theater .shower-dot.live {
+  background: var(--shower-live);
+  box-shadow: 0 0 8px rgb(74 222 128 / .55);
+}
+
+.shower-theater .shower-dot.busy { background: var(--shower-warn); }
+
+.shower-theater .shower-offline { color: var(--shower-warn); }
+
+.shower-theater .shower-guide {
+  font-size: 11px;
+  color: var(--shower-warn);
+  overflow-wrap: anywhere;
+}
+
+.shower-theater .shower-notice {
+  font-size: 11px;
+  color: var(--shower-live);
+  overflow-wrap: anywhere;
+}
+
+.shower-theater .error-banner {
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--shower-danger) 45%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--shower-danger) 12%, var(--shower-bg));
+  color: var(--shower-danger);
+  font-size: 11px;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+}
+
+.shower-theater .shower-empty {
+  padding: 30px 14px;
+  font-size: 12px;
+  color: var(--shower-muted);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.shower-theater .shower-empty svg { opacity: .7; }
+
+.shower-theater .shower-meta {
+  flex: none;
+  padding: 0 16px 6px;
+  font-size: 10.5px;
+  color: var(--shower-muted);
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.shower-theater .shower-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* 剧场舞台内的画面：portal 中无 .desktop-shell 祖先，交互样式用裸作用域补齐。 */
+.shower-theater .shower-frame {
+  user-select: none;
+  touch-action: pan-y;
+}
+
+.shower-theater .shower-frame.interactive { cursor: crosshair; touch-action: none; }
+
+/* 舞台作为初始聚焦点（tabIndex=-1），不显示焦点环。 */
+.shower-theater-stage:focus { outline: none; }
