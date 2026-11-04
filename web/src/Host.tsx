@@ -3232,10 +3232,6 @@ ${newer}` : draftSnapshot;
       setChatSearchQuery('');
       return true;
     }
-    if (leftDrawerOpen) {
-      setLeftDrawerOpen(false);
-      return true;
-    }
     if (screen === 'bot-avatar') {
       setScreen(avatarReturnScreen);
       return true;
@@ -3325,31 +3321,6 @@ ${newer}` : draftSnapshot;
     window.addEventListener('app-back', onAppBack);
     return () => window.removeEventListener('app-back', onAppBack);
   }, [active, handleStepBack]);
-
-  // Edge swipe gesture support for Left Hidden Sidebar
-  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
-  const onTouchStart = (e: React.TouchEvent) => {
-    if (!leftDrawerOpen && e.target instanceof Element && e.target.closest('.hub-hero-section')) {
-      touchStartRef.current = null;
-      return;
-    }
-    const touch = e.touches[0];
-    if (touch) touchStartRef.current = { x: touch.clientX, y: touch.clientY };
-  };
-  const onTouchEnd = (e: React.TouchEvent) => {
-    const start = touchStartRef.current;
-    touchStartRef.current = null;
-    const touch = e.changedTouches[0];
-    if (!start || !touch) return;
-    const dx = touch.clientX - start.x;
-    const dy = Math.abs(touch.clientY - start.y);
-    if (dy > 60) return;
-    if (screen === 'hub' && start.x < 36 && dx > 65) {
-      setLeftDrawerOpen(true);
-    } else if (leftDrawerOpen && dx < -65) {
-      setLeftDrawerOpen(false);
-    }
-  };
 
   // Android Pull-to-Refresh gesture on Hub Scroll Area
   const onHubScrollTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
@@ -3535,7 +3506,7 @@ ${newer}` : draftSnapshot;
     },
     onRun: command => void action.run(() => runSlashCommand(command)),
   });
-  const anyDrawerOpen = leftDrawerOpen;
+  const anyDrawerOpen = false;
   const primaryPreset = primaryBot
     ? resolveBotAvatarPreset(botAvatarKey(primaryBot), primaryBot.role, true)
     : JARVIS_AVATAR_PRESET;
@@ -3602,13 +3573,17 @@ ${newer}` : draftSnapshot;
   // @lane-hooks:schedules
   // ---
   // @lane-hooks:scopes
+  // 左上按钮仍调 setLeftDrawerOpen(true)：抽屉已删，语义改为直接进设置。
+  useEffect(() => {
+    if (!leftDrawerOpen) return;
+    setScreen('settings');
+    setLeftDrawerOpen(false);
+  }, [leftDrawerOpen]);
   // ---
 
   return (
     <div
-      className={`bot-hub-shell${leftDrawerOpen ? ' drawer-left-active' : ''}${screen === 'bot-screen' ? ' is-fullscreen-computer' : ''}`}
-      onTouchStart={onTouchStart}
-      onTouchEnd={onTouchEnd}
+      className={`bot-hub-shell${screen === 'bot-screen' ? ' is-fullscreen-computer' : ''}`}
     >
       {/* ==================== SCREEN 1: MAIN HUB (15844.jpg + PanelLeft icon) ==================== */}
       {/* 群聊/私聊子页打开时保持 hub DOM（隐藏不卸载）：返回来源滚动位置不丢。
@@ -5947,7 +5922,7 @@ ${newer}` : draftSnapshot;
                 <ArrowLeft size={20} />
               </button>
               <h2 className="grok-subpage-header-title">{t('待发送', 'Pending')}</h2>
-              <span style={{ width: 44 }} />
+              <span className="shell-topbar-spacer" />
             </header>
           )}
           {/* conversation/dm 页面头由 Scopes 会话头承担：宿主不再叠一层标题栏，
@@ -6255,67 +6230,6 @@ ${newer}` : draftSnapshot;
         (activeBot.hostKind === 'local' ? localHost?.deviceId : activeBot.hostId) === modelTarget.identity.targetDeviceId &&
         (screen === 'bot-profile' || (screen === 'bot-edit' && editMode === 'edit')) &&
         <BotModelSheet key={`${modelTarget.center}|${modelTarget.botKey}|${modelTarget.identity.generation}|${modelTarget.tab}`} api={modelTarget.api} identity={modelTarget.identity} botId={modelTarget.botId} initialTab={modelTarget.tab} onClose={() => setModelTarget(null)}/>}
-
-      {/* ==================== LEFT HIDDEN SIDEBAR DRAWER (Persistent for smooth slide animation) ==================== */}
-      <div
-        className={`grok-drawer-layer left${leftDrawerOpen ? ' open' : ''}`}
-        aria-hidden={!leftDrawerOpen}
-        onClick={() => setLeftDrawerOpen(false)}
-      >
-        <aside
-          className="grok-left-drawer"
-          role="dialog"
-          aria-label={t('左侧边栏', 'Left sidebar')}
-          onClick={e => e.stopPropagation()}
-        >
-          <header className="hub-left-drawer-header">
-            <div className="hub-left-drawer-brand">
-              <GrokBotAvatar preset={primaryPreset} isPrimary size={34} />
-              <div className="hub-left-drawer-brand-text">
-                <strong>Bot Hub</strong>
-                <span>
-                  {centerConn.connecting
-                    ? t('正在连接中心…', 'Connecting…')
-                    : centerConn.ready
-                      ? t('中心已连接', 'Center Online')
-                      : centerConn.saved ? t('连接已断开', 'Disconnected') : t('本机模式', 'Local Mode')}
-                </span>
-              </div>
-            </div>
-          </header>
-
-          <nav className="hub-left-drawer-nav" aria-label={t('导航菜单', 'Navigation')}>
-            <button
-              type="button"
-              className="hub-left-nav-btn"
-              onClick={() => {
-                setLeftDrawerOpen(false);
-                setScreen('pending');
-              }}
-            >
-              <Clock size={19} />
-              <span>{t('待发送', 'Pending')}</span>
-              <ChevronRight size={16} className="hub-left-nav-chevron" />
-            </button>
-          </nav>
-
-          <div className="hub-left-drawer-spacer" />
-
-          <footer className="hub-left-drawer-footer">
-            <button
-              type="button"
-              className="hub-left-settings-btn"
-              onClick={() => {
-                setLeftDrawerOpen(false);
-                setScreen('settings');
-              }}
-            >
-              <Settings size={20} />
-              <span>{t('设置', 'Settings')}</span>
-            </button>
-          </footer>
-        </aside>
-      </div>
 
       {/* Hub 群聊 / Bot 长按·右键·键盘上下文菜单 */}
       <ConversationContextMenu
