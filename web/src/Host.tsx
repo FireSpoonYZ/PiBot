@@ -3585,6 +3585,25 @@ ${newer}` : draftSnapshot;
   // 换主机/档案/设备/代/Bot 就换 key：旧画面与旧会话随卸载丢弃，不跨设备复用帧。
   const showerPreviewKey = `${showerHostKind ?? '-'}:${showerIdentity?.profileId ?? '-'}:${showerIdentity?.generation ?? '-'}:${showerIdentity?.targetDeviceId ?? '-'}:${showerBotId ?? '-'}:${showerHostKind === 'remote' ? showerRemoteReady : 'local'}`;
 
+  // @lane-hooks:settings
+  // ---
+  // @lane-hooks:hub
+  // ---
+  // @lane-hooks:chat
+  // ---
+  // @lane-hooks:remote-composer
+  // ---
+  // @lane-hooks:bot-profile
+  // ---
+  // @lane-hooks:avatar-soul
+  // ---
+  // @lane-hooks:errors
+  // ---
+  // @lane-hooks:schedules
+  // ---
+  // @lane-hooks:scopes
+  // ---
+
   return (
     <div
       className={`bot-hub-shell${leftDrawerOpen ? ' drawer-left-active' : ''}${screen === 'bot-screen' ? ' is-fullscreen-computer' : ''}`}
