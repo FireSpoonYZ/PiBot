@@ -3771,7 +3771,7 @@ ${newer}` : draftSnapshot;
             {/* Pinned & Regular Bots and Rooms (Archived section moved to Settings) */}
             <section className="hub-bot-list" aria-label={t('智能体列表', 'Bots')}>
               <div className="hub-filter-chips">
-                <Chips
+                <Chips<'all' | 'bots' | 'rooms'>
                   value={hubFilter}
                   onChange={setHubFilter}
                   label={t('按类型筛选', 'Filter by type')}
