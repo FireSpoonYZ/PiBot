@@ -66,12 +66,17 @@
   overflow: hidden;
 }
 
-.pending-card-status { margin: 0; font-size: .84rem; color: var(--muted); }
-.pending-card-reason { margin: 0; font-size: .82rem; color: var(--danger); }
+.pending-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+.pending-card-status { display: inline-flex; align-items: center; gap: 6px; font-size: .8rem; font-weight: 600; color: var(--muted); }
+.pending-card-status::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.pending-card-status.is-todo { color: var(--accent); }
+.pending-card-status.is-warn { color: #b7791f; }
+.pending-card-status.is-error { color: var(--danger); }
+.pending-card-status.is-ok { color: #2f855a; }
 .pending-card-hint { margin: 0; font-size: .78rem; color: var(--muted); }
 .pending-card-error { margin: 0; font-size: .82rem; color: var(--danger); }
 
-.pending-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.pending-card-actions { display: flex; gap: 8px; margin-left: auto; }
 .pending-card-actions .grok-done-pill-btn { min-height: 34px; padding: 0 16px; font-size: .85rem; }
 .pending-card-actions .hub-outline-btn { min-height: 34px; padding: 0 14px; border-radius: 999px; font-size: .85rem; }
 
@@ -93,3 +98,4 @@
 
 .pending-inbox-empty { margin-top: 12px; }
 .pending-inbox-empty .grok-done-pill-btn { margin-top: 8px; }
+.pending-inbox-empty .grok-row-icon { width: 40px; height: 40px; opacity: .7; }

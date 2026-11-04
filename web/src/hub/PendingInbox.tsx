@@ -4,7 +4,7 @@
 // 用户语言（不写 requestId/messageId/回执/对账 等术语）。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ChevronDown, ChevronUp, Inbox, MessageSquare, Users } from 'lucide-react';
+import { ChevronDown, ChevronUp, Inbox, MessageSquare, Users, Bot } from 'lucide-react';
 import type { PendingRecord } from '../../../host-core/index.js';
 import type { DesktopUiIntent } from '../../../host-core/desktop-client.js';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
@@ -31,7 +31,7 @@ type PendingOp = 'pending_send' | 'pending_reconcile' | 'pending_cancel';
 const NEED_STATES = new Set(['pending', 'unconfirmed', 'rejected', 'sending']);
 
 /** 卡片副标题时间：当天时:分、昨天、7 天内星期、其余月/日（沿用 ConversationRow 约定）。 */
-function formatWhen(iso: string): string {
+function formatWhen(iso: string, yesterday: string): string {
   const ms = Date.parse(iso);
   if (!Number.isFinite(ms) || ms <= 0) return '';
   const date = new Date(ms);
@@ -39,7 +39,7 @@ function formatWhen(iso: string): string {
   const dayStart = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   const days = Math.round((dayStart(now) - dayStart(date)) / 86_400_000);
   if (days <= 0) return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  if (days === 1) return '昨天';
+  if (days === 1) return yesterday;
   if (days < 7) return date.toLocaleDateString([], { weekday: 'short' });
   return date.toLocaleDateString([], {
     month: 'numeric',
@@ -192,13 +192,13 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
     const title = item.kind === 'primary'
       ? (bot?.role || t('已删除的智能体', 'Deleted assistant'))
       : (room?.title || t('群聊', 'Group chat'));
-    const time = formatWhen(item.updatedAt || item.createdAt);
+    const time = formatWhen(item.updatedAt || item.createdAt, t('昨天', 'Yesterday'));
     const subtitle = deviceName(item.targetDeviceId) + (time ? ' · ' + time : '');
 
     let statusLine = '';
     let primaryBtn: ReactNode = null;
     let secondaryBtn: ReactNode = null;
-    let reason: ReactNode = null;
+    let tone: 'todo' | 'warn' | 'error' | 'ok' = 'todo';
     if (item.state === 'pending') {
       statusLine = t('还没发出', 'Not sent yet');
       primaryBtn = (
@@ -215,8 +215,10 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
       );
     } else if (item.state === 'sending') {
       statusLine = t('正在发送…', 'Sending…');
+      tone = 'warn';
     } else if (item.state === 'unconfirmed') {
-      statusLine = t('可能已经送达，暂时无法确认', 'Probably delivered, unconfirmed');
+      statusLine = t('可能已送达，待确认', 'Maybe delivered');
+      tone = 'warn';
       primaryBtn = (
         <button type="button" className="grok-done-pill-btn" disabled={anyBusy || offline}
           onClick={() => void run(item, 'pending_reconcile')}>
@@ -224,11 +226,9 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
         </button>
       );
     } else if (item.state === 'rejected') {
-      statusLine = t('发送失败', 'Send failed');
-      if (item.lastError) {
-        const parsed = humanizeError(item.lastError.code + ': ' + item.lastError.outcome, t);
-        if (parsed?.title) reason = <p className="pending-card-reason">{parsed.title}</p>;
-      }
+      tone = 'error';
+      const parsed = item.lastError ? humanizeError(item.lastError.code + ': ' + item.lastError.outcome, t) : null;
+      statusLine = parsed?.title ? t('发送失败：', 'Failed: ') + parsed.title : t('发送失败', 'Send failed');
       primaryBtn = (
         <button type="button" className="grok-done-pill-btn" disabled={anyBusy || offline}
           onClick={() => void run(item, 'pending_reconcile')}>
@@ -237,6 +237,7 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
       );
     } else {
       statusLine = t('已送达', 'Delivered');
+      tone = 'ok';
     }
 
     return (
@@ -263,11 +264,10 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
             <span className="pending-card-subtitle">{subtitle}</span>
           </div>
           {item.text && <p className="pending-card-text">{item.text}</p>}
-          <p className="pending-card-status">{statusLine}</p>
-          {reason}
-          {(primaryBtn || secondaryBtn) && (
-            <div className="pending-card-actions">{primaryBtn}{secondaryBtn}</div>
-          )}
+          <div className="pending-card-foot">
+            <span className={'pending-card-status is-' + tone}>{statusLine}</span>
+            {(primaryBtn || secondaryBtn) && <div className="pending-card-actions">{secondaryBtn}{primaryBtn}</div>}
+          </div>
           {renderError(item.id)}
         </div>
       </div>
@@ -291,7 +291,7 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
     let primaryBtn: ReactNode = null;
     let hint: ReactNode = null;
     if (intent.outcome === 'unconfirmed') {
-      statusLine = t('可能已经完成，暂时无法确认', 'Probably done, unconfirmed');
+      statusLine = t('可能已完成，待确认', 'Maybe done');
       if (intent.method === 'createBot') {
         primaryBtn = (
           <button type="button" className="grok-done-pill-btn" disabled={anyBusy || offline}
@@ -300,12 +300,12 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
           </button>
         );
       } else {
-        hint = <p className="pending-card-hint">{t('请稍后到群聊里确认', 'Please confirm in the group chat later')}</p>;
+        hint = <span className="pending-card-hint">{t('稍后到群聊里看看', 'Check the group later')}</span>;
       }
     } else if (intent.outcome === 'not-sent') {
       statusLine = t('没有发出', 'Not sent');
       primaryBtn = (
-        <button type="button" className="grok-done-pill-btn" disabled={anyBusy}
+        <button type="button" className="hub-outline-btn" disabled={anyBusy}
           onClick={() => void removeIntent(intent)}>
           {t('移除', 'Remove')}
         </button>
@@ -313,7 +313,7 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
     } else {
       statusLine = t('已完成', 'Done');
       primaryBtn = (
-        <button type="button" className="grok-done-pill-btn" disabled={anyBusy}
+        <button type="button" className="hub-outline-btn" disabled={anyBusy}
           onClick={() => void removeIntent(intent)}>
           {t('移除', 'Remove')}
         </button>
@@ -322,16 +322,18 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
     return (
       <div key={intent.id} className="pending-card">
         <div className="pending-card-avatar">
-          <span className="pending-card-fallback-icon"><Users size={22} /></span>
+          <span className="pending-card-fallback-icon">{intent.method === 'createBot' ? <Bot size={22} /> : <Users size={22} />}</span>
         </div>
         <div className="pending-card-main">
           <div className="pending-card-head">
             <span className="pending-card-title">{title}</span>
             <span className="pending-card-subtitle">{deviceName(intent.targetDeviceId)}</span>
           </div>
-          <p className="pending-card-status">{statusLine}</p>
-          {hint}
-          {primaryBtn && <div className="pending-card-actions">{primaryBtn}</div>}
+          <div className="pending-card-foot">
+            <span className={'pending-card-status is-' + (intent.outcome === 'responded' ? 'ok' : intent.outcome === 'unconfirmed' ? 'warn' : 'error')}>{statusLine}</span>
+            {hint}
+            {primaryBtn && <div className="pending-card-actions">{primaryBtn}</div>}
+          </div>
           {renderError(intent.id)}
         </div>
       </div>
