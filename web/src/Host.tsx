@@ -3592,6 +3592,8 @@ ${newer}` : draftSnapshot;
   // @lane-hooks:chat
   // ---
   // @lane-hooks:remote-composer
+  // "+" 菜单 /clear 二次确认：存首次点击时间戳，3 秒内再点才执行（自然过期，无计时器）。
+  const [clearArmedAt, setClearArmedAt] = useState(0);
   // ---
   // @lane-hooks:bot-profile
   // ---
@@ -4244,14 +4246,14 @@ ${newer}` : draftSnapshot;
               />
             )}
             {activeBot.archivedAt ? (
-              <div className="grok-card-group grok-archived-chat-banner">
-                <span className="grok-archived-chat-banner-text">
+              <div className="grok-card-group composer-archived-banner">
+                <span className="composer-archived-banner-text">
                   {t(
                     `该智能体已归档（14 天保留期剩余 ${formatArchivedRemainingDays(activeBot.archivedAt)} 天），当前为只读历史`,
                     `Archived (${formatArchivedRemainingDays(activeBot.archivedAt)}d left of 14d retention) · Read-only history`,
                   )}
                 </span>
-                <div className="grok-archived-chat-banner-actions">
+                <div className="composer-archived-banner-actions">
                   <button
                     type="button"
                     className="grok-done-pill-btn"
@@ -4284,10 +4286,6 @@ ${newer}` : draftSnapshot;
                 onOffline={() => setOfflineNotice({ botKey: activeBot.key, text: t('目标离线，草稿已保留。', 'Target offline; draft retained.') })}
                 composerMenuOpen={composerMenuOpen}
                 onToggleComposerMenu={() => setComposerMenuOpen(v => !v)}
-                onOpenProfile={() => {
-                  setComposerMenuOpen(false);
-                  openBotProfile(activeBot);
-                }}
                 onRunCommand={runSlashCommand}
                 commandBusy={Boolean(slashBusy)}
                 canStop={canStopBot}
@@ -4360,17 +4358,6 @@ ${newer}` : draftSnapshot;
                 <button
                   type="button"
                   role="menuitem"
-                  onClick={() => {
-                    setComposerMenuOpen(false);
-                    openBotProfile(activeBot);
-                  }}
-                >
-                  <User size={18} />
-                  <span>{t('查看 Bot 资料与设定', 'View Bot Profile & Settings')}</span>
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
                   disabled={!activeChatScope || chatDraftAttachments.length >= IMAGE_MAX_COUNT || imageUploading}
                   onClick={() => {
                     setComposerMenuOpen(false);
@@ -4401,9 +4388,23 @@ ${newer}` : draftSnapshot;
                     <span>{t('拍照', 'Camera')}</span>
                   </button>
                 )}
-                <button type="button" role="menuitem" className="danger" onClick={() => void action.run(() => runSlashCommand('/clear'))}>
+                <div className="composer-menu-separator" role="separator" aria-hidden="true" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="danger"
+                  onClick={() => {
+                    if (clearArmedAt !== 0 && Date.now() - clearArmedAt <= 3000) {
+                      setClearArmedAt(0);
+                      setComposerMenuOpen(false);
+                      void action.run(() => runSlashCommand('/clear'));
+                    } else {
+                      setClearArmedAt(Date.now());
+                    }
+                  }}
+                >
                   <Trash2 size={18} />
-                  <span>{t('清空当前对话历史 (/clear)', 'Clear conversation history (/clear)')}</span>
+                  <span>{clearArmedAt !== 0 && Date.now() - clearArmedAt <= 3000 ? t('再次点击确认清空', 'Tap again to confirm clear') : t('清空当前对话历史 (/clear)', 'Clear conversation history (/clear)')}</span>
                 </button>
               </div>
             )}
@@ -4508,15 +4509,6 @@ ${newer}` : draftSnapshot;
                     onClick={() => void sendMessage()}
                   >
                     <ArrowUp size={18} />
-                  </button>
-                ) : !canStopBot && !isBotBusy ? (
-                  <button
-                    type="button"
-                    className="grok-composer-action-pill voice"
-                    aria-label={t('语音对话', 'Voice mode')}
-                    onClick={() => openBotProfile(activeBot)}
-                  >
-                    <AudioLines size={18} />
                   </button>
                 ) : null}
               </div>
@@ -6712,7 +6704,6 @@ function RemotePendingComposer({
   onOffline,
   composerMenuOpen,
   onToggleComposerMenu,
-  onOpenProfile,
   onRunCommand,
   commandBusy,
   onAbort,
@@ -6740,7 +6731,6 @@ function RemotePendingComposer({
   onOffline(): void;
   composerMenuOpen: boolean;
   onToggleComposerMenu(): void;
-  onOpenProfile(): void;
   /** 执行 /clear 与 /compact；true 表示服务端已成功（可清命令草稿），false 表示 UI 已切走后不再报错的过期结果。 */
   onRunCommand(command: SlashCommandName): Promise<boolean>;
   /** 顶栏菜单等 Host 侧发起的命令执行中：锁住输入与发送，避免绕过。 */
@@ -6842,6 +6832,8 @@ function RemotePendingComposer({
   const slashBusyRef = useRef(false);
   const sending = useRef(false);
   const [stopError, setStopError] = useState('');
+  /** "+" 菜单 /clear 二次确认：存首次点击时间戳，3 秒内再点才执行。 */
+  const [clearArmedAt, setClearArmedAt] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   /** 停止与发送并存、独立：不被 attempt/上传/草稿/action.busy 锁禁，只防重复。 */
   const stopBusy = Boolean(stopping);
@@ -7254,10 +7246,6 @@ function RemotePendingComposer({
 
       {composerMenuOpen && (
         <div className="bot-plus-popover" role="menu">
-          <button type="button" role="menuitem" onClick={onOpenProfile}>
-            <User size={18} />
-            <span>{t('查看 Bot 资料与设定', 'View Bot Profile & Settings')}</span>
-          </button>
           <button
             type="button"
             role="menuitem"
@@ -7291,14 +7279,22 @@ function RemotePendingComposer({
               <span>{t('拍照', 'Camera')}</span>
             </button>
           )}
+          <div className="composer-menu-separator" role="separator" aria-hidden="true" />
           <button
             type="button"
             role="menuitem"
             className="danger"
-            onClick={() => void runCommand('/clear')}
+            onClick={() => {
+              if (clearArmedAt !== 0 && Date.now() - clearArmedAt <= 3000) {
+                setClearArmedAt(0);
+                void runCommand('/clear');
+              } else {
+                setClearArmedAt(Date.now());
+              }
+            }}
           >
             <Trash2 size={18} />
-            <span>{t('清空当前对话历史 (/clear)', 'Clear conversation history (/clear)')}</span>
+            <span>{clearArmedAt !== 0 && Date.now() - clearArmedAt <= 3000 ? t('再次点击确认清空', 'Tap again to confirm clear') : t('清空当前对话历史 (/clear)', 'Clear conversation history (/clear)')}</span>
           </button>
         </div>
       )}
@@ -7364,15 +7360,6 @@ function RemotePendingComposer({
               aria-label={t('发送', 'Send')}
             >
               <ArrowUp size={18} />
-            </button>
-          ) : !canStop && !isBotBusy ? (
-            <button
-              type="button"
-              className="grok-composer-action-pill voice"
-              aria-label={t('查看资料与语音设定', 'Bot profile & voice')}
-              onClick={onOpenProfile}
-            >
-              <AudioLines size={18} />
             </button>
           ) : null}
 
