@@ -1,0 +1,24 @@
+/* schedules lane styles: loaded after web/src/styles.css via hub/lanes.css. */
+
+/* Inline style extractions from Host.tsx schedule & archived screens. */
+.grok-icon-mr-4 { margin-right: 4px; }
+.grok-btn-mt-8 { margin-top: 8px; }
+.grok-topbar-spacer { width: 44px; flex: none; }
+.grok-footnote-mt-2 { margin-top: 2px; }
+.grok-archived-subtitle-gap { gap: 8px; }
+.grok-archived-btn-sm { padding: 3px 10px; font-size: 0.76rem; }
+
+/* Lucide icons inside schedule badges. */
+.grok-schedule-badge { display: inline-flex; align-items: center; gap: 4px; }
+.grok-schedule-badge svg { flex: none; }
+
+/* Custom toggle background (bot accent color) via CSS variable. */
+.grok-toggle-switch.checked[style*="--grok-toggle-bg"] { background: var(--grok-toggle-bg); }
+
+/* Hint shown below prompt textarea when prompt is empty. */
+.grok-schedule-prompt-hint {
+  margin-top: 6px;
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
