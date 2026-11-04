@@ -3567,6 +3567,10 @@ ${newer}` : draftSnapshot;
   // @lane-hooks:bot-profile
   // ---
   // @lane-hooks:avatar-soul
+  const soulDraftBytes = soulBytes(soulDraft);
+  const soulByteRatio = soulDraftBytes / SOUL_MAX_BYTES;
+  // 与 botSoul 文本一致即视为已保存；加载中（null）时先看本地脏标记。
+  const soulSaved = botSoul ? soulDraft === botSoul.text : !soulDirty;
   // ---
   // @lane-hooks:errors
   // ---
@@ -5312,7 +5316,7 @@ ${newer}` : draftSnapshot;
             <button
               type="button"
               className="grok-done-pill-btn"
-              disabled={action.busy || soulBytes(soulDraft) > SOUL_MAX_BYTES}
+              disabled={action.busy || soulDraftBytes > SOUL_MAX_BYTES}
               onClick={() => void handleSaveSoul()}
             >
               {action.busy ? t('保存中', 'Saving') : t('保存', 'Save')}
@@ -5320,7 +5324,7 @@ ${newer}` : draftSnapshot;
           </header>
 
           <div className="grok-subpage-scroll">
-            <div className="soul-snippet-bar" style={{ margin: '2px 2px 4px' }}>
+            <div className="soul-snippet-bar">
               {SOUL_SNIPPETS.map(item => (
                 <button
                   key={item.zh}
@@ -5348,7 +5352,7 @@ ${newer}` : draftSnapshot;
               )}
             </div>
 
-            <section className="grok-card-group" style={{ padding: 14 }}>
+            <section className="grok-card-group avatar-soul-card">
               <textarea
                 className="grok-soul-textarea"
                 rows={14}
@@ -5363,22 +5367,31 @@ ${newer}` : draftSnapshot;
                   '# Core Persona\nWrite the Bot identity, tone, expertise, and boundaries here…',
                 )}
               />
-              <div className="soul-byte-progress" style={{ marginTop: 10 }}>
-                <div className="soul-byte-bar">
-                  <div
-                    className={`soul-byte-fill ${soulBytes(soulDraft) > SOUL_MAX_BYTES ? 'over' : ''}`}
-                    style={{ width: `${Math.min(100, Math.round((soulBytes(soulDraft) / SOUL_MAX_BYTES) * 100))}%` }}
-                  />
-                </div>
-                <div className="soul-byte-meta">
-                  <span>
-                    {botSoul?.revision ? `Rev: ${botSoul.revision.slice(0, 10)}` : t('草稿', 'Draft')}
-                  </span>
-                  <span>
-                    {`${soulBytes(soulDraft).toLocaleString()} / ${SOUL_MAX_BYTES.toLocaleString()} B`}
-                  </span>
-                </div>
+              <div className="soul-meta-row">
+                <span className="soul-meta-status">
+                  {soulSaved ? t('已保存', 'Saved') : t('未保存修改', 'Unsaved changes')}
+                </span>
+                <span className="soul-meta-count">
+                  {soulByteRatio > 0.8 && (
+                    <span className={`soul-meta-limit${soulDraftBytes > SOUL_MAX_BYTES ? ' over' : ''}`}>
+                      {soulDraftBytes > SOUL_MAX_BYTES
+                        ? t('超出上限', 'Over limit')
+                        : t('接近上限', 'Near limit')}
+                    </span>
+                  )}
+                  {t(`${soulDraft.length} 字`, `${soulDraft.length} chars`)}
+                </span>
               </div>
+              {soulByteRatio > 0.8 && (
+                <div className="soul-byte-progress">
+                  <div className="soul-byte-bar">
+                    <div
+                      className={`soul-byte-fill${soulDraftBytes > SOUL_MAX_BYTES ? ' over' : ''}`}
+                      style={{ width: `${Math.min(100, Math.round(soulByteRatio * 100))}%` }}
+                    />
+                  </div>
+                </div>
+              )}
             </section>
             <p className="grok-card-footnote">
               {t(
