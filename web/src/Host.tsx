@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   ArrowUp,
   AudioLines,
+  Bell,
   Brain,
   Check,
   ChevronDown,
@@ -37,6 +38,7 @@ import {
   User,
   Users,
   X,
+  Zap,
 } from 'lucide-react';
 import {
   BotHost,
@@ -151,6 +153,7 @@ import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PRO
 // @lane-imports:errors
 // ---
 // @lane-imports:schedules
+import './hub/schedules.css';
 // ---
 // @lane-imports:scopes
 // ---
@@ -5473,7 +5476,7 @@ ${newer}` : draftSnapshot;
                 className="grok-done-pill-btn"
                 onClick={() => openScheduleCreate()}
               >
-                <Plus size={16} style={{ marginRight: 4 }} />
+                <Plus size={16} className="grok-icon-mr-4" />
                 {t('新建', 'New')}
               </button>
             )}
@@ -5567,11 +5570,10 @@ ${newer}` : draftSnapshot;
                       </p>
                       <button
                         type="button"
-                        className="grok-done-pill-btn"
-                        style={{ marginTop: 8 }}
+                        className="grok-done-pill-btn grok-btn-mt-8"
                         onClick={() => openScheduleCreate()}
                       >
-                        <Plus size={16} style={{ marginRight: 4 }} />
+                        <Plus size={16} className="grok-icon-mr-4" />
                         {t('新建定时任务', 'Create Schedule')}
                       </button>
                     </section>
@@ -5612,8 +5614,8 @@ ${newer}` : draftSnapshot;
                                 </span>
                                 <span className={`grok-schedule-badge ${task.alarmMode === 'alarmClock' ? 'alarm' : 'silent'}`}>
                                   {task.alarmMode === 'alarmClock'
-                                    ? t('🔔 强提醒', '🔔 Alarm')
-                                    : t('⚡ 后台执行', '⚡ Silent')}
+                                    ? <><Bell size={12} />{t('强提醒', 'Alarm')}</>
+                                    : <><Zap size={12} />{t('后台执行', 'Silent')}</>}
                                 </span>
                               </div>
                             </div>
@@ -5623,7 +5625,7 @@ ${newer}` : draftSnapshot;
                               role="switch"
                               aria-checked={isEnabled}
                               className={`grok-toggle-switch${isEnabled ? ' checked' : ''}`}
-                              style={isEnabled ? { backgroundColor: accentColor } : undefined}
+                              style={isEnabled ? ({ '--grok-toggle-bg': accentColor } as React.CSSProperties) : undefined}
                               onClick={() => void handleToggleSchedule(task, !isEnabled)}
                             >
                               <span className="grok-toggle-knob" />
@@ -5760,13 +5762,13 @@ ${newer}` : draftSnapshot;
                         }}
                       >
                         <option value="daily">{t('每天', 'Daily')}</option>
-                        <option value="statutoryWorkday">{t('法定工作日（智能跳过节假日）', 'Statutory Workdays')}</option>
+                        <option value="statutoryWorkday">{t('法定工作日', 'Statutory Workdays')}</option>
                         <option value="statutoryHoliday">{t('法定节假日', 'Statutory Holidays')}</option>
                         <option value="weekdays-mon-fri">{t('每周一至周五', 'Mon–Fri')}</option>
-                        <option value="weekends-sat-sun">{t('每个周末（周六、周日）', 'Weekends')}</option>
+                        <option value="weekends-sat-sun">{t('周末', 'Weekends')}</option>
                         <option value="weekly">{t('自定义每周几…', 'Custom Weekdays…')}</option>
                         <option value="monthly">{t('每月固定日期', 'Monthly')}</option>
-                        <option value="once">{t('单次执行（最近一次到点）', 'One-time (Next occurrence)')}</option>
+                        <option value="once">{t('仅一次', 'Once')}</option>
                       </select>
                       <ChevronsUpDown size={15} />
                     </label>
@@ -5848,6 +5850,9 @@ ${newer}` : draftSnapshot;
                         'Prompt sent to this Bot when triggered, e.g. Summarize my agenda and key tasks for today.',
                       )}
                     />
+                    {!scheduleDraft.prompt.trim() && (
+                      <div className="grok-schedule-prompt-hint">{t('填写指令后才能保存', 'Fill in the prompt to save')}</div>
+                    )}
                   </div>
                 </section>
               </div>
@@ -6157,11 +6162,11 @@ ${newer}` : draftSnapshot;
             <h2 className="grok-subpage-header-title">
               {t(`已归档智能体 (${archivedBots.length})`, `Archived Bots (${archivedBots.length})`)}
             </h2>
-            <span style={{ width: 44 }} />
+            <span className="grok-topbar-spacer" />
           </header>
 
           <div className="grok-subpage-scroll">
-            <p className="grok-card-footnote" style={{ marginTop: 2 }}>
+            <p className="grok-card-footnote grok-footnote-mt-2">
               {t(
                 '已归档的智能体保留 14 天，到期后自动清理。点击条目可查看只读历史对话，也可随时恢复或永久删除。',
                 'Archived bots are retained for 14 days before auto-deletion. Tap a bot to view read-only history, restore, or permanently delete.',
@@ -6211,14 +6216,13 @@ ${newer}` : draftSnapshot;
                             {t(`剩余 ${daysLeft} 天（共 14 天）`, `${daysLeft}d / 14d left`)}
                           </span>
                         </div>
-                        <div className="hub-bot-subtitle-line" style={{ gap: 8 }}>
+                        <div className="hub-bot-subtitle-line grok-archived-subtitle-gap">
                           <span className="hub-bot-snippet">
                             {item.lastPreview || item.description || t('点击查看只读历史 · 14 天后自动清理', 'Tap for read-only history · 14d auto-delete')}
                           </span>
                           <button
                             type="button"
-                            className="hub-outline-btn"
-                            style={{ padding: '3px 10px', fontSize: '0.76rem' }}
+                            className="hub-outline-btn grok-archived-btn-sm"
                             disabled={action.busy}
                             onClick={e => {
                               e.stopPropagation();
@@ -6229,8 +6233,7 @@ ${newer}` : draftSnapshot;
                           </button>
                           <button
                             type="button"
-                            className="hub-outline-btn danger"
-                            style={{ padding: '3px 10px', fontSize: '0.76rem' }}
+                            className="hub-outline-btn danger grok-archived-btn-sm"
                             disabled={action.busy}
                             onClick={e => {
                               e.stopPropagation();
