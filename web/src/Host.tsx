@@ -1751,9 +1751,8 @@ export function HostPage({
     }
   }, [ensureRemoteApi, t]);
 
-  const openBotEdit = (bot: UnifiedBotItem) => {
-    const meta = botMetaMap[bot.key];
-    const preset = resolveBotAvatarPreset(botAvatarKey(bot), bot.role, bot.isPrimary);
+  // 资料页即编辑页：进入/换 Bot 时把共享编辑态预填为当前 Bot。
+  const prefillBotProfileEdit = (bot: UnifiedBotItem) => {
     editCwdFetchRef.current++;
     setEditMode('edit');
     setEditMakePrimary(Boolean(bot.isPrimary));
@@ -1763,12 +1762,7 @@ export function HostPage({
     setEditCwd(bot.cwd || localHost?.workspace || '');
     setEditCwdRevision(null);
     setEditCwdError('');
-    setEditAvatarPreset(preset);
-    setEditVoiceTone(meta?.voiceTone ?? '未设置');
-    setEditVoiceSpeed(meta?.voiceSpeed ?? '1x');
-    setEditVoiceLang(meta?.voiceLang ?? '自动');
-    setScreen('bot-edit');
-    void loadBotSoul(bot);
+    setEditAvatarPreset(resolveBotAvatarPreset(botAvatarKey(bot), bot.role, bot.isPrimary));
   };
 
   // 编辑期间以完整身份（设备+bot+连接 profile/generation）为键重读修订；
@@ -1780,7 +1774,7 @@ export function HostPage({
         : 'local')
     : '';
   useEffect(() => {
-    if (screen !== 'bot-edit' || editMode !== 'edit' || !activeBot) return;
+    if (screen !== 'bot-profile' || !activeBot) return;
     void loadEditCwd(activeBot);
     return () => {
       // 身份/表单变化：旧修订立即作废，绝不允许旧 CAS 凭据写新目标。
@@ -2130,9 +2124,6 @@ ${newer}` : draftSnapshot;
             lastText: editSubtitle.trim() || t('点击开始文字对话…', 'Tap to start chatting…'),
             updatedAt: Date.now(),
             unread: true,
-            voiceTone: editVoiceTone,
-            voiceSpeed: editVoiceSpeed,
-            voiceLang: editVoiceLang,
           });
           if (soulDraft.trim()) {
             try {
@@ -2183,9 +2174,6 @@ ${newer}` : draftSnapshot;
             lastText: editSubtitle.trim() || t('点击开始文字对话…', 'Tap to start chatting…'),
             updatedAt: Date.now(),
             unread: true,
-            voiceTone: editVoiceTone,
-            voiceSpeed: editVoiceSpeed,
-            voiceLang: editVoiceLang,
           });
           await syncRemoteBots();
           setScreen('hub');
@@ -2239,11 +2227,7 @@ ${newer}` : draftSnapshot;
         updateBotMeta(activeBot.key, {
           customName: roleName,
           subtitle: editSubtitle.trim(),
-          voiceTone: editVoiceTone,
-          voiceSpeed: editVoiceSpeed,
-          voiceLang: editVoiceLang,
         });
-        setScreen('bot-profile');
       }
     });
 
@@ -3594,6 +3578,16 @@ ${newer}` : draftSnapshot;
   // @lane-hooks:remote-composer
   // ---
   // @lane-hooks:bot-profile
+  // 资料页即编辑页：从非资料页家族进入或换 Bot 时预填共享编辑态；
+  // 从头像/灵魂/电脑等子页返回不重填，保住未保存的输入。
+  const profileEditKeyRef = useRef<{ key: string | null; inFamily: boolean }>({ key: null, inFamily: false });
+  useEffect(() => {
+    const inFamily = screen === 'bot-profile' || screen === 'bot-avatar' || screen === 'bot-soul' || screen === 'bot-schedules' || screen === 'bot-screen';
+    const entered = screen === 'bot-profile' && (!profileEditKeyRef.current.inFamily || profileEditKeyRef.current.key !== activeBot?.key);
+    profileEditKeyRef.current = { key: activeBot?.key ?? null, inFamily };
+    if (entered && activeBot) prefillBotProfileEdit(activeBot);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen, activeBot?.key]);
   // ---
   // @lane-hooks:avatar-soul
   // ---
@@ -4558,16 +4552,15 @@ ${newer}` : draftSnapshot;
             >
               <ArrowLeft size={20} />
             </button>
-            <div className="grok-subpage-actions">
-              <button
-                type="button"
-                className="grok-floating-circle-btn"
-                aria-label={t('编辑 Bot', 'Edit Bot')}
-                onClick={() => openBotEdit(activeBot)}
-              >
-                <MoreHorizontal size={20} />
-              </button>
-            </div>
+            <h2 className="grok-subpage-header-title">{t('智能体', 'Bot')}</h2>
+            <button
+              type="button"
+              className="grok-done-pill-btn"
+              disabled={action.busy || !editName.trim()}
+              onClick={() => void handleSaveBotEdit()}
+            >
+              {action.busy ? t('保存中', 'Saving') : t('保存', 'Save')}
+            </button>
           </header>
 
           <div className="grok-subpage-scroll">
@@ -4590,18 +4583,24 @@ ${newer}` : draftSnapshot;
                   platformBadge={<PlatformLogoIcon platform={activeBot.platform} size={11} />}
                   size={104}
                 />
+                <span className="grok-avatar-pencil-badge">
+                  <Pencil size={16} />
+                </span>
               </button>
-              <h1 className="grok-profile-title">{activeBot.role}</h1>
-              {activeBot.description && (
-                <p className="grok-profile-subtitle">{activeBot.description}</p>
-              )}
-              <button
-                type="button"
-                className="grok-profile-edit-pill"
-                onClick={() => openBotEdit(activeBot)}
-              >
-                {t('编辑', 'Edit')}
-              </button>
+              <input
+                className="grok-profile-title-input"
+                value={editName}
+                onChange={e => setEditName(e.target.value)}
+                placeholder={t('输入 Bot 名称', 'Enter Bot name')}
+                aria-label={t('名称', 'Name')}
+              />
+              <input
+                className="grok-profile-subtitle-input"
+                value={editSubtitle}
+                onChange={e => setEditSubtitle(e.target.value)}
+                placeholder={t('描述 Bot 的用途（可选）', 'Describe what this Bot does (optional)')}
+                aria-label={t('标题', 'Subtitle')}
+              />
             </section>
 
             {/* Grouped Card 1: Capabilities & Computer (15867.jpg style) */}
@@ -4615,7 +4614,9 @@ ${newer}` : draftSnapshot;
                 <Cpu size={20} className="grok-row-icon" />
                 <span className="grok-row-label">{t('模型', 'Model')}</span>
                 <span className="grok-row-value grok-row-value-path">
-                  {getOrCreateRemoteClient ? t('设置', 'Settings') : t('请在独立助手中设置 Bot 模型', 'Set the bot model in the standalone assistant')}
+                  {getOrCreateRemoteClient
+                    ? (activeBot.modelRef ?? t('继承中心默认', 'Inherit center default'))
+                    : t('请在独立助手中设置 Bot 模型', 'Set the bot model in the standalone assistant')}
                 </span>
                 <ChevronRight size={18} className="grok-row-chevron" />
               </button>
@@ -4693,15 +4694,6 @@ ${newer}` : draftSnapshot;
                 <ExternalLink size={16} className="grok-row-chevron" />
               </button>
 
-              <div className="grok-card-row no-active">
-                <FolderOpen size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('资料库', 'Files')}</span>
-                <span className="grok-row-value grok-row-value-path">
-                  {(activeBot.cwd || localHost?.workspace || '/workspace').split(/[\\/]/).filter(Boolean).pop() ||
-                    '/workspace'}
-                </span>
-              </div>
-
               <button
                 type="button"
                 className="grok-card-row"
@@ -4714,43 +4706,53 @@ ${newer}` : draftSnapshot;
               </button>
             </section>
 
-            {/* Grouped Card 2: Notification Toggle (15867.jpg) */}
-            <section className="grok-card-group">
-              <div className="grok-card-row no-active">
-                <span className="grok-row-label">{t('通知', 'Notifications')}</span>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={botMetaMap[activeBot.key]?.notifyEnabled !== false}
-                  className={`grok-toggle-switch${botMetaMap[activeBot.key]?.notifyEnabled !== false ? ' checked' : ''}`}
-                  style={
-                    botMetaMap[activeBot.key]?.notifyEnabled !== false
-                      ? { backgroundColor: resolveBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary).color }
-                      : undefined
-                  }
-                  onClick={() =>
-                    updateBotMeta(activeBot.key, {
-                      notifyEnabled: botMetaMap[activeBot.key]?.notifyEnabled === false,
-                    })
-                  }
-                >
-                  <span className="grok-toggle-knob" />
-                </button>
+            {/* Working directory (inline edit; CAS via center) */}
+            <div className="grok-field-section">
+              <label className="grok-section-label">{t('工作目录', 'Working directory')}</label>
+              <div className="grok-card-group">
+                <input
+                  className="grok-card-input"
+                  value={editCwd}
+                  onChange={e => { editCwdDirtyRef.current = true; setEditCwd(e.target.value); }}
+                  placeholder={t('目标 Host 上的绝对路径；空闲后生效', 'Absolute path on the target Host; applies when idle')}
+                />
+                {editCwdError && (
+                  <div className="grok-card-row no-active">
+                    <span className="grok-row-label profile-inline-error">{editCwdError}</span>
+                    <button
+                      type="button"
+                      className="hub-outline-btn"
+                      disabled={action.busy}
+                      onClick={() => void loadEditCwd(activeBot)}
+                    >
+                      {t('重新读取', 'Reload')}
+                    </button>
+                  </div>
+                )}
+                {!editCwdError && editCwdRevision === null && (
+                  <p className="secondary profile-card-hint">
+                    {t('正在读取中心修订…', 'Loading the center revision…')}
+                  </p>
+                )}
+                <p className="secondary profile-card-hint">
+                  {t(
+                    '保存到中心后在该 Bot 空闲时生效；运行中的任务保持原目录，不会移动文件。',
+                    'Saved to the center and applied when this Bot is idle; running work keeps its directory and no files are moved.',
+                  )}
+                </p>
               </div>
-            </section>
-            <p className="grok-card-footnote">
-              {t('Bot 完成任务或等你处理时通知你', 'Notify you when the Bot finishes work or needs your input')}
-            </p>
+            </div>
 
-            {/* Grouped Card 3: Primary Bot Switch, Archive & Delete Lifecycle */}
-            <div className="grok-field-section" style={{ marginTop: 12 }}>
+            {/* Grouped Card: Primary Bot Switch, Archive & Delete Lifecycle */}
+            <div className="grok-field-section">
               <label className="grok-section-label">{t('节点与生命周期管理', 'Lifecycle Management')}</label>
               <section className="grok-card-group">
                 {activeBot.isPrimary ? (
                   <div className="grok-card-row no-active">
                     <Star size={19} className="grok-row-icon" />
-                    <span className="grok-row-label">
-                      {t('当前为主智能体（切换主智能体后可归档或删除）', 'Current Primary Bot (switch primary to archive/delete)')}
+                    <span className="grok-row-label">{t('主智能体', 'Primary Bot')}</span>
+                    <span className="grok-row-value profile-lifecycle-note">
+                      {t('切换主智能体后可归档或删除', 'Switch primary to archive/delete')}
                     </span>
                   </div>
                 ) : (
@@ -4835,28 +4837,26 @@ ${newer}` : draftSnapshot;
         />
       )}
 
-      {/* ==================== SCREEN 4: EDIT / CREATE BOT VIEW (15847.jpg) ==================== */}
+      {/* ==================== SCREEN 4: CREATE BOT VIEW (15847.jpg) ==================== */}
       {screen === 'bot-edit' && (
         <main className="grok-subpage grok-page-enter">
           <header className="grok-subpage-topbar">
-            {mustCreatePrimaryBot && editMode === 'create' ? (
-              <span style={{ width: 40 }} />
+            {mustCreatePrimaryBot ? (
+              <span className="bot-profile-topbar-spacer" />
             ) : (
               <button
                 type="button"
                 className="grok-floating-circle-btn"
                 aria-label={t('返回', 'Back')}
-                onClick={() => setScreen(editMode === 'create' ? 'hub' : 'bot-profile')}
+                onClick={() => setScreen('hub')}
               >
                 <ArrowLeft size={20} />
               </button>
             )}
             <h2 className="grok-subpage-header-title">
-              {editMode === 'create'
-                ? mustCreatePrimaryBot || editMakePrimary
-                  ? t('创建主智能体', 'Create Primary Bot')
-                  : t('新建 Bot', 'New Bot')
-                : t('编辑 Bot', 'Edit Bot')}
+              {mustCreatePrimaryBot || editMakePrimary
+                ? t('创建主智能体', 'Create Primary Bot')
+                : t('新建 Bot', 'New Bot')}
             </h2>
             <button
               type="button"
@@ -4869,13 +4869,11 @@ ${newer}` : draftSnapshot;
           </header>
 
           <div className="grok-subpage-scroll">
-            {mustCreatePrimaryBot && editMode === 'create' && (
+            {mustCreatePrimaryBot && (
               <div className="grok-field-section">
-                <section className="grok-card-group" style={{ padding: '12px 14px' }}>
-                  <strong style={{ display: 'block', marginBottom: 4 }}>
-                    {t('当前设备尚未创建主智能体', 'Primary Bot Required')}
-                  </strong>
-                  <span style={{ fontSize: '0.85rem', opacity: 0.82 }}>
+                <section className="grok-card-group bot-profile-primary-notice">
+                  <strong>{t('当前设备尚未创建主智能体', 'Primary Bot Required')}</strong>
+                  <span>
                     {t(
                       '每台设备至少需要一个主智能体。请先创建本机主智能体后再进入主页。',
                       'Every device requires at least one primary bot. Create one to enter the hub.',
@@ -4884,7 +4882,7 @@ ${newer}` : draftSnapshot;
                 </section>
               </div>
             )}
-            {editMode === 'create' && createAttempt && (
+            {createAttempt && (
               <div className="grok-field-section">
                 <section className="grok-card-group grok-pending-freeze-card">
                   <div className="grok-pending-freeze-head">
@@ -5003,36 +5001,8 @@ ${newer}` : draftSnapshot;
                   className="grok-card-input"
                   value={editCwd}
                   onChange={e => { editCwdDirtyRef.current = true; setEditCwd(e.target.value); }}
-                  placeholder={editMode === 'create'
-                    ? t('目标主机上的绝对路径（留空用默认工作区）', 'Absolute path on the target host (blank uses default workspace)')
-                    : t('目标 Host 上的绝对路径；空闲后生效', 'Absolute path on the target Host; applies when idle')}
+                  placeholder={t('目标主机上的绝对路径（留空用默认工作区）', 'Absolute path on the target host (blank uses default workspace)')}
                 />
-                {editMode === 'edit' && (
-                  <p className="secondary" style={{ margin: '0 18px 12px' }}>
-                    {t(
-                      '保存到中心后在该 Bot 空闲时生效；运行中的任务保持原目录，不会移动文件。',
-                      'Saved to the center and applied when this Bot is idle; running work keeps its directory and no files are moved.',
-                    )}
-                  </p>
-                )}
-                {editMode === 'edit' && editCwdError && (
-                  <div className="grok-card-row no-active">
-                    <span className="grok-row-label" style={{ color: 'var(--danger, #c0392b)' }}>{editCwdError}</span>
-                    <button
-                      type="button"
-                      className="hub-outline-btn"
-                      disabled={action.busy || !activeBot}
-                      onClick={() => activeBot && void loadEditCwd(activeBot)}
-                    >
-                      {t('重新读取', 'Reload')}
-                    </button>
-                  </div>
-                )}
-                {editMode === 'edit' && !editCwdError && editCwdRevision === null && (
-                  <p className="secondary" style={{ margin: '0 18px 12px' }}>
-                    {t('正在读取中心修订…', 'Loading the center revision…')}
-                  </p>
-                )}
               </div>
             </div>
 
@@ -5051,7 +5021,7 @@ ${newer}` : draftSnapshot;
               </div>
             </div>
 
-            {editMode === 'create' && hasRemoteConfigured && !mustCreatePrimaryBot && (
+            {hasRemoteConfigured && !mustCreatePrimaryBot && (
               <div className="grok-field-section">
                 <label className="grok-section-label">{t('运行节点', 'Host')}</label>
                 <div className="grok-card-group">
@@ -5074,7 +5044,7 @@ ${newer}` : draftSnapshot;
               </div>
             )}
 
-            {editMode === 'create' && !mustCreatePrimaryBot && (
+            {!mustCreatePrimaryBot && (
               <div className="grok-field-section">
                 <label className="grok-section-label">{t('主智能体设置', 'Primary Role')}</label>
                 <div className="grok-card-group">
@@ -5097,58 +5067,7 @@ ${newer}` : draftSnapshot;
             <div className="grok-field-section">
               <label className="grok-section-label">{t('模型与能力', 'Model & Capabilities')}</label>
               <div className="grok-card-group">
-                {editMode === 'create' ? <div className="grok-card-row no-active">{t('创建后在模型设置中选择，默认继承中心', 'Choose a model after creation; inherits from the center by default')}</div>
-                  : !getOrCreateRemoteClient ? <div className="grok-card-row no-active">{t('请在独立助手中设置 Bot 模型', 'Set the bot model in the standalone assistant')}</div>
-                  : <>
-                    <button type="button" className="grok-card-row" onClick={() => openModelPickerSheet('bot-edit')} disabled={!remoteConnected || !remoteIdentity || !activeBot || (activeBot.hostKind === 'local' && !localHost?.deviceId)}>
-                      <Cpu size={18} className="grok-row-icon"/><span className="grok-row-label">{t('Bot 模型设置', 'Bot model settings')}</span><ChevronRight size={18} className="grok-row-chevron"/>
-                    </button>
-                    <button type="button" className="grok-card-row" onClick={() => openModelPickerSheet('bot-edit', 'capabilities')} disabled={!remoteConnected || !remoteIdentity || !activeBot || (activeBot.hostKind === 'local' && !localHost?.deviceId)}>
-                      <Puzzle size={18} className="grok-row-icon"/><span className="grok-row-label">{t('插件 / 技能 / MCP', 'Plugins / Skills / MCP')}</span><ChevronRight size={18} className="grok-row-chevron"/>
-                    </button>
-                  </>}
-              </div>
-            </div>
-
-            {/* Voice Call Section (15847.jpg) */}
-            <div className="grok-field-section">
-              <label className="grok-section-label">{t('语音通话', 'Voice Call')}</label>
-              <div className="grok-card-group">
-                <div className="grok-card-row no-active">
-                  <span className="grok-row-label">{t('语音', 'Voice')}</span>
-                  <label className="grok-select-wrap">
-                    <select value={editVoiceTone} onChange={e => setEditVoiceTone(e.target.value)}>
-                      <option value="未设置">{t('未设置', 'Default')}</option>
-                      <option value="清朗男声">{t('清朗男声', 'Clear Male')}</option>
-                      <option value="温和女声">{t('温和女声', 'Warm Female')}</option>
-                    </select>
-                    <ChevronsUpDown size={15} />
-                  </label>
-                </div>
-                <div className="grok-card-row no-active">
-                  <span className="grok-row-label">{t('速度', 'Speed')}</span>
-                  <label className="grok-select-wrap">
-                    <select value={editVoiceSpeed} onChange={e => setEditVoiceSpeed(e.target.value)}>
-                      <option value="0.75x">0.75x</option>
-                      <option value="1x">1x</option>
-                      <option value="1.25x">1.25x</option>
-                      <option value="1.5x">1.5x</option>
-                      <option value="2x">2x</option>
-                    </select>
-                    <ChevronsUpDown size={15} />
-                  </label>
-                </div>
-                <div className="grok-card-row no-active">
-                  <span className="grok-row-label">{t('语言', 'Language')}</span>
-                  <label className="grok-select-wrap">
-                    <select value={editVoiceLang} onChange={e => setEditVoiceLang(e.target.value)}>
-                      <option value="自动">{t('自动', 'Auto')}</option>
-                      <option value="中文">中文</option>
-                      <option value="English">English</option>
-                    </select>
-                    <ChevronsUpDown size={15} />
-                  </label>
-                </div>
+                <div className="grok-card-row no-active">{t('创建后在模型设置中选择，默认继承中心', 'Choose a model after creation; inherits from the center by default')}</div>
               </div>
             </div>
 
