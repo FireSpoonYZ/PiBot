@@ -139,6 +139,7 @@ import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, us
 
 import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleRepeatLabel, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending, ChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, formatToolStepDuration, copyTextToClipboard, renderToolStepIcon, extractSmartArgEntries, ToolCallStepCard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
 // @lane-imports:settings
+import { Badge, Disclosure, Row, Section } from './bot-settings/primitives';
 // ---
 // @lane-imports:hub
 // ---
@@ -7373,7 +7374,6 @@ function HubSettingsView({
   const [credJson, setCredJson] = useState('');
   const [voice, setVoice] = useState<HostVoiceSettings>();
   const [showLocalConfig, setShowLocalConfig] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<'basic' | 'advanced'>('basic');
 
   useEffect(() => {
     void ensureRemoteApi();
@@ -7532,631 +7532,546 @@ function HubSettingsView({
   const showCenterForm = !centerConn.ready || editingCenter;
 
   return (
-    <main className="grok-subpage grok-page-enter">
+    <main className="grok-subpage grok-page-enter hst-settings">
       <header className="grok-subpage-topbar">
         <button type="button" className="grok-floating-circle-btn" onClick={onBack} aria-label={t('返回', 'Back')}>
           <ArrowLeft size={20} />
         </button>
         <h2 className="grok-subpage-header-title">{t('设置', 'Settings')}</h2>
-        <span style={{ width: 44 }} />
+        <span className="hst-topbar-spacer" />
       </header>
 
       <div className="grok-subpage-scroll">
-        <div className="grok-segmented-tabs" role="tablist" aria-label={t('设置分栏', 'Settings tabs')} style={{ marginBottom: 14 }}>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={settingsTab === 'basic'}
-            className={settingsTab === 'basic' ? 'active' : undefined}
-            onClick={() => setSettingsTab('basic')}
-          >
-            {t('常规设置', 'General')}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={settingsTab === 'advanced'}
-            className={settingsTab === 'advanced' ? 'active' : undefined}
-            onClick={() => setSettingsTab('advanced')}
-          >
-            {t('高级设置', 'Advanced')}
-          </button>
-        </div>
+        {/* 1. 账号与中心 */}
+        <Section title={t('账号与中心', 'Account & Center')}>
+          <Row
+            icon={<Globe />}
+            title={
+              centerConn.ready
+                ? centerConn.status?.centerUrl || centerConn.url || t('已连接中心', 'Center Connected')
+                : centerConn.connecting
+                  ? t('正在后台连接中心…', 'Connecting to center…')
+                  : t('未连接中心服务', 'Center Disconnected')
+            }
+            subtitle={
+              centerConn.ready
+                ? `${t('设备标识：', 'Device: ')}${centerConn.deviceId || centerConn.saved?.deviceId || 'android'}`
+                : centerConn.saved?.url
+                  ? `${t('已保存地址：', 'Saved: ')}${centerConn.saved.url}`
+                  : t('配置中心地址与令牌以同步多端智能体', 'Configure center URL & token to sync bots across devices')
+            }
+            trailing={
+              <Badge tone={centerConn.ready ? 'success' : centerConn.connecting ? 'accent' : 'neutral'}>
+                {centerConn.connecting ? t('连接中', 'Syncing') : centerConn.ready ? t('已连接', 'Connected') : t('未连接', 'Offline')}
+              </Badge>
+            }
+          />
 
-        {settingsTab === 'basic' && <>
-        {/* Section 0: Center Connection (Moved from top of Bot Hub into Settings) */}
-        <div className="grok-field-section">
-          <div className="grok-provider-group-head">
-            <label className="grok-section-label">{t('中心连接', 'Center Connection')}</label>
-            {centerConn.ready && (
-              <button
-                type="button"
-                className="grok-provider-edit-link"
-                onClick={() => setEditingCenter(v => !v)}
-              >
-                {editingCenter ? t('收起', 'Collapse') : t('更换中心连接', 'Change Center')}
-              </button>
-            )}
-          </div>
-
-          <section className="grok-card-group">
-            <div className="grok-card-row no-active">
-              <Globe size={20} className="grok-row-icon" />
-              <div className="grok-model-row-main">
-                <span className="grok-row-label">
-                  {centerConn.ready
-                    ? centerConn.status?.centerUrl || centerConn.url || t('已连接中心', 'Center Connected')
-                    : centerConn.connecting
-                      ? t('正在后台连接中心…', 'Connecting to center…')
-                      : t('未连接中心服务', 'Center Disconnected')}
-                </span>
-                <small className="grok-model-row-sub">
-                  {centerConn.ready
-                    ? `${t('设备标识：', 'Device: ')}${centerConn.deviceId || centerConn.saved?.deviceId || 'android'}`
-                    : centerConn.saved?.url
-                      ? `${t('已保存地址：', 'Saved: ')}${centerConn.saved.url}`
-                      : t('配置中心地址与令牌以同步多端智能体', 'Configure center URL & token to sync bots across devices')}
-                </small>
-              </div>
-              <span className={`hub-online-pill${centerConn.ready ? '' : ' is-offline'}`}>
-                {centerConn.connecting
-                  ? t('连接中', 'Syncing')
-                  : centerConn.ready
-                    ? t('已连接', 'Connected')
-                    : t('未连接', 'Offline')}
-              </span>
-            </div>
-
-            {centerConn.ready && !editingCenter && (
-              <>
+          {centerConn.ready && !editingCenter && (
+            <>
+              <Row
+                icon={<ExternalLink />}
+                title={t('在浏览器打开中心管理', 'Open Center Management')}
+                chevron
+                onClick={() => centerConn.openManagement()}
+              />
+              <div className="hst-actions">
                 <button
                   type="button"
-                  className="grok-card-row"
-                  onClick={() => centerConn.openManagement()}
+                  className="hst-btn"
+                  disabled={centerConn.busy}
+                  onClick={() => setEditingCenter(true)}
                 >
-                  <ExternalLink size={19} className="grok-row-icon" />
-                  <span className="grok-row-label">{t('在浏览器中打开中心管理', 'Open Center Management')}</span>
-                  <ChevronRight size={18} className="grok-row-chevron" />
+                  {t('更换中心连接', 'Change Center')}
                 </button>
-                <div className="grok-card-row no-active" style={{ justifyContent: 'flex-end', gap: 8 }}>
+                <button
+                  type="button"
+                  className="hst-btn"
+                  disabled={centerConn.busy}
+                  onClick={() => void centerConn.disconnect()}
+                >
+                  {t('断开中心', 'Disconnect')}
+                </button>
+              </div>
+            </>
+          )}
+
+          {showCenterForm && (
+            <>
+              <label className="hst-input-row">
+                <span className="hst-input-label">{t('中心地址', 'Center URL')}</span>
+                <input
+                  className="hst-input"
+                  inputMode="url"
+                  value={centerConn.url}
+                  onChange={e => centerConn.setUrl(e.target.value)}
+                  placeholder="https://127.0.0.1:4318"
+                />
+              </label>
+
+              <label className="hst-input-row">
+                <span className="hst-input-label">{t('设备标识', 'Device ID')}</span>
+                <input
+                  className="hst-input"
+                  value={centerConn.deviceId}
+                  onChange={e => centerConn.setDeviceId(e.target.value)}
+                  placeholder="android-client"
+                />
+              </label>
+
+              <label className="hst-input-row">
+                <span className="hst-input-label">{t('客户端令牌', 'Client Token')}</span>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  className="hst-input"
+                  value={centerConn.token}
+                  onChange={e => centerConn.setToken(e.target.value)}
+                  placeholder={
+                    centerConn.matchesSaved
+                      ? t('留空使用已保存令牌', 'Blank to use saved token')
+                      : t('输入中心访问令牌', 'Enter client token')
+                  }
+                />
+              </label>
+
+              {centerConn.error && (
+                <div className="hst-row-static">
+                  <ErrorNotice error={centerConn.error} compact onDismiss={() => centerConn.setError('')} />
+                </div>
+              )}
+
+              <div className="hst-actions">
+                {centerConn.saved?.url && (
                   <button
                     type="button"
-                    className="hub-outline-btn"
-                    disabled={centerConn.busy}
-                    onClick={() => setEditingCenter(true)}
-                  >
-                    {t('更换中心连接', 'Change Center')}
-                  </button>
-                  <button
-                    type="button"
-                    className="hub-outline-btn"
+                    className="hst-btn"
                     disabled={centerConn.busy}
                     onClick={() => void centerConn.disconnect()}
                   >
-                    {t('断开中心', 'Disconnect')}
+                    {t('断开并清除凭据', 'Clear Saved')}
                   </button>
-                </div>
-              </>
-            )}
-
-            {showCenterForm && (
-              <>
-                <label className="grok-card-row grok-input-row">
-                  <span className="grok-input-label">{t('中心地址', 'Center URL')}</span>
-                  <input
-                    className="grok-inline-input"
-                    inputMode="url"
-                    value={centerConn.url}
-                    onChange={e => centerConn.setUrl(e.target.value)}
-                    placeholder="https://127.0.0.1:4318"
-                  />
-                </label>
-
-                <label className="grok-card-row grok-input-row">
-                  <span className="grok-input-label">{t('设备标识', 'Device ID')}</span>
-                  <input
-                    className="grok-inline-input"
-                    value={centerConn.deviceId}
-                    onChange={e => centerConn.setDeviceId(e.target.value)}
-                    placeholder="android-client"
-                  />
-                </label>
-
-                <label className="grok-card-row grok-input-row">
-                  <span className="grok-input-label">{t('客户端令牌', 'Client Token')}</span>
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    className="grok-inline-input"
-                    value={centerConn.token}
-                    onChange={e => centerConn.setToken(e.target.value)}
-                    placeholder={
-                      centerConn.matchesSaved
-                        ? t('留空使用已保存令牌', 'Blank to use saved token')
-                        : t('输入中心访问令牌', 'Enter client token')
-                    }
-                  />
-                </label>
-
-                {centerConn.error && (
-                  <div className="grok-card-row no-active">
-                    <ErrorNotice error={centerConn.error} compact onDismiss={() => centerConn.setError('')} />
-                  </div>
                 )}
-
-                <div className="grok-card-row no-active" style={{ justifyContent: 'flex-end', flexWrap: 'wrap', gap: 8 }}>
-                  {centerConn.saved?.url && (
-                    <button
-                      type="button"
-                      className="hub-outline-btn"
-                      disabled={centerConn.busy}
-                      onClick={() => void centerConn.disconnect()}
-                    >
-                      {t('断开并清除凭据', 'Clear Saved')}
-                    </button>
-                  )}
+                {centerConn.matchesSaved && !centerConn.token.trim() && (
                   <button
                     type="button"
-                    className="hub-outline-btn"
+                    className="hst-btn"
                     disabled={centerConn.busy}
-                    onClick={() => void centerConn.stopLocalHost()}
-                  >
-                    {t('退出客户端', 'Exit Client')}
-                  </button>
-                  {centerConn.matchesSaved && !centerConn.token.trim() && (
-                    <button
-                      type="button"
-                      className="hub-outline-btn"
-                      disabled={centerConn.busy}
-                      onClick={() =>
-                        void centerConn.connect().then(() => {
-                          setEditingCenter(false);
-                        })
-                      }
-                    >
-                      {t('用已存凭据重连', 'Reconnect Saved')}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="grok-done-pill-btn"
-                    disabled={
-                      centerConn.busy ||
-                      !centerConn.url.trim() ||
-                      !centerConn.deviceId.trim() ||
-                      (!centerConn.token.trim() && !centerConn.matchesSaved)
-                    }
                     onClick={() =>
-                      void centerConn
-                        .connect()
-                        .then(() => {
-                          setEditingCenter(false);
-                        })
+                      void centerConn.connect().then(() => {
+                        setEditingCenter(false);
+                      })
                     }
                   >
-                    {centerConn.preparing
-                      ? t('正在启动本机节点…', 'Starting Host…')
-                      : centerConn.busy
-                        ? t('连接中…', 'Connecting…')
-                        : t('连接中心', 'Connect Center')}
+                    {t('用已存凭据重连', 'Reconnect Saved')}
                   </button>
-                </div>
-              </>
-            )}
-          </section>
-        </div>
-
-        {/* Section 1: Models & Voice */}
-        <div className="grok-field-section">
-          <label className="grok-section-label">{t('模型与语音', 'Models & Voice')}</label>
-          <section className="grok-card-group">
-            {onOpenModelSheet && (
-              <button type="button" className="grok-card-row" onClick={onOpenModelSheet}>
-                <Cpu size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('模型与服务商', 'Providers & Models')}</span>
-                <span className="grok-row-value">{t('配置 API 与常用模型', 'Manage')}</span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-            )}
-
-            <div className="grok-card-row no-active">
-              <AudioLines size={20} className="grok-row-icon" />
-              <span className="grok-row-label">{t('语音朗读倍速', 'Speech Rate')}</span>
-              <label className="grok-select-wrap">
-                <select
-                  value={String(voice?.speechRate ?? 1)}
-                  onChange={e =>
-                    void action.run(async () => {
-                      const current = voice ?? (await BotHost.voiceSettings());
-                      const next = { ...current, speechRate: Number(e.target.value) };
-                      await BotHost.saveVoiceSettings({ settings: next as HostVoiceSaveInput });
-                      setVoice(await BotHost.voiceSettings());
-                    })
+                )}
+                <button
+                  type="button"
+                  className="hst-btn is-primary"
+                  disabled={
+                    centerConn.busy ||
+                    !centerConn.url.trim() ||
+                    !centerConn.deviceId.trim() ||
+                    (!centerConn.token.trim() && !centerConn.matchesSaved)
+                  }
+                  onClick={() =>
+                    void centerConn
+                      .connect()
+                      .then(() => {
+                        setEditingCenter(false);
+                      })
                   }
                 >
-                  {[0.75, 1, 1.25, 1.5, 2].map(r => (
-                    <option key={r} value={String(r)}>
-                      {r}×
-                    </option>
-                  ))}
-                </select>
-                <ChevronsUpDown size={15} />
-              </label>
-            </div>
-          </section>
-          <p className="grok-card-footnote">
-            {t(
-              '支持添加 DeepSeek、OpenAI、Anthropic、Gemini 或自定义服务商，并收藏 ★ 常用模型。',
-              'Configure built-in or custom providers and pin favorite models.',
-            )}
-          </p>
-        </div>
+                  {centerConn.preparing
+                    ? t('正在启动本机节点…', 'Starting Host…')
+                    : centerConn.busy
+                      ? t('连接中…', 'Connecting…')
+                      : t('连接中心', 'Connect Center')}
+                </button>
+              </div>
+            </>
+          )}
+        </Section>
 
-        {/* Section 2: Archived Bots & Lifecycle */}
-        <div className="grok-field-section">
-          <label className="grok-section-label">{t('智能体与归档', 'Bots & Archive')}</label>
-          <section className="grok-card-group">
-            <button type="button" className="grok-card-row" onClick={onOpenArchivedBots}>
-              <Archive size={20} className="grok-row-icon" />
-              <span className="grok-row-label">
-                {t(`已归档智能体 (${archivedCount})`, `Archived Bots (${archivedCount})`)}
-              </span>
-              <span className="grok-row-value">{t('14 天后自动清理', '14d auto-delete')}</span>
-              <ChevronRight size={18} className="grok-row-chevron" />
-            </button>
-          </section>
-        </div>
-
-        {/* Section 3: System Permissions & Console */}
-        <div className="grok-field-section">
-          <label className="grok-section-label">{t('系统与控制台', 'System & Console')}</label>
-          <section className="grok-card-group">
-            {onOpenSystemSettings && (
-              <button type="button" className="grok-card-row" onClick={onOpenSystemSettings}>
-                <Settings size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('系统权限与设置', 'System permissions & settings')}</span>
-                <span className="grok-row-value">{t('Shizuku、唤醒词、外观', 'Permissions & Theme')}</span>
-                <ChevronRight size={18} className="grok-row-chevron" />
+        {/* 2. 设备 */}
+        <Section
+          title={t('设备', 'Devices')}
+          action={
+            remoteProfiles.length > 0 ? (
+              <button type="button" className="bs-link" onClick={() => setAddingRemote(v => !v)}>
+                {addingRemote ? t('收起', 'Collapse') : t('添加节点', 'Add Host')}
               </button>
-            )}
-
-            <button
-              type="button"
-              className="grok-card-row"
-              onClick={() => void openCenterManagement()}
-            >
-              <ExternalLink size={20} className="grok-row-icon" />
-              <span className="grok-row-label">{t('中心管理控制台', 'Center Management Console')}</span>
-              <span className="grok-row-value">{t('浏览器打开', 'Open in browser')}</span>
-              <ChevronRight size={18} className="grok-row-chevron" />
-            </button>
-          </section>
-        </div>
-        </>}
-
-        {settingsTab === 'advanced' && <>
-        <div className="grok-field-section">
-          <label className="grok-section-label">{t('中心连接进阶参数', 'Center Advanced TLS & Host Token')}</label>
-          <section className="grok-card-group">
-            <label className="grok-card-row grok-input-row">
-              <span className="grok-input-label">{t('本机节点令牌', 'Host Token')}</span>
-              <input
-                type="password"
-                autoComplete="new-password"
-                className="grok-inline-input"
-                value={centerConn.hostToken}
-                onChange={e => centerConn.setHostToken(e.target.value)}
-                placeholder={t('选填，留空保持本机节点令牌不变', 'Optional; leave blank to keep local Host token')}
-              />
-            </label>
-
-            <label className="grok-card-row grok-input-row">
-              <span className="grok-input-label">{t('CA 证书', 'CA PEM')}</span>
-              <input
-                className="grok-inline-input"
-                value={centerConn.ca}
-                onChange={e => centerConn.setCa(e.target.value)}
-                placeholder={t('自签名证书 PEM（选填）', 'Optional self-signed PEM')}
-              />
-            </label>
-          </section>
-          <p className="grok-card-footnote">
-            {t('仅在使用自签证书中心或需单独指定本机 Host 设备令牌时填写。', 'Only needed for self-signed TLS certificates or custom local Host tokens.')}
-          </p>
-        </div>
-
-        {/* Section 2: Remote Connections */}
-        <div className="grok-field-section">
-          <div className="grok-provider-group-head">
-            <label className="grok-section-label">{t('自定义远程节点 / 直连配置', 'Custom Remote Hosts')}</label>
-            <button
-              type="button"
-              className="grok-provider-edit-link"
-              onClick={() => setAddingRemote(v => !v)}
-            >
-              {addingRemote ? t('取消', 'Cancel') : t('＋ 添加节点', '+ Add Host')}
-            </button>
-          </div>
-
+            ) : undefined
+          }
+          hint={
+            remoteProfiles.length > 0
+              ? t('连接远程节点后，远端主机上的 Bot 会自动出现在主页列表中。', 'Connected remote bots appear directly in your home list.')
+              : undefined
+          }
+          bare
+        >
           {addingRemote && (
-            <form className="grok-card-group" onSubmit={saveRemoteProfile} style={{ marginBottom: 10 }}>
-              <label className="grok-card-row grok-input-row">
-                <span className="grok-input-label">{t('节点名称', 'Name')}</span>
+            <form className="bs-card" onSubmit={saveRemoteProfile}>
+              <label className="hst-input-row">
+                <span className="hst-input-label">{t('节点名称', 'Name')}</span>
                 <input
                   required
-                  className="grok-inline-input"
+                  className="hst-input"
                   value={formTitle}
                   onChange={e => setFormTitle(e.target.value)}
                   placeholder={t('例如：家里工作站', 'e.g. Home Workstation')}
                 />
               </label>
 
-              <div className="grok-card-row no-active">
-                <span className="grok-row-label">{t('连接方式', 'Mode')}</span>
-                <label className="grok-select-wrap">
+              <div className="hst-input-row">
+                <span className="hst-input-label">{t('连接方式', 'Mode')}</span>
+                <span className="hst-select-wrap is-end">
                   <select value={formKind} onChange={e => setFormKind(e.target.value as 'local' | 'relay')}>
                     <option value="relay">{t('中继服务 (Relay)', 'Relay')}</option>
                     <option value="local">{t('直连 (WebSocket)', 'Direct WebSocket')}</option>
                   </select>
-                  <ChevronsUpDown size={15} />
-                </label>
+                  <ChevronsUpDown size={14} />
+                </span>
               </div>
 
-              <label className="grok-card-row grok-input-row">
-                <span className="grok-input-label">{t('服务地址', 'Server URL')}</span>
+              <label className="hst-input-row">
+                <span className="hst-input-label">{t('服务地址', 'Server URL')}</span>
                 <input
                   required
-                  className="grok-inline-input"
+                  className="hst-input"
                   value={formUrl}
                   onChange={e => setFormUrl(e.target.value)}
                   placeholder="wss://..."
                 />
               </label>
 
-              <label className="grok-card-row grok-input-row">
-                <span className="grok-input-label">
+              <label className="hst-input-row">
+                <span className="hst-input-label">
                   {formKind === 'relay' ? t('设备标识', 'Device ID') : t('目标设备 ID', 'Target ID')}
                 </span>
                 <input
                   required={formKind === 'relay'}
-                  className="grok-inline-input"
+                  className="hst-input"
                   value={formDeviceId}
                   onChange={e => setFormDeviceId(e.target.value)}
                   placeholder={formKind === 'relay' ? t('必填', 'Required') : t('选填', 'Optional')}
                 />
               </label>
 
-              <div className="grok-card-row no-active" style={{ justifyContent: 'flex-end' }}>
-                <button type="submit" className="grok-done-pill-btn" disabled={action.busy}>
+              <div className="hst-actions">
+                <button type="submit" className="hst-btn is-primary" disabled={action.busy}>
                   {t('保存节点', 'Save Host')}
                 </button>
               </div>
             </form>
           )}
 
-          <section className="grok-card-group">
-            {remoteProfiles.length === 0 ? (
-              <button
-                type="button"
-                className="grok-card-row"
+          {remoteProfiles.length === 0 && !addingRemote ? (
+            <div className="bs-card">
+              <Row
+                icon={<Server />}
+                title={t('添加远程节点', 'Add Remote Host')}
+                subtitle={t('默认本机运行', 'Local only')}
+                chevron
                 onClick={() => setAddingRemote(true)}
-              >
-                <Server size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('添加远程节点', 'Add Remote Host')}</span>
-                <span className="grok-row-value">{t('默认本机运行', 'Local only')}</span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-            ) : (
-              <>
-                {remoteProfiles.map(p => {
-                  const active = (selectedProfileId ?? remoteProfiles[0]?.id) === p.id;
-                  const isConnectedProfile = remoteConnected && remoteIdentity?.profileId === p.id;
-                  return (
-                    <div key={p.id} className={`grok-card-row grok-model-item-row${active ? ' active' : ''}`}>
-                      <button
-                        type="button"
-                        className="grok-model-item-select"
-                        onClick={() => setSelectedProfileId(p.id)}
-                      >
-                        <div className="grok-model-row-main">
-                          <span className="grok-row-label">{p.title}</span>
-                          <small className="grok-model-row-sub">{`${p.kind} · ${p.url}`}</small>
-                        </div>
-                      </button>
-                      <div className="grok-model-item-right">
-                        {isConnectedProfile && <span className="hub-online-pill">{t('已连接', 'Connected')}</span>}
+              />
+            </div>
+          ) : remoteProfiles.length > 0 ? (
+            <div className="bs-card">
+              {remoteProfiles.map(p => {
+                const active = (selectedProfileId ?? remoteProfiles[0]?.id) === p.id;
+                const isConnectedProfile = remoteConnected && remoteIdentity?.profileId === p.id;
+                return (
+                  <Row
+                    key={p.id}
+                    selected={active}
+                    icon={<Server />}
+                    title={p.title}
+                    subtitle={`${p.kind} · ${p.url}`}
+                    onClick={() => setSelectedProfileId(p.id)}
+                    trailing={
+                      <>
+                        {isConnectedProfile && <Badge tone="success">{t('已连接', 'Connected')}</Badge>}
                         <button
                           type="button"
-                          className="grok-schedule-icon-btn danger"
+                          className="hst-btn is-ghost"
                           aria-label={t('删除节点', 'Remove host')}
                           onClick={() => void deleteRemoteProfile(p.id)}
                         >
                           <Trash2 size={15} />
                         </button>
-                      </div>
-                    </div>
-                  );
-                })}
+                      </>
+                    }
+                  />
+                );
+              })}
 
-                <label className="grok-card-row grok-input-row">
-                  <span className="grok-input-label">{t('连接令牌', 'Token')}</span>
+              <label className="hst-input-row">
+                <span className="hst-input-label">{t('连接令牌', 'Token')}</span>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  className="hst-input"
+                  value={token}
+                  onChange={e => setToken(e.target.value)}
+                  placeholder={t('输入访问 Token', 'Enter access token')}
+                />
+              </label>
+
+              {activeProfile?.kind === 'relay' && (
+                <label className="hst-input-row">
+                  <span className="hst-input-label">{t('CA 证书', 'CA PEM')}</span>
                   <input
-                    type="password"
-                    autoComplete="new-password"
-                    className="grok-inline-input"
-                    value={token}
-                    onChange={e => setToken(e.target.value)}
-                    placeholder={t('输入访问 Token', 'Enter access token')}
+                    className="hst-input"
+                    value={ca}
+                    onChange={e => setCa(e.target.value)}
+                    placeholder={t('选填 PEM', 'Optional PEM')}
                   />
                 </label>
+              )}
 
-                {activeProfile?.kind === 'relay' && (
-                  <label className="grok-card-row grok-input-row">
-                    <span className="grok-input-label">{t('CA 证书', 'CA PEM')}</span>
-                    <input
-                      className="grok-inline-input"
-                      value={ca}
-                      onChange={e => setCa(e.target.value)}
-                      placeholder={t('选填 PEM', 'Optional PEM')}
-                    />
-                  </label>
-                )}
-
-                <div className="grok-card-row no-active" style={{ justifyContent: 'flex-end', gap: 8 }}>
-                  {remoteConnected && (
-                    <button
-                      type="button"
-                      className="hub-outline-btn"
-                      disabled={action.busy}
-                      onClick={() => void disconnectRemote()}
-                    >
-                      {t('断开连接', 'Disconnect')}
-                    </button>
-                  )}
+              <div className="hst-actions">
+                {remoteConnected && (
                   <button
                     type="button"
-                    className="grok-done-pill-btn"
-                    disabled={action.busy || !token.trim()}
-                    onClick={() => void connectRemoteProfile()}
+                    className="hst-btn"
+                    disabled={action.busy}
+                    onClick={() => void disconnectRemote()}
                   >
-                    {t('连接节点', 'Connect')}
+                    {t('断开连接', 'Disconnect')}
                   </button>
+                )}
+                <button
+                  type="button"
+                  className="hst-btn is-primary"
+                  disabled={action.busy || !token.trim()}
+                  onClick={() => void connectRemoteProfile()}
+                >
+                  {t('连接节点', 'Connect')}
+                </button>
+              </div>
+
+              {remoteConnected && remoteIdentity?.kind === 'relay' && remoteDevices.map(dev => (
+                <div className="hst-device-row" key={dev.deviceId}>
+                  <span className={`hst-device-badge${dev.online ? '' : ' is-offline'}`}>
+                    <PlatformLogoIcon platform={dev.platform} size={14} />
+                  </span>
+                  {renamingDeviceId === dev.deviceId ? (
+                    <>
+                      <input
+                        className="hst-device-name-input"
+                        value={renameDraft}
+                        onChange={e => setRenameDraft(e.target.value)}
+                        placeholder={dev.deviceId}
+                        autoFocus
+                      />
+                      <button
+                        type="button"
+                        className="hst-btn is-primary"
+                        disabled={action.busy}
+                        onClick={() =>
+                          void action.run(async () => {
+                            const api = await ensureRemoteApi();
+                            if (!api || !api.identity) throw new Error('Not connected');
+                            await api.broker(api.identity, 'rename_device', {
+                              deviceId: dev.deviceId,
+                              displayName: renameDraft.trim(),
+                            });
+                            setRenamingDeviceId(null);
+                            onRemoteUpdated();
+                          })
+                        }
+                      >
+                        {t('保存', 'Save')}
+                      </button>
+                      <button
+                        type="button"
+                        className="hst-btn"
+                        onClick={() => setRenamingDeviceId(null)}
+                      >
+                        {t('取消', 'Cancel')}
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="hst-device-name">{dev.displayName || dev.deviceId}</span>
+                      <Badge tone={dev.online ? 'success' : 'neutral'}>
+                        {dev.online ? t('在线', 'Online') : t('离线', 'Offline')}
+                      </Badge>
+                      <button
+                        type="button"
+                        className="hst-btn"
+                        onClick={() => {
+                          setRenamingDeviceId(dev.deviceId);
+                          setRenameDraft(dev.displayName || dev.deviceId);
+                        }}
+                      >
+                        {t('改名', 'Rename')}
+                      </button>
+                    </>
+                  )}
                 </div>
+              ))}
+            </div>
+          ) : null}
+        </Section>
 
-                {remoteConnected && remoteIdentity?.kind === 'relay' && remoteDevices.map(dev => (
-                  <div className="grok-card-row no-active" key={dev.deviceId} style={{ gap: 8 }}>
-                    <span
-                      className={`hub-bot-host-badge remote${dev.online ? '' : ' is-offline'}`}
-                      style={{ maxWidth: 'none' }}
-                    >
-                      <PlatformLogoIcon platform={dev.platform} size={12} />
-                    </span>
-                    {renamingDeviceId === dev.deviceId ? (
-                      <>
-                        <input
-                          className="grok-inline-input"
-                          style={{ textAlign: 'left', flex: 1 }}
-                          value={renameDraft}
-                          onChange={e => setRenameDraft(e.target.value)}
-                          placeholder={dev.deviceId}
-                          autoFocus
-                        />
-                        <button
-                          type="button"
-                          className="grok-done-pill-btn"
-                          disabled={action.busy}
-                          onClick={() =>
-                            void action.run(async () => {
-                              const api = await ensureRemoteApi();
-                              if (!api || !api.identity) throw new Error('Not connected');
-                              await api.broker(api.identity, 'rename_device', {
-                                deviceId: dev.deviceId,
-                                displayName: renameDraft.trim(),
-                              });
-                              setRenamingDeviceId(null);
-                              onRemoteUpdated();
-                            })
-                          }
-                        >
-                          {t('保存', 'Save')}
-                        </button>
-                        <button
-                          type="button"
-                          className="hub-outline-btn"
-                          onClick={() => setRenamingDeviceId(null)}
-                        >
-                          {t('取消', 'Cancel')}
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <span className="grok-row-label" style={{ flex: 1 }}>
-                          {dev.displayName || dev.deviceId}
-                        </span>
-                        <span className={`hub-online-pill${dev.online ? '' : ' is-offline'}`}>
-                          {dev.online ? t('在线', 'Online') : t('离线', 'Offline')}
-                        </span>
-                        <button
-                          type="button"
-                          className="hub-outline-btn"
-                          onClick={() => {
-                            setRenamingDeviceId(dev.deviceId);
-                            setRenameDraft(dev.displayName || dev.deviceId);
-                          }}
-                        >
-                          {t('改名', 'Rename')}
-                        </button>
-                      </>
-                    )}
-                  </div>
+        {/* 3. 语音 */}
+        <Section title={t('语音', 'Voice')}>
+          <div className="hst-row-static">
+            <span className="bs-row-icon" aria-hidden="true"><AudioLines size={17} /></span>
+            <span className="bs-row-text"><span className="bs-row-title">{t('语音朗读倍速', 'Speech Rate')}</span></span>
+            <span className="hst-select-wrap">
+              <select
+                value={String(voice?.speechRate ?? 1)}
+                onChange={e =>
+                  void action.run(async () => {
+                    const current = voice ?? (await BotHost.voiceSettings());
+                    const next = { ...current, speechRate: Number(e.target.value) };
+                    await BotHost.saveVoiceSettings({ settings: next as HostVoiceSaveInput });
+                    setVoice(await BotHost.voiceSettings());
+                  })
+                }
+              >
+                {[0.75, 1, 1.25, 1.5, 2].map(r => (
+                  <option key={r} value={String(r)}>
+                    {r}×
+                  </option>
                 ))}
+              </select>
+              <ChevronsUpDown size={14} />
+            </span>
+          </div>
+        </Section>
 
-              </>
-            )}
-          </section>
-          <p className="grok-card-footnote">
-            {t(
-              '连接远程节点后，远端主机上的 Bot 会自动出现在主页列表中。',
-              'Connected remote bots appear directly in your home list.',
-            )}
-          </p>
-        </div>
+        {/* 4. 智能体 */}
+        <Section title={t('智能体', 'Bots')}>
+          <Row
+            icon={<Archive />}
+            title={t(`已归档智能体 (${archivedCount})`, `Archived Bots (${archivedCount})`)}
+            subtitle={t('14 天后自动清理', '14d auto-delete')}
+            chevron
+            onClick={onOpenArchivedBots}
+          />
+          {onOpenModelSheet && (
+            <Row
+              icon={<Cpu />}
+              title={t('模型与服务商', 'Providers & Models')}
+              subtitle={t('配置 API 与常用模型', 'Manage API & favorite models')}
+              chevron
+              onClick={onOpenModelSheet}
+            />
+          )}
+        </Section>
 
-        {/* Section 3: Local Host Raw JSON */}
-        <div className="grok-field-section">
-          <label className="grok-section-label">{t('本机底层配置与凭据', 'Local Host Raw Config')}</label>
-          <section className="grok-card-group">
-            <button type="button" className="grok-card-row" onClick={toggleLocalConfig}>
-              <Code2 size={20} className="grok-row-icon" />
-              <span className="grok-row-label">{t('高级配置 (JSON)', 'Advanced JSON')}</span>
-              <span className="grok-row-value">{showLocalConfig ? t('收起', 'Hide') : t('展开', 'Show')}</span>
-              <ChevronRight size={18} className="grok-row-chevron" />
-            </button>
-          </section>
+        {/* 5. 系统 */}
+        {onOpenSystemSettings && (
+          <Section title={t('系统', 'System')}>
+            <Row
+              icon={<Settings />}
+              title={t('系统权限与设置', 'System permissions & settings')}
+              subtitle={t('Shizuku、唤醒词、外观等系统级设置', 'Shizuku, wake word, theme and other system settings')}
+              chevron
+              onClick={onOpenSystemSettings}
+            />
+          </Section>
+        )}
 
-          {showLocalConfig && (
-            <div className="grok-advanced-body" style={{ marginTop: 8 }}>
-              <form onSubmit={saveLocalCredentials} className="grok-card-group">
-                <label className="grok-card-row grok-input-row">
-                  <span className="grok-input-label">{t('凭据 JSON', 'Credentials JSON')}</span>
+        {/* 6. 开发者 */}
+        <Disclosure title={t('开发者', 'Developer')}>
+          <div className="hst-form">
+            <Section title={t('中心连接进阶参数', 'Center TLS & Host Token')} bare>
+              <div className="bs-card">
+                <label className="hst-input-row">
+                  <span className="hst-input-label">{t('本机节点令牌', 'Host Token')}</span>
                   <input
                     type="password"
                     autoComplete="new-password"
-                    className="grok-inline-input"
-                    value={credJson}
-                    onChange={e => setCredJson(e.target.value)}
-                    placeholder='{"OPENAI_API_KEY": "sk-..."}'
+                    className="hst-input"
+                    value={centerConn.hostToken}
+                    onChange={e => centerConn.setHostToken(e.target.value)}
+                    placeholder={t('选填，留空保持不变', 'Optional; blank keeps current')}
                   />
                 </label>
-                <div className="grok-card-row no-active" style={{ justifyContent: 'flex-end' }}>
-                  <button type="submit" className="grok-done-pill-btn" disabled={action.busy}>
-                    {t('保存凭据', 'Save Credentials')}
-                  </button>
-                </div>
-              </form>
+                <label className="hst-input-row">
+                  <span className="hst-input-label">{t('CA 证书', 'CA PEM')}</span>
+                  <input
+                    className="hst-input"
+                    value={centerConn.ca}
+                    onChange={e => centerConn.setCa(e.target.value)}
+                    placeholder={t('自签名证书 PEM（选填）', 'Optional self-signed PEM')}
+                  />
+                </label>
+              </div>
+            </Section>
 
-              {hostSettings && (
-                <form onSubmit={saveLocalSettings} className="grok-card-group">
-                  <div className="grok-card-textarea-wrap">
-                    <textarea
-                      rows={6}
-                      value={settingsJson}
-                      onChange={e => setSettingsJson(e.target.value)}
-                      spellCheck={false}
-                      style={{ fontFamily: 'ui-monospace, Consolas, monospace', fontSize: '.82rem' }}
-                    />
-                  </div>
-                  <div className="grok-card-row no-active" style={{ justifyContent: 'flex-end' }}>
-                    <button type="submit" className="grok-done-pill-btn" disabled={action.busy}>
-                      {t('保存运行配置', 'Save Runtime JSON')}
-                    </button>
-                  </div>
-                </form>
+            <Section title={t('本机底层配置与凭据', 'Local Host Config')} bare>
+              <div className="bs-card">
+                <Row
+                  icon={<Code2 />}
+                  title={t('高级配置 (JSON)', 'Advanced JSON')}
+                  trailing={<span className="bs-row-sub">{showLocalConfig ? t('收起', 'Hide') : t('展开', 'Show')}</span>}
+                  chevron
+                  onClick={toggleLocalConfig}
+                />
+              </div>
+
+              {showLocalConfig && (
+                <>
+                  <form onSubmit={saveLocalCredentials} className="bs-card">
+                    <label className="hst-input-row">
+                      <span className="hst-input-label">{t('凭据 JSON', 'Credentials JSON')}</span>
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        className="hst-input"
+                        value={credJson}
+                        onChange={e => setCredJson(e.target.value)}
+                        placeholder='{"OPENAI_API_KEY": "sk-..."}'
+                      />
+                    </label>
+                    <div className="hst-actions">
+                      <button type="submit" className="hst-btn is-primary" disabled={action.busy}>
+                        {t('保存凭据', 'Save Credentials')}
+                      </button>
+                    </div>
+                  </form>
+
+                  {hostSettings && (
+                    <form onSubmit={saveLocalSettings} className="bs-card">
+                      <div className="hst-row-static">
+                        <textarea
+                          className="hst-textarea"
+                          rows={6}
+                          value={settingsJson}
+                          onChange={e => setSettingsJson(e.target.value)}
+                          spellCheck={false}
+                        />
+                      </div>
+                      <div className="hst-actions">
+                        <button type="submit" className="hst-btn is-primary" disabled={action.busy}>
+                          {t('保存运行配置', 'Save Runtime JSON')}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                </>
               )}
-            </div>
-          )}
+            </Section>
+          </div>
+        </Disclosure>
+
+        <div className="hst-exit">
+          <button
+            type="button"
+            className="hst-btn is-danger"
+            disabled={centerConn.busy}
+            onClick={() => void centerConn.stopLocalHost()}
+          >
+            {t('退出客户端', 'Exit Client')}
+          </button>
         </div>
-        </>}
 
         <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
       </div>
