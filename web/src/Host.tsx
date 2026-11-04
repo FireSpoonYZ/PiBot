@@ -3565,6 +3565,48 @@ ${newer}` : draftSnapshot;
   // @lane-hooks:hub
   // ---
   // @lane-hooks:chat
+  // Two-tap confirm for "clear current conversation": first tap arms, second tap within 3s runs.
+  const [clearConfirmArmed, setClearConfirmArmed] = useState(false);
+  const clearConfirmTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!chatTopMenuOpen) setClearConfirmArmed(false);
+  }, [chatTopMenuOpen]);
+  useEffect(() => () => {
+    if (clearConfirmTimerRef.current !== null) window.clearTimeout(clearConfirmTimerRef.current);
+  }, []);
+  const requestClearConversation = () => {
+    if (!clearConfirmArmed) {
+      setClearConfirmArmed(true);
+      if (clearConfirmTimerRef.current !== null) window.clearTimeout(clearConfirmTimerRef.current);
+      clearConfirmTimerRef.current = window.setTimeout(() => setClearConfirmArmed(false), 3000);
+      return;
+    }
+    if (clearConfirmTimerRef.current !== null) window.clearTimeout(clearConfirmTimerRef.current);
+    setClearConfirmArmed(false);
+    setChatTopMenuOpen(false);
+    const scope = activeChatScope;
+    void runSlashCommand('/clear').catch(error => {
+      if (currentChatScope.current === scope) setClearNotice(errorText(error));
+    });
+  };
+  // Merged bottom status bar: render only the single highest-priority notice.
+  const chatConnIssue = !centerConn.ready && Boolean(centerConn.status?.error);
+  const chatLoadIssue = Boolean(chatLoadError) && !(centerConn.status?.state === 'disconnected' && centerConn.status.error);
+  const chatAdmissionActive = Boolean(chatTurnAdmission) && chatPending?.botKey === activeBot?.key &&
+    (chatReceipt?.status === undefined || chatReceipt.status === 'queued');
+  const chatRecovering = chatPending?.botKey === activeBot?.key && chatPending?.phase === 'recovering';
+  const chatStatusKind: 'fail' | 'recovering' | 'admission' | 'conn' | 'load' | 'clear' | null =
+    failureNotice ? 'fail'
+      : chatRecovering ? 'recovering'
+      : chatAdmissionActive ? 'admission'
+      : chatConnIssue ? 'conn'
+      : chatLoadIssue ? 'load'
+      : clearNotice ? 'clear'
+      : null;
+  // "排队等待受理" technical wording replaced; other admission phases keep the original text.
+  const chatAdmissionText = chatTurnAdmission?.phase === 'queued'
+    ? t('排队等待中…', 'Waiting in queue…')
+    : admissionStatusText;
   // ---
   // @lane-hooks:remote-composer
   // "+" 菜单 /clear 二次确认：存首次点击时间戳，3 秒内再点才执行（自然过期，无计时器）。
@@ -3985,22 +4027,6 @@ ${newer}` : draftSnapshot;
                       <span>{t('恢复智能体', 'Unarchive Bot')}</span>
                     </button>
                   )}
-                  {!activeBot.archivedAt && (
-                    <button
-                      type="button"
-                      role="menuitem"
-                      className="danger"
-                      onClick={() => {
-                        const scope = activeChatScope;
-                        void runSlashCommand('/clear').catch(error => {
-                          if (currentChatScope.current === scope) setClearNotice(errorText(error));
-                        });
-                      }}
-                    >
-                      <Trash2 size={19} />
-                      <span>{t('清空当前对话', 'Clear History')}</span>
-                    </button>
-                  )}
                   {!activeBot.isPrimary && (
                     <button
                       type="button"
@@ -4011,6 +4037,22 @@ ${newer}` : draftSnapshot;
                       <Trash2 size={19} />
                       <span>{t('永久删除智能体', 'Permanently Delete Bot')}</span>
                     </button>
+                  )}
+                  {!activeBot.archivedAt && (
+                    <>
+                      <div className="grok-menu-separator" role="separator" />
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="danger"
+                        onClick={requestClearConversation}
+                      >
+                        <Trash2 size={19} />
+                        <span>{clearConfirmArmed
+                          ? t('再次点击确认清空', 'Tap again to confirm clearing')
+                          : t('清空当前对话', 'Clear History')}</span>
+                      </button>
+                    </>
                   )}
                 </div>
               </>
@@ -4192,27 +4234,41 @@ ${newer}` : draftSnapshot;
               startedAt={activeTurnStartedAt}
               t={t}
             />
-            <ErrorNotice
-              error={failureNotice || (!centerConn.ready && centerConn.status?.error ? centerConn.error : '')}
-              actionLabel={failureNotice ? t('检查配置', 'Check Settings') : !centerConn.ready && centerConn.status?.error ? t('去连接', 'Connect') : undefined}
-              onAction={failureNotice ? () => openBotProfile(activeBot) : !centerConn.ready && centerConn.status?.error ? () => setScreen('settings') : undefined}
-            />
-            {((chatLoadError && !(centerConn.status?.state === 'disconnected' && centerConn.status.error)) || (chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering')) && (
+            {chatStatusKind === 'fail' && (
+              <ErrorNotice
+                error={failureNotice}
+                actionLabel={t('检查配置', 'Check Settings')}
+                onAction={() => openBotProfile(activeBot)}
+              />
+            )}
+            {chatStatusKind === 'recovering' && (
               <div className="bot-chat-system-notice" role="status">
-                {chatPending?.phase === 'recovering' ? t('发送结果待确认，保留原请求 ID；不会自动重发。', 'Send result unconfirmed; retaining the original request ID without resending.') : activeBot.online === false ? remoteConnected ? t('目标节点离线，上线后自动恢复。', 'Target offline; restoring when it returns.') : t('连接已中断，远端设备状态待确认。', 'Connection interrupted; remote device status is unknown.') : chatLoadError}
-                {chatPending?.phase === 'recovering' && activeBot.hostKind === 'local' && <button type="button" className="hub-outline-btn" onClick={() => setChatResumeEpoch(value => value + 1)}>{t('按原 ID 对账', 'Reconcile ID')}</button>}
+                {t('消息可能已送达，正在确认。为避免重复，不会自动重发。', 'The message may have been delivered; confirming. To avoid duplicates, it will not be resent automatically.')}
+                {activeBot.hostKind === 'local' && <button type="button" className="hub-outline-btn" onClick={() => setChatResumeEpoch(value => value + 1)}>{t('重新确认', 'Confirm again')}</button>}
               </div>
             )}
-            {chatTurnAdmission && chatPending?.botKey === activeBot.key && (chatReceipt?.status === undefined || chatReceipt.status === 'queued') && (
+            {chatStatusKind === 'admission' && (
               <div className="bot-chat-system-notice" role="status">
-                {admissionStatusText}
-                {chatTurnAdmission.phase === 'failed' && (activeBot.hostKind === 'local'
-                  ? <button type="button" className="hub-outline-btn" onClick={() => void retryAdmission()}>{t('按原 ID 重试', 'Retry same ID')}</button>
-                  : <button type="button" className="hub-outline-btn" onClick={() => void retryRemoteAdmission()}>{t('按原 ID 重试', 'Retry same ID')}</button>
+                {chatAdmissionText}
+                {chatTurnAdmission?.phase === 'failed' && (activeBot.hostKind === 'local'
+                  ? <button type="button" className="hub-outline-btn" onClick={() => void retryAdmission()}>{t('重试发送', 'Retry sending')}</button>
+                  : <button type="button" className="hub-outline-btn" onClick={() => void retryRemoteAdmission()}>{t('重试发送', 'Retry sending')}</button>
                 )}
               </div>
             )}
-            {clearNotice && (
+            {chatStatusKind === 'conn' && (
+              <ErrorNotice
+                error={centerConn.error}
+                actionLabel={t('去连接', 'Connect')}
+                onAction={() => setScreen('settings')}
+              />
+            )}
+            {chatStatusKind === 'load' && (
+              <div className="bot-chat-system-notice" role="status">
+                {activeBot.online === false ? (remoteConnected ? t('目标节点离线，上线后自动恢复。', 'Target offline; restoring when it returns.') : t('连接已中断，远端设备状态待确认。', 'Connection interrupted; remote device status is unknown.')) : chatLoadError}
+              </div>
+            )}
+            {chatStatusKind === 'clear' && (
               <div className="bot-chat-system-notice" role="status">
                 {clearNotice}
               </div>
