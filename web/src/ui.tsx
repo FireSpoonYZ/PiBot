@@ -208,13 +208,34 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     code === 'EVENT_STREAM_CLOSED' ||
     code === 'STREAM_CLOSED' ||
     code === 'TRANSPORT_RESET' ||
+    code === 'NOT_CONNECTED' ||
+    code === 'DISCONNECTED' ||
+    code === 'TIMEOUT' ||
     body.includes('事件流未就绪') ||
     body.includes('准入前事件缓冲溢出')
   ) {
     return {
       tone: 'warning',
-      title: t('实时同步通道已中断', 'Live Sync Interrupted'),
-      description: t('正在尝试恢复实时消息流，您也可以下拉刷新或重新进入页面', 'Attempting to restore live updates; pull to refresh if needed'),
+      title: code === 'TIMEOUT' ? t('请求超时', 'Request Timed Out') : t('连接已中断', 'Connection Lost'),
+      description: t('正在尝试恢复连接，您也可以下拉刷新或重新进入页面', 'Attempting to restore the connection; pull to refresh if needed'),
+      detail,
+    };
+  }
+
+  if (code === 'INVALID_CWD') {
+    return {
+      tone: 'danger',
+      title: t('工作目录无效', 'Invalid Working Directory'),
+      description: t('目标路径不存在或不可访问，请检查任务配置中的目录', 'The target path does not exist or is inaccessible. Check the configured directory'),
+      detail,
+    };
+  }
+
+  if (code === 'SUBMISSION_NOT_FOUND') {
+    return {
+      tone: 'warning',
+      title: t('提交记录未找到', 'Submission Not Found'),
+      description: t('该任务可能已被清理或来自其他设备，请刷新后重试', 'The submission may have been cleared or came from another device. Refresh and retry'),
       detail,
     };
   }
@@ -273,6 +294,7 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
 
   // 6. Model & Generation errors
   if (
+    code.startsWith('MODEL_') ||
     body === 'model_error' ||
     body.includes('模型生成失败') ||
     lower.includes('model generation failed')
@@ -365,6 +387,26 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
       tone: 'warning',
       title: t('部分远程节点同步未完成', 'Some Remote Nodes Could Not Sync'),
       description: t('已为您展示最近缓存的智能体列表，可展开查看具体节点原因', 'Showing cached bots while some remote nodes are unreachable'),
+      detail: raw,
+    };
+  }
+
+  // 11. JS runtime exceptions (TypeError / ReferenceError / SyntaxError): raw engine
+  // messages are meaningless to users; original text stays inspectable via detail.
+  if (
+    lower.includes('cannot read properties of') ||
+    lower.includes('is not iterable') ||
+    lower.includes('is not a function') ||
+    lower.includes('is not defined') ||
+    lower.includes('is undefined') ||
+    lower.includes('undefined is not an object') ||
+    lower.includes('unexpected token') ||
+    lower.includes('json.parse')
+  ) {
+    return {
+      tone: 'danger',
+      title: t('数据加载出错', 'Failed to Load Data'),
+      description: t('返回的数据格式不正确，请下拉刷新或稍后重试', 'The response was malformed. Pull to refresh or try again later'),
       detail: raw,
     };
   }

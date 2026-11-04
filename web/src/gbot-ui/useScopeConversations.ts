@@ -408,7 +408,9 @@ export function useScopeConversations(
         deletedScopeIds,
       ),
     );
-    setError(errors.length > 0 ? errors.join('；') : null);
+    // 只上报第一条来源错误：多来源拼接（"A: …；B: …"）会把原始异常整串暴露给用户，
+    // 单条错误也能保持 humanizeError 的 KNOWN_CODE_PREFIX（"CODE: message"）可解析。
+    setError(errors.length > 0 ? errors[0] : null);
   };
 
   /**
