@@ -1,1 +1,30 @@
 /* composer lane styles: loaded after web/src/styles.css via hub/lanes.css. */
+
+/* 归档只读提示块：与 bot-communications-mobile.css 中的 .grok-archived-chat-banner 相同布局。 */
+.composer-archived-banner {
+  padding: 10px 14px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.composer-archived-banner-text {
+  flex: 1 1 180px;
+  font-size: .85rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.composer-archived-banner-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* "+" 菜单中 /clear 上方的分隔线。 */
+.composer-menu-separator {
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--line);
+}
