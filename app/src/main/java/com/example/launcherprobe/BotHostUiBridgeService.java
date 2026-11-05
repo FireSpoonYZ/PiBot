@@ -362,6 +362,8 @@ public final class BotHostUiBridgeService extends Service {
                     return done(manager.centerSettings());
                 case "saveCenterSettings":
                     return BotClientService.saveHostCenterSettings(BotHostUiBridgeService.this, requiredObject(params, "input"));
+                case "storeCenterCredentials":
+                    return client().storeCenterCredentials(requiredObject(params, "input"));
                 case "settingsGet":
                     return manager.settingsGet(this::clientSessionOpen);
                 case "settingsSet":

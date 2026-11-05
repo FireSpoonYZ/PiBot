@@ -16,6 +16,7 @@ RUN npm ci --prefix center-server --omit=dev
 RUN npm ci --prefix host-core --omit=dev
 
 FROM node:22-bookworm
+LABEL org.opencontainers.image.source="https://github.com/FireSpoonYZ/e-launcher"
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build --chown=node:node /app/center-contract/ ./center-contract/

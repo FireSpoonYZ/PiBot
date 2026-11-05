@@ -107,8 +107,13 @@ fn node_path(exe_dir: &Path) -> PathBuf {
 
 fn runtime_candidates(exe_dir: &Path) -> Vec<PathBuf> {
     let mut list = Vec::new();
-    if let Some(value) = non_empty_env("E_LAUNCHER_HOST_RUNTIME") {
-        list.push(PathBuf::from(value));
+    // Windows runs under the scheduled task with the interactive user's
+    // environment; honoring the override there would resolve executable code
+    // outside the protected install directory, so the bundled root is fixed.
+    if !cfg!(windows) {
+        if let Some(value) = non_empty_env("E_LAUNCHER_HOST_RUNTIME") {
+            list.push(PathBuf::from(value));
+        }
     }
     if cfg!(windows) {
         list.push(exe_dir.join("host-runtime"));

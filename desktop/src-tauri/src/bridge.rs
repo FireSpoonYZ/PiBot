@@ -54,6 +54,7 @@ const PUBLIC_OPERATIONS: &[&str] = &[
   "center_connect",
   "center_status",
   "center_disconnect",
+  "center_store",
   "center_owner_session",
   "center_owner_login",
   "center_bot_model_get",

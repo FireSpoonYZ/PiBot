@@ -1,6 +1,13 @@
-import { randomBytes, scryptSync } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+// center-server/cli.js
+// Entry point. password-hash stays a standalone command. Normal startup
+// resolves the bootstrap plan (legacy env, persisted center-config.json, or
+// first-run onboarding) before any store is opened; setup mode serves a
+// minimal onboarding listener, then swaps in the real center after the
+// one-time submission persists the managed configuration.
+
 import { openCenterServer } from './server.js';
+import { centerServerOptions, hashOwnerPassword, loadOrCreateSetupToken, resolveCenterPlan } from './config.js';
+import { openSetupServer } from './setup.js';
 
 async function main() {
   if (process.argv[2] === 'password-hash') {
@@ -8,25 +15,52 @@ async function main() {
     for await (const chunk of process.stdin) password += chunk;
     password = password.replace(/\r?\n$/, '');
     if (!password) throw new Error('Password must not be empty');
-    const salt = randomBytes(16);
-    process.stdout.write(`scrypt$${salt.toString('hex')}$${scryptSync(password, salt, 64).toString('hex')}\n`);
+    process.stdout.write(hashOwnerPassword(password) + '\n');
     return;
   }
   if (process.argv.length !== 2) throw new Error('Unknown command');
-  const env = process.env;
-  function key(name) {
-    if (!/^[0-9a-f]{64}$/i.test(env[name] || '')) throw new Error(`${name} must be 32 bytes in hex`);
-    return Buffer.from(env[name], 'hex');
+
+  const plan = resolveCenterPlan(process.env);
+  let listener;
+  const stop = async () => {
+    try { await listener?.close(); } finally { process.exit(0); }
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+
+  if (plan.mode === 'setup') {
+    const setupToken = loadOrCreateSetupToken(plan.dataRoot);
+    const setup = await openSetupServer({
+      dataRoot: plan.dataRoot,
+      https: plan.https,
+      tlsMode: plan.tlsMode,
+      listenHost: plan.listenHost,
+      port: plan.port,
+      webRoot: plan.webRoot,
+      defaults: plan.setupDefaults,
+      setupToken: setupToken.token,
+    });
+    listener = setup;
+    process.stdout.write(
+      'Center first-run setup required. Open ' + (plan.setupDefaults.publicUrl || setup.url)
+      + ' and submit the one-time setup token from ' + setupToken.path
+      + ' (also readable in this local log): ' + setupToken.token + '\n',
+    );
+    const configured = await setup.configured;
+    listener = undefined;
+    await setup.close();
+    const server = await openCenterServer(centerServerOptions(plan, configured));
+    listener = server;
+    process.stdout.write('Center listening at ' + configured.publicUrl + '\n');
+    return;
   }
-  const https = { cert: readFileSync(env.CENTER_TLS_CERT_FILE, 'utf8'), key: readFileSync(env.CENTER_TLS_KEY_FILE, 'utf8') };
-  if (!env.CENTER_LINK_URL || !env.CENTER_PUBLIC_URL) throw new Error('CENTER_LINK_URL and CENTER_PUBLIC_URL are required');
-  const server = await openCenterServer({
-    dataRoot: env.CENTER_DATA_ROOT || '/data', encryptionKey: key('CENTER_ENCRYPTION_KEY_HEX'), sessionKey: key('CENTER_SESSION_KEY_HEX'), ownerPasswordHash: env.CENTER_OWNER_PASSWORD_HASH,
-    https, publicUrl: env.CENTER_PUBLIC_URL, listenHost: env.CENTER_LISTEN_HOST || '0.0.0.0', port: Number(env.CENTER_PORT || 8443), webRoot: env.CENTER_WEB_ROOT || '/app/center-web/dist', npmPath: env.CENTER_NPM_PATH,
-    relay: { listenHost: env.CENTER_LISTEN_HOST || '0.0.0.0', port: Number(env.CENTER_RELAY_PORT || 8790), tls: https, linkUrl: env.CENTER_LINK_URL },
-  });
-  process.stdout.write(`Center listening at ${env.CENTER_PUBLIC_URL}\n`);
-  const stop = async () => { await server.close(); process.exit(0); };
-  process.once('SIGINT', stop); process.once('SIGTERM', stop);
+
+  const server = await openCenterServer(centerServerOptions(plan, plan.config));
+  listener = server;
+  process.stdout.write('Center listening at ' + plan.config.publicUrl + '\n');
 }
-main().catch(() => { process.stderr.write('Center startup failed\n'); process.exitCode = 1; });
+
+main().catch((error) => {
+  process.stderr.write('Center startup failed: ' + (error && error.message ? error.message : String(error)) + '\n');
+  process.exitCode = 1;
+});

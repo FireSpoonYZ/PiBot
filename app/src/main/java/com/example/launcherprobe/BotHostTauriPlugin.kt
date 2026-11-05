@@ -24,6 +24,8 @@ import java.util.ArrayDeque
 import java.util.UUID
 import java.util.concurrent.CompletionException
 import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val MICROPHONE = "microphone"
 private const val STREAM_CLOSED_CODE = "EVENT_STREAM_CLOSED"
@@ -61,7 +63,8 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
 
     private val main = Handler(Looper.getMainLooper())
     private val streamOwner: String = UUID.randomUUID().toString()
-    private var destroyed = false
+    /** volatile：配对 worker 线程在登记提交点之前以此判定 UI 会话存活。 */
+    @Volatile private var destroyed = false
     private var mainWebView: WebView? = null
     private var client: BotHostUiBridgeClient? = null
     private var events: Channel? = null
@@ -80,6 +83,12 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
     private var pendingVoiceParams: JSONObject? = null
     private var pendingVoiceGeneration = 0
     private var pendingVoiceGranted = false
+    /** C7 配对的串行 worker：HTTP/设置子进程/桥调用都阻塞型，单线程保证不并发注册。 */
+    private val pairWorker = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "bot-center-pair").apply { isDaemon = true }
+    }
+    /** pair/repair 同时只允许一个在途（防并发注册）；超时的僵尸任务继续持有直到自然结束。 */
+    private val pairInFlight = AtomicBoolean()
     /** Bot 屏幕原生覆盖层（懒创建）；只观看/接管已有屏幕，与 Host 事件流无关。 */
     private var screenOverlay: BotScreenOverlay? = null
     /** 系统选图/拍照：同进程序列化在 BotImagePicker 内（单会话）。 */
@@ -228,6 +237,10 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
                 if (overlay != null && overlay.isSession(screenSession(params))) overlay.close()
                 replyOk(invoke, idleScreen())
             }
+            "pairCenter" -> pairCenter(invoke, params)
+            "repairCenterBinding" -> repairCenterBinding(invoke)
+            "onboardingStatus" -> onboardingStatus(invoke)
+            "onboardingAction" -> onboardingAction(invoke, params)
             else -> dispatchService(invoke, method, params)
         }
     }
@@ -314,6 +327,105 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         try {
             hostActivity.startActivity(Intent(android.provider.Settings.ACTION_SETTINGS))
             replyOk(invoke, JSObject())
+        } catch (t: Throwable) {
+            replyFailure(invoke, t)
+        }
+    }
+
+    /**
+     * C7 配对（UI 本地入口）：整链阻塞在 pairWorker 串行执行——参数校验/已有绑定检查、
+     * snapshot 或 settingsGet 取本机 Host 身份、所有者会话四步 + POST /api/devices、
+     * 断连清旧态 → 凭据/saveCenterSettings 持久化 → center_connect 派发。
+     * 结果 {centerUrl,deviceId,displayName,hostConfigured,connectionRequested,warnings?}，绝不回传令牌/口令。
+     */
+    private fun pairCenter(invoke: Invoke, params: JSONObject) {
+        runPairTask(invoke) { bridge ->
+            CenterPairing.pair(hostActivity.applicationContext, bridge, params) { !destroyed }
+        }
+    }
+
+    /** C7 绑定修复：用已存 client 凭据重发 saveCenterSettings+center_connect，不注册新设备。 */
+    private fun repairCenterBinding(invoke: Invoke) {
+        runPairTask(invoke) { bridge ->
+            CenterPairing.repair(hostActivity.applicationContext, bridge)
+        }
+    }
+
+    /**
+     * pair/repair 共享派发：BUSY 拒绝并发（不排队无限等待）；worker 中结果经主线程回执；
+     * 仅本通道有 360s 回执兜底——超时只回 TIMEOUT，worker 继续跑完持久化（不丢已登记凭据），
+     * pairInFlight 也只在 worker 自然结束时释放。
+     */
+    private fun runPairTask(invoke: Invoke, work: (BotHostUiBridgeClient) -> JSONObject) {
+        // 与通知 action 一致：开始即要求显式前台；提交后的持久化/连接仍允许完成。
+        if (!foregroundUi()) {
+            replyInvalid(invoke, "NOT_FOREGROUND", "仅可在前台执行配对")
+            return
+        }
+        if (!pairInFlight.compareAndSet(false, true)) {
+            replyInvalid(invoke, "BUSY", "配对任务进行中")
+            return
+        }
+        val bridge = try {
+            bridge()
+        } catch (t: Throwable) {
+            pairInFlight.set(false)
+            replyFailure(invoke, t)
+            return
+        }
+        val replied = AtomicBoolean()
+        val timeout = Runnable {
+            if (replied.compareAndSet(false, true)) {
+                replyError(invoke, "TIMEOUT", "配对超时，请检查中心后重试", "unconfirmed")
+            }
+        }
+        main.postDelayed(timeout, PAIR_REPLY_TIMEOUT_MS)
+        pairWorker.execute {
+            var result: JSONObject? = null
+            var failure: Throwable? = null
+            try {
+                result = work(bridge)
+            } catch (t: Throwable) {
+                failure = t
+            }
+            val replyResult = result
+            val replyError = failure
+            main.post {
+                main.removeCallbacks(timeout)
+                if (replied.compareAndSet(false, true)) {
+                    pairInFlight.set(false)
+                    if (destroyed) replyInvalid(invoke, "CANCELLED", "界面已结束")
+                    else if (replyError != null) replyFailure(invoke, replyError)
+                    else replyOk(invoke, replyResult)
+                } else {
+                    pairInFlight.set(false)
+                }
+            }
+        }
+    }
+
+    /** C7 引导状态（UI 本地只读）：通知/电池/Shizuku 五项，不启动任何服务。 */
+    private fun onboardingStatus(invoke: Invoke) {
+        try {
+            replyOk(invoke, BotOnboarding.status(hostActivity.applicationContext))
+        } catch (t: Throwable) {
+            replyFailure(invoke, t)
+        }
+    }
+
+    /** C7 引导动作（仅显式前台）：返回 {requested}，是否发出系统请求/页面。 */
+    private fun onboardingAction(invoke: Invoke, params: JSONObject) {
+        val action = params.opt("action") as? String
+        if (action.isNullOrEmpty()) {
+            replyInvalid(invoke, "INVALID_ARGS", "action 无效")
+            return
+        }
+        if (!foregroundUi()) {
+            replyInvalid(invoke, "NOT_FOREGROUND", "仅可在前台执行引导动作")
+            return
+        }
+        try {
+            replyOk(invoke, BotOnboarding.performAction(hostActivity, action))
         } catch (t: Throwable) {
             replyFailure(invoke, t)
         }
@@ -762,6 +874,7 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         imagePicker = null
         screenOverlay?.destroy()
         screenOverlay = null
+        pairWorker.shutdownNow()
         mainWebView = null
         val existing = client
         client = null
@@ -870,6 +983,9 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
     }
 
     private companion object {
+        /** pair/repair 的 invoke 回执兜底（worker 持久化不受其影响）。 */
+        const val PAIR_REPLY_TIMEOUT_MS = 360_000L
+
         /** 固定白名单：只有既有 Host 数据操作可转发；eventsFailed 是内部流控 helper，不在其中。 */
         val SERVICE_METHODS = setOf(
             "snapshot", "status", "centerSettings", "saveCenterSettings", "settingsGet", "settingsSet", "saveCredentials", "call",

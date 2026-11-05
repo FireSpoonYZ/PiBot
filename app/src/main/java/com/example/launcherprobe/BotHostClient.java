@@ -389,6 +389,46 @@ final class BotHostClient {
         });
     }
 
+    /**
+     * 原生配对专用单写入方（仅 BotHostUiBridgeService.storeCenterCredentials 调用，web 不可达）：
+     * 在 onControl 串行队列内先按 center_disconnect 同组失效旧连接代（revision++/blocked/pending
+     * 清空/移除恢复定时），随后才写新凭据——旧 generation 的迟到 ready/persistReady 无法覆盖。
+     * enabled=true 让"保存成功但连接失败"保持可自动恢复；返回仅 metadata，不含 token。
+     */
+    CompletableFuture<JSONObject> storeCenterCredentials(JSONObject record) {
+        return onControl(() -> {
+            synchronized (lock) {
+                ++centerRevision;
+                centerPending = false;
+                centerBlocked = true;
+                centerReadyObserved = false;
+                restoreNeeded = false;
+                pendingCredentials = null;
+                main.removeCallbacks(pendingStatus);
+            }
+            try {
+                credentials.save(record);
+            } catch (Exception failure) {
+                throw new BridgeException("CREDENTIALS", "unconfirmed", "中心凭据保存失败，请重试");
+            }
+            boolean enabled;
+            try {
+                enabled = context.getSharedPreferences("bot_client_connection", Context.MODE_PRIVATE)
+                        .edit().putBoolean("enabled", true).commit();
+            } catch (RuntimeException failure) {
+                enabled = false;
+            }
+            if (!enabled) {
+                throw new BridgeException("CREDENTIALS", "unconfirmed", "无法保存连接状态，请重试");
+            }
+            try {
+                return CompletableFuture.completedFuture(CenterClientCredentials.metadata(record));
+            } catch (Exception failure) {
+                throw new BridgeException("CREDENTIALS", "unconfirmed", "中心凭据校验失败");
+            }
+        });
+    }
+
     void checkConnection() {
         checkConnection(false);
     }

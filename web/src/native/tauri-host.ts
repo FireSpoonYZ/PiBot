@@ -13,7 +13,8 @@ import type { LiveTarget } from '../../../host-core/index.js';
 import type {
   BotHostPickImagesResult, BotHostPlugin, CenterSettings, HostCallResult, HostFrameEvent,
   HostSettings, HostSettingsPayload, HostSnapshot, HostStatus, HostVoiceEvent,
-  HostVoiceSaveInput, HostVoiceSettings, PluginListenerHandle,
+  HostVoiceSaveInput, HostVoiceSettings, OnboardingActionName, OnboardingStatus,
+  PairCenterResult, PluginListenerHandle,
 } from './index';
 
 // clientFrame 只给手机远端页内部使用。
@@ -464,6 +465,38 @@ export function mobileUiSettings(): Promise<MobileUiSettings> {
 /** hide：只把本 UI 任务移到后台，不停止 Host。 */
 export function mobileHide(): Promise<unknown> {
   return request('hide');
+}
+
+/**
+ * C7 首启配对：中心 URL + owner 密码由原生换取设备绑定并保存 Host/client 凭据；
+ * token 不进入 JS。UI-local 前台动作；connectionRequested 非就绪，仍需 center_status 轮询。
+ */
+export function pairCenter(input: {
+  url: string; password: string; displayName?: string; ca?: string; force?: boolean;
+}): Promise<PairCenterResult> {
+  const params: Record<string, unknown> = { url: input.url, password: input.password };
+  if (input.displayName) params.displayName = input.displayName;
+  if (input.ca) params.ca = input.ca;
+  if (input.force) params.force = true;
+  return mobileLocalRequest<PairCenterResult>('pairCenter', params);
+}
+
+/**
+ * C7 失败恢复：原生复用已存安全凭据重试 Host saveCenterSettings + client_connect；
+ * 不需要 owner 密码、不注册新设备、不回 token。UI-local 前台动作；结果同样非就绪语义。
+ */
+export function repairCenterBinding(): Promise<PairCenterResult> {
+  return mobileLocalRequest<PairCenterResult>('repairCenterBinding');
+}
+
+/** C7 权限/后台真实状态查询；不启动服务或授权流程。 */
+export function onboardingStatus(): Promise<OnboardingStatus> {
+  return mobileLocalRequest<OnboardingStatus>('onboardingStatus');
+}
+
+/** C7 权限动作：仅前台显式发起系统请求/页面，返回的 requested 不代表已授权。 */
+export function onboardingAction(action: OnboardingActionName): Promise<{ requested: boolean }> {
+  return mobileLocalRequest<{ requested: boolean }>('onboardingAction', { action });
 }
 
 /** 显式重建 IPC 会话并修复已保留监听器的事件传输；不重发观察或 mutation。 */

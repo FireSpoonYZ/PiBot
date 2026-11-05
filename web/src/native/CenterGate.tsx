@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { BotHost, openCenterUrl } from './index';
-import { mobileClientRequest } from './tauri-host';
+import { BotHost, openCenterUrl, type PairCenterResult } from './index';
+import { mobileClientRequest, pairCenter, repairCenterBinding } from './tauri-host';
 
 export type SavedConnection = { url: string; deviceId: string; ca: string };
 export type CenterStatus = { state: 'disconnected' | 'connecting' | 'ready'; centerUrl: string; clientId?: string; savedConnection?: SavedConnection; savedConnectionError?: string; brokerGeneration?: number; error?: { code?: string; message?: string } | string | null };
@@ -36,6 +36,11 @@ export interface CenterConnectionContextValue {
   error: string;
   setError: (v: string) => void;
   connect: (event?: FormEvent) => Promise<void>;
+  /** C7 首启配对：owner 密码换设备绑定；成功返回 PairCenterResult（被更新操作取代时 undefined）。
+      失败置 error 并重新抛出原始错误，调用方可按 error.code 区分 ALREADY_CONFIGURED 等可恢复原因。 */
+  pair: (password: string, options?: { displayName?: string; force?: boolean }) => Promise<PairCenterResult | undefined>;
+  /** C7 失败恢复：用本机已存凭据重试本机绑定/连接（无密码、不注册新设备）；语义与 pair 相同。 */
+  repair: () => Promise<PairCenterResult | undefined>;
   disconnect: () => void;
   openManagement: () => void;
   stopLocalHost: () => void;
@@ -61,6 +66,8 @@ const defaultCenterContext: CenterConnectionContextValue = {
   error: '',
   setError: () => {},
   connect: async () => {},
+  pair: async () => undefined,
+  repair: async () => undefined,
   disconnect: () => {},
   openManagement: () => {},
   stopLocalHost: () => {},
@@ -88,23 +95,24 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
   const [preparing, setPreparing] = useState(false);
   const [prepareRetry, setPrepareRetry] = useState(0);
 
+  const updateStatus = (next: CenterStatus) => {
+    setStatus(next);
+    setSaved(next.savedConnection);
+    if (next.savedConnectionError) setError(next.savedConnectionError);
+    else if (next.error && permanentCenterErrors.has(centerErrorCode(next.error))) setError(centerErrorMessage(next.error) || centerErrorCode(next.error));
+    else if (next.state === 'connecting') setError('正在重连…');
+  };
+  const readStatus = async () => {
+    const next = await mobileClientRequest<CenterStatus>('center_status', {});
+    if (next.state !== 'ready') return next;
+    const broker = await mobileClientRequest<{ phase: string; generation: number }>('status', {});
+    return { ...next, state: broker.phase === 'connected' ? 'ready' as const : 'connecting' as const,
+      brokerGeneration: broker.generation };
+  };
+
   useEffect(() => {
     let live = true;
     let timer: ReturnType<typeof setTimeout>;
-    const updateStatus = (next: CenterStatus) => {
-      setStatus(next);
-      setSaved(next.savedConnection);
-      if (next.savedConnectionError) setError(next.savedConnectionError);
-      else if (next.error && permanentCenterErrors.has(centerErrorCode(next.error))) setError(centerErrorMessage(next.error) || centerErrorCode(next.error));
-      else if (next.state === 'connecting') setError('正在重连…');
-    };
-    const readStatus = async () => {
-      const next = await mobileClientRequest<CenterStatus>('center_status', {});
-      if (next.state !== 'ready') return next;
-      const broker = await mobileClientRequest<{ phase: string; generation: number }>('status', {});
-      return { ...next, state: broker.phase === 'connected' ? 'ready' as const : 'connecting' as const,
-        brokerGeneration: broker.generation };
-    };
     const poll = async () => {
       const issued = epoch.current;
       try {
@@ -233,6 +241,63 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
     }
   };
 
+  // C7 owner 密码配对：原生负责登记设备、保存凭据并请求连接；这里只回填身份并立即刷新一次真实状态。
+  const pair = async (password: string, options?: { displayName?: string; force?: boolean }): Promise<PairCenterResult | undefined> => {
+    const issued = ++epoch.current;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await pairCenter({
+        url: url.trim(),
+        password,
+        ...(options?.displayName ? { displayName: options.displayName } : {}),
+        ...(ca.trim() ? { ca: ca.trim() } : {}),
+        ...(options?.force ? { force: true } : {}),
+      });
+      if (issued !== epoch.current) return undefined;
+      await adoptPairResult(result, issued);
+      return result;
+    } catch (failure) {
+      if (issued === epoch.current) setError(failure instanceof Error ? failure.message : '配对失败，请检查中心地址与密码。');
+      throw failure;
+    } finally {
+      if (issued === epoch.current) setBusy(false);
+    }
+  };
+
+  // pair/repair 共用的结果回填：只写身份与既有 localStorage 键，并立即读一次真实 status；
+  // connectionRequested 非就绪，连接建立仍交给既有轮询与状态效果处理。
+  const adoptPairResult = async (result: PairCenterResult, issued: number) => {
+    setUrl(result.centerUrl);
+    setDeviceId(result.deviceId);
+    localStorage.setItem('center-client-device-id', result.deviceId);
+    localStorage.setItem('active-center-url', result.centerUrl);
+    try {
+      const next = await readStatus();
+      if (issued === epoch.current) updateStatus(next);
+    } catch {
+      // 状态刷新失败由既有轮询兜底，不覆盖结果。
+    }
+  };
+
+  // C7 已存绑定的失败恢复：原生复用安全凭据重试 Host/client 连接，不注册新设备。
+  const repair = async (): Promise<PairCenterResult | undefined> => {
+    const issued = ++epoch.current;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await repairCenterBinding();
+      if (issued !== epoch.current) return undefined;
+      await adoptPairResult(result, issued);
+      return result;
+    } catch (failure) {
+      if (issued === epoch.current) setError(failure instanceof Error ? failure.message : '修复绑定失败，请重试。');
+      throw failure;
+    } finally {
+      if (issued === epoch.current) setBusy(false);
+    }
+  };
+
   const matchesSaved = Boolean(saved && saved.url === url.trim() && saved.deviceId === deviceId.trim() && saved.ca === ca.trim());
   const disconnect = () => {
     const issued = ++epoch.current;
@@ -285,6 +350,8 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
     error,
     setError,
     connect,
+    pair,
+    repair,
     disconnect,
     openManagement,
     stopLocalHost,

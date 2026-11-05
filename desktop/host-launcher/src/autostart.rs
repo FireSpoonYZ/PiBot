@@ -1,18 +1,29 @@
-//! Login autostart: Windows HKCU Run value; Linux systemd user unit + linger.
+//! Login autostart: Windows protected scheduled task via the `host-task`
+//! helper inside shower-windows.exe; Linux systemd user unit.
 
 use serde_json::{json, Value};
+
+#[cfg(windows)]
+use std::path::PathBuf;
+#[cfg(windows)]
+use std::time::Duration;
 
 #[allow(unused_imports)]
 use crate::util::{AppError, AppResult};
 
+/// status is a plain user query and never prompts for elevation.
+#[cfg(windows)]
+pub const HOST_TASK_FAST_TIMEOUT: Duration = Duration::from_secs(30);
+/// start triggers the scheduled task; a little more room than a plain query.
+#[cfg(windows)]
+pub const HOST_TASK_START_TIMEOUT: Duration = Duration::from_secs(40);
+/// install/enable/disable may go through a controlled elevation (runas) prompt.
+#[cfg(windows)]
+pub const HOST_TASK_ELEVATED_TIMEOUT: Duration = Duration::from_secs(180);
+
 #[cfg(windows)]
 mod win {
-    use std::ffi::c_void;
-    use std::path::Path;
-
-    use windows_sys::Win32::System::Registry::{
-        RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ,
-    };
+    use windows_sys::Win32::System::Registry::{RegDeleteKeyValueW, HKEY_CURRENT_USER};
 
     use crate::util::{AppError, AppResult};
 
@@ -25,31 +36,7 @@ mod win {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    pub fn run_value(exe: &Path) -> String {
-        format!("\"{}\" run", exe.display())
-    }
-
-    pub fn set(exe: &Path) -> AppResult<()> {
-        let key = wide(RUN_KEY);
-        let name = wide(VALUE_NAME);
-        let data = wide(&run_value(exe));
-        // SAFETY: all pointers reference live, NUL-terminated UTF-16 buffers.
-        let status = unsafe {
-            RegSetKeyValueW(
-                HKEY_CURRENT_USER,
-                key.as_ptr(),
-                name.as_ptr(),
-                REG_SZ,
-                data.as_ptr() as *const c_void,
-                (data.len() * 2) as u32,
-            )
-        };
-        if status as u32 != ERROR_SUCCESS {
-            return Err(AppError::new("AUTOSTART_FAILED", format!("RegSetKeyValueW failed ({})", status as u32)));
-        }
-        Ok(())
-    }
-
+    /// Removes the pre-scheduled-task HKCU Run value; a missing value is success.
     pub fn delete() -> AppResult<()> {
         let key = wide(RUN_KEY);
         let name = wide(VALUE_NAME);
@@ -60,50 +47,88 @@ mod win {
         }
         Ok(())
     }
+}
 
-    pub fn exists() -> bool {
-        let key = wide(RUN_KEY);
-        let name = wide(VALUE_NAME);
-        let mut size: u32 = 0;
-        // SAFETY: size query only (null data buffer).
-        let status = unsafe {
-            RegGetValueW(
-                HKEY_CURRENT_USER,
-                key.as_ptr(),
-                name.as_ptr(),
-                RRF_RT_REG_SZ,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut size,
-            )
-        } as u32;
-        status == ERROR_SUCCESS
+/// The protected native helper bundled next to the runtime. A missing helper is
+/// an explicit error; we never fall back to a normal-privilege mechanism.
+#[cfg(windows)]
+fn shower_helper() -> AppResult<PathBuf> {
+    crate::paths::locate_runtime()?.shower.ok_or_else(|| {
+        AppError::new("RUNTIME_MISSING", "protected shower-windows.exe host-task helper is not installed")
+    })
+}
+
+/// Runs `<shower-windows.exe> host-task <action>` and parses its JSON result;
+/// `{error:{code,message}}` payloads keep their code and a non-zero exit.
+#[cfg(windows)]
+pub fn host_task(action: &str, timeout: Duration) -> AppResult<Value> {
+    let exe = shower_helper()?;
+    let mut cmd = crate::process::command(&exe);
+    cmd.arg("host-task").arg(action);
+    crate::process::run_json_command(cmd, timeout, "HOST_TASK_FAILED")
+}
+
+#[cfg(windows)]
+fn bool_field(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Autostart state for `status`: `{installed, autostart}`.
+/// Windows normalizes the raw helper answer: autostart only counts when the
+/// scheduled task is installed AND enabled; a legacy HKCU Run value without the
+/// task (helper reports installed:false, autostart:true) is a migration error,
+/// not a working autostart — start would fail with TASK_NOT_INSTALLED.
+pub fn status() -> AppResult<Value> {
+    #[cfg(windows)]
+    {
+        let status = host_task("status", HOST_TASK_FAST_TIMEOUT)?;
+        let installed = bool_field(&status, "installed");
+        let raw_autostart = bool_field(&status, "autostart");
+        if !installed && raw_autostart {
+            return Err(AppError::new(
+                "AUTOSTART_MIGRATION_REQUIRED",
+                "legacy autostart is present but the scheduled task is not installed; run 'e-launcher-host enable' to migrate",
+            ));
+        }
+        Ok(json!({
+            "installed": installed,
+            "autostart": installed && raw_autostart,
+        }))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Ok(json!({
+            "installed": crate::process::systemd_available(),
+            "autostart": is_enabled(),
+        }))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        Ok(json!({ "installed": false, "autostart": false }))
     }
 }
 
-#[cfg(target_os = "linux")]
-fn current_user() -> Option<String> {
-    if let Some(user) = std::env::var("USER").ok().filter(|u| !u.trim().is_empty()) {
-        return Some(user.trim().to_string());
-    }
-    let mut cmd = crate::process::command("id");
-    cmd.arg("-un");
-    let out = crate::process::run_capture(cmd).ok()?;
-    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (out.status.success() && !name.is_empty()).then_some(name)
-}
-
-/// Registers login autostart. Returns `{"autostart":true, ...}`.
+/// Registers login autostart. Returns `{"autostart":true}`.
 pub fn enable() -> AppResult<Value> {
     #[cfg(windows)]
     {
-        let exe = crate::paths::exe_path()?;
-        win::set(&exe)?;
+        let status = host_task("status", HOST_TASK_FAST_TIMEOUT)?;
+        let mut enabled = bool_field(&status, "autostart");
+        if !bool_field(&status, "installed") {
+            let installed = host_task("install", HOST_TASK_ELEVATED_TIMEOUT)?;
+            enabled = bool_field(&installed, "autostart");
+        }
+        if !enabled {
+            host_task("enable", HOST_TASK_ELEVATED_TIMEOUT)?;
+        }
+        // The HKCU Run value is gone as an autostart mechanism; drop a stale
+        // value so a previously installed Host cannot start twice at login.
+        let _ = win::delete();
         Ok(json!({ "autostart": true }))
     }
     #[cfg(target_os = "linux")]
     {
-        use crate::process::{output_message, systemctl_checked, systemctl_user, systemd_available, SYSTEMD_UNIT};
+        use crate::process::{systemctl_checked, systemctl_user, systemd_available, SYSTEMD_UNIT};
         if !systemd_available() {
             return Err(AppError::new(
                 "AUTOSTART_UNAVAILABLE",
@@ -112,23 +137,8 @@ pub fn enable() -> AppResult<Value> {
         }
         let _ = systemctl_user(&["daemon-reload"]);
         systemctl_checked(&["enable", SYSTEMD_UNIT], "AUTOSTART_FAILED")?;
-        let (linger, message) = match current_user() {
-            None => (false, Some("cannot determine current user for loginctl enable-linger".to_string())),
-            Some(user) => {
-                let mut cmd = crate::process::command("loginctl");
-                cmd.args(["enable-linger", &user]);
-                match crate::process::run_capture(cmd) {
-                    Ok(out) if out.status.success() => (true, None),
-                    Ok(out) => (false, Some(format!("loginctl enable-linger failed: {}", output_message(&out)))),
-                    Err(e) => (false, Some(format!("loginctl enable-linger failed: {e}"))),
-                }
-            }
-        };
-        let mut result = json!({ "autostart": true, "linger": linger });
-        if let Some(message) = message {
-            result["message"] = Value::String(message);
-        }
-        Ok(result)
+        // Linger is a machine policy: never enabled or disabled from here.
+        Ok(json!({ "autostart": true }))
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
@@ -139,7 +149,11 @@ pub fn enable() -> AppResult<Value> {
 pub fn disable() -> AppResult<Value> {
     #[cfg(windows)]
     {
-        win::delete()?;
+        let status = host_task("status", HOST_TASK_FAST_TIMEOUT)?;
+        if bool_field(&status, "installed") {
+            host_task("disable", HOST_TASK_ELEVATED_TIMEOUT)?;
+        }
+        let _ = win::delete();
         Ok(json!({ "autostart": false }))
     }
     #[cfg(target_os = "linux")]
@@ -158,29 +172,10 @@ pub fn disable() -> AppResult<Value> {
     }
 }
 
-pub fn is_enabled() -> bool {
-    #[cfg(windows)]
-    {
-        win::exists()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        match crate::process::systemctl_user(&["is-enabled", crate::process::SYSTEMD_UNIT]) {
-            Ok(out) => String::from_utf8_lossy(&out.stdout).trim() == "enabled",
-            Err(_) => false,
-        }
-    }
-    #[cfg(not(any(windows, target_os = "linux")))]
-    {
-        false
-    }
-}
-
-#[cfg(all(test, windows))]
-mod tests {
-    #[test]
-    fn run_value_quotes_exe() {
-        let v = super::win::run_value(std::path::Path::new(r"C:\Program Files\e\e-launcher-host.exe"));
-        assert_eq!(v, r#""C:\Program Files\e\e-launcher-host.exe" run"#);
+#[cfg(target_os = "linux")]
+fn is_enabled() -> bool {
+    match crate::process::systemctl_user(&["is-enabled", crate::process::SYSTEMD_UNIT]) {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).trim() == "enabled",
+        Err(_) => false,
     }
 }

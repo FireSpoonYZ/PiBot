@@ -76,6 +76,9 @@ final class BotHostUiProtocol {
      */
     private static final Set<String> OPERATIONS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
             "snapshot", "status", "centerSettings", "saveCenterSettings", "settingsGet", "settingsSet", "saveCredentials", "call",
+            // 原生配对 helper 专用：客户端凭据单写入方（默认进程串行队列内失效旧连接代再保存）。
+            // 不加入 Rust ALLOWED_METHODS/Kotlin SERVICE_METHODS，web 无法经 request 到达。
+            "storeCenterCredentials",
             "observe", "cancelObservation",
             "voiceSettings", "saveVoiceSettings", "startVoice", "finishVoice", "cancelVoice",
             "uiSettings", OP_PAUSE,

@@ -2,9 +2,14 @@
 //! probing and systemd (Linux) integration.
 
 use std::fs::{self, OpenOptions};
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use serde_json::Value;
 
 use crate::paths::HostPaths;
 use crate::util::{AppError, AppResult};
@@ -18,8 +23,31 @@ pub const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 pub const SYSTEMD_UNIT: &str = "e-launcher-host.service";
 
-/// Environment variables that must never leak into the launcher/Host children.
-pub const SCRUBBED_ENV: &[&str] = &["E_LAUNCHER_OWNER_PASSWORD"];
+/// Environment variables that must never leak into the launcher/Host
+/// children. Besides the secret, this covers the selectors for executable code
+/// (runtime dir, native helper, Node loader hooks): under the Windows scheduled
+/// task the inherited user environment cannot be trusted to keep them inside
+/// the protected install directory, so only the supervisor's bundled paths may
+/// set them. env_remove matches case-insensitively on Windows.
+pub const SCRUBBED_ENV: &[&str] = &[
+    "E_LAUNCHER_OWNER_PASSWORD",
+    "E_LAUNCHER_HOST_RUNTIME",
+    "E_LAUNCHER_SHOWER_WINDOWS_EXE",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+];
+
+/// Whether a config.json/secrets.env entry may reach the Host child. Both files
+/// are user-editable while the child can run under the elevated scheduled task,
+/// so loader/executable-path overrides are rejected. Windows environment names
+/// are case-insensitive, so the filter compares case-insensitively there.
+pub fn config_env_allowed(key: &str) -> bool {
+    if cfg!(windows) {
+        !SCRUBBED_ENV.iter().any(|denied| denied.eq_ignore_ascii_case(key))
+    } else {
+        !SCRUBBED_ENV.contains(&key)
+    }
+}
 
 /// A `Command` that never opens a console window on Windows.
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
@@ -36,6 +64,128 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
 /// Runs a short helper command with no stdin and captured output.
 pub fn run_capture(mut cmd: Command) -> std::io::Result<Output> {
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+}
+
+const MAX_HELPER_OUTPUT: usize = 256 * 1024;
+/// How long to wait for the pipe readers to drain after the helper exited.
+const OUTPUT_DRAIN: Duration = Duration::from_secs(1);
+
+/// Drains one pipe into a shared tail-capped buffer, then bumps the done count.
+/// Incremental collection means a grandchild inheriting the pipe never blocks
+/// result collection — the buffer already holds whatever arrived.
+fn pipe_drain(mut reader: impl Read + Send + 'static, sink: Arc<Mutex<Vec<u8>>>, done: Arc<AtomicUsize>) {
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if let Ok(mut buf) = sink.lock() {
+                        buf.extend_from_slice(&chunk[..n]);
+                        // Keep only the tail beyond the cap; the result line is last.
+                        if buf.len() > MAX_HELPER_OUTPUT {
+                            let excess = buf.len() - MAX_HELPER_OUTPUT;
+                            buf.drain(..excess);
+                        }
+                    }
+                }
+            }
+        }
+        done.fetch_add(1, Ordering::SeqCst);
+    });
+}
+
+/// Last non-empty line of captured output.
+fn last_line(bytes: &[u8]) -> Option<String> {
+    bytes
+        .split(|b| *b == b'\n')
+        .rev()
+        .map(|line| String::from_utf8_lossy(line).trim().to_string())
+        .find(|line| !line.is_empty())
+}
+
+/// Runs a trusted helper and parses the LAST non-empty stdout line as JSON;
+/// helpers that report errors on stderr instead (e.g. host-core/cli.js) are
+/// handled by falling back to stderr's last line. An {"error":{"code","message"}}
+/// payload is propagated with its code kept; fail_code covers spawn/wait
+/// failures, timeouts, missing or invalid output and non-zero exits without a
+/// payload. The helper inherits a scrubbed environment (no secret or
+/// executable-path variables) and raw stderr text never enters our output.
+pub fn run_json_command(mut cmd: Command, timeout: Duration, fail_code: &str) -> AppResult<Value> {
+    for key in SCRUBBED_ENV {
+        cmd.env_remove(key);
+    }
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| AppError::new(fail_code, format!("failed to start helper: {e}")))?;
+    let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let readers_done = Arc::new(AtomicUsize::new(0));
+    let mut readers = 0usize;
+    if let Some(out) = child.stdout.take() {
+        readers += 1;
+        pipe_drain(out, stdout_buf.clone(), readers_done.clone());
+    }
+    if let Some(err) = child.stderr.take() {
+        readers += 1;
+        pipe_drain(err, stderr_buf.clone(), readers_done.clone());
+    }
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {}
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(AppError::new(fail_code, format!("failed to wait for helper: {e}")));
+            }
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let Some(status) = status else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(AppError::new(fail_code, format!("helper timed out after {}s", timeout.as_secs())));
+    };
+    // Bounded drain: the child's own writes land in the pipes before it exits,
+    // so the readers finish almost immediately; a leaked grandchild holding a
+    // pipe open must not extend this wait past OUTPUT_DRAIN, and never past the
+    // caller's own deadline — the whole call stays inside the given budget.
+    let drain_deadline = (Instant::now() + OUTPUT_DRAIN).min(deadline);
+    while readers_done.load(Ordering::SeqCst) < readers && Instant::now() < drain_deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let stdout = stdout_buf.lock().map(|buf| buf.clone()).unwrap_or_default();
+    let stderr = stderr_buf.lock().map(|buf| buf.clone()).unwrap_or_default();
+    let parsed = last_line(&stdout)
+        .and_then(|line| serde_json::from_str::<Value>(&line).ok())
+        .or_else(|| last_line(&stderr).and_then(|line| serde_json::from_str::<Value>(&line).ok()));
+    let Some(value) = parsed else {
+        return Err(AppError::new(fail_code, format!("helper exited {status} without a JSON result")));
+    };
+    if let Some(error) = value.get("error").filter(|e| e.is_object()) {
+        let code = error
+            .get("code")
+            .and_then(Value::as_str)
+            .filter(|c| !c.is_empty())
+            .unwrap_or(fail_code)
+            .to_string();
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("helper failed")
+            .to_string();
+        return Err(AppError::new(&code, message));
+    }
+    if !status.success() {
+        return Err(AppError::new(fail_code, format!("helper exited {status}")));
+    }
+    Ok(value)
 }
 
 pub fn output_message(output: &Output) -> String {
@@ -75,10 +225,17 @@ pub fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> boo
 }
 
 /// Spawns `<exe> run` fully detached from the caller (no inherited stdio).
+// Windows never uses this: starting goes through the protected scheduled task.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn spawn_detached_run(exe: &Path, cwd: &Path) -> AppResult<()> {
     let mut cmd = Command::new(exe);
     cmd.arg("run").current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     for key in SCRUBBED_ENV {
+        // A detached "run" resolves the runtime itself; the override is honored
+        // on unix where no elevated task exists, so it must still reach the child.
+        if *key == "E_LAUNCHER_HOST_RUNTIME" {
+            continue;
+        }
         cmd.env_remove(key);
     }
     #[cfg(windows)]
@@ -151,35 +308,6 @@ pub fn port_open(port: u16) -> bool {
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
     let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port));
     TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
-}
-
-pub fn listening_pid(port: u16) -> Option<u32> {
-    #[cfg(windows)]
-    {
-        let mut cmd = command("netstat");
-        cmd.args(["-ano", "-p", "tcp"]);
-        let out = run_capture(cmd).ok()?;
-        let needle_local = format!("127.0.0.1:{port}");
-        let needle_any = format!("0.0.0.0:{port}");
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let cols: Vec<&str> = line.split_whitespace().collect();
-            if cols.len() >= 5 && cols[3].eq_ignore_ascii_case("LISTENING") {
-                if cols[1] == needle_local || cols[1] == needle_any {
-                    if let Ok(pid) = cols[4].parse::<u32>() {
-                        if pid > 0 {
-                            return Some(pid);
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = port;
-        None
-    }
 }
 
 // ---------------------------------------------------------------- systemd

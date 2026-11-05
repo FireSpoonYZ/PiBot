@@ -4,7 +4,7 @@ import { Copy, ExternalLink } from 'lucide-react';
 import { GrokBotAvatar, JARVIS_AVATAR_PRESET } from '../../../web/src/GrokBotAvatar';
 import { ErrorNotice, errorText, useText } from '../../../web/src/ui';
 import type { DesktopClientStatus } from '../../../host-core/desktop-client.js';
-import { hostAdopt, hostErrorCode, hostErrorText, hostPair, hostStatus, type HostPairResult, type HostStatus } from './hostService';
+import { hostAdopt, hostControl, hostErrorCode, hostErrorText, hostPair, hostStatus, hostWarningText, type HostPairResult, type HostStatus } from './hostService';
 import './CenterGate.css';
 
 type SavedConnection = { url: string; deviceId: string; ca: string };
@@ -13,12 +13,10 @@ type ConnectInput = { url: string; deviceId: string; deviceToken: string; ca?: s
 /** 首次配对进度：pairing=启动器登录/注册/启动 Host（单次调用），connecting=客户端连接中心。 */
 type PairPhase = 'idle' | 'pairing' | 'connecting';
 
-/** 启动器错误码对应失败步骤：0 登录中心，1 注册设备，2 启动本机 Host。 */
-const pairErrorStep = (code: string): number => {
-  if (['OWNER_AUTH_FAILED', 'CENTER_UNREACHABLE', 'ALREADY_CONFIGURED', 'INVALID_ARGUMENT', 'HOST_LAUNCHER_MISSING'].includes(code)) return 0;
-  if (code.includes('START') || code.includes('ENABLE') || code === 'TIMEOUT') return 2;
-  return 1;
-};
+/** 配对四步：0 登记设备，1 登录自启动，2 本机 Host 启动并就绪，3 客户端连接。 */
+type StepState = 'pending' | 'active' | 'done' | 'error';
+/** 配对成功后保留的设备凭据（仅存内存）：saved=是否已写入本机凭据存储。 */
+type PairedCreds = { result: HostPairResult; ca: string; saved: boolean };
 export type CenterStatus = {
   state: 'disconnected' | 'connecting' | 'ready';
   centerUrl: string;
@@ -87,16 +85,24 @@ export function CenterGate({ children, onDisconnected }: Props) {
   const [host, setHost] = useState<HostStatus | null>();
   /** 首次 center_status 轮询已结束（成功或失败），用于判断是否存在已保存连接。 */
   const [polled, setPolled] = useState(false);
-  /** 主密钥仅为输入态，提交即清空。 */
+  /** 所有者密码仅为输入态，提交即清空。 */
   const [password, setPassword] = useState('');
   const [pairName, setPairName] = useState('');
   const [pairForce, setPairForce] = useState(false);
   const [pairPhase, setPairPhase] = useState<PairPhase>('idle');
-  const [pairFailedStep, setPairFailedStep] = useState<number>();
+  /** 配对四步真实状态；未进行配对时为 undefined。 */
+  const [pairSteps, setPairSteps] = useState<StepState[]>();
+  /** pair 返回的非致命告警（启动/自启失败等），逐条展示，不渲染全成功。 */
+  const [pairWarnings, setPairWarnings] = useState<string[]>([]);
+  /** 正在局部重试的步骤下标。 */
+  const [retryingStep, setRetryingStep] = useState<number>();
   const [adoptHost, setAdoptHost] = useState(true);
-  /** 配对成功但客户端连接失败时保留凭据供“重试连接”，仅存内存。 */
-  const pairedRef = useRef<HostPairResult | null>(null);
+  /** 配对成功后保留设备凭据与 CA，供步骤重试/连接重试，仅存内存。 */
+  const pairedRef = useRef<PairedCreds | null>(null);
   const [canRetryPaired, setCanRetryPaired] = useState(false);
+  /** Windows 原生虚拟屏配置（setup-shower）进度与结果。 */
+  const [showerBusy, setShowerBusy] = useState(false);
+  const [showerOutcome, setShowerOutcome] = useState<{ ok: boolean; text: string } | null>(null);
   const epoch = useRef(0);
   const autoAttempted = useRef(false);
   const wasReady = useRef(false);
@@ -269,6 +275,16 @@ export function CenterGate({ children, onDisconnected }: Props) {
     wasReady.current = status?.state === 'ready';
   }, [status, onDisconnected]);
 
+  // 连接成功后清理配对进度：断线回到连接页时应显示手动连接而非已完成的旧步骤。
+  useEffect(() => {
+    if (status?.state !== 'ready') return;
+    pairedRef.current = null;
+    setPairSteps(undefined);
+    setPairWarnings([]);
+    setCanRetryPaired(false);
+    setPairPhase('idle');
+  }, [status?.state]);
+
   const matchesSaved = Boolean(
     saved &&
     saved.url === url.trim() &&
@@ -278,21 +294,40 @@ export function CenterGate({ children, onDisconnected }: Props) {
 
   /** 首次运行：内置 Host 可用、未配对且客户端无已保存连接时显示配对表单；配对流程中保持显示。 */
   const firstRun = Boolean(host && !host.configured && !saved && polled);
-  const showPair = firstRun || pairPhase !== 'idle' || pairFailedStep !== undefined;
+  const showPair = firstRun || pairPhase !== 'idle' || pairSteps !== undefined;
   /** 手动连接时可让内置 Host 接管该设备：未配对，或已配对的正是同一设备（刷新令牌）。 */
   const offerAdopt = Boolean(host && (!host.configured || host.deviceId === deviceId.trim()));
 
   const connect = async (event: FormEvent) => {
     event.preventDefault();
+    if (busy || showerBusy) return;
     epoch.current += 1;
     setBusy(true);
     setError('');
     setCanRetryPaired(false);
+    setPairSteps(undefined);
+    setPairWarnings([]);
+    pairedRef.current = null;
     const input: ConnectInput = { url: url.trim(), deviceId: deviceId.trim(), deviceToken: token.trim(), ca: ca.trim() };
+    /** adopt 成功但收尾步骤（enable/start/凭据保存）未全部完成时的如实提示。 */
+    let adoptNotes: string[] = [];
     try {
       if (offerAdopt && adoptHost && input.deviceToken) {
         try {
-          await hostAdopt({ centerUrl: input.url, deviceId: input.deviceId, deviceToken: input.deviceToken, centerCa: input.ca });
+          const adoptResult = await hostAdopt({ centerUrl: input.url, deviceId: input.deviceId, deviceToken: input.deviceToken, centerCa: input.ca });
+          adoptNotes = (adoptResult.warnings ?? []).map(hostWarningText);
+          if (adoptResult.clientCredentialsSaved === false) {
+            adoptNotes.push(
+              t('客户端凭据未能保存到本机。', 'Client credentials could not be stored locally.') +
+                (adoptResult.storeError?.message ? ' ' + adoptResult.storeError.message : ''),
+            );
+          }
+          if (adoptNotes.length > 0) {
+            setError(
+              t('本机 Host 已接管，但部分收尾步骤未完成：', 'The local Host took over the device, but some wrap-up steps did not finish: ') +
+                adoptNotes.join('；'),
+            );
+          }
         } catch (e) {
           setError(
             t('本机 Host 接管失败；可取消勾选“同时在本机运行 Host”后仅连接客户端。', 'The local Host could not take over this device. Uncheck “Also run the Host on this computer” to connect the client only.') +
@@ -306,37 +341,183 @@ export function CenterGate({ children, onDisconnected }: Props) {
       await connectCenter(input);
     } catch (e) {
       setStatus(undefined);
-      setError(t('中心连接失败，请检查地址、设备身份、令牌与证书。', 'Failed to connect to the center. Check the address, device identity, token and certificate.') + ' ' + errorText(e));
+      setError(
+        t('中心连接失败，请检查地址、设备身份、令牌与证书。', 'Failed to connect to the center. Check the address, device identity, token and certificate.') +
+          (adoptNotes.length > 0 ? ' ' + t('本机 Host 收尾警告：', 'Host wrap-up warnings: ') + adoptNotes.join('；') : '') +
+          ' ' + errorText(e),
+      );
     } finally {
       setToken('');
       setBusy(false);
     }
   };
 
-  /** 配对完成后以启动器返回的设备凭据连接客户端（与手动连接同一路径）。 */
-  const connectPaired = async (result: HostPairResult, attempt: number) => {
-    setPairFailedStep(undefined);
+  /** 配对完成后以启动器返回的设备凭据连接客户端（与手动连接同一路径，含可选 CA）。 */
+  const connectPaired = async (paired: PairedCreds, attempt: number) => {
     setCanRetryPaired(false);
     setPairPhase('connecting');
+    setPairSteps((prev) => {
+      if (!prev) return prev;
+      const next = prev.slice();
+      next[3] = 'active';
+      return next;
+    });
     try {
+      // 凭据未持久化时先经同一 center_store 重试保存（无网络）；失败仍继续连接，
+      // 连接成功本身也会写凭据——绝不因保存失败而重新登记。
+      if (!paired.saved) {
+        try {
+          await request('center_store', {
+            url: paired.result.centerUrl,
+            deviceId: paired.result.deviceId,
+            deviceToken: paired.result.deviceToken,
+            ca: paired.ca,
+          });
+          paired.saved = true;
+        } catch { /* 连接成功后凭据同样会写入，忽略本次保存失败 */ }
+      }
       await connectCenter(
-        { url: result.centerUrl, deviceId: result.deviceId, deviceToken: result.deviceToken },
+        { url: paired.result.centerUrl, deviceId: paired.result.deviceId, deviceToken: paired.result.deviceToken, ca: paired.ca },
         () => attempt === epoch.current,
       );
-      pairedRef.current = null;
+      // 只清掉自己这份凭据：期间若已有更新的配对结果，保留它。
+      if (pairedRef.current === paired) pairedRef.current = null;
     } catch (e) {
-      setPairFailedStep(3);
-      setUrl(result.centerUrl);
-      setDeviceId(result.deviceId);
+      if (attempt !== epoch.current) return;
+      setPairSteps((prev) => {
+        if (!prev) return prev;
+        const next = prev.slice();
+        next[3] = 'error';
+        return next;
+      });
+      setUrl(paired.result.centerUrl);
+      setDeviceId(paired.result.deviceId);
       setCanRetryPaired(true);
       setError(t('设备已配对，但客户端连接中心失败。', 'The device is paired, but the client could not connect to the center.') + ' ' + hostErrorText(e, t));
     } finally {
-      setPairPhase('idle');
+      if (attempt === epoch.current) setPairPhase('idle');
+    }
+  };
+
+  /** Host 已启动但未就绪时短轮询等待就绪（约 12s）；超时或停止返回 false。 */
+  const awaitHostReady = async (attempt: number): Promise<boolean> => {
+    for (let i = 0; i < 12; i += 1) {
+      if (attempt !== epoch.current) return false;
+      const st = await refreshHost();
+      if (!st?.running) return false;
+      if (st.ready) return true;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    return false;
+  };
+
+  /** 把某步失败原因并入告警列表（去重）；步骤本身标 error，不阻断后续。 */
+  const noteStepFailure = (text: string) =>
+    setPairWarnings((prev) => (prev.includes(text) ? prev : [...prev, text]));
+
+  /**
+   * 登记成功后的自动顺序执行（接口 B：pair 只登记，不再隐式 enable/start）：
+   * 步1 登录自启（hostControl enable）→ 步2 启动并就绪（start/restart + 真实 ready）→ 步3 客户端连接。
+   * 失败步标 error 并可独立重试，但流程继续：enable 失败仍可 start/仅连接客户端，不渲染全成功。
+   */
+  const runSteps = async (
+    paired: PairedCreds,
+    initial: StepState[],
+    attempt: number,
+    fromIndex = 1,
+  ) => {
+    const steps = initial.slice();
+    for (let i = Math.max(1, fromIndex); i <= 3; i += 1) {
+      if (attempt !== epoch.current) return;
+      if (steps[i] === 'done') continue;
+      steps[i] = 'active';
+      setPairSteps(steps.slice());
+      if (i === 1) {
+        let done = false;
+        try {
+          await hostControl('enable');
+          const fresh = await refreshHost();
+          if (attempt !== epoch.current) return;
+          done = fresh?.autostart === true;
+          if (!done) noteStepFailure(t('登录自启动未启用。', 'Run at login was not enabled.'));
+        } catch (e) {
+          if (attempt !== epoch.current) return;
+          noteStepFailure(t('登录自启动失败：', 'Run at login failed: ') + hostErrorText(e, t));
+        }
+        steps[i] = done ? 'done' : 'error';
+      } else if (i === 2) {
+        let ready = false;
+        try {
+          const current = await refreshHost();
+          if (attempt !== epoch.current) return;
+          // restartRequired=true 表示旧进程尚未退出，start 会见锁空操作，必须 restart。
+          const needsRestart = paired.result.restartRequired === true || current?.running === true;
+          await hostControl(needsRestart ? 'restart' : 'start');
+          ready = await awaitHostReady(attempt);
+          if (!ready) noteStepFailure(t('本机 Host 已启动但未就绪。', 'The local Host started but is not ready.'));
+        } catch (e) {
+          if (attempt !== epoch.current) return;
+          noteStepFailure(t('本机 Host 启动失败：', 'The local Host failed to start: ') + hostErrorText(e, t));
+        }
+        if (attempt !== epoch.current) return;
+        steps[i] = ready ? 'done' : 'error';
+      } else {
+        // 设备已登记：客户端连接独立于本机 Host，始终尝试。
+        await connectPaired(paired, attempt);
+        return;
+      }
+      setPairSteps(steps.slice());
+    }
+  };
+
+  /** 局部重试：从指定步骤起重跑未完成的剩余步骤（enable→start/ready→connect），不做二次 pair。 */
+  const retryStep = async (index: number) => {
+    const paired = pairedRef.current;
+    if (!paired || !pairSteps || busy || showerBusy) return;
+    const attempt = ++epoch.current;
+    setBusy(true);
+    setError('');
+    setRetryingStep(index);
+    try {
+      const steps = pairSteps.slice();
+      steps[index] = 'pending';
+      await runSteps(paired, steps, attempt, index);
+    } finally {
+      setRetryingStep(undefined);
+      if (attempt === epoch.current) setBusy(false);
+    }
+  };
+
+  /** 原生虚拟屏配置：仅 Windows 显示；用户显式触发，可能弹 UAC/凭据框并短暂停止本机 Host。 */
+  const setupShower = async () => {
+    // 与 pair/start/restart 串行：setup-shower 会短暂停止本机 Host。
+    if (showerBusy || busy) return;
+    setShowerBusy(true);
+    setShowerOutcome(null);
+    try {
+      const result = await hostControl('setup-shower');
+      const configured = result.configured === true;
+      const verified = result.verified === true;
+      setShowerOutcome(
+        configured && verified
+          ? { ok: true, text: t('虚拟屏已配置并通过验证。', 'Virtual display configured and verified.') }
+          : { ok: false, text: t('虚拟屏配置已结束，但未完成验证。', 'Virtual display setup finished without completing verification.') },
+      );
+    } catch (e) {
+      setShowerOutcome({ ok: false, text: hostErrorText(e, t) });
+    } finally {
+      setShowerBusy(false);
+      void refreshHost();
     }
   };
 
   const pair = async (event: FormEvent) => {
     event.preventDefault();
+    if (busy || showerBusy) return;
+    // 冻结提交时输入：异步完成只认这份 URL/CA，busy 期间输入框已禁用。
+    const frozenUrl = url.trim();
+    const frozenCa = ca.trim();
+    const frozenName = pairName.trim();
     const secret = password;
     setPassword('');
     const force = pairForce;
@@ -344,45 +525,65 @@ export function CenterGate({ children, onDisconnected }: Props) {
     setBusy(true);
     setError('');
     setCanRetryPaired(false);
-    setPairFailedStep(undefined);
+    setPairWarnings([]);
+    setPairSteps(['active', 'pending', 'pending', 'pending']);
     setPairPhase('pairing');
     try {
       let result: HostPairResult;
       try {
-        result = await hostPair({ centerUrl: url.trim(), password: secret, displayName: pairName.trim(), force });
+        result = await hostPair({ centerUrl: frozenUrl, password: secret, displayName: frozenName, centerCa: frozenCa, force });
       } catch (e) {
-        const code = hostErrorCode(e);
-        setPairFailedStep(pairErrorStep(code));
+        // hostPair 单次调用涵盖登记；失败统一标在登记步。
+        setPairSteps(['error', 'pending', 'pending', 'pending']);
         setPairPhase('idle');
-        if (code === 'ALREADY_CONFIGURED') {
+        if (hostErrorCode(e) === 'ALREADY_CONFIGURED') {
           setPairForce(true);
-          setError(t('本机已配对过中心。重新输入主密钥并点击“重新配对”将覆盖现有配置。', 'This computer is already paired. Re-enter the master key and click “Re-pair” to replace the existing pairing.'));
+          setError(t('本机已配对过中心。重新输入所有者密码并点击“重新配对”将覆盖现有配置。', 'This computer is already paired. Re-enter the owner password and click “Re-pair” to replace the existing pairing.'));
         } else {
           setError(t('配对失败：', 'Pairing failed: ') + hostErrorText(e, t));
         }
-        return;
-      } finally {
         void refreshHost();
+        return;
       }
       setPairForce(false);
-      pairedRef.current = result;
+      setPairWarnings((result.warnings ?? []).map(hostWarningText));
+      const paired: PairedCreds = { result, ca: frozenCa, saved: result.clientCredentialsSaved === true };
+      pairedRef.current = paired;
+      if (!paired.saved) {
+        noteStepFailure(
+          t('客户端凭据未能保存到本机，若现在关闭窗口可能需要重新登记。', 'Client credentials could not be stored locally; closing the window now may require re-pairing.') +
+            (result.storeError?.message ? ' ' + result.storeError.message : ''),
+        );
+      }
       if (attempt !== epoch.current) {
         setPairPhase('idle');
         return;
       }
-      await connectPaired(result, attempt);
+      const fresh = await refreshHost();
+      if (attempt !== epoch.current) {
+        setPairPhase('idle');
+        return;
+      }
+      // pair 只登记+持久化；步1/步2 由启动器汇报的真实状态决定是否可跳过。
+      const steps: StepState[] = [
+        'done',
+        (fresh?.autostart ?? result.autostart ?? false) ? 'done' : 'pending',
+        (fresh?.ready ?? result.ready ?? false) ? 'done' : 'pending',
+        'pending',
+      ];
+      await runSteps(paired, steps, attempt);
     } finally {
       setBusy(false);
     }
   };
 
   const retryPaired = () => {
-    const result = pairedRef.current;
-    if (!result) return;
+    const paired = pairedRef.current;
+    if (!paired || busy || showerBusy) return;
     const attempt = ++epoch.current;
     setBusy(true);
     setError('');
-    void connectPaired(result, attempt).finally(() => setBusy(false));
+    void connectPaired(paired, attempt).finally(() => setBusy(false));
   };
 
   const disconnectCenter = async () => {
@@ -410,32 +611,24 @@ export function CenterGate({ children, onDisconnected }: Props) {
 
   const connecting = busy || status?.state === 'connecting';
 
-  const pairSteps = [
-    t('登录中心', 'Sign in to center'),
-    t('注册设备', 'Register device'),
-    t('启动本机 Host', 'Start local Host'),
-    t('连接', 'Connect'),
+  const pairStepLabels = [
+    t('登记设备', 'Register device'),
+    t('登录后自动运行', 'Run automatically at login'),
+    t('启动并就绪本机 Host', 'Start and ready the local Host'),
+    t('连接客户端', 'Connect client'),
   ];
-  const pairStepState = (index: number): 'pending' | 'active' | 'done' | 'error' => {
-    if (pairFailedStep !== undefined) {
-      if (index < pairFailedStep) return 'done';
-      return index === pairFailedStep ? 'error' : 'pending';
-    }
-    if (pairPhase === 'pairing') return index <= 2 ? 'active' : 'pending';
-    if (pairPhase === 'connecting') return index <= 2 ? 'done' : 'active';
-    return 'pending';
-  };
-  const showPairSteps = pairPhase !== 'idle' || pairFailedStep !== undefined;
+  const pairStepState = (index: number): StepState => pairSteps?.[index] ?? 'pending';
+  const showPairSteps = pairPhase !== 'idle' || pairSteps !== undefined;
 
   const manualForm = (
     <form className="gate-form" onSubmit={connect}>
       <label className="gate-field">
         <span>{t('中心 HTTPS 地址', 'Center HTTPS URL')}</span>
-        <input required type="url" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://center.example.com" />
+        <input required type="url" value={url} disabled={busy || showerBusy} onChange={e => setUrl(e.target.value)} placeholder="https://center.example.com" />
       </label>
       <label className="gate-field">
         <span>{t('设备身份', 'Device identity')}</span>
-        <input required value={deviceId} onChange={e => setDeviceId(e.target.value)} />
+        <input required value={deviceId} disabled={busy || showerBusy} onChange={e => setDeviceId(e.target.value)} />
       </label>
       <label className="gate-field">
         <span>
@@ -447,21 +640,22 @@ export function CenterGate({ children, onDisconnected }: Props) {
           type="password"
           autoComplete="off"
           value={token}
+          disabled={busy || showerBusy}
           onChange={e => setToken(e.target.value)}
           placeholder={matchesSaved ? t('已保存凭据，留空使用已存令牌', 'Saved credentials — leave blank to reuse') : ''}
         />
       </label>
       <details className="gate-advanced">
         <summary>{t('高级 TLS / 自签 CA 证书（可选）', 'Advanced TLS / self-signed CA certificate (optional)')}</summary>
-        <textarea value={ca} onChange={e => setCa(e.target.value)} placeholder="-----BEGIN CERTIFICATE-----" rows={4} />
+        <textarea value={ca} disabled={busy || showerBusy} onChange={e => setCa(e.target.value)} placeholder="-----BEGIN CERTIFICATE-----" rows={4} />
       </details>
       {offerAdopt && (
         <label className="gate-check">
-          <input type="checkbox" checked={adoptHost} onChange={e => setAdoptHost(e.target.checked)} />
+          <input type="checkbox" checked={adoptHost} disabled={busy || showerBusy} onChange={e => setAdoptHost(e.target.checked)} />
           <span>{t('同时在本机运行 Host', 'Also run the Host on this computer')}</span>
         </label>
       )}
-      <button disabled={busy} type="submit" className="primary-button gate-submit">
+      <button disabled={busy || showerBusy} type="submit" className="primary-button gate-submit">
         {connecting ? t('连接中…', 'Connecting…') : t('连接中心', 'Connect')}
       </button>
     </form>
@@ -475,7 +669,7 @@ export function CenterGate({ children, onDisconnected }: Props) {
           <h1>{t('连接 e-助手中心', 'Connect to e-Assistant Center')}</h1>
           <p className="gate-subtitle">
             {showPair
-              ? t('输入中心地址与主密钥，本机将自动注册并在后台运行 Host', 'Enter the center URL and master key; this computer registers itself and runs the Host in the background')
+              ? t('输入中心地址与所有者密码，本机将自动注册并在后台运行 Host', 'Enter the center URL and owner password; this computer registers itself and runs the Host in the background')
               : t('统一管理多端智能体、模型、插件与记忆', 'Manage agents, models, plugins and memory across devices')}
           </p>
         </div>
@@ -494,27 +688,57 @@ export function CenterGate({ children, onDisconnected }: Props) {
             <form className="gate-form" onSubmit={pair}>
               <label className="gate-field">
                 <span>{t('中心地址', 'Center URL')}</span>
-                <input required type="url" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://center.example.com" />
+                <input required type="url" value={url} disabled={busy || showerBusy} onChange={e => setUrl(e.target.value)} placeholder="https://center.example.com" />
               </label>
               <label className="gate-field">
-                <span>{t('主密钥', 'Master key')}</span>
-                <input required type="password" autoComplete="off" value={password} onChange={e => setPassword(e.target.value)} />
+                <span>{t('所有者密码', 'Owner password')}</span>
+                <input required type="password" autoComplete="off" value={password} disabled={busy || showerBusy} onChange={e => setPassword(e.target.value)} />
               </label>
               <label className="gate-field">
                 <span>{t('本机名称', 'Computer name')}</span>
-                <input required maxLength={64} value={pairName} onChange={e => setPairName(e.target.value)} />
+                <input required maxLength={64} value={pairName} disabled={busy || showerBusy} onChange={e => setPairName(e.target.value)} />
               </label>
+              <details className="gate-advanced">
+                <summary>{t('高级 TLS / 自签 CA 证书（可选）', 'Advanced TLS / self-signed CA certificate (optional)')}</summary>
+                <textarea value={ca} disabled={busy || showerBusy} onChange={e => setCa(e.target.value)} placeholder="-----BEGIN CERTIFICATE-----" rows={4} />
+              </details>
               {showPairSteps && (
-                <ol className="gate-steps" aria-live="polite">
-                  {pairSteps.map((label, index) => (
-                    <li key={label} className={`gate-step ${pairStepState(index)}`}>
-                      <span className="gate-step-dot" aria-hidden />
-                      {label}
-                    </li>
-                  ))}
-                </ol>
+                <>
+                  <ol className="gate-steps" aria-live="polite">
+                    {pairStepLabels.map((label, index) => {
+                      const state = pairStepState(index);
+                      return (
+                        <li key={label} className={`gate-step ${state}`}>
+                          <span className="gate-step-dot" aria-hidden />
+                          <span className="gate-step-label">{label}</span>
+                          {state === 'error' && index > 0 && pairedRef.current && (
+                            <button
+                              type="button"
+                              className="gate-step-retry"
+                              disabled={busy || showerBusy}
+                              onClick={() => void retryStep(index)}
+                            >
+                              {retryingStep === index
+                                ? index === 1
+                                  ? t('等待授权…', 'Awaiting approval…')
+                                  : t('重试中…', 'Retrying…')
+                                : t('重试', 'Retry')}
+                            </button>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ol>
+                  {pairWarnings.length > 0 && (
+                    <ul className="gate-warnings">
+                      {pairWarnings.map((warning, index) => (
+                        <li key={index}>{warning}</li>
+                      ))}
+                    </ul>
+                  )}
+                </>
               )}
-              <button disabled={busy} type="submit" className="primary-button gate-submit">
+              <button disabled={busy || showerBusy} type="submit" className="primary-button gate-submit">
                 {busy
                   ? (pairPhase === 'connecting' ? t('连接中…', 'Connecting…') : t('配对中…', 'Pairing…'))
                   : pairForce ? t('重新配对', 'Re-pair') : t('配对并连接', 'Pair and connect')}
@@ -524,6 +748,26 @@ export function CenterGate({ children, onDisconnected }: Props) {
               <summary>{t('高级：使用已有设备 ID 和令牌', 'Advanced: use an existing device ID and token')}</summary>
               {manualForm}
             </details>
+            {host?.platform === 'windows' && (
+              <div className="gate-shower">
+                <button
+                  type="button"
+                  className="secondary-button gate-manage"
+                  disabled={busy || showerBusy}
+                  onClick={() => void setupShower()}
+                >
+                  {showerBusy ? t('等待授权或配置中…', 'Awaiting approval or configuring…') : t('配置原生虚拟屏', 'Configure native virtual display')}
+                </button>
+                <p className="gate-hint">
+                  {t('供桌面智能体在独立虚拟屏中运行；需要管理员授权与本机凭据，若本机 Host 已运行会短暂暂停。', 'Lets desktop agents run in a separate virtual display; needs admin approval and local credentials, and briefly pauses a running local Host.')}
+                </p>
+                {showerOutcome && (
+                  <p className={showerOutcome.ok ? 'gate-shower-result ok' : 'gate-shower-result error'} role="status">
+                    {showerOutcome.text}
+                  </p>
+                )}
+              </div>
+            )}
           </>
         ) : manualForm}
         <button

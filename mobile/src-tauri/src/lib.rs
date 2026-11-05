@@ -53,6 +53,11 @@ const ALLOWED_METHODS: &[&str] = &[
   "screenStatus",
   "screenTakeover",
   "screenClose",
+  // C7 配对/引导：Kotlin 侧 UI-local 动作（配对内部复用既有 bridge op，不进桥白名单）
+  "pairCenter",
+  "repairCenterBinding",
+  "onboardingStatus",
+  "onboardingAction",
   // 私有 bridge 服务的固定 op
   "snapshot",
   "status",

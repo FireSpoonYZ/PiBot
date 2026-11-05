@@ -193,8 +193,18 @@ impl CenterClient {
         Ok((authenticated, token))
     }
 
-    /// Owner login (§1 steps 1–3) followed by `POST /api/devices`.
-    pub fn register_device(&mut self, password: &str, display_name: &str, platform: &str) -> AppResult<Registered> {
+    /// Owner login (§1 steps 1–3) followed by POST /api/devices. device_id is
+    /// the local Host store identity the center must register; replace_existing
+    /// rotates the token while keeping Bot records. A registered ID without
+    /// replace maps to ALREADY_CONFIGURED (center 409).
+    pub fn register_device(
+        &mut self,
+        password: &str,
+        display_name: &str,
+        platform: &str,
+        device_id: &str,
+        replace_existing: bool,
+    ) -> AppResult<Registered> {
         let (_, csrf) = self.csrf_token()?;
         self.send("POST", "/api/session", Some(&csrf), Some(json!({ "password": password })))
             .map_err(|f| map_fail(f, "POST /api/session", true))?;
@@ -202,10 +212,25 @@ impl CenterClient {
         if !authenticated {
             return Err(AppError::new("OWNER_AUTH_FAILED", "center did not establish an owner session"));
         }
-        let body = json!({ "displayName": display_name, "platform": platform });
+        let body = json!({
+            "displayName": display_name,
+            "platform": platform,
+            "deviceId": device_id,
+            "replaceExisting": replace_existing,
+        });
         let response = self
             .send("POST", "/api/devices", Some(&csrf), Some(body))
-            .map_err(|f| map_fail(f, "POST /api/devices", true))?;
+            .map_err(|f| match f {
+                HttpFail::Status(409, body) => {
+                    let (_, message) = center_error_detail(&body);
+                    let detail = message.map(|m| format!(" ({m})")).unwrap_or_default();
+                    AppError::new(
+                        "ALREADY_CONFIGURED",
+                        format!("POST /api/devices: deviceId is already registered{detail}; use --force to replace"),
+                    )
+                }
+                other => map_fail(other, "POST /api/devices", true),
+            })?;
         let device_id = response.get("deviceId").and_then(Value::as_str).unwrap_or("").to_string();
         let device_token = response.get("deviceToken").and_then(Value::as_str).unwrap_or("").to_string();
         if device_id.is_empty() || device_token.len() < 43 {

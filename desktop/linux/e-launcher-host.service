@@ -7,7 +7,8 @@ Type=simple
 ExecStart=/usr/bin/e-launcher-host run
 Restart=always
 RestartSec=3
-TimeoutStopSec=30
+# 外层停止预算必须大于 Host 内部清理预算（共享契约）。
+TimeoutStopSec=90
 UMask=0077
 
 [Install]

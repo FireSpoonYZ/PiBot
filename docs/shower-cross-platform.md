@@ -123,7 +123,8 @@ csc.exe` and the system `System32\mstscax.dll`. It does not use PowerShell, NuGe
 a Windows SDK, `tlbimp` or any downloaded package, and it fails with an explicit
 message instead of falling back.
 
-It compiles, in this order:
+It compiles, in this order (the same binary also carries the install-time
+`host-task` and `shower-setup` subcommands described further below):
 
 1. `host-core/native/windows/InteropGenerator.cs` → `native/windows/build/
    InteropGenerator.exe`.
@@ -211,6 +212,45 @@ or Host shutdown terminates the native process; the guardian restores the
 original child-enabled and TermService state. NLA, Windows Hello, firewall and
 `RDP-Tcp` settings are not changed.
 
+### Windows login autostart and credential onboarding
+
+The same `shower-windows.exe` carries two install-time subcommands routed from
+`Program` (`HostLoginTask.Run` / `RdpHost.RunOnboarding`); neither opens a
+desktop or reads the physical one:
+
+- `host-task <install|enable|disable|start|status|remove>` manages the login
+  autostart scheduled task `ELauncherHost-<SID>` for the current interactive
+  user's SID; `install` verifies the task account matches that user. The task is
+  a fixed action running `e-launcher-host.exe run` from the install directory
+  with InteractiveToken and Highest privileges, triggered by a logon trigger
+  (type 9 / TASK_TRIGGER_LOGON) — no arbitrary executable or command, no
+  idle/battery limits, single instance, bounded retry. The task itself stays
+  `Enabled=true`; enable/disable only toggles the trigger's `Enabled` flag, so
+  a disabled autostart still allows manual `start`.
+  The task's write ACL is limited to administrators/SYSTEM while the owning user
+  may read and run it. `start` and `status` work unelevated;
+  `install`/`enable`/`disable`/`remove` may complete through a controlled
+  `runas` elevation: a declined UAC returns `AUTHORIZATION_CANCELLED`, the wrong
+  account `INSTALL_USER_MISMATCH`, a standard user `ADMIN_ACCOUNT_REQUIRED`, and
+  a user-writable install directory `INSTALLATION_NOT_PROTECTED` — installing is
+  therefore an administrator action into a protected directory such as Program
+  Files, and a standard user cannot satisfy it with someone else's admin
+  credentials. Results are one JSON line on the last stdout line —
+  `{installed,autostart}` for status/enable/disable/install, `{status:'started'}`
+  for start — with errors as `{error:{code,message}}` and a non-zero exit. The
+  launcher registers the task at install/pair time but only enables and starts it
+  after pairing succeeds; subsequent logins show no UAC prompt.
+- `shower-setup --state-dir <absolute path>` is the credential-onboarding entry:
+  it prompts once for the current account's password through the existing
+  `ShowerCredentials.Prompt`, proves it inside a temporary RDP child session
+  (temporary agent created, agent-ready verified), then saves it to the current
+  user's Credential Manager and always releases the temporary session and
+  bootstrap state. The last stdout line is `{configured:true,verified:true}` or
+  `{error:{code,message}}` with a non-zero exit; when an existing session holds
+  the single child-session slot it reports busy instead of taking over. The
+  password/PIN is never exposed or written to logs, and nothing pops up
+  unattended.
+
 ### Local Windows credential enrollment
 
 Microsoft documents automatic parent-user logon for normal
@@ -219,9 +259,15 @@ On the acceptance machine, the Microsoft-account/Hello session instead returned
 RDP error 2055 (`SSL_ERR_LOGON_FAILURE`). Changing account hints, removing
 CredSSP, or retaining only ActiveX memory did not provide unattended recreation.
 
-Configure the current Windows account and its account password (not the Hello
-PIN) in **Credential Manager → Windows Credentials → Add a generic credential**,
-using target **`e-launcher/Shower/localhost`**. The account name is included in
+The explicit enrollment path is `e-launcher-host setup-shower` (also exposed as
+a local-only action in the desktop UI): the launcher explicitly stops this
+machine's Host first — the onboarding needs the free child-session slot — runs
+`shower-windows.exe shower-setup --state-dir …` above within a 300 s budget,
+then starts the Host again if it was running, preserving the original error when
+restoring fails. The UI states that the local Host is briefly stopped. Manual
+entry stays an alternative: configure the current Windows account and its account
+password (not the Hello PIN) in **Credential Manager → Windows Credentials → Add
+a generic credential**, using target **`e-launcher/Shower/localhost`**. The account name is included in
 the `authentication-required` status when setup is needed. This is the current
 user's local credential vault, not a center setting or application JSON file.
 Each connection reads it with `CredReadW` and supplies it directly to the ActiveX
@@ -263,7 +309,11 @@ physical D-Bus session address is replaced by the private bus. It never uses
 it started.
 
 Required system programs, which must already be installed (the backend reports an
-explicit dependency error and never installs packages):
+explicit dependency error and never installs packages; the desktop deb/rpm
+declares the corresponding distro packages — see `desktop/src-tauri/
+tauri.linux.conf.json`. The rpm accepts Fedora's stock `ffmpeg-free` (the
+backend only needs the x11grab input and built-in mjpeg encoder) or RPM
+Fusion's full `ffmpeg`):
 
 - `Xvnc` or `Xtigervnc`
 - a window manager: `xfwm4` or `openbox`

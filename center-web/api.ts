@@ -11,6 +11,8 @@ export interface InstallationCheckRequest { deviceId: string; botId: string }
 export interface ActionDescriptor { id: string; title: string; inputSchema: JsonSchema; outputSchema?: JsonSchema }
 export interface McpOAuthStart { flowId: string; authorizationUrl: string }
 export interface McpOAuthStatus { status: 'pending' | 'complete' | 'failed'; error?: string }
+export interface SetupStatus { required: boolean; publicUrl?: string; linkUrl?: string; tlsMode?: 'direct' | 'proxy' }
+export interface SetupRequest { setupToken: string; ownerPassword: string; publicUrl: string; linkUrl: string }
 
 let csrfToken: string | null = null;
 export class CenterApiError extends Error {
@@ -42,9 +44,40 @@ async function request<T>(path: string, method = 'GET', body?: unknown): Promise
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
+// Onboarding runs before any session exists, so /api/setup uses a raw fetch:
+// no CSRF token is required or available yet. A 404 on GET means an older
+// center without onboarding — already configured; POST 404 is a real error.
+// Every request is bounded by SETUP_REQUEST_TIMEOUT_MS; a caller-provided
+// signal is merged in, so an earlier caller abort (wait deadline) still wins.
+const SETUP_REQUEST_TIMEOUT_MS = 10_000;
+async function setupRequest<T>(method: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener('abort', forwardAbort);
+  const timer = setTimeout(() => controller.abort(), SETUP_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch('/api/setup', {
+      method, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+      headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (method === 'GET' && response.status === 404) return { required: false } as T;
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null) as ApiError | null;
+      throw new CenterApiError(payload?.error?.code || 'HTTP_ERROR', payload?.error?.message || '请求失败 (' + response.status + ')', response.status, payload?.error?.details);
+    }
+    return await response.json() as T;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', forwardAbort);
+  }
+}
 const botPath = (deviceId: string, botId: string) => `/api/devices/${id(deviceId)}/bots/${id(botId)}`;
 const installationPath = (installationId: string) => `/api/installations/${id(installationId)}`;
 export const api = {
+  getSetup: (signal?: AbortSignal) => setupRequest<SetupStatus>('GET', undefined, signal),
+  submitSetup: (body: SetupRequest) => setupRequest<{ configured: boolean }>('POST', body),
   async session() { const result = await request<SessionInfo>('/api/session'); csrfToken = result.csrfToken; return result; },
   async login(body: LoginRequest) { const result = await request<SessionInfo>('/api/session', 'POST', body); csrfToken = result.csrfToken; return result; },
   async logout() { await request<void>('/api/session', 'DELETE'); csrfToken = null; },

@@ -57,6 +57,7 @@ import {
 } from './native';
 import { mobileLocalRequest, onMobileStreamFailure } from './native/tauri-host';
 import { ActiveCenter, useCenterConnection } from './native/CenterGate';
+import { OnboardingPanel, OnboardingPermissions } from './native/OnboardingPanel';
 import { useDrafts } from '../../desktop/web/src/drafts';
 import { readHistoryPage } from '../../desktop/web/src/history';
 import { Scopes } from '../../desktop/web/src/Scopes';
@@ -7522,103 +7523,12 @@ function HubSettingsView({
             </>
           )}
 
-          {showCenterForm && (
-            <>
-              <label className="hst-input-row">
-                <span className="hst-input-label">{t('中心地址', 'Center URL')}</span>
-                <input
-                  className="hst-input"
-                  inputMode="url"
-                  value={centerConn.url}
-                  onChange={e => centerConn.setUrl(e.target.value)}
-                  placeholder="https://127.0.0.1:4318"
-                />
-              </label>
-
-              <label className="hst-input-row">
-                <span className="hst-input-label">{t('设备标识', 'Device ID')}</span>
-                <input
-                  className="hst-input"
-                  value={centerConn.deviceId}
-                  onChange={e => centerConn.setDeviceId(e.target.value)}
-                  placeholder="android-client"
-                />
-              </label>
-
-              <label className="hst-input-row">
-                <span className="hst-input-label">{t('客户端令牌', 'Client Token')}</span>
-                <input
-                  type="password"
-                  autoComplete="new-password"
-                  className="hst-input"
-                  value={centerConn.token}
-                  onChange={e => centerConn.setToken(e.target.value)}
-                  placeholder={
-                    centerConn.matchesSaved
-                      ? t('留空使用已保存令牌', 'Blank to use saved token')
-                      : t('输入中心访问令牌', 'Enter client token')
-                  }
-                />
-              </label>
-
-              {centerConn.error && (
-                <div className="hst-row-static">
-                  <ErrorNotice error={centerConn.error} compact onDismiss={() => centerConn.setError('')} />
-                </div>
-              )}
-
-              <div className="hst-actions">
-                {centerConn.saved?.url && (
-                  <button
-                    type="button"
-                    className="hst-btn"
-                    disabled={centerConn.busy}
-                    onClick={() => void centerConn.disconnect()}
-                  >
-                    {t('断开并清除凭据', 'Clear Saved')}
-                  </button>
-                )}
-                {centerConn.matchesSaved && !centerConn.token.trim() && (
-                  <button
-                    type="button"
-                    className="hst-btn"
-                    disabled={centerConn.busy}
-                    onClick={() =>
-                      void centerConn.connect().then(() => {
-                        setEditingCenter(false);
-                      })
-                    }
-                  >
-                    {t('用已存凭据重连', 'Reconnect Saved')}
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="hst-btn is-primary"
-                  disabled={
-                    centerConn.busy ||
-                    !centerConn.url.trim() ||
-                    !centerConn.deviceId.trim() ||
-                    (!centerConn.token.trim() && !centerConn.matchesSaved)
-                  }
-                  onClick={() =>
-                    void centerConn
-                      .connect()
-                      .then(() => {
-                        setEditingCenter(false);
-                      })
-                  }
-                >
-                  {centerConn.preparing
-                    ? t('正在启动本机节点…', 'Starting Host…')
-                    : centerConn.busy
-                      ? t('连接中…', 'Connecting…')
-                      : t('连接中心', 'Connect Center')}
-                </button>
-              </div>
-            </>
-          )}
+          {/* C7 首启引导：无存凭据默认 owner 密码配对；手动令牌与重新配对收入折叠项。 */}
+          {showCenterForm && <OnboardingPanel onDone={() => setEditingCenter(false)} />}
         </Section>
+
+        {/* C7 通知/后台/Shizuku 与本机 Host 状态：连接前后均可在设置查看。 */}
+        <OnboardingPermissions />
 
         {/* 2. 设备 */}
         <Section

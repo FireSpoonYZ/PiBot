@@ -1,0 +1,4 @@
+/* C7 首启引导补充样式：.ob- 前缀，仅 native/OnboardingPanel 使用；其余沿用 .hst-/.bs- 原语。 */
+.ob-check-row { cursor: pointer; gap: 10px; }
+.ob-check { flex: none; width: 18px; height: 18px; accent-color: var(--bs-accent, currentColor); }
+.ob-note { font-size: .86rem; color: var(--muted); overflow-wrap: anywhere; }

@@ -14,7 +14,7 @@ mod util;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::BufRead;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -31,15 +31,31 @@ commands:
   status     print service status
   enable     register login autostart
   disable    remove login autostart
+  setup-shower
+             run the interactive Windows Shower credential setup (briefly stops the Host)
   pair --center-url <url> [--name <displayName>] [--port <n>] [--data-root <abs>] [--center-ca-file <f>] [--force]
              owner password from E_LAUNCHER_OWNER_PASSWORD or first stdin line
   adopt --center-url <url> --device-id <id> [--name <displayName>] [--port <n>] [--data-root <abs>] [--center-ca-file <f>]
              device token from E_LAUNCHER_RELAY_TOKEN or first stdin line
   help | version";
 
-const START_TIMEOUT: Duration = Duration::from_secs(5);
-const STOP_TIMEOUT: Duration = Duration::from_secs(15);
+const START_TIMEOUT: Duration = Duration::from_secs(10);
+/// The outer stop waits for the supervisor's graceful child shutdown (45s for
+/// Node service.close incl. ~20s native release) plus polling and write slack.
+const STOP_TIMEOUT: Duration = Duration::from_secs(70);
 const KILL_TIMEOUT: Duration = Duration::from_secs(5);
+/// Single authenticated /v1/service probe bound for the status command.
+const READY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Slice of the setup-shower budget kept for restarting the Host afterwards:
+/// host-task start 40s + lock wait 10s + pipe drain slack ≈ 55s.
+const RESTART_RESERVE: Duration = Duration::from_secs(55);
+/// Hard cap for the native shower-setup call itself (its internal ready poll
+/// is 180s); the 300s total still covers outer stop + restart.
+const SETUP_HELPER_TIMEOUT: Duration = Duration::from_secs(200);
+/// Total setup-shower budget covering stop + native setup + restart.
+const SETUP_SHOWER_TIMEOUT: Duration = Duration::from_secs(300);
+/// Bound for the bundled cli.js init identity probe.
+const IDENTITY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_NAME_CHARS: usize = 64;
 
 fn main() {
@@ -70,7 +86,7 @@ fn dispatch(args: &[String]) -> AppResult<Value> {
     match command.as_str() {
         "help" | "--help" | "-h" => Ok(json!({ "usage": USAGE })),
         "version" | "--version" => Ok(json!({ "version": env!("CARGO_PKG_VERSION") })),
-        "run" | "start" | "stop" | "restart" | "status" | "enable" | "disable" => {
+        "run" | "start" | "stop" | "restart" | "status" | "enable" | "disable" | "setup-shower" => {
             parse_flags(rest, &[], &[])?;
             let paths = HostPaths::resolve()?;
             match command.as_str() {
@@ -80,7 +96,8 @@ fn dispatch(args: &[String]) -> AppResult<Value> {
                 "restart" => cmd_restart(&paths),
                 "status" => cmd_status(&paths),
                 "enable" => autostart::enable(),
-                _ => autostart::disable(),
+                "disable" => autostart::disable(),
+                _ => cmd_setup_shower(&paths),
             }
         }
         "pair" => {
@@ -252,26 +269,71 @@ fn read_secret_input(env_name: &str, what: &str) -> AppResult<String> {
 
 // ------------------------------------------------------------------ service control
 
+/// Contract-restricted platform tag; the launcher ships on Windows/Linux only.
+fn platform_tag() -> &'static str {
+    if cfg!(windows) {
+        "windows"
+    } else {
+        "linux"
+    }
+}
+
+/// Authenticated probe of the real Host: GET /v1/service with the local control
+/// token, short timeout, no proxy/env redirects. A merely listening port or an
+/// unauthenticated endpoint never counts as ready; the token never leaves here.
+fn probe_ready(control_url: &str, token: &str) -> bool {
+    let url = format!("{control_url}/v1/service");
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_millis(500))
+        .timeout(READY_PROBE_TIMEOUT)
+        .redirects(0)
+        .build()
+        .get(&url)
+        .set("authorization", &format!("Bearer {token}"))
+        .call()
+        .is_ok()
+}
+
 fn cmd_status(paths: &HostPaths) -> AppResult<Value> {
     let (config, config_error) = match config::read_config(paths) {
         Ok(config) => (config, None),
         Err(e) => (None, Some(e)),
     };
+    let secrets = config::read_secrets(paths).ok().flatten();
     let configured = config.is_some() && config::load(paths).is_ok();
     let running = process::lock_held(paths);
     let launcher = if running { supervisor::read_status(paths) } else { None };
+    let ready = match (config.as_ref(), secrets.as_ref()) {
+        (Some(config), Some(secrets)) => secrets
+            .get(CONTROL_TOKEN_KEY)
+            .map(|token| probe_ready(&config.control_url(), token))
+            .unwrap_or(false),
+        _ => false,
+    };
+    let autostart = autostart::status();
     let mut value = json!({
         "configured": configured,
         "running": running,
+        "ready": ready,
+        "platform": platform_tag(),
         "pid": launcher.as_ref().map(|s| s.pid),
         "hostPid": launcher.as_ref().and_then(|s| s.host_pid),
         "controlUrl": config.as_ref().map(Config::control_url),
         "centerUrl": config.as_ref().map(|c| c.center_url.clone()),
         "deviceId": config.as_ref().map(|c| c.device_id.clone()),
         "displayName": config.as_ref().map(|c| c.display_name.clone()),
-        "autostart": autostart::is_enabled(),
+        "autostart": autostart
+            .as_ref()
+            .ok()
+            .and_then(|s| s.get("autostart"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "autostartScope": "user-login",
         "logFile": paths.log.display().to_string(),
     });
+    if let Err(error) = autostart {
+        value["autostartError"] = error.to_json()["error"].clone();
+    }
     if let Some(error) = config_error {
         value["configError"] = error.to_json()["error"].clone();
     }
@@ -293,14 +355,24 @@ fn cmd_start(paths: &HostPaths) -> AppResult<Value> {
         process::systemctl_checked(&["start", process::SYSTEMD_UNIT], "START_FAILED")?;
     } else {
         process::remove_file_quiet(&paths.stop_request);
-        process::spawn_detached_run(&paths::exe_path()?, &paths.home)?;
+        #[cfg(windows)]
+        {
+            // Start goes through the protected scheduled task only; a missing
+            // helper or unprotected install is an explicit error, never a
+            // normal-privilege spawn fallback.
+            autostart::host_task("start", autostart::HOST_TASK_START_TIMEOUT)?;
+        }
+        #[cfg(not(windows))]
+        {
+            process::spawn_detached_run(&paths::exe_path()?, &paths.home)?;
+        }
     }
     if process::wait_until(START_TIMEOUT, || process::lock_held(paths)) {
         Ok(json!({ "status": "started" }))
     } else {
         Err(AppError::new(
             "START_TIMEOUT",
-            format!("launcher did not start within 5s; see {}", paths.log.display()),
+            format!("launcher did not start within 10s; see {}", paths.log.display()),
         ))
     }
 }
@@ -342,6 +414,73 @@ fn cmd_restart(paths: &HostPaths) -> AppResult<Value> {
     cmd_start(paths)
 }
 
+/// setup-shower (Windows): stop the Host, run the interactive native credential
+/// onboarding (shower-windows.exe shower-setup) within the 300s total budget,
+/// then restart the Host when it was running. The original setup error is kept
+/// even when the restart afterwards also fails.
+fn cmd_setup_shower(paths: &HostPaths) -> AppResult<Value> {
+    if !cfg!(windows) {
+        return Err(AppError::new("SETUP_UNAVAILABLE", "setup-shower is only supported on Windows"));
+    }
+    let deadline = Instant::now() + SETUP_SHOWER_TIMEOUT;
+    // Works before the first pairing too: without config.json the state dir
+    // falls back to the default data dir, matching <dataRoot>/shower-windows
+    // from host-core/shower-windows.js once paired.
+    let state_dir = match config::read_config(paths)? {
+        Some(config) => std::path::Path::new(&config.data_root).join("shower-windows"),
+        None => paths.data.join("shower-windows"),
+    };
+    let shower = paths::locate_runtime()?.shower.ok_or_else(|| {
+        AppError::new("RUNTIME_MISSING", "protected shower-windows.exe setup helper is not installed")
+    })?;
+    let was_running = process::lock_held(paths);
+    if was_running {
+        cmd_stop(paths)?;
+    }
+    // Reserve the restart slice inside the 300s total so a slow helper cannot
+    // consume the whole budget before the Host is started again.
+    let remaining = deadline
+        .saturating_duration_since(Instant::now())
+        .saturating_sub(if was_running { RESTART_RESERVE } else { Duration::ZERO })
+        .min(SETUP_HELPER_TIMEOUT);
+    let result = if remaining.is_zero() {
+        Err(AppError::new("SETUP_TIMEOUT", "setup-shower timed out before the native helper started"))
+    } else {
+        let mut cmd = process::command(&shower);
+        cmd.arg("shower-setup").arg("--state-dir").arg(&state_dir);
+        process::run_json_command(cmd, remaining, "SETUP_FAILED")
+    };
+    let mut restart_error = None;
+    if was_running {
+        if let Err(e) = cmd_start(paths) {
+            restart_error = Some(format!("{}: {}", e.code, e.message));
+        }
+    }
+    match result {
+        Ok(mut value) => {
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("restarted".to_string(), Value::Bool(was_running && restart_error.is_none()));
+                if let Some(warning) = restart_error {
+                    if let Some(list) = obj
+                        .entry("warnings".to_string())
+                        .or_insert_with(|| json!([]))
+                        .as_array_mut()
+                    {
+                        list.push(Value::String(warning));
+                    }
+                }
+            }
+            Ok(value)
+        }
+        Err(mut error) => {
+            if let Some(warning) = restart_error {
+                error.message = format!("{}; host restart afterwards failed: {}", error.message, warning);
+            }
+            Err(error)
+        }
+    }
+}
+
 // ------------------------------------------------------------------ pairing
 
 /// Writes secrets first and config last, so `configured` only flips once both exist.
@@ -353,6 +492,35 @@ fn write_pairing(paths: &HostPaths, config: &Config, relay_token: &str, control_
     let _ = std::fs::create_dir_all(&paths.logs);
     config::write_secrets(paths, &secrets)?;
     config::write_config(paths, config)
+}
+
+/// The local Host store's own deviceId via the bundled Node +
+/// host-core/cli.js init — Node always answers with this ID, so it is the only
+/// one the center may register. init opens (and on first use creates) the
+/// store; it never starts the Agent.
+fn host_identity(runtime: &paths::Runtime, data_root: &str) -> AppResult<String> {
+    let cli = runtime
+        .cli
+        .parent()
+        .map(|dir| dir.join("cli.js"))
+        .filter(|p| p.is_file())
+        .ok_or_else(|| AppError::new("RUNTIME_MISSING", "bundled host-core/cli.js not found"))?;
+    let mut cmd = process::command(&runtime.node);
+    cmd.arg(&cli).arg("init").arg("--data-root").arg(data_root);
+    let out = process::run_json_command(cmd, IDENTITY_TIMEOUT, "IDENTITY_FAILED")?;
+    out.get("deviceId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| AppError::new("IDENTITY_FAILED", "host identity init returned no deviceId"))
+}
+
+/// Effective Host data root: explicit --data-root, else the previous config's,
+/// else the default under HOST_HOME.
+fn effective_data_root(flag: Option<String>, previous: Option<&Config>, paths: &HostPaths) -> String {
+    flag.or_else(|| previous.map(|c| c.data_root.clone()))
+        .unwrap_or_else(|| paths.data.display().to_string())
 }
 
 fn cmd_pair(paths: &HostPaths, flags: &Flags) -> AppResult<Value> {
@@ -367,14 +535,33 @@ fn cmd_pair(paths: &HostPaths, flags: &Flags) -> AppResult<Value> {
     let previous = config::read_config(paths).ok().flatten();
     let display_name = name.unwrap_or_else(default_display_name);
     let password = read_secret_input("E_LAUNCHER_OWNER_PASSWORD", "owner password")?;
+    let data_root = effective_data_root(data_root, previous.as_ref(), paths);
+    let runtime = paths::locate_runtime()?;
+    let device_id = host_identity(&runtime, &data_root)?;
 
     let mut client = center::CenterClient::new(&center_url, ca_file.as_deref().map(std::path::Path::new))?;
-    let registered = client.register_device(&password, &display_name, center::platform())?;
+    let registered = client.register_device(
+        &password,
+        &display_name,
+        center::platform(),
+        &device_id,
+        flags.has("force"),
+    )?;
     drop(password);
+    if registered.device_id != device_id {
+        return Err(AppError::new(
+            "CENTER_ERROR",
+            "POST /api/devices returned a deviceId different from the local Host identity",
+        ));
+    }
 
+    // Registration + persistence only: enable/start/wait-ready are separate UI
+    // steps (each with its own budget) so a slow helper cannot strand pairing.
     let mut warnings: Vec<String> = Vec::new();
+    let mut stop_failed = false;
     if process::lock_held(paths) {
         if let Err(e) = cmd_stop(paths) {
+            stop_failed = true;
             warnings.push(format!("{}: {}", e.code, e.message));
         }
     }
@@ -383,41 +570,36 @@ fn cmd_pair(paths: &HostPaths, flags: &Flags) -> AppResult<Value> {
         center_url: center_url.clone(),
         device_id: registered.device_id.clone(),
         display_name: registered.display_name.clone(),
-        data_root: data_root
-            .or_else(|| previous.as_ref().map(|c| c.data_root.clone()))
-            .unwrap_or_else(|| paths.data.display().to_string()),
+        data_root,
         port: port.or_else(|| previous.as_ref().map(|c| c.port)).unwrap_or(DEFAULT_PORT),
         center_ca_file: ca_file,
         env: previous.map(|c| c.env).unwrap_or_default(),
     };
-    write_pairing(paths, &config, &registered.device_token, &random_token()?)?;
+    let control_token = random_token()?;
+    write_pairing(paths, &config, &registered.device_token, &control_token)?;
 
+    // Report the real current state; nothing was enabled or started here.
+    // A failed stop leaves the OLD process serving the previous config, so the
+    // UI must call restart (not start, which would no-op on the live process).
+    let running = process::lock_held(paths);
+    let ready = running && probe_ready(&config.control_url(), &control_token);
     let mut result = json!({
+        "configured": true,
         "deviceId": registered.device_id,
         "deviceToken": registered.device_token,
         "centerUrl": center_url,
         "displayName": config.display_name,
         "controlUrl": config.control_url(),
+        "running": running,
+        "ready": ready,
+        "restartRequired": stop_failed && running,
     });
-    match autostart::enable() {
-        Ok(detail) => {
-            result["autostart"] = json!(true);
-            if let Some(linger) = detail.get("linger") {
-                result["linger"] = linger.clone();
-            }
-            if let Some(message) = detail.get("message").and_then(Value::as_str) {
-                warnings.push(message.to_string());
-            }
+    match autostart::status() {
+        Ok(status) => {
+            result["autostart"] = json!(status.get("autostart").and_then(Value::as_bool).unwrap_or(false));
         }
         Err(e) => {
             result["autostart"] = json!(false);
-            warnings.push(format!("{}: {}", e.code, e.message));
-        }
-    }
-    match cmd_start(paths) {
-        Ok(_) => result["running"] = json!(true),
-        Err(e) => {
-            result["running"] = json!(false);
             warnings.push(format!("{}: {}", e.code, e.message));
         }
     }
@@ -454,6 +636,19 @@ fn cmd_adopt(paths: &HostPaths, flags: &Flags) -> AppResult<Value> {
         None => random_token()?,
     };
     let previous = config::read_config(paths).ok().flatten();
+    let data_root = effective_data_root(data_root, previous.as_ref(), paths);
+    // Manual adopt must target the ID the local Host store actually presents;
+    // anything else would write a config Node can never authenticate with.
+    let runtime = paths::locate_runtime()?;
+    let identity = host_identity(&runtime, &data_root)?;
+    if identity != device_id {
+        return Err(AppError::new(
+            "DEVICE_ID_MISMATCH",
+            format!(
+                "--device-id {device_id} does not match the local Host identity {identity}; adopting an existing device requires a matching Host store"
+            ),
+        ));
+    }
     let config = Config {
         version: CONFIG_VERSION,
         center_url: center_url.clone(),
@@ -461,9 +656,7 @@ fn cmd_adopt(paths: &HostPaths, flags: &Flags) -> AppResult<Value> {
         display_name: name
             .or_else(|| previous.as_ref().map(|c| c.display_name.clone()))
             .unwrap_or_else(default_display_name),
-        data_root: data_root
-            .or_else(|| previous.as_ref().map(|c| c.data_root.clone()))
-            .unwrap_or_else(|| paths.data.display().to_string()),
+        data_root,
         port: port.or_else(|| previous.as_ref().map(|c| c.port)).unwrap_or(DEFAULT_PORT),
         center_ca_file: ca_file,
         env: previous.map(|c| c.env).unwrap_or_default(),
@@ -485,8 +678,15 @@ fn cmd_adopt(paths: &HostPaths, flags: &Flags) -> AppResult<Value> {
         "restarted": false,
     });
     if was_running {
-        cmd_start(paths)?;
-        result["restarted"] = json!(true);
+        // A failed restart must not lose the already-persisted adoption: the
+        // caller can retry via start/enable once the task helper is present.
+        match cmd_start(paths) {
+            Ok(_) => result["restarted"] = json!(true),
+            Err(e) => {
+                result["restarted"] = json!(false);
+                result["warnings"] = json!([format!("{}: {}", e.code, e.message)]);
+            }
+        }
     }
     Ok(result)
 }
