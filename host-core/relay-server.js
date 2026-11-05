@@ -97,6 +97,7 @@ export async function openRelayServer(options = {}) {
   const port = options.port === undefined ? DEFAULT_PORT : options.port;
   const listenHost = options.listenHost === undefined ? DEFAULT_LISTEN_HOST : options.listenHost;
   const tls = options.tls;
+  const onHostDisconnect = typeof options.onHostDisconnect === 'function' ? options.onHostDisconnect : null;
 
   // All validation happens before any registry data / sockets are created.
   if (typeof dataRoot !== 'string' || dataRoot.trim() === '' || !isAbsolute(dataRoot)) {
@@ -165,10 +166,22 @@ export async function openRelayServer(options = {}) {
   const liveRoutes = openLiveRoutes(); // bounded live-observation correlation
   let closed = false;
 
+  // Report once when the registered host conn leaves deviceMap so the center can cancel its learning jobs.
+  function notifyHostDisconnect(conn) {
+    if (onHostDisconnect === null || conn.disconnectNotified || conn.deviceId === null) return;
+    conn.disconnectNotified = true;
+    try {
+      onHostDisconnect(conn.deviceId);
+    } catch {
+      /* callback must not break relay routing/teardown */
+    }
+  }
+
   function connCleanup(conn) {
     clearTimeout(conn.helloTimer);
     if (conn.deviceId !== null && deviceMap.get(conn.deviceId) === conn) {
       deviceMap.delete(conn.deviceId);
+      if (!closed) notifyHostDisconnect(conn);
     }
     // A leaving client abandons its pending calls and live watches (best-effort
     // host cancel); a leaving host fails its pending calls and live watches.
@@ -784,6 +797,8 @@ export async function openRelayServer(options = {}) {
         if (previous) {
           previous.replaced = true;
           closeWith(previous, RELAY_CLOSE.REPLACED);
+          // connCleanup cannot see the replaced host leave once the map points to the new conn.
+          notifyHostDisconnect(previous);
         }
       }
       const ready = {
@@ -918,7 +933,8 @@ export async function openRelayServer(options = {}) {
       helloTimer: null,
       alive: true,
       dead: false,
-      replaced: false
+      replaced: false,
+      disconnectNotified: false
     };
     allConns.add(conn);
 

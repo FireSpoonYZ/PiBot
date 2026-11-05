@@ -60,6 +60,10 @@ const HOST_RUNTIME_DIR = path.join(DESKTOP_BUILD, 'host-runtime');
 const HOST_RUNTIME_DEPS_DIR = path.join(CACHE_DIR, 'host-runtime-deps');
 const HOST_RUNTIME_LAYOUT_VERSION = 1;
 const HOST_CORE_RUNTIME_SUBDIRS = ['capabilities', 'managed-install', 'plugins', 'third-party'];
+// Builtin skill resources are runtime data the host loads at request time, so
+// they stage under their own extension list (docs only, no code).
+const HOST_CORE_BUILTIN_SKILLS_DIR = 'builtin-skills';
+const BUILTIN_SKILLS_SOURCE_EXTENSIONS = ['.md'];
 // Build/dev-only top-level host-core modules that the Host never loads.
 const HOST_CORE_RUNTIME_EXCLUDED = new Set(['desktop-tauri.js', 'package-lock.json', 'prepare-android-tools.js']);
 const HOST_RUNTIME_SOURCE_EXTENSIONS = ['.js', '.mjs', '.cjs', '.json'];
@@ -1004,11 +1008,11 @@ function isInsideDir(parent, child) {
   return rel !== '' && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
 }
 
-function hasRuntimeSourceExtension(name) {
-  return HOST_RUNTIME_SOURCE_EXTENSIONS.some((ext) => name.endsWith(ext)) && !/\.(?:test|spec)\.[cm]?js$/.test(name);
+function hasRuntimeSourceExtension(name, extensions = HOST_RUNTIME_SOURCE_EXTENSIONS) {
+  return extensions.some((ext) => name.endsWith(ext)) && !/\.(?:test|spec)\.[cm]?js$/.test(name);
 }
 
-function listRuntimeSourceTree(dir, out) {
+function listRuntimeSourceTree(dir, out, extensions = HOST_RUNTIME_SOURCE_EXTENSIONS) {
   for (const entry of readdirSync(dir).sort()) {
     if (entry.startsWith('.') || entry === 'node_modules' || entry === 'test' || entry === 'tests' || entry === '__tests__') {
       continue;
@@ -1019,8 +1023,8 @@ function listRuntimeSourceTree(dir, out) {
       throw fail(`host runtime source must not be a symbolic link: ${toPosixPath(path.relative(ROOT, full))}`);
     }
     if (st.isDirectory()) {
-      listRuntimeSourceTree(full, out);
-    } else if (st.isFile() && hasRuntimeSourceExtension(entry)) {
+      listRuntimeSourceTree(full, out, extensions);
+    } else if (st.isFile() && hasRuntimeSourceExtension(entry, extensions)) {
       out.push(full);
     }
   }
@@ -1048,6 +1052,14 @@ function collectHostRuntimeSources() {
       throw fail(`host-core/${sub}/ is missing; cannot stage the bundled Host runtime`);
     }
     listRuntimeSourceTree(dir, roots);
+  }
+  {
+    const dir = path.join(HERE, HOST_CORE_BUILTIN_SKILLS_DIR);
+    const st = lstatSync(dir, { throwIfNoEntry: false });
+    if (!st || !st.isDirectory() || st.isSymbolicLink()) {
+      throw fail(`host-core/${HOST_CORE_BUILTIN_SKILLS_DIR}/ is missing; cannot stage the bundled Host runtime`);
+    }
+    listRuntimeSourceTree(dir, roots, BUILTIN_SKILLS_SOURCE_EXTENSIONS);
   }
   for (const required of ['host-service-cli.js', 'package.json']) {
     if (!roots.includes(path.join(HERE, required))) {

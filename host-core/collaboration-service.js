@@ -180,7 +180,7 @@ export function createCollaborationService({
     return useClient((active) => active.call(deviceId, 'getBotSoul', { botId }, { signal }));
   }
 
-  async function setBotSoul({ deviceId, botId, text, expectedRevision, signal }) {
+  async function setBotSoul({ deviceId, botId, text, expectedRevision, self = false, signal }) {
     let revision = expectedRevision;
     if (revision === undefined) {
       const current = await getBotSoul({ deviceId, botId, signal });
@@ -189,7 +189,7 @@ export function createCollaborationService({
     const input = { expectedRevision: revision, text };
     if (deviceId === host.deviceId) {
       const localRuntime = getLocalRuntime?.();
-      return localRuntime ? localRuntime.setBotSoul(botId, input) : host.setBotSoul(botId, input);
+      return localRuntime ? localRuntime.setBotSoul(botId, { ...input, self }) : host.setBotSoul(botId, input);
     }
     return useClient((active) => active.call(deviceId, 'setBotSoul', { botId, input }, { signal }));
   }
@@ -329,6 +329,31 @@ export function createCollaborationService({
     return { deviceId, botId, installationId, ...updated };
   }
 
+  // Center-managed per-Bot services: identical for local and remote targets,
+  // because the authoritative skill draft / installation state lives at Center.
+  async function manageBotSkill({ deviceId, botId, input, signal }) {
+    return requireCenterClient().botSkill(deviceId, botId, input, signal);
+  }
+
+  async function manageBotInstallation({ deviceId, botId, input, signal }) {
+    return requireCenterClient().botInstallation(deviceId, botId, input, signal);
+  }
+
+  // Learning is Host-driven: the target device owns the model/tool loop, so
+  // learn/review/curate can only start where that Bot actually runs. Remote
+  // targets go through the existing control-call routing; a peer without the
+  // method fails INVALID_ARGUMENT instead of leaving a stranded job.
+  async function manageBotLearning({ deviceId, botId, input, signal }) {
+    if (deviceId === host.deviceId) {
+      const localRuntime = requireLocalRuntime();
+      if (typeof localRuntime.manageBotLearning !== 'function') {
+        throw serviceError('INVALID_STATE', 'local runtime does not support Bot learning');
+      }
+      return localRuntime.manageBotLearning(botId, input);
+    }
+    return useClient((active) => active.call(deviceId, 'manageBotLearning', { botId, input }, { signal }));
+  }
+
   async function putBotFileChunk({ deviceId, botId, input, signal }) {
     if (deviceId === host.deviceId) return requireLocalRuntime().putBotFileChunk(botId, input);
     return useClient((active) => active.call(deviceId, 'putBotFileChunk', { botId, ...input }, { signal }));
@@ -396,6 +421,9 @@ export function createCollaborationService({
     setBotModel,
     getBotCapabilities,
     setBotCapability,
+    manageBotSkill,
+    manageBotInstallation,
+    manageBotLearning,
     putBotFileChunk,
     getCurrentDevice,
     close,

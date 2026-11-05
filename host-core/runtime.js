@@ -34,6 +34,9 @@ import { WorkDecisionState } from './work-decision-state.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { createTurnAdmission } from './runtime-turns.js';
 import { createBotSessionRuntime } from './runtime-bot-session.js';
+import { createBotLearning } from './bot-learning.js';
+import { createBotManagementSkillSection } from './bot-management-skill.js';
+import { SOUL_MAX_BYTES } from './bot-soul.js';
 import { normalizeUserMessage } from './scope-protocol.js';
 import { createCommunicationTools } from './communication-tools.js';
 import { createCollaborationService } from './collaboration-service.js';
@@ -285,6 +288,22 @@ export async function openRuntime(options) {
       throw new AggregateError(failures.map((result) => result.reason), 'bot env cleanup failed');
     }
   };
+  // Drop the cached env of exactly one conversation (used when a learning
+  // review conversation finishes); unlike dropBotEnvs it never touches the plugin lane.
+  const dropEnvFor = async (nativeId) => {
+    const prefix = String(nativeId) + '\u0000';
+    const dropped = [];
+    for (const [key, env] of [...envCache]) {
+      if (!key.startsWith(prefix)) continue;
+      envCache.delete(key);
+      dropped.push(env);
+    }
+    const results = await Promise.allSettled(dropped.map((env) => env.cleanup(CTX)));
+    const failures = results.filter((result) => result.status === 'rejected');
+    if (failures.length > 0) {
+      throw new AggregateError(failures.map((result) => result.reason), 'conversation env cleanup failed');
+    }
+  };
   const cleanupEnvs = async () => {
     const envs = [...envCache.values()];
     envCache.clear();
@@ -392,6 +411,13 @@ export async function openRuntime(options) {
       schedules,
       collaboration,
     }),
+  }));
+  // 内置 Bot 管理技能目录：只渲染名称/描述索引，
+  // 完整 SKILL.md 由模型按目录经文件工具读取，不把整本手册塞进系统提示。
+  const botManagementSection = createBotManagementSkillSection();
+  registry.install(defineExtension({
+    name: 'host.bot-management-skill',
+    sections: Array.isArray(botManagementSection) ? botManagementSection : [botManagementSection],
   }));
   // 原生桥接工具仅显式注入时注册：主会话与 work 身份共享同一 registry，二者均可见。
   if (nativeBridge) {
@@ -613,11 +639,13 @@ export async function openRuntime(options) {
     releaseOwner,
     cleanupEnvs,
     dropBotEnvs,
+    dropEnvFor,
     live,
     workContexts,
     decisions,
     sessions,
     plugins,
+    registry,
     coreExtensions,
     codemodeExtension,
     finalBudgetExtension,
@@ -686,7 +714,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, live, workContexts, decisions, sessions, plugins, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower, schedules }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower, schedules }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -706,6 +734,67 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   };
   // 同一 Bot 的发送/设置/显式同步串行；内侧复用 raw 实现，避免自持同一 lane。
   const admitBot = botAdmissions.admit;
+  // Hermes 学习驱动（Host learning contract）：自动完结上报、next→agent.run→respond
+  // 驱动与受限 review 工具面；配置/计数/作业持久化全在 Center learning 服务，
+  // 本实例不持久化任何学习状态，驱动失败如实回执，绝不伪造完成。
+  const learning = createBotLearning({
+    host,
+    getHarness: () => harness,
+    models,
+    getBotModels,
+    getCenterClient: () => centerRuntime.getClient(),
+    plugins,
+    registry,
+    context: CTX,
+    openPrimaryConversation: (bot) => getPrimaryConversation(harness, bot, {}, CTX),
+    dropEnvFor,
+    isBotIdle: (bot) => botIsIdle(bot),
+  });
+  // 自编辑 SOUL 排队：Bot 在自己的活动轮里调 set_bot_soul（协作/管理工具显式
+  // self:true）不能轮中改写人格——先校验输入，再排队到空闲边界；apply 仍走
+  // host.setBotSoul 的 CAS，queued 回执只表示已受理排队，绝不伪装已应用。
+  // shortcut: 进程内存队列，重启即丢；丢失后下一次 get_bot_soul 读到真实文档，
+  // 不会误以为已写入。若要跨重启保留需落盘，属后续增强。
+  const selfSoulQueue = new Map();
+  const SELF_SOUL_REVISION_RE = /^[0-9a-f]{64}$/;
+  function assertQueuedSoulInput(input) {
+    if (typeof input?.expectedRevision !== 'string' || !SELF_SOUL_REVISION_RE.test(input.expectedRevision)) {
+      throw errWithCode('expectedRevision must be a SHA-256 hex digest', 'INVALID_ARGUMENT');
+    }
+    if (typeof input.text !== 'string' || !input.text.isWellFormed()) {
+      throw errWithCode('text must be a well-formed UTF-16 string', 'INVALID_ARGUMENT');
+    }
+    if (Buffer.byteLength(input.text, 'utf8') > SOUL_MAX_BYTES) {
+      throw errWithCode('text exceeds the 64 KiB SOUL limit', 'INVALID_ARGUMENT');
+    }
+  }
+  // 空闲边界应用排队的自编辑：仍在 admitBot lane 内复查空闲——后到的自编辑覆盖
+  // 先排队的（各自 CAS 仍独立校验）；CAS/参数/归属失败立即丢弃，其余错误保留待
+  // 下一个空闲边界重试；lane 暂停/关闭时保留排队，恢复后再应用。
+  function drainSelfSoul(botId) {
+    if (!selfSoulQueue.has(botId) || closing) return;
+    void admitBot(botId, async () => {
+      const pending = selfSoulQueue.get(botId);
+      if (!pending) return;
+      const bot = host.getBot(botId);
+      if (!bot) {
+        selfSoulQueue.delete(botId);
+        return;
+      }
+      if (!(await botIsIdle(bot))) return;
+      if (selfSoulQueue.get(botId) !== pending) return;
+      try {
+        const soul = host.setBotSoul(botId, pending);
+        if (selfSoulQueue.get(botId) === pending) selfSoulQueue.delete(botId);
+        await refreshBotProfiles(bot);
+        return soul;
+      } catch (err) {
+        if (err?.code === 'REQUEST_CONFLICT' || err?.code === 'INVALID_ARGUMENT' || err?.code === 'BOT_NOT_FOUND') {
+          if (selfSoulQueue.get(botId) === pending) selfSoulQueue.delete(botId);
+        }
+      }
+    }).catch(() => { /* lane 关闭/暂停：保留排队 */ });
+  }
   // 本运行时已初始化过人格/工具的 Bot；新 Bot 经 initializeBot 增量加入。
   const initializedBots = new Set();
 
@@ -772,6 +861,10 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     } catch {
       /* ignore activity update error if bot was deleted or store closed */
     }
+    // Bot 完结是安全空闲边界：先结算排队的自编辑 SOUL，再上报学习增量——
+    // 两者都是 fire-and-forget，绝不阻塞前台回复或占用 Bot 准入。
+    drainSelfSoul(botId);
+    learning.noteCompletedSubmission(botId, formatted);
   }
 
   function checkTrackedSubmissions() {
@@ -806,6 +899,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
                 }
               } else if (statusRecord.status === 'unanswered') {
                 trackedSubmissions.delete(submissionId);
+                drainSelfSoul(info.botId);
                 turns.pump(info.botId);
               }
             } catch {
@@ -862,6 +956,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       const errors = [];
       try { turns.close(); } catch (err) { errors.push(err); }
       try { await decisions.close(); } catch (err) { errors.push(err); }
+      // 学习驱动在 harness/store 释放前停止：取消在驱动作业与受限会话执行。
+      try { await learning.close(); } catch (err) { errors.push(err); }
       // 已接纳 Bot 操作在 harness/store 释放前排空。
       try { await botClose; } catch (err) { errors.push(err); }
       if (submissionCheckPromise) {
@@ -999,6 +1095,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 取消确认成功才解除 gate 并置 stopped：失败保留 gate 与 stopping 可见状态，
       // 绝不伪装成功/偷偷放行旧工作（stopPending 留作崩溃恢复边界）。
       await turns.settleStop(botId);
+      drainSelfSoul(botId);
     } catch (err) {
       throw err;
     }
@@ -1185,6 +1282,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     const bot = host.getBot(botId);
     if (!bot || bot.isPrimary || !bot.archivedAt) return false;
     await assertBotIdle(bot);
+    await learning.cancelBot(botId);
+    selfSoulQueue.delete(botId);
     await schedules.deleteBot(bot);
     host.deleteBot({ botId });
     await attachmentStore.removeBot(botId);
@@ -1261,6 +1360,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       botAdmissions.suspend();
       plugins.suspend();
       plugins.abortActions();
+      learning.notifyOffline();
       return serial(async () => { await abortConversations(); await botAdmissions.drain(); await plugins.quiesce(); });
     }
     const generation = epoch;
@@ -1560,6 +1660,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       const bot = await requireBot(botId);
       if (bot.isPrimary) throw errWithCode('primary bot cannot be archived', 'PRIMARY_BOT_PROTECTED');
       await assertBotIdle(bot);
+      await learning.cancelBot(botId);
       await schedules.pauseBot(bot);
       const updated = host.archiveBot({ botId });
       if (onBotsSync) await onBotsSync();
@@ -1579,6 +1680,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       const bot = await requireBot(botId);
       if (bot.isPrimary) throw errWithCode('primary bot cannot be deleted', 'PRIMARY_BOT_PROTECTED');
       await assertBotIdle(bot);
+      await learning.cancelBot(botId);
+      selfSoulQueue.delete(botId);
       await schedules.deleteBot(bot);
       const res = host.deleteBot({ botId });
       await attachmentStore.removeBot(botId);
@@ -1609,10 +1712,23 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
     setBotSoul: (botId, input) => admitBot(botId, async () => {
       const bot = await requireBot(botId);
-      await assertBotIdle(bot);
+      try {
+        await assertBotIdle(bot);
+      } catch (err) {
+        // 自编辑（协作/管理工具显式 input.self=true）：Bot 自身忙时排队到空闲
+        // 边界；用户写入保持原有 RUNTIME_BUSY 语义，绝不轮中改写人格。
+        if (err?.code === 'RUNTIME_BUSY' && input?.self === true) {
+          assertQueuedSoulInput(input);
+          selfSoulQueue.set(botId, { expectedRevision: input.expectedRevision, text: input.text });
+          return { ...host.getBotSoul(botId), status: 'queued' };
+        }
+        throw err;
+      }
+      // 非自编辑的直达写覆盖任何排队中的自编辑（用户写优先于排队项）。
+      if (input?.self !== true) selfSoulQueue.delete(botId);
       const soul = host.setBotSoul(botId, input);
       await refreshBotProfiles(bot);
-      return soul;
+      return { ...soul, status: 'applied' };
     }),
 
     // 附件：先落盘再引用。上传幂等（内容定址），getAttachment 只回该 Bot 归属的图。
@@ -1835,6 +1951,10 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     getMemorySource: (botId, input) => plugins.actionByName(botId, 'getMemorySource', input),
     correctMemory: (botId, input) => plugins.actionByName(botId, 'correctMemory', input),
     retryMemory: (botId, input) => plugins.actionByName(botId, 'retryMemory', input),
+
+    // Bot 学习管理：status/configure/cancel 直转 Center；learn/review/curate
+    // start 后挂 next→agent.run→respond 驱动并回诚实作业回执。
+    manageBotLearning: (botId, input) => learning.manageBotLearning(botId, input),
 
     getWorkContext: workContexts.getWorkContext,
     // 显式同步与发送/设置同队列：决策内部走 raw workContexts.syncWorkContext（已在 Bot 准入内），不会递归取 lane。

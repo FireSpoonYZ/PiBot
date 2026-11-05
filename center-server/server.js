@@ -13,19 +13,25 @@ import { openHostBridge } from './host-bridge.js';
 import { openCenterExecution } from './execution.js';
 import { openTurnAdmission } from './turns.js';
 import { openMcpOAuth } from './oauth/index.js';
+import { openSkillManager } from './skills/index.js';
+import { runHermes } from './hermes/index.js';
+import { openLearningService } from './learning/index.js';
+import { openBotManagement } from './bot-management.js';
 
 const require = createRequire(import.meta.url);
-const status = { INVALID_ARGUMENT: 400, INVALID_CWD: 400, UNSUPPORTED_TARGET: 400, VALIDATION_FAILED: 400, UNAUTHENTICATED: 401, FORBIDDEN: 403, CSRF_INVALID: 403, NOT_FOUND: 404, BOT_NOT_FOUND: 404, REVISION_CONFLICT: 409, REQUEST_CONFLICT: 409, TURN_SET_CHANGED: 409, TURN_SYNC_FAILED: 409, TURN_RECOVERY_REQUIRED: 403, INVALID_STATE: 409, PRIMARY_BOT_PROTECTED: 409, BOT_ARCHIVED: 409, PAYLOAD_TOO_LARGE: 413, RATE_LIMITED: 429, CENTER_OFFLINE: 503, DEVICE_OFFLINE: 503 };
+const status = { INVALID_ARGUMENT: 400, INVALID_CWD: 400, UNSUPPORTED_TARGET: 400, VALIDATION_FAILED: 400, UNAUTHENTICATED: 401, FORBIDDEN: 403, CSRF_INVALID: 403, NOT_FOUND: 404, BOT_NOT_FOUND: 404, REVISION_CONFLICT: 409, REQUEST_CONFLICT: 409, TURN_SET_CHANGED: 409, TURN_SYNC_FAILED: 409, TURN_RECOVERY_REQUIRED: 403, INVALID_STATE: 409, PRIMARY_BOT_PROTECTED: 409, BOT_ARCHIVED: 409, PAYLOAD_TOO_LARGE: 413, RATE_LIMITED: 429, PACKAGE_NOT_READY: 409, CALL_TIMEOUT: 504, TIMEOUT: 504, HERMES_ERROR: 502, CENTER_OFFLINE: 503, DEVICE_OFFLINE: 503 };
 
 export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ownerPasswordHash, https, listenHost = '127.0.0.1', port = 8443, relay: relayOptions, webRoot, npmPath, publicUrl }) {
   if (!relayOptions?.tls?.cert || !relayOptions?.tls?.key || !https?.cert || !https?.key || !publicUrl || new URL(publicUrl).protocol !== 'https:' || new URL(relayOptions.linkUrl).protocol !== 'wss:') throw new Error('HTTPS and TLS relay are required');
   if (!(encryptionKey instanceof Uint8Array) || !(sessionKey instanceof Uint8Array) || encryptionKey.byteLength !== 32 || sessionKey.byteLength !== 32 || Buffer.from(encryptionKey).equals(Buffer.from(sessionKey))) throw new Error('Independent encryption and session keys are required');
-  let store, relay, bridge, packages, execution, oauth, routes, app;
+  let store, relay, bridge, packages, execution, oauth, routes, app, skills, learning, botManagement;
   let closing;
   async function close() {
     if (!closing) closing = (async () => {
       const errors = [];
-      for (const fn of [() => routes?.close(), () => app?.close(), () => packages?.close(), () => execution?.close(), () => oauth?.close(), () => bridge?.close(), () => relay?.close(), () => store?.close()]) {
+      // Skill/learning services close before the package manager and store
+      // they mutate through; there is nothing to close on botManagement.
+      for (const fn of [() => routes?.close(), () => app?.close(), () => learning?.close(), () => skills?.close(), () => packages?.close(), () => execution?.close(), () => oauth?.close(), () => bridge?.close(), () => relay?.close(), () => store?.close()]) {
         try { await fn(); } catch (error) { errors.push(error); }
       }
       if (errors.length) throw new AggregateError(errors, 'Center shutdown failed');
@@ -34,7 +40,8 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
   }
   try {
     store = openCenterStore({ dataRoot, encryptionKey });
-    relay = await openRelayServer({ dataRoot, listenHost: relayOptions.listenHost, port: relayOptions.port, tls: relayOptions.tls });
+    // Resolve learning lazily; closing keeps center shutdown on the interrupted path.
+    relay = await openRelayServer({ dataRoot, listenHost: relayOptions.listenHost, port: relayOptions.port, tls: relayOptions.tls, onHostDisconnect: (deviceId) => { if (!closing) learning?.cancelDevice(deviceId); } });
     bridge = openHostBridge({ dataRoot, store, relay, linkUrl: relayOptions.linkUrl, ca: [relayOptions.tls.cert, ...rootCertificates].join('\n') });
     oauth = openMcpOAuth({ store, publicUrl });
     execution = openCenterExecution({ store, packages: { getInstalled: id => packages.getInstalled(id) }, oauth });
@@ -57,7 +64,12 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
     await registerAuth(app, { sessionKey, ownerPasswordHash });
     await app.register(multipart, { limits: { files: 1, fileSize: 100 * 1024 * 1024, fields: 0 } });
     const turns = openTurnAdmission({ store, packages });
-    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl: relayOptions.linkUrl, turns });
+    // New services are constructed after packages (publish/mutation backend)
+    // and before routes; notify is delegated lazily until routes exists.
+    skills = await openSkillManager({ dataRoot, store, packages, notify: (deviceId) => routes?.notifyDevice?.(deviceId) });
+    learning = await openLearningService({ dataRoot, store, skills, runHermes });
+    botManagement = openBotManagement({ store, packages, notify: (deviceId) => routes?.notifyDevice?.(deviceId) });
+    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl: relayOptions.linkUrl, turns, skills, learning, botManagement });
     if (webRoot) {
       await app.register(fastifyStatic, { root: webRoot, prefix: '/' });
       app.setNotFoundHandler((req, reply) => {

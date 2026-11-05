@@ -684,6 +684,13 @@ export interface Runtime {
   getBotSoul(botId: string): Promise<BotSoul>;
   /** CAS on the file SHA-256; conflict rejects REQUEST_CONFLICT without overwriting. */
   setBotSoul(botId: string, input: BotSoulUpdate): Promise<BotSoul>;
+  /**
+   * Bot skill-learning management driven by this Host. status/configure are
+   * forwarded to the Center learning service; learn/review/curate start a job
+   * and schedule its driver, returning the honest job receipt (never a claim
+   * that the review already ran); cancel stops it.
+   */
+  manageBotLearning(botId: string, input: BotLearningInput): Promise<Record<string, unknown>>;
   scheduleTask(botId: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
   /* Unified Shower environment (host.shower): the same six methods on every platform. */
   getShowerStatus(target: ShowerTarget): Promise<ShowerSession>;
@@ -1111,6 +1118,7 @@ export interface ControlClient {
   getServiceStatus(options?: ControlClientCallOptions): Promise<HostServiceStatus>;
   getBotSoul(botId: string, options?: ControlClientCallOptions): Promise<BotSoul>;
   setBotSoul(botId: string, input: BotSoulUpdate, options?: ControlClientCallOptions): Promise<BotSoul>;
+  manageBotLearning(botId: string, input: BotLearningInput, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
   scheduleTask(botId: string, input: Record<string, unknown>, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
   getShowerStatus(target: ShowerTarget, options?: ControlClientCallOptions): Promise<ShowerSession>;
   createShowerSession(target: ShowerTarget, input?: ShowerCreateOptions, options?: ControlClientCallOptions): Promise<ShowerSession>;
@@ -1221,12 +1229,79 @@ export interface BotSoul {
   path: string;
   revision: string;
   text: string;
+  status?: 'queued' | 'applied';
 }
 
 /** CAS input for setBotSoul and PUT /v1/bots/:botId/soul; text is at most 64 KiB. */
 export interface BotSoulUpdate {
   expectedRevision: string;
   text: string;
+}
+
+/*
+ * Bot management surfaces shared by the manage_bot_skill/manage_bot_learning/
+ * manage_bot_installation tools, the collaboration service and the Center
+ * bot-scoped routes (POST .../bots/:botId/skills|learning|installations).
+ * Action-specific fields stay owned by each service; these inputs mirror the
+ * fixed wire shapes rather than arbitrary HTTP.
+ */
+export type BotSkillAction =
+  | 'list' | 'read' | 'create' | 'update' | 'delete' | 'archive' | 'restore'
+  | 'pin' | 'lock' | 'history' | 'rollback' | 'publish' | 'adopt';
+
+/** Center skill service input; mutations require expectedRevision (create uses null). */
+export interface BotSkillInput {
+  action: BotSkillAction;
+  skillId?: string;
+  name?: string;
+  category?: string;
+  skillName?: string;
+  newName?: string;
+  description?: string;
+  /** Map of relative file path to UTF-8 content for create/update. */
+  files?: Record<string, string | null>;
+  path?: string;
+  content?: string | null;
+  expectedRevision?: number | null;
+  pinned?: boolean;
+  locked?: boolean;
+  revision?: number;
+  installationId?: string;
+  requestId?: string;
+}
+
+export type BotLearningAction = 'status' | 'configure' | 'learn' | 'review' | 'curate' | 'cancel';
+
+/** Tool/runtime-level learning input; Host maps learn/review/curate to the Center start action. */
+export interface BotLearningInput {
+  action: BotLearningAction;
+  jobId?: string;
+  focus?: string;
+  snapshot?: Record<string, unknown>;
+  /** Learning settings applied with configure; fields are owned by the Center learning service. */
+  config?: Record<string, unknown>;
+  expectedRevision?: number;
+  requestId?: string;
+}
+
+export type BotInstallationAction =
+  | 'inspect' | 'install' | 'update' | 'rollback' | 'enable' | 'disable'
+  | 'uninstall' | 'operation' | 'deployments';
+
+/** Bot-scoped installation input; mutations are CAS/requestId-idempotent operations. */
+export interface BotInstallationInput {
+  action: BotInstallationAction;
+  installationId?: string;
+  operationId?: string;
+  kind?: 'plugin' | 'mcp' | 'skill';
+  /** {type:'npm',spec} | {type:'artifact',artifactRef} | {type:'http',url}; also the artifact update source. */
+  source?: Record<string, unknown>;
+  target?: 'host' | 'center';
+  displayName?: string;
+  targetVersion?: string;
+  /** Bot-scoped enable may only name the target Bot itself as validation identity. */
+  validationBot?: { deviceId: string; botId: string };
+  requestId?: string;
 }
 
 /** Canonical Host config `runtime.extensions`; legacy `runtime.hindsight` is still accepted. */
@@ -1769,6 +1844,7 @@ export interface OpenRelayServerOptions {
   port?: number;
   listenHost?: string;
   tls?: { cert: string; key: string };
+  onHostDisconnect?: (deviceId: string) => void;
 }
 
 export interface RelayServer {

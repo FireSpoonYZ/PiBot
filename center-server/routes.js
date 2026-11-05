@@ -109,7 +109,7 @@ function assertConfigCredentials(schema, value) {
 }
 
 
-export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns }) {
+export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement }) {
   const streams = new Map();
   function notify(deviceId) {
     for (const stream of streams.get(deviceId) || []) {
@@ -366,6 +366,22 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   }
   route('GET', '/api/installations/:id/deployments', req => store.listDeploymentReceipts(req.params.id));
   route('GET', '/api/operations/:id', req => required(store.getOperation(req.params.id), 'Operation'));
+  // Bot-scoped management: same services as the paired-device routes below,
+  // owner authority. Skills/learning pass the Bot identity through unchanged.
+  const botScope = (req) => {
+    const { deviceId, botId } = req.params;
+    if (!store.listDeviceBots(deviceId).some((bot) => bot.botId === botId)) fail('NOT_FOUND', 'Bot not found');
+    return { deviceId, botId };
+  };
+  route('POST', '/api/devices/:deviceId/bots/:botId/skills', req => skills.execute({ ...botScope(req), origin: 'foreground' }, object(req.body)), true);
+  route('POST', '/api/devices/:deviceId/bots/:botId/learning', req => {
+    const body = object(req.body);
+    // Only the target Host may drive learning jobs; the owner may inspect,
+    // configure and cancel, but a start/next/respond here would strand the job.
+    if (!['status', 'configure', 'cancel'].includes(body.action)) fail('FORBIDDEN', 'Learning jobs are driven by the target Host');
+    return learning.execute(botScope(req), body);
+  }, true);
+  route('POST', '/api/devices/:deviceId/bots/:botId/installations', req => botManagement.execute(botScope(req), object(req.body), { allowShared: true }), true);
   const oauthInput = req => ({ installationId: req.params.id, deviceId: text(req.body?.deviceId, 'deviceId'), botId: text(req.body?.botId, 'botId') });
   route('POST', '/api/installations/:id/oauth/start', req => oauth.start(oauthInput(req)), true);
   route('GET', '/api/oauth/mcp/flows/:flowId', req => required(oauth.status(req.params.flowId), 'OAuth flow'));
@@ -397,7 +413,10 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     req.centerDevice = { deviceId, token };
     done();
   }
-  const host = (method, url, handler) => app.route({ method, url, onRequest: authenticate, handler });
+  const host = (method, url, handler, bodyLimit) => app.route({ method, url, onRequest: authenticate, handler, ...(bodyLimit !== undefined ? { bodyLimit } : {}) });
+  // Learning start carries a transcript snapshot the service bounds at 8 MiB;
+  // this route's body limit sits just above it — never a global raise.
+  const LEARNING_BODY_LIMIT = 9 * 1024 * 1024;
   host('GET', '/api/host/events', (req, reply) => {
     const { deviceId, token } = req.centerDevice;
     reply.hijack();
@@ -461,6 +480,15 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     try { await packages.reconcileDevice(deviceId); } finally { notify(deviceId); }
     return result;
   });
+  host('POST', '/api/host/devices/:deviceId/bots/:botId/skills', req => skills.execute({ ...botScope(req), origin: 'foreground' }, object(req.body)));
+  host('POST', '/api/host/devices/:deviceId/bots/:botId/learning', req => {
+    const scope = botScope(req);
+    // The learning job's agent.run callbacks are handed to the initiating
+    // Host; a forged cross-device source must never drive another Host's jobs.
+    if (scope.deviceId !== req.centerDevice.deviceId) fail('FORBIDDEN', 'Device mismatch');
+    return learning.execute(scope, object(req.body));
+  }, LEARNING_BODY_LIMIT);
+  host('POST', '/api/host/devices/:deviceId/bots/:botId/installations', req => botManagement.execute(botScope(req), object(req.body)));
   host('GET', '/api/host/snapshot', req => snapshot(req.centerDevice.deviceId));
   host('POST', '/api/host/receipt', (req, reply) => {
     const body = object(req.body);
@@ -522,5 +550,5 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   });
   host('POST', '/api/host/capabilities/:installationId/tools/list', req => execution.listTools(req.centerDevice.deviceId, req.params.installationId, object(req.body)));
   host('POST', '/api/host/capabilities/:installationId/tools/call', req => { const body = object(req.body); text(body.callId, 'callId'); text(body.name, 'name'); object(body.args); return execution.callTool(req.centerDevice.deviceId, req.params.installationId, body); });
-  return { notifyInstallation, close() { for (const set of streams.values()) for (const stream of set) stream.reply.end(); streams.clear(); } };
+  return { notifyInstallation, notifyDevice: notify, close() { for (const set of streams.values()) for (const stream of set) stream.reply.end(); streams.clear(); } };
 }

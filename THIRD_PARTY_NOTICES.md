@@ -258,3 +258,42 @@ root contain no copyright line, and none was invented for them. The Apache text 
 terms 1-9 and the APPENDIX. A bundled crate whose archive has no license file and that
 has no exact fallback mapping still fails the build instead of falling back to package
 metadata.
+
+## Hermes Agent learning modules
+
+The center server vendors unmodified upstream learning modules from
+**hermes-agent**, by Nous Research:
+
+- Repository: https://github.com/NousResearch/hermes-agent
+- Exact revision: `71736c9f32597bbca9d89cede5aa136e55946b2f`
+- License: MIT. A verbatim copy travels with the vendored sources at
+  `center-server/hermes/vendor/LICENSE`.
+- Vendored scope (original bytes, no rewording): `agent/background_review.py`,
+  `agent/learn_prompt.py`, `agent/curator.py` and their unchanged helper
+  modules under `center-server/hermes/vendor/`. The Node.js transport,
+  skill-service bridge and Host agent-run adapters that drive them are project
+  code, not upstream.
+
+```text
+MIT License
+
+Copyright (c) 2025 Nous Research
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

@@ -92,6 +92,7 @@ const routes = [
   { method: 'PUT', key: '/v1/settings', pattern: /^\/v1\/settings\/?$/, params: [], hasBody: true, handler: putSettings },
   { method: 'GET', key: '/v1/bots/:botId/soul', pattern: /^\/v1\/bots\/([^/]+)\/soul\/?$/, params: ['botId'], hasBody: false, handler: getBotSoul },
   { method: 'PUT', key: '/v1/bots/:botId/soul', pattern: /^\/v1\/bots\/([^/]+)\/soul\/?$/, params: ['botId'], hasBody: true, handler: setBotSoul },
+  { method: 'POST', key: '/v1/bots/:botId/learning', pattern: /^\/v1\/bots\/([^/]+)\/learning\/?$/, params: ['botId'], hasBody: true, handler: manageBotLearning },
   { method: 'POST', key: '/v1/bots/:botId/schedules', pattern: /^\/v1\/bots\/([^/]+)\/schedules\/?$/, params: ['botId'], hasBody: true, handler: botSchedules },
   { method: 'GET', key: '/v1/service', pattern: /^\/v1\/service\/?$/, params: [], hasBody: false, handler: serviceStatus },
   { method: 'GET', key: '/v1/scopes/:scopeKey', pattern: /^\/v1\/scopes\/([^/]+)\/?$/, params: ['scopeKey'], hasBody: false, handler: getScopeState },
@@ -736,6 +737,12 @@ async function setBotSoul(host, runtime, params, body, req, res) {
   assertNoQuery(req);
   requireBot(host, params.botId);
   writeControlJson(res, 200, await runtime.setBotSoul(params.botId, body));
+}
+
+async function manageBotLearning(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  requireBot(host, params.botId);
+  writeControlJson(res, 200, await runtime.manageBotLearning(params.botId, body));
 }
 
 async function botSchedules(host, runtime, params, body, req, res) {

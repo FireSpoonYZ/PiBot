@@ -16,6 +16,13 @@ RUN npm ci --prefix center-server --omit=dev
 RUN npm ci --prefix host-core --omit=dev
 
 FROM node:22-bookworm
+# Python runs only at the center, for the vendored Hermes learning modules
+# (center-server/hermes/vendor/, requires-python >=3.11,<3.15). bookworm ships
+# python3.11; the Node adapter launches it via env HERMES_PYTHON (default
+# python3). No Python is installed or needed on Android.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build --chown=node:node /app/center-contract/ ./center-contract/

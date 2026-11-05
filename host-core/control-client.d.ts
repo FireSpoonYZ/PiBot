@@ -60,6 +60,7 @@ import type {
   CenterActionCall,
   BotSoul,
   BotSoulUpdate,
+  BotLearningInput,
   WorkLiveFrame,
   ShowerCreateOptions,
   ShowerFrame,
@@ -177,6 +178,7 @@ export interface ControlClient {
   /* Per-Bot SOUL; set methods are CAS and never replayed. */
   getBotSoul(botId: string, options?: ControlClientCallOptions): Promise<BotSoul>;
   setBotSoul(botId: string, input: BotSoulUpdate, options?: ControlClientCallOptions): Promise<BotSoul>;
+  manageBotLearning(botId: string, input: BotLearningInput, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
   /*
    * Unified Shower (Android/Windows/Linux): same argument order as the Runtime
    * methods, with this client's trailing {signal} options. The body stays the
