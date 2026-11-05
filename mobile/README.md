@@ -40,6 +40,31 @@ Tauri 的 Android 运行链路（App.run → tauri-runtime-wry.run → tao `Even
 - 桥是私有、非导出、同 UID 校验的 Binder 服务：Binder 事务只返回 socket FD，业务走 UTF-8 JSONL（`request`/`response`/`event`）。上限：2 MiB 行、8 个在途普通请求、8 帧/4 MiB 事件预算、暂停/清理保留通道、25 s 请求截止与 5 s 绑定截止、按 generation/nonce 的投递身份、单一原生事件代理与最多一个等待 ACK 的事件帧。
 - 公开 Host 控制方法仍是 **35 个**；Kotlin 内的 `start`/`stop`/`openLegacy`/`reconnect`/`hide` 是 UI 本地动作（socket 内另有 `uiSettings`、`pause`），不是新增公开方法。`streamError` 是私有事件通道，不新增 JS 命令或 Host API。
 
+## 首次绑定与引导检查
+
+首次绑定只需中心地址与所有者密码：本地桥新增 `pairCenter`（params
+`{url,password,displayName?,ca?,force?}`，result `{centerUrl,deviceId,
+displayName,hostConfigured,connectionRequested,warnings?}`，不返回 token）。
+原生侧先以 HTTPS owner 身份 `GET /api/session` → `POST /api/session` →
+`GET /api/session` → `POST /api/devices`（platform `android`），随后复用既
+有 Host 保存、客户端凭据存储与连接/FGS 入口，绑定成功后自动发起连接。仍保
+留手动高级模式。
+
+- 密码只在内存中使用；设备 token 只写原生加密存储。自签 CA 继续按原规则
+  校验：不 trust-all、不关闭 hostname 校验，也不把密码带进重定向。
+- 已成功注册的设备不会重复提交注册；持久化之后连接失败进入可恢复状态。
+- 本地桥另有 `repairCenterBinding`：只用本机已保存的绑定与凭据恢复中心绑
+  定并重新发起连接，不需要密码、不重新调用 `/api/devices` 注册设备；绑定
+  缺失或凭据失效时报可恢复错误，而不是静默重建身份。
+- `onboardingStatus {}` → `{notificationsGranted,batteryUnrestricted,
+  shizukuInstalled,shizukuRunning,shizukuGranted}`：只读查询，不启动服务或
+  授权。
+- `onboardingAction {action:'notifications'|'battery-settings'|
+  'shizuku-permission'|'shizuku-manager'}` → `{requested:boolean}`：仅前台
+  显式按钮动作；回到应用重新查询，`requested:true` 不等于已授权。
+- 设备重启后 Shizuku 服务停止，需要用户重新启动 Shizuku（应用授权记录保
+  留）；电池不受限需要用户在系统设置中确认。
+
 ## 其他设备（手机远端页，M20-01 已交付）
 
 - 与本机 Host 页并列：首次点 **其他设备** 才挂载远端页；之后两侧都保持挂载，**本机 Host** / **其他设备** 只切换可见性（`hidden`），以保留各自草稿与已选目标。不可见的一侧由 `active`/`pageActive` 传给页面：立即取消该页观察（`clientUnobserve` / `cancelObservation`）、停只读轮询（回执刷新、Work activity 1s 刷新、生命周期轮询），**不** stop/abort Host、**不**断开 client、**不**关 client child，也不自动重连或重放变更；再切回时观察/轮询按只读方式重建（LIVE 需要它）。

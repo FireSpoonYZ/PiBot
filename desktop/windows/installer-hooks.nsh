@@ -1,21 +1,129 @@
 !include "${__FILEDIR__}\..\build\icons\shell-icon.nsh"
 
-; Bundled Host launcher (externalBin e-launcher-host.exe next to the main binary).
-; Runs hidden via nsExec in the installing user's context (installMode currentUser);
-; the exit code is discarded and $0 is preserved for the surrounding Tauri template.
-!macro E_LAUNCHER_HOST_EXEC ARGS
-  Push $0
-  nsExec::Exec '"$INSTDIR\e-launcher-host.exe" ${ARGS}'
-  Pop $0
-  Pop $0
+; Host 登录任务化安装：perMachine 安装到受保护目录，普通权限客户端保持不变。
+; 绑定数据仍在 %LOCALAPPDATA%\e-launcher\host-service（用户目录，不在安装目录）。
+
+Var /GLOBAL EHostAppData
+Var /GLOBAL EHostHome
+Var /GLOBAL EHostLock
+Var /GLOBAL EHostStopReq
+Var /GLOBAL EHostRunning
+Var /GLOBAL EHostWait
+Var /GLOBAL EHostFailed
+Var /GLOBAL EHostWasRunning
+Var /GLOBAL EHostFile
+Var /GLOBAL EOldInstallDir
+
+; perMachine 安装时 SetShellVarContext 为 all，需临时切回 current 才能拿到
+; 交互登录用户自己的 LOCALAPPDATA（同用户提权下 current == 安装用户）。
+!macro E_LAUNCHER_HOST_DETECT_HOME
+  SetShellVarContext current
+  StrCpy $EHostAppData "$LOCALAPPDATA"
+  StrCpy $EHostHome "$LOCALAPPDATA\e-launcher\host-service"
+  StrCpy $EHostLock "$EHostHome\launcher.lock"
+  StrCpy $EHostStopReq "$EHostHome\stop.request"
+  !insertmacro SetContext
 !macroend
+
+; OUT 参数 := "1" 当 supervisor 仍持有 launcher.lock，否则 "0"。
+; 用与 fs2 try_lock_exclusive 相同的 LockFileEx 互斥字节锁探测，不需要启动任何二进制。
+!macro E_LAUNCHER_HOST_PROBE_RUNNING OUT
+  StrCpy ${OUT} "0"
+  ${If} ${FileExists} "$EHostLock"
+    System::Call 'kernel32::CreateFileW(w "$EHostLock", i 0x80000000, i 3, p 0, i 3, i 0x80, p 0) p .R7'
+    ${If} $R7 == -1
+      StrCpy ${OUT} "1"
+    ${Else}
+      System::Alloc 24
+      Pop $R8
+      System::Call 'kernel32::RtlZeroMemory(p R8, i 24)'
+      System::Call 'kernel32::LockFileEx(p R7, i 3, i 0, i 1, i 0, p R8) i .R9'
+      ${If} $R9 == 0
+        StrCpy ${OUT} "1"
+      ${Else}
+        System::Call 'kernel32::UnlockFileEx(p R7, i 0, i 1, i 0, p R8)'
+      ${EndIf}
+      System::Free $R8
+      System::Call 'kernel32::CloseHandle(p R7)'
+    ${EndIf}
+  ${EndIf}
+!macroend
+
+; OUT 参数 := "1" 表示优雅停止失败。写入 stop.request（launcher stop 的同一路径），
+; 等待 supervisor 自行清理退出；外层等待 85s 必须大于 launcher 内层停止预算(约45s)
+; 与 launcher stop 自身外层(约70s)，避免提前打断正在进行的 Node 清理。
+!macro E_LAUNCHER_HOST_STOP OUT
+  StrCpy ${OUT} "0"
+  !insertmacro E_LAUNCHER_HOST_PROBE_RUNNING $EHostRunning
+  ${If} $EHostRunning == "1"
+    FileOpen $EHostFile "$EHostStopReq" w
+    ${If} $EHostFile != ""
+      FileWrite $EHostFile "stop$\n"
+      FileClose $EHostFile
+    ${EndIf}
+    StrCpy $EHostWait 0
+    ${Do}
+      Sleep 1000
+      IntOp $EHostWait $EHostWait + 1
+      !insertmacro E_LAUNCHER_HOST_PROBE_RUNNING $EHostRunning
+      ${If} $EHostRunning == "0"
+        ${ExitDo}
+      ${EndIf}
+      ${If} $EHostWait >= 85
+        ${ExitDo}
+      ${EndIf}
+    ${Loop}
+    ${If} $EHostRunning == "1"
+      StrCpy ${OUT} "1"
+    ${EndIf}
+  ${EndIf}
+!macroend
+
+; perMachine（提权）安装不允许把安装目录选回用户可写目录；否则 Host 登录任务会
+; 拒绝把该路径登记为 Highest 级别 action。普通权限安装不强制（非 perMachine）。
+; hooks 在 INSTALLMODE 定义之前被 include，这里用运行时是否提权区分安装模式。
+Function .onVerifyInstDir
+  System::Call 'shell32::IsUserAnAdmin() i .R9'
+  ${If} $R9 == 1
+    Push $R0
+    Push $R1
+    Push $R2
+    StrCpy $R2 "0"
+    StrLen $R0 "$PROGRAMFILES64\"
+    StrCpy $R1 $INSTDIR $R0
+    ${If} $R1 == "$PROGRAMFILES64\"
+      StrCpy $R2 "1"
+    ${EndIf}
+    StrLen $R0 "$PROGRAMFILES32\"
+    StrCpy $R1 $INSTDIR $R0
+    ${If} $R1 == "$PROGRAMFILES32\"
+      StrCpy $R2 "1"
+    ${EndIf}
+    StrLen $R0 "$PROGRAMFILES\"
+    StrCpy $R1 $INSTDIR $R0
+    ${If} $R1 == "$PROGRAMFILES\"
+      StrCpy $R2 "1"
+    ${EndIf}
+    ${If} $R2 == "0"
+      MessageBox MB_ICONSTOP "安装目录必须位于 Program Files 内，不能选择用户可写目录。"
+      Abort
+    ${EndIf}
+    Pop $R2
+    Pop $R1
+    Pop $R0
+  ${EndIf}
+FunctionEnd
 
 !macro NSIS_HOOK_PREINSTALL
   Delete "$INSTDIR\icons\shell-icon-*.ico"
-  ; Stop a running bundled Host so its launcher, Node sidecar and host-runtime files
-  ; are not locked while being replaced (failure is ignored).
-  ${If} ${FileExists} "$INSTDIR\e-launcher-host.exe"
-    !insertmacro E_LAUNCHER_HOST_EXEC "stop"
+  !insertmacro E_LAUNCHER_HOST_DETECT_HOME
+  ; 记录升级前 Host 是否在运行：只有原本运行着的才在装完后恢复启动。
+  !insertmacro E_LAUNCHER_HOST_PROBE_RUNNING $EHostWasRunning
+  ; 优雅停止运行中的 Host（含旧用户目录安装的迁移场景），失败阻止覆盖写入。
+  !insertmacro E_LAUNCHER_HOST_STOP $EHostFailed
+  ${If} $EHostFailed == "1"
+    MessageBox MB_ICONSTOP "无法停止正在运行的 Host，请关闭后重试安装。"
+    Abort "host still running"
   ${EndIf}
   ; Drop the previous host-runtime tree so stale node_modules files from an older
   ; version cannot shadow the freshly installed dependencies.
@@ -35,20 +143,63 @@
   ${EndIf}
   WriteRegStr SHCTX "${UNINSTKEY}" "DisplayIcon" "$INSTDIR\icons\${E_LAUNCHER_SHELL_ICON}"
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
-  ; Already paired (HOST_HOME config exists): re-register HKCU Run autostart for the
-  ; new launcher path and start the bundled Host again.
-  ${If} ${FileExists} "$LOCALAPPDATA\e-launcher\host-service\config.json"
-  ${AndIf} ${FileExists} "$INSTDIR\e-launcher-host.exe"
-    !insertmacro E_LAUNCHER_HOST_EXEC "enable"
-    !insertmacro E_LAUNCHER_HOST_EXEC "start"
+  ; 为本交互登录用户注册 Host 登录任务（未配对时 trigger 登记为禁用、不自动运行；
+  ; 升级时保留原 trigger 启停状态）。提权结果必须上报，不再丢弃退出码。
+  ${If} ${FileExists} "$INSTDIR\host-runtime\native\shower-windows.exe"
+    nsExec::Exec '"$INSTDIR\host-runtime\native\shower-windows.exe" host-task install'
+    Pop $EHostFailed
+    ${If} $EHostFailed != 0
+      MessageBox MB_ICONSTOP "注册 Host 登录任务失败（退出码 $EHostFailed）。应用本身已安装，可在配对时重试。"
+    ${Else}
+      ; 任务注册成功后才清理 currentUser 旧安装：删除用户目录下的旧程序与残留卸载入口。
+      ; 只接受完全等于 <用户LOCALAPPDATA>\<ProductName> 的旧安装路径，不执行其中任何二进制；
+      ; helper 已移除旧 HKCU Run，这里兜底同一用户的残留值。
+      ReadRegStr $EOldInstallDir HKCU "${UNINSTKEY}" "InstallLocation"
+      ${If} $EOldInstallDir != ""
+        StrCpy $R9 $EOldInstallDir 1
+        ${If} $R9 == "$\""
+          StrCpy $EOldInstallDir $EOldInstallDir -1
+          StrCpy $EOldInstallDir $EOldInstallDir "" 1
+        ${EndIf}
+        ${If} $EOldInstallDir == "$EHostAppData\${PRODUCTNAME}"
+        ${AndIf} $EOldInstallDir != "$INSTDIR"
+          RMDir /r "$EOldInstallDir"
+          DeleteRegKey HKCU "${UNINSTKEY}"
+        ${EndIf}
+      ${EndIf}
+      DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "e-launcher-host"
+      ; 升级前 Host 在运行且仍保持配对：仅此时按原运行状态恢复启动（不重新启用用户已关闭的自启动）。
+      ${If} $EHostWasRunning == "1"
+      ${AndIf} ${FileExists} "$EHostHome\config.json"
+        nsExec::Exec '"$INSTDIR\host-runtime\native\shower-windows.exe" host-task start'
+        Pop $EHostFailed
+        ${If} $EHostFailed != 0
+          MessageBox MB_ICONEXCLAMATION "Host 未能在安装后恢复运行（退出码 $EHostFailed），可稍后手动启动。"
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
   ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
-  ; Stop the bundled Host and remove its HKCU Run autostart; pairing data under
-  ; %LOCALAPPDATA%\e-launcher\host-service is kept.
-  ${If} ${FileExists} "$INSTDIR\e-launcher-host.exe"
-    !insertmacro E_LAUNCHER_HOST_EXEC "stop"
-    !insertmacro E_LAUNCHER_HOST_EXEC "disable"
+  !insertmacro E_LAUNCHER_HOST_DETECT_HOME
+  ; 先优雅停止 Host，失败阻止删除文件并报告；配对数据保留在用户目录。
+  !insertmacro E_LAUNCHER_HOST_STOP $EHostFailed
+  ${If} $EHostFailed == "1"
+    MessageBox MB_ICONSTOP "无法停止正在运行的 Host，请关闭后重试卸载。"
+    Abort "host still running"
+  ${EndIf}
+  ${If} $UpdateMode <> 1
+    ; 真正卸载（非升级路径）：删除本产品此用户的登录任务与兜底自启动项。
+    ; 删任务失败必须阻止卸载——否则其 exe 被删而特权任务残留。
+    ${If} ${FileExists} "$INSTDIR\host-runtime\native\shower-windows.exe"
+      nsExec::Exec '"$INSTDIR\host-runtime\native\shower-windows.exe" host-task remove'
+      Pop $EHostFailed
+      ${If} $EHostFailed != 0
+        MessageBox MB_ICONSTOP "删除 Host 登录任务失败（退出码 $EHostFailed），请重试卸载。"
+        Abort "host task remove failed"
+      ${EndIf}
+    ${EndIf}
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "e-launcher-host"
   ${EndIf}
 !macroend

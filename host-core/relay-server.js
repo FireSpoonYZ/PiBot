@@ -97,6 +97,7 @@ export async function openRelayServer(options = {}) {
   const port = options.port === undefined ? DEFAULT_PORT : options.port;
   const listenHost = options.listenHost === undefined ? DEFAULT_LISTEN_HOST : options.listenHost;
   const tls = options.tls;
+  const tlsTermination = options.tlsTermination;
 
   // All validation happens before any registry data / sockets are created.
   if (typeof dataRoot !== 'string' || dataRoot.trim() === '' || !isAbsolute(dataRoot)) {
@@ -109,6 +110,12 @@ export async function openRelayServer(options = {}) {
     throw invalid('listenHost must be a literal IP address');
   }
 
+  if (tlsTermination !== undefined && tlsTermination !== 'proxy') {
+    throw invalid("tlsTermination must be 'proxy'");
+  }
+  if (tlsTermination === 'proxy' && tls !== undefined) {
+    throw invalid("tlsTermination 'proxy' cannot be combined with tls");
+  }
   let tlsOptions = null;
   if (tls !== undefined) {
     if (
@@ -124,8 +131,9 @@ export async function openRelayServer(options = {}) {
       throw invalid('tls cert/key are not valid PEM');
     }
     tlsOptions = { cert: tls.cert, key: tls.key };
-  } else if (listenHost !== '127.0.0.1' && listenHost !== '::1') {
-    // Plain WS is only allowed on literal loopback; every other bind requires TLS.
+  } else if (tlsTermination !== 'proxy' && listenHost !== '127.0.0.1' && listenHost !== '::1') {
+    // Plain WS is only allowed on literal loopback; every other bind requires
+    // TLS, unless an upstream TLS-terminating proxy is explicitly declared.
     throw invalid('TLS is required unless listening on literal 127.0.0.1 or ::1');
   }
 

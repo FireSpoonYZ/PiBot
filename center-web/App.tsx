@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, Navigate, NavLink, Route, Routes } from 'react-router-dom';
 import { LogOut, Moon, Puzzle, RefreshCw, Server, Smartphone, Sun, WifiOff } from 'lucide-react';
 import { api } from './api';
+import type { SetupStatus } from './api';
 import Login from './pages/Login';
+import Setup from './pages/Setup';
 import Providers from './pages/Providers';
 import Models from './pages/Models';
 import Devices from './pages/Devices';
@@ -26,7 +28,16 @@ function getInitialTheme(): ThemeMode {
 }
 
 export default function App() {
-  const [state, setState] = useState<'loading' | 'offline' | 'anonymous' | 'ready'>('loading');
+  const [state, setState] = useState<'loading' | 'offline' | 'anonymous' | 'ready' | 'setup'>('loading');
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
+  // generation cancels in-flight responses from an older bootstrap/refresh so a
+  // late /api/session reply cannot overwrite the setup state.
+  const generationRef = useRef(0);
+  // No /api/session traffic runs until a bootstrap confirms required:false.
+  const pollingRef = useRef(false);
+  const bootstrapInFlightRef = useRef(false);
   const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
 
   useEffect(() => {
@@ -43,32 +54,98 @@ export default function App() {
   }, []);
 
   const refresh = useCallback(async () => {
+    const generation = generationRef.current;
     try {
       const session = await api.session();
-      setState(session.authenticated ? 'ready' : 'anonymous');
+      if (generation === generationRef.current) {
+        setState(session.authenticated ? 'ready' : 'anonymous');
+      }
     } catch {
-      setState('offline');
+      if (generation === generationRef.current) setState('offline');
     }
   }, []);
 
+  // Unconfigured centers must go through onboarding before any session work:
+  // polling /api/session against the setup listener would flash the offline card.
+  const bootstrap = useCallback(async () => {
+    if (bootstrapInFlightRef.current) return;
+    bootstrapInFlightRef.current = true;
+    const generation = ++generationRef.current;
+    // Session polling stays paused until required:false is confirmed.
+    pollingRef.current = false;
+    try {
+      let setup: SetupStatus;
+      try {
+        setup = await api.getSetup();
+      } catch {
+        if (generation === generationRef.current) setState('offline');
+        return;
+      }
+      if (generation !== generationRef.current) return;
+      if (setup.required) {
+        setSetupStatus(setup);
+        setState('setup');
+        return;
+      }
+      pollingRef.current = true;
+      void refresh();
+    } finally {
+      // Only the request that still owns the generation may clear the flag; a
+      // stale bootstrap must not unblock/falsely unblock newer calls.
+      if (generation === generationRef.current) bootstrapInFlightRef.current = false;
+    }
+  }, [refresh]);
+
   useEffect(() => {
-    void refresh();
-    const offline = () => setState('offline');
+    void bootstrap();
+    const offline = () => {
+      if (pollingRef.current && stateRef.current !== 'setup') setState('offline');
+    };
     const unauthenticated = () => {
+      if (!pollingRef.current || stateRef.current === 'setup') return;
       setState('anonymous');
       void refresh();
     };
     window.addEventListener('center-offline', offline);
     window.addEventListener('center-unauthenticated', unauthenticated);
-    const timer = window.setInterval(() => void refresh(), 5000);
+    const timer = window.setInterval(() => {
+      // Offline recovery always re-runs the full bootstrap (the setup listener
+      // has no /api/session); this branch must precede the pollingRef check or
+      // a failed initial bootstrap (pollingRef=false) could never recover.
+      if (stateRef.current === 'offline') {
+        void bootstrap();
+        return;
+      }
+      if (!pollingRef.current || stateRef.current === 'setup') return;
+      void refresh();
+    }, 5000);
     return () => {
+      // Invalidate any in-flight bootstrap/refresh so a StrictMode remount
+      // cannot let a stale response write state, and release the in-flight
+      // flag so the replayed effect can bootstrap again (generation guards
+      // prevent the orphaned request from reclaiming it).
+      generationRef.current++;
+      bootstrapInFlightRef.current = false;
+      pollingRef.current = false;
       window.clearInterval(timer);
       window.removeEventListener('center-offline', offline);
       window.removeEventListener('center-unauthenticated', unauthenticated);
     };
-  }, [refresh]);
+  }, [bootstrap, refresh]);
 
-  if (state === 'loading') {
+  if (state === 'setup' && setupStatus) {
+    return (
+      <Setup
+        status={setupStatus}
+        onComplete={() => {
+          setState('loading');
+          void bootstrap();
+        }}
+      />
+    );
+  }
+
+  if (state === 'loading' || state === 'setup') {
     return (
       <main className="page login">
         <div className="login-card" style={{ textAlign: 'center' }}>
@@ -87,7 +164,7 @@ export default function App() {
           </div>
           <h1>中心不可用</h1>
           <p className="secondary" role="alert">无法连接中心，业务页面已关闭。</p>
-          <button className="button" onClick={() => void refresh()}>
+          <button className="button" onClick={() => void bootstrap()}>
             <RefreshCw size={16} />
             <span>重试连接</span>
           </button>

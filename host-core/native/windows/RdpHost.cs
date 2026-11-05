@@ -77,6 +77,11 @@ namespace ELauncher.Shower
         private const int SessionCloseTimeoutMs = 5000;
         // 注销核验上限：给总 15 s release 留出 agent 释放与断连空间，仅查询本机 WTS 状态。
         private const int LogoffVerifyTimeoutMs = 8000;
+        // 内部轮询预算：低于父 launcher 的 200 s 硬上限，留出收尾与结果行时间。
+        // 它不覆盖 prepare 与凭据框模态阻塞；外部超时强杀由 launcher 兜底，不等于 cleanup 已验证。
+        private const int OnboardingBudgetMs = 180000;
+        // 密码被拒或账户输入错误时允许有限重试，绝不无限弹框。
+        private const int OnboardingMaxAttempts = 3;
 
         private static readonly string[] WindowsKeys = new string[]
         {
@@ -145,6 +150,8 @@ namespace ELauncher.Shower
         // 仅本次进程内 prepare 成功的授权宿主才能创建子会话；启动失败不假装已授权。
         private bool prepared;
         private readonly object prepareLock = new object();
+        // 仅本进程显式 shower-setup 引导允许 PrepareCredentials 弹凭据框；普通 host 路径只读已存凭据。
+        private bool onboarding;
 
         private RdpHost(string stateDir)
         {
@@ -767,7 +774,8 @@ namespace ELauncher.Shower
                 RunOnUi(delegate
                 {
                     RequireCurrent(expectedGeneration);
-                    if (pendingCredential != null)
+                    // 引导模式下新凭据要等 agent 握手验证后才由引导流程统一提交；普通路径行为不变。
+                    if (pendingCredential != null && !onboarding)
                     {
                         pendingCredential.Commit();
                         ClearPendingCredential();
@@ -1005,11 +1013,27 @@ namespace ELauncher.Shower
             string account = string.IsNullOrEmpty(domain) ? user : domain + "\\" + user;
             client.UserName = user;
             client.Domain = domain;
-            pendingCredential = ShowerCredentials.Read(account);
-            if (pendingCredential == null)
+            if (onboarding)
             {
-                throw new HostFault(HostErrorCodes.AuthRequired,
-                    "请在 Windows 凭据管理器中配置或更新普通凭据 e-launcher/Shower/localhost，账户为 " + account);
+                // 仅显式本地引导允许弹凭据框：先把离屏宿主窗口带回屏内作为父窗口，结束后恢复。
+                ApplyPreview("visible");
+                try
+                {
+                    pendingCredential = ShowerCredentials.Prompt(ui.Handle, account, credentialRejected);
+                }
+                finally
+                {
+                    ApplyPreview("offscreen");
+                }
+            }
+            else
+            {
+                pendingCredential = ShowerCredentials.Read(account);
+                if (pendingCredential == null)
+                {
+                    throw new HostFault(HostErrorCodes.AuthRequired,
+                        "请在 Windows 凭据管理器中配置或更新普通凭据 e-launcher/Shower/localhost，账户为 " + account);
+                }
             }
             pendingCredential.Apply(ocx);
         }
@@ -1509,6 +1533,236 @@ namespace ELauncher.Shower
             }
             HostLog.Warn("child session " + child.ToString(CultureInfo.InvariantCulture) + " was still logged on after the logoff request");
             throw new HostFault(HostErrorCodes.BackendFailed, "child session " + child.ToString(CultureInfo.InvariantCulture) + " did not finish logging off within " + LogoffVerifyTimeoutMs.ToString(CultureInfo.InvariantCulture) + " ms");
+        }
+
+        // ---------------------------------------------------------------------------------- onboarding
+
+        /// <summary>
+        /// 显式本地一次性凭据引导（shower-setup）：prepare 授权 → 弹 Windows 凭据框（预填当前账户，明示非 PIN）→
+        /// 建临时子会话，登录并等到虚拟屏 ready 作为账户与密码验证 → 验证通过才写入本用户凭据管理器 →
+        /// finally 注销临时会话；guardian 随本进程退出恢复子会话开关与 TermService。
+        /// stdout 最后一行是 {"configured":true,"verified":true} 或 {"error":{"code","message"}}（非零退出）。
+        /// </summary>
+        internal static int RunOnboarding(string[] args)
+        {
+            string stateDir = null;
+            bool invalid = args == null;
+            for (int i = 0; !invalid && i < args.Length; i++)
+            {
+                if (stateDir == null
+                    && string.Equals(args[i], "--state-dir", StringComparison.OrdinalIgnoreCase)
+                    && i + 1 < args.Length
+                    && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
+                {
+                    stateDir = args[++i];
+                }
+                else
+                {
+                    invalid = true;
+                }
+            }
+            if (invalid || string.IsNullOrEmpty(stateDir) || !Path.IsPathRooted(stateDir))
+            {
+                return ReportOnboarding(HostErrorCodes.InvalidArgument, "setup requires exactly --state-dir <absolute directory>", 2);
+            }
+            string resolved;
+            try
+            {
+                resolved = Path.GetFullPath(stateDir);
+                Directory.CreateDirectory(resolved);
+            }
+            catch (Exception ex)
+            {
+                return ReportOnboarding(HostErrorCodes.InvalidArgument, "state dir is unusable: " + ex.Message, 2);
+            }
+            return new RdpHost(resolved).ExecuteOnboarding();
+        }
+
+        private int ExecuteOnboarding()
+        {
+            // 已有别的 child/session 时明确 busy，先失败再接管的顺序不变。
+            int existing = HostNative.ChildSessionId();
+            if (existing == HostNative.UnsupportedChildSessions)
+            {
+                return ReportOnboarding(HostErrorCodes.Unavailable, "this Windows build does not support child sessions", 1);
+            }
+            if (existing > 0)
+            {
+                return ReportOnboarding(HostErrorCodes.Busy, "another child session already exists; it will not be adopted", 1);
+            }
+            var budget = Stopwatch.StartNew();
+            StartUiThread();
+            if (!uiReady.Wait(UiStartTimeoutMs) || uiFault != null)
+            {
+                HostLog.Warn("rdp window failed: " + (uiFault ?? "it did not start in time"));
+                ShutdownUi();
+                return ReportOnboarding(HostErrorCodes.Unavailable, "the rdp window is not available: " + (uiFault ?? "it did not start in time"), 1);
+            }
+            // 进程私有开关：只有这条显式命令允许 PrepareCredentials 弹凭据框。
+            onboarding = true;
+            string onboardingSession = "credential-setup-" + Guid.NewGuid().ToString("N");
+            HostFault failure = null;
+            Exception cleanupFault = null;
+            bool verified = false;
+            bool saved = false;
+            try
+            {
+                Prepare(new Dictionary<string, object>());
+                for (int attempt = 1; attempt <= OnboardingMaxAttempts && !verified; attempt++)
+                {
+                    var parameters = new Dictionary<string, object>();
+                    parameters["sessionId"] = onboardingSession;
+                    Ensure(parameters);
+                    failure = WaitForOnboardingOutcome(budget, out verified);
+                    if (verified)
+                    {
+                        RunOnUi(delegate { saved = CommitPendingCredential(); });
+                        break;
+                    }
+                    string owned = CurrentSession();
+                    if (owned != null)
+                    {
+                        try
+                        {
+                            Cleanup(owned, "onboarding-retry");
+                        }
+                        catch (Exception ex)
+                        {
+                            cleanupFault = ex;
+                            HostLog.Warn("onboarding cleanup failed: " + ex.Message);
+                            break;
+                        }
+                    }
+                    if (failure == null || !IsRetryableOnboarding(failure.Code)) break;
+                }
+            }
+            catch (HostFault fault)
+            {
+                failure = fault;
+            }
+            catch (Exception ex)
+            {
+                failure = new HostFault(HostErrorCodes.BackendFailed, ex.GetType().Name + ": " + ex.Message);
+            }
+            finally
+            {
+                try
+                {
+                    string owned = CurrentSession();
+                    if (owned != null) Cleanup(owned, "onboarding");
+                }
+                catch (Exception ex)
+                {
+                    cleanupFault = ex;
+                    HostLog.Warn("onboarding cleanup failed: " + ex.Message);
+                }
+                ShutdownUi();
+            }
+            if (!verified)
+            {
+                if (failure == null) failure = new HostFault(HostErrorCodes.BackendFailed, "credential verification did not finish");
+                return ReportOnboarding(failure.Code, failure.Message, 1);
+            }
+            if (!saved)
+            {
+                return ReportOnboarding(HostErrorCodes.BackendFailed, "the verified credential was not committed", 1);
+            }
+            if (cleanupFault != null)
+            {
+                // 凭据已保存但临时会话释放失败：绝不报 configured；父 launcher 外层清理兜底。
+                return ReportOnboarding(
+                    HostErrorCodes.BackendFailed,
+                    "the credential was saved but the verification session could not be released: " + cleanupFault.Message,
+                    1);
+            }
+            var done = new Dictionary<string, object>();
+            done["configured"] = true;
+            done["verified"] = true;
+            WriteOnboardingLine(done);
+            return 0;
+        }
+
+        /// <summary>轮询会话状态机直到 ready / authentication-required / error，或预算耗尽；只有 ready 才视为凭据已验证。</summary>
+        private HostFault WaitForOnboardingOutcome(Stopwatch budget, out bool verified)
+        {
+            verified = false;
+            for (;;)
+            {
+                if (budget.ElapsedMilliseconds >= OnboardingBudgetMs)
+                {
+                    return new HostFault(HostErrorCodes.BackendFailed, "credential verification did not finish within " + OnboardingBudgetMs.ToString(CultureInfo.InvariantCulture) + " ms");
+                }
+                string current;
+                string code;
+                string message;
+                string owned;
+                lock (stateLock)
+                {
+                    current = phase;
+                    code = phaseCode;
+                    message = phaseMessage;
+                    owned = sessionId;
+                }
+                if (owned == null || string.Equals(current, "closed", StringComparison.Ordinal))
+                {
+                    return new HostFault(HostErrorCodes.Unavailable, "the verification session ended before it was ready");
+                }
+                if (string.Equals(current, "ready", StringComparison.Ordinal))
+                {
+                    verified = true;
+                    return null;
+                }
+                if (string.Equals(current, "authentication-required", StringComparison.Ordinal))
+                {
+                    // 未达 ready：登录被拒或桌面仍在解锁，都不构成凭据已验证；不写新凭据，允许有限重试。
+                    return new HostFault(HostErrorCodes.AuthRequired, message ?? "the verification session did not reach ready");
+                }
+                if (string.Equals(current, "error", StringComparison.Ordinal))
+                {
+                    return new HostFault(code ?? HostErrorCodes.BackendFailed, message ?? "credential verification failed");
+                }
+                Thread.Sleep(200);
+            }
+        }
+
+        /// <summary>密码被拒或账户格式输入错误可以重试；取消与其他失败直接返回。</summary>
+        private static bool IsRetryableOnboarding(string code)
+        {
+            return string.Equals(code, HostErrorCodes.AuthRequired, StringComparison.Ordinal)
+                || string.Equals(code, HostErrorCodes.InvalidArgument, StringComparison.Ordinal);
+        }
+
+        /// <summary>UI 线程上把已验证的凭据写入本用户凭据管理器；返回是否真正落盘。</summary>
+        private bool CommitPendingCredential()
+        {
+            if (pendingCredential == null) return false;
+            pendingCredential.Commit();
+            ClearPendingCredential();
+            return true;
+        }
+
+        private static int ReportOnboarding(string code, string message, int exitCode)
+        {
+            var error = new Dictionary<string, object>();
+            error["code"] = code;
+            error["message"] = message ?? string.Empty;
+            var envelope = new Dictionary<string, object>();
+            envelope["error"] = error;
+            WriteOnboardingLine(envelope);
+            return exitCode;
+        }
+
+        private static void WriteOnboardingLine(Dictionary<string, object> payload)
+        {
+            try
+            {
+                Console.Out.WriteLine(WireJson.Serialize(payload));
+                Console.Out.Flush();
+            }
+            catch (Exception ex)
+            {
+                HostLog.Warn("cannot write the onboarding result: " + ex.Message);
+            }
         }
     }
 }

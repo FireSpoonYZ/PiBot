@@ -101,13 +101,13 @@ Windows/Linux 构建的并行度由 Cargo 自行决定，本文不设固定 job 
 `tauri.conf.json` 的 `bundle.targets` 为 `all`，安装包落在 `desktop/build/target/release/bundle/` 下：
 
 - **Windows x64**：`msi/*.msi`（WiX，`tauri.windows.conf.json` 指定 `language: zh-CN`）与 `nsis/*-setup.exe`。
-- **Linux x64**：`deb/*.deb`、`rpm/*.rpm`、`appimage/*.AppImage`。`tauri.linux.conf.json` 把 Linux 的 `productName` 覆盖为 `e-launcher-desktop`（ASCII 包名，资源因此落在 `/usr/lib/e-launcher-desktop/`），并为 deb/rpm 安装 systemd 用户单元；窗口标题仍是 `e-助手`。
+- **Linux x64**：`deb/*.deb`、`rpm/*.rpm`、`appimage/*.AppImage`。deb/rpm 同时声明 Shower 运行所需的发行版包（TigerVNC、`xfwm4`/`openbox`、`xfdesktop4`/`xfce4-panel`/`xfconf`、`xfce4-terminal`、`xauth`、`dbus`、`xdotool`、`ffmpeg`，见 `src-tauri/tauri.linux.conf.json`；Fedora 系可满足标准仓库的 `ffmpeg-free`（后端只需 x11grab 采集与内置 mjpeg 编码），或用 RPM Fusion 的完整 `ffmpeg`），不在运行时静默 apt/yum，也不依赖用户全局 Node。AppImage 不声明这些系统依赖，Shower 支持范围以目标机已装程序为准，缺组件时报依赖错误而不是假装全包含。`tauri.linux.conf.json` 把 Linux 的 `productName` 覆盖为 `e-launcher-desktop`（ASCII 包名，资源因此落在 `/usr/lib/e-launcher-desktop/`），并为 deb/rpm 安装 systemd 用户单元；窗口标题仍是 `e-助手`。
 
 ## 内置 Host 与自启动
 
 安装包自带一套本机 Host，由启动器 `e-launcher-host` 监管（崩溃退避重启、日志 `logs/host.log` 超 10 MiB 轮转）：
 
-| 内容 | Windows（NSIS，按用户安装） | Linux（deb/rpm） |
+| 内容 | Windows（NSIS，受保护目录，默认 Program Files） | Linux（deb/rpm） |
 | --- | --- | --- |
 | 启动器 | `<安装目录>\e-launcher-host.exe` | `/usr/bin/e-launcher-host` |
 | Node | `<安装目录>\e-launcher-client-node.exe`（与客户端共用） | `/usr/bin/e-launcher-client-node` |
@@ -116,12 +116,12 @@ Windows/Linux 构建的并行度由 Cargo 自行决定，本文不设固定 job 
 
 `host-runtime/` 由 `node host-core/build-desktop.js` 生成：`host-core/`（运行所需模块、`package.json` 及按当前平台 `npm ci --omit=dev --ignore-scripts` 安装的生产依赖，含 `npm`；类型声明与 source map 已剔除）、`host-core/cua-driver/<平台>/`（固定版本 cua-driver-rs）、`plugins/hindsight/` 中被 host-core 复用的文件，以及仅 Windows 的 `native/shower-windows.exe` + `MSTSCLib.dll`。Linux 包必须在 Linux 上构建。缺少构建工具时可用 `E_LAUNCHER_SHOWER_WINDOWS_DIR`（含上述两个文件的绝对目录）与 `E_LAUNCHER_CUA_DRIVER`（预置 `cua-driver[.exe]` 的绝对路径，同目录需有完整发布文件）指定预构建产物，否则构建直接报错。
 
-配对：首次打开客户端填写中心地址、主密钥与本机名称，客户端调用 `e-launcher-host pair` 登录中心、注册设备、写入配置与随机控制令牌，再启用自启动并启动 Host；已有设备 ID/令牌时可用“高级”入口（`adopt`）接管。主密钥只经 stdin 传给启动器，不落盘。也可在终端执行 `e-launcher-host status|start|stop|restart|enable|disable`，输出为单行 JSON。
+配对：首次打开客户端填写中心地址、所有者密码与本机名称，客户端调用 `e-launcher-host pair` 登录中心、登记本机真实 Host 身份并持久化配置与随机控制令牌——pair 本身不启用自启动、不启动 Host；桌面 UI 随后自动执行 enable/start 分步（先经 broker `center_store` 持久化客户端凭据，再做需要 UAC 的步骤，不是关闭界面才保存），任一步骤失败保留显式重试，UI 以 `ready`（本机 Host 认证探测，不是仅端口监听）宣告可用。重绑时中心按 `deviceId` 保留原 Host ID 并轮换 token，不新建重复设备。已有设备 ID/令牌时可用"高级"入口（`adopt`）接管。所有者密码只经 stdin 传给启动器，不落盘。也可在终端执行 `e-launcher-host status|start|stop|restart|enable|disable`，输出为单行 JSON。Windows 另有 `e-launcher-host setup-shower`：显式短暂停止本机 Host（预算 300 秒，界面明确提示），完成 Shower 凭据引导（账户密码而非 PIN，写入当前用户 Credential Manager）后恢复原运行状态；已有会话占用时报 busy 不接管。
 
 自启动：
 
-- **Windows**：`enable` 写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `e-launcher-host` 值（`"<exe>" run`），登录后无窗口启动。NSIS 安装前先 `stop` 并清空旧 `host-runtime\`；安装后若已配对则重新 `enable` + `start`；卸载前 `stop` + `disable`，保留 `host-service` 目录中的配对与数据。MSI 包不含这些钩子，升级前请先在客户端或终端停止 Host。
-- **Linux**：deb/rpm 安装 `/usr/lib/systemd/user/e-launcher-host.service`；`enable` 执行 `systemctl --user enable e-launcher-host.service` 并尝试 `loginctl enable-linger <用户>`，使 Host 在未登录图形会话时也能随开机运行（linger 失败仅提示，不影响启用）。AppImage 不安装单元文件，启动器退回为分离的后台 `run` 进程，不提供开机自启。
+- **Windows**：安装须落在受保护目录（默认 Program Files）并由本机管理员账户完成——标准用户不能借其他管理员凭据完成安装。`enable`/`disable`/`start`/`status` 经由同目录 `shower-windows.exe host-task` 管理固定任务 `ELauncherHost-<SID>`（当前交互用户 SID 的登录触发、`e-launcher-host.exe run` 动作）：未提升的启用/禁用/安装/移除可经受控 `runas` 完成（UAC 取消 `AUTHORIZATION_CANCELLED`、账号不符 `INSTALL_USER_MISMATCH`、非管理员 `ADMIN_ACCOUNT_REQUIRED`、目录不受保护 `INSTALLATION_NOT_PROTECTED`），`start`/`status` 普通权限可执行；登录后无窗口启动且不再弹 UAC。任务本体保持 `Enabled=true`，自启开关只切登录触发器（type 9）的 `Enabled`——禁用自启后仍可手动 `start`。安装先注册任务但未绑定不自动运行，绑定成功再 enable/start。NSIS 安装前先 `stop` 并清空旧 `host-runtime\`；安装后若已配对则重新 `enable` + `start`；卸载前 `stop` + `disable`，保留 `host-service` 目录中的配对与数据。MSI 包不含这些钩子，升级前请先在客户端或终端停止 Host。
+- **Linux**：deb/rpm 安装 `/usr/lib/systemd/user/e-launcher-host.service`（`TimeoutStopSec=90`，外层停止预算大于 Host 内部清理预算）；`enable` 只执行 `systemctl --user enable e-launcher-host.service`，Host 在登录图形会话后运行——不再自动 `enable-linger`，也不撤销用户已有的 linger。AppImage 不安装单元文件，启动器退回为分离的后台 `run` 进程，不提供开机自启。
 
 ## 连接外部 Host 服务
 

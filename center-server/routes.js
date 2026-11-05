@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import Ajv from 'ajv';
 import { requireOwner, assertPublicCredentialId } from './auth.js';
+import { assertId } from '../host-core/message-protocol.js';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 const required = (value, name) => value ?? fail('NOT_FOUND', `${name} not found`);
@@ -87,11 +88,17 @@ function runtimeBotReceipt(value) {
 const devicePlatforms = ['windows', 'linux', 'macos', 'android'];
 function deviceRegistration(value) {
   const body = object(value);
-  if (Object.keys(body).some(key => key !== 'displayName' && key !== 'platform')) fail('INVALID_ARGUMENT', 'Invalid device registration');
+  if (Object.keys(body).some(key => key !== 'displayName' && key !== 'platform' && key !== 'deviceId' && key !== 'replaceExisting')) fail('INVALID_ARGUMENT', 'Invalid device registration');
   const displayName = typeof body.displayName === 'string' && body.displayName.isWellFormed() ? body.displayName.trim() : '';
   if (displayName.length < 1 || displayName.length > 64 || /[\x00-\x1f\x7f]/.test(displayName)) fail('INVALID_ARGUMENT', 'displayName must contain 1-64 characters');
   if (!devicePlatforms.includes(body.platform)) fail('INVALID_ARGUMENT', 'Invalid platform');
-  return { displayName, platform: body.platform };
+  if (body.deviceId !== undefined) {
+    assertId(body.deviceId, 'deviceId');
+    // center-* is reserved for the center's own relay client identity.
+    if (body.deviceId.startsWith('center-')) fail('FORBIDDEN', 'Reserved device ID');
+  }
+  if (body.replaceExisting !== undefined && (typeof body.replaceExisting !== 'boolean' || body.deviceId === undefined)) fail('INVALID_ARGUMENT', 'replaceExisting requires a deviceId');
+  return { displayName, platform: body.platform, deviceId: body.deviceId, replaceExisting: body.replaceExisting };
 }
 function runtimeCapabilityError(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.error == null) fail('INVALID_ARGUMENT', 'Invalid runtime receipt');
@@ -142,14 +149,25 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('GET', '/api/model-config', () => store.getModelConfig());
   route('PUT', '/api/model-config', req => { const body = object(req.body); return changed(store.putModelConfig(body.expectedRevision, validate(selectionSchema, body.value))); }, true);
   route('GET', '/api/devices', () => bridge.listDevices());
-  // 所有者登记新设备：令牌只在本响应中返回一次，中心只保存其哈希，不写日志。
+  // 所有者登记/重绑设备：令牌只在本响应中返回一次，中心只保存其哈希，不写日志。
   route('POST', '/api/devices', (req, reply) => {
-    const { displayName, platform } = deviceRegistration(req.body);
-    const deviceId = randomUUID();
+    const { displayName, platform, deviceId: requestedId, replaceExisting } = deviceRegistration(req.body);
+    const deviceId = requestedId ?? randomUUID();
     const deviceToken = randomBytes(32).toString('base64url');
-    bridge.registry.register({ deviceId, token: deviceToken, displayName });
+    const existing = requestedId === undefined ? null : bridge.registry.get(requestedId);
+    if (existing !== null && replaceExisting !== true) fail('REQUEST_CONFLICT', 'Device already registered');
+    if (existing === null) {
+      bridge.registry.register({ deviceId, token: deviceToken, displayName });
+      bridge.registry.updateMetadata(deviceId, { platform });
+      return reply.code(201).send({ deviceId, deviceToken, displayName, platform });
+    }
+    // 以既有身份重绑：轮换新令牌（仅存哈希），保留 Bot/会话/全部记录，按输入
+    // 更新名称与平台；notify 使仍持有旧凭据的 SSE 流失效。
+    bridge.registry.rotate({ deviceId, token: deviceToken });
+    bridge.registry.rename(deviceId, displayName);
     bridge.registry.updateMetadata(deviceId, { platform });
-    return reply.code(201).send({ deviceId, deviceToken, displayName, platform });
+    notify(deviceId);
+    return reply.code(200).send({ deviceId, deviceToken, displayName, platform });
   }, true);
   route('PATCH', '/api/devices/:deviceId', req => {
     const { deviceId } = req.params;

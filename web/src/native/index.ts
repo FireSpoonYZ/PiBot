@@ -25,6 +25,27 @@ export type HostPhase = 'stopped'|'starting'|'running'|'stopping'|'failed';
 export type HostSnapshot = { phase: HostPhase; deviceId: string|null; lastUpdated: number; errorCode: string|null; restartRequired: boolean; workspace?: string|null };
 export type CenterConnectionStatus = { state: 'disconnected' | 'connecting' | 'ready'; centerUrl: string; appliedRevision: number | null; error: {code: string; message: string} | null };
 export type CenterSettings = { url: string; ca: string; tokenConfigured: boolean };
+/** C7 首启配对（mobileLocalRequest('pairCenter')）：owner 密码只经原生换绑定，结果不含任何 token。 */
+export type PairCenterResult = {
+  centerUrl: string;
+  deviceId: string;
+  displayName: string;
+  /** 原生已完成设备登记并保存 Host/client 凭据；true 时可用已存凭据重连，不得重复登记。 */
+  hostConfigured: boolean;
+  /** 原生已请求既有连接入口；不等于已就绪，真实状态仍由 center_status 轮询判定。 */
+  connectionRequested: boolean;
+  warnings?: { code: string; message: string }[];
+};
+/** C7 权限/后台真实状态（mobileLocalRequest('onboardingStatus')）：只查询，不启动服务或授权。 */
+export type OnboardingStatus = {
+  notificationsGranted: boolean;
+  batteryUnrestricted: boolean;
+  shizukuInstalled: boolean;
+  shizukuRunning: boolean;
+  shizukuGranted: boolean;
+};
+/** C7 权限动作（mobileLocalRequest('onboardingAction')）：仅发起系统请求/页面，requested 不代表已授权。 */
+export type OnboardingActionName = 'notifications' | 'battery-settings' | 'shizuku-permission' | 'shizuku-manager';
 export type HostStatus = HostSnapshot & { center?: CenterConnectionStatus };
 export type HostSettingsModel = {
   id: string; name?: string; reasoning?: boolean; contextWindow?: number; maxTokens?: number;

@@ -35,7 +35,9 @@ const PREPARE_TIMEOUT_MS = 300_000;
 const CANCEL_TIMEOUT_MS = 5_000;
 // 给同步注销留出时间；超时后由强制关闭和 guardian 完成清理。
 const RELEASE_TIMEOUT_MS = 15_000;
-const SHUTDOWN_GRACE_MS = 2_000;
+// EOF 后给原生宿主最多 20 s 完成 RDP 注销与 guardian 恢复，再由强杀兜底；
+// 过短的 grace 会提前砍掉还在清理的 guardian。
+const SHUTDOWN_GRACE_MS = 20_000;
 const EXIT_WAIT_MS = SHUTDOWN_GRACE_MS + 1_000;
 const MAX_REQUEST_BYTES = 1024 * 1024;
 // contract：原生整行 base64 帧上限 2 MiB。

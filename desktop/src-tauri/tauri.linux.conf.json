@@ -3,11 +3,37 @@
   "bundle": {
     "linux": {
       "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "tigervnc-standalone-server",
+          "xfwm4 | openbox",
+          "xfdesktop4",
+          "xfce4-panel",
+          "xfconf",
+          "xfce4-terminal",
+          "xauth",
+          "dbus",
+          "xdotool",
+          "ffmpeg"
+        ],
         "files": {
           "/usr/lib/systemd/user/e-launcher-host.service": "../linux/e-launcher-host.service"
         }
       },
       "rpm": {
+        "depends": [
+          "tigervnc-server",
+          "(xfwm4 or openbox)",
+          "xfdesktop",
+          "xfce4-panel",
+          "xfconf",
+          "xfce4-terminal",
+          "xorg-x11-xauth",
+          "dbus",
+          "xdotool",
+          "(ffmpeg-free or ffmpeg)"
+        ],
         "files": {
           "/usr/lib/systemd/user/e-launcher-host.service": "../linux/e-launcher-host.service"
         }

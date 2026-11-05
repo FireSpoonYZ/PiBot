@@ -3,7 +3,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -19,7 +19,11 @@ use crate::util::{now_iso, write_atomic, AppError, AppResult};
 pub const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 pub const BACKOFF_RESET_UPTIME: Duration = Duration::from_secs(5 * 60);
 pub const BACKOFF_MAX: Duration = Duration::from_secs(60);
-const CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Graceful stop budget for the Node Host: stdin shutdown -> service.close()
+/// which first lets the native shower host release RDP/guardian (~20s inside).
+const CHILD_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
+/// Bound for each escalation step once the graceful budget is spent.
+const ESCALATION_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_POLL: Duration = Duration::from_secs(1);
 const TICK: Duration = Duration::from_millis(200);
 
@@ -229,14 +233,17 @@ fn host_command(paths: &HostPaths, config: &Config, secrets: &Secrets, runtime: 
     for key in process::SCRUBBED_ENV {
         cmd.env_remove(key);
     }
-    cmd.envs(&config.env);
-    for (key, value) in &secrets.entries {
-        cmd.env(key, value);
+    for (key, value) in config.env.iter().chain(secrets.entries.iter().map(|(k, v)| (k, v))) {
+        if process::config_env_allowed(key) {
+            cmd.env(key, value);
+        }
     }
     if let Some(shower) = &runtime.shower {
         cmd.env("E_LAUNCHER_SHOWER_WINDOWS_EXE", shower);
     }
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // stdin stays piped so "shutdown" can be written for a graceful stop;
+    // EOF alone never stops the Host.
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd
 }
 
@@ -255,27 +262,38 @@ fn wait_timeout(child: &mut Child, timeout: Duration) -> Option<Option<i32>> {
     }
 }
 
-/// Forwards termination to the Host and waits up to 10s, then kills it.
-fn shutdown_child(child: &mut Child) -> Option<i32> {
+/// Graceful stop: the Host reads "shutdown" on stdin and awaits
+/// service.close(), which lets the native shower host release RDP/guardian
+/// before we ever kill. When stdin cannot be written (e.g. a broken pipe) the
+/// bounded escalation is the only stop left; an adopted process we did not
+/// spawn is handled by the caller.
+fn shutdown_child(child: &mut Child, stdin: Option<ChildStdin>) -> Option<i32> {
     if let Ok(Some(status)) = child.try_wait() {
         return status.code();
+    }
+    if let Some(mut stdin) = stdin {
+        if stdin.write_all(b"shutdown\n").and_then(|_| stdin.flush()).is_ok() {
+            drop(stdin);
+            if let Some(code) = wait_timeout(child, CHILD_SHUTDOWN_TIMEOUT) {
+                return code;
+            }
+        }
     }
     #[cfg(unix)]
     {
         process::terminate(child.id());
-        if let Some(code) = wait_timeout(child, CHILD_STOP_TIMEOUT) {
+        if let Some(code) = wait_timeout(child, ESCALATION_TIMEOUT) {
             return code;
         }
     }
     #[cfg(windows)]
     {
+        // No SIGTERM equivalent here; the graceful budget above already gave
+        // the native layers their cleanup window, so this kill is not early.
         process::kill_tree(child.id());
     }
     let _ = child.kill();
-    match wait_timeout(child, CHILD_STOP_TIMEOUT) {
-        Some(code) => code,
-        None => None,
-    }
+    wait_timeout(child, ESCALATION_TIMEOUT).unwrap_or(None)
 }
 
 enum Outcome {
@@ -340,45 +358,17 @@ pub fn run(paths: &HostPaths) -> AppResult<Value> {
 
     let mut attempt: u32 = 0;
     if process::port_open(config.port) {
-        let adopted_pid = process::listening_pid(config.port);
-        status.host_pid = adopted_pid;
-        write_status(paths, &status, &log);
-        log_event(
-            &log,
-            &format!(
-                "adopted existing host listening on 127.0.0.1:{} pid={}",
-                config.port,
-                adopted_pid.map_or_else(|| "unknown".to_string(), |p| p.to_string())
+        // A listener we did not spawn cannot receive the stdin shutdown and is
+        // not provably our Host by port/pid alone, so it is never adopted and
+        // never killed: the operator stops the old Host first.
+        log_event(&log, &format!("port 127.0.0.1:{} already in use; refusing to start", config.port));
+        return Err(AppError::new(
+            "PORT_IN_USE",
+            format!(
+                "127.0.0.1:{} is already in use; run 'e-launcher-host stop' (or free the port) before starting the Host",
+                config.port
             ),
-        );
-        let mut last_probe = Instant::now();
-        let stopped = loop {
-            if watch.requested(&log) {
-                if let Some(pid) = adopted_pid {
-                    process::kill_tree(pid);
-                }
-                status.host_pid = None;
-                status.last_exit = Some(LastExit { code: Some(0), at: now_iso() });
-                break true;
-            }
-            if last_probe.elapsed() >= STOP_POLL {
-                last_probe = Instant::now();
-                if !process::port_open(config.port) {
-                    log_event(&log, "adopted host exited; switching to bundled host");
-                    status.host_pid = None;
-                    write_status(paths, &status, &log);
-                    break false;
-                }
-            }
-            std::thread::sleep(TICK);
-        };
-        if stopped {
-            write_status(paths, &status, &log);
-            log_event(&log, "launcher exiting");
-            process::remove_file_quiet(&paths.stop_request);
-            drop(lock);
-            return Ok(json!({ "status": "stopped" }));
-        }
+        ));
     }
     loop {
         if watch.requested(&log) {
@@ -387,6 +377,7 @@ pub fn run(paths: &HostPaths) -> AppResult<Value> {
         let spawned_at = Instant::now();
         let exit_code = match host_command(paths, &config, &secrets, &runtime).spawn() {
             Ok(mut child) => {
+                let child_stdin = child.stdin.take();
                 status.host_pid = Some(child.id());
                 write_status(paths, &status, &log);
                 log_event(&log, &format!("host started pid={}", child.id()));
@@ -399,7 +390,7 @@ pub fn run(paths: &HostPaths) -> AppResult<Value> {
                 match supervise(&mut child, &mut watch, &log) {
                     Outcome::Exited(code) => code,
                     Outcome::Stop => {
-                        let code = shutdown_child(&mut child);
+                        let code = shutdown_child(&mut child, child_stdin);
                         log_event(&log, &format!("host stopped code={}", fmt_code(code)));
                         status.host_pid = None;
                         status.last_exit = Some(LastExit { code, at: now_iso() });

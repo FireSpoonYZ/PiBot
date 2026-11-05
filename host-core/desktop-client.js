@@ -50,7 +50,7 @@ const MAX_CA_PEM_BYTES = 65536; // 64 KiB
 const MAX_ERROR_MESSAGE_BYTES = 512;
 const STABLE_ERROR_CODES = new Set([...CONTROL_ERROR_CODES, 'REPLACED', 'PENDING_BUSY', 'CERTIFICATE_ERROR']);
 const LOCAL_OFFLINE_OPS = new Set(['pending_enqueue', 'pending_get', 'pending_list', 'pending_cancel', 'ui_get', 'ui_set']);
-const CENTER_LIFECYCLE_OPS = new Set(['center_connect', 'center_status', 'center_disconnect', 'status', 'disconnect', 'unobserve']);
+const CENTER_LIFECYCLE_OPS = new Set(['center_connect', 'center_status', 'center_disconnect', 'center_store', 'status', 'disconnect', 'unobserve']);
 
 function isPlainObject(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -306,13 +306,25 @@ export function openDesktopClient(options) {
     }
   }
 
-  function writeSavedCenterCredentials(record) {
-    if (!persistCenterCredentials) return;
+  // strict=false: best-effort persist (normal connect path) — returns whether
+  // the record landed. strict=true: throws STORE_FAILED so center_store can
+  // report honestly. Writes go through a same-dir unique tmp + atomic rename so
+  // a crash never leaves a truncated credentials file.
+  function writeSavedCenterCredentials(record, strict = false) {
+    const fail = () => {
+      if (strict) throw brokerError('STORE_FAILED', 'not-sent', 'failed to persist center credentials');
+      return false;
+    };
+    if (!persistCenterCredentials) return fail();
+    const tmpFile = credentialsFile + '.' + process.pid + '.' + Date.now() + '.tmp';
     try {
       fs.mkdirSync(resolvedDataRoot, { recursive: true });
-      fs.writeFileSync(credentialsFile, JSON.stringify(record), { encoding: 'utf8', mode: 0o600 });
+      fs.writeFileSync(tmpFile, JSON.stringify(record), { encoding: 'utf8', mode: 0o600 });
+      fs.renameSync(tmpFile, credentialsFile);
+      return true;
     } catch {
-      /* ignore write errors */
+      try { fs.unlinkSync(tmpFile); } catch { /* best-effort cleanup */ }
+      return fail();
     }
   }
 
@@ -622,6 +634,48 @@ export function openDesktopClient(options) {
     if (previous) await previous.close();
     return centerStatus();
   }
+
+  // UI-local: persists user-authorized device credentials for later reconnects
+  // (invoked by desktop_host_pair/adopt after the launcher registered). No
+  // network and no Host lifecycle — but any in-flight center session for the
+  // previous binding is torn down first so a late success cannot overwrite the
+  // new record.
+  async function opCenterStore(params) {
+    rejectUnknownFields(params, new Set(['url', 'deviceId', 'deviceToken', 'ca']), 'center_store params');
+    const credentials = {
+      url: params.url,
+      deviceId: params.deviceId,
+      deviceToken: params.deviceToken,
+      ca: params.ca ?? '',
+    };
+    validateCenterUrl(credentials.url);
+    try {
+      assertId(credentials.deviceId, 'deviceId');
+      assertDeviceToken(credentials.deviceToken);
+    } catch (err) {
+      throw invalid(err.message);
+    }
+    if (credentials.ca !== '') validateCaPem(credentials.ca);
+    cancelCenterRetry();
+    const myGeneration = (centerGeneration += 1);
+    centerCredentials = null;
+    centerState = 'disconnected';
+    centerError = null;
+    endConnectionObservations({ code: 'CANCELLED', message: 'center credentials replaced', outcome: 'unconfirmed' });
+    dropTransportForCenter();
+    abortCenterRequests();
+    const previous = centerClient;
+    centerClient = null;
+    if (previous) await previous.close();
+    // A concurrent connect/store could have bumped the generation while we were
+    // closing — if so, let it win instead of overwriting it with this record.
+    if (centerGeneration !== myGeneration) {
+      throw brokerError('CANCELLED', 'not-sent', 'center store superseded');
+    }
+    writeSavedCenterCredentials(credentials, true);
+    return centerStatus();
+  }
+
   async function ownerOperation(params, signal, kind) {
     const allowed = kind === 'session' ? [] : kind === 'login' ? ['password'] : kind === 'get' ? ['deviceId', 'botId'] : ['deviceId', 'botId', 'expectedRevision', 'value'];
     rejectUnknownFields(params, new Set(allowed), `center owner ${kind} params`);
@@ -1682,6 +1736,7 @@ export function openDesktopClient(options) {
     ['center_connect', opCenterConnect],
     ['center_status', opCenterStatus],
     ['center_disconnect', opCenterDisconnect],
+    ['center_store', opCenterStore],
     ['center_owner_session', (params, signal) => ownerOperation(params, signal, 'session')],
     ['center_owner_login', (params, signal) => ownerOperation(params, signal, 'login')],
     ['center_bot_model_get', (params, signal) => ownerOperation(params, signal, 'get')],

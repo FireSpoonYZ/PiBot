@@ -1769,6 +1769,11 @@ export interface OpenRelayServerOptions {
   port?: number;
   listenHost?: string;
   tls?: { cert: string; key: string };
+  /**
+   * 'proxy' declares an upstream TLS-terminating proxy: the only way a
+   * non-loopback plaintext WS bind is permitted. Cannot be combined with tls.
+   */
+  tlsTermination?: 'proxy';
 }
 
 export interface RelayServer {

@@ -26,12 +26,14 @@ namespace ELauncher.Shower
             {
                 if (args == null || args.Length == 0)
                 {
-                    HostLog.Warn("usage: shower-windows host --state-dir <absolute directory> | agent --pipe <name> --session-id <n> | bootstrap-<step>");
+                    HostLog.Warn("usage: shower-windows host --state-dir <absolute directory> | agent --pipe <name> --session-id <n> | bootstrap-<step> | host-task <install|enable|disable|start|status|remove> | shower-setup --state-dir <absolute directory>");
                     return 2;
                 }
                 string command = args[0];
                 if (string.Equals(command, "host", StringComparison.Ordinal)) return RdpHost.Run(Tail(args));
                 if (string.Equals(command, "agent", StringComparison.Ordinal)) return RunAgent(Tail(args));
+                if (string.Equals(command, "host-task", StringComparison.Ordinal)) return HostLoginTask.Run(Tail(args));
+                if (string.Equals(command, "shower-setup", StringComparison.Ordinal)) return RdpHost.RunOnboarding(Tail(args));
                 if (command != null && command.StartsWith("bootstrap-", StringComparison.Ordinal)) return SessionBootstrap.Run(args);
                 HostLog.Warn("unknown command: " + command);
                 return 2;

@@ -22,14 +22,24 @@ use std::os::windows::process::CommandExt;
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 use serde_json::{Map, Value, json};
-use tauri::{Webview, utils::platform};
+use tauri::{AppHandle, State, Webview, utils::platform};
 
-use crate::{bridge::BridgeError, ensure_main_webview};
+use crate::{
+  bridge::{BridgeError, DesktopBridge},
+  ensure_main_webview,
+};
 
 const LAUNCHER_NAME: &str = "e-launcher-host";
-const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
-const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
-const PAIR_TIMEOUT: Duration = Duration::from_secs(60);
+/// status probes the supervisor plus the authenticated /v1/service ready check.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(35);
+/// pair registers over HTTPS and persists config/secrets: identity read ~30s
+/// + 4x60s network worst case + ~75s stop + status/ready probe per the
+/// launcher's own budget (~380s), rounded up with margin.
+const PAIR_TIMEOUT: Duration = Duration::from_secs(420);
+/// setup-shower stops the Host, runs the native onboarding (UAC + credential
+/// prompt + temporary RDP child), then restores the Host; the launcher keeps
+/// its restart reserve inside this outer budget.
+const SETUP_SHOWER_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// How long to keep collecting stdout after the launcher exited. A detached
 /// grandchild (`run`) may inherit the pipe, so EOF is not guaranteed.
@@ -37,7 +47,8 @@ const OUTPUT_GRACE: Duration = Duration::from_millis(500);
 const MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
 const MAX_SECRET_BYTES: usize = 4096;
 const MAX_CA_BYTES: usize = 64 * 1024;
-const CA_FILE_NAME: &str = "center-ca.pem";
+const CA_FILE_PREFIX: &str = "center-ca-";
+const CONFIG_FILE_NAME: &str = "config.json";
 /// Secret-bearing variables the launcher prefers over stdin; never inherit them
 /// from the desktop process so the stdin value is always the one used.
 const SECRET_ENV_KEYS: &[&str] = &[
@@ -45,7 +56,7 @@ const SECRET_ENV_KEYS: &[&str] = &[
   "E_LAUNCHER_RELAY_TOKEN",
   "E_LAUNCHER_CONTROL_TOKEN",
 ];
-const CONTROL_ACTIONS: &[&str] = &["start", "stop", "restart", "enable", "disable"];
+const CONTROL_ACTIONS: &[&str] = &["start", "stop", "restart", "enable", "disable", "setup-shower"];
 
 fn invalid(message: &str) -> BridgeError {
   BridgeError::new("INVALID_ARGUMENT", message, "not-sent")
@@ -277,8 +288,55 @@ fn host_home() -> Option<PathBuf> {
   }
 }
 
-/// Persists an optional self-signed center CA so the Host can use `--center-ca-file`.
-fn write_center_ca(pem: &str) -> Result<PathBuf, BridgeError> {
+/// A center CA written to its own unique file — the previously configured CA
+/// is never touched, and the launcher config simply records this path. On drop
+/// the file is removed only when pairing provably failed AND config.json does
+/// not reference it; ambiguous outcomes (launcher timeout after it may have
+/// persisted the config, unreadable config) conservatively keep the file.
+struct StagedCa {
+  path: PathBuf,
+  home: PathBuf,
+  committed: bool,
+}
+
+impl StagedCa {
+  fn commit(mut self) {
+    self.committed = true;
+  }
+
+  /// True only when config.json was read and does not point at this file.
+  /// A missing config counts as unreferenced; every other ambiguity (read
+  /// error, unparseable JSON) reports "still referenced" so nothing committed
+  /// is deleted by accident.
+  fn referenced_nowhere(&self) -> bool {
+    let text = match fs::read_to_string(self.home.join(CONFIG_FILE_NAME)) {
+      Ok(text) => text,
+      Err(e) => return e.kind() == std::io::ErrorKind::NotFound,
+    };
+    let config: Value = match serde_json::from_str(&text) {
+      Ok(config) => config,
+      Err(_) => return false,
+    };
+    match config.get("centerCaFile").and_then(Value::as_str) {
+      Some(current) => current != self.path.to_string_lossy().as_ref(),
+      None => true,
+    }
+  }
+}
+
+impl Drop for StagedCa {
+  fn drop(&mut self) {
+    if self.committed || !self.referenced_nowhere() {
+      return;
+    }
+    let _ = fs::remove_file(&self.path);
+  }
+}
+
+/// Validates the PEM and writes it under a fresh unique name in HOST_HOME via
+/// create_new, so an existing CA can never be overwritten. The PEM itself is
+/// neither returned nor logged — only the path flows to the launcher.
+fn stage_center_ca(pem: &str) -> Result<StagedCa, BridgeError> {
   let pem = pem.trim();
   if pem.len() > MAX_CA_BYTES || !pem.contains("-----BEGIN CERTIFICATE-----") {
     return Err(invalid("invalid center CA certificate"));
@@ -287,10 +345,34 @@ fn write_center_ca(pem: &str) -> Result<PathBuf, BridgeError> {
     .ok_or_else(|| BridgeError::new("STORE_FAILED", "failed to resolve host service directory", "not-sent"))?;
   fs::create_dir_all(&home)
     .map_err(|_| BridgeError::new("STORE_FAILED", "failed to create host service directory", "not-sent"))?;
-  let path = home.join(CA_FILE_NAME);
-  fs::write(&path, format!("{pem}\n"))
-    .map_err(|_| BridgeError::new("STORE_FAILED", "failed to write center CA file", "not-sent"))?;
-  Ok(path)
+  let stamp = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.as_nanos())
+    .unwrap_or(0);
+  for attempt in 0..4u32 {
+    let path = home.join(format!("{CA_FILE_PREFIX}{stamp:x}-{}-{attempt}.pem", std::process::id()));
+    match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+      Ok(mut file) => {
+        file
+          .write_all(format!("{pem}\n").as_bytes())
+          .map_err(|_| BridgeError::new("STORE_FAILED", "failed to write center CA file", "not-sent"))?;
+        return Ok(StagedCa { path, home, committed: false });
+      }
+      Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+      Err(_) => {
+        return Err(BridgeError::new(
+          "STORE_FAILED",
+          "failed to write center CA file",
+          "not-sent",
+        ));
+      }
+    }
+  }
+  Err(BridgeError::new(
+    "STORE_FAILED",
+    "failed to allocate a center CA file name",
+    "not-sent",
+  ))
 }
 
 fn local_hostname() -> Option<String> {
@@ -309,13 +391,26 @@ fn is_running(status: &Value) -> bool {
   status.get("running").and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// Per-action outer budgets matching the launcher's own worst cases: graceful
+/// stops wait on Node stdin shutdown, enable/disable may sit on a UAC prompt.
+fn control_timeout(action: &str) -> Duration {
+  match action {
+    "start" => Duration::from_secs(60),
+    "stop" => Duration::from_secs(85),
+    "restart" => Duration::from_secs(145),
+    "enable" | "disable" => Duration::from_secs(400),
+    "setup-shower" => SETUP_SHOWER_TIMEOUT,
+    _ => Duration::from_secs(60),
+  }
+}
+
 /// Starts the Host, or restarts it when already running so a fresh config is loaded.
 fn start_or_restart() -> Result<Value, BridgeError> {
   let running = run_launcher(&["status".to_string()], None, STATUS_TIMEOUT)
     .map(|status| is_running(&status))
     .unwrap_or(false);
   let action = if running { "restart" } else { "start" };
-  run_launcher(&[action.to_string()], None, CONTROL_TIMEOUT)
+  run_launcher(&[action.to_string()], None, control_timeout(action))
 }
 
 #[tauri::command]
@@ -323,20 +418,73 @@ pub async fn desktop_host_status(webview: Webview) -> Result<Value, BridgeError>
   ensure_main_webview(&webview)?;
   run_blocking(|| {
     let mut status = run_launcher(&["status".to_string()], None, STATUS_TIMEOUT)?;
-    if let (Some(obj), Some(name)) = (status.as_object_mut(), local_hostname()) {
-      obj.entry("hostname").or_insert(Value::String(name));
+    if let Some(obj) = status.as_object_mut() {
+      if let Some(name) = local_hostname() {
+        obj.entry("hostname").or_insert(Value::String(name));
+      }
+      // Static knowledge: lets the UI gate Windows-only actions even if an
+      // older launcher build omits the field.
+      obj.entry("platform").or_insert(Value::String(
+        if cfg!(windows) { "windows" } else { "linux" }.to_string(),
+      ));
     }
     Ok(status)
   })
   .await
 }
 
+/// Persists the just-registered client credentials through the broker's own
+/// `center_store` op (single writer of center-credentials.json). Called only
+/// after the launcher pair/adopt actually succeeded, so user-authorized new
+/// bindings replace the old client credentials. Never throws into the
+/// command — the outcome is reported via `clientCredentialsSaved`/`storeError`.
+async fn store_client_credentials(
+  app: &AppHandle,
+  bridge: &DesktopBridge,
+  result: &mut Value,
+  url: String,
+  device_id: String,
+  device_token: String,
+  ca: String,
+) {
+  let stored = bridge
+    .request(
+      app,
+      "center_store",
+      json!({
+        "url": url,
+        "deviceId": device_id,
+        "deviceToken": device_token,
+        "ca": ca,
+      }),
+    )
+    .await;
+  if let Some(obj) = result.as_object_mut() {
+    match &stored {
+      Ok(_) => {
+        obj.insert("clientCredentialsSaved".to_string(), json!(true));
+      }
+      Err(e) => {
+        obj.insert("clientCredentialsSaved".to_string(), json!(false));
+        obj.insert(
+          "storeError".to_string(),
+          serde_json::to_value(e)
+            .unwrap_or_else(|_| json!({"code": "INTERNAL", "message": "credential store failed"})),
+        );
+      }
+    }
+  }
+}
+
 #[tauri::command]
 pub async fn desktop_host_pair(
+  app: AppHandle,
   webview: Webview,
+  bridge: State<'_, DesktopBridge>,
   center_url: String,
   password: String,
   display_name: Option<String>,
+  center_ca: Option<String>,
   force: Option<bool>,
 ) -> Result<Value, BridgeError> {
   ensure_main_webview(&webview)?;
@@ -346,26 +494,55 @@ pub async fn desktop_host_pair(
     Some(name) if !name.is_empty() => Some(validate_display_name(name)?),
     _ => None,
   };
+  let center_ca = center_ca.filter(|pem| !pem.trim().is_empty());
+  let store_ca = center_ca.clone();
   let force = force.unwrap_or(false);
-  run_blocking(move || {
+  let mut result = run_blocking(move || {
+    let staged = match center_ca {
+      Some(pem) => Some(stage_center_ca(&pem)?),
+      None => None,
+    };
     let mut args = vec!["pair".to_string(), "--center-url".to_string(), center_url];
     if let Some(name) = display_name {
       args.push("--name".to_string());
       args.push(name);
     }
+    if let Some(staged) = &staged {
+      args.push("--center-ca-file".to_string());
+      args.push(staged.path.to_string_lossy().into_owned());
+    }
     if force {
       args.push("--force".to_string());
     }
-    let result = run_launcher(&args, Some(password.as_str()), PAIR_TIMEOUT)?;
+    let result = run_launcher(&args, Some(password.as_str()), PAIR_TIMEOUT);
     drop(password);
-    Ok(result)
+    // Commit the staged CA only once pairing actually wrote the new config;
+    // a failure drops the guard and restores the previous CA bytes.
+    if result.is_ok() {
+      if let Some(staged) = staged {
+        staged.commit();
+      }
+    }
+    result
   })
-  .await
+  .await?;
+  // Persist client credentials right after registration — long enable/start
+  // steps (and any window close during them) must not lose the token.
+  if let (Some(url), Some(device_id), Some(device_token)) = (
+    result.get("centerUrl").and_then(Value::as_str).map(str::to_owned),
+    result.get("deviceId").and_then(Value::as_str).map(str::to_owned),
+    result.get("deviceToken").and_then(Value::as_str).map(str::to_owned),
+  ) {
+    store_client_credentials(&app, &bridge, &mut result, url, device_id, device_token, store_ca.unwrap_or_default()).await;
+  }
+  Ok(result)
 }
 
 #[tauri::command]
 pub async fn desktop_host_adopt(
+  app: AppHandle,
   webview: Webview,
+  bridge: State<'_, DesktopBridge>,
   center_url: String,
   device_id: String,
   device_token: String,
@@ -376,8 +553,14 @@ pub async fn desktop_host_adopt(
   let device_id = validate_device_id(&device_id)?;
   let device_token = device_token.trim().to_string();
   validate_secret(&device_token, "device token is required")?;
+  let store_token = device_token.clone();
   let center_ca = center_ca.filter(|pem| !pem.trim().is_empty());
-  run_blocking(move || {
+  let store_ca = center_ca.clone();
+  let result = run_blocking(move || {
+    let staged = match center_ca {
+      Some(pem) => Some(stage_center_ca(&pem)?),
+      None => None,
+    };
     let mut args = vec![
       "adopt".to_string(),
       "--center-url".to_string(),
@@ -385,26 +568,66 @@ pub async fn desktop_host_adopt(
       "--device-id".to_string(),
       device_id,
     ];
-    if let Some(pem) = center_ca {
-      let ca_path = write_center_ca(&pem)?;
+    if let Some(staged) = &staged {
       args.push("--center-ca-file".to_string());
-      args.push(ca_path.to_string_lossy().into_owned());
+      args.push(staged.path.to_string_lossy().into_owned());
     }
     let adopt = run_launcher(&args, Some(device_token.as_str()), PAIR_TIMEOUT)?;
     drop(device_token);
-    let enable = run_launcher(&["enable".to_string()], None, CONTROL_TIMEOUT)?;
-    let start = if adopt.get("restarted").and_then(Value::as_bool) == Some(true) {
+    // adopt already wrote the config referencing the CA path; enable/start
+    // failures must not roll back the file the new config now needs.
+    if let Some(staged) = staged {
+      staged.commit();
+    }
+    Ok(adopt)
+  })
+  .await?;
+  let restarted = result.get("restarted").and_then(Value::as_bool) == Some(true);
+  let adopt_url = result.get("centerUrl").and_then(Value::as_str).map(str::to_owned);
+  let adopt_device_id = result.get("deviceId").and_then(Value::as_str).map(str::to_owned);
+  let mut out = json!({ "adopt": result });
+  // Same safety net as pair: persist the adopted client credentials BEFORE the
+  // long enable/start (UAC) — a window close must never strand the adopt flow.
+  if let (Some(url), Some(device_id)) = (adopt_url, adopt_device_id) {
+    store_client_credentials(&app, &bridge, &mut out, url, device_id, store_token, store_ca.unwrap_or_default()).await;
+  }
+  // enable/start run after the credentials are safe; failures are reported as
+  // retryable warnings on the adopt result — never as a failed command.
+  let post = run_blocking(move || {
+    let mut warnings: Vec<Value> = Vec::new();
+    let enable = match run_launcher(&["enable".to_string()], None, control_timeout("enable")) {
+      Ok(value) => value,
+      Err(e) => {
+        warnings.push(json!({ "code": e.code, "message": e.message }));
+        json!({ "error": { "code": e.code, "message": e.message } })
+      }
+    };
+    let start = if restarted {
       json!({ "status": "restarted" })
     } else {
-      start_or_restart()?
+      match start_or_restart() {
+        Ok(value) => value,
+        Err(e) => {
+          warnings.push(json!({ "code": e.code, "message": e.message }));
+          json!({ "error": { "code": e.code, "message": e.message } })
+        }
+      }
     };
-    let mut out = Map::new();
-    out.insert("adopt".to_string(), adopt);
-    out.insert("enable".to_string(), enable);
-    out.insert("start".to_string(), start);
-    Ok(Value::Object(out))
+    let mut post = Map::new();
+    post.insert("enable".to_string(), enable);
+    post.insert("start".to_string(), start);
+    if !warnings.is_empty() {
+      post.insert("warnings".to_string(), Value::Array(warnings));
+    }
+    Ok(Value::Object(post))
   })
-  .await
+  .await?;
+  if let (Some(obj), Some(post)) = (out.as_object_mut(), post.as_object()) {
+    for (key, value) in post {
+      obj.insert(key.clone(), value.clone());
+    }
+  }
+  Ok(out)
 }
 
 #[tauri::command]
@@ -413,5 +636,6 @@ pub async fn desktop_host_control(webview: Webview, action: String) -> Result<Va
   if !CONTROL_ACTIONS.contains(&action.as_str()) {
     return Err(invalid("unsupported host control action"));
   }
-  run_blocking(move || run_launcher(&[action], None, CONTROL_TIMEOUT)).await
+  let timeout = control_timeout(&action);
+  run_blocking(move || run_launcher(&[action], None, timeout)).await
 }
