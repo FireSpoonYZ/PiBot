@@ -748,6 +748,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   // Hermes 学习驱动（Host learning contract）：自动完结上报、next→agent.run→respond
   // 驱动与受限 review 工具面；配置/计数/作业持久化全在 Center learning 服务，
   // 本实例不持久化任何学习状态，驱动失败如实回执，绝不伪造完成。
+  let learningModelRefs = new Set();
   const learning = createBotLearning({
     host,
     getHarness: () => harness,
@@ -755,6 +756,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     getBotModels,
     getCenterClient: () => centerRuntime.getClient(),
     plugins,
+    schedules,
+    getUsableModelRefs: () => learningModelRefs,
     registry,
     context: CTX,
     openPrimaryConversation: (bot) => getPrimaryConversation(harness, bot, {}, CTX),
@@ -1550,6 +1553,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       const nextRegistryKey = centerRegistryKey(snapshot);
       if (nextRegistryKey !== registryKey) {
         applyCenterModels(snapshot, models);
+        learningModelRefs = new Set(snapshot.providers
+          .filter((provider) => provider.enabled && (provider.credentialRef == null || snapshot.credentials?.[provider.credentialRef]))
+          .flatMap((provider) => (snapshot.models[provider.id] ?? []).filter((model) => model.enabled).map((model) => provider.id + '/' + model.id)));
         registryKey = nextRegistryKey;
       }
       centerConfigured = true;

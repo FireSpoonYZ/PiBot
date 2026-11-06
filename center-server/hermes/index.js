@@ -6,7 +6,7 @@ import { yaml } from '../skills/upstream.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CHILD = join(HERE, 'python', 'child.py');
-const METHODS = new Set(['agent.run', 'skill.call', 'memory.call', 'yaml.parse']);
+const METHODS = new Set(['agent.run', 'skill.call', 'memory.call', 'schedule.call', 'yaml.parse']);
 const MODES = new Set(['review', 'learn', 'curate']);
 const MAX_LINE_BYTES = 64 * 1024 * 1024;
 const STDERR_TAIL_BYTES = 64 * 1024;

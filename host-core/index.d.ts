@@ -1326,14 +1326,26 @@ export interface BotSkillInput {
 
 export type BotLearningAction = 'status' | 'configure' | 'learn' | 'review' | 'curate' | 'cancel';
 
-/** Tool/runtime-level learning input; Host maps learn/review/curate to the Center start action. */
+/** CAS settings patch; auxiliary refs never introduce new provider credentials. */
+export interface BotLearningSettingsPatch {
+  enabled?: boolean;
+  reviewModelRef?: string | null;
+  curatorModelRef?: string | null;
+  review?: { memoryEvery?: number; skillEvery?: number };
+  curator?: { enabled?: boolean; intervalHours?: number; minIdleHours?: number; staleAfterDays?: number; archiveAfterDays?: number; consolidate?: boolean; paused?: boolean };
+  budget?: { maxIterations?: number; maxInputTokens?: number | null; callTimeoutMs?: number; jobTimeoutMs?: number; pollTimeoutMs?: number };
+}
+
+/** Tool/runtime-level input; Host maps learn/review/curate to the Center start action. */
 export interface BotLearningInput {
   action: BotLearningAction;
   jobId?: string;
   focus?: string;
   snapshot?: Record<string, unknown>;
-  /** Learning settings applied with configure; fields are owned by the Center learning service. */
-  config?: Record<string, unknown>;
+  /** Manual learn only; at most 16 explicit local files/directories or http(s) URLs. */
+  sources?: string[];
+  /** Null auxiliary refs follow the Bot; other refs must already be usable on its Host. */
+  config?: BotLearningSettingsPatch;
   expectedRevision?: number;
   requestId?: string;
 }

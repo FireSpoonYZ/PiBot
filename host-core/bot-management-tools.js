@@ -97,17 +97,23 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
         'active/last job), configure (settings plus expectedRevision CAS), learn/review/curate ' +
         '(start a Host-driven background job and return its job receipt — the job is not finished ' +
         'when the call returns; poll status for the outcome), cancel (jobId or the active job). ' +
-        'learn/review/curate only work where the target Bot runs.',
+        'learn/review/curate only work where the target Bot runs. learn accepts explicit sources ' +
+        '(local paths or http(s) URLs); material tools never run in review/curate. Auxiliary model refs must already be usable on that Host.',
       properties: {
         deviceId: ID_SCHEMA,
         botId: ID_SCHEMA,
         action: { type: 'string', enum: LEARNING_ACTIONS },
         jobId: ID_SCHEMA,
         focus: { type: 'string' },
+        sources: { type: 'array', maxItems: 16, items: { type: 'string', minLength: 1, maxLength: 4096 }, description: 'Manual learn only: explicit files/directories relative to target Bot cwd, or http(s) URLs. Never infer sources from focus.' },
         requestId: ID_SCHEMA,
         config: {
           type: 'object',
-          description: 'Learning settings to apply with configure (for example enabled and interval fields).',
+          description: 'Learning settings with CAS: enabled, review, curator, budget, reviewModelRef, curatorModelRef. Null model refs follow the Bot model; explicit refs must be configured and usable on this Host.',
+          properties: {
+            reviewModelRef: { type: ['string', 'null'] },
+            curatorModelRef: { type: ['string', 'null'] },
+          },
         },
         expectedRevision: { type: 'integer', minimum: 0 },
       },
