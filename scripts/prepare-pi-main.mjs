@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  rmSync, writeFileSync,
+  rmSync, writeFileSync, realpathSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -22,11 +22,13 @@ const ROOT = path.resolve(HERE, '..');
 const M = JSON.parse(readFileSync(path.join(HERE, 'pi-main.json'), 'utf8'));
 const OUT_DIR = path.join(ROOT, 'build', 'pi-main');
 const RECEIPT = path.join(OUT_DIR, 'receipt.json');
-const CACHE_REPO = path.join(tmpdir(), 'e-launcher-pi-main-git');
+// Windows runner TEMP may use an 8.3 alias; TypeScript must see one canonical workspace path.
+const TEMP = realpathSync.native(tmpdir());
+const CACHE_REPO = path.join(TEMP, 'e-launcher-pi-main-git');
 // Distinct cache-adjacent build tree (not any caller-supplied path). Never
 // deleted: an existing tree is verified and reused, only a missing one is
 // created via git worktree add.
-const WORKTREE = path.join(tmpdir(), 'e-launcher-pi-main-build-' + M.upstream.sha.slice(0, 12));
+const WORKTREE = path.join(TEMP, 'e-launcher-pi-main-build-' + M.upstream.sha.slice(0, 12));
 const SIX = new Set(M.packages.map((p) => p.name));
 // Upstream build order; durable depends on ai, so ai must precede it.
 const ORDER = [

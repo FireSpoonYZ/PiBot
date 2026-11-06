@@ -17,7 +17,7 @@ const METAFILE_DIR = path.join(APP_BUILD, 'host-runtime');
 const TOOL_CACHE = path.join(APP_BUILD, 'host-native-tools');
 // File-name prefixes considered license/notice texts (case-insensitive); files
 // only, so LICENSE-APACHE / LICENSE-MIT / COPYING variants are all captured.
-const LICENSE_PREFIXES = ['license', 'copying', 'notice'];
+const LICENSE_PREFIXES = ['license', 'licence', 'copying', 'notice'];
 // npm archives for the pinned @earendil-works packages (chord/pi-ai/pi-durable
 // 1.3.0) omit LICENSE files; use the verified in-repo upstream MIT copies instead.
 // @vectorize-io/hindsight-client 0.9.2 publishes dist/src/generated only, so its
@@ -43,6 +43,7 @@ const UPSTREAM_LICENSE_ALLOWLIST = new Map([
   ['@earendil-works/pi-telemetry', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
   ['@vectorize-io/hindsight-client', { version: '0.9.2', declared: 'MIT', license: 'hindsight-client-0.9.2-MIT.txt' }],
   ['standardwebhooks', { version: '1.1.1', declared: 'MIT', license: 'standardwebhooks-1.1.1-LICENSE.txt' }],
+  ['data-uri-to-buffer', { version: '4.0.1', declared: 'MIT', license: 'desktop/data-uri-to-buffer-4.0.1-MIT.txt' }],
 ]);
 const DYNAMIC_ASSET_RE = /(?:require\s*\.\s*resolve|createRequire\s*\([^)]*\)\s*\.\s*resolve|new\s+URL)\s*\(\s*(['"])([^'"]+\.(?:wasm|node))\1/g;
 

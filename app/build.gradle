@@ -55,6 +55,7 @@ def buildHostRuntime = tasks.register('buildHostRuntime', Exec) {
             rootProject.file('licenses/pi-main-35dfa757378b-MIT.txt'),
             rootProject.file('licenses/hindsight-client-0.9.2-MIT.txt'),
             rootProject.file('licenses/standardwebhooks-1.1.1-LICENSE.txt'),
+            rootProject.file('licenses/desktop/data-uri-to-buffer-4.0.1-MIT.txt'),
             file("$buildDir/host-native-tools/licenses")
     inputs.file file('build.gradle')
     outputs.dir file("$buildDir/generated/assets/botHost")
