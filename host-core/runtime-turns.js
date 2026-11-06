@@ -502,6 +502,11 @@ export function createTurnAdmission(deps) {
         }
       }
       if (!preparation) throw lastError ?? errWithCode('turn preparation did not produce a set', 'TURN_SYNC_FAILED');
+      // 新准入先拒绝空模型，避免同 requestId 钉住空快照；已有 grant 保持原恢复语义。
+      if (!preparation.admission) {
+        const target = (preparation.snapshot.bots ?? []).find((entry) => entry.botId === bot.botId);
+        if (!target?.model?.modelRef) throw errWithCode('center model is required', 'TURN_SYNC_FAILED');
+      }
       // 3. 目标 set 与当前不同才要求全 Bot 原生空闲；相同 set 只要求主会话空闲。
       const needsSwitch = appliedSetIds.get(bot.botId) !== preparation.setId;
       if (needsSwitch && await botBusyForSet(bot, true)) {
