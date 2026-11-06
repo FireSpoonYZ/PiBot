@@ -132,7 +132,7 @@ function WebhookEditor({ initialRoute, devices, bots, onSaved, onDeleted }: {
   const copy = async (value: string) => {
     try {
       await navigator.clipboard.writeText(value);
-      setNotice('已复制；含 token 的内容请仅粘贴到可信位置。');
+      setNotice('已复制。');
       setError('');
     } catch {
       setError('复制失败，请手动选择并复制下方文本；自动复制需要 HTTPS 和剪贴板权限。');
@@ -163,7 +163,7 @@ function WebhookEditor({ initialRoute, devices, bots, onSaved, onDeleted }: {
         if (!active.current) return;
         saved(result.route);
         setToken(result.token);
-        setNotice('token 已轮换，旧 token 已失效。请立即保存新 token。');
+        setNotice('token 已轮换，旧 token 已失效。');
       } else {
         saved(await api.updateWebhook(route.id, { name: route.name, instruction: route.instruction, enabled: false }));
         setNotice('入口已停用；未派发事件将取消，已派发任务不会中断。');
@@ -177,17 +177,23 @@ function WebhookEditor({ initialRoute, devices, bots, onSaved, onDeleted }: {
       {notice && <p className="inline-notice" role="status">{notice}</p>}
       <form className="form" onSubmit={event => {
         event.preventDefault();
-        if (!name.trim() || !instruction.trim() || (!route && !targetReady)) return;
+        if (busy || confirm || !name.trim() || !instruction.trim() || (!route && !targetReady)) return;
         void run(async () => {
           if (route) {
-            saved(await api.updateWebhook(route.id, { name: name.trim(), instruction: instruction.trim(), enabled: route.enabled }));
+            const next = await api.updateWebhook(route.id, { name: name.trim(), instruction: instruction.trim(), enabled: route.enabled });
+            if (!active.current) return;
+            saved(next);
+            setName(next.name);
+            setInstruction(next.instruction);
             setNotice('固定任务已保存；已接收事件仍使用接收时的指令。');
           } else {
             const result = await api.createWebhook({ name: name.trim(), instruction: instruction.trim(), deviceId, botId, enabled });
             if (!active.current) return;
             saved(result.route);
+            setName(result.route.name);
+            setInstruction(result.route.instruction);
             setToken(result.token);
-            setNotice('入口已创建。token 仅本次显示，请立即安全保存。');
+            setNotice('入口已创建。');
           }
         });
       }}>
@@ -263,7 +269,7 @@ function WebhookEditor({ initialRoute, devices, bots, onSaved, onDeleted }: {
             )}
             {token ? (
               <div className="form">
-                <p className="inline-notice" role="status">token 仅本次显示。关闭详情、切换页面或刷新浏览器后将清除，无法再次读取；遗失时请轮换。复制的内容仍会留在系统剪贴板，请自行清理。</p>
+                <p className="inline-notice" role="status">token 仅显示一次，请保存。离开详情后清除；遗失时请轮换。</p>
                 <label>一次性显示的 Bearer token
                   <textarea readOnly rows={2} autoComplete="off" spellCheck={false} value={token} onFocus={event => event.target.select()} />
                 </label>
@@ -279,7 +285,7 @@ function WebhookEditor({ initialRoute, devices, bots, onSaved, onDeleted }: {
               </label>
               <button type="button" className="quiet-button" onClick={() => void copy(curl)}><Copy size={15} aria-hidden="true" />复制 curl</button>
             </div>
-            <p className="secondary">每个新事件替换 Idempotency-Key，重试时保持同一键和 JSON 内容。仅接受不超过 64 KiB 的 JSON 对象；202 表示已接收，不代表执行成功。示例含凭据时避免写入 shell 历史、日志或共享文档。</p>
+            <p className="secondary">每个新事件替换 Idempotency-Key，重试时保持同一键和 JSON 内容。仅接受不超过 64 KiB 的 JSON 对象；202 表示已接收，不代表执行成功。</p>
           </section>
           <WebhookEvents routeId={route.id} revision={eventRevision} />
         </>
@@ -360,11 +366,14 @@ export default function Webhooks() {
         ))}
       </div>
       <SheetModal open={selection !== undefined} onOpenChange={open => { if (!open) setSelection(undefined); }}
-        title={selection ? `管理入口：${selection.name}` : 'Webhook 入口'}
+        title={selection ? `管理入口：${selection.name}` : '创建 Webhook 入口'}
         description="通用 JSON Bearer 入口 · 固定目标与任务 · 最近事件" size="lg">
         {selection !== undefined && (
-          <WebhookEditor key={selection?.id ?? 'new'} initialRoute={selection} devices={devices} bots={bots}
-            onSaved={route => setRoutes(current => current.some(item => item.id === route.id) ? current.map(item => item.id === route.id ? route : item) : [route, ...current])}
+          <WebhookEditor initialRoute={selection} devices={devices} bots={bots}
+            onSaved={route => {
+              setSelection(route);
+              setRoutes(current => current.some(item => item.id === route.id) ? current.map(item => item.id === route.id ? route : item) : [route, ...current]);
+            }}
             onDeleted={id => {
               setRoutes(current => current.filter(route => route.id !== id));
               setSelection(undefined);

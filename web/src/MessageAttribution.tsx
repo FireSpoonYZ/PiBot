@@ -1,8 +1,8 @@
 // Unified Bot session 消息来源徽标（web 共享，desktop/mobile 复用）。
 // 契约：kind/botId/deviceId/channel 为稳定身份（仅内部 key/定位），名字仅显示；
 // 所有可见文本/aria 只用面向用户的名字与自然回退，永不渲染 UUID/短 ID。
-// 普通用户答案上隐藏 Host 触发器与私聊/内部协作工作文本的来源徽标（由调用方按
-// channel/category 过滤决定渲染）。消息正文里 Bot 自己写出的 ID 是历史内容，不篡改。
+// 普通主聊及内部 Host 触发器隐藏徽标，命名的 Webhook 主聊来源例外；协作轮由调用方过滤。
+// 消息正文里 Bot 自己写出的 ID 是历史内容，不篡改。
 import type { MessageAttribution as MessageAttributionData } from './chatTurnModel';
 import { useText } from './ui';
 import './MessageAttribution.css';
@@ -40,6 +40,11 @@ function senderLabel(a: MessageAttributionData, t: (zh: string, en: string) => s
   return a.kind === 'bot' ? t('未命名 Bot', 'Unnamed Bot') : kindLabel(a.kind, t);
 }
 
+// Only the structured Host attribution names Webhook work; message text is never inspected.
+export function isWebhookAttribution(a: MessageAttributionData | undefined): boolean {
+  return a?.kind === 'host' && a.channel === 'primary' && /^Webhook · \S/.test(a.name ?? '');
+}
+
 /**
  * 紧凑来源徽标：「名字 · 频道」+ 可选方向/类别小标签。设备与 ID 不出现在可见
  * 文本、title 或 aria-label 中（身份区分由宿主 knownBots 名字承担）。
@@ -47,10 +52,10 @@ function senderLabel(a: MessageAttributionData, t: (zh: string, en: string) => s
 export function MessageAttribution({ attribution, className }: MessageAttributionProps) {
   const t = useText();
   const a = attribution;
-  // 普通用户与 Bot 主聊（primary）及 Host 内部触发器不展示来源胶囊；仅保留 dm/room 来源。
-  if (a.channel === 'primary' || a.kind === 'host') return null;
+  const webhook = isWebhookAttribution(a);
+  if (!webhook && (a.channel === 'primary' || a.kind === 'host')) return null;
   const sender = senderLabel(a, t);
-  const channel = channelLabel(a.channel, t);
+  const channel = webhook ? t('自动任务', 'Automated task') : channelLabel(a.channel, t);
   const directionOutgoing = a.direction === 'outgoing';
   const isUser = a.kind === 'user';
 
