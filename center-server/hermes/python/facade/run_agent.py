@@ -42,8 +42,8 @@ class AIAgent:
 
     run_conversation forwards {prompt, messages, tools, allowedTools,
     maxIterations, maxInputTokens, model, provider, reasoningConfig} through
-    the bridge and stores the returned transcript on _session_messages so
-    the vendored summarizer / report builders see the original data shapes.
+    the bridge. _session_messages preserves the transcript for review; curator
+    gets a receipt-backed operation audit there, never used for model replay.
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -172,8 +172,8 @@ class AIAgent:
         """Execute one bounded conversation turn through the Host.
 
         Returns {final_response, messages, usage} like upstream; the
-        transcript is also stored on _session_messages for the vendored
-        action summarizer and curator report builders.
+        transcript is also stored on _session_messages for review. Only curator's
+        report view is projected into committed flat operations; returned messages stay raw.
         """
         if self._interrupt_requested or transport.cancelled():
             raise AgentCancelled(self._interrupt_reason or "interrupted")
@@ -229,7 +229,11 @@ class AIAgent:
         if not isinstance(result, dict):
             raise transport.TransportError("agent.run returned a non-object result")
         messages_out = result.get("messages")
-        self._session_messages = list(messages_out) if isinstance(messages_out, list) else []
+        transcript = list(messages_out) if isinstance(messages_out, list) else []
+        self._session_messages = transcript
+        if self.platform == "curator":
+            from curator_audit import project_curator_audit
+            self._session_messages = project_curator_audit(transcript)
         usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
         for key in _USAGE_COUNTERS:
             try:
@@ -241,7 +245,7 @@ class AIAgent:
             self.session_estimated_cost_usd = usage.get("estimated_cost_usd")
         return {
             "final_response": result.get("final_response") or "",
-            "messages": self._session_messages,
+            "messages": transcript,
             "usage": usage,
         }
 

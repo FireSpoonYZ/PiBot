@@ -43,4 +43,6 @@ For `memory({action:'memoryStatus', ...})`, only optional `state` (`pending | ac
 
 ## Curator schedule bridge
 
+Curator reports use an operation-audit projection of actual `skill_manage` results: committed batches are expanded into flat action/name/absorbed_into declarations, without skill bodies that could exhaust the upstream 400-character argument limit. A batch is included only when every result matches its operation and confirms success, the applied count covers the whole batch, and no rollback occurred. A `draftSaved` publication failure can establish committed draft operations, but the original failure receipt is preserved and is not deployment success. Missing, truncated or rolled-back receipts provide no successful-operation evidence. Expanded report counts are operation counts, **not** actual model/network call counts; Host execution, returned transcripts and learn/review messages retain the original batch contract.
+
 Only curator jobs can call `schedule.call`, and only `referenced_skill_names` / `rewrite_skill_refs` on the current job's Bot. The schedule manager owns reference semantics and revisions; learning does not infer dependencies from prompt text or snapshot fields. Learning passes the job AbortSignal to the schedule manager's optional cancellation argument; this does not undo an already committed transaction.
