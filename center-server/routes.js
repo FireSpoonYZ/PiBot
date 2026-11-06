@@ -3,6 +3,7 @@ import Ajv from 'ajv';
 import { requireOwner, assertPublicCredentialId } from './auth.js';
 import { assertId } from '../host-core/message-protocol.js';
 import { assertDeviceId, assertDeviceToken } from '../host-core/relay-protocol.js';
+import { registerWebhookRoutes } from './webhooks.js';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 const required = (value, name) => value ?? fail('NOT_FOUND', `${name} not found`);
@@ -121,12 +122,12 @@ function assertConfigCredentials(schema, value) {
 }
 
 
-export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog }) {
+export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, publicUrl }) {
   const streams = new Map();
-  function notify(deviceId) {
+  function notify(deviceId, event = 'config-changed') {
     for (const stream of streams.get(deviceId) || []) {
       if (!bridge.registry.authenticate(deviceId, stream.token)) stream.reply.end();
-      else stream.reply.write('event: config-changed\ndata: {}\n\n');
+      else stream.reply.write(`event: ${event}\ndata: {}\n\n`);
     }
   }
   function notifyAll() { for (const deviceId of streams.keys()) notify(deviceId); }
@@ -453,6 +454,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     done();
   }
   const host = (method, url, handler, bodyLimit) => app.route({ method, url, onRequest: authenticate, handler, ...(bodyLimit !== undefined ? { bodyLimit } : {}) });
+  registerWebhookRoutes(app, { store, bridge, route, host, publicUrl, notify: deviceId => notify(deviceId, 'webhook-ready') });
   // Learning start carries a transcript snapshot the service bounds at 8 MiB;
   // this route's body limit sits just above it — never a global raise.
   const LEARNING_BODY_LIMIT = 9 * 1024 * 1024;

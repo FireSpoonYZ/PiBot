@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from 'node:util';
 import Ajv from 'ajv';
 import deepmerge from 'deepmerge';
 import { assertPublicCredentialId } from '../auth.js';
+import { webhookStore } from './webhooks.js';
 
 function error(code, message, details) {
   const result = new Error(message);
@@ -353,7 +354,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     db.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
     transaction(() => {
       let version = db.prepare('PRAGMA user_version').get().user_version;
-      if (![0, 1, 2, 3, 4, 5, 6].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
+      if (![0, 1, 2, 3, 4, 5, 6, 7].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
       if (version === 0) {
         db.exec(`
           CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL, config_revision INTEGER NOT NULL);
@@ -437,10 +438,34 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           CREATE TABLE model_stars (model_ref TEXT PRIMARY KEY);
           PRAGMA user_version = 6;
         `);
+        version = 6;
+      }
+      if (version === 6) {
+        db.exec(`
+          CREATE TABLE webhook_routes (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, device_id TEXT NOT NULL, bot_id TEXT NOT NULL,
+            instruction TEXT NOT NULL, enabled INTEGER NOT NULL, token_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT
+          );
+          CREATE TABLE webhook_events (
+            id TEXT PRIMARY KEY, route_id TEXT NOT NULL REFERENCES webhook_routes(id), route_name TEXT NOT NULL,
+            device_id TEXT NOT NULL, bot_id TEXT NOT NULL, request_id TEXT NOT NULL UNIQUE,
+            idempotency_key TEXT NOT NULL, body_digest TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('pending', 'dispatching', 'queued', 'running', 'succeeded', 'failed', 'cancelled', 'expired')),
+            received_at TEXT NOT NULL, expires_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            error_json TEXT, instruction TEXT NOT NULL, payload_json TEXT NOT NULL,
+            UNIQUE(route_id, idempotency_key)
+          );
+          CREATE INDEX webhook_events_route_time ON webhook_events(route_id, received_at);
+          CREATE INDEX webhook_events_device_active ON webhook_events(device_id, received_at)
+            WHERE status IN ('pending', 'dispatching', 'queued', 'running');
+          PRAGMA user_version = 7;
+        `);
       }
     });
 
     store = {
+      ...webhookStore(db, transaction),
       listProviders: () => rows('providers'),
       getProvider: (id) => get('providers', id),
       putProvider(provider, expectedRevision) {
@@ -584,6 +609,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           for (const removedBotId of existingMap.keys()) {
             seq += 1;
             deleteBotStmt.run(deviceId, removedBotId);
+            store.cancelWebhookEventsForBot(deviceId, removedBotId);
             deleteModelStmt.run(deviceId, removedBotId);
             deleteBindingStmt.run(deviceId, removedBotId);
             insertEventStmt.run(seq, deviceId, removedBotId, 'delete', null, nowIso);
@@ -698,6 +724,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           const seq = meta.seq + 1;
           const nowIso = new Date().toISOString();
           db.prepare('DELETE FROM device_bots WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
+          store.cancelWebhookEventsForBot(deviceId, botId);
           db.prepare('DELETE FROM bot_models WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
           db.prepare('DELETE FROM bindings WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
           db.prepare('INSERT INTO bot_events (seq, device_id, bot_id, op, json, updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(seq, deviceId, botId, 'delete', null, nowIso);
