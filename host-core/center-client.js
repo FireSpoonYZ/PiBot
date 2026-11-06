@@ -286,7 +286,8 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
         ? '?admissionId=' + encodeURIComponent(options.admissionId) : '';
       return request('/api/host/artifacts/' + encodeURIComponent(ref) + query, { binary: true, signal: options.signal });
     },
-    pollWebhookEvents: (options = {}) => request('/api/host/webhook-events/poll', { method: 'POST', body: {}, signal: options.signal }),
+    pollWebhookEvents: (options = {}) => request('/api/host/webhook-events/poll', { method: 'POST', body: { cursor: options.cursor }, signal: options.signal }),
+    stopWebhookEvents: (input, options = {}) => request('/api/host/webhook-events/stop', { method: 'POST', body: { botId: input.botId, stopEpoch: input.stopEpoch }, signal: options.signal }),
     reportWebhookEvent: (eventId, input, options = {}) => request('/api/host/webhook-events/' + encodeURIComponent(eventId) + '/receipt', { method: 'POST', body: input, signal: options.signal }),
     prepareTurn: (input, options = {}) => request('/api/host/turns/prepare', { method: 'POST', body: input, signal: options.signal }),
     confirmTurn: (input, options = {}) => request('/api/host/turns/confirm', { method: 'POST', body: input, signal: options.signal }),
