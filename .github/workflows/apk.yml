@@ -9,6 +9,12 @@ on:
   # Reusable: invoked by release.yml for v* tags (signed release APK).
   workflow_call:
     inputs:
+      source-ref:
+        type: string
+        default: ''
+      source-sha:
+        type: string
+        default: ''
       release:
         type: boolean
         default: false
@@ -42,6 +48,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source-ref || github.ref }}
 
       - uses: actions/setup-java@v6
         with:
@@ -78,7 +86,7 @@ jobs:
             exit 1
           fi
           yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" "platforms;android-36" "ndk;28.2.13676358" "cmake;3.22.1"
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
 
       # rust-toolchain.toml pins channel 1.99.1; add the two Android targets.
       - name: Install Rust toolchain and Android targets
@@ -159,12 +167,14 @@ jobs:
           set -euo pipefail
           APK=app/build/outputs/apk/release/app-release.apk
           test -f "$APK"
-          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -n 1)
-          "$APKSIGNER" verify --print-certs "$APK" > "$RUNNER_TEMP/apk-certs.txt"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          "$APKSIGNER" verify --print-certs-pem "$APK" > "$RUNNER_TEMP/apk-certs.txt"
           EXPECTED="${EXPECTED_ANDROID_CERT_SHA256,,}"
           EXPECTED="${EXPECTED//:/}"
           [[ "$EXPECTED" =~ ^[0-9a-f]{64}$ ]] || { echo "Configure ANDROID_RELEASE_CERT_SHA256 before official release"; exit 1; }
-          ACTUAL=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/apk-certs.txt" | tail -n 1 | tr 'A-F' 'a-f')
+          sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' "$RUNNER_TEMP/apk-certs.txt" > "$RUNNER_TEMP/apk-certs.pem"
+          ACTUAL=$(openssl x509 -in "$RUNNER_TEMP/apk-certs.pem" -outform DER | sha256sum | cut -d ' ' -f 1)
+          printf 'APK certificate SHA-256: %s\nExpected certificate: %s\n' "$ACTUAL" "$EXPECTED"
           [ "$ACTUAL" = "$EXPECTED" ] || { echo "APK signing identity does not match"; exit 1; }
           mkdir -p release-out
           cp "$APK" release-out/PiBot-${{ inputs.version }}-android-arm64.apk

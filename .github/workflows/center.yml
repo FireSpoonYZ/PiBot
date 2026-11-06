@@ -8,6 +8,12 @@ on:
   workflow_dispatch:
   workflow_call:
     inputs:
+      source-ref:
+        type: string
+        default: ''
+      source-sha:
+        type: string
+        default: ''
       release:
         type: boolean
         default: false
@@ -26,6 +32,8 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source-ref || github.ref }}
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v4
       - name: Image name
@@ -43,7 +51,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: ${{ inputs.release || false }}
-          tags: ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+          tags: ${{ steps.image.outputs.name }}:sha-${{ inputs.source-sha || github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Image metadata
@@ -52,9 +60,10 @@ jobs:
           IMAGE: ${{ steps.image.outputs.name }}
           DIGEST: ${{ steps.build.outputs.digest }}
           VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source-sha || github.sha }}
         run: |
           printf '{"version":"%s","platform":"center","image":"%s:%s","digest":"%s","sourceCommit":"%s"}\n' \
-            "$VERSION" "$IMAGE" "$VERSION" "$DIGEST" "$GITHUB_SHA" > center-image.json
+            "$VERSION" "$IMAGE" "$VERSION" "$DIGEST" "$SOURCE_COMMIT" > center-image.json
       - uses: actions/upload-artifact@v7
         if: inputs.release
         with:
