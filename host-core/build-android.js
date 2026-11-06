@@ -17,7 +17,7 @@ const METAFILE_DIR = path.join(APP_BUILD, 'host-runtime');
 const TOOL_CACHE = path.join(APP_BUILD, 'host-native-tools');
 // File-name prefixes considered license/notice texts (case-insensitive); files
 // only, so LICENSE-APACHE / LICENSE-MIT / COPYING variants are all captured.
-const LICENSE_PREFIXES = ['license', 'copying', 'notice'];
+const LICENSE_PREFIXES = ['license', 'licence', 'copying', 'notice'];
 // npm archives for the pinned @earendil-works packages (chord/pi-ai/pi-durable
 // 1.3.0) omit LICENSE files; use the verified in-repo upstream MIT copies instead.
 // @vectorize-io/hindsight-client 0.9.2 publishes dist/src/generated only, so its
