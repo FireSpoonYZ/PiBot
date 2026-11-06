@@ -29,8 +29,13 @@ commands:
   stop       stop the supervisor and the Host
   restart    stop + start
   status     print service status
-  enable     register login autostart
-  disable    remove login autostart
+  enable     register boot autostart on Linux or login autostart on Windows
+  disable    remove autostart registration
+  remove     stop and remove service registration, preserving business data
+  prepare-update [--stop-active]
+             suspend new work and report readiness; optionally stop active work
+  cancel-update
+             resume work after a cancelled update
   setup-shower
              run the interactive Windows Shower credential setup (briefly stops the Host)
   pair --center-url <url> [--name <displayName>] [--port <n>] [--data-root <abs>] [--center-ca-file <f>] [--force]
@@ -86,7 +91,7 @@ fn dispatch(args: &[String]) -> AppResult<Value> {
     match command.as_str() {
         "help" | "--help" | "-h" => Ok(json!({ "usage": USAGE })),
         "version" | "--version" => Ok(json!({ "version": env!("CARGO_PKG_VERSION") })),
-        "run" | "start" | "stop" | "restart" | "status" | "enable" | "disable" | "setup-shower" => {
+        "run" | "start" | "stop" | "restart" | "status" | "enable" | "disable" | "remove" | "setup-shower" => {
             parse_flags(rest, &[], &[])?;
             let paths = HostPaths::resolve()?;
             match command.as_str() {
@@ -97,8 +102,13 @@ fn dispatch(args: &[String]) -> AppResult<Value> {
                 "status" => cmd_status(&paths),
                 "enable" => autostart::enable(),
                 "disable" => autostart::disable(),
+                "remove" => { cmd_stop(&paths)?; autostart::remove() },
                 _ => cmd_setup_shower(&paths),
             }
+        }
+        "prepare-update" | "cancel-update" => {
+            let flags = parse_flags(rest, &[], if command == "prepare-update" { &["stop-active"] } else { &[] })?;
+            cmd_update(&HostPaths::resolve()?, command == "prepare-update", flags.has("stop-active"))
         }
         "pair" => {
             let flags = parse_flags(rest, &["center-url", "name", "port", "data-root", "center-ca-file"], &["force"])?;
@@ -226,7 +236,7 @@ fn parse_name(value: Option<&str>) -> AppResult<Option<String>> {
 
 fn parse_device_id(text: &str) -> AppResult<String> {
     let id = text.trim();
-    if id.is_empty() || id.len() > 200 || id.chars().any(|c| c.is_whitespace() || c.is_control()) {
+    if id.is_empty() || id.len() > 200 || !id.bytes().all(|c| (b'!'..=b'~').contains(&c)) {
         return Err(AppError::new("INVALID_ARGUMENT", "--device-id is invalid"));
     }
     Ok(id.to_string())
@@ -328,9 +338,15 @@ fn cmd_status(paths: &HostPaths) -> AppResult<Value> {
             .and_then(|s| s.get("autostart"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        "autostartScope": "user-login",
+        "autostartScope": if cfg!(windows) { "user-login" } else { "system-boot" },
+        "hostHome": paths.home.display().to_string(),
         "logFile": paths.log.display().to_string(),
     });
+    if let Some(extra) = autostart::status_extra() {
+        if let (Some(target), Some(source)) = (value.as_object_mut(), extra.as_object()) {
+            target.extend(source.clone());
+        }
+    }
     if let Err(error) = autostart {
         value["autostartError"] = error.to_json()["error"].clone();
     }
@@ -481,6 +497,23 @@ fn cmd_setup_shower(paths: &HostPaths) -> AppResult<Value> {
     }
 }
 
+fn cmd_update(paths: &HostPaths, prepare: bool, stop_active: bool) -> AppResult<Value> {
+    if !process::lock_held(paths) {
+        return Ok(json!({ "ready": true, "activeCount": 0, "maintenance": false }));
+    }
+    let (config, secrets) = config::load(paths)?;
+    let token = secrets.get(CONTROL_TOKEN_KEY)
+        .ok_or_else(|| AppError::new("CONFIG_INVALID", "control token is missing"))?;
+    let url = format!("{}/v1/service/update", config.control_url());
+    ureq::AgentBuilder::new().redirects(0)
+        .timeout_connect(Duration::from_secs(2)).timeout(Duration::from_secs(55)).build()
+        .post(&url).set("authorization", &format!("Bearer {token}"))
+        .send_json(json!({ "action": if prepare { "prepare" } else { "cancel" }, "stopActive": stop_active }))
+        .map_err(|e| AppError::new("UPDATE_FAILED", format!("Host update coordination failed: {e}")))?
+        .into_json::<Value>()
+        .map_err(|_| AppError::new("UPDATE_FAILED", "Host returned invalid update state"))
+}
+
 // ------------------------------------------------------------------ pairing
 
 /// Writes secrets first and config last, so `configured` only flips once both exist.
@@ -498,15 +531,16 @@ fn write_pairing(paths: &HostPaths, config: &Config, relay_token: &str, control_
 /// host-core/cli.js init — Node always answers with this ID, so it is the only
 /// one the center may register. init opens (and on first use creates) the
 /// store; it never starts the Agent.
-fn host_identity(runtime: &paths::Runtime, data_root: &str) -> AppResult<String> {
+fn host_identity(runtime: &paths::Runtime, data_root: &str, expected: Option<&str>) -> AppResult<String> {
     let cli = runtime
         .cli
         .parent()
-        .map(|dir| dir.join("cli.js"))
+        .map(|dir| dir.join("host-service-cli.js"))
         .filter(|p| p.is_file())
         .ok_or_else(|| AppError::new("RUNTIME_MISSING", "bundled host-core/cli.js not found"))?;
     let mut cmd = process::command(&runtime.node);
-    cmd.arg(&cli).arg("init").arg("--data-root").arg(data_root);
+    cmd.arg("--preserve-symlinks-main").arg(&cli).arg("identity").arg("--data-root").arg(data_root);
+    if let Some(id) = expected { cmd.arg("--expected-device-id").arg(id); }
     let out = process::run_json_command(cmd, IDENTITY_TIMEOUT, "IDENTITY_FAILED")?;
     out.get("deviceId")
         .and_then(Value::as_str)
@@ -537,7 +571,21 @@ fn cmd_pair(paths: &HostPaths, flags: &Flags) -> AppResult<Value> {
     let password = read_secret_input("E_LAUNCHER_OWNER_PASSWORD", "owner password")?;
     let data_root = effective_data_root(data_root, previous.as_ref(), paths);
     let runtime = paths::locate_runtime()?;
-    let device_id = host_identity(&runtime, &data_root)?;
+    let device_id = host_identity(&runtime, &data_root, None)?;
+    let pending_path = paths.home.join("pairing-pending.json");
+    let force = flags.has("force");
+    let pending = match std::fs::read(&pending_path) {
+        Ok(bytes) => Some(serde_json::from_slice::<Value>(&bytes)
+            .map_err(|_| AppError::new("CONFIG_INVALID", "pending pairing is invalid"))?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(AppError::io("read pending pairing", e)),
+    };
+    let token = pending.as_ref().filter(|p|
+        p["centerUrl"] == center_url && p["deviceId"] == device_id && p["force"] == force
+    ).and_then(|p| p["deviceToken"].as_str()).map(str::to_owned).unwrap_or(random_token()?);
+    crate::util::write_atomic(&pending_path, json!({
+        "centerUrl": center_url, "deviceId": device_id, "deviceToken": token, "force": force
+    }).to_string().as_bytes(), true)?;
 
     let mut client = center::CenterClient::new(&center_url, ca_file.as_deref().map(std::path::Path::new))?;
     let registered = client.register_device(
@@ -545,10 +593,11 @@ fn cmd_pair(paths: &HostPaths, flags: &Flags) -> AppResult<Value> {
         &display_name,
         center::platform(),
         &device_id,
-        flags.has("force"),
+        &token,
+        force,
     )?;
     drop(password);
-    if registered.device_id != device_id {
+    if registered.device_id != device_id || registered.device_token != token {
         return Err(AppError::new(
             "CENTER_ERROR",
             "POST /api/devices returned a deviceId different from the local Host identity",
@@ -577,6 +626,8 @@ fn cmd_pair(paths: &HostPaths, flags: &Flags) -> AppResult<Value> {
     };
     let control_token = random_token()?;
     write_pairing(paths, &config, &registered.device_token, &control_token)?;
+    // Pairing is committed; cleanup failure must not hide the recoverable credentials.
+    let _ = std::fs::remove_file(&pending_path);
 
     // Report the real current state; nothing was enabled or started here.
     // A failed stop leaves the OLD process serving the previous config, so the
@@ -640,7 +691,7 @@ fn cmd_adopt(paths: &HostPaths, flags: &Flags) -> AppResult<Value> {
     // Manual adopt must target the ID the local Host store actually presents;
     // anything else would write a config Node can never authenticate with.
     let runtime = paths::locate_runtime()?;
-    let identity = host_identity(&runtime, &data_root)?;
+    let identity = host_identity(&runtime, &data_root, Some(&device_id))?;
     if identity != device_id {
         return Err(AppError::new(
             "DEVICE_ID_MISMATCH",

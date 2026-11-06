@@ -1,0 +1,7 @@
+[toolchain]
+# Pinned stable toolchain for all Rust builds (desktop, mobile, host-launcher,
+# shower-server). Do not float to nightly or "stable" — updater signing and
+# reproducible releases require a fixed compiler. Android targets are added
+# per-CI job (rustup target add) since they are not needed for host builds.
+channel = "1.99.1"
+profile = "minimal"

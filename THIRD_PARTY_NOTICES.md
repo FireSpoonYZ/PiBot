@@ -20,7 +20,7 @@ The application incorporates and modifies **Operit Shower**, by the Operit contr
 - Repository: https://github.com/AAswordman/Operit
 - Exact revision: `b2c76100e5960a82ec154b62f201d89db099fadc`
 - Upstream paths: `showerclient/` and `tools/shower/app/src/main/`
-- License: GNU Lesser General Public License version 3; a verbatim copy is retained at [`licenses/Operit-LGPL-3.0.txt`](licenses/Operit-LGPL-3.0.txt).
+- License: GNU Lesser General Public License version 3; a verbatim copy is retained at [`licenses/Operit-LGPL-3.0.txt`](licenses/Operit-LGPL-3.0.txt). The incorporated GPLv3 terms are retained at [`licenses/GPL-3.0.txt`](licenses/GPL-3.0.txt), copied from https://www.gnu.org/licenses/gpl-3.0.txt.
 
 The required corresponding source is kept in this repository rather than represented only by a prebuilt upstream artifact:
 
@@ -112,10 +112,11 @@ jemalloc and shell-completion extras. Linux-musl release binaries are not used o
 because they fail under the real app UID (exit 159). The upstream MIT notices of rg and fd are
 copied from the verified source crates into `bot-host/third-party-licenses.txt`.
 
-## Android Host runtime bundle
+## Current pinned Pi / Host runtime bundle
 
-The APK's host runtime (`bot-host/host-runtime.mjs`) bundles `@earendil-works/chord`,
-`@earendil-works/pi-ai` and `@earendil-works/pi-durable` at version **1.3.0**,
+The APK and desktop Host runtimes bundle the six packages in
+`scripts/pi-main.json` at version **1.4.0-main.35dfa757378b**, built from
+<https://github.com/earendil-works/pi/tree/35dfa757378bd7a8570670e99c2687bdd1039a06>,
 together with the transitive dependencies actually included
 in the bundle. Each included package's name, version and license text are emitted
 at build time into the shipped `bot-host/third-party-licenses.txt` by
@@ -123,17 +124,12 @@ at build time into the shipped `bot-host/third-party-licenses.txt` by
 `host-core/package-lock.json`. Building the bundle uses the root Vite installation's esbuild; esbuild itself is not shipped. The host runtime is built from
 the repository's own `host-core` sources, not from a third-party binary kit.
 
-The published npm archives of `@earendil-works/chord`, `@earendil-works/pi-ai`
-and `@earendil-works/pi-durable` at 1.3.0 do not include a LICENSE file, so
-`host-core/build-android.js` uses the pinned in-repo upstream copy
-[`licenses/pi-v1.3.0-MIT.txt`](licenses/pi-v1.3.0-MIT.txt) for these three
-packages when their installed package lacks a license file. That copy is the
-verbatim MIT license of the earendil-works/pi repository at tag `v1.3.0`
-(https://raw.githubusercontent.com/earendil-works/pi/v1.3.0/LICENSE, Copyright
-(c) 2025 Mario Zechner), verified by the project reviewer; it covers all three
-packages, which are published from the same upstream repository. Any other
-bundled package without a license file still fails the build instead of
-falling back to package metadata.
+The pinned packages omit LICENSE in their archives. Android and desktop
+packagers use [`licenses/pi-main-35dfa757378b-MIT.txt`](licenses/pi-main-35dfa757378b-MIT.txt),
+copied verbatim from that exact commit's
+[LICENSE](https://raw.githubusercontent.com/earendil-works/pi/35dfa757378bd7a8570670e99c2687bdd1039a06/LICENSE)
+(Copyright (c) 2025 Mario Zechner). The fallback matches the exact installed
+version; an unrecognized bundled package without a license file fails the build.
 
 ## Center platform dependencies and Pi Skill adaptation
 
@@ -163,14 +159,15 @@ The adaptation is restricted to managed directories rather than Pi's
 HOME/project scanning. Pi is Copyright (c) 2025 Mario Zechner, MIT;
 the full upstream text is retained in
 [`licenses/pi-v1.3.0-MIT.txt`](licenses/pi-v1.3.0-MIT.txt).
-The same license applies to `@earendil-works/pi-mcp` 1.3.0; the Android
-and desktop packagers use that exact-version fallback if its archive has no
-license file. These attributions do not alter this project's AGPL-3.0 license.
+The v1.3.0 text remains for this adapted source. Current pinned package
+fallbacks use the separately verified main-commit copy above. These
+attributions do not alter this project's AGPL-3.0 license.
 
-The desktop application runs a client broker, not a Host, and does not package
-another npm distribution. Android reuses the versioned npm asset described
-above. An independent Node Host can use its locked npm 11.6.2 dependency, whose
-Artistic-2.0 license and bundled dependency notices accompany that distribution.
+The desktop bundle contains separate client-broker and Host runtimes,
+a pinned Node executable, and npm 11.6.2 for managed packages. Its
+Artistic-2.0 license and bundled dependency notices accompany the distribution.
+Android reuses the versioned npm asset described above. An independent Node
+Host uses the same locked npm dependency.
 The Host's `tar` 7.5.22 is by Isaac Z. Schlueter and contributors,
 under the Blue Oak Model License 1.0.0; its full text is retained in
 [`licenses/tar-7.5.22-BlueOak-1.0.0.md`](licenses/tar-7.5.22-BlueOak-1.0.0.md).
@@ -258,3 +255,42 @@ root contain no copyright line, and none was invented for them. The Apache text 
 terms 1-9 and the APPENDIX. A bundled crate whose archive has no license file and that
 has no exact fallback mapping still fails the build instead of falling back to package
 metadata.
+
+## Hermes Agent learning modules
+
+The center server vendors unmodified upstream learning modules from
+**hermes-agent**, by Nous Research:
+
+- Repository: https://github.com/NousResearch/hermes-agent
+- Exact revision: `71736c9f32597bbca9d89cede5aa136e55946b2f`
+- License: MIT. A verbatim copy travels with the vendored sources at
+  `center-server/hermes/vendor/LICENSE`.
+- Vendored scope (original bytes, no rewording): `agent/background_review.py`,
+  `agent/learn_prompt.py`, `agent/curator.py` and their unchanged helper
+  modules under `center-server/hermes/vendor/`. The Node.js transport,
+  skill-service bridge and Host agent-run adapters that drive them are project
+  code, not upstream.
+
+```text
+MIT License
+
+Copyright (c) 2025 Nous Research
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

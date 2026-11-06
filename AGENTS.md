@@ -5,8 +5,11 @@
 | 目录 | 内容 |
 | --- | --- |
 | `app/src/main/` | Android 原生 Java（独立助手入口、App Widget、语音、Shower、Pi 桥接） |
-| `web/src/` | React + TypeScript 前端（聊天、设置，Capacitor 桥接） |
-| `pi-runtime/` | Pi coding-agent SDK 集成，esbuild 打包为 `pi-runtime.cjs` |
+| `web/src/`、`mobile/` | 共享 React/TypeScript 界面与 Android Tauri 外壳 |
+| `desktop/` | Windows/Linux Tauri 客户端、Host 启动器、NSIS/DEB 钩子 |
+| `host-core/` | 多端 Host、客户端 broker、工具、固定 Pi SDK 集成 |
+| `center-server/`、`center-web/`、`center-contract/` | 中心服务、管理页与契约 |
+| `pi-runtime/` | 保留的旧 Pi 集成与旧数据兼容 |
 | `shower-server/` | Binder-only 虚拟屏服务，Gradle 构建后以 `shower-server.jar` 打入 App assets |
 | `tests/` | 纯 Java 断言检查（AgentChecks、ConversationTreeChecks），不依赖 Android stub |
 | `app/src/test/` | Robolectric 单元测试 |
@@ -26,7 +29,8 @@
 - **JDK 21**（`JAVA_HOME` 必须指向 JDK 21）
 - **Android SDK Platform 36**（`ANDROID_HOME` 未设置时使用 `$env:LOCALAPPDATA\Android\Sdk`）
 - **NDK 28.2.13676358、CMake 3.22.1**（构建 node_launcher）
-- **Node ≥ 22.19**（前端构建和 pi-runtime）
+- **Node ≥ 22.19**（通过 mise 选择运行时）
+- **Rust 1.99.1**（rust-toolchain.toml）；Android 编译需对应 aarch64-linux-android / x86_64-linux-android target
 - Gradle 8.14.3 通过仓库内 `gradlew.bat` 自动下载
 - 首次构建需下载 Gradle 发行包、构建依赖和 sherpa-onnx 模型，并接受 SDK 许可
 
@@ -39,20 +43,13 @@
 $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 $env:JAVA_HOME = "$env:ProgramFiles\Microsoft\jdk-21.0.9.10-hotspot"
 
-# 首次安装前端依赖并同步 Capacitor；之后新增或修改原生插件时重新同步
-npm ci
+mise exec node@22.19.0 -- npm ci
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-npm run build
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-npm run sync:android
+rustup target add --toolchain 1.99.1 aarch64-linux-android x86_64-linux-android
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-# 首次准备 Node Mobile、SDK 和 npm 资源；更新这些资源时重新运行
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-pi-runtime.ps1
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-# 日常编译：Gradle preBuild 会重新构建并复制 Web 资源、构建 Pi runtime
-.\gradlew.bat build --no-daemon --console=plain
+# Gradle 自动准备固定 Pi、Host、Tauri 前端和原生资源；模拟器加 -PlauncherAbis=x86_64
+mise exec node@22.19.0 -- .\gradlew.bat :app:assembleDebug --no-daemon --console=plain
 exit $LASTEXITCODE
 ```
 

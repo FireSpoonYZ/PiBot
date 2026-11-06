@@ -57,9 +57,11 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     req.setTimeout(30000, () => req.destroy(centerError('CENTER_OFFLINE', 'center request timed out')));
     const response = await new Promise((resolve, reject) => { req.once('response', resolve); req.once('error', reject); });
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      // 仅 turn 准入端点透传服务端类型化错误码（TURN_SET_CHANGED/TURN_SYNC_FAILED 等），
-      // 其他路径保持既有 CENTER_REQUEST_FAILED 语义及 ownerRequest 回退。
-      const typedTurnError = path.startsWith('/api/host/turns/');
+      // turn 准入端点透传服务端类型化错误码（TURN_SET_CHANGED/TURN_SYNC_FAILED 等）；
+      // bot 管理端点同样透传有界类型码，REVISION_CONFLICT 等 CAS 失败不会丢成
+      // BAD_RESPONSE。其他路径保持既有 CENTER_REQUEST_FAILED 语义及 ownerRequest 回退。
+      const typedTurnError = path.startsWith('/api/host/turns/') ||
+        /^\/api\/host\/devices\/[^/]+\/bots\/[^/]+\/(skills|learning|installations)$/.test(path);
       let errorCode = null;
       let errorMessage = null;
       if (typedTurnError) {
@@ -167,6 +169,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
   const hostBotCapabilitiesPath = (targetDeviceId, botId) => '/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/capabilities';
   const runtimeStatusPath = (targetDeviceId) => '/api/devices/' + encodeURIComponent(targetDeviceId) + '/runtime-status';
   const hostRuntimeStatusPath = (targetDeviceId) => '/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/runtime-status';
+  const hostBotManagePath = (targetDeviceId, botId, domain) => '/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/' + domain;
   try {
     const req = start('/api/host/events', { signal });
     req.setTimeout(15000, () => req.destroy(centerError('CENTER_OFFLINE', 'center connection timed out')));
@@ -254,6 +257,12 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     }),
     botCapabilitySet: (targetDeviceId, botId, installationId, input, signal) => request(hostBotCapabilitiesPath(targetDeviceId, botId) + '/' + encodeURIComponent(installationId), { method: 'PUT', body: input, signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botCapabilitiesPath(targetDeviceId, botId) + '/' + encodeURIComponent(installationId), { method: 'PUT', body: input, signal }) : Promise.reject(err)),
     runtimeStatus: (targetDeviceId, signal) => request(hostRuntimeStatusPath(targetDeviceId), { signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(runtimeStatusPath(targetDeviceId), { signal }) : Promise.reject(err)),
+    // Bot-scoped management: fixed POST paths only; typed errors preserve CAS
+    // conflicts and service codes. No ownerRequest fallback — both route sets
+    // ship together, so a missing endpoint is an honest CENTER_REQUEST_FAILED.
+    botSkill: (targetDeviceId, botId, input, signal) => request(hostBotManagePath(targetDeviceId, botId, 'skills'), { method: 'POST', body: input, signal }),
+    botLearning: (targetDeviceId, botId, input, signal) => request(hostBotManagePath(targetDeviceId, botId, 'learning'), { method: 'POST', body: input, signal }),
+    botInstallation: (targetDeviceId, botId, input, signal) => request(hostBotManagePath(targetDeviceId, botId, 'installations'), { method: 'POST', body: input, signal }),
     bootstrap: (bots) => request('/api/host/bootstrap', { method: 'POST', body: { deviceId, capabilityProtocol: 1, bots } }),
     syncBots: (bots) => request('/api/host/bots-sync', { method: 'POST', body: { deviceId, bots } }).catch(() => request('/api/host/bootstrap', { method: 'POST', body: { deviceId, capabilityProtocol: 1, bots } })),
     getBotSync: ({ epoch, sinceSeq } = {}, signal) => {

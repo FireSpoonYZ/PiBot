@@ -15,4 +15,9 @@ permissions = [
   "allow-desktop-host-pair",
   "allow-desktop-host-adopt",
   "allow-desktop-host-control",
+  "allow-desktop-update-status",
+  "allow-desktop-update-check",
+  "allow-desktop-update-download",
+  "allow-desktop-update-install",
+  "allow-desktop-update-cancel",
 ]

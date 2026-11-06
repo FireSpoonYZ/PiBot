@@ -1,12 +1,10 @@
-# 默认 CENTER_TLS_MODE=proxy：TLS 由已有的反向代理（如 NAS 的 HTTPS 入口）
-# 终止，容器内 8443 为明文 HTTP、8790 为明文 WS，因此两个端口只发布到宿主机
-# loopback。反代容器也可直接加入本 Compose 网络访问 center:8443 / center:8790
-# （此时可整段移除 ports）。对外地址仍必须是 https/wss（见 center.env.example）。
-# direct TLS 与旧 env 部署示例见 docs/center-linux-deployment.md。
+# 中心 HTTP/API/SSE 与 /v1/link 共用内部 8080；HTTPS/WSS 由反向代理提供。
+# 默认只向宿主机回环发布。容器反代可走 center:8080 并移除 ports。
+# 对外地址与首次初始化见 center.env.example、docs/center-linux-deployment.md。
 
 services:
   center:
-    # GHCR 官方预构建镜像，由 .github/workflows/center-image.yml 在 main 分支推送。
+    # center.yml 在版本 tag 发布稳定 latest；main 只发布 sha-<commit> 镜像。
     image: ghcr.io/firespoonyz/e-launcher-center:latest
     # 源码构建（开发）：把上面的 image 换成下面三行，再 docker compose up -d --build
     # image: e-launcher-center:local
@@ -20,18 +18,12 @@ services:
     environment:
       CENTER_DATA_ROOT: /data
       CENTER_LISTEN_HOST: 0.0.0.0
-      CENTER_PORT: "8443"
-      CENTER_RELAY_PORT: "8790"
+      CENTER_PORT: "8080"
       CENTER_WEB_ROOT: /app/center-web/dist
-      CENTER_TLS_MODE: proxy
     ports:
-      - "127.0.0.1:8443:8443"
-      - "127.0.0.1:8790:8790"
+      - "127.0.0.1:8080:8080"
     volumes:
       - center-data:/data
-      # 仅 direct TLS 模式（CENTER_TLS_MODE=direct）需要，并在 environment
-      # 增加 CENTER_TLS_CERT_FILE=/certs/cert.pem 与 CENTER_TLS_KEY_FILE=/certs/key.pem：
-      # - ./center-certs:/certs:ro
 
 volumes:
   center-data:

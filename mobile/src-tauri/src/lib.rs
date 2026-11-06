@@ -82,6 +82,12 @@ const ALLOWED_METHODS: &[&str] = &[
   "clientObserve",
   "clientUnobserve",
   "clientChatVisibility",
+  // 客户端自更新：固定方法名直达默认进程 ClientUpdater。
+  "updateStatus",
+  "updateCheck",
+  "updateDownload",
+  "updateInstall",
+  "updateCancel",
 ];
 
 /// 不占普通准入槽的本地 UI 动作：普通槽满时仍可执行，不产生 bridge 请求堆积。
@@ -94,8 +100,8 @@ const CLEANUP_METHODS: &[&str] = &[
   "screenClose",
 ];
 
-/// 客户端观察清理：不占普通槽，改用独立小额度（与 Kotlin 侧同名额度一致），超限立即拒绝不排队。
-const CLIENT_CLEANUP_METHODS: &[&str] = &["clientUnobserve"];
+/// 客户端观察清理与更新取消共用独立小额度，超限立即拒绝不排队。
+const CLIENT_CLEANUP_METHODS: &[&str] = &["clientUnobserve", "updateCancel"];
 
 /// 归一化后的错误形状，前端按固定三态处理，不重试。
 #[derive(Debug, Clone, Serialize)]

@@ -38,3 +38,22 @@ app/src/main/assets/npm/
 app/src/main/jniLibs/
 app/src/main/cpp/node-include/
 app/.cxx/
+
+# Release/signing material and local secrets — never commit.
+center.env
+center-certs/
+.env
+.env.*
+!.env.example
+!*.env.example
+**/release-signing.env
+*.keystore
+*.jks
+*.pem
+*.key
+*.p12
+*.pfx
+keystore.properties
+# Tauri updater signing private key (TAURI_SIGNING_PRIVATE_KEY material)
+tauri-updater.key
+tauri-updater.key.pub

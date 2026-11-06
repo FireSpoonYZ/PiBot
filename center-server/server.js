@@ -3,44 +3,46 @@ import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { rootCertificates } from 'node:tls';
 import { openRelayServer } from '../host-core/relay-server.js';
-import { parseRelayUrl } from '../host-core/relay-protocol.js';
 import { openCenterStore } from './data/index.js';
 import { openPackageManager } from './packages/index.js';
 import { registerAuth } from './auth.js';
+import { registerClientReleaseRoutes } from './client-releases.js';
 import { registerRoutes } from './routes.js';
 import { openHostBridge } from './host-bridge.js';
 import { openCenterExecution } from './execution.js';
 import { openTurnAdmission } from './turns.js';
 import { openMcpOAuth } from './oauth/index.js';
+import { openSkillManager } from './skills/index.js';
+import { runHermes } from './hermes/index.js';
+import { openLearningService } from './learning/index.js';
+import { openBotManagement } from './bot-management.js';
 
 const require = createRequire(import.meta.url);
-const status = { INVALID_ARGUMENT: 400, INVALID_CWD: 400, UNSUPPORTED_TARGET: 400, VALIDATION_FAILED: 400, UNAUTHENTICATED: 401, FORBIDDEN: 403, CSRF_INVALID: 403, NOT_FOUND: 404, BOT_NOT_FOUND: 404, REVISION_CONFLICT: 409, REQUEST_CONFLICT: 409, TURN_SET_CHANGED: 409, TURN_SYNC_FAILED: 409, TURN_RECOVERY_REQUIRED: 403, INVALID_STATE: 409, PRIMARY_BOT_PROTECTED: 409, BOT_ARCHIVED: 409, PAYLOAD_TOO_LARGE: 413, RATE_LIMITED: 429, CENTER_OFFLINE: 503, DEVICE_OFFLINE: 503 };
+const status = { INVALID_ARGUMENT: 400, INVALID_CWD: 400, UNSUPPORTED_TARGET: 400, VALIDATION_FAILED: 400, UNAUTHENTICATED: 401, FORBIDDEN: 403, CSRF_INVALID: 403, NOT_FOUND: 404, BOT_NOT_FOUND: 404, REVISION_CONFLICT: 409, REQUEST_CONFLICT: 409, TURN_SET_CHANGED: 409, TURN_SYNC_FAILED: 409, TURN_RECOVERY_REQUIRED: 403, INVALID_STATE: 409, PRIMARY_BOT_PROTECTED: 409, BOT_ARCHIVED: 409, PAYLOAD_TOO_LARGE: 413, RATE_LIMITED: 429, PACKAGE_NOT_READY: 409, CALL_TIMEOUT: 504, TIMEOUT: 504, HERMES_ERROR: 502, CENTER_OFFLINE: 503, DEVICE_OFFLINE: 503 };
 
-// tlsMode 'proxy' keeps the public endpoints https/wss while an upstream
-// proxy terminates TLS, so the internal HTTP/WS listeners run plaintext. The
-// in-process bridge then reaches the relay only via a literal loopback ws URL
-// (the only non-TLS URL relay clients accept), which these binds guarantee.
-const PROXY_RELAY_LOOPBACK = new Map([['0.0.0.0', '127.0.0.1'], ['127.0.0.1', '127.0.0.1'], ['::', '[::1]'], ['::1', '[::1]']]);
-
-export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ownerPasswordHash, https, listenHost = '127.0.0.1', port = 8443, relay: relayOptions, webRoot, npmPath, publicUrl, tlsMode = 'direct' }) {
-  if (tlsMode !== 'direct' && tlsMode !== 'proxy') throw new Error("tlsMode must be 'direct' or 'proxy'");
-  const proxy = tlsMode === 'proxy';
-  // The public linkUrl is handed to hosts verbatim and the bridge no longer
-  // dials it in proxy mode, so it must pass the client-side relay URL rules
-  // (wss only, no userinfo/query/fragment, exact /v1/link path) at startup.
-  if (!publicUrl || new URL(publicUrl).protocol !== 'https:' || !relayOptions?.linkUrl || parseRelayUrl(relayOptions.linkUrl).protocol !== 'wss:') throw new Error('HTTPS and TLS relay are required');
-  if (!proxy && (!relayOptions.tls?.cert || !relayOptions.tls?.key || !https?.cert || !https?.key)) throw new Error('HTTPS and TLS relay are required');
-  const proxyLoopback = PROXY_RELAY_LOOPBACK.get(relayOptions?.listenHost ?? '127.0.0.1');
-  if (proxy && proxyLoopback === undefined) throw new Error("tlsMode 'proxy' requires relay listenHost 0.0.0.0, ::, or a literal loopback");
+export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ownerPasswordHash, listenHost = '127.0.0.1', port = 8080, trustProxy = false, webRoot, npmPath, publicUrl }) {
+  // Single public HTTPS origin; the WSS link URL, OAuth callback and client
+  // downloads are all derived from it. The service itself never terminates TLS:
+  // the user's reverse proxy owns certificates and forwards plain HTTP here.
+  if (typeof publicUrl !== 'string' || publicUrl === '') throw new Error('publicUrl is required');
+  let publicOrigin;
+  try { publicOrigin = new URL(publicUrl); } catch { throw new Error('publicUrl must be a valid URL'); }
+  if (publicOrigin.protocol !== 'https:' || publicOrigin.username || publicOrigin.password || publicOrigin.search || publicOrigin.hash || publicOrigin.pathname !== '/') {
+    throw new Error('publicUrl must be an HTTPS origin (scheme, host and optional port only)');
+  }
+  const linkUrl = `wss://${publicOrigin.host}/v1/link`;
   if (!(encryptionKey instanceof Uint8Array) || !(sessionKey instanceof Uint8Array) || encryptionKey.byteLength !== 32 || sessionKey.byteLength !== 32 || Buffer.from(encryptionKey).equals(Buffer.from(sessionKey))) throw new Error('Independent encryption and session keys are required');
-  let store, relay, bridge, packages, execution, oauth, routes, app;
+  let store, relay, bridge, packages, execution, oauth, routes, app, skills, learning, botManagement;
   let closing;
   async function close() {
     if (!closing) closing = (async () => {
       const errors = [];
-      for (const fn of [() => routes?.close(), () => app?.close(), () => packages?.close(), () => execution?.close(), () => oauth?.close(), () => bridge?.close(), () => relay?.close(), () => store?.close()]) {
+      // Relay WS teardown runs before app.close() so upgraded sockets are
+      // stopped while the HTTP listener is still owned by this process.
+      // Skill/learning services close before the package manager and store
+      // they mutate through; there is nothing to close on botManagement.
+      for (const fn of [() => routes?.close(), () => relay?.close(), () => app?.close(), () => learning?.close(), () => skills?.close(), () => packages?.close(), () => execution?.close(), () => oauth?.close(), () => bridge?.close(), () => store?.close()]) {
         try { await fn(); } catch (error) { errors.push(error); }
       }
       if (errors.length) throw new AggregateError(errors, 'Center shutdown failed');
@@ -49,15 +51,7 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
   }
   try {
     store = openCenterStore({ dataRoot, encryptionKey });
-    relay = await openRelayServer({ dataRoot, listenHost: relayOptions.listenHost, port: relayOptions.port, ...(proxy ? { tlsTermination: 'proxy' } : { tls: relayOptions.tls }) });
-    // Proxy mode: bridge dials loopback on the relay's actual bound port so it
-    // never depends on the NAS's external DNS hairpin; public linkUrl stays wss.
-    const bridgeLinkUrl = proxy ? `ws://${proxyLoopback}:${new URL(relay.url).port}/v1/link` : relayOptions.linkUrl;
-    bridge = openHostBridge({ dataRoot, store, relay, linkUrl: bridgeLinkUrl, ca: proxy ? undefined : [relayOptions.tls.cert, ...rootCertificates].join('\n') });
-    oauth = openMcpOAuth({ store, publicUrl });
-    execution = openCenterExecution({ store, packages: { getInstalled: id => packages.getInstalled(id) }, oauth });
-    packages = await openPackageManager({ dataRoot, store, npmPath: npmPath || join(dirname(require.resolve('npm/package.json')), 'bin', 'npm-cli.js'), onChange: id => routes?.notifyInstallation(id), withActivation: (id, publish) => execution.withActivation(id, publish), probeCenterMcp: (installation, config, identity) => execution.probeGlobal(installation, config, identity) });
-    app = Fastify({ https: proxy ? undefined : https, logger: false, bodyLimit: 1024 * 1024 });
+    app = Fastify({ logger: false, bodyLimit: 1024 * 1024, trustProxy });
     app.addHook('onRequest', (req, reply, done) => {
       if (req.url.startsWith('/api/')) reply.header('Cache-Control', 'no-store');
       done();
@@ -72,14 +66,28 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
       if (!status[code]) code = 'INTERNAL_ERROR';
       reply.code(status[code] || 500).send({ error: { code, message: code === 'INTERNAL_ERROR' ? 'Internal error' : code.replaceAll('_', ' ').toLowerCase() } });
     });
+    // The relay shares this HTTP server: native ws noServer handleUpgrade on
+    // /v1/link keeps first-frame auth, hello timeout, backpressure and
+    // disconnect cleanup; the center keeps sole ownership of shutdown.
+    relay = await openRelayServer({ dataRoot, httpServer: app.server, onHostDisconnect: (deviceId) => { if (!closing) learning?.cancelDevice(deviceId); } });
+    bridge = openHostBridge({ dataRoot, store, relay });
+    oauth = openMcpOAuth({ store, publicUrl });
+    execution = openCenterExecution({ store, packages: { getInstalled: id => packages.getInstalled(id) }, oauth });
+    packages = await openPackageManager({ dataRoot, store, npmPath: npmPath || join(dirname(require.resolve('npm/package.json')), 'bin', 'npm-cli.js'), onChange: id => routes?.notifyInstallation(id), withActivation: (id, publish) => execution.withActivation(id, publish), probeCenterMcp: (installation, config, identity) => execution.probeGlobal(installation, config, identity) });
     await registerAuth(app, { sessionKey, ownerPasswordHash });
     // Already configured: unauthenticated read-only probes for setup polling
     // and health checks; no reset or mutation endpoint exists here.
     app.get('/api/setup', () => ({ required: false }));
     app.get('/api/health', () => ({ status: 'ready' }));
     await app.register(multipart, { limits: { files: 1, fileSize: 100 * 1024 * 1024, fields: 0 } });
+    await registerClientReleaseRoutes(app, { store, dataRoot, registry: bridge.registry, internalDeviceId: bridge.deviceId, publicUrl });
     const turns = openTurnAdmission({ store, packages });
-    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl: relayOptions.linkUrl, turns });
+    // New services are constructed after packages (publish/mutation backend)
+    // and before routes; notify is delegated lazily until routes exists.
+    skills = await openSkillManager({ dataRoot, store, packages, notify: (deviceId) => routes?.notifyDevice?.(deviceId) });
+    learning = await openLearningService({ dataRoot, store, skills, runHermes });
+    botManagement = openBotManagement({ store, packages, notify: (deviceId) => routes?.notifyDevice?.(deviceId) });
+    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement });
     if (webRoot) {
       await app.register(fastifyStatic, { root: webRoot, prefix: '/' });
       app.setNotFoundHandler((req, reply) => {
@@ -88,6 +96,6 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
       });
     }
     const url = await app.listen({ host: listenHost, port });
-    return { url, linkUrl: relayOptions.linkUrl, close };
+    return { url, linkUrl, close };
   } catch (error) { try { await close(); } catch {} throw error; }
 }

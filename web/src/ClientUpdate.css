@@ -1,0 +1,18 @@
+/* 客户端更新区共享样式：仅 .cu- 前缀，桌面/Android 设置页共用。 */
+.cu-row { display: flex; flex-direction: column; gap: 8px; padding: 10px 0; }
+.cu-row + .cu-row { border-top: 1px solid var(--line); }
+.cu-line { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: .9rem; }
+.cu-label { color: var(--muted); flex: none; }
+.cu-value { min-width: 0; overflow-wrap: anywhere; text-align: right; }
+.cu-notes {
+  max-height: 140px; overflow-y: auto; padding: 10px 12px; border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  border: 1px solid var(--line); font-size: .82rem; line-height: 1.5;
+  color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.cu-progress { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.cu-progress > span { display: block; height: 100%; border-radius: 999px; background: var(--accent); transition: width .3s ease; }
+.cu-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.cu-message { font-size: .82rem; color: var(--muted); overflow-wrap: anywhere; }
+.cu-message.is-error { color: var(--danger); }
+.cu-meta { font-size: .78rem; color: var(--muted); overflow-wrap: anywhere; }

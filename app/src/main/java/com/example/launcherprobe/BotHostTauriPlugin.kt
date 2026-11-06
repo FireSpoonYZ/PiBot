@@ -272,7 +272,48 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             params.put("visible", false)
         }
         if ("cancelVoice" == method) invalidatePendingVoice()
+        if (method == "updateInstall") {
+            if (!foregroundUi()) {
+                replyInvalid(invoke, "NOT_FOREGROUND", "仅可在前台安装更新")
+                return
+            }
+            forwardUpdateInstall(invoke, params)
+            return
+        }
         forward(invoke, method, params)
+    }
+
+    /**
+     * updateInstall 显式入口：仅当返回状态为 waiting-permission 时打开本应用
+     * "安装未知应用"系统设置页。只在用户显式点击触发；status 轮询不弹此页，
+     * 用户授权后回到前台由用户再次点击继续安装。
+     */
+    private fun forwardUpdateInstall(invoke: Invoke, params: JSONObject) {
+        val future = try {
+            bridge().request("updateInstall", params)
+        } catch (t: Throwable) {
+            replyFailure(invoke, t)
+            return
+        }
+        future.whenComplete { result, error ->
+            main.post {
+                if (error != null) {
+                    replyFailure(invoke, error)
+                    return@post
+                }
+                if (result != null && "waiting-permission" == result.optString("phase") && foregroundUi()) {
+                    try {
+                        hostActivity.startActivity(Intent(
+                            android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            android.net.Uri.parse("package:" + hostActivity.packageName)))
+                    } catch (t: Throwable) {
+                        replyFailure(invoke, t)
+                        return@post
+                    }
+                }
+                replyOk(invoke, result)
+            }
+        }
     }
 
     // ---------- UI 本地动作 ----------
@@ -992,7 +1033,9 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             "observe", "cancelObservation", "voiceSettings", "saveVoiceSettings",
             "startVoice", "finishVoice", "cancelVoice", "uiSettings", "pause",
             // M20 客户端（远端 Host）固定入口；内层 broker 操作另有 16 项白名单。
-            "clientRequest", "clientObserve", "clientUnobserve", "clientChatVisibility"
+            "clientRequest", "clientObserve", "clientUnobserve", "clientChatVisibility",
+            // 客户端自更新：固定方法名直达默认进程 ClientUpdater。
+            "updateStatus", "updateCheck", "updateDownload", "updateInstall", "updateCancel"
         )
     }
 }

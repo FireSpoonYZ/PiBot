@@ -1,0 +1,75 @@
+name: Center image
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: center-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Resolve image and immutable tags
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/e-launcher-center"
+          TAGS="$IMAGE:sha-$GITHUB_SHA"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            TAGS="$TAGS,$IMAGE:${GITHUB_REF_NAME#v},$IMAGE:latest"
+          fi
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Emit versioned image metadata
+        if: github.ref_type == 'tag'
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          VERSION=${GITHUB_REF_NAME#v}
+          printf '{"version":"%s","platform":"center","image":"%s:%s","digest":"%s","sourceCommit":"%s"}\n' \
+            "$VERSION" "$IMAGE" "$VERSION" "$DIGEST" "$GITHUB_SHA" > center-image.json
+
+      - uses: actions/upload-artifact@v7
+        if: github.ref_type == 'tag'
+        with:
+          name: center-image-metadata-${{ github.ref_name }}
+          path: center-image.json
+          if-no-files-found: error
+          retention-days: 30

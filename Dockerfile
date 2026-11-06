@@ -17,6 +17,13 @@ RUN npm ci --prefix host-core --omit=dev
 
 FROM node:22-bookworm
 LABEL org.opencontainers.image.source="https://github.com/FireSpoonYZ/e-launcher"
+# Python runs only at the center, for the vendored Hermes learning modules
+# (center-server/hermes/vendor/, requires-python >=3.11,<3.15). bookworm ships
+# python3.11; the Node adapter launches it via env HERMES_PYTHON (default
+# python3). No Python is installed or needed on Android.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build --chown=node:node /app/center-contract/ ./center-contract/
@@ -28,5 +35,5 @@ COPY --chown=node:node licenses/ ./licenses/
 COPY --chown=node:node plugins/ ./plugins/
 RUN mkdir -p /data && chown node:node /data
 USER node
-EXPOSE 8443 8790
+EXPOSE 8080
 CMD ["node", "center-server/cli.js"]

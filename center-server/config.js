@@ -102,38 +102,27 @@ function loadCenterConfigFile(path) {
     sessionKeyHex: String(parsed.sessionKeyHex).toLowerCase(),
     ownerPasswordHash: checkedHash(parsed.ownerPasswordHash, path),
     publicUrl: normalizePublicUrl(parsed.publicUrl, path + ' publicUrl'),
-    linkUrl: normalizeLinkUrl(parsed.linkUrl, path + ' linkUrl'),
+    linkUrl: deriveLinkUrl(normalizePublicUrl(parsed.publicUrl)),
   };
-}
-
-function readTls(env) {
-  if (!env.CENTER_TLS_CERT_FILE || !env.CENTER_TLS_KEY_FILE) {
-    throw new Error('CENTER_TLS_CERT_FILE and CENTER_TLS_KEY_FILE are required unless CENTER_TLS_MODE=proxy');
-  }
-  return { cert: readFileSync(env.CENTER_TLS_CERT_FILE, 'utf8'), key: readFileSync(env.CENTER_TLS_KEY_FILE, 'utf8') };
 }
 
 /**
  * Resolves the startup plan without opening any store.
  * mode 'start': config is complete (persisted file or full legacy env).
  * mode 'setup': data root is new; run first-run onboarding.
- * URL precedence: explicit CENTER_PUBLIC_URL / CENTER_LINK_URL env wins over a
+ * URL precedence: explicit CENTER_PUBLIC_URL env wins over a
  * persisted or submitted value; credential envs may only match the file.
  */
 export function resolveCenterPlan(env) {
-  const tlsMode = env.CENTER_TLS_MODE || 'direct';
-  if (tlsMode !== 'direct' && tlsMode !== 'proxy') throw new Error("CENTER_TLS_MODE must be 'direct' or 'proxy'");
   const dataRoot = env.CENTER_DATA_ROOT || '/data';
   if (!isAbsolute(dataRoot)) throw new Error('CENTER_DATA_ROOT must be an absolute path');
   const listenHost = env.CENTER_LISTEN_HOST || '0.0.0.0';
   if (isIP(listenHost) === 0) throw new Error('CENTER_LISTEN_HOST must be a literal IP address');
   const plan = {
-    tlsMode,
     dataRoot,
-    https: tlsMode === 'direct' ? readTls(env) : undefined,
     listenHost,
-    port: checkedPort(env.CENTER_PORT || 8443, 'CENTER_PORT'),
-    relayPort: checkedPort(env.CENTER_RELAY_PORT || 8790, 'CENTER_RELAY_PORT'),
+    port: checkedPort(env.CENTER_PORT || 8080, 'CENTER_PORT'),
+    trustProxy: parseTrustProxy(env.CENTER_TRUST_PROXY),
     webRoot: env.CENTER_WEB_ROOT || '/app/center-web/dist',
     npmPath: env.CENTER_NPM_PATH,
   };
@@ -142,7 +131,7 @@ export function resolveCenterPlan(env) {
   const envSessionHex = env.CENTER_SESSION_KEY_HEX;
   const envOwnerHash = env.CENTER_OWNER_PASSWORD_HASH;
   const envPublicUrl = env.CENTER_PUBLIC_URL ? normalizePublicUrl(env.CENTER_PUBLIC_URL, 'CENTER_PUBLIC_URL') : undefined;
-  const envLinkUrl = env.CENTER_LINK_URL ? normalizeLinkUrl(env.CENTER_LINK_URL, 'CENTER_LINK_URL') : undefined;
+  const envLinkUrl = envPublicUrl ? deriveLinkUrl(envPublicUrl) : undefined;
 
   const configPath = join(dataRoot, CENTER_CONFIG_FILE);
   if (existsSync(configPath)) {
@@ -162,7 +151,7 @@ export function resolveCenterPlan(env) {
       sessionKey: file.sessionKey,
       ownerPasswordHash: file.ownerPasswordHash,
       publicUrl: envPublicUrl ?? file.publicUrl,
-      linkUrl: envLinkUrl ?? file.linkUrl,
+      linkUrl: deriveLinkUrl(envPublicUrl ?? file.publicUrl),
     };
     return plan;
   }
@@ -170,7 +159,7 @@ export function resolveCenterPlan(env) {
   const credentialCount = [envEncryptionHex, envSessionHex, envOwnerHash].filter((value) => value !== undefined && value !== '').length;
   if (credentialCount === 3) {
     // Complete legacy env: starts as-is, no migration and no setup token.
-    if (!envPublicUrl || !envLinkUrl) throw new Error('CENTER_LINK_URL and CENTER_PUBLIC_URL are required');
+    if (!envPublicUrl) throw new Error('CENTER_PUBLIC_URL is required');
     const { encryptionKey, sessionKey } = checkedKeys(envEncryptionHex, envSessionHex, 'env');
     plan.mode = 'start';
     plan.config = {
@@ -200,7 +189,7 @@ export function resolveCenterPlan(env) {
     throw new Error(
       dataRoot + ' already contains center data (' + foreign.slice(0, 3).join(', ') + (foreign.length > 3 ? ', ...' : '') + ') but no ' + CENTER_CONFIG_FILE + '; '
       + 'refusing to generate new keys over existing data. Restore the original ' + CENTER_CONFIG_FILE + ', or provide CENTER_ENCRYPTION_KEY_HEX, '
-      + 'CENTER_SESSION_KEY_HEX, CENTER_OWNER_PASSWORD_HASH, CENTER_PUBLIC_URL and CENTER_LINK_URL to start.',
+      + 'CENTER_SESSION_KEY_HEX, CENTER_OWNER_PASSWORD_HASH, CENTER_PUBLIC_URL to start.',
     );
   }
   // Env-provided defaults get persisted verbatim by setup; a link URL the
@@ -220,15 +209,19 @@ export function centerServerOptions(plan, config) {
     encryptionKey: config.encryptionKey,
     sessionKey: config.sessionKey,
     ownerPasswordHash: config.ownerPasswordHash,
-    https: plan.https,
     publicUrl: config.publicUrl,
     listenHost: plan.listenHost,
     port: plan.port,
     webRoot: plan.webRoot,
     npmPath: plan.npmPath,
-    tlsMode: plan.tlsMode,
-    relay: { listenHost: plan.listenHost, port: plan.relayPort, tls: plan.https, linkUrl: config.linkUrl },
+    trustProxy: plan.trustProxy,
   };
+}
+
+function parseTrustProxy(value) {
+  if (value === undefined || value === '' || value === 'false') return false;
+  if (value === 'true') return true;
+  return value.split(',').map(part => part.trim()).filter(Boolean);
 }
 
 function checkedPort(value, name) {

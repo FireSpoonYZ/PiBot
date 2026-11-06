@@ -54,7 +54,7 @@ export function createTurnAdmission(deps) {
     getBotModels, setBotModels, profileFor, botExecutionFingerprint, applyBotCwd,
     setBotAppliedRevision, setBotFingerprint, live, admitBot, getEpoch,
     trackSubmission, recordCompletedSubmission, initializeBot, attachments, sessions,
-    preemptWork,
+    preemptWork, canAdmit = () => true,
   } = deps;
 
   // 可信的发送方来源：只接受 Runtime 传入的结构化标记，deviceId 恒为本机，绝不采信正文。
@@ -299,7 +299,7 @@ export function createTurnAdmission(deps) {
       不算忙/死锁——本函数只看原生活动与 Host 队列。
       停止 gate 激活时恒为 false：取消确认前绝不给后台工作发新 grant。 */
   async function canRunWork(botId) {
-    if (closing || stopped(botId)) return false;
+    if (closing || !canAdmit() || stopped(botId)) return false;
     const bot = host.getBot(botId);
     if (!bot) return false;
     if ((await readQueue(bot.primaryConversationId))
@@ -437,7 +437,7 @@ export function createTurnAdmission(deps) {
       await setPhase(bot, item.requestId, 'checking');
       let lastError = null;
       for (let attempt = 0; attempt < MAX_PREPARE_ATTEMPTS && !preparation; attempt++) {
-        if (getEpoch() !== epoch || closing) throw errWithCode('host is not connected', 'NOT_CONNECTED');
+        if (getEpoch() !== epoch || closing || !canAdmit()) throw errWithCode('host is not connected', 'NOT_CONNECTED');
         try {
           preparation = await centerRuntime.prepareTurn({
             botId: bot.botId,
@@ -463,7 +463,7 @@ export function createTurnAdmission(deps) {
       }
       await setPhase(bot, item.requestId, 'synchronizing');
       await applyPreparation(bot, preparation);
-      if (getEpoch() !== epoch || closing) throw errWithCode('host is not connected', 'NOT_CONNECTED');
+      if (getEpoch() !== epoch || closing || !canAdmit()) throw errWithCode('host is not connected', 'NOT_CONNECTED');
       grant = preparation.admission ?? await centerRuntime.confirmTurn({
         botId: bot.botId,
         requestId: item.requestId,
@@ -555,7 +555,7 @@ export function createTurnAdmission(deps) {
 
     // 6. 提交前最后一次核对条目仍存活（abort/关闭可能刚删了它）。
     const alive = await itemAlive(bot, item.requestId);
-    if (!alive || getEpoch() !== epoch || closing) {
+    if (!alive || getEpoch() !== epoch || closing || !canAdmit()) {
       throw errWithCode('queued turn was cancelled', 'NOT_CONNECTED');
     }
     // 授予后崩溃重放：原生会话可能已记录同一 requestId 的提交（submit 成功、step7 删队列前崩溃）。
@@ -651,6 +651,7 @@ export function createTurnAdmission(deps) {
     if (attachmentMeta.length > 0) entry.data.attachments = attachmentMeta;
     let submission;
     try {
+      if (!canAdmit()) throw errWithCode('host is preparing an update', 'RUNTIME_BUSY');
       submission = await conversation.submit(
         { type: 'input', content, requestId: item.requestId, whenBusy: 'reject', entry },
         context,
@@ -700,7 +701,7 @@ export function createTurnAdmission(deps) {
   /** 泵一条（可能重入下一轮 head）；每次新轮都会重新过中心确认，绝不合并 followup。
       'cancelled' 条目是对账用的终态受理记录，不是可泵的 head：跳过它们，绝不重投已取消的轮。 */
   async function pump(bot) {
-    if (closing) return;
+    if (closing || !canAdmit()) return;
     if (bot.archivedAt !== null && bot.archivedAt !== undefined) return;
     const items = await readQueue(bot.primaryConversationId);
     const item = headItem(items);
@@ -1160,6 +1161,7 @@ export function createTurnAdmission(deps) {
       if (!(await pendingViable(binding.nativeId, input.requestId))) return null;
       const conversation = await h.conversation(executionNativeId, context);
       if (!conversation) throw new Error('work conversation is missing');
+      if (!canAdmit()) return null;
       const submission = await conversation.submit(input, context);
       // submit 在飞期间 stop/preempt 已作旧 pending：立即中止刚提交的原生工作，
       // 绝不出现「停止后新执行」。abortSubmission 幂等，work lane 结算时再覆盖。

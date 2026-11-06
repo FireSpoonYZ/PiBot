@@ -38,8 +38,7 @@ export default function Setup({ status, onComplete }: { status: SetupStatus; onC
   const [ownerPassword, setOwnerPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [publicUrl, setPublicUrl] = useState(() => defaultPublicUrl(status));
-  const [linkUrl, setLinkUrl] = useState(() => status.linkUrl ?? deriveLinkUrl(defaultPublicUrl(status)));
-  const [linkUrlEdited, setLinkUrlEdited] = useState(false);
+  const linkUrl = deriveLinkUrl(publicUrl);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [finishing, setFinishing] = useState(false);
@@ -121,7 +120,7 @@ export default function Setup({ status, onComplete }: { status: SetupStatus; onC
         </p>
         <p className="secondary">
           如通过 NAS 反向代理部署，必须启用 WebSocket 升级。
-          {status.tlsMode ? ' 当前部署模式：' + status.tlsMode + '。' : ''}
+          {' HTTPS/WSS 由同一反向代理入口提供。'}
         </p>
         <form
           className="form"
@@ -142,7 +141,7 @@ export default function Setup({ status, onComplete }: { status: SetupStatus; onC
             setBusy(true);
             setError('');
             void api
-              .submitSetup({ setupToken, ownerPassword, publicUrl, linkUrl })
+              .submitSetup({ setupToken, ownerPassword, publicUrl })
               .then(() => {
                 if (!mountedRef.current) return;
                 clearSecrets();
@@ -210,7 +209,7 @@ export default function Setup({ status, onComplete }: { status: SetupStatus; onC
               onChange={event => {
                 const value = event.target.value;
                 setPublicUrl(value);
-                if (!linkUrlEdited) setLinkUrl(deriveLinkUrl(value));
+
               }}
             />
           </label>
@@ -222,10 +221,7 @@ export default function Setup({ status, onComplete }: { status: SetupStatus; onC
               required
               disabled={disabled}
               value={linkUrl}
-              onChange={event => {
-                setLinkUrl(event.target.value);
-                setLinkUrlEdited(true);
-              }}
+              readOnly
             />
           </label>
           {error && (

@@ -286,6 +286,7 @@ const METHOD_HANDLERS = new Map([
   ['retryMemory', (control, params, signal) => control.retryMemory(params.botId, params.input, { signal })],
   ['getBotSoul', (control, params, signal) => control.getBotSoul(params.botId, { signal })],
   ['setBotSoul', (control, params, signal) => control.setBotSoul(params.botId, params.input, { signal })],
+  ['manageBotLearning', (control, params, signal) => control.manageBotLearning(params.botId, params.input, { signal })],
   ['scheduleTask', (control, params, signal) => control.scheduleTask(params.botId, params.input, { signal })],
   ['discoverProviderModels', (control, params, signal) => control.discoverProviderModels(params.input, { signal })],
   ['validateCenterProvider', (control, params, signal) => control.validateCenterProvider(params, { signal })],

@@ -6,6 +6,7 @@ import { inboxQueryKey } from './message-queries.js';
 import { CONTROL_ERROR_CODES } from './remote-control-protocol.js';
 import { BOT_FILE_MAX_COUNT } from './bot-file-protocol.js';
 import { snapshotBotFiles, deliverBotFile } from './bot-files.js';
+import { createBotManagementTools } from './bot-management-tools.js';
 
 const MAX_OUTPUT_BYTES = 50 * 1024;
 const MAX_TEXT_UNITS = 4096;
@@ -105,7 +106,7 @@ function previewPage(metadata, page, key) {
 
 
 export function createCommunicationTools({ host, getHarness, getMessageLog, publishWork, collaboration, sessions }) {
-  function tool({ name, description, properties, required = [], deferred, run }) {
+  function tool({ name, description, properties, required = [], deferred, boundedCodes, run }) {
     return defineTool({
       name,
       description,
@@ -130,7 +131,12 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
               outcome: error.outcome ?? 'unconfirmed',
             }), isError: true };
           }
-          if (!TOOL_ERROR_CODES.has(error?.code)) throw error;
+          // boundedCodes tools (Center bot management) accept every
+          // service-emitted uppercase code as a tool-visible error result;
+          // un-coded errors still surface as failures.
+          const boundedServiceCode = boundedCodes === true &&
+            typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code);
+          if (!TOOL_ERROR_CODES.has(error?.code) && !boundedServiceCode) throw error;
           return {
             ...output({
               code: error.code,
@@ -356,9 +362,10 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
           expectedRevision: { type: 'string' },
         },
         required: ['deviceId', 'botId', 'text'],
-        async run(args, _identity, _log, _api, context) {
+        async run(args, identity, _log, _api, context) {
           assertTargetBot(args);
-          return collaboration.setBotSoul({ ...args, signal: context.abortSignal });
+          const self = args.deviceId === host.deviceId && args.botId === identity.botId;
+          return collaboration.setBotSoul({ ...args, self, signal: context.abortSignal });
         },
       }),
       tool({
@@ -467,6 +474,7 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
           return collaboration.unarchiveBot({ ...args, signal: context.abortSignal });
         },
       }),
+      ...createBotManagementTools({ collaboration, memoRequestId }).map((spec) => tool(spec)),
       tool({
         name: 'delete_bot',
         description: 'Permanently delete an idle, non-primary Bot from the specified device.',

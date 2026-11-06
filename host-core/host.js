@@ -2,6 +2,7 @@ import { openStore } from './store.js';
 import { ensureSoul, setSoulText } from './bot-soul.js';
 import fs from 'node:fs';
 import path from 'node:path';
+import { assertDeviceId } from './relay-protocol.js';
 
 /**
  * Open the local bot/host registry for the machine.
@@ -13,8 +14,10 @@ export function openHost(options) {
   if (typeof dataRoot !== 'string' || dataRoot.trim() === '' || !path.isAbsolute(dataRoot)) {
     throw invalidArgument('dataRoot must be a non-empty absolute path');
   }
+  const expectedDeviceId = options?.expectedDeviceId;
+  if (expectedDeviceId !== undefined) assertDeviceId(expectedDeviceId);
   const root = path.resolve(dataRoot);
-  const store = openStore(root);
+  const store = openStore(root, expectedDeviceId);
   const defaultWorkspace = path.resolve(root, 'workspaces');
 
   // 未知 Bot 抛 BOT_NOT_FOUND；SOUL 路径只在此校验过存在性后由 bot-soul.js 内部生成。

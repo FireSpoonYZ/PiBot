@@ -350,7 +350,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     db.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
     transaction(() => {
       let version = db.prepare('PRAGMA user_version').get().user_version;
-      if (![0, 1, 2, 3, 4].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
+      if (![0, 1, 2, 3, 4, 5].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
       if (version === 0) {
         db.exec(`
           CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL, config_revision INTEGER NOT NULL);
@@ -406,6 +406,25 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           CREATE TABLE turn_sets (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, bot_id TEXT NOT NULL, fingerprint TEXT NOT NULL, json TEXT NOT NULL);
           CREATE TABLE turn_admissions (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, bot_id TEXT NOT NULL, scope_key TEXT NOT NULL, request_id TEXT NOT NULL, set_id TEXT NOT NULL, fingerprint TEXT NOT NULL, json TEXT NOT NULL, UNIQUE(device_id, bot_id, scope_key, request_id));
           PRAGMA user_version = 4;
+        `);
+        version = 4;
+      }
+      if (version === 4) {
+        // Client release artifacts are immutable once recorded; the tuple is the
+        // publish identity so a version can never be silently overwritten.
+        db.exec(`
+          CREATE TABLE client_releases (
+            id TEXT PRIMARY KEY,
+            platform TEXT NOT NULL,
+            arch TEXT NOT NULL,
+            format TEXT NOT NULL,
+            version TEXT NOT NULL,
+            published INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            json TEXT NOT NULL,
+            UNIQUE(platform, arch, format, version)
+          );
+          PRAGMA user_version = 5;
         `);
       }
     });
@@ -1087,6 +1106,46 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           const credentials = Object.fromEntries([...content.refs].map((id) => [id, resolveCredential(assertPublicCredentialId(id))]));
           return { protocol: 1, deviceId, revision: desired.revision, linkUrl, providers: content.providers, models: content.models, bots: content.bots, credentials };
         }, 'DEFERRED');
+      },
+      // Client releases are distribution metadata, not execution config: none of
+      // these methods call bump(), so device config revisions are unaffected.
+      listClientReleases() {
+        return db.prepare('SELECT json FROM client_releases ORDER BY created_at DESC, rowid DESC').all().map(parse);
+      },
+      getClientRelease(id) {
+        assertId(id);
+        return get('client_releases', id);
+      },
+      findClientRelease({ platform, arch, format, version }) {
+        return parse(db.prepare('SELECT json FROM client_releases WHERE platform = ? AND arch = ? AND format = ? AND version = ?').get(platform, arch, format, version));
+      },
+      createClientRelease(record) {
+        assertObject(record);
+        assertId(record.id);
+        return transaction(() => {
+          if (store.findClientRelease(record)) throw error('REQUEST_CONFLICT', 'Client release already exists');
+          db.prepare('INSERT INTO client_releases (id, platform, arch, format, version, published, created_at, json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+            .run(record.id, record.platform, record.arch, record.format, record.version, record.published ? 1 : 0, record.createdAt, json(record));
+          return record;
+        });
+      },
+      setClientReleasePublished(id, published) {
+        assertId(id);
+        if (typeof published !== 'boolean') throw error('INVALID_ARGUMENT', 'published must be boolean');
+        return transaction(() => {
+          const current = store.getClientRelease(id);
+          if (!current) throw error('NOT_FOUND', 'Client release not found');
+          // The first publish timestamp is kept across later publish/unpublish cycles.
+          const result = { ...current, published, publishedAt: published ? (current.publishedAt ?? new Date().toISOString()) : current.publishedAt };
+          db.prepare('UPDATE client_releases SET published = ?, json = ? WHERE id = ?').run(result.published ? 1 : 0, json(result), id);
+          return result;
+        });
+      },
+      listPublishedClientReleases({ platform, arch, format } = {}) {
+        return db.prepare(`SELECT json FROM client_releases WHERE published = 1
+          AND (? IS NULL OR platform = ?) AND (? IS NULL OR arch = ?) AND (? IS NULL OR format = ?)
+          ORDER BY created_at DESC, rowid DESC`)
+          .all(platform ?? null, platform ?? null, arch ?? null, arch ?? null, format ?? null, format ?? null).map(parse);
       },
       close() { db.close(); },
     };

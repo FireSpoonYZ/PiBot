@@ -312,8 +312,20 @@ pub fn port_open(port: u16) -> bool {
 
 // ---------------------------------------------------------------- systemd
 
+/// Absolute `systemctl` path on standard Debian/systemd layouts; falls back to
+/// a bare `systemctl` (PATH lookup) on other distributions.
+fn systemctl_program() -> std::path::PathBuf {
+    for candidate in ["/usr/bin/systemctl", "/bin/systemctl", "/usr/local/bin/systemctl"] {
+        let path = Path::new(candidate);
+        if path.is_file() {
+            return path.to_path_buf();
+        }
+    }
+    std::path::PathBuf::from("systemctl")
+}
+
 pub fn systemctl_user(args: &[&str]) -> std::io::Result<Output> {
-    let mut cmd = command("systemctl");
+    let mut cmd = command(systemctl_program());
     cmd.arg("--user").args(args);
     run_capture(cmd)
 }

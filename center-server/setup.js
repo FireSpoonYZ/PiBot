@@ -24,8 +24,8 @@ import {
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 const status = { INVALID_ARGUMENT: 400, UNAUTHENTICATED: 401, FORBIDDEN: 403, NOT_FOUND: 404, REQUEST_CONFLICT: 409, PAYLOAD_TOO_LARGE: 413, RATE_LIMITED: 429, INTERNAL_ERROR: 500 };
 
-export async function openSetupServer({ dataRoot, https, tlsMode, listenHost = '127.0.0.1', port = 8443, webRoot, defaults = {}, setupToken }) {
-  const app = Fastify({ https, logger: false, bodyLimit: 16 * 1024 });
+export async function openSetupServer({ dataRoot, tlsMode, listenHost = '127.0.0.1', port = 8080, webRoot, defaults = {}, setupToken }) {
+  const app = Fastify({ logger: false, bodyLimit: 16 * 1024 });
   let configured = null;
   let submitting = false;
   let resolveConfigured;
@@ -87,13 +87,7 @@ export async function openSetupServer({ dataRoot, https, tlsMode, listenHost = '
       if (typeof password !== 'string' || password.length < 12 || password.length > 1024) fail('INVALID_ARGUMENT', 'ownerPassword must be 12-1024 characters');
       const publicUrl = defaults.publicUrl
         ?? (body.publicUrl !== undefined && body.publicUrl !== '' ? normalizePublicUrl(body.publicUrl) : fail('INVALID_ARGUMENT', 'publicUrl is required'));
-      let linkUrl = defaults.linkUrl;
-      if (linkUrl === undefined) {
-        linkUrl = body.linkUrl === undefined || body.linkUrl === null || body.linkUrl === ''
-          ? deriveLinkUrl(publicUrl)
-          : normalizeLinkUrl(body.linkUrl);
-      }
-      if (new URL(linkUrl).pathname !== '/v1/link') fail('INVALID_ARGUMENT', 'linkUrl must end with /v1/link');
+      const linkUrl = deriveLinkUrl(publicUrl);
       const encryptionKey = randomBytes(32);
       const sessionKey = randomBytes(32);
       const record = {

@@ -1,0 +1,80 @@
+{
+  "source": "https://github.com/NousResearch/hermes-agent.git",
+  "commit": "71736c9f32597bbca9d89cede5aa136e55946b2f",
+  "license": "MIT (see LICENSE)",
+  "note": "Files below are copied byte-for-byte from the pinned upstream commit via `git show <commit>:<path>`. sha256 values digest the blob bytes; blob is the upstream git object id for `git cat-file` verification.",
+  "files": {
+    "LICENSE": {
+      "sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6",
+      "blob": "75410e73319c72cd3e991a501c5455eb78f38375"
+    },
+    "agent/__init__.py": {
+      "sha256": "21cdce89e9ffdb847634bf498b087410cd191a1e375db43928735846fb7ddc86",
+      "blob": "9555e8210179a1b4e6245bf69bf71039f7bb29ae"
+    },
+    "agent/jiter_preload.py": {
+      "sha256": "bb66461d6e52e54dd2368ad021304d74676824924c45df80f0a3e769c9e5fff3",
+      "blob": "61b90820b83b1411496e5e38da09e25b34a17da8"
+    },
+    "agent/background_review.py": {
+      "sha256": "31efabc1611e6b979681d3bc7fd06f7099654e3052c45bb445b02c7473cb7bb0",
+      "blob": "108e4518ed584448f8c2a5f16a7c903690efc9fd"
+    },
+    "agent/curator.py": {
+      "sha256": "b3a89ebf23453ab8b45971fed4624ef5e2ef3693da2612aa6cf61a2bdca2c653",
+      "blob": "f3fe2bd72ec633fb3798afabb90ef61f36eb6637"
+    },
+    "agent/curator_backup.py": {
+      "sha256": "41a63a699d9c525dc42a5199107b3bac53fff7cddb41f8dbb95e6d8eebccc362",
+      "blob": "be6aab04c0e4c3d93e4e01c3ff30dde42ea658a7"
+    },
+    "agent/learn_prompt.py": {
+      "sha256": "0407ac5cb2380000133ff6b131e3f9f7af59f01f660335b5b5677aba4e44eb4b",
+      "blob": "feac4178b5cb157760e97285dc3ddc5f5dc3616a"
+    },
+    "agent/interrupt_compat.py": {
+      "sha256": "3ce061954cf52505feb69013372bcef37141699761a05dfff334cb3eaa09f25c",
+      "blob": "50a4dfa7b95b323326bca972b265555947ff0cbd"
+    },
+    "agent/safe_worker_policy.py": {
+      "sha256": "f0759f0868f402d5aff6007303ad503e3d3d92999ed01693037bc8f07b4a2738",
+      "blob": "fee28e9986b2baf79fd9c8540be434e903b4df89"
+    },
+    "agent/skill_utils.py": {
+      "sha256": "9b643866caf9b0db3b568045e2b49bf2903f89197497c815a492afec89b33722",
+      "blob": "78752d09d25907d194d16b89c713733a421a2f72"
+    },
+    "agent/thread_scoped_output.py": {
+      "sha256": "f6ebba933be6d4c13e95d97a290b5a58e99c9d29ef1824fef26245814ebe65bc",
+      "blob": "2363c73cab8c1e066cf971b44eb5a2e92c3f8c03"
+    },
+    "tools/__init__.py": {
+      "sha256": "7bca460f476ac9ace706c8cfd07e98f8aae34d839862f0f68abafc3a8397cf35",
+      "blob": "db946d0e2bc62d468804968c074f844b5fa0cbb3"
+    },
+    "tools/skill_ledger.py": {
+      "sha256": "56121bfa4e5daa57ca7f9eb1767817e06e0ad00fae2e4c7f72bcaaf299e43c27",
+      "blob": "dc983d1877187852738dc7eaadc839886e039595"
+    },
+    "tools/skill_manager_guards.py": {
+      "sha256": "3ca2e672a39061f3e2d9f58e402d5fb582a77d002d2d743d476e21a5a335e866",
+      "blob": "896189fbe8f609612e54c1186089cb20c33be65a"
+    },
+    "tools/skill_provenance.py": {
+      "sha256": "5c492a925cdde61c3257eb5db76568822d26be3d9a2c40d364a9997a3a7cb576",
+      "blob": "4ab73ce25634d642a831a3de4b66283ada19e4e0"
+    },
+    "hermes_constants.py": {
+      "sha256": "74d849629c176703d48f9aa43a245fd8819545ac908c805e347db7d691976510",
+      "blob": "32dbd53c9737545edea778df17eaec42c2581b56"
+    },
+    "utils.py": {
+      "sha256": "7add43a4e5b3bd042e95412e2d9bd2eddfd35a8a2628f4d5ba6f20dd5eca1877",
+      "blob": "8d3193114faa646a1739e41b8d21e9a53b9c398d"
+    },
+    "hermes_cli/sizefmt.py": {
+      "sha256": "103db010ac020af25ccd5ba5a4b33fa62965336bf6bfc98f14c5ecfbeea41d28",
+      "blob": "29dddcfa854315dd449e141d58714b4b814b33d8"
+    }
+  }
+}

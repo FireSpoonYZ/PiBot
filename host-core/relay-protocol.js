@@ -67,6 +67,12 @@ export function isCertificateError(error) {
   return typeof error?.code === 'string' && /^(?:CERT_|CRL_|ERROR_IN_CERT_|ERR_TLS_CERT_|ERR_OSSL_PEM_|ERR_OSSL_X509_|ERR_SSL_CERTIFICATE_VERIFY_FAILED$|DEPTH_ZERO_SELF_SIGNED_CERT$|SELF_SIGNED_CERT_IN_CHAIN$|UNABLE_TO_(?:GET_ISSUER_CERT|VERIFY_LEAF_SIGNATURE|DECRYPT_CERT_SIGNATURE|DECODE_ISSUER_PUBLIC_KEY)|INVALID_CA$|INVALID_PURPOSE$|PATH_LENGTH_EXCEEDED$|HOSTNAME_MISMATCH$)/.test(error.code);
 }
 
+export function assertDeviceId(value) {
+  if (typeof value !== 'string' || !/^[\x21-\x7e]{1,200}$/.test(value)) {
+    throw invalid('deviceId must contain 1-200 visible ASCII characters');
+  }
+}
+
 export function assertDeviceToken(token) {
   if (typeof token !== 'string' || !DEVICE_TOKEN_RE.test(token)) {
     throw invalid('token must be 32-512 characters of A-Za-z0-9_-');

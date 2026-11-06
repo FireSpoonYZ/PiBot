@@ -167,6 +167,8 @@ const CONTROL_V2_METHODS = Object.freeze([
   'uploadAttachment',
   'getAttachment',
   'putBotFileChunk',
+  // Bot 学习管理（Hermes 后台 review/learn/curate 作业）：params {botId,input}。
+  'manageBotLearning',
 ]);
 
 export const CONTROL_METHODS = Object.freeze([...CONTROL_V1_METHODS, ...CONTROL_V2_METHODS]);
@@ -569,7 +571,7 @@ function normalizeControlParams(method, params) {
       rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
       assertId(params.botId, 'botId');
       if (!isPlainObject(params.input)) throw invalid('input must be an object');
-      rejectUnknownFields(params.input, new Set(['expectedRevision', 'text']), 'input');
+      rejectUnknownFields(params.input, new Set(['expectedRevision', 'text', 'self']), 'input');
       if (typeof params.input.expectedRevision !== 'string' || !SHA256_HEX_RE.test(params.input.expectedRevision)) {
         throw invalid('expectedRevision must be a lowercase 64-character hex SHA-256');
       }
@@ -581,7 +583,11 @@ function normalizeControlParams(method, params) {
       }
       return {
         botId: params.botId,
-        input: { expectedRevision: params.input.expectedRevision, text: params.input.text },
+        input: {
+          expectedRevision: params.input.expectedRevision,
+          text: params.input.text,
+          ...(params.input.self === true ? { self: true } : {}),
+        },
       };
     }
     case 'validateCenterProvider':
@@ -672,6 +678,16 @@ function normalizeControlParams(method, params) {
       assertId(params.botId, 'botId');
       assertAttachmentId(params.attachmentId, 'attachmentId');
       return { botId: params.botId, attachmentId: params.attachmentId };
+    }
+    case 'manageBotLearning': {
+      rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
+      assertId(params.botId, 'botId');
+      if (!isPlainObject(params.input)) throw invalid('input must be an object');
+      if (typeof params.input.action !== 'string' ||
+          !['status', 'configure', 'learn', 'review', 'curate', 'cancel'].includes(params.input.action)) {
+        throw invalid('input.action must be one of status|configure|learn|review|curate|cancel');
+      }
+      return { botId: params.botId, input: params.input };
     }
     default:
       throw invalid('unknown control method');

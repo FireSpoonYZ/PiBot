@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, Navigate, NavLink, Route, Routes } from 'react-router-dom';
-import { LogOut, Moon, Puzzle, RefreshCw, Server, Smartphone, Sun, WifiOff } from 'lucide-react';
+import { LogOut, Moon, Package, Puzzle, RefreshCw, Server, Smartphone, Sun, WifiOff } from 'lucide-react';
 import { api } from './api';
 import type { SetupStatus } from './api';
 import Login from './pages/Login';
@@ -11,6 +11,7 @@ import Devices from './pages/Devices';
 import Capabilities from './pages/Capabilities';
 import Installation from './pages/Installation';
 import BotCapabilities from './pages/BotCapabilities';
+import ClientReleases from './pages/ClientReleases';
 
 type ThemeMode = 'light' | 'dark';
 
@@ -230,6 +231,13 @@ export default function App() {
                 <Puzzle size={18} />
                 <span>插件、MCP 与 Skill</span>
               </NavLink>
+              <NavLink
+                to="/releases"
+                className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
+              >
+                <Package size={18} />
+                <span>客户端版本</span>
+              </NavLink>
             </div>
           </nav>
           <Routes>
@@ -240,6 +248,7 @@ export default function App() {
             <Route path="/capabilities" element={<Capabilities />} />
             <Route path="/capabilities/:installationId" element={<Installation />} />
             <Route path="/devices/:deviceId/bots/:botId/capabilities" element={<BotCapabilities />} />
+            <Route path="/releases" element={<ClientReleases />} />
             <Route path="*" element={<Navigate to="/providers" replace />} />
           </Routes>
         </div>

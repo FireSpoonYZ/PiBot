@@ -140,6 +140,7 @@ import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, us
 import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleRepeatLabel, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending, ChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, formatToolStepDuration, copyTextToClipboard, renderToolStepIcon, extractSmartArgEntries, ToolCallStepCard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
 // @lane-imports:settings
 import { Badge, Disclosure, Row, Section } from './bot-settings/primitives';
+import { ClientUpdateSection } from './ClientUpdateSection';
 // ---
 // @lane-imports:hub
 import { Chips } from './bot-settings/primitives';
@@ -7527,10 +7528,10 @@ function HubSettingsView({
           {showCenterForm && <OnboardingPanel onDone={() => setEditingCenter(false)} />}
         </Section>
 
-        {/* C7 通知/后台/Shizuku 与本机 Host 状态：连接前后均可在设置查看。 */}
         <OnboardingPermissions />
+        <ClientUpdateSection variant="mobile" />
 
-        {/* 2. 设备 */}
+        {/* 3. 设备 */}
         <Section
           title={t('设备', 'Devices')}
           action={
@@ -7753,7 +7754,7 @@ function HubSettingsView({
           ) : null}
         </Section>
 
-        {/* 3. 语音 */}
+        {/* 4. 语音 */}
         <Section title={t('语音', 'Voice')}>
           <div className="hst-row-static">
             <span className="bs-row-icon" aria-hidden="true"><AudioLines size={17} /></span>
@@ -7781,7 +7782,7 @@ function HubSettingsView({
           </div>
         </Section>
 
-        {/* 4. 智能体 */}
+        {/* 5. 智能体 */}
         <Section title={t('智能体', 'Bots')}>
           <Row
             icon={<Archive />}
@@ -7808,7 +7809,7 @@ function HubSettingsView({
           )}
         </Section>
 
-        {/* 5. 系统 */}
+        {/* 6. 系统 */}
         {onOpenSystemSettings && (
           <Section title={t('系统', 'System')}>
             <Row
@@ -7821,7 +7822,7 @@ function HubSettingsView({
           </Section>
         )}
 
-        {/* 6. 开发者 */}
+        {/* 7. 开发者 */}
         <Disclosure title={t('开发者', 'Developer')}>
           <div className="hst-form">
             <Section title={t('中心连接进阶参数', 'Center TLS & Host Token')} bare>

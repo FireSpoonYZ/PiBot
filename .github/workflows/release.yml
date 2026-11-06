@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  android:
+    uses: ./.github/workflows/apk.yml
+    secrets: inherit
+
+  desktop:
+    uses: ./.github/workflows/desktop.yml
+    secrets: inherit
+
+  release:
+    needs: [android, desktop]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Verify product version consistency
+        run: node scripts/release-check.mjs --tag "${GITHUB_REF_NAME}"
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: '*-${{ github.ref_name }}'
+          path: artifacts
+          merge-multiple: false
+
+      # Map each downloaded installer to the center contract and emit one
+      # <name>.metadata.json per artifact. Paths passed to release-artifact.mjs
+      # are the real files under artifacts/.
+      - name: Generate per-artifact metadata
+        run: |
+          set -euo pipefail
+          VERSION=${GITHUB_REF_NAME#v}
+          COMMIT=$GITHUB_SHA
+          NOTES="release ${GITHUB_REF_NAME} (${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+          count=0
+          while IFS= read -r f; do
+            base=$(basename "$f")
+            case "$base" in
+              *.exe) platform=windows; arch=x86_64; format=nsis;;
+              *.deb) platform=linux;    arch=x86_64; format=deb;;
+              *.apk) platform=android;  arch=aarch64; format=apk;;
+              *) continue;;
+            esac
+            extra=()
+            if [ "$format" = apk ]; then
+              VC=$(grep -oP 'android\.versionCode=\K\d+' gradle.properties || echo '')
+              [ -n "$VC" ] && extra+=(--version-code "$VC")
+            fi
+            out="$(dirname "$f")/$base.metadata.json"
+            node scripts/release-artifact.mjs \
+              --version "$VERSION" --commit "$COMMIT" --notes "$NOTES" \
+              --platform "$platform" --arch "$arch" --format "$format" \
+              --file "$f" "${extra[@]}" --out "$out"
+            count=$((count+1))
+          done < <(find artifacts -type f \( -name '*.exe' -o -name '*.deb' -o -name '*.apk' \) | sort)
+          if [ "$count" -eq 0 ]; then
+            echo "No release artifacts found"
+            exit 1
+          fi
+          echo "generated $count metadata file(s)"
+
+      - name: Publish immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists; refusing to overwrite."
+            exit 1
+          fi
+          # Upload every installer + its .sig/.sha256 sidecar + metadata JSON.
+          mapfile -d '' files < <(find artifacts -type f \( -name '*.exe' -o -name '*.deb' -o -name '*.apk' -o -name '*.sig' -o -name '*.sha256' -o -name '*.metadata.json' \) -print0)
+          if [ "${#files[@]}" -eq 0 ]; then echo "nothing to upload"; exit 1; fi
+          gh release create "${GITHUB_REF_NAME}" "${files[@]}" \
+            --title "e-launcher ${GITHUB_REF_NAME}" \
+            --notes "SHA: ${GITHUB_SHA}\nRun: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --target "$GITHUB_SHA"

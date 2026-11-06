@@ -8,9 +8,10 @@
 use std::{
   env, fs,
   io::{BufRead, BufReader, Read, Write},
-  path::PathBuf,
+  net::{SocketAddr, TcpStream},
+  path::{Path, PathBuf},
   process::{Command, Stdio},
-  sync::mpsc,
+  sync::{mpsc, Mutex},
   thread,
   time::{Duration, Instant},
 };
@@ -25,7 +26,7 @@ use serde_json::{Map, Value, json};
 use tauri::{AppHandle, State, Webview, utils::platform};
 
 use crate::{
-  bridge::{BridgeError, DesktopBridge},
+  bridge::{self, BridgeError, DesktopBridge},
   ensure_main_webview,
 };
 
@@ -56,7 +57,8 @@ const SECRET_ENV_KEYS: &[&str] = &[
   "E_LAUNCHER_RELAY_TOKEN",
   "E_LAUNCHER_CONTROL_TOKEN",
 ];
-const CONTROL_ACTIONS: &[&str] = &["start", "stop", "restart", "enable", "disable", "setup-shower"];
+static HOST_CONTROL_LOCK: Mutex<()> = Mutex::new(());
+const CONTROL_ACTIONS: &[&str] = &["start", "stop", "restart", "enable", "disable", "setup-shower", "remove"];
 
 fn invalid(message: &str) -> BridgeError {
   BridgeError::new("INVALID_ARGUMENT", message, "not-sent")
@@ -208,13 +210,19 @@ fn run_launcher(args: &[String], secret: Option<&str>, timeout: Duration) -> Res
   }
 }
 
-async fn run_blocking<F>(job: F) -> Result<Value, BridgeError>
+async fn run_blocking<F, T: Send + 'static>(job: F) -> Result<T, BridgeError>
 where
-  F: FnOnce() -> Result<Value, BridgeError> + Send + 'static,
+  F: FnOnce() -> Result<T, BridgeError> + Send + 'static,
 {
   tauri::async_runtime::spawn_blocking(job)
     .await
     .map_err(|_| BridgeError::new("INTERNAL", "host launcher worker failed", "unconfirmed"))?
+}
+
+/// Runs a launcher subcommand without secret input (e.g. `prepare-update`,
+/// `cancel-update`) for the updater coordination path.
+pub(crate) async fn host_cli(args: Vec<String>, timeout: Duration) -> Result<Value, BridgeError> {
+  run_blocking(move || run_launcher(&args, None, timeout)).await
 }
 
 fn validate_center_url(raw: &str) -> Result<String, BridgeError> {
@@ -263,28 +271,24 @@ fn validate_secret(value: &str, what: &str) -> Result<(), BridgeError> {
   Ok(())
 }
 
-/// `HOST_HOME` per the host-service contract (§2).
-fn host_home() -> Option<PathBuf> {
-  if let Some(value) = env::var_os("E_LAUNCHER_HOST_HOME") {
-    let path = PathBuf::from(value);
-    if path.is_absolute() {
-      return Some(path);
-    }
-  }
-  #[cfg(windows)]
-  {
-    env::var_os("LOCALAPPDATA")
-      .map(PathBuf::from)
-      .filter(|p| p.is_absolute())
-      .map(|p| p.join("e-launcher").join("host-service"))
-  }
-  #[cfg(not(windows))]
-  {
-    let config = env::var_os("XDG_CONFIG_HOME")
-      .map(PathBuf::from)
-      .filter(|p| p.is_absolute())
-      .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(config.join("e-launcher").join("host-service"))
+/// The launcher resolves the registered home, including migrated Windows data.
+fn reported_host_home(status: &Value) -> Option<PathBuf> {
+  status.get("hostHome").and_then(Value::as_str)
+    .map(PathBuf::from).filter(|path| path.is_absolute())
+}
+
+const AUTOSTART_PENDING_FILE: &str = "host-autostart-pending";
+
+fn set_autostart_pending(data_root: &Path, pending: Option<&str>) -> Result<(), BridgeError> {
+  let path = data_root.join(AUTOSTART_PENDING_FILE);
+  let result = match pending {
+    Some(step) => fs::write(path, step),
+    None => fs::remove_file(path),
+  };
+  match result {
+    Ok(()) => Ok(()),
+    Err(err) if pending.is_none() && err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+    Err(_) => Err(BridgeError::new("STORE_FAILED", "could not save Host autostart state", "not-sent")),
   }
 }
 
@@ -336,13 +340,11 @@ impl Drop for StagedCa {
 /// Validates the PEM and writes it under a fresh unique name in HOST_HOME via
 /// create_new, so an existing CA can never be overwritten. The PEM itself is
 /// neither returned nor logged — only the path flows to the launcher.
-fn stage_center_ca(pem: &str) -> Result<StagedCa, BridgeError> {
+fn stage_center_ca(pem: &str, home: PathBuf) -> Result<StagedCa, BridgeError> {
   let pem = pem.trim();
   if pem.len() > MAX_CA_BYTES || !pem.contains("-----BEGIN CERTIFICATE-----") {
     return Err(invalid("invalid center CA certificate"));
   }
-  let home = host_home()
-    .ok_or_else(|| BridgeError::new("STORE_FAILED", "failed to resolve host service directory", "not-sent"))?;
   fs::create_dir_all(&home)
     .map_err(|_| BridgeError::new("STORE_FAILED", "failed to create host service directory", "not-sent"))?;
   let stamp = std::time::SystemTime::now()
@@ -404,6 +406,105 @@ fn control_timeout(action: &str) -> Duration {
   }
 }
 
+const CONTROL_TOKEN_ENV: &str = "E_LAUNCHER_CONTROL_TOKEN";
+const SERVICE_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_SERVICE_RESPONSE: usize = 64 * 1024;
+
+/// Reads `E_LAUNCHER_CONTROL_TOKEN` from the Host `secrets.env` using the same
+/// KEY=VALUE rules as the launcher parser. The token never leaves this process.
+fn read_control_token(home: &Path) -> Option<String> {
+  let text = fs::read_to_string(home.join("secrets.env")).ok()?;
+  let mut found = None;
+  for raw in text.lines() {
+    let line = raw.trim_end_matches('\r').trim();
+    if line.is_empty() || line.starts_with('#') {
+      continue;
+    }
+    let line = line.strip_prefix("export ").unwrap_or(line);
+    let Some((key, value)) = line.split_once('=') else {
+      continue;
+    };
+    if key.trim() != CONTROL_TOKEN_ENV {
+      continue;
+    }
+    let mut token = value.trim();
+    if token.len() >= 2
+      && ((token.starts_with('"') && token.ends_with('"'))
+        || (token.starts_with('\'') && token.ends_with('\'')))
+    {
+      token = &token[1..token.len() - 1];
+    }
+    found = if token.is_empty() { None } else { Some(token.to_string()) };
+  }
+  found
+}
+
+/// Queries the running Host's local control API for its real center state.
+/// Returns `(online, centerState, hostPhase)`; `online` is only true when the
+/// Host itself reports a ready center session — never assumed from the
+/// launcher process alone.
+fn probe_host_service(control_url: &str, home: Option<&Path>) -> Option<(bool, Option<String>, Option<String>)> {
+  let token = read_control_token(home?)?;
+  let parsed = tauri::Url::parse(control_url).ok()?;
+  if parsed.scheme() != "http" || parsed.host_str() != Some("127.0.0.1")
+    || !parsed.username().is_empty() || parsed.password().is_some()
+    || token.contains(&['\r', '\n', '\0'][..]) {
+    return None;
+  }
+  let host = "127.0.0.1";
+  let port = parsed.port().unwrap_or(80);
+  let socket: SocketAddr = format!("{host}:{port}").parse().ok()?;
+  let mut stream = TcpStream::connect_timeout(&socket, SERVICE_PROBE_TIMEOUT).ok()?;
+  stream
+    .set_read_timeout(Some(SERVICE_PROBE_TIMEOUT))
+    .ok()?;
+  stream
+    .set_write_timeout(Some(SERVICE_PROBE_TIMEOUT))
+    .ok()?;
+  let request = format!(
+    "GET /v1/service HTTP/1.1\r\nHost: {host}:{port}\r\nAuthorization: Bearer {token}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+  );
+  stream.write_all(request.as_bytes()).ok()?;
+
+  let mut raw = Vec::with_capacity(8192);
+  let mut chunk = [0u8; 8192];
+  loop {
+    match stream.read(&mut chunk) {
+      Ok(0) => break,
+      Ok(n) => {
+        raw.extend_from_slice(&chunk[..n]);
+        if raw.len() > MAX_SERVICE_RESPONSE {
+          return None;
+        }
+      }
+      Err(_) => break,
+    }
+  }
+  let text = String::from_utf8_lossy(&raw);
+  let (head, body) = text.split_once("\r\n\r\n")?;
+  let status_ok = head
+    .lines()
+    .next()
+    .map(|line| line.contains(" 200"))
+    .unwrap_or(false);
+  if !status_ok {
+    return Some((false, None, None));
+  }
+  let service: Value = serde_json::from_str(body.trim()).ok()?;
+  let center_state = service
+    .get("center")
+    .and_then(|center| center.get("state"))
+    .and_then(Value::as_str)
+    .map(str::to_string);
+  let host_phase = service
+    .get("phase")
+    .and_then(Value::as_str)
+    .map(str::to_string);
+  let online = center_state.as_deref() == Some("ready");
+  Some((online, center_state, host_phase))
+}
+
+
 /// Starts the Host, or restarts it when already running so a fresh config is loaded.
 fn start_or_restart() -> Result<Value, BridgeError> {
   let running = run_launcher(&["status".to_string()], None, STATUS_TIMEOUT)
@@ -416,7 +517,7 @@ fn start_or_restart() -> Result<Value, BridgeError> {
 #[tauri::command]
 pub async fn desktop_host_status(webview: Webview) -> Result<Value, BridgeError> {
   ensure_main_webview(&webview)?;
-  run_blocking(|| {
+  let mut status = run_blocking(|| {
     let mut status = run_launcher(&["status".to_string()], None, STATUS_TIMEOUT)?;
     if let Some(obj) = status.as_object_mut() {
       if let Some(name) = local_hostname() {
@@ -430,7 +531,51 @@ pub async fn desktop_host_status(webview: Webview) -> Result<Value, BridgeError>
     }
     Ok(status)
   })
-  .await
+  .await?;
+
+  // Configuration, service registration, process state and center-online are
+  // reported separately: `configured`/`autostart` come from the launcher,
+  // `running`/`pid`/`hostPid` describe the process, and `online` is only
+  // set from the Host's own control API answer — never inferred.
+  let running = status
+    .get("running")
+    .and_then(Value::as_bool)
+    .unwrap_or(false);
+  let control_url = status
+    .get("controlUrl")
+    .and_then(Value::as_str)
+    .map(str::to_string);
+  let mut online = false;
+  let mut center_state = None;
+  let mut host_phase = None;
+  if running {
+    if let Some(url) = control_url {
+      // Resolve the Host home the same way the launcher reports it so the
+      // control token is read from the directory the running Host actually uses.
+      let home = reported_host_home(&status);
+      if let Ok(probe) = tauri::async_runtime::spawn_blocking(move || {
+        probe_host_service(&url, home.as_deref())
+      })
+      .await
+      {
+        if let Some((is_online, state, phase)) = probe {
+          online = is_online;
+          center_state = state;
+          host_phase = phase;
+        }
+      }
+    }
+  }
+  if let Some(obj) = status.as_object_mut() {
+    obj.insert("online".to_string(), json!(online));
+    if let Some(state) = center_state {
+      obj.insert("centerState".to_string(), json!(state));
+    }
+    if let Some(phase) = host_phase {
+      obj.insert("hostPhase".to_string(), json!(phase));
+    }
+  }
+  Ok(status)
 }
 
 /// Persists the just-registered client credentials through the broker's own
@@ -498,8 +643,10 @@ pub async fn desktop_host_pair(
   let store_ca = center_ca.clone();
   let force = force.unwrap_or(false);
   let mut result = run_blocking(move || {
+    let _guard = HOST_CONTROL_LOCK.lock().unwrap();
+    let prior = run_launcher(&["status".to_string()], None, STATUS_TIMEOUT)?;
     let staged = match center_ca {
-      Some(pem) => Some(stage_center_ca(&pem)?),
+      Some(pem) => Some(stage_center_ca(&pem, reported_host_home(&prior).ok_or_else(|| invalid("Host home is unavailable"))?)?),
       None => None,
     };
     let mut args = vec!["pair".to_string(), "--center-url".to_string(), center_url];
@@ -556,9 +703,30 @@ pub async fn desktop_host_adopt(
   let store_token = device_token.clone();
   let center_ca = center_ca.filter(|pem| !pem.trim().is_empty());
   let store_ca = center_ca.clone();
-  let result = run_blocking(move || {
+  let marker_root = bridge::resolve_client_data_root(&app)?;
+  let marker = PathBuf::from(marker_root);
+  let (result, needs_enable, needs_start) = run_blocking({
+    let marker = marker.clone();
+    move || {
+    let _guard = HOST_CONTROL_LOCK.lock().unwrap();
+    let prior = run_launcher(&["status".to_string()], None, STATUS_TIMEOUT)?;
+    let configured = prior.get("configured").and_then(Value::as_bool) == Some(true);
+    let same_identity = configured
+      && prior.get("centerUrl").and_then(Value::as_str) == Some(center_url.as_str())
+      && prior.get("deviceId").and_then(Value::as_str) == Some(device_id.as_str());
+    if !same_identity && (configured || prior.get("configError").is_some()) {
+      return Err(BridgeError::new("ALREADY_CONFIGURED", "re-pair explicitly to change the local Host", "not-sent"));
+    }
+    let pending = match fs::read_to_string(marker.join(AUTOSTART_PENDING_FILE)) {
+      Ok(value) => Some(value),
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+      Err(_) => return Err(BridgeError::new("STORE_FAILED", "could not read Host autostart state", "not-sent")),
+    };
+    if !configured { set_autostart_pending(&marker, Some("enable"))?; }
+    let needs_enable = !configured || pending.as_deref() == Some("enable");
+    let needs_start = !configured || pending.is_some();
     let staged = match center_ca {
-      Some(pem) => Some(stage_center_ca(&pem)?),
+      Some(pem) => Some(stage_center_ca(&pem, reported_host_home(&prior).ok_or_else(|| invalid("Host home is unavailable"))?)?),
       None => None,
     };
     let mut args = vec![
@@ -572,15 +740,19 @@ pub async fn desktop_host_adopt(
       args.push("--center-ca-file".to_string());
       args.push(staged.path.to_string_lossy().into_owned());
     }
-    let adopt = run_launcher(&args, Some(device_token.as_str()), PAIR_TIMEOUT)?;
+    let adopt = if same_identity {
+      prior.clone()
+    } else {
+      run_launcher(&args, Some(device_token.as_str()), PAIR_TIMEOUT)?
+    };
     drop(device_token);
     // adopt already wrote the config referencing the CA path; enable/start
     // failures must not roll back the file the new config now needs.
     if let Some(staged) = staged {
       staged.commit();
     }
-    Ok(adopt)
-  })
+    Ok((adopt, needs_enable, needs_start))
+  }})
   .await?;
   let restarted = result.get("restarted").and_then(Value::as_bool) == Some(true);
   let adopt_url = result.get("centerUrl").and_then(Value::as_str).map(str::to_owned);
@@ -594,15 +766,19 @@ pub async fn desktop_host_adopt(
   // enable/start run after the credentials are safe; failures are reported as
   // retryable warnings on the adopt result — never as a failed command.
   let post = run_blocking(move || {
+    let _guard = HOST_CONTROL_LOCK.lock().unwrap();
     let mut warnings: Vec<Value> = Vec::new();
-    let enable = match run_launcher(&["enable".to_string()], None, control_timeout("enable")) {
-      Ok(value) => value,
+    let enable = if needs_enable { match run_launcher(&["enable".to_string()], None, control_timeout("enable")) {
+      Ok(value) => {
+        set_autostart_pending(&marker, Some("start"))?;
+        value
+      },
       Err(e) => {
         warnings.push(json!({ "code": e.code, "message": e.message }));
         json!({ "error": { "code": e.code, "message": e.message } })
       }
-    };
-    let start = if restarted {
+    }} else { json!({ "status": "unchanged" }) };
+    let start = if !needs_start { json!({ "status": "unchanged" }) } else if restarted {
       json!({ "status": "restarted" })
     } else {
       match start_or_restart() {
@@ -613,6 +789,7 @@ pub async fn desktop_host_adopt(
         }
       }
     };
+    if warnings.is_empty() { set_autostart_pending(&marker, None)?; }
     let mut post = Map::new();
     post.insert("enable".to_string(), enable);
     post.insert("start".to_string(), start);
@@ -631,11 +808,23 @@ pub async fn desktop_host_adopt(
 }
 
 #[tauri::command]
-pub async fn desktop_host_control(webview: Webview, action: String) -> Result<Value, BridgeError> {
+pub async fn desktop_host_control(
+  app: AppHandle,
+  webview: Webview,
+  action: String,
+) -> Result<Value, BridgeError> {
   ensure_main_webview(&webview)?;
   if !CONTROL_ACTIONS.contains(&action.as_str()) {
     return Err(invalid("unsupported host control action"));
   }
   let timeout = control_timeout(&action);
-  run_blocking(move || run_launcher(&[action], None, timeout)).await
+  let marker_root = bridge::resolve_client_data_root(&app)?;
+  run_blocking(move || {
+    let _guard = HOST_CONTROL_LOCK.lock().unwrap();
+    let result = run_launcher(&[action.clone()], None, timeout)?;
+    if matches!(action.as_str(), "stop" | "disable" | "enable" | "remove") {
+      set_autostart_pending(Path::new(&marker_root), None)?;
+    }
+    Ok(result)
+  }).await
 }

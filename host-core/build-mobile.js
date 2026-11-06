@@ -341,8 +341,12 @@ async function writeNotices(abis) {
   // web/src/gbot-ui 是源码级 MIT 适配（lenML/gbot-ui）：不在 npm/Cargo 图上，
   // 沿用 desktop 读 licenses 文件的方式直接把同一份文本附进 Android 产物。
   const gbotUiLicense = (await readFile(path.join(ROOT, 'licenses', 'gbot-ui-MIT.txt'), 'utf8')).trim();
+  const projectNotices = await Promise.all(
+    ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'licenses/Operit-LGPL-3.0.txt', 'licenses/GPL-3.0.txt']
+      .map(async (file) => '## ' + file + '\n\n' + await readFile(path.join(ROOT, file), 'utf8'))
+  );
   const content =
-    [header, ...blocks.map((block) => block.join('\n\n---\n\n')), '## source: lenML/gbot-ui (MIT)', gbotUiLicense].join('\n\n---\n\n') + '\n';
+    [header, ...projectNotices, ...blocks.map((block) => block.join('\n\n---\n\n')), '## source: lenML/gbot-ui (MIT)', gbotUiLicense].join('\n\n---\n\n') + '\n';
   await mkdir(NOTICES_DIR, { recursive: true });
   await writeFile(NOTICES_OUT, content, 'utf8');
   return { outfile: NOTICES_OUT, sha256: sha256Buffer(Buffer.from(content, 'utf8')) };

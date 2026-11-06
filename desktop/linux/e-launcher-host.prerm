@@ -1,0 +1,120 @@
+#!/bin/sh
+# e-launcher-host prerm — runs as root before the package is removed.
+#
+# Real dpkg ordering:
+#   upgrade: old-prerm upgrade -> new-preinst upgrade -> unpack ->
+#            old-postrm upgrade -> new-postinst configure
+#   remove : prerm remove -> postrm remove
+#
+# On upgrade this script exits early: the *new* preinst (which runs right
+# after old-prerm) owns state capture and the reliable stop. On
+# remove/deconfigure the unit files still exist, so stopping the user
+# services here is both possible and required; a stop failure aborts the
+# removal (exit 1).
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+UNIT="e-launcher-host.service"
+REGDIR="/var/lib/e-launcher/hosts"
+STATEDIR="/var/lib/e-launcher/state"
+CTL_TIMEOUT=110
+
+SYSTEMCTL=""
+for c in /usr/bin/systemctl /bin/systemctl /usr/local/bin/systemctl; do
+  if [ -x "$c" ]; then SYSTEMCTL="$c"; break; fi
+done
+RUNUSER=$(command -v runuser 2>/dev/null || :)
+
+log() { echo "e-launcher-host: $*"; }
+
+user_name() { getent passwd "$1" 2>/dev/null | cut -d: -f1; }
+user_home() { getent passwd "$1" 2>/dev/null | cut -d: -f6; }
+user_config_home() {
+  _config=$(sed -n 's/^configHome=//p' "$REGDIR/$1" 2>/dev/null | head -n 1)
+  case "$_config" in
+    /*) printf '%s' "$_config" ;;
+    *) printf '%s/.config' "$(user_home "$1")" ;;
+  esac
+}
+
+manager_up() {
+  [ -n "$RUNUSER" ] && [ -n "$SYSTEMCTL" ] && [ -S "/run/user/$1/systemd/private" ]
+}
+
+user_systemctl() {
+  _uid="$1"; shift
+  _name=$(user_name "$_uid")
+  [ -n "$_name" ] || { echo "e-launcher-host: no passwd entry for uid $_uid" >&2; return 1; }
+  timeout "$CTL_TIMEOUT" "$RUNUSER" -u "$_name" -- env \
+    "XDG_RUNTIME_DIR=/run/user/$_uid" \
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$_uid/bus" \
+    "HOME=$(user_home "$_uid")" \
+    "XDG_CONFIG_HOME=$(user_config_home "$_uid")" \
+    "$SYSTEMCTL" --user "$@" </dev/null
+}
+
+# UIDs with a registry entry or a leftover state file.
+collect_uids() {
+  for _dir in "$REGDIR" "$STATEDIR"; do
+    [ -d "$_dir" ] || continue
+    for _f in "$_dir"/*; do
+      [ -e "$_f" ] || continue
+      _u=${_f##*/}
+      case "$_u" in *[!0-9]*) continue ;; esac
+      echo "$_u"
+    done
+  done
+}
+
+case "${1:-}" in
+  upgrade) exit 0 ;;
+  remove|deconfigure) ;;
+  *) exit 0 ;;
+esac
+[ -n "$SYSTEMCTL" ] && [ -n "$RUNUSER" ] || exit 0
+
+_targets=$(collect_uids | sort -un)
+[ -n "$_targets" ] || exit 0
+
+for _uid in $_targets; do
+  [ -n "$(user_name "$_uid")" ] || continue
+  mkdir -p "$STATEDIR" || exit 1
+  chmod 0750 "$STATEDIR" || exit 1
+  if [ ! -f "$STATEDIR/$_uid" ]; then
+    _enabled=no; _active=no
+    if manager_up "$_uid"; then
+      _state=$(user_systemctl "$_uid" is-enabled "$UNIT" 2>/dev/null) || :
+      case "$_state" in
+        enabled|enabled-runtime|indirect) _enabled=yes ;;
+        disabled|static|masked|linked|linked-runtime|alias|generated|transient) ;;
+        *) log "cannot read enabled state for uid $_uid; aborting"; exit 1 ;;
+      esac
+      _state=$(user_systemctl "$_uid" is-active "$UNIT" 2>/dev/null) || :
+      case "$_state" in
+        active|activating|reloading|deactivating) _active=yes ;;
+        inactive|failed) ;;
+        *) log "cannot read active state for uid $_uid; aborting"; exit 1 ;;
+      esac
+    elif [ -e "$(user_config_home "$_uid")/systemd/user/default.target.wants/$UNIT" ]; then
+      _enabled=yes
+    fi
+    _tmp="$STATEDIR/$_uid.$$"
+    printf 'uid=%s\nenabled=%s\nactive=%s\n' "$_uid" "$_enabled" "$_active" > "$_tmp" \
+      && chmod 0640 "$_tmp" && mv -T "$_tmp" "$STATEDIR/$_uid" || exit 1
+  fi
+  # A live manager implies a possibly running service; a dead manager means
+  # nothing can be running under it.
+  if manager_up "$_uid"; then
+    if ! user_systemctl "$_uid" stop "$UNIT" >/dev/null 2>&1; then
+      log "failed to stop $UNIT for uid $_uid; aborting package removal"
+      exit 1
+    fi
+    _after=$(user_systemctl "$_uid" is-active "$UNIT" 2>/dev/null) || :
+    case "$_after" in
+      inactive|failed) ;;
+      *) log "cannot confirm stopped $UNIT for uid $_uid; aborting package removal"; exit 1 ;;
+    esac
+  fi
+done
+exit 0

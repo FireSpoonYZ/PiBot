@@ -212,10 +212,12 @@ impl StopWatch {
 
 fn host_command(paths: &HostPaths, config: &Config, secrets: &Secrets, runtime: &Runtime) -> std::process::Command {
     let mut cmd = process::command(&runtime.node);
-    cmd.arg(&runtime.cli)
+    cmd.arg("--preserve-symlinks-main").arg(&runtime.cli)
         .arg("serve")
         .arg("--data-root")
         .arg(&config.data_root)
+        .arg("--expected-device-id")
+        .arg(&config.device_id)
         .arg("--token-env")
         .arg(CONTROL_TOKEN_KEY)
         .arg("--port")

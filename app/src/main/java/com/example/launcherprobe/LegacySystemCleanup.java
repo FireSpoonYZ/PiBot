@@ -54,9 +54,6 @@ final class LegacySystemCleanup {
             notifications.deleteNotificationChannel("task-attention");
             notifications.deleteNotificationChannel("chat-execution");
             notifications.deleteNotificationChannel("wake_word");
-            for (String name : new String[]{"scheduled_tasks", "schedule_calendar", "task_widget", "task_notifications"}) {
-                if (!app.deleteSharedPreferences(name)) throw new IllegalStateException("Unable to remove obsolete state: " + name);
-            }
             if (!app.getSharedPreferences("obsolete_system_cleanup", Context.MODE_PRIVATE)
                     .edit().putBoolean("complete", true).commit()) throw new IllegalStateException("Unable to record cleanup");
         } catch (RuntimeException failure) {

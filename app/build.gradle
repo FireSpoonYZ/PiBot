@@ -52,6 +52,7 @@ def buildHostRuntime = tasks.register('buildHostRuntime', Exec) {
             rootProject.fileTree('center-contract'),
             rootProject.fileTree('plugins') { exclude 'build/**', 'node_modules/**' },
             rootProject.file('licenses/pi-v1.3.0-MIT.txt'),
+            rootProject.file('licenses/pi-main-35dfa757378b-MIT.txt'),
             rootProject.file('licenses/hindsight-client-0.9.2-MIT.txt'),
             rootProject.file('licenses/standardwebhooks-1.1.1-LICENSE.txt'),
             file("$buildDir/host-native-tools/licenses")
@@ -77,6 +78,7 @@ def buildMobileUi = tasks.register('buildMobileUi', Exec) {
             rootProject.fileTree('web/src'),
             sharedWebInputs,
             rootProject.fileTree('licenses'),
+            rootProject.file('LICENSE'), rootProject.file('THIRD_PARTY_NOTICES.md'),
             rootProject.file('package.json'), rootProject.file('package-lock.json'),
             rootProject.file('vite.mobile.config.ts'),
             rootProject.file('host-core/build-mobile.js'), rootProject.file('host-core/build-desktop.js'),
@@ -114,30 +116,96 @@ android {
     compileSdk 36
     ndkVersion '28.2.13676358'
 
+    // Release signing props resolve eagerly but NON-throwing at configuration
+    // time: all four values must come from -P properties or the matching
+    // ANDROID_RELEASE_* env vars (explicit map, no camelCase flattening). If
+    // any is missing the signingConfig stays empty and a guard on the release
+    // packaging tasks fails the build at execution time — debug builds and
+    // lint/test configuration never require secrets, and a missing key can
+    // never silently produce a debug-signed or unsigned "release" APK.
+    def releaseProp = { String key ->
+        def envName = [
+            'android.releaseKeystore'      : 'ANDROID_RELEASE_KEYSTORE',
+            'android.releaseStorePassword' : 'ANDROID_RELEASE_STORE_PASSWORD',
+            'android.releaseKeyAlias'      : 'ANDROID_RELEASE_KEY_ALIAS',
+            'android.releaseKeyPassword'   : 'ANDROID_RELEASE_KEY_PASSWORD',
+        ][key]
+        def value = findProperty(key) ?: System.getenv(envName)
+        return (value == null || value.toString().trim().isEmpty()) ? null : value.toString()
+    }
+    def releaseProps = [
+        keystore    : releaseProp('android.releaseKeystore'),
+        storePass   : releaseProp('android.releaseStorePassword'),
+        keyAlias    : releaseProp('android.releaseKeyAlias'),
+        keyPassword : releaseProp('android.releaseKeyPassword'),
+    ]
+    def releaseSigningComplete = releaseProps.values().every { it != null }
+
     signingConfigs {
+        // Debug builds use the standard user debug key (~/.android/debug.keystore,
+        // generated automatically by AGP). Maintainers who must keep installing
+        // over an older debug-signed build can point android.debugKeystore and
+        // friends at their existing key via -P or ~/.gradle/gradle.properties;
+        // no repository keystore is required or generated.
         debug {
-            storeFile rootProject.file(findProperty('emulatorTestKeystore') ?: 'debug.keystore')
-            if (!storeFile.isFile()) {
-                throw new GradleException('Missing debug.keystore in project root. Copy the shared development keystore from another development machine.')
+            def debugStore = findProperty('android.debugKeystore')
+            if (debugStore != null) {
+                storeFile file(debugStore)
+                storePassword findProperty('android.debugStorePassword') ?: 'android'
+                keyAlias findProperty('android.debugKeyAlias') ?: 'androiddebugkey'
+                keyPassword findProperty('android.debugKeyPassword') ?: 'android'
             }
-            storePassword 'android'
-            keyAlias 'androiddebugkey'
-            keyPassword 'android'
+        }
+        release {
+            if (releaseSigningComplete) {
+                storeFile file(releaseProps.keystore)
+                storePassword releaseProps.storePass
+                keyAlias releaseProps.keyAlias
+                keyPassword releaseProps.keyPassword
+            }
         }
     }
 
     buildTypes {
         release {
-            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.release
         }
     }
+
+    // Fail release packaging at execution time when the full signing
+    // configuration was not provided; never fall back to debug/unsigned.
+    tasks.matching { it.name ==~ /(?i)(package|assemble|install|bundle)Release$/ }
+            .configureEach {
+                doFirst {
+                    if (!releaseSigningComplete) {
+                        throw new GradleException(
+                            'Release signing is not configured. Set android.releaseKeystore, ' +
+                            'android.releaseStorePassword, android.releaseKeyAlias and ' +
+                            'android.releaseKeyPassword via -P or ANDROID_RELEASE_KEYSTORE / ' +
+                            'ANDROID_RELEASE_STORE_PASSWORD / ANDROID_RELEASE_KEY_ALIAS / ' +
+                            'ANDROID_RELEASE_KEY_PASSWORD environment variables.')
+                    }
+                }
+            }
 
     defaultConfig {
         applicationId 'com.example.launcherprobe'
         minSdk 33
         targetSdk 36
-        versionCode 1
-        versionName '1.0'
+        // versionCode is Android's monotonic install counter, independent of the
+        // product version: bump android.versionCode in gradle.properties (or -P) for
+        // every distributed release; it must never decrease or be reused. Must be
+        // a positive int that fits the signed 32-bit APK field.
+        def androidVersionCode = (findProperty('android.versionCode') ?: '2') as int
+        if (androidVersionCode <= 0 || androidVersionCode > 2147483647) {
+            throw new GradleException("android.versionCode must be a positive 32-bit integer, got: " +
+                    (findProperty('android.versionCode') ?: '2'))
+        }
+        versionCode androidVersionCode
+        // versionName tracks the single product version in root package.json.
+        def productVersion = new groovy.json.JsonSlurper().parse(
+                rootProject.file('package.json')).version
+        versionName productVersion
         ndk { abiFilters.addAll(launcherAbis) }
         externalNativeBuild {
             cmake {

@@ -318,9 +318,9 @@ public final class BotHostUiBridgeService extends Service {
                         new BridgeException("INVALID_ARGUMENT", "not-sent", "不支持的操作")));
                 return;
             }
-            // pause 与 clientUnobserve 为保留清理槽：不受 8 个普通 in-flight 限制，普通请求满载时
+            // pause、clientUnobserve 与 updateCancel 为保留清理槽：不受 8 个普通 in-flight 限制，普通请求满载时
             // 仍能生效；数量额度由 BotHostUiBridgeClient 的独立清理槽（pause 单合并槽 + 客户端
-            // 观察清理 ≤2）约束，不在本层无界堆积。
+            // 客户端清理与更新取消合计 ≤2）约束，不在本层无界堆积。
             boolean reserved = BotHostUiProtocol.isCleanupOperation(op);
             if (!reserved && inFlight.incrementAndGet() > BotHostUiProtocol.MAX_IN_FLIGHT) {
                 inFlight.decrementAndGet();
@@ -403,6 +403,15 @@ public final class BotHostUiBridgeService extends Service {
                 case "clientConnectionProbe":
                     client().checkConnection(true);
                     return done(new JSONObject());
+                case "updateStatus":
+                case "updateDownload":
+                case "updateCancel":
+                    validateUpdateParams(params, null);
+                    return ClientUpdater.get(BotHostUiBridgeService.this).request(op, params);
+                case "updateCheck":
+                case "updateInstall":
+                    validateUpdateParams(params, "updateCheck".equals(op) ? "automatic" : "stopActive");
+                    return ClientUpdater.get(BotHostUiBridgeService.this).request(op, params);
                 case "clientChatVisibility":
                     String deviceId = required(params, "deviceId");
                     String botId = required(params, "botId");
@@ -851,6 +860,16 @@ public final class BotHostUiBridgeService extends Service {
         return BotHostUiProtocol.object(
                 "language", ui.getString("language", "system"),
                 "appearance", ui.getString("theme", "system"));
+    }
+
+    /** 不接受网页传入的 URL、令牌或文件路径；布尔选项省略时由更新器按 false 处理。 */
+    private static void validateUpdateParams(JSONObject params, String option) throws BridgeException {
+        if (params == null) return;
+        if (option == null ? params.length() != 0
+                : params.length() > (params.has(option) ? 1 : 0)
+                || (params.has(option) && !(params.opt(option) instanceof Boolean))) {
+            throw new BridgeException("INVALID_ARGUMENT", "not-sent", "更新参数无效");
+        }
     }
 
     private static String required(JSONObject params, String name) {

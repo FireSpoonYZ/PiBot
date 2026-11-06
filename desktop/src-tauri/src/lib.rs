@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod host_service;
+pub mod updates;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -129,14 +130,19 @@ pub struct NavigationGuardConfig {
 
 pub fn run() {
   let bridge = DesktopBridge::new();
-  let app = tauri::Builder::default()
+  let mut builder = tauri::Builder::default()
     .manage(bridge)
+    .manage(updates::UpdateState::default())
     .plugin(
       tauri::plugin::Builder::<tauri::Wry, ()>::new("navigation-guard")
         .on_navigation(|webview, url| webview.label() == "main" && is_allowed_navigation(url))
         .build(),
     )
-    .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_dialog::init());
+  if let Some(pubkey) = updates::configured_pubkey() {
+    builder = builder.plugin(tauri_plugin_updater::Builder::new().pubkey(pubkey).build());
+  }
+  let app = builder
     .setup(|app| {
       if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_title("e-助手");
@@ -166,6 +172,11 @@ pub fn run() {
       host_service::desktop_host_pair,
       host_service::desktop_host_adopt,
       host_service::desktop_host_control,
+      updates::desktop_update_status,
+      updates::desktop_update_check,
+      updates::desktop_update_download,
+      updates::desktop_update_install,
+      updates::desktop_update_cancel,
     ])
     .build(tauri::generate_context!())
     .expect("failed to build e-launcher desktop application");

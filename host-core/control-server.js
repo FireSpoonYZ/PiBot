@@ -92,7 +92,9 @@ const routes = [
   { method: 'PUT', key: '/v1/settings', pattern: /^\/v1\/settings\/?$/, params: [], hasBody: true, handler: putSettings },
   { method: 'GET', key: '/v1/bots/:botId/soul', pattern: /^\/v1\/bots\/([^/]+)\/soul\/?$/, params: ['botId'], hasBody: false, handler: getBotSoul },
   { method: 'PUT', key: '/v1/bots/:botId/soul', pattern: /^\/v1\/bots\/([^/]+)\/soul\/?$/, params: ['botId'], hasBody: true, handler: setBotSoul },
+  { method: 'POST', key: '/v1/bots/:botId/learning', pattern: /^\/v1\/bots\/([^/]+)\/learning\/?$/, params: ['botId'], hasBody: true, handler: manageBotLearning },
   { method: 'POST', key: '/v1/bots/:botId/schedules', pattern: /^\/v1\/bots\/([^/]+)\/schedules\/?$/, params: ['botId'], hasBody: true, handler: botSchedules },
+  { method: 'POST', key: '/v1/service/update', pattern: /^\/v1\/service\/update\/?$/, params: [], hasBody: true, handler: updateService },
   { method: 'GET', key: '/v1/service', pattern: /^\/v1\/service\/?$/, params: [], hasBody: false, handler: serviceStatus },
   { method: 'GET', key: '/v1/scopes/:scopeKey', pattern: /^\/v1\/scopes\/([^/]+)\/?$/, params: ['scopeKey'], hasBody: false, handler: getScopeState },
   { method: 'POST', key: '/v1/scopes/:scopeKey/members', pattern: /^\/v1\/scopes\/([^/]+)\/members\/?$/, params: ['scopeKey'], hasBody: true, handler: updateScopeMembers },
@@ -297,7 +299,7 @@ async function dispatch(host, runtime, authorize, req, res, ctx) {
   // 这些路径走 Harness snapshot/commit/abortTask，不隐式 resume 调度器；
   // 模型、工具、问卷等执行路由仍被拒绝（runtime 侧另有 online/recovery 门禁兜底）。
   const OFFLINE_ALLOWED = new Set([
-    '/v1/host', '/v1/settings', '/v1/service',
+    '/v1/host', '/v1/settings', '/v1/service', '/v1/service/update',
     '/v1/bots/:botId/submissions', '/v1/bots/:botId/submissions/:requestId', '/v1/bots/:botId/abort',
     '/v1/bot-requests/:requestId', '/v1/bots/:botId/history', '/v1/bots/:botId/live',
     // 只读读取已上传图片：中心离线时草稿/历史仍可展示既有附件。
@@ -738,6 +740,12 @@ async function setBotSoul(host, runtime, params, body, req, res) {
   writeControlJson(res, 200, await runtime.setBotSoul(params.botId, body));
 }
 
+async function manageBotLearning(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  requireBot(host, params.botId);
+  writeControlJson(res, 200, await runtime.manageBotLearning(params.botId, body));
+}
+
 async function botSchedules(host, runtime, params, body, req, res) {
   assertNoQuery(req);
   requireBot(host, params.botId);
@@ -747,6 +755,19 @@ async function botSchedules(host, runtime, params, body, req, res) {
 async function discoverModels(host, runtime, params, body, req, res) {
   assertNoQuery(req);
   writeControlJson(res, 200, await runtime.discoverProviderModels(body));
+}
+
+async function updateService(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  if (!body || typeof body !== 'object' || Array.isArray(body)
+      || Object.keys(body).some(key => !['action', 'stopActive'].includes(key))
+      || !['prepare', 'cancel'].includes(body.action)
+      || (body.stopActive !== undefined && typeof body.stopActive !== 'boolean')) {
+    throw new ControlHttpError(400, 'INVALID_ARGUMENT', 'invalid update operation');
+  }
+  writeControlJson(res, 200, await (body.action === 'prepare'
+    ? runtime.prepareUpdate({ stopActive: body.stopActive ?? false })
+    : runtime.cancelUpdate()));
 }
 
 async function serviceStatus(host, runtime, params, body, req, res, ctx) {

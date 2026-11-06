@@ -35,12 +35,12 @@ const LICENSE_PREFIXES = ['license', 'copying', 'notice'];
 // deterministic 1.4.0-main.35dfa757378b, not the npm 1.4.0 release.
 const PI_MAIN_VERSION = '1.4.0-main.35dfa757378b';
 const UPSTREAM_LICENSE_ALLOWLIST = new Map([
-  ['@earendil-works/chord', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-ai', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-codemode', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-durable', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-mcp', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-telemetry', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/chord', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
+  ['@earendil-works/pi-ai', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
+  ['@earendil-works/pi-codemode', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
+  ['@earendil-works/pi-durable', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
+  ['@earendil-works/pi-mcp', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
+  ['@earendil-works/pi-telemetry', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
   ['@vectorize-io/hindsight-client', { version: '0.9.2', declared: 'MIT', license: 'hindsight-client-0.9.2-MIT.txt' }],
   ['standardwebhooks', { version: '1.1.1', declared: 'MIT', license: 'standardwebhooks-1.1.1-LICENSE.txt' }],
 ]);
@@ -137,6 +137,25 @@ async function assertNoRequiredDynamicAssets(metafile, outfile, absWorkingDir) {
   }
 }
 
+// Builtin skill resources (.md) ship as payload siblings of host-runtime.mjs
+// so host-core/bot-management-skill.js resolves builtin-skills/ the same way in
+// the repo tree, the staged desktop host-runtime, and this flattened bundle.
+// Returns POSIX paths relative to dir; only regular .md files are shipped.
+async function listSkillResources(dir, base, out = []) {
+  const root = base ?? dir;
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isSymbolicLink()) throw new Error('builtin skill resource must not be a symbolic link: ' + full);
+    if (entry.isDirectory()) {
+      await listSkillResources(full, root, out);
+    } else if (entry.isFile() && entry.name.endsWith('.md')) {
+      out.push(path.relative(root, full).split(path.sep).join('/'));
+    }
+  }
+  return out.sort();
+}
+
 async function collectBundledPackages(metafile, outfile, absWorkingDir) {
   const roots = new Map();
   for (const raw of includedBundleInputs(metafile, outfile, absWorkingDir)) {
@@ -155,6 +174,22 @@ async function writePayloadFiles(metafile, outfile, absWorkingDir, toolNotices) 
   files.set('host-runtime.mjs', { path: 'host-runtime.mjs' });
   await copyFile(path.join(HERE, 'node_modules', 'quickjs-wasi', 'quickjs.wasm'), path.join(OUT_DIR, 'quickjs.wasm'));
   files.set('quickjs.wasm', { path: 'quickjs.wasm' });
+
+  const skillRoot = path.join(HERE, 'builtin-skills');
+  let skillFiles;
+  try {
+    skillFiles = await listSkillResources(skillRoot);
+  } catch (err) {
+    throw new Error('host-core/builtin-skills is missing or unreadable; the builtin bot-management skill cannot be shipped: ' + err.message);
+  }
+  if (skillFiles.length === 0) throw new Error('host-core/builtin-skills contains no .md resources to ship');
+  for (const rel of skillFiles) {
+    const dest = 'builtin-skills/' + rel;
+    const target = path.join(OUT_DIR, ...dest.split('/'));
+    await mkdir(path.dirname(target), { recursive: true });
+    await copyFile(path.join(skillRoot, ...rel.split('/')), target);
+    files.set(dest, { path: dest });
+  }
 
   const roots = await collectBundledPackages(metafile, outfile, absWorkingDir);
   const sections = [];
@@ -191,7 +226,8 @@ async function writePayloadFiles(metafile, outfile, absWorkingDir, toolNotices) 
   await writeFile(path.join(OUT_DIR, 'third-party-licenses.txt'), licenseText, 'utf8');
   files.set('third-party-licenses.txt', { path: 'third-party-licenses.txt' });
 
-  const sorted = [...files.values()].sort((a, b) => a.path.localeCompare(b.path));
+  // UTF-16 code-unit order matches Android BotHostAssets' String.compareTo validation.
+  const sorted = [...files.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   const entries = [];
   for (const file of sorted) {
     entries.push({ path: file.path, sha256: await sha256File(path.join(OUT_DIR, ...file.path.split('/'))) });

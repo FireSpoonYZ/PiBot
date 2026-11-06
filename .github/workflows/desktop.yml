@@ -1,0 +1,137 @@
+name: Desktop
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+  # Reusable: invoked by release.yml for v* tags (signed NSIS/DEB + updater sigs).
+  workflow_call:
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: true
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # Updater public key is compiled into the app via env! in the Rust build
+  # script (native lane). Public material → repository variable, not secret.
+  E_LAUNCHER_UPDATER_PUBLIC_KEY: ${{ vars.E_LAUNCHER_UPDATER_PUBLIC_KEY }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            bundle: nsis
+            artifact: desktop-windows
+          - os: ubuntu-latest
+            bundle: deb
+            artifact: desktop-linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # rust-toolchain.toml pins channel 1.99.1 (profile minimal).
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.1 --profile minimal --no-self-update
+          rustup default 1.99.1
+          rustc --version
+          cargo --version
+
+      - name: Install Linux webkit dependencies
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf build-essential curl wget file \
+            libssl-dev pkg-config
+
+      - name: Install web dependencies
+        run: npm ci
+
+      - name: Prepare pinned Pi and Host dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run prepare:pi-main
+          npm ci --prefix host-core
+
+      - name: Verify product version consistency
+        env:
+          TAG_ARG: ${{ github.ref_type == 'tag' && format('--tag {0}', github.ref_name) || '' }}
+        run: node scripts/release-check.mjs $TAG_ARG
+
+      # Existing prepare step must run before tauri-action: it produces icons,
+      # the node sidecar, host runtime, host-launcher sidecar and notices that
+      # the bundle references. tauri-action then runs the pinned CLI build.
+      - name: Prepare desktop resources
+        run: npm run desktop:prepare
+
+      # Branch pushes: unsigned dev bundles, no secrets.
+      - name: Build bundle (dev)
+        if: github.ref_type != 'tag'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: desktop
+          # Pinned CLI 2.12.4 via our wrapper (absolute path; wrapper sets its
+          # own cwd). Action appends 'build <args>' → 'build --bundles nsis'.
+          tauriScript: node ${{ github.workspace }}/host-core/desktop-tauri.js
+          args: --bundles ${{ matrix.bundle }}
+
+      # v* tags: updater artifacts + NSIS-preferred metadata on Windows.
+      - name: Require updater signing secret
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "Missing secret TAURI_SIGNING_PRIVATE_KEY; refusing unsigned release."
+            exit 1
+          fi
+          test -n "$E_LAUNCHER_UPDATER_PUBLIC_KEY" || { echo "Missing E_LAUNCHER_UPDATER_PUBLIC_KEY"; exit 1; }
+
+      - name: Build bundle (release)
+        if: github.ref_type == 'tag'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: desktop
+          tauriScript: node ${{ github.workspace }}/host-core/desktop-tauri.js
+          args: --bundles ${{ matrix.bundle }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
+          updaterJsonPreferNsis: ${{ matrix.os == 'windows-latest' }}
+
+      - name: Upload bundle artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}-${{ github.ref_name }}
+          path: desktop/build/target/release/bundle/
+          if-no-files-found: error
+          retention-days: 30

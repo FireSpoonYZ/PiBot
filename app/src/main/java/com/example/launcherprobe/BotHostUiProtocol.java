@@ -52,20 +52,20 @@ final class BotHostUiProtocol {
     static final String OP_PAUSE = "pause";
 
     /**
-     * 保留清理操作：不受普通在途上限约束，普通请求满载时仍能生效（pause/clientUnobserve）。
-     * Rust 侧对应 CLIENT_CLEANUP_METHODS＝{clientUnobserve}；pause 只在 UI↔bridge 之间存在，
+     * 保留清理操作：普通请求满载时 pause、clientUnobserve 和 updateCancel 仍可生效。
+     * Rust 侧对应 CLIENT_CLEANUP_METHODS＝{clientUnobserve, updateCancel}；pause 只在 UI↔bridge 之间存在，
      * 不进 Rust 命令。
      */
     static boolean isCleanupOperation(String op) {
-        return OP_PAUSE.equals(op) || "clientUnobserve".equals(op);
+        return OP_PAUSE.equals(op) || isClientCleanupOperation(op);
     }
 
     /**
-     * 客户端观察清理（clientUnobserve）：不占普通 8 槽，改用与 Rust
+     * 客户端观察清理和更新取消：不占普通 8 槽，改用与 Rust
      * {@code CLIENT_CLEANUP_METHODS} 对齐的独立小额度；额度满立即拒绝，不排队。
      */
     static boolean isClientCleanupOperation(String op) {
-        return "clientUnobserve".equals(op);
+        return "clientUnobserve".equals(op) || "updateCancel".equals(op);
     }
 
     /**
@@ -82,7 +82,9 @@ final class BotHostUiProtocol {
             "observe", "cancelObservation",
             "voiceSettings", "saveVoiceSettings", "startVoice", "finishVoice", "cancelVoice",
             "uiSettings", OP_PAUSE,
-            "clientRequest", "clientObserve", "clientUnobserve", "clientChatVisibility", "clientConnectionProbe")));
+            "clientRequest", "clientObserve", "clientUnobserve", "clientChatVisibility", "clientConnectionProbe",
+            // 客户端自更新：固定方法名直达默认进程 ClientUpdater；只接收 protocol 固定参数。
+            "updateStatus", "updateCheck", "updateDownload", "updateInstall", "updateCancel")));
 
     private BotHostUiProtocol() {
     }

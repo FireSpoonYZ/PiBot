@@ -34,6 +34,7 @@ import path from 'node:path';
 import { parseArgs, promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveTauriCliEntry, spawnNodeScript } from './desktop-tauri.js';
+import { prepareSearchTools } from './prepare-tools.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -60,8 +61,12 @@ const HOST_RUNTIME_DIR = path.join(DESKTOP_BUILD, 'host-runtime');
 const HOST_RUNTIME_DEPS_DIR = path.join(CACHE_DIR, 'host-runtime-deps');
 const HOST_RUNTIME_LAYOUT_VERSION = 1;
 const HOST_CORE_RUNTIME_SUBDIRS = ['capabilities', 'managed-install', 'plugins', 'third-party'];
+// Builtin skill resources are runtime data the host loads at request time, so
+// they stage under their own extension list (docs only, no code).
+const HOST_CORE_BUILTIN_SKILLS_DIR = 'builtin-skills';
+const BUILTIN_SKILLS_SOURCE_EXTENSIONS = ['.md'];
 // Build/dev-only top-level host-core modules that the Host never loads.
-const HOST_CORE_RUNTIME_EXCLUDED = new Set(['desktop-tauri.js', 'package-lock.json', 'prepare-android-tools.js']);
+const HOST_CORE_RUNTIME_EXCLUDED = new Set(['desktop-tauri.js', 'package-lock.json', 'prepare-android-tools.js', 'prepare-tools.js']);
 const HOST_RUNTIME_SOURCE_EXTENSIONS = ['.js', '.mjs', '.cjs', '.json'];
 // Type declarations / source maps / TS build info are never loaded by the Host;
 // pruning them roughly halves the installer file count (AWS/Smithy dist-types).
@@ -218,12 +223,12 @@ const DYNAMIC_ASSET_RE = /(?:require\s*\.\s*resolve|createRequire\s*\([^)]*\)\s*
 // deterministic 1.4.0-main.35dfa757378b, not the npm 1.4.0 release.
 const PI_MAIN_VERSION = '1.4.0-main.35dfa757378b';
 const UPSTREAM_LICENSE_ALLOWLIST = new Map([
-  ['@earendil-works/chord', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-ai', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-codemode', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-durable', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-mcp', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
-  ['@earendil-works/pi-telemetry', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-v1.3.0-MIT.txt' }],
+  ['@earendil-works/chord', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
+  ['@earendil-works/pi-ai', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
+  ['@earendil-works/pi-codemode', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
+  ['@earendil-works/pi-durable', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
+  ['@earendil-works/pi-mcp', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
+  ['@earendil-works/pi-telemetry', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
   ['@vectorize-io/hindsight-client', { version: '0.9.2', declared: 'MIT', license: 'hindsight-client-0.9.2-MIT.txt' }],
   ['standardwebhooks', { version: '1.1.1', declared: 'MIT', license: 'standardwebhooks-1.1.1-LICENSE.txt' }],
   // Desktop UI packages (consumed through UI_NPM_PACKAGES, not the broker
@@ -990,6 +995,7 @@ export async function collectCargoLicenseSections({
 //   host-core/                     runtime host-core modules + package.json
 //   host-core/node_modules/        production deps for this platform (incl. npm)
 //   host-core/cua-driver/<key>/    pinned cua-driver-rs files (cua-driver.js path)
+//   tools/<platform>-<arch>/       pinned rg/fd binaries and licenses
 //   plugins/<name>/                first-party plugin files host-core re-exports
 //   native/shower-windows.exe      Windows only, + MSTSCLib.dll (launcher exports
 //                                  E_LAUNCHER_SHOWER_WINDOWS_EXE)
@@ -1004,11 +1010,11 @@ function isInsideDir(parent, child) {
   return rel !== '' && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
 }
 
-function hasRuntimeSourceExtension(name) {
-  return HOST_RUNTIME_SOURCE_EXTENSIONS.some((ext) => name.endsWith(ext)) && !/\.(?:test|spec)\.[cm]?js$/.test(name);
+function hasRuntimeSourceExtension(name, extensions = HOST_RUNTIME_SOURCE_EXTENSIONS) {
+  return extensions.some((ext) => name.endsWith(ext)) && !/\.(?:test|spec)\.[cm]?js$/.test(name);
 }
 
-function listRuntimeSourceTree(dir, out) {
+function listRuntimeSourceTree(dir, out, extensions = HOST_RUNTIME_SOURCE_EXTENSIONS) {
   for (const entry of readdirSync(dir).sort()) {
     if (entry.startsWith('.') || entry === 'node_modules' || entry === 'test' || entry === 'tests' || entry === '__tests__') {
       continue;
@@ -1019,8 +1025,8 @@ function listRuntimeSourceTree(dir, out) {
       throw fail(`host runtime source must not be a symbolic link: ${toPosixPath(path.relative(ROOT, full))}`);
     }
     if (st.isDirectory()) {
-      listRuntimeSourceTree(full, out);
-    } else if (st.isFile() && hasRuntimeSourceExtension(entry)) {
+      listRuntimeSourceTree(full, out, extensions);
+    } else if (st.isFile() && hasRuntimeSourceExtension(entry, extensions)) {
       out.push(full);
     }
   }
@@ -1048,6 +1054,14 @@ function collectHostRuntimeSources() {
       throw fail(`host-core/${sub}/ is missing; cannot stage the bundled Host runtime`);
     }
     listRuntimeSourceTree(dir, roots);
+  }
+  {
+    const dir = path.join(HERE, HOST_CORE_BUILTIN_SKILLS_DIR);
+    const st = lstatSync(dir, { throwIfNoEntry: false });
+    if (!st || !st.isDirectory() || st.isSymbolicLink()) {
+      throw fail(`host-core/${HOST_CORE_BUILTIN_SKILLS_DIR}/ is missing; cannot stage the bundled Host runtime`);
+    }
+    listRuntimeSourceTree(dir, roots, BUILTIN_SKILLS_SOURCE_EXTENSIONS);
   }
   for (const required of ['host-service-cli.js', 'package.json']) {
     if (!roots.includes(path.join(HERE, required))) {
@@ -1201,7 +1215,16 @@ async function resolveCuaDriverFiles() {
 
 async function collectHostRuntimeNatives() {
   const cua = await resolveCuaDriverFiles();
-  const files = [...cua.files];
+  const searchCache = path.join(CACHE_DIR, 'search-tools');
+  const { tools: searchTools } = await prepareSearchTools({ dataRoot: searchCache });
+  const searchFiles = [];
+  for (const tool of searchTools) {
+    for (const src of [tool.path, ...tool.licensePaths]) {
+      assertStrictlyRegularFile(src, `search tool file ${src}`);
+      searchFiles.push({ dest: toPosixPath(path.relative(searchCache, src)), src, executable: src === tool.path });
+    }
+  }
+  const files = [...cua.files, ...searchFiles];
   let shower = null;
   if (process.platform === 'win32') {
     shower = await resolveShowerWindowsDir();
@@ -1213,6 +1236,8 @@ async function collectHostRuntimeNatives() {
   }
   return {
     files,
+    searchFiles,
+    searchTools,
     cua: { release: cua.release, status: cua.status, licensePath: cua.licensePath },
     shower: shower ? { status: shower.status } : null,
   };
@@ -1384,11 +1409,17 @@ async function prepareHostRuntime() {
     deps: depsStatus,
     sourceFiles: sources.size,
     nativeFiles: natives.files.length,
+    searchTools: natives.searchTools,
     cua: natives.cua,
     shower: natives.shower,
   });
   const depsReusable = rec?.depsKey === deps.key && hostRuntimeDepsComplete(installedModules, deps.pkg);
-  if (depsReusable && rec.contentKey === contentKey) {
+  const searchFilesReusable = natives.searchFiles.every((file) => {
+    const staged = path.join(HOST_RUNTIME_DIR, ...file.dest.split('/'));
+    return isRegularFile(staged) && sha256OfFile(staged) === sha256OfFile(file.src) &&
+      (!file.executable || process.platform === 'win32' || (statSync(staged).mode & 0o111) !== 0);
+  });
+  if (depsReusable && rec.contentKey === contentKey && searchFilesReusable) {
     return summary('cached', 'cached');
   }
 
@@ -1596,6 +1627,12 @@ async function collectHostRuntimeLicenseSections(hostRuntimeInfo) {
   }
   sections.push(`## Cua driver ${hostRuntimeInfo.cua.release} (MIT)`);
   sections.push((await readFile(hostRuntimeInfo.cua.licensePath, 'utf8')).trim());
+  for (const tool of hostRuntimeInfo.searchTools) {
+    for (const licensePath of tool.licensePaths) {
+      sections.push(`## ${tool.name} ${tool.version}: ${path.basename(licensePath)}`);
+      sections.push((await readFile(licensePath, 'utf8')).trim());
+    }
+  }
   return sections;
 }
 
@@ -1613,8 +1650,13 @@ async function writeThirdPartyNotices(nodeInfo, metafile, hostRuntimeInfo) {
   // directly from licenses/ (same read mechanism as UPSTREAM_LICENSE_ALLOWLIST).
   const gbotUiLicense = (await readFile(path.join(ROOT, 'licenses', 'gbot-ui-MIT.txt'), 'utf8')).trim();
 
+  const projectNotices = await Promise.all(
+    ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'licenses/Operit-LGPL-3.0.txt', 'licenses/GPL-3.0.txt']
+      .map(async (file) => '## ' + file + '\n\n' + await readFile(path.join(ROOT, file), 'utf8'))
+  );
   const blocks = [
     '# Third-Party Notices (e-launcher Desktop Client)',
+    ...projectNotices,
     `## Node.js v${nodeInfo.version} (${nodeInfo.triple})`,
     nodeInfo.licenseText.trim(),
     ...npmSections,
@@ -1677,6 +1719,7 @@ export async function prepareDesktop() {
       deps: hostRuntimeInfo.deps,
       sourceFiles: hostRuntimeInfo.sourceFiles,
       nativeFiles: hostRuntimeInfo.nativeFiles,
+      searchTools: hostRuntimeInfo.searchTools.map(({ name, version, sha256 }) => ({ name, version, sha256 })),
       cua: { release: hostRuntimeInfo.cua.release, status: hostRuntimeInfo.cua.status },
       shower: hostRuntimeInfo.shower,
     },

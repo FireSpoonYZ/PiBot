@@ -6,7 +6,8 @@ import { invoke } from '@tauri-apps/api/core';
 export interface HostStatus {
   configured: boolean;
   /** supervisor（监管进程）存活；不代表 Host 已就绪。 */
-  running: boolean;
+  configError?: unknown;
+  running?: boolean | null;
   /** 已认证探测本机 Host 就绪（短超时 GET /v1/service）；缺省按未就绪处理。 */
   ready?: boolean;
   pid: number | null;
@@ -14,9 +15,9 @@ export interface HostStatus {
   controlUrl: string | null;
   centerUrl: string | null;
   deviceId: string | null;
-  autostart: boolean;
+  autostart?: boolean | null;
   /** 自启动范围：仅安装用户登录后运行。 */
-  autostartScope?: 'user-login';
+  autostartScope?: 'user-login' | 'system-boot';
   platform?: 'windows' | 'linux';
   /** 登录自启登记失败时由启动器附带的真实错误（{code,message}）。 */
   autostartError?: { code?: string; message?: string } | null;
@@ -25,6 +26,15 @@ export interface HostStatus {
   displayName?: string | null;
   /** 本机主机名（Rust 读取环境），用作默认本机名称。 */
   hostname?: string | null;
+  /** 启动器扩展字段：Windows 服务登记/状态/启动类型；缺省=未上报，不乱映射。 */
+  service?: { registered?: boolean | null; state?: string | null; startType?: string | null } | null;
+  ownerSid?: string | null;
+  /** Host 进程阶段与中心连接状态（host_service 附带）；缺省=未知。 */
+  hostPhase?: string | null;
+  centerState?: string | null;
+  online?: boolean | null;
+  /** Linux linger 状态；缺省=未上报。 */
+  linger?: boolean | null;
 }
 
 /** pair/局部操作附带的非致命告警；启动器字符串与 {code,message} 形态都兼容。 */
@@ -60,7 +70,7 @@ export interface HostAdoptResult {
   warnings?: HostWarning[];
 }
 
-export type HostControlAction = 'start' | 'stop' | 'restart' | 'enable' | 'disable' | 'setup-shower';
+export type HostControlAction = 'start' | 'stop' | 'restart' | 'enable' | 'disable' | 'setup-shower' | 'remove';
 
 export interface HostPairInput {
   centerUrl: string;

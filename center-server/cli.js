@@ -32,8 +32,7 @@ async function main() {
     const setupToken = loadOrCreateSetupToken(plan.dataRoot);
     const setup = await openSetupServer({
       dataRoot: plan.dataRoot,
-      https: plan.https,
-      tlsMode: plan.tlsMode,
+      tlsMode: 'proxy',
       listenHost: plan.listenHost,
       port: plan.port,
       webRoot: plan.webRoot,

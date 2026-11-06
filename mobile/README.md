@@ -1,4 +1,15 @@
-# Tauri Android 界面（`mobile/`，模块 18）
+# Tauri Android 客户端（`mobile/`）
+
+## 当前发布与更新（2026-11-06）
+
+产品版本为 `1.1.0`、Android versionCode 为 `2`。本轮在 API 36 x86_64 模拟器实际完成从开发包 `1.1.0/code 2` 到隔离验收包 `1.1.1/code 3` 的 PackageInstaller 覆盖升级，包含认证下载、摘要/包身份/版本校验、未知来源授权、系统确认、取消后重试与下次启动读取真实版本；原设备身份、Bot 和已完成模型回复保留。测试使用独立开发签名，未验证正式旧签名 lineage 或 ARM64 真机。完整范围见[发布进度](../docs/open-source-release-progress.md)。
+
+更新桥方法为 `updateStatus/updateCheck/updateDownload/updateInstall/updateCancel`，通过现有 Rust/Kotlin/私有 Binder 访问默认进程的更新器。UI 不传下载 URL、文件路径或令牌。客户端连接后按 24 小时间隔自动检查，手动检查不受此间隔限制；下载、安装由用户发起。安装器启动只表示等待系统操作，下次启动按实际已安装版本判断结果。
+
+首次配对先在原生私有存储保存固定 ID 与待确认令牌；同 ID/同令牌可幂等重试，显式 force 才旋转凭据。中心使用单 HTTPS/WSS origin。Rust 工具链固定为 `1.99.1`；普通开发使用标准本地 debug key，覆盖旧开发包需显式指定原 key，正式 APK 使用独立受保护签名配置。
+
+以下模块说明与历史记录保留原提交/范围；版本、签名和本轮结果以上述当前记录为准。
+
 
 M18（Tauri Android 外壳）已交付并获父助手限定范围验收，交付时为 **18/20**（本期交付范围为原 20 模块中的 19 个，M19 按用户决定移出本期、编号保留）；M20（跨设备集成、打包与真机验收）进行中，本期当前 **18/19**：M19（Windows/Linux TUI）本期不交付，其未验收代码只在 git stash `02f1396fda08d1b666ca83597ebbcea805c74d28`（仅未来草稿，本期不恢复，保留草稿，不计完成），TUI 界面/终端快捷键验收不再是 M20 完成条件；已交付 **M20-01 手机远端入口 + 限定范围跨设备联调**，并在 REDMI K80 真机完成限定运行验证（首次安装 + 覆盖重装，见「验证边界」），但 M20 并未整体完成。本目录只提供 Android 手机侧可见界面：默认是本机 Host，“其他设备”页是同一份桌面客户端实现跑在手机原生桥上（见下节）；不替代本机 Host，也不含桌面 GUI 安装包（见 [`desktop/`](../desktop/README.md)）。
 
@@ -134,8 +145,8 @@ exit $LASTEXITCODE
 - 依赖自带的法务文本（`/META-INF/LICENSE`、`/META-INF/LICENSE.txt`、`/META-INF/NOTICE`、`/META-INF/NOTICE.txt`、`/LICENSE`、`/LICENSE.txt`、`/NOTICE`、`/NOTICE.txt`）也是这 8 个路径：`android.packaging.resources` 只把这 8 项从 AGP 默认排除集合里移除，并按标准 DSL 加入 `resources.merges`（同名文件合并完整上游文本）。签名/MANIFEST 等其它默认排除、默认 service merge 与 `jniLibs.useLegacyPackaging` 均不变；不使用 `pickFirst`、不手工拼接替代文本。
 - 法务资源已验证（限定范围）：删除生成片段后重新完整构建双 ABI `assembleDebug`+`assembleDebugAndroidTest` exit 0、片段自动重建且字节一致；新 APK 相对上一验收包只增加 `META-INF/LICENSE`、`META-INF/LICENSE.txt`、`META-INF/NOTICE` 三个条目，其余全部原条目（DEX/.so/所有 assets/res）按相同 ZIP 顺序单次解压 SHA256 完全一致；4 个 Jackson 2.15.3 依赖各自的 `META-INF/LICENSE`/`NOTICE` 共 8 项均包含在合并后的完整文本中；zipalign `-P16` 与原签名通过。此为父在本机做的限定验收，不等于远端 CI 已验证。
 - Rust 依赖的完整通知仍由 `build-mobile.js` 汇总到 assets 的 `THIRD_PARTY_NOTICES.txt`，与上面的 Maven/jar 法务资源是两件事。
-- 版本号、签名、`applicationId`、ABI 列表、16 KiB 页对齐与既有 Capacitor/Shower/Pi 资产管线均未改变。
-- GitHub Actions `apk.yml` 在 Gradle 之前用 runner 自带 `rustup` 装 stable（minimal）与两个 Android target（不改本机工具链、不新增 action 依赖）；该步骤属于已实现的接线，**尚未在真实 GitHub runner 上执行**。本地构建只需本机已装 Rust，不需要这一步。
+- 产品版本从根 package.json 读取，versionCode 独立递增，debug/release 签名分离；applicationId、原业务数据路径、ABI 选择、16 KiB 页对齐与既有 Shower/Pi 资产管线保留。
+- GitHub Actions `apk.yml` 在 Gradle 之前用 runner 自带 `rustup` 装固定 Rust 1.99.1（minimal）与两个 Android target（不改本机工具链、不新增 action 依赖）；该步骤属于已实现的接线，**尚未在真实 GitHub runner 上执行**。本地构建只需本机已装 Rust，不需要这一步。
 
 ## 验证边界（父助手限定范围）
 

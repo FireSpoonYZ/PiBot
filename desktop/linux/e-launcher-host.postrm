@@ -1,0 +1,166 @@
+#!/bin/sh
+# e-launcher-host postrm — runs as root after package removal or a rolled-
+# back upgrade.
+#
+# Real dpkg ordering:
+#   upgrade success: old-postrm upgrade -> new-postinst configure (which
+#                    restores state, so "upgrade" here is a no-op)
+#   upgrade aborted: old-postrm abort-upgrade (services were stopped by
+#                    new-preinst; best-effort restore, never fail)
+#   remove/purge   : prerm remove already stopped services; here we disable
+#                    each user's unit, remove this product's drop-in and the
+#                    wants symlink (works even with the manager down), then
+#                    drop the package-owned registry/state. User Host data
+#                    (~/.config/e-launcher) and linger are never touched.
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+UNIT="e-launcher-host.service"
+DROPIN="10-host-home.conf"
+REGDIR="/var/lib/e-launcher/hosts"
+STATEDIR="/var/lib/e-launcher/state"
+CTL_TIMEOUT=110
+
+SYSTEMCTL=""
+for c in /usr/bin/systemctl /bin/systemctl /usr/local/bin/systemctl; do
+  if [ -x "$c" ]; then SYSTEMCTL="$c"; break; fi
+done
+RUNUSER=$(command -v runuser 2>/dev/null || :)
+
+log() { echo "e-launcher-host: $*"; }
+
+user_name() { getent passwd "$1" 2>/dev/null | cut -d: -f1; }
+user_home() { getent passwd "$1" 2>/dev/null | cut -d: -f6; }
+user_config_home() {
+  _config=$(sed -n 's/^configHome=//p' "$REGDIR/$1" 2>/dev/null | head -n 1)
+  case "$_config" in
+    /*) printf '%s' "$_config" ;;
+    *) printf '%s/.config' "$(user_home "$1")" ;;
+  esac
+}
+
+manager_up() {
+  [ -n "$RUNUSER" ] && [ -n "$SYSTEMCTL" ] && [ -S "/run/user/$1/systemd/private" ]
+}
+
+user_systemctl() {
+  _uid="$1"; shift
+  _name=$(user_name "$_uid")
+  [ -n "$_name" ] || return 1
+  timeout "$CTL_TIMEOUT" "$RUNUSER" -u "$_name" -- env \
+    "XDG_RUNTIME_DIR=/run/user/$_uid" \
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$_uid/bus" \
+    "HOME=$(user_home "$_uid")" \
+    "XDG_CONFIG_HOME=$(user_config_home "$_uid")" \
+    "$SYSTEMCTL" --user "$@" </dev/null >/dev/null 2>&1
+}
+
+# Reads uid=/enabled=/active= from a state file into _uid/_enabled/_active.
+read_state() {
+  _uid=""; _enabled=no; _active=no
+  while IFS='=' read -r _k _v; do
+    case "$_k" in
+      uid) _uid="$_v" ;;
+      enabled) _enabled="$_v" ;;
+      active) _active="$_v" ;;
+    esac
+  done < "$1"
+}
+
+# Best-effort restore for aborted package operations: same steps as postinst
+# but failures only log; state files stay as the repair basis.
+restore_states() {
+  [ -d "$STATEDIR" ] || return 0
+  for _sf in "$STATEDIR"/*; do
+    [ -f "$_sf" ] || continue
+    read_state "$_sf"
+    case "$_uid" in
+      ''|*[!0-9]*) rm -f "$_sf"; continue ;;
+    esac
+    [ -n "$(user_name "$_uid")" ] || { rm -f "$_sf"; continue; }
+    if manager_up "$_uid"; then
+      _ok=yes
+      if [ "$_enabled" = "yes" ] || [ "$_active" = "yes" ]; then
+        user_systemctl "$_uid" daemon-reload || { log "daemon-reload failed for uid $_uid"; _ok=no; }
+      fi
+      if [ "$_enabled" = "yes" ]; then
+        user_systemctl "$_uid" enable "$UNIT" || { log "re-enable failed for uid $_uid"; _ok=no; }
+      fi
+      if [ "$_active" = "yes" ]; then
+        user_systemctl "$_uid" start "$UNIT" || { log "restart failed for uid $_uid"; _ok=no; }
+      fi
+      # Keep the state file when any required step failed so a later repair
+      # (dpkg --configure or manual restart) still has the restore basis.
+      [ "$_ok" = "yes" ] && rm -f "$_sf"
+    else
+      # Manager down: enabled units re-arm via their wants symlink; a
+      # manually started one cannot be restarted — keep its state file.
+      if [ "$_enabled" = "no" ] && [ "$_active" = "yes" ]; then
+        log "uid $_uid was running but its user manager is down; state kept"
+      else
+        rm -f "$_sf"
+      fi
+    fi
+  done
+  rmdir "$STATEDIR" 2>/dev/null || :
+}
+
+# UIDs known to this package: registry entries and leftover state files.
+collect_uids() {
+  for _dir in "$REGDIR" "$STATEDIR"; do
+    [ -d "$_dir" ] || continue
+    for _f in "$_dir"/*; do
+      [ -e "$_f" ] || continue
+      _u=${_f##*/}
+      case "$_u" in *[!0-9]*) continue ;; esac
+      echo "$_u"
+    done
+  done
+}
+
+# Remove this product's per-user autostart artifacts: the drop-in and the
+# default.target.wants symlink. Works without a running manager; when the
+# manager is up, `systemctl --user disable` is used first so systemd also
+# cleans any other enablement symlinks it knows about.
+remove_user_autostart() {
+  _uid="$1"
+  _h=$(user_home "$_uid")
+  [ -n "$_h" ] || return 0
+  if manager_up "$_uid"; then
+    user_systemctl "$_uid" disable "$UNIT" || log "disable failed for uid $_uid"
+    # Best-effort: the unit file is already gone; a failed reload only
+    # leaves a stale in-memory unit until the manager restarts.
+    user_systemctl "$_uid" daemon-reload || log "daemon-reload failed for uid $_uid"
+  fi
+  _name=$(user_name "$_uid")
+  _config=$(user_config_home "$_uid")
+  timeout "$CTL_TIMEOUT" "$RUNUSER" -u "$_name" -- rm -f -- \
+    "$_config/systemd/user/$UNIT.d/$DROPIN" \
+    "$_config/systemd/user/default.target.wants/$UNIT" \
+    || { log "cannot remove user service files for uid $_uid"; return 1; }
+  timeout "$CTL_TIMEOUT" "$RUNUSER" -u "$_name" -- rmdir -- \
+    "$_config/systemd/user/$UNIT.d" 2>/dev/null || :
+}
+
+case "${1:-}" in
+  upgrade) exit 0 ;;
+  abort-upgrade|abort-install)
+    restore_states
+    ;;
+  remove|purge)
+    if [ -n "$SYSTEMCTL" ] && [ -n "$RUNUSER" ]; then
+      for _uid in $(collect_uids | sort -un); do
+        [ -n "$(user_name "$_uid")" ] || continue
+        remove_user_autostart "$_uid" || exit 1
+      done
+    else
+      log "runuser/systemctl unavailable; keeping registry for repair"
+      exit 1
+    fi
+    rm -rf "$REGDIR" "$STATEDIR" 2>/dev/null || :
+    rmdir /var/lib/e-launcher 2>/dev/null || :
+    ;;
+  *) exit 0 ;;
+esac
+exit 0

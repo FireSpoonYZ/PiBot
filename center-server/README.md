@@ -4,7 +4,7 @@
 
 ## 设备登记
 
-`POST /api/devices` 需要所有者会话与 `x-csrf-token`（与其他管理端写路由相同）。请求 `{displayName, platform}`：`displayName` 去除首尾空白后为 1–64 个字符，`platform` 为 `windows`、`linux`、`macos` 或 `android`；其他字段或取值返回 `400 INVALID_ARGUMENT`。成功返回 `201 {deviceId, deviceToken, displayName, platform}`：`deviceId` 为随机 UUID，`deviceToken` 为 32 字节随机数的 base64url。令牌只在此响应中出现一次，中心中继注册表（`relay.sqlite`）只保存其 SHA-256 哈希，不写日志；丢失后需删除设备重新登记。新设备立即出现在 `GET /api/devices`（未连接前 `online: false`），Host 连接时 hello 上报的平台会覆盖登记时的值。
+`POST /api/devices` 需要所有者会话与 `x-csrf-token`（与其他管理端写路由相同）。请求 `{displayName, platform, deviceId?, deviceToken?, replaceExisting?}`：`displayName` 去除首尾空白后为 1–64 个字符，`platform` 为 `windows`、`linux`、`macos` 或 `android`；其他字段或取值返回 `400 INVALID_ARGUMENT`。省略设备身份时生成 UUID 和令牌。首次登记返回 `201 {deviceId, deviceToken, displayName, platform}`。客户端先在原生私有存储保存固定 ID/令牌；同 ID、同令牌重试返回 `200` 并复用身份，异令牌返回 `409`。`replaceExisting: true` 为显式重新配对，轮换令牌并保留 Bot/历史；旧令牌随后失效。新 ID 限 1–200 个可见 ASCII 字符，保留 `center-` 前缀。中心中继注册表（`relay.sqlite`）只保存令牌 SHA-256，不写日志。新设备立即出现在 `GET /api/devices`（未连接前 `online: false`），Host 连接时 hello 上报的平台会覆盖登记时的值。
 
 ## Bot 头像
 

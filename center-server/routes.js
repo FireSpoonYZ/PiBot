@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import Ajv from 'ajv';
 import { requireOwner, assertPublicCredentialId } from './auth.js';
 import { assertId } from '../host-core/message-protocol.js';
+import { assertDeviceId, assertDeviceToken } from '../host-core/relay-protocol.js';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 const required = (value, name) => value ?? fail('NOT_FOUND', `${name} not found`);
@@ -88,17 +89,21 @@ function runtimeBotReceipt(value) {
 const devicePlatforms = ['windows', 'linux', 'macos', 'android'];
 function deviceRegistration(value) {
   const body = object(value);
-  if (Object.keys(body).some(key => key !== 'displayName' && key !== 'platform' && key !== 'deviceId' && key !== 'replaceExisting')) fail('INVALID_ARGUMENT', 'Invalid device registration');
+  if (Object.keys(body).some(key => key !== 'displayName' && key !== 'platform' && key !== 'deviceId' && key !== 'replaceExisting' && key !== 'deviceToken')) fail('INVALID_ARGUMENT', 'Invalid device registration');
   const displayName = typeof body.displayName === 'string' && body.displayName.isWellFormed() ? body.displayName.trim() : '';
   if (displayName.length < 1 || displayName.length > 64 || /[\x00-\x1f\x7f]/.test(displayName)) fail('INVALID_ARGUMENT', 'displayName must contain 1-64 characters');
   if (!devicePlatforms.includes(body.platform)) fail('INVALID_ARGUMENT', 'Invalid platform');
   if (body.deviceId !== undefined) {
-    assertId(body.deviceId, 'deviceId');
+    assertDeviceId(body.deviceId);
     // center-* is reserved for the center's own relay client identity.
     if (body.deviceId.startsWith('center-')) fail('FORBIDDEN', 'Reserved device ID');
   }
   if (body.replaceExisting !== undefined && (typeof body.replaceExisting !== 'boolean' || body.deviceId === undefined)) fail('INVALID_ARGUMENT', 'replaceExisting requires a deviceId');
-  return { displayName, platform: body.platform, deviceId: body.deviceId, replaceExisting: body.replaceExisting };
+  if (body.deviceToken !== undefined) {
+    if (body.deviceId === undefined) fail('INVALID_ARGUMENT', 'deviceToken requires a deviceId');
+    assertDeviceToken(body.deviceToken);
+  }
+  return { displayName, platform: body.platform, deviceId: body.deviceId, replaceExisting: body.replaceExisting, deviceToken: body.deviceToken };
 }
 function runtimeCapabilityError(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.error == null) fail('INVALID_ARGUMENT', 'Invalid runtime receipt');
@@ -116,7 +121,7 @@ function assertConfigCredentials(schema, value) {
 }
 
 
-export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns }) {
+export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement }) {
   const streams = new Map();
   function notify(deviceId) {
     for (const stream of streams.get(deviceId) || []) {
@@ -151,15 +156,15 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('GET', '/api/devices', () => bridge.listDevices());
   // 所有者登记/重绑设备：令牌只在本响应中返回一次，中心只保存其哈希，不写日志。
   route('POST', '/api/devices', (req, reply) => {
-    const { displayName, platform, deviceId: requestedId, replaceExisting } = deviceRegistration(req.body);
+    const { displayName, platform, deviceId: requestedId, replaceExisting, deviceToken: requestedToken } = deviceRegistration(req.body);
     const deviceId = requestedId ?? randomUUID();
-    const deviceToken = randomBytes(32).toString('base64url');
+    const deviceToken = requestedToken ?? randomBytes(32).toString('base64url');
     const existing = requestedId === undefined ? null : bridge.registry.get(requestedId);
-    if (existing !== null && replaceExisting !== true) fail('REQUEST_CONFLICT', 'Device already registered');
-    if (existing === null) {
+    if (existing !== null && replaceExisting !== true && requestedToken === undefined) fail('REQUEST_CONFLICT', 'Device already registered');
+    if (existing === null || replaceExisting !== true) {
       bridge.registry.register({ deviceId, token: deviceToken, displayName });
       bridge.registry.updateMetadata(deviceId, { platform });
-      return reply.code(201).send({ deviceId, deviceToken, displayName, platform });
+      return reply.code(existing === null ? 201 : 200).send({ deviceId, deviceToken, displayName, platform });
     }
     // 以既有身份重绑：轮换新令牌（仅存哈希），保留 Bot/会话/全部记录，按输入
     // 更新名称与平台；notify 使仍持有旧凭据的 SSE 流失效。
@@ -384,6 +389,22 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   }
   route('GET', '/api/installations/:id/deployments', req => store.listDeploymentReceipts(req.params.id));
   route('GET', '/api/operations/:id', req => required(store.getOperation(req.params.id), 'Operation'));
+  // Bot-scoped management: same services as the paired-device routes below,
+  // owner authority. Skills/learning pass the Bot identity through unchanged.
+  const botScope = (req) => {
+    const { deviceId, botId } = req.params;
+    if (!store.listDeviceBots(deviceId).some((bot) => bot.botId === botId)) fail('NOT_FOUND', 'Bot not found');
+    return { deviceId, botId };
+  };
+  route('POST', '/api/devices/:deviceId/bots/:botId/skills', req => skills.execute({ ...botScope(req), origin: 'foreground' }, object(req.body)), true);
+  route('POST', '/api/devices/:deviceId/bots/:botId/learning', req => {
+    const body = object(req.body);
+    // Only the target Host may drive learning jobs; the owner may inspect,
+    // configure and cancel, but a start/next/respond here would strand the job.
+    if (!['status', 'configure', 'cancel'].includes(body.action)) fail('FORBIDDEN', 'Learning jobs are driven by the target Host');
+    return learning.execute(botScope(req), body);
+  }, true);
+  route('POST', '/api/devices/:deviceId/bots/:botId/installations', req => botManagement.execute(botScope(req), object(req.body), { allowShared: true }), true);
   const oauthInput = req => ({ installationId: req.params.id, deviceId: text(req.body?.deviceId, 'deviceId'), botId: text(req.body?.botId, 'botId') });
   route('POST', '/api/installations/:id/oauth/start', req => oauth.start(oauthInput(req)), true);
   route('GET', '/api/oauth/mcp/flows/:flowId', req => required(oauth.status(req.params.flowId), 'OAuth flow'));
@@ -415,7 +436,10 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     req.centerDevice = { deviceId, token };
     done();
   }
-  const host = (method, url, handler) => app.route({ method, url, onRequest: authenticate, handler });
+  const host = (method, url, handler, bodyLimit) => app.route({ method, url, onRequest: authenticate, handler, ...(bodyLimit !== undefined ? { bodyLimit } : {}) });
+  // Learning start carries a transcript snapshot the service bounds at 8 MiB;
+  // this route's body limit sits just above it — never a global raise.
+  const LEARNING_BODY_LIMIT = 9 * 1024 * 1024;
   host('GET', '/api/host/events', (req, reply) => {
     const { deviceId, token } = req.centerDevice;
     reply.hijack();
@@ -479,6 +503,15 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     try { await packages.reconcileDevice(deviceId); } finally { notify(deviceId); }
     return result;
   });
+  host('POST', '/api/host/devices/:deviceId/bots/:botId/skills', req => skills.execute({ ...botScope(req), origin: 'foreground' }, object(req.body)));
+  host('POST', '/api/host/devices/:deviceId/bots/:botId/learning', req => {
+    const scope = botScope(req);
+    // The learning job's agent.run callbacks are handed to the initiating
+    // Host; a forged cross-device source must never drive another Host's jobs.
+    if (scope.deviceId !== req.centerDevice.deviceId) fail('FORBIDDEN', 'Device mismatch');
+    return learning.execute(scope, object(req.body));
+  }, LEARNING_BODY_LIMIT);
+  host('POST', '/api/host/devices/:deviceId/bots/:botId/installations', req => botManagement.execute(botScope(req), object(req.body)));
   host('GET', '/api/host/snapshot', req => snapshot(req.centerDevice.deviceId));
   host('POST', '/api/host/receipt', (req, reply) => {
     const body = object(req.body);
@@ -540,5 +573,5 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   });
   host('POST', '/api/host/capabilities/:installationId/tools/list', req => execution.listTools(req.centerDevice.deviceId, req.params.installationId, object(req.body)));
   host('POST', '/api/host/capabilities/:installationId/tools/call', req => { const body = object(req.body); text(body.callId, 'callId'); text(body.name, 'name'); object(body.args); return execution.callTool(req.centerDevice.deviceId, req.params.installationId, body); });
-  return { notifyInstallation, close() { for (const set of streams.values()) for (const stream of set) stream.reply.end(); streams.clear(); } };
+  return { notifyInstallation, notifyDevice: notify, close() { for (const set of streams.values()) for (const stream of set) stream.reply.end(); streams.clear(); } };
 }

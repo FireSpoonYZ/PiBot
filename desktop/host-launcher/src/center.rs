@@ -203,6 +203,7 @@ impl CenterClient {
         display_name: &str,
         platform: &str,
         device_id: &str,
+        device_token: &str,
         replace_existing: bool,
     ) -> AppResult<Registered> {
         let (_, csrf) = self.csrf_token()?;
@@ -216,6 +217,7 @@ impl CenterClient {
             "displayName": display_name,
             "platform": platform,
             "deviceId": device_id,
+            "deviceToken": device_token,
             "replaceExisting": replace_existing,
         });
         let response = self

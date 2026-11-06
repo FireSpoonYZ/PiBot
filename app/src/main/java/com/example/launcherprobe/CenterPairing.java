@@ -147,10 +147,24 @@ final class CenterPairing {
         if (!ownerOpen.getAsBoolean()) {
             throw new BridgeException("CANCELLED", "not-sent", "界面已结束");
         }
+        android.content.SharedPreferences pending = appContext.getSharedPreferences("center_pairing", Context.MODE_PRIVATE);
+        String pendingKey = url + "\n" + deviceId + "\n" + force;
+        String requestedToken = pendingKey.equals(pending.getString("key", null))
+                ? pending.getString("token", null) : null;
+        if (requestedToken == null) {
+            byte[] random = new byte[32];
+            new java.security.SecureRandom().nextBytes(random);
+            requestedToken = android.util.Base64.encodeToString(random,
+                    android.util.Base64.URL_SAFE | android.util.Base64.NO_WRAP | android.util.Base64.NO_PADDING);
+            if (!pending.edit().putString("key", pendingKey).putString("token", requestedToken).commit()) {
+                throw new BridgeException("CREDENTIALS", "not-sent", "无法保存待配对凭据");
+            }
+        }
         JSONObject created = session.request("POST", url + "/api/devices",
                 new JSONObject().put("displayName", displayName)
                         .put("platform", "android")
                         .put("deviceId", deviceId)
+                        .put("deviceToken", requestedToken)
                         .put("replaceExisting", force),
                 csrf, "中心会话或 CSRF 校验失败");
 
@@ -161,7 +175,7 @@ final class CenterPairing {
             throw new BridgeException("CENTER_ERROR", "not-sent",
                     "中心未按请求登记本机 Host 身份");
         }
-        if (!DEVICE_TOKEN.matcher(token).matches()) {
+        if (!DEVICE_TOKEN.matcher(token).matches() || !token.equals(requestedToken)) {
             throw new BridgeException("CENTER_ERROR", "not-sent", "中心返回的设备令牌无效");
         }
 
@@ -174,6 +188,7 @@ final class CenterPairing {
                         .put("url", url).put("deviceId", deviceId)
                         .put("deviceToken", token).put("ca", ca)
                         .put("displayName", created.optString("displayName", displayName)))));
+        pending.edit().clear().commit();
         boolean hostConfigured = false;
         try {
             await(bridge.request("saveCenterSettings", new JSONObject()
