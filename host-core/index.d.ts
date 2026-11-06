@@ -158,6 +158,52 @@ export interface ImageAttachmentData extends ImageAttachment {
   data: string;
 }
 
+/** Model tool arguments, not a new Runtime/control endpoint. Cursor is runtime-local and opaque. */
+export type SessionSearchInput = {
+  conversationId?: string;
+  limit?: number;
+  cursor?: string | null;
+} & ({
+  action: 'search';
+  /** Literal case-sensitive substring, 1..256 characters; no regex or FTS. */
+  query: string;
+} | {
+  action: 'read';
+  conversationId: string;
+  entryId: number;
+  before?: number;
+  after?: number;
+});
+
+export interface SessionSearchItem {
+  conversationId: string;
+  scopeId: string | null;
+  entryId: number;
+  /** Model carrier role; scope messages may actually have a Bot author. */
+  role: 'user' | 'assistant';
+  source: 'model' | 'scope';
+  authorKind?: 'user' | 'bot';
+  messageIndex: number;
+  blockIndex: number;
+  /** UTF-16 offset in this original text block (scope source: message.text). */
+  offset: number;
+  text: string;
+  matchOffset?: number;
+  truncated: boolean;
+}
+
+export interface SessionSearchPage {
+  action: 'search' | 'read';
+  botId: string;
+  items: SessionSearchItem[];
+  nextCursor: string | null;
+  /** Includes repeated entry reads when processing a large text block in chunks. */
+  scannedEntryReads: number;
+  scannedTextUnits: number;
+  /** Exhausted the frozen snapshot, not a claim about messages arriving later. */
+  complete: boolean;
+}
+
 export interface HistoryOptions {
   limit?: number;
   cursor?: Record<string, unknown> | null;

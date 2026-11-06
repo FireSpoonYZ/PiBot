@@ -39,6 +39,7 @@ import { createBotManagementSkillSection } from './bot-management-skill.js';
 import { SOUL_MAX_BYTES } from './bot-soul.js';
 import { normalizeUserMessage } from './scope-protocol.js';
 import { createCommunicationTools } from './communication-tools.js';
+import { createSessionSearchTool } from './session-search-tool.js';
 import { createCollaborationService } from './collaboration-service.js';
 import { renderCollaborationPrompt } from './collaboration-prompt.js';
 import { createCuaTools } from './cua-tools.js';
@@ -378,6 +379,7 @@ export async function openRuntime(options) {
       createGrepTool({ dataRoot: host.dataRoot, toolPaths: execution.toolPaths }),
       createFindTool({ dataRoot: host.dataRoot, toolPaths: execution.toolPaths }),
       createLsTool(),
+      createSessionSearchTool({ host, getHarness: () => harness, getWorkContexts: () => workContexts }),
     ],
     sections: [section('host-execution', (input) => {
       // Android 系统 sh 在描述中显式；Windows Git Bash 与 Linux bash 保持不变。
