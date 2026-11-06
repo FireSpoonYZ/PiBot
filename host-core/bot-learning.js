@@ -454,6 +454,7 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
    */
   async function driveJob(bot, job) {
     let consecutiveErrors = 0;
+    let completedCall = null;
     for (;;) {
       if (closing || job.controller.signal.aborted) return;
       const client = getCenterClient?.();
@@ -476,38 +477,41 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
         await sleep(250, job.controller.signal);
         continue;
       }
-      // A model call can outlive a remote cancellation or Center timeout.
-      // Observe the job in parallel and stop the provider before releasing its extension.
-      const watch = new AbortController();
-      const stopWatch = () => watch.abort();
-      job.controller.signal.addEventListener('abort', stopWatch, { once: true });
-      const watching = (async () => {
-        while (!watch.signal.aborted) {
-          await sleep(1000, watch.signal);
-          if (watch.signal.aborted) break;
-          try {
-            const current = await client.botLearning(host.deviceId, bot.botId, { action: 'next', jobId: job.jobId }, watch.signal);
-            if (TERMINAL_JOB_STATUS.has(current?.status) || (current?.call && current.call.id !== call.id)) {
-              abortJob(job);
+      // Center has one outstanding call: a failed response retries this outcome, not its effects.
+      if (completedCall?.id !== call.id) {
+        completedCall = null;
+        // A model call can outlive a remote cancellation or Center timeout.
+        // Observe the job in parallel and stop the provider before releasing its extension.
+        const watch = new AbortController();
+        const stopWatch = () => watch.abort();
+        job.controller.signal.addEventListener('abort', stopWatch, { once: true });
+        const watching = (async () => {
+          while (!watch.signal.aborted) {
+            await sleep(1000, watch.signal);
+            if (watch.signal.aborted) break;
+            try {
+              const current = await client.botLearning(host.deviceId, bot.botId, { action: 'next', jobId: job.jobId }, watch.signal);
+              if (TERMINAL_JOB_STATUS.has(current?.status) || (current?.call && current.call.id !== call.id)) {
+                abortJob(job);
+                break;
+              }
+            } catch {
+              if (!watch.signal.aborted) abortJob(job);
               break;
             }
-          } catch {
-            if (!watch.signal.aborted) abortJob(job);
-            break;
           }
+        })();
+        try {
+          completedCall = { id: call.id, outcome: await executeCall(bot, job, call) };
+        } finally {
+          watch.abort();
+          job.controller.signal.removeEventListener('abort', stopWatch);
+          await watching;
         }
-      })();
-      let outcome;
-      try {
-        outcome = await executeCall(bot, job, call);
-      } finally {
-        watch.abort();
-        job.controller.signal.removeEventListener('abort', stopWatch);
-        await watching;
       }
       try {
         await client.botLearning(host.deviceId, bot.botId, {
-          action: 'respond', jobId: job.jobId, callId: call.id, ...outcome,
+          action: 'respond', jobId: job.jobId, callId: call.id, ...completedCall.outcome,
         }, job.controller.signal);
         consecutiveErrors = 0;
       } catch {
@@ -530,7 +534,7 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
           throw messageError('FORBIDDEN', 'Schedule callbacks are restricted to curator skill references');
         }
         job.controller.signal.throwIfAborted();
-        return { result: await schedules.hermesSkillCall(bot, call.params.name, call.params.args ?? {}) };
+        return { result: await schedules.hermesSkillCall(bot, call.params.name, call.params.args ?? {}, { signal: job.controller.signal }) };
       }
       return { error: { code: 'INVALID_ARGUMENT', message: 'unsupported call method: ' + String(call.method).slice(0, 64) } };
     } catch (err) {
