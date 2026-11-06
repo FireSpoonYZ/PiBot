@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild with the repaired pipeline
+        required: true
+        type: string
 
 concurrency:
   group: official-release
@@ -17,6 +23,8 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -27,11 +35,17 @@ jobs:
       - id: version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          node scripts/release-check.mjs --tag "$GITHUB_REF_NAME"
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/master
+          [[ "$REQUESTED_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Expected a release tag"; exit 1; }
+          git checkout --detach "refs/tags/$REQUESTED_TAG"
+          SOURCE_COMMIT=$(git rev-parse HEAD)
+          VERSION="${REQUESTED_TAG#v}"
+          node scripts/release-check.mjs --tag "$REQUESTED_TAG"
+          git merge-base --is-ancestor "$SOURCE_COMMIT" origin/master
+          echo "tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
           if gh release view "v$VERSION" >/dev/null 2>&1; then
             echo "Version already released; published versions are immutable."
             exit 1
@@ -44,6 +58,8 @@ jobs:
     with:
       release: true
       version: ${{ needs.version.outputs.version }}
+      source-ref: ${{ needs.version.outputs.tag }}
+      source-sha: ${{ needs.version.outputs.sha }}
     secrets: inherit
 
   desktop:
@@ -52,6 +68,8 @@ jobs:
     with:
       release: true
       version: ${{ needs.version.outputs.version }}
+      source-ref: ${{ needs.version.outputs.tag }}
+      source-sha: ${{ needs.version.outputs.sha }}
     secrets: inherit
 
   center:
@@ -60,13 +78,19 @@ jobs:
     with:
       release: true
       version: ${{ needs.version.outputs.version }}
+      source-ref: ${{ needs.version.outputs.tag }}
+      source-sha: ${{ needs.version.outputs.sha }}
     secrets: inherit
 
   publish:
     needs: [version, android, desktop, center]
     runs-on: ubuntu-24.04
+    env:
+      SOURCE_COMMIT: ${{ needs.version.outputs.sha }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.tag }}
       - uses: actions/setup-node@v7
         with:
           node-version: '26.13.0'
@@ -103,7 +127,7 @@ jobs:
             if [ "$format" = apk ]; then
               extra=(--version-code "$(sed -n 's/^android.versionCode=//p' gradle.properties | tr -d '\r')")
             fi
-            node scripts/release-artifact.mjs --version "$VERSION" --commit "$GITHUB_SHA" \
+            node scripts/release-artifact.mjs --version "$VERSION" --commit "$SOURCE_COMMIT" \
               --notes "PiBot $VERSION" --platform "$platform" --arch "$arch" --format "$format" \
               --file "release-out/PiBot-$VERSION-$suffix" "${extra[@]}" \
               --out "release-out/PiBot-$VERSION-$suffix.metadata.json"
@@ -135,7 +159,7 @@ jobs:
           Android 首发采用独立正式签名；旧开发签名安装请先导出需要的数据。
           Windows 当前使用登录自启动任务，尚未提供无人登录的 SCM 服务。
 
-          Source: $GITHUB_SHA
+          Source: $SOURCE_COMMIT
           EOF
-          gh release create "v$VERSION" release-out/* --target "$GITHUB_SHA" \
+          gh release create "v$VERSION" release-out/* --target "$SOURCE_COMMIT" \
             --title "PiBot v$VERSION" --notes-file release-notes.md --generate-notes --verify-tag --latest
