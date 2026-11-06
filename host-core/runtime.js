@@ -1859,7 +1859,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       assertNonBlank(requestId, 'requestId');
       const bot = host.getBot(botId);
       if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
-      // Host 队列里尚未原生提交的条目先返回 queued 回执（受理存在，无原生记录可等）。
+      // 共享读取先对账残留队列的原生 done；否则返回 Host 受理/取消回执，不隐式恢复。
       const queued = await turns.queuedReceipt(bot, requestId);
       if (queued) return queued;
       const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
@@ -1891,7 +1891,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       assertNonBlank(requestId, 'requestId');
       const bot = host.getBot(botId);
       if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
-      // Host 队列里尚未原生提交的条目可见为 queued；否则落到原生记录。
+      // 共享读取先对账残留队列的原生 done；无队列条目时再查其他原生状态。
       const queued = await turns.queuedReceipt(bot, requestId);
       if (queued) return queued;
       const conversation = await getPrimaryConversation(harness, bot, {}, CTX);

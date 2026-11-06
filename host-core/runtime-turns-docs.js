@@ -35,7 +35,7 @@ export const TurnPin = defineDocFamily({
 
 // 有界阶段值；错误另行 bounded（code <=64、message <=200，绝不带回正文/凭据）。
 // 'cancelled' 是本地终态（abort/Stop），不在对外 TurnAdmissionStatus 相集内，
-// 仅用于区分已取消受理：queuedReceipt/wait/findByRequest 读为 unanswered 回执。
+// 仅用于区分已取消受理：无原生 done 时 getSubmission/wait 读为 unanswered 回执。
 export const TURN_PHASES = new Set(['queued', 'checking', 'synchronizing', 'failed']);
 
 const MAX_ERROR_MESSAGE = 200;
@@ -63,7 +63,7 @@ export function toTurnAdmissionStatus(item) {
     字段与 PrimarySubmission 对齐（answerText/reason 为 null），另附 admission 与附件
     展示元数据（绝不带 base64 字节，图片-only 受理因此仍可渲染出待发送缩略信息）。
     phase 'cancelled' 的条目生成终态 unanswered 回执：受理被撤销，但记录仍存在、
-    getSubmission/wait/findByRequest 不因唯一的 Host 记录被删而误报不存在。 */
+    getSubmission/wait 不因唯一的 Host 记录被删而误报不存在；原生 done 由共享读取路径优先返回。 */
 export function toQueuedReceipt(item) {
   const cancelled = item.phase === 'cancelled';
   return {

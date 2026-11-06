@@ -858,7 +858,8 @@ export function createTurnAdmission(deps) {
       throw errWithCode('attachments exceed the 64 MiB per-message total image byte limit', 'INVALID_ARGUMENT');
     }
     const now = new Date().toISOString();
-    const item = await harness().commit(async (tx) => {
+    // 回执在事务内投影为普通元数据；浅拷贝会让 origin/附件保留已结算的 overlay。
+    const receipt = await harness().commit(async (tx) => {
       const doc = await queueDoc(tx, bot.primaryConversationId);
       // 停止 epoch 对账与受理持久化同一事务：捕获的进程代次落后于当前计数，
       // 该受理按作废落 cancelled 终态（保留回执可答），绝不排队待泵。
@@ -871,14 +872,14 @@ export function createTurnAdmission(deps) {
           throw errWithCode('requestId already used with different text: ' + requestId, 'REQUEST_CONFLICT');
         }
         // 同 requestId 的重复重传：已取消终态绝不复活（真正重发用新 requestId）。
-        if (existing.phase === 'cancelled') return { ...existing };
+        if (existing.phase === 'cancelled') return toQueuedReceipt(existing);
         if (stale) {
           // 在飞重试撞上停止：受理作废为 cancelled，不再泵旧工作。
           existing.stopEpoch = capturedStopEpoch;
           existing.phase = 'cancelled';
           existing.error = null;
           existing.updatedAt = now;
-          return { ...existing };
+          return toQueuedReceipt(existing);
         }
         if (existing.phase === 'failed') {
           // 同 requestId 的显式重试重新武装自动重试：耗尽的退避计数在重试时清零，
@@ -887,7 +888,7 @@ export function createTurnAdmission(deps) {
           existing.updatedAt = now;
           retryAttempts.delete(botId);
         }
-        return { ...existing };
+        return toQueuedReceipt(existing);
       }
       const next = {
         requestId,
@@ -911,7 +912,7 @@ export function createTurnAdmission(deps) {
         stopEpoch: capturedStopEpoch,
       };
       doc.items.push(next);
-      return { ...next };
+      return toQueuedReceipt(next);
     }, context);
     // initializeBot 的 SOUL 回填等可失败工作必须在受理持久化之后：先落队列再初始化，
     // 失败的消息在 Host 端永远有可对账的 queued 记录，而不是无声丢失。
@@ -919,23 +920,35 @@ export function createTurnAdmission(deps) {
     const count = await queuedCount(bot);
     publishStatus(botId, await liveHead(bot), count);
     // 受理未被停止作废：新的真实输入允许新运行，清掉旧 stopped 覆盖后再泵。
-    if (item.phase !== 'cancelled') {
+    if (receipt.status === 'queued') {
       clearStopped(botId);
       nudge(botId);
+    }
+    return receipt;
+  }
+
+  /** getSubmission/wait 共用：残留 Host 队列（含 cancelled）不能遮蔽原生 done。 */
+  async function queuedReceipt(bot, requestId) {
+    const items = await readQueue(bot.primaryConversationId);
+    const item = items.find((entry) => entry.requestId === requestId);
+    if (!item) return null;
+    const h = harness();
+    const conversation = await getPrimaryConversation(h, bot, {}, context);
+    if (conversation) {
+      // 只读终态，不用会隐式 resume 的 wait/abort，也不重新提交或删除取消记录。
+      const record = await h.commit((tx) => tx.submissionByRequest(conversation.id, requestId), context);
+      if (record?.status === 'done') {
+        const formatted = await formatPrimarySubmission(h, bot, record, context);
+        recordCompletedSubmission(bot.botId, formatted);
+        return formatted;
+      }
     }
     return toQueuedReceipt(item);
   }
 
-  /** 队列中仍存在的条目 -> queued 回执；供 getSubmission/wait 先查。 */
-  async function queuedReceipt(bot, requestId) {
-    const items = await readQueue(bot.primaryConversationId);
-    const item = items.find((entry) => entry.requestId === requestId);
-    return item ? toQueuedReceipt(item) : null;
-  }
-
   /**
    * abort：把该 Bot 尚未原生提交的排队条目转为 cancelled 终态受理（不删除唯一记录，
-   * getSubmission/wait/findByRequest 之后读为 unanswered 而不是 NOT_FOUND），同时清理
+   * getSubmission/wait 无原生 done 时读为 unanswered 而不是 NOT_FOUND），同时清理
    * 已授予但未提交的空 pin——取消绝不复活旧授权。队列取消与空 pin 清理在同一 commit：
    * 原子边界内绝不出现「条目已取消而授权 pin 仍活」的中间态。
    * throughStopEpoch 限定取消范围：只作废受理代次 ≤ 该值的条目（停止前已受理的
