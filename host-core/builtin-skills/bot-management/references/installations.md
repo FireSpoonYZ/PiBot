@@ -16,6 +16,8 @@ Shared installations can be described/checked/probed for this Bot; a single Bot 
 
 ### Explicit probe boundaries
 
+- Unsupported installations (for example Todo), targets or plugin versions return HTTP 400 `UNSUPPORTED_TARGET`, not an internal error. Use `describe.probeSupported` or `check.probe.supported` to inspect support; do not retry the same unsupported probe. Only upgrade through Center when a compatible Host Webfox/Hindsight version is available.
+
 - Webfox: one search for `example.com` with maxResults=1 if search is configured, otherwise one contents extraction of `https://example.com/`. No retries; 10-second deadline. Only that selected capability/provider is verified, not every provider, answer or research.
 - Hindsight: one authenticated bank-list read filtered to the Bot's primary bank, limit=1; never creates a bank or writes memory. Empty list is a successful connection/read, not proof that memory exists or writes work.
 - Provider bodies and raw error strings are not returned. Plugin action input/output schemas, current authorization and action cancellation still apply.

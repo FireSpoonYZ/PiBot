@@ -161,7 +161,7 @@ export function openBotManagement({ store, packages, notify }) {
       };
       const before = readCheck();
       if (action === 'check') return before;
-      if (!probeSupported) fail('UNSUPPORTED_ACTION', 'This installed version has no supported read-only probe; update through Center');
+      if (!probeSupported) fail('UNSUPPORTED_TARGET', 'Probe requires a compatible Host Webfox/Hindsight installation; use describe/check to inspect support');
       if (!before.configuration.enabled) fail('FORBIDDEN', 'Capability is not enabled for this Bot');
       if (!before.configured || before.deployment.status !== 'deployed') {
         return { ...before, probe: { status: 'blocked', reason: 'Wait for valid configuration and matching deployment/configuration receipts' } };

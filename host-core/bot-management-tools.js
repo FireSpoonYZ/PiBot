@@ -130,6 +130,7 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
         'Manage Center capability installations scoped to the target Bot. Actions: catalog (minimal metadata), ' +
         'describe (schema and credential-reference status, no secret values), check (configuration versus ' +
         'deployment receipts, no network), probe (explicit read-only Webfox/Hindsight request, may incur cost). ' +
+        'UNSUPPORTED_TARGET means this installation/version cannot be probed; use describe/check instead of retrying. ' +
         'Enter secrets only in the Center credential UI, never chat/questionnaires. Other actions: inspect, install ' +
         '(creates the installation, globally enables it, then binds this Bot — the reply reports the ' +
         'stage reached; bound means saved binding plus a queued deployment plan), update, rollback, ' +
