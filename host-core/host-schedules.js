@@ -189,12 +189,13 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
         }
         return result;
       },
-      async hermesSkillCall(bot, name, args = {}) {
+      async hermesSkillCall(bot, name, args = {}, { signal } = {}) {
+        signal?.throwIfAborted();
         const normalized = normalizeHermesSkillCall(name, args);
         const result = await nativeBridge({
           tool: 'schedule_task', actor: actorFor(bot), taskId: 1,
           arguments: { action: 'hermesSkillCall', name, args: normalized },
-        });
+        }, { signal });
         return name === 'referenced_skill_names' ? result.skills : result;
       },
       async pauseBot(bot) {
@@ -990,7 +991,8 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
       }
     },
 
-    async hermesSkillCall(bot, name, args = {}) {
+    async hermesSkillCall(bot, name, args = {}, { signal } = {}) {
+      signal?.throwIfAborted();
       if (closed) throw messageError('NOT_CONNECTED', 'host is closing');
       const { consolidated, pruned } = normalizeHermesSkillCall(name, args);
       return inTx((database) => {
