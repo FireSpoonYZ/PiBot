@@ -12,7 +12,7 @@ const STATUS: Record<WebhookEvent['status'], { label: string; badge: string }> =
   dispatching: { label: '已派发', badge: 'badge-primary' },
   queued: { label: '已入队', badge: 'badge-primary' },
   running: { label: '执行中', badge: 'badge-primary' },
-  succeeded: { label: '成功', badge: 'badge-online' },
+  succeeded: { label: '本轮完成', badge: 'badge-online' },
   failed: { label: '失败', badge: 'badge-danger' },
   cancelled: { label: '已取消', badge: 'badge-neutral' },
   expired: { label: '已过期', badge: 'badge-neutral' },
@@ -59,26 +59,35 @@ function WebhookEvents({ routeId, revision }: { routeId: string; revision: numbe
           <RefreshCw size={15} aria-hidden="true" />刷新事件
         </button>
       </div>
-      <p className="secondary">最新在前；状态需手动刷新，最终回答请到目标 Bot 的聊天查看。</p>
+      <p className="secondary">最新在前；状态需手动刷新。“本轮完成”仅表示 Webhook 初始提交轮已结束，不代表异步协作全部完成；后续结果请到目标 Bot 的聊天查看。</p>
+      <p className="secondary">“取消中”表示中心已记录停止意图，等待 Host 对账；若本轮实际已完成，仍会保留完成状态。</p>
       {loadedAt && <p className="secondary">上次读取：{loadedAt}</p>}
       {error && <p className="inline-error" role="alert">{error}；请重试刷新。已有记录可能不是最新状态。</p>}
       {loading && <p className="secondary" role="status">正在读取事件…</p>}
       {!loading && !error && events.length === 0 && <p className="empty-state">暂无事件。向此入口发送 JSON 后，可在这里查看投递进度。</p>}
-      {events.map(event => (
-        <article className="resource-row" key={event.id}>
-          <div className="card-header">
-            <strong>{event.routeName}</strong>
-            <span className={`badge ${STATUS[event.status].badge}`}>{STATUS[event.status].label} · {event.status}</span>
-          </div>
-          <p className="secondary">事件：{event.id}<br />幂等键：{event.idempotencyKey}<br />请求：{event.requestId}</p>
-          <p className="secondary">
-            接收：<time dateTime={event.receivedAt}>{formatTime(event.receivedAt)}</time><br />
-            更新：<time dateTime={event.updatedAt}>{formatTime(event.updatedAt)}</time><br />
-            未派发过期：<time dateTime={event.expiresAt}>{formatTime(event.expiresAt)}</time>
-          </p>
-          {event.error && <p className="inline-error">{event.error.code}：{event.error.message}</p>}
-        </article>
-      ))}
+      {events.map(event => {
+        const terminal = ['succeeded', 'failed', 'cancelled', 'expired'].includes(event.status);
+        const cancelling = !terminal && event.cancelRequested;
+        const admissionFailed = !terminal && !cancelling && event.admission?.phase === 'failed';
+        const status = cancelling ? { label: '取消中', badge: 'badge-warn' }
+          : admissionFailed ? { label: '准入失败', badge: 'badge-danger' } : STATUS[event.status];
+        const diagnostic = admissionFailed ? event.admission?.error ?? event.error : event.error;
+        return (
+          <article className="resource-row" key={event.id}>
+            <div className="card-header">
+              <strong>{event.routeName}</strong>
+              <span className={`badge ${status.badge}`}>{status.label} · {event.status}</span>
+            </div>
+            <p className="secondary">事件：{event.id}<br />幂等键：{event.idempotencyKey}<br />请求：{event.requestId}</p>
+            <p className="secondary">
+              接收：<time dateTime={event.receivedAt}>{formatTime(event.receivedAt)}</time><br />
+              更新：<time dateTime={event.updatedAt}>{formatTime(event.updatedAt)}</time><br />
+              未派发过期：<time dateTime={event.expiresAt}>{formatTime(event.expiresAt)}</time>
+            </p>
+            {diagnostic && <p className="inline-error">{diagnostic.code}：{diagnostic.message}</p>}
+          </article>
+        );
+      })}
     </section>
   );
 }

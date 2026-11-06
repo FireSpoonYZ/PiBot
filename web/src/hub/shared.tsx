@@ -429,6 +429,7 @@ export function formatScheduleNextRun(
 export interface TurnAdmissionStatus {
   requestId: string;
   phase: 'queued' | 'checking' | 'synchronizing' | 'failed';
+  source?: 'primary' | 'background';
   error?: { code: string; message: string };
 }
 export type TurnAdmissionCarrier = { admission?: TurnAdmissionStatus | null };

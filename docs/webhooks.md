@@ -18,7 +18,9 @@ v1 是通用 JSON Bearer 入口，不包含供应商专用签名适配、出站�
 
 目标设备和 Bot **创建后不可修改**；换目标请新建入口。名称和固定指令可以编辑。事件接收时会冻结目标、入口名称、固定指令、payload 和内部 requestId，之后编辑入口不会改写已接收事件。
 
-外部 payload 是不可信任务数据，不是登录所有者发送的聊天指令。Host 以内部来源 `Webhook · <入口名称>` 提交，聊天显示该来源与“自动任务”徽标，不作为用户主动消息展示。它复用目标 Bot 的主会话、模型、工具与任务队列，不创建第二套 Agent 队列；直接用户任务保留 FIFO 优先级。
+外部 payload 是不可信任务数据，不是登录所有者发送的聊天指令。Host 以受信来源 `sender.kind='host'`、`sourceType='webhook'`、展示名 `Webhook · <入口名称>` 提交，聊天按结构化来源显示“自动任务”徽标，不作为用户主动消息展示。旧历史缺少 `sourceType` 时，仅在展示层兼容 host + primary + 名称前缀；名称不参与调度，payload 中的同名字段不能改写来源。回答作者仍是实际 Bot，回复目标不变。
+
+它复用目标 Bot 的主会话、模型、工具与任务队列，不创建第二套 Agent 队列。**排队时用户输入优先于 Host 自动事件，同类 FIFO；普通用户消息不会自动抢占已经运行的 Webhook 主轮**。例如 W1 已运行、W2 排队后用户 U 到达，顺序仍为 W1 → U → W2；需要取消当前轮时显式“停止此 Bot”。这不改变既有群/DM 等 work 的准入与抢占规则。
 
 ## 2. 请求格式
 
@@ -109,14 +111,26 @@ unset WEBHOOK_TOKEN
 | `dispatching` | 已派发给 Host，可能正在恢复确认 |
 | `queued` | Host 已持久化受理，进入 Bot 既有任务队列 |
 | `running` | Bot 实际执行中 |
-| `succeeded` | 已成功完成；回答在 Bot 聊天 |
+| `succeeded` | 本轮完成：Webhook 初始提交轮已结束，回答在 Bot 聊天；不代表异步协作全部完成 |
 | `failed` | 执行失败，查看简短错误及 Bot 聊天 |
 | `cancelled` | 已取消，例如未派发时入口停用/删除、目标删除，或用户停止任务 |
 | `expired` | 未领取的 pending 事件超过 24 小时 |
 
+列表展示优先级为：**终态真实状态 → 非终态 `cancelRequested=true` 的“取消中” → `admission.phase='failed'` 的“准入失败”及具体诊断 → 普通状态**。“准入失败”仍可处于 `queued`，不是执行失败终态；修复模型/插件等配置后，沿用既有同 requestId 的准入恢复机制，不因中心反复拉取而重置重试次数。外部重复 POST 只返回原事件，不触发新的执行或显式准入重试。
+
+“本轮完成”不追踪 `send_to` 等异步委派的全部后续工作。迟到的协作回复仍按既有冻结回复目标进入聊天；请结合原 requestId 和消息查看后续结果。HTTP 202 仅表示中心已接收，既不是本轮完成，也不是全部协作完成。
+
 **24 小时期限只适用于未派发、未领取的 pending 事件**，不是运行中的任务超时。已派发、已入队或运行中的任务不因这个时间到达而自动中断。离线期间中心可以接收并保留待投递事件，但不会替设备执行任务。
 
 Host 在启动、恢复、重连和接到通知后拉取事件，并通过有界的后台重试补足通知或回执丢失；中心状态可能短暂落后于实际执行。Host 更新维护期间暂停新的 Webhook 任务准入，恢复后继续；关闭 Host 不会由中心偷偷启动第二个实例。已受理任务沿用既有持久队列及 requestId 恢复，用户停止的任务不会自动复活。
+
+### 停止此 Bot 与中心确认边界
+
+“停止此 Bot”取消本地当前运行与积压，并同步取消中心在**确认此次停止的事务时**已接收的该 Bot Webhook 积压。尚未领取的事件直接取消；已派发/入队/运行事件先记录取消意图，页面显示“取消中”，由 Host 对账后确定真实终态。若 Host 实际已经完成、只是完成回执尚未送达，仍保留“本轮完成”，不会误标为取消。停止不是回滚，已发生的工具外部动作无法撤销。
+
+离线或中心暂不可用时，本地先停止，显示“本地已停止，中心待同步”。**离线停止到中心确认之间接收的 Webhook 也属于要取消的积压**；此期间仅阻止该 Bot 新 Webhook 的首次执行，不阻止停止后新的用户输入。新用户工作开始后仍显示真实工作阶段，附“Webhook停止待同步”，不是整个 Bot 永久暂停。待同步标记跨重启保留，重连先同步停止再恢复投递。
+
+中心确认后的新事件可以运行；同一停止代次的重复确认不会取消确认后的新事件。若要长期拒绝新事件，应停用入口，而不是反复停止 Bot。
 
 设备需要真正运行 Host 并能连接中心才能执行。Windows/Linux 的托管启动以及 Android 的后台/退出限制沿用各客户端现有生命周期；有登记记录或中心 HTTP 正常不代表 Host 正在执行。中心只保存投递账本和简短状态，不是独立执行引擎。
 
@@ -144,6 +158,6 @@ Host 在启动、恢复、重连和接到通知后拉取事件，并通过有界
 
 `WebhookRoute` 字段为 `id,name,deviceId,botId,instruction,enabled,createdAt,updatedAt,url`，不含 token。
 
-`WebhookEvent` 字段为 `id,routeId,routeName,deviceId,botId,requestId,idempotencyKey,status,receivedAt,expiresAt,updatedAt,error?`；`error` 为 `{code,message}`，也可缺省或为 null。所有者事件列表不返回 payload、固定指令快照或最终回答。
+`WebhookEvent` 字段为 `id,routeId,routeName,deviceId,botId,requestId,idempotencyKey,status,receivedAt,expiresAt,updatedAt,cancelRequested,admission?,error?`。`cancelRequested` 默认 false，仅表示中心停止意图，终态可保留作审计但不再显示“取消中”。`admission` 可缺省或为 null，形状为 `{phase:'queued'|'checking'|'synchronizing'|'failed',error?:{code,message}}`，不重复 requestId；进入 running/终态清除旧准入诊断。`error` 为 `{code,message}`，也可缺省或为 null；诊断只含安全短错误。所有者事件列表不返回 payload、固定指令快照或最终回答。
 
 本文描述 v1 接口与使用约定，不是运行验收记录；实际 UI、剪贴板、n8n、离线恢复与端到端执行需在整合中心及 Host 后验收。

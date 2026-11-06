@@ -1,7 +1,7 @@
 // Unified Bot session 消息来源徽标（web 共享，desktop/mobile 复用）。
 // 契约：kind/botId/deviceId/channel 为稳定身份（仅内部 key/定位），名字仅显示；
 // 所有可见文本/aria 只用面向用户的名字与自然回退，永不渲染 UUID/短 ID。
-// 普通主聊及内部 Host 触发器隐藏徽标，命名的 Webhook 主聊来源例外；协作轮由调用方过滤。
+// 普通主聊及内部 Host 触发器隐藏徽标，Webhook 来源例外；协作轮由调用方过滤。
 // 消息正文里 Bot 自己写出的 ID 是历史内容，不篡改。
 import type { MessageAttribution as MessageAttributionData } from './chatTurnModel';
 import { useText } from './ui';
@@ -40,9 +40,10 @@ function senderLabel(a: MessageAttributionData, t: (zh: string, en: string) => s
   return a.kind === 'bot' ? t('未命名 Bot', 'Unnamed Bot') : kindLabel(a.kind, t);
 }
 
-// Only the structured Host attribution names Webhook work; message text is never inspected.
+// Legacy history lacks sourceType; only its Host/primary attribution name is a fallback, never message text.
 export function isWebhookAttribution(a: MessageAttributionData | undefined): boolean {
-  return a?.kind === 'host' && a.channel === 'primary' && /^Webhook · \S/.test(a.name ?? '');
+  return a?.kind === 'host' && (a.sourceType === 'webhook' ||
+    (a.sourceType === undefined && a.channel === 'primary' && /^Webhook · \S/.test(a.name ?? '')));
 }
 
 /**

@@ -245,6 +245,7 @@ function isNotSent(e: unknown): boolean {
 interface TurnAdmissionView {
   requestId: string;
   phase: 'queued' | 'checking' | 'synchronizing' | 'failed';
+  source?: 'primary' | 'background';
   error: { code: string; message: string } | null;
 }
 
@@ -280,7 +281,12 @@ function readTurnAdmission(value: unknown): TurnAdmissionView | null {
       message: typeof value.error.message === 'string' ? value.error.message : '',
     };
   }
-  return { requestId: value.requestId, phase: value.phase as TurnAdmissionView['phase'], error };
+  return {
+    requestId: value.requestId,
+    phase: value.phase as TurnAdmissionView['phase'],
+    ...(value.source === 'primary' || value.source === 'background' ? { source: value.source } : {}),
+    error,
+  };
 }
 
 /** 从 PendingRecord.receipt 读取 queued/null-submission 与可选 admission；二者皆缺返回 null。 */
@@ -737,6 +743,7 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, attachme
       {turnAdmission ? (
         <div className={'status' + (turnAdmission.phase === 'failed' ? ' error' : ' busy')} role="status" aria-live="polite">
           {TURN_ADMISSION_LABELS[turnAdmission.phase]}
+          {turnAdmission.source === 'background' ? ' · 后台' : null}
           {turnAdmission.error
             ? '（' + turnAdmission.error.code + (turnAdmission.error.message ? '：' + truncate(turnAdmission.error.message, 120) : '') + '）'
             : null}
@@ -1945,7 +1952,10 @@ function PrimaryChatPane({
     sendState === 'sending' &&
     slashBusy === null &&
     (liveActivity.phase === 'idle' || liveActivity.phase === 'stopped')
-      ? { phase: 'queued', source: 'primary', scopeId: null, requestId: null, startedAt: null }
+      ? {
+          phase: 'queued', source: 'primary', scopeId: null, requestId: null, startedAt: null,
+          webhookStopPending: liveActivity.webhookStopPending,
+        }
       : null;
   const activity: BotActivity =
     stopping && liveActivity.phase !== 'stopping' && liveActivity.phase !== 'interrupting'

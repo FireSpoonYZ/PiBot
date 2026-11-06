@@ -483,7 +483,7 @@ export function GrokBotWorkingSlot({
         setElapsedSec(Math.max(0, Math.floor((Date.now() - finalStartMs) / 1000)));
       }
       workingStartMsByBotKey.delete(botKey);
-      // 'failed' 是驻留终态：由下方 terminalActivity 持续渲染，不走 1.45s 自动清除的 error 结算。
+      // 'failed' 是驻留终态：由下方 settledActivity 持续渲染，不走 1.45s 自动清除的 error 结算。
       setSettlementOutcome(
         activity?.phase === 'stopped' ? 'stopped' : hasError ? 'error' : 'success',
       );
@@ -505,11 +505,10 @@ export function GrokBotWorkingSlot({
       activity?.phase === 'compacting' ||
       activity?.phase === 'interrupting' ||
       activity?.phase === 'stopping');
-  // Terminal activity phases still render the slot (a settled result, not a
-  // spinner): 'stopped' must not read as completed and 'failed' must not spin.
-  // 'failed' 驻留到下一次忙碌/新活动帧，是可见的失败提示而非一闪而过的结算动画。
-  const terminalActivity =
-    !isBusy && (activity?.phase === 'stopped' || activity?.phase === 'failed') ? activity : null;
+  // Settled failures/stops and pending Webhook stop sync stay visible without a spinner.
+  const settledActivity =
+    !isBusy && (activity?.phase === 'stopped' || activity?.phase === 'failed' || activity?.webhookStopPending)
+      ? activity : null;
 
   useEffect(() => {
     if (!isBusy || isStreaming || activeToolName || isPhaseLed) {
@@ -523,7 +522,7 @@ export function GrokBotWorkingSlot({
     return () => window.clearInterval(cycle);
   }, [isBusy, isStreaming, activeToolName, isPhaseLed]);
 
-  if (!isBusy && (isRecovering || (!settlementOutcome && !terminalActivity))) return null;
+  if (!isBusy && (isRecovering || (!settlementOutcome && !settledActivity))) return null;
 
   const baseState = resolveGrokMascotState({
     isBusy,
@@ -543,7 +542,7 @@ export function GrokBotWorkingSlot({
       if (activity?.phase === 'compacting') return 'working';
       return 'waiting';
     }
-    if (terminalActivity) {
+    if (settledActivity) {
       return 'idle';
     }
     if (settlementOutcome === 'stopped') return 'idle';
@@ -554,7 +553,7 @@ export function GrokBotWorkingSlot({
 
   const statusText = (() => {
     if (!isBusy) {
-      if (terminalActivity) return botActivityText(terminalActivity, t);
+      if (settledActivity) return botActivityText(settledActivity, t);
       if (settlementOutcome === 'stopped') return t('已停止', 'Stopped');
       return settlementOutcome === 'error'
         ? t('执行中断', 'Interrupted')
@@ -596,7 +595,7 @@ export function GrokBotWorkingSlot({
 
   return (
     <div
-      className={`sand-activity-slot${!isBusy && (settlementOutcome || terminalActivity) ? ' is-settling' : ''}`}
+      className={`sand-activity-slot${!isBusy && (settlementOutcome || settledActivity) ? ' is-settling' : ''}`}
       data-role="assistant"
       data-grok-state={mascotState}
       aria-live="polite"
@@ -618,8 +617,10 @@ export function GrokBotWorkingSlot({
         <span className="sand-activity-mark-label">
           <span className={`sand-activity-label-text${isBusy ? ' is-shimmering' : ''}`}>
             {statusText}
+            {activity?.webhookStopPending && !isPhaseLed && !settledActivity
+              ? t(' · Webhook停止待同步', ' · Webhook stop awaiting sync') : null}
           </span>
-          {(isBusy || Boolean(settlementOutcome) || Boolean(terminalActivity)) && (
+          {(isBusy || Boolean(settlementOutcome) || Boolean(settledActivity)) && (
             <span className="sand-activity-elapsed">{formatWorkingElapsed(elapsedSec)}</span>
           )}
         </span>

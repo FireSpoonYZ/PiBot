@@ -38,6 +38,11 @@ export interface WebhookEvent {
   receivedAt: string;
   expiresAt: string;
   updatedAt: string;
+  cancelRequested: boolean;
+  admission?: {
+    phase: 'queued' | 'checking' | 'synchronizing' | 'failed';
+    error?: { code: string; message: string };
+  } | null;
   error?: { code: string; message: string } | null;
 }
 export interface CreateWebhookRequest {

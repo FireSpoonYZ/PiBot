@@ -4270,6 +4270,7 @@ ${newer}` : draftSnapshot;
             {chatStatusKind === 'admission' && (
               <div className="bot-chat-system-notice" role="status">
                 {chatAdmissionText}
+                {chatTurnAdmission?.source === 'background' ? t(' · 后台', ' · background') : null}
                 {chatTurnAdmission?.phase === 'failed' && (activeBot.hostKind === 'local'
                   ? <button type="button" className="hub-outline-btn" onClick={() => void retryAdmission()}>{t('重试发送', 'Retry sending')}</button>
                   : <button type="button" className="hub-outline-btn" onClick={() => void retryRemoteAdmission()}>{t('重试发送', 'Retry sending')}</button>

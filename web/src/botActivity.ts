@@ -25,6 +25,8 @@ export type BotActivity = {
   startedAt: string | null;
   /** 仅 phase 'failed' 时 Host 附带的有界失败诊断；旧 Host 及其他相缺省。 */
   error?: { code: string; message: string };
+  /** Pending Center acknowledgement of a Webhook stop, independent of the local phase. */
+  webhookStopPending?: boolean;
 };
 
 const IDLE_ACTIVITY: BotActivity = {
@@ -35,8 +37,8 @@ const IDLE_ACTIVITY: BotActivity = {
   startedAt: null,
 };
 
-function fallbackActivity(phase: BotActivityPhase): BotActivity {
-  return { ...IDLE_ACTIVITY, phase };
+function fallbackActivity(phase: BotActivityPhase, source: BotActivitySource = null): BotActivity {
+  return { ...IDLE_ACTIVITY, phase, source };
 }
 
 export function resolveBotActivity(
@@ -44,18 +46,19 @@ export function resolveBotActivity(
     busy?: boolean;
     queuedCount?: number;
     activity?: BotActivity;
-    turnAdmission?: { phase: string } | null;
+    turnAdmission?: { phase: string; source?: 'primary' | 'background' } | null;
   } | null,
 ): BotActivity {
   if (live?.activity) return live.activity;
   if (!live) return IDLE_ACTIVITY;
   if (live.busy) return fallbackActivity('running');
   const admissionPhase = live.turnAdmission?.phase;
-  if (admissionPhase === 'failed') return fallbackActivity('failed');
+  const admissionSource = live.turnAdmission?.source ?? null;
+  if (admissionPhase === 'failed') return fallbackActivity('failed', admissionSource);
   if (admissionPhase === 'checking' || admissionPhase === 'synchronizing') {
-    return fallbackActivity('preparing');
+    return fallbackActivity('preparing', admissionSource);
   }
-  if ((live.queuedCount ?? 0) > 0) return fallbackActivity('queued');
+  if ((live.queuedCount ?? 0) > 0) return fallbackActivity('queued', admissionSource);
   return IDLE_ACTIVITY;
 }
 
@@ -85,6 +88,9 @@ export function botActivityText(
   activity: BotActivity,
   t: (zh: string, en: string) => string,
 ): string {
+  if (activity.phase === 'stopped' && activity.webhookStopPending) {
+    return t('本地已停止，中心待同步', 'Stopped locally, awaiting Center sync');
+  }
   const phaseText = (() => {
     switch (activity.phase) {
       case 'queued':
@@ -107,16 +113,17 @@ export function botActivityText(
         return t('空闲', 'Idle');
     }
   })();
-  if (activity.phase === 'idle' || !activity.source) return phaseText;
-  const sourceText =
-    activity.source === 'room'
+  const sourceText = activity.phase === 'idle' || !activity.source
+    ? ''
+    : activity.source === 'room'
       ? t('群聊', 'room')
       : activity.source === 'dm'
         ? t('私信', 'DM')
         : activity.source === 'background'
           ? t('后台', 'background')
           : t('主聊天', 'main chat');
-  return `${phaseText} · ${sourceText}`;
+  return [phaseText, sourceText, activity.webhookStopPending
+    ? t('Webhook停止待同步', 'Webhook stop awaiting sync') : ''].filter(Boolean).join(' · ');
 }
 
 export function parseBotActivityStartedAt(
