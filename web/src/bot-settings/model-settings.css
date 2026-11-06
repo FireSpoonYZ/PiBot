@@ -19,6 +19,4 @@
   overflow-wrap: anywhere;
 }
 
-.bs-model-list-empty { border-radius: 16px; background: var(--bs-card); }
-
 .bs-model-link { align-self: flex-start; }

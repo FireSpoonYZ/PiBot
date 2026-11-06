@@ -141,12 +141,26 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     const credential = provider.credentialRef ? store.resolveCredential(assertPublicCredentialId(provider.credentialRef)) : undefined;
     return { provider, models, ...(credential === undefined ? {} : { credential }) };
   };
+  const modelPicker = () => ({ ...store.getModelPicker(), sync: catalog.status() });
+  const setModelStar = req => {
+    const body = validate({
+      type: 'object', required: ['modelRef', 'starred'], additionalProperties: false,
+      properties: { modelRef: { type: 'string', minLength: 3, maxLength: 512 }, starred: { type: 'boolean' } },
+    }, req.body);
+    return store.setModelStar(body.modelRef, body.starred);
+  };
+  route('GET', '/api/model-picker', modelPicker);
+  route('PUT', '/api/model-stars', setModelStar, true);
   route('GET', '/api/model-catalog', () => catalog.status());
   route('POST', '/api/model-catalog/sync', async () => { await catalog.sync().catch(() => {}); return catalog.status(); }, true);
   route('GET', '/api/providers', () => store.listProviders());
-  route('POST', '/api/providers', (req, reply) => reply.code(201).send(changed(store.putProvider({ ...validate(providerSchema, req.body), credentialRef: assertPublicCredentialId(req.body.credentialRef), id: req.body.id || randomUUID(), revision: 0 }, null))), true);
+  route('POST', '/api/providers', (req, reply) => {
+    const provider = store.putProvider({ ...validate(providerSchema, req.body), credentialRef: assertPublicCredentialId(req.body.credentialRef), id: req.body.id || randomUUID(), revision: 0 }, null);
+    catalog.apply();
+    return reply.code(201).send(changed(provider));
+  }, true);
   route('GET', '/api/providers/:id', req => required(store.getProvider(req.params.id), 'Provider'));
-  route('PUT', '/api/providers/:id', req => { const body = object(req.body); validate(providerSchema, body.value); assertPublicCredentialId(body.value.credentialRef); return changed(store.putProvider({ ...body.value, id: req.params.id }, body.expectedRevision)); }, true);
+  route('PUT', '/api/providers/:id', req => { const body = object(req.body); validate(providerSchema, body.value); assertPublicCredentialId(body.value.credentialRef); const provider = store.putProvider({ ...body.value, id: req.params.id }, body.expectedRevision); catalog.apply(); return changed(provider); }, true);
   for (const [path, method] of [['validate', 'validateCenterProvider'], ['discover', 'discoverCenterProviderModels']]) {
     route('POST', `/api/providers/:id/${path}`, req => bridge.call(text(req.body?.deviceId, 'deviceId'), method, providerInput(req.params.id)), true);
   }
@@ -475,6 +489,8 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     const sinceSeq = req.query?.sinceSeq !== undefined ? Number(req.query.sinceSeq) : undefined;
     return store.getBotSync({ epoch, sinceSeq, devices: bridge.listDevices() });
   });
+  host('GET', '/api/host/model-picker', modelPicker);
+  host('PUT', '/api/host/model-stars', setModelStar);
   host('GET', '/api/host/connection', req => ({ protocol: 1, deviceId: req.centerDevice.deviceId, linkUrl }));
   host('GET', '/api/host/devices/:deviceId/runtime-status', req => {
     const device = bridge.listDevices().find(item => item.deviceId === req.params.deviceId);

@@ -4,13 +4,14 @@
 // 未保存草稿连同其原始基线（含 revision）按 profile+target+bot 保留，自动读取绝不替换 dirty 部分的基线，
 // 因此旧草稿不会拿到未看过的远端 revision 去覆盖远端；不自动重放、不跨 Host 串数据。
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { CenterBotModelConfig, CenterModelSelection } from '../../../host-core/desktop-client.js';
-import type { BotSoul, ModelCatalog } from '../../../host-core/index.js';
-import { request, toError } from './api';
+import type { CenterBotModelConfig, CenterModelSelection, CenterModelPicker } from '../../../host-core/desktop-client.js';
+import type { BotSoul } from '../../../host-core/index.js';
+import { toError } from './api';
 import { openCenterManagement } from './CenterGate';
 import { BotCapabilities } from './BotCapabilities';
 import { BotSchedules } from './BotSchedules';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
+import { ModelPicker } from '../../../web/src/bot-settings/ModelPicker';
 import './BotSettings.css';
 
 /** 与 Host 的公开上限一致（UTF-8 字节）。 */
@@ -91,8 +92,7 @@ export function BotSettings({
 
   const [modelConfig, setModelConfig] = useState<CenterBotModelConfig | null>(null);
   const [modelDraft, setModelDraft] = useState<CenterModelSelection>({});
-  const [modelCatalog, setModelCatalog] = useState<ModelCatalog | null>(null);
-  const [modelQuery, setModelQuery] = useState('');
+  const [modelCatalog, setModelCatalog] = useState<CenterModelPicker | null>(null);
   const [modelSaving, setModelSaving] = useState(false);
 
   const mountedRef = useRef(true);
@@ -147,21 +147,15 @@ export function BotSettings({
     const writesAtStart = writeSeqRef.current;
     setLoading(true);
     try {
-      const doc = await api.call(id, 'getBotSoul', { botId });
-      void Promise.all([
-        api.call(id, 'getModelCatalog', {}).catch(() => null),
-        id.targetDeviceId
-          ? request('center_bot_model_get', { deviceId: id.targetDeviceId, botId }).catch(() => null)
-          : Promise.resolve(null),
-      ]).then(([catalogRes, cfgRes]) => {
-        if (stale(sel)) return;
-        if (catalogRes) setModelCatalog(catalogRes);
-        if (cfgRes) {
-          setModelConfig(cfgRes);
-          setModelDraft({ ...cfgRes.overrides });
-        }
-      });
+      const [doc, catalogRes, cfgRes] = await Promise.all([
+        api.call(id, 'getBotSoul', { botId }),
+        api.broker(id, 'center_model_picker_get', {}),
+        api.broker(id, 'center_bot_model_get', { deviceId: id.targetDeviceId, botId }),
+      ]);
       if (stale(sel) || seq !== seqRef.current || writesAtStart !== writeSeqRef.current) return;
+      setModelCatalog(catalogRes);
+      setModelConfig(cfgRes);
+      setModelDraft({ ...cfgRes.overrides });
       if (adoptRemote) {
         // 唯一允许更新基线并丢弃本地草稿的入口（显式动作）。
         const adopted: Cached = { soul: doc, soulDraft: null, lock: false };
@@ -205,6 +199,7 @@ export function BotSettings({
     setNotice(null);
     setSaving(null);
     setModelConfig(null);
+    setModelCatalog(null);
     setModelDraft({});
     if (key) void load(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -317,13 +312,14 @@ export function BotSettings({
     setError(null);
     setNotice(null);
     try {
-      const updated = await request('center_bot_model_set', {
+      const updated = await api.broker(id, 'center_bot_model_set', {
         deviceId: id.targetDeviceId,
         botId,
         expectedRevision: modelConfig.revision,
         value: modelDraft,
       });
       if (stale(sel)) return;
+      ++writeSeqRef.current;
       setModelConfig(updated);
       setModelDraft({ ...updated.overrides });
       setNotice('Bot 模型设置已保存并同步至中心。');
@@ -376,13 +372,6 @@ export function BotSettings({
   const panelOpen = Boolean(open);
   const showCapabilityPanel = panelOpen && studioTab === 'capabilities';
   const showSchedulesPanel = panelOpen && studioTab === 'schedules';
-  const q = modelQuery.trim().toLowerCase();
-  const filteredModels = (modelCatalog?.models ?? []).filter(
-    (m) => !q || `${m.name} ${m.modelRef}`.toLowerCase().includes(q),
-  );
-  const draftModelMissing =
-    !!modelDraft.modelRef &&
-    !modelCatalog?.models.some((m) => m.modelRef === modelDraft.modelRef);
 
   if (!open) return null;
 
@@ -556,61 +545,32 @@ export function BotSettings({
                 <span>{`思考 ${describeVal(modelConfig.effective.thinkingLevel)}`}</span>
                 <span>{describeCodemode(modelConfig.effective)}</span>
               </div>
-              <label className="bot-studio-field">
-                搜索过滤模型
-                <input
-                  type="search"
-                  value={modelQuery}
-                  placeholder="输入模型名称或 provider/modelId 过滤…"
-                  disabled={busy}
-                  onChange={(e) => setModelQuery(e.target.value)}
+              <button
+                type="button"
+                aria-pressed={modelDraft.modelRef === undefined}
+                className={`bot-studio-model-row ${modelDraft.modelRef === undefined ? 'active' : ''}`}
+                disabled={busy || !online}
+                onClick={() => updateModelDraft('modelRef', undefined)}
+              >
+                <span className="bot-studio-model-name">继承中心全局</span>
+                <span className="bot-studio-model-ref">{describeVal(modelConfig.global.modelRef)}</span>
+              </button>
+              {modelCatalog && identity ? (
+                <ModelPicker
+                  key={key}
+                  catalog={modelCatalog}
+                  api={api}
+                  identity={identity}
+                  value={modelDraft.modelRef}
+                  onChange={value => updateModelDraft('modelRef', value)}
+                  onStarsChange={starredModels => {
+                    if (!stale(key) && api.identity?.generation === identity.generation) {
+                      setModelCatalog(previous => previous ? { ...previous, starredModels } : previous);
+                    }
+                  }}
+                  disabled={busy || !online}
                 />
-              </label>
-              <div className="bot-studio-field">
-                <span className="bot-studio-field-label">
-                  {`选择模型（${filteredModels.length} / ${modelCatalog?.models.length ?? 0} 个可用）`}
-                </span>
-                <div className="bot-studio-model-list" role="radiogroup" aria-label="选择模型">
-                  <button
-                    type="button"
-                    role="radio"
-                    aria-checked={modelDraft.modelRef === undefined}
-                    className={`bot-studio-model-row ${modelDraft.modelRef === undefined ? 'active' : ''}`}
-                    disabled={busy || !online}
-                    onClick={() => updateModelDraft('modelRef', undefined)}
-                  >
-                    <span className="bot-studio-model-name">继承中心全局</span>
-                    <span className="bot-studio-model-ref">{describeVal(modelConfig.global.modelRef)}</span>
-                  </button>
-                  {draftModelMissing ? (
-                    <button
-                      type="button"
-                      role="radio"
-                      aria-checked="true"
-                      className="bot-studio-model-row active"
-                      disabled={busy || !online}
-                      onClick={() => updateModelDraft('modelRef', modelDraft.modelRef)}
-                    >
-                      <span className="bot-studio-model-name">{`${modelDraft.modelRef}（当前配置）`}</span>
-                      <span className="bot-studio-model-ref">不在中心目录中</span>
-                    </button>
-                  ) : null}
-                  {filteredModels.map((m) => (
-                    <button
-                      key={m.modelRef}
-                      type="button"
-                      role="radio"
-                      aria-checked={modelDraft.modelRef === m.modelRef}
-                      className={`bot-studio-model-row ${modelDraft.modelRef === m.modelRef ? 'active' : ''}`}
-                      disabled={busy || !online}
-                      onClick={() => updateModelDraft('modelRef', m.modelRef)}
-                    >
-                      <span className="bot-studio-model-name">{m.name}</span>
-                      <span className="bot-studio-model-ref">{m.modelRef}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
+              ) : null}
               <div className="bot-studio-field">
                 <span className="bot-studio-field-label">
                   {`思考强度 (Thinking Level) · 全局 ${describeVal(modelConfig.global.thinkingLevel)}`}

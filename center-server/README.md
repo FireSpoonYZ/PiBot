@@ -2,6 +2,14 @@
 
 中心（Center）是多设备 Bot 平台的权威配置面：管理 provider/模型目录、设备登记、托管插件/技能的安装与部署、Bot 绑定与生效配置，并经认证中继向 Host 下发快照与部署计划。服务为 Fastify 应用（`openCenterServer`），数据根下按域保存独立 SQLite 与 artifact 存储；控制台（center-web）与 Host 设备分别走不同的认证入口，Host 侧路由要求已登记的设备身份。
 
+## Bot 模型选择与 Star
+
+Windows、Linux、Android 的 Bot 模型页共用 All / Star 选择器。All 显示已启用且凭证已配置（或明确无需凭证）的服务商模型，包括 pi.dev 自动同步和手动添加的模型；显式停用的模型不显示。已知 provider 修改代理地址后仍会同步目录，新增同名 provider 立即应用中心缓存。中心启动及每 24 小时同步一次，失败时继续使用已有目录。
+
+Star 按完整 `provider/modelId` 保存在中心，供该中心的三个客户端和所有 Bot 共用。收藏立即保存，独立于 Bot 模型覆盖的 CAS 保存；取消收藏不改变 Bot 的模型。服务商停用时保留收藏记录，恢复后重新显示。首次打开有可用收藏时默认进入 Star，否则进入 All。
+
+设备令牌接口为 `GET /api/host/model-picker` 和 `PUT /api/host/model-stars`；管理接口去掉 `/host`，沿用 owner/CSRF 认证。读取返回模型目录、`starredModels` 和同步状态，不返回凭证或接入地址；写入接受 `{modelRef, starred}`，按单模型幂等更新，返回 `{starredModels}`。收藏不会提升执行配置修订。数据库自动升级到 schema 6，增加 `model_stars` 表；部署时需同时更新中心和客户端。
+
 ## 设备登记
 
 `POST /api/devices` 需要所有者会话与 `x-csrf-token`（与其他管理端写路由相同）。请求 `{displayName, platform, deviceId?, deviceToken?, replaceExisting?}`：`displayName` 去除首尾空白后为 1–64 个字符，`platform` 为 `windows`、`linux`、`macos` 或 `android`；其他字段或取值返回 `400 INVALID_ARGUMENT`。省略设备身份时生成 UUID 和令牌。首次登记返回 `201 {deviceId, deviceToken, displayName, platform}`。客户端先在原生私有存储保存固定 ID/令牌；同 ID、同令牌重试返回 `200` 并复用身份，异令牌返回 `409`。`replaceExisting: true` 为显式重新配对，轮换令牌并保留 Bot/历史；旧令牌随后失效。新 ID 限 1–200 个可见 ASCII 字符，保留 `center-` 前缀。中心中继注册表（`relay.sqlite`）只保存令牌 SHA-256，不写日志。新设备立即出现在 `GET /api/devices`（未连接前 `online: false`），Host 连接时 hello 上报的平台会覆盖登记时的值。

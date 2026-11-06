@@ -1,8 +1,7 @@
 // Bot 模型配置（模型 / 思考强度 / Code Mode）的数据层：读取、草稿、CAS 保存、管理员登录回退。
 // 模型页与高级设置页共用；两页各自持有一份草稿，保存时整体提交 overrides。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CenterBotModelConfig, CenterModelSelection } from '../../../host-core/desktop-client.js';
-import type { ModelCatalog } from '../../../host-core/index.js';
+import type { CenterBotModelConfig, CenterModelSelection, CenterModelPicker } from '../../../host-core/desktop-client.js';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
 import { errorText } from '../ui';
 
@@ -24,7 +23,7 @@ export interface BotModelConfigState {
   /** 需要中心管理员登录后才能读写。 */
   needsLogin: boolean;
   config?: CenterBotModelConfig;
-  catalog?: ModelCatalog;
+  catalog?: CenterModelPicker;
   /** 当前草稿（本 Bot overrides）。 */
   draft: CenterModelSelection;
   /** 草稿与已保存 overrides 不同。 */
@@ -34,6 +33,7 @@ export interface BotModelConfigState {
   setError(message: string): void;
   dismissError(): void;
   dismissNotice(): void;
+  setStarredModels(starredModels: string[]): void;
   setModelRef(value: Override<string>): void;
   setThinkingLevel(value: Override<string>): void;
   /** 关闭 Code Mode 时若“仅 Code Mode”为开，会一并关闭。 */
@@ -54,7 +54,7 @@ export function useBotModelConfig(api: DesktopPanelApi, identity: DesktopIdentit
   const [authenticated, setAuthenticated] = useState(true);
   const [config, setConfig] = useState<CenterBotModelConfig>();
   const [draft, setDraft] = useState<CenterModelSelection>({});
-  const [catalog, setCatalog] = useState<ModelCatalog>();
+  const [catalog, setCatalog] = useState<CenterModelPicker>();
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -68,7 +68,7 @@ export function useBotModelConfig(api: DesktopPanelApi, identity: DesktopIdentit
     alive.current = true;
     void (async () => {
       try {
-        const models = await api.call(identity, 'getModelCatalog', {});
+        const models = await api.broker(identity, 'center_model_picker_get', {});
         if (!alive.current) return;
         setCatalog(models);
         // 模型配置读写优先走 host 设备令牌路径；仅当旧中心要求 owner 会话时才回退弹出密码登录。
@@ -162,6 +162,7 @@ export function useBotModelConfig(api: DesktopPanelApi, identity: DesktopIdentit
     setError,
     dismissError: () => setError(''),
     dismissNotice: () => setNotice(''),
+    setStarredModels: starredModels => setCatalog(previous => previous ? { ...previous, starredModels } : previous),
     setModelRef,
     setThinkingLevel,
     setCodemode,

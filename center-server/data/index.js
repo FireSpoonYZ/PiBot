@@ -353,7 +353,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     db.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
     transaction(() => {
       let version = db.prepare('PRAGMA user_version').get().user_version;
-      if (![0, 1, 2, 3, 4, 5].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
+      if (![0, 1, 2, 3, 4, 5, 6].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
       if (version === 0) {
         db.exec(`
           CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL, config_revision INTEGER NOT NULL);
@@ -403,6 +403,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           CREATE TABLE device_configs (device_id TEXT PRIMARY KEY, json TEXT NOT NULL);
           PRAGMA user_version = 3;
         `);
+        version = 3;
       }
       if (version === 3) {
         db.exec(`
@@ -428,6 +429,13 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             UNIQUE(platform, arch, format, version)
           );
           PRAGMA user_version = 5;
+        `);
+        version = 5;
+      }
+      if (version === 5) {
+        db.exec(`
+          CREATE TABLE model_stars (model_ref TEXT PRIMARY KEY);
+          PRAGMA user_version = 6;
         `);
       }
     });
@@ -465,6 +473,40 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           bump();
           return result;
         });
+      },
+      // Picker availability uses credential metadata, not the secrets granted to a particular Host.
+      getModelPicker() {
+        const models = store.listProviders().filter(provider =>
+          provider.enabled && (provider.credentialRef === null || credential(provider.credentialRef)?.configured)
+        ).flatMap(provider => store.listModels(provider.id).filter(model => model.enabled).map(model => ({
+          modelRef: provider.id + '/' + model.id,
+          name: model.name,
+          contextWindow: model.contextWindow,
+          maxTokens: model.maxTokens,
+          reasoning: model.reasoning,
+        })));
+        models.sort((a, b) => Buffer.compare(Buffer.from(a.modelRef), Buffer.from(b.modelRef)));
+        return { defaultModel: store.getModelConfig().global.modelRef ?? null, models, starredModels: store.listModelStars() };
+      },
+      listModelStars() {
+        return db.prepare('SELECT model_ref FROM model_stars ORDER BY model_ref').all().map(row => row.model_ref);
+      },
+      setModelStar(modelRef, starred) {
+        if (typeof modelRef !== 'string' || modelRef.length > 512 || !modelRef.isWellFormed() ||
+            !/^[^/\s]+\/.+$/u.test(modelRef) || typeof starred !== 'boolean') {
+          throw error('INVALID_ARGUMENT', 'Invalid model star');
+        }
+        if (starred) {
+          const slash = modelRef.indexOf('/');
+          if (!store.listModels(modelRef.slice(0, slash)).some(model => model.id === modelRef.slice(slash + 1))) {
+            throw error('NOT_FOUND', 'Model not found');
+          }
+          db.prepare('INSERT OR IGNORE INTO model_stars (model_ref) VALUES (?)').run(modelRef);
+        } else {
+          db.prepare('DELETE FROM model_stars WHERE model_ref = ?').run(modelRef);
+        }
+        // Stars are owner preferences and never change execution revisions or Bot selections.
+        return { starredModels: store.listModelStars() };
       },
       getModelConfig() {
         const row = db.prepare('SELECT json, revision FROM model_config WHERE id = 1').get();
