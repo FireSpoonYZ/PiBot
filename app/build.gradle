@@ -12,23 +12,10 @@ def sharedWebInputs = rootProject.files(
         rootProject.fileTree('desktop/web/src'),
         rootProject.fileTree('host-core') { include '*.js', '*.d.ts' })
 
-// The six @earendil-works packages are file: tarballs under build/pi-main,
-// built from the pinned upstream main commit by scripts/prepare-pi-main.mjs.
-// They must exist before npm ci resolves host-core/package.json.
-def preparePiMain = tasks.register('preparePiMain', Exec) {
-    workingDir rootProject.projectDir
-    commandLine 'node', 'scripts/prepare-pi-main.mjs'
-    inputs.files rootProject.file('scripts/prepare-pi-main.mjs'),
-            rootProject.file('scripts/pi-main.json')
-    outputs.dir rootProject.file('build/pi-main')
-}
+// Pi uses exact official npm releases recorded in the Host lockfile.
 def installHostDependencies = tasks.register('installHostDependencies', Exec) {
-    dependsOn preparePiMain
     workingDir rootProject.file('host-core')
-    // file: tarball deps need `install` to write the lockfile on first run
-    // (npm ci never generates a lock); subsequent runs reuse it via ci.
-    def hostLockExists = rootProject.file('host-core/package-lock.json').exists()
-    commandLine npmCommand + (hostLockExists ? ['ci'] : ['install'])
+    commandLine npmCommand + ['ci']
     inputs.files rootProject.file('host-core/package.json'), rootProject.file('host-core/package-lock.json'),
             rootProject.fileTree('host-core') { include '.npmrc' }, rootProject.fileTree('.') { include '.npmrc' }
     outputs.dir rootProject.file('host-core/node_modules')
@@ -52,9 +39,10 @@ def buildHostRuntime = tasks.register('buildHostRuntime', Exec) {
             rootProject.fileTree('center-contract'),
             rootProject.fileTree('plugins') { exclude 'build/**', 'node_modules/**' },
             rootProject.file('licenses/pi-v1.3.0-MIT.txt'),
-            rootProject.file('licenses/pi-main-35dfa757378b-MIT.txt'),
+            rootProject.file('licenses/pi-1.5.0-MIT.txt'),
             rootProject.file('licenses/hindsight-client-0.9.2-MIT.txt'),
             rootProject.file('licenses/standardwebhooks-1.1.1-LICENSE.txt'),
+            rootProject.file('licenses/desktop/data-uri-to-buffer-4.0.1-MIT.txt'),
             file("$buildDir/host-native-tools/licenses")
     inputs.file file('build.gradle')
     outputs.dir file("$buildDir/generated/assets/botHost")

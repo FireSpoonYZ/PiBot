@@ -1,4 +1,4 @@
-import { Type } from '@earendil-works/pi-ai';
+import { Type } from 'typebox';
 import { defineTool } from '@earendil-works/pi-durable';
 import { DEFAULT_IMAGE_LIMITS } from '@earendil-works/pi-durable/tools';
 import { resolveBotIdentity } from './bot-identity.js';

@@ -36,6 +36,7 @@ env:
 
 jobs:
   build:
+    name: Desktop ${{ matrix.bundle }}
     strategy:
       fail-fast: false
       matrix:
@@ -53,7 +54,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: '22.19.0'
+          node-version: '26.13.0'
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -80,11 +81,10 @@ jobs:
       - name: Install web dependencies
         run: npm ci
 
-      - name: Prepare pinned Pi and Host dependencies
+      - name: Install Host dependencies
         shell: bash
         run: |
           set -euo pipefail
-          npm run prepare:pi-main
           npm ci --prefix host-core
 
       - name: Verify product version consistency

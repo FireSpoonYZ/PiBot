@@ -1,24 +1,18 @@
 # syntax=docker/dockerfile:1
-FROM node:22-bookworm AS build
+FROM node:26.13.0-bookworm AS build
 WORKDIR /app
 COPY center-contract/ center-contract/
 COPY center-web/ center-web/
 RUN npm ci --prefix center-web && npm run --prefix center-web build
 COPY center-server/ center-server/
 COPY host-core/ host-core/
-# The six @earendil-works deps are file:../build/pi-main/<tgz> built from the
-# pinned upstream SHA (scripts/pi-main.json); .dockerignore excludes build/,
-# so generate them inside the builder before installing either manifest.
-COPY scripts/pi-main.json scripts/pi-main.json
-COPY scripts/prepare-pi-main.mjs scripts/prepare-pi-main.mjs
-RUN node scripts/prepare-pi-main.mjs
 RUN npm ci --prefix center-server --omit=dev
 RUN npm ci --prefix host-core --omit=dev
 COPY plugins/ plugins/
 COPY scripts/prepare-builtin-plugins.mjs scripts/prepare-builtin-plugins.mjs
 RUN node scripts/prepare-builtin-plugins.mjs
 
-FROM node:22-bookworm
+FROM node:26.13.0-bookworm
 LABEL org.opencontainers.image.source="https://github.com/FireSpoonYZ/PiBot"
 # Python runs only at the center, for the vendored Hermes learning modules
 # (center-server/hermes/vendor/, requires-python >=3.11,<3.15). bookworm ships

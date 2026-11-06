@@ -17,7 +17,7 @@ const METAFILE_DIR = path.join(APP_BUILD, 'host-runtime');
 const TOOL_CACHE = path.join(APP_BUILD, 'host-native-tools');
 // File-name prefixes considered license/notice texts (case-insensitive); files
 // only, so LICENSE-APACHE / LICENSE-MIT / COPYING variants are all captured.
-const LICENSE_PREFIXES = ['license', 'copying', 'notice'];
+const LICENSE_PREFIXES = ['license', 'licence', 'copying', 'notice'];
 // npm archives for the pinned @earendil-works packages (chord/pi-ai/pi-durable
 // 1.3.0) omit LICENSE files; use the verified in-repo upstream MIT copies instead.
 // @vectorize-io/hindsight-client 0.9.2 publishes dist/src/generated only, so its
@@ -29,20 +29,19 @@ const LICENSE_PREFIXES = ['license', 'copying', 'notice'];
 // licenses/standardwebhooks-1.1.1-LICENSE.txt -- that text is NOT an MIT copy.
 // `declared` is the manifest license to match, `license` the in-repo text file; a
 // package@version outside this map still fails the missing-license check.
-// The six @earendil-works packages are built from the pinned upstream main
-// commit (scripts/pi-main.json, scripts/prepare-pi-main.mjs) and installed via
-// file: tarballs from build/pi-main/; their installed version is the
-// deterministic 1.4.0-main.35dfa757378b, not the npm 1.4.0 release.
-const PI_MAIN_VERSION = '1.4.0-main.35dfa757378b';
+// Official Pi 1.5.0 packages; the exact upstream MIT text covers archives without a root license.
+const PI_MAIN_VERSION = '1.5.0';
 const UPSTREAM_LICENSE_ALLOWLIST = new Map([
-  ['@earendil-works/chord', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
-  ['@earendil-works/pi-ai', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
-  ['@earendil-works/pi-codemode', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
-  ['@earendil-works/pi-durable', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
-  ['@earendil-works/pi-mcp', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
-  ['@earendil-works/pi-telemetry', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
+  ['@earendil-works/pi-schema', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
+  ['@earendil-works/chord', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
+  ['@earendil-works/pi-ai', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
+  ['@earendil-works/pi-codemode', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
+  ['@earendil-works/pi-durable', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
+  ['@earendil-works/pi-mcp', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
+  ['@earendil-works/pi-telemetry', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
   ['@vectorize-io/hindsight-client', { version: '0.9.2', declared: 'MIT', license: 'hindsight-client-0.9.2-MIT.txt' }],
   ['standardwebhooks', { version: '1.1.1', declared: 'MIT', license: 'standardwebhooks-1.1.1-LICENSE.txt' }],
+  ['data-uri-to-buffer', { version: '4.0.1', declared: 'MIT', license: 'desktop/data-uri-to-buffer-4.0.1-MIT.txt' }],
 ]);
 const DYNAMIC_ASSET_RE = /(?:require\s*\.\s*resolve|createRequire\s*\([^)]*\)\s*\.\s*resolve|new\s+URL)\s*\(\s*(['"])([^'"]+\.(?:wasm|node))\1/g;
 
@@ -95,6 +94,12 @@ async function findLicenseFiles(pkgRoot) {
     const full = path.join(pkgRoot, entry);
     const info = await stat(full);
     if (info.isFile()) found.push(full);
+    else if (info.isDirectory() && lower === 'licenses') {
+      for (const name of await readdir(full)) {
+        const file = path.join(full, name);
+        if ((await stat(file)).isFile()) found.push(file);
+      }
+    }
   }
   return found;
 }
@@ -277,15 +282,7 @@ async function assertInstalledHostDependencies() {
     if (pkg.name !== name) {
       throw new Error(`host-core dependency directory ${name} contains package named ${pkg.name ?? 'unknown'}`);
     }
-    // file: deps pin a tarball path, not a semver. For the six pinned
-    // @earendil-works packages the installed package.json version must equal
-    // the deterministic PI_MAIN_VERSION; every other dependency keeps the
-    // strict name+version match below.
-    if (expected.startsWith('file:')) {
-      if (pkg.version !== PI_MAIN_VERSION) {
-        throw new Error(`host-core dependency ${name} installed version ${pkg.version ?? 'unknown'} does not match pinned ${PI_MAIN_VERSION}`);
-      }
-    } else if (pkg.version !== expected) {
+    if (pkg.version !== expected) {
       throw new Error(`host-core dependency ${name} installed version ${pkg.version ?? 'unknown'} does not match pinned ${expected}`);
     }
   }

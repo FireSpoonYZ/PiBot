@@ -10,7 +10,6 @@
     "center:start": "npm --prefix center-server start",
     "mobile:web": "node host-core/build-mobile.js --web",
     "mobile:build": "node host-core/build-mobile.js",
-    "prepare:pi-main": "node scripts/prepare-pi-main.mjs",
     "desktop:prepare": "node host-core/build-desktop.js",
     "desktop:dev": "node host-core/desktop-tauri.js dev",
     "desktop:build": "node host-core/desktop-tauri.js build",

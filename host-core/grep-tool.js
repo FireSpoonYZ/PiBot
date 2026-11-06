@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { Type } from '@earendil-works/pi-ai';
+import { Type } from 'typebox';
 import { defineTool } from '@earendil-works/pi-durable';
 import { ExecutionError, FileError, getOrThrow } from '@earendil-works/pi-durable/env';
 import { withCancel } from '@earendil-works/chord/context';

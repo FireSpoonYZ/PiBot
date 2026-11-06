@@ -16,7 +16,8 @@
           "dbus",
           "xdotool",
           "ffmpeg",
-          "sudo"
+          "sudo",
+          "libatomic1"
         ],
         "preInstallScript": "../linux/e-launcher-host.preinst",
         "postInstallScript": "../linux/e-launcher-host.postinst",
@@ -31,6 +32,7 @@
       "rpm": {
         "depends": [
           "tigervnc-server",
+          "libatomic",
           "(xfwm4 or openbox)",
           "xfdesktop",
           "xfce4-panel",
