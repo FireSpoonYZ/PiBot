@@ -476,6 +476,19 @@ namespace ELauncher.Shower
                 principal = Get(definition, "Principal");
                 string userId = Get(principal, "UserId") as string;
                 int logonType = Convert.ToInt32(Get(principal, "LogonType"), System.Globalization.CultureInfo.InvariantCulture);
+                // Task Scheduler 的 COM 接口可能返回用户名，XML 中则保存 SID。
+                if (!string.IsNullOrEmpty(userId)
+                    && !string.Equals(userId, sessionSid, StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        userId = ((SecurityIdentifier)new NTAccount(userId).Translate(typeof(SecurityIdentifier))).Value;
+                    }
+                    catch (IdentityNotMappedException)
+                    {
+                        userId = null;
+                    }
+                }
                 ownerOk = string.Equals(userId, sessionSid, StringComparison.OrdinalIgnoreCase) && logonType == 3;
 
                 actions = Get(definition, "Actions");
