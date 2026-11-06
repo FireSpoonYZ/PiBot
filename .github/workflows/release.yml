@@ -130,6 +130,8 @@ jobs:
 
           下载 compose.yaml、compose.https.yaml、Caddyfile 和 center.env.example，
           按 [快速开始](https://github.com/$GITHUB_REPOSITORY/blob/v$VERSION/README.md) 部署。
+          Pi SDK：1.5.0。桌面与中心 Node：26.13.0 LTS。
+          Android 使用上游最新可下载 Node Mobile 24.18.0-0，尚未跟进 2026 年 10 月 Node 安全更新。
           Android 首发采用独立正式签名；旧开发签名安装请先导出需要的数据。
           Windows 当前使用登录自启动任务，尚未提供无人登录的 SCM 服务。
 
