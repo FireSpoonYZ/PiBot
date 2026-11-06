@@ -36,6 +36,7 @@ env:
 
 jobs:
   build:
+    name: Desktop ${{ matrix.bundle }}
     strategy:
       fail-fast: false
       matrix:
