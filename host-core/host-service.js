@@ -349,7 +349,7 @@ export async function openHostService(options) {
   }
   async function connect() {
     const gen = ++generation;
-    const current = await connectCenter({ centerUrl: center.url, deviceId, deviceToken: center.deviceToken, ca: center.ca, onDisconnect: disconnect, onChange: changed });
+    const current = await connectCenter({ centerUrl: center.url, deviceId, deviceToken: center.deviceToken, ca: center.ca, onDisconnect: disconnect, onChange: changed, onWebhookReady: () => control?.notifyWebhookReady() });
     if (closed || gen !== generation) { await current.close(); throw offlineError(); }
     client = current;
     return current;

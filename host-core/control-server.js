@@ -261,6 +261,8 @@ export async function openControlServer(options) {
     url,
     close,
     resume: () => runtime.resume(),
+    // Internal SSE wakeup only; no public route or caller-supplied origin.
+    notifyWebhookReady: () => runtime.notifyWebhookReady(),
     applyCenterSnapshot: (snapshot, options) => runtime.applyCenterSnapshot(snapshot, options),
     // 内部即时撤销；不注册 HTTP 路由，不对外暴露。
     revokeCenterCapabilities: (snapshot) => runtime.revokeCenterCapabilities(snapshot),
@@ -408,7 +410,10 @@ async function findByRequest(host, runtime, params, body, req, res) {
 
 async function submit(host, runtime, params, body, req, res) {
   // 只等待受理，不等待模型回答。
-  const submission = await runtime.submit(params.botId, body);
+  const submission = await runtime.submit(params.botId, {
+    ...body,
+    origin: { sender: { kind: 'user' }, replyTo: null },
+  });
   writeControlJson(res, 202, submission);
 }
 

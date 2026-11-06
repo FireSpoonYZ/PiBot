@@ -51,6 +51,7 @@ export function senderAttribution(author, deviceId) {
   if (kind === 'bot' && cleanString(author?.botId)) sender.botId = author.botId;
   const device = cleanString(deviceId) ?? cleanString(author?.deviceId);
   if (device) sender.deviceId = device;
+  if (kind === 'host' && cleanString(author?.name)) sender.name = author.name.slice(0, 200);
   return sender;
 }
 

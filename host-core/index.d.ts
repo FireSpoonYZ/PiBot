@@ -704,7 +704,9 @@ export interface Runtime {
   /** Aborts the matching conversation, then returns the current session status. */
   takeoverShower(target: ShowerTarget, sessionId: string): Promise<ShowerSession>;
   releaseShowerSession(target: ShowerTarget, sessionId: string): Promise<Record<string, unknown>>;
-  /** Idempotently resume native tasks AND activate automatic room/DM processing; may submit new work. */
+  /** Internal Center notification; wakes webhook delivery without accepting public input. */
+  notifyWebhookReady(): void;
+  /** Idempotently resume native tasks AND activate automatic room/DM/webhook processing; may submit new work. */
   resume(): void;
   close(): Promise<void>;
 }
@@ -1056,6 +1058,8 @@ export interface ControlServer {
   deviceId: string;
   url: string;
   close(): Promise<void>;
+  /** Internal Center SSE wakeup; not exposed as an HTTP/control operation. */
+  notifyWebhookReady(): void;
   /** Forwards runtime.restoreTurns(): cold-start pinned-turn recovery before resume. */
   restoreTurns(): Promise<void>;
 }

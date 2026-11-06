@@ -105,7 +105,7 @@ export function createTurnAdmission(deps) {
           scopeId: null,
           triggerMessageId: item.requestId,
           replyTo,
-          sender: { kind, deviceId: host.deviceId },
+          sender: { kind, deviceId: host.deviceId, ...(name !== null ? { name } : {}) },
           replyTarget: { kind: 'primary' },
         },
       },

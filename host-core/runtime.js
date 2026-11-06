@@ -46,6 +46,7 @@ import { createShowerManager } from './shower-manager.js';
 import { createShowerTools } from './shower-tools.js';
 import { createRuntimeShower } from './runtime-shower.js';
 import { createScheduleManager } from './host-schedules.js';
+import { createWebhookConsumer } from './host-webhooks.js';
 import { createScheduleTools } from './schedule-tools.js';
 import {
   attachmentPath,
@@ -717,6 +718,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
+  let resumed = false;
   let appliedRevision = null;
   let highestRevision = -1;
   let centerConfigured = false;
@@ -931,6 +933,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
   const close = () => {
     closing = true;
+    webhooks.pause();
     ++epoch;
     centerOnline = false;
     setOnline(false);
@@ -953,6 +956,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       const botClose = botAdmissions.close();
       // 依次执行并收集每步错误：任何一步失败仍继续清理，最后显式抛出。
       const errors = [];
+      try { await webhooks.close(); } catch (err) { errors.push(err); }
       try { turns.close(); } catch (err) { errors.push(err); }
       try { await decisions.close(); } catch (err) { errors.push(err); }
       // 学习驱动在 harness/store 释放前停止：取消在驱动作业与受限会话执行。
@@ -1034,6 +1038,12 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     // 用户轮 head 实际准入前抢占同 Bot 非用户来源 work（群/DM/迟到续轮）；
     // 不动主聊天用户轮、不清 Host 用户队列。work lane 未实现时静默跳过。
     preemptWork: (botId) => decisions.interruptBotWork?.(botId, { reason: 'preempted' }),
+  });
+  const webhooks = createWebhookConsumer({
+    deviceId: host.deviceId,
+    getClient: () => centerRuntime.getClient(),
+    getRuntime: () => runtime,
+    isReady: () => resumed && centerOnline && !closing && !isMaintenance() && !turns.isRecoveryPending(),
   });
   decisions.setTurnGate(turns.admitWorkDecision, turns.pump, turns.canRunWork);
   // 队列生命周期通知：pending 创建/结束/暂停/取消的纯元数据快照驱动统一 live 活动投影。
@@ -1350,6 +1360,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
   function setCenterOnline(value) {
     if (!value) {
+      webhooks.pause();
       // 仅真实断线走这里：关闭准入、中止执行、卸载能力。
       ++epoch;
       centerOnline = false;
@@ -1383,6 +1394,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         botAdmissions.resume();
         learning.resume();
         schedules.notifyOnline();
+        webhooks.wake();
         await turns.nudgeAll();
         return activation;
       } catch (err) {
@@ -1639,6 +1651,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   const runtime = {
     async prepareUpdate({ stopActive = false } = {}) {
       setMaintenance(true);
+      webhooks.pause();
       learning.suspend();
       botAdmissions.suspend();
       await botAdmissions.drain();
@@ -1663,6 +1676,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         plugins.resumeAdmissions();
         learning.resume();
         schedules.notifyOnline();
+        webhooks.wake();
         await turns.nudgeAll();
       }
       return { maintenance: false };
@@ -2080,8 +2094,12 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     resume() {
       harness.resume();
       decisions.resume();
+      resumed = true;
       turns.nudgeAll().catch(() => {});
+      webhooks.wake();
     },
+
+    notifyWebhookReady: () => webhooks.wake(),
 
     watch(botId, options) {
       return live.watch(botId, options);
@@ -2093,7 +2111,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
     close,
   };
-  const lifecycleMethods = new Set(['initializeBots', 'applyCenterSnapshot', 'setCenterOnline', 'withCapabilityActivation', 'revokeCenterCapabilities', 'restoreTurns', 'prepareUpdate', 'cancelUpdate', 'getUpdateState', 'close']);
+  const lifecycleMethods = new Set(['initializeBots', 'applyCenterSnapshot', 'setCenterOnline', 'withCapabilityActivation', 'revokeCenterCapabilities', 'restoreTurns', 'prepareUpdate', 'cancelUpdate', 'getUpdateState', 'notifyWebhookReady', 'close']);
   // 离线/恢复暂停只放行本地已鉴权动作：持久 enqueue、被动回执/状态与取消。
   // 这些路径只用 Harness snapshot/commit/abortTask，不隐式 resume 调度器；
   // 模型、工具、问卷等执行路径仍受 Center 门禁（运行时本就对 SDK 抛离线错）。
