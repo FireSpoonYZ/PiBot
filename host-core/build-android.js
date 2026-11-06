@@ -43,6 +43,8 @@ const UPSTREAM_LICENSE_ALLOWLIST = new Map([
   ['@earendil-works/pi-telemetry', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
   ['@vectorize-io/hindsight-client', { version: '0.9.2', declared: 'MIT', license: 'hindsight-client-0.9.2-MIT.txt' }],
   ['standardwebhooks', { version: '1.1.1', declared: 'MIT', license: 'standardwebhooks-1.1.1-LICENSE.txt' }],
+  // Reuse the full License section from data-uri-to-buffer@4.0.1/README.md; provenance: licenses/desktop/README.md.
+  ['data-uri-to-buffer', { version: '4.0.1', declared: 'MIT', license: 'desktop/data-uri-to-buffer-4.0.1-MIT.txt' }],
 ]);
 const DYNAMIC_ASSET_RE = /(?:require\s*\.\s*resolve|createRequire\s*\([^)]*\)\s*\.\s*resolve|new\s+URL)\s*\(\s*(['"])([^'"]+\.(?:wasm|node))\1/g;
 
