@@ -354,7 +354,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     db.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
     transaction(() => {
       let version = db.prepare('PRAGMA user_version').get().user_version;
-      if (![0, 1, 2, 3, 4, 5, 6, 7].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
+      if (![0, 1, 2, 3, 4, 5, 6, 7, 8].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
       if (version === 0) {
         db.exec(`
           CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL, config_revision INTEGER NOT NULL);
@@ -460,6 +460,19 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           CREATE INDEX webhook_events_device_active ON webhook_events(device_id, received_at)
             WHERE status IN ('pending', 'dispatching', 'queued', 'running');
           PRAGMA user_version = 7;
+        `);
+        version = 7;
+      }
+      if (version === 7) {
+        db.exec(`
+          ALTER TABLE webhook_events ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0, 1));
+          ALTER TABLE webhook_events ADD COLUMN admission_json TEXT;
+          CREATE TABLE webhook_stops (
+            device_id TEXT NOT NULL, bot_id TEXT NOT NULL,
+            stop_epoch INTEGER NOT NULL CHECK(stop_epoch > 0 AND stop_epoch <= 9007199254740991),
+            PRIMARY KEY(device_id, bot_id)
+          );
+          PRAGMA user_version = 8;
         `);
       }
     });

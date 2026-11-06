@@ -5,6 +5,22 @@ const terminal = new Set(['succeeded', 'failed', 'cancelled', 'expired']);
 const progress = { dispatching: 0, queued: 1, running: 2 };
 const hash = value => createHash('sha256').update(value).digest();
 
+function parseCursor(cursor) {
+  if (cursor == null) return null;
+  if (typeof cursor !== 'string' || cursor.length > 256 || !/^[A-Za-z0-9_-]+$/.test(cursor)) {
+    fail('INVALID_ARGUMENT', 'Invalid webhook cursor');
+  }
+  let value;
+  try { value = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')); }
+  catch { fail('INVALID_ARGUMENT', 'Invalid webhook cursor'); }
+  if (!Array.isArray(value) || value.length !== 2 || typeof value[0] !== 'string' ||
+      !Number.isFinite(Date.parse(value[0])) || new Date(value[0]).toISOString() !== value[0] ||
+      !Number.isSafeInteger(value[1]) || value[1] <= 0) {
+    fail('INVALID_ARGUMENT', 'Invalid webhook cursor');
+  }
+  return value;
+}
+
 function routeValue(row) {
   return {
     id: row.id, name: row.name, deviceId: row.device_id, botId: row.bot_id,
@@ -17,6 +33,8 @@ function eventValue(row, host = false) {
     id: row.id, routeId: row.route_id, routeName: row.route_name,
     deviceId: row.device_id, botId: row.bot_id, requestId: row.request_id,
     idempotencyKey: row.idempotency_key, status: row.status,
+    cancelRequested: Boolean(row.cancel_requested),
+    admission: row.admission_json === null ? null : JSON.parse(row.admission_json),
     receivedAt: row.received_at, expiresAt: row.expires_at, updatedAt: row.updated_at,
     ...(row.error_json === null ? {} : { error: JSON.parse(row.error_json) }),
     ...(host ? { instruction: row.instruction, payload: JSON.parse(row.payload_json) } : {}),
@@ -123,19 +141,44 @@ export function webhookStore(db, transaction) {
         return db.prepare('SELECT * FROM webhook_events WHERE route_id = ? ORDER BY received_at DESC, rowid DESC LIMIT 100').all(id).map(row => eventValue(row));
       });
     },
-    pollWebhookEvents(deviceId) {
+    stopWebhookEvents(deviceId, { botId, stopEpoch }) {
+      return transaction(() => {
+        const previous = db.prepare('SELECT stop_epoch FROM webhook_stops WHERE device_id = ? AND bot_id = ?').get(deviceId, botId);
+        if (previous && previous.stop_epoch >= stopEpoch) return { botId, stopEpoch: previous.stop_epoch };
+        // No directory FK: removed/archived Bots still need durable stop acknowledgement.
+        db.prepare(`INSERT INTO webhook_stops (device_id, bot_id, stop_epoch) VALUES (?, ?, ?)
+          ON CONFLICT(device_id, bot_id) DO UPDATE SET stop_epoch = excluded.stop_epoch`).run(deviceId, botId, stopEpoch);
+        const now = new Date().toISOString();
+        cancelPending('device_id = ? AND bot_id = ?', [deviceId, botId], now, 'USER_STOP', 'Webhook cancelled by user stop');
+        // A claimed event may already have completed locally; preserve its real receipt.
+        db.prepare(`UPDATE webhook_events SET cancel_requested = 1, updated_at = ?
+          WHERE device_id = ? AND bot_id = ? AND status IN ('dispatching', 'queued', 'running') AND cancel_requested = 0`)
+          .run(now, deviceId, botId);
+        return { botId, stopEpoch };
+      });
+    },
+    pollWebhookEvents(deviceId, cursor = null) {
+      const after = parseCursor(cursor);
       return transaction(() => {
         const now = new Date().toISOString();
         settlePending('device_id = ?', [deviceId], now);
-        const rows = db.prepare(`SELECT * FROM webhook_events WHERE device_id = ?
-          AND status IN ('pending', 'dispatching', 'queued', 'running') ORDER BY received_at, rowid LIMIT 50`).all(deviceId);
+        const candidates = db.prepare(`SELECT *, rowid AS cursor_rowid FROM webhook_events WHERE device_id = ?
+          AND status IN ('pending', 'dispatching', 'queued', 'running')
+          ${after ? 'AND (received_at, rowid) > (?, ?)' : ''}
+          ORDER BY received_at, rowid LIMIT 51`).all(deviceId, ...(after ?? []));
+        const rows = candidates.slice(0, 50);
         for (const row of rows) {
           if (row.status !== 'pending') continue;
           db.prepare("UPDATE webhook_events SET status = 'dispatching', updated_at = ? WHERE id = ?").run(now, row.id);
           row.status = 'dispatching';
           row.updated_at = now;
         }
-        return rows.map(row => eventValue(row, true));
+        const last = rows.at(-1);
+        return {
+          items: rows.map(row => eventValue(row, true)),
+          nextCursor: candidates.length > 50
+            ? Buffer.from(JSON.stringify([last.received_at, last.cursor_rowid])).toString('base64url') : null,
+        };
       });
     },
     reportWebhookEvent(deviceId, id, input) {
@@ -144,12 +187,18 @@ export function webhookStore(db, transaction) {
         if (!row) fail('NOT_FOUND', 'Webhook event not found');
         if (terminal.has(row.status)) return eventValue(row);
         if (row.status === 'pending') fail('INVALID_STATE', 'Webhook event has not been dispatched');
-        if (!terminal.has(input.status) && progress[input.status] <= progress[row.status]) return eventValue(row);
+        if (!terminal.has(input.status) && progress[input.status] < progress[row.status]) return eventValue(row);
+        const errorJson = input.error == null ? null : JSON.stringify(input.error);
+        const admissionJson = input.status !== 'queued' ? null
+          : input.admission === undefined ? row.admission_json
+          : input.admission === null ? null : JSON.stringify(input.admission);
+        if (row.status === input.status && row.error_json === errorJson && row.admission_json === admissionJson) return eventValue(row);
         row.status = input.status;
         row.updated_at = new Date().toISOString();
-        row.error_json = input.error == null ? null : JSON.stringify(input.error);
-        db.prepare('UPDATE webhook_events SET status = ?, updated_at = ?, error_json = ? WHERE id = ?')
-          .run(row.status, row.updated_at, row.error_json, id);
+        row.error_json = errorJson;
+        row.admission_json = admissionJson;
+        db.prepare('UPDATE webhook_events SET status = ?, updated_at = ?, error_json = ?, admission_json = ? WHERE id = ?')
+          .run(row.status, row.updated_at, row.error_json, row.admission_json, id);
         return eventValue(row);
       });
     },

@@ -25,18 +25,32 @@ function routeInput(value, create = false) {
     ...(create ? { deviceId: text(body.deviceId, 'deviceId', 128), botId: text(body.botId, 'botId', 128) } : {}),
   };
 }
-function receiptInput(value) {
-  const body = fields(value, ['status', 'error']);
-  if (!['queued', 'running', 'succeeded', 'failed', 'cancelled'].includes(body.status)) fail('INVALID_ARGUMENT', 'Invalid webhook receipt');
-  let error = null;
-  if (body.error != null) {
-    fields(body.error, ['code', 'message']);
-    if (typeof body.error.code !== 'string' || !/^[A-Z][A-Z0-9_]{0,63}$/.test(body.error.code) || typeof body.error.message !== 'string') {
-      fail('INVALID_ARGUMENT', 'Invalid webhook error');
-    }
-    error = { code: body.error.code, message: body.error.message.slice(0, 300) };
+function errorInput(value) {
+  fields(value, ['code', 'message']);
+  if (typeof value.code !== 'string' || !/^[A-Z][A-Z0-9_]{0,63}$/.test(value.code) || typeof value.message !== 'string') {
+    fail('INVALID_ARGUMENT', 'Invalid webhook error');
   }
-  return { status: body.status, error };
+  return { code: value.code, message: value.message.slice(0, 200) };
+}
+function receiptInput(value) {
+  const body = fields(value, ['status', 'error', 'admission']);
+  if (!['queued', 'running', 'succeeded', 'failed', 'cancelled'].includes(body.status)) fail('INVALID_ARGUMENT', 'Invalid webhook receipt');
+  let admission;
+  if (body.admission === null) admission = null;
+  else if (body.admission !== undefined) {
+    fields(body.admission, ['phase', 'error']);
+    if (!['queued', 'checking', 'synchronizing', 'failed'].includes(body.admission.phase)) fail('INVALID_ARGUMENT', 'Invalid webhook admission');
+    admission = {
+      phase: body.admission.phase,
+      ...(body.admission.error == null ? {} : { error: errorInput(body.admission.error) }),
+    };
+  }
+  return { status: body.status, error: body.error == null ? null : errorInput(body.error), admission };
+}
+function stopInput(value) {
+  const body = fields(value, ['botId', 'stopEpoch']);
+  if (!Number.isSafeInteger(body.stopEpoch) || body.stopEpoch <= 0) fail('INVALID_ARGUMENT', 'Invalid stopEpoch');
+  return { botId: text(body.botId, 'botId', 128), stopEpoch: body.stopEpoch };
 }
 
 // Sort object keys without recursion: even a deeply nested, size-bounded JSON body is untrusted.
@@ -110,8 +124,14 @@ export function registerWebhookRoutes(app, { store, bridge, route, host, publicU
   });
 
   host('POST', '/api/host/webhook-events/poll', req => {
-    fields(req.body, []);
-    return { items: store.pollWebhookEvents(req.centerDevice.deviceId) };
+    const body = fields(req.body, ['cursor']);
+    return store.pollWebhookEvents(req.centerDevice.deviceId, body.cursor);
+  });
+  host('POST', '/api/host/webhook-events/stop', req => {
+    const deviceId = req.centerDevice.deviceId;
+    const result = store.stopWebhookEvents(deviceId, stopInput(req.body));
+    notify(deviceId);
+    return result;
   });
   host('POST', '/api/host/webhook-events/:id/receipt', req =>
     store.reportWebhookEvent(req.centerDevice.deviceId, req.params.id, receiptInput(req.body)));
