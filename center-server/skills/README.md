@@ -83,6 +83,7 @@ device+bot+sessionScope; autonomous origins only), locked (autonomous writes ref
 pinned (delete refused), pinned/locked semantics live in usage records exactly like
 upstream. Autonomous delete → recoverable archive + binding disable (never hard delete).
 
+Curator delete source and nonempty target must both use exact names in this Bot's `curated_report`; source aliases/unmanaged sources are refused, and the existing pinned-source refusal still applies.
 Curator-only delete guards: a nonempty `absorbed_into` must be the exact name of a
 non-archived target in this Bot's existing `curated_report` (agent-created, or an
 eligible pinned skill). An unpinned manual target, archived target or alias is

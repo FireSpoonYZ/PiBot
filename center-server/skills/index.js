@@ -628,6 +628,10 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     if (AUTONOMOUS_ORIGINS.has(id.origin) && typeof absorbed !== 'string') {
       return U.refusal("Curator/review deletes must pass absorbed_into ('' for an explicit prune, or the umbrella skill's name).");
     }
+    const curatedReport = id.origin === 'curator' ? skillUsageCalls.curated_report(id, {}, installedList) : null;
+    if (id.origin === 'curator' && (a.name.trim() !== name || !curatedReport.some(entry => entry.name === name))) {
+      return U.refusal('Curator delete requires a curator-managed source using its exact name from this Bot\'s curated_report, not a category path or frontmatter alias. Choose a manageable source and use its report name. The source skill has not been archived.');
+    }
     const target = typeof absorbed === 'string' ? absorbed.trim() : '';
     if (target) {
       if (target === name) return U.refusal(`absorbed_into='${target}' cannot equal the skill being deleted.`);
@@ -636,7 +640,7 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
         return U.refusal(`absorbed_into='${target}' does not exist. Create or patch the umbrella skill first, then retry the delete.`);
       }
       if (id.origin === 'curator' && (usageRow(id, targetRow.name).record?.state === U.STATE_ARCHIVED
-        || !skillUsageCalls.curated_report(id, {}, installedList).some(row => row.name === target))) {
+        || !curatedReport.some(entry => entry.name === target))) {
         return U.refusal(`Curator absorbed_into='${target}' must use the exact name of a non-archived skill in this Bot's curated_report. Pin an eligible manual target first, or choose an active curator-managed target; restore an archived target before retrying. The source skill has not been archived.`);
       }
     }
