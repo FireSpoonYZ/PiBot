@@ -83,6 +83,16 @@ device+bot+sessionScope; autonomous origins only), locked (autonomous writes ref
 pinned (delete refused), pinned/locked semantics live in usage records exactly like
 upstream. Autonomous delete → recoverable archive + binding disable (never hard delete).
 
+Curator-only delete guards: a nonempty `absorbed_into` must be the exact name of a
+non-archived target in this Bot's existing `curated_report` (agent-created, or an
+eligible pinned skill). An unpinned manual target, archived target or alias is
+refused before archiving the source; pin an eligible manual target or choose an
+active curator-managed target, restore archived targets first, and use the report's
+exact name. Curator calls containing delete must have exactly one operation, checked
+before the mutation transaction; create/patch the umbrella in a preceding call.
+This enforces the previously descriptive-only sole-delete rule for curator calls,
+without changing background-review/foreground rules or successful multi-create/patch batches.
+
 ## Exact vs adapted (flag for integrators)
 
 - EXACT: validation limits/regexes, frontmatter rules, file_path confinement, usage

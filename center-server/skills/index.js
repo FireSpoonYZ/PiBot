@@ -631,8 +631,13 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     const target = typeof absorbed === 'string' ? absorbed.trim() : '';
     if (target) {
       if (target === name) return U.refusal(`absorbed_into='${target}' cannot equal the skill being deleted.`);
-      if (!resolveManaged(id, target)) {
+      const targetRow = resolveManaged(id, target);
+      if (!targetRow) {
         return U.refusal(`absorbed_into='${target}' does not exist. Create or patch the umbrella skill first, then retry the delete.`);
+      }
+      if (id.origin === 'curator' && (usageRow(id, targetRow.name).record?.state === U.STATE_ARCHIVED
+        || !skillUsageCalls.curated_report(id, {}, installedList).some(row => row.name === target))) {
+        return U.refusal(`Curator absorbed_into='${target}' must use the exact name of a non-archived skill in this Bot's curated_report. Pin an eligible manual target first, or choose an active curator-managed target; restore an archived target before retrying. The source skill has not been archived.`);
       }
     }
     if (AUTONOMOUS_ORIGINS.has(id.origin)) {
@@ -1154,8 +1159,12 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       const replayed = replay(id, request, request.action);
       let saved = replayed.hit;
       if (!saved) {
-        const installedList = await installedSkills(id);
         const ops = batch ? args.operations : [args];
+        if (id.origin === 'curator' && ops.length !== 1 && ops.some(op => op?.action === 'delete')) {
+          return json({ ...U.refusal('Curator delete must be the sole operation in its call. Create or patch the umbrella first, then delete in a separate call. No skills were changed.'),
+            results: [], operations_applied: 0, rolled_back: true });
+        }
+        const installedList = await installedSkills(id);
         try {
           saved = await reconcileBindingChanges(id, () => tx(() => {
             const results = [], changed = new Set();

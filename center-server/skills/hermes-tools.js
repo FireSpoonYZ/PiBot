@@ -91,7 +91,7 @@ export const HERMES_SKILL_TOOLS = [
                   file_path: { type: 'string', description: "Supporting file (write_file's shape)." },
                 }, ['file_path']),
                 opSchema('delete', {
-                  absorbed_into: { type: 'string', description: 'Curator consolidation only: umbrella skill that absorbed this one (must exist).' },
+                  absorbed_into: { type: 'string', description: 'Curator consolidation: exact name of a non-archived umbrella in this Bot\'s curated_report (agent-created or eligible pinned skill). Pin an eligible manual target first, or choose an active curator-managed target; restore archived targets first. Empty string declares a prune.' },
                 }, []),
               ],
             },
