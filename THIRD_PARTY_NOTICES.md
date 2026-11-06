@@ -114,9 +114,9 @@ copied from the verified source crates into `bot-host/third-party-licenses.txt`.
 
 ## Current pinned Pi / Host runtime bundle
 
-The APK and desktop Host runtimes bundle the six packages in
-`scripts/pi-main.json` at version **1.4.0-main.35dfa757378b**, built from
-<https://github.com/earendil-works/pi/tree/35dfa757378bd7a8570670e99c2687bdd1039a06>,
+The APK and desktop Host runtimes bundle the official npm Pi packages
+at version **1.5.0**, from release commit
+<https://github.com/earendil-works/pi/tree/f9a26365568127461c47a07a37dcb42c140a3ac5>,
 together with the transitive dependencies actually included
 in the bundle. Each included package's name, version and license text are emitted
 at build time into the shipped `bot-host/third-party-licenses.txt` by
@@ -124,10 +124,9 @@ at build time into the shipped `bot-host/third-party-licenses.txt` by
 `host-core/package-lock.json`. Building the bundle uses the root Vite installation's esbuild; esbuild itself is not shipped. The host runtime is built from
 the repository's own `host-core` sources, not from a third-party binary kit.
 
-The pinned packages omit LICENSE in their archives. Android and desktop
-packagers use [`licenses/pi-main-35dfa757378b-MIT.txt`](licenses/pi-main-35dfa757378b-MIT.txt),
-copied verbatim from that exact commit's
-[LICENSE](https://raw.githubusercontent.com/earendil-works/pi/35dfa757378bd7a8570670e99c2687bdd1039a06/LICENSE)
+For packages omitting a root LICENSE, Android and desktop packagers use
+[`licenses/pi-1.5.0-MIT.txt`](licenses/pi-1.5.0-MIT.txt), copied verbatim from
+[the v1.5.0 LICENSE](https://raw.githubusercontent.com/earendil-works/pi/v1.5.0/LICENSE)
 (Copyright (c) 2025 Mario Zechner). The fallback matches the exact installed
 version; an unrecognized bundled package without a license file fails the build.
 
@@ -160,7 +159,7 @@ HOME/project scanning. Pi is Copyright (c) 2025 Mario Zechner, MIT;
 the full upstream text is retained in
 [`licenses/pi-v1.3.0-MIT.txt`](licenses/pi-v1.3.0-MIT.txt).
 The v1.3.0 text remains for this adapted source. Current pinned package
-fallbacks use the separately verified main-commit copy above. These
+fallbacks use the separately verified v1.5.0 copy above. These
 attributions do not alter this project's AGPL-3.0 license.
 
 The desktop bundle contains separate client-broker and Host runtimes,

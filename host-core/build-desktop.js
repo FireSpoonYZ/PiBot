@@ -83,7 +83,7 @@ const HOST_LAUNCHER_DIR = path.join(DESKTOP_DIR, 'host-launcher');
 const HOST_LAUNCHER_CARGO_TOML = path.join(HOST_LAUNCHER_DIR, 'Cargo.toml');
 const HOST_LAUNCHER_BIN = 'e-launcher-host';
 
-const NODE_VERSION = '22.19.0';
+const NODE_VERSION = '26.13.0';
 const TAURI_API_VERSION = '2.12.4';
 const TAURI_CLI_VERSION = '2.12.4';
 const CURL_FLAGS = [
@@ -217,18 +217,16 @@ const DYNAMIC_ASSET_RE = /(?:require\s*\.\s*resolve|createRequire\s*\([^)]*\)\s*
 // licenses/standardwebhooks-1.1.1-LICENSE.txt -- that text is NOT an MIT copy.
 // `declared` is the manifest license to match, `license` the in-repo text file; a
 // package@version outside this map still fails the missing-license check.
-// The six @earendil-works packages are built from the pinned upstream main
-// commit (scripts/pi-main.json, scripts/prepare-pi-main.mjs) and installed via
-// file: tarballs from build/pi-main/; their installed version is the
-// deterministic 1.4.0-main.35dfa757378b, not the npm 1.4.0 release.
-const PI_MAIN_VERSION = '1.4.0-main.35dfa757378b';
+// Official Pi 1.5.0 packages; the exact upstream MIT text covers archives without a root license.
+const PI_MAIN_VERSION = '1.5.0';
 const UPSTREAM_LICENSE_ALLOWLIST = new Map([
-  ['@earendil-works/chord', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
-  ['@earendil-works/pi-ai', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
-  ['@earendil-works/pi-codemode', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
-  ['@earendil-works/pi-durable', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
-  ['@earendil-works/pi-mcp', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
-  ['@earendil-works/pi-telemetry', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-main-35dfa757378b-MIT.txt' }],
+  ['@earendil-works/pi-schema', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
+  ['@earendil-works/chord', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
+  ['@earendil-works/pi-ai', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
+  ['@earendil-works/pi-codemode', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
+  ['@earendil-works/pi-durable', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
+  ['@earendil-works/pi-mcp', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
+  ['@earendil-works/pi-telemetry', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
   ['@vectorize-io/hindsight-client', { version: '0.9.2', declared: 'MIT', license: 'hindsight-client-0.9.2-MIT.txt' }],
   ['standardwebhooks', { version: '1.1.1', declared: 'MIT', license: 'standardwebhooks-1.1.1-LICENSE.txt' }],
   // Desktop UI packages (consumed through UI_NPM_PACKAGES, not the broker
@@ -271,7 +269,7 @@ const NODE_TARGETS = {
     triple: 'x86_64-pc-windows-msvc',
     url: `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-win-x64.zip`,
     archiveName: `node-v${NODE_VERSION}-win-x64.zip`,
-    sha256: 'ea3fad0e67a991d8477d8c01344b56e69c676ccb733f065b22436994b1253f86',
+    sha256: 'dcc60d59a0746999f99064a01c020445d54d84228c691cdbf25b49ac3b59150a',
     binaryEntry: `node-v${NODE_VERSION}-win-x64/node.exe`,
     licenseEntry: `node-v${NODE_VERSION}-win-x64/LICENSE`,
     sidecarName: 'e-launcher-client-node-x86_64-pc-windows-msvc.exe',
@@ -282,7 +280,7 @@ const NODE_TARGETS = {
     triple: 'x86_64-unknown-linux-gnu',
     url: `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz`,
     archiveName: `node-v${NODE_VERSION}-linux-x64.tar.gz`,
-    sha256: 'd36e56998220085782c0ca965f9d51b7726335aed2f5fc7321c6c0ad233aa96d',
+    sha256: '5848553868b402d3fabb5b09270649977780a390f832155721025a08b5104455',
     binaryEntry: `node-v${NODE_VERSION}-linux-x64/bin/node`,
     licenseEntry: `node-v${NODE_VERSION}-linux-x64/LICENSE`,
     sidecarName: 'e-launcher-client-node-x86_64-unknown-linux-gnu',
@@ -1261,7 +1259,7 @@ function hostRuntimeDepsInfo() {
     if (typeof spec !== 'string' || !spec.startsWith('file:')) continue;
     const rel = spec.slice('file:'.length);
     const src = path.resolve(HERE, rel);
-    assertStrictlyRegularFile(src, `host-core dependency ${name} tarball ${rel} (run node scripts/prepare-pi-main.mjs)`);
+    assertStrictlyRegularFile(src, `host-core dependency ${name} tarball ${rel}`);
     const dest = path.resolve(HOST_RUNTIME_DEPS_DIR, 'host-core', rel);
     if (!isInsideDir(HOST_RUNTIME_DEPS_DIR, dest)) {
       throw fail(`host-core dependency ${name} file: spec escapes the npm work tree: ${spec}`);
@@ -1676,9 +1674,6 @@ async function writeThirdPartyNotices(nodeInfo, metafile, hostRuntimeInfo) {
 }
 
 export async function prepareDesktop() {
-  // Ensure the six pinned @earendil-works file: tarballs exist before
-  // bundleDesktopClient's host-dependency check runs.
-  await runExec(process.execPath, [path.join(ROOT, 'scripts', 'prepare-pi-main.mjs')], { cwd: ROOT });
   await mkdir(DESKTOP_BUILD, { recursive: true });
   const nodeInfo = await prepareNodeSidecar();
   const iconsInfo = await prepareIcons();

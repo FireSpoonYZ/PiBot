@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { getOrThrow } from "@earendil-works/pi-durable/env";
 import { defineTool } from "@earendil-works/pi-durable";
 import { withCancel } from "@earendil-works/chord/context";

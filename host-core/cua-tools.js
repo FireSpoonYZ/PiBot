@@ -7,7 +7,7 @@
 // inventory 来自 cua-driver.js 对固定二进制的只读 CLI metadata（describe），
 // 与私有子会话内 MCP tools/list 同源；注册发生在 Harness 打开前的 registry 快照，
 // codemode/工具搜索的渐进式发现直接生效，不需要包装器。
-import { Type } from '@earendil-works/pi-ai';
+import { Type } from 'typebox';
 import { defineTool } from '@earendil-works/pi-durable';
 import { toLlmContent } from '@earendil-works/pi-mcp';
 import {
