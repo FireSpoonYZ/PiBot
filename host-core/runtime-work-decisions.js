@@ -264,6 +264,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
   let activityListener = null;
   const activityGeneration = new Map(); // botId -> 最新发出的汇总序号
   const activityCache = new Map();      // botId -> 已发布 signature（去重）
+  const activityLoads = new Map();      // botId -> 最新被动汇总，供看板等待初始化
 
   // 汇总签名即结构化 JSON：内容不变不重复发布，避免每次 settle 都投影。
   function summarySignature(summary) {
@@ -286,12 +287,26 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     try { activityListener(botId, summary); } catch { /* listener 失败不影响决策 */ }
   }
 
-  function publishActivity(botId) {
-    if (activityListener === null) return;
+  function loadActivity(botId) {
+    if (activityListener === null) return Promise.resolve();
     const generation = bumpActivity(botId);
-    workSummary(botId)
+    const task = workSummary(botId)
       .then((summary) => emitActivity(botId, generation, summary))
-      .catch(() => {});
+      .finally(() => {
+        if (activityLoads.get(botId) === task) activityLoads.delete(botId);
+      });
+    activityLoads.set(botId, task);
+    return task;
+  }
+
+  async function refreshActivity(botId) {
+    await loadActivity(botId);
+    // A newer publication superseded this read: await it rather than expose an empty map.
+    while (activityLoads.has(botId)) await activityLoads.get(botId);
+  }
+
+  function publishActivity(botId) {
+    void loadActivity(botId).catch(() => {});
   }
 
   function setActivityListener(listener) {
@@ -1558,7 +1573,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
   }
 
   return { resume, close, beforeRequest, checkBudget, publishWork, getWorkActivity, stopWork, resumeWork, stopScopeWork, takeoverShower,
-    interruptBotWork, setActivityListener,
+    interruptBotWork, setActivityListener, refreshActivity,
     coordinationSelector,
     drainFailureNotices,
     setTurnGate: (fn, onIdle, canRunWork = null) => {

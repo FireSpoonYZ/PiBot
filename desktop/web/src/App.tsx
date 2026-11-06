@@ -5,6 +5,7 @@ import type { ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
   FolderInput,
+  LayoutDashboard,
   MessageSquare,
   Monitor,
   Moon,
@@ -60,7 +61,7 @@ interface AppState {
   /** 不可变快照：与 api 可变 getter 分离，供子面板按 props 旧值检测变化。 */
   identity: DesktopIdentity | null;
   transportConnected: boolean;
-  view: 'chat' | 'pending';
+  view: 'chat' | 'board' | 'pending';
   token: string;
   ca: string;
   form: ProfileFormState;
@@ -549,7 +550,7 @@ class App extends Component<AppProps, AppState> {
     const phaseLabel = phaseText(status, transportConnected);
     const center = this.props.centerConnection.status;
     const selectedProfile = this.state.profiles.find((p) => p.id === this.state.selectedProfileId) ?? null;
-    const showDeviceSelector = this.state.view !== 'chat' && !!identity;
+    const showDeviceSelector = this.state.view === 'pending' && !!identity;
     const { theme, setTheme } = this.props
 ;
     return (
@@ -559,6 +560,7 @@ class App extends Component<AppProps, AppState> {
             {(
               [
                 { key: 'chat', label: '对话', Icon: MessageSquare },
+                { key: 'board', label: '看板', Icon: LayoutDashboard },
                 { key: 'pending', label: '待发', Icon: FolderInput },
               ] as const
             ).map(({ key, label, Icon }) => (
@@ -741,7 +743,7 @@ class App extends Component<AppProps, AppState> {
     const snapshot = api.snapshot;
     if (!identity || !snapshot) return <div className="empty-state">请先连接 Host 或中继（左下角「设置」）。</div>;
     let pendingNode: ReactNode = null;
-    if (view !== 'chat') {
+    if (view === 'pending') {
       const deviceId = this.state.selectedDeviceId;
       if (!deviceId) {
         pendingNode = <div className="empty-state">请选择目标设备。</div>;
@@ -760,11 +762,14 @@ class App extends Component<AppProps, AppState> {
     }
     return (
       <>
-        <div className={view === 'chat' ? 'chat-workspace-host' : 'chat-workspace-host workspace-hidden'}>
+        <div className={view !== 'pending' ? 'chat-workspace-host' : 'chat-workspace-host workspace-hidden'}>
           <BotChats
             api={api}
             currentDeviceId={this.state.status?.connection?.deviceId ?? ''}
-            pageActive={pageActive && (view === 'chat' || this.state.settingsOpen)}
+            pageActive={pageActive && (view !== 'pending' || this.state.settingsOpen)}
+            workspaceActive={pageActive && view !== 'pending' && !this.state.settingsOpen}
+            boardActive={view === 'board'}
+            onOpenBoardChat={() => this.setState({ view: 'chat' })}
             onArchiveBridge={this.handleArchiveBridge}
           />
         </div>

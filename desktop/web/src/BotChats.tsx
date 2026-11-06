@@ -63,6 +63,8 @@ import { useDrafts } from './drafts';
 import type { DraftSnapshot } from './drafts';
 import { type QuestionnaireSubmitPayload } from '../../../web/src/ToolPresentation';
 import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
+import { BotBoard } from '../../../web/src/BotBoard';
+import { botBoardKey, useBotBoard, useMarkViewedBoardResult, type BotBoardTarget } from '../../../web/src/useBotBoard';
 import {
   botActivityText,
   canStopBotActivity,
@@ -1704,6 +1706,19 @@ function PrimaryChatPane({
   const [avatarVersion, setAvatarVersion] = useState(0);
 
   const [rawItems, setRawItems] = useState<AnyRawEntry[]>([]);
+  const boardTarget: BotBoardTarget | undefined = identity ? {
+    key: botBoardKey(`${identity.profileId}|${identity.kind}`, identity.targetDeviceId, bot.botId),
+    hostKey: identity.targetDeviceId,
+    generation: sess,
+    botId: bot.botId,
+    name: bot.role,
+    deviceName,
+    avatarKey: botAvatarKey(bot),
+    online,
+    read: botIds => api.call(identity, 'getBotBoard', { botIds }),
+  } : undefined;
+  const chatBoard = useBotBoard(boardTarget ? [boardTarget] : [], pageActive);
+  const markViewedBoardResult = useMarkViewedBoardResult(chatBoard, boardTarget, pageActive);
   const [rawLoading, setRawLoading] = useState(false);
   const [rawError, setRawError] = useState<string | null>(null);
   const rawCursorRef = useRef<Record<string, unknown> | null>(null);
@@ -1974,6 +1989,7 @@ function PrimaryChatPane({
   return (
     <div className="chat-stage" ref={stageRef}>
       <div className="chat-column">
+      {chatBoard.storageError && <p role="alert" className="bot-board-warning">{chatBoard.storageError}</p>}
       <header className="chat-header">
         <button
           type="button"
@@ -2236,6 +2252,7 @@ function PrimaryChatPane({
         avatarKey={botAvatarKey(bot)}
         devicePlatform={devicePlatform}
         search={chatSearch}
+        onVisibleAssistantTextEntryIds={markViewedBoardResult}
         archived={isArchived}
         onSubmitQuestionnaire={submitQuestionnaire}
         attachmentFetcher={attachmentFetcher}
@@ -2480,6 +2497,9 @@ export function BotChats({
   initialBotId,
   initialDeviceId,
   onArchiveBridge,
+  boardActive = false,
+  workspaceActive = pageActive,
+  onOpenBoardChat,
 }: {
   api: DesktopPanelApi;
   currentDeviceId: string;
@@ -2489,6 +2509,9 @@ export function BotChats({
   initialBotId?: string;
   initialDeviceId?: string;
   onArchiveBridge?: (bridge: BotChatsArchiveBridge | null) => void;
+  boardActive?: boolean;
+  workspaceActive?: boolean;
+  onOpenBoardChat?: () => void;
 }) {
   const identity = api.identity;
   const sess = sessionKey(identity);
@@ -2507,6 +2530,24 @@ export function BotChats({
 
   const [bots, setBots] = useState<BotDirectoryEntry[]>(() => initialCache?.bots ?? []);
   const [devices, setDevices] = useState<DevicesDirectoryItem[]>(() => initialCache?.devices ?? []);
+  const boardBots = profileRef.current === profileKey ? bots : initialCache?.bots ?? [];
+  const boardDevices = profileRef.current === profileKey ? devices : initialCache?.devices ?? [];
+  const boardTargets: BotBoardTarget[] = identity ? boardBots.filter(bot => !bot.archivedAt).map(bot => {
+    const reachable = identity.kind !== 'local' || identity.targetDeviceId === bot.deviceId;
+    const targetIdentity = reachable ? api.identityForTarget(bot.deviceId) : identity;
+    return {
+      key: botBoardKey(profileKey, bot.deviceId, bot.botId),
+      hostKey: bot.deviceId,
+      generation: sess,
+      botId: bot.botId,
+      name: bot.role,
+      deviceName: boardDevices.find(device => device.deviceId === bot.deviceId)?.displayName || bot.deviceName || '未命名设备',
+      avatarKey: botAvatarKey(bot),
+      online: online && bot.online && reachable,
+      read: botIds => api.call(targetIdentity, 'getBotBoard', { botIds }),
+    };
+  }) : [];
+  const board = useBotBoard(boardTargets, pageActive && workspaceActive && boardActive);
   const [botsError, setBotsError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<boolean>(() => Boolean(initialCache));
   const [selected, setSelected] = useState<{ deviceId: string; botId: string } | null>(null);
@@ -2781,7 +2822,7 @@ export function BotChats({
     loading: groupsLoading,
     error: groupsError,
     refresh: refreshGroups,
-  } = useScopeConversations(scopeSources, pageActive, 'room');
+  } = useScopeConversations(scopeSources, pageActive && !boardActive, 'room');
 
   /** 群聊实际所在 Host：identity.targetDeviceId 是稳定字符串，不依赖 targetApi 对象引用。 */
   function groupSourceOf(g: (typeof groupItems)[number]) {
@@ -3666,6 +3707,22 @@ export function BotChats({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [menu, isPinned, online, resolveRoomApi, togglePin, archiveBotEntry, devices, currentDeviceId]);
 
+  if (boardActive) return <BotBoard
+    targets={boardTargets}
+    board={board}
+    loading={!loaded || loading}
+    error={botsError}
+    onOpen={target => {
+      const bot = boardBots.find(bot => botBoardKey(profileKey, bot.deviceId, bot.botId) === target.key);
+      if (!bot) return;
+      setSelected({ deviceId: bot.deviceId, botId: bot.botId });
+      setDeviceFilter('all');
+      setStage(null);
+      setRoomSettingsOpen(false);
+      onOpenBoardChat?.();
+    }}
+  />;
+
   return (
     <div className={`bot-chats-layout${listCollapsed ? ' list-collapsed' : ''}`}>
       <aside className="hub-sidebar" aria-label="智能体名录">
@@ -3964,7 +4021,7 @@ export function BotChats({
             onOpenPrivateChats={(bot) =>
               openDmList({ deviceId: bot.deviceId, botId: bot.botId })
             }
-            pageActive={pageActive && !stage}
+            pageActive={pageActive && workspaceActive && !stage}
           />
           </div>
         ) : null}

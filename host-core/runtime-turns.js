@@ -12,6 +12,7 @@ import { formatPrimarySubmission } from './runtime-history.js';
 import { parseModelRef } from './runtime-models.js';
 import { WorkIndex, WorkContextState } from './work-context-docs.js';
 import { WorkDecisionState } from './work-decision-state.js';
+import { clearBotBoardResult } from './runtime-bot-board.js';
 
 const MAX_PREPARE_ATTEMPTS = 3;
 // 每条消息图片解码总字节上限（64MiB）：单张合法（≤16MiB）的图仍需满足本条消息总量限制。
@@ -158,6 +159,9 @@ export function createTurnAdmission(deps) {
       const doc = await queueDoc(tx, bot.primaryConversationId);
       doc.stopEpoch = stopEpochs.get(bot.botId);
       doc.stopPending = true;
+      const index = await tx.doc(PrimaryIndex);
+      const nativeId = index.byPrimary[bot.primaryConversationId];
+      if (nativeId !== undefined) await clearBotBoardResult(tx, nativeId);
     }, context).then(() => boundary);
   }
 
@@ -172,6 +176,9 @@ export function createTurnAdmission(deps) {
       await harness().commit(async (tx) => {
         const doc = await queueDoc(tx, bot.primaryConversationId);
         doc.stopPending = false;
+        const index = await tx.doc(PrimaryIndex);
+        const nativeId = index.byPrimary[bot.primaryConversationId];
+        if (nativeId !== undefined) await clearBotBoardResult(tx, nativeId);
       }, context);
     }
     stopArmed.delete(botId);
@@ -214,6 +221,15 @@ export function createTurnAdmission(deps) {
   // 只计仍待准入/未原生提交的受理；cancelled 终态记录保留可查但不占队列数。
   async function queuedCount(bot) {
     return (await readQueue(bot.primaryConversationId)).filter((entry) => entry.phase !== 'cancelled').length;
+  }
+
+  /** Passive board bootstrap: restore the same admission projection without pumping. */
+  async function refreshActivity(botId) {
+    const bot = host.getBot(botId);
+    const doc = await harness().snapshot(TurnQueue, bot.primaryConversationId, context);
+    const items = doc?.items ?? [];
+    publishStatus(botId, headItem(items), items.filter((item) => item.phase !== 'cancelled').length);
+    if (doc?.stopPending) live.setBotControl(botId, 'stopping');
   }
 
   /** 更新条目阶段并广播准入状态（head 条目即对外可见状态）。 */
@@ -1191,6 +1207,7 @@ export function createTurnAdmission(deps) {
 
   return {
     enqueue,
+    refreshActivity,
     pump: nudge,
     nudgeAll,
     queuedReceipt,

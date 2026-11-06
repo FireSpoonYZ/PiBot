@@ -8,6 +8,7 @@
 // additive v2 and normalize through shower-protocol so every platform agrees.
 
 import { messageError, assertId, normalizeScopeHistoryOptions } from './message-protocol.js';
+import { normalizeBotBoardParams } from './bot-board-protocol.js';
 import {
   normalizeScopeListOptions,
   normalizeScopeCreate,
@@ -159,6 +160,7 @@ const CONTROL_V2_METHODS = Object.freeze([
   'sendShowerInput',
   'takeoverShower',
   'releaseShowerSession',
+  'getBotBoard',
   // 对话命令：/clear 与 /compact 是 additive v2，只接 {botId}。
   'clearHistory',
   'compact',
@@ -321,6 +323,8 @@ function showerTargetParams(params) {
 // no source-device resolution happens here.
 function normalizeControlParams(method, params) {
   switch (method) {
+    case 'getBotBoard':
+      return normalizeBotBoardParams(params);
     case 'getHostInfo':
     case 'getServiceStatus':
     case 'listBots': {

@@ -187,6 +187,7 @@ export const SOUL_SNIPPETS: { zh: string; en: string; text: string }[] = [
 
 export type HubScreen =
   | 'hub'
+  | 'board'
   | 'chat'
   | 'conversation'
   | 'dm'
