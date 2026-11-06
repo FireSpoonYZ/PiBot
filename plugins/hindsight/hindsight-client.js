@@ -454,6 +454,15 @@ export function createHindsightClient(config) {
   }
 
   return {
+    // Explicit setup probe: one authenticated read, never creates a missing bank.
+    async probeBank(bankId, signal) {
+      const id = mustResourceId(bankId, 'bankId');
+      return request(async (sdkSignal) => {
+        const list = plainObject(await sdkCall(sdk.listBanks,
+          { query: { q: id, limit: 1, offset: 0 } }, sdkSignal));
+        protocolCheck(Array.isArray(list.banks), 'bank list banks must be an array');
+      }, timeoutMs, signal);
+    },
     // 存在性走 listBanks（q 为子串过滤）后按 bank_id 精确匹配；不依赖 /config。
     async getBank(bankId, signal) {
       const id = mustResourceId(bankId, 'bankId');

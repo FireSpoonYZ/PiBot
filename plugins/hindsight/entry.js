@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { normalizeHindsightConfig } from './hindsight-client.js';
+import { createHindsightClient, normalizeHindsightConfig } from './hindsight-client.js';
 import { hindsightBankId } from './hindsight-format.js';
 import { openHindsightStore } from './hindsight-store.js';
 import { createRuntimeHindsight } from './runtime-hindsight.js';
@@ -15,7 +15,7 @@ import { readConfigFile } from './config/config.js';
 const descriptors = JSON.parse(readFileSync(new URL('./capability.json', import.meta.url), 'utf8')).actions;
 const WRITE_ACTIONS = new Set(['retainMemory', 'correctMemory', 'retryMemory']);
 
-export function createPlugin({ installationId, dataDir, host }) {
+export function createPlugin({ installationId, version, dataDir, host }) {
   const bots = new Set();
   const botKey = (botId) => createHash('sha256').update(botId).digest('hex');
   const policyFile = (botId) => join(dataDir, botKey(botId) + '.policy.json');
@@ -139,6 +139,24 @@ export function createPlugin({ installationId, dataDir, host }) {
         inputSchema,
         async execute(input, invocationContext) {
           check();
+          invocationContext.abortSignal?.throwIfAborted();
+          if (id === 'learningMemoryStatus') {
+            return { enabled: true, canRead: true, canWrite: mode === 'read-write', mode };
+          }
+          if (id === 'probe') {
+            const client = createHindsightClient({ ...config, timeoutMs: 10000 });
+            try {
+              await client.probeBank(projectBankId, AbortSignal.any([
+                invocationContext.abortSignal, AbortSignal.timeout(10000),
+              ]));
+              check();
+              invocationContext.abortSignal.throwIfAborted();
+              return { ok: true, version, operation: 'listBanks' };
+            } catch {
+              invocationContext.abortSignal.throwIfAborted();
+              throw Object.assign(new Error('Hindsight read-only probe failed; check credentials/connectivity in Center.'), { code: 'PROBE_FAILED' });
+            } finally { await client.close(); }
+          }
           if (WRITE_ACTIONS.has(id) && mode !== 'read-write') {
             throw Object.assign(new Error('Hindsight is read-only.'), { code: 'EXTENSION_READ_ONLY' });
           }

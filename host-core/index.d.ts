@@ -1337,9 +1337,17 @@ export interface BotLearningInput {
 
 export type BotInstallationAction =
   | 'inspect' | 'install' | 'update' | 'rollback' | 'enable' | 'disable'
-  | 'uninstall' | 'operation' | 'deployments';
+  | 'uninstall' | 'operation' | 'deployments' | 'catalog' | 'describe' | 'check' | 'probe';
 
-/** Bot-scoped installation input; mutations are CAS/requestId-idempotent operations. */
+export type {
+  BotInstallationCatalog, BotInstallationDescription, BotInstallationCheck,
+  LearningMemoryStatus, LearningSourceInput, LearningSourceResult,
+} from '../center-contract/index.js';
+
+/** Bot-scoped installation input; mutations are CAS/requestId-idempotent operations.
+ * catalog needs no installationId; describe/check/probe require it.
+ * probe is explicit, read-only and potentially billed; check never performs a network probe.
+ */
 export interface BotInstallationInput {
   action: BotInstallationAction;
   installationId?: string;

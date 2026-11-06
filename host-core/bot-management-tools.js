@@ -24,7 +24,7 @@ const SKILL_ACTIONS = [
 const LEARNING_ACTIONS = ['status', 'configure', 'learn', 'review', 'curate', 'cancel'];
 const INSTALLATION_ACTIONS = [
   'inspect', 'install', 'update', 'rollback', 'enable', 'disable',
-  'uninstall', 'operation', 'deployments',
+  'uninstall', 'operation', 'deployments', 'catalog', 'describe', 'check', 'probe',
 ];
 
 function assertTargetBot(args) {
@@ -112,7 +112,10 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
     {
       name: 'manage_bot_installation',
       description:
-        'Manage Center capability installations scoped to the target Bot. Actions: inspect, install ' +
+        'Manage Center capability installations scoped to the target Bot. Actions: catalog (minimal metadata), ' +
+        'describe (schema and credential-reference status, no secret values), check (configuration versus ' +
+        'deployment receipts, no network), probe (explicit read-only Webfox/Hindsight request, may incur cost). ' +
+        'Enter secrets only in the Center credential UI, never chat/questionnaires. Other actions: inspect, install ' +
         '(creates the installation, globally enables it, then binds this Bot — the reply reports the ' +
         'stage reached; bound means saved binding plus a queued deployment plan), update, rollback, ' +
         'enable, disable, uninstall, operation (poll one operation receipt by operationId), ' +
