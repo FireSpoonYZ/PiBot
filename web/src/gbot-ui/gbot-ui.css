@@ -103,7 +103,14 @@
 }
 .gbot-conversation-row__meta {
   flex: none;
+  max-width: 62%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 11px;
+}
+.gbot-conversation-row__sub > .gbot-conversation-row__meta:first-child {
+  max-width: 100%;
 }
 .gbot-conversation-row__unread-dot {
   flex: none;

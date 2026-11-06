@@ -580,27 +580,27 @@ class App extends Component<AppProps, AppState> {
           </div>
           <div className="rail-spacer" />
           <div className="rail-group">
-            <div className="theme-switch" role="group" aria-label="主题">
-              {(
-                [
-                  { key: 'light', Icon: Sun, title: '浅色' },
-                  { key: 'system', Icon: Monitor, title: '跟随系统' },
-                  { key: 'dark', Icon: Moon, title: '深色' },
-                ] as const
-              ).map(({ key, Icon, title }) => (
+            {(() => {
+              const themeMeta =
+                theme === 'light'
+                  ? { next: 'system' as const, Icon: Sun, label: '浅色', title: '当前主题：浅色（点击切换为跟随系统）' }
+                  : theme === 'dark'
+                    ? { next: 'light' as const, Icon: Moon, label: '深色', title: '当前主题：深色（点击切换为浅色）' }
+                    : { next: 'dark' as const, Icon: Monitor, label: '自动', title: '当前主题：跟随系统（点击切换为深色）' };
+              const ThemeIcon = themeMeta.Icon;
+              return (
                 <button
-                  key={key}
                   type="button"
-                  title={title}
-                  aria-pressed={theme === key}
-                  className={theme === key ? 'active' : undefined}
-                  onClick={() => setTheme(key)}
+                  className="rail-item"
+                  title={themeMeta.title}
+                  aria-label={themeMeta.title}
+                  onClick={() => setTheme(themeMeta.next)}
                 >
-                  <Icon size={12} aria-hidden />
+                  <ThemeIcon size={18} aria-hidden />
+                  <span className="rail-label">{themeMeta.label}</span>
                 </button>
-              ))}
-            </div>
-            <span className="rail-caption">主题</span>
+              );
+            })()}
             <button
               type="button"
               className="rail-item"
@@ -608,36 +608,46 @@ class App extends Component<AppProps, AppState> {
               onClick={() => this.setState({ settingsOpen: true })}
               title={identity ? '当前：' + phaseLabel : '打开连接与节点设置'}
             >
-              <Settings size={18} aria-hidden />
+              <span className="rail-icon-wrap">
+                <Settings size={18} aria-hidden />
+                <span className={'conn-dot ' + (transportConnected ? 'online' : 'offline')} />
+              </span>
               <span className="rail-label">设置</span>
-              <span className={'conn-dot ' + (transportConnected ? 'online' : 'offline')} />
             </button>
           </div>
         </aside>
         <main className="app-workspace">
           {this.state.globalError && (
             <div className="error-banner" role="alert">
-              {this.state.globalError}
-              <button onClick={() => this.setState({ globalError: null })}>关闭</button>
+              <span className="error-banner-text">{this.state.globalError}</span>
+              <div className="error-banner-actions">
+                <button type="button" onClick={() => this.setState({ globalError: null })}>关闭</button>
+              </div>
             </div>
           )}
           {this.state.bannerError && (
             <div className="error-banner" role="alert">
-              {this.state.bannerError}
-              <button onClick={() => this.setState({ bannerError: null })}>关闭</button>
+              <span className="error-banner-text">{this.state.bannerError}</span>
+              <div className="error-banner-actions">
+                <button type="button" onClick={() => this.setState({ bannerError: null })}>关闭</button>
+              </div>
             </div>
           )}
           {this.state.connectionError && identity && !transportConnected && (
             <div className="error-banner" role="alert">
-              {this.state.connectionError}
-              {status?.errorCode ? (
-                <details>
-                  <summary>技术详情</summary>
-                  <code>{'phase=' + status.phase + ' · errorCode=' + status.errorCode}</code>
-                </details>
-              ) : null}
-              <button type="button" onClick={() => void this.checkConnection()}>检查连接</button>
-              <button onClick={() => this.setState({ connectionError: null })}>关闭</button>
+              <span className="error-banner-text">
+                {this.state.connectionError}
+                {status?.errorCode ? (
+                  <details>
+                    <summary>技术详情</summary>
+                    <code>{'phase=' + status.phase + ' · errorCode=' + status.errorCode}</code>
+                  </details>
+                ) : null}
+              </span>
+              <div className="error-banner-actions">
+                <button type="button" onClick={() => void this.checkConnection()}>检查连接</button>
+                <button type="button" onClick={() => this.setState({ connectionError: null })}>关闭</button>
+              </div>
             </div>
           )}
           <div className="workspace-body">

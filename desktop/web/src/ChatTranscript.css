@@ -54,7 +54,15 @@
   flex-wrap: wrap;
   justify-content: center;
   gap: 8px;
-  margin-top: 6px;
+  margin-top: 8px;
+}
+.desktop-shell .desktop-transcript-empty-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 7px 14px;
+  font-size: 13px;
 }
 
 /* 轮次气泡：居中舒适阅读宽度 */

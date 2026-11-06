@@ -30,18 +30,103 @@ export interface HumanizedError {
 }
 
 const KNOWN_CODE_PREFIX = /^([A-Z][A-Z0-9_]{2,32}):\s*(.*)$/s;
+const OUTCOME_PREFIX = /^(unconfirmed|not-sent|responded):\s*(.*)$/is;
+const TRAILING_OUTCOME_CODE = /\s*(?:[·:;]\s*)?(?:unconfirmed|not-sent|responded):\s*([A-Z][A-Z0-9_]{2,32})$/i;
+const CONTEXT_PREFIX_RE = /^(群聊列表读取失败|目录读取失败|观察建立失败|连接失败|更换中心连接失败|无法读取配置|保存 profile 失败|设为主 Bot 失败|归档失败|恢复失败|删除失败|停止失败|选择图片失败|选择文件失败)[：:]\s*(.+)$/s;
+const TARGET_OFFLINE_PREFIX_RE = /^目标\s+(.+?)\s*离线[：:]\s*(.+)$/s;
+const DEVICE_CODE_PREFIX_RE = /^([^:：]{1,48}?)[：:]\s*([A-Z][A-Z0-9_]{2,32})(?:[：:\s]\s*(.*))?$/s;
+
+function normalizeErrorParts(raw: string): {
+  code: string;
+  body: string;
+  contextPrefix: string;
+  devicePrefix: string;
+} {
+  let body = raw.trim();
+  let contextPrefix = '';
+  let devicePrefix = '';
+  let code = '';
+
+  const ctxMatch = body.match(CONTEXT_PREFIX_RE);
+  if (ctxMatch) {
+    contextPrefix = ctxMatch[1].trim();
+    body = ctxMatch[2].trim();
+  }
+
+  const targetOfflineMatch = body.match(TARGET_OFFLINE_PREFIX_RE);
+  if (targetOfflineMatch) {
+    devicePrefix = targetOfflineMatch[1].trim();
+    body = targetOfflineMatch[2].trim();
+    if (!code) code = 'OFFLINE';
+  }
+
+  // Iteratively strip repeated CODE: and outcome: prefixes
+  for (let i = 0; i < 6; i += 1) {
+    const codeMatch = body.match(KNOWN_CODE_PREFIX);
+    if (codeMatch) {
+      const nextCode = codeMatch[1];
+      // Prefer a specific code over generic INTERNAL wrapper
+      if (!code || code === 'INTERNAL') {
+        code = nextCode;
+      }
+      body = codeMatch[2].trim();
+      continue;
+    }
+    const outcomeMatch = body.match(OUTCOME_PREFIX);
+    if (outcomeMatch) {
+      body = outcomeMatch[2].trim();
+      continue;
+    }
+    const devMatch = !devicePrefix ? body.match(DEVICE_CODE_PREFIX_RE) : null;
+    if (devMatch) {
+      devicePrefix = devMatch[1].trim();
+      const nextCode = devMatch[2].trim();
+      if (!code || code === 'INTERNAL') {
+        code = nextCode;
+      }
+      body = (devMatch[3] ?? '').trim();
+      continue;
+    }
+    break;
+  }
+
+  // Strip trailing "unconfirmed: CODE" / "not-sent: CODE" noise
+  const trailingMatch = body.match(TRAILING_OUTCOME_CODE);
+  if (trailingMatch) {
+    if (!code || code === 'INTERNAL') {
+      code = trailingMatch[1].toUpperCase();
+    }
+    body = body.slice(0, trailingMatch.index).trim();
+  }
+
+  // If body is a bare uppercase error code (e.g. "DISCONNECTED" or "OFFLINE"), promote it to code
+  if (/^[A-Z][A-Z0-9_]{2,32}$/.test(body)) {
+    if (!code || code === 'INTERNAL') {
+      code = body;
+    }
+    body = '';
+  }
+
+  // If body is just the code itself or an outcome token, clear redundant body
+  if (
+    body === code ||
+    /^(unconfirmed|not-sent|responded)$/i.test(body) ||
+    /^(unconfirmed|not-sent|responded):\s*[A-Z0-9_]+$/i.test(body)
+  ) {
+    body = '';
+  }
+
+  return { code, body, contextPrefix, devicePrefix };
+}
 
 export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => string): HumanizedError | null {
   const raw = typeof rawInput === 'string' ? rawInput.trim() : errorText(rawInput).trim();
   if (!raw) return null;
 
-  let code = '';
-  let body = raw;
-  const codeMatch = raw.match(KNOWN_CODE_PREFIX);
-  if (codeMatch) {
-    code = codeMatch[1];
-    body = codeMatch[2].trim();
-  }
+  const parsed = normalizeErrorParts(raw);
+  const code = parsed.code;
+  let body = parsed.body;
+  const { contextPrefix, devicePrefix } = parsed;
 
   let extractedDetail = '';
   const reqMatch = body.match(/^(.*?)\s*·\s*(requestId\s+\S+|p-[a-z0-9-]+.*|[0-9a-f]{8}-[0-9a-f-]{12,}.*)$/i);
@@ -50,9 +135,13 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     extractedDetail = reqMatch[2].trim();
   }
 
-  const lower = `${code} ${body}`.toLowerCase();
+  const lower = `${code} ${contextPrefix} ${body}`.toLowerCase();
   const detail =
-    [code ? `Code: ${code}` : '', extractedDetail, body !== raw && code ? raw : '']
+    [
+      code ? `Code: ${code}` : '',
+      extractedDetail,
+      (code || contextPrefix || devicePrefix) && body !== raw && raw !== code ? raw : '',
+    ]
       .filter(Boolean)
       .join(' · ') || undefined;
 
@@ -205,6 +294,30 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
 
   // 5. Transport / Stream / Host errors
   if (
+    code === 'OFFLINE' ||
+    code === 'CONTROL_UNAVAILABLE' ||
+    body === 'Remote target unavailable' ||
+    body === 'Not connected' ||
+    body === 'Original connection unavailable' ||
+    body.includes('无法连接目标节点') ||
+    lower.includes('target host unavailable') ||
+    body.includes('目标设备离线，已拒绝修改') ||
+    body.includes('所选设备不可用')
+  ) {
+    const targetLabel = devicePrefix ? `「${devicePrefix}」` : t('目标设备', 'Target Device');
+    return {
+      tone: 'warning',
+      title: contextPrefix
+        ? `${contextPrefix}：${targetLabel}${t('当前离线', ' is Offline')}`
+        : devicePrefix
+          ? t(`设备「${devicePrefix}」当前离线`, `Device "${devicePrefix}" is Offline`)
+          : t('目标设备当前离线', 'Target Device Offline'),
+      description: t('已展示最近缓存的内容，设备恢复在线后即可继续同步与操作', 'Showing cached content until the remote device is back online'),
+      detail,
+    };
+  }
+
+  if (
     code === 'EVENT_STREAM_CLOSED' ||
     code === 'STREAM_CLOSED' ||
     code === 'TRANSPORT_RESET' ||
@@ -214,10 +327,16 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     body.includes('事件流未就绪') ||
     body.includes('准入前事件缓冲溢出')
   ) {
+    const baseTitle =
+      code === 'TIMEOUT'
+        ? t('请求超时', 'Request Timed Out')
+        : devicePrefix
+          ? t(`与「${devicePrefix}」的连接已中断`, `Connection to "${devicePrefix}" Lost`)
+          : t('连接已中断', 'Connection Lost');
     return {
       tone: 'warning',
-      title: code === 'TIMEOUT' ? t('请求超时', 'Request Timed Out') : t('连接已中断', 'Connection Lost'),
-      description: t('正在尝试恢复连接，您也可以下拉刷新或重新进入页面', 'Attempting to restore the connection; pull to refresh if needed'),
+      title: contextPrefix ? `${contextPrefix}：${baseTitle}` : baseTitle,
+      description: t('正在尝试恢复连接，您也可以稍后点击重试', 'Attempting to restore the connection; retry in a moment if needed'),
       detail,
     };
   }
@@ -271,23 +390,6 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
       tone: 'warning',
       title: t('当前操作较为频繁', 'Service Busy'),
       description: t('系统正在处理上一项任务，请稍候片刻再试', 'Another request is currently being processed. Please wait a moment'),
-      detail,
-    };
-  }
-
-  if (
-    body === 'Remote target unavailable' ||
-    body === 'Not connected' ||
-    body === 'Original connection unavailable' ||
-    body.includes('无法连接目标节点') ||
-    lower.includes('target host unavailable') ||
-    body.includes('目标设备离线，已拒绝修改') ||
-    body.includes('所选设备不可用')
-  ) {
-    return {
-      tone: 'warning',
-      title: t('无法连接到目标设备', 'Target Device Unreachable'),
-      description: t('请确认远程节点在线且网络连接正常后再执行此操作', 'Ensure the remote host is online and connected before trying again'),
       detail,
     };
   }
@@ -412,10 +514,14 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
   }
 
   // Default fallback: clean title without ugly raw code prefix
+  const fallbackTitle =
+    contextPrefix && body
+      ? `${contextPrefix}：${body}`
+      : body || contextPrefix || t('操作未能完成', 'Operation Could Not Complete');
   return {
     tone: 'danger',
-    title: body || t('操作未能完成', 'Operation Could Not Complete'),
-    detail: code ? `${code}: ${body}` : extractedDetail || undefined,
+    title: fallbackTitle,
+    detail: code ? `${code}${body ? ': ' + body : ''}` : extractedDetail || undefined,
   };
 }
 

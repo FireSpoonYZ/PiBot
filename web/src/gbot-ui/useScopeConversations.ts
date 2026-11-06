@@ -50,11 +50,27 @@ const LIST_PAGE_LIMIT = 20;
 
 type ScopeKind = 'room' | 'dm';
 
+function isPeerOfflineError(e: unknown): boolean {
+  if (!e || typeof e !== 'object') return false;
+  const code = (e as { code?: unknown }).code;
+  return code === 'OFFLINE' || code === 'CONTROL_UNAVAILABLE' || code === 'DISCONNECTED';
+}
+
 function errText(e: unknown): string {
   if (e && typeof e === 'object') {
     const r = e as Record<string, unknown>;
-    const code = typeof r.code === 'string' ? r.code : '';
-    const message = typeof r.message === 'string' ? r.message : '';
+    const code = typeof r.code === 'string' ? r.code.trim() : '';
+    let message = typeof r.message === 'string' ? r.message.trim() : '';
+    if (code && message.startsWith(`${code}:`)) {
+      message = message.slice(code.length + 1).trim();
+    }
+    if (
+      message === code ||
+      /^(unconfirmed|not-sent|responded)$/i.test(message) ||
+      /^(unconfirmed|not-sent|responded):\s*[A-Z0-9_]+$/i.test(message)
+    ) {
+      message = '';
+    }
     if (code) return message ? code + ': ' + message : code;
     if (message) return message;
   }
@@ -360,7 +376,7 @@ export function useScopeConversations(
             if (!stillValid()) return;
             const msg = errText(e);
             if (msg === 'stale') return;
-            // 单来源失败：保留同账户未删除旧项 + 记错误，其他来源不受影响。
+            // 单来源失败：保留同账户未删除旧项；若只是对端节点离线则按离线快照静默回退，不弹冗余错误横幅。
             if (prev) {
               const bots = source.bots ?? [];
               for (const item of prev.items) {
@@ -373,7 +389,9 @@ export function useScopeConversations(
                 });
               }
             }
-            errors.push(label + ': ' + msg);
+            if (!isPeerOfflineError(e)) {
+              errors.push(label + ': ' + msg);
+            }
           }
         }
         purgeSnapshots(deletedScopeIds);

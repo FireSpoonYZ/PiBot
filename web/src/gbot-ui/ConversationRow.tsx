@@ -108,7 +108,9 @@ export function ConversationRow({
         </span>
 
         <span className="gbot-conversation-row__sub">
-          <span className="gbot-conversation-row__preview">{preview ?? ''}</span>
+          {preview ? (
+            <span className="gbot-conversation-row__preview">{preview}</span>
+          ) : null}
           {meta ? <span className="gbot-conversation-row__meta">{meta}</span> : null}
           {unread ? (
             <span aria-label="未读" className="gbot-conversation-row__unread-dot" />

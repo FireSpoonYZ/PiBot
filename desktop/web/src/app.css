@@ -1331,14 +1331,48 @@ details.raw-history > .raw-history-content {
 .status.error::before, .status.is-offline::before { background: var(--danger); }
 
 .error-banner {
-  background: var(--danger-soft);
-  border: 1px solid var(--danger);
-  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: color-mix(in srgb, var(--danger-soft) 88%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
+  border-radius: 12px;
   color: var(--danger);
-  padding: 9px 12px;
+  padding: 8px 12px;
   margin: 8px 0;
+  font-size: 13px;
+  line-height: 1.45;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+.error-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+.error-banner-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.error-banner button {
+  flex-shrink: 0;
+  min-height: 28px;
+  padding: 3px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--line));
+  background: var(--surface-elevated);
+  color: var(--danger);
+}
+.error-banner button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger-soft) 65%, var(--surface-elevated));
+  border-color: var(--danger);
+}
+.app-workspace > .error-banner {
+  margin: 8px 14px 0;
 }
 .metadata.error-banner { display: inline-block; margin: 0; padding: 3px 8px; font-size: 12px; font-family: var(--font-mono); }
 

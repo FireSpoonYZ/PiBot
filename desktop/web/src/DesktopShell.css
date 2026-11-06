@@ -47,11 +47,21 @@
   margin-bottom: 4px;
 }
 .desktop-shell .rail-spacer { flex: 1; }
+.desktop-shell .rail-icon-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 .desktop-shell .conn-dot {
+  position: absolute;
+  top: -2px;
+  right: -4px;
   display: inline-block;
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--surface, #efeee9);
 }
 .desktop-shell .conn-dot.online { background: var(--ok, #16a34a); }
 .desktop-shell .conn-dot.offline { background: var(--danger, #ac3434); }

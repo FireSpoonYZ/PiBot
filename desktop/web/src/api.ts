@@ -31,7 +31,11 @@ export class DesktopRemoteError extends Error {
   readonly code: string;
   readonly outcome: RemoteControlOutcome;
   constructor(shape: { code: string; message: string; outcome: RemoteControlOutcome }) {
-    super(`${shape.code}: ${shape.message}`);
+    const rawMsg = shape.message.trim();
+    const body = rawMsg.startsWith(`${shape.code}:`)
+      ? rawMsg.slice(shape.code.length + 1).trim()
+      : rawMsg;
+    super(body ? `${shape.code}: ${body}` : shape.code);
     this.name = 'DesktopRemoteError';
     this.code = shape.code;
     this.outcome = shape.outcome;

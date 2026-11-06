@@ -14,12 +14,14 @@ import {
   MessageSquare,
   Monitor,
   MoreHorizontal,
+  Palette,
   Pin,
   PinOff,
   Plus,
   RefreshCw,
   Search,
   Shrink,
+  Sparkles,
   Square,
   Star,
   Trash2,
@@ -200,18 +202,35 @@ function sessionKey(id: DesktopIdentity | null): string {
 function errText(e: unknown): string {
   if (e && typeof e === 'object') {
     const r = e as Record<string, unknown>;
-    const code = typeof r.code === 'string' ? r.code : '';
-    const message = typeof r.message === 'string' ? r.message : '';
+    const code = typeof r.code === 'string' ? r.code.trim() : '';
+    let message = typeof r.message === 'string' ? r.message.trim() : '';
+    if (code && message.startsWith(`${code}:`)) {
+      message = message.slice(code.length + 1).trim();
+    }
+    if (
+      message === code ||
+      /^(unconfirmed|not-sent|responded)$/i.test(message) ||
+      /^(unconfirmed|not-sent|responded):\s*[A-Z0-9_]+$/i.test(message)
+    ) {
+      message = '';
+    }
     if (code) return message ? `${code}: ${message}` : code;
     if (message) return message;
   }
   return String(e);
 }
 
-/** 目标 Host 不可达（OFFLINE/CONTROL_UNAVAILABLE）只污染对应聊天上下文，不上全局横幅；
- * 其余错误（含未知 outcome 的写入失败）照旧 reportError，不吞未知结果。 */
+/** 判断是否为对端节点离线/连接断开错误。 */
+function isPeerDisconnectError(e: unknown): boolean {
+  if (isTargetOfflineError(e)) return true;
+  const code = e && typeof e === 'object' ? (e as { code?: unknown }).code : undefined;
+  return code === 'DISCONNECTED' || code === 'NOT_CONNECTED' || code === 'EVENT_STREAM_CLOSED';
+}
+
+/** 目标 Host 不可达或连接断开只展示在对应聊天上下文，不上顶栏全局横幅；
+ * 其余错误照旧 reportError。 */
 function reportUnlessTargetOffline(api: { reportError(e: unknown): void }, e: unknown): void {
-  if (!isTargetOfflineError(e)) api.reportError(e);
+  if (!isPeerDisconnectError(e)) api.reportError(e);
 }
 
 /** 只有 error.outcome 明确 not-sent（未派发）才可判定未入队；其余一律视为结果未知。 */
@@ -863,11 +882,10 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, attachme
       {sendError ? <div className="error-banner" role="alert">{sendError}</div> : null}
       {sendNotice ? <div className="status" role="status">{sendNotice}</div> : null}
       <div className="composer-footer">
-        <p className="hint">Enter 发送 · Shift+Enter 换行 · / 呼出命令</p>
-        <details className="composer-details">
-          <summary>发送链路说明</summary>
-          <p className="hint">发送：冻结 ID → 入队 → 清空草稿 → 显式发送；结果以回执/live 为准。{draftHint ? ' ' + draftHint : ''}</p>
-        </details>
+        <p className="hint">
+          Enter 发送 · Shift+Enter 换行 · / 呼出命令
+          {draftHint ? ` · ${draftHint}` : ''}
+        </p>
       </div>
     </div>
   );
@@ -1785,8 +1803,7 @@ function PrimaryChatPane({
           if (sessionKey(api.identity) !== localSess) return;
           if ('error' in ev) {
             const err = ev as Extract<DesktopObservationEvent, { error: unknown }>;
-            const shape = err.error as { code?: string; message?: string };
-            setLiveError(`${shape.code ?? '未知'}${shape.message ? ': ' + shape.message : ''}`);
+            setLiveError(tErr(err.error));
             setLiveEnded(true);
             return;
           }
@@ -2195,20 +2212,19 @@ function PrimaryChatPane({
         </div>
       ) : null}
 
-      {liveEnded && online ? (
+      {liveEnded && online && !liveError && !rawError ? (
         <div className="status live-ended-banner" role="status">
           观察已结束（不断连 Agent）。
           <button type="button" onClick={() => setWatchTick((t) => t + 1)}>重新观察</button>
         </div>
       ) : null}
-      {liveError && online ? (
-        <div className="error-banner" role="alert">{liveError}</div>
-      ) : null}
       {!online ? (
-        <div className="status" role="status">
-          {identity
-            ? `目标 ${deviceName}（${bot.role}）离线：显示最后读取的内容（只读），草稿保留；恢复在线后可继续发送。`
-            : '连接已断开：显示最后读取的内容（只读），草稿保留。'}
+        <div className="status status-offline-bar" role="status">
+          <span>
+            {identity
+              ? `目标 ${deviceName}（${bot.role}）离线：显示最后读取的内容（只读），草稿保留；恢复在线后可继续发送。`
+              : '连接已断开：显示最后读取的内容（只读），草稿保留。'}
+          </span>
         </div>
       ) : null}
 
@@ -2224,20 +2240,24 @@ function PrimaryChatPane({
         onSubmitQuestionnaire={submitQuestionnaire}
         attachmentFetcher={attachmentFetcher}
         loading={rawLoading}
-        error={rawError}
+        error={online ? (rawError || liveError) : null}
         hasMore={false}
         onLoadMore={() => void loadRaw()}
-        onRetry={() => void loadRaw()}
+        onRetry={() => {
+          setLiveError(null);
+          setWatchTick((t) => t + 1);
+          void loadRaw();
+        }}
         emptyActions={
           <>
             <button type="button" className="secondary-button" onClick={() => openInspector('profile')}>
-              🎨 定制形象与资料
+              <Palette size={15} aria-hidden="true" /> 定制形象与资料
             </button>
             <button type="button" className="secondary-button" onClick={() => openInspector('settings')}>
-              🎭 配置灵魂与模型
+              <Sparkles size={15} aria-hidden="true" /> 配置灵魂与模型
             </button>
             <button type="button" className="secondary-button" onClick={() => openInspector('shower')}>
-              🖥 打开虚拟桌面
+              <Monitor size={15} aria-hidden="true" /> 打开虚拟桌面
             </button>
           </>
         }
@@ -2569,10 +2589,16 @@ export function BotChats({
       });
       setDevices(directory.devices);
       setLoaded(true);
+      const actionableErrors = directory.errors.filter(
+        (e) => e.code !== 'OFFLINE' && e.code !== 'CONTROL_UNAVAILABLE' && e.code !== 'DISCONNECTED',
+      );
       setBotsError(
-        directory.errors.length
-          ? directory.errors
-              .map((e) => `${directory.devices.find((d) => d.deviceId === e.deviceId)?.displayName || e.deviceId}: ${e.code}${e.message ? ' ' + e.message : ''}`)
+        actionableErrors.length
+          ? actionableErrors
+              .map((e) => {
+                const devName = directory.devices.find((d) => d.deviceId === e.deviceId)?.displayName || e.deviceId;
+                return `${devName}: ${errText(e)}`;
+              })
               .join('；')
           : null,
       );
@@ -3389,6 +3415,11 @@ export function BotChats({
     return devices.find((d) => d.deviceId === deviceId)?.online ?? false;
   }
 
+  function shortDeviceName(name: string): string {
+    const trimmed = name.trim();
+    return trimmed.length > 8 ? `${trimmed.slice(0, 7).trimEnd()}…` : trimmed;
+  }
+
   function renderGroupRow(g: (typeof groupRows)[number], pinned: boolean) {
     const source = groupSourceOf(g);
     const scopeId = g.scope.scope.scopeId;
@@ -3398,12 +3429,12 @@ export function BotChats({
       <ConversationRow
         className="hub-bot-row"
         title={g.title}
-        preview={g.lastPreview || undefined}
+        preview={plainPreview(g.lastPreview)}
         timestamp={g.lastActivityAt}
         selected={isSelected}
         pinned={pinned}
         badge="群聊"
-        meta={source.label}
+        meta={shortDeviceName(source.label)}
         avatar={
           <ConversationGroupAvatar members={g.scope.scope.members} bots={bots} size={46} />
         }
@@ -3440,6 +3471,19 @@ export function BotChats({
     );
   }
 
+  function plainPreview(raw: string | null | undefined): string | undefined {
+    if (!raw) return undefined;
+    const cleaned = raw
+      .replace(/```[\s\S]*?```/g, ' [代码] ')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/__([^_]+)__/g, '$1')
+      .replace(/^#+\s+/gm, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return cleaned || undefined;
+  }
+
   function renderBotRow(b: BotDirectoryEntry, pinned: boolean) {
     const chatKey = botPinKey(b.deviceId, b.botId);
     const isSelected =
@@ -3451,11 +3495,11 @@ export function BotChats({
       <ConversationRow
         className={`hub-bot-row${isSelected ? ' selected' : ''}${!isBotOnline ? ' offline' : ''}`}
         title={b.role}
-        preview={b.lastPreview || b.description || undefined}
+        preview={plainPreview(b.lastPreview)}
         timestamp={activityIso}
         selected={isSelected}
         pinned={pinned}
-        meta={`${deviceNameOf(b.deviceId)} · ${isBotOnline ? '在线' : '离线'}`}
+        meta={`${shortDeviceName(deviceNameOf(b.deviceId))} · ${isBotOnline ? '在线' : '离线'}`}
         avatar={
           <GrokBotAvatar
             botKey={botAvatarKey(b)}
@@ -3649,11 +3693,13 @@ export function BotChats({
                 isPrimary
                 starBadge
                 platformBadge={b.platform || 'host'}
-                size={56}
+                size={44}
               />
-              <span className="hub-hero-name">{b.role}</span>
-              <span className={`hub-hero-node${b.online && online ? '' : ' offline'}`}>
-                {b.online && online ? deviceNameOf(b.deviceId) : `${deviceNameOf(b.deviceId)} · 离线`}
+              <span className="hub-hero-info">
+                <span className="hub-hero-name">{b.role}</span>
+                <span className={`hub-hero-node${b.online && online ? '' : ' offline'}`}>
+                  {b.online && online ? deviceNameOf(b.deviceId) : `${deviceNameOf(b.deviceId)} · 离线`}
+                </span>
               </span>
             </HeroBotCard>
           ))}
@@ -3670,8 +3716,10 @@ export function BotChats({
               }}
             >
               <span className="hub-hero-plus">＋</span>
-              <span className="hub-hero-name">创建主智能体</span>
-              <span className="hub-hero-node">{d.displayName || '未命名设备'}</span>
+              <span className="hub-hero-info">
+                <span className="hub-hero-name">创建主智能体</span>
+                <span className="hub-hero-node">{d.displayName || '未命名设备'}</span>
+              </span>
             </button>
           ))}
         </div>
@@ -3682,7 +3730,7 @@ export function BotChats({
             ref={searchInputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索智能体或群聊…（Ctrl+K）"
+            placeholder="搜索对话…"
             aria-label="搜索智能体或群聊"
           />
           {query ? (
@@ -3694,7 +3742,9 @@ export function BotChats({
             >
               <X size={13} />
             </button>
-          ) : null}
+          ) : (
+            <kbd className="hub-search-kbd" aria-hidden="true">Ctrl K</kbd>
+          )}
         </div>
 
         {devices.length > 1 ? (
