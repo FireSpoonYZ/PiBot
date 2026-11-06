@@ -40,6 +40,7 @@ import { SOUL_MAX_BYTES } from './bot-soul.js';
 import { normalizeUserMessage } from './scope-protocol.js';
 import { createCommunicationTools } from './communication-tools.js';
 import { createCollaborationService } from './collaboration-service.js';
+import { BASE_BEHAVIOR_PROMPT } from './bot-prompt.js';
 import { renderCollaborationPrompt } from './collaboration-prompt.js';
 import { createCuaTools } from './cua-tools.js';
 import { createShowerManager } from './shower-manager.js';
@@ -370,6 +371,10 @@ export async function openRuntime(options) {
     nativeBridge,
   });
   const registry = createRegistry();
+  registry.install(defineExtension({
+    name: 'host.base-behavior',
+    sections: [section('host-base-behavior', () => BASE_BEHAVIOR_PROMPT)],
+  }));
   registry.install(createCodingTools());
   registry.install(createToolSearchExtension());
   registry.install(defineExtension({
