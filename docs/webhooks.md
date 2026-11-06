@@ -160,4 +160,11 @@ Host 在启动、恢复、重连和接到通知后拉取事件，并通过有界
 
 `WebhookEvent` 字段为 `id,routeId,routeName,deviceId,botId,requestId,idempotencyKey,status,receivedAt,expiresAt,updatedAt,cancelRequested,admission?,error?`。`cancelRequested` 默认 false，仅表示中心停止意图，终态可保留作审计但不再显示“取消中”。`admission` 可缺省或为 null，形状为 `{phase:'queued'|'checking'|'synchronizing'|'failed',error?:{code,message}}`，不重复 requestId；进入 running/终态清除旧准入诊断。`error` 为 `{code,message}`，也可缺省或为 null；诊断只含安全短错误。所有者事件列表不返回 payload、固定指令快照或最终回答。
 
-本文描述 v1 接口与使用约定，不是运行验收记录；实际 UI、剪贴板、n8n、离线恢复与端到端执行需在整合中心及 Host 后验收。
+## 8. 本次 Webhook 修补验收（父助手，限定范围）
+
+- **环境与证据**：真实 Center、Windows Host、工具及 SQLite，模型使用 Mockoon 受控 OpenAI 兼容响应，验证运行链路而非真实模型智力。证据根为 `D:/tmp/pibot-webhook-repair-acceptance`，最终 `acceptance.json` 由父助手保存；本节不是此前三端客户端验收的重述。
+- **持久化、诊断与分页**：Center v7→v8 保留旧入口、事件及 token；同状态准入诊断可更新/清除，running 不回退。Bot A 的 52 条积压取消 1 条、仍有 51 条未完成时，Bot B 事件在第二页领取并真实执行，覆盖终态移除后的分页；同毫秒分页仅静态核对。
+- **来源与顺序**：W1 已运行、W2 先排队、U 后到，实际 W1 → U → W2；history/live 保留 `sourceType=webhook`，伪造 HTTP origin 仍归为 user，queued/preparing/failed/running 来源正确。
+- **停止与恢复**：maintenance 下未领取事件、单次延迟 poll 跨停止的旧事件均取消，后者无 native submission；待中心确认期间新用户仍可运行，live 标记不遮蔽工作。离线停止记录跨进程重启后取消确认窗口积压；native done 丢回执后，即使注入原始残留 Host 队列及 stopPending 再重启，getSubmission/中心仍保留 done/succeeded。**重启实测在中心恢复后启动**；Host CLI 原有无中心冷启动返回 `CENTER_OFFLINE`，不声称支持离线冷启动。
+- **准入与异步完成**：同 ID 失败重试 overlay 回归已修；未配模型的新请求在 grant 前失败，配置修复后同 ID 仅执行一次。真实 `send_to` 委派 B 时，初始 Webhook 先 succeeded，B 随后 reply，A 续轮回 primary；对应证据为根目录的 `delegation-initial.json`、`delegation-scope-history.json`、`delegation-final-history.json`。
+- **界面与边界**：Center 浏览器实际显示准入失败原因和“本轮完成”；三套前端构建及 desktop tsc 通过。本轮未新增测试、未跑单元测试，未做 Android/native GUI 或跨设备 Bot 协作验收；剪贴板、n8n 等未列明路径不据此宣称已验收。
