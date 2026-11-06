@@ -34,5 +34,5 @@ COPY --chown=node:node licenses/ ./licenses/
 COPY --chown=node:node plugins/ ./plugins/
 RUN mkdir -p /data && chown node:node /data
 USER node
-EXPOSE 8443 8790
+EXPOSE 8080
 CMD ["node", "center-server/cli.js"]

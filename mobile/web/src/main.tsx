@@ -1,11 +1,13 @@
 // Android Tauri 主界面入口：统一承载极简 Bot Hub（置顶主 Bot + 本机/远程统一 Bot 列表 + 左右隐藏侧边栏）。
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { DesktopClientStatus } from '../../../host-core/desktop-client';
 import { HashRouter } from 'react-router-dom';
 import { HostPage } from '../../../web/src/Host';
-import { CenterGate, isTransientCenterError, type CenterStatus } from '../../../web/src/native/CenterGate';
+import { CenterGate, isTransientCenterError, useCenterConnection, type CenterStatus } from '../../../web/src/native/CenterGate';
 import { ErrorNotice, LanguageOverride, errorText } from '../../../web/src/ui';
+import { ClientUpdateProvider } from '../../../web/src/ClientUpdateProvider';
+import type { ClientUpdateOp, ClientUpdateParams, ClientUpdateStatus } from '../../../web/src/ClientUpdate';
 import {
   mobileHide,
   mobileLocalRequest,
@@ -228,19 +230,43 @@ function MobileShell() {
     <LanguageOverride.Provider value={ui.language}>
       <div className="mobile-shell">
         <div className="mobile-body">
-          <CenterGate onDisconnected={centerDisconnected} onReady={centerReady} recoveryEpoch={connectionEpoch + adoptEpoch}><HostPage
-            onBack={() => void mobileHide()}
-            persistentPending
-            connectionEpoch={connectionEpoch}
-            active
-            getOrCreateRemoteClient={getOrCreateRemoteClient}
-            onRefreshConnection={checkConnection}
-            onOpenSystemSettings={() => void mobileLocalRequest('openSystemSettings').catch(error => setNotice(errorText(error)))}
-          /></CenterGate>
+          <CenterGate onDisconnected={centerDisconnected} onReady={centerReady} recoveryEpoch={connectionEpoch + adoptEpoch}>
+            <MobileUpdateBoundary>
+              <HostPage
+                onBack={() => void mobileHide()}
+                persistentPending
+                connectionEpoch={connectionEpoch}
+                active
+                getOrCreateRemoteClient={getOrCreateRemoteClient}
+                onRefreshConnection={checkConnection}
+                onOpenSystemSettings={() => void mobileLocalRequest('openSystemSettings').catch(error => setNotice(errorText(error)))}
+              />
+            </MobileUpdateBoundary>
+          </CenterGate>
         </div>
         <ErrorNotice error={notice} compact onDismiss={() => setNotice('')} />
       </div>
     </LanguageOverride.Provider>
+  );
+}
+
+/** Android 更新命令适配：语义操作 → mobileLocalRequest update*（原生侧负责节流/验签/安装）。 */
+const mobileUpdateRequest = (op: ClientUpdateOp, params?: ClientUpdateParams): Promise<ClientUpdateStatus> => {
+  const method = 'update' + op[0].toUpperCase() + op.slice(1);
+  return mobileLocalRequest<ClientUpdateStatus>(method, { ...(params ?? {}) });
+};
+
+/** CenterGate ready 后挂载更新 provider：centerKey 变化/断开即作废旧查询结果。 */
+function MobileUpdateBoundary({ children }: { children: ReactNode }) {
+  const conn = useCenterConnection();
+  const ready = conn.ready;
+  const centerKey = ready
+    ? (conn.status?.centerUrl ?? '') + '|' + (conn.saved?.deviceId ?? conn.status?.clientId ?? '')
+    : '';
+  return (
+    <ClientUpdateProvider request={mobileUpdateRequest} ready={ready} centerKey={centerKey}>
+      {children}
+    </ClientUpdateProvider>
   );
 }
 

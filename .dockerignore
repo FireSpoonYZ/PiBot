@@ -6,6 +6,7 @@
 .pi
 .env
 .env.*
+!**/*.env.example
 center.env
 center-certs
 **/*.pem
@@ -20,3 +21,5 @@ local.properties
 **/*.sqlite-*
 **/*.db
 **/*.db-*
+tauri-updater.key
+tauri-updater.key.pub

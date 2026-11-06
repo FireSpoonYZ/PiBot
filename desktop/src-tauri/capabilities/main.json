@@ -7,13 +7,18 @@
   "platforms": ["windows", "linux"],
   "permissions": [
     "allow-desktop-request",
-  "allow-desktop-open-center",
+    "allow-desktop-open-center",
     "allow-desktop-observe",
     "allow-desktop-unobserve",
     "allow-desktop-pick-file",
     "allow-desktop-host-status",
     "allow-desktop-host-pair",
     "allow-desktop-host-adopt",
-    "allow-desktop-host-control"
+    "allow-desktop-host-control",
+    "allow-desktop-update-status",
+    "allow-desktop-update-check",
+    "allow-desktop-update-download",
+    "allow-desktop-update-install",
+    "allow-desktop-update-cancel"
   ]
 }

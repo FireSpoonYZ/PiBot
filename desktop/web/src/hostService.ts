@@ -5,18 +5,28 @@ import { invoke } from '@tauri-apps/api/core';
 /** 启动器 `status` 输出（契约 §3），Rust 侧额外附带 `hostname`。 */
 export interface HostStatus {
   configured: boolean;
-  running: boolean;
+  configError?: unknown;
+  running?: boolean | null;
   pid: number | null;
   hostPid: number | null;
   controlUrl: string | null;
   centerUrl: string | null;
   deviceId: string | null;
-  autostart: boolean;
+  autostart?: boolean | null;
   logFile: string;
   /** 启动器若输出则显示；契约未强制。 */
   displayName?: string | null;
   /** 本机主机名（Rust 读取环境），用作默认本机名称。 */
   hostname?: string | null;
+  /** 启动器扩展字段：Windows 服务登记/状态/启动类型；缺省=未上报，不乱映射。 */
+  service?: { registered?: boolean | null; state?: string | null; startType?: string | null } | null;
+  ownerSid?: string | null;
+  /** Host 进程阶段与中心连接状态（host_service 附带）；缺省=未知。 */
+  hostPhase?: string | null;
+  centerState?: string | null;
+  online?: boolean | null;
+  /** Linux linger 状态；缺省=未上报。 */
+  linger?: boolean | null;
 }
 
 /** 启动器 `pair` 输出。 */
@@ -28,6 +38,10 @@ export interface HostPairResult {
   controlUrl: string;
   /** 强制重新配对后重启 Host 失败时由 Rust 附带。 */
   restartError?: { code: string; message: string };
+  /** 配对成功但个别步骤（自启/启动 Host）失败时由启动器附带；不阻断配对结果。 */
+  warnings?: string[];
+  running?: boolean;
+  autostart?: boolean;
 }
 
 export interface HostAdoptResult {
@@ -36,7 +50,7 @@ export interface HostAdoptResult {
   start: Record<string, unknown>;
 }
 
-export type HostControlAction = 'start' | 'stop' | 'restart' | 'enable' | 'disable';
+export type HostControlAction = 'start' | 'stop' | 'restart' | 'enable' | 'disable' | 'remove';
 
 export interface HostPairInput {
   centerUrl: string;

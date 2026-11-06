@@ -91,7 +91,7 @@ export interface Host {
   close(): void;
 }
 
-export function openHost(options: { dataRoot: string }): Host;
+export function openHost(options: { dataRoot: string; expectedDeviceId?: string }): Host;
 
 export interface PrimarySubmission {
   botId: string;
@@ -1180,6 +1180,8 @@ export interface HostServiceOptions {
   npmPath?: string;
   displayName?: string;
   platform?: string;
+  /** Expected device identity for first pairing or verification; mismatched existing DB rejects with IDENTITY_MISMATCH. */
+  expectedDeviceId?: string;
   /** Optional trusted JS native bridge for Android tools; never persisted as a settings field. */
   nativeBridge?: NativeBridge;
 }
@@ -1848,8 +1850,15 @@ export interface OpenRelayServerOptions {
 }
 
 export interface RelayServer {
-  readonly url: string;
+  readonly url: string | null;
+  readonly httpServer?: import('node:http').Server;
   getStatus(): RelayServerStatus;
+  call<K extends keyof RemoteControlMethodMap>(
+    clientDeviceId: string,
+    targetDeviceId: string,
+    method: K,
+    params: RemoteControlMethodMap[K]['params'],
+  ): Promise<RemoteControlMethodMap[K]['result']>;
   close(): Promise<void>;
 }
 

@@ -22,6 +22,7 @@ import type { BotDirectoryEntry, DevicesDirectoryItem } from '../../../host-core
 import type { DesktopIdentity } from './types';
 import { openCenterManagement } from './CenterGate';
 import { HostServiceSection } from './HostServiceSection';
+import { ClientUpdateSection } from '../../../web/src/ClientUpdateSection';
 import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
 import { botAvatarKey } from '../../../web/src/botAvatarSync';
 import { remainingArchiveDays, type BotChatsArchiveBridge } from './BotChats';
@@ -458,6 +459,8 @@ export function SettingsPanel(props: SettingsPanelProps) {
             </div>
 
             <HostServiceSection />
+
+            <ClientUpdateSection variant="desktop" />
 
             <div className="settings-section">
               <div className="section-head">

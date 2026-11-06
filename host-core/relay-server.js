@@ -8,6 +8,7 @@
 // scopeProtocol:1; no scope/history state or pending mailbox is kept here.
 // The relay never persists messages and keeps no business state beyond peers.
 
+import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSecureContext } from 'node:tls';
@@ -25,7 +26,7 @@ import {
   readClientFrame,
   encodeRelayFrame
 } from './relay-protocol.js';
-import { digest, messageError } from './message-protocol.js';
+import { assertId, digest, messageError } from './message-protocol.js';
 import {
   openControlRoutes,
   CONTROL_MAX_CLIENT_CALLS,
@@ -38,7 +39,7 @@ import {
   LIVE_MAX_HOST_SUBSCRIPTIONS,
   LIVE_MAX_SUBSCRIPTIONS
 } from './relay-live.js';
-import { controlMethodTimeoutMs, controlMethodVersion } from './remote-control-protocol.js';
+import { controlMethodTimeoutMs, controlMethodVersion, normalizeControlCall } from './remote-control-protocol.js';
 
 const DEFAULT_PORT = 8790;
 const DEFAULT_LISTEN_HOST = '127.0.0.1';
@@ -97,21 +98,39 @@ export async function openRelayServer(options = {}) {
   const port = options.port === undefined ? DEFAULT_PORT : options.port;
   const listenHost = options.listenHost === undefined ? DEFAULT_LISTEN_HOST : options.listenHost;
   const tls = options.tls;
+  const httpServer = options.httpServer;
   const onHostDisconnect = typeof options.onHostDisconnect === 'function' ? options.onHostDisconnect : null;
 
   // All validation happens before any registry data / sockets are created.
   if (typeof dataRoot !== 'string' || dataRoot.trim() === '' || !isAbsolute(dataRoot)) {
     throw invalid('dataRoot must be a non-empty absolute path');
   }
-  if (!Number.isInteger(port) || port < 0 || port > 65535) {
-    throw invalid('port must be an integer between 0 and 65535');
-  }
-  if (typeof listenHost !== 'string' || isIP(listenHost) === 0) {
-    throw invalid('listenHost must be a literal IP address');
+
+  // httpServer mode attaches the /v1/link upgrade handler to a caller-owned
+  // HTTP listener (e.g. the center Fastify server behind a TLS-terminating
+  // proxy). It excludes the standalone port/listenHost/tls options; the relay
+  // never listens or loads certificates itself in this mode.
+  const sharedServer = httpServer !== undefined;
+  if (sharedServer) {
+    if (
+      typeof httpServer !== 'object' || httpServer === null ||
+      typeof httpServer.on !== 'function' || typeof httpServer.once !== 'function' ||
+      typeof httpServer.removeListener !== 'function' ||
+      options.port !== undefined || options.listenHost !== undefined || tls !== undefined
+    ) {
+      throw invalid('httpServer requires a Node.js http.Server and excludes port/listenHost/tls');
+    }
+  } else {
+    if (!Number.isInteger(port) || port < 0 || port > 65535) {
+      throw invalid('port must be an integer between 0 and 65535');
+    }
+    if (typeof listenHost !== 'string' || isIP(listenHost) === 0) {
+      throw invalid('listenHost must be a literal IP address');
+    }
   }
 
   let tlsOptions = null;
-  if (tls !== undefined) {
+  if (!sharedServer && tls !== undefined) {
     if (
       typeof tls !== 'object' || tls === null ||
       typeof tls.cert !== 'string' || tls.cert === '' ||
@@ -125,7 +144,7 @@ export async function openRelayServer(options = {}) {
       throw invalid('tls cert/key are not valid PEM');
     }
     tlsOptions = { cert: tls.cert, key: tls.key };
-  } else if (listenHost !== '127.0.0.1' && listenHost !== '::1') {
+  } else if (!sharedServer && listenHost !== '127.0.0.1' && listenHost !== '::1') {
     // Plain WS is only allowed on literal loopback; every other bind requires TLS.
     throw invalid('TLS is required unless listening on literal 127.0.0.1 or ::1');
   }
@@ -142,19 +161,27 @@ export async function openRelayServer(options = {}) {
   let wss = null;
   let server = null;
   let registry = null;
+  // The caller owns the HTTP listener in shared mode: close() cleans WS state
+  // and the registry but never closes or reconfigures that server.
+  let ownsServer = false;
   try {
     wss = new WebSocketServer({
       noServer: true,
       maxPayload: MAX_RELAY_FRAME_BYTES,
       perMessageDeflate: false
     });
-    server = tlsOptions
-      ? createHttpsServer(tlsOptions, requestHandler)
-      : createServer(requestHandler);
+    if (sharedServer) {
+      server = httpServer;
+    } else {
+      server = tlsOptions
+        ? createHttpsServer(tlsOptions, requestHandler)
+        : createServer(requestHandler);
+      ownsServer = true;
+    }
     registry = openRelayRegistry({ dataRoot });
   } catch (err) {
     try { wss?.close(); } catch { /* ignore */ }
-    try { server?.close(); } catch { /* ignore */ }
+    try { if (ownsServer) server?.close(); } catch { /* ignore */ }
     try { registry?.close(); } catch { /* ignore */ }
     throw err;
   }
@@ -454,45 +481,48 @@ export async function openRelayServer(options = {}) {
     }
   }
 
-  function routeControlCall(conn, frame) {
-    if (controlRoutes.findByClientCall(conn, frame.callId)) {
-      return closeWith(conn, RELAY_CLOSE.BAD_FRAME);
-    }
+  // Shared placement path for wire control-call frames and the
+  // in-process internal client: identical method-version gate, pending/host
+  // call limits, target identity check and per-method deadline. Failures are
+  // delivered back through the client conn's control-result channel.
+  function placeControlCall(client, callId, targetDeviceId, method, params) {
     let methodVersion;
     try {
-      methodVersion = controlMethodVersion(frame.method);
+      methodVersion = controlMethodVersion(method);
     } catch {
-      return closeWith(conn, RELAY_CLOSE.BAD_FRAME);
+      // Wire frames are already normalized upstream; internal callers validate
+      // via normalizeControlCall first, so this is unreachable in practice.
+      return sendControlFailure(client, callId, targetDeviceId, 'INVALID_ARGUMENT', 'not-sent');
     }
     // Legacy clients (no controlProtocol) may still call v1 methods; a method
     // additionally requires each peer to declare controlProtocol >= its version.
-    const clientCap = conn.controlProtocol === 2 ? 2 : 1;
+    const clientCap = client.controlProtocol === 2 ? 2 : 1;
     if (clientCap < methodVersion) {
-      return sendControlFailure(conn, frame.callId, frame.targetDeviceId, 'CONTROL_UNAVAILABLE', 'not-sent');
+      return sendControlFailure(client, callId, targetDeviceId, 'CONTROL_UNAVAILABLE', 'not-sent');
     }
     if (
       controlRoutes.size() >= CONTROL_MAX_PENDING ||
-      controlRoutes.countClient(conn) >= CONTROL_MAX_CLIENT_CALLS
+      controlRoutes.countClient(client) >= CONTROL_MAX_CLIENT_CALLS
     ) {
-      return sendControlFailure(conn, frame.callId, frame.targetDeviceId, 'RPC_BUSY', 'not-sent');
+      return sendControlFailure(client, callId, targetDeviceId, 'RPC_BUSY', 'not-sent');
     }
-    const peer = deviceMap.get(frame.targetDeviceId);
+    const peer = deviceMap.get(targetDeviceId);
     if (!peer || !peerUsable(peer)) {
-      return sendControlFailure(conn, frame.callId, frame.targetDeviceId, 'OFFLINE', 'not-sent');
+      return sendControlFailure(client, callId, targetDeviceId, 'OFFLINE', 'not-sent');
     }
     if (peer.controlProtocol < methodVersion) {
-      return sendControlFailure(conn, frame.callId, frame.targetDeviceId, 'CONTROL_UNAVAILABLE', 'not-sent');
+      return sendControlFailure(client, callId, targetDeviceId, 'CONTROL_UNAVAILABLE', 'not-sent');
     }
     if (controlRoutes.countHost(peer) >= CONTROL_MAX_HOST_CALLS) {
-      return sendControlFailure(conn, frame.callId, frame.targetDeviceId, 'RPC_BUSY', 'not-sent');
+      return sendControlFailure(client, callId, targetDeviceId, 'RPC_BUSY', 'not-sent');
     }
-    const record = controlRoutes.add(conn, frame.callId, peer, frame.targetDeviceId, controlMethodTimeoutMs(frame.method));
+    const record = controlRoutes.add(client, callId, peer, targetDeviceId, controlMethodTimeoutMs(method));
     if (!writeFrame(peer.ws, {
       type: 'control-request',
       routeId: record.routeId,
-      fromDeviceId: conn.deviceId,
-      method: frame.method,
-      params: frame.params
+      fromDeviceId: client.deviceId,
+      method,
+      params
     }, (err) => {
       if (err) {
         // Accepted send failed asynchronously: the host may have seen it, so
@@ -502,8 +532,15 @@ export async function openRelayServer(options = {}) {
     })) {
       controlRoutes.remove(record.routeId);
       const code = peer.dead || peer.ws.readyState !== WS_OPEN ? 'OFFLINE' : 'BACKPRESSURE';
-      sendControlFailure(conn, frame.callId, frame.targetDeviceId, code, 'not-sent');
+      sendControlFailure(client, callId, targetDeviceId, code, 'not-sent');
     }
+  }
+
+  function routeControlCall(conn, frame) {
+    if (controlRoutes.findByClientCall(conn, frame.callId)) {
+      return closeWith(conn, RELAY_CLOSE.BAD_FRAME);
+    }
+    placeControlCall(conn, frame.callId, frame.targetDeviceId, frame.method, frame.params);
   }
 
   function routeControlCancel(conn, frame) {
@@ -548,6 +585,105 @@ export async function openRelayServer(options = {}) {
       return false;
     }
     return true;
+  }
+
+  // ---- In-process internal client (center -> host control calls) ----
+  // The center calls host control methods through the same routeControlCall
+  // placement path a remote client conn would use: identical method whitelist
+  // (normalizeControlCall), target identity/peerUsable check, pending/host
+  // call limits and per-method deadlines. The "client" is a conn-shaped object
+  // whose ws is a synchronous in-memory sink: outbound control-result frames
+  // settle the per-call promise instead of touching a socket. Internal conns
+  // are never added to allConns, so heartbeat/registry scans and socket close
+  // cleanup do not apply; relay close() fails every pending call explicitly.
+  const internalPending = new Map(); // callId -> {resolve, reject}
+  const internalClients = new Map(); // deviceId -> conn-shaped client
+
+  function internalResultError(code, outcome) {
+    const err = new Error(`control call failed: ${code}`);
+    err.code = typeof code === 'string' ? code : 'INTERNAL';
+    err.outcome = typeof outcome === 'string' ? outcome : 'unconfirmed';
+    return err;
+  }
+
+  function internalWs() {
+    return {
+      readyState: WS_OPEN,
+      bufferedAmount: 0,
+      send(text, cb) {
+        let frame = null;
+        try { frame = JSON.parse(text); } catch { frame = null; }
+        const pending = frame !== null ? internalPending.get(frame.callId) : undefined;
+        if (pending !== undefined) {
+          internalPending.delete(frame.callId);
+          if (frame.ok === true) pending.resolve(frame.result);
+          else pending.reject(internalResultError(frame.code, frame.outcome));
+        }
+        if (typeof cb === 'function') {
+          try { cb(); } catch { /* delivery callback must not break routing */ }
+        }
+      },
+      ping() {},
+      pong() {},
+      terminate() {},
+      close() {},
+      on() { return this; },
+      once() { return this; },
+      off() { return this; },
+      removeListener() { return this; },
+    };
+  }
+
+  function internalClient(deviceId) {
+    let conn = internalClients.get(deviceId);
+    if (conn === undefined) {
+      conn = {
+        ws: internalWs(),
+        deviceId,
+        version: 0,
+        role: 'client',
+        controlProtocol: 2,
+        scopeProtocol: 0,
+        helloTimer: null,
+        alive: true,
+        dead: false,
+        replaced: false,
+        disconnectNotified: false,
+      };
+      internalClients.set(deviceId, conn);
+    }
+    return conn;
+  }
+
+  function internalCall(clientDeviceId, targetDeviceId, method, params) {
+    if (closed) return Promise.reject(internalResultError('DISCONNECTED', 'not-sent'));
+    let normalized;
+    try {
+      assertId(clientDeviceId, 'clientDeviceId');
+      assertId(targetDeviceId, 'targetDeviceId');
+      normalized = normalizeControlCall(method, params);
+    } catch (err) {
+      const code = err && err.code === 'REQUEST_TOO_LARGE' ? 'REQUEST_TOO_LARGE' : 'INVALID_ARGUMENT';
+      return Promise.reject(internalResultError(code, 'not-sent'));
+    }
+    const client = internalClient(clientDeviceId);
+    let device = null;
+    try { device = registry.get(clientDeviceId); } catch { device = null; }
+    if (device === null || device.revokedAt !== null) {
+      return Promise.reject(internalResultError('REVOKED', 'not-sent'));
+    }
+    // Refresh the credential version per call so a rotated registration cannot
+    // leave a stale version silently dropping results until timeout.
+    client.version = device.credentialVersion;
+    const callId = randomUUID();
+    if (controlRoutes.findByClientCall(client, callId)) {
+      return Promise.reject(internalResultError('INVALID_ARGUMENT', 'not-sent'));
+    }
+    const promise = new Promise((resolve, reject) => {
+      internalPending.set(callId, { resolve, reject });
+    });
+    placeControlCall(client, callId, targetDeviceId, normalized.method, normalized.params);
+    return promise;
   }
 
   // ---- Module 14 live observation routing ----
@@ -957,7 +1093,7 @@ export async function openRelayServer(options = {}) {
     }, RELAY_HELLO_TIMEOUT_MS);
   }
 
-  server.on('upgrade', (req, socket, head) => {
+  function onUpgrade(req, socket, head) {
     if (closed) {
       return rejectUpgrade(socket, 503, 'Service Unavailable');
     }
@@ -983,8 +1119,11 @@ export async function openRelayServer(options = {}) {
     } catch {
       socket.destroy();
     }
-  });
+  }
 
+  // Same listener in both modes: on the caller-owned server it is detached on
+  // close so a surviving HTTP listener keeps no stale upgrade path.
+  server.on('upgrade', onUpgrade);
   server.on('error', noop); // listener errors after bind never crash the process
 
   // Credential and heartbeat scans cover every authenticated host AND client
@@ -1075,6 +1214,14 @@ export async function openRelayServer(options = {}) {
         deviceMap.clear();
         controlRoutes.clear();
         liveRoutes.clear();
+        // In-process callers have no socket close event: fail every pending
+        // internal call before the correlation tables are gone for good.
+        for (const pending of internalPending.values()) {
+          pending.reject(internalResultError('DISCONNECTED', 'unconfirmed'));
+        }
+        internalPending.clear();
+        for (const conn of internalClients.values()) conn.dead = true;
+        internalClients.clear();
         for (const socket of upgradeSockets) {
           capture(() => socket.destroy());
         }
@@ -1087,24 +1234,31 @@ export async function openRelayServer(options = {}) {
             resolve();
           }
         });
-        await new Promise((resolve) => {
-          let settled = false;
-          const finish = () => {
-            if (!settled) {
-              settled = true;
-              resolve();
+        if (!ownsServer) {
+          // Caller-owned listener: detach the upgrade path only; the owner
+          // (e.g. the center app) performs its own HTTP shutdown.
+          capture(() => server.removeListener('upgrade', onUpgrade));
+          capture(() => server.removeListener('error', noop));
+        } else {
+          await new Promise((resolve) => {
+            let settled = false;
+            const finish = () => {
+              if (!settled) {
+                settled = true;
+                resolve();
+              }
+            };
+            try {
+              server.close(finish);
+              // Pending slow/keep-alive HTTP connections must not block close.
+              server.closeIdleConnections();
+              server.closeAllConnections();
+            } catch (err) {
+              errors.push(err);
+              finish();
             }
-          };
-          try {
-            server.close(finish);
-            // Pending slow/keep-alive HTTP connections must not block close.
-            server.closeIdleConnections();
-            server.closeAllConnections();
-          } catch (err) {
-            errors.push(err);
-            finish();
-          }
-        });
+          });
+        }
         capture(() => registry.close());
         if (errors.length === 1) throw errors[0];
         if (errors.length > 1) throw new AggregateError(errors, 'relay server close cleanup failed');
@@ -1113,39 +1267,47 @@ export async function openRelayServer(options = {}) {
     return closing;
   }
 
-  try {
-    await new Promise((resolve, reject) => {
-      const onListenError = (err) => reject(err);
-      server.once('error', onListenError);
-      server.listen(port, listenHost, () => {
-        server.removeListener('error', onListenError);
-        resolve();
+  if (ownsServer) {
+    try {
+      await new Promise((resolve, reject) => {
+        const onListenError = (err) => reject(err);
+        server.once('error', onListenError);
+        server.listen(port, listenHost, () => {
+          server.removeListener('error', onListenError);
+          resolve();
+        });
       });
-    });
-  } catch (err) {
-    closed = true;
-    clearInterval(registryCheckTimer);
-    clearInterval(heartbeatTimer);
-    clearInterval(controlTimer);
-    controlRoutes.clear();
-    liveRoutes.clear();
-    for (const conn of allConns) {
-      clearTimeout(conn.helloTimer);
-      try { conn.ws.terminate(); } catch { /* ignore */ }
+    } catch (err) {
+      closed = true;
+      clearInterval(registryCheckTimer);
+      clearInterval(heartbeatTimer);
+      clearInterval(controlTimer);
+      controlRoutes.clear();
+      liveRoutes.clear();
+      for (const conn of allConns) {
+        clearTimeout(conn.helloTimer);
+        try { conn.ws.terminate(); } catch { /* ignore */ }
+      }
+      for (const pending of internalPending.values()) {
+        pending.reject(internalResultError('DISCONNECTED', 'unconfirmed'));
+      }
+      internalPending.clear();
+      try { wss.close(); } catch { /* ignore */ }
+      try { server.close(); } catch { /* ignore */ }
+      try { registry.close(); } catch { /* ignore */ }
+      throw err;
     }
-    try { wss.close(); } catch { /* ignore */ }
-    try { server.close(); } catch { /* ignore */ }
-    try { registry.close(); } catch { /* ignore */ }
-    throw err;
   }
 
-  const addr = server.address();
+  const addr = ownsServer ? server.address() : null;
   const actualPort = typeof addr === 'object' && addr !== null ? addr.port : port;
   const scheme = tlsOptions ? 'wss' : 'ws';
   const hostPart = listenHost.includes(':') ? `[${listenHost}]` : listenHost;
 
   return {
-    url: `${scheme}://${hostPart}:${actualPort}/v1/link`,
+    // In shared-server mode the public WSS URL is derived from the configured
+    // public origin by the caller; the relay itself never listens here.
+    url: ownsServer ? `${scheme}://${hostPart}:${actualPort}/v1/link` : null,
     getStatus() {
       const onlineDeviceIds = [];
       for (const [deviceId, conn] of deviceMap) {
@@ -1158,6 +1320,9 @@ export async function openRelayServer(options = {}) {
       }
       return { onlineDeviceIds, pendingConnections };
     },
+    // In-process control call: same whitelist/identity/limits/timeouts as a
+    // remote client conn. Rejects with an Error carrying {code, outcome}.
+    call: internalCall,
     close
   };
 }

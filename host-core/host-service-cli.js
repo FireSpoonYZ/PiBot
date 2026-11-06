@@ -18,6 +18,7 @@ const USAGE = `usage: node host-core/host-service-cli.js [serve|settings-get|set
 
 commands (default: serve):
   serve             start the unified local host service; requires --data-root --token-env --center-url --device-token-env
+  identity          print the persisted device identity; requires --data-root [--expected-device-id]
   settings-get      print the persisted local host settings snapshot; requires --data-root
   settings-set      replace persisted local host settings (next startup only); requires --data-root --input
   autostart-enable  register logon autostart for the current Windows user; same required options as serve (values not read);
@@ -27,6 +28,7 @@ commands (default: serve):
 
 options:
   --data-root <dir>         verified absolute data directory (required)
+  --expected-device-id <id> expected device identity for first pairing or verification (serve, identity)
   --token-env <name>        environment variable holding the control token (serve only, required)
   --center-url <url>        center HTTPS origin (serve only, required)
   --device-token-env <name> environment variable holding the device token (serve only, required)
@@ -40,6 +42,7 @@ options:
 
 const COMMANDS = new Set([
   'serve',
+  'identity',
   'settings-get',
   'settings-set',
   'autostart-enable',
@@ -49,6 +52,7 @@ const COMMANDS = new Set([
 
 const OPTIONS = {
   'data-root': { type: 'string' },
+  'expected-device-id': { type: 'string' },
   'token-env': { type: 'string' },
   'center-url': { type: 'string' },
   'device-token-env': { type: 'string' },
@@ -61,7 +65,8 @@ const OPTIONS = {
 };
 
 const ALLOWED_FLAGS = {
-  serve: ['data-root', 'token-env', 'center-url', 'device-token-env', 'center-ca-file', 'npm-path', 'port', 'initial-settings'],
+  serve: ['data-root', 'expected-device-id', 'token-env', 'center-url', 'device-token-env', 'center-ca-file', 'npm-path', 'port', 'initial-settings'],
+  identity: ['data-root', 'expected-device-id'],
   'settings-get': ['data-root'],
   'settings-set': ['data-root', 'input'],
   'autostart-enable': ['data-root', 'token-env', 'center-url', 'device-token-env', 'center-ca-file', 'npm-path', 'port', 'initial-settings'],
@@ -71,6 +76,7 @@ const ALLOWED_FLAGS = {
 
 const REQUIRED = {
   serve: ['data-root', 'token-env', 'center-url', 'device-token-env'],
+  identity: ['data-root'],
   'settings-get': ['data-root'],
   'settings-set': ['data-root', 'input'],
   'autostart-enable': ['data-root', 'token-env', 'center-url', 'device-token-env'],
@@ -345,6 +351,9 @@ async function settingsSet(dataRoot, patch) {
 
 async function serve(values) {
   const options = { dataRoot: parseDataRoot(values['data-root']) };
+  if (values['expected-device-id'] !== undefined) {
+    options.expectedDeviceId = values['expected-device-id'];
+  }
   options.token = tokenFromEnv(values['token-env'], 'token-env');
   options.center = {
     url: values['center-url'],
@@ -428,7 +437,15 @@ async function main() {
 
   const dataRoot = parseDataRoot(values['data-root']);
   let result;
-  if (command === 'settings-get') {
+  if (command === 'identity') {
+    const expectedDeviceId = values['expected-device-id'];
+    const probe = openHost({ dataRoot, expectedDeviceId });
+    try {
+      result = { deviceId: probe.deviceId };
+    } finally {
+      probe.close();
+    }
+  } else if (command === 'settings-get') {
     result = await settingsGet(dataRoot);
   } else {
     const patch = readInputObject(values.input);

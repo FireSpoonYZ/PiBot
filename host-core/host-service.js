@@ -17,7 +17,7 @@ function offlineError() { return Object.assign(new Error('center is disconnected
 
 export async function openHostService(options) {
   for (const key of Object.keys(options ?? {})) {
-    if (!new Set(['dataRoot', 'token', 'port', 'initialSettings', 'nativeBridge', 'center', 'npmPath', 'displayName', 'platform']).has(key)) throw invalidArgument(`unknown option: ${key}`);
+    if (!new Set(['dataRoot', 'token', 'port', 'initialSettings', 'nativeBridge', 'center', 'npmPath', 'displayName', 'platform', 'expectedDeviceId']).has(key)) throw invalidArgument(`unknown option: ${key}`);
   }
   const { dataRoot, token, port, initialSettings, nativeBridge, center, npmPath } = options ?? {};
   if (typeof dataRoot !== 'string' || !path.isAbsolute(dataRoot)) throw invalidArgument('dataRoot must be an absolute path');
@@ -31,8 +31,10 @@ export async function openHostService(options) {
   if (initialSettings !== undefined) normalizeHostSettings(initialSettings);
   const platform = options.platform ?? process.platform;
   if (typeof platform !== 'string' || !platform.trim() || (options.displayName !== undefined && typeof options.displayName !== 'string')) throw invalidArgument('displayName and platform must be strings');
+  const expectedDeviceId = options.expectedDeviceId;
+  if (expectedDeviceId !== undefined && (typeof expectedDeviceId !== 'string' || expectedDeviceId.trim() === '')) throw invalidArgument('expectedDeviceId must be a non-empty string');
 
-  const probe = openHost({ dataRoot });
+  const probe = openHost({ dataRoot, expectedDeviceId });
   const deviceId = probe.deviceId;
   probe.close();
   const displayName = options.displayName?.trim() || (platform !== 'android' && os.hostname().trim()) || `${platform}-${deviceId.slice(0, 8)}`;

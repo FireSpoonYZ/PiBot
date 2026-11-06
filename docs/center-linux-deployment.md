@@ -1,8 +1,10 @@
 # Linux 中心部署
 
-中心为单个 Node 22 Debian 容器：管理 HTTPS（8443）和既有 relay TLS
-（8790）是同一进程的独立监听器。Compose 只部署中心；Hindsight 后端及
-数据库使用已有外部服务。HTTP MCP 登记现有端点，Node/npm MCP 在对应目标
+中心为单个 Node 22 Debian 容器：管理 API、静态 Web、SSE 事件流和
+`/v1/link` 设备 WebSocket 共用同一个内部 HTTP 监听（默认 8080）。
+服务自身不加载 TLS 证书；对外 HTTPS/WSS 由用户自己的反向代理终结，
+Compose 只把应用端口发布到宿主机回环地址。Hindsight 后端及数据库
+使用已有外部服务。HTTP MCP 登记现有端点，Node/npm MCP 在对应目标
 的受管目录安装；不自动编排 Python、uv 或 Docker MCP。
 
 ## 构建前提
@@ -36,10 +38,11 @@ sh scripts/center-build.sh
 
 ## 配置和启动
 
-将受信任的 PEM 证书链及私钥分别放到 `center-certs/cert.pem` 和
-`center-certs/key.pem`。两监听器使用同一证书；容器以镜像内 `node` 用户
-读取挂载目录和文件，需授予该用户读取权限，且不要使私钥对其他用户可读。
-证书的域名必须匹配对外地址。保护该目录，不要提交到版本库或复制到镜像。
+中心监听明文 HTTP；TLS 证书与 HTTPS/WSS 终结由用户自己的反向代理负责。
+代理需要转发同一公网 origin 下的 `/api/*`、静态资源、SSE
+（`/api/host/events`，关闭响应缓冲）和 WebSocket 升级路径
+`/v1/link`（不要缓冲 upgrade）。容器代理可直接走 Docker 网络，
+宿主机代理使用 Compose 发布的回环端口 `127.0.0.1:8080`。
 
 以下示例在安全的交互式 shell 中执行，将域名替换为真实地址，勿启用
 `set -x`；不要把口令、密钥写到 shell 历史或日志。文件必须妥善保护，
@@ -54,8 +57,7 @@ unset owner_password
 encryption_key=$(docker run --rm e-launcher-center:local node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")
 session_key=$(docker run --rm e-launcher-center:local node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))")
 cat > center.env <<EOF
-CENTER_PUBLIC_URL=https://center.example.com:8443
-CENTER_LINK_URL=wss://center.example.com:8790/v1/link
+CENTER_PUBLIC_URL=https://center.example.com
 CENTER_ENCRYPTION_KEY_HEX=$encryption_key
 CENTER_SESSION_KEY_HEX=$session_key
 CENTER_OWNER_PASSWORD_HASH='$owner_hash'
@@ -67,10 +69,13 @@ docker compose up -d --no-build
 `center.env` 由 Compose 的 env_file 读取，不是 Docker 构建输入；口令哈希
 采用 `scrypt$<16字节salt hex>$<64字节key hex>`，单引号防止 Compose
 将其中的 `$` 视为插值。两个 key 各为独立 32 字节的 64 位 hex。
-`CENTER_PUBLIC_URL` 和 `CENTER_LINK_URL` 必须是设备可访问的实际地址；
-反向代理场景需确保两个 TLS 服务和 WebSocket 路径都正确转发，项目不提供
-代理。映射其他主机端口时同步修改这些外部 URL。Compose 固定容器内数据、
-端口、Web 和证书路径；可在安全的 `center.env` 中另外设置
+`CENTER_PUBLIC_URL` 是客户端访问的 HTTPS 根 origin（协议、主机、
+可选端口，不带路径）；设备 WebSocket 地址 `wss://<host>/v1/link`、
+OAuth 回调和客户端下载地址都由它推导，不再单独配置
+`CENTER_LINK_URL`。`CENTER_TRUST_PROXY` 可选：逗号分隔的可信代理
+IP/CIDR，或 `true`/`false`；默认 `false`，仅在确认反向代理为
+`X-Forwarded-*` 可信来源时按实际代理范围填写。Compose 固定容器内数据、
+端口和 Web 路径；可在安全的 `center.env` 中另外设置
 `CENTER_NPM_PATH` 为容器内 npm-cli.js 的绝对路径，默认使用中心安装的
 固定 npm。不要更换密钥或覆盖数据来“修复”启动失败。
 
@@ -103,7 +108,7 @@ Host 机器启动（替换中心地址；私有 CA 时添加可选参数，npm �
 
 ```sh
 node host-core/host-service-cli.js serve --data-root "$HOST_DATA_ROOT" \
-  --token-env HOST_CONTROL_TOKEN --center-url https://center.example.com:8443 \
+  --token-env HOST_CONTROL_TOKEN --center-url https://center.example.com \
   --device-token-env HOST_DEVICE_TOKEN
 # 可选：--center-ca-file /path/to/ca.pem --npm-path /absolute/path/to/npm-cli.js
 ```
@@ -123,8 +128,8 @@ BC 为独立 Host 原生插件 `@e-launcher/billion-context` 1.0.0（能力 ID `
 ## 维护和升级
 
 `center-data` Docker volume 保存中心、relay 和受管安装数据；
-`center.env` 与 `center-certs/` 在宿主机上，不在该 volume 中。备份前先
-停止服务，并将数据归档、加密密钥和证书分开安全保存；归档包含敏感数据。
+`center.env` 在宿主机上，不在该 volume 中。备份前先
+停止服务，并将数据归档和加密密钥分开安全保存；归档包含敏感数据。
 例如将 `BACKUP_DIR` 指向仓库外的受保护目录：
 
 ```sh
@@ -135,12 +140,15 @@ docker compose up -d --no-build
 ```
 
 升级前备份并记录原镜像版本及配置；拉取/合并新源码与匹配锁文件后重建
-镜像，使用原 volume、原加密密钥和证书重新启动。数据迁移及回滚应按实际
-版本说明执行，不假定旧程序能读取升级后的数据库。替换证书后重启容器以
-重新加载。停止、备份和恢复期间不要并行修改同一数据卷。
+镜像，使用原 volume 和原加密密钥重新启动。旧版双监听（8443/8790）升级
+时先备份数据与配置，更新中心和反向代理后让客户端重新取得中心公布的
+连接信息；不在产品内保留第二个 Relay 监听端口。数据迁移及回滚应按实际
+版本说明执行，不假定旧程序能读取升级后的数据库。停止、备份和恢复
+期间不要并行修改同一数据卷。
 
 ## 验收边界
 
 本说明是部署入口而不是运行结果。上线前需真实验证登录、设备登记、Host
 连接、两个 Bot 的配置继承与覆盖、Billion Context 的安装和跨升级状态恢复、Hindsight、HTTP 和 Node MCP、Skill、
-更新/卸载与断线重连。构建和容器启动本身不能证明上述功能正常。
+更新/卸载与断线重连，以及经反向代理的 HTTPS/WSS 单入口。构建和容器
+启动本身不能证明上述功能正常。

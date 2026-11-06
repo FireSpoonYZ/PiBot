@@ -1,19 +1,17 @@
 // host-core/prepare-tools.js
 import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import os from 'node:os';
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { parseArgs, promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { getSearchToolAsset, getSearchToolInstallPath } from './search-bin.js';
 
 /**
- * 搜索工具准备：仅在显式运行 prepareSearchTools / CLI 时下载固定版本 rg/fd，
- * 模型工具不触发下载。固定 asset 规格与安装路径复用 search-bin.js，不查询 latest。
+ * 搜索工具准备：构建期或显式 CLI 下载固定版本 rg/fd，模型工具不触发下载。
+ * 归档每次使用前校验固定 SHA-256；asset 规格和路径复用 search-bin.js。
  */
 const SEARCH_TOOL_NAMES = ['rg', 'fd'];
-const LICENSE_FILE_NAME = 'LICENSE-MIT';
 // curl 固定参数：--fail --location --connect-timeout 20 --max-time 120 --max-filesize 67108864
 const CURL_FLAGS = ['--silent', '--show-error', '--fail', '--location', '--connect-timeout', '20', '--max-time', '120', '--max-filesize', '67108864'];
 const MAX_EXTRACT_OUTPUT_BYTES = 32 * 1024 * 1024;
@@ -108,50 +106,63 @@ function tempSibling(dir, base) {
   return path.join(dir, '.' + base + '.' + randomBytes(4).toString('hex') + '.tmp');
 }
 
-/** 安装单个搜索工具；binary 与 LICENSE-MIT 均已存在时直接返回现成结果，不运行二进制自检。 */
+async function verifiedArchive(dataRoot, asset) {
+  const dir = path.join(dataRoot, 'archives');
+  const archivePath = path.join(dir, asset.archiveName);
+  mkdirSync(dir, { recursive: true });
+  if (isRegularFile(archivePath) && sha256OfFile(archivePath) === asset.sha256) return archivePath;
+
+  const tmpArchive = tempSibling(dir, asset.archiveName);
+  try {
+    await downloadArchive(asset.url, tmpArchive);
+    const actual = sha256OfFile(tmpArchive);
+    if (actual !== asset.sha256) {
+      throw prepareFailed('SHA-256 mismatch for ' + asset.archiveName + ': expected ' + asset.sha256 + ', got ' + actual);
+    }
+    renameSync(tmpArchive, archivePath);
+  } finally {
+    rmSync(tmpArchive, { force: true });
+  }
+  return archivePath;
+}
+
+/** 从每次验证过的归档重新提取，绝不信任旧版未验证的已安装文件。 */
 async function installTool(dataRoot, name) {
   const asset = getSearchToolAsset(name);
   const installPath = getSearchToolInstallPath(dataRoot, name);
   const installDir = path.dirname(installPath);
-  const licensePath = path.join(installDir, LICENSE_FILE_NAME);
-
-  if (isRegularFile(installPath) && isRegularFile(licensePath)) {
-    return { name, version: asset.version, path: installPath, sha256: sha256OfFile(installPath) };
+  const archivePath = await verifiedArchive(dataRoot, asset);
+  const licenses = [];
+  for (const entry of asset.licenseEntries) {
+    const buffer = await extractEntry(archivePath, entry);
+    if (buffer.toString('utf8').trim() === '') throw prepareFailed('empty ' + entry + ' extracted for ' + name);
+    licenses.push({ path: path.join(installDir, path.basename(entry)), buffer });
   }
+  const binaryBuffer = await extractEntry(archivePath, asset.entryPath);
+  assertBinaryHeader(binaryBuffer, process.platform, name);
 
   mkdirSync(installDir, { recursive: true });
-
-  // 下载归档放系统 tmp；最终写入用同目录临时文件 + rename，原子替换且失败保留旧文件。
-  const tmpRoot = mkdtempSync(path.join(os.tmpdir(), 'prepare-tools-'));
   const tempPaths = [];
   try {
-    const archivePath = path.join(tmpRoot, asset.archiveName);
-    await downloadArchive(asset.url, archivePath);
-
-    const licenseBuffer = await extractEntry(archivePath, asset.licenseEntry);
-    if (licenseBuffer.length === 0) throw prepareFailed('empty ' + LICENSE_FILE_NAME + ' extracted for ' + name);
-
-    const binaryBuffer = await extractEntry(archivePath, asset.entryPath);
-    assertBinaryHeader(binaryBuffer, process.platform, name);
-
-    // 先写许可证再写 binary：缺 binary 的目录不会被当成完成安装。
-    const tmpLicense = tempSibling(installDir, name + '.LICENSE-MIT');
-    writeFileSync(tmpLicense, licenseBuffer);
-    tempPaths.push(tmpLicense);
-    renameSync(tmpLicense, licensePath);
-
+    for (const license of licenses) {
+      const tmp = tempSibling(installDir, path.basename(license.path));
+      tempPaths.push(tmp);
+      writeFileSync(tmp, license.buffer);
+      renameSync(tmp, license.path);
+    }
     const tmpBinary = tempSibling(installDir, name);
-    writeFileSync(tmpBinary, binaryBuffer);
-    // POSIX 先 chmod 755 再 rename：即使进程在 rename 后崩溃，已公布的 binary 也具备执行权限。
-    if (process.platform !== 'win32') chmodSync(tmpBinary, 0o755);
     tempPaths.push(tmpBinary);
+    writeFileSync(tmpBinary, binaryBuffer);
+    if (process.platform !== 'win32') chmodSync(tmpBinary, 0o755);
     renameSync(tmpBinary, installPath);
   } finally {
-    rmSync(tmpRoot, { recursive: true, force: true });
     for (const p of tempPaths) rmSync(p, { force: true });
   }
 
-  return { name, version: asset.version, path: installPath, sha256: sha256OfFile(installPath) };
+  return {
+    name, version: asset.version, path: installPath, sha256: sha256OfFile(installPath),
+    licensePaths: licenses.map((license) => license.path),
+  };
 }
 
 /** 准备 rg/fd 固定版本到 dataRoot 下（仅当前平台），返回安装结果。 */

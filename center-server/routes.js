@@ -87,11 +87,18 @@ function runtimeBotReceipt(value) {
 const devicePlatforms = ['windows', 'linux', 'macos', 'android'];
 function deviceRegistration(value) {
   const body = object(value);
-  if (Object.keys(body).some(key => key !== 'displayName' && key !== 'platform')) fail('INVALID_ARGUMENT', 'Invalid device registration');
+  if (Object.keys(body).some(key => key !== 'displayName' && key !== 'platform' && key !== 'deviceId')) fail('INVALID_ARGUMENT', 'Invalid device registration');
   const displayName = typeof body.displayName === 'string' && body.displayName.isWellFormed() ? body.displayName.trim() : '';
   if (displayName.length < 1 || displayName.length > 64 || /[\x00-\x1f\x7f]/.test(displayName)) fail('INVALID_ARGUMENT', 'displayName must contain 1-64 characters');
   if (!devicePlatforms.includes(body.platform)) fail('INVALID_ARGUMENT', 'Invalid platform');
-  return { displayName, platform: body.platform };
+  let deviceId;
+  if (body.deviceId !== undefined) {
+    if (typeof body.deviceId !== 'string' || body.deviceId.trim() === '' || body.deviceId.length > 256) {
+      fail('INVALID_ARGUMENT', 'Invalid deviceId');
+    }
+    deviceId = body.deviceId.trim();
+  }
+  return { displayName, platform: body.platform, deviceId };
 }
 function runtimeCapabilityError(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.error == null) fail('INVALID_ARGUMENT', 'Invalid runtime receipt');
@@ -144,8 +151,11 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('GET', '/api/devices', () => bridge.listDevices());
   // 所有者登记新设备：令牌只在本响应中返回一次，中心只保存其哈希，不写日志。
   route('POST', '/api/devices', (req, reply) => {
-    const { displayName, platform } = deviceRegistration(req.body);
-    const deviceId = randomUUID();
+    const { displayName, platform, deviceId: requestedDeviceId } = deviceRegistration(req.body);
+    const deviceId = requestedDeviceId ?? randomUUID();
+    if (requestedDeviceId !== undefined && bridge.registry.get(deviceId)) {
+      fail('REQUEST_CONFLICT', 'Device already registered');
+    }
     const deviceToken = randomBytes(32).toString('base64url');
     bridge.registry.register({ deviceId, token: deviceToken, displayName });
     bridge.registry.updateMetadata(deviceId, { platform });

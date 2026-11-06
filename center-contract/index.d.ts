@@ -420,3 +420,56 @@ export interface ProviderCheckResult { ok: boolean; message: string }
 export interface DiscoveryResult { models: Model[] }
 export interface ActionRequest { requestId: string; deviceId: string; botId: string; input: JsonValue }
 export interface ActionResult { result: JsonValue }
+
+/**
+ * Center-managed client release records (client-releases API, plan §7).
+ *
+ * POST /api/client-releases takes multipart FormData: field 'metadata' carries a
+ * JSON-encoded ClientReleaseMetadata, field 'artifact' the installer file. The
+ * server validates the artifact against the metadata, computes sha256, and
+ * stores the record as unpublished (draft) until an owner publishes it.
+ * GET /api/client-releases returns { releases: ClientReleaseRecord[] }.
+ * POST /api/client-releases/:id/publish takes { published: boolean } and returns
+ * the updated record. GET /api/client-releases/:id/download streams the
+ * installer to authenticated owners via record.downloadUrl.
+ */
+export type ClientReleasePlatform = 'windows' | 'linux' | 'android';
+export type ClientReleaseArch = 'x86_64' | 'aarch64';
+export type ClientReleaseFormat = 'nsis' | 'deb' | 'apk';
+
+/**
+ * Metadata the CI build exports for import into the center admin UI. The
+ * platform/arch/format combination is restricted: windows+x86_64+nsis,
+ * linux+x86_64+deb, android+aarch64/x86_64+apk.
+ */
+export interface ClientReleaseMetadata {
+  version: string;
+  platform: ClientReleasePlatform;
+  arch: ClientReleaseArch;
+  format: ClientReleaseFormat;
+  /** Installer size in bytes, as reported by CI; must match the uploaded artifact. */
+  size: number;
+  /** Lowercase hex SHA-256 of the installer. */
+  sha256: string;
+  /** Optional detached signature text (e.g. .sig contents) for desktop packages. */
+  signature?: string;
+  /** Optional release notes shown to administrators. */
+  notes?: string;
+  /** Source commit the build was produced from. */
+  sourceCommit: string;
+  /** Android-only monotonically increasing versionCode; required for apk. */
+  versionCode?: number;
+}
+
+/** Stored release record: metadata plus server-assigned fields. */
+export interface ClientReleaseRecord extends ClientReleaseMetadata {
+  id: string;
+  filename: string;
+  published: boolean;
+  publishedAt: string | null;
+  /** Same-origin download path for the installer; owner session required. */
+  downloadUrl: string;
+}
+
+export interface ClientReleaseListResponse { releases: ClientReleaseRecord[] }
+export interface ClientReleasePublishRequest { published: boolean }

@@ -4,6 +4,7 @@ import type {
   EnableRequest,
   InstallRequest, Installation, InstallationConfig, LoginRequest, Model, ModelConfig, ModelSelection,
   Operation, OperationRequest, PackageVersion, Provider, ProviderCheckRequest, ProviderCheckResult, JsonSchema,
+  ClientReleaseListResponse, ClientReleaseMetadata, ClientReleasePublishRequest, ClientReleaseRecord,
   PutBotCapability, PutInstallationConfig, PutInstallationDisplayName, RevisionWrite, SessionInfo, UpdateRequest,
 } from '@e-launcher/center-contract';
 
@@ -109,4 +110,13 @@ export const api = {
   runAction: (installationId: string, action: string, body: ActionRequest) => request<ActionResult>(`${installationPath(installationId)}/actions/${id(action)}`, 'POST', body),
   listDeployments: (installationId: string) => request<DeploymentReceipt[]>(`${installationPath(installationId)}/deployments`),
   getOperation: (operationId: string) => request<Operation>(`/api/operations/${id(operationId)}`),
+  listClientReleases: () => request<ClientReleaseListResponse>('/api/client-releases'),
+  createClientRelease: (metadata: ClientReleaseMetadata, artifact: File) => {
+    const body = new FormData();
+    body.append('metadata', JSON.stringify(metadata));
+    body.append('artifact', artifact);
+    return request<ClientReleaseRecord>('/api/client-releases', 'POST', body);
+  },
+  publishClientRelease: (releaseId: string, body: ClientReleasePublishRequest) =>
+    request<ClientReleaseRecord>(`/api/client-releases/${id(releaseId)}/publish`, 'POST', body),
 };

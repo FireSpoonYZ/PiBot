@@ -3,6 +3,7 @@ package com.example.launcherprobe;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 
 import com.example.launcherprobe.BotHostProcess.BridgeException;
 
@@ -20,6 +21,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
@@ -43,6 +45,11 @@ final class BotHostClient {
     private final Object lock = new Object();
     private final CenterClientCredentials credentials;
     private long centerRevision;
+    // 更新代次也随 broker 断线/重连变化，不改变 center_connect 的在途修订号。
+    private long updateGeneration;
+    private long brokerGeneration = -1;
+    private boolean brokerReadyObserved;
+    private String brokerDeviceId;
     private boolean centerPending;
     private boolean centerBlocked;
     private boolean centerReadyObserved;
@@ -148,6 +155,10 @@ final class BotHostClient {
                     if (generation == null || generation.process != process || generation.closing || !ownerOpen.getAsBoolean())
                         throw new BridgeException("CANCELLED", "not-sent", "界面会话已关闭");
                     revision = ++centerRevision;
+                    ++updateGeneration;
+                    brokerGeneration = -1;
+                    brokerReadyObserved = false;
+                    brokerDeviceId = null;
                     centerPending = true;
                     centerBlocked = false;
                     centerReadyObserved = false;
@@ -176,6 +187,10 @@ final class BotHostClient {
                     if (generation == null || generation.process != process || generation.closing || !ownerOpen.getAsBoolean())
                         throw new BridgeException("CANCELLED", "not-sent", "界面会话已关闭");
                     ++centerRevision;
+                    ++updateGeneration;
+                    brokerGeneration = -1;
+                    brokerReadyObserved = false;
+                    brokerDeviceId = null;
                     centerPending = false;
                     centerBlocked = true;
                     centerReadyObserved = false;
@@ -194,10 +209,17 @@ final class BotHostClient {
             if ("center_connect".equals(op)) synchronized (lock) {
                 pendingCredentials = new JSONObject(forwarded.toString());
             }
+            if ("connect".equals(op) || "disconnect".equals(op)) synchronized (lock) {
+                brokerUnavailableLocked();
+            }
             final JSONObject sent = forwarded;
             final long attempt = revision;
             final long statusRevision;
-            synchronized (lock) { statusRevision = centerRevision; }
+            final long statusUpdateGeneration;
+            synchronized (lock) {
+                statusRevision = centerRevision;
+                statusUpdateGeneration = updateGeneration;
+            }
             CompletableFuture<JSONObject> reply;
             try {
                 reply = process.request("call", new JSONObject().put("method", op).put("params", sent));
@@ -257,11 +279,30 @@ final class BotHostClient {
                         if ("center_status".equals(op)) {
                             boolean ready = !centerBlocked && !centerPending && "ready".equals(status.optString("state"));
                             if (ready && !centerReadyObserved) BotClientService.centerReady();
+                            if (!ready) brokerUnavailableLocked();
                             centerReadyObserved = ready;
                         }
                         return CompletableFuture.completedFuture(centerMetadata(envelope));
                     }
                 }));
+            }
+            if ("status".equals(op)) {
+                return reply.handle((value, failure) -> {
+                    synchronized (lock) {
+                        if (statusRevision == centerRevision && statusUpdateGeneration == updateGeneration
+                                && generation != null && generation.process == process && !generation.closing
+                                && !centerPending && !centerBlocked && centerReadyObserved) {
+                            if (failure != null) {
+                                String code = BotHostUiProtocol.errorCode(failure);
+                                if (!"BUSY".equals(code) && !"RPC_BUSY".equals(code)) brokerUnavailableLocked();
+                            } else {
+                                observeBrokerStatusLocked(valueEnvelope(value).optJSONObject("value"));
+                            }
+                        }
+                    }
+                    if (failure != null) throw new CompletionException(failure);
+                    return valueEnvelope(value);
+                });
             }
             return reply.thenApply(BotHostClient::valueEnvelope);
         });
@@ -271,6 +312,31 @@ final class BotHostClient {
         return "INVALID_ARGUMENT".equals(code) || "CREDENTIALS".equals(code)
                 || "UNAUTHORIZED".equals(code) || "FORBIDDEN".equals(code)
                 || "REVOKED".equals(code) || "CERTIFICATE_ERROR".equals(code);
+    }
+
+    /** 调用方持 lock；不能让旧下载跨越中继连接变化。 */
+    private void brokerUnavailableLocked() {
+        if (centerReadyObserved || brokerReadyObserved) ++updateGeneration;
+        centerReadyObserved = false;
+        brokerReadyObserved = false;
+        brokerDeviceId = null;
+    }
+
+    private void observeBrokerStatusLocked(JSONObject status) {
+        if (status == null || !(status.opt("generation") instanceof Number)) {
+            brokerUnavailableLocked();
+            return;
+        }
+        long next = ((Number) status.opt("generation")).longValue();
+        if (next < brokerGeneration) return;
+        JSONObject connection = status.optJSONObject("connection");
+        boolean ready = "connected".equals(status.optString("phase")) && connection != null
+                && "relay".equals(connection.optString("kind"));
+        if (brokerGeneration != next || brokerReadyObserved != ready) ++updateGeneration;
+        brokerGeneration = next;
+        brokerReadyObserved = ready;
+        brokerDeviceId = ready ? connection.optString("deviceId") : null;
+        if (!ready) centerReadyObserved = false;
     }
 
     /** 调用方持 lock；只有 broker 确认 ready 才保存本次凭据。 */
@@ -322,9 +388,15 @@ final class BotHostClient {
             }
             BotHostProcess process = acquire(ownerId, ownerOpen);
             ClientObservation record = new ClientObservation(ownerId, process);
+            JSONObject observedTarget = target.optJSONObject("target");
+            boolean connectionWatch = observedTarget != null && "connection".equals(observedTarget.optString("kind"));
+            long watchRevision;
+            long watchBrokerGeneration;
             synchronized (lock) {
                 if (clientObservations.containsKey(observationId))
                     throw new BridgeException("BUSY", "not-sent", "观察身份已被占用");
+                watchRevision = centerRevision;
+                watchBrokerGeneration = brokerGeneration;
                 clientObservations.put(observationId, record);
             }
             String id;
@@ -332,11 +404,25 @@ final class BotHostClient {
                 id = process.observe(observationId, target, frame -> {
                     JSONObject body = frame.optJSONObject("frame");
                     if (frame.has("error") || (body != null && "end".equals(body.optString("type")))) {
-                        synchronized (lock) { clientObservations.remove(observationId, record); }
+                        synchronized (lock) {
+                            if (clientObservations.remove(observationId, record) && connectionWatch
+                                    && generation != null && generation.process == process && centerRevision == watchRevision
+                                    && (watchBrokerGeneration < 0 || brokerGeneration == watchBrokerGeneration)) {
+                                brokerUnavailableLocked();
+                                main.post(this::checkConnection);
+                            }
+                        }
                     }
                     onFrame.accept(frame);
                 }, error -> {
-                    synchronized (lock) { clientObservations.remove(observationId, record); }
+                    synchronized (lock) {
+                        if (clientObservations.remove(observationId, record) && connectionWatch
+                                && generation != null && generation.process == process && centerRevision == watchRevision
+                                && (watchBrokerGeneration < 0 || brokerGeneration == watchBrokerGeneration)) {
+                            brokerUnavailableLocked();
+                            main.post(this::checkConnection);
+                        }
+                    }
                     onError.accept(error);
                 });
             } catch (IOException | RuntimeException failure) {
@@ -410,7 +496,128 @@ final class BotHostClient {
         long revision;
         synchronized (lock) { revision = centerRevision; }
         JSONObject params = probe ? BotHostUiProtocol.object("probe", true) : new JSONObject();
-        return request("background", BotClientService.ownerOpen(), "center_status", params, revision);
+        return request("background", BotClientService.ownerOpen(), "center_status", params, revision)
+                .thenCompose(value -> request("background", BotClientService.ownerOpen(), "status", new JSONObject(), revision)
+                        .handle((ignored, failure) -> value));
+    }
+
+    /**
+     * 客户端自更新的中心凭据快照：只在真实中心就绪（centerReady 已被 broker 确认）、
+     * 未阻塞/未在途、且当前代进程存活时返回已加密保存记录的内部副本；
+     * 其余任何状态一律 NOT_CONNECTED，绝不返回陈旧凭据。generation 随真实
+     * centerRevision 和 broker 连接代次变化，供 ClientUpdater 检测切换或重连。
+     * 仅默认进程内部使用，不经 UI 桥/broker 暴露。
+     */
+    JSONObject updateCredentials() throws BridgeException {
+        synchronized (lock) {
+            Generation current = generation;
+            boolean ready = centerReadyObserved && brokerReadyObserved && !centerBlocked && !centerPending
+                    && current != null && current.current && !current.closing
+                    && current.process != null && current.process.isAlive();
+            if (!ready) {
+                throw new BridgeException("NOT_CONNECTED", "not-sent", "中心连接未就绪");
+            }
+            JSONObject saved;
+            try {
+                saved = credentials.read();
+            } catch (Exception failure) {
+                throw new BridgeException("CREDENTIALS", "not-sent", "已保存的中心凭据无法读取");
+            }
+            if (saved == null) {
+                throw new BridgeException("NOT_CONNECTED", "not-sent", "中心连接未就绪");
+            }
+            try {
+                if (!saved.getString("deviceId").equals(brokerDeviceId)) {
+                    throw new BridgeException("NOT_CONNECTED", "not-sent", "中心连接未就绪");
+                }
+                return new JSONObject().put("url", saved.getString("url"))
+                        .put("deviceId", saved.getString("deviceId"))
+                        .put("deviceToken", saved.getString("deviceToken"))
+                        .put("ca", saved.getString("ca"))
+                        .put("generation", updateGeneration);
+            } catch (JSONException failure) {
+                throw new BridgeException("INTERNAL", "not-sent", "中心凭据快照构造失败");
+            }
+        }
+    }
+
+    /** 更新网络操作及安装前确认；只查询当前 broker，绝不启动新进程。 */
+    CompletableFuture<JSONObject> confirmUpdateCredentials() {
+        final Generation current;
+        final long revision;
+        final long updateEpoch;
+        final long deadline = SystemClock.elapsedRealtime() + 5000;
+        synchronized (lock) {
+            current = generation;
+            if (current == null || !current.current || current.closing || current.process == null
+                    || !current.process.isAlive() || centerBlocked || centerPending || pendingCredentials != null) {
+                return failed(updateNotConnected());
+            }
+            revision = centerRevision;
+            updateEpoch = updateGeneration;
+        }
+        AtomicReference<CompletableFuture<JSONObject>> active = new AtomicReference<>();
+        CompletableFuture<JSONObject> confirmation = requestUpdateStatus(current, revision, deadline, "center_status", active)
+                .thenCompose(center -> {
+                    JSONObject status = center.optJSONObject("value");
+                    if (status == null || !"ready".equals(status.optString("state"))) return failed(updateNotConnected());
+                    return requestUpdateStatus(current, revision, deadline, "status", active);
+                }).thenCompose(broker -> {
+                    synchronized (lock) {
+                        if (!updateConfirmationCurrent(current, revision, deadline) || updateGeneration != updateEpoch) {
+                            return failed(updateNotConnected());
+                        }
+                        boolean wasReady = centerReadyObserved;
+                        centerReadyObserved = true;
+                        observeBrokerStatusLocked(broker.optJSONObject("value"));
+                        try {
+                            JSONObject credentials = updateCredentials();
+                            if (!wasReady) BotClientService.centerReady();
+                            return CompletableFuture.completedFuture(credentials);
+                        } catch (BridgeException failure) {
+                            return failed(failure);
+                        }
+                    }
+                });
+        return confirmation.orTimeout(5, TimeUnit.SECONDS).handle((value, failure) -> {
+            if (failure == null) return value;
+            CompletableFuture<JSONObject> request = active.get();
+            if (request != null) {
+                try { control.execute(() -> request.cancel(true)); }
+                catch (RejectedExecutionException ignored) { }
+            }
+            synchronized (lock) {
+                if (generation == current && centerRevision == revision && updateGeneration == updateEpoch) {
+                    brokerUnavailableLocked();
+                }
+            }
+            throw new CompletionException(updateNotConnected());
+        });
+    }
+
+    private CompletableFuture<JSONObject> requestUpdateStatus(Generation current, long revision, long deadline,
+                                                               String op, AtomicReference<CompletableFuture<JSONObject>> active) {
+        return onControl(() -> {
+            synchronized (lock) {
+                if (!updateConfirmationCurrent(current, revision, deadline)) throw updateNotConnected();
+            }
+            CompletableFuture<JSONObject> request = current.process.request("call",
+                    new JSONObject().put("method", op).put("params", new JSONObject()));
+            active.set(request);
+            if (SystemClock.elapsedRealtime() >= deadline) request.cancel(true);
+            return request.thenApply(BotHostClient::valueEnvelope);
+        });
+    }
+
+    /** 调用方持 lock；查询跨代或超时不得发布结果。 */
+    private boolean updateConfirmationCurrent(Generation current, long revision, long deadline) {
+        return SystemClock.elapsedRealtime() < deadline && generation == current && current.current
+                && !current.closing && current.process != null && current.process.isAlive()
+                && centerRevision == revision && !centerBlocked && !centerPending && pendingCredentials == null;
+    }
+
+    private static BridgeException updateNotConnected() {
+        return new BridgeException("NOT_CONNECTED", "not-sent", "中心连接未就绪");
     }
 
     // ---------- 单写者与懒启动 ----------
@@ -494,6 +701,10 @@ final class BotHostClient {
         BotHostProcess process;
         synchronized (lock) {
             ++centerRevision;
+            ++updateGeneration;
+            brokerGeneration = -1;
+            brokerReadyObserved = false;
+            brokerDeviceId = null;
             centerPending = false;
             centerReadyObserved = false;
             pendingCredentials = null;
@@ -561,6 +772,10 @@ final class BotHostClient {
                     centerPending = false;
                     centerReadyObserved = false;
                     ++centerRevision;
+                    ++updateGeneration;
+                    brokerGeneration = -1;
+                    brokerReadyObserved = false;
+                    brokerDeviceId = null;
                     if (!centerBlocked) {
                         restoreNeeded = true;
                         if (pendingCredentials != null && BotClientService.isActive()) main.post(pendingStatus);

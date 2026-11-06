@@ -53,7 +53,7 @@ function toBotExtensionSettings(row) {
 }
 
 // 先取写锁再读版本：并发首次 open 不会都读到 0 而重复插身份。
-function initSchema(db) {
+function initSchema(db, expectedDeviceId) {
   db.exec('BEGIN IMMEDIATE');
   let committed = false;
   try {
@@ -63,7 +63,7 @@ function initSchema(db) {
       throw errWithCode('database schema version is not supported', 'UNSUPPORTED_SCHEMA');
     }
     if (version === 0) {
-      const deviceId = randomUUID();
+      const deviceId = expectedDeviceId ?? randomUUID();
       db.exec(`
         CREATE TABLE host_identity (
           id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -129,7 +129,7 @@ function initSchema(db) {
   }
 }
 
-export function openStore(dataRoot) {
+export function openStore(dataRoot, expectedDeviceId) {
   mkdirSync(dataRoot, { recursive: true });
   const db = new DatabaseSync(join(dataRoot, DB_FILE));
   let closed = false;
@@ -141,9 +141,12 @@ export function openStore(dataRoot) {
   try {
     db.exec('PRAGMA foreign_keys = ON;');
     db.exec('PRAGMA busy_timeout = 5000;');
-    initSchema(db);
+    initSchema(db, expectedDeviceId);
 
     const deviceId = db.prepare('SELECT device_id FROM host_identity WHERE id = 1').get().device_id;
+    if (expectedDeviceId !== undefined && deviceId !== expectedDeviceId) {
+      throw errWithCode('host identity does not match expected device id', 'IDENTITY_MISMATCH');
+    }
 
     const stmtGetBot = db.prepare('SELECT * FROM bots WHERE bot_id = ?');
     const stmtGetHostProfile = db.prepare('SELECT primary_bot_id, updated_at FROM host_profile WHERE id = 1');

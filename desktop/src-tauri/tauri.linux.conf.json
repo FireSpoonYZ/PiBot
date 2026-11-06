@@ -3,8 +3,15 @@
   "bundle": {
     "linux": {
       "deb": {
+        "depends": ["sudo"],
+        "preInstallScript": "../linux/e-launcher-host.preinst",
+        "postInstallScript": "../linux/e-launcher-host.postinst",
+        "preRemoveScript": "../linux/e-launcher-host.prerm",
+        "postRemoveScript": "../linux/e-launcher-host.postrm",
         "files": {
-          "/usr/lib/systemd/user/e-launcher-host.service": "../linux/e-launcher-host.service"
+          "/usr/lib/systemd/user/e-launcher-host.service": "../linux/e-launcher-host.service",
+          "/usr/lib/e-launcher-desktop/e-launcher-hostctl": "../linux/e-launcher-hostctl",
+          "/etc/sudoers.d/e-launcher-hostctl": "../linux/e-launcher.sudoers"
         }
       },
       "rpm": {

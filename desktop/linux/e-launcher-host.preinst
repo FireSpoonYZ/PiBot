@@ -1,0 +1,207 @@
+#!/bin/sh
+# e-launcher-host preinst — runs as root before the package is unpacked.
+#
+# Real dpkg ordering for upgrade: old-prerm upgrade -> new-preinst upgrade ->
+# unpack -> old-postrm upgrade -> new-postinst configure. So on upgrade this
+# script (new-preinst) is the first place that can stop user services before
+# files change; old-prerm already exited early for "upgrade".
+#
+# For each configured user it records enabled/active state under
+# /var/lib/e-launcher/state/<uid> and reliably stops the service. A stop
+# failure aborts the package operation (exit 1). State files already present
+# from a previous attempt are preserved so retries never overwrite the
+# pre-stop snapshot with post-stop values.
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+UNIT="e-launcher-host.service"
+REGDIR="/var/lib/e-launcher/hosts"
+STATEDIR="/var/lib/e-launcher/state"
+DROPIN="10-host-home.conf"
+CTL_TIMEOUT=20
+
+SYSTEMCTL=""
+for c in /usr/bin/systemctl /bin/systemctl /usr/local/bin/systemctl; do
+  if [ -x "$c" ]; then SYSTEMCTL="$c"; break; fi
+done
+RUNUSER=$(command -v runuser 2>/dev/null || :)
+
+log() { echo "e-launcher-host: $*"; }
+
+user_name() { getent passwd "$1" 2>/dev/null | cut -d: -f1; }
+user_home() { getent passwd "$1" 2>/dev/null | cut -d: -f6; }
+
+# True when the user's systemd --user manager is reachable.
+manager_up() {
+  [ -n "$RUNUSER" ] && [ -n "$SYSTEMCTL" ] && [ -S "/run/user/$1/systemd/private" ]
+}
+
+# systemctl --user for uid via runuser with a sane user-session environment.
+# Never run systemctl as root; stdin is /dev/null, output passes through.
+user_systemctl() {
+  _uid="$1"; shift
+  _name=$(user_name "$_uid")
+  [ -n "$_name" ] || { echo "e-launcher-host: no passwd entry for uid $_uid" >&2; return 1; }
+  timeout "$CTL_TIMEOUT" "$RUNUSER" -u "$_name" -- env \
+    "XDG_RUNTIME_DIR=/run/user/$_uid" \
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$_uid/bus" \
+    "HOME=$(user_home "$_uid")" \
+    "$SYSTEMCTL" --user "$@" </dev/null
+}
+
+# yes/no: authoritative is-enabled when the manager is up, else the
+# default.target.wants symlink on disk.
+unit_enabled_state() {
+  if manager_up "$1"; then
+    _st=$(user_systemctl "$1" is-enabled "$UNIT" 2>/dev/null) || _st=""
+    case "$_st" in
+      enabled|enabled-runtime|indirect) echo yes; return ;;
+      *) echo no; return ;;
+    esac
+  fi
+  _home=$(user_home "$1")
+  if [ -n "$_home" ] && [ -e "$_home/.config/systemd/user/default.target.wants/$UNIT" ]; then
+    echo yes
+  else
+    echo no
+  fi
+}
+
+# yes/no: a running (or starting) Host process under the user manager.
+unit_active() {
+  manager_up "$1" || { echo no; return; }
+  _st=$(user_systemctl "$1" is-active "$UNIT" 2>/dev/null) || { echo no; return; }
+  case "$_st" in
+    active|activating|reloading) echo yes ;;
+    *) echo no ;;
+  esac
+}
+
+# UIDs known to this package: registry entries, leftover state files, and
+# (preinst only) users whose wants symlink proves prior configuration.
+collect_uids() {
+  for _dir in "$REGDIR" "$STATEDIR"; do
+    [ -d "$_dir" ] || continue
+    for _f in "$_dir"/*; do
+      [ -e "$_f" ] || continue
+      _u=${_f##*/}
+      case "$_u" in *[!0-9]*) continue ;; esac
+      echo "$_u"
+    done
+  done
+}
+
+# UIDs whose passwd home still has the enabled-unit wants symlink. Fallback
+# for users configured before the registry existed (or after its loss).
+scan_enabled_users() {
+  getent passwd 2>/dev/null | while IFS= read -r _line; do
+    _u=$(printf '%s' "$_line" | cut -d: -f3)
+    _h=$(printf '%s' "$_line" | cut -d: -f6)
+    case "$_u" in ''|*[!0-9]*) continue ;; esac
+    [ -n "$_h" ] || continue
+    [ -e "$_h/.config/systemd/user/default.target.wants/$UNIT" ] || continue
+    echo "$_u"
+  done
+}
+
+# Host home pinned by this product's drop-in (default XDG location only),
+# printed to stdout when found. Values with escapes are rejected rather than
+# guessed; %% is unescaped to %.
+dropin_host_home() {
+  _h=$(user_home "$1")
+  [ -n "$_h" ] || return 0
+  _f="$_h/.config/systemd/user/$UNIT.d/$DROPIN"
+  [ -f "$_f" ] || return 0
+  _v=$(sed -n 's/^Environment="E_LAUNCHER_HOST_HOME=//p' "$_f" | head -n 1)
+  [ -n "$_v" ] || return 0
+  _v=${_v%\"}
+  case "$_v" in *\\*|*\"*) return 0 ;; esac
+  _v=$(printf '%s' "$_v" | sed 's/%%/%/g')
+  case "$_v" in /*) printf '%s' "$_v" ;; esac
+}
+
+# Resolve the real absolute Host home for uid: drop-in value first, then the
+# default Host directory only when it carries Host markers. Prints nothing
+# when unknown — callers must then record a UID-only registry entry.
+resolve_host_home() {
+  _v=$(dropin_host_home "$1")
+  if [ -n "$_v" ]; then printf '%s' "$_v"; return 0; fi
+  _h=$(user_home "$1")
+  [ -n "$_h" ] || return 0
+  _c="$_h/.config/e-launcher/host-service"
+  if [ -f "$_c/config.json" ] || [ -f "$_c/secrets.env" ] || [ -d "$_c/data" ]; then
+    printf '%s' "$_c"
+  fi
+}
+
+# Write/refresh the registry entry for uid. home may be empty for a UID-only
+# entry (service can still be found and stopped; no home is claimed).
+write_registry() {
+  _uid="$1"; _home="$2"
+  _rt="$REGDIR/.$1.tmp.$$"
+  {
+    echo "uid=$_uid"
+    if [ -n "$_home" ]; then echo "home=$_home"; fi
+  } > "$_rt" 2>/dev/null \
+    && chmod 0640 "$_rt" 2>/dev/null \
+    && mv -f "$_rt" "$REGDIR/$_uid" 2>/dev/null \
+    || { rm -f "$_rt"; return 1; }
+}
+
+case "${1:-}" in
+  install|upgrade) ;;
+  *) exit 0 ;;
+esac
+[ -n "$SYSTEMCTL" ] && [ -n "$RUNUSER" ] || exit 0
+
+mkdir -p "$REGDIR" "$STATEDIR" 2>/dev/null || { log "cannot create state directories"; exit 1; }
+chmod 0750 "$REGDIR" "$STATEDIR" 2>/dev/null || { log "cannot secure state directories"; exit 1; }
+
+_targets=$( { collect_uids; scan_enabled_users; } | sort -un )
+[ -n "$_targets" ] || exit 0
+
+for _uid in $_targets; do
+  [ -n "$(user_name "$_uid")" ] || continue
+  _sf="$STATEDIR/$_uid"
+
+  # Preserve an existing state file: it holds the pre-stop snapshot from an
+  # earlier attempt of this same package operation. Rewriting it now would
+  # record the already-stopped state and lose the restore basis.
+  if [ ! -f "$_sf" ]; then
+    _enabled=$(unit_enabled_state "$_uid")
+    _active=$(unit_active "$_uid")
+    {
+      echo "uid=$_uid"
+      echo "enabled=$_enabled"
+      echo "active=$_active"
+    } > "$_sf" || { log "cannot write state for uid $_uid"; exit 1; }
+    chmod 0640 "$_sf" 2>/dev/null || { log "cannot secure state for uid $_uid"; exit 1; }
+  fi
+
+  # Self-heal the registry so uninstall/upgrade still finds this user. The
+  # home line is only written when the real Host home could be verified;
+  # otherwise the entry stays UID-only rather than claiming the login home.
+  if [ ! -f "$REGDIR/$_uid" ]; then
+    _home=$(resolve_host_home "$_uid")
+    write_registry "$_uid" "$_home" \
+      || log "cannot self-heal registry entry for uid $_uid"
+  fi
+
+  # Reliable stop: only when the user manager is reachable (a running
+  # service implies a live manager; otherwise nothing can be running).
+  if manager_up "$_uid"; then
+    if ! user_systemctl "$_uid" stop "$UNIT" >/dev/null 2>&1; then
+      log "failed to stop $UNIT for uid $_uid; aborting package operation"
+      exit 1
+    fi
+    _after=$(user_systemctl "$_uid" is-active "$UNIT" 2>/dev/null || echo unknown)
+    case "$_after" in
+      active|activating|reloading)
+        log "$UNIT for uid $_uid is still active after stop; aborting package operation"
+        exit 1
+        ;;
+    esac
+  fi
+done
+exit 0

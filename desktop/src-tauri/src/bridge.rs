@@ -303,6 +303,17 @@ impl DesktopBridge {
     self.dispatch_request(&session, op, params).await
   }
 
+  pub(crate) async fn request_with_session_generation(
+    &self,
+    app: &AppHandle,
+    op: &str,
+  ) -> Result<(u64, Value), BridgeError> {
+    let session = self.ensure_session(app).await?;
+    let generation = session.lock().unwrap().generation;
+    let result = self.dispatch_request(&session, op, json!({})).await?;
+    Ok((generation, result))
+  }
+
   pub async fn observe(
     &self,
     app: &AppHandle,
@@ -765,7 +776,7 @@ fn validate_non_empty_id(value: &str, name: &str) -> Result<(), BridgeError> {
   Ok(())
 }
 
-fn resolve_client_data_root(app: &AppHandle) -> Result<String, BridgeError> {
+pub(crate) fn resolve_client_data_root(app: &AppHandle) -> Result<String, BridgeError> {
   #[cfg(debug_assertions)]
   if let Some(override_root) = std::env::var_os("E_LAUNCHER_DESKTOP_DATA_ROOT") {
     let path = PathBuf::from(override_root);

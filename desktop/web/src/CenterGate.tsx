@@ -5,11 +5,40 @@ import { GrokBotAvatar, JARVIS_AVATAR_PRESET } from '../../../web/src/GrokBotAva
 import { ErrorNotice, errorText, useText } from '../../../web/src/ui';
 import type { DesktopClientStatus } from '../../../host-core/desktop-client.js';
 import { hostAdopt, hostErrorCode, hostErrorText, hostPair, hostStatus, type HostPairResult, type HostStatus } from './hostService';
+import { ClientUpdateProvider } from '../../../web/src/ClientUpdateProvider';
+import type { ClientUpdateOp, ClientUpdateParams, ClientUpdateStatus } from '../../../web/src/ClientUpdate';
 import './CenterGate.css';
+
+/** 桌面更新命令适配：语义操作 → desktop_update_* Tauri 命令（原生侧负责节流/验签/安装）。 */
+const desktopUpdateRequest = (op: ClientUpdateOp, params?: ClientUpdateParams): Promise<ClientUpdateStatus> => {
+  const command = 'desktop_update_' + op;
+  if (op === 'check') return invoke<ClientUpdateStatus>(command, { automatic: Boolean(params?.automatic) });
+  if (op === 'install') return invoke<ClientUpdateStatus>(command, { stopActive: Boolean(params?.stopActive) });
+  return invoke<ClientUpdateStatus>(command);
+};
 
 type SavedConnection = { url: string; deviceId: string; ca: string };
 /** center_connect 入参；手动连接、自动重连与首次配对共用。 */
 type ConnectInput = { url: string; deviceId: string; deviceToken: string; ca?: string };
+
+const centerOrigin = (url: string | null | undefined): string | null => {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url.trim());
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.origin : null;
+  } catch {
+    return null;
+  }
+};
+
+const matchesHostConnection = (host: HostStatus, url: string, deviceId: string): boolean => {
+  const origin = centerOrigin(url);
+  return Boolean(origin && origin === centerOrigin(host.centerUrl) && deviceId.trim() && host.deviceId === deviceId.trim());
+};
+
+const isNewHost = (host: HostStatus): boolean =>
+  host.configured === false && !host.centerUrl && !host.deviceId && !host.configError;
+
 /** 首次配对进度：pairing=启动器登录/注册/启动 Host（单次调用），connecting=客户端连接中心。 */
 type PairPhase = 'idle' | 'pairing' | 'connecting';
 
@@ -91,9 +120,11 @@ export function CenterGate({ children, onDisconnected }: Props) {
   const [password, setPassword] = useState('');
   const [pairName, setPairName] = useState('');
   const [pairForce, setPairForce] = useState(false);
+  const [reconfigure, setReconfigure] = useState(false);
+  const [adoptHost, setAdoptHost] = useState(true);
   const [pairPhase, setPairPhase] = useState<PairPhase>('idle');
   const [pairFailedStep, setPairFailedStep] = useState<number>();
-  const [adoptHost, setAdoptHost] = useState(true);
+
   /** 配对成功但客户端连接失败时保留凭据供“重试连接”，仅存内存。 */
   const pairedRef = useRef<HostPairResult | null>(null);
   const [canRetryPaired, setCanRetryPaired] = useState(false);
@@ -277,10 +308,11 @@ export function CenterGate({ children, onDisconnected }: Props) {
   );
 
   /** 首次运行：内置 Host 可用、未配对且客户端无已保存连接时显示配对表单；配对流程中保持显示。 */
-  const firstRun = Boolean(host && !host.configured && !saved && polled);
-  const showPair = firstRun || pairPhase !== 'idle' || pairFailedStep !== undefined;
-  /** 手动连接时可让内置 Host 接管该设备：未配对，或已配对的正是同一设备（刷新令牌）。 */
-  const offerAdopt = Boolean(host && (!host.configured || host.deviceId === deviceId.trim()));
+  const firstRun = Boolean(host && isNewHost(host) && !saved && polled);
+  const showPair = firstRun || reconfigure || pairPhase !== 'idle' || pairFailedStep !== undefined;
+  const offerAdopt = Boolean(host && (isNewHost(host) || (host.configured === true && matchesHostConnection(host, url, deviceId))));
+  const sameHostConnection = Boolean(host?.configured && offerAdopt);
+  const hasHostConfiguration = Boolean(host && (host.configured === true || host.centerUrl || host.deviceId || host.configError));
 
   const connect = async (event: FormEvent) => {
     event.preventDefault();
@@ -290,12 +322,14 @@ export function CenterGate({ children, onDisconnected }: Props) {
     setCanRetryPaired(false);
     const input: ConnectInput = { url: url.trim(), deviceId: deviceId.trim(), deviceToken: token.trim(), ca: ca.trim() };
     try {
-      if (offerAdopt && adoptHost && input.deviceToken) {
+      // adopt 会启用自启动；只在首次配置时调用，已配置 Host 的普通重连绝不调用。
+      const currentHost = host && isNewHost(host) && offerAdopt && adoptHost && input.deviceToken ? await refreshHost() : null;
+      if (currentHost && isNewHost(currentHost)) {
         try {
           await hostAdopt({ centerUrl: input.url, deviceId: input.deviceId, deviceToken: input.deviceToken, centerCa: input.ca });
         } catch (e) {
           setError(
-            t('本机 Host 接管失败；可取消勾选“同时在本机运行 Host”后仅连接客户端。', 'The local Host could not take over this device. Uncheck “Also run the Host on this computer” to connect the client only.') +
+            t('本机 Host 接管失败；可重试或在连接页显式重新配对。若只连接客户端，可取消首次配置选项。', 'The local Host could not take over this device. Retry or re-pair explicitly; uncheck first-time setup to connect the client only.') +
               ' ' + hostErrorText(e, t),
           );
           return;
@@ -318,12 +352,17 @@ export function CenterGate({ children, onDisconnected }: Props) {
     setPairFailedStep(undefined);
     setCanRetryPaired(false);
     setPairPhase('connecting');
+    // 配对成功但启动器个别步骤（自启/启动 Host）失败：身份不重注册，先提示再继续连接。
+    if (result.warnings?.length) {
+      setError(t('配对已完成，但本机 Host 有警告：', 'Pairing finished, but the local Host reported warnings: ') + result.warnings.join('；'));
+    }
     try {
       await connectCenter(
         { url: result.centerUrl, deviceId: result.deviceId, deviceToken: result.deviceToken },
         () => attempt === epoch.current,
       );
       pairedRef.current = null;
+      setReconfigure(false);
     } catch (e) {
       setPairFailedStep(3);
       setUrl(result.centerUrl);
@@ -393,9 +432,12 @@ export function CenterGate({ children, onDisconnected }: Props) {
   };
 
   if (status?.state === 'ready') {
+    const centerKey = status.centerUrl + '|' + (status.savedConnection?.deviceId ?? status.clientId);
     return (
       <CenterConnectionContext.Provider value={{ status, disconnectCenter }}>
-        {children}
+        <ClientUpdateProvider request={desktopUpdateRequest} ready centerKey={centerKey}>
+          {children}
+        </ClientUpdateProvider>
       </CenterConnectionContext.Provider>
     );
   }
@@ -455,11 +497,18 @@ export function CenterGate({ children, onDisconnected }: Props) {
         <summary>{t('高级 TLS / 自签 CA 证书（可选）', 'Advanced TLS / self-signed CA certificate (optional)')}</summary>
         <textarea value={ca} onChange={e => setCa(e.target.value)} placeholder="-----BEGIN CERTIFICATE-----" rows={4} />
       </details>
-      {offerAdopt && (
+      {host && isNewHost(host) && offerAdopt && (
         <label className="gate-check">
           <input type="checkbox" checked={adoptHost} onChange={e => setAdoptHost(e.target.checked)} />
-          <span>{t('同时在本机运行 Host', 'Also run the Host on this computer')}</span>
+          <span>{t('首次连接时同时配置本机 Host', 'Configure the local Host on first connection')}</span>
         </label>
+      )}
+      {hasHostConfiguration && (
+        <p className="gate-subtitle">
+          {sameHostConnection
+            ? t('本机 Host 已配置为此中心和设备；重连不会更改其自启动设置。', 'The local Host is configured for this center and device; reconnecting will not change autostart.')
+            : t('本机 Host 已有其他或不完整的配置；此次只连接客户端，不会更改 Host。', 'The local Host has a different or incomplete configuration; this only connects the client.')}
+        </p>
       )}
       <button disabled={busy} type="submit" className="primary-button gate-submit">
         {connecting ? t('连接中…', 'Connecting…') : t('连接中心', 'Connect')}
@@ -492,6 +541,7 @@ export function CenterGate({ children, onDisconnected }: Props) {
         {showPair ? (
           <>
             <form className="gate-form" onSubmit={pair}>
+              {pairForce && <p className="gate-subtitle">{t('重新配对会替换本机 Host 的中心配置。', 'Re-pairing replaces the local Host center configuration.')}</p>}
               <label className="gate-field">
                 <span>{t('中心地址', 'Center URL')}</span>
                 <input required type="url" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://center.example.com" />
@@ -524,8 +574,28 @@ export function CenterGate({ children, onDisconnected }: Props) {
               <summary>{t('高级：使用已有设备 ID 和令牌', 'Advanced: use an existing device ID and token')}</summary>
               {manualForm}
             </details>
+            {reconfigure && pairPhase === 'idle' && (
+              <button type="button" className="secondary-button gate-manage" disabled={busy} onClick={() => {
+                setReconfigure(false);
+                setPairForce(false);
+                setPairFailedStep(undefined);
+                setError('');
+              }}>
+                {t('返回连接', 'Back to connection')}
+              </button>
+            )}
           </>
         ) : manualForm}
+        {!showPair && hasHostConfiguration && (
+          <button type="button" className="secondary-button gate-manage" disabled={busy} onClick={() => {
+            setPairForce(true);
+            setReconfigure(true);
+            setPairFailedStep(undefined);
+            setError('');
+          }}>
+            {t('重新配对本机 Host', 'Re-pair local Host')}
+          </button>
+        )}
         <button
           type="button"
           className="secondary-button gate-manage"

@@ -4,13 +4,24 @@ on:
   push:
     branches: ['**']
   workflow_dispatch:
+  # Reusable: invoked by release.yml for v* tags (signed release APK).
+  workflow_call:
+    secrets:
+      ANDROID_RELEASE_KEYSTORE_BASE64:
+        required: true
+      ANDROID_RELEASE_STORE_PASSWORD:
+        required: true
+      ANDROID_RELEASE_KEY_ALIAS:
+        required: true
+      ANDROID_RELEASE_KEY_PASSWORD:
+        required: true
 
 concurrency:
   group: apk-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m
@@ -27,7 +38,6 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      # v6 moves caching to a proprietary component with separate terms; v5 already runs on Node 24.
       - uses: gradle/actions/setup-gradle@v5
 
       - uses: actions/setup-node@v7
@@ -59,31 +69,19 @@ jobs:
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platforms;android-36" "ndk;28.2.13676358" "cmake;3.22.1"
 
-      # settings.gradle 会在缺失时用 `node host-core/build-mobile.js --sdk-path` 生成 SDK include 片段，
-      # 该 metadata 需要 cargo；这里用 runner 自带的 rustup 准备好 stable + 两个 Android target。
+      # rust-toolchain.toml pins channel 1.99.1; add the two Android targets.
       - name: Install Rust toolchain and Android targets
         run: |
           set -euo pipefail
           if ! command -v rustup >/dev/null 2>&1; then
-            echo "rustup not found on this runner image; the APK job needs the preinstalled Rust toolchain manager" >&2
+            echo "rustup not found on this runner image" >&2
             exit 1
           fi
-          rustup toolchain install stable --profile minimal --no-self-update
-          rustup default stable
-          rustup target add --toolchain stable aarch64-linux-android x86_64-linux-android
+          rustup toolchain install 1.99.1 --profile minimal --no-self-update
+          rustup default 1.99.1
+          rustup target add aarch64-linux-android x86_64-linux-android
           rustc --version
           cargo --version
-
-      - name: Restore debug keystore
-        env:
-          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
-        run: |
-          if [ -z "$DEBUG_KEYSTORE_BASE64" ]; then
-            echo "Missing repository secret DEBUG_KEYSTORE_BASE64"
-            exit 1
-          fi
-          echo "$DEBUG_KEYSTORE_BASE64" | base64 -d > debug.keystore
-          test -s debug.keystore
 
       - name: Install web dependencies
         run: npm ci
@@ -95,39 +93,66 @@ jobs:
         shell: pwsh
         run: ./scripts/prepare-node-mobile.ps1
 
-      - name: Assemble APK
-        run: ./gradlew --no-daemon --console=plain :app:testDebugUnitTest :app:lintDebug :shower-server:lintDebug :app:assembleDebug ${{ github.ref == 'refs/heads/main' && ':app:assembleRelease' || '' }}
+      - name: Verify product version consistency
+        env:
+          TAG_ARG: ${{ github.ref_type == 'tag' && format('--tag {0}', github.ref_name) || '' }}
+        run: node scripts/release-check.mjs $TAG_ARG
+
+      # Branch pushes: debug APK artifact only — no signing secrets required.
+      - name: Assemble debug APK
+        if: github.ref_type != 'tag'
+        run: ./gradlew --no-daemon --console=plain :app:testDebugUnitTest :app:lintDebug :shower-server:lintDebug :app:assembleDebug
 
       - name: Upload debug APK
+        if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v7
         with:
-          name: e-launcher-debug
+          name: apk-debug-${{ github.sha }}
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
 
+      # v* tags: signed release APK, uploaded for the shared release job.
+      # Release signing resolves lazily in app/build.gradle afterEvaluate; the
+      # ANDROID_RELEASE_* env vars below are only read when release tasks run.
+      - name: Decode release keystore
+        if: github.ref_type == 'tag'
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ANDROID_RELEASE_KEYSTORE_BASE64" ]; then
+            echo "Missing secret ANDROID_RELEASE_KEYSTORE_BASE64"
+            exit 1
+          fi
+          echo "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          test -s "$RUNNER_TEMP/release.keystore"
+
+      - name: Build signed release APK
+        if: github.ref_type == 'tag'
+        run: ./gradlew --no-daemon --console=plain :app:testDebugUnitTest :app:lintDebug :shower-server:lintDebug :app:assembleRelease
+        env:
+          ANDROID_RELEASE_KEYSTORE: ${{ runner.temp }}/release.keystore
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+
+      - name: Verify APK signature and publish artifact
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/release/app-release.apk
+          test -f "$APK"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -n 1)
+          "$APKSIGNER" verify --print-certs "$APK"
+          mkdir -p release-out
+          cp "$APK" release-out/e-launcher-android-arm64.apk
+
       - name: Upload release APK
-        if: github.ref == 'refs/heads/main'
+        if: github.ref_type == 'tag'
         uses: actions/upload-artifact@v7
         with:
-          name: e-launcher-release
-          path: app/build/outputs/apk/release/app-release.apk
+          name: apk-release-${{ github.ref_name }}
+          path: release-out/e-launcher-android-arm64.apk
           if-no-files-found: error
-          retention-days: 7
-
-      - name: Publish GitHub Release
-        if: github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cp app/build/outputs/apk/debug/app-debug.apk e-launcher-debug.apk
-          cp app/build/outputs/apk/release/app-release.apk e-launcher-release.apk
-          notes=$(printf 'SHA: %s\nRun: %s/%s/actions/runs/%s' "$GITHUB_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")
-          if gh release view latest >/dev/null 2>&1; then
-            gh release delete latest --cleanup-tag --yes
-          fi
-          gh release create latest e-launcher-debug.apk e-launcher-release.apk \
-            --title Latest \
-            --notes "$notes" \
-            --latest \
-            --target "$GITHUB_SHA"
+          retention-days: 30

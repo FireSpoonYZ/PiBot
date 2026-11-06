@@ -1,0 +1,74 @@
+#!/bin/sh
+# e-launcher-hostctl — limited root helper for e-launcher DEB lifecycle.
+#
+# Installed at /usr/lib/e-launcher-desktop/e-launcher-hostctl (root-owned,
+# not user-writable) and invoked by `e-launcher-host enable|remove` through
+# `sudo -n`. It only records the *calling* user's UID and absolute Host home
+# under /var/lib/e-launcher/hosts/ for the package maintainer scripts; it
+# never executes user-supplied commands and stores no secrets.
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+REGDIR="/var/lib/e-launcher/hosts"
+
+die() { echo "e-launcher-hostctl: $*" >&2; exit 1; }
+
+[ "$(id -u)" = "0" ] || die "must run as root"
+[ -n "${SUDO_UID:-}" ] || die "SUDO_UID is not set"
+case "$SUDO_UID" in
+  ''|*[!0-9]*) die "invalid SUDO_UID '$SUDO_UID'" ;;
+esac
+# Only real unprivileged users may register; root (uid 0) and system-ish
+# accounts must not end up in the lifecycle registry.
+[ "$SUDO_UID" != "0" ] || die "uid 0 cannot register"
+getent passwd "$SUDO_UID" >/dev/null 2>&1 || die "uid $SUDO_UID has no passwd entry"
+
+op="${1:-}"
+[ $# -gt 0 ] && shift
+
+# Absolute path, no control characters (registry is line-based), bounded.
+valid_home() {
+  case "$1" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *[[:cntrl:]]*) return 1 ;;
+  esac
+  [ "${#1}" -le 4096 ]
+}
+
+# The registry directory must be a real directory we control — never a
+# symlink — with permissions only root can traverse.
+prepare_regdir() {
+  [ -L "$REGDIR" ] && die "$REGDIR is a symlink"
+  mkdir -p "$REGDIR" || die "cannot create $REGDIR"
+  [ -d "$REGDIR" ] || die "$REGDIR is not a directory"
+  chmod 0750 "$REGDIR" || die "cannot secure $REGDIR"
+}
+
+case "$op" in
+  register)
+    [ $# -eq 1 ] || die "usage: e-launcher-hostctl register <host-home>"
+    home="$1"
+    valid_home "$home" || die "invalid host home '$home'"
+    [ -d "$home" ] || die "host home '$home' does not exist"
+    prepare_regdir
+    tmp="$REGDIR/.$SUDO_UID.tmp.$$"
+    {
+      echo "uid=$SUDO_UID"
+      echo "home=$home"
+    } > "$tmp" || die "cannot write $tmp"
+    chmod 0640 "$tmp" || die "cannot secure $tmp"
+    mv -f "$tmp" "$REGDIR/$SUDO_UID" || die "cannot install registry entry"
+    ;;
+  unregister)
+    [ $# -eq 0 ] || die "usage: e-launcher-hostctl unregister"
+    rm -f "$REGDIR/$SUDO_UID" || die "cannot remove registry entry"
+    ;;
+  *)
+    die "usage: e-launcher-hostctl register <host-home>|unregister"
+    ;;
+esac
+exit 0

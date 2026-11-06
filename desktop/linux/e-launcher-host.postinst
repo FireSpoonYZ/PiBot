@@ -1,0 +1,163 @@
+#!/bin/sh
+# e-launcher-host postinst — runs as root after the package is unpacked.
+#
+# configure: restore the per-user state saved by preinst. Any item that
+# should be restored (daemon-reload, re-enable, restart) failing keeps that
+# user's state file and makes this script exit non-zero, so dpkg reports the
+# configure as failed instead of claiming success with the restore basis
+# lost. `dpkg --configure e-launcher-desktop` retries from the kept state.
+#
+# abort-upgrade / abort-install / abort-remove / abort-deconfigure: the
+# package operation was rolled back after preinst/prerm had already stopped
+# user services, so best-effort restore runs here; failures are only logged
+# and the state file is kept as the repair basis.
+#
+# Linger is a per-user property and is never touched here.
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+UNIT="e-launcher-host.service"
+REGDIR="/var/lib/e-launcher/hosts"
+STATEDIR="/var/lib/e-launcher/state"
+CTL_TIMEOUT=20
+
+SYSTEMCTL=""
+for c in /usr/bin/systemctl /bin/systemctl /usr/local/bin/systemctl; do
+  if [ -x "$c" ]; then SYSTEMCTL="$c"; break; fi
+done
+RUNUSER=$(command -v runuser 2>/dev/null || :)
+
+log() { echo "e-launcher-host: $*"; }
+
+user_name() { getent passwd "$1" 2>/dev/null | cut -d: -f1; }
+user_home() { getent passwd "$1" 2>/dev/null | cut -d: -f6; }
+
+manager_up() {
+  [ -n "$RUNUSER" ] && [ -n "$SYSTEMCTL" ] && [ -S "/run/user/$1/systemd/private" ]
+}
+
+user_systemctl() {
+  _uid="$1"; shift
+  _name=$(user_name "$_uid")
+  [ -n "$_name" ] || { echo "e-launcher-host: no passwd entry for uid $_uid" >&2; return 1; }
+  timeout "$CTL_TIMEOUT" "$RUNUSER" -u "$_name" -- env \
+    "XDG_RUNTIME_DIR=/run/user/$_uid" \
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$_uid/bus" \
+    "HOME=$(user_home "$_uid")" \
+    "$SYSTEMCTL" --user "$@" </dev/null
+}
+
+# Reads uid=/enabled=/active= from a state file into _uid/_enabled/_active.
+read_state() {
+  _uid=""; _enabled=no; _active=no
+  while IFS='=' read -r _k _v; do
+    case "$_k" in
+      uid) _uid="$_v" ;;
+      enabled) _enabled="$_v" ;;
+      active) _active="$_v" ;;
+    esac
+  done < "$1"
+}
+
+# Restore one user's saved state. strict=yes (configure): a failed required
+# step keeps the state file and returns 1 so dpkg fails the configure.
+# strict=no (abort-*): failures are logged, the state file is kept as the
+# repair basis, and 0 is returned so a rollback is never failed by us.
+restore_one() {
+  _uid="$1"; _enabled="$2"; _active="$3"; _strict="$4"
+  _sf="$STATEDIR/$_uid"
+  [ -n "$(user_name "$_uid")" ] || { rm -f "$_sf"; return 0; }
+
+  if ! manager_up "$_uid"; then
+    # Manager down: an enabled unit re-arms itself via its wants symlink at
+    # next manager start, so enabled=yes needs nothing now. A manually
+    # started (enabled=no, active=yes) service cannot be restarted without
+    # the manager — keep the state file as the repair basis in both modes;
+    # only strict mode fails the package operation.
+    if [ "$_enabled" = "no" ] && [ "$_active" = "yes" ]; then
+      log "uid $_uid was running but its user manager is down; cannot restore now"
+      [ "$_strict" = "yes" ] && return 1
+      return 0
+    fi
+    rm -f "$_sf"
+    return 0
+  fi
+
+  if [ "$_enabled" = "yes" ] || [ "$_active" = "yes" ]; then
+    user_systemctl "$_uid" daemon-reload >/dev/null 2>&1 || {
+      log "daemon-reload failed for uid $_uid"
+      [ "$_strict" = "yes" ] && return 1
+      return 0
+    }
+  fi
+  if [ "$_enabled" = "yes" ]; then
+    if ! user_systemctl "$_uid" enable "$UNIT" >/dev/null 2>&1; then
+      log "re-enable failed for uid $_uid"
+      [ "$_strict" = "yes" ] && return 1
+      return 0
+    fi
+    if ! user_systemctl "$_uid" is-enabled "$UNIT" 2>/dev/null | grep -q '^enabled'; then
+      log "re-enable verification failed for uid $_uid"
+      [ "$_strict" = "yes" ] && return 1
+      return 0
+    fi
+  fi
+  if [ "$_active" = "yes" ]; then
+    if user_systemctl "$_uid" start "$UNIT" >/dev/null 2>&1; then
+      _now=$(user_systemctl "$_uid" is-active "$UNIT" 2>/dev/null || echo unknown)
+      case "$_now" in
+        active|activating|reloading) : ;;
+        *)
+          log "$UNIT for uid $_uid did not become active after upgrade"
+          [ "$_strict" = "yes" ] && return 1
+          return 0
+          ;;
+      esac
+    else
+      log "failed to restart $UNIT for uid $_uid"
+      [ "$_strict" = "yes" ] && return 1
+      return 0
+    fi
+  fi
+  rm -f "$_sf"
+  return 0
+}
+
+restore_states() {
+  _strict="$1"
+  _failed=0
+  [ -d "$STATEDIR" ] || return 0
+  for _sf in "$STATEDIR"/*; do
+    [ -f "$_sf" ] || continue
+    read_state "$_sf"
+    case "$_uid" in
+      ''|*[!0-9]*) rm -f "$_sf"; continue ;;
+    esac
+    restore_one "$_uid" "$_enabled" "$_active" "$_strict" || _failed=1
+  done
+  rmdir "$STATEDIR" 2>/dev/null || :
+  return "$_failed"
+}
+
+# The helper script and sudoers entry may land with loose modes depending on
+# the bundler; enforce the intended permissions. A chmod failure is logged,
+# not fatal to configure.
+chmod 0755 /usr/lib/e-launcher-desktop/e-launcher-hostctl 2>/dev/null \
+  || log "cannot chmod helper /usr/lib/e-launcher-desktop/e-launcher-hostctl"
+if [ -f /etc/sudoers.d/e-launcher-hostctl ]; then
+  chmod 0440 /etc/sudoers.d/e-launcher-hostctl 2>/dev/null \
+    || log "cannot chmod /etc/sudoers.d/e-launcher-hostctl"
+fi
+
+case "${1:-}" in
+  configure)
+    [ -n "$SYSTEMCTL" ] && [ -n "$RUNUSER" ] || exit 0
+    restore_states yes || exit 1
+    ;;
+  abort-upgrade|abort-install|abort-remove|abort-deconfigure)
+    restore_states no || :
+    ;;
+  *) exit 0 ;;
+esac
+exit 0

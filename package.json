@@ -1,7 +1,7 @@
 {
   "name": "e-launcher-web",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "scripts": {
     "test": "node --test web/test/*.test.mjs",
@@ -18,6 +18,7 @@
   "dependencies": {
     "@radix-ui/react-dialog": "1.1.15",
     "@tauri-apps/api": "2.12.4",
+    "@tauri-apps/plugin-updater": "2.14.1",
     "katex": "0.16.27",
     "lucide-react": "0.562.0",
     "react": "19.2.3",

@@ -1,20 +1,32 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-/** Pinned upstream versions of the bundled search binaries. */
+/** Pinned upstream versions and release archive SHA-256 digests. */
 const SEARCH_TOOLS = {
   rg: {
     version: '15.1.0',
     repo: 'BurntSushi/ripgrep',
-    tag: '15.1.0',
-    rootPrefix: 'ripgrep-15.1.0-',
+    tagPrefix: '',
+    prefix: 'ripgrep-',
+    licenses: ['LICENSE-MIT', 'UNLICENSE', 'COPYING'],
+    // https://github.com/BurntSushi/ripgrep/releases/tag/15.1.0 (.sha256 assets)
+    sha256: {
+      'win32-x64': '124510b94b6baa3380d051fdf4650eaa80a302c876d611e9dba0b2e18d87493a',
+      'linux-x64': '1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599',
+    },
   },
   fd: {
     version: '10.3.0',
     repo: 'sharkdp/fd',
-    tag: 'v10.3.0',
-    rootPrefix: 'fd-v10.3.0-',
+    tagPrefix: 'v',
+    prefix: 'fd-v',
+    licenses: ['LICENSE-MIT', 'LICENSE-APACHE'],
+    // https://api.github.com/repos/sharkdp/fd/releases/tags/v10.3.0 (asset digests)
+    sha256: {
+      'win32-x64': '318aa2a6fa664325933e81fda60d523fff29444129e91ebf0726b5b3bcd8b059',
+      'linux-x64': '2b6bfaae8c48f12050813c2ffe1884c61ea26e750d803df9c9114550a314cd14',
+    },
   },
 };
 
@@ -23,34 +35,32 @@ export const SEARCH_TOOL_VERSIONS = {
   fd: SEARCH_TOOLS.fd.version,
 };
 
-// Release triples: x64 => x86_64, arm64 => aarch64; win32/linux only.
 const TRIPLES = {
-  win32: { x64: 'x86_64-pc-windows-msvc', arm64: 'aarch64-pc-windows-msvc' },
-  linux: { x64: 'x86_64-unknown-linux-musl', arm64: 'aarch64-unknown-linux-musl' },
+  'win32-x64': 'x86_64-pc-windows-msvc',
+  'linux-x64': 'x86_64-unknown-linux-musl',
 };
 
-/**
- * Asset metadata of the pinned release for a search tool on one platform/arch.
- * Only win32/linux and x64/arm64 are supported.
- */
+/** Asset metadata for the pinned Windows/Linux x64 release. */
 export function getSearchToolAsset(name, platform = process.platform, arch = process.arch) {
   assertToolName(name);
   const triple = requireTriple(platform, arch);
   const tool = SEARCH_TOOLS[name];
   const binary = binaryName(name, platform);
-  const root = `${tool.rootPrefix}${triple}`;
+  const root = `${tool.prefix}${tool.version}-${triple}`;
   const archiveName = platform === 'win32' ? `${root}.zip` : `${root}.tar.gz`;
   return {
     version: tool.version,
-    url: `https://github.com/${tool.repo}/releases/download/${tool.tag}/${archiveName}`,
+    url: `https://github.com/${tool.repo}/releases/download/${tool.tagPrefix}${tool.version}/${archiveName}`,
     archiveName,
+    sha256: tool.sha256[`${platform}-${arch}`],
     entryPath: `${root}/${binary}`,
     binaryName: binary,
     licenseEntry: `${root}/LICENSE-MIT`,
+    licenseEntries: tool.licenses.map((license) => `${root}/${license}`),
   };
 }
 
-/** Installed location of the pinned version: <dataRoot>/tools/<platform>-<arch>/<name>-<version>/<binary>. */
+/** Pinned location: <root>/tools/<platform>-<arch>/<name>-<version>/<binary>. */
 export function getSearchToolInstallPath(dataRoot, name, platform = process.platform, arch = process.arch) {
   assertToolName(name);
   assertDataRoot(dataRoot);
@@ -58,76 +68,21 @@ export function getSearchToolInstallPath(dataRoot, name, platform = process.plat
   return path.join(dataRoot, 'tools', `${platform}-${arch}`, `${name}-${SEARCH_TOOL_VERSIONS[name]}`, binaryName(name, platform));
 }
 
-/**
- * Resolve a search binary, in order: an explicit toolPaths entry, the pinned
- * install path, the Pi agent bin directory, then PATH. Returns the absolute
- * path of an existing executable file, or throws.
- */
-export function resolveSearchBinary(name, { dataRoot, toolPaths } = {}) {
+/** Resolve only product-bundled binaries, never user configuration or PATH. */
+export function resolveSearchBinary(name) {
   assertToolName(name);
   const platform = process.platform;
   const arch = process.arch;
-
-  const explicit = toolPaths?.[name];
-  if (explicit !== undefined) {
-    // null 是显式给出的非法值，报 INVALID_ARGUMENT，不当作未指定而回退。
-    return resolveExplicit(name, explicit, platform);
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  let candidate;
+  if (platform === 'android') {
+    // Android bundles this module into bot-host/runtime/<payloadSha>/host-runtime.mjs.
+    candidate = path.resolve(moduleDir, '..', '..', 'bin', name);
+  } else if (isSupported(platform, arch)) {
+    candidate = getSearchToolInstallPath(path.resolve(moduleDir, '..'), name, platform, arch);
   }
-
-  if (isSupported(platform, arch) && typeof dataRoot === 'string' && dataRoot !== '') {
-    const installed = getSearchToolInstallPath(dataRoot, name, platform, arch);
-    if (isExecutableFile(installed, platform)) return installed;
-  }
-
-  for (const dir of piBinDirs()) {
-    const candidate = path.join(dir, binaryName(name, platform));
-    if (isExecutableFile(candidate, platform)) return candidate;
-  }
-
-  const found = findOnPath(name, platform);
-  if (found !== undefined) return found;
-
+  if (candidate && isExecutableFile(candidate, platform)) return candidate;
   throw unavailable(name);
-}
-
-function resolveExplicit(name, value, platform) {
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw invalidArgument(`toolPaths.${name} must be a non-empty string`);
-  }
-  if (!path.isAbsolute(value)) {
-    throw invalidArgument(`toolPaths.${name} must be an absolute path`);
-  }
-  if (!isExecutableFile(value, platform)) {
-    throw toolUnavailable(`configured ${name} binary is not an executable file: ${value}`);
-  }
-  return value;
-}
-
-function findOnPath(name, platform) {
-  const programNames = [binaryName(name, platform)];
-  // fd is packaged as fdfind on Debian/Ubuntu.
-  if (name === 'fd' && platform === 'linux') programNames.push('fdfind');
-  const pathEnv = process.env.PATH ?? '';
-  for (const entry of pathEnv.split(path.delimiter)) {
-    if (entry === '') continue;
-    const dir = path.resolve(entry);
-    for (const program of programNames) {
-      const candidate = path.join(dir, program);
-      if (isExecutableFile(candidate, platform)) return candidate;
-    }
-  }
-  return undefined;
-}
-
-function piBinDirs() {
-  const dirs = [];
-  const agentDir = process.env.PI_AGENT_DIR;
-  if (typeof agentDir === 'string' && agentDir.trim() !== '') {
-    // PI_AGENT_DIR 可能是相对路径，path.resolve 保证返回绝对路径。
-    dirs.push(path.resolve(agentDir, 'bin'));
-  }
-  dirs.push(path.join(os.homedir(), '.pi', 'agent', 'bin'));
-  return dirs;
 }
 
 /** Existing executable file? ENOENT/ENOTDIR count as missing; other errors propagate. */
@@ -157,11 +112,11 @@ function binaryName(name, platform) {
 }
 
 function isSupported(platform, arch) {
-  return TRIPLES[platform]?.[arch] !== undefined;
+  return TRIPLES[`${platform}-${arch}`] !== undefined;
 }
 
 function requireTriple(platform, arch) {
-  const triple = TRIPLES[platform]?.[arch];
+  const triple = TRIPLES[`${platform}-${arch}`];
   if (triple === undefined) {
     throw invalidArgument(`unsupported platform/arch: ${platform}/${arch}`);
   }
@@ -189,14 +144,8 @@ function invalidArgument(message) {
   return err;
 }
 
-function toolUnavailable(message) {
-  const err = new Error(message);
+function unavailable(name) {
+  const err = new Error(`bundled ${name} binary is missing or not executable`);
   err.code = 'TOOL_UNAVAILABLE';
   return err;
-}
-
-function unavailable(name) {
-  return toolUnavailable(
-    `${name} binary not found. Run the explicit prepare-tools command to install it, or configure toolPaths.${name}.`
-  );
 }

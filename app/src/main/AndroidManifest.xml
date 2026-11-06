@@ -15,6 +15,8 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+    <!-- Android 8+ 安装未知应用来源；仅在用户显式 updateInstall 返回 waiting-permission 时引导。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <queries>
         <intent>
@@ -83,6 +85,10 @@
         <!-- Bot 屏幕：默认进程、同 UID 私有 Binder；只观看/接管已有 Shower 虚拟屏，不创建屏幕或启动 Host。 -->
         <service
             android:name=".BotScreenService"
+            android:exported="false" />
+        <!-- 客户端更新安装结果回执：默认进程、非导出；PackageInstaller status 回调。 -->
+        <receiver
+            android:name=".ClientUpdateResultReceiver"
             android:exported="false" />
         <activity
             android:name=".MainActivity"

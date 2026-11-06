@@ -34,6 +34,7 @@ import path from 'node:path';
 import { parseArgs, promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveTauriCliEntry, spawnNodeScript } from './desktop-tauri.js';
+import { prepareSearchTools } from './prepare-tools.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -65,7 +66,7 @@ const HOST_CORE_RUNTIME_SUBDIRS = ['capabilities', 'managed-install', 'plugins',
 const HOST_CORE_BUILTIN_SKILLS_DIR = 'builtin-skills';
 const BUILTIN_SKILLS_SOURCE_EXTENSIONS = ['.md'];
 // Build/dev-only top-level host-core modules that the Host never loads.
-const HOST_CORE_RUNTIME_EXCLUDED = new Set(['desktop-tauri.js', 'package-lock.json', 'prepare-android-tools.js']);
+const HOST_CORE_RUNTIME_EXCLUDED = new Set(['desktop-tauri.js', 'package-lock.json', 'prepare-android-tools.js', 'prepare-tools.js']);
 const HOST_RUNTIME_SOURCE_EXTENSIONS = ['.js', '.mjs', '.cjs', '.json'];
 // Type declarations / source maps / TS build info are never loaded by the Host;
 // pruning them roughly halves the installer file count (AWS/Smithy dist-types).
@@ -994,6 +995,7 @@ export async function collectCargoLicenseSections({
 //   host-core/                     runtime host-core modules + package.json
 //   host-core/node_modules/        production deps for this platform (incl. npm)
 //   host-core/cua-driver/<key>/    pinned cua-driver-rs files (cua-driver.js path)
+//   tools/<platform>-<arch>/       pinned rg/fd binaries and licenses
 //   plugins/<name>/                first-party plugin files host-core re-exports
 //   native/shower-windows.exe      Windows only, + MSTSCLib.dll (launcher exports
 //                                  E_LAUNCHER_SHOWER_WINDOWS_EXE)
@@ -1213,7 +1215,16 @@ async function resolveCuaDriverFiles() {
 
 async function collectHostRuntimeNatives() {
   const cua = await resolveCuaDriverFiles();
-  const files = [...cua.files];
+  const searchCache = path.join(CACHE_DIR, 'search-tools');
+  const { tools: searchTools } = await prepareSearchTools({ dataRoot: searchCache });
+  const searchFiles = [];
+  for (const tool of searchTools) {
+    for (const src of [tool.path, ...tool.licensePaths]) {
+      assertStrictlyRegularFile(src, `search tool file ${src}`);
+      searchFiles.push({ dest: toPosixPath(path.relative(searchCache, src)), src, executable: src === tool.path });
+    }
+  }
+  const files = [...cua.files, ...searchFiles];
   let shower = null;
   if (process.platform === 'win32') {
     shower = await resolveShowerWindowsDir();
@@ -1225,6 +1236,8 @@ async function collectHostRuntimeNatives() {
   }
   return {
     files,
+    searchFiles,
+    searchTools,
     cua: { release: cua.release, status: cua.status, licensePath: cua.licensePath },
     shower: shower ? { status: shower.status } : null,
   };
@@ -1396,11 +1409,17 @@ async function prepareHostRuntime() {
     deps: depsStatus,
     sourceFiles: sources.size,
     nativeFiles: natives.files.length,
+    searchTools: natives.searchTools,
     cua: natives.cua,
     shower: natives.shower,
   });
   const depsReusable = rec?.depsKey === deps.key && hostRuntimeDepsComplete(installedModules, deps.pkg);
-  if (depsReusable && rec.contentKey === contentKey) {
+  const searchFilesReusable = natives.searchFiles.every((file) => {
+    const staged = path.join(HOST_RUNTIME_DIR, ...file.dest.split('/'));
+    return isRegularFile(staged) && sha256OfFile(staged) === sha256OfFile(file.src) &&
+      (!file.executable || process.platform === 'win32' || (statSync(staged).mode & 0o111) !== 0);
+  });
+  if (depsReusable && rec.contentKey === contentKey && searchFilesReusable) {
     return summary('cached', 'cached');
   }
 
@@ -1608,6 +1627,12 @@ async function collectHostRuntimeLicenseSections(hostRuntimeInfo) {
   }
   sections.push(`## Cua driver ${hostRuntimeInfo.cua.release} (MIT)`);
   sections.push((await readFile(hostRuntimeInfo.cua.licensePath, 'utf8')).trim());
+  for (const tool of hostRuntimeInfo.searchTools) {
+    for (const licensePath of tool.licensePaths) {
+      sections.push(`## ${tool.name} ${tool.version}: ${path.basename(licensePath)}`);
+      sections.push((await readFile(licensePath, 'utf8')).trim());
+    }
+  }
   return sections;
 }
 
@@ -1689,6 +1714,7 @@ export async function prepareDesktop() {
       deps: hostRuntimeInfo.deps,
       sourceFiles: hostRuntimeInfo.sourceFiles,
       nativeFiles: hostRuntimeInfo.nativeFiles,
+      searchTools: hostRuntimeInfo.searchTools.map(({ name, version, sha256 }) => ({ name, version, sha256 })),
       cua: { release: hostRuntimeInfo.cua.release, status: hostRuntimeInfo.cua.status },
       shower: hostRuntimeInfo.shower,
     },
