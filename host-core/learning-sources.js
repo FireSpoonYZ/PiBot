@@ -11,6 +11,15 @@ const within = (root, candidate) => {
   return !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep);
 };
 
+function decodeUtf8Page(bytes, hasMore) {
+  try {
+    // Preserve BOM bytes so re-encoding the returned text gives the exact consumed byte count.
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes, { stream: hasMore });
+  } catch {
+    throw invalid('Learning source is not supported UTF-8 text, or offset is not on a character boundary');
+  }
+}
+
 export async function declareLearningSources(values, cwd) {
   if (values === undefined) return [];
   if (!Array.isArray(values) || values.length > 16) throw invalid('sources must contain at most 16 paths or URLs');
@@ -41,8 +50,10 @@ export async function readLearningSource(sources, args, signal, readWeb) {
     if (args.action !== 'web' || args.path !== undefined || args.offset !== undefined) throw invalid('URL sources require web without path/offset');
     const result = await readWeb(source.value, signal);
     if (typeof result?.content !== 'string') throw messageError('INVALID_STATE', 'Webfox returned no extracted material');
+    if (!result.content.isWellFormed()) throw invalid('Webfox content is not supported Unicode text');
     const bytes = Buffer.from(result.content, 'utf8');
-    return { url: source.value, content: bytes.subarray(0, PAGE_BYTES).toString('utf8'), truncated: result.truncated === true || bytes.length > PAGE_BYTES };
+    const hasMore = bytes.length > PAGE_BYTES;
+    return { url: source.value, content: decodeUtf8Page(bytes.subarray(0, PAGE_BYTES), hasMore), truncated: result.truncated === true || hasMore };
   }
   if (!['list', 'read'].includes(args.action)) throw invalid('Local sources require list or read');
   const relative = args.path ?? '';
@@ -81,11 +92,22 @@ export async function readLearningSource(sources, args, signal, readWeb) {
     if (await realpath(candidate) !== resolved || info.dev !== current.dev || info.ino !== current.ino) throw invalid('Source changed while opening');
     if (!info.isFile() || info.size > MAX_FILE_BYTES) throw invalid('Learning text files must be regular files at most 2 MiB');
     signal.throwIfAborted();
-    const buffer = Buffer.alloc(PAGE_BYTES);
-    const { bytesRead } = await file.read(buffer, 0, buffer.length, offset);
-    signal.throwIfAborted();
-    if (buffer.subarray(0, bytesRead).includes(0)) throw invalid('Binary learning sources are not supported');
-    return { path: relative, offset, content: buffer.subarray(0, bytesRead).toString('utf8'),
-      nextOffset: offset + bytesRead < info.size ? offset + bytesRead : null, truncated: offset + bytesRead < info.size };
+    const buffer = Buffer.alloc(Math.min(PAGE_BYTES, Math.max(0, info.size - offset)));
+    let bytesRead = 0;
+    let eof = false;
+    while (bytesRead < buffer.length) {
+      signal.throwIfAborted();
+      const chunk = await file.read(buffer, bytesRead, buffer.length - bytesRead, offset + bytesRead);
+      signal.throwIfAborted();
+      if (chunk.bytesRead === 0) { eof = true; break; }
+      bytesRead += chunk.bytesRead;
+    }
+    const bytes = buffer.subarray(0, bytesRead);
+    if (bytes.includes(0)) throw invalid('Binary learning sources are not supported');
+    const hasMore = !eof && offset + bytesRead < info.size;
+    const content = decodeUtf8Page(bytes, hasMore);
+    // A partial trailing character is read again at nextOffset, never emitted or skipped.
+    const nextOffset = hasMore ? offset + Buffer.byteLength(content, 'utf8') : null;
+    return { path: relative, offset, content, nextOffset, truncated: hasMore };
   } finally { await file.close(); }
 }
