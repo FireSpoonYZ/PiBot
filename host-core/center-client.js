@@ -261,6 +261,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     // conflicts and service codes. No ownerRequest fallback — both route sets
     // ship together, so a missing endpoint is an honest CENTER_REQUEST_FAILED.
     botSkill: (targetDeviceId, botId, input, signal) => request(hostBotManagePath(targetDeviceId, botId, 'skills'), { method: 'POST', body: input, signal }),
+    botSkillUse: (targetDeviceId, botId, input, signal) => request('/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/skills/usage', { method: 'POST', body: input, signal }),
     botLearning: (targetDeviceId, botId, input, signal) => request(hostBotManagePath(targetDeviceId, botId, 'learning'), { method: 'POST', body: input, signal }),
     botInstallation: (targetDeviceId, botId, input, signal) => request(hostBotManagePath(targetDeviceId, botId, 'installations'), { method: 'POST', body: input, signal }),
     bootstrap: (bots) => request('/api/host/bootstrap', { method: 'POST', body: { deviceId, capabilityProtocol: 1, bots } }),

@@ -459,6 +459,16 @@ export async function openRuntime(options) {
       }
       return identity.botId;
     },
+    getSkillReadEnv: async (conversationId, context) => {
+      const conversation = await harness.conversation(conversationId, context);
+      const agent = await conversation.agent(context);
+      return envFor({ conversationId, cwd: agent.cwd });
+    },
+    reportSkillUse: (botId, input, signal) => {
+      const client = centerRuntime.getClient();
+      if (!client) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+      return client.botSkillUse(host.deviceId, botId, input, signal);
+    },
     assertCapabilityAllowed: (botId, id) => plugins.assertCapabilityAllowed(botId, id),
     getExecutionEnv: async (botId) => envFor({ conversationId: 'plugin:' + botId, cwd: host.getBot(botId).cwd }),
     getBotEntryWatermark: (botId) => getBotEntryWatermark(botId),

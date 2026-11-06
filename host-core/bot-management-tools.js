@@ -19,7 +19,7 @@ const MEMBER_SCHEMA = {
 
 const SKILL_ACTIONS = [
   'list', 'read', 'create', 'update', 'delete', 'archive', 'restore',
-  'pin', 'lock', 'history', 'rollback', 'publish', 'adopt',
+  'pin', 'lock', 'history', 'rollback', 'publish', 'adopt', 'snapshots', 'restore_snapshot',
 ];
 const LEARNING_ACTIONS = ['status', 'configure', 'learn', 'review', 'curate', 'cancel'];
 const INSTALLATION_ACTIONS = [
@@ -46,7 +46,8 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
       name: 'manage_bot_skill',
       description:
         "Manage the target Bot's Center-managed skills. Actions: list, read, create, update, delete, " +
-        'archive, restore, pin, lock, history, rollback, publish, adopt. Mutations require ' +
+        'archive, restore, pin, lock, history, rollback, publish, adopt, snapshots, restore_snapshot. ' +
+        'Snapshot restore requires snapshotId, expectedRevisions from snapshots, and requestId; it restores drafts only, not live state or queued deployments. Use restore for archived skills then publish. Other mutations require ' +
         'expectedRevision (create passes expectedRevision null). publish packages the draft, enables ' +
         'it and binds it to this Bot only; the returned deployment receipt is a queued plan, not an ' +
         'applied install. This Bot may target itself.',
@@ -54,6 +55,14 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
         deviceId: ID_SCHEMA,
         botId: ID_SCHEMA,
         action: { type: 'string', enum: SKILL_ACTIONS },
+        snapshotId: ID_SCHEMA,
+        expectedRevisions: {
+          type: 'object', additionalProperties: { anyOf: [{ type: 'null' }, {
+            type: 'object', properties: { skillId: ID_SCHEMA, revision: { type: 'integer', minimum: 0 },
+              stateRevision: { type: 'integer', minimum: 0 } },
+            required: ['skillId', 'revision', 'stateRevision'], additionalProperties: false,
+          }] },
+        },
         skillId: ID_SCHEMA,
         name: { type: 'string', minLength: 1 },
         category: { type: 'string' },

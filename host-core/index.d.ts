@@ -1298,11 +1298,14 @@ export interface BotSoulUpdate {
  */
 export type BotSkillAction =
   | 'list' | 'read' | 'create' | 'update' | 'delete' | 'archive' | 'restore'
-  | 'pin' | 'lock' | 'history' | 'rollback' | 'publish' | 'adopt';
+  | 'pin' | 'lock' | 'history' | 'rollback' | 'publish' | 'adopt' | 'snapshots' | 'restore_snapshot';
 
-/** Center skill service input; mutations require expectedRevision (create uses null). */
+/** Center skill service input; mutations require expectedRevision (create uses null), or expectedRevisions for snapshot restore. */
 export interface BotSkillInput {
   action: BotSkillAction;
+  snapshotId?: string;
+  /** Obtain from snapshots; null means the named skill must still be absent. */
+  expectedRevisions?: Record<string, { skillId: string; revision: number; stateRevision: number } | null>;
   skillId?: string;
   name?: string;
   category?: string;

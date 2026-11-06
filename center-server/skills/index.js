@@ -131,6 +131,8 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     artifactDelete: db.prepare('DELETE FROM skill_artifacts WHERE skill_id = ?'),
     snapshotInsert: db.prepare('INSERT INTO skill_snapshots (id, device_id, bot_id, reason, json, created_at) VALUES (?, ?, ?, ?, ?, ?)'),
     snapshotsFor: db.prepare('SELECT id FROM skill_snapshots WHERE device_id = ? AND bot_id = ? ORDER BY rowid DESC'),
+    snapshotGet: db.prepare('SELECT * FROM skill_snapshots WHERE id = ? AND device_id = ? AND bot_id = ?'),
+    snapshotList: db.prepare('SELECT * FROM skill_snapshots WHERE device_id = ? AND bot_id = ? ORDER BY rowid DESC LIMIT 20'),
     snapshotDelete: db.prepare('DELETE FROM skill_snapshots WHERE id = ? AND device_id = ? AND bot_id = ?'),
     reqGet: db.prepare('SELECT * FROM skill_requests WHERE id = ?'),
     reqPut: db.prepare('INSERT INTO skill_requests (id, device_id, bot_id, fingerprint, json, created_at) VALUES (?, ?, ?, ?, ?, ?)'),
@@ -1223,12 +1225,14 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
   const publicationTimers = new Map();
   let closing = false;
   function schedulePublication(id, skillId, attempts = 0) {
-    if (closing || publicationTimers.has(skillId) || attempts >= 20) return;
+    if (closing || attempts >= 20) return;
+    if (publicationTimers.has(skillId)) clearTimeout(publicationTimers.get(skillId));
+    const expectedRevision = stmts.skillById.get(skillId)?.revision;
     const timer = setTimeout(() => {
       publicationTimers.delete(skillId);
       void enqueue(id, async () => {
         const row = stmts.skillById.get(skillId);
-        if (!row || usageRow(id, row.name).record?.state === U.STATE_ARCHIVED) return;
+        if (!row || row.revision !== expectedRevision || usageRow(id, row.name).record?.state === U.STATE_ARCHIVED) return;
         const result = await actions.publish(id, { skillId, expectedRevision: row.revision });
         if (['queued', 'activating'].includes(result.publication.status)) schedulePublication(id, skillId, attempts + 1);
       }).catch(() => {});
@@ -1299,7 +1303,90 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
 
   function filesOf(row) { return skillFiles(row); }
 
+  function snapshotSkills(id, snapshot) {
+    return JSON.parse(snapshot.json).map(entry => {
+      const current = getManaged(id, entry.skill.name);
+      return { ...entry, current };
+    });
+  }
+
   const actions = {
+    snapshots(id, input) {
+      const rows = input.snapshotId
+        ? [stmts.snapshotGet.get(input.snapshotId, id.deviceId, id.botId)].filter(Boolean)
+        : stmts.snapshotList.all(id.deviceId, id.botId);
+      return { snapshots: rows.map(snapshot => ({
+        snapshotId: snapshot.id, reason: snapshot.reason, createdAt: snapshot.created_at,
+        skills: snapshotSkills(id, snapshot).map(({ skill, current }) => ({
+          name: skill.name, skillId: skill.id, snapshotRevision: skill.head_rev,
+          currentSkillId: current?.id ?? null,
+        })),
+        expectedRevisions: Object.fromEntries(snapshotSkills(id, snapshot).map(({ skill, current }) => [
+          skill.name, current ? { skillId: current.id, revision: current.revision,
+            stateRevision: usageRow(id, current.name).revision } : null,
+        ])),
+      })) };
+    },
+
+    async restore_snapshot(id, input) {
+      if (typeof input.requestId !== 'string' || !input.requestId || input.requestId.length > 200) {
+        throw error('INVALID_ARGUMENT', 'restore_snapshot requires requestId');
+      }
+      if (typeof input.snapshotId !== 'string' || !input.snapshotId || input.snapshotId.length > 200) {
+        throw error('INVALID_ARGUMENT', 'restore_snapshot requires snapshotId');
+      }
+      const expected = input.expectedRevisions;
+      if (!expected || typeof expected !== 'object' || Array.isArray(expected)) {
+        throw error('INVALID_ARGUMENT', 'Use snapshots to obtain expectedRevisions');
+      }
+      const deploymentPlans = await packages.listDeploymentPlans(id.deviceId);
+      const snapshot = stmts.snapshotGet.get(input.snapshotId, id.deviceId, id.botId);
+      if (!snapshot) throw error('NOT_FOUND', 'Snapshot not found for this Bot');
+      const entries = snapshotSkills(id, snapshot);
+      if (Object.keys(expected).length !== entries.length) throw error('REVISION_CONFLICT', 'Snapshot skill set mismatch');
+      return tx(() => {
+        const replayed = replay(id, input, 'restore_snapshot');
+        if (replayed.hit) return replayed.hit;
+        for (const { skill, current } of entries) {
+          if (!Object.hasOwn(expected, skill.name)) throw error('REVISION_CONFLICT', 'Missing snapshot skill revision');
+          const token = expected[skill.name];
+          if (current) {
+            if (!token || token.skillId !== current.id) throw error('REVISION_CONFLICT', 'Skill identity changed');
+            assertRevision(token.revision, current.revision);
+            assertRevision(token.stateRevision, usageRow(id, current.name).revision);
+          } else if (token !== null) throw error('REVISION_CONFLICT', 'Skill was deleted');
+        }
+        const restored = entries.map(({ skill, files, usage, current }) => {
+          // A deleted skill starts a new identity; surviving skills retain every revision.
+          const row = current ?? { id: randomUUID(), head_rev: 0, revision: 0,
+            installation_id: null, package_id: null, published_rev: null, json: '{}' };
+          const committed = commitRevision(row, files, { origin: 'snapshot_restore', requestId: input.requestId });
+          if (!current) stmts.insertSkill.run(row.id, id.deviceId, id.botId, skill.name,
+            committed.fmName, skill.category, committed.revision, committed.rev, null, null, null,
+            skill.source, '{}', now(), now());
+          // Preserve live telemetry; if it was deleted too, recover the snapshot's record.
+          if (!current && !usageRow(id, skill.name).record && usage?.record) {
+            usageWrite(id, skill.name, 1, usage.record);
+          }
+          const summary = summarizeSkill(id, stmts.skillById.get(row.id));
+          const requiresRestore = summary.state === U.STATE_ARCHIVED;
+          return { ...summary, publishedRevision: row.published_rev ?? null,
+            restoredFromRevision: skill.head_rev, stage: 'draft', restoreMode: 'drafts',
+            requiresRestore, nextActions: requiresRestore ? ['restore', 'publish'] : ['publish'],
+            currentDeployment: {
+              plans: deploymentPlans.filter(plan => plan.installationId === row.installation_id),
+              receipts: row.installation_id ? store.listDeploymentReceipts(row.installation_id)
+                .filter(receipt => receipt.deviceId === id.deviceId) : [],
+            },
+            publication: { status: 'not_requested' }, deployment: { status: 'not_requested' } };
+        });
+        const result = { snapshotId: snapshot.id, stage: 'draft', restoreMode: 'drafts', skills: restored,
+          publication: { status: 'not_requested' }, deployment: { status: 'not_requested' } };
+        recordRequest(id, replayed, result);
+        return result;
+      });
+    },
+
     async list(id) {
       const installedList = await installedSkills(id);
       return {
@@ -1733,7 +1820,7 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     if (typeof action !== 'string' || typeof actions[action] !== 'function') {
       throw error('INVALID_ARGUMENT', `Unknown action '${action}'. Use: ${Object.keys(actions).join(', ')}`);
     }
-    const readOnly = ['list', 'read', 'history'].includes(action);
+    const readOnly = ['list', 'read', 'history', 'snapshots'].includes(action);
     if (readOnly) return actions[action](id, input ?? {});
     return enqueue(id, async () => {
       const replayed = replay(id, input, action);
@@ -1743,8 +1830,43 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       // A publish that is still queued/activating/failed must NOT pin the request id:
       // an explicit retry resumes the same package operations instead of replaying a stale receipt.
       const pending = result?.publication && !['enabled', 'applied'].includes(result.publication.status);
-      if (!pending) recordRequest(id, replayed, result);
+      if (!pending && action !== 'restore_snapshot') recordRequest(id, replayed, result);
       return result;
+    });
+  }
+
+  // Authenticated Host-only observations, separate from model-facing management actions.
+  async function reportUse(identity, input) {
+    const id = normalizeIdentity(identity);
+    assertBot(id);
+    const fields = ['requestId', 'installationId', 'version', 'skillName', 'skillPath', 'path'];
+    if (!input || fields.some(key => typeof input[key] !== 'string' || !input[key] || input[key].length > 1024)
+      || Object.keys(input).some(key => !fields.includes(key)) || !/^[a-f0-9]{64}$/.test(input.requestId)) {
+      throw error('INVALID_ARGUMENT', 'Invalid skill use observation');
+    }
+    return enqueue(id, async () => {
+      const replayed = replay(id, input, 'host_skill_use');
+      if (replayed.hit) return replayed.hit;
+      const binding = store.listBotBindings({ deviceId: id.deviceId }).find(binding =>
+        binding.botId === id.botId && binding.installationId === input.installationId && binding.enabled);
+      const installation = store.getInstallation(input.installationId);
+      if (!binding || installation?.kind !== 'skill' || installation.target !== 'host'
+        || !store.isActive(installation) || installation.targetVersion !== input.version) {
+        throw error('FORBIDDEN', 'Skill installation is not active for this Bot/version');
+      }
+      const version = store.getPackageVersion(installation.packageId, input.version);
+      if (!version?.artifactRef) throw error('NOT_FOUND', 'Skill artifact is unavailable');
+      const skill = (await installedPackage(version.artifactRef)).find(skill =>
+        skill.name === input.skillName && skill.dir === input.skillPath && skill.files.includes(input.path));
+      if (!skill) throw error('INVALID_ARGUMENT', 'Read file does not belong to this skill');
+      const managed = stmts.skillsFor.all(id.deviceId, id.botId).find(row => row.installation_id === input.installationId);
+      const name = managed?.name ?? skill.name;
+      return tx(() => {
+        bumpUse(id, name);
+        const result = { recorded: true, name };
+        recordRequest(id, replayed, result);
+        return result;
+      });
     });
   }
 
@@ -1780,6 +1902,7 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
 
   return {
     execute,
+    reportUse,
     hermes,
     HERMES_SKILL_TOOLS,
     async close() {

@@ -73,7 +73,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     assertCapabilityAllowed(botId, installationId);
   }
 
-  function guardContributions(bot, installationId, botId) {
+  function guardContributions(bot, installationId, botId, skillTelemetry = false) {
     const source = bot.durableContributions ?? {};
     if (source.tasks?.length) throw error('INVALID_ARGUMENT', 'Bot contributions cannot register tasks');
     const tools = source.tools?.map((tool) => ({
@@ -97,11 +97,16 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     const hooks = source.hooks?.map((item) => ({
       ...item,
       handlers: Object.fromEntries(Object.entries(item.handlers).map(([key, fn]) => [key, async (...args) => {
-        return runAccepted(async () => {
-          const api = args[args.length - 2];
-          await checkOwner(botId, installationId, api.conversationId);
-          return fn(...args);
-        }, botId);
+        try {
+          return await runAccepted(async () => {
+            const api = args[args.length - 2];
+            await checkOwner(botId, installationId, api.conversationId);
+            return fn(...args);
+          }, botId);
+        } catch (error) {
+          // Read telemetry cannot turn a completed tool into a policy/connection error.
+          if (!skillTelemetry || key !== 'afterTool') throw error;
+        }
       }])),
     }));
     const wraps = source.wraps?.map((item) => ({
@@ -374,7 +379,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
       try {
         const contribution = await opened.instance.plugin.forBot(context);
         await contribution.prepare();
-        const extension = defineExtension({ name: nameFor(id, capability.targetVersion, botId), ...guardContributions(contribution, id, botId) });
+        const extension = defineExtension({ name: nameFor(id, capability.targetVersion, botId), ...guardContributions(contribution, id, botId, capability.kind === 'skill') });
         return { id, instance: opened.instance, created: opened.created,
           entry: { bot: contribution, context, extension },
           fingerprint: capabilityFingerprint(capability, credentials),

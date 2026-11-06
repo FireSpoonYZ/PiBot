@@ -336,6 +336,8 @@ export interface BotScheduleLatestRun {
 }
 
 export interface BotScheduleTask {
+  /** Explicit skill dependencies; older saved tasks omit this (equivalent to []). */
+  skills?: string[];
   id: string;
   revision: number;
   enabled: boolean;

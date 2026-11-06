@@ -14,6 +14,7 @@ const CREATE_FIELDS = new Set([
   'action',
   'title',
   'prompt',
+  'skills',
   'repeat',
   'time',
   'weekday',
@@ -30,6 +31,7 @@ const UPDATE_FIELDS = new Set([
   'revision',
   'title',
   'prompt',
+  'skills',
   'repeat',
   'time',
   'weekday',
@@ -44,6 +46,35 @@ const DELETE_FIELDS = new Set(['action', 'id', 'revision']);
 const ENABLE_FIELDS = new Set(['action', 'id', 'revision', 'enabled']);
 const LIST_FIELDS = new Set(['action', 'cursor', 'limit']);
 const EXACT_ALARM_FIELDS = new Set(['action']);
+
+export function validateScheduleSkills(value) {
+  if (!Array.isArray(value) || value.length > 100 || new Set(value).size !== value.length) {
+    throw invalid('skills must be a unique array of at most 100 skill names');
+  }
+  for (const name of value) {
+    if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) {
+      throw invalid('skills must contain skill names, not paths or prompts');
+    }
+  }
+  return value;
+}
+
+export function normalizeHermesSkillCall(name, args) {
+  if (!isPlainObject(args)) throw invalid('args must be an object');
+  if (name === 'referenced_skill_names') {
+    rejectUnknownFields(args, new Set());
+    return {};
+  }
+  if (name !== 'rewrite_skill_refs') throw invalid('Unsupported schedule call');
+  rejectUnknownFields(args, new Set(['consolidated', 'pruned']));
+  const consolidated = args.consolidated ?? {};
+  const pruned = args.pruned ?? [];
+  if (!isPlainObject(consolidated) || Object.keys(consolidated).length > 100) throw invalid('Invalid consolidated map');
+  validateScheduleSkills(Object.keys(consolidated));
+  for (const target of Object.values(consolidated)) validateScheduleSkills([target]);
+  validateScheduleSkills(pruned);
+  return { consolidated, pruned };
+}
 
 function invalid(message) {
   return messageError('INVALID_ARGUMENT', message);
@@ -92,6 +123,7 @@ export function validateScheduleTaskFields(task) {
   if (!isPlainObject(task)) throw invalid('任务数据无效');
   assertWellFormedRange(task.title, 1, 80, 'title');
   assertWellFormedRange(task.prompt, 1, 8000, 'prompt');
+  if (task.skills !== undefined) validateScheduleSkills(task.skills);
   if (typeof task.repeat !== 'string' || !REPEATS_SET.has(task.repeat)) {
     throw invalid('重复方式无效');
   }
@@ -152,6 +184,7 @@ export function normalizeScheduleTaskInput(input) {
         if (input[key] === undefined || input[key] === null) throw invalid(`缺少必要参数: ${key}`);
         out[key] = input[key];
       }
+      out.skills = input.skills === undefined ? [] : validateScheduleSkills(input.skills).slice();
       if (input.weekday !== undefined) out.weekday = input.weekday;
       if (input.weekdays !== undefined) out.weekdays = Array.isArray(input.weekdays) ? input.weekdays.slice() : input.weekdays;
       if (input.monthDay !== undefined) out.monthDay = input.monthDay;
@@ -171,6 +204,7 @@ export function normalizeScheduleTaskInput(input) {
       for (const key of [
         'title',
         'prompt',
+        'skills',
         'repeat',
         'time',
         'weekday',

@@ -20,8 +20,9 @@ Bot must be registered. Mutations serialize per (device,bot); `expectedRevision`
 - `create`, `adopt` → `expectedRevision: null`
 - `update`, `delete`, `rollback`, `publish` → current `revision` (content CAS)
 - `archive`, `restore`, `pin`, `lock` → current `stateRevision` (usage-record CAS)
+- `restore_snapshot` → `snapshotId`, `expectedRevisions` map from `snapshots`, mandatory `requestId`; atomic drafts + idempotent receipt
 
-Actions: `list | read | create | update | delete | archive | restore | pin | lock | history | rollback | publish | adopt`.
+Actions: `list | read | create | update | delete | archive | restore | pin | lock | history | rollback | publish | adopt | snapshots | restore_snapshot`.
 
 | action | fields | notes |
 |---|---|---|
@@ -32,6 +33,8 @@ Actions: `list | read | create | update | delete | archive | restore | pin | loc
 | delete | skillId\|name | hard delete; published → `packages.uninstall` first (returns operationId, phase 'queued') |
 | archive / restore | skillId\|name | usage `state`; published → Bot binding disabled / restored (was-enabled only) |
 | pin / lock | skillId\|name, pinned\|locked | pin = managed only; lock = any resolvable name incl. installed |
+| snapshots | snapshotId? | latest 20 retained snapshots, or selected snapshot; current per-name CAS tokens, not file contents |
+| restore_snapshot | snapshotId, expectedRevisions, requestId | additive recovery; new draft revisions; preserves current lifecycle/bindings/deployments; preserves counters/protection flags and post-snapshot skills; no publication/deployment requested |
 | history | skillId\|name | all content revisions |
 | rollback | skillId\|name, revision | copies rev → new head (origin 'rollback') |
 | publish | skillId\|name | builds tar (`package/` root: package.json `bot-skill-<skillId>` @ `1.0.<headRev>` + files) → uploadArtifact → install (or update) → enable → `putBotCapability(enabled)` → `packages.reconcileDevice` + `notify(deviceId)`; awaits ≤8s metadata readiness (`activation.status==='enabled'`), never device deploy. Result `publication.status` ∈ 'enabled'\|'activating'\|'queued'\|'failed' — pending is NOT request-pinned so retries resume. |
@@ -101,7 +104,18 @@ Hermes skill writes commit revisions atomically before publication. Publication
 receipts identify queued, activating, enabled or failed state; enabled is not a
 Host deployment receipt. Failed or pending publication keeps the draft for retry.
 Curator snapshots retain managed content and metadata in the center database;
-individual content revisions can be restored through history/rollback.
+whole snapshots can be recovered into new drafts through snapshots/restore_snapshot; individual content revisions remain recoverable through history/rollback. A hard-deleted skill is recreated with a new identity (deleted history is not recoverable). Publication retry timers are revision-fenced so a previous pending publication cannot automatically publish restored drafts. Existing deployment operations/bindings are not rolled back.
 
 Foreground `skill_manage` edits locked/pinned skills freely (upstream parity: the
 lock is an autonomous-pass guard); execute() delete ignores pinned, adapter refuses.
+
+## Host usage observations
+
+`POST /api/host/devices/:deviceId/bots/:botId/skills/usage` is Host-only, requires the authenticated device to match, and calls `reportUse(identity,input)`. Fields: `requestId` (SHA-256 of stable Host/Bot/installation/version/conversation/task/call identity), `installationId, version, skillName, skillPath, path`. Center validates the enabled Bot binding, active skill installation/version, package skill directory and actual member file, then atomically bumps existing skill_usage and records the idempotent receipt in skill_requests. Managed installation IDs resolve back to managed directory names, even when frontmatter names differ. No telemetry action is advertised to the model.
+
+## Curator schedule bridge
+
+`cron.jobs.referenced_skill_names()` -> `schedule.call {name:"referenced_skill_names",args:{}}`, list converted to Python set.
+`cron.jobs.rewrite_skill_refs(*, consolidated=None, pruned=None)` -> `schedule.call {name:"rewrite_skill_refs",args:{consolidated,pruned}}`.
+
+Lane B authorizes/dispatches these calls for the current curator job Bot to `schedules.hermesSkillCall(bot,name,args)`. The reply is `{rewrites:[{job_id,job_name,before,after,mapped,dropped}],jobs_updated,jobs_scanned}`. Node and Android engines include disabled jobs, operate in one storage transaction, preserve due times and already-claimed runs, bump changed revisions, and re-plan alarms. Other names error. No snapshot-derived or prompt-regex dependencies.

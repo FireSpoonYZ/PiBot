@@ -506,6 +506,11 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return result;
   });
   host('POST', '/api/host/devices/:deviceId/bots/:botId/skills', req => skills.execute({ ...botScope(req), origin: 'foreground' }, object(req.body)));
+  host('POST', '/api/host/devices/:deviceId/bots/:botId/skills/usage', req => {
+    const scope = botScope(req);
+    if (scope.deviceId !== req.centerDevice.deviceId) fail('FORBIDDEN', 'Device mismatch');
+    return skills.reportUse(scope, object(req.body));
+  });
   host('POST', '/api/host/devices/:deviceId/bots/:botId/learning', req => {
     const scope = botScope(req);
     // The learning job's agent.run callbacks are handed to the initiating

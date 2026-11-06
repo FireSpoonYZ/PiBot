@@ -20,6 +20,7 @@ import {
   assertCanonicalUuid,
   assertPositiveRevision,
   normalizeScheduleTaskInput,
+  normalizeHermesSkillCall,
   validateScheduleTaskFields,
 } from './schedule-protocol.js';
 
@@ -148,6 +149,7 @@ function taskDTO(task, runs) {
       dto[key] = Array.isArray(task[key]) ? task[key].slice() : task[key];
     }
   }
+  dto.skills = task.skills?.slice() ?? [];
   dto.latestRun = latestRunSummary(runs, task.id);
   return dto;
 }
@@ -186,6 +188,14 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
           throw storeError('定时任务原生响应无效');
         }
         return result;
+      },
+      async hermesSkillCall(bot, name, args = {}) {
+        const normalized = normalizeHermesSkillCall(name, args);
+        const result = await nativeBridge({
+          tool: 'schedule_task', actor: actorFor(bot), taskId: 1,
+          arguments: { action: 'hermesSkillCall', name, args: normalized },
+        });
+        return name === 'referenced_skill_names' ? result.skills : result;
       },
       async pauseBot(bot) {
         try {
@@ -421,6 +431,7 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
       occurrence,
       requestId: stableRequestId(taskId, revision, occurrence),
       prompt: task.prompt,
+      skills: task.skills?.slice() ?? [],
       vibrate: Boolean(task.vibrate),
       deleteAfterRun: Boolean(task.deleteAfterRun),
       owner: {
@@ -448,6 +459,7 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
       },
       title: input.title,
       prompt: input.prompt,
+      skills: input.skills?.slice() ?? [],
       repeat: input.repeat,
       time: input.time,
       alarmMode: input.alarmMode ?? 'alarmClock',
@@ -774,7 +786,7 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
         step.kind === 'submit'
           ? rt.submit(botId, {
               requestId,
-              text: `${SOURCE_PREFIX} ${step.run.prompt}`,
+              text: `${SOURCE_PREFIX}${step.run.skills?.length ? '\nLoad these skills with the read tool before executing: ' + JSON.stringify(step.run.skills) + '\n' : ' '}${step.run.prompt}`,
               // 内部计划任务是可信 host 来源输入：稳定 requestId + host 归属，
               // 与用户私聊轮共享准入但不冒名 user。
               origin: { sender: { kind: 'host' }, replyTo: null },
@@ -976,6 +988,41 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
         default:
           throw invalidError(`未知操作: ${normalized.action}`);
       }
+    },
+
+    async hermesSkillCall(bot, name, args = {}) {
+      if (closed) throw messageError('NOT_CONNECTED', 'host is closing');
+      const { consolidated, pruned } = normalizeHermesSkillCall(name, args);
+      return inTx((database) => {
+        const st = loadFromDb(database);
+        const tasks = st.tasks.filter(task => ownerOf(task).deviceId === host.deviceId && ownerOf(task).botId === bot.botId);
+        if (tasks.length > MAX_TASKS) throw storeError('Too many scheduled tasks');
+        if (name === 'referenced_skill_names') return [...new Set(tasks.flatMap(task => task.skills ?? []))].sort();
+        const rewrites = [];
+        for (const task of tasks) {
+          const before = task.skills ?? [];
+          const mapped = {};
+          const dropped = [];
+          const after = [];
+          for (const skill of before) {
+            let target = skill;
+            if (Object.hasOwn(consolidated, skill)) { target = consolidated[skill]; mapped[skill] = target; }
+            else if (pruned.includes(skill)) { dropped.push(skill); continue; }
+            if (!after.includes(target)) after.push(target);
+          }
+          if (JSON.stringify(before) === JSON.stringify(after)) continue;
+          task.skills = after;
+          task.revision += 1;
+          task.updatedAt = Date.now();
+          rewrites.push({ job_id: task.id, job_name: task.title, before, after, mapped, dropped });
+        }
+        if (rewrites.length) {
+          saveToDb(database, st);
+          scheduleAlarmsLocked(st);
+          saveToDb(database, st);
+        }
+        return { rewrites, jobs_updated: rewrites.length, jobs_scanned: tasks.length };
+      });
     },
 
     async pauseBot(bot) {
