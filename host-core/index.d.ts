@@ -829,6 +829,8 @@ export interface Attribution {
   deviceId?: string;
   /** Display-only sender name; never an identity or routing key. */
   name?: string;
+  /** Trusted Host entry source only; never accepted from a user sender. */
+  sourceType?: 'webhook';
   channel: 'primary' | 'dm' | 'room';
   scopeId?: string;
   messageId?: string;
@@ -895,6 +897,7 @@ export interface LiveGeneration {
 export interface TurnAdmissionStatus {
   requestId: string;
   phase: 'queued' | 'checking' | 'synchronizing' | 'failed';
+  source?: 'primary' | 'background';
   error?: { code: string; message: string };
 }
 
@@ -915,6 +918,8 @@ export interface BotActivity {
   source: 'primary' | 'room' | 'dm' | 'background' | null;
   scopeId: string | null;
   requestId: string | null;
+  /** Center stop confirmation is pending; independent of the current local phase. */
+  webhookStopPending?: boolean;
   /** ISO 8601 timestamp of the current activity start; null when unknown. */
   startedAt: string | null;
   /**

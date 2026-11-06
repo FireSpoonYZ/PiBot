@@ -12,6 +12,7 @@ import { defineDocFamily } from '@earendil-works/pi-durable';
 // 对账用进程内计数）。stopPending：在飞停止协调的崩溃恢复标记，beginStop 落盘置位、
 // 取消成功结算时清除；冷启动在任何 harness.resume 前对置位 Bot 补完 user_stop 与
 // 主会话取消标记（quiesce=false），绝不自动恢复漏取消工作。
+// pendingWebhookStopEpoch：独立的中心停止确认屏障，仅相同代次确认后清除，不阻止新用户输入。
 // 队列条目 stopEpoch：受理时捕获的本进程停止代次；停止只作废代次 ≤ 停止值的条目，
 // 受理晚于停止的在飞 submit 在持久化同事务内以旧代次落 cancelled 回执，绝不复活旧工作。
 export const TurnQueue = defineDocFamily({
@@ -19,7 +20,7 @@ export const TurnQueue = defineDocFamily({
   version: 1,
   scope: 'session',
   family: true,
-  initial: () => ({ items: [], stopEpoch: 0, stopPending: false }),
+  initial: () => ({ items: [], stopEpoch: 0, stopPending: false, pendingWebhookStopEpoch: null }),
   checkpointWhen: () => false,
 });
 
@@ -47,12 +48,13 @@ function safeError(error) {
   return { code, message };
 }
 
-/** 对外可见的准入状态：只含 requestId/phase/error，绝不带正文、快照或凭据。 */
+/** 对外可见的准入状态：只含 requestId/phase/source/error，绝不带正文、快照或凭据。 */
 export function toTurnAdmissionStatus(item) {
   if (!item) return null;
   return {
     requestId: item.requestId,
     phase: TURN_PHASES.has(item.phase) ? item.phase : 'queued',
+    source: item.origin?.sender?.kind === 'user' ? 'primary' : 'background',
     ...(item.error ? { error: safeError(item.error) } : {}),
   };
 }

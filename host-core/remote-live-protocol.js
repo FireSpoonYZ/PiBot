@@ -49,7 +49,7 @@ const HISTORY_ITEM_KEYS = new Set(['id', 'kind', 'messages', 'attribution']);
 // runtime-live-projection); validate the exact shape here so a forged Host cannot
 // attach arbitrary metadata to history items.
 const ATTRIBUTION_KEYS = new Set([
-  'kind', 'botId', 'deviceId', 'name', 'channel', 'scopeId',
+  'kind', 'botId', 'deviceId', 'name', 'sourceType', 'channel', 'scopeId',
   'messageId', 'replyTo', 'rootId', 'category', 'direction', 'createdAt',
 ]);
 const ATTRIBUTION_KINDS = new Set(['user', 'bot', 'host']);
@@ -71,6 +71,12 @@ function normalizeLiveAttribution(value) {
     throw invalid("attribution channel must be 'primary', 'dm' or 'room'");
   }
   const out = { kind: value.kind, channel: value.channel };
+  if (value.sourceType !== undefined) {
+    if (value.kind !== 'host' || value.sourceType !== 'webhook') {
+      throw invalid('attribution sourceType must be webhook on a host sender');
+    }
+    out.sourceType = value.sourceType;
+  }
   for (const key of ATTRIBUTION_STRING_KEYS) {
     if (value[key] === undefined) continue;
     assertText(value[key], 'attribution ' + key);
@@ -208,7 +214,7 @@ const TOOL_KEYS = new Set([
 const MESSAGE_ROLES = new Set(['user', 'assistant', 'toolResult']);
 
 // Turn admission status is metadata-only: bounded IDs/phases/error, never text.
-const TURN_ADMISSION_KEYS = new Set(['requestId', 'phase', 'error']);
+const TURN_ADMISSION_KEYS = new Set(['requestId', 'phase', 'source', 'error']);
 const TURN_ADMISSION_PHASES = new Set(['queued', 'checking', 'synchronizing', 'failed']);
 const TURN_ADMISSION_ERROR_KEYS = new Set(['code', 'message']);
 const MAX_TURN_ADMISSION_CHARS = 256;
@@ -216,7 +222,7 @@ const MAX_TURN_ADMISSION_CHARS = 256;
 // Unified Bot activity is metadata-only: phase/source enums, bounded nullable
 // IDs, an ISO timestamp and a bounded safe failure diagnostic; it never carries
 // text, credentials, tool args or raw provider error bodies.
-const ACTIVITY_KEYS = new Set(['phase', 'source', 'scopeId', 'requestId', 'startedAt', 'error']);
+const ACTIVITY_KEYS = new Set(['phase', 'source', 'scopeId', 'requestId', 'startedAt', 'error', 'webhookStopPending']);
 const ACTIVITY_ERROR_KEYS = new Set(['code', 'message']);
 const MAX_ACTIVITY_ERROR_CHARS = 256;
 const ACTIVITY_PHASES = new Set([
@@ -241,6 +247,10 @@ function normalizeBotActivity(value) {
     throw invalid('activity phase must be a known Bot activity phase');
   }
   const activity = { phase: value.phase };
+  if (value.webhookStopPending !== undefined) {
+    if (typeof value.webhookStopPending !== 'boolean') throw invalid('activity webhookStopPending must be a boolean');
+    activity.webhookStopPending = value.webhookStopPending;
+  }
   if (value.source === null || ACTIVITY_SOURCES.has(value.source)) {
     activity.source = value.source;
   } else {
@@ -296,6 +306,12 @@ function normalizeTurnAdmissionStatus(value) {
     throw invalid('turnAdmission phase must be queued, checking, synchronizing or failed');
   }
   const status = { requestId: value.requestId, phase: value.phase };
+  if (value.source !== undefined) {
+    if (value.source !== 'primary' && value.source !== 'background') {
+      throw invalid('turnAdmission source must be primary or background');
+    }
+    status.source = value.source;
+  }
   if (value.error !== undefined) {
     if (!isPlainObject(value.error)) throw invalid('turnAdmission error must be a plain object');
     rejectUnknownFields(value.error, TURN_ADMISSION_ERROR_KEYS, 'turnAdmission error');

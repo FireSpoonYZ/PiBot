@@ -52,6 +52,7 @@ export function senderAttribution(author, deviceId) {
   const device = cleanString(deviceId) ?? cleanString(author?.deviceId);
   if (device) sender.deviceId = device;
   if (kind === 'host' && cleanString(author?.name)) sender.name = author.name.slice(0, 200);
+  if (kind === 'host' && author?.sourceType === 'webhook') sender.sourceType = 'webhook';
   return sender;
 }
 
@@ -66,6 +67,7 @@ export function scopeMessageAttribution(stored, scopeKind, direction) {
   };
   if (author.botId) attribution.botId = author.botId;
   if (author.deviceId) attribution.deviceId = author.deviceId;
+  if (author.sourceType) attribution.sourceType = author.sourceType;
   if (cleanString(message.scopeId)) attribution.scopeId = message.scopeId;
   if (cleanString(message.messageId)) attribution.messageId = message.messageId;
   if (cleanString(message.replyTo)) attribution.replyTo = message.replyTo;

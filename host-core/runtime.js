@@ -1044,6 +1044,19 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     getClient: () => centerRuntime.getClient(),
     getRuntime: () => runtime,
     isReady: () => resumed && centerOnline && !closing && !isMaintenance() && !turns.isRecoveryPending(),
+    getStopStates: turns.getStopStates,
+    acknowledgeStop: turns.acknowledgeStop,
+    submitWebhook: async (botId, input, capturedStopEpoch) => {
+      if (!resumed || !centerOnline || closing || isMaintenance() || turns.isRecoveryPending() ||
+          turns.stopped(botId) || turns.webhookStopPending(botId)) return null;
+      return submitPrimary(botId, {
+        ...input,
+        origin: {
+          sender: { kind: 'host', name: input?.origin?.sender?.name, sourceType: 'webhook' },
+          replyTo: null,
+        },
+      }, capturedStopEpoch);
+    },
   });
   decisions.setTurnGate(turns.admitWorkDecision, turns.pump, turns.canRunWork);
   // 队列生命周期通知：pending 创建/结束/暂停/取消的纯元数据快照驱动统一 live 活动投影。
@@ -1065,7 +1078,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 先立停止 gate：beginStop 在首个 await 前同步推进进程代次并 arm gate，
       // 持久审计代次与 stopPending 崩溃恢复标记随后落盘；取消确认前无新执行。
       // beginStop 返回推进前代次（取消边界）：≤ 该值的受理属于停止前已受理的
-      // 输入与工作积压；本地计数经 restoreTurns 预载已对齐持久值，旧进程遗留
+      // 输入与工作积压；本地计数经 initializeBots 预载已对齐持久值，旧进程遗留
       // 队列条目（其持久 stopEpoch ≤ 预载基线）同样落在边界内，绝不漏取消。
       const epoch = await turns.beginStop(bot);
       // 再撤掉 Host 队列中已受理的未原生提交条目：仅作废旧代次受理（停止前的输入
@@ -1105,10 +1118,31 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 取消确认成功才解除 gate 并置 stopped：失败保留 gate 与 stopping 可见状态，
       // 绝不伪装成功/偷偷放行旧工作（stopPending 留作崩溃恢复边界）。
       await turns.settleStop(botId);
+      webhooks.wake();
       drainSelfSoul(botId);
     } catch (err) {
       throw err;
     }
+  }
+
+  // stopEpoch 由可信调用者在排队前捕获；内部 Webhook 保留 poll 前代次，绝不重捕获。
+  function submitPrimary(botId, input, stopEpoch) {
+    const kind = input?.origin?.sender?.kind === 'host' ? 'host' : 'user';
+    const trustedInput = {
+      ...input,
+      stopEpoch,
+      origin: {
+        sender: {
+          kind,
+          name: typeof input?.origin?.sender?.name === 'string' ? input.origin.sender.name : null,
+          ...(kind === 'host' && input?.origin?.sender?.sourceType === 'webhook' ? { sourceType: 'webhook' } : {}),
+        },
+        replyTo: typeof input?.origin?.replyTo === 'string' ? input.origin.replyTo : null,
+      },
+    };
+    // 离线只持久化，不通过会隐式 resume 的路径；本地停止不等待中心确认。
+    if (!centerOnline || turns.isRecoveryPending()) return turns.enqueue(botId, trustedInput);
+    return admitBot(botId, () => turns.enqueue(botId, trustedInput));
   }
 
   // 统一图形环境的 Runtime 门面：Actor 只来自可信主会话或工作绑定，绝不采信调用方会话。
@@ -1698,6 +1732,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
     async initializeBots() {
       await purgeExpiredArchivedBots();
+      // 控制入口开放前（包括离线启动）预载停止代次、恢复 gate 与中心待同步提示。
+      await turns.pendingStops();
       for (const bot of host.listBots()) await initializeBot(bot.botId);
     },
 
@@ -1815,25 +1851,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       assertNonBlank(botId, 'botId');
       // 停止代次必须在任何 await/排队前捕获：受理晚于停止的在飞 submit 以旧代次
       // 持久化并在同事务内作废为 cancelled 回执；停止后受理的新代次输入允许新运行。
-      const stopEpoch = turns.stopEpoch(botId);
-      const trustedInput = {
-        ...input,
-        stopEpoch,
-        origin: {
-          sender: {
-            kind: input?.origin?.sender?.kind === 'host' ? 'host' : 'user',
-            name: typeof input?.origin?.sender?.name === 'string' ? input.origin.sender.name : null,
-          },
-          replyTo: typeof input?.origin?.replyTo === 'string' ? input.origin.replyTo : null,
-        },
-      };
-      input = trustedInput;
-      // 离线或恢复未完成：准入 lane 挂起，泵不可能在飞——直接持久化受理（已鉴权本地动作）。
-      // nudge 由恢复后的 resume/nudgeAll 重新发起；绝不调用会隐式 resume 的路径。
-      if (!centerOnline || turns.isRecoveryPending()) {
-        return turns.enqueue(botId, input);
-      }
-      return admitBot(botId, () => turns.enqueue(botId, input));
+      return submitPrimary(botId, input, turns.stopEpoch(botId));
     },
 
     async wait(botId, requestId) {
@@ -2058,6 +2076,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         // 恢复失败即向外传播——绝不置 stopped 伪装成功后继续恢复调度。
         try { live.setBotControl?.(bot.botId, 'stopping'); } catch { /* live 缺席 */ }
         try {
+          await turns.cancelQueued(bot, turns.stopEpoch(bot.botId) - 1);
           if (decisions.interruptBotWork) {
             // 已有 pending.interruption 的 scope 沿用其已捕获 through 边界（宕机后
             // 新到消息不被这次补停吞掉），由 work lane 的幂等标记保证。
