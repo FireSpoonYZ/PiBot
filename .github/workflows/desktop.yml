@@ -2,10 +2,19 @@ name: Desktop
 
 on:
   push:
-    branches: ['**']
+    branches: [master]
+  pull_request:
+    branches: [develop, master]
   workflow_dispatch:
   # Reusable: invoked by release.yml for v* tags (signed NSIS/DEB + updater sigs).
   workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
+      version:
+        type: string
+        default: ''
     secrets:
       TAURI_SIGNING_PRIVATE_KEY:
         required: true
@@ -13,8 +22,8 @@ on:
         required: false
 
 concurrency:
-  group: desktop-${{ github.ref }}
-  cancel-in-progress: true
+  group: desktop-${{ github.ref }}-${{ inputs.release || false }}
+  cancel-in-progress: ${{ !inputs.release }}
 
 permissions:
   contents: read
@@ -31,20 +40,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          - os: windows-2022
             bundle: nsis
             artifact: desktop-windows
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             bundle: deb
             artifact: desktop-linux
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '22.19.0'
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -79,59 +88,31 @@ jobs:
           npm ci --prefix host-core
 
       - name: Verify product version consistency
-        env:
-          TAG_ARG: ${{ github.ref_type == 'tag' && format('--tag {0}', github.ref_name) || '' }}
-        run: node scripts/release-check.mjs $TAG_ARG
-
-      # Existing prepare step must run before tauri-action: it produces icons,
-      # the node sidecar, host runtime, host-launcher sidecar and notices that
-      # the bundle references. tauri-action then runs the pinned CLI build.
-      - name: Prepare desktop resources
-        run: npm run desktop:prepare
-
-      # Branch pushes: unsigned dev bundles, no secrets.
-      - name: Build bundle (dev)
-        if: github.ref_type != 'tag'
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: desktop
-          # Pinned CLI 2.12.4 via our wrapper (absolute path; wrapper sets its
-          # own cwd). Action appends 'build <args>' → 'build --bundles nsis'.
-          tauriScript: node ${{ github.workspace }}/host-core/desktop-tauri.js
-          args: --bundles ${{ matrix.bundle }}
-
-      # v* tags: updater artifacts + NSIS-preferred metadata on Windows.
-      - name: Require updater signing secret
-        if: github.ref_type == 'tag'
         shell: bash
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: |
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "Missing secret TAURI_SIGNING_PRIVATE_KEY; refusing unsigned release."
-            exit 1
-          fi
-          test -n "$E_LAUNCHER_UPDATER_PUBLIC_KEY" || { echo "Missing E_LAUNCHER_UPDATER_PUBLIC_KEY"; exit 1; }
+          TAG_ARG: ${{ inputs.release && format('--tag v{0}', inputs.version) || '' }}
+        run: node scripts/release-check.mjs $TAG_ARG
 
-      - name: Build bundle (release)
-        if: github.ref_type == 'tag'
-        uses: tauri-apps/tauri-action@v0
+      - name: Build installer
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          projectPath: desktop
-          tauriScript: node ${{ github.workspace }}/host-core/desktop-tauri.js
-          args: --bundles ${{ matrix.bundle }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
-          updaterJsonPreferNsis: ${{ matrix.os == 'windows-latest' }}
+          RELEASE: ${{ inputs.release || false }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.release && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.release && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        run: |
+          set -euo pipefail
+          extra=()
+          if [ "$RELEASE" = true ]; then
+            test -n "$TAURI_SIGNING_PRIVATE_KEY" || { echo "Missing updater private key"; exit 1; }
+            test -n "$E_LAUNCHER_UPDATER_PUBLIC_KEY" || { echo "Missing updater public key"; exit 1; }
+            extra=(--config '{"bundle":{"createUpdaterArtifacts":true}}')
+          fi
+          npm run desktop:build -- --bundles ${{ matrix.bundle }} "${extra[@]}"
 
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}-${{ github.ref_name }}
+          name: ${{ matrix.artifact }}-${{ inputs.version || github.sha }}
           path: desktop/build/target/release/bundle/
           if-no-files-found: error
           retention-days: 30

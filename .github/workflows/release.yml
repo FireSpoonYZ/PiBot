@@ -4,88 +4,136 @@ on:
   push:
     tags: ['v*']
 
+concurrency:
+  group: official-release
+  cancel-in-progress: false
+
 permissions:
   contents: write
   packages: write
 
 jobs:
-  android:
-    uses: ./.github/workflows/apk.yml
-    secrets: inherit
-
-  desktop:
-    uses: ./.github/workflows/desktop.yml
-    secrets: inherit
-
-  release:
-    needs: [android, desktop]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
-
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
-
-      - name: Verify product version consistency
-        run: node scripts/release-check.mjs --tag "${GITHUB_REF_NAME}"
-
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: '*-${{ github.ref_name }}'
-          path: artifacts
-          merge-multiple: false
-
-      # Map each downloaded installer to the center contract and emit one
-      # <name>.metadata.json per artifact. Paths passed to release-artifact.mjs
-      # are the real files under artifacts/.
-      - name: Generate per-artifact metadata
-        run: |
-          set -euo pipefail
-          VERSION=${GITHUB_REF_NAME#v}
-          COMMIT=$GITHUB_SHA
-          NOTES="release ${GITHUB_REF_NAME} (${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
-          count=0
-          while IFS= read -r f; do
-            base=$(basename "$f")
-            case "$base" in
-              *.exe) platform=windows; arch=x86_64; format=nsis;;
-              *.deb) platform=linux;    arch=x86_64; format=deb;;
-              *.apk) platform=android;  arch=aarch64; format=apk;;
-              *) continue;;
-            esac
-            extra=()
-            if [ "$format" = apk ]; then
-              VC=$(grep -oP 'android\.versionCode=\K\d+' gradle.properties || echo '')
-              [ -n "$VC" ] && extra+=(--version-code "$VC")
-            fi
-            out="$(dirname "$f")/$base.metadata.json"
-            node scripts/release-artifact.mjs \
-              --version "$VERSION" --commit "$COMMIT" --notes "$NOTES" \
-              --platform "$platform" --arch "$arch" --format "$format" \
-              --file "$f" "${extra[@]}" --out "$out"
-            count=$((count+1))
-          done < <(find artifacts -type f \( -name '*.exe' -o -name '*.deb' -o -name '*.apk' \) | sort)
-          if [ "$count" -eq 0 ]; then
-            echo "No release artifacts found"
-            exit 1
-          fi
-          echo "generated $count metadata file(s)"
-
-      - name: Publish immutable GitHub Release
+          node-version: '22.19.0'
+      - id: version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            echo "Release ${GITHUB_REF_NAME} already exists; refusing to overwrite."
+          VERSION="${GITHUB_REF_NAME#v}"
+          node scripts/release-check.mjs --tag "$GITHUB_REF_NAME"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/master
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "Version already released; published versions are immutable."
             exit 1
           fi
-          # Upload every installer + its .sig/.sha256 sidecar + metadata JSON.
-          mapfile -d '' files < <(find artifacts -type f \( -name '*.exe' -o -name '*.deb' -o -name '*.apk' -o -name '*.sig' -o -name '*.sha256' -o -name '*.metadata.json' \) -print0)
-          if [ "${#files[@]}" -eq 0 ]; then echo "nothing to upload"; exit 1; fi
-          gh release create "${GITHUB_REF_NAME}" "${files[@]}" \
-            --title "e-launcher ${GITHUB_REF_NAME}" \
-            --notes "SHA: ${GITHUB_SHA}\nRun: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            --target "$GITHUB_SHA"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  android:
+    needs: version
+    uses: ./.github/workflows/apk.yml
+    with:
+      release: true
+      version: ${{ needs.version.outputs.version }}
+    secrets: inherit
+
+  desktop:
+    needs: version
+    uses: ./.github/workflows/desktop.yml
+    with:
+      release: true
+      version: ${{ needs.version.outputs.version }}
+    secrets: inherit
+
+  center:
+    needs: version
+    uses: ./.github/workflows/center.yml
+    with:
+      release: true
+      version: ${{ needs.version.outputs.version }}
+    secrets: inherit
+
+  publish:
+    needs: [version, android, desktop, center]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.19.0'
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: '*-${{ needs.version.outputs.version }}'
+          path: artifacts
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assemble release assets
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir release-out
+          copy_installer() {
+            local ext="$1" name="$2"
+            mapfile -d '' files < <(find artifacts -type f -name "*.$ext" -print0)
+            [ "${#files[@]}" -eq 1 ] || { echo "Expected exactly one $ext installer"; exit 1; }
+            cp "${files[0]}" "release-out/$name"
+            if [ "$ext" != apk ]; then cp "${files[0]}.sig" "release-out/$name.sig"; fi
+          }
+          copy_installer exe "PiBot-$VERSION-windows-x64-setup.exe"
+          copy_installer deb "PiBot-$VERSION-linux-amd64.deb"
+          copy_installer apk "PiBot-$VERSION-android-arm64.apk"
+          for spec in "windows x86_64 nsis windows-x64-setup.exe" "linux x86_64 deb linux-amd64.deb" "android aarch64 apk android-arm64.apk"; do
+            read -r platform arch format suffix <<< "$spec"
+            extra=()
+            if [ "$format" = apk ]; then
+              extra=(--version-code "$(sed -n 's/^android.versionCode=//p' gradle.properties | tr -d '\r')")
+            fi
+            node scripts/release-artifact.mjs --version "$VERSION" --commit "$GITHUB_SHA" \
+              --notes "PiBot $VERSION" --platform "$platform" --arch "$arch" --format "$format" \
+              --file "release-out/PiBot-$VERSION-$suffix" "${extra[@]}" \
+              --out "release-out/PiBot-$VERSION-$suffix.metadata.json"
+          done
+          cp artifacts/center-image.json release-out/
+          cp compose.yaml compose.https.yaml Caddyfile center.env.example release-out/
+          sed -i "s/pibot-center:latest/pibot-center:$VERSION/" release-out/compose.yaml
+          (cd release-out; sha256sum -- * > SHA256SUMS)
+      - name: Publish matching image tags and GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/pibot-center"
+          DIGEST=$(node -p "JSON.parse(require('fs').readFileSync('release-out/center-image.json')).digest")
+          docker buildx imagetools create -t "$IMAGE:$VERSION" -t "$IMAGE:latest" "$IMAGE@$DIGEST"
+          cat > release-notes.md <<EOF
+          ## PiBot $VERSION
+          - Windows：下载 windows-x64-setup.exe
+          - Ubuntu / Debian：下载 linux-amd64.deb
+          - Android：下载 android-arm64.apk（Android 13+）
+          - 中心：\`$IMAGE:$VERSION\`（amd64 / arm64）
+
+          下载 compose.yaml、compose.https.yaml、Caddyfile 和 center.env.example，
+          按 [快速开始](https://github.com/$GITHUB_REPOSITORY/blob/v$VERSION/README.md) 部署。
+          Android 首发采用独立正式签名；旧开发签名安装请先导出需要的数据。
+          Windows 当前使用登录自启动任务，尚未提供无人登录的 SCM 服务。
+
+          Source: $GITHUB_SHA
+          EOF
+          gh release create "v$VERSION" release-out/* --target "$GITHUB_SHA" \
+            --title "PiBot v$VERSION" --notes-file release-notes.md --generate-notes --verify-tag --latest

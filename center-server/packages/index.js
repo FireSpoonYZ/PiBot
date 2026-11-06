@@ -668,6 +668,7 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
 
   return {
     uploadArtifact, readArtifact, listDeploymentPlans, turnPlan, reconcileDevice, install, revalidate, setOperationPhase,
+    idle: () => queue,
     update: (id, request) => change(id, request, 'update'),
     enable: (id, request) => change(id, request, 'enable'),
     disable: (id, request) => change(id, request, 'disable'),

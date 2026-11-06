@@ -5,7 +5,7 @@ import type { CredentialInfo, Device, Provider } from '@e-launcher/center-contra
 import { api, CenterApiError } from '../api';
 import { SheetModal } from '../components/SheetModal';
 
-const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages', 'pi-messages'];
+const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages', 'pi-messages', 'google-generative-ai'];
 const blank: Provider = {
   id: '',
   name: '',
@@ -72,9 +72,14 @@ export default function Providers() {
       <header className="page-header">
         <div className="page-title-group">
           <h1>服务商与模型</h1>
-          <p className="secondary">统一管理模型服务商、API 密钥与模型目录</p>
+          <p className="secondary">已预置 Pi 服务商与模型。编辑并填写 API Key、启用服务商，再设置默认模型即可使用。目录每天同步新增模型，保留已有配置。</p>
         </div>
         <div className="action-row">
+          <button className="button secondary-button button-sm" disabled={busy} onClick={() => void run(async () => {
+            const result = await api.syncModelCatalog();
+            await load();
+            setNotice(result.error || `目录已同步：新增 ${result.modelsAdded ?? 0} 个模型，已有配置保持不变`);
+          })}>同步 Pi 模型目录</button>
           <Link to="/devices" className="button secondary-button button-sm">
             设置全局与 Bot 模型
           </Link>
@@ -262,7 +267,12 @@ export default function Providers() {
                     });
                     setCredential(result);
                     setSecret('');
-                    setNotice('凭证已保存');
+                    if (!edit.enabled) {
+                      const enabled = await api.putProvider(edit.id, { expectedRevision: edit.revision, value: { ...edit, enabled: true } });
+                      setEdit(enabled);
+                      await load();
+                    }
+                    setNotice('凭证已保存，服务商已启用；请设置默认模型');
                   });
                 }}
               >

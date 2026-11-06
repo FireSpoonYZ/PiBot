@@ -4,6 +4,7 @@ import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completio
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy';
 import { piMessagesApi } from '@earendil-works/pi-ai/api/pi-messages.lazy';
 import { anthropicMessagesApi } from '@earendil-works/pi-ai/api/anthropic-messages.lazy';
+import { googleGenerativeAIApi } from '@earendil-works/pi-ai/api/google-generative-ai.lazy';
 import { normalizeHindsightConfig, parseHindsightOptions } from './hindsight-client.js';
 import { normalizeRuntimeExtensions, resolveRuntimeExtensions } from './extension-manager.js';
 import { readInputObject } from './cli-input.js';
@@ -20,6 +21,7 @@ const PROVIDER_APIS = new Map([
   ['openai-responses', openAIResponsesApi],
   ['pi-messages', piMessagesApi],
   ['anthropic-messages', anthropicMessagesApi],
+  ['google-generative-ai', googleGenerativeAIApi],
 ]);
 const DEFAULT_PROVIDER_API = 'openai-completions';
 

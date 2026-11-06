@@ -4,8 +4,8 @@
 
 services:
   center:
-    # center.yml 在版本 tag 发布稳定 latest；main 只发布 sha-<commit> 镜像。
-    image: ghcr.io/firespoonyz/e-launcher-center:latest
+    # v* Tag 的全部正式构建成功后发布版本镜像和 latest。
+    image: ghcr.io/firespoonyz/pibot-center:latest
     # 源码构建（开发）：把上面的 image 换成下面三行，再 docker compose up -d --build
     # image: e-launcher-center:local
     # build:

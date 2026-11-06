@@ -1,7 +1,7 @@
 {
   "name": "e-launcher-web",
   "private": true,
-  "version": "1.1.0",
+  "version": "0.0.1",
   "type": "module",
   "scripts": {
     "test": "node --test web/test/*.test.mjs",
@@ -13,7 +13,8 @@
     "prepare:pi-main": "node scripts/prepare-pi-main.mjs",
     "desktop:prepare": "node host-core/build-desktop.js",
     "desktop:dev": "node host-core/desktop-tauri.js dev",
-    "desktop:build": "node host-core/desktop-tauri.js build"
+    "desktop:build": "node host-core/desktop-tauri.js build",
+    "center:prepare": "node scripts/prepare-builtin-plugins.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "1.1.15",

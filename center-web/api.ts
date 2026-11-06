@@ -82,6 +82,7 @@ export const api = {
   async session() { const result = await request<SessionInfo>('/api/session'); csrfToken = result.csrfToken; return result; },
   async login(body: LoginRequest) { const result = await request<SessionInfo>('/api/session', 'POST', body); csrfToken = result.csrfToken; return result; },
   async logout() { await request<void>('/api/session', 'DELETE'); csrfToken = null; },
+  syncModelCatalog: () => request<{ modelsAdded?: number; error: string | null }>('/api/model-catalog/sync', 'POST'),
   listProviders: () => request<Provider[]>('/api/providers'),
   createProvider: (body: Provider) => request<Provider>('/api/providers', 'POST', body),
   getProvider: (providerId: string) => request<Provider>(`/api/providers/${id(providerId)}`),

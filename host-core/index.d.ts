@@ -517,7 +517,7 @@ export interface ProviderConfig {
   name?: string;
   baseUrl: string;
   /** 该 provider 全部模型共用的 API；缺省 openai-completions，其他值显式拒绝。 */
-  api?: 'openai-completions' | 'openai-responses' | 'pi-messages' | 'anthropic-messages';
+  api?: 'openai-completions' | 'openai-responses' | 'pi-messages' | 'anthropic-messages' | 'google-generative-ai';
   apiKeyEnv?: string;
   models: ModelConfig[];
 }

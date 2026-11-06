@@ -201,6 +201,9 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
   const DEFAULT_BINDINGS = {
     'e-launcher.hindsight': { overrides: (bot) => ({ projectId: `${bot.name}-${bot.botId}` }) },
     'e-launcher.billion-context': {},
+    'e-launcher.ask-user-question': {},
+    'e-launcher.todo': {},
+    'e-launcher.webfox': {},
   };
   /** Default bindings for a newly registered Bot: Hindsight projectId is name-botId; Billion Context uses the global config. Existing rows (incl. explicit disables) are kept. Caller must hold a transaction. */
   function initializeBotDefaults(bot) {

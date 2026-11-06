@@ -1,0 +1,20 @@
+# Optional HTTPS entry: docker compose -f compose.yaml -f compose.https.yaml up -d
+services:
+  https:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    env_file:
+      - center.env
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - center
+volumes:
+  caddy-data:
+  caddy-config:

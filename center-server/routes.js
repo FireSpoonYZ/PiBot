@@ -121,7 +121,7 @@ function assertConfigCredentials(schema, value) {
 }
 
 
-export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement }) {
+export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog }) {
   const streams = new Map();
   function notify(deviceId) {
     for (const stream of streams.get(deviceId) || []) {
@@ -141,6 +141,8 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     const credential = provider.credentialRef ? store.resolveCredential(assertPublicCredentialId(provider.credentialRef)) : undefined;
     return { provider, models, ...(credential === undefined ? {} : { credential }) };
   };
+  route('GET', '/api/model-catalog', () => catalog.status());
+  route('POST', '/api/model-catalog/sync', async () => { await catalog.sync().catch(() => {}); return catalog.status(); }, true);
   route('GET', '/api/providers', () => store.listProviders());
   route('POST', '/api/providers', (req, reply) => reply.code(201).send(changed(store.putProvider({ ...validate(providerSchema, req.body), credentialRef: assertPublicCredentialId(req.body.credentialRef), id: req.body.id || randomUUID(), revision: 0 }, null))), true);
   route('GET', '/api/providers/:id', req => required(store.getProvider(req.params.id), 'Provider'));
@@ -573,5 +575,5 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   });
   host('POST', '/api/host/capabilities/:installationId/tools/list', req => execution.listTools(req.centerDevice.deviceId, req.params.installationId, object(req.body)));
   host('POST', '/api/host/capabilities/:installationId/tools/call', req => { const body = object(req.body); text(body.callId, 'callId'); text(body.name, 'name'); object(body.args); return execution.callTool(req.centerDevice.deviceId, req.params.installationId, body); });
-  return { notifyInstallation, notifyDevice: notify, close() { for (const set of streams.values()) for (const stream of set) stream.reply.end(); streams.clear(); } };
+  return { notifyAll, notifyInstallation, notifyDevice: notify, close() { for (const set of streams.values()) for (const stream of set) stream.reply.end(); streams.clear(); } };
 }

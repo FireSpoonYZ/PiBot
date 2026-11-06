@@ -14,9 +14,12 @@ COPY scripts/prepare-pi-main.mjs scripts/prepare-pi-main.mjs
 RUN node scripts/prepare-pi-main.mjs
 RUN npm ci --prefix center-server --omit=dev
 RUN npm ci --prefix host-core --omit=dev
+COPY plugins/ plugins/
+COPY scripts/prepare-builtin-plugins.mjs scripts/prepare-builtin-plugins.mjs
+RUN node scripts/prepare-builtin-plugins.mjs
 
 FROM node:22-bookworm
-LABEL org.opencontainers.image.source="https://github.com/FireSpoonYZ/e-launcher"
+LABEL org.opencontainers.image.source="https://github.com/FireSpoonYZ/PiBot"
 # Python runs only at the center, for the vendored Hermes learning modules
 # (center-server/hermes/vendor/, requires-python >=3.11,<3.15). bookworm ships
 # python3.11; the Node adapter launches it via env HERMES_PYTHON (default
@@ -30,6 +33,7 @@ COPY --from=build --chown=node:node /app/center-contract/ ./center-contract/
 COPY --from=build --chown=node:node /app/center-server/ ./center-server/
 COPY --from=build --chown=node:node /app/center-web/ ./center-web/
 COPY --from=build --chown=node:node /app/host-core/ ./host-core/
+COPY --from=build --chown=node:node /app/build/builtin-plugins/ ./build/builtin-plugins/
 COPY --chown=node:node LICENSE THIRD_PARTY_NOTICES.md ./
 COPY --chown=node:node licenses/ ./licenses/
 COPY --chown=node:node plugins/ ./plugins/

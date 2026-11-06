@@ -1,6 +1,6 @@
 {
   "productName": "e-助手",
-  "version": "1.1.0",
+  "version": "0.0.1",
   "identifier": "com.example.launcherprobe",
   "build": {
     "frontendDist": "../build/web"
@@ -17,7 +17,9 @@
     ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; connect-src ipc: https://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'",
-      "capabilities": ["main"],
+      "capabilities": [
+        "main"
+      ],
       "assetProtocol": {
         "enable": false,
         "scope": []
@@ -27,6 +29,8 @@
   "bundle": {
     "active": false,
     "targets": "all",
-    "icon": ["../../assets/icon.png"]
+    "icon": [
+      "../../assets/icon.png"
+    ]
   }
 }
