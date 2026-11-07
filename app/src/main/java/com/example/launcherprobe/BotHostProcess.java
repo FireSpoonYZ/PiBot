@@ -275,6 +275,8 @@ final class BotHostProcess {
         env.put("HOME", assets.home.getAbsolutePath());
         env.put("TMPDIR", new File(assets.home, "tmp").getAbsolutePath());
         env.put("LD_LIBRARY_PATH", context.getApplicationInfo().nativeLibraryDir);
+        // Small-ICU Node Mobile needs external break-iterator data for Intl.Segmenter.
+        env.put("NODE_ICU_DATA", assets.entry.getParentFile().getAbsolutePath());
         env.put("PI_AGENT_DIR", new File(assets.home, ".pi/agent").getAbsolutePath());
         env.put("PATH", assets.bin.getAbsolutePath() + ":" + "/system/bin:/system/xbin:/vendor/bin");
     }

@@ -3,10 +3,12 @@
 // Bundles host-core/android-runtime.js with the root Vite esbuild dependency into app/build/generated/assets/botHost/bot-host/ and
 // emits payload.json + third-party-licenses.txt for the APK.
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { readFile, writeFile, copyFile, mkdir, readdir, access, stat, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { downloadVerified } from './prepare-android-tools.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -15,6 +17,10 @@ const OUT_DIR = path.join(APP_BUILD, 'generated', 'assets', 'botHost', 'bot-host
 // esbuild build graph stays out of the APK assets: ignored build subdir only.
 const METAFILE_DIR = path.join(APP_BUILD, 'host-runtime');
 const TOOL_CACHE = path.join(APP_BUILD, 'host-native-tools');
+// Node Mobile 24.18.0-0 uses small ICU 78; update these pins with the runtime.
+const ICU_VERSION = '78.3';
+const ICU_DATA_FILE = 'icudt78l.dat';
+const ICU_ARCHIVE_SHA256 = '982619632b78887f1895b063e96e8c3cc7f99283337c8abbd05aa71635de613c';
 // File-name prefixes considered license/notice texts (case-insensitive); files
 // only, so LICENSE-APACHE / LICENSE-MIT / COPYING variants are all captured.
 const LICENSE_PREFIXES = ['license', 'licence', 'copying', 'notice'];
@@ -180,6 +186,15 @@ async function writePayloadFiles(metafile, outfile, absWorkingDir, toolNotices) 
   await copyFile(path.join(HERE, 'node_modules', 'quickjs-wasi', 'quickjs.wasm'), path.join(OUT_DIR, 'quickjs.wasm'));
   files.set('quickjs.wasm', { path: 'quickjs.wasm' });
 
+  const icuArchiveName = `icu4c-${ICU_VERSION}-data-bin-l.zip`;
+  const icuArchive = await downloadVerified(
+    `https://github.com/unicode-org/icu/releases/download/release-${ICU_VERSION}/${icuArchiveName}`,
+    ICU_ARCHIVE_SHA256, icuArchiveName);
+  const jar = process.env.JAVA_HOME
+    ? path.join(process.env.JAVA_HOME, 'bin', process.platform === 'win32' ? 'jar.exe' : 'jar') : 'jar';
+  execFileSync(jar, ['xf', icuArchive, ICU_DATA_FILE], { cwd: OUT_DIR });
+  files.set(ICU_DATA_FILE, { path: ICU_DATA_FILE });
+
   const skillRoot = path.join(HERE, 'builtin-skills');
   let skillFiles;
   try {
@@ -197,7 +212,10 @@ async function writePayloadFiles(metafile, outfile, absWorkingDir, toolNotices) 
   }
 
   const roots = await collectBundledPackages(metafile, outfile, absWorkingDir);
-  const sections = [];
+  const sections = [
+    `# ICU data ${ICU_VERSION} (Unicode License V3 and third-party notices)`,
+    (await readFile(path.join(ROOT, 'licenses', `icu-${ICU_VERSION}-LICENSE.txt`), 'utf8')).trim(),
+  ];
   for (const pkg of [...roots.values()].sort((a, b) => a.name.localeCompare(b.name))) {
     const licenseFiles = await findLicenseFiles(pkg.root);
     sections.push(`# ${pkg.name}@${pkg.version} (${pkg.license ?? 'unknown'})`);

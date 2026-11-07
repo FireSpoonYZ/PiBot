@@ -119,7 +119,7 @@ function chmodExecutable(filePath) {
   if (process.platform !== 'win32') chmodSync(filePath, 0o755);
 }
 
-async function downloadVerified(url, sha256, fileName) {
+export async function downloadVerified(url, sha256, fileName) {
   const target = path.join(DOWNLOADS, fileName);
   if (isRegularFile(target) && sha256OfFile(target) === sha256) return target;
   mkdirSync(DOWNLOADS, { recursive: true });

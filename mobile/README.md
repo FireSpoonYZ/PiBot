@@ -1,14 +1,20 @@
 # Tauri Android 客户端（`mobile/`）
 
-## 当前发布与更新（2026-11-06）
+## 当前源码与 Android 运行时（2026-11-07）
 
-产品版本为 `1.1.0`、Android versionCode 为 `2`。本轮在 API 36 x86_64 模拟器实际完成从开发包 `1.1.0/code 2` 到隔离验收包 `1.1.1/code 3` 的 PackageInstaller 覆盖升级，包含认证下载、摘要/包身份/版本校验、未知来源授权、系统确认、取消后重试与下次启动读取真实版本；原设备身份、Bot 和已完成模型回复保留。测试使用独立开发签名，未验证正式旧签名 lineage 或 ARM64 真机。完整范围见[发布进度](../docs/open-source-release-progress.md)。
+当前源码版本为 `0.0.2`、Android versionCode 为 `6`，用于集成验收；已发布的正式版仍为 `v0.0.1`。
+
+Node Mobile `24.18.0-0` 使用 small ICU 78。Android 构建从 Unicode 官方下载并校验 ICU `78.3` 数据，将 `icudt78l.dat` 放入现有校验过的 Host 资产目录，启动 Host 与客户端 Node 子进程时设置 `NODE_ICU_DATA`。这为 Pi 工具搜索提供完整分词数据，避免缺少数据时 `Intl.Segmenter` 导致进程崩溃（[Node #51752](https://github.com/nodejs/node/issues/51752)）。首次构建需要下载约 12.8 MB；归档缓存在 `app/build/host-native-tools/downloads/`，许可随 APK 打包。更新 Node Mobile 时须同时核对 `host-core/build-android.js` 中的 ICU 主版本与归档校验值。
+
+## 历史升级验收（2026-11-06）
+
+该次隔离验收使用产品版本 `1.1.0`、Android versionCode `2`。本轮在 API 36 x86_64 模拟器实际完成从开发包 `1.1.0/code 2` 到隔离验收包 `1.1.1/code 3` 的 PackageInstaller 覆盖升级，包含认证下载、摘要/包身份/版本校验、未知来源授权、系统确认、取消后重试与下次启动读取真实版本；原设备身份、Bot 和已完成模型回复保留。测试使用独立开发签名，未验证正式旧签名 lineage 或 ARM64 真机。完整范围见[发布进度](../docs/open-source-release-progress.md)。
 
 更新桥方法为 `updateStatus/updateCheck/updateDownload/updateInstall/updateCancel`，通过现有 Rust/Kotlin/私有 Binder 访问默认进程的更新器。UI 不传下载 URL、文件路径或令牌。客户端连接后按 24 小时间隔自动检查，手动检查不受此间隔限制；下载、安装由用户发起。安装器启动只表示等待系统操作，下次启动按实际已安装版本判断结果。
 
 首次配对先在原生私有存储保存固定 ID 与待确认令牌；同 ID/同令牌可幂等重试，显式 force 才旋转凭据。中心使用单 HTTPS/WSS origin。Rust 工具链固定为 `1.99.1`；普通开发使用标准本地 debug key，覆盖旧开发包需显式指定原 key，正式 APK 使用独立受保护签名配置。
 
-以下模块说明与历史记录保留原提交/范围；版本、签名和本轮结果以上述当前记录为准。
+以下模块说明与历史记录保留原提交和范围；当前源码版本以上方说明为准。
 
 
 M18（Tauri Android 外壳）已交付并获父助手限定范围验收，交付时为 **18/20**（本期交付范围为原 20 模块中的 19 个，M19 按用户决定移出本期、编号保留）；M20（跨设备集成、打包与真机验收）进行中，本期当前 **18/19**：M19（Windows/Linux TUI）本期不交付，其未验收代码只在 git stash `02f1396fda08d1b666ca83597ebbcea805c74d28`（仅未来草稿，本期不恢复，保留草稿，不计完成），TUI 界面/终端快捷键验收不再是 M20 完成条件；已交付 **M20-01 手机远端入口 + 限定范围跨设备联调**，并在 REDMI K80 真机完成限定运行验证（首次安装 + 覆盖重装，见「验证边界」），但 M20 并未整体完成。本目录只提供 Android 手机侧可见界面：默认是本机 Host，“其他设备”页是同一份桌面客户端实现跑在手机原生桥上（见下节）；不替代本机 Host，也不含桌面 GUI 安装包（见 [`desktop/`](../desktop/README.md)）。
