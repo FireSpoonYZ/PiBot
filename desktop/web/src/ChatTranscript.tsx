@@ -9,12 +9,13 @@ import { Markdown } from '../../../web/src/Markdown';
 import {
   latestEntryChannel,
   parseHistoryEntries,
+  visibleAssistantTextEntryIds,
   formatTurnDuration,
   normalizeAttribution,
   type ChatTurn,
   type ChatToolCallItem,
 } from '../../../web/src/chatTurnModel';
-import { MessageAttribution as MessageAttributionBadge } from '../../../web/src/MessageAttribution';
+import { isWebhookAttribution, MessageAttribution as MessageAttributionBadge } from '../../../web/src/MessageAttribution';
 import {
   readToolPresentation,
   ToolPresentationCard,
@@ -55,6 +56,8 @@ export interface ChatTranscriptProps {
   devicePlatform?: string;
   /** 会话内搜索关键字；空串显示全部轮次。 */
   search: string;
+  /** 当前实际渲染轮次中的助手正文 entry ID（已完成归属和搜索过滤）。 */
+  onVisibleAssistantTextEntryIds?: (ids: readonly string[]) => void;
   archived: boolean;
   onSubmitQuestionnaire: (installationId: string, input: QuestionnaireSubmitPayload) => Promise<unknown>;
   /** 按 attachmentId 取图显示；null 表示当前不可读取附件（离线/无权限）。 */
@@ -85,6 +88,7 @@ export function ChatTranscript({
   avatarKey,
   devicePlatform,
   search,
+  onVisibleAssistantTextEntryIds,
   archived,
   onSubmitQuestionnaire,
   attachmentFetcher = null,
@@ -164,6 +168,10 @@ export function ChatTranscript({
         Boolean(turn.tools?.some((tool) => tool.name.toLowerCase().includes(q))),
     );
   }, [allTurns, search]);
+
+  useEffect(() => {
+    onVisibleAssistantTextEntryIds?.(visibleAssistantTextEntryIds(visibleTurns));
+  }, [visibleTurns, onVisibleAssistantTextEntryIds]);
 
   const lastTurn = visibleTurns.at(-1);
 
@@ -312,16 +320,12 @@ export function ChatTranscript({
             turn.durationMs > 0 &&
             !(isLastAssistantTurn && isBusy);
           const turnAttr = turn.attribution;
-          // Host 触发器不是人类消息：user-role 的 kind=host 来源（工作触发/内部调度）
-          // 不显示来源徽标，避免误认作用户发言；其余真实来源（用户/对端 Bot）照常标记。
-          const showAttribution =
-            Boolean(turnAttr) && !(turn.role === 'user' && turnAttr?.kind === 'host');
           return (
             <article
               key={turn.id}
-              className={`bot-chat-bubble ${turn.role}${turn.isStreaming ? ' streaming' : ''}`}
+              className={`bot-chat-bubble ${isWebhookAttribution(turnAttr) ? 'assistant' : turn.role}${turn.isStreaming ? ' streaming' : ''}`}
             >
-              {showAttribution && turnAttr ? (
+              {turnAttr ? (
                 <MessageAttributionBadge attribution={turnAttr} />
               ) : null}
               {turn.role === 'assistant' && turn.blocks

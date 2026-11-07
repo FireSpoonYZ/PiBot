@@ -1,7 +1,7 @@
 {
   "manifestVersion": 1,
   "id": "e-launcher.webfox",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "kind": "plugin",
   "displayName": "Webfox",
   "hostApi": "^1.0.0",
@@ -20,6 +20,81 @@
   "uiSchema": "ui.schema.json",
   "stateVersion": 1,
   "contributions": [
-    "tools"
+    "tools",
+    "actions"
+  ],
+  "actions": [
+    {
+      "id": "probe",
+      "title": "Explicit read-only connectivity probe",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "version": {
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "search",
+              "contents"
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "version",
+          "operation"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "readLearningSource",
+      "title": "Read one declared learning URL",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "pattern": "^https?://[^\\s]+$"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "content": {
+            "type": "string",
+            "maxLength": 49152
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "url",
+          "content"
+        ],
+        "additionalProperties": false
+      }
+    }
   ]
 }

@@ -12,6 +12,7 @@ import { formatPrimarySubmission } from './runtime-history.js';
 import { parseModelRef } from './runtime-models.js';
 import { WorkIndex, WorkContextState } from './work-context-docs.js';
 import { WorkDecisionState } from './work-decision-state.js';
+import { clearBotBoardResult } from './runtime-bot-board.js';
 
 const MAX_PREPARE_ATTEMPTS = 3;
 // 每条消息图片解码总字节上限（64MiB）：单张合法（≤16MiB）的图仍需满足本条消息总量限制。
@@ -69,7 +70,9 @@ export function createTurnAdmission(deps) {
     }
     const name = typeof origin.sender?.name === 'string' ? origin.sender.name.slice(0, 200) : null;
     const replyTo = typeof origin.replyTo === 'string' ? origin.replyTo : null;
-    return { sender: { kind, ...(name !== null ? { name } : {}) }, replyTo };
+    return { sender: { kind, ...(name !== null ? { name } : {}),
+      ...(kind === 'host' && origin.sender?.sourceType === 'webhook' ? { sourceType: 'webhook' } : {}),
+    }, replyTo };
   }
 
   /** 受理条目在原生提交时附带的可信入口：entry.data 携带发送方归属与
@@ -81,6 +84,8 @@ export function createTurnAdmission(deps) {
     const kind = item.origin?.sender?.kind === 'user' ? 'user' : 'host';
     const name = typeof item.origin?.sender?.name === 'string' ? item.origin.sender.name : null;
     const replyTo = typeof item.origin?.replyTo === 'string' ? item.origin.replyTo : null;
+    const source = kind === 'host' && item.origin?.sender?.sourceType === 'webhook'
+      ? { sourceType: 'webhook' } : {};
     return {
       kind: 'host.user-message',
       data: {
@@ -96,6 +101,7 @@ export function createTurnAdmission(deps) {
           direction: 'incoming',
           createdAt: item.enqueuedAt,
           ...(name !== null ? { name } : {}),
+          ...source,
           ...(replyTo !== null ? { replyTo } : {}),
         },
         turn: {
@@ -105,7 +111,7 @@ export function createTurnAdmission(deps) {
           scopeId: null,
           triggerMessageId: item.requestId,
           replyTo,
-          sender: { kind, deviceId: host.deviceId },
+          sender: { kind, deviceId: host.deviceId, ...(name !== null ? { name } : {}), ...source },
           replyTarget: { kind: 'primary' },
         },
       },
@@ -120,12 +126,13 @@ export function createTurnAdmission(deps) {
   const workBackoff = new Map();    // nativeId -> ms epoch，工作决策准入退避
   // 停止 gate：beginStop 在首个 await 前同步推进本进程代次并 arm gate；
   // armed 期间所有原生忙检查/canRunWork 恒忙恒否，取消确认前另一轮不争用 Bot 资源。
-  // 代次跨进程单调：restoreTurns 冷启动先把各 Bot 持久代次预载入本地 map，
+  // 代次跨进程单调：initializeBots 冷启动先把各 Bot 持久代次预载入本地 map，
   // beginStop 同步 ++ 即恒大于任何旧进程代次——旧进程遗留队列条目的
   // stopEpoch 恒 ≤ 当前计数，cancelQueued 按代次覆盖绝不漏取消；
   // 并发首批 submit 捕获同值（0 基线）不互相误作废。doc.stopPending 是崩溃恢复标记。
   const stopArmed = new Set();      // botId：在飞停止协调（abort 未结算）
   const stopEpochs = new Map();     // botId -> 停止代次（持久单调，预载对齐）
+  const pendingWebhookStops = new Map(); // botId -> 待中心确认代次，不占本地停止 gate
   let closing = false;
 
   /** 该 Bot 停止 gate 是否激活：beginStop 已 arm，abort 尚未成功结算。 */
@@ -138,6 +145,34 @@ export function createTurnAdmission(deps) {
     return stopEpochs.get(botId) ?? 0;
   }
 
+  function webhookStopPending(botId) {
+    return pendingWebhookStops.has(botId);
+  }
+
+  async function getStopStates() {
+    return host.listBots().map((bot) => ({
+      botId: bot.botId,
+      stopEpoch: stopEpoch(bot.botId),
+      pendingStopEpoch: pendingWebhookStops.get(bot.botId) ?? null,
+    }));
+  }
+
+  async function acknowledgeStop(botId, epoch) {
+    const bot = host.getBot(botId);
+    if (!bot || pendingWebhookStops.get(botId) !== epoch) return;
+    const cleared = await harness().commit(async (tx) => {
+      const doc = await queueDoc(tx, bot.primaryConversationId);
+      if (doc.pendingWebhookStopEpoch !== epoch || pendingWebhookStops.get(botId) !== epoch) return false;
+      doc.pendingWebhookStopEpoch = null;
+      return true;
+    }, context);
+    // 新停止可能在旧确认提交期间立 gate：旧确认不能清新代次或其 live 提示。
+    if (cleared && pendingWebhookStops.get(botId) === epoch) {
+      pendingWebhookStops.delete(botId);
+      live?.setWebhookStopPending?.(botId, false);
+    }
+  }
+
   /** 新输入已被接受且未被停止作废：仅清掉已结算的 stopped 覆盖。
       stopping/interrupting 由停止协调与抢占窗口持有：在飞期间绝不覆盖。 */
   function clearStopped(botId) {
@@ -147,17 +182,23 @@ export function createTurnAdmission(deps) {
 
   /** 停止 gate 第一步：armed 标记与本地代次推进必须在首个 await 前落地——
       此后任何捕获旧代次的在飞 submit 均被同事务对账作废，在飞准入也恒见忙。
-      本地计数经 restoreTurns 预载已对齐持久值，同步 ++ 即跨进程单调；
-      持久提交只回写当前代次与 stopPending 崩溃恢复标记。落盘失败不解除 gate。
+      本地计数经 pendingStops 预载已对齐持久值，同步 ++ 即跨进程单调；
+      持久提交同时写本地 stopPending 与中心待确认代次。落盘失败不解除 gate。
       返回取消边界（推进前代次）：≤ 该值的受理属于停止前积压，由 cancelQueued 作废。 */
   function beginStop(bot) {
     const boundary = stopEpochs.get(bot.botId) ?? 0;
     stopEpochs.set(bot.botId, boundary + 1);
     stopArmed.add(bot.botId);
+    pendingWebhookStops.set(bot.botId, boundary + 1);
+    live?.setWebhookStopPending?.(bot.botId, true);
     return harness().commit(async (tx) => {
       const doc = await queueDoc(tx, bot.primaryConversationId);
       doc.stopEpoch = stopEpochs.get(bot.botId);
       doc.stopPending = true;
+      doc.pendingWebhookStopEpoch = doc.stopEpoch;
+      const index = await tx.doc(PrimaryIndex);
+      const nativeId = index.byPrimary[bot.primaryConversationId];
+      if (nativeId !== undefined) await clearBotBoardResult(tx, nativeId);
     }, context).then(() => boundary);
   }
 
@@ -172,6 +213,9 @@ export function createTurnAdmission(deps) {
       await harness().commit(async (tx) => {
         const doc = await queueDoc(tx, bot.primaryConversationId);
         doc.stopPending = false;
+        const index = await tx.doc(PrimaryIndex);
+        const nativeId = index.byPrimary[bot.primaryConversationId];
+        if (nativeId !== undefined) await clearBotBoardResult(tx, nativeId);
       }, context);
     }
     stopArmed.delete(botId);
@@ -188,8 +232,19 @@ export function createTurnAdmission(deps) {
     const bots = [];
     for (const bot of host.listBots()) {
       const doc = await harness().snapshot(TurnQueue, bot.primaryConversationId, context);
+      if (!stopEpochs.has(bot.botId)) {
+        stopEpochs.set(bot.botId, doc?.stopEpoch ?? 0);
+        if (doc?.pendingWebhookStopEpoch != null) {
+          pendingWebhookStops.set(bot.botId, doc.pendingWebhookStopEpoch);
+          live?.setWebhookStopPending?.(bot.botId, true);
+          if (doc.stopPending !== true) live?.setBotControl?.(bot.botId, 'stopped');
+        }
+        const items = doc?.items ?? [];
+        publishStatus(bot.botId, headItem(items), items.filter((item) => item.phase !== 'cancelled').length);
+      }
       if (doc?.stopPending === true) {
         stopArmed.add(bot.botId);
+        live?.setBotControl?.(bot.botId, 'stopping');
         bots.push(bot);
       }
     }
@@ -214,6 +269,15 @@ export function createTurnAdmission(deps) {
   // 只计仍待准入/未原生提交的受理；cancelled 终态记录保留可查但不占队列数。
   async function queuedCount(bot) {
     return (await readQueue(bot.primaryConversationId)).filter((entry) => entry.phase !== 'cancelled').length;
+  }
+
+  /** Passive board bootstrap: restore the same admission projection without pumping. */
+  async function refreshActivity(botId) {
+    const bot = host.getBot(botId);
+    const doc = await harness().snapshot(TurnQueue, bot.primaryConversationId, context);
+    const items = doc?.items ?? [];
+    publishStatus(botId, headItem(items), items.filter((item) => item.phase !== 'cancelled').length);
+    if (doc?.stopPending) live.setBotControl(botId, 'stopping');
   }
 
   /** 更新条目阶段并广播准入状态（head 条目即对外可见状态）。 */
@@ -454,6 +518,11 @@ export function createTurnAdmission(deps) {
         }
       }
       if (!preparation) throw lastError ?? errWithCode('turn preparation did not produce a set', 'TURN_SYNC_FAILED');
+      // 新准入先拒绝空模型，避免同 requestId 钉住空快照；已有 grant 保持原恢复语义。
+      if (!preparation.admission) {
+        const target = (preparation.snapshot.bots ?? []).find((entry) => entry.botId === bot.botId);
+        if (!target?.model?.modelRef) throw errWithCode('center model is required', 'TURN_SYNC_FAILED');
+      }
       // 3. 目标 set 与当前不同才要求全 Bot 原生空闲；相同 set 只要求主会话空闲。
       const needsSwitch = appliedSetIds.get(bot.botId) !== preparation.setId;
       if (needsSwitch && await botBusyForSet(bot, true)) {
@@ -810,7 +879,8 @@ export function createTurnAdmission(deps) {
       throw errWithCode('attachments exceed the 64 MiB per-message total image byte limit', 'INVALID_ARGUMENT');
     }
     const now = new Date().toISOString();
-    const item = await harness().commit(async (tx) => {
+    // 回执在事务内投影为普通元数据；浅拷贝会让 origin/附件保留已结算的 overlay。
+    const receipt = await harness().commit(async (tx) => {
       const doc = await queueDoc(tx, bot.primaryConversationId);
       // 停止 epoch 对账与受理持久化同一事务：捕获的进程代次落后于当前计数，
       // 该受理按作废落 cancelled 终态（保留回执可答），绝不排队待泵。
@@ -823,14 +893,14 @@ export function createTurnAdmission(deps) {
           throw errWithCode('requestId already used with different text: ' + requestId, 'REQUEST_CONFLICT');
         }
         // 同 requestId 的重复重传：已取消终态绝不复活（真正重发用新 requestId）。
-        if (existing.phase === 'cancelled') return { ...existing };
+        if (existing.phase === 'cancelled') return toQueuedReceipt(existing);
         if (stale) {
           // 在飞重试撞上停止：受理作废为 cancelled，不再泵旧工作。
           existing.stopEpoch = capturedStopEpoch;
           existing.phase = 'cancelled';
           existing.error = null;
           existing.updatedAt = now;
-          return { ...existing };
+          return toQueuedReceipt(existing);
         }
         if (existing.phase === 'failed') {
           // 同 requestId 的显式重试重新武装自动重试：耗尽的退避计数在重试时清零，
@@ -839,7 +909,7 @@ export function createTurnAdmission(deps) {
           existing.updatedAt = now;
           retryAttempts.delete(botId);
         }
-        return { ...existing };
+        return toQueuedReceipt(existing);
       }
       const next = {
         requestId,
@@ -858,36 +928,48 @@ export function createTurnAdmission(deps) {
         updatedAt: now,
         // 受理时捕获的本进程停止代次：停止只作废旧代次受理，停止开始后受理的
         // 新代次输入不被 cancelQueued 一锅取消（等停止结算后泵）。
-        // 持久化该值供跨进程对账：后续进程的本地计数经 beginStop max(...) 推进后
-        // 恒 ≥ 此值，cancelQueued 按代次覆盖旧进程遗留受理。
+        // 持久化该值供跨进程对账：后续进程预载 TurnQueue.stopEpoch 后恒 ≥ 此值，
+        // cancelQueued 按代次覆盖旧进程遗留受理。
         stopEpoch: capturedStopEpoch,
       };
       doc.items.push(next);
-      return { ...next };
+      return toQueuedReceipt(next);
     }, context);
     // initializeBot 的 SOUL 回填等可失败工作必须在受理持久化之后：先落队列再初始化，
     // 失败的消息在 Host 端永远有可对账的 queued 记录，而不是无声丢失。
     await initializeBot(botId);
     const count = await queuedCount(bot);
-    publishStatus(botId, item, count);
+    publishStatus(botId, await liveHead(bot), count);
     // 受理未被停止作废：新的真实输入允许新运行，清掉旧 stopped 覆盖后再泵。
-    if (item.phase !== 'cancelled') {
+    if (receipt.status === 'queued') {
       clearStopped(botId);
       nudge(botId);
+    }
+    return receipt;
+  }
+
+  /** getSubmission/wait 共用：残留 Host 队列（含 cancelled）不能遮蔽原生 done。 */
+  async function queuedReceipt(bot, requestId) {
+    const items = await readQueue(bot.primaryConversationId);
+    const item = items.find((entry) => entry.requestId === requestId);
+    if (!item) return null;
+    const h = harness();
+    const conversation = await getPrimaryConversation(h, bot, {}, context);
+    if (conversation) {
+      // 只读终态，不用会隐式 resume 的 wait/abort，也不重新提交或删除取消记录。
+      const record = await h.commit((tx) => tx.submissionByRequest(conversation.id, requestId), context);
+      if (record?.status === 'done') {
+        const formatted = await formatPrimarySubmission(h, bot, record, context);
+        recordCompletedSubmission(bot.botId, formatted);
+        return formatted;
+      }
     }
     return toQueuedReceipt(item);
   }
 
-  /** 队列中仍存在的条目 -> queued 回执；供 getSubmission/wait 先查。 */
-  async function queuedReceipt(bot, requestId) {
-    const items = await readQueue(bot.primaryConversationId);
-    const item = items.find((entry) => entry.requestId === requestId);
-    return item ? toQueuedReceipt(item) : null;
-  }
-
   /**
    * abort：把该 Bot 尚未原生提交的排队条目转为 cancelled 终态受理（不删除唯一记录，
-   * getSubmission/wait/findByRequest 之后读为 unanswered 而不是 NOT_FOUND），同时清理
+   * getSubmission/wait 无原生 done 时读为 unanswered 而不是 NOT_FOUND），同时清理
    * 已授予但未提交的空 pin——取消绝不复活旧授权。队列取消与空 pin 清理在同一 commit：
    * 原子边界内绝不出现「条目已取消而授权 pin 仍活」的中间态。
    * throughStopEpoch 限定取消范围：只作废受理代次 ≤ 该值的条目（停止前已受理的
@@ -1004,13 +1086,7 @@ export function createTurnAdmission(deps) {
   let recoveryPending = false;
 
   async function restoreTurns() {
-    // 服务暴露前的唯一初始化点：把各 Bot 持久停止代次预载入本进程 map——
-    // 旧进程遗留队列条目的 stopEpoch 从此恒 ≤ 当前计数，cancelQueued 按代次
-    // 覆盖绝不漏取消；缺席条目默认 0，新 Bot 首批并发捕获同值不误作废。
-    for (const bot of host.listBots()) {
-      const doc = await harness().snapshot(TurnQueue, bot.primaryConversationId, context);
-      stopEpochs.set(bot.botId, Math.max(doc?.stopEpoch ?? 0, stopEpochs.get(bot.botId) ?? 0));
-    }
+    // 停止元数据已在 initializeBots/pendingStops 恢复，先补停再恢复 pin。
     const restored = new Map(); // botId -> setId
     const failed = [];
     for (const { bot, admissionId } of await pinsToRestore()) {
@@ -1191,6 +1267,7 @@ export function createTurnAdmission(deps) {
 
   return {
     enqueue,
+    refreshActivity,
     pump: nudge,
     nudgeAll,
     queuedReceipt,
@@ -1205,6 +1282,10 @@ export function createTurnAdmission(deps) {
     // 停止 gate：runtime.abort 先 beginStop（持久推进 TurnQueue.stopEpoch 并 arm
     // 本进程 gate）再统一取消，settleStop 结算；submit 捕获 stopEpoch 作废旧受理。
     stopEpoch,
+    stopped,
+    webhookStopPending,
+    getStopStates,
+    acknowledgeStop,
     beginStop,
     settleStop,
     // 冷启动未完成停止清单：runtime.restoreTurns 在任何 harness.resume 前处理。

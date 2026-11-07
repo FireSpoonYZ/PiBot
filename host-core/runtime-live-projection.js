@@ -218,6 +218,7 @@ function projectAttribution(raw) {
   const channel = raw.channel;
   if (channel !== 'primary' && channel !== 'dm' && channel !== 'room') return null;
   const out = { kind, channel };
+  if (kind === 'host' && raw.sourceType === 'webhook') out.sourceType = 'webhook';
   for (const key of ['botId', 'deviceId', 'name', 'scopeId', 'messageId', 'replyTo', 'rootId', 'createdAt']) {
     const value = raw[key];
     if (typeof value === 'string') out[key] = boundAttributionString(value);

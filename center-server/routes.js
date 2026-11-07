@@ -3,6 +3,7 @@ import Ajv from 'ajv';
 import { requireOwner, assertPublicCredentialId } from './auth.js';
 import { assertId } from '../host-core/message-protocol.js';
 import { assertDeviceId, assertDeviceToken } from '../host-core/relay-protocol.js';
+import { registerWebhookRoutes } from './webhooks.js';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 const required = (value, name) => value ?? fail('NOT_FOUND', `${name} not found`);
@@ -121,12 +122,12 @@ function assertConfigCredentials(schema, value) {
 }
 
 
-export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog }) {
+export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, publicUrl }) {
   const streams = new Map();
-  function notify(deviceId) {
+  function notify(deviceId, event = 'config-changed') {
     for (const stream of streams.get(deviceId) || []) {
       if (!bridge.registry.authenticate(deviceId, stream.token)) stream.reply.end();
-      else stream.reply.write('event: config-changed\ndata: {}\n\n');
+      else stream.reply.write(`event: ${event}\ndata: {}\n\n`);
     }
   }
   function notifyAll() { for (const deviceId of streams.keys()) notify(deviceId); }
@@ -141,12 +142,26 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     const credential = provider.credentialRef ? store.resolveCredential(assertPublicCredentialId(provider.credentialRef)) : undefined;
     return { provider, models, ...(credential === undefined ? {} : { credential }) };
   };
+  const modelPicker = () => ({ ...store.getModelPicker(), sync: catalog.status() });
+  const setModelStar = req => {
+    const body = validate({
+      type: 'object', required: ['modelRef', 'starred'], additionalProperties: false,
+      properties: { modelRef: { type: 'string', minLength: 3, maxLength: 512 }, starred: { type: 'boolean' } },
+    }, req.body);
+    return store.setModelStar(body.modelRef, body.starred);
+  };
+  route('GET', '/api/model-picker', modelPicker);
+  route('PUT', '/api/model-stars', setModelStar, true);
   route('GET', '/api/model-catalog', () => catalog.status());
   route('POST', '/api/model-catalog/sync', async () => { await catalog.sync().catch(() => {}); return catalog.status(); }, true);
   route('GET', '/api/providers', () => store.listProviders());
-  route('POST', '/api/providers', (req, reply) => reply.code(201).send(changed(store.putProvider({ ...validate(providerSchema, req.body), credentialRef: assertPublicCredentialId(req.body.credentialRef), id: req.body.id || randomUUID(), revision: 0 }, null))), true);
+  route('POST', '/api/providers', (req, reply) => {
+    const provider = store.putProvider({ ...validate(providerSchema, req.body), credentialRef: assertPublicCredentialId(req.body.credentialRef), id: req.body.id || randomUUID(), revision: 0 }, null);
+    catalog.apply();
+    return reply.code(201).send(changed(provider));
+  }, true);
   route('GET', '/api/providers/:id', req => required(store.getProvider(req.params.id), 'Provider'));
-  route('PUT', '/api/providers/:id', req => { const body = object(req.body); validate(providerSchema, body.value); assertPublicCredentialId(body.value.credentialRef); return changed(store.putProvider({ ...body.value, id: req.params.id }, body.expectedRevision)); }, true);
+  route('PUT', '/api/providers/:id', req => { const body = object(req.body); validate(providerSchema, body.value); assertPublicCredentialId(body.value.credentialRef); const provider = store.putProvider({ ...body.value, id: req.params.id }, body.expectedRevision); catalog.apply(); return changed(provider); }, true);
   for (const [path, method] of [['validate', 'validateCenterProvider'], ['discover', 'discoverCenterProviderModels']]) {
     route('POST', `/api/providers/:id/${path}`, req => bridge.call(text(req.body?.deviceId, 'deviceId'), method, providerInput(req.params.id)), true);
   }
@@ -406,7 +421,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     if (!['status', 'configure', 'cancel'].includes(body.action)) fail('FORBIDDEN', 'Learning jobs are driven by the target Host');
     return learning.execute(botScope(req), body);
   }, true);
-  route('POST', '/api/devices/:deviceId/bots/:botId/installations', req => botManagement.execute(botScope(req), object(req.body), { allowShared: true }), true);
+  route('POST', '/api/devices/:deviceId/bots/:botId/installations', req => botManagement.execute(botScope(req), object(req.body), { allowShared: true, callAction: action }), true);
   const oauthInput = req => ({ installationId: req.params.id, deviceId: text(req.body?.deviceId, 'deviceId'), botId: text(req.body?.botId, 'botId') });
   route('POST', '/api/installations/:id/oauth/start', req => oauth.start(oauthInput(req)), true);
   route('GET', '/api/oauth/mcp/flows/:flowId', req => required(oauth.status(req.params.flowId), 'OAuth flow'));
@@ -439,6 +454,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     done();
   }
   const host = (method, url, handler, bodyLimit) => app.route({ method, url, onRequest: authenticate, handler, ...(bodyLimit !== undefined ? { bodyLimit } : {}) });
+  registerWebhookRoutes(app, { store, bridge, route, host, publicUrl, notify: deviceId => notify(deviceId, 'webhook-ready') });
   // Learning start carries a transcript snapshot the service bounds at 8 MiB;
   // this route's body limit sits just above it — never a global raise.
   const LEARNING_BODY_LIMIT = 9 * 1024 * 1024;
@@ -475,6 +491,8 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     const sinceSeq = req.query?.sinceSeq !== undefined ? Number(req.query.sinceSeq) : undefined;
     return store.getBotSync({ epoch, sinceSeq, devices: bridge.listDevices() });
   });
+  host('GET', '/api/host/model-picker', modelPicker);
+  host('PUT', '/api/host/model-stars', setModelStar);
   host('GET', '/api/host/connection', req => ({ protocol: 1, deviceId: req.centerDevice.deviceId, linkUrl }));
   host('GET', '/api/host/devices/:deviceId/runtime-status', req => {
     const device = bridge.listDevices().find(item => item.deviceId === req.params.deviceId);
@@ -506,6 +524,11 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return result;
   });
   host('POST', '/api/host/devices/:deviceId/bots/:botId/skills', req => skills.execute({ ...botScope(req), origin: 'foreground' }, object(req.body)));
+  host('POST', '/api/host/devices/:deviceId/bots/:botId/skills/usage', req => {
+    const scope = botScope(req);
+    if (scope.deviceId !== req.centerDevice.deviceId) fail('FORBIDDEN', 'Device mismatch');
+    return skills.reportUse(scope, object(req.body));
+  });
   host('POST', '/api/host/devices/:deviceId/bots/:botId/learning', req => {
     const scope = botScope(req);
     // The learning job's agent.run callbacks are handed to the initiating
@@ -513,7 +536,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     if (scope.deviceId !== req.centerDevice.deviceId) fail('FORBIDDEN', 'Device mismatch');
     return learning.execute(scope, object(req.body));
   }, LEARNING_BODY_LIMIT);
-  host('POST', '/api/host/devices/:deviceId/bots/:botId/installations', req => botManagement.execute(botScope(req), object(req.body)));
+  host('POST', '/api/host/devices/:deviceId/bots/:botId/installations', req => botManagement.execute(botScope(req), object(req.body), { callAction: action }));
   host('GET', '/api/host/snapshot', req => snapshot(req.centerDevice.deviceId));
   host('POST', '/api/host/receipt', (req, reply) => {
     const body = object(req.body);

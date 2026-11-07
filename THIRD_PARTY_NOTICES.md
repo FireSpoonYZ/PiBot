@@ -172,6 +172,17 @@ under the Blue Oak Model License 1.0.0; its full text is retained in
 [`licenses/tar-7.5.22-BlueOak-1.0.0.md`](licenses/tar-7.5.22-BlueOak-1.0.0.md).
 Bundled Host dependency notices are collected from the actual esbuild inputs.
 
+## ICU data for Android
+
+Android bundles the official ICU **78.3** little-endian data archive to supply
+Node Mobile's missing full internationalization data, including word segmentation.
+Source: https://github.com/unicode-org/icu/releases/tag/release-78.3
+(`icu4c-78.3-data-bin-l.zip`, SHA-256
+`982619632b78887f1895b063e96e8c3cc7f99283337c8abbd05aa71635de613c`).
+Its complete Unicode License V3 and third-party notices are retained in
+[`licenses/icu-78.3-LICENSE.txt`](licenses/icu-78.3-LICENSE.txt) and included in
+the Android Host's generated `third-party-licenses.txt`.
+
 ## ws (WebSocket)
 
 The host-core depends on **ws 8.22.0**, the WebSocket client/server implementation for Node.js, under the MIT License:

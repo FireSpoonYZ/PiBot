@@ -17,6 +17,7 @@ import type {
   PendingListOptions,
   PendingListPage,
   LiveTarget,
+  ModelCatalog,
 } from './index.js';
 import type { BotAvatar, BotAvatarConfig, BotCapabilityConfig, BotCwdConfig, Installation, JsonObject } from '../center-contract/index.js';
 
@@ -176,6 +177,10 @@ export interface DesktopCenterStatus {
 }
 
 export interface CenterModelSelection { modelRef?: string | null; thinkingLevel?: string | null; codemode?: boolean | null; codemodeOnly?: boolean | null }
+export interface CenterModelPicker extends ModelCatalog {
+  starredModels: string[];
+  sync: { source: string; syncedAt: string | null; error: string | null };
+}
 export interface CenterBotModelConfig { global: CenterModelSelection; overrides: CenterModelSelection; effective: CenterModelSelection; revision: number }
 
 /** Center-reported apply status; `pending` is synthesized by the center and never sent by a Host. */
@@ -236,6 +241,8 @@ export interface DesktopOperationMap {
   };
   center_owner_session: { params: Record<string, never>; result: { authenticated: boolean } };
   center_owner_login: { params: { password: string }; result: { authenticated: boolean } };
+  center_model_picker_get: { params: Record<string, never>; result: CenterModelPicker };
+  center_model_star_set: { params: { modelRef: string; starred: boolean }; result: { starredModels: string[] } };
   center_bot_model_get: { params: { deviceId: string; botId: string }; result: CenterBotModelConfig };
   center_bot_model_set: { params: { deviceId: string; botId: string; expectedRevision: number; value: CenterModelSelection }; result: CenterBotModelConfig };
   center_bot_avatar_get: { params: { deviceId: string; botId: string }; result: BotAvatarConfig };

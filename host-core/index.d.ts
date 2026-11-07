@@ -158,6 +158,52 @@ export interface ImageAttachmentData extends ImageAttachment {
   data: string;
 }
 
+/** Model tool arguments, not a new Runtime/control endpoint. Cursor is runtime-local and opaque. */
+export type SessionSearchInput = {
+  conversationId?: string;
+  limit?: number;
+  cursor?: string | null;
+} & ({
+  action: 'search';
+  /** Literal case-sensitive substring, 1..256 characters; no regex or FTS. */
+  query: string;
+} | {
+  action: 'read';
+  conversationId: string;
+  entryId: number;
+  before?: number;
+  after?: number;
+});
+
+export interface SessionSearchItem {
+  conversationId: string;
+  scopeId: string | null;
+  entryId: number;
+  /** Model carrier role; scope messages may actually have a Bot author. */
+  role: 'user' | 'assistant';
+  source: 'model' | 'scope';
+  authorKind?: 'user' | 'bot';
+  messageIndex: number;
+  blockIndex: number;
+  /** UTF-16 offset in this original text block (scope source: message.text). */
+  offset: number;
+  text: string;
+  matchOffset?: number;
+  truncated: boolean;
+}
+
+export interface SessionSearchPage {
+  action: 'search' | 'read';
+  botId: string;
+  items: SessionSearchItem[];
+  nextCursor: string | null;
+  /** Includes repeated entry reads when processing a large text block in chunks. */
+  scannedEntryReads: number;
+  scannedTextUnits: number;
+  /** Exhausted the frozen snapshot, not a claim about messages arriving later. */
+  complete: boolean;
+}
+
 export interface HistoryOptions {
   limit?: number;
   cursor?: Record<string, unknown> | null;
@@ -622,6 +668,8 @@ export interface Runtime {
   getAttachment(botId: string, attachmentId: string): Promise<ImageAttachmentData>;
   putBotFileChunk(botId: string, input: BotFileChunkInput): Promise<BotFileReceipt>;
   history(botId: string, options?: HistoryOptions): Promise<HistoryPage>;
+  /** Passive batch snapshot; no conversation creation or scheduler resume. */
+  getBotBoard(params: BotBoardParams): Promise<BotBoardSnapshot>;
   /** /clear：清空主私聊可见历史并重置模型上下文（pi.reset，不新建 conversationId）。 */
   clearHistory(botId: string): Promise<ClearHistoryResult>;
   /** /compact：跑一次手动压缩并等待任务终态；失败抛 COMPACTION_FAILED。 */
@@ -704,7 +752,9 @@ export interface Runtime {
   /** Aborts the matching conversation, then returns the current session status. */
   takeoverShower(target: ShowerTarget, sessionId: string): Promise<ShowerSession>;
   releaseShowerSession(target: ShowerTarget, sessionId: string): Promise<Record<string, unknown>>;
-  /** Idempotently resume native tasks AND activate automatic room/DM processing; may submit new work. */
+  /** Internal Center notification; wakes webhook delivery without accepting public input. */
+  notifyWebhookReady(): void;
+  /** Idempotently resume native tasks AND activate automatic room/DM/webhook processing; may submit new work. */
   resume(): void;
   close(): Promise<void>;
 }
@@ -827,6 +877,8 @@ export interface Attribution {
   deviceId?: string;
   /** Display-only sender name; never an identity or routing key. */
   name?: string;
+  /** Trusted Host entry source only; never accepted from a user sender. */
+  sourceType?: 'webhook';
   channel: 'primary' | 'dm' | 'room';
   scopeId?: string;
   messageId?: string;
@@ -893,6 +945,7 @@ export interface LiveGeneration {
 export interface TurnAdmissionStatus {
   requestId: string;
   phase: 'queued' | 'checking' | 'synchronizing' | 'failed';
+  source?: 'primary' | 'background';
   error?: { code: string; message: string };
 }
 
@@ -913,6 +966,8 @@ export interface BotActivity {
   source: 'primary' | 'room' | 'dm' | 'background' | null;
   scopeId: string | null;
   requestId: string | null;
+  /** Center stop confirmation is pending; independent of the current local phase. */
+  webhookStopPending?: boolean;
   /** ISO 8601 timestamp of the current activity start; null when unknown. */
   startedAt: string | null;
   /**
@@ -922,6 +977,29 @@ export interface BotActivity {
    * it elsewhere.
    */
   error?: { code: string; message: string };
+}
+
+/** At most 64 IDs (256 UTF-8 bytes each); duplicates are returned once in input order. */
+export interface BotBoardParams {
+  botIds: string[];
+}
+
+export interface BotBoardItem {
+  botId: string;
+  /** Public primary conversation UUID, even before a native conversation exists. */
+  conversationId: string;
+  activity: BotActivity;
+  queuedCount: number;
+  attention: null | { kind: 'questionnaire'; requestId: string; summary: string; count: number };
+  progress: null | { completed: number; total: number; current: string | null };
+  /** Committed success only, hidden while non-idle; summary <=500, attention/current <=200 characters. */
+  lastResult: null | { id: string; completedAt: string; summary: string };
+}
+
+export interface BotBoardSnapshot {
+  updatedAt: string;
+  items: BotBoardItem[];
+  errors: { botId: string; code: 'BOT_NOT_FOUND' | 'BOARD_UNAVAILABLE'; message: string }[];
 }
 
 export interface BotLiveState {
@@ -1056,6 +1134,8 @@ export interface ControlServer {
   deviceId: string;
   url: string;
   close(): Promise<void>;
+  /** Internal Center SSE wakeup; not exposed as an HTTP/control operation. */
+  notifyWebhookReady(): void;
   /** Forwards runtime.restoreTurns(): cold-start pinned-turn recovery before resume. */
   restoreTurns(): Promise<void>;
 }
@@ -1083,6 +1163,7 @@ export interface ControlClient {
   getAttachment(botId: string, attachmentId: string, options?: ControlClientCallOptions): Promise<ImageAttachmentData>;
   putBotFileChunk(botId: string, input: BotFileChunkInput, options?: ControlClientCallOptions): Promise<BotFileReceipt>;
   history(botId: string, options?: HistoryOptions & ControlClientCallOptions): Promise<HistoryPage>;
+  getBotBoard(params: BotBoardParams, options?: ControlClientCallOptions): Promise<BotBoardSnapshot>;
   clearHistory(botId: string, options?: ControlClientCallOptions): Promise<ClearHistoryResult>;
   compact(botId: string, options?: ControlClientCallOptions): Promise<CompactResult>;
   abort(botId: string, options?: ControlClientCallOptions): Promise<{ botId: string }>;
@@ -1252,11 +1333,14 @@ export interface BotSoulUpdate {
  */
 export type BotSkillAction =
   | 'list' | 'read' | 'create' | 'update' | 'delete' | 'archive' | 'restore'
-  | 'pin' | 'lock' | 'history' | 'rollback' | 'publish' | 'adopt';
+  | 'pin' | 'lock' | 'history' | 'rollback' | 'publish' | 'adopt' | 'snapshots' | 'restore_snapshot';
 
-/** Center skill service input; mutations require expectedRevision (create uses null). */
+/** Center skill service input; mutations require expectedRevision (create uses null), or expectedRevisions for snapshot restore. */
 export interface BotSkillInput {
   action: BotSkillAction;
+  snapshotId?: string;
+  /** Obtain from snapshots; null means the named skill must still be absent. */
+  expectedRevisions?: Record<string, { skillId: string; revision: number; stateRevision: number } | null>;
   skillId?: string;
   name?: string;
   category?: string;
@@ -1277,23 +1361,43 @@ export interface BotSkillInput {
 
 export type BotLearningAction = 'status' | 'configure' | 'learn' | 'review' | 'curate' | 'cancel';
 
-/** Tool/runtime-level learning input; Host maps learn/review/curate to the Center start action. */
+/** CAS settings patch; auxiliary refs never introduce new provider credentials. */
+export interface BotLearningSettingsPatch {
+  enabled?: boolean;
+  reviewModelRef?: string | null;
+  curatorModelRef?: string | null;
+  review?: { memoryEvery?: number; skillEvery?: number };
+  curator?: { enabled?: boolean; intervalHours?: number; minIdleHours?: number; staleAfterDays?: number; archiveAfterDays?: number; consolidate?: boolean; paused?: boolean };
+  budget?: { maxIterations?: number; maxInputTokens?: number | null; callTimeoutMs?: number; jobTimeoutMs?: number; pollTimeoutMs?: number };
+}
+
+/** Tool/runtime-level input; Host maps learn/review/curate to the Center start action. */
 export interface BotLearningInput {
   action: BotLearningAction;
   jobId?: string;
   focus?: string;
   snapshot?: Record<string, unknown>;
-  /** Learning settings applied with configure; fields are owned by the Center learning service. */
-  config?: Record<string, unknown>;
+  /** Manual learn only; at most 16 explicit local files/directories or http(s) URLs. */
+  sources?: string[];
+  /** Null auxiliary refs follow the Bot; other refs must already be usable on its Host. */
+  config?: BotLearningSettingsPatch;
   expectedRevision?: number;
   requestId?: string;
 }
 
 export type BotInstallationAction =
   | 'inspect' | 'install' | 'update' | 'rollback' | 'enable' | 'disable'
-  | 'uninstall' | 'operation' | 'deployments';
+  | 'uninstall' | 'operation' | 'deployments' | 'catalog' | 'describe' | 'check' | 'probe';
 
-/** Bot-scoped installation input; mutations are CAS/requestId-idempotent operations. */
+export type {
+  BotInstallationCatalog, BotInstallationDescription, BotInstallationCheck,
+  LearningMemoryStatus, LearningSourceInput, LearningSourceResult,
+} from '../center-contract/index.js';
+
+/** Bot-scoped installation input; mutations are CAS/requestId-idempotent operations.
+ * catalog needs no installationId; describe/check/probe require it.
+ * probe is explicit, read-only and potentially billed; check never performs a network probe.
+ */
 export interface BotInstallationInput {
   action: BotInstallationAction;
   installationId?: string;
@@ -1960,6 +2064,7 @@ export interface RemoteControlMethodMap {
   submit: { params: { botId: string; requestId: string; text: string; attachments?: string[] }; result: PrimarySubmission };
   getSubmission: { params: { botId: string; requestId: string }; result: PrimarySubmission };
   history: { params: HistoryOptions & { botId: string }; result: HistoryPage };
+  getBotBoard: { params: BotBoardParams; result: BotBoardSnapshot };
   clearHistory: { params: { botId: string }; result: ClearHistoryResult };
   compact: { params: { botId: string }; result: CompactResult };
   abort: { params: { botId: string }; result: { botId: string } };

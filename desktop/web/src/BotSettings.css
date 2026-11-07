@@ -224,17 +224,6 @@
   font-weight: 600;
 }
 
-.bot-studio .bot-studio-model-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 260px;
-  overflow-y: auto;
-  padding: 4px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface);
-}
 .bot-studio .bot-studio-model-row {
   display: flex;
   flex-direction: column;

@@ -73,7 +73,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     assertCapabilityAllowed(botId, installationId);
   }
 
-  function guardContributions(bot, installationId, botId) {
+  function guardContributions(bot, installationId, botId, skillTelemetry = false) {
     const source = bot.durableContributions ?? {};
     if (source.tasks?.length) throw error('INVALID_ARGUMENT', 'Bot contributions cannot register tasks');
     const tools = source.tools?.map((tool) => ({
@@ -97,11 +97,16 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     const hooks = source.hooks?.map((item) => ({
       ...item,
       handlers: Object.fromEntries(Object.entries(item.handlers).map(([key, fn]) => [key, async (...args) => {
-        return runAccepted(async () => {
-          const api = args[args.length - 2];
-          await checkOwner(botId, installationId, api.conversationId);
-          return fn(...args);
-        }, botId);
+        try {
+          return await runAccepted(async () => {
+            const api = args[args.length - 2];
+            await checkOwner(botId, installationId, api.conversationId);
+            return fn(...args);
+          }, botId);
+        } catch (error) {
+          // Read telemetry cannot turn a completed tool into a policy/connection error.
+          if (!skillTelemetry || key !== 'afterTool') throw error;
+        }
       }])),
     }));
     const wraps = source.wraps?.map((item) => ({
@@ -374,7 +379,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
       try {
         const contribution = await opened.instance.plugin.forBot(context);
         await contribution.prepare();
-        const extension = defineExtension({ name: nameFor(id, capability.targetVersion, botId), ...guardContributions(contribution, id, botId) });
+        const extension = defineExtension({ name: nameFor(id, capability.targetVersion, botId), ...guardContributions(contribution, id, botId, capability.kind === 'skill') });
         return { id, instance: opened.instance, created: opened.created,
           entry: { bot: contribution, context, extension },
           fingerprint: capabilityFingerprint(capability, credentials),
@@ -819,7 +824,8 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     return result;
   }
 
-  async function action(installationId, actionId, request) {
+  async function action(installationId, actionId, request, { signal } = {}) {
+    signal?.throwIfAborted();
     if (!accepting) throw error('RUNTIME_BUSY', 'capability execution is not accepting new work');
     if (!request || typeof request.requestId !== 'string' || !request.requestId || typeof request.botId !== 'string' || !request.botId || !Object.hasOwn(request, 'input')) {
       throw error('INVALID_ARGUMENT', 'invalid capability action request');
@@ -833,6 +839,8 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     if (!descriptor || !action) throw error('NOT_FOUND', 'capability action not found');
     if (!ajv.validate(descriptor.inputSchema, request.input) || !ajv.validate(action.inputSchema, request.input)) throw error('VALIDATION_FAILED', 'invalid action input');
     const controller = new AbortController();
+    const cancel = () => controller.abort(signal.reason);
+    signal?.addEventListener('abort', cancel, { once: true });
     const timer = setTimeout(() => controller.abort(error('TIMEOUT', 'capability action timed out')), 120000);
     timer.unref?.();
     const operation = Promise.resolve().then(() => {
@@ -850,7 +858,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     });
     let result;
     try { result = await Promise.race([operation, aborted]); }
-    finally { clearTimeout(timer); controller.signal.removeEventListener('abort', onAbort); }
+    finally { clearTimeout(timer); controller.signal.removeEventListener('abort', onAbort); signal?.removeEventListener('abort', cancel); }
     assertCapabilityAllowed(request.botId, installationId);
     if (descriptor.outputSchema !== undefined && !ajv.validate(descriptor.outputSchema, result)) {
       throw error('VALIDATION_FAILED', 'invalid action output');
@@ -858,12 +866,12 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     return { result };
   }
 
-  async function actionByName(botId, actionId, input) {
+  async function actionByName(botId, actionId, input, options = {}) {
     const matches = [...instances.values()].filter((instance) => instance.bots.has(botId) &&
       instance.manifest.actions?.some((descriptor) => descriptor.id === actionId));
     if (matches.length === 0) throw error('EXTENSION_DISABLED', 'capability action is unavailable');
     if (matches.length > 1) throw error('INVALID_STATE', 'capability action is ambiguous');
-    return (await action(matches[0].installationId, actionId, { deviceId: host.deviceId, botId, requestId: input?.requestId ?? randomUUID(), input: input ?? {} })).result;
+    return (await action(matches[0].installationId, actionId, { deviceId: host.deviceId, botId, requestId: input?.requestId ?? randomUUID(), input: input ?? {} }, options)).result;
   }
 
   async function close() {

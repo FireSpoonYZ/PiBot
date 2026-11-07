@@ -91,7 +91,7 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
     skills = await openSkillManager({ dataRoot, store, packages, notify: (deviceId) => routes?.notifyDevice?.(deviceId) });
     learning = await openLearningService({ dataRoot, store, skills, runHermes });
     botManagement = openBotManagement({ store, packages, notify: (deviceId) => routes?.notifyDevice?.(deviceId) });
-    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog });
+    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, publicUrl });
     if (webRoot) {
       await app.register(fastifyStatic, { root: webRoot, prefix: '/' });
       app.setNotFoundHandler((req, reply) => {

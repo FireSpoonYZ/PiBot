@@ -1,5 +1,7 @@
 import type {
   BotRecord,
+  BotBoardParams,
+  BotBoardSnapshot,
   CreateBotInput,
   UpdateBotProfileInput,
   PrimarySubmission,
@@ -129,6 +131,7 @@ export interface ControlClient {
   getAttachment(botId: string, attachmentId: string, options?: ControlClientCallOptions): Promise<ImageAttachmentData>;
   putBotFileChunk(botId: string, input: BotFileChunkInput, options?: ControlClientCallOptions): Promise<BotFileReceipt>;
   history(botId: string, options?: HistoryClientOptions): Promise<HistoryPage>;
+  getBotBoard(params: BotBoardParams, options?: ControlClientCallOptions): Promise<BotBoardSnapshot>;
   clearHistory(botId: string, options?: ControlClientCallOptions): Promise<ClearHistoryResult>;
   compact(botId: string, options?: ControlClientCallOptions): Promise<CompactResult>;
   abort(botId: string, options?: ControlClientCallOptions): Promise<{ botId: string }>;

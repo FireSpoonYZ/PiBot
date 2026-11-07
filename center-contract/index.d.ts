@@ -413,6 +413,60 @@ export interface ProviderCheckRequest { deviceId: string }
 /** Trusted owner-initiated Host probe; credential is transient and never persisted. */
 export interface ProviderProbeRequest { provider: Provider; models: Model[]; credential?: string }
 export interface InstallationCheckRequest { deviceId: string; botId: string }
+
+/** Safe discovery projection: no package source, configuration values or other Bot bindings. */
+export type BotInstallationMetadata = Pick<Installation,
+  'installationId' | 'packageId' | 'displayName' | 'kind' | 'target' | 'targetVersion' | 'enabled'>;
+export interface CapabilityCredentialStatus {
+  path: string;
+  credentialRef: string | null;
+  configured: boolean;
+  revision: number | null;
+}
+export interface BotInstallationCatalog { installations: BotInstallationMetadata[] }
+export interface BotInstallationDescription {
+  installation: BotInstallationMetadata;
+  configSchema: JsonSchema;
+  actions: ActionDescriptor[];
+  /** null when the installation is neither bound to nor owned by the target Bot. */
+  credentialRefs: CapabilityCredentialStatus[] | null;
+  probeSupported: boolean;
+  guidance: string;
+}
+export interface BotInstallationCheck {
+  installation: BotInstallationMetadata;
+  /** Schema + referenced credential presence only, not network verification. */
+  configured: boolean;
+  configuration: {
+    schemaValid: boolean;
+    globalRevision: number;
+    bindingRevision: number;
+    enabled: boolean;
+    credentialRefs: CapabilityCredentialStatus[];
+    desiredRevision: number;
+    appliedRevision: number | null;
+    receipt: { botId: string; desiredRevision: number; appliedRevision: number | null; status: string } | null;
+  };
+  deployment: {
+    status: 'deployed' | 'not-deployed' | 'stale' | 'failed';
+    desiredRevision: number | null;
+    planId: string | null;
+    receipt: DeploymentReceipt | null;
+  };
+  probe:
+    | { status: 'not-run'; supported: boolean }
+    | { status: 'blocked'; reason: string }
+    | { status: 'failed' | 'stale'; message: string }
+    | { status: 'verified'; version: string; operation: 'search' | 'contents' | 'listBanks'; checkedAt: string };
+  guidance: string;
+}
+/** Hindsight action learningMemoryStatus({}); authorized policy, no network or writes. */
+export interface LearningMemoryStatus {
+  enabled: true; canRead: true; canWrite: boolean; mode: 'read-only' | 'read-write';
+}
+/** Webfox action readLearningSource; caller enforces its declared source allowlist. */
+export interface LearningSourceInput { url: string }
+export interface LearningSourceResult { url: string; content: string; truncated?: boolean }
 export interface OAuthStartRequest { deviceId: string; botId: string }
 export interface OAuthStartResponse { flowId: string; authorizationUrl: string }
 export interface OAuthFlowState { status: 'pending' | 'complete' | 'failed'; error?: string }

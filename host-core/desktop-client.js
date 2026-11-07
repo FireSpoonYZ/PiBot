@@ -728,6 +728,17 @@ export function openDesktopClient(options) {
     }
   }
 
+  async function modelPickerOperation(params, signal, write) {
+    rejectUnknownFields(params, new Set(write ? ['modelRef', 'starred'] : []), 'model picker params');
+    if (write && (typeof params.modelRef !== 'string' || params.modelRef.length > 512 ||
+        !params.modelRef.isWellFormed() || !/^[^/\s]+\/.+$/u.test(params.modelRef) || typeof params.starred !== 'boolean')) {
+      throw invalid('invalid model star');
+    }
+    return runCenterAction(client => write
+      ? client.modelStarSet({ modelRef: params.modelRef, starred: params.starred }, signal)
+      : client.modelPickerGet(signal));
+  }
+
   function pathId(value, name) {
     try {
       assertId(value, name);
@@ -1739,6 +1750,8 @@ export function openDesktopClient(options) {
     ['center_store', opCenterStore],
     ['center_owner_session', (params, signal) => ownerOperation(params, signal, 'session')],
     ['center_owner_login', (params, signal) => ownerOperation(params, signal, 'login')],
+    ['center_model_picker_get', (params, signal) => modelPickerOperation(params, signal, false)],
+    ['center_model_star_set', (params, signal) => modelPickerOperation(params, signal, true)],
     ['center_bot_model_get', (params, signal) => ownerOperation(params, signal, 'get')],
     ['center_bot_model_set', (params, signal) => ownerOperation(params, signal, 'set')],
     ['center_bot_avatar_get', (params, signal) => avatarOperation(params, signal, false)],

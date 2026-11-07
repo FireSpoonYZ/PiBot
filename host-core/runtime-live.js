@@ -7,6 +7,8 @@ import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/conte
 import { getPrimaryConversation } from './runtime-docs.js';
 import { BotSessionState } from './bot-session-context.js';
 import { GenerationFailureState } from './generation-failure.js';
+import { normalizeBotBoardParams } from './bot-board-protocol.js';
+import { readBotBoardDetails, projectBotBoardItem } from './runtime-bot-board.js';
 import { emptyLiveState, projectLiveState, diffLiveState } from './runtime-live-projection.js';
 
 const CTX = BACKGROUND_CONTEXT;
@@ -56,6 +58,12 @@ function normalizeTurnAdmission(status) {
     throw errWithCode('turn admission phase must be queued, checking, synchronizing or failed', 'INVALID_ARGUMENT');
   }
   const normalized = { requestId: boundText(status.requestId, MAX_TURN_REQUEST_ID_CHARS), phase: status.phase };
+  if (status.source !== undefined) {
+    if (status.source !== 'primary' && status.source !== 'background') {
+      throw errWithCode('turn admission source must be primary or background', 'INVALID_ARGUMENT');
+    }
+    normalized.source = status.source;
+  }
   if (status.error !== undefined) {
     const error = status.error;
     if (typeof error !== 'object' || error === null || Array.isArray(error) ||
@@ -171,10 +179,14 @@ function resolveBotActivity(botId, runActivity, queuedCount, ctx) {
     return stripInternal(projected);
   }
   const admission = ctx.admissionByBot.get(botId) ?? null;
-  if (admission?.status?.phase === 'failed') return activity('failed');
+  if (admission?.status?.phase === 'failed') return activity('failed', {
+    source: admission.status.source ?? null,
+    requestId: admission.status.requestId,
+    ...(admission.status.error ? { error: admission.status.error } : {}),
+  });
   if (admission?.status !== null && admission?.status !== undefined) {
     return activity(admission.status.phase === 'queued' ? 'queued' : 'preparing', {
-      source: 'primary',
+      source: admission.status.source ?? null,
       requestId: admission.status.requestId,
     });
   }
@@ -191,8 +203,8 @@ function resolveBotActivity(botId, runActivity, queuedCount, ctx) {
   }
   // 原生 pi.inbox 已有 SDK 排队项但既无运行也无 admission/work pending：
   // 真实工作已入队，绝不能报 idle。排在空闲/手动 compacting 之前：排队的
-  // 真实输入比后台压缩更贴近用户等待。
-  if (queuedCount > 0) return activity('queued', { source: 'primary' });
+  // 真实输入比后台压缩更贴近用户等待；计数没有归属，不猜成 primary。
+  if (queuedCount > 0) return activity('queued');
   // 空闲/手动压缩低于真实排队：积压的真实输入比后台整理更贴近用户等待。
   if (projected?.phase === 'compacting') return stripInternal(projected);
   if (control === 'stopped') return activity('stopped');
@@ -201,7 +213,9 @@ function resolveBotActivity(botId, runActivity, queuedCount, ctx) {
 
 /** 合并统一 activity 进 primary 快照（恒写入，同 turnAdmission）。 */
 function withBotActivity(projected, botId, runActivity, ctx) {
-  return { ...projected, activity: resolveBotActivity(botId, runActivity, projected.queuedCount, ctx) };
+  const resolved = resolveBotActivity(botId, runActivity, projected.queuedCount, ctx);
+  if (ctx.webhookStopPendingByBot.has(botId)) resolved.webhookStopPending = true;
+  return { ...projected, activity: resolved };
 }
 
 /** 新的真实工作/排队输入出现：清掉旧 stopped control，防止新任务完结后又误显已停止。 */
@@ -244,7 +258,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
   // botId -> {pending:[…]}：work lane 推送的存活 pending 元数据快照；
   // 只投影进 primary watch 的统一 activity，绝不进 work watch（保持原历史）。
   const workByBot = new Map();
-  const activityCtx = { controlByBot, workByBot, admissionByBot };
+  const webhookStopPendingByBot = new Set();
+  const activityCtx = { controlByBot, workByBot, admissionByBot, webhookStopPendingByBot };
 
   function track(task) {
     inflight.add(task);
@@ -256,7 +271,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     return botId + '\u0000' + scopeId;
   }
 
-  function createWatch(bot, signal, work) {
+  function createWatch(bot, signal, work, board = false) {
     const botId = bot.botId;
     const state = {
       kind: 'pending', // 'pending' | 'attaching' | 'attached' | 'ended'
@@ -296,6 +311,9 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       sessionState: null,
       pendingView: null,
       attributionLoad: null,
+      initialized: false,
+      boardView: null,
+      boardDetails: null,
     };
     state.closed = new Promise((resolve) => { state.settleEnd = resolve; });
 
@@ -387,7 +405,10 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     // 结束观察并释放底层原生 watch。先落定本端 reason，再 await native.stop()，
     // 避免原生 closed 回调抢先覆盖 reason；不等待用户 listener。
     async function shutdown(reason) {
-      if (state.endReason !== null) return state.closed;
+      if (state.endReason !== null) {
+        await stopNative();
+        return state.closed;
+      }
       const native = state.native;
       end(reason);
       if (native) await native.stop();
@@ -456,6 +477,16 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
               }
             }
           }
+          if (board) {
+            try {
+              extras ??= {};
+              extras.boardDetails = await readBotBoardDetails(getHarness(), state.nativeId, CTX);
+            } catch (err) {
+              end('session_failed', err);
+              void stopNative().catch(() => {});
+              return;
+            }
+          }
           if (state.endReason !== null) return;
           if (state.pendingView === view) {
             state.pendingView = null;
@@ -486,7 +517,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
           // 显式新工作，须清旧 stopped 透出压缩；失败投影不是工作，不清。
           // 压缩被停止结算时调用方重写 stopped——清标不影响停止后仍 stopped。
           const activeWork = state.runActivity !== null && state.runActivity.isFailure !== true;
-          if (activeWork || state.inboxQueued > 0) {
+          // 冻结看板 view 可能早于停止结算，不能据此清共享 stopped。
+          if (!board && (activeWork || state.inboxQueued > 0)) {
             clearStoppedOnWork(activityCtx, botId);
           }
           next = withBotActivity(
@@ -501,6 +533,11 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       }
       const previous = state.current;
       state.current = deepFreeze(next);
+      state.initialized = true;
+      if (board) {
+        state.boardView = view;
+        state.boardDetails = extras?.boardDetails ?? null;
+      }
       if (diffLiveState(previous, next) !== null) {
         state.seq++;
         if (state.started) {
@@ -544,7 +581,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
         state.seq++;
         state.forceFrame = true;
       }
-      // SDK start 不投初始值：登记归属装载（异步）后立即 start，中间不 await，不漏 commit。
+      // SDK start 不投初始值：普通聊天登记归属装载后立即 start，中间不 await，不漏 commit。
       state.nativeId = conversation.id;
       onView(native.value);
       if (work && state.forceFrame) {
@@ -552,8 +589,9 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
         kick();
       }
       try {
+        // 看板只读捕获的 native.value，不追逐流式更新，避免归属装载饥饿。
         // Durable 保证视图 watch 只发 value 调用：直接解构，onView 同步执行。
-        native.start(({ value }) => { onView(value); });
+        if (!board) native.start(({ value }) => { onView(value); });
       } catch (err) {
         await stopNative().catch(() => {});
         end('listener_error', err);
@@ -614,7 +652,20 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       }
     }
 
+    async function readBoard() {
+      // watch() waits for attach, not the asynchronous attribution projection.
+      // Never expose its placeholder idle value for an existing conversation.
+      while (state.attachPromise !== null || state.attributionLoad !== null) {
+        await (state.attachPromise ?? state.attributionLoad);
+      }
+      if (state.endReason !== null || (state.nativeId !== null && (!state.initialized || state.pendingView !== null))) {
+        throw errWithCode('bot board snapshot is unavailable', 'BOARD_UNAVAILABLE');
+      }
+      return projectBotBoardItem(botId, state.conversationId, state.current, state.boardView, state.boardDetails);
+    }
+
     const watch = {
+      _readBoard: readBoard,
       _applyAdmission: applyAdmission,
       _applyActivity: applyActivity,
       get value() {
@@ -677,13 +728,13 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     })());
   }
 
-  function watch(botId, options = {}) {
+  function watch(botId, options = {}, board = false) {
     return track((async () => {
       assertNonBlank(botId, 'botId');
       const bot = host.getBot(botId);
       if (!bot) throw errWithCode('bot not found: ' + botId, 'BOT_NOT_FOUND');
       const signal = options?.signal ?? undefined;
-      const w = createWatch(bot, signal, null);
+      const w = createWatch(bot, signal, null, board);
       if (w.ended) return w;
       if (closedFlag) {
         await w.shutdown('session_closed');
@@ -707,6 +758,32 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       if (conversation) await bind(botId, conversation);
       return w;
     })());
+  }
+
+  async function getBotBoard(params, refreshActivity) {
+    const { botIds } = normalizeBotBoardParams(params);
+    const items = [];
+    const errors = [];
+    // One transient observer at a time; no permanent subscriptions or broker quota.
+    for (const botId of botIds) {
+      let observer;
+      try {
+        if (!host.getBot(botId)) throw errWithCode('bot not found', 'BOT_NOT_FOUND');
+        await refreshActivity?.(botId);
+        observer = await watch(botId, {}, true);
+        items.push(await observer._readBoard());
+      } catch (err) {
+        const missing = err?.code === 'BOT_NOT_FOUND';
+        errors.push({
+          botId,
+          code: missing ? 'BOT_NOT_FOUND' : 'BOARD_UNAVAILABLE',
+          message: missing ? 'bot not found' : 'bot board snapshot is unavailable',
+        });
+      } finally {
+        if (observer) await observer.stop();
+      }
+    }
+    return { updatedAt: new Date().toISOString(), items, errors };
   }
 
   function watchWork(botId, scopeId, options = {}) {
@@ -813,6 +890,12 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     }
   }
 
+  function setWebhookStopPending(botId, pending) {
+    if (pending) webhookStopPendingByBot.add(botId);
+    else webhookStopPendingByBot.delete(botId);
+    for (const w of watches) w._applyActivity(botId);
+  }
+
   async function close() {
     if (closedFlag) return;
     closedFlag = true;
@@ -828,7 +911,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     pendingByWork.clear();
     controlByBot.clear();
     workByBot.clear();
+    webhookStopPendingByBot.clear();
   }
 
-  return { watch, watchWork, bind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, close };
+  return { watch, watchWork, getBotBoard, bind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, setWebhookStopPending, close };
 }

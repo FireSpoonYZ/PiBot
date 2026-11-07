@@ -66,9 +66,9 @@ final class BotHostSchedules {
     private static final Set<String> ACTIVE_RUNS = Set.of("dispatching", "unconfirmed", "queued", "placed");
     private static final Set<String> SUBMISSION_TERMINAL = Set.of("done", "unanswered");
     private static final Set<String> SUBMISSION_ACTIVE = Set.of("queued", "placed");
-    private static final Set<String> CREATE_FIELDS = Set.of("action", "title", "prompt", "repeat", "time",
+    private static final Set<String> CREATE_FIELDS = Set.of("action", "title", "prompt", "skills", "repeat", "time",
             "weekday", "weekdays", "monthDay", "alarmMode", "vibrate", "deleteAfterRun");
-    private static final Set<String> UPDATE_FIELDS = Set.of("action", "id", "revision", "title", "prompt",
+    private static final Set<String> UPDATE_FIELDS = Set.of("action", "id", "revision", "title", "prompt", "skills",
             "repeat", "time", "weekday", "weekdays", "monthDay", "alarmMode", "vibrate", "deleteAfterRun");
     private static final Set<String> MUTATION_ID_FIELDS = Set.of("action", "id", "revision");
     private static final Set<String> ENABLE_FIELDS = Set.of("action", "id", "revision", "enabled");
@@ -353,6 +353,9 @@ final class BotHostSchedules {
                 return list(owner, input);
             case "requestExactAlarm":
                 return requestExactAlarmFromBridge();
+            case "hermesSkillCall":
+                requireKeys(input, Set.of("action", "name", "args"));
+                return hermesSkillCall(owner, input);
             case "pauseBot":
                 return pauseOwner(owner);
             case "deleteBot":
@@ -569,6 +572,84 @@ final class BotHostSchedules {
             scheduleAlarmsLocked(st);
             save(db, st);
             return mutationResult(st, merged);
+        });
+    }
+
+    private static JSONArray validateSkills(Object value) throws JSONException {
+        if (!(value instanceof JSONArray names) || names.length() > 100) {
+            throw new IllegalArgumentException("skills must be an array of at most 100 names");
+        }
+        Set<String> seen = new java.util.HashSet<>();
+        for (int i = 0; i < names.length(); i++) {
+            Object raw = names.get(i);
+            if (!(raw instanceof String name) || !name.matches("^[a-z0-9][a-z0-9-]{0,63}$") || !seen.add(name)) {
+                throw new IllegalArgumentException("skills must contain unique skill names");
+            }
+        }
+        return names;
+    }
+
+    private JSONObject hermesSkillCall(Owner owner, JSONObject input) {
+        return inTx(db -> {
+            String name = input.getString("name");
+            JSONObject args = input.getJSONObject("args");
+            boolean read = "referenced_skill_names".equals(name);
+            if (!read && !"rewrite_skill_refs".equals(name)) throw new IllegalArgumentException("Unsupported schedule call");
+            requireKeys(args, read ? Set.of() : Set.of("consolidated", "pruned"));
+            JSONObject consolidated = read || !args.has("consolidated") ? new JSONObject() : args.getJSONObject("consolidated");
+            JSONArray pruned = read || !args.has("pruned") ? new JSONArray() : validateSkills(args.get("pruned"));
+            JSONArray sources = new JSONArray();
+            Iterator<String> keys = consolidated.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                sources.put(key);
+                validateSkills(new JSONArray().put(consolidated.get(key)));
+            }
+            validateSkills(sources);
+            Set<String> prunedNames = new java.util.HashSet<>();
+            for (int i = 0; i < pruned.length(); i++) prunedNames.add(pruned.getString(i));
+            State st = load(db);
+            Set<String> referenced = new java.util.TreeSet<>();
+            JSONArray rewrites = new JSONArray();
+            int scanned = 0;
+            for (int i = 0; i < st.tasks.length(); i++) {
+                JSONObject task = st.tasks.getJSONObject(i);
+                JSONObject storedOwner = task.getJSONObject("owner");
+                if (!owner.deviceId.equals(storedOwner.optString("deviceId")) || !owner.botId.equals(storedOwner.optString("botId"))) continue;
+                if (++scanned > MAX_TASKS) throw new IllegalStateException("Too many scheduled tasks");
+                JSONArray before = task.has("skills") ? validateSkills(task.get("skills")) : new JSONArray();
+                JSONArray after = new JSONArray();
+                JSONObject mapped = new JSONObject();
+                JSONArray dropped = new JSONArray();
+                Set<String> seen = new java.util.HashSet<>();
+                for (int j = 0; j < before.length(); j++) {
+                    String skill = before.getString(j);
+                    referenced.add(skill);
+                    String target = skill;
+                    if (consolidated.has(skill)) {
+                        target = consolidated.getString(skill);
+                        mapped.put(skill, target);
+                    } else if (prunedNames.contains(skill)) {
+                        dropped.put(skill);
+                        continue;
+                    }
+                    if (seen.add(target)) after.put(target);
+                }
+                if (read || before.toString().equals(after.toString())) continue;
+                task.put("skills", after);
+                task.put("revision", task.getLong("revision") + 1);
+                task.put("updatedAt", System.currentTimeMillis());
+                rewrites.put(new JSONObject().put("job_id", task.getString("id"))
+                        .put("job_name", task.getString("title")).put("before", before).put("after", after)
+                        .put("mapped", mapped).put("dropped", dropped));
+            }
+            if (read) return new JSONObject().put("skills", new JSONArray(referenced));
+            if (rewrites.length() > 0) {
+                save(db, st);
+                scheduleAlarmsLocked(st);
+                save(db, st);
+            }
+            return new JSONObject().put("rewrites", rewrites).put("jobs_updated", rewrites.length()).put("jobs_scanned", scanned);
         });
     }
 
@@ -877,7 +958,10 @@ final class BotHostSchedules {
         try {
             if ("submit".equals(step.inflight.kind)) {
                 method = "submit";
-                String text = SOURCE_PREFIX + " " + step.run.optString("prompt");
+                JSONArray skills = step.run.optJSONArray("skills");
+                String text = SOURCE_PREFIX + (skills != null && skills.length() > 0
+                        ? "\nLoad these skills with the read tool before executing: " + skills + "\n" : " ")
+                        + step.run.optString("prompt");
                 params = new JSONObject().put("botId", ownerBotId(step.run))
                         .put("requestId", step.run.optString("requestId")).put("text", text);
             } else {
@@ -1327,6 +1411,7 @@ final class BotHostSchedules {
                     .put("conversationId", owner.conversationId));
             copyField(input, task, "title");
             copyField(input, task, "prompt");
+            task.put("skills", input.has("skills") ? input.get("skills") : new JSONArray());
             copyField(input, task, "repeat");
             copyField(input, task, "time");
             if (input.has("weekday")) copyField(input, task, "weekday");
@@ -1371,6 +1456,7 @@ final class BotHostSchedules {
                 || !isWellFormed(title) || title.strip().isEmpty()) {
             throw new IllegalArgumentException("title 必须是 1..80 字符的非空白文本");
         }
+        if (task.has("skills")) validateSkills(task.get("skills"));
         Object promptRaw = task.opt("prompt");
         if (!(promptRaw instanceof String prompt) || prompt.isEmpty() || prompt.length() > 8000
                 || !isWellFormed(prompt) || prompt.strip().isEmpty()) {
@@ -1480,6 +1566,7 @@ final class BotHostSchedules {
             run.put("requestId", stableRequestId(taskId, revision, occurrence));
             // 不可变 occurrence 快照：提交/振动/删除不依赖后续编辑的 live 定义。
             run.put("prompt", task.optString("prompt"));
+            run.put("skills", task.has("skills") ? new JSONArray(task.getJSONArray("skills").toString()) : new JSONArray());
             run.put("vibrate", task.optBoolean("vibrate", false));
             run.put("deleteAfterRun", task.optBoolean("deleteAfterRun", false));
             JSONObject owner = new JSONObject();
@@ -1568,7 +1655,8 @@ final class BotHostSchedules {
 
     private JSONObject taskDTO(JSONObject task, JSONArray runs) throws JSONException {
         JSONObject dto = new JSONObject();
-        String[] keys = {"id", "revision", "enabled", "title", "prompt", "repeat", "time", "weekday", "weekdays",
+        dto.put("skills", task.has("skills") ? task.getJSONArray("skills") : new JSONArray());
+        String[] keys = {"id", "revision", "enabled", "title", "prompt", "skills", "repeat", "time", "weekday", "weekdays",
                 "monthDay", "alarmMode", "vibrate", "deleteAfterRun", "nextRunAt", "sourceTaskId",
                 "createdAt", "updatedAt"};
         for (String key : keys) {

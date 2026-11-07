@@ -11,6 +11,7 @@ export interface MessageAttribution {
   botId?: string;
   deviceId?: string;
   name?: string;
+  sourceType?: 'webhook';
   channel: 'primary' | 'dm' | 'room';
   scopeId?: string;
   messageId?: string;
@@ -56,6 +57,8 @@ export interface ChatTurn {
   role: 'user' | 'assistant';
   text: string;
   entryId: number;
+  /** 构成本轮助手正文的持久 entry ID；entryId 会随工具结果推进，不能代替正文归属。 */
+  assistantTextEntryIds?: string[];
   /** 用户消息已上传图片附件（host.user-message 的 data.attachments / live user message 的 attachments）。 */
   attachments?: ImageAttachment[];
   error?: string;
@@ -318,6 +321,7 @@ export function normalizeAttribution(value: unknown): MessageAttribution | undef
   if (deviceId !== undefined) out.deviceId = deviceId;
   const name = readString(raw.name);
   if (name !== undefined) out.name = name;
+  if (kind === 'host' && raw.sourceType === 'webhook') out.sourceType = 'webhook';
   const scopeId = readString(raw.scopeId);
   if (scopeId !== undefined) out.scopeId = scopeId;
   const messageId = readString(raw.messageId);
@@ -839,6 +843,7 @@ export function parseHistoryEntries(
         // 不按文本内容去重：相邻不同发言/消息可能正文相同，判重会丢消息。
         if (joinedText) {
           acc.textParts.push(joinedText);
+          (acc.turn.assistantTextEntryIds ??= []).push(String(item.id));
         }
         if (thinkingParts.length > 0) {
           acc.thinkingParts.push(thinkingParts.join('\n'));
@@ -1141,6 +1146,11 @@ export function parseHistoryEntries(
         Boolean(turn.error) ||
         Boolean(turn.thinking)),
   );
+}
+
+/** 从调用方实际显示的轮次提取正文 ID，不重做归属或搜索过滤。 */
+export function visibleAssistantTextEntryIds(turns: readonly ChatTurn[]): string[] {
+  return turns.flatMap(turn => turn.assistantTextEntryIds ?? []);
 }
 
 // 当前执行轮的计时起点：只认 Host activity.startedAt（含 compacting，自动压缩保持原轮起点）。

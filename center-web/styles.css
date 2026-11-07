@@ -1065,7 +1065,7 @@ details > summary {
     padding-bottom: env(safe-area-inset-bottom, 0px);
     z-index: 30;
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     align-items: stretch;
     gap: 0;
     background: color-mix(in srgb, var(--card) 94%, transparent);

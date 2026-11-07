@@ -1,21 +1,20 @@
 // Bot 模型页：当前生效摘要 + 模型单选 + 思考强度 + 服务商入口，底部统一保存栏。
 // 数据与草稿由 useBotModelConfig 提供；“显式清空”只在高级设置页切换，本页仅提示并允许恢复。
-import { useMemo, useState } from 'react';
 import { ExternalLink } from 'lucide-react';
 import type { ModelCatalogEntry } from '../../../host-core/index.js';
+import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
+import { ModelPicker } from './ModelPicker';
 import { openCenterManagement } from '../native';
 import { ErrorNotice, errorText, useText } from '../ui';
-import { Badge, Chips, EmptyState, LoadingState, LoginCard, Row, SaveBar, SearchField, Section, SettingsSheet, type ChoiceOption } from './primitives';
+import { Badge, Chips, LoadingState, LoginCard, Row, SaveBar, Section, SettingsSheet, type ChoiceOption } from './primitives';
 import { THINKING_LEVELS, type BotModelConfigState } from './useBotModelConfig';
 import './model-settings.css';
 
 const INHERIT = '__inherit';
 const CLEARED = '__null';
-const SEARCH_THRESHOLD = 6;
 
-export function ModelSettingsPage({ state, onClose }: { state: BotModelConfigState; onClose(): void }) {
+export function ModelSettingsPage({ state, api, identity, onClose }: { state: BotModelConfigState; api: DesktopPanelApi; identity: DesktopIdentity; onClose(): void }) {
   const t = useText();
-  const [query, setQuery] = useState('');
   const { config, catalog, draft, busy } = state;
   const models: ModelCatalogEntry[] = catalog?.models ?? [];
 
@@ -35,13 +34,6 @@ export function ModelSettingsPage({ state, onClose }: { state: BotModelConfigSta
     if (!ref) return undefined;
     return models.find(model => model.modelRef === ref)?.name ?? ref;
   };
-
-  const q = query.trim().toLowerCase();
-  const filtered = useMemo(
-    () => (q ? models.filter(model => `${model.name} ${model.modelRef}`.toLowerCase().includes(q)) : models),
-    [models, q],
-  );
-  const orphanRef = typeof draft.modelRef === 'string' && !models.some(model => model.modelRef === draft.modelRef) ? draft.modelRef : undefined;
 
   const thinkingOptions: ChoiceOption<string>[] = [
     { value: INHERIT, label: t('跟随默认', 'Default'), hint: config?.global.thinkingLevel ? levelLabel(config.global.thinkingLevel) : undefined },
@@ -79,7 +71,6 @@ export function ModelSettingsPage({ state, onClose }: { state: BotModelConfigSta
     if (!config) return null;
     const globalName = modelName(config.global.modelRef);
     const cleared = draft.modelRef === null;
-    const showSearch = models.length > SEARCH_THRESHOLD;
     return (
       <Section
         title={t('模型', 'Model')}
@@ -96,46 +87,9 @@ export function ModelSettingsPage({ state, onClose }: { state: BotModelConfigSta
             onClick={() => state.setModelRef(undefined)}
           />
         </div>
-        {showSearch ? <SearchField value={query} onChange={setQuery} placeholder={t('搜索模型', 'Search models')} /> : null}
-        {models.length === 0 && !orphanRef ? (
-          <div className="bs-model-list-empty">
-            <EmptyState title={t('暂无可用模型', 'No models available')} hint={t('可在中心管理中添加模型服务商', 'Add a model provider in Center management')} />
-          </div>
-        ) : (
-          <>
-            {orphanRef || filtered.length > 0 ? (
-              <div className="bs-card" role="radiogroup" aria-label={t('模型', 'Model')}>
-                {orphanRef ? (
-                  <Row
-                    radio
-                    selected
-                    disabled={busy}
-                    title={orphanRef}
-                    subtitle={t('不在当前模型目录中', 'Not in the current catalog')}
-                    onClick={() => state.setModelRef(orphanRef)}
-                  />
-                ) : null}
-                {filtered.map(model => (
-                  <Row
-                    key={model.modelRef}
-                    radio
-                    selected={draft.modelRef === model.modelRef}
-                    disabled={busy}
-                    title={model.name}
-                    subtitle={<span className="bs-model-ref">{model.modelRef}</span>}
-                    trailing={model.reasoning ? <Badge>{t('推理', 'Reasoning')}</Badge> : undefined}
-                    onClick={() => state.setModelRef(model.modelRef)}
-                  />
-                ))}
-              </div>
-            ) : null}
-            {models.length > 0 && filtered.length === 0 ? (
-              <div className="bs-model-list-empty">
-                <EmptyState title={t('没有匹配的模型', 'No matching models')} />
-              </div>
-            ) : null}
-          </>
-        )}
+        {catalog ? (
+          <ModelPicker catalog={catalog} api={api} identity={identity} value={draft.modelRef} onChange={state.setModelRef} onStarsChange={state.setStarredModels} disabled={busy} />
+        ) : null}
       </Section>
     );
   };
@@ -185,8 +139,8 @@ export function ModelSettingsPage({ state, onClose }: { state: BotModelConfigSta
       {renderSummary()}
       <ErrorNotice error={state.error} onDismiss={state.dismissError} />
       {state.notice ? <ErrorNotice error={state.notice} tone="success" compact onDismiss={state.dismissNotice} /> : null}
-      {renderModels()}
       {renderThinking()}
+      {renderModels()}
       {config ? (
         <button
           type="button"

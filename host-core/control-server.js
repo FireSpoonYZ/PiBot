@@ -3,6 +3,7 @@
 import http from 'node:http';
 import { isDeepStrictEqual } from 'node:util';
 import { normalizeHostSettings } from './host-settings.js';
+import { normalizeBotBoardParams } from './bot-board-protocol.js';
 import { openHost } from './host.js';
 import { openRuntime } from './runtime.js';
 import { validateCenterProvider, discoverCenterProviderModels } from './runtime-models.js';
@@ -41,6 +42,7 @@ const EXTRA_ERROR_STATUS = Object.freeze({
 });
 
 const routes = [
+  { method: 'POST', key: '/v1/bot-board', pattern: /^\/v1\/bot-board\/?$/, params: [], hasBody: true, handler: getBotBoard },
   { method: 'POST', key: '/v1/center/provider/validate', pattern: /^\/v1\/center\/provider\/validate\/?$/, params: [], hasBody: true, handler: centerValidateProvider },
   { method: 'POST', key: '/v1/center/provider/discover', pattern: /^\/v1\/center\/provider\/discover\/?$/, params: [], hasBody: true, handler: centerDiscoverProvider },
   { method: 'POST', key: '/v1/center/action', pattern: /^\/v1\/center\/action\/?$/, params: [], hasBody: true, handler: centerAction },
@@ -261,6 +263,8 @@ export async function openControlServer(options) {
     url,
     close,
     resume: () => runtime.resume(),
+    // Internal SSE wakeup only; no public route or caller-supplied origin.
+    notifyWebhookReady: () => runtime.notifyWebhookReady(),
     applyCenterSnapshot: (snapshot, options) => runtime.applyCenterSnapshot(snapshot, options),
     // 内部即时撤销；不注册 HTTP 路由，不对外暴露。
     revokeCenterCapabilities: (snapshot) => runtime.revokeCenterCapabilities(snapshot),
@@ -299,7 +303,7 @@ async function dispatch(host, runtime, authorize, req, res, ctx) {
   // 这些路径走 Harness snapshot/commit/abortTask，不隐式 resume 调度器；
   // 模型、工具、问卷等执行路由仍被拒绝（runtime 侧另有 online/recovery 门禁兜底）。
   const OFFLINE_ALLOWED = new Set([
-    '/v1/host', '/v1/settings', '/v1/service', '/v1/service/update',
+    '/v1/host', '/v1/settings', '/v1/service', '/v1/service/update', '/v1/bot-board',
     '/v1/bots/:botId/submissions', '/v1/bots/:botId/submissions/:requestId', '/v1/bots/:botId/abort',
     '/v1/bot-requests/:requestId', '/v1/bots/:botId/history', '/v1/bots/:botId/live',
     // 只读读取已上传图片：中心离线时草稿/历史仍可展示既有附件。
@@ -408,7 +412,10 @@ async function findByRequest(host, runtime, params, body, req, res) {
 
 async function submit(host, runtime, params, body, req, res) {
   // 只等待受理，不等待模型回答。
-  const submission = await runtime.submit(params.botId, body);
+  const submission = await runtime.submit(params.botId, {
+    ...body,
+    origin: { sender: { kind: 'user' }, replyTo: null },
+  });
   writeControlJson(res, 202, submission);
 }
 
@@ -457,6 +464,10 @@ async function history(host, runtime, params, body, req, res) {
 async function abort(host, runtime, params, body, req, res) {
   await runtime.abort(params.botId);
   writeControlJson(res, 200, { botId: params.botId });
+}
+
+async function getBotBoard(host, runtime, params, body, req, res) {
+  writeControlJson(res, 200, await runtime.getBotBoard(normalizeBotBoardParams(body)));
 }
 
 // /clear 与 /compact 不读取请求体（与 abort 一致），成功才返回新的可见历史边界/压缩结果。

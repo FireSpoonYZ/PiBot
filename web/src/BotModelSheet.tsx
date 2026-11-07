@@ -25,5 +25,5 @@ function ModelConfigHost({ api, target, tab, onClose }: { api: DesktopPanelApi; 
   const state = useBotModelConfig(api, target.identity, target.deviceId, target.botId);
   return tab === 'advanced'
     ? <AdvancedSettingsPage state={state} onClose={onClose} />
-    : <ModelSettingsPage state={state} onClose={onClose} />;
+    : <ModelSettingsPage state={state} api={api} identity={target.identity} onClose={onClose} />;
 }

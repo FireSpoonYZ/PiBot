@@ -215,6 +215,9 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     abort(botId, options) {
       return request('POST', ['v1', 'bots', botId, 'abort'], { ...callOptions(options), body: {} });
     },
+    getBotBoard(params, options) {
+      return request('POST', ['v1', 'bot-board'], { ...callOptions(options), body: params });
+    },
     clearHistory(botId, options) {
       return request('POST', ['v1', 'bots', botId, 'history', 'clear'], { ...callOptions(options), body: {} });
     },

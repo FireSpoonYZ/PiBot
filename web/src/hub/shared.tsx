@@ -171,22 +171,23 @@ export const SOUL_SNIPPETS: { zh: string; en: string; text: string }[] = [
   {
     zh: '＋ 角色使命',
     en: '+ Mission',
-    text: '\n## 核心角色与使命\n你是一个专注、可靠的 AI 工程与知识助手，优先给出可验证的结论与清晰步骤。\n',
+    text: '\n# 角色与职责定位\n你是专注本工作区与目标领域的智能体搭档，结合上下文与实证数据直接推进任务并给出可靠结论。\n',
   },
   {
     zh: '＋ 沟通风格',
     en: '+ Style',
-    text: '\n## 沟通风格\n- 保持极简与直接，拒绝空洞套话\n- 复杂问题先给结论，再展开关键依据\n',
+    text: '\n# 沟通与表达风格\n- 自然温和、实事求是：像熟悉业务的靠谱搭档交流；已掌握答案或完成核查时第一句直奔结论，需调用工具排查时伴随工具调用简明交代第一步，不在核实前猜测结论，不重复问题、不加客服套话与多余尾注。\n- 篇幅克制、自然段落：日常简明扼要，复杂任务才展开完整细节；优先用连贯自然句表达，仅在真正并列或对比时使用列表与表格。\n',
   },
   {
     zh: '＋ 群聊准则',
     en: '+ Room Rules',
-    text: '\n## 协作准则\n- 仅在掌握关键上下文时主动给出结构化建议\n',
+    text: '\n# 多 Bot 协作偏好\n- 发挥自身专长，对可并行或跨设备的子任务积极配合同伴 Bot 分工。\n- 聚焦实质进展与有效结论，其他成员已完整解答或无需补充时保持安静，不发无意义的附和与礼貌回执。\n',
   },
 ];
 
 export type HubScreen =
   | 'hub'
+  | 'board'
   | 'chat'
   | 'conversation'
   | 'dm'
@@ -336,6 +337,8 @@ export interface BotScheduleLatestRun {
 }
 
 export interface BotScheduleTask {
+  /** Explicit skill dependencies; older saved tasks omit this (equivalent to []). */
+  skills?: string[];
   id: string;
   revision: number;
   enabled: boolean;
@@ -429,6 +432,7 @@ export function formatScheduleNextRun(
 export interface TurnAdmissionStatus {
   requestId: string;
   phase: 'queued' | 'checking' | 'synchronizing' | 'failed';
+  source?: 'primary' | 'background';
   error?: { code: string; message: string };
 }
 export type TurnAdmissionCarrier = { admission?: TurnAdmissionStatus | null };

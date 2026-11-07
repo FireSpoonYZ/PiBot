@@ -57,6 +57,7 @@ export const HERMES_SKILL_TOOLS = [
         'content alone REPLACES the whole file, read it via skill_view() ' +
         'first), write_file/remove_file (supporting files), delete (sole ' +
         'op only). Existing skills are modified wherever they live. ' +
+        'Curator delete source and nonempty absorbed_into must use exact names in this Bot\'s curated_report. ' +
         'Description: max ' + SKILL_PROMPT_DESC_LIMIT + " chars, 'Use when <trigger>. <behavior>.', never " +
         'the category name (the index shows it). Write lessons, not logs: ' +
         'imperative rule + why, no PR numbers/dates/incident narration, one ' +
@@ -91,7 +92,7 @@ export const HERMES_SKILL_TOOLS = [
                   file_path: { type: 'string', description: "Supporting file (write_file's shape)." },
                 }, ['file_path']),
                 opSchema('delete', {
-                  absorbed_into: { type: 'string', description: 'Curator consolidation only: umbrella skill that absorbed this one (must exist).' },
+                  absorbed_into: { type: 'string', description: 'Curator consolidation: exact name of a non-archived umbrella in this Bot\'s curated_report (agent-created or eligible pinned skill). Pin an eligible manual target first, or choose an active curator-managed target; restore archived targets first. Empty string declares a prune.' },
                 }, []),
               ],
             },

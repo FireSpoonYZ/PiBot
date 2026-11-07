@@ -84,7 +84,7 @@ export function createScheduleTools({ host, getHarness, schedules, collaboration
         'create 新建任务，title/prompt/repeat/time 必填，ID 由宿主分配，不接受 id/revision；' +
         'update/delete/setEnabled 必须提供 id 和正整数 revision 做严格 CAS（先 list 获取最新 id 与 revision）。' +
         'repeat 支持 once/daily/weekly/monthly/statutoryWorkday/statutoryHoliday，time 格式 HH:mm，' +
-        '可选 alarmMode exact|alarmClock（默认 alarmClock）、vibrate、deleteAfterRun。',
+        'skills 是显式技能名称数组（默认空），执行时先加载；不从 prompt 推断依赖。可选 alarmMode exact|alarmClock（默认 alarmClock）、vibrate、deleteAfterRun。',
       parameters: {
         type: 'object',
         properties: {
@@ -96,6 +96,7 @@ export function createScheduleTools({ host, getHarness, schedules, collaboration
           botId: { type: 'string', minLength: 1, maxLength: 128 },
           title: { type: 'string', minLength: 1, maxLength: 80 },
           prompt: { type: 'string', minLength: 1, maxLength: 8000 },
+          skills: { type: 'array', items: { type: 'string', pattern: '^[a-z0-9][a-z0-9-]{0,63}$' }, uniqueItems: true, maxItems: 100 },
           repeat: {
             type: 'string',
             enum: [

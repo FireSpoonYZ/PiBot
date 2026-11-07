@@ -16,6 +16,7 @@ import {
   ExternalLink,
   FolderOpen,
   Globe,
+  LayoutDashboard,
   MessageSquare,
   Mic,
   Monitor,
@@ -78,14 +79,16 @@ import { useChatPins } from './gbot-ui/chatPins';
 import { SortablePinnedChat } from './gbot-ui/SortablePinnedChat';
 import type { MessageMember } from '../../host-core/index.js';
 import { createLocalScopeReadApi } from './local-scope-api';
-import { MessageAttribution } from './MessageAttribution';
+import { isWebhookAttribution, MessageAttribution } from './MessageAttribution';
 import './bot-communications-mobile.css';
 import type { DesktopDraftEntry, DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../host-core/desktop-client.js';
-import type { BotLiveState, ClearHistoryResult, CompactResult, DevicesDirectoryItem, PendingCursor, PendingListPage, ScopeInfo, ShowerTarget } from '../../host-core/index.js';
+import type { BotBoardSnapshot, BotLiveState, ClearHistoryResult, CompactResult, DevicesDirectoryItem, PendingCursor, PendingListPage, ScopeInfo, ShowerTarget } from '../../host-core/index.js';
 import type { ShowerCall } from './ShowerPreview';
 import { Markdown } from './Markdown';
 import { BotScreenPanel } from './BotScreenPanel';
+import { BotBoard } from './BotBoard';
+import { botBoardKey, useBotBoard, useMarkViewedBoardResult, type BotBoardTarget } from './useBotBoard';
 import { BotModelSheet, type BotSettingsTab } from './BotModelSheet';
 import {
   GROK_AVATAR_PRESETS,
@@ -111,6 +114,7 @@ import {
   formatTurnDuration,
   latestEntryChannel,
   parseHistoryEntries,
+  visibleAssistantTextEntryIds,
   resolveActiveTurnStartedAt,
   type ChatToolCallItem,
   type ChatTurnBlock,
@@ -191,7 +195,7 @@ export function HostPage({
 
   // Screen stack navigation
   const [screen, setScreen] = useState<HubScreen>('hub');
-  const [chatReturnScreen, setChatReturnScreen] = useState<'hub' | 'archived-bots'>('hub');
+  const [chatReturnScreen, setChatReturnScreen] = useState<'hub' | 'board' | 'archived-bots'>('hub');
   const [profileReturnScreen, setProfileReturnScreen] = useState<HubScreen>('chat');
   const [avatarReturnScreen, setAvatarReturnScreen] = useState<HubScreen>('bot-edit');
   const [subPageReturnScreen, setSubPageReturnScreen] = useState<HubScreen>('bot-profile');
@@ -933,6 +937,32 @@ export function HostPage({
     return `local:${localDev}`;
   }, [activeCenter, centerConn.saved?.url, centerConn.url, remoteIdentity?.profileId, remoteIdentity?.kind, localHost?.deviceId, localBots]);
 
+  const boardTargets: BotBoardTarget[] = allBotItems.filter(bot => !bot.archivedAt).map(bot => ({
+    key: botBoardKey(pinStorageScope, bot.deviceId, bot.botId),
+    hostKey: JSON.stringify([bot.hostKind, bot.deviceId]),
+    generation: JSON.stringify([connectionEpoch, remoteIdentity?.generation, localHost?.phase, pinStorageScope]),
+    botId: bot.botId,
+    name: bot.role,
+    deviceName: bot.hostKind === 'local' ? bot.hostLabel : remoteDevices.find(device => device.deviceId === bot.deviceId)?.displayName || '远程设备',
+    avatarKey: botAvatarKey(bot),
+    online: bot.hostKind === 'local' ? localHost?.phase === 'running' : !!bot.online && remoteConnected,
+    read: async botIds => {
+      if (bot.hostKind === 'local') {
+        const envelope = await BotHost.call({ method: 'getBotBoard', params: { botIds } });
+        return envelope.result as BotBoardSnapshot;
+      }
+      if (!bot.remoteIdentity || !remoteClientRef.current) throw new Error('Host unavailable');
+      return remoteClientRef.current.api.call(bot.remoteIdentity, 'getBotBoard', { botIds });
+    },
+  }));
+  const activeBoardTarget = activeBot
+    ? boardTargets.find(target => target.key === botBoardKey(pinStorageScope, activeBot.deviceId, activeBot.botId))
+    : undefined;
+  const board = useBotBoard(
+    screen === 'board' ? boardTargets : activeBoardTarget ? [activeBoardTarget] : [],
+    active && (screen === 'board' || screen === 'chat'),
+  );
+
   const chatPins = useChatPins(pinStorageScope);
   const botPinKey = useCallback((bot: { deviceId: string; botId: string }) => `bot:${bot.deviceId}:${bot.botId}`, []);
   const roomPinKey = useCallback((scopeId: string) => `room:${scopeId}`, []);
@@ -1616,7 +1646,7 @@ export function HostPage({
     chatRequestId, chatReceiptStatus, chatResumeEpoch, chatPending?.scopeKey, updateBotMeta, syncLocalBots, syncRemoteBots,
   ]);
 
-  const openBotChat = (bot: UnifiedBotItem, fromScreen?: 'hub' | 'archived-bots') => {
+  const openBotChat = (bot: UnifiedBotItem, fromScreen?: 'hub' | 'board' | 'archived-bots') => {
     profileLoadGeneration.current += 1;
     scheduleLoadGeneration.current += 1;
     const scopeKey = scopeForBot(bot);
@@ -3116,6 +3146,11 @@ ${newer}` : draftSnapshot;
     );
   }, [allChatTurns, chatSearchOpen, chatSearchQuery]);
 
+  const markViewedBoardResult = useMarkViewedBoardResult(board, activeBoardTarget, active && screen === 'chat');
+  useEffect(() => {
+    markViewedBoardResult(visibleAssistantTextEntryIds(visibleTurns));
+  }, [visibleTurns, markViewedBoardResult]);
+
   const latestTurnToolCount = visibleTurns.at(-1)?.tools?.length ?? 0;
 
   // 从私聊/群聊返回聊天时恢复离开前 scrollTop：layout effect 先置位，
@@ -3265,6 +3300,10 @@ ${newer}` : draftSnapshot;
     }
     if (screen === 'archived-bots') {
       setScreen('settings');
+      return true;
+    }
+    if (screen === 'board') {
+      setScreen('hub');
       return true;
     }
     if (screen === 'pending') {
@@ -3651,6 +3690,18 @@ ${newer}` : draftSnapshot;
       {/* ==================== SCREEN 1: MAIN HUB (15844.jpg + PanelLeft icon) ==================== */}
       {/* 群聊/私聊子页打开时保持 hub DOM（隐藏不卸载）：返回来源滚动位置不丢。
           用显式 class 而非 hidden 属性，避免 author CSS display 覆盖。 */}
+      {screen === 'board' && <BotBoard
+        targets={boardTargets}
+        board={board}
+        loading={hubRefreshing || (!localBotsLoaded && localHost?.phase === 'running')}
+        error={directoryError}
+        onBack={() => setScreen('hub')}
+        onOpen={target => {
+          const bot = allBotItems.find(bot => botBoardKey(pinStorageScope, bot.deviceId, bot.botId) === target.key);
+          if (bot) openBotChat(bot, 'board');
+        }}
+      />}
+      {screen === 'chat' && board.storageError && <p role="alert" className="bot-board-warning">{board.storageError}</p>}
       {(screen === 'hub' || screen === 'conversation' || screen === 'dm') && (
         <main
           className={`hub-main grok-page-enter${anyDrawerOpen ? ' is-scaled' : ''}${screen === 'hub' ? '' : ' hub-hidden'}`}
@@ -3717,6 +3768,9 @@ ${newer}` : draftSnapshot;
             </button>
           </header>
 
+          <button type="button" className="bot-board-entry" onClick={() => setScreen('board')}>
+            <LayoutDashboard size={18} aria-hidden /> Bot 看板 <ChevronRight size={16} aria-hidden />
+          </button>
           <div
             className="hub-scroll-area"
             ref={hubScrollRef}
@@ -4152,9 +4206,9 @@ ${newer}` : draftSnapshot;
                 return (
                   <article
                     key={turn.id}
-                    className={`bot-chat-bubble ${turn.role}${turn.isStreaming ? ' streaming' : ''}`}
+                    className={`bot-chat-bubble ${isWebhookAttribution(attribution) ? 'assistant' : turn.role}${turn.isStreaming ? ' streaming' : ''}`}
                   >
-                    {attribution && attribution.kind !== 'host' && (
+                    {attribution && (
                       <MessageAttribution
                         attribution={attribution}
                         className="bot-chat-attribution"
@@ -4270,6 +4324,7 @@ ${newer}` : draftSnapshot;
             {chatStatusKind === 'admission' && (
               <div className="bot-chat-system-notice" role="status">
                 {chatAdmissionText}
+                {chatTurnAdmission?.source === 'background' ? t(' · 后台', ' · background') : null}
                 {chatTurnAdmission?.phase === 'failed' && (activeBot.hostKind === 'local'
                   ? <button type="button" className="hub-outline-btn" onClick={() => void retryAdmission()}>{t('重试发送', 'Retry sending')}</button>
                   : <button type="button" className="hub-outline-btn" onClick={() => void retryRemoteAdmission()}>{t('重试发送', 'Retry sending')}</button>

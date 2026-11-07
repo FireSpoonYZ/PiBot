@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from 'node:util';
 import Ajv from 'ajv';
 import deepmerge from 'deepmerge';
 import { assertPublicCredentialId } from '../auth.js';
+import { webhookStore } from './webhooks.js';
 
 function error(code, message, details) {
   const result = new Error(message);
@@ -353,7 +354,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     db.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
     transaction(() => {
       let version = db.prepare('PRAGMA user_version').get().user_version;
-      if (![0, 1, 2, 3, 4, 5].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
+      if (![0, 1, 2, 3, 4, 5, 6, 7, 8].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
       if (version === 0) {
         db.exec(`
           CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL, config_revision INTEGER NOT NULL);
@@ -403,6 +404,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           CREATE TABLE device_configs (device_id TEXT PRIMARY KEY, json TEXT NOT NULL);
           PRAGMA user_version = 3;
         `);
+        version = 3;
       }
       if (version === 3) {
         db.exec(`
@@ -429,10 +431,54 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           );
           PRAGMA user_version = 5;
         `);
+        version = 5;
+      }
+      if (version === 5) {
+        db.exec(`
+          CREATE TABLE model_stars (model_ref TEXT PRIMARY KEY);
+          PRAGMA user_version = 6;
+        `);
+        version = 6;
+      }
+      if (version === 6) {
+        db.exec(`
+          CREATE TABLE webhook_routes (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, device_id TEXT NOT NULL, bot_id TEXT NOT NULL,
+            instruction TEXT NOT NULL, enabled INTEGER NOT NULL, token_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT
+          );
+          CREATE TABLE webhook_events (
+            id TEXT PRIMARY KEY, route_id TEXT NOT NULL REFERENCES webhook_routes(id), route_name TEXT NOT NULL,
+            device_id TEXT NOT NULL, bot_id TEXT NOT NULL, request_id TEXT NOT NULL UNIQUE,
+            idempotency_key TEXT NOT NULL, body_digest TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('pending', 'dispatching', 'queued', 'running', 'succeeded', 'failed', 'cancelled', 'expired')),
+            received_at TEXT NOT NULL, expires_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            error_json TEXT, instruction TEXT NOT NULL, payload_json TEXT NOT NULL,
+            UNIQUE(route_id, idempotency_key)
+          );
+          CREATE INDEX webhook_events_route_time ON webhook_events(route_id, received_at);
+          CREATE INDEX webhook_events_device_active ON webhook_events(device_id, received_at)
+            WHERE status IN ('pending', 'dispatching', 'queued', 'running');
+          PRAGMA user_version = 7;
+        `);
+        version = 7;
+      }
+      if (version === 7) {
+        db.exec(`
+          ALTER TABLE webhook_events ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0, 1));
+          ALTER TABLE webhook_events ADD COLUMN admission_json TEXT;
+          CREATE TABLE webhook_stops (
+            device_id TEXT NOT NULL, bot_id TEXT NOT NULL,
+            stop_epoch INTEGER NOT NULL CHECK(stop_epoch > 0 AND stop_epoch <= 9007199254740991),
+            PRIMARY KEY(device_id, bot_id)
+          );
+          PRAGMA user_version = 8;
+        `);
       }
     });
 
     store = {
+      ...webhookStore(db, transaction),
       listProviders: () => rows('providers'),
       getProvider: (id) => get('providers', id),
       putProvider(provider, expectedRevision) {
@@ -465,6 +511,40 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           bump();
           return result;
         });
+      },
+      // Picker availability uses credential metadata, not the secrets granted to a particular Host.
+      getModelPicker() {
+        const models = store.listProviders().filter(provider =>
+          provider.enabled && (provider.credentialRef === null || credential(provider.credentialRef)?.configured)
+        ).flatMap(provider => store.listModels(provider.id).filter(model => model.enabled).map(model => ({
+          modelRef: provider.id + '/' + model.id,
+          name: model.name,
+          contextWindow: model.contextWindow,
+          maxTokens: model.maxTokens,
+          reasoning: model.reasoning,
+        })));
+        models.sort((a, b) => Buffer.compare(Buffer.from(a.modelRef), Buffer.from(b.modelRef)));
+        return { defaultModel: store.getModelConfig().global.modelRef ?? null, models, starredModels: store.listModelStars() };
+      },
+      listModelStars() {
+        return db.prepare('SELECT model_ref FROM model_stars ORDER BY model_ref').all().map(row => row.model_ref);
+      },
+      setModelStar(modelRef, starred) {
+        if (typeof modelRef !== 'string' || modelRef.length > 512 || !modelRef.isWellFormed() ||
+            !/^[^/\s]+\/.+$/u.test(modelRef) || typeof starred !== 'boolean') {
+          throw error('INVALID_ARGUMENT', 'Invalid model star');
+        }
+        if (starred) {
+          const slash = modelRef.indexOf('/');
+          if (!store.listModels(modelRef.slice(0, slash)).some(model => model.id === modelRef.slice(slash + 1))) {
+            throw error('NOT_FOUND', 'Model not found');
+          }
+          db.prepare('INSERT OR IGNORE INTO model_stars (model_ref) VALUES (?)').run(modelRef);
+        } else {
+          db.prepare('DELETE FROM model_stars WHERE model_ref = ?').run(modelRef);
+        }
+        // Stars are owner preferences and never change execution revisions or Bot selections.
+        return { starredModels: store.listModelStars() };
       },
       getModelConfig() {
         const row = db.prepare('SELECT json, revision FROM model_config WHERE id = 1').get();
@@ -542,6 +622,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           for (const removedBotId of existingMap.keys()) {
             seq += 1;
             deleteBotStmt.run(deviceId, removedBotId);
+            store.cancelWebhookEventsForBot(deviceId, removedBotId);
             deleteModelStmt.run(deviceId, removedBotId);
             deleteBindingStmt.run(deviceId, removedBotId);
             insertEventStmt.run(seq, deviceId, removedBotId, 'delete', null, nowIso);
@@ -656,6 +737,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           const seq = meta.seq + 1;
           const nowIso = new Date().toISOString();
           db.prepare('DELETE FROM device_bots WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
+          store.cancelWebhookEventsForBot(deviceId, botId);
           db.prepare('DELETE FROM bot_models WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
           db.prepare('DELETE FROM bindings WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
           db.prepare('INSERT INTO bot_events (seq, device_id, bot_id, op, json, updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(seq, deviceId, botId, 'delete', null, nowIso);

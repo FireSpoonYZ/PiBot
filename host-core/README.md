@@ -102,6 +102,7 @@ node host-core/cli.js list --data-root '/path/to/data-root'
 - `messages.js`：模块 7 门面 `openMessageLog({dataRoot})`，组合 openHost 与 openMessageStore；协议边界只验证一次。
 - `message-protocol.js`：模块 7 协议校验与规范化（`messageError`/`assertId`/`assertRevision`/`normalizeScope`/`normalizePublish`/`normalizePublishGuard`/`normalizeEnvelope`/`normalizePeer`/`normalizeAck`/`normalizePageOptions`/`streamIdForScope`/`digest`/`assertScopeMessage`）。
 - `message-store.js`：`openMessageStore(dataRoot, deviceId)`，建库 `messages.sqlite`（user_version=2）：v0 全新库在初始化事务内一次性建 M7+M12 表；v1 旧库先校验身份行且 deviceId 匹配，再原子执行 `SCOPE_SCHEMA_SQL` 增量迁移到 v2；更高版本拒绝且不 drop/reset。模块 12 在此实现托管作用域存储与副本导入（`createScope`/`updateScope`/`getScopeState`/`listScopeStates`/`getScopeRecord`/`acceptScopeOffer`/`acknowledgeScope`/`recordScopeError`/`scopeOffers`/`replicaInventory`/`replicaHistory`/`nextMissingRange`/`listScopeReplicas`/`listReplicaPeers`/`recordReplicaInventory`/`importReplicaHistory`/`recordReplicaScan`，共 17 个 M12 门面方法）。
+- `session-search.js` / `session-search-tool.js`：内置 `session_search` search/read 工具，只扫当前 Bot 的既有主/已绑定工作会话原文；有界、可续页，非 FTS。参数、权限、reset 与游标限制见 [session-search.md](session-search.md)。
 - `message-queries.js`：`createMessageQueries(db, {deviceId})` 只读查询（getScope/listScopes/getMessage/history/inbox/replies/outbox/deliveryStatus/streamStatus）；replies 为模块 11 的 DM 直接关联回复查询。
 - `message-cli.js`：模块 7 特权离线 CLI（scope/get-scope/scopes/publish/get/receive/ack/history/inbox/outbox/delivery/stream）；输入文件读取复用模块 12 新增的 `cli-input.js`（`readInputObject`）。
 - `cli-input.js`：模块 12 抽出的共享输入读取（`invalid`/`readInputObject`，≤1MiB 普通 UTF-8 JSON 文件，保留原有大小/竞态/关闭错误处理；`uploadAttachment` 调用可传 32MiB 读取预算），`message-cli.js`、`control-cli.js`、`remote-control-cli.js`、`pending-cli.js` 与 `host-service.js` 共用；模块 14 起新增 `readTextFile`（普通文件 state/open/fstat、≤1MiB+1 有界 read、严格 UTF-8、size change/FD cleanup），供 CA 与 caFile 读取。
@@ -354,6 +355,24 @@ await control.close(); // 幂等：先关 listener/连接与进行中 handler，
 | GET `/v1/bots/:botId/context` | — | 200 `ContextStatus` |
 
 错误响应统一为 `{"error":{"code":...,"message":...}}`（不带堆栈、不泄漏 token）。错误码到 HTTP 状态映射：`INVALID_ARGUMENT`/`INVALID_CWD`→400，`REQUEST_CONFLICT`/`MODEL_REQUIRED`/`MODEL_NOT_FOUND`/`RUNTIME_BUSY`→409，`BOT_NOT_FOUND`/`BOT_REQUEST_NOT_FOUND`/`SUBMISSION_NOT_FOUND`→404，`UNSUPPORTED_SCHEMA`→503，其他代码返回 500，并保留已有错误码；没有错误码时使用 `INTERNAL`；另有 `UNAUTHORIZED`→401、`ORIGIN_FORBIDDEN`→403、`REQUEST_TOO_LARGE`→413、`UNSUPPORTED_MEDIA_TYPE`→415、`METHOD_NOT_ALLOWED`→405、`NOT_FOUND`→404。
+
+### Bot 看板只读批量快照
+
+`POST /v1/bot-board` / additive v2 `getBotBoard`，参数仅 `{botIds:string[]}`。
+数组最多 64 项（允许空数组），ID 沿用非空、well-formed、最多 256 UTF-8 字节约束；重复 ID 保留首次顺序。
+Runtime 与 ControlClient 同名方法接收该参数对象。响应为
+`{updatedAt,items,errors}`，缺失 Bot 返回单项 `BOT_NOT_FOUND`，不可读快照返回安全固定文案的
+`BOARD_UNAVAILABLE`，不阻断其他 Bot；整个请求参数错误为 `INVALID_ARGUMENT`。
+
+远程看板要求中心（含 relay 控制方法白名单）与 Host 一起更新；仅更新 Host 时，旧中心会将新增的 `getBotBoard` 方法拒绝为 `BAD_FRAME`。
+
+- 每项仅 `botId,conversationId,activity,queuedCount,attention,progress,lastResult`；conversationId 始终是公开 UUID。
+- activity 复用聊天九相及 Host admission/work/control 优先级，不添加看板专属 phase。
+- 被动恢复 admission/work 元数据后，逐 Bot 短暂取得原生 watch，只捕获一次 `native.value`，不启动连续监听，等待该 view 的归属与详情读取完成后 finally 释放；不创建会话、不 resume/nudge、不调用能力 action，也不占 broker live 订阅额度。直接本机 HTTP/Runtime 在 Center 离线和 maintenance 时仍允许；远端保留既有传输鉴权与连接门禁。
+- attention 仅取当前 running 工具槽中 pending 的安全 questionnaire presentation，摘要最多 200 字符，count 为该问卷题数；不扫历史问卷。
+- progress 读取当前 `e-launcher.todos` v1 Durable 文档，只返回完成数、总数和 in_progress 任务标题（最多 200 字符）；空列表为 null。固定 SDK 的 ConversationView 只挂载 pi.*，所以此处用同契约 token 被动 snapshot。
+- `host.bot-board-result` 保存本次启用后最新成功答复：公共 GenerationTask.beforeRequest 换轮失效旧结果；afterRun 用已提交 answer entry 的文本块生成最多 500 字符摘要（不含 thinking/工具参数），entry ID 作稳定字符串 id，首次索引提交时间作 completedAt。幂等重跑不更新时间；不回填旧历史。
+- 有 run、afterRun 收尾、队列、停止、失败或压缩时 lastResult 为 null；仅真正 idle 才展示已持久成功。停止起始与结算同事务失效结果；clearHistory 后清理索引，读取还检查 answer 之后的 pi.reset，覆盖 reset 已提交但索引清理前崩溃的窗口。重启读取持久索引，不从 idle/最后模型正文/lastActivityAt 猜成功。
 
 ### 对话命令 `/clear` 与 `/compact`
 

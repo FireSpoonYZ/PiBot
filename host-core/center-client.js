@@ -17,7 +17,7 @@ export function validateCenterUrl(centerUrl) {
   return base;
 }
 
-export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, signal, onDisconnect, onChange }) {
+export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, signal, onDisconnect, onChange, onWebhookReady }) {
   const base = validateCenterUrl(centerUrl);
   assertId(deviceId, 'deviceId');
   assertDeviceToken(deviceToken);
@@ -198,7 +198,9 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
         const frame = buffer.slice(0, end);
         const separator = /^\r?\n\r?\n/.exec(buffer.slice(end))[0];
         buffer = buffer.slice(end + separator.length);
-        if (frame.split(/\r?\n/).some((line) => line === 'event: config-changed')) onChange?.();
+        const lines = frame.split(/\r?\n/);
+        if (lines.includes('event: config-changed')) onChange?.();
+        if (lines.includes('event: webhook-ready')) onWebhookReady?.();
       }
     });
     events.once('end', disconnected);
@@ -224,6 +226,8 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     },
     botAvatarGet: (targetDeviceId, botId, signal) => request('/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/avatar', { signal }),
     botAvatarSet: (targetDeviceId, botId, input, signal) => request('/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/avatar', { method: 'PUT', body: input, signal }),
+    modelPickerGet: signal => request('/api/host/model-picker', { signal }),
+    modelStarSet: (input, signal) => request('/api/host/model-stars', { method: 'PUT', body: input, signal }),
     botModelGet: (targetDeviceId, botId, signal) => request(hostBotModelPath(targetDeviceId, botId), { signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botModelPath(targetDeviceId, botId), { signal }) : Promise.reject(err)),
     botModelSet: (targetDeviceId, botId, input, signal) => request(hostBotModelPath(targetDeviceId, botId), { method: 'PUT', body: input, signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botModelPath(targetDeviceId, botId), { method: 'PUT', body: input, signal }) : Promise.reject(err)),
     botCwdGet: (targetDeviceId, botId, signal) => request(hostBotCwdPath(targetDeviceId, botId), { signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botCwdPath(targetDeviceId, botId), { signal }) : Promise.reject(err)),
@@ -261,6 +265,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     // conflicts and service codes. No ownerRequest fallback — both route sets
     // ship together, so a missing endpoint is an honest CENTER_REQUEST_FAILED.
     botSkill: (targetDeviceId, botId, input, signal) => request(hostBotManagePath(targetDeviceId, botId, 'skills'), { method: 'POST', body: input, signal }),
+    botSkillUse: (targetDeviceId, botId, input, signal) => request('/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/skills/usage', { method: 'POST', body: input, signal }),
     botLearning: (targetDeviceId, botId, input, signal) => request(hostBotManagePath(targetDeviceId, botId, 'learning'), { method: 'POST', body: input, signal }),
     botInstallation: (targetDeviceId, botId, input, signal) => request(hostBotManagePath(targetDeviceId, botId, 'installations'), { method: 'POST', body: input, signal }),
     bootstrap: (bots) => request('/api/host/bootstrap', { method: 'POST', body: { deviceId, capabilityProtocol: 1, bots } }),
@@ -282,6 +287,9 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
         ? '?admissionId=' + encodeURIComponent(options.admissionId) : '';
       return request('/api/host/artifacts/' + encodeURIComponent(ref) + query, { binary: true, signal: options.signal });
     },
+    pollWebhookEvents: (options = {}) => request('/api/host/webhook-events/poll', { method: 'POST', body: { cursor: options.cursor }, signal: options.signal }),
+    stopWebhookEvents: (input, options = {}) => request('/api/host/webhook-events/stop', { method: 'POST', body: { botId: input.botId, stopEpoch: input.stopEpoch }, signal: options.signal }),
+    reportWebhookEvent: (eventId, input, options = {}) => request('/api/host/webhook-events/' + encodeURIComponent(eventId) + '/receipt', { method: 'POST', body: input, signal: options.signal }),
     prepareTurn: (input, options = {}) => request('/api/host/turns/prepare', { method: 'POST', body: input, signal: options.signal }),
     confirmTurn: (input, options = {}) => request('/api/host/turns/confirm', { method: 'POST', body: input, signal: options.signal }),
     restoreTurn: (input, options = {}) => request('/api/host/turns/restore', { method: 'POST', body: input, signal: options.signal }),

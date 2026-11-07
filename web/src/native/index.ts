@@ -95,6 +95,7 @@ export interface HostBot {
 export type TurnAdmissionStatus = {
   requestId: string;
   phase: 'queued'|'checking'|'synchronizing'|'failed';
+  source?: 'primary' | 'background';
   error?: { code: string; message: string };
 };
 // A queued receipt is acceptance, not execution: conversationId/submissionId are
