@@ -27,6 +27,7 @@ import { GenerationFailureState } from './generation-failure.js';
 import { resolveBotIdentity } from './bot-identity.js';
 import { createPluginManager } from './plugins/manager.js';
 import { createRuntimeLive } from './runtime-live.js';
+import { botBoardResultHooks, clearBotBoardResult } from './runtime-bot-board.js';
 import { readScopeHistory, readScopeMessage, readScopeMessageDelivery } from './runtime-scope-queries.js';
 import { createWorkContextRuntime } from './runtime-work-contexts.js';
 import { WorkIndex, WorkContextState, workInstructions } from './work-context-docs.js';
@@ -377,6 +378,10 @@ export async function openRuntime(options) {
     sections: [section('host-base-behavior', () => BASE_BEHAVIOR_PROMPT)],
   }));
   registry.install(createCodingTools());
+  registry.install(defineExtension({
+    name: 'host.bot-board',
+    hooks: [hook(GenerationTask, botBoardResultHooks(() => harness))],
+  }));
   registry.install(createToolSearchExtension());
   registry.install(defineExtension({
     name: 'host.tools',
@@ -1939,6 +1944,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 只起水位捕获作用。
       await sessions.sync(botId);
       await conversation.reset(undefined, CTX);
+      await harness.commit((tx) => clearBotBoardResult(tx, conversation.id), CTX);
       // 统一会话状态随 pi.reset 一起翻篇：保留账本导入水位与未决请求来源（迟到回复
       // 仍可续接、旧账本绝不重导入），只清理已过期的活动轮状态。reset 失败则状态原样保留。
       await sessions.reset(botId);
@@ -2125,6 +2131,13 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
     notifyWebhookReady: () => webhooks.wake(),
 
+    getBotBoard(params) {
+      return live.getBotBoard(params, async (botId) => {
+        await turns.refreshActivity(botId);
+        await decisions.refreshActivity(botId);
+      });
+    },
+
     watch(botId, options) {
       return live.watch(botId, options);
     },
@@ -2141,7 +2154,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   // 模型、工具、问卷等执行路径仍受 Center 门禁（运行时本就对 SDK 抛离线错）。
   // scope 查询是纯本地账本读取（不调度、不触碰模型），离线也放行给被动浏览 UI；
   // createScope/updateScope/publishUserMessage 等写路径仍受 Center 门禁。
-  const offlineMethods = new Set(['submit', 'getSubmission', 'wait', 'abort', 'turns', 'inspect', 'history', 'watch',
+  const offlineMethods = new Set(['submit', 'getSubmission', 'wait', 'abort', 'turns', 'inspect', 'history', 'watch', 'getBotBoard',
     'uploadAttachment', 'getAttachment',
     'scopeHistory', 'getScopeMessage', 'getScopeMessageDelivery', 'getScopeState', 'listScopeStates', 'listScopeReplicas']);
   const maintenanceAllowed = new Set([...offlineMethods, 'getCurrentDevice', 'getBot', 'getModelCatalog', 'getBotSoul', 'listScopes']);

@@ -246,6 +246,7 @@ const METHOD_HANDLERS = new Map([
     control.getSubmission(params.botId, params.requestId, { signal })],
   ['history', (control, params, signal) => control.history(params.botId, { ...pageOptions(params, signal), chunked: params.chunked })],
   ['abort', (control, params, signal) => control.abort(params.botId, { signal })],
+  ['getBotBoard', (control, params, signal) => control.getBotBoard(params, { signal })],
   ['clearHistory', (control, params, signal) => control.clearHistory(params.botId, { signal })],
   ['compact', (control, params, signal) => control.compact(params.botId, { signal })],
   ['contextStatus', (control, params, signal) => control.contextStatus(params.botId, { signal })],

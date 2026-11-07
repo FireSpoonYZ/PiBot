@@ -622,6 +622,8 @@ export interface Runtime {
   getAttachment(botId: string, attachmentId: string): Promise<ImageAttachmentData>;
   putBotFileChunk(botId: string, input: BotFileChunkInput): Promise<BotFileReceipt>;
   history(botId: string, options?: HistoryOptions): Promise<HistoryPage>;
+  /** Passive batch snapshot; no conversation creation or scheduler resume. */
+  getBotBoard(params: BotBoardParams): Promise<BotBoardSnapshot>;
   /** /clear：清空主私聊可见历史并重置模型上下文（pi.reset，不新建 conversationId）。 */
   clearHistory(botId: string): Promise<ClearHistoryResult>;
   /** /compact：跑一次手动压缩并等待任务终态；失败抛 COMPACTION_FAILED。 */
@@ -931,6 +933,29 @@ export interface BotActivity {
   error?: { code: string; message: string };
 }
 
+/** At most 64 IDs (256 UTF-8 bytes each); duplicates are returned once in input order. */
+export interface BotBoardParams {
+  botIds: string[];
+}
+
+export interface BotBoardItem {
+  botId: string;
+  /** Public primary conversation UUID, even before a native conversation exists. */
+  conversationId: string;
+  activity: BotActivity;
+  queuedCount: number;
+  attention: null | { kind: 'questionnaire'; requestId: string; summary: string; count: number };
+  progress: null | { completed: number; total: number; current: string | null };
+  /** Committed success only, hidden while non-idle; summary <=500, attention/current <=200 characters. */
+  lastResult: null | { id: string; completedAt: string; summary: string };
+}
+
+export interface BotBoardSnapshot {
+  updatedAt: string;
+  items: BotBoardItem[];
+  errors: { botId: string; code: 'BOT_NOT_FOUND' | 'BOARD_UNAVAILABLE'; message: string }[];
+}
+
 export interface BotLiveState {
   history: LiveHistoryItem[];
   historyTruncated: boolean;
@@ -1092,6 +1117,7 @@ export interface ControlClient {
   getAttachment(botId: string, attachmentId: string, options?: ControlClientCallOptions): Promise<ImageAttachmentData>;
   putBotFileChunk(botId: string, input: BotFileChunkInput, options?: ControlClientCallOptions): Promise<BotFileReceipt>;
   history(botId: string, options?: HistoryOptions & ControlClientCallOptions): Promise<HistoryPage>;
+  getBotBoard(params: BotBoardParams, options?: ControlClientCallOptions): Promise<BotBoardSnapshot>;
   clearHistory(botId: string, options?: ControlClientCallOptions): Promise<ClearHistoryResult>;
   compact(botId: string, options?: ControlClientCallOptions): Promise<CompactResult>;
   abort(botId: string, options?: ControlClientCallOptions): Promise<{ botId: string }>;
@@ -1969,6 +1995,7 @@ export interface RemoteControlMethodMap {
   submit: { params: { botId: string; requestId: string; text: string; attachments?: string[] }; result: PrimarySubmission };
   getSubmission: { params: { botId: string; requestId: string }; result: PrimarySubmission };
   history: { params: HistoryOptions & { botId: string }; result: HistoryPage };
+  getBotBoard: { params: BotBoardParams; result: BotBoardSnapshot };
   clearHistory: { params: { botId: string }; result: ClearHistoryResult };
   compact: { params: { botId: string }; result: CompactResult };
   abort: { params: { botId: string }; result: { botId: string } };
