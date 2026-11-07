@@ -4,7 +4,7 @@
 
 ## 版本模型
 
-- 根 `package.json` 的 `version`（当前 `1.1.0`）是唯一对外产品版本。
+- 根 `package.json` 的 `version`（当前 `0.0.2`）是唯一对外产品版本。
 - `desktop/src-tauri/tauri.conf.json`、`mobile/src-tauri/tauri.conf.json`、
   `mobile/src-tauri/Cargo.toml`、`desktop/src-tauri/Cargo.toml`、
   `desktop/host-launcher/Cargo.toml` 保存同一字面量；`app/build.gradle` 的
@@ -12,7 +12,7 @@
   Gradle 根即仓库根）。
 - `scripts/release-check.mjs` 核对全部上述字段 + `android.versionCode`
   为正整数；`--tag vX.Y.Z` 额外核对 tag 与产品版本一致。
-- Android `versionCode` 独立于产品版本（当前 `2`，已分发过 1），见
+- Android `versionCode` 独立于产品版本（当前 `7`，验收包使用过 `6`），见
   `gradle.properties` 的 `android.versionCode`，每个已分发 APK 单调递增、
   不复用、不回退。
 
@@ -29,21 +29,23 @@
   并由 `packageRelease`/`assembleRelease` 等打包任务的 doFirst 守卫在执行期
   失败。debug 构建、lint/test 与纯配置永远不需要这些值；缺 key 不会产出
   debug 签名或未签名的"正式"APK。
-- 旧私钥不在仓库：没有正式 keystore 时只能构建 debug 包；官方正式发布
-  必须先配置上述 secrets 并完成 `apksigner rotate` lineage（需旧私钥），
-  未完成前不得以新身份发布覆盖安装包。
+- 正式私钥不在仓库，发布必须沿用已配置的正式 keystore，不得重新生成。
+  `0.0.1` 起的官方 APK 使用同一正式签名，可按递增 versionCode 覆盖安装。
+  旧开发签名与正式签名不兼容，需先备份并完成数据迁移；不要卸载用户数据后直接替换。
 
 ## CI 渠道
 
-- 普通分支 push：`apk.yml` 只构建 debug APK artifact；`desktop.yml` 只构建
-  无签名 NSIS/DEB bundle artifact；均不需要 secret。
-- `v*` tag：`release.yml` 通过 `workflow_call` 依次调用 `apk.yml`
-  （签名 APK）与 `desktop.yml`（tauri-action 构建 + updater `.sig`），
-  全部成功后由唯一 `release` job 汇总产物、逐件生成
+- `master` push、面向 `develop/master` 的 PR 与手动构建：`apk.yml` 构建
+  debug APK artifact；`desktop.yml` 构建无 updater 签名的 NSIS/DEB artifact。
+  这些构建不发布 GitHub Release。
+- `v*` tag：`release.yml` 通过 `workflow_call` 并行调用 `apk.yml`
+  （签名 APK）、`desktop.yml`（安装包 + updater `.sig`）与 `center.yml`，
+  全部成功后由唯一 `publish` job 汇总产物、逐件生成
   `<file>.metadata.json`、创建**一次不可变** GitHub Release（已存在则拒绝）。
-- `center.yml` 为唯一中心镜像工作流。main 仅推送不可变 sha 标签，其他分支/PR 只构建；版本 tag 通过 Docker 官方 build-push Actions 推送
-  `ghcr.io/<owner>/e-launcher-center:<version>` 与 `latest`，tag 另产出
-  `center-image.json` 元数据 artifact；不创建 GitHub Release。
+- `center.yml` 为唯一中心镜像工作流。普通 `master`/PR/手动运行只构建；
+  release 调用先推送 `ghcr.io/<owner>/pibot-center:sha-<sourceCommit>` 并产出
+  `center-image.json`。全部平台成功后，`publish` 将同一 digest 标记为版本号和
+  `latest`，并创建 GitHub Release。发布 Tag 不移动；失败重试继续使用同一 Tag。
 
 ## 需要配置的 GitHub secrets / variables
 
