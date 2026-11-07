@@ -1,5 +1,6 @@
 import { openStore } from './store.js';
 import { ensureSoul, setSoulText } from './bot-soul.js';
+import { formatInitialBotSoul } from './bot-prompt.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { assertDeviceId } from './relay-protocol.js';
@@ -73,7 +74,7 @@ export function openHost(options) {
       if (store.findByRequest(requestId) !== null) {
         // 已受理记录不因上次 SOUL 写入失败而丢失：重试在此幂等补建。
         const retried = store.createBot(request);
-        ensureSoul(root, retried.botId, retried.role);
+        ensureSoul(root, retried.botId, formatInitialBotSoul(retried.role));
         return retried;
       }
 
@@ -92,7 +93,7 @@ export function openHost(options) {
 
       const created = store.createBot(request);
       // 注册记录与 SOUL 文件分两步：文件失败不回滚已受理记录，重试可完成初始化。
-      ensureSoul(root, created.botId, created.role);
+      ensureSoul(root, created.botId, formatInitialBotSoul(created.role));
       return created;
     },
     updateBotProfile(input) {
