@@ -307,6 +307,25 @@ final class ShowerController {
         return state("text").put("characters", text.length());
     }
 
+    synchronized int surfaceSecretInput(String sessionId, int x, int y, String text,
+            java.util.function.BooleanSupplier cancelled) throws Exception {
+        IShowerService service = activeService();
+        if (sessionId == null || !sessionId.equals(surfaceSessionId)) {
+            throw new IllegalStateException("Secret input session mismatch");
+        }
+        if (text == null || text.isEmpty() || text.length() > 1000) {
+            throw new IllegalArgumentException("Secret input invalid");
+        }
+        Thread caller = Thread.currentThread();
+        IShowerGesture cancellation = new IShowerGesture.Stub() {
+            @Override public boolean isCancelled() {
+                return caller.isInterrupted() || cancelled.getAsBoolean();
+            }
+        };
+        if (cancellation.isCancelled()) return 3;
+        return service.secretInput(displayId, x, y, text, cancellation);
+    }
+
     private byte[] requestPng(int maxWidth, int maxHeight) throws Exception {
         if (maxWidth < 160 || maxWidth > 1440 || maxHeight < 160 || maxHeight > 3200) {
             throw new IllegalArgumentException("截图尺寸范围为 160..1440 × 160..3200");
@@ -392,7 +411,7 @@ final class ShowerController {
         synchronized (clipboard) {
             activeService();
             if (Thread.currentThread().isInterrupted()) throw new InterruptedException("复制已取消");
-            clipboard.setPrimaryClip(ClipData.newPlainText("e-launcher", text));
+            clipboard.setPrimaryClip(ClipData.newPlainText("pibot", text));
         }
         return state("copy").put("characters", text.length());
     }

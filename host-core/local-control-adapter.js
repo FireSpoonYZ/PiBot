@@ -11,6 +11,7 @@ import {
 } from './remote-control-protocol.js';
 import { normalizeLiveTarget } from './remote-live-protocol.js';
 import { SHOWER_ERROR_CODES } from './shower-protocol.js';
+import { VAULT_ERROR_CODES } from './vault-protocol.js';
 
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,512}$/;
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '[::1]']);
@@ -72,6 +73,7 @@ const LOCAL_DOMAIN_CODES = new Set([
   'ATTACHMENT_NOT_FOUND',
   'MODEL_NO_VISION',
   ...SHOWER_ERROR_CODES,
+  ...VAULT_ERROR_CODES,
 ]);
 
 function controlError(code, outcome) {
@@ -292,6 +294,7 @@ const METHOD_HANDLERS = new Map([
   ['validateCenterProvider', (control, params, signal) => control.validateCenterProvider(params, { signal })],
   ['discoverCenterProviderModels', (control, params, signal) => control.discoverCenterProviderModels(params, { signal })],
   ['callCapabilityAction', (control, params, signal) => control.callCapabilityAction(params, { signal })],
+  ['vaultControl', (control, params, signal) => control.vaultControl(params, { signal })],
   ['getShowerStatus', (control, params, signal) => control.getShowerStatus(showerTarget(params), { signal })],
   ['createShowerSession', (control, params, signal) =>
     control.createShowerSession(showerTarget(params), params.input ?? {}, { signal })],
@@ -437,9 +440,11 @@ function isNonEmptyWellFormedString(value) {
 function validateHostInfo(info) {
   if (
     !isPlainObject(info) ||
-    Object.keys(info).length !== 4 ||
+    Object.keys(info).length !== 6 ||
     info.protocolVersion !== 1 ||
     !isNonEmptyWellFormedString(info.deviceId) ||
+    !isNonEmptyWellFormedString(info.defaultWorkspace) ||
+    !isNonEmptyWellFormedString(info.displayName) ||
     !isNonEmptyWellFormedString(info.platform) ||
     !isNonEmptyWellFormedString(info.arch)
   ) {
@@ -453,6 +458,8 @@ function validateHostInfo(info) {
   return {
     protocolVersion: 1,
     deviceId: info.deviceId,
+    defaultWorkspace: info.defaultWorkspace,
+    displayName: info.displayName,
     platform: info.platform,
     arch: info.arch,
   };

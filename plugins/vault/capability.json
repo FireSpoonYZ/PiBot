@@ -1,0 +1,24 @@
+{
+  "manifestVersion": 1,
+  "id": "e-launcher.vault",
+  "version": "1.0.0",
+  "kind": "plugin",
+  "displayName": "Vault",
+  "hostApi": "^1.0.0",
+  "durableApi": "1.4.0",
+  "components": {
+    "host": {
+      "entry": "entry.js"
+    }
+  },
+  "platforms": [
+    "windows",
+    "linux",
+    "android"
+  ],
+  "configSchema": "config.schema.json",
+  "stateVersion": 1,
+  "contributions": [
+    "tools"
+  ]
+}

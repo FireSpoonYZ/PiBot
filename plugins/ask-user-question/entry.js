@@ -237,7 +237,7 @@ export function createPlugin({ installationId, host }) {
        * first: a terminal record from the commit listener, the tool task's
        * abort (user stop), the bot's quiesce/close, or the watch's own end
        * when the Session closes — no wait can block a shutdown.
-       * session_closed/session_failed reject, never masquerade as a user
+       * Watch endings and failures reject, never masquerade as a user
        * decline; only a real cancelled record maps to DECLINE_MESSAGE.
        */
       function waitFor(watchHandle, context) {
@@ -257,12 +257,12 @@ export function createPlugin({ installationId, host }) {
             context.abortSignal?.aborted ? context.abortSignal.reason : botController.signal.reason,
           ));
           const unwatch = (end) => {
-            if (end.reason === 'stopped') return;
-            if (end.reason === 'failed') {
+            if (end.kind === 'stopped') return;
+            if (end.kind === 'failed' || end.kind === 'listener_error') {
               settle(reject, end.error instanceof Error ? end.error : abortError(end.error));
             } else {
-              // session_closed / retired / cancelled: interrupt, not a decline.
-              settle(reject, abortError(end.reason));
+              // ended / aborted (including task retirement): interrupt, not a decline.
+              settle(reject, abortError(end.kind));
             }
           };
           const current = watchHandle.value;
@@ -279,7 +279,12 @@ export function createPlugin({ installationId, host }) {
           }
           context.abortSignal?.addEventListener('abort', onAbort, { once: true });
           botController.signal.addEventListener('abort', onAbort, { once: true });
-          watchHandle.start(async (value) => {
+          watchHandle.start(async (call) => {
+            if (call.kind === 'failed') {
+              settle(reject, call.error instanceof Error ? call.error : abortError(call.error));
+              return;
+            }
+            const { value } = call;
             if (value === null || value.status !== 'pending') settle(resolve, value);
           });
         });

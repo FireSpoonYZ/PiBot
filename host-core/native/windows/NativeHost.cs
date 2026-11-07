@@ -297,7 +297,7 @@ namespace ELauncher.Shower
         {
             var call = new AgentCall();
             string id = Guid.NewGuid().ToString("N");
-            string failureCode = method == "input" ? HostErrorCodes.InputFailed : HostErrorCodes.BackendFailed;
+            string failureCode = method == "input" || method == "secretInput" ? HostErrorCodes.InputFailed : HostErrorCodes.BackendFailed;
             lock (pendingLock)
             {
                 if (closed) throw new HostFault(HostErrorCodes.NotReady, "the child session agent is not connected");
@@ -312,7 +312,12 @@ namespace ELauncher.Shower
                 message["params"] = parameters ?? new Dictionary<string, object>();
                 Write(message);
                 written = true;
-                if (relay != null) relay.AgentRequestId = id;
+                if (relay != null)
+                {
+                    relay.AgentRequestId = id;
+                    // Cancellation can arrive while the private request is being written.
+                    if (method == "secretInput" && relay.Cancelled) CancelRemote(id);
+                }
                 if (!call.Done.Wait(timeoutMs))
                 {
                     // The agent may still be injecting; stop it and report the input as unconfirmed, never resent.
@@ -334,7 +339,8 @@ namespace ELauncher.Shower
             }
             catch (Exception ex)
             {
-                throw new HostFault(failureCode, "cannot reach the child session agent: " + ex.Message, written ? "unconfirmed" : "not-sent");
+                throw new HostFault(failureCode, method == "secretInput" ? "Secret input failed"
+                    : "cannot reach the child session agent: " + ex.Message, written ? "unconfirmed" : "not-sent");
             }
             finally
             {

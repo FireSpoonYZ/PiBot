@@ -136,7 +136,7 @@ impl CenterClient {
             .timeout_connect(Duration::from_secs(15))
             .timeout(Duration::from_secs(60))
             .redirects(0)
-            .user_agent(concat!("e-launcher-host/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("pibot-host/", env!("CARGO_PKG_VERSION")))
             .try_proxy_from_env(true);
         if let Some(ca) = ca_file {
             builder = builder.tls_config(tls_config(ca)?);

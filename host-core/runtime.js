@@ -45,6 +45,7 @@ import { createCuaTools } from './cua-tools.js';
 import { createShowerManager } from './shower-manager.js';
 import { createShowerTools } from './shower-tools.js';
 import { createRuntimeShower } from './runtime-shower.js';
+import { createVaultService } from './vault-service.js';
 import { createScheduleManager } from './host-schedules.js';
 import { createScheduleTools } from './schedule-tools.js';
 import {
@@ -55,6 +56,7 @@ import {
 } from './attachments.js';
 import { putBotFileChunk } from './bot-files.js';
 import { normalizeBotFileChunk } from './bot-file-protocol.js';
+import { withCodemodePresentations } from './codemode-presentations.js';
 
 const CTX = BACKGROUND_CONTEXT;
 const BOTS_SYNC_THROTTLE_MS = 1000;
@@ -340,6 +342,7 @@ export async function openRuntime(options) {
           thinkingLevel: profile.thinkingLevel,
           instructions: profile.instructions,
           removeTools: profile.removeTools,
+          selectedExtensions: profile.selectedExtensions,
           codemodeOnly: profile.codemodeOnly,
         }, CTX);
       }
@@ -361,8 +364,9 @@ export async function openRuntime(options) {
   });
 
   // 统一图形环境：管理器按注入的可信原生桥接（Android）或当前平台（Windows/Linux）选后端；
-  // 构造不启动原生/进程资源，首次 ensure 才申请，随 Runtime 关闭释放。
+  // 构造不启动原生/进程资源；Windows 启动时准备管理员授权，图形会话仍由首次 ensure 按需创建，随 Runtime 关闭释放。
   const shower = createShowerManager({ dataRoot: host.dataRoot, nativeBridge });
+  const vault = await createVaultService({ host, getHarness: () => harness, shower, isMaintenance: () => maintenance });
   const schedules = createScheduleManager({
     host,
     getRuntime: () => runtime,
@@ -480,7 +484,7 @@ export async function openRuntime(options) {
       },
     },
   };
-  plugins = createPluginManager({ host, registry, installer: centerRuntime.installer, services, isOnline: () => online });
+  plugins = createPluginManager({ host, registry, installer: centerRuntime.installer, services, isOnline: () => online, vaultFacade: vault.facade });
   registry.install(defineExtension({
     name: 'host.request-context',
     hooks: [hook(GenerationTask, {
@@ -571,7 +575,7 @@ export async function openRuntime(options) {
       }
     },
   })] });
-  const codemodeExtension = createCodemodeExtension({ sandbox: createHostCodemodeSandbox() });
+  const codemodeExtension = withCodemodePresentations(createCodemodeExtension({ sandbox: createHostCodemodeSandbox() }));
   registry.install(codemodeExtension);
   registry.install(finalBudgetExtension);
   try {
@@ -605,6 +609,7 @@ export async function openRuntime(options) {
     }
     try { await plugins.close(); } catch { /* close 失败不掩盖原错误 */ }
     try { await schedules.close(); } catch { /* close 失败不掩盖原错误 */ }
+    await vault.close();
     try { await shower.close(); } catch { /* close 失败不掩盖原错误 */ }
     try { await collaboration.close(); } catch { /* close 失败不掩盖原错误 */ }
     try { await cleanupEnvs(); } catch { /* open 失败清理不掩盖原错误 */ }
@@ -658,9 +663,11 @@ export async function openRuntime(options) {
     onBotsSync: options?.onBotsSync,
     collaboration,
     shower,
+    vault,
     schedules,
   });
   try {
+    if (process.platform === 'win32') await shower.prepare();
     // 启动时初始化已有 Bot 的 SOUL 和会话人格；中心策略稍后应用。
     await runtime.initializeBots();
     schedules.start();
@@ -713,7 +720,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower, schedules }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower, vault, schedules }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -947,6 +954,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     plugins.suspend();
     plugins.abortActions();
     closePromise ??= (async () => {
+      // Seal secret access before waiting for any runtime work to drain.
+      const vaultClose = vault.close();
       await lifecycle;
       // 同步封闭 Bot 新准入并开始排空：必须在本次 async 体的首个 await 之前调用，
       // 否则等待 decisions.close() 期间新设置/发送操作仍能入队。
@@ -964,6 +973,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       }
       // 再关闭定时任务与 Shower：丢弃排队操作并释放本 Host 拥有的资源，不把在飞结果留到关库之后。
       try { await schedules.close(); } catch (err) { errors.push(err); }
+      try { await vaultClose; } catch (err) { errors.push(err); }
       try { await shower.close(); } catch (err) { errors.push(err); }
       // 排空已接纳导入，但共享消息账本须保留到原生工具退出。
       try { await workContexts.quiesce(); } catch (err) { errors.push(err); }
@@ -2025,6 +2035,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     getScopeMessageDelivery: (scopeId, messageId) => runMessageOperation((log) => readScopeMessageDelivery(log, scopeId, messageId)),
 
     // 统一图形环境（Android/Windows/Linux 同签名）：status/frame 只读，takeover 复用 conversation.abort。
+    vaultControl: vault.control,
     getShowerStatus: showerRuntime.getShowerStatus,
     createShowerSession: showerRuntime.createShowerSession,
     getShowerFrame: showerRuntime.getShowerFrame,
@@ -2099,7 +2110,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   // 模型、工具、问卷等执行路径仍受 Center 门禁（运行时本就对 SDK 抛离线错）。
   // scope 查询是纯本地账本读取（不调度、不触碰模型），离线也放行给被动浏览 UI；
   // createScope/updateScope/publishUserMessage 等写路径仍受 Center 门禁。
-  const offlineMethods = new Set(['submit', 'getSubmission', 'wait', 'abort', 'turns', 'inspect', 'history', 'watch',
+  const offlineMethods = new Set(['vaultControl', 'submit', 'getSubmission', 'wait', 'abort', 'turns', 'inspect', 'history', 'watch',
     'uploadAttachment', 'getAttachment',
     'scopeHistory', 'getScopeMessage', 'getScopeMessageDelivery', 'getScopeState', 'listScopeStates', 'listScopeReplicas']);
   const maintenanceAllowed = new Set([...offlineMethods, 'getCurrentDevice', 'getBot', 'getModelCatalog', 'getBotSoul', 'listScopes']);

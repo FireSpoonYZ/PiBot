@@ -2,6 +2,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $root = Split-Path $PSScriptRoot -Parent
 $version = '24.18.0-0'
+# 内嵌 small-icu（ICU 78.3）缺分词数据；Android payload 由 host-core/build-android.js
+# 附带官方 icudt78l.dat 并经 NODE_ICU_DATA 生效。升级此版本时同步匹配 ICU 主版本与 dat 文件名。
 $expected = 'ceb86b0b8130006195a60cd37393ebe0fd665b644ce8d5674dfba1da65d3be28'
 $archive = Join-Path ([IO.Path]::GetTempPath()) "nodejs-mobile-android-$version.zip"
 $url = "https://github.com/gmaclennan/nodejs-mobile/releases/download/v$version/nodejs-mobile-android-$version.zip"

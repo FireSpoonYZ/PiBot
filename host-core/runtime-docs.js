@@ -53,7 +53,7 @@ export async function createPrimaryInTransaction(tx, bot, options = {}) {
     instructions: options.instructions === undefined ? bot.role : options.instructions,
     cwd: bot.cwd,
     tools: initialToolsChange(options.removeTools),
-    ...(options.codemodeOnly ? { modelTools: [{ name: 'codemode' }] } : {}),
+    ...(options.codemodeOnly ? { modelTools: codemodeModelTools(options) } : {}),
   });
   draft.byPrimary[primaryId] = record.id;
   return record.id;
@@ -88,6 +88,22 @@ export async function getPrimaryConversation(harness, bot, options, context) {
  */
 export function initialToolsChange(removeTools) {
   return removeTools && removeTools.length > 0 ? { remove: removeTools } : null;
+}
+
+/** SDK 仍按 enabled tools 取交集；这里只保留 model-only，并且不自动加载 deferred 工具。 */
+export function codemodeModelTools(profile, modelTools) {
+  const definitions = new Map((profile.selectedExtensions ?? [])
+    .flatMap((extension) => extension.tools ?? [])
+    .map((tool) => [tool.name, tool]));
+  const loaded = new Set(Array.isArray(modelTools) ? modelTools : modelTools?.add ?? []);
+  const removed = new Set(modelTools?.remove ?? []);
+  const modelOnly = [...definitions.values()].filter((tool) =>
+    tool.name !== 'codemode'
+    && tool.callers?.includes('model')
+    && !tool.callers.includes('tools')
+    && !removed.has(tool.name)
+    && (tool.deferred !== true || loaded.has(tool.name)));
+  return [{ name: 'codemode' }, ...modelOnly.map((tool) => ({ name: tool.name }))];
 }
 
 /**
@@ -142,8 +158,10 @@ export function agentProfileChange(state, profile) {
   if (profile?.codemodeOnly !== undefined) {
     const currentModelTools = state?.modelTools;
     if (profile.codemodeOnly === true) {
-      if (!Array.isArray(currentModelTools) || currentModelTools.length !== 1 || currentModelTools[0] !== 'codemode') {
-        change.modelTools = [{ name: 'codemode' }];
+      const desiredModelTools = codemodeModelTools(profile, currentModelTools);
+      if (!Array.isArray(currentModelTools) || currentModelTools.length !== desiredModelTools.length
+        || currentModelTools.some((name, index) => name !== desiredModelTools[index].name)) {
+        change.modelTools = desiredModelTools;
       }
     } else if (Array.isArray(currentModelTools)) {
       change.modelTools = null;

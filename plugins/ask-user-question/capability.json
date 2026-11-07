@@ -1,7 +1,7 @@
 {
   "manifestVersion": 1,
   "id": "e-launcher.ask-user-question",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "kind": "plugin",
   "displayName": "Ask User Question",
   "hostApi": "^1.0.0",

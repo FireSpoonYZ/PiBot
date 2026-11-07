@@ -227,6 +227,32 @@ public final class Main {
                 return withDisplay(displayId, current -> current.input.injectKeyWithMeta(keyCode, metaState));
             }
 
+            @Override public int secretInput(int displayId, int x, int y, String text,
+                    IShowerGesture cancellation) {
+                try {
+                    enforceCaller();
+                    if (cancellation == null || text == null || text.isEmpty() || text.length() > 1000) return 2;
+                    for (int i = 0; i < text.length(); i++) {
+                        if (text.charAt(i) < 32 || text.charAt(i) == 127) return 1;
+                    }
+                    return withDisplay(displayId, current -> {
+                        requireCoordinate(current, x, y);
+                        // UiAutomation must connect as this privileged service, not its Binder caller.
+                        long identity = Binder.clearCallingIdentity();
+                        try {
+                            return SecretInputController.setText(displayId, x, y, text, () -> {
+                                try { return cancellation.isCancelled(); }
+                                catch (Throwable unavailable) { return true; }
+                            });
+                        } finally {
+                            Binder.restoreCallingIdentity(identity);
+                        }
+                    });
+                } catch (Throwable failure) {
+                    return 2;
+                }
+            }
+
             @Override public ParcelFileDescriptor requestScreenshot(int displayId, int maxWidth,
                     int maxHeight) {
                 enforceCaller();

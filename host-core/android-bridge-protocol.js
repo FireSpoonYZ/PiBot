@@ -7,7 +7,7 @@
 import path from 'node:path';
 import { messageError, assertId } from './message-protocol.js';
 import { CONTROL_ERROR_CODES, CONTROL_OUTCOMES } from './remote-control-protocol.js';
-import { SHOWER_ERROR_CODES } from './shower-protocol.js';
+import { SHOWER_ERROR_CODES, normalizeShowerSecretTarget, assertShowerSecretText } from './shower-protocol.js';
 import { normalizeHostSettings } from './host-settings.js';
 import { normalizeDeviceName } from './device-metadata.js';
 
@@ -382,13 +382,14 @@ export function normalizeNativeResultFrame(parsed) {
 
 const NATIVE_TOOLS = new Set(['android_apps', 'android_shower', 'android_speak', 'schedule_task', 'shower_surface']);
 const NATIVE_KINDS = new Set(['primary', 'room', 'dm']);
-// Unified Shower private entry: only the six environment actions cross this IPC.
+// Unified Shower private entry: environment actions and private Vault input cross this IPC.
 // Arguments are assembled by the trusted Android backend, never by model output.
 const SHOWER_SURFACE_ACTIONS = new Map([
   ['status', null],
   ['ensure', 'options'],
   ['frame', 'limits'],
   ['input', 'input'],
+  ['secretInput', null],
   ['launch', 'target'],
   ['release', null],
 ]);
@@ -400,10 +401,20 @@ const HUMAN_TASK_ID_RE = /^human:[0-9a-fA-F-]{8,64}$/;
 function normalizeShowerSurfaceArguments(value) {
   const action = value.action;
   if (typeof action !== 'string' || !SHOWER_SURFACE_ACTIONS.has(action)) {
-    throw invalid('INVALID_ARGUMENT', 'shower_surface action must be status, ensure, frame, input, launch or release');
+    throw invalid('INVALID_ARGUMENT', 'shower_surface action must be status, ensure, frame, input, secretInput, launch or release');
   }
   if (!SHOWER_SURFACE_SOURCES.has(value.source)) {
     throw invalid('INVALID_ARGUMENT', "shower_surface source must be 'agent' or 'human'");
+  }
+  if (action === 'secretInput') {
+    if (Object.keys(value).some(key => !['action', 'sessionId', 'source', 'target', 'text'].includes(key))) {
+      throw invalid('INVALID_ARGUMENT', 'Invalid secret input arguments');
+    }
+    assertId(value.sessionId, 'sessionId');
+    const target = normalizeShowerSecretTarget(value.target);
+    assertShowerSecretText(value.text);
+    if (target.windowId !== undefined) throw invalid('SHOWER_UNSUPPORTED', 'Secret input unsupported');
+    return { action, sessionId: value.sessionId, source: value.source, target, text: value.text };
   }
   const payload = SHOWER_SURFACE_ACTIONS.get(action);
   const allowed = new Set(['action', 'sessionId', 'source']);

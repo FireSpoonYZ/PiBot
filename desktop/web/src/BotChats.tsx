@@ -61,7 +61,7 @@ import type {
 import { isTargetOfflineError } from './api';
 import { useDrafts } from './drafts';
 import type { DraftSnapshot } from './drafts';
-import { type QuestionnaireSubmitPayload } from '../../../web/src/ToolPresentation';
+import type { QuestionnaireSubmitPayload, VaultUnlockSubmitPayload } from '../../../web/src/ToolPresentation';
 import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
 import {
   botActivityText,
@@ -1183,6 +1183,21 @@ function PrimaryChatPane({
     [api, bot.botId],
   );
 
+  // 私有解锁回执绑定当前目标身份，不经过聊天提交或离线待发队列。
+  const submitVaultUnlock = useCallback((input: VaultUnlockSubmitPayload): Promise<unknown> => {
+    const current = api.identity;
+    if (!identity || !current || !api.transportConnected ||
+      current.profileId !== identity.profileId || current.targetDeviceId !== identity.targetDeviceId ||
+      current.kind !== identity.kind || current.generation !== identity.generation) {
+      return Promise.reject({ code: 'NOT_CONNECTED' });
+    }
+    return api.call(identity, 'vaultControl', { action: 'respondUnlock', ...input });
+  }, [api, identity]);
+  const toolScopeKey = JSON.stringify([
+    identity?.profileId, identity?.targetDeviceId, identity?.kind, identity?.generation,
+    bot.botId, bot.primaryConversationId, online,
+  ]);
+
   useEffect(() => {
     setManageError(null);
     setConfirmDelete(false);
@@ -2237,7 +2252,10 @@ function PrimaryChatPane({
         devicePlatform={devicePlatform}
         search={chatSearch}
         archived={isArchived}
+        scopeKey={toolScopeKey}
+        disabled={!online}
         onSubmitQuestionnaire={submitQuestionnaire}
+        onSubmitVaultUnlock={submitVaultUnlock}
         attachmentFetcher={attachmentFetcher}
         loading={rawLoading}
         error={online ? (rawError || liveError) : null}
@@ -2431,7 +2449,7 @@ function PrimaryChatPane({
                 </div>
               ) : null}
               {inspectorTab === 'settings' ? (
-                <BotSettings api={api} botId={bot.botId} open onOpenChange={() => { /* 页签由外层管理，内部不再渲染关闭 UI */ }} />
+                <BotSettings api={api} botId={bot.botId} hostLabel={`${deviceName} (${bot.deviceId})`} open onOpenChange={() => { /* 页签由外层管理，内部不再渲染关闭 UI */ }} />
               ) : null}
               {inspectorTab === 'raw' ? (
                 <RawHistoryPane

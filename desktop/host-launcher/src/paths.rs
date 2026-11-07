@@ -99,9 +99,9 @@ pub struct Runtime {
 
 fn node_path(exe_dir: &Path) -> PathBuf {
     if cfg!(windows) {
-        exe_dir.join("e-launcher-client-node.exe")
+        exe_dir.join("pibot-node.exe")
     } else {
-        exe_dir.join("e-launcher-client-node")
+        exe_dir.join("pibot-node")
     }
 }
 
@@ -118,8 +118,8 @@ fn runtime_candidates(exe_dir: &Path) -> Vec<PathBuf> {
     if cfg!(windows) {
         list.push(exe_dir.join("host-runtime"));
     } else {
-        list.push(exe_dir.join("..").join("lib").join("e-launcher-desktop").join("host-runtime"));
-        list.push(PathBuf::from("/usr/lib/e-launcher-desktop/host-runtime"));
+        list.push(exe_dir.join("..").join("lib").join("pibot").join("host-runtime"));
+        list.push(PathBuf::from("/usr/lib/pibot/host-runtime"));
     }
     list
 }

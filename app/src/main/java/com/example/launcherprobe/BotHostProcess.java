@@ -277,6 +277,9 @@ final class BotHostProcess {
         env.put("LD_LIBRARY_PATH", context.getApplicationInfo().nativeLibraryDir);
         env.put("PI_AGENT_DIR", new File(assets.home, ".pi/agent").getAbsolutePath());
         env.put("PATH", assets.bin.getAbsolutePath() + ":" + "/system/bin:/system/xbin:/vendor/bin");
+        // nodejs-mobile 内嵌 icu_small 缺分词数据，Intl.Segmenter 会段错误；
+        // 完整 icudt78l.dat 作为 payload 兄弟文件装在运行时版本目录。
+        env.put("NODE_ICU_DATA", assets.entry.getParentFile().getAbsolutePath());
     }
 
     private void drainStderr() {

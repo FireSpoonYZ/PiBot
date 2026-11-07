@@ -113,11 +113,8 @@ import {
   type ChatToolCallItem,
   type ChatTurnBlock,
 } from '../chatTurnModel';
-import {
-  readToolPresentation,
-  ToolPresentationCard,
-  type QuestionnaireSubmitPayload,
-} from '../ToolPresentation';
+import { readToolPresentation } from '../ToolPresentation';
+import { ToolCallCard, type ToolCallCardProps } from '../ToolCallCard';
 import {
   IMAGE_MAX_COUNT,
   IMAGE_MAX_TOTAL_BYTES,
@@ -788,177 +785,16 @@ export function extractSmartArgEntries(
   return entries;
 }
 
-export function ToolCallStepCard({
-  tool,
-  botKey,
-  isBotBusy,
-  disabled,
-  onSubmitQuestionnaire,
-  t,
-}: {
-  tool: ChatToolCallItem;
-  botKey: string;
-  isBotBusy: boolean;
-  disabled: boolean;
-  onSubmitQuestionnaire: (presentation: { installationId: string }, input: QuestionnaireSubmitPayload) => Promise<unknown>;
-  t: (zh: string, en: string) => string;
-}) {
-  const [expanded, setExpanded] = useState(() => tool.status === 'error');
-  const [showRawJson, setShowRawJson] = useState(false);
-  const [copiedPart, setCopiedPart] = useState<'args' | 'output' | null>(null);
-
-  const presentation = tool.presentation ? readToolPresentation(tool.presentation) : null;
-  const hasArgs = Boolean(tool.args && Object.keys(tool.args).length > 0);
-  const hasOutput = Boolean(tool.output && tool.output.trim());
-  const smartEntries = useMemo(() => extractSmartArgEntries(tool.name, tool.args), [tool.name, tool.args]);
-  const rawArgsJson = useMemo(
-    () => (hasArgs ? JSON.stringify(tool.args, null, 2) : ''),
-    [hasArgs, tool.args],
-  );
-
-  const stateLabel =
-    tool.status === 'running'
-      ? t('调用中', 'Calling')
-      : tool.status === 'error'
-        ? t('失败', 'Failed')
-        : typeof tool.durationMs === 'number' && tool.durationMs > 0
-          ? formatToolStepDuration(tool.durationMs)
-          : t('已完成', 'Done');
-
-  const triggerCopy = (part: 'args' | 'output', text: string) => {
-    copyTextToClipboard(text);
-    setCopiedPart(part);
-    window.setTimeout(() => {
-      setCopiedPart(current => (current === part ? null : current));
-    }, 1400);
-  };
-
-  return (
-    <div role="listitem" className="bot-chat-tool-wrap">
-      <button
-        type="button"
-        className={`bot-chat-tool-chip is-${tool.status}${expanded ? ' is-expanded' : ''}`}
-        aria-expanded={expanded}
-        onClick={() => setExpanded(v => !v)}
-      >
-        <span className="bot-tool-step-icon" aria-hidden="true">
-          {renderToolStepIcon(tool.status)}
-        </span>
-        <span className="bot-tool-step-name">{tool.name}</span>
-        {tool.argSummary ? (
-          <span className="bot-tool-step-summary" title={tool.argSummary}>
-            {tool.argSummary}
-          </span>
-        ) : null}
-        <span className="bot-tool-step-state">{stateLabel}</span>
-        <ChevronDown size={13} className={`bot-tool-step-chevron${expanded ? ' is-open' : ''}`} aria-hidden="true" />
-      </button>
-
-      {expanded && (
-        <div className={`bot-tool-detail-panel is-${tool.status}`} role="region" aria-label={`${tool.name} ${t('调用详情', 'Call details')}`}>
-          {hasArgs ? (
-            <div className="bot-tool-detail-section">
-              <div className="bot-tool-detail-head">
-                <span className="bot-tool-detail-label">{t('参数', 'ARGS')}</span>
-                <div className="bot-tool-detail-actions">
-                  {smartEntries.length > 0 && (
-                    <button
-                      type="button"
-                      className="bot-tool-detail-mini-btn"
-                      onClick={() => setShowRawJson(v => !v)}
-                    >
-                      {showRawJson ? t('智能摘要', 'Summary') : t('原始 JSON', 'Raw JSON')}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="bot-tool-detail-mini-btn"
-                    onClick={() => triggerCopy('args', rawArgsJson)}
-                  >
-                    {copiedPart === 'args' ? t('已复制', 'Copied') : t('复制', 'Copy')}
-                  </button>
-                </div>
-              </div>
-              {!showRawJson && smartEntries.length > 0 ? (
-                <div className="bot-tool-smart-args">
-                  {smartEntries.map((entry, idx) => (
-                    <div key={idx} className="bot-tool-smart-row">
-                      <span className="bot-tool-smart-key">{entry.label}</span>
-                      <code className="bot-tool-smart-val">{entry.value}</code>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <pre className="bot-tool-detail-pre">{rawArgsJson}</pre>
-              )}
-            </div>
-          ) : null}
-
-          {hasOutput ? (
-            <div className="bot-tool-detail-section">
-              <div className="bot-tool-detail-head">
-                <span className="bot-tool-detail-label">
-                  {tool.status === 'error'
-                    ? t('错误输出', 'ERROR')
-                    : tool.status === 'running'
-                      ? t('实时输出', 'LIVE OUTPUT')
-                      : t('输出', 'RESULT')}
-                  {tool.outputTruncated ? ` · ${t('已截断', 'Truncated')}` : ''}
-                </span>
-                <div className="bot-tool-detail-actions">
-                  <button
-                    type="button"
-                    className="bot-tool-detail-mini-btn"
-                    onClick={() => triggerCopy('output', tool.output ?? '')}
-                  >
-                    {copiedPart === 'output' ? t('已复制', 'Copied') : t('复制', 'Copy')}
-                  </button>
-                </div>
-              </div>
-              <pre className="bot-tool-detail-pre is-output">{tool.output}</pre>
-            </div>
-          ) : null}
-
-          {!hasArgs && !hasOutput ? (
-            <div className="bot-tool-detail-empty">
-              {tool.status === 'running'
-                ? t('正在执行工具，等待输出返回…', 'Running tool, waiting for output…')
-                : t('该工具调用已执行完成（无额外参数或文本输出）', 'Completed with no additional text output')}
-            </div>
-          ) : null}
-        </div>
-      )}
-
-      {presentation ? (
-        <ToolPresentationCard
-          key={`${botKey}:${presentation.kind === 'questionnaire' ? presentation.requestId : tool.id}`}
-          presentation={presentation}
-          active={tool.presentationLive === true && isBotBusy}
-          disabled={disabled}
-          onSubmit={
-            presentation.kind === 'questionnaire'
-              ? input => onSubmitQuestionnaire(presentation, input)
-              : undefined
-          }
-        />
-      ) : null}
-    </div>
-  );
-}
-
 export function TurnToolCallsSection({
   tools,
-  botKey,
-  isBotBusy,
+  scopeKey,
+  active,
   disabled,
   onSubmitQuestionnaire,
+  onSubmitVaultUnlock,
   t,
-}: {
+}: Omit<ToolCallCardProps, 'tool'> & {
   tools: ChatToolCallItem[];
-  botKey: string;
-  isBotBusy: boolean;
-  disabled: boolean;
-  onSubmitQuestionnaire: (presentation: { installationId: string }, input: QuestionnaireSubmitPayload) => Promise<unknown>;
   t: (zh: string, en: string) => string;
 }) {
   const hasActiveOrErrorOrInteractive = tools.some(
@@ -987,14 +823,14 @@ export function TurnToolCallsSection({
     return (
       <div className="bot-chat-tools" role="list" aria-label={t('工具调用', 'Tool calls')}>
         {tools.map(tool => (
-          <ToolCallStepCard
+          <ToolCallCard
             key={tool.id}
             tool={tool}
-            botKey={botKey}
-            isBotBusy={isBotBusy}
+            scopeKey={scopeKey}
+            active={active}
             disabled={disabled}
             onSubmitQuestionnaire={onSubmitQuestionnaire}
-            t={t}
+            onSubmitVaultUnlock={onSubmitVaultUnlock}
           />
         ))}
       </div>
@@ -1033,14 +869,14 @@ export function TurnToolCallsSection({
       {groupOpen && (
         <div className="bot-chat-tools is-grouped" role="list" aria-label={t('工具调用', 'Tool calls')}>
           {tools.map(tool => (
-            <ToolCallStepCard
+            <ToolCallCard
               key={tool.id}
               tool={tool}
-              botKey={botKey}
-              isBotBusy={isBotBusy}
+              scopeKey={scopeKey}
+              active={active}
               disabled={disabled}
               onSubmitQuestionnaire={onSubmitQuestionnaire}
-              t={t}
+              onSubmitVaultUnlock={onSubmitVaultUnlock}
             />
           ))}
         </div>

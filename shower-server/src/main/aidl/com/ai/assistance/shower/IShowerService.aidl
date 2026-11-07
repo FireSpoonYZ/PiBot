@@ -20,4 +20,6 @@ interface IShowerService {
     boolean setPreviewSurface(int displayId, in Surface surface, IShowerClient viewer);
     boolean injectTouch(int displayId, in MotionEvent event);
     int[] getDisplaySize(int displayId);
+    // Private: 0 applied, 1 unsupported, 2 failed/unconfirmed, 3 cancelled.
+    int secretInput(int displayId, int x, int y, String text, IShowerGesture cancellation);
 }

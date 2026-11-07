@@ -2,11 +2,14 @@
 // host-core/build-android.js: product build entry for the Android Host runtime.
 // Bundles host-core/android-runtime.js with the root Vite esbuild dependency into app/build/generated/assets/botHost/bot-host/ and
 // emits payload.json + third-party-licenses.txt for the APK.
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { readFile, writeFile, copyFile, mkdir, readdir, access, stat, rm } from 'node:fs/promises';
+import { readFile, writeFile, copyFile, mkdir, readdir, access, stat, rm, rename } from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -15,6 +18,22 @@ const OUT_DIR = path.join(APP_BUILD, 'generated', 'assets', 'botHost', 'bot-host
 // esbuild build graph stays out of the APK assets: ignored build subdir only.
 const METAFILE_DIR = path.join(APP_BUILD, 'host-runtime');
 const TOOL_CACHE = path.join(APP_BUILD, 'host-native-tools');
+// Pinned ICU zip cache (ignored build dir); the cache hit still re-verifies
+// the fixed SHA-256 below before reuse.
+const ICU_CACHE = path.join(APP_BUILD, 'host-icu');
+// nodejs-mobile (scripts/prepare-node-mobile.ps1, currently 24.18.0-0) ships
+// icu_small without break-iterator data, which segfaults Intl.Segmenter; the
+// official full icudt78l.dat ships as a host-runtime.mjs payload sibling and
+// BotHostProcess points NODE_ICU_DATA at the versioned install directory.
+// On a Node upgrade, re-match the pinned ICU major version and dat name.
+const ICU_ZIP_URL = 'https://github.com/unicode-org/icu/releases/download/release-78.3/icu4c-78.3-data-bin-l.zip';
+const ICU_ZIP_SHA256 = '982619632b78887f1895b063e96e8c3cc7f99283337c8abbd05aa71635de613c';
+const ICU_DAT_NAME = 'icudt78l.dat';
+const ICU_DAT_SHA256 = 'd5cf2a40dccbe471781ec7af85693bff542ff12f0b670c9630c4e72d60714b8b';
+const ICU_DAT_BYTES = 33107232;
+const CURL_FLAGS = ['--silent', '--show-error', '--fail', '--location', '--connect-timeout', '20', '--max-time', '300', '--max-filesize', '67108864'];
+const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+const MAX_ZIP_MEMBER_BYTES = 48 * 1024 * 1024;
 // File-name prefixes considered license/notice texts (case-insensitive); files
 // only, so LICENSE-APACHE / LICENSE-MIT / COPYING variants are all captured.
 const LICENSE_PREFIXES = ['license', 'licence', 'copying', 'notice'];
@@ -173,12 +192,91 @@ async function collectBundledPackages(metafile, outfile, absWorkingDir) {
   return roots;
 }
 
-async function writePayloadFiles(metafile, outfile, absWorkingDir, toolNotices) {
+const execFileAsync = promisify(execFile);
+
+async function runExec(command, args, options = {}) {
+  try {
+    const result = await execFileAsync(command, args, options);
+    return { stdout: result.stdout, stderr: result.stderr };
+  } catch (err) {
+    if (err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      throw new Error(command + ' output exceeded max buffer');
+    }
+    if (typeof err.code === 'number') {
+      throw new Error(command + ' exited with code ' + err.code + ': ' + String(err.stderr ?? '').trim());
+    }
+    throw new Error(command + ' failed to start: ' + err.message);
+  }
+}
+
+// System32 curl.exe on Windows (same pattern as prepare-android-tools.js);
+// inherits env so standard http_proxy/https_proxy/no_proxy apply.
+function curlCommand() {
+  if (process.platform === 'win32') {
+    const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+    const candidate = systemRoot ? path.join(systemRoot, 'System32', 'curl.exe') : null;
+    if (candidate && existsSync(candidate)) return candidate;
+  }
+  return 'curl';
+}
+
+// Streams one member of the verified zip without a zip-parser dependency:
+// Windows System32/tar.exe is bsdtar (-xOf), Linux/mac use unzip -p.
+async function readZipMember(zipPath, member) {
+  let command = 'unzip';
+  let args = ['-p', zipPath, member];
+  if (process.platform === 'win32') {
+    const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+    const tar = systemRoot ? path.join(systemRoot, 'System32', 'tar.exe') : null;
+    if (!tar || !existsSync(tar)) throw new Error('System32/tar.exe not found; cannot extract ICU zip member');
+    command = tar;
+    args = ['-xOf', zipPath, member];
+  }
+  const result = await runExec(command, args, { encoding: 'buffer', maxBuffer: MAX_ZIP_MEMBER_BYTES });
+  return result.stdout;
+}
+
+// Download-or-reuse the pinned ICU zip; partial downloads never rename and a
+// stale/corrupt cache entry is replaced after failing the fixed hash.
+async function icuZipPath() {
+  const target = path.join(ICU_CACHE, 'icu4c-78.3-data-bin-l.zip');
+  const cached = await readIfPresent(target);
+  if (cached && sha256Buffer(cached) === ICU_ZIP_SHA256) return target;
+  await mkdir(ICU_CACHE, { recursive: true });
+  const partial = target + '.part';
+  await runExec(curlCommand(), [...CURL_FLAGS, '--output', partial, ICU_ZIP_URL], {
+    maxBuffer: MAX_OUTPUT_BYTES,
+  });
+  const actual = await sha256File(partial);
+  if (actual !== ICU_ZIP_SHA256) {
+    await rm(partial, { force: true });
+    throw new Error('ICU data archive checksum mismatch for ' + ICU_ZIP_URL + ': ' + actual);
+  }
+  await rename(partial, target);
+  return target;
+}
+
+// Verified dat bytes plus the full official LICENSE for the notices file.
+async function prepareIcuData() {
+  const zip = await icuZipPath();
+  const dat = await readZipMember(zip, ICU_DAT_NAME);
+  if (dat.length !== ICU_DAT_BYTES || sha256Buffer(dat) !== ICU_DAT_SHA256) {
+    throw new Error('ICU zip member ' + ICU_DAT_NAME + ' size/hash mismatch in ' + zip);
+  }
+  const license = (await readZipMember(zip, 'LICENSE')).toString('utf8').trim();
+  if (license.length === 0) throw new Error('ICU zip LICENSE member is empty');
+  return { dat, license };
+}
+
+async function writePayloadFiles(metafile, outfile, absWorkingDir, toolNotices, icu) {
   await mkdir(OUT_DIR, { recursive: true });
   const files = new Map();
   files.set('host-runtime.mjs', { path: 'host-runtime.mjs' });
   await copyFile(path.join(HERE, 'node_modules', 'quickjs-wasi', 'quickjs.wasm'), path.join(OUT_DIR, 'quickjs.wasm'));
   files.set('quickjs.wasm', { path: 'quickjs.wasm' });
+  // Sibling of host-runtime.mjs in the versioned install dir (NODE_ICU_DATA).
+  await writeFile(path.join(OUT_DIR, ICU_DAT_NAME), icu.dat);
+  files.set(ICU_DAT_NAME, { path: ICU_DAT_NAME });
 
   const skillRoot = path.join(HERE, 'builtin-skills');
   let skillFiles;
@@ -227,6 +325,8 @@ async function writePayloadFiles(metafile, outfile, absWorkingDir, toolNotices) 
     sections.push(`# ${notice.title}`);
     sections.push(notice.text.trim());
   }
+  sections.push('# ICU 78.3 (ICU License)');
+  sections.push(icu.license);
   const licenseText = sections.join('\n\n---\n\n') + '\n';
   await writeFile(path.join(OUT_DIR, 'third-party-licenses.txt'), licenseText, 'utf8');
   files.set('third-party-licenses.txt', { path: 'third-party-licenses.txt' });
@@ -330,7 +430,8 @@ async function main() {
   await writeFile(metafilePath, JSON.stringify(result.metafile, null, 2), 'utf8');
   await assertNoRequiredDynamicAssets(result.metafile, outfile, ROOT);
   const toolNotices = await loadToolNotices();
-  const manifest = await writePayloadFiles(result.metafile, outfile, ROOT, toolNotices);
+  const icu = await prepareIcuData();
+  const manifest = await writePayloadFiles(result.metafile, outfile, ROOT, toolNotices, icu);
   process.stdout.write(JSON.stringify({ done: true, outDir: OUT_DIR, payload: manifest }) + '\n');
 }
 

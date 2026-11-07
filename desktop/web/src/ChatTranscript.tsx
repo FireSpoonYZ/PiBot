@@ -15,11 +15,8 @@ import {
   type ChatToolCallItem,
 } from '../../../web/src/chatTurnModel';
 import { MessageAttribution as MessageAttributionBadge } from '../../../web/src/MessageAttribution';
-import {
-  readToolPresentation,
-  ToolPresentationCard,
-  type QuestionnaireSubmitPayload,
-} from '../../../web/src/ToolPresentation';
+import type { QuestionnaireSubmitPayload, VaultUnlockSubmitPayload } from '../../../web/src/ToolPresentation';
+import { ToolCallCard } from '../../../web/src/ToolCallCard';
 import {
   GrokBotAvatar,
   GrokBotWorkingSlot,
@@ -56,7 +53,11 @@ export interface ChatTranscriptProps {
   /** 会话内搜索关键字；空串显示全部轮次。 */
   search: string;
   archived: boolean;
+  /** 工具交互身份含连接代与会话；不复用其他上下文的密码输入。 */
+  scopeKey?: string;
+  disabled?: boolean;
   onSubmitQuestionnaire: (installationId: string, input: QuestionnaireSubmitPayload) => Promise<unknown>;
+  onSubmitVaultUnlock?: (input: VaultUnlockSubmitPayload) => Promise<unknown>;
   /** 按 attachmentId 取图显示；null 表示当前不可读取附件（离线/无权限）。 */
   attachmentFetcher?: AttachmentFetcher | null;
   loading?: boolean;
@@ -86,7 +87,10 @@ export function ChatTranscript({
   devicePlatform,
   search,
   archived,
+  scopeKey,
+  disabled = false,
   onSubmitQuestionnaire,
+  onSubmitVaultUnlock,
   attachmentFetcher = null,
   loading = false,
   error = null,
@@ -190,53 +194,17 @@ export function ChatTranscript({
 
   // 工具芯片/卡片的单工具渲染：有序块与回退 tools 列表共用同一 JSX，
   // 保证 live→历史 与块内/块外渲染一致。
-  const renderToolChip = (tool: ChatToolCallItem) => {
-    const presentation = tool.presentation ? readToolPresentation(tool.presentation) : null;
-    return (
-      <span key={tool.id} role="listitem" className="bot-chat-tool-wrap">
-        <span role="presentation" className={`bot-chat-tool-chip is-${tool.status}`}>
-          <span className="bot-tool-step-icon" aria-hidden="true">
-            {tool.status === 'running' ? (
-              <svg viewBox="0 0 16 16" fill="none">
-                <circle cx="8" cy="8" r="5.75" stroke="currentColor" strokeOpacity="0.24" strokeWidth="1.75" />
-                <path d="M8 2.25A5.75 5.75 0 0 1 13.75 8" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-              </svg>
-            ) : tool.status === 'error' ? (
-              <svg viewBox="0 0 16 16" fill="none">
-                <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.6" />
-                <path d="M8 5v3.5M8 11h.01" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-              </svg>
-            ) : (
-              <svg viewBox="0 0 16 16" fill="none">
-                <path d="M3.75 8.25 6.6 11.1 12.25 5.25" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            )}
-          </span>
-          <span className="bot-tool-step-name">{tool.name}</span>
-          <span className="bot-tool-step-state">
-            {tool.status === 'running'
-              ? t('调用中', 'Calling')
-              : tool.status === 'error'
-                ? t('失败', 'Failed')
-                : t('已完成', 'Done')}
-          </span>
-        </span>
-        {presentation ? (
-          <ToolPresentationCard
-            key={`${botKey}:${presentation.kind === 'questionnaire' ? presentation.requestId : tool.id}`}
-            presentation={presentation}
-            active={tool.presentationLive === true && isBusy && !archived}
-            disabled={archived}
-            onSubmit={
-              presentation.kind === 'questionnaire'
-                ? (input) => onSubmitQuestionnaire(presentation.installationId, input)
-                : undefined
-            }
-          />
-        ) : null}
-      </span>
-    );
-  };
+  const renderToolChip = (tool: ChatToolCallItem) => (
+    <ToolCallCard
+      key={tool.id}
+      tool={tool}
+      scopeKey={scopeKey ?? `${botKey}:${bot.primaryConversationId}`}
+      active={isBusy && !archived}
+      disabled={disabled || archived}
+      onSubmitQuestionnaire={onSubmitQuestionnaire}
+      onSubmitVaultUnlock={onSubmitVaultUnlock}
+    />
+  );
 
   // 仅当用户停留在底部附近时跟随新流；向上翻阅历史不打断滚动位置。
   const scrollRef = useRef<HTMLElement | null>(null);

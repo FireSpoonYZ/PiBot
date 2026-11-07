@@ -24,7 +24,13 @@ export interface MessageAttribution {
 export interface ChatToolCallItem {
   id: string;
   name: string;
-  status: 'running' | 'done' | 'error';
+  status: 'running' | 'done' | 'error' | 'cancelled' | 'interrupted';
+  /** done without an outcome is incomplete, not proof of success. */
+  outcome?: 'ok' | 'error' | 'cancelled' | 'interrupted';
+  parentCallId?: string;
+  children?: ChatToolCallItem[];
+  nestedCallsTruncated?: boolean;
+  error?: string;
   durationMs?: number;
   /** 工具调用参数（来自 raw history entry.model 中的 toolCall.arguments）。 */
   args?: Record<string, unknown>;
@@ -124,6 +130,93 @@ function compactSingleLine(value: string, maxLen = 56): string {
   const clean = value.replace(/\s+/g, ' ').trim();
   if (!clean) return '';
   return clean.length > maxLen ? `${clean.slice(0, maxLen - 1)}…` : clean;
+}
+
+function readToolOutcome(value: unknown): ChatToolCallItem['outcome'] {
+  return value === 'ok' || value === 'error' || value === 'cancelled' || value === 'interrupted'
+    ? value
+    : undefined;
+}
+
+function toolStatus(outcome: ChatToolCallItem['outcome'], done: boolean): ChatToolCallItem['status'] {
+  return outcome === 'ok' ? 'done' : outcome ?? (done ? 'done' : 'running');
+}
+
+function readDuration(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/** Durable numeric IDs and live slot IDs identify the same child, never its tool name. */
+function mergeToolChildren(parent: ChatToolCallItem, incoming: ChatToolCallItem[]) {
+  const byId = new Map((parent.children ?? []).map(child => [child.id, child]));
+  for (const child of incoming) {
+    const existing = byId.get(child.id);
+    if (existing) Object.assign(existing, child);
+    else byId.set(child.id, child);
+  }
+  parent.children = [...byId.values()];
+  const prefix = parent.id + '/c';
+  const ordinal = (id: string) => id.startsWith(prefix) && /^\d+$/.test(id.slice(prefix.length))
+    ? Number(id.slice(prefix.length))
+    : undefined;
+  parent.children.sort((a, b) => {
+    const left = ordinal(a.id);
+    const right = ordinal(b.id);
+    return left !== undefined && right !== undefined ? left - right : 0;
+  });
+}
+
+/** Read only codemode's bounded summaries; child output is not part of this durable contract. */
+function readNestedCalls(parent: ChatToolCallItem, entry: Record<string, unknown>) {
+  if (parent.name !== 'codemode') return;
+  if (entry.nestedCallsTruncated === true) parent.nestedCallsTruncated = true;
+  const projected = Array.isArray(entry.nestedCalls);
+  const details = asRecord(entry.details);
+  const source = projected ? entry.nestedCalls : details.calls;
+  if (!Array.isArray(source)) return;
+  const children: ChatToolCallItem[] = [];
+  // Host 投影已把 details.nestedPresentationsTruncated 并入 nestedCallsTruncated；
+  // raw 历史直接读该标志（装饰器丢 presentation 预算耗尽时写入）。
+  let truncated = entry.nestedCallsTruncated === true ||
+    details.nestedPresentationsTruncated === true || source.length > 128;
+  for (const value of source.slice(0, 128)) {
+    const call = asRecord(value);
+    const id = projected
+      ? (call.parentCallId === parent.id ? readString(call.callId) : undefined)
+      : Number.isSafeInteger(call.id) && (call.id as number) >= 0
+        ? parent.id + '/c' + call.id
+        : undefined;
+    const name = readString(call.name);
+    const outcome = readToolOutcome(call.status);
+    if (!id || !name || (!outcome && call.status !== 'running')) {
+      truncated = true;
+      continue;
+    }
+    const args = projected ? call.argsPreview : call.args;
+    const argSummary = typeof args === 'string' ? args.slice(0, 1024) : undefined;
+    const error = typeof call.error === 'string' ? call.error.slice(0, 2048) : undefined;
+    truncated ||= name.length > 256 || (typeof args === 'string' && args.length > 1024) ||
+      (typeof call.error === 'string' && call.error.length > 2048);
+    // 终态子调用的专用卡：投影行与 raw details.calls 行都可能带白名单
+    // presentation（codemode-presentations 装饰器按 cN 合入）；形状由渲染侧
+    // readToolPresentation 再校验，历史一律 presentationLive:false 不可交互。
+    const presentation = asRecord(call.presentation);
+    children.push({
+      id,
+      parentCallId: parent.id,
+      name: name.slice(0, 256),
+      // A final summary still marked running has no recorded outcome.
+      status: toolStatus(outcome, true),
+      outcome,
+      ...(argSummary !== undefined ? { argSummary } : {}),
+      ...(error !== undefined ? { error } : {}),
+      durationMs: readDuration(call.durationMs),
+      ...(Object.keys(presentation).length > 0 ? { presentation } : {}),
+      presentationLive: false,
+    });
+  }
+  mergeToolChildren(parent, children);
+  parent.nestedCallsTruncated = truncated;
 }
 
 function shortenPath(rawPath: string, maxLen = 44): string {
@@ -927,13 +1020,19 @@ export function parseHistoryEntries(
         if (Number.isFinite(numericId) && numericId > acc.turn.entryId) {
           acc.turn.entryId = numericId;
         }
-        const resolvedStatus: ChatToolCallItem['status'] = isError ? 'error' : 'done';
-        let matched = toolCallId ? acc.tools.find((t) => t.id === toolCallId) : undefined;
-        if (!matched && toolName) {
-          matched = acc.tools.find((t) => t.name === toolName && !acc.settledToolIds.has(t.id));
-        }
+        const presentationStatus = projectedPresentation?.status;
+        const outcome = readToolOutcome(entry.outcome) ??
+          (presentationStatus === 'cancelled' || presentationStatus === 'interrupted'
+            ? presentationStatus
+            : isError ? 'error' : 'ok');
+        const resolvedStatus = toolStatus(outcome, true);
+        const matched = toolCallId ? acc.tools.find((t) => t.id === toolCallId) : undefined;
         if (matched) {
           matched.status = resolvedStatus;
+          matched.outcome = outcome;
+          matched.presentationLive = false;
+          readNestedCalls(matched, entry);
+          acc.settledToolIds.add(matched.id);
           if (msgDurationMs !== undefined) matched.durationMs = msgDurationMs;
           if (resultOutput) matched.output = resultOutput;
           if (resultTruncated) matched.outputTruncated = true;
@@ -941,23 +1040,24 @@ export function parseHistoryEntries(
             matched.presentation = projectedPresentation;
             matched.presentationLive = false;
           }
-          acc.settledToolIds.add(matched.id);
         } else if (toolName) {
           const id = toolCallId || `${String(item.id ?? i)}-${mIdx}-result`;
           const tool: ChatToolCallItem = {
             id,
             name: toolName,
             status: resolvedStatus,
+            outcome,
             durationMs: msgDurationMs,
             ...(resultOutput ? { output: resultOutput } : {}),
             ...(resultTruncated ? { outputTruncated: true } : {}),
             ...(projectedPresentation ? { presentation: projectedPresentation, presentationLive: false } : {}),
           };
+          readNestedCalls(tool, entry);
+          acc.settledToolIds.add(id);
           acc.tools.push(tool);
           // 孤立 toolResult（分页窗口内未见调用侧）在轮尾追加展示组；
           // 已匹配的调用不移动位置，仅原地更新状态。
           accPushTool(acc, tool, false);
-          acc.settledToolIds.add(id);
         }
         if (acc.startMs === undefined && fallbackStart !== undefined) {
           acc.startMs = fallbackStart;
@@ -1013,18 +1113,24 @@ export function parseHistoryEntries(
       name: string,
       slot: Record<string, unknown> | undefined,
     ): ChatToolCallItem => {
-      const slotStatus: ChatToolCallItem['status'] = slot && slot.status === 'done' ? 'done' : 'running';
+      const outcome = readToolOutcome(slot?.outcome);
+      const status = toolStatus(outcome, slot?.status === 'done');
       const slotOutput = slot && typeof slot.output === 'string' ? slot.output.trim() : '';
-      const slotTruncated = slot?.truncated === true;
       const slotPresentation = asRecord(slot?.presentation);
       const hasPresentation = Object.keys(slotPresentation).length > 0;
       return {
         id,
         name,
-        status: slotStatus,
+        status,
+        outcome,
+        durationMs: readDuration(slot?.durationMs),
+        ...(typeof slot?.parentCallId === 'string' ? { parentCallId: slot.parentCallId } : {}),
+        ...(typeof slot?.argsPreview === 'string' ? { argSummary: slot.argsPreview } : {}),
+        ...(typeof slot?.error === 'string' ? { error: slot.error } : {}),
         ...(slotOutput ? { output: slotOutput } : {}),
-        ...(slotTruncated ? { outputTruncated: true } : {}),
-        ...(hasPresentation ? { presentation: slotPresentation, presentationLive: true } : {}),
+        outputTruncated: slot?.truncated === true,
+        ...(hasPresentation ? { presentation: slotPresentation } : {}),
+        presentationLive: hasPresentation && status === 'running',
       };
     };
     const isPlaced = (callId: string) =>
@@ -1034,12 +1140,14 @@ export function parseHistoryEntries(
     //    （历史已展示或本轮已放置）原地保留，新工具用 slot 数据就位。
     //    缺该字段（旧 Host）：不在此放工具，下面 slot 循环按尾部追加。
     let prevWasGenTool = false;
-    for (const block of genBlocks) {
+    for (const [blockIndex, block] of genBlocks.entries()) {
       if (block.type === 'text' && typeof block.text === 'string' && block.text) {
         accPushText(acc, block.text);
         prevWasGenTool = false;
       } else if (block.type === 'toolCall' && typeof block.name === 'string' && block.name.trim()) {
         const callId = typeof block.callId === 'string' ? block.callId : '';
+        // Nested slots belong only to their parent, even if an older projection also lists them here.
+        if (slotByCallId.get(callId)?.parentCallId) continue;
         // generation 提到的工具计入活跃集合：未 settled 的不被下面
         // running→done 扫描误标完成。
         if (callId) activeLiveIds.add(callId);
@@ -1053,7 +1161,7 @@ export function parseHistoryEntries(
             activeLiveIds.add(known.id);
           } else {
             const slot = callId ? slotByCallId.get(callId) : undefined;
-            const id = callId || `live-block-tool-${name}`;
+            const id = callId || `live-block-tool-${blockIndex}`;
             const tool = makeLiveTool(id, name, slot);
             acc.tools.push(tool);
             accPushTool(acc, tool, prevWasGenTool);
@@ -1064,48 +1172,56 @@ export function parseHistoryEntries(
       }
     }
 
-    // 2) live slot 更新：已定位工具原地更新状态；genBlocks 未覆盖的新 slot
-    //    （旧 Host 或截断）按尾部追加展示。
+    // 2) Place roots first, then attach children by ID; slot/completion order cannot flatten a child.
+    const toolsById = new Map<string, ChatToolCallItem>();
+    const indexTool = (tool: ChatToolCallItem) => {
+      toolsById.set(tool.id, tool);
+      for (const child of tool.children ?? []) indexTool(child);
+    };
+    for (const tool of acc.tools) indexTool(tool);
+    const nested: ChatToolCallItem[] = [];
     for (let sIdx = 0; sIdx < liveTools.length; sIdx++) {
       const slot = asRecord(liveTools[sIdx]);
       const callId = typeof slot.callId === 'string' ? slot.callId : '';
       const name = typeof slot.name === 'string' ? slot.name.trim() : '';
       if (!name) continue;
-      const slotStatus: ChatToolCallItem['status'] = slot.status === 'done' ? 'done' : 'running';
-      const slotOutput = typeof slot.output === 'string' ? slot.output.trim() : '';
-      const slotTruncated = slot.truncated === true;
-      const slotPresentation = asRecord(slot.presentation);
-      const hasPresentation = Object.keys(slotPresentation).length > 0;
-      const existing = callId
-        ? acc.tools.find((t) => t.id === callId)
-        : acc.tools.find((t) => t.name === name && !acc.settledToolIds.has(t.id));
+      const id = callId || `live-tool-${sIdx}`;
+      const tool = makeLiveTool(id, name, slot);
+      if (tool.parentCallId) {
+        // No stable ID means this child cannot be reconciled with a durable result.
+        if (callId) nested.push(tool);
+        continue;
+      }
+      activeLiveIds.add(id);
+      const existing = toolsById.get(id);
       if (existing) {
-        activeLiveIds.add(existing.id);
-        if (slotOutput && !existing.output) {
-          existing.output = slotOutput;
-          if (slotTruncated) existing.outputTruncated = true;
-        }
-        if (!acc.settledToolIds.has(existing.id)) {
-          existing.status = slotStatus;
-          if (slotOutput) {
-            existing.output = slotOutput;
-            if (slotTruncated) existing.outputTruncated = true;
-          }
-          if (hasPresentation) {
-            existing.presentation = slotPresentation;
-            existing.presentationLive = true;
-          }
-        }
+        if (!acc.settledToolIds.has(id)) Object.assign(existing, tool);
       } else {
-        const id = callId || `live-tool-${sIdx}`;
-        activeLiveIds.add(id);
-        const tool = makeLiveTool(id, name, slot);
         acc.tools.push(tool);
+        toolsById.set(id, tool);
         accPushTool(acc, tool, true);
       }
     }
+    // Index the child slots before linking, so a child's parent need not precede it in the frame.
+    for (const child of nested) {
+      if (!toolsById.has(child.id)) toolsById.set(child.id, child);
+    }
+    for (const child of nested) {
+      const parent = toolsById.get(child.parentCallId!);
+      if (!parent) continue;
+      activeLiveIds.add(child.id);
+      if (!acc.settledToolIds.has(parent.id)) activeLiveIds.add(parent.id);
+      const existing = parent.children?.find(item => item.id === child.id);
+      if (acc.settledToolIds.has(parent.id)) {
+        // A durable result is authoritative; a stale slot cannot reopen its interactive card.
+        if (existing) continue;
+        child.presentationLive = false;
+        if (child.status === 'running') child.status = 'done';
+      }
+      mergeToolChildren(parent, [child]);
+    }
 
-    // Earlier tool rounds in the same turn have already completed once a new round or text stream starts.
+    // Earlier slots are no longer running; without a result their outcome remains unknown.
     if (liveTools.length > 0 || streamingText !== '') {
       for (const tool of acc.tools) {
         if (tool.status === 'running' && !activeLiveIds.has(tool.id)) {

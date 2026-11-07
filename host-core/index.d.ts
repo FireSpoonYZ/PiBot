@@ -696,6 +696,7 @@ export interface Runtime {
   manageBotLearning(botId: string, input: BotLearningInput): Promise<Record<string, unknown>>;
   scheduleTask(botId: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
   /* Unified Shower environment (host.shower): the same six methods on every platform. */
+  vaultControl(input: VaultControlInput): Promise<VaultControlResult>;
   getShowerStatus(target: ShowerTarget): Promise<ShowerSession>;
   createShowerSession(target: ShowerTarget, input?: ShowerCreateOptions): Promise<ShowerSession>;
   getShowerFrame(target: ShowerTarget, sessionId: string, limits?: ShowerFrameLimits): Promise<ShowerFrame>;
@@ -792,7 +793,17 @@ export interface QuestionnairePresentation {
   result?: QuestionnaireResultPresentation;
 }
 
-export type ToolPresentation = TodoPresentation | QuestionnairePresentation;
+export interface VaultUnlockPresentation {
+  kind: 'vault-unlock';
+  version: 1;
+  installationId: string;
+  conversationId: number;
+  requestId: string;
+  mode: 'initialize' | 'unlock';
+  status: 'pending' | 'unlocked' | 'cancelled' | 'interrupted';
+}
+
+export type ToolPresentation = TodoPresentation | QuestionnairePresentation | VaultUnlockPresentation;
 
 /**
  * Live preview types (module 6): bounded, non-durable projection frames for a
@@ -803,6 +814,19 @@ export type ToolPresentation = TodoPresentation | QuestionnairePresentation;
 export interface LiveMessageToolCall {
   callId: string;
   name: string;
+}
+
+/** Bounded codemode child summary, not a separate model-issued tool call. */
+export interface NestedToolCallSummary {
+  callId: string;
+  parentCallId: string;
+  name: string;
+  argsPreview?: string;
+  status: 'running' | 'ok' | 'error' | 'cancelled' | 'interrupted';
+  durationMs?: number;
+  error?: string;
+  /** Whitelist projection of the nested call's result.details.presentation; absent on older Hosts. */
+  presentation?: ToolPresentation;
 }
 
 /**
@@ -847,6 +871,10 @@ export interface LiveMessage {
   timestamp?: number;
   durationMs?: number;
   toolCalls?: LiveMessageToolCall[];
+  /** Codemode result.details.calls only; absent on older Hosts. */
+  nestedCalls?: NestedToolCallSummary[];
+  /** True when child summaries are missing, invalid or cut by projection budgets. */
+  nestedCallsTruncated?: boolean;
   /** Original text/toolCall interleave for assistant messages; absent on older Hosts. */
   blocks?: LiveContentBlock[];
   /** Whitelist projection of the toolResult details.presentation; read-only. */
@@ -873,6 +901,12 @@ export interface LiveTool {
   droppedLines: number;
   entryId?: number;
   parentCallId?: string;
+  /** Bounded preview of nested slot.arguments; never the raw arguments object. */
+  argsPreview?: string;
+  /** Derived only from an available nested slot summary, never from status=done. */
+  outcome?: 'ok' | 'error' | 'cancelled' | 'interrupted';
+  durationMs?: number;
+  error?: string;
   /** Whitelist projection of the running tool's slot.details.presentation; read-only. */
   presentation?: ToolPresentation;
 }
@@ -1123,6 +1157,7 @@ export interface ControlClient {
   setBotSoul(botId: string, input: BotSoulUpdate, options?: ControlClientCallOptions): Promise<BotSoul>;
   manageBotLearning(botId: string, input: BotLearningInput, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
   scheduleTask(botId: string, input: Record<string, unknown>, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
+  vaultControl(input: VaultControlInput, options?: ControlClientCallOptions): Promise<VaultControlResult>;
   getShowerStatus(target: ShowerTarget, options?: ControlClientCallOptions): Promise<ShowerSession>;
   createShowerSession(target: ShowerTarget, input?: ShowerCreateOptions, options?: ControlClientCallOptions): Promise<ShowerSession>;
   getShowerFrame(target: ShowerTarget, sessionId: string, limits?: ShowerFrameLimits, options?: ControlClientCallOptions): Promise<ShowerFrame>;
@@ -1945,7 +1980,44 @@ export type RemoteControlOutcome = 'not-sent' | 'unconfirmed' | 'responded';
  * CONTROL_METHODS in remote-control-protocol.js for the authoritative list and
  * count); params/results reuse the DTOs above.
  */
+export interface VaultStatus {
+  initialized: boolean;
+  locked: boolean;
+  revision: number;
+  expiresAt: string | null;
+}
+export interface VaultItemMeta {
+  secretRef: string;
+  label: string;
+  username: string;
+  allowedBotIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+export interface VaultItemInput {
+  secretRef?: string;
+  label: string;
+  username?: string;
+  /** Omit only when editing to preserve the existing password. */
+  password?: string;
+  allowedBotIds: string[];
+}
+export type VaultControlInput =
+  | { action: 'status' | 'lock' | 'list' }
+  | { action: 'initialize' | 'unlock'; masterPassword: string }
+  | { action: 'respondUnlock'; requestId: string; masterPassword: string; cancelled?: false }
+  | { action: 'respondUnlock'; requestId: string; cancelled: true; masterPassword?: never }
+  | { action: 'save'; expectedRevision: number; item: VaultItemInput }
+  | { action: 'delete'; expectedRevision: number; secretRef: string }
+  | { action: 'changePassword'; masterPassword: string; newMasterPassword: string };
+export type VaultControlResult = VaultStatus
+  | { requestId: string; status: 'unlocked' | 'cancelled' }
+  | { revision: number; items: VaultItemMeta[] }
+  | { revision: number; item: VaultItemMeta }
+  | { revision: number };
+
 export interface RemoteControlMethodMap {
+  vaultControl: { params: VaultControlInput; result: VaultControlResult };
   getHostInfo: { params: Record<string, never>; result: ControlHostInfo };
   getServiceStatus: { params: Record<string, never>; result: HostServiceStatus };
   listBots: { params: Record<string, never>; result: BotRecord[] };

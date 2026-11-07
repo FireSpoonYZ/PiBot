@@ -1,5 +1,5 @@
 {
-  "productName": "e-助手",
+  "productName": "pibot",
   "version": "0.0.1",
   "identifier": "com.example.launcherprobe",
   "build": {
@@ -10,7 +10,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "e-助手",
+        "title": "pibot",
         "url": "index.html",
         "useHttpsScheme": true
       }

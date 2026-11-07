@@ -1110,7 +1110,7 @@ namespace ELauncher.Shower
                 definition = Invoke(service, "NewTask", new object[] { 0 });
 
                 object registrationInfo = Get(definition, "RegistrationInfo");
-                Set(registrationInfo, "Author", "ELauncher Shower");
+                Set(registrationInfo, "Author", "pibot Shower");
                 Set(registrationInfo, "Description", "一次性 SYSTEM bootstrap，运行后立即删除");
 
                 object principal = Get(definition, "Principal");

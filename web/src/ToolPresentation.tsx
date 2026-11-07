@@ -5,8 +5,10 @@ import type {
   TodoPresentation,
   QuestionnairePresentation,
   QuestionnaireAnswerPresentation,
+  VaultUnlockPresentation,
 } from '../../host-core/index.js';
 import { useText } from './ui';
+import { VaultUnlockCard } from './vault/VaultUnlockCard';
 import './tool-presentation.css';
 
 /**
@@ -18,7 +20,12 @@ import './tool-presentation.css';
  * 类型 type-only 引用 host-core 契约，不维护重复接口。
  */
 
-export type { ToolPresentation, TodoPresentation, QuestionnairePresentation };
+export type { ToolPresentation, TodoPresentation, QuestionnairePresentation, VaultUnlockPresentation };
+
+/** Private vaultControl response only; never submit through questionnaire or chat actions. */
+export type VaultUnlockSubmitPayload =
+  | { requestId: string; masterPassword: string; cancelled?: false }
+  | { requestId: string; cancelled: true };
 
 /** 提交参数签名：宿主侧固定 callCapabilityAction 的 request 部分；deviceId/botId 由父级补。
  * 用对象 type alias（非 interface）声明，保持对 ActionRequest.input 的 JsonValue 可赋值。 */
@@ -112,21 +119,32 @@ export function readToolPresentation(value: unknown): ToolPresentation | null {
     if (value.result !== undefined && !checkResult(value.result)) return null;
     return value as unknown as QuestionnairePresentation;
   }
+  if (value.kind === 'vault-unlock') {
+    if (Object.keys(value).some(key => !['kind', 'version', 'installationId', 'conversationId', 'requestId', 'mode', 'status'].includes(key))) return null;
+    if (!isNonEmptyString(value.requestId) || !isInt(value.conversationId) || value.conversationId < 0) return null;
+    if (value.mode !== 'initialize' && value.mode !== 'unlock') return null;
+    if (value.status !== 'pending' && value.status !== 'unlocked' && value.status !== 'cancelled' && value.status !== 'interrupted') return null;
+    return value as unknown as VaultUnlockPresentation;
+  }
   return null;
 }
 
 export interface ToolPresentationCardProps {
   presentation: ToolPresentation;
-  /** 仍活跃工具的 pending 问卷才可提交；历史 answered/cancelled 一律只读。 */
+  /** 仅当前活跃工具的 pending 交互可提交；历史卡片一律只读。 */
   active: boolean;
   disabled?: boolean;
   onSubmit?: (input: QuestionnaireSubmitPayload) => Promise<unknown>;
+  onSubmitVaultUnlock?: (input: VaultUnlockSubmitPayload) => Promise<unknown>;
 }
 
-export function ToolPresentationCard({ presentation, active, disabled = false, onSubmit }: ToolPresentationCardProps) {
+export function ToolPresentationCard({ presentation, active, disabled = false, onSubmit, onSubmitVaultUnlock }: ToolPresentationCardProps) {
   const t = useText();
   if (presentation.kind === 'todo') {
     return <TodoCard presentation={presentation} t={t} />;
+  }
+  if (presentation.kind === 'vault-unlock') {
+    return <VaultUnlockCard presentation={presentation} active={active} disabled={disabled} onSubmit={onSubmitVaultUnlock} />;
   }
   return (
     <QuestionnaireCard

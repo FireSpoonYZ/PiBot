@@ -187,7 +187,7 @@ export default function App() {
             <div className="mobile-topbar">
               <div className="brand-title">
                 <span className="brand-dot" aria-hidden="true" />
-                <span>E-Launcher 中心</span>
+                <span>pibot 中心</span>
               </div>
               <div className="shell-footer">
                 <button

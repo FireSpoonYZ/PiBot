@@ -121,7 +121,7 @@ pub fn status() -> AppResult<Value> {
         if !installed && raw_autostart {
             return Err(AppError::new(
                 "AUTOSTART_MIGRATION_REQUIRED",
-                "legacy autostart is present but the scheduled task is not installed; run 'e-launcher-host enable' to migrate",
+                "legacy autostart is present but the scheduled task is not installed; run 'pibot-host enable' to migrate",
             ));
         }
         Ok(json!({
@@ -155,7 +155,7 @@ mod linux_service {
     /// records the *calling* user's UID and absolute Host home under
     /// /var/lib/e-launcher/hosts/ for the package maintainer scripts; it never
     /// executes user-supplied commands and stores no secrets.
-    const HOSTCTL: &str = "/usr/lib/e-launcher-desktop/e-launcher-hostctl";
+    const HOSTCTL: &str = "/usr/lib/pibot/pibot-hostctl";
     const DROPIN_NAME: &str = "10-host-home.conf";
 
     /// `systemd/user/e-launcher-host.service.d` under the user's config home.

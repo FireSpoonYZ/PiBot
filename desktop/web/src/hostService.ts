@@ -1,4 +1,4 @@
-// 内置本机 Host（e-launcher-host 启动器）的 Tauri 命令封装。
+// 内置本机 Host（pibot-host 启动器）的 Tauri 命令封装。
 // 所有者密码与设备令牌只经 invoke 参数传给 Rust，再由 Rust 通过 stdin 交给启动器；不写 localStorage / 日志。
 import { invoke } from '@tauri-apps/api/core';
 

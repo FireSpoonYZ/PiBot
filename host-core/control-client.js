@@ -1,6 +1,7 @@
 // Control API client for the standalone Host control server (web-standard fetch only; no Node/Host imports).
 
 import { readControlLive, readWorkLive } from './control-live-client.js';
+import { normalizeVaultControl, safeVaultError } from './vault-protocol.js';
 
 export class ControlApiError extends Error {
   constructor(message, options = {}) {
@@ -371,6 +372,17 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     },
     // Unified Shower：参数顺序与 Runtime/远端 v2 方法表一致，body 恰为
     // {botId,scopeId?,...}；Actor/targetDeviceId 从不来自客户端。
+    async vaultControl(input, options) {
+      try {
+        return await request('POST', ['v1', 'vault'], { ...callOptions(options), body: normalizeVaultControl(input) });
+      } catch (error) {
+        if (error instanceof ControlApiError && ['NETWORK', 'BAD_RESPONSE'].includes(error.code)) {
+          throw new ControlApiError('Vault request is unconfirmed.', { code: error.code, status: error.status });
+        }
+        const safe = safeVaultError(error);
+        throw new ControlApiError(safe.message, { code: safe.code, status: error?.status });
+      }
+    },
     getShowerStatus(target, options) {
       return request('POST', ['v1', 'shower', 'status'], { ...callOptions(options), body: target });
     },

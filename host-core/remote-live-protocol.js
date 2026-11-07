@@ -3,12 +3,18 @@
 // Directional frame readers only: no ws/network/Runtime/database. Imports
 // message-protocol.js (ids) and the control error code table. Snapshot state
 // mirrors the existing BotLiveState projection exactly; unknown fields and
-// raw docs/task memory/thinking/arguments/signatures are rejected here.
+// raw docs/task memory/thinking/arguments/signatures are rejected here;
+// nested-call argument previews are a separate bounded string whitelist.
 
 import { messageError, assertId } from './message-protocol.js';
 import { normalizeDeviceName, normalizeDevicePlatform } from './device-metadata.js';
 import { CONTROL_ERROR_CODES } from './remote-control-protocol.js';
 import { normalizeToolPresentation } from './tool-presentation.js';
+import {
+  MAX_NESTED_CALLS, MAX_NESTED_CALLS_BYTES, MAX_NESTED_CALL_ID_UNITS,
+  MAX_NESTED_CALL_NAME_UNITS, MAX_TOOL_ARGS_PREVIEW_UNITS, MAX_TOOL_ERROR_UNITS,
+  NESTED_CALL_STATUSES, TOOL_OUTCOMES, isToolDuration,
+} from './tool-call-summary.js';
 
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
 
@@ -103,6 +109,8 @@ const MESSAGE_KEYS = new Set([
   'timestamp',
   'durationMs',
   'toolCalls',
+  'nestedCalls',
+  'nestedCallsTruncated',
   'presentation',
   'attachments',
   'blocks',
@@ -165,6 +173,57 @@ function normalizeLiveAttachments(value) {
   return out;
 }
 const MESSAGE_TOOL_CALL_KEYS = new Set(['callId', 'name']);
+const NESTED_CALL_KEYS = new Set([
+  'callId', 'parentCallId', 'name', 'argsPreview', 'status', 'durationMs', 'error', 'presentation',
+]);
+
+function assertBoundedSummaryText(value, label, max, nonblank = false) {
+  assertText(value, label);
+  if (value.length > max || (nonblank && value.trim() === '')) {
+    throw invalid(label + ' exceeds the bound or is blank');
+  }
+}
+
+function checkToolSummaryFields(value, label) {
+  if (value.argsPreview !== undefined) {
+    assertBoundedSummaryText(value.argsPreview, label + ' argsPreview', MAX_TOOL_ARGS_PREVIEW_UNITS);
+  }
+  if (value.error !== undefined) {
+    assertBoundedSummaryText(value.error, label + ' error', MAX_TOOL_ERROR_UNITS);
+  }
+  if (value.durationMs !== undefined && !isToolDuration(value.durationMs)) {
+    throw invalid(label + ' durationMs must be a finite nonnegative number at most MAX_SAFE_INTEGER');
+  }
+}
+
+function normalizeNestedCalls(value, parentCallId) {
+  if (!Array.isArray(value) || value.length > MAX_NESTED_CALLS) {
+    throw invalid('message nestedCalls must be an array of at most ' + MAX_NESTED_CALLS + ' items');
+  }
+  assertBoundedSummaryText(parentCallId, 'nestedCalls parent callId', MAX_NESTED_CALL_ID_UNITS, true);
+  if (Buffer.byteLength(JSON.stringify(value), 'utf8') > MAX_NESTED_CALLS_BYTES) {
+    throw invalid('message nestedCalls exceeds the byte budget');
+  }
+  const ids = new Set();
+  return value.map((call) => {
+    if (!isPlainObject(call)) throw invalid('nested call must be a plain object');
+    rejectUnknownFields(call, NESTED_CALL_KEYS, 'nested call');
+    assertBoundedSummaryText(call.callId, 'nested call callId', MAX_NESTED_CALL_ID_UNITS, true);
+    assertBoundedSummaryText(call.name, 'nested call name', MAX_NESTED_CALL_NAME_UNITS, true);
+    if (call.parentCallId !== parentCallId) throw invalid('nested call parentCallId must match the result');
+    if (ids.has(call.callId)) throw invalid('nested call callId must be unique');
+    ids.add(call.callId);
+    if (!NESTED_CALL_STATUSES.has(call.status)) throw invalid('nested call status must be a known outcome or running');
+    checkToolSummaryFields(call, 'nested call');
+    const out = { callId: call.callId, parentCallId, name: call.name, status: call.status };
+    for (const key of ['argsPreview', 'durationMs', 'error']) {
+      if (call[key] !== undefined) out[key] = call[key];
+    }
+    // Same whitelist as tool/message presentations; an invalid shape rejects the frame.
+    if (call.presentation !== undefined) out.presentation = normalizeToolPresentation(call.presentation);
+    return out;
+  });
+}
 // Ordered content blocks: same safe fields as text/toolCalls, no args or thinking.
 const MAX_MESSAGE_BLOCKS = 128;
 const MAX_BLOCK_TEXT_CHARS = 65536;
@@ -202,6 +261,10 @@ const TOOL_KEYS = new Set([
   'droppedLines',
   'parentCallId',
   'entryId',
+  'argsPreview',
+  'outcome',
+  'durationMs',
+  'error',
   'presentation',
 ]);
 // Roles emitted by the existing projection; no extra roles are invented here.
@@ -386,6 +449,17 @@ function normalizeLiveState(state) {
       }
       if (message.timestamp !== undefined) assertNonNegativeSafeInteger(message.timestamp, 'message timestamp');
       if (message.durationMs !== undefined) assertNonNegativeSafeInteger(message.durationMs, 'message durationMs');
+      if (message.nestedCalls !== undefined || message.nestedCallsTruncated !== undefined) {
+        if (message.role !== 'toolResult' || message.toolName !== 'codemode') {
+          throw invalid('nested call summaries are allowed only on codemode tool results');
+        }
+        if (message.nestedCallsTruncated !== undefined && typeof message.nestedCallsTruncated !== 'boolean') {
+          throw invalid('message nestedCallsTruncated must be a boolean');
+        }
+        if (message.nestedCalls !== undefined) {
+          message.nestedCalls = normalizeNestedCalls(message.nestedCalls, message.toolCallId);
+        }
+      }
       // Strict whitelist validation; replaces the value so any extra fields a
       // forged host added inside a presentation cannot reach clients.
       if (message.presentation !== undefined) message.presentation = normalizeToolPresentation(message.presentation);
@@ -442,6 +516,10 @@ function normalizeLiveState(state) {
     }
     if (tool.parentCallId !== undefined) assertText(tool.parentCallId, 'tool parentCallId');
     if (tool.entryId !== undefined) assertNonNegativeSafeInteger(tool.entryId, 'tool entryId');
+    checkToolSummaryFields(tool, 'tool');
+    if (tool.outcome !== undefined && !TOOL_OUTCOMES.has(tool.outcome)) {
+      throw invalid('tool outcome must be ok, error, cancelled or interrupted');
+    }
     if (tool.presentation !== undefined) tool.presentation = normalizeToolPresentation(tool.presentation);
   }
   assertNonNegativeSafeInteger(state.queuedCount, 'state.queuedCount');

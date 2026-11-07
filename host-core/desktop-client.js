@@ -1356,6 +1356,11 @@ export function openDesktopClient(options) {
     }
   }
 
+  function isLocalVaultCall(op, params) {
+    return op === 'call' && params.method === 'vaultControl' && phase === 'connected' &&
+      activeSession?.kind === 'local' && typeof activeSession.adapter === 'function';
+  }
+
   async function opCall(params, reqSignal) {
     rejectUnknownFields(params, new Set(['targetDeviceId', 'method', 'params']), 'call params');
     try {
@@ -1370,8 +1375,10 @@ export function openDesktopClient(options) {
       const code = err && err.code === 'REQUEST_TOO_LARGE' ? 'REQUEST_TOO_LARGE' : 'INVALID_ARGUMENT';
       throw brokerError(code, 'not-sent', err.message);
     }
-    await requireTargetReady(params.targetDeviceId, reqSignal);
-    requireCenter();
+    if (!isLocalVaultCall('call', params)) {
+      await requireTargetReady(params.targetDeviceId, reqSignal);
+      requireCenter();
+    }
     const session = requireConnectedSession();
     const sessionGen = session.generation;
     const timeout = withCallTimeout(reqSignal, controlBrokerTimeoutMs(normalized.method));
@@ -1782,7 +1789,7 @@ export function openDesktopClient(options) {
     if (!isPlainObject(params)) {
       throw invalid(`${op} params must be a plain object`);
     }
-    if (!CENTER_LIFECYCLE_OPS.has(op) && !LOCAL_OFFLINE_OPS.has(op)) requireCenter();
+    if (!CENTER_LIFECYCLE_OPS.has(op) && !LOCAL_OFFLINE_OPS.has(op) && !isLocalVaultCall(op, params)) requireCenter();
     if (op === 'settings_set') throw brokerError('NOT_CONNECTED', 'not-sent', 'settings are managed by the center');
     // unobserve only aborts a local subscription synchronously (no network, no wait): it must
     // never queue behind the 8 in-flight RPCs or a connect/disconnect switch (a switch already
