@@ -2029,6 +2029,7 @@ function PrimaryChatPane({
             starBadge={isPrimary && !isArchived}
             platformBadge={devicePlatform}
             busy={liveBusy}
+            offline={!online}
             size={30}
           />
           <span className="chat-header-pill-text">
@@ -3577,6 +3578,7 @@ export function BotChats({
             starBadge={isPrimaryActive}
             platformBadge={b.platform || 'host'}
             busy={false}
+            offline={!isBotOnline}
             size={46}
           />
         }
@@ -3778,6 +3780,7 @@ export function BotChats({
                 isPrimary
                 starBadge
                 platformBadge={b.platform || 'host'}
+                offline={!b.online || !online}
                 size={44}
               />
               <span className="hub-hero-info">

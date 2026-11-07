@@ -10,6 +10,7 @@ const columns: { key: BoardBucket; label: string }[] = [
   { key: 'working', label: '工作中' },
   { key: 'review', label: '待查看' },
   { key: 'idle', label: '空闲' },
+  { key: 'offline', label: '离线' },
 ];
 const timeText = (value: string) => new Date(value).toLocaleString();
 
@@ -27,7 +28,7 @@ export function BotBoard({ targets, board, onOpen, onBack, loading, error }: {
   const rows = targets.map(target => {
     const record = board.records.get(target.key);
     const item = record?.item;
-    const bucket = item ? botBoardBucket(item, board.seen.get(target.key)) : null;
+    const bucket = !target.online ? 'offline' : item ? botBoardBucket(item, board.seen.get(target.key)) : null;
     const stale = !target.online || !!record?.error || record?.generation !== target.generation;
     return { target, record, item, bucket, stale };
   });
@@ -42,15 +43,15 @@ export function BotBoard({ targets, board, onOpen, onBack, loading, error }: {
     // A disconnected clock freezes at the last successful snapshot.
     const clock = stale && record?.updatedAt ? Date.parse(record.updatedAt) : Date.now();
     const controlling = item?.activity.phase === 'stopping' || item?.activity.phase === 'interrupting';
-    return <button type="button" className="bot-board-card" key={target.key} onClick={() => {
+    return <button type="button" className={`bot-board-card${!target.online ? ' is-offline' : ''}`} key={target.key} onClick={() => {
       if (item?.lastResult) board.markViewed(target.key, item.lastResult.id);
       onOpen(target);
     }} aria-label={`打开 ${target.name} 的聊天 · ${target.deviceName}`}>
       <span className="bot-board-card-head">
-        <GrokBotAvatar botKey={target.avatarKey} roleName={target.name} size={40} />
+        <GrokBotAvatar botKey={target.avatarKey} roleName={target.name} offline={!target.online} size={40} />
         <span><strong>{target.name}</strong><small>{target.deviceName}</small></span>
       </span>
-      {stale && <span className="bot-board-warning">{!target.online ? '设备离线' : record?.error || '正在刷新'}</span>}
+      {stale && <span className={target.online ? 'bot-board-warning' : 'bot-board-offline-label'}>{!target.online ? '设备离线' : record?.error || '正在刷新'}</span>}
       <span className="bot-board-status">{item ? botActivityText(item.activity, zh => zh) : target.online ? '等待状态读取…' : '尚无状态快照'}</span>
       {!!item?.queuedCount && <small>排队 {item.queuedCount} 项</small>}
       {item?.attention && !controlling && <p>待回答 · {item.attention.count} 题<br />{item.attention.summary}</p>}

@@ -161,6 +161,7 @@ import './hub/schedules.css';
 // ---
 // @lane-imports:scopes
 import { PendingInbox } from './hub/PendingInbox';
+import { Dialog } from './components/ui/dialog';
 // ---
 
 export interface HostPageProps {
@@ -197,8 +198,10 @@ export function HostPage({
   const [avatarReturnScreen, setAvatarReturnScreen] = useState<HubScreen>('bot-edit');
   const [subPageReturnScreen, setSubPageReturnScreen] = useState<HubScreen>('bot-profile');
 
-  // Left drawer (always mounted in DOM for smooth slide-in & slide-out animation)
+  // Mobile navigation drawer shares the app's modal focus and dismissal behavior.
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
+  const navigationTriggerRef = useRef<HTMLButtonElement>(null);
+  const [libraryReturnScreen, setLibraryReturnScreen] = useState<'hub' | 'settings'>('settings');
 
   // Hub search
   const [searchQuery, setSearchQuery] = useState('');
@@ -3207,6 +3210,10 @@ ${newer}` : draftSnapshot;
 
   // Step-by-step Back Navigation for Android full-screen back gesture & hardware Back button
   const handleStepBack = useCallback((): boolean => {
+    if (leftDrawerOpen) {
+      setLeftDrawerOpen(false);
+      return true;
+    }
     if (roomDeleteModal) {
       if (!roomDeleteModal.submitting) {
         roomDeleteFetchSeqRef.current += 1;
@@ -3298,7 +3305,7 @@ ${newer}` : draftSnapshot;
       return true;
     }
     if (screen === 'archived-bots') {
-      setScreen('settings');
+      setScreen(libraryReturnScreen);
       return true;
     }
     if (screen === 'board') {
@@ -3306,7 +3313,7 @@ ${newer}` : draftSnapshot;
       return true;
     }
     if (screen === 'pending') {
-      setScreen('settings');
+      setScreen(libraryReturnScreen);
       return true;
     }
     if (screen === 'settings') {
@@ -3328,6 +3335,7 @@ ${newer}` : draftSnapshot;
     composerMenuOpen,
     chatSearchOpen,
     leftDrawerOpen,
+    libraryReturnScreen,
     screen,
     roomSettingsOpen,
     avatarReturnScreen,
@@ -3539,7 +3547,9 @@ ${newer}` : draftSnapshot;
     },
     onRun: command => void action.run(() => runSlashCommand(command)),
   });
-  const anyDrawerOpen = false;
+  const anyDrawerOpen = leftDrawerOpen;
+  const botIsOffline = (bot: UnifiedBotItem) => bot.hostKind === 'local'
+    ? localHost?.phase !== 'running' : !remoteConnected || bot.online === false;
   const primaryPreset = primaryBot
     ? resolveBotAvatarPreset(botAvatarKey(primaryBot), primaryBot.role, true)
     : JARVIS_AVATAR_PRESET;
@@ -3706,18 +3716,55 @@ ${newer}` : draftSnapshot;
   // @lane-hooks:schedules
   // ---
   // @lane-hooks:scopes
-  // 左上按钮仍调 setLeftDrawerOpen(true)：抽屉已删，语义改为直接进设置。
-  useEffect(() => {
-    if (!leftDrawerOpen) return;
-    setScreen('settings');
+  const navigateFromSidebar = (next: HubScreen) => {
+    setLibraryReturnScreen('hub');
     setLeftDrawerOpen(false);
-  }, [leftDrawerOpen]);
+    setScreen(next);
+  };
   // ---
 
   return (
     <div
       className={`bot-hub-shell${screen === 'bot-screen' ? ' is-fullscreen-computer' : ''}`}
     >
+      <Dialog
+        open={leftDrawerOpen}
+        onOpenChange={setLeftDrawerOpen}
+        title="pibot"
+        drawer
+        className="hub-navigation"
+        onCloseAutoFocus={event => {
+          event.preventDefault();
+          navigationTriggerRef.current?.focus();
+        }}
+      >
+        <nav className="hub-left-drawer-nav" aria-label={t('主导航', 'Main navigation')}>
+          {([
+            { screen: 'hub', label: t('对话', 'Chats'), Icon: MessageSquare },
+            { screen: 'board', label: t('Bot 看板', 'Bot board'), Icon: LayoutDashboard },
+            { screen: 'pending', label: t('待发消息', 'Pending messages'), Icon: Clock },
+            { screen: 'archived-bots', label: t('已归档 Bot', 'Archived Bots'), Icon: Archive },
+          ] as const).map(item => (
+            <button
+              key={item.screen}
+              type="button"
+              className="hub-left-nav-btn"
+              aria-current={screen === item.screen ? 'page' : undefined}
+              onClick={() => navigateFromSidebar(item.screen)}
+            >
+              <item.Icon size={20} aria-hidden />
+              <span>{item.label}</span>
+              <ChevronRight size={16} className="hub-left-nav-chevron" aria-hidden />
+            </button>
+          ))}
+        </nav>
+        <div className="hub-left-drawer-spacer" />
+        <footer className="hub-left-drawer-footer">
+          <button type="button" className="hub-left-settings-btn" onClick={() => navigateFromSidebar('settings')}>
+            <Settings size={20} aria-hidden /><span>{t('设置', 'Settings')}</span>
+          </button>
+        </footer>
+      </Dialog>
       {/* ==================== SCREEN 1: MAIN HUB (15844.jpg + PanelLeft icon) ==================== */}
       {/* 群聊/私聊子页打开时保持 hub DOM（隐藏不卸载）：返回来源滚动位置不丢。
           用显式 class 而非 hidden 属性，避免 author CSS display 覆盖。 */}
@@ -3742,11 +3789,14 @@ ${newer}` : draftSnapshot;
           <header className="hub-top-bar">
             <button
               type="button"
+              ref={navigationTriggerRef}
               className="hub-circle-btn hub-left-trigger"
-              aria-label={t('设置', 'Settings')}
+              aria-label={t('打开侧边栏', 'Open sidebar')}
+              aria-haspopup="dialog"
+              aria-expanded={leftDrawerOpen}
               onClick={() => setLeftDrawerOpen(true)}
             >
-              <Settings size={20} strokeWidth={2} />
+              <PanelLeft size={20} strokeWidth={2} />
             </button>
 
             {(() => {
@@ -3799,9 +3849,6 @@ ${newer}` : draftSnapshot;
             </button>
           </header>
 
-          <button type="button" className="bot-board-entry" onClick={() => setScreen('board')}>
-            <LayoutDashboard size={18} aria-hidden /> Bot 看板 <ChevronRight size={16} aria-hidden />
-          </button>
           <div
             className="hub-scroll-area"
             ref={hubScrollRef}
@@ -3816,6 +3863,7 @@ ${newer}` : draftSnapshot;
                 <HubPrimaryHero
                   bot={primaryBot}
                   preset={primaryPreset}
+                  offline={botIsOffline(primaryBot)}
                   label={`${primaryBot.role} · ${primaryBot.hostLabel} - ${t('点击进入文字对话', 'Tap to chat')}`}
                   onOpen={() => openBotChat(primaryBot, 'hub')}
                   onOpenMenu={(position) => setHubContextMenu({ ...position, bot: primaryBot })}
@@ -3945,6 +3993,7 @@ ${newer}` : draftSnapshot;
                     <HubBotRow
                       key={entry.pinKey}
                       item={item}
+                      offline={botIsOffline(item)}
                       preset={preset}
                       isPrimaryActive={isPrimaryActive}
                       snippet={snippet}
@@ -5290,7 +5339,7 @@ ${newer}` : draftSnapshot;
               <GrokBotAvatar preset={draftAvatar} size={118} />
             </div>
 
-            {/* White Rounded Card with Shapes/Expressions + 11 Color Swatches + Reset (15848.jpg) */}
+            {/* Avatar shapes, expressions and online colors. */}
             <section className="grok-avatar-card">
               {avatarTab === 'shape' ? (
                 <div className="grok-shapes-grid">
@@ -6027,7 +6076,7 @@ ${newer}` : draftSnapshot;
               <button
                 type="button"
                 className="grok-floating-circle-btn"
-                onClick={() => setScreen('settings')}
+                onClick={() => setScreen(libraryReturnScreen)}
                 aria-label={t('返回', 'Back')}
               >
                 <ArrowLeft size={20} />
@@ -6158,8 +6207,8 @@ ${newer}` : draftSnapshot;
             void syncRemoteBots();
           }}
           archivedCount={archivedBots.length}
-          onOpenArchivedBots={() => setScreen('archived-bots')}
-          onOpenPending={() => setScreen('pending')}
+          onOpenArchivedBots={() => { setLibraryReturnScreen('settings'); setScreen('archived-bots'); }}
+          onOpenPending={() => { setLibraryReturnScreen('settings'); setScreen('pending'); }}
           onOpenModelSheet={() => void openCenterManagement()}
           onOpenSystemSettings={onOpenSystemSettings}
         />
@@ -6172,8 +6221,8 @@ ${newer}` : draftSnapshot;
             <button
               type="button"
               className="grok-floating-circle-btn"
-              onClick={() => setScreen('settings')}
-              aria-label={t('返回设置', 'Back to settings')}
+              onClick={() => setScreen(libraryReturnScreen)}
+              aria-label={t('返回', 'Back')}
             >
               <ArrowLeft size={20} />
             </button>
@@ -6553,12 +6602,14 @@ ${newer}` : draftSnapshot;
 function HubPrimaryHero({
   bot,
   preset,
+  offline,
   label,
   onOpen,
   onOpenMenu,
 }: {
   bot: UnifiedBotItem;
   preset: GrokAvatarPreset;
+  offline: boolean;
   label: string;
   onOpen: () => void;
   onOpenMenu: (position: { x: number; y: number }) => void;
@@ -6573,6 +6624,7 @@ function HubPrimaryHero({
     >
       <GrokBotAvatar
         preset={preset}
+        offline={offline}
         isPrimary
         starBadge
         platformBadge={<PlatformLogoIcon platform={bot.platform} size={11} />}
@@ -6593,6 +6645,7 @@ function HubPrimaryHero({
 function HubBotRow({
   item,
   preset,
+  offline,
   isPrimaryActive,
   snippet,
   unread,
@@ -6603,6 +6656,7 @@ function HubBotRow({
 }: {
   item: UnifiedBotItem;
   preset: GrokAvatarPreset;
+  offline: boolean;
   isPrimaryActive: boolean;
   snippet: string;
   unread: boolean;
@@ -6614,7 +6668,7 @@ function HubBotRow({
 }) {
   return (
     <ConversationRow
-      className={`hub-bot-row${item.online === false ? ' is-offline' : ''}`}
+      className={`hub-bot-row${offline ? ' is-offline' : ''}`}
       title={item.role}
       preview={snippet}
       timestamp={timestampMs || null}
@@ -6623,6 +6677,7 @@ function HubBotRow({
       avatar={
         <GrokBotAvatar
           preset={preset}
+          offline={offline}
           isPrimary={isPrimaryActive}
           starBadge={isPrimaryActive}
           platformBadge={<PlatformLogoIcon platform={item.platform} size={11} />}
@@ -6631,7 +6686,7 @@ function HubBotRow({
       }
       onOpen={onOpen}
       onOpenMenu={onOpenMenu}
-      meta={item.hostLabel}
+      meta={`${item.hostLabel}${offline ? ' · 离线' : ''}`}
     />
   );
 }

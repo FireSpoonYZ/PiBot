@@ -1,5 +1,4 @@
-.bot-board-entry { display: flex; align-items: center; justify-content: center; gap: 8px; flex-shrink: 0; margin: 0 16px 12px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; color: var(--text); background: var(--surface); font: inherit; }
-.bot-board { box-sizing: border-box; width: 100%; height: 100%; min-height: 0; overflow: auto; padding: 24px; color: var(--text); background: var(--bg); }
+.bot-board { box-sizing: border-box; width: 100%; height: 100%; min-height: 0; overflow: auto; padding: calc(24px + var(--top, 0px)) 24px calc(24px + var(--bottom, 0px)); color: var(--text); background: var(--bg); }
 .bot-board-header, .bot-board-toolbar, .bot-board-card-head, .bot-board-search { display: flex; align-items: center; gap: 12px; }
 .bot-board-header { flex-wrap: wrap; margin-bottom: 20px; }
 .bot-board-header h1 { font-size: 22px; margin: 0; }
@@ -23,12 +22,14 @@
 .bot-board-card-head > span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .bot-board-card strong { font-size: 14px; }
 .bot-board-card p { margin: 0; font-size: 13px; white-space: pre-wrap; line-height: 1.6; }
+.bot-board-offline-label, .bot-board-card.is-offline .bot-board-status { color: var(--muted); font-size: 12px; }
+.bot-board-column.is-offline { background: color-mix(in srgb, var(--muted) 10%, var(--bg)); }
 .bot-board-status, .bot-board-open { font-size: 12px; color: var(--accent); }
 .bot-board-warning { color: var(--danger); font-size: 12px; line-height: 1.5; }
 .bot-board-unknown { margin-bottom: 16px; }
 .bot-board-unknown > div { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
 @media (max-width: 700px) {
-  .bot-board { padding: 16px; }
+  .bot-board { padding: calc(16px + var(--top, 0px)) 16px calc(16px + var(--bottom, 0px)); }
   .bot-board-header > span { width: 100%; }
   .bot-board-columns, .bot-board-unknown > div { grid-template-columns: 1fr; }
   .bot-board-column { padding: 10px; }

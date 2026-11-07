@@ -37,6 +37,15 @@
 .gbot-conversation-row[data-active] {
   background: var(--accent-soft, var(--selection, rgb(0 0 0 / 0.05)));
 }
+.gbot-conversation-row.hub-bot-row[data-pinned] {
+  background: color-mix(in srgb, var(--text) 11%, var(--bg));
+}
+.gbot-conversation-row.hub-bot-row[data-pinned]:hover {
+  background: color-mix(in srgb, var(--text) 16%, var(--bg));
+}
+.gbot-conversation-row.hub-bot-row[data-pinned][data-active] {
+  box-shadow: inset 3px 0 var(--accent);
+}
 .gbot-conversation-row__avatar {
   flex: none;
   display: inline-flex;

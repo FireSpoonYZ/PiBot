@@ -30,7 +30,6 @@ export const GROK_COLOR_PALETTE: ReadonlyArray<{ id: string; hex: string; labelZ
   { id: 'blue', hex: '#2B70F6', labelZh: '经典蓝', labelEn: 'Classic Blue' },
   { id: 'purple', hex: '#795BF2', labelZh: '星云紫', labelEn: 'Violet' },
   { id: 'pink', hex: '#DF4191', labelZh: '多巴胺粉', labelEn: 'Magenta' },
-  { id: 'gray', hex: '#6F7072', labelZh: '岩石灰', labelEn: 'Slate Gray' },
 ];
 
 export const GROK_SHAPE_ORDER: ReadonlyArray<{ shape: string; rotation: number; labelZh: string; labelEn: string }> = [
@@ -79,7 +78,7 @@ export const JARVIS_AVATAR_PRESET: GrokAvatarPreset = {
 
 export const GROK_AVATAR_PRESETS: ReadonlyArray<GrokAvatarPreset> = [
   { id: 'pink-wedge', shape: 'wedge', color: '#DF4191', rotation: 14, expressionIndex: 0, labelZh: '玫红三角', labelEn: 'Pink Wedge' },
-  { id: 'slate-cloud', shape: 'cloud', color: '#6F7072', rotation: -6, expressionIndex: 1, labelZh: '深灰云朵', labelEn: 'Slate Cloud' },
+  { id: 'slate-cloud', shape: 'cloud', color: '#48AB94', rotation: -6, expressionIndex: 1, labelZh: '松石云朵', labelEn: 'Teal Cloud' },
   { id: 'pink-pebble', shape: 'pebble', color: '#DF4191', rotation: -14, expressionIndex: 1, labelZh: '粉红胶囊', labelEn: 'Pink Pebble' },
   { id: 'coral-wedge', shape: 'wedge', color: '#EA403C', rotation: 32, expressionIndex: 0, labelZh: '珊瑚三角', labelEn: 'Coral Wedge' },
   { id: 'coral-pebble', shape: 'pebble', color: '#EA403C', rotation: -14, expressionIndex: 1, labelZh: '珊瑚胶囊', labelEn: 'Coral Pebble' },
@@ -91,6 +90,14 @@ export const GROK_AVATAR_PRESETS: ReadonlyArray<GrokAvatarPreset> = [
 ];
 
 const AVATAR_CONFIG_STORE_KEY = 'bot-hub-avatar-config-v2';
+const OFFLINE_COLOR = '#6F7072';
+
+// 旧灰色配置只调整显示颜色，保留形状及中心保存的数据。
+function onlineAvatarPreset(preset: GrokAvatarPreset): GrokAvatarPreset {
+  return preset.color.toUpperCase() === OFFLINE_COLOR
+    ? { ...preset, color: '#48AB94', labelZh: '松石青', labelEn: 'Teal' }
+    : preset;
+}
 
 export function getSavedAvatarConfigMap(): Record<string, GrokAvatarPreset> {
   try {
@@ -151,7 +158,7 @@ export function getDefaultBotAvatarPreset(botKey: string, _roleName?: string, is
 export function resolveBotAvatarPreset(botKey: string, roleName?: string, isPrimary?: boolean): GrokAvatarPreset {
   const saved = getSavedAvatarConfigMap()[botKey];
   if (saved && saved.shape && saved.color) {
-    return saved;
+    return onlineAvatarPreset(saved);
   }
   return getDefaultBotAvatarPreset(botKey, roleName, isPrimary);
 }
@@ -164,6 +171,7 @@ export interface GrokBotAvatarProps {
   starBadge?: boolean;
   platformBadge?: string | ReactNode;
   busy?: boolean;
+  offline?: boolean;
   size?: number;
   className?: string;
 }
@@ -225,11 +233,12 @@ export function GrokBotAvatar({
   starBadge = false,
   platformBadge,
   busy = false,
+  offline = false,
   size = 52,
   className = '',
 }: GrokBotAvatarProps) {
   const clipId = useId().replace(/:/g, '_');
-  const resolved = preset ?? resolveBotAvatarPreset(botKey || roleName || 'bot', roleName, isPrimary);
+  const resolved = preset ? onlineAvatarPreset(preset) : resolveBotAvatarPreset(botKey || roleName || 'bot', roleName, isPrimary);
   const shape = GROK_SHAPES[resolved.shape] ?? GROK_SHAPES.blob;
   const exprIdx = Math.min(Math.max(0, resolved.expressionIndex), GROK_EXPRESSIONS.length - 1);
   const [leftPath, rightPath] = GROK_EXPRESSIONS[exprIdx];
@@ -245,7 +254,7 @@ export function GrokBotAvatar({
 
   return (
     <span
-      className={`grok-bot-avatar${busy ? ' is-busy' : ''}${isPrimary ? ' is-primary' : ''}${className ? ` ${className}` : ''}`}
+      className={`grok-bot-avatar${busy && !offline ? ' is-busy' : ''}${offline ? ' is-offline' : ''}${isPrimary ? ' is-primary' : ''}${className ? ` ${className}` : ''}`}
       style={{ width: `${size}px`, height: `${size}px` }}
       aria-hidden="true"
     >
@@ -262,7 +271,7 @@ export function GrokBotAvatar({
           </clipPath>
         </defs>
         <g className="grok-bot-body-group">
-          <path d={shape.path} fill={resolved.color} transform={headTransform} />
+          <path d={shape.path} fill={offline ? OFFLINE_COLOR : resolved.color} transform={headTransform} />
           <g clipPath={`url(#${clipId})`} className="grok-bot-eyes-group">
             <path d={leftPath} fill="#ffffff" transform={leftTransform} />
             <path d={rightPath} fill="#ffffff" transform={rightTransform} />

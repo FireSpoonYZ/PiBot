@@ -271,7 +271,7 @@ export function ChatTranscript({
 
       {visibleTurns.length === 0 && !displayGeneratingText ? (
         <div className="desktop-transcript-empty bot-chat-empty">
-          <GrokBotAvatar preset={avatarPreset} isPrimary={bot.isPrimary} starBadge={bot.isPrimary} platformBadge={platformBadge} size={84} />
+          <GrokBotAvatar preset={avatarPreset} isPrimary={bot.isPrimary} starBadge={bot.isPrimary} platformBadge={platformBadge} offline={disabled} size={84} />
           <h2>{bot.role}</h2>
           <p>{bot.description || t('开始一段新的对话。', 'Start a new conversation.')}</p>
           {search.trim() ? (
