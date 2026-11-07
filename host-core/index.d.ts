@@ -704,7 +704,9 @@ export interface Runtime {
   /** Aborts the matching conversation, then returns the current session status. */
   takeoverShower(target: ShowerTarget, sessionId: string): Promise<ShowerSession>;
   releaseShowerSession(target: ShowerTarget, sessionId: string): Promise<Record<string, unknown>>;
-  /** Idempotently resume native tasks AND activate automatic room/DM processing; may submit new work. */
+  /** Internal Center notification; wakes webhook delivery without accepting public input. */
+  notifyWebhookReady(): void;
+  /** Idempotently resume native tasks AND activate automatic room/DM/webhook processing; may submit new work. */
   resume(): void;
   close(): Promise<void>;
 }
@@ -827,6 +829,8 @@ export interface Attribution {
   deviceId?: string;
   /** Display-only sender name; never an identity or routing key. */
   name?: string;
+  /** Trusted Host entry source only; never accepted from a user sender. */
+  sourceType?: 'webhook';
   channel: 'primary' | 'dm' | 'room';
   scopeId?: string;
   messageId?: string;
@@ -893,6 +897,7 @@ export interface LiveGeneration {
 export interface TurnAdmissionStatus {
   requestId: string;
   phase: 'queued' | 'checking' | 'synchronizing' | 'failed';
+  source?: 'primary' | 'background';
   error?: { code: string; message: string };
 }
 
@@ -913,6 +918,8 @@ export interface BotActivity {
   source: 'primary' | 'room' | 'dm' | 'background' | null;
   scopeId: string | null;
   requestId: string | null;
+  /** Center stop confirmation is pending; independent of the current local phase. */
+  webhookStopPending?: boolean;
   /** ISO 8601 timestamp of the current activity start; null when unknown. */
   startedAt: string | null;
   /**
@@ -1056,6 +1063,8 @@ export interface ControlServer {
   deviceId: string;
   url: string;
   close(): Promise<void>;
+  /** Internal Center SSE wakeup; not exposed as an HTTP/control operation. */
+  notifyWebhookReady(): void;
   /** Forwards runtime.restoreTurns(): cold-start pinned-turn recovery before resume. */
   restoreTurns(): Promise<void>;
 }

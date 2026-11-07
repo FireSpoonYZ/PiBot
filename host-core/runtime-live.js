@@ -56,6 +56,12 @@ function normalizeTurnAdmission(status) {
     throw errWithCode('turn admission phase must be queued, checking, synchronizing or failed', 'INVALID_ARGUMENT');
   }
   const normalized = { requestId: boundText(status.requestId, MAX_TURN_REQUEST_ID_CHARS), phase: status.phase };
+  if (status.source !== undefined) {
+    if (status.source !== 'primary' && status.source !== 'background') {
+      throw errWithCode('turn admission source must be primary or background', 'INVALID_ARGUMENT');
+    }
+    normalized.source = status.source;
+  }
   if (status.error !== undefined) {
     const error = status.error;
     if (typeof error !== 'object' || error === null || Array.isArray(error) ||
@@ -171,10 +177,14 @@ function resolveBotActivity(botId, runActivity, queuedCount, ctx) {
     return stripInternal(projected);
   }
   const admission = ctx.admissionByBot.get(botId) ?? null;
-  if (admission?.status?.phase === 'failed') return activity('failed');
+  if (admission?.status?.phase === 'failed') return activity('failed', {
+    source: admission.status.source ?? null,
+    requestId: admission.status.requestId,
+    ...(admission.status.error ? { error: admission.status.error } : {}),
+  });
   if (admission?.status !== null && admission?.status !== undefined) {
     return activity(admission.status.phase === 'queued' ? 'queued' : 'preparing', {
-      source: 'primary',
+      source: admission.status.source ?? null,
       requestId: admission.status.requestId,
     });
   }
@@ -191,8 +201,8 @@ function resolveBotActivity(botId, runActivity, queuedCount, ctx) {
   }
   // 原生 pi.inbox 已有 SDK 排队项但既无运行也无 admission/work pending：
   // 真实工作已入队，绝不能报 idle。排在空闲/手动 compacting 之前：排队的
-  // 真实输入比后台压缩更贴近用户等待。
-  if (queuedCount > 0) return activity('queued', { source: 'primary' });
+  // 真实输入比后台压缩更贴近用户等待；计数没有归属，不猜成 primary。
+  if (queuedCount > 0) return activity('queued');
   // 空闲/手动压缩低于真实排队：积压的真实输入比后台整理更贴近用户等待。
   if (projected?.phase === 'compacting') return stripInternal(projected);
   if (control === 'stopped') return activity('stopped');
@@ -201,7 +211,9 @@ function resolveBotActivity(botId, runActivity, queuedCount, ctx) {
 
 /** 合并统一 activity 进 primary 快照（恒写入，同 turnAdmission）。 */
 function withBotActivity(projected, botId, runActivity, ctx) {
-  return { ...projected, activity: resolveBotActivity(botId, runActivity, projected.queuedCount, ctx) };
+  const resolved = resolveBotActivity(botId, runActivity, projected.queuedCount, ctx);
+  if (ctx.webhookStopPendingByBot.has(botId)) resolved.webhookStopPending = true;
+  return { ...projected, activity: resolved };
 }
 
 /** 新的真实工作/排队输入出现：清掉旧 stopped control，防止新任务完结后又误显已停止。 */
@@ -244,7 +256,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
   // botId -> {pending:[…]}：work lane 推送的存活 pending 元数据快照；
   // 只投影进 primary watch 的统一 activity，绝不进 work watch（保持原历史）。
   const workByBot = new Map();
-  const activityCtx = { controlByBot, workByBot, admissionByBot };
+  const webhookStopPendingByBot = new Set();
+  const activityCtx = { controlByBot, workByBot, admissionByBot, webhookStopPendingByBot };
 
   function track(task) {
     inflight.add(task);
@@ -813,6 +826,12 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     }
   }
 
+  function setWebhookStopPending(botId, pending) {
+    if (pending) webhookStopPendingByBot.add(botId);
+    else webhookStopPendingByBot.delete(botId);
+    for (const w of watches) w._applyActivity(botId);
+  }
+
   async function close() {
     if (closedFlag) return;
     closedFlag = true;
@@ -828,7 +847,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     pendingByWork.clear();
     controlByBot.clear();
     workByBot.clear();
+    webhookStopPendingByBot.clear();
   }
 
-  return { watch, watchWork, bind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, close };
+  return { watch, watchWork, bind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, setWebhookStopPending, close };
 }

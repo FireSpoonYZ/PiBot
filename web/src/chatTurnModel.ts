@@ -11,6 +11,7 @@ export interface MessageAttribution {
   botId?: string;
   deviceId?: string;
   name?: string;
+  sourceType?: 'webhook';
   channel: 'primary' | 'dm' | 'room';
   scopeId?: string;
   messageId?: string;
@@ -318,6 +319,7 @@ export function normalizeAttribution(value: unknown): MessageAttribution | undef
   if (deviceId !== undefined) out.deviceId = deviceId;
   const name = readString(raw.name);
   if (name !== undefined) out.name = name;
+  if (kind === 'host' && raw.sourceType === 'webhook') out.sourceType = 'webhook';
   const scopeId = readString(raw.scopeId);
   if (scopeId !== undefined) out.scopeId = scopeId;
   const messageId = readString(raw.messageId);

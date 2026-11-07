@@ -47,6 +47,7 @@ import { createShowerManager } from './shower-manager.js';
 import { createShowerTools } from './shower-tools.js';
 import { createRuntimeShower } from './runtime-shower.js';
 import { createScheduleManager } from './host-schedules.js';
+import { createWebhookConsumer } from './host-webhooks.js';
 import { createScheduleTools } from './schedule-tools.js';
 import {
   attachmentPath,
@@ -722,6 +723,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
+  let resumed = false;
   let appliedRevision = null;
   let highestRevision = -1;
   let centerConfigured = false;
@@ -936,6 +938,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
   const close = () => {
     closing = true;
+    webhooks.pause();
     ++epoch;
     centerOnline = false;
     setOnline(false);
@@ -958,6 +961,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       const botClose = botAdmissions.close();
       // 依次执行并收集每步错误：任何一步失败仍继续清理，最后显式抛出。
       const errors = [];
+      try { await webhooks.close(); } catch (err) { errors.push(err); }
       try { turns.close(); } catch (err) { errors.push(err); }
       try { await decisions.close(); } catch (err) { errors.push(err); }
       // 学习驱动在 harness/store 释放前停止：取消在驱动作业与受限会话执行。
@@ -1040,6 +1044,25 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     // 不动主聊天用户轮、不清 Host 用户队列。work lane 未实现时静默跳过。
     preemptWork: (botId) => decisions.interruptBotWork?.(botId, { reason: 'preempted' }),
   });
+  const webhooks = createWebhookConsumer({
+    deviceId: host.deviceId,
+    getClient: () => centerRuntime.getClient(),
+    getRuntime: () => runtime,
+    isReady: () => resumed && centerOnline && !closing && !isMaintenance() && !turns.isRecoveryPending(),
+    getStopStates: turns.getStopStates,
+    acknowledgeStop: turns.acknowledgeStop,
+    submitWebhook: async (botId, input, capturedStopEpoch) => {
+      if (!resumed || !centerOnline || closing || isMaintenance() || turns.isRecoveryPending() ||
+          turns.stopped(botId) || turns.webhookStopPending(botId)) return null;
+      return submitPrimary(botId, {
+        ...input,
+        origin: {
+          sender: { kind: 'host', name: input?.origin?.sender?.name, sourceType: 'webhook' },
+          replyTo: null,
+        },
+      }, capturedStopEpoch);
+    },
+  });
   decisions.setTurnGate(turns.admitWorkDecision, turns.pump, turns.canRunWork);
   // 队列生命周期通知：pending 创建/结束/暂停/取消的纯元数据快照驱动统一 live 活动投影。
   decisions.setActivityListener?.((botId, summary) => live.setWorkActivity?.(botId, summary));
@@ -1060,7 +1083,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 先立停止 gate：beginStop 在首个 await 前同步推进进程代次并 arm gate，
       // 持久审计代次与 stopPending 崩溃恢复标记随后落盘；取消确认前无新执行。
       // beginStop 返回推进前代次（取消边界）：≤ 该值的受理属于停止前已受理的
-      // 输入与工作积压；本地计数经 restoreTurns 预载已对齐持久值，旧进程遗留
+      // 输入与工作积压；本地计数经 initializeBots 预载已对齐持久值，旧进程遗留
       // 队列条目（其持久 stopEpoch ≤ 预载基线）同样落在边界内，绝不漏取消。
       const epoch = await turns.beginStop(bot);
       // 再撤掉 Host 队列中已受理的未原生提交条目：仅作废旧代次受理（停止前的输入
@@ -1100,10 +1123,31 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 取消确认成功才解除 gate 并置 stopped：失败保留 gate 与 stopping 可见状态，
       // 绝不伪装成功/偷偷放行旧工作（stopPending 留作崩溃恢复边界）。
       await turns.settleStop(botId);
+      webhooks.wake();
       drainSelfSoul(botId);
     } catch (err) {
       throw err;
     }
+  }
+
+  // stopEpoch 由可信调用者在排队前捕获；内部 Webhook 保留 poll 前代次，绝不重捕获。
+  function submitPrimary(botId, input, stopEpoch) {
+    const kind = input?.origin?.sender?.kind === 'host' ? 'host' : 'user';
+    const trustedInput = {
+      ...input,
+      stopEpoch,
+      origin: {
+        sender: {
+          kind,
+          name: typeof input?.origin?.sender?.name === 'string' ? input.origin.sender.name : null,
+          ...(kind === 'host' && input?.origin?.sender?.sourceType === 'webhook' ? { sourceType: 'webhook' } : {}),
+        },
+        replyTo: typeof input?.origin?.replyTo === 'string' ? input.origin.replyTo : null,
+      },
+    };
+    // 离线只持久化，不通过会隐式 resume 的路径；本地停止不等待中心确认。
+    if (!centerOnline || turns.isRecoveryPending()) return turns.enqueue(botId, trustedInput);
+    return admitBot(botId, () => turns.enqueue(botId, trustedInput));
   }
 
   // 统一图形环境的 Runtime 门面：Actor 只来自可信主会话或工作绑定，绝不采信调用方会话。
@@ -1355,6 +1399,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
   function setCenterOnline(value) {
     if (!value) {
+      webhooks.pause();
       // 仅真实断线走这里：关闭准入、中止执行、卸载能力。
       ++epoch;
       centerOnline = false;
@@ -1388,6 +1433,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         botAdmissions.resume();
         learning.resume();
         schedules.notifyOnline();
+        webhooks.wake();
         await turns.nudgeAll();
         return activation;
       } catch (err) {
@@ -1644,6 +1690,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   const runtime = {
     async prepareUpdate({ stopActive = false } = {}) {
       setMaintenance(true);
+      webhooks.pause();
       learning.suspend();
       botAdmissions.suspend();
       await botAdmissions.drain();
@@ -1668,6 +1715,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         plugins.resumeAdmissions();
         learning.resume();
         schedules.notifyOnline();
+        webhooks.wake();
         await turns.nudgeAll();
       }
       return { maintenance: false };
@@ -1689,6 +1737,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
     async initializeBots() {
       await purgeExpiredArchivedBots();
+      // 控制入口开放前（包括离线启动）预载停止代次、恢复 gate 与中心待同步提示。
+      await turns.pendingStops();
       for (const bot of host.listBots()) await initializeBot(bot.botId);
     },
 
@@ -1806,25 +1856,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       assertNonBlank(botId, 'botId');
       // 停止代次必须在任何 await/排队前捕获：受理晚于停止的在飞 submit 以旧代次
       // 持久化并在同事务内作废为 cancelled 回执；停止后受理的新代次输入允许新运行。
-      const stopEpoch = turns.stopEpoch(botId);
-      const trustedInput = {
-        ...input,
-        stopEpoch,
-        origin: {
-          sender: {
-            kind: input?.origin?.sender?.kind === 'host' ? 'host' : 'user',
-            name: typeof input?.origin?.sender?.name === 'string' ? input.origin.sender.name : null,
-          },
-          replyTo: typeof input?.origin?.replyTo === 'string' ? input.origin.replyTo : null,
-        },
-      };
-      input = trustedInput;
-      // 离线或恢复未完成：准入 lane 挂起，泵不可能在飞——直接持久化受理（已鉴权本地动作）。
-      // nudge 由恢复后的 resume/nudgeAll 重新发起；绝不调用会隐式 resume 的路径。
-      if (!centerOnline || turns.isRecoveryPending()) {
-        return turns.enqueue(botId, input);
-      }
-      return admitBot(botId, () => turns.enqueue(botId, input));
+      return submitPrimary(botId, input, turns.stopEpoch(botId));
     },
 
     async wait(botId, requestId) {
@@ -1832,7 +1864,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       assertNonBlank(requestId, 'requestId');
       const bot = host.getBot(botId);
       if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
-      // Host 队列里尚未原生提交的条目先返回 queued 回执（受理存在，无原生记录可等）。
+      // 共享读取先对账残留队列的原生 done；否则返回 Host 受理/取消回执，不隐式恢复。
       const queued = await turns.queuedReceipt(bot, requestId);
       if (queued) return queued;
       const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
@@ -1864,7 +1896,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       assertNonBlank(requestId, 'requestId');
       const bot = host.getBot(botId);
       if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
-      // Host 队列里尚未原生提交的条目可见为 queued；否则落到原生记录。
+      // 共享读取先对账残留队列的原生 done；无队列条目时再查其他原生状态。
       const queued = await turns.queuedReceipt(bot, requestId);
       if (queued) return queued;
       const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
@@ -2049,6 +2081,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         // 恢复失败即向外传播——绝不置 stopped 伪装成功后继续恢复调度。
         try { live.setBotControl?.(bot.botId, 'stopping'); } catch { /* live 缺席 */ }
         try {
+          await turns.cancelQueued(bot, turns.stopEpoch(bot.botId) - 1);
           if (decisions.interruptBotWork) {
             // 已有 pending.interruption 的 scope 沿用其已捕获 through 边界（宕机后
             // 新到消息不被这次补停吞掉），由 work lane 的幂等标记保证。
@@ -2085,8 +2118,12 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     resume() {
       harness.resume();
       decisions.resume();
+      resumed = true;
       turns.nudgeAll().catch(() => {});
+      webhooks.wake();
     },
+
+    notifyWebhookReady: () => webhooks.wake(),
 
     watch(botId, options) {
       return live.watch(botId, options);
@@ -2098,7 +2135,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
     close,
   };
-  const lifecycleMethods = new Set(['initializeBots', 'applyCenterSnapshot', 'setCenterOnline', 'withCapabilityActivation', 'revokeCenterCapabilities', 'restoreTurns', 'prepareUpdate', 'cancelUpdate', 'getUpdateState', 'close']);
+  const lifecycleMethods = new Set(['initializeBots', 'applyCenterSnapshot', 'setCenterOnline', 'withCapabilityActivation', 'revokeCenterCapabilities', 'restoreTurns', 'prepareUpdate', 'cancelUpdate', 'getUpdateState', 'notifyWebhookReady', 'close']);
   // 离线/恢复暂停只放行本地已鉴权动作：持久 enqueue、被动回执/状态与取消。
   // 这些路径只用 Harness snapshot/commit/abortTask，不隐式 resume 调度器；
   // 模型、工具、问卷等执行路径仍受 Center 门禁（运行时本就对 SDK 抛离线错）。

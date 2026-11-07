@@ -15,6 +15,46 @@ export interface McpOAuthStatus { status: 'pending' | 'complete' | 'failed'; err
 export interface SetupStatus { required: boolean; publicUrl?: string; linkUrl?: string; tlsMode?: 'direct' | 'proxy' }
 export interface SetupRequest { setupToken: string; ownerPassword: string; publicUrl: string }
 
+export interface WebhookRoute {
+  id: string;
+  name: string;
+  deviceId: string;
+  botId: string;
+  instruction: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  url: string;
+}
+export interface WebhookEvent {
+  id: string;
+  routeId: string;
+  routeName: string;
+  deviceId: string;
+  botId: string;
+  requestId: string;
+  idempotencyKey: string;
+  status: 'pending' | 'dispatching' | 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'expired';
+  receivedAt: string;
+  expiresAt: string;
+  updatedAt: string;
+  cancelRequested: boolean;
+  admission?: {
+    phase: 'queued' | 'checking' | 'synchronizing' | 'failed';
+    error?: { code: string; message: string };
+  } | null;
+  error?: { code: string; message: string } | null;
+}
+export interface CreateWebhookRequest {
+  name: string;
+  deviceId: string;
+  botId: string;
+  instruction: string;
+  enabled?: boolean;
+}
+export interface UpdateWebhookRequest { name: string; instruction: string; enabled: boolean }
+export interface WebhookTokenReceipt { route: WebhookRoute; token: string }
+
 let csrfToken: string | null = null;
 export class CenterApiError extends Error {
   constructor(public code: string, message: string, public status: number, public details?: ApiError['error']['details']) {
@@ -94,6 +134,12 @@ export const api = {
   putModel: (providerId: string, modelId: string, body: RevisionWrite<Model>) => request<Model>(`/api/providers/${id(providerId)}/models/${id(modelId)}`, 'PUT', body),
   getModelConfig: () => request<ModelConfig>('/api/model-config'),
   putModelConfig: (body: RevisionWrite<ModelSelection>) => request<ModelConfig>('/api/model-config', 'PUT', body),
+  listWebhooks: () => request<{ items: WebhookRoute[] }>('/api/webhooks'),
+  createWebhook: (body: CreateWebhookRequest) => request<WebhookTokenReceipt>('/api/webhooks', 'POST', body),
+  updateWebhook: (routeId: string, body: UpdateWebhookRequest) => request<WebhookRoute>(`/api/webhooks/${id(routeId)}`, 'PUT', body),
+  rotateWebhookToken: (routeId: string) => request<WebhookTokenReceipt>(`/api/webhooks/${id(routeId)}/rotate-token`, 'POST', {}),
+  deleteWebhook: (routeId: string) => request<void>(`/api/webhooks/${id(routeId)}`, 'DELETE'),
+  listWebhookEvents: (routeId: string) => request<{ items: WebhookEvent[] }>(`/api/webhooks/${id(routeId)}/events`),
   listDevices: () => request<Device[]>('/api/devices'),
   getDeviceRuntimeStatus: (deviceId: string) => request<DeviceRuntimeStatus>(`/api/devices/${id(deviceId)}/runtime-status`),
   renameDevice: (deviceId: string, name: string) => request<Device>(`/api/devices/${id(deviceId)}`, 'PATCH', { name }),

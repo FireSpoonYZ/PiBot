@@ -14,7 +14,7 @@ import {
   type ChatTurn,
   type ChatToolCallItem,
 } from '../../../web/src/chatTurnModel';
-import { MessageAttribution as MessageAttributionBadge } from '../../../web/src/MessageAttribution';
+import { isWebhookAttribution, MessageAttribution as MessageAttributionBadge } from '../../../web/src/MessageAttribution';
 import {
   readToolPresentation,
   ToolPresentationCard,
@@ -312,16 +312,12 @@ export function ChatTranscript({
             turn.durationMs > 0 &&
             !(isLastAssistantTurn && isBusy);
           const turnAttr = turn.attribution;
-          // Host 触发器不是人类消息：user-role 的 kind=host 来源（工作触发/内部调度）
-          // 不显示来源徽标，避免误认作用户发言；其余真实来源（用户/对端 Bot）照常标记。
-          const showAttribution =
-            Boolean(turnAttr) && !(turn.role === 'user' && turnAttr?.kind === 'host');
           return (
             <article
               key={turn.id}
-              className={`bot-chat-bubble ${turn.role}${turn.isStreaming ? ' streaming' : ''}`}
+              className={`bot-chat-bubble ${isWebhookAttribution(turnAttr) ? 'assistant' : turn.role}${turn.isStreaming ? ' streaming' : ''}`}
             >
-              {showAttribution && turnAttr ? (
+              {turnAttr ? (
                 <MessageAttributionBadge attribution={turnAttr} />
               ) : null}
               {turn.role === 'assistant' && turn.blocks

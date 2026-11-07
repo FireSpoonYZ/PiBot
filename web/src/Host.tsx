@@ -78,7 +78,7 @@ import { useChatPins } from './gbot-ui/chatPins';
 import { SortablePinnedChat } from './gbot-ui/SortablePinnedChat';
 import type { MessageMember } from '../../host-core/index.js';
 import { createLocalScopeReadApi } from './local-scope-api';
-import { MessageAttribution } from './MessageAttribution';
+import { isWebhookAttribution, MessageAttribution } from './MessageAttribution';
 import './bot-communications-mobile.css';
 import type { DesktopDraftEntry, DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../host-core/desktop-client.js';
@@ -4152,9 +4152,9 @@ ${newer}` : draftSnapshot;
                 return (
                   <article
                     key={turn.id}
-                    className={`bot-chat-bubble ${turn.role}${turn.isStreaming ? ' streaming' : ''}`}
+                    className={`bot-chat-bubble ${isWebhookAttribution(attribution) ? 'assistant' : turn.role}${turn.isStreaming ? ' streaming' : ''}`}
                   >
-                    {attribution && attribution.kind !== 'host' && (
+                    {attribution && (
                       <MessageAttribution
                         attribution={attribution}
                         className="bot-chat-attribution"
@@ -4270,6 +4270,7 @@ ${newer}` : draftSnapshot;
             {chatStatusKind === 'admission' && (
               <div className="bot-chat-system-notice" role="status">
                 {chatAdmissionText}
+                {chatTurnAdmission?.source === 'background' ? t(' · 后台', ' · background') : null}
                 {chatTurnAdmission?.phase === 'failed' && (activeBot.hostKind === 'local'
                   ? <button type="button" className="hub-outline-btn" onClick={() => void retryAdmission()}>{t('重试发送', 'Retry sending')}</button>
                   : <button type="button" className="hub-outline-btn" onClick={() => void retryRemoteAdmission()}>{t('重试发送', 'Retry sending')}</button>
