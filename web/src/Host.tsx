@@ -946,6 +946,7 @@ export function HostPage({
     name: bot.role,
     deviceName: bot.hostKind === 'local' ? bot.hostLabel : remoteDevices.find(device => device.deviceId === bot.deviceId)?.displayName || '远程设备',
     avatarKey: botAvatarKey(bot),
+    isPrimary: bot.isPrimary,
     online: bot.hostKind === 'local' ? localHost?.phase === 'running' : !!bot.online && remoteConnected,
     read: async botIds => {
       if (bot.hostKind === 'local') {

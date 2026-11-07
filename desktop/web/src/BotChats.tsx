@@ -2572,6 +2572,7 @@ export function BotChats({
       name: bot.role,
       deviceName: boardDevices.find(device => device.deviceId === bot.deviceId)?.displayName || bot.deviceName || '未命名设备',
       avatarKey: botAvatarKey(bot),
+      isPrimary: bot.isPrimary,
       online: online && bot.online && reachable,
       read: botIds => api.call(targetIdentity, 'getBotBoard', { botIds }),
     };

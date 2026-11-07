@@ -10,6 +10,7 @@ export interface BotBoardTarget {
   name: string;
   deviceName: string;
   avatarKey: string;
+  isPrimary?: boolean;
   online: boolean;
   read: (botIds: string[]) => Promise<BotBoardSnapshot>;
 }

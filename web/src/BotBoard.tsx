@@ -48,7 +48,7 @@ export function BotBoard({ targets, board, onOpen, onBack, loading, error }: {
       onOpen(target);
     }} aria-label={`打开 ${target.name} 的聊天 · ${target.deviceName}`}>
       <span className="bot-board-card-head">
-        <GrokBotAvatar botKey={target.avatarKey} roleName={target.name} offline={!target.online} size={40} />
+        <GrokBotAvatar botKey={target.avatarKey} roleName={target.name} isPrimary={target.isPrimary} offline={!target.online} size={40} />
         <span><strong>{target.name}</strong><small>{target.deviceName}</small></span>
       </span>
       {stale && <span className={target.online ? 'bot-board-warning' : 'bot-board-offline-label'}>{!target.online ? '设备离线' : record?.error || '正在刷新'}</span>}
@@ -80,7 +80,7 @@ export function BotBoard({ targets, board, onOpen, onBack, loading, error }: {
     </nav>
     {error && <p role="alert" className="bot-board-warning">目录读取失败：{error}</p>}
     {board.storageError && <p role="alert" className="bot-board-warning">{board.storageError}</p>}
-    {filtered.some(r => r.stale && r.item) && <p className="bot-board-warning">以下保留最后一次读取的状态，请留意更新时间。</p>}
+    {filtered.some(r => r.stale && r.item) && <p className="bot-board-snapshot-note">以下保留最后一次读取的状态，请留意更新时间。</p>}
     {!targets.length && <p role="status">{loading ? '正在加载 Bot 目录…' : error ? '目录暂不可用，请恢复连接后重试。' : '还没有 Bot，请先在对话页创建。'}</p>}
     {!!targets.length && !filtered.length && <p role="status">没有符合筛选条件的 Bot。</p>}
     {filtered.some(r => r.bucket === null) && <section className="bot-board-unknown"><h2>状态未确认</h2><div>{filtered.filter(r => r.bucket === null).map(renderCard)}</div></section>}
