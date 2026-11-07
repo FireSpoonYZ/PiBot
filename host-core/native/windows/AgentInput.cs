@@ -202,6 +202,92 @@ namespace ELauncher.Shower
             SendMouse(0, 0, 0u, MouseMiddleUp, out ignored);
         }
 
+        // Private route: no CuaDriver, clipboard, key-name parsing or character-count receipts.
+        public static bool SecretInput(Dictionary<string, object> payload, AgentOpCancel cancel)
+        {
+            try
+            {
+                string unknown;
+                Dictionary<string, object> target;
+                string text;
+                if (AgentJson.HasUnexpectedField(payload, new string[] { "target", "text" }, out unknown)
+                    || !AgentJson.TryGetObject(AgentJson.Get(payload, "target"), out target)
+                    || AgentJson.HasUnexpectedField(target, new string[] { "x", "y", "windowId" }, out unknown)
+                    || !AgentJson.TryGetString(AgentJson.Get(payload, "text"), out text)
+                    || text.Length == 0 || text.Length > MaxTextChars) return false;
+                foreach (char c in text) if (c < 32 || c == 127) return false;
+                Rectangle screen;
+                string reason;
+                if (!AgentDesktop.TryGetScreen(out screen, out reason)) return false;
+                int x, y;
+                AgentFailure ignored;
+                if (!TryCoordinate(target, "x", screen.Width, out x, out ignored)
+                    || !TryCoordinate(target, "y", screen.Height, out y, out ignored)) return false;
+                if (cancel.Cancelled) return false;
+                IntPtr window = IntPtr.Zero;
+                object rawWindow = AgentJson.Get(target, "windowId");
+                if (rawWindow != null)
+                {
+                    if (!(rawWindow is int || rawWindow is long || rawWindow is decimal || rawWindow is double)) return false;
+                    decimal number = Convert.ToDecimal(rawWindow, CultureInfo.InvariantCulture);
+                    if (number <= 0 || number > 9007199254740991m || number != decimal.Truncate(number)) return false;
+                    window = new IntPtr((long)number);
+                    uint pid, session;
+                    if (!IsWindow(window) || GetWindowThreadProcessId(window, out pid) == 0
+                        || !ProcessIdToSessionId(pid, out session)
+                        || session != (uint)AgentNative.CurrentProcessSessionId()) return false;
+                    IntPtr root = GetAncestor(window, 2);
+                    // Restoring a minimized window would invalidate observed screen coordinates.
+                    if (root == IntPtr.Zero || IsIconic(root)) return false;
+                    if (GetAncestor(GetForegroundWindow(), 2) != root)
+                    {
+                        SetForegroundWindow(root);
+                        if (GetAncestor(GetForegroundWindow(), 2) != root) return false;
+                    }
+                    NativeRect bounds;
+                    if (!GetWindowRect(window, out bounds) || x + screen.X < bounds.Left
+                        || x + screen.X >= bounds.Right || y + screen.Y < bounds.Top
+                        || y + screen.Y >= bounds.Bottom) return false;
+                }
+                if (cancel.Cancelled || !MoveAbsolute(screen, x + screen.X, y + screen.Y, out ignored)) return false;
+                bool pressed = false;
+                try
+                {
+                    if (!SendMouse(0, 0, 0u, MouseLeftDown, out ignored)) return false;
+                    pressed = true;
+                    if (!SendMouse(0, 0, 0u, MouseLeftUp, out ignored)) return false;
+                    pressed = false;
+                }
+                finally
+                {
+                    if (pressed) SendMouse(0, 0, 0u, MouseLeftUp, out ignored);
+                }
+                if (window != IntPtr.Zero && GetAncestor(GetForegroundWindow(), 2) != GetAncestor(window, 2)) return false;
+                foreach (char c in text)
+                {
+                    if (cancel.Cancelled) return false;
+                    if (!SendUnicode(c, false, out ignored)) return false;
+                    if (!SendUnicode(c, true, out ignored)) return false;
+                }
+                return !cancel.Cancelled;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeRect { public int Left, Top, Right, Bottom; }
+        [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr window);
+        [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+        [DllImport("kernel32.dll")] private static extern bool ProcessIdToSessionId(uint pid, out uint session);
+        [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr window);
+        [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
+        [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+        [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out NativeRect rect);
+
         private static Dictionary<string, object> Click(Dictionary<string, object> input, Rectangle screen, AgentOpCancel cancel, out AgentFailure failure)
         {
             failure = null;

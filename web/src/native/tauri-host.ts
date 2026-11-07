@@ -167,6 +167,8 @@ class MobileBotHost implements BotHostPlugin {
     target: { kind: 'primary'; botId: string } | { kind: 'work'; botId: string; scopeId: string };
   }): Promise<{ observationId: string }> {
     // 显式观察要求就绪流；id 在异步请求前预占，失败/终态帧移除。
+    // 失败闩锁不裸拒绝：先经单飞行重连重建传输，仍不就绪才按未就绪拒绝。
+    if (!this.live && this.failed) await mobileReconnect().catch(() => {});
     if (!this.live) throw streamClosed();
     this.observations.add(options.observationId);
     try {
@@ -216,11 +218,13 @@ class MobileBotHost implements BotHostPlugin {
   /** 远端观察帧：与 hostFrame/voiceEvent 共用同一个原生事件流（内部，不扩公共插件接口）。 */
   addListener(event: 'clientFrame', listener: (event: DesktopObservationEvent) => void): Promise<PluginListenerHandle>;
   addListener(event: HostEvent, listener: (event: any) => void): Promise<PluginListenerHandle> {
-    // 失败 latch 期间不自动 listen；只有显式 reconnect 清 latch 并修复传输。
-    if (this.failed) return Promise.reject(streamClosed());
     const set = this.listeners[event];
     set.add(listener);
-    return this.subscribe().then(() => ({
+    // 失败闩锁期间登记先占位，再经单飞行重连修复传输；恢复失败回滚登记并按原样拒绝。
+    const ready = this.failed
+      ? mobileReconnect().then(() => this.subscribe())
+      : this.subscribe();
+    return ready.then(() => ({
       remove: async () => {
         set.delete(listener);
         // 只有没有其它本地注册时才取消本 UI 的订阅；取消在队列内复查注册数。
@@ -499,11 +503,22 @@ export function onboardingAction(action: OnboardingActionName): Promise<{ reques
   return mobileLocalRequest<{ requested: boolean }>('onboardingAction', { action });
 }
 
+// 恢复单飞行：并发触发共享同一次原生桥重建与事件传输重开；结算后下一次调用重新发起。
+let reconnectFlight: Promise<{ connected: boolean }> | undefined;
+
 /** 显式重建 IPC 会话并修复已保留监听器的事件传输；不重发观察或 mutation。 */
-export async function mobileReconnect(): Promise<{ connected: boolean }> {
-  const result = await request<{ connected: boolean }>('reconnect');
-  await active?.resetStream();
-  return result;
+export function mobileReconnect(): Promise<{ connected: boolean }> {
+  if (!reconnectFlight) {
+    const run = (async () => {
+      const result = await request<{ connected: boolean }>('reconnect');
+      await active?.resetStream();
+      return result;
+    })();
+    reconnectFlight = run;
+    const clear = () => { if (reconnectFlight === run) reconnectFlight = undefined; };
+    void run.then(clear, clear);
+  }
+  return reconnectFlight;
 }
 
 /**

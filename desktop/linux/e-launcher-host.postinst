@@ -5,7 +5,7 @@
 # should be restored (daemon-reload, re-enable, restart) failing keeps that
 # user's state file and makes this script exit non-zero, so dpkg reports the
 # configure as failed instead of claiming success with the restore basis
-# lost. `dpkg --configure e-launcher-desktop` retries from the kept state.
+# lost. `dpkg --configure pibot` retries from the kept state.
 #
 # abort-upgrade / abort-install / abort-remove / abort-deconfigure: the
 # package operation was rolled back after preinst/prerm had already stopped
@@ -28,7 +28,7 @@ for c in /usr/bin/systemctl /bin/systemctl /usr/local/bin/systemctl; do
 done
 RUNUSER=$(command -v runuser 2>/dev/null || :)
 
-log() { echo "e-launcher-host: $*"; }
+log() { echo "pibot-host: $*"; }
 
 user_name() { getent passwd "$1" 2>/dev/null | cut -d: -f1; }
 user_home() { getent passwd "$1" 2>/dev/null | cut -d: -f6; }
@@ -47,7 +47,7 @@ manager_up() {
 user_systemctl() {
   _uid="$1"; shift
   _name=$(user_name "$_uid")
-  [ -n "$_name" ] || { echo "e-launcher-host: no passwd entry for uid $_uid" >&2; return 1; }
+  [ -n "$_name" ] || { echo "pibot-host: no passwd entry for uid $_uid" >&2; return 1; }
   timeout "$CTL_TIMEOUT" "$RUNUSER" -u "$_name" -- env \
     "XDG_RUNTIME_DIR=/run/user/$_uid" \
     "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$_uid/bus" \
@@ -148,15 +148,37 @@ restore_states() {
   return "$_failed"
 }
 
+# Reverses the preinst staging done on a replacing install: moves the
+# registry/state dirs back out of /var/lib/e-launcher/pibot-rename/ so the
+# recorded per-user states stay visible to this package's lifecycle. An
+# unexpected existing target is an explicit failure — newer data is never
+# overwritten by the staged snapshot.
+unstage_dirs() {
+  _stage="/var/lib/e-launcher/pibot-rename"
+  [ -d "$_stage" ] || return 0
+  for _d in "$_stage"/*; do
+    [ -d "$_d" ] || continue
+    _base="${_d##*/}"
+    if [ -e "/var/lib/e-launcher/$_base" ]; then
+      log "cannot restore $_base: /var/lib/e-launcher/$_base already exists"
+      return 1
+    fi
+    mv "$_d" "/var/lib/e-launcher/$_base" || { log "cannot restore $_d"; return 1; }
+  done
+  rmdir "$_stage" 2>/dev/null || { log "cannot remove $_stage"; return 1; }
+}
+
 # The helper script and sudoers entry may land with loose modes depending on
 # the bundler; enforce the intended permissions. A chmod failure is logged,
 # not fatal to configure.
-chmod 0755 /usr/lib/e-launcher-desktop/e-launcher-hostctl 2>/dev/null \
+chmod 0755 /usr/lib/pibot/pibot-hostctl 2>/dev/null \
   || { log "cannot secure Host helper"; exit 1; }
-if [ -f /etc/sudoers.d/e-launcher-hostctl ]; then
-  chmod 0440 /etc/sudoers.d/e-launcher-hostctl 2>/dev/null \
+if [ -f /etc/sudoers.d/pibot-hostctl ]; then
+  chmod 0440 /etc/sudoers.d/pibot-hostctl 2>/dev/null \
     || { log "cannot secure Host sudoers entry"; exit 1; }
 fi
+
+unstage_dirs || exit 1
 
 case "${1:-}" in
   configure)

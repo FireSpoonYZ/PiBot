@@ -1,0 +1,14 @@
+.vault-panel { --bs-accent: var(--accent, #2b70f6); --bs-card: var(--surface); display: grid; gap: 14px; min-width: 0; color: var(--text); }
+.vault-panel h3, .vault-panel p { margin: 0; overflow-wrap: anywhere; }
+.vault-panel header { display: grid; gap: 6px; }
+.vault-hint { color: var(--muted); font-size: .85rem; }
+.vault-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.vault-panel fieldset { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 14px; }
+.vault-panel legend { margin-bottom: 14px; font-weight: 600; }
+.vault-panel label { display: grid; gap: 6px; font-size: .9rem; }
+.vault-panel .bs-input { border-color: var(--line); }
+.vault-permission { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.vault-items { display: grid; gap: 12px; list-style: none; margin: 0; padding: 0; }
+.vault-items li { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; }
+.vault-items li p { margin-top: 4px; }
+.vault-panel [role="alert"] { color: var(--danger); }

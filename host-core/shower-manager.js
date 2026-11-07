@@ -15,6 +15,9 @@ import { createLinuxShowerBackend } from './shower-linux.js';
 import { createWindowsShowerBackend } from './shower-windows.js';
 import { normalizeCuaRequest } from './cua-protocol.js';
 import {
+  normalizeShowerSecretTarget,
+  assertShowerSecretText,
+  secretInputFailure,
   normalizeShowerCreate,
   normalizeShowerFrameLimits,
   normalizeShowerInput,
@@ -34,7 +37,7 @@ const PHASES = new Set([
   'closed',
   'error',
 ]);
-const BACKEND_METHODS = ['status', 'ensure', 'frame', 'input', 'launch', 'release', 'close'];
+const BACKEND_METHODS = ['status', 'ensure', 'frame', 'input', 'secretInput', 'launch', 'release', 'close'];
 // Windows/Linux 每会话空闲回收固定 5 分钟；Android 保留其原生服务端既有策略。
 const IDLE_RELEASE_MS = 300_000;
 // Windows 全机只有一块子会话，因此所有归属共用一条串行队列；取消仍按 owner 区分。
@@ -571,6 +574,44 @@ export function createShowerManager({ dataRoot, nativeBridge, backend } = {}) {
     }
   }
 
+  // Plaintext is resolved only at the head of the existing owner FIFO, never queued.
+  async function secretInput(actor, sessionId, target, resolveText, options = {}) {
+    let sent = false;
+    begin();
+    try {
+      const bound = normalizeActor(actor);
+      const normalized = normalizeShowerSecretTarget(target);
+      const source = sourceOf(options);
+      if (typeof resolveText !== 'function') throw invalid('Invalid resolver');
+      const manager = await liveBackend();
+      return await run(bound, options.signal, async (signal) => {
+        const record = resolveSession(bound, sessionId);
+        clearIdleTimer(record.sessionId);
+        let text;
+        try {
+          text = await resolveText();
+          assertShowerSecretText(text);
+          if (signal.aborted) throw cancelled();
+          resolveSession(bound, sessionId);
+          sent = true;
+          const result = await manager.secretInput(record, { target: normalized, text },
+            callOptions(options, source, signal));
+          if (signal.aborted || result?.sessionId !== record.sessionId || result?.status !== 'applied') {
+            throw backendFailure('Secret input unconfirmed');
+          }
+          return { sessionId: record.sessionId, status: 'applied' };
+        } finally {
+          text = undefined;
+          touchSession(record);
+        }
+      });
+    } catch (error) {
+      throw secretInputFailure(error, sent);
+    } finally {
+      end();
+    }
+  }
+
   async function launch(actor, sessionId, value, options = {}) {
     const bound = normalizeActor(actor);
     const normalized = normalizeShowerLaunch(value);
@@ -651,5 +692,5 @@ export function createShowerManager({ dataRoot, nativeBridge, backend } = {}) {
     return closePromise;
   }
 
-  return { status, ensure, frame, input, launch, release, cua, cancel, close, prepare };
+  return { status, ensure, frame, input, secretInput, launch, release, cua, cancel, close, prepare };
 }

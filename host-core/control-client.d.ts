@@ -1,4 +1,6 @@
 import type {
+  VaultControlInput,
+  VaultControlResult,
   BotRecord,
   BotBoardParams,
   BotBoardSnapshot,
@@ -188,6 +190,7 @@ export interface ControlClient {
    * remote v2 params {botId, scopeId?, ...}; Actor/targetDeviceId are never
    * client supplied. takeover/release are not replayed.
    */
+  vaultControl(input: VaultControlInput, options?: ControlClientCallOptions): Promise<VaultControlResult>;
   getShowerStatus(target: ShowerTarget, options?: ControlClientCallOptions): Promise<ShowerSession>;
   createShowerSession(
     target: ShowerTarget,

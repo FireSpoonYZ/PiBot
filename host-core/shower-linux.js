@@ -24,6 +24,7 @@ import {
 import net from 'node:net';
 import path from 'node:path';
 import { messageError } from './message-protocol.js';
+import { normalizeShowerSecretTarget, assertShowerSecretText, secretInputFailure } from './shower-protocol.js';
 import { CuaMcpClient, validateCuaRequest } from './cua-mcp.js';
 import { resolveCuaDriverPath } from './cua-driver.js';
 import { SHOWER_MAX_FRAME_BASE64_BYTES } from './shower-protocol.js';
@@ -205,7 +206,7 @@ function logSuffix(logPath) {
 
 /** Run one program without a shell; the caller abort signal kills it immediately. */
 function runCommand(command, args, options = {}) {
-  const { env, signal, timeoutMs = COMMAND_TIMEOUT_MS, stdin = null, maxStdoutBytes = 8 * 1024 * 1024 } = options;
+  const { env, signal, timeoutMs = COMMAND_TIMEOUT_MS, stdin = null, maxStdoutBytes = 8 * 1024 * 1024, secret = false } = options;
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(messageError('CANCELLED', 'shower operation was cancelled'));
@@ -215,7 +216,7 @@ function runCommand(command, args, options = {}) {
     try {
       child = spawn(command, args, {
         env,
-        stdio: [stdin === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+        stdio: [stdin === null ? 'ignore' : 'pipe', secret ? 'ignore' : 'pipe', secret ? 'ignore' : 'pipe'],
       });
     } catch (error) {
       reject(messageError('SHOWER_BACKEND_FAILED', `${path.basename(command)} could not start: ${error.message}`));
@@ -225,10 +226,16 @@ function runCommand(command, args, options = {}) {
     let stdoutBytes = 0;
     let stderr = '';
     let settled = false;
+    let stoppedFailure = null;
     const timer = setTimeout(() => {
-      kill();
-      settle(messageError('SHOWER_BACKEND_FAILED', `${path.basename(command)} timed out after ${timeoutMs}ms`));
+      stop(messageError('SHOWER_BACKEND_FAILED', `${path.basename(command)} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
+    function stop(error) {
+      // Secret typing holds the owner FIFO until the killed process has actually exited.
+      if (secret) stoppedFailure = error;
+      kill();
+      if (!secret) settle(error);
+    }
     function kill() {
       try {
         child.kill('SIGKILL');
@@ -245,14 +252,13 @@ function runCommand(command, args, options = {}) {
       else resolve(value);
     }
     function onAbort() {
-      kill();
-      settle(messageError('CANCELLED', 'shower operation was cancelled'));
+      stop(messageError('CANCELLED', 'shower operation was cancelled'));
     }
     if (signal) signal.addEventListener('abort', onAbort, { once: true });
     child.on('error', (error) => {
       settle(messageError('SHOWER_BACKEND_FAILED', `${path.basename(command)} failed: ${error.message}`));
     });
-    child.stdout.on('data', (chunk) => {
+    child.stdout?.on('data', (chunk) => {
       stdoutBytes += chunk.length;
       if (stdoutBytes > maxStdoutBytes) {
         kill();
@@ -261,10 +267,10 @@ function runCommand(command, args, options = {}) {
       }
       stdout.push(chunk);
     });
-    child.stderr.on('data', (chunk) => {
+    child.stderr?.on('data', (chunk) => {
       if (stderr.length < LOG_TAIL_LIMIT) stderr += String(chunk);
     });
-    child.on('close', (code) => settle(null, { code, stdout: Buffer.concat(stdout), stderr }));
+    child.on('close', (code) => settle(stoppedFailure, { code, stdout: Buffer.concat(stdout), stderr }));
     if (stdin !== null && child.stdin) {
       child.stdin.on('error', () => {});
       child.stdin.end(stdin);
@@ -1292,6 +1298,34 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
     return { sessionId: state.sessionId, type: action.type, source: source ?? 'agent', callId: callId ?? null };
   }
 
+  async function secretInput(record, value, { signal } = {}) {
+    let sent = false;
+    try {
+      checkAborted(signal);
+      const state = requireReady(requireSession(record));
+      const target = normalizeShowerSecretTarget(value?.target);
+      assertShowerSecretText(value?.text);
+      if (target.x >= state.width || target.y >= state.height) {
+        throw messageError('INVALID_ARGUMENT', 'Secret input target invalid');
+      }
+      // XIDs are resolved by this private X server, never the physical display.
+      const args = target.windowId === undefined ? []
+        : ['windowactivate', '--sync', String(target.windowId), 'windowfocus', '--sync', String(target.windowId)];
+      args.push('mousemove', String(target.x), String(target.y), 'click', '1',
+        'type', '--clearmodifiers', '--delay', '12', '--file', '-');
+      checkAborted(signal);
+      sent = true;
+      const result = await runCommand(state.programs.xdotool, args, {
+        env: sessionEnv(state), signal, stdin: value.text, secret: true,
+      });
+      checkAborted(signal);
+      if (result.code !== 0) throw messageError('SHOWER_INPUT_FAILED', 'Secret input failed');
+      return { sessionId: state.sessionId, status: 'applied' };
+    } catch (error) {
+      throw secretInputFailure(error, sent);
+    }
+  }
+
   async function launch(record, value, { signal, source, callId } = {}) {
     checkAborted(signal);
     const state = requireReady(requireSession(record));
@@ -1347,5 +1381,5 @@ export function createLinuxShowerBackend({ dataRoot } = {}) {
     }
   }
 
-  return { platform: 'linux', status, ensure, frame, input, launch, cua, release, close };
+  return { platform: 'linux', status, ensure, frame, input, secretInput, launch, cua, release, close };
 }

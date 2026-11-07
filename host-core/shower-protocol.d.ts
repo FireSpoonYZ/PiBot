@@ -3,6 +3,12 @@
 // pure normalizer surface from shower-protocol.js. Re-exported by index.d.ts;
 // import from either module instead of redeclaring the shapes.
 
+/** Internal Vault path only; never accepted by sendShowerInput or CUA. */
+export interface ShowerSecretTarget { x: number; y: number; windowId?: number }
+export function normalizeShowerSecretTarget(value: unknown): ShowerSecretTarget;
+export function assertShowerSecretText(text: unknown): asserts text is string;
+export function secretInputFailure(error: unknown, sent?: boolean): Error & { code: string; outcome: 'not-sent' | 'unconfirmed' };
+
 export type ShowerPlatform = 'android' | 'windows' | 'linux';
 
 export type ShowerPhase =

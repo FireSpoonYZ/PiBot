@@ -17,6 +17,7 @@ import {
   FolderOpen,
   Globe,
   LayoutDashboard,
+  LockKeyhole,
   MessageSquare,
   Mic,
   Monitor,
@@ -90,6 +91,7 @@ import { BotScreenPanel } from './BotScreenPanel';
 import { BotBoard } from './BotBoard';
 import { botBoardKey, useBotBoard, useMarkViewedBoardResult, type BotBoardTarget } from './useBotBoard';
 import { BotModelSheet, type BotSettingsTab } from './BotModelSheet';
+import { VaultPanel, type VaultCall } from './vault/VaultPanel';
 import {
   GROK_AVATAR_PRESETS,
   GROK_COLOR_PALETTE,
@@ -116,14 +118,9 @@ import {
   parseHistoryEntries,
   visibleAssistantTextEntryIds,
   resolveActiveTurnStartedAt,
-  type ChatToolCallItem,
   type ChatTurnBlock,
 } from './chatTurnModel';
-import {
-  readToolPresentation,
-  ToolPresentationCard,
-  type QuestionnaireSubmitPayload,
-} from './ToolPresentation';
+import type { QuestionnaireSubmitPayload, VaultUnlockSubmitPayload } from './ToolPresentation';
 import {
   IMAGE_MAX_COUNT,
   IMAGE_MAX_TOTAL_BYTES,
@@ -141,9 +138,9 @@ import {
 import type { ImageAttachment } from '../../host-core/index.js';
 import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useText } from './ui';
 
-import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleRepeatLabel, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending, ChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, formatToolStepDuration, copyTextToClipboard, renderToolStepIcon, extractSmartArgEntries, ToolCallStepCard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
+import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleRepeatLabel, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending, ChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, copyTextToClipboard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
 // @lane-imports:settings
-import { Badge, Disclosure, Row, Section } from './bot-settings/primitives';
+import { Badge, Disclosure, Row, Section, SettingsSheet } from './bot-settings/primitives';
 import { ClientUpdateSection } from './ClientUpdateSection';
 // ---
 // @lane-imports:hub
@@ -399,6 +396,7 @@ export function HostPage({
     deleteAfterRun: false,
   });
 
+  const [vaultTargetKey, setVaultTargetKey] = useState<string | null>(null);
   const [modelTarget, setModelTarget] = useState<{ botKey: string; botId: string; center: string; identity: DesktopIdentity; api: DesktopPanelApi; tab: BotSettingsTab } | null>(null);
 
   const observeIdRef = useRef<string | undefined>(undefined);
@@ -1264,7 +1262,8 @@ export function HostPage({
     };
   }, [connectionEpoch]);
 
-  useEffect(() => onMobileStreamFailure(() => { chatLoadGeneration.current += 1; profileLoadGeneration.current += 1; cancelActiveObservation(); setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…')); }), [cancelActiveObservation]);
+  // 传输失效即撤陈旧 LIVE 与其中待定交互（历史保留只读），恢复后由新快照重建。
+  useEffect(() => onMobileStreamFailure(() => { chatLoadGeneration.current += 1; profileLoadGeneration.current += 1; cancelActiveObservation(); setChatLive(undefined); setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…')); }), [cancelActiveObservation]);
   useEffect(() => {
     const resume = () => { if (!document.hidden) setChatResumeEpoch(value => value + 1); };
     document.addEventListener('visibilitychange', resume);
@@ -2951,7 +2950,7 @@ ${newer}` : draftSnapshot;
 
   /** 问卷提交走现有 callCapabilityAction；deviceId/botId 由宿主授权，不自建协议。 */
   const submitQuestionnaire = useCallback(
-    async (presentation: { installationId: string }, input: QuestionnaireSubmitPayload) => {
+    async (installationId: string, input: QuestionnaireSubmitPayload) => {
       if (!activeBot) throw new Error(t('目标不可用，未提交', 'Target unavailable; not submitted'));
       if (activeBot.hostKind === 'local') {
         const deviceId = localHost?.deviceId;
@@ -2959,7 +2958,7 @@ ${newer}` : draftSnapshot;
         const env = await BotHost.call({
           method: 'callCapabilityAction',
           params: {
-            installationId: presentation.installationId,
+            installationId,
             action: 'answerQuestionnaire',
             request: { requestId: uuid(), deviceId, botId: activeBot.botId, input },
           },
@@ -2972,7 +2971,7 @@ ${newer}` : draftSnapshot;
         throw new Error(t('目标设备离线，未提交', 'Target device offline; not submitted'));
       }
       const res = await api.call(identity, 'callCapabilityAction', {
-        installationId: presentation.installationId,
+        installationId,
         action: 'answerQuestionnaire',
         request: { requestId: uuid(), deviceId: identity.targetDeviceId, botId: activeBot.botId, input },
       });
@@ -3589,6 +3588,38 @@ ${newer}` : draftSnapshot;
     showerHostKind === 'local' ? localHost?.phase === 'running' : showerRemoteReady;
   // 换主机/档案/设备/代/Bot 就换 key：旧画面与旧会话随卸载丢弃，不跨设备复用帧。
   const showerPreviewKey = `${showerHostKind ?? '-'}:${showerIdentity?.profileId ?? '-'}:${showerIdentity?.generation ?? '-'}:${showerIdentity?.targetDeviceId ?? '-'}:${showerBotId ?? '-'}:${showerHostKind === 'remote' ? showerRemoteReady : 'local'}`;
+
+  const vaultIdentityKey = JSON.stringify([activeCenter, activeBot?.key, activeBot?.deviceId,
+    activeBot?.hostKind, showerIdentity?.profileId, showerIdentity?.generation, showerIdentity?.kind]);
+  const vaultConnected = Boolean(showerConnected &&
+    (activeBot?.hostKind !== 'local' || activeBot.deviceId === localHost?.deviceId));
+  const callVault = useCallback<VaultCall>(input => {
+    if (!activeBot || !vaultConnected) return Promise.reject({ code: 'OFFLINE' });
+    if (activeBot.hostKind === 'local') {
+      if (localHostRef.current?.phase !== 'running' || localHostRef.current.deviceId !== activeBot.deviceId) {
+        return Promise.reject({ code: 'OFFLINE' });
+      }
+      return BotHost.call({ method: 'vaultControl', params: input }).then(envelope => envelope.result);
+    }
+    const api = remoteClientRef.current?.api;
+    const current = api?.identity;
+    if (!api || !api.transportConnected || !current || !showerIdentity ||
+      current.profileId !== showerIdentity.profileId || current.generation !== showerIdentity.generation ||
+      current.kind !== showerIdentity.kind) {
+      return Promise.reject({ code: 'NOT_CONNECTED' });
+    }
+    return api.call(showerIdentity, 'vaultControl', input);
+  }, [activeBot, vaultConnected, showerIdentity]);
+  // 主密码只走当前目标的私有控制通道，不进入聊天提交或待发队列。
+  const submitVaultUnlock = useCallback(
+    (input: VaultUnlockSubmitPayload) => callVault({ action: 'respondUnlock', ...input }),
+    [callVault],
+  );
+  const toolScopeKey = JSON.stringify([vaultIdentityKey, activeBot?.primaryConversationId, vaultConnected]);
+
+  useEffect(() => {
+    setVaultTargetKey(null);
+  }, [screen, vaultIdentityKey]);
 
   // @lane-hooks:settings
   // ---
@@ -4226,10 +4257,11 @@ ${newer}` : draftSnapshot;
                             <TurnToolCallsSection
                               key={block.id}
                               tools={block.tools}
-                              botKey={activeBot?.key ?? 'chat'}
-                              isBotBusy={isBotBusy}
-                              disabled={Boolean(activeBot?.archivedAt)}
+                              scopeKey={toolScopeKey}
+                              active={isBotBusy}
+                              disabled={Boolean(activeBot?.archivedAt) || !vaultConnected}
                               onSubmitQuestionnaire={submitQuestionnaire}
+                              onSubmitVaultUnlock={submitVaultUnlock}
                               t={t}
                             />
                           ) : (
@@ -4247,10 +4279,11 @@ ${newer}` : draftSnapshot;
                           {turn.tools && turn.tools.length > 0 && (
                             <TurnToolCallsSection
                               tools={turn.tools}
-                              botKey={activeBot?.key ?? 'chat'}
-                              isBotBusy={isBotBusy}
-                              disabled={Boolean(activeBot?.archivedAt)}
+                              scopeKey={toolScopeKey}
+                              active={isBotBusy}
+                              disabled={Boolean(activeBot?.archivedAt) || !vaultConnected}
                               onSubmitQuestionnaire={submitQuestionnaire}
+                              onSubmitVaultUnlock={submitVaultUnlock}
                               t={t}
                             />
                           )}
@@ -4744,6 +4777,17 @@ ${newer}` : draftSnapshot;
                 <span className="grok-row-value grok-row-value-path">
                   {getOrCreateRemoteClient ? t('设置', 'Settings') : t('请在独立助手中设置 Bot 能力', 'Set bot capabilities in the standalone assistant')}
                 </span>
+                <ChevronRight size={18} className="grok-row-chevron" />
+              </button>
+
+              <button
+                type="button"
+                className="grok-card-row"
+                onClick={() => setVaultTargetKey(vaultIdentityKey)}
+              >
+                <LockKeyhole size={20} className="grok-row-icon" />
+                <span className="grok-row-label">{t('密码库', 'Password Vault')}</span>
+                <span className="grok-row-value">{activeBot.hostLabel}</span>
                 <ChevronRight size={18} className="grok-row-chevron" />
               </button>
 
@@ -6232,6 +6276,14 @@ ${newer}` : draftSnapshot;
         (activeBot.hostKind === 'local' ? localHost?.deviceId : activeBot.hostId) === modelTarget.identity.targetDeviceId &&
         (screen === 'bot-profile' || (screen === 'bot-edit' && editMode === 'edit')) &&
         <BotModelSheet key={`${modelTarget.center}|${modelTarget.botKey}|${modelTarget.identity.generation}|${modelTarget.tab}`} api={modelTarget.api} identity={modelTarget.identity} botId={modelTarget.botId} initialTab={modelTarget.tab} onClose={() => setModelTarget(null)}/>}
+
+      {vaultTargetKey === vaultIdentityKey && activeBot && screen === 'bot-profile' ? (
+        <SettingsSheet title={t('密码库', 'Password Vault')} onClose={() => setVaultTargetKey(null)}>
+          <VaultPanel identityKey={vaultIdentityKey} botId={activeBot.botId}
+            hostLabel={`${activeBot.hostLabel} (${activeBot.deviceId})`}
+            connected={vaultConnected} call={callVault} />
+        </SettingsSheet>
+      ) : null}
 
       {/* Hub 群聊 / Bot 长按·右键·键盘上下文菜单 */}
       <ConversationContextMenu

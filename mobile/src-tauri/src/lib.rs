@@ -558,5 +558,5 @@ pub fn run() {
       mobile_host_unlisten,
     ])
     .run(tauri::generate_context!())
-    .expect("failed to run the e-launcher mobile UI");
+    .expect("failed to run the pibot mobile UI");
 }

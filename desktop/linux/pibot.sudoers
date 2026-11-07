@@ -1,5 +1,5 @@
-# e-launcher: let any local user register/unregister their own Host service
+# pibot: let any local user register/unregister their own Host service
 # entry and enable their own linger (calling UID + Host/XDG paths, no secrets) so DEB upgrade
 # scripts can find configured users. The helper validates SUDO_UID and its
 # arguments; it cannot execute arbitrary commands.
-ALL ALL=(root) NOPASSWD: /usr/lib/e-launcher-desktop/e-launcher-hostctl
+ALL ALL=(root) NOPASSWD: /usr/lib/pibot/pibot-hostctl

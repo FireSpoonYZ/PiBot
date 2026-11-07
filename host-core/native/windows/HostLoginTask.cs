@@ -14,7 +14,7 @@ namespace ELauncher.Shower
 {
     /// <summary>
     /// 每用户 Host 登录计划任务 "ELauncherHost-<userSid>" 的安装与日常控制。
-    /// 任务的 action 固定为同安装目录的 e-launcher-host.exe run（绝不接受外部传入的
+    /// 任务的 action 固定为同安装目录的 pibot-host.exe run（绝不接受外部传入的
     /// exe/参数），只允许管理员保护目录内的二进制；安装/启停/删除只作用于本交互会话
     /// 用户自己的任务，管理员代装给别的用户一律拒绝。
     ///
@@ -28,8 +28,8 @@ namespace ELauncher.Shower
     internal static class HostLoginTask
     {
         private const string TaskNamePrefix = "ELauncherHost-";
-        private const string LauncherExeName = "e-launcher-host.exe";
-        private const string NodeExeName = "e-launcher-client-node.exe";
+        private const string LauncherExeName = "pibot-host.exe";
+        private const string NodeExeName = "pibot-node.exe";
         private const string RuntimeDirName = "host-runtime";
         private const string HostHomeRelative = @"e-launcher\host-service";
         private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -557,8 +557,8 @@ namespace ELauncher.Shower
                 definition = Invoke(service, "NewTask", new object[] { 0 });
 
                 object registrationInfo = Get(definition, "RegistrationInfo");
-                Set(registrationInfo, "Author", "e-launcher");
-                Set(registrationInfo, "Description", "当前用户登录后运行的 Host 守护(e-launcher-host run)");
+                Set(registrationInfo, "Author", "pibot");
+                Set(registrationInfo, "Description", "当前用户登录后运行的 Host 守护(pibot-host run)");
 
                 object principal = Get(definition, "Principal");
                 Set(principal, "UserId", sessionSid);
@@ -724,7 +724,7 @@ namespace ELauncher.Shower
 
         /// <summary>
         /// 固定布局推导：native/shower-windows.exe → host-runtime → 安装目录；
-        /// launcher 一律为 &lt;installDir&gt;/e-launcher-host.exe（仅推导路径，不做保护校验）。
+        /// launcher 一律为 &lt;installDir&gt;/pibot-host.exe（仅推导路径，不做保护校验）。
         /// </summary>
         private static string ResolveLauncherPath(out string installDir)
         {

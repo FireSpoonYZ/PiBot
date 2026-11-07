@@ -1,9 +1,9 @@
 // 模块 6：Bot 主私聊实时投影的纯 helper。只读 ConversationView，不触发调度、不写记录，
 // 不调用 Session；由 runtime-live.js 与传输/客户端消费。无新依赖。
 //
-// 安全窗口：仅投影文本与当前工具安全字段，不透传 raw docs、task memory、参数或签名。
-// 工具 details 只经 tool-presentation.js 白名单投影 presentation；其他 details 字段
-// （diagnostics、参数、凭据等）永不跨越此边界。
+// 安全窗口：仅投影文本与工具安全字段，不透传 raw docs、task memory、原始参数或签名。
+// 工具 details 只投影白名单 presentation 与 codemode calls 的有界摘要；
+// 子槽参数仅保留有界预览，不转发其他 details、diagnostics 或凭据结构。
 // 性能：历史/消息均从最新向前扫描，找到上限即停止，不遍历/暂存全部原文。
 //
 // 统一会话：host.scope-message 只渲染对端原文（不渲染 Host 包装 JSON），
@@ -16,6 +16,7 @@
 // projectLiveState 只产出真实运行那一层，其余由 runtime-live 注入。
 
 import { projectToolPresentation, toolPresentationBytes } from './tool-presentation.js';
+import { projectCodemodeCalls, projectNestedToolFields } from './tool-call-summary.js';
 import { MAX_LIVE_JSON_BYTES } from './remote-live-protocol.js';
 import { deriveEntryAttribution } from './bot-session-context.js';
 
@@ -183,6 +184,12 @@ function projectMessage(message, budget, entry) {
       // 存在 presentation 但超界/不合规/超总预算：省略结构，置 truncated 标示消息不完整。
       projected.truncated = true;
     }
+    if (message.toolName === 'codemode') {
+      const summary = projectCodemodeCalls(message.details?.calls, message.toolCallId, budget.limit - budget.used, message.details?.nestedPresentationsTruncated === true);
+      Object.assign(projected, summary);
+      if (summary.nestedCalls !== undefined) budget.take(summary.nestedCalls);
+      if (summary.nestedCallsTruncated) projected.truncated = true;
+    }
   } else if (role === 'assistant') {
     if (toolCalls.length > 0) projected.toolCalls = toolCalls;
     const ordered = orderedBlocksFromContent(message.content, MAX_MESSAGE_UNITS);
@@ -284,7 +291,12 @@ function entryTextUnits(entry) {
   return units;
 }
 
-/** 投影一个工具槽：只带安全字段与白名单 presentation，不带任务内存/其他 details/参数/诊断。 */
+function isPendingInteraction(presentation) {
+  return presentation?.status === 'pending' &&
+    (presentation.kind === 'questionnaire' || presentation.kind === 'vault-unlock');
+}
+
+/** 投影工具槽、白名单 presentation 与嵌套摘要，不带原始参数/details/诊断。 */
 function projectTool(slot, budget) {
   const truncated = (slot.droppedBytes ?? 0) > 0 || (slot.droppedLines ?? 0) > 0;
   const tool = {
@@ -296,7 +308,13 @@ function projectTool(slot, budget) {
     droppedBytes: slot.droppedBytes ?? 0,
     droppedLines: slot.droppedLines ?? 0,
   };
-  if (typeof slot.parentCallId === 'string') tool.parentCallId = slot.parentCallId;
+  if (typeof slot.parentCallId === 'string') {
+    tool.parentCallId = slot.parentCallId;
+    const { truncated: summaryTruncated, ...summary } = projectNestedToolFields(slot);
+    Object.assign(tool, summary);
+    budget.take(summary);
+    if (summaryTruncated) tool.truncated = true;
+  }
   if (typeof slot.entry === 'number') tool.entryId = slot.entry;
   if (typeof slot.output === 'string' && slot.output !== '') {
     const tail = truncateTail(slot.output, MAX_TOOL_OUTPUT_UNITS);
@@ -450,7 +468,7 @@ export function emptyLiveState() {
 /**
  * 从 ConversationView 投影实时状态。历史从最新向前累计，50 条可显示后遇到第 51 条即停；
  * 总文本超 65536 单元丢弃最旧整条并立即 break，保证窗口是连续最新段。工具仅映射
- * tools/nestedTools 前 32 个。busy 由 pi.live.run 存在决定，queuedCount 取 pi.inbox.items 长度。
+ * tools/nestedTools 最多 32 个，待答交互优先。busy 由 pi.live.run 存在决定，queuedCount 取 pi.inbox.items 长度。
  */
 export function projectLiveState(view, sessionState = null, extras = null) {
   const live = view.docs?.['pi.live'] ?? null;
@@ -462,23 +480,28 @@ export function projectLiveState(view, sessionState = null, extras = null) {
   let seenDisplayable = 0;
   let lastEntryId = null;
   let historyTruncated = false;
-  // 运行中工具优先占用 presentation 预算（pending 问卷优先但不豁免超限）；
+  // 运行中工具优先占用结构化预算（pending 问卷/Vault 优先但不豁免超限）；
   // 历史按从新到旧补充。预算是帧级字节余量：先按 envelope 常量预留，history
   // 按最坏情况计入实际字节后再收紧（见文件尾 fitPresentationBudget）。
   const budget = {
     limit: Math.max(0, MAX_LIVE_JSON_BYTES - FRAME_ENVELOPE_RESERVE_BYTES),
     used: 0,
     canFit(bytes) { return bytes <= this.limit - this.used; },
-    take(presentation) { this.used += toolPresentationBytes(presentation); },
+    take(value) { this.used += toolPresentationBytes(value); },
   };
 
   const liveTools = live?.tools ?? [];
   const nestedTools = live?.nestedTools ?? [];
   const tools = [];
-  const toolCount = Math.min(liveTools.length, MAX_TOOLS);
-  for (let i = 0; i < toolCount; i++) tools.push(projectTool(liveTools[i], budget));
-  const nestedCount = Math.min(nestedTools.length, MAX_TOOLS - tools.length);
-  for (let i = 0; i < nestedCount; i++) tools.push(projectTool(nestedTools[i], budget));
+  for (const pending of [true, false]) {
+    for (const slots of [liveTools, nestedTools]) {
+      for (const slot of slots) {
+        if (tools.length >= MAX_TOOLS) break;
+        if (isPendingInteraction(slot.details?.presentation) !== pending) continue;
+        tools.push(projectTool(slot, budget));
+      }
+    }
+  }
 
   for (let i = entries.length - 1; i >= 0; i--) {
     const projected = projectEntry(entries[i], sessionState, budget);
@@ -542,14 +565,27 @@ export function projectLiveState(view, sessionState = null, extras = null) {
 /**
  * 第二遍把整帧塞进预算：删 presentation 后仍可能超（文本 JSON 转义最坏 6 倍），
  * 按 旧历史presentation→整条旧历史→工具输出尾部→生成文本→工具presentation 的
- * 顺序逐级裁剪，每级后重算实际字节；新历史与待答问卷最后裁但不豁免上限。
+ * 顺序逐级裁剪，每级后重算实际字节；嵌套摘要先让位，待答问卷/Vault 最后裁但不豁免上限。
  */
 const FIT_FRAME_LIMIT = MAX_LIVE_JSON_BYTES - FRAME_ENVELOPE_RESERVE_BYTES;
 function fitPresentationBudget(state) {
   if (utf8JsonBytes(state) <= FIT_FRAME_LIMIT) return;
 
-  // 1) 历史 presentation：最旧条目、条目内最旧消息优先删。
   let deficit = utf8JsonBytes(state) - FIT_FRAME_LIMIT;
+  // 历史子调用摘要先让出预算，显式标示缺失，不能变成“没有子调用”。
+  for (const item of state.history) {
+    for (const message of item.messages) {
+      if (deficit <= 0) break;
+      if (!message.nestedCalls?.length) continue;
+      deficit -= utf8JsonBytes(message.nestedCalls) - 2;
+      message.nestedCalls = [];
+      message.nestedCallsTruncated = true;
+      message.truncated = true;
+    }
+    if (deficit <= 0) break;
+  }
+
+  // 1) 历史 presentation：最旧条目、条目内最旧消息优先删。
   for (const item of state.history) {
     for (const message of item.messages) {
       if (deficit <= 0) break;
@@ -627,15 +663,26 @@ function fitPresentationBudget(state) {
     }
   }
 
-  // 5) 运行中工具 presentation 最后裁（pending 问卷优先保留）：投影顺序逐个删。
+  // 5) 子槽预览先让位于活跃交互，身份/终态/耗时不删。
+  if (utf8JsonBytes(state) > FIT_FRAME_LIMIT) {
+    for (const tool of state.tools) {
+      if (tool.argsPreview === undefined && tool.error === undefined) continue;
+      delete tool.argsPreview;
+      delete tool.error;
+      tool.truncated = true;
+    }
+  }
+  // 6) 运行中 presentation 最后裁；pending 问卷和 Vault 同等优先。
   if (utf8JsonBytes(state) > FIT_FRAME_LIMIT) {
     let overflow = utf8JsonBytes(state) - FIT_FRAME_LIMIT;
-    for (const tool of state.tools) {
-      if (overflow <= 0) break;
-      if (tool.presentation === undefined) continue;
-      overflow -= utf8JsonBytes(tool.presentation);
-      delete tool.presentation;
-      tool.truncated = true;
+    for (const pending of [false, true]) {
+      for (const tool of state.tools) {
+        if (overflow <= 0) break;
+        if (tool.presentation === undefined || isPendingInteraction(tool.presentation) !== pending) continue;
+        overflow -= utf8JsonBytes(tool.presentation);
+        delete tool.presentation;
+        tool.truncated = true;
+      }
     }
     state.toolsTruncated = true;
   }

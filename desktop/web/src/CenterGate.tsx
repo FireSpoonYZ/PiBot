@@ -703,7 +703,7 @@ export function CenterGate({ children, onDisconnected }: Props) {
       <section className="gate-card">
         <div className="gate-hero">
           <GrokBotAvatar preset={JARVIS_AVATAR_PRESET} busy={connecting} size={72} />
-          <h1>{t('连接 e-助手中心', 'Connect to e-Assistant Center')}</h1>
+          <h1>{t('连接 pibot 中心', 'Connect to pibot Center')}</h1>
           <p className="gate-subtitle">
             {showPair
               ? t('输入中心地址与所有者密码，本机将自动注册并在后台运行 Host', 'Enter the center URL and owner password; this computer registers itself and runs the Host in the background')
