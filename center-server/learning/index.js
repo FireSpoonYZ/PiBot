@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { HERMES_SKILL_TOOLS } from '../skills/hermes-tools.js';
+import { learningTools, MEMORY_GUIDANCE } from './hermes-tools.js';
 
 const error = (code, message) => Object.assign(new Error(message), { code });
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -44,10 +45,10 @@ const MAX_STORED_RESULT_BYTES = 1024 * 1024;
 const MAX_MESSAGE = 2_000;
 
 // Methods the vendored Python may invoke via runHermes' onCall. Nothing else is answered.
-const ONCALL_METHODS = new Set(['agent.run', 'skill.call', 'memory.call']);
+const ONCALL_METHODS = new Set(['agent.run', 'skill.call', 'memory.call', 'schedule.call']);
 // Tool names the Host may execute inside an outstanding agent.run (upstream dispatch-side
-// whitelist: skills toolset + read-only file tools restricted to own skills; 'memory' is NOT
-// routed here — the Host maps it to Hindsight internally).
+// whitelist: skills toolset + read-only file tools restricted to own skills. Memory/material
+// tools execute locally on the Host; enqueueing them behind agent.run would deadlock.
 const REVIEW_TOOL_NAMES = new Set(['skills_list', 'skill_view', 'skill_manage', 'read_file', 'search_files']);
 // Review-scope origin for skills.hermes provenance, per job mode.
 const MODE_ORIGIN = { review: 'background_review', learn: 'background_review', curate: 'curator' };
@@ -55,7 +56,7 @@ const MODES = new Set(Object.keys(MODE_ORIGIN));
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
 // Snapshot/call fields the contract declares; anything else (e.g. credentials) never reaches
 // Python or the Host — provider credentials are never uploaded.
-const SNAPSHOT_KEYS = ['messages', 'model', 'provider', 'systemPrompt', 'sessionId', 'tools', 'memoryEnabled', 'span'];
+const SNAPSHOT_KEYS = ['messages', 'model', 'provider', 'systemPrompt', 'sessionId', 'tools', 'memoryEnabled', 'memory', 'span'];
 const AGENT_RUN_KEYS = ['prompt', 'messages', 'tools', 'allowedTools', 'maxIterations', 'maxInputTokens', 'model', 'provider', 'reasoningConfig', 'sessionId'];
 // Runtime credential field names stripped ONLY at the top level of a params object. Nested
 // content (transcript messages, tool schemas, tool args) is request source data and must pass
@@ -112,6 +113,7 @@ function stripTopCredentials(value) {
 function defaultSettings() {
   return {
     enabled: true,
+    reviewModelRef: null, curatorModelRef: null,
     review: { memoryEvery: DEFAULT_MEMORY_EVERY, skillEvery: DEFAULT_SKILL_EVERY },
     curator: {
       enabled: true, intervalHours: DEFAULT_CURATOR_INTERVAL_HOURS, minIdleHours: DEFAULT_CURATOR_MIN_IDLE_HOURS,
@@ -133,7 +135,12 @@ function defaultCounters() {
 function validateSettingsPatch(current, patch) {
   const next = { ...current, review: { ...current.review }, curator: { ...current.curator }, budget: { ...current.budget } };
   for (const key of Object.keys(patch)) {
-    if (!['enabled', 'review', 'curator', 'budget'].includes(key)) throw error('VALIDATION_FAILED', 'Unknown setting ' + key);
+    if (!['enabled', 'review', 'curator', 'budget', 'reviewModelRef', 'curatorModelRef'].includes(key)) throw error('VALIDATION_FAILED', 'Unknown setting ' + key);
+  }
+  for (const key of ['reviewModelRef', 'curatorModelRef']) {
+    if (patch[key] === undefined) continue;
+    if (patch[key] !== null && (typeof patch[key] !== 'string' || patch[key].length > 512 || !/^[^/\s]+\/.+/.test(patch[key]))) throw error('VALIDATION_FAILED', 'Invalid ' + key);
+    next[key] = patch[key];
   }
   if (patch.enabled !== undefined) next.enabled = boolIn(patch.enabled, 'enabled');
   if (patch.review !== undefined) {
@@ -278,6 +285,7 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
     Object.assign(merged.curator, stored.curator ?? {});
     Object.assign(merged.budget, stored.budget ?? {});
     if (typeof stored.enabled === 'boolean') merged.enabled = stored.enabled;
+    for (const key of ['reviewModelRef', 'curatorModelRef']) merged[key] = stored[key] ?? null;
     return { settings: merged, revision: row.revision };
   }
   function getCounters(deviceId, botId) {
@@ -346,7 +354,7 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
       if (typeof snapshot?.provider === 'string' && typeof snapshot?.model === 'string') {
         candidates.push({
           providerId: snapshot.provider,
-          modelId: snapshot.model.includes('/') ? snapshot.model.slice(snapshot.model.indexOf('/') + 1) : snapshot.model,
+          modelId: snapshot.model,
         });
       }
       const ref = store.getBotModelConfig(deviceId, botId).effective?.modelRef;
@@ -367,23 +375,28 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
 
   // Outbound params for one host-driven callback: whitelisted, credential-free, explicit finite budget.
   function hostCallParams(runtime, method, params) {
-    if (method === 'memory.call') return stripTopCredentials(object(params) ? params : {});
+    if (method !== 'agent.run') return stripTopCredentials(object(params) ? params : {});
     const source = object(params) ? params : {};
     const clean = {};
-    // Whitelist bounds the top level; declared fields pass through verbatim (byte-identical
-    // prompt/messages/tools the Python side built — cache parity is pointless if we rewrite them).
+    // Whitelist the top level; preserve transcripts, then supply the adapted tools/guidance.
     for (const key of AGENT_RUN_KEYS) {
       if (source[key] !== undefined) clean[key] = source[key];
     }
     if (typeof clean.prompt !== 'string' || !clean.prompt) throw error('INVALID_ARGUMENT', 'agent.run requires a prompt');
     if (!Array.isArray(clean.messages)) clean.messages = [];
-    // Center supplies the review tool schemas when the Python side sends none.
-    if (!Array.isArray(clean.tools) || !clean.tools.length) clean.tools = HERMES_SKILL_TOOLS;
-    const allowed = new Set(REVIEW_TOOL_NAMES);
-    if (runtime.memoryEnabled) allowed.add('memory');
+    // Center supplies the job-scoped tool surface; background forks cannot add material tools.
+    const tools = learningTools(runtime.job, HERMES_SKILL_TOOLS);
+    const allowed = new Set(tools.map((tool) => tool.function.name));
+    // Authoritative schemas replace definitions supplied by a fork or transcript.
+    clean.tools = tools;
+    clean.prompt += '\n\nManaged tool contract (overrides upstream file-memory/material instructions): ' + MEMORY_GUIDANCE +
+      ' Only advertised and allowed tools exist; read_file/search_files cover skills, not local source material. ' +
+      'Use learning_source for declared materials when advertised, never terminal/web_extract.';
+    if (runtime.job.sources.length) clean.prompt += '\nDeclared sources (zero-based indices): ' + json(runtime.job.sources);
     clean.allowedTools = Array.isArray(clean.allowedTools)
       ? clean.allowedTools.filter((name) => allowed.has(name))
       : [...allowed];
+    if (runtime.model) { clean.provider = runtime.model.provider; clean.model = runtime.model.model; }
     // Budgets are always explicit and finite toward the Host, whatever Python asked for.
     const iterations = Number(clean.maxIterations);
     clean.maxIterations = Number.isSafeInteger(iterations) && iterations >= 1 ? Math.min(iterations, runtime.budget.maxIterations) : runtime.budget.maxIterations;
@@ -438,7 +451,10 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
       if (typeof name !== 'string' || !name) throw error('INVALID_ARGUMENT', 'skill.call requires a name');
       return await skills.hermes(skillContext(runtime, 'skill-' + ++runtime.skillCalls), name, args);
     }
-    if (method === 'memory.call' && runtime.memoryEnabled !== true) {
+    if (method === 'schedule.call' && (runtime.job.mode !== 'curate' || !['referenced_skill_names', 'rewrite_skill_refs'].includes(params?.name))) {
+      throw error('FORBIDDEN', 'Schedule callbacks are restricted to curator skill references');
+    }
+    if (method === 'memory.call' && !learningTools(runtime.job, HERMES_SKILL_TOOLS).some((tool) => tool.function.name === 'memory')) {
       throw error('UNSUPPORTED_TARGET', 'Memory tools are not enabled for this job');
     }
     return await enqueueHostCall(runtime, method, params);
@@ -511,7 +527,7 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
       automatic: job.automatic,
       reviewMemory: job.reviewMemory ?? null,
       reviewSkills: job.reviewSkills ?? null,
-      tools: HERMES_SKILL_TOOLS,
+      tools: learningTools(job, HERMES_SKILL_TOOLS),
       budget: { ...runtime.budget },
       // Upstream 'curator' config section, original keys verbatim for the bound config provider.
       curator: {
@@ -524,7 +540,8 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
       },
       // Upstream 'auxiliary.background_review' task block: explicit finite aggregate input budget.
       auxiliary: {
-        background_review: { enabled: true, max_input_tokens: runtime.budget.maxInputTokens },
+        background_review: { enabled: true, max_input_tokens: runtime.budget.maxInputTokens, ...(job.mode === 'review' ? runtime.model : {}) },
+        curator: job.mode === 'curate' ? runtime.model : {},
       },
     };
     try {
@@ -578,11 +595,34 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
     };
   }
 
+  function auxiliaryModel(ref, deviceId) {
+    if (ref === null) return null;
+    const slash = ref.indexOf('/');
+    const provider = store.getProvider(ref.slice(0, slash));
+    const model = provider && store.listModels(provider.id).find((item) => item.id === ref.slice(slash + 1) && item.enabled);
+    if (!provider?.enabled || !model || (provider.credentialRef && !store.getCredential(provider.credentialRef)?.configured)) {
+      throw error('MODEL_NOT_FOUND', 'Auxiliary model must be enabled and configured');
+    }
+    // Match the existing device credential grant: learning never broadens that grant.
+    if (provider.credentialRef && !store.listDeviceBots(deviceId).some((bot) => {
+      const selected = store.getBotModelConfig(deviceId, bot.botId).effective?.modelRef;
+      if (typeof selected !== 'string') return false;
+      const split = selected.indexOf('/');
+      const granted = store.getProvider(selected.slice(0, split));
+      return granted?.enabled && granted.credentialRef === provider.credentialRef &&
+        store.listModels(granted.id).some((item) => item.id === selected.slice(split + 1) && item.enabled);
+    })) throw error('MODEL_NOT_FOUND', 'Auxiliary provider is not already granted to this Host');
+    return { provider: provider.id, model: model.id };
+  }
+
   function configure(identity, input) {
     const current = getSettings(identity.deviceId, identity.botId);
     if (input.expectedRevision !== current.revision) throw error('REVISION_CONFLICT', 'Revision does not match');
     if (input.config !== undefined && !object(input.config)) throw error('VALIDATION_FAILED', 'Invalid config');
     const merged = validateSettingsPatch(current.settings, input.config ?? {});
+    for (const key of ['reviewModelRef', 'curatorModelRef']) {
+      if (input.config?.[key] !== undefined) auxiliaryModel(merged[key], identity.deviceId);
+    }
     transaction(() => {
       settingsStmt.put.run(identity.deviceId, identity.botId, json(merged), current.revision + 1);
     });
@@ -600,6 +640,11 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
     const automatic = input.automatic === true;
     if (automatic && mode === 'learn') throw error('INVALID_ARGUMENT', 'Learning runs are explicit only');
     const snapshot = sanitizeSnapshot(input.snapshot, mode);
+    const sources = input.sources ?? [];
+    if (!Array.isArray(sources) || sources.length > 16 || sources.some((source) => typeof source !== 'string' || !source.trim() || source.length > 4096)) throw error('INVALID_ARGUMENT', 'Invalid sources');
+    if (sources.length && mode !== 'learn') throw error('FORBIDDEN', 'Sources are only allowed for manual learn');
+    const initialSettings = getSettings(identity.deviceId, identity.botId).settings;
+    const model = auxiliaryModel(mode === 'review' ? initialSettings.reviewModelRef : mode === 'curate' ? initialSettings.curatorModelRef : null, identity.deviceId);
     const focus = input.focus === undefined ? null : input.focus;
     if (focus !== null && (typeof focus !== 'string' || focus.length > 4_000)) throw error('INVALID_ARGUMENT', 'Invalid focus');
     // Tool-iteration count of the completed submission — upstream _iters_since_skill counts
@@ -610,7 +655,7 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
     if (bot.archivedAt) throw error('BOT_ARCHIVED', 'Bot is archived');
     const { deviceId, botId } = identity;
     const now = Date.now();
-    const fingerprint = createHash('sha256').update(stableJson({ mode, automatic, focus, snapshot, iterations })).digest('hex');
+    const fingerprint = createHash('sha256').update(stableJson({ mode, automatic, focus, snapshot, iterations, sources })).digest('hex');
 
     const admission = transaction(() => {
       const existing = parse(submissionStmt.get.get(deviceId, botId, input.requestId));
@@ -687,7 +732,7 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
       }
       const job = {
         jobId: 'job-' + randomUUID(), deviceId, botId, requestId: input.requestId,
-        mode, automatic, focus, snapshot,
+        mode, automatic, focus, snapshot, sources,
         ...(mode === 'review' ? { reviewMemory: automatic ? reviewMemory : snapshot.memoryEnabled === true, reviewSkills: automatic ? reviewSkills : true } : {}),
         status: 'queued', createdAt: new Date(now).toISOString(),
       };
@@ -718,18 +763,17 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
     const settings = getSettings(deviceId, botId).settings;
     const abort = new AbortController();
     const runtime = {
-      job, abort, abortReason: null,
+      job, model, abort, abortReason: null,
       deadline: Date.now() + settings.budget.jobTimeoutMs,
       finished: false, pending: null, waiters: new Set(), toolInflight: new Map(),
       callChain: Promise.resolve(), skillCalls: 0, graceTimer: null,
       budget: {
         maxIterations: settings.budget.maxIterations,
-        maxInputTokens: deriveInputBudget(deviceId, botId, settings, snapshot),
+        maxInputTokens: deriveInputBudget(deviceId, botId, settings, model ? { ...snapshot, ...model } : snapshot),
         callTimeoutMs: settings.budget.callTimeoutMs,
         jobTimeoutMs: settings.budget.jobTimeoutMs,
         pollTimeoutMs: settings.budget.pollTimeoutMs,
       },
-      memoryEnabled: snapshot.memoryEnabled === true,
       sessionId: typeof snapshot.sessionId === 'string' ? snapshot.sessionId : undefined,
       // base64url keeps device/bot ids path-safe on every OS (no traversal, no forbidden chars).
       stateDir: join(dataRoot, 'learning-state', Buffer.from(deviceId, 'utf8').toString('base64url'), Buffer.from(botId, 'utf8').toString('base64url')),
@@ -770,8 +814,13 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
     if (clean.model !== undefined && typeof clean.model !== 'string') throw error('INVALID_ARGUMENT', 'Invalid snapshot model');
     if (clean.provider !== undefined && typeof clean.provider !== 'string') throw error('INVALID_ARGUMENT', 'Invalid snapshot provider');
     if (mode !== 'curate' && typeof clean.model !== 'string') throw error('INVALID_ARGUMENT', 'A snapshot model is required');
-    // No Hermes memory tool is currently exposed to the model.
-    clean.memoryEnabled = false;
+    const memory = snapshot.memory;
+    clean.memoryEnabled = memory?.enabled === true && memory.canRead === true &&
+      typeof memory.canWrite === 'boolean' && ['read-only', 'read-write'].includes(memory.mode) &&
+      memory.canWrite === (memory.mode === 'read-write');
+    clean.memory = clean.memoryEnabled
+      ? { enabled: true, canRead: true, canWrite: memory.canWrite, mode: memory.mode }
+      : { enabled: false, canRead: false, canWrite: false };
     boundedJson(clean, MAX_SNAPSHOT_BYTES, 'snapshot');
     return clean;
   }
@@ -888,6 +937,7 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
     const runtime = runtimes.get(job.jobId);
     if (!runtime || runtime.finished) throw error('INVALID_STATE', 'No active learning job');
     if (runtime.pending?.method !== 'agent.run') throw error('INVALID_STATE', 'No outstanding agent.run call');
+    if (!runtime.pending.params.allowedTools.includes(input.name)) throw error('FORBIDDEN', 'Tool was not allowed for this model call');
     const argsText = boundedJson(args, 1024 * 1024, 'tool args');
     // Fingerprint first: an in-flight callId may only share its promise when name and args
     // match exactly — a reused id with different arguments is a conflict, not a shared result.
@@ -995,6 +1045,7 @@ export const LEARNING_INPUT_SCHEMA = {
     requestId: { type: 'string', minLength: 1, maxLength: 128 },
     mode: { enum: ['review', 'learn', 'curate'] },
     focus: { type: 'string', maxLength: 4000 },
+    sources: { type: 'array', maxItems: 16, items: { type: 'string', minLength: 1, maxLength: 4096 } },
     snapshot: { type: 'object' },
     automatic: { type: 'boolean' },
     iterations: { type: 'integer', minimum: 0 },

@@ -19,12 +19,12 @@ const MEMBER_SCHEMA = {
 
 const SKILL_ACTIONS = [
   'list', 'read', 'create', 'update', 'delete', 'archive', 'restore',
-  'pin', 'lock', 'history', 'rollback', 'publish', 'adopt',
+  'pin', 'lock', 'history', 'rollback', 'publish', 'adopt', 'snapshots', 'restore_snapshot',
 ];
 const LEARNING_ACTIONS = ['status', 'configure', 'learn', 'review', 'curate', 'cancel'];
 const INSTALLATION_ACTIONS = [
   'inspect', 'install', 'update', 'rollback', 'enable', 'disable',
-  'uninstall', 'operation', 'deployments',
+  'uninstall', 'operation', 'deployments', 'catalog', 'describe', 'check', 'probe',
 ];
 
 function assertTargetBot(args) {
@@ -46,7 +46,8 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
       name: 'manage_bot_skill',
       description:
         "Manage the target Bot's Center-managed skills. Actions: list, read, create, update, delete, " +
-        'archive, restore, pin, lock, history, rollback, publish, adopt. Mutations require ' +
+        'archive, restore, pin, lock, history, rollback, publish, adopt, snapshots, restore_snapshot. ' +
+        'Snapshot restore requires snapshotId, expectedRevisions from snapshots, and requestId; it restores drafts only, not live state or queued deployments. Use restore for archived skills then publish. Other mutations require ' +
         'expectedRevision (create passes expectedRevision null). publish packages the draft, enables ' +
         'it and binds it to this Bot only; the returned deployment receipt is a queued plan, not an ' +
         'applied install. This Bot may target itself.',
@@ -54,6 +55,14 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
         deviceId: ID_SCHEMA,
         botId: ID_SCHEMA,
         action: { type: 'string', enum: SKILL_ACTIONS },
+        snapshotId: ID_SCHEMA,
+        expectedRevisions: {
+          type: 'object', additionalProperties: { anyOf: [{ type: 'null' }, {
+            type: 'object', properties: { skillId: ID_SCHEMA, revision: { type: 'integer', minimum: 0 },
+              stateRevision: { type: 'integer', minimum: 0 } },
+            required: ['skillId', 'revision', 'stateRevision'], additionalProperties: false,
+          }] },
+        },
         skillId: ID_SCHEMA,
         name: { type: 'string', minLength: 1 },
         category: { type: 'string' },
@@ -88,17 +97,23 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
         'active/last job), configure (settings plus expectedRevision CAS), learn/review/curate ' +
         '(start a Host-driven background job and return its job receipt — the job is not finished ' +
         'when the call returns; poll status for the outcome), cancel (jobId or the active job). ' +
-        'learn/review/curate only work where the target Bot runs.',
+        'learn/review/curate only work where the target Bot runs. learn accepts explicit sources ' +
+        '(local paths or http(s) URLs); material tools never run in review/curate. Auxiliary model refs must already be usable on that Host.',
       properties: {
         deviceId: ID_SCHEMA,
         botId: ID_SCHEMA,
         action: { type: 'string', enum: LEARNING_ACTIONS },
         jobId: ID_SCHEMA,
         focus: { type: 'string' },
+        sources: { type: 'array', maxItems: 16, items: { type: 'string', minLength: 1, maxLength: 4096 }, description: 'Manual learn only: explicit files/directories relative to target Bot cwd, or http(s) URLs. Never infer sources from focus.' },
         requestId: ID_SCHEMA,
         config: {
           type: 'object',
-          description: 'Learning settings to apply with configure (for example enabled and interval fields).',
+          description: 'Learning settings with CAS: enabled, review, curator, budget, reviewModelRef, curatorModelRef. Null model refs follow the Bot model; explicit refs must be configured and usable on this Host.',
+          properties: {
+            reviewModelRef: { type: ['string', 'null'] },
+            curatorModelRef: { type: ['string', 'null'] },
+          },
         },
         expectedRevision: { type: 'integer', minimum: 0 },
       },
@@ -112,7 +127,11 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
     {
       name: 'manage_bot_installation',
       description:
-        'Manage Center capability installations scoped to the target Bot. Actions: inspect, install ' +
+        'Manage Center capability installations scoped to the target Bot. Actions: catalog (minimal metadata), ' +
+        'describe (schema and credential-reference status, no secret values), check (configuration versus ' +
+        'deployment receipts, no network), probe (explicit read-only Webfox/Hindsight request, may incur cost). ' +
+        'UNSUPPORTED_TARGET means this installation/version cannot be probed; use describe/check instead of retrying. ' +
+        'Enter secrets only in the Center credential UI, never chat/questionnaires. Other actions: inspect, install ' +
         '(creates the installation, globally enables it, then binds this Bot — the reply reports the ' +
         'stage reached; bound means saved binding plus a queued deployment plan), update, rollback, ' +
         'enable, disable, uninstall, operation (poll one operation receipt by operationId), ' +

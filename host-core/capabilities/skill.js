@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { section } from '@earendil-works/pi-durable';
+import { section, hook, ToolTask } from '@earendil-works/pi-durable';
 import { formatSkillsForPrompt, loadSkillFromFile } from '../third-party/pi-skills.js';
+import { reportSkillRead } from '../skill-use.js';
 
 function fail(message) {
   return Object.assign(new Error(message), { code: 'SKILL_INVALID' });
@@ -64,7 +65,7 @@ function discoverSkills(packageRoot) {
   return skills;
 }
 
-export async function createSkillDriver({ installationId, packageRoot, host }) {
+export async function createSkillDriver({ installationId, version, packageRoot, host }) {
   const bots = new Set();
   return {
     async forBot(context) {
@@ -82,6 +83,16 @@ export async function createSkillDriver({ installationId, packageRoot, host }) {
       };
       const bot = {
         durableContributions: {
+          hooks: [hook(ToolTask, {
+            async afterTool(call, result, api, context) {
+              if (call.name !== 'read' || result.isError) return;
+              try {
+                if (!active || closed || await host.resolveConversationBot(api.conversationId) !== botId) return;
+                check();
+                await reportSkillRead({ call, result, api, context, skills, installationId, version, packageRoot, botId, host });
+              } catch { /* Telemetry must never replace a successful user tool result. */ }
+            },
+          })],
           sections: [section(key, async (input, invocation) => {
             invocation.abortSignal?.throwIfAborted();
             const owner = await host.resolveConversationBot(input.conversationId);

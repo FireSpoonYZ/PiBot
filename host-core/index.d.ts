@@ -158,6 +158,52 @@ export interface ImageAttachmentData extends ImageAttachment {
   data: string;
 }
 
+/** Model tool arguments, not a new Runtime/control endpoint. Cursor is runtime-local and opaque. */
+export type SessionSearchInput = {
+  conversationId?: string;
+  limit?: number;
+  cursor?: string | null;
+} & ({
+  action: 'search';
+  /** Literal case-sensitive substring, 1..256 characters; no regex or FTS. */
+  query: string;
+} | {
+  action: 'read';
+  conversationId: string;
+  entryId: number;
+  before?: number;
+  after?: number;
+});
+
+export interface SessionSearchItem {
+  conversationId: string;
+  scopeId: string | null;
+  entryId: number;
+  /** Model carrier role; scope messages may actually have a Bot author. */
+  role: 'user' | 'assistant';
+  source: 'model' | 'scope';
+  authorKind?: 'user' | 'bot';
+  messageIndex: number;
+  blockIndex: number;
+  /** UTF-16 offset in this original text block (scope source: message.text). */
+  offset: number;
+  text: string;
+  matchOffset?: number;
+  truncated: boolean;
+}
+
+export interface SessionSearchPage {
+  action: 'search' | 'read';
+  botId: string;
+  items: SessionSearchItem[];
+  nextCursor: string | null;
+  /** Includes repeated entry reads when processing a large text block in chunks. */
+  scannedEntryReads: number;
+  scannedTextUnits: number;
+  /** Exhausted the frozen snapshot, not a claim about messages arriving later. */
+  complete: boolean;
+}
+
 export interface HistoryOptions {
   limit?: number;
   cursor?: Record<string, unknown> | null;
@@ -1287,11 +1333,14 @@ export interface BotSoulUpdate {
  */
 export type BotSkillAction =
   | 'list' | 'read' | 'create' | 'update' | 'delete' | 'archive' | 'restore'
-  | 'pin' | 'lock' | 'history' | 'rollback' | 'publish' | 'adopt';
+  | 'pin' | 'lock' | 'history' | 'rollback' | 'publish' | 'adopt' | 'snapshots' | 'restore_snapshot';
 
-/** Center skill service input; mutations require expectedRevision (create uses null). */
+/** Center skill service input; mutations require expectedRevision (create uses null), or expectedRevisions for snapshot restore. */
 export interface BotSkillInput {
   action: BotSkillAction;
+  snapshotId?: string;
+  /** Obtain from snapshots; null means the named skill must still be absent. */
+  expectedRevisions?: Record<string, { skillId: string; revision: number; stateRevision: number } | null>;
   skillId?: string;
   name?: string;
   category?: string;
@@ -1312,23 +1361,43 @@ export interface BotSkillInput {
 
 export type BotLearningAction = 'status' | 'configure' | 'learn' | 'review' | 'curate' | 'cancel';
 
-/** Tool/runtime-level learning input; Host maps learn/review/curate to the Center start action. */
+/** CAS settings patch; auxiliary refs never introduce new provider credentials. */
+export interface BotLearningSettingsPatch {
+  enabled?: boolean;
+  reviewModelRef?: string | null;
+  curatorModelRef?: string | null;
+  review?: { memoryEvery?: number; skillEvery?: number };
+  curator?: { enabled?: boolean; intervalHours?: number; minIdleHours?: number; staleAfterDays?: number; archiveAfterDays?: number; consolidate?: boolean; paused?: boolean };
+  budget?: { maxIterations?: number; maxInputTokens?: number | null; callTimeoutMs?: number; jobTimeoutMs?: number; pollTimeoutMs?: number };
+}
+
+/** Tool/runtime-level input; Host maps learn/review/curate to the Center start action. */
 export interface BotLearningInput {
   action: BotLearningAction;
   jobId?: string;
   focus?: string;
   snapshot?: Record<string, unknown>;
-  /** Learning settings applied with configure; fields are owned by the Center learning service. */
-  config?: Record<string, unknown>;
+  /** Manual learn only; at most 16 explicit local files/directories or http(s) URLs. */
+  sources?: string[];
+  /** Null auxiliary refs follow the Bot; other refs must already be usable on its Host. */
+  config?: BotLearningSettingsPatch;
   expectedRevision?: number;
   requestId?: string;
 }
 
 export type BotInstallationAction =
   | 'inspect' | 'install' | 'update' | 'rollback' | 'enable' | 'disable'
-  | 'uninstall' | 'operation' | 'deployments';
+  | 'uninstall' | 'operation' | 'deployments' | 'catalog' | 'describe' | 'check' | 'probe';
 
-/** Bot-scoped installation input; mutations are CAS/requestId-idempotent operations. */
+export type {
+  BotInstallationCatalog, BotInstallationDescription, BotInstallationCheck,
+  LearningMemoryStatus, LearningSourceInput, LearningSourceResult,
+} from '../center-contract/index.js';
+
+/** Bot-scoped installation input; mutations are CAS/requestId-idempotent operations.
+ * catalog needs no installationId; describe/check/probe require it.
+ * probe is explicit, read-only and potentially billed; check never performs a network probe.
+ */
 export interface BotInstallationInput {
   action: BotInstallationAction;
   installationId?: string;

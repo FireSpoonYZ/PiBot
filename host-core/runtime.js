@@ -40,6 +40,7 @@ import { createBotManagementSkillSection } from './bot-management-skill.js';
 import { SOUL_MAX_BYTES } from './bot-soul.js';
 import { normalizeUserMessage } from './scope-protocol.js';
 import { createCommunicationTools } from './communication-tools.js';
+import { createSessionSearchTool } from './session-search-tool.js';
 import { createCollaborationService } from './collaboration-service.js';
 import { BASE_BEHAVIOR_PROMPT } from './bot-prompt.js';
 import { renderCollaborationPrompt } from './collaboration-prompt.js';
@@ -389,6 +390,7 @@ export async function openRuntime(options) {
       createGrepTool({ dataRoot: host.dataRoot, toolPaths: execution.toolPaths }),
       createFindTool({ dataRoot: host.dataRoot, toolPaths: execution.toolPaths }),
       createLsTool(),
+      createSessionSearchTool({ host, getHarness: () => harness, getWorkContexts: () => workContexts }),
     ],
     sections: [section('host-execution', (input) => {
       // Android 系统 sh 在描述中显式；Windows Git Bash 与 Linux bash 保持不变。
@@ -467,6 +469,16 @@ export async function openRuntime(options) {
         throw errWithCode('conversation has ambiguous ownership', 'BOT_CONTEXT_REQUIRED');
       }
       return identity.botId;
+    },
+    getSkillReadEnv: async (conversationId, context) => {
+      const conversation = await harness.conversation(conversationId, context);
+      const agent = await conversation.agent(context);
+      return envFor({ conversationId, cwd: agent.cwd });
+    },
+    reportSkillUse: (botId, input, signal) => {
+      const client = centerRuntime.getClient();
+      if (!client) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+      return client.botSkillUse(host.deviceId, botId, input, signal);
     },
     assertCapabilityAllowed: (botId, id) => plugins.assertCapabilityAllowed(botId, id),
     getExecutionEnv: async (botId) => envFor({ conversationId: 'plugin:' + botId, cwd: host.getBot(botId).cwd }),
@@ -748,6 +760,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   // Hermes 学习驱动（Host learning contract）：自动完结上报、next→agent.run→respond
   // 驱动与受限 review 工具面；配置/计数/作业持久化全在 Center learning 服务，
   // 本实例不持久化任何学习状态，驱动失败如实回执，绝不伪造完成。
+  let learningModelRefs = new Set();
   const learning = createBotLearning({
     host,
     getHarness: () => harness,
@@ -755,6 +768,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     getBotModels,
     getCenterClient: () => centerRuntime.getClient(),
     plugins,
+    schedules,
+    getUsableModelRefs: () => learningModelRefs,
     registry,
     context: CTX,
     openPrimaryConversation: (bot) => getPrimaryConversation(harness, bot, {}, CTX),
@@ -1594,6 +1609,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       const nextRegistryKey = centerRegistryKey(snapshot);
       if (nextRegistryKey !== registryKey) {
         applyCenterModels(snapshot, models);
+        learningModelRefs = new Set(snapshot.providers
+          .filter((provider) => provider.enabled && (provider.credentialRef == null || snapshot.credentials?.[provider.credentialRef]))
+          .flatMap((provider) => (snapshot.models[provider.id] ?? []).filter((model) => model.enabled).map((model) => provider.id + '/' + model.id)));
         registryKey = nextRegistryKey;
       }
       centerConfigured = true;

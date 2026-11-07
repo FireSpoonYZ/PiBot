@@ -15,6 +15,14 @@
 
 provider 专属参数放在工具调用的 `options` 字段；未声明选项的 provider 不出现该字段。搜索与内容查询可分别选择不同 provider。超时、取消、按输入进度、部分失败（status `partial`）与结构化结果沿用 Webfox 语义；`options` 中放错位置的参数在调用前被拒绝并给出建议路径。模型可见输出限 50 KiB / 2000 行：任一超限时完整结果（渲染文本 + 结构文档）写入插件数据目录下的私有文件（`webfox-output/`，0600），输出开头附文件路径与字节数，可用 read 分段读取；`structuredOutput` 始终携带完整结果文档供 codemode 使用。
 
+## 受管 actions
+
+Webfox 插件 **1.1.0** 增加两个 manifest actions，均要求当前 Bot 已启用且授权：
+- `readLearningSource({url})`：仅使用已配置的 contents provider 提取一个 HTTP(S) URL（不接受 URL 凭据/空白，最长 2048 字符）。返回 `{url,content,truncated?}`，content 使用现有 renderer，最多 48 KiB UTF-8；最长 30 秒并传递 action 取消信号。不回退搜索、不执行命令、不落 spill 文件。声明来源白名单由学习调用方负责。
+- `probe({})`：显式真实只读探测，优先 search（example.com，1 个结果），否则 contents（https://example.com/）；10 秒、无重试，返回 `{ok:true,version,operation}`。只有 answer/research 的配置不能探测；成功不代表其他 provider 已验证。可能产生供应商费用。
+
+设置过程见 Host 管理 skill 的 references/installations.md。凭据只在 Center UI 输入，不经聊天或问卷收集。
+
 ## 配置
 
 在中心按 Bot 配置；配置只保存引用，不保存密钥明文。

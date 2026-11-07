@@ -1,7 +1,7 @@
 {
   "manifestVersion": 1,
   "id": "e-launcher.hindsight",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "kind": "plugin",
   "displayName": "Hindsight",
   "hostApi": "^1.0.0",
@@ -395,6 +395,73 @@
         },
         "required": [
           "operationId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "probe",
+      "title": "Explicit read-only connectivity probe",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "version": {
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "listBanks"
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "version",
+          "operation"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "learningMemoryStatus",
+      "title": "Authorized learning memory policy (no network probe)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "const": true
+          },
+          "canRead": {
+            "const": true
+          },
+          "canWrite": {
+            "type": "boolean"
+          },
+          "mode": {
+            "enum": [
+              "read-only",
+              "read-write"
+            ]
+          }
+        },
+        "required": [
+          "enabled",
+          "canRead",
+          "canWrite",
+          "mode"
         ],
         "additionalProperties": false
       }

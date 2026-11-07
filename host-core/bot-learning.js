@@ -3,10 +3,10 @@
 // - 主会话用户提交完结后向 Center learning 服务上报真实增量快照（自动 review 入口）；
 // - 手动与自动 learn|review|curate 作业由 next→agent.run→respond 循环驱动；
 // - agent.run 在独立的受限 Durable 会话执行：只注册回调给出的 OpenAI 函数 schema
-//   对应的工具，并强制 allowedTools 白名单；工具调用经
+//   对应的工具，并强制 allowedTools 白名单；技能调用经
 //   centerClient.botLearning {action:'tool',jobId,callId,name,args} 回 Center
 //   （callId 由 agent.run 回调 id 与模型工具调用 id 派生，Center 按 (jobId,callId) 幂等）
-//   （Clarification 1），绝不放开 bash/管理等通用工具面；
+//   记忆/显式资料经 Host 本地受限能力执行，绝不放开 bash/管理等通用工具面；
 // - 触发计数、间隔阈值、配置、作业持久化全在 Center learning 服务，
 //   Host 不保存阈值、不按完成条数强行触发，只提供真实增量；
 // - 与原 Hermes 的适配边界：上游 fork 复用父会话缓存前缀，这里按契约重建独立
@@ -18,6 +18,7 @@ import { defineExtension, defineTool, hook, GenerationTask, ResetEntry } from '@
 import { messageError } from './message-protocol.js';
 import { parseModelRef } from './runtime-models.js';
 import { countRequestTokens, countMessageTokens } from './request-context.js';
+import { declareLearningSources, readLearningSource } from './learning-sources.js';
 
 const REPLAY_ENTRY_KIND = 'learning.replay';
 const INPUT_ENTRY_KIND = 'learning.review-input';
@@ -46,7 +47,7 @@ const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhi
 // Center 侧适配器决定暴露与否，本侧不发明第二套记忆接口。
 const MEMORY_ACTIONS = new Set([
   'memoryStatus', 'recallMemory', 'reflectMemory', 'retainMemory',
-  'getMemory', 'getMemorySource', 'correctMemory', 'retryMemory',
+  'getMemory', 'getMemorySource', 'correctMemory',
 ]);
 // 回执/工具错误对外只透传这组已知码；其余一律折叠为 INTERNAL，绝不把
 // 凭据/provider 细节写进学习通道。
@@ -54,6 +55,7 @@ const SAFE_ERROR_CODES = new Set([
   'INVALID_ARGUMENT', 'BOT_NOT_FOUND', 'CENTER_OFFLINE', 'INVALID_STATE',
   'REQUEST_CONFLICT', 'MODEL_REQUIRED', 'MODEL_NOT_FOUND', 'RUNTIME_BUSY',
   'NOT_CONNECTED', 'CONTEXT_LIMIT', 'INTERNAL', 'EXTENSION_DISABLED',
+  'EXTENSION_READ_ONLY', 'FORBIDDEN', 'VALIDATION_FAILED', 'CANCELLED',
 ]);
 
 function isPlainObject(value) {
@@ -256,7 +258,7 @@ function addUsage(sum, usage) {
  * - registry：受限 review 扩展须先 install（SDK 按名称从注册表解析扩展），
  *   名称按 jobId+callId 唯一，运行结算或取消后在 finally 卸载，防多 Bot 互覆。
  */
-export function createBotLearning({ host, getHarness, models, getBotModels, getCenterClient, plugins, registry, context, openPrimaryConversation, dropEnvFor, isBotIdle }) {
+export function createBotLearning({ host, getHarness, models, getBotModels, getCenterClient, plugins, schedules, getUsableModelRefs, registry, context, openPrimaryConversation, dropEnvFor, isBotIdle }) {
   let closing = false;
   let suspended = false;
   const deferredReports = new Map();
@@ -282,6 +284,27 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
     const bot = host.getBot(botId);
     if (!bot) throw messageError('BOT_NOT_FOUND', 'bot not found: ' + botId);
     return bot;
+  }
+
+  async function memoryStatus(botId, signal) {
+    try {
+      const status = await plugins.actionByName(botId, 'learningMemoryStatus', {}, { signal });
+      if (status?.enabled !== true || status.canRead !== true || typeof status.canWrite !== 'boolean' ||
+          !['read-only', 'read-write'].includes(status.mode) || status.canWrite !== (status.mode === 'read-write')) {
+        throw messageError('INVALID_STATE', 'Hindsight returned an invalid learning readiness result');
+      }
+      return { enabled: true, canRead: true, canWrite: status.canWrite, mode: status.mode };
+    } catch (err) {
+      if (err?.code === 'EXTENSION_DISABLED') return { enabled: false, canRead: false, canWrite: false };
+      throw messageError(safeCode(err), 'Cannot determine authorized Hindsight readiness');
+    }
+  }
+
+  function assertUsableModel(ref) {
+    const parsed = parseModelRef(ref);
+    if (!getUsableModelRefs().has(ref) || !models.getModel(parsed.provider, parsed.modelId)) {
+      throw messageError('MODEL_NOT_FOUND', 'Learning model is not configured and usable by this Host');
+    }
   }
 
   /**
@@ -350,10 +373,12 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
         model = parsed.modelId;
       } catch { /* modelRef 异常时如实缺省，由 Center 决定 */ }
     }
+    const memory = await memoryStatus(bot.botId);
     const snapshot = {
       messages,
       sessionId: bot.primaryConversationId,
-      memoryEnabled: false,
+      memoryEnabled: memory.enabled,
+      memory,
       span: {
         afterEntryId: incremental ? cursor : 0,
         throughEntryId,
@@ -404,7 +429,8 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
       void safeCancelRemote(bot.botId, existing.jobId);
     }
     const controller = new AbortController();
-    const job = { botId: bot.botId, jobId, controller, mode: meta?.mode ?? null, activeRun: null, done: null };
+    const job = { botId: bot.botId, jobId, controller, mode: meta?.mode ?? null, automatic: meta?.automatic === true,
+      sources: meta?.sources ?? [], activeRun: null, done: null };
     job.done = driveJob(bot, job);
     jobs.set(bot.botId, job);
     job.done.catch(() => {}).finally(() => {
@@ -428,6 +454,7 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
    */
   async function driveJob(bot, job) {
     let consecutiveErrors = 0;
+    let completedCall = null;
     for (;;) {
       if (closing || job.controller.signal.aborted) return;
       const client = getCenterClient?.();
@@ -450,38 +477,41 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
         await sleep(250, job.controller.signal);
         continue;
       }
-      // A model call can outlive a remote cancellation or Center timeout.
-      // Observe the job in parallel and stop the provider before releasing its extension.
-      const watch = new AbortController();
-      const stopWatch = () => watch.abort();
-      job.controller.signal.addEventListener('abort', stopWatch, { once: true });
-      const watching = (async () => {
-        while (!watch.signal.aborted) {
-          await sleep(1000, watch.signal);
-          if (watch.signal.aborted) break;
-          try {
-            const current = await client.botLearning(host.deviceId, bot.botId, { action: 'next', jobId: job.jobId }, watch.signal);
-            if (TERMINAL_JOB_STATUS.has(current?.status) || (current?.call && current.call.id !== call.id)) {
-              abortJob(job);
+      // Center has one outstanding call: a failed response retries this outcome, not its effects.
+      if (completedCall?.id !== call.id) {
+        completedCall = null;
+        // A model call can outlive a remote cancellation or Center timeout.
+        // Observe the job in parallel and stop the provider before releasing its extension.
+        const watch = new AbortController();
+        const stopWatch = () => watch.abort();
+        job.controller.signal.addEventListener('abort', stopWatch, { once: true });
+        const watching = (async () => {
+          while (!watch.signal.aborted) {
+            await sleep(1000, watch.signal);
+            if (watch.signal.aborted) break;
+            try {
+              const current = await client.botLearning(host.deviceId, bot.botId, { action: 'next', jobId: job.jobId }, watch.signal);
+              if (TERMINAL_JOB_STATUS.has(current?.status) || (current?.call && current.call.id !== call.id)) {
+                abortJob(job);
+                break;
+              }
+            } catch {
+              if (!watch.signal.aborted) abortJob(job);
               break;
             }
-          } catch {
-            if (!watch.signal.aborted) abortJob(job);
-            break;
           }
+        })();
+        try {
+          completedCall = { id: call.id, outcome: await executeCall(bot, job, call) };
+        } finally {
+          watch.abort();
+          job.controller.signal.removeEventListener('abort', stopWatch);
+          await watching;
         }
-      })();
-      let outcome;
-      try {
-        outcome = await executeCall(bot, job, call);
-      } finally {
-        watch.abort();
-        job.controller.signal.removeEventListener('abort', stopWatch);
-        await watching;
       }
       try {
         await client.botLearning(host.deviceId, bot.botId, {
-          action: 'respond', jobId: job.jobId, callId: call.id, ...outcome,
+          action: 'respond', jobId: job.jobId, callId: call.id, ...completedCall.outcome,
         }, job.controller.signal);
         consecutiveErrors = 0;
       } catch {
@@ -499,6 +529,13 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
       if (call.method === 'memory.call') {
         return { result: await runMemoryCall(bot, job, call) };
       }
+      if (call.method === 'schedule.call') {
+        if (job.mode !== 'curate' || !['referenced_skill_names', 'rewrite_skill_refs'].includes(call.params?.name)) {
+          throw messageError('FORBIDDEN', 'Schedule callbacks are restricted to curator skill references');
+        }
+        job.controller.signal.throwIfAborted();
+        return { result: await schedules.hermesSkillCall(bot, call.params.name, call.params.args ?? {}, { signal: job.controller.signal }) };
+      }
       return { error: { code: 'INVALID_ARGUMENT', message: 'unsupported call method: ' + String(call.method).slice(0, 64) } };
     } catch (err) {
       return { error: { code: safeCode(err), message: safeMessage(err) } };
@@ -511,7 +548,44 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
     if (typeof params.name !== 'string' || !MEMORY_ACTIONS.has(params.name)) {
       throw messageError('INVALID_ARGUMENT', 'unsupported memory action');
     }
-    return plugins.actionByName(bot.botId, params.name, isPlainObject(params.args) ? params.args : {});
+    return executeMemory(bot, job, params.name, params.args ?? {}, call.id, job.controller.signal);
+  }
+
+  async function executeMemory(bot, job, name, input, callId, signal) {
+    signal.throwIfAborted();
+    if (job.mode === 'curate' || !MEMORY_ACTIONS.has(name) || !isPlainObject(input) ||
+        Object.hasOwn(input, 'target') || Object.hasOwn(input, 'requestId')) {
+      throw messageError('FORBIDDEN', 'Learning memory is limited to this Bot primary bank');
+    }
+    const status = await memoryStatus(bot.botId, signal);
+    if (!status.enabled) throw messageError('EXTENSION_DISABLED', 'Enable and configure Hindsight for this Bot in Center first');
+    const write = name === 'retainMemory' || name === 'correctMemory';
+    if (write && !status.canWrite) throw messageError('EXTENSION_READ_ONLY', 'Hindsight is read-only');
+    if (name === 'correctMemory' && job.automatic) throw messageError('FORBIDDEN', 'Automatic memory review is append-only');
+    const args = { ...input };
+    if (write) args.requestId = 'learning-' + createHash('sha256').update(JSON.stringify([job.jobId, callId])).digest('hex');
+    let receipt;
+    try { receipt = await plugins.actionByName(bot.botId, name, args, { signal }); }
+    catch (err) { throw messageError(safeCode(err), 'Hindsight action failed; check capability configuration and operation receipts'); }
+    if (!write) return { success: true, result: receipt };
+    const completed = name === 'correctMemory' ? receipt?.state === 'applied'
+      : Array.isArray(receipt?.jobs) && receipt.jobs.length > 0 && receipt.jobs.every((item) => item.state === 'completed');
+    const failed = ['rejected', 'unconfirmed'].includes(receipt?.state) || receipt?.jobs?.some((item) => item.state === 'failed');
+    // Only a real completed receipt contributes an upstream write notification.
+    return { success: !failed, completed, staged: !completed, receipt,
+      message: completed ? 'Hindsight memory updated (confirmed receipt)' : 'Hindsight write not confirmed complete; inspect receipt before claiming success' };
+  }
+
+  async function executeLocalTool(bot, job, name, args, callId, signal) {
+    if (name === 'memory') {
+      const { action, ...input } = args;
+      return executeMemory(bot, job, action, input, callId, signal);
+    }
+    if (job.mode !== 'learn' || job.automatic) throw messageError('FORBIDDEN', 'Material tools are manual-learn only');
+    return readLearningSource(job.sources, args, signal, async (url, sourceSignal) => {
+      try { return await plugins.actionByName(bot.botId, 'readLearningSource', { url }, { signal: sourceSignal }); }
+      catch (err) { throw messageError(safeCode(err), 'Webfox extraction unavailable; configure an authorized contents provider in Center, then retry learn'); }
+    });
   }
 
   /** 本次 review 的模型解析：agent.run 的 provider/model 覆盖优先，否则用 Bot 当前中心选择。 */
@@ -529,6 +603,7 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
     if (typeof params.provider === 'string' && params.provider.trim() !== '') provider = params.provider.trim();
     if (typeof params.model === 'string' && params.model.trim() !== '') modelId = params.model.trim();
     if (!provider || !modelId) throw messageError('MODEL_REQUIRED', 'review model is required');
+    assertUsableModel(provider + '/' + modelId);
     const model = models.getModel(provider, modelId);
     if (!model) throw messageError('MODEL_NOT_FOUND', 'review model is unavailable: ' + provider + '/' + modelId);
     const reasoning = params.reasoningConfig;
@@ -576,10 +651,17 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
           };
         }
         try {
+          const signal = AbortSignal.any([job.controller.signal, toolContext.abortSignal].filter(Boolean));
+          signal.throwIfAborted();
+          const toolCallId = 'tool-' + createHash('sha256').update(JSON.stringify([call.id, api.callId])).digest('hex');
+          if (spec.name === 'memory' || spec.name === 'learning_source') {
+            const result = await executeLocalTool(bot, job, spec.name, args, toolCallId, signal);
+            return { output: [{ type: 'text', text: JSON.stringify(result) }], ...(result?.success === false ? { isError: true } : {}) };
+          }
           const client = requireClient();
           const envelope = await client.botLearning(host.deviceId, bot.botId, {
-            action: 'tool', jobId: job.jobId, callId: 'tool-' + createHash('sha256').update(JSON.stringify([call.id, api.callId])).digest('hex'), name: spec.name, args: isPlainObject(args) ? args : {},
-          }, toolContext.abortSignal);
+            action: 'tool', jobId: job.jobId, callId: toolCallId, name: spec.name, args: isPlainObject(args) ? args : {},
+          }, signal);
           // Center 回执 {jobId,callId,name,result}：result 为 JSON string，原样喂回模型
           // （摘要器读取其中 success/_change 等键），envelope 元信息不透给模型。
           const raw = isPlainObject(envelope) ? envelope.result : envelope;
@@ -790,6 +872,7 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
     const senderKind = await submissionSenderKind(submissionId).catch(() => null);
     if (senderKind !== 'user') return;
     const status = await client.botLearning(host.deviceId, botId, { action: 'status' });
+    if (status.settings?.reviewModelRef) assertUsableModel(status.settings.reviewModelRef);
     const storedCursor = status?.counters?.reviewCursor;
     reportCursors.set(botId, storedCursor?.sessionId === bot.primaryConversationId ? storedCursor.throughEntryId : 0);
     const built = await buildSnapshot(bot, { incremental: true });
@@ -825,6 +908,9 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
       if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
         throw messageError('BOT_ARCHIVED', 'bot is archived and read-only');
       }
+      for (const key of ['reviewModelRef', 'curatorModelRef']) {
+        if (input.config?.[key] != null) assertUsableModel(input.config[key]);
+      }
       const forward = { ...input, action: 'configure' };
       const result = await client.botLearning(host.deviceId, botId, forward);
       if (input.config?.enabled === false) {
@@ -847,18 +933,26 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
     if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
       throw messageError('BOT_ARCHIVED', 'bot is archived and read-only');
     }
+    if (input.sources !== undefined && action !== 'learn') throw messageError('INVALID_ARGUMENT', 'sources are only accepted for learn');
+    const sources = await declareLearningSources(input.sources, bot.cwd);
+    const settings = (await client.botLearning(host.deviceId, botId, { action: 'status' })).settings;
+    const auxiliary = action === 'review' ? settings.reviewModelRef : action === 'curate' ? settings.curatorModelRef : null;
+    if (auxiliary) assertUsableModel(auxiliary);
     const requestId = typeof input.requestId === 'string' && input.requestId !== '' ? input.requestId : randomUUID();
     const start = { action: 'start', mode: action, requestId, automatic: false };
     if (typeof input.focus === 'string' && input.focus !== '') start.focus = input.focus;
-    if (isPlainObject(input.snapshot)) start.snapshot = input.snapshot;
-    else {
+    if (isPlainObject(input.snapshot)) {
+      const memory = await memoryStatus(botId);
+      start.snapshot = { ...input.snapshot, memory, memoryEnabled: memory.enabled };
+    } else {
       const built = await buildSnapshot(bot, { incremental: false });
       if (built) start.snapshot = built.snapshot;
     }
     if (suspended) throw messageError('RUNTIME_BUSY', 'host is preparing an update');
+    start.sources = sources.map((source) => source.value);
     const receipt = await client.botLearning(host.deviceId, botId, start);
     if (liveJob(receipt)) {
-      startDriver(bot, receipt.jobId, { mode: action, automatic: false });
+      startDriver(bot, receipt.jobId, { mode: action, automatic: false, sources });
       return { ...receipt, driven: true };
     }
     return { ...receipt, driven: false };
@@ -880,6 +974,7 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
           const lastActivity = Date.parse(bot.lastActivityAt ?? bot.createdAt);
           if (!Number.isFinite(lastActivity) || Date.now() - lastActivity < settings.curator.minIdleHours * 3_600_000) continue;
           if (!(await isBotIdle(bot))) continue;
+          if (settings.curatorModelRef) assertUsableModel(settings.curatorModelRef);
           const built = await buildSnapshot(bot, { incremental: false });
           if (!built) continue;
           if (suspended) continue;

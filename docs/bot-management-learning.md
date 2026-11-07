@@ -26,7 +26,9 @@ Bot 管理工具面包括 Bot 自有 Skill、能力安装管理与 Hermes 学习
 
 - Node↔Python 传输：有界 NDJSON、方法白名单、错误/取消/退出透传；`agent.run` 回调经已认证设备 HTTP 长轮询（≤20s，客户端 30s 超时）交给发起方 Host，显式应答。
 - Skill 回调桥：上游 `skills_list`/`skill_view`/`skill_manage` 与 `skill_usage.*`（curated_report/set_state/archive 等）映射到中心 Skill 服务，保留上游成功结果形状（`success` + `_change`）；读后再写与 locked 防护在适配侧执行。Hermes 从不直接写本地 skill 文件。
-- Memory：当前学习快照不暴露 memory 工具，`memoryEnabled` 固定为 false，仅执行 skill 范围，不创建第二套记忆库。
+- Memory：Host 经已授权 Hindsight `learningMemoryStatus` 提供真实可读/可写状态；学习仅使用目标 Bot primary bank 的适配工具，不创建 MEMORY.md/USER.md 或第二套记忆库。保留只读、自动审查仅追加及真实写入回执；pending/accepted 不等于完成。
+- 手动 learn 可指定 `sources:string[]`（本地文件/目录或 http(s) URL）；仅显式材料可读，网页依赖已授权 Webfox contents action，review/curate 不开放资料工具。限制与使用方法见内置 references/learning.md。
+- 学习配置支持 CAS `reviewModelRef` / `curatorModelRef`；默认 null 跟随 Bot，仅接受 Host 已有可用模型，不扩大凭据下发。Curator 的两种技能引用操作经 `schedule.call` 回到当前 Bot 调度器。
 - 上游 import 可能需要适配；不支持的功能显式失败，不用假成功。
 
 **运行环境：** Python 只在中心侧。中心 Docker 最终镜像安装 `python3`（Debian bookworm 为 3.11，满足上游 `requires-python >=3.11,<3.15`），保持非 root `USER node`；Android/桌面 Host 不含也不依赖 Python。适配层以环境变量 `HERMES_PYTHON` 启动解释器，默认 `python3`；Windows 可设置解释器绝对路径覆盖。

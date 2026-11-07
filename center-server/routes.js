@@ -421,7 +421,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     if (!['status', 'configure', 'cancel'].includes(body.action)) fail('FORBIDDEN', 'Learning jobs are driven by the target Host');
     return learning.execute(botScope(req), body);
   }, true);
-  route('POST', '/api/devices/:deviceId/bots/:botId/installations', req => botManagement.execute(botScope(req), object(req.body), { allowShared: true }), true);
+  route('POST', '/api/devices/:deviceId/bots/:botId/installations', req => botManagement.execute(botScope(req), object(req.body), { allowShared: true, callAction: action }), true);
   const oauthInput = req => ({ installationId: req.params.id, deviceId: text(req.body?.deviceId, 'deviceId'), botId: text(req.body?.botId, 'botId') });
   route('POST', '/api/installations/:id/oauth/start', req => oauth.start(oauthInput(req)), true);
   route('GET', '/api/oauth/mcp/flows/:flowId', req => required(oauth.status(req.params.flowId), 'OAuth flow'));
@@ -524,6 +524,11 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return result;
   });
   host('POST', '/api/host/devices/:deviceId/bots/:botId/skills', req => skills.execute({ ...botScope(req), origin: 'foreground' }, object(req.body)));
+  host('POST', '/api/host/devices/:deviceId/bots/:botId/skills/usage', req => {
+    const scope = botScope(req);
+    if (scope.deviceId !== req.centerDevice.deviceId) fail('FORBIDDEN', 'Device mismatch');
+    return skills.reportUse(scope, object(req.body));
+  });
   host('POST', '/api/host/devices/:deviceId/bots/:botId/learning', req => {
     const scope = botScope(req);
     // The learning job's agent.run callbacks are handed to the initiating
@@ -531,7 +536,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     if (scope.deviceId !== req.centerDevice.deviceId) fail('FORBIDDEN', 'Device mismatch');
     return learning.execute(scope, object(req.body));
   }, LEARNING_BODY_LIMIT);
-  host('POST', '/api/host/devices/:deviceId/bots/:botId/installations', req => botManagement.execute(botScope(req), object(req.body)));
+  host('POST', '/api/host/devices/:deviceId/bots/:botId/installations', req => botManagement.execute(botScope(req), object(req.body), { callAction: action }));
   host('GET', '/api/host/snapshot', req => snapshot(req.centerDevice.deviceId));
   host('POST', '/api/host/receipt', (req, reply) => {
     const body = object(req.body);
