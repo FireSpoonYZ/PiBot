@@ -256,12 +256,12 @@ export function createPlugin({ installationId, host }) {
             context.abortSignal?.aborted ? context.abortSignal.reason : botController.signal.reason,
           ));
           const unwatch = (end) => {
-            if (end.reason === 'stopped') return;
-            if (end.reason === 'failed') {
+            if (end.kind === 'stopped') return;
+            if (end.kind === 'failed' || end.kind === 'listener_error') {
               settle(reject, end.error instanceof Error ? end.error : abortError(end.error));
             } else {
-              // session_closed / retired / cancelled: interrupt, not a decline.
-              settle(reject, abortError(end.reason));
+              // Ended/aborted watches interrupt the request rather than declining it.
+              settle(reject, abortError(end.kind));
             }
           };
           const current = watchHandle.value;
@@ -278,8 +278,16 @@ export function createPlugin({ installationId, host }) {
           }
           context.abortSignal?.addEventListener('abort', onAbort, { once: true });
           botController.signal.addEventListener('abort', onAbort, { once: true });
-          watchHandle.start(async (value) => {
-            if (value === null || value.status !== 'pending') settle(resolve, value);
+          watchHandle.start(async (call) => {
+            if (call.kind === 'failed') {
+              settle(reject, abortError(call.error));
+              return;
+            }
+            if (call.retired) {
+              settle(reject, abortError('retired'));
+              return;
+            }
+            if (call.value === null || call.value.status !== 'pending') settle(resolve, call.value);
           });
         });
       }
