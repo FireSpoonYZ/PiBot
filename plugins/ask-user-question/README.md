@@ -11,11 +11,11 @@ protocol instead.
 
 ## What it registers
 
-- **Model tool** `ask_user_question` (`callers: ['model']`, `replay: 'safe'`):
+- **Model and nested tool** `ask_user_question` (`replay: 'safe'`; SDK-default callers `model` and `tools`):
   1-4 questions, 2-4 options each, `multiSelect` flag, optional per-option
   `preview`. Parameters, limits, reserved labels (`Other`,
   `Type something.`, `Next`), duplicate guards, normalization and the
-  LLM-facing result text match upstream 2.15.0.
+  LLM-facing result text match upstream 2.15.0. Nested calls keep the tool available in Code Mode-only mode and publish the same pending questionnaire.
 - **Capability action** `answerQuestionnaire`: submits or cancels one pending
   request. Input: `{conversationId, requestId, cancelled, answers[],
   globalNote?}` where `requestId` is the tool task id and each answer is
@@ -25,15 +25,15 @@ protocol instead.
 
 ## State and lifecycle
 
-Requests persist in the conversation-scoped Durable document
-`e-launcher.ask-user-question` (`history: 'latest'`), keyed by
-`String(toolTaskId)`; several requests may be pending at once. The tool waits
+Requests persist in the task-scoped Durable document
+`e-launcher.ask-user-question`, owned by the question's tool task, including
+nested Code Mode calls. Several requests may be pending at once. The tool waits
 on `watchDoc` + the invocation abort signal — no polling, no persistent
 Promise across restarts. First valid answer wins inside one atomic commit; an
 answer can commit only while its tool task is still live, so a settled task can
-never be answered — the final presentation is computed inside the same commit and oversized answers are rejected before anything is stored. Stop/abort leaves the record pending and ends the wait
-without marking it user-cancelled; a restart replays the wait and picks up any
-answer committed meanwhile. The tool's `details` always carries the
+never be answered — the final presentation is computed inside the same commit and oversized answers are rejected before anything is stored. An interrupted live task resumes its wait after restart and picks up any
+answer committed meanwhile. Stop aborts the task; task-scoped records retire
+when their task settles. The tool's `details` always carries the
 whitelisted `presentation` shape (`kind: 'questionnaire'`, `version: 1`)
 bounded to 48 KiB; oversized calls are rejected at the tool boundary.
 

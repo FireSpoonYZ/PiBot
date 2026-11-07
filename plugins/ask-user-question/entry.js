@@ -138,7 +138,6 @@ export function createPlugin({ installationId, host }) {
           name: ASK_USER_QUESTION_TOOL_NAME,
           description: DEFAULT_TOOL_DESCRIPTION,
           parameters: QuestionParamsSchema,
-          callers: ['model'],
           replay: 'safe',
           prepareArguments: prepareQuestionArguments,
           async execute(args, api, context) {
