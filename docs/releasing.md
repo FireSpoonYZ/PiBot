@@ -12,7 +12,7 @@
   Gradle 根即仓库根）。
 - `scripts/release-check.mjs` 核对全部上述字段 + `android.versionCode`
   为正整数；`--tag vX.Y.Z` 额外核对 tag 与产品版本一致。
-- Android `versionCode` 独立于产品版本（当前 `8`，正式 0.0.2 使用 `7`），见
+- Android `versionCode` 独立于产品版本（当前 `9`，首轮 0.0.3 候选使用 `8`，正式 0.0.2 使用 `7`），见
   `gradle.properties` 的 `android.versionCode`，每个已分发 APK 单调递增、
   不复用、不回退。
 
@@ -83,3 +83,11 @@ Fork/外部贡献者不需要以上任何 secret 即可构建 debug 包。
 从该附件安装并验收。通过后，在同一源码提交创建带注解的 `vX.Y.Z` Tag，注解单独一行写 `Candidate-Run: <runId>`。Tag 发布会校验候选运行的仓库、工作流、版本标题、成功状态及精确源码提交，再复用它的安装包、签名与镜像 digest，避免验收后重新构建出另一批字节。普通无此注解的 Tag 仍走原来的完整构建发布流程。
 
 候选产物保留 30 天。若验收需要修改源码，提交修复并重新构建、验收；不要提前创建或移动正式 Tag。Android 已安装过的候选若发生内容变化，需继续递增 versionCode。
+
+### 桌面覆盖升级身份
+
+Linux 保留 Debian/RPM 包身份 `e-launcher-desktop` 和资源目录 `/usr/lib/e-launcher-desktop`，桌面入口仍显示 pibot，命令为 `pibot` / `pibot-host`。不要用 Conflicts/Replaces 改包名：APT 会先完整移除旧包，其 postrm 会清除 Host 自启动与恢复状态，新包的 preinst 来不及接管。
+
+Windows 从旧 NSIS 版本升级时直接覆盖原安装目录，避免默认先运行旧卸载器删除 Host 登录任务。覆盖前关闭当前及旧名客户端，再停止 Host；完成后为已配对 Host 启用登录自启动并立即启动，确认运行后才报告成功，同时清除旧名可执行文件。
+
+DEB 和 NSIS 的安装（含覆盖升级）都负责为已配对 Host 启用自启动并立即启动；配置或启动失败时安装返回错误。Linux 保留既有 linger 设置，失败回退仍使用升级前的状态快照。未配对的新安装在首次配对完成后自动启动。

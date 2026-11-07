@@ -12,10 +12,6 @@
 # from a previous attempt are preserved so retries never overwrite the
 # pre-stop snapshot with post-stop values.
 #
-# On a replacing install (old package removed via Conflicts) the registry and
-# state dirs are then staged under /var/lib/e-launcher/pibot-rename/ so the
-# old package's postrm cannot find and delete per-user enablement; the new
-# postinst/postrm restores them.
 set -u
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
@@ -70,7 +66,7 @@ unit_enabled_state() {
     _st=$(user_systemctl "$1" is-enabled "$UNIT" 2>/dev/null) || :
     case "$_st" in
       enabled|enabled-runtime|indirect) echo yes; return ;;
-      disabled|static|masked|linked|linked-runtime|alias|generated|transient) echo no; return ;;
+      disabled|static|masked|linked|linked-runtime|alias|generated|transient|not-found) echo no; return ;;
       *) return 1 ;;
     esac
   fi
@@ -107,15 +103,16 @@ collect_uids() {
   done
 }
 
-# UIDs whose passwd home still has the enabled-unit wants symlink. Fallback
-# for users configured before the registry existed (or after its loss).
-scan_enabled_users() {
+# Include configured users even when their service was deliberately stopped
+# or disabled: installation enables and starts paired Hosts.
+scan_configured_users() {
   getent passwd 2>/dev/null | while IFS= read -r _line; do
     _u=$(printf '%s' "$_line" | cut -d: -f3)
     _h=$(printf '%s' "$_line" | cut -d: -f6)
     case "$_u" in ''|*[!0-9]*) continue ;; esac
     [ -n "$_h" ] || continue
-    [ -e "$_h/.config/systemd/user/default.target.wants/$UNIT" ] || continue
+    [ -e "$_h/.config/systemd/user/default.target.wants/$UNIT" ] \
+      || [ -f "$_h/.config/e-launcher/host-service/config.json" ] || continue
     echo "$_u"
   done
 }
@@ -173,7 +170,7 @@ esac
 mkdir -p "$REGDIR" "$STATEDIR" 2>/dev/null || { log "cannot create state directories"; exit 1; }
 chmod 0750 "$REGDIR" "$STATEDIR" 2>/dev/null || { log "cannot secure state directories"; exit 1; }
 
-_targets=$( { collect_uids; scan_enabled_users; } | sort -un )
+_targets=$( { collect_uids; scan_configured_users; } | sort -un )
 [ -n "$_targets" ] || exit 0
 
 for _uid in $_targets; do
@@ -216,29 +213,4 @@ for _uid in $_targets; do
   fi
 done
 
-# Replacing install only (old package is removed via Conflicts, $1=install):
-# the old postrm still runs after this script and collects REGDIR/STATEDIR
-# UIDs to delete each user's drop-in and wants link plus both directories.
-# Hide them under a private staging dir so the old script sees nothing;
-# postinst (and postrm on abort) moves them back. A staging dir left by an
-# earlier failed attempt is kept; a recreated non-empty dir at the original
-# path is an explicit conflict so the pre-stop snapshot is never overwritten.
-if [ "$1" = "install" ]; then
-  _stage="/var/lib/e-launcher/pibot-rename"
-  for _d in "$REGDIR" "$STATEDIR"; do
-    [ -d "$_d" ] || continue
-    _base="${_d##*/}"
-    if [ -e "$_stage/$_base" ]; then
-      if [ -n "$(ls -A "$_d" 2>/dev/null)" ]; then
-        log "cannot stage $_d: $_stage/$_base already exists; keeping snapshot"
-        exit 1
-      fi
-      rmdir "$_d" 2>/dev/null || :
-      continue
-    fi
-    mkdir -p "$_stage" || { log "cannot create $_stage"; exit 1; }
-    chmod 0700 "$_stage" || { log "cannot secure $_stage"; exit 1; }
-    mv "$_d" "$_stage/$_base" || { log "cannot stage $_d"; exit 1; }
-  done
-fi
 exit 0

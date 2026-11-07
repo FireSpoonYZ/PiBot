@@ -106,23 +106,6 @@ restore_states() {
   rmdir "$STATEDIR" 2>/dev/null || :
 }
 
-# Reverses the preinst staging done on a replacing install (see preinst);
-# used on the abort paths so a rolled-back operation restores the recorded
-# per-user states before the best-effort restore below runs.
-unstage_dirs() {
-  _stage="/var/lib/e-launcher/pibot-rename"
-  [ -d "$_stage" ] || return 0
-  for _d in "$_stage"/*; do
-    [ -d "$_d" ] || continue
-    _base="${_d##*/}"
-    if [ -e "/var/lib/e-launcher/$_base" ]; then
-      log "cannot restore $_base: /var/lib/e-launcher/$_base already exists"
-      return 1
-    fi
-    mv "$_d" "/var/lib/e-launcher/$_base" || { log "cannot restore $_d"; return 1; }
-  done
-  rmdir "$_stage" 2>/dev/null || { log "cannot remove $_stage"; return 1; }
-}
 
 # UIDs known to this package: registry entries and leftover state files.
 collect_uids() {
@@ -164,7 +147,6 @@ remove_user_autostart() {
 case "${1:-}" in
   upgrade) exit 0 ;;
   abort-upgrade|abort-install)
-    unstage_dirs || exit 1
     restore_states
     ;;
   remove|purge)
@@ -177,7 +159,7 @@ case "${1:-}" in
       log "runuser/systemctl unavailable; keeping registry for repair"
       exit 1
     fi
-    rm -rf "$REGDIR" "$STATEDIR" "/var/lib/e-launcher/pibot-rename" 2>/dev/null || :
+    rm -rf "$REGDIR" "$STATEDIR" 2>/dev/null || :
     rmdir /var/lib/e-launcher 2>/dev/null || :
     ;;
   *) exit 0 ;;

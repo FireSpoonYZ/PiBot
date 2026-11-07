@@ -249,6 +249,12 @@ Function PageReinstall
   nsis_tauri_utils::SemverCompare "${VERSION}" $R0
   Pop $R0
 
+  ; Upgrade in place: the old uninstaller removes the user's Host task.
+  ${If} $R0 = 1
+  ${AndIf} $WixMode <> 1
+    Abort
+  ${EndIf}
+
   ; Read the install choice header through $R5 so a custom language file that only
   ; defines the misspelled `choowHowToInstall` still shows its own text
   ; TODO: remove the `choowHowToInstall` fallback in a future major version
@@ -689,11 +695,14 @@ SectionEnd
 Section Install
   SetOutPath $INSTDIR
 
+  !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  ${If} ${FileExists} "$INSTDIR\e-launcher-desktop.exe"
+    !insertmacro CheckIfAppIsRunning "$INSTDIR\e-launcher-desktop.exe" "e-助手"
+  ${EndIf}
+
   !ifmacrodef NSIS_HOOK_PREINSTALL
     !insertmacro NSIS_HOOK_PREINSTALL
   !endif
-
-  !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"
@@ -710,6 +719,11 @@ Section Install
   {{#each binaries}}
     File /a "/oname={{this}}" "{{no-escape @key}}"
   {{/each}}
+
+  ; Retire the renamed executables after their processes have stopped.
+  Delete "$INSTDIR\e-launcher-desktop.exe"
+  Delete "$INSTDIR\e-launcher-host.exe"
+  Delete "$INSTDIR\e-launcher-client-node.exe"
 
   ; Create file associations
   {{#each file_associations as |association| ~}}
