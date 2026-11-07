@@ -32,15 +32,16 @@ export function openModelCatalog({ store, onChange }) {
           baseUrl: profile.baseUrl, credentialRef: profile.id + '-api-key', enabled: false }, null);
         providersAdded++;
       }
-      // Custom endpoints and explicitly edited models remain owner-controlled.
-      if (provider.api !== profile.api || provider.baseUrl !== profile.baseUrl) continue;
-      const known = new Set(store.listModels(profile.id).map(model => model.id));
-      for (const candidate of catalog[profile.id] ?? []) {
-        if (candidate.type && candidate.type !== 'chat') continue;
-        if (candidate.api !== profile.api || known.has(candidate.id)) continue;
+    }
+    for (const provider of store.listProviders()) {
+      // An endpoint override keeps the provider's catalog; existing models remain owner-controlled.
+      const known = new Set(store.listModels(provider.id).map(model => model.id));
+      for (const candidate of catalog[provider.id] ?? []) {
+        if (!candidate || typeof candidate !== 'object' || (candidate.type && candidate.type !== 'chat')) continue;
+        if (known.has(candidate.id)) continue;
         const model = Object.fromEntries(fields.filter(key => candidate[key] !== undefined).map(key => [key, candidate[key]]));
         if (!validate(model)) continue;
-        store.putModel(profile.id, { ...model, enabled: true }, null);
+        store.putModel(provider.id, { ...model, enabled: true }, null);
         known.add(model.id);
         modelsAdded++;
       }
@@ -49,7 +50,8 @@ export function openModelCatalog({ store, onChange }) {
     return { providersAdded, modelsAdded };
   }
 
-  apply(Object.fromEntries(profiles.map(profile => [profile.id, profile.models])));
+  let cachedCatalog = Object.fromEntries(profiles.map(profile => [profile.id, profile.models]));
+  apply(cachedCatalog);
 
   async function refresh() {
     try {
@@ -60,10 +62,11 @@ export function openModelCatalog({ store, onChange }) {
       const bytes = await response.text();
       if (Buffer.byteLength(bytes) > 16 * 1024 * 1024) throw new Error('catalog exceeds size limit');
       const catalog = JSON.parse(bytes);
-      if (!catalog || typeof catalog !== 'object' || profiles.some(p => catalog[p.id] !== undefined && !Array.isArray(catalog[p.id]))) {
+      if (!catalog || typeof catalog !== 'object' || Array.isArray(catalog) || Object.values(catalog).some(models => !Array.isArray(models))) {
         throw new Error('invalid catalog');
       }
       const result = apply(catalog);
+      cachedCatalog = catalog;
       status = { source: 'pi.dev', syncedAt: new Date().toISOString(), error: null, ...result };
       return status;
     } catch (error) {
@@ -78,7 +81,7 @@ export function openModelCatalog({ store, onChange }) {
   const timer = setInterval(() => { void sync().catch(() => {}); }, 24 * 60 * 60 * 1000);
   timer.unref();
   return {
-    status: () => status, sync,
+    status: () => status, sync, apply: () => apply(cachedCatalog),
     async close() { clearInterval(timer); lifetime.abort(); await pending?.catch(() => {}); },
   };
 }

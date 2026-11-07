@@ -88,6 +88,8 @@ export const BRIDGE_CLIENT_OPERATIONS = new Set([
   'center_disconnect',
   'center_owner_session',
   'center_owner_login',
+  'center_model_picker_get',
+  'center_model_star_set',
   'center_bot_model_get',
   'center_bot_model_set',
   'center_bot_avatar_get',

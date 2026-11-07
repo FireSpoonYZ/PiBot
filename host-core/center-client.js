@@ -224,6 +224,8 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     },
     botAvatarGet: (targetDeviceId, botId, signal) => request('/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/avatar', { signal }),
     botAvatarSet: (targetDeviceId, botId, input, signal) => request('/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/avatar', { method: 'PUT', body: input, signal }),
+    modelPickerGet: signal => request('/api/host/model-picker', { signal }),
+    modelStarSet: (input, signal) => request('/api/host/model-stars', { method: 'PUT', body: input, signal }),
     botModelGet: (targetDeviceId, botId, signal) => request(hostBotModelPath(targetDeviceId, botId), { signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botModelPath(targetDeviceId, botId), { signal }) : Promise.reject(err)),
     botModelSet: (targetDeviceId, botId, input, signal) => request(hostBotModelPath(targetDeviceId, botId), { method: 'PUT', body: input, signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botModelPath(targetDeviceId, botId), { method: 'PUT', body: input, signal }) : Promise.reject(err)),
     botCwdGet: (targetDeviceId, botId, signal) => request(hostBotCwdPath(targetDeviceId, botId), { signal }).catch(err => err?.code === 'CENTER_REQUEST_FAILED' ? ownerRequest(botCwdPath(targetDeviceId, botId), { signal }) : Promise.reject(err)),
