@@ -10,6 +10,7 @@ const columns: { key: BoardBucket; label: string }[] = [
   { key: 'working', label: '工作中' },
   { key: 'review', label: '待查看' },
   { key: 'idle', label: '空闲' },
+  { key: 'offline', label: '离线' },
 ];
 const timeText = (value: string) => new Date(value).toLocaleString();
 
@@ -27,7 +28,7 @@ export function BotBoard({ targets, board, onOpen, onBack, loading, error }: {
   const rows = targets.map(target => {
     const record = board.records.get(target.key);
     const item = record?.item;
-    const bucket = item ? botBoardBucket(item, board.seen.get(target.key)) : null;
+    const bucket = !target.online ? 'offline' : item ? botBoardBucket(item, board.seen.get(target.key)) : null;
     const stale = !target.online || !!record?.error || record?.generation !== target.generation;
     return { target, record, item, bucket, stale };
   });
@@ -42,15 +43,15 @@ export function BotBoard({ targets, board, onOpen, onBack, loading, error }: {
     // A disconnected clock freezes at the last successful snapshot.
     const clock = stale && record?.updatedAt ? Date.parse(record.updatedAt) : Date.now();
     const controlling = item?.activity.phase === 'stopping' || item?.activity.phase === 'interrupting';
-    return <button type="button" className="bot-board-card" key={target.key} onClick={() => {
+    return <button type="button" className={`bot-board-card${!target.online ? ' is-offline' : ''}`} key={target.key} onClick={() => {
       if (item?.lastResult) board.markViewed(target.key, item.lastResult.id);
       onOpen(target);
     }} aria-label={`打开 ${target.name} 的聊天 · ${target.deviceName}`}>
       <span className="bot-board-card-head">
-        <GrokBotAvatar botKey={target.avatarKey} roleName={target.name} size={40} />
+        <GrokBotAvatar botKey={target.avatarKey} roleName={target.name} isPrimary={target.isPrimary} offline={!target.online} size={40} />
         <span><strong>{target.name}</strong><small>{target.deviceName}</small></span>
       </span>
-      {stale && <span className="bot-board-warning">{!target.online ? '设备离线' : record?.error || '正在刷新'}</span>}
+      {stale && <span className={target.online ? 'bot-board-warning' : 'bot-board-offline-label'}>{!target.online ? '设备离线' : record?.error || '正在刷新'}</span>}
       <span className="bot-board-status">{item ? botActivityText(item.activity, zh => zh) : target.online ? '等待状态读取…' : '尚无状态快照'}</span>
       {!!item?.queuedCount && <small>排队 {item.queuedCount} 项</small>}
       {item?.attention && !controlling && <p>待回答 · {item.attention.count} 题<br />{item.attention.summary}</p>}
@@ -79,7 +80,7 @@ export function BotBoard({ targets, board, onOpen, onBack, loading, error }: {
     </nav>
     {error && <p role="alert" className="bot-board-warning">目录读取失败：{error}</p>}
     {board.storageError && <p role="alert" className="bot-board-warning">{board.storageError}</p>}
-    {filtered.some(r => r.stale && r.item) && <p className="bot-board-warning">以下保留最后一次读取的状态，请留意更新时间。</p>}
+    {filtered.some(r => r.stale && r.item) && <p className="bot-board-snapshot-note">以下保留最后一次读取的状态，请留意更新时间。</p>}
     {!targets.length && <p role="status">{loading ? '正在加载 Bot 目录…' : error ? '目录暂不可用，请恢复连接后重试。' : '还没有 Bot，请先在对话页创建。'}</p>}
     {!!targets.length && !filtered.length && <p role="status">没有符合筛选条件的 Bot。</p>}
     {filtered.some(r => r.bucket === null) && <section className="bot-board-unknown"><h2>状态未确认</h2><div>{filtered.filter(r => r.bucket === null).map(renderCard)}</div></section>}

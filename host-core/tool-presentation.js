@@ -1,7 +1,7 @@
 // host-core/tool-presentation.js
 // Tool presentation contract: the ONLY UI structure a tool may publish through
-// result.details.presentation / api.details({presentation}). Two kinds exist,
-// 'todo' and 'questionnaire'; anything else (kind, version, field shape or
+// result.details.presentation / api.details({presentation}). Supported kinds are
+// 'todo', 'questionnaire' and 'vault-unlock'; anything else (kind, version, field shape or
 // wire byte budget) is dropped by the live projection, never forwarded.
 //
 // Pure module: no I/O, no Session/Runtime/storage. Shared by
@@ -47,10 +47,14 @@ const MAX_ID_BYTES = 1024;
 
 const TODO_STATUSES = new Set(['pending', 'in_progress', 'completed']);
 const QUESTIONNAIRE_STATUSES = new Set(['pending', 'answered', 'cancelled']);
+const VAULT_UNLOCK_STATUSES = new Set(['pending', 'unlocked', 'cancelled', 'interrupted']);
 const ANSWER_KINDS = new Set(['option', 'custom', 'multi']);
 
 const TOP_KEYS = {
   todo: new Set(['kind', 'version', 'installationId', 'tasks']),
+  'vault-unlock': new Set([
+    'kind', 'version', 'installationId', 'conversationId', 'requestId', 'mode', 'status',
+  ]),
   questionnaire: new Set([
     'kind',
     'version',
@@ -223,7 +227,22 @@ function checkPresentation(value, onError) {
     if (value.result !== undefined) checkResult(value.result, onError);
     return;
   }
-  onError('presentation kind must be todo or questionnaire');
+  if (value.kind === 'vault-unlock') {
+    rejectUnknownFields(value, TOP_KEYS['vault-unlock'], onError);
+    checkId(value.installationId, onError);
+    checkId(value.requestId, onError);
+    if (!Number.isSafeInteger(value.conversationId) || value.conversationId < 0) {
+      onError('vault-unlock conversationId must be a nonnegative safe integer');
+    }
+    if (value.mode !== 'initialize' && value.mode !== 'unlock') {
+      onError('vault-unlock mode must be initialize or unlock');
+    }
+    if (!VAULT_UNLOCK_STATUSES.has(value.status)) {
+      onError('vault-unlock status must be pending, unlocked, cancelled or interrupted');
+    }
+    return;
+  }
+  onError('presentation kind must be todo, questionnaire or vault-unlock');
 }
 
 function buildPresentation(value) {
@@ -233,6 +252,17 @@ function buildPresentation(value) {
       version: 1,
       installationId: value.installationId,
       tasks: value.tasks.map((task) => ({ id: task.id, subject: task.subject, status: task.status })),
+    };
+  }
+  if (value.kind === 'vault-unlock') {
+    return {
+      kind: 'vault-unlock',
+      version: 1,
+      installationId: value.installationId,
+      conversationId: value.conversationId,
+      requestId: value.requestId,
+      mode: value.mode,
+      status: value.status,
     };
   }
   const questionnaire = {

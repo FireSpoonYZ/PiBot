@@ -1,4 +1,4 @@
-# e-助手桌面客户端（Windows / Linux x64）
+# pibot 桌面客户端（Windows / Linux x64）
 
 产品版本 **1.1.0**。当前实现和三端验收范围见[发布进度](../docs/open-source-release-progress.md)。本文描述当前行为；旧 M17/M20 模块记录保留在 Git 历史与[架构进度](../docs/next-generation-architecture.md)，不作为本版本安装与更新已完成的证明。
 
@@ -12,7 +12,7 @@
 
 ## 两个平台的当前差异
 
-**Linux** 使用 DEB 中的 `/usr/bin/e-launcher-host` 和 systemd 用户单元，首次配置固定实际 Host home 与 XDG 配置目录，启用 linger。配置文件和服务在用户身份下使用；受限 root helper 只登记调用用户的 UID、Host home 与 XDG 路径，供包升级找到正确目标。
+**Linux** 使用 DEB 中的 `/usr/bin/pibot-host` 和 systemd 用户单元，首次配置固定实际 Host home 与 XDG 配置目录，启用 linger。配置文件和服务在用户身份下使用；受限 root helper 只登记调用用户的 UID、Host home 与 XDG 路径，供包升级找到正确目标。
 
 DEB preinst 保存首次启用/运行快照，停止失败则阻止替换。postinst 恢复原状态，失败保留修复依据；用户关闭的自启动不会被升级开启。卸载停止并移除本产品服务，保留业务数据与 linger。使用非默认 `XDG_CONFIG_HOME` 时，登记的是实际目录。
 

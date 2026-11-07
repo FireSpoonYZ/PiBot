@@ -1,4 +1,4 @@
-//! Tauri commands that drive the bundled `e-launcher-host` launcher binary.
+//! Tauri commands that drive the bundled `pibot-host` launcher binary.
 //!
 //! The launcher lives next to the desktop executable (Tauri externalBin). Every
 //! call runs it as a short-lived child process without a console window,
@@ -30,7 +30,7 @@ use crate::{
   ensure_main_webview,
 };
 
-const LAUNCHER_NAME: &str = "e-launcher-host";
+const LAUNCHER_NAME: &str = "pibot-host";
 /// status probes the supervisor plus the authenticated /v1/service ready check.
 const STATUS_TIMEOUT: Duration = Duration::from_secs(35);
 /// pair registers over HTTPS and persists config/secrets: identity read ~30s

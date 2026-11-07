@@ -81,7 +81,7 @@ if (format === 'apk') {
   if (abis.length !== 1 || abis[0] !== (arch === 'aarch64' ? 'arm64-v8a' : 'x86_64')) usage('APK ABI does not match metadata');
 } else if (format === 'deb') {
   const fields = execFileSync('dpkg-deb', ['--field', abs], { encoding: 'utf8' });
-  if (!/^Package: e-launcher-desktop$/m.test(fields) || !/^Architecture: amd64$/m.test(fields)
+  if (!/^Package: pibot$/m.test(fields) || !/^Architecture: amd64$/m.test(fields)
       || fields.match(/^Version: (.+)$/m)?.[1] !== version) usage('DEB identity/version does not match metadata');
 }
 

@@ -711,23 +711,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "e-launcher-desktop"
-version = "0.0.2"
-dependencies = [
- "dunce",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-updater",
- "tokio",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "embed-resource"
 version = "3.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2365,6 +2348,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
 dependencies = [
  "siphasher",
+]
+
+[[package]]
+name = "pibot"
+version = "0.0.2"
+dependencies = [
+ "dunce",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-updater",
+ "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

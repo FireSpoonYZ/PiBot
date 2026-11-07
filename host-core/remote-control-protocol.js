@@ -36,6 +36,7 @@ import {
 } from './shower-protocol.js';
 import { normalizeScheduleControlParams } from './schedule-protocol.js';
 import { normalizeBotFileChunk } from './bot-file-protocol.js';
+import { normalizeVaultControl, VAULT_ERROR_CODES } from './vault-protocol.js';
 
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
@@ -81,7 +82,7 @@ export function isMemoryControlMethod(method) {
 // Slow RPCs share the memory timeout chain: one manual compaction waits on a
 // model summarization request and must not be cut off by the 20s/25s default.
 function isSlowControlMethod(method) {
-  return method === 'compact' || isMemoryControlMethod(method);
+  return method === 'compact' || method === 'vaultControl' || isMemoryControlMethod(method);
 }
 
 /** Relay/target execution deadline for one control method. */
@@ -116,6 +117,7 @@ export const CONTROL_V1_METHODS = Object.freeze([
 // Fixed v2 additions (module 14, plus the managed-extension/SOUL additions and
 // the unified Shower six).
 const CONTROL_V2_METHODS = Object.freeze([
+  'vaultControl',
   'getServiceStatus',
   'updateBotProfile',
   'setPrimaryBot',
@@ -259,6 +261,7 @@ export const CONTROL_ERROR_CODES = new Set([
   'TURN_SYNC_FAILED',
   'TURN_RECOVERY_REQUIRED',
   ...SHOWER_ERROR_CODES,
+  ...VAULT_ERROR_CODES,
 ]);
 
 // Failure outcome semantics across the control protocol.
@@ -626,6 +629,7 @@ function normalizeControlParams(method, params) {
         input: out,
       };
     }
+    case 'vaultControl': return normalizeVaultControl(params);
     case 'getShowerStatus': {
       rejectUnknownFields(params, new Set(['botId', 'scopeId']), 'params');
       return showerTargetParams(params);

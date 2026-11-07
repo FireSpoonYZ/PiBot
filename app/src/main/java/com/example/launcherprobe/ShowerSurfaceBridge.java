@@ -40,7 +40,7 @@ final class ShowerSurfaceBridge {
     private static final int SCROLL_PX_PER_NOTCH = 80;
     private static final int MAX_SCROLL_PX = 1200;
     private static final Set<String> ACTIONS =
-            Set.of("status", "ensure", "frame", "input", "launch", "release");
+            Set.of("status", "ensure", "frame", "input", "secretInput", "launch", "release");
     private static final Set<String> SOURCES = Set.of("agent", "human");
     // 固定毫秒精度 ISO 时间戳，避免 JS Date.parse 对变长小数位的解析差异。
     private static final DateTimeFormatter TIMESTAMP =
@@ -137,6 +137,7 @@ final class ShowerSurfaceBridge {
         return switch (action) {
             case "frame" -> frame(controller, sessionId, arguments.optJSONObject("limits"), cancelled);
             case "input" -> input(controller, sessionId, arguments.optJSONObject("input"), cancelled);
+            case "secretInput" -> secretInput(controller, sessionId, arguments, cancelled);
             case "launch" -> launch(controller, sessionId, arguments.optJSONObject("target"), cancelled);
             case "release" -> release(controller, sessionId);
             default -> throw new IllegalArgumentException("未知 shower action");
@@ -264,6 +265,31 @@ final class ShowerSurfaceBridge {
             case "text" -> text(controller, input, cancelled);
             default -> throw new Failure("SHOWER_UNSUPPORTED", "不支持的输入类型");
         };
+    }
+
+    private static JSONObject secretInput(ShowerController controller, String sessionId,
+            JSONObject arguments, BooleanSupplier cancelled) throws Exception {
+        try {
+            requireReady(controller, sessionId);
+            JSONObject target = arguments.getJSONObject("target");
+            if (target.has("windowId")) throw new Failure("SHOWER_UNSUPPORTED", "Secret input unsupported");
+            int x = ShowerToolBridge.integer(target, "x");
+            int y = ShowerToolBridge.integer(target, "y");
+            String text = arguments.getString("text");
+            checkCancelled(cancelled);
+            int status = controller.surfaceSecretInput(sessionId, x, y, text, cancelled);
+            checkCancelled(cancelled);
+            if (status == 1) throw new Failure("SHOWER_UNSUPPORTED", "Secret input unsupported");
+            if (status == 3) throw new Failure("CANCELLED", "Secret input cancelled");
+            if (status != 0) throw new Failure("SHOWER_INPUT_FAILED", "Secret input failed");
+            return new JSONObject().put("sessionId", sessionId).put("status", "applied");
+        } catch (Failure failure) {
+            throw new Failure(failure.code, "Secret input failed");
+        } catch (InterruptedException interrupted) {
+            throw new Failure("CANCELLED", "Secret input cancelled");
+        } catch (Throwable failure) {
+            throw new Failure("SHOWER_INPUT_FAILED", "Secret input failed");
+        }
     }
 
     private static JSONObject click(ShowerController controller, JSONObject input,

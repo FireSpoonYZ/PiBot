@@ -1,8 +1,8 @@
 #!/bin/sh
-# e-launcher-hostctl — limited root helper for e-launcher DEB lifecycle.
+# pibot-hostctl — limited root helper for pibot DEB lifecycle.
 #
-# Installed at /usr/lib/e-launcher-desktop/e-launcher-hostctl (root-owned,
-# not user-writable) and invoked by `e-launcher-host enable|remove` through
+# Installed at /usr/lib/pibot/pibot-hostctl (root-owned,
+# not user-writable) and invoked by `pibot-host enable|remove` through
 # `sudo -n`. It records the calling user's Host/XDG paths and enables linger
 # for that same UID. It never executes user-supplied commands or stores secrets.
 set -u
@@ -11,7 +11,7 @@ export PATH
 
 REGDIR="/var/lib/e-launcher/hosts"
 
-die() { echo "e-launcher-hostctl: $*" >&2; exit 1; }
+die() { echo "pibot-hostctl: $*" >&2; exit 1; }
 
 [ "$(id -u)" = "0" ] || die "must run as root"
 [ -n "${SUDO_UID:-}" ] || die "SUDO_UID is not set"
@@ -49,7 +49,7 @@ prepare_regdir() {
 
 case "$op" in
   register)
-    [ $# -eq 2 ] || die "usage: e-launcher-hostctl register <host-home> <config-home>"
+    [ $# -eq 2 ] || die "usage: pibot-hostctl register <host-home> <config-home>"
     home="$1"
     config_home="$2"
     valid_home "$config_home" || die "invalid config home"
@@ -67,11 +67,11 @@ case "$op" in
     loginctl enable-linger "$SUDO_UID" || die "cannot enable linger for uid $SUDO_UID"
     ;;
   unregister)
-    [ $# -eq 0 ] || die "usage: e-launcher-hostctl unregister"
+    [ $# -eq 0 ] || die "usage: pibot-hostctl unregister"
     rm -f "$REGDIR/$SUDO_UID" || die "cannot remove registry entry"
     ;;
   *)
-    die "usage: e-launcher-hostctl register <host-home> <config-home>|unregister"
+    die "usage: pibot-hostctl register <host-home> <config-home>|unregister"
     ;;
 esac
 exit 0

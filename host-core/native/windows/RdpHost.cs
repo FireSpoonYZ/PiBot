@@ -104,6 +104,7 @@ namespace ELauncher.Shower
         private static readonly string[] FrameFields = WithTrusted(new string[] { "sessionId", "limits" });
         private static readonly string[] FrameLimitFields = new string[] { "maxWidth", "maxHeight", "maxBytes" };
         private static readonly string[] InputFields = WithTrusted(new string[] { "sessionId", "input" });
+        private static readonly string[] SecretInputFields = WithTrusted(new string[] { "sessionId", "secretInput" });
         private static readonly string[] LaunchFields = WithTrusted(new string[] { "sessionId", "launch" });
         private static readonly string[] PreviewFields = WithTrusted(new string[] { "sessionId", "preview", "mode" });
         private static readonly string[] ReleaseFields = WithTrusted(new string[] { "sessionId" });
@@ -246,7 +247,7 @@ namespace ELauncher.Shower
             {
                 Application.EnableVisualStyles();
                 ui = new RdpWindow();
-                ui.Text = "e-launcher shower";
+                ui.Text = "pibot shower";
                 ui.FormBorderStyle = FormBorderStyle.SizableToolWindow;
                 ui.MinimizeBox = false;
                 ui.ShowInTaskbar = false;
@@ -372,7 +373,7 @@ namespace ELauncher.Shower
 
         private void Handle(WireRequest request)
         {
-            bool tracked = request.Method == "frame" || request.Method == "input" || request.Method == "launch" || request.Method == "cua";
+            bool tracked = request.Method == "frame" || request.Method == "input" || request.Method == "secretInput" || request.Method == "launch" || request.Method == "cua";
             WireRelay relay = null;
             if (tracked)
             {
@@ -408,6 +409,12 @@ namespace ELauncher.Shower
                             result = Forward(request.Params, relay, false);
                         }
                         break;
+                    case "secretInput":
+                        lock (opLock)
+                        {
+                            result = Forward(request.Params, relay, false, true);
+                        }
+                        break;
                     case "launch":
                         lock (opLock)
                         {
@@ -439,12 +446,20 @@ namespace ELauncher.Shower
             }
             catch (HostFault fault)
             {
-                wire.Failure(request.Id, fault.Code, fault.Message, fault.Outcome);
+                wire.Failure(request.Id, fault.Code, request.Method == "secretInput" ? "Secret input failed" : fault.Message,
+                    request.Method == "secretInput" ? "unconfirmed" : fault.Outcome);
             }
             catch (Exception ex)
             {
-                HostLog.Warn(request.Method + " failed: " + ex.GetType().Name + ": " + ex.Message);
-                wire.Failure(request.Id, HostErrorCodes.BackendFailed, ex.Message, null);
+                if (request.Method == "secretInput")
+                {
+                    wire.Failure(request.Id, HostErrorCodes.BackendFailed, "Secret input failed", "unconfirmed");
+                }
+                else
+                {
+                    HostLog.Warn(request.Method + " failed: " + ex.GetType().Name + ": " + ex.Message);
+                    wire.Failure(request.Id, HostErrorCodes.BackendFailed, ex.Message, null);
+                }
             }
             finally
             {
@@ -1213,11 +1228,11 @@ namespace ELauncher.Shower
             return result;
         }
 
-        private object Forward(Dictionary<string, object> parameters, WireRelay relay, bool launch)
+        private object Forward(Dictionary<string, object> parameters, WireRelay relay, bool launch, bool secret = false)
         {
-            CheckFields(parameters, launch ? LaunchFields : InputFields, launch ? "launch" : "input");
+            string field = secret ? "secretInput" : launch ? "launch" : "input";
+            CheckFields(parameters, secret ? SecretInputFields : launch ? LaunchFields : InputFields, field);
             string requested = RequireSession(parameters);
-            string field = launch ? "launch" : "input";
             Dictionary<string, object> payload = WireJson.GetObject(parameters, field);
             if (payload == null) throw new HostFault(HostErrorCodes.InvalidArgument, "params." + field + " must be an object");
             RequireReady();
@@ -1237,7 +1252,8 @@ namespace ELauncher.Shower
             if (source != null) forwarded["source"] = source;
             string taskId = WireJson.GetString(parameters, "taskId");
             if (taskId != null) forwarded["taskId"] = taskId;
-            Dictionary<string, object> result = link.Call(field, forwarded, RelayTimeoutMs, relay);
+            Dictionary<string, object> result = link.Call(field, forwarded, RelayTimeoutMs, relay,
+                secret ? CuaCancelSettleMs : 0);
             if (result == null) result = new Dictionary<string, object>();
             return result;
         }

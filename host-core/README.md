@@ -1346,6 +1346,8 @@ export JAVA_HOME="/c/Program Files/Microsoft/jdk-21.0.9.10-hotspot"
 
 Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16KiB rg15.1.0 fd10.3.0（x86_64、arm64-v8a）固定 crate SHA 与锁定 Cargo 隔离环境；真实 untrusted_app 7/7 文件工具通过（含 grep/find）；私有祖先 Cargo 配置被拒，迁移 pins 后 4/4 缓存复验；许可见 THIRD_PARTY_NOTICES.md。
 
+Node Mobile 24.18.0 内嵌 icu_small（ICU 78.3）缺分词数据，Intl.Segmenter 会段错误；`build-android.js` 下载官方 `icudt78l.dat`（固定 URL/SHA-256，ZIP 缓存在 `app/build/host-icu/`、命中仍复验哈希）作为 payload 兄弟文件装入运行时版本目录，`BotHostProcess` 以 `NODE_ICU_DATA` 指向该目录，官方 LICENSE 并入 `third-party-licenses.txt`。升级 Node 版本时须同步匹配 ICU 主版本与 dat 文件名。
+
 ### 设置、凭据与桥
 
 设置与凭据写入仅下次显式重启生效：`settingsSet({input:{expectedRevision,settings}})`，在线保存标记 restartRequired（ready 绑定成功后清除）；saveCredentials 只写整个 aliases 映射替换（validateCredentials 无增量更新）。请求并发满/过渡期拒绝为 BUSY/not-sent。

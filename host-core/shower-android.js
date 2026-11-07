@@ -9,6 +9,7 @@
 // and status never starts Shower or wakes Shizuku.
 import { randomUUID } from 'node:crypto';
 import { assertId, messageError } from './message-protocol.js';
+import { normalizeShowerSecretTarget, assertShowerSecretText, secretInputFailure } from './shower-protocol.js';
 import {
   SHOWER_ERROR_CODES,
   SHOWER_MAX_FRAME_BASE64_BYTES,
@@ -353,6 +354,25 @@ export function createAndroidShowerBackend({ nativeBridge } = {}) {
     };
   }
 
+  async function secretInput(record, value, options = {}) {
+    let sent = false;
+    try {
+      sessionIdOf(record);
+      const target = normalizeShowerSecretTarget(value?.target);
+      assertShowerSecretText(value?.text);
+      if (target.windowId !== undefined) throw messageError('SHOWER_UNSUPPORTED', 'Secret input unsupported');
+      assertNotAborted(options.signal, 'not-sent');
+      const request = nativeRequest(record, 'secretInput', { target, text: value.text }, options);
+      sent = true;
+      const result = await callNative(nativeBridge, request, { signal: options.signal, mutating: true });
+      requireEcho(result, record);
+      if (result.status !== 'applied') throw backendFailed('Secret input failed');
+      return { sessionId: record.sessionId, status: 'applied' };
+    } catch (error) {
+      throw secretInputFailure(error, sent);
+    }
+  }
+
   async function launch(record, value, options = {}) {
     sessionIdOf(record);
     if (!isPlainObject(value) || value.kind !== 'app') {
@@ -406,5 +426,5 @@ export function createAndroidShowerBackend({ nativeBridge } = {}) {
     }
   }
 
-  return { platform: PLATFORM, status, ensure, frame, input, launch, release, close };
+  return { platform: PLATFORM, status, ensure, frame, input, secretInput, launch, release, close };
 }

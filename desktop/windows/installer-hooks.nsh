@@ -14,6 +14,12 @@ Var /GLOBAL EHostWasRunning
 Var /GLOBAL EHostFile
 Var /GLOBAL EOldInstallDir
 
+; 改名前的旧 Windows productName：installer.nsi 已把 UNINSTKEY/MANUPRODUCTKEY
+; 固定为旧名（升级身份不变，新版本共用旧卸载键），此处仅清理旧快捷方式与
+; 旧 HKCU 用户目录安装残留；旧快捷方式删除按 current/all 两上下文执行。
+!define E_LAUNCHER_LEGACY_PRODUCT "e-助手"
+!define E_LAUNCHER_LEGACY_UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\e-助手"
+
 ; perMachine 安装时 SetShellVarContext 为 all，需临时切回 current 才能拿到
 ; 交互登录用户自己的 LOCALAPPDATA（同用户提权下 current == 安装用户）。
 !macro E_LAUNCHER_HOST_DETECT_HOME
@@ -141,6 +147,19 @@ FunctionEnd
     CreateShortcut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe" "" "$INSTDIR\icons\${E_LAUNCHER_SHELL_ICON}" 0
     !insertmacro SetLnkAppUserModelId "$DESKTOP\${PRODUCTNAME}.lnk"
   ${EndIf}
+  ; 旧品牌快捷方式清理：旧包可能按 perUser 或 perMachine 安装，两个上下文都只
+  ; 删除已知旧名，新快捷方式（pibot.lnk）不受影响。
+  SetShellVarContext current
+  Delete "$SMPROGRAMS\${E_LAUNCHER_LEGACY_PRODUCT}.lnk"
+  Delete "$DESKTOP\${E_LAUNCHER_LEGACY_PRODUCT}.lnk"
+  Delete "$SMPROGRAMS\e-launcher-desktop.lnk"
+  Delete "$DESKTOP\e-launcher-desktop.lnk"
+  SetShellVarContext all
+  Delete "$SMPROGRAMS\${E_LAUNCHER_LEGACY_PRODUCT}.lnk"
+  Delete "$DESKTOP\${E_LAUNCHER_LEGACY_PRODUCT}.lnk"
+  Delete "$SMPROGRAMS\e-launcher-desktop.lnk"
+  Delete "$DESKTOP\e-launcher-desktop.lnk"
+  !insertmacro SetContext
   WriteRegStr SHCTX "${UNINSTKEY}" "DisplayIcon" "$INSTDIR\icons\${E_LAUNCHER_SHELL_ICON}"
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
   ; 为本交互登录用户注册 Host 登录任务（未配对时 trigger 登记为禁用、不自动运行；
@@ -154,17 +173,17 @@ FunctionEnd
       ; 任务注册成功后才清理 currentUser 旧安装：删除用户目录下的旧程序与残留卸载入口。
       ; 只接受完全等于 <用户LOCALAPPDATA>\<ProductName> 的旧安装路径，不执行其中任何二进制；
       ; helper 已移除旧 HKCU Run，这里兜底同一用户的残留值。
-      ReadRegStr $EOldInstallDir HKCU "${UNINSTKEY}" "InstallLocation"
+      ReadRegStr $EOldInstallDir HKCU "${E_LAUNCHER_LEGACY_UNINSTKEY}" "InstallLocation"
       ${If} $EOldInstallDir != ""
         StrCpy $R9 $EOldInstallDir 1
         ${If} $R9 == "$\""
           StrCpy $EOldInstallDir $EOldInstallDir -1
           StrCpy $EOldInstallDir $EOldInstallDir "" 1
         ${EndIf}
-        ${If} $EOldInstallDir == "$EHostAppData\${PRODUCTNAME}"
+        ${If} $EOldInstallDir == "$EHostAppData\${E_LAUNCHER_LEGACY_PRODUCT}"
         ${AndIf} $EOldInstallDir != "$INSTDIR"
           RMDir /r "$EOldInstallDir"
-          DeleteRegKey HKCU "${UNINSTKEY}"
+          DeleteRegKey HKCU "${E_LAUNCHER_LEGACY_UNINSTKEY}"
         ${EndIf}
       ${EndIf}
       DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "e-launcher-host"

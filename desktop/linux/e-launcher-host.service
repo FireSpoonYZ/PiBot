@@ -1,10 +1,10 @@
 [Unit]
-Description=e-launcher Host (user)
+Description=pibot Host (user)
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/e-launcher-host run
+ExecStart=/usr/bin/pibot-host run
 Restart=always
 RestartSec=3
 # 外层停止预算必须大于 Host 内部清理预算（共享契约）。

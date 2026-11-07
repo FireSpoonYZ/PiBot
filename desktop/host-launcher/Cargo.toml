@@ -1,15 +1,15 @@
 [package]
-name = "e-launcher-host"
+name = "pibot-host"
 version = "0.0.2"
 edition = "2021"
 publish = false
-description = "Supervisor/launcher for the bundled e-launcher Host service"
+description = "Supervisor/launcher for the bundled pibot Host service"
 
 # Standalone crate: never pulled into another workspace.
 [workspace]
 
 [[bin]]
-name = "e-launcher-host"
+name = "pibot-host"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,4 +1,4 @@
-//! `e-launcher-host`: pairs this machine with a center and supervises the
+//! `pibot-host`: pairs this machine with a center and supervises the
 //! bundled Host service (contract §3). All machine output is one JSON line
 //! on stdout; failures print `{"error":{"code","message"}}` and exit 1.
 
@@ -22,7 +22,7 @@ use crate::config::{Config, Secrets, CONFIG_VERSION, CONTROL_TOKEN_KEY, DEFAULT_
 use crate::paths::HostPaths;
 use crate::util::{print_json, random_token, AppError, AppResult};
 
-const USAGE: &str = "usage: e-launcher-host <command> [options]
+const USAGE: &str = "usage: pibot-host <command> [options]
 commands:
   run        foreground supervisor for the Host service
   start      start the supervisor in the background (systemd user unit on Linux when installed)
@@ -255,7 +255,7 @@ fn default_display_name() -> String {
         .into_iter()
         .map(|c| c.trim().chars().filter(|ch| !ch.is_control()).take(MAX_NAME_CHARS).collect::<String>())
         .find(|c| !c.is_empty())
-        .unwrap_or_else(|| "e-launcher-host".to_string())
+        .unwrap_or_else(|| "pibot-host".to_string())
 }
 
 /// Secret from `env_name`, else the first stdin line (line ending removed).

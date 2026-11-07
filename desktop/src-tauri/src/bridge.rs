@@ -47,7 +47,7 @@ const MEMORY_METHODS: &[&str] = &[
 const MAX_OBSERVER_FRAME_FIFO: usize = 8;
 const MAX_OBSERVER_FIFO_BYTES: usize = 80 * 1024 * 1024;
 const OBSERVE_ACK_OP: &str = "observe_ack";
-const SIDECAR_NAME: &str = "e-launcher-client-node";
+const SIDECAR_NAME: &str = "pibot-node";
 const CLIENT_SCRIPT_NAME: &str = "desktop-client.mjs";
 
 const PUBLIC_OPERATIONS: &[&str] = &[
@@ -417,6 +417,37 @@ impl DesktopBridge {
     }
   }
 
+  /// The main webview's document owns every observer Channel; once it is
+  /// replaced they are all dead. Drop the entries so the fresh page can
+  /// observe, then best-effort revoke each sidecar observation. The session
+  /// and its broker/center connections stay alive.
+  pub fn evict_page_observers(&self) {
+    let maybe_session = { self.inner.session.lock().unwrap().clone() };
+    let Some(session) = maybe_session else {
+      return;
+    };
+    let (ids, ready) = {
+      let mut guard = session.lock().unwrap();
+      let stale = std::mem::take(&mut guard.observers);
+      (stale.into_keys().collect::<Vec<String>>(), guard.is_ready())
+    };
+    if ids.is_empty() || !ready {
+      return;
+    }
+    let bridge = self.clone();
+    tauri::async_runtime::spawn(async move {
+      for observation_id in ids {
+        let params = json!({ "observationId": observation_id });
+        match bridge.dispatch_request(&session, "unobserve", params).await {
+          Ok(_) => {}
+          // Session gone mid-drain: the remaining revokes are moot.
+          Err(err) if err.code == "DISCONNECTED" || err.code == "NOT_CONNECTED" => break,
+          Err(_) => {}
+        }
+      }
+    });
+  }
+
   // Local-only flow-control ack for observation delivery. Idempotent; never
   // spawns or forwards to the Node child. Returns {acknowledged:boolean}.
   fn handle_observe_ack(&self, params: Value) -> Result<Value, BridgeError> {
@@ -475,10 +506,7 @@ impl DesktopBridge {
     if acknowledged && !terminal {
       // Advance the bounded FIFO now that the previous event is acked.
       if pump_observation_channel(&session, observation_id).is_err() {
-        let err =
-          BridgeError::new("DISCONNECTED", "failed to deliver observation event", "unconfirmed");
-        teardown_session(&self.inner, &session, err.clone());
-        return Err(err);
+        drop_failed_observer(&self.inner, &session, observation_id, None);
       }
     }
     Ok(json!({ "acknowledged": acknowledged }))
@@ -1164,7 +1192,7 @@ fn read_bounded_line<R: BufRead>(
 }
 
 fn handle_stdout_frame(
-  bridge_inner: &BridgeInner,
+  bridge_inner: &Arc<BridgeInner>,
   session: &Arc<Mutex<SessionState>>,
   frame: Value,
 ) -> Result<(), BridgeError> {
@@ -1279,17 +1307,16 @@ fn handle_stdout_frame(
         let Some(state) = guard.observers.get_mut(&observation_id) else {
           return Ok(());
         };
-        state.enqueue(frame, is_terminal)?;
-      }
-      match pump_observation_channel(session, &observation_id) {
-        Ok(()) => Ok(()),
-        Err(()) => {
-          let err =
-            BridgeError::new("DISCONNECTED", "failed to deliver observation event", "unconfirmed");
-          teardown_session(bridge_inner, session, err);
-          Ok(())
+        if let Err(err) = state.enqueue(frame, is_terminal) {
+          drop(guard);
+          drop_failed_observer(bridge_inner, session, &observation_id, Some(err));
+          return Ok(());
         }
       }
+      if pump_observation_channel(session, &observation_id).is_err() {
+        drop_failed_observer(bridge_inner, session, &observation_id, None);
+      }
+      Ok(())
     }
     _ => Err(BridgeError::new(
       "BAD_FRAME",
@@ -1297,6 +1324,45 @@ fn handle_stdout_frame(
       "unconfirmed",
     )),
   }
+}
+
+// A failed observer must not kill the session. When a reason is given
+// (e.g. FIFO overflow on a live consumer), first report it through the same
+// terminal-error envelope teardown uses — best effort, a dead Channel just
+// ignores it — so the page fails the observation instead of hanging. Then
+// drop the entry and best-effort revoke the sidecar observation.
+fn drop_failed_observer(
+  bridge_inner: &Arc<BridgeInner>,
+  session: &Arc<Mutex<SessionState>>,
+  observation_id: &str,
+  terminal_error: Option<BridgeError>,
+) {
+  let (channel, ready) = {
+    let mut guard = session.lock().unwrap();
+    let removed = guard.observers.remove(observation_id);
+    (removed.map(|state| state.channel), guard.is_ready())
+  };
+  if let (Some(channel), Some(err)) = (channel, terminal_error) {
+    let event = json!({
+      "type": "event",
+      "observationId": observation_id,
+      "error": {
+        "code": err.code,
+        "message": err.message,
+        "outcome": "unconfirmed",
+      }
+    });
+    let _ = channel.send(event);
+  }
+  if !ready {
+    return;
+  }
+  let bridge = DesktopBridge { inner: Arc::clone(bridge_inner) };
+  let session = Arc::clone(session);
+  let params = json!({ "observationId": observation_id });
+  tauri::async_runtime::spawn(async move {
+    let _ = bridge.dispatch_request(&session, "unobserve", params).await;
+  });
 }
 
 fn is_session_current(bridge_inner: &BridgeInner, session: &Arc<Mutex<SessionState>>) -> bool {

@@ -1,6 +1,6 @@
-<p><a href="assets/logo.png"><img src="assets/icon.png" alt="e-launcher" width="112" height="112"></a></p>
+<p><a href="assets/logo.png"><img src="assets/icon.png" alt="pibot" width="112" height="112"></a></p>
 
-# e-launcher 独立 AI 助手
+# pibot 独立 AI 助手
 
 自托管中心管理模型、设备、Bot、插件、MCP、Skill 与客户端版本，Windows、Linux 和 Android 客户端连接同一中心。每台设备上的 Host 执行模型与工具，聊天、文件和设备能力保留在对应设备。Android 是普通助手应用，不申请默认 HOME，不提供桌面网格、图标包、小组件宿主或导航手势。
 

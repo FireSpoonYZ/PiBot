@@ -121,7 +121,7 @@ public final class BotHostService extends Service {
         super.onCreate();
         activeService = this;
         getSystemService(NotificationManager.class).createNotificationChannel(
-                new NotificationChannel(CHANNEL, "AI Host", NotificationManager.IMPORTANCE_LOW));
+                new NotificationChannel(CHANNEL, "pibot Host", NotificationManager.IMPORTANCE_LOW));
         getSystemService(NotificationManager.class).createNotificationChannel(
                 new NotificationChannel("bot-client-tasks", "任务完成", NotificationManager.IMPORTANCE_DEFAULT));
         BotHostManager.get(this).attachService(this);
@@ -153,7 +153,7 @@ public final class BotHostService extends Service {
         manager.awaitStop().whenComplete((ignored, stopError) -> main.post(() -> {
             if (activeService != this || startAttempt != attempt || !BotClientService.ownsHostListener(listener)) return;
             if (stopError != null) {
-                showError("AI Host 清理失败");
+                showError("pibot Host 清理失败");
                 updateNotification("清理失败");
                 if (recovering) BotClientService.retryHost(listener, attempt);
                 return;
@@ -164,7 +164,7 @@ public final class BotHostService extends Service {
                 if (activeService != this || startAttempt != attempt || !BotClientService.ownsHostListener(listener)) return;
                 if (error != null) {
                     if (!(error instanceof CancellationException)) {
-                        showError("AI Host 启动失败");
+                        showError("pibot Host 启动失败");
                         updateNotification("启动失败");
                         if (recovering) BotClientService.retryHost(listener, attempt);
                     }
@@ -184,7 +184,7 @@ public final class BotHostService extends Service {
             String phase = manager.snapshot().optString("phase");
             if ("running".equals(phase) || "starting".equals(phase)) return;
             if (failed && "failed".equals(phase)) {
-                showError("AI Host 已停止：" + manager.snapshot().optString("errorCode", code));
+                showError("pibot Host 已停止：" + manager.snapshot().optString("errorCode", code));
             } else if (!failed && "stopped".equals(phase)) {
                 getSystemService(NotificationManager.class).cancel(ERROR_NOTIFICATION_ID);
             }
@@ -200,7 +200,7 @@ public final class BotHostService extends Service {
     private void refreshNotification() {
         if (BotHostManager.get(this).snapshot().optString("phase").equals("running")) {
             getSystemService(NotificationManager.class).cancel(ERROR_NOTIFICATION_ID);
-            updateNotification("本地 AI Host 正在运行");
+            updateNotification("本地 pibot Host 正在运行");
         }
     }
 
@@ -214,7 +214,7 @@ public final class BotHostService extends Service {
         getSystemService(NotificationManager.class).notify(ERROR_NOTIFICATION_ID,
                 new Notification.Builder(this, CHANNEL)
                         .setSmallIcon(android.R.drawable.stat_notify_error)
-                        .setContentTitle("AI Host")
+                        .setContentTitle("pibot Host")
                         .setContentText(text)
                         .setContentIntent(open)
                         .setAutoCancel(true)
@@ -229,7 +229,7 @@ public final class BotHostService extends Service {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
-                .setContentTitle("AI Host")
+                .setContentTitle("pibot Host")
                 .setContentText(text)
                 .setContentIntent(open)
                 .addAction(new Notification.Action.Builder(
