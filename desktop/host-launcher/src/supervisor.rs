@@ -367,7 +367,7 @@ pub fn run(paths: &HostPaths) -> AppResult<Value> {
         return Err(AppError::new(
             "PORT_IN_USE",
             format!(
-                "127.0.0.1:{} is already in use; run 'e-launcher-host stop' (or free the port) before starting the Host",
+                "127.0.0.1:{} is already in use; run 'pibot-host stop' (or free the port) before starting the Host",
                 config.port
             ),
         ));

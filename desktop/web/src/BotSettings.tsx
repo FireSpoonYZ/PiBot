@@ -12,6 +12,7 @@ import { BotCapabilities } from './BotCapabilities';
 import { BotSchedules } from './BotSchedules';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import { ModelPicker } from '../../../web/src/bot-settings/ModelPicker';
+import { VaultPanel, type VaultCall } from '../../../web/src/vault/VaultPanel';
 import './BotSettings.css';
 
 /** 与 Host 的公开上限一致（UTF-8 字节）。 */
@@ -37,13 +38,14 @@ const SOUL_SNIPPETS: { label: string; content: string }[] = [
   },
 ];
 
-type StudioTab = 'soul' | 'model' | 'capabilities' | 'schedules';
+type StudioTab = 'soul' | 'model' | 'capabilities' | 'schedules' | 'vault';
 
 const STUDIO_TABS: { id: StudioTab; label: string }[] = [
   { id: 'soul', label: '🎭 灵魂人设' },
   { id: 'model', label: '🤖 模型设置' },
   { id: 'capabilities', label: '🔌 插件与能力' },
   { id: 'schedules', label: '⏰ 定时任务' },
+  { id: 'vault', label: '🔒 密码库' },
 ];
 
 /** 一个 Bot 的本地编辑状态：草稿与其原始基线成对保存，切走/重挂载后 CAS 仍指向同一远端版本。 */
@@ -68,10 +70,12 @@ function soulBytes(text: string): number {
 export function BotSettings({
   api,
   botId,
+  hostLabel,
   open,
 }: {
   api: DesktopPanelApi;
   botId: string;
+  hostLabel: string;
   /** 由外层工作台抽屉控制；true 时直接展示内容。 */
   open?: boolean;
   onOpenChange?: (next: boolean) => void;
@@ -80,6 +84,16 @@ export function BotSettings({
   const online = api.transportConnected;
   const key = identity ? cacheKey(identity, botId) : '';
   const cached = key ? draftCache.get(key) : undefined;
+  const vaultIdentityKey = JSON.stringify([identity?.profileId, identity?.targetDeviceId, identity?.kind, identity?.generation]);
+  const callVault = useCallback<VaultCall>(input => {
+    const current = api.identity;
+    if (!identity || !current || !api.transportConnected ||
+      current.profileId !== identity.profileId || current.targetDeviceId !== identity.targetDeviceId ||
+      current.kind !== identity.kind || current.generation !== identity.generation) {
+      return Promise.reject({ code: 'NOT_CONNECTED' });
+    }
+    return api.call(identity, 'vaultControl', input);
+  }, [api, identity]);
 
   const [soul, setSoul] = useState<BotSoul | null>(cached?.soul ?? null);
   const [soulDraft, setSoulDraft] = useState<string | null>(cached?.soulDraft ?? null);
@@ -666,6 +680,13 @@ export function BotSettings({
           ) : (
             <div className="metadata">{loading ? '读取模型配置中…' : '尚未加载模型配置'}</div>
           )}
+        </div>
+      ) : null}
+
+      {studioTab === 'vault' ? (
+        <div className="studio-card bot-studio-card" role="tabpanel" aria-label="密码库">
+          <VaultPanel identityKey={vaultIdentityKey} botId={botId}
+            hostLabel={hostLabel} connected={online && !!identity} call={callVault} />
         </div>
       ) : null}
 

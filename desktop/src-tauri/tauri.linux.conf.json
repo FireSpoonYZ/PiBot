@@ -1,5 +1,5 @@
 {
-  "productName": "e-launcher-desktop",
+  "productName": "pibot",
   "bundle": {
     "linux": {
       "deb": {
@@ -19,14 +19,23 @@
           "sudo",
           "libatomic1"
         ],
+        "provides": [
+          "e-launcher-desktop"
+        ],
+        "conflicts": [
+          "e-launcher-desktop"
+        ],
+        "replaces": [
+          "e-launcher-desktop"
+        ],
         "preInstallScript": "../linux/e-launcher-host.preinst",
         "postInstallScript": "../linux/e-launcher-host.postinst",
         "preRemoveScript": "../linux/e-launcher-host.prerm",
         "postRemoveScript": "../linux/e-launcher-host.postrm",
         "files": {
           "/usr/lib/systemd/user/e-launcher-host.service": "../linux/e-launcher-host.service",
-          "/usr/lib/e-launcher-desktop/e-launcher-hostctl": "../linux/e-launcher-hostctl",
-          "/etc/sudoers.d/e-launcher-hostctl": "../linux/e-launcher.sudoers"
+          "/usr/lib/pibot/pibot-hostctl": "../linux/pibot-hostctl",
+          "/etc/sudoers.d/pibot-hostctl": "../linux/pibot.sudoers"
         }
       },
       "rpm": {
@@ -42,6 +51,9 @@
           "dbus",
           "xdotool",
           "(ffmpeg-free or ffmpeg)"
+        ],
+        "obsoletes": [
+          "e-launcher-desktop"
         ],
         "files": {
           "/usr/lib/systemd/user/e-launcher-host.service": "../linux/e-launcher-host.service"

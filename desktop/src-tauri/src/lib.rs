@@ -4,7 +4,7 @@ pub mod updates;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Manager, RunEvent, State, Webview, ipc::Channel};
+use tauri::{AppHandle, Manager, RunEvent, State, Webview, ipc::Channel, webview::PageLoadEvent};
 use tauri_plugin_dialog::DialogExt;
 
 pub use bridge::{BridgeError, DesktopBridge, DesktopObserveAck, DesktopRequestInput, PickedFileRef};
@@ -133,6 +133,13 @@ pub fn run() {
   let mut builder = tauri::Builder::default()
     .manage(bridge)
     .manage(updates::UpdateState::default())
+    // Reload/navigation kills every observer Channel owned by the old
+    // document; evict them before the new page's JS installs its watches.
+    .on_page_load(|webview, payload| {
+      if webview.label() == "main" && payload.event() == PageLoadEvent::Started {
+        webview.state::<DesktopBridge>().evict_page_observers();
+      }
+    })
     .plugin(
       tauri::plugin::Builder::<tauri::Wry, ()>::new("navigation-guard")
         .on_navigation(|webview, url| webview.label() == "main" && is_allowed_navigation(url))
@@ -145,7 +152,7 @@ pub fn run() {
   let app = builder
     .setup(|app| {
       if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_title("e-助手");
+        let _ = window.set_title("Pi Bot");
         window.set_icon(tauri::include_image!("../build/icons/icon.png"))?;
         #[cfg(windows)]
         {
@@ -179,7 +186,7 @@ pub fn run() {
       updates::desktop_update_cancel,
     ])
     .build(tauri::generate_context!())
-    .expect("failed to build e-launcher desktop application");
+    .expect("failed to build pibot desktop application");
 
   app.run(|app_handle, event| {
     if matches!(event, RunEvent::Exit) {

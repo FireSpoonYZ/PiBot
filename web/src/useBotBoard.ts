@@ -10,6 +10,7 @@ export interface BotBoardTarget {
   name: string;
   deviceName: string;
   avatarKey: string;
+  isPrimary?: boolean;
   online: boolean;
   read: (botIds: string[]) => Promise<BotBoardSnapshot>;
 }
@@ -21,7 +22,7 @@ export interface BotBoardRecord {
   generation?: string;
 }
 
-export type BoardBucket = 'attention' | 'working' | 'review' | 'idle';
+export type BoardBucket = 'attention' | 'working' | 'review' | 'idle' | 'offline';
 
 export function botBoardKey(scope: string, deviceId: string, botId: string): string {
   return JSON.stringify([scope, deviceId, botId]);

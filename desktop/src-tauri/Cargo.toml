@@ -1,6 +1,6 @@
 [package]
-name = "e-launcher-desktop"
-version = "0.0.2"
+name = "pibot"
+version = "0.0.3"
 edition = "2021"
 publish = false
 

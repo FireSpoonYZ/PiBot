@@ -1,6 +1,6 @@
 {
-  "productName": "e-助手",
-  "version": "0.0.2",
+  "productName": "pibot",
+  "version": "0.0.3",
   "identifier": "com.example.launcherprobe",
   "build": {
     "frontendDist": "../build/web"
@@ -10,7 +10,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "e-助手",
+        "title": "pibot",
         "url": "index.html",
         "useHttpsScheme": true
       }

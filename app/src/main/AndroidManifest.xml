@@ -35,7 +35,7 @@
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
-        android:label="AI Assistant"
+        android:label="pibot"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <provider
@@ -69,14 +69,14 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="On-device AI Host and remote link accompanying the user-started client" />
+                android:value="On-device pibot Host and remote link accompanying the user-started client" />
         </service>
         <service
             android:name=".BotClientService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="User-started AI client and its background connection and task notifications" />
+                android:value="User-started pibot client and its background connection and task notifications" />
         </service>
         <!-- M18 UI 桥：默认进程、同 UID 私有 Binder；绑定本身不启动 Host/模型。 -->
         <service

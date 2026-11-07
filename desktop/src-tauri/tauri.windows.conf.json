@@ -8,7 +8,8 @@
         "installMode": "perMachine",
         "installerIcon": "../build/icons/icon.ico",
         "uninstallerIcon": "../build/icons/icon.ico",
-        "installerHooks": "../windows/installer-hooks.nsh"
+        "installerHooks": "../windows/installer-hooks.nsh",
+        "template": "../windows/installer.nsi"
       }
     },
     "resources": {

@@ -64,7 +64,7 @@ export function openCenterExecution({ store, packages, oauth }) {
       } else if (!isAbsolute(command)) command = resolve(installed.packageRoot, command);
       transport = new StdioTransport({ command, args, cwd: config.cwd ? resolve(installed.packageRoot, config.cwd) : installed.packageRoot, env: { PATH: process.env.PATH || '', ...env }, inheritEnv: false });
     }
-    const client = new McpClient({ name: 'e-launcher-center', version: '1.0.0', requestTimeoutMs: config.timeoutMs });
+    const client = new McpClient({ name: 'pibot-center', version: '1.0.0', requestTimeoutMs: config.timeoutMs });
     try { await client.connect(transport); return client; }
     catch (error) { await client.close(); throw error; }
   }

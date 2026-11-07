@@ -8,7 +8,7 @@
 //               desktop/build/icons/, stages the bundled Host runtime into
 //               desktop/build/host-runtime/ (host-core sources + production
 //               node_modules incl. npm, Cua driver, Windows Shower native host),
-//               builds the desktop/host-launcher sidecar (e-launcher-host), and
+//               builds the desktop/host-launcher sidecar (pibot-host), and
 //               emits desktop/build/THIRD_PARTY_NOTICES.txt.
 //   --web     : prepares desktop resources, then typechecks and builds the desktop
 //               frontend (desktop/web -> desktop/build/web).
@@ -54,7 +54,7 @@ const NOTICES_OUTFILE = path.join(DESKTOP_BUILD, 'THIRD_PARTY_NOTICES.txt');
 const CARGO_TOML = path.join(DESKTOP_DIR, 'src-tauri', 'Cargo.toml');
 // Bundled Host (see desktop/README.md "内置 Host 与自启动"): Tauri maps
 // desktop/build/host-runtime/ to the resource dir host-runtime/ and installs the
-// e-launcher-host launcher next to the main binary via externalBin.
+// pibot-host launcher next to the main binary via externalBin.
 const HOST_RUNTIME_DIR = path.join(DESKTOP_BUILD, 'host-runtime');
 // npm ci work tree mirroring the repo layout (<work>/host-core + <work>/build/pi-main)
 // so the lockfile's relative file:../build/pi-main/*.tgz specs resolve unchanged.
@@ -81,7 +81,7 @@ const CUA_RELEASE_FILE = path.join(HERE, 'cua-driver-release.json');
 const CUA_LICENSE_SOURCE = path.join(ROOT, 'licenses', 'cua', 'LICENSE-MIT.txt');
 const HOST_LAUNCHER_DIR = path.join(DESKTOP_DIR, 'host-launcher');
 const HOST_LAUNCHER_CARGO_TOML = path.join(HOST_LAUNCHER_DIR, 'Cargo.toml');
-const HOST_LAUNCHER_BIN = 'e-launcher-host';
+const HOST_LAUNCHER_BIN = 'pibot-host';
 
 const NODE_VERSION = '26.13.0';
 const TAURI_API_VERSION = '2.12.4';
@@ -272,7 +272,7 @@ const NODE_TARGETS = {
     sha256: 'dcc60d59a0746999f99064a01c020445d54d84228c691cdbf25b49ac3b59150a',
     binaryEntry: `node-v${NODE_VERSION}-win-x64/node.exe`,
     licenseEntry: `node-v${NODE_VERSION}-win-x64/LICENSE`,
-    sidecarName: 'e-launcher-client-node-x86_64-pc-windows-msvc.exe',
+    sidecarName: 'pibot-node-x86_64-pc-windows-msvc.exe',
     tarFlags: ['-xf'],
     platform: 'win32',
   },
@@ -283,7 +283,7 @@ const NODE_TARGETS = {
     sha256: '5848553868b402d3fabb5b09270649977780a390f832155721025a08b5104455',
     binaryEntry: `node-v${NODE_VERSION}-linux-x64/bin/node`,
     licenseEntry: `node-v${NODE_VERSION}-linux-x64/LICENSE`,
-    sidecarName: 'e-launcher-client-node-x86_64-unknown-linux-gnu',
+    sidecarName: 'pibot-node-x86_64-unknown-linux-gnu',
     tarFlags: ['-xzf'],
     platform: 'linux',
   },
@@ -769,7 +769,7 @@ async function collectBundledNpmPackages(metafile, outfile, absWorkingDir) {
     if (
       pkg &&
       pkg.name !== '@e-launcher/host-core' &&
-      pkg.name !== 'e-launcher-web' &&
+      pkg.name !== 'pibot' &&
       !roots.has(`${pkg.name}@${pkg.version}`)
     ) {
       roots.set(`${pkg.name}@${pkg.version}`, pkg);
@@ -988,7 +988,7 @@ export async function collectCargoLicenseSections({
 }
 
 // ---------------------------------------------------------------------------
-// Bundled Host runtime (desktop/build/host-runtime/) and the e-launcher-host
+// Bundled Host runtime (desktop/build/host-runtime/) and the pibot-host
 // launcher sidecar. Layout (relative to the Tauri resource dir host-runtime/):
 //   host-core/                     runtime host-core modules + package.json
 //   host-core/node_modules/        production deps for this platform (incl. npm)
@@ -1443,7 +1443,7 @@ async function prepareHostRuntime() {
       } catch (err) {
         backupDir = null;
         throw fail(
-          `cannot replace ${HOST_RUNTIME_DIR} (${err.message}); stop any e-launcher-host / Host process ` +
+          `cannot replace ${HOST_RUNTIME_DIR} (${err.message}); stop any pibot-host / Host process ` +
             'or tauri dev session using it and retry'
         );
       }
@@ -1474,14 +1474,14 @@ async function prepareHostRuntime() {
   return summary('staged', depsStatus);
 }
 
-// Builds desktop/host-launcher (binary e-launcher-host) in release mode and copies
-// it to desktop/build/binaries/e-launcher-host-<target-triple>[.exe] for Tauri
+// Builds desktop/host-launcher (binary pibot-host) in release mode and copies
+// it to desktop/build/binaries/pibot-host-<target-triple>[.exe] for Tauri
 // externalBin. The executable path comes from cargo's JSON artifact messages, so
 // desktop/.cargo/config.toml target-dir or CARGO_TARGET_DIR are honoured.
 async function prepareHostLauncher() {
   const spec = currentNodeTarget();
   if (!isRegularFile(HOST_LAUNCHER_CARGO_TOML)) {
-    throw fail('desktop/host-launcher/Cargo.toml is missing; the e-launcher-host launcher crate must be present before packaging');
+    throw fail('desktop/host-launcher/Cargo.toml is missing; the pibot-host launcher crate must be present before packaging');
   }
   const args = [
     'build',
@@ -1653,7 +1653,7 @@ async function writeThirdPartyNotices(nodeInfo, metafile, hostRuntimeInfo) {
       .map(async (file) => '## ' + file + '\n\n' + await readFile(path.join(ROOT, file), 'utf8'))
   );
   const blocks = [
-    '# Third-Party Notices (e-launcher Desktop Client)',
+    '# Third-Party Notices (pibot Desktop Client)',
     ...projectNotices,
     `## Node.js v${nodeInfo.version} (${nodeInfo.triple})`,
     nodeInfo.licenseText.trim(),
@@ -1663,7 +1663,7 @@ async function writeThirdPartyNotices(nodeInfo, metafile, hostRuntimeInfo) {
     gbotUiLicense,
     ...cargoSections,
     ...hostRuntimeSections,
-    '# e-launcher-host launcher (Rust dependencies)',
+    '# pibot-host launcher (Rust dependencies)',
     ...launcherCargoSections,
   ];
   const content = blocks.join('\n\n---\n\n') + '\n';

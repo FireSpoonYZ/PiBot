@@ -6,6 +6,41 @@ import { messageError, assertId } from './message-protocol.js';
 
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
 
+// Private Vault input helpers; never part of the ordinary ShowerInput union.
+export function normalizeShowerSecretTarget(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.keys(value).some((key) => !['x', 'y', 'windowId'].includes(key))
+      || !Number.isSafeInteger(value.x) || value.x < 0
+      || !Number.isSafeInteger(value.y) || value.y < 0
+      || (value.windowId !== undefined && (!Number.isSafeInteger(value.windowId) || value.windowId <= 0))) {
+    throw secretInputFailure({ code: 'INVALID_ARGUMENT' });
+  }
+  return { x: value.x, y: value.y, ...(value.windowId === undefined ? {} : { windowId: value.windowId }) };
+}
+
+export function assertShowerSecretText(text) {
+  if (typeof text !== 'string' || text.length === 0 || text.length > 1000) {
+    throw secretInputFailure({ code: 'INVALID_ARGUMENT' });
+  }
+  // Control characters can submit forms or move focus in native typing backends.
+  if (/[\u0000-\u001f\u007f]/u.test(text)) throw secretInputFailure({ code: 'SHOWER_UNSUPPORTED' });
+}
+
+// Only our sanitized errors can carry a pre-dispatch outcome across backend/manager wrappers.
+const secretInputFailures = new WeakSet();
+export function secretInputFailure(error, sent = false) {
+  const codes = ['INVALID_ARGUMENT', 'CANCELLED', 'VAULT_LOCKED', 'VAULT_FORBIDDEN',
+    'VAULT_NOT_FOUND', 'VAULT_CONFLICT', 'RUNTIME_BUSY', 'SHOWER_UNSUPPORTED', 'SHOWER_SESSION_NOT_FOUND', 'SHOWER_SESSION_MISMATCH',
+    'SHOWER_NOT_READY', 'SHOWER_AUTH_REQUIRED', 'SHOWER_UNAVAILABLE'];
+  const code = codes.includes(error?.code) ? error.code
+    : error?.name === 'AbortError' ? 'CANCELLED' : 'SHOWER_INPUT_FAILED';
+  const failure = messageError(code, code === 'SHOWER_UNSUPPORTED'
+    ? 'Secret input unsupported' : 'Secret input failed');
+  failure.outcome = secretInputFailures.has(error) ? error.outcome : sent ? 'unconfirmed' : 'not-sent';
+  secretInputFailures.add(failure);
+  return failure;
+}
+
 // ABSOLUTE full base64 image budget (720 KiB); a whole control result must stay
 // below the existing 1 MiB JSON frame. Backends resize/compress to fit and error
 // out instead of ever raising this ceiling.

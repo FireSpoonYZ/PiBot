@@ -26,7 +26,7 @@ for c in /usr/bin/systemctl /bin/systemctl /usr/local/bin/systemctl; do
 done
 RUNUSER=$(command -v runuser 2>/dev/null || :)
 
-log() { echo "e-launcher-host: $*"; }
+log() { echo "pibot-host: $*"; }
 
 user_name() { getent passwd "$1" 2>/dev/null | cut -d: -f1; }
 user_home() { getent passwd "$1" 2>/dev/null | cut -d: -f6; }
@@ -45,7 +45,7 @@ manager_up() {
 user_systemctl() {
   _uid="$1"; shift
   _name=$(user_name "$_uid")
-  [ -n "$_name" ] || { echo "e-launcher-host: no passwd entry for uid $_uid" >&2; return 1; }
+  [ -n "$_name" ] || { echo "pibot-host: no passwd entry for uid $_uid" >&2; return 1; }
   timeout "$CTL_TIMEOUT" "$RUNUSER" -u "$_name" -- env \
     "XDG_RUNTIME_DIR=/run/user/$_uid" \
     "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$_uid/bus" \

@@ -320,7 +320,7 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
 
     private fun startHost(invoke: Invoke) {
         if (!foregroundUi()) {
-            replyInvalid(invoke, "NOT_FOREGROUND", "仅可在前台启动 AI Host")
+            replyInvalid(invoke, "NOT_FOREGROUND", "仅可在前台启动 pibot Host")
             return
         }
         try {

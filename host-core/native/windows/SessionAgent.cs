@@ -441,7 +441,7 @@ namespace ELauncher.Shower
                 CancelOperation(id, parameters);
                 return;
             }
-            if (method != "frame" && method != "input" && method != "launch" && method != "release" && method != "cua")
+            if (method != "frame" && method != "input" && method != "secretInput" && method != "launch" && method != "release" && method != "cua")
             {
                 SendError(id, new AgentFailure(CodeInvalidArgument, "unknown method: " + method + "; expected frame, input, launch, cua, cancel or release"));
                 return;
@@ -557,7 +557,9 @@ namespace ELauncher.Shower
                 }
                 catch (Exception ex)
                 {
-                    SendError(operation.Id, new AgentFailure(CodeBackendFailed, "agent operation failed: " + ex.Message));
+                    SendError(operation.Id, operation.Method == "secretInput"
+                        ? new AgentFailure(CodeBackendFailed, "Secret input failed", "unconfirmed")
+                        : new AgentFailure(CodeBackendFailed, "agent operation failed: " + ex.Message));
                 }
                 finally
                 {
@@ -585,6 +587,7 @@ namespace ELauncher.Shower
             }
             if (request.Method == "frame") ExecuteFrame(request);
             else if (request.Method == "input") ExecuteInput(request);
+            else if (request.Method == "secretInput") ExecuteSecretInput(request);
             else if (request.Method == "launch") ExecuteLaunch(request);
             else if (request.Method == "cua") ExecuteCua(request);
             else ExecuteRelease(request);
@@ -646,6 +649,27 @@ namespace ELauncher.Shower
                 SendError(request.Id, failure ?? new AgentFailure(CodeBackendFailed, "input injection failed"));
                 return;
             }
+            SendResult(request.Id, result);
+        }
+
+        private void ExecuteSecretInput(AgentRequest request)
+        {
+            string unknown;
+            Dictionary<string, object> payload;
+            if (AgentJson.HasUnexpectedField(request.Parameters, WithCommon("secretInput"), out unknown)
+                || !AgentJson.TryGetObject(AgentJson.Get(request.Parameters, "secretInput"), out payload))
+            {
+                SendError(request.Id, new AgentFailure(CodeInvalidArgument, "Secret input failed", "not-sent"));
+                return;
+            }
+            if (!AgentInput.SecretInput(payload, request.Cancel))
+            {
+                SendError(request.Id, new AgentFailure(request.Cancel.Cancelled ? CodeCancelled : "SHOWER_INPUT_FAILED",
+                    "Secret input failed", "unconfirmed"));
+                return;
+            }
+            var result = new Dictionary<string, object>();
+            result["status"] = "applied";
             SendResult(request.Id, result);
         }
 

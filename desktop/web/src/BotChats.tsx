@@ -61,7 +61,7 @@ import type {
 import { isTargetOfflineError } from './api';
 import { useDrafts } from './drafts';
 import type { DraftSnapshot } from './drafts';
-import { type QuestionnaireSubmitPayload } from '../../../web/src/ToolPresentation';
+import type { QuestionnaireSubmitPayload, VaultUnlockSubmitPayload } from '../../../web/src/ToolPresentation';
 import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
 import { BotBoard } from '../../../web/src/BotBoard';
 import { botBoardKey, useBotBoard, useMarkViewedBoardResult, type BotBoardTarget } from '../../../web/src/useBotBoard';
@@ -1192,6 +1192,21 @@ function PrimaryChatPane({
     [api, bot.botId],
   );
 
+  // 私有解锁回执绑定当前目标身份，不经过聊天提交或离线待发队列。
+  const submitVaultUnlock = useCallback((input: VaultUnlockSubmitPayload): Promise<unknown> => {
+    const current = api.identity;
+    if (!identity || !current || !api.transportConnected ||
+      current.profileId !== identity.profileId || current.targetDeviceId !== identity.targetDeviceId ||
+      current.kind !== identity.kind || current.generation !== identity.generation) {
+      return Promise.reject({ code: 'NOT_CONNECTED' });
+    }
+    return api.call(identity, 'vaultControl', { action: 'respondUnlock', ...input });
+  }, [api, identity]);
+  const toolScopeKey = JSON.stringify([
+    identity?.profileId, identity?.targetDeviceId, identity?.kind, identity?.generation,
+    bot.botId, bot.primaryConversationId, online,
+  ]);
+
   useEffect(() => {
     setManageError(null);
     setConfirmDelete(false);
@@ -2014,6 +2029,7 @@ function PrimaryChatPane({
             starBadge={isPrimary && !isArchived}
             platformBadge={devicePlatform}
             busy={liveBusy}
+            offline={!online}
             size={30}
           />
           <span className="chat-header-pill-text">
@@ -2264,7 +2280,10 @@ function PrimaryChatPane({
         search={chatSearch}
         onVisibleAssistantTextEntryIds={markViewedBoardResult}
         archived={isArchived}
+        scopeKey={toolScopeKey}
+        disabled={!online}
         onSubmitQuestionnaire={submitQuestionnaire}
+        onSubmitVaultUnlock={submitVaultUnlock}
         attachmentFetcher={attachmentFetcher}
         loading={rawLoading}
         error={online ? (rawError || liveError) : null}
@@ -2458,7 +2477,7 @@ function PrimaryChatPane({
                 </div>
               ) : null}
               {inspectorTab === 'settings' ? (
-                <BotSettings api={api} botId={bot.botId} open onOpenChange={() => { /* 页签由外层管理，内部不再渲染关闭 UI */ }} />
+                <BotSettings api={api} botId={bot.botId} hostLabel={`${deviceName} (${bot.deviceId})`} open onOpenChange={() => { /* 页签由外层管理，内部不再渲染关闭 UI */ }} />
               ) : null}
               {inspectorTab === 'raw' ? (
                 <RawHistoryPane
@@ -2553,6 +2572,7 @@ export function BotChats({
       name: bot.role,
       deviceName: boardDevices.find(device => device.deviceId === bot.deviceId)?.displayName || bot.deviceName || '未命名设备',
       avatarKey: botAvatarKey(bot),
+      isPrimary: bot.isPrimary,
       online: online && bot.online && reachable,
       read: botIds => api.call(targetIdentity, 'getBotBoard', { botIds }),
     };
@@ -3559,6 +3579,7 @@ export function BotChats({
             starBadge={isPrimaryActive}
             platformBadge={b.platform || 'host'}
             busy={false}
+            offline={!isBotOnline}
             size={46}
           />
         }
@@ -3760,6 +3781,7 @@ export function BotChats({
                 isPrimary
                 starBadge
                 platformBadge={b.platform || 'host'}
+                offline={!b.online || !online}
                 size={44}
               />
               <span className="hub-hero-info">

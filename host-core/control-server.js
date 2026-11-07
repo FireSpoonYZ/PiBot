@@ -26,6 +26,8 @@ import {
   normalizeShowerTarget,
 } from './shower-protocol.js';
 
+import { VAULT_ERROR_CODES, safeVaultError } from './vault-protocol.js';
+
 const BIND_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8787;
 const PROTOCOL_VERSION = 1;
@@ -34,6 +36,9 @@ const JOB_STATE_RE = /^(pending|accepted|completed|failed)$/;
 const MAX_STATUS_LIMIT = 200;
 
 const EXTRA_ERROR_STATUS = Object.freeze({
+  ...Object.fromEntries(VAULT_ERROR_CODES.map(code => [code, 409])),
+  VAULT_INVALID_ARGUMENT: 400,
+  VAULT_UNAVAILABLE: 503,
   PRIMARY_BOT_PROTECTED: 409,
   BOT_ARCHIVED: 409,
   INVALID_STATE: 409,
@@ -43,6 +48,7 @@ const EXTRA_ERROR_STATUS = Object.freeze({
 
 const routes = [
   { method: 'POST', key: '/v1/bot-board', pattern: /^\/v1\/bot-board\/?$/, params: [], hasBody: true, handler: getBotBoard },
+  { method: 'POST', key: '/v1/vault', pattern: /^\/v1\/vault\/?$/, params: [], hasBody: true, handler: vaultControl },
   { method: 'POST', key: '/v1/center/provider/validate', pattern: /^\/v1\/center\/provider\/validate\/?$/, params: [], hasBody: true, handler: centerValidateProvider },
   { method: 'POST', key: '/v1/center/provider/discover', pattern: /^\/v1\/center\/provider\/discover\/?$/, params: [], hasBody: true, handler: centerDiscoverProvider },
   { method: 'POST', key: '/v1/center/action', pattern: /^\/v1\/center\/action\/?$/, params: [], hasBody: true, handler: centerAction },
@@ -116,6 +122,7 @@ const routes = [
 // backend cap and one manual compaction can wait on a model summarization;
 // only these responses extend the socket inactivity window.
 const SLOW_ROUTE_KEYS = new Set([
+  '/v1/vault',
   '/v1/bots/:botId/memory',
   '/v1/bots/:botId/memory/recall',
   '/v1/bots/:botId/memory/reflect',
@@ -303,7 +310,7 @@ async function dispatch(host, runtime, authorize, req, res, ctx) {
   // 这些路径走 Harness snapshot/commit/abortTask，不隐式 resume 调度器；
   // 模型、工具、问卷等执行路由仍被拒绝（runtime 侧另有 online/recovery 门禁兜底）。
   const OFFLINE_ALLOWED = new Set([
-    '/v1/host', '/v1/settings', '/v1/service', '/v1/service/update', '/v1/bot-board',
+    '/v1/vault', '/v1/host', '/v1/settings', '/v1/service', '/v1/service/update', '/v1/bot-board',
     '/v1/bots/:botId/submissions', '/v1/bots/:botId/submissions/:requestId', '/v1/bots/:botId/abort',
     '/v1/bot-requests/:requestId', '/v1/bots/:botId/history', '/v1/bots/:botId/live',
     // 只读读取已上传图片：中心离线时草稿/历史仍可展示既有附件。
@@ -621,6 +628,13 @@ async function showerFrame(host, runtime, params, body, req, res) {
   const sessionId = normalizeShowerSessionId(body.sessionId);
   const limits = body.limits === undefined ? undefined : normalizeShowerFrameLimits(body.limits);
   writeControlJson(res, 200, await runtime.getShowerFrame(target, sessionId, limits));
+}
+
+async function vaultControl(host, runtime, params, body, req, res) {
+  try {
+    assertNoQuery(req);
+    writeControlJson(res, 200, await runtime.vaultControl(body));
+  } catch (error) { throw safeVaultError(error); }
 }
 
 async function showerInput(host, runtime, params, body, req, res) {

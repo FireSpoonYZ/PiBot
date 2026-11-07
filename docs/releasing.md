@@ -4,7 +4,7 @@
 
 ## 版本模型
 
-- 根 `package.json` 的 `version`（当前 `0.0.2`）是唯一对外产品版本。
+- 根 `package.json` 的 `version`（当前 `0.0.3`）是唯一对外产品版本。
 - `desktop/src-tauri/tauri.conf.json`、`mobile/src-tauri/tauri.conf.json`、
   `mobile/src-tauri/Cargo.toml`、`desktop/src-tauri/Cargo.toml`、
   `desktop/host-launcher/Cargo.toml` 保存同一字面量；`app/build.gradle` 的
@@ -12,7 +12,7 @@
   Gradle 根即仓库根）。
 - `scripts/release-check.mjs` 核对全部上述字段 + `android.versionCode`
   为正整数；`--tag vX.Y.Z` 额外核对 tag 与产品版本一致。
-- Android `versionCode` 独立于产品版本（当前 `7`，验收包使用过 `6`），见
+- Android `versionCode` 独立于产品版本（当前 `8`，正式 0.0.2 使用 `7`），见
   `gradle.properties` 的 `android.versionCode`，每个已分发 APK 单调递增、
   不复用、不回退。
 
@@ -75,3 +75,11 @@ Fork/外部贡献者不需要以上任何 secret 即可构建 debug 包。
 - release job 把每个 `*.metadata.json` 与制品一起传到 GitHub Release，
   中心管理员逐件导入。
 - 中心镜像元数据见 `center.yml` 产出的 `center-image.json`。
+
+## 覆盖升级验收后发布同一批产物
+
+需要先验证安装器升级时，在发布源码已合入 master 后，运行 Release 的手动构建，设置 `tag=vX.Y.Z`、`candidate=true`。它构建正式签名 APK、带 updater 签名的桌面安装包和中心 sha 镜像，生成完整 `candidate-assets-<sourceCommit>` 附件，不创建 Release 或更新 latest。
+
+从该附件安装并验收。通过后，在同一源码提交创建带注解的 `vX.Y.Z` Tag，注解单独一行写 `Candidate-Run: <runId>`。Tag 发布会校验候选运行的仓库、工作流、版本标题、成功状态及精确源码提交，再复用它的安装包、签名与镜像 digest，避免验收后重新构建出另一批字节。普通无此注解的 Tag 仍走原来的完整构建发布流程。
+
+候选产物保留 30 天。若验收需要修改源码，提交修复并重新构建、验收；不要提前创建或移动正式 Tag。Android 已安装过的候选若发生内容变化，需继续递增 versionCode。

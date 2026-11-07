@@ -221,7 +221,7 @@ async function saveArtifact(part, directory) {
 
 function filenameFor(meta) {
   const version = meta.version.replace(/[^0-9A-Za-z.-]/g, '-');
-  return 'e-launcher-' + version + '-' + meta.platform + '-' + meta.arch + '.' + EXTENSIONS[meta.format];
+  return 'pibot-' + version + '-' + meta.platform + '-' + meta.arch + '.' + EXTENSIONS[meta.format];
 }
 
 function publicRecord(record, base) {

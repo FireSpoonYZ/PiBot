@@ -287,7 +287,6 @@
 }
 .hub-bot-row:hover { background: var(--accent-soft); }
 .hub-bot-row.selected { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
-.hub-bot-row.offline { opacity: 0.62; }
 
 .hub-bot-row-main {
   flex: 1;

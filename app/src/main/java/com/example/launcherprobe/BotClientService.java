@@ -325,7 +325,7 @@ public final class BotClientService extends Service {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
-                .setContentTitle("AI 客户端")
+                .setContentTitle("pibot 客户端")
                 .setContentText(text)
                 .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true)
                 .addAction(new Notification.Action.Builder(android.R.drawable.ic_menu_close_clear_cancel,
@@ -423,7 +423,7 @@ public final class BotClientService extends Service {
                     new NotificationChannel("bot-client-tasks", "任务完成", NotificationManager.IMPORTANCE_DEFAULT));
             Notification notification = new Notification.Builder(context, "bot-client-tasks")
                     .setSmallIcon(android.R.drawable.stat_notify_more)
-                    .setContentTitle("AI 任务")
+                    .setContentTitle("pibot 任务")
                     .setContentText(failed ? "任务未完成" : "任务已完成")
                     .setContentIntent(open).setAutoCancel(true).build();
             try {

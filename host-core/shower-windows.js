@@ -14,6 +14,7 @@ import { mkdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { messageError } from './message-protocol.js';
+import { normalizeShowerSecretTarget, assertShowerSecretText, secretInputFailure } from './shower-protocol.js';
 import { SHOWER_ERROR_CODES, SHOWER_MAX_FRAME_BASE64_BYTES } from './shower-protocol.js';
 import { resolveCuaDriverPath } from './cua-driver.js';
 
@@ -900,6 +901,27 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
     return { sessionId, type: value.type, source: source ?? 'agent', callId: callId ?? null };
   }
 
+  async function secretInput(record, value, { signal, source, taskId, callId } = {}) {
+    let sent = false;
+    try {
+      checkAborted(signal);
+      const sessionId = requireRecordSessionId(record);
+      const target = normalizeShowerSecretTarget(value?.target);
+      assertShowerSecretText(value?.text);
+      const client = requireHost(sessionId);
+      checkAborted(signal);
+      sent = true;
+      const result = await client.request('secretInput',
+        { sessionId, secretInput: { target, text: value.text }, ...trustedFields(source, taskId, callId) },
+        { signal, cancelSettleMs: CUA_CANCEL_SETTLE_MS });
+      checkAborted(signal);
+      if (result?.status !== 'applied') throw secretInputFailure(null, true);
+      return { sessionId, status: 'applied' };
+    } catch (error) {
+      throw secretInputFailure(error, sent);
+    }
+  }
+
   async function launch(record, value, { signal, source, taskId, callId } = {}) {
     checkAborted(signal);
     const sessionId = requireRecordSessionId(record);
@@ -1032,6 +1054,7 @@ export function createWindowsShowerBackend({ dataRoot } = {}) {
     ensure,
     frame,
     input,
+    secretInput,
     launch,
     preview,
     release,

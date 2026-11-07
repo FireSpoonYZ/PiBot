@@ -5,6 +5,7 @@ import { defineExtension } from '@earendil-works/pi-durable';
 import { loadNativePlugin } from './index.js';
 import { createMcpDriver } from '../capabilities/mcp.js';
 import { createSkillDriver } from '../capabilities/skill.js';
+import { vaultError } from '../vault-protocol.js';
 
 const error = (code, message) => Object.assign(new Error(message), { code });
 const nameFor = (...parts) => 'cap-' + createHash('sha256').update(JSON.stringify(parts)).digest('hex');
@@ -21,7 +22,7 @@ const describe = (err) => ({
   message: typeof err?.message === 'string' && err.message ? err.message.slice(0, 200) : 'capability could not be applied',
 });
 
-export function createPluginManager({ host, registry, installer, services, isOnline }) {
+export function createPluginManager({ host, registry, installer, services, isOnline, vaultFacade }) {
   const ajv = new Ajv({ allErrors: true, coerceTypes: false, useDefaults: false, strict: false });
   ajv.addFormat('credential-ref', true);
   let instances = new Map(); // instanceKey(installationId, version) -> { key, installationId, plugin, manifest, version, bots, taskExtension }
@@ -293,7 +294,20 @@ export function createPluginManager({ host, registry, installer, services, isOnl
       if (allowPreparation && round?.preparing.has(botKey(botId, id)) && round.enabled.has(botKey(botId, id))) return;
       assertCapabilityAllowed(botId, id);
     };
+    const assertVaultAllowed = botId => {
+      if (!accepting || !canBind(policy.get(botId)?.get(id)) || !boundEntry(botId, id)) {
+        throw vaultError('VAULT_FORBIDDEN');
+      }
+      assertCapabilityAllowed(botId, id);
+    };
     const scopedHost = { ...services,
+      ...(installed?.manifest?.id === 'e-launcher.vault' && vaultFacade ? {
+        vault: vaultFacade(async conversationId => {
+          const botId = await services.resolveConversationBot(conversationId);
+          await checkOwner(botId, id, conversationId);
+          assertVaultAllowed(botId);
+        }, assertVaultAllowed, id),
+      } : {}),
       async tryRunBackgroundTask(botId, task) {
         if (!accepting || !isOnline() || !isAuthorized(policy.get(botId)?.get(id))) return false;
         await runAccepted(async () => { assertCapabilityAllowed(botId, id); await task(); }, botId);
