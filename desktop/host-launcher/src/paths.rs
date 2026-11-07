@@ -118,8 +118,8 @@ fn runtime_candidates(exe_dir: &Path) -> Vec<PathBuf> {
     if cfg!(windows) {
         list.push(exe_dir.join("host-runtime"));
     } else {
-        list.push(exe_dir.join("..").join("lib").join("pibot").join("host-runtime"));
-        list.push(PathBuf::from("/usr/lib/pibot/host-runtime"));
+        list.push(exe_dir.join("..").join("lib").join("e-launcher-desktop").join("host-runtime"));
+        list.push(PathBuf::from("/usr/lib/e-launcher-desktop/host-runtime"));
     }
     list
 }

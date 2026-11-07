@@ -10,7 +10,6 @@ Var /GLOBAL EHostStopReq
 Var /GLOBAL EHostRunning
 Var /GLOBAL EHostWait
 Var /GLOBAL EHostFailed
-Var /GLOBAL EHostWasRunning
 Var /GLOBAL EHostFile
 Var /GLOBAL EOldInstallDir
 
@@ -123,8 +122,6 @@ FunctionEnd
 !macro NSIS_HOOK_PREINSTALL
   Delete "$INSTDIR\icons\shell-icon-*.ico"
   !insertmacro E_LAUNCHER_HOST_DETECT_HOME
-  ; 记录升级前 Host 是否在运行：只有原本运行着的才在装完后恢复启动。
-  !insertmacro E_LAUNCHER_HOST_PROBE_RUNNING $EHostWasRunning
   ; 优雅停止运行中的 Host（含旧用户目录安装的迁移场景），失败阻止覆盖写入。
   !insertmacro E_LAUNCHER_HOST_STOP $EHostFailed
   ${If} $EHostFailed == "1"
@@ -163,12 +160,14 @@ FunctionEnd
   WriteRegStr SHCTX "${UNINSTKEY}" "DisplayIcon" "$INSTDIR\icons\${E_LAUNCHER_SHELL_ICON}"
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
   ; 为本交互登录用户注册 Host 登录任务（未配对时 trigger 登记为禁用、不自动运行；
-  ; 升级时保留原 trigger 启停状态）。提权结果必须上报，不再丢弃退出码。
+  ; 已配对时由下方安装步骤启用并启动）。提权结果必须上报，不再丢弃退出码。
   ${If} ${FileExists} "$INSTDIR\host-runtime\native\shower-windows.exe"
     nsExec::Exec '"$INSTDIR\host-runtime\native\shower-windows.exe" host-task install'
     Pop $EHostFailed
     ${If} $EHostFailed != 0
-      MessageBox MB_ICONSTOP "注册 Host 登录任务失败（退出码 $EHostFailed）。应用本身已安装，可在配对时重试。"
+      MessageBox MB_ICONSTOP "注册 Host 登录任务失败（退出码 $EHostFailed）。"
+      SetErrorLevel 1
+      Abort "host task install failed"
     ${Else}
       ; 任务注册成功后才清理 currentUser 旧安装：删除用户目录下的旧程序与残留卸载入口。
       ; 只接受完全等于 <用户LOCALAPPDATA>\<ProductName> 的旧安装路径，不执行其中任何二进制；
@@ -187,13 +186,36 @@ FunctionEnd
         ${EndIf}
       ${EndIf}
       DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "e-launcher-host"
-      ; 升级前 Host 在运行且仍保持配对：仅此时按原运行状态恢复启动（不重新启用用户已关闭的自启动）。
-      ${If} $EHostWasRunning == "1"
-      ${AndIf} ${FileExists} "$EHostHome\config.json"
+      ; 已配对的 Host 在安装结束时启用自启动并立即运行。
+      ${If} ${FileExists} "$EHostHome\config.json"
+        nsExec::Exec '"$INSTDIR\host-runtime\native\shower-windows.exe" host-task enable'
+        Pop $EHostFailed
+        ${If} $EHostFailed != 0
+          MessageBox MB_ICONSTOP "启用 Host 自启动失败（退出码 $EHostFailed）。"
+          SetErrorLevel 1
+          Abort "host task enable failed"
+        ${EndIf}
         nsExec::Exec '"$INSTDIR\host-runtime\native\shower-windows.exe" host-task start'
         Pop $EHostFailed
         ${If} $EHostFailed != 0
-          MessageBox MB_ICONEXCLAMATION "Host 未能在安装后恢复运行（退出码 $EHostFailed），可稍后手动启动。"
+          MessageBox MB_ICONSTOP "启动 Host 失败（退出码 $EHostFailed）。"
+          SetErrorLevel 1
+          Abort "host task start failed"
+        ${EndIf}
+        StrCpy $EHostWait 0
+        ${Do}
+          Sleep 1000
+          IntOp $EHostWait $EHostWait + 1
+          !insertmacro E_LAUNCHER_HOST_PROBE_RUNNING $EHostRunning
+          ${If} $EHostRunning == "1"
+          ${OrIf} $EHostWait >= 30
+            ${ExitDo}
+          ${EndIf}
+        ${Loop}
+        ${If} $EHostRunning != "1"
+          MessageBox MB_ICONSTOP "Host 未能在安装结束前启动，请检查 Host 日志。"
+          SetErrorLevel 1
+          Abort "host did not start"
         ${EndIf}
       ${EndIf}
     ${EndIf}

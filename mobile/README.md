@@ -2,7 +2,7 @@
 
 ## 当前源码与 Android 运行时（2026-11-07）
 
-当前源码版本为 `0.0.3`、Android versionCode 为 `8`；正式 0.0.2 使用 `7`，升级继续沿用同一正式签名。
+当前源码版本为 `0.0.3`、Android versionCode 为 `9`；正式 0.0.2 使用 `7`，升级继续沿用同一正式签名。
 
 Node Mobile `24.18.0-0` 使用 small ICU 78。Android 构建从 Unicode 官方下载并校验 ICU `78.3` 数据，将 `icudt78l.dat` 放入现有校验过的 Host 资产目录，启动 Host 与客户端 Node 子进程时设置 `NODE_ICU_DATA`。这为 Pi 工具搜索提供完整分词数据，避免缺少数据时 `Intl.Segmenter` 导致进程崩溃（[Node #51752](https://github.com/nodejs/node/issues/51752)）。首次构建需要下载约 12.8 MB；归档缓存在 `app/build/host-native-tools/downloads/`，许可随 APK 打包。更新 Node Mobile 时须同时核对 `host-core/build-android.js` 中的 ICU 主版本与归档校验值。
 
