@@ -52,6 +52,8 @@ function VaultUnlockSession({ presentation, active, disabled = false, onSubmit }
   function failure(code: unknown): string {
     switch (code) {
       case 'VAULT_UNLOCK_FAILED': return t('无法解锁密码库，请检查主密码后重新输入。', 'Could not unlock Vault. Check the master password and enter it again.');
+      case 'VAULT_LOGIN_CHALLENGE': return t('账号要求额外登录验证，当前尚不支持该验证方式。', 'This account requires additional login verification that is not supported yet.');
+      case 'VAULT_STALE_SESSION': return t('密码库账号或会话已变更，请重新发起解锁。', 'Vault account or session changed. Start a new unlock request.');
       case 'VAULT_REQUEST_EXPIRED': return t('解锁请求已结束或过期，请发起新的请求。', 'This unlock request ended or expired. Start a new request.');
       case 'VAULT_REQUEST_BUSY': return t('该请求正在处理，请等待状态更新后再操作。', 'This request is being processed. Wait for a status update before trying again.');
       case 'VAULT_INVALID_ARGUMENT': return t('输入无效，请检查并重新输入主密码。', 'Invalid input. Check and re-enter the master password.');
@@ -113,7 +115,7 @@ function VaultUnlockSession({ presentation, active, disabled = false, onSubmit }
       </div>
       <p id={descriptionId} className="tp-vault-hint">{t('作用于当前 Host 的密码库；条目仍按各 Bot 的授权控制。主密码仅通过专用通道提交，不进入聊天。', 'Applies to this Host’s Vault; each Bot’s entry permissions still apply. The master password uses a private control channel, not chat.')}</p>
       {presentation.source === 'vaultwarden' ? (
-        <p className="tp-vault-hint">{t('来源', 'Source')}: Vaultwarden{presentation.serverUrl ? ' · ' + presentation.serverUrl : ''}</p>
+        <p className="tp-vault-hint">{t('来源', 'Source')}: Vaultwarden{presentation.serverUrl ? ' · ' + presentation.serverUrl : ''}。{t('首次使用时，本次主密码也用于登录已配置账号。', 'On first use, this master password also signs in to the configured account.')}</p>
       ) : null}
       {canRespond ? (
         <form ref={formRef} className="tp-vault-form" autoComplete="off" noValidate onSubmit={event => {

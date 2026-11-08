@@ -42,8 +42,9 @@ function vaultError(error: unknown): string {
     case 'REVISION_CONFLICT':
     case 'REQUEST_CONFLICT': return '密码库配置或授权已被修改，请刷新后重试。';
     case 'VAULT_CONNECTION_FAILED': return '无法连接 Vaultwarden 服务，请检查服务地址与网络。';
-    case 'VAULT_NEEDS_LOGIN': return '外部密码库需要先登录账号。';
-    case 'VAULT_UNLOCK_FAILED': return '主密码不正确，请重新输入。';
+    case 'VAULT_NEEDS_LOGIN': return '请输入主密码以登录并解锁外部密码库。';
+    case 'VAULT_LOGIN_CHALLENGE': return '账号要求额外登录验证，当前尚不支持该验证方式。';
+    case 'VAULT_UNLOCK_FAILED': return '无法登录或解锁，请检查主密码及账号设置。';
     case 'VAULT_NOT_CONFIGURED': return '外部密码库尚未配置。';
     case 'VAULT_FORBIDDEN': return '密码库访问未获授权。';
     case 'VAULT_INVALID_ARGUMENT': return '输入无效，请检查后重试。';
@@ -66,6 +67,7 @@ export default function VaultSettings({ installation }: { installation: Installa
   const [pick, setPick] = useState<Record<string, { deviceId: string; botId: string }>>({});
   const [source, setSource] = useState<VaultSource>('local');
   const [serverUrl, setServerUrl] = useState('');
+  const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
@@ -97,6 +99,7 @@ export default function VaultSettings({ installation }: { installation: Installa
     setStatus(next);
     setSource(next.source);
     setServerUrl(next.serverUrl ?? '');
+    setEmail(next.email ?? '');
   }, []);
 
   const run = useCallback(async (work: () => Promise<void>) => {
@@ -175,27 +178,16 @@ export default function VaultSettings({ installation }: { installation: Installa
       setError('请填写 Vaultwarden 服务地址');
       return;
     }
+    const accountEmail = email.trim().toLowerCase();
+    if (source === 'vaultwarden' && !accountEmail) {
+      setError('请填写 Vaultwarden 账号邮箱');
+      return;
+    }
     void run(async () => {
       if (!status) return;
-      await control({ action: 'configure', expectedRevision: status.revision, source, ...(url ? { serverUrl: url } : {}) });
+      await control({ action: 'configure', expectedRevision: status.revision, source, ...(url ? { serverUrl: url, email: accountEmail } : {}) });
       form.reset();
       setMessage('密码库来源已保存');
-    });
-  };
-
-  const submitLogin = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const clientId = (form.elements.namedItem('clientId') as HTMLInputElement).value;
-    const clientSecret = (form.elements.namedItem('clientSecret') as HTMLInputElement).value;
-    // Bind the epoch shown with this form: if the account changed since, the
-    // center rejects with VAULT_STALE_SESSION instead of logging into it.
-    const expectedEpoch = status?.epoch;
-    form.reset();
-    void run(async () => {
-      if (expectedEpoch === undefined) return;
-      await control({ action: 'login', clientId, clientSecret, expectedEpoch });
-      setMessage('账号已登录，请使用主密码解锁');
     });
   };
 
@@ -270,7 +262,7 @@ export default function VaultSettings({ installation }: { installation: Installa
             ) : null}
           </p>
         )}
-        {status?.accountId && <p>账号：{status.accountId}</p>}
+        {status?.email && <p>账号：{status.email}</p>}
         <p className="secondary">
           上次同步：{status?.lastSyncAt ?? '无'} · 自动锁定：{status?.expiresAt ?? '无'} · Bot 级启用见「分配」标签页
         </p>
@@ -332,38 +324,30 @@ export default function VaultSettings({ installation }: { installation: Installa
               />
             </label>
           )}
+          {source === 'vaultwarden' && (
+            <label>
+              账号邮箱
+              <input
+                type="email"
+                value={email}
+                disabled={busy || !status}
+                onChange={event => setEmail(event.target.value)}
+                autoComplete="off"
+                required
+                maxLength={320}
+              />
+            </label>
+          )}
         </div>
         <div className="action-row">
-          <button type="submit" className="button secondary-button button-sm" disabled={busy || !status || (source === status.source && (serverUrl.trim() || null) === status.serverUrl)}>
+          <button type="submit" className="button secondary-button button-sm" disabled={busy || !status || (source === status.source && (serverUrl.trim() || null) === status.serverUrl && (email.trim().toLowerCase() || null) === status.email)}>
             保存来源
           </button>
         </div>
-        {external && status && !status.configured && <p className="secondary">保存地址后仍需登录并解锁，Bot 才能查找与填充条目。</p>}
+        {source === 'vaultwarden' && <p className="secondary">只保存服务地址与邮箱。首次使用时，在客户端私密解锁界面输入主密码即可登录并解锁。</p>}
       </form>
 
-      {external && status?.configured && !status.authenticated && (
-        <form className="form" onSubmit={submitLogin}>
-          <div className="form-grid">
-            <label>
-              API Client ID
-              <input name="clientId" autoComplete="off" required disabled={busy} />
-            </label>
-            <label>
-              API Client Secret
-              <input name="clientSecret" type="password" autoComplete="off" required disabled={busy} />
-            </label>
-          </div>
-          <div className="action-row">
-            <button type="submit" className="button" disabled={busy}>
-              <KeyRound size={15} aria-hidden="true" />
-              登录账号
-            </button>
-          </div>
-          <p className="secondary">API key 仅用于本次登录；登录后仍需主密码解锁才能读取条目。</p>
-        </form>
-      )}
-
-      {external && status?.authenticated && status.locked && (
+      {external && status?.configured && (!status.authenticated || status.locked) && (
         <form className="form" onSubmit={submitUnlock}>
           <label>
             主密码
@@ -372,7 +356,7 @@ export default function VaultSettings({ installation }: { installation: Installa
           <div className="action-row">
             <button type="submit" className="button" disabled={busy}>
               <KeyRound size={15} aria-hidden="true" />
-              解锁
+              {status.authenticated ? '解锁' : '登录并解锁'}
             </button>
           </div>
         </form>

@@ -4,7 +4,7 @@
 
 ## 版本模型
 
-- 根 `package.json` 的 `version`（当前 `0.0.4`）是唯一对外产品版本。
+- 根 `package.json` 的 `version`（当前 `0.0.5`）是唯一对外产品版本。
 - `desktop/src-tauri/tauri.conf.json`、`mobile/src-tauri/tauri.conf.json`、
   `mobile/src-tauri/Cargo.toml`、`desktop/src-tauri/Cargo.toml`、
   `desktop/host-launcher/Cargo.toml` 保存同一字面量；`app/build.gradle` 的

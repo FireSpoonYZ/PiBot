@@ -15,7 +15,8 @@ const MESSAGES = Object.freeze({
   VAULT_SESSION_REQUIRED: 'Open a Shower session first.',
   VAULT_INPUT_UNSUPPORTED: 'Secret input is unsupported for this target.',
   VAULT_NOT_CONFIGURED: 'External Vault is not configured.',
-  VAULT_NEEDS_LOGIN: 'External Vault needs an administrator sign-in.',
+  VAULT_NEEDS_LOGIN: 'External Vault is signed out. Call vault_unlock to sign in and unlock privately.',
+  VAULT_LOGIN_CHALLENGE: 'The account requires additional login verification.',
   VAULT_CONNECTION_FAILED: 'Vault service is unreachable.',
   VAULT_UNSUPPORTED: 'This Vault operation is not supported by the current Vault source.',
   VAULT_STALE_SESSION: 'Vault session changed. Try again.',
@@ -54,8 +55,7 @@ export function normalizeVaultItem(item) {
 }
 const EXTERNAL_CONTROL_FIELDS = Object.freeze({
   status: [], check: [], logout: [], lock: [], sync: [], list: [],
-  configure: ['expectedRevision', 'source', 'serverUrl'],
-  login: ['clientId', 'clientSecret', 'expectedEpoch'],
+  configure: ['expectedRevision', 'source', 'serverUrl', 'email'],
   unlock: ['masterPassword', 'expectedEpoch'],
   setGrants: ['expectedRevision', 'secretRef', 'allowedBots'],
 });
@@ -71,6 +71,7 @@ export function normalizeExternalVaultControl(input) {
     if (input.source !== 'local' && input.source !== 'vaultwarden') throw vaultError('VAULT_INVALID_ARGUMENT');
     value.source = input.source;
     if (input.serverUrl !== undefined) value.serverUrl = vaultString(input.serverUrl, 2048, 1);
+    if (input.email !== undefined) value.email = vaultString(input.email, 320, 1);
     return value;
   }
   if (input.action === 'setGrants') {

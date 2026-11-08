@@ -5,16 +5,12 @@
 // GET /object/item/:id — but no login/logout/config routes, so account
 // operations run as short-lived child processes.
 //
-// Secret channels, never argv/env/files/logs: client_id/client_secret enter
-// 'bw login --apikey' through its own stdin prompts (written to stderr; each
-// fed exactly once), the master password enters bw serve as the POST /unlock
-// JSON body, and no BW_SESSION is ever set — the unlocked key lives only in
-// the serve process and dies with it. Child env is a whitelist (PATH, HOME,
-// NODE_EXTRA_CA_CERTS for deploy-managed private CAs); no BW_* variable is
-// ever inherited.
-//
-// The CLI still writes its own plaintext data.json (it contains the API
-// clientSecret and token state), so its BITWARDENCLI_APPDATA_DIR is a random
+// The configured email and the master password enter 'bw login' only through
+// stdin prompts; unlock uses bw serve's private POST /unlock JSON body.
+// Login output can contain a session key: it is bounded, discarded, never
+// logged or exported. No BW_SESSION is inherited or passed to another child.
+// The CLI still writes plaintext token state (and may retain legacy API
+// credentials) in data.json. Its BITWARDENCLI_APPDATA_DIR is a random
 // private 0700 directory under /dev/shm — tmpfs, memory only, wiped on close
 // and gone with the container. The only thing persisted is that single
 // data.json, re-encrypted here with the Center encryption key (AES-256-GCM,
@@ -78,7 +74,7 @@ function classifyUpstream(message) {
   if (/vault is locked/i.test(text)) return 'VAULT_LOCKED';
   // 'Cryptography error, The decryption operation failed' is the observed
   // 2026.10.1 /unlock response for a wrong master password.
-  if (/invalid master password|cryptography error|decryption operation failed/i.test(text)) return 'VAULT_UNLOCK_FAILED';
+  if (/invalid master password|username or password is incorrect|cryptography error|decryption operation failed/i.test(text)) return 'VAULT_UNLOCK_FAILED';
   if (/not found/i.test(text)) return 'VAULT_NOT_FOUND';
   return 'VAULT_UNAVAILABLE';
 }
@@ -343,62 +339,61 @@ export async function openVaultwardenClient({ dataRoot, encryptionKey }) {
     });
   }
 
-  /* 'bw login --apikey' with credentials written only to its stdin prompts.
-   * Each prompt is answered exactly once; on timeout, failure or early exit
-   * the stdin pipe is closed and the process is terminated. */
-  function runLogin(clientId, clientSecret) {
+  // shortcut: interactive MFA/SSO needs a private challenge UI before those accounts are supported.
+  function runLogin(email, masterPassword, signal) {
     assertOpen();
+    if (signal?.aborted) throw vaultError('VAULT_REQUEST_EXPIRED', 'bw login cancelled');
     return new Promise((resolve, reject) => {
-      const [command, ...rest] = spawnArgs(['login', '--apikey']);
+      const [command, ...rest] = spawnArgs(['login']);
       const child = track(spawn(command, rest, { env: cliEnv(true), stdio: ['pipe', 'pipe', 'pipe'] }));
       let stderr = '';
       let stdout = '';
-      let sentId = false;
-      let sentSecret = false;
+      let sentEmail = false;
+      let sentPassword = false;
       let done = false;
       const finish = (error) => {
         if (done) return;
         done = true;
         clearTimeout(timer);
+        signal?.removeEventListener('abort', cancel);
         try { child.stdin.end(); } catch { /* already closed */ }
         stdout = stderr = '';
         if (error) reject(error);
         else resolve();
       };
+      const cancel = () => {
+        killChild(child);
+        finish(vaultError('VAULT_REQUEST_EXPIRED', 'bw login cancelled'));
+      };
       const timer = setTimeout(() => {
         killChild(child);
-        finish(vaultError('VAULT_UNAVAILABLE', 'bw login timed out'));
+        finish(vaultError('VAULT_CONNECTION_FAILED', 'bw login timed out'));
       }, LOGIN_TIMEOUT_MS);
-      // EPIPE arrives asynchronously when the child dies mid-prompt; the
-      // close event settles the promise, so the stream error is swallowed.
       child.stdin.on('error', () => {});
-      child.stdout.on('data', (chunk) => { if (stdout.length < MAX_CHILD_OUTPUT) stdout += chunk; });
+      signal?.addEventListener('abort', cancel, { once: true });
+      if (signal?.aborted) { cancel(); return; }
+      child.stdout.on('data', (chunk) => { if (!done && stdout.length < MAX_CHILD_OUTPUT) stdout += chunk; });
       child.stderr.on('data', (chunk) => {
+        if (done) return;
         if (stderr.length < MAX_CHILD_OUTPUT) stderr += chunk;
-        // Prompt texts verified in login.command.ts: "client_id:" then
-        // "client_secret:", written to stderr. Sequential writes keep each
-        // line on its own prompt; a pre-buffered write could drop the
-        // second line, and a repeated write could smuggle it into a later
-        // prompt, so each is sent exactly once.
-        if (!sentId && stderr.includes('client_id:')) {
-          sentId = true;
-          try { child.stdin.write(clientId + '\n'); } catch { /* child gone */ }
+        // Prompt text is pinned to login.command.ts in CLI 2026.10.1.
+        if (!sentEmail && stderr.includes('Email address:')) {
+          sentEmail = true;
+          try { child.stdin.write(email + '\n'); } catch { /* child gone */ }
         }
-        if (sentId && !sentSecret && stderr.includes('client_secret:')) {
-          sentSecret = true;
-          try {
-            child.stdin.write(clientSecret + '\n');
-            child.stdin.end();
-          } catch { /* child gone */ }
+        if (sentEmail && !sentPassword && stderr.includes('Master password:')) {
+          sentPassword = true;
+          try { child.stdin.write(masterPassword + '\n'); } catch { /* child gone */ }
+        }
+        if (/Two-step login (?:method|code):|New device verification required\.|Organization identifier:|captcha/i.test(stderr)) {
+          killChild(child);
+          finish(vaultError('VAULT_LOGIN_CHALLENGE', 'Additional login verification required'));
         }
       });
       child.on('error', () => finish(vaultError('VAULT_UNAVAILABLE', 'bw login failed to start')));
       child.on('close', (code) => {
         if (code === 0) finish();
-        else {
-          const classified = classifyUpstream(stdout + '\n' + stderr);
-          finish(vaultError(classified === 'VAULT_UNAVAILABLE' ? 'VAULT_NEEDS_LOGIN' : classified, 'bw login failed'));
-        }
+        else finish(vaultError(classifyUpstream(stdout + '\n' + stderr), 'bw login failed'));
       });
     });
   }
@@ -579,6 +574,7 @@ export async function openVaultwardenClient({ dataRoot, encryptionKey }) {
     return {
       authenticated: status === 'locked' || status === 'unlocked',
       locked: status !== 'unlocked',
+      email: typeof template.userEmail === 'string' ? template.userEmail.trim().toLowerCase() : null,
       accountId: typeof template.userId === 'string' && template.userId !== '' ? template.userId : null,
       lastSyncAt: typeof template.lastSync === 'string' && template.lastSync !== '' ? template.lastSync : null,
     };
@@ -623,37 +619,37 @@ export async function openVaultwardenClient({ dataRoot, encryptionKey }) {
   }
 
   return {
-    async configure({ serverUrl }) {
+    async configure({ serverUrl, email }) {
       boundedString(serverUrl, 'serverUrl', 2048);
+      boundedString(email, 'email', 320);
       let parsed;
       try { parsed = new URL(serverUrl); } catch { throw vaultError('VAULT_INVALID_ARGUMENT', 'serverUrl must be a valid URL'); }
       if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
         throw vaultError('VAULT_INVALID_ARGUMENT', 'serverUrl must be an https URL without credentials');
       }
       return enqueue(async () => {
-        // Idempotent for the already-persisted URL: no logout, no restart —
-        // callers may invoke this on every startup or adapter ensure.
-        if (sameServerUrl(await configuredServerUrl(), parsed.href)) return status();
+        const sameServer = sameServerUrl(await configuredServerUrl(), parsed.href);
         const before = await status();
+        if (sameServer && (!before.authenticated || before.email === email)) return before;
         await stopServe();
         // 'bw config server' refuses while an account is logged in; changing
         // the server always ends any previous account session and its grants.
         if (before.authenticated) await runCli(['logout']);
-        await runCli(['config', 'server', parsed.href]);
+        if (!sameServer) await runCli(['config', 'server', parsed.href]);
         return finishOp();
       });
     },
 
-    async login({ clientId, clientSecret }) {
-      secretLine(clientId, 'clientId');
-      secretLine(clientSecret, 'clientSecret');
+    async login({ email, masterPassword, signal }) {
+      secretLine(email, 'email');
+      secretLine(masterPassword, 'masterPassword');
       return enqueue(async () => {
         const before = await status();
         await stopServe();
         // 'bw login' exits if already authed; a previous account is dropped
         // first so a different account can replace it.
         if (before.authenticated) await runCli(['logout']);
-        await runLogin(clientId, clientSecret);
+        await runLogin(email, masterPassword, signal);
         await saveCliState();
         await ensureServe();
         return finishOp();

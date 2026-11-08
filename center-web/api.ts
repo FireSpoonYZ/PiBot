@@ -71,15 +71,15 @@ export interface ExternalVaultStatus {
   locked: boolean;
   expiresAt: string | null;
   serverUrl: string | null;
+  email: string | null;
   accountId: string | null;
   lastSyncAt: string | null;
   epoch: string;
 }
 export type ExternalVaultControlInput =
   | { action: 'status' }
-  | { action: 'configure'; expectedRevision: number; source: VaultSource; serverUrl?: string }
+  | { action: 'configure'; expectedRevision: number; source: VaultSource; serverUrl?: string; email?: string }
   | { action: 'check' }
-  | { action: 'login'; clientId: string; clientSecret: string; expectedEpoch: string }
   | { action: 'logout' }
   | { action: 'unlock'; masterPassword: string; expectedEpoch: string }
   | { action: 'lock' }
