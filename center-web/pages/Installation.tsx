@@ -541,7 +541,7 @@ export default function Installation() {
             <h2>密码库设置</h2>
           </div>
           <p className="secondary">
-            密码库由中心统一管理，此能力没有 JSON 配置项。主密码与 API key 只经此私有通道提交，不写入插件配置或快照。
+            密码库由中心统一管理，此能力没有 JSON 配置项。主密码只经专用私密通道提交，不写入插件配置或快照。
           </p>
           <VaultSettings installation={item} />
         </section>

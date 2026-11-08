@@ -2106,6 +2106,7 @@ export interface ExternalVaultStatus {
   locked: boolean;
   expiresAt: string | null;
   serverUrl: string | null;
+  email: string | null;
   accountId: string | null;
   lastSyncAt: string | null;
   epoch: string;
@@ -2128,8 +2129,7 @@ export interface ExternalVaultItemRef {
 }
 export type ExternalVaultControlInput =
   | { action: 'status' | 'check' | 'logout' | 'lock' | 'sync' | 'list' }
-  | { action: 'configure'; expectedRevision: number; source: ExternalVaultSource; serverUrl?: string }
-  | { action: 'login'; clientId: string; clientSecret: string; expectedEpoch: string }
+  | { action: 'configure'; expectedRevision: number; source: ExternalVaultSource; serverUrl?: string; email?: string }
   | { action: 'unlock'; masterPassword: string; expectedEpoch: string }
   | { action: 'setGrants'; expectedRevision: number; secretRef: string; allowedBots: ExternalVaultGrant[] };
 export type ExternalVaultControlResult = ExternalVaultStatus

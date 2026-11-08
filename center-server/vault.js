@@ -30,6 +30,7 @@ const MESSAGES = Object.freeze({
   VAULT_CONFLICT: 'Vault changed. Refresh and try again.',
   VAULT_FORBIDDEN: 'Vault access is not permitted.',
   VAULT_UNLOCK_FAILED: 'Vault could not be unlocked.',
+  VAULT_LOGIN_CHALLENGE: 'The account requires additional login verification.',
   VAULT_REQUEST_EXPIRED: 'Vault request expired.',
   VAULT_REQUEST_BUSY: 'Vault request is already being processed.',
   VAULT_NOT_FOUND: 'Vault item is unavailable.',
@@ -61,8 +62,7 @@ const shape = (raw, fields) => {
 
 const CONTROL_FIELDS = Object.freeze({
   status: [], check: [], list: [], logout: [], lock: [], sync: [],
-  configure: ['expectedRevision', 'source', 'serverUrl'],
-  login: ['clientId', 'clientSecret', 'expectedEpoch'],
+  configure: ['expectedRevision', 'source', 'serverUrl', 'email'],
   unlock: ['masterPassword', 'expectedEpoch'],
   setGrants: ['expectedRevision', 'secretRef', 'allowedBots'],
 });
@@ -88,10 +88,9 @@ function normalizeControl(raw) {
       if (!['local', 'vaultwarden'].includes(raw.source)) fail('VAULT_INVALID_ARGUMENT');
       const value = { action: 'configure', expectedRevision: int(raw.expectedRevision), source: raw.source };
       if (raw.serverUrl !== undefined) value.serverUrl = bound(raw.serverUrl, 512);
+      if (raw.email !== undefined) value.email = emailOf(raw.email);
       return value;
     }
-    case 'login':
-      return { action: 'login', clientId: bound(raw.clientId, 512), clientSecret: bound(raw.clientSecret, 512), expectedEpoch: bound(raw.expectedEpoch, 128) };
     case 'unlock':
       return { action: 'unlock', masterPassword: bound(raw.masterPassword, 1024), expectedEpoch: bound(raw.expectedEpoch, 128) };
     case 'setGrants':
@@ -110,6 +109,12 @@ function serverUrlOf(value) {
   return url.origin;
 }
 
+function emailOf(raw) {
+  const email = bound(raw, 320).trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+$/u.test(email)) fail('VAULT_INVALID_ARGUMENT');
+  return email;
+}
+
 export async function openCenterVault({ dataRoot, encryptionKey, store, client: injected }) {
   if (!(encryptionKey instanceof Uint8Array) || encryptionKey.byteLength !== 32) {
     throw Object.assign(new Error('encryptionKey must contain 32 bytes'), { code: 'INVALID_ARGUMENT' });
@@ -123,7 +128,7 @@ export async function openCenterVault({ dataRoot, encryptionKey, store, client: 
     let record;
     try { record = JSON.parse(readFileSync(statePath, 'utf8')); }
     catch (error) {
-      if (error.code === 'ENOENT') return { revision: 0, source: 'local', serverUrl: null, entries: {} };
+      if (error.code === 'ENOENT') return { revision: 0, source: 'local', serverUrl: null, email: null, entries: {} };
       throw error;
     }
     // An unreadable or tampered state must fail closed — silently resetting to
@@ -137,12 +142,14 @@ export async function openCenterVault({ dataRoot, encryptionKey, store, client: 
           !Number.isSafeInteger(value.revision) || value.revision < 0 ||
           !['local', 'vaultwarden'].includes(value.source) ||
           (value.serverUrl !== null && typeof value.serverUrl !== 'string') ||
+          (value.email != null && typeof value.email !== 'string') ||
           !value.entries || typeof value.entries !== 'object' || Array.isArray(value.entries) ||
           Object.values(value.entries).some(entry => !entry || typeof entry !== 'object' ||
             typeof entry.itemId !== 'string' || typeof entry.label !== 'string' || typeof entry.username !== 'string' ||
             !Array.isArray(entry.allowedBots) || entry.allowedBots.some(g => !g || typeof g.deviceId !== 'string' || typeof g.botId !== 'string'))) {
         throw new Error('invalid vault state');
       }
+      value.email ??= null;
       return value;
     } catch {
       throw new Error('Center vault state is unreadable; refusing an implicit fallback');
@@ -235,10 +242,10 @@ export async function openCenterVault({ dataRoot, encryptionKey, store, client: 
   };
 
   async function ensureAdapter() {
-    if (state.source !== 'vaultwarden' || state.serverUrl === null) fail('VAULT_NOT_CONFIGURED');
+    if (state.source !== 'vaultwarden' || state.serverUrl === null || state.email === null) fail('VAULT_NOT_CONFIGURED');
     const c = await getClient();
     if (!adapterReady) {
-      try { await c.configure({ serverUrl: state.serverUrl }); adapterReady = true; }
+      try { await c.configure({ serverUrl: state.serverUrl, email: state.email }); adapterReady = true; }
       catch (error) { adapterReady = false; throw clean(error, 'VAULT_CONNECTION_FAILED'); }
     }
     return c;
@@ -251,6 +258,7 @@ export async function openCenterVault({ dataRoot, encryptionKey, store, client: 
     return current;
   }
   async function requireSession() {
+    if (state.email === null) fail('VAULT_NOT_CONFIGURED');
     const c = await ensureAdapter();
     const current = await adapterStatus(c);
     if (current.authenticated !== true) fail('VAULT_NEEDS_LOGIN');
@@ -269,7 +277,7 @@ export async function openCenterVault({ dataRoot, encryptionKey, store, client: 
   };
 
   function statusShape(current) {
-    const configured = state.source === 'vaultwarden' && state.serverUrl !== null;
+    const configured = state.source === 'vaultwarden' && state.serverUrl !== null && state.email !== null;
     const authenticated = configured && current?.authenticated === true;
     const locked = !authenticated || current?.locked !== false;
     return {
@@ -280,6 +288,7 @@ export async function openCenterVault({ dataRoot, encryptionKey, store, client: 
       locked,
       expiresAt: authenticated && !locked ? expiresAt : null,
       serverUrl: state.serverUrl,
+      email: state.email,
       accountId: authenticated && typeof current.accountId === 'string' ? current.accountId : null,
       lastSyncAt: authenticated && typeof current.lastSyncAt === 'string' ? current.lastSyncAt : null,
       epoch,
@@ -287,7 +296,7 @@ export async function openCenterVault({ dataRoot, encryptionKey, store, client: 
   }
   async function statusOp() {
     let current = null;
-    if (state.source === 'vaultwarden') {
+    if (state.source === 'vaultwarden' && state.email !== null) {
       const c = await ensureAdapter();
       // A dead adapter is a connection error, not a fake "needs login".
       current = await adapterStatus(c);
@@ -324,10 +333,11 @@ export async function openCenterVault({ dataRoot, encryptionKey, store, client: 
   async function configureOp(input) {
     if (input.expectedRevision !== state.revision) fail('VAULT_CONFLICT');
     const serverUrl = input.source === 'vaultwarden' ? serverUrlOf(input.serverUrl ?? state.serverUrl) : state.serverUrl;
-    // A source or URL change locks the session and revokes every stored item
+    const email = input.source === 'vaultwarden' ? emailOf(input.email ?? state.email) : state.email;
+    // A source, URL or email change locks the session and revokes every stored item
     // reference and grant before the new configuration is saved. The revoke
     // happens only on a real switch — a CAS failure changes nothing.
-    if (input.source !== state.source || (input.source === 'vaultwarden' && serverUrl !== state.serverUrl)) {
+    if (input.source !== state.source || (input.source === 'vaultwarden' && (serverUrl !== state.serverUrl || email !== state.email))) {
       if (client) await lockAdapter(client);
       state.entries = {};
       expiresAt = null;
@@ -336,33 +346,15 @@ export async function openCenterVault({ dataRoot, encryptionKey, store, client: 
     }
     state.source = input.source;
     state.serverUrl = serverUrl;
+    state.email = email;
     state.revision += 1;
     persist();
     // An explicit switch to external never falls back to local: the choice is
     // already persisted, and a failed bring-up reports a fixed error.
     if (input.source === 'vaultwarden') {
       const c = await getClient();
-      try { await c.configure({ serverUrl }); adapterReady = true; }
+      try { await c.configure({ serverUrl, email }); adapterReady = true; }
       catch (error) { adapterReady = false; throw clean(error, 'VAULT_CONNECTION_FAILED'); }
-    }
-    return statusOp();
-  }
-  async function loginOp(input, signal) {
-    if (input.expectedEpoch !== epoch) fail('VAULT_STALE_SESSION');
-    const c = await ensureAdapter();
-    const before = (await adapterStatus(c)).accountId ?? null;
-    try { await c.login({ clientId: input.clientId, clientSecret: input.clientSecret }); }
-    catch (error) { throw clean(error, 'VAULT_NEEDS_LOGIN'); }
-    // A cancelled in-flight login cleans up only this context — the adapter is
-    // locked and nothing about the credentials crosses the boundary.
-    if (signal?.aborted || closed) { await lockAdapter(c); checkAlive(signal); }
-    if (((await adapterStatus(c)).accountId ?? null) !== before) {
-      // A different account invalidates every previously granted item reference.
-      state.entries = {};
-      state.revision += 1;
-      persist();
-      rekey();
-      expiresAt = null;
     }
     return statusOp();
   }
@@ -379,12 +371,23 @@ export async function openCenterVault({ dataRoot, encryptionKey, store, client: 
   }
   async function unlockOp(input, signal) {
     if (input.expectedEpoch !== epoch) fail('VAULT_STALE_SESSION');
+    if (state.email === null) fail('VAULT_NOT_CONFIGURED');
     const c = await ensureAdapter();
     const current = await adapterStatus(c);
-    if (current.authenticated !== true) fail('VAULT_NEEDS_LOGIN');
     const guard = revGen;
-    try { await c.unlock({ masterPassword: input.masterPassword }); }
-    catch (error) { throw clean(error, 'VAULT_UNLOCK_FAILED'); }
+    try {
+      // First sign-in happens only after the user submits the private unlock form.
+      if (current.authenticated !== true) {
+        await c.login({ email: state.email, masterPassword: input.masterPassword, signal });
+      }
+      if (guard !== revGen || input.expectedEpoch !== epoch) fail('VAULT_STALE_SESSION');
+      checkAlive(signal);
+      await c.unlock({ masterPassword: input.masterPassword });
+    } catch (error) {
+      await lockAdapter(c);
+      checkAlive(signal);
+      throw clean(error, 'VAULT_UNLOCK_FAILED');
+    }
     // A revoke or cancel that slipped past the unlock must never keep the key:
     // lock first, then report the fixed error.
     if (guard !== revGen || input.expectedEpoch !== epoch || signal?.aborted || closed) {
@@ -545,11 +548,8 @@ export async function openCenterVault({ dataRoot, encryptionKey, store, client: 
     });
   }
 
-  // Entry-time revoke: lock/logout kill the session and epoch before their slot
-  // ever runs; login arms only revGen so a pending unlock dies while its own
-  // expectedEpoch is still compared against the current epoch.
+  // Revoke before queuing so an in-flight first login cannot restore an unlock.
   const HARD_REVOKERS = new Set(['lock', 'logout']);
-  const SOFT_REVOKERS = new Set(['login']);
   async function control(raw, options) {
     if (closed) fail('VAULT_UNAVAILABLE');
     const input = normalizeControl(raw);
@@ -558,8 +558,6 @@ export async function openCenterVault({ dataRoot, encryptionKey, store, client: 
       revGen++;
       rekey();
       expiresAt = null;
-    } else if (SOFT_REVOKERS.has(input.action)) {
-      revGen++;
     }
     checkAlive(signal);
     return serialized(async () => {
@@ -568,7 +566,6 @@ export async function openCenterVault({ dataRoot, encryptionKey, store, client: 
         case 'status': return statusOp();
         case 'check': return checkOp();
         case 'configure': return configureOp(input);
-        case 'login': return loginOp(input, signal);
         case 'logout': return logoutOp();
         case 'unlock': return unlockOp(input, signal);
         case 'lock': return lockOp();

@@ -68,7 +68,7 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
   function failure(error: unknown): string {
     const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
     switch (code) {
-      case 'VAULT_UNLOCK_FAILED': return t('主密码不正确。', 'Incorrect master password.');
+      case 'VAULT_UNLOCK_FAILED': return t('无法登录或解锁，请检查主密码及账号设置。', 'Could not sign in or unlock. Check the master password and account settings.');
       case 'VAULT_LOCKED': return t('密码库已锁定，请刷新后解锁。', 'Vault is locked. Refresh and unlock.');
       case 'VAULT_INVALID_ARGUMENT': return t('密码库输入无效，请刷新后检查并重新输入。', 'Invalid Vault input. Refresh, review and enter it again.');
       case 'VAULT_NOT_FOUND': return t('条目已不可用，请刷新密码库。', 'Entry is unavailable. Refresh Vault.');
@@ -76,7 +76,8 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
       case 'VAULT_ALREADY_INITIALIZED': return t('密码库已创建，请刷新后解锁。', 'Vault is already initialized. Refresh and unlock.');
       case 'VAULT_FORBIDDEN': return t('密码库访问未获授权，请刷新并检查 Bot 授权。', 'Vault access is not permitted. Refresh and review Bot permissions.');
       case 'VAULT_NOT_CONFIGURED': return t('外部密码库尚未配置，请先完成服务设置。', 'External Vault is not configured. Finish the service setup first.');
-      case 'VAULT_NEEDS_LOGIN': return t('外部密码库需要登录，请先使用 API key 登录。', 'External Vault requires login. Sign in with the API key first.');
+      case 'VAULT_NEEDS_LOGIN': return t('请输入主密码以登录并解锁外部密码库。', 'Enter the master password to sign in and unlock the external Vault.');
+      case 'VAULT_LOGIN_CHALLENGE': return t('账号要求额外登录验证，当前尚不支持该验证方式。', 'This account requires additional login verification that is not supported yet.');
       case 'VAULT_CONNECTION_FAILED': return t('无法连接外部密码库服务，请检查地址后刷新。', 'Cannot reach the external Vault service. Check the address and refresh.');
       case 'VAULT_UNSUPPORTED': return t('当前 Host 不支持此密码库操作。', 'This Host does not support that Vault operation.');
       case 'VAULT_STALE_SESSION': return t('密码库会话已过期，请刷新后重新解锁。', 'Vault session expired. Refresh and unlock again.');
@@ -227,15 +228,17 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
             <>
               <button className="bs-btn" type="button" disabled={disabled} onClick={() => void executeExternal({ action: 'sync' })}>{t('同步', 'Sync')}</button>
               <button className="bs-btn" type="button" disabled={disabled} onClick={() => void executeExternal({ action: 'lock' })}>{t('锁定', 'Lock')}</button>
-              <button className="bs-btn is-danger" type="button" disabled={disabled} onClick={() => void executeExternal({ action: 'logout' })}>{t('退出账号', 'Sign out')}</button>
             </>
+          ) : null}
+          {external && ext?.authenticated ? (
+            <button className="bs-btn is-danger" type="button" disabled={disabled} onClick={() => void executeExternal({ action: 'logout' })}>{t('退出账号', 'Sign out')}</button>
           ) : null}
         </div>
       ) : null}
       {external && ext?.serverUrl ? (
         <p className="vault-hint">
           <a href={ext.serverUrl} target="_blank" rel="noreferrer">{t('打开 Vaultwarden 管理条目', 'Open Vaultwarden to manage entries')}</a>
-          {ext.accountId ? <> · {ext.accountId}</> : null}
+          {ext.email ? <> · {ext.email}</> : null}
           {ext.lastSyncAt ? <> · {t('上次同步', 'Last sync')}: {ext.lastSyncAt}</> : null}
         </p>
       ) : null}
@@ -246,14 +249,19 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
           const form = event.currentTarget;
           const source = (form.elements.namedItem('source') as HTMLSelectElement).value === 'vaultwarden' ? 'vaultwarden' as const : 'local' as const;
           const serverUrl = (form.elements.namedItem('serverUrl') as HTMLInputElement).value.trim();
+          const email = (form.elements.namedItem('email') as HTMLInputElement).value.trim().toLowerCase();
           form.reset();
           if (source === 'vaultwarden' && !/^https:\/\//i.test(serverUrl)) {
             setError(t('Vaultwarden 地址必须使用 https://', 'The Vaultwarden address must use https://'));
             return;
           }
+          if (source === 'vaultwarden' && !email) {
+            setError(t('请填写账号邮箱。', 'Enter the account email.'));
+            return;
+          }
           const revision = status?.external?.revision;
           if (revision === undefined) return;
-          void executeExternal({ action: 'configure', expectedRevision: revision, source, ...(serverUrl ? { serverUrl } : {}) });
+          void executeExternal({ action: 'configure', expectedRevision: revision, source, ...(source === 'vaultwarden' ? { serverUrl, email } : {}) });
         }}>
           <fieldset disabled={disabled}>
             <legend>{t('密码库来源', 'Vault source')}</legend>
@@ -266,6 +274,9 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
             <label>{t('Vaultwarden 地址（https://）', 'Vaultwarden address (https://)')}
               <input className="bs-input" name="serverUrl" defaultValue={ext?.serverUrl ?? ''} inputMode="url" autoComplete="off" placeholder="https://vaultwarden.example.com" />
             </label>
+            <label>{t('账号邮箱', 'Account email')}
+              <input className="bs-input" name="email" type="email" defaultValue={ext?.email ?? ''} maxLength={320} autoComplete="off" />
+            </label>
             <div className="vault-actions">
               <button className="bs-btn is-primary" type="submit">{t('保存来源', 'Save source')}</button>
               <button className="bs-btn is-ghost" type="button" onClick={() => { clearForms(); setConfiguring(false); }}>{t('取消', 'Cancel')}</button>
@@ -275,33 +286,7 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
         </form>
       ) : null}
 
-      {external && ext?.configured && !ext.authenticated ? (
-        <form onSubmit={event => {
-          event.preventDefault();
-          const form = event.currentTarget;
-          const clientId = (form.elements.namedItem('clientId') as HTMLInputElement).value;
-          const clientSecret = (form.elements.namedItem('clientSecret') as HTMLInputElement).value;
-          // Epoch rendered with this form: if the account changed since, the
-          // center rejects with VAULT_STALE_SESSION instead of a stale login.
-          const expectedEpoch = ext?.epoch;
-          form.reset();
-          if (expectedEpoch === undefined) return;
-          void executeExternal({ action: 'login', clientId, clientSecret, expectedEpoch });
-        }}>
-          <fieldset disabled={disabled}>
-            <legend>{t('登录 Vaultwarden', 'Sign in to Vaultwarden')}</legend>
-            <label>{t('API Client ID', 'API client id')}<input className="bs-input" name="clientId" autoComplete="off" required /></label>
-            <label>{t('API Client Secret', 'API client secret')}<input className="bs-input" name="clientSecret" type="password" autoComplete="off" required /></label>
-            <div className="vault-actions">
-              <button className="bs-btn is-primary" type="submit">{t('登录', 'Sign in')}</button>
-              <button className="bs-btn is-ghost" type="button" onClick={clearForms}>{t('清空', 'Clear')}</button>
-            </div>
-            <p className="vault-hint">{t('API key 仅用于本次登录；登录后仍需主密码解锁。', 'The API key is used only for this login; the master password is still required to unlock.')}</p>
-          </fieldset>
-        </form>
-      ) : null}
-
-      {external && ext?.authenticated && ext.locked ? (
+      {external && ext?.configured && (!ext.authenticated || ext.locked) ? (
         <form onSubmit={event => {
           event.preventDefault();
           const form = event.currentTarget;
@@ -312,7 +297,8 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
           void executeExternal({ action: 'unlock', masterPassword, expectedEpoch });
         }}>
           <fieldset disabled={disabled}>
-            <legend>{t('解锁外部密码库', 'Unlock external Vault')}</legend>
+            <legend>{ext.authenticated ? t('解锁外部密码库', 'Unlock external Vault') : t('登录并解锁', 'Sign in and unlock')}</legend>
+            <p className="vault-hint">{t('首次使用时会用本次主密码登录已配置账号；主密码不保存、不进入聊天。', 'On first use, this master password signs in to the configured account. It is not saved or sent to chat.')}</p>
             <label>{t('主密码', 'Master password')}<input className="bs-input" name="masterPassword" type="password" autoComplete="off" required /></label>
             <div className="vault-actions">
               <button className="bs-btn is-primary" type="submit">{t('解锁', 'Unlock')}</button>
@@ -323,7 +309,7 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
       ) : null}
 
       {external && ext && !ext.configured ? (
-        <p className="vault-hint">{t('尚未配置外部密码库。请在「服务设置」填写 Vaultwarden 地址，或前往中心管理页的 Vault 插件配置。', 'External Vault is not configured yet. Set the Vaultwarden address under “Service settings”, or use the Vault plugin page in the center console.')}</p>
+        <p className="vault-hint">{t('尚未配置外部密码库。请在「服务设置」填写 Vaultwarden 地址和账号邮箱，或前往中心管理页的 Vault 插件配置。', 'External Vault is not configured yet. Set the Vaultwarden address and account email under “Service settings”, or use the Vault plugin page in the center console.')}</p>
       ) : null}
 
       {extReady ? (

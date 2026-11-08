@@ -109,7 +109,7 @@ export async function createVaultService({ host, getHarness, shower, isMaintenan
   }
   function externalStatus(status) {
     return {
-      initialized: status?.configured === true && status?.authenticated === true,
+      initialized: status?.configured === true,
       locked: status?.locked !== false,
       revision: Number.isSafeInteger(status?.revision) ? status.revision : 0,
       expiresAt: typeof status?.expiresAt === 'string' ? status.expiresAt : null,
@@ -252,7 +252,6 @@ export async function createVaultService({ host, getHarness, shower, isMaintenan
             if (mode === 'external') {
               const status = probe.status;
               if (status?.configured !== true) throw vaultError('VAULT_NOT_CONFIGURED');
-              if (status?.authenticated !== true) throw vaultError('VAULT_NEEDS_LOGIN');
               if (status?.locked === false) return { status: 'unlocked' };
               external = true;
               cardMode = 'unlock';
