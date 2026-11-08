@@ -370,7 +370,7 @@ export async function openRuntime(options) {
   // 统一图形环境：管理器按注入的可信原生桥接（Android）或当前平台（Windows/Linux）选后端；
   // 构造不启动原生/进程资源；Windows 启动时准备管理员授权，图形会话仍由首次 ensure 按需创建，随 Runtime 关闭释放。
   const shower = createShowerManager({ dataRoot: host.dataRoot, nativeBridge });
-  const vault = await createVaultService({ host, getHarness: () => harness, shower, isMaintenance: () => maintenance });
+  const vault = await createVaultService({ host, getHarness: () => harness, shower, isMaintenance: () => maintenance, centerVault: centerRuntime.centerVault ?? null });
   const schedules = createScheduleManager({
     host,
     getRuntime: () => runtime,

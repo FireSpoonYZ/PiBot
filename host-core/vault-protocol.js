@@ -14,6 +14,11 @@ const MESSAGES = Object.freeze({
   VAULT_INPUT_UNCONFIRMED: 'Secret input is unconfirmed. Do not retry automatically.',
   VAULT_SESSION_REQUIRED: 'Open a Shower session first.',
   VAULT_INPUT_UNSUPPORTED: 'Secret input is unsupported for this target.',
+  VAULT_NOT_CONFIGURED: 'External Vault is not configured.',
+  VAULT_NEEDS_LOGIN: 'External Vault needs an administrator sign-in.',
+  VAULT_CONNECTION_FAILED: 'Vault service is unreachable.',
+  VAULT_UNSUPPORTED: 'This Vault operation is not supported by the current Vault source.',
+  VAULT_STALE_SESSION: 'Vault session changed. Try again.',
   RUNTIME_BUSY: 'Host is preparing an update.',
 });
 export const VAULT_ERROR_CODES = Object.freeze(Object.keys(MESSAGES).filter(code => code.startsWith('VAULT_')));
@@ -47,8 +52,48 @@ export function normalizeVaultItem(item) {
   if (!value.secretRef && value.password === undefined) throw vaultError('VAULT_INVALID_ARGUMENT');
   return value;
 }
+const EXTERNAL_CONTROL_FIELDS = Object.freeze({
+  status: [], check: [], logout: [], lock: [], sync: [], list: [],
+  configure: ['expectedRevision', 'source', 'serverUrl'],
+  login: ['clientId', 'clientSecret', 'expectedEpoch'],
+  unlock: ['masterPassword', 'expectedEpoch'],
+  setGrants: ['expectedRevision', 'secretRef', 'allowedBots'],
+});
+// 中心外部密码库控制输入（contract §4 联合）：严格白名单 + 有界字符串，秘密字段
+// 与普通参数同边界处理，绝不进入日志或反射错误。
+export function normalizeExternalVaultControl(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      !Object.hasOwn(EXTERNAL_CONTROL_FIELDS, input.action)) throw vaultError('VAULT_INVALID_ARGUMENT');
+  object(input, ['action', ...EXTERNAL_CONTROL_FIELDS[input.action]]);
+  const value = { action: input.action };
+  if (input.action === 'configure') {
+    value.expectedRevision = revision(input.expectedRevision);
+    if (input.source !== 'local' && input.source !== 'vaultwarden') throw vaultError('VAULT_INVALID_ARGUMENT');
+    value.source = input.source;
+    if (input.serverUrl !== undefined) value.serverUrl = vaultString(input.serverUrl, 2048, 1);
+    return value;
+  }
+  if (input.action === 'setGrants') {
+    value.expectedRevision = revision(input.expectedRevision);
+    value.secretRef = vaultString(input.secretRef, 128, 1);
+    if (!Array.isArray(input.allowedBots) || input.allowedBots.length > 256) throw vaultError('VAULT_INVALID_ARGUMENT');
+    value.allowedBots = input.allowedBots.map((grant) => {
+      object(grant, ['deviceId', 'botId']);
+      return { deviceId: vaultString(grant.deviceId, 128, 1), botId: vaultString(grant.botId, 128, 1) };
+    });
+    return value;
+  }
+  for (const key of EXTERNAL_CONTROL_FIELDS[input.action]) {
+    value[key] = vaultString(input[key], key === 'expectedEpoch' ? 128 : 1024, 1);
+  }
+  return value;
+}
 export function normalizeVaultControl(input) {
-  object(input, ['action', 'masterPassword', 'newMasterPassword', 'expectedRevision', 'item', 'secretRef', 'requestId', 'cancelled']);
+  object(input, ['action', 'masterPassword', 'newMasterPassword', 'expectedRevision', 'item', 'secretRef', 'requestId', 'cancelled', 'input']);
+  if (input.action === 'external') {
+    object(input, ['action', 'input']);
+    return { action: 'external', input: normalizeExternalVaultControl(input.input) };
+  }
   if (input.action === 'respondUnlock') {
     const requestId = vaultString(input.requestId, 128, 1);
     if (input.cancelled === true) {

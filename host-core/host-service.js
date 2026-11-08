@@ -419,6 +419,13 @@ export async function openHostService(options) {
         snapshot,
         getClient: () => client ?? null,
         installer,
+        // 内部 Vault 桥：每次调用取当前 client，重连后不残留旧对象；只供 vault 服务
+        // 内部使用，不作为模型服务公开。deviceId 由 Bearer 认证主体决定，不由参数传入。
+        centerVault: {
+          control: (input, options) => { const current = client; if (!current) throw offlineError(); return current.vaultControl(input, options); },
+          find: (input, options) => { const current = client; if (!current) throw offlineError(); return current.vaultFind(input, options); },
+          resolve: (input, options) => { const current = client; if (!current) throw offlineError(); return current.vaultResolve(input, options); },
+        },
         // 每轮准入协调：只经 center client + installer.prepare，不重入快照/生命周期通道。
         // 平铺到 centerRuntime：runtime-turns 按 contract §3 直接调用 prepareTurn/confirmTurn/restoreTurn。
         ...createTurnSynchronizer({ getClient: () => client ?? null, installer }),

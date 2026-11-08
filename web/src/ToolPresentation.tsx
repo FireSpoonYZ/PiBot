@@ -120,10 +120,12 @@ export function readToolPresentation(value: unknown): ToolPresentation | null {
     return value as unknown as QuestionnairePresentation;
   }
   if (value.kind === 'vault-unlock') {
-    if (Object.keys(value).some(key => !['kind', 'version', 'installationId', 'conversationId', 'requestId', 'mode', 'status'].includes(key))) return null;
+    if (Object.keys(value).some(key => !['kind', 'version', 'installationId', 'conversationId', 'requestId', 'mode', 'status', 'source', 'serverUrl'].includes(key))) return null;
     if (!isNonEmptyString(value.requestId) || !isInt(value.conversationId) || value.conversationId < 0) return null;
     if (value.mode !== 'initialize' && value.mode !== 'unlock') return null;
     if (value.status !== 'pending' && value.status !== 'unlocked' && value.status !== 'cancelled' && value.status !== 'interrupted') return null;
+    if (value.source !== undefined && value.source !== 'local' && value.source !== 'vaultwarden') return null;
+    if (value.serverUrl !== undefined && !isNonEmptyString(value.serverUrl)) return null;
     return value as unknown as VaultUnlockPresentation;
   }
   return null;

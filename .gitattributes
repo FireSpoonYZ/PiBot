@@ -2,3 +2,4 @@ gradlew text eol=lf
 *.bat text eol=crlf
 gradle/wrapper/gradle-wrapper.jar binary
 desktop/linux/* text eol=lf
+licenses/bitwarden-cli-2026.10.1-LICENSE.txt -text -whitespace

@@ -21,6 +21,16 @@ LABEL org.opencontainers.image.source="https://github.com/FireSpoonYZ/PiBot"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 \
     && rm -rf /var/lib/apt/lists/*
+# Official Bitwarden CLI for the Vaultwarden adapter
+# (center-server/vaultwarden-client.js): pinned version, pure-JS package with no
+# native optional deps so amd64 and arm64 builds work identically. Installed
+# into its own prefix; center-server/host-core lockfiles stay untouched.
+# The adapter spawns it only on the container loopback via `bw serve`.
+ARG BW_CLI_VERSION=2026.10.1
+RUN mkdir -p /opt/bitwarden-cli && cd /opt/bitwarden-cli \
+    && npm init -y >/dev/null \
+    && npm install --omit=dev --ignore-scripts --no-audit --no-fund --save-exact "@bitwarden/cli@${BW_CLI_VERSION}" \
+    && ln -s /opt/bitwarden-cli/node_modules/.bin/bw /usr/local/bin/bw
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build --chown=node:node /app/center-contract/ ./center-contract/

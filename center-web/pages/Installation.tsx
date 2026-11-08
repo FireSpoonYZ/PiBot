@@ -18,6 +18,7 @@ import type {
 import { api } from '../api';
 import { ActivationBadge, ActivationSummary, activationUsable } from '../components/ActivationStatus';
 import ConfigForm from '../components/ConfigForm';
+import VaultSettings from '../components/VaultSettings';
 import { ConfigOperation, errorMessage } from '../components/ConfigOperation';
 import { SheetModal } from '../components/SheetModal';
 import '../components/Config.css';
@@ -534,7 +535,19 @@ export default function Installation() {
         </>
       )}
 
-      {config && tab === '配置' && (
+      {config && tab === '配置' && item?.packageId === 'e-launcher.vault' && (
+        <section className="card-group">
+          <div className="card-header">
+            <h2>密码库设置</h2>
+          </div>
+          <p className="secondary">
+            密码库由中心统一管理，此能力没有 JSON 配置项。主密码与 API key 只经此私有通道提交，不写入插件配置或快照。
+          </p>
+          <VaultSettings installation={item} />
+        </section>
+      )}
+
+      {config && tab === '配置' && item?.packageId !== 'e-launcher.vault' && (
         <section className="card-group">
           <div className="card-header">
             <h2>全局配置</h2>

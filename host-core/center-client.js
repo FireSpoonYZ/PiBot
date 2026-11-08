@@ -62,14 +62,17 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
       // BAD_RESPONSE。其他路径保持既有 CENTER_REQUEST_FAILED 语义及 ownerRequest 回退。
       const typedTurnError = path.startsWith('/api/host/turns/') ||
         /^\/api\/host\/devices\/[^/]+\/bots\/[^/]+\/(skills|learning|installations)$/.test(path);
+      // /api/host/vault/* 只透传固定 VAULT_* 码/消息；其他错误仍走状态码兜底。
+      const typedVaultError = path.startsWith('/api/host/vault/');
       let errorCode = null;
       let errorMessage = null;
-      if (typedTurnError) {
+      if (typedTurnError || typedVaultError) {
         const chunks = [];
         for await (const chunk of response) chunks.push(chunk);
         try {
           const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          if (typeof parsed?.error?.code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(parsed.error.code)) {
+          const codePattern = typedVaultError ? /^VAULT_[A-Z0-9_]{1,60}$/ : /^[A-Z][A-Z0-9_]{1,63}$/;
+          if (typeof parsed?.error?.code === 'string' && codePattern.test(parsed.error.code)) {
             errorCode = parsed.error.code;
             if (typeof parsed.error.message === 'string' && parsed.error.message.length <= 512) errorMessage = parsed.error.message;
           }
@@ -78,6 +81,9 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
         response.resume();
       }
       if (errorCode) throw centerError(errorCode, errorMessage ?? 'center request failed');
+      if (typedVaultError && response.statusCode === 404) {
+        throw centerError('CENTER_VAULT_UNSUPPORTED', 'center does not support vault service');
+      }
       if (response.statusCode === 409) throw centerError('REQUEST_CONFLICT', 'center revision conflict; reload before saving');
       if (response.statusCode === 401 || (response.statusCode === 403 && !path.startsWith('/api/host/devices/'))) {
         const error = centerError('UNAUTHORIZED', 'center authentication failed');
@@ -293,6 +299,10 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     prepareTurn: (input, options = {}) => request('/api/host/turns/prepare', { method: 'POST', body: input, signal: options.signal }),
     confirmTurn: (input, options = {}) => request('/api/host/turns/confirm', { method: 'POST', body: input, signal: options.signal }),
     restoreTurn: (input, options = {}) => request('/api/host/turns/restore', { method: 'POST', body: input, signal: options.signal }),
+    // 中心外部密码库：device 认证固定路径，typed VAULT_* 码透传；密码路径不自动重试。
+    vaultControl: (input, options = {}) => request('/api/host/vault/control', { method: 'POST', body: input, signal: options.signal }),
+    vaultFind: (input, options = {}) => request('/api/host/vault/find', { method: 'POST', body: input, signal: options.signal }),
+    vaultResolve: (input, options = {}) => request('/api/host/vault/resolve', { method: 'POST', body: input, signal: options.signal }),
     listCapabilityTools: (id, botId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/list', { method: 'POST', body: { botId }, signal: options.signal }),
     callCapabilityTool: (id, botId, name, args, callId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/call', { method: 'POST', body: { botId, name, args, callId }, signal: options.signal }),
     async close() { closed = true; clearTimeout(watchdog); ownerCookie = ''; ownerCsrf = ''; for (const active of requests) active.destroy(); events.destroy(); },

@@ -1,5 +1,20 @@
 # Third-party source notices
 
+## Bitwarden Password Manager CLI
+
+The center image bundles the unmodified official npm OSS build of
+`@bitwarden/cli` **2026.10.1** in `/opt/bitwarden-cli`, as a separate process
+for the optional Vaultwarden integration. It is not bundled into desktop or
+Android clients. Upstream source and build instructions:
+https://github.com/bitwarden/clients/tree/cli-v2026.10.1 .
+
+The upstream license notice is retained verbatim at
+[`licenses/bitwarden-cli-2026.10.1-LICENSE.txt`](licenses/bitwarden-cli-2026.10.1-LICENSE.txt).
+The OSS source uses GPL-3.0; its full terms are retained in
+[`licenses/GPL-3.0.txt`](licenses/GPL-3.0.txt). Installed npm dependency license
+files remain alongside their packages in the center image. Bitwarden's
+trademarks remain owned by their respective holders.
+
 ## Historical Ogesture derivation
 
 Earlier Launcher Probe versions incorporated modified source from **Ogesture**, by the Ogesture contributors / team Olauncher:

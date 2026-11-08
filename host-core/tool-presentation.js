@@ -54,6 +54,7 @@ const TOP_KEYS = {
   todo: new Set(['kind', 'version', 'installationId', 'tasks']),
   'vault-unlock': new Set([
     'kind', 'version', 'installationId', 'conversationId', 'requestId', 'mode', 'status',
+    'source', 'serverUrl',
   ]),
   questionnaire: new Set([
     'kind',
@@ -240,6 +241,10 @@ function checkPresentation(value, onError) {
     if (!VAULT_UNLOCK_STATUSES.has(value.status)) {
       onError('vault-unlock status must be pending, unlocked, cancelled or interrupted');
     }
+    if (value.source !== undefined && value.source !== 'local' && value.source !== 'vaultwarden') {
+      onError('vault-unlock source must be local or vaultwarden');
+    }
+    if (value.serverUrl !== undefined) checkText(value.serverUrl, 2048, 1, onError);
     return;
   }
   onError('presentation kind must be todo, questionnaire or vault-unlock');
@@ -255,7 +260,7 @@ function buildPresentation(value) {
     };
   }
   if (value.kind === 'vault-unlock') {
-    return {
+    const presentation = {
       kind: 'vault-unlock',
       version: 1,
       installationId: value.installationId,
@@ -264,6 +269,9 @@ function buildPresentation(value) {
       mode: value.mode,
       status: value.status,
     };
+    if (value.source !== undefined) presentation.source = value.source;
+    if (value.serverUrl !== undefined) presentation.serverUrl = value.serverUrl;
+    return presentation;
   }
   const questionnaire = {
     kind: 'questionnaire',
