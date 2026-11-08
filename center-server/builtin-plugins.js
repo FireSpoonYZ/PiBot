@@ -34,4 +34,6 @@ export async function initializeBuiltinPlugins({ dataRoot, store, packages }) {
     await writeFile(receiptFile + '.tmp', JSON.stringify(initialized) + '\n', { mode: 0o600 });
     await rename(receiptFile + '.tmp', receiptFile);
   }
+  // Bots that already existed when a new default capability (e.g. vault) shipped never ran initializeBotDefaults for it; the backfill is idempotent and keeps explicit disables.
+  store.backfillDefaultBindings();
 }

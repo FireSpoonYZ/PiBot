@@ -851,6 +851,9 @@ export interface VaultUnlockPresentation {
   requestId: string;
   mode: 'initialize' | 'unlock';
   status: 'pending' | 'unlocked' | 'cancelled' | 'interrupted';
+  /** Present only for external-source cards (never 'initialize' there). */
+  source?: ExternalVaultSource;
+  serverUrl?: string;
 }
 
 export type ToolPresentation = TodoPresentation | QuestionnairePresentation | VaultUnlockPresentation;
@@ -2089,7 +2092,49 @@ export interface VaultStatus {
   locked: boolean;
   revision: number;
   expiresAt: string | null;
+  /** Missing on results produced before external-source support; treat as 'local'. */
+  source?: ExternalVaultSource;
+  external?: ExternalVaultStatus;
 }
+/** Center-level Vault backend; 'local' is this Host's own encrypted vault.json. */
+export type ExternalVaultSource = 'local' | 'vaultwarden';
+export interface ExternalVaultStatus {
+  source: ExternalVaultSource;
+  revision: number;
+  configured: boolean;
+  authenticated: boolean;
+  locked: boolean;
+  expiresAt: string | null;
+  serverUrl: string | null;
+  accountId: string | null;
+  lastSyncAt: string | null;
+  epoch: string;
+}
+/** A Vaultwarden item grant: one Bot on one device. */
+export interface ExternalVaultGrant {
+  deviceId: string;
+  botId: string;
+}
+export interface ExternalVaultItemMeta {
+  secretRef: string;
+  label: string;
+  username: string;
+  allowedBots: ExternalVaultGrant[];
+}
+export interface ExternalVaultItemRef {
+  secretRef: string;
+  label: string;
+  username: string;
+}
+export type ExternalVaultControlInput =
+  | { action: 'status' | 'check' | 'logout' | 'lock' | 'sync' | 'list' }
+  | { action: 'configure'; expectedRevision: number; source: ExternalVaultSource; serverUrl?: string }
+  | { action: 'login'; clientId: string; clientSecret: string; expectedEpoch: string }
+  | { action: 'unlock'; masterPassword: string; expectedEpoch: string }
+  | { action: 'setGrants'; expectedRevision: number; secretRef: string; allowedBots: ExternalVaultGrant[] };
+export type ExternalVaultControlResult = ExternalVaultStatus
+  | { revision: number; items: ExternalVaultItemMeta[] }
+  | { reachable: boolean; status: ExternalVaultStatus };
 export interface VaultItemMeta {
   secretRef: string;
   label: string;
@@ -2113,12 +2158,14 @@ export type VaultControlInput =
   | { action: 'respondUnlock'; requestId: string; cancelled: true; masterPassword?: never }
   | { action: 'save'; expectedRevision: number; item: VaultItemInput }
   | { action: 'delete'; expectedRevision: number; secretRef: string }
-  | { action: 'changePassword'; masterPassword: string; newMasterPassword: string };
+  | { action: 'changePassword'; masterPassword: string; newMasterPassword: string }
+  | { action: 'external'; input: ExternalVaultControlInput };
 export type VaultControlResult = VaultStatus
   | { requestId: string; status: 'unlocked' | 'cancelled' }
   | { revision: number; items: VaultItemMeta[] }
   | { revision: number; item: VaultItemMeta }
-  | { revision: number };
+  | { revision: number }
+  | ExternalVaultControlResult;
 
 export interface RemoteControlMethodMap {
   vaultControl: { params: VaultControlInput; result: VaultControlResult };

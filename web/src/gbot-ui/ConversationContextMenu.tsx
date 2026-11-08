@@ -115,6 +115,7 @@ export function ConversationContextMenu({
       closeRef.current(true);
     };
     const handleViewportChange = () => closeRef.current(true);
+    const handleForceClose = () => closeRef.current(false);
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       event.preventDefault();
@@ -126,11 +127,13 @@ export function ConversationContextMenu({
     document.addEventListener('keydown', handleEscape, true);
     window.addEventListener('resize', handleViewportChange);
     window.addEventListener('scroll', handleViewportChange, true);
+    window.addEventListener('gbot-close-context-menu', handleForceClose);
     return () => {
       document.removeEventListener('pointerdown', handlePointerDown, true);
       document.removeEventListener('keydown', handleEscape, true);
       window.removeEventListener('resize', handleViewportChange);
       window.removeEventListener('scroll', handleViewportChange, true);
+      window.removeEventListener('gbot-close-context-menu', handleForceClose);
     };
   }, [position]);
 

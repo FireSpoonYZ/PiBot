@@ -1,82 +1,32 @@
-/* gbot-ui lane：置顶会话拖拽/键盘排序外层与兄弟手柄样式。
+/* gbot-ui lane：置顶会话整行拖拽/键盘排序外层样式。
  * 复用仓库既有圆角与颜色变量（--surface / --text / --muted / --accent / --accent-soft / --selection），
- * 只给置顶项提供轻量包裹与右侧兄弟拖拽手柄，不新增大分组标题或外层卡片。 */
+ * 仅提供整行轻量包裹与拖拽浮起/落点指示线，不渲染右侧独立手柄，使置顶灰底完整覆盖整行。 */
 
 .gbot-sortable-pinned-chat {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 2px;
   width: 100%;
   min-width: 0;
-  border-radius: 14px;
-  transition: background-color 140ms ease, box-shadow 140ms ease;
+  border-radius: 16px;
+  transition: box-shadow 140ms ease;
 }
 
 .gbot-sortable-pinned-chat > :first-child {
   flex: 1;
+  width: 100%;
   min-width: 0;
-}
-
-.gbot-sortable-pinned-chat__handle {
-  flex: none;
-  width: 26px;
-  height: 32px;
-  padding: 0;
-  margin-right: 2px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted, inherit);
-  opacity: 0.64;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: grab;
-  touch-action: none;
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  user-select: none;
-  transition: opacity 140ms ease, background-color 140ms ease, color 140ms ease;
-}
-
-.gbot-sortable-pinned-chat__handle svg {
-  width: 15px;
-  height: 15px;
-  pointer-events: none;
-}
-
-.gbot-sortable-pinned-chat__handle:hover {
-  opacity: 1;
-  color: var(--text, inherit);
-  background: var(--accent-soft, var(--selection, rgb(0 0 0 / 0.06)));
-}
-
-.gbot-sortable-pinned-chat__handle:active {
-  cursor: grabbing;
-  opacity: 1;
-}
-
-.gbot-sortable-pinned-chat__handle:focus-visible {
-  opacity: 1;
-  color: var(--text, inherit);
-  background: var(--accent-soft, var(--selection, rgb(0 0 0 / 0.06)));
-  outline: 2px solid var(--accent, #627565);
-  outline-offset: 1px;
 }
 
 .gbot-sortable-pinned-chat[data-dragging="true"] {
   z-index: 20;
-  background: var(--surface, rgb(0 0 0 / 0.04));
-  box-shadow: 0 6px 18px rgb(0 0 0 / 0.12);
-  opacity: 0.94;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.14);
+  opacity: 0.96;
   transition: none;
 }
 
-.gbot-sortable-pinned-chat[data-dragging="true"] .gbot-sortable-pinned-chat__handle {
+.gbot-sortable-pinned-chat[data-dragging="true"] > :first-child {
   cursor: grabbing;
-  opacity: 1;
-  color: var(--accent, inherit);
 }
 
 .gbot-sortable-pinned-chat[data-drop-position="before"]::before,

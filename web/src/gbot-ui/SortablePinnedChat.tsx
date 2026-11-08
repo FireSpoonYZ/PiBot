@@ -1,21 +1,26 @@
-// gbot-ui lane：置顶会话单项可拖拽/可键盘重排包裹组件。
-// 结构约定：wrapper 内部将会话行（children）与拖拽手柄 button 并列作为兄弟节点，
-// 绝不将 button 嵌套进 ConversationRow button 内；未置顶项不套本组件。
-// 支持触摸与鼠标 pointer 拖拽、Escape/pointercancel 取消（不误触打开会话）、
-// 以及手柄聚焦时 ArrowUp/ArrowDown 调整置顶顺序（保留过滤隐藏的置顶项原位）。
+// gbot-ui lane：置顶会话整行可拖拽/可键盘重排包裹组件。
+// 结构约定：wrapper 直接包裹会话行（children），不渲染右侧独立拖拽手柄，使置顶灰底完整覆盖整行；
+// 未置顶项不套本组件。
+// 手势防冲突约定：
+// - 轻点（<500ms 未拖动）：正常打开会话；
+// - 触摸快速滑动（<260ms 内移动 >10px 或触发列表滚动）：放弃拖拽，交给原生列表滚动；
+// - 长按不拖动（满 500ms 未拖动）：弹出上下文菜单；
+// - 长按拖动（触摸按住 ≥260ms 后拖动，或满 500ms 弹出菜单后继续按住拖动，以及桌面鼠标左键拖动）：
+//   自动抑制/收起菜单并进入置顶顺序拖拽，松手提交新顺序且不误触打开会话；
+// - Escape / pointercancel / blur：取消拖拽还原位置；
+// - 会话行聚焦时 ArrowUp/ArrowDown：调整置顶顺序（保留过滤隐藏的置顶项原位）。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   KeyboardEvent as ReactKeyboardEvent,
-  MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
   ReactNode,
 } from 'react';
-import { GripVertical } from 'lucide-react';
-import { useText } from '../ui';
 import { reorderExistingPins } from './chatPins';
 import './sortable-pinned-chat.css';
 
-const DRAG_THRESHOLD_PX = 3;
+const DRAG_THRESHOLD_PX = 5;
+const SCROLL_CANCEL_TOLERANCE_PX = 10;
+const TOUCH_DRAG_HOLD_MS = 260;
 const FALLBACK_ROW_HEIGHT_PX = 48;
 const CLICK_GUARD_MS = 400;
 
@@ -66,9 +71,14 @@ function clearPeerDropPositions(peers: readonly HTMLElement[]): void {
 
 interface ActiveDragSession {
   pointerId: number;
+  startX: number;
   startY: number;
+  lastY: number;
+  dragBaseY: number;
   currentTranslateY: number;
+  dragArmed: boolean;
   moved: boolean;
+  holdTimer: number | null;
   startIndex: number;
   targetIndex: number;
   peers: HTMLElement[];
@@ -83,9 +93,7 @@ export function SortablePinnedChat({
   children,
   className,
 }: SortablePinnedChatProps) {
-  const t = useText();
   const wrapperRef = useRef<HTMLDivElement>(null);
-  const handleRef = useRef<HTMLButtonElement>(null);
   const dragRef = useRef<ActiveDragSession | null>(null);
   const suppressClickUntilRef = useRef(0);
   const clickGuardTimerRef = useRef<number | null>(null);
@@ -121,14 +129,18 @@ export function SortablePinnedChat({
       const session = dragRef.current;
       if (!session) return;
       dragRef.current = null;
+      if (session.holdTimer !== null) {
+        window.clearTimeout(session.holdTimer);
+        session.holdTimer = null;
+      }
       session.cleanup();
       clearPeerDropPositions(session.peers);
 
-      const handle = handleRef.current;
-      if (handle) {
+      const wrapper = wrapperRef.current;
+      if (wrapper) {
         try {
-          if (handle.hasPointerCapture?.(session.pointerId)) {
-            handle.releasePointerCapture(session.pointerId);
+          if (wrapper.hasPointerCapture?.(session.pointerId)) {
+            wrapper.releasePointerCapture(session.pointerId);
           }
         } catch {
           // 忽略非活动指针释放异常
@@ -138,7 +150,7 @@ export function SortablePinnedChat({
       setDragging(false);
       setTranslateY(0);
 
-      if (session.moved || !commit) {
+      if (session.moved) {
         armClickGuard();
       }
 
@@ -163,16 +175,34 @@ export function SortablePinnedChat({
   );
 
   const updateDragByPointer = useCallback(
-    (pointerId: number, clientY: number) => {
+    (pointerId: number, clientX: number, clientY: number) => {
       const session = dragRef.current;
       if (!session || session.pointerId !== pointerId) return;
 
-      const dy = clientY - session.startY;
+      session.lastY = clientY;
+
+      // 触摸端长按就绪前：若手指移动超出容差，视为用户在上下滚动列表，放弃拖拽
+      if (!session.dragArmed) {
+        const moveDist = Math.hypot(clientX - session.startX, clientY - session.startY);
+        if (moveDist > SCROLL_CANCEL_TOLERANCE_PX) {
+          stopActiveDrag(false);
+        }
+        return;
+      }
+
+      const dy = clientY - session.dragBaseY;
       if (!session.moved) {
         if (Math.abs(dy) < DRAG_THRESHOLD_PX) return;
         session.moved = true;
         setDragging(true);
         armClickGuard();
+        // 若用户按住已超过 500ms 导致上下文菜单刚弹出，继续拖动时立即收起菜单转为排序
+        window.dispatchEvent(new CustomEvent('gbot-close-context-menu'));
+        try {
+          wrapperRef.current?.setPointerCapture?.(pointerId);
+        } catch {
+          // 忽略不支持 pointer capture 的环境
+        }
       }
 
       if (session.peers.length <= 1) {
@@ -203,7 +233,7 @@ export function SortablePinnedChat({
         ? rawRects
         : session.peers.map((_, idx) => {
             const top =
-              session.startY -
+              session.dragBaseY -
               FALLBACK_ROW_HEIGHT_PX / 2 +
               (idx - session.startIndex) * FALLBACK_ROW_HEIGHT_PX;
             return {
@@ -252,7 +282,7 @@ export function SortablePinnedChat({
         session.peers[nextIndex]?.setAttribute('data-drop-position', 'after');
       }
     },
-    [armClickGuard],
+    [armClickGuard, stopActiveDrag],
   );
 
   useEffect(
@@ -260,6 +290,9 @@ export function SortablePinnedChat({
       if (dragRef.current) {
         const session = dragRef.current;
         dragRef.current = null;
+        if (session.holdTimer !== null) {
+          window.clearTimeout(session.holdTimer);
+        }
         session.cleanup();
         clearPeerDropPositions(session.peers);
       }
@@ -271,12 +304,11 @@ export function SortablePinnedChat({
     [],
   );
 
-  const handlePointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || !event.isPrimary) return;
     const wrapper = wrapperRef.current;
     if (!wrapper) return;
 
-    event.stopPropagation();
     stopActiveDrag(false);
 
     const normalizedKey = chatKey.trim();
@@ -288,14 +320,10 @@ export function SortablePinnedChat({
     if (startIndex === -1) return;
 
     const pointerId = event.pointerId;
-    try {
-      event.currentTarget.setPointerCapture?.(pointerId);
-    } catch {
-      // 忽略不支持 pointer capture 的环境
-    }
+    const isMouse = event.pointerType === 'mouse';
 
     const onWindowPointerMove = (moveEvent: PointerEvent) => {
-      updateDragByPointer(moveEvent.pointerId, moveEvent.clientY);
+      updateDragByPointer(moveEvent.pointerId, moveEvent.clientX, moveEvent.clientY);
     };
 
     const onWindowPointerUp = (upEvent: PointerEvent) => {
@@ -310,13 +338,28 @@ export function SortablePinnedChat({
       stopActiveDrag(false);
     };
 
+    const onWindowTouchMove = (touchEvent: TouchEvent) => {
+      const session = dragRef.current;
+      if (!session) return;
+      if (session.dragArmed && touchEvent.cancelable) {
+        touchEvent.preventDefault();
+      }
+    };
+
+    const onWindowScroll = () => {
+      const session = dragRef.current;
+      if (!session || session.moved) return;
+      stopActiveDrag(false);
+    };
+
     const onWindowBlur = () => {
       if (!dragRef.current) return;
       stopActiveDrag(false);
     };
 
     const onWindowKeyDown = (keyEvent: KeyboardEvent) => {
-      if (keyEvent.key !== 'Escape' || !dragRef.current) return;
+      const session = dragRef.current;
+      if (keyEvent.key !== 'Escape' || !session || !session.moved) return;
       keyEvent.preventDefault();
       keyEvent.stopPropagation();
       stopActiveDrag(false);
@@ -325,14 +368,21 @@ export function SortablePinnedChat({
     window.addEventListener('pointermove', onWindowPointerMove, true);
     window.addEventListener('pointerup', onWindowPointerUp, true);
     window.addEventListener('pointercancel', onWindowPointerCancel, true);
+    window.addEventListener('touchmove', onWindowTouchMove, { capture: true, passive: false });
+    window.addEventListener('scroll', onWindowScroll, { capture: true, passive: true });
     window.addEventListener('blur', onWindowBlur);
     window.addEventListener('keydown', onWindowKeyDown, true);
 
-    dragRef.current = {
+    const session: ActiveDragSession = {
       pointerId,
+      startX: event.clientX,
       startY: event.clientY,
+      lastY: event.clientY,
+      dragBaseY: event.clientY,
       currentTranslateY: 0,
+      dragArmed: isMouse,
       moved: false,
+      holdTimer: null,
       startIndex,
       targetIndex: startIndex,
       peers,
@@ -341,32 +391,28 @@ export function SortablePinnedChat({
         window.removeEventListener('pointermove', onWindowPointerMove, true);
         window.removeEventListener('pointerup', onWindowPointerUp, true);
         window.removeEventListener('pointercancel', onWindowPointerCancel, true);
+        window.removeEventListener('touchmove', onWindowTouchMove, true);
+        window.removeEventListener('scroll', onWindowScroll, true);
         window.removeEventListener('blur', onWindowBlur);
         window.removeEventListener('keydown', onWindowKeyDown, true);
       },
     };
+
+    if (!isMouse) {
+      session.holdTimer = window.setTimeout(() => {
+        if (dragRef.current === session) {
+          session.holdTimer = null;
+          session.dragArmed = true;
+          session.dragBaseY = session.lastY;
+        }
+      }, TOUCH_DRAG_HOLD_MS);
+    }
+
+    dragRef.current = session;
   };
 
-  const handlePointerMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (!dragRef.current || dragRef.current.pointerId !== event.pointerId) return;
-    event.stopPropagation();
-    updateDragByPointer(event.pointerId, event.clientY);
-  };
-
-  const handlePointerUp = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (!dragRef.current || dragRef.current.pointerId !== event.pointerId) return;
-    event.stopPropagation();
-    stopActiveDrag(true);
-  };
-
-  const handlePointerCancel = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (!dragRef.current || dragRef.current.pointerId !== event.pointerId) return;
-    event.stopPropagation();
-    stopActiveDrag(false);
-  };
-
-  const handleKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-    if (event.key === 'Escape' && dragRef.current) {
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape' && dragRef.current?.moved) {
       event.preventDefault();
       event.stopPropagation();
       stopActiveDrag(false);
@@ -403,20 +449,11 @@ export function SortablePinnedChat({
     onReorderRef.current(nextAllKeys);
 
     requestAnimationFrame(() => {
-      if (handleRef.current?.isConnected && document.activeElement !== handleRef.current) {
-        handleRef.current.focus({ preventScroll: true });
+      const rowButton = wrapperRef.current?.querySelector<HTMLElement>('button');
+      if (rowButton?.isConnected && document.activeElement !== rowButton) {
+        rowButton.focus({ preventScroll: true });
       }
     });
-  };
-
-  const handleButtonClick = (event: ReactMouseEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
-  };
-
-  const handleButtonContextMenu = (event: ReactMouseEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    event.stopPropagation();
   };
 
   const wrapperStyle =
@@ -430,32 +467,12 @@ export function SortablePinnedChat({
       data-dragging={dragging ? 'true' : undefined}
       data-pinned-chat-key={chatKey}
       data-sortable-pinned-chat=""
+      onKeyDown={handleKeyDown}
+      onPointerDown={handlePointerDown}
       ref={wrapperRef}
       style={wrapperStyle}
     >
       {children}
-      <button
-        aria-label={t(
-          '拖动或按上下方向键调整置顶顺序',
-          'Drag or use Up and Down arrow keys to reorder pinned chat',
-        )}
-        aria-roledescription={t('置顶排序手柄', 'Pinned chat reorder handle')}
-        className="gbot-sortable-pinned-chat__handle"
-        data-no-row-menu=""
-        data-pinned-drag-handle={chatKey}
-        onClick={handleButtonClick}
-        onContextMenu={handleButtonContextMenu}
-        onKeyDown={handleKeyDown}
-        onPointerCancel={handlePointerCancel}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        ref={handleRef}
-        title={t('调整置顶顺序', 'Reorder pinned chat')}
-        type="button"
-      >
-        <GripVertical aria-hidden="true" size={15} />
-      </button>
     </div>
   );
 }

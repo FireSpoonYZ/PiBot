@@ -18,6 +18,8 @@ docker compose logs center
 
 Compose 默认只发布 `127.0.0.1:8080`；容器反代可使用同一 Docker 网络的 `center:8080` 并移除 ports。数据放在 `center-data` volume，容器以非 root 用户运行。Hermes 的 Python 只在中心镜像内运行，Android 不需要 Python。
 
+镜像还在 `/opt/bitwarden-cli` 内置固定版本官方 Bitwarden CLI（`@bitwarden/cli` 2026.10.1），供 Vault 的 Vaultwarden 外部密码库使用：适配器只在容器回环上启动 `bw serve`，不新增任何发布端口；API key 与主密码只经私密通道（交互式 stdin 提示与 `POST /unlock` JSON 体）进入，不写 argv/env/文件/日志。自管部署如需替换可信 CLI 入口，可设绝对路径 `PIBOT_BW_CLI`（见 `center.env.example`）；秘密一律在中心 Vault 设置页输入，不写入 env 文件。
+
 ## 反向代理
 
 所有路径转发到同一后端，保留外部 Host（含端口），为 WebSocket 传递 Upgrade/Connection，SSE 关闭缓冲。Nginx 示例：

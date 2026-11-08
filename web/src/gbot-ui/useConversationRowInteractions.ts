@@ -132,6 +132,7 @@ export function useConversationRowInteractions({
 
     timerRef.current = window.setTimeout(() => {
       timerRef.current = null;
+      if (row.closest('[data-dragging="true"]')) return;
       lastLongPressAtRef.current = performance.now();
       armClickSuppression();
       row.focus({ preventScroll: true });
@@ -170,6 +171,7 @@ export function useConversationRowInteractions({
     event.preventDefault();
     cancelPendingPress();
     if (isFromNestedControl(event)) return;
+    if (event.currentTarget.closest('[data-dragging="true"]')) return;
     if (performance.now() - lastLongPressAtRef.current < LONG_PRESS_MS) return;
     // 上游 openAgentContextMenu：preventDefault + focus + 以事件坐标开菜单。
     event.currentTarget.focus({ preventScroll: true });

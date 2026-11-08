@@ -40,7 +40,8 @@
 .gbot-conversation-row.hub-bot-row[data-pinned] {
   background: color-mix(in srgb, var(--text) 11%, var(--bg));
 }
-.gbot-conversation-row.hub-bot-row[data-pinned]:hover {
+.gbot-conversation-row.hub-bot-row[data-pinned]:hover,
+.gbot-conversation-row.hub-bot-row[data-pinned]:active {
   background: color-mix(in srgb, var(--text) 16%, var(--bg));
 }
 .gbot-conversation-row.hub-bot-row[data-pinned][data-active] {

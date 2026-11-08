@@ -52,6 +52,43 @@ export interface CreateWebhookRequest {
   instruction: string;
   enabled?: boolean;
 }
+
+// POST /api/vault/control wire contract (center-server vault routes). Secrets
+// only ever travel inside these request bodies; responses never contain them.
+export type VaultSource = 'local' | 'vaultwarden';
+export interface ExternalVaultGrant { deviceId: string; botId: string }
+export interface ExternalVaultItemMeta {
+  secretRef: string;
+  label: string;
+  username: string;
+  allowedBots: ExternalVaultGrant[];
+}
+export interface ExternalVaultStatus {
+  source: VaultSource;
+  revision: number;
+  configured: boolean;
+  authenticated: boolean;
+  locked: boolean;
+  expiresAt: string | null;
+  serverUrl: string | null;
+  accountId: string | null;
+  lastSyncAt: string | null;
+  epoch: string;
+}
+export type ExternalVaultControlInput =
+  | { action: 'status' }
+  | { action: 'configure'; expectedRevision: number; source: VaultSource; serverUrl?: string }
+  | { action: 'check' }
+  | { action: 'login'; clientId: string; clientSecret: string; expectedEpoch: string }
+  | { action: 'logout' }
+  | { action: 'unlock'; masterPassword: string; expectedEpoch: string }
+  | { action: 'lock' }
+  | { action: 'sync' }
+  | { action: 'list' }
+  | { action: 'setGrants'; expectedRevision: number; secretRef: string; allowedBots: ExternalVaultGrant[] };
+export interface ExternalVaultListResult { revision: number; items: ExternalVaultItemMeta[] }
+export interface ExternalVaultCheckResult { reachable: boolean; status: ExternalVaultStatus }
+export type ExternalVaultControlResult = ExternalVaultStatus | ExternalVaultListResult | ExternalVaultCheckResult;
 export interface UpdateWebhookRequest { name: string; instruction: string; enabled: boolean }
 export interface WebhookTokenReceipt { route: WebhookRoute; token: string }
 
@@ -190,6 +227,7 @@ export const api = {
   runAction: (installationId: string, action: string, body: ActionRequest) => request<ActionResult>(`${installationPath(installationId)}/actions/${id(action)}`, 'POST', body),
   listDeployments: (installationId: string) => request<DeploymentReceipt[]>(`${installationPath(installationId)}/deployments`),
   getOperation: (operationId: string) => request<Operation>(`/api/operations/${id(operationId)}`),
+  vaultControl: (body: ExternalVaultControlInput) => request<ExternalVaultControlResult>('/api/vault/control', 'POST', body),
   listClientReleases: () => request<ClientReleaseListResponse>('/api/client-releases'),
   createClientRelease: (metadata: ClientReleaseMetadata, artifact: File) => {
     const body = new FormData();

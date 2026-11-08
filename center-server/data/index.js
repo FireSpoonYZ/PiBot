@@ -204,6 +204,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     'e-launcher.billion-context': {},
     'e-launcher.ask-user-question': {},
     'e-launcher.todo': {},
+    'e-launcher.vault': {},
     'e-launcher.webfox': {},
   };
   /** Default bindings for a newly registered Bot: Hindsight projectId is name-botId; Billion Context uses the global config. Existing rows (incl. explicit disables) are kept. Caller must hold a transaction. */
@@ -828,6 +829,18 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           if (activeInstallation(current) !== activeInstallation(result)) bump();
           save('installations', id, result);
           return result;
+        });
+      },
+      /** Seeds missing default bindings for every currently active default plugin, e.g. a bundled capability added after Bots already existed. Explicit disables/overrides and globally inactive installations are untouched. */
+      backfillDefaultBindings() {
+        return transaction(() => {
+          let changed = false;
+          for (const installation of store.listInstallations()) {
+            if (!DEFAULT_BINDINGS[installation.packageId]) continue;
+            if (seedBotDefaults(installation)) changed = true;
+          }
+          if (changed) bump();
+          return changed;
         });
       },
       getInstallationConfig: configFor,

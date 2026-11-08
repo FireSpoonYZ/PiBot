@@ -6329,7 +6329,7 @@ ${newer}` : draftSnapshot;
 
       {vaultTargetKey === vaultIdentityKey && activeBot && screen === 'bot-profile' ? (
         <SettingsSheet title={t('密码库', 'Password Vault')} onClose={() => setVaultTargetKey(null)}>
-          <VaultPanel identityKey={vaultIdentityKey} botId={activeBot.botId}
+          <VaultPanel identityKey={vaultIdentityKey} botId={activeBot.botId} deviceId={activeBot.deviceId}
             hostLabel={`${activeBot.hostLabel} (${activeBot.deviceId})`}
             connected={vaultConnected} call={callVault} />
         </SettingsSheet>

@@ -3,6 +3,7 @@
 /* Divider above the destructive "clear history" item in the chat top menu. */
 .grok-menu-separator { height: 1px; margin: 4px 6px; background: var(--line); }
 
-/* Markdown tables fill the chat bubble; .table-scroll provides horizontal overflow for wide tables. */
+/* Markdown tables fill the chat bubble when narrow; wide tables keep their natural column widths
+   and scroll horizontally inside .table-scroll instead of being squeezed into one-character columns. */
 .bot-chat-bubble .table-scroll { width: 100%; }
-.bot-chat-bubble .table-scroll table { width: 100%; }
+.bot-chat-bubble .table-scroll table { width: max-content; min-width: 100%; }

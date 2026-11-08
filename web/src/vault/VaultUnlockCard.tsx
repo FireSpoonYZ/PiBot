@@ -112,6 +112,9 @@ function VaultUnlockSession({ presentation, active, disabled = false, onSubmit }
         <span className={`tp-status-pill is-${status}`} role="status">{statusLabel}</span>
       </div>
       <p id={descriptionId} className="tp-vault-hint">{t('作用于当前 Host 的密码库；条目仍按各 Bot 的授权控制。主密码仅通过专用通道提交，不进入聊天。', 'Applies to this Host’s Vault; each Bot’s entry permissions still apply. The master password uses a private control channel, not chat.')}</p>
+      {presentation.source === 'vaultwarden' ? (
+        <p className="tp-vault-hint">{t('来源', 'Source')}: Vaultwarden{presentation.serverUrl ? ' · ' + presentation.serverUrl : ''}</p>
+      ) : null}
       {canRespond ? (
         <form ref={formRef} className="tp-vault-form" autoComplete="off" noValidate onSubmit={event => {
           event.preventDefault();

@@ -30,7 +30,9 @@ export function assertShowerSecretText(text) {
 const secretInputFailures = new WeakSet();
 export function secretInputFailure(error, sent = false) {
   const codes = ['INVALID_ARGUMENT', 'CANCELLED', 'VAULT_LOCKED', 'VAULT_FORBIDDEN',
-    'VAULT_NOT_FOUND', 'VAULT_CONFLICT', 'RUNTIME_BUSY', 'SHOWER_UNSUPPORTED', 'SHOWER_SESSION_NOT_FOUND', 'SHOWER_SESSION_MISMATCH',
+    'VAULT_NOT_FOUND', 'VAULT_CONFLICT', 'VAULT_REQUEST_EXPIRED', 'VAULT_STALE_SESSION', 'VAULT_CONNECTION_FAILED',
+    'VAULT_NOT_CONFIGURED', 'VAULT_NEEDS_LOGIN', 'VAULT_UNSUPPORTED',
+    'RUNTIME_BUSY', 'SHOWER_UNSUPPORTED', 'SHOWER_SESSION_NOT_FOUND', 'SHOWER_SESSION_MISMATCH',
     'SHOWER_NOT_READY', 'SHOWER_AUTH_REQUIRED', 'SHOWER_UNAVAILABLE'];
   const code = codes.includes(error?.code) ? error.code
     : error?.name === 'AbortError' ? 'CANCELLED' : 'SHOWER_INPUT_FAILED';

@@ -685,7 +685,7 @@ export function BotSettings({
 
       {studioTab === 'vault' ? (
         <div className="studio-card bot-studio-card" role="tabpanel" aria-label="密码库">
-          <VaultPanel identityKey={vaultIdentityKey} botId={botId}
+          <VaultPanel identityKey={vaultIdentityKey} botId={botId} deviceId={identity?.targetDeviceId}
             hostLabel={hostLabel} connected={online && !!identity} call={callVault} />
         </div>
       ) : null}
