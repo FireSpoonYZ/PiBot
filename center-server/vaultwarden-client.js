@@ -383,7 +383,10 @@ export async function openVaultwardenClient({ dataRoot, encryptionKey }) {
         }
         if (sentEmail && !sentPassword && stderr.includes('Master password:')) {
           sentPassword = true;
-          try { child.stdin.write(masterPassword + '\n'); } catch { /* child gone */ }
+          try {
+            child.stdin.write(masterPassword + '\n');
+            child.stdin.end();
+          } catch { /* child gone */ }
         }
         if (/Two-step login (?:method|code):|New device verification required\.|Organization identifier:|captcha/i.test(stderr)) {
           killChild(child);

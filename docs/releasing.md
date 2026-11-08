@@ -12,7 +12,7 @@
   Gradle 根即仓库根）。
 - `scripts/release-check.mjs` 核对全部上述字段 + `android.versionCode`
   为正整数；`--tag vX.Y.Z` 额外核对 tag 与产品版本一致。
-- Android `versionCode` 独立于产品版本（当前 `10`，正式 0.0.3 使用 `9`，首轮 0.0.3 候选使用 `8`，正式 0.0.2 使用 `7`），见
+- Android `versionCode` 独立于产品版本（当前 `11`，正式 0.0.4 使用 `10`，正式 0.0.3 使用 `9`，首轮 0.0.3 候选使用 `8`，正式 0.0.2 使用 `7`），见
   `gradle.properties` 的 `android.versionCode`，每个已分发 APK 单调递增、
   不复用、不回退。
 
