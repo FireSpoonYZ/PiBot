@@ -128,7 +128,7 @@ namespace ELauncher.Shower
         private static extern bool ProcessIdToSessionId(uint processId, out uint sessionId);
 
         [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint serverProcessId);
+        private static extern bool GetNamedPipeServerSessionId(SafePipeHandle pipe, out uint serverSessionId);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool SetProcessDPIAware();
@@ -160,10 +160,9 @@ namespace ELauncher.Shower
             sessionId = -1;
             var client = pipe as NamedPipeClientStream;
             if (client == null || client.SafePipeHandle == null || client.SafePipeHandle.IsInvalid) return false;
-            uint processId;
-            if (!GetNamedPipeServerProcessId(client.SafePipeHandle, out processId) || processId == 0) return false;
+            // The child token cannot inspect an elevated host process; query the pipe peer directly.
             uint session;
-            if (!ProcessIdToSessionId(processId, out session)) return false;
+            if (!GetNamedPipeServerSessionId(client.SafePipeHandle, out session)) return false;
             sessionId = (int)session;
             return true;
         }
