@@ -216,9 +216,13 @@ final class ShowerManager {
     }
 
     private IOwnPermissionService ensureShellService() throws Exception {
-        if (!Shizuku.pingBinder()) throw new IllegalStateException("Shizuku 未运行");
+        if (!Shizuku.pingBinder()) {
+            throw new ShowerSurfaceBridge.Failure("SHOWER_UNAVAILABLE",
+                    "未连接到 Shizuku 服务，请在目标设备的 Shizuku 管理器中启动服务后重试。");
+        }
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-            throw new SecurityException("尚未授予本应用 Shizuku 权限");
+            throw new ShowerSurfaceBridge.Failure("SHOWER_PERMISSION_REQUIRED",
+                    "尚未授予本应用 Shizuku 权限，请在目标设备的 PiBot「设置 → 通知与后台运行 → Shizuku」中点击「授权」后重试。");
         }
         long deadline = android.os.SystemClock.elapsedRealtime() + CONNECTION_TIMEOUT_MS;
         synchronized (lock) {
