@@ -466,6 +466,24 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
   }
 
   // 9. Virtual Screen (Shower) errors
+  if (code === 'SHOWER_PERMISSION_REQUIRED') {
+    return {
+      tone: 'warning',
+      title: t('虚拟屏缺少权限', 'Virtual Screen Permission Required'),
+      description: t('请在目标设备上授予所需权限。Android：打开 PiBot「设置 → 通知与后台运行 → Shizuku」，点击「授权」后重试。', 'Grant the required permission on the target device. On Android, open PiBot Settings → Notifications & Background → Shizuku, then tap Grant and retry.'),
+      detail,
+    };
+  }
+
+  if (code === 'SHOWER_UNAVAILABLE') {
+    return {
+      tone: 'warning',
+      title: t('虚拟屏服务不可用', 'Virtual Screen Service Unavailable'),
+      description: t('请在目标设备上检查虚拟屏服务。Android：先在 Shizuku 管理器中启动服务，再返回 PiBot 重试。', 'Check the virtual screen service on the target device. On Android, start Shizuku in its manager, then return to PiBot and retry.'),
+      detail,
+    };
+  }
+
   if (
     code === 'SHOWER_BACKEND_FAILED' ||
     body.includes('虚拟屏') ||
