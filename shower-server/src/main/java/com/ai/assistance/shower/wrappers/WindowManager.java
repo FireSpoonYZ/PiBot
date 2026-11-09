@@ -4,9 +4,18 @@ import android.graphics.Bitmap;
 import android.hardware.HardwareBuffer;
 import android.os.Build;
 import android.os.IInterface;
+import android.system.OsConstants;
 import android.util.Log;
 
+import java.lang.ref.Reference;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
+import java.util.function.ObjIntConsumer;
 
 public final class WindowManager {
 
@@ -15,6 +24,7 @@ public final class WindowManager {
     public static final int DISPLAY_IME_POLICY_HIDE = 2;
 
     private static final String TAG = "ShowerWindowManager";
+    private static final int CAPTURE_TIMEOUT_MS = 4000;
 
     private final IInterface manager;
     private Method setDisplayImePolicyMethod;
@@ -29,16 +39,15 @@ public final class WindowManager {
     }
 
     /** Captures on API 34+; the caller owns the returned software bitmap. */
-    public Bitmap captureDisplay(int displayId, float frameScale) throws ReflectiveOperationException {
+    public Bitmap captureDisplay(int displayId, float frameScale)
+            throws ReflectiveOperationException, InterruptedException {
         String screenCaptureClassName = Build.VERSION.SDK_INT >= 37
                 ? "android.window.ScreenCaptureInternal" : "android.window.ScreenCapture";
         Class<?> screenCaptureClass = Class.forName(screenCaptureClassName);
         Class<?> captureArgsClass = Class.forName(screenCaptureClassName + "$CaptureArgs");
         Class<?> builderClass = Class.forName(screenCaptureClassName + "$CaptureArgs$Builder");
         Class<?> listenerClass = Class.forName(screenCaptureClassName + "$ScreenCaptureListener");
-        Class<?> syncListenerClass = Class.forName(screenCaptureClassName + "$SynchronousScreenCaptureListener");
         Class<?> bufferClass = Class.forName(screenCaptureClassName + "$ScreenshotHardwareBuffer");
-        Method getBuffer = syncListenerClass.getMethod("getBuffer");
         Method getHardwareBuffer = bufferClass.getMethod("getHardwareBuffer");
         Method asBitmap = bufferClass.getMethod("asBitmap");
 
@@ -53,30 +62,76 @@ public final class WindowManager {
             builderClass.getMethod("setAllowProtected", boolean.class).invoke(builder, false);
         }
         Object args = builderClass.getMethod("build").invoke(builder);
-        Object listener = screenCaptureClass.getMethod("createSyncCaptureListener").invoke(null);
-        manager.getClass().getMethod("captureDisplay", int.class, captureArgsClass, listenerClass)
-                .invoke(manager, displayId, args, listener);
-        // Reflect on the public base class; getBuffer uses the framework's bounded wait.
-        Object screenshot = getBuffer.invoke(listener);
-        if (screenshot == null) {
-            throw new IllegalStateException("WindowManager capture failed or timed out for display " + displayId);
-        }
+        CompletableFuture<Object> captured = new CompletableFuture<>();
+        Consumer<Object> receiveBuffer = buffer -> captured.complete(buffer);
+        ObjIntConsumer<Object> receiveResult = (buffer, status) -> {
+            if (status == 0) {
+                captured.complete(buffer);
+            } else {
+                closeScreenshot(buffer, getHardwareBuffer);
+                Log.w(TAG, "Capture failed for display " + displayId + " with status " + status);
+                captured.completeExceptionally(new CaptureException(
+                        status == -OsConstants.EPERM || status == -OsConstants.EACCES
+                                ? "SHOWER_CAPTURE_BLOCKED" : "SHOWER_CAPTURE_FAILED", status));
+            }
+        };
+        boolean reportsStatus = Build.VERSION.SDK_INT >= 35;
+        Object callback = reportsStatus ? receiveResult : receiveBuffer;
         Bitmap bitmap = null;
-        try (HardwareBuffer hardwareBuffer = (HardwareBuffer) getHardwareBuffer.invoke(screenshot)) {
-            if (hardwareBuffer == null) {
-                throw new IllegalStateException("No screenshot hardware buffer for display " + displayId);
+        Object listener = null;
+        try {
+            listener = listenerClass.getConstructor(
+                    reportsStatus ? ObjIntConsumer.class : Consumer.class).newInstance(callback);
+            manager.getClass().getMethod("captureDisplay", int.class, captureArgsClass, listenerClass)
+                    .invoke(manager, displayId, args, listener);
+            Object screenshot = captured.get(CAPTURE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            if (screenshot == null || getHardwareBuffer.invoke(screenshot) == null) {
+                throw new CaptureException("SHOWER_CAPTURE_FAILED");
             }
             bitmap = (Bitmap) asBitmap.invoke(screenshot);
-            if (bitmap == null) {
-                throw new IllegalStateException("No screenshot bitmap for display " + displayId);
-            }
+            if (bitmap == null) throw new CaptureException("SHOWER_CAPTURE_FAILED");
             Bitmap copy = bitmap.copy(Bitmap.Config.ARGB_8888, false);
-            if (copy == null) {
-                throw new IllegalStateException("Screenshot bitmap copy failed for display " + displayId);
-            }
+            if (copy == null) throw new CaptureException("SHOWER_CAPTURE_FAILED");
             return copy;
+        } catch (TimeoutException timeout) {
+            throw new CaptureException("SHOWER_CAPTURE_TIMEOUT");
+        } catch (ExecutionException failure) {
+            throw (CaptureException) failure.getCause();
+        } catch (InvocationTargetException failure) {
+            if (failure.getCause() instanceof SecurityException) {
+                throw new CaptureException("SHOWER_CAPTURE_BLOCKED");
+            }
+            throw failure;
         } finally {
             if (bitmap != null) bitmap.recycle();
+            // Also close a buffer delivered after our bounded wait has expired.
+            captured.thenAccept(buffer -> closeScreenshot(buffer, getHardwareBuffer));
+            // The framework's native listener holds only a weak reference to its callback.
+            Reference.reachabilityFence(callback);
+            Reference.reachabilityFence(listener);
+        }
+    }
+
+    public static final class CaptureException extends IllegalStateException {
+        public final Integer status;
+
+        private CaptureException(String code) {
+            this(code, null);
+        }
+
+        private CaptureException(String code, Integer status) {
+            super(code);
+            this.status = status;
+        }
+    }
+
+    private static void closeScreenshot(Object screenshot, Method getHardwareBuffer) {
+        if (screenshot == null) return;
+        try {
+            HardwareBuffer buffer = (HardwareBuffer) getHardwareBuffer.invoke(screenshot);
+            if (buffer != null) buffer.close();
+        } catch (ReflectiveOperationException failure) {
+            Log.w(TAG, "Unable to close screenshot buffer", failure);
         }
     }
 

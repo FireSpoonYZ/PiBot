@@ -475,6 +475,33 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     };
   }
 
+  if (code === 'SHOWER_CAPTURE_BLOCKED') {
+    return {
+      tone: 'warning',
+      title: t('系统阻止了虚拟屏截图', 'Virtual Screen Capture Blocked'),
+      description: t('请在目标虚拟屏内收起密码键盘或关闭受保护窗口，然后重新截图。', 'Dismiss the password keyboard or protected window in the target virtual screen, then capture again.'),
+      detail,
+    };
+  }
+
+  if (code === 'SHOWER_CAPTURE_TIMEOUT') {
+    return {
+      tone: 'warning',
+      title: t('等待虚拟屏截图超时', 'Virtual Screen Capture Timed Out'),
+      description: t('请稍后重新截图；若刚打开密码键盘，请先在目标虚拟屏内收起键盘。', 'Capture again shortly. If you just opened a password keyboard, dismiss it in the target virtual screen first.'),
+      detail,
+    };
+  }
+
+  if (code === 'SHOWER_CAPTURE_FAILED') {
+    return {
+      tone: 'warning',
+      title: t('未能获取虚拟屏画面', 'Virtual Screen Capture Failed'),
+      description: t('请重新截图。之前的输入操作不会自动重放。', 'Capture again. Previous input actions will not be replayed automatically.'),
+      detail,
+    };
+  }
+
   if (code === 'SHOWER_UNAVAILABLE') {
     return {
       tone: 'warning',

@@ -240,7 +240,7 @@ public final class Main {
                         // UiAutomation must connect as this privileged service, not its Binder caller.
                         long identity = Binder.clearCallingIdentity();
                         try {
-                            return SecretInputController.setText(displayId, x, y, text, () -> {
+                            return SecretInputController.setText(displayId, x, y, text, current.input, () -> {
                                 try { return cancellation.isCancelled(); }
                                 catch (Throwable unavailable) { return true; }
                             });
