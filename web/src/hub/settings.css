@@ -13,6 +13,12 @@
   :root[data-theme=system] .hst-settings { --bs-accent: #5b93ff; --bs-card: var(--surface); }
 }
 
+.hst-settings .hst-overview:not([hidden]) { display: contents; }
+.hst-settings .hst-overview > * { flex-shrink: 0; }
+.hst-settings .hst-entry-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.hst-settings .hst-entry-label > .bs-row-sub { max-width: 48%; text-align: end; }
+.hst-settings .hst-device-name > .bs-row-sub { display: block; }
+
 /* Section/Row 外的表单控件与动作行（bs-* 未覆盖的部分） */
 .hst-input-row,
 .hst-actions,

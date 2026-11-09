@@ -148,19 +148,20 @@
   border-radius: var(--radius-lg, 22px);
   box-shadow: var(--shadow-lg, 0 16px 42px rgb(0 0 0 / 0.14));
 }
+.desktop-dialog.client-settings-dialog { width: min(480px, 94vw); }
 .desktop-dialog .dialog-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
   padding: 14px 18px 6px;
 }
-.desktop-dialog .dialog-title { margin: 0; font-size: 16px; font-weight: 650; }
+.desktop-dialog .dialog-title { flex: 1; margin: 0; font-size: 16px; font-weight: 650; }
 .desktop-dialog .dialog-desc {
   margin: 0 18px 10px;
   font-size: 12px;
   color: var(--muted, #70756f);
 }
-.desktop-dialog .dialog-tabs { margin: 0 18px 4px; }
+.client-settings-dialog .dialog-desc { margin-left: 60px; }
 .desktop-dialog .dialog-body {
   flex: 1;
   min-height: 0;
@@ -168,30 +169,51 @@
   padding: 0 18px 18px;
 }
 
-/* 弹窗内页签（叠加 .pill-tabs 基础类） */
-.desktop-dialog .pill-tabs {
-  display: inline-flex;
-  gap: 4px;
-  padding: 3px;
-  border: 1px solid var(--line, #e5e5df);
-  border-radius: 999px;
-  background: var(--surface, #efeee9);
+/* 设置首页与详情共用的列表行 */
+.client-settings-dialog .settings-row-group {
+  border-top: 1px solid var(--line-subtle, var(--line));
 }
-.desktop-dialog .pill-tabs button {
-  min-height: 0;
-  padding: 5px 14px;
-  border: none;
-  border-radius: 999px;
+.client-settings-dialog .settings-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px;
+  border: 0;
   background: transparent;
-  color: var(--muted, #70756f);
-  font-size: 13px;
-  cursor: pointer;
+  color: var(--text);
+  text-align: left;
 }
-.desktop-dialog .pill-tabs button.active {
-  background: var(--surface-elevated, #fff);
-  color: var(--text, #242622);
-  box-shadow: var(--shadow-sm, 0 2px 10px rgb(0 0 0 / 0.04));
+.client-settings-dialog .settings-row + .settings-row {
+  border-top: 1px solid var(--line-subtle, var(--line));
 }
+.client-settings-dialog .settings-row-label {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.client-settings-dialog .settings-row > .metadata,
+.client-settings-dialog .settings-row > .status {
+  max-width: 60%;
+  text-align: right;
+}
+.client-settings-dialog .settings-row-link { cursor: pointer; }
+.client-settings-dialog .settings-row-link:hover { background: var(--surface); }
+.client-settings-dialog .settings-row-link:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+}
+.client-settings-dialog .settings-row-icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--muted);
+}
+.client-settings-dialog .settings-row-chevron {
+  flex: none;
+  color: var(--muted);
+}
+.client-settings-dialog .settings-row input[type="radio"] { accent-color: var(--brand); }
 
 /* 弹窗分区 */
 .desktop-dialog .settings-section {
@@ -226,12 +248,47 @@
 }
 .desktop-dialog .settings-diagnostics > summary { cursor: pointer; }
 .desktop-dialog .settings-diagnostics[open] > summary { margin-bottom: 6px; }
-.desktop-dialog .settings-device { flex: 1; min-width: 0; padding: 8px 0; }
-.desktop-dialog .settings-device > .card-row { margin-bottom: 2px; }
-.desktop-dialog .settings-device .settings-diagnostics { margin-top: 0; }
-.desktop-dialog .settings-device-runtime {
-  padding: 4px 0 8px;
-  border-top: 0;
+.client-settings-dialog .settings-device {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+}
+.client-settings-dialog .settings-device > summary {
+  min-height: 44px;
+  padding: 6px 4px;
+  border-radius: var(--radius-xs);
+  font-weight: 400;
+}
+.client-settings-dialog .settings-device > summary:hover { background: var(--surface); }
+.client-settings-dialog .settings-device > summary:focus-visible { outline-offset: -2px; }
+.client-settings-dialog .settings-device[open] > summary {
+  margin-bottom: 0;
+  border-bottom: 0;
+}
+.client-settings-dialog .settings-device-name {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.client-settings-dialog .settings-device > .settings-device-details {
+  margin: 0;
+  padding: 0 8px 8px 20px;
+}
+.client-settings-dialog .device-list.settings-directory { gap: 0; }
+.client-settings-dialog .settings-directory > .settings-device-item {
+  min-height: 44px;
+  align-items: flex-start;
+  border-top: 1px solid var(--line-subtle, var(--line));
+  border-radius: 0;
+}
+.client-settings-dialog .settings-device-item > .icon-button,
+.client-settings-dialog .settings-device-item > .rename-inline {
+  margin-top: 4px;
 }
 .desktop-dialog .archive-more[open] { flex-basis: 100%; }
 .desktop-dialog .section-head {
@@ -254,16 +311,11 @@
   flex-wrap: wrap;
   margin-top: 8px;
 }
-.desktop-dialog .client-pill {
-  display: inline-flex;
+.client-settings-dialog .settings-client-id {
+  display: flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 10px;
-  border: 1px solid var(--line, #e5e5df);
-  border-radius: 999px;
   font-family: var(--mono, monospace);
-  font-size: 11px;
-  color: var(--muted, #70756f);
 }
 
 /* 档案与设备行 */
@@ -311,9 +363,11 @@
   align-items: center;
   gap: 6px;
   flex: 1;
+  min-width: 0;
 }
 .desktop-dialog .rename-inline input {
   flex: 1;
+  min-width: 0;
   border: 1px solid var(--line, #e5e5df);
   border-radius: 8px;
   padding: 5px 10px;
