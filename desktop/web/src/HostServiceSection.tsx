@@ -1,4 +1,4 @@
-// 本机服务在常规设置挂载时查询。进程存在、任务就绪与中心在线各自取自原生状态。
+// 设置弹窗共用本机服务状态。进程存在、任务就绪与中心在线各自取自原生状态。
 import { RefreshCw, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useText } from '../../../web/src/ui';
@@ -13,13 +13,12 @@ function boolText(value: boolean | null | undefined, t: Translate): string {
   return t('未知', 'Unknown');
 }
 
-export function HostServiceSection({ onDeviceId }: { onDeviceId?: (deviceId: string) => void }) {
+export function useHostService() {
   const t = useText();
   const [host, setHost] = useState<HostStatus | null>();
   const [loadError, setLoadError] = useState('');
   const [actionError, setActionError] = useState('');
   const [busy, setBusy] = useState<HostControlAction | null>(null);
-  const [confirmRemove, setConfirmRemove] = useState(false);
   const inFlight = useRef(false);
   const statusRead = useRef(0);
   const actionInFlight = useRef(false);
@@ -35,16 +34,14 @@ export function HostServiceSection({ onDeviceId }: { onDeviceId?: (deviceId: str
       if (!isCurrent()) return;
       setHost(next);
       setLoadError('');
-      onDeviceId?.(next.configured ? next.deviceId ?? '' : '');
     } catch (error) {
       if (!isCurrent()) return;
       setHost(null);
       setLoadError(hostErrorText(error, t));
-      onDeviceId?.('');
     } finally {
       if (statusRead.current === read) inFlight.current = false;
     }
-  }, [onDeviceId, t]);
+  }, [t]);
 
   useEffect(() => {
     live.current = true;
@@ -62,15 +59,16 @@ export function HostServiceSection({ onDeviceId }: { onDeviceId?: (deviceId: str
   }, [load]);
 
   const run = async (action: HostControlAction) => {
-    if (actionInFlight.current) return;
+    if (actionInFlight.current) return false;
     actionInFlight.current = true;
     setBusy(action);
     setActionError('');
     try {
       await hostControl(action);
-      if (live.current && action === 'remove') setConfirmRemove(false);
+      return true;
     } catch (error) {
       if (live.current) setActionError(hostErrorText(error, t));
+      return false;
     } finally {
       actionInFlight.current = false;
       if (live.current) {
@@ -82,6 +80,18 @@ export function HostServiceSection({ onDeviceId }: { onDeviceId?: (deviceId: str
 
   const running = host?.running;
   const processLabel = running === true ? t('运行中', 'Running') : running === false ? t('已停止', 'Stopped') : t('状态未知', 'Unknown');
+  const summary = host === undefined ? t('正在读取', 'Reading')
+    : host === null ? t('无法读取', 'Unavailable')
+    : !host.configured ? t('未就绪', 'Not ready')
+    : processLabel;
+  return { host, loadError, actionError, busy, load, run, summary, processLabel };
+}
+
+export function HostServiceSection({ service }: { service: ReturnType<typeof useHostService> }) {
+  const t = useText();
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const { host, loadError, actionError, busy, load, run, summary, processLabel } = service;
+  const running = host?.running;
   const taskLabel = host?.hostPhase === 'closing' ? t('正在停止', 'Stopping')
     : host?.ready === true ? t('本机已就绪', 'Ready on this device')
     : host?.ready === false ? t('尚未就绪', 'Not ready') : t('状态未知', 'Unknown');
@@ -92,16 +102,8 @@ export function HostServiceSection({ onDeviceId }: { onDeviceId?: (deviceId: str
       : t('自动运行', 'Start automatically');
 
   return (
-    <details className="settings-section settings-disclosure settings-device-runtime">
-      <summary>
-        <strong>{t('本机运行服务', 'Local runtime')}</strong>
-        <span className="status">{host === undefined ? t('正在读取', 'Reading') : host?.configured ? processLabel : t('未就绪', 'Not ready')}</span>
-      </summary>
-      <div className="dialog-actions">
-        <button type="button" className="secondary-button" onClick={() => void load()} disabled={busy !== null}>
-          <RefreshCw size={13} aria-hidden /> {t('刷新状态', 'Refresh status')}
-        </button>
-      </div>
+    <section className="settings-section">
+      {host === undefined && <p className="metadata" role="status">{summary}</p>}
       {host === null && <p className="status">{t('暂时无法读取本机服务。', 'Could not read the local runtime.')}</p>}
       {host && !host.configured && (
         <p className="status">{host.centerUrl || host.deviceId || host.configError
@@ -109,44 +111,54 @@ export function HostServiceSection({ onDeviceId }: { onDeviceId?: (deviceId: str
           : t('本机尚未配对，可从连接页开始。', 'This device is unpaired. Start on the connection page.')}</p>
       )}
       {host?.configured && (
-        <>
-          <div className="card-row">
-            <span className="metadata">{t('运行进程', 'Process')}</span><strong>{processLabel}</strong>
-            {host.displayName && <span className="metadata">{host.displayName}</span>}
+        <div className="settings-row-group">
+          <div className="settings-row">
+            <span className="settings-row-label">{host.displayName || t('运行进程', 'Process')}</span>
+            <span className={running ? 'status online' : 'metadata'}>{processLabel}</span>
           </div>
-          <div className="card-row">
-            <span className="metadata">{t('任务就绪', 'Task readiness')}</span><strong>{taskLabel}</strong>
-            {host.online != null && <span className="metadata">{host.online ? t('中心在线', 'Center online') : t('中心离线', 'Center offline')}</span>}
+          <div className="settings-row">
+            <span className="settings-row-label">{t('任务就绪', 'Task readiness')}</span>
+            <span className="metadata">{taskLabel}</span>
           </div>
-          <div className="card-row">
-            <span className="metadata">{autoLabel}</span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={host.autostart ?? false}
-              aria-label={autoLabel}
-              className={'grok-toggle-switch' + (host.autostart ? ' checked' : '')}
-              disabled={busy !== null || host.autostart == null}
-              onClick={() => void run(host.autostart ? 'disable' : 'enable')}
-            >
-              <span className="grok-toggle-knob" />
-            </button>
-            {host.autostart == null && <span className="metadata">{t('未知', 'Unknown')}</span>}
-          </div>
-          <div className="dialog-actions">
-            {running === false && <button type="button" className="primary-button" disabled={busy !== null} onClick={() => void run('start')}>{busy === 'start' ? t('正在启动…', 'Starting…') : t('启动', 'Start')}</button>}
-            {running === true && (
-              <>
-                <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void run('restart')}>{busy === 'restart' ? t('正在重启…', 'Restarting…') : t('重启', 'Restart')}</button>
-                <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void run('stop')}>{busy === 'stop' ? t('正在停止…', 'Stopping…') : t('停止', 'Stop')}</button>
-              </>
+          {host.online != null && (
+            <div className="settings-row">
+              <span className="settings-row-label">{t('中心连接', 'Center connection')}</span>
+              <span className="metadata">{host.online ? t('在线', 'Online') : t('离线', 'Offline')}</span>
+            </div>
+          )}
+          <div className="settings-row">
+            <span className="settings-row-label">{autoLabel}</span>
+            {host.autostart == null ? <span className="metadata">{t('未知', 'Unknown')}</span> : (
+              <button
+                type="button"
+                role="switch"
+                aria-checked={host.autostart}
+                aria-label={autoLabel}
+                className={'grok-toggle-switch' + (host.autostart ? ' checked' : '')}
+                disabled={busy !== null}
+                onClick={() => void run(host.autostart ? 'disable' : 'enable')}
+              >
+                <span className="grok-toggle-knob" />
+              </button>
             )}
           </div>
-        </>
+        </div>
       )}
+      <div className="dialog-actions">
+        {host?.configured && running === false && <button type="button" className="primary-button" disabled={busy !== null} onClick={() => void run('start')}>{busy === 'start' ? t('正在启动…', 'Starting…') : t('启动服务', 'Start service')}</button>}
+        {host?.configured && running === true && (
+          <>
+            <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void run('restart')}>{busy === 'restart' ? t('正在重启…', 'Restarting…') : t('重启服务', 'Restart service')}</button>
+            <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void run('stop')}>{busy === 'stop' ? t('正在停止…', 'Stopping…') : t('停止服务', 'Stop service')}</button>
+          </>
+        )}
+        <button type="button" className="icon-button" onClick={() => void load()} disabled={busy !== null} aria-label={t('刷新状态', 'Refresh status')}>
+          <RefreshCw size={15} aria-hidden />
+        </button>
+      </div>
       {(host || loadError) && (
         <details className="settings-diagnostics">
-          <summary>{t('服务诊断', 'Runtime diagnostics')}</summary>
+          <summary>{t('服务诊断与维护', 'Runtime diagnostics and maintenance')}</summary>
           {loadError && <p className="metadata">{loadError}</p>}
           {host && (
             <>
@@ -176,13 +188,13 @@ export function HostServiceSection({ onDeviceId }: { onDeviceId?: (deviceId: str
       {confirmRemove && (
         <div className="card-row" role="alert">
           <span className="metadata">{t('移除登记会停止本机服务，配对与数据仍可用于恢复。', 'Removing the registration stops the local runtime. Pairing and data can be used to restore it.')}</span>
-          <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void run('remove')}>
+          <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void run('remove').then(removed => { if (removed) setConfirmRemove(false); })}>
             {busy === 'remove' ? t('正在移除…', 'Removing…') : t('确认移除', 'Confirm removal')}
           </button>
           <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => setConfirmRemove(false)}>{t('取消', 'Cancel')}</button>
         </div>
       )}
       {actionError && <p className="error-banner" role="alert">{actionError}</p>}
-    </details>
+    </section>
   );
 }

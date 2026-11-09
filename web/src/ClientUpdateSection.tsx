@@ -26,6 +26,22 @@ function phaseLabel(phase: ClientUpdatePhase, t: (zh: string, en: string) => str
   }
 }
 
+export function useClientUpdateSummary(): string | undefined {
+  const t = useText();
+  const update = useClientUpdate();
+  if (!update?.ready) return undefined;
+  const { status, pending, actionError } = update;
+  if (pending === 'install') return phaseLabel('installing', t);
+  if (pending === 'download' || status?.phase === 'downloading') {
+    const progress = updateProgress(status);
+    return t('下载中', 'Downloading') + (progress === null ? '' : ' · ' + progress + '%');
+  }
+  if (pending === 'check') return phaseLabel('checking', t);
+  if (actionError) return phaseLabel('error', t);
+  if (!status || status.phase === 'idle' || status.phase === 'up-to-date') return status?.currentVersion;
+  return phaseLabel(status.phase, t);
+}
+
 function DesktopUpdateSection({ update }: { update: ClientUpdateContextValue }) {
   const t = useText();
   const { status, pending, ready, actionError, check, download, install, cancel } = update;
@@ -52,10 +68,10 @@ function DesktopUpdateSection({ update }: { update: ClientUpdateContextValue }) 
   }, [ready, phase, release?.id, status?.message]);
 
   return (
-    <details className="settings-section settings-disclosure cu-desktop">
-      <summary><strong>{t('更新', 'Updates')}</strong><span className="metadata">{summary}</span></summary>
+    <section className="settings-section cu-desktop">
       <div className="cu-row">
         <div className="cu-line"><span className="cu-label">{t('当前版本', 'Current version')}</span><span>{status?.currentVersion || '—'}</span></div>
+        <div className="cu-line"><span className="cu-label">{t('状态', 'Status')}</span><span className="cu-value">{summary}</span></div>
         {release && (
           <div className="cu-line"><span className="cu-label">{t('新版本', 'New version')}</span><span className="cu-value">{release.version}{size && ' · ' + size}</span></div>
         )}
@@ -131,7 +147,7 @@ function DesktopUpdateSection({ update }: { update: ClientUpdateContextValue }) 
       {phase === 'complete' && <p className="cu-message">{t('重启应用后生效', 'Takes effect after restart')}</p>}
       {!ready && <p className="cu-message">{t('连接中心后可检查更新。', 'Connect to the center to check for updates.')}</p>}
       {actionError && <p className="cu-message is-error" role="alert">{actionError}</p>}
-    </details>
+    </section>
   );
 }
 
@@ -262,5 +278,5 @@ export function ClientUpdateSection(props: { variant: 'desktop' | 'mobile' }) {
     </>
   );
 
-  return <Section title={t('客户端更新', 'Client Update')}>{body}</Section>;
+  return <Section>{body}</Section>;
 }

@@ -12,6 +12,7 @@ import {
   Clock,
   Code2,
   Cpu,
+  Download,
   ExternalLink,
   FolderOpen,
   Globe,
@@ -142,7 +143,7 @@ import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, us
 import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleRepeatLabel, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending, ChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, copyTextToClipboard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
 // @lane-imports:settings
 import { Badge, Disclosure, Row, Section, SettingsSheet } from './bot-settings/primitives';
-import { ClientUpdateSection } from './ClientUpdateSection';
+import { ClientUpdateSection, useClientUpdateSummary } from './ClientUpdateSection';
 // ---
 // @lane-imports:hub
 import { Chips } from './bot-settings/primitives';
@@ -178,6 +179,8 @@ export interface HostPageProps {
   onOpenSystemSettings?(): void;
 }
 
+type HubSettingsPage = 'overview' | 'connection' | 'devices' | 'manual' | 'updates' | 'permissions';
+
 export function HostPage({
   connectionEpoch = 0,
   active = true,
@@ -194,6 +197,7 @@ export function HostPage({
 
   // Screen stack navigation
   const [screen, setScreen] = useState<HubScreen>('hub');
+  const [settingsPage, setSettingsPage] = useState<HubSettingsPage>('overview');
   const [chatReturnScreen, setChatReturnScreen] = useState<'hub' | 'board' | 'archived-bots'>('hub');
   const [profileReturnScreen, setProfileReturnScreen] = useState<HubScreen>('chat');
   const [avatarReturnScreen, setAvatarReturnScreen] = useState<HubScreen>('bot-edit');
@@ -266,7 +270,13 @@ export function HostPage({
     else localStorage.removeItem(CREATE_ATTEMPT_KEY);
     setCreateAttemptState(attempt);
   };
-  const [remoteDevices, setRemoteDevices] = useState<DevicesDirectoryItem[]>(() => readCachedRemoteDevices());
+  const [remoteDirectory, setRemoteDirectory] = useState<{
+    devices: DevicesDirectoryItem[];
+    identity: DesktopIdentity | null;
+    failedGeneration: number | null;
+  }>(() => ({ devices: readCachedRemoteDevices(), identity: null, failedGeneration: null }));
+  const remoteDevices = remoteDirectory.devices;
+  const directoryReadFailed = remoteIdentity !== null && remoteDirectory.failedGeneration === remoteIdentity.generation;
   const remoteClientRef = useRef<{ api: DesktopPanelApi; invalidate(): void; dispose(): void } | null>(null);
   // Bot 通信页：本机只读适配器按（设备ID+代际）重建，换设备/重进页面即换 sessionKey。
   // hostRunning 从 localHostRef 读最新相位（不闭包捕获旧快照）；deviceId 变才重建适配器。
@@ -606,12 +616,17 @@ export function HostPage({
     const generation = directoryGeneration.current;
     directoryFlight.current = true;
     try {
-      const directory = await api.broker(identity, 'bot_directory', {});
+      const directory = await api.broker(identity, 'bot_directory', {}).catch(error => {
+        if (generation === directoryGeneration.current && api.identity?.generation === identity.generation) {
+          setRemoteDirectory(previous => ({ ...previous, failedGeneration: identity.generation }));
+        }
+        throw error;
+      });
       if (generation !== directoryGeneration.current || api.identity?.generation !== identity.generation) return;
+      setRemoteDirectory({ devices: directory.devices, identity, failedGeneration: null });
+      writeCachedRemoteDevices(directory.devices);
       await syncBotAvatarConfigs(api, directory.bots, localHostRef.current?.deviceId ?? '');
       if (generation !== directoryGeneration.current || api.identity?.generation !== identity.generation) return;
-      setRemoteDevices(directory.devices);
-      writeCachedRemoteDevices(directory.devices);
       setRemoteBots(previous => {
         const failed = new Set(directory.errors.map(error => error.deviceId));
         for (const device of directory.devices) if (!device.online) failed.add(device.deviceId);
@@ -3230,6 +3245,16 @@ ${newer}` : draftSnapshot;
     }
   }, [onRefreshConnection, ensureRemoteApi, syncLocalBots, syncRemoteBots]);
 
+  const openCenterSettings = () => {
+    setSettingsPage('connection');
+    setScreen('settings');
+  };
+
+  const backFromSettings = useCallback(() => {
+    if (settingsPage === 'overview') setScreen('hub');
+    else setSettingsPage(settingsPage === 'manual' ? 'devices' : 'overview');
+  }, [settingsPage]);
+
   // Step-by-step Back Navigation for Android full-screen back gesture & hardware Back button
   const handleStepBack = useCallback((): boolean => {
     if (leftDrawerOpen) {
@@ -3271,6 +3296,10 @@ ${newer}` : draftSnapshot;
       } else {
         setScreen(dmTarget?.returnScreen ?? 'hub');
       }
+      return true;
+    }
+    if (screen === 'settings') {
+      backFromSettings();
       return true;
     }
     if (chatTopMenuOpen) {
@@ -3338,10 +3367,6 @@ ${newer}` : draftSnapshot;
       setScreen(libraryReturnScreen);
       return true;
     }
-    if (screen === 'settings') {
-      setScreen('hub');
-      return true;
-    }
     if (screen === 'hub' && searchQuery.trim()) {
       setSearchQuery('');
       return true;
@@ -3358,6 +3383,7 @@ ${newer}` : draftSnapshot;
     chatSearchOpen,
     leftDrawerOpen,
     libraryReturnScreen,
+    backFromSettings,
     screen,
     roomSettingsOpen,
     avatarReturnScreen,
@@ -3750,6 +3776,7 @@ ${newer}` : draftSnapshot;
   const navigateFromSidebar = (next: HubScreen) => {
     setLibraryReturnScreen('hub');
     setLeftDrawerOpen(false);
+    if (next === 'settings') setSettingsPage('overview');
     setScreen(next);
   };
   // ---
@@ -3944,7 +3971,7 @@ ${newer}` : draftSnapshot;
                 compact
                 error={directoryError || (!centerConn.ready ? centerConn.error : '') || chatPins.error || action.error}
                 actionLabel={!centerConn.ready && centerConn.status?.error ? t('去设置', 'Settings') : directoryError ? t('刷新', 'Refresh') : undefined}
-                onAction={!centerConn.ready && centerConn.status?.error ? () => setScreen('settings') : directoryError ? () => void triggerHubRefresh() : undefined}
+                onAction={!centerConn.ready && centerConn.status?.error ? openCenterSettings : directoryError ? () => void triggerHubRefresh() : undefined}
                 onDismiss={directoryError ? () => setDirectoryError('') : action.error ? () => action.setError('') : undefined}
               />
               {remoteBots.length > 0 && !remoteConnected && (
@@ -4449,7 +4476,7 @@ ${newer}` : draftSnapshot;
               <ErrorNotice
                 error={centerConn.error}
                 actionLabel={t('去连接', 'Connect')}
-                onAction={() => setScreen('settings')}
+                onAction={openCenterSettings}
               />
             )}
             {chatStatusKind === 'load' && (
@@ -6230,7 +6257,7 @@ ${newer}` : draftSnapshot;
                 devices={remoteDevices}
                 bots={allBotItems}
                 rooms={roomConversations}
-                onOpenSettings={() => setScreen('settings')}
+                onOpenSettings={openCenterSettings}
               />
             )}
           </div>
@@ -6240,16 +6267,21 @@ ${newer}` : draftSnapshot;
       {/* ==================== SCREEN 8: SETTINGS VIEW ==================== */}
       {screen === 'settings' && (
         <HubSettingsView
-          onBack={() => setScreen('hub')}
+          page={settingsPage}
+          onOpenPage={setSettingsPage}
+          onBack={backFromSettings}
           ensureRemoteApi={ensureRemoteApi}
           remoteProfiles={remoteProfiles}
           remoteIdentity={remoteIdentity}
           remoteConnected={remoteConnected}
           remoteDevices={remoteDevices}
-          setRemoteDevices={setRemoteDevices}
-          onRemoteUpdated={() => {
-            void syncRemoteBots();
-          }}
+          directoryReadFailed={directoryReadFailed}
+          directoryCurrent={!directoryReadFailed && remoteConnected && remoteIdentity !== null &&
+            remoteDirectory.identity?.generation === remoteIdentity.generation &&
+            remoteDirectory.identity.profileId === remoteIdentity.profileId}
+          localDeviceId={localHost?.deviceId}
+          onRemoteDevices={(devices, identity) => setRemoteDirectory({ devices, identity, failedGeneration: null })}
+          onRemoteUpdated={syncRemoteBots}
           archivedCount={archivedBots.length}
           onOpenArchivedBots={() => { setLibraryReturnScreen('settings'); setScreen('archived-bots'); }}
           onOpenPending={() => { setLibraryReturnScreen('settings'); setScreen('pending'); }}
@@ -7414,13 +7446,18 @@ function RemotePendingComposer({
 }
 
 function HubSettingsView({
+  page,
+  onOpenPage,
   onBack,
   ensureRemoteApi,
   remoteProfiles,
   remoteIdentity,
   remoteConnected,
   remoteDevices,
-  setRemoteDevices,
+  directoryReadFailed,
+  directoryCurrent,
+  localDeviceId,
+  onRemoteDevices,
   onRemoteUpdated,
   archivedCount,
   onOpenArchivedBots,
@@ -7428,14 +7465,19 @@ function HubSettingsView({
   onOpenModelSheet,
   onOpenSystemSettings,
 }: {
+  page: HubSettingsPage;
+  onOpenPage(page: HubSettingsPage): void;
   onBack(): void;
   ensureRemoteApi(): Promise<DesktopPanelApi | null>;
   remoteProfiles: DesktopUiProfile[];
   remoteIdentity: DesktopIdentity | null;
   remoteConnected: boolean;
   remoteDevices: DevicesDirectoryItem[];
-  setRemoteDevices(items: DevicesDirectoryItem[]): void;
-  onRemoteUpdated(): void;
+  directoryReadFailed: boolean;
+  directoryCurrent: boolean;
+  localDeviceId?: string | null;
+  onRemoteDevices(items: DevicesDirectoryItem[], identity: DesktopIdentity): void;
+  onRemoteUpdated(): Promise<void>;
   archivedCount: number;
   onOpenArchivedBots(): void;
   onOpenPending(): void;
@@ -7445,9 +7487,15 @@ function HubSettingsView({
   const t = useText();
   const action = useAction();
   const centerConn = useCenterConnection();
+  const updateSummary = useClientUpdateSummary();
+  const titleId = useId();
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollByPage = useRef<Partial<Record<HubSettingsPage, number>>>({});
+  const previousPage = useRef<HubSettingsPage | null>(null);
 
   const [editingCenter, setEditingCenter] = useState(false);
-  const [renamingDeviceId, setRenamingDeviceId] = useState<string | null>(null);
+  const [renamingDevice, setRenamingDevice] = useState<{ deviceId: string; generation: number } | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
 
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(remoteIdentity?.profileId ?? null);
@@ -7465,12 +7513,38 @@ function HubSettingsView({
   const [voice, setVoice] = useState<HostVoiceSettings>();
   const [showLocalConfig, setShowLocalConfig] = useState(false);
 
+  useLayoutEffect(() => {
+    const previous = previousPage.current;
+    if (previous === page) return;
+    previousPage.current = page;
+    if (previous === 'connection') {
+      setEditingCenter(false);
+      centerConn.setToken('');
+    }
+    if (previous === 'manual') {
+      setToken('');
+      setCa('');
+    }
+    if (previous === 'devices') setRenamingDevice(null);
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollByPage.current[page] ?? 0;
+    if (previous || page !== 'overview') titleRef.current?.focus({ preventScroll: true });
+  }, [page, centerConn.setToken]);
+
   useEffect(() => {
     void ensureRemoteApi();
     void BotHost.voiceSettings()
       .then(v => setVoice(v))
       .catch(() => {});
   }, [ensureRemoteApi]);
+
+  const activeProfile = remoteProfiles.find(profile => profile.id === selectedProfileId) ?? remoteProfiles[0];
+  const selectedIsConnected = remoteConnected && Boolean(activeProfile && activeProfile.id === remoteIdentity?.profileId);
+
+  const selectRemoteProfile = (profileId: string | null) => {
+    setSelectedProfileId(profileId);
+    setToken('');
+    setCa('');
+  };
 
   const saveRemoteProfile = (e: React.FormEvent) => {
     e.preventDefault();
@@ -7494,7 +7568,7 @@ function HubSettingsView({
               url: formUrl.trim(),
               deviceId: formDeviceId.trim(),
             };
-      await (api as DesktopPanelApi & { queueWrite(fn: (s: any) => any): Promise<any> }).queueWrite(s => ({
+      await api.queueWrite(s => ({
         ...s,
         profiles: [...s.profiles, next],
       }));
@@ -7502,7 +7576,7 @@ function HubSettingsView({
       setFormUrl('');
       setFormDeviceId('');
       setAddingRemote(false);
-      setSelectedProfileId(next.id);
+      selectRemoteProfile(next.id);
     });
   };
 
@@ -7510,69 +7584,58 @@ function HubSettingsView({
     action.run(async () => {
       const api = await ensureRemoteApi();
       if (!api) return;
-      await (api as DesktopPanelApi & { queueWrite(fn: (s: any) => any): Promise<any> }).queueWrite(s => ({
+      await api.queueWrite(s => ({
         ...s,
         profiles: s.profiles.filter((p: DesktopUiProfile) => p.id !== profileId),
       }));
-      if (selectedProfileId === profileId) setSelectedProfileId(null);
+      if (activeProfile?.id === profileId) selectRemoteProfile(null);
     });
 
-  const connectRemoteProfile = () =>
-    action.run(async () => {
+  const connectRemoteProfile = () => {
+    const profile = activeProfile;
+    if (!profile || !token.trim()) return;
+    const input: DesktopConnectionInput =
+      profile.kind === 'local'
+        ? {
+            kind: 'local',
+            url: profile.url,
+            token: token.trim(),
+            ...(profile.expectedDeviceId ? { expectedDeviceId: profile.expectedDeviceId } : {}),
+          }
+        : {
+            kind: 'relay',
+            url: profile.url,
+            deviceId: profile.deviceId,
+            token: token.trim(),
+            ...(ca.trim() ? { ca: ca.trim() } : {}),
+          };
+    setToken('');
+    setCa('');
+    return action.run(async () => {
       const api = await ensureRemoteApi();
-      const profile = remoteProfiles.find(p => p.id === (selectedProfileId ?? remoteProfiles[0]?.id));
-      if (!api || !profile || !token.trim()) return;
-      const input: DesktopConnectionInput =
-        profile.kind === 'local'
-          ? {
-              kind: 'local',
-              url: profile.url,
-              token: token.trim(),
-              ...(profile.expectedDeviceId ? { expectedDeviceId: profile.expectedDeviceId } : {}),
-            }
-          : {
-              kind: 'relay',
-              url: profile.url,
-              deviceId: profile.deviceId,
-              token: token.trim(),
-              ...(ca.trim() ? { ca: ca.trim() } : {}),
-            };
+      if (!api) throw new Error(t('当前环境不支持远程连接组件', 'Remote client unavailable'));
       api.setTransportConnected(false);
       api.setIdentity(null);
-      try {
-        const status = await api.broker(
-          { profileId: profile.id, targetDeviceId: '', generation: 0, kind: profile.kind },
-          'connect',
-          { connection: input },
-        );
-        let targetDeviceId = '';
-        if (status.connection && status.connection.kind === 'local') {
-          targetDeviceId = status.connection.deviceId ?? '';
+      const status = await api.broker(
+        { profileId: profile.id, targetDeviceId: '', generation: 0, kind: profile.kind },
+        'connect',
+        { connection: input },
+      );
+      const targetDeviceId = status.connection?.kind === 'local' ? status.connection.deviceId ?? '' : '';
+      const newIdentity = api.setIdentity({ profileId: profile.id, targetDeviceId, kind: profile.kind });
+      const connected = status.phase === 'connected';
+      api.setTransportConnected(connected);
+      if (connected && newIdentity) {
+        const result = await api.broker(newIdentity, 'devices', { limit: 20, cursor: null });
+        if (api.identity?.generation !== newIdentity.generation || !api.transportConnected) return;
+        onRemoteDevices(result.items, newIdentity);
+        if (profile.kind === 'relay' && result.items.length === 1) {
+          api.setIdentity({ profileId: profile.id, targetDeviceId: result.items[0].deviceId, kind: 'relay' });
         }
-        const newIdentity = api.setIdentity({
-          profileId: profile.id,
-          targetDeviceId,
-          kind: profile.kind,
-        });
-        const isConn = status.phase === 'connected';
-        api.setTransportConnected(isConn);
-        if (isConn && newIdentity) {
-          const page = await api.broker(newIdentity, 'devices', { limit: 20, cursor: null });
-          setRemoteDevices(page.items);
-          if (profile.kind === 'relay' && page.items.length === 1) {
-            api.setIdentity({
-              profileId: profile.id,
-              targetDeviceId: page.items[0].deviceId,
-              kind: 'relay',
-            });
-          }
-          onRemoteUpdated();
-        }
-      } finally {
-        setToken('');
-        setCa('');
+        void onRemoteUpdated();
       }
     });
+  };
 
   const disconnectRemote = () =>
     action.run(async () => {
@@ -7580,7 +7643,18 @@ function HubSettingsView({
       if (!api || !remoteIdentity) return;
       api.setTransportConnected(false);
       await api.broker(remoteIdentity, 'disconnect', {});
-      onRemoteUpdated();
+      void onRemoteUpdated();
+    });
+
+  const renameDevice = (deviceId: string) =>
+    action.run(async () => {
+      const api = await ensureRemoteApi();
+      if (!remoteIdentity || !api?.transportConnected || api.identity?.generation !== remoteIdentity.generation) {
+        throw new Error(t('设备连接已变化，请刷新后重试。', 'The device connection changed. Refresh and try again.'));
+      }
+      await api.broker(remoteIdentity, 'rename_device', { deviceId, displayName: renameDraft.trim() });
+      setRenamingDevice(null);
+      void onRemoteUpdated();
     });
 
   const toggleLocalConfig = () => {
@@ -7618,95 +7692,176 @@ function HubSettingsView({
     });
   };
 
-  const activeProfile = remoteProfiles.find(p => p.id === (selectedProfileId ?? remoteProfiles[0]?.id));
   const showCenterForm = !centerConn.ready || editingCenter;
+  const centerAddress = centerConn.status?.centerUrl || centerConn.saved?.url;
+  const centerDeviceId = centerConn.saved?.deviceId || (centerConn.ready ? centerConn.deviceId : '');
+  const centerClientId = centerConn.status?.clientId;
+  const centerStatus = (
+    <Badge tone={centerConn.ready ? 'success' : centerConn.connecting ? 'accent' : 'neutral'}>
+      {centerConn.ready ? t('已连接', 'Connected')
+        : centerConn.connecting ? t('连接中', 'Connecting')
+          : centerConn.error ? t('连接异常', 'Connection issue') : t('未连接', 'Disconnected')}
+    </Badge>
+  );
+  const pageTitles = {
+    overview: t('设置', 'Settings'),
+    connection: t('中心连接', 'Center connection'),
+    devices: t('设备', 'Devices'),
+    manual: t('手动连接设备', 'Connect a device'),
+    updates: t('客户端更新', 'Client update'),
+    permissions: t('权限与后台', 'Permissions'),
+  };
+  const canRename = directoryCurrent && remoteIdentity?.kind === 'relay';
+  const directoryNotice = directoryReadFailed
+    ? remoteDevices.length > 0
+      ? t('暂时无法刷新目录，显示上次读取的设备。', 'Could not refresh the directory. Showing previously seen devices.')
+      : t('暂时无法读取设备目录。', 'Could not read the device directory.')
+    : remoteDevices.length > 0 && !directoryCurrent
+      ? t('显示上次读取的设备，当前状态待确认。', 'Showing previously seen devices. Their current status is unknown.')
+      : '';
+  const actionNotice = <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />;
 
   return (
-    <main className="grok-subpage grok-page-enter hst-settings">
+    <main className="grok-subpage grok-page-enter hst-settings" aria-labelledby={titleId}>
       <header className="grok-subpage-topbar">
         <button type="button" className="grok-floating-circle-btn" onClick={onBack} aria-label={t('返回', 'Back')}>
           <ArrowLeft size={20} />
         </button>
-        <h2 className="grok-subpage-header-title">{t('设置', 'Settings')}</h2>
-        <span className="hst-topbar-spacer" />
+        <h2 ref={titleRef} id={titleId} tabIndex={-1} className="grok-subpage-header-title">{pageTitles[page]}</h2>
+        <span className="hst-topbar-spacer" aria-hidden="true" />
       </header>
 
-      <div className="grok-subpage-scroll">
-        {/* 1. 账号与中心 */}
-        <Section title={t('账号与中心', 'Account & Center')}>
-          <Row
-            icon={<Globe />}
-            title={
-              centerConn.ready
-                ? centerConn.status?.centerUrl || centerConn.url || t('已连接中心', 'Center Connected')
-                : centerConn.connecting
-                  ? t('正在后台连接中心…', 'Connecting to center…')
-                  : t('未连接中心服务', 'Center Disconnected')
-            }
-            subtitle={
-              centerConn.ready
-                ? `${t('设备标识：', 'Device: ')}${centerConn.deviceId || centerConn.saved?.deviceId || 'android'}`
-                : centerConn.saved?.url
-                  ? `${t('已保存地址：', 'Saved: ')}${centerConn.saved.url}`
-                  : t('配置中心地址与令牌以同步多端智能体', 'Configure center URL & token to sync bots across devices')
-            }
-            trailing={
-              <Badge tone={centerConn.ready ? 'success' : centerConn.connecting ? 'accent' : 'neutral'}>
-                {centerConn.connecting ? t('连接中', 'Syncing') : centerConn.ready ? t('已连接', 'Connected') : t('未连接', 'Offline')}
-              </Badge>
-            }
-          />
-
-          {centerConn.ready && !editingCenter && (
-            <>
+      <div
+        className="grok-subpage-scroll"
+        ref={scrollRef}
+        onScroll={event => { scrollByPage.current[page] = event.currentTarget.scrollTop; }}
+      >
+        {page !== 'overview' && actionNotice}
+        {page === 'connection' && (
+          <>
+            <Section>
               <Row
-                icon={<ExternalLink />}
-                title={t('在浏览器打开中心管理', 'Open Center Management')}
-                chevron
-                onClick={() => centerConn.openManagement()}
+                icon={<Globe />}
+                title={centerConn.ready ? t('当前中心', 'Current center') : t('连接状态', 'Connection status')}
+                subtitle={centerAddress}
+                trailing={centerStatus}
               />
-              <div className="hst-actions">
-                <button
-                  type="button"
-                  className="hst-btn"
-                  disabled={centerConn.busy}
-                  onClick={() => setEditingCenter(true)}
-                >
-                  {t('更换中心连接', 'Change Center')}
+              {centerConn.ready && !editingCenter && (
+                <>
+                  <Row icon={<ExternalLink />} title={t('在浏览器打开中心管理', 'Open center management')} onClick={centerConn.openManagement} chevron />
+                  <Row title={t('更换中心连接', 'Change center')} disabled={centerConn.busy} onClick={() => setEditingCenter(true)} chevron />
+                  <Row title={t('断开中心', 'Disconnect from center')} disabled={centerConn.busy} onClick={centerConn.disconnect} />
+                </>
+              )}
+            </Section>
+            {showCenterForm ? (
+              <Section title={editingCenter ? t('更换中心连接', 'Change center') : t('连接中心', 'Connect to center')}>
+                <OnboardingPanel onDone={() => setEditingCenter(false)} />
+                {editingCenter && centerConn.ready && (
+                  <div className="hst-actions">
+                    <button type="button" className="hst-btn" disabled={centerConn.busy} onClick={() => {
+                      setEditingCenter(false);
+                      centerConn.setToken('');
+                    }}>
+                      {t('取消', 'Cancel')}
+                    </button>
+                  </div>
+                )}
+              </Section>
+            ) : <ErrorNotice error={centerConn.error} onDismiss={() => centerConn.setError('')} />}
+            {(centerDeviceId || centerClientId) && (
+              <Disclosure title={t('连接详情', 'Connection details')}>
+                <Section>
+                  {centerDeviceId && <Row title={t('设备标识', 'Device ID')} subtitle={centerDeviceId} />}
+                  {centerClientId && <Row title={t('客户端标识', 'Client ID')} subtitle={centerClientId} />}
+                </Section>
+              </Disclosure>
+            )}
+          </>
+        )}
+
+        {page === 'devices' && (
+          <>
+            <Section
+              title={t('设备目录', 'Device directory')}
+              action={remoteConnected && (
+                <button type="button" className="bs-link" disabled={action.busy} onClick={() => void action.run(onRemoteUpdated)}>
+                  {t('刷新', 'Refresh')}
                 </button>
-                <button
-                  type="button"
-                  className="hst-btn"
-                  disabled={centerConn.busy}
-                  onClick={() => void centerConn.disconnect()}
-                >
-                  {t('断开中心', 'Disconnect')}
-                </button>
-              </div>
-            </>
-          )}
+              )}
+            >
+              {directoryNotice && <Row title={<span role="status" className="bs-row-sub">{directoryNotice}</span>} />}
+              {localDeviceId && !remoteDevices.some(device => device.deviceId === localDeviceId) && (
+                <Row icon={<PlatformLogoIcon platform="android" />} title={t('此设备', 'This device')} />
+              )}
+              {remoteDevices.map(device => {
+                const renaming = canRename && renamingDevice?.deviceId === device.deviceId &&
+                  renamingDevice.generation === remoteIdentity?.generation;
+                return (
+                  <div className="hst-device-row" key={device.deviceId}>
+                    <span className={'hst-device-badge' + (directoryCurrent && !device.online ? ' is-offline' : '')} aria-hidden="true">
+                      <PlatformLogoIcon platform={device.platform} size={14} />
+                    </span>
+                    {renaming ? (
+                      <>
+                        <input
+                          className="hst-device-name-input"
+                          value={renameDraft}
+                          onChange={event => setRenameDraft(event.target.value)}
+                          aria-label={t('设备名称', 'Device name')}
+                          maxLength={120}
+                          autoFocus
+                        />
+                        <button type="button" className="hst-btn is-primary" disabled={action.busy || !renameDraft.trim()} onClick={() => void renameDevice(device.deviceId)}>
+                          {t('保存', 'Save')}
+                        </button>
+                        <button type="button" className="hst-btn" disabled={action.busy} onClick={() => setRenamingDevice(null)}>
+                          {t('取消', 'Cancel')}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="hst-device-name">
+                          {device.displayName || t('未命名设备', 'Unnamed device')}
+                          {device.deviceId === localDeviceId && <span className="bs-row-sub">{t('本机', 'This device')}</span>}
+                        </span>
+                        {directoryCurrent && (
+                          <Badge tone={device.online ? 'success' : 'neutral'}>{device.online ? t('在线', 'Online') : t('离线', 'Offline')}</Badge>
+                        )}
+                        {canRename && remoteIdentity && (
+                          <button type="button" className="hst-btn is-ghost" disabled={action.busy} onClick={() => {
+                            setRenamingDevice({ deviceId: device.deviceId, generation: remoteIdentity.generation });
+                            setRenameDraft(device.displayName || device.deviceId);
+                          }}>
+                            {t('改名', 'Rename')}
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+              {remoteDevices.length === 0 && !directoryNotice && <Row title={directoryCurrent
+                ? t('暂无目录设备', 'No devices in the directory')
+                : t('设备目录尚未读取', 'Device directory unavailable')} />}
+            </Section>
+            <Section>
+              <Row icon={<Server />} title={pageTitles.manual} onClick={() => onOpenPage('manual')} chevron />
+            </Section>
+          </>
+        )}
 
-          {/* C7 首启引导：无存凭据默认 owner 密码配对；手动令牌与重新配对收入折叠项。 */}
-          {showCenterForm && <OnboardingPanel onDone={() => setEditingCenter(false)} />}
-        </Section>
+        {page === 'updates' && <ClientUpdateSection variant="mobile" />}
+        {page === 'permissions' && <OnboardingPermissions />}
 
-        <OnboardingPermissions />
-        <ClientUpdateSection variant="mobile" />
-
-        {/* 3. 设备 */}
-        <Section
-          title={t('设备', 'Devices')}
+        {page === 'manual' && <Section
+          title={t('连接档案', 'Connection profiles')}
           action={
-            remoteProfiles.length > 0 ? (
-              <button type="button" className="bs-link" onClick={() => setAddingRemote(v => !v)}>
-                {addingRemote ? t('收起', 'Collapse') : t('添加节点', 'Add Host')}
+            remoteProfiles.length > 0 || addingRemote ? (
+              <button type="button" className="bs-link" disabled={action.busy} onClick={() => setAddingRemote(v => !v)}>
+                {addingRemote ? t('收起', 'Collapse') : t('新增连接', 'Add connection')}
               </button>
             ) : undefined
-          }
-          hint={
-            remoteProfiles.length > 0
-              ? t('连接远程节点后，远端主机上的 Bot 会自动出现在主页列表中。', 'Connected remote bots appear directly in your home list.')
-              : undefined
           }
           bare
         >
@@ -7768,43 +7923,37 @@ function HubSettingsView({
 
           {remoteProfiles.length === 0 && !addingRemote ? (
             <div className="bs-card">
-              <Row
-                icon={<Server />}
-                title={t('添加远程节点', 'Add Remote Host')}
-                subtitle={t('默认本机运行', 'Local only')}
-                chevron
-                onClick={() => setAddingRemote(true)}
-              />
+              <Row icon={<Server />} title={t('添加设备连接', 'Add device connection')} onClick={() => setAddingRemote(true)} chevron />
             </div>
-          ) : remoteProfiles.length > 0 ? (
+          ) : activeProfile && (
             <div className="bs-card">
-              {remoteProfiles.map(p => {
-                const active = (selectedProfileId ?? remoteProfiles[0]?.id) === p.id;
-                const isConnectedProfile = remoteConnected && remoteIdentity?.profileId === p.id;
-                return (
-                  <Row
-                    key={p.id}
-                    selected={active}
-                    icon={<Server />}
-                    title={p.title}
-                    subtitle={`${p.kind} · ${p.url}`}
-                    onClick={() => setSelectedProfileId(p.id)}
-                    trailing={
-                      <>
-                        {isConnectedProfile && <Badge tone="success">{t('已连接', 'Connected')}</Badge>}
-                        <button
-                          type="button"
-                          className="hst-btn is-ghost"
-                          aria-label={t('删除节点', 'Remove host')}
-                          onClick={() => void deleteRemoteProfile(p.id)}
-                        >
-                          <Trash2 size={15} />
-                        </button>
-                      </>
-                    }
-                  />
-                );
-              })}
+              {remoteProfiles.map(profile => (
+                <Row
+                  key={profile.id}
+                  selected={activeProfile.id === profile.id}
+                  icon={<Server />}
+                  title={profile.title}
+                  subtitle={(profile.kind === 'local' ? t('直连', 'Direct') : t('中继', 'Relay')) + ' · ' + profile.url}
+                  disabled={action.busy}
+                  onClick={() => {
+                    if (activeProfile.id !== profile.id) selectRemoteProfile(profile.id);
+                  }}
+                  trailing={
+                    <>
+                      {remoteConnected && remoteIdentity?.profileId === profile.id && <Badge tone="success">{t('已连接', 'Connected')}</Badge>}
+                      <button
+                        type="button"
+                        className="hst-btn is-ghost"
+                        disabled={action.busy}
+                        aria-label={t('删除连接档案', 'Remove connection profile') + ' · ' + profile.title}
+                        onClick={() => void deleteRemoteProfile(profile.id)}
+                      >
+                        <Trash2 size={15} aria-hidden="true" />
+                      </button>
+                    </>
+                  }
+                />
+              ))}
 
               <label className="hst-input-row">
                 <span className="hst-input-label">{t('连接令牌', 'Token')}</span>
@@ -7812,274 +7961,226 @@ function HubSettingsView({
                   type="password"
                   autoComplete="new-password"
                   className="hst-input"
+                  disabled={action.busy}
                   value={token}
                   onChange={e => setToken(e.target.value)}
-                  placeholder={t('输入访问 Token', 'Enter access token')}
+                  placeholder={t('输入访问令牌', 'Enter access token')}
                 />
               </label>
 
-              {activeProfile?.kind === 'relay' && (
-                <label className="hst-input-row">
-                  <span className="hst-input-label">{t('CA 证书', 'CA PEM')}</span>
-                  <input
-                    className="hst-input"
-                    value={ca}
-                    onChange={e => setCa(e.target.value)}
-                    placeholder={t('选填 PEM', 'Optional PEM')}
-                  />
-                </label>
+              {activeProfile.kind === 'relay' && (
+                <Disclosure title={t('CA 证书（可选）', 'CA certificate (optional)')}>
+                  <label className="hst-input-row">
+                    <span className="hst-input-label">{t('CA 证书', 'CA certificate')}</span>
+                    <input
+                      className="hst-input"
+                      disabled={action.busy}
+                      value={ca}
+                      onChange={e => setCa(e.target.value)}
+                      placeholder={t('选填 PEM', 'Optional PEM')}
+                    />
+                  </label>
+                </Disclosure>
               )}
 
               <div className="hst-actions">
                 {remoteConnected && (
-                  <button
-                    type="button"
-                    className="hst-btn"
-                    disabled={action.busy}
-                    onClick={() => void disconnectRemote()}
-                  >
-                    {t('断开连接', 'Disconnect')}
+                  <button type="button" className="hst-btn" disabled={action.busy} onClick={() => void disconnectRemote()}>
+                    {t('断开当前连接', 'Disconnect current connection')}
                   </button>
                 )}
-                <button
-                  type="button"
-                  className="hst-btn is-primary"
-                  disabled={action.busy || !token.trim()}
-                  onClick={() => void connectRemoteProfile()}
-                >
-                  {t('连接节点', 'Connect')}
+                <button type="button" className="hst-btn is-primary" disabled={action.busy || !token.trim()} onClick={() => void connectRemoteProfile()}>
+                  {selectedIsConnected ? t('重新连接', 'Reconnect') : t('连接', 'Connect')}
                 </button>
               </div>
-
-              {remoteConnected && remoteIdentity?.kind === 'relay' && remoteDevices.map(dev => (
-                <div className="hst-device-row" key={dev.deviceId}>
-                  <span className={`hst-device-badge${dev.online ? '' : ' is-offline'}`}>
-                    <PlatformLogoIcon platform={dev.platform} size={14} />
-                  </span>
-                  {renamingDeviceId === dev.deviceId ? (
-                    <>
-                      <input
-                        className="hst-device-name-input"
-                        value={renameDraft}
-                        onChange={e => setRenameDraft(e.target.value)}
-                        placeholder={dev.deviceId}
-                        autoFocus
-                      />
-                      <button
-                        type="button"
-                        className="hst-btn is-primary"
-                        disabled={action.busy}
-                        onClick={() =>
-                          void action.run(async () => {
-                            const api = await ensureRemoteApi();
-                            if (!api || !api.identity) throw new Error('Not connected');
-                            await api.broker(api.identity, 'rename_device', {
-                              deviceId: dev.deviceId,
-                              displayName: renameDraft.trim(),
-                            });
-                            setRenamingDeviceId(null);
-                            onRemoteUpdated();
-                          })
-                        }
-                      >
-                        {t('保存', 'Save')}
-                      </button>
-                      <button
-                        type="button"
-                        className="hst-btn"
-                        onClick={() => setRenamingDeviceId(null)}
-                      >
-                        {t('取消', 'Cancel')}
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <span className="hst-device-name">{dev.displayName || dev.deviceId}</span>
-                      <Badge tone={dev.online ? 'success' : 'neutral'}>
-                        {dev.online ? t('在线', 'Online') : t('离线', 'Offline')}
-                      </Badge>
-                      <button
-                        type="button"
-                        className="hst-btn"
-                        onClick={() => {
-                          setRenamingDeviceId(dev.deviceId);
-                          setRenameDraft(dev.displayName || dev.deviceId);
-                        }}
-                      >
-                        {t('改名', 'Rename')}
-                      </button>
-                    </>
-                  )}
-                </div>
-              ))}
             </div>
-          ) : null}
-        </Section>
-
-        {/* 4. 语音 */}
-        <Section title={t('语音', 'Voice')}>
-          <div className="hst-row-static">
-            <span className="bs-row-icon" aria-hidden="true"><AudioLines size={17} /></span>
-            <span className="bs-row-text"><span className="bs-row-title">{t('语音朗读倍速', 'Speech Rate')}</span></span>
-            <span className="hst-select-wrap">
-              <select
-                value={String(voice?.speechRate ?? 1)}
-                onChange={e =>
-                  void action.run(async () => {
-                    const current = voice ?? (await BotHost.voiceSettings());
-                    const next = { ...current, speechRate: Number(e.target.value) };
-                    await BotHost.saveVoiceSettings({ settings: next as HostVoiceSaveInput });
-                    setVoice(await BotHost.voiceSettings());
-                  })
-                }
-              >
-                {[0.75, 1, 1.25, 1.5, 2].map(r => (
-                  <option key={r} value={String(r)}>
-                    {r}×
-                  </option>
-                ))}
-              </select>
-              <ChevronsUpDown size={14} />
-            </span>
-          </div>
-        </Section>
-
-        {/* 5. 智能体 */}
-        <Section title={t('智能体', 'Bots')}>
-          <Row
-            icon={<Archive />}
-            title={t(`已归档智能体 (${archivedCount})`, `Archived Bots (${archivedCount})`)}
-            subtitle={t('14 天后自动清理', '14d auto-delete')}
-            chevron
-            onClick={onOpenArchivedBots}
-          />
-          <Row
-            icon={<Clock />}
-            title={t('待发送', 'Pending')}
-            subtitle={t('离线时保留、尚未确认送达的消息', 'Messages kept offline or not yet confirmed')}
-            chevron
-            onClick={onOpenPending}
-          />
-          {onOpenModelSheet && (
-            <Row
-              icon={<Cpu />}
-              title={t('模型与服务商', 'Providers & Models')}
-              subtitle={t('配置 API 与常用模型', 'Manage API & favorite models')}
-              chevron
-              onClick={onOpenModelSheet}
-            />
           )}
-        </Section>
+        </Section>}
 
-        {/* 6. 系统 */}
-        {onOpenSystemSettings && (
-          <Section title={t('系统', 'System')}>
+        <div className="hst-overview" hidden={page !== 'overview'}>
+          <Section>
             <Row
-              icon={<Settings />}
-              title={t('系统权限与设置', 'System permissions & settings')}
-              subtitle={t('Shizuku、唤醒词、外观等系统级设置', 'Shizuku, wake word, theme and other system settings')}
-              chevron
-              onClick={onOpenSystemSettings}
+              icon={<Globe />}
+              title={<span className="hst-entry-label"><span>{pageTitles.connection}</span>{centerStatus}</span>}
+              onClick={() => onOpenPage('connection')}
             />
+            <Row icon={<Monitor />} title={pageTitles.devices} onClick={() => onOpenPage('devices')} chevron />
+            <Row
+              icon={<Download />}
+              title={updateSummary
+                ? <span className="hst-entry-label"><span>{pageTitles.updates}</span><span className="bs-row-sub">{updateSummary}</span></span>
+                : pageTitles.updates}
+              onClick={() => onOpenPage('updates')}
+              chevron={!updateSummary}
+            />
+            <Row icon={<Bell />} title={t('通知与后台运行', 'Alerts & background')} onClick={() => onOpenPage('permissions')} chevron />
           </Section>
-        )}
 
-        {/* 7. 开发者 */}
-        <Disclosure title={t('开发者', 'Developer')}>
-          <div className="hst-form">
-            <Section title={t('中心连接进阶参数', 'Center TLS & Host Token')} bare>
-              <div className="bs-card">
-                <label className="hst-input-row">
-                  <span className="hst-input-label">{t('本机节点令牌', 'Host Token')}</span>
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    className="hst-input"
-                    value={centerConn.hostToken}
-                    onChange={e => centerConn.setHostToken(e.target.value)}
-                    placeholder={t('选填，留空保持不变', 'Optional; blank keeps current')}
-                  />
-                </label>
-                <label className="hst-input-row">
-                  <span className="hst-input-label">{t('CA 证书', 'CA PEM')}</span>
-                  <input
-                    className="hst-input"
-                    value={centerConn.ca}
-                    onChange={e => centerConn.setCa(e.target.value)}
-                    placeholder={t('自签名证书 PEM（选填）', 'Optional self-signed PEM')}
-                  />
-                </label>
-              </div>
+          {/* 语音 */}
+          <Section title={t('语音', 'Voice')}>
+            <div className="hst-row-static">
+              <span className="bs-row-icon" aria-hidden="true"><AudioLines size={17} /></span>
+              <span className="bs-row-text"><span className="bs-row-title">{t('语音朗读倍速', 'Speech Rate')}</span></span>
+              <span className="hst-select-wrap">
+                <select
+                  value={String(voice?.speechRate ?? 1)}
+                  onChange={e =>
+                    void action.run(async () => {
+                      const current = voice ?? (await BotHost.voiceSettings());
+                      const next = { ...current, speechRate: Number(e.target.value) };
+                      await BotHost.saveVoiceSettings({ settings: next as HostVoiceSaveInput });
+                      setVoice(await BotHost.voiceSettings());
+                    })
+                  }
+                >
+                  {[0.75, 1, 1.25, 1.5, 2].map(r => (
+                    <option key={r} value={String(r)}>
+                      {r}×
+                    </option>
+                  ))}
+                </select>
+                <ChevronsUpDown size={14} />
+              </span>
+            </div>
+          </Section>
+
+          {/* 智能体 */}
+          <Section title={t('智能体', 'Bots')}>
+            <Row
+              icon={<Archive />}
+              title={t(`已归档智能体 (${archivedCount})`, `Archived Bots (${archivedCount})`)}
+              subtitle={t('14 天后自动清理', '14d auto-delete')}
+              chevron
+              onClick={onOpenArchivedBots}
+            />
+            <Row
+              icon={<Clock />}
+              title={t('待发送', 'Pending')}
+              subtitle={t('离线时保留、尚未确认送达的消息', 'Messages kept offline or not yet confirmed')}
+              chevron
+              onClick={onOpenPending}
+            />
+            {onOpenModelSheet && (
+              <Row
+                icon={<Cpu />}
+                title={t('模型与服务商', 'Providers & Models')}
+                subtitle={t('配置 API 与常用模型', 'Manage API & favorite models')}
+                chevron
+                onClick={onOpenModelSheet}
+              />
+            )}
+          </Section>
+
+          {/* 系统 */}
+          {onOpenSystemSettings && (
+            <Section title={t('系统', 'System')}>
+              <Row
+                icon={<Settings />}
+                title={t('系统权限与设置', 'System permissions & settings')}
+                subtitle={t('Shizuku、唤醒词、外观等系统级设置', 'Shizuku, wake word, theme and other system settings')}
+                chevron
+                onClick={onOpenSystemSettings}
+              />
             </Section>
+          )}
 
-            <Section title={t('本机底层配置与凭据', 'Local Host Config')} bare>
-              <div className="bs-card">
-                <Row
-                  icon={<Code2 />}
-                  title={t('高级配置 (JSON)', 'Advanced JSON')}
-                  trailing={<span className="bs-row-sub">{showLocalConfig ? t('收起', 'Hide') : t('展开', 'Show')}</span>}
-                  chevron
-                  onClick={toggleLocalConfig}
-                />
-              </div>
+          {/* 开发者 */}
+          <Disclosure title={t('开发者', 'Developer')}>
+            <div className="hst-form">
+              <Section title={t('中心连接进阶参数', 'Center TLS & Host Token')} bare>
+                <div className="bs-card">
+                  <label className="hst-input-row">
+                    <span className="hst-input-label">{t('本机节点令牌', 'Host Token')}</span>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      className="hst-input"
+                      value={centerConn.hostToken}
+                      onChange={e => centerConn.setHostToken(e.target.value)}
+                      placeholder={t('选填，留空保持不变', 'Optional; blank keeps current')}
+                    />
+                  </label>
+                  <label className="hst-input-row">
+                    <span className="hst-input-label">{t('CA 证书', 'CA PEM')}</span>
+                    <input
+                      className="hst-input"
+                      value={centerConn.ca}
+                      onChange={e => centerConn.setCa(e.target.value)}
+                      placeholder={t('自签名证书 PEM（选填）', 'Optional self-signed PEM')}
+                    />
+                  </label>
+                </div>
+              </Section>
 
-              {showLocalConfig && (
-                <>
-                  <form onSubmit={saveLocalCredentials} className="bs-card">
-                    <label className="hst-input-row">
-                      <span className="hst-input-label">{t('凭据 JSON', 'Credentials JSON')}</span>
-                      <input
-                        type="password"
-                        autoComplete="new-password"
-                        className="hst-input"
-                        value={credJson}
-                        onChange={e => setCredJson(e.target.value)}
-                        placeholder='{"OPENAI_API_KEY": "sk-..."}'
-                      />
-                    </label>
-                    <div className="hst-actions">
-                      <button type="submit" className="hst-btn is-primary" disabled={action.busy}>
-                        {t('保存凭据', 'Save Credentials')}
-                      </button>
-                    </div>
-                  </form>
+              <Section title={t('本机底层配置与凭据', 'Local Host Config')} bare>
+                <div className="bs-card">
+                  <Row
+                    icon={<Code2 />}
+                    title={t('高级配置 (JSON)', 'Advanced JSON')}
+                    trailing={<span className="bs-row-sub">{showLocalConfig ? t('收起', 'Hide') : t('展开', 'Show')}</span>}
+                    chevron
+                    onClick={toggleLocalConfig}
+                  />
+                </div>
 
-                  {hostSettings && (
-                    <form onSubmit={saveLocalSettings} className="bs-card">
-                      <div className="hst-row-static">
-                        <textarea
-                          className="hst-textarea"
-                          rows={6}
-                          value={settingsJson}
-                          onChange={e => setSettingsJson(e.target.value)}
-                          spellCheck={false}
+                {showLocalConfig && (
+                  <>
+                    <form onSubmit={saveLocalCredentials} className="bs-card">
+                      <label className="hst-input-row">
+                        <span className="hst-input-label">{t('凭据 JSON', 'Credentials JSON')}</span>
+                        <input
+                          type="password"
+                          autoComplete="new-password"
+                          className="hst-input"
+                          value={credJson}
+                          onChange={e => setCredJson(e.target.value)}
+                          placeholder='{"OPENAI_API_KEY": "sk-..."}'
                         />
-                      </div>
+                      </label>
                       <div className="hst-actions">
                         <button type="submit" className="hst-btn is-primary" disabled={action.busy}>
-                          {t('保存运行配置', 'Save Runtime JSON')}
+                          {t('保存凭据', 'Save Credentials')}
                         </button>
                       </div>
                     </form>
-                  )}
-                </>
-              )}
-            </Section>
-          </div>
-        </Disclosure>
 
-        <div className="hst-exit">
-          <button
-            type="button"
-            className="hst-btn is-danger"
-            disabled={centerConn.busy}
-            onClick={() => void centerConn.stopLocalHost()}
-          >
-            {t('退出客户端', 'Exit Client')}
-          </button>
+                    {hostSettings && (
+                      <form onSubmit={saveLocalSettings} className="bs-card">
+                        <div className="hst-row-static">
+                          <textarea
+                            className="hst-textarea"
+                            rows={6}
+                            value={settingsJson}
+                            onChange={e => setSettingsJson(e.target.value)}
+                            spellCheck={false}
+                          />
+                        </div>
+                        <div className="hst-actions">
+                          <button type="submit" className="hst-btn is-primary" disabled={action.busy}>
+                            {t('保存运行配置', 'Save Runtime JSON')}
+                          </button>
+                        </div>
+                      </form>
+                    )}
+                  </>
+                )}
+              </Section>
+            </div>
+          </Disclosure>
+
+          <div className="hst-exit">
+            <button
+              type="button"
+              className="hst-btn is-danger"
+              disabled={centerConn.busy}
+              onClick={() => void centerConn.stopLocalHost()}
+            >
+              {t('退出客户端', 'Exit Client')}
+            </button>
+          </div>
         </div>
 
-        <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
+        {page === 'overview' && actionNotice}
       </div>
     </main>
   );
