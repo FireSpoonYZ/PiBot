@@ -2,7 +2,7 @@
 
 定稿日期：2026-11-06。源码核对基线：`3319c53`。
 
-用户已授权助手决定剩余选型。本文是后续实施的主文档；[现成方案调研报告](open-source-release-solutions-research.md)保留候选比较和来源依据。与前期讨论不一致时，以本定稿为准。
+本文保留 2026-11-06 的设计与实施边界。当前构建命令与发布流程见维护中的文档。 [源码构建](../README.md#从源码构建) · [发布说明](releasing.md) · [历史调研](open-source-release-solutions-research.md)
 
 本文描述目标与实施边界。业务代码和本机三端运行验证已有进展；实际已完成、未完成与外部发布材料以[开发及验收进度](open-source-release-progress.md)为准。Windows SCM、虚拟服务账户和会话代理仍属未完成实现，不视为已交付。
 
@@ -364,9 +364,9 @@ rg 为内容搜索、fd 为文件查找提供能力，是运行时组件。
 
 ### 10.2 Pi
 
-以精确正式版本、lockfile 和 npm ci 为常态。当前 `scripts/pi-main.json` 固定 SHA 保留到用户需要的 bug fix 正式发布，不改成浮动 main。
+当时暂用固定提交等待修复发布。当前使用正式 npm 版本，依赖与传递依赖分别由包清单和 lockfile 固定。构建时使用 `npm ci` 安装。
 
-实施时定位该修复的上游 PR/commit，记录第一个包含修复的发布版本。确认后整体核对 Durable、chord、pi-ai、pi-codemode、pi-mcp、pi-telemetry，切回精确发布版本，并删除本次例外的源码构建、重打包及 Docker/Gradle 准备步骤。
+更新时一起核对 Durable、chord、pi-ai、pi-codemode、pi-mcp 与 pi-telemetry 的版本和兼容性。
 
 不新增源码版/正式版用户开关，不用 patch-package 建第二套临时维护方式。Renovate/Dependabot 本轮不引入。
 
@@ -491,6 +491,6 @@ Pi 切回正式版本取决于修复发布，单独跟踪，不阻塞其他阶�
 - `host-core/build-desktop.js`、`build-android.js`、`build-mobile.js`
 - `host-core/prepare-tools.js`、`prepare-android-tools.js`、`search-bin.js`
 - `app/build.gradle`、`app/src/main/AndroidManifest.xml`、Android Tauri 插件与 Host 桥
-- `scripts/pi-main.json`、`scripts/prepare-pi-main.mjs`、相关 manifest 和 lockfile
+- `host-core/package.json`、`host-core/package-lock.json` 与 `center-server/package-lock.json`
 - `compose.yaml`、`Dockerfile`、`.github/workflows/`
 - `LICENSE`、`THIRD_PARTY_NOTICES.md`、`licenses/`、`.gitignore`、`.dockerignore`

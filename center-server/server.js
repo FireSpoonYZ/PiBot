@@ -14,7 +14,7 @@ import { openCenterExecution } from './execution.js';
 import { openTurnAdmission } from './turns.js';
 import { openMcpOAuth } from './oauth/index.js';
 import { openSkillManager } from './skills/index.js';
-import { runHermes } from './hermes/index.js';
+import { runLearningJob } from './learning-engine/index.js';
 import { openLearningService } from './learning/index.js';
 import { openBotManagement } from './bot-management.js';
 import { openCenterVault } from './vault.js';
@@ -22,7 +22,7 @@ import { initializeBuiltinPlugins } from './builtin-plugins.js';
 import { openModelCatalog } from './model-catalog.js';
 
 const require = createRequire(import.meta.url);
-const status = { INVALID_ARGUMENT: 400, INVALID_CWD: 400, UNSUPPORTED_TARGET: 400, VALIDATION_FAILED: 400, UNAUTHENTICATED: 401, FORBIDDEN: 403, CSRF_INVALID: 403, NOT_FOUND: 404, BOT_NOT_FOUND: 404, REVISION_CONFLICT: 409, REQUEST_CONFLICT: 409, TURN_SET_CHANGED: 409, TURN_SYNC_FAILED: 409, TURN_RECOVERY_REQUIRED: 403, INVALID_STATE: 409, PRIMARY_BOT_PROTECTED: 409, BOT_ARCHIVED: 409, PAYLOAD_TOO_LARGE: 413, RATE_LIMITED: 429, PACKAGE_NOT_READY: 409, CALL_TIMEOUT: 504, TIMEOUT: 504, HERMES_ERROR: 502, CENTER_OFFLINE: 503, DEVICE_OFFLINE: 503, VAULT_INVALID_ARGUMENT: 400, VAULT_FORBIDDEN: 403, VAULT_NOT_FOUND: 404, VAULT_NOT_CONFIGURED: 409, VAULT_NEEDS_LOGIN: 409, VAULT_LOGIN_CHALLENGE: 409, VAULT_STALE_SESSION: 409, VAULT_CONFLICT: 409, VAULT_REQUEST_EXPIRED: 409, VAULT_REQUEST_BUSY: 409, VAULT_NOT_INITIALIZED: 409, VAULT_ALREADY_INITIALIZED: 409, VAULT_LOCKED: 409, VAULT_UNLOCK_FAILED: 409, VAULT_UNSUPPORTED: 409, VAULT_CONNECTION_FAILED: 502, VAULT_UNAVAILABLE: 503 };
+const status = { INVALID_ARGUMENT: 400, INVALID_CWD: 400, UNSUPPORTED_TARGET: 400, VALIDATION_FAILED: 400, UNAUTHENTICATED: 401, FORBIDDEN: 403, CSRF_INVALID: 403, NOT_FOUND: 404, BOT_NOT_FOUND: 404, REVISION_CONFLICT: 409, REQUEST_CONFLICT: 409, TURN_SET_CHANGED: 409, TURN_SYNC_FAILED: 409, TURN_RECOVERY_REQUIRED: 403, INVALID_STATE: 409, PRIMARY_BOT_PROTECTED: 409, BOT_ARCHIVED: 409, PAYLOAD_TOO_LARGE: 413, RATE_LIMITED: 429, PACKAGE_NOT_READY: 409, CALL_TIMEOUT: 504, TIMEOUT: 504, LEARNING_ERROR: 502, CENTER_OFFLINE: 503, DEVICE_OFFLINE: 503, VAULT_INVALID_ARGUMENT: 400, VAULT_FORBIDDEN: 403, VAULT_NOT_FOUND: 404, VAULT_NOT_CONFIGURED: 409, VAULT_NEEDS_LOGIN: 409, VAULT_LOGIN_CHALLENGE: 409, VAULT_STALE_SESSION: 409, VAULT_CONFLICT: 409, VAULT_REQUEST_EXPIRED: 409, VAULT_REQUEST_BUSY: 409, VAULT_NOT_INITIALIZED: 409, VAULT_ALREADY_INITIALIZED: 409, VAULT_LOCKED: 409, VAULT_UNLOCK_FAILED: 409, VAULT_UNSUPPORTED: 409, VAULT_CONNECTION_FAILED: 502, VAULT_UNAVAILABLE: 503 };
 
 export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ownerPasswordHash, listenHost = '127.0.0.1', port = 8080, trustProxy = false, webRoot, npmPath, publicUrl }) {
   // Single public HTTPS origin; the WSS link URL, OAuth callback and client
@@ -90,7 +90,7 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
     // New services are constructed after packages (publish/mutation backend)
     // and before routes; notify is delegated lazily until routes exists.
     skills = await openSkillManager({ dataRoot, store, packages, notify: (deviceId) => routes?.notifyDevice?.(deviceId) });
-    learning = await openLearningService({ dataRoot, store, skills, runHermes });
+    learning = await openLearningService({ dataRoot, store, skills, runLearningJob });
     botManagement = openBotManagement({ store, packages, notify: (deviceId) => routes?.notifyDevice?.(deviceId) });
     vault = await openCenterVault({ dataRoot, encryptionKey, store });
     routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, publicUrl, vault });

@@ -101,6 +101,7 @@ const routes = [
   { method: 'GET', key: '/v1/bots/:botId/soul', pattern: /^\/v1\/bots\/([^/]+)\/soul\/?$/, params: ['botId'], hasBody: false, handler: getBotSoul },
   { method: 'PUT', key: '/v1/bots/:botId/soul', pattern: /^\/v1\/bots\/([^/]+)\/soul\/?$/, params: ['botId'], hasBody: true, handler: setBotSoul },
   { method: 'POST', key: '/v1/bots/:botId/learning', pattern: /^\/v1\/bots\/([^/]+)\/learning\/?$/, params: ['botId'], hasBody: true, handler: manageBotLearning },
+  { method: 'POST', key: '/v1/bots/:botId/skill-reviews', pattern: /^\/v1\/bots\/([^/]+)\/skill-reviews\/?$/, params: ['botId'], hasBody: true, handler: reviewBotSkills },
   { method: 'POST', key: '/v1/bots/:botId/schedules', pattern: /^\/v1\/bots\/([^/]+)\/schedules\/?$/, params: ['botId'], hasBody: true, handler: botSchedules },
   { method: 'POST', key: '/v1/service/update', pattern: /^\/v1\/service\/update\/?$/, params: [], hasBody: true, handler: updateService },
   { method: 'GET', key: '/v1/service', pattern: /^\/v1\/service\/?$/, params: [], hasBody: false, handler: serviceStatus },
@@ -769,6 +770,12 @@ async function manageBotLearning(host, runtime, params, body, req, res) {
   assertNoQuery(req);
   requireBot(host, params.botId);
   writeControlJson(res, 200, await runtime.manageBotLearning(params.botId, body));
+}
+
+async function reviewBotSkills(_host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  const { params: { botId, input } } = normalizeControlCall('reviewBotSkills', { botId: params.botId, input: body });
+  writeControlJson(res, 200, await runtime.reviewBotSkills(botId, input));
 }
 
 async function botSchedules(host, runtime, params, body, req, res) {

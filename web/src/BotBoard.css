@@ -28,6 +28,22 @@
 .bot-board-warning { color: var(--danger); font-size: 12px; line-height: 1.5; }
 .bot-board-unknown { margin-bottom: 16px; }
 .bot-board-unknown > div { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.bot-board-desktop .bot-board-progress {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.bot-board-desktop .bot-board-unknown { margin-top: 16px; }
+.bot-board-other { margin-top: 16px; }
+.bot-board-other > summary {
+  width: fit-content;
+  padding: 6px 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+.bot-board-other[open] > summary { margin-bottom: 8px; }
 @media (max-width: 700px) {
   .bot-board { padding: calc(16px + var(--top, 0px)) 16px calc(16px + var(--bottom, 0px)); }
   .bot-board-header > span { width: 100%; }

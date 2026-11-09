@@ -36,11 +36,13 @@ export function BotAvatarStudio({
     resolveBotAvatarPreset(botKey, roleName, isPrimary),
   );
   const [dirty, setDirty] = useState(false);
+  const [editing, setEditing] = useState(false);
   const action = useAction();
 
   useEffect(() => {
     setDraft(resolveBotAvatarPreset(botKey, roleName, isPrimary));
     setDirty(false);
+    setEditing(false);
   }, [botKey, roleName, isPrimary]);
 
   function persist(value: GrokAvatarPreset | null) {
@@ -54,112 +56,118 @@ export function BotAvatarStudio({
 
   return (
     <div className="avatar-studio">
-      <div className="avatar-studio-preview">
-        <GrokBotAvatar preset={draft} size={96} isPrimary={isPrimary} starBadge={isPrimary} />
-      </div>
+      <button className="avatar-studio-trigger" type="button" aria-expanded={editing} onClick={() => setEditing(value => !value)}>
+        <GrokBotAvatar preset={draft} size={40} isPrimary={isPrimary} starBadge={isPrimary} />
+        <span>{editing ? '收起头像编辑' : '编辑头像'}</span>
+        {dirty ? <small>未保存</small> : null}
+      </button>
+      {editing ? (
+        <>
+          <div className="avatar-studio-section-title">形状</div>
+          <div className="avatar-shape-grid" role="group" aria-label="形状">
+            {GROK_SHAPE_ORDER.map((item) => {
+              const selected = draft.shape === item.shape;
+              return (
+                <button
+                  key={item.shape}
+                  type="button"
+                  className={`avatar-shape-cell${selected ? ' selected' : ''}`}
+                  title={item.labelZh}
+                  aria-pressed={selected}
+                  disabled={action.busy}
+                  onClick={() => {
+                    setDirty(true);
+                    setDraft((prev) => ({
+                      ...prev,
+                      id: `${item.shape}-${prev.color}`,
+                      shape: item.shape,
+                      rotation: item.rotation,
+                    }));
+                  }}
+                >
+                  <GrokBotAvatar
+                    preset={{ ...draft, shape: item.shape, rotation: item.rotation }}
+                    size={40}
+                  />
+                </button>
+              );
+            })}
+          </div>
 
-      <div className="avatar-studio-section-title">形状</div>
-      <div className="avatar-shape-grid" role="listbox" aria-label="形状">
-        {GROK_SHAPE_ORDER.map((item) => {
-          const selected = draft.shape === item.shape;
-          return (
+          <div className="avatar-studio-section-title">表情</div>
+          <div className="avatar-expression-grid" role="group" aria-label="表情">
+            {GROK_EXPRESSION_LIST.map((expr) => {
+              const selected = draft.expressionIndex === expr.index;
+              return (
+                <button
+                  key={expr.index}
+                  type="button"
+                  className={`avatar-expression-cell${selected ? ' selected' : ''}`}
+                  title={expr.labelZh}
+                  aria-pressed={selected}
+                  disabled={action.busy}
+                  onClick={() => {
+                    setDirty(true);
+                    setDraft((prev) => ({ ...prev, expressionIndex: expr.index }));
+                  }}
+                >
+                  <GrokBotAvatar
+                    preset={{ ...draft, expressionIndex: expr.index }}
+                    size={46}
+                  />
+                  <span>{expr.labelZh}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="avatar-studio-section-title">颜色</div>
+          <div className="avatar-color-grid" role="group" aria-label="颜色">
+            {GROK_COLOR_PALETTE.map((c) => {
+              const selected = draft.color.toLowerCase() === c.hex.toLowerCase();
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  className={`avatar-color-swatch${selected ? ' selected' : ''}`}
+                  title={c.labelZh}
+                  aria-pressed={selected}
+                  disabled={action.busy}
+                  onClick={() => {
+                    setDirty(true);
+                    setDraft((prev) => ({ ...prev, id: `${prev.shape}-${c.id}`, color: c.hex }));
+                  }}
+                >
+                  <span style={{ backgroundColor: c.hex }} />
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="avatar-studio-actions">
             <button
-              key={item.shape}
               type="button"
-              className={`avatar-shape-cell${selected ? ' selected' : ''}`}
-              title={item.labelZh}
-              aria-pressed={selected}
-              onClick={() => {
-                setDirty(true);
-                setDraft((prev) => ({
-                  ...prev,
-                  id: `${item.shape}-${prev.color}`,
-                  shape: item.shape,
-                  rotation: item.rotation,
-                }));
-              }}
+              className="secondary-button"
+              disabled={action.busy}
+              onClick={() => persist(null)}
+              title="放弃自定义并恢复该 Bot 的默认头像"
             >
-              <GrokBotAvatar
-                preset={{ ...draft, shape: item.shape, rotation: item.rotation }}
-                size={40}
-              />
+              <RotateCcw size={14} /> 恢复默认
             </button>
-          );
-        })}
-      </div>
-
-      <div className="avatar-studio-section-title">表情</div>
-      <div className="avatar-expression-grid" role="listbox" aria-label="表情">
-        {GROK_EXPRESSION_LIST.map((expr) => {
-          const selected = draft.expressionIndex === expr.index;
-          return (
             <button
-              key={expr.index}
               type="button"
-              className={`avatar-expression-cell${selected ? ' selected' : ''}`}
-              title={expr.labelZh}
-              aria-pressed={selected}
-              onClick={() => {
-                setDirty(true);
-                setDraft((prev) => ({ ...prev, expressionIndex: expr.index }));
-              }}
+              className="primary-button"
+              disabled={!dirty || action.busy}
+              onClick={() => persist(draft)}
+              title="保存到中心并同步到其他客户端"
             >
-              <GrokBotAvatar
-                preset={{ ...draft, expressionIndex: expr.index }}
-                size={46}
-              />
-              <span>{expr.labelZh}</span>
+              {action.busy ? '保存中…' : dirty ? '保存形象' : '已保存'}
             </button>
-          );
-        })}
-      </div>
-
-      <div className="avatar-studio-section-title">颜色</div>
-      <div className="avatar-color-grid" role="listbox" aria-label="颜色">
-        {GROK_COLOR_PALETTE.map((c) => {
-          const selected = draft.color.toLowerCase() === c.hex.toLowerCase();
-          return (
-            <button
-              key={c.id}
-              type="button"
-              className={`avatar-color-swatch${selected ? ' selected' : ''}`}
-              title={c.labelZh}
-              aria-pressed={selected}
-              onClick={() => {
-                setDirty(true);
-                setDraft((prev) => ({ ...prev, id: `${prev.shape}-${c.id}`, color: c.hex }));
-              }}
-            >
-              <span style={{ backgroundColor: c.hex }} />
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="avatar-studio-actions">
-        <button
-          type="button"
-          className="secondary-button"
-          disabled={action.busy}
-          onClick={() => persist(null)}
-          title="放弃自定义并恢复该 Bot 的默认头像"
-        >
-          <RotateCcw size={14} /> 恢复默认
-        </button>
-        <button
-          type="button"
-          className="primary-button"
-          disabled={!dirty || action.busy}
-          onClick={() => persist(draft)}
-          title="保存到中心并同步到其他客户端"
-        >
-          {action.busy ? '保存中…' : dirty ? '保存形象' : '已保存'}
-        </button>
-      </div>
+          </div>
+          <p className="avatar-studio-hint">保存后会同步到其他客户端。</p>
+        </>
+      ) : null}
       <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
-      <p className="avatar-studio-hint">
-        头像保存在中心，在其他客户端刷新后同步显示。
-      </p>
     </div>
   );
 }

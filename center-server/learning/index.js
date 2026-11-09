@@ -2,15 +2,15 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { HERMES_SKILL_TOOLS } from '../skills/hermes-tools.js';
-import { learningTools, MEMORY_GUIDANCE } from './hermes-tools.js';
+import { LEARNING_SKILL_TOOLS } from '../skills/learning-tools.js';
+import { learningTools, MEMORY_GUIDANCE } from './tools.js';
 
 const error = (code, message) => Object.assign(new Error(message), { code });
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const json = (value) => JSON.stringify(value);
 const parse = (row) => (row ? JSON.parse(row.json) : null);
 
-// Upstream-pinned defaults (Hermes @ 71736c9, read statically):
+// Defaults from upstream revision 71736c9:
 //   agent/background_review.py: _REVIEW_MAX_ITERATIONS=16, _REVIEW_MAX_INPUT_TOKENS_CAP=600_000,
 //     _REVIEW_INPUT_CONTEXT_FRACTION=0.75, _REVIEW_MAX_INPUT_TOKENS_FALLBACK=120_000.
 //   agent/agent_init.py: memory nudge default 10 (config memory.nudge_interval; counted in USER
@@ -19,8 +19,7 @@ const parse = (row) => (row ? JSON.parse(row.json) : null);
 //     _iters_since_skill >= _skill_nudge_interval).
 //   agent/curator.py: DEFAULT_INTERVAL_HOURS=24*7, DEFAULT_MIN_IDLE_HOURS=2,
 //     DEFAULT_STALE_AFTER_DAYS=14, DEFAULT_ARCHIVE_AFTER_DAYS=30, DEFAULT_CONSOLIDATE=False;
-//     curator.enabled defaults ON; first observation seeds last_run_at and defers one interval;
-//     manual 'hermes curator run' bypasses the idle/interval/paused gate.
+//     first observation seeds last_run_at and defers one interval.
 // Transport budgets below are ours (upstream runs in-process threads without them).
 const REVIEW_MAX_ITERATIONS = 16;
 const REVIEW_INPUT_TOKENS_CAP = 600_000;
@@ -34,7 +33,7 @@ const DEFAULT_STALE_AFTER_DAYS = 14;
 const DEFAULT_ARCHIVE_AFTER_DAYS = 30;
 
 const DEFAULT_CALL_TIMEOUT_MS = 900_000; // one agent.run / memory.call round trip, incl. Host-side model loop
-const DEFAULT_JOB_TIMEOUT_MS = 1_800_000; // whole runHermes invocation
+const DEFAULT_JOB_TIMEOUT_MS = 1_800_000; // whole learning job
 const DEFAULT_POLL_TIMEOUT_MS = 20_000; // contract: next long-poll must answer within 20s (Host client timeout 30s)
 // Upstream waits 2.0s for a cancelled review to acknowledge before letting the live turn proceed;
 // our equivalent bounds the Python child's shutdown before the job is finalized regardless.
@@ -44,13 +43,13 @@ const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 const MAX_STORED_RESULT_BYTES = 1024 * 1024;
 const MAX_MESSAGE = 2_000;
 
-// Methods the vendored Python may invoke via runHermes' onCall. Nothing else is answered.
+// Methods the Python worker may invoke through onCall.
 const ONCALL_METHODS = new Set(['agent.run', 'skill.call', 'memory.call', 'schedule.call']);
 // Tool names the Host may execute inside an outstanding agent.run (upstream dispatch-side
 // whitelist: skills toolset + read-only file tools restricted to own skills. Memory/material
 // tools execute locally on the Host; enqueueing them behind agent.run would deadlock.
 const REVIEW_TOOL_NAMES = new Set(['skills_list', 'skill_view', 'skill_manage', 'read_file', 'search_files']);
-// Review-scope origin for skills.hermes provenance, per job mode.
+// Provenance used by the skill service for each learning mode.
 const MODE_ORIGIN = { review: 'background_review', learn: 'background_review', curate: 'curator' };
 const MODES = new Set(Object.keys(MODE_ORIGIN));
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
@@ -112,13 +111,12 @@ function stripTopCredentials(value) {
 
 function defaultSettings() {
   return {
-    enabled: true,
     reviewModelRef: null, curatorModelRef: null,
     review: { memoryEvery: DEFAULT_MEMORY_EVERY, skillEvery: DEFAULT_SKILL_EVERY },
     curator: {
-      enabled: true, intervalHours: DEFAULT_CURATOR_INTERVAL_HOURS, minIdleHours: DEFAULT_CURATOR_MIN_IDLE_HOURS,
+      intervalHours: DEFAULT_CURATOR_INTERVAL_HOURS, minIdleHours: DEFAULT_CURATOR_MIN_IDLE_HOURS,
       staleAfterDays: DEFAULT_STALE_AFTER_DAYS, archiveAfterDays: DEFAULT_ARCHIVE_AFTER_DAYS,
-      consolidate: false, paused: false,
+      consolidate: false,
     },
     budget: { maxIterations: REVIEW_MAX_ITERATIONS, maxInputTokens: null, callTimeoutMs: DEFAULT_CALL_TIMEOUT_MS, jobTimeoutMs: DEFAULT_JOB_TIMEOUT_MS, pollTimeoutMs: DEFAULT_POLL_TIMEOUT_MS },
   };
@@ -135,32 +133,28 @@ function defaultCounters() {
 function validateSettingsPatch(current, patch) {
   const next = { ...current, review: { ...current.review }, curator: { ...current.curator }, budget: { ...current.budget } };
   for (const key of Object.keys(patch)) {
-    if (!['enabled', 'review', 'curator', 'budget', 'reviewModelRef', 'curatorModelRef'].includes(key)) throw error('VALIDATION_FAILED', 'Unknown setting ' + key);
+    if (!['review', 'curator', 'budget', 'reviewModelRef', 'curatorModelRef'].includes(key)) throw error('VALIDATION_FAILED', 'Unknown setting ' + key);
   }
   for (const key of ['reviewModelRef', 'curatorModelRef']) {
     if (patch[key] === undefined) continue;
     if (patch[key] !== null && (typeof patch[key] !== 'string' || patch[key].length > 512 || !/^[^/\s]+\/.+/.test(patch[key]))) throw error('VALIDATION_FAILED', 'Invalid ' + key);
     next[key] = patch[key];
   }
-  if (patch.enabled !== undefined) next.enabled = boolIn(patch.enabled, 'enabled');
   if (patch.review !== undefined) {
     const section = object(patch.review) ? patch.review : { invalid: true };
     for (const key of Object.keys(section)) {
       if (!['memoryEvery', 'skillEvery'].includes(key)) throw error('VALIDATION_FAILED', 'Unknown review setting ' + key);
-      // 0 disables that automatic scope, matching the upstream 'interval > 0' gates.
-      section[key] = intIn(section[key], 0, 10_000, 'review.' + key);
+      section[key] = intIn(section[key], 1, 10_000, 'review.' + key);
     }
     Object.assign(next.review, section);
   }
   if (patch.curator !== undefined) {
     const section = object(patch.curator) ? patch.curator : { invalid: true };
     for (const key of Object.keys(section)) {
-      if (!['enabled', 'intervalHours', 'minIdleHours', 'staleAfterDays', 'archiveAfterDays', 'consolidate', 'paused'].includes(key)) {
+      if (!['intervalHours', 'minIdleHours', 'staleAfterDays', 'archiveAfterDays', 'consolidate'].includes(key)) {
         throw error('VALIDATION_FAILED', 'Unknown curator setting ' + key);
       }
     }
-    if (section.enabled !== undefined) section.enabled = boolIn(section.enabled, 'curator.enabled');
-    if (section.paused !== undefined) section.paused = boolIn(section.paused, 'curator.paused');
     if (section.consolidate !== undefined) section.consolidate = boolIn(section.consolidate, 'curator.consolidate');
     for (const key of ['intervalHours', 'staleAfterDays', 'archiveAfterDays']) {
       // Upstream floors day/hour counts at 1 (a value < 1 would fire every tick / mass-transition).
@@ -194,15 +188,15 @@ function validateSettingsPatch(current, patch) {
 }
 
 /**
- * Learning service: per-Bot Hermes review/learn/curate jobs. Owns settings, automatic-trigger
- * counters, durable job summaries and the Host callback long-poll; the Python process (runHermes)
- * does the actual review loop, skill callbacks go to skills.hermes, and
+ * Learning service: per-Bot review/learn/curate jobs. Owns settings, automatic-trigger
+ * counters, durable job summaries and the Host callback long-poll. The Python worker
+ * runs the review loop, skill callbacks go to the skill service, and
  * agent.run/memory.call are driven by the initiating Host through next/respond.
  */
-export async function openLearningService({ dataRoot, store, skills, runHermes }) {
+export async function openLearningService({ dataRoot, store, skills, runLearningJob }) {
   if (typeof dataRoot !== 'string') throw error('INVALID_ARGUMENT', 'dataRoot is required');
-  if (!store || !skills || typeof skills.hermes !== 'function' || typeof runHermes !== 'function') {
-    throw error('INVALID_ARGUMENT', 'store, skills and runHermes are required');
+  if (!store || !skills || typeof skills.learningTool !== 'function' || typeof runLearningJob !== 'function') {
+    throw error('INVALID_ARGUMENT', 'store, skills and runLearningJob are required');
   }
   mkdirSync(dataRoot, { recursive: true });
   const db = new DatabaseSync(join(dataRoot, 'learning.sqlite'));
@@ -279,14 +273,18 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
     const row = settingsStmt.get.get(deviceId, botId);
     if (!row) return { settings: defaultSettings(), revision: 0 };
     const stored = JSON.parse(row.json);
-    // Merge over defaults so keys added later never read back as undefined.
-    const merged = defaultSettings();
-    Object.assign(merged.review, stored.review ?? {});
-    Object.assign(merged.curator, stored.curator ?? {});
-    Object.assign(merged.budget, stored.budget ?? {});
-    if (typeof stored.enabled === 'boolean') merged.enabled = stored.enabled;
-    for (const key of ['reviewModelRef', 'curatorModelRef']) merged[key] = stored[key] ?? null;
-    return { settings: merged, revision: row.revision };
+    // Copy only current settings from older rows. A legacy zero used to disable
+    // a review scope; use its normal interval when reading those rows.
+    const settings = defaultSettings();
+    for (const section of ['review', 'curator', 'budget']) {
+      for (const key of Object.keys(settings[section])) {
+        settings[section][key] = stored[section]?.[key] ?? settings[section][key];
+      }
+    }
+    if (settings.review.memoryEvery === 0) settings.review.memoryEvery = DEFAULT_MEMORY_EVERY;
+    if (settings.review.skillEvery === 0) settings.review.skillEvery = DEFAULT_SKILL_EVERY;
+    for (const key of ['reviewModelRef', 'curatorModelRef']) settings[key] = stored[key] ?? null;
+    return { settings, revision: row.revision };
   }
   function getCounters(deviceId, botId) {
     const row = countersStmt.get.get(deviceId, botId);
@@ -385,7 +383,7 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
     if (typeof clean.prompt !== 'string' || !clean.prompt) throw error('INVALID_ARGUMENT', 'agent.run requires a prompt');
     if (!Array.isArray(clean.messages)) clean.messages = [];
     // Center supplies the job-scoped tool surface; background forks cannot add material tools.
-    const tools = learningTools(runtime.job, HERMES_SKILL_TOOLS);
+    const tools = learningTools(runtime.job, LEARNING_SKILL_TOOLS);
     const allowed = new Set(tools.map((tool) => tool.function.name));
     // Authoritative schemas replace definitions supplied by a fork or transcript.
     clean.tools = tools;
@@ -436,25 +434,31 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
   }
 
   function skillContext(runtime, requestId) {
+    const { job, sessionId: conversationId } = runtime;
+    const span = job.snapshot.span;
     return {
-      deviceId: runtime.job.deviceId, botId: runtime.job.botId,
-      origin: MODE_ORIGIN[runtime.job.mode], sessionId: runtime.job.jobId, requestId,
+      deviceId: job.deviceId, botId: job.botId,
+      origin: MODE_ORIGIN[job.mode], sessionId: job.jobId, requestId,
+      learningSource: {
+        mode: job.mode, jobId: job.jobId, conversationId,
+        afterEntryId: span?.afterEntryId, throughEntryId: span?.throughEntryId,
+      },
     };
   }
 
   async function onCall(runtime, method, params) {
     if (runtime.finished) throw error('INVALID_STATE', 'Job already finished');
-    if (!ONCALL_METHODS.has(method)) throw error('FORBIDDEN', 'Unsupported Hermes callback ' + method);
+    if (!ONCALL_METHODS.has(method)) throw error('FORBIDDEN', 'Unsupported learning callback ' + method);
     if (method === 'skill.call') {
       const name = object(params) ? params.name : null;
       const args = object(params) && object(params.args) ? params.args : {};
       if (typeof name !== 'string' || !name) throw error('INVALID_ARGUMENT', 'skill.call requires a name');
-      return await skills.hermes(skillContext(runtime, 'skill-' + ++runtime.skillCalls), name, args);
+      return await skills.learningTool(skillContext(runtime, 'skill-' + ++runtime.skillCalls), name, args);
     }
-    if (method === 'schedule.call' && (runtime.job.mode !== 'curate' || !['referenced_skill_names', 'rewrite_skill_refs'].includes(params?.name))) {
-      throw error('FORBIDDEN', 'Schedule callbacks are restricted to curator skill references');
+    if (method === 'schedule.call' && (runtime.job.mode !== 'curate' || params?.name !== 'referenced_skill_names')) {
+      throw error('FORBIDDEN', 'Curator jobs can only read schedule skill references');
     }
-    if (method === 'memory.call' && !learningTools(runtime.job, HERMES_SKILL_TOOLS).some((tool) => tool.function.name === 'memory')) {
+    if (method === 'memory.call' && !learningTools(runtime.job, LEARNING_SKILL_TOOLS).some((tool) => tool.function.name === 'memory')) {
       throw error('UNSUPPORTED_TARGET', 'Memory tools are not enabled for this job');
     }
     return await enqueueHostCall(runtime, method, params);
@@ -527,11 +531,10 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
       automatic: job.automatic,
       reviewMemory: job.reviewMemory ?? null,
       reviewSkills: job.reviewSkills ?? null,
-      tools: learningTools(job, HERMES_SKILL_TOOLS),
+      tools: learningTools(job, LEARNING_SKILL_TOOLS),
       budget: { ...runtime.budget },
       // Upstream 'curator' config section, original keys verbatim for the bound config provider.
       curator: {
-        enabled: settings.curator.enabled,
         interval_hours: settings.curator.intervalHours,
         min_idle_hours: settings.curator.minIdleHours,
         stale_after_days: settings.curator.staleAfterDays,
@@ -545,7 +548,7 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
       },
     };
     try {
-      const outcome = await runHermes(
+      const outcome = await runLearningJob(
         { mode: job.mode, snapshot: job.snapshot, focus: job.focus ?? null, config, stateDir: runtime.stateDir },
         { onCall: (method, params) => onCall(runtime, method, params), signal: runtime.abort.signal },
       );
@@ -587,7 +590,11 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
       : null;
     return {
       deviceId: identity.deviceId, botId: identity.botId,
-      settings: { ...settings, revision },
+      // Older Hosts use these read-only flags to decide whether to schedule curator jobs.
+      settings: {
+        ...settings, revision, enabled: true,
+        curator: { ...settings.curator, enabled: true, paused: false },
+      },
       counters,
       activeJob: runtime ? pickJob(runtime.job) : null,
       lastJob: lastJob ? pickJob(lastJob) : null,
@@ -626,10 +633,6 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
     transaction(() => {
       settingsStmt.put.run(identity.deviceId, identity.botId, json(merged), current.revision + 1);
     });
-    if (current.settings.enabled && merged.enabled === false) {
-      const active = runtimes.get(activeByBot.get(botKey(identity.deviceId, identity.botId)));
-      if (active) cancelJob(active, 'cancel');
-    }
     return { settings: { ...merged, revision: current.revision + 1 } };
   }
 
@@ -678,12 +681,6 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
         counters.reviewCursor = { sessionId: snapshot.sessionId, throughEntryId: snapshot.span.throughEntryId };
         saveCounters(deviceId, botId, counters);
       }
-      if (!settings.enabled) {
-        if (!automatic) throw error('FORBIDDEN', 'Learning is disabled for this Bot');
-        const decision = { status: 'disabled', jobId: null, mode, automatic };
-        recordSubmission(deviceId, botId, input.requestId, fingerprint, decision);
-        return { replay: decision };
-      }
       let reviewMemory = null;
       let reviewSkills = null;
       if (automatic && mode === 'review') {
@@ -695,8 +692,8 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
         // second concurrent review), so 'busy' still consumes the trigger.
         if (snapshot.memoryEnabled === true) counters.turnsSinceMemoryReview += 1;
         counters.itersSinceSkillReview += iterations;
-        reviewMemory = settings.review.memoryEvery > 0 && counters.turnsSinceMemoryReview >= settings.review.memoryEvery;
-        reviewSkills = settings.review.skillEvery > 0 && counters.itersSinceSkillReview >= settings.review.skillEvery;
+        reviewMemory = snapshot.memoryEnabled === true && counters.turnsSinceMemoryReview >= settings.review.memoryEvery;
+        reviewSkills = counters.itersSinceSkillReview >= settings.review.skillEvery;
         if (!reviewMemory && !reviewSkills) {
           saveCounters(deviceId, botId, counters);
           const decision = { status: 'deferred', jobId: null, mode, automatic, reason: 'interval', counters: { turnsSinceMemoryReview: counters.turnsSinceMemoryReview, itersSinceSkillReview: counters.itersSinceSkillReview } };
@@ -707,15 +704,8 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
         if (reviewSkills) counters.itersSinceSkillReview = 0;
       }
       if (automatic && mode === 'curate') {
-        // Upstream curator.should_run_now: enabled + not paused + last_run_at older than
-        // intervalHours; a missing last_run_at is seeded and the first pass deferred.
+        // The Center gates subsequent curator passes on the configured interval.
         const lastRunAt = counters.lastCuratorRunAt ? Date.parse(counters.lastCuratorRunAt) : null;
-        if (!settings.curator.enabled || settings.curator.paused) {
-          const decision = { status: 'disabled', jobId: null, mode, automatic, reason: settings.curator.paused ? 'paused' : 'curator-disabled' };
-          recordSubmission(deviceId, botId, input.requestId, fingerprint, decision);
-          saveCounters(deviceId, botId, counters);
-          return { replay: decision };
-        }
         // The first admitted pass lets upstream seed its own state and defer.
         if (lastRunAt !== null && now - lastRunAt < settings.curator.intervalHours * 3_600_000) {
           const decision = { status: 'deferred', jobId: null, mode, automatic, reason: 'interval', nextEligibleAt: new Date(lastRunAt + settings.curator.intervalHours * 3_600_000).toISOString() };
@@ -955,29 +945,20 @@ export async function openLearningService({ dataRoot, store, skills, runHermes }
       }
       if (existing.response != null) {
         const result = JSON.parse(existing.response);
-        let parsed = result;
-        if (typeof result === 'string') {
-          try { parsed = JSON.parse(result); } catch { /* preserve original result */ }
-        }
-        const resumePublication = input.name === 'skill_manage' && Array.isArray(parsed?.publications)
-          && parsed.publications.some((item) => ['queued', 'activating', 'failed'].includes(item.status));
-        if (!resumePublication) return { jobId: job.jobId, callId: input.callId, name: input.name, result };
-        // The skills service replays the committed draft by request id; only publication resumes.
-      } else {
-        // A claimed call with no result may have committed before a crash.
-        return {
-          jobId: job.jobId, callId: input.callId, name: input.name,
-          result: { success: false, error: { code: 'INDETERMINATE', message: 'Tool call outcome is unknown; it was not re-executed' } },
-        };
+        return { jobId: job.jobId, callId: input.callId, name: input.name, result };
       }
-    } else {
-      // Claim before side effects so an interrupted call is never silently duplicated.
-      toolCallStmt.insert.run(job.jobId, input.callId, input.name, argsText, new Date().toISOString());
+      // A claimed call with no result may have committed before a crash.
+      return {
+        jobId: job.jobId, callId: input.callId, name: input.name,
+        result: { success: false, error: { code: 'INDETERMINATE', message: 'Tool call outcome is unknown; it was not re-executed' } },
+      };
     }
+    // Claim before side effects so an interrupted call is never silently duplicated.
+    toolCallStmt.insert.run(job.jobId, input.callId, input.name, argsText, new Date().toISOString());
     const execution = (async () => {
       let result;
       try {
-        result = await skills.hermes(skillContext(runtime, input.callId), input.name, args);
+        result = await skills.learningTool(skillContext(runtime, input.callId), input.name, args);
       } catch (err) {
         // Declared tool failures surface to the review model as success:false results, not transport errors.
         result = { success: false, error: { code: typeof err?.code === 'string' ? err.code : 'TOOL_ERROR', message: typeof err?.message === 'string' ? err.message.slice(0, MAX_MESSAGE) : 'Tool failed' } };

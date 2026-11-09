@@ -65,6 +65,7 @@ import type {
   BotSoul,
   BotSoulUpdate,
   BotLearningInput,
+  BotSkillReviewInput,
   WorkLiveFrame,
   ShowerCreateOptions,
   ShowerFrame,
@@ -184,6 +185,7 @@ export interface ControlClient {
   getBotSoul(botId: string, options?: ControlClientCallOptions): Promise<BotSoul>;
   setBotSoul(botId: string, input: BotSoulUpdate, options?: ControlClientCallOptions): Promise<BotSoul>;
   manageBotLearning(botId: string, input: BotLearningInput, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
+  reviewBotSkills(botId: string, input: BotSkillReviewInput, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
   /*
    * Unified Shower (Android/Windows/Linux): same argument order as the Runtime
    * methods, with this client's trailing {signal} options. The body stays the

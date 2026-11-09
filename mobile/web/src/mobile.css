@@ -51,7 +51,7 @@
 /* 远端页已有专属 .remote-panel-toggle，隐藏桌面侧栏折叠按钮避免重复。 */
 .remote-client .sidebar-toggle-btn { display: none; }
 
-/* 本机 Host 页 Grok × Hermes 工作区聚焦胶囊栏 */
+/* 本机 Host 页工作区聚焦胶囊栏 */
 .host-focus-bar {
   display: flex;
   flex-wrap: wrap;

@@ -742,6 +742,7 @@ export interface Runtime {
    * that the review already ran); cancel stops it.
    */
   manageBotLearning(botId: string, input: BotLearningInput): Promise<Record<string, unknown>>;
+  reviewBotSkills(botId: string, input: BotSkillReviewInput): Promise<Record<string, unknown>>;
   scheduleTask(botId: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
   /* Unified Shower environment (host.shower): the same six methods on every platform. */
   vaultControl(input: VaultControlInput): Promise<VaultControlResult>;
@@ -1240,6 +1241,7 @@ export interface ControlClient {
   getBotSoul(botId: string, options?: ControlClientCallOptions): Promise<BotSoul>;
   setBotSoul(botId: string, input: BotSoulUpdate, options?: ControlClientCallOptions): Promise<BotSoul>;
   manageBotLearning(botId: string, input: BotLearningInput, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
+  reviewBotSkills(botId: string, input: BotSkillReviewInput, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
   scheduleTask(botId: string, input: Record<string, unknown>, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
   vaultControl(input: VaultControlInput, options?: ControlClientCallOptions): Promise<VaultControlResult>;
   getShowerStatus(target: ShowerTarget, options?: ControlClientCallOptions): Promise<ShowerSession>;
@@ -1397,15 +1399,21 @@ export interface BotSkillInput {
   requestId?: string;
 }
 
+/** Review an unpublished learning change, then approve the exact revision that was read. */
+export type BotSkillReviewInput =
+  | { action: 'list' }
+  | { action: 'read'; skillId: string }
+  | { action: 'read'; skillId: string; path: string; expectedRevision: number }
+  | { action: 'approve'; skillId: string; expectedRevision: number; requestId: string };
+
 export type BotLearningAction = 'status' | 'configure' | 'learn' | 'review' | 'curate' | 'cancel';
 
 /** CAS settings patch; auxiliary refs never introduce new provider credentials. */
 export interface BotLearningSettingsPatch {
-  enabled?: boolean;
   reviewModelRef?: string | null;
   curatorModelRef?: string | null;
   review?: { memoryEvery?: number; skillEvery?: number };
-  curator?: { enabled?: boolean; intervalHours?: number; minIdleHours?: number; staleAfterDays?: number; archiveAfterDays?: number; consolidate?: boolean; paused?: boolean };
+  curator?: { intervalHours?: number; minIdleHours?: number; staleAfterDays?: number; archiveAfterDays?: number; consolidate?: boolean };
   budget?: { maxIterations?: number; maxInputTokens?: number | null; callTimeoutMs?: number; jobTimeoutMs?: number; pollTimeoutMs?: number };
 }
 
@@ -2184,6 +2192,7 @@ export interface RemoteControlMethodMap {
   getSubmission: { params: { botId: string; requestId: string }; result: PrimarySubmission };
   history: { params: HistoryOptions & { botId: string }; result: HistoryPage };
   getBotBoard: { params: BotBoardParams; result: BotBoardSnapshot };
+  reviewBotSkills: { params: { botId: string; input: BotSkillReviewInput }; result: Record<string, unknown> };
   clearHistory: { params: { botId: string }; result: ClearHistoryResult };
   compact: { params: { botId: string }; result: CompactResult };
   abort: { params: { botId: string }; result: { botId: string } };

@@ -12,3 +12,10 @@
 .vault-items li { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; }
 .vault-items li p { margin-top: 4px; }
 .vault-panel [role="alert"] { color: var(--danger); }
+.vault-panel-desktop h4 { margin: 0; }
+.vault-panel-desktop .vault-desktop-tools {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}

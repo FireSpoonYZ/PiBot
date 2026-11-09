@@ -161,29 +161,16 @@
   pointer-events: none;
 }
 
-.hub-device-chips {
+.hub-device-filter {
   flex: none;
-  display: flex;
-  gap: 6px;
-  overflow-x: auto;
+  display: block;
   padding: 0 14px 8px;
-  scrollbar-width: none;
 }
-.hub-device-chips::-webkit-scrollbar { display: none; }
-.hub-device-chips .chip {
-  flex: none;
-  min-height: 26px;
-  padding: 3px 11px;
-  font-size: 12px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--bg);
-  color: var(--muted);
-}
-.hub-device-chips .chip.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+.hub-device-filter select {
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 8px;
+  font-size: 13px;
 }
 
 .hub-sidebar > .error-banner,
@@ -350,6 +337,35 @@
   border-top: 1px solid var(--line);
 }
 .hub-new-btn { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.hub-list-more { position: relative; }
+.hub-list-more > summary { cursor: pointer; list-style: none; }
+.hub-list-more > summary::-webkit-details-marker { display: none; }
+.hub-list-more-actions {
+  position: absolute;
+  inset-inline-end: 0;
+  bottom: calc(100% + 6px);
+  z-index: 3;
+  min-width: 156px;
+  display: grid;
+  gap: 2px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: var(--shadow-sm);
+}
+.hub-list-more-actions button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  text-align: start;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+}
+.hub-list-more-actions button:not(:disabled):hover { background: var(--accent-soft); }
 
 /* ————— 主舞台 ————— */
 
@@ -419,6 +435,14 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.chat-header-settings-icon {
+  flex: none;
+  color: var(--muted);
+}
+.chat-header-pill:hover .chat-header-settings-icon,
+.chat-header-pill[aria-expanded='true'] .chat-header-settings-icon {
+  color: var(--accent-strong, var(--accent));
+}
 
 .live-dot {
   flex: none;
@@ -460,6 +484,7 @@
   background: var(--bg);
   padding: 0 8px;
   min-height: 32px;
+  min-width: 0;
   color: var(--muted);
 }
 .chat-search-bar input {
@@ -467,6 +492,7 @@
   background: transparent;
   width: 160px;
   min-height: 30px;
+  min-width: 0;
   padding: 0;
 }
 .chat-search-bar input:focus { outline: none; border: 0; }
@@ -676,6 +702,27 @@
 }
 .composer-plus { flex: none; width: 36px; height: 36px; border-radius: 50%; }
 
+.chat-awaiting-answer {
+  flex: none;
+  margin: 0;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  background: var(--accent-soft);
+  font-size: 13px;
+}
+.stop-pill small { color: inherit; font-size: 11px; opacity: .8; }
+
+.bot-form-advanced {
+  min-width: 0;
+  grid-column: 1 / -1;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+.bot-form-advanced > summary { cursor: pointer; color: var(--muted); }
+.bot-form-advanced[open] > summary { margin-bottom: 10px; }
+
 /* ————— 右侧工作台抽屉 ————— */
 
 /* Radix Dialog Content：modal 关闭时不渲染；宽屏并排为 flex 项，紧凑模态为 fixed 浮层。 */
@@ -699,28 +746,23 @@
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
 }
-.inspector-head .pill-tabs {
+.inspector-title {
   flex: 1;
-  display: flex;
-  gap: 4px;
   min-width: 0;
-  overflow-x: auto;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
-.inspector-head .pill-tabs button {
+.inspector-head > select {
   flex: none;
-  min-height: 30px;
-  padding: 4px 13px;
-  font-size: 13px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--bg);
-  color: var(--muted);
+  min-height: 32px;
+  max-width: 128px;
+  padding: 3px 8px;
 }
-.inspector-head .pill-tabs button.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-}
+.inspector-device { margin: 0; }
 
 .inspector-body {
   flex: 1;

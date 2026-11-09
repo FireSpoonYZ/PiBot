@@ -347,10 +347,20 @@ or recreates a desktop.
 Error codes are the shared set: `SHOWER_UNAVAILABLE`, `SHOWER_UNSUPPORTED`,
 `SHOWER_BUSY`, `SHOWER_AUTH_REQUIRED`, `SHOWER_PERMISSION_REQUIRED`,
 `SHOWER_SESSION_NOT_FOUND`, `SHOWER_SESSION_MISMATCH`, `SHOWER_NOT_READY`,
-`SHOWER_INPUT_FAILED`, `SHOWER_FRAME_TOO_LARGE`, `SHOWER_BACKEND_FAILED`, plus the
+`SHOWER_INPUT_FAILED`, `SHOWER_FRAME_TOO_LARGE`, `SHOWER_CAPTURE_BLOCKED`,
+`SHOWER_CAPTURE_TIMEOUT`, `SHOWER_CAPTURE_FAILED`, `SHOWER_BACKEND_FAILED`, plus the
 existing `INVALID_ARGUMENT`/`CANCELLED`. Input keeps the existing not-sent /
 unconfirmed / responded outcome semantics and is never retried automatically; a
 session id from another session or Actor is rejected instead of acted on.
+
+Android captures retain secure/protected-content redaction. On API 35+, the native
+capture status is recorded without image content; permission denial reports
+`SHOWER_CAPTURE_BLOCKED`, a four-second wait without a callback reports
+`SHOWER_CAPTURE_TIMEOUT`, and other callback/buffer failures report
+`SHOWER_CAPTURE_FAILED`. API 34 callbacks do not expose the native status and
+report missing buffers as capture failures. A screenshot never sends BACK or
+replays input. If a password keyboard has just blocked capture, dismiss it only
+inside the owning virtual display before requesting a new frame.
 
 ## Built-in Cua
 

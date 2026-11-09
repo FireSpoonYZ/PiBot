@@ -21,6 +21,13 @@
   background: var(--surface);
 }
 .desktop-shell .pending-panel-head h3 { margin: 0; }
+.desktop-shell .pending-context {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
 
 /* 状态过滤胶囊栏（仅桌面壳；移动容器见文件底部例外规则） */
 .desktop-shell .pending-filter-tabs {

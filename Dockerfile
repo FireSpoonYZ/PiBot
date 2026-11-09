@@ -14,10 +14,9 @@ RUN node scripts/prepare-builtin-plugins.mjs
 
 FROM node:26.13.0-bookworm
 LABEL org.opencontainers.image.source="https://github.com/FireSpoonYZ/PiBot"
-# Python runs only at the center, for the vendored Hermes learning modules
-# (center-server/hermes/vendor/, requires-python >=3.11,<3.15). bookworm ships
-# python3.11; the Node adapter launches it via env HERMES_PYTHON (default
-# python3). No Python is installed or needed on Android.
+# Bot learning runs Python only in the Center. Bookworm provides Python 3.11
+# for center-server/learning-engine/vendor/. Set PIBOT_LEARNING_PYTHON to
+# select an interpreter explicitly; the default is python3.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 \
     && rm -rf /var/lib/apt/lists/*

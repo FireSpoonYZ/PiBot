@@ -13,6 +13,7 @@ import com.ai.assistance.shower.device.DisplayInfo;
 import com.ai.assistance.shower.device.Size;
 import com.ai.assistance.shower.wrappers.ServiceManager;
 import com.ai.assistance.shower.wrappers.SurfaceControl;
+import com.ai.assistance.shower.wrappers.WindowManager;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
@@ -63,6 +64,13 @@ final class DisplayCapture {
             image = waitForImage(reader);
             if (image == null) throw new IllegalStateException("Screenshot timed out");
             return encodeImageToPng(image);
+        } catch (WindowManager.CaptureException failure) {
+            Main.logToFile("Display capture failed for " + displayId + ": " + failure.getMessage()
+                    + ", native status=" + failure.status, null);
+            throw failure;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Display capture interrupted", interrupted);
         } catch (Throwable throwable) {
             Main.logToFile("Display capture failed for " + displayId + ": " + throwable, throwable);
             throw new IllegalStateException("Unable to capture virtual display", throwable);

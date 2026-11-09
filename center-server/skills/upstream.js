@@ -1,6 +1,6 @@
-// Upstream-faithful helpers for the Hermes skill adapter (tools/skill_manager_tool.py
+// Upstream-faithful helpers for the learning skill adapter (tools/skill_manager_tool.py
 // and tools/skill_usage.py, pinned at 71736c9f32597bbca9d89cede5aa136e55946b2f).
-// Adapted parts are marked ADAPTED: upstream runs on a Hermes filesystem; this module
+// Adapted parts are marked ADAPTED: upstream runs on a local filesystem; this module
 // works on the center-managed per-Bot skill store.
 //
 // yaml is resolved through host-core's installed copy (host-core/third-party/pi-skills.js

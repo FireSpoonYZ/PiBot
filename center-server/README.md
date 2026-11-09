@@ -2,6 +2,12 @@
 
 中心（Center）是多设备 Bot 平台的权威配置面：管理 provider/模型目录、设备登记、托管插件/技能的安装与部署、Bot 绑定与生效配置，并经认证中继向 Host 下发快照与部署计划。服务为 Fastify 应用（`openCenterServer`），数据根下按域保存独立 SQLite 与 artifact 存储；控制台（center-web）与 Host 设备分别走不同的认证入口，Host 侧路由要求已登记的设备身份。
 
+## 启动与排查
+
+中心可以用发行镜像部署，也可以从源码构建镜像。部署后在浏览器完成首次初始化和模型配置，再在客户端验证首轮。 [首次部署](../README.md#首次部署并跑通一个-bot) · [中心镜像与诊断](../docs/center-linux-deployment.md)
+
+中心 Dockerfile 使用 Node.js **26.13.0**，按三个包各自的锁文件安装 `center-web`、`center-server` 和 `host-core`。仅开发管理页时，可在仓库根执行 `npm ci --prefix center-web` 和 `npm run center:build`。
+
 ## Bot 模型选择与 Star
 
 Windows、Linux、Android 的 Bot 模型页共用 All / Star 选择器。All 显示已启用且凭证已配置（或明确无需凭证）的服务商模型，包括 pi.dev 自动同步和手动添加的模型；显式停用的模型不显示。已知 provider 修改代理地址后仍会同步目录，新增同名 provider 立即应用中心缓存。中心启动及每 24 小时同步一次，失败时继续使用已有目录。
@@ -26,9 +32,7 @@ Star 按完整 `provider/modelId` 保存在中心，供该中心的三个客户�
 
 部分 Host 插件在中心注册为"默认绑定"能力：当安装处于已启用状态（`installation.enabled` 且 activation 为 `enabled`）时，新注册的 Bot 自动获得 `enabled: true`、revision 1 的绑定，沿用全局配置。已有 Bot 在安装首次变为已启用状态时同样补发默认绑定。**显式禁用、自定义 overrides 或既有 revision 不会被覆盖。**
 
-当前默认绑定能力：`e-launcher.hindsight`（默认 `projectId: <name>-<botId>`）、`e-launcher.billion-context`（使用全局配置）。默认绑定仅在 Bot 首次注册或安装首次激活时写入一次；之后所有变更走普通 `PUT /api/devices/:deviceId/bots/:botId/capabilities/:id` 修订检查路径。
-
-生产部署 Billion Context 时，经 owner session 上传 artifact 并完成 `POST /api/installations` + `POST /api/installations/:id/enable`；激活成功后所有尚无 BC 绑定记录的 Bot 自动获得默认启用绑定。无额外迁移步骤；已有显式禁用或自定义 overrides 的 Bot 不受影响。
+内置问卷、待办、Vault 与 Billion Context 在新中心默认启用。Hindsight 和 Webfox 随镜像提供，启用并配置服务后可下发 Bot 绑定。Hindsight 的默认 `projectId` 为 `<name>-<botId>`。可在管理页查看全局激活与单 Bot 绑定。自定义制品按普通安装与启用流程部署。 [中心插件管理](../docs/center-linux-deployment.md#模型能力与客户端版本)
 
 ## 每轮准入（turn admission）
 

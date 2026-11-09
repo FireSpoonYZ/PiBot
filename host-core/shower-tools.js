@@ -304,7 +304,9 @@ export function createShowerTools({ host, getHarness, manager }) {
         + '在 codemode 中须显式 text(block.text)/image(block) 将各块传给模型，勿把图片 base64 打印成文本。'
         + '错误码：SHOWER_UNAVAILABLE/SHOWER_NOT_READY/SHOWER_BUSY/SHOWER_SESSION_NOT_FOUND/'
         + 'SHOWER_SESSION_MISMATCH/SHOWER_UNSUPPORTED/SHOWER_AUTH_REQUIRED/SHOWER_PERMISSION_REQUIRED/'
-        + 'SHOWER_INPUT_FAILED/SHOWER_FRAME_TOO_LARGE/SHOWER_BACKEND_FAILED。',
+        + 'SHOWER_INPUT_FAILED/SHOWER_FRAME_TOO_LARGE/SHOWER_CAPTURE_BLOCKED/SHOWER_CAPTURE_TIMEOUT/'
+        + 'SHOWER_CAPTURE_FAILED/SHOWER_BACKEND_FAILED。截图被阻止或超时且刚打开了密码键盘时，'
+        + '可在本 Shower 会话内收起键盘后重新截图；不要重放输入。',
       parameters: {
         type: 'object',
         properties: {

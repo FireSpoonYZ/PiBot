@@ -1,3 +1,0 @@
-# Vendored upstream blobs must stay byte-identical to the pinned commit.
-# Disable all line-ending/text conversion so git never rewrites these bytes.
-* -text

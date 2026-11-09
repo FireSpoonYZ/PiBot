@@ -1,28 +1,36 @@
 # Linux 中心部署
 
-中心管理页、API、SSE 与 `/v1/link` 共用一个内部 HTTP listener，默认端口 `8080`。HTTPS/WSS 由用户自己的反向代理提供。中心进程通过内部调用控制 Relay；不需要对公网域名进行回环连接。
+中心管理页、API、SSE 与 `/v1/link` 共用容器内的 HTTP `8080`。外部设备经同一个 HTTPS 地址访问，`/v1/link` 使用 WSS。中心进程通过内部调用控制 Relay。
 
 ## 镜像与配置
 
-`compose.yaml` 默认使用 `ghcr.io/firespoonyz/e-launcher-center:latest`。`center.yml` 在版本 tag 发布 `<version>` 与稳定 `latest`，main 构建只发布 `sha-<完整提交>`；其他分支和 PR 只构建验证，不覆盖稳定标签。正式流水线的实际运行状态见[进度记录](open-source-release-progress.md)。
+正式中心镜像支持 Linux `amd64` 和 `arm64`。源码中的 `compose.yaml` 使用 `ghcr.io/firespoonyz/pibot-center:latest`，发行版附带的 Compose 文件固定到同版镜像标签。普通分支或 PR 构建镜像用于验证，正式发布才推送版本标签与 `latest`。 [发布说明](releasing.md)
+
+下载同一发行版的 `compose.yaml`、`compose.https.yaml`、`Caddyfile`、`center.env.example` 后，在同一目录执行以下命令。 [GitHub Releases](https://github.com/FireSpoonYZ/PiBot/releases/latest)
 
 ```sh
 umask 077
 cp center.env.example center.env
-# 编辑 CENTER_PUBLIC_URL=https://center.example.com
-docker compose up -d
-docker compose logs center
+# 编辑 center.env，将 CENTER_PUBLIC_URL 设为实际 HTTPS 根地址。
+docker compose -f compose.yaml -f compose.https.yaml up -d
+docker compose -f compose.yaml -f compose.https.yaml ps
 ```
 
-源码构建使用 `sh scripts/center-build.sh`，再按 Compose 注释选择 `e-launcher-center:local` 与 `build:`。Dockerfile 会从 `scripts/pi-main.json` 的固定提交准备 Pi tarball，再分别安装中心和 Host 依赖。无需把宿主 node_modules 或本地 build 目录放进镜像。
+自带 Caddy 需要域名已指向服务器，以及可用的 TCP 80 和 443。已有 HTTPS 反向代理时，改用 `docker compose up -d`，按下节配置。中心端口默认只映射到 `127.0.0.1:8080`。使用容器反代时可让代理加入同一 Docker 网络，访问 `center:8080`，并移除中心的 `ports`。中心数据保存在 `center-data` volume，容器以非 root 用户运行。
 
-Compose 默认只发布 `127.0.0.1:8080`；容器反代可使用同一 Docker 网络的 `center:8080` 并移除 ports。数据放在 `center-data` volume，容器以非 root 用户运行。Hermes 的 Python 只在中心镜像内运行，Android 不需要 Python。
+镜像内置固定版本的 Bitwarden CLI `@bitwarden/cli@2026.10.1`，用于 Vaultwarden 外部密码库。`bw serve` 只在容器回环上运行。自管部署可用 `PIBOT_BW_CLI` 指定可信的绝对路径，Vault 登录资料在中心设置页输入。 [Vault 文档](vault.md)
 
-镜像还在 `/opt/bitwarden-cli` 内置固定版本官方 Bitwarden CLI（`@bitwarden/cli` 2026.10.1），供 Vault 的 Vaultwarden 外部密码库使用：适配器只在容器回环上启动 `bw serve`，不新增任何发布端口；API key 与主密码只经私密通道（交互式 stdin 提示与 `POST /unlock` JSON 体）进入，不写 argv/env/文件/日志。自管部署如需替换可信 CLI 入口，可设绝对路径 `PIBOT_BW_CLI`（见 `center.env.example`）；秘密一律在中心 Vault 设置页输入，不写入 env 文件。
+### 从源码构建中心镜像
+
+```sh
+sh scripts/center-build.sh
+```
+
+在 Compose 中将中心的 `image` 改为 `pibot-center:local`，再用上述命令启动。Dockerfile 使用 Node.js `26.13.0`，分别按锁文件安装中心前端、中心服务与 Host 依赖，构建网页并准备内置插件。镜像包含 Bot 学习所需的 Python。桌面和 Android 客户端使用各自的 Node 运行时。
 
 ## 反向代理
 
-所有路径转发到同一后端，保留外部 Host（含端口），为 WebSocket 传递 Upgrade/Connection，SSE 关闭缓冲。Nginx 示例：
+所有路径转发到同一后端，保留外部 Host（含端口），为 WebSocket 传递 Upgrade/Connection，SSE 关闭缓冲。下面是 Nginx 的 location 配置。
 
 ```nginx
 location /v1/link {
@@ -47,7 +55,7 @@ location / {
 
 ## 首次初始化
 
-空数据目录启动后进入初始化模式：
+空数据目录启动后进入初始化模式。
 
 - `GET /api/health` 返回 `{"status":"setup"}`。
 - `GET /api/setup` 返回初始化状态和非秘密地址，不返回初始化码。
@@ -57,7 +65,7 @@ location / {
 
 配置文件与 token 文件使用私有权限。DATA_ROOT 需要支持 hardlink 的本地文件系统；已有业务数据但缺少完整配置时拒绝生成新密钥。重启复用原配置，没有网页重置或覆盖已有密钥的入口。
 
-完整旧环境变量配置仍可使用：`CENTER_ENCRYPTION_KEY_HEX`、`CENTER_SESSION_KEY_HEX`、`CENTER_OWNER_PASSWORD_HASH` 三项必须同时提供，并保留原值。两个 key 各为独立 32 字节 hex；密码哈希格式为 `scrypt$<salt hex>$<key hex>`。旧 env 不自动搬进配置文件；持久配置存在时，冲突的密钥覆盖会被拒绝。
+旧部署仍可使用环境变量配置。`CENTER_ENCRYPTION_KEY_HEX`、`CENTER_SESSION_KEY_HEX`、`CENTER_OWNER_PASSWORD_HASH` 三项必须同时提供，并保留原值。两个 key 各为独立 32 字节 hex。密码哈希格式为 `scrypt$<salt hex>$<key hex>`。旧 env 按原方式读取。持久配置存在时，冲突的密钥覆盖会被拒绝。
 
 ## 配对与设备身份
 
@@ -69,19 +77,59 @@ location / {
 
 ## 模型、能力与客户端版本
 
-登录中心后管理 provider、模型、凭据、设备 Bot 与受管能力。共享默认模型和单 Bot 覆盖采用修订检查；设备回执显示实际应用结果。Skill 管理和 Hermes 学习见[Bot 管理与学习](bot-management-learning.md)。
+登录中心后管理 provider、模型、凭据、设备 Bot 与受管能力。共享默认模型和单 Bot 覆盖采用修订检查。设备回执显示实际应用结果。Skill 与 Bot 学习的操作见专项文档。 [Bot 管理与学习](bot-management-learning.md)
 
-Billion Context 为独立受管插件，按[插件说明](../plugins/billion-context/README.md)构建、上传和启用；已有显式关闭或 overrides 不会被默认绑定覆盖。
+新中心会准备内置的受管插件，其中 Billion Context 默认启用。自定义版本可通过制品上传，Bot 已保存的显式禁用和 overrides 会保留。 [Billion Context 插件](../plugins/billion-context/README.md)
 
 “客户端版本”先保存上传草稿，再显式发布或撤回。NSIS/DEB 需要 updater 签名，APK 需要 versionCode，所有文件流式核对大小和摘要。设备认证后才能查询、下载；中心分发签名，不保存发布私钥。元数据生成与正式签名要求见[发布说明](releasing.md)。
 
-## 升级、备份与迁移
+## 按层定位故障
 
-备份时先停止本中心的写入，再归档 DATA_ROOT，包括 `center-config.json`、数据库及制品。配置中含解密已存凭据所需的密钥，备份目录应为私有权限。旧 env 部署还需单独保存 `center.env`；反代证书由反代系统保存。
+在有源码和 Node.js 的环境中，可从仓库根运行只读的网络检查。
 
 ```sh
-docker compose stop center
+node scripts/check-center.mjs https://center.example.com
+```
+
+该命令检查 `/api/health` 和 `/v1/link` 的 WebSocket Upgrade。继续用下表确认设备认证、Host、配置、模型与 Shower。只有发行资产时，使用下方的 `curl` 示例。
+
+从出现问题的设备所在网络检查公开地址。在服务器上先访问 `http://127.0.0.1:8080/api/health`，再访问公开 HTTPS 地址，可以区分容器启动与反向代理问题。
+
+```sh
+curl -fsS --max-time 10 http://127.0.0.1:8080/api/health
+curl -fsS --max-time 10 https://center.example.com/api/health
+```
+
+| 层 | 检查入口 | 如何解释结果 |
+| --- | --- | --- |
+| 容器与 HTTP | `docker compose ps`、`docker compose logs --tail=50 center`、本机 `/api/health` | `setup` 表示等待初始化，`ready` 表示中心已启动。初始化日志含一次性码，分享日志前应先移除 |
+| 公开 HTTPS | 从客户端网络访问公开 `/api/health` | 本机 HTTP 正常而公开 HTTPS 失败时，检查 DNS、端口、证书链和反代地址。私有 CA 部署需让客户端信任对应 CA |
+| Host 服务 | Linux 运行 `pibot-host status`，Windows PowerShell 运行 `& "$env:ProgramFiles\pibot\pibot-host.exe" status`。Android 打开 PiBot，查看前台服务通知与客户端连接状态 | 桌面的 `configured`、`running`、`ready` 分别代表已有有效配置、进程运行、本机认证控制接口响应。Windows 需要配对的用户登录。Linux 可进一步查 `systemctl --user status e-launcher-host.service` |
+| Relay 与设备身份 | 登录中心的「设备与 Bot」，确认配对的目标设备在线 | 设备在线说明目标 Host 已连上 Relay。HTTPS 健康但设备离线时，检查 `/v1/link` 的 Upgrade 与 SSE 代理设置，再查设备身份、令牌和 CA |
+| 配置应用 | 查看设备卡片的「配置版本」「已应用版本」及应用状态 | 「已应用」且两个版本一致，表示 Host 已应用中心当前配置。「等待空闲」表示 Host 尚在执行。遇到「应用失败」，先查看设备回执里的错误码 |
+| 模型 | 在「服务商与模型」检查服务商、凭据和目标模型，再确认「设备与 Bot」中的全局默认或 Bot 覆盖 | 在线且配置已应用后，从该 Bot 聊天发一条短消息。模型返回的认证、地址或模型错误可以在对应服务商配置中排查 |
+| Shower | 在目标 Bot 聊天尝试打开虚拟屏 | Android 的 `SHOWER_UNAVAILABLE` 可先查 Shizuku 是否运行，`SHOWER_PERMISSION_REQUIRED` 可到 PiBot 的「设置 → 通知与后台运行 → Shizuku」授权。Windows 查交互式登录与虚拟屏配置，Linux 查 Xvnc 与桌面依赖 |
+
+需要单独确认反代的 WebSocket Upgrade 时，可以发送一次无凭据的 HTTP/1.1 握手。`101 Switching Protocols` 表示请求到达 Relay 的 Upgrade 入口，设备认证结果以「设备与 Bot」为准。看到 `101` 后命令可能等待至 `--max-time` 到期。
+
+```sh
+curl --http1.1 -i --no-buffer --max-time 3 \
+  -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' \
+  -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  https://center.example.com/v1/link
+```
+
+平台依赖、服务日志与安装说明见各端文档。 [桌面](../desktop/README.md) · [Android](../mobile/README.md) · [Shower](shower-cross-platform.md)
+
+## 升级、备份与迁移
+
+备份时先停止本中心的写入，再归档 DATA_ROOT，包括 `center-config.json`、数据库及制品。配置中含解密已存凭据所需的密钥，备份目录应为私有权限。旧 env 部署还需单独保存 `center.env`。反代证书由反代系统保存。将 `BACKUP_DIR` 指向已存在的私有备份目录。
+
+```sh
+test -n "$BACKUP_DIR" && test -d "$BACKUP_DIR" || exit 1
 umask 077
+docker compose stop center
 docker compose run -T --rm --no-deps --entrypoint tar center -C /data -czf - . > "$BACKUP_DIR/center-data.tar.gz"
 docker compose up -d --no-deps center
 ```
@@ -90,4 +138,4 @@ docker compose up -d --no-deps center
 
 升级使用原 volume；不要执行 `docker compose down -v`，不要通过更换密钥或清库修复启动错误。回退数据库时使用对应停机快照，不假定旧程序能读取新 schema。
 
-本次本机 Linux、Windows 和 Android 模拟器的实际验证范围见[进度记录](open-source-release-progress.md)。正式 CI、Windows SCM/跨账户安装、正式签名迁移与完整长期运行仍按该记录跟踪。
+2026-11-06 隔离环境中 Linux、Windows 和 Android 模拟器的实际验证范围见历史进度。发行版本和签名要求以发布说明为准。 [历史验收](open-source-release-progress.md) · [发布说明](releasing.md)

@@ -353,9 +353,9 @@ final class BotHostSchedules {
                 return list(owner, input);
             case "requestExactAlarm":
                 return requestExactAlarmFromBridge();
-            case "hermesSkillCall":
+            case "learningSkillCall":
                 requireKeys(input, Set.of("action", "name", "args"));
-                return hermesSkillCall(owner, input);
+                return learningSkillCall(owner, input);
             case "pauseBot":
                 return pauseOwner(owner);
             case "deleteBot":
@@ -589,7 +589,7 @@ final class BotHostSchedules {
         return names;
     }
 
-    private JSONObject hermesSkillCall(Owner owner, JSONObject input) {
+    private JSONObject learningSkillCall(Owner owner, JSONObject input) {
         return inTx(db -> {
             String name = input.getString("name");
             JSONObject args = input.getJSONObject("args");

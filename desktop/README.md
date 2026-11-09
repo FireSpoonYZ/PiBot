@@ -1,6 +1,6 @@
 # pibot 桌面客户端（Windows / Linux x64）
 
-产品版本 **1.1.0**。当前实现和三端验收范围见[发布进度](../docs/open-source-release-progress.md)。本文描述当前行为；旧 M17/M20 模块记录保留在 Git 历史与[架构进度](../docs/next-generation-architecture.md)，不作为本版本安装与更新已完成的证明。
+Windows x64 和 Linux amd64 的发行包分别为 NSIS 和 DEB。产品版本以仓库根 `package.json` 为准。首次部署和历史验收分别见对应文档。 [快速入门](../README.md#首次部署并跑通一个-bot) · [历史验收](../docs/open-source-release-progress.md)
 
 ## 首次连接
 
@@ -14,7 +14,7 @@
 
 **Linux** 使用 DEB 中的 `/usr/bin/pibot-host` 和 systemd 用户单元，首次配置固定实际 Host home 与 XDG 配置目录，启用 linger。配置文件和服务在用户身份下使用；受限 root helper 只登记调用用户的 UID、Host home 与 XDG 路径，供包升级找到正确目标。
 
-DEB preinst 保存首次启用/运行快照，停止失败则阻止替换。postinst 恢复原状态，失败保留修复依据；用户关闭的自启动不会被升级开启。卸载停止并移除本产品服务，保留业务数据与 linger。使用非默认 `XDG_CONFIG_HOME` 时，登记的是实际目录。
+覆盖安装前，DEB 的 preinst 保存用户服务启用和运行状态，再停止服务。安装后为已登记且已配置的 Host 启用并启动用户服务。失败时保留修复依据。安装回退使用原状态快照。卸载移除产品服务，保留用户业务数据与 linger。非默认 `XDG_CONFIG_HOME` 按实际目录登记。 [升级行为](../docs/releasing.md#桌面覆盖升级身份)
 
 **Windows** 当前仍复用受保护的登录任务与原用户 Host home，设置页明确显示“登录后自动运行”。`perMachine` 安装目录、固定 native helper、原所有者和虚拟屏凭据校验保留。SCM、专用虚拟服务账户、跨账户 UAC 与用户会话代理仍在[未完成清单](../docs/open-source-release-progress.md)，当前不能在无人登录时启动 Host。
 
@@ -42,26 +42,55 @@ Tauri 窗口只运行界面。独立 Node broker 处理客户端连接与观察�
 
 原生命令为 `desktop_update_status/check/download/install/cancel`；界面不提供任意下载 URL 或发布公钥替换入口。正式 updater 公钥由构建环境 `E_LAUNCHER_UPDATER_PUBLIC_KEY` 注入，私钥不进入安装包或中心。未配置签名材料的开发构建不具备官方更新信任。发布步骤见[发布说明](../docs/releasing.md)。
 
-## 构建
+## 服务诊断
 
-使用 Node ≥ 22.19 与 `rust-toolchain.toml` 固定的 Rust 1.99.1：
+从已配对的用户会话运行状态命令。`ready` 只表示本机认证控制接口已响应，中心 Relay 和配置应用状态分别在客户端设置及中心的「设备与 Bot」检查。 [完整诊断步骤](../docs/center-linux-deployment.md#按层定位故障)
 
 ```sh
-mise exec node@22.19.0 -- npm ci
-mise exec node@22.19.0 -- npm run prepare:pi-main
-mise exec node@22.19.0 -- npm ci --prefix host-core
-mise exec node@22.19.0 -- npm run desktop:build -- --bundles nsis
-# Linux 使用 --bundles deb。
+pibot-host status
+systemctl --user status e-launcher-host.service
+journalctl --user -u e-launcher-host.service -n 50 --no-pager
 ```
 
-Linux 构建需要 WebKitGTK 4.1、GTK3、AppIndicator、librsvg、patchelf、C/C++ 编译链、pkg-config 与 OpenSSL 开发包。DEB 同时声明 sudo、Xvnc、轻量 XFCE 桌面、xauth、dbus、xdotool、ffmpeg 等运行依赖。
+```powershell
+& "$env:ProgramFiles\pibot\pibot-host.exe" status
+```
 
-资源准备会打包固定 Node、Host、npm、原生工具、rg/fd、内置技能与对应许可。运行时不回退到系统 PATH 或其他 Pi 工具目录。普通开发包不需要正式签名秘密。
+## 构建
 
-安装包位于 `desktop/build/target/release/bundle/nsis/` 或 `desktop/build/target/release/bundle/deb/`；不是 `desktop/src-tauri/target/`。源码开发与安装版的 GUI/Host/权限状态应分别验收。
+使用 CI 的 **Node.js 26.13.0** 与 `rust-toolchain.toml` 固定的 **Rust 1.99.1**。先将该 Node 版本加入 PATH，再从仓库根安装依赖。
 
-## 本轮已验证与剩余项
+```sh
+npm ci
+npm ci --prefix host-core
+```
 
-Windows 实际运行了隔离 debug GUI、原生配对、Host、模型搜索工具、更新检查、认证下载、验签、下载取消，以及安装维护门的等待/停止/恢复。Linux 在本机运行 Host 和真实模型，在独立 systemd 容器运行安装版 GUI，并执行 DEB 安装、升级、自启动状态保留、无 GUI 用户 manager 重启、失败阻断与修复流程。
+### Linux amd64
+
+CI 使用 Ubuntu 24.04，桌面构建需要 WebKitGTK 4.1、GTK3、AppIndicator、librsvg、OpenSSL 开发包和本机编译工具。
+
+```sh
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+  libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+  librsvg2-dev patchelf build-essential curl wget file libssl-dev pkg-config
+npm run desktop:build -- --bundles deb
+```
+
+DEB 通过 `apt` 安装时解析运行依赖，其中包括 WebKitGTK、TigerVNC、轻量 XFCE 桌面、xauth、dbus、xdotool 与 ffmpeg。产物位于 `desktop/build/target/release/bundle/deb/`。
+
+### Windows x64
+
+CI 使用 Windows Server 2022 runner。源码构建使用 MSVC x64 Rust 工具链、Visual Studio C++ Build Tools 与 Windows SDK。Shower 组件使用 .NET Framework 4.8 提供的 `Framework64\csc.exe`，GUI 运行使用 WebView2。
+
+```powershell
+npm run desktop:build -- --bundles nsis
+```
+
+产物位于 `desktop/build/target/release/bundle/nsis/`。资源准备会打包固定 Node、Host、npm、原生工具、rg/fd、内置技能与许可。普通开发包可用默认构建流程，正式更新签名见发布说明。 [桌面 CI](../.github/workflows/desktop.yml) · [发布说明](../docs/releasing.md)
+
+## 历史验收范围
+
+2026-11-06 的隔离验收中，Windows 实际运行了 debug GUI、原生配对、Host、模型搜索工具、更新检查、认证下载、验签、下载取消，以及安装维护门的等待/停止/恢复。Linux 在本机运行 Host 和真实模型，在独立 systemd 容器运行安装版 GUI，并执行 DEB 安装、升级、自启动状态保留、无 GUI 用户 manager 重启、失败阻断与修复流程。
 
 Windows SCM/跨账户安装恢复、完整 Windows 安装器升级循环、物理机整机重启与长期运行仍未验收。详细结果、数据保留及收尾清理状态见[进度记录](../docs/open-source-release-progress.md)。

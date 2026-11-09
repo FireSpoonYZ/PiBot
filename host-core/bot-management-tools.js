@@ -93,7 +93,7 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
     {
       name: 'manage_bot_learning',
       description:
-        "Manage the target Bot's skill-learning service. Actions: status (config, counters and " +
+        "Manage the target Bot's always-on learning service. Actions: status (config, counters and " +
         'active/last job), configure (settings plus expectedRevision CAS), learn/review/curate ' +
         '(start a Host-driven background job and return its job receipt — the job is not finished ' +
         'when the call returns; poll status for the outcome), cancel (jobId or the active job). ' +
@@ -109,10 +109,38 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
         requestId: ID_SCHEMA,
         config: {
           type: 'object',
-          description: 'Learning settings with CAS: enabled, review, curator, budget, reviewModelRef, curatorModelRef. Null model refs follow the Bot model; explicit refs must be configured and usable on this Host.',
+          additionalProperties: false,
+          description: 'Learning settings with CAS: positive review intervals, curator cadence, budget, reviewModelRef, curatorModelRef. Null model refs follow the Bot model; explicit refs must be configured and usable on this Host.',
           properties: {
             reviewModelRef: { type: ['string', 'null'] },
             curatorModelRef: { type: ['string', 'null'] },
+            review: {
+              type: 'object', additionalProperties: false,
+              properties: {
+                memoryEvery: { type: 'integer', minimum: 1, maximum: 10_000 },
+                skillEvery: { type: 'integer', minimum: 1, maximum: 10_000 },
+              },
+            },
+            curator: {
+              type: 'object', additionalProperties: false,
+              properties: {
+                intervalHours: { type: 'integer', minimum: 1, maximum: 100_000 },
+                minIdleHours: { type: 'number', minimum: 0, maximum: 10_000 },
+                staleAfterDays: { type: 'integer', minimum: 1, maximum: 100_000 },
+                archiveAfterDays: { type: 'integer', minimum: 1, maximum: 100_000 },
+                consolidate: { type: 'boolean' },
+              },
+            },
+            budget: {
+              type: 'object', additionalProperties: false,
+              properties: {
+                maxIterations: { type: 'integer', minimum: 1, maximum: 128 },
+                maxInputTokens: { type: ['integer', 'null'], minimum: 1, maximum: 10_000_000 },
+                callTimeoutMs: { type: 'integer', minimum: 1_000, maximum: 3_600_000 },
+                jobTimeoutMs: { type: 'integer', minimum: 10_000, maximum: 14_400_000 },
+                pollTimeoutMs: { type: 'integer', minimum: 1_000, maximum: 20_000 },
+              },
+            },
           },
         },
         expectedRevision: { type: 'integer', minimum: 0 },

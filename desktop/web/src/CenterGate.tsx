@@ -55,7 +55,8 @@ export type CenterStatus = {
    * 前端只采纳，不据此自动 connect。 */
   broker?: DesktopClientStatus;
 };
-type Props = { children: ReactNode; onDisconnected(): void };
+type Props = { children: ReactNode; onInterrupted(): void; onDisconnected(): void };
+type WorkspaceConnection = { key: string; centerUrl: string; clientId: string; deviceId?: string };
 
 const request = <T,>(op: string, params: object = {}) =>
   invoke<T>('desktop_request', { request: { op, params } });
@@ -66,8 +67,16 @@ const isBusyCenterError = (error: unknown) => {
   return code === 'RPC_BUSY' || code === 'BUSY';
 };
 
-type CenterConnection = { status: CenterStatus | undefined; disconnectCenter: () => Promise<void> };
-const CenterConnectionContext = createContext<CenterConnection>({ status: undefined, disconnectCenter: () => Promise.resolve() });
+type CenterConnection = {
+  status: CenterStatus | undefined;
+  checkCenter: () => Promise<void>;
+  disconnectCenter: () => Promise<void>;
+};
+const CenterConnectionContext = createContext<CenterConnection>({
+  status: undefined,
+  checkCenter: () => Promise.resolve(),
+  disconnectCenter: () => Promise.resolve(),
+});
 
 export function useCenterConnection(): CenterConnection {
   return useContext(CenterConnectionContext);
@@ -94,7 +103,7 @@ export function useDesktopTheme(): { theme: DesktopTheme; setTheme: (theme: Desk
   return { theme, setTheme };
 }
 
-export function CenterGate({ children, onDisconnected }: Props) {
+export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
   const t = useText();
   // 主题应用放在真实桌面入口挂载处：本模块会被 BotSettings -> openCenterManagement 间接导入，
   // 而 BotSettings 可被手机端引用，模块加载即写 data-theme 会污染移动端。
@@ -106,6 +115,7 @@ export function CenterGate({ children, onDisconnected }: Props) {
   const [token, setToken] = useState('');
   const [ca, setCa] = useState('');
   const [status, setStatus] = useState<CenterStatus>();
+  const [workspace, setWorkspace] = useState<WorkspaceConnection>();
   const [saved, setSaved] = useState<SavedConnection>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -134,12 +144,47 @@ export function CenterGate({ children, onDisconnected }: Props) {
   const [showerBusy, setShowerBusy] = useState(false);
   const [showerOutcome, setShowerOutcome] = useState<{ ok: boolean; text: string } | null>(null);
   const epoch = useRef(0);
+  const statusRead = useRef(0);
   const autoAttempted = useRef(false);
-  const wasReady = useRef(false);
+  const disconnecting = useRef(false);
   const lastProbeAt = useRef(0);
   const probeInFlight = useRef(false);
   const statusRef = useRef(status);
-  statusRef.current = status;
+  const workspaceRef = useRef(workspace);
+
+  /** 暂态保留工作区，收到断线状态时先封住旧 transport，再发布 UI 状态。 */
+  const applyStatus = (next: CenterStatus | undefined, connectedDeviceId?: string): void => {
+    let active = workspaceRef.current;
+    const savedDeviceId = next?.savedConnection && centerOrigin(next.savedConnection.url) === next.centerUrl
+      ? next.savedConnection.deviceId
+      : undefined;
+    const nextDeviceId = connectedDeviceId ?? savedDeviceId;
+    if (active && next && (
+      active.clientId !== next.clientId ||
+      (next.centerUrl && active.centerUrl !== next.centerUrl) ||
+      (active.deviceId && nextDeviceId && active.deviceId !== nextDeviceId)
+    )) {
+      onDisconnected();
+      active = undefined;
+      workspaceRef.current = undefined;
+      setWorkspace(undefined);
+    }
+    if (next?.state === 'ready' && !active) {
+      const connection = {
+        key: JSON.stringify([next.centerUrl, next.clientId, nextDeviceId]),
+        centerUrl: next.centerUrl,
+        clientId: next.clientId,
+        deviceId: nextDeviceId,
+      };
+      workspaceRef.current = connection;
+      setWorkspace(connection);
+    } else if (active && next?.state !== 'ready' && statusRef.current?.state === 'ready') {
+      onInterrupted();
+    }
+    statusRef.current = next;
+    setStatus(next);
+    if (next) setSaved(next.savedConnection);
+  };
 
   /** center ready 时顺带读取 broker transport 快照（仅多一次本地 sidecar 读）。 */
   const readStatus = async (params: object = {}): Promise<CenterStatus> => {
@@ -156,16 +201,15 @@ export function CenterGate({ children, onDisconnected }: Props) {
   /** 显式探测：复用 broker center_status({probe:true})——ready 时验证双链路，
    * connecting 时绕过退避立即重试；不发起 UI 侧 connect，不违背显式断开。 */
   const probe = async (): Promise<void> => {
+    if (disconnecting.current) return;
     const issued = epoch.current;
+    const read = ++statusRead.current;
     lastProbeAt.current = Date.now();
     try {
       const next = await readStatus({ probe: true });
-      if (issued === epoch.current) {
-        setStatus(next);
-        setSaved(next.savedConnection);
-      }
+      if (issued === epoch.current && read === statusRead.current) applyStatus(next);
     } catch (failure) {
-      if (!isBusyCenterError(failure) && issued === epoch.current) setStatus(undefined);
+      if (!isBusyCenterError(failure) && issued === epoch.current && read === statusRead.current) applyStatus(undefined);
     }
   };
 
@@ -178,10 +222,10 @@ export function CenterGate({ children, onDisconnected }: Props) {
       ...(input.ca ? { ca: input.ca } : {}),
     });
     if (!isCurrent()) return undefined;
+    statusRead.current += 1;
     localStorage.setItem('center-url', input.url);
     localStorage.setItem('center-device-id', input.deviceId);
-    setStatus(next);
-    setSaved(next.savedConnection);
+    applyStatus(next, input.deviceId);
     return next;
   };
 
@@ -228,14 +272,18 @@ export function CenterGate({ children, onDisconnected }: Props) {
     let live = true;
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
+      if (disconnecting.current) {
+        timer = setTimeout(poll, 1000);
+        return;
+      }
       const issued = epoch.current;
+      const read = ++statusRead.current;
       try {
         const next = await readStatus();
-        if (live && issued === epoch.current) {
-          setStatus(next);
-          setSaved(next.savedConnection);
-          if (next.savedConnection && !autoAttempted.current) {
-            const conn = next.savedConnection;
+        if (live && issued === epoch.current && read === statusRead.current) {
+          const conn = !autoAttempted.current && !workspaceRef.current ? next.savedConnection : undefined;
+          applyStatus(next);
+          if (conn) {
             setUrl((prev) => prev || conn.url);
             setDeviceId((prev) => prev || conn.deviceId);
             setCa((prev) => prev || conn.ca);
@@ -259,7 +307,7 @@ export function CenterGate({ children, onDisconnected }: Props) {
           }
         }
       } catch (failure) {
-        if (!isBusyCenterError(failure) && live && issued === epoch.current) setStatus(undefined);
+        if (!isBusyCenterError(failure) && live && issued === epoch.current && read === statusRead.current) applyStatus(undefined);
       }
       if (live) setPolled(true);
       if (live) timer = setTimeout(poll, 1000);
@@ -269,10 +317,10 @@ export function CenterGate({ children, onDisconnected }: Props) {
   }, []);
 
   // 窗口回到前台探测一次（节流 10s、单飞）：ready 也探测——休眠期 cached-ready 的
-  // 半开连接只能靠 probe 暴露。broker 显式 disconnected 时不探，避免后台触发重连。
+  // 半开连接只能靠 probe 暴露。显式断开或已切到直连档案时不探测中心中继。
   useEffect(() => {
     const onVisible = () => {
-      if (document.hidden || probeInFlight.current || Date.now() - lastProbeAt.current < 10000) return;
+      if (document.hidden || disconnecting.current || probeInFlight.current || Date.now() - lastProbeAt.current < 10000) return;
       probeInFlight.current = true;
       void (async () => {
         const issued = epoch.current;
@@ -282,7 +330,7 @@ export function CenterGate({ children, onDisconnected }: Props) {
             try {
               const broker = await request<DesktopClientStatus>('status');
               if (issued !== epoch.current) return;
-              if (broker.phase === 'disconnected') return;
+              if (broker.phase === 'disconnected' || broker.connection?.kind === 'local') return;
             } catch { /* status 读失败仍走 probe 判定 */ }
           }
           await probe();
@@ -300,12 +348,7 @@ export function CenterGate({ children, onDisconnected }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    if (wasReady.current && status?.state !== 'ready') onDisconnected();
-    wasReady.current = status?.state === 'ready';
-  }, [status, onDisconnected]);
-
-  // 连接成功后清理配对进度：断线回到连接页时应显示手动连接而非已完成的旧步骤。
+  // 配对完成后清理步骤，显式更换连接时显示当前表单。
   useEffect(() => {
     if (status?.state !== 'ready') return;
     pairedRef.current = null;
@@ -332,7 +375,8 @@ export function CenterGate({ children, onDisconnected }: Props) {
   const connect = async (event: FormEvent) => {
     event.preventDefault();
     if (busy || showerBusy) return;
-    epoch.current += 1;
+    const attempt = ++epoch.current;
+    autoAttempted.current = true;
     setBusy(true);
     setError('');
     setCanRetryPaired(false);
@@ -371,9 +415,10 @@ export function CenterGate({ children, onDisconnected }: Props) {
           void refreshHost();
         }
       }
-      await connectCenter(input);
+      await connectCenter(input, () => attempt === epoch.current);
     } catch (e) {
-      setStatus(undefined);
+      if (attempt !== epoch.current) return;
+      applyStatus(undefined);
       setError(
         t('中心连接失败，请检查地址、设备身份、令牌与证书。', 'Failed to connect to the center. Check the address, device identity, token and certificate.') +
           (adoptNotes.length > 0 ? ' ' + t('本机 Host 收尾警告：', 'Host wrap-up warnings: ') + adoptNotes.join('；') : '') +
@@ -551,11 +596,12 @@ export function CenterGate({ children, onDisconnected }: Props) {
     // 冻结提交时输入：异步完成只认这份 URL/CA，busy 期间输入框已禁用。
     const frozenUrl = url.trim();
     const frozenCa = ca.trim();
-    const frozenName = pairName.trim();
+    const frozenName = pairName.trim() || host?.hostname?.trim().slice(0, 64) || t('我的电脑', 'My computer');
     const secret = password;
     setPassword('');
     const force = pairForce;
     const attempt = ++epoch.current;
+    autoAttempted.current = true;
     setBusy(true);
     setError('');
     setCanRetryPaired(false);
@@ -621,17 +667,28 @@ export function CenterGate({ children, onDisconnected }: Props) {
   };
 
   const disconnectCenter = async () => {
+    if (disconnecting.current) return;
+    disconnecting.current = true;
     epoch.current += 1;
-    const next = await request<CenterStatus>('center_disconnect');
-    setStatus(next);
-    setSaved(next.savedConnection);
+    autoAttempted.current = true;
+    onInterrupted();
+    statusRef.current = undefined;
+    setStatus(undefined);
+    try {
+      const next = await request<CenterStatus>('center_disconnect');
+      onDisconnected();
+      workspaceRef.current = undefined;
+      setWorkspace(undefined);
+      applyStatus(next);
+    } finally {
+      disconnecting.current = false;
+    }
   };
 
-  if (status?.state === 'ready') {
-    const centerKey = status.centerUrl + '|' + (status.savedConnection?.deviceId ?? status.clientId);
+  if (workspace) {
     return (
-      <CenterConnectionContext.Provider value={{ status, disconnectCenter }}>
-        <ClientUpdateProvider request={desktopUpdateRequest} ready centerKey={centerKey}>
+      <CenterConnectionContext.Provider value={{ status, checkCenter: probe, disconnectCenter }}>
+        <ClientUpdateProvider key={workspace.key} request={desktopUpdateRequest} ready={status?.state === 'ready'} centerKey={workspace.key}>
           {children}
         </ClientUpdateProvider>
       </CenterConnectionContext.Provider>
@@ -650,7 +707,9 @@ export function CenterGate({ children, onDisconnected }: Props) {
 
   const pairStepLabels = [
     t('登记设备', 'Register device'),
-    t('登录后自动运行', 'Run automatically at login'),
+    host?.autostartScope === 'system-boot' || host?.platform === 'linux'
+      ? t('开机时自动运行', 'Run automatically at startup')
+      : t('登录后自动运行', 'Run automatically at login'),
     t('启动并就绪本机 Host', 'Start and ready the local Host'),
     t('连接客户端', 'Connect client'),
   ];
@@ -710,18 +769,7 @@ export function CenterGate({ children, onDisconnected }: Props) {
               : t('统一管理多端智能体、模型、插件与记忆', 'Manage agents, models, plugins and memory across devices')}
           </p>
         </div>
-        {status?.clientId && (
-          <div className="gate-client-id">
-            <span className="gate-client-label">{t('本客户端标识', 'Client ID')}</span>
-            <code>{status.clientId}</code>
-            <button type="button" className="icon-button" onClick={copyClientId} title={t('复制', 'Copy')}>
-              <Copy size={14} />
-            </button>
-            {copied && <span className="gate-copied">{t('已复制', 'Copied')}</span>}
-          </div>
-        )}
         {showPair ? (
-          <>
             <form className="gate-form" onSubmit={pair}>
               {pairForce && <p className="gate-subtitle">{t('重新配对会替换本机 Host 的中心配置。', 'Re-pairing replaces the local Host center configuration.')}</p>}
               <label className="gate-field">
@@ -732,21 +780,18 @@ export function CenterGate({ children, onDisconnected }: Props) {
                 <span>{t('所有者密码', 'Owner password')}</span>
                 <input required type="password" autoComplete="off" value={password} disabled={busy || showerBusy} onChange={e => setPassword(e.target.value)} />
               </label>
-              <label className="gate-field">
-                <span>{t('本机名称', 'Computer name')}</span>
-                <input required maxLength={64} value={pairName} disabled={busy || showerBusy} onChange={e => setPairName(e.target.value)} />
-              </label>
-              <details className="gate-advanced">
-                <summary>{t('高级 TLS / 自签 CA 证书（可选）', 'Advanced TLS / self-signed CA certificate (optional)')}</summary>
-                <textarea value={ca} disabled={busy || showerBusy} onChange={e => setCa(e.target.value)} placeholder="-----BEGIN CERTIFICATE-----" rows={4} />
-              </details>
+              <button disabled={busy || showerBusy} type="submit" className="primary-button gate-submit">
+                {busy
+                  ? (pairPhase === 'connecting' ? t('连接中…', 'Connecting…') : t('配对中…', 'Pairing…'))
+                  : pairForce ? t('重新配对', 'Re-pair') : t('配对并连接', 'Pair and connect')}
+              </button>
               {showPairSteps && (
                 <>
                   <ol className="gate-steps" aria-live="polite">
                     {pairStepLabels.map((label, index) => {
                       const state = pairStepState(index);
                       return (
-                        <li key={label} className={`gate-step ${state}`}>
+                        <li key={label} className={`gate-step ${state}`} aria-current={state === 'active' ? 'step' : undefined}>
                           <span className="gate-step-dot" aria-hidden />
                           <span className="gate-step-label">{label}</span>
                           {state === 'error' && index > 0 && pairedRef.current && (
@@ -776,17 +821,47 @@ export function CenterGate({ children, onDisconnected }: Props) {
                   )}
                 </>
               )}
-              <button disabled={busy || showerBusy} type="submit" className="primary-button gate-submit">
-                {busy
-                  ? (pairPhase === 'connecting' ? t('连接中…', 'Connecting…') : t('配对中…', 'Pairing…'))
-                  : pairForce ? t('重新配对', 'Re-pair') : t('配对并连接', 'Pair and connect')}
-              </button>
+              <details className="gate-advanced">
+                <summary>{t('本机名称与证书', 'Computer name and certificate')}</summary>
+                <div className="gate-advanced-fields">
+                  <label className="gate-field">
+                    <span>{t('本机名称（可选）', 'Computer name (optional)')}</span>
+                    <input maxLength={64} value={pairName} disabled={busy || showerBusy} onChange={e => setPairName(e.target.value)} />
+                  </label>
+                  <label className="gate-field">
+                    <span>{t('自签 CA 证书（可选）', 'Self-signed CA certificate (optional)')}</span>
+                    <textarea value={ca} disabled={busy || showerBusy} onChange={e => setCa(e.target.value)} placeholder="-----BEGIN CERTIFICATE-----" rows={4} />
+                  </label>
+                </div>
+              </details>
             </form>
-            <details className="gate-advanced">
-              <summary>{t('高级：使用已有设备 ID 和令牌', 'Advanced: use an existing device ID and token')}</summary>
-              {manualForm}
-            </details>
-            {host?.platform === 'windows' && (
+        ) : manualForm}
+        <ErrorNotice
+          error={error}
+          onDismiss={() => setError('')}
+          actionLabel={canRetryPaired ? t('重试连接', 'Retry connection') : undefined}
+          onAction={canRetryPaired ? retryPaired : undefined}
+        />
+        <details className="gate-advanced">
+          <summary>{t('其他连接选项', 'More connection options')}</summary>
+          <div className="gate-advanced-fields">
+            {showPair && (
+              <details className="gate-advanced">
+                <summary>{t('使用已有设备 ID 和令牌', 'Use an existing device ID and token')}</summary>
+                {manualForm}
+              </details>
+            )}
+            {!showPair && hasHostConfiguration && (
+              <button type="button" className="secondary-button gate-manage" disabled={busy} onClick={() => {
+                setPairForce(true);
+                setReconfigure(true);
+                setPairSteps(undefined);
+                setError('');
+              }}>
+                {t('重新配对本机 Host', 'Re-pair local Host')}
+              </button>
+            )}
+            {showPair && host?.platform === 'windows' && (
               <div className="gate-shower">
                 <button
                   type="button"
@@ -806,53 +881,36 @@ export function CenterGate({ children, onDisconnected }: Props) {
                 )}
               </div>
             )}
-          </>
-        ) : manualForm}
-        {!showPair && hasHostConfiguration && (
-          <button type="button" className="secondary-button gate-manage" disabled={busy} onClick={() => {
-            setPairForce(true);
-            setReconfigure(true);
-            setPairSteps(undefined);
-            setError('');
-          }}>
-            {t('重新配对本机 Host', 'Re-pair local Host')}
-          </button>
-        )}
-        <button
-          type="button"
-          className="secondary-button gate-manage"
-          disabled={busy}
-          onClick={() => {
-            if (status?.broker?.phase === 'disconnected' || status?.state === 'disconnected') {
-              setError(t('已显式断开：请在上方重新连接中心。', 'Explicitly disconnected — reconnect above.'));
-              return;
-            }
-            void probe();
-          }}
-        >
-          {t('检查连接', 'Check connection')}
-        </button>
-        <button
-          type="button"
-          className="secondary-button gate-manage"
-          disabled={!url}
-          onClick={() => void invoke('desktop_open_center', { url: url.trim() }).catch((e) => setError(t('无法打开中心管理页面。', 'Could not open the center management page.') + ' ' + errorText(e)))}
-        >
-          <ExternalLink size={14} />
-          {t('在浏览器打开中心管理', 'Open center management in browser')}
-        </button>
-        <ErrorNotice
-          error={error}
-          onDismiss={() => setError('')}
-          actionLabel={canRetryPaired ? t('重试连接', 'Retry connection') : undefined}
-          onAction={canRetryPaired ? retryPaired : undefined}
-        />
+            <button type="button" className="secondary-button gate-manage" disabled={busy} onClick={() => void probe()}>
+              {t('检查连接', 'Check connection')}
+            </button>
+            <button
+              type="button"
+              className="secondary-button gate-manage"
+              disabled={!url}
+              onClick={() => void invoke('desktop_open_center', { url: url.trim() }).catch((e) => setError(t('无法打开中心管理页面。', 'Could not open the center management page.') + ' ' + errorText(e)))}
+            >
+              <ExternalLink size={14} />
+              {t('在浏览器打开中心管理', 'Open center management in browser')}
+            </button>
+            {status?.clientId && (
+              <div className="gate-client-id">
+                <span className="gate-client-label">{t('本客户端标识', 'Client ID')}</span>
+                <code>{status.clientId}</code>
+                <button type="button" className="icon-button" onClick={copyClientId} title={t('复制', 'Copy')}>
+                  <Copy size={14} />
+                </button>
+                {copied && <span className="gate-copied">{t('已复制', 'Copied')}</span>}
+              </div>
+            )}
+          </div>
+        </details>
       </section>
     </main>
   );
 }
 
-export function openCenterManagement() {
-  const url = localStorage.getItem('center-url');
-  if (url) void invoke('desktop_open_center', { url });
+export async function openCenterManagement(centerUrl?: string): Promise<void> {
+  const url = centerUrl || localStorage.getItem('center-url');
+  if (url) await invoke('desktop_open_center', { url });
 }

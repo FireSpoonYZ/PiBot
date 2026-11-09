@@ -118,6 +118,23 @@ function naturalPlatformName(platform: string | undefined): string {
   return '';
 }
 
+export function scopeDeviceName(deviceId: string, bots: readonly ScopeBotInfo[], api?: ScopeReadApi): string {
+  const deviceBots = bots.filter((bot) => bot.deviceId === deviceId);
+  const isNatural = (text: string) => !isTechnicalIdLike(text, { deviceId, botId: '' }) &&
+    !deviceBots.some((bot) => isTechnicalIdLike(text, bot));
+  for (const bot of deviceBots) {
+    for (const label of [bot.deviceName, bot.hostLabel]) {
+      if (label && isNatural(label)) return label.trim();
+    }
+  }
+  const profile = api?.snapshot?.state?.profiles.find((p) =>
+    (p.kind === 'relay' ? p.deviceId : p.expectedDeviceId) === deviceId,
+  );
+  if (profile?.title && isNatural(profile.title)) return profile.title.trim();
+  if (api?.identity?.targetDeviceId === deviceId && api.identity.kind === 'local') return '本机';
+  return naturalPlatformName(deviceBots[0]?.platform);
+}
+
 /**
  * 成员自然副标题（设备自然名 + 角色状态）：
  * 只使用目录与档案中已有的自然名称字段，绝不回退或拼接 deviceId/botId/scopeId。
@@ -159,6 +176,7 @@ export function memberMetaText(
 
 export interface GroupSettingsProps {
   api: ScopeReadApi;
+  variant?: 'desktop' | 'mobile';
   /** 指向权威节点的写通道（非权威或未就绪时为 null）。 */
   membersApi: DesktopViewApi | null;
   scope: ScopeInfo;
@@ -172,6 +190,7 @@ export interface GroupSettingsProps {
 
 export function GroupSettings({
   api,
+  variant = 'mobile',
   membersApi,
   scope,
   bots,
@@ -181,6 +200,7 @@ export function GroupSettings({
   onClose,
   onDeleted,
 }: GroupSettingsProps) {
+  const desktop = variant === 'desktop';
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
@@ -193,11 +213,16 @@ export function GroupSettings({
   const wOnline = Boolean(membersApi && wIdentity && membersApi.transportConnected);
   const hasAuthorityNode = Boolean(scope.authorityDeviceId);
   const canManage = canWrite && hasAuthorityNode && Boolean(membersApi);
+  const authorityName = (desktop && scope.authorityDeviceId && scopeDeviceName(scope.authorityDeviceId, bots, api)) || '群聊管理设备';
+  const unavailableDevice = desktop ? `${authorityName}暂时不可用` : '权威节点未连接';
 
   const savedTitle = readScopeTitle(scope.scope);
   const autoTitle = roomAutoTitle(scope.scope, bots);
   const displayTitle = conversationTitle(scope.scope, bots);
   const memberCount = scope.scope.members.length;
+  const memberDevices = desktop ? [...new Set(scope.scope.members.map((m) => m.deviceId))] : [];
+  const namedDevices = memberDevices.map((id) => scopeDeviceName(id, bots, api) || '未命名设备');
+  const deviceSummary = `${memberDevices.length} 台参与设备` + (namedDevices.length ? `（${namedDevices.join('、')}）` : '');
 
   /** 最近一次从权威节点确认的 revision 基线。 */
   const authorityBaselineRef = useRef<{ revision: number } | null>(null);
@@ -219,6 +244,7 @@ export function GroupSettings({
 
   // ————— 群成员 CAS 编辑状态 —————
   const [editMode, setEditMode] = useState(false);
+  const [memberQuery, setMemberQuery] = useState('');
   const [editMembers, setEditMembers] = useState<MessageMember[]>(() =>
     scope.scope.members.map((m) => ({ ...m })),
   );
@@ -338,7 +364,7 @@ export function GroupSettings({
   async function saveTitle() {
     if (titleSaving || titleFrozenAttempt) return;
     if (!membersApi || !membersApi.identity || !membersApi.transportConnected) {
-      setTitleError('权威节点未连接，暂不能保存群名称；您的输入已保留。');
+      setTitleError(`${unavailableDevice}，暂不能保存群名称。输入已保留。`);
       return;
     }
     const trimmed = titleInput.trim();
@@ -454,7 +480,7 @@ export function GroupSettings({
   async function retryFrozenTitleAttempt() {
     if (!titleFrozenAttempt || titleSaving) return;
     if (!membersApi || !membersApi.identity || !membersApi.transportConnected) {
-      setTitleError('权威节点未连接，请连接后再重试原请求。');
+      setTitleError(`${unavailableDevice}，请连接后再重试原请求。`);
       return;
     }
     const id = membersApi.identity;
@@ -506,6 +532,7 @@ export function GroupSettings({
     setEditMembers(latest.scope.members.map((m) => ({ ...m })));
     setSaveMembersError(null);
     setEnterEditError(null);
+    setMemberQuery('');
     setMembersFrozenAttempt(null);
     setEditMode(true);
   }
@@ -546,6 +573,7 @@ export function GroupSettings({
     setMembersFrozenAttempt(null);
     setEditMembers(scope.scope.members.map((m) => ({ ...m })));
     setSaveMembersError(null);
+    setMemberQuery('');
     setEditMode(false);
   }
 
@@ -561,11 +589,11 @@ export function GroupSettings({
   async function saveMembers() {
     if (savingMembers || membersFrozenAttempt) return;
     if (!membersApi || !membersApi.identity) {
-      setSaveMembersError('写通道未连接，不能保存成员变更；选择已保留，可稍后重试。');
+      setSaveMembersError(`${desktop ? unavailableDevice : '写通道未连接'}，暂不能保存成员变更。选择已保留。`);
       return;
     }
     if (!membersApi.transportConnected) {
-      setSaveMembersError('权威节点未连接，不能保存成员变更；选择已保留，可稍后重试。');
+      setSaveMembersError(`${unavailableDevice}，暂不能保存成员变更。选择已保留。`);
       return;
     }
     if (editMembers.length < 2) {
@@ -653,7 +681,7 @@ export function GroupSettings({
   async function retryFrozenMembersAttempt() {
     if (!membersFrozenAttempt || savingMembers) return;
     if (!membersApi || !membersApi.identity || !membersApi.transportConnected) {
-      setSaveMembersError('权威节点未连接，请连接后再重试原请求。');
+      setSaveMembersError(`${unavailableDevice}，请连接后再重试原请求。`);
       return;
     }
     const id = membersApi.identity;
@@ -698,7 +726,7 @@ export function GroupSettings({
   async function requestDeleteRoom() {
     if (preparingDelete || deleting) return;
     if (!membersApi || !membersApi.identity || !membersApi.transportConnected) {
-      setDeleteError('权威节点未连接，暂无法解散并删除群聊。');
+      setDeleteError(`${unavailableDevice}，暂时无法解散群聊。`);
       return;
     }
     const id = membersApi.identity;
@@ -739,7 +767,7 @@ export function GroupSettings({
   async function confirmDeleteRoom() {
     if (deleting) return;
     if (!membersApi || !membersApi.identity || !membersApi.transportConnected) {
-      setDeleteError('权威节点未连接，暂无法执行解散操作。');
+      setDeleteError(`${unavailableDevice}，暂时无法解散群聊。`);
       return;
     }
     const id = membersApi.identity;
@@ -790,7 +818,7 @@ export function GroupSettings({
   async function reconcileDeleteAttempt() {
     if (!deleteFrozenAttempt || deleting) return;
     if (!membersApi || !membersApi.identity || !membersApi.transportConnected) {
-      setDeleteError('权威节点未连接，请连接后查询群状态。');
+      setDeleteError(`${unavailableDevice}，请连接后查询群状态。`);
       return;
     }
     const id = membersApi.identity;
@@ -834,6 +862,10 @@ export function GroupSettings({
   const candidateChoices = memberCandidates.filter(
     (b) => !editMembers.some((m) => m.deviceId === b.deviceId && m.botId === b.botId),
   );
+  const query = memberQuery.trim().toLocaleLowerCase();
+  const matchingCandidates = query
+    ? candidateChoices.filter((bot) => `${bot.role} ${memberMetaText(bot, bots, api)}`.toLocaleLowerCase().includes(query))
+    : candidateChoices;
 
   return (
     <div className="scope-settings-view" aria-label="群聊详情">
@@ -855,7 +887,7 @@ export function GroupSettings({
             />
           </svg>
         </button>
-        <h2 className="scope-settings-topbar-title">群聊详情</h2>
+        <h2 className="scope-settings-topbar-title">{desktop ? '成员与群聊设置' : '群聊详情'}</h2>
         <span aria-hidden="true" className="conversation-chat-header__spacer" />
       </header>
 
@@ -864,21 +896,32 @@ export function GroupSettings({
           {/* ————— 顶部居中组合头像 88px + 群名 + 成员数量 ————— */}
           <section className="scope-settings-hero">
             <div className="scope-settings-hero-avatar">
-              <ConversationGroupAvatar members={scope.scope.members} bots={bots} size={88} />
+              <ConversationGroupAvatar members={scope.scope.members} bots={bots} size={desktop ? 40 : 88} />
             </div>
-            <h1 className="scope-settings-hero-title">{displayTitle}</h1>
-            <p className="scope-settings-hero-subtitle">{memberCount} 位成员</p>
+            {desktop ? <div className="scope-settings-hero-text">
+              <h1 className="scope-settings-hero-title">{displayTitle}</h1>
+              <p className="scope-settings-hero-subtitle">{memberCount} 位成员 · {deviceSummary}</p>
+            </div> : <>
+              <h1 className="scope-settings-hero-title">{displayTitle}</h1>
+              <p className="scope-settings-hero-subtitle">{memberCount} 位成员</p>
+            </>}
           </section>
 
           {!canManage ? (
             <div className="status scope-settings-status-bar" role="status">
               {!canWrite
                 ? '当前为只读浏览模式，仅供查看群聊信息。'
-                : '当前仅群聊权威节点可修改群名称、管理成员或解散群聊。'}
+                : desktop
+                  ? hasAuthorityNode
+                    ? `${authorityName}负责管理群聊，目前无法连接。`
+                    : '当前无法确定群聊的管理设备。'
+                  : '当前仅群聊权威节点可修改群名称、管理成员或解散群聊。'}
             </div>
           ) : !wOnline ? (
             <div className="status scope-settings-status-bar" role="status">
-              权威节点待连接，连接后可修改群名称、管理成员或解散群聊；本地输入会为您保留。
+              {desktop
+                ? `${unavailableDevice}。连接后可保存群聊设置，当前输入会保留。`
+                : '权威节点待连接，连接后可修改群名称、管理成员或解散群聊；本地输入会为您保留。'}
             </div>
           ) : null}
 
@@ -1034,7 +1077,7 @@ export function GroupSettings({
                   const meta = memberMetaText(m, bots, api);
                   return (
                     <li key={`${m.deviceId}:${m.botId}`} className="member-row scope-settings-member-row">
-                      <span className="member-row-avatar">{memberAvatar(m, bots, 38)}</span>
+                      <span className="member-row-avatar">{memberAvatar(m, bots, desktop ? 30 : 38)}</span>
                       <span className="member-row-text scope-settings-member-info">
                         <span className="entity-title scope-settings-member-name">{name}</span>
                         {meta ? <span className="scope-settings-member-meta">{meta}</span> : null}
@@ -1071,9 +1114,17 @@ export function GroupSettings({
 
                   <div className="scope-settings-candidates-block">
                     <span className="scope-settings-candidates-title">添加成员</span>
-                    {candidateChoices.length > 0 ? (
+                    {desktop && candidateChoices.length > 0 ? <input
+                      className="scope-member-search"
+                      type="search"
+                      placeholder="按智能体名称或设备搜索"
+                      aria-label="搜索可添加的成员"
+                      value={memberQuery}
+                      onChange={(e) => setMemberQuery(e.target.value)}
+                    /> : null}
+                    {matchingCandidates.length > 0 ? (
                       <div className="member-quick-row scope-settings-candidates-grid">
-                        {candidateChoices.map((b) => {
+                        {matchingCandidates.map((b) => {
                           const meta = memberMetaText(b, bots, api);
                           const displayRole = b.role.trim() || '未命名 Bot';
                           return (
@@ -1099,11 +1150,11 @@ export function GroupSettings({
                         })}
                       </div>
                     ) : (
-                      <span className="hint">所有可用智能体均已在群聊中。</span>
+                      <span className="hint">{candidateChoices.length ? '没有匹配的智能体。' : '所有可用智能体均已在群聊中。'}</span>
                     )}
                   </div>
 
-                  {!wOnline ? (
+                  {!wOnline && !desktop ? (
                     <div className="status scope-settings-inner-status">
                       写通道未连接，暂不能保存成员变更；当前选择已保留。
                     </div>
@@ -1155,7 +1206,7 @@ export function GroupSettings({
                     <button
                       type="button"
                       className="primary-button scope-compact-btn"
-                      disabled={savingMembers || Boolean(membersFrozenAttempt) || !wOnline}
+                      disabled={savingMembers || Boolean(membersFrozenAttempt) || !wOnline || (desktop && editMembers.length < 2)}
                       onClick={() => void saveMembers()}
                     >
                       {savingMembers ? '保存中…' : '保存成员'}
@@ -1202,7 +1253,9 @@ export function GroupSettings({
                     <strong>确认解散并删除群聊「{displayTitle}」？</strong>
                   </div>
                   <p className="scope-delete-confirm-desc">
-                    解散后将永久删除该群聊，所有设备上的群聊历史消息与成员关系都会一并删除，且不可恢复。
+                    {desktop
+                      ? `解散涉及 ${deviceSummary}。群聊历史和成员关系会被永久删除。`
+                      : '解散后将永久删除该群聊，所有设备上的群聊历史消息与成员关系都会一并删除，且不可恢复。'}
                   </p>
                   {deleteError ? (
                     <div className="error-banner" role="alert">

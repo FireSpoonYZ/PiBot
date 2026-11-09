@@ -764,7 +764,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   };
   // 同一 Bot 的发送/设置/显式同步串行；内侧复用 raw 实现，避免自持同一 lane。
   const admitBot = botAdmissions.admit;
-  // Hermes 学习驱动（Host learning contract）：自动完结上报、next→agent.run→respond
+  // Bot 学习驱动：自动完结上报、next→agent.run→respond
   // 驱动与受限 review 工具面；配置/计数/作业持久化全在 Center learning 服务，
   // 本实例不持久化任何学习状态，驱动失败如实回执，绝不伪造完成。
   let learningModelRefs = new Set();
@@ -2064,6 +2064,12 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     // Bot 学习管理：status/configure/cancel 直转 Center；learn/review/curate
     // start 后挂 next→agent.run→respond 驱动并回诚实作业回执。
     manageBotLearning: (botId, input) => admitBot(botId, () => learning.manageBotLearning(botId, input)),
+    async reviewBotSkills(botId, input) {
+      await requireBot(botId);
+      const client = centerRuntime.getClient();
+      if (!client) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+      return client.botSkillReview(botId, input);
+    },
 
     getWorkContext: workContexts.getWorkContext,
     // 显式同步与发送/设置同队列：决策内部走 raw workContexts.syncWorkContext（已在 Bot 准入内），不会递归取 lane。

@@ -10,7 +10,7 @@
 /* ————— 顶栏 ————— */
 .desktop-shell .bot-sched-topbar,
 .desktop-dialog .bot-sched-topbar {
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
 }
 .desktop-shell .bot-sched-count,
 .desktop-dialog .bot-sched-count {
@@ -40,18 +40,6 @@
   border: 1px solid color-mix(in srgb, var(--line, #e5e5df) 85%, transparent);
   font-size: .82rem; font-weight: 550;
 }
-.desktop-shell .bot-sched-icon-btn,
-.desktop-dialog .bot-sched-icon-btn {
-  width: 32px; height: 32px; min-height: 32px; padding: 0;
-  border-radius: 50%; border: 0;
-  display: inline-flex; align-items: center; justify-content: center;
-  color: var(--muted); background: var(--surface, #efeee9);
-  transition: background-color 150ms ease, color 150ms ease;
-}
-.desktop-shell .bot-sched-icon-btn:hover,
-.desktop-dialog .bot-sched-icon-btn:hover { color: var(--text); }
-.desktop-shell .bot-sched-icon-btn.danger,
-.desktop-dialog .bot-sched-icon-btn.danger { color: var(--danger, #ac3434); }
 .desktop-shell .spinning,
 .desktop-dialog .spinning { animation: bot-sched-spin 1s linear infinite; }
 @keyframes bot-sched-spin { to { transform: rotate(360deg); } }
@@ -115,38 +103,6 @@
 .desktop-dialog .bot-sched-card-top {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
-.desktop-shell .bot-sched-card-time-wrap,
-.desktop-dialog .bot-sched-card-time-wrap {
-  display: flex; align-items: baseline; flex-wrap: wrap; gap: 7px 10px;
-  cursor: pointer; min-width: 0;
-  border: 0; background: transparent; padding: 0; text-align: left;
-}
-.desktop-shell .bot-sched-card-time-wrap:disabled,
-.desktop-dialog .bot-sched-card-time-wrap:disabled { cursor: default; }
-.desktop-shell .bot-sched-time,
-.desktop-dialog .bot-sched-time {
-  font-size: 1.6rem; font-weight: 750; letter-spacing: -.02em;
-  font-variant-numeric: tabular-nums; color: var(--text); line-height: 1.1;
-}
-.desktop-shell .bot-sched-badges,
-.desktop-dialog .bot-sched-badges {
-  display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px;
-}
-.desktop-shell .bot-sched-badge,
-.desktop-dialog .bot-sched-badge {
-  font-size: .74rem; font-weight: 600; padding: 3px 9px; border-radius: 999px;
-  background: var(--surface, #efeee9); color: var(--muted);
-}
-.desktop-shell .bot-sched-badge.alarm,
-.desktop-dialog .bot-sched-badge.alarm {
-  background: rgb(234 88 12 / .12); color: #EA580C;
-}
-.desktop-shell .bot-sched-badge.silent,
-.desktop-dialog .bot-sched-badge.silent {
-  background: color-mix(in srgb, var(--brand, #2B70F6) 12%, transparent);
-  color: var(--brand, #2B70F6);
-}
-
 .desktop-shell .bot-sched-card-body,
 .desktop-dialog .bot-sched-card-body {
   display: flex; flex-direction: column; gap: 3px; cursor: pointer; padding: 2px 0;
@@ -159,22 +115,12 @@
 .desktop-shell .bot-sched-prompt,
 .desktop-dialog .bot-sched-prompt {
   font-size: .84rem; color: var(--muted); line-height: 1.45;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   white-space: pre-wrap;
-}
-.desktop-shell .bot-sched-card-footer,
-.desktop-dialog .bot-sched-card-footer {
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  padding-top: 8px;
-  border-top: 1px solid color-mix(in srgb, var(--line, #e5e5df) 55%, transparent);
 }
 .desktop-shell .bot-sched-next,
 .desktop-dialog .bot-sched-next {
   font-size: .77rem; color: var(--muted); font-variant-numeric: tabular-nums;
 }
-.desktop-shell .bot-sched-actions,
-.desktop-dialog .bot-sched-actions { display: inline-flex; align-items: center; gap: 6px; flex: none; }
-
 /* ————— iOS 风格拨动开关（.bot-sched-toggle） ————— */
 .desktop-shell .bot-sched-toggle,
 .desktop-dialog .bot-sched-toggle {
@@ -283,13 +229,23 @@
   resize: vertical; outline: none; min-height: 72px;
 }
 
-.desktop-shell .bot-sched-sr-only,
-.desktop-dialog .bot-sched-sr-only {
-  position: absolute; width: 1px; height: 1px; overflow: hidden;
-  clip: rect(0 0 0 0); white-space: nowrap; padding: 0; margin: -1px;
-}
-
 .desktop-shell .bot-sched-form-actions,
 .desktop-dialog .bot-sched-form-actions {
   display: flex; align-items: center; gap: 9px; padding: 2px 4px;
 }
+
+.bot-schedules-panel .bot-sched-preview {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: .85rem;
+  overflow-wrap: anywhere;
+}
+.bot-schedules-panel .bot-sched-detail {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+}
+.bot-schedules-panel .bot-sched-detail p { margin: 0; overflow-wrap: anywhere; }
+.bot-schedules-panel .bot-sched-textarea-wrap label { display: block; margin-bottom: 6px; }

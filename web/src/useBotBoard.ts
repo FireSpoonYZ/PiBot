@@ -159,10 +159,12 @@ export function useMarkViewedBoardResult(
   const record = target ? board.records.get(target.key) : undefined;
   const id = record?.item?.lastResult?.id;
   return useCallback((visibleTextEntryIds: readonly string[]) => {
-    if (active && board.visible && !document.hidden && target?.online && !record?.error &&
-        record?.generation === target.generation && id && visibleTextEntryIds.includes(id)) {
+    const current = target ? board.records.get(target.key) : undefined;
+    if (active && board.visible && !document.hidden && target?.online && !current?.error &&
+        current?.generation === target.generation && id && current.item?.lastResult?.id === id &&
+        visibleTextEntryIds.includes(id)) {
       board.markViewed(target.key, id);
     }
-  }, [active, board.visible, board.markViewed, target?.key, target?.online, target?.generation,
+  }, [active, board.visible, board.markViewed, board.records, target?.key, target?.online, target?.generation,
     record?.generation, record?.error, id]);
 }

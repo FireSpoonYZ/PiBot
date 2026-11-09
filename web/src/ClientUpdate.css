@@ -16,3 +16,14 @@
 .cu-message { font-size: .82rem; color: var(--muted); overflow-wrap: anywhere; }
 .cu-message.is-error { color: var(--danger); }
 .cu-meta { font-size: .78rem; color: var(--muted); overflow-wrap: anywhere; }
+
+.cu-desktop .cu-message { margin: 8px 0 0; }
+.cu-desktop-progress { width: 100%; height: 10px; accent-color: var(--brand, var(--accent)); }
+.cu-stop-confirm {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.cu-stop-confirm .cu-message { margin: 0 0 8px; }

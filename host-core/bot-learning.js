@@ -1,5 +1,5 @@
 // host-core/bot-learning.js
-// Host 侧 Hermes 学习驱动：
+// Host 侧 Bot 学习驱动：
 // - 主会话用户提交完结后向 Center learning 服务上报真实增量快照（自动 review 入口）；
 // - 手动与自动 learn|review|curate 作业由 next→agent.run→respond 循环驱动；
 // - agent.run 在独立的受限 Durable 会话执行：只注册回调给出的 OpenAI 函数 schema
@@ -9,7 +9,7 @@
 //   记忆/显式资料经 Host 本地受限能力执行，绝不放开 bash/管理等通用工具面；
 // - 触发计数、间隔阈值、配置、作业持久化全在 Center learning 服务，
 //   Host 不保存阈值、不按完成条数强行触发，只提供真实增量；
-// - 与原 Hermes 的适配边界：上游 fork 复用父会话缓存前缀，这里按契约重建独立
+// - 与上游的适配边界：上游 fork 复用父会话缓存前缀，这里按契约重建独立
 //   ownerless 会话，不声称缓存等价；messages 在 OpenAI 式与 pi-ai 式之间做尽力
 //   双向投影（thinking 块、图片字节与 provider 私有字段不保真）。
 import { createHash, randomUUID } from 'node:crypto';
@@ -249,7 +249,7 @@ function addUsage(sum, usage) {
 }
 
 /**
- * Hermes 学习驱动的 Host 侧装配。deps 全部由 runtime.js 注入：
+ * Bot 学习驱动的 Host 侧装配。deps 全部由 runtime.js 注入：
  * - host：本机 Bot/设备事实源（deviceId、SOUL、primaryConversationId）；
  * - getHarness/models/getBotModels：受限会话与 review 模型解析；
  * - getCenterClient：Center learning 通道（botLearning 固定路径方法）；
@@ -530,11 +530,11 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
         return { result: await runMemoryCall(bot, job, call) };
       }
       if (call.method === 'schedule.call') {
-        if (job.mode !== 'curate' || !['referenced_skill_names', 'rewrite_skill_refs'].includes(call.params?.name)) {
-          throw messageError('FORBIDDEN', 'Schedule callbacks are restricted to curator skill references');
+        if (job.mode !== 'curate' || call.params?.name !== 'referenced_skill_names') {
+          throw messageError('FORBIDDEN', 'Curator jobs can only read schedule skill references');
         }
         job.controller.signal.throwIfAborted();
-        return { result: await schedules.hermesSkillCall(bot, call.params.name, call.params.args ?? {}, { signal: job.controller.signal }) };
+        return { result: await schedules.learningSkillCall(bot, call.params.name, call.params.args ?? {}, { signal: job.controller.signal }) };
       }
       return { error: { code: 'INVALID_ARGUMENT', message: 'unsupported call method: ' + String(call.method).slice(0, 64) } };
     } catch (err) {
@@ -702,8 +702,8 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
 
   /**
    * 执行一次 agent.run：独立 ownerless 会话 + 受限工具扩展 + maxTurns/输入 token 硬预算；
-   * 返回 {final_response,messages,usage(Hermes 字段名)}，messages 为整段 OpenAI 式 transcript
-   * （回放 + 本轮新增），与原 Hermes 摘要器的 prior-snapshot 去重语义兼容。
+   * 返回 {final_response,messages,usage}，messages 为整段 OpenAI 式 transcript
+   * （回放 + 本轮新增），与上游摘要器的 prior-snapshot 去重语义兼容。
    */
   async function runAgentRun(bot, job, call) {
     const harness = getHarness();
@@ -970,7 +970,7 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
         try {
           const status = await client.botLearning(host.deviceId, bot.botId, { action: 'status' });
           const settings = status.settings;
-          if (!settings.enabled || !settings.curator.enabled || settings.curator.paused || status.activeJob) continue;
+          if (status.activeJob) continue;
           const lastActivity = Date.parse(bot.lastActivityAt ?? bot.createdAt);
           if (!Number.isFinite(lastActivity) || Date.now() - lastActivity < settings.curator.minIdleHours * 3_600_000) continue;
           if (!(await isBotIdle(bot))) continue;
