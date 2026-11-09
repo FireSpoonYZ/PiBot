@@ -42,6 +42,7 @@ import {
   isNotSent,
   isScopeDeleted,
   memberAvatar,
+  scopeDeviceName,
   sessionKey,
 } from './GroupSettings';
 import type { ScopeBotInfo } from './GroupSettings';
@@ -105,19 +106,26 @@ function mergeKnownBots(listed: BotRecord[], known: readonly ScopeBotInfo[] | un
   return [...map.values()];
 }
 
-function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted }: {
+type RoomSendRecordsTarget = { deviceId: string; scopeId: string; recordId?: string };
+
+function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted, deviceName, onOpenSendRecords }: {
   api: DesktopViewApi;
   scopeId: string;
   replyTo: string | null;
   onReplyTo: (id: string | null) => void;
   /** 仅在“确定受理”后触发只读历史刷新；刷新失败不得改变发送结果。 */
   onAccepted: () => void;
+  deviceName?: string;
+  onOpenSendRecords?: (target: RoomSendRecordsTarget) => void;
 }) {
   const identity = api.identity;
+  const desktop = deviceName !== undefined;
+  const recordsLabel = desktop ? '发送记录' : '待发送面板';
   const draftTarget = useMemo(() => ({ kind: 'room' as const, id: scopeId }), [scopeId]);
   const drafts = useDrafts({ api, identity, target: draftTarget });
   const [sendState, setSendState] = useState<'idle' | 'sending'>('idle');
   const [sendError, setSendError] = useState<string | null>(null);
+  const [lastRecord, setLastRecord] = useState<{ deviceId: string; id: string; accepted: boolean } | null>(null);
   const [recOutcome, setRecOutcome] = useState<{ action: string; found: boolean; recordId: string | null; recordState: string | null } | null>(null);
   const lockedRef = useRef(false);
   const mountedRef = useRef(true);
@@ -129,6 +137,7 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted }: {
   function onChangeText(v: string) {
     drafts.editText(v);
     if (sendError) setSendError(null);
+    if (lastRecord?.accepted) setLastRecord(null);
   }
 
   function setReply(id: string | null) {
@@ -155,6 +164,7 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted }: {
     setSendState('sending');
     setSendError(null);
     setRecOutcome(null);
+    setLastRecord(null);
     await drafts.waitQuiet(started.handle);
     // 只发送冻结副本：await 后不重组 replyTo/业务 ID。
     const frozen = started.attempt.input;
@@ -179,19 +189,22 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted }: {
       if (!rec) return;
       drafts.setPending(started.handle, rec.id);
       const pendingId = rec.id;
+      if (desktop && mountedRef.current) setLastRecord({ deviceId: rec.targetDeviceId, id: pendingId, accepted: false });
       const cleared = await drafts.confirmCleared(started.handle);
       if (cleared !== 'cleared') {
         const errMsg = cleared === 'conflict'
           ? '草稿尚未清空：磁盘草稿已被更新。原发送记录保留且未发送；请查看新版草稿并选择“保留新版草稿，结束旧尝试”，不会自动清空或补发。'
-          : '草稿尚未清空：消息已入队但未远程发送，请在待发送面板处理。';
+          : `草稿尚未清空：消息已入队但未远程发送，请在${recordsLabel}中处理。`;
         drafts.markFailed(started.handle, errMsg);
         setSendError(errMsg);
         return;
       }
-      onReplyTo(null);
-      if (!api.transportConnected) {
+      if (mountedRef.current) onReplyTo(null);
+      if (!api.transportConnected || (desktop && sessionKey(api.identity) !== sessionKey(identity))) {
         drafts.finishSend(started.handle);
-        setSendError('离线：消息已入队，连接后请在待发送面板显式发送。');
+        setSendError(desktop
+          ? `消息已入队。${deviceName}可用后，请从发送记录继续发送。`
+          : '离线：消息已入队，连接后请在待发送面板显式发送。');
         return;
       }
       try {
@@ -210,18 +223,19 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted }: {
   }
 
   function reportSendRecord(handle: { key: string; attemptId: string }, rec: PendingRecord) {
+    if (desktop && mountedRef.current) setLastRecord({ deviceId: rec.targetDeviceId, id: rec.id, accepted: rec.state === 'accepted' });
     if (rec.state === 'accepted') {
       drafts.finishSend(handle);
       // 受理只说明已受理；完成与否以 live/原回执为准，界面不断言。
       // 已受理是成功路径：清错误条并刷新只读历史，不用 error-banner 展示。
       setSendError(null);
-      onAccepted();
+      if (mountedRef.current) onAccepted();
     } else if (rec.state === 'rejected') {
       // 确定终态：本地 attempt 结束，原记录保留在待发送面板
       drafts.finishSend(handle);
-      setSendError('发送被拒。原记录可在待发送面板查看。');
+      setSendError(`发送被拒。可查看${recordsLabel}了解详情。`);
     } else if (rec.state === 'unconfirmed') {
-      const errMsg = '发送结果未确认，请等待待发送面板对账。';
+      const errMsg = desktop ? '发送结果未确认，可在发送记录核对。' : '发送结果未确认，请等待待发送面板对账。';
       drafts.markUnconfirmed(handle);
       setSendError(errMsg);
     } else {
@@ -233,11 +247,15 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted }: {
   async function queryPending() {
     if (!identity || !drafts.attempt || !drafts.key) return;
     const handle = { key: drafts.key, attemptId: drafts.attempt.id };
+    const deviceId = drafts.attempt.owner.targetDeviceId;
     const outcome = await drafts.reconcile(handle);
     if (!mountedRef.current) return;
     setRecOutcome(outcome);
+    if (desktop && outcome.recordId) {
+      setLastRecord({ deviceId, id: outcome.recordId, accepted: outcome.recordState === 'accepted' });
+    }
     if (outcome.action === 'finished') {
-      setSendError('发送状态已确定，本地发送尝试已结束。');
+      setSendError(desktop && outcome.recordState === 'accepted' ? null : '发送状态已确定，本地发送尝试已结束。');
       // 只读对账也确认受理时刷新消息；读失败只进 histError。
       if (outcome.recordState === 'accepted') onAccepted();
     } else if (outcome.action === 'kept') {
@@ -255,7 +273,7 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted }: {
     const r = await drafts.retryClearAfterVerify(handle);
     if (r === 'cleared') {
       setRecOutcome(null);
-      setSendError('本地草稿已清空，原记录保留在待发送面板，由面板显式发送。');
+      setSendError(`本地草稿已清空，可从${recordsLabel}继续发送。`);
     } else if (r === 'conflict') {
       setSendError('草稿尚未清空：磁盘草稿已被更新；请查看新版草稿并选择“保留新版草稿，结束旧尝试”。');
     } else {
@@ -269,7 +287,7 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted }: {
     const r = drafts.adoptNewerDraftAndFinish(handle);
     if (r.ok) {
       setRecOutcome(null);
-      setSendError('已保留新版草稿并结束旧尝试；原发送记录仍在待发送面板，未发送。');
+      setSendError(`已保留新版草稿。旧消息尚未发送，可在${recordsLabel}查看。`);
     } else {
       setSendError(r.error ?? '无法采用新版草稿');
     }
@@ -289,6 +307,17 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted }: {
 
   const disabled = sendState === 'sending' || lockedRef.current || drafts.busy || !!drafts.attempt;
   const canSend = !disabled && !!identity && !!drafts.key && !!drafts.text.trim() && !drafts.savePaused;
+  const attempt = drafts.attempt;
+  const recordTarget: RoomSendRecordsTarget | null = attempt
+    ? attempt.pendingId || attempt.phase === 'unconfirmed'
+      ? { deviceId: attempt.owner.targetDeviceId, scopeId, recordId: attempt.pendingId ?? undefined }
+      : null
+    : lastRecord ? { deviceId: lastRecord.deviceId, scopeId, recordId: lastRecord.id } : null;
+  const recordAction = onOpenSendRecords && recordTarget ? (
+    <button type="button" className="scope-send-record-link" onClick={() => onOpenSendRecords(recordTarget)}>
+      查看发送记录
+    </button>
+  ) : null;
 
   return (
     <div className="composer scope-composer">
@@ -323,6 +352,8 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted }: {
               {recOutcome?.action === 'ready-clear-retry' ? (
                 <button type="button" onClick={() => void retryClearVerified()}>重试清空草稿</button>
               ) : null}
+              {desktop && sendError ? <span>{sendError}</span> : null}
+              {recordAction}
             </>
           )}
         </div>
@@ -363,7 +394,15 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted }: {
           {sendState === 'sending' ? '发送中…' : '发送'}
         </button>
       </div>
-      {sendError ? <div className="error-banner" role="alert">{sendError}</div> : null}
+      {desktop ? <div className="scope-composer-footnote">
+        <span>{api.transportConnected ? '草稿保存在本机。' : `${deviceName}暂时不可用。草稿保存在本机。`}</span>
+        {!attempt && (sendError || lastRecord?.accepted || recordAction) ? <span role="status">
+          {sendError ?? (lastRecord?.accepted ? '消息已受理。' : '')}
+          {recordAction}
+        </span> : null}
+      </div> : null}
+      {!desktop && sendError ? <div className="error-banner" role="alert">{sendError}</div> : null}
+      {desktop && attempt?.phase === 'not-sent' && sendError ? <div className="status" role="status">{sendError}</div> : null}
     </div>
   );
 }
@@ -429,6 +468,9 @@ function MemberEditor({ current, candidates, names, onChange }: {
 
 function ScopeDetail({
   api,
+  variant,
+  onOpenSendRecords,
+  participant,
   scope,
   bots,
   onChanged,
@@ -443,6 +485,9 @@ function ScopeDetail({
   onSettingsOpenChange,
 }: {
   api: ScopeReadApi;
+  variant: 'desktop' | 'mobile';
+  onOpenSendRecords?: (target: RoomSendRecordsTarget) => void;
+  participant?: MessageMember;
   scope: ScopeInfo;
   bots: readonly ScopeBotInfo[];
   onChanged: (s: ScopeInfo) => void;
@@ -468,6 +513,7 @@ function ScopeDetail({
   const sess = sessionKey(identity);
   const online = api.transportConnected;
   const isRoom = scope.scope.kind === 'room';
+  const desktop = variant === 'desktop';
   /**
    * 群聊写端：resolver 路由（send 走成员所在可用 Host，members 只可达 authority）；
    * 未提供 resolver 时回退“读取 api 本身是权威节点完整 DesktopViewApi”的原路径。
@@ -485,6 +531,8 @@ function ScopeDetail({
     return scope.isAuthority && isScopeWritableApi(api) ? api : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolveRoomApi, api, isRoom, scope.authorityDeviceId, scope.isAuthority, scope.scope.scopeId, scope.scope.revision, online]);
+  const sendDeviceId = sendApi?.identity?.targetDeviceId;
+  const sendDeviceName = sendDeviceId ? scopeDeviceName(sendDeviceId, bots, api) || '成员设备' : '成员设备';
 
   const [settingsOpenState, setSettingsOpenState] = useState(false);
   const isSettingsControlled = settingsOpen !== undefined;
@@ -843,10 +891,12 @@ function ScopeDetail({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope.scope.scopeId]);
 
-  // 被动读取：离线不自动 call，重连后全量重载（含刷新 tailCursor）。
+  // 同一会话重连时从已读位置增量接续，保留已翻看的旧页和当前视口。
   useEffect(() => {
-    if (identity && api.transportConnected) void loadHistory(true);
-  }, [loadHistory, identity, online]);
+    if (!identity || !online) return;
+    if (tailCursorRef.current) void pollNew();
+    else void loadHistory(true);
+  }, [loadHistory, pollNew, identity, online]);
 
   // 可见 + 在线 + 文档可见时每 2s 沿 tailCursor 增量轮询并核对群状态；隐藏/离线停表。
   useEffect(() => {
@@ -859,6 +909,7 @@ function ScopeDetail({
   }, [pollNew, pollScopeState, identity, online, pageActive, docVisible]);
 
   const memberCount = scope.scope.members.length;
+  const title = desktop && !isRoom && participant ? dmRowTitle(scope, bots, participant) : conversationTitle(scope.scope, bots);
   return (
     <div className="scope-detail">
       <div
@@ -866,12 +917,14 @@ function ScopeDetail({
         aria-hidden={showSettings || undefined}
       >
         <ConversationChatHeader
-          title={conversationTitle(scope.scope, bots)}
+          title={title}
           subtitle={isRoom ? `${memberCount} 位成员` : undefined}
           avatar={<ConversationGroupAvatar members={scope.scope.members} bots={bots} size={30} />}
           onBack={onBack}
           readOnly={!canWrite}
-          onOpenMenu={isRoom ? openSettings : undefined}
+          onOpenMenu={isRoom && !desktop ? openSettings : undefined}
+          onShowMembers={isRoom && desktop ? openSettings : undefined}
+          membersLabel={isRoom && desktop ? '成员' : undefined}
         />
 
         {/* room/DM 均可被动查看 scopeHistory 与分页；仅 room + 可写 API 允许用户消息输入。 */}
@@ -926,12 +979,16 @@ function ScopeDetail({
               scopeId={scope.scope.scopeId}
               replyTo={roomReply}
               onReplyTo={setRoomReply}
-              onAccepted={() => void loadHistory(true)}
+              onAccepted={() => void (desktop ? pollNew() : loadHistory(true))}
+              deviceName={desktop ? sendDeviceName : undefined}
+              onOpenSendRecords={desktop ? onOpenSendRecords : undefined}
             />
           ) : (
             /* 有 resolver 但写端未就绪：待连接禁用区，不标“只读”。 */
             <div className="composer scope-composer">
-              <div className="status">写通道待连接，暂不能发送；连接后可正常输入。</div>
+              <div className="status">{desktop
+                ? '暂时连不上群聊的成员设备。草稿保存在本机。'
+                : '写通道待连接，暂不能发送；连接后可正常输入。'}</div>
               <div className="scope-composer-row">
                 <textarea
                   className="composer-input scope-composer-input"
@@ -946,14 +1003,15 @@ function ScopeDetail({
               </div>
             </div>
           )
-        ) : (
+        ) : !desktop ? (
           <p className="hint scope-readonly-hint">仅供查看</p>
-        )}
+        ) : null}
       </div>
 
       {showSettings ? (
         <GroupSettings
           api={api}
+          variant={variant}
           membersApi={membersApi}
           scope={scope}
           bots={bots}
@@ -1051,6 +1109,8 @@ function dmRowTitle(scope: ScopeInfo, bots: readonly ConversationBot[], self?: M
 export function Scopes({
   api,
   pageActive = true,
+  variant = 'mobile',
+  onOpenSendRecords,
   initialBotId,
   initialScopeId,
   readOnly = false,
@@ -1074,6 +1134,8 @@ export function Scopes({
   /** 完整视图 API（远端桌面/移动远端）或本机只读窄 API（mobile lane 适配器）。 */
   api: DesktopViewApi | ScopeReadApi;
   pageActive?: boolean;
+  variant?: 'desktop' | 'mobile';
+  onOpenSendRecords?: (target: RoomSendRecordsTarget) => void;
   /** 进入时预选 scope。 */
   initialScopeId?: string;
   /** 兼容保留：宿主旧导航传入；新消息界面不再按 Bot 筛选消息。 */
@@ -1136,10 +1198,11 @@ export function Scopes({
   const [bots, setBots] = useState<BotRecord[]>([]);
   /** 目录 + 实时 listBots 合并后的命名/头像表（已知优先 listBots，目录提供归档/远端名与设备名）。 */
   const mergedBots = useMemo(() => mergeKnownBots(bots, knownBots), [bots, knownBots]);
+  const dmLabel = variant === 'desktop' ? '智能体间通信' : '私聊';
   const listTitle = participant
-    ? (participantName ?? conversationMemberName(participant, mergedBots)) + '的私聊'
+    ? (participantName ?? conversationMemberName(participant, mergedBots)) + `的${dmLabel}`
     : scopeKind === 'dm'
-      ? '私聊'
+      ? dmLabel
       : scopeKind === 'room'
         ? '群聊'
         : '群聊 / 智能体私聊';
@@ -1312,6 +1375,8 @@ export function Scopes({
     <div
       className={
         'conversation-layout scope-shell'
+        + (variant === 'desktop' ? ' scope-shell-desktop' : '')
+        + (variant === 'desktop' && (participant || scopeKind === 'dm') ? ' scope-shell-desktop-dm' : '')
         + (selectedId ? ' scope-shell-detail-open' : '')
         + (detailOnly ? ' scope-shell-detail-only' : '')
       }
@@ -1364,7 +1429,7 @@ export function Scopes({
           />
         ) : null}
         {rowConversations.length === 0 && !convList.loading && !convList.error ? (
-          <div className="empty-state">{participant ? '该 Bot 暂无私聊。' : '暂无会话。'}{!participant && identity ? '点击“新建会话”创建。' : (!identity ? '请先连接。' : '')}</div>
+          <div className="empty-state">{participant ? (variant === 'desktop' ? '暂无智能体间通信。' : '该 Bot 暂无私聊。') : '暂无会话。'}{!participant && identity ? '点击“新建会话”创建。' : (!identity ? '请先连接。' : '')}</div>
         ) : (
           <ul className="entity-list-items">
             {rowConversations.map((c) => (
@@ -1400,6 +1465,9 @@ export function Scopes({
           <ScopeDetail
             key={`${selected.scope.scopeId}_${targetKey}`}
             api={api}
+            variant={variant}
+            onOpenSendRecords={onOpenSendRecords}
+            participant={participant}
             scope={selected}
             bots={mergedBots}
             onChanged={(s) => {
@@ -1425,7 +1493,9 @@ export function Scopes({
         ) : detailOnly && selectedId ? (
           <div className="status">加载中…</div>
         ) : (
-          <div className="empty-state">在左侧选择一个群聊或私聊查看详情。</div>
+          <div className="empty-state">{variant === 'desktop' && (participant || scopeKind === 'dm')
+            ? '选择一条通信查看详情。'
+            : '在左侧选择一个群聊或私聊查看详情。'}</div>
         )}
       </section>
     </div>

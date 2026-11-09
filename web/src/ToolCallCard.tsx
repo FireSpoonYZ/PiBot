@@ -14,6 +14,8 @@ export interface ToolCallCardProps {
   scopeKey: string;
   active: boolean;
   disabled?: boolean;
+  variant?: 'desktop';
+  requesterName?: string;
   onSubmitQuestionnaire?: (installationId: string, input: QuestionnaireSubmitPayload) => Promise<unknown>;
   onSubmitVaultUnlock?: (input: VaultUnlockSubmitPayload) => Promise<unknown>;
 }
@@ -24,6 +26,8 @@ export function ToolCallCard({
   scopeKey,
   active,
   disabled = false,
+  variant,
+  requesterName,
   onSubmitQuestionnaire,
   onSubmitVaultUnlock,
 }: ToolCallCardProps) {
@@ -74,6 +78,8 @@ export function ToolCallCard({
               scopeKey={scopeKey}
               active={active && tool.status === 'running'}
               disabled={disabled}
+              variant={variant}
+              requesterName={requesterName}
               onSubmitQuestionnaire={onSubmitQuestionnaire}
               onSubmitVaultUnlock={onSubmitVaultUnlock}
             />
@@ -125,6 +131,8 @@ export function ToolCallCard({
           presentation={presentation}
           active={active && tool.presentationLive === true}
           disabled={disabled}
+          variant={variant}
+          requesterName={requesterName}
           onSubmit={presentation.kind === 'questionnaire' && onSubmitQuestionnaire
             ? input => onSubmitQuestionnaire(presentation.installationId, input)
             : undefined}

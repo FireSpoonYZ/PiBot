@@ -1,13 +1,9 @@
 // Bot 设置工作台（desktop/远程页）：SOUL.md 编辑、CPA 模型设置、插件能力、定时任务。
 // 外层抽屉由 BotChats 负责；open=true 时直接展示内容，非活动 tab 的能力/任务面板不挂载、不轮询。
-// 显式读取 + CAS 保存：冲突/结果未确认只锁保存，只有显式“采用远端设置（丢弃本地修改）”才换基线；
-// 未保存草稿连同其原始基线（含 revision）按 profile+target+bot 保留，自动读取绝不替换 dirty 部分的基线，
-// 因此旧草稿不会拿到未看过的远端 revision 去覆盖远端；不自动重放、不跨 Host 串数据。
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { CenterBotModelConfig, CenterModelSelection, CenterModelPicker } from '../../../host-core/desktop-client.js';
 import type { BotSoul, RemoteControlMethodMap } from '../../../host-core/index.js';
 import { toError } from './api';
-import { openCenterManagement } from './CenterGate';
 import { BotCapabilities } from './BotCapabilities';
 import { BotSchedules } from './BotSchedules';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
@@ -39,9 +35,9 @@ const SOUL_SNIPPETS: { label: string; content: string }[] = [
   },
 ];
 
-type StudioTab = 'soul' | 'model' | 'capabilities' | 'skill-review' | 'schedules' | 'vault';
+export type BotSettingsTab = 'soul' | 'model' | 'capabilities' | 'skill-review' | 'schedules' | 'vault';
 
-const STUDIO_TABS: { id: StudioTab; label: string }[] = [
+const STUDIO_TABS: { id: BotSettingsTab; label: string }[] = [
   { id: 'soul', label: '🎭 灵魂人设' },
   { id: 'model', label: '🤖 模型设置' },
   { id: 'capabilities', label: '🔌 插件与能力' },
@@ -50,306 +46,306 @@ const STUDIO_TABS: { id: StudioTab; label: string }[] = [
   { id: 'vault', label: '🔒 密码库' },
 ];
 
-/** 一个 Bot 的本地编辑状态：草稿与其原始基线成对保存，切走/重挂载后 CAS 仍指向同一远端版本。 */
-interface Cached {
-  soul: BotSoul | null;
-  soulDraft: string | null;
-  /** 上次保存冲突/结果未确认：锁定保存，直到用户显式采用远端。 */
-  lock: boolean;
+type DraftProblem = 'conflict' | 'unconfirmed';
+
+interface DraftState<Config, Value> {
+  baseline: Config | null;
+  draft: Value | null;
+  problem: DraftProblem | null;
+  saving: boolean;
 }
 
-/** 按 profile+target+bot 保留（不含 generation，重连后仍可继续编辑）。 */
-const draftCache = new Map<string, Cached>();
+/** 关闭抽屉后，草稿、CAS 基线和进行中的保存仍属于原智能体。 */
+function createDraftCache<Config, Value>() {
+  const empty: DraftState<Config, Value> = { baseline: null, draft: null, problem: null, saving: false };
+  const entries = new Map<string, DraftState<Config, Value>>();
+  const listeners = new Map<string, Set<() => void>>();
+  return {
+    get: (key: string) => entries.get(key) ?? empty,
+    set(key: string, value: DraftState<Config, Value>) {
+      entries.set(key, value);
+      listeners.get(key)?.forEach(listener => listener());
+    },
+    subscribe(key: string, listener: () => void) {
+      const subscribers = listeners.get(key) ?? new Set<() => void>();
+      listeners.set(key, subscribers);
+      subscribers.add(listener);
+      return () => {
+        subscribers.delete(listener);
+        if (!subscribers.size) listeners.delete(key);
+      };
+    },
+  };
+}
 
 function cacheKey(identity: DesktopIdentity, botId: string): string {
-  return `${identity.profileId}\u0000${identity.targetDeviceId}\u0000${botId}`;
+  return JSON.stringify([identity.profileId, identity.kind, identity.targetDeviceId, botId]);
+}
+
+function isCurrent(api: DesktopPanelApi, identity: DesktopIdentity): boolean {
+  const current = api.identity;
+  return api.transportConnected && !!current &&
+    current.profileId === identity.profileId && current.kind === identity.kind &&
+    current.targetDeviceId === identity.targetDeviceId && current.generation === identity.generation;
+}
+
+interface EditorResource<Config extends { revision: string | number }, Value> {
+  label: string;
+  cache: ReturnType<typeof createDraftCache<Config, Value>>;
+  read(api: DesktopPanelApi, identity: DesktopIdentity, botId: string): Promise<Config>;
+  write(api: DesktopPanelApi, identity: DesktopIdentity, botId: string, baseline: Config, value: Value): Promise<Config>;
+  valueOf(config: Config): Value;
+  equal(a: Value, b: Value): boolean;
+  savedMessage: string;
+}
+
+const soulResource: EditorResource<BotSoul, string> = {
+  label: '人设',
+  cache: createDraftCache<BotSoul, string>(),
+  read: (api, identity, botId) => api.call(identity, 'getBotSoul', { botId }),
+  write: (api, identity, botId, baseline, text) =>
+    api.call(identity, 'setBotSoul', { botId, input: { expectedRevision: baseline.revision, text } }),
+  valueOf: config => config.text,
+  equal: (a, b) => a === b,
+  savedMessage: '人设已保存，下一次请求生效。',
+};
+
+const modelResource: EditorResource<CenterBotModelConfig, CenterModelSelection> = {
+  label: '模型设置',
+  cache: createDraftCache<CenterBotModelConfig, CenterModelSelection>(),
+  read: (api, identity, botId) =>
+    api.broker(identity, 'center_bot_model_get', { deviceId: identity.targetDeviceId, botId }),
+  write: (api, identity, botId, baseline, value) => api.broker(identity, 'center_bot_model_set', {
+    deviceId: identity.targetDeviceId, botId, expectedRevision: baseline.revision, value,
+  }),
+  valueOf: config => config.overrides,
+  // undefined 表示继承。null 与 false 都是显式覆盖。
+  equal: (a, b) => a.modelRef === b.modelRef && a.thinkingLevel === b.thinkingLevel &&
+    a.codemode === b.codemode && a.codemodeOnly === b.codemodeOnly,
+  savedMessage: '模型设置已保存并同步至中心。',
+};
+
+function useSettingsEditor<Config extends { revision: string | number }, Value>(
+  resource: EditorResource<Config, Value>,
+  api: DesktopPanelApi,
+  botId: string,
+  key: string,
+  active: boolean,
+) {
+  const { cache } = resource;
+  const generation = api.identity?.generation;
+  const online = api.transportConnected;
+  const subscribe = useCallback((listener: () => void) => cache.subscribe(key, listener), [cache, key]);
+  const getSnapshot = useCallback(() => cache.get(key), [cache, key]);
+  const state = useSyncExternalStore(subscribe, getSnapshot);
+  const readRef = useRef<{ generation: number } | null>(null);
+  const alive = useRef(false);
+  const [reading, setReading] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const loading = reading !== null && reading === generation;
+
+  useLayoutEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      readRef.current = null;
+    };
+  }, []);
+
+  const load = useCallback(async (adopt: boolean): Promise<void> => {
+    const id = api.identity;
+    const original = cache.get(key);
+    if (!id || !api.transportConnected || cacheKey(id, botId) !== key ||
+      original.saving || readRef.current?.generation === id.generation) return;
+    const read = { generation: id.generation };
+    readRef.current = read;
+    const current = () => readRef.current === read && isCurrent(api, id) && cache.get(key) === original;
+    setReading(id.generation);
+    setError(null);
+    setNotice(null);
+    try {
+      const next = await resource.read(api, id, botId);
+      if (!current()) return;
+      if (adopt || (original.draft === null && !original.problem)) {
+        cache.set(key, { baseline: next, draft: null, problem: null, saving: false });
+        if (adopt) setNotice('已采用远端版本。');
+      } else if (original.baseline?.revision === next.revision) {
+        // 同一版本可以更新生效摘要，编辑继续绑定原版本。
+        cache.set(key, { ...original, baseline: next });
+      } else if (!original.problem) {
+        cache.set(key, { ...original, problem: 'conflict' });
+      }
+    } catch (failure) {
+      if (current()) setError(`读取${resource.label}失败。${toError(failure).message}`);
+    } finally {
+      if (readRef.current === read) {
+        readRef.current = null;
+        setReading(null);
+      }
+    }
+  }, [api, botId, cache, key, resource]);
+
+  useEffect(() => {
+    if (active && online) void load(false);
+  }, [active, generation, online, load]);
+
+  function update(edit: (value: Value) => Value | null): void {
+    const id = api.identity;
+    const current = cache.get(key);
+    if (!id || cacheKey(id, botId) !== key || !current.baseline || current.saving ||
+      readRef.current?.generation === id.generation) return;
+    const saved = resource.valueOf(current.baseline);
+    const value = edit(current.draft ?? saved);
+    const draft = value !== null && !resource.equal(value, saved) ? value : null;
+    cache.set(key, { ...current, draft });
+    setNotice(null);
+  }
+
+  async function save(): Promise<void> {
+    const id = api.identity;
+    const { baseline, draft, problem, saving } = cache.get(key);
+    if (!id || !id.targetDeviceId || !api.transportConnected || cacheKey(id, botId) !== key ||
+      !baseline || draft === null || problem || saving || readRef.current?.generation === id.generation) return;
+    const inFlight = { baseline, draft, problem, saving: true };
+    cache.set(key, inFlight);
+    setError(null);
+    setNotice(null);
+    try {
+      const next = await resource.write(api, id, botId, baseline, draft);
+      if (cache.get(key) !== inFlight) return;
+      if (!isCurrent(api, id)) {
+        cache.set(key, { ...inFlight, problem: 'unconfirmed', saving: false });
+        return;
+      }
+      cache.set(key, { baseline: next, draft: null, problem: null, saving: false });
+      if (alive.current) setNotice(resource.savedMessage);
+    } catch (failure) {
+      if (cache.get(key) !== inFlight) return;
+      const err = toError(failure);
+      const conflict = err.code === 'REQUEST_CONFLICT' || err.code === 'REVISION_CONFLICT';
+      const nextProblem = conflict ? 'conflict' :
+        err.outcome === 'unconfirmed' && err.code !== 'RUNTIME_BUSY' ? 'unconfirmed' : null;
+      cache.set(key, { ...inFlight, problem: nextProblem, saving: false });
+      if (alive.current && isCurrent(api, id) && !nextProblem) {
+        setError(err.code === 'RUNTIME_BUSY'
+          ? '智能体正忙。草稿已保留，任务结束后可重试。'
+          : `保存${resource.label}失败，草稿已保留。${err.message}`);
+      }
+    }
+  }
+
+  return { ...state, loading, error, notice, setError, load, update, save, busy: loading || state.saving };
 }
 
 function soulBytes(text: string): number {
   return new TextEncoder().encode(text).length;
 }
 
-export function BotSettings({
-  api,
-  botId,
-  hostLabel,
-  open,
-}: {
+interface BotSettingsProps {
   api: DesktopPanelApi;
   botId: string;
   hostLabel: string;
+  hostPlatform?: string;
+  tab?: BotSettingsTab;
   /** 由外层工作台抽屉控制；true 时直接展示内容。 */
   open?: boolean;
   onOpenChange?: (next: boolean) => void;
-}) {
+}
+
+export function BotSettings(props: BotSettingsProps) {
+  const identity = props.api.identity;
+  const key = identity ? cacheKey(identity, props.botId) : '';
+  return props.open ? <BotSettingsSession key={key} draftKey={key} {...props} /> : null;
+}
+
+function BotSettingsSession({ api, botId, hostLabel, hostPlatform, tab, draftKey: key }: BotSettingsProps & { draftKey: string }) {
   const identity = api.identity;
   const online = api.transportConnected;
-  const key = identity ? cacheKey(identity, botId) : '';
-  const cached = key ? draftCache.get(key) : undefined;
-  const botPanelIdentityKey = JSON.stringify([identity?.profileId, identity?.targetDeviceId, identity?.kind, identity?.generation]);
+  const botPanelIdentityKey = JSON.stringify([key, identity?.generation]);
   const callBotPanel = useCallback(<M extends 'vaultControl' | 'reviewBotSkills',>(
     method: M,
     params: RemoteControlMethodMap[M]['params'],
   ) => {
-    const current = api.identity;
-    if (!identity || !current || !api.transportConnected ||
-      current.profileId !== identity.profileId || current.targetDeviceId !== identity.targetDeviceId ||
-      current.kind !== identity.kind || current.generation !== identity.generation) {
-      return Promise.reject({ code: 'NOT_CONNECTED' });
-    }
+    if (!identity || !isCurrent(api, identity)) return Promise.reject({ code: 'NOT_CONNECTED' });
     return api.call(identity, method, params);
   }, [api, identity]);
   const callVault = useCallback<VaultCall>(input => callBotPanel('vaultControl', input), [callBotPanel]);
   const callSkillReview = useCallback<SkillReviewCall>(input =>
     callBotPanel('reviewBotSkills', { botId, input }), [botId, callBotPanel]);
 
-  const [soul, setSoul] = useState<BotSoul | null>(cached?.soul ?? null);
-  const [soulDraft, setSoulDraft] = useState<string | null>(cached?.soulDraft ?? null);
-  const [locked, setLocked] = useState(!!cached?.lock);
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState<'soul' | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [studioTab, setStudioTab] = useState<StudioTab>('soul');
-
-  const [modelConfig, setModelConfig] = useState<CenterBotModelConfig | null>(null);
-  const [modelDraft, setModelDraft] = useState<CenterModelSelection>({});
+  const [localTab, setLocalTab] = useState<BotSettingsTab>('soul');
+  const studioTab = tab ?? localTab;
+  const soulEditor = useSettingsEditor(soulResource, api, botId, key, studioTab === 'soul');
+  const modelEditor = useSettingsEditor(modelResource, api, botId, key, studioTab === 'model');
+  const soulInputId = useId();
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const showModelPicker = studioTab === 'model' && modelPickerOpen;
   const [modelCatalog, setModelCatalog] = useState<CenterModelPicker | null>(null);
-  const [modelSaving, setModelSaving] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const catalogSeq = useRef(0);
 
-  const mountedRef = useRef(true);
-  /** 读取代次：同一选择内只应用最后一次读取。 */
-  const seqRef = useRef(0);
-  /** 写入代次：保存成功后作废发起更早的读取响应，避免把旧 revision 当基线。 */
-  const writeSeqRef = useRef(0);
-  /** 最近一次渲染的本地状态；响应应用时按“当前”状态判断该部分是否已被编辑。 */
-  const liveRef = useRef<Cached>({ soul: null, soulDraft: null, lock: false });
-  liveRef.current = { soul, soulDraft, lock: locked };
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => { mountedRef.current = false; };
-  }, []);
-
-  /** 选择是否已变（profile/target/bot）或已卸载：迟到结果一律丢弃。 */
-  const stale = useCallback((sel: string): boolean => {
-    if (!mountedRef.current) return true;
-    const cur = api.identity;
-    return !cur || cacheKey(cur, botId) !== sel;
-  }, [api, botId]);
-
-  /** 每次状态变更都把草稿与基线成对写回缓存，保证重挂载后 CAS 仍用原 revision。 */
-  const remember = useCallback((patch: Partial<Cached>): void => {
-    if (!key) return;
-    draftCache.set(key, { ...liveRef.current, ...patch });
-  }, [key]);
-
-  // SOUL 逐字节比较，不 trim：空内容与尾部空白都是有效文本。
-  function updateSoul(next: string | null): void {
-    const base = liveRef.current.soul;
-    const draft = next !== null && base && next === base.text ? null : next;
-    setSoulDraft(draft);
-    setNotice(null);
-    liveRef.current = { ...liveRef.current, soulDraft: draft };
-    remember({ soulDraft: draft });
-  }
-
-  function insertSoulSnippet(snippet: string): void {
-    if (busy) return;
-    const cur = soulDraft ?? soul?.text ?? '';
-    const sep = cur.length > 0 && !cur.endsWith('\n') ? '\n\n' : cur.length > 0 ? '\n' : '';
-    updateSoul(cur + sep + snippet);
-  }
-
-  const load = useCallback(async (adoptRemote: boolean): Promise<void> => {
+  const loadCatalog = useCallback(async () => {
     const id = api.identity;
-    if (!id || !api.transportConnected) return;
-    const sel = cacheKey(id, botId);
-    const seq = ++seqRef.current;
-    const writesAtStart = writeSeqRef.current;
-    setLoading(true);
+    if (!id || !api.transportConnected || cacheKey(id, botId) !== key) return;
+    const seq = ++catalogSeq.current;
+    const current = () => catalogSeq.current === seq && isCurrent(api, id);
+    setCatalogError(null);
     try {
-      const [doc, catalogRes, cfgRes] = await Promise.all([
-        api.call(id, 'getBotSoul', { botId }),
-        api.broker(id, 'center_model_picker_get', {}),
-        api.broker(id, 'center_bot_model_get', { deviceId: id.targetDeviceId, botId }),
-      ]);
-      if (stale(sel) || seq !== seqRef.current || writesAtStart !== writeSeqRef.current) return;
-      setModelCatalog(catalogRes);
-      setModelConfig(cfgRes);
-      setModelDraft({ ...cfgRes.overrides });
-      if (adoptRemote) {
-        // 唯一允许更新基线并丢弃本地草稿的入口（显式动作）。
-        const adopted: Cached = { soul: doc, soulDraft: null, lock: false };
-        setSoul(doc);
-        setSoulDraft(null);
-        setLocked(false);
-        setError(null);
-        setNotice('已采用远端当前设置与 SOUL（本地未保存修改已丢弃）。');
-        liveRef.current = adopted;
-        draftCache.set(sel, adopted);
-        return;
-      }
-      // 普通读取：已编辑部分保持原基线（请求发起后用户才开始编辑也按当前状态判断）。
-      const live = liveRef.current;
-      const soulPinned = live.soulDraft !== null;
-      const nextSoul = soulPinned && live.soul ? live.soul : doc;
-      setSoul(nextSoul);
-      if (!live.lock) setError(null);
-      if (
-        (soulPinned && live.soul && live.soul.revision !== doc.revision)
-      ) {
-        setNotice('远端已更新：本地未保存草稿保持原基线，保存会得到冲突提示；需要远端内容请用“采用远端设置（丢弃本地修改）”。');
-      }
-      remember({ soul: nextSoul });
-    } catch (e) {
-      if (stale(sel) || seq !== seqRef.current) return;
-      setError(`读取 Bot 设置失败：${toError(e).message}`);
-      api.reportError(e);
-    } finally {
-      if (mountedRef.current && seq === seqRef.current) setLoading(false);
+      const next = await api.broker(id, 'center_model_picker_get', {});
+      if (current()) setModelCatalog(next);
+    } catch (failure) {
+      if (current()) setCatalogError(toError(failure).message);
     }
-  }, [api, botId, key, stale, remember]);
+  }, [api, botId, key]);
 
-  // 首次/换 Bot：草稿与基线一起从缓存恢复后显式读取；不自动写回任何内容。
+  const generation = identity?.generation;
   useEffect(() => {
-    const saved = key ? draftCache.get(key) : undefined;
-    setSoul(saved?.soul ?? null);
-    setSoulDraft(saved?.soulDraft ?? null);
-    setLocked(!!saved?.lock);
-    setError(null);
-    setNotice(null);
-    setSaving(null);
-    setModelConfig(null);
-    setModelCatalog(null);
-    setModelDraft({});
-    if (key) void load(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+    if (online && showModelPicker) void loadCatalog();
+    return () => { catalogSeq.current += 1; };
+  }, [generation, online, showModelPicker, loadCatalog]);
 
-  // 重连后被动刷新一次（同一选择；dirty 部分的基线仍保持不动）。
-  const prevOnline = useRef(online);
-  useEffect(() => {
-    if (!prevOnline.current && online && key) void load(false);
-    prevOnline.current = online;
-  }, [online, key, load]);
-
-  const soulValue = soulDraft ?? soul?.text ?? '';
-  const soulDirty = soulDraft !== null && !!soul && soulDraft !== soul.text;
-  // 读取（含“采用远端”）在途时同样锁住编辑与保存：点击后才输入的内容不会被迟到的采用结果清掉。
-  const busy = saving !== null || loading || modelSaving;
-  const saveBusy = busy || !online;
-  const canSaveSoul = !saveBusy && !!soul && soulDirty && !locked;
-  const dirty = soulDirty;
+  const soul = soulEditor.baseline;
+  const soulValue = soulEditor.draft ?? soul?.text ?? '';
+  const soulDirty = soulEditor.draft !== null;
   const currentBytes = soulBytes(soulValue);
-  const bytePct = Math.min(100, Math.round((currentBytes / SOUL_MAX_BYTES) * 100));
   const byteOverLimit = currentBytes > SOUL_MAX_BYTES;
   const byteWarn = !byteOverLimit && currentBytes > SOUL_MAX_BYTES * 0.85;
+  const modelConfig = modelEditor.baseline;
+  const modelDraft: CenterModelSelection = modelEditor.draft ?? modelConfig?.overrides ?? {};
+  const modelDirty = modelEditor.draft !== null;
+  const editor = studioTab === 'soul' ? soulEditor : studioTab === 'model' ? modelEditor : null;
 
-  /** 统一收尾：确定的拒绝保留草稿可重试；冲突/未确认锁保存，只有显式采用远端才能继续。 */
-  function reportSaveFailure(e: unknown, sel: string, what: string): void {
-    if (stale(sel)) return;
-    const err = toError(e);
-    api.reportError(e);
-    if (err.code === 'RUNTIME_BUSY') {
-      setError('Bot 正忙（RUNTIME_BUSY）：有进行中或排队的任务，本次未保存。草稿已保留，任务结束后可重试。');
-      return;
-    }
-    if (err.code === 'REQUEST_CONFLICT' || err.outcome === 'unconfirmed') {
-      setLocked(true);
-      remember({ lock: true });
-      setError(err.code === 'REQUEST_CONFLICT'
-        ? `${what}保存冲突（REQUEST_CONFLICT）：远端内容已变化，本次写入未生效。草稿与基线已保留；普通“重新读取”不会给未保存草稿换 revision，请用“采用远端设置（丢弃本地修改）”核对后再保存，不会自动重放。`
-        : `${what}保存结果未确认（${err.message || err.code}）：草稿已保留，保存保持锁定；请用“采用远端设置（丢弃本地修改）”核对远端，不会自动重放。`);
-      return;
-    }
-    // 其他确定性拒绝（未下发）：不锁保存，可修正后重试。
-    setError(`${what}保存被拒绝（${err.code}）：${err.message}。草稿已保留，可修正后重试。`);
+  function insertSoulSnippet(snippet: string): void {
+    soulEditor.update(text => {
+      const separator = !text ? '' : text.endsWith('\n') ? '\n' : '\n\n';
+      return text + separator + snippet;
+    });
   }
 
-  async function saveSoul(): Promise<void> {
-    const id = api.identity;
-    if (!id || !soul || !soulDirty || busy || locked || !online) return;
-    const text = soulDraft ?? '';
-    const bytes = soulBytes(text);
-    if (bytes > SOUL_MAX_BYTES) {
-      setError(`SOUL 超过 64 KiB（当前 ${bytes} 字节），未保存。`);
-      return;
-    }
-    const sel = cacheKey(id, botId);
-    setSaving('soul');
-    setError(null);
-    setNotice(null);
-    try {
-      const updated = await api.call(id, 'setBotSoul', {
-        botId,
-        input: { expectedRevision: soul.revision, text },
-      });
-      if (stale(sel)) return;
-      writeSeqRef.current += 1;
-      liveRef.current = { ...liveRef.current, soul: updated, soulDraft: null };
-      setSoul(updated);
-      setSoulDraft(null);
-      remember({ soul: updated, soulDraft: null });
-      setNotice('SOUL 已保存：下一请求生效，不重置会话与历史。');
-    } catch (e) {
-      reportSaveFailure(e, sel, 'SOUL ');
-    } finally {
-      if (mountedRef.current) setSaving(null);
-    }
-  }
-
-  function updateModelDraft(k: 'modelRef' | 'thinkingLevel', v: string | null | undefined): void {
-    setModelDraft((prev) => {
-      const next = { ...prev };
-      if (v === undefined) delete next[k];
-      else next[k] = v;
+  function updateModelDraft(field: 'modelRef' | 'thinkingLevel', value: string | null | undefined): void {
+    modelEditor.update(previous => {
+      const next = { ...previous };
+      if (value === undefined) delete next[field];
+      else next[field] = value;
       return next;
     });
-    setNotice(null);
   }
 
-  function updateCodemodeDraft(k: 'codemode' | 'codemodeOnly', v: string): void {
-    setModelDraft((prev) => {
-      const next = { ...prev };
-      if (v === '__inherit') delete next[k];
-      else if (v === '__null') next[k] = null;
-      else if (v === 'true') {
-        next[k] = true;
-        if (k === 'codemodeOnly') next.codemode = true;
-      } else if (v === 'false') {
-        next[k] = false;
-        if (k === 'codemode' && next.codemodeOnly === true) next.codemodeOnly = false;
+  function updateCodemodeDraft(field: 'codemode' | 'codemodeOnly', value: string): void {
+    modelEditor.update(previous => {
+      const next = { ...previous };
+      if (value === '__inherit') delete next[field];
+      else if (value === '__null') next[field] = null;
+      else if (value === 'true') {
+        next[field] = true;
+        if (field === 'codemodeOnly') next.codemode = true;
+      } else if (value === 'false') {
+        next[field] = false;
+        if (field === 'codemode' && next.codemodeOnly === true) next.codemodeOnly = false;
       }
       return next;
     });
-    setNotice(null);
-  }
-
-  async function saveModelConfig(): Promise<void> {
-    const id = api.identity;
-    if (!id || !id.targetDeviceId || !modelConfig || busy || !online) return;
-    const sel = cacheKey(id, botId);
-    setModelSaving(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const updated = await api.broker(id, 'center_bot_model_set', {
-        deviceId: id.targetDeviceId,
-        botId,
-        expectedRevision: modelConfig.revision,
-        value: modelDraft,
-      });
-      if (stale(sel)) return;
-      ++writeSeqRef.current;
-      setModelConfig(updated);
-      setModelDraft({ ...updated.overrides });
-      setNotice('Bot 模型设置已保存并同步至中心。');
-    } catch (e) {
-      if (!stale(sel)) setError(`保存模型配置失败：${toError(e).message}`);
-    } finally {
-      if (mountedRef.current) setModelSaving(false);
-    }
   }
 
   const describeVal = (v: string | null | undefined) =>
@@ -383,317 +379,307 @@ export function BotSettings({
       key={value}
       type="button"
       className={`bot-studio-choice ${codemodeValue(k) === value ? 'active' : ''}`}
-      disabled={busy || !online}
+      disabled={modelEditor.busy || !online}
       onClick={() => updateCodemodeDraft(k, value)}
     >
       {label}
     </button>
   );
 
-  // 能力/定时任务面板只在其 tab 激活且面板打开时挂载：收起/后台不轮询中心。
-  const panelOpen = Boolean(open);
-  const showCapabilityPanel = panelOpen && studioTab === 'capabilities';
-  const showSchedulesPanel = panelOpen && studioTab === 'schedules';
-
-  if (!open) return null;
-
   return (
     <section className="bot-studio" aria-label="Bot 设置工作台">
-      <div className="bot-studio-head">
-        <div className="pill-tabs bot-studio-tabs" role="tablist" aria-label="Bot 设置页签">
-          {STUDIO_TABS.map((t) => (
+      {tab === undefined || editor ? <div className="bot-studio-head">
+        {tab === undefined ? <div className="pill-tabs bot-studio-tabs" role="tablist" aria-label="Bot 设置页签">
+          {STUDIO_TABS.map((tab) => {
+            const dirty = tab.id === 'soul' ? soulDirty : tab.id === 'model' && modelDirty;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={studioTab === tab.id}
+                className={studioTab === tab.id ? 'active' : undefined}
+                onClick={() => setLocalTab(tab.id)}
+              >
+                {tab.label}{dirty ? <span aria-hidden="true" title="有未保存修改"> ●</span> : null}
+              </button>
+            );
+          })}
+        </div> : null}
+        {editor ? <div className="bot-studio-actions">
             <button
-              key={t.id}
               type="button"
-              role="tab"
-              aria-selected={studioTab === t.id}
-              className={studioTab === t.id ? 'active' : undefined}
-              onClick={() => setStudioTab(t.id)}
+              className="secondary-button"
+              onClick={() => {
+                void editor.load(false);
+                if (showModelPicker) void loadCatalog();
+              }}
+              disabled={!online || editor.busy}
             >
-              {t.id === 'soul' && soulDirty ? `${t.label} ●` : t.label}
+              {editor.loading ? '读取中…' : '↻ 重新读取'}
             </button>
-          ))}
-        </div>
-        <div className="bot-studio-actions">
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={() => void load(false)}
-            disabled={!online || loading || busy}
-          >
-            {loading ? '读取中…' : '↻ 重新读取'}
-          </button>
-          <button
-            type="button"
-            className={`secondary-button ${locked ? 'warn' : ''}`}
-            onClick={() => void load(true)}
-            disabled={!online || loading || busy || (!dirty && !locked)}
-          >
-            采用远端设置（丢弃本地修改）
-          </button>
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={() => void openCenterManagement()}
-          >
-            插件与中心管理
-          </button>
-        </div>
-      </div>
-
-      <div className="bot-studio-badges">
-        {soul ? (
-          <span className={`studio-pill ${soulDirty ? 'is-warn' : 'is-ok'}`}>
-            {`SOUL.md · ${currentBytes} B${soulDirty ? ' · 已修改' : ''}`}
-          </span>
-        ) : null}
-        {modelConfig ? (
-          <span className="studio-pill is-ok">
-            {`模型: ${describeVal(modelConfig.effective.modelRef)}`}
-          </span>
-        ) : null}
-        {locked ? <span className="studio-pill is-lock">🔒 冲突锁定</span> : null}
-      </div>
+          {editor.draft !== null || editor.problem ? (
+            <button
+              type="button"
+              className={`secondary-button ${editor.problem ? 'warn' : ''}`}
+              onClick={() => void editor.load(true)}
+              disabled={!online || editor.busy}
+            >
+              采用远端设置（丢弃本地修改）
+            </button>
+          ) : null}
+        </div> : null}
+      </div> : null}
 
       {!online ? <div className="status">离线：显示最后读取的设置，保存已禁用。</div> : null}
-      {loading && !soul ? <div className="status">加载中…</div> : null}
-      {error ? (
+      {editor?.error ? (
         <div className="error-banner" role="alert">
-          {error}
-          <button onClick={() => setError(null)}>关闭</button>
+          {editor.error}
+          <button type="button" onClick={() => editor.setError(null)}>关闭</button>
         </div>
       ) : null}
-      {notice ? <div className="status online">{notice}</div> : null}
-      {locked ? (
+      {editor?.notice ? <div className="status online">{editor.notice}</div> : null}
+      {editor?.problem ? (
         <div className="bot-studio-lock" role="status">
-          <strong>🔒 保存保持锁定：</strong>
-          请用“采用远端设置（丢弃本地修改）”核对远端；普通“重新读取”不会给未保存草稿换 revision。
+          {editor.problem === 'conflict' ? '远端设置已更新。' : '上次保存结果待核对。'}
+          草稿已保留。若要按远端版本继续，请先采用该版本。
         </div>
       ) : null}
 
       {studioTab === 'soul' ? (
         <div className="studio-card bot-studio-card" role="tabpanel" aria-label="灵魂人设">
-          <div className="studio-card-header">
-            <label>🎭 SOUL.md（Bot 独立灵魂文档）</label>
-            {soul ? (
-              <span className={`studio-pill mono ${byteOverLimit ? 'is-lock' : byteWarn ? 'is-warn' : 'is-ok'}`}>
-                {`UTF-8: ${currentBytes} / ${SOUL_MAX_BYTES} B (${bytePct}%)`}
-              </span>
-            ) : null}
-          </div>
+          <div className="studio-card-header"><label htmlFor={soulInputId}>人设</label></div>
           {soul ? (
             <>
-              <div className="metadata">
-                {`${soul.path} · revision ${soul.revision.slice(0, 12)}…${soulDirty ? '（本地草稿基线）' : ''}`}
-              </div>
-              <div className="soul-byte-progress" aria-hidden="true">
-                <div
-                  className={`soul-byte-fill ${byteOverLimit ? 'danger' : byteWarn ? 'warn' : ''}`}
-                  style={{ width: `${bytePct}%` }}
-                />
-              </div>
-              <div className="soul-snippet-bar">
-                {SOUL_SNIPPETS.map((s) => (
-                  <button
-                    key={s.label}
-                    type="button"
-                    className="snippet-chip"
-                    disabled={busy}
-                    onClick={() => insertSoulSnippet(s.content)}
-                  >
-                    {s.label}
-                  </button>
-                ))}
-                <button
-                  type="button"
-                  className="snippet-chip danger"
-                  disabled={busy || soulValue === ''}
-                  onClick={() => updateSoul('')}
-                >
-                  清空为空灵魂 (&quot;&quot;)
-                </button>
-              </div>
               <textarea
+                id={soulInputId}
                 className="soul-textarea"
                 value={soulValue}
-                rows={12}
+                rows={10}
                 spellCheck={false}
-                placeholder="在此编写该 Bot 的独立系统灵魂（SOUL.md）。留空保存代表显式使用空灵魂 (intentionally empty)…"
-                disabled={busy}
-                onChange={(e) => updateSoul(e.target.value)}
+                placeholder="写下这个智能体的职责、沟通风格和协作准则。"
+                disabled={soulEditor.busy}
+                onChange={(event) => soulEditor.update(() => event.target.value)}
               />
-              <p className="hint">
-                该 Bot 独立的系统人设（主会话 Primary 与群聊/私聊 Room/DM 工作上下文共享同一份 SOUL.md）；保存后在下一个请求生效，不重置会话与历史。允许为空。
-              </p>
+              {byteWarn ? (
+                <p className={byteOverLimit ? 'error-banner' : 'hint'} role="status">
+                  {byteOverLimit ? '人设超过 64 KiB 上限。' : '人设接近 64 KiB 上限。'} 当前 {currentBytes.toLocaleString()} 字节。
+                </p>
+              ) : null}
               <div className="form-actions">
                 <button
                   type="button"
                   className="primary-button"
-                  onClick={() => void saveSoul()}
-                  disabled={!canSaveSoul || byteOverLimit}
+                  onClick={() => {
+                    if (!byteOverLimit) void soulEditor.save();
+                  }}
+                  disabled={!online || !soulDirty || soulEditor.busy || !!soulEditor.problem || byteOverLimit}
                 >
-                  {saving === 'soul' ? '保存中…' : '保存灵魂文档（CAS）'}
+                  {soulEditor.saving ? '保存中…' : '保存人设'}
                 </button>
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={() => updateSoul(null)}
-                  disabled={!soulDirty || busy}
-                >
-                  放弃修改
-                </button>
+                {soulDirty && !soulEditor.problem ? (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => soulEditor.update(() => null)}
+                    disabled={soulEditor.busy}
+                  >
+                    放弃修改
+                  </button>
+                ) : null}
               </div>
+              <details className="bot-studio-disclosure">
+                <summary>插入模板</summary>
+                <div className="soul-snippet-bar">
+                  {SOUL_SNIPPETS.map(snippet => (
+                    <button
+                      key={snippet.label}
+                      type="button"
+                      className="snippet-chip"
+                      disabled={soulEditor.busy}
+                      onClick={() => insertSoulSnippet(snippet.content)}
+                    >
+                      {snippet.label}
+                    </button>
+                  ))}
+                </div>
+              </details>
+              <p className="hint">人设在下一次请求生效，可留空。</p>
+              <details className="bot-studio-disclosure">
+                <summary>人设详情</summary>
+                <p className="metadata">{soul.path} · 版本 {soul.revision}{soulDirty ? '（草稿基线）' : ''}</p>
+              </details>
             </>
           ) : (
-            <div className="metadata">{loading ? '读取中…' : '尚未读取'}</div>
+            <div className="metadata">{soulEditor.loading ? '读取中…' : '尚未读取'}</div>
           )}
         </div>
       ) : null}
 
       {studioTab === 'model' ? (
         <div className="studio-card bot-studio-card" role="tabpanel" aria-label="模型设置">
-          <div className="studio-card-header">
-            <label>🤖 模型设置（CPA 中心下发）</label>
-            {modelConfig ? (
-              <span className="studio-pill is-ok">
-                {`有效模型: ${describeVal(modelConfig.effective.modelRef)}`}
-              </span>
-            ) : null}
-          </div>
           {modelConfig ? (
             <>
               <div className="bot-studio-effective">
-                <span>{`生效模型 ${describeVal(modelConfig.effective.modelRef)}`}</span>
-                <span>{`思考 ${describeVal(modelConfig.effective.thinkingLevel)}`}</span>
-                <span>{describeCodemode(modelConfig.effective)}</span>
+                <div className="bot-studio-model-summary">
+                  <span>{modelEditor.problem ? '编辑前的模型' : '正在使用的模型'}</span>
+                  <strong>{modelConfig.effective.modelRef ?? '未设置模型'}</strong>
+                  <span>{modelConfig.overrides.modelRef === undefined ? '继承中心' : '此智能体单独设置'}</span>
+                </div>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  aria-expanded={modelPickerOpen}
+                  onClick={() => setModelPickerOpen(value => !value)}
+                >
+                  {modelPickerOpen ? '收起模型列表' : '更换模型'}
+                </button>
               </div>
-              <button
-                type="button"
-                aria-pressed={modelDraft.modelRef === undefined}
-                className={`bot-studio-model-row ${modelDraft.modelRef === undefined ? 'active' : ''}`}
-                disabled={busy || !online}
-                onClick={() => updateModelDraft('modelRef', undefined)}
-              >
-                <span className="bot-studio-model-name">继承中心全局</span>
-                <span className="bot-studio-model-ref">{describeVal(modelConfig.global.modelRef)}</span>
-              </button>
-              {modelCatalog && identity ? (
-                <ModelPicker
-                  key={key}
-                  catalog={modelCatalog}
-                  api={api}
-                  identity={identity}
-                  value={modelDraft.modelRef}
-                  onChange={value => updateModelDraft('modelRef', value)}
-                  onStarsChange={starredModels => {
-                    if (!stale(key) && api.identity?.generation === identity.generation) {
-                      setModelCatalog(previous => previous ? { ...previous, starredModels } : previous);
-                    }
-                  }}
-                  disabled={busy || !online}
-                />
+              {modelDirty ? (
+                <p className="hint">{modelDraft.modelRef === modelConfig.overrides.modelRef
+                  ? '有未保存的高级设置'
+                  : `待保存 · ${describeVal(modelDraft.modelRef)}`}</p>
               ) : null}
-              <div className="bot-studio-field">
-                <span className="bot-studio-field-label">
-                  {`思考强度 (Thinking Level) · 全局 ${describeVal(modelConfig.global.thinkingLevel)}`}
-                </span>
-                <div className="bot-studio-choices" role="radiogroup" aria-label="思考强度">
-                  {['__inherit', '__null', ...THINKING_LEVELS].map((lv) => (
-                    <button
-                      key={lv}
-                      type="button"
-                      role="radio"
-                      aria-checked={thinkingValue === lv}
-                      className={`bot-studio-choice ${thinkingValue === lv ? 'active' : ''}`}
-                      disabled={busy || !online}
-                      onClick={() =>
-                        updateModelDraft(
-                          'thinkingLevel',
-                          lv === '__inherit' ? undefined : lv === '__null' ? null : lv,
-                        )
-                      }
-                    >
-                      {lv === '__inherit' ? '继承' : lv === '__null' ? '显式清空' : lv}
-                    </button>
-                  ))}
-                  {thinkingValue !== '__inherit' &&
-                  thinkingValue !== '__null' &&
-                  !THINKING_LEVELS.includes(thinkingValue) ? (
-                    <button
-                      type="button"
-                      role="radio"
-                      aria-checked="true"
-                      className="bot-studio-choice active"
-                      disabled={busy || !online}
-                      onClick={() => updateModelDraft('thinkingLevel', thinkingValue)}
-                    >
-                      {`${thinkingValue}（当前）`}
-                    </button>
+              {modelPickerOpen ? (
+                <div className="bot-studio-advanced">
+                  {catalogError ? <div className="error-banner" role="alert">读取模型列表失败。{catalogError}</div> : null}
+                  <button
+                    type="button"
+                    aria-pressed={modelDraft.modelRef === undefined}
+                    className={`bot-studio-model-row ${modelDraft.modelRef === undefined ? 'active' : ''}`}
+                    disabled={modelEditor.busy || !online}
+                    onClick={() => updateModelDraft('modelRef', undefined)}
+                  >
+                    <span className="bot-studio-model-name">继承中心全局</span>
+                    <span className="bot-studio-model-ref">{describeVal(modelConfig.global.modelRef)}</span>
+                  </button>
+                  {modelCatalog && identity ? (
+                    <ModelPicker
+                      key={key}
+                      catalog={modelCatalog}
+                      api={api}
+                      identity={identity}
+                      value={modelDraft.modelRef}
+                      onChange={value => updateModelDraft('modelRef', value)}
+                      onStarsChange={starredModels => {
+                        if (isCurrent(api, identity)) {
+                          catalogSeq.current += 1;
+                          setModelCatalog(previous => previous ? { ...previous, starredModels } : previous);
+                        }
+                      }}
+                      disabled={modelEditor.busy || !online}
+                    />
+                  ) : !catalogError && online ? (
+                    <p className="metadata" role="status">正在读取模型列表…</p>
                   ) : null}
                 </div>
-              </div>
-              <div className="bot-studio-field">
-                <span className="bot-studio-field-label">模型覆盖策略</span>
-                <select
-                  disabled={busy || !online}
-                  value={modelDraft.modelRef === null ? '__null' : '__normal'}
-                  onChange={(e) => {
-                    if (e.target.value === '__null') updateModelDraft('modelRef', null);
-                    else if (modelDraft.modelRef === null) updateModelDraft('modelRef', undefined);
-                  }}
-                >
-                  <option value="__normal">正常（继承全局或使用所选模型）</option>
-                  <option value="__null">显式清空（强制阻断继承全局模型）</option>
-                </select>
-              </div>
-              <div className="bot-studio-field">
-                <span className="bot-studio-field-label">
-                  {`启用 Code Mode (codemode) · 全局 ${modelConfig.global.codemode ? '开启' : '关闭'}`}
-                </span>
-                <div className="bot-studio-choices">
-                  {codemodePill('codemode', '__inherit', '继承')}
-                  {codemodePill('codemode', 'true', '开启')}
-                  {codemodePill('codemode', 'false', '关闭')}
+              ) : null}
+              <details className="bot-studio-disclosure">
+                <summary>高级设置</summary>
+                <div className="bot-studio-advanced">
+                  <div className="bot-studio-field">
+                    <span className="bot-studio-field-label">
+                      {`思考强度 · 全局 ${describeVal(modelConfig.global.thinkingLevel)}`}
+                    </span>
+                    <div className="bot-studio-choices" role="radiogroup" aria-label="思考强度">
+                      {['__inherit', '__null', ...THINKING_LEVELS].map((lv) => (
+                        <button
+                          key={lv}
+                          type="button"
+                          role="radio"
+                          aria-checked={thinkingValue === lv}
+                          className={`bot-studio-choice ${thinkingValue === lv ? 'active' : ''}`}
+                          disabled={modelEditor.busy || !online}
+                          onClick={() =>
+                            updateModelDraft(
+                              'thinkingLevel',
+                              lv === '__inherit' ? undefined : lv === '__null' ? null : lv,
+                            )
+                          }
+                        >
+                          {lv === '__inherit' ? '继承' : lv === '__null' ? '显式清空' : lv}
+                        </button>
+                      ))}
+                      {thinkingValue !== '__inherit' &&
+                      thinkingValue !== '__null' &&
+                      !THINKING_LEVELS.includes(thinkingValue) ? (
+                        <button
+                          type="button"
+                          role="radio"
+                          aria-checked="true"
+                          className="bot-studio-choice active"
+                          disabled={modelEditor.busy || !online}
+                          onClick={() => updateModelDraft('thinkingLevel', thinkingValue)}
+                        >
+                          {`${thinkingValue}（当前）`}
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="bot-studio-field">
+                    <span className="bot-studio-field-label">模型覆盖策略</span>
+                    <select
+                      disabled={modelEditor.busy || !online}
+                      value={modelDraft.modelRef === null ? '__null' : '__normal'}
+                      onChange={(e) => {
+                        if (e.target.value === '__null') updateModelDraft('modelRef', null);
+                        else if (modelDraft.modelRef === null) updateModelDraft('modelRef', undefined);
+                      }}
+                    >
+                      <option value="__normal">正常（继承全局或使用所选模型）</option>
+                      <option value="__null">显式清空（强制阻断继承全局模型）</option>
+                    </select>
+                  </div>
+                  <div className="bot-studio-field">
+                    <span className="bot-studio-field-label">
+                      {`启用 Code Mode · 全局 ${modelConfig.global.codemode ? '开启' : '关闭'}`}
+                    </span>
+                    <div className="bot-studio-choices">
+                      {codemodePill('codemode', '__inherit', '继承')}
+                      {codemodePill('codemode', 'true', '开启')}
+                      {codemodePill('codemode', 'false', '关闭')}
+                    </div>
+                    {modelDraft.codemode === null ? <span className="hint">当前为显式清空。</span> : null}
+                  </div>
+                  <div className="bot-studio-field">
+                    <span className="bot-studio-field-label">
+                      {`仅 Code Mode 模式 · 全局 ${modelConfig.global.codemodeOnly ? '开启' : '关闭'}`}
+                    </span>
+                    <div className="bot-studio-choices">
+                      {codemodePill('codemodeOnly', '__inherit', '继承')}
+                      {codemodePill('codemodeOnly', 'true', '开启')}
+                      {codemodePill('codemodeOnly', 'false', '关闭')}
+                    </div>
+                    {modelDraft.codemodeOnly === null ? <span className="hint">当前为显式清空。</span> : null}
+                  </div>
+                  <p className="hint">
+                    Code Mode 允许模型在受控环境中编排工具调用。仅 Code Mode 模式会改为按需加载工具。
+                  </p>
+                  <div className="metadata">
+                    {`${modelDirty ? '草稿基线' : '当前覆盖'} · ${describeVal(modelConfig.overrides.modelRef)} (${describeVal(modelConfig.overrides.thinkingLevel)}, ${describeCodemode(modelConfig.overrides)}) · revision ${modelConfig.revision}`}
+                  </div>
                 </div>
-                {modelDraft.codemode === null ? <span className="hint">当前为显式清空。</span> : null}
-              </div>
-              <div className="bot-studio-field">
-                <span className="bot-studio-field-label">
-                  {`仅 Code Mode 模式 (codemodeOnly — 全量工具与 MCP 渐进式按需加载) · 全局 ${modelConfig.global.codemodeOnly ? '开启' : '关闭'}`}
-                </span>
-                <div className="bot-studio-choices">
-                  {codemodePill('codemodeOnly', '__inherit', '继承')}
-                  {codemodePill('codemodeOnly', 'true', '开启')}
-                  {codemodePill('codemodeOnly', 'false', '关闭')}
-                </div>
-                {modelDraft.codemodeOnly === null ? <span className="hint">当前为显式清空。</span> : null}
-              </div>
-              <p className="hint">
-                启用 Code Mode 后模型可在受控 QuickJS 沙盒中编写 JS 脚本批量编排工具调用；启用“仅 Code Mode 模式”后，仅向模型暴露 codemode 工具，所有内置工具、插件与 MCP 转为沙盒内渐进式按需搜索与加载，大幅降低上下文开销。
-              </p>
-              <div className="metadata">
-                {`当前覆盖: ${describeVal(modelConfig.overrides.modelRef)} (${describeVal(modelConfig.overrides.thinkingLevel)}, ${describeCodemode(modelConfig.overrides)}) · revision ${modelConfig.revision}`}
-              </div>
+              </details>
               <div className="form-actions">
                 <button
                   type="button"
                   className="primary-button"
-                  disabled={busy || !online}
-                  onClick={() => void saveModelConfig()}
+                  disabled={!online || !modelDirty || modelEditor.busy || !!modelEditor.problem}
+                  onClick={() => void modelEditor.save()}
                 >
-                  {modelSaving ? '保存中…' : '保存模型设置'}
+                  {modelEditor.saving ? '保存中…' : '保存模型设置'}
                 </button>
               </div>
             </>
           ) : (
-            <div className="metadata">{loading ? '读取模型配置中…' : '尚未加载模型配置'}</div>
+            <div className="metadata">{modelEditor.loading ? '读取模型配置中…' : '尚未加载模型配置'}</div>
           )}
         </div>
       ) : null}
 
       {studioTab === 'skill-review' ? (
         <div className="studio-card bot-studio-card" role="tabpanel" aria-label="Skill 审阅">
-          <SkillReviewPanel key={botPanelIdentityKey + ':' + botId}
+          <SkillReviewPanel key={botPanelIdentityKey}
             connected={online && !!identity} call={callSkillReview} />
         </div>
       ) : null}
@@ -701,25 +687,19 @@ export function BotSettings({
       {studioTab === 'vault' ? (
         <div className="studio-card bot-studio-card" role="tabpanel" aria-label="密码库">
           <VaultPanel identityKey={botPanelIdentityKey} botId={botId} deviceId={identity?.targetDeviceId}
-            hostLabel={hostLabel} connected={online && !!identity} call={callVault} />
+            hostLabel={hostLabel} connected={online && !!identity} call={callVault} variant="desktop" />
         </div>
       ) : null}
 
-      {showCapabilityPanel && identity ? (
+      {studioTab === 'capabilities' && identity ? (
         <div className="studio-card bot-studio-card" role="tabpanel" aria-label="插件与能力">
-          <div className="studio-card-header">
-            <label>🔌 Bot 能力（插件 / MCP / 技能）</label>
-          </div>
           <BotCapabilities key={`${identity.targetDeviceId}\u0000${botId}`} api={api} identity={identity} deviceId={identity.targetDeviceId} botId={botId} />
         </div>
       ) : null}
 
-      {showSchedulesPanel && identity ? (
+      {studioTab === 'schedules' && identity ? (
         <div className="studio-card bot-studio-card" role="tabpanel" aria-label="定时任务">
-          <div className="studio-card-header">
-            <label>⏰ 定时任务（主私聊自动触发）</label>
-          </div>
-          <BotSchedules key={`${identity.targetDeviceId}\u0000${botId}`} api={api} identity={identity} botId={botId} />
+          <BotSchedules key={`${identity.targetDeviceId}\u0000${botId}`} api={api} identity={identity} botId={botId} hostPlatform={hostPlatform} />
         </div>
       ) : null}
     </section>

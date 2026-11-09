@@ -9,7 +9,6 @@ import { Markdown } from '../../../web/src/Markdown';
 import {
   latestEntryChannel,
   parseHistoryEntries,
-  visibleAssistantTextEntryIds,
   formatTurnDuration,
   normalizeAttribution,
   type ChatTurn,
@@ -46,6 +45,7 @@ export interface ChatTranscriptProps {
   /** 统一工作状态（含本地乐观发送/停止投影），由 BotChats 唯一口径计算后传入；
    *  缺省（预览等无父级场景）按 idle 处理，不在此处二次推导。 */
   activity?: BotActivity | null;
+  awaitingAnswer?: boolean;
   /** 与 BotChats 持久化头像键一致（local:local:botId / remote:profileId:deviceId:botId）；
    *  缺省回退 deviceId:botId，仅供无持久化上下文的预览使用。 */
   avatarKey?: string;
@@ -53,8 +53,10 @@ export interface ChatTranscriptProps {
   devicePlatform?: string;
   /** 会话内搜索关键字；空串显示全部轮次。 */
   search: string;
-  /** 当前实际渲染轮次中的助手正文 entry ID（已完成归属和搜索过滤）。 */
-  onVisibleAssistantTextEntryIds?: (ids: readonly string[]) => void;
+  boardResultId?: string;
+  onViewedResult?: (id: string) => void;
+  questionnaireRequestId?: string;
+  onQuestionnaireFocused?: (id: string) => void;
   archived: boolean;
   /** 工具交互身份含连接代与会话；不复用其他上下文的密码输入。 */
   scopeKey?: string;
@@ -86,10 +88,14 @@ export function ChatTranscript({
   live,
   bot,
   activity = null,
+  awaitingAnswer = false,
   avatarKey,
   devicePlatform,
   search,
-  onVisibleAssistantTextEntryIds,
+  boardResultId,
+  onViewedResult,
+  questionnaireRequestId,
+  onQuestionnaireFocused,
   archived,
   scopeKey,
   disabled = false,
@@ -149,6 +155,7 @@ export function ChatTranscript({
       liveGeneratingBlocks: liveIsCollaborative ? undefined : live?.generation?.blocks,
       selfBotId: bot.botId,
       liveAttribution,
+      trackAssistantTextEntries: true,
     }),
   [mergedItems, live, isBusy, displayGeneratingText, liveAttribution, bot.botId]);
 
@@ -172,10 +179,6 @@ export function ChatTranscript({
         Boolean(turn.tools?.some((tool) => tool.name.toLowerCase().includes(q))),
     );
   }, [allTurns, search]);
-
-  useEffect(() => {
-    onVisibleAssistantTextEntryIds?.(visibleAssistantTextEntryIds(visibleTurns));
-  }, [visibleTurns, onVisibleAssistantTextEntryIds]);
 
   const lastTurn = visibleTurns.at(-1);
 
@@ -209,6 +212,8 @@ export function ChatTranscript({
       scopeKey={scopeKey ?? `${botKey}:${bot.primaryConversationId}`}
       active={isBusy && !archived}
       disabled={disabled || archived}
+      variant="desktop"
+      requesterName={bot.role}
       onSubmitQuestionnaire={onSubmitQuestionnaire}
       onSubmitVaultUnlock={onSubmitVaultUnlock}
     />
@@ -235,6 +240,47 @@ export function ChatTranscript({
     if (el) el.scrollTop = el.scrollHeight;
   }, [botKey]);
 
+  useEffect(() => {
+    const root = scrollRef.current;
+    if (!root || !boardResultId || !onViewedResult || loading || error || disabled ||
+        typeof IntersectionObserver !== 'function') return;
+    const blocks = root.querySelectorAll(`[data-assistant-entry-id="${CSS.escape(boardResultId)}"]`);
+    if (!blocks.length) return;
+    let watching = true;
+    // Report the first positive intersection even when the block initially touches the viewport edge.
+    const observer = new IntersectionObserver((entries) => {
+      if (!watching || document.hidden || !root.isConnected || root.dataset.boardResultId !== boardResultId) return;
+      if (entries.some(({ target, intersectionRect }) =>
+        intersectionRect.width > 0 && intersectionRect.height > 0 && root.contains(target),
+      )) {
+        observer.disconnect();
+        watching = false;
+        onViewedResult(boardResultId);
+      }
+    }, { root, threshold: [0, Number.EPSILON] });
+    blocks.forEach(block => observer.observe(block));
+    return () => {
+      watching = false;
+      observer.disconnect();
+    };
+  }, [boardResultId, onViewedResult, visibleTurns, loading, error, disabled]);
+
+  useEffect(() => {
+    if (!questionnaireRequestId || !onQuestionnaireFocused || disabled || loading || document.hidden) return;
+    const questionnaire = scrollRef.current?.querySelector(
+      `[data-active-questionnaire="${CSS.escape(questionnaireRequestId)}"]`,
+    );
+    if (!questionnaire) return;
+    const question = questionnaire.querySelector('fieldset[data-unanswered]');
+    const control = question?.querySelector<HTMLElement>('.tp-options input:enabled, summary') ??
+      questionnaire.querySelector<HTMLButtonElement>('button.tp-btn-primary:enabled');
+    if (!control) return;
+    (question ?? control).scrollIntoView({ block: 'start', inline: 'nearest' });
+    control.focus({ preventScroll: true });
+    onScroll();
+    onQuestionnaireFocused(questionnaireRequestId);
+  }, [questionnaireRequestId, onQuestionnaireFocused, visibleTurns, disabled, loading, onScroll]);
+
   const avatarPreset = resolveBotAvatarPreset(botKey, bot.role, bot.isPrimary);
   const platformBadge = devicePlatform || 'host';
 
@@ -243,6 +289,7 @@ export function ChatTranscript({
       className="desktop-transcript bot-chat-messages"
       ref={scrollRef}
       onScroll={onScroll}
+      data-board-result-id={!loading && !error && !disabled ? boardResultId : undefined}
       aria-label={t('对话消息', 'Conversation')}
     >
       {hasMore || loading || error ? (
@@ -277,7 +324,7 @@ export function ChatTranscript({
           {search.trim() ? (
             <p className="desktop-transcript-empty-search">{t('没有匹配搜索的轮次。', 'No turns match the search.')}</p>
           ) : null}
-          {emptyActions ? <div className="desktop-transcript-empty-actions">{emptyActions}</div> : null}
+          {emptyActions && !search.trim() && !loading && !error ? <div className="desktop-transcript-empty-actions">{emptyActions}</div> : null}
         </div>
       ) : (
         visibleTurns.map((turn, turnIdx) => {
@@ -308,7 +355,9 @@ export function ChatTranscript({
                         {block.tools.map((tool) => renderToolChip(tool))}
                       </div>
                     ) : (
-                      <Markdown key={block.id} text={block.text} onOpenLink={openLink} />
+                      <div key={block.id} data-assistant-entry-id={block.entryId}>
+                        <Markdown text={block.text} onOpenLink={openLink} />
+                      </div>
                     ),
                   )
                 : null}
@@ -349,7 +398,7 @@ export function ChatTranscript({
         })
       )}
 
-      <GrokBotWorkingSlot
+      {!awaitingAnswer ? <GrokBotWorkingSlot
         key={botKey}
         botKey={botKey}
         preset={avatarPreset}
@@ -362,7 +411,7 @@ export function ChatTranscript({
         hasError={Boolean(lastTurn?.error) || phaseFailed}
         startedAt={workingSlotStartedAt}
         t={t}
-      />
+      /> : null}
       {failureNotice ? (
         <ErrorNotice compact error={failureNotice} />
       ) : null}

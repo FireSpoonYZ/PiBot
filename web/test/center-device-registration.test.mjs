@@ -135,15 +135,23 @@ test('POST /api/devices rejects invalid bodies without registering anything', as
       { displayName: 42, platform: 'linux' },
       { displayName: 'pc', platform: 'ios' },
       { displayName: 'pc', platform: 'Windows' },
-      { displayName: 'pc', platform: 'linux', deviceId: 'chosen-by-client' },
+      { displayName: 'pc', platform: 'linux', deviceId: 'invalid device id' },
       [],
     ]) {
       const res = await center.app.inject({ method: 'POST', url: '/api/devices', headers: { cookie, 'x-csrf-token': csrfToken }, payload });
       assert.equal(res.statusCode, 400, JSON.stringify(payload));
       assert.equal(res.json().error.code, 'INVALID_ARGUMENT');
     }
-    const ok = await center.app.inject({ method: 'POST', url: '/api/devices', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { displayName: 'x'.repeat(64), platform: 'macos' } });
+    assert.equal(center.bridge.registry.list().length, before);
+    const deviceId = 'chosen-by-client';
+    const ok = await center.app.inject({
+      method: 'POST', url: '/api/devices',
+      headers: { cookie, 'x-csrf-token': csrfToken },
+      payload: { displayName: 'x'.repeat(64), platform: 'macos', deviceId },
+    });
     assert.equal(ok.statusCode, 201);
+    assert.equal(ok.json().deviceId, deviceId);
+    assert.match(ok.json().deviceToken, /^[A-Za-z0-9_-]{43}$/);
     assert.equal(center.bridge.registry.list().length, before + 1);
   } finally {
     await center.close();

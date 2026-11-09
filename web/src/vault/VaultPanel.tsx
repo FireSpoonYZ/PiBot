@@ -22,6 +22,7 @@ type Props = {
   hostLabel: string;
   connected: boolean;
   call: VaultCall;
+  variant?: 'desktop';
 };
 
 export function VaultPanel(props: Props) {
@@ -32,8 +33,9 @@ function isExternalList(value: unknown): value is { revision: number; items: Ext
   return !!value && typeof value === 'object' && Array.isArray((value as { items?: unknown }).items);
 }
 
-function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
+function VaultSession({ botId, deviceId, hostLabel, connected, call, variant }: Props) {
   const t = useText();
+  const desktop = variant === 'desktop';
   const [status, setStatus] = useState<VaultStatus | null>(null);
   const [items, setItems] = useState<VaultItemMeta[]>([]);
   const [revision, setRevision] = useState<number | null>(null);
@@ -44,6 +46,7 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
   const [changingPassword, setChangingPassword] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [configuring, setConfiguring] = useState(false);
+  const [sourceChoice, setSourceChoice] = useState<'local' | 'vaultwarden'>('local');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -182,43 +185,30 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
   const ext: ExternalVaultStatus | undefined = status?.external ?? undefined;
   const external = status?.source === 'vaultwarden';
   const extReady = !!(external && ext?.configured && ext.authenticated && !ext.locked);
+  const localReady = !external && status?.initialized && !status.locked;
   const grantKey = (grant: { deviceId: string; botId: string }) => grant.deviceId + '/' + grant.botId;
 
-  return (
-    <section ref={root} className="vault-panel" aria-label={t('密码库', 'Password Vault')} aria-busy={busy}>
-      <header>
-        <h3>{t('密码库', 'Password Vault')}</h3>
-        <p>{t('目标 Host', 'Target Host')}: {hostLabel}</p>
-        <p>Bot: {botId}</p>
-      </header>
-      <p className="vault-hint">{external
-        ? t('条目由中心统一的 Vaultwarden 账号提供；密码只经私有通道下发，不进入聊天。授权仅控制当前 Bot；其他 Bot 的授权保持不变。', 'Entries come from the shared Vaultwarden account managed by the center; secrets travel only over the private channel, never chat. Permission changes affect only this Bot; other Bots retain their permissions.')
-        : t('密码只保存到此 Host 的加密密码库，不进入聊天。授权仅控制当前 Bot；其他 Bot 的授权保持不变。', 'Passwords stay in this Host’s encrypted vault, not chat. Permission changes affect only this Bot; other Bots retain their permissions.')}</p>
-      <div className="vault-actions">
-        <button className="bs-btn" type="button" disabled={disabled} onClick={() => void execute({ action: 'status' })}>{t('刷新状态', 'Refresh status')}</button>
-        {!external ? <button className="bs-btn" type="button" disabled={disabled || status?.initialized === false} onClick={() => void execute({ action: 'lock' })}>{t('锁定', 'Lock')}</button> : null}
-      </div>
-      {!connected ? <p role="alert">{t('目标 Host 离线，未排队或重试。', 'Target Host is offline. Nothing was queued or retried.')}</p> : null}
-      {error ? <p role="alert">{error}</p> : null}
-      {notice ? <p role="status" className="vault-hint">{notice}</p> : null}
-      <p role="status">
-        {busy ? t('处理中…', 'Working…') : status
-          ? external
-            ? !ext?.configured ? t('外部密码库未配置', 'External Vault not configured')
-              : !ext.authenticated ? t('外部密码库未登录', 'External Vault not signed in')
-              : ext.locked ? t('已锁定', 'Locked') : t('已解锁', 'Unlocked')
-            : !status.initialized ? t('尚未创建密码库', 'Vault not initialized')
-            : status.locked ? t('已锁定', 'Locked') : t('已解锁', 'Unlocked')
-          : t('状态未知', 'Status unknown')}
-      </p>
-      {status ? <p className="vault-hint">{t('来源', 'Source')}: {external ? 'Vaultwarden' : status.source === 'local' ? t('本地密码库', 'Local vault') : t('本地密码库（旧版 Host）', 'Local vault (older Host)')}</p> : null}
-      {status?.expiresAt ? <p className="vault-hint">{t('自动锁定时间', 'Auto-lock at')}: {status.expiresAt}</p> : null}
-      {external && ext?.expiresAt ? <p className="vault-hint">{t('外部会话自动锁定', 'External session auto-lock')}: {ext.expiresAt}</p> : null}
-      {status && !status.source ? <p className="vault-hint">{t('此 Host 版本较旧，不支持外部密码库；如需 Vaultwarden 请升级 Host。', 'This Host is too old for an external vault. Upgrade the Host to use Vaultwarden.')}</p> : null}
-
+  const refreshActions = (
+    <div className="vault-actions">
+      <button className="bs-btn" type="button" disabled={disabled} onClick={() => void execute({ action: 'status' })}>{t('刷新状态', 'Refresh status')}</button>
+      {!external && (!desktop || localReady) ? <button className="bs-btn" type="button" disabled={disabled || status?.initialized === false} onClick={() => void execute({ action: 'lock' })}>{t('锁定', 'Lock')}</button> : null}
+    </div>
+  );
+  const localActions = (
+    <div className="vault-actions">
+      <button className={desktop ? 'bs-btn is-primary' : 'bs-btn'} type="button" disabled={disabled} onClick={() => { clearForms(); setEditor('new'); setAllowed(false); setChangingPassword(false); setDeleting(null); }}>{t('添加条目', 'Add entry')}</button>
+      <button className="bs-btn" type="button" disabled={disabled} onClick={() => { clearForms(); setEditor(null); setChangingPassword(true); setDeleting(null); }}>{t('更改主密码', 'Change master password')}</button>
+    </div>
+  );
+  const serviceSettings = (
+    <>
       {status?.source ? (
         <div className="vault-actions">
-          <button className="bs-btn is-ghost" type="button" disabled={disabled} onClick={() => { clearForms(); setConfiguring(value => !value); }}>
+          <button className="bs-btn is-ghost" type="button" disabled={disabled} onClick={() => {
+            clearForms();
+            if (!configuring) setSourceChoice(external ? 'vaultwarden' : 'local');
+            setConfiguring(!configuring);
+          }}>
             {t('服务设置', 'Service settings')}
           </button>
           {external && ext?.configured ? (
@@ -248,8 +238,8 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
           event.preventDefault();
           const form = event.currentTarget;
           const source = (form.elements.namedItem('source') as HTMLSelectElement).value === 'vaultwarden' ? 'vaultwarden' as const : 'local' as const;
-          const serverUrl = (form.elements.namedItem('serverUrl') as HTMLInputElement).value.trim();
-          const email = (form.elements.namedItem('email') as HTMLInputElement).value.trim().toLowerCase();
+          const serverUrl = (form.elements.namedItem('serverUrl') as HTMLInputElement | null)?.value.trim() ?? '';
+          const email = (form.elements.namedItem('email') as HTMLInputElement | null)?.value.trim().toLowerCase() ?? '';
           form.reset();
           if (source === 'vaultwarden' && !/^https:\/\//i.test(serverUrl)) {
             setError(t('Vaultwarden 地址必须使用 https://', 'The Vaultwarden address must use https://'));
@@ -266,25 +256,71 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
           <fieldset disabled={disabled}>
             <legend>{t('密码库来源', 'Vault source')}</legend>
             <label>{t('来源', 'Source')}
-              <select className="bs-input" name="source" defaultValue={external ? 'vaultwarden' : 'local'}>
+              <select
+                className="bs-input"
+                name="source"
+                value={desktop ? sourceChoice : undefined}
+                defaultValue={desktop ? undefined : external ? 'vaultwarden' : 'local'}
+                onChange={desktop ? event => setSourceChoice(event.target.value === 'vaultwarden' ? 'vaultwarden' : 'local') : undefined}
+              >
                 <option value="local">{t('本地密码库', 'Local vault')}</option>
                 <option value="vaultwarden">Vaultwarden</option>
               </select>
             </label>
-            <label>{t('Vaultwarden 地址（https://）', 'Vaultwarden address (https://)')}
-              <input className="bs-input" name="serverUrl" defaultValue={ext?.serverUrl ?? ''} inputMode="url" autoComplete="off" placeholder="https://vaultwarden.example.com" />
-            </label>
-            <label>{t('账号邮箱', 'Account email')}
-              <input className="bs-input" name="email" type="email" defaultValue={ext?.email ?? ''} maxLength={320} autoComplete="off" />
-            </label>
+            {!desktop || sourceChoice === 'vaultwarden' ? (
+              <>
+                <label>{t('Vaultwarden 地址（https://）', 'Vaultwarden address (https://)')}
+                  <input className="bs-input" name="serverUrl" defaultValue={ext?.serverUrl ?? ''} inputMode="url" autoComplete="off" placeholder="https://vaultwarden.example.com" />
+                </label>
+                <label>{t('账号邮箱', 'Account email')}
+                  <input className="bs-input" name="email" type="email" defaultValue={ext?.email ?? ''} maxLength={320} autoComplete="off" />
+                </label>
+              </>
+            ) : null}
             <div className="vault-actions">
               <button className="bs-btn is-primary" type="submit">{t('保存来源', 'Save source')}</button>
               <button className="bs-btn is-ghost" type="button" onClick={() => { clearForms(); setConfiguring(false); }}>{t('取消', 'Cancel')}</button>
             </div>
-            <p className="vault-hint">{t('切换来源会锁定当前会话；显式切到外部后连接失败不会退回本地。', 'Switching source locks the session; once external is chosen, connection failures never fall back to local.')}</p>
+            <p className="vault-hint">{desktop
+              ? t('保存新来源后，当前会话会锁定。', 'Saving a new source locks the current session.')
+              : t('切换来源会锁定当前会话；显式切到外部后连接失败不会退回本地。', 'Switching source locks the session; once external is chosen, connection failures never fall back to local.')}</p>
           </fieldset>
         </form>
       ) : null}
+
+    </>
+  );
+
+  return (
+    <section ref={root} className={desktop ? 'vault-panel vault-panel-desktop' : 'vault-panel'} aria-label={t('密码库', 'Password Vault')} aria-busy={busy}>
+      <header>
+        <h3>{t('密码库', 'Password Vault')}</h3>
+        <p>{t('目标 Host', 'Target Host')}: {hostLabel}</p>
+        {!desktop ? <p>Bot: {botId}</p> : null}
+      </header>
+      {!desktop ? <p className="vault-hint">{external
+        ? t('条目由中心统一的 Vaultwarden 账号提供；密码只经私有通道下发，不进入聊天。授权仅控制当前 Bot；其他 Bot 的授权保持不变。', 'Entries come from the shared Vaultwarden account managed by the center; secrets travel only over the private channel, never chat. Permission changes affect only this Bot; other Bots retain their permissions.')
+        : t('密码只保存到此 Host 的加密密码库，不进入聊天。授权仅控制当前 Bot；其他 Bot 的授权保持不变。', 'Passwords stay in this Host’s encrypted vault, not chat. Permission changes affect only this Bot; other Bots retain their permissions.')}</p> : null}
+      {!desktop ? refreshActions : null}
+      {!connected ? <p role="alert">{t('目标 Host 离线，未排队或重试。', 'Target Host is offline. Nothing was queued or retried.')}</p> : null}
+      {error ? <p role="alert">{error}</p> : null}
+      {notice ? <p role="status" className="vault-hint">{notice}</p> : null}
+      <p role="status">
+        {busy ? t('处理中…', 'Working…') : status
+          ? external
+            ? !ext?.configured ? t('外部密码库未配置', 'External Vault not configured')
+              : !ext.authenticated ? t('外部密码库未登录', 'External Vault not signed in')
+              : ext.locked ? t('已锁定', 'Locked') : t('已解锁', 'Unlocked')
+            : !status.initialized ? t('尚未创建密码库', 'Vault not initialized')
+            : status.locked ? t('已锁定', 'Locked') : t('已解锁', 'Unlocked')
+          : t('状态未知', 'Status unknown')}
+      </p>
+      {status ? <p className="vault-hint">{t('来源', 'Source')}: {external ? 'Vaultwarden' : status.source === 'local' ? t('本地密码库', 'Local vault') : t('本地密码库（旧版 Host）', 'Local vault (older Host)')}</p> : null}
+      {!desktop && status?.expiresAt ? <p className="vault-hint">{t('自动锁定时间', 'Auto-lock at')}: {status.expiresAt}</p> : null}
+      {!desktop && external && ext?.expiresAt ? <p className="vault-hint">{t('外部会话自动锁定', 'External session auto-lock')}: {ext.expiresAt}</p> : null}
+      {status && !status.source ? <p className="vault-hint">{t('此 Host 版本较旧，不支持外部密码库；如需 Vaultwarden 请升级 Host。', 'This Host is too old for an external vault. Upgrade the Host to use Vaultwarden.')}</p> : null}
+
+      {!desktop ? serviceSettings : null}
 
       {external && ext?.configured && (!ext.authenticated || ext.locked) ? (
         <form onSubmit={event => {
@@ -298,11 +334,11 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
         }}>
           <fieldset disabled={disabled}>
             <legend>{ext.authenticated ? t('解锁外部密码库', 'Unlock external Vault') : t('登录并解锁', 'Sign in and unlock')}</legend>
-            <p className="vault-hint">{t('首次使用时会用本次主密码登录已配置账号；主密码不保存、不进入聊天。', 'On first use, this master password signs in to the configured account. It is not saved or sent to chat.')}</p>
+            {!desktop ? <p className="vault-hint">{t('首次使用时会用本次主密码登录已配置账号；主密码不保存、不进入聊天。', 'On first use, this master password signs in to the configured account. It is not saved or sent to chat.')}</p> : null}
             <label>{t('主密码', 'Master password')}<input className="bs-input" name="masterPassword" type="password" autoComplete="off" required /></label>
             <div className="vault-actions">
               <button className="bs-btn is-primary" type="submit">{t('解锁', 'Unlock')}</button>
-              <button className="bs-btn is-ghost" type="button" onClick={clearForms}>{t('清空', 'Clear')}</button>
+              {!desktop ? <button className="bs-btn is-ghost" type="button" onClick={clearForms}>{t('清空', 'Clear')}</button> : null}
             </div>
           </fieldset>
         </form>
@@ -314,6 +350,7 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
 
       {extReady ? (
         <>
+          {desktop ? <h4>{t('密码库条目', 'Vault entries')}</h4> : null}
           {!extItems.length ? <p className="vault-hint">{t('暂无条目。请在 Vaultwarden 中新增条目后点击「同步」。', 'No entries. Add entries in Vaultwarden, then “Sync”.')}</p> : null}
           <ul className="vault-items">
             {extItems.map(item => {
@@ -366,17 +403,14 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
             {!status.initialized ? <label>{t('确认主密码', 'Confirm master password')}<input className="bs-input" name="confirmation" type="password" autoComplete="off" required /></label> : null}
             <div className="vault-actions">
               <button className="bs-btn is-primary" type="submit">{status.initialized ? t('解锁', 'Unlock') : t('创建密码库', 'Create vault')}</button>
-              <button className="bs-btn is-ghost" type="button" onClick={clearForms}>{t('清空', 'Clear')}</button>
+              {!desktop ? <button className="bs-btn is-ghost" type="button" onClick={clearForms}>{t('清空', 'Clear')}</button> : null}
             </div>
           </fieldset>
         </form>
       ) : null}
 
-      {!external && status?.initialized && !status.locked ? <>
-        <div className="vault-actions">
-          <button className="bs-btn" type="button" disabled={disabled} onClick={() => { clearForms(); setEditor('new'); setAllowed(false); setChangingPassword(false); setDeleting(null); }}>{t('添加条目', 'Add entry')}</button>
-          <button className="bs-btn" type="button" disabled={disabled} onClick={() => { clearForms(); setEditor(null); setChangingPassword(true); setDeleting(null); }}>{t('更改主密码', 'Change master password')}</button>
-        </div>
+      {localReady ? <>
+        {desktop ? <h4>{t('密码库条目', 'Vault entries')}</h4> : localActions}
         {!items.length ? <p className="vault-hint">{t('暂无条目。新条目默认不授权任何 Bot。', 'No entries. New entries allow no Bots by default.')}</p> : null}
         <ul className="vault-items">
           {items.map(item => <li key={item.secretRef}>
@@ -394,6 +428,7 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
             </div> : null}
           </li>)}
         </ul>
+        {desktop && !editor && !changingPassword ? localActions : null}
         {editor ? <form key={editing?.secretRef ?? 'new'} onSubmit={event => {
           event.preventDefault();
           const form = event.currentTarget;
@@ -447,6 +482,7 @@ function VaultSession({ botId, deviceId, hostLabel, connected, call }: Props) {
           </fieldset>
         </form> : null}
       </> : null}
+      {desktop ? <div className="vault-desktop-tools">{refreshActions}{serviceSettings}</div> : null}
     </section>
   );
 }

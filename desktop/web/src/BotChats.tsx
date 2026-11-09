@@ -3,25 +3,22 @@
 // 全部请求仍走既有 useDrafts / pending_enqueue / pending_send / observe 路径，
 // 保留 CAS、显式发送、结果未确认锁与离线只读语义。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { ReactNode, RefObject } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
   Archive,
   ArrowUp,
-  Eraser,
   FileText,
   History,
   MessageSquare,
   Monitor,
   MoreHorizontal,
-  Palette,
   Pin,
   PinOff,
   Plus,
   RefreshCw,
   Search,
-  Shrink,
-  Sparkles,
+  Settings,
   Square,
   Star,
   Trash2,
@@ -61,7 +58,7 @@ import type {
 import { isTargetOfflineError } from './api';
 import { useDrafts } from './drafts';
 import type { DraftSnapshot } from './drafts';
-import type { QuestionnaireSubmitPayload, VaultUnlockSubmitPayload } from '../../../web/src/ToolPresentation';
+import { readToolPresentation, type QuestionnaireSubmitPayload, type VaultUnlockSubmitPayload } from '../../../web/src/ToolPresentation';
 import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
 import { BotBoard } from '../../../web/src/BotBoard';
 import { botBoardKey, useBotBoard, useMarkViewedBoardResult, type BotBoardTarget } from '../../../web/src/useBotBoard';
@@ -73,7 +70,7 @@ import {
   type BotActivity,
 } from '../../../web/src/botActivity';
 import { botAvatarKey, syncBotAvatarConfigs } from '../../../web/src/botAvatarSync';
-import { BotSettings } from './BotSettings';
+import { BotSettings, type BotSettingsTab } from './BotSettings';
 import { ShowerPreview } from './ShowerPreview';
 import { ChatTranscript } from './ChatTranscript';
 import { BotAvatarStudio } from './BotAvatarStudio';
@@ -163,12 +160,30 @@ function writeDirectoryCache(
   }
 }
 
+type LastChat = { kind: 'bot' | 'scope'; deviceId: string; id: string };
+
+function readLastChat(profileKey: string): LastChat | null {
+  if (!profileKey) return null;
+  try {
+    const saved = JSON.parse(localStorage.getItem(`desktop-last-chat:v1:${profileKey}`) ?? 'null') as Partial<LastChat> | null;
+    if ((saved?.kind === 'bot' || saved?.kind === 'scope') && typeof saved.deviceId === 'string' &&
+        typeof saved.id === 'string' && saved.id && saved.deviceId) {
+      return { kind: saved.kind, deviceId: saved.deviceId, id: saved.id };
+    }
+  } catch {
+    // 无法读取时仍可打开默认会话。
+  }
+  return null;
+}
+
+export function archiveExpiryAt(archivedAt?: string | null): number | null {
+  const archivedMs = archivedAt ? Date.parse(archivedAt) : NaN;
+  return Number.isFinite(archivedMs) ? archivedMs + ARCHIVE_RETENTION_DAYS * MS_PER_DAY : null;
+}
+
 export function remainingArchiveDays(archivedAt: string | null | undefined): number {
-  if (!archivedAt) return ARCHIVE_RETENTION_DAYS;
-  const archivedMs = Date.parse(archivedAt);
-  if (Number.isNaN(archivedMs)) return ARCHIVE_RETENTION_DAYS;
-  const expireMs = archivedMs + ARCHIVE_RETENTION_DAYS * MS_PER_DAY;
-  return Math.max(0, Math.ceil((expireMs - Date.now()) / MS_PER_DAY));
+  const expiresAt = archiveExpiryAt(archivedAt);
+  return expiresAt === null ? ARCHIVE_RETENTION_DAYS : Math.max(0, Math.ceil((expiresAt - Date.now()) / MS_PER_DAY));
 }
 
 function botPinKey(deviceId: string, botId: string): string {
@@ -189,6 +204,15 @@ export interface BotChatsArchiveBridge {
   openBotHistory: (bot: BotDirectoryEntry) => void;
   unarchiveBot: (bot: BotDirectoryEntry) => Promise<void>;
   deleteBot: (bot: BotDirectoryEntry) => Promise<void>;
+  conversationName: (target: SendRecordsTarget) => string | undefined;
+  openConversation: (target: SendRecordsTarget) => void;
+}
+
+export interface SendRecordsTarget {
+  deviceId: string;
+  recordId?: string;
+  botId?: string;
+  scopeId?: string;
 }
 
 function botSortTimestamp(b: Pick<BotRecord, 'lastActivityAt' | 'createdAt'>): number {
@@ -331,9 +355,7 @@ function entryTextLines(entry: AnyRawEntry): string[] {
         else if (part.type === 'thinking' && typeof part.thinking === 'string') lines.push('[思考] ' + part.thinking);
         else if (part.type === 'image') lines.push('[图片内容]');
         else if (part.type === 'toolCall' && typeof part.name === 'string') {
-          const args = part.arguments;
-          const argsText = args && typeof args === 'object' ? JSON.stringify(args) : '';
-          lines.push(`[工具调用] ${part.name}${argsText ? ' ' + argsText : ''}`);
+          lines.push(`调用 ${part.name}`);
         }
       }
       continue;
@@ -346,16 +368,20 @@ function entryTextLines(entry: AnyRawEntry): string[] {
 }
 
 function RawEntryRow({ entry }: { entry: AnyRawEntry }) {
-  const summary = entryTextLines(entry).join('\n');
+  const label = ({
+    'pi.user': '用户消息',
+    'pi.assistant': '智能体回复',
+    'pi.tool_result': '工具结果',
+    'pi.reset': '对话已清空',
+  } as Record<string, string>)[entry.kind] ?? '会话事件';
+  const summary = truncate(entryTextLines(entry).join('\n'), 320);
   return (
     <div className="raw-entry">
-      <div className="raw-entry-head">
-        <span className="raw-entry-id">{String(entry.id)}</span>
-        <span className="raw-entry-kind">{entry.kind}</span>
-      </div>
+      <strong>{label}</strong>
       {summary ? <p className="raw-entry-text">{summary}</p> : null}
       <details className="raw-entry-json">
-        <summary>原始 JSON</summary>
+        <summary>事件 ID 与原始 JSON</summary>
+        <p className="metadata">{String(entry.id)} · {entry.kind}</p>
         <pre>{JSON.stringify(entry, null, 2)}</pre>
       </details>
     </div>
@@ -412,7 +438,7 @@ function CreateBotForm({
   const [role, setRole] = useState('');
   const [description, setDescription] = useState('');
   const [cwd, setCwd] = useState('');
-  const [makePrimary, setMakePrimary] = useState(true);
+  const [makePrimary, setMakePrimary] = useState(false);
   const [busy, setBusy] = useState(false);
   const [locked, setLocked] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -425,16 +451,6 @@ function CreateBotForm({
       mountedRef.current = false;
     };
   }, []);
-
-  useEffect(() => {
-    if (initialDeviceId) {
-      setDeviceId(initialDeviceId);
-      const hasPrimary = bots.some(
-        (b) => b.deviceId === initialDeviceId && b.isPrimary && !b.archivedAt,
-      );
-      setMakePrimary(!hasPrimary);
-    }
-  }, [initialDeviceId, bots]);
 
   const targetHasPrimary = useMemo(
     () =>
@@ -449,11 +465,7 @@ function CreateBotForm({
 
   function handleSelectDevice(nextDeviceId: string) {
     setDeviceId(nextDeviceId);
-    const hasPrimary = Boolean(
-      nextDeviceId &&
-        bots.some((b) => b.deviceId === nextDeviceId && b.isPrimary && !b.archivedAt),
-    );
-    setMakePrimary(!hasPrimary);
+    setMakePrimary(false);
   }
 
   async function submit() {
@@ -463,7 +475,7 @@ function CreateBotForm({
       return;
     }
     if (!role.trim()) {
-      setError('Bot 名称必填');
+      setError('请输入智能体名称。');
       return;
     }
     sendingRef.current = true;
@@ -494,7 +506,7 @@ function CreateBotForm({
         setLocked(true);
       }
       setError(
-        `${errText(e)}（原 requestId: ${requestId}；未确认结果请在待发送面板选择原设备对账，不会自动重发）`,
+        `${errText(e)}（原 requestId: ${requestId}；可在发送记录里核对结果）`,
       );
       reportUnlessTargetOffline(api, e);
     } finally {
@@ -512,30 +524,16 @@ function CreateBotForm({
       }}
     >
       <label className="field">
-        目标设备
-        <select
-          value={deviceId}
-          onChange={(e) => handleSelectDevice(e.target.value)}
-          disabled={busy || locked}
-        >
-          <option value="">请选择设备</option>
-          {devices.map((d) => (
-            <option key={d.deviceId} value={d.deviceId} disabled={!d.online}>
-              {d.displayName || d.deviceId} · {d.deviceId} {d.online ? '在线' : '离线'}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="field">
-        Bot 名称
+        名称
         <input
           value={role}
           onChange={(e) => setRole(e.target.value)}
           disabled={busy || locked}
+          autoFocus
         />
       </label>
       <label className="field">
-        职责
+        职责（可选）
         <textarea
           value={description}
           onChange={(e) => setDescription(e.target.value)}
@@ -543,27 +541,36 @@ function CreateBotForm({
           disabled={busy || locked}
         />
       </label>
-      <label className="field">
-        cwd（可选；留空使用目标默认工作区）
-        <input
-          value={cwd}
-          onChange={(e) => setCwd(e.target.value)}
-          disabled={busy || locked}
-        />
-      </label>
-      <label className="field checkbox-field">
-        <input
-          type="checkbox"
-          checked={effectiveMakePrimary}
-          disabled={busy || locked || forcePrimary}
-          onChange={(e) => setMakePrimary(e.target.checked)}
-        />
-        <span>设为主 Bot (makePrimary)</span>
-      </label>
+      <p className="hint">{deviceId ? `创建于 ${devices.find(device => device.deviceId === deviceId)?.displayName || '所选设备'}` : '请在高级设置中选择在线设备。'}</p>
       {forcePrimary ? (
-        <p className="hint">该设备当前尚无未归档的主 Bot，已强制勾选并锁定设为主 Bot。</p>
+        <p className="hint">该设备当前没有主智能体，创建后会自动设为主智能体。</p>
       ) : null}
-      <p className="hint">模型由中心管理，新 Bot 使用中心默认配置。</p>
+      <details className="bot-form-advanced">
+        <summary>高级设置</summary>
+        <div className="form-grid">
+          <label className="field">
+            目标设备
+            <select value={deviceId} onChange={(e) => handleSelectDevice(e.target.value)} disabled={busy || locked}>
+              <option value="">请选择设备</option>
+              {devices.map(device => (
+                <option key={device.deviceId} value={device.deviceId} disabled={!device.online}>
+                  {device.displayName || '未命名设备'}{device.online ? '' : ' · 离线'}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            工作目录（可选）
+            <input value={cwd} onChange={(e) => setCwd(e.target.value)} disabled={busy || locked} placeholder="留空使用设备默认工作目录" />
+          </label>
+          {targetHasPrimary ? (
+            <label className="field checkbox-field">
+              <input type="checkbox" checked={makePrimary} disabled={busy || locked} onChange={(e) => setMakePrimary(e.target.checked)} />
+              <span>替换该设备的主智能体</span>
+            </label>
+          ) : null}
+        </div>
+      </details>
       {error ? (
         <div className="error-banner" role="alert">
           {error}
@@ -571,7 +578,7 @@ function CreateBotForm({
       ) : null}
       <div className="form-actions">
         <button type="submit" className="primary-button" disabled={busy || locked || !api.transportConnected}>
-          {busy ? '创建中…' : effectiveMakePrimary ? '创建主 Bot' : '创建 Bot'}
+          {busy ? '创建中…' : '创建智能体'}
         </button>
       </div>
     </form>
@@ -589,7 +596,8 @@ function parseSlashCommand(text: string): SlashCommandName | null {
   return SLASH_COMMANDS.find((c) => c.command === trimmed)?.command ?? null;
 }
 
-function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, canPick, onPick, draftError, draftHint, draftConflict, sendState, sendError, sendNotice, onSend, canSend, disabled, onRetryDraft, attempt, recOutcome, onReconcile, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onInsertSlash }: {
+function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, canPick, onPick, draftError, draftHint, draftConflict, sendState, sendError, sendNotice, onSend, canSend, disabled, onRetryDraft, attempt, recOutcome, onReconcile, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onInsertSlash, onOpenSendRecord }: {
+  textareaRef: RefObject<HTMLTextAreaElement | null>;
   text: string;
   onChangeText: (v: string) => void;
   files: { name: string; path: string; size: number }[];
@@ -613,7 +621,7 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, attachme
   canSend: boolean;
   disabled: boolean;
   onRetryDraft: () => void;
-  attempt: { id: string; phase: string; pendingId: string | null; error: string | null; businessId: string } | null;
+  attempt: { phase: string; error: string | null } | null;
   recOutcome: { action: string; found: boolean; recordId: string | null; recordState: string | null } | null;
   onReconcile: () => void;
   onReleaseNotSent: () => void;
@@ -625,8 +633,8 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, attachme
   onRetryTurnAdmission: () => void;
   /** 斜杠命令先填回输入框；用户显式发送后由发送路径调用 clearHistory/compact，不当作模型 prompt。 */
   onInsertSlash: (command: string) => void;
+  onOpenSendRecord?: () => void;
 }) {
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [slashIndex, setSlashIndex] = useState(0);
   const [dismissedSlash, setDismissedSlash] = useState<string | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -639,7 +647,7 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, attachme
     if (!el) return;
     el.style.height = 'auto';
     el.style.height = `${Math.min(160, Math.max(36, el.scrollHeight))}px`;
-  }, []);
+  }, [textareaRef]);
 
   useEffect(() => {
     autosize();
@@ -723,15 +731,16 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, attachme
         <div className="error-banner" role="alert" aria-live="polite">
           {attempt.phase === 'not-sent' ? (
             <>
-              发送未入队（not-sent）：{attempt.error}
+              {sendError ?? attempt.error ?? '消息尚未入队。'}
               <button type="button" onClick={() => onReleaseNotSent()}>恢复编辑</button>
             </>
           ) : (
             <>
-              发送冻结中 · 业务ID {attempt.businessId}{attempt.pendingId ? ` · pending ${attempt.pendingId}` : ''}（{attempt.phase}）。
+              {sendError ?? (sendState === 'sending' ? '正在保存并发送消息…' : '发送结果待确认。')}
               {attempt.phase === 'cleared' || attempt.phase === 'failed' || attempt.phase === 'unconfirmed' ? (
-                <button type="button" onClick={() => onReconcile()}>查询原记录</button>
+                <button type="button" onClick={onReconcile} disabled={sendState === 'sending'}>核对结果</button>
               ) : null}
+              {onOpenSendRecord ? <button type="button" onClick={onOpenSendRecord}>查看发送记录</button> : null}
               {draftConflict && recOutcome?.found ? (
                 <button type="button" onClick={() => onAdoptNewerDraft()}>保留新版草稿，结束旧尝试</button>
               ) : null}
@@ -812,8 +821,8 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, attachme
               type="button"
               className="icon-button composer-plus"
               disabled={disabled}
-              aria-label="更多操作"
-              title="添加文件引用 / 斜杠命令"
+              aria-label="添加附件"
+              title="添加附件"
               onClick={() => setMoreOpen((v) => !v)}
             >
               <Plus size={18} />
@@ -848,19 +857,6 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, attachme
                     Relay 模式不可选本机文件；可将目标 Host 上已存在的路径作为普通文本引用。
                   </p>
                 ) : null}
-                {SLASH_COMMANDS.map((c) => (
-                  <button
-                    key={c.command}
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setMoreOpen(false);
-                      pickSlash(c.command);
-                    }}
-                  >
-                    {c.command === '/clear' ? <Eraser size={14} /> : <Shrink size={14} />} {c.label} · {c.desc}
-                  </button>
-                ))}
               </div>
             ) : null}
           </div>
@@ -888,8 +884,14 @@ function Composer({ text, onChangeText, files, onAddFile, onRemoveFile, attachme
           </button>
         </div>
       </div>
-      {sendError ? <div className="error-banner" role="alert">{sendError}</div> : null}
-      {sendNotice ? <div className="status" role="status">{sendNotice}</div> : null}
+      {sendError && !attempt ? <div className="error-banner" role="alert">
+        {sendError}
+        {!attempt && onOpenSendRecord ? <button type="button" onClick={onOpenSendRecord}>查看发送记录</button> : null}
+      </div> : null}
+      {sendNotice ? <div className="status" role="status">
+        {sendNotice}
+        {!attempt && onOpenSendRecord ? <button type="button" onClick={onOpenSendRecord}>查看发送记录</button> : null}
+      </div> : null}
       <div className="composer-footer">
         <p className="hint">
           Enter 发送 · Shift+Enter 换行 · / 呼出命令
@@ -1069,36 +1071,50 @@ function BotProfile({ api, centerApi, bot, onSaved }: { api: DesktopPanelApi; ce
     <div className="form-grid inspector-profile-form">
       <label className="field">名称<input value={name} maxLength={120} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setName(e.target.value); }} /></label>
       <label className="field">职责<textarea value={description} maxLength={2000} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setDescription(e.target.value); }} /></label>
-      <label className="field">
-        工作目录
-        <input
-          value={cwd}
-          disabled={busy || isArchived}
-          placeholder="目标 Host 上的绝对路径"
-          onChange={(e) => { cwdDirty.current = true; setCwd(e.target.value); setCwdNotice(null); }}
-        />
-      </label>
-      <p className="hint">
-        目标 Host 上的绝对路径；保存到中心后该 Bot 空闲时生效；不会移动文件。
-        {cwdFailed ? '（未能从中心读取修订，请重新读取后再保存）' : cwdRevision === null ? '（正在读取中心修订…）' : ''}
-      </p>
-      {cwdNotice ? <div className="status" role="status">{cwdNotice}</div> : null}
       {error ? <div className="error-banner" role="alert">{error}</div> : null}
       <div className="form-actions">
         {locked ? (
           <button type="button" className="secondary-button" disabled={busy || !api.transportConnected} onClick={() => void adoptRemote()}>读取并采用远端资料（丢弃草稿）</button>
         ) : null}
-        <button type="button" className="secondary-button" onClick={() => void saveCwd()} disabled={busy || isArchived || !centerOnline || !cwdSavable}>保存工作目录</button>
-        {(cwdFailed || (error && cwdRevision === null)) ? (
-          <button type="button" className="secondary-button" disabled={busy || !centerOnline} onClick={() => void loadCwdRef.current()}>重新读取目录修订</button>
-        ) : null}
         <button type="button" className="primary-button" onClick={() => void save()} disabled={busy || locked || isArchived || !api.transportConnected}>保存资料</button>
       </div>
+      <details className="bot-form-advanced">
+        <summary>工作目录（高级）</summary>
+        <div className="form-grid">
+          <label className="field">
+            工作目录
+            <input
+              value={cwd}
+              disabled={busy || isArchived}
+              placeholder="目标设备上的绝对路径"
+              onChange={(e) => { cwdDirty.current = true; setCwd(e.target.value); setCwdNotice(null); }}
+            />
+          </label>
+          <p className="hint">保存后将在智能体空闲时生效。</p>
+          {cwdNotice ? <div className="status" role="status">{cwdNotice}</div> : null}
+          <div className="form-actions">
+            <button type="button" className="secondary-button" onClick={() => void saveCwd()} disabled={busy || isArchived || !centerOnline || !cwdSavable}>保存工作目录</button>
+            {(cwdFailed || (error && cwdRevision === null)) ? (
+              <button type="button" className="secondary-button" disabled={busy || !centerOnline} onClick={() => void loadCwdRef.current()}>重新读取工作目录</button>
+            ) : null}
+          </div>
+        </div>
+      </details>
     </div>
   );
 }
 
-type InspectorTab = 'profile' | 'settings' | 'raw' | 'shower';
+type InspectorTab = 'profile' | BotSettingsTab | 'raw' | 'shower';
+
+const inspectorPages: ReadonlyArray<{ id: InspectorTab; label: string }> = [
+  { id: 'profile', label: '资料' },
+  { id: 'soul', label: '人设' },
+  { id: 'model', label: '模型' },
+  { id: 'capabilities', label: '插件与能力' },
+  { id: 'skill-review', label: 'Skill 审阅' },
+  { id: 'schedules', label: '定时任务' },
+  { id: 'vault', label: '密码库' },
+];
 
 function PrimaryChatPane({
   api,
@@ -1111,7 +1127,14 @@ function PrimaryChatPane({
   onBotDeleted,
   onLiveActivity,
   onOpenPrivateChats,
+  onOpenSendRecords,
+  onRequestArchive,
+  focusComposer = false,
   inspectorRequest = null,
+  questionnaireRequestId,
+  onQuestionnaireFocused,
+  transcriptVisible = true,
+  centerInterrupted = false,
   pageActive = true,
 }: {
   api: DesktopPanelApi;
@@ -1128,7 +1151,14 @@ function PrimaryChatPane({
   onLiveActivity?: () => void;
   /** 打开该 Bot 参与的私聊列表（只读，默认不选对话）。 */
   onOpenPrivateChats?: (bot: BotRecord) => void;
+  onOpenSendRecords?: (target: SendRecordsTarget) => void;
+  onRequestArchive: () => void;
+  focusComposer?: boolean;
   inspectorRequest?: { tab: InspectorTab; seq: number } | null;
+  questionnaireRequestId?: string;
+  onQuestionnaireFocused?: (id: string) => void;
+  transcriptVisible?: boolean;
+  centerInterrupted?: boolean;
   pageActive?: boolean;
 }) {
   const t = useText();
@@ -1147,6 +1177,7 @@ function PrimaryChatPane({
   const [sendState, setSendState] = useState<'idle' | 'sending'>('idle');
   const [sendError, setSendError] = useState<string | null>(null);
   const [sendNotice, setSendNotice] = useState<string | null>(null);
+  const [lastSendRecordId, setLastSendRecordId] = useState<string>();
   const [slashBusy, setSlashBusy] = useState<SlashCommandName | null>(null);
   const [recOutcome, setRecOutcome] = useState<{ action: string; found: boolean; recordId: string | null; recordState: string | null } | null>(null);
   const lockedRef = useRef(false);
@@ -1154,13 +1185,15 @@ function PrimaryChatPane({
   const [chatSearch, setChatSearch] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const autoFocusedRef = useRef(false);
   /** 本聊天最新的 Host 准入状态（Host-queued 回执中的 admission）；null 表示无等待项。 */
   const [turnAdmission, setTurnAdmission] = useState<TurnAdmissionView | null>(null);
   /** 抽屉 Portal 容器：紧凑模态只锁本聊天气泡层，不影响左栏名录与导航。 */
   const stageRef = useRef<HTMLDivElement | null>(null);
   const inspectorContentRef = useRef<HTMLDivElement | null>(null);
 
-  const [manageAction, setManageAction] = useState<'setPrimary' | 'archive' | 'unarchive' | 'delete' | null>(null);
+  const [manageAction, setManageAction] = useState<'setPrimary' | 'unarchive' | 'delete' | null>(null);
   const [manageError, setManageError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
@@ -1240,6 +1273,9 @@ function PrimaryChatPane({
     return () => { mountedRef.current = false; };
   }, []);
 
+  const isCurrentSession = useCallback(() =>
+    mountedRef.current && sessionKey(api.identity) === sess, [api, sess]);
+
   async function handleSetPrimary() {
     if (!identity || !online || manageInFlightRef.current || isPrimary || isArchived) return;
     manageInFlightRef.current = true;
@@ -1256,38 +1292,6 @@ function PrimaryChatPane({
     } catch (e) {
       if (mountedRef.current && sessionKey(api.identity) === sess) {
         setManageError(`设为主 Bot 失败：${tErr(e)}`);
-        reportUnlessTargetOffline(api, e);
-      }
-    } finally {
-      manageInFlightRef.current = false;
-      if (mountedRef.current) setManageAction(null);
-    }
-  }
-
-  async function handleArchive() {
-    if (!identity || !online || manageInFlightRef.current || isPrimary || isArchived) return;
-    manageInFlightRef.current = true;
-    setManageAction('archive');
-    setManageError(null);
-    try {
-      const updated = await api.call(identity, 'archiveBot', { botId: bot.botId });
-      if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
-      const archivedAt =
-        updated &&
-        typeof updated === 'object' &&
-        'archivedAt' in updated &&
-        typeof (updated as { archivedAt?: unknown }).archivedAt === 'string'
-          ? (updated as { archivedAt: string }).archivedAt
-          : new Date().toISOString();
-      onBotUpdated({
-        ...(updated && typeof updated === 'object' ? (updated as Partial<BotRecord>) : {}),
-        botId: bot.botId,
-        archivedAt,
-        isPrimary: false,
-      });
-    } catch (e) {
-      if (mountedRef.current && sessionKey(api.identity) === sess) {
-        setManageError(`归档失败：${tErr(e)}`);
         reportUnlessTargetOffline(api, e);
       }
     } finally {
@@ -1344,6 +1348,7 @@ function PrimaryChatPane({
   function onChangeText(v: string) {
     drafts.editText(v);
     if (sendError) setSendError(null);
+    if (lastSendRecordId) setSendNotice(null);
   }
 
   function addFile(ref: { name: string; path: string; size: number }) {
@@ -1371,14 +1376,16 @@ function PrimaryChatPane({
     if (!identity || lockedRef.current || isArchived) return;
     try {
       const ref = await api.pickFile();
-      if (ref && !lockedRef.current) addFile(ref);
+      if (ref && isCurrentSession() && !lockedRef.current) addFile(ref);
     } catch (e) {
+      if (!isCurrentSession()) return;
       api.reportError(e);
       setSendError('选择文件失败：' + errText(e));
     }
   }
 
-  const [imageUploading, setImageUploading] = useState(false);
+  const [imageUploadSession, setImageUploadSession] = useState<string | null>(null);
+  const imageUploading = imageUploadSession === sess;
 
   /** 桌面只选图（无原生相机）；上传归属冻结在发起时的 identity/botId/draftKey。
    *  addAttachment 的 expectedKey 是原子 guard（useDrafts 内部 keyRef 实时比较）：
@@ -1388,7 +1395,7 @@ function PrimaryChatPane({
     const frozenIdentity = identity;
     const draftKey = drafts.key;
     if (!frozenIdentity || lockedRef.current || isArchived || !draftKey || imageUploading) return;
-    setImageUploading(true);
+    setImageUploadSession(sess);
     pickImagesFromInput({
       onPicked: async (files) => {
         try {
@@ -1401,6 +1408,7 @@ function PrimaryChatPane({
             existing.add(id);
             queued.push(source);
           }
+          if (!isCurrentSession()) return;
           if (drafts.attachments.length + queued.length > IMAGE_MAX_COUNT) {
             setSendError(`最多 ${IMAGE_MAX_COUNT} 张图片，本次未上传。`);
             return;
@@ -1412,15 +1420,18 @@ function PrimaryChatPane({
               mimeType: source.mimeType,
               data: source.data,
             });
-            if (!drafts.addAttachment(att, draftKey)) return; // key 已切换：中止剩余批次
+            if (!isCurrentSession() || !drafts.addAttachment(att, draftKey)) return;
           }
           setSendError(null);
         } catch (e) {
+          if (!isCurrentSession()) return;
           api.reportError(e);
           setSendError('选择图片失败：' + errText(e));
         }
       },
-      onSettled: () => setImageUploading(false),
+      onSettled: () => {
+        if (mountedRef.current) setImageUploadSession(current => current === sess ? null : current);
+      },
     });
   }
 
@@ -1448,7 +1459,7 @@ function PrimaryChatPane({
       if (persisted && persisted.text === draftText && persisted.files.length === 0) {
         try {
           await api.clearDraft(draftKey, [{ text: draftText, files: [] }]);
-          if (drafts.text === draftText) drafts.editText('');
+          if (isCurrentSession() && drafts.text === draftText) drafts.editText('');
         } catch {
           // CAS 冲突/写失败：持久草稿保留，不掩盖服务端已成功的事实。
         }
@@ -1456,6 +1467,7 @@ function PrimaryChatPane({
         drafts.editText('');
       }
       // 服务端成功后立即重读完整可见历史（busy 下降沿兜底也会补跑）。
+      if (!isCurrentSession()) return;
       void loadRawLatest();
       setSendNotice(
         command === '/clear'
@@ -1465,7 +1477,7 @@ function PrimaryChatPane({
             : '没有可压缩的历史',
       );
       window.setTimeout(() => {
-        if (mountedRef.current) setSendNotice(null);
+        if (isCurrentSession()) setSendNotice(null);
       }, 2500);
     } catch (e) {
       if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
@@ -1487,6 +1499,8 @@ function PrimaryChatPane({
     const msg = drafts.text.trim();
     const attachmentIds = drafts.attachments.map((a) => a.id);
     if (!msg && attachmentIds.length === 0) return;
+    setLastSendRecordId(undefined);
+    setSendNotice(null);
     const command = parseSlashCommand(msg);
     if (command && attachmentIds.length === 0) {
       if (live?.busy || drafts.attempt || drafts.savePaused || drafts.files.length > 0) {
@@ -1522,7 +1536,6 @@ function PrimaryChatPane({
     await drafts.waitQuiet(started.handle);
     // 只发送冻结副本：await 后不重组身份/业务 ID。
     const frozen = started.attempt.input;
-    const businessId = frozen.kind === 'primary' ? frozen.requestId : frozen.messageId;
     try {
       let rec: PendingRecord | null = null;
       try {
@@ -1531,11 +1544,11 @@ function PrimaryChatPane({
         reportUnlessTargetOffline(api, e);
         // 只有本阶段明确 not-sent（无队列记录）才可声称未入队。
         if (isNotSent(e)) {
-          const errMsg = `发送未入队（not-sent）：${tErr(e)}。原 requestId ${businessId} 已冻结，无队列记录，可恢复编辑后重试。`;
+          const errMsg = '消息尚未发出。恢复编辑后可以重新发送。';
           drafts.markNotSent(started.handle, errMsg);
           setSendError(errMsg);
         } else {
-          const errMsg = `入队结果未确认：${tErr(e)}（原 requestId ${businessId}）；保持原 ID 锁，请查询原记录，不会自动补发。`;
+          const errMsg = '结果未知。请先核对原记录。';
           drafts.markUnconfirmed(started.handle);
           setSendError(errMsg);
         }
@@ -1544,28 +1557,29 @@ function PrimaryChatPane({
       if (!rec) return;
       drafts.setPending(started.handle, rec.id);
       const pendingId = rec.id;
+      setLastSendRecordId(pendingId);
       const cleared = await drafts.confirmCleared(started.handle);
       if (cleared !== 'cleared') {
         const errMsg = cleared === 'conflict'
-          ? `草稿尚未清空：磁盘草稿已被更新。原队列记录 ${pendingId} 保留，未发送；请查看新版草稿并选择“保留新版草稿，结束旧尝试”，不会自动清空或补发。`
-          : `草稿尚未清空：消息已入队（${pendingId}）但未远程发送，请在待发送面板处理。`;
+          ? '消息已加入发送记录。请先处理更新后的草稿。'
+          : '消息已加入发送记录，可以在那里继续处理。';
         drafts.markFailed(started.handle, errMsg);
         setSendError(errMsg);
         return;
       }
-      if (!api.transportConnected) {
+      if (!api.transportConnected || sessionKey(api.identity) !== sess) {
         drafts.finishSend(started.handle);
-        setSendError(`离线：已入队（${pendingId}），连接后请在待发送面板显式发送。`);
+        setSendNotice('消息已加入发送记录。连接恢复后，可以从记录里发送。');
         return;
       }
       try {
         const sent = await api.pending(identity, 'pending_send', { id: pendingId });
-        reportSendRecord(started.handle, sent, pendingId);
+        reportSendRecord(started.handle, sent);
       } catch (e) {
         // 回执丢失/超时/未知：已入队，保留原 ID 锁，绝不标未入队。
         reportUnlessTargetOffline(api, e);
         drafts.markUnconfirmed(started.handle);
-        setSendError(`发送回执未确认：已入队（${pendingId}）· ${tErr(e)}；保持原 ID 锁，请查询原记录，不会自动补发。`);
+        setSendError('发送结果未知。请先核对原记录。');
       }
     } finally {
       lockedRef.current = false;
@@ -1573,49 +1587,47 @@ function PrimaryChatPane({
     }
   }
 
-  function reportSendRecord(handle: { key: string; attemptId: string }, rec: PendingRecord, originalPendingId: string) {
+  function reportSendRecord(handle: { key: string; attemptId: string }, rec: PendingRecord) {
     const hostQueued = readHostQueuedReceipt(rec);
     // Host-queued：本地已持久化并等待中心准入，submissionId 为 null 属正常，不视为缺失。
     setTurnAdmission(hostQueued ? hostQueued.admission : null);
     if (rec.state === 'accepted') {
       drafts.finishSend(handle);
       // 受理只说明已受理；完成与否以 live/原回执为准，界面不断言。
-      setSendError(hostQueued
-        ? '已受理（accepted）：提交已入 Host 队列等待准入（submissionId 未定）。结果以 live 或原回执为准。'
-        : '已受理（accepted）。结果以 live 或原回执为准。');
+      setSendNotice(hostQueued ? '消息已进入设备的任务队列。' : '设备已接收消息。');
       onLiveActivityRef.current?.();
     } else if (rec.state === 'rejected') {
       // 确定终态：本地 attempt 结束，原记录保留在待发送面板
       drafts.finishSend(handle);
-      setSendError(`发送被拒：${rec.lastError?.code ?? '未知'}。原记录 ${rec.id} 可在待发送面板查看。`);
+      setSendError('设备未接收消息。详情见发送记录。');
     } else if (rec.state === 'unconfirmed') {
-      const errMsg = `发送结果未确认（unconfirmed），原记录 ${rec.id} 请等待待发送面板对账。`;
       drafts.markUnconfirmed(handle);
-      setSendError(errMsg);
+      setSendError('发送结果未知。请先核对原记录。');
     } else {
       drafts.finishSend(handle);
-      setSendError(hostQueued
-        ? `消息已入 Host 队列等待准入（${originalPendingId}）${hostQueued.admission ? '：' + TURN_ADMISSION_LABELS[hostQueued.admission.phase] : ''}；结果以 live 或原回执为准。`
-        : `消息状态：${rec.state}（${originalPendingId}）。`);
+      setSendNotice('消息已加入发送记录。');
     }
   }
 
   async function queryPending() {
-    if (!identity || !drafts.attempt || !drafts.key) return;
+    if (!identity || !drafts.attempt || !drafts.key || lockedRef.current) return;
     const handle = { key: drafts.key, attemptId: drafts.attempt.id };
-    const outcome = await drafts.reconcile(handle);
+    lockedRef.current = true;
+    const outcome = await drafts.reconcile(handle).finally(() => { lockedRef.current = false; });
     if (!mountedRef.current) return;
     setRecOutcome(outcome);
-    if (outcome.note) {
-      setSendError(outcome.note);
+    if (outcome.recordId) setLastSendRecordId(outcome.recordId);
+    if (outcome.action === 'finished' && outcome.recordState === 'accepted') {
+      setSendError(null);
+      setSendNotice('设备已接收消息。');
     } else if (outcome.action === 'finished') {
-      setSendError(`对账：原记录已确定（${outcome.recordState}），本地 attempt 已结束。`);
-    } else if (outcome.action === 'kept') {
-      setSendError(`对账：找到原记录 ${outcome.recordId}，状态 ${outcome.recordState}；保持锁，等待终态。`);
+      setSendError('设备未接收消息。详情见发送记录。');
     } else if (outcome.action === 'ready-clear-retry') {
-      setSendError(`对账：找到原记录 ${outcome.recordId}，状态 ${outcome.recordState}；草稿尚未清空，可显式重试本地清空。`);
+      setSendError('已找到发送记录，可以重试清空本地草稿。');
+    } else if (outcome.found) {
+      setSendError(drafts.conflict ? '已找到发送记录。请处理更新后的草稿。' : '已找到发送记录，正在等待结果。');
     } else {
-      setSendError('未找到匹配原记录（按 kind/target/业务ID/文本 分页检索）；保持未确认与锁，绝不自动补发。');
+      setSendError('暂时无法确认发送结果。可以稍后再核对。');
     }
   }
 
@@ -1664,9 +1676,12 @@ function PrimaryChatPane({
 
   /** 显式刷新 Host 准入状态；找不到等待记录即清空显示。 */
   async function refreshTurnAdmission() {
-    const rec = await findHostAdmissionRecord();
-    if (!mountedRef.current) return;
-    setTurnAdmission(rec ? readHostQueuedReceipt(rec)?.admission ?? null : null);
+    try {
+      const rec = await findHostAdmissionRecord();
+      if (isCurrentSession()) setTurnAdmission(rec ? readHostQueuedReceipt(rec)?.admission ?? null : null);
+    } catch (e) {
+      if (isCurrentSession()) reportUnlessTargetOffline(api, e);
+    }
   }
 
   /**
@@ -1678,6 +1693,7 @@ function PrimaryChatPane({
     const current = api.identity;
     if (!current || !api.transportConnected || sendState !== 'idle' || lockedRef.current || isArchived) return;
     const rec = await findHostAdmissionRecord();
+    if (!isCurrentSession()) return;
     const admission = rec ? readHostQueuedReceipt(rec)?.admission ?? null : null;
     if (!rec || rec.kind !== 'primary' || !admission || admission.phase !== 'failed') {
       if (mountedRef.current) setTurnAdmission(admission);
@@ -1690,7 +1706,7 @@ function PrimaryChatPane({
       const receipt = await api.call(current, 'submit', {
         botId: rec.botId, requestId: rec.requestId, text: rec.text,
       });
-      if (!mountedRef.current) return;
+      if (!isCurrentSession()) return;
       const nextAdmission = readTurnAdmission((receipt as { admission?: unknown }).admission);
       setTurnAdmission(nextAdmission);
       setSendError(nextAdmission && nextAdmission.phase !== 'failed'
@@ -1699,6 +1715,7 @@ function PrimaryChatPane({
       // 本地 outbox 记录 receipt 仍带旧 admission：显式对账刷新一次（只读，不改远端状态）。
       try { await api.pending(current, 'pending_reconcile', { id: rec.id }); } catch { /* 对账失败不掩盖重试结果 */ }
     } catch (e) {
+      if (!isCurrentSession()) return;
       reportUnlessTargetOffline(api, e);
       setSendError('准入重试未确认：' + tErr(e) + '。原 requestId 与记录保留，可再次显式重试，不会自动补发。');
     } finally {
@@ -1719,12 +1736,16 @@ function PrimaryChatPane({
     }
   }
 
-  const [live, setLive] = useState<BotLiveState | null>(null);
+  const [observedLive, setObservedLive] = useState<{ session: string; state: BotLiveState } | null>(null);
+  const live = observedLive && (!online || observedLive.session === sess) ? observedLive.state : null;
   const [liveLast, setLiveLast] = useState<string | null>(null);
   const [liveError, setLiveError] = useState<string | null>(null);
   const [liveEnded, setLiveEnded] = useState(false);
   const [watchTick, setWatchTick] = useState(0);
-  const [stopping, setStopping] = useState(false);
+  const [stoppingSession, setStoppingSession] = useState<string | null>(null);
+  const [confirmedStopTarget, setConfirmedStopTarget] = useState<string | null>(null);
+  const stopButtonRef = useRef<HTMLButtonElement>(null);
+  const stopping = stoppingSession === sess;
   const [avatarVersion, setAvatarVersion] = useState(0);
 
   const [rawItems, setRawItems] = useState<AnyRawEntry[]>([]);
@@ -1740,13 +1761,21 @@ function PrimaryChatPane({
     read: botIds => api.call(identity, 'getBotBoard', { botIds }),
   } : undefined;
   const chatBoard = useBotBoard(boardTarget ? [boardTarget] : [], pageActive);
-  const markViewedBoardResult = useMarkViewedBoardResult(chatBoard, boardTarget, pageActive);
+  const transcriptActive = pageActive && transcriptVisible && online && chatBoard.visible &&
+    !inspectorTab && !liveEnded && !liveError;
+  const boardRecord = boardTarget ? chatBoard.records.get(boardTarget.key) : undefined;
+  const resultId = boardRecord?.item?.conversationId === bot.primaryConversationId
+    ? boardRecord.item.lastResult?.id
+    : undefined;
+  const boardResultId = transcriptActive && boardTarget && boardRecord?.generation === sess &&
+    !boardRecord.error && chatBoard.seen.get(boardTarget.key) !== resultId ? resultId : undefined;
+  const markViewedBoardResult = useMarkViewedBoardResult(chatBoard, boardTarget, transcriptActive);
+  const onViewedResult = useCallback((id: string) => {
+    if (api.transportConnected && sessionKey(api.identity) === sess) markViewedBoardResult([id]);
+  }, [api, sess, markViewedBoardResult]);
   const [rawLoading, setRawLoading] = useState(false);
   const [rawError, setRawError] = useState<string | null>(null);
   const rawCursorRef = useRef<Record<string, unknown> | null>(null);
-  const rawSessRef = useRef(sess);
-  rawSessRef.current = sess;
-
   /**
    * 每轮任务完结（busy true→false）或观察结束时，沿升序游标逐页读完整可见历史
    * （与手机端 Host.tsx fetchBotHistoryPages 一致：首帧=最早页，继续翻页到尽头才包含最新条目），
@@ -1754,65 +1783,65 @@ function PrimaryChatPane({
    * 单飞：busy 期间 token 级 update 不触发；turns 之间间隔靠飞行中标记+补跑标志合并。
    * 失败保留旧数据并置可见错误（聊天流顶部重试条），不静默丢弃。
    */
-  const latestFlightRef = useRef<{ inFlight: boolean; dirty: boolean }>({ inFlight: false, dirty: false });
+  // 重连后的读取属于新代次，旧请求既不能覆盖它，也不能吞掉这次刷新。
+  const latestFlightRef = useRef<{ session: string; dirty: boolean } | null>(null);
   const prevBusyRef = useRef(false);
 
   const loadRawLatest = useCallback(async () => {
-    if (!identity || !api.transportConnected) return;
-    if (latestFlightRef.current.inFlight) {
+    if (!identity || !api.transportConnected || !isCurrentSession()) return;
+    if (latestFlightRef.current?.session === sess) {
       latestFlightRef.current.dirty = true;
       return;
     }
-    latestFlightRef.current.inFlight = true;
-    const localSess = rawSessRef.current;
+    const flight = { session: sess, dirty: false };
+    latestFlightRef.current = flight;
     try {
       const all: AnyRawEntry[] = [];
       let cursor: Record<string, unknown> | null = null;
       for (;;) {
         const page: Awaited<ReturnType<typeof readHistoryPage<AnyRawEntry>>> = await readHistoryPage<AnyRawEntry>(async (c, limit, chunked) => {
-          if (rawSessRef.current !== localSess) return null;
+          if (!isCurrentSession()) return null;
           return api.call(identity, 'history', { botId: bot.botId, limit, cursor: c, ...(chunked ? { chunked: true } : {}) });
         }, cursor, 200);
-        if (!page || rawSessRef.current !== localSess) return;
+        if (!page || !isCurrentSession()) return;
         const items = page.items;
         if (items.length === 0) break;
         all.push(...items);
         if (!page.nextCursor || typeof page.nextCursor !== 'object' || Array.isArray(page.nextCursor)) break;
         cursor = page.nextCursor;
       }
-      if (rawSessRef.current !== localSess) return;
+      if (!isCurrentSession()) return;
       // 完整可见历史整体替换：/clear 后 reset 之前的条目不再回归，不再依赖截断的 live 窗口。
       setRawItems(all);
       rawCursorRef.current = null;
       setRawError(null);
     } catch (e) {
       // 失败保留旧数据：重试按钮在聊天流顶部可见，下一次完结/重连也会再补跑。
-      if (rawSessRef.current === localSess) {
+      if (isCurrentSession()) {
         setRawError(tErr(e));
         reportUnlessTargetOffline(api, e);
       }
     } finally {
-      latestFlightRef.current.inFlight = false;
-      if (latestFlightRef.current.dirty && rawSessRef.current === localSess) {
-        latestFlightRef.current.dirty = false;
-        void loadRawLatest();
+      if (latestFlightRef.current === flight) {
+        latestFlightRef.current = null;
+        if (flight.dirty && isCurrentSession()) void loadRawLatest();
       }
     }
-  }, [api, bot.botId, identity]);
+  }, [api, bot.botId, identity, isCurrentSession, sess]);
 
   /**
    * 历史只读路径只有一条：无论首次进入、重连、重试或 busy 下降沿，都复用 loadRawLatest
    * 的完整分页单飞读取；这里只保留 loading 标记，失败错误由 loadRawLatest 自身置位。
    */
   const loadRaw = useCallback(async () => {
-    if (!identity || !api.transportConnected) return;
+    if (!identity || !api.transportConnected || !isCurrentSession()) return;
     setRawLoading(true);
     try {
       await loadRawLatest();
     } finally {
-      setRawLoading(false);
+      if (isCurrentSession()) setRawLoading(false);
     }
-  }, [api, identity, loadRawLatest]);
+  }, [api, identity, isCurrentSession, loadRawLatest]);
 
   // busy true→false 下降沿触发合并刷新；live.busy 首帧为 true 也等下一轮完结。
   useEffect(() => {
@@ -1824,13 +1853,13 @@ function PrimaryChatPane({
 
   useEffect(() => {
     // 离线/页面不可见（远端页切回本机）不发 observe：保留最后读取的 live 数据，重连后被动重建。
-    if (!identity || !api.transportConnected || !pageActive) return;
+    if (!identity || !api.transportConnected || !pageActive || !isCurrentSession()) return;
     const localSess = sess;
     let disposed = false;
     let handle: { close(): Promise<void> } | null = null;
     void (async () => {
       if (disposed) return;
-      setLive(null);
+      setObservedLive(null);
       setLiveError(null);
       setLiveEnded(false);
       setLiveLast(null);
@@ -1856,7 +1885,7 @@ function PrimaryChatPane({
           if ('scopeId' in f) return;
           setLiveLast(new Date().toISOString());
           if (f.type === 'snapshot') {
-            setLive(f.state);
+            setObservedLive({ session: localSess, state: f.state });
             // 快照帧可能带整字段 turnAdmission；缺省/形状非法一律清空显示。
             setTurnAdmission(readTurnAdmission((f.state as { turnAdmission?: unknown }).turnAdmission));
             onLiveActivityRef.current?.();
@@ -1866,7 +1895,9 @@ function PrimaryChatPane({
               setTurnAdmission(readTurnAdmission((changes as { turnAdmission?: unknown }).turnAdmission));
             }
             if (changes) {
-              setLive((prev) => (prev ? { ...prev, ...changes } : prev));
+              setObservedLive(prev => prev?.session === localSess
+                ? { session: localSess, state: { ...prev.state, ...changes } }
+                : prev);
               if ('history' in changes || 'busy' in changes || 'generation' in changes) {
                 onLiveActivityRef.current?.();
               }
@@ -1874,14 +1905,14 @@ function PrimaryChatPane({
           }
         });
         h.ready.catch((e) => {
-          if (!disposed) {
+          if (!disposed && isCurrentSession()) {
             setLiveError('观察建立失败：' + tErr(e));
             setLiveEnded(true);
           }
         });
         handle = h;
       } catch (e) {
-        if (!disposed) {
+        if (!disposed && isCurrentSession()) {
           setLiveError(tErr(e));
           setLiveEnded(true);
         }
@@ -1891,18 +1922,19 @@ function PrimaryChatPane({
       disposed = true;
       if (handle) void handle.close().catch(() => {});
     };
-  }, [api, sess, bot.botId, watchTick, online, pageActive, loadRawLatest]);
+  }, [api, sess, bot.botId, watchTick, online, pageActive, loadRawLatest, isCurrentSession]);
 
   async function stopTask() {
     if (!identity || stopping || !api.transportConnected) return;
-    setStopping(true);
+    setStoppingSession(sess);
     try {
       await api.call(identity, 'abort', { botId: bot.botId });
     } catch (e) {
+      if (!isCurrentSession()) return;
       setLiveError('停止失败：' + tErr(e));
       reportUnlessTargetOffline(api, e);
     } finally {
-      if (mountedRef.current) setStopping(false);
+      if (mountedRef.current) setStoppingSession(current => current === sess ? null : current);
     }
   }
 
@@ -1973,6 +2005,15 @@ function PrimaryChatPane({
 
   const disabled =
     isArchived || sendState === 'sending' || slashBusy !== null || lockedRef.current || drafts.busy || !!drafts.attempt;
+  useEffect(() => {
+    if (!focusComposer || autoFocusedRef.current || !pageActive || !online || disabled) return;
+    autoFocusedRef.current = true;
+    if (document.activeElement === document.body) composerRef.current?.focus();
+  }, [focusComposer, pageActive, online, disabled]);
+  const sendRecordId = drafts.attempt ? drafts.attempt.pendingId : lastSendRecordId;
+  const openSendRecord = onOpenSendRecords && (sendRecordId || drafts.attempt?.phase === 'unconfirmed')
+    ? () => onOpenSendRecords({ deviceId: bot.deviceId, botId: bot.botId, recordId: sendRecordId ?? undefined })
+    : undefined;
 
   // 统一口径只在这里计算一次传给 ChatTranscript：Host activity 为准；
   // 本地发送乐观只在 Host 未受理（idle/stopped）时叠加 queued；
@@ -1993,8 +2034,23 @@ function PrimaryChatPane({
       : sendingActivity ?? liveActivity;
   const liveBusy = isBotActivityBusy(activity);
   const canStop = canStopBotActivity(activity);
+  const pendingQuestionnaire = online && !isArchived && live?.busy && !liveEnded && !liveError &&
+    activity.source !== 'room' && activity.source !== 'dm' && activity.phase !== 'stopping' && activity.phase !== 'interrupting'
+    ? readToolPresentation(live.tools?.find(tool => tool.status === 'running' &&
+        tool.presentation?.kind === 'questionnaire' && tool.presentation.status === 'pending')?.presentation)
+    : null;
+  const awaitingAnswer = pendingQuestionnaire?.kind === 'questionnaire'
+    ? `等待你确认 · ${pendingQuestionnaire.questions.length} 题` : null;
   // 停止独立门禁：只关联在线/归档/停止进行中，不被发送、草稿锁或附件上传禁用。
   const stopDisabled = !online || isArchived || stopping;
+  const queuedCount = live?.queuedCount ?? 0;
+  const requiresStopConfirmation = liveActivity.source === 'room' || liveActivity.source === 'dm' ||
+    liveActivity.source === 'background' || queuedCount > 1 || (live?.busy === true && queuedCount > 0);
+  const stopTarget = JSON.stringify([sess, liveActivity.source, liveActivity.scopeId, liveActivity.requestId, liveActivity.startedAt]);
+  const stopConfirmOpen = pageActive && canStop && !stopDisabled && confirmedStopTarget === stopTarget;
+  useEffect(() => {
+    if (!stopConfirmOpen) setConfirmedStopTarget(null);
+  }, [stopConfirmOpen]);
   void avatarVersion; // 头像保存后 bump：重新计算 key 下各 GrokBotAvatar preset
 
   const statusText = !online
@@ -2004,12 +2060,17 @@ function PrimaryChatPane({
       : liveEnded
         ? '观察已结束（不断连 Agent）'
         : live
-          ? botActivityText(activity, t)
+          ? awaitingAnswer ?? botActivityText(activity, t)
           : '正在建立观察…';
 
   function openInspector(tab: InspectorTab) {
     setInspectorTab((cur) => (cur === tab ? null : tab));
   }
+
+  const inspectorPage = inspectorPages.find(page => page.id === inspectorTab);
+  const settingsTab = inspectorTab === 'profile' || inspectorTab === 'raw' || inspectorTab === 'shower' ? null : inspectorTab;
+  const inspectorTitle = inspectorPage?.label ?? (inspectorTab === 'raw' ? '诊断与原始记录' : '虚拟桌面');
+  const example = '帮我梳理今天的待办事项。';
 
   return (
     <div className="chat-stage" ref={stageRef}>
@@ -2020,7 +2081,10 @@ function PrimaryChatPane({
           type="button"
           className="chat-header-pill"
           onClick={() => openInspector('profile')}
-          title="打开 Bot 工作台（Ctrl+.）"
+          aria-label={`打开${bot.role}的智能体设置`}
+          aria-haspopup="dialog"
+          aria-expanded={Boolean(inspectorPage)}
+          title="智能体设置（Ctrl+.）"
         >
           <GrokBotAvatar
             botKey={botAvatarKey(bot)}
@@ -2046,6 +2110,7 @@ function PrimaryChatPane({
             title={statusText}
             aria-label={statusText}
           />
+          <Settings className="chat-header-settings-icon" size={15} aria-hidden="true" />
         </button>
 
         <div className="chat-header-actions">
@@ -2095,24 +2160,20 @@ function PrimaryChatPane({
           >
             <Monitor size={15} /> 桌面
           </button>
-          <button
-            type="button"
-            className={`secondary-button chat-action-pill${inspectorTab === 'settings' ? ' active' : ''}`}
-            onClick={() => openInspector('settings')}
-            title="人设与能力（SOUL / 模型 / 插件）"
-          >
-            人设与能力
-          </button>
           {canStop || stopping ? (
             <button
+              ref={stopButtonRef}
               type="button"
               className={`secondary-button chat-action-pill stop-pill${stopping ? ' is-stopping' : ''}`}
-              onClick={() => void stopTask()}
+              onClick={() => {
+                if (requiresStopConfirmation) setConfirmedStopTarget(stopTarget);
+                else void stopTask();
+              }}
               disabled={stopDisabled}
-              title="停止此 Bot（取消排队与进行中的工作）"
-              aria-label="停止此 Bot"
+              title="停止此智能体的排队和进行中任务，包括其他会话"
             >
-              <Square size={14} /> {stopping ? '正在停止…' : '停止此 Bot'}
+              <Square size={14} /> {stopping ? '正在停止…' : '停止任务'}
+              <small>含排队和其他会话</small>
             </button>
           ) : null}
           <div className="chat-more-wrap" ref={moreMenuRef}>
@@ -2139,7 +2200,7 @@ function PrimaryChatPane({
                       onOpenPrivateChats(bot);
                     }}
                   >
-                    <MessageSquare size={14} /> 查看私聊
+                    <MessageSquare size={14} /> 查看智能体间通信
                   </button>
                 ) : null}
                 <button
@@ -2157,9 +2218,9 @@ function PrimaryChatPane({
                     role="menuitem"
                     disabled={!online || manageBusy || isPrimary}
                     title={isPrimary ? '主 Bot 不可归档，请先切换主 Bot' : '归档此 Bot（14 天后自动删除）'}
-                    onClick={() => { setMoreMenuOpen(false); void handleArchive(); }}
+                    onClick={() => { setMoreMenuOpen(false); onRequestArchive(); }}
                   >
-                    <Archive size={14} /> {manageAction === 'archive' ? '归档中…' : '归档智能体'}
+                    <Archive size={14} /> 归档智能体
                   </button>
                 ) : (
                   <button
@@ -2172,23 +2233,7 @@ function PrimaryChatPane({
                   </button>
                 )}
                 <button type="button" role="menuitem" onClick={() => { setMoreMenuOpen(false); openInspector('raw'); }}>
-                  <History size={14} /> 原始历史与对账
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  disabled={disabled}
-                  onClick={() => { setMoreMenuOpen(false); drafts.editText('/clear'); }}
-                >
-                  <Eraser size={14} /> /clear 清空当前对话
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  disabled={disabled}
-                  onClick={() => { setMoreMenuOpen(false); drafts.editText('/compact'); }}
-                >
-                  <Shrink size={14} /> /compact 压缩上下文
+                  <History size={14} /> 诊断与原始记录
                 </button>
                 <button
                   type="button"
@@ -2205,6 +2250,8 @@ function PrimaryChatPane({
           </div>
         </div>
       </header>
+
+      {awaitingAnswer ? <p className="chat-awaiting-answer" role="status">{awaitingAnswer}</p> : null}
 
       {confirmDelete && !isPrimary ? (
         <div className="confirm-delete-banner" role="alert">
@@ -2260,7 +2307,7 @@ function PrimaryChatPane({
           <button type="button" onClick={() => setWatchTick((t) => t + 1)}>重新观察</button>
         </div>
       ) : null}
-      {!online ? (
+      {!online && !centerInterrupted ? (
         <div className="status status-offline-bar" role="status">
           <span>
             {identity
@@ -2275,17 +2322,22 @@ function PrimaryChatPane({
         live={live}
         bot={bot}
         activity={activity}
+        awaitingAnswer={Boolean(awaitingAnswer)}
         avatarKey={botAvatarKey(bot)}
         devicePlatform={devicePlatform}
         search={chatSearch}
-        onVisibleAssistantTextEntryIds={markViewedBoardResult}
+        boardResultId={boardResultId}
+        onViewedResult={onViewedResult}
+        questionnaireRequestId={transcriptActive && live?.busy &&
+          activity.phase !== 'stopping' && activity.phase !== 'interrupting' ? questionnaireRequestId : undefined}
+        onQuestionnaireFocused={onQuestionnaireFocused}
         archived={isArchived}
         scopeKey={toolScopeKey}
         disabled={!online}
         onSubmitQuestionnaire={submitQuestionnaire}
         onSubmitVaultUnlock={submitVaultUnlock}
         attachmentFetcher={attachmentFetcher}
-        loading={rawLoading}
+        loading={online && rawLoading}
         error={online ? (rawError || liveError) : null}
         hasMore={false}
         onLoadMore={() => void loadRaw()}
@@ -2295,21 +2347,17 @@ function PrimaryChatPane({
           void loadRaw();
         }}
         emptyActions={
-          <>
-            <button type="button" className="secondary-button" onClick={() => openInspector('profile')}>
-              <Palette size={15} aria-hidden="true" /> 定制形象与资料
-            </button>
-            <button type="button" className="secondary-button" onClick={() => openInspector('settings')}>
-              <Sparkles size={15} aria-hidden="true" /> 配置灵魂与模型
-            </button>
-            <button type="button" className="secondary-button" onClick={() => openInspector('shower')}>
-              <Monitor size={15} aria-hidden="true" /> 打开虚拟桌面
-            </button>
-          </>
+          !isArchived && !drafts.text && <button
+            type="button"
+            className="secondary-button"
+            disabled={disabled || !drafts.key}
+            onClick={() => { onChangeText(example); composerRef.current?.focus(); }}
+          >{example}</button>
         }
       />
 
       <Composer
+        textareaRef={composerRef}
         text={drafts.text}
         onChangeText={onChangeText}
         files={drafts.files}
@@ -2340,10 +2388,7 @@ function PrimaryChatPane({
         }
         disabled={disabled}
         onRetryDraft={drafts.retrySave}
-        attempt={drafts.attempt ? {
-          ...drafts.attempt,
-          businessId: drafts.attempt.input.kind === 'primary' ? drafts.attempt.input.requestId : drafts.attempt.input.messageId,
-        } : null}
+        attempt={drafts.attempt}
         recOutcome={recOutcome}
         onReconcile={queryPending}
         onReleaseNotSent={releaseNotSent}
@@ -2352,8 +2397,35 @@ function PrimaryChatPane({
         turnAdmission={turnAdmission}
         onRetryTurnAdmission={() => void retryTurnAdmission()}
         onInsertSlash={(cmd) => drafts.editText(cmd)}
+        onOpenSendRecord={openSendRecord}
       />
       </div>
+
+      <Dialog.Root open={stopConfirmOpen} onOpenChange={open => {
+        if (!open) setConfirmedStopTarget(null);
+      }}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="desktop-dialog-overlay" />
+          <Dialog.Content className="desktop-dialog confirm-action-dialog" onCloseAutoFocus={event => {
+            event.preventDefault();
+            if (stopButtonRef.current && !stopButtonRef.current.disabled) stopButtonRef.current.focus();
+            else stageRef.current?.querySelector<HTMLButtonElement>('.chat-header-pill')?.focus();
+          }}>
+            <div className="desktop-dialog-head"><Dialog.Title>停止智能体任务</Dialog.Title></div>
+            <div className="confirm-action-body">
+              <Dialog.Description>停止「{bot.role}」的所有进行中和排队任务，包括其他会话和后台任务。</Dialog.Description>
+              <div className="form-actions">
+                <Dialog.Close asChild><button type="button" className="secondary-button">取消</button></Dialog.Close>
+                <button type="button" className="primary-button danger-button" onClick={() => {
+                  if (!stopConfirmOpen) return;
+                  setConfirmedStopTarget(null);
+                  void stopTask();
+                }}>确认停止</button>
+              </div>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
       <Dialog.Root
         open={inspectorTab !== null}
@@ -2377,29 +2449,18 @@ function PrimaryChatPane({
               stageRef.current?.querySelector<HTMLButtonElement>('.chat-header-pill')?.focus();
             }}
           >
-            <Dialog.Title className="sr-only">Bot 工作台</Dialog.Title>
             <div className="inspector-head">
-              <div className="pill-tabs" role="tablist" aria-label="工作台页签">
-                {(
-                  [
-                    { key: 'profile', label: '资料' },
-                    { key: 'settings', label: '设置' },
-                    { key: 'raw', label: '原始历史' },
-                    { key: 'shower', label: '桌面' },
-                  ] as const
-                ).map((t) => (
-                  <button
-                    key={t.key}
-                    type="button"
-                    role="tab"
-                    aria-selected={inspectorTab === t.key}
-                    className={inspectorTab === t.key ? 'active' : ''}
-                    onClick={() => setInspectorTab(t.key)}
-                  >
-                    {t.label}
-                  </button>
-                ))}
-              </div>
+              <Dialog.Title className="inspector-title">{bot.role} · {inspectorTitle}</Dialog.Title>
+              {inspectorPage ? <select
+                aria-label="智能体设置项"
+                value={inspectorPage.id}
+                onChange={event => {
+                  const next = inspectorPages.find(page => page.id === event.target.value);
+                  if (next) setInspectorTab(next.id);
+                }}
+              >
+                {inspectorPages.map(page => <option key={page.id} value={page.id}>{page.label}</option>)}
+              </select> : null}
               <button
                 type="button"
                 className="icon-button"
@@ -2413,6 +2474,8 @@ function PrimaryChatPane({
             <div className="inspector-body">
               {inspectorTab === 'profile' ? (
                 <div className="inspector-section">
+                  <p className="metadata inspector-device">设备 · {deviceName}</p>
+                  <BotProfile api={api} centerApi={centerApi} bot={bot} onSaved={onProfileSaved} />
                   <BotAvatarStudio
                     api={api}
                     deviceId={bot.deviceId}
@@ -2423,14 +2486,8 @@ function PrimaryChatPane({
                     isPrimary={isPrimary && !isArchived}
                     onChanged={() => { setAvatarVersion((v) => v + 1); onLiveActivity?.(); }}
                   />
-                  <BotProfile api={api} centerApi={centerApi} bot={bot} onSaved={onProfileSaved} />
-                  <div className="inspector-meta-card">
-                    <div className="metadata">设备：{deviceName}（{bot.deviceId}）</div>
-                    <div className="metadata">botId：{bot.botId}</div>
-                    <div className="metadata">cwd：{bot.cwd}</div>
-                  </div>
-                  <div className="inspector-lifecycle">
-                    <div className="inspector-section-title">生命周期</div>
+                  <details className="inspector-lifecycle bot-form-advanced">
+                    <summary>管理智能体</summary>
                     {isPrimary && !isArchived ? (
                       <p className="hint">主 Bot 不可归档/删除，请先切换主 Bot。</p>
                     ) : null}
@@ -2450,9 +2507,9 @@ function PrimaryChatPane({
                           type="button"
                           className="secondary-button"
                           disabled={!online || manageBusy || isPrimary}
-                          onClick={() => void handleArchive()}
+                          onClick={onRequestArchive}
                         >
-                          {manageAction === 'archive' ? '归档中…' : '归档智能体'}
+                          归档智能体
                         </button>
                       ) : (
                         <button
@@ -2473,16 +2530,16 @@ function PrimaryChatPane({
                         永久删除智能体
                       </button>
                     </div>
-                  </div>
+                  </details>
                 </div>
               ) : null}
-              {inspectorTab === 'settings' ? (
-                <BotSettings api={api} botId={bot.botId} hostLabel={`${deviceName} (${bot.deviceId})`} open onOpenChange={() => { /* 页签由外层管理，内部不再渲染关闭 UI */ }} />
+              {settingsTab ? (
+                <BotSettings api={api} botId={bot.botId} hostLabel={deviceName} hostPlatform={devicePlatform} tab={settingsTab} open />
               ) : null}
               {inspectorTab === 'raw' ? (
                 <RawHistoryPane
                   items={rawItems}
-                  loading={rawLoading}
+                  loading={online && rawLoading}
                   error={rawError}
                   onLoadMore={() => void loadRaw()}
                   hasMore={false}
@@ -2492,6 +2549,8 @@ function PrimaryChatPane({
               ) : null}
               {inspectorTab === 'shower' ? (
                 <ShowerPreview
+                  key={sess}
+                  variant="desktop"
                   call={callShower}
                   target={{ botId: bot.botId }}
                   connected={api.transportConnected && pageActive}
@@ -2528,7 +2587,10 @@ export function BotChats({
   onArchiveBridge,
   boardActive = false,
   workspaceActive = pageActive,
+  centerInterrupted = false,
   onOpenBoardChat,
+  onOpenSendRecords,
+  onOpenArchived,
 }: {
   api: DesktopPanelApi;
   currentDeviceId: string;
@@ -2540,14 +2602,20 @@ export function BotChats({
   onArchiveBridge?: (bridge: BotChatsArchiveBridge | null) => void;
   boardActive?: boolean;
   workspaceActive?: boolean;
+  centerInterrupted?: boolean;
   onOpenBoardChat?: () => void;
+  onOpenSendRecords?: (target?: SendRecordsTarget) => void;
+  onOpenArchived?: () => void;
 }) {
   const identity = api.identity;
   const sess = sessionKey(identity);
   const online = api.transportConnected;
   const profileKey = identity ? `${identity.profileId}|${identity.kind}` : '';
   const profileRef = useRef(profileKey);
+  const profileReady = profileRef.current === profileKey;
   const initialCache = useMemo(() => readDirectoryCache(profileKey), [profileKey]);
+  const lastChat = useMemo(() => readLastChat(profileKey), [profileKey]);
+  const restoreRef = useRef({ profileKey: '', restored: false });
   const {
     pinnedKeys,
     isPinned,
@@ -2559,8 +2627,8 @@ export function BotChats({
 
   const [bots, setBots] = useState<BotDirectoryEntry[]>(() => initialCache?.bots ?? []);
   const [devices, setDevices] = useState<DevicesDirectoryItem[]>(() => initialCache?.devices ?? []);
-  const boardBots = profileRef.current === profileKey ? bots : initialCache?.bots ?? [];
-  const boardDevices = profileRef.current === profileKey ? devices : initialCache?.devices ?? [];
+  const boardBots = profileReady ? bots : initialCache?.bots ?? [];
+  const boardDevices = profileReady ? devices : initialCache?.devices ?? [];
   const boardTargets: BotBoardTarget[] = identity ? boardBots.filter(bot => !bot.archivedAt).map(bot => {
     const reachable = identity.kind !== 'local' || identity.targetDeviceId === bot.deviceId;
     const targetIdentity = reachable ? api.identityForTarget(bot.deviceId) : identity;
@@ -2580,7 +2648,12 @@ export function BotChats({
   const board = useBotBoard(boardTargets, pageActive && workspaceActive && boardActive);
   const [botsError, setBotsError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<boolean>(() => Boolean(initialCache));
-  const [selected, setSelected] = useState<{ deviceId: string; botId: string } | null>(null);
+  const [selected, setSelected] = useState<{
+    deviceId: string;
+    botId: string;
+    focusComposer?: boolean;
+    questionnaire?: { requestId: string; conversationId: string; session: string };
+  } | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [createTargetDeviceId, setCreateTargetDeviceId] = useState('');
   const [loading, setLoading] = useState(false);
@@ -2619,13 +2692,28 @@ export function BotChats({
   const [deletingBotKey, setDeletingBotKey] = useState<string | null>(null);
   const [deleteBotError, setDeleteBotError] = useState<string | null>(null);
   const [confirmDeleteGroup, setConfirmDeleteGroup] = useState<ConfirmDeleteGroupState | null>(null);
+  const [archiveTarget, setArchiveTarget] = useState<BotDirectoryEntry | null>(null);
+  const [archiving, setArchiving] = useState(false);
+  const archiveFlight = useRef(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const listMoreRef = useRef<HTMLDetailsElement>(null);
   const refreshQueued = useRef(false);
   const inFlight = useRef(false);
   const seq = useRef(0);
   const sessionRef = useRef(sess);
   sessionRef.current = sess;
   const lastLiveRefreshRef = useRef(0);
+  const onQuestionnaireFocused = useCallback((id: string) => {
+    setSelected(current => current?.questionnaire?.requestId === id && current.questionnaire.session === sess
+      ? { ...current, questionnaire: undefined }
+      : current);
+  }, [sess]);
+
+  useEffect(() => {
+    setSelected(current => current?.questionnaire && (stage || current.questionnaire.session !== sess)
+      ? { ...current, questionnaire: undefined }
+      : current);
+  }, [stage, sess]);
 
   const loadBots = useCallback(async () => {
     if (!identity || !api.transportConnected || !pageActive || !visible || inFlight.current) return;
@@ -2709,7 +2797,7 @@ export function BotChats({
   }, [triggerLoadBots]);
 
   useEffect(() => {
-    if (loaded && profileKey) {
+    if (loaded && profileKey && profileRef.current === profileKey) {
       writeDirectoryCache(profileKey, bots, devices);
     }
   }, [loaded, profileKey, bots, devices]);
@@ -2736,6 +2824,7 @@ export function BotChats({
   useEffect(() => {
     if (profileRef.current !== profileKey) {
       profileRef.current = profileKey;
+      restoreRef.current = { profileKey, restored: false };
       const cached = readDirectoryCache(profileKey);
       setBots(cached?.bots ?? []);
       setDevices(cached?.devices ?? []);
@@ -2752,6 +2841,10 @@ export function BotChats({
       setConfirmDeleteBot(null);
       setDeleteBotError(null);
       setConfirmDeleteGroup(null);
+      setArchiveTarget(null);
+      setShowCreate(false);
+      setDeviceFilter('all');
+      setQuery('');
     }
     seq.current += 1;
     setLoading(false);
@@ -2768,8 +2861,9 @@ export function BotChats({
 
   // Ctrl/Cmd+K 聚焦搜索 · Ctrl/Cmd+B 折叠列表 · Ctrl/Cmd+F 会话内搜索 · Ctrl/Cmd+. 工作台
   useEffect(() => {
+    if (!workspaceActive || boardActive) return;
     function onKey(e: KeyboardEvent) {
-      if (!(e.ctrlKey || e.metaKey)) return;
+      if (e.defaultPrevented || !(e.ctrlKey || e.metaKey)) return;
       const k = e.key.toLowerCase();
       if (k === 'k') {
         e.preventDefault();
@@ -2778,17 +2872,17 @@ export function BotChats({
       } else if (k === 'b') {
         e.preventDefault();
         setListCollapsed((v) => !v);
-      } else if (k === 'f') {
+      } else if (k === 'f' && !stage && selected) {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent('botchats:chat-search'));
-      } else if (e.key === '.') {
+      } else if (e.key === '.' && !stage && selected) {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent('botchats:toggle-inspector'));
       }
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [workspaceActive, boardActive, stage, selected]);
 
   const missingPrimaryDevices = useMemo(
     () =>
@@ -2836,9 +2930,11 @@ export function BotChats({
   // 群聊行只读来源：只枚举真实有 Bot 的 Host 设备（目录可能含无 Bot 的 center 节点，
   // 对其调用 listScopeStates 会报错）；冻结 targetApi + identityForTarget，离线目标自然不可写。
   const scopeSources = useMemo(() => {
+    if (!identity || !profileReady) return [];
     const onlineByDevice = new Map(devices.map((d) => [d.deviceId, d.online]));
     const nameByDevice = new Map(devices.map((d) => [d.deviceId, d.displayName || '未命名设备']));
-    const hostDeviceIds = [...new Set(bots.map((b) => b.deviceId))];
+    const hostDeviceIds = [...new Set(bots.map((b) => b.deviceId))]
+      .filter(deviceId => identity.kind !== 'local' || deviceId === identity.targetDeviceId);
     return hostDeviceIds.map((deviceId) => ({
       key: deviceId,
       label: nameByDevice.get(deviceId) ?? deviceId,
@@ -2846,13 +2942,67 @@ export function BotChats({
       identity: api.identityForTarget(deviceId),
       bots,
     }));
-  }, [api, sess, devices, bots]);
+  }, [api, identity, sess, profileReady, devices, bots]);
   const {
     items: groupItems,
     loading: groupsLoading,
+    loaded: groupsLoaded,
     error: groupsError,
     refresh: refreshGroups,
   } = useScopeConversations(scopeSources, pageActive && !boardActive, 'room');
+  const hasOnlineGroupSource = scopeSources.some(source => source.api.transportConnected);
+
+  useEffect(() => {
+    if (!profileKey || !profileReady || !workspaceActive || boardActive || !loaded || initialBotId) return;
+    if (restoreRef.current.profileKey !== profileKey) {
+      restoreRef.current = { profileKey, restored: false };
+    }
+    const restore = restoreRef.current;
+    if (restore.restored) return;
+    if (selected || stage) {
+      restore.restored = true;
+      return;
+    }
+    if (lastChat?.kind === 'scope') {
+      const group = groupItems.find(item => item.scope.scope.scopeId === lastChat.id &&
+        item.identity.profileId === identity?.profileId && item.identity.kind === identity?.kind);
+      if (group) {
+        restore.restored = true;
+        setStage({ kind: 'scope', scopeId: lastChat.id, deviceId: group.identity.targetDeviceId });
+        return;
+      }
+      if (!online || (hasOnlineGroupSource && (!groupsLoaded || groupsLoading || groupsError))) return;
+    }
+    const savedBot = lastChat?.kind === 'bot' && (identity?.kind !== 'local' || identity.targetDeviceId === lastChat.deviceId)
+      ? bots.find(bot => bot.botId === lastChat.id && bot.deviceId === lastChat.deviceId && !bot.archivedAt)
+      : undefined;
+    const onlinePrimary = (bot: BotDirectoryEntry) => online && bot.online && bot.isPrimary && !bot.archivedAt;
+    const bot = savedBot ?? bots.find(bot => onlinePrimary(bot) && bot.deviceId === currentDeviceId) ?? bots.find(onlinePrimary);
+    if (!bot) return;
+    restore.restored = true;
+    setSelected({ deviceId: bot.deviceId, botId: bot.botId, focusComposer: true });
+  }, [profileKey, profileReady, identity, workspaceActive, boardActive, loaded, initialBotId, selected,
+    stage, lastChat, groupItems, groupsLoaded, groupsLoading, groupsError, online, hasOnlineGroupSource, bots, currentDeviceId]);
+
+  useEffect(() => {
+    if (!profileKey || !profileReady) return;
+    let selection: LastChat | undefined;
+    if (stage?.kind === 'scope' && groupItems.some(item => item.scope.scope.scopeId === stage.scopeId &&
+        item.identity.profileId === identity?.profileId && item.identity.kind === identity?.kind)) {
+      selection = { kind: 'scope', deviceId: stage.deviceId, id: stage.scopeId };
+    } else if (!stage && selected && bots.some(bot => bot.deviceId === selected.deviceId &&
+        bot.botId === selected.botId && !bot.archivedAt)) {
+      selection = { kind: 'bot', deviceId: selected.deviceId, id: selected.botId };
+    }
+    if (!selection) return;
+    try {
+      const key = `desktop-last-chat:v1:${profileKey}`;
+      const value = JSON.stringify(selection);
+      if (localStorage.getItem(key) !== value) localStorage.setItem(key, value);
+    } catch {
+      // 连接仍可使用当前选中的会话。
+    }
+  }, [profileKey, profileReady, identity, stage, selected, bots, groupItems]);
 
   /** 群聊实际所在 Host：identity.targetDeviceId 是稳定字符串，不依赖 targetApi 对象引用。 */
   function groupSourceOf(g: (typeof groupItems)[number]) {
@@ -2946,12 +3096,12 @@ export function BotChats({
     [pinnedKeys, reorderPins],
   );
 
-  const selectedBot = selected
+  const selectedBot = profileReady && selected
     ? bots.find((b) => b.deviceId === selected.deviceId && b.botId === selected.botId) ?? null
     : null;
   const scopedApi = useMemo(
     () =>
-      identity && selectedBot
+      identity && selectedBot && (identity.kind !== 'local' || identity.targetDeviceId === selectedBot.deviceId)
         ? targetApi(api, selectedBot.deviceId, selectedBot.online)
         : null,
     [api, sess, selectedBot?.deviceId, selectedBot?.online],
@@ -2961,8 +3111,9 @@ export function BotChats({
    *  都换引用，依赖它会反复给 Scopes 传新 api 对象导致历史清空/重置）。 */
   const stageOnline = stage ? deviceOnlineOf(stage.deviceId) : false;
   const stageApi = useMemo(
-    () => (stage ? targetApi(api, stage.deviceId, stageOnline) : null),
-    [api, sess, stage?.deviceId, stageOnline],
+    () => (identity && profileReady && stage && (identity.kind !== 'local' || identity.targetDeviceId === stage.deviceId)
+      ? targetApi(api, stage.deviceId, stageOnline) : null),
+    [api, identity, profileReady, sess, stage?.deviceId, stageOnline],
   );
   // Scopes 目录：bots 已含远端与归档记录，透传 deviceName/hostLabel/platform/description，
   // 跨设备群成员与 DM 成员/作者名均显示自然设备名，不回退 UUID。
@@ -3081,11 +3232,11 @@ export function BotChats({
   // 并切到该 Bot 所在设备筛选；同 botId 跨设备时以 deviceId 为准（身份可核对）。
   const initialNavRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!initialBotId) {
+    if (!initialBotId || !profileReady) {
       initialNavRef.current = null;
       return;
     }
-    const key = `${initialDeviceId ?? ''}:${initialBotId}`;
+    const key = `${profileKey}:${initialDeviceId ?? ''}:${initialBotId}`;
     if (initialNavRef.current === key) return;
     const target = bots.find(
       (b) =>
@@ -3098,7 +3249,7 @@ export function BotChats({
     setSelected({ deviceId: target.deviceId, botId: target.botId });
     setRoomSettingsOpen(false);
     setStage(null);
-  }, [initialBotId, initialDeviceId, bots]);
+  }, [initialBotId, initialDeviceId, profileReady, profileKey, bots]);
 
   const archiveBotEntry = useCallback(
     async (targetBot: BotDirectoryEntry) => {
@@ -3226,6 +3377,29 @@ export function BotChats({
     setSelected({ deviceId: targetBot.deviceId, botId: targetBot.botId });
   }, []);
 
+  const conversationName = useCallback((target: SendRecordsTarget): string | undefined => {
+    if (!identity || !profileReady) return undefined;
+    if (identity.kind === 'local' && identity.targetDeviceId !== target.deviceId) return undefined;
+    if (target.botId) return bots.find(bot => bot.botId === target.botId && bot.deviceId === target.deviceId)?.role;
+    return groupItems.find(group => group.scope.scope.scopeId === target.scopeId &&
+      group.identity.profileId === identity.profileId && group.identity.kind === identity.kind)?.title;
+  }, [identity, profileReady, bots, groupItems]);
+
+  const openConversation = useCallback((target: SendRecordsTarget) => {
+    if (!conversationName(target)) return;
+    setDeviceFilter('all');
+    setQuery('');
+    setRoomSettingsOpen(false);
+    if (target.botId) {
+      setSelected({ deviceId: target.deviceId, botId: target.botId });
+      setStage(null);
+    } else if (target.scopeId) {
+      const group = groupItems.find(item => item.scope.scope.scopeId === target.scopeId &&
+        item.identity.profileId === identity?.profileId && item.identity.kind === identity?.kind);
+      if (group) setStage({ kind: 'scope', scopeId: target.scopeId, deviceId: group.identity.targetDeviceId });
+    }
+  }, [conversationName, groupItems, identity]);
+
   const archiveBridge = useMemo<BotChatsArchiveBridge>(
     () => ({
       archivedBots: allArchivedBots,
@@ -3237,6 +3411,8 @@ export function BotChats({
       openBotHistory: openArchivedBotHistory,
       unarchiveBot: unarchiveBotEntry,
       deleteBot: deleteBotEntry,
+      conversationName,
+      openConversation,
     }),
     [
       allArchivedBots,
@@ -3248,12 +3424,14 @@ export function BotChats({
       openArchivedBotHistory,
       unarchiveBotEntry,
       deleteBotEntry,
+      conversationName,
+      openConversation,
     ],
   );
 
   useEffect(() => {
-    onArchiveBridge?.(archiveBridge);
-  }, [onArchiveBridge, archiveBridge]);
+    onArchiveBridge?.(profileReady ? archiveBridge : null);
+  }, [onArchiveBridge, archiveBridge, profileReady]);
 
   useEffect(() => {
     return () => {
@@ -3274,6 +3452,22 @@ export function BotChats({
       setDeleteBotError(`永久删除失败：${errText(e)}`);
     } finally {
       setDeletingBotKey(null);
+    }
+  }
+
+  async function handleConfirmArchive() {
+    if (!archiveTarget || !online || archiveFlight.current) return;
+    const session = sessionRef.current;
+    archiveFlight.current = true;
+    setArchiving(true);
+    try {
+      await archiveBotEntry(archiveTarget);
+    } catch {
+      // archiveBotEntry 已保留可见错误。
+    } finally {
+      archiveFlight.current = false;
+      setArchiving(false);
+      if (sessionRef.current === session) setArchiveTarget(null);
     }
   }
 
@@ -3505,7 +3699,8 @@ export function BotChats({
         selected={isSelected}
         pinned={pinned}
         badge="群聊"
-        meta={shortDeviceName(source.label)}
+        meta={devices.length > 1 || groupItems.some(other => other.key !== g.key && other.title === g.title)
+          ? shortDeviceName(source.label) : undefined}
         avatar={
           <ConversationGroupAvatar members={g.scope.scope.members} bots={bots} size={46} />
         }
@@ -3570,7 +3765,11 @@ export function BotChats({
         timestamp={activityIso}
         selected={isSelected}
         pinned={pinned}
-        meta={`${shortDeviceName(deviceNameOf(b.deviceId))} · ${isBotOnline ? '在线' : '离线'}`}
+        meta={[
+          devices.length > 1 || bots.some(other => other !== b && !other.archivedAt && other.role === b.role)
+            ? shortDeviceName(deviceNameOf(b.deviceId)) : '',
+          !isBotOnline ? '离线' : '',
+        ].filter(Boolean).join(' · ') || undefined}
         avatar={
           <GrokBotAvatar
             botKey={botAvatarKey(b)}
@@ -3700,7 +3899,7 @@ export function BotChats({
     }
     items.push({
       key: 'view-dm',
-      label: '查看私聊',
+      label: '查看智能体间通信',
       icon: <MessageSquare size={15} />,
       onSelect: () => {
         setMenu(null);
@@ -3716,7 +3915,7 @@ export function BotChats({
         disabled: !botOnline,
         onSelect: () => {
           setMenu(null);
-          void archiveBotEntry(b).catch(() => {});
+          setArchiveTarget(b);
         },
       });
     }
@@ -3736,17 +3935,29 @@ export function BotChats({
     }
     return items;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [menu, isPinned, online, resolveRoomApi, togglePin, archiveBotEntry, devices, currentDeviceId]);
+  }, [menu, isPinned, online, resolveRoomApi, togglePin, devices, currentDeviceId]);
+
+  const groupToDissolve = confirmDeleteGroup?.latestScope ?? confirmDeleteGroup?.initialScope;
+  const dissolveDeviceNames = groupToDissolve
+    ? [...new Set(groupToDissolve.scope.members.map(member => member.deviceId))].map(deviceNameOf)
+    : [];
 
   if (boardActive) return <BotBoard
+    variant="desktop"
     targets={boardTargets}
     board={board}
     loading={!loaded || loading}
     error={botsError}
-    onOpen={target => {
+    onOpen={(target, questionnaire) => {
       const bot = boardBots.find(bot => botBoardKey(profileKey, bot.deviceId, bot.botId) === target.key);
       if (!bot) return;
-      setSelected({ deviceId: bot.deviceId, botId: bot.botId });
+      setSelected({
+        deviceId: bot.deviceId,
+        botId: bot.botId,
+        questionnaire: questionnaire?.conversationId === bot.primaryConversationId
+          ? { ...questionnaire, session: sess }
+          : undefined,
+      });
       setDeviceFilter('all');
       setStage(null);
       setRoomSettingsOpen(false);
@@ -3786,9 +3997,15 @@ export function BotChats({
               />
               <span className="hub-hero-info">
                 <span className="hub-hero-name">{b.role}</span>
-                <span className={`hub-hero-node${b.online && online ? '' : ' offline'}`}>
-                  {b.online && online ? deviceNameOf(b.deviceId) : `${deviceNameOf(b.deviceId)} · 离线`}
-                </span>
+                {devices.length > 1 || bots.some(other => other !== b && !other.archivedAt && other.role === b.role) || !b.online || !online ? (
+                  <span className={`hub-hero-node${b.online && online ? '' : ' offline'}`}>
+                    {[
+                      devices.length > 1 || bots.some(other => other !== b && !other.archivedAt && other.role === b.role)
+                        ? deviceNameOf(b.deviceId) : '',
+                      !b.online || !online ? '离线' : '',
+                    ].filter(Boolean).join(' · ')}
+                  </span>
+                ) : null}
               </span>
             </HeroBotCard>
           ))}
@@ -3837,25 +4054,17 @@ export function BotChats({
         </div>
 
         {devices.length > 1 ? (
-          <div className="hub-device-chips" role="tablist" aria-label="设备筛选">
-            <button
-              type="button"
-              className={deviceFilter === 'all' ? 'chip active' : 'chip'}
-              onClick={() => setDeviceFilter('all')}
-            >
-              全部
-            </button>
-            {devices.map((d) => (
-              <button
-                key={d.deviceId}
-                type="button"
-                className={deviceFilter === d.deviceId ? 'chip active' : 'chip'}
-                onClick={() => setDeviceFilter(d.deviceId)}
-              >
-                {d.displayName || '未命名设备'}
-              </button>
-            ))}
-          </div>
+          <label className="hub-device-filter">
+            <span className="sr-only">按设备筛选</span>
+            <select value={deviceFilter} onChange={event => setDeviceFilter(event.target.value)}>
+              <option value="all">所有设备</option>
+              {devices.map(device => (
+                <option key={device.deviceId} value={device.deviceId}>
+                  {device.displayName || '未命名设备'}{device.online && online ? '' : ' · 离线'}
+                </option>
+              ))}
+            </select>
+          </label>
         ) : null}
 
         {botsError ? (
@@ -3881,7 +4090,7 @@ export function BotChats({
             <button type="button" onClick={() => setBotActionError(null)}>关闭</button>
           </div>
         ) : null}
-        {!online ? <div className="status">离线：显示最后读取的 Bot 列表。</div> : null}
+        {!online && !centerInterrupted ? <div className="status">离线：显示最后读取的 Bot 列表。</div> : null}
 
         <div className="hub-list-scroll">
           {loading && !loaded ? (
@@ -3890,7 +4099,7 @@ export function BotChats({
             <div className="status">目录尚未读取。</div>
           ) : primaryBots.length === 0 && regularBots.length === 0 && groupRows.length === 0 && !botsError ? (
             <div className="empty-state">
-              {query || deviceFilter !== 'all' ? '没有匹配的智能体或群聊。' : '暂无 Bot，点击“新建 Bot”创建。'}
+              {query || deviceFilter !== 'all' ? '没有匹配的智能体或群聊。' : '暂无会话，可以先新建智能体。'}
             </div>
           ) : (
             <>
@@ -3913,28 +4122,35 @@ export function BotChats({
             type="button"
             className="primary-button hub-new-btn"
             onClick={() => {
+              const preferredDevice = [stage?.deviceId, selectedBot?.deviceId, deviceFilter, currentDeviceId]
+                .find(id => onlineDevices.some(device => device.deviceId === id));
+              setCreateTargetDeviceId(preferredDevice ?? onlineDevices[0]?.deviceId ?? '');
               setShowCreate(true);
-              if (missingPrimaryDevices.length > 0) {
-                setCreateTargetDeviceId(missingPrimaryDevices[0].deviceId);
-              }
             }}
             disabled={!identity}
           >
             <Plus size={15} /> 新建智能体
           </button>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={() => {
-              triggerLoadBots();
-              refreshGroups();
-            }}
-            disabled={!online || loading}
-            aria-label="刷新列表"
-            title="刷新列表"
-          >
-            <RefreshCw size={15} />
-          </button>
+          <details className="hub-list-more" ref={listMoreRef} onBlur={event => {
+            if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
+          }}>
+            <summary className="icon-button" aria-label="对话列表更多操作" title="对话列表更多操作"><MoreHorizontal size={16} /></summary>
+            <div className="hub-list-more-actions">
+              {onOpenSendRecords ? <button type="button" onClick={() => {
+                listMoreRef.current?.removeAttribute('open');
+                onOpenSendRecords();
+              }}><History size={15} /> 发送记录</button> : null}
+              {onOpenArchived ? <button type="button" onClick={() => {
+                listMoreRef.current?.removeAttribute('open');
+                onOpenArchived();
+              }}><Archive size={15} /> 已归档智能体</button> : null}
+              <button type="button" disabled={!online || loading} onClick={() => {
+                listMoreRef.current?.removeAttribute('open');
+                triggerLoadBots();
+                void refreshGroups();
+              }}><RefreshCw size={15} /> 刷新列表</button>
+            </div>
+          </details>
         </div>
       </aside>
 
@@ -3942,10 +4158,11 @@ export function BotChats({
         {stage?.kind === 'dm' && stageApi ? (
           <div className="scope-main-stage">
             <Scopes
-              key={`dm:${sess}:${stage.member.deviceId}:${stage.member.botId}`}
+              key={JSON.stringify(['dm', profileKey, stage.member.deviceId, stage.member.botId])}
               api={stageApi}
               pageActive={pageActive}
               readOnly
+              variant="desktop"
               scopeKind="dm"
               participant={stage.member}
               participantName={stage.name}
@@ -3964,11 +4181,13 @@ export function BotChats({
         ) : stage?.kind === 'scope' && stageApi ? (
           <div className="scope-main-stage">
             <Scopes
-              key={`scope:${sess}:${stage.deviceId}:${stage.scopeId}`}
+              key={JSON.stringify(['scope', profileKey, stage.deviceId, stage.scopeId])}
               api={stageApi}
               pageActive={pageActive}
               scopeKind="room"
+              variant="desktop"
               detailOnly
+              onOpenSendRecords={onOpenSendRecords}
               initialScopeId={stage.scopeId}
               resolveRoomApi={resolveRoomApi}
               memberCandidates={scopeMemberCandidates}
@@ -3998,12 +4217,20 @@ export function BotChats({
         {scopedApi && selectedBot ? (
           <div className={stage ? 'chat-stage-host stage-hidden' : 'chat-stage-host'}>
           <PrimaryChatPane
-            key={`${sess}:${selectedBot.deviceId}:${selectedBot.botId}`}
+            key={JSON.stringify([profileKey, selectedBot.deviceId, selectedBot.botId, selectedBot.primaryConversationId])}
             api={scopedApi}
             centerApi={api}
             bot={selectedBot}
             deviceName={selectedDeviceName}
             devicePlatform={selectedDevicePlatform}
+            focusComposer={selected?.focusComposer}
+            onOpenSendRecords={onOpenSendRecords}
+            onRequestArchive={() => setArchiveTarget(selectedBot)}
+            questionnaireRequestId={selected?.questionnaire?.session === sess &&
+              selected.questionnaire.conversationId === selectedBot.primaryConversationId
+              ? selected.questionnaire.requestId : undefined}
+            onQuestionnaireFocused={onQuestionnaireFocused}
+            centerInterrupted={centerInterrupted}
             inspectorRequest={
               inspectorRequest &&
               inspectorRequest.deviceId === selectedBot.deviceId &&
@@ -4053,6 +4280,7 @@ export function BotChats({
             onOpenPrivateChats={(bot) =>
               openDmList({ deviceId: bot.deviceId, botId: bot.botId })
             }
+            transcriptVisible={!showCreate && !confirmDeleteBot && !confirmDeleteGroup && !archiveTarget}
             pageActive={pageActive && workspaceActive && !stage}
           />
           </div>
@@ -4108,6 +4336,26 @@ export function BotChats({
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
+      <Dialog.Root open={archiveTarget !== null} onOpenChange={open => {
+        if (!open && !archiveFlight.current) setArchiveTarget(null);
+      }}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="desktop-dialog-overlay" />
+          <Dialog.Content className="desktop-dialog confirm-action-dialog">
+            <div className="desktop-dialog-head"><Dialog.Title>归档智能体</Dialog.Title></div>
+            <div className="confirm-action-body">
+              <Dialog.Description>归档「{archiveTarget?.role}」后，对话转为只读。归档满 {ARCHIVE_RETENTION_DAYS} 天会自动清理，期间可在已归档智能体里恢复。</Dialog.Description>
+              <div className="form-actions">
+                <Dialog.Close asChild><button type="button" className="secondary-button" disabled={archiving}>取消</button></Dialog.Close>
+                <button type="button" className="primary-button" onClick={() => void handleConfirmArchive()} disabled={archiving || !online}>
+                  {archiving ? '正在归档…' : '确认归档'}
+                </button>
+              </div>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
       <Dialog.Root
         open={confirmDeleteBot !== null}
         onOpenChange={(open) => {
@@ -4197,7 +4445,9 @@ export function BotChats({
             {confirmDeleteGroup ? (
               <div className="confirm-action-body">
                 <p>
-                  确定要解散并删除群聊「{confirmDeleteGroup.title}」吗？解散后所有设备上的该群聊及历史消息都将被永久删除，此操作不可撤销。
+                  确定要解散并删除群聊「{confirmDeleteGroup.title}」吗？
+                  {dissolveDeviceNames.length ? `涉及 ${dissolveDeviceNames.length} 台参与设备（${dissolveDeviceNames.join('、')}）。` : ''}
+                  群聊历史和成员关系会被永久删除。
                 </p>
                 {confirmDeleteGroup.loadingLatest ? (
                   <div className="status">正在从权威节点读取最新群状态…</div>

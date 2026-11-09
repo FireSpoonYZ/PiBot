@@ -351,9 +351,7 @@
   background: color-mix(in srgb, var(--shower-danger) 10%, var(--shower-surface-2));
 }
 
-/* ————— 全窗口剧场模式（Theater Full View） —————
- * portal 到 <body>，position:fixed 全窗深色舞台；Escape 只退出剧场（走 React 合成
- * keydown，不会到达输入框，因此绝不会把 Escape 误发给远端）；关闭/返回始终可达。 */
+/* 全屏舞台经 portal 挂到 body，返回和关闭按钮始终可达。 */
 
 .desktop-shell .shower-theater,
 .remote-client .shower-theater,
@@ -558,3 +556,38 @@
 
 /* 舞台作为初始聚焦点（tabIndex=-1），不显示焦点环。 */
 .shower-theater-stage:focus { outline: none; }
+
+.shower-desktop .shower-controls { align-items: center; }
+.shower-desktop .shower-controls .hint { margin: 0; }
+.shower-desktop .shower-controls:empty,
+.shower-desktop .shower-theater-alerts:empty { display: none; }
+.shower-desktop .shower-diagnostics > summary {
+  width: fit-content;
+  font-size: 12px;
+  color: var(--shower-muted);
+  cursor: pointer;
+}
+.shower-desktop .shower-diagnostics[open] { flex-basis: 100%; }
+.shower-desktop .shower-diagnostics-body {
+  display: grid;
+  justify-items: start;
+  gap: 5px;
+  padding: 8px 0 0;
+  color: var(--shower-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.shower-theater.shower-desktop .shower-diagnostics-body {
+  max-height: min(160px, 25vh);
+  overflow: auto;
+}
+.shower-theater.shower-desktop .shower-input { flex: 1 1 220px; }
+.shower-theater.shower-desktop .shower-input-label { color: var(--shower-muted); font-size: 11px; }
+.shower-desktop .shower-confirm-end {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--shower-text);
+}
+.shower-desktop .shower-confirm-end p { margin: 0; font-size: 12px; }

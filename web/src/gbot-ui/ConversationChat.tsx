@@ -77,6 +77,7 @@ export interface ConversationChatHeaderProps {
   readOnly?: boolean;
   onOpenMenu?: () => void;
   onShowMembers?: () => void;
+  membersLabel?: string;
 }
 
 export function ConversationChatHeader({
@@ -87,8 +88,10 @@ export function ConversationChatHeader({
   readOnly = false,
   onOpenMenu,
   onShowMembers,
+  membersLabel,
 }: ConversationChatHeaderProps) {
   const t = useText();
+  const visibleMembersLabel = !onOpenMenu && onShowMembers ? membersLabel : undefined;
   return (
     <header className="conversation-chat-header">
       {onBack ? (
@@ -132,11 +135,11 @@ export function ConversationChatHeader({
       {onOpenMenu || onShowMembers ? (
         <button
           aria-label={onOpenMenu ? t('更多操作', 'More options') : t('查看成员', 'View members')}
-          className="conversation-chat-header__circle"
+          className={visibleMembersLabel ? 'conversation-chat-header__members' : 'conversation-chat-header__circle'}
           onClick={onOpenMenu ?? onShowMembers}
           type="button"
         >
-          <MoreHorizontal aria-hidden="true" size={18} />
+          {visibleMembersLabel ?? <MoreHorizontal aria-hidden="true" size={18} />}
         </button>
       ) : (
         <span aria-hidden="true" className="conversation-chat-header__spacer" />
