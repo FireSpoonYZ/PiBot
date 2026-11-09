@@ -19,7 +19,7 @@ import type {
 import type { BotDirectoryEntry, DevicesDirectoryItem } from '../../../host-core/index.js';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import { PendingPanel } from './PendingPanel';
-import { SettingsPanel } from './SettingsPanel';
+import { SettingsPanel, type DevicesSectionState } from './SettingsPanel';
 import { BotChats, type BotChatsArchiveBridge, type SendRecordsTarget } from './BotChats';
 import {
   CenterGate,
@@ -36,16 +36,6 @@ interface ProfileFormState {
   url: string;
   expectedDeviceId: string;
   deviceId: string;
-}
-
-interface DevicesSectionState {
-  items: DevicesDirectoryItem[];
-  nextCursor: { afterDeviceId: string } | null;
-  error: string | null;
-  busy: boolean;
-  /** 成功读取过目录的时间；仅用于展示，失败/加载中不得冒充为空目录。 */
-  loadedAt: string | null;
-  loaded: boolean;
 }
 
 interface AppState {
@@ -97,6 +87,7 @@ const emptyDevices: DevicesSectionState = {
   busy: false,
   loadedAt: null,
   loaded: false,
+  stale: false,
 };
 
 /** 实际连接状态统一口径：transport 已断开/身份已作废时，缓存的 connected 不得再当在线。
@@ -322,7 +313,7 @@ class App extends Component<AppProps, AppState> {
       void this.loadDevices();
     } else if (prevState.transportConnected && !this.state.transportConnected) {
       this.setState((s) => ({
-        devices: { ...s.devices, busy: false },
+        devices: { ...s.devices, busy: false, stale: s.devices.loaded },
         connectionError: s.identity
           ? '连接已中断：远程操作不可用，目录为只读缓存。'
           : s.connectionError,
@@ -438,6 +429,7 @@ class App extends Component<AppProps, AppState> {
           error: null,
           loaded: true,
           loadedAt: new Date().toISOString(),
+          stale: false,
         },
       });
     } catch (e) {
@@ -449,6 +441,7 @@ class App extends Component<AppProps, AppState> {
           ...s.devices,
           error: err.code === 'IDENTITY_CHANGED' ? null : err.message,
           busy: false,
+          stale: s.devices.stale || (s.devices.loaded && err.code !== 'IDENTITY_CHANGED'),
         },
       }));
     }
@@ -698,7 +691,7 @@ class App extends Component<AppProps, AppState> {
               className="rail-item"
               ref={(el) => { this.settingsButtonRef = el; }}
               onClick={() => this.setState({ settingsOpen: true, settingsPage: 'general' })}
-              title={identity ? '当前：' + phaseLabel : '打开连接与节点设置'}
+              title={identity ? '当前：' + phaseLabel : '打开设置'}
             >
               <span className="rail-icon-wrap">
                 <Settings size={18} aria-hidden />
@@ -758,7 +751,10 @@ class App extends Component<AppProps, AppState> {
         <Dialog.Root open={this.state.settingsOpen} onOpenChange={(open) => this.setState({ settingsOpen: open })}>
           <Dialog.Portal>
             <Dialog.Overlay className="desktop-dialog-overlay settings-dialog-overlay" />
-            <Dialog.Content className="desktop-dialog settings-dialog" onCloseAutoFocus={(e) => { e.preventDefault(); this.settingsButtonRef?.focus(); }}>
+            <Dialog.Content
+              className={'desktop-dialog settings-dialog' + (this.state.settingsPage === 'general' ? ' client-settings-dialog' : '')}
+              onCloseAutoFocus={(e) => { e.preventDefault(); this.settingsButtonRef?.focus(); }}
+            >
               <SettingsPanel
                 profiles={this.state.profiles}
                 profilesError={this.state.profilesError}
@@ -790,6 +786,8 @@ class App extends Component<AppProps, AppState> {
                 onLoadMoreDevices={() => void this.loadMoreDevices()}
                 onRenameDevice={(item, name) => void this.renameDevice(item, name)}
                 onDeviceError={(message) => this.setState((s) => ({ devices: { ...s.devices, error: message } }))}
+                actionError={this.state.globalError}
+                onDismissActionError={() => this.setState({ globalError: null })}
                 archiveBridge={this.state.archiveBridge}
                 archiveOpen={this.state.settingsPage === 'archive'}
                 onOpenArchivedBotHistory={this.handleOpenArchivedBotHistory}

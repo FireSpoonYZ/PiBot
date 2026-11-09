@@ -1,6 +1,6 @@
 /* gbot-ui lane：置顶会话整行拖拽/键盘排序外层样式。
  * 复用仓库既有圆角与颜色变量（--surface / --text / --muted / --accent / --accent-soft / --selection），
- * 仅提供整行轻量包裹与拖拽浮起/落点指示线，不渲染右侧独立手柄，使置顶灰底完整覆盖整行。 */
+ * 提供整行包裹与拖拽浮起/落点指示线。 */
 
 .gbot-sortable-pinned-chat {
   position: relative;

@@ -1,10 +1,9 @@
 // gbot-ui lane：通用会话行（主语义 button，不嵌套按钮）。
 // JSX 结构复制自 lenML/gbot-ui（MIT，仓库 licenses/gbot-ui-MIT.txt）：
 // 上游 src/components/grok-bot/MobileChatList.tsx 的 ConversationRow 默认实现
-// （title/preview 两行结构、选中/未读/徽标/时间槽位、pointer hook 展开到 button）。
+// （title/preview 两行结构、选中/未读/时间槽位、pointer hook 展开到 button）。
 // 差异：agent 模型替换为合同 props；Tailwind utility 由 gbot-ui.css 中同名结构类替代。
 import type { ReactNode } from 'react';
-import { Pin } from 'lucide-react';
 import { useConversationRowInteractions } from './useConversationRowInteractions';
 import type { ConversationMenuPosition } from './useConversationRowInteractions';
 
@@ -13,8 +12,8 @@ export interface ConversationRowProps {
   preview?: string;
   timestamp?: string | number | null;
   avatar: ReactNode;
-  badge?: string;
-  meta?: string;
+  groupLabel?: string;
+  connectionLabel?: string;
   selected?: boolean;
   unread?: boolean;
   pinned?: boolean;
@@ -56,8 +55,8 @@ export function ConversationRow({
   preview,
   timestamp,
   avatar,
-  badge,
-  meta,
+  groupLabel,
+  connectionLabel,
   selected = false,
   unread = false,
   pinned = false,
@@ -66,9 +65,11 @@ export function ConversationRow({
   className,
 }: ConversationRowProps) {
   const interactions = useConversationRowInteractions({ onOpen, onOpenMenu });
-  const label = [title, pinned ? '已置顶' : null, unread ? '未读' : null, meta ?? null]
+  const label = [title, groupLabel, pinned ? '已置顶' : null, unread ? '未读' : null, connectionLabel]
     .filter(Boolean)
     .join('，');
+  const time = formatConversationTime(timestamp);
+  const subtitle = preview?.trim();
 
   return (
     <button
@@ -90,32 +91,14 @@ export function ConversationRow({
       <span className="gbot-conversation-row__body">
         <span className="gbot-conversation-row__head">
           <span className="gbot-conversation-row__title">{title}</span>
-          {pinned ? (
-            <span
-              aria-hidden="true"
-              className="gbot-conversation-row__pin"
-              title="已置顶"
-            >
-              <Pin aria-hidden="true" size={12} />
-            </span>
-          ) : null}
-          {badge ? (
-            <span className="gbot-conversation-row__badge">{badge}</span>
-          ) : null}
-          <span className="gbot-conversation-row__time">
-            {formatConversationTime(timestamp)}
-          </span>
-        </span>
-
-        <span className="gbot-conversation-row__sub">
-          {preview ? (
-            <span className="gbot-conversation-row__preview">{preview}</span>
-          ) : null}
-          {meta ? <span className="gbot-conversation-row__meta">{meta}</span> : null}
           {unread ? (
-            <span aria-label="未读" className="gbot-conversation-row__unread-dot" />
+            <span aria-hidden="true" className="gbot-conversation-row__unread-dot" />
           ) : null}
+          {time ? <span className="gbot-conversation-row__time">{time}</span> : null}
         </span>
+        {subtitle ? (
+          <span className="gbot-conversation-row__preview">{subtitle}</span>
+        ) : null}
       </span>
     </button>
   );

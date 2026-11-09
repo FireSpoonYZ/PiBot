@@ -189,6 +189,7 @@ export type HubScreen =
   | 'conversation'
   | 'dm'
   | 'bot-profile'
+  | 'bot-profile-manage'
   | 'bot-edit'
   | 'bot-avatar'
   | 'bot-soul'

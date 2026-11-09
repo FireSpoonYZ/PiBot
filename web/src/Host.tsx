@@ -7,12 +7,12 @@ import {
   Bell,
   Brain,
   Check,
-  ChevronDown,
   ChevronRight,
   ChevronsUpDown,
   Clock,
   Code2,
   Cpu,
+  Download,
   ExternalLink,
   FolderOpen,
   Globe,
@@ -40,7 +40,6 @@ import {
   User,
   Users,
   X,
-  Zap,
 } from 'lucide-react';
 import {
   BotHost,
@@ -78,6 +77,7 @@ import {
 } from './gbot-ui';
 import { useChatPins } from './gbot-ui/chatPins';
 import { SortablePinnedChat } from './gbot-ui/SortablePinnedChat';
+import { useConversationUnread } from './gbot-ui/useConversationUnread';
 import type { MessageMember } from '../../host-core/index.js';
 import { createLocalScopeReadApi } from './local-scope-api';
 import { isWebhookAttribution, MessageAttribution } from './MessageAttribution';
@@ -139,10 +139,10 @@ import {
 import type { ImageAttachment } from '../../host-core/index.js';
 import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useText } from './ui';
 
-import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleRepeatLabel, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending, ChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, copyTextToClipboard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
+import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending, ChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, copyTextToClipboard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
 // @lane-imports:settings
 import { Badge, Disclosure, Row, Section, SettingsSheet } from './bot-settings/primitives';
-import { ClientUpdateSection } from './ClientUpdateSection';
+import { ClientUpdateSection, useClientUpdateSummary } from './ClientUpdateSection';
 // ---
 // @lane-imports:hub
 import { Chips } from './bot-settings/primitives';
@@ -178,6 +178,8 @@ export interface HostPageProps {
   onOpenSystemSettings?(): void;
 }
 
+type HubSettingsPage = 'overview' | 'connection' | 'devices' | 'manual' | 'updates' | 'permissions';
+
 export function HostPage({
   connectionEpoch = 0,
   active = true,
@@ -194,6 +196,7 @@ export function HostPage({
 
   // Screen stack navigation
   const [screen, setScreen] = useState<HubScreen>('hub');
+  const [settingsPage, setSettingsPage] = useState<HubSettingsPage>('overview');
   const [chatReturnScreen, setChatReturnScreen] = useState<'hub' | 'board' | 'archived-bots'>('hub');
   const [profileReturnScreen, setProfileReturnScreen] = useState<HubScreen>('chat');
   const [avatarReturnScreen, setAvatarReturnScreen] = useState<HubScreen>('bot-edit');
@@ -266,7 +269,13 @@ export function HostPage({
     else localStorage.removeItem(CREATE_ATTEMPT_KEY);
     setCreateAttemptState(attempt);
   };
-  const [remoteDevices, setRemoteDevices] = useState<DevicesDirectoryItem[]>(() => readCachedRemoteDevices());
+  const [remoteDirectory, setRemoteDirectory] = useState<{
+    devices: DevicesDirectoryItem[];
+    identity: DesktopIdentity | null;
+    failedGeneration: number | null;
+  }>(() => ({ devices: readCachedRemoteDevices(), identity: null, failedGeneration: null }));
+  const remoteDevices = remoteDirectory.devices;
+  const directoryReadFailed = remoteIdentity !== null && remoteDirectory.failedGeneration === remoteIdentity.generation;
   const remoteClientRef = useRef<{ api: DesktopPanelApi; invalidate(): void; dispose(): void } | null>(null);
   // Bot 通信页：本机只读适配器按（设备ID+代际）重建，换设备/重进页面即换 sessionKey。
   // hostRunning 从 localHostRef 读最新相位（不闭包捕获旧快照）；deviceId 变才重建适配器。
@@ -355,8 +364,15 @@ export function HostPage({
   const [editName, setEditName] = useState('');
   const [editSubtitle, setEditSubtitle] = useState('');
   const [editCwd, setEditCwd] = useState('');
+  const [editCwdBaseline, setEditCwdBaseline] = useState('');
   const [editCwdRevision, setEditCwdRevision] = useState<number | null>(null);
   const [editCwdError, setEditCwdError] = useState('');
+  const [editSaveErrors, setEditSaveErrors] = useState<Partial<Record<'profile' | 'cwd', string>>>({});
+  const [editCwdSaved, setEditCwdSaved] = useState(false);
+  const editSaveInFlight = useRef(false);
+  const profileEditKeyRef = useRef<{ key: string | null; inFamily: boolean }>({ key: null, inFamily: false });
+  const profileManageTrigger = useRef<HTMLButtonElement>(null);
+  const restoreProfileManageFocus = useRef(false);
   // 单调递增 token：编辑目标/连接变化丢弃迟到的 cwd 回填结果。
   const editCwdFetchRef = useRef(0);
   // 用户已编辑目录后，异步回填不得覆盖输入。
@@ -378,7 +394,7 @@ export function HostPage({
   const [soulDirty, setSoulDirty] = useState(false);
 
   // Per-Bot Scheduled Tasks state
-  const [botScheduleState, setBotScheduleState] = useState<BotScheduleState>({
+  const [botScheduleState, setBotScheduleState] = useState<BotScheduleState & { botKey?: string }>({
     tasks: [],
     exactAlarmGranted: true,
     schedulingError: '',
@@ -387,6 +403,7 @@ export function HostPage({
   });
   const [scheduleFilter, setScheduleFilter] = useState<'all' | 'enabled' | 'paused'>('all');
   const [scheduleEditing, setScheduleEditing] = useState<'new' | 'edit' | null>(null);
+  const [scheduleDeleteTarget, setScheduleDeleteTarget] = useState<BotScheduleTask | null>(null);
   const [scheduleCustomWeekdays, setScheduleCustomWeekdays] = useState(false);
   const [scheduleDraft, setScheduleDraft] = useState<BotScheduleDraft>({
     title: '',
@@ -606,12 +623,17 @@ export function HostPage({
     const generation = directoryGeneration.current;
     directoryFlight.current = true;
     try {
-      const directory = await api.broker(identity, 'bot_directory', {});
+      const directory = await api.broker(identity, 'bot_directory', {}).catch(error => {
+        if (generation === directoryGeneration.current && api.identity?.generation === identity.generation) {
+          setRemoteDirectory(previous => ({ ...previous, failedGeneration: identity.generation }));
+        }
+        throw error;
+      });
       if (generation !== directoryGeneration.current || api.identity?.generation !== identity.generation) return;
+      setRemoteDirectory({ devices: directory.devices, identity, failedGeneration: null });
+      writeCachedRemoteDevices(directory.devices);
       await syncBotAvatarConfigs(api, directory.bots, localHostRef.current?.deviceId ?? '');
       if (generation !== directoryGeneration.current || api.identity?.generation !== identity.generation) return;
-      setRemoteDevices(directory.devices);
-      writeCachedRemoteDevices(directory.devices);
       setRemoteBots(previous => {
         const failed = new Set(directory.errors.map(error => error.deviceId));
         for (const device of directory.devices) if (!device.online) failed.add(device.deviceId);
@@ -672,7 +694,7 @@ export function HostPage({
         cwdRevision: b.cwdRevision ?? 0,
         modelRef: b.modelRef,
         createdAt: b.createdAt,
-        lastActivityAt: b.lastActivityAt || b.createdAt,
+        lastActivityAt: b.lastActivityAt || undefined,
         lastPreview: b.lastPreview || '',
         archivedAt: b.archivedAt ?? null,
         hostKind: 'local',
@@ -705,7 +727,7 @@ export function HostPage({
         cwdRevision: b.cwdRevision ?? 0,
         modelRef: b.modelRef,
         createdAt: b.createdAt,
-        lastActivityAt: b.lastActivityAt || b.createdAt,
+        lastActivityAt: b.lastActivityAt || undefined,
         lastPreview: b.lastPreview || '',
         archivedAt: b.archivedAt ?? null,
         hostKind: 'remote' as const,
@@ -970,6 +992,29 @@ export function HostPage({
   const chatPins = useChatPins(pinStorageScope);
   const botPinKey = useCallback((bot: { deviceId: string; botId: string }) => `bot:${bot.deviceId}:${bot.botId}`, []);
   const roomPinKey = useCallback((scopeId: string) => `room:${scopeId}`, []);
+  // 同一中心可以更换绑定；未读记录同时按中心地址和已确认的客户端身份隔离。
+  const centerAccountId = centerConn.saved?.deviceId || centerConn.status?.clientId;
+  const unreadNamespace = pinStorageScope.startsWith('center:')
+    ? (centerAccountId ? JSON.stringify([pinStorageScope, centerAccountId]) : null)
+    : (centerConn.initialized && pinStorageScope !== 'local:local' ? pinStorageScope : null);
+  const unreadRows = useMemo(() => [
+    ...listBotItems.map(item => ({
+      key: botPinKey(item),
+      lastMessageAt: item.lastPreview?.trim() ? item.lastActivityAt ?? null : null,
+    })),
+    ...roomConversations.map(room => ({
+      key: roomPinKey(room.scope.scope.scopeId),
+      lastMessageAt: room.lastActivityAt,
+    })),
+  ], [listBotItems, roomConversations, botPinKey, roomPinKey]);
+  const { unread: unreadConversationKeys, markViewed: markConversationViewed } = useConversationUnread(
+    unreadNamespace,
+    unreadRows,
+    active && screen === 'chat' && activeBot ? botPinKey(activeBot) : null,
+  );
+  const markRoomHistoryViewed = useCallback((scopeId: string, lastMessageAt: string) => {
+    markConversationViewed(roomPinKey(scopeId), lastMessageAt);
+  }, [markConversationViewed, roomPinKey]);
 
   // 群聊和普通 Bot 混排：key 统一为 bot:${deviceId}:${botId} / room:${scopeId}。
   // 置顶项按 pinnedKeys 顺序排在列表最上（不随消息时间变），普通项按最近时间倒序；
@@ -1100,6 +1145,7 @@ export function HostPage({
     setDmSelectedScopeId(null);
     setHubContextMenu(null);
     setBotConfirmModal(null);
+    setScheduleDeleteTarget(null);
     if (screen === 'conversation') setScreen(scopeReturnScreen);
     else if (screen === 'dm') setScreen(dmTarget?.returnScreen ?? 'hub');
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1205,10 +1251,6 @@ export function HostPage({
 
   const mustCreatePrimaryBot = Boolean(localHost?.phase === 'running' && localBotsLoaded && !primaryBot);
 
-  const unreadCount = useMemo(() => {
-    return listBotItems.filter(item => botMetaMap[item.key]?.unread).length;
-  }, [listBotItems, botMetaMap]);
-
   const cancelActiveObservation = useCallback(() => {
     if (observeIdRef.current) {
       const id = observeIdRef.current;
@@ -1305,6 +1347,7 @@ export function HostPage({
           });
         } else {
           setBotScheduleState({
+            botKey: bot.key,
             tasks: [],
             exactAlarmGranted: true,
             schedulingError: '',
@@ -1326,7 +1369,7 @@ export function HostPage({
               : Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
           now: typeof raw.now === 'number' ? raw.now : Date.now(),
         };
-        setBotScheduleState(nextState);
+        setBotScheduleState({ ...nextState, botKey: bot.key });
         const enabledCount = tasks.filter(item => item.enabled !== false).length;
         updateBotMeta(bot.key, { scheduleCount: enabledCount });
       } catch {
@@ -1766,7 +1809,9 @@ export function HostPage({
     setComposerMenuOpen(false);
     setActiveBotKey(bot.key);
     setScheduleEditing(null);
+    setScheduleDeleteTarget(null);
     setScheduleFilter('all');
+    setSubPageReturnScreen('bot-profile');
     setScreen('bot-schedules');
     void loadBotSchedules(bot);
   };
@@ -1781,7 +1826,9 @@ export function HostPage({
       if (!api || !identity) throw new Error(t('中心连接不可用，无法读取工作目录；连接后可重试', 'Center unavailable; cannot load the working directory. Retry once connected'));
       const config = await api.broker(identity, 'center_bot_cwd_get', { deviceId: bot.deviceId, botId: bot.botId });
       if (editCwdFetchRef.current !== fetchId) return false;
-      if (!editCwdDirtyRef.current) setEditCwd(config.value ?? bot.cwd ?? '');
+      const current = config.value ?? bot.cwd ?? '';
+      if (!editCwdDirtyRef.current) setEditCwd(current);
+      setEditCwdBaseline(current);
       setEditCwdRevision(config.revision);
       setEditCwdError('');
       return true;
@@ -1804,19 +1851,21 @@ export function HostPage({
     setEditCwd(bot.cwd || localHost?.workspace || '');
     setEditCwdRevision(null);
     setEditCwdError('');
+    setEditSaveErrors({});
+    setEditCwdSaved(false);
     setEditAvatarPreset(resolveBotAvatarPreset(botAvatarKey(bot), bot.role, bot.isPrimary));
   };
 
   // 编辑期间以完整身份（设备+bot+连接 profile/generation）为键重读修订；
   // 离开表单/切 create/换目标即失效旧请求，迟到结果不写新表单。
   const editCwdIdentity = activeBot
-    ? activeBot.deviceId + ':' + activeBot.botId + ':' +
-      (activeBot.remoteIdentity
-        ? activeBot.remoteIdentity.profileId + '/' + activeBot.remoteIdentity.generation
-        : 'local')
+    ? JSON.stringify([
+        activeCenter, activeBot.deviceId, activeBot.botId,
+        remoteIdentity?.profileId, remoteIdentity?.generation,
+      ])
     : '';
   useEffect(() => {
-    if (screen !== 'bot-profile' || !activeBot) return;
+    if (!activeBot || (screen !== 'bot-profile-manage' && !(screen === 'bot-edit' && editMode === 'edit'))) return;
     void loadEditCwd(activeBot);
     return () => {
       // 身份/表单变化：旧修订立即作废，绝不允许旧 CAS 凭据写新目标。
@@ -1931,7 +1980,7 @@ export function HostPage({
         setChatDraftAttachments([]);
         writeChatDraft(scopeKey, '');
         writeChatDraftAttachments(scopeKey, []);
-        updateBotMeta(bot.key, { lastText: t('对话已清空', 'History cleared'), updatedAt: Date.now(), unread: false });
+        updateBotMeta(bot.key, { lastText: '', updatedAt: Date.now(), unread: false });
         setClearNotice(t('已清空当前对话并重置上下文', 'Conversation cleared and context reset'));
       } else {
         // /compact 成功后才清掉实际命令草稿；若等待期间已写入新文本则保留，不误删。
@@ -2122,10 +2171,13 @@ ${newer}` : draftSnapshot;
   };
 
   // Save in Edit Bot / Create Bot (15847.jpg "完成")
-  const handleSaveBotEdit = () =>
-    action.run(async () => {
+  const handleSaveBotEdit = (scope: 'all' | 'profile' | 'cwd' = 'all') => {
+    if (action.busy || editSaveInFlight.current) return;
+    editSaveInFlight.current = true;
+    const draftOwner = profileEditKeyRef.current;
+    return action.run(async () => {
       const roleName = editName.trim();
-      if (!roleName) return;
+      if (scope !== 'cwd' && !roleName) return;
 
       if (editMode === 'create') {
         const targetHost = mustCreatePrimaryBot ? 'local' : editTargetHost;
@@ -2163,9 +2215,9 @@ ${newer}` : draftSnapshot;
           updateBotMeta(key, {
             customName: roleName,
             subtitle: editSubtitle.trim(),
-            lastText: editSubtitle.trim() || t('点击开始文字对话…', 'Tap to start chatting…'),
+            lastText: '',
             updatedAt: Date.now(),
-            unread: true,
+            unread: false,
           });
           if (soulDraft.trim()) {
             try {
@@ -2213,25 +2265,27 @@ ${newer}` : draftSnapshot;
           updateBotMeta(key, {
             customName: roleName,
             subtitle: editSubtitle.trim(),
-            lastText: editSubtitle.trim() || t('点击开始文字对话…', 'Tap to start chatting…'),
+            lastText: '',
             updatedAt: Date.now(),
-            unread: true,
+            unread: false,
           });
           await syncRemoteBots();
           setScreen('hub');
         }
       } else if (activeBot) {
-        // Editing an existing Bot updates the authoritative shared profile.
         const trimmedCwd = editCwd.trim();
-        const cwdChanged = trimmedCwd !== (activeBot.cwd ?? '');
-        const profileChanged = roleName !== activeBot.role || editSubtitle.trim() !== (activeBot.description ?? '');
-        if (!trimmedCwd) throw new Error(t('工作目录不能为空', 'Working directory cannot be empty'));
+        const cwdChanged = scope !== 'profile' && trimmedCwd !== (scope === 'cwd' ? editCwdBaseline : activeBot.cwd ?? '');
+        const profileChanged = scope !== 'cwd' && (roleName !== activeBot.role || editSubtitle.trim() !== (activeBot.description ?? ''));
+        if (scope !== 'all') setEditSaveErrors(errors => ({ ...errors, [scope]: '' }));
+        if (scope === 'cwd') setEditCwdSaved(false);
         const saveCwd = async () => {
           if (!cwdChanged) return;
           if (editCwdRevision === null) {
             throw new Error(t('工作目录修订尚未读取，请重新读取后再保存', 'Working directory revision not loaded; reload before saving'));
           }
+          const fetchId = editCwdFetchRef.current;
           const api = await ensureRemoteApi();
+          if (profileEditKeyRef.current !== draftOwner || editCwdFetchRef.current !== fetchId) return;
           const identity = activeBot.hostKind === 'local' ? api?.identity : activeBot.remoteIdentity;
           const broker = activeBot.hostKind === 'local' ? api : remoteClientRef.current?.api;
           if (!broker || !identity) {
@@ -2242,36 +2296,50 @@ ${newer}` : draftSnapshot;
               deviceId: activeBot.deviceId, botId: activeBot.botId,
               expectedRevision: editCwdRevision, value: trimmedCwd,
             });
+            if (profileEditKeyRef.current !== draftOwner || editCwdFetchRef.current !== fetchId) return;
             setEditCwdRevision(config.revision);
             editCwdDirtyRef.current = false;
             setEditCwd(config.value ?? trimmedCwd);
+            setEditCwdBaseline(config.value ?? trimmedCwd);
+            setEditCwdError('');
+            if (scope === 'cwd') setEditCwdSaved(true);
           } catch (error) {
             const code = (error as { code?: string })?.code;
-            if (code === 'REVISION_CONFLICT' || code === 'REQUEST_CONFLICT') {
+            if (editCwdFetchRef.current === fetchId && (code === 'REVISION_CONFLICT' || code === 'REQUEST_CONFLICT')) {
               setEditCwdRevision(null);
               setEditCwdError(t('工作目录已被其他修改占用，请重新读取后再保存', 'Working directory was changed elsewhere; reload and save again'));
             }
             throw error;
           }
         };
-        if (activeBot.hostKind === 'local') {
-          if (profileChanged) await BotHost.call({ method: 'updateBotProfile', params: { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() } });
-          // 本机 Bot 的 cwd 由中心权威管理：只经中心 CAS 通道写入，
-          // 没有中心连接时不静默绕开写 Host 本地。
-          await saveCwd();
-          await syncLocalBots();
-        } else if (activeBot.remoteIdentity && remoteClientRef.current) {
-          if (profileChanged) await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'updateBotProfile', { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() });
-          await saveCwd();
-          await syncRemoteBots();
-        } else throw new Error('Remote target unavailable');
-        await saveAvatar(activeBot, editAvatarPreset);
-        updateBotMeta(activeBot.key, {
-          customName: roleName,
-          subtitle: editSubtitle.trim(),
-        });
+        try {
+          if (scope !== 'profile' && !trimmedCwd) {
+            throw new Error(t('工作目录不能为空', 'Working directory cannot be empty'));
+          }
+          if (activeBot.hostKind === 'local') {
+            if (profileChanged) await BotHost.call({ method: 'updateBotProfile', params: { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() } });
+            await saveCwd();
+            await syncLocalBots();
+          } else if (activeBot.remoteIdentity && remoteClientRef.current) {
+            if (profileChanged) await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'updateBotProfile', { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() });
+            await saveCwd();
+            await syncRemoteBots();
+          } else throw new Error(t('无法连接目标节点', 'Target host unavailable'));
+          if (scope === 'all') await saveAvatar(activeBot, editAvatarPreset);
+          if (scope !== 'cwd') updateBotMeta(activeBot.key, { customName: roleName, subtitle: editSubtitle.trim() });
+        } catch (error) {
+          if (scope === 'all') throw error;
+          const code = (error as { code?: string })?.code;
+          const cwdConflict = scope === 'cwd' && (code === 'REVISION_CONFLICT' || code === 'REQUEST_CONFLICT');
+          if (profileEditKeyRef.current === draftOwner && !cwdConflict) {
+            setEditSaveErrors(errors => ({ ...errors, [scope]: errorText(error) }));
+          }
+        }
       }
+    }).finally(() => {
+      editSaveInFlight.current = false;
     });
+  };
 
   const handleSetPrimaryBot = (bot: UnifiedBotItem) =>
     action.run(async () => {
@@ -2391,7 +2459,10 @@ ${newer}` : draftSnapshot;
       }
       const returnToArchived =
         screen === 'archived-bots' ||
-        ((screen === 'chat' || screen === 'bot-profile') && chatReturnScreen === 'archived-bots');
+        (screen === 'chat' && chatReturnScreen === 'archived-bots') ||
+        ((screen === 'bot-profile' || screen === 'bot-profile-manage') &&
+          (profileReturnScreen === 'archived-bots' ||
+            (profileReturnScreen === 'chat' && chatReturnScreen === 'archived-bots')));
       setScreen(returnToArchived ? 'archived-bots' : 'hub');
     });
 
@@ -2616,7 +2687,7 @@ ${newer}` : draftSnapshot;
     }
   }, [roomDeleteModal, resolveRoomApi, chatPins, roomPinKey, scopeConversationTarget, t]);
 
-  const openModelPickerSheet = (_target: 'bot-edit' | 'bot-profile', tab: BotSettingsTab = 'model') => {
+  const openModelPickerSheet = (tab: BotSettingsTab = 'model') => {
     if (!activeBot || !remoteIdentity || !remoteConnected || !remoteClientRef.current) return;
     const deviceId = activeBot.hostKind === 'local' ? localHost?.deviceId : activeBot.hostId;
     if (!deviceId) return;
@@ -2728,7 +2799,7 @@ ${newer}` : draftSnapshot;
     setScheduleDraft({
       id: task.id,
       revision: task.revision,
-      title: task.title,
+      title: task.title || '',
       prompt: task.prompt ?? '',
       repeat: task.repeat,
       time: task.time || '08:00',
@@ -2789,6 +2860,7 @@ ${newer}` : draftSnapshot;
         id: task.id,
         revision: task.revision,
       });
+      setScheduleDeleteTarget(null);
       setScheduleEditing(null);
     });
 
@@ -2849,6 +2921,10 @@ ${newer}` : draftSnapshot;
       });
       if (activeBot) await loadBotSchedules(activeBot);
     });
+
+  const scheduleTasks = botScheduleState.botKey === activeBot?.key ? botScheduleState.tasks : [];
+  const scheduleError = botScheduleState.botKey === activeBot?.key ? botScheduleState.schedulingError : '';
+  const scheduleOffline = activeBot?.hostKind === 'remote' && (!remoteConnected || activeBot.online === false);
 
   const submission = chatSubmissionRef.current;
   // 用户主动停止的 unanswered 回执（reason aborted/cancelled）是已停止结算，不是配置/模型故障：
@@ -3211,6 +3287,21 @@ ${newer}` : draftSnapshot;
     }
   }, [onRefreshConnection, ensureRemoteApi, syncLocalBots, syncRemoteBots]);
 
+  const openCenterSettings = () => {
+    setSettingsPage('connection');
+    setScreen('settings');
+  };
+
+  const backFromSettings = useCallback(() => {
+    if (settingsPage === 'overview') setScreen('hub');
+    else setSettingsPage(settingsPage === 'manual' ? 'devices' : 'overview');
+  }, [settingsPage]);
+
+  const backFromProfileManage = useCallback(() => {
+    restoreProfileManageFocus.current = true;
+    setScreen('bot-profile');
+  }, []);
+
   // Step-by-step Back Navigation for Android full-screen back gesture & hardware Back button
   const handleStepBack = useCallback((): boolean => {
     if (leftDrawerOpen) {
@@ -3254,6 +3345,30 @@ ${newer}` : draftSnapshot;
       }
       return true;
     }
+    if (screen === 'settings') {
+      backFromSettings();
+      return true;
+    }
+    if (screen === 'bot-profile') {
+      if (skillReviewTargetKey) setSkillReviewTargetKey(null);
+      else if (vaultTargetKey) setVaultTargetKey(null);
+      else setScreen(profileReturnScreen);
+      return true;
+    }
+    if (screen === 'bot-profile-manage') {
+      backFromProfileManage();
+      return true;
+    }
+    if (screen === 'bot-schedules') {
+      if (scheduleDeleteTarget) {
+        if (!action.busy) setScheduleDeleteTarget(null);
+      } else if (scheduleEditing !== null) {
+        setScheduleEditing(null);
+      } else {
+        setScreen(subPageReturnScreen);
+      }
+      return true;
+    }
     if (chatTopMenuOpen) {
       setChatTopMenuOpen(false);
       return true;
@@ -3275,14 +3390,6 @@ ${newer}` : draftSnapshot;
       setScreen(subPageReturnScreen);
       return true;
     }
-    if (screen === 'bot-schedules') {
-      if (scheduleEditing !== null) {
-        setScheduleEditing(null);
-      } else {
-        setScreen('bot-profile');
-      }
-      return true;
-    }
     if (screen === 'bot-screen') {
       setScreen('bot-profile');
       return true;
@@ -3292,10 +3399,6 @@ ${newer}` : draftSnapshot;
         return true;
       }
       setScreen(editMode === 'create' ? 'hub' : 'bot-profile');
-      return true;
-    }
-    if (screen === 'bot-profile') {
-      setScreen(profileReturnScreen);
       return true;
     }
     if (screen === 'chat') {
@@ -3319,10 +3422,6 @@ ${newer}` : draftSnapshot;
       setScreen(libraryReturnScreen);
       return true;
     }
-    if (screen === 'settings') {
-      setScreen('hub');
-      return true;
-    }
     if (screen === 'hub' && searchQuery.trim()) {
       setSearchQuery('');
       return true;
@@ -3339,6 +3438,10 @@ ${newer}` : draftSnapshot;
     chatSearchOpen,
     leftDrawerOpen,
     libraryReturnScreen,
+    backFromSettings,
+    backFromProfileManage,
+    skillReviewTargetKey,
+    vaultTargetKey,
     screen,
     roomSettingsOpen,
     avatarReturnScreen,
@@ -3346,6 +3449,7 @@ ${newer}` : draftSnapshot;
     profileReturnScreen,
     chatReturnScreen,
     scheduleEditing,
+    scheduleDeleteTarget,
     editMode,
     mustCreatePrimaryBot,
     searchQuery,
@@ -3708,12 +3812,20 @@ ${newer}` : draftSnapshot;
   // @lane-hooks:bot-profile
   // 资料页即编辑页：从非资料页家族进入或换 Bot 时预填共享编辑态；
   // 从头像/灵魂/电脑等子页返回不重填，保住未保存的输入。
-  const profileEditKeyRef = useRef<{ key: string | null; inFamily: boolean }>({ key: null, inFamily: false });
-  useEffect(() => {
-    const inFamily = screen === 'bot-profile' || screen === 'bot-avatar' || screen === 'bot-soul' || screen === 'bot-schedules' || screen === 'bot-screen';
-    const entered = screen === 'bot-profile' && (!profileEditKeyRef.current.inFamily || profileEditKeyRef.current.key !== activeBot?.key);
-    profileEditKeyRef.current = { key: activeBot?.key ?? null, inFamily };
-    if (entered && activeBot) prefillBotProfileEdit(activeBot);
+  useLayoutEffect(() => {
+    const inFamily = screen === 'bot-profile' || screen === 'bot-profile-manage' || screen === 'bot-avatar' || screen === 'bot-soul' || screen === 'bot-schedules' || screen === 'bot-screen';
+    const key = activeBot?.key ?? null;
+    const previous = profileEditKeyRef.current;
+    if (previous.key !== key || previous.inFamily !== inFamily) {
+      profileEditKeyRef.current = { key, inFamily };
+    }
+    if (screen === 'bot-profile' && activeBot && (!previous.inFamily || previous.key !== key)) {
+      prefillBotProfileEdit(activeBot);
+    }
+    if (screen === 'bot-profile' && restoreProfileManageFocus.current) {
+      restoreProfileManageFocus.current = false;
+      profileManageTrigger.current?.focus();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, activeBot?.key]);
   // ---
@@ -3731,6 +3843,7 @@ ${newer}` : draftSnapshot;
   const navigateFromSidebar = (next: HubScreen) => {
     setLibraryReturnScreen('hub');
     setLeftDrawerOpen(false);
+    if (next === 'settings') setSettingsPage('overview');
     setScreen(next);
   };
   // ---
@@ -3925,7 +4038,7 @@ ${newer}` : draftSnapshot;
                 compact
                 error={directoryError || (!centerConn.ready ? centerConn.error : '') || chatPins.error || action.error}
                 actionLabel={!centerConn.ready && centerConn.status?.error ? t('去设置', 'Settings') : directoryError ? t('刷新', 'Refresh') : undefined}
-                onAction={!centerConn.ready && centerConn.status?.error ? () => setScreen('settings') : directoryError ? () => void triggerHubRefresh() : undefined}
+                onAction={!centerConn.ready && centerConn.status?.error ? openCenterSettings : directoryError ? () => void triggerHubRefresh() : undefined}
                 onDismiss={directoryError ? () => setDirectoryError('') : action.error ? () => action.setError('') : undefined}
               />
               {remoteBots.length > 0 && !remoteConnected && (
@@ -3962,17 +4075,18 @@ ${newer}` : draftSnapshot;
                     const rowNode = (
                       <ConversationRow
                         key={entry.pinKey}
-                        className="hub-bot-row hub-room-row"
+                        className="hub-bot-row"
                         title={room.title}
-                        preview={room.lastPreview || t('暂无消息', 'No messages yet')}
+                        preview={room.lastPreview}
                         timestamp={room.lastActivityAt}
-                        badge={t('群聊', 'Group')}
+                        groupLabel={t('群聊', 'Group chat')}
                         pinned={entry.pinned}
+                        unread={unreadConversationKeys.has(entry.pinKey)}
                         avatar={
                           <ConversationGroupAvatar
                             members={room.scope.scope.members}
                             bots={knownBots}
-                            size={52}
+                            size={40}
                           />
                         }
                         onOpen={() => openScopeConversation(room, false)}
@@ -3994,24 +4108,37 @@ ${newer}` : draftSnapshot;
                   }
                   const item = entry.bot!;
                   const meta = botMetaMap[item.key];
-                  const isPrimaryActive = Boolean(item.isPrimary && !item.archivedAt);
-                  const snippet =
-                    item.lastPreview ||
-                    meta?.lastText ||
-                    item.description ||
-                    t('点击开始文字对话…', 'Tap to start chatting…');
-                  const preset = resolveBotAvatarPreset(botAvatarKey(item), item.role, isPrimaryActive);
+                  const offline = botIsOffline(item);
+                  const statusUnknown = item.hostKind === 'local' ? !localHost : !remoteConnected;
+                  const connectionLabel = statusUnknown
+                    ? t('连接状态待确认', 'Connection status unknown')
+                    : offline ? t('离线', 'Offline') : t('在线', 'Online');
+                  const cachedPreview = meta?.lastText?.trim();
+                  // 旧缓存曾将创建占位与清空提示写入摘要，只有存在相应的目录或清空记录时才排除。
+                  const isCreationPlaceholder = (!item.lastActivityAt || item.lastActivityAt === item.createdAt) &&
+                    (cachedPreview === meta?.subtitle?.trim() ||
+                     cachedPreview === '点击开始文字对话…' || cachedPreview === 'Tap to start chatting…');
+                  const isClearNotice = clearedMap[item.key] !== undefined &&
+                    (cachedPreview === '对话已清空' || cachedPreview === 'History cleared');
+                  const preview = item.lastPreview?.trim() ||
+                    (isCreationPlaceholder || isClearNotice ? undefined : cachedPreview);
                   const rowNode = (
-                    <HubBotRow
+                    <ConversationRow
                       key={entry.pinKey}
-                      item={item}
-                      offline={botIsOffline(item)}
-                      preset={preset}
-                      isPrimaryActive={isPrimaryActive}
-                      snippet={snippet}
-                      unread={Boolean(meta?.unread)}
-                      timestampMs={entry.sortMs}
+                      className="hub-bot-row"
+                      title={item.role}
+                      preview={preview}
+                      timestamp={entry.sortMs || null}
+                      connectionLabel={connectionLabel}
+                      unread={unreadConversationKeys.has(entry.pinKey)}
                       pinned={entry.pinned}
+                      avatar={
+                        <GrokBotAvatar
+                          preset={resolveBotAvatarPreset(botAvatarKey(item), item.role, Boolean(item.isPrimary))}
+                          offline={offline}
+                          size={40}
+                        />
+                      }
                       onOpen={() => openBotChat(item, 'hub')}
                       onOpenMenu={(position) => setHubContextMenu({ ...position, bot: item })}
                     />
@@ -4034,19 +4161,6 @@ ${newer}` : draftSnapshot;
           </div>
 
           <footer className="hub-bottom-bar">
-            {unreadCount > 0 && (
-              <button
-                type="button"
-                className="hub-unread-pill"
-                onClick={() => {
-                  const container = document.querySelector('.hub-scroll-area');
-                  container?.scrollBy({ top: 220, behavior: 'smooth' });
-                }}
-              >
-                <ChevronDown size={16} />
-                <span>{t(`${unreadCount} 个未读`, `${unreadCount} unread`)}</span>
-              </button>
-            )}
             <label className="hub-search-box">
               <Search size={18} className="hub-search-icon" />
               <input
@@ -4429,7 +4543,7 @@ ${newer}` : draftSnapshot;
               <ErrorNotice
                 error={centerConn.error}
                 actionLabel={t('去连接', 'Connect')}
-                onAction={() => setScreen('settings')}
+                onAction={openCenterSettings}
               />
             )}
             {chatStatusKind === 'load' && (
@@ -4748,7 +4862,7 @@ ${newer}` : draftSnapshot;
 
       {/* ==================== SCREEN 3: BOT PROFILE VIEW (15867.jpg) ==================== */}
       {screen === 'bot-profile' && activeBot && (
-        <main className="grok-subpage grok-page-enter">
+        <main className="grok-subpage grok-page-enter bot-profile-page">
           <header className="grok-subpage-topbar">
             <button
               type="button"
@@ -4758,12 +4872,12 @@ ${newer}` : draftSnapshot;
             >
               <ArrowLeft size={20} />
             </button>
-            <h2 className="grok-subpage-header-title">{t('智能体', 'Bot')}</h2>
+            <h2 className="grok-subpage-header-title">{t('智能体资料', 'Bot profile')}</h2>
             <button
               type="button"
               className="grok-done-pill-btn"
               disabled={action.busy || !editName.trim()}
-              onClick={() => void handleSaveBotEdit()}
+              onClick={() => void handleSaveBotEdit('profile')}
             >
               {action.busy ? t('保存中', 'Saving') : t('保存', 'Save')}
             </button>
@@ -4787,7 +4901,7 @@ ${newer}` : draftSnapshot;
                   isPrimary={activeBot.isPrimary}
                   starBadge={activeBot.isPrimary}
                   platformBadge={<PlatformLogoIcon platform={activeBot.platform} size={11} />}
-                  size={104}
+                  size={88}
                 />
                 <span className="grok-avatar-pencil-badge">
                   <Pencil size={16} />
@@ -4805,143 +4919,150 @@ ${newer}` : draftSnapshot;
                 value={editSubtitle}
                 onChange={e => setEditSubtitle(e.target.value)}
                 placeholder={t('描述 Bot 的用途（可选）', 'Describe what this Bot does (optional)')}
-                aria-label={t('标题', 'Subtitle')}
+                aria-label={t('用途', 'Purpose')}
               />
             </section>
 
-            {/* Grouped Card 1: Capabilities & Computer (15867.jpg style) */}
-            <section className="grok-card-group">
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => openModelPickerSheet('bot-profile')}
-                disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
-              >
-                <Cpu size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('模型', 'Model')}</span>
-                <span className="grok-row-value grok-row-value-path">
-                  {getOrCreateRemoteClient
-                    ? (activeBot.modelRef ?? t('继承中心默认', 'Inherit center default'))
-                    : t('请在独立助手中设置 Bot 模型', 'Set the bot model in the standalone assistant')}
-                </span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => openModelPickerSheet('bot-profile', 'capabilities')}
-                disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
-              >
-                <Puzzle size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('插件 / 技能 / MCP', 'Plugins / Skills / MCP')}</span>
-                <span className="grok-row-value grok-row-value-path">
-                  {getOrCreateRemoteClient ? t('设置', 'Settings') : t('请在独立助手中设置 Bot 能力', 'Set bot capabilities in the standalone assistant')}
-                </span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => setSkillReviewTargetKey(botPanelIdentityKey)}
-              >
-                <Sparkles size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('Skill 审阅', 'Skill Review')}</span>
-                <span className="grok-row-value">{t('学习草稿', 'Learning drafts')}</span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => setVaultTargetKey(botPanelIdentityKey)}
-              >
-                <LockKeyhole size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('密码库', 'Password Vault')}</span>
-                <span className="grok-row-value">{activeBot.hostLabel}</span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => openModelPickerSheet('bot-profile', 'advanced')}
-                disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
-              >
-                <Settings size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('高级设置', 'Advanced Settings')}</span>
-                <span className="grok-row-value grok-row-value-path">
-                  {getOrCreateRemoteClient ? t('Code Mode · 覆盖策略', 'Code Mode · Overrides') : t('请在独立助手中设置', 'Configure in standalone assistant')}
-                </span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => {
-                  setSubPageReturnScreen('bot-profile');
-                  setScreen('bot-soul');
-                }}
-              >
-                <Sparkles size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('灵魂文档', 'Persona')}</span>
-                <span className="grok-row-value">
-                  {soulDraft.trim() ? t('已配置', 'Configured') : t('未设置', 'Not set')}
-                </span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => openBotSchedules(activeBot)}
-              >
-                <Clock size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('定时任务', 'Schedules')}</span>
-                <span className="grok-row-value">
-                  {(() => {
-                    const count =
-                      botMetaMap[activeBot.key]?.scheduleCount ??
-                      botScheduleState.tasks.filter(x => x.enabled !== false).length;
-                    return count > 0 ? t(`${count} 个已开启`, `${count} active`) : '';
-                  })()}
-                </span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => void openCenterManagement()}
-              >
-                <Brain size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('长期记忆', 'Memory')}</span>
-                <span className="grok-row-value">{t('在中心管理中打开', 'Opens Center management')}</span>
-                <ExternalLink size={16} className="grok-row-chevron" />
-              </button>
-
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => setScreen('bot-screen')}
-              >
-                <Monitor size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('电脑', 'Computer')}</span>
-                <span className="grok-row-value">{isBotBusy ? t('运行中', 'Active') : t('空闲', 'Idle')}</span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
+            <ErrorNotice
+              error={editSaveErrors.profile}
+              onDismiss={() => setEditSaveErrors(errors => ({ ...errors, profile: '' }))}
+            />
+            <section className="grok-field-section">
+              <h3 className="grok-section-label">{t('常用设置', 'Common settings')}</h3>
+              <div className="grok-card-group">
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => openModelPickerSheet()}
+                  disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
+                >
+                  <Cpu size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('模型', 'Model')}</span>
+                  <span className="grok-row-value grok-row-value-path">
+                    {activeBot.modelRef ?? (getOrCreateRemoteClient ? t('继承中心默认', 'Center default') : '')}
+                  </span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => {
+                    setSubPageReturnScreen('bot-profile');
+                    setScreen('bot-soul');
+                  }}
+                >
+                  <Sparkles size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('人设', 'Persona')}</span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => openModelPickerSheet('capabilities')}
+                  disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
+                >
+                  <Puzzle size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('插件与能力', 'Plugins & capabilities')}</span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => openBotSchedules(activeBot)}
+                >
+                  <Clock size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('定时任务', 'Schedules')}</span>
+                  <span className="grok-row-value">
+                    {(() => {
+                      const count = botMetaMap[activeBot.key]?.scheduleCount ?? 0;
+                      return count > 0 ? t(`${count} 个已开启`, `${count} active`) : '';
+                    })()}
+                  </span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+              </div>
             </section>
 
-            {/* Working directory (inline edit; CAS via center) */}
-            <div className="grok-field-section">
-              <label className="grok-section-label">{t('工作目录', 'Working directory')}</label>
+            <section className="grok-field-section">
+              <h3 className="grok-section-label">{t('更多', 'More')}</h3>
+              <div className="grok-card-group">
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => setSkillReviewTargetKey(botPanelIdentityKey)}
+                >
+                  <Sparkles size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('Skill 审阅', 'Skill Review')}</span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => setVaultTargetKey(botPanelIdentityKey)}
+                >
+                  <LockKeyhole size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('密码库', 'Password Vault')}</span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => void openCenterManagement()}
+                >
+                  <Brain size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('长期记忆', 'Memory')}</span>
+                  <ExternalLink size={16} className="grok-row-chevron" />
+                </button>
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => setScreen('bot-screen')}
+                >
+                  <Monitor size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('电脑', 'Computer')}</span>
+                  <span className="grok-row-value">{isBotBusy ? t('运行中', 'Active') : t('空闲', 'Idle')}</span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+                <button ref={profileManageTrigger} type="button" className="grok-card-row" onClick={() => setScreen('bot-profile-manage')}>
+                  <Settings size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('管理智能体', 'Manage bot')}</span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+              </div>
+            </section>
+          </div>
+        </main>
+      )}
+
+      {screen === 'bot-profile-manage' && activeBot && (
+        <main className="grok-subpage grok-page-enter bot-profile-page">
+          <header className="grok-subpage-topbar">
+            <button
+              type="button"
+              className="grok-floating-circle-btn"
+              aria-label={t('返回智能体资料', 'Back to bot profile')}
+              onClick={backFromProfileManage}
+            >
+              <ArrowLeft size={20} />
+            </button>
+            <h2 className="grok-subpage-header-title">{t('管理智能体', 'Manage bot')}</h2>
+            <span className="grok-topbar-spacer" aria-hidden="true" />
+          </header>
+
+          <div className="grok-subpage-scroll">
+            <section className="grok-field-section">
+              <label className="grok-section-label" htmlFor="profile-working-directory">{t('工作目录', 'Working directory')}</label>
               <div className="grok-card-group">
                 <input
+                  id="profile-working-directory"
                   className="grok-card-input"
                   value={editCwd}
-                  onChange={e => { editCwdDirtyRef.current = true; setEditCwd(e.target.value); }}
+                  disabled={action.busy}
+                  onChange={e => {
+                    editCwdDirtyRef.current = true;
+                    setEditCwd(e.target.value);
+                    setEditCwdSaved(false);
+                  }}
                   placeholder={t('目标 Host 上的绝对路径；空闲后生效', 'Absolute path on the target Host; applies when idle')}
                 />
                 {editCwdError && (
@@ -4959,7 +5080,7 @@ ${newer}` : draftSnapshot;
                 )}
                 {!editCwdError && editCwdRevision === null && (
                   <p className="secondary profile-card-hint">
-                    {t('正在读取中心修订…', 'Loading the center revision…')}
+                    {t('正在读取目录…', 'Loading directory…')}
                   </p>
                 )}
                 <p className="secondary profile-card-hint">
@@ -4968,12 +5089,41 @@ ${newer}` : draftSnapshot;
                     'Saved to the center and applied when this Bot is idle; running work keeps its directory and no files are moved.',
                   )}
                 </p>
+                {editCwdSaved && (
+                  <p className="secondary profile-card-hint" role="status">{t('工作目录已保存', 'Working directory saved')}</p>
+                )}
+                <div className="profile-directory-actions">
+                  <button
+                    type="button"
+                    className="grok-done-pill-btn"
+                    disabled={action.busy || editCwdRevision === null || !editCwd.trim() || editCwd.trim() === editCwdBaseline}
+                    onClick={() => void handleSaveBotEdit('cwd')}
+                  >
+                    {t('保存工作目录', 'Save working directory')}
+                  </button>
+                </div>
               </div>
-            </div>
+              <ErrorNotice
+                error={editSaveErrors.cwd}
+                onDismiss={() => setEditSaveErrors(errors => ({ ...errors, cwd: '' }))}
+              />
+            </section>
 
-            {/* Grouped Card: Primary Bot Switch, Archive & Delete Lifecycle */}
-            <div className="grok-field-section">
-              <label className="grok-section-label">{t('节点与生命周期管理', 'Lifecycle Management')}</label>
+            <section className="grok-card-group">
+              <button
+                type="button"
+                className="grok-card-row"
+                onClick={() => openModelPickerSheet('advanced')}
+                disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
+              >
+                <Settings size={20} className="grok-row-icon" />
+                <span className="grok-row-label">{t('高级设置', 'Advanced Settings')}</span>
+                <ChevronRight size={18} className="grok-row-chevron" />
+              </button>
+            </section>
+
+            <section className="grok-field-section">
+              <h3 className="grok-section-label">{t('智能体状态', 'Bot status')}</h3>
               <section className="grok-card-group">
                 {activeBot.isPrimary ? (
                   <div className="grok-card-row no-active">
@@ -5037,7 +5187,7 @@ ${newer}` : draftSnapshot;
                 )}
               </section>
               <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
-            </div>
+            </section>
           </div>
         </main>
       )}
@@ -5618,7 +5768,7 @@ ${newer}` : draftSnapshot;
               <button
                 type="button"
                 className="grok-done-pill-btn"
-                disabled={action.busy || !scheduleDraft.prompt.trim()}
+                disabled={action.busy || scheduleOffline || !scheduleDraft.prompt.trim()}
                 onClick={() => void handleSaveSchedule()}
               >
                 {action.busy ? t('保存中', 'Saving') : t('保存', 'Save')}
@@ -5627,6 +5777,7 @@ ${newer}` : draftSnapshot;
               <button
                 type="button"
                 className="grok-done-pill-btn"
+                disabled={action.busy || scheduleOffline}
                 onClick={() => openScheduleCreate()}
               >
                 <Plus size={16} className="grok-icon-mr-4" />
@@ -5637,44 +5788,32 @@ ${newer}` : draftSnapshot;
 
           {!scheduleEditing ? (
             <div className="grok-subpage-scroll">
-              {/* Filter Tabs */}
-              <div className="grok-schedule-filter-bar" role="tablist">
-                {(
-                  [
-                    {
-                      id: 'all' as const,
-                      label: t(`全部 (${botScheduleState.tasks.length})`, `All (${botScheduleState.tasks.length})`),
-                    },
-                    {
-                      id: 'enabled' as const,
-                      label: t(
-                        `已开启 (${botScheduleState.tasks.filter(x => x.enabled !== false).length})`,
-                        `Active (${botScheduleState.tasks.filter(x => x.enabled !== false).length})`,
-                      ),
-                    },
-                    {
-                      id: 'paused' as const,
-                      label: t(
-                        `已暂停 (${botScheduleState.tasks.filter(x => x.enabled === false).length})`,
-                        `Paused (${botScheduleState.tasks.filter(x => x.enabled === false).length})`,
-                      ),
-                    },
-                  ]
-                ).map(tab => (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    role="tab"
-                    aria-selected={scheduleFilter === tab.id}
-                    className={`grok-schedule-filter-tab${scheduleFilter === tab.id ? ' active' : ''}`}
-                    onClick={() => setScheduleFilter(tab.id)}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
+              {(scheduleFilter !== 'all' ||
+                (scheduleTasks.some(task => task.enabled !== false) && scheduleTasks.some(task => task.enabled === false))) && (
+                <div className="grok-schedule-filter-bar" role="group" aria-label={t('按任务状态筛选', 'Filter by schedule status')}>
+                  {([
+                    { id: 'all', label: t('全部', 'All') },
+                    { id: 'enabled', label: t('已开启', 'Active') },
+                    { id: 'paused', label: t('已暂停', 'Paused') },
+                  ] as const).map(tab => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      aria-pressed={scheduleFilter === tab.id}
+                      className={`grok-schedule-filter-tab${scheduleFilter === tab.id ? ' active' : ''}`}
+                      onClick={() => setScheduleFilter(tab.id)}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+              )}
 
-              {!botScheduleState.exactAlarmGranted && (
+              {scheduleOffline && (
+                <p className="grok-card-footnote" role="status">{t('目标设备离线，连接后可修改定时任务。', 'The target device is offline. Reconnect to change schedules.')}</p>
+              )}
+
+              {botScheduleState.botKey === activeBot.key && !botScheduleState.exactAlarmGranted && (
                 <section className="grok-card-group grok-schedule-permission-banner">
                   <div className="grok-schedule-permission-text">
                     <strong>{t('精确闹钟权限未开启', 'Exact Alarm Permission Needed')}</strong>
@@ -5696,7 +5835,7 @@ ${newer}` : draftSnapshot;
               )}
 
               {(() => {
-                const filteredTasks = botScheduleState.tasks.filter(task => {
+                const filteredTasks = scheduleTasks.filter(task => {
                   if (scheduleFilter === 'enabled') return task.enabled !== false;
                   if (scheduleFilter === 'paused') return task.enabled === false;
                   return true;
@@ -5709,11 +5848,13 @@ ${newer}` : draftSnapshot;
                     <section className="grok-card-group grok-schedule-empty">
                       <Clock size={32} className="grok-row-icon" />
                       <h4>
-                        {scheduleFilter === 'all'
-                          ? t(`还没有为「${botDisplayName}」设置定时任务`, `No schedules for ${botDisplayName}`)
+                        {scheduleOffline && botScheduleState.botKey !== activeBot.key
+                          ? t('暂无可查看的任务记录', 'No schedule records available')
                           : scheduleFilter === 'enabled'
                             ? t('暂无已开启的定时任务', 'No active schedules')
-                            : t('暂无已暂停的定时任务', 'No paused schedules')}
+                            : scheduleFilter === 'paused'
+                              ? t('暂无已暂停的定时任务', 'No paused schedules')
+                              : t(`还没有为「${botDisplayName}」设置定时任务`, `No schedules for ${botDisplayName}`)}
                       </h4>
                       <p>
                         {t(
@@ -5724,6 +5865,7 @@ ${newer}` : draftSnapshot;
                       <button
                         type="button"
                         className="grok-done-pill-btn grok-btn-mt-8"
+                        disabled={action.busy || scheduleOffline}
                         onClick={() => openScheduleCreate()}
                       >
                         <Plus size={16} className="grok-icon-mr-4" />
@@ -5734,107 +5876,51 @@ ${newer}` : draftSnapshot;
                 }
 
                 return (
-                  <div className="grok-schedule-list">
+                  <div className="grok-card-group grok-schedule-list">
                     {filteredTasks.map(task => {
                       const isEnabled = task.enabled !== false;
-                      const accentColor = resolveBotAvatarPreset(
-                        botAvatarKey(activeBot),
-                        activeBot.role,
-                        activeBot.isPrimary,
-                      ).color;
+                      const prompt = Array.from(task.prompt?.trim().replace(/\s+/g, ' ') ?? '');
+                      const promptTitle = prompt.slice(0, 48).join('') + (prompt.length > 48 ? '…' : '');
+                      const title = task.title?.trim() || promptTitle ||
+                        t('未命名定时任务', 'Untitled schedule');
+                      const latestStatus = task.latestRun?.status;
+                      const runNotice = latestStatus === 'unconfirmed'
+                        ? t('上次结果待确认', 'Last run unconfirmed')
+                        : latestStatus === 'unanswered'
+                          ? t('上次未完成', 'Last run incomplete')
+                          : latestStatus === 'not_sent' || latestStatus === 'skipped_offline' || latestStatus === 'skipped_capacity'
+                            ? t('上次未执行', 'Last run skipped')
+                            : '';
                       return (
-                        <section
-                          key={task.id}
-                          className={`grok-card-group grok-schedule-card${isEnabled ? '' : ' paused'}`}
-                        >
-                          <div className="grok-schedule-card-top">
-                            <div
-                              className="grok-schedule-card-time-wrap"
-                              role="button"
-                              tabIndex={0}
-                              onClick={() => openScheduleEdit(task)}
-                              onKeyDown={e => {
-                                if (e.key === 'Enter' || e.key === ' ') {
-                                  e.preventDefault();
-                                  openScheduleEdit(task);
-                                }
-                              }}
-                            >
-                              <span className="grok-schedule-time">{task.time || '09:00'}</span>
-                              <div className="grok-schedule-badges">
-                                <span className="grok-schedule-badge">
-                                  {formatScheduleRepeatLabel(task, t)}
-                                </span>
-                                <span className={`grok-schedule-badge ${task.alarmMode === 'alarmClock' ? 'alarm' : 'silent'}`}>
-                                  {task.alarmMode === 'alarmClock'
-                                    ? <><Bell size={12} />{t('强提醒', 'Alarm')}</>
-                                    : <><Zap size={12} />{t('后台执行', 'Silent')}</>}
-                                </span>
-                              </div>
-                            </div>
-
-                            <button
-                              type="button"
-                              role="switch"
-                              aria-checked={isEnabled}
-                              className={`grok-toggle-switch${isEnabled ? ' checked' : ''}`}
-                              style={isEnabled ? ({ '--grok-toggle-bg': accentColor } as React.CSSProperties) : undefined}
-                              onClick={() => void handleToggleSchedule(task, !isEnabled)}
-                            >
-                              <span className="grok-toggle-knob" />
-                            </button>
-                          </div>
-
-                          <div
-                            className="grok-schedule-card-body"
-                            role="button"
-                            tabIndex={0}
+                        <div key={task.id} className="grok-schedule-row">
+                          <button
+                            type="button"
+                            className="grok-schedule-entry"
+                            disabled={action.busy}
                             onClick={() => openScheduleEdit(task)}
-                            onKeyDown={e => {
-                              if (e.key === 'Enter' || e.key === ' ') {
-                                e.preventDefault();
-                                openScheduleEdit(task);
-                              }
-                            }}
                           >
-                            <div className="grok-schedule-title">
-                              {task.title || t('未命名定时任务', 'Untitled Task')}
-                            </div>
-                            <div className="grok-schedule-prompt">
-                              {task.prompt || t('点击编辑任务指令…', 'Tap to edit prompt…')}
-                            </div>
-                          </div>
-
-                          <div className="grok-schedule-card-footer">
+                            <span className="grok-schedule-title">{title}</span>
                             <span className="grok-schedule-next">
                               {isEnabled
-                                ? `${t('下次执行：', 'Next: ')}${formatScheduleNextRun(
-                                    task.nextRunAt,
-                                    botScheduleState.timeZone,
-                                    t,
-                                  )}`
+                                ? t('下次执行 · ', 'Next run · ') + formatScheduleNextRun(task.nextRunAt, botScheduleState.timeZone, t)
                                 : t('已暂停', 'Paused')}
+                              {runNotice && <span className="grok-schedule-run-notice">{` · ${runNotice}`}</span>}
                             </span>
-                            <div className="grok-schedule-actions">
-                              <button
-                                type="button"
-                                className="grok-schedule-icon-btn"
-                                aria-label={t('编辑', 'Edit')}
-                                onClick={() => openScheduleEdit(task)}
-                              >
-                                <Pencil size={15} />
-                              </button>
-                              <button
-                                type="button"
-                                className="grok-schedule-icon-btn danger"
-                                aria-label={t('删除', 'Delete')}
-                                onClick={() => void handleDeleteSchedule(task)}
-                              >
-                                <Trash2 size={15} />
-                              </button>
-                            </div>
-                          </div>
-                        </section>
+                          </button>
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={isEnabled}
+                            aria-label={t(`启用任务「${title}」`, `Enable schedule “${title}”`)}
+                            className="grok-schedule-toggle"
+                            disabled={action.busy || scheduleOffline}
+                            onClick={() => void handleToggleSchedule(task, !isEnabled)}
+                          >
+                            <span className={`grok-toggle-switch${isEnabled ? ' checked' : ''}`} aria-hidden="true">
+                              <span className="grok-toggle-knob" />
+                            </span>
+                          </button>
+                        </div>
                       );
                     })}
                   </div>
@@ -5842,12 +5928,15 @@ ${newer}` : draftSnapshot;
               })()}
 
               <ErrorNotice
-                error={action.error || botScheduleState.schedulingError}
+                error={action.error || scheduleError}
                 onDismiss={action.error ? () => action.setError('') : undefined}
               />
             </div>
           ) : (
             <div className="grok-subpage-scroll">
+              {scheduleOffline && (
+                <p className="grok-card-footnote" role="status">{t('目标设备离线，连接后可修改定时任务。', 'The target device is offline. Reconnect to change schedules.')}</p>
+              )}
               {/* Time & Repeat Section */}
               <div className="grok-field-section">
                 <label className="grok-section-label">{t('执行时间与周期', 'Time & Recurrence')}</label>
@@ -6069,11 +6158,12 @@ ${newer}` : draftSnapshot;
                   <button
                     type="button"
                     className="grok-card-row danger-text"
+                    disabled={action.busy || scheduleOffline}
                     onClick={() => {
-                      const existing = botScheduleState.tasks.find(x => x.id === scheduleDraft.id);
+                      const existing = scheduleTasks.find(task => task.id === scheduleDraft.id);
                       if (existing) {
-                        void handleDeleteSchedule(existing);
-                        setScheduleEditing(null);
+                        action.setError('');
+                        setScheduleDeleteTarget(existing);
                       }
                     }}
                   >
@@ -6084,11 +6174,32 @@ ${newer}` : draftSnapshot;
               )}
 
               <ErrorNotice
-                error={action.error || botScheduleState.schedulingError}
+                error={scheduleDeleteTarget ? '' : action.error || scheduleError}
                 onDismiss={action.error ? () => action.setError('') : undefined}
               />
             </div>
           )}
+          <Dialog
+            open={scheduleDeleteTarget !== null}
+            onOpenChange={open => { if (!open && !action.busy) setScheduleDeleteTarget(null); }}
+            title={t('删除定时任务', 'Delete schedule')}
+          >
+            <p className="secondary">{t('确定删除这个定时任务？', 'Delete this scheduled task?')}</p>
+            <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
+            <div className="dialog-actions">
+              <button type="button" className="button secondary-button" disabled={action.busy} onClick={() => setScheduleDeleteTarget(null)}>
+                {t('取消', 'Cancel')}
+              </button>
+              <button
+                type="button"
+                className="button danger-button"
+                disabled={action.busy || scheduleOffline}
+                onClick={() => { if (scheduleDeleteTarget) void handleDeleteSchedule(scheduleDeleteTarget); }}
+              >
+                {action.busy ? t('删除中…', 'Deleting…') : t('确认删除', 'Delete schedule')}
+              </button>
+            </div>
+          </Dialog>
         </main>
       )}
 
@@ -6137,6 +6248,7 @@ ${newer}` : draftSnapshot;
                     scopeKind="room"
                     initialScopeId={scopeConversationTarget.scope.scope.scopeId}
                     knownBots={knownBots}
+                    onHistoryViewed={markRoomHistoryViewed}
                     settingsOpen={roomSettingsOpen}
                     onSettingsOpenChange={setRoomSettingsOpen}
                     onDeleted={() => {
@@ -6209,7 +6321,7 @@ ${newer}` : draftSnapshot;
                 devices={remoteDevices}
                 bots={allBotItems}
                 rooms={roomConversations}
-                onOpenSettings={() => setScreen('settings')}
+                onOpenSettings={openCenterSettings}
               />
             )}
           </div>
@@ -6219,16 +6331,21 @@ ${newer}` : draftSnapshot;
       {/* ==================== SCREEN 8: SETTINGS VIEW ==================== */}
       {screen === 'settings' && (
         <HubSettingsView
-          onBack={() => setScreen('hub')}
+          page={settingsPage}
+          onOpenPage={setSettingsPage}
+          onBack={backFromSettings}
           ensureRemoteApi={ensureRemoteApi}
           remoteProfiles={remoteProfiles}
           remoteIdentity={remoteIdentity}
           remoteConnected={remoteConnected}
           remoteDevices={remoteDevices}
-          setRemoteDevices={setRemoteDevices}
-          onRemoteUpdated={() => {
-            void syncRemoteBots();
-          }}
+          directoryReadFailed={directoryReadFailed}
+          directoryCurrent={!directoryReadFailed && remoteConnected && remoteIdentity !== null &&
+            remoteDirectory.identity?.generation === remoteIdentity.generation &&
+            remoteDirectory.identity.profileId === remoteIdentity.profileId}
+          localDeviceId={localHost?.deviceId}
+          onRemoteDevices={(devices, identity) => setRemoteDirectory({ devices, identity, failedGeneration: null })}
+          onRemoteUpdated={syncRemoteBots}
           archivedCount={archivedBots.length}
           onOpenArchivedBots={() => { setLibraryReturnScreen('settings'); setScreen('archived-bots'); }}
           onOpenPending={() => { setLibraryReturnScreen('settings'); setScreen('pending'); }}
@@ -6346,7 +6463,7 @@ ${newer}` : draftSnapshot;
       {modelTarget && activeBot?.key === modelTarget.botKey && activeBot.botId === modelTarget.botId &&
         activeCenter === modelTarget.center && remoteConnected && remoteIdentity?.generation === modelTarget.identity.generation &&
         (activeBot.hostKind === 'local' ? localHost?.deviceId : activeBot.hostId) === modelTarget.identity.targetDeviceId &&
-        (screen === 'bot-profile' || (screen === 'bot-edit' && editMode === 'edit')) &&
+        (screen === 'bot-profile' || screen === 'bot-profile-manage' || (screen === 'bot-edit' && editMode === 'edit')) &&
         <BotModelSheet key={`${modelTarget.center}|${modelTarget.botKey}|${modelTarget.identity.generation}|${modelTarget.tab}`} api={modelTarget.api} identity={modelTarget.identity} botId={modelTarget.botId} initialTab={modelTarget.tab} onClose={() => setModelTarget(null)}/>}
 
       {skillReviewTargetKey === botPanelIdentityKey && activeBot && screen === 'bot-profile' ? (
@@ -6667,56 +6784,6 @@ function HubPrimaryHero({
         </span>
       </div>
     </button>
-  );
-}
-
-/** 普通 Bot 行：ConversationRow 承载点击/长按/键盘菜单，保 host badge 与时间。 */
-function HubBotRow({
-  item,
-  preset,
-  offline,
-  isPrimaryActive,
-  snippet,
-  unread,
-  timestampMs,
-  pinned,
-  onOpen,
-  onOpenMenu,
-}: {
-  item: UnifiedBotItem;
-  preset: GrokAvatarPreset;
-  offline: boolean;
-  isPrimaryActive: boolean;
-  snippet: string;
-  unread: boolean;
-  /** server/meta 最大值，与混排排序一致。 */
-  timestampMs: number;
-  pinned?: boolean;
-  onOpen: () => void;
-  onOpenMenu: (position: { x: number; y: number }) => void;
-}) {
-  return (
-    <ConversationRow
-      className={`hub-bot-row${offline ? ' is-offline' : ''}`}
-      title={item.role}
-      preview={snippet}
-      timestamp={timestampMs || null}
-      unread={unread}
-      pinned={pinned}
-      avatar={
-        <GrokBotAvatar
-          preset={preset}
-          offline={offline}
-          isPrimary={isPrimaryActive}
-          starBadge={isPrimaryActive}
-          platformBadge={<PlatformLogoIcon platform={item.platform} size={11} />}
-          size={52}
-        />
-      }
-      onOpen={onOpen}
-      onOpenMenu={onOpenMenu}
-      meta={`${item.hostLabel}${offline ? ' · 离线' : ''}`}
-    />
   );
 }
 
@@ -7443,13 +7510,18 @@ function RemotePendingComposer({
 }
 
 function HubSettingsView({
+  page,
+  onOpenPage,
   onBack,
   ensureRemoteApi,
   remoteProfiles,
   remoteIdentity,
   remoteConnected,
   remoteDevices,
-  setRemoteDevices,
+  directoryReadFailed,
+  directoryCurrent,
+  localDeviceId,
+  onRemoteDevices,
   onRemoteUpdated,
   archivedCount,
   onOpenArchivedBots,
@@ -7457,14 +7529,19 @@ function HubSettingsView({
   onOpenModelSheet,
   onOpenSystemSettings,
 }: {
+  page: HubSettingsPage;
+  onOpenPage(page: HubSettingsPage): void;
   onBack(): void;
   ensureRemoteApi(): Promise<DesktopPanelApi | null>;
   remoteProfiles: DesktopUiProfile[];
   remoteIdentity: DesktopIdentity | null;
   remoteConnected: boolean;
   remoteDevices: DevicesDirectoryItem[];
-  setRemoteDevices(items: DevicesDirectoryItem[]): void;
-  onRemoteUpdated(): void;
+  directoryReadFailed: boolean;
+  directoryCurrent: boolean;
+  localDeviceId?: string | null;
+  onRemoteDevices(items: DevicesDirectoryItem[], identity: DesktopIdentity): void;
+  onRemoteUpdated(): Promise<void>;
   archivedCount: number;
   onOpenArchivedBots(): void;
   onOpenPending(): void;
@@ -7474,9 +7551,15 @@ function HubSettingsView({
   const t = useText();
   const action = useAction();
   const centerConn = useCenterConnection();
+  const updateSummary = useClientUpdateSummary();
+  const titleId = useId();
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollByPage = useRef<Partial<Record<HubSettingsPage, number>>>({});
+  const previousPage = useRef<HubSettingsPage | null>(null);
 
   const [editingCenter, setEditingCenter] = useState(false);
-  const [renamingDeviceId, setRenamingDeviceId] = useState<string | null>(null);
+  const [renamingDevice, setRenamingDevice] = useState<{ deviceId: string; generation: number } | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
 
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(remoteIdentity?.profileId ?? null);
@@ -7494,12 +7577,38 @@ function HubSettingsView({
   const [voice, setVoice] = useState<HostVoiceSettings>();
   const [showLocalConfig, setShowLocalConfig] = useState(false);
 
+  useLayoutEffect(() => {
+    const previous = previousPage.current;
+    if (previous === page) return;
+    previousPage.current = page;
+    if (previous === 'connection') {
+      setEditingCenter(false);
+      centerConn.setToken('');
+    }
+    if (previous === 'manual') {
+      setToken('');
+      setCa('');
+    }
+    if (previous === 'devices') setRenamingDevice(null);
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollByPage.current[page] ?? 0;
+    if (previous || page !== 'overview') titleRef.current?.focus({ preventScroll: true });
+  }, [page, centerConn.setToken]);
+
   useEffect(() => {
     void ensureRemoteApi();
     void BotHost.voiceSettings()
       .then(v => setVoice(v))
       .catch(() => {});
   }, [ensureRemoteApi]);
+
+  const activeProfile = remoteProfiles.find(profile => profile.id === selectedProfileId) ?? remoteProfiles[0];
+  const selectedIsConnected = remoteConnected && Boolean(activeProfile && activeProfile.id === remoteIdentity?.profileId);
+
+  const selectRemoteProfile = (profileId: string | null) => {
+    setSelectedProfileId(profileId);
+    setToken('');
+    setCa('');
+  };
 
   const saveRemoteProfile = (e: React.FormEvent) => {
     e.preventDefault();
@@ -7523,7 +7632,7 @@ function HubSettingsView({
               url: formUrl.trim(),
               deviceId: formDeviceId.trim(),
             };
-      await (api as DesktopPanelApi & { queueWrite(fn: (s: any) => any): Promise<any> }).queueWrite(s => ({
+      await api.queueWrite(s => ({
         ...s,
         profiles: [...s.profiles, next],
       }));
@@ -7531,7 +7640,7 @@ function HubSettingsView({
       setFormUrl('');
       setFormDeviceId('');
       setAddingRemote(false);
-      setSelectedProfileId(next.id);
+      selectRemoteProfile(next.id);
     });
   };
 
@@ -7539,69 +7648,58 @@ function HubSettingsView({
     action.run(async () => {
       const api = await ensureRemoteApi();
       if (!api) return;
-      await (api as DesktopPanelApi & { queueWrite(fn: (s: any) => any): Promise<any> }).queueWrite(s => ({
+      await api.queueWrite(s => ({
         ...s,
         profiles: s.profiles.filter((p: DesktopUiProfile) => p.id !== profileId),
       }));
-      if (selectedProfileId === profileId) setSelectedProfileId(null);
+      if (activeProfile?.id === profileId) selectRemoteProfile(null);
     });
 
-  const connectRemoteProfile = () =>
-    action.run(async () => {
+  const connectRemoteProfile = () => {
+    const profile = activeProfile;
+    if (!profile || !token.trim()) return;
+    const input: DesktopConnectionInput =
+      profile.kind === 'local'
+        ? {
+            kind: 'local',
+            url: profile.url,
+            token: token.trim(),
+            ...(profile.expectedDeviceId ? { expectedDeviceId: profile.expectedDeviceId } : {}),
+          }
+        : {
+            kind: 'relay',
+            url: profile.url,
+            deviceId: profile.deviceId,
+            token: token.trim(),
+            ...(ca.trim() ? { ca: ca.trim() } : {}),
+          };
+    setToken('');
+    setCa('');
+    return action.run(async () => {
       const api = await ensureRemoteApi();
-      const profile = remoteProfiles.find(p => p.id === (selectedProfileId ?? remoteProfiles[0]?.id));
-      if (!api || !profile || !token.trim()) return;
-      const input: DesktopConnectionInput =
-        profile.kind === 'local'
-          ? {
-              kind: 'local',
-              url: profile.url,
-              token: token.trim(),
-              ...(profile.expectedDeviceId ? { expectedDeviceId: profile.expectedDeviceId } : {}),
-            }
-          : {
-              kind: 'relay',
-              url: profile.url,
-              deviceId: profile.deviceId,
-              token: token.trim(),
-              ...(ca.trim() ? { ca: ca.trim() } : {}),
-            };
+      if (!api) throw new Error(t('当前环境不支持远程连接组件', 'Remote client unavailable'));
       api.setTransportConnected(false);
       api.setIdentity(null);
-      try {
-        const status = await api.broker(
-          { profileId: profile.id, targetDeviceId: '', generation: 0, kind: profile.kind },
-          'connect',
-          { connection: input },
-        );
-        let targetDeviceId = '';
-        if (status.connection && status.connection.kind === 'local') {
-          targetDeviceId = status.connection.deviceId ?? '';
+      const status = await api.broker(
+        { profileId: profile.id, targetDeviceId: '', generation: 0, kind: profile.kind },
+        'connect',
+        { connection: input },
+      );
+      const targetDeviceId = status.connection?.kind === 'local' ? status.connection.deviceId ?? '' : '';
+      const newIdentity = api.setIdentity({ profileId: profile.id, targetDeviceId, kind: profile.kind });
+      const connected = status.phase === 'connected';
+      api.setTransportConnected(connected);
+      if (connected && newIdentity) {
+        const result = await api.broker(newIdentity, 'devices', { limit: 20, cursor: null });
+        if (api.identity?.generation !== newIdentity.generation || !api.transportConnected) return;
+        onRemoteDevices(result.items, newIdentity);
+        if (profile.kind === 'relay' && result.items.length === 1) {
+          api.setIdentity({ profileId: profile.id, targetDeviceId: result.items[0].deviceId, kind: 'relay' });
         }
-        const newIdentity = api.setIdentity({
-          profileId: profile.id,
-          targetDeviceId,
-          kind: profile.kind,
-        });
-        const isConn = status.phase === 'connected';
-        api.setTransportConnected(isConn);
-        if (isConn && newIdentity) {
-          const page = await api.broker(newIdentity, 'devices', { limit: 20, cursor: null });
-          setRemoteDevices(page.items);
-          if (profile.kind === 'relay' && page.items.length === 1) {
-            api.setIdentity({
-              profileId: profile.id,
-              targetDeviceId: page.items[0].deviceId,
-              kind: 'relay',
-            });
-          }
-          onRemoteUpdated();
-        }
-      } finally {
-        setToken('');
-        setCa('');
+        void onRemoteUpdated();
       }
     });
+  };
 
   const disconnectRemote = () =>
     action.run(async () => {
@@ -7609,7 +7707,18 @@ function HubSettingsView({
       if (!api || !remoteIdentity) return;
       api.setTransportConnected(false);
       await api.broker(remoteIdentity, 'disconnect', {});
-      onRemoteUpdated();
+      void onRemoteUpdated();
+    });
+
+  const renameDevice = (deviceId: string) =>
+    action.run(async () => {
+      const api = await ensureRemoteApi();
+      if (!remoteIdentity || !api?.transportConnected || api.identity?.generation !== remoteIdentity.generation) {
+        throw new Error(t('设备连接已变化，请刷新后重试。', 'The device connection changed. Refresh and try again.'));
+      }
+      await api.broker(remoteIdentity, 'rename_device', { deviceId, displayName: renameDraft.trim() });
+      setRenamingDevice(null);
+      void onRemoteUpdated();
     });
 
   const toggleLocalConfig = () => {
@@ -7647,95 +7756,176 @@ function HubSettingsView({
     });
   };
 
-  const activeProfile = remoteProfiles.find(p => p.id === (selectedProfileId ?? remoteProfiles[0]?.id));
   const showCenterForm = !centerConn.ready || editingCenter;
+  const centerAddress = centerConn.status?.centerUrl || centerConn.saved?.url;
+  const centerDeviceId = centerConn.saved?.deviceId || (centerConn.ready ? centerConn.deviceId : '');
+  const centerClientId = centerConn.status?.clientId;
+  const centerStatus = (
+    <Badge tone={centerConn.ready ? 'success' : centerConn.connecting ? 'accent' : 'neutral'}>
+      {centerConn.ready ? t('已连接', 'Connected')
+        : centerConn.connecting ? t('连接中', 'Connecting')
+          : centerConn.error ? t('连接异常', 'Connection issue') : t('未连接', 'Disconnected')}
+    </Badge>
+  );
+  const pageTitles = {
+    overview: t('设置', 'Settings'),
+    connection: t('中心连接', 'Center connection'),
+    devices: t('设备', 'Devices'),
+    manual: t('手动连接设备', 'Connect a device'),
+    updates: t('客户端更新', 'Client update'),
+    permissions: t('权限与后台', 'Permissions'),
+  };
+  const canRename = directoryCurrent && remoteIdentity?.kind === 'relay';
+  const directoryNotice = directoryReadFailed
+    ? remoteDevices.length > 0
+      ? t('暂时无法刷新目录，显示上次读取的设备。', 'Could not refresh the directory. Showing previously seen devices.')
+      : t('暂时无法读取设备目录。', 'Could not read the device directory.')
+    : remoteDevices.length > 0 && !directoryCurrent
+      ? t('显示上次读取的设备，当前状态待确认。', 'Showing previously seen devices. Their current status is unknown.')
+      : '';
+  const actionNotice = <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />;
 
   return (
-    <main className="grok-subpage grok-page-enter hst-settings">
+    <main className="grok-subpage grok-page-enter hst-settings" aria-labelledby={titleId}>
       <header className="grok-subpage-topbar">
         <button type="button" className="grok-floating-circle-btn" onClick={onBack} aria-label={t('返回', 'Back')}>
           <ArrowLeft size={20} />
         </button>
-        <h2 className="grok-subpage-header-title">{t('设置', 'Settings')}</h2>
-        <span className="hst-topbar-spacer" />
+        <h2 ref={titleRef} id={titleId} tabIndex={-1} className="grok-subpage-header-title">{pageTitles[page]}</h2>
+        <span className="hst-topbar-spacer" aria-hidden="true" />
       </header>
 
-      <div className="grok-subpage-scroll">
-        {/* 1. 账号与中心 */}
-        <Section title={t('账号与中心', 'Account & Center')}>
-          <Row
-            icon={<Globe />}
-            title={
-              centerConn.ready
-                ? centerConn.status?.centerUrl || centerConn.url || t('已连接中心', 'Center Connected')
-                : centerConn.connecting
-                  ? t('正在后台连接中心…', 'Connecting to center…')
-                  : t('未连接中心服务', 'Center Disconnected')
-            }
-            subtitle={
-              centerConn.ready
-                ? `${t('设备标识：', 'Device: ')}${centerConn.deviceId || centerConn.saved?.deviceId || 'android'}`
-                : centerConn.saved?.url
-                  ? `${t('已保存地址：', 'Saved: ')}${centerConn.saved.url}`
-                  : t('配置中心地址与令牌以同步多端智能体', 'Configure center URL & token to sync bots across devices')
-            }
-            trailing={
-              <Badge tone={centerConn.ready ? 'success' : centerConn.connecting ? 'accent' : 'neutral'}>
-                {centerConn.connecting ? t('连接中', 'Syncing') : centerConn.ready ? t('已连接', 'Connected') : t('未连接', 'Offline')}
-              </Badge>
-            }
-          />
-
-          {centerConn.ready && !editingCenter && (
-            <>
+      <div
+        className="grok-subpage-scroll"
+        ref={scrollRef}
+        onScroll={event => { scrollByPage.current[page] = event.currentTarget.scrollTop; }}
+      >
+        {page !== 'overview' && actionNotice}
+        {page === 'connection' && (
+          <>
+            <Section>
               <Row
-                icon={<ExternalLink />}
-                title={t('在浏览器打开中心管理', 'Open Center Management')}
-                chevron
-                onClick={() => centerConn.openManagement()}
+                icon={<Globe />}
+                title={centerConn.ready ? t('当前中心', 'Current center') : t('连接状态', 'Connection status')}
+                subtitle={centerAddress}
+                trailing={centerStatus}
               />
-              <div className="hst-actions">
-                <button
-                  type="button"
-                  className="hst-btn"
-                  disabled={centerConn.busy}
-                  onClick={() => setEditingCenter(true)}
-                >
-                  {t('更换中心连接', 'Change Center')}
+              {centerConn.ready && !editingCenter && (
+                <>
+                  <Row icon={<ExternalLink />} title={t('在浏览器打开中心管理', 'Open center management')} onClick={centerConn.openManagement} chevron />
+                  <Row title={t('更换中心连接', 'Change center')} disabled={centerConn.busy} onClick={() => setEditingCenter(true)} chevron />
+                  <Row title={t('断开中心', 'Disconnect from center')} disabled={centerConn.busy} onClick={centerConn.disconnect} />
+                </>
+              )}
+            </Section>
+            {showCenterForm ? (
+              <Section title={editingCenter ? t('更换中心连接', 'Change center') : t('连接中心', 'Connect to center')}>
+                <OnboardingPanel onDone={() => setEditingCenter(false)} />
+                {editingCenter && centerConn.ready && (
+                  <div className="hst-actions">
+                    <button type="button" className="hst-btn" disabled={centerConn.busy} onClick={() => {
+                      setEditingCenter(false);
+                      centerConn.setToken('');
+                    }}>
+                      {t('取消', 'Cancel')}
+                    </button>
+                  </div>
+                )}
+              </Section>
+            ) : <ErrorNotice error={centerConn.error} onDismiss={() => centerConn.setError('')} />}
+            {(centerDeviceId || centerClientId) && (
+              <Disclosure title={t('连接详情', 'Connection details')}>
+                <Section>
+                  {centerDeviceId && <Row title={t('设备标识', 'Device ID')} subtitle={centerDeviceId} />}
+                  {centerClientId && <Row title={t('客户端标识', 'Client ID')} subtitle={centerClientId} />}
+                </Section>
+              </Disclosure>
+            )}
+          </>
+        )}
+
+        {page === 'devices' && (
+          <>
+            <Section
+              title={t('设备目录', 'Device directory')}
+              action={remoteConnected && (
+                <button type="button" className="bs-link" disabled={action.busy} onClick={() => void action.run(onRemoteUpdated)}>
+                  {t('刷新', 'Refresh')}
                 </button>
-                <button
-                  type="button"
-                  className="hst-btn"
-                  disabled={centerConn.busy}
-                  onClick={() => void centerConn.disconnect()}
-                >
-                  {t('断开中心', 'Disconnect')}
-                </button>
-              </div>
-            </>
-          )}
+              )}
+            >
+              {directoryNotice && <Row title={<span role="status" className="bs-row-sub">{directoryNotice}</span>} />}
+              {localDeviceId && !remoteDevices.some(device => device.deviceId === localDeviceId) && (
+                <Row icon={<PlatformLogoIcon platform="android" />} title={t('此设备', 'This device')} />
+              )}
+              {remoteDevices.map(device => {
+                const renaming = canRename && renamingDevice?.deviceId === device.deviceId &&
+                  renamingDevice.generation === remoteIdentity?.generation;
+                return (
+                  <div className="hst-device-row" key={device.deviceId}>
+                    <span className={'hst-device-badge' + (directoryCurrent && !device.online ? ' is-offline' : '')} aria-hidden="true">
+                      <PlatformLogoIcon platform={device.platform} size={14} />
+                    </span>
+                    {renaming ? (
+                      <>
+                        <input
+                          className="hst-device-name-input"
+                          value={renameDraft}
+                          onChange={event => setRenameDraft(event.target.value)}
+                          aria-label={t('设备名称', 'Device name')}
+                          maxLength={120}
+                          autoFocus
+                        />
+                        <button type="button" className="hst-btn is-primary" disabled={action.busy || !renameDraft.trim()} onClick={() => void renameDevice(device.deviceId)}>
+                          {t('保存', 'Save')}
+                        </button>
+                        <button type="button" className="hst-btn" disabled={action.busy} onClick={() => setRenamingDevice(null)}>
+                          {t('取消', 'Cancel')}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="hst-device-name">
+                          {device.displayName || t('未命名设备', 'Unnamed device')}
+                          {device.deviceId === localDeviceId && <span className="bs-row-sub">{t('本机', 'This device')}</span>}
+                        </span>
+                        {directoryCurrent && (
+                          <Badge tone={device.online ? 'success' : 'neutral'}>{device.online ? t('在线', 'Online') : t('离线', 'Offline')}</Badge>
+                        )}
+                        {canRename && remoteIdentity && (
+                          <button type="button" className="hst-btn is-ghost" disabled={action.busy} onClick={() => {
+                            setRenamingDevice({ deviceId: device.deviceId, generation: remoteIdentity.generation });
+                            setRenameDraft(device.displayName || device.deviceId);
+                          }}>
+                            {t('改名', 'Rename')}
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+              {remoteDevices.length === 0 && !directoryNotice && <Row title={directoryCurrent
+                ? t('暂无目录设备', 'No devices in the directory')
+                : t('设备目录尚未读取', 'Device directory unavailable')} />}
+            </Section>
+            <Section>
+              <Row icon={<Server />} title={pageTitles.manual} onClick={() => onOpenPage('manual')} chevron />
+            </Section>
+          </>
+        )}
 
-          {/* C7 首启引导：无存凭据默认 owner 密码配对；手动令牌与重新配对收入折叠项。 */}
-          {showCenterForm && <OnboardingPanel onDone={() => setEditingCenter(false)} />}
-        </Section>
+        {page === 'updates' && <ClientUpdateSection variant="mobile" />}
+        {page === 'permissions' && <OnboardingPermissions />}
 
-        <OnboardingPermissions />
-        <ClientUpdateSection variant="mobile" />
-
-        {/* 3. 设备 */}
-        <Section
-          title={t('设备', 'Devices')}
+        {page === 'manual' && <Section
+          title={t('连接档案', 'Connection profiles')}
           action={
-            remoteProfiles.length > 0 ? (
-              <button type="button" className="bs-link" onClick={() => setAddingRemote(v => !v)}>
-                {addingRemote ? t('收起', 'Collapse') : t('添加节点', 'Add Host')}
+            remoteProfiles.length > 0 || addingRemote ? (
+              <button type="button" className="bs-link" disabled={action.busy} onClick={() => setAddingRemote(v => !v)}>
+                {addingRemote ? t('收起', 'Collapse') : t('新增连接', 'Add connection')}
               </button>
             ) : undefined
-          }
-          hint={
-            remoteProfiles.length > 0
-              ? t('连接远程节点后，远端主机上的 Bot 会自动出现在主页列表中。', 'Connected remote bots appear directly in your home list.')
-              : undefined
           }
           bare
         >
@@ -7797,43 +7987,37 @@ function HubSettingsView({
 
           {remoteProfiles.length === 0 && !addingRemote ? (
             <div className="bs-card">
-              <Row
-                icon={<Server />}
-                title={t('添加远程节点', 'Add Remote Host')}
-                subtitle={t('默认本机运行', 'Local only')}
-                chevron
-                onClick={() => setAddingRemote(true)}
-              />
+              <Row icon={<Server />} title={t('添加设备连接', 'Add device connection')} onClick={() => setAddingRemote(true)} chevron />
             </div>
-          ) : remoteProfiles.length > 0 ? (
+          ) : activeProfile && (
             <div className="bs-card">
-              {remoteProfiles.map(p => {
-                const active = (selectedProfileId ?? remoteProfiles[0]?.id) === p.id;
-                const isConnectedProfile = remoteConnected && remoteIdentity?.profileId === p.id;
-                return (
-                  <Row
-                    key={p.id}
-                    selected={active}
-                    icon={<Server />}
-                    title={p.title}
-                    subtitle={`${p.kind} · ${p.url}`}
-                    onClick={() => setSelectedProfileId(p.id)}
-                    trailing={
-                      <>
-                        {isConnectedProfile && <Badge tone="success">{t('已连接', 'Connected')}</Badge>}
-                        <button
-                          type="button"
-                          className="hst-btn is-ghost"
-                          aria-label={t('删除节点', 'Remove host')}
-                          onClick={() => void deleteRemoteProfile(p.id)}
-                        >
-                          <Trash2 size={15} />
-                        </button>
-                      </>
-                    }
-                  />
-                );
-              })}
+              {remoteProfiles.map(profile => (
+                <Row
+                  key={profile.id}
+                  selected={activeProfile.id === profile.id}
+                  icon={<Server />}
+                  title={profile.title}
+                  subtitle={(profile.kind === 'local' ? t('直连', 'Direct') : t('中继', 'Relay')) + ' · ' + profile.url}
+                  disabled={action.busy}
+                  onClick={() => {
+                    if (activeProfile.id !== profile.id) selectRemoteProfile(profile.id);
+                  }}
+                  trailing={
+                    <>
+                      {remoteConnected && remoteIdentity?.profileId === profile.id && <Badge tone="success">{t('已连接', 'Connected')}</Badge>}
+                      <button
+                        type="button"
+                        className="hst-btn is-ghost"
+                        disabled={action.busy}
+                        aria-label={t('删除连接档案', 'Remove connection profile') + ' · ' + profile.title}
+                        onClick={() => void deleteRemoteProfile(profile.id)}
+                      >
+                        <Trash2 size={15} aria-hidden="true" />
+                      </button>
+                    </>
+                  }
+                />
+              ))}
 
               <label className="hst-input-row">
                 <span className="hst-input-label">{t('连接令牌', 'Token')}</span>
@@ -7841,274 +8025,226 @@ function HubSettingsView({
                   type="password"
                   autoComplete="new-password"
                   className="hst-input"
+                  disabled={action.busy}
                   value={token}
                   onChange={e => setToken(e.target.value)}
-                  placeholder={t('输入访问 Token', 'Enter access token')}
+                  placeholder={t('输入访问令牌', 'Enter access token')}
                 />
               </label>
 
-              {activeProfile?.kind === 'relay' && (
-                <label className="hst-input-row">
-                  <span className="hst-input-label">{t('CA 证书', 'CA PEM')}</span>
-                  <input
-                    className="hst-input"
-                    value={ca}
-                    onChange={e => setCa(e.target.value)}
-                    placeholder={t('选填 PEM', 'Optional PEM')}
-                  />
-                </label>
+              {activeProfile.kind === 'relay' && (
+                <Disclosure title={t('CA 证书（可选）', 'CA certificate (optional)')}>
+                  <label className="hst-input-row">
+                    <span className="hst-input-label">{t('CA 证书', 'CA certificate')}</span>
+                    <input
+                      className="hst-input"
+                      disabled={action.busy}
+                      value={ca}
+                      onChange={e => setCa(e.target.value)}
+                      placeholder={t('选填 PEM', 'Optional PEM')}
+                    />
+                  </label>
+                </Disclosure>
               )}
 
               <div className="hst-actions">
                 {remoteConnected && (
-                  <button
-                    type="button"
-                    className="hst-btn"
-                    disabled={action.busy}
-                    onClick={() => void disconnectRemote()}
-                  >
-                    {t('断开连接', 'Disconnect')}
+                  <button type="button" className="hst-btn" disabled={action.busy} onClick={() => void disconnectRemote()}>
+                    {t('断开当前连接', 'Disconnect current connection')}
                   </button>
                 )}
-                <button
-                  type="button"
-                  className="hst-btn is-primary"
-                  disabled={action.busy || !token.trim()}
-                  onClick={() => void connectRemoteProfile()}
-                >
-                  {t('连接节点', 'Connect')}
+                <button type="button" className="hst-btn is-primary" disabled={action.busy || !token.trim()} onClick={() => void connectRemoteProfile()}>
+                  {selectedIsConnected ? t('重新连接', 'Reconnect') : t('连接', 'Connect')}
                 </button>
               </div>
-
-              {remoteConnected && remoteIdentity?.kind === 'relay' && remoteDevices.map(dev => (
-                <div className="hst-device-row" key={dev.deviceId}>
-                  <span className={`hst-device-badge${dev.online ? '' : ' is-offline'}`}>
-                    <PlatformLogoIcon platform={dev.platform} size={14} />
-                  </span>
-                  {renamingDeviceId === dev.deviceId ? (
-                    <>
-                      <input
-                        className="hst-device-name-input"
-                        value={renameDraft}
-                        onChange={e => setRenameDraft(e.target.value)}
-                        placeholder={dev.deviceId}
-                        autoFocus
-                      />
-                      <button
-                        type="button"
-                        className="hst-btn is-primary"
-                        disabled={action.busy}
-                        onClick={() =>
-                          void action.run(async () => {
-                            const api = await ensureRemoteApi();
-                            if (!api || !api.identity) throw new Error('Not connected');
-                            await api.broker(api.identity, 'rename_device', {
-                              deviceId: dev.deviceId,
-                              displayName: renameDraft.trim(),
-                            });
-                            setRenamingDeviceId(null);
-                            onRemoteUpdated();
-                          })
-                        }
-                      >
-                        {t('保存', 'Save')}
-                      </button>
-                      <button
-                        type="button"
-                        className="hst-btn"
-                        onClick={() => setRenamingDeviceId(null)}
-                      >
-                        {t('取消', 'Cancel')}
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <span className="hst-device-name">{dev.displayName || dev.deviceId}</span>
-                      <Badge tone={dev.online ? 'success' : 'neutral'}>
-                        {dev.online ? t('在线', 'Online') : t('离线', 'Offline')}
-                      </Badge>
-                      <button
-                        type="button"
-                        className="hst-btn"
-                        onClick={() => {
-                          setRenamingDeviceId(dev.deviceId);
-                          setRenameDraft(dev.displayName || dev.deviceId);
-                        }}
-                      >
-                        {t('改名', 'Rename')}
-                      </button>
-                    </>
-                  )}
-                </div>
-              ))}
             </div>
-          ) : null}
-        </Section>
-
-        {/* 4. 语音 */}
-        <Section title={t('语音', 'Voice')}>
-          <div className="hst-row-static">
-            <span className="bs-row-icon" aria-hidden="true"><AudioLines size={17} /></span>
-            <span className="bs-row-text"><span className="bs-row-title">{t('语音朗读倍速', 'Speech Rate')}</span></span>
-            <span className="hst-select-wrap">
-              <select
-                value={String(voice?.speechRate ?? 1)}
-                onChange={e =>
-                  void action.run(async () => {
-                    const current = voice ?? (await BotHost.voiceSettings());
-                    const next = { ...current, speechRate: Number(e.target.value) };
-                    await BotHost.saveVoiceSettings({ settings: next as HostVoiceSaveInput });
-                    setVoice(await BotHost.voiceSettings());
-                  })
-                }
-              >
-                {[0.75, 1, 1.25, 1.5, 2].map(r => (
-                  <option key={r} value={String(r)}>
-                    {r}×
-                  </option>
-                ))}
-              </select>
-              <ChevronsUpDown size={14} />
-            </span>
-          </div>
-        </Section>
-
-        {/* 5. 智能体 */}
-        <Section title={t('智能体', 'Bots')}>
-          <Row
-            icon={<Archive />}
-            title={t(`已归档智能体 (${archivedCount})`, `Archived Bots (${archivedCount})`)}
-            subtitle={t('14 天后自动清理', '14d auto-delete')}
-            chevron
-            onClick={onOpenArchivedBots}
-          />
-          <Row
-            icon={<Clock />}
-            title={t('待发送', 'Pending')}
-            subtitle={t('离线时保留、尚未确认送达的消息', 'Messages kept offline or not yet confirmed')}
-            chevron
-            onClick={onOpenPending}
-          />
-          {onOpenModelSheet && (
-            <Row
-              icon={<Cpu />}
-              title={t('模型与服务商', 'Providers & Models')}
-              subtitle={t('配置 API 与常用模型', 'Manage API & favorite models')}
-              chevron
-              onClick={onOpenModelSheet}
-            />
           )}
-        </Section>
+        </Section>}
 
-        {/* 6. 系统 */}
-        {onOpenSystemSettings && (
-          <Section title={t('系统', 'System')}>
+        <div className="hst-overview" hidden={page !== 'overview'}>
+          <Section>
             <Row
-              icon={<Settings />}
-              title={t('系统权限与设置', 'System permissions & settings')}
-              subtitle={t('Shizuku、唤醒词、外观等系统级设置', 'Shizuku, wake word, theme and other system settings')}
-              chevron
-              onClick={onOpenSystemSettings}
+              icon={<Globe />}
+              title={<span className="hst-entry-label"><span>{pageTitles.connection}</span>{centerStatus}</span>}
+              onClick={() => onOpenPage('connection')}
             />
+            <Row icon={<Monitor />} title={pageTitles.devices} onClick={() => onOpenPage('devices')} chevron />
+            <Row
+              icon={<Download />}
+              title={updateSummary
+                ? <span className="hst-entry-label"><span>{pageTitles.updates}</span><span className="bs-row-sub">{updateSummary}</span></span>
+                : pageTitles.updates}
+              onClick={() => onOpenPage('updates')}
+              chevron={!updateSummary}
+            />
+            <Row icon={<Bell />} title={t('通知与后台运行', 'Alerts & background')} onClick={() => onOpenPage('permissions')} chevron />
           </Section>
-        )}
 
-        {/* 7. 开发者 */}
-        <Disclosure title={t('开发者', 'Developer')}>
-          <div className="hst-form">
-            <Section title={t('中心连接进阶参数', 'Center TLS & Host Token')} bare>
-              <div className="bs-card">
-                <label className="hst-input-row">
-                  <span className="hst-input-label">{t('本机节点令牌', 'Host Token')}</span>
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    className="hst-input"
-                    value={centerConn.hostToken}
-                    onChange={e => centerConn.setHostToken(e.target.value)}
-                    placeholder={t('选填，留空保持不变', 'Optional; blank keeps current')}
-                  />
-                </label>
-                <label className="hst-input-row">
-                  <span className="hst-input-label">{t('CA 证书', 'CA PEM')}</span>
-                  <input
-                    className="hst-input"
-                    value={centerConn.ca}
-                    onChange={e => centerConn.setCa(e.target.value)}
-                    placeholder={t('自签名证书 PEM（选填）', 'Optional self-signed PEM')}
-                  />
-                </label>
-              </div>
+          {/* 语音 */}
+          <Section title={t('语音', 'Voice')}>
+            <div className="hst-row-static">
+              <span className="bs-row-icon" aria-hidden="true"><AudioLines size={17} /></span>
+              <span className="bs-row-text"><span className="bs-row-title">{t('语音朗读倍速', 'Speech Rate')}</span></span>
+              <span className="hst-select-wrap">
+                <select
+                  value={String(voice?.speechRate ?? 1)}
+                  onChange={e =>
+                    void action.run(async () => {
+                      const current = voice ?? (await BotHost.voiceSettings());
+                      const next = { ...current, speechRate: Number(e.target.value) };
+                      await BotHost.saveVoiceSettings({ settings: next as HostVoiceSaveInput });
+                      setVoice(await BotHost.voiceSettings());
+                    })
+                  }
+                >
+                  {[0.75, 1, 1.25, 1.5, 2].map(r => (
+                    <option key={r} value={String(r)}>
+                      {r}×
+                    </option>
+                  ))}
+                </select>
+                <ChevronsUpDown size={14} />
+              </span>
+            </div>
+          </Section>
+
+          {/* 智能体 */}
+          <Section title={t('智能体', 'Bots')}>
+            <Row
+              icon={<Archive />}
+              title={t(`已归档智能体 (${archivedCount})`, `Archived Bots (${archivedCount})`)}
+              subtitle={t('14 天后自动清理', '14d auto-delete')}
+              chevron
+              onClick={onOpenArchivedBots}
+            />
+            <Row
+              icon={<Clock />}
+              title={t('待发送', 'Pending')}
+              subtitle={t('离线时保留、尚未确认送达的消息', 'Messages kept offline or not yet confirmed')}
+              chevron
+              onClick={onOpenPending}
+            />
+            {onOpenModelSheet && (
+              <Row
+                icon={<Cpu />}
+                title={t('模型与服务商', 'Providers & Models')}
+                subtitle={t('配置 API 与常用模型', 'Manage API & favorite models')}
+                chevron
+                onClick={onOpenModelSheet}
+              />
+            )}
+          </Section>
+
+          {/* 系统 */}
+          {onOpenSystemSettings && (
+            <Section title={t('系统', 'System')}>
+              <Row
+                icon={<Settings />}
+                title={t('系统权限与设置', 'System permissions & settings')}
+                subtitle={t('Shizuku、唤醒词、外观等系统级设置', 'Shizuku, wake word, theme and other system settings')}
+                chevron
+                onClick={onOpenSystemSettings}
+              />
             </Section>
+          )}
 
-            <Section title={t('本机底层配置与凭据', 'Local Host Config')} bare>
-              <div className="bs-card">
-                <Row
-                  icon={<Code2 />}
-                  title={t('高级配置 (JSON)', 'Advanced JSON')}
-                  trailing={<span className="bs-row-sub">{showLocalConfig ? t('收起', 'Hide') : t('展开', 'Show')}</span>}
-                  chevron
-                  onClick={toggleLocalConfig}
-                />
-              </div>
+          {/* 开发者 */}
+          <Disclosure title={t('开发者', 'Developer')}>
+            <div className="hst-form">
+              <Section title={t('中心连接进阶参数', 'Center TLS & Host Token')} bare>
+                <div className="bs-card">
+                  <label className="hst-input-row">
+                    <span className="hst-input-label">{t('本机节点令牌', 'Host Token')}</span>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      className="hst-input"
+                      value={centerConn.hostToken}
+                      onChange={e => centerConn.setHostToken(e.target.value)}
+                      placeholder={t('选填，留空保持不变', 'Optional; blank keeps current')}
+                    />
+                  </label>
+                  <label className="hst-input-row">
+                    <span className="hst-input-label">{t('CA 证书', 'CA PEM')}</span>
+                    <input
+                      className="hst-input"
+                      value={centerConn.ca}
+                      onChange={e => centerConn.setCa(e.target.value)}
+                      placeholder={t('自签名证书 PEM（选填）', 'Optional self-signed PEM')}
+                    />
+                  </label>
+                </div>
+              </Section>
 
-              {showLocalConfig && (
-                <>
-                  <form onSubmit={saveLocalCredentials} className="bs-card">
-                    <label className="hst-input-row">
-                      <span className="hst-input-label">{t('凭据 JSON', 'Credentials JSON')}</span>
-                      <input
-                        type="password"
-                        autoComplete="new-password"
-                        className="hst-input"
-                        value={credJson}
-                        onChange={e => setCredJson(e.target.value)}
-                        placeholder='{"OPENAI_API_KEY": "sk-..."}'
-                      />
-                    </label>
-                    <div className="hst-actions">
-                      <button type="submit" className="hst-btn is-primary" disabled={action.busy}>
-                        {t('保存凭据', 'Save Credentials')}
-                      </button>
-                    </div>
-                  </form>
+              <Section title={t('本机底层配置与凭据', 'Local Host Config')} bare>
+                <div className="bs-card">
+                  <Row
+                    icon={<Code2 />}
+                    title={t('高级配置 (JSON)', 'Advanced JSON')}
+                    trailing={<span className="bs-row-sub">{showLocalConfig ? t('收起', 'Hide') : t('展开', 'Show')}</span>}
+                    chevron
+                    onClick={toggleLocalConfig}
+                  />
+                </div>
 
-                  {hostSettings && (
-                    <form onSubmit={saveLocalSettings} className="bs-card">
-                      <div className="hst-row-static">
-                        <textarea
-                          className="hst-textarea"
-                          rows={6}
-                          value={settingsJson}
-                          onChange={e => setSettingsJson(e.target.value)}
-                          spellCheck={false}
+                {showLocalConfig && (
+                  <>
+                    <form onSubmit={saveLocalCredentials} className="bs-card">
+                      <label className="hst-input-row">
+                        <span className="hst-input-label">{t('凭据 JSON', 'Credentials JSON')}</span>
+                        <input
+                          type="password"
+                          autoComplete="new-password"
+                          className="hst-input"
+                          value={credJson}
+                          onChange={e => setCredJson(e.target.value)}
+                          placeholder='{"OPENAI_API_KEY": "sk-..."}'
                         />
-                      </div>
+                      </label>
                       <div className="hst-actions">
                         <button type="submit" className="hst-btn is-primary" disabled={action.busy}>
-                          {t('保存运行配置', 'Save Runtime JSON')}
+                          {t('保存凭据', 'Save Credentials')}
                         </button>
                       </div>
                     </form>
-                  )}
-                </>
-              )}
-            </Section>
-          </div>
-        </Disclosure>
 
-        <div className="hst-exit">
-          <button
-            type="button"
-            className="hst-btn is-danger"
-            disabled={centerConn.busy}
-            onClick={() => void centerConn.stopLocalHost()}
-          >
-            {t('退出客户端', 'Exit Client')}
-          </button>
+                    {hostSettings && (
+                      <form onSubmit={saveLocalSettings} className="bs-card">
+                        <div className="hst-row-static">
+                          <textarea
+                            className="hst-textarea"
+                            rows={6}
+                            value={settingsJson}
+                            onChange={e => setSettingsJson(e.target.value)}
+                            spellCheck={false}
+                          />
+                        </div>
+                        <div className="hst-actions">
+                          <button type="submit" className="hst-btn is-primary" disabled={action.busy}>
+                            {t('保存运行配置', 'Save Runtime JSON')}
+                          </button>
+                        </div>
+                      </form>
+                    )}
+                  </>
+                )}
+              </Section>
+            </div>
+          </Disclosure>
+
+          <div className="hst-exit">
+            <button
+              type="button"
+              className="hst-btn is-danger"
+              disabled={centerConn.busy}
+              onClick={() => void centerConn.stopLocalHost()}
+            >
+              {t('退出客户端', 'Exit Client')}
+            </button>
+          </div>
         </div>
 
-        <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
+        {page === 'overview' && actionNotice}
       </div>
     </main>
   );

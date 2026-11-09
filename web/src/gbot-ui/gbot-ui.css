@@ -37,15 +37,11 @@
 .gbot-conversation-row[data-active] {
   background: var(--accent-soft, var(--selection, rgb(0 0 0 / 0.05)));
 }
-.gbot-conversation-row.hub-bot-row[data-pinned] {
-  background: color-mix(in srgb, var(--text) 11%, var(--bg));
-}
-.gbot-conversation-row.hub-bot-row[data-pinned]:hover,
-.gbot-conversation-row.hub-bot-row[data-pinned]:active {
-  background: color-mix(in srgb, var(--text) 16%, var(--bg));
-}
-.gbot-conversation-row.hub-bot-row[data-pinned][data-active] {
-  box-shadow: inset 3px 0 var(--accent);
+.gbot-conversation-row.hub-bot-row {
+  min-height: 54px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  line-height: 1.4;
 }
 .gbot-conversation-row__avatar {
   flex: none;
@@ -72,60 +68,24 @@
   font-size: 14px;
   font-weight: 600;
 }
-.gbot-conversation-row__pin {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--accent, #627565);
-}
-.gbot-conversation-row__pin svg {
-  width: 12px;
-  height: 12px;
-}
-.gbot-conversation-row__badge {
-  flex: none;
-  font-size: 10.5px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--surface, rgb(0 0 0 / 0.06));
-  border: 1px solid var(--line, transparent);
-  color: var(--muted, inherit);
-}
 .gbot-conversation-row__time {
   flex: none;
   font-size: 11px;
-  color: var(--muted, inherit);
-}
-.gbot-conversation-row__sub {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
   color: var(--muted, inherit);
 }
 .gbot-conversation-row__preview {
-  flex: 1;
-  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.gbot-conversation-row__meta {
-  flex: none;
-  max-width: 62%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-}
-.gbot-conversation-row__sub > .gbot-conversation-row__meta:first-child {
-  max-width: 100%;
+  font-size: 12px;
+  color: var(--muted, inherit);
 }
 .gbot-conversation-row__unread-dot {
   flex: none;
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 999px;
   background: var(--accent, #627565);
 }
