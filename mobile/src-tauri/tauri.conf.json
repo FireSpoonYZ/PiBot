@@ -1,6 +1,6 @@
 {
   "productName": "pibot",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "identifier": "com.example.launcherprobe",
   "build": {
     "frontendDist": "../build/web"
