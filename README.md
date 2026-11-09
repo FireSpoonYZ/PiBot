@@ -8,6 +8,12 @@
   <strong>自托管的多端 AI 助手与 Agent 协同平台（Windows · Linux · Android）</strong>
 </p>
 
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg" alt="License: AGPL-3.0"></a>
+  <a href="https://github.com/FireSpoonYZ/PiBot/releases/latest"><img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20Android-2ea44f.svg" alt="Platform"></a>
+  <a href="https://linux.do"><img src="https://img.shields.io/badge/LINUX%20DO-%E8%AE%A4%E5%8F%AF%E7%A4%BE%E5%8C%BA-000000?logo=linux&logoColor=white" alt="LINUX DO 社区"></a>
+</p>
+
 ---
 
 ## 简介
@@ -177,6 +183,8 @@ $serial = '<已授权设备序列号>'
 
 ---
 
-## 许可证
+## 许可证与社区
 
 本项目基于 [AGPL-3.0](LICENSE) 许可证开源。Operit Shower 的 LGPL 派生源码及随包分发的第三方组件许可声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 [`licenses/`](licenses/)。
+
+欢迎访问 [LINUX DO](https://linux.do) 社区参与交流与反馈。
