@@ -175,20 +175,28 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
     const resolved = await primaryFor(botId);
     if (!resolved) return { nativeId: null, conversationId: null, lastImportedLocalId: 0, imported: 0 };
     const { nativeId, conversationId } = resolved;
-    return harness().commit(async (tx) => {
-      const state = await sessionStateDoc(tx, nativeId);
-      let imported = 0;
-      let cursor;
-      if (state.lastImportedLocalId > 0) {
-        cursor = {
+    const firstPage = (lastImportedLocalId, limit) => {
+      const options = { limit };
+      if (lastImportedLocalId > 0) {
+        options.cursor = {
           deviceId: host.deviceId,
           kind: 'inbox',
           key: inboxQueryKey(botId, undefined),
-          afterLocalId: state.lastImportedLocalId,
+          afterLocalId: lastImportedLocalId,
         };
       }
+      return log().inbox(botId, options);
+    };
+    // 空轮询只读，因为获取尚不存在的事务草稿也会创建文档。
+    const lastImportedLocalId = (await snapshot(nativeId))?.lastImportedLocalId ?? 0;
+    if (firstPage(lastImportedLocalId, 1).items.length === 0) {
+      return { nativeId, conversationId, lastImportedLocalId, imported: 0 };
+    }
+    return harness().commit(async (tx) => {
+      const state = await sessionStateDoc(tx, nativeId);
+      let imported = 0;
+      let page = firstPage(state.lastImportedLocalId, SYNC_PAGE_LIMIT);
       for (;;) {
-        const page = log().inbox(botId, { limit: SYNC_PAGE_LIMIT, ...(cursor ? { cursor } : {}) });
         for (const item of page.items) {
           const scope = item.message.scopeId ? log().getScope(item.message.scopeId) : null;
           await tx.appendEntry(nativeId, createSessionMessageEntry(item, scope?.kind ?? 'room'));
@@ -197,9 +205,9 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
           imported += 1;
         }
         if (page.nextCursor === null || page.items.length === 0) break;
-        cursor = page.nextCursor;
+        page = log().inbox(botId, { limit: SYNC_PAGE_LIMIT, cursor: page.nextCursor });
       }
-      state.updatedAt = new Date().toISOString();
+      if (imported > 0) state.updatedAt = new Date().toISOString();
       return { nativeId, conversationId, lastImportedLocalId: state.lastImportedLocalId, imported };
     }, ctx);
   }
