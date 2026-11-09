@@ -31,6 +31,9 @@ export type ShowerErrorCode =
   | 'SHOWER_NOT_READY'
   | 'SHOWER_INPUT_FAILED'
   | 'SHOWER_FRAME_TOO_LARGE'
+  | 'SHOWER_CAPTURE_BLOCKED'
+  | 'SHOWER_CAPTURE_TIMEOUT'
+  | 'SHOWER_CAPTURE_FAILED'
   | 'SHOWER_BACKEND_FAILED';
 
 export type ShowerLaunchKind = 'app' | 'process';

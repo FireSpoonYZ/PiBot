@@ -206,8 +206,22 @@ final class ShowerSurfaceBridge {
         checkCancelled(cancelled);
         int sourceWidth = controller.surfaceWidth();
         int sourceHeight = controller.surfaceHeight();
-        byte[] png = controller.capturePng(Math.min(maxWidth, MAX_PNG_WIDTH),
-                Math.min(maxHeight, MAX_PNG_HEIGHT));
+        byte[] png;
+        try {
+            png = controller.capturePng(Math.min(maxWidth, MAX_PNG_WIDTH),
+                    Math.min(maxHeight, MAX_PNG_HEIGHT));
+        } catch (IllegalStateException failure) {
+            String code = failure.getMessage() == null ? "" : failure.getMessage();
+            throw switch (code) {
+                case "SHOWER_CAPTURE_BLOCKED" -> new Failure(code,
+                        "系统拒绝截图，请在目标虚拟屏内收起密码键盘或关闭受保护窗口后重新截图。");
+                case "SHOWER_CAPTURE_TIMEOUT" -> new Failure(code,
+                        "等待虚拟屏截图超时；若刚打开密码键盘，请先在该虚拟屏内收起键盘后重新截图。");
+                case "SHOWER_CAPTURE_FAILED" -> new Failure(code,
+                        "虚拟屏截图失败，请重新截图；操作未重放。");
+                default -> failure;
+            };
+        }
         checkCancelled(cancelled);
         return encodeJpeg(png, maxWidth, maxHeight, maxBytes, cancelled)
                 .put("ok", true)
