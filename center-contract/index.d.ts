@@ -29,11 +29,18 @@ export interface Provider {
   credentialRef: string | null;
   enabled: boolean;
   revision: number;
+  /** Native Pi provider, keeping its protocol-specific implementation. */
+  native?: boolean;
+  /** Pi models.json-compatible provider overrides; omitted fields inherit Pi defaults. */
+  custom?: JsonObject;
 }
 /** Fields retain runtime-models names; model-specific optional values remain JSON. */
 export interface Model {
   id: string;
   name: string;
+  api?: string;
+  baseUrl?: string;
+  headers?: JsonObject;
   contextWindow: number;
   maxTokens: number;
   input: string[];
@@ -42,8 +49,25 @@ export interface Model {
   cost?: JsonObject;
   compat?: JsonObject;
   inputLimits?: JsonObject;
+  promptCache?: JsonObject;
+  samplingParams?: JsonObject;
+  samplingParamsByThinkingLevel?: JsonObject;
+  source?: 'catalog' | 'manual';
   enabled: boolean;
   revision: number;
+}
+export interface ProviderAuthStatus {
+  providerId: string;
+  method: 'none' | 'api_key' | 'oauth';
+  oauth: boolean;
+  label: string;
+  subscription: boolean;
+}
+export interface ProviderAuthFlow {
+  status: 'pending' | 'complete' | 'failed' | 'cancelled';
+  events: Array<{ type: string; url?: string; userCode?: string; verificationUri?: string; message?: string; instructions?: string; links?: Array<{url:string; label:string}> }>;
+  prompt: null | { type: string; message: string; placeholder?: string; options?: Array<{id:string;label:string}> };
+  error: string | null;
 }
 export interface ModelSelection { modelRef?: string | null; thinkingLevel?: string | null; codemode?: boolean | null; codemodeOnly?: boolean | null }
 export interface ModelConfig { global: ModelSelection; revision: number }

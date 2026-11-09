@@ -19,6 +19,7 @@ const blank: Model = {
 export default function Models() {
   const { providerId = '' } = useParams();
   const [models, setModels] = useState<Model[]>([]);
+  const [search, setSearch] = useState('');
   const [devices, setDevices] = useState<Device[]>([]);
   const [deviceId, setDeviceId] = useState('');
   const [discovered, setDiscovered] = useState<Model[]>([]);
@@ -57,10 +58,16 @@ export default function Models() {
     setEdit(model);
     setCreating(isNew);
     setInputTypes(model.input.join(', '));
-    const { thinkingLevelMap, cost, compat, inputLimits } = model;
+    const { api: modelApi, baseUrl, headers, thinkingLevelMap, cost, compat, inputLimits, promptCache, samplingParams, samplingParamsByThinkingLevel } = model;
     setAdvanced(
       JSON.stringify(
         {
+          ...(modelApi !== undefined && { api: modelApi }),
+          ...(baseUrl !== undefined && { baseUrl }),
+          ...(headers !== undefined && { headers }),
+          ...(promptCache !== undefined && { promptCache }),
+          ...(samplingParams !== undefined && { samplingParams }),
+          ...(samplingParamsByThinkingLevel !== undefined && { samplingParamsByThinkingLevel }),
           ...(thinkingLevelMap !== undefined && { thinkingLevelMap }),
           ...(cost !== undefined && { cost }),
           ...(compat !== undefined && { compat }),
@@ -120,6 +127,10 @@ export default function Models() {
         </p>
       )}
 
+      {models.length > 0 && <label className="form" style={{ marginBottom: 18 }}>
+        <span className="secondary">查找模型（{models.length} 个）</span>
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="输入模型名称或 ID" />
+      </label>}
       {models.length === 0 ? (
         <div className="empty-state">
           <Cpu size={28} />
@@ -128,7 +139,7 @@ export default function Models() {
         </div>
       ) : (
         <div className="card-grid">
-          {models.map(model => (
+          {models.filter(m => !search || (m.name + ' ' + m.id).toLowerCase().includes(search.toLowerCase())).slice(0, 60).map(model => (
             <article className="card-group resource-row" key={model.id}>
               <div className="card-header">
                 <div className="action-row" style={{ marginBlock: 0 }}>
@@ -257,11 +268,11 @@ export default function Models() {
                     !extra ||
                     Array.isArray(extra) ||
                     typeof extra !== 'object' ||
-                    Object.keys(extra).some(k => !['thinkingLevelMap', 'cost', 'compat', 'inputLimits'].includes(k))
+                    Object.keys(extra).some(k => !['api', 'baseUrl', 'headers', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel'].includes(k))
                   ) {
-                    throw new Error('高级参数仅接受 thinkingLevelMap、cost、compat、inputLimits 对象');
+                    throw new Error('高级参数包含不支持的字段');
                   }
-                  const { thinkingLevelMap: _t, cost: _c, compat: _co, inputLimits: _i, ...base } = edit;
+                  const { api: _api, baseUrl: _url, headers: _headers, thinkingLevelMap: _t, cost: _c, compat: _co, inputLimits: _i, promptCache: _pc, samplingParams: _sp, samplingParamsByThinkingLevel: _sl, ...base } = edit;
                   const input = inputTypes
                     .split(',')
                     .map(v => v.trim())
@@ -351,7 +362,7 @@ export default function Models() {
                 <summary>高级参数（JSON，可选）</summary>
                 <div className="form" style={{ marginTop: 10 }}>
                   <p className="secondary">
-                    可配置 thinkingLevelMap、cost、compat、inputLimits 字段；无特殊要求保持 <code>{'{}'}</code> 即可。
+                    可覆盖单个模型的 api、baseUrl、headers、thinkingLevelMap、cost、compat 等字段；无特殊要求保持 <code>{'{}'}</code> 即可。
                   </p>
                   <label>
                     高级参数（JSON）

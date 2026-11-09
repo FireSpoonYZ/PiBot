@@ -19,12 +19,12 @@ const boundedId = { type: 'string', minLength: 1, maxLength: 128 };
 const revision = { type: 'integer', minimum: 0 };
 const providerSchema = {
   type: 'object', required: ['name', 'api', 'baseUrl', 'credentialRef', 'enabled'],
-  properties: { id: string, name: string, api: string, baseUrl: string, credentialRef: { anyOf: [string, { type: 'null' }] }, enabled: { type: 'boolean' }, revision },
+  properties: { id: string, name: string, api: string, baseUrl: { type: 'string' }, credentialRef: { anyOf: [string, { type: 'null' }] }, enabled: { type: 'boolean' }, revision, native: { type: 'boolean' }, custom: { type: 'object' } },
   additionalProperties: false,
 };
 const modelSchema = {
   type: 'object', required: ['id', 'name', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'enabled'],
-  properties: { id: string, name: string, contextWindow: { type: 'integer', minimum: 1 }, maxTokens: { type: 'integer', minimum: 1 }, input: { type: 'array', items: string }, reasoning: { type: 'boolean' }, enabled: { type: 'boolean' }, revision, thinkingLevelMap: { type: 'object' }, cost: { type: 'object' }, compat: { type: 'object' }, inputLimits: { type: 'object' } },
+  properties: { id: string, name: string, api: string, baseUrl: string, headers: { type: 'object' }, contextWindow: { type: 'integer', minimum: 1 }, maxTokens: { type: 'integer', minimum: 1 }, input: { type: 'array', items: string }, reasoning: { type: 'boolean' }, enabled: { type: 'boolean' }, revision, thinkingLevelMap: { type: 'object' }, cost: { type: 'object' }, compat: { type: 'object' }, inputLimits: { type: 'object' }, promptCache: { type: 'object' }, samplingParams: { type: 'object' }, samplingParamsByThinkingLevel: { type: 'object' }, source: { enum: ['catalog', 'manual'] } },
   additionalProperties: false,
 };
 const selectionSchema = { type: 'object', properties: { modelRef: { anyOf: [string, { type: 'null' }] }, thinkingLevel: { anyOf: [string, { type: 'null' }] }, codemode: { anyOf: [{ type: 'boolean' }, { type: 'null' }] }, codemodeOnly: { anyOf: [{ type: 'boolean' }, { type: 'null' }] } }, additionalProperties: false };
@@ -123,7 +123,7 @@ function assertConfigCredentials(schema, value) {
 }
 
 
-export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, publicUrl, vault }) {
+export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, publicUrl, vault }) {
   const streams = new Map();
   function notify(deviceId, event = 'config-changed') {
     for (const stream of streams.get(deviceId) || []) {
@@ -140,7 +140,8 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   const providerInput = id => {
     const provider = required(store.getProvider(id), 'Provider');
     const models = store.listModels(id);
-    const credential = provider.credentialRef ? store.resolveCredential(assertPublicCredentialId(provider.credentialRef)) : undefined;
+    const ref = provider.credentialRef && assertPublicCredentialId(provider.credentialRef);
+    const credential = ref && store.getCredential(ref)?.configured ? store.resolveCredential(ref) : undefined;
     return { provider, models, ...(credential === undefined ? {} : { credential }) };
   };
   const modelPicker = () => ({ ...store.getModelPicker(), sync: catalog.status() });
@@ -156,19 +157,27 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('GET', '/api/model-catalog', () => catalog.status());
   route('POST', '/api/model-catalog/sync', async () => { await catalog.sync().catch(() => {}); return catalog.status(); }, true);
   route('GET', '/api/providers', () => store.listProviders());
-  route('POST', '/api/providers', (req, reply) => {
+  route('POST', '/api/providers', async (req, reply) => {
     const provider = store.putProvider({ ...validate(providerSchema, req.body), credentialRef: assertPublicCredentialId(req.body.credentialRef), id: req.body.id || randomUUID(), revision: 0 }, null);
-    catalog.apply();
+    await catalog.apply();
     return reply.code(201).send(changed(provider));
   }, true);
   route('GET', '/api/providers/:id', req => required(store.getProvider(req.params.id), 'Provider'));
-  route('PUT', '/api/providers/:id', req => { const body = object(req.body); validate(providerSchema, body.value); assertPublicCredentialId(body.value.credentialRef); const provider = store.putProvider({ ...body.value, id: req.params.id }, body.expectedRevision); catalog.apply(); return changed(provider); }, true);
+  // Pi native OAuth is interactive; these endpoints expose only flow prompts,
+  // never access or refresh tokens. All mutations retain owner + CSRF checks.
+  route('GET', '/api/providers/:id/auth-status', req => providerAuth.describe(req.params.id));
+  route('POST', '/api/providers/:id/login', req => providerAuth.start(req.params.id), true);
+  route('GET', '/api/providers/:id/login/:flowId', req => providerAuth.status(req.params.id, req.params.flowId));
+  route('POST', '/api/providers/:id/login/:flowId/answer', req => providerAuth.answer(req.params.id, req.params.flowId, req.body?.answer), true);
+  route('POST', '/api/providers/:id/login/:flowId/cancel', req => providerAuth.cancel(req.params.id, req.params.flowId), true);
+  route('POST', '/api/providers/:id/logout', req => providerAuth.logout(req.params.id), true);
+  route('PUT', '/api/providers/:id', async req => { const body = object(req.body); validate(providerSchema, body.value); assertPublicCredentialId(body.value.credentialRef); const provider = store.putProvider({ ...body.value, id: req.params.id }, body.expectedRevision); await catalog.apply(); return changed(provider); }, true);
   for (const [path, method] of [['validate', 'validateCenterProvider'], ['discover', 'discoverCenterProviderModels']]) {
     route('POST', `/api/providers/:id/${path}`, req => bridge.call(text(req.body?.deviceId, 'deviceId'), method, providerInput(req.params.id)), true);
   }
   route('GET', '/api/providers/:id/models', req => { required(store.getProvider(req.params.id), 'Provider'); return store.listModels(req.params.id); });
-  route('POST', '/api/providers/:id/models', (req, reply) => { required(store.getProvider(req.params.id), 'Provider'); return reply.code(201).send(changed(store.putModel(req.params.id, { ...validate(modelSchema, req.body), revision: 0 }, null))); }, true);
-  route('PUT', '/api/providers/:id/models/:modelId', req => { const body = object(req.body); return changed(store.putModel(req.params.id, { ...validate(modelSchema, body.value), id: req.params.modelId }, body.expectedRevision)); }, true);
+  route('POST', '/api/providers/:id/models', async (req, reply) => { required(store.getProvider(req.params.id), 'Provider'); const value = store.putModel(req.params.id, { ...validate(modelSchema, req.body), source: 'manual', revision: 0 }, null); await catalog.apply(); return reply.code(201).send(changed(value)); }, true);
+  route('PUT', '/api/providers/:id/models/:modelId', async req => { const body = object(req.body); const value = store.putModel(req.params.id, { ...validate(modelSchema, body.value), id: req.params.modelId, source: 'manual' }, body.expectedRevision); await catalog.apply(); return changed(value); }, true);
   route('GET', '/api/model-config', () => store.getModelConfig());
   route('PUT', '/api/model-config', req => { const body = object(req.body); return changed(store.putModelConfig(body.expectedRevision, validate(selectionSchema, body.value))); }, true);
   route('GET', '/api/devices', () => bridge.listDevices());
@@ -495,6 +504,15 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return store.getBotSync({ epoch, sinceSeq, devices: bridge.listDevices() });
   });
   host('GET', '/api/host/model-picker', modelPicker);
+  host('GET', '/api/host/providers/:id/auth', async req => {
+    const providerId = req.params.id;
+    const authorized = store.listDeviceBots(req.centerDevice.deviceId).some(bot => {
+      const modelRef = store.getBotModelConfig(req.centerDevice.deviceId, bot.botId).effective.modelRef;
+      return modelRef?.startsWith(providerId + '/');
+    });
+    if (!authorized) fail('FORBIDDEN', 'Provider is not assigned to this device');
+    return catalog.getAuth(providerId);
+  });
   host('PUT', '/api/host/model-stars', setModelStar);
   host('GET', '/api/host/connection', req => ({ protocol: 1, deviceId: req.centerDevice.deviceId, linkUrl }));
   host('GET', '/api/host/devices/:deviceId/runtime-status', req => {

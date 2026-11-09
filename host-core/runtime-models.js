@@ -1,5 +1,7 @@
 import path from 'node:path';
 import { createModels, createProvider } from '@earendil-works/pi-ai/models';
+import { getApiProvider } from '@earendil-works/pi-ai/compat';
+import { nativeCenterProvider } from './native-center-providers.js';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy';
 import { piMessagesApi } from '@earendil-works/pi-ai/api/pi-messages.lazy';
@@ -279,7 +281,7 @@ function validateProviders(providers) {
     if (!isPlainObject(p)) {
       throw invalidArgument('runtime config: each provider must be an object');
     }
-    rejectUnknownFields(p, new Set(['id', 'name', 'api', 'baseUrl', 'apiKeyEnv', 'models']), 'runtime config provider');
+    rejectUnknownFields(p, new Set(['id', 'name', 'api', 'baseUrl', 'apiKeyEnv', 'models', 'headers', 'authMode', 'native']), 'runtime config provider');
     const id = p.id;
     if (typeof id !== 'string' || id.trim() === '' || !id.isWellFormed()) {
       throw invalidArgument('runtime config: provider id must be a non-empty well-formed string');
@@ -290,12 +292,12 @@ function validateProviders(providers) {
     if (seenProviders.has(id)) throw invalidArgument(`runtime config: duplicate provider id: ${id}`);
     seenProviders.add(id);
 
-    const baseUrl = normalizeProviderBaseUrl(p.baseUrl);
+    const baseUrl = p.native && !p.baseUrl ? undefined : normalizeProviderBaseUrl(p.baseUrl);
     let api;
     if (p.api !== undefined) {
       const requested = typeof p.api === 'string' ? p.api.trim() : '';
-      if (!PROVIDER_APIS.has(requested)) {
-        throw invalidArgument(`runtime config: provider "${id}" api is not supported: ${requested || typeof p.api}; supported: ${[...PROVIDER_APIS.keys()].join(', ')}`);
+      if (!PROVIDER_APIS.has(requested) && !getApiProvider(requested)) {
+        throw invalidArgument(`runtime config: provider "${id}" api is not supported: ${requested || typeof p.api}`);
       }
       api = requested;
     }
@@ -314,7 +316,7 @@ function validateProviders(providers) {
       if (!isPlainObject(m)) {
         throw invalidArgument(`runtime config: each model of provider "${id}" must be an object`);
       }
-      rejectUnknownFields(m, new Set(['id', 'name', 'reasoning', 'contextWindow', 'maxTokens', 'input', 'cost', 'compat', 'thinkingLevelMap', 'inputLimits']), 'runtime config model');
+      rejectUnknownFields(m, new Set(['id', 'name', 'api', 'baseUrl', 'headers', 'reasoning', 'contextWindow', 'maxTokens', 'input', 'cost', 'compat', 'thinkingLevelMap', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel']), 'runtime config model');
       const modelId = m.id;
       if (typeof modelId !== 'string' || modelId.trim() === '' || !modelId.isWellFormed()) {
         throw invalidArgument('runtime config: model id must be a non-empty well-formed string');
@@ -362,6 +364,14 @@ function validateProviders(providers) {
         input = ['text', ...normalized.filter((kind) => kind !== 'text')];
       }
       const model = { id: modelId, contextWindow, maxTokens };
+      if (m.api !== undefined) {
+        if (typeof m.api !== 'string' || !getApiProvider(m.api)) throw invalidArgument('Unsupported model API');
+        model.api = m.api;
+      }
+      if (m.baseUrl !== undefined) model.baseUrl = normalizeProviderBaseUrl(m.baseUrl);
+      for (const field of ['headers', 'samplingParams', 'samplingParamsByThinkingLevel', 'promptCache']) {
+        if (m[field] !== undefined) model[field] = passThroughObject(m[field], field);
+      }
       if (m.name !== undefined) model.name = m.name;
       if (m.reasoning !== undefined) model.reasoning = m.reasoning;
       if (input !== undefined) model.input = input;
@@ -379,6 +389,9 @@ function validateProviders(providers) {
     if (typeof p.name === 'string' && p.name.trim() !== '') provider.name = p.name.trim();
     if (api !== undefined) provider.api = api;
     if (apiKeyEnv !== undefined) provider.apiKeyEnv = apiKeyEnv;
+    if (p.native === true) provider.native = true;
+    if (p.authMode === 'oauth') provider.authMode = 'oauth';
+    if (p.headers !== undefined) provider.headers = passThroughObject(p.headers, 'provider headers');
     out.push(provider);
   }
   return out;
@@ -450,12 +463,15 @@ function createApiKeyAuth(apiKeyEnv) {
 }
 
 /** Build the registry from the authenticated snapshot; credentials never enter local settings or process.env. */
-export function applyCenterModels(snapshot, existingModels) {
+export function applyCenterModels(snapshot, existingModels, authResolver) {
   const providers = snapshot.providers.filter((provider) => provider.enabled).map((provider) => ({
     id: provider.id,
     name: provider.name,
     api: provider.api,
     baseUrl: provider.baseUrl,
+    native: provider.native,
+    authMode: provider.authMode,
+    ...(provider.headers === undefined ? {} : { headers: provider.headers }),
     models: (snapshot.models[provider.id] ?? []).filter((model) => model.enabled).map(
       ({ enabled, revision, ...model }) => model
     ),
@@ -470,7 +486,7 @@ export function applyCenterModels(snapshot, existingModels) {
         throw errWithCode('center selected model is unavailable', 'MODEL_NOT_FOUND');
       }
       const selected = snapshot.providers.find((p) => p.id === ref.provider);
-      if (selected.credentialRef !== null && !snapshot.credentials[selected.credentialRef]) {
+      if (selected.credentialRef !== null && !snapshot.credentials?.[selected.credentialRef] && selected.authMode !== 'oauth' && !authResolver) {
         throw errWithCode('center provider credential is unavailable', 'INVALID_STATE');
       }
     }
@@ -485,7 +501,7 @@ export function applyCenterModels(snapshot, existingModels) {
     if (original.credentialRef !== null) {
       credential = snapshot.credentials[original.credentialRef] ?? null;
     }
-    return buildProvider(provider, credential);
+    return nativeCenterProvider(provider, provider.models, credential, authResolver);
   });
   const models = existingModels ?? createModels();
   models.clearProviders();

@@ -263,9 +263,18 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       throw error('INTERNAL_ERROR', 'Credential decryption failed');
     }
   }
+  function executionProviders() {
+    return store.listProviders().map(provider => ({
+      ...provider,
+      ...(typeof provider.custom?.baseUrl === 'string' ? { baseUrl: provider.custom.baseUrl } : {}),
+      ...(typeof provider.custom?.api === 'string' ? { api: provider.custom.api } : {}),
+      ...(provider.custom?.headers && typeof provider.custom.headers === 'object' ? { headers: provider.custom.headers } : {}),
+      authMode: credential('center-internal-pi-oauth-' + provider.id)?.configured ? 'oauth' : 'api_key',
+    }));
+  }
   /** Execution-relevant snapshot content for one device: no display names, activity fields or other devices. */
   function executionContent(deviceId) {
-    const providers = store.listProviders();
+    const providers = executionProviders();
     for (const provider of providers) assertPublicCredentialId(provider.credentialRef);
     const models = Object.fromEntries(providers.map((provider) => [provider.id, store.listModels(provider.id)]));
     const installations = store.listInstallations();
@@ -280,7 +289,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       const slash = model.modelRef.indexOf('/');
       const provider = providers.find((item) => item.id === model.modelRef.slice(0, slash) && item.enabled);
       const selected = provider && models[provider.id].find((item) => item.id === model.modelRef.slice(slash + 1) && item.enabled);
-      if (slash > 0 && selected && provider.credentialRef) refs.add(provider.credentialRef);
+      if (slash > 0 && selected && provider.credentialRef && provider.authMode !== 'oauth') refs.add(provider.credentialRef);
     }
     const capabilities = installations.map((installation) => {
       const config = capabilityFor(deviceId, bot.botId, installation.installationId);
@@ -307,7 +316,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
   }
   /** Single-Bot turn context: same content shape as a device snapshot, plus the secret-free set checksum. */
   function turnContent(deviceId, bot) {
-    const providers = store.listProviders();
+    const providers = executionProviders();
     const models = Object.fromEntries(providers.map((provider) => [provider.id, store.listModels(provider.id)]));
     const installations = store.listInstallations();
     const refs = new Set();
@@ -329,8 +338,8 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     };
   }
   // Display-only fields are excluded so renaming never invalidates a device; only execution content is compared.
-  const providerFields = ['id', 'api', 'baseUrl', 'credentialRef', 'enabled'];
-  const modelFields = ['id', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits', 'enabled'];
+  const providerFields = ['id', 'api', 'baseUrl', 'credentialRef', 'enabled', 'native', 'authMode', 'headers'];
+  const modelFields = ['id', 'api', 'baseUrl', 'headers', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel', 'enabled'];
   const capabilityFields = ['installationId', 'kind', 'target', 'targetVersion', 'enabled', 'authorized', 'effectiveConfig', 'credentialRefs', 'credentialRevisions'];
   /** Fingerprints secret-free execution content; CAS revisions, Bot ordering and disabled capabilities are ignored. */
   function deviceDesired(deviceId, content) {
@@ -486,9 +495,13 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
         assertObject(provider);
         assertPublicCredentialId(provider.credentialRef);
         let url;
-        try { url = new URL(provider.baseUrl); } catch { throw error('INVALID_ARGUMENT', 'Invalid provider URL'); }
-        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw error('INVALID_ARGUMENT', 'Invalid provider URL');
-        const input = pick(provider, ['id', 'name', 'api', 'baseUrl', 'credentialRef', 'enabled']);
+        if (provider.baseUrl) {
+          try { url = new URL(provider.baseUrl); } catch { throw error('INVALID_ARGUMENT', 'Invalid provider URL'); }
+          if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw error('INVALID_ARGUMENT', 'Invalid provider URL');
+        } else if (!provider.native) throw error('INVALID_ARGUMENT', 'A custom provider requires a base URL');
+        if (provider.custom !== undefined && !object(provider.custom)) throw error('INVALID_ARGUMENT', 'Provider overrides must be an object');
+        if (provider.custom?.apiKey !== undefined) throw error('INVALID_ARGUMENT', 'Store API keys in encrypted credentials, not overrides');
+        const input = pick(provider, ['id', 'name', 'api', 'baseUrl', 'credentialRef', 'enabled', 'native', 'custom']);
         return transaction(() => { const value = createOrUpdate('providers', input, 'id', expectedRevision); bump(); return value; });
       },
       listModels(providerId) {
@@ -507,7 +520,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             if (!current) throw error('NOT_FOUND', 'Model not found');
             assertRevision(expectedRevision, current.revision);
           }
-          const result = { ...pick(model, ['name', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits', 'enabled']), id, revision: current ? current.revision + 1 : 0 };
+          const result = { ...pick(model, ['name', 'api', 'baseUrl', 'headers', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel', 'source', 'enabled']), id, revision: current ? current.revision + 1 : 0 };
           db.prepare('INSERT INTO models VALUES (?, ?, ?) ON CONFLICT(provider_id, id) DO UPDATE SET json = excluded.json').run(providerId, id, json(result));
           bump();
           return result;
@@ -516,7 +529,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       // Picker availability uses credential metadata, not the secrets granted to a particular Host.
       getModelPicker() {
         const models = store.listProviders().filter(provider =>
-          provider.enabled && (provider.credentialRef === null || credential(provider.credentialRef)?.configured)
+          provider.enabled && (provider.credentialRef === null || credential(provider.credentialRef)?.configured || credential('center-internal-pi-oauth-' + provider.id)?.configured)
         ).flatMap(provider => store.listModels(provider.id).filter(model => model.enabled).map(model => ({
           modelRef: provider.id + '/' + model.id,
           name: model.name,
