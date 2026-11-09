@@ -16,6 +16,8 @@ const ATTRIBUTION_CHANNELS = new Set(['primary', 'dm', 'room']);
 const ATTRIBUTION_CATEGORIES = new Set(['public', 'notice', 'request', 'reply']);
 const ATTRIBUTION_DIRECTIONS = new Set(['incoming', 'outgoing']);
 
+export const BOT_SESSION_CHECKPOINT_INTERVAL = 128;
+
 /** 会话级持久状态（latest-only）：导入水位、冻结的活动轮、发出请求与已观察回复水位。 */
 export const BotSessionState = defineDoc({
   kind: 'host.bot-session',
@@ -37,7 +39,8 @@ export const BotSessionState = defineDoc({
     completedTurns: {},
     updatedAt: null,
   }),
-  checkpointWhen: () => false,
+  // deltasSinceBase 是本次写入之前的增量数。
+  checkpointWhen: (_value, _ops, { deltasSinceBase }) => deltasSinceBase >= BOT_SESSION_CHECKPOINT_INTERVAL - 1,
 });
 
 function cleanString(value) {

@@ -16,6 +16,7 @@ import { createAndroidTools } from './android-tools.js';
 import { createHostExecutionEnv } from './host-environment.js';
 import { openHost } from './host.js';
 import { acquireRuntimeOwner } from './runtime-owner.js';
+import { migrateBotSessionCheckpoints } from './bot-session-checkpoint-migration.js';
 import { parseExecutionOptions, parseModelRef, normalizeThinkingLevel, normalizeCodemodeFlag, describeModelCatalog, discoverProviderModels, applyCenterModels } from './runtime-models.js';
 import { createGrepTool } from './grep-tool.js';
 import { createFindTool } from './find-tool.js';
@@ -613,7 +614,9 @@ export async function openRuntime(options) {
       }));
     }
     coreExtensions = registry.snapshot().installed().filter((extension) => extension !== finalBudgetExtension && extension !== codemodeExtension);
-    storage = await openNodeSqliteStorage(join(host.dataRoot, 'durable.sqlite'));
+    const durableDbPath = join(host.dataRoot, 'durable.sqlite');
+    storage = await openNodeSqliteStorage(durableDbPath);
+    await migrateBotSessionCheckpoints(storage, durableDbPath);
     harness = await Harness.open(storage, {
       models,
       registry,
