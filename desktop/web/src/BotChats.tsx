@@ -89,6 +89,7 @@ import {
 import type { ConversationMenuItem } from '../../../web/src/gbot-ui/ConversationContextMenu';
 import { useChatPins } from '../../../web/src/gbot-ui/chatPins';
 import { SortablePinnedChat } from '../../../web/src/gbot-ui/SortablePinnedChat';
+import { useConversationUnread } from '../../../web/src/gbot-ui/useConversationUnread';
 import './BotChats.css';
 
 type AnyRawEntry = { id: unknown; kind: string; model?: unknown; data?: unknown };
@@ -3004,13 +3005,6 @@ export function BotChats({
     }
   }, [profileKey, profileReady, identity, stage, selected, bots, groupItems]);
 
-  /** 群聊实际所在 Host：identity.targetDeviceId 是稳定字符串，不依赖 targetApi 对象引用。 */
-  function groupSourceOf(g: (typeof groupItems)[number]) {
-    const deviceId = g.identity.targetDeviceId;
-    const label = devices.find((d) => d.deviceId === deviceId)?.displayName || '未知设备';
-    return { deviceId, label };
-  }
-
   const groupRows = useMemo(() => {
     const q = query.trim().toLowerCase();
     return groupItems.filter((g) => {
@@ -3106,6 +3100,28 @@ export function BotChats({
         : null,
     [api, sess, selectedBot?.deviceId, selectedBot?.online],
   );
+  const unreadRows = useMemo(() => [
+    ...bots.filter(bot => !bot.archivedAt).map(bot => ({
+      key: botPinKey(bot.deviceId, bot.botId),
+      lastMessageAt: bot.lastPreview?.trim() ? bot.lastActivityAt : null,
+    })),
+    ...groupItems.map(group => ({
+      key: roomPinKey(group.scope.scope.scopeId),
+      lastMessageAt: group.lastActivityAt,
+    })),
+  ], [bots, groupItems]);
+  const chatWorkspaceActive = pageActive && workspaceActive && !boardActive;
+  const viewingBotKey = chatWorkspaceActive && !stage && scopedApi && selectedBot && !selectedBot.archivedAt
+    ? botPinKey(selectedBot.deviceId, selectedBot.botId)
+    : null;
+  const { unread, markViewed } = useConversationUnread(
+    profileReady && profileKey ? profileKey : null,
+    unreadRows,
+    viewingBotKey,
+  );
+  const onRoomHistoryViewed = useCallback((scopeId: string, lastMessageAt: string) => {
+    markViewed(roomPinKey(scopeId), lastMessageAt);
+  }, [markViewed]);
   /** 子视图 api 按当前 api + sess（含 generation）+ 在线布尔重建：同 profile 重连后
    *  identity 代际更新、设备上下线同步反映；不依赖 devices 数组引用（每轮目录刷新
    *  都换引用，依赖它会反复给 Scopes 传新 api 对象导致历史清空/重置）。 */
@@ -3680,13 +3696,7 @@ export function BotChats({
     return devices.find((d) => d.deviceId === deviceId)?.online ?? false;
   }
 
-  function shortDeviceName(name: string): string {
-    const trimmed = name.trim();
-    return trimmed.length > 8 ? `${trimmed.slice(0, 7).trimEnd()}…` : trimmed;
-  }
-
   function renderGroupRow(g: (typeof groupRows)[number], pinned: boolean) {
-    const source = groupSourceOf(g);
     const scopeId = g.scope.scope.scopeId;
     const chatKey = roomPinKey(scopeId);
     const isSelected = stage?.kind === 'scope' && stage.scopeId === scopeId;
@@ -3697,19 +3707,18 @@ export function BotChats({
         preview={plainPreview(g.lastPreview)}
         timestamp={g.lastActivityAt}
         selected={isSelected}
+        unread={unread.has(chatKey)}
         pinned={pinned}
-        badge="群聊"
-        meta={devices.length > 1 || groupItems.some(other => other.key !== g.key && other.title === g.title)
-          ? shortDeviceName(source.label) : undefined}
+        groupLabel="群聊"
         avatar={
-          <ConversationGroupAvatar members={g.scope.scope.members} bots={bots} size={46} />
+          <ConversationGroupAvatar members={g.scope.scope.members} bots={bots} size={34} />
         }
         onOpen={() => {
           setRoomSettingsOpen(false);
           setStage({
             kind: 'scope',
             scopeId,
-            deviceId: source.deviceId,
+            deviceId: g.identity.targetDeviceId,
           });
         }}
         onOpenMenu={(position) =>
@@ -3755,31 +3764,24 @@ export function BotChats({
     const isSelected =
       !stage && selected?.deviceId === b.deviceId && selected.botId === b.botId;
     const isBotOnline = Boolean(b.online && online);
-    const isPrimaryActive = Boolean(b.isPrimary && !b.archivedAt);
     const activityIso = b.lastActivityAt || b.createdAt;
     const rowNode = (
       <ConversationRow
-        className={`hub-bot-row${isSelected ? ' selected' : ''}${!isBotOnline ? ' offline' : ''}`}
+        className="hub-bot-row"
         title={b.role}
         preview={plainPreview(b.lastPreview)}
         timestamp={activityIso}
         selected={isSelected}
+        unread={unread.has(chatKey)}
         pinned={pinned}
-        meta={[
-          devices.length > 1 || bots.some(other => other !== b && !other.archivedAt && other.role === b.role)
-            ? shortDeviceName(deviceNameOf(b.deviceId)) : '',
-          !isBotOnline ? '离线' : '',
-        ].filter(Boolean).join(' · ') || undefined}
+        connectionLabel={isBotOnline ? '在线' : '未连接'}
         avatar={
           <GrokBotAvatar
             botKey={botAvatarKey(b)}
             roleName={b.role}
-            isPrimary={isPrimaryActive}
-            starBadge={isPrimaryActive}
-            platformBadge={b.platform || 'host'}
-            busy={false}
+            isPrimary={b.isPrimary}
             offline={!isBotOnline}
-            size={46}
+            size={34}
           />
         }
         onOpen={() => {
@@ -3819,7 +3821,6 @@ export function BotChats({
       const scopeId = g.scope.scope.scopeId;
       const pinKey = roomPinKey(scopeId);
       const pinned = isPinned(pinKey);
-      const source = groupSourceOf(g);
       const authorityApi = resolveRoomApi(g.scope, 'members');
       const canDeleteGroup = Boolean(online && authorityApi && authorityApi.transportConnected);
       return [
@@ -3833,7 +3834,7 @@ export function BotChats({
             setStage({
               kind: 'scope',
               scopeId,
-              deviceId: source.deviceId,
+              deviceId: g.identity.targetDeviceId,
             });
           },
         },
@@ -4188,6 +4189,7 @@ export function BotChats({
               variant="desktop"
               detailOnly
               onOpenSendRecords={onOpenSendRecords}
+              onHistoryViewed={chatWorkspaceActive && !roomSettingsOpen ? onRoomHistoryViewed : undefined}
               initialScopeId={stage.scopeId}
               resolveRoomApi={resolveRoomApi}
               memberCandidates={scopeMemberCandidates}

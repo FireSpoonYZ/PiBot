@@ -7,7 +7,6 @@ import {
   Bell,
   Brain,
   Check,
-  ChevronDown,
   ChevronRight,
   ChevronsUpDown,
   Clock,
@@ -78,6 +77,7 @@ import {
 } from './gbot-ui';
 import { useChatPins } from './gbot-ui/chatPins';
 import { SortablePinnedChat } from './gbot-ui/SortablePinnedChat';
+import { useConversationUnread } from './gbot-ui/useConversationUnread';
 import type { MessageMember } from '../../host-core/index.js';
 import { createLocalScopeReadApi } from './local-scope-api';
 import { isWebhookAttribution, MessageAttribution } from './MessageAttribution';
@@ -672,7 +672,7 @@ export function HostPage({
         cwdRevision: b.cwdRevision ?? 0,
         modelRef: b.modelRef,
         createdAt: b.createdAt,
-        lastActivityAt: b.lastActivityAt || b.createdAt,
+        lastActivityAt: b.lastActivityAt || undefined,
         lastPreview: b.lastPreview || '',
         archivedAt: b.archivedAt ?? null,
         hostKind: 'local',
@@ -705,7 +705,7 @@ export function HostPage({
         cwdRevision: b.cwdRevision ?? 0,
         modelRef: b.modelRef,
         createdAt: b.createdAt,
-        lastActivityAt: b.lastActivityAt || b.createdAt,
+        lastActivityAt: b.lastActivityAt || undefined,
         lastPreview: b.lastPreview || '',
         archivedAt: b.archivedAt ?? null,
         hostKind: 'remote' as const,
@@ -970,6 +970,29 @@ export function HostPage({
   const chatPins = useChatPins(pinStorageScope);
   const botPinKey = useCallback((bot: { deviceId: string; botId: string }) => `bot:${bot.deviceId}:${bot.botId}`, []);
   const roomPinKey = useCallback((scopeId: string) => `room:${scopeId}`, []);
+  // 同一中心可以更换绑定；未读记录同时按中心地址和已确认的客户端身份隔离。
+  const centerAccountId = centerConn.saved?.deviceId || centerConn.status?.clientId;
+  const unreadNamespace = pinStorageScope.startsWith('center:')
+    ? (centerAccountId ? JSON.stringify([pinStorageScope, centerAccountId]) : null)
+    : (centerConn.initialized && pinStorageScope !== 'local:local' ? pinStorageScope : null);
+  const unreadRows = useMemo(() => [
+    ...listBotItems.map(item => ({
+      key: botPinKey(item),
+      lastMessageAt: item.lastPreview?.trim() ? item.lastActivityAt ?? null : null,
+    })),
+    ...roomConversations.map(room => ({
+      key: roomPinKey(room.scope.scope.scopeId),
+      lastMessageAt: room.lastActivityAt,
+    })),
+  ], [listBotItems, roomConversations, botPinKey, roomPinKey]);
+  const { unread: unreadConversationKeys, markViewed: markConversationViewed } = useConversationUnread(
+    unreadNamespace,
+    unreadRows,
+    active && screen === 'chat' && activeBot ? botPinKey(activeBot) : null,
+  );
+  const markRoomHistoryViewed = useCallback((scopeId: string, lastMessageAt: string) => {
+    markConversationViewed(roomPinKey(scopeId), lastMessageAt);
+  }, [markConversationViewed, roomPinKey]);
 
   // 群聊和普通 Bot 混排：key 统一为 bot:${deviceId}:${botId} / room:${scopeId}。
   // 置顶项按 pinnedKeys 顺序排在列表最上（不随消息时间变），普通项按最近时间倒序；
@@ -1204,10 +1227,6 @@ export function HostPage({
   }, [getOrCreateRemoteClient, active, screen, activeBot?.key, activeBot?.botId, activeBot?.hostKind, activeBot?.hostId, localHost?.deviceId]);
 
   const mustCreatePrimaryBot = Boolean(localHost?.phase === 'running' && localBotsLoaded && !primaryBot);
-
-  const unreadCount = useMemo(() => {
-    return listBotItems.filter(item => botMetaMap[item.key]?.unread).length;
-  }, [listBotItems, botMetaMap]);
 
   const cancelActiveObservation = useCallback(() => {
     if (observeIdRef.current) {
@@ -1931,7 +1950,7 @@ export function HostPage({
         setChatDraftAttachments([]);
         writeChatDraft(scopeKey, '');
         writeChatDraftAttachments(scopeKey, []);
-        updateBotMeta(bot.key, { lastText: t('对话已清空', 'History cleared'), updatedAt: Date.now(), unread: false });
+        updateBotMeta(bot.key, { lastText: '', updatedAt: Date.now(), unread: false });
         setClearNotice(t('已清空当前对话并重置上下文', 'Conversation cleared and context reset'));
       } else {
         // /compact 成功后才清掉实际命令草稿；若等待期间已写入新文本则保留，不误删。
@@ -2163,9 +2182,9 @@ ${newer}` : draftSnapshot;
           updateBotMeta(key, {
             customName: roleName,
             subtitle: editSubtitle.trim(),
-            lastText: editSubtitle.trim() || t('点击开始文字对话…', 'Tap to start chatting…'),
+            lastText: '',
             updatedAt: Date.now(),
-            unread: true,
+            unread: false,
           });
           if (soulDraft.trim()) {
             try {
@@ -2213,9 +2232,9 @@ ${newer}` : draftSnapshot;
           updateBotMeta(key, {
             customName: roleName,
             subtitle: editSubtitle.trim(),
-            lastText: editSubtitle.trim() || t('点击开始文字对话…', 'Tap to start chatting…'),
+            lastText: '',
             updatedAt: Date.now(),
-            unread: true,
+            unread: false,
           });
           await syncRemoteBots();
           setScreen('hub');
@@ -3962,17 +3981,18 @@ ${newer}` : draftSnapshot;
                     const rowNode = (
                       <ConversationRow
                         key={entry.pinKey}
-                        className="hub-bot-row hub-room-row"
+                        className="hub-bot-row"
                         title={room.title}
-                        preview={room.lastPreview || t('暂无消息', 'No messages yet')}
+                        preview={room.lastPreview}
                         timestamp={room.lastActivityAt}
-                        badge={t('群聊', 'Group')}
+                        groupLabel={t('群聊', 'Group chat')}
                         pinned={entry.pinned}
+                        unread={unreadConversationKeys.has(entry.pinKey)}
                         avatar={
                           <ConversationGroupAvatar
                             members={room.scope.scope.members}
                             bots={knownBots}
-                            size={52}
+                            size={40}
                           />
                         }
                         onOpen={() => openScopeConversation(room, false)}
@@ -3994,24 +4014,37 @@ ${newer}` : draftSnapshot;
                   }
                   const item = entry.bot!;
                   const meta = botMetaMap[item.key];
-                  const isPrimaryActive = Boolean(item.isPrimary && !item.archivedAt);
-                  const snippet =
-                    item.lastPreview ||
-                    meta?.lastText ||
-                    item.description ||
-                    t('点击开始文字对话…', 'Tap to start chatting…');
-                  const preset = resolveBotAvatarPreset(botAvatarKey(item), item.role, isPrimaryActive);
+                  const offline = botIsOffline(item);
+                  const statusUnknown = item.hostKind === 'local' ? !localHost : !remoteConnected;
+                  const connectionLabel = statusUnknown
+                    ? t('连接状态待确认', 'Connection status unknown')
+                    : offline ? t('离线', 'Offline') : t('在线', 'Online');
+                  const cachedPreview = meta?.lastText?.trim();
+                  // 旧缓存曾将创建占位与清空提示写入摘要，只有存在相应的目录或清空记录时才排除。
+                  const isCreationPlaceholder = (!item.lastActivityAt || item.lastActivityAt === item.createdAt) &&
+                    (cachedPreview === meta?.subtitle?.trim() ||
+                     cachedPreview === '点击开始文字对话…' || cachedPreview === 'Tap to start chatting…');
+                  const isClearNotice = clearedMap[item.key] !== undefined &&
+                    (cachedPreview === '对话已清空' || cachedPreview === 'History cleared');
+                  const preview = item.lastPreview?.trim() ||
+                    (isCreationPlaceholder || isClearNotice ? undefined : cachedPreview);
                   const rowNode = (
-                    <HubBotRow
+                    <ConversationRow
                       key={entry.pinKey}
-                      item={item}
-                      offline={botIsOffline(item)}
-                      preset={preset}
-                      isPrimaryActive={isPrimaryActive}
-                      snippet={snippet}
-                      unread={Boolean(meta?.unread)}
-                      timestampMs={entry.sortMs}
+                      className="hub-bot-row"
+                      title={item.role}
+                      preview={preview}
+                      timestamp={entry.sortMs || null}
+                      connectionLabel={connectionLabel}
+                      unread={unreadConversationKeys.has(entry.pinKey)}
                       pinned={entry.pinned}
+                      avatar={
+                        <GrokBotAvatar
+                          preset={resolveBotAvatarPreset(botAvatarKey(item), item.role, Boolean(item.isPrimary))}
+                          offline={offline}
+                          size={40}
+                        />
+                      }
                       onOpen={() => openBotChat(item, 'hub')}
                       onOpenMenu={(position) => setHubContextMenu({ ...position, bot: item })}
                     />
@@ -4034,19 +4067,6 @@ ${newer}` : draftSnapshot;
           </div>
 
           <footer className="hub-bottom-bar">
-            {unreadCount > 0 && (
-              <button
-                type="button"
-                className="hub-unread-pill"
-                onClick={() => {
-                  const container = document.querySelector('.hub-scroll-area');
-                  container?.scrollBy({ top: 220, behavior: 'smooth' });
-                }}
-              >
-                <ChevronDown size={16} />
-                <span>{t(`${unreadCount} 个未读`, `${unreadCount} unread`)}</span>
-              </button>
-            )}
             <label className="hub-search-box">
               <Search size={18} className="hub-search-icon" />
               <input
@@ -6137,6 +6157,7 @@ ${newer}` : draftSnapshot;
                     scopeKind="room"
                     initialScopeId={scopeConversationTarget.scope.scope.scopeId}
                     knownBots={knownBots}
+                    onHistoryViewed={markRoomHistoryViewed}
                     settingsOpen={roomSettingsOpen}
                     onSettingsOpenChange={setRoomSettingsOpen}
                     onDeleted={() => {
@@ -6667,56 +6688,6 @@ function HubPrimaryHero({
         </span>
       </div>
     </button>
-  );
-}
-
-/** 普通 Bot 行：ConversationRow 承载点击/长按/键盘菜单，保 host badge 与时间。 */
-function HubBotRow({
-  item,
-  preset,
-  offline,
-  isPrimaryActive,
-  snippet,
-  unread,
-  timestampMs,
-  pinned,
-  onOpen,
-  onOpenMenu,
-}: {
-  item: UnifiedBotItem;
-  preset: GrokAvatarPreset;
-  offline: boolean;
-  isPrimaryActive: boolean;
-  snippet: string;
-  unread: boolean;
-  /** server/meta 最大值，与混排排序一致。 */
-  timestampMs: number;
-  pinned?: boolean;
-  onOpen: () => void;
-  onOpenMenu: (position: { x: number; y: number }) => void;
-}) {
-  return (
-    <ConversationRow
-      className={`hub-bot-row${offline ? ' is-offline' : ''}`}
-      title={item.role}
-      preview={snippet}
-      timestamp={timestampMs || null}
-      unread={unread}
-      pinned={pinned}
-      avatar={
-        <GrokBotAvatar
-          preset={preset}
-          offline={offline}
-          isPrimary={isPrimaryActive}
-          starBadge={isPrimaryActive}
-          platformBadge={<PlatformLogoIcon platform={item.platform} size={11} />}
-          size={52}
-        />
-      }
-      onOpen={onOpen}
-      onOpenMenu={onOpenMenu}
-      meta={`${item.hostLabel}${offline ? ' · 离线' : ''}`}
-    />
   );
 }
 

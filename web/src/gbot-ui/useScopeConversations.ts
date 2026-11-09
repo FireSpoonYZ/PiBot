@@ -32,7 +32,8 @@ export interface ScopeConversation {
   scope: ScopeInfo;
   title: string;
   lastPreview: string;
-  lastActivityAt: string | null;
+  /** undefined 表示尚未读到历史，null 表示确认没有消息。 */
+  lastActivityAt: string | null | undefined;
 }
 
 export interface UseScopeConversationsResult {
@@ -113,7 +114,7 @@ interface SourceSnapshot {
 /**
  * 汇总一个来源的全部 scope（沿 nextCursor 分页到无游标，不设人为页数上限），
  * 排除已删除墓碑并按 kind 过滤后再逐个 scopeHistory 取最新一条（room 列表不额外读 DM 历史）。
- * history 失败保留该 scope 的上次预览/时间；无上次数据时才放空值。
+ * history 失败保留该 scope 的上次预览/时间；无上次数据时保持未知。
  * 失效由调用方判定；每个 await 后经 stillValid() 早退。
  */
 async function loadSource(
@@ -174,7 +175,7 @@ async function loadSource(
         } catch (e) {
           if (!stillValid()) return;
           // 失败保留该 scope 此前预览/时间，避免列表项在时间轴上乱跳。
-          history.set(scopeId, prev ?? { preview: '', at: null });
+          if (prev) history.set(scopeId, prev);
           if (firstError === null) firstError = errText(e);
         }
       }
@@ -200,7 +201,7 @@ function buildItems(
         scope,
         title: conversationTitle(scope.scope, bots),
         lastPreview: h?.preview ?? '',
-        lastActivityAt: h?.at ?? null,
+        lastActivityAt: h?.at,
       };
     });
 }
