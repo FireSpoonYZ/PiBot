@@ -40,7 +40,6 @@ import {
   User,
   Users,
   X,
-  Zap,
 } from 'lucide-react';
 import {
   BotHost,
@@ -140,7 +139,7 @@ import {
 import type { ImageAttachment } from '../../host-core/index.js';
 import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useText } from './ui';
 
-import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleRepeatLabel, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending, ChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, copyTextToClipboard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
+import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending, ChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, copyTextToClipboard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
 // @lane-imports:settings
 import { Badge, Disclosure, Row, Section, SettingsSheet } from './bot-settings/primitives';
 import { ClientUpdateSection, useClientUpdateSummary } from './ClientUpdateSection';
@@ -365,8 +364,15 @@ export function HostPage({
   const [editName, setEditName] = useState('');
   const [editSubtitle, setEditSubtitle] = useState('');
   const [editCwd, setEditCwd] = useState('');
+  const [editCwdBaseline, setEditCwdBaseline] = useState('');
   const [editCwdRevision, setEditCwdRevision] = useState<number | null>(null);
   const [editCwdError, setEditCwdError] = useState('');
+  const [editSaveErrors, setEditSaveErrors] = useState<Partial<Record<'profile' | 'cwd', string>>>({});
+  const [editCwdSaved, setEditCwdSaved] = useState(false);
+  const editSaveInFlight = useRef(false);
+  const profileEditKeyRef = useRef<{ key: string | null; inFamily: boolean }>({ key: null, inFamily: false });
+  const profileManageTrigger = useRef<HTMLButtonElement>(null);
+  const restoreProfileManageFocus = useRef(false);
   // 单调递增 token：编辑目标/连接变化丢弃迟到的 cwd 回填结果。
   const editCwdFetchRef = useRef(0);
   // 用户已编辑目录后，异步回填不得覆盖输入。
@@ -388,7 +394,7 @@ export function HostPage({
   const [soulDirty, setSoulDirty] = useState(false);
 
   // Per-Bot Scheduled Tasks state
-  const [botScheduleState, setBotScheduleState] = useState<BotScheduleState>({
+  const [botScheduleState, setBotScheduleState] = useState<BotScheduleState & { botKey?: string }>({
     tasks: [],
     exactAlarmGranted: true,
     schedulingError: '',
@@ -397,6 +403,7 @@ export function HostPage({
   });
   const [scheduleFilter, setScheduleFilter] = useState<'all' | 'enabled' | 'paused'>('all');
   const [scheduleEditing, setScheduleEditing] = useState<'new' | 'edit' | null>(null);
+  const [scheduleDeleteTarget, setScheduleDeleteTarget] = useState<BotScheduleTask | null>(null);
   const [scheduleCustomWeekdays, setScheduleCustomWeekdays] = useState(false);
   const [scheduleDraft, setScheduleDraft] = useState<BotScheduleDraft>({
     title: '',
@@ -1138,6 +1145,7 @@ export function HostPage({
     setDmSelectedScopeId(null);
     setHubContextMenu(null);
     setBotConfirmModal(null);
+    setScheduleDeleteTarget(null);
     if (screen === 'conversation') setScreen(scopeReturnScreen);
     else if (screen === 'dm') setScreen(dmTarget?.returnScreen ?? 'hub');
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1339,6 +1347,7 @@ export function HostPage({
           });
         } else {
           setBotScheduleState({
+            botKey: bot.key,
             tasks: [],
             exactAlarmGranted: true,
             schedulingError: '',
@@ -1360,7 +1369,7 @@ export function HostPage({
               : Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai',
           now: typeof raw.now === 'number' ? raw.now : Date.now(),
         };
-        setBotScheduleState(nextState);
+        setBotScheduleState({ ...nextState, botKey: bot.key });
         const enabledCount = tasks.filter(item => item.enabled !== false).length;
         updateBotMeta(bot.key, { scheduleCount: enabledCount });
       } catch {
@@ -1800,7 +1809,9 @@ export function HostPage({
     setComposerMenuOpen(false);
     setActiveBotKey(bot.key);
     setScheduleEditing(null);
+    setScheduleDeleteTarget(null);
     setScheduleFilter('all');
+    setSubPageReturnScreen('bot-profile');
     setScreen('bot-schedules');
     void loadBotSchedules(bot);
   };
@@ -1815,7 +1826,9 @@ export function HostPage({
       if (!api || !identity) throw new Error(t('中心连接不可用，无法读取工作目录；连接后可重试', 'Center unavailable; cannot load the working directory. Retry once connected'));
       const config = await api.broker(identity, 'center_bot_cwd_get', { deviceId: bot.deviceId, botId: bot.botId });
       if (editCwdFetchRef.current !== fetchId) return false;
-      if (!editCwdDirtyRef.current) setEditCwd(config.value ?? bot.cwd ?? '');
+      const current = config.value ?? bot.cwd ?? '';
+      if (!editCwdDirtyRef.current) setEditCwd(current);
+      setEditCwdBaseline(current);
       setEditCwdRevision(config.revision);
       setEditCwdError('');
       return true;
@@ -1838,19 +1851,21 @@ export function HostPage({
     setEditCwd(bot.cwd || localHost?.workspace || '');
     setEditCwdRevision(null);
     setEditCwdError('');
+    setEditSaveErrors({});
+    setEditCwdSaved(false);
     setEditAvatarPreset(resolveBotAvatarPreset(botAvatarKey(bot), bot.role, bot.isPrimary));
   };
 
   // 编辑期间以完整身份（设备+bot+连接 profile/generation）为键重读修订；
   // 离开表单/切 create/换目标即失效旧请求，迟到结果不写新表单。
   const editCwdIdentity = activeBot
-    ? activeBot.deviceId + ':' + activeBot.botId + ':' +
-      (activeBot.remoteIdentity
-        ? activeBot.remoteIdentity.profileId + '/' + activeBot.remoteIdentity.generation
-        : 'local')
+    ? JSON.stringify([
+        activeCenter, activeBot.deviceId, activeBot.botId,
+        remoteIdentity?.profileId, remoteIdentity?.generation,
+      ])
     : '';
   useEffect(() => {
-    if (screen !== 'bot-profile' || !activeBot) return;
+    if (!activeBot || (screen !== 'bot-profile-manage' && !(screen === 'bot-edit' && editMode === 'edit'))) return;
     void loadEditCwd(activeBot);
     return () => {
       // 身份/表单变化：旧修订立即作废，绝不允许旧 CAS 凭据写新目标。
@@ -2156,10 +2171,13 @@ ${newer}` : draftSnapshot;
   };
 
   // Save in Edit Bot / Create Bot (15847.jpg "完成")
-  const handleSaveBotEdit = () =>
-    action.run(async () => {
+  const handleSaveBotEdit = (scope: 'all' | 'profile' | 'cwd' = 'all') => {
+    if (action.busy || editSaveInFlight.current) return;
+    editSaveInFlight.current = true;
+    const draftOwner = profileEditKeyRef.current;
+    return action.run(async () => {
       const roleName = editName.trim();
-      if (!roleName) return;
+      if (scope !== 'cwd' && !roleName) return;
 
       if (editMode === 'create') {
         const targetHost = mustCreatePrimaryBot ? 'local' : editTargetHost;
@@ -2255,17 +2273,19 @@ ${newer}` : draftSnapshot;
           setScreen('hub');
         }
       } else if (activeBot) {
-        // Editing an existing Bot updates the authoritative shared profile.
         const trimmedCwd = editCwd.trim();
-        const cwdChanged = trimmedCwd !== (activeBot.cwd ?? '');
-        const profileChanged = roleName !== activeBot.role || editSubtitle.trim() !== (activeBot.description ?? '');
-        if (!trimmedCwd) throw new Error(t('工作目录不能为空', 'Working directory cannot be empty'));
+        const cwdChanged = scope !== 'profile' && trimmedCwd !== (scope === 'cwd' ? editCwdBaseline : activeBot.cwd ?? '');
+        const profileChanged = scope !== 'cwd' && (roleName !== activeBot.role || editSubtitle.trim() !== (activeBot.description ?? ''));
+        if (scope !== 'all') setEditSaveErrors(errors => ({ ...errors, [scope]: '' }));
+        if (scope === 'cwd') setEditCwdSaved(false);
         const saveCwd = async () => {
           if (!cwdChanged) return;
           if (editCwdRevision === null) {
             throw new Error(t('工作目录修订尚未读取，请重新读取后再保存', 'Working directory revision not loaded; reload before saving'));
           }
+          const fetchId = editCwdFetchRef.current;
           const api = await ensureRemoteApi();
+          if (profileEditKeyRef.current !== draftOwner || editCwdFetchRef.current !== fetchId) return;
           const identity = activeBot.hostKind === 'local' ? api?.identity : activeBot.remoteIdentity;
           const broker = activeBot.hostKind === 'local' ? api : remoteClientRef.current?.api;
           if (!broker || !identity) {
@@ -2276,36 +2296,50 @@ ${newer}` : draftSnapshot;
               deviceId: activeBot.deviceId, botId: activeBot.botId,
               expectedRevision: editCwdRevision, value: trimmedCwd,
             });
+            if (profileEditKeyRef.current !== draftOwner || editCwdFetchRef.current !== fetchId) return;
             setEditCwdRevision(config.revision);
             editCwdDirtyRef.current = false;
             setEditCwd(config.value ?? trimmedCwd);
+            setEditCwdBaseline(config.value ?? trimmedCwd);
+            setEditCwdError('');
+            if (scope === 'cwd') setEditCwdSaved(true);
           } catch (error) {
             const code = (error as { code?: string })?.code;
-            if (code === 'REVISION_CONFLICT' || code === 'REQUEST_CONFLICT') {
+            if (editCwdFetchRef.current === fetchId && (code === 'REVISION_CONFLICT' || code === 'REQUEST_CONFLICT')) {
               setEditCwdRevision(null);
               setEditCwdError(t('工作目录已被其他修改占用，请重新读取后再保存', 'Working directory was changed elsewhere; reload and save again'));
             }
             throw error;
           }
         };
-        if (activeBot.hostKind === 'local') {
-          if (profileChanged) await BotHost.call({ method: 'updateBotProfile', params: { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() } });
-          // 本机 Bot 的 cwd 由中心权威管理：只经中心 CAS 通道写入，
-          // 没有中心连接时不静默绕开写 Host 本地。
-          await saveCwd();
-          await syncLocalBots();
-        } else if (activeBot.remoteIdentity && remoteClientRef.current) {
-          if (profileChanged) await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'updateBotProfile', { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() });
-          await saveCwd();
-          await syncRemoteBots();
-        } else throw new Error('Remote target unavailable');
-        await saveAvatar(activeBot, editAvatarPreset);
-        updateBotMeta(activeBot.key, {
-          customName: roleName,
-          subtitle: editSubtitle.trim(),
-        });
+        try {
+          if (scope !== 'profile' && !trimmedCwd) {
+            throw new Error(t('工作目录不能为空', 'Working directory cannot be empty'));
+          }
+          if (activeBot.hostKind === 'local') {
+            if (profileChanged) await BotHost.call({ method: 'updateBotProfile', params: { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() } });
+            await saveCwd();
+            await syncLocalBots();
+          } else if (activeBot.remoteIdentity && remoteClientRef.current) {
+            if (profileChanged) await remoteClientRef.current.api.call(activeBot.remoteIdentity, 'updateBotProfile', { botId: activeBot.botId, name: roleName, description: editSubtitle.trim() });
+            await saveCwd();
+            await syncRemoteBots();
+          } else throw new Error(t('无法连接目标节点', 'Target host unavailable'));
+          if (scope === 'all') await saveAvatar(activeBot, editAvatarPreset);
+          if (scope !== 'cwd') updateBotMeta(activeBot.key, { customName: roleName, subtitle: editSubtitle.trim() });
+        } catch (error) {
+          if (scope === 'all') throw error;
+          const code = (error as { code?: string })?.code;
+          const cwdConflict = scope === 'cwd' && (code === 'REVISION_CONFLICT' || code === 'REQUEST_CONFLICT');
+          if (profileEditKeyRef.current === draftOwner && !cwdConflict) {
+            setEditSaveErrors(errors => ({ ...errors, [scope]: errorText(error) }));
+          }
+        }
       }
+    }).finally(() => {
+      editSaveInFlight.current = false;
     });
+  };
 
   const handleSetPrimaryBot = (bot: UnifiedBotItem) =>
     action.run(async () => {
@@ -2425,7 +2459,10 @@ ${newer}` : draftSnapshot;
       }
       const returnToArchived =
         screen === 'archived-bots' ||
-        ((screen === 'chat' || screen === 'bot-profile') && chatReturnScreen === 'archived-bots');
+        (screen === 'chat' && chatReturnScreen === 'archived-bots') ||
+        ((screen === 'bot-profile' || screen === 'bot-profile-manage') &&
+          (profileReturnScreen === 'archived-bots' ||
+            (profileReturnScreen === 'chat' && chatReturnScreen === 'archived-bots')));
       setScreen(returnToArchived ? 'archived-bots' : 'hub');
     });
 
@@ -2650,7 +2687,7 @@ ${newer}` : draftSnapshot;
     }
   }, [roomDeleteModal, resolveRoomApi, chatPins, roomPinKey, scopeConversationTarget, t]);
 
-  const openModelPickerSheet = (_target: 'bot-edit' | 'bot-profile', tab: BotSettingsTab = 'model') => {
+  const openModelPickerSheet = (tab: BotSettingsTab = 'model') => {
     if (!activeBot || !remoteIdentity || !remoteConnected || !remoteClientRef.current) return;
     const deviceId = activeBot.hostKind === 'local' ? localHost?.deviceId : activeBot.hostId;
     if (!deviceId) return;
@@ -2762,7 +2799,7 @@ ${newer}` : draftSnapshot;
     setScheduleDraft({
       id: task.id,
       revision: task.revision,
-      title: task.title,
+      title: task.title || '',
       prompt: task.prompt ?? '',
       repeat: task.repeat,
       time: task.time || '08:00',
@@ -2823,6 +2860,7 @@ ${newer}` : draftSnapshot;
         id: task.id,
         revision: task.revision,
       });
+      setScheduleDeleteTarget(null);
       setScheduleEditing(null);
     });
 
@@ -2883,6 +2921,10 @@ ${newer}` : draftSnapshot;
       });
       if (activeBot) await loadBotSchedules(activeBot);
     });
+
+  const scheduleTasks = botScheduleState.botKey === activeBot?.key ? botScheduleState.tasks : [];
+  const scheduleError = botScheduleState.botKey === activeBot?.key ? botScheduleState.schedulingError : '';
+  const scheduleOffline = activeBot?.hostKind === 'remote' && (!remoteConnected || activeBot.online === false);
 
   const submission = chatSubmissionRef.current;
   // 用户主动停止的 unanswered 回执（reason aborted/cancelled）是已停止结算，不是配置/模型故障：
@@ -3255,6 +3297,11 @@ ${newer}` : draftSnapshot;
     else setSettingsPage(settingsPage === 'manual' ? 'devices' : 'overview');
   }, [settingsPage]);
 
+  const backFromProfileManage = useCallback(() => {
+    restoreProfileManageFocus.current = true;
+    setScreen('bot-profile');
+  }, []);
+
   // Step-by-step Back Navigation for Android full-screen back gesture & hardware Back button
   const handleStepBack = useCallback((): boolean => {
     if (leftDrawerOpen) {
@@ -3302,6 +3349,26 @@ ${newer}` : draftSnapshot;
       backFromSettings();
       return true;
     }
+    if (screen === 'bot-profile') {
+      if (skillReviewTargetKey) setSkillReviewTargetKey(null);
+      else if (vaultTargetKey) setVaultTargetKey(null);
+      else setScreen(profileReturnScreen);
+      return true;
+    }
+    if (screen === 'bot-profile-manage') {
+      backFromProfileManage();
+      return true;
+    }
+    if (screen === 'bot-schedules') {
+      if (scheduleDeleteTarget) {
+        if (!action.busy) setScheduleDeleteTarget(null);
+      } else if (scheduleEditing !== null) {
+        setScheduleEditing(null);
+      } else {
+        setScreen(subPageReturnScreen);
+      }
+      return true;
+    }
     if (chatTopMenuOpen) {
       setChatTopMenuOpen(false);
       return true;
@@ -3323,14 +3390,6 @@ ${newer}` : draftSnapshot;
       setScreen(subPageReturnScreen);
       return true;
     }
-    if (screen === 'bot-schedules') {
-      if (scheduleEditing !== null) {
-        setScheduleEditing(null);
-      } else {
-        setScreen('bot-profile');
-      }
-      return true;
-    }
     if (screen === 'bot-screen') {
       setScreen('bot-profile');
       return true;
@@ -3340,10 +3399,6 @@ ${newer}` : draftSnapshot;
         return true;
       }
       setScreen(editMode === 'create' ? 'hub' : 'bot-profile');
-      return true;
-    }
-    if (screen === 'bot-profile') {
-      setScreen(profileReturnScreen);
       return true;
     }
     if (screen === 'chat') {
@@ -3384,6 +3439,9 @@ ${newer}` : draftSnapshot;
     leftDrawerOpen,
     libraryReturnScreen,
     backFromSettings,
+    backFromProfileManage,
+    skillReviewTargetKey,
+    vaultTargetKey,
     screen,
     roomSettingsOpen,
     avatarReturnScreen,
@@ -3391,6 +3449,7 @@ ${newer}` : draftSnapshot;
     profileReturnScreen,
     chatReturnScreen,
     scheduleEditing,
+    scheduleDeleteTarget,
     editMode,
     mustCreatePrimaryBot,
     searchQuery,
@@ -3753,12 +3812,20 @@ ${newer}` : draftSnapshot;
   // @lane-hooks:bot-profile
   // 资料页即编辑页：从非资料页家族进入或换 Bot 时预填共享编辑态；
   // 从头像/灵魂/电脑等子页返回不重填，保住未保存的输入。
-  const profileEditKeyRef = useRef<{ key: string | null; inFamily: boolean }>({ key: null, inFamily: false });
-  useEffect(() => {
-    const inFamily = screen === 'bot-profile' || screen === 'bot-avatar' || screen === 'bot-soul' || screen === 'bot-schedules' || screen === 'bot-screen';
-    const entered = screen === 'bot-profile' && (!profileEditKeyRef.current.inFamily || profileEditKeyRef.current.key !== activeBot?.key);
-    profileEditKeyRef.current = { key: activeBot?.key ?? null, inFamily };
-    if (entered && activeBot) prefillBotProfileEdit(activeBot);
+  useLayoutEffect(() => {
+    const inFamily = screen === 'bot-profile' || screen === 'bot-profile-manage' || screen === 'bot-avatar' || screen === 'bot-soul' || screen === 'bot-schedules' || screen === 'bot-screen';
+    const key = activeBot?.key ?? null;
+    const previous = profileEditKeyRef.current;
+    if (previous.key !== key || previous.inFamily !== inFamily) {
+      profileEditKeyRef.current = { key, inFamily };
+    }
+    if (screen === 'bot-profile' && activeBot && (!previous.inFamily || previous.key !== key)) {
+      prefillBotProfileEdit(activeBot);
+    }
+    if (screen === 'bot-profile' && restoreProfileManageFocus.current) {
+      restoreProfileManageFocus.current = false;
+      profileManageTrigger.current?.focus();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, activeBot?.key]);
   // ---
@@ -4795,7 +4862,7 @@ ${newer}` : draftSnapshot;
 
       {/* ==================== SCREEN 3: BOT PROFILE VIEW (15867.jpg) ==================== */}
       {screen === 'bot-profile' && activeBot && (
-        <main className="grok-subpage grok-page-enter">
+        <main className="grok-subpage grok-page-enter bot-profile-page">
           <header className="grok-subpage-topbar">
             <button
               type="button"
@@ -4805,12 +4872,12 @@ ${newer}` : draftSnapshot;
             >
               <ArrowLeft size={20} />
             </button>
-            <h2 className="grok-subpage-header-title">{t('智能体', 'Bot')}</h2>
+            <h2 className="grok-subpage-header-title">{t('智能体资料', 'Bot profile')}</h2>
             <button
               type="button"
               className="grok-done-pill-btn"
               disabled={action.busy || !editName.trim()}
-              onClick={() => void handleSaveBotEdit()}
+              onClick={() => void handleSaveBotEdit('profile')}
             >
               {action.busy ? t('保存中', 'Saving') : t('保存', 'Save')}
             </button>
@@ -4834,7 +4901,7 @@ ${newer}` : draftSnapshot;
                   isPrimary={activeBot.isPrimary}
                   starBadge={activeBot.isPrimary}
                   platformBadge={<PlatformLogoIcon platform={activeBot.platform} size={11} />}
-                  size={104}
+                  size={88}
                 />
                 <span className="grok-avatar-pencil-badge">
                   <Pencil size={16} />
@@ -4852,143 +4919,150 @@ ${newer}` : draftSnapshot;
                 value={editSubtitle}
                 onChange={e => setEditSubtitle(e.target.value)}
                 placeholder={t('描述 Bot 的用途（可选）', 'Describe what this Bot does (optional)')}
-                aria-label={t('标题', 'Subtitle')}
+                aria-label={t('用途', 'Purpose')}
               />
             </section>
 
-            {/* Grouped Card 1: Capabilities & Computer (15867.jpg style) */}
-            <section className="grok-card-group">
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => openModelPickerSheet('bot-profile')}
-                disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
-              >
-                <Cpu size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('模型', 'Model')}</span>
-                <span className="grok-row-value grok-row-value-path">
-                  {getOrCreateRemoteClient
-                    ? (activeBot.modelRef ?? t('继承中心默认', 'Inherit center default'))
-                    : t('请在独立助手中设置 Bot 模型', 'Set the bot model in the standalone assistant')}
-                </span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => openModelPickerSheet('bot-profile', 'capabilities')}
-                disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
-              >
-                <Puzzle size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('插件 / 技能 / MCP', 'Plugins / Skills / MCP')}</span>
-                <span className="grok-row-value grok-row-value-path">
-                  {getOrCreateRemoteClient ? t('设置', 'Settings') : t('请在独立助手中设置 Bot 能力', 'Set bot capabilities in the standalone assistant')}
-                </span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => setSkillReviewTargetKey(botPanelIdentityKey)}
-              >
-                <Sparkles size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('Skill 审阅', 'Skill Review')}</span>
-                <span className="grok-row-value">{t('学习草稿', 'Learning drafts')}</span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => setVaultTargetKey(botPanelIdentityKey)}
-              >
-                <LockKeyhole size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('密码库', 'Password Vault')}</span>
-                <span className="grok-row-value">{activeBot.hostLabel}</span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => openModelPickerSheet('bot-profile', 'advanced')}
-                disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
-              >
-                <Settings size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('高级设置', 'Advanced Settings')}</span>
-                <span className="grok-row-value grok-row-value-path">
-                  {getOrCreateRemoteClient ? t('Code Mode · 覆盖策略', 'Code Mode · Overrides') : t('请在独立助手中设置', 'Configure in standalone assistant')}
-                </span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => {
-                  setSubPageReturnScreen('bot-profile');
-                  setScreen('bot-soul');
-                }}
-              >
-                <Sparkles size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('灵魂文档', 'Persona')}</span>
-                <span className="grok-row-value">
-                  {soulDraft.trim() ? t('已配置', 'Configured') : t('未设置', 'Not set')}
-                </span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => openBotSchedules(activeBot)}
-              >
-                <Clock size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('定时任务', 'Schedules')}</span>
-                <span className="grok-row-value">
-                  {(() => {
-                    const count =
-                      botMetaMap[activeBot.key]?.scheduleCount ??
-                      botScheduleState.tasks.filter(x => x.enabled !== false).length;
-                    return count > 0 ? t(`${count} 个已开启`, `${count} active`) : '';
-                  })()}
-                </span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
-
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => void openCenterManagement()}
-              >
-                <Brain size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('长期记忆', 'Memory')}</span>
-                <span className="grok-row-value">{t('在中心管理中打开', 'Opens Center management')}</span>
-                <ExternalLink size={16} className="grok-row-chevron" />
-              </button>
-
-              <button
-                type="button"
-                className="grok-card-row"
-                onClick={() => setScreen('bot-screen')}
-              >
-                <Monitor size={20} className="grok-row-icon" />
-                <span className="grok-row-label">{t('电脑', 'Computer')}</span>
-                <span className="grok-row-value">{isBotBusy ? t('运行中', 'Active') : t('空闲', 'Idle')}</span>
-                <ChevronRight size={18} className="grok-row-chevron" />
-              </button>
+            <ErrorNotice
+              error={editSaveErrors.profile}
+              onDismiss={() => setEditSaveErrors(errors => ({ ...errors, profile: '' }))}
+            />
+            <section className="grok-field-section">
+              <h3 className="grok-section-label">{t('常用设置', 'Common settings')}</h3>
+              <div className="grok-card-group">
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => openModelPickerSheet()}
+                  disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
+                >
+                  <Cpu size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('模型', 'Model')}</span>
+                  <span className="grok-row-value grok-row-value-path">
+                    {activeBot.modelRef ?? (getOrCreateRemoteClient ? t('继承中心默认', 'Center default') : '')}
+                  </span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => {
+                    setSubPageReturnScreen('bot-profile');
+                    setScreen('bot-soul');
+                  }}
+                >
+                  <Sparkles size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('人设', 'Persona')}</span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => openModelPickerSheet('capabilities')}
+                  disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
+                >
+                  <Puzzle size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('插件与能力', 'Plugins & capabilities')}</span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => openBotSchedules(activeBot)}
+                >
+                  <Clock size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('定时任务', 'Schedules')}</span>
+                  <span className="grok-row-value">
+                    {(() => {
+                      const count = botMetaMap[activeBot.key]?.scheduleCount ?? 0;
+                      return count > 0 ? t(`${count} 个已开启`, `${count} active`) : '';
+                    })()}
+                  </span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+              </div>
             </section>
 
-            {/* Working directory (inline edit; CAS via center) */}
-            <div className="grok-field-section">
-              <label className="grok-section-label">{t('工作目录', 'Working directory')}</label>
+            <section className="grok-field-section">
+              <h3 className="grok-section-label">{t('更多', 'More')}</h3>
+              <div className="grok-card-group">
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => setSkillReviewTargetKey(botPanelIdentityKey)}
+                >
+                  <Sparkles size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('Skill 审阅', 'Skill Review')}</span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => setVaultTargetKey(botPanelIdentityKey)}
+                >
+                  <LockKeyhole size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('密码库', 'Password Vault')}</span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => void openCenterManagement()}
+                >
+                  <Brain size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('长期记忆', 'Memory')}</span>
+                  <ExternalLink size={16} className="grok-row-chevron" />
+                </button>
+                <button
+                  type="button"
+                  className="grok-card-row"
+                  onClick={() => setScreen('bot-screen')}
+                >
+                  <Monitor size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('电脑', 'Computer')}</span>
+                  <span className="grok-row-value">{isBotBusy ? t('运行中', 'Active') : t('空闲', 'Idle')}</span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+                <button ref={profileManageTrigger} type="button" className="grok-card-row" onClick={() => setScreen('bot-profile-manage')}>
+                  <Settings size={20} className="grok-row-icon" />
+                  <span className="grok-row-label">{t('管理智能体', 'Manage bot')}</span>
+                  <ChevronRight size={18} className="grok-row-chevron" />
+                </button>
+              </div>
+            </section>
+          </div>
+        </main>
+      )}
+
+      {screen === 'bot-profile-manage' && activeBot && (
+        <main className="grok-subpage grok-page-enter bot-profile-page">
+          <header className="grok-subpage-topbar">
+            <button
+              type="button"
+              className="grok-floating-circle-btn"
+              aria-label={t('返回智能体资料', 'Back to bot profile')}
+              onClick={backFromProfileManage}
+            >
+              <ArrowLeft size={20} />
+            </button>
+            <h2 className="grok-subpage-header-title">{t('管理智能体', 'Manage bot')}</h2>
+            <span className="grok-topbar-spacer" aria-hidden="true" />
+          </header>
+
+          <div className="grok-subpage-scroll">
+            <section className="grok-field-section">
+              <label className="grok-section-label" htmlFor="profile-working-directory">{t('工作目录', 'Working directory')}</label>
               <div className="grok-card-group">
                 <input
+                  id="profile-working-directory"
                   className="grok-card-input"
                   value={editCwd}
-                  onChange={e => { editCwdDirtyRef.current = true; setEditCwd(e.target.value); }}
+                  disabled={action.busy}
+                  onChange={e => {
+                    editCwdDirtyRef.current = true;
+                    setEditCwd(e.target.value);
+                    setEditCwdSaved(false);
+                  }}
                   placeholder={t('目标 Host 上的绝对路径；空闲后生效', 'Absolute path on the target Host; applies when idle')}
                 />
                 {editCwdError && (
@@ -5006,7 +5080,7 @@ ${newer}` : draftSnapshot;
                 )}
                 {!editCwdError && editCwdRevision === null && (
                   <p className="secondary profile-card-hint">
-                    {t('正在读取中心修订…', 'Loading the center revision…')}
+                    {t('正在读取目录…', 'Loading directory…')}
                   </p>
                 )}
                 <p className="secondary profile-card-hint">
@@ -5015,12 +5089,41 @@ ${newer}` : draftSnapshot;
                     'Saved to the center and applied when this Bot is idle; running work keeps its directory and no files are moved.',
                   )}
                 </p>
+                {editCwdSaved && (
+                  <p className="secondary profile-card-hint" role="status">{t('工作目录已保存', 'Working directory saved')}</p>
+                )}
+                <div className="profile-directory-actions">
+                  <button
+                    type="button"
+                    className="grok-done-pill-btn"
+                    disabled={action.busy || editCwdRevision === null || !editCwd.trim() || editCwd.trim() === editCwdBaseline}
+                    onClick={() => void handleSaveBotEdit('cwd')}
+                  >
+                    {t('保存工作目录', 'Save working directory')}
+                  </button>
+                </div>
               </div>
-            </div>
+              <ErrorNotice
+                error={editSaveErrors.cwd}
+                onDismiss={() => setEditSaveErrors(errors => ({ ...errors, cwd: '' }))}
+              />
+            </section>
 
-            {/* Grouped Card: Primary Bot Switch, Archive & Delete Lifecycle */}
-            <div className="grok-field-section">
-              <label className="grok-section-label">{t('节点与生命周期管理', 'Lifecycle Management')}</label>
+            <section className="grok-card-group">
+              <button
+                type="button"
+                className="grok-card-row"
+                onClick={() => openModelPickerSheet('advanced')}
+                disabled={!getOrCreateRemoteClient || !remoteConnected || !remoteIdentity || (activeBot.hostKind === 'local' && !localHost?.deviceId)}
+              >
+                <Settings size={20} className="grok-row-icon" />
+                <span className="grok-row-label">{t('高级设置', 'Advanced Settings')}</span>
+                <ChevronRight size={18} className="grok-row-chevron" />
+              </button>
+            </section>
+
+            <section className="grok-field-section">
+              <h3 className="grok-section-label">{t('智能体状态', 'Bot status')}</h3>
               <section className="grok-card-group">
                 {activeBot.isPrimary ? (
                   <div className="grok-card-row no-active">
@@ -5084,7 +5187,7 @@ ${newer}` : draftSnapshot;
                 )}
               </section>
               <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
-            </div>
+            </section>
           </div>
         </main>
       )}
@@ -5665,7 +5768,7 @@ ${newer}` : draftSnapshot;
               <button
                 type="button"
                 className="grok-done-pill-btn"
-                disabled={action.busy || !scheduleDraft.prompt.trim()}
+                disabled={action.busy || scheduleOffline || !scheduleDraft.prompt.trim()}
                 onClick={() => void handleSaveSchedule()}
               >
                 {action.busy ? t('保存中', 'Saving') : t('保存', 'Save')}
@@ -5674,6 +5777,7 @@ ${newer}` : draftSnapshot;
               <button
                 type="button"
                 className="grok-done-pill-btn"
+                disabled={action.busy || scheduleOffline}
                 onClick={() => openScheduleCreate()}
               >
                 <Plus size={16} className="grok-icon-mr-4" />
@@ -5684,44 +5788,32 @@ ${newer}` : draftSnapshot;
 
           {!scheduleEditing ? (
             <div className="grok-subpage-scroll">
-              {/* Filter Tabs */}
-              <div className="grok-schedule-filter-bar" role="tablist">
-                {(
-                  [
-                    {
-                      id: 'all' as const,
-                      label: t(`全部 (${botScheduleState.tasks.length})`, `All (${botScheduleState.tasks.length})`),
-                    },
-                    {
-                      id: 'enabled' as const,
-                      label: t(
-                        `已开启 (${botScheduleState.tasks.filter(x => x.enabled !== false).length})`,
-                        `Active (${botScheduleState.tasks.filter(x => x.enabled !== false).length})`,
-                      ),
-                    },
-                    {
-                      id: 'paused' as const,
-                      label: t(
-                        `已暂停 (${botScheduleState.tasks.filter(x => x.enabled === false).length})`,
-                        `Paused (${botScheduleState.tasks.filter(x => x.enabled === false).length})`,
-                      ),
-                    },
-                  ]
-                ).map(tab => (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    role="tab"
-                    aria-selected={scheduleFilter === tab.id}
-                    className={`grok-schedule-filter-tab${scheduleFilter === tab.id ? ' active' : ''}`}
-                    onClick={() => setScheduleFilter(tab.id)}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
+              {(scheduleFilter !== 'all' ||
+                (scheduleTasks.some(task => task.enabled !== false) && scheduleTasks.some(task => task.enabled === false))) && (
+                <div className="grok-schedule-filter-bar" role="group" aria-label={t('按任务状态筛选', 'Filter by schedule status')}>
+                  {([
+                    { id: 'all', label: t('全部', 'All') },
+                    { id: 'enabled', label: t('已开启', 'Active') },
+                    { id: 'paused', label: t('已暂停', 'Paused') },
+                  ] as const).map(tab => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      aria-pressed={scheduleFilter === tab.id}
+                      className={`grok-schedule-filter-tab${scheduleFilter === tab.id ? ' active' : ''}`}
+                      onClick={() => setScheduleFilter(tab.id)}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+              )}
 
-              {!botScheduleState.exactAlarmGranted && (
+              {scheduleOffline && (
+                <p className="grok-card-footnote" role="status">{t('目标设备离线，连接后可修改定时任务。', 'The target device is offline. Reconnect to change schedules.')}</p>
+              )}
+
+              {botScheduleState.botKey === activeBot.key && !botScheduleState.exactAlarmGranted && (
                 <section className="grok-card-group grok-schedule-permission-banner">
                   <div className="grok-schedule-permission-text">
                     <strong>{t('精确闹钟权限未开启', 'Exact Alarm Permission Needed')}</strong>
@@ -5743,7 +5835,7 @@ ${newer}` : draftSnapshot;
               )}
 
               {(() => {
-                const filteredTasks = botScheduleState.tasks.filter(task => {
+                const filteredTasks = scheduleTasks.filter(task => {
                   if (scheduleFilter === 'enabled') return task.enabled !== false;
                   if (scheduleFilter === 'paused') return task.enabled === false;
                   return true;
@@ -5756,11 +5848,13 @@ ${newer}` : draftSnapshot;
                     <section className="grok-card-group grok-schedule-empty">
                       <Clock size={32} className="grok-row-icon" />
                       <h4>
-                        {scheduleFilter === 'all'
-                          ? t(`还没有为「${botDisplayName}」设置定时任务`, `No schedules for ${botDisplayName}`)
+                        {scheduleOffline && botScheduleState.botKey !== activeBot.key
+                          ? t('暂无可查看的任务记录', 'No schedule records available')
                           : scheduleFilter === 'enabled'
                             ? t('暂无已开启的定时任务', 'No active schedules')
-                            : t('暂无已暂停的定时任务', 'No paused schedules')}
+                            : scheduleFilter === 'paused'
+                              ? t('暂无已暂停的定时任务', 'No paused schedules')
+                              : t(`还没有为「${botDisplayName}」设置定时任务`, `No schedules for ${botDisplayName}`)}
                       </h4>
                       <p>
                         {t(
@@ -5771,6 +5865,7 @@ ${newer}` : draftSnapshot;
                       <button
                         type="button"
                         className="grok-done-pill-btn grok-btn-mt-8"
+                        disabled={action.busy || scheduleOffline}
                         onClick={() => openScheduleCreate()}
                       >
                         <Plus size={16} className="grok-icon-mr-4" />
@@ -5781,107 +5876,51 @@ ${newer}` : draftSnapshot;
                 }
 
                 return (
-                  <div className="grok-schedule-list">
+                  <div className="grok-card-group grok-schedule-list">
                     {filteredTasks.map(task => {
                       const isEnabled = task.enabled !== false;
-                      const accentColor = resolveBotAvatarPreset(
-                        botAvatarKey(activeBot),
-                        activeBot.role,
-                        activeBot.isPrimary,
-                      ).color;
+                      const prompt = Array.from(task.prompt?.trim().replace(/\s+/g, ' ') ?? '');
+                      const promptTitle = prompt.slice(0, 48).join('') + (prompt.length > 48 ? '…' : '');
+                      const title = task.title?.trim() || promptTitle ||
+                        t('未命名定时任务', 'Untitled schedule');
+                      const latestStatus = task.latestRun?.status;
+                      const runNotice = latestStatus === 'unconfirmed'
+                        ? t('上次结果待确认', 'Last run unconfirmed')
+                        : latestStatus === 'unanswered'
+                          ? t('上次未完成', 'Last run incomplete')
+                          : latestStatus === 'not_sent' || latestStatus === 'skipped_offline' || latestStatus === 'skipped_capacity'
+                            ? t('上次未执行', 'Last run skipped')
+                            : '';
                       return (
-                        <section
-                          key={task.id}
-                          className={`grok-card-group grok-schedule-card${isEnabled ? '' : ' paused'}`}
-                        >
-                          <div className="grok-schedule-card-top">
-                            <div
-                              className="grok-schedule-card-time-wrap"
-                              role="button"
-                              tabIndex={0}
-                              onClick={() => openScheduleEdit(task)}
-                              onKeyDown={e => {
-                                if (e.key === 'Enter' || e.key === ' ') {
-                                  e.preventDefault();
-                                  openScheduleEdit(task);
-                                }
-                              }}
-                            >
-                              <span className="grok-schedule-time">{task.time || '09:00'}</span>
-                              <div className="grok-schedule-badges">
-                                <span className="grok-schedule-badge">
-                                  {formatScheduleRepeatLabel(task, t)}
-                                </span>
-                                <span className={`grok-schedule-badge ${task.alarmMode === 'alarmClock' ? 'alarm' : 'silent'}`}>
-                                  {task.alarmMode === 'alarmClock'
-                                    ? <><Bell size={12} />{t('强提醒', 'Alarm')}</>
-                                    : <><Zap size={12} />{t('后台执行', 'Silent')}</>}
-                                </span>
-                              </div>
-                            </div>
-
-                            <button
-                              type="button"
-                              role="switch"
-                              aria-checked={isEnabled}
-                              className={`grok-toggle-switch${isEnabled ? ' checked' : ''}`}
-                              style={isEnabled ? ({ '--grok-toggle-bg': accentColor } as React.CSSProperties) : undefined}
-                              onClick={() => void handleToggleSchedule(task, !isEnabled)}
-                            >
-                              <span className="grok-toggle-knob" />
-                            </button>
-                          </div>
-
-                          <div
-                            className="grok-schedule-card-body"
-                            role="button"
-                            tabIndex={0}
+                        <div key={task.id} className="grok-schedule-row">
+                          <button
+                            type="button"
+                            className="grok-schedule-entry"
+                            disabled={action.busy}
                             onClick={() => openScheduleEdit(task)}
-                            onKeyDown={e => {
-                              if (e.key === 'Enter' || e.key === ' ') {
-                                e.preventDefault();
-                                openScheduleEdit(task);
-                              }
-                            }}
                           >
-                            <div className="grok-schedule-title">
-                              {task.title || t('未命名定时任务', 'Untitled Task')}
-                            </div>
-                            <div className="grok-schedule-prompt">
-                              {task.prompt || t('点击编辑任务指令…', 'Tap to edit prompt…')}
-                            </div>
-                          </div>
-
-                          <div className="grok-schedule-card-footer">
+                            <span className="grok-schedule-title">{title}</span>
                             <span className="grok-schedule-next">
                               {isEnabled
-                                ? `${t('下次执行：', 'Next: ')}${formatScheduleNextRun(
-                                    task.nextRunAt,
-                                    botScheduleState.timeZone,
-                                    t,
-                                  )}`
+                                ? t('下次执行 · ', 'Next run · ') + formatScheduleNextRun(task.nextRunAt, botScheduleState.timeZone, t)
                                 : t('已暂停', 'Paused')}
+                              {runNotice && <span className="grok-schedule-run-notice">{` · ${runNotice}`}</span>}
                             </span>
-                            <div className="grok-schedule-actions">
-                              <button
-                                type="button"
-                                className="grok-schedule-icon-btn"
-                                aria-label={t('编辑', 'Edit')}
-                                onClick={() => openScheduleEdit(task)}
-                              >
-                                <Pencil size={15} />
-                              </button>
-                              <button
-                                type="button"
-                                className="grok-schedule-icon-btn danger"
-                                aria-label={t('删除', 'Delete')}
-                                onClick={() => void handleDeleteSchedule(task)}
-                              >
-                                <Trash2 size={15} />
-                              </button>
-                            </div>
-                          </div>
-                        </section>
+                          </button>
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={isEnabled}
+                            aria-label={t(`启用任务「${title}」`, `Enable schedule “${title}”`)}
+                            className="grok-schedule-toggle"
+                            disabled={action.busy || scheduleOffline}
+                            onClick={() => void handleToggleSchedule(task, !isEnabled)}
+                          >
+                            <span className={`grok-toggle-switch${isEnabled ? ' checked' : ''}`} aria-hidden="true">
+                              <span className="grok-toggle-knob" />
+                            </span>
+                          </button>
+                        </div>
                       );
                     })}
                   </div>
@@ -5889,12 +5928,15 @@ ${newer}` : draftSnapshot;
               })()}
 
               <ErrorNotice
-                error={action.error || botScheduleState.schedulingError}
+                error={action.error || scheduleError}
                 onDismiss={action.error ? () => action.setError('') : undefined}
               />
             </div>
           ) : (
             <div className="grok-subpage-scroll">
+              {scheduleOffline && (
+                <p className="grok-card-footnote" role="status">{t('目标设备离线，连接后可修改定时任务。', 'The target device is offline. Reconnect to change schedules.')}</p>
+              )}
               {/* Time & Repeat Section */}
               <div className="grok-field-section">
                 <label className="grok-section-label">{t('执行时间与周期', 'Time & Recurrence')}</label>
@@ -6116,11 +6158,12 @@ ${newer}` : draftSnapshot;
                   <button
                     type="button"
                     className="grok-card-row danger-text"
+                    disabled={action.busy || scheduleOffline}
                     onClick={() => {
-                      const existing = botScheduleState.tasks.find(x => x.id === scheduleDraft.id);
+                      const existing = scheduleTasks.find(task => task.id === scheduleDraft.id);
                       if (existing) {
-                        void handleDeleteSchedule(existing);
-                        setScheduleEditing(null);
+                        action.setError('');
+                        setScheduleDeleteTarget(existing);
                       }
                     }}
                   >
@@ -6131,11 +6174,32 @@ ${newer}` : draftSnapshot;
               )}
 
               <ErrorNotice
-                error={action.error || botScheduleState.schedulingError}
+                error={scheduleDeleteTarget ? '' : action.error || scheduleError}
                 onDismiss={action.error ? () => action.setError('') : undefined}
               />
             </div>
           )}
+          <Dialog
+            open={scheduleDeleteTarget !== null}
+            onOpenChange={open => { if (!open && !action.busy) setScheduleDeleteTarget(null); }}
+            title={t('删除定时任务', 'Delete schedule')}
+          >
+            <p className="secondary">{t('确定删除这个定时任务？', 'Delete this scheduled task?')}</p>
+            <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
+            <div className="dialog-actions">
+              <button type="button" className="button secondary-button" disabled={action.busy} onClick={() => setScheduleDeleteTarget(null)}>
+                {t('取消', 'Cancel')}
+              </button>
+              <button
+                type="button"
+                className="button danger-button"
+                disabled={action.busy || scheduleOffline}
+                onClick={() => { if (scheduleDeleteTarget) void handleDeleteSchedule(scheduleDeleteTarget); }}
+              >
+                {action.busy ? t('删除中…', 'Deleting…') : t('确认删除', 'Delete schedule')}
+              </button>
+            </div>
+          </Dialog>
         </main>
       )}
 
@@ -6399,7 +6463,7 @@ ${newer}` : draftSnapshot;
       {modelTarget && activeBot?.key === modelTarget.botKey && activeBot.botId === modelTarget.botId &&
         activeCenter === modelTarget.center && remoteConnected && remoteIdentity?.generation === modelTarget.identity.generation &&
         (activeBot.hostKind === 'local' ? localHost?.deviceId : activeBot.hostId) === modelTarget.identity.targetDeviceId &&
-        (screen === 'bot-profile' || (screen === 'bot-edit' && editMode === 'edit')) &&
+        (screen === 'bot-profile' || screen === 'bot-profile-manage' || (screen === 'bot-edit' && editMode === 'edit')) &&
         <BotModelSheet key={`${modelTarget.center}|${modelTarget.botKey}|${modelTarget.identity.generation}|${modelTarget.tab}`} api={modelTarget.api} identity={modelTarget.identity} botId={modelTarget.botId} initialTab={modelTarget.tab} onClose={() => setModelTarget(null)}/>}
 
       {skillReviewTargetKey === botPanelIdentityKey && activeBot && screen === 'bot-profile' ? (

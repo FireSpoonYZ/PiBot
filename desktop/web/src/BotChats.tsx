@@ -2,29 +2,37 @@
 // 设计依据 desktop-gui-fresh-argon-design §5.2/§5.3/§5.4；
 // 全部请求仍走既有 useDrafts / pending_enqueue / pending_send / observe 路径，
 // 保留 CAS、显式发送、结果未确认锁与离线只读语义。
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode, RefObject } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
   Archive,
+  ArrowLeft,
   ArrowUp,
+  ChevronRight,
+  Clock,
+  Cpu,
   FileText,
   History,
+  LockKeyhole,
   MessageSquare,
   Monitor,
   MoreHorizontal,
   Pin,
   PinOff,
   Plus,
+  Puzzle,
   RefreshCw,
   Search,
   Settings,
+  Sparkles,
   Square,
   Star,
   Trash2,
   User,
   Users,
   X,
+  type LucideIcon,
 } from 'lucide-react';
 import {
   IMAGE_MAX_COUNT,
@@ -903,13 +911,21 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
   );
 }
 
-function BotProfile({ api, centerApi, bot, onSaved }: { api: DesktopPanelApi; centerApi: DesktopPanelApi; bot: BotRecord; onSaved: (bot: BotRecord) => void }) {
+function BotProfile({ api, centerApi, bot, page, onSaved }: {
+  api: DesktopPanelApi;
+  centerApi: DesktopPanelApi;
+  bot: BotRecord;
+  page: 'profile' | 'management';
+  onSaved: (bot: BotRecord) => void;
+}) {
   const [name, setName] = useState(bot.role);
   const [description, setDescription] = useState(bot.description ?? '');
   const [cwd, setCwd] = useState(bot.cwd);
   const [cwdRevision, setCwdRevision] = useState<number | null>(null);
   const [cwdFailed, setCwdFailed] = useState(false);
   const [cwdNotice, setCwdNotice] = useState<string | null>(null);
+  const [cwdError, setCwdError] = useState<string | null>(null);
+  const [cwdOpened, setCwdOpened] = useState(false);
   const [busy, setBusy] = useState(false);
   const [locked, setLocked] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -923,6 +939,10 @@ function BotProfile({ api, centerApi, bot, onSaved }: { api: DesktopPanelApi; ce
   // cwd 读写走中心 api（broker ops 不需要目标 Host 在线）；profile 仍用 scopedApi。
   const centerOnline = centerApi.transportConnected;
   const centerSess = sessionKey(centerApi.identity);
+  const shouldLoadCwd = cwdOpened || page === 'management';
+  useEffect(() => {
+    if (page === 'management') setCwdOpened(true);
+  }, [page]);
   useEffect(() => {
     if (!dirty.current && !locked) { setName(bot.role); setDescription(bot.description ?? ''); }
     if (!cwdDirty.current) setCwd(bot.cwd);
@@ -946,6 +966,7 @@ function BotProfile({ api, centerApi, bot, onSaved }: { api: DesktopPanelApi; ce
       if (cwdFetchRef.current !== fetchId) return;
       setCwdRevision(config.revision);
       setCwdFailed(false);
+      setCwdError(null);
       if (!cwdDirty.current) setCwd(config.value ?? bot.cwd);
       cwdBaseline.current = config.value ?? bot.cwd;
     } catch {
@@ -957,8 +978,7 @@ function BotProfile({ api, centerApi, bot, onSaved }: { api: DesktopPanelApi; ce
   const loadCwdRef = useRef(loadCwd);
   useEffect(() => { loadCwdRef.current = loadCwd; }, [loadCwd]);
 
-  // 只有真实目标/会话身份变化才清草稿；目录更新、引用变化不清。
-  // 中心重连也重读修订（可能在他处变更），但不丢草稿。
+  // 管理页首次打开时读取修订。抽屉内切页保留草稿，目标或会话改变时重置。
   const cwdIdentity = bot.botId + '@' + bot.deviceId;
   const lastIdentityRef = useRef('');
   useEffect(() => {
@@ -969,15 +989,16 @@ function BotProfile({ api, centerApi, bot, onSaved }: { api: DesktopPanelApi; ce
       cwdDirty.current = false;
       cwdBaseline.current = bot.cwd;
       setCwdNotice(null);
+      setCwdError(null);
       setCwd(bot.cwd);
     }
     // 修订一律作废再重读：同会话重连、身份切换、离开/挂载都会先失效旧请求。
     cwdFetchRef.current++;
     setCwdRevision(null);
     setCwdFailed(false);
-    void loadCwdRef.current();
+    if (shouldLoadCwd) void loadCwdRef.current();
     return () => { cwdFetchRef.current++; };
-  }, [cwdIdentity, centerSess, centerOnline]);
+  }, [cwdIdentity, centerSess, centerOnline, shouldLoadCwd]);
 
   async function save() {
     const identity = api.identity;
@@ -993,7 +1014,6 @@ function BotProfile({ api, centerApi, bot, onSaved }: { api: DesktopPanelApi; ce
       setName(updated.role);
       setDescription(updated.description ?? '');
       onSaved(updated);
-      setCwdNotice(null);
     } catch (e) {
       if (sessionKey(api.identity) !== sessionKey(identity)) return;
       if (!isNotSent(e) && !(e && typeof e === 'object' && (e as { outcome?: string }).outcome === 'responded')) setLocked(true);
@@ -1036,8 +1056,9 @@ function BotProfile({ api, centerApi, bot, onSaved }: { api: DesktopPanelApi; ce
     const identity = centerApi.identity;
     if (!identity || !centerOnline || inFlight.current || isArchived || !cwdSavable) return;
     inFlight.current = true;
+    cwdFetchRef.current += 1;
     setBusy(true);
-    setError(null);
+    setCwdError(null);
     setCwdNotice(null);
     try {
       const config = await centerApi.broker(identity, 'center_bot_cwd_set', {
@@ -1058,15 +1079,38 @@ function BotProfile({ api, centerApi, bot, onSaved }: { api: DesktopPanelApi; ce
       const code = (e as { code?: string })?.code;
       if (code === 'REVISION_CONFLICT' || code === 'REQUEST_CONFLICT') {
         setCwdRevision(null);
-        setError('工作目录已被其他修改占用；请重新读取后再保存。');
+        setCwdError('工作目录已被其他修改占用；请重新读取后再保存。');
       } else {
-        setError('工作目录保存失败：' + errText(e));
+        setCwdError('工作目录保存失败：' + errText(e));
       }
     } finally {
       inFlight.current = false;
       setBusy(false);
     }
   }
+
+  if (page === 'management') return (
+    <div className="form-grid inspector-profile-form">
+      <label className="field">
+        工作目录
+        <input
+          value={cwd}
+          disabled={busy || isArchived}
+          placeholder="目标设备上的绝对路径"
+          onChange={(e) => { cwdDirty.current = true; setCwd(e.target.value); setCwdNotice(null); }}
+        />
+      </label>
+      <p className="hint">保存后将在智能体空闲时生效。</p>
+      {cwdNotice ? <div className="status" role="status">{cwdNotice}</div> : null}
+      {cwdError || cwdFailed ? <div className="error-banner" role="alert">{cwdError ?? '无法读取工作目录。'}</div> : null}
+      <div className="form-actions">
+        <button type="button" className="secondary-button" onClick={() => void saveCwd()} disabled={busy || isArchived || !centerOnline || !cwdSavable}>保存工作目录</button>
+        {(cwdFailed || (cwdError && cwdRevision === null)) ? (
+          <button type="button" className="secondary-button" disabled={busy || !centerOnline} onClick={() => void loadCwdRef.current()}>重新读取工作目录</button>
+        ) : null}
+      </div>
+    </div>
+  );
 
   return (
     <div className="form-grid inspector-profile-form">
@@ -1079,43 +1123,33 @@ function BotProfile({ api, centerApi, bot, onSaved }: { api: DesktopPanelApi; ce
         ) : null}
         <button type="button" className="primary-button" onClick={() => void save()} disabled={busy || locked || isArchived || !api.transportConnected}>保存资料</button>
       </div>
-      <details className="bot-form-advanced">
-        <summary>工作目录（高级）</summary>
-        <div className="form-grid">
-          <label className="field">
-            工作目录
-            <input
-              value={cwd}
-              disabled={busy || isArchived}
-              placeholder="目标设备上的绝对路径"
-              onChange={(e) => { cwdDirty.current = true; setCwd(e.target.value); setCwdNotice(null); }}
-            />
-          </label>
-          <p className="hint">保存后将在智能体空闲时生效。</p>
-          {cwdNotice ? <div className="status" role="status">{cwdNotice}</div> : null}
-          <div className="form-actions">
-            <button type="button" className="secondary-button" onClick={() => void saveCwd()} disabled={busy || isArchived || !centerOnline || !cwdSavable}>保存工作目录</button>
-            {(cwdFailed || (error && cwdRevision === null)) ? (
-              <button type="button" className="secondary-button" disabled={busy || !centerOnline} onClick={() => void loadCwdRef.current()}>重新读取工作目录</button>
-            ) : null}
-          </div>
-        </div>
-      </details>
     </div>
   );
 }
 
-type InspectorTab = 'profile' | BotSettingsTab | 'raw' | 'shower';
+type InspectorDetail = BotSettingsTab | 'management';
+type InspectorTab = 'profile' | InspectorDetail | 'raw' | 'shower';
 
-const inspectorPages: ReadonlyArray<{ id: InspectorTab; label: string }> = [
-  { id: 'profile', label: '资料' },
-  { id: 'soul', label: '人设' },
-  { id: 'model', label: '模型' },
-  { id: 'capabilities', label: '插件与能力' },
-  { id: 'skill-review', label: 'Skill 审阅' },
-  { id: 'schedules', label: '定时任务' },
-  { id: 'vault', label: '密码库' },
+interface InspectorPage {
+  id: InspectorDetail;
+  label: string;
+  Icon: LucideIcon;
+}
+
+const inspectorGroups: ReadonlyArray<{ title: string; pages: readonly InspectorPage[] }> = [
+  { title: '常用设置', pages: [
+    { id: 'model', label: '模型', Icon: Cpu },
+    { id: 'soul', label: '人设', Icon: FileText },
+    { id: 'capabilities', label: '插件与能力', Icon: Puzzle },
+    { id: 'schedules', label: '定时任务', Icon: Clock },
+  ] },
+  { title: '更多', pages: [
+    { id: 'skill-review', label: 'Skill 审阅', Icon: Sparkles },
+    { id: 'vault', label: '密码库', Icon: LockKeyhole },
+    { id: 'management', label: '管理', Icon: Settings },
+  ] },
 ];
+const inspectorPages = inspectorGroups.flatMap(group => group.pages);
 
 function PrimaryChatPane({
   api,
@@ -1193,10 +1227,16 @@ function PrimaryChatPane({
   /** 抽屉 Portal 容器：紧凑模态只锁本聊天气泡层，不影响左栏名录与导航。 */
   const stageRef = useRef<HTMLDivElement | null>(null);
   const inspectorContentRef = useRef<HTMLDivElement | null>(null);
+  const inspectorBodyRef = useRef<HTMLDivElement | null>(null);
+  const inspectorTitleRef = useRef<HTMLHeadingElement | null>(null);
+  const previousInspectorTabRef = useRef<InspectorTab | null>(null);
+  const profileScrollRef = useRef(0);
 
   const [manageAction, setManageAction] = useState<'setPrimary' | 'unarchive' | 'delete' | null>(null);
   const [manageError, setManageError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const deleteConfirmationRef = useRef<HTMLDivElement | null>(null);
+  const manageDeleteButtonRef = useRef<HTMLButtonElement | null>(null);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const moreMenuRef = useRef<HTMLDivElement | null>(null);
   const manageInFlightRef = useRef(false);
@@ -1253,6 +1293,30 @@ function PrimaryChatPane({
       setInspectorTab(inspectorRequest.tab);
     }
   }, [inspectorRequest]);
+
+  useLayoutEffect(() => {
+    const previous = previousInspectorTabRef.current;
+    previousInspectorTabRef.current = inspectorTab;
+    if (previous === 'management' && inspectorTab !== previous) setConfirmDelete(false);
+    if (!inspectorTab) {
+      profileScrollRef.current = 0;
+      return;
+    }
+    const body = inspectorBodyRef.current;
+    if (!body || !previous || previous === inspectorTab) return;
+    if (inspectorTab === 'profile') {
+      body.scrollTop = profileScrollRef.current;
+      const trigger = body.querySelector<HTMLButtonElement>(`[data-inspector-page="${previous}"]`);
+      (trigger ?? inspectorTitleRef.current)?.focus();
+    } else {
+      body.scrollTop = 0;
+      inspectorTitleRef.current?.focus({ preventScroll: true });
+    }
+  }, [inspectorTab]);
+
+  useLayoutEffect(() => {
+    if (confirmDelete && inspectorTab === 'management') deleteConfirmationRef.current?.focus();
+  }, [confirmDelete, inspectorTab]);
 
   /** 统一 Shower 面板的平台无关 RPC 适配：方法名/扁平参数由面板给出，身份仍取当前连接。 */
   const callShower = useCallback(
@@ -2069,8 +2133,43 @@ function PrimaryChatPane({
   }
 
   const inspectorPage = inspectorPages.find(page => page.id === inspectorTab);
-  const settingsTab = inspectorTab === 'profile' || inspectorTab === 'raw' || inspectorTab === 'shower' ? null : inspectorTab;
-  const inspectorTitle = inspectorPage?.label ?? (inspectorTab === 'raw' ? '诊断与原始记录' : '虚拟桌面');
+  const isProfilePage = inspectorTab === 'profile';
+  const isManagementPage = inspectorTab === 'management';
+  const settingsTab = inspectorPage && inspectorPage.id !== 'management' ? inspectorPage.id : null;
+  const inspectorTitle = inspectorPage?.label ??
+    (isProfilePage ? '智能体资料' : inspectorTab === 'raw' ? '诊断与原始记录' : '虚拟桌面');
+  const deleteConfirmation = confirmDelete && !isPrimary ? (
+    <div className="confirm-delete-banner" role="alert" ref={deleteConfirmationRef} tabIndex={isManagementPage ? -1 : undefined}>
+      <span>确定要永久删除智能体「{bot.role}」吗？此操作不可撤销。</span>
+      <div className="confirm-delete-actions">
+        <button
+          type="button"
+          className="primary-button danger-button"
+          disabled={!online || manageBusy}
+          onClick={() => void handleDelete()}
+        >
+          {manageAction === 'delete' ? '删除中…' : '确认永久删除'}
+        </button>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={manageBusy}
+          onClick={() => {
+            setConfirmDelete(false);
+            if (isManagementPage) manageDeleteButtonRef.current?.focus();
+          }}
+        >
+          取消
+        </button>
+      </div>
+    </div>
+  ) : null;
+  const managementError = manageError ? (
+    <div className="error-banner" role="alert">
+      {manageError}
+      <button type="button" onClick={() => setManageError(null)}>关闭</button>
+    </div>
+  ) : null;
   const example = '帮我梳理今天的待办事项。';
 
   return (
@@ -2084,7 +2183,7 @@ function PrimaryChatPane({
           onClick={() => openInspector('profile')}
           aria-label={`打开${bot.role}的智能体设置`}
           aria-haspopup="dialog"
-          aria-expanded={Boolean(inspectorPage)}
+          aria-expanded={isProfilePage || Boolean(inspectorPage)}
           title="智能体设置（Ctrl+.）"
         >
           <GrokBotAvatar
@@ -2254,36 +2353,8 @@ function PrimaryChatPane({
 
       {awaitingAnswer ? <p className="chat-awaiting-answer" role="status">{awaitingAnswer}</p> : null}
 
-      {confirmDelete && !isPrimary ? (
-        <div className="confirm-delete-banner" role="alert">
-          <span>确定要永久删除智能体「{bot.role}」吗？此操作不可撤销。</span>
-          <div className="confirm-delete-actions">
-            <button
-              type="button"
-              className="primary-button danger-button"
-              disabled={!online || manageBusy}
-              onClick={() => void handleDelete()}
-            >
-              {manageAction === 'delete' ? '删除中…' : '确认永久删除'}
-            </button>
-            <button
-              type="button"
-              className="secondary-button"
-              disabled={manageBusy}
-              onClick={() => setConfirmDelete(false)}
-            >
-              取消
-            </button>
-          </div>
-        </div>
-      ) : null}
-
-      {manageError ? (
-        <div className="error-banner" role="alert">
-          {manageError}
-          <button type="button" onClick={() => setManageError(null)}>关闭</button>
-        </div>
-      ) : null}
+      {isManagementPage ? null : deleteConfirmation}
+      {isManagementPage ? null : managementError}
 
       {isArchived ? (
         <div className="archived-readonly-banner" role="status">
@@ -2451,17 +2522,14 @@ function PrimaryChatPane({
             }}
           >
             <div className="inspector-head">
-              <Dialog.Title className="inspector-title">{bot.role} · {inspectorTitle}</Dialog.Title>
-              {inspectorPage ? <select
-                aria-label="智能体设置项"
-                value={inspectorPage.id}
-                onChange={event => {
-                  const next = inspectorPages.find(page => page.id === event.target.value);
-                  if (next) setInspectorTab(next.id);
-                }}
-              >
-                {inspectorPages.map(page => <option key={page.id} value={page.id}>{page.label}</option>)}
-              </select> : null}
+              {inspectorPage ? (
+                <button type="button" className="icon-button" aria-label="返回资料" onClick={() => setInspectorTab('profile')}>
+                  <ArrowLeft size={16} aria-hidden />
+                </button>
+              ) : null}
+              <Dialog.Title className="inspector-title" ref={inspectorTitleRef} tabIndex={-1} aria-label={`${bot.role} · ${inspectorTitle}`}>
+                {isProfilePage || inspectorPage ? inspectorTitle : `${bot.role} · ${inspectorTitle}`}
+              </Dialog.Title>
               <button
                 type="button"
                 className="icon-button"
@@ -2472,11 +2540,12 @@ function PrimaryChatPane({
                 <X size={16} />
               </button>
             </div>
-            <div className="inspector-body">
-              {inspectorTab === 'profile' ? (
-                <div className="inspector-section">
-                  <p className="metadata inspector-device">设备 · {deviceName}</p>
-                  <BotProfile api={api} centerApi={centerApi} bot={bot} onSaved={onProfileSaved} />
+            <div className="inspector-body" ref={inspectorBodyRef} onScroll={(event) => {
+              if (isProfilePage) profileScrollRef.current = event.currentTarget.scrollTop;
+            }}>
+              <div className="inspector-section" hidden={!isProfilePage && !isManagementPage}>
+                {isProfilePage ? <p className="metadata inspector-device">设备 · {deviceName}</p> : null}
+                <div hidden={!isProfilePage}>
                   <BotAvatarStudio
                     api={api}
                     deviceId={bot.deviceId}
@@ -2487,8 +2556,37 @@ function PrimaryChatPane({
                     isPrimary={isPrimary && !isArchived}
                     onChanged={() => { setAvatarVersion((v) => v + 1); onLiveActivity?.(); }}
                   />
-                  <details className="inspector-lifecycle bot-form-advanced">
-                    <summary>管理智能体</summary>
+                </div>
+                <BotProfile api={api} centerApi={centerApi} bot={bot} page={isManagementPage ? 'management' : 'profile'} onSaved={onProfileSaved} />
+                {isProfilePage ? (
+                  <nav className="inspector-links" aria-label="智能体设置">
+                    {inspectorGroups.map(group => (
+                      <section className="inspector-link-group" key={group.title}>
+                        <h3 className="inspector-section-title">{group.title}</h3>
+                        {group.pages.map(({ id, label, Icon }) => (
+                          <button
+                            key={id}
+                            type="button"
+                            className="inspector-link"
+                            data-inspector-page={id}
+                            onClick={() => {
+                              profileScrollRef.current = inspectorBodyRef.current?.scrollTop ?? 0;
+                              setInspectorTab(id);
+                            }}
+                          >
+                            <Icon size={17} aria-hidden />
+                            <span className="inspector-link-label">{label}</span>
+                            {id === 'model' ? <span className="metadata inspector-link-value">{bot.modelRef ?? '默认'}</span> : null}
+                            <ChevronRight size={15} aria-hidden />
+                          </button>
+                        ))}
+                      </section>
+                    ))}
+                  </nav>
+                ) : null}
+                {isManagementPage ? (
+                  <section className="inspector-lifecycle" aria-label="智能体状态">
+                    <h3 className="inspector-section-title">智能体状态</h3>
                     {isPrimary && !isArchived ? (
                       <p className="hint">主 Bot 不可归档/删除，请先切换主 Bot。</p>
                     ) : null}
@@ -2525,15 +2623,18 @@ function PrimaryChatPane({
                       <button
                         type="button"
                         className="secondary-button danger-outline"
+                        ref={manageDeleteButtonRef}
                         disabled={!online || manageBusy || isPrimary}
                         onClick={() => setConfirmDelete(true)}
                       >
                         永久删除智能体
                       </button>
                     </div>
-                  </details>
-                </div>
-              ) : null}
+                    {deleteConfirmation}
+                    {managementError}
+                  </section>
+                ) : null}
+              </div>
               {settingsTab ? (
                 <BotSettings api={api} botId={bot.botId} hostLabel={deviceName} hostPlatform={devicePlatform} tab={settingsTab} open />
               ) : null}

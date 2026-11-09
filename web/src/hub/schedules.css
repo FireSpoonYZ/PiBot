@@ -8,12 +8,35 @@
 .grok-archived-subtitle-gap { gap: 8px; }
 .grok-archived-btn-sm { padding: 3px 10px; font-size: 0.76rem; }
 
-/* Lucide icons inside schedule badges. */
-.grok-schedule-badge { display: inline-flex; align-items: center; gap: 4px; }
-.grok-schedule-badge svg { flex: none; }
-
-/* Custom toggle background (bot accent color) via CSS variable. */
-.grok-toggle-switch.checked[style*="--grok-toggle-bg"] { background: var(--grok-toggle-bg); }
+.grok-card-group.grok-schedule-list { gap: 0; }
+.grok-schedule-row { display: flex; align-items: center; }
+.grok-schedule-row + .grok-schedule-row {
+  border-top: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
+}
+.grok-schedule-entry {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: 64px;
+  padding: 10px 0 10px 16px;
+  text-align: start;
+}
+.grok-schedule-entry .grok-schedule-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.grok-schedule-run-notice { color: var(--danger); }
+.grok-schedule-toggle {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 14px;
+}
 
 /* Hint shown below prompt textarea when prompt is empty. */
 .grok-schedule-prompt-hint {

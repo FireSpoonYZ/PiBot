@@ -101,10 +101,16 @@
   overflow-wrap: anywhere;
 }
 
-.scope-shell .scope-settings-hero-subtitle {
-  margin: 0;
-  font-size: 0.88rem;
-  color: var(--muted);
+.scope-shell .scope-settings-hero-text {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.scope-shell .scope-title-edit-btn {
+  flex: none;
+  min-height: 36px;
+  padding: 4px 12px;
+  font-size: 0.84rem;
 }
 
 .scope-shell-desktop .scope-settings-container {
@@ -124,19 +130,13 @@
   filter: none;
 }
 
-.scope-shell-desktop .scope-settings-hero-text {
-  min-width: 0;
-}
-
 .scope-shell-desktop .scope-settings-hero-title {
   margin: 0;
   font-size: 1.05rem;
 }
 
-.scope-shell-desktop .scope-settings-hero-subtitle {
-  margin-top: 2px;
-  font-size: .82rem;
-  overflow-wrap: anywhere;
+.scope-shell-desktop .scope-title-edit-btn {
+  margin-inline-start: auto;
 }
 
 .scope-shell-desktop .scope-member-search {
@@ -170,11 +170,6 @@
   color: var(--muted);
 }
 
-.scope-shell .scope-settings-section-meta {
-  font-size: 0.78rem;
-  color: var(--muted);
-}
-
 .scope-shell .scope-settings-card {
   border-radius: 22px;
   background: color-mix(in srgb, var(--bg) 96%, #fff);
@@ -184,6 +179,9 @@
   display: flex;
   flex-direction: column;
 }
+
+.scope-shell .scope-settings-section[hidden],
+.scope-shell .scope-settings-card[hidden] { display: none; }
 
 :root[data-theme="dark"] .scope-shell .scope-settings-card {
   background: var(--surface);
@@ -367,8 +365,23 @@
   border-top: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
 }
 
-.scope-shell .scope-settings-danger-section {
-  margin-top: 4px;
+.scope-shell .scope-settings-management-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 14px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+.scope-shell .scope-settings-management-row:hover:not(:disabled) { background: var(--surface); }
+.scope-shell .scope-settings-management-row:focus-visible { outline-offset: -2px; }
+.scope-shell .scope-settings-management-row > span { flex: 1; }
+.scope-shell .scope-settings-management-row > svg { flex: none; color: var(--muted); }
+.scope-shell .scope-settings-management-row[aria-expanded="true"] .scope-settings-management-chevron {
+  transform: rotate(90deg);
 }
 
 .scope-shell .scope-danger-row-btn {

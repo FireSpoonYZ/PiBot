@@ -28,12 +28,21 @@
 }
 
 /* bot-profile: inline cwd error/hints inside the card. */
+.bot-profile-page h3.grok-section-label { margin: 0; }
 .profile-inline-error {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--danger);
   white-space: normal;
 }
+.profile-inline-error + button { flex: none; }
 .profile-card-hint {
   margin: 0 18px 12px;
+}
+.profile-directory-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 14px 12px;
 }
 .profile-lifecycle-label { display: flex; flex-direction: column; gap: 2px; white-space: normal; }
 .profile-lifecycle-note { font-size: .78rem; font-weight: 400; color: var(--muted); }
