@@ -30,7 +30,8 @@ export async function runLearningJob({ mode, snapshot, focus, config, stateDir }
   if (signal?.aborted) return { error: { code: 'CANCELLED', message: 'cancelled before start' } };
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
 
-  const command = process.env.PIBOT_LEARNING_PYTHON || 'python3';
+  // Keep interpreter overrides from deployments configured before the rename.
+  const command = process.env.PIBOT_LEARNING_PYTHON || process.env.HERMES_PYTHON || 'python3';
   const child = spawn(command, ['-B', CHILD], {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: {

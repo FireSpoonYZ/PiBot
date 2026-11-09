@@ -1,6 +1,7 @@
 package com.example.launcherprobe;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.NotificationManager;
 import android.content.Context;
@@ -162,9 +163,10 @@ final class BotOnboarding {
     }
 
     /**
-     * 本进程没有 ShizukuProvider 实例：向默认进程的 provider 拉取当前 binder。
-     * 已存活直接返回；拉到新 binder 后交给 Shizuku.onBinderReceived 完成本进程 attach。
+     * 沿用固定版本 Shizuku 13.1.5 的多进程 binder 拉取与绑定步骤。
+     * 本进程按需从默认进程的 provider 拉取 binder，省去常驻广播接收器。
      */
+    @SuppressLint("RestrictedApi")
     private static boolean ensureShizukuBinder(Context context) {
         if (Shizuku.pingBinder()) return true;
         try {

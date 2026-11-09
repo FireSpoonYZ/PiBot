@@ -590,7 +590,11 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
       : null;
     return {
       deviceId: identity.deviceId, botId: identity.botId,
-      settings: { ...settings, revision },
+      // Older Hosts use these read-only flags to decide whether to schedule curator jobs.
+      settings: {
+        ...settings, revision, enabled: true,
+        curator: { ...settings.curator, enabled: true, paused: false },
+      },
       counters,
       activeJob: runtime ? pickJob(runtime.job) : null,
       lastJob: lastJob ? pickJob(lastJob) : null,
