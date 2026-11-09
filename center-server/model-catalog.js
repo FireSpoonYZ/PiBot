@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 
@@ -148,6 +149,7 @@ export function openModelCatalog({ store, dataRoot, onChange }) {
     let modelsAdded = 0, modelsUpdated = 0;
     for (const provider of store.listProviders()) {
       const available = runtime.getModels(provider.id);
+      const bundledModels = new Map((bundled.get(provider.id)?.getModels() ?? []).map(model => [model.id, model]));
       const ids = new Set();
       for (const candidate of available) {
         if (candidate.type && candidate.type !== 'chat') continue;
@@ -155,12 +157,19 @@ export function openModelCatalog({ store, dataRoot, onChange }) {
         ids.add(candidate.id);
         const current = store.listModels(provider.id).find(row => row.id === candidate.id);
         if (current && current.source !== 'catalog') {
-          // Legacy models have no source tag. Preserve every existing owner edit on migration.
-          if (current.source !== 'manual') {
-            store.putModel(provider.id, { ...current, source: 'manual' }, current.revision);
-            modelsUpdated++;
+          // Older PiBot records lack source markers. Match their former bundled Pi
+          // metadata to continue automatic updates, but preserve owner edits.
+          const native = bundledModels.get(candidate.id);
+          const legacyCatalog = current.source === undefined && native &&
+            ['name', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits']
+              .every(key => isDeepStrictEqual(current[key], native[key]));
+          if (!legacyCatalog) {
+            if (current.source !== 'manual') {
+              store.putModel(provider.id, { ...current, source: 'manual' }, current.revision);
+              modelsUpdated++;
+            }
+            continue;
           }
-          continue;
         }
         const fields = Object.fromEntries(MODEL_FIELDS.filter(key => candidate[key] !== undefined)
           .map(key => [key, candidate[key]]));

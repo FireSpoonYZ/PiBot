@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 const { builtinProviders } = await import(new URL('../../host-core/node_modules/@earendil-works/pi-ai/dist/providers/all.js', import.meta.url));
 import { nativeCenterProvider } from '../../host-core/native-center-providers.js';
-import { centerPiCredentialStore } from '../../center-server/model-catalog.js';
+import { centerPiCredentialStore, openModelCatalog } from '../../center-server/model-catalog.js';
+import { openCenterStore } from '../../center-server/data/index.js';
 
 function catalogProvider(id) {
   const provider = builtinProviders().find(entry => entry.id === id);
@@ -91,4 +95,38 @@ test('Center Pi CredentialStore serializes token rotation and never enumerates s
   assert.equal(JSON.stringify(await store.list()).includes('refresh'), false);
   await store.delete('openai-codex');
   assert.equal(await store.read('openai-codex'), undefined);
+});
+
+test('migration updates untouched legacy models while retaining manual edits', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pibot-migration-test-'));
+  const store = openCenterStore({ dataRoot: root, encryptionKey: Buffer.alloc(32, 76) });
+  let catalog;
+  try {
+    const native = catalogProvider('openai');
+    const firstTwo = native.getModels().slice(0, 2);
+    assert.equal(firstTwo.length, 2);
+    store.putProvider({
+      id: 'openai', name: native.name, api: firstTwo[0].api,
+      baseUrl: native.baseUrl, credentialRef: 'openai-api-key', enabled: false,
+    }, null);
+    const previousFields = ['id', 'name', 'contextWindow', 'maxTokens', 'input', 'reasoning',
+      'thinkingLevelMap', 'cost', 'compat', 'inputLimits'];
+    for (const [index, model] of firstTwo.entries()) {
+      const previous = Object.fromEntries(previousFields.filter(key => model[key] !== undefined)
+        .map(key => [key, model[key]]));
+      if (index === 1) previous.contextWindow += 1; // Owner-edited legacy metadata
+      store.putModel('openai', { ...previous, enabled: true }, null);
+    }
+    catalog = openModelCatalog({ store, dataRoot: root, onChange: () => {} });
+    await catalog.ready;
+    const untouched = store.listModels('openai').find(model => model.id === firstTwo[0].id);
+    const modified = store.listModels('openai').find(model => model.id === firstTwo[1].id);
+    assert.equal(untouched.source, 'catalog');
+    assert.equal(modified.source, 'manual');
+    assert.equal(modified.contextWindow, firstTwo[1].contextWindow + 1);
+  } finally {
+    await catalog?.close();
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
