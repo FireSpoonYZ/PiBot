@@ -1,9 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   Check,
+  ChevronRight,
+  Pencil,
   Plus,
   RefreshCw,
+  Settings,
   Trash2,
   X,
 } from 'lucide-react';
@@ -230,7 +233,11 @@ export function GroupSettings({
   const [syncStateError, setSyncStateError] = useState<string | null>(null);
 
   // ————— 群名称编辑状态（明确按钮保存，绝不 blur+click 重复提交） —————
+  const [titleEditing, setTitleEditing] = useState(false);
   const [titleInput, setTitleInput] = useState<string>(() => savedTitle);
+  const titleEditButtonRef = useRef<HTMLButtonElement>(null);
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  const titleWasEditingRef = useRef(false);
   const titleDirtyRef = useRef(false);
   const titleBaselineRef = useRef<{ revision: number; baseTitle: string } | null>(null);
   const [titleSaving, setTitleSaving] = useState(false);
@@ -260,6 +267,7 @@ export function GroupSettings({
   } | null>(null);
 
   // ————— 解散并删除群聊状态（React 内联二次确认，不用 window.confirm/prompt） —————
+  const [managementOpen, setManagementOpen] = useState(false);
   const [preparingDelete, setPreparingDelete] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -269,6 +277,12 @@ export function GroupSettings({
     requestId: string;
     expectedRevision: number;
   } | null>(null);
+
+  useLayoutEffect(() => {
+    if (titleEditing) titleInputRef.current?.focus();
+    else if (titleWasEditingRef.current) titleEditButtonRef.current?.focus();
+    titleWasEditingRef.current = titleEditing;
+  }, [titleEditing]);
 
   // 被动 prop 刷新：未改名时同步名称显示；未处于成员编辑时同步成员列表。
   useEffect(() => {
@@ -433,6 +447,7 @@ export function GroupSettings({
         setTitleInput(updatedTitle);
         setTitleError(null);
         setTitleNotice(updatedTitle ? '群聊名称已保存。' : '已恢复为成员默认名称。');
+        setTitleEditing(false);
         onChanged(updated);
       } catch (e) {
         if (!mountedRef.current || sessionKey(membersApi.identity) !== localSess) return;
@@ -468,6 +483,7 @@ export function GroupSettings({
       setTitleInput(latestTitle);
       setTitleError(null);
       setTitleNotice('已确认群名称保存成功。');
+      setTitleEditing(false);
     } else if (latest.scope.revision === titleFrozenAttempt.expectedRevision) {
       setTitleError('权威节点尚未应用该修改，可点击“原请求重试”安全重发。');
     } else {
@@ -510,6 +526,7 @@ export function GroupSettings({
       setTitleInput(updatedTitle);
       setTitleError(null);
       setTitleNotice(updatedTitle ? '群聊名称已保存。' : '已恢复为成员默认名称。');
+      setTitleEditing(false);
       onChanged(updated);
     } catch (e) {
       if (!mountedRef.current || sessionKey(membersApi.identity) !== localSess) return;
@@ -893,18 +910,26 @@ export function GroupSettings({
 
       <div className="scope-settings-scroll">
         <div className="scope-settings-container">
-          {/* ————— 顶部居中组合头像 88px + 群名 + 成员数量 ————— */}
           <section className="scope-settings-hero">
             <div className="scope-settings-hero-avatar">
-              <ConversationGroupAvatar members={scope.scope.members} bots={bots} size={desktop ? 40 : 88} />
+              <ConversationGroupAvatar members={scope.scope.members} bots={bots} size={desktop ? 40 : 64} />
             </div>
-            {desktop ? <div className="scope-settings-hero-text">
+            <div className="scope-settings-hero-text">
               <h1 className="scope-settings-hero-title">{displayTitle}</h1>
-              <p className="scope-settings-hero-subtitle">{memberCount} 位成员 · {deviceSummary}</p>
-            </div> : <>
-              <h1 className="scope-settings-hero-title">{displayTitle}</h1>
-              <p className="scope-settings-hero-subtitle">{memberCount} 位成员</p>
-            </>}
+            </div>
+            {canManage || titleEditing ? (
+              <button
+                type="button"
+                className="secondary-button scope-title-edit-btn"
+                ref={titleEditButtonRef}
+                aria-expanded={titleEditing}
+                disabled={titleSaving || Boolean(titleFrozenAttempt)}
+                onClick={() => setTitleEditing(open => !open)}
+              >
+                <Pencil size={14} aria-hidden />
+                {titleEditing ? '收起编辑' : '修改群名'}
+              </button>
+            ) : null}
           </section>
 
           {!canManage ? (
@@ -938,21 +963,13 @@ export function GroupSettings({
             </div>
           ) : null}
 
-          {/* ————— 群名称卡片：输入与明确保存、清空恢复默认自动名 ————— */}
-          <section className="scope-settings-section" aria-label="群聊名称">
-            <div className="scope-settings-section-head">
-              <span className="scope-settings-section-label">群聊名称</span>
-              {savedTitle ? (
-                <span className="scope-settings-section-meta">已设自定义名称</span>
-              ) : (
-                <span className="scope-settings-section-meta">当前使用成员自动名称</span>
-              )}
-            </div>
-            <div className="scope-settings-card">
+          <section className="scope-settings-section" aria-label="群聊名称" hidden={!titleEditing && !titleNotice && !titleError}>
+            <div className="scope-settings-card" hidden={!titleEditing}>
               <div className="scope-title-input-row">
                 <input
                   type="text"
                   className="scope-title-input"
+                  ref={titleInputRef}
                   value={titleInput}
                   maxLength={120}
                   placeholder={autoTitle || '输入群聊名称（留空则按成员自动拼接）'}
@@ -1217,9 +1234,24 @@ export function GroupSettings({
             </div>
           </section>
 
-          {/* ————— 最底部红色：解散并删除群聊（二次确认所有设备历史删除） ————— */}
           {canManage ? (
-            <section className="scope-settings-section scope-settings-danger-section" aria-label="解散并删除群聊">
+            <div className="scope-settings-card">
+              <button
+                type="button"
+                className="scope-settings-management-row"
+                aria-expanded={managementOpen}
+                disabled={preparingDelete || deleting || confirmDeleteOpen}
+                onClick={() => setManagementOpen(open => !open)}
+              >
+                <Settings size={17} aria-hidden />
+                <span>管理群聊</span>
+                <ChevronRight className="scope-settings-management-chevron" size={16} aria-hidden />
+              </button>
+            </div>
+          ) : null}
+
+          {canManage && managementOpen ? (
+            <section className="scope-settings-section" aria-label="解散并删除群聊">
               {!confirmDeleteOpen ? (
                 <>
                   <div className="scope-settings-card">
@@ -1310,9 +1342,9 @@ export function GroupSettings({
                   </div>
                 </div>
               )}
-              <p className="scope-settings-footnote">
+              {!confirmDeleteOpen ? <p className="scope-settings-footnote">
                 解散群聊会同步清除所有参与设备上的该群聊与全部历史记录。
-              </p>
+              </p> : null}
             </section>
           ) : null}
         </div>
