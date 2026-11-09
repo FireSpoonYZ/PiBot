@@ -113,6 +113,7 @@ export interface UseBotCapabilitiesOptions {
   t: (zh: string, en: string) => string;
   /** 中心管理员登录成功后通知外层，同一弹窗内的其它视图可同步会话状态。 */
   onAuthenticated?: () => void;
+  waitForFreshRuntime?: boolean;
 }
 
 export interface BotCapabilitiesState {
@@ -139,7 +140,7 @@ export interface BotCapabilitiesState {
   capabilityErrors: CenterRuntimeCapabilityError[];
 }
 
-export function useBotCapabilities({ api, identity, deviceId, botId, t, onAuthenticated }: UseBotCapabilitiesOptions): BotCapabilitiesState {
+export function useBotCapabilities({ api, identity, deviceId, botId, t, onAuthenticated, waitForFreshRuntime }: UseBotCapabilitiesOptions): BotCapabilitiesState {
   const [entries, setEntries] = useState<CenterBotCapabilityEntry[]>([]);
   const [runtime, setRuntime] = useState<CenterDeviceRuntimeStatus | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -254,6 +255,8 @@ export function useBotCapabilities({ api, identity, deviceId, botId, t, onAuthen
       setEntries((previous) =>
         previous.map((item) => (item.installation.installationId === config.installationId ? { ...item, config } : item)),
       );
+      // 保存响应只有中心配置。旧运行回执不能证明新配置已应用。
+      if (waitForFreshRuntime) setRuntime(null);
       setEditor(null);
       setNotice(runtime && !runtime.online
         ? textRef.current('已保存到中心；目标设备离线，待其上线后再同步应用。', 'Saved to the center; the target is offline and will sync when it reconnects.')

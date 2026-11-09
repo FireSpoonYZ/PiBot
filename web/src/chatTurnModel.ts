@@ -54,7 +54,7 @@ export interface ChatToolCallItem {
  * 消息缺有序信息（旧 Host live 投影）时按文本→工具回退顺序追加，不宣称恢复已丢失交错。
  */
 export type ChatTurnBlock =
-  | { id: string; kind: 'text'; text: string }
+  | { id: string; kind: 'text'; text: string; entryId?: string }
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tools'; tools: ChatToolCallItem[] };
 
@@ -96,6 +96,8 @@ export interface ParseHistoryOptions {
   /** 当前生成的有序内容块投影（LiveGeneration.blocks，仅新 Host）；缺省时流式
    *  文本/工具按工具→文本回退顺序追加到活轮末尾。 */
   liveGeneratingBlocks?: unknown;
+  /** 保留持久正文的条目边界，供桌面根据正文在视口内的位置标记结果。 */
+  trackAssistantTextEntries?: boolean;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -366,7 +368,7 @@ export function formatWorkingElapsed(seconds: number): string {
 
 /** 累积期展示块：tools 块持有自身工具子序列；工具引用与 acc.tools 共享。 */
 type AccBlock =
-  | { kind: 'text'; text: string }
+  | { kind: 'text'; text: string; entryId?: string }
   | { kind: 'thinking'; text: string }
   | { kind: 'tools'; tools: ChatToolCallItem[] };
 
@@ -623,13 +625,13 @@ export function parseHistoryEntries(
     return currentAssistant;
   };
 
-  /** 文本块追加：紧邻上一 text 块时换行续接，不拆出新块（与 textParts join 一致）。 */
-  const accPushText = (acc: AssistantTurnAccumulator, text: string) => {
+  /** 同条目的相邻文本换行续接；未跟踪条目时维持原有合并方式。 */
+  const accPushText = (acc: AssistantTurnAccumulator, text: string, entryId?: string) => {
     const last = acc.blocks.at(-1);
-    if (last && last.kind === 'text') {
+    if (last?.kind === 'text' && last.entryId === entryId) {
       last.text = last.text + '\n' + text;
     } else {
-      acc.blocks.push({ kind: 'text', text });
+      acc.blocks.push({ kind: 'text', text, entryId });
     }
   };
   const accPushThinking = (acc: AssistantTurnAccumulator, text: string) => {
@@ -716,7 +718,12 @@ export function parseHistoryEntries(
         const text = block.text.trim();
         if (!text) continue;
         blockSeq += 1;
-        out.push({ id: acc.turn.id + '-b' + blockSeq, kind: block.kind, text });
+        out.push({
+          id: acc.turn.id + '-b' + blockSeq,
+          kind: block.kind,
+          text,
+          ...(block.kind === 'text' && block.entryId !== undefined ? { entryId: block.entryId } : {}),
+        });
       }
     }
     acc.turn.blocks = out.length > 0 ? out : undefined;
@@ -946,9 +953,12 @@ export function parseHistoryEntries(
         }
         // 按消息内记录顺序落实展示块：同消息内连续工具并入一组，不跨消息合并
         // 工具组；同 callId 已由 accAddTool 去重，不会重复入块。
+        const textEntryId = options?.trackAssistantTextEntries && Number.isSafeInteger(numericId) && numericId > 0
+          ? String(item.id)
+          : undefined;
         for (const seg of messageBlocks) {
           if (seg.kind === 'text') {
-            accPushText(acc, seg.text);
+            accPushText(acc, seg.text, textEntryId);
           } else if (seg.kind === 'thinking') {
             accPushThinking(acc, seg.text);
           } else {

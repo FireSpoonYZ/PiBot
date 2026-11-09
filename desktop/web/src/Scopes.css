@@ -76,6 +76,40 @@
   display: none !important;
 }
 
+.scope-shell-desktop .conversation-chat-header__members {
+  flex: none;
+  min-height: 34px;
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: .82rem;
+  font-weight: 600;
+}
+.scope-shell-desktop .conversation-chat-header__members:hover {
+  border-color: var(--accent);
+}
+
+.scope-shell-desktop .scope-composer-footnote {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  color: var(--muted);
+  font-size: .76rem;
+}
+.scope-shell-desktop .scope-send-record-link {
+  margin-inline-start: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-strong, var(--accent));
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 /* 消息区为聊天表面内唯一纵向滚动容器。 */
 .scope-shell .scope-message-list {
   flex: 1;

@@ -168,6 +168,7 @@ export interface IntentPatch {
 /** core 面板（PendingPanel/SettingsPanel）使用的扩展表面，不属于共享 DesktopViewApi。 */
 export interface DesktopPanelApi extends DesktopViewApi {
   subscribe(listener: () => void): () => void;
+  subscribePending(listener: () => void): () => void;
   init(): Promise<DesktopUiSnapshot>;
   setIdentity(
     base: { profileId: string; targetDeviceId: string; kind: 'local' | 'relay' } | null,

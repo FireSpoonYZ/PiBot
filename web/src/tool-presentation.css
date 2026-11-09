@@ -33,6 +33,8 @@
 .tp-preview { margin: 4px 0 0; padding: 6px 8px; border-radius: 8px; background: color-mix(in srgb, var(--bg, #fff) 55%, transparent); border: 1px solid color-mix(in srgb, var(--line, #d0d7de) 60%, transparent); font: .75rem/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12em; overflow-y: auto; }
 .tp-input { width: 100%; padding: 6px 10px; border-radius: 10px; border: 1px solid color-mix(in srgb, var(--line, #d0d7de) 85%, transparent); background: var(--surface, #fff); color: var(--text, #1f2328); font-size: .82rem; }
 .tp-input:disabled { opacity: .55; }
+.tp-optional-fields > summary { color: var(--muted, #656d76); cursor: pointer; font-size: .78rem; }
+.tp-optional-fields > .tp-input { margin-top: 6px; }
 .tp-error { padding: 6px 10px; border-radius: 10px; font-size: .8rem; color: var(--danger, #d1242f); border: 1px solid color-mix(in srgb, var(--danger, #d1242f) 30%, transparent); background: color-mix(in srgb, var(--danger, #d1242f) 8%, transparent); overflow-wrap: anywhere; }
 .tp-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .tp-btn { padding: 6px 14px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--line, #d0d7de) 90%, transparent); background: var(--surface, #fff); color: var(--text, #1f2328); font-size: .82rem; cursor: pointer; }

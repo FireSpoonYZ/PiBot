@@ -55,44 +55,6 @@
   background: #fff8e6;
 }
 
-.bot-studio-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-/* 局部状态胶囊（scoped 版本，兼容 app.css 是否保留 .studio-pill）。 */
-.bot-studio .studio-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
-  border: 1px solid var(--line);
-  background: var(--bg);
-  color: var(--muted);
-  max-width: 100%;
-  overflow-wrap: anywhere;
-}
-.bot-studio .studio-pill.mono { font-family: var(--mono); }
-.bot-studio .studio-pill.is-ok {
-  background: var(--ok-soft);
-  border-color: #b7dfc0;
-  color: var(--ok);
-}
-.bot-studio .studio-pill.is-warn {
-  background: #fff8e6;
-  border-color: #edd28a;
-  color: var(--warn);
-}
-.bot-studio .studio-pill.is-lock {
-  background: var(--danger-soft, #fdeceb);
-  border-color: #e6b8b5;
-  color: var(--danger);
-}
-
 .bot-studio .bot-studio-lock {
   padding: 8px 10px;
   border: 1px solid #e6b8b5;
@@ -141,20 +103,30 @@
   gap: 8px;
 }
 
-/* SOUL 字节进度条 */
-.bot-studio .soul-byte-progress {
-  height: 6px;
-  border-radius: 999px;
-  background: var(--line);
-  overflow: hidden;
+.bot-studio-disclosure > summary {
+  width: fit-content;
+  font-size: 13px;
+  cursor: pointer;
 }
-.bot-studio .soul-byte-fill {
-  height: 100%;
-  background: var(--accent);
-  border-radius: 999px;
+.bot-studio-disclosure[open] > summary { margin-bottom: 8px; }
+.bot-studio-advanced {
+  display: grid;
+  gap: 10px;
 }
-.bot-studio .soul-byte-fill.warn { background: var(--warn); }
-.bot-studio .soul-byte-fill.danger { background: var(--danger); }
+.avatar-studio .avatar-studio-trigger {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  align-self: flex-start;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.avatar-studio .avatar-studio-trigger:hover { background: var(--surface); }
+.avatar-studio .avatar-studio-trigger small { color: var(--muted); }
 
 /* 快捷片段胶囊 */
 .bot-studio .soul-snippet-bar {
@@ -175,11 +147,6 @@
 .bot-studio .snippet-chip:hover:not(:disabled) {
   border-color: var(--accent);
 }
-.bot-studio .snippet-chip.danger {
-  color: var(--danger);
-  border-color: #e6b8b5;
-}
-
 .bot-studio .soul-textarea {
   width: 100%;
   box-sizing: border-box;
@@ -199,6 +166,8 @@
 .bot-studio .bot-studio-effective {
   display: flex;
   flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
   gap: 6px 14px;
   padding: 8px 10px;
   border: 1px solid var(--line);
@@ -208,6 +177,14 @@
   font-size: 12px;
   font-weight: 600;
 }
+
+.bot-studio .bot-studio-model-summary {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.bot-studio .bot-studio-model-summary strong { color: var(--text); font-size: 14px; }
 
 .bot-studio .bot-studio-field {
   display: flex;

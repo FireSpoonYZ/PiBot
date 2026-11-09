@@ -38,6 +38,8 @@ export interface ScopeConversation {
 export interface UseScopeConversationsResult {
   items: ScopeConversation[];
   loading: boolean;
+  /** 当前来源及会话类型已完成至少一次在线读取。 */
+  loaded: boolean;
   error: string | null;
   /** 等待本轮（或与在途合并后的）实际刷新结束。 */
   refresh: () => Promise<void>;
@@ -248,11 +250,13 @@ export function useScopeConversations(
   // sources/bots 数组可能每次渲染重建：稳定键由内容计算（非引用），
   // ref 持有最新值；只有键/kind/可见性变化才重载，避免请求循环。
   const sourcesKey = sources.map(sourceKey).join('\n');
+  const resultKey = `${kind ?? ''}\n${sourcesKey}`;
   const sourcesRef = useRef(sources);
   sourcesRef.current = sources;
 
   const [items, setItems] = useState<ScopeConversation[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** 顺序号：每轮开始/作废 +1；旧响应一律抛弃。 */
   const seqRef = useRef(0);
@@ -429,6 +433,7 @@ export function useScopeConversations(
     // 只上报第一条来源错误：多来源拼接（"A: …；B: …"）会把原始异常整串暴露给用户，
     // 单条错误也能保持 humanizeError 的 KNOWN_CODE_PREFIX（"CODE: message"）可解析。
     setError(errors.length > 0 ? errors[0] : null);
+    if (onlineAttempted) setLoadedKey(resultKey);
   };
 
   /**
@@ -482,5 +487,5 @@ export function useScopeConversations(
   // 卸载时作废旧响应；在途链经 mountedRef/while 条件自然终止，不再续网络。
   useEffect(() => () => { seqRef.current += 1; }, []);
 
-  return { items, loading, error, refresh };
+  return { items, loading, loaded: loadedKey === resultKey, error, refresh };
 }

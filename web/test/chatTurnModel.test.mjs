@@ -91,6 +91,8 @@ test('projectLiveState projects tool-only assistant entries, empty-text toolResu
 });
 
 test('parseHistoryEntries shows tool calls immediately on initiation and updates status to done/error upon completion', () => {
+  const toolBehavior = ({ id, name, status, outcome, durationMs, output }) =>
+    [id, name, status, outcome, durationMs, output];
   const liveHistory = [
     {
       id: 10,
@@ -127,7 +129,9 @@ test('parseHistoryEntries shows tool calls immediately on initiation and updates
   });
   assert.equal(runningTurns.length, 2);
   assert.equal(runningTurns[1].role, 'assistant');
-  assert.deepEqual(runningTurns[1].tools, [{ id: 'call_1', name: 'bash', status: 'running' }]);
+  assert.deepEqual(runningTurns[1].tools.map(toolBehavior), [
+    ['call_1', 'bash', 'running', undefined, undefined, undefined],
+  ]);
   assert.equal(runningTurns[1].durationMs, undefined);
 
   // Phase 2: Tool 1 completed (toolResult arrived), Tool 2 initiated in liveTools
@@ -155,9 +159,9 @@ test('parseHistoryEntries shows tool calls immediately on initiation and updates
     liveGeneratingText: 'Analyzing output...',
   });
   assert.equal(step2Turns.length, 2);
-  assert.deepEqual(step2Turns[1].tools, [
-    { id: 'call_1', name: 'bash', status: 'done', durationMs: 500, output: 'ok' },
-    { id: 'call_2', name: 'read', status: 'running' },
+  assert.deepEqual(step2Turns[1].tools.map(toolBehavior), [
+    ['call_1', 'bash', 'done', 'ok', 500, 'ok'],
+    ['call_2', 'read', 'running', undefined, undefined, undefined],
   ]);
   assert.equal(step2Turns[1].text, 'Analyzing output...');
   assert.equal(step2Turns[1].isStreaming, true);
@@ -211,13 +215,41 @@ test('parseHistoryEntries shows tool calls immediately on initiation and updates
   ];
   const finalTurns = parseHistoryEntries(completedHistory, 0, { isBusy: false });
   assert.equal(finalTurns.length, 2);
-  assert.deepEqual(finalTurns[1].tools, [
-    { id: 'call_1', name: 'bash', status: 'done', durationMs: 500, output: 'ok' },
-    { id: 'call_2', name: 'read', status: 'error', durationMs: 300, output: 'permission denied' },
+  assert.deepEqual(finalTurns[1].tools.map(toolBehavior), [
+    ['call_1', 'bash', 'done', 'ok', 500, 'ok'],
+    ['call_2', 'read', 'error', 'error', 300, 'permission denied'],
   ]);
   assert.equal(finalTurns[1].text, 'Diagnostics complete.');
   // Total duration from user timestamp (10_000) to end of last assistant message (12_600 + 1_900 = 14_500) = 4_500ms
   assert.equal(finalTurns[1].durationMs, 4_500);
+});
+
+test('tracked desktop text keeps adjacent assistant entry boundaries', () => {
+  const entries = [
+    {
+      id: 10,
+      kind: 'pi.assistant',
+      model: [{ role: 'assistant', content: [{ type: 'text', text: 'Earlier progress' }] }],
+    },
+    {
+      id: 11,
+      kind: 'pi.assistant',
+      model: [{ role: 'assistant', content: [{ type: 'text', text: 'Final result' }] }],
+    },
+  ];
+
+  const merged = parseHistoryEntries(entries);
+  assert.equal(merged.length, 1);
+  assert.deepEqual(merged[0].blocks, [
+    { id: '10-0-b1', kind: 'text', text: 'Earlier progress\nFinal result' },
+  ]);
+
+  const tracked = parseHistoryEntries(entries, 0, { trackAssistantTextEntries: true });
+  assert.equal(tracked.length, 1);
+  assert.deepEqual(tracked[0].blocks, [
+    { id: '10-0-b1', kind: 'text', text: 'Earlier progress', entryId: '10' },
+    { id: '10-0-b2', kind: 'text', text: 'Final result', entryId: '11' },
+  ]);
 });
 
 test('formatTurnDuration and formatWorkingElapsed format durations cleanly', () => {

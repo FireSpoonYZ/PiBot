@@ -107,6 +107,42 @@
   color: var(--muted);
 }
 
+.scope-shell-desktop .scope-settings-container {
+  gap: 14px;
+}
+
+.scope-shell-desktop .scope-settings-hero {
+  flex-direction: row;
+  gap: 10px;
+  padding: 4px 10px;
+  text-align: start;
+}
+
+.scope-shell-desktop .scope-settings-hero-avatar {
+  flex: none;
+  padding: 0;
+  filter: none;
+}
+
+.scope-shell-desktop .scope-settings-hero-text {
+  min-width: 0;
+}
+
+.scope-shell-desktop .scope-settings-hero-title {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.scope-shell-desktop .scope-settings-hero-subtitle {
+  margin-top: 2px;
+  font-size: .82rem;
+  overflow-wrap: anywhere;
+}
+
+.scope-shell-desktop .scope-member-search {
+  width: 100%;
+}
+
 .scope-shell .scope-settings-status-bar {
   padding: 8px 12px;
   border-radius: 14px;
@@ -446,6 +482,20 @@
     border-right: 0;
   }
   .desktop-shell .scope-shell.scope-shell-detail-open .scope-list {
+    display: none;
+  }
+}
+
+@media (max-width: 1060px) {
+  .scope-main-stage .scope-shell.scope-shell-desktop-dm:not(.scope-shell-detail-open) > .chat-pane {
+    display: none !important;
+  }
+  .scope-shell.scope-shell-desktop-dm > .scope-list {
+    flex: 1;
+    width: auto;
+    border-right: 0;
+  }
+  .scope-shell.scope-shell-desktop-dm.scope-shell-detail-open > .scope-list {
     display: none;
   }
 }

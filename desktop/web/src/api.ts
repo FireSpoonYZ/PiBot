@@ -195,6 +195,7 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
   private uiChain: Promise<unknown> = Promise.resolve();
   private loadPromise: Promise<DesktopUiSnapshot> | null = null;
   private listeners = new Set<() => void>();
+  private pendingListeners = new Set<() => void>();
   private errorListeners = new Set<(message: string) => void>();
 
   constructor(transport: DesktopTransport = tauriTransport) {
@@ -218,6 +219,11 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  subscribePending(listener: () => void): () => void {
+    this.pendingListeners.add(listener);
+    return () => this.pendingListeners.delete(listener);
   }
 
   subscribeErrors(listener: (message: string) => void): () => void {
@@ -451,13 +457,22 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
       if (record && record.targetDeviceId !== identity.targetDeviceId) {
         throw new DesktopRemoteError({ code: 'IDENTITY_CHANGED', message: '待发送目标不匹配', outcome: 'not-sent' });
       }
+      if (op === 'pending_get') return record as DesktopOperationMap[K]['result'];
     }
-    const result = await this.transport.request(op, params);
-    if (op === 'pending_list') {
-      const page = result as DesktopOperationMap['pending_list']['result'];
-      return { ...page, items: page.items.filter((item) => item.targetDeviceId === identity.targetDeviceId) } as DesktopOperationMap[K]['result'];
+    try {
+      const result = await this.transport.request(op, params);
+      if (op === 'pending_list') {
+        const page = result as DesktopOperationMap['pending_list']['result'];
+        return { ...page, items: page.items.filter((item) => item.targetDeviceId === identity.targetDeviceId) } as DesktopOperationMap[K]['result'];
+      }
+      return result;
+    } finally {
+      if (op !== 'pending_list' && op !== 'pending_get') {
+        for (const listener of this.pendingListeners) {
+          try { listener(); } catch { /* 刷新提示失败不能改变已提交的队列结果。 */ }
+        }
+      }
     }
-    return result;
   }
 
   async broker<K extends PublicBrokerOperation>(

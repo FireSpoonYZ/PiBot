@@ -136,23 +136,26 @@ export interface ToolPresentationCardProps {
   /** 仅当前活跃工具的 pending 交互可提交；历史卡片一律只读。 */
   active: boolean;
   disabled?: boolean;
+  variant?: 'desktop';
+  requesterName?: string;
   onSubmit?: (input: QuestionnaireSubmitPayload) => Promise<unknown>;
   onSubmitVaultUnlock?: (input: VaultUnlockSubmitPayload) => Promise<unknown>;
 }
 
-export function ToolPresentationCard({ presentation, active, disabled = false, onSubmit, onSubmitVaultUnlock }: ToolPresentationCardProps) {
+export function ToolPresentationCard({ presentation, active, disabled = false, variant, requesterName, onSubmit, onSubmitVaultUnlock }: ToolPresentationCardProps) {
   const t = useText();
   if (presentation.kind === 'todo') {
     return <TodoCard presentation={presentation} t={t} />;
   }
   if (presentation.kind === 'vault-unlock') {
-    return <VaultUnlockCard presentation={presentation} active={active} disabled={disabled} onSubmit={onSubmitVaultUnlock} />;
+    return <VaultUnlockCard presentation={presentation} active={active} disabled={disabled} requesterName={requesterName} onSubmit={onSubmitVaultUnlock} />;
   }
   return (
     <QuestionnaireCard
       presentation={presentation}
       active={active && presentation.status === 'pending' && Boolean(onSubmit)}
       disabled={disabled}
+      collapseOptionalFields={variant === 'desktop'}
       onSubmit={onSubmit}
       t={t}
     />
@@ -197,12 +200,14 @@ function QuestionnaireCard({
   presentation,
   active,
   disabled,
+  collapseOptionalFields,
   onSubmit,
   t,
 }: {
   presentation: QuestionnairePresentation;
   active: boolean;
   disabled: boolean;
+  collapseOptionalFields: boolean;
   onSubmit?: (input: QuestionnaireSubmitPayload) => Promise<unknown>;
   t: (zh: string, en: string) => string;
 }) {
@@ -306,9 +311,24 @@ function QuestionnaireCard({
           : editable
             ? t('待回答', 'Pending')
             : t('待回答（只读）', 'Pending (read-only)');
+  const globalNoteInput = <input
+    type="text"
+    className="tp-input tp-global-note"
+    aria-label={t('整体备注（可选）', 'Overall note (optional)')}
+    placeholder={t('整体备注（可选）', 'Overall note (optional)')}
+    value={globalNote}
+    maxLength={GLOBAL_NOTE_LIMIT}
+    disabled={!editable || busy || settledLocally}
+    onChange={event => { setGlobalNote(event.target.value); clearError(); }}
+  />;
 
   return (
-    <div className={`tp-card tp-questionnaire is-${presentation.status}`} role="group" aria-label={t('问卷', 'Questionnaire')}>
+    <div
+      className={`tp-card tp-questionnaire is-${presentation.status}`}
+      role="group"
+      aria-label={t('问卷', 'Questionnaire')}
+      data-active-questionnaire={editable && !busy && !settledLocally ? presentation.requestId : undefined}
+    >
       <div className="tp-card-head">
         <span className="tp-card-title">{t('问卷', 'Questions')}</span>
         <span className={`tp-status-pill is-${presentation.status}`}>{statusLabel}</span>
@@ -321,8 +341,35 @@ function QuestionnaireCard({
             const groupName = `tp-q-${presentation.requestId}-${index}`;
             const inputDisabled = !editable || busy || settledLocally;
             const multi = question.multiSelect === true;
+            const optionalFields = <>
+              <input
+                type="text"
+                className="tp-input"
+                aria-label={t('自定义回答（可选）', 'Custom answer (optional)')}
+                placeholder={t('自定义回答（可选）', 'Custom answer (optional)')}
+                value={customTextMap[index] ?? ''}
+                maxLength={CUSTOM_TEXT_LIMIT}
+                disabled={inputDisabled}
+                onChange={event => changeCustomText(index, multi, event.target.value)}
+              />
+              <input
+                type="text"
+                className="tp-input tp-notes"
+                aria-label={t('备注（可选）', 'Notes (optional)')}
+                placeholder={t('备注（可选）', 'Notes (optional)')}
+                value={notesMap[index] ?? ''}
+                maxLength={NOTES_LIMIT}
+                disabled={inputDisabled}
+                onChange={event => { setNotesMap(prev => ({ ...prev, [index]: event.target.value })); clearError(); }}
+              />
+            </>;
             return (
-              <fieldset key={index} className="tp-question" disabled={inputDisabled}>
+              <fieldset
+                key={index}
+                className="tp-question"
+                disabled={inputDisabled}
+                data-unanswered={selected.length === 0 && !customTextMap[index]?.trim() ? '' : undefined}
+              >
                 <legend className="tp-question-text">
                   <span className="tp-question-header">{question.header} · </span>
                   {question.question}
@@ -354,36 +401,19 @@ function QuestionnaireCard({
                     <OptionPreview key={`preview-${optionIndex}`} preview={option.preview} />
                   ) : null,
                 )}
-                <input
-                  type="text"
-                  className="tp-input"
-                  placeholder={t('自定义回答（可选）', 'Custom answer (optional)')}
-                  value={customTextMap[index] ?? ''}
-                  maxLength={CUSTOM_TEXT_LIMIT}
-                  disabled={inputDisabled}
-                  onChange={event => changeCustomText(index, multi, event.target.value)}
-                />
-                <input
-                  type="text"
-                  className="tp-input tp-notes"
-                  placeholder={t('备注（可选）', 'Notes (optional)')}
-                  value={notesMap[index] ?? ''}
-                  maxLength={NOTES_LIMIT}
-                  disabled={inputDisabled}
-                  onChange={event => { setNotesMap(prev => ({ ...prev, [index]: event.target.value })); clearError(); }}
-                />
+                {collapseOptionalFields ? <details className="tp-optional-fields">
+                  <summary>{t('自定义回答和备注', 'Custom answer and notes')}
+                    {customTextMap[index]?.trim() || notesMap[index]?.trim() ? t(' · 已填写', ' · Added') : ''}
+                  </summary>
+                  {optionalFields}
+                </details> : optionalFields}
               </fieldset>
             );
           })}
-          <input
-            type="text"
-            className="tp-input tp-global-note"
-            placeholder={t('整体备注（可选）', 'Overall note (optional)')}
-            value={globalNote}
-            maxLength={GLOBAL_NOTE_LIMIT}
-            disabled={!editable || busy || settledLocally}
-            onChange={event => { setGlobalNote(event.target.value); clearError(); }}
-          />
+          {collapseOptionalFields ? <details className="tp-optional-fields">
+            <summary>{globalNote.trim() ? t('整体备注 · 已填写', 'Overall note · Added') : t('添加整体备注', 'Add overall note')}</summary>
+            {globalNoteInput}
+          </details> : globalNoteInput}
           {error ? <div className="tp-error" role="alert">{error}</div> : null}
           {settledLocally ? (
             <div className="tp-result-line">{t('该请求已被其他提交结算，回答以先到者为准。', 'This request was already settled; the first answer won.')}</div>

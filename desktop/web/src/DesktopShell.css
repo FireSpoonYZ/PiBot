@@ -65,33 +65,21 @@
 }
 .desktop-shell .conn-dot.online { background: var(--ok, #16a34a); }
 .desktop-shell .conn-dot.offline { background: var(--danger, #ac3434); }
+.desktop-shell .conn-dot.needs-attention { background: var(--warn, #ad6500); }
 
-/* 主题三档切换（浅色 / 跟随系统 / 深色） */
-.desktop-shell .theme-switch {
-  display: flex;
-  border: 1px solid var(--line, #e5e5df);
-  border-radius: 999px;
-  overflow: hidden;
-  background: var(--surface-elevated, #fff);
-}
-.desktop-shell .theme-switch button {
+.desktop-shell .center-recovery {
   display: flex;
   align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  min-height: 0;
-  padding: 0;
-  border: none;
-  border-radius: 0;
-  background: transparent;
-  color: var(--muted, #70756f);
-  cursor: pointer;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 16px;
+  border-bottom: 1px solid var(--line-subtle, var(--line));
+  color: var(--muted);
+  font-size: 13px;
 }
-.desktop-shell .theme-switch button + button { border-left: 1px solid var(--line, #e5e5df); }
-.desktop-shell .theme-switch button.active {
-  background: var(--brand-soft, rgb(43 112 246 / 0.12));
-  color: var(--brand, var(--accent, #2B70F6));
+.desktop-shell .center-recovery .secondary-button {
+  min-height: 28px;
+  padding: 2px 10px;
 }
 
 /* ---------- 群聊 / 待发送 顶部设备选择器 ---------- */
@@ -117,6 +105,11 @@
   font-size: 12px;
   color: var(--muted, #70756f);
   white-space: nowrap;
+}
+.desktop-shell .pending-device-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .desktop-shell .device-selector select {
   min-width: 220px;
@@ -207,6 +200,40 @@
 }
 .desktop-dialog .settings-section:first-child { border-top: none; }
 .desktop-dialog .settings-section h4 { margin: 0 0 8px; font-size: 13px; }
+.desktop-dialog .settings-disclosure > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+.desktop-dialog .settings-disclosure > summary::-webkit-details-marker { display: none; }
+.desktop-dialog .settings-disclosure > summary::before {
+  content: '›';
+  font-size: 17px;
+  line-height: 1;
+  color: var(--muted);
+}
+.desktop-dialog .settings-disclosure[open] > summary::before { transform: rotate(90deg); }
+.desktop-dialog .settings-disclosure > summary > .metadata,
+.desktop-dialog .settings-disclosure > summary > .status { margin-left: auto; }
+.desktop-dialog .settings-disclosure[open] > summary { margin-bottom: 10px; }
+.desktop-dialog .settings-diagnostics {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.desktop-dialog .settings-diagnostics > summary { cursor: pointer; }
+.desktop-dialog .settings-diagnostics[open] > summary { margin-bottom: 6px; }
+.desktop-dialog .settings-device { flex: 1; min-width: 0; padding: 8px 0; }
+.desktop-dialog .settings-device > .card-row { margin-bottom: 2px; }
+.desktop-dialog .settings-device .settings-diagnostics { margin-top: 0; }
+.desktop-dialog .settings-device-runtime {
+  padding: 4px 0 8px;
+  border-top: 0;
+}
+.desktop-dialog .archive-more[open] { flex-basis: 100%; }
 .desktop-dialog .section-head {
   display: flex;
   align-items: center;
@@ -308,6 +335,11 @@
   font-size: 12px;
   color: var(--muted, #70756f);
 }
+.desktop-dialog .form-grid .checkbox-field {
+  flex-direction: row;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
 .desktop-dialog .form-grid .form-grid-full { grid-column: 1 / -1; }
 .desktop-dialog .form-grid input,
 .desktop-dialog .form-grid select {
@@ -345,55 +377,7 @@
   resize: vertical;
 }
 
-/* ---------- 设置内已归档智能体入口与专页 ---------- */
-.desktop-dialog .archived-entry-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid var(--line, #e5e5df);
-  border-radius: var(--radius-sm, 12px);
-  background: var(--surface-elevated, #fff);
-  color: var(--text, #242622);
-  text-align: left;
-  cursor: pointer;
-}
-.desktop-dialog .archived-entry-row:hover {
-  background: var(--surface, #efeee9);
-  border-color: var(--accent, #2B70F6);
-}
-.desktop-dialog .archived-entry-main {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-width: 0;
-}
-.desktop-dialog .archived-subpage-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-.desktop-dialog .archived-subpage-title {
-  flex: 1;
-  min-width: 180px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.desktop-dialog .archived-subpage-title h4 {
-  margin: 0;
-}
-.desktop-dialog .archived-back-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
+/* ---------- 已归档智能体 ---------- */
 .desktop-dialog .archived-bot-list {
   list-style: none;
   display: flex;
@@ -441,19 +425,6 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-}
-.desktop-dialog .archived-bot-title-line {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.desktop-dialog .archived-bot-preview {
-  font-size: 12px;
-  color: var(--muted, #70756f);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .desktop-dialog .archived-bot-actions {
   display: flex;

@@ -2,7 +2,7 @@
 
 .desktop-shell.gate-shell {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   min-height: 100%;
   padding: 24px;
@@ -13,6 +13,7 @@
 .gate-card {
   width: 100%;
   max-width: 440px;
+  margin-block: auto;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -117,6 +118,14 @@
 }
 
 .gate-advanced > .gate-form { margin-top: 12px; }
+
+.gate-advanced-fields {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.gate-advanced-fields .gate-field textarea { margin-top: 0; }
 
 .gate-check {
   display: flex;
