@@ -481,6 +481,7 @@ function ScopeDetail({
   resolveRoomApi,
   memberCandidates,
   onDeleted,
+  onHistoryViewed,
   settingsOpen,
   onSettingsOpenChange,
 }: {
@@ -504,6 +505,7 @@ function ScopeDetail({
   memberCandidates?: readonly ScopeBotInfo[];
   /** 群详情删除成功或远端检测到群已删除时触发。 */
   onDeleted?: () => void;
+  onHistoryViewed?: (scopeId: string, lastMessageAt: string) => void;
   /** 受控群详情设置页开关（仅 room 生效；缺省走内部状态）。 */
   settingsOpen?: boolean;
   /** 群详情设置页开关变更回调。 */
@@ -812,6 +814,16 @@ function ScopeDetail({
       el.scrollTop = savedScrollTopRef.current;
     }
   }, [history, showSettings]);
+
+  const latestMessage = history.at(-1)?.message;
+  useEffect(() => {
+    if (
+      isRoom && pageActive && docVisible && !showSettings &&
+      newCount === 0 && wasAtBottomRef.current && latestMessage?.scopeId === scope.scope.scopeId
+    ) {
+      onHistoryViewed?.(latestMessage.scopeId, latestMessage.createdAt);
+    }
+  }, [isRoom, pageActive, docVisible, showSettings, newCount, latestMessage, scope.scope.scopeId, onHistoryViewed]);
 
   // 被回复消息不在本页时按 messageId 单独取回；缓存防重复请求与重复渲染抖动。
   useEffect(() => {
@@ -1128,6 +1140,7 @@ export function Scopes({
   resolveRoomApi,
   memberCandidates,
   onDeleted,
+  onHistoryViewed,
   settingsOpen,
   onSettingsOpenChange,
 }: {
@@ -1170,6 +1183,8 @@ export function Scopes({
   memberCandidates?: readonly ScopeBotInfo[];
   /** 群详情删除成功或远端检测到群已删除时触发：父级回到 Hub / 清 stage 并刷新群列表、移除置顶。 */
   onDeleted?: () => void;
+  /** 用户在可见群聊中查看到最新消息时通知会话列表。 */
+  onHistoryViewed?: (scopeId: string, lastMessageAt: string) => void;
   /** 受控群详情设置页开关（仅 room 生效；缺省走内部状态）。 */
   settingsOpen?: boolean;
   /** 群详情设置页开关变更回调（三点进入 true，设置页返回 false）。 */
@@ -1485,6 +1500,7 @@ export function Scopes({
             resolveRoomApi={resolveRoomApi}
             memberCandidates={memberCandidates}
             onDeleted={handleScopeDeleted}
+            onHistoryViewed={onHistoryViewed}
             settingsOpen={settingsOpen}
             onSettingsOpenChange={onSettingsOpenChange}
           />

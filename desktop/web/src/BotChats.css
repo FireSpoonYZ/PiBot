@@ -179,19 +179,6 @@
 /* 混排行内状态小条（列表滚动区内）：跟随列表内边距，不占 sidebar 外边距。 */
 .hub-list-scroll > .status { margin: 6px 10px; }
 
-/* 群聊行徽标与来源行（gbot-ui ConversationRow badge/meta，桌面主题色适配） */
-.hub-bot-row .gbot-conversation-row__badge {
-  flex: none;
-  font-size: 11px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-}
-.hub-bot-row .gbot-conversation-row__meta { font-size: 11.5px; color: var(--muted); }
-
-/* ————— 统一列表 ————— */
-
 /* PrimaryChatPane 隐藏宿主：子视图打开时保持挂载但隐藏（不依赖 UA hidden 样式）。 */
 .chat-stage-host { display: contents; }
 .chat-stage-host.stage-hidden { display: none; }
@@ -244,9 +231,6 @@
   display: none;
 }
 
-/* 行选中态（gbot-ui 以 data-active 标记，复用 hub-bot-row.selected 视觉） */
-.hub-bot-row[data-active] { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
-
 /* ————— 统一列表 ————— */
 
 .hub-list-scroll {
@@ -259,58 +243,6 @@
 .hub-bot-list { list-style: none; padding: 0; margin: 0; }
 .hub-bot-list li { margin: 0; }
 
-.hub-bot-row {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  width: 100%;
-  text-align: left;
-  border: 0;
-  background: transparent;
-  border-radius: 14px;
-  padding: 9px 10px;
-  color: var(--text);
-  min-height: 0;
-}
-.hub-bot-row:hover { background: var(--accent-soft); }
-.hub-bot-row.selected { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
-
-.hub-bot-row-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-.hub-bot-row-title-line {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
-}
-.hub-bot-row-title {
-  flex: 1;
-  min-width: 0;
-  font-weight: 600;
-  font-size: 14px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.hub-bot-row-time {
-  flex: none;
-  font-size: 11.5px;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-.hub-bot-row-sub,
-.hub-bot-row-preview {
-  font-size: 12px;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .archive-countdown { color: var(--warn); }
 
 .hub-archived {
@@ -1022,7 +954,7 @@
 /* ————— 悬停与滚动条细节（桌面指针） ————— */
 
 @media (hover: hover) {
-  .hub-bot-row,
+  .hub-bot-list .gbot-conversation-row,
   .hub-hero-card,
   .icon-button,
   .secondary-button {

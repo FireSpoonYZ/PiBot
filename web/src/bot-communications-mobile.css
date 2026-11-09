@@ -78,23 +78,17 @@
   min-height: 0;
 }
 
-/* Hub 混排：共享 .gbot-conversation-row 复用 .hub-bot-row 布局；群聊行徽章与 Bot 行 host badge 同风格。 */
-.hub-bot-row .gbot-conversation-row__badge {
-  flex: none;
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-size: .68rem;
-  font-weight: 600;
-  line-height: 1.3;
-  background: color-mix(in srgb, var(--accent) 15%, var(--surface));
-  color: var(--accent);
-}
-
-/* 置顶排序行：在 SortablePinnedChat 包装内与兄弟拖拽手柄并排自适应。 */
-.hub-bot-list .hub-bot-row {
+/* 移动会话行保留触控空间，置顶会话沿用整行拖拽。 */
+.hub-main .hub-bot-list .gbot-conversation-row {
   flex: 1;
   min-width: 0;
+  min-height: 62px;
+  gap: 12px;
+  padding: 6px 10px;
 }
+
+.hub-main .hub-bot-list .gbot-conversation-row__title { font-size: 15px; }
+.hub-main .hub-bot-list .gbot-conversation-row__preview { font-size: 13px; }
 
 /* Hub 群聊 / Bot 上下文菜单：共享上游 ContextMenu 定位/焦点/关闭逻辑，
    本工程主题变量外壳；[data-ready] 前不显示（上游先定位再 reveal）。 */
