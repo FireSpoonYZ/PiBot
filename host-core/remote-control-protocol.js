@@ -9,6 +9,7 @@
 
 import { messageError, assertId, normalizeScopeHistoryOptions } from './message-protocol.js';
 import { normalizeBotBoardParams } from './bot-board-protocol.js';
+import { normalizeSkillReviewInput } from './skill-review-protocol.js';
 import {
   normalizeScopeListOptions,
   normalizeScopeCreate,
@@ -171,8 +172,9 @@ const CONTROL_V2_METHODS = Object.freeze([
   'uploadAttachment',
   'getAttachment',
   'putBotFileChunk',
-  // Bot 学习管理（Hermes 后台 review/learn/curate 作业）：params {botId,input}。
+  // Bot 学习管理（后台 review/learn/curate 作业）：params {botId,input}。
   'manageBotLearning',
+  'reviewBotSkills',
 ]);
 
 export const CONTROL_METHODS = Object.freeze([...CONTROL_V1_METHODS, ...CONTROL_V2_METHODS]);
@@ -193,6 +195,9 @@ export const CONTROL_ERROR_CODES = new Set([
   'CENTER_OFFLINE',
   'INVALID_CWD',
   'REQUEST_CONFLICT',
+  'REVISION_CONFLICT',
+  'NOT_FOUND',
+  'FORBIDDEN',
   'BOT_NOT_FOUND',
   'BOT_REQUEST_NOT_FOUND',
   'SUBMISSION_NOT_FOUND',
@@ -696,6 +701,11 @@ function normalizeControlParams(method, params) {
         throw invalid('input.action must be one of status|configure|learn|review|curate|cancel');
       }
       return { botId: params.botId, input: params.input };
+    }
+    case 'reviewBotSkills': {
+      rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
+      assertId(params.botId, 'botId');
+      return { botId: params.botId, input: normalizeSkillReviewInput(params.input) };
     }
     default:
       throw invalid('unknown control method');

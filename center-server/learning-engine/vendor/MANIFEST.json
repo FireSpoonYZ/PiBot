@@ -1,0 +1,98 @@
+{
+  "source": "https://github.com/NousResearch",
+  "commit": "71736c9f32597bbca9d89cede5aa136e55946b2f",
+  "license": "MIT (see LICENSE)",
+  "note": "Upstream Git blob IDs identify the original files at the pinned revision. sha256 identifies the bytes included here after adaptation.",
+  "files": {
+    "LICENSE": {
+      "sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6",
+      "upstreamBlob": "75410e73319c72cd3e991a501c5455eb78f38375",
+      "upstreamSha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6"
+    },
+    "agent/__init__.py": {
+      "sha256": "21cdce89e9ffdb847634bf498b087410cd191a1e375db43928735846fb7ddc86",
+      "upstreamBlob": "9555e8210179a1b4e6245bf69bf71039f7bb29ae",
+      "upstreamSha256": "21cdce89e9ffdb847634bf498b087410cd191a1e375db43928735846fb7ddc86"
+    },
+    "agent/jiter_preload.py": {
+      "sha256": "bb66461d6e52e54dd2368ad021304d74676824924c45df80f0a3e769c9e5fff3",
+      "upstreamBlob": "61b90820b83b1411496e5e38da09e25b34a17da8",
+      "upstreamSha256": "bb66461d6e52e54dd2368ad021304d74676824924c45df80f0a3e769c9e5fff3"
+    },
+    "agent/background_review.py": {
+      "sha256": "f4f9bf2be9e346afd59afff00160da87f701ecc4d355707d65044d010ed72a3d",
+      "upstreamBlob": "108e4518ed584448f8c2a5f16a7c903690efc9fd",
+      "upstreamSha256": "31efabc1611e6b979681d3bc7fd06f7099654e3052c45bb445b02c7473cb7bb0"
+    },
+    "agent/curator.py": {
+      "sha256": "b4d0537221a19fe889717c1f82e02e2ac024003789bcbb1b2b8d5d8f2f665605",
+      "upstreamBlob": "f3fe2bd72ec633fb3798afabb90ef61f36eb6637",
+      "upstreamSha256": "b3a89ebf23453ab8b45971fed4624ef5e2ef3693da2612aa6cf61a2bdca2c653"
+    },
+    "agent/curator_backup.py": {
+      "sha256": "40bf4b26b16dc8294a3c65ee1bb9148be4682006b4b7cb57b6b082b08713fcdf",
+      "upstreamBlob": "be6aab04c0e4c3d93e4e01c3ff30dde42ea658a7",
+      "upstreamSha256": "41a63a699d9c525dc42a5199107b3bac53fff7cddb41f8dbb95e6d8eebccc362"
+    },
+    "agent/learn_prompt.py": {
+      "sha256": "8bd739b06b80806dc6f8bf41266f1ea9d2c942bf73e973b7853c1c9cf900ff8d",
+      "upstreamBlob": "feac4178b5cb157760e97285dc3ddc5f5dc3616a",
+      "upstreamSha256": "0407ac5cb2380000133ff6b131e3f9f7af59f01f660335b5b5677aba4e44eb4b"
+    },
+    "agent/interrupt_compat.py": {
+      "sha256": "3ce061954cf52505feb69013372bcef37141699761a05dfff334cb3eaa09f25c",
+      "upstreamBlob": "50a4dfa7b95b323326bca972b265555947ff0cbd",
+      "upstreamSha256": "3ce061954cf52505feb69013372bcef37141699761a05dfff334cb3eaa09f25c"
+    },
+    "agent/safe_worker_policy.py": {
+      "sha256": "30ad8c47a179ad400378fe54ba49789b38611187cbd82abef358d74cc2137e89",
+      "upstreamBlob": "fee28e9986b2baf79fd9c8540be434e903b4df89",
+      "upstreamSha256": "f0759f0868f402d5aff6007303ad503e3d3d92999ed01693037bc8f07b4a2738"
+    },
+    "agent/skill_utils.py": {
+      "sha256": "cec57d07042deadf1c3a471d20d17a609933310aaeb75afa61ac54b24fd61f81",
+      "upstreamBlob": "78752d09d25907d194d16b89c713733a421a2f72",
+      "upstreamSha256": "9b643866caf9b0db3b568045e2b49bf2903f89197497c815a492afec89b33722"
+    },
+    "agent/thread_scoped_output.py": {
+      "sha256": "f6ebba933be6d4c13e95d97a290b5a58e99c9d29ef1824fef26245814ebe65bc",
+      "upstreamBlob": "2363c73cab8c1e066cf971b44eb5a2e92c3f8c03",
+      "upstreamSha256": "f6ebba933be6d4c13e95d97a290b5a58e99c9d29ef1824fef26245814ebe65bc"
+    },
+    "tools/__init__.py": {
+      "sha256": "a4c3c9daeb0c10c817d2c9c8942961bafa138c45912096cd8a8334df9c6a66b7",
+      "upstreamBlob": "db946d0e2bc62d468804968c074f844b5fa0cbb3",
+      "upstreamSha256": "7bca460f476ac9ace706c8cfd07e98f8aae34d839862f0f68abafc3a8397cf35"
+    },
+    "tools/skill_ledger.py": {
+      "sha256": "30831e4bb68f65386481f75ef279fed146cd7984e61689058f1ea3429089319f",
+      "upstreamBlob": "dc983d1877187852738dc7eaadc839886e039595",
+      "upstreamSha256": "56121bfa4e5daa57ca7f9eb1767817e06e0ad00fae2e4c7f72bcaaf299e43c27"
+    },
+    "tools/skill_manager_guards.py": {
+      "sha256": "350f501536ddbc1d4cab218cc040a8b64c4bb16264d30de9306b4999469ffecb",
+      "upstreamBlob": "896189fbe8f609612e54c1186089cb20c33be65a",
+      "upstreamSha256": "3ca2e672a39061f3e2d9f58e402d5fb582a77d002d2d743d476e21a5a335e866"
+    },
+    "tools/skill_provenance.py": {
+      "sha256": "5c492a925cdde61c3257eb5db76568822d26be3d9a2c40d364a9997a3a7cb576",
+      "upstreamBlob": "4ab73ce25634d642a831a3de4b66283ada19e4e0",
+      "upstreamSha256": "5c492a925cdde61c3257eb5db76568822d26be3d9a2c40d364a9997a3a7cb576"
+    },
+    "learning_constants.py": {
+      "sha256": "70350675b14e2b5be851af5dd36819789b5edb49fa504fab5f43950be9ca0d96",
+      "upstreamBlob": "32dbd53c9737545edea778df17eaec42c2581b56",
+      "upstreamSha256": "74d849629c176703d48f9aa43a245fd8819545ac908c805e347db7d691976510"
+    },
+    "utils.py": {
+      "sha256": "c1e35b2ad21d9156170ec0a0b2a384bf1f5069227fd7717ab845be6d11b0cbe4",
+      "upstreamBlob": "8d3193114faa646a1739e41b8d21e9a53b9c398d",
+      "upstreamSha256": "7add43a4e5b3bd042e95412e2d9bd2eddfd35a8a2628f4d5ba6f20dd5eca1877"
+    },
+    "learning_cli/sizefmt.py": {
+      "sha256": "3baba4be0388513d41e0bfa5bbae82f8aefe73361ea9c87d135606d83ae4c5b4",
+      "upstreamBlob": "29dddcfa854315dd449e141d58714b4b814b33d8",
+      "upstreamSha256": "103db010ac020af25ccd5ba5a4b33fa62965336bf6bfc98f14c5ecfbeea41d28"
+    }
+  }
+}

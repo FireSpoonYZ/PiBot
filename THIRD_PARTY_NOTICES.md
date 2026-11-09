@@ -281,20 +281,18 @@ terms 1-9 and the APPENDIX. A bundled crate whose archive has no license file an
 has no exact fallback mapping still fails the build instead of falling back to package
 metadata.
 
-## Hermes Agent learning modules
+## Bot learning modules
 
-The center server vendors unmodified upstream learning modules from
-**hermes-agent**, by Nous Research:
+The Center includes learning modules adapted from code by Nous Research.
 
-- Repository: https://github.com/NousResearch/hermes-agent
+- Source organization: https://github.com/NousResearch
 - Exact revision: `71736c9f32597bbca9d89cede5aa136e55946b2f`
 - License: MIT. A verbatim copy travels with the vendored sources at
-  `center-server/hermes/vendor/LICENSE`.
-- Vendored scope (original bytes, no rewording): `agent/background_review.py`,
-  `agent/learn_prompt.py`, `agent/curator.py` and their unchanged helper
-  modules under `center-server/hermes/vendor/`. The Node.js transport,
-  skill-service bridge and Host agent-run adapters that drive them are project
-  code, not upstream.
+  `center-server/learning-engine/vendor/LICENSE`.
+- The adapted sources include `agent/background_review.py`, `agent/learn_prompt.py`,
+  `agent/curator.py` and their helpers. The vendor manifest records both
+  upstream Git blob IDs and local checksums. The Node.js transport, skill
+  bridge and Host execution adapters are PiBot code.
 
 ```text
 MIT License

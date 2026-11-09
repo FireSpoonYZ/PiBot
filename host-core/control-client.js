@@ -358,6 +358,9 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     manageBotLearning(botId, input, options) {
       return request('POST', ['v1', 'bots', botId, 'learning'], { ...callOptions(options), body: input });
     },
+    reviewBotSkills(botId, input, options) {
+      return request('POST', ['v1', 'bots', botId, 'skill-reviews'], { ...callOptions(options), body: input });
+    },
     scheduleTask(botId, input, options) {
       return request('POST', ['v1', 'bots', botId, 'schedules'], { ...callOptions(options), body: input });
     },

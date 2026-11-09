@@ -45,54 +45,46 @@ headRevision, state, pinned, locked, createdBy, source, installationId?, publish
 createdAt, updatedAt`. Errors use the standard center codes (INVALID_ARGUMENT, NOT_FOUND,
 REVISION_CONFLICT, REQUEST_CONFLICT, INVALID_STATE, FORBIDDEN, PAYLOAD_TOO_LARGE).
 
-## hermes(identity, name, args)
+## review(identity, input)
 
-Upstream adapter — answers both Python `skill.call` callbacks and the learning
-internal `action:'tool'` path (identity.origin = review mode, sessionId = jobId).
+The client review flow uses the dedicated Bot-scoped `skill-reviews` endpoint.
+The device and Bot come from the authenticated route or Host call.
 
-Tool names → JSON **string** (upstream tools return `json.dumps`):
-- `skills_list` → `{success, skills:[live managed], installed:[bound], archived:[names], count}`
-- `skill_view {name, file_path?}` → `{success, name, path, content|files, description, source, ...}`
-- `skill_manage {operations:[…]}` (advertised atomic batch) or legacy flat
-  `{action, name, content?, category?, file_path?, file_content?, old_string?, new_string?, replace_all?, absorbed_into?}`;
-  actions create/edit/patch/delete/write_file/remove_file.
-  Success shapes keep `success:true` + `message` + `_change` (+ `_archived` on review deletes);
-  batch returns `{success, results:[{action,name,file_path?,success,message?}], operations_applied}`,
-  failures `{success:false, error, results, rolled_back:true}`. Errors never carry `_change`.
-- `read_file {path, offset?, limit?}`, `search_files {query, path?, case_sensitive?, max_results?}`
-  — ADAPTED to the Bot's skill library (upstream file_tools.py is not vendored); both
-  register read-before-write marks like upstream.
+| action | fields | result |
+|---|---|---|
+| list | — | `{items}` with the Bot's learning drafts awaiting approval |
+| read | `skillId` | Draft summary and `changes`, the list of added, removed, and modified files |
+| read | `skillId`, `path`, `expectedRevision` | Same summary with `file: {path, before, after}` for the selected change. A missing side is `null`. |
+| approve | `skillId`, `expectedRevision`, `requestId` | Publication receipt and, once published, the current target-device deployment status |
 
-`skill_usage.<fn>` / `skill_provenance.<fn>` → plain JSON values (kwargs object;
-`skill_name` or `name` accepted; tuples → arrays, e.g. archive_skill → `[ok,msg]`):
-bump_view, bump_use, bump_patch, record_created, record_installed, mark_agent_created,
-forget, get_record, load_usage, save_usage, seed_record_if_missing, reanchor_clock,
-set_state, set_pinned, set_locked, is_locked, locked_skill_names,
-is_agent_created, is_bundled(false), is_hub_installed(bound-installed claim),
-is_external_only(false), is_protected_builtin(false), is_curation_eligible,
-is_curator_managed, provenance, telemetry_provenance, list_agent_created_skill_names,
-list_archived_skill_names, list_unmanaged_skill_names, unmanaged_report, curated_report,
-usage_report, read_suppressed_names([]), archive_skill, restore_skill, adopt_skill,
-latest_activity_at, activity_count, read_skill_name({content,fallback}), constants.
-skill_provenance: is_background_review, is_unattended_review, get_current_write_origin,
-set/reset_current_write_origin (no-op nulls). Unknown names throw INVALID_ARGUMENT.
-`skill_file_lock` is intentionally NOT mapped — mutations serialize center-side; C must no-op it.
+Each summary includes the Skill's current revision, its published revision, and the
+latest learning source. The source can contain the mode, job ID, conversation ID and
+entry range. Existing unpublished review and curation revisions retain their known
+mode. A stale preview or approval returns `REVISION_CONFLICT`. If an explicitly
+approved publication is queued or activating, the client can resume with the same
+revision and request ID. An `enabled` publication confirms Center activation.
+The separate deployment status reflects what the target Host has applied.
 
-Upstream protections implemented adapter-side: read-before-write marks (per
-device+bot+sessionScope; autonomous origins only), locked (autonomous writes refused),
-pinned (delete refused), pinned/locked semantics live in usage records exactly like
-upstream. Autonomous delete → recoverable archive + binding disable (never hard delete).
+## learningTool(identity, name, args)
 
-Curator delete source and nonempty target must both use exact names in this Bot's `curated_report`; source aliases/unmanaged sources are refused, and the existing pinned-source refusal still applies.
-Curator-only delete guards: a nonempty `absorbed_into` must be the exact name of a
-non-archived target in this Bot's existing `curated_report` (agent-created, or an
-eligible pinned skill). An unpinned manual target, archived target or alias is
-refused before archiving the source; pin an eligible manual target or choose an
-active curator-managed target, restore archived targets first, and use the report's
-exact name. Curator calls containing delete must have exactly one operation, checked
-before the mutation transaction; create/patch the umbrella in a preceding call.
-This enforces the previously descriptive-only sole-delete rule for curator calls,
-without changing background-review/foreground rules or successful multi-create/patch batches.
+The learning adapter handles Python `skill.call` callbacks and the internal
+`action:'tool'` path. The caller supplies the job ID, write origin and available
+source metadata. A batch request ID is scoped to the job.
+
+- `skills_list` lists managed drafts and bound Skill packages.
+- `skill_view`, `read_file` and `search_files` read the Bot's Skill library and
+  record which files were viewed during the job.
+- `skill_manage` accepts an atomic `operations` array, or a single operation
+  using flat arguments. Supported operations are `create`, `edit`, `patch`,
+  `write_file` and `remove_file`. A successful write reports `draftSaved` and
+  `reviewRequired`. A failed operation rolls back the batch.
+
+Tool results are JSON strings with the usual `success`, `_change` and batch
+result fields. The internal `skill_usage.*` and `skill_provenance.*` callbacks
+use plain JSON values. Learning can read lifecycle metadata and mark a Skill
+active or stale. Archival, restoration and deletion use the separate
+management path. Existing read-before-write and lock guards apply to review
+and curation.
 
 ## Exact vs adapted (flag for integrators)
 
@@ -105,30 +97,28 @@ without changing background-review/foreground rules or successful multi-create/p
   installed packages map to upstream "hub/external" (provenance 'hub'/'installed',
   read-only); SKILL_PROMPT_DESC_LIMIT=60 (agent/curator.py, learn_prompt.py);
   linter findings + security scan omitted (opt-in upstream, not vendored);
-  absorbed_into absorb-target resolves managed skills only.
 - Dependencies: `tar` via the installed dependency tree; `yaml` resolves through
   `host-core/package.json` and is used for skill frontmatter and curator summaries.
 
 ## Integration
 
-Hermes skill writes commit revisions atomically before publication. Publication
-receipts identify queued, activating, enabled or failed state; enabled is not a
-Host deployment receipt. Failed or pending publication keeps the draft for retry.
-Curator snapshots retain managed content and metadata in the center database;
-whole snapshots can be recovered into new drafts through snapshots/restore_snapshot; individual content revisions remain recoverable through history/rollback. A hard-deleted skill is recreated with a new identity (deleted history is not recoverable). Publication retry timers are revision-fenced so a previous pending publication cannot automatically publish restored drafts. Existing deployment operations/bindings are not rolled back.
+Learning commits revisions atomically. Each draft keeps its source with its revision.
+Approval compares the draft with the last published content and uses the existing
+artifact installation, activation and deployment pipeline. Ordinary management
+publication requires review when the unpublished revisions include a learning draft.
 
-Foreground `skill_manage` edits locked/pinned skills freely (upstream parity: the
-lock is an autonomous-pass guard); execute() delete ignores pinned, adapter refuses.
+Curator snapshots retain managed content and metadata in the Center database.
+Recover a snapshot into drafts with `snapshots` and `restore_snapshot`, or restore
+an individual content revision with `history` and `rollback`. Recovered learning
+drafts carry their source into review. Existing published versions, bindings and
+deployment plans stay in place during draft restoration.
 
 ## Host usage observations
 
 `POST /api/host/devices/:deviceId/bots/:botId/skills/usage` is Host-only, requires the authenticated device to match, and calls `reportUse(identity,input)`. Fields: `requestId` (SHA-256 of stable Host/Bot/installation/version/conversation/task/call identity), `installationId, version, skillName, skillPath, path`. Center validates the enabled Bot binding, active skill installation/version, package skill directory and actual member file, then atomically bumps existing skill_usage and records the idempotent receipt in skill_requests. Managed installation IDs resolve back to managed directory names, even when frontmatter names differ. No telemetry action is advertised to the model.
 
-## Curator schedule bridge
+## Curator schedule references
 
-`cron.jobs.referenced_skill_names()` -> `schedule.call {name:"referenced_skill_names",args:{}}`, list converted to Python set.
-`cron.jobs.rewrite_skill_refs(*, consolidated=None, pruned=None)` -> `schedule.call {name:"rewrite_skill_refs",args:{consolidated,pruned}}`.
-
-Lane B authorizes/dispatches these calls for the current curator job Bot to `schedules.hermesSkillCall(bot,name,args,{signal}={})`. The reply is `{rewrites:[{job_id,job_name,before,after,mapped,dropped}],jobs_updated,jobs_scanned}`. Node and Android engines include disabled jobs, operate in one storage transaction, preserve due times and already-claimed runs, bump changed revisions, and re-plan alarms. Other names error. No snapshot-derived or prompt-regex dependencies.
-
-The optional fourth argument carries the learning job's abort signal; existing three-argument callers remain compatible. Node checks cancellation before its synchronous transaction. Android forwards the signal through the existing native bridge options, reusing queued/beforeWrite cancellation and native_cancel for the native executor queue. Cancellation does not roll back an already committed transaction or change the bridge's existing outcome semantics.
+`cron.jobs.referenced_skill_names()` reads the Bot's scheduled Skill references
+through the Host callback. Curation keeps the existing bindings and schedule
+references in place while proposed content awaits review.

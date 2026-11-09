@@ -4,78 +4,50 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| `app/src/main/` | Android 原生 Java（独立助手入口、App Widget、语音、Shower、Pi 桥接） |
+| `app/src/main/` | Android 原生入口、前台服务、通知、语音与 Shower 桥接 |
 | `web/src/`、`mobile/` | 共享 React/TypeScript 界面与 Android Tauri 外壳 |
 | `desktop/` | Windows/Linux Tauri 客户端、Host 启动器、NSIS/DEB 钩子 |
 | `host-core/` | 多端 Host、客户端 broker、工具、固定 Pi SDK 集成 |
 | `center-server/`、`center-web/`、`center-contract/` | 中心服务、管理页与契约 |
-| `pi-runtime/` | 保留的旧 Pi 集成与旧数据兼容 |
-| `shower-server/` | Binder-only 虚拟屏服务，Gradle 构建后以 `shower-server.jar` 打入 App assets |
-| `tests/` | 纯 Java 断言检查（AgentChecks、ConversationTreeChecks），不依赖 Android stub |
-| `app/src/test/` | Robolectric 单元测试 |
-| `app/src/androidTest/` | 设备端 instrumentation 检查 |
-| `scripts/` | 可重复运行的验证与辅助脚本 |
+| `shower-server/` | Binder-only 虚拟屏服务，Gradle 构建后以 `shower-server.jar` 打入 APK assets |
+| `web/test/`、`app/src/test/` | Node 行为测试与 Android JUnit/Robolectric 测试 |
+| `scripts/` | 构建准备、网络诊断与发行校验 |
 
 ## 助手与迁移边界
 
-- MainActivity 是普通 Capacitor 入口；不恢复 HOME、桌面网格/搜索、图标包、小组件宿主、导航手势或应用切换页。
-- TaskWidgetProvider 使用 RemoteViews/XML；不内嵌 EditText、问卷输入或虚拟屏。点击打开现有聊天/详情/语音 Activity，多个实例按会话分别选择任务。
-- 普通事件至少 1000ms 尾沿节流，开始/问卷/停止/终态及时刷新；冷状态只显示私有 `task_widget` 最后快照及更新时间，不启动 Pi/Shizuku/Shower/FGS。
-- 保留 applicationId、签名、聊天/附件/Pi/偏好数据路径及旧草稿。AppCatalog/AppSearch、Shower 和原系统语音组件名不是桌面残留。
-- 仅 `gestures.pending_restore=true` 可自动恢复旧导航值为 0，读回且 commit 清标成功才完成；不写 1，不改无障碍列表或申请 HOME。权限不足时保留标记与 ADB/系统设置/显式 Shizuku 救援入口，具体命令见 README。
+- `MainActivity` 是普通应用入口，由它启动独立 `:tauri_ui` 进程内的 `TauriMainActivity`。保持助手范围，避免恢复 HOME、桌面网格/搜索、图标包、小组件宿主、导航手势与应用切换页。
+- 保留 applicationId、签名、聊天/附件/Pi/偏好数据路径及旧草稿。保留助手用到的 AppCatalog/AppSearch、Shower 和系统语音组件名。
+- 旧导航值只在 `gestures.pending_restore=true` 时恢复为 0，读回且 commit 清标成功才完成。权限不足时保留标记，并可用 ADB、系统设置或显式 Shizuku 救援入口。禁止自动写 1、更改无障碍列表或申请 HOME。 [Android 旧数据恢复](README.md#首次部署并跑通一个-bot)
 
-## 构建先决条件
+## 构建环境与命令
 
-- **JDK 21**（`JAVA_HOME` 必须指向 JDK 21）
-- **Android SDK Platform 36**（`ANDROID_HOME` 未设置时使用 `$env:LOCALAPPDATA\Android\Sdk`）
-- **NDK 28.2.13676358、CMake 3.22.1**（构建 node_launcher）
-- **Node ≥ 22.19**（通过 mise 选择运行时）
-- **Rust 1.99.1**（rust-toolchain.toml）；Android 编译需对应 aarch64-linux-android / x86_64-linux-android target
-- Gradle 8.14.3 通过仓库内 `gradlew.bat` 自动下载
-- 首次构建需下载 Gradle 发行包、构建依赖和 sherpa-onnx 模型，并接受 SDK 许可
+使用 CI 的 **Node.js 26.13.0**，可用 `mise exec node@26.13.0 -- <命令>`。Rust **1.99.1** 由 `rust-toolchain.toml` 固定。桌面构建先装根目录与 `host-core` npm 依赖，中心镜像由 `scripts/center-build.sh` 构建。 [源码构建](README.md#从源码构建) · [桌面依赖](desktop/README.md#构建)
 
-## 构建命令
+Android 使用 **JDK 21**、**Platform 36**、**Build-Tools 36.0.0**、**NDK 28.2.13676358**、**CMake 3.22.1** 和对应 Rust target。`JAVA_HOME` 指向 JDK 21，`ANDROID_HOME` 指向 SDK（Windows 的默认路径为 `$env:LOCALAPPDATA\Android\Sdk`）。使用 Gradle wrapper **8.14.3**。
 
-后台构建统一加上 `--no-daemon --console=plain`，避免 Gradle Daemon 影响后台工具结束判定。通过 PowerShell 包装构建命令时，末尾加上 `exit $LASTEXITCODE`，将 Gradle 退出码传给后台工具。
+全新工作区先接受 SDK 许可、按锁文件安装 npm 依赖并运行 `scripts/prepare-node-mobile.ps1`，再用 Gradle 构建。Android 的宿主构建工具 Node.js 与 APK 内 Node Mobile 分别固定版本。 [Android 完整命令](mobile/README.md#构建与先决条件)
 
-```powershell
-# 环境变量
-$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
-$env:JAVA_HOME = "$env:ProgramFiles\Microsoft\jdk-21.0.9.10-hotspot"
-
-mise exec node@22.19.0 -- npm ci
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-rustup target add --toolchain 1.99.1 aarch64-linux-android x86_64-linux-android
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-# Gradle 自动准备固定 Pi、Host、Tauri 前端和原生资源；模拟器加 -PlauncherAbis=x86_64
-mise exec node@22.19.0 -- .\gradlew.bat :app:assembleDebug --no-daemon --console=plain
-exit $LASTEXITCODE
-```
-
-成功构建的调试 APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。
+后台 Gradle 命令统一加 `--no-daemon --console=plain`。通过 PowerShell 包装构建时，用 `exit $LASTEXITCODE` 传递最后一条外部命令的退出码。
 
 ## 按变更范围选择验证
 
 | 改动范围 | 最小验证 |
 | --- | --- |
-| 纯 Java 逻辑（Agent、历史、搜索） | `scripts/verify.ps1` 中的纯 Java 检查会覆盖 |
-| Android 业务逻辑 | `.\gradlew.bat :app:testDebugUnitTest --no-daemon --console=plain`（Robolectric） |
-| 前端 TypeScript/React | `npm test`（Node 行为测试）和 `npm run build`（tsc + vite） |
-| pi-runtime JS | `npm --prefix pi-runtime test` |
-| Shower 服务端 | `.\gradlew.bat :shower-server:lintDebug --no-daemon --console=plain` |
-| 定时任务 UI | `node scripts/check-schedules.mjs`（浏览器检查，不需要设备） |
-| Android 完整检查 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1` |
+| 共享前端 / Host / Center 行为 | 安装根、`host-core`、`center-server` 依赖后运行 `npm test`，前端变更再运行 `npm run build` |
+| 中心管理页 | `npm ci --prefix center-web` 后运行 `npm run center:build` |
+| 桌面专有前端 | `npx tsc -p desktop/web/tsconfig.json --noEmit` |
+| Android Java 业务逻辑 | `./gradlew :app:testDebugUnitTest --no-daemon --console=plain` |
+| Android 打包与静态检查 | `./gradlew :app:assembleDebug :app:lintDebug --no-daemon --console=plain` |
+| Shower 服务端 | `./gradlew :shower-server:lintDebug --no-daemon --console=plain` |
+| 发布版本一致性 | `node scripts/release-check.mjs` |
 
-`scripts/verify.ps1` 执行纯 Java 断言检查、`:app:testDebugUnitTest :app:assembleDebug :app:lintDebug :shower-server:lintDebug`、APK 运行时资源检查、Shower 单 dex 与必需类检查、旧引用、HOME/桌面残留、Widget 注册/XML 检查和空白/行尾风格检查。可用 `-StaticOnly` 或 `-JavaOnly` 单独执行轻量检查。它不运行根目录的 `npm test`、`npm --prefix pi-runtime test`、浏览器交互检查或设备检查；涉及这些范围时按表补充。
+Windows 使用 `.\gradlew.bat`。调试 APK 输出至 `app/build/outputs/apk/debug/app-debug.apk`。模拟器选 `-PlauncherAbis=x86_64`。APK 的设备验收需用同签名安装包和独立测试设备或模拟器。
 
 ## 设备验证与自动测试的界限
 
-- 纯 Java 检查和 Robolectric 测试覆盖逻辑正确性，不能证明真实桌面 Widget 呈现、MotionEvent 或虚拟屏行为。
-- Instrumentation 编译用 `:app:assembleDebugAndroidTest`。`ChatStoreChecks` 提供 `widget`、`questionnaire`、`notifications`、`share-intake`、`share-ui`、`voice-continuity`、`search-consistency` 等检查；`shower-preview`/`workbench` 还需 Shizuku。实际运行需要安装应用及测试 APK 的设备或模拟器，编译不等于已运行。
-- 截图检查必须传 `-e artifactDir <设备绝对可写目录>`；拉取到电脑时放仓库外。`workbench` 的控制/回答文件也使用此目录。
-- Widget 点击/系统恢复、Shower 画面、定时任务后台执行、朗读等功能的最终验收必须在真机上进行，不能仅凭构建通过判定。
-- ADB 触摸注入不等于真实手指验收；`input keyevent` 仅证明按键路径。
+- JUnit、Robolectric 与 Gradle 构建覆盖各自的代码或产物，设备交互需在对应设备单独验收。
+- Android 系统导航恢复、通知点击、Shower 画面与触摸、后台任务和语音最终验收需要真机。ADB `input keyevent` 可验证按键分发，手指交互由真机实测。
+- 历史设备验收按原记录的版本、环境与功能范围理解。当前验证入口以上表为准。 [Android 历史验收](mobile/README.md#验证边界父助手限定范围)
 
 ## 临时文件与密钥
 

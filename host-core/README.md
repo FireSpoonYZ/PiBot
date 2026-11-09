@@ -1,18 +1,16 @@
 # @e-launcher/host-core
 
-当前产品版本为 1.1.0，固定 Pi main 提交、中心单入口、更新维护门和本轮三端真实模型/安装验收见[发布进度](../docs/open-source-release-progress.md)。`Runtime.prepareUpdate({stopActive?})` 暂停新工作准入并返回真实活动量，`cancelUpdate()` 恢复；仅经认证本机 `/v1/service/update` 暴露，不加入远程或模型工具方法表。以下模块计数和验收数字保留原提交的历史范围，不作为当前完整发行验收。
+本仓库以根 `package.json` 记录产品版本。Host 的 Pi SDK 采用 `host-core/package-lock.json` 固定的正式 npm 版本，CI 使用 Node.js 26.13.0。`Runtime.prepareUpdate({stopActive?})` 暂停新工作准入并返回真实活动量，`cancelUpdate()` 恢复。维护入口仅在认证的本机 `/v1/service/update` 上暴露。下文的模块计数、环境与验收数字保留历史范围，当前构建和设备诊断以快速入门为准。 [源码构建](../README.md#从源码构建) · [诊断](../docs/center-linux-deployment.md#按层定位故障)
 
-本机 Bot/Host 核心。模块 1 提供 Bot 定义与主私聊身份登记；模块 2 接入 Pi Durable 长期主私聊、历史与执行恢复；模块 3 通过中心受管插件提供 Billion Context；模块 4 接入本机工具（read/write/edit/bash 与 grep/find/ls）；模块 5 接入本机长驻控制 API 与客户端；模块 6 接入 Bot 主私聊直播预览（认证本地 SSE、运行时 watch、客户端与 CLI）；模块 7 接入本机持久消息账本（messages.sqlite：作用域/成员修订、不可变信封、outbox、落地去重 ACK、本地收件/历史/缺口、特权离线 CLI）；模块 8 接入认证设备中继与 Host 消息投递（中心只存设备注册；复用模块 7 outbox，本机进程网络端到端）；模块 9 在认证中继上增加固定 10 个 JSON 方法的远程 Host 控制（独立多客户端角色、Node 客户端与一次性 CLI；父助手已完成本机独立进程 171/171 个端到端检查点验收，范围见下文）；模块 10 已完成群与 Bot DM 的独立工作上下文（显式被动导入、独立 Durable/BC、本机 API/CLI；父助手完成 149/149 个检查点，实测范围与限制见下文）。模块 11 已完成自然群聊决策与 Bot 通信工具（父助手完成 161/161 个端到端检查点，含 18 份数据库完整性/外键检查；限定环境与未实测范围见下文）。模块 12（成员范围管理与历史补齐）已完成父助手限定范围验收：实际运行 122/122 个检查点通过，总完成数 **12/20**。模块 13（Hindsight → Pi Durable 可追溯长期记忆）已完成 Host 侧适配及限定范围验收，总完成数 **13/20**。模块 14（统一 Host 服务与设备接入）已完成父助手限定范围验收（139/139 检查点，范围见下文），总完成数 **14/20**。模块 15（Android 本机 Host）已交付并获父助手验收，总完成数 **15/20**；模块 16–20 共 5 个待交付。运行时由单 Host 所有者持有，跨进程身份稳定。包正式名为 `@e-launcher/host-core`；当前仓库尚无 workspace/包安装连接，示例直接从仓库根导入本地文件（见下文）。
-
-整体方向见 [下一代多端 Bot 架构设计](../docs/next-generation-architecture.md)（目标架构，部分已实现），交付计划与完成/剩余模块见 [重构路线图](../docs/refactor-roadmap.md)。
+Host 负责 Bot 登记、会话执行与本机工具，客户端 broker 负责连接与观察。中心下发配置及能力部署计划。模块历史和分项验收见后文。 [产品架构](../README.md)
 
 ## 实现与边界
 
-- 需要 Node >= 22.19.0（package.json 中 `engines.node` 声明的最低版本）。存储用 Node 内置 SQLite（`node:sqlite`），数据库文件即 `dataRoot/host.sqlite`；新的 dataRoot 会自动建立（含必要的目录与库文件）。
-- `openHost` 负责登记；`openRuntime` 负责 Pi Durable 主私聊、内嵌 BC 及本机工具。模块 5/6 提供认证本地 HTTP/SSE，模块 7 提供本机持久消息账本，模块 8/9 接入认证中继、投递与远程 JSON 控制。模块 10 在同一 Runtime 内增加隔离的群/DM 被动工作上下文，不新增运行时所有者；模块 11 在此基础上接入显式 `Runtime.resume()` 激活的自动决策、通信工具和逐 scope 停止/恢复，已完成父助手的限定范围验收。模块 12 在消息账本上增加受控元数据修订（create/update authority+CAS+请求去重）、副本历史查询/导入、自源恢复与 scopeProtocol:1 业务帧链，并为用户消息增加六个本机 HTTP/客户端/CLI 入口（父助手已完成 122/122 检查点限定范围验收，范围见下文）。
+- Host 源码包声明的 Node.js 最低版本为 24.22.2，构建与开发使用 CI 的 26.13.0。存储用 Node 内置 SQLite（`node:sqlite`），登记数据库为 `dataRoot/host.sqlite`。新数据目录及库文件由 Host 建立。
+- `openHost` 负责登记，`openRuntime` 负责 Pi Durable 会话、受管能力与本机工具。本机客户端使用认证 HTTP/SSE，远端客户端通过设备中继访问固定控制接口。群聊与 Bot 私聊使用独立工作上下文。
 - 写入由 SQLite 事务保护，重复请求重试安全。
 - `host.sqlite` 仍只保存登记数据，Durable 使用独立的 `durable.sqlite`；`runtime-owner.sqlite` 的 SQLite 事务锁保证单进程所有权。
-- SQLite 宿主适配尚未在 Android 验证；旧运行链路未被替换。
+- Android 使用 APK 内的 Node Mobile 运行 Host。设备验证按对应平台文档的版本和范围理解。 [Android 客户端](../mobile/README.md)
 - dataRoot（数据库/记录）与 cwd（工具默认工作目录）分离：不 `process.chdir`；工具在 Bot Host 中运行，以 cwd 为默认工作目录，write/edit 会写入该目录。
 
 ## 数据
@@ -153,13 +151,7 @@ node host-core/cli.js list --data-root '/path/to/data-root'
 
 ## 模块 2：Durable 长期主私聊
 
-依赖为固定上游 main SHA（`scripts/pi-main.json`）构建的 `@earendil-works/pi-durable`、`pi-ai`、`chord`、`pi-codemode`、`pi-mcp`、`pi-telemetry` 六包 `build/pi-main/*.tgz`（file: 依赖）。先在仓库根生成 tgz，再安装：
-
-```bash
-npm run prepare:pi-main   # 构建固定 SHA 的六包到 build/pi-main/（幂等，可用 --source-dir 指向同 SHA 干净 git checkout）
-npm --prefix host-core install --ignore-scripts --no-audit --no-fund   # file: 依赖首次生成 lock（ci 不生成新 lock）
-# 已有 lock 后复现：npm --prefix host-core ci --ignore-scripts --no-audit --no-fund
-```
+当前依赖固定为 Pi SDK 正式 npm 版本。从仓库根运行 `npm ci --prefix host-core`，按锁文件安装。
 
 模块 1 的同步 API、创建幂等语义和 `host.sqlite` schema v1 均保留。Bot 的公开主私聊 UUID 与 Durable 内部数字会话 ID 在同一 Durable commit 中建立映射；不是把旧 SDK 的 Session 或运行检查点直接导入。
 
@@ -1329,20 +1321,7 @@ Host 运行数据在独立 `files/bot-host`（含 `bot-host/workspaces`）；模
 
 ### 构建与前提
 
-JDK 21、SDK Platform 36、NDK 28.2.13676358、CMake 3.22.1、Node ≥ 22.19，另需 Rust cargo/rustup 与 `aarch64-linux-android`、`x86_64-linux-android` 目标。app/build.gradle 自动 prepare Android Host 资源（prepareHostTools/buildHostRuntime 挂 preBuild，构建 Host 运行时并生成 jniLibs 工具）。
-
-在 Git Bash 中使用 `./gradlew`（可先按需 export 环境变量）：
-
-```bash
-# 默认 arm64-v8a：
-export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"
-export JAVA_HOME="/c/Program Files/Microsoft/jdk-21.0.9.10-hotspot"
-./gradlew :app:assembleDebug --no-daemon --console=plain
-# APK：app/build/outputs/apk/debug/app-debug.apk
-
-# 模拟器 x86_64（app + instrumentation）：
-./gradlew :app:assembleDebug :app:assembleDebugAndroidTest -PlauncherAbis=x86_64 --no-daemon --console=plain
-```
+当前 Android Host 随 APK 构建。先按平台文档安装构建依赖、npm 包和 Node Mobile，再运行 Gradle wrapper。`prepareHostTools` 与 `buildHostRuntime` 挂在 `preBuild` 上。 [Android 完整构建命令](../mobile/README.md#构建与先决条件)
 
 Android 搜索工具（rg/fd）固定 API 29，不改变 App minSdk33。NDK/16KiB rg15.1.0 fd10.3.0（x86_64、arm64-v8a）固定 crate SHA 与锁定 Cargo 隔离环境；真实 untrusted_app 7/7 文件工具通过（含 grep/find）；私有祖先 Cargo 配置被拒，迁移 pins 后 4/4 缓存复验；许可见 THIRD_PARTY_NOTICES.md。
 
@@ -1471,7 +1450,7 @@ Node Mobile 24.18.0 内嵌 icu_small（ICU 78.3）缺分词数据，Intl.Segment
 
 ### 构建接线
 
-- `host-core/build-mobile.js`：`--sdk-path` 只用 cargo metadata 解析 `tauri 2.12.5` 的 `mobile/android` 并写 `mobile/build/tauri-sdk.gradle`；该片段是生成物且被忽略，缺失时 `settings.gradle` 在配置阶段用 `providers.exec` 同步跑它后再 apply（plain Gradle / CI / `scripts/verify.ps1` 共用，手动先跑仍可用于排查；`cargo metadata` 只需 Cargo，编译 cdylib 的 ABI 构建才需 `rustup target` 与 NDK；node/cargo 无法启动时 Gradle 直接报 Exec 失败，否则跑完仍缺片段才报带退出码的 missing 错误；不猜 registry 路径、不刷新 lock）。默认模式构建 `mobile/build/web`、按 launcherAbis 用 NDK 显式参数交叉编译 `libe_launcher_mobile.so`（`CARGO_ENCODED_RUSTFLAGS` 传 target/sysroot/16 KiB 页对齐，并校验 ELF `PT_LOAD` 对齐）、把 wry/tauri 生成的 Kotlin 落到 `app/build/generated/source/tauri`，再按实际 ABI 的 cargo 图把完整 Rust 通知合并写入 Gradle assets 源根 `app/build/generated/assets/tauri/THIRD_PARTY_NOTICES.txt`（打进 APK 后的 asset 路径为根目录 `THIRD_PARTY_NOTICES.txt`，不在 `tauri/` 子目录）。
+- `host-core/build-mobile.js --sdk-path` 使用 Cargo 依赖图生成 SDK include。本地 Gradle 与 CI 都在片段缺失时运行该命令。正常构建按所选 ABI 用 NDK 交叉编译并检查 16 KiB ELF 对齐，同时生成 Kotlin、Web 资源与完整的 Rust 依赖许可。 [Android 构建接线](../mobile/README.md#构建与先决条件)
 - **依赖法务资源**：`app/build.gradle` 的 `android.packaging.resources` 仅从 AGP 默认排除集中移除 8 个路径（`/META-INF/LICENSE`、`/META-INF/LICENSE.txt`、`/META-INF/NOTICE`、`/META-INF/NOTICE.txt`、`/LICENSE`、`/LICENSE.txt`、`/NOTICE`、`/NOTICE.txt`），并用标准 `merges` 合并同名文件；签名/MANIFEST 等默认排除与 `jniLibs.useLegacyPackaging` 不变，不用 `pickFirst`、不手拼替代文本。已限定验收：删掉生成片段后双 ABI `assembleDebug`+`assembleDebugAndroidTest` exit 0、片段自动重建且字节一致；新 APK 相对上一验收包仅多 `META-INF/LICENSE`、`META-INF/LICENSE.txt`、`META-INF/NOTICE` 三个条目，全部原条目（DEX/.so/assets/res）按相同 ZIP 顺序单次解压 SHA256 完全一致；4 个 Jackson 2.15.3 依赖的 `META-INF/LICENSE`/`NOTICE` 共 8 项均含于合并文本；zipalign `-P16` 与原签名通过。APK 工作流已加 Rust stable + 双 target 准备，但**远端 GitHub Actions 仍未实际运行**。
 - `CARGO_LICENSE_FALLBACKS`（`build-desktop.js`，Android 同样复用）只对精确 `package@version` + 声明串生效：Android 图会命中既有的 `alloc-stdlib@0.3.0`、`selectors@0.38.0` 等桌面期映射，以及 M18 新增的 `jni-sys-macros@0.4.1`、`ndk-context@0.1.1`、`ndk@0.9.0`、`ndk-sys@0.6.0+11769913`（均 MIT OR Apache-2.0，文本见 `licenses/android/` 或 `licenses/desktop/`）。只有确实缺失且无精确映射的 license 才硬失败。
 

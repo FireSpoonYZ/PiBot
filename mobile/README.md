@@ -1,8 +1,8 @@
 # Tauri Android 客户端（`mobile/`）
 
-## 当前源码与 Android 运行时（2026-11-07）
+## 当前源码与 Android 运行时
 
-当前源码版本为 `0.0.3`、Android versionCode 为 `9`；正式 0.0.2 使用 `7`，升级继续沿用同一正式签名。
+产品版本以仓库根 `package.json` 为准，Android 安装序号 `android.versionCode` 见 `gradle.properties`。正式覆盖升级沿用同一签名及递增的 versionCode。 [发布说明](../docs/releasing.md)
 
 Node Mobile `24.18.0-0` 使用 small ICU 78。Android 构建从 Unicode 官方下载并校验 ICU `78.3` 数据，将 `icudt78l.dat` 放入现有校验过的 Host 资产目录，启动 Host 与客户端 Node 子进程时设置 `NODE_ICU_DATA`。这为 Pi 工具搜索提供完整分词数据，避免缺少数据时 `Intl.Segmenter` 导致进程崩溃（[Node #51752](https://github.com/nodejs/node/issues/51752)）。首次构建需要下载约 12.8 MB；归档缓存在 `app/build/host-native-tools/downloads/`，许可随 APK 打包。更新 Node Mobile 时须同时核对 `host-core/build-android.js` 中的 ICU 主版本与归档校验值。
 
@@ -14,7 +14,7 @@ Node Mobile `24.18.0-0` 使用 small ICU 78。Android 构建从 Unicode 官方�
 
 首次配对先在原生私有存储保存固定 ID 与待确认令牌；同 ID/同令牌可幂等重试，显式 force 才旋转凭据。中心使用单 HTTPS/WSS origin。Rust 工具链固定为 `1.99.1`；普通开发使用标准本地 debug key，覆盖旧开发包需显式指定原 key，正式 APK 使用独立受保护签名配置。
 
-以下模块说明与历史记录保留原提交和范围；当前源码版本以上方说明为准。
+以下模块说明与验收记录保留原提交和范围。首次安装与排查以当前的快速入门和构建段落为准。 [首次部署](../README.md#首次部署并跑通一个-bot) · [构建](#构建与先决条件)
 
 
 M18（Tauri Android 外壳）已交付并获父助手限定范围验收，交付时为 **18/20**（本期交付范围为原 20 模块中的 19 个，M19 按用户决定移出本期、编号保留）；M20（跨设备集成、打包与真机验收）进行中，本期当前 **18/19**：M19（Windows/Linux TUI）本期不交付，其未验收代码只在 git stash `02f1396fda08d1b666ca83597ebbcea805c74d28`（仅未来草稿，本期不恢复，保留草稿，不计完成），TUI 界面/终端快捷键验收不再是 M20 完成条件；已交付 **M20-01 手机远端入口 + 限定范围跨设备联调**，并在 REDMI K80 真机完成限定运行验证（首次安装 + 覆盖重装，见「验证边界」），但 M20 并未整体完成。本目录只提供 Android 手机侧可见界面：默认是本机 Host，“其他设备”页是同一份桌面客户端实现跑在手机原生桥上（见下节）；不替代本机 Host，也不含桌面 GUI 安装包（见 [`desktop/`](../desktop/README.md)）。
@@ -128,22 +128,35 @@ displayName,hostConfigured,connectionRequested,warnings?}`，不返回 token）�
 
 麦克风权限由插件 `@TauriPlugin` 声明，Kotlin 侧在 `startVoice` 前检查真实前台与权限，权限回调按 generation 归属；语音沿用默认进程 Host 的既有“冻结 botId/requestId 只提交一次”语义与事件形状，重复/迟到回调不会串到新捕获。debug 构建开启 WebView 检查，release 保持关闭，未放松 CSP/Origin/TLS。
 
-## 构建与先决条件（Windows PowerShell）
+## 构建与先决条件
 
-JDK 21、Android SDK Platform 36、NDK `28.2.13676358`、AGP 8.13.0 / Gradle 8.14.3、Kotlin 2.3.20、Node **≥ 22.19**，以及 Rust：SDK 引导的 `cargo metadata` 只需要 Cargo（不需要 Android target 或 NDK）；真正编译 `libe_launcher_mobile.so` 的 ABI 构建才需要相应 `rustup target add aarch64-linux-android x86_64-linux-android` 与 NDK。
+与 Android CI 对齐，使用 Node.js **26.13.0**、JDK **21**、SDK Platform **36**、Build-Tools **36.0.0**、NDK **28.2.13676358**、CMake **3.22.1** 和 Rust **1.99.1**。Gradle **8.14.3** 由 wrapper 下载。通过 SDK Manager 安装对应包并接受许可，将 Node 加入 PATH，`JAVA_HOME` 指向 JDK 21，`ANDROID_HOME` 指向 SDK。 [Android CI](../.github/workflows/apk.yml)
+
+从仓库根运行以下 Windows PowerShell 命令。Node Mobile 准备脚本下载、校验并解包 APK 用的 `libnode.so` 与头文件。
 
 ```powershell
+$ErrorActionPreference = 'Stop'
+if (-not $env:ANDROID_HOME) { $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk" }
+
 npm ci
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-node host-core/build-mobile.js --sdk-path    # 可选：提前生成 SDK include 片段（settings 阶段缺失时也会自动生成）
+npm ci --prefix host-core
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-.\gradlew.bat :app:assembleDebug --no-daemon --console=plain   # 默认 arm64-v8a
+npm ci --prefix center-server
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+rustup target add --toolchain 1.99.1 aarch64-linux-android x86_64-linux-android
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+& .\scripts\prepare-node-mobile.ps1
+.\gradlew.bat :app:assembleDebug --no-daemon --console=plain
 exit $LASTEXITCODE
 ```
 
-按需选 ABI：把同一条命令换成 `-PlauncherAbis=x86_64`（模拟器）或 `-PlauncherAbis=arm64-v8a,x86_64`（一个 APK 同时含两种 ABI），不需要连续构建多次。`:app:assembleDebug` 依赖的 `buildMobileUi` 已包含界面前端构建；只改前端想看产物时单独跑 `npm run mobile:web`（tsc + vite → `mobile/build/web`）。
+Linux 使用相同 SDK 与 npm/Rust 准备步骤。运行 `pwsh -NoProfile -File scripts/prepare-node-mobile.ps1` 后执行 `./gradlew :app:assembleDebug --no-daemon --console=plain`。
 
-- SDK include 片段 `mobile/build/tauri-sdk.gradle` 是生成物且被忽略：`settings.gradle` 在它缺失时会在配置阶段用 `providers.exec`（`workingDir = rootDir`、显式 argv、不过 shell）同步执行 `node host-core/build-mobile.js --sdk-path`，成功生成后才 `apply`。这同时覆盖 plain Gradle、CI 与 `scripts/verify.ps1`，不需要改任何调用方。手动先跑 `node host-core/build-mobile.js --sdk-path` 仍然有用（可提前定位问题），但不是必需。
+默认 ABI 为 `arm64-v8a`。模拟器构建加 `-PlauncherAbis=x86_64`，双 ABI 包加 `-PlauncherAbis=arm64-v8a,x86_64`。调试 APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。仅构建前端可用 `npm run mobile:web`，产物位于 `mobile/build/web`。
+
+- `mobile/build/tauri-sdk.gradle` 是生成的 SDK include 片段。片段缺失时，`settings.gradle` 在配置阶段先执行 `node host-core/build-mobile.js --sdk-path`，成功后再载入。本地 Gradle 与 CI 共用这一步。也可以先手动执行该命令排查 SDK 路径。
 - 如果 helper 跑完后片段仍不存在（例如 Cargo 不可用或 `mobile/src-tauri` 的 Cargo 图解析失败），Gradle 会抛带退出码与修复指引的 `GradleException`。注意：`node`/`cargo` 本身无法启动时，`providers.exec` 会直接以 Gradle 的 Exec 失败报错，不会进入这个自定义分支；两者都是真实构建错误，不会猜 cargo registry 目录，也不做 lock 刷新回退。
 - `:app:assembleDebug` 依赖 `buildMobileUi`，它执行 `node host-core/build-mobile.js --abis <launcherAbis> --ndk <sdk>/ndk/28.2.13676358`：构建 release 版 Rust cdylib、用 NDK clang 显式参数交叉编译并校验 16 KiB ELF 对齐、把 wry/tauri 生成的 Kotlin 写入 `app/build/generated/source/tauri`、把 `.so` 放到 `app/build/generated/jniLibs/tauri/<abi>`，并把按实际构建 ABI 的 cargo 图生成的完整 Rust 通知写到 Gradle assets 源根 `app/build/generated/assets/tauri/THIRD_PARTY_NOTICES.txt`（APK 内 asset 路径是 `THIRD_PARTY_NOTICES.txt`，不是 `tauri/` 子目录）。
 - `gradle.properties` 固定 `org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8`（完整 APK + androidTest 构建实测需要）；未设 Gradle/Cargo 并行上限；Kotlin 数据用 KGP 默认 `.kotlin/`（已忽略）。

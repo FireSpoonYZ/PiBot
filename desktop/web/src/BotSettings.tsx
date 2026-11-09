@@ -5,7 +5,7 @@
 // 因此旧草稿不会拿到未看过的远端 revision 去覆盖远端；不自动重放、不跨 Host 串数据。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CenterBotModelConfig, CenterModelSelection, CenterModelPicker } from '../../../host-core/desktop-client.js';
-import type { BotSoul } from '../../../host-core/index.js';
+import type { BotSoul, RemoteControlMethodMap } from '../../../host-core/index.js';
 import { toError } from './api';
 import { openCenterManagement } from './CenterGate';
 import { BotCapabilities } from './BotCapabilities';
@@ -13,6 +13,7 @@ import { BotSchedules } from './BotSchedules';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import { ModelPicker } from '../../../web/src/bot-settings/ModelPicker';
 import { VaultPanel, type VaultCall } from '../../../web/src/vault/VaultPanel';
+import { SkillReviewPanel, type SkillReviewCall } from '../../../web/src/learning/SkillReviewPanel';
 import './BotSettings.css';
 
 /** 与 Host 的公开上限一致（UTF-8 字节）。 */
@@ -38,12 +39,13 @@ const SOUL_SNIPPETS: { label: string; content: string }[] = [
   },
 ];
 
-type StudioTab = 'soul' | 'model' | 'capabilities' | 'schedules' | 'vault';
+type StudioTab = 'soul' | 'model' | 'capabilities' | 'skill-review' | 'schedules' | 'vault';
 
 const STUDIO_TABS: { id: StudioTab; label: string }[] = [
   { id: 'soul', label: '🎭 灵魂人设' },
   { id: 'model', label: '🤖 模型设置' },
   { id: 'capabilities', label: '🔌 插件与能力' },
+  { id: 'skill-review', label: '✨ Skill 审阅' },
   { id: 'schedules', label: '⏰ 定时任务' },
   { id: 'vault', label: '🔒 密码库' },
 ];
@@ -84,16 +86,22 @@ export function BotSettings({
   const online = api.transportConnected;
   const key = identity ? cacheKey(identity, botId) : '';
   const cached = key ? draftCache.get(key) : undefined;
-  const vaultIdentityKey = JSON.stringify([identity?.profileId, identity?.targetDeviceId, identity?.kind, identity?.generation]);
-  const callVault = useCallback<VaultCall>(input => {
+  const botPanelIdentityKey = JSON.stringify([identity?.profileId, identity?.targetDeviceId, identity?.kind, identity?.generation]);
+  const callBotPanel = useCallback(<M extends 'vaultControl' | 'reviewBotSkills',>(
+    method: M,
+    params: RemoteControlMethodMap[M]['params'],
+  ) => {
     const current = api.identity;
     if (!identity || !current || !api.transportConnected ||
       current.profileId !== identity.profileId || current.targetDeviceId !== identity.targetDeviceId ||
       current.kind !== identity.kind || current.generation !== identity.generation) {
       return Promise.reject({ code: 'NOT_CONNECTED' });
     }
-    return api.call(identity, 'vaultControl', input);
+    return api.call(identity, method, params);
   }, [api, identity]);
+  const callVault = useCallback<VaultCall>(input => callBotPanel('vaultControl', input), [callBotPanel]);
+  const callSkillReview = useCallback<SkillReviewCall>(input =>
+    callBotPanel('reviewBotSkills', { botId, input }), [botId, callBotPanel]);
 
   const [soul, setSoul] = useState<BotSoul | null>(cached?.soul ?? null);
   const [soulDraft, setSoulDraft] = useState<string | null>(cached?.soulDraft ?? null);
@@ -683,9 +691,16 @@ export function BotSettings({
         </div>
       ) : null}
 
+      {studioTab === 'skill-review' ? (
+        <div className="studio-card bot-studio-card" role="tabpanel" aria-label="Skill 审阅">
+          <SkillReviewPanel key={botPanelIdentityKey + ':' + botId}
+            connected={online && !!identity} call={callSkillReview} />
+        </div>
+      ) : null}
+
       {studioTab === 'vault' ? (
         <div className="studio-card bot-studio-card" role="tabpanel" aria-label="密码库">
-          <VaultPanel identityKey={vaultIdentityKey} botId={botId} deviceId={identity?.targetDeviceId}
+          <VaultPanel identityKey={botPanelIdentityKey} botId={botId} deviceId={identity?.targetDeviceId}
             hostLabel={hostLabel} connected={online && !!identity} call={callVault} />
         </div>
       ) : null}

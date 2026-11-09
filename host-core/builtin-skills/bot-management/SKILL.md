@@ -1,6 +1,6 @@
 ---
 name: bot-management
-description: Manage e-launcher Bots across devices — identity, profile, SOUL, model, capabilities, Bot-owned managed skills (draft/publish/adopt), Hermes learning jobs, and capability package installations. Load when a request creates, configures, reviews, teaches, or operates on a Bot rather than doing the Bot's own task.
+description: Manage e-launcher Bots across devices — identity, profile, SOUL, model, capabilities, Bot-owned managed skills (draft/publish/adopt), Bot learning jobs, and capability package installations. Load when a request creates, configures, reviews, teaches, or operates on a Bot rather than doing the Bot's own task.
 ---
 
 # Bot management
@@ -22,5 +22,5 @@ Operate on Bots through the management tools — never by editing their files, d
 | --- | --- |
 | `references/bots.md` | Create, inspect, configure (profile/SOUL/model/capabilities), interrupt, archive, or delete a Bot |
 | `references/skills.md` | Read, draft, revise, pin/lock, publish, or adopt a Bot's managed skill — `manage_bot_skill` |
-| `references/learning.md` | Check, configure, start, follow, or cancel Hermes learning — `manage_bot_learning` |
+| `references/learning.md` | Check, configure, start, follow, or cancel Bot learning jobs — `manage_bot_learning` |
 | `references/installations.md` | Inspect, install, update, roll back, enable, or remove capability packages — `manage_bot_installation` |

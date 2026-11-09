@@ -84,7 +84,7 @@ import { isWebhookAttribution, MessageAttribution } from './MessageAttribution';
 import './bot-communications-mobile.css';
 import type { DesktopDraftEntry, DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../host-core/desktop-client.js';
-import type { BotBoardSnapshot, BotLiveState, ClearHistoryResult, CompactResult, DevicesDirectoryItem, PendingCursor, PendingListPage, ScopeInfo, ShowerTarget } from '../../host-core/index.js';
+import type { BotBoardSnapshot, BotLiveState, ClearHistoryResult, CompactResult, DevicesDirectoryItem, PendingCursor, PendingListPage, RemoteControlMethodMap, ScopeInfo, ShowerTarget } from '../../host-core/index.js';
 import type { ShowerCall } from './ShowerPreview';
 import { Markdown } from './Markdown';
 import { BotScreenPanel } from './BotScreenPanel';
@@ -92,6 +92,7 @@ import { BotBoard } from './BotBoard';
 import { botBoardKey, useBotBoard, useMarkViewedBoardResult, type BotBoardTarget } from './useBotBoard';
 import { BotModelSheet, type BotSettingsTab } from './BotModelSheet';
 import { VaultPanel, type VaultCall } from './vault/VaultPanel';
+import { SkillReviewPanel, type SkillReviewCall } from './learning/SkillReviewPanel';
 import {
   GROK_AVATAR_PRESETS,
   GROK_COLOR_PALETTE,
@@ -400,6 +401,7 @@ export function HostPage({
   });
 
   const [vaultTargetKey, setVaultTargetKey] = useState<string | null>(null);
+  const [skillReviewTargetKey, setSkillReviewTargetKey] = useState<string | null>(null);
   const [modelTarget, setModelTarget] = useState<{ botKey: string; botId: string; center: string; identity: DesktopIdentity; api: DesktopPanelApi; tab: BotSettingsTab } | null>(null);
 
   const observeIdRef = useRef<string | undefined>(undefined);
@@ -3600,17 +3602,20 @@ ${newer}` : draftSnapshot;
   // 换主机/档案/设备/代/Bot 就换 key：旧画面与旧会话随卸载丢弃，不跨设备复用帧。
   const showerPreviewKey = `${showerHostKind ?? '-'}:${showerIdentity?.profileId ?? '-'}:${showerIdentity?.generation ?? '-'}:${showerIdentity?.targetDeviceId ?? '-'}:${showerBotId ?? '-'}:${showerHostKind === 'remote' ? showerRemoteReady : 'local'}`;
 
-  const vaultIdentityKey = JSON.stringify([activeCenter, activeBot?.key, activeBot?.deviceId,
+  const botPanelIdentityKey = JSON.stringify([activeCenter, activeBot?.key, activeBot?.deviceId,
     activeBot?.hostKind, showerIdentity?.profileId, showerIdentity?.generation, showerIdentity?.kind]);
-  const vaultConnected = Boolean(showerConnected &&
+  const botPanelConnected = Boolean(showerConnected &&
     (activeBot?.hostKind !== 'local' || activeBot.deviceId === localHost?.deviceId));
-  const callVault = useCallback<VaultCall>(input => {
-    if (!activeBot || !vaultConnected) return Promise.reject({ code: 'OFFLINE' });
+  const callBotPanel = useCallback(<M extends 'vaultControl' | 'reviewBotSkills',>(
+    method: M,
+    params: RemoteControlMethodMap[M]['params'],
+  ) => {
+    if (!activeBot || !botPanelConnected) return Promise.reject({ code: 'OFFLINE' });
     if (activeBot.hostKind === 'local') {
       if (localHostRef.current?.phase !== 'running' || localHostRef.current.deviceId !== activeBot.deviceId) {
         return Promise.reject({ code: 'OFFLINE' });
       }
-      return BotHost.call({ method: 'vaultControl', params: input }).then(envelope => envelope.result);
+      return BotHost.call({ method, params: params as Record<string, unknown> }).then(envelope => envelope.result);
     }
     const api = remoteClientRef.current?.api;
     const current = api?.identity;
@@ -3619,18 +3624,24 @@ ${newer}` : draftSnapshot;
       current.kind !== showerIdentity.kind) {
       return Promise.reject({ code: 'NOT_CONNECTED' });
     }
-    return api.call(showerIdentity, 'vaultControl', input);
-  }, [activeBot, vaultConnected, showerIdentity]);
+    return api.call(showerIdentity, method, params);
+  }, [activeBot, botPanelConnected, showerIdentity]);
+  const callVault = useCallback<VaultCall>(input => callBotPanel('vaultControl', input), [callBotPanel]);
+  const callSkillReview = useCallback<SkillReviewCall>(input => {
+    if (!activeBot) return Promise.reject({ code: 'NOT_CONNECTED' });
+    return callBotPanel('reviewBotSkills', { botId: activeBot.botId, input });
+  }, [activeBot, callBotPanel]);
   // 主密码只走当前目标的私有控制通道，不进入聊天提交或待发队列。
   const submitVaultUnlock = useCallback(
     (input: VaultUnlockSubmitPayload) => callVault({ action: 'respondUnlock', ...input }),
     [callVault],
   );
-  const toolScopeKey = JSON.stringify([vaultIdentityKey, activeBot?.primaryConversationId, vaultConnected]);
+  const toolScopeKey = JSON.stringify([botPanelIdentityKey, activeBot?.primaryConversationId, botPanelConnected]);
 
   useEffect(() => {
     setVaultTargetKey(null);
-  }, [screen, vaultIdentityKey]);
+    setSkillReviewTargetKey(null);
+  }, [screen, botPanelIdentityKey]);
 
   // @lane-hooks:settings
   // ---
@@ -4309,7 +4320,7 @@ ${newer}` : draftSnapshot;
                               tools={block.tools}
                               scopeKey={toolScopeKey}
                               active={isBotBusy}
-                              disabled={Boolean(activeBot?.archivedAt) || !vaultConnected}
+                              disabled={Boolean(activeBot?.archivedAt) || !botPanelConnected}
                               onSubmitQuestionnaire={submitQuestionnaire}
                               onSubmitVaultUnlock={submitVaultUnlock}
                               t={t}
@@ -4331,7 +4342,7 @@ ${newer}` : draftSnapshot;
                               tools={turn.tools}
                               scopeKey={toolScopeKey}
                               active={isBotBusy}
-                              disabled={Boolean(activeBot?.archivedAt) || !vaultConnected}
+                              disabled={Boolean(activeBot?.archivedAt) || !botPanelConnected}
                               onSubmitQuestionnaire={submitQuestionnaire}
                               onSubmitVaultUnlock={submitVaultUnlock}
                               t={t}
@@ -4833,7 +4844,18 @@ ${newer}` : draftSnapshot;
               <button
                 type="button"
                 className="grok-card-row"
-                onClick={() => setVaultTargetKey(vaultIdentityKey)}
+                onClick={() => setSkillReviewTargetKey(botPanelIdentityKey)}
+              >
+                <Sparkles size={20} className="grok-row-icon" />
+                <span className="grok-row-label">{t('Skill 审阅', 'Skill Review')}</span>
+                <span className="grok-row-value">{t('学习草稿', 'Learning drafts')}</span>
+                <ChevronRight size={18} className="grok-row-chevron" />
+              </button>
+
+              <button
+                type="button"
+                className="grok-card-row"
+                onClick={() => setVaultTargetKey(botPanelIdentityKey)}
               >
                 <LockKeyhole size={20} className="grok-row-icon" />
                 <span className="grok-row-label">{t('密码库', 'Password Vault')}</span>
@@ -6327,11 +6349,17 @@ ${newer}` : draftSnapshot;
         (screen === 'bot-profile' || (screen === 'bot-edit' && editMode === 'edit')) &&
         <BotModelSheet key={`${modelTarget.center}|${modelTarget.botKey}|${modelTarget.identity.generation}|${modelTarget.tab}`} api={modelTarget.api} identity={modelTarget.identity} botId={modelTarget.botId} initialTab={modelTarget.tab} onClose={() => setModelTarget(null)}/>}
 
-      {vaultTargetKey === vaultIdentityKey && activeBot && screen === 'bot-profile' ? (
+      {skillReviewTargetKey === botPanelIdentityKey && activeBot && screen === 'bot-profile' ? (
+        <SettingsSheet title={t('Skill 审阅', 'Skill Review')} onClose={() => setSkillReviewTargetKey(null)}>
+          <SkillReviewPanel key={botPanelIdentityKey} connected={botPanelConnected} call={callSkillReview} />
+        </SettingsSheet>
+      ) : null}
+
+      {vaultTargetKey === botPanelIdentityKey && activeBot && screen === 'bot-profile' ? (
         <SettingsSheet title={t('密码库', 'Password Vault')} onClose={() => setVaultTargetKey(null)}>
-          <VaultPanel identityKey={vaultIdentityKey} botId={activeBot.botId} deviceId={activeBot.deviceId}
+          <VaultPanel identityKey={botPanelIdentityKey} botId={activeBot.botId} deviceId={activeBot.deviceId}
             hostLabel={`${activeBot.hostLabel} (${activeBot.deviceId})`}
-            connected={vaultConnected} call={callVault} />
+            connected={botPanelConnected} call={callVault} />
         </SettingsSheet>
       ) : null}
 

@@ -61,7 +61,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
       // bot 管理端点同样透传有界类型码，REVISION_CONFLICT 等 CAS 失败不会丢成
       // BAD_RESPONSE。其他路径保持既有 CENTER_REQUEST_FAILED 语义及 ownerRequest 回退。
       const typedTurnError = path.startsWith('/api/host/turns/') ||
-        /^\/api\/host\/devices\/[^/]+\/bots\/[^/]+\/(skills|learning|installations)$/.test(path);
+        /^\/api\/host\/devices\/[^/]+\/bots\/[^/]+\/(skills|skill-reviews|learning|installations)$/.test(path);
       // /api/host/vault/* 只透传固定 VAULT_* 码/消息；其他错误仍走状态码兜底。
       const typedVaultError = path.startsWith('/api/host/vault/');
       let errorCode = null;
@@ -271,6 +271,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     // conflicts and service codes. No ownerRequest fallback — both route sets
     // ship together, so a missing endpoint is an honest CENTER_REQUEST_FAILED.
     botSkill: (targetDeviceId, botId, input, signal) => request(hostBotManagePath(targetDeviceId, botId, 'skills'), { method: 'POST', body: input, signal }),
+    botSkillReview: (botId, input) => request(hostBotManagePath(deviceId, botId, 'skill-reviews'), { method: 'POST', body: input }),
     botSkillUse: (targetDeviceId, botId, input, signal) => request('/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/skills/usage', { method: 'POST', body: input, signal }),
     botLearning: (targetDeviceId, botId, input, signal) => request(hostBotManagePath(targetDeviceId, botId, 'learning'), { method: 'POST', body: input, signal }),
     botInstallation: (targetDeviceId, botId, input, signal) => request(hostBotManagePath(targetDeviceId, botId, 'installations'), { method: 'POST', body: input, signal }),

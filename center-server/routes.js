@@ -415,6 +415,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return { deviceId, botId };
   };
   route('POST', '/api/devices/:deviceId/bots/:botId/skills', req => skills.execute({ ...botScope(req), origin: 'foreground' }, object(req.body)), true);
+  route('POST', '/api/devices/:deviceId/bots/:botId/skill-reviews', req => skills.review(botScope(req), object(req.body)), true);
   route('POST', '/api/devices/:deviceId/bots/:botId/learning', req => {
     const body = object(req.body);
     // Only the target Host may drive learning jobs; the owner may inspect,
@@ -526,6 +527,11 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return result;
   });
   host('POST', '/api/host/devices/:deviceId/bots/:botId/skills', req => skills.execute({ ...botScope(req), origin: 'foreground' }, object(req.body)));
+  host('POST', '/api/host/devices/:deviceId/bots/:botId/skill-reviews', req => {
+    const scope = botScope(req);
+    if (scope.deviceId !== req.centerDevice.deviceId) fail('FORBIDDEN', 'Device mismatch');
+    return skills.review(scope, object(req.body));
+  });
   host('POST', '/api/host/devices/:deviceId/bots/:botId/skills/usage', req => {
     const scope = botScope(req);
     if (scope.deviceId !== req.centerDevice.deviceId) fail('FORBIDDEN', 'Device mismatch');

@@ -59,7 +59,7 @@ export function validateScheduleSkills(value) {
   return value;
 }
 
-export function normalizeHermesSkillCall(name, args) {
+export function normalizeLearningSkillCall(name, args) {
   if (!isPlainObject(args)) throw invalid('args must be an object');
   if (name === 'referenced_skill_names') {
     rejectUnknownFields(args, new Set());

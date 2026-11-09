@@ -20,7 +20,7 @@ import {
   assertCanonicalUuid,
   assertPositiveRevision,
   normalizeScheduleTaskInput,
-  normalizeHermesSkillCall,
+  normalizeLearningSkillCall,
   validateScheduleTaskFields,
 } from './schedule-protocol.js';
 
@@ -189,12 +189,12 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
         }
         return result;
       },
-      async hermesSkillCall(bot, name, args = {}, { signal } = {}) {
+      async learningSkillCall(bot, name, args = {}, { signal } = {}) {
         signal?.throwIfAborted();
-        const normalized = normalizeHermesSkillCall(name, args);
+        const normalized = normalizeLearningSkillCall(name, args);
         const result = await nativeBridge({
           tool: 'schedule_task', actor: actorFor(bot), taskId: 1,
-          arguments: { action: 'hermesSkillCall', name, args: normalized },
+          arguments: { action: 'learningSkillCall', name, args: normalized },
         }, { signal });
         return name === 'referenced_skill_names' ? result.skills : result;
       },
@@ -991,10 +991,10 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
       }
     },
 
-    async hermesSkillCall(bot, name, args = {}, { signal } = {}) {
+    async learningSkillCall(bot, name, args = {}, { signal } = {}) {
       signal?.throwIfAborted();
       if (closed) throw messageError('NOT_CONNECTED', 'host is closing');
-      const { consolidated, pruned } = normalizeHermesSkillCall(name, args);
+      const { consolidated, pruned } = normalizeLearningSkillCall(name, args);
       return inTx((database) => {
         const st = loadFromDb(database);
         const tasks = st.tasks.filter(task => ownerOf(task).deviceId === host.deviceId && ownerOf(task).botId === bot.botId);
