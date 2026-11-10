@@ -4,7 +4,7 @@
 
 ## 版本模型
 
-- 根 `package.json` 的 `version`（当前 `0.0.12`）是唯一对外产品版本。
+- 根 `package.json` 的 `version`（当前 `0.0.13`）是唯一对外产品版本。
 - `desktop/src-tauri/tauri.conf.json`、`mobile/src-tauri/tauri.conf.json`、
   `mobile/src-tauri/Cargo.toml`、`desktop/src-tauri/Cargo.toml`、
   `desktop/host-launcher/Cargo.toml` 保存同一字面量；`app/build.gradle` 的
@@ -12,7 +12,7 @@
   Gradle 根即仓库根）。
 - `scripts/release-check.mjs` 核对全部上述字段 + `android.versionCode`
   为正整数；`--tag vX.Y.Z` 额外核对 tag 与产品版本一致。
-- Android `versionCode` 独立于产品版本（当前 `18`，正式 0.0.11 使用 `17`，正式 0.0.10 使用 `16`，正式 0.0.9 使用 `15`，正式 0.0.8 使用 `14`，正式 0.0.7 使用 `13`，正式 0.0.6 使用 `12`，正式 0.0.5 使用 `11`，正式 0.0.4 使用 `10`，正式 0.0.3 使用 `9`，首轮 0.0.3 候选使用 `8`，正式 0.0.2 使用 `7`），见
+- Android `versionCode` 独立于产品版本（当前 `19`，正式 0.0.12 使用 `18`，正式 0.0.11 使用 `17`，正式 0.0.10 使用 `16`，正式 0.0.9 使用 `15`，正式 0.0.8 使用 `14`，正式 0.0.7 使用 `13`，正式 0.0.6 使用 `12`，正式 0.0.5 使用 `11`，正式 0.0.4 使用 `10`，正式 0.0.3 使用 `9`，首轮 0.0.3 候选使用 `8`，正式 0.0.2 使用 `7`），见
   `gradle.properties` 的 `android.versionCode`，每个已分发 APK 单调递增、
   不复用、不回退。
 
