@@ -3,9 +3,9 @@
 // release artifact. Output shape (single object, not an array):
 //
 //   { "version": "1.1.0",
-//     "platform": "windows" | "linux" | "android",
+//     "platform": "windows" | "linux" | "macos" | "android",
 //     "arch": "x86_64" | "aarch64",
-//     "format": "nsis" | "deb" | "apk",
+//     "format": "nsis" | "deb" | "app" | "apk",
 //     "size": <bytes>,
 //     "sha256": "<hex>",
 //     "signature": "<contents of sibling .sig>",   // only when present
@@ -27,6 +27,7 @@ import { execFileSync } from 'node:child_process';
 import { createReadStream, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readAppBundleInfo } from '../center-server/app-bundle.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const arg = (n) => { const i = process.argv.indexOf('--' + n); return i === -1 ? undefined : process.argv[i + 1]; };
@@ -41,9 +42,11 @@ const file = arg('file');
 const versionCode = arg('version-code') ?? arg('versionCode');
 const out = arg('out');
 
-const PLATFORMS = new Set(['windows', 'linux', 'android']);
+const PLATFORMS = new Set(['windows', 'linux', 'macos', 'android']);
 const ARCHES = new Set(['x86_64', 'aarch64']);
-const FORMATS = new Set(['nsis', 'deb', 'apk']);
+// app = the macOS updater bundle (<Name>.app.tar.gz); the DMG is not imported.
+const FORMATS = new Set(['nsis', 'deb', 'app', 'apk']);
+const MACOS_BUNDLE = { name: 'PiBot.app', identifier: 'io.github.firespoonyz.pibot' };
 
 function usage(msg) {
   if (msg) console.error(msg);
@@ -53,11 +56,11 @@ function usage(msg) {
 if (!version || !commit || notes === undefined || !platform || !arch || !format || !file) {
   usage('missing required argument(s)');
 }
-if (!PLATFORMS.has(platform)) usage('platform must be windows|linux|android');
+if (!PLATFORMS.has(platform)) usage('platform must be windows|linux|macos|android');
 if (!ARCHES.has(arch)) usage('arch must be x86_64|aarch64');
-if (!FORMATS.has(format)) usage('format must be nsis|deb|apk');
+if (!FORMATS.has(format)) usage('format must be nsis|deb|app|apk');
 if (typeof notes !== 'string' || notes.trim() === '') usage('notes must be a non-empty string');
-const targets = { nsis: ['windows', 'x86_64'], deb: ['linux', 'x86_64'], apk: ['android', arch] };
+const targets = { nsis: ['windows', 'x86_64'], deb: ['linux', 'x86_64'], app: ['macos', 'aarch64'], apk: ['android', arch] };
 if (targets[format][0] !== platform || targets[format][1] !== arch) usage('unsupported platform/arch/format combination');
 if (format !== 'apk' && versionCode !== undefined) usage('version-code is only valid for APK');
 if (format === 'apk' && !/^[1-9]\d*$/.test(versionCode ?? '')) usage('APK requires version-code');
@@ -83,6 +86,10 @@ if (format === 'apk') {
   const fields = execFileSync('dpkg-deb', ['--field', abs], { encoding: 'utf8' });
   if (!/^Package: e-launcher-desktop$/m.test(fields) || !/^Architecture: amd64$/m.test(fields)
       || fields.match(/^Version: (.+)$/m)?.[1] !== version) usage('DEB identity/version does not match metadata');
+} else if (format === 'app') {
+  const info = await readAppBundleInfo(abs);
+  if (!info || info.bundleName !== MACOS_BUNDLE.name || info.identifier !== MACOS_BUNDLE.identifier
+      || info.version !== version) usage('macOS app bundle identity/version does not match metadata');
 }
 
 const sha256 = await new Promise((resolve, reject) => {

@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [develop, master]
   workflow_dispatch:
-  # Reusable: invoked by release.yml for v* tags (signed NSIS/DEB + updater sigs).
+  # Reusable: invoked by release.yml for v* tags (signed NSIS/DEB/macOS app + updater sigs).
   workflow_call:
     inputs:
       source-ref:
@@ -50,9 +50,22 @@ jobs:
           - os: windows-2022
             bundle: nsis
             artifact: desktop-windows
+            upload: desktop/build/target/release/bundle/
           - os: ubuntu-24.04
             bundle: deb
             artifact: desktop-linux
+            upload: desktop/build/target/release/bundle/
+          # Apple Silicon runner; ad-hoc signed (no Developer ID / notarization).
+          # Only the DMG and the updater bundle are uploaded: the raw PiBot.app
+          # tree carries node_modules files that the release job's single-match
+          # installer patterns must never see.
+          - os: macos-14
+            bundle: app,dmg
+            artifact: desktop-macos
+            upload: |
+              desktop/build/target/release/bundle/dmg/*.dmg
+              desktop/build/target/release/bundle/macos/*.app.tar.gz
+              desktop/build/target/release/bundle/macos/*.app.tar.gz.sig
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
@@ -122,6 +135,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}-${{ inputs.version || github.sha }}
-          path: desktop/build/target/release/bundle/
+          path: ${{ matrix.upload }}
           if-no-files-found: error
           retention-days: 30

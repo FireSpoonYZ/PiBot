@@ -153,6 +153,10 @@ jobs:
           }
           copy_installer "*.exe" "PiBot-$VERSION-windows-x64-setup.exe" yes
           copy_installer "e-launcher-desktop_*.deb" "PiBot-$VERSION-linux-amd64.deb" yes
+          # macOS: the DMG is the first-install download; the signed .app.tar.gz
+          # is the updater bundle imported into the center (format app).
+          copy_installer "*.dmg" "PiBot-$VERSION-macos-arm64.dmg" no
+          copy_installer "*.app.tar.gz" "PiBot-$VERSION-macos-arm64.app.tar.gz" yes
           copy_installer "*.apk" "PiBot-$VERSION-android-arm64.apk" no
           copy_installer "pibot-center_${VERSION}_amd64.deb" "PiBot-$VERSION-center-linux-amd64.deb" no
           copy_installer "pibot-center_${VERSION}_arm64.deb" "PiBot-$VERSION-center-linux-arm64.deb" no
@@ -163,7 +167,7 @@ jobs:
             grep -qx "Version: $VERSION" <<<"$fields"
             grep -qx "Architecture: $deb_arch" <<<"$fields"
           done
-          for spec in "windows x86_64 nsis windows-x64-setup.exe" "linux x86_64 deb linux-amd64.deb" "android aarch64 apk android-arm64.apk"; do
+          for spec in "windows x86_64 nsis windows-x64-setup.exe" "linux x86_64 deb linux-amd64.deb" "macos aarch64 app macos-arm64.app.tar.gz" "android aarch64 apk android-arm64.apk"; do
             read -r platform arch format suffix <<< "$spec"
             extra=()
             if [ "$format" = apk ]; then
@@ -202,6 +206,7 @@ jobs:
           ## PiBot $VERSION
           - Windows：下载 windows-x64-setup.exe
           - Ubuntu / Debian（桌面客户端）：下载 linux-amd64.deb
+          - macOS（Apple Silicon，macOS 13.5+）：下载 macos-arm64.dmg；未经 Apple 公证，首次打开需在“系统设置 › 隐私与安全性”中选择“仍要打开”
           - Android：下载 android-arm64.apk（Android 13+）
           - 中心（Docker）：\`$IMAGE:$VERSION\`（amd64 / arm64）
           - 中心（Ubuntu / Debian DEB）：下载 center-linux-amd64.deb 或 center-linux-arm64.deb
@@ -212,7 +217,7 @@ jobs:
           Pi SDK：1.5.0。桌面与中心 Node：26.13.0 LTS。
           Android 使用上游最新可下载 Node Mobile 24.18.0-0，尚未跟进 2026 年 10 月 Node 安全更新。
           Android 首发采用独立正式签名；旧开发签名安装请先导出需要的数据。
-          Windows 当前使用登录自启动任务，尚未提供无人登录的 SCM 服务。
+          Windows 当前使用登录自启动任务，尚未提供无人登录的 SCM 服务。macOS 同样仅在用户登录后运行 Host，暂不提供图形环境（Shower/Cua）。
 
           Source: $SOURCE_COMMIT
           EOF

@@ -15,6 +15,7 @@ import { SheetModal } from '../components/SheetModal';
 const COMBINATIONS: Record<ClientReleasePlatform, { arch: ClientReleaseArch; format: ClientReleaseFormat }[]> = {
   windows: [{ arch: 'x86_64', format: 'nsis' }],
   linux: [{ arch: 'x86_64', format: 'deb' }],
+  macos: [{ arch: 'aarch64', format: 'app' }],
   android: [
     { arch: 'aarch64', format: 'apk' },
     { arch: 'x86_64', format: 'apk' },
@@ -24,12 +25,14 @@ const COMBINATIONS: Record<ClientReleasePlatform, { arch: ClientReleaseArch; for
 const PLATFORM_LABEL: Record<ClientReleasePlatform, string> = {
   windows: 'Windows',
   linux: 'Linux',
+  macos: 'macOS',
   android: 'Android',
 };
 
 const FORMAT_LABEL: Record<ClientReleaseFormat, string> = {
   nsis: 'NSIS 安装包',
   deb: 'DEB 安装包',
+  app: 'macOS 更新包（.app.tar.gz）',
   apk: 'APK 安装包',
 };
 
@@ -75,9 +78,9 @@ async function readMetadataFile(file: File): Promise<ClientReleaseMetadata> {
   const raw = parsed as Record<string, unknown>;
   const meta = emptyMetadata();
   meta.version = typeof raw.version === 'string' ? raw.version : '';
-  if (!(['windows', 'linux', 'android'] as const).includes(raw.platform as ClientReleasePlatform) ||
+  if (!(['windows', 'linux', 'macos', 'android'] as const).includes(raw.platform as ClientReleasePlatform) ||
       !(['x86_64', 'aarch64'] as const).includes(raw.arch as ClientReleaseArch) ||
-      !(['nsis', 'deb', 'apk'] as const).includes(raw.format as ClientReleaseFormat)) {
+      !(['nsis', 'deb', 'app', 'apk'] as const).includes(raw.format as ClientReleaseFormat)) {
     throw new Error('元数据包含未知的平台、架构或安装格式');
   }
   meta.platform = raw.platform as ClientReleasePlatform;
