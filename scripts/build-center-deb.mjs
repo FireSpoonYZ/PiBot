@@ -12,6 +12,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -20,6 +21,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -206,9 +208,9 @@ function stageSharedPayload(workDir) {
   return appStage;
 }
 
-function buildDebForArch({ version, target, appStage, cacheDir, outDir }) {
+function buildDebForArch({ version, target, appStage, cacheDir, workDir, outDir }) {
   const { nodeBin, nodeLicense } = ensureNodeArchive(cacheDir, target);
-  const pkgRoot = path.join(outDir, `pkg-${target.debArch}`);
+  const pkgRoot = path.join(workDir, `pkg-${target.debArch}`);
   rmSync(pkgRoot, { recursive: true, force: true });
 
   const installRoot = path.join(pkgRoot, 'usr', 'lib', 'pibot-center');
@@ -522,32 +524,38 @@ async function main() {
     if (!NODE_ARCH_TARGETS[a]) throw new Error(`Unsupported --arch '${a}' (expected amd64 or arm64)`);
   }
 
-  const workDir = path.join(ROOT, 'build', 'center-deb-work');
+  // Place workDir outside repo 'build/' because prepare-builtin-plugins.mjs
+  // filters out any path containing a 'build' directory segment.
+  const workDir = mkdtempSync(path.join(os.tmpdir(), 'pibot-center-deb-'));
   const cacheDir = path.join(ROOT, 'build', 'center-deb-cache');
   const outDir = path.join(ROOT, 'build', 'center-deb');
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
 
-  const appStage = stageSharedPayload(workDir);
   const built = {};
-  for (const a of arches) {
-    built[a] = buildDebForArch({
-      version: pkgVersion,
-      target: NODE_ARCH_TARGETS[a],
-      appStage,
-      cacheDir,
-      outDir,
-    });
-  }
-
-  if (process.argv.includes('--smoke-test')) {
-    const hostDebArch = process.arch === 'arm64' ? 'arm64' : 'amd64';
-    if (built[hostDebArch]) {
-      await smokeTestDeb(built[hostDebArch], workDir);
+  try {
+    const appStage = stageSharedPayload(workDir);
+    for (const a of arches) {
+      built[a] = buildDebForArch({
+        version: pkgVersion,
+        target: NODE_ARCH_TARGETS[a],
+        appStage,
+        cacheDir,
+        workDir,
+        outDir,
+      });
     }
+
+    if (process.argv.includes('--smoke-test')) {
+      const hostDebArch = process.arch === 'arm64' ? 'arm64' : 'amd64';
+      if (built[hostDebArch]) {
+        await smokeTestDeb(built[hostDebArch], workDir);
+      }
+    }
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
   }
 
-  rmSync(workDir, { recursive: true, force: true });
   console.log('Built Center DEB package(s):', Object.values(built).join(', '));
 }
 
