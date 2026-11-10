@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+case "${1:-}" in
+  remove|purge)
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+      systemctl daemon-reload || :
+    fi
+    if [ "${1:-}" = "purge" ] && [ -d /var/lib/pibot-center ]; then
+      echo "pibot-center: preserving /var/lib/pibot-center (contains encryption keys and Center database)."
+    fi
+    ;;
+esac
+
+exit 0

@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+
+INSTALL_ROOT="/usr/lib/pibot-center"
+NODE_BIN="$INSTALL_ROOT/bin/node"
+CLI_JS="$INSTALL_ROOT/center-server/cli.js"
+ENV_FILE="/etc/pibot-center/center.env"
+
+export NODE_ENV="${NODE_ENV:-production}"
+export PATH="$INSTALL_ROOT/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+export CENTER_DATA_ROOT="${CENTER_DATA_ROOT:-/var/lib/pibot-center}"
+export CENTER_LISTEN_HOST="${CENTER_LISTEN_HOST:-127.0.0.1}"
+export CENTER_PORT="${CENTER_PORT:-8080}"
+export CENTER_WEB_ROOT="${CENTER_WEB_ROOT:-$INSTALL_ROOT/center-web/dist}"
+export PIBOT_BW_CLI="${PIBOT_BW_CLI:-$INSTALL_ROOT/bitwarden-cli/node_modules/@bitwarden/cli/build/bw.js}"
+
+cmd="${1:-serve}"
+case "$cmd" in
+  serve)
+    if [ -r "$ENV_FILE" ]; then
+      set -a
+      # shellcheck disable=SC1090
+      . "$ENV_FILE"
+      set +a
+    fi
+    exec "$NODE_BIN" "$CLI_JS"
+    ;;
+  password-hash)
+    exec "$NODE_BIN" "$CLI_JS" password-hash
+    ;;
+  status)
+    exec systemctl status pibot-center.service --no-pager
+    ;;
+  setup-token)
+    token_file="${CENTER_DATA_ROOT}/center-setup-token"
+    if [ -r "$token_file" ]; then
+      cat "$token_file"
+    else
+      echo "Setup token not readable or already completed ($token_file). Run with sudo if first-run setup is still active." >&2
+      exit 1
+    fi
+    ;;
+  -h|--help|help)
+    cat <<'EOF'
+Usage: pibot-center <command>
+
+Commands:
+  serve           Run the Center HTTP/WSS server in foreground (used by systemd)
+  password-hash   Read password from stdin and print scrypt owner password hash
+  status          Show systemd service status for pibot-center.service
+  setup-token     Print the first-run setup token (requires root / pibot-center)
+EOF
+    ;;
+  *)
+    echo "Unknown command: $cmd (try 'pibot-center --help')" >&2
+    exit 2
+    ;;
+esac

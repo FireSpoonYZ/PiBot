@@ -1,0 +1,29 @@
+[Unit]
+Description=PiBot Center Server and Relay
+Documentation=https://github.com/FireSpoonYZ/PiBot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pibot-center
+Group=pibot-center
+WorkingDirectory=/usr/lib/pibot-center
+Environment=NODE_ENV=production
+Environment=HOME=/var/lib/pibot-center
+Environment=PATH=/usr/lib/pibot-center/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=CENTER_DATA_ROOT=/var/lib/pibot-center
+Environment=CENTER_LISTEN_HOST=127.0.0.1
+Environment=CENTER_PORT=8080
+Environment=CENTER_WEB_ROOT=/usr/lib/pibot-center/center-web/dist
+Environment=PIBOT_BW_CLI=/usr/lib/pibot-center/bitwarden-cli/node_modules/@bitwarden/cli/build/bw.js
+EnvironmentFile=-/etc/pibot-center/center.env
+ExecStart=/usr/lib/pibot-center/bin/node /usr/lib/pibot-center/center-server/cli.js
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

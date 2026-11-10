@@ -145,15 +145,24 @@ jobs:
           set -euo pipefail
           mkdir release-out
           copy_installer() {
-            local ext="$1" name="$2"
-            mapfile -d '' files < <(find artifacts -type f -name "*.$ext" -print0)
-            [ "${#files[@]}" -eq 1 ] || { echo "Expected exactly one $ext installer"; exit 1; }
+            local pattern="$1" name="$2" signed="$3"
+            mapfile -d '' files < <(find artifacts -type f -name "$pattern" -print0)
+            [ "${#files[@]}" -eq 1 ] || { echo "Expected exactly one $pattern installer"; exit 1; }
             cp "${files[0]}" "release-out/$name"
-            if [ "$ext" != apk ]; then cp "${files[0]}.sig" "release-out/$name.sig"; fi
+            if [ "$signed" = yes ]; then cp "${files[0]}.sig" "release-out/$name.sig"; fi
           }
-          copy_installer exe "PiBot-$VERSION-windows-x64-setup.exe"
-          copy_installer deb "PiBot-$VERSION-linux-amd64.deb"
-          copy_installer apk "PiBot-$VERSION-android-arm64.apk"
+          copy_installer "*.exe" "PiBot-$VERSION-windows-x64-setup.exe" yes
+          copy_installer "e-launcher-desktop_*.deb" "PiBot-$VERSION-linux-amd64.deb" yes
+          copy_installer "*.apk" "PiBot-$VERSION-android-arm64.apk" no
+          copy_installer "pibot-center_${VERSION}_amd64.deb" "PiBot-$VERSION-center-linux-amd64.deb" no
+          copy_installer "pibot-center_${VERSION}_arm64.deb" "PiBot-$VERSION-center-linux-arm64.deb" no
+          for spec in "amd64 PiBot-$VERSION-center-linux-amd64.deb" "arm64 PiBot-$VERSION-center-linux-arm64.deb"; do
+            read -r deb_arch deb_name <<< "$spec"
+            fields=$(dpkg-deb --field "release-out/$deb_name")
+            grep -qx "Package: pibot-center" <<<"$fields"
+            grep -qx "Version: $VERSION" <<<"$fields"
+            grep -qx "Architecture: $deb_arch" <<<"$fields"
+          done
           for spec in "windows x86_64 nsis windows-x64-setup.exe" "linux x86_64 deb linux-amd64.deb" "android aarch64 apk android-arm64.apk"; do
             read -r platform arch format suffix <<< "$spec"
             extra=()
@@ -168,6 +177,8 @@ jobs:
           cp artifacts/center-image.json release-out/
           cp compose.yaml compose.https.yaml Caddyfile center.env.example release-out/
           sed -i "s/pibot-center:latest/pibot-center:$VERSION/" release-out/compose.yaml
+          git archive --format=tar.gz --prefix="PiBot-$VERSION/" -o "release-out/PiBot-$VERSION-source.tar.gz" "$SOURCE_COMMIT"
+          git archive --format=zip --prefix="PiBot-$VERSION/" -o "release-out/PiBot-$VERSION-source.zip" "$SOURCE_COMMIT"
           (cd release-out; sha256sum -- * > SHA256SUMS)
       - name: Upload candidate release assets
         if: inputs.candidate
@@ -190,11 +201,13 @@ jobs:
           cat > release-notes.md <<EOF
           ## PiBot $VERSION
           - Windows：下载 windows-x64-setup.exe
-          - Ubuntu / Debian：下载 linux-amd64.deb
+          - Ubuntu / Debian（桌面客户端）：下载 linux-amd64.deb
           - Android：下载 android-arm64.apk（Android 13+）
-          - 中心：\`$IMAGE:$VERSION\`（amd64 / arm64）
+          - 中心（Docker）：\`$IMAGE:$VERSION\`（amd64 / arm64）
+          - 中心（Ubuntu / Debian DEB）：下载 center-linux-amd64.deb 或 center-linux-arm64.deb
+          - 源码包：下载 PiBot-$VERSION-source.tar.gz 或 PiBot-$VERSION-source.zip
 
-          下载 compose.yaml、compose.https.yaml、Caddyfile 和 center.env.example，
+          Docker 部署下载 compose.yaml、compose.https.yaml、Caddyfile 和 center.env.example；DEB 直装执行 \`sudo apt install ./PiBot-$VERSION-center-linux-amd64.deb\`，
           按 [快速开始](https://github.com/$GITHUB_REPOSITORY/blob/v$VERSION/README.md) 部署。
           Pi SDK：1.5.0。桌面与中心 Node：26.13.0 LTS。
           Android 使用上游最新可下载 Node Mobile 24.18.0-0，尚未跟进 2026 年 10 月 Node 安全更新。
