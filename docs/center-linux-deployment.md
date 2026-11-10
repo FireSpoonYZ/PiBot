@@ -20,6 +20,18 @@ docker compose -f compose.yaml -f compose.https.yaml ps
 
 镜像内置固定版本的 Bitwarden CLI `@bitwarden/cli@2026.10.1`，用于 Vaultwarden 外部密码库。`bw serve` 只在容器回环上运行。自管部署可用 `PIBOT_BW_CLI` 指定可信的绝对路径，Vault 登录资料在中心设置页输入。 [Vault 文档](vault.md)
 
+### 使用 DEB 包在 Ubuntu / Debian 直接部署
+
+无需 Docker 时，可从发行页下载 `PiBot-<VERSION>-center-linux-amd64.deb`（或 `arm64`）直接安装。DEB 包内置固定版本的 Node.js `26.13.0` 与 `@bitwarden/cli@2026.10.1`（安装目录 `/usr/lib/pibot-center`，数据目录 `/var/lib/pibot-center`，配置文件 `/etc/pibot-center/center.env`），与桌面端 `e-launcher-desktop` 包互不冲突：
+
+```sh
+sudo apt install ./PiBot-<VERSION>-center-linux-amd64.deb
+sudo pibot-center status
+sudo pibot-center setup-token
+```
+
+服务 `pibot-center.service` 默认监听本机回环 `127.0.0.1:8080`；按下方反向代理章节配置 HTTPS/WSS 后，即可在网页使用 `sudo pibot-center setup-token` 输出的初始化码完成首次设置（也可编辑 `/etc/pibot-center/center.env` 后执行 `sudo systemctl restart pibot-center`）。覆盖安装新版本 `.deb` 会自动重启服务并完整保留 `/etc/pibot-center/center.env` 与 `/var/lib/pibot-center` 数据。
+
 ### 从源码构建中心镜像
 
 ```sh

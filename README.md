@@ -20,7 +20,7 @@
 
 **PiBot** 采用「**中心管控 + 设备本地执行**」架构。
 
-- **中心服务器（Center）**通过 Docker 自托管，集中管理模型服务商与 API 凭据、设备与 Bot、MCP / Skill / 插件、Bot 学习、Webhook 自动任务以及客户端版本分发。
+- **中心服务器（Center）**支持通过 Docker 或 Ubuntu / Debian DEB 安装包自托管，集中管理模型服务商与 API 凭据、设备与 Bot、MCP / Skill / 插件、Bot 学习、Webhook 自动任务以及客户端版本分发。
 - **多端节点（Host & Client）**运行在 Windows、Linux 与 Android 设备上。工具在 Bot 所在设备执行，工作目录与会话主存储也在该设备。客户端通过中心的 Relay 与远端 Host 协作，Bot 学习会将会话快照传给中心处理。
 
 ```mermaid
@@ -80,7 +80,7 @@ docker compose -f compose.yaml -f compose.https.yaml up -d
 docker compose -f compose.yaml -f compose.https.yaml ps
 ```
 
-已有 HTTPS 反向代理时，使用 `docker compose up -d`，将全部路径转发到 `127.0.0.1:8080`，并为 `/v1/link` 传递 WebSocket Upgrade、为 SSE 关闭代理缓冲。 [Nginx 示例](docs/center-linux-deployment.md#反向代理)
+已有 HTTPS 反向代理时，使用 `docker compose up -d`（或在 Ubuntu / Debian 直接执行 `sudo apt install ./PiBot-<VERSION>-center-linux-amd64.deb`），将全部路径转发到 `127.0.0.1:8080`，并为 `/v1/link` 传递 WebSocket Upgrade、为 SSE 关闭代理缓冲。 [DEB 部署与 Nginx 示例](docs/center-linux-deployment.md#使用-deb-包在-ubuntu--debian-直接部署)
 
 ### 2. 初始化中心
 

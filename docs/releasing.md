@@ -4,7 +4,7 @@
 
 ## 版本模型
 
-- 根 `package.json` 的 `version`（当前 `0.0.11`）是唯一对外产品版本。
+- 根 `package.json` 的 `version`（当前 `0.0.12`）是唯一对外产品版本。
 - `desktop/src-tauri/tauri.conf.json`、`mobile/src-tauri/tauri.conf.json`、
   `mobile/src-tauri/Cargo.toml`、`desktop/src-tauri/Cargo.toml`、
   `desktop/host-launcher/Cargo.toml` 保存同一字面量；`app/build.gradle` 的
@@ -12,7 +12,7 @@
   Gradle 根即仓库根）。
 - `scripts/release-check.mjs` 核对全部上述字段 + `android.versionCode`
   为正整数；`--tag vX.Y.Z` 额外核对 tag 与产品版本一致。
-- Android `versionCode` 独立于产品版本（当前 `17`，正式 0.0.10 使用 `16`，正式 0.0.9 使用 `15`，正式 0.0.8 使用 `14`，正式 0.0.7 使用 `13`，正式 0.0.6 使用 `12`，正式 0.0.5 使用 `11`，正式 0.0.4 使用 `10`，正式 0.0.3 使用 `9`，首轮 0.0.3 候选使用 `8`，正式 0.0.2 使用 `7`），见
+- Android `versionCode` 独立于产品版本（当前 `18`，正式 0.0.11 使用 `17`，正式 0.0.10 使用 `16`，正式 0.0.9 使用 `15`，正式 0.0.8 使用 `14`，正式 0.0.7 使用 `13`，正式 0.0.6 使用 `12`，正式 0.0.5 使用 `11`，正式 0.0.4 使用 `10`，正式 0.0.3 使用 `9`，首轮 0.0.3 候选使用 `8`，正式 0.0.2 使用 `7`），见
   `gradle.properties` 的 `android.versionCode`，每个已分发 APK 单调递增、
   不复用、不回退。
 
@@ -42,10 +42,10 @@
   （签名 APK）、`desktop.yml`（安装包 + updater `.sig`）与 `center.yml`，
   全部成功后由唯一 `publish` job 汇总产物、逐件生成
   `<file>.metadata.json`、创建**一次不可变** GitHub Release（已存在则拒绝）。
-- `center.yml` 为唯一中心镜像工作流。普通 `master`/PR/手动运行只构建；
-  release 调用先推送 `ghcr.io/<owner>/pibot-center:sha-<sourceCommit>` 并产出
-  `center-image.json`。全部平台成功后，`publish` 将同一 digest 标记为版本号和
-  `latest`，并创建 GitHub Release。发布 Tag 不移动；失败重试继续使用同一 Tag。
+- `center.yml` 为唯一中心工作流，同时构建多架构容器镜像与自包含 Linux DEB 安装包（`pibot-center` `amd64`/`arm64`，内置固定版本 Node.js `26.13.0` 与 `@bitwarden/cli@2026.10.1`）并执行冒烟验证。普通 `master`/PR/手动运行构建镜像与 DEB artifact；
+  release 调用先推送 `ghcr.io/<owner>/pibot-center:sha-<sourceCommit>`、产出
+  `center-image.json` 与中心 DEB。全部平台成功后，`publish` 将同一镜像 digest 标记为版本号和
+  `latest`，生成精确提交对应的源码归档（`PiBot-<VERSION>-source.tar.gz` 与 `.zip`），并连同中心 DEB 一起写入 `SHA256SUMS` 创建 GitHub Release。发布 Tag 不移动；失败重试继续使用同一 Tag。
 
 ## 需要配置的 GitHub secrets / variables
 

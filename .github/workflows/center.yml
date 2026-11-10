@@ -70,3 +70,33 @@ jobs:
           name: center-image-${{ inputs.version }}
           path: center-image.json
           if-no-files-found: error
+
+  deb:
+    name: Center deb
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source-ref || github.ref }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26.13.0'
+          cache: npm
+          cache-dependency-path: center-server/package-lock.json
+      - name: Verify product version consistency
+        shell: bash
+        env:
+          TAG_ARG: ${{ inputs.release && format('--tag v{0}', inputs.version) || '' }}
+        run: node scripts/release-check.mjs $TAG_ARG
+      - name: Build and smoke-test Center DEB packages
+        shell: bash
+        env:
+          VERSION_ARG: ${{ inputs.version && format('--version {0}', inputs.version) || '' }}
+        run: node scripts/build-center-deb.mjs $VERSION_ARG --smoke-test
+      - uses: actions/upload-artifact@v7
+        with:
+          name: center-deb-${{ inputs.version || github.sha }}
+          path: build/center-deb/*.deb
+          if-no-files-found: error
+          retention-days: 30

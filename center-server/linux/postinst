@@ -1,0 +1,73 @@
+#!/bin/sh
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+SERVICE_USER="pibot-center"
+SERVICE_GROUP="pibot-center"
+DATA_DIR="/var/lib/pibot-center"
+ETC_DIR="/etc/pibot-center"
+ENV_FILE="/etc/pibot-center/center.env"
+UNIT="pibot-center.service"
+
+ensure_account() {
+  if ! getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
+    if command -v addgroup >/dev/null 2>&1; then
+      addgroup --system "$SERVICE_GROUP" >/dev/null
+    else
+      groupadd --system "$SERVICE_GROUP"
+    fi
+  fi
+  if ! getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
+    if command -v adduser >/dev/null 2>&1; then
+      adduser --system --ingroup "$SERVICE_GROUP" --home "$DATA_DIR" \
+        --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER" >/dev/null
+    else
+      useradd --system --gid "$SERVICE_GROUP" --home-dir "$DATA_DIR" \
+        --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+    fi
+  fi
+}
+
+case "${1:-}" in
+  configure)
+    ensure_account
+    mkdir -p "$DATA_DIR"
+    chown "$SERVICE_USER:$SERVICE_GROUP" "$DATA_DIR"
+    chmod 0700 "$DATA_DIR"
+
+    if [ -d "$ETC_DIR" ]; then
+      chown "root:$SERVICE_GROUP" "$ETC_DIR"
+      chmod 0750 "$ETC_DIR"
+    fi
+    if [ -f "$ENV_FILE" ]; then
+      chown "root:$SERVICE_GROUP" "$ENV_FILE"
+      chmod 0640 "$ENV_FILE"
+    fi
+
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+      systemctl daemon-reload
+      if [ -z "${2:-}" ]; then
+        systemctl enable "$UNIT" >/dev/null 2>&1 || systemctl enable "$UNIT"
+        systemctl start "$UNIT"
+      else
+        if systemctl is-enabled "$UNIT" >/dev/null 2>&1 || systemctl is-active "$UNIT" >/dev/null 2>&1; then
+          systemctl restart "$UNIT"
+        fi
+      fi
+    else
+      mkdir -p /etc/systemd/system/multi-user.target.wants
+      ln -sf /usr/lib/systemd/system/"$UNIT" /etc/systemd/system/multi-user.target.wants/"$UNIT"
+    fi
+    ;;
+  abort-upgrade|abort-remove|abort-deconfigure)
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+      systemctl daemon-reload || :
+      if systemctl is-enabled "$UNIT" >/dev/null 2>&1; then
+        systemctl start "$UNIT" || :
+      fi
+    fi
+    ;;
+esac
+
+exit 0

@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+UNIT="pibot-center.service"
+
+case "${1:-}" in
+  remove|deconfigure)
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+      systemctl stop "$UNIT" || :
+      if [ "${1:-}" = "remove" ]; then
+        systemctl disable "$UNIT" >/dev/null 2>&1 || :
+      fi
+    elif [ "${1:-}" = "remove" ]; then
+      rm -f /etc/systemd/system/multi-user.target.wants/"$UNIT" || :
+    fi
+    ;;
+  upgrade|failed-upgrade)
+    ;;
+esac
+
+exit 0
