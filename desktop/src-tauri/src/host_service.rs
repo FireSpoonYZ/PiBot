@@ -6,7 +6,7 @@
 //! argv or logs — and parses the single-line JSON it prints on stdout.
 
 use std::{
-  env, fs,
+  fs,
   io::{BufRead, BufReader, Read, Write},
   net::{SocketAddr, TcpStream},
   path::{Path, PathBuf},
@@ -225,6 +225,50 @@ pub(crate) async fn host_cli(args: Vec<String>, timeout: Duration) -> Result<Val
   run_blocking(move || run_launcher(&args, None, timeout)).await
 }
 
+/// macOS has no installer lifecycle around an update: the Host runs code from
+/// inside PiBot.app, so it is stopped with the current launcher before `swap`
+/// replaces the bundle, then the LaunchAgent is refreshed (if autostart was on)
+/// and the Host restarted with the new launcher at the same path. The whole
+/// sequence holds the host-control lock so no UI action interleaves. `stop`
+/// always runs: besides stopping a live supervisor it unloads the LaunchAgent
+/// job, so launchd cannot respawn bundle code mid-swap. Failing to stop
+/// returns Err and `swap` never runs (after trying to bring a previously
+/// running Host back); restore problems after `swap` are returned as a
+/// message next to its result.
+#[cfg(target_os = "macos")]
+pub(crate) async fn with_host_stopped<T: Send + 'static>(
+  swap: impl FnOnce() -> T + Send + 'static,
+) -> Result<(T, Option<String>), BridgeError> {
+  run_blocking(move || {
+    let _guard = HOST_CONTROL_LOCK.lock().unwrap();
+    let status = run_launcher(&["status".to_string()], None, STATUS_TIMEOUT)?;
+    let was_running = is_running(&status);
+    let autostart = status.get("autostart").and_then(Value::as_bool) == Some(true);
+    if let Err(err) = run_launcher(&["stop".to_string()], None, control_timeout("stop")) {
+      if was_running {
+        let _ = run_launcher(&["start".to_string()], None, control_timeout("start"));
+      }
+      return Err(err);
+    }
+    let output = swap();
+    let mut problems = Vec::new();
+    let mut step = |action: &str| {
+      if let Err(e) = run_launcher(&[action.to_string()], None, control_timeout(action)) {
+        problems.push(format!("{action}: {}: {}", e.code, e.message));
+      }
+    };
+    if autostart {
+      step("enable");
+    }
+    if was_running {
+      step("start");
+    }
+    let message = (!problems.is_empty()).then(|| format!("local Host was not fully restored ({})", problems.join("; ")));
+    Ok((output, message))
+  })
+  .await
+}
+
 fn validate_center_url(raw: &str) -> Result<String, BridgeError> {
   let url = raw.trim();
   if url.is_empty() || url.len() > 2048 {
@@ -379,9 +423,19 @@ fn stage_center_ca(pem: &str, home: PathBuf) -> Result<StagedCa, BridgeError> {
 
 fn local_hostname() -> Option<String> {
   #[cfg(windows)]
-  let raw = env::var("COMPUTERNAME").ok();
-  #[cfg(not(windows))]
-  let raw = env::var("HOSTNAME")
+  let raw = std::env::var("COMPUTERNAME").ok();
+  // The user-facing "Computer Name" from System Settings (same source as the launcher).
+  #[cfg(target_os = "macos")]
+  let raw = Command::new("/usr/sbin/scutil")
+    .args(["--get", "ComputerName"])
+    .stdin(Stdio::null())
+    .stderr(Stdio::null())
+    .output()
+    .ok()
+    .filter(|out| out.status.success())
+    .map(|out| String::from_utf8_lossy(&out.stdout).into_owned());
+  #[cfg(not(any(windows, target_os = "macos")))]
+  let raw = std::env::var("HOSTNAME")
     .ok()
     .or_else(|| fs::read_to_string("/etc/hostname").ok());
   raw
@@ -526,7 +580,7 @@ pub async fn desktop_host_status(webview: Webview) -> Result<Value, BridgeError>
       // Static knowledge: lets the UI gate Windows-only actions even if an
       // older launcher build omits the field.
       obj.entry("platform").or_insert(Value::String(
-        if cfg!(windows) { "windows" } else { "linux" }.to_string(),
+        if cfg!(windows) { "windows" } else if cfg!(target_os = "macos") { "macos" } else { "linux" }.to_string(),
       ));
     }
     Ok(status)

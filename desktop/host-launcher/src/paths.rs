@@ -65,7 +65,19 @@ fn default_host_home() -> AppResult<PathBuf> {
     Ok(PathBuf::from(base).join("e-launcher").join("host-service"))
 }
 
-#[cfg(not(windows))]
+/// macOS: `~/Library/Application Support/e-launcher/host-service`.
+#[cfg(target_os = "macos")]
+fn default_host_home() -> AppResult<PathBuf> {
+    let home = non_empty_env("HOME").ok_or_else(|| AppError::new("IO_ERROR", "HOME is not set"))?;
+    Ok(mac_host_home(Path::new(&home)))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn mac_host_home(user_home: &Path) -> PathBuf {
+    user_home.join("Library").join("Application Support").join("e-launcher").join("host-service")
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn default_host_home() -> AppResult<PathBuf> {
     let base = match non_empty_env("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()) {
         Some(p) => p,
@@ -117,11 +129,18 @@ fn runtime_candidates(exe_dir: &Path) -> Vec<PathBuf> {
     }
     if cfg!(windows) {
         list.push(exe_dir.join("host-runtime"));
+    } else if cfg!(target_os = "macos") {
+        // PiBot.app/Contents/MacOS/pibot-host -> PiBot.app/Contents/Resources/host-runtime
+        list.push(mac_bundle_runtime(exe_dir));
     } else {
         list.push(exe_dir.join("..").join("lib").join("e-launcher-desktop").join("host-runtime"));
         list.push(PathBuf::from("/usr/lib/e-launcher-desktop/host-runtime"));
     }
     list
+}
+
+fn mac_bundle_runtime(exe_dir: &Path) -> PathBuf {
+    exe_dir.join("..").join("Resources").join("host-runtime")
 }
 
 pub fn host_runtime_root(exe_dir: &Path) -> Option<PathBuf> {
@@ -179,5 +198,17 @@ mod tests {
         assert_eq!(p.lock, home.join("launcher.lock"));
         assert_eq!(p.status, home.join("launcher.json"));
         assert_eq!(p.stop_request, home.join("stop.request"));
+    }
+
+    #[test]
+    fn macos_layout_uses_application_support_and_bundle_resources() {
+        assert_eq!(
+            mac_host_home(Path::new("/Users/u")),
+            PathBuf::from("/Users/u/Library/Application Support/e-launcher/host-service")
+        );
+        assert_eq!(
+            mac_bundle_runtime(Path::new("/Applications/PiBot.app/Contents/MacOS")),
+            PathBuf::from("/Applications/PiBot.app/Contents/MacOS/../Resources/host-runtime")
+        );
     }
 }

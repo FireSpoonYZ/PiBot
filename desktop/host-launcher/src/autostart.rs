@@ -1,7 +1,10 @@
 //! Login autostart: Windows protected scheduled task via the `host-task`
-//! helper inside shower-windows.exe; Linux systemd user unit.
+//! helper inside shower-windows.exe; Linux systemd user unit; macOS user
+//! LaunchAgent in the `gui/<uid>` launchd domain.
 
-use serde_json::{json, Value};
+#[cfg(not(target_os = "macos"))]
+use serde_json::json;
+use serde_json::Value;
 
 #[cfg(windows)]
 use std::path::PathBuf;
@@ -136,7 +139,11 @@ pub fn status() -> AppResult<Value> {
             "autostart": is_enabled(),
         }))
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        mac_launchd::status()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         Ok(json!({ "installed": false, "autostart": false }))
     }
@@ -454,22 +461,464 @@ pub fn status_extra() -> Option<Value> {
     None
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+mod mac_launchd {
+    //! `~/Library/LaunchAgents/<label>.plist` runs `pibot-host run` once the
+    //! user logs in and lets launchd restart it after a crash. A deliberate
+    //! `stop` makes `run` exit 0, which `KeepAlive.SuccessfulExit=false` leaves
+    //! stopped. `enable`/`disable` only change whether the agent loads at the
+    //! next login (like `systemctl enable/disable`); `start` asks launchd to run
+    //! a current, enabled agent and otherwise reports that the caller must
+    //! start the launcher directly.
+
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use serde_json::{json, Value};
+
+    use crate::paths::HostPaths;
+    use crate::process;
+    use crate::util::{AppError, AppResult};
+
+    pub const LABEL: &str = "io.github.firespoonyz.pibot.host";
+    const LAUNCHCTL: &str = "/bin/launchctl";
+    /// launchd's SIGTERM→SIGKILL grace; must exceed the supervisor's graceful
+    /// Host shutdown budget (same contract as the systemd unit's TimeoutStopSec=90).
+    const EXIT_TIMEOUT_SECS: u32 = 90;
+    const THROTTLE_SECS: u32 = 10;
+    /// Wait for a booted-out job to release launcher.lock before reloading it.
+    const UNLOAD_WAIT: Duration = Duration::from_secs(95);
+
+    /// Product label. Debug builds accept `E_LAUNCHER_LAUNCHD_LABEL` so local
+    /// verification can use an isolated agent; release builds never do.
+    pub fn label() -> String {
+        #[cfg(debug_assertions)]
+        if let Ok(value) = std::env::var("E_LAUNCHER_LAUNCHD_LABEL") {
+            if is_valid_label(&value) {
+                return value;
+            }
+        }
+        LABEL.to_string()
+    }
+
+    #[cfg_attr(not(any(debug_assertions, test)), allow(dead_code))]
+    pub fn is_valid_label(value: &str) -> bool {
+        !value.is_empty()
+            && value.len() <= 128
+            && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    }
+
+    fn domain() -> String {
+        // SAFETY: getuid has no preconditions and cannot fail.
+        format!("gui/{}", unsafe { libc::getuid() })
+    }
+
+    fn service_target(label: &str) -> String {
+        format!("{}/{label}", domain())
+    }
+
+    fn launchctl(args: &[&str]) -> std::io::Result<std::process::Output> {
+        let mut cmd = process::command(LAUNCHCTL);
+        cmd.args(args);
+        process::run_capture(cmd)
+    }
+
+    fn launchctl_checked(args: &[&str], code: &str) -> AppResult<()> {
+        match launchctl(args) {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => Err(AppError::new(code, format!("launchctl {}: {}", args.join(" "), process::output_message(&out)))),
+            Err(e) => Err(AppError::new(code, format!("launchctl {}: {e}", args.join(" ")))),
+        }
+    }
+
+    pub fn plist_path() -> AppResult<PathBuf> {
+        let home = std::env::var_os("HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .ok_or_else(|| AppError::new("IO_ERROR", "HOME is not set"))?;
+        Ok(home.join("Library").join("LaunchAgents").join(format!("{}.plist", label())))
+    }
+
+    fn xml_escape(raw: &str) -> String {
+        let mut out = String::with_capacity(raw.len());
+        for c in raw.chars() {
+            match c {
+                '&' => out.push_str("&amp;"),
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                '"' => out.push_str("&quot;"),
+                '\'' => out.push_str("&apos;"),
+                _ => out.push(c),
+            }
+        }
+        out
+    }
+
+    fn plist_text<'a>(path: &'a Path, what: &str) -> AppResult<&'a str> {
+        let raw = path
+            .to_str()
+            .ok_or_else(|| AppError::new("AUTOSTART_FAILED", format!("{what} {} is not valid UTF-8", path.display())))?;
+        if raw.chars().any(char::is_control) {
+            return Err(AppError::new("AUTOSTART_FAILED", format!("{what} {} contains control characters", path.display())));
+        }
+        Ok(raw)
+    }
+
+    /// The exact LaunchAgent this launcher registers. An installed plist that
+    /// differs from it (moved/replaced PiBot.app, other Host home, older
+    /// format) is stale and is never started by launchd.
+    pub fn render_plist(label: &str, program: &Path, host_home: &Path) -> AppResult<String> {
+        let label = xml_escape(label);
+        let program = xml_escape(plist_text(program, "launcher path")?);
+        let home = xml_escape(plist_text(host_home, "host home")?);
+        Ok(format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>{label}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>{program}</string>
+		<string>run</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>E_LAUNCHER_HOST_HOME</key>
+		<string>{home}</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>{THROTTLE_SECS}</integer>
+	<key>ExitTimeOut</key>
+	<integer>{EXIT_TIMEOUT_SECS}</integer>
+	<key>Umask</key>
+	<integer>63</integer>
+</dict>
+</plist>
+"#
+        ))
+    }
+
+    /// Canonical path of this launcher binary (what launchd should execute).
+    fn current_program() -> AppResult<PathBuf> {
+        let exe = crate::paths::exe_path()?;
+        Ok(std::fs::canonicalize(&exe).unwrap_or(exe))
+    }
+
+    /// Gatekeeper App Translocation runs quarantined apps from a randomized
+    /// read-only path that disappears; never register such a path.
+    pub fn is_translocated(program: &Path) -> bool {
+        program.to_string_lossy().contains("/AppTranslocation/")
+    }
+
+    fn expected_plist() -> AppResult<String> {
+        render_plist(&label(), &current_program()?, &crate::paths::host_home()?)
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Registration {
+        Missing,
+        Current,
+        Stale,
+    }
+
+    fn registration() -> AppResult<(Registration, PathBuf)> {
+        let path = plist_path()?;
+        let installed = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Registration::Missing, path)),
+            Err(e) => return Err(AppError::io("read LaunchAgent plist", e)),
+        };
+        let state = if installed == expected_plist()? { Registration::Current } else { Registration::Stale };
+        Ok((state, path))
+    }
+
+    fn is_loaded(label: &str) -> bool {
+        matches!(launchctl(&["print", &service_target(label)]), Ok(out) if out.status.success())
+    }
+
+    /// `launchctl print-disabled gui/<uid>` lists override entries as
+    /// `"label" => disabled|enabled` (older releases print `true|false`).
+    pub fn parse_disabled(listing: &str, label: &str) -> bool {
+        let needle = format!("\"{label}\"");
+        listing
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(needle.as_str()))
+            .filter_map(|rest| rest.trim().strip_prefix("=>"))
+            .map(|value| matches!(value.trim(), "disabled" | "true"))
+            .last()
+            .unwrap_or(false)
+    }
+
+    fn is_disabled(label: &str) -> bool {
+        match launchctl(&["print-disabled", &domain()]) {
+            Ok(out) if out.status.success() => parse_disabled(&String::from_utf8_lossy(&out.stdout), label),
+            _ => false,
+        }
+    }
+
+    /// Unloads a loaded job (launchd sends SIGTERM) and waits until its
+    /// supervisor released launcher.lock, so a reload never races the old one.
+    fn bootout(label: &str, home: Option<&Path>) -> AppResult<()> {
+        if !is_loaded(label) {
+            return Ok(());
+        }
+        launchctl_checked(&["bootout", &service_target(label)], "AUTOSTART_FAILED")?;
+        if let Some(home) = home {
+            let paths = HostPaths::new(home.to_path_buf());
+            process::wait_until(UNLOAD_WAIT, || !process::lock_held(&paths));
+        }
+        Ok(())
+    }
+
+    fn bootstrap(path: &Path) -> AppResult<()> {
+        let path = plist_text(path, "LaunchAgent path")?;
+        launchctl_checked(&["bootstrap", &domain(), path], "AUTOSTART_FAILED")
+    }
+
+    pub fn status() -> AppResult<Value> {
+        let state = registration()?.0;
+        if state == Registration::Missing {
+            return Ok(json!({ "installed": false, "autostart": false }));
+        }
+        // A disabled agent never runs, so a stale path in it needs no repair
+        // prompt; turning autostart on again rewrites it anyway.
+        if is_disabled(&label()) {
+            return Ok(json!({ "installed": true, "autostart": false }));
+        }
+        if state == Registration::Stale {
+            return Err(AppError::new(
+                "AUTOSTART_STALE",
+                "the login item points to another PiBot.app location or version; turn autostart on again to repair it",
+            ));
+        }
+        Ok(json!({ "installed": true, "autostart": true }))
+    }
+
+    /// Writes (or repairs) the agent and allows it to load at login. A first
+    /// registration does not start anything; repairing a loaded stale agent
+    /// reloads it so a Host it was running keeps running from the new path.
+    pub fn enable() -> AppResult<Value> {
+        let label = label();
+        let program = current_program()?;
+        if is_translocated(&program) {
+            return Err(AppError::new(
+                "AUTOSTART_UNAVAILABLE",
+                "PiBot is running from a temporary translocated location; move PiBot.app to the Applications folder, reopen it, then enable autostart",
+            ));
+        }
+        let home = crate::paths::host_home()?;
+        let body = render_plist(&label, &program, &home)?;
+        let path = plist_path()?;
+        let mut reload = false;
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(body.as_str()) {
+            if is_loaded(&label) {
+                reload = process::lock_held(&HostPaths::new(home.clone()));
+                bootout(&label, Some(&home))?;
+            }
+            crate::util::write_atomic(&path, body.as_bytes(), false)?;
+            // launchd ignores agents that are group/world writable.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                .map_err(|e| AppError::io("set LaunchAgent permissions", e))?;
+        }
+        launchctl_checked(&["enable", &service_target(&label)], "AUTOSTART_FAILED")?;
+        if reload {
+            bootstrap(&path)?;
+        }
+        Ok(json!({ "autostart": true }))
+    }
+
+    /// Keeps the agent file (so `start` and `remove` still find it) and only
+    /// stops it from loading at the next login; a running Host keeps running.
+    pub fn disable() -> AppResult<Value> {
+        let label = label();
+        if plist_path()?.exists() || is_loaded(&label) {
+            launchctl_checked(&["disable", &service_target(&label)], "AUTOSTART_FAILED")?;
+        }
+        Ok(json!({ "autostart": false }))
+    }
+
+    /// Unloads and deletes only this product's agent; user data is untouched.
+    pub fn remove() -> AppResult<Value> {
+        let label = label();
+        bootout(&label, crate::paths::host_home().ok().as_deref())?;
+        match std::fs::remove_file(plist_path()?) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(AppError::io("remove LaunchAgent plist", e)),
+        }
+        Ok(json!({ "removed": true }))
+    }
+
+    /// How `start` should proceed after asking launchd.
+    pub enum Start {
+        /// launchd is starting the current, enabled agent.
+        Launchd,
+        /// Start the launcher directly; carries why launchd could not be used
+        /// when it was attempted (e.g. the background item is switched off in
+        /// System Settings › Login Items).
+        Direct(Option<String>),
+    }
+
+    /// Starts the Host through launchd when a current, enabled agent exists so
+    /// crash restarts apply; otherwise (or when launchd refuses) the caller
+    /// starts the launcher directly. A stale or disabled agent is unloaded
+    /// first so launchd never runs an old path.
+    pub fn start() -> Start {
+        let label = label();
+        let Ok((state, path)) = registration() else { return Start::Direct(None) };
+        let usable = state == Registration::Current && !is_disabled(&label);
+        let loaded = is_loaded(&label);
+        if !usable {
+            if loaded {
+                let _ = bootout(&label, None);
+            }
+            return Start::Direct(None);
+        }
+        let result = if loaded {
+            launchctl_checked(&["kickstart", &service_target(&label)], "START_FAILED")
+        } else {
+            bootstrap(&path)
+        };
+        match result {
+            Ok(()) => Start::Launchd,
+            Err(e) => Start::Direct(Some(format!("launchd did not start the LaunchAgent, started directly: {}", e.message))),
+        }
+    }
+
+    /// After the supervisor stopped (or when none was running): unload a
+    /// loaded job so KeepAlive cannot respawn a `run` that keeps failing at
+    /// startup. `start` bootstraps it again and the next login reloads it.
+    pub fn unload() -> AppResult<()> {
+        bootout(&label(), None)
+    }
+
+    /// Before `stop` kills a supervisor that ignored the graceful request, ask
+    /// launchd to unload the job so the kill is not answered with a KeepAlive
+    /// respawn. Never waits for the unload: launchd would sit out ExitTimeOut
+    /// on a hung supervisor, and the caller's kill is what ends it.
+    pub fn release_for_kill() {
+        let label = label();
+        if !is_loaded(&label) {
+            return;
+        }
+        let mut cmd = process::command(LAUNCHCTL);
+        cmd.args(["bootout", &service_target(&label)])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if let Ok(mut child) = cmd.spawn() {
+            // Give launchd a moment to register the removal before the kill.
+            process::wait_until(Duration::from_millis(500), || matches!(child.try_wait(), Ok(Some(_))));
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn plist_escapes_paths_and_keeps_fixed_keys() {
+            let text = render_plist(LABEL, Path::new("/Apps/A&B <x>.app/Contents/MacOS/pibot-host"), Path::new("/Users/u/Library/Application Support/e-launcher/host-service")).unwrap();
+            assert!(text.contains("<string>io.github.firespoonyz.pibot.host</string>"));
+            assert!(text.contains("<string>/Apps/A&amp;B &lt;x&gt;.app/Contents/MacOS/pibot-host</string>\n\t\t<string>run</string>"));
+            assert!(text.contains("<key>E_LAUNCHER_HOST_HOME</key>\n\t\t<string>/Users/u/Library/Application Support/e-launcher/host-service</string>"));
+            assert!(text.contains("<key>SuccessfulExit</key>\n\t\t<false/>"));
+            assert!(text.contains("<key>ExitTimeOut</key>\n\t<integer>90</integer>"));
+            assert!(render_plist(LABEL, Path::new("/a\nb"), Path::new("/h")).is_err());
+        }
+
+        #[test]
+        fn moved_bundle_renders_a_different_plist() {
+            let home = Path::new("/Users/u/h");
+            let a = render_plist(LABEL, Path::new("/Applications/PiBot.app/Contents/MacOS/pibot-host"), home).unwrap();
+            let b = render_plist(LABEL, Path::new("/Users/u/Desktop/PiBot.app/Contents/MacOS/pibot-host"), home).unwrap();
+            assert_ne!(a, b);
+        }
+
+        #[test]
+        fn disabled_listing_parses_new_and_old_formats() {
+            let listing = "disabled services = {\n\t\"com.apple.x\" => enabled\n\t\"io.github.firespoonyz.pibot.host\" => disabled\n}\n";
+            assert!(parse_disabled(listing, LABEL));
+            assert!(!parse_disabled("\t\"io.github.firespoonyz.pibot.host\" => enabled\n", LABEL));
+            assert!(parse_disabled("\t\"io.github.firespoonyz.pibot.host\" => true\n", LABEL));
+            assert!(!parse_disabled("\t\"io.github.firespoonyz.pibot.host.other\" => disabled\n", LABEL));
+            assert!(!parse_disabled("", LABEL));
+        }
+
+        #[test]
+        fn translocated_and_label_checks() {
+            assert!(is_translocated(Path::new("/private/var/folders/x/AppTranslocation/ABC/d/PiBot.app/Contents/MacOS/pibot-host")));
+            assert!(!is_translocated(Path::new("/Applications/PiBot.app/Contents/MacOS/pibot-host")));
+            assert!(is_valid_label("io.github.firespoonyz.pibot.host-test"));
+            assert!(!is_valid_label("bad label"));
+            assert!(!is_valid_label(""));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn enable() -> AppResult<Value> {
+    mac_launchd::enable()
+}
+
+#[cfg(target_os = "macos")]
+pub fn disable() -> AppResult<Value> {
+    mac_launchd::disable()
+}
+
+#[cfg(target_os = "macos")]
+pub fn remove() -> AppResult<Value> {
+    mac_launchd::remove()
+}
+
+#[cfg(target_os = "macos")]
+pub use mac_launchd::Start as LaunchdStart;
+
+/// macOS: start through launchd when possible (see `LaunchdStart`).
+#[cfg(target_os = "macos")]
+pub fn launchd_start() -> LaunchdStart {
+    mac_launchd::start()
+}
+
+/// macOS: unload the job once the supervisor is stopped.
+#[cfg(target_os = "macos")]
+pub fn launchd_unload() -> AppResult<()> {
+    mac_launchd::unload()
+}
+
+/// macOS: request the unload before a forced kill so launchd does not respawn it.
+#[cfg(target_os = "macos")]
+pub fn launchd_release_for_kill() {
+    mac_launchd::release_for_kill()
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn enable() -> AppResult<Value> {
     Err(AppError::new("AUTOSTART_UNAVAILABLE", "autostart is not supported on this platform"))
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn disable() -> AppResult<Value> {
     Ok(serde_json::json!({ "autostart": false }))
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn remove() -> AppResult<Value> {
     Ok(serde_json::json!({ "removed": true }))
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn is_enabled() -> bool {
     false
 }

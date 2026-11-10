@@ -26,11 +26,11 @@ use crate::util::{print_json, random_token, AppError, AppResult};
 const USAGE: &str = "usage: pibot-host <command> [options]
 commands:
   run        foreground supervisor for the Host service
-  start      start the supervisor in the background (systemd user unit on Linux when installed)
+  start      start the supervisor in the background (systemd user unit on Linux / LaunchAgent on macOS when installed)
   stop       stop the supervisor and the Host
   restart    stop + start
   status     print service status
-  enable     register boot autostart on Linux or login autostart on Windows
+  enable     register boot autostart on Linux or login autostart on Windows/macOS
   disable    remove autostart registration
   remove     stop and remove service registration, preserving business data
   prepare-update [--stop-active]
@@ -249,6 +249,17 @@ fn default_display_name() -> String {
     let mut candidates: Vec<String> = Vec::new();
     if cfg!(windows) {
         candidates.extend(std::env::var("COMPUTERNAME").ok());
+    } else if cfg!(target_os = "macos") {
+        // The user-facing "Computer Name" from System Settings, then the Bonjour name.
+        for key in ["ComputerName", "LocalHostName"] {
+            let mut cmd = process::command("/usr/sbin/scutil");
+            cmd.args(["--get", key]);
+            if let Ok(out) = process::run_capture(cmd) {
+                if out.status.success() {
+                    candidates.push(String::from_utf8_lossy(&out.stdout).into_owned());
+                }
+            }
+        }
     } else {
         candidates.extend(std::env::var("HOSTNAME").ok());
         candidates.extend(std::fs::read_to_string("/etc/hostname").ok());
@@ -282,10 +293,12 @@ fn read_secret_input(env_name: &str, what: &str) -> AppResult<String> {
 
 // ------------------------------------------------------------------ service control
 
-/// Contract-restricted platform tag; the launcher ships on Windows/Linux only.
+/// Contract-restricted platform tag; the launcher ships on Windows/Linux/macOS.
 fn platform_tag() -> &'static str {
     if cfg!(windows) {
         "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
     } else {
         "linux"
     }
@@ -341,7 +354,7 @@ fn cmd_status(paths: &HostPaths) -> AppResult<Value> {
             .and_then(|s| s.get("autostart"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        "autostartScope": if cfg!(windows) { "user-login" } else { "system-boot" },
+        "autostartScope": if cfg!(any(windows, target_os = "macos")) { "user-login" } else { "system-boot" },
         "hostHome": paths.home.display().to_string(),
         "logFile": paths.log.display().to_string(),
     });
@@ -369,6 +382,8 @@ fn cmd_start(paths: &HostPaths) -> AppResult<Value> {
     }
     config::load(paths)?;
     paths::locate_runtime()?;
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut warnings: Vec<String> = Vec::new();
     if process::systemd_available() {
         let _ = process::systemctl_user(&["daemon-reload"]);
         process::systemctl_checked(&["start", process::SYSTEMD_UNIT], "START_FAILED")?;
@@ -381,19 +396,48 @@ fn cmd_start(paths: &HostPaths) -> AppResult<Value> {
             // normal-privilege spawn fallback.
             autostart::host_task("start", autostart::HOST_TASK_START_TIMEOUT)?;
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        {
+            // A current, enabled LaunchAgent runs the Host under launchd (crash
+            // restarts); otherwise, or when launchd refuses, start directly.
+            if let autostart::LaunchdStart::Direct(note) = autostart::launchd_start() {
+                warnings.extend(note);
+                process::spawn_detached_run(&paths::exe_path()?, &paths.home)?;
+            }
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             process::spawn_detached_run(&paths::exe_path()?, &paths.home)?;
         }
     }
     if process::wait_until(START_TIMEOUT, || process::lock_held(paths)) {
-        Ok(json!({ "status": "started" }))
+        let mut result = json!({ "status": "started" });
+        if !warnings.is_empty() {
+            result["warnings"] = json!(warnings);
+        }
+        Ok(result)
     } else {
         Err(AppError::new(
             "START_TIMEOUT",
             format!("launcher did not start within 10s; see {}", paths.log.display()),
         ))
     }
+}
+
+/// Result of a completed stop. On macOS the LaunchAgent job is also unloaded
+/// so KeepAlive cannot respawn a `run` that keeps failing at startup (the
+/// equivalent of `systemctl stop` ending a Restart=always loop); `start`
+/// reloads it and so does the next login.
+fn stopped(forced: bool) -> Value {
+    let mut value = json!({ "status": "stopped" });
+    if forced {
+        value["forced"] = json!(true);
+    }
+    #[cfg(target_os = "macos")]
+    if let Err(e) = autostart::launchd_unload() {
+        value["warnings"] = json!([format!("{}: {}", e.code, e.message)]);
+    }
+    value
 }
 
 fn cmd_stop(paths: &HostPaths) -> AppResult<Value> {
@@ -405,14 +449,18 @@ fn cmd_stop(paths: &HostPaths) -> AppResult<Value> {
     }
     if !process::lock_held(paths) {
         process::remove_file_quiet(&paths.stop_request);
-        return Ok(json!({ "status": "stopped" }));
+        return Ok(stopped(false));
     }
     // Not managed by systemd (or systemctl failed): ask `run` to exit.
     std::fs::write(&paths.stop_request, b"stop\n").map_err(|e| AppError::io("write stop.request", e))?;
     if process::wait_until(STOP_TIMEOUT, || !process::lock_held(paths)) {
         process::remove_file_quiet(&paths.stop_request);
-        return Ok(json!({ "status": "stopped" }));
+        return Ok(stopped(false));
     }
+    // launchd answers a killed (non-zero exit) supervisor with a KeepAlive
+    // respawn; request the unload before killing so a forced stop stays stopped.
+    #[cfg(target_os = "macos")]
+    autostart::launchd_release_for_kill();
     if let Some(status) = supervisor::read_status(paths) {
         if let Some(host_pid) = status.host_pid {
             process::kill_tree(host_pid);
@@ -422,7 +470,7 @@ fn cmd_stop(paths: &HostPaths) -> AppResult<Value> {
     let released = process::wait_until(KILL_TIMEOUT, || !process::lock_held(paths));
     process::remove_file_quiet(&paths.stop_request);
     if released {
-        Ok(json!({ "status": "stopped", "forced": true }))
+        Ok(stopped(true))
     } else {
         Err(systemd_error.unwrap_or_else(|| AppError::new("STOP_FAILED", "launcher did not stop")))
     }
