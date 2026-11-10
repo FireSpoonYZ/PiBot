@@ -6,7 +6,7 @@
 | --- | --- |
 | `app/src/main/` | Android 原生入口、前台服务、通知、语音与 Shower 桥接 |
 | `web/src/`、`mobile/` | 共享 React/TypeScript 界面与 Android Tauri 外壳 |
-| `desktop/` | Windows/Linux Tauri 客户端、Host 启动器、NSIS/DEB 钩子 |
+| `desktop/` | Windows/Linux/macOS Tauri 客户端、Host 启动器、NSIS/DEB 钩子 |
 | `host-core/` | 多端 Host、客户端 broker、工具、固定 Pi SDK 集成 |
 | `center-server/`、`center-web/`、`center-contract/` | 中心服务、管理页与契约 |
 | `shower-server/` | Binder-only 虚拟屏服务，Gradle 构建后以 `shower-server.jar` 打入 APK assets |

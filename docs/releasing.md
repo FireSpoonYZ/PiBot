@@ -36,10 +36,12 @@
 ## CI 渠道
 
 - `master` push、面向 `develop/master` 的 PR 与手动构建：`apk.yml` 构建
-  debug APK artifact；`desktop.yml` 构建无 updater 签名的 NSIS/DEB artifact。
+  debug APK artifact；`desktop.yml` 构建无 updater 签名的 NSIS/DEB artifact，以及
+  `macos-14` 上 ad-hoc 签名的 macOS DMG（Apple Silicon）。
   这些构建不发布 GitHub Release。
 - `v*` tag：`release.yml` 通过 `workflow_call` 并行调用 `apk.yml`
-  （签名 APK）、`desktop.yml`（安装包 + updater `.sig`）与 `center.yml`，
+  （签名 APK）、`desktop.yml`（安装包 + updater `.sig`；macOS 为 DMG 与签名的
+  `PiBot.app.tar.gz`）与 `center.yml`，
   全部成功后由唯一 `publish` job 汇总产物、逐件生成
   `<file>.metadata.json`、创建**一次不可变** GitHub Release（已存在则拒绝）。
 - `center.yml` 为唯一中心工作流，同时构建多架构容器镜像与自包含 Linux DEB 安装包（`pibot-center` `amd64`/`arm64`，内置固定版本 Node.js `26.13.0` 与 `@bitwarden/cli@2026.10.1`）并执行冒烟验证。普通 `master`/PR/手动运行构建镜像与 DEB artifact；
@@ -71,7 +73,8 @@ Fork/外部贡献者不需要以上任何 secret 即可构建 debug 包。
   sourceCommit, versionCode?}`。`sha256` 对真实文件流式计算（不信 sidecar）；
   `signature` 是同目录 `.sig` 的**文本内容**（桌面制品必须提供，且签名绑定版本需一致）；
   `notes` 必填非空字符串；`versionCode` 仅 Android。
-- APK 元数据读取 SDK aapt 的真实包名、versionName、versionCode 与单一 ABI；需设置 ANDROID_HOME。DEB 使用 dpkg-deb 核对 Package、Version 与 Architecture。
+- APK 元数据读取 SDK aapt 的真实包名、versionName、versionCode 与单一 ABI；需设置 ANDROID_HOME。DEB 使用 dpkg-deb 核对 Package、Version 与 Architecture。macOS 更新包（`format: app`，`macos`/`aarch64`）读取 `PiBot.app.tar.gz` 内 `PiBot.app/Contents/Info.plist`，核对 bundle identifier `io.github.firespoonyz.pibot` 与 `CFBundleShortVersionString`；中心导入时同样核对版本。
+- macOS DMG（`PiBot-<VERSION>-macos-arm64.dmg`）只用于首次安装，随 Release 发布但不生成元数据、不导入中心；应用内更新只使用 `PiBot-<VERSION>-macos-arm64.app.tar.gz` 及其 `.sig`。
 - release job 把每个 `*.metadata.json` 与制品一起传到 GitHub Release，
   中心管理员逐件导入。
 - 中心镜像元数据见 `center.yml` 产出的 `center-image.json`。
@@ -91,3 +94,5 @@ Linux 保留 Debian/RPM 包身份 `e-launcher-desktop` 和资源目录 `/usr/lib
 Windows 从旧 NSIS 版本升级时直接覆盖原安装目录，避免默认先运行旧卸载器删除 Host 登录任务。覆盖前关闭当前及旧名客户端，再停止 Host；完成后为已配对 Host 启用登录自启动并立即启动，确认运行后才报告成功，同时清除旧名可执行文件。
 
 DEB 和 NSIS 的安装（含覆盖升级）都负责为已配对 Host 启用自启动并立即启动；配置或启动失败时安装返回错误。Linux 保留既有 linger 设置，失败回退仍使用升级前的状态快照。未配对的新安装在首次配对完成后自动启动。
+
+macOS 没有安装器钩子：bundle identifier `io.github.firespoonyz.pibot` 与 LaunchAgent 标签 `io.github.firespoonyz.pibot.host` 是覆盖升级身份，不得更改。应用内更新由客户端停止 Host、原位替换 `PiBot.app`，再刷新登录项并重新启动 Host；用户从 DMG 手动覆盖 `/Applications/PiBot.app` 时，Host 不会被自动停止，应先在设置页停止服务。
