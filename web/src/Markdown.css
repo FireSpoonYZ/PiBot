@@ -1,0 +1,47 @@
+.markdown .table-scroll {
+  width: fit-content;
+  max-width: 100%;
+  margin-block: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x pan-y;
+  background:
+    linear-gradient(to left, var(--table-edge-bg, var(--bg)) 12px, transparent 20px) right center / 20px 100% no-repeat local,
+    linear-gradient(to left, color-mix(in srgb, currentColor 14%, transparent), transparent) right center / 12px 100% no-repeat scroll;
+}
+
+.markdown .table-scroll:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.markdown .table-scroll > table {
+  width: max-content;
+  border-collapse: collapse;
+  font-size: .9rem;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+  white-space: normal;
+}
+
+.markdown .table-scroll :is(th, td) {
+  min-width: 5rem;
+  max-width: clamp(12rem, 60vw, 24rem);
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.markdown .table-scroll th {
+  font-weight: 600;
+  background: color-mix(in srgb, currentColor 6%, transparent);
+}
+
+.bot-chat-bubble .markdown .table-scroll { width: 100%; }
+.bot-chat-bubble .markdown .table-scroll > table { min-width: 100%; }

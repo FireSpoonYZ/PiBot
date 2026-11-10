@@ -5,6 +5,7 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { mobileLocalRequest } from './native/tauri-host';
 import { ErrorNotice, useAction, useText } from './ui';
+import './Markdown.css';
 
 export interface MarkdownProps {
   text: string;
