@@ -287,7 +287,7 @@ interface TurnAdmissionView {
 const TURN_ADMISSION_PHASES = new Set(['queued', 'checking', 'synchronizing', 'failed']);
 
 const TURN_ADMISSION_LABELS: Record<TurnAdmissionView['phase'], string> = {
-  queued: '排队等待准入',
+  queued: '等待中心准入',
   checking: '正在核对 Center 版本集',
   synchronizing: '正在同步插件版本',
   failed: '准入失败',
@@ -605,6 +605,11 @@ function parseSlashCommand(text: string): SlashCommandName | null {
   return SLASH_COMMANDS.find((c) => c.command === trimmed)?.command ?? null;
 }
 
+type SendNotice = {
+  text: string;
+  showRecordAction?: boolean;
+};
+
 function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, canPick, onPick, draftError, draftHint, draftConflict, sendState, sendError, sendNotice, onSend, canSend, disabled, onRetryDraft, attempt, recOutcome, onReconcile, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onInsertSlash, onOpenSendRecord }: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   text: string;
@@ -624,8 +629,8 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
   draftConflict: DraftSnapshot | null;
   sendState: 'idle' | 'sending';
   sendError: string | null;
-  /** 发送路径的短时可见提示（slash 进度/结果）；与 sendError 只保留其一。 */
-  sendNotice: string | null;
+  /** 发送受理与斜杠命令的提示。 */
+  sendNotice: SendNotice | null;
   onSend: () => void;
   canSend: boolean;
   disabled: boolean;
@@ -650,17 +655,29 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
   const moreRef = useRef<HTMLDivElement | null>(null);
   const composingRef = useRef(false);
 
-  /** 自适应高度：36px ~ 160px（设计 §5.3 胶囊输入区）。 */
   const autosize = useCallback(() => {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = `${Math.min(160, Math.max(36, el.scrollHeight))}px`;
+    el.style.height = `${el.scrollHeight}px`;
   }, [textareaRef]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     autosize();
   }, [text, autosize]);
+
+  useEffect(() => {
+    const row = textareaRef.current?.parentElement;
+    if (!row) return;
+    let width: number | undefined;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry.contentRect.width === width) return;
+      width = entry.contentRect.width;
+      autosize();
+    });
+    observer.observe(row);
+    return () => observer.disconnect();
+  }, [textareaRef, autosize]);
 
   useEffect(() => {
     function onDocDown(e: MouseEvent) {
@@ -722,87 +739,111 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
     }
   }
 
+  const recoveringAttempt = attempt && (
+    sendState === 'idle' || sendError || attempt.error || attempt.phase === 'unconfirmed'
+  ) ? attempt : null;
+  const admissionProgress = turnAdmission && turnAdmission.phase !== 'failed'
+    ? TURN_ADMISSION_LABELS[turnAdmission.phase] + (turnAdmission.source === 'background' ? ' · 后台' : '')
+    : null;
+  const footerStatus = sendState === 'sending'
+    ? sendNotice?.text ?? '正在保存并发送消息…'
+    : [sendNotice?.text, admissionProgress].filter(Boolean).join(' · ');
+  const footerHint = draftHint ?? 'Enter 发送 · Shift+Enter 换行 · / 呼出命令';
+  const footerRecordAction = sendState === 'idle' && sendNotice?.showRecordAction &&
+    !recoveringAttempt && !sendError
+    ? onOpenSendRecord
+    : undefined;
+
   return (
-    <div className="composer">
-      {draftError ? (
-        <div className="error-banner" role="alert">
-          {draftError}
-          <button type="button" onClick={onRetryDraft}>重试保存</button>
-        </div>
-      ) : null}
-      {draftConflict ? (
-        <div className="status">
-          磁盘上的新版草稿：{truncate(draftConflict.text, 160) || '（空文本）'}
-          {draftConflict.files.length > 0 ? `（${draftConflict.files.length} 个文件引用）` : ''}
-        </div>
-      ) : null}
-      {attempt ? (
-        <div className="error-banner" role="alert" aria-live="polite">
-          {attempt.phase === 'not-sent' ? (
-            <>
-              {sendError ?? attempt.error ?? '消息尚未入队。'}
-              <button type="button" onClick={() => onReleaseNotSent()}>恢复编辑</button>
-            </>
-          ) : (
-            <>
-              {sendError ?? (sendState === 'sending' ? '正在保存并发送消息…' : '发送结果待确认。')}
-              {attempt.phase === 'cleared' || attempt.phase === 'failed' || attempt.phase === 'unconfirmed' ? (
-                <button type="button" onClick={onReconcile} disabled={sendState === 'sending'}>核对结果</button>
-              ) : null}
-              {onOpenSendRecord ? <button type="button" onClick={onOpenSendRecord}>查看发送记录</button> : null}
-              {draftConflict && recOutcome?.found ? (
-                <button type="button" onClick={() => onAdoptNewerDraft()}>保留新版草稿，结束旧尝试</button>
-              ) : null}
-              {recOutcome?.action === 'ready-clear-retry' ? (
-                <button type="button" onClick={() => onRetryClearVerified()}>重试本地清空</button>
-              ) : null}
-            </>
-          )}
-        </div>
-      ) : null}
-      {turnAdmission ? (
-        <div className={'status' + (turnAdmission.phase === 'failed' ? ' error' : ' busy')} role="status" aria-live="polite">
-          {TURN_ADMISSION_LABELS[turnAdmission.phase]}
-          {turnAdmission.source === 'background' ? ' · 后台' : null}
-          {turnAdmission.error
-            ? '（' + turnAdmission.error.code + (turnAdmission.error.message ? '：' + truncate(turnAdmission.error.message, 120) : '') + '）'
-            : null}
-          {' · 同一 requestId 等待中心准入'}
-          {turnAdmission.phase === 'failed' && onRetryTurnAdmission ? (
-            <button type="button" onClick={() => onRetryTurnAdmission()}>重试准入</button>
-          ) : null}
-        </div>
-      ) : null}
-      {files.length > 0 ? (
-        <p className="hint">已引用 {files.length} 个路径，发送时按原文引用，不会上传文件。</p>
-      ) : null}
-      {files.length > 0 ? (
-        <div className="file-refs">
-          {files.map((f, i) => (
-            <span key={`${f.path}#${i}`} className="file-ref" title={f.path}>
-              <FileText size={12} aria-hidden="true" />
-              {f.name} · {f.size} B
-              <button type="button" onClick={() => onRemoveFile(i)} disabled={disabled} aria-label={`移除 ${f.name}`}>
-                <X size={12} />
-              </button>
+    <div className="composer bot-composer">
+      <div className="composer-extras">
+        {draftError ? (
+          <div className="error-banner" role="alert">
+            <span className="error-banner-text">{draftError}</span>
+            <button type="button" onClick={onRetryDraft}>重试保存</button>
+          </div>
+        ) : null}
+        {draftConflict ? (
+          <div className="status">
+            <span>
+              磁盘上的新版草稿：{truncate(draftConflict.text, 160) || '（空文本）'}
+              {draftConflict.files.length > 0 ? `（${draftConflict.files.length} 个文件引用）` : ''}
             </span>
-          ))}
-        </div>
-      ) : null}
-      {attachments.length > 0 ? (
-        <div className="attachments" role="group" aria-label="图片附件">
-          {attachments.map((att, i) => (
-            <ImageAttachmentThumb
-              key={att.id}
-              attachment={att}
-              fetcher={attachmentFetcher}
-              disabled={disabled}
-              onRemove={() => onRemoveAttachment(i)}
-              t={(zh, en) => zh}
-            />
-          ))}
-        </div>
-      ) : null}
+          </div>
+        ) : null}
+        {recoveringAttempt ? (
+          <div className="error-banner" role="alert">
+            {recoveringAttempt.phase === 'not-sent' ? (
+              <>
+                <span className="error-banner-text">{sendError ?? recoveringAttempt.error ?? '消息尚未入队。'}</span>
+                <button type="button" onClick={onReleaseNotSent}>恢复编辑</button>
+              </>
+            ) : (
+              <>
+                <span className="error-banner-text">{sendError ?? recoveringAttempt.error ?? '发送结果待确认。'}</span>
+                {recoveringAttempt.phase === 'cleared' || recoveringAttempt.phase === 'failed' || recoveringAttempt.phase === 'unconfirmed' ? (
+                  <button type="button" onClick={onReconcile} disabled={sendState === 'sending'}>核对结果</button>
+                ) : null}
+                {onOpenSendRecord ? <button type="button" onClick={onOpenSendRecord}>查看发送记录</button> : null}
+                {draftConflict && recOutcome?.found ? (
+                  <button type="button" onClick={onAdoptNewerDraft}>保留新版草稿，结束旧尝试</button>
+                ) : null}
+                {recOutcome?.action === 'ready-clear-retry' ? (
+                  <button type="button" onClick={onRetryClearVerified}>重试本地清空</button>
+                ) : null}
+              </>
+            )}
+          </div>
+        ) : null}
+        {turnAdmission?.phase === 'failed' ? (
+          <div className="error-banner" role="alert">
+            <span className="error-banner-text">
+              {TURN_ADMISSION_LABELS[turnAdmission.phase]}
+              {turnAdmission.source === 'background' ? ' · 后台' : null}
+              {turnAdmission.error
+                ? '（' + turnAdmission.error.code + (turnAdmission.error.message ? '：' + turnAdmission.error.message : '') + '）'
+                : null}
+            </span>
+            <button type="button" onClick={onRetryTurnAdmission}>重试准入</button>
+          </div>
+        ) : null}
+        {sendError && !attempt ? (
+          <div className="error-banner" role="alert">
+            <span className="error-banner-text">{sendError}</span>
+            {onOpenSendRecord ? <button type="button" onClick={onOpenSendRecord}>查看发送记录</button> : null}
+          </div>
+        ) : null}
+        {files.length > 0 ? (
+          <>
+            <p className="hint">已引用 {files.length} 个路径，发送时按原文引用，不会上传文件。</p>
+            <div className="file-refs">
+              {files.map((f, i) => (
+                <span key={`${f.path}#${i}`} className="file-ref" title={f.path}>
+                  <FileText size={12} aria-hidden="true" />
+                  {f.name} · {f.size} B
+                  <button type="button" onClick={() => onRemoveFile(i)} disabled={disabled} aria-label={`移除 ${f.name}`}>
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          </>
+        ) : null}
+        {attachments.length > 0 ? (
+          <div className="attachments" role="group" aria-label="图片附件">
+            {attachments.map((att, i) => (
+              <ImageAttachmentThumb
+                key={att.id}
+                attachment={att}
+                fetcher={attachmentFetcher}
+                disabled={disabled}
+                onRemove={() => onRemoveAttachment(i)}
+                t={(zh, en) => zh}
+              />
+            ))}
+          </div>
+        ) : null}
+      </div>
       <div className="composer-input-wrap">
         {slashOpen ? (
           <div className="slash-popover" role="listbox" aria-label="斜杠命令">
@@ -825,7 +866,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
           </div>
         ) : null}
         <div className="composer-row">
-          <div className="composer-plus-wrap" ref={moreRef}>
+          <div ref={moreRef}>
             <button
               type="button"
               className="icon-button composer-plus"
@@ -877,6 +918,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
             onKeyDown={onKeyDown}
             onCompositionStart={() => { composingRef.current = true; }}
             onCompositionEnd={() => { composingRef.current = false; }}
+            aria-label="输入消息"
             placeholder="输入消息，/ 呼出命令…"
             rows={1}
             disabled={disabled}
@@ -893,19 +935,14 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
           </button>
         </div>
       </div>
-      {sendError && !attempt ? <div className="error-banner" role="alert">
-        {sendError}
-        {!attempt && onOpenSendRecord ? <button type="button" onClick={onOpenSendRecord}>查看发送记录</button> : null}
-      </div> : null}
-      {sendNotice ? <div className="status" role="status">
-        {sendNotice}
-        {!attempt && onOpenSendRecord ? <button type="button" onClick={onOpenSendRecord}>查看发送记录</button> : null}
-      </div> : null}
       <div className="composer-footer">
-        <p className="hint">
-          Enter 发送 · Shift+Enter 换行 · / 呼出命令
-          {draftHint ? ` · ${draftHint}` : ''}
-        </p>
+        <div className="composer-footer-text" title={footerStatus || footerHint}>
+          <span role="status">{footerStatus}</span>
+          {footerStatus ? null : footerHint}
+        </div>
+        {footerRecordAction ? (
+          <button type="button" className="composer-record-link" onClick={footerRecordAction}>打开发送记录</button>
+        ) : null}
       </div>
     </div>
   );
@@ -1211,7 +1248,7 @@ function PrimaryChatPane({
 
   const [sendState, setSendState] = useState<'idle' | 'sending'>('idle');
   const [sendError, setSendError] = useState<string | null>(null);
-  const [sendNotice, setSendNotice] = useState<string | null>(null);
+  const [sendNotice, setSendNotice] = useState<SendNotice | null>(null);
   const [lastSendRecordId, setLastSendRecordId] = useState<string>();
   const [slashBusy, setSlashBusy] = useState<SlashCommandName | null>(null);
   const [recOutcome, setRecOutcome] = useState<{ action: string; found: boolean; recordId: string | null; recordState: string | null } | null>(null);
@@ -1514,7 +1551,7 @@ function PrimaryChatPane({
     setSlashBusy(command);
     setSendState('sending');
     setSendError(null);
-    setSendNotice(command === '/clear' ? '正在清空对话…' : '正在压缩上下文…');
+    setSendNotice({ text: command === '/clear' ? '正在清空对话…' : '正在压缩上下文…' });
     try {
       const result = await api.call(current, command === '/clear' ? 'clearHistory' : 'compact', { botId: bot.botId });
       if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
@@ -1534,13 +1571,13 @@ function PrimaryChatPane({
       // 服务端成功后立即重读完整可见历史（busy 下降沿兜底也会补跑）。
       if (!isCurrentSession()) return;
       void loadRawLatest();
-      setSendNotice(
-        command === '/clear'
+      setSendNotice({
+        text: command === '/clear'
           ? '已清空当前对话并重置上下文'
           : (result as CompactResult | undefined)?.compacted
             ? '已压缩较早的上下文'
             : '没有可压缩的历史',
-      );
+      });
       window.setTimeout(() => {
         if (isCurrentSession()) setSendNotice(null);
       }, 2500);
@@ -1634,7 +1671,10 @@ function PrimaryChatPane({
       }
       if (!api.transportConnected || sessionKey(api.identity) !== sess) {
         drafts.finishSend(started.handle);
-        setSendNotice('消息已加入发送记录。连接恢复后，可以从记录里发送。');
+        setSendNotice({
+          text: '消息已加入发送记录。连接恢复后，可以从记录里发送。',
+          showRecordAction: true,
+        });
         return;
       }
       try {
@@ -1659,7 +1699,7 @@ function PrimaryChatPane({
     if (rec.state === 'accepted') {
       drafts.finishSend(handle);
       // 受理只说明已受理；完成与否以 live/原回执为准，界面不断言。
-      setSendNotice(hostQueued ? '消息已进入设备的任务队列。' : '设备已接收消息。');
+      setSendNotice({ text: hostQueued ? '已进入设备任务队列' : '设备已接收消息' });
       onLiveActivityRef.current?.();
     } else if (rec.state === 'rejected') {
       // 确定终态：本地 attempt 结束，原记录保留在待发送面板
@@ -1670,7 +1710,12 @@ function PrimaryChatPane({
       setSendError('发送结果未知。请先核对原记录。');
     } else {
       drafts.finishSend(handle);
-      setSendNotice('消息已加入发送记录。');
+      setSendNotice({
+        text: rec.state === 'pending'
+          ? '消息待发送，可在记录里继续发送。'
+          : '发送结果待确认，可在记录里核对。',
+        showRecordAction: true,
+      });
     }
   }
 
@@ -1684,7 +1729,7 @@ function PrimaryChatPane({
     if (outcome.recordId) setLastSendRecordId(outcome.recordId);
     if (outcome.action === 'finished' && outcome.recordState === 'accepted') {
       setSendError(null);
-      setSendNotice('设备已接收消息。');
+      setSendNotice({ text: '设备已接收消息。' });
     } else if (outcome.action === 'finished') {
       setSendError('设备未接收消息。详情见发送记录。');
     } else if (outcome.action === 'ready-clear-retry') {
@@ -2080,23 +2125,21 @@ function PrimaryChatPane({
     ? () => onOpenSendRecords({ deviceId: bot.deviceId, botId: bot.botId, recordId: sendRecordId ?? undefined })
     : undefined;
 
-  // 统一口径只在这里计算一次传给 ChatTranscript：Host activity 为准；
-  // 本地发送乐观只在 Host 未受理（idle/stopped）时叠加 queued；
-  // abort 进行中本地投影 stopping（Host 的 stopping/interrupting 优先）。
+  // 正文从 Host 受理起显示任务活动。顶部仍用本地 queued 投影维持发送期间的状态和停止入口。
   const liveActivity = resolveBotActivity(live);
-  const sendingActivity: BotActivity | null =
+  const transcriptActivity: BotActivity =
+    stopping && liveActivity.phase !== 'stopping' && liveActivity.phase !== 'interrupting'
+      ? { ...liveActivity, phase: 'stopping' }
+      : liveActivity;
+  const activity: BotActivity =
     sendState === 'sending' &&
     slashBusy === null &&
-    (liveActivity.phase === 'idle' || liveActivity.phase === 'stopped')
+    (transcriptActivity.phase === 'idle' || transcriptActivity.phase === 'stopped')
       ? {
           phase: 'queued', source: 'primary', scopeId: null, requestId: null, startedAt: null,
           webhookStopPending: liveActivity.webhookStopPending,
         }
-      : null;
-  const activity: BotActivity =
-    stopping && liveActivity.phase !== 'stopping' && liveActivity.phase !== 'interrupting'
-      ? { ...liveActivity, phase: 'stopping' }
-      : sendingActivity ?? liveActivity;
+      : transcriptActivity;
   const liveBusy = isBotActivityBusy(activity);
   const canStop = canStopBotActivity(activity);
   const pendingQuestionnaire = online && !isArchived && live?.busy && !liveEnded && !liveError &&
@@ -2393,7 +2436,7 @@ function PrimaryChatPane({
         entries={rawItems}
         live={live}
         bot={bot}
-        activity={activity}
+        activity={transcriptActivity}
         awaitingAnswer={Boolean(awaitingAnswer)}
         avatarKey={botAvatarKey(bot)}
         devicePlatform={devicePlatform}
