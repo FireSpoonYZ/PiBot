@@ -1,7 +1,7 @@
 {
   "name": "pibot",
   "private": true,
-  "version": "0.0.10",
+  "version": "0.0.11",
   "type": "module",
   "scripts": {
     "test": "node --test web/test/*.test.mjs",

@@ -1,368 +1,303 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Activity, KeyRound, Plus, Server, Settings2 } from 'lucide-react';
-import type { CredentialInfo, Device, Provider } from '@e-launcher/center-contract';
+import { Plus, Search, Settings2 } from 'lucide-react';
+import type { CredentialInfo, Provider, ProviderAuthFlow, ProviderAuthStatus, JsonObject } from '@e-launcher/center-contract';
 import { api, CenterApiError } from '../api';
 import { SheetModal } from '../components/SheetModal';
 
-const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages', 'pi-messages', 'google-generative-ai'];
-const blank: Provider = {
-  id: '',
-  name: '',
-  api: protocols[0],
-  baseUrl: '',
-  credentialRef: null,
-  enabled: true,
-  revision: 0,
-};
+const protocols = ['openai-completions', 'openai-responses', 'anthropic-messages', 'google-generative-ai', 'pi-messages'];
+const blank: Provider = { id: '', name: '', baseUrl: '', api: 'openai-completions', credentialRef: null, native: false, enabled: false, revision: 0 };
 
 export default function Providers() {
   const [providers, setProviders] = useState<Provider[]>([]);
-  const [devices, setDevices] = useState<Device[]>([]);
+  const [choose, setChoose] = useState(false);
+  const [search, setSearch] = useState('');
   const [edit, setEdit] = useState<Provider | null>(null);
   const [creating, setCreating] = useState(false);
+  const [custom, setCustom] = useState('{}');
+  const [auth, setAuth] = useState<ProviderAuthStatus | null>(null);
   const [credential, setCredential] = useState<CredentialInfo | null>(null);
-  const [savedRef, setSavedRef] = useState<string | null>(null);
-  const [secret, setSecret] = useState('');
-  const [deviceId, setDeviceId] = useState('');
-  const [notice, setNotice] = useState('');
-  const [error, setError] = useState('');
+  const [keyValue, setKeyValue] = useState('');
+  const [flowId, setFlowId] = useState<string | null>(null);
+  const [flow, setFlow] = useState<ProviderAuthFlow | null>(null);
+  const [reply, setReply] = useState('');
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+
+  const load = async () => setProviders(await api.listProviders());
+  useEffect(() => { void load().catch(e => setError(String(e))); }, []);
+  const connected = useMemo(() => providers.filter(p => p.enabled), [providers]);
+  const available = useMemo(() => providers.filter(p => !p.enabled &&
+    (!search || (p.name + ' ' + p.id).toLowerCase().includes(search.toLowerCase()))).slice(0, 30), [providers, search]);
 
   const run = async (work: () => Promise<void>) => {
-    setBusy(true);
-    setError('');
-    try {
-      await work();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
+    setBusy(true); setError(''); setNotice('');
+    try { await work(); } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
   };
 
-  const load = async () => {
-    const [p, d] = await Promise.all([api.listProviders(), api.listDevices()]);
-    setProviders(p);
-    setDevices(d);
+  const open = async (provider: Provider, isNew = false) => {
+    setEdit(provider); setCreating(isNew); setChoose(false); setError(''); setNotice('');
+    setCustom(JSON.stringify(provider.custom ?? {}, null, 2)); setAuth(null);
+    setCredential(null); setKeyValue(''); setFlowId(null); setFlow(null); setReply('');
+    if (!isNew) {
+      const [status, key] = await Promise.all([
+        api.providerAuthStatus(provider.id),
+        provider.credentialRef ? api.getCredential(provider.credentialRef).catch(e => {
+          if (e instanceof CenterApiError && e.status === 404) return null;
+          throw e;
+        }) : Promise.resolve(null),
+      ]);
+      setAuth(status); setCredential(key);
+    }
   };
 
   useEffect(() => {
-    void run(load);
-  }, []);
-
-  const open = async (provider: Provider, isNew: boolean) => {
-    setEdit(provider);
-    setCreating(isNew);
-    setSecret('');
-    setCredential(null);
-    setSavedRef(provider.credentialRef);
-    setNotice('');
-    if (provider.credentialRef) {
+    if (!flowId || !edit) return;
+    let gone = false;
+    const providerId = edit.id;
+    const poll = async () => {
       try {
-        setCredential(await api.getCredential(provider.credentialRef));
-      } catch (e) {
-        if (!(e instanceof CenterApiError && e.status === 404)) throw e;
-      }
-    }
+        const state = await api.providerLoginStatus(providerId, flowId);
+        if (gone) return;
+        setFlow(state);
+        if (state.status === 'complete') {
+          setFlowId(null); setNotice('账号连接成功'); setError('');
+          void load();
+          void api.providerAuthStatus(providerId).then(setAuth);
+          return;
+        }
+        if (state.status === 'failed' || state.status === 'cancelled') setFlowId(null);
+      } catch (e) { if (!gone) setError(String(e)); }
+    };
+    void poll();
+    const timer = setInterval(() => { void poll(); }, 2000);
+    return () => { gone = true; clearInterval(timer); };
+  }, [flowId, edit?.id]);
+
+  const close = () => {
+    if (flowId && edit) void api.providerLoginCancel(edit.id, flowId).catch(() => {});
+    setEdit(null); setFlowId(null);
+  };
+
+  const save = async () => {
+    if (!edit) return;
+    const settings = JSON.parse(custom) as JsonObject;
+    if (!settings || Array.isArray(settings) || typeof settings !== 'object') throw new Error('高级设置必须是 JSON 对象');
+    if (settings.apiKey !== undefined) throw new Error('API Key 请使用专用的安全输入框');
+    const input = { ...edit, custom: settings, ...(creating && !edit.credentialRef ? { credentialRef: edit.id + '-api-key' } : {}) };
+    const saved = creating ? await api.createProvider(input) :
+      await api.putProvider(input.id, { expectedRevision: edit.revision, value: input });
+    await load(); await open(saved); setNotice('设置已保存');
+  };
+
+  const startLogin = async () => {
+    if (!edit) return;
+    const { flowId: id } = await api.providerLogin(edit.id);
+    setFlowId(id); setFlow(null);
   };
 
   return (
     <main className="page">
       <header className="page-header">
         <div className="page-title-group">
-          <h1>服务商与模型</h1>
-          <p className="secondary">已预置 Pi 服务商与模型。编辑并填写 API Key、启用服务商，再设置默认模型即可使用。目录每天同步新增模型，保留已有配置。</p>
+          <h1>模型服务商</h1>
+          <p className="secondary">连接账号或填写 API Key。模型列表与协议由 Pi 自动维护。</p>
         </div>
         <div className="action-row">
           <button className="button secondary-button button-sm" disabled={busy} onClick={() => void run(async () => {
-            const result = await api.syncModelCatalog();
-            await load();
-            setNotice(result.error || `目录已同步：新增 ${result.modelsAdded ?? 0} 个模型，已有配置保持不变`);
-          })}>同步 Pi 模型目录</button>
-          <Link to="/devices" className="button secondary-button button-sm">
-            设置全局与 Bot 模型
-          </Link>
-          <button className="button" onClick={() => void run(() => open({ ...blank }, true))}>
-            <Plus size={16} />
-            新增服务商
+            const result = await api.syncModelCatalog(); await load();
+            setNotice(result.error || '模型目录已同步');
+          })}>更新模型目录</button>
+          <button className="button" onClick={() => { setSearch(''); setChoose(true); }}>
+            <Plus size={16} /> 添加服务商
           </button>
         </div>
       </header>
 
-      {error && (
-        <p className="inline-error" role="alert">
-          {error}
-        </p>
-      )}
-      {notice && (
-        <p className="inline-notice" role="status">
-          {notice}
-        </p>
-      )}
+      {error && <p role="alert" className="inline-error">{error}</p>}
+      {notice && <p role="status" className="inline-notice">{notice}</p>}
 
-      {providers.length === 0 ? (
+      {connected.length === 0 ? (
         <div className="empty-state">
-          <Server size={28} />
-          <p>暂无已配置的服务商</p>
-          <p className="secondary">点击右上角“新增服务商”配置 API 协议、Base URL 与密钥引用。</p>
+          <p>还没有连接模型服务商</p>
+          <p className="secondary">点击“添加服务商”，选择已有平台或自己的兼容接口。</p>
         </div>
       ) : (
         <div className="card-grid">
-          {providers.map(provider => (
+          {connected.map(provider => (
             <article className="card-group resource-card" key={provider.id}>
               <div className="card-header">
-                <div className="action-row" style={{ marginBlock: 0 }}>
-                  <h2>{provider.name || provider.id}</h2>
-                  <span className={`badge ${provider.enabled ? 'badge-online' : 'badge-offline'}`}>
-                    {provider.enabled ? '已启用' : '已停用'}
-                  </span>
-                  <span className="badge badge-neutral">{provider.api}</span>
+                <div><h2>{provider.name || provider.id}</h2>
+                  <p className="secondary" style={{ marginBottom: 0 }}>{provider.native ? 'Pi 原生服务商' : '自定义服务商'}</p>
                 </div>
+                <span className="badge badge-online">已启用</span>
               </div>
-              <p className="secondary">
-                ID: {provider.id} · {provider.baseUrl} · {provider.credentialRef ? `凭证: ${provider.credentialRef}` : '无凭证引用'}
-              </p>
               <div className="action-row">
-                <Link className="button secondary-button button-sm" to={`/providers/${encodeURIComponent(provider.id)}/models`}>
-                  模型管理
-                </Link>
-                <button className="quiet-button" onClick={() => void run(() => open(provider, false))}>
-                  <Settings2 size={15} />
-                  编辑与密钥
+                <button className="quiet-button" onClick={() => void run(() => open(provider))}>
+                  <Settings2 size={15} /> 管理连接
                 </button>
+                <Link to={`/providers/${encodeURIComponent(provider.id)}/models`} className="quiet-button">模型列表</Link>
               </div>
             </article>
           ))}
         </div>
       )}
 
-      <SheetModal
-        open={edit !== null}
-        onOpenChange={isOpen => {
-          if (!isOpen) {
-            setEdit(null);
-            setSecret('');
-          }
-        }}
-        title={creating ? '新增服务商' : `编辑服务商：${edit?.name || edit?.id || ''}`}
-        description={creating ? '配置模型服务商接口地址、协议与凭证引用' : `ID: ${edit?.id || ''} · 管理基本参数、API Key 与在线连接测试`}
-        size="lg"
-      >
+      <SheetModal open={choose} onOpenChange={setChoose} title="添加服务商"
+        description="选择常用平台，或连接任意兼容 API" size="lg">
+        <div className="form">
+          <label>
+            <span className="secondary">查找平台</span>
+            <div style={{ position: 'relative' }}>
+              <Search size={15} style={{ position: 'absolute', left: 12, top: 14, opacity: .6 }} />
+              <input style={{ paddingLeft: 36 }} value={search} placeholder="例如 OpenAI、Claude、Copilot"
+                onChange={e => setSearch(e.target.value)} />
+            </div>
+          </label>
+          <div className="card-grid" style={{ maxHeight: 340, overflowY: 'auto' }}>
+            {available.map(p => (
+              <button key={p.id} className="quiet-button" style={{ textAlign: 'left', padding: 12, border: '1px solid var(--line, #ddd)', borderRadius: 10 }}
+                onClick={() => void run(() => open(p))}>
+                {p.name} <span className="secondary" style={{ fontSize: 12 }}>· {p.id}</span>
+              </button>
+            ))}
+          </div>
+          {available.length === 0 && <p className="secondary">没有匹配的平台，可以添加自定义连接。</p>}
+          <button className="button secondary-button" onClick={() => void open({ ...blank }, true)}>
+            <Plus size={16} /> 自定义兼容接口
+          </button>
+        </div>
+      </SheetModal>
+
+      <SheetModal open={edit !== null} onOpenChange={open => { if (!open) close(); }}
+        title={creating ? '自定义服务商' : (edit?.name || '模型服务商')}
+        description={edit?.native ? '保留 Pi 原生认证和模型能力' : '连接任意 Pi 支持的兼容接口'} size="lg">
         {edit && (
-          <div>
-            {error && (
-              <p className="inline-error" role="alert">
-                {error}
-              </p>
-            )}
-            {notice && (
-              <p className="inline-notice" role="status">
-                {notice}
-              </p>
-            )}
+          <div className="form">
+            {error && <p role="alert" className="inline-error">{error}</p>}
+            {notice && <p role="status" className="inline-notice">{notice}</p>}
 
-            <form
-              className="form"
-              onSubmit={event => {
-                event.preventDefault();
-                void run(async () => {
-                  const saved = creating
-                    ? await api.createProvider(edit)
-                    : await api.putProvider(edit.id, { expectedRevision: edit.revision, value: edit });
-                  await open(saved, false);
-                  await load();
-                  setNotice('服务商已保存');
-                });
-              }}
-            >
-              <div className="form-grid">
-                <label>
-                  服务商 ID
-                  <input
-                    required
-                    value={edit.id}
-                    disabled={!creating}
-                    placeholder="例如 openai 或 anthropic"
-                    onChange={e => setEdit({ ...edit, id: e.target.value })}
-                  />
-                </label>
-                <label>
-                  显示名称
-                  <input
-                    required
-                    value={edit.name}
-                    placeholder="例如 OpenAI 官方"
-                    onChange={e => setEdit({ ...edit, name: e.target.value })}
-                  />
-                </label>
-              </div>
-              <label>
-                Base URL
-                <input
-                  type="url"
-                  required
-                  value={edit.baseUrl}
-                  placeholder="https://api.openai.com/v1"
-                  onChange={e => setEdit({ ...edit, baseUrl: e.target.value })}
-                />
-              </label>
-              <div className="form-grid">
-                <label>
-                  API 协议
-                  <select value={edit.api} onChange={e => setEdit({ ...edit, api: e.target.value })}>
-                    {!protocols.includes(edit.api) && <option>{edit.api}</option>}
-                    {protocols.map(p => (
-                      <option key={p}>{p}</option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  凭证引用
-                  <input
-                    value={edit.credentialRef || ''}
-                    placeholder="例如 openai-key（可选）"
-                    onChange={e => setEdit({ ...edit, credentialRef: e.target.value || null })}
-                  />
-                </label>
-              </div>
-              <label className="check">
-                <input
-                  type="checkbox"
-                  checked={edit.enabled}
-                  onChange={e => setEdit({ ...edit, enabled: e.target.checked })}
-                />
-                启用
-              </label>
-              <div className="action-row">
-                <button className="button" disabled={busy}>
-                  保存服务商
-                </button>
-                <button
-                  type="button"
-                  className="quiet-button"
-                  onClick={() => {
-                    setEdit(null);
-                    setSecret('');
-                  }}
-                >
-                  关闭
-                </button>
-              </div>
-            </form>
-
-            {!creating && edit.credentialRef && edit.credentialRef !== savedRef && (
-              <p className="secondary">凭证引用已更改，请先点击“保存服务商”后再写入对应 API Key。</p>
-            )}
-
-            {!creating && edit.credentialRef && edit.credentialRef === savedRef && (
-              <form
-                className="panel form"
-                onSubmit={e => {
-                  e.preventDefault();
-                  void run(async () => {
-                    const result = await api.putCredential(edit.credentialRef!, {
-                      value: secret,
-                      expectedRevision: credential?.revision ?? null,
-                    });
-                    setCredential(result);
-                    setSecret('');
-                    if (!edit.enabled) {
-                      const enabled = await api.putProvider(edit.id, { expectedRevision: edit.revision, value: { ...edit, enabled: true } });
-                      setEdit(enabled);
-                      await load();
-                    }
-                    setNotice('凭证已保存，服务商已启用；请设置默认模型');
-                  });
-                }}
-              >
+            {!creating && auth?.oauth && (
+              <div className="panel form">
                 <div className="card-header">
-                  <h3>
-                    <KeyRound size={16} style={{ verticalAlign: 'text-bottom', marginRight: 6 }} />
-                    凭证：{edit.credentialRef}
-                  </h3>
-                  <span className={`badge ${credential?.configured ? 'badge-success' : 'badge-warn'}`}>
-                    {credential?.configured ? '已配置；不会回显密钥' : '尚未配置'}
+                  <h3>账号连接</h3>
+                  <span className={auth.method === 'oauth' ? 'badge badge-online' : 'badge badge-neutral'}>
+                    {auth.method === 'oauth' ? '已连接' : '未连接'}
                   </span>
                 </div>
-                <label>
-                  新 API Key
-                  <input
-                    type="password"
-                    required
-                    autoComplete="new-password"
-                    placeholder="输入新的 API 密钥以写入或轮换"
-                    value={secret}
-                    onChange={e => setSecret(e.target.value)}
-                  />
+                {auth.method === 'oauth' ? (
+                  <div className="action-row">
+                    <span className="secondary">已通过 Pi 原生授权连接</span>
+                    <button className="quiet-button danger" disabled={busy} onClick={() => void run(async () => {
+                      setAuth(await api.providerLogout(edit.id)); await load(); setNotice('已退出账号');
+                    })}>退出账号</button>
+                  </div>
+                ) : <button className="button" disabled={busy || Boolean(flowId)} onClick={() => void run(startLogin)}>
+                  {auth.label || '连接账号'}
+                </button>}
+                {flow && (
+                  <div className="form">
+                    {flow.events.filter(e => e.type === 'auth_url' || e.type === 'device_code').slice(-1).map((e, i) => (
+                      <div key={i} className="panel form">
+                        {e.type === 'device_code' && <p>授权码：<strong style={{ userSelect: 'all' }}>{e.userCode}</strong></p>}
+                        <a href={e.url || e.verificationUri} target="_blank" rel="noopener noreferrer">打开授权页面 ↗</a>
+                      </div>
+                    ))}
+                    {flow.prompt && <form className="form" onSubmit={e => { e.preventDefault();
+                      if (flowId) void run(async () => { await api.providerLoginAnswer(edit.id, flowId, reply); setReply(''); });
+                    }}>
+                      <label>{flow.prompt.message}
+                        {flow.prompt.type === 'select' ? (
+                          <select value={reply} onChange={e => setReply(e.target.value)}>
+                            <option value="">请选择</option>
+                            {flow.prompt.options?.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+                          </select>
+                        ) : <input type={flow.prompt.type === 'secret' ? 'password' : 'text'}
+                          value={reply} placeholder={flow.prompt.placeholder || '粘贴授权码或回调地址'}
+                          onChange={e => setReply(e.target.value)} />}
+                      </label>
+                      <button className="button" disabled={!reply || busy}>继续</button>
+                    </form>}
+                    {flow.status === 'pending' && <p className="secondary">等待授权完成…</p>}
+                    {flow.error && <p className="inline-error">{flow.error}</p>}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {!creating && edit.credentialRef && (
+              <form className="panel form" onSubmit={e => { e.preventDefault(); void run(async () => {
+                if (!keyValue) return;
+                const saved = await api.putCredential(edit.credentialRef!, {
+                  value: keyValue, expectedRevision: credential?.revision ?? null,
+                });
+                setCredential(saved); setKeyValue('');
+                if (!edit.enabled) {
+                  const updated = await api.putProvider(edit.id, { expectedRevision: edit.revision,
+                    value: { ...edit, enabled: true } });
+                  setEdit(updated);
+                }
+                setAuth(await api.providerAuthStatus(edit.id)); await load(); setNotice('API Key 已保存');
+              }); }}>
+                <div className="card-header"><h3>API Key</h3>
+                  <span className="secondary">{credential?.configured ? '已配置' : '未配置'}</span></div>
+                <label>密钥
+                  <input type="password" value={keyValue} autoComplete="new-password"
+                    placeholder={credential?.configured ? '输入新 Key 以替换' : '粘贴 API Key'}
+                    onChange={e => setKeyValue(e.target.value)} />
                 </label>
                 <div className="action-row">
-                  <button className="button" disabled={busy}>
-                    保存凭证
-                  </button>
-                  {credential?.configured && (
-                    <button
-                      type="button"
-                      className="quiet-button danger"
-                      disabled={busy}
-                      onClick={() =>
-                        void run(async () => {
-                          await api.deleteCredential(edit.credentialRef!, {
-                            expectedRevision: credential.revision,
-                            value: null,
-                          });
-                          setCredential(null);
-                          setSecret('');
-                          setNotice('凭证已删除');
-                        })
-                      }
-                    >
-                      删除凭证
-                    </button>
-                  )}
+                  <button className="button secondary-button" disabled={!keyValue || busy}>保存 Key</button>
+                  {credential?.configured && <button type="button" className="quiet-button danger" disabled={busy}
+                    onClick={() => void run(async () => {
+                      await api.deleteCredential(edit.credentialRef!, { expectedRevision: credential.revision, value: null });
+                      setCredential(null); setAuth(await api.providerAuthStatus(edit.id)); await load();
+                      setNotice('API Key 已删除');
+                    })}>删除 Key</button>}
                 </div>
               </form>
             )}
 
-            {!creating && (
-              <div className="panel form">
-                <h3>
-                  <Activity size={16} style={{ verticalAlign: 'text-bottom', marginRight: 6 }} />
-                  在线设备连接检查
-                </h3>
-                <label>
-                  用于连接检查的在线设备
-                  <select value={deviceId} onChange={e => setDeviceId(e.target.value)}>
-                    <option value="">选择设备</option>
-                    {devices
-                      .filter(d => d.online)
-                      .map(d => (
-                        <option key={d.deviceId} value={d.deviceId}>
-                          {d.name || d.deviceId}
-                        </option>
-                      ))}
-                  </select>
+            <form className="form" onSubmit={e => { e.preventDefault(); void run(save); }}>
+              {creating && <div className="form-grid">
+                <label>连接名称<input required value={edit.name} placeholder="我的模型服务"
+                  onChange={e => setEdit({ ...edit, name: e.target.value })} /></label>
+                <label>服务商 ID<input required value={edit.id} placeholder="my-provider"
+                  onChange={e => setEdit({ ...edit, id: e.target.value })} /></label>
+              </div>}
+
+              {!edit.native && <div className="form-grid">
+                <label>API 地址<input type="url" required value={edit.baseUrl}
+                  placeholder="https://api.example.com/v1"
+                  onChange={e => setEdit({ ...edit, baseUrl: e.target.value })}/></label>
+                <label>协议<input value={edit.api} list="pi-provider-protocols"
+                  onChange={e => setEdit({ ...edit, api: e.target.value })}/>
+                  <datalist id="pi-provider-protocols">{protocols.map(p => <option key={p} value={p}/>)}</datalist>
                 </label>
-                <p className="secondary">
-                  检查会使用已保存的服务商配置和模型发送真实推理请求，可能产生费用；未保存的修改不会用于检查。
-                </p>
-                <div className="action-row">
-                  <button
-                    type="button"
-                    className="button secondary-button"
-                    disabled={busy || !deviceId}
-                    onClick={() =>
-                      void run(async () => {
-                        const result = await api.validateProvider(edit.id, { deviceId });
-                        setNotice(`${result.ok ? '连接成功' : '连接失败'}：${result.message}`);
-                      })
-                    }
-                  >
-                    检查连接
-                  </button>
+              </div>}
+
+              <details className="fold-panel">
+                <summary>高级设置 · 自定义 Provider</summary>
+                <div className="form" style={{ marginTop: 12 }}>
+                  <p className="secondary">使用 Pi models.json 的 Provider 配置格式。只填写要覆盖的字段；支持 baseUrl、api、headers、models 和 modelOverrides。API Key 请在上方安全保存。</p>
+                  <textarea rows={8} spellCheck={false} value={custom} onChange={e => setCustom(e.target.value)} />
+                  <label className="check"><input type="checkbox" checked={edit.enabled}
+                    onChange={e => setEdit({ ...edit, enabled: e.target.checked })}/>启用服务商</label>
+                  {edit.native && <label>显示名称<input value={edit.name}
+                    onChange={e => setEdit({ ...edit, name: e.target.value })} /></label>}
                 </div>
+              </details>
+
+              {creating && <p className="secondary">创建后可以连接 API Key，并在“模型列表”添加模型。</p>}
+              <div className="action-row">
+                <button className="button" disabled={busy}>{creating ? '创建连接' : '保存设置'}</button>
+                {!creating && <Link to={`/providers/${encodeURIComponent(edit.id)}/models`}
+                  className="button secondary-button">管理模型</Link>}
+                <button type="button" className="quiet-button" onClick={close}>关闭</button>
               </div>
-            )}
+            </form>
           </div>
         )}
       </SheetModal>

@@ -12,6 +12,8 @@
   "dependencies": {
     "@e-launcher/center-contract": "file:../center-contract",
     "@earendil-works/pi-mcp": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
     "@fastify/csrf-protection": "7.1.0",
     "@fastify/multipart": "9.3.0",
     "@fastify/rate-limit": "10.3.0",

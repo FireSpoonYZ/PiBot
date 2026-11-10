@@ -1348,10 +1348,14 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   function centerRegistryKey(snapshot) {
     const providers = (snapshot.providers ?? []).map((provider) => ({
       id: provider.id, enabled: provider.enabled, api: provider.api, baseUrl: provider.baseUrl,
+      native: provider.native, authMode: provider.authMode, headers: provider.headers,
       credential: provider.credentialRef == null ? null
         : [provider.credentialRef, snapshot.credentials?.[provider.credentialRef] ?? null],
       models: (snapshot.models?.[provider.id] ?? []).filter((model) => model.enabled).map((model) => ({
-        id: model.id, contextWindow: model.contextWindow, maxTokens: model.maxTokens, input: model.input,
+        id: model.id, api: model.api, baseUrl: model.baseUrl, headers: model.headers,
+        promptCache: model.promptCache, samplingParams: model.samplingParams,
+        samplingParamsByThinkingLevel: model.samplingParamsByThinkingLevel,
+        contextWindow: model.contextWindow, maxTokens: model.maxTokens, input: model.input,
         reasoning: model.reasoning, cost: model.cost, compat: model.compat ?? null,
         thinkingLevelMap: model.thinkingLevelMap ?? null, inputLimits: model.inputLimits ?? null,
       })),
@@ -1621,7 +1625,11 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 模型注册表只在执行字段变化时重建；Bot 选择不在此处发布。
       const nextRegistryKey = centerRegistryKey(snapshot);
       if (nextRegistryKey !== registryKey) {
-        applyCenterModels(snapshot, models);
+        applyCenterModels(snapshot, models, (providerId, signal) => {
+          const active = centerRuntime.getClient();
+          if (!active) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+          return active.providerAuth(providerId, signal);
+        });
         learningModelRefs = new Set(snapshot.providers
           .filter((provider) => provider.enabled && (provider.credentialRef == null || snapshot.credentials?.[provider.credentialRef]))
           .flatMap((provider) => (snapshot.models[provider.id] ?? []).filter((model) => model.enabled).map((model) => provider.id + '/' + model.id)));

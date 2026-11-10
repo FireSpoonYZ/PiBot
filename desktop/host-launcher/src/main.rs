@@ -13,7 +13,8 @@ mod supervisor;
 mod util;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::BufRead;
+use std::error::Error;
+use std::io::{self, BufRead};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -51,6 +52,8 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(70);
 const KILL_TIMEOUT: Duration = Duration::from_secs(5);
 /// Single authenticated /v1/service probe bound for the status command.
 const READY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const CANCEL_UPDATE_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
+const CANCEL_UPDATE_RETRY_INTERVAL: Duration = Duration::from_millis(200);
 /// Slice of the setup-shower budget kept for restarting the Host afterwards:
 /// host-task start 40s + lock wait 10s + pipe drain slack ≈ 55s.
 const RESTART_RESERVE: Duration = Duration::from_secs(55);
@@ -505,11 +508,26 @@ fn cmd_update(paths: &HostPaths, prepare: bool, stop_active: bool) -> AppResult<
     let token = secrets.get(CONTROL_TOKEN_KEY)
         .ok_or_else(|| AppError::new("CONFIG_INVALID", "control token is missing"))?;
     let url = format!("{}/v1/service/update", config.control_url());
-    ureq::AgentBuilder::new().redirects(0)
-        .timeout_connect(Duration::from_secs(2)).timeout(Duration::from_secs(55)).build()
-        .post(&url).set("authorization", &format!("Bearer {token}"))
-        .send_json(json!({ "action": if prepare { "prepare" } else { "cancel" }, "stopActive": stop_active }))
-        .map_err(|e| AppError::new("UPDATE_FAILED", format!("Host update coordination failed: {e}")))?
+    let agent = ureq::AgentBuilder::new().redirects(0)
+        .timeout_connect(Duration::from_secs(2)).timeout(Duration::from_secs(55)).build();
+    let authorization = format!("Bearer {token}");
+    let body = json!({ "action": if prepare { "prepare" } else { "cancel" }, "stopActive": stop_active });
+    let retry_deadline = Instant::now() + CANCEL_UPDATE_RETRY_TIMEOUT;
+    let response = loop {
+        match agent.post(&url).set("authorization", &authorization).send_json(&body) {
+            Ok(response) => break response,
+            // A DEB upgrade can restart the supervisor before its control port starts listening.
+            Err(ureq::Error::Transport(error)) if !prepare
+                && error.source().and_then(|source| source.downcast_ref::<io::Error>())
+                    .is_some_and(|cause| cause.kind() == io::ErrorKind::ConnectionRefused)
+                && Instant::now() + CANCEL_UPDATE_RETRY_INTERVAL <= retry_deadline =>
+            {
+                std::thread::sleep(CANCEL_UPDATE_RETRY_INTERVAL);
+            }
+            Err(error) => return Err(AppError::new("UPDATE_FAILED", format!("Host update coordination failed: {error}"))),
+        }
+    };
+    response
         .into_json::<Value>()
         .map_err(|_| AppError::new("UPDATE_FAILED", "Host returned invalid update state"))
 }
