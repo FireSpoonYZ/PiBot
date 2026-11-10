@@ -6,7 +6,7 @@
 // 限制、断线退避与阻塞判定，绝不读写 runtime 或模型状态。
 import { mkdirSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { normalizeDeviceName, normalizeDevicePlatform } from './device-metadata.js';
+import { hostDevicePlatform, normalizeDeviceName, normalizeDevicePlatform } from './device-metadata.js';
 import { join, isAbsolute } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import WebSocket from 'ws';
@@ -117,7 +117,7 @@ export async function openDeviceLink(options) {
   const ca = options.ca === undefined || options.ca === null ? undefined : options.ca;
   if (ca !== undefined) validateCa(ca);
   const displayName = options.displayName === undefined ? undefined : normalizeDeviceName(options.displayName);
-  const platform = normalizeDevicePlatform(options.platform ?? process.platform);
+  const platform = normalizeDevicePlatform(options.platform ?? hostDevicePlatform());
   const onStatus = options.onStatus;
   if (onStatus !== undefined && typeof onStatus !== 'function') {
     throw messageError('INVALID_ARGUMENT', 'onStatus must be a function');

@@ -26,6 +26,8 @@ removed, or rewritten.
 | `aws-sdk-js-v3-Apache-2.0.txt` | @aws-sdk/credential-provider-http, @aws-sdk/credential-provider-login, @aws-sdk/nested-clients | 3.972.77, 3.972.82, 3.997.49 | Apache-2.0 | aws/aws-sdk-js-v3 monorepo root `LICENSE` (copied verbatim from sibling `@aws-sdk/client-bedrock-runtime/LICENSE`) |
 | `data-uri-to-buffer-4.0.1-MIT.txt` | data-uri-to-buffer | 4.0.1 | MIT | `License` section embedded in `data-uri-to-buffer@4.0.1/README.md` |
 | `proxy-agents-MIT.txt` | proxy-agent-negotiate | 1.1.0 | MIT | TooTallNate/proxy-agents monorepo root `LICENSE` (copied verbatim from sibling `https-proxy-agent/LICENSE`) |
+| `objc2-LICENSE.md` | block2, objc2, objc2-encode, objc2-foundation (MIT); dispatch2, objc2-exception-helper, objc2-app-kit, objc2-core-foundation, objc2-core-graphics, objc2-io-surface, objc2-osa-kit, objc2-quartz-core, objc2-web-kit (Zlib OR Apache-2.0 OR MIT) | 0.6.2, 0.6.5, 4.1.0, 0.3.2; 0.3.1, 0.1.1, 0.3.2 | see package column | https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md — byte-identical (SHA-256 `7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54`) at every source commit recorded in the crates' `.cargo_vcs_info.json` (b4167b5, d7d2fa2, 8d214f5, 8852b42, 7b1abfd) |
+| `spdx-MIT.txt` | the objc2 crates above (used under MIT) | — | MIT | https://raw.githubusercontent.com/spdx/license-list-data/v3.29.0/text/MIT.txt (SHA-256 `b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5`); the objc2 `LICENSE.md` is a licensing statement without an MIT text or copyright line, so the standard text is included alongside it |
 
 `plist@1.10.3` is not vendored: its crate archive contains a top-level
 `LICENCE` file, which the packaging script discovers directly via the
@@ -36,6 +38,10 @@ Linux x64 dependency set (discovered while packaging on Linux) whose crate
 archives ship no license file; they are exact package@version entries, so they
 do not affect the Windows dependency set. Listing them here is a packaging
 statement only, not evidence that the Linux client was built or launched.
+
+The objc2-family entries come from the macOS arm64 dependency set (Tauri/wry
+and the `ctrlc` dependency of `pibot-host`); `build-desktop.js` records the
+exact upstream commit and crate path of each crate in the generated notices.
 
 `build-desktop.js` consults this directory only for the exact
 package@version + license pairs listed above when normal license discovery in
