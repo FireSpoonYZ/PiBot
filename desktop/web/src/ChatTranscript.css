@@ -224,12 +224,4 @@
   font-family: var(--mono, ui-monospace, Consolas, monospace);
   font-size: 0.92em;
 }
-.desktop-shell .desktop-transcript .markdown table { border-collapse: collapse; }
-.desktop-shell .desktop-transcript .markdown th,
-.desktop-shell .desktop-transcript .markdown td {
-  border: 1px solid var(--line);
-  padding: 5px 10px;
-  text-align: left;
-}
-.desktop-shell .desktop-transcript .table-scroll,
 .desktop-shell .desktop-transcript .katex-display { max-width: 100%; overflow-x: auto; }
