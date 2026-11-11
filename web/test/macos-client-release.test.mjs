@@ -4,22 +4,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { createHash, randomBytes, scryptSync } from 'node:crypto';
-import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { openCenterStore } from '../../center-server/data/index.js';
-import { openHostBridge } from '../../center-server/host-bridge.js';
-import { registerAuth } from '../../center-server/auth.js';
-import { registerClientReleaseRoutes } from '../../center-server/client-releases.js';
 import { readAppBundleInfo } from '../../center-server/app-bundle.js';
 import { hostDevicePlatform } from '../../host-core/device-metadata.js';
+import { multipartBody, openTestCenter, verifyUpdaterArtifact, verifyUpdaterSignature } from '../../scripts/verify-updater-artifact.mjs';
 
-// Fastify 与 multipart 只安装在 center-server 包内，按该包解析。
-const centerRequire = createRequire(new URL('../../center-server/package.json', import.meta.url));
-const Fastify = centerRequire('fastify');
-const multipart = centerRequire('@fastify/multipart');
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const PASSWORD = 'macos-release-test-password';
+const TAURI_CLI = path.join(ROOT, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
 const COMMIT = 'a'.repeat(40);
 
 function tempDir(prefix) {
@@ -68,60 +60,23 @@ function fakeSignature(version) {
     `trusted comment: timestamp:1700000000\tfile:PiBot.app.tar.gz\tversion:${version}\n${'B'.repeat(40)}==\n`;
 }
 
-function ownerPasswordHash(password) {
-  const salt = randomBytes(16);
-  return `scrypt$${salt.toString('hex')}$${scryptSync(password, salt, 64).toString('hex')}`;
+/** Throwaway updater key from the Tauri CLI (never the release key). */
+function tauriKey(dir, name = 'updater.key') {
+  const key = path.join(dir, name);
+  execFileSync(process.execPath, [TAURI_CLI, 'signer', 'generate', '--ci', '-p', '', '-w', key, '-f'], { stdio: 'pipe' });
+  return { key, publicKey: fs.readFileSync(`${key}.pub`, 'utf8') };
 }
 
-function cookieOf(res, previous = '') {
-  const raw = res.headers['set-cookie'];
-  const cookies = (Array.isArray(raw) ? raw : [raw]).filter(Boolean).map(value => value.split(';')[0]);
-  return cookies.length ? cookies.join('; ') : previous;
-}
-
-function multipartBody(metadata, file, filename) {
-  const boundary = '----pibot' + randomBytes(8).toString('hex');
-  const body = Buffer.concat([
-    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="metadata"\r\n\r\n${JSON.stringify(metadata)}\r\n`),
-    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="artifact"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n`),
-    file,
-    Buffer.from(`\r\n--${boundary}--\r\n`),
-  ]);
-  return { body, contentType: `multipart/form-data; boundary=${boundary}` };
+/** Signs like the Tauri bundler does: base64 minisign text in <file>.sig. */
+function tauriSign(file, key, version) {
+  const args = [TAURI_CLI, 'signer', 'sign', '-f', key, '-p', ''];
+  if (version) args.push('--app-version', version);
+  execFileSync(process.execPath, [...args, file], { stdio: 'pipe' });
+  return fs.readFileSync(`${file}.sig`, 'utf8');
 }
 
 async function openCenter() {
-  const dataRoot = tempDir('el-center-macos-release-');
-  const store = openCenterStore({ dataRoot, encryptionKey: new Uint8Array(32).fill(7) });
-  const bridge = openHostBridge({ dataRoot, store, linkUrl: 'wss://127.0.0.1:1', relay: { getStatus: () => ({ onlineDeviceIds: [] }) } });
-  const app = Fastify({ logger: false });
-  app.setErrorHandler((error, req, reply) => {
-    let code = typeof error.code === 'string' ? error.code : 'INTERNAL_ERROR';
-    if (code === 'FST_CSRF_INVALID_TOKEN' || code === 'FST_CSRF_MISSING_SECRET') code = 'CSRF_INVALID';
-    reply.code(code === 'INTERNAL_ERROR' ? 500 : 400).send({ error: { code } });
-  });
-  await registerAuth(app, { sessionKey: randomBytes(32), ownerPasswordHash: ownerPasswordHash(PASSWORD) });
-  await app.register(multipart, { limits: { files: 1, fileSize: 100 * 1024 * 1024, fields: 0 } });
-  await registerClientReleaseRoutes(app, { store, dataRoot, registry: bridge.registry, internalDeviceId: bridge.deviceId, publicUrl: 'https://center.example' });
-  await app.ready();
-  return {
-    app,
-    async login() {
-      let res = await app.inject({ method: 'GET', url: '/api/session' });
-      let cookie = cookieOf(res);
-      res = await app.inject({ method: 'POST', url: '/api/session', headers: { cookie, 'x-csrf-token': res.json().csrfToken }, payload: { password: PASSWORD } });
-      assert.equal(res.statusCode, 200);
-      cookie = cookieOf(res, cookie);
-      res = await app.inject({ method: 'GET', url: '/api/session', headers: { cookie } });
-      return { cookie: cookieOf(res, cookie), csrfToken: res.json().csrfToken };
-    },
-    async close() {
-      await app.close();
-      bridge.close();
-      store.close();
-      fs.rmSync(dataRoot, { recursive: true, force: true });
-    },
-  };
+  return openTestCenter();
 }
 
 function metadataFor(file, overrides = {}) {
@@ -239,6 +194,63 @@ test('release-artifact emits app metadata only for the PiBot bundle identity', (
     } finally {
       fs.rmSync(foreign, { recursive: true, force: true });
     }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Tauri-signed updater bundle passes signature, release metadata and center publish/query/download', async () => {
+  const dir = tempDir('el-updater-chain-');
+  try {
+    const { key, publicKey } = tauriKey(dir);
+    const archive = makeAppArchive(dir, { version: '1.2.3' });
+    tauriSign(archive, key, '1.2.3');
+    const summary = await verifyUpdaterArtifact({ file: archive, publicKey, version: '1.2.3', platform: 'macos', arch: 'aarch64', format: 'app' });
+    assert.equal(summary.version, '1.2.3');
+    assert.equal(summary.sha256, createHash('sha256').update(fs.readFileSync(archive)).digest('hex'));
+    // Same key id the Tauri CLI wrote into the public key comment.
+    assert.match(Buffer.from(publicKey, 'base64').toString('utf8'), new RegExp(`minisign public key: ${summary.keyId}\\n`));
+
+    // release-artifact.mjs (and so the chain) refuses a bundle whose Info.plist version differs.
+    const other = tempDir('el-updater-chain-other-');
+    try {
+      const stale = makeAppArchive(other, { version: '1.2.2' });
+      tauriSign(stale, key, '1.2.3');
+      await assert.rejects(
+        verifyUpdaterArtifact({ file: stale, publicKey, version: '1.2.3', platform: 'macos', arch: 'aarch64', format: 'app' }),
+        /release-artifact\.mjs rejected/,
+      );
+    } finally {
+      fs.rmSync(other, { recursive: true, force: true });
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('updater signature check rejects tampered files, foreign keys and unbound or edited comments', () => {
+  const dir = tempDir('el-updater-sig-');
+  try {
+    const { key, publicKey } = tauriKey(dir);
+    const { publicKey: foreignKey } = tauriKey(dir, 'foreign.key');
+    const archive = makeAppArchive(dir, { version: '1.2.3' });
+    const bytes = fs.readFileSync(archive);
+    const signature = tauriSign(archive, key, '1.2.3');
+    const check = (overrides = {}) => verifyUpdaterSignature({ bytes, signature, publicKey, fileName: 'PiBot.app.tar.gz', version: '1.2.3', ...overrides });
+
+    assert.equal(check().version, '1.2.3');
+    const tampered = Buffer.from(bytes);
+    tampered[tampered.length - 1] ^= 1;
+    assert.throws(() => check({ bytes: tampered }), /does not match the file/);
+    assert.throws(() => check({ publicKey: foreignKey }), /signed by key/);
+    assert.throws(() => check({ version: '1.2.4' }), /names version 1\.2\.3/);
+    assert.throws(() => check({ fileName: 'Other.app.tar.gz' }), /names file/);
+    assert.throws(() => check({ signature: fakeSignature('1.2.3') }));
+    // `tauri signer sign` without --app-version: not bound to any version.
+    assert.throws(() => check({ signature: tauriSign(archive, key) }), /names version undefined/);
+    // Trusted comment edited after signing.
+    const edited = Buffer.from(signature, 'base64').toString('utf8').replace('version:1.2.3', 'version:9.9.9');
+    assert.throws(() => check({ signature: Buffer.from(edited).toString('base64'), version: '9.9.9' }), /trusted comment signature is invalid/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
