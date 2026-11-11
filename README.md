@@ -184,6 +184,12 @@ $serial = '<已授权设备序列号>'
 
 ---
 
+## 特别感谢
+
+特别感谢 [@WangShayne](https://github.com/WangShayne) 开发并贡献 macOS（Apple Silicon）客户端，以及配套的启动、更新与发布支持。相关贡献见 [PR #27](https://github.com/FireSpoonYZ/PiBot/pull/27)。
+
+---
+
 ## 许可证与社区
 
 本项目基于 [AGPL-3.0](LICENSE) 许可证开源。Operit Shower 的 LGPL 派生源码及随包分发的第三方组件许可声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 [`licenses/`](licenses/)。
