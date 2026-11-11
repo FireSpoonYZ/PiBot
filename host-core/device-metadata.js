@@ -17,3 +17,12 @@ export function normalizeDevicePlatform(value) {
   }
   return value.trim();
 }
+
+/**
+ * Platform this Host reports to the center. Node's `darwin` is reported as the
+ * center's `macos` (the UI matches platforms by substring, and `darwin` contains
+ * `win`); every other value keeps the existing Node name.
+ */
+export function hostDevicePlatform(platform = process.platform) {
+  return platform === 'darwin' ? 'macos' : platform;
+}

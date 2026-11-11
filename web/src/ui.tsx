@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useState } from 'react';
 import { CheckCircle2, ChevronDown, ChevronUp, CircleAlert, Info, RefreshCw, TriangleAlert, X } from 'lucide-react';
+import './error-notice.css';
 
 export type UiLanguage = 'system' | 'zh' | 'en';
 export const LanguageOverride = createContext<UiLanguage | undefined>(undefined);
@@ -380,6 +381,7 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
 
   if (
     code === 'BUSY' ||
+    code === 'RUNTIME_BUSY' ||
     code === 'RPC_BUSY' ||
     body.includes('队列已满') ||
     body.includes('并发已满') ||
@@ -418,7 +420,15 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
   }
 
   // 7. Bot lifecycle & protection rules
-  if (body.includes('主智能体受保护') || lower.includes('primary bot is protected')) {
+  if (code === 'BOT_NOT_FOUND') {
+    return {
+      tone: 'info',
+      title: t('该智能体已不存在', 'This bot no longer exists'),
+      description: t('请刷新对话列表，选择其他智能体继续。', 'Refresh the conversation list and select another bot.'),
+      detail,
+    };
+  }
+  if (code === 'PRIMARY_BOT_PROTECTED' || body.includes('主智能体受保护') || lower.includes('primary bot is protected')) {
     return {
       tone: 'warning',
       title: t('主助手受保护，无法直接归档或删除', 'Primary Assistant is Protected'),
@@ -560,13 +570,15 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
 
   // Default fallback: clean title without ugly raw code prefix
   const fallbackTitle =
-    contextPrefix && body
+    code && !/[\u3400-\u9fff]/.test(body)
+      ? t('操作未能完成', 'Operation Could Not Complete')
+      : contextPrefix && body
       ? `${contextPrefix}：${body}`
       : body || contextPrefix || t('操作未能完成', 'Operation Could Not Complete');
   return {
     tone: 'danger',
     title: fallbackTitle,
-    detail: code ? `${code}${body ? ': ' + body : ''}` : extractedDetail || undefined,
+    detail: code ? raw : extractedDetail || undefined,
   };
 }
 

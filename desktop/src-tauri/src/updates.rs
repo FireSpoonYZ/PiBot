@@ -242,15 +242,61 @@ async fn resolve_center_auth(app: &AppHandle) -> Result<Option<CenterAuth>, Brid
 }
 
 fn update_target() -> Result<(&'static str, &'static str, &'static str), BridgeError> {
-  if !cfg!(target_arch = "x86_64") {
-    return Err(invalid("desktop updater supports x86_64 only"));
-  }
-  if cfg!(windows) {
+  if cfg!(windows) && cfg!(target_arch = "x86_64") {
     Ok(("windows", "x86_64", "nsis"))
-  } else if cfg!(target_os = "linux") {
+  } else if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
     Ok(("linux", "x86_64", "deb"))
+  } else if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+    // Tauri's macOS updater installs a signed PiBot.app.tar.gz in place.
+    Ok(("macos", "aarch64", "app"))
   } else {
-    Err(invalid("desktop updater supports Windows and Linux only"))
+    Err(invalid("desktop updater supports Windows/Linux x86_64 and macOS Apple Silicon only"))
+  }
+}
+
+struct Installed {
+  result: Result<(), String>,
+  /// Non-fatal Host restore problem to report next to the result.
+  note: Option<String>,
+  /// The Host that held the update preparation was stopped; the restarted
+  /// process never entered maintenance, so there is nothing to cancel.
+  host_cycled: bool,
+}
+
+/// Installs the verified package. Windows/Linux installers own the Host
+/// lifecycle (NSIS hooks, DEB maintainer scripts); macOS swaps the .app in
+/// place, so the Host is stopped around the swap and restored afterwards.
+async fn install_package(update: Update, bytes: Arc<Vec<u8>>) -> Installed {
+  #[cfg(target_os = "macos")]
+  {
+    match host_service::with_host_stopped(move || update.install(bytes.as_slice())).await {
+      Ok((result, note)) => Installed { result: result.map_err(|err| err.to_string()), note, host_cycled: true },
+      // Nothing was replaced: the swap only runs after a confirmed stop.
+      Err(err) => Installed {
+        result: Err(format!(
+          "update not installed: the local Host could not be confirmed stopped ({}: {})",
+          err.code, err.message
+        )),
+        note: None,
+        host_cycled: false,
+      },
+    }
+  }
+  #[cfg(not(target_os = "macos"))]
+  {
+    let result = match tauri::async_runtime::spawn_blocking(move || update.install(bytes.as_slice())).await {
+      Ok(Ok(())) => Ok(()),
+      Ok(Err(err)) => Err(err.to_string()),
+      Err(err) => Err(format!("install worker failed: {err}")),
+    };
+    Installed { result, note: None, host_cycled: false }
+  }
+}
+
+fn with_note(message: String, note: Option<String>) -> String {
+  match note {
+    Some(note) => format!("{message}; {note}"),
+    None => message,
   }
 }
 
@@ -716,7 +762,10 @@ pub async fn desktop_update_install(
   if !fence_matches(&app, &state, operation, &fence).await {
     return Ok(finish_stale(&state, &current, operation).await);
   }
-  let result = tauri::async_runtime::spawn_blocking(move || update.install(bytes.as_slice())).await;
+  let Installed { result, note, host_cycled } = install_package(update, bytes).await;
+  if host_cycled {
+    state.inner.lock().unwrap().prepared = false;
+  }
   if !fence_matches(&app, &state, operation, &fence).await {
     return Ok(finish_stale(&state, &current, operation).await);
   }
@@ -728,8 +777,10 @@ pub async fn desktop_update_install(
     });
   }
   match (result, cleanup) {
-    (_, Err(message)) => Ok(finish(&state, &current, operation, Phase::Error, Some(message))),
-    (Ok(Ok(())), Ok(())) => {
+    // Keep the install failure (e.g. a blocked swap) visible next to a cleanup failure.
+    (Err(failed), Err(message)) => Ok(finish(&state, &current, operation, Phase::Error, Some(with_note(format!("{failed}; {message}"), note)))),
+    (Ok(()), Err(message)) => Ok(finish(&state, &current, operation, Phase::Error, Some(with_note(message, note)))),
+    (Ok(()), Ok(())) => {
       {
         let mut inner = state.inner.lock().unwrap();
         if !inner.invalidated {
@@ -737,12 +788,11 @@ pub async fn desktop_update_install(
           inner.fence = Some(fence.clone());
         }
       }
-      Ok(finish(&state, &current, operation, Phase::Complete, Some(
-        "update installed; restart the app to run the new version".to_string(),
-      )))
+      Ok(finish(&state, &current, operation, Phase::Complete, Some(with_note(
+        "update installed; restart the app to run the new version".to_string(), note,
+      ))))
     }
-    (Ok(Err(err)), Ok(())) => Ok(finish(&state, &current, operation, Phase::Error, Some(err.to_string()))),
-    (Err(err), Ok(())) => Ok(finish(&state, &current, operation, Phase::Error, Some(format!("install worker failed: {err}")))),
+    (Err(message), Ok(())) => Ok(finish(&state, &current, operation, Phase::Error, Some(with_note(message, note)))),
   }
 }
 

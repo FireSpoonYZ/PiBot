@@ -6,7 +6,7 @@
 //! argv or logs — and parses the single-line JSON it prints on stdout.
 
 use std::{
-  env, fs,
+  fs,
   io::{BufRead, BufReader, Read, Write},
   net::{SocketAddr, TcpStream},
   path::{Path, PathBuf},
@@ -95,8 +95,11 @@ fn resolve_launcher() -> Result<PathBuf, BridgeError> {
 
 /// Runs one launcher subcommand synchronously. Call only from a blocking thread.
 fn run_launcher(args: &[String], secret: Option<&str>, timeout: Duration) -> Result<Value, BridgeError> {
-  let launcher = resolve_launcher()?;
-  let mut cmd = Command::new(&launcher);
+  run_launcher_at(&resolve_launcher()?, args, secret, timeout)
+}
+
+fn run_launcher_at(launcher: &Path, args: &[String], secret: Option<&str>, timeout: Duration) -> Result<Value, BridgeError> {
+  let mut cmd = Command::new(launcher);
   cmd.args(args);
   for key in SECRET_ENV_KEYS {
     cmd.env_remove(key);
@@ -223,6 +226,84 @@ where
 /// `cancel-update`) for the updater coordination path.
 pub(crate) async fn host_cli(args: Vec<String>, timeout: Duration) -> Result<Value, BridgeError> {
   run_blocking(move || run_launcher(&args, None, timeout)).await
+}
+
+/// macOS has no installer lifecycle around an update: the Host runs code from
+/// inside PiBot.app, so it is stopped with the current launcher before `swap`
+/// replaces the bundle, then the LaunchAgent is refreshed (if autostart was on)
+/// and the Host restarted with the new launcher at the same path. The whole
+/// sequence holds the host-control lock so no UI action interleaves. See
+/// [`cycle_host_for_update`] for the rules.
+#[cfg(target_os = "macos")]
+pub(crate) async fn with_host_stopped<T: Send + 'static>(
+  swap: impl FnOnce() -> T + Send + 'static,
+) -> Result<(T, Option<String>), BridgeError> {
+  run_blocking(move || {
+    let _guard = HOST_CONTROL_LOCK.lock().unwrap();
+    let mut launcher = |action: &str| {
+      let timeout = if action == "status" { STATUS_TIMEOUT } else { control_timeout(action) };
+      run_launcher(&[action.to_string()], None, timeout)
+    };
+    cycle_host_for_update(&mut launcher, swap)
+  })
+  .await
+}
+
+/// Runs one launcher subcommand and returns its JSON result.
+type LauncherCall<'a> = dyn FnMut(&str) -> Result<Value, BridgeError> + 'a;
+
+/// `stop` always runs: besides stopping a live supervisor it unloads the
+/// LaunchAgent job, so launchd cannot respawn bundle code mid-swap. `swap`
+/// runs only after the launcher confirmed both (see [`confirm_stopped`]);
+/// otherwise this returns Err without swapping, after trying to bring a
+/// previously running Host back. Restore problems after `swap` are returned
+/// as a message next to its result.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn cycle_host_for_update<T>(
+  launcher: &mut LauncherCall<'_>,
+  swap: impl FnOnce() -> T,
+) -> Result<(T, Option<String>), BridgeError> {
+  let status = launcher("status")?;
+  let was_running = is_running(&status);
+  let autostart = status.get("autostart").and_then(Value::as_bool) == Some(true);
+  if let Err(err) = launcher("stop").and_then(|result| confirm_stopped(&result)) {
+    if was_running {
+      let _ = launcher("start");
+    }
+    return Err(err);
+  }
+  let output = swap();
+  let mut problems = Vec::new();
+  let mut step = |action: &str| {
+    if let Err(e) = launcher(action) {
+      problems.push(format!("{action}: {}: {}", e.code, e.message));
+    }
+  };
+  if autostart {
+    step("enable");
+  }
+  if was_running {
+    step("start");
+  }
+  let message = (!problems.is_empty()).then(|| format!("local Host was not fully restored ({})", problems.join("; ")));
+  Ok((output, message))
+}
+
+/// A stop result only allows the swap when the supervisor exited and launchd
+/// reported the LaunchAgent unloaded (`launchdLoaded: false`). A result
+/// without that confirmation (an older launcher, or one that only warned
+/// about the unload) is treated as a failed stop.
+fn confirm_stopped(result: &Value) -> Result<(), BridgeError> {
+  let stopped = result.get("status").and_then(Value::as_str) == Some("stopped");
+  let unloaded = result.get("launchdLoaded").and_then(Value::as_bool) == Some(false);
+  if stopped && unloaded {
+    return Ok(());
+  }
+  Err(BridgeError::new(
+    "STOP_UNCONFIRMED",
+    "the launcher did not confirm that the Host stopped and its LaunchAgent is unloaded",
+    "responded",
+  ))
 }
 
 fn validate_center_url(raw: &str) -> Result<String, BridgeError> {
@@ -379,9 +460,19 @@ fn stage_center_ca(pem: &str, home: PathBuf) -> Result<StagedCa, BridgeError> {
 
 fn local_hostname() -> Option<String> {
   #[cfg(windows)]
-  let raw = env::var("COMPUTERNAME").ok();
-  #[cfg(not(windows))]
-  let raw = env::var("HOSTNAME")
+  let raw = std::env::var("COMPUTERNAME").ok();
+  // The user-facing "Computer Name" from System Settings (same source as the launcher).
+  #[cfg(target_os = "macos")]
+  let raw = Command::new("/usr/sbin/scutil")
+    .args(["--get", "ComputerName"])
+    .stdin(Stdio::null())
+    .stderr(Stdio::null())
+    .output()
+    .ok()
+    .filter(|out| out.status.success())
+    .map(|out| String::from_utf8_lossy(&out.stdout).into_owned());
+  #[cfg(not(any(windows, target_os = "macos")))]
+  let raw = std::env::var("HOSTNAME")
     .ok()
     .or_else(|| fs::read_to_string("/etc/hostname").ok());
   raw
@@ -526,7 +617,7 @@ pub async fn desktop_host_status(webview: Webview) -> Result<Value, BridgeError>
       // Static knowledge: lets the UI gate Windows-only actions even if an
       // older launcher build omits the field.
       obj.entry("platform").or_insert(Value::String(
-        if cfg!(windows) { "windows" } else { "linux" }.to_string(),
+        if cfg!(windows) { "windows" } else if cfg!(target_os = "macos") { "macos" } else { "linux" }.to_string(),
       ));
     }
     Ok(status)
@@ -827,4 +918,305 @@ pub async fn desktop_host_control(
     }
     Ok(result)
   }).await
+}
+
+#[cfg(test)]
+mod tests {
+  use std::{cell::RefCell, rc::Rc};
+
+  use super::*;
+
+  type Answer = Box<dyn FnMut(&str) -> Result<Value, BridgeError>>;
+
+  /// Runs the update cycle against a scripted launcher. Returns the result
+  /// and the call order, with `swap` recorded where the bundle was replaced.
+  fn cycle(mut answer: Answer) -> (Result<(&'static str, Option<String>), BridgeError>, Vec<String>) {
+    let log = Rc::new(RefCell::new(Vec::<String>::new()));
+    let launcher_log = log.clone();
+    let mut launcher = move |action: &str| {
+      launcher_log.borrow_mut().push(action.to_string());
+      answer(action)
+    };
+    let swap_log = log.clone();
+    let result = cycle_host_for_update(&mut launcher, move || {
+      swap_log.borrow_mut().push("swap".to_string());
+      "swapped"
+    });
+    let calls = log.borrow().clone();
+    (result, calls)
+  }
+
+  /// A running Host with autostart on, whose `stop` answers `stop`.
+  fn running_host(stop: Result<Value, BridgeError>) -> Answer {
+    let mut stop = Some(stop);
+    Box::new(move |action| match action {
+      "status" => Ok(json!({ "running": true, "autostart": true })),
+      "stop" => stop.take().expect("stop runs once"),
+      _ => Ok(json!({ "status": "started" })),
+    })
+  }
+
+  fn confirmed_stop() -> Value {
+    json!({ "status": "stopped", "launchdLoaded": false })
+  }
+
+  #[test]
+  fn unload_failure_never_swaps_and_brings_the_host_back() {
+    let unload_failed = BridgeError::new(
+      "STOP_FAILED",
+      "the Host stopped, but its LaunchAgent could not be confirmed unloaded, so launchd may start it again: launchctl exited 5",
+      "responded",
+    );
+    let (result, calls) = cycle(running_host(Err(unload_failed)));
+    assert_eq!(result.unwrap_err().code, "STOP_FAILED");
+    assert_eq!(calls, ["status", "stop", "start"]);
+  }
+
+  #[test]
+  fn stop_without_unload_confirmation_never_swaps() {
+    let unconfirmed = [
+      // Pre-fix launcher shape: unload error demoted to a warning.
+      json!({ "status": "stopped", "warnings": ["AUTOSTART_FAILED: launchctl bootout: exited 5"] }),
+      json!({ "status": "stopped" }),
+      json!({ "status": "stopped", "launchdLoaded": true }),
+      json!({ "status": "stopped", "launchdLoaded": "false" }),
+      json!({ "status": "running", "launchdLoaded": false }),
+      json!({}),
+    ];
+    for stop in unconfirmed {
+      let (result, calls) = cycle(running_host(Ok(stop.clone())));
+      assert_eq!(result.unwrap_err().code, "STOP_UNCONFIRMED", "{stop}");
+      assert_eq!(calls, ["status", "stop", "start"], "{stop}");
+    }
+  }
+
+  #[test]
+  fn stop_timeout_never_swaps() {
+    let (result, calls) = cycle(running_host(Err(BridgeError::new("TIMEOUT", "host launcher timed out", "unconfirmed"))));
+    assert_eq!(result.unwrap_err().code, "TIMEOUT");
+    assert!(!calls.iter().any(|c| c == "swap"));
+  }
+
+  #[test]
+  fn unreadable_status_neither_stops_nor_swaps() {
+    let (result, calls) = cycle(Box::new(|_| Err(BridgeError::new("HOST_LAUNCHER_MISSING", "missing", "not-sent"))));
+    assert_eq!(result.unwrap_err().code, "HOST_LAUNCHER_MISSING");
+    assert_eq!(calls, ["status"]);
+  }
+
+  #[test]
+  fn stopped_host_is_not_started_when_its_stop_fails() {
+    let mut stop = Some(Err(BridgeError::new("STOP_FAILED", "unload failed", "responded")));
+    let (result, calls) = cycle(Box::new(move |action| match action {
+      "status" => Ok(json!({ "running": false, "autostart": true })),
+      "stop" => stop.take().unwrap(),
+      _ => Ok(json!({})),
+    }));
+    assert!(result.is_err());
+    assert_eq!(calls, ["status", "stop"]);
+  }
+
+  #[test]
+  fn confirmed_stop_swaps_then_restores_in_order() {
+    let (result, calls) = cycle(running_host(Ok(confirmed_stop())));
+    assert_eq!(result.unwrap(), ("swapped", None));
+    assert_eq!(calls, ["status", "stop", "swap", "enable", "start"]);
+  }
+
+  #[test]
+  fn host_that_was_stopped_without_autostart_stays_stopped() {
+    let (result, calls) = cycle(Box::new(|action| match action {
+      "status" => Ok(json!({ "running": false, "autostart": false })),
+      "stop" => Ok(confirmed_stop()),
+      other => panic!("unexpected {other}"),
+    }));
+    assert_eq!(result.unwrap(), ("swapped", None));
+    assert_eq!(calls, ["status", "stop", "swap"]);
+  }
+
+  #[test]
+  fn restore_problems_are_reported_next_to_the_swap_result() {
+    let (result, calls) = cycle(Box::new(|action| match action {
+      "status" => Ok(json!({ "running": true, "autostart": true })),
+      "stop" => Ok(confirmed_stop()),
+      "enable" => Err(BridgeError::new("AUTOSTART_FAILED", "launchctl enable: denied", "responded")),
+      _ => Err(BridgeError::new("START_TIMEOUT", "launcher did not start within 10s", "responded")),
+    }));
+    let (output, message) = result.unwrap();
+    assert_eq!(output, "swapped");
+    let message = message.unwrap();
+    assert!(message.contains("enable: AUTOSTART_FAILED") && message.contains("start: START_TIMEOUT"), "{message}");
+    assert_eq!(calls, ["status", "stop", "swap", "enable", "start"]);
+  }
+
+  /// The update cycle against real launchd, the real launcher and copies of
+  /// a built PiBot.app. Ignored by default; scripts/macos-update-cycle-test.sh
+  /// runs it with a debug launcher (the only build that honours the test
+  /// label), an isolated Host home and a throwaway LaunchAgent label.
+  #[cfg(target_os = "macos")]
+  mod launchd {
+    use std::{
+      fs,
+      os::unix::fs::{MetadataExt, PermissionsExt},
+      path::{Path, PathBuf},
+      process::Command,
+      thread,
+      time::{Duration, Instant},
+    };
+
+    use serde_json::{Value, json};
+
+    use super::super::{BridgeError, STATUS_TIMEOUT, control_timeout, cycle_host_for_update, run_launcher_at};
+
+    const PRODUCT_LABEL: &str = "io.github.firespoonyz.pibot.host";
+    /// How long the swap watches for launchd bringing the Host back.
+    const SWAP_WATCH: Duration = Duration::from_secs(3);
+
+    fn env_path(name: &str) -> PathBuf {
+      std::env::var_os(name)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("{name} is not set; run scripts/macos-update-cycle-test.sh"))
+    }
+
+    fn uid() -> String {
+      let out = Command::new("/usr/bin/id").arg("-u").output().unwrap();
+      String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    /// None when launchd has no such job; otherwise the job's pid, if running.
+    fn job(label: &str) -> Option<Option<u32>> {
+      let out = Command::new("/bin/launchctl").args(["print", &format!("gui/{}/{label}", uid())]).output().unwrap();
+      match out.status.code() {
+        Some(0) => Some(
+          String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("pid = ").and_then(|pid| pid.trim().parse().ok())),
+        ),
+        Some(113) => None,
+        other => panic!("launchctl print exited {other:?}: {}", String::from_utf8_lossy(&out.stderr)),
+      }
+    }
+
+    fn alive(pid: u32) -> bool {
+      Command::new("/bin/kill").args(["-0", &pid.to_string()]).stderr(std::process::Stdio::null()).status().unwrap().success()
+    }
+
+    /// Inodes of the executable images a process has mapped (lsof `txt`).
+    fn mapped_inodes(pid: u32) -> Vec<u64> {
+      let out = Command::new("/usr/sbin/lsof").args(["-a", "-p", &pid.to_string(), "-d", "txt", "-Fi"]).output().unwrap();
+      String::from_utf8_lossy(&out.stdout).lines().filter_map(|line| line.strip_prefix('i')?.parse().ok()).collect()
+    }
+
+    /// Copies the built bundle and puts the debug launcher in place of the
+    /// release one (which ignores the test label).
+    fn copy_app(from: &Path, to: &Path, launcher: &Path) {
+      fs::create_dir_all(to.parent().unwrap()).unwrap();
+      assert!(Command::new("/usr/bin/ditto").arg(from).arg(to).status().unwrap().success());
+      fs::copy(launcher, to.join("Contents/MacOS/pibot-host")).unwrap();
+    }
+
+    /// A paired-looking Host whose center is unreachable: the supervisor runs
+    /// and holds launcher.lock, the Host itself keeps retrying.
+    fn write_host_config(home: &Path) {
+      fs::create_dir_all(home.join("data")).unwrap();
+      let config = json!({
+        "version": 1,
+        "centerUrl": "https://127.0.0.1:9",
+        "deviceId": "00000000-0000-4000-8000-00000000c1c1",
+        "displayName": "launchd update-cycle test",
+        "dataRoot": home.join("data"),
+        "port": 40000 + std::process::id() % 20000,
+      });
+      fs::write(home.join("config.json"), serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+      let secrets = home.join("secrets.env");
+      fs::write(&secrets, "E_LAUNCHER_CONTROL_TOKEN=update-cycle-control\nE_LAUNCHER_RELAY_TOKEN=update-cycle-relay\n").unwrap();
+      fs::set_permissions(&secrets, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    struct Fixture {
+      dir: PathBuf,
+      label: String,
+      installed: PathBuf,
+    }
+
+    impl Fixture {
+      fn run(&self, action: &str) -> Result<Value, BridgeError> {
+        let timeout = if action == "status" { STATUS_TIMEOUT } else { control_timeout(action) };
+        run_launcher_at(&self.installed.join("Contents/MacOS/pibot-host"), &[action.to_string()], None, timeout)
+      }
+    }
+
+    impl Drop for Fixture {
+      /// Leaves no job, plist or process behind, also after a failed assertion.
+      fn drop(&mut self) {
+        let _ = self.run("remove");
+        let _ = Command::new("/bin/launchctl").args(["bootout", &format!("gui/{}/{}", uid(), self.label)]).output();
+        if let Some(home) = std::env::var_os("HOME") {
+          let _ = fs::remove_file(Path::new(&home).join("Library/LaunchAgents").join(format!("{}.plist", self.label)));
+        }
+        let _ = fs::remove_dir_all(&self.dir);
+      }
+    }
+
+    #[test]
+    #[ignore = "needs a GUI launchd domain and a built PiBot.app; run scripts/macos-update-cycle-test.sh"]
+    fn update_cycle_against_real_launchd() {
+      let app = env_path("PIBOT_LAUNCHD_TEST_APP");
+      let debug_launcher = env_path("PIBOT_LAUNCHD_TEST_LAUNCHER");
+      let dir = env_path("PIBOT_LAUNCHD_TEST_DIR");
+      let home = env_path("E_LAUNCHER_HOST_HOME");
+      let label = std::env::var("E_LAUNCHER_LAUNCHD_LABEL").expect("E_LAUNCHER_LAUNCHD_LABEL is not set");
+      assert_ne!(label, PRODUCT_LABEL, "never touch the product LaunchAgent");
+      assert!(home.starts_with(&dir) && !home.exists(), "E_LAUNCHER_HOST_HOME must be a new directory inside PIBOT_LAUNCHD_TEST_DIR");
+      assert_eq!(job(&label), None, "{label} is already loaded");
+
+      let installed = dir.join("Applications/PiBot.app");
+      let staged = dir.join("staged/PiBot.app");
+      let backup = dir.join("backup/PiBot.app");
+      copy_app(&app, &installed, &debug_launcher);
+      copy_app(&app, &staged, &debug_launcher);
+      write_host_config(&home);
+      let fixture = Fixture { dir: dir.clone(), label: label.clone(), installed: installed.clone() };
+
+      // Before: autostart on and launchd running the supervisor.
+      fixture.run("enable").unwrap();
+      let started = fixture.run("start").unwrap();
+      assert!(started.get("warnings").is_none(), "launchd did not start the Host: {started}");
+      let before = fixture.run("status").unwrap();
+      assert_eq!((before["running"].as_bool(), before["autostart"].as_bool()), (Some(true), Some(true)), "{before}");
+      let old_pid = before["pid"].as_u64().unwrap() as u32;
+      assert_eq!(job(&label), Some(Some(old_pid)), "launchd should be running supervisor {old_pid}");
+      let old_inode = fs::metadata(installed.join("Contents/MacOS/pibot-host")).unwrap().ino();
+      let new_inode = fs::metadata(staged.join("Contents/MacOS/pibot-host")).unwrap().ino();
+
+      let mut launcher = |action: &str| fixture.run(action);
+      let (output, note) = cycle_host_for_update(&mut launcher, || {
+        // The job is gone and stays gone: launchd cannot start bundle code mid-swap.
+        let watch = Instant::now() + SWAP_WATCH;
+        while Instant::now() < watch {
+          assert_eq!(job(&label), None, "LaunchAgent loaded during the swap");
+          assert!(!alive(old_pid), "supervisor {old_pid} still running during the swap");
+          thread::sleep(Duration::from_millis(200));
+        }
+        let during = fixture.run("status").unwrap();
+        assert_eq!(during["running"].as_bool(), Some(false), "{during}");
+        // Same moves as the updater: old bundle aside, new bundle into place.
+        fs::create_dir_all(backup.parent().unwrap()).unwrap();
+        fs::rename(&installed, &backup).unwrap();
+        fs::rename(&staged, &installed).unwrap();
+        "swapped"
+      })
+      .unwrap();
+      assert_eq!((output, note), ("swapped", None));
+
+      // After: the LaunchAgent is loaded again and launchd runs the new launcher.
+      let after = fixture.run("status").unwrap();
+      assert_eq!((after["running"].as_bool(), after["autostart"].as_bool()), (Some(true), Some(true)), "{after}");
+      let new_pid = after["pid"].as_u64().unwrap() as u32;
+      assert_ne!(new_pid, old_pid);
+      assert_eq!(job(&label), Some(Some(new_pid)), "launchd should be running supervisor {new_pid}");
+      let inodes = mapped_inodes(new_pid);
+      assert!(inodes.contains(&new_inode) && !inodes.contains(&old_inode), "supervisor {new_pid} maps {inodes:?}, new launcher is {new_inode}, old {old_inode}");
+    }
+  }
 }

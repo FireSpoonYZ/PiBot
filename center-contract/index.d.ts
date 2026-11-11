@@ -511,14 +511,15 @@ export interface ActionResult { result: JsonValue }
  * the updated record. GET /api/client-releases/:id/download streams the
  * installer to authenticated owners via record.downloadUrl.
  */
-export type ClientReleasePlatform = 'windows' | 'linux' | 'android';
+export type ClientReleasePlatform = 'windows' | 'linux' | 'macos' | 'android';
 export type ClientReleaseArch = 'x86_64' | 'aarch64';
-export type ClientReleaseFormat = 'nsis' | 'deb' | 'apk';
+/** `app` is the macOS updater bundle (`<Name>.app.tar.gz`), not the DMG. */
+export type ClientReleaseFormat = 'nsis' | 'deb' | 'app' | 'apk';
 
 /**
  * Metadata the CI build exports for import into the center admin UI. The
  * platform/arch/format combination is restricted: windows+x86_64+nsis,
- * linux+x86_64+deb, android+aarch64/x86_64+apk.
+ * linux+x86_64+deb, macos+aarch64+app, android+aarch64/x86_64+apk.
  */
 export interface ClientReleaseMetadata {
   version: string;

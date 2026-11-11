@@ -84,6 +84,20 @@
 
 /* ---------- 群聊 / 待发送 顶部设备选择器 ---------- */
 .desktop-shell .workspace-body { flex-direction: column; }
+.desktop-shell .app-workspace { position: relative; }
+.desktop-shell .app-notices {
+  position: absolute;
+  top: 8px;
+  right: 14px;
+  z-index: 30;
+  width: min(460px, calc(100% - 28px));
+  pointer-events: none;
+}
+.desktop-shell .app-notices > .grok-notice-card {
+  margin: 0 0 8px;
+  pointer-events: auto;
+  box-shadow: var(--shadow-md);
+}
 .desktop-shell .chat-workspace-host { display: contents; }
 .desktop-shell .chat-workspace-host.workspace-hidden { display: none; }
 .desktop-shell .device-view { min-width: 0; }

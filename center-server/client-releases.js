@@ -4,6 +4,7 @@ import { open, rename, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import semver from 'semver';
 import { requireOwner } from './auth.js';
+import { readAppBundleInfo } from './app-bundle.js';
 
 // Per-request multipart limits for this route only; the global registration in
 // server.js keeps its own (smaller) limits for every other upload endpoint.
@@ -22,8 +23,11 @@ const ALLOWED_COMBINATIONS = {
   nsis: { windows: ['x86_64'] },
   deb: { linux: ['x86_64'] },
   apk: { android: ['aarch64', 'x86_64'] },
+  // macOS updater bundle: Tauri's signed <Name>.app.tar.gz (the DMG is a
+  // first-install download only and never served by the center).
+  app: { macos: ['aarch64'] },
 };
-const EXTENSIONS = { nsis: 'exe', deb: 'deb', apk: 'apk' };
+const EXTENSIONS = { nsis: 'exe', deb: 'deb', apk: 'apk', app: 'app.tar.gz' };
 const FORMATS = new Set(Object.keys(ALLOWED_COMBINATIONS));
 const METADATA_FIELDS = new Set(['version', 'platform', 'arch', 'format', 'size', 'sha256', 'signature', 'notes', 'sourceCommit', 'versionCode']);
 
@@ -181,11 +185,19 @@ async function verifyApk(handle, size) {
   return false;
 }
 
-async function verifyArtifact(format, filePath, size) {
+// .app.tar.gz is a gzip tar whose <Name>.app/Contents/Info.plist carries the
+// declared version (CFBundleShortVersionString).
+async function verifyMacApp(filePath, version) {
+  const info = await readAppBundleInfo(filePath);
+  return info !== null && info.version === version;
+}
+
+async function verifyArtifact(meta, filePath, size) {
+  if (meta.format === 'app') return verifyMacApp(filePath, meta.version);
   const handle = await open(filePath, 'r');
   try {
-    if (format === 'nsis') return await verifyNsis(handle, size);
-    if (format === 'deb') return await verifyDeb(handle, size);
+    if (meta.format === 'nsis') return await verifyNsis(handle, size);
+    if (meta.format === 'deb') return await verifyDeb(handle, size);
     return await verifyApk(handle, size);
   } finally {
     await handle.close();
@@ -321,7 +333,7 @@ export function registerClientReleaseRoutes(app, { store, dataRoot, registry, in
       if (metadata.size !== artifact.size || metadata.sha256 !== artifact.sha256) {
         fail('VALIDATION_FAILED', 'Artifact size or sha256 does not match metadata');
       }
-      const matches = await verifyArtifact(metadata.format, tmpPath, artifact.size);
+      const matches = await verifyArtifact(metadata, tmpPath, artifact.size);
       if (!matches) fail('VALIDATION_FAILED', 'Artifact content does not match declared format');
       const id = randomUUID();
       const finalPath = join(directory, id);

@@ -7,6 +7,7 @@ on:
     branches: [develop, master]
   workflow_dispatch:
   # Reusable: invoked by release.yml for v* tags (signed NSIS/DEB + updater sigs).
+  # The experimental macOS client builds separately in desktop-macos.yml.
   workflow_call:
     inputs:
       source-ref:
@@ -41,6 +42,48 @@ env:
   E_LAUNCHER_UPDATER_PUBLIC_KEY: ${{ vars.E_LAUNCHER_UPDATER_PUBLIC_KEY }}
 
 jobs:
+  test:
+    name: Desktop tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source-ref || github.ref }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26.13.0'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            host-core/package-lock.json
+            center-server/package-lock.json
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.1 --profile minimal --no-self-update
+          rustup default 1.99.1
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm ci --prefix host-core
+          npm ci --prefix center-server
+
+      # Shared Host, center and release behaviour, including the updater
+      # signature check and center publish/query/download of a bundle signed
+      # with a throwaway Tauri key (web/test/macos-client-release.test.mjs).
+      - name: Node tests
+        run: npm test
+
+      - name: Launcher tests
+        run: cargo test --locked --manifest-path desktop/host-launcher/Cargo.toml
+
   build:
     name: Desktop ${{ matrix.bundle }}
     strategy:
@@ -117,6 +160,14 @@ jobs:
             extra=(--config "$config")
           fi
           npm run desktop:build -- --bundles ${{ matrix.bundle }} "${extra[@]}"
+
+      # Desktop crate unit tests, including the macOS update rule that the
+      # bundle is only replaced after a confirmed Host stop (the logic is
+      # platform independent). The crate compiles only once the build above
+      # has prepared its bundled binaries and resources.
+      - name: Desktop crate tests
+        if: runner.os == 'Linux'
+        run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml --lib
 
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v7

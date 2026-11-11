@@ -93,6 +93,13 @@ function assertBinaryHeader(buffer, platform, name) {
     }
     return;
   }
+  if (platform === 'darwin') {
+    // 64-bit little-endian Mach-O (MH_MAGIC_64) for CPU_TYPE_ARM64.
+    if (buffer.length < 8 || buffer.readUInt32LE(0) !== 0xfeedfacf || buffer.readUInt32LE(4) !== 0x0100000c) {
+      throw prepareFailed(name + ' binary is not an arm64 Mach-O executable');
+    }
+    return;
+  }
   if (buffer.length < 4 || buffer[0] !== 0x7f || buffer[1] !== 0x45 || buffer[2] !== 0x4c || buffer[3] !== 0x46) {
     throw prepareFailed(name + ' binary is not an ELF executable');
   }

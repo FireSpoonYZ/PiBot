@@ -95,7 +95,7 @@ export function HostServiceSection({ service }: { service: ReturnType<typeof use
   const taskLabel = host?.hostPhase === 'closing' ? t('正在停止', 'Stopping')
     : host?.ready === true ? t('本机已就绪', 'Ready on this device')
     : host?.ready === false ? t('尚未就绪', 'Not ready') : t('状态未知', 'Unknown');
-  const autoLabel = host?.autostartScope === 'user-login' || host?.platform === 'windows'
+  const autoLabel = host?.autostartScope === 'user-login' || host?.platform === 'windows' || host?.platform === 'macos'
     ? t('登录后自动运行', 'Run at login')
     : host?.autostartScope === 'system-boot' || host?.platform === 'linux'
       ? t('开机时自动运行', 'Run at startup')
@@ -142,6 +142,14 @@ export function HostServiceSection({ service }: { service: ReturnType<typeof use
               </button>
             )}
           </div>
+        </div>
+      )}
+      {host?.configured && host.autostartError?.code === 'AUTOSTART_STALE' && (
+        <div className="card-row" role="alert">
+          <span className="metadata">{t('PiBot 的位置或版本已变化，需要重新启用登录后自动运行。', 'PiBot was moved or changed; turn run at login on again to repair it.')}</span>
+          <button type="button" className="secondary-button" disabled={busy !== null} onClick={() => void run('enable')}>
+            {busy === 'enable' ? t('正在重新启用…', 'Re-enabling…') : t('重新启用', 'Re-enable')}
+          </button>
         </div>
       )}
       <div className="dialog-actions">

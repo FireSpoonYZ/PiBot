@@ -106,7 +106,7 @@ export interface DraftWidgetState {
    * 无 id 用 pending_list 分页按冻结 kind/target/bot 或 scope/业务 ID 匹配。
    * 查询到确定受理/终态且草稿已清空才结束本地 attempt；其余保持锁。
    */
-  reconcile(handle: DraftHandle): Promise<ReconcileOutcome>;
+  reconcile(handle: DraftHandle, options?: { silent?: boolean }): Promise<ReconcileOutcome>;
   /** 仅限 not-sent（确定未入队）释放编辑；其余拒绝并返回错误。 */
   releaseIfNotSent(handle: DraftHandle): { ok: boolean; error?: string };
   /** 清稿失败且已核实原记录后，显式重试本地清空（同样走 clearDraft CAS，不触发远程 send）。 */
@@ -683,7 +683,7 @@ export function useDrafts(opts: {
    * - ready-clear-retry：查到记录且本地清空失败 → 允许显式重试本地清空。
    * - unconfirmed：查不到 → 保持未确认与锁（绝不重新 enqueue/换 ID）。
    */
-  const reconcile = useCallback(async (handle: DraftHandle): Promise<ReconcileOutcome> => {
+  const reconcile = useCallback(async (handle: DraftHandle, options?: { silent?: boolean }): Promise<ReconcileOutcome> => {
     const started = currentAttempt(handle);
     if (!started) {
       return {
@@ -716,7 +716,7 @@ export function useDrafts(opts: {
       try {
         found = await api.pending(queryIdentity, 'pending_get', { id: pendingId });
       } catch (e) {
-        api.reportError(e);
+        if (!options?.silent) api.reportError(e);
         queryError = errText(e);
       }
       // sending/unconfirmed 或本地未命中：显式只读 reconcile（需 transport），绝不 send。
@@ -724,7 +724,7 @@ export function useDrafts(opts: {
         try {
           found = await api.pending(queryIdentity, 'pending_reconcile', { id: pendingId });
         } catch (e) {
-          api.reportError(e);
+          if (!options?.silent) api.reportError(e);
           queryError = errText(e);
         }
       }
@@ -740,7 +740,7 @@ export function useDrafts(opts: {
         try {
           page = await api.pending(queryIdentity, 'pending_list', { options: { limit: 50, cursor } });
         } catch (e) {
-          api.reportError(e);
+          if (!options?.silent) api.reportError(e);
           queryError = errText(e);
           break;
         }

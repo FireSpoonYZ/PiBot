@@ -9,6 +9,7 @@ import { openManagedInstaller } from './managed-install/index.js';
 import { createTurnSynchronizer } from './turn-sync.js';
 import { openControlServer } from './control-server.js';
 import { openDeviceLink } from './device-link.js';
+import { hostDevicePlatform } from './device-metadata.js';
 import { assertDeviceToken, parseRelayUrl } from './relay-protocol.js';
 
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,512}$/;
@@ -29,7 +30,7 @@ export async function openHostService(options) {
   assertDeviceToken(center.deviceToken);
   if (center.deviceToken === token) throw invalidArgument('device token must differ from control token');
   if (initialSettings !== undefined) normalizeHostSettings(initialSettings);
-  const platform = options.platform ?? process.platform;
+  const platform = options.platform ?? hostDevicePlatform();
   if (typeof platform !== 'string' || !platform.trim() || (options.displayName !== undefined && typeof options.displayName !== 'string')) throw invalidArgument('displayName and platform must be strings');
   const expectedDeviceId = options.expectedDeviceId;
   if (expectedDeviceId !== undefined && (typeof expectedDeviceId !== 'string' || expectedDeviceId.trim() === '')) throw invalidArgument('expectedDeviceId must be a non-empty string');

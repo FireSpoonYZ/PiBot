@@ -4,7 +4,7 @@
   "local": true,
   "windows": ["main"],
   "webviews": ["main"],
-  "platforms": ["windows", "linux"],
+  "platforms": ["windows", "linux", "macOS"],
   "permissions": [
     "allow-desktop-request",
     "allow-desktop-open-center",

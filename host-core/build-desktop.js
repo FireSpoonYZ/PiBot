@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // host-core/build-desktop.js: product prepare/build/dev entry for the Tauri 2
-// Windows/Linux x64 desktop client.
+// Windows/Linux x64 and macOS arm64 desktop client.
 //
 // Modes:
 //   (default) : prepares Node sidecar binary, bundles host-core/desktop-client-cli.js
@@ -104,7 +104,31 @@ const LICENSE_PREFIXES = ['license', 'licence', 'copying', 'notice', 'unlicense'
 // Verified upstream license texts for Rust crates whose published archives omit
 // license files (see licenses/desktop/README.md). Only exact package@version +
 // license pairs are allowed; anything else still fails with a strict error.
+//
+// macOS Rust graph: the madsmtm/objc2 crates ship no license file, and the
+// repository only carries LICENSE.md, a licensing statement (MIT for objc2,
+// block2, objc2-foundation and objc2-encode; "Zlib OR Apache-2.0 OR MIT" for
+// the rest) with no MIT text or copyright line. That statement (identical at
+// every source commit below) is vendored verbatim together with the SPDX MIT
+// text; the trio-licensed crates are used under MIT.
+const OBJC2_LICENSE_FILES = ['licenses/desktop/objc2-LICENSE.md', 'licenses/desktop/spdx-MIT.txt'];
+const objc2Fallback = (crate, license, commit, cratePath) => [crate, {
+  license,
+  provenance:
+    `Provenance: ${crate.replace('@', ' ')}, madsmtm/objc2 commit ${commit}, crate path "${cratePath}"; ` +
+    'repository LICENSE.md vendored verbatim plus the SPDX MIT text (used under MIT), in licenses/desktop/.',
+  files: OBJC2_LICENSE_FILES,
+}];
+const OBJC2_TRIO = 'Zlib OR Apache-2.0 OR MIT';
 const CARGO_LICENSE_FALLBACKS = new Map([
+  objc2Fallback('block2@0.6.2', 'MIT', 'b4167b582b2f75f9a1be75495c41b765344fd03c', 'crates/block2'),
+  objc2Fallback('objc2@0.6.5', 'MIT', 'd7d2fa23ceaa5e6096c923b081040e5d81b3b9df', 'crates/objc2'),
+  objc2Fallback('objc2-encode@4.1.0', 'MIT', '8d214f5477365ffcbcbb7de058c86ed9a518efb7', 'crates/objc2-encode'),
+  objc2Fallback('objc2-exception-helper@0.1.1', OBJC2_TRIO, '8d214f5477365ffcbcbb7de058c86ed9a518efb7', 'crates/objc2-exception-helper'),
+  objc2Fallback('dispatch2@0.3.1', OBJC2_TRIO, '8852b424193ca41602281b3d7540d7c8ed51e49a', 'crates/dispatch2'),
+  objc2Fallback('objc2-foundation@0.3.2', 'MIT', '7b1abfd750a2cacaea71d6a56ecfb83cb7de560b', 'framework-crates/objc2-foundation'),
+  ...['app-kit', 'core-foundation', 'core-graphics', 'io-surface', 'osa-kit', 'quartz-core', 'web-kit'].map((name) =>
+    objc2Fallback(`objc2-${name}@0.3.2`, OBJC2_TRIO, '7b1abfd750a2cacaea71d6a56ecfb83cb7de560b', `framework-crates/objc2-${name}`)),
   ['alloc-stdlib@0.3.0', {
     license: 'BSD-3-Clause',
     files: ['licenses/desktop/alloc-stdlib-0.3.0-BSD-3-Clause.txt'],
@@ -287,7 +311,22 @@ const NODE_TARGETS = {
     tarFlags: ['-xzf'],
     platform: 'linux',
   },
+  'darwin-arm64': {
+    triple: 'aarch64-apple-darwin',
+    url: `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-arm64.tar.gz`,
+    archiveName: `node-v${NODE_VERSION}-darwin-arm64.tar.gz`,
+    sha256: 'd38bd5e5a2ddce6bbb5ce45e46e208337da4d51fffe611e567fd32073d6439f6',
+    binaryEntry: `node-v${NODE_VERSION}-darwin-arm64/bin/node`,
+    licenseEntry: `node-v${NODE_VERSION}-darwin-arm64/LICENSE`,
+    sidecarName: 'pibot-node-aarch64-apple-darwin',
+    tarFlags: ['-xzf'],
+    platform: 'darwin',
+  },
 };
+
+// cua-driver-rs ships Windows/Linux builds only; macOS has no bundled Cua desktop
+// backend (host-core/runtime.js registers Cua tools on win32/linux only).
+const CUA_PLATFORMS = new Set(['win32', 'linux']);
 
 const execFileAsync = promisify(execFile);
 
@@ -378,7 +417,7 @@ function currentNodeTarget() {
   const key = `${process.platform}-${process.arch}`;
   const spec = NODE_TARGETS[key];
   if (!spec) {
-    throw fail(`unsupported desktop build platform/arch: ${key} (expected win32-x64 or linux-x64)`);
+    throw fail(`unsupported desktop build platform/arch: ${key} (expected win32-x64, linux-x64 or darwin-arm64)`);
   }
   return spec;
 }
@@ -387,6 +426,13 @@ function assertBinaryHeader(buffer, platform, label) {
   if (platform === 'win32') {
     if (buffer.length < 2 || buffer[0] !== 0x4d || buffer[1] !== 0x5a) {
       throw fail(`${label} is not a Windows PE executable (MZ header missing)`);
+    }
+    return;
+  }
+  if (platform === 'darwin') {
+    // 64-bit little-endian Mach-O (MH_MAGIC_64) for CPU_TYPE_ARM64.
+    if (buffer.length < 8 || buffer.readUInt32LE(0) !== 0xfeedfacf || buffer.readUInt32LE(4) !== 0x0100000c) {
+      throw fail(`${label} is not an arm64 Mach-O executable`);
     }
     return;
   }
@@ -561,9 +607,11 @@ async function prepareIcons() {
   const sourceHash = sha256OfFile(ICON_SOURCE);
   const icoPath = path.join(ICONS_DIR, 'icon.ico');
   const pngPath = path.join(ICONS_DIR, 'icon.png');
+  // macOS bundles use the icon.icns produced by the same `tauri icon` run.
+  const icnsPath = process.platform === 'darwin' ? path.join(ICONS_DIR, 'icon.icns') : null;
   const manifest = readManifest() ?? { version: 1 };
 
-  if (isRegularFile(icoPath) && isRegularFile(pngPath)) {
+  if (isRegularFile(icoPath) && isRegularFile(pngPath) && (icnsPath === null || isRegularFile(icnsPath))) {
     const icoHash = sha256OfFile(icoPath);
     const pngHash = sha256OfFile(pngPath);
     const rec = manifest.icons;
@@ -571,7 +619,8 @@ async function prepareIcons() {
       rec &&
       rec.sourceSha256 === sourceHash &&
       rec.icoSha256 === icoHash &&
-      rec.pngSha256 === pngHash
+      rec.pngSha256 === pngHash &&
+      (icnsPath === null || rec.icnsSha256 === sha256OfFile(icnsPath))
     ) {
       return { icoPath, pngPath, status: 'cached' };
     }
@@ -587,7 +636,8 @@ async function prepareIcons() {
 
   assertStrictlyRegularFile(icoPath, 'generated desktop/build/icons/icon.ico');
   assertStrictlyRegularFile(pngPath, 'generated desktop/build/icons/icon.png');
-  if (statSync(icoPath).size === 0 || statSync(pngPath).size === 0) {
+  if (icnsPath !== null) assertStrictlyRegularFile(icnsPath, 'generated desktop/build/icons/icon.icns');
+  if (statSync(icoPath).size === 0 || statSync(pngPath).size === 0 || (icnsPath !== null && statSync(icnsPath).size === 0)) {
     throw fail('generated desktop icons must be non-empty');
   }
 
@@ -596,6 +646,7 @@ async function prepareIcons() {
     sourceSha256: sourceHash,
     icoSha256: sha256OfFile(icoPath),
     pngSha256: sha256OfFile(pngPath),
+    ...(icnsPath !== null ? { icnsSha256: sha256OfFile(icnsPath) } : {}),
   };
   writeManifest(nextManifest);
   return { icoPath, pngPath, status: 'generated' };
@@ -1212,7 +1263,7 @@ async function resolveCuaDriverFiles() {
 }
 
 async function collectHostRuntimeNatives() {
-  const cua = await resolveCuaDriverFiles();
+  const cua = CUA_PLATFORMS.has(process.platform) ? await resolveCuaDriverFiles() : null;
   const searchCache = path.join(CACHE_DIR, 'search-tools');
   const { tools: searchTools } = await prepareSearchTools({ dataRoot: searchCache });
   const searchFiles = [];
@@ -1222,7 +1273,7 @@ async function collectHostRuntimeNatives() {
       searchFiles.push({ dest: toPosixPath(path.relative(searchCache, src)), src, executable: src === tool.path });
     }
   }
-  const files = [...cua.files, ...searchFiles];
+  const files = [...(cua?.files ?? []), ...searchFiles];
   let shower = null;
   if (process.platform === 'win32') {
     shower = await resolveShowerWindowsDir();
@@ -1236,7 +1287,7 @@ async function collectHostRuntimeNatives() {
     files,
     searchFiles,
     searchTools,
-    cua: { release: cua.release, status: cua.status, licensePath: cua.licensePath },
+    cua: cua ? { release: cua.release, status: cua.status, licensePath: cua.licensePath } : null,
     shower: shower ? { status: shower.status } : null,
   };
 }
@@ -1623,8 +1674,10 @@ async function collectHostRuntimeLicenseSections(hostRuntimeInfo) {
       }
     }
   }
-  sections.push(`## Cua driver ${hostRuntimeInfo.cua.release} (MIT)`);
-  sections.push((await readFile(hostRuntimeInfo.cua.licensePath, 'utf8')).trim());
+  if (hostRuntimeInfo.cua) {
+    sections.push(`## Cua driver ${hostRuntimeInfo.cua.release} (MIT)`);
+    sections.push((await readFile(hostRuntimeInfo.cua.licensePath, 'utf8')).trim());
+  }
   for (const tool of hostRuntimeInfo.searchTools) {
     for (const licensePath of tool.licensePaths) {
       sections.push(`## ${tool.name} ${tool.version}: ${path.basename(licensePath)}`);
@@ -1715,7 +1768,7 @@ export async function prepareDesktop() {
       sourceFiles: hostRuntimeInfo.sourceFiles,
       nativeFiles: hostRuntimeInfo.nativeFiles,
       searchTools: hostRuntimeInfo.searchTools.map(({ name, version, sha256 }) => ({ name, version, sha256 })),
-      cua: { release: hostRuntimeInfo.cua.release, status: hostRuntimeInfo.cua.status },
+      cua: hostRuntimeInfo.cua ? { release: hostRuntimeInfo.cua.release, status: hostRuntimeInfo.cua.status } : null,
       shower: hostRuntimeInfo.shower,
     },
     hostLauncher: {
