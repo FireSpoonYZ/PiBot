@@ -36,14 +36,23 @@
 ## CI 渠道
 
 - `master` push、面向 `develop/master` 的 PR 与手动构建：`apk.yml` 构建
-  debug APK artifact；`desktop.yml` 构建无 updater 签名的 NSIS/DEB artifact，以及
-  `macos-14` 上 ad-hoc 签名的 macOS DMG（Apple Silicon）。
+  debug APK artifact；`desktop.yml` 运行 `npm test` 与启动器 Rust 测试，构建无 updater
+  签名的 NSIS/DEB artifact，并在 Linux 构建后运行桌面 crate 单元测试。
   这些构建不发布 GitHub Release。
+- macOS 客户端（Apple Silicon）为**实验性发布项**，由独立的 `desktop-macos.yml` 在
+  `macos-14` 上构建 ad-hoc 签名的 App 与 DMG。普通运行用作业内临时生成的 updater 密钥
+  （不使用正式私钥）签名 `PiBot.app.tar.gz`，再用 `scripts/verify-updater-artifact.mjs`
+  校验签名、元数据及进程内中心的上传、发布、查询与下载；随后以测试专用 LaunchAgent
+  标签在真实 launchd 上运行 `scripts/macos-update-cycle-test.sh`（停止 Host、替换 App、恢复）。
+  任一步失败时 PR 检查显示失败，但不影响其他工作流。
 - `v*` tag：`release.yml` 通过 `workflow_call` 并行调用 `apk.yml`
-  （签名 APK）、`desktop.yml`（安装包 + updater `.sig`；macOS 为 DMG 与签名的
-  `PiBot.app.tar.gz`）与 `center.yml`，
-  全部成功后由唯一 `publish` job 汇总产物、逐件生成
+  （签名 APK）、`desktop.yml`（安装包 + updater `.sig`）、`desktop-macos.yml`
+  （DMG 与签名的 `PiBot.app.tar.gz`）与 `center.yml`。
+  Android、Windows/Linux 桌面与中心全部成功后，由唯一 `publish` job 汇总产物、逐件生成
   `<file>.metadata.json`、创建**一次不可变** GitHub Release（已存在则拒绝）。
+  macOS 不在必需条件内：发布模式下其作业失败不会让运行失败（候选运行仍可复用）；`publish`
+  只在 DMG、更新包与 `.sig` 齐全且通过元数据校验时附上 macOS 产物，否则照常发布其他平台，
+  并在作业摘要、警告注解和 Release 说明中写明“macOS 本版本未提供”及原因。
 - `center.yml` 为唯一中心工作流，同时构建多架构容器镜像与自包含 Linux DEB 安装包（`pibot-center` `amd64`/`arm64`，内置固定版本 Node.js `26.13.0` 与 `@bitwarden/cli@2026.10.1`）并执行冒烟验证。普通 `master`/PR/手动运行构建镜像与 DEB artifact；
   release 调用先推送 `ghcr.io/<owner>/pibot-center:sha-<sourceCommit>`、产出
   `center-image.json` 与中心 DEB。全部平台成功后，`publish` 将同一镜像 digest 标记为版本号和

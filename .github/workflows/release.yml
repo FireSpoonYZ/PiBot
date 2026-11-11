@@ -101,6 +101,18 @@ jobs:
       source-sha: ${{ needs.version.outputs.sha }}
     secrets: inherit
 
+  # Experimental: a failure here never blocks the release (see publish).
+  desktop_macos:
+    needs: version
+    if: ${{ needs.version.outputs.candidate_run == '' }}
+    uses: ./.github/workflows/desktop-macos.yml
+    with:
+      release: true
+      version: ${{ needs.version.outputs.version }}
+      source-ref: ${{ needs.version.outputs.source_ref }}
+      source-sha: ${{ needs.version.outputs.sha }}
+    secrets: inherit
+
   center:
     needs: version
     if: ${{ needs.version.outputs.candidate_run == '' }}
@@ -112,8 +124,10 @@ jobs:
       source-sha: ${{ needs.version.outputs.sha }}
     secrets: inherit
 
+  # Waits for desktop_macos but never requires it: macOS assets are published
+  # only when that build produced a complete, valid set.
   publish:
-    needs: [version, android, desktop, center]
+    needs: [version, android, desktop, desktop_macos, center]
     if: ${{ always() && !cancelled() && needs.version.result == 'success' && (needs.version.outputs.candidate_run != '' || (needs.android.result == 'success' && needs.desktop.result == 'success' && needs.center.result == 'success')) }}
     runs-on: ubuntu-24.04
     env:
@@ -153,10 +167,6 @@ jobs:
           }
           copy_installer "*.exe" "PiBot-$VERSION-windows-x64-setup.exe" yes
           copy_installer "e-launcher-desktop_*.deb" "PiBot-$VERSION-linux-amd64.deb" yes
-          # macOS: the DMG is the first-install download; the signed .app.tar.gz
-          # is the updater bundle imported into the center (format app).
-          copy_installer "*.dmg" "PiBot-$VERSION-macos-arm64.dmg" no
-          copy_installer "*.app.tar.gz" "PiBot-$VERSION-macos-arm64.app.tar.gz" yes
           copy_installer "*.apk" "PiBot-$VERSION-android-arm64.apk" no
           copy_installer "pibot-center_${VERSION}_amd64.deb" "PiBot-$VERSION-center-linux-amd64.deb" no
           copy_installer "pibot-center_${VERSION}_arm64.deb" "PiBot-$VERSION-center-linux-arm64.deb" no
@@ -167,7 +177,7 @@ jobs:
             grep -qx "Version: $VERSION" <<<"$fields"
             grep -qx "Architecture: $deb_arch" <<<"$fields"
           done
-          for spec in "windows x86_64 nsis windows-x64-setup.exe" "linux x86_64 deb linux-amd64.deb" "macos aarch64 app macos-arm64.app.tar.gz" "android aarch64 apk android-arm64.apk"; do
+          for spec in "windows x86_64 nsis windows-x64-setup.exe" "linux x86_64 deb linux-amd64.deb" "android aarch64 apk android-arm64.apk"; do
             read -r platform arch format suffix <<< "$spec"
             extra=()
             if [ "$format" = apk ]; then
@@ -178,6 +188,39 @@ jobs:
               --file "release-out/PiBot-$VERSION-$suffix" "${extra[@]}" \
               --out "release-out/PiBot-$VERSION-$suffix.metadata.json"
           done
+          # macOS (experimental, desktop-macos.yml): the DMG is the first-install
+          # download; the signed .app.tar.gz is the updater bundle imported into
+          # the center (format app). Published only as a complete, valid set;
+          # otherwise the release goes out without macOS and says why.
+          single() {
+            local found
+            mapfile -d '' found < <(find artifacts -type f -name "$1" -print0)
+            [ "${#found[@]}" -eq 1 ] && printf '%s' "${found[0]}"
+          }
+          mac="PiBot-$VERSION-macos-arm64"
+          macos_skipped=""
+          if ! dmg=$(single "*.dmg"); then
+            macos_skipped="no macOS DMG from the desktop-macos build"
+          elif ! app=$(single "*.app.tar.gz") || [ ! -f "$app.sig" ]; then
+            macos_skipped="no signed macOS updater bundle from the desktop-macos build"
+          else
+            cp "$dmg" "release-out/$mac.dmg"
+            cp "$app" "release-out/$mac.app.tar.gz"
+            cp "$app.sig" "release-out/$mac.app.tar.gz.sig"
+            if ! node scripts/release-artifact.mjs --version "$VERSION" --commit "$SOURCE_COMMIT" \
+                --notes "PiBot $VERSION" --platform macos --arch aarch64 --format app \
+                --file "release-out/$mac.app.tar.gz" --out "release-out/$mac.app.tar.gz.metadata.json" 2> macos-metadata.err; then
+              macos_skipped="macOS updater bundle failed release checks: $(head -n 1 macos-metadata.err)"
+              rm -f "release-out/$mac".*
+            fi
+          fi
+          if [ -n "$macos_skipped" ]; then
+            echo "::warning title=macOS client not released::$macos_skipped"
+            echo "### macOS client (experimental): not included — $macos_skipped" >> "$GITHUB_STEP_SUMMARY"
+            echo "MACOS_SKIPPED=$macos_skipped" >> "$GITHUB_ENV"
+          else
+            echo "### macOS client (experimental): included" >> "$GITHUB_STEP_SUMMARY"
+          fi
           cp artifacts/center-image.json release-out/
           cp compose.yaml compose.https.yaml Caddyfile center.env.example release-out/
           sed -i "s/pibot-center:latest/pibot-center:$VERSION/" release-out/compose.yaml
@@ -202,11 +245,16 @@ jobs:
           IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/pibot-center"
           DIGEST=$(node -p "JSON.parse(require('fs').readFileSync('release-out/center-image.json')).digest")
           docker buildx imagetools create -t "$IMAGE:$VERSION" -t "$IMAGE:latest" "$IMAGE@$DIGEST"
+          if [ -z "${MACOS_SKIPPED:-}" ]; then
+            MACOS_LINE='- macOS（Apple Silicon，macOS 13.5+，实验性）：下载 macos-arm64.dmg；未经 Apple 公证，首次打开需在“系统设置 › 隐私与安全性”中选择“仍要打开”'
+          else
+            MACOS_LINE="- macOS（实验性）：本版本未提供（$MACOS_SKIPPED）"
+          fi
           cat > release-notes.md <<EOF
           ## PiBot $VERSION
           - Windows：下载 windows-x64-setup.exe
           - Ubuntu / Debian（桌面客户端）：下载 linux-amd64.deb
-          - macOS（Apple Silicon，macOS 13.5+）：下载 macos-arm64.dmg；未经 Apple 公证，首次打开需在“系统设置 › 隐私与安全性”中选择“仍要打开”
+          $MACOS_LINE
           - Android：下载 android-arm64.apk（Android 13+）
           - 中心（Docker）：\`$IMAGE:$VERSION\`（amd64 / arm64）
           - 中心（Ubuntu / Debian DEB）：下载 center-linux-amd64.deb 或 center-linux-arm64.deb

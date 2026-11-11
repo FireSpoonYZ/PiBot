@@ -20,7 +20,7 @@ Windows x64、Linux amd64 和 macOS Apple Silicon（13.5+）的发行包分别�
 
 Windows 图形能力只在所属用户交互会话中使用。Host 核心启动不再主动等待 Shower 授权；图形能力在实际需要时申请。设置页保留显式虚拟屏凭据配置。
 
-**macOS** 使用 `PiBot.app/Contents/MacOS/pibot-host` 和用户 LaunchAgent `~/Library/LaunchAgents/io.github.firespoonyz.pibot.host.plist`（`gui/<uid>` 域）。与 Windows 相同，Host 只在用户登录后运行，设置页显示“登录后自动运行”。supervisor 异常退出后由 launchd 按 10 秒节流重启。停止服务时 supervisor 以 0 退出，同时卸载本次会话中的登录项任务，避免启动失败的 Host 被反复拉起；下次启动服务或重新登录时再加载。自启动开关只决定下次登录是否加载登录项，不停止正在运行的 Host。启动服务时，已登记且有效的登录项经 launchd（`bootstrap`/`kickstart`）运行；没有有效登录项，或 launchd 拒绝启动（例如在「系统设置 › 通用 › 登录项」中关闭了 PiBot 的后台运行）时，直接启动启动器并在结果中附带提示。
+**macOS** 使用 `PiBot.app/Contents/MacOS/pibot-host` 和用户 LaunchAgent `~/Library/LaunchAgents/io.github.firespoonyz.pibot.host.plist`（`gui/<uid>` 域）。与 Windows 相同，Host 只在用户登录后运行，设置页显示“登录后自动运行”。supervisor 异常退出后由 launchd 按 10 秒节流重启。停止服务时 supervisor 以 0 退出，同时卸载本次会话中的登录项任务，避免启动失败的 Host 被反复拉起；下次启动服务或重新登录时再加载。只有 launchd 确认任务已不在（`launchctl print` 返回“无此服务”），停止才算成功并在结果中带 `launchdLoaded: false`；卸载被拒绝、任务仍在或状态无法查询时，停止返回 `STOP_FAILED`。自启动开关只决定下次登录是否加载登录项，不停止正在运行的 Host。启动服务时，已登记且有效的登录项经 launchd（`bootstrap`/`kickstart`）运行；没有有效登录项，或 launchd 拒绝启动（例如在「系统设置 › 通用 › 登录项」中关闭了 PiBot 的后台运行）时，直接启动启动器并在结果中附带提示。
 
 登录项记录 App 的实际路径。移动或替换 `PiBot.app` 后，设置页提示需要重新启用，点击后按新位置重写并重新加载登录项，原本运行的 Host 从新位置继续运行。从 Gatekeeper 的临时随机位置（App Translocation）运行时拒绝登记，需先把 App 拖到「应用程序」再打开。
 
@@ -50,7 +50,7 @@ Tauri 窗口只运行界面。独立 Node broker 处理客户端连接与观察�
 
 下载和验签不停止 Host。安装准备经本机认证控制端点暂停新任务准入，并检查真实活动；可等待，也可显式停止后继续。取消准备恢复准入。安装后的服务恢复由 DEB/NSIS 生命周期负责；Windows 完整安装恢复仍未完成验收。
 
-macOS 没有安装器生命周期：安装准备通过后，客户端先用当前启动器停止 Host，再原位替换 `PiBot.app`；随后在自启动开启时刷新登录项，并用新启动器重新启动原本运行的 Host，最后提示重启客户端。停止失败时不替换 App；恢复失败作为提示附在更新结果中，可在设置页重试。DMG 只用于首次安装，中心分发的是 `PiBot.app.tar.gz`（格式 `app`）。
+macOS 没有安装器生命周期：安装准备通过后，客户端先用当前启动器停止 Host，再原位替换 `PiBot.app`；随后在自启动开启时刷新登录项，并用新启动器重新启动原本运行的 Host，最后提示重启客户端。只有启动器确认 Host 已停止且登录项任务已卸载（`status: stopped`、`launchdLoaded: false`）才替换 App；停止失败或缺少确认时不替换，报告“update not installed”，并尝试恢复原本运行的 Host。替换后的恢复失败作为提示附在更新结果中，可在设置页重试。DMG 只用于首次安装，中心分发的是 `PiBot.app.tar.gz`（格式 `app`）。
 
 原生命令为 `desktop_update_status/check/download/install/cancel`；界面不提供任意下载 URL 或发布公钥替换入口。正式 updater 公钥由构建环境 `E_LAUNCHER_UPDATER_PUBLIC_KEY` 注入，私钥不进入安装包或中心。未配置签名材料的开发构建不具备官方更新信任。发布步骤见[发布说明](../docs/releasing.md)。
 
@@ -109,13 +109,23 @@ npm run desktop:build -- --bundles nsis
 
 ### macOS Apple Silicon
 
-CI 使用 `macos-14`（Apple Silicon）runner。本机构建需要 Xcode 或 Command Line Tools；资源准备会下载固定的 Node `darwin-arm64` 与 rg/fd，并编译 `pibot-host`。macOS 不打包 Cua 驱动与 Shower 组件。
+macOS 客户端为实验性发布项：CI 由独立的 [`desktop-macos.yml`](../.github/workflows/desktop-macos.yml) 在 `macos-14`（Apple Silicon）runner 上构建，失败不阻断 Windows/Linux 构建，也不阻断其他平台的发布。本机构建需要 Xcode 或 Command Line Tools；资源准备会下载固定的 Node `darwin-arm64` 与 rg/fd，并编译 `pibot-host`。macOS 不打包 Cua 驱动与 Shower 组件。
 
 ```sh
 npm run desktop:build -- --bundles app,dmg
 ```
 
 产物位于 `desktop/build/target/release/bundle/macos/PiBot.app` 和 `bundle/dmg/`；正式构建（`createUpdaterArtifacts`）另生成 `bundle/macos/PiBot.app.tar.gz` 与 `.sig`。`src-tauri/tauri.macos.conf.json` 只在 macOS 上设定 bundle identifier `io.github.firespoonyz.pibot`、产品名 `PiBot`、最低系统版本 13.5（与 Node 26 官方二进制一致）、ad-hoc 签名并关闭 hardened runtime。日后改用 Developer ID 和公证时，需要启用 hardened runtime，为 `pibot-node` 配置 JIT 所需 entitlements，并对 `host-runtime` 内的可执行文件签名。
+
+更新链路可在本机复查（CI 用作业内临时密钥执行同样的检查）：
+
+```sh
+# 签名、发布元数据，以及进程内中心的上传、发布、查询与下载
+node scripts/verify-updater-artifact.mjs --file desktop/build/target/release/bundle/macos/PiBot.app.tar.gz \
+  --public-key @<updater 公钥文件> --version <版本> --platform macos --arch aarch64 --format app
+# 真实 launchd 上的停止 Host → 替换 PiBot.app → 恢复；使用测试专用标签与临时 Host home，需要已登录的图形会话
+scripts/macos-update-cycle-test.sh [PiBot.app 路径]
+```
 
 ## 历史验收范围
 
