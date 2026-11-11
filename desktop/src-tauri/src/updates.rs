@@ -271,8 +271,12 @@ async fn install_package(update: Update, bytes: Arc<Vec<u8>>) -> Installed {
   {
     match host_service::with_host_stopped(move || update.install(bytes.as_slice())).await {
       Ok((result, note)) => Installed { result: result.map_err(|err| err.to_string()), note, host_cycled: true },
+      // Nothing was replaced: the swap only runs after a confirmed stop.
       Err(err) => Installed {
-        result: Err(format!("could not stop the local Host before installing: {}", err.message)),
+        result: Err(format!(
+          "update not installed: the local Host could not be confirmed stopped ({}: {})",
+          err.code, err.message
+        )),
         note: None,
         host_cycled: false,
       },
@@ -773,7 +777,9 @@ pub async fn desktop_update_install(
     });
   }
   match (result, cleanup) {
-    (_, Err(message)) => Ok(finish(&state, &current, operation, Phase::Error, Some(with_note(message, note)))),
+    // Keep the install failure (e.g. a blocked swap) visible next to a cleanup failure.
+    (Err(failed), Err(message)) => Ok(finish(&state, &current, operation, Phase::Error, Some(with_note(format!("{failed}; {message}"), note)))),
+    (Ok(()), Err(message)) => Ok(finish(&state, &current, operation, Phase::Error, Some(with_note(message, note)))),
     (Ok(()), Ok(())) => {
       {
         let mut inner = state.inner.lock().unwrap();

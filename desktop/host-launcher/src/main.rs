@@ -427,17 +427,20 @@ fn cmd_start(paths: &HostPaths) -> AppResult<Value> {
 /// Result of a completed stop. On macOS the LaunchAgent job is also unloaded
 /// so KeepAlive cannot respawn a `run` that keeps failing at startup (the
 /// equivalent of `systemctl stop` ending a Restart=always loop); `start`
-/// reloads it and so does the next login.
-fn stopped(forced: bool) -> Value {
+/// reloads it and so does the next login. The stop only succeeds once launchd
+/// confirmed the job is gone (`launchdLoaded: false`): the updater replaces
+/// PiBot.app only after that, so launchd cannot start bundle code mid-swap.
+fn stopped(forced: bool) -> AppResult<Value> {
     let mut value = json!({ "status": "stopped" });
     if forced {
         value["forced"] = json!(true);
     }
     #[cfg(target_os = "macos")]
-    if let Err(e) = autostart::launchd_unload() {
-        value["warnings"] = json!([format!("{}: {}", e.code, e.message)]);
+    {
+        autostart::launchd_unload()?;
+        value["launchdLoaded"] = json!(false);
     }
-    value
+    Ok(value)
 }
 
 fn cmd_stop(paths: &HostPaths) -> AppResult<Value> {
@@ -449,13 +452,13 @@ fn cmd_stop(paths: &HostPaths) -> AppResult<Value> {
     }
     if !process::lock_held(paths) {
         process::remove_file_quiet(&paths.stop_request);
-        return Ok(stopped(false));
+        return stopped(false);
     }
     // Not managed by systemd (or systemctl failed): ask `run` to exit.
     std::fs::write(&paths.stop_request, b"stop\n").map_err(|e| AppError::io("write stop.request", e))?;
     if process::wait_until(STOP_TIMEOUT, || !process::lock_held(paths)) {
         process::remove_file_quiet(&paths.stop_request);
-        return Ok(stopped(false));
+        return stopped(false);
     }
     // launchd answers a killed (non-zero exit) supervisor with a KeepAlive
     // respawn; request the unload before killing so a forced stop stays stopped.
@@ -470,7 +473,7 @@ fn cmd_stop(paths: &HostPaths) -> AppResult<Value> {
     let released = process::wait_until(KILL_TIMEOUT, || !process::lock_held(paths));
     process::remove_file_quiet(&paths.stop_request);
     if released {
-        Ok(stopped(true))
+        stopped(true)
     } else {
         Err(systemd_error.unwrap_or_else(|| AppError::new("STOP_FAILED", "launcher did not stop")))
     }
@@ -853,5 +856,41 @@ mod tests {
         assert_eq!(dispatch(&strings(&["nope"])).unwrap_err().code, "INVALID_ARGUMENT");
         assert_eq!(dispatch(&[]).unwrap_err().code, "INVALID_ARGUMENT");
         assert_eq!(dispatch(&strings(&["status", "--x"])).unwrap_err().code, "INVALID_ARGUMENT");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn stopped_host(tag: &str) -> HostPaths {
+        let home = std::env::temp_dir().join(format!("elh-stop-{tag}-{}-{}", std::process::id(), util::unix_millis_now()));
+        std::fs::create_dir_all(&home).unwrap();
+        HostPaths::new(home)
+    }
+
+    /// The updater replaces PiBot.app only after `stop` succeeded, so a
+    /// LaunchAgent that cannot be unloaded must fail the stop, not warn.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stop_fails_while_the_launch_agent_stays_loaded() {
+        let paths = stopped_host("loaded");
+        for (bootout_exit, unloads) in [(5, false), (0, false)] {
+            let (script, _) = autostart::launchctl_fake::launchd(None, bootout_exit, unloads);
+            let err = autostart::launchctl_fake::with(script, || cmd_stop(&paths)).unwrap_err();
+            assert_eq!(err.code, "STOP_FAILED", "{}", err.message);
+        }
+        let (script, _) = autostart::launchctl_fake::launchd(Some(112), 0, true);
+        assert_eq!(autostart::launchctl_fake::with(script, || cmd_stop(&paths)).unwrap_err().code, "STOP_FAILED");
+        let _ = std::fs::remove_dir_all(&paths.home);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stop_confirms_the_launch_agent_is_unloaded() {
+        let paths = stopped_host("unloaded");
+        let (script, calls) = autostart::launchctl_fake::launchd(None, 0, true);
+        let value = autostart::launchctl_fake::with(script, || cmd_stop(&paths)).unwrap();
+        assert_eq!(value["status"], "stopped");
+        assert_eq!(value["launchdLoaded"], false);
+        assert!(value.get("warnings").is_none());
+        assert_eq!(calls.borrow().iter().filter(|c| c.as_str() == "bootout").count(), 1);
+        let _ = std::fs::remove_dir_all(&paths.home);
     }
 }

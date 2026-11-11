@@ -488,6 +488,10 @@ mod mac_launchd {
     const THROTTLE_SECS: u32 = 10;
     /// Wait for a booted-out job to release launcher.lock before reloading it.
     const UNLOAD_WAIT: Duration = Duration::from_secs(95);
+    /// How long a finished bootout may take to disappear from `launchctl print`.
+    const UNLOAD_CONFIRM: Duration = Duration::from_millis(if cfg!(test) { 300 } else { 5000 });
+    /// `launchctl print` exit status for a domain without that service.
+    const PRINT_NOT_FOUND: i32 = 113;
 
     /// Product label. Debug builds accept `E_LAUNCHER_LAUNCHD_LABEL` so local
     /// verification can use an isolated agent; release builds never do.
@@ -518,6 +522,10 @@ mod mac_launchd {
     }
 
     fn launchctl(args: &[&str]) -> std::io::Result<std::process::Output> {
+        #[cfg(test)]
+        if let Some(output) = fake::answer(args) {
+            return Ok(output);
+        }
         let mut cmd = process::command(LAUNCHCTL);
         cmd.args(args);
         process::run_capture(cmd)
@@ -642,8 +650,24 @@ mod mac_launchd {
         Ok((state, path))
     }
 
+    /// Whether launchd has the job loaded: `print` exits 0 for a loaded job
+    /// and 113 when the domain has none. Any other answer (no such domain,
+    /// launchctl failing) leaves the state unknown and is an error.
+    fn loaded(label: &str) -> AppResult<bool> {
+        let target = service_target(label);
+        match launchctl(&["print", &target]) {
+            Ok(out) if out.status.success() => Ok(true),
+            Ok(out) if out.status.code() == Some(PRINT_NOT_FOUND) => Ok(false),
+            Ok(out) => Err(AppError::new(
+                "LAUNCHD_UNKNOWN",
+                format!("launchctl print {target}: {}", process::output_message(&out)),
+            )),
+            Err(e) => Err(AppError::new("LAUNCHD_UNKNOWN", format!("launchctl print {target}: {e}"))),
+        }
+    }
+
     fn is_loaded(label: &str) -> bool {
-        matches!(launchctl(&["print", &service_target(label)]), Ok(out) if out.status.success())
+        matches!(loaded(label), Ok(true))
     }
 
     /// `launchctl print-disabled gui/<uid>` lists override entries as
@@ -666,18 +690,32 @@ mod mac_launchd {
         }
     }
 
-    /// Unloads a loaded job (launchd sends SIGTERM) and waits until its
-    /// supervisor released launcher.lock, so a reload never races the old one.
+    /// Unloads a loaded job (launchd sends SIGTERM), waits until its
+    /// supervisor released launcher.lock so a reload never races the old one,
+    /// then confirms launchd no longer has the job. Ok means launchd reported
+    /// the job absent; a refused bootout, a job that stays loaded or an
+    /// unknown state are errors.
     fn bootout(label: &str, home: Option<&Path>) -> AppResult<()> {
-        if !is_loaded(label) {
+        if !loaded(label)? {
             return Ok(());
         }
-        launchctl_checked(&["bootout", &service_target(label)], "AUTOSTART_FAILED")?;
-        if let Some(home) = home {
-            let paths = HostPaths::new(home.to_path_buf());
-            process::wait_until(UNLOAD_WAIT, || !process::lock_held(&paths));
+        let target = service_target(label);
+        let request = launchctl_checked(&["bootout", &target], "AUTOSTART_FAILED");
+        if request.is_ok() {
+            if let Some(home) = home {
+                let paths = HostPaths::new(home.to_path_buf());
+                process::wait_until(UNLOAD_WAIT, || !process::lock_held(&paths));
+            }
+            process::wait_until(UNLOAD_CONFIRM, || matches!(loaded(label), Ok(false)));
         }
-        Ok(())
+        // A failed bootout can still mean the job went away meanwhile; only
+        // what launchd reports now decides.
+        if !loaded(label)? {
+            return Ok(());
+        }
+        Err(request.err().unwrap_or_else(|| {
+            AppError::new("AUTOSTART_FAILED", format!("launchd still has {target} loaded after bootout"))
+        }))
     }
 
     fn bootstrap(path: &Path) -> AppResult<()> {
@@ -798,9 +836,16 @@ mod mac_launchd {
 
     /// After the supervisor stopped (or when none was running): unload a
     /// loaded job so KeepAlive cannot respawn a `run` that keeps failing at
-    /// startup. `start` bootstraps it again and the next login reloads it.
+    /// startup, and so an update can replace PiBot.app without launchd
+    /// starting bundle code mid-swap. `start` bootstraps it again and the next
+    /// login reloads it. Failing to confirm the unload fails the stop.
     pub fn unload() -> AppResult<()> {
-        bootout(&label(), None)
+        bootout(&label(), None).map_err(|e| {
+            AppError::new(
+                "STOP_FAILED",
+                format!("the Host stopped, but its LaunchAgent could not be confirmed unloaded, so launchd may start it again: {}", e.message),
+            )
+        })
     }
 
     /// Before `stop` kills a supervisor that ignored the graceful request, ask
@@ -809,7 +854,7 @@ mod mac_launchd {
     /// on a hung supervisor, and the caller's kill is what ends it.
     pub fn release_for_kill() {
         let label = label();
-        if !is_loaded(&label) {
+        if matches!(loaded(&label), Ok(false)) {
             return;
         }
         let mut cmd = process::command(LAUNCHCTL);
@@ -823,9 +868,119 @@ mod mac_launchd {
         }
     }
 
+    /// Test stand-in for `/bin/launchctl`: a per-thread script maps each
+    /// call to an exit status, so unload paths run without touching launchd.
+    #[cfg(test)]
+    pub mod fake {
+        use std::cell::RefCell;
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{ExitStatus, Output};
+
+        type Script = Box<dyn FnMut(&[&str]) -> i32>;
+
+        thread_local! {
+            static SCRIPT: RefCell<Option<Script>> = RefCell::new(None);
+        }
+
+        /// Runs `body` with every launchctl call on this thread answered by `script`.
+        pub fn with<R>(script: impl FnMut(&[&str]) -> i32 + 'static, body: impl FnOnce() -> R) -> R {
+            SCRIPT.with(|slot| *slot.borrow_mut() = Some(Box::new(script)));
+            let result = body();
+            SCRIPT.with(|slot| *slot.borrow_mut() = None);
+            result
+        }
+
+        pub(super) fn answer(args: &[&str]) -> Option<Output> {
+            SCRIPT.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                let code = (slot.as_mut()?)(args);
+                Some(Output {
+                    status: ExitStatus::from_raw(code << 8),
+                    stdout: Vec::new(),
+                    stderr: if code == 0 { Vec::new() } else { format!("launchctl exited {code}").into_bytes() },
+                })
+            })
+        }
+
+        /// A launchd that holds one job; `bootout` answers `bootout_exit` and
+        /// unloads the job when `unloads` is set. Returns the script and a
+        /// log of the subcommands it saw.
+        pub fn launchd(
+            print_exit: Option<i32>,
+            bootout_exit: i32,
+            unloads: bool,
+        ) -> (impl FnMut(&[&str]) -> i32, std::rc::Rc<RefCell<Vec<String>>>) {
+            let calls = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let log = calls.clone();
+            let mut loaded = true;
+            let script = move |args: &[&str]| {
+                log.borrow_mut().push(args[0].to_string());
+                match args[0] {
+                    "print" => print_exit.unwrap_or(if loaded { 0 } else { super::PRINT_NOT_FOUND }),
+                    "bootout" => {
+                        if unloads {
+                            loaded = false;
+                        }
+                        bootout_exit
+                    }
+                    _ => 0,
+                }
+            };
+            (script, calls)
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        fn count(calls: &std::rc::Rc<std::cell::RefCell<Vec<String>>>, name: &str) -> usize {
+            calls.borrow().iter().filter(|c| c.as_str() == name).count()
+        }
+
+        #[test]
+        fn unload_confirms_the_job_is_gone() {
+            let (script, calls) = fake::launchd(None, 0, true);
+            fake::with(script, || unload()).unwrap();
+            assert_eq!(count(&calls, "bootout"), 1);
+        }
+
+        #[test]
+        fn unload_without_a_loaded_job_does_nothing() {
+            let (script, calls) = fake::launchd(Some(PRINT_NOT_FOUND), 0, true);
+            fake::with(script, || unload()).unwrap();
+            assert_eq!(count(&calls, "bootout"), 0);
+        }
+
+        #[test]
+        fn refused_bootout_fails_the_stop() {
+            let (script, _) = fake::launchd(None, 5, false);
+            let err = fake::with(script, || unload()).unwrap_err();
+            assert_eq!(err.code, "STOP_FAILED");
+            assert!(err.message.contains("launchctl exited 5"), "{}", err.message);
+        }
+
+        #[test]
+        fn job_still_loaded_after_bootout_fails_the_stop() {
+            let (script, _) = fake::launchd(None, 0, false);
+            let err = fake::with(script, || unload()).unwrap_err();
+            assert_eq!(err.code, "STOP_FAILED");
+            assert!(err.message.contains("still has"), "{}", err.message);
+        }
+
+        #[test]
+        fn unknown_launchd_state_fails_the_stop() {
+            let (script, calls) = fake::launchd(Some(112), 0, true);
+            let err = fake::with(script, || unload()).unwrap_err();
+            assert_eq!(err.code, "STOP_FAILED");
+            assert_eq!(count(&calls, "bootout"), 0);
+        }
+
+        #[test]
+        fn job_gone_despite_bootout_error_is_unloaded() {
+            let (script, _) = fake::launchd(None, 3, true);
+            fake::with(script, || unload()).unwrap();
+        }
 
         #[test]
         fn plist_escapes_paths_and_keeps_fixed_keys() {
@@ -891,7 +1046,8 @@ pub fn launchd_start() -> LaunchdStart {
     mac_launchd::start()
 }
 
-/// macOS: unload the job once the supervisor is stopped.
+/// macOS: unload the job once the supervisor is stopped; an unload that
+/// cannot be confirmed is a `STOP_FAILED` error.
 #[cfg(target_os = "macos")]
 pub fn launchd_unload() -> AppResult<()> {
     mac_launchd::unload()
@@ -902,6 +1058,9 @@ pub fn launchd_unload() -> AppResult<()> {
 pub fn launchd_release_for_kill() {
     mac_launchd::release_for_kill()
 }
+
+#[cfg(all(test, target_os = "macos"))]
+pub use mac_launchd::fake as launchctl_fake;
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn enable() -> AppResult<Value> {
