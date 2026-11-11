@@ -29,6 +29,7 @@ import {
 import { targetApi } from './targetApi';
 import type { DesktopViewApi } from './types';
 import './DesktopShell.css';
+import { ErrorNotice } from '../../../web/src/ui';
 
 interface ProfileFormState {
   title: string;
@@ -702,22 +703,14 @@ class App extends Component<AppProps, AppState> {
           </div>
         </aside>
         <main className="app-workspace">
+          <aside className="app-notices" aria-label="通知">
           {this.state.globalError && (
-            <div className="error-banner" role="alert">
-              <span className="error-banner-text">{this.state.globalError}</span>
-              <div className="error-banner-actions">
-                <button type="button" onClick={() => this.setState({ globalError: null })}>关闭</button>
-              </div>
-            </div>
+            <ErrorNotice error={this.state.globalError} onDismiss={() => this.setState({ globalError: null })} />
           )}
           {this.state.bannerError && (
-            <div className="error-banner" role="alert">
-              <span className="error-banner-text">{this.state.bannerError}</span>
-              <div className="error-banner-actions">
-                <button type="button" onClick={() => this.setState({ bannerError: null })}>关闭</button>
-              </div>
-            </div>
+            <ErrorNotice error={this.state.bannerError} onDismiss={() => this.setState({ bannerError: null })} />
           )}
+          </aside>
           {centerInterrupted && (
             <div className="center-recovery">
               <span role="status">{center?.state === 'disconnected' ? '中心连接不可用' : '正在恢复中心连接…'}</span>

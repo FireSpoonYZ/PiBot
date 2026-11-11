@@ -2,7 +2,6 @@ import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, us
 import {
   Archive,
   ArrowLeft,
-  ArrowUp,
   AudioLines,
   Bell,
   Brain,
@@ -138,6 +137,8 @@ import {
 } from './imageAttachments';
 import type { ImageAttachment } from '../../host-core/index.js';
 import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useText } from './ui';
+import { SendButtonIcon } from './SendButtonIcon';
+import { deleteBotAndVerify, isDefiniteSendFailure } from './botOperations';
 
 import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending, ChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, copyTextToClipboard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
 // @lane-imports:settings
@@ -321,6 +322,7 @@ export function HostPage({
   const currentChatScope = useRef('');
   const selectedChatTarget = useRef<{ hostKind: 'local' | 'remote'; hostId: string; botId: string } | undefined>(undefined);
   const localInFlight = useRef(new Set<string>());
+  const deletingBots = useRef(new Set<string>());
   const [chatObservationError, setChatObservationError] = useState('');
   // 历史读取失败单独记录：观察恢复成功只清连接问题，不清掉这次历史错误，交给现有 2s 重试。
   const [chatHistoryError, setChatHistoryError] = useState('');
@@ -1321,6 +1323,7 @@ export function HostPage({
   // Load per-Bot Scheduled Tasks
   const loadBotSchedules = useCallback(
     async (bot: UnifiedBotItem) => {
+      if (deletingBots.current.has(bot.key)) return;
       const generation = ++scheduleLoadGeneration.current;
       try {
         let rawResult: unknown;
@@ -1421,12 +1424,13 @@ export function HostPage({
   // Load history and observe when entering Chat View
   const loadBotHistoryAndObserve = useCallback(
     async (bot: UnifiedBotItem) => {
+      if (deletingBots.current.has(bot.key)) return;
       cancelActiveObservation();
       // 等这次加载结束再安排重试，避免多片传输被 2 秒定时器反复作废。
       setChatHistoryError('');
       setChatObservationError('');
       const generation = ++chatLoadGeneration.current;
-      const current = () => generation === chatLoadGeneration.current;
+      const current = () => generation === chatLoadGeneration.current && !deletingBots.current.has(bot.key);
       // 同一聊天前台恢复/重连时保留现有 live，直到新快照到达；旧消息只来自实时快照时不会被清空。
       const historyErrorText = t('历史记录暂时无法加载，正在重试…', 'History temporarily unavailable; retrying…');
 
@@ -1653,11 +1657,11 @@ export function HostPage({
     }
     let polling = false;
     const timer = window.setInterval(async () => {
-      if (!alive || polling || document.hidden || (chatHostKind === 'local' && localInFlight.current.has(requestId))) return;
+      if (!alive || polling || document.hidden || deletingBots.current.has(chatBotKey) || (chatHostKind === 'local' && localInFlight.current.has(requestId))) return;
       polling = true;
       try {
         const next = await readSubmission();
-        if (!alive || chatSubmissionRef.current !== submission || !next || next.requestId !== requestId) return;
+        if (!alive || deletingBots.current.has(chatBotKey) || chatSubmissionRef.current !== submission || !next || next.requestId !== requestId) return;
         const entry = chatPending && pendingByBot.current.get(chatPending.scopeKey);
         const nextAdmission = (next as TurnAdmissionCarrier).admission ?? null;
         if (next.status !== 'done' && next.status !== 'unanswered') {
@@ -2013,7 +2017,7 @@ export function HostPage({
         setOfflineNotice({ botKey: bot.key, text: t('目标离线，草稿已保留。', 'Target offline; draft retained.') });
         return;
       }
-      if (chatPending?.botKey === bot.key && chatPending.phase !== 'accepted') throw new Error(t('原请求尚未确认，请勿重复发送。', 'Original request is unconfirmed; do not resend.'));
+      if (deletingBots.current.has(bot.key) || (chatPending?.botKey === bot.key && chatPending.phase !== 'accepted')) return;
       if (bot.archivedAt) throw new Error(t('该智能体已归档，请先恢复后再发送消息', 'This bot is archived. Unarchive it first.'));
       if (imageUploading) return;
       const draftSnapshot = chatDraft;
@@ -2081,10 +2085,10 @@ ${newer}` : draftSnapshot;
           receipt = result.result as HostSubmission;
         } catch (error) {
           if (stillOwned()) {
-            if ((error as { outcome?: string })?.outcome === 'not-sent') restore();
+            if (isDefiniteSendFailure(error)) restore();
             else updatePending({ pending: { ...submission, phase: 'recovering' } });
           }
-          if (currentChatScope.current === scopeKey) throw error;
+          if (currentChatScope.current === scopeKey && isDefiniteSendFailure(error)) throw error;
           return;
         }
         if (!stillOwned()) return;
@@ -2437,33 +2441,71 @@ ${newer}` : draftSnapshot;
       if (bot.isPrimary) {
         throw new Error(t('主智能体受保护，不能直接删除。请先将其他智能体设为主智能体。', 'Primary bot is protected. Switch primary bot before deleting.'));
       }
-      if (bot.hostKind === 'local') {
-        const snap = await ensureLocalHostRunning();
-        if (!snap || snap.phase !== 'running') throw new Error(t('本机服务未运行', 'Local host not running'));
-        await BotHost.call({ method: 'deleteBot', params: { botId: bot.botId } });
-        await syncLocalBots(snap);
-      } else if (bot.remoteIdentity && remoteClientRef.current) {
-        if (!remoteConnected || bot.online === false) {
-          throw new Error(t('目标设备离线，已拒绝修改', 'Target device is offline; operation rejected'));
-        }
-        await remoteClientRef.current.api.call(bot.remoteIdentity, 'deleteBot', { botId: bot.botId });
-        await syncRemoteBots();
-      } else {
-        throw new Error(t('无法连接目标节点', 'Target host unavailable'));
-      }
-      chatPins.removePin(botPinKey(bot));
-      setBotConfirmModal(null);
+      if (deletingBots.current.has(bot.key)) return;
+      deletingBots.current.add(bot.key);
       if (activeBotKey === bot.key) {
+        chatLoadGeneration.current += 1;
+        chatHistoryEpoch.current += 1;
+        profileLoadGeneration.current += 1;
         cancelActiveObservation();
-        setActiveBotKey(null);
       }
-      const returnToArchived =
-        screen === 'archived-bots' ||
-        (screen === 'chat' && chatReturnScreen === 'archived-bots') ||
-        ((screen === 'bot-profile' || screen === 'bot-profile-manage') &&
-          (profileReturnScreen === 'archived-bots' ||
-            (profileReturnScreen === 'chat' && chatReturnScreen === 'archived-bots')));
-      setScreen(returnToArchived ? 'archived-bots' : 'hub');
+      let deleted = false;
+      try {
+        if (bot.hostKind === 'local') {
+          const snap = await ensureLocalHostRunning();
+          if (!snap || snap.phase !== 'running') throw new Error(t('本机服务未运行', 'Local host not running'));
+          await deleteBotAndVerify(
+            () => BotHost.call({ method: 'deleteBot', params: { botId: bot.botId } }),
+            () => BotHost.call({ method: 'getBot', params: { botId: bot.botId } }),
+          );
+          deleted = true;
+          localBotsScopeRef.current = { ...localBotsScopeRef.current };
+          await syncLocalBots(snap).catch(() => {});
+          if (localBotsScopeRef.current.center === activeCenter) {
+            setLocalBots(previous => previous.filter(item => item.botId !== bot.botId));
+          }
+        } else if (bot.remoteIdentity && remoteClientRef.current) {
+          if (!remoteConnected || bot.online === false) {
+            throw new Error(t('目标设备离线，已拒绝修改', 'Target device is offline; operation rejected'));
+          }
+          const api = remoteClientRef.current.api;
+          const identity = bot.remoteIdentity;
+          await deleteBotAndVerify(
+            () => api.call(identity, 'deleteBot', { botId: bot.botId }),
+            () => api.call(identity, 'getBot', { botId: bot.botId }),
+          );
+          deleted = true;
+          directoryGeneration.current += 1;
+          await syncRemoteBots().catch(() => {});
+          if (api.identity?.profileId === identity.profileId) {
+            setRemoteBots(previous => {
+              const next = previous.filter(item => item.deviceId !== bot.deviceId || item.botId !== bot.botId);
+              writeCachedRemoteBots(next);
+              return next;
+            });
+          }
+        } else {
+          throw new Error(t('无法连接目标节点', 'Target host unavailable'));
+        }
+        chatPins.removePin(botPinKey(bot));
+        setBotConfirmModal(null);
+        if (activeBotKey === bot.key) {
+          cancelActiveObservation();
+          setActiveBotKey(null);
+        }
+        const returnToArchived =
+          screen === 'archived-bots' ||
+          (screen === 'chat' && chatReturnScreen === 'archived-bots') ||
+          ((screen === 'bot-profile' || screen === 'bot-profile-manage') &&
+            (profileReturnScreen === 'archived-bots' ||
+              (profileReturnScreen === 'chat' && chatReturnScreen === 'archived-bots')));
+        setScreen(returnToArchived ? 'archived-bots' : 'hub');
+      } finally {
+        if (!deleted) {
+          deletingBots.current.delete(bot.key);
+          setChatResumeEpoch(value => value + 1);
+        }
+      }
     });
 
   // 群行直接解散删除：走 authority resolved members API，先读最新 scope 冻结 requestId / expectedRevision，
@@ -3791,11 +3833,10 @@ ${newer}` : draftSnapshot;
   const chatLoadIssue = Boolean(chatLoadError) && !(centerConn.status?.state === 'disconnected' && centerConn.status.error);
   const chatAdmissionActive = Boolean(chatTurnAdmission) && chatPending?.botKey === activeBot?.key &&
     (chatReceipt?.status === undefined || chatReceipt.status === 'queued');
-  const chatRecovering = chatPending?.botKey === activeBot?.key && chatPending?.phase === 'recovering';
-  const chatStatusKind: 'fail' | 'recovering' | 'admission' | 'conn' | 'load' | 'clear' | null =
+  const sendingReceipt = chatPending?.botKey === activeBot?.key && chatPending?.phase !== 'accepted';
+  const chatStatusKind: 'fail' | 'admission' | 'conn' | 'load' | 'clear' | null =
     failureNotice ? 'fail'
-      : chatRecovering ? 'recovering'
-      : chatAdmissionActive ? 'admission'
+      : chatAdmissionActive && chatTurnAdmission?.phase === 'failed' ? 'admission'
       : chatConnIssue ? 'conn'
       : chatLoadIssue ? 'load'
       : clearNotice ? 'clear'
@@ -4500,8 +4541,8 @@ ${newer}` : draftSnapshot;
               key={activeBot.key}
               botKey={activeBot.key}
               preset={resolveBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary)}
-              isBusy={isBotBusy}
-              isSending={chatPending?.botKey === activeBot.key && chatPending.phase === 'sending'}
+              isBusy={isBotActivityBusy(rawBotActivity) || isStoppingBot}
+              isSending={false}
               isRecovering={chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering'}
               isStreaming={Boolean(displayGeneratingText)}
               activeToolName={displayLiveToolName}
@@ -4511,7 +4552,7 @@ ${newer}` : draftSnapshot;
                   !displayGeneratingText,
               )}
               queuedCount={chatLive?.queuedCount ?? 0}
-              activity={botActivity}
+              activity={isStoppingBot ? botActivity : rawBotActivity}
               hasError={Boolean(failureNotice) || (chatReceipt?.status === 'unanswered' && !receiptUserCancelled)}
               startedAt={activeTurnStartedAt}
               t={t}
@@ -4522,12 +4563,6 @@ ${newer}` : draftSnapshot;
                 actionLabel={t('检查配置', 'Check Settings')}
                 onAction={() => openBotProfile(activeBot)}
               />
-            )}
-            {chatStatusKind === 'recovering' && (
-              <div className="bot-chat-system-notice" role="status">
-                {t('消息可能已送达，正在确认。为避免重复，不会自动重发。', 'The message may have been delivered; confirming. To avoid duplicates, it will not be resent automatically.')}
-                {activeBot.hostKind === 'local' && <button type="button" className="hub-outline-btn" onClick={() => setChatResumeEpoch(value => value + 1)}>{t('重新确认', 'Confirm again')}</button>}
-              </div>
             )}
             {chatStatusKind === 'admission' && (
               <div className="bot-chat-system-notice" role="status">
@@ -4822,15 +4857,16 @@ ${newer}` : draftSnapshot;
                   </button>
                 )}
 
-                {chatDraft.trim() || chatDraftAttachments.length > 0 ? (
+                {sendingReceipt || chatDraft.trim() || chatDraftAttachments.length > 0 ? (
                   <button
                     type="button"
                     className="grok-composer-action-pill send"
-                    aria-label={t('发送', 'Send')}
-                    disabled={action.busy || Boolean(slashBusy) || imageUploading || (chatPending?.botKey === activeBot.key && chatPending.phase === 'recovering')}
+                    aria-label={sendingReceipt ? t('正在发送', 'Sending') : t('发送', 'Send')}
+                    aria-busy={sendingReceipt}
+                    disabled={sendingReceipt || Boolean(slashBusy) || imageUploading || deletingBots.current.has(activeBot.key)}
                     onClick={() => void sendMessage()}
                   >
-                    <ArrowUp size={18} />
+                    <SendButtonIcon busy={sendingReceipt} />
                   </button>
                 ) : null}
               </div>
@@ -6953,12 +6989,12 @@ function RemotePendingComposer({
       onSettled: release,
     });
   }, [imageUploading, drafts.key, drafts.attempt, blocked, commandBusy, inTauriUi, uploadRemoteImages]);
-  const [recoveryTick, setRecoveryTick] = useState(0);
   const [confirmedConflict, setConfirmedConflict] = useState<{ requestId: string; pendingId: string; original: DesktopDraftEntry; handle?: { key: string; attemptId: string } }>();
   const [resolvingConflict, setResolvingConflict] = useState(false);
   const [slashBusy, setSlashBusy] = useState<SlashCommandName>();
   const slashBusyRef = useRef(false);
   const sending = useRef(false);
+  const [sendingNow, setSendingNow] = useState(false);
   const [stopError, setStopError] = useState('');
   /** "+" 菜单 /clear 二次确认：存首次点击时间戳，3 秒内再点才执行。 */
   const [clearArmedAt, setClearArmedAt] = useState(0);
@@ -7015,7 +7051,7 @@ function RemotePendingComposer({
       try {
         const handle = { key: drafts.key!, attemptId: attempt.id };
         if (!attempt.pendingId && !attempt.cleared) {
-          await drafts.reconcile(handle);
+          await drafts.reconcile(handle, { silent: true });
           return;
         }
         if (attempt.pendingId) {
@@ -7024,7 +7060,12 @@ function RemotePendingComposer({
           if (pending?.state === 'sending' || pending?.state === 'unconfirmed') pending = await api.pending(identity, 'pending_reconcile', { id: attempt.pendingId });
           if (pending?.state === 'pending') pending = await api.pending(identity, 'pending_cancel', { id: attempt.pendingId });
           if (!alive) return;
-          if (pending?.state === 'rejected' && pending.lastError?.code === 'CANCELLED' && pending.lastError.outcome === 'not-sent') {
+          if (pending?.state === 'accepted' && pending.receipt) {
+            onAccepted(pending.receipt as unknown as HostSubmission);
+            if (attempt.cleared || await drafts.confirmCleared(handle) === 'cleared') drafts.finishSend(handle);
+            return;
+          }
+          if (pending?.state === 'rejected') {
             const newer = drafts.conflict ?? api.snapshot?.state.drafts[handle.key];
             const attEqual = (a: DesktopDraftEntry, b: DesktopDraftEntry) => JSON.stringify(a.attachments ?? []) === JSON.stringify(b.attachments ?? []);
             const matches = (draft: DesktopDraftEntry) => Boolean(newer && newer.text === draft.text && JSON.stringify(newer.files) === JSON.stringify(draft.files) && attEqual(newer, draft));
@@ -7065,7 +7106,7 @@ function RemotePendingComposer({
     return () => { alive = false; window.clearInterval(timer); };
     // Callbacks are scoped to this mounted bot; identity generation fences old requests.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, identity.generation, identity.targetDeviceId, botId, online, drafts.key, drafts.attempt?.id, drafts.attempt?.phase, drafts.attempt?.pendingId, drafts.conflict, confirmedConflict?.requestId, recoveryTick]);
+  }, [api, identity.generation, identity.targetDeviceId, botId, online, drafts.key, drafts.attempt?.id, drafts.attempt?.phase, drafts.attempt?.pendingId, drafts.conflict, confirmedConflict?.requestId]);
 
   useEffect(() => {
     if (!pending || !blocked || drafts.attempt || !drafts.key || !online || !api.transportConnected || confirmedConflict?.requestId === pending.requestId) return;
@@ -7092,7 +7133,7 @@ function RemotePendingComposer({
           return;
         }
         if (record.state === 'pending') record = await api.pending(identity, 'pending_cancel', { id: record.id });
-        if (!alive || record.state !== 'rejected' || record.lastError?.code !== 'CANCELLED' || record.lastError.outcome !== 'not-sent' || !pending.draft) return;
+        if (!alive || record.state !== 'rejected' || !pending.draft) return;
         const draft = pending.draft;
         const currentText = drafts.text;
         const newer = api.snapshot?.state.drafts[drafts.key!];
@@ -7121,7 +7162,7 @@ function RemotePendingComposer({
     return () => { alive = false; window.clearInterval(timer); };
     // Current generation and the persisted request identify the only safe target.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pending?.requestId, pending?.pendingId, blocked, drafts.attempt?.id, drafts.key, online, identity.generation, identity.targetDeviceId, api, confirmedConflict?.requestId, recoveryTick]);
+  }, [pending?.requestId, pending?.pendingId, blocked, drafts.attempt?.id, drafts.key, online, identity.generation, identity.targetDeviceId, api, confirmedConflict?.requestId]);
 
   const keepNewerDraft = async () => {
     const conflict = confirmedConflict;
@@ -7131,8 +7172,7 @@ function RemotePendingComposer({
     try {
       const original = await api.pending(identity, 'pending_get', { id: conflict.pendingId });
       if (!original || original.kind !== 'primary' || original.requestId !== conflict.requestId || original.botId !== botId ||
-        original.targetDeviceId !== identity.targetDeviceId || original.state !== 'rejected' ||
-        original.lastError?.code !== 'CANCELLED' || original.lastError.outcome !== 'not-sent') {
+        original.targetDeviceId !== identity.targetDeviceId || original.state !== 'rejected') {
         throw new Error(t('尚未确认请求已取消，无法结束旧尝试。', 'Cancellation is not confirmed; the original attempt remains locked.'));
       }
       if (!api.snapshot) throw new Error(t('持久草稿尚未加载。', 'Saved draft is not loaded.'));
@@ -7221,6 +7261,7 @@ function RemotePendingComposer({
     });
     if (!started) return;
     sending.current = true;
+    setSendingNow(true);
     if (started.attempt.input.kind !== 'primary') return;
     const requestId = started.attempt.input.requestId;
     onStarted(requestId, text, started.attempt.draft);
@@ -7249,7 +7290,7 @@ function RemotePendingComposer({
         const message = errorText(error);
         if ((error as { outcome?: string })?.outcome === 'not-sent') { drafts.markNotSent(started.handle, message); drafts.releaseIfNotSent(started.handle); onNotSent(requestId); }
         else { drafts.markUnconfirmed(started.handle); onUnconfirmed(requestId); }
-        setNotice(`${message} · requestId ${started.attempt.input.kind === 'primary' ? started.attempt.input.requestId : ''}`);
+        setNotice((error as { outcome?: string })?.outcome === 'not-sent' ? message : '');
         return;
       }
       drafts.setPending(started.handle, pending.id);
@@ -7268,7 +7309,7 @@ function RemotePendingComposer({
       if (!api.transportConnected) {
         drafts.markUnconfirmed(started.handle);
         onUnconfirmed(requestId);
-        setNotice(t('连接中断，请按原 ID 确认结果。', 'Connection interrupted; reconcile the original ID.'));
+        setNotice('');
         return;
       }
       try {
@@ -7280,17 +7321,21 @@ function RemotePendingComposer({
           if (sent.receipt) onAccepted(sent.receipt as unknown as HostSubmission);
         } else {
           onUnconfirmed(requestId);
-          setNotice(`${sent.state} · ${pending.id}`);
+          setNotice('');
         }
       } catch (error) {
         drafts.markUnconfirmed(started.handle);
         onUnconfirmed(requestId);
-        setNotice(`${t('回执未确认，请按原 ID 对账', 'Receipt unconfirmed; reconcile the original ID')} · ${pending.id} · ${errorText(error)}`);
+        setNotice('');
       }
     } finally {
       sending.current = false;
+      setSendingNow(false);
     }
   };
+
+  const waitingForReceipt = !confirmedConflict && drafts.attempt?.phase !== 'failed' &&
+    (sendingNow || blocked || Boolean(drafts.attempt && drafts.attempt.phase !== 'not-sent'));
 
   return (
     <>
@@ -7316,17 +7361,6 @@ function RemotePendingComposer({
           {confirmedConflict.original.files.map((file, index) => <div key={`${file.path}:${index}`} className="pre-wrap">{file.name}: {file.path}</div>)}
           <button type="button" className="hub-outline-btn" disabled={resolvingConflict} onClick={() => void keepNewerDraft()}>
             {t('保留新版草稿，结束旧尝试', 'Keep newer draft and end original attempt')}
-          </button>
-        </section>
-      )}
-      {(blocked || (drafts.attempt && !['locked', 'enqueued', 'cleared'].includes(drafts.attempt.phase))) && (
-        <section className="grok-card-group grok-pending-freeze-card" role="status" style={{ marginBottom: 8 }}>
-          <div className="grok-pending-freeze-head">
-            <span className="grok-pending-freeze-badge">{t('发送结果待确认', 'Send result unconfirmed')}</span>
-            <code className="grok-pending-freeze-id">{pending?.requestId || (drafts.attempt?.input.kind === 'primary' ? drafts.attempt.input.requestId : '')}</code>
-          </div>
-          <button type="button" className="grok-done-pill-btn" onClick={() => setRecoveryTick(value => value + 1)}>
-            {t('按原 ID 对账', 'Reconcile ID')}
           </button>
         </section>
       )}
@@ -7479,15 +7513,16 @@ function RemotePendingComposer({
             }}
           />
 
-          {drafts.text.trim() || drafts.attachments.length > 0 ? (
+          {waitingForReceipt || drafts.text.trim() || drafts.attachments.length > 0 ? (
             <button
               type="button"
               className="grok-composer-action-pill send"
-              disabled={(!drafts.text.trim() && drafts.attachments.length === 0) || imageUploading || Boolean(drafts.attempt) || blocked || Boolean(fallbackDraft) || commandLocked}
+              disabled={waitingForReceipt || (!drafts.text.trim() && drafts.attachments.length === 0) || imageUploading || Boolean(drafts.attempt) || blocked || Boolean(fallbackDraft) || commandLocked}
               onClick={() => void send()}
-              aria-label={t('发送', 'Send')}
+              aria-label={waitingForReceipt ? t('正在发送', 'Sending') : t('发送', 'Send')}
+              aria-busy={waitingForReceipt}
             >
-              <ArrowUp size={18} />
+              <SendButtonIcon busy={waitingForReceipt} />
             </button>
           ) : null}
 

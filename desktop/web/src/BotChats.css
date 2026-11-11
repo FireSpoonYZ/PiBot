@@ -703,6 +703,7 @@
   color: var(--muted);
   opacity: 1;
 }
+.bot-composer .composer-send[aria-busy="true"] { background: var(--brand); color: #fff; }
 
 .chat-awaiting-answer {
   flex: none;

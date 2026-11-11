@@ -1,0 +1,33 @@
+.grok-notice-card.inline-error {
+  --notice-accent: var(--danger);
+  display: block; padding: 12px 14px; margin: 8px 0; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--surface-elevated, var(--bg));
+  color: var(--text); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere;
+  box-shadow: none; animation: none;
+}
+.grok-notice-card.inline-error.is-info { --notice-accent: var(--muted); }
+.grok-notice-card.inline-error.is-warning { --notice-accent: var(--warn, #a76a19); }
+.grok-notice-card.inline-error.is-success { --notice-accent: var(--accent); }
+.grok-notice-card.inline-error:not(.is-dark-glass) { border-color: var(--line); background: var(--surface-elevated, var(--bg)); }
+.grok-notice-card .grok-notice-main { display: flex; align-items: flex-start; gap: 10px; width: 100%; }
+.grok-notice-card .grok-notice-icon-wrap { display: flex; align-items: center; justify-content: center; flex: none; width: 18px; height: 22px; margin: 0; background: none; color: var(--notice-accent); }
+.grok-notice-card .grok-notice-icon { width: 18px; height: 18px; }
+.grok-notice-card .grok-notice-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.grok-notice-card .grok-notice-title { color: var(--text); font-size: 13px; line-height: 1.5; font-weight: 500; }
+.grok-notice-card .grok-notice-desc { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.grok-notice-card .grok-notice-detail-wrap { margin-top: 3px; }
+.grok-notice-card .grok-notice-detail-toggle { display: inline-flex; align-items: center; gap: 3px; padding: 3px 0; color: var(--muted); background: none; border: 0; border-radius: 4px; font-size: 12px; font-weight: 400; }
+.grok-notice-card .grok-notice-detail-code { margin: 5px 0 0; padding: 8px 10px; border: 0; border-radius: 6px; background: var(--surface); color: var(--muted); font: 12px/1.5 monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.grok-notice-card .grok-notice-actions { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; align-self: flex-start; flex-shrink: 0; }
+.grok-notice-card .grok-notice-action-pill { min-height: 30px; padding: 3px 6px; border: 0; border-radius: 6px; background: none; color: var(--brand, var(--accent)); font-size: 12px; font-weight: 500; box-shadow: none; }
+.grok-notice-card .grok-notice-dismiss-btn { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 6px; color: var(--muted); background: none; }
+.grok-notice-card .grok-notice-dismiss-btn svg { width: 15px; height: 15px; }
+.app-workspace > .grok-notice-card { margin: 8px 14px 0; }
+@media (max-width: 480px) {
+  .grok-notice-card .grok-notice-main { flex-wrap: wrap; }
+  .grok-notice-card .grok-notice-content { flex-basis: calc(100% - 28px); }
+  .grok-notice-card .grok-notice-actions { margin-left: 28px; }
+}
+@media (pointer: coarse) {
+  .grok-notice-card .grok-notice-action-pill, .grok-notice-card .grok-notice-dismiss-btn, .grok-notice-card .grok-notice-detail-toggle { min-width: 44px; min-height: 44px; }
+}

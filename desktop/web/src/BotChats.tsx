@@ -2,13 +2,12 @@
 // 设计依据 desktop-gui-fresh-argon-design §5.2/§5.3/§5.4；
 // 全部请求仍走既有 useDrafts / pending_enqueue / pending_send / observe 路径，
 // 保留 CAS、显式发送、结果未确认锁与离线只读语义。
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ReactNode, RefObject } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
   Archive,
   ArrowLeft,
-  ArrowUp,
   ChevronRight,
   Clock,
   Cpu,
@@ -48,7 +47,11 @@ import {
 import type { ImageAttachment } from '../../../host-core/index.js';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import type { DesktopObservationEvent } from './types';
-import { useText } from '../../../web/src/ui';
+import { ErrorNotice, useText } from '../../../web/src/ui';
+import { BotReadScope } from '../../../web/src/botReadScope';
+import { deleteBotAndVerify } from '../../../web/src/botOperations';
+import { SendButtonIcon } from '../../../web/src/SendButtonIcon';
+import { useReceiptRecovery } from '../../../web/src/useReceiptRecovery';
 import type {
   BotLiveState,
   BotDirectoryEntry,
@@ -63,7 +66,7 @@ import type {
   PendingRecord,
   ScopeInfo,
 } from '../../../host-core/index.js';
-import { isTargetOfflineError } from './api';
+import { isTargetOfflineError, toError } from './api';
 import { useDrafts } from './drafts';
 import type { DraftSnapshot } from './drafts';
 import { readToolPresentation, type QuestionnaireSubmitPayload, type VaultUnlockSubmitPayload } from '../../../web/src/ToolPresentation';
@@ -610,7 +613,7 @@ type SendNotice = {
   showRecordAction?: boolean;
 };
 
-function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, canPick, onPick, draftError, draftHint, draftConflict, sendState, sendError, sendNotice, onSend, canSend, disabled, onRetryDraft, attempt, recOutcome, onReconcile, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onInsertSlash, onOpenSendRecord }: {
+function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, canPick, onPick, draftError, draftHint, draftConflict, sendState, receiptBusy, sendError, sendNotice, onSend, canSend, disabled, onRetryDraft, attempt, recOutcome, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onInsertSlash, onOpenSendRecord }: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   text: string;
   onChangeText: (v: string) => void;
@@ -628,6 +631,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
   draftHint: string | null;
   draftConflict: DraftSnapshot | null;
   sendState: 'idle' | 'sending';
+  receiptBusy: boolean;
   sendError: string | null;
   /** 发送受理与斜杠命令的提示。 */
   sendNotice: SendNotice | null;
@@ -637,7 +641,6 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
   onRetryDraft: () => void;
   attempt: { phase: string; error: string | null } | null;
   recOutcome: { action: string; found: boolean; recordId: string | null; recordState: string | null } | null;
-  onReconcile: () => void;
   onReleaseNotSent: () => void;
   onRetryClearVerified: () => void;
   onAdoptNewerDraft: () => void;
@@ -739,15 +742,9 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
     }
   }
 
-  const recoveringAttempt = attempt && (
-    sendState === 'idle' || sendError || attempt.error || attempt.phase === 'unconfirmed'
-  ) ? attempt : null;
-  const admissionProgress = turnAdmission && turnAdmission.phase !== 'failed'
-    ? TURN_ADMISSION_LABELS[turnAdmission.phase] + (turnAdmission.source === 'background' ? ' · 后台' : '')
-    : null;
-  const footerStatus = sendState === 'sending'
-    ? sendNotice?.text ?? '正在保存并发送消息…'
-    : [sendNotice?.text, admissionProgress].filter(Boolean).join(' · ');
+  const recoveringAttempt = attempt && (attempt.phase === 'not-sent' || attempt.phase === 'failed' ||
+    draftConflict || recOutcome?.action === 'ready-clear-retry') ? attempt : null;
+  const footerStatus = receiptBusy ? null : sendNotice?.text;
   const footerHint = draftHint ?? 'Enter 发送 · Shift+Enter 换行 · / 呼出命令';
   const footerRecordAction = sendState === 'idle' && sendNotice?.showRecordAction &&
     !recoveringAttempt && !sendError
@@ -758,10 +755,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
     <div className="composer bot-composer">
       <div className="composer-extras">
         {draftError ? (
-          <div className="error-banner" role="alert">
-            <span className="error-banner-text">{draftError}</span>
-            <button type="button" onClick={onRetryDraft}>重试保存</button>
-          </div>
+          <ErrorNotice error={draftError} actionLabel="重试保存" onAction={onRetryDraft} compact />
         ) : null}
         {draftConflict ? (
           <div className="status">
@@ -780,10 +774,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
               </>
             ) : (
               <>
-                <span className="error-banner-text">{sendError ?? recoveringAttempt.error ?? '发送结果待确认。'}</span>
-                {recoveringAttempt.phase === 'cleared' || recoveringAttempt.phase === 'failed' || recoveringAttempt.phase === 'unconfirmed' ? (
-                  <button type="button" onClick={onReconcile} disabled={sendState === 'sending'}>核对结果</button>
-                ) : null}
+                <span className="error-banner-text">{sendError ?? recoveringAttempt.error ?? '草稿需要处理。'}</span>
                 {onOpenSendRecord ? <button type="button" onClick={onOpenSendRecord}>查看发送记录</button> : null}
                 {draftConflict && recOutcome?.found ? (
                   <button type="button" onClick={onAdoptNewerDraft}>保留新版草稿，结束旧尝试</button>
@@ -796,22 +787,12 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
           </div>
         ) : null}
         {turnAdmission?.phase === 'failed' ? (
-          <div className="error-banner" role="alert">
-            <span className="error-banner-text">
-              {TURN_ADMISSION_LABELS[turnAdmission.phase]}
-              {turnAdmission.source === 'background' ? ' · 后台' : null}
-              {turnAdmission.error
-                ? '（' + turnAdmission.error.code + (turnAdmission.error.message ? '：' + turnAdmission.error.message : '') + '）'
-                : null}
-            </span>
-            <button type="button" onClick={onRetryTurnAdmission}>重试准入</button>
-          </div>
+          <ErrorNotice title="消息暂未开始处理" description="内容已保留，可以重试。"
+            detail={turnAdmission.error ? `${turnAdmission.error.code}: ${turnAdmission.error.message ?? ''}` : undefined}
+            actionLabel="重试发送" onAction={onRetryTurnAdmission} compact />
         ) : null}
         {sendError && !attempt ? (
-          <div className="error-banner" role="alert">
-            <span className="error-banner-text">{sendError}</span>
-            {onOpenSendRecord ? <button type="button" onClick={onOpenSendRecord}>查看发送记录</button> : null}
-          </div>
+          <ErrorNotice error={sendError} actionLabel={onOpenSendRecord ? '查看发送记录' : undefined} onAction={onOpenSendRecord} compact />
         ) : null}
         {files.length > 0 ? (
           <>
@@ -927,11 +908,12 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
             type="button"
             className="composer-send primary-button"
             onClick={() => onSend()}
-            disabled={disabled || !canSend}
-            aria-label="发送"
+            disabled={receiptBusy || disabled || !canSend}
+            aria-label={receiptBusy ? '正在发送' : '发送'}
+            aria-busy={receiptBusy}
             title="Enter 发送 · Shift+Enter 换行"
           >
-            {sendState === 'sending' ? '…' : <ArrowUp size={16} />}
+            <SendButtonIcon busy={receiptBusy} size={16} />
           </button>
         </div>
       </div>
@@ -1192,6 +1174,7 @@ function PrimaryChatPane({
   api,
   centerApi,
   bot,
+  readScope,
   deviceName,
   devicePlatform,
   onProfileSaved,
@@ -1213,6 +1196,7 @@ function PrimaryChatPane({
   /** 未按目标在线收窄的原 api：仅中心权威操作（cwd get/set）使用。 */
   centerApi: DesktopPanelApi;
   bot: BotRecord;
+  readScope: BotReadScope;
   /** 目录侧设备显示名（仅展示）。 */
   deviceName: string;
   /** 目录侧设备平台徽标（DevicesDirectoryItem.platform）；BotRecord 无此字段，缺省回退 host。 */
@@ -1236,7 +1220,11 @@ function PrimaryChatPane({
   const t = useText();
   const identity = api.identity;
   const sess = sessionKey(identity);
-  const online = api.transportConnected;
+  const readRevision = useSyncExternalStore(readScope.subscribe, readScope.snapshot);
+  const readsActive = readScope.isCurrent(readRevision);
+  const onBotDeletedRef = useRef(onBotDeleted);
+  onBotDeletedRef.current = onBotDeleted;
+  const online = api.transportConnected && readsActive;
   /** 目标离线时带设备/Bot 上下文；其余错误原样 code: message。 */
   const tErr = (e: unknown): string =>
     isTargetOfflineError(e) ? `目标 ${deviceName}（${bot.role}）离线：${errText(e)}` : errText(e);
@@ -1376,7 +1364,7 @@ function PrimaryChatPane({
   }, []);
 
   const isCurrentSession = useCallback(() =>
-    mountedRef.current && sessionKey(api.identity) === sess, [api, sess]);
+    mountedRef.current && sessionKey(api.identity) === sess && readScope.isCurrent(readRevision), [api, sess, readScope, readRevision]);
 
   async function handleSetPrimary() {
     if (!identity || !online || manageInFlightRef.current || isPrimary || isArchived) return;
@@ -1431,17 +1419,23 @@ function PrimaryChatPane({
     manageInFlightRef.current = true;
     setManageAction('delete');
     setManageError(null);
+    readScope.suspend();
+    let deleted = false;
     try {
-      await api.call(identity, 'deleteBot', { botId: bot.botId });
+      await deleteBotAndVerify(
+        () => api.call(identity, 'deleteBot', { botId: bot.botId }),
+        () => api.call(identity, 'getBot', { botId: bot.botId }),
+      );
+      deleted = true;
       if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
       setConfirmDelete(false);
       onBotDeleted(bot.botId);
     } catch (e) {
       if (mountedRef.current && sessionKey(api.identity) === sess) {
         setManageError(`删除失败：${tErr(e)}`);
-        reportUnlessTargetOffline(api, e);
       }
     } finally {
+      if (!deleted) readScope.resume();
       manageInFlightRef.current = false;
       if (mountedRef.current) setManageAction(null);
     }
@@ -1635,24 +1629,22 @@ function PrimaryChatPane({
     setSendState('sending');
     setSendError(null);
     setRecOutcome(null);
-    await drafts.waitQuiet(started.handle);
     // 只发送冻结副本：await 后不重组身份/业务 ID。
     const frozen = started.attempt.input;
     try {
+      await drafts.waitQuiet(started.handle);
       let rec: PendingRecord | null = null;
       try {
         rec = await api.pending(identity, 'pending_enqueue', { input: frozen });
       } catch (e) {
-        reportUnlessTargetOffline(api, e);
         // 只有本阶段明确 not-sent（无队列记录）才可声称未入队。
         if (isNotSent(e)) {
           const errMsg = '消息尚未发出。恢复编辑后可以重新发送。';
           drafts.markNotSent(started.handle, errMsg);
           setSendError(errMsg);
         } else {
-          const errMsg = '结果未知。请先核对原记录。';
           drafts.markUnconfirmed(started.handle);
-          setSendError(errMsg);
+          setSendError(null);
         }
         return;
       }
@@ -1682,9 +1674,8 @@ function PrimaryChatPane({
         reportSendRecord(started.handle, sent);
       } catch (e) {
         // 回执丢失/超时/未知：已入队，保留原 ID 锁，绝不标未入队。
-        reportUnlessTargetOffline(api, e);
         drafts.markUnconfirmed(started.handle);
-        setSendError('发送结果未知。请先核对原记录。');
+        setSendError(null);
       }
     } finally {
       lockedRef.current = false;
@@ -1699,47 +1690,49 @@ function PrimaryChatPane({
     if (rec.state === 'accepted') {
       drafts.finishSend(handle);
       // 受理只说明已受理；完成与否以 live/原回执为准，界面不断言。
-      setSendNotice({ text: hostQueued ? '已进入设备任务队列' : '设备已接收消息' });
+      setSendNotice(null);
       onLiveActivityRef.current?.();
     } else if (rec.state === 'rejected') {
       // 确定终态：本地 attempt 结束，原记录保留在待发送面板
       drafts.finishSend(handle);
       setSendError('设备未接收消息。详情见发送记录。');
-    } else if (rec.state === 'unconfirmed') {
+    } else if (rec.state === 'unconfirmed' || rec.state === 'sending') {
       drafts.markUnconfirmed(handle);
-      setSendError('发送结果未知。请先核对原记录。');
+      setSendError(null);
     } else {
       drafts.finishSend(handle);
       setSendNotice({
-        text: rec.state === 'pending'
-          ? '消息待发送，可在记录里继续发送。'
-          : '发送结果待确认，可在记录里核对。',
+        text: '消息待发送，可在记录里继续发送。',
         showRecordAction: true,
       });
     }
   }
 
-  async function queryPending() {
+  async function queryPending(silent = false, current = () => true) {
     if (!identity || !drafts.attempt || !drafts.key || lockedRef.current) return;
     const handle = { key: drafts.key, attemptId: drafts.attempt.id };
     lockedRef.current = true;
-    const outcome = await drafts.reconcile(handle).finally(() => { lockedRef.current = false; });
-    if (!mountedRef.current) return;
+    const outcome = await drafts.reconcile(handle, { silent }).finally(() => { lockedRef.current = false; });
+    if (!isCurrentSession() || !current()) return;
     setRecOutcome(outcome);
     if (outcome.recordId) setLastSendRecordId(outcome.recordId);
     if (outcome.action === 'finished' && outcome.recordState === 'accepted') {
       setSendError(null);
-      setSendNotice({ text: '设备已接收消息。' });
+      setSendNotice(null);
     } else if (outcome.action === 'finished') {
       setSendError('设备未接收消息。详情见发送记录。');
     } else if (outcome.action === 'ready-clear-retry') {
       setSendError('已找到发送记录，可以重试清空本地草稿。');
     } else if (outcome.found) {
-      setSendError(drafts.conflict ? '已找到发送记录。请处理更新后的草稿。' : '已找到发送记录，正在等待结果。');
+      setSendError(drafts.conflict ? '草稿已更新，请保留需要的内容。' : null);
     } else {
-      setSendError('暂时无法确认发送结果。可以稍后再核对。');
+      if (!silent) setSendError(null);
     }
   }
+
+  useReceiptRecovery(`${sess}|${bot.botId}|${drafts.attempt?.id ?? ''}`, Boolean(drafts.attempt &&
+    drafts.attempt.phase !== 'not-sent' && sendState === 'idle' && !drafts.conflict), online && pageActive,
+    current => queryPending(true, current));
 
   async function retryClearVerified() {
     if (!identity || !drafts.attempt || !drafts.key) return;
@@ -1928,8 +1921,12 @@ function PrimaryChatPane({
     } catch (e) {
       // 失败保留旧数据：重试按钮在聊天流顶部可见，下一次完结/重连也会再补跑。
       if (isCurrentSession()) {
+        if (toError(e).code === 'BOT_NOT_FOUND') {
+          readScope.suspend();
+          onBotDeletedRef.current(bot.botId);
+          return;
+        }
         setRawError(tErr(e));
-        reportUnlessTargetOffline(api, e);
       }
     } finally {
       if (latestFlightRef.current === flight) {
@@ -1975,10 +1972,15 @@ function PrimaryChatPane({
       setLiveLast(null);
       try {
         const h = api.observe(identity, { kind: 'primary', botId: bot.botId }, (ev) => {
-          if (disposed) return;
+          if (disposed || !isCurrentSession()) return;
           if (sessionKey(api.identity) !== localSess) return;
           if ('error' in ev) {
             const err = ev as Extract<DesktopObservationEvent, { error: unknown }>;
+            if (toError(err.error).code === 'BOT_NOT_FOUND') {
+              readScope.suspend();
+              onBotDeletedRef.current(bot.botId);
+              return;
+            }
             setLiveError(tErr(err.error));
             setLiveEnded(true);
             return;
@@ -2016,6 +2018,11 @@ function PrimaryChatPane({
         });
         h.ready.catch((e) => {
           if (!disposed && isCurrentSession()) {
+            if (toError(e).code === 'BOT_NOT_FOUND') {
+              readScope.suspend();
+              onBotDeletedRef.current(bot.botId);
+              return;
+            }
             setLiveError('观察建立失败：' + tErr(e));
             setLiveEnded(true);
           }
@@ -2114,7 +2121,7 @@ function PrimaryChatPane({
   }, [moreMenuOpen]);
 
   const disabled =
-    isArchived || sendState === 'sending' || slashBusy !== null || lockedRef.current || drafts.busy || !!drafts.attempt;
+    !readsActive || isArchived || sendState === 'sending' || slashBusy !== null || lockedRef.current || drafts.busy || !!drafts.attempt;
   useEffect(() => {
     if (!focusComposer || autoFocusedRef.current || !pageActive || !online || disabled) return;
     autoFocusedRef.current = true;
@@ -2208,10 +2215,7 @@ function PrimaryChatPane({
     </div>
   ) : null;
   const managementError = manageError ? (
-    <div className="error-banner" role="alert">
-      {manageError}
-      <button type="button" onClick={() => setManageError(null)}>关闭</button>
-    </div>
+    <ErrorNotice error={manageError} onDismiss={() => setManageError(null)} compact />
   ) : null;
   const example = '帮我梳理今天的待办事项。';
 
@@ -2422,7 +2426,7 @@ function PrimaryChatPane({
           <button type="button" onClick={() => setWatchTick((t) => t + 1)}>重新观察</button>
         </div>
       ) : null}
-      {!online && !centerInterrupted ? (
+      {!online && readsActive && !centerInterrupted ? (
         <div className="status status-offline-bar" role="status">
           <span>
             {identity
@@ -2489,6 +2493,8 @@ function PrimaryChatPane({
         draftHint={isArchived ? '此 Bot 已归档，当前为只读模式，恢复后可继续发送消息。' : null}
         draftConflict={drafts.conflict}
         sendState={sendState}
+        receiptBusy={sendState === 'sending' || Boolean(drafts.attempt &&
+          !['not-sent', 'failed'].includes(drafts.attempt.phase) && !drafts.conflict && recOutcome?.action !== 'ready-clear-retry')}
         sendError={sendError}
         sendNotice={sendNotice}
         onSend={handleSend}
@@ -2505,7 +2511,6 @@ function PrimaryChatPane({
         onRetryDraft={drafts.retrySave}
         attempt={drafts.attempt}
         recOutcome={recOutcome}
-        onReconcile={queryPending}
         onReleaseNotSent={releaseNotSent}
         onRetryClearVerified={retryClearVerified}
         onAdoptNewerDraft={adoptNewerDraft}
@@ -2771,6 +2776,13 @@ export function BotChats({
   } = useChatPins(profileKey || 'default');
 
   const [bots, setBots] = useState<BotDirectoryEntry[]>(() => initialCache?.bots ?? []);
+  const readScopes = useRef(new Map<string, BotReadScope>());
+  const readScopeFor = useCallback((deviceId: string, botId: string) => {
+    const key = JSON.stringify([profileKey, deviceId, botId]);
+    let scope = readScopes.current.get(key);
+    if (!scope) { scope = new BotReadScope(); readScopes.current.set(key, scope); }
+    return scope;
+  }, [profileKey]);
   const [devices, setDevices] = useState<DevicesDirectoryItem[]>(() => initialCache?.devices ?? []);
   const boardBots = profileReady ? bots : initialCache?.bots ?? [];
   const boardDevices = profileReady ? devices : initialCache?.devices ?? [];
@@ -2833,6 +2845,12 @@ export function BotChats({
       | { kind: 'group'; group: (typeof groupRows)[number] };
   } | null>(null);
   const [botActionError, setBotActionError] = useState<string | null>(null);
+  const [botDeletionNotice, setBotDeletionNotice] = useState('');
+  useEffect(() => {
+    if (!botDeletionNotice) return;
+    const timer = window.setTimeout(() => setBotDeletionNotice(''), 3000);
+    return () => window.clearTimeout(timer);
+  }, [botDeletionNotice]);
   const [confirmDeleteBot, setConfirmDeleteBot] = useState<BotDirectoryEntry | null>(null);
   const [deletingBotKey, setDeletingBotKey] = useState<string | null>(null);
   const [deleteBotError, setDeleteBotError] = useState<string | null>(null);
@@ -3495,13 +3513,22 @@ export function BotChats({
       if (!identity || !api.transportConnected || targetBot.isPrimary) return;
       const localSess = sessionRef.current;
       setBotActionError(null);
+      const scope = readScopeFor(targetBot.deviceId, targetBot.botId);
+      scope.suspend();
+      let deleted = false;
       try {
         const botApi = targetApi(api, targetBot.deviceId, Boolean(targetBot.online && api.transportConnected));
         if (!botApi.identity || !botApi.transportConnected) {
           throw new Error('目标设备离线或未连接');
         }
-        await botApi.call(botApi.identity, 'deleteBot', { botId: targetBot.botId });
+        const targetIdentity = botApi.identity;
+        await deleteBotAndVerify(
+          () => botApi.call(targetIdentity, 'deleteBot', { botId: targetBot.botId }),
+          () => botApi.call(targetIdentity, 'getBot', { botId: targetBot.botId }),
+        );
+        deleted = true;
         if (sessionRef.current !== localSess) return;
+        seq.current += 1;
         removePin(botPinKey(targetBot.deviceId, targetBot.botId));
         setSelected((cur) =>
           cur && cur.deviceId === targetBot.deviceId && cur.botId === targetBot.botId ? null : cur,
@@ -3517,16 +3544,14 @@ export function BotChats({
         setBots((old) =>
           old.filter((b) => !(b.deviceId === targetBot.deviceId && b.botId === targetBot.botId)),
         );
+        setBotDeletionNotice(`「${targetBot.role}」已删除`);
         triggerLoadBots();
         refreshGroups();
-      } catch (e) {
-        if (sessionRef.current === localSess) {
-          reportUnlessTargetOffline(api, e);
-        }
-        throw e;
+      } finally {
+        if (!deleted) scope.resume();
       }
     },
-    [api, identity, removePin, triggerLoadBots, refreshGroups],
+    [api, identity, removePin, triggerLoadBots, refreshGroups, readScopeFor],
   );
 
   const openArchivedBotHistory = useCallback((targetBot: BotDirectoryEntry) => {
@@ -4367,6 +4392,7 @@ export function BotChats({
             api={scopedApi}
             centerApi={api}
             bot={selectedBot}
+            readScope={readScopeFor(selectedBot.deviceId, selectedBot.botId)}
             deviceName={selectedDeviceName}
             devicePlatform={selectedDevicePlatform}
             focusComposer={selected?.focusComposer}
@@ -4412,8 +4438,10 @@ export function BotChats({
             }}
             onBotDeleted={(deletedBotId) => {
               const targetDeviceId = selectedBot.deviceId;
+              seq.current += 1;
               removePin(botPinKey(targetDeviceId, deletedBotId));
               setSelected(null);
+              setBotDeletionNotice(`「${selectedBot.role}」已删除`);
               setBots((old) =>
                 old.filter(
                   (b) => !(b.deviceId === targetDeviceId && b.botId === deletedBotId),
@@ -4433,7 +4461,7 @@ export function BotChats({
         ) : null}
         {!stage && !(scopedApi && selectedBot) ? (
           <div className="empty-state stage-empty">
-            <span className="title">选择左侧智能体开始对话</span>
+            <span className="title" role="status">{botDeletionNotice || '选择左侧智能体开始对话'}</span>
             {onlineDevices.length > 0 ? '或使用 Ctrl+K 快速搜索' : null}
           </div>
         ) : null}
