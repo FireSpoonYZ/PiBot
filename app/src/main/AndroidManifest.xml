@@ -122,5 +122,21 @@
             android:process=":tauri_ui"
             android:theme="@style/WebAppTheme"
             android:windowSoftInputMode="adjustResize" />
+        <!-- 配对码扫描（PairingScanActivity，基于 zxing-android-embedded 的 CaptureManager）：与发起它的
+             TauriMainActivity 同在 :tauri_ui 进程，不唤起 Host 所在的默认进程；库默认强制横屏，这里改为
+             随传感器旋转。主题等属性沿用库对 CaptureActivity 的声明。 -->
+        <activity
+            android:name=".PairingScanActivity"
+            android:clearTaskOnLaunch="true"
+            android:exported="false"
+            android:process=":tauri_ui"
+            android:screenOrientation="fullSensor"
+            android:stateNotNeeded="true"
+            android:theme="@style/zxing_CaptureTheme"
+            android:windowSoftInputMode="stateAlwaysHidden" />
+        <!-- 库自带的 CaptureActivity 不再使用（会在默认进程、强制横屏、拒权限时弹误导性对话框），不打进 APK。 -->
+        <activity
+            android:name="com.journeyapps.barcodescanner.CaptureActivity"
+            tools:node="remove" />
     </application>
 </manifest>

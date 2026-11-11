@@ -4,7 +4,8 @@ import { Copy, ExternalLink } from 'lucide-react';
 import { GrokBotAvatar, JARVIS_AVATAR_PRESET } from '../../../web/src/GrokBotAvatar';
 import { ErrorNotice, errorText, useText } from '../../../web/src/ui';
 import type { DesktopClientStatus } from '../../../host-core/desktop-client.js';
-import { hostAdopt, hostControl, hostErrorCode, hostErrorText, hostPair, hostStatus, hostWarningText, type HostPairResult, type HostStatus } from './hostService';
+import { hostAdopt, hostConnectLocal, hostControl, hostErrorCode, hostErrorText, hostPair, hostPairCode, hostStatus, hostWarningText, rawMessage, type HostPairResult, type HostStatus } from './hostService';
+import { readPaste } from './pairingCode';
 import { ClientUpdateProvider } from '../../../web/src/ClientUpdateProvider';
 import type { ClientUpdateOp, ClientUpdateParams, ClientUpdateStatus } from '../../../web/src/ClientUpdate';
 import './CenterGate.css';
@@ -38,6 +39,24 @@ const matchesHostConnection = (host: HostStatus, url: string, deviceId: string):
 
 const isNewHost = (host: HostStatus): boolean =>
   host.configured === false && !host.centerUrl && !host.deviceId && !host.configError;
+
+/** 本机 Host 已配对且配置完好：其身份可直接交给客户端使用。 */
+const isPairedHost = (host: HostStatus): boolean =>
+  host.configured === true && Boolean(host.centerUrl) && Boolean(host.deviceId) && !host.configError;
+
+/**
+ * 用户点过“断开中心”：之后不再自动用本机身份重连，只显示按钮。
+ * 断开会清掉客户端已存凭据，本机 Host 却仍是已配对状态，没有这个标记就会在下次启动时悄悄连回去。
+ * 任何一次成功连接都会清除它。
+ */
+const USER_DISCONNECTED_KEY = 'center-user-disconnected';
+const userDisconnected = (): boolean => localStorage.getItem(USER_DISCONNECTED_KEY) === '1';
+
+/**
+ * 门页错误。字符串交给 ErrorNotice 做通用归类；本机 Host 流程的失败已经是写好的指引，按原样显示。
+ * 否则通用归类见到“证书 / certificate”就会换成泛泛的“在设置里填写 CA”，把真正的处理办法藏进详情。
+ */
+type GateError = string | { title: string; description: string; detail?: string };
 
 /** 首次配对进度：pairing=启动器登录/注册/启动 Host（单次调用），connecting=客户端连接中心。 */
 type PairPhase = 'idle' | 'pairing' | 'connecting';
@@ -117,7 +136,13 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
   const [status, setStatus] = useState<CenterStatus>();
   const [workspace, setWorkspace] = useState<WorkspaceConnection>();
   const [saved, setSaved] = useState<SavedConnection>();
-  const [error, setError] = useState('');
+  const [error, setError] = useState<GateError>('');
+  /** 本机 Host 流程的失败：标题说明哪一步，正文是启动器错误码对应的指引，原始报错放进详情。 */
+  const hostFailure = (title: string, e: unknown): GateError => {
+    const description = hostErrorText(e, t);
+    const raw = rawMessage(e);
+    return { title, description, ...(raw && raw !== description ? { detail: raw } : {}) };
+  };
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   /** undefined=读取中；null=内置 Host 不可用（开发构建或缺组件），退回手动连接；否则为启动器 status。 */
@@ -128,7 +153,6 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
   const [password, setPassword] = useState('');
   const [pairName, setPairName] = useState('');
   const [pairForce, setPairForce] = useState(false);
-  const [reconfigure, setReconfigure] = useState(false);
   const [pairPhase, setPairPhase] = useState<PairPhase>('idle');
   /** 配对四步真实状态；未进行配对时为 undefined。 */
   const [pairSteps, setPairSteps] = useState<StepState[]>();
@@ -137,6 +161,14 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
   /** 正在局部重试的步骤下标。 */
   const [retryingStep, setRetryingStep] = useState<number>();
   const [adoptHost, setAdoptHost] = useState(true);
+  /** 配对码输入框内容：只存内存，登记成功后清空。 */
+  const [pairCode, setPairCode] = useState('');
+  /** 本机已配到另一个中心时，用户确认“替换现有配对”后，用 force 重新提交同一配对码。 */
+  const [codeForce, setCodeForce] = useState(false);
+  /** 正在用本机 Host 的身份连接中心。 */
+  const [localBusy, setLocalBusy] = useState(false);
+  /** 本次运行已自动尝试过本机身份连接（只试一次，失败后交给用户）。 */
+  const localTried = useRef(false);
   /** 配对成功后保留设备凭据与 CA，供步骤重试/连接重试，仅存内存。 */
   const pairedRef = useRef<PairedCreds | null>(null);
   const [canRetryPaired, setCanRetryPaired] = useState(false);
@@ -226,6 +258,7 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
     localStorage.setItem('center-url', input.url);
     localStorage.setItem('center-device-id', input.deviceId);
     applyStatus(next, input.deviceId);
+    localStorage.removeItem(USER_DISCONNECTED_KEY);
     return next;
   };
 
@@ -367,14 +400,34 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
 
   /** 首次运行：内置 Host 可用、未配对且客户端无已保存连接时显示配对表单；配对流程中保持显示。 */
   const firstRun = Boolean(host && isNewHost(host) && !saved && polled);
-  const showPair = firstRun || reconfigure || pairPhase !== 'idle' || pairSteps !== undefined;
+  const showPair = firstRun || pairPhase !== 'idle' || pairSteps !== undefined;
+  /** 内置 Host 可用：主入口是配对码；开发构建或缺组件时为 false，退回手动连接。 */
+  const hostAvailable = Boolean(host);
+  /** 本机 Host 已配对：其身份可直接交给客户端，免去任何输入。 */
+  const pairedHost = Boolean(host && isPairedHost(host));
+  const paste = readPaste(pairCode);
   /** 手动连接时可让内置 Host 接管该设备：未配对，或已配对的正是同一设备（刷新令牌）。 */
-  const hasHostConfiguration = Boolean(host && (host.configured || host.centerUrl || host.deviceId || host.configError));
   const offerAdopt = Boolean(host && (isNewHost(host) || matchesHostConnection(host, url, deviceId)));
+
+  /**
+   * 配对码误填进手动表单（设备令牌 / 设备身份）：它不是凭据，拿去直连只会得到看不懂的 TLS 或认证错误。
+   * 有内置 Host 时转交配对码流程；没有时说明原因。返回 true 表示已按配对码处理。
+   */
+  const takeMisplacedCode = (value: string): boolean => {
+    if (readPaste(value).kind !== 'code') return false;
+    if (hostAvailable) {
+      setToken('');
+      onPairCodeChange(value);
+    } else {
+      setError(t('这是配对码，不是设备令牌。配对码需要带内置 Host 的 PiBot 客户端；当前客户端只能用设备 ID 和令牌连接。', 'That is a pairing code, not a device token. Pairing codes need a PiBot client with the built-in Host; this client can only connect with a device ID and token.'));
+    }
+    return true;
+  };
 
   const connect = async (event: FormEvent) => {
     event.preventDefault();
     if (busy || showerBusy) return;
+    if ([token, deviceId].some(takeMisplacedCode)) return;
     const attempt = ++epoch.current;
     autoAttempted.current = true;
     setBusy(true);
@@ -460,7 +513,6 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
       );
       // 只清掉自己这份凭据：期间若已有更新的配对结果，保留它。
       if (pairedRef.current === paired) pairedRef.current = null;
-      if (attempt === epoch.current) setReconfigure(false);
     } catch (e) {
       if (attempt !== epoch.current) return;
       setPairSteps((prev) => {
@@ -590,16 +642,16 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
     }
   };
 
-  const pair = async (event: FormEvent) => {
-    event.preventDefault();
-    if (busy || showerBusy) return;
-    // 冻结提交时输入：异步完成只认这份 URL/CA，busy 期间输入框已禁用。
-    const frozenUrl = url.trim();
-    const frozenCa = ca.trim();
-    const frozenName = pairName.trim() || host?.hostname?.trim().slice(0, 64) || t('我的电脑', 'My computer');
-    const secret = password;
-    setPassword('');
-    const force = pairForce;
+  /**
+   * 配对公共流程：登记（所有者密码或配对码）→ 自启动 → 启动并就绪 Host → 连接客户端。
+   * 两种登记方式只差 register 本身与 CA 的来源（密码流程来自表单，配对码流程来自码本身）。
+   */
+  const runPairFlow = async (
+    register: () => Promise<HostPairResult>,
+    caOf: (result: HostPairResult) => string,
+    onAlreadyConfigured: () => void,
+    onRegistered: () => void,
+  ) => {
     const attempt = ++epoch.current;
     autoAttempted.current = true;
     setBusy(true);
@@ -611,23 +663,24 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
     try {
       let result: HostPairResult;
       try {
-        result = await hostPair({ centerUrl: frozenUrl, password: secret, displayName: frozenName, centerCa: frozenCa, force });
+        result = await register();
       } catch (e) {
-        // hostPair 单次调用涵盖登记；失败统一标在登记步。
+        // 登记是单次调用；失败统一标在登记步。
         setPairSteps(['error', 'pending', 'pending', 'pending']);
         setPairPhase('idle');
         if (hostErrorCode(e) === 'ALREADY_CONFIGURED') {
-          setPairForce(true);
-          setError(t('本机已配对过中心。重新输入所有者密码并点击“重新配对”将覆盖现有配置。', 'This computer is already paired. Re-enter the owner password and click “Re-pair” to replace the existing pairing.'));
+          onAlreadyConfigured();
         } else {
-          setError(t('配对失败：', 'Pairing failed: ') + hostErrorText(e, t));
+          setError(hostFailure(t('配对失败', 'Pairing failed'), e));
         }
         void refreshHost();
         return;
       }
       setPairForce(false);
+      setCodeForce(false);
+      onRegistered();
       setPairWarnings((result.warnings ?? []).map(hostWarningText));
-      const paired: PairedCreds = { result, ca: frozenCa, saved: result.clientCredentialsSaved === true };
+      const paired: PairedCreds = { result, ca: caOf(result), saved: result.clientCredentialsSaved === true };
       pairedRef.current = paired;
       if (!paired.saved) {
         noteStepFailure(
@@ -657,6 +710,98 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
     }
   };
 
+  const defaultPairName = () => pairName.trim() || host?.hostname?.trim().slice(0, 64) || t('我的电脑', 'My computer');
+
+  /** 所有者密码配对（折叠在“其他连接方式”里）。 */
+  const pair = async (event: FormEvent) => {
+    event.preventDefault();
+    if (busy || showerBusy) return;
+    // 冻结提交时输入：异步完成只认这份 URL/CA，busy 期间输入框已禁用。
+    const frozenUrl = url.trim();
+    const frozenCa = ca.trim();
+    const frozenName = defaultPairName();
+    const secret = password;
+    setPassword('');
+    const force = pairForce;
+    await runPairFlow(
+      () => hostPair({ centerUrl: frozenUrl, password: secret, displayName: frozenName, centerCa: frozenCa, force }),
+      () => frozenCa,
+      () => {
+        setPairForce(true);
+        setError(t('本机已配对过中心。重新输入所有者密码并点击“重新配对”将覆盖现有配置。', 'This computer is already paired. Re-enter the owner password and click “Re-pair” to replace the existing pairing.'));
+      },
+      () => {},
+    );
+  };
+
+  /** 配对码配对：地址、一次性密钥和私有 CA 都在码里，用户无需再输入任何内容。 */
+  const pairWithCode = async (text: string, force: boolean) => {
+    if (busy || showerBusy) return;
+    const frozenName = defaultPairName();
+    await runPairFlow(
+      () => hostPairCode({ code: text, displayName: frozenName, force }),
+      (result) => result.centerCa ?? '',
+      () => {
+        // 同一个中心的配对码不需要确认：已存在的设备 ID 只有专属码才接得回，通用码由中心拒绝；走到这里说明本机已配到另一个中心，需要用户明确确认。
+        setCodeForce(true);
+        setError(t('本机已配对到另一个中心。再次点击“替换现有配对”将覆盖本机现有配置。', 'This computer is paired with a different center. Click “Replace existing pairing” to overwrite it.'));
+      },
+      // 配对码用过即废，登记成功后不再保留在输入框里。
+      () => setPairCode(''),
+    );
+  };
+
+  /** 输入框变化：识别出完整配对码就立即开始配对，其余输入只给出提示。 */
+  const onPairCodeChange = (value: string) => {
+    setPairCode(value);
+    setCodeForce(false);
+    setError('');
+    if (readPaste(value).kind === 'code' && !busy && !showerBusy) void pairWithCode(value, false);
+  };
+
+  /**
+   * 用本机 Host 的身份连接中心：已配对的 Host 把自己的身份交给客户端，无需输入任何内容。
+   * 令牌始终留在 Rust 侧；这里只拿到地址、设备 ID 和（公开的）CA。
+   */
+  const connectLocal = async () => {
+    if (busy || showerBusy) return;
+    const attempt = ++epoch.current;
+    autoAttempted.current = true;
+    setBusy(true);
+    setLocalBusy(true);
+    setError('');
+    try {
+      const stored = await hostConnectLocal();
+      if (attempt !== epoch.current) return;
+      if (stored.clientCredentialsSaved === false) {
+        throw new Error(t('无法保存本机身份到客户端。', 'Could not store the local identity for the client.') + (stored.storeError?.message ? ' ' + stored.storeError.message : ''));
+      }
+      // 凭据已在 Rust 侧存好：令牌留空，由客户端用已存凭据重连（地址、设备 ID、CA 须与所存一致）。
+      await connectCenter(
+        { url: stored.centerUrl, deviceId: stored.deviceId, deviceToken: '', ca: stored.centerCa ?? '' },
+        () => attempt === epoch.current,
+      );
+    } catch (e) {
+      if (attempt !== epoch.current) return;
+      setError(hostFailure(t('无法用本机身份连接中心', 'Could not connect with this computer’s identity'), e));
+    } finally {
+      if (attempt === epoch.current) {
+        setBusy(false);
+        setLocalBusy(false);
+      }
+    }
+  };
+
+  // 已配对的本机 Host + 客户端没有已存连接：启动后自动用本机身份连接一次，什么都不用填。
+  // 用户主动断开过则不自动连，只显示按钮。失败后留给用户（按钮或配对码），不循环重试。
+  useEffect(() => {
+    if (localTried.current || !polled || !host || !isPairedHost(host) || saved || workspaceRef.current) return;
+    if (status?.state === 'ready' || status?.state === 'connecting' || userDisconnected()) return;
+    localTried.current = true;
+    void connectLocal();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [polled, host, saved, status?.state]);
+
   const retryPaired = () => {
     const paired = pairedRef.current;
     if (!paired || busy || showerBusy) return;
@@ -669,6 +814,7 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
   const disconnectCenter = async () => {
     if (disconnecting.current) return;
     disconnecting.current = true;
+    localStorage.setItem(USER_DISCONNECTED_KEY, '1');
     epoch.current += 1;
     autoAttempted.current = true;
     onInterrupted();
@@ -737,7 +883,7 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
           autoComplete="off"
           value={token}
           disabled={busy || showerBusy}
-          onChange={e => setToken(e.target.value)}
+          onChange={e => { setToken(e.target.value); takeMisplacedCode(e.target.value); }}
           placeholder={matchesSaved ? t('已保存凭据，留空使用已存令牌', 'Saved credentials — leave blank to reuse') : ''}
         />
       </label>
@@ -757,6 +903,157 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
     </form>
   );
 
+  const hostLabel = (value: string | null | undefined): string => {
+    try {
+      return value ? new URL(value).host : '';
+    } catch {
+      return '';
+    }
+  };
+  const pairedHostLabel = hostLabel(host?.centerUrl);
+  /** 打开中心管理页：优先用表单里的地址，其次是本机 Host 已配对的中心。 */
+  const managementUrl = url.trim() || host?.centerUrl?.trim() || '';
+
+  const pasteErrorCode =
+    paste.kind === 'not-code' ? 'NOT_A_PAIRING_CODE'
+      : paste.kind === 'damaged' ? 'INVALID_PAIRING_CODE'
+        : paste.kind === 'unsupported' ? 'UNSUPPORTED_PAIRING_CODE'
+          : '';
+  const pasteHint = paste.kind === 'code'
+    ? t(`将连接到 ${paste.centerHost}`, `Will connect to ${paste.centerHost}`)
+    : pasteErrorCode ? hostErrorText({ code: pasteErrorCode }, t) : '';
+
+  /** 配对进度与告警：所有者密码和配对码两种方式共用，放在表单之外以便折叠时仍可见。 */
+  const pairProgress = showPairSteps && (
+    <>
+      <ol className="gate-steps" aria-live="polite">
+        {pairStepLabels.map((label, index) => {
+          const state = pairStepState(index);
+          return (
+            <li key={label} className={`gate-step ${state}`} aria-current={state === 'active' ? 'step' : undefined}>
+              <span className="gate-step-dot" aria-hidden />
+              <span className="gate-step-label">{label}</span>
+              {state === 'error' && index > 0 && pairedRef.current && (
+                <button
+                  type="button"
+                  className="gate-step-retry"
+                  disabled={busy || showerBusy}
+                  onClick={() => void retryStep(index)}
+                >
+                  {retryingStep === index
+                    ? index === 1
+                      ? t('等待授权…', 'Awaiting approval…')
+                      : t('重试中…', 'Retrying…')
+                    : t('重试', 'Retry')}
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+      {pairWarnings.length > 0 && (
+        <ul className="gate-warnings">
+          {pairWarnings.map((warning, index) => (
+            <li key={index}>{warning}</li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
+
+  /** 主入口：粘贴中心管理页签发的配对码；识别出完整的码就立即配对。 */
+  const pairCodeForm = (
+    <form
+      className="gate-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (paste.kind === 'code') void pairWithCode(pairCode, codeForce);
+      }}
+    >
+      <label className="gate-field">
+        <span>{t('配对码', 'Pairing code')}</span>
+        <textarea
+          className="gate-code"
+          rows={3}
+          value={pairCode}
+          disabled={busy || showerBusy}
+          autoFocus
+          spellCheck={false}
+          autoComplete="off"
+          autoCapitalize="off"
+          placeholder={t('在中心管理页的“设备与 Bot”点击“添加设备”，复制配对码后粘贴到这里', 'On the center’s Devices page click “Add device”, copy the pairing code and paste it here')}
+          onChange={(event) => onPairCodeChange(event.target.value)}
+        />
+      </label>
+      {pasteHint && <p className={`gate-hint${pasteErrorCode ? ' gate-hint-warn' : ''}`} role="status">{pasteHint}</p>}
+      <button disabled={busy || showerBusy || paste.kind !== 'code'} type="submit" className="primary-button gate-submit">
+        {busy
+          ? (pairPhase === 'connecting' ? t('连接中…', 'Connecting…') : t('配对中…', 'Pairing…'))
+          : codeForce ? t('替换现有配对', 'Replace existing pairing') : t('配对并连接', 'Pair and connect')}
+      </button>
+    </form>
+  );
+
+  /** 所有者密码配对：旧版中心（没有配对码）的退路，折叠在“其他连接方式”里。 */
+  const passwordForm = (
+    <form className="gate-form" onSubmit={pair}>
+      {pairForce && <p className="gate-subtitle">{t('重新配对会替换本机 Host 的中心配置。', 'Re-pairing replaces the local Host center configuration.')}</p>}
+      <label className="gate-field">
+        <span>{t('中心地址', 'Center URL')}</span>
+        <input required type="url" value={url} disabled={busy || showerBusy} onChange={e => setUrl(e.target.value)} placeholder="https://center.example.com" />
+      </label>
+      <label className="gate-field">
+        <span>{t('所有者密码', 'Owner password')}</span>
+        <input required type="password" autoComplete="off" value={password} disabled={busy || showerBusy} onChange={e => setPassword(e.target.value)} />
+      </label>
+      <button disabled={busy || showerBusy} type="submit" className="primary-button gate-submit">
+        {busy
+          ? (pairPhase === 'connecting' ? t('连接中…', 'Connecting…') : t('配对中…', 'Pairing…'))
+          : pairForce ? t('重新配对', 'Re-pair') : t('配对并连接', 'Pair and connect')}
+      </button>
+      <details className="gate-advanced">
+        <summary>{t('本机名称与证书', 'Computer name and certificate')}</summary>
+        <div className="gate-advanced-fields">
+          <label className="gate-field">
+            <span>{t('本机名称（可选）', 'Computer name (optional)')}</span>
+            <input maxLength={64} value={pairName} disabled={busy || showerBusy} onChange={e => setPairName(e.target.value)} />
+          </label>
+          <label className="gate-field">
+            <span>{t('自签 CA 证书（可选）', 'Self-signed CA certificate (optional)')}</span>
+            <textarea value={ca} disabled={busy || showerBusy} onChange={e => setCa(e.target.value)} placeholder="-----BEGIN CERTIFICATE-----" rows={4} />
+          </label>
+        </div>
+      </details>
+    </form>
+  );
+
+  /** 已配对的本机 Host：把它的身份直接交给客户端，免去任何输入。 */
+  // 配对流程进行中（或刚失败、步骤还显示着）不出现：此时 Host 虽已变成“已配对”，提示“无需再输入”只会误导。
+  const localConnect = hostAvailable && pairedHost && !showPairSteps && (
+    <div className="gate-local">
+      {localBusy ? (
+        <p className="gate-hint" role="status">
+          {t('正在使用本机身份连接', 'Connecting with this computer’s identity')}
+          {pairedHostLabel ? ` · ${pairedHostLabel}` : ''}…
+        </p>
+      ) : (
+        <button type="button" className="primary-button gate-submit" disabled={busy || showerBusy} onClick={() => void connectLocal()}>
+          {t('用本机身份连接', 'Connect with this computer’s identity')}
+          {pairedHostLabel ? ` · ${pairedHostLabel}` : ''}
+        </button>
+      )}
+      <p className="gate-hint">{t('本机已配对，无需再输入。也可以粘贴新的配对码。', 'This computer is already paired. You can also paste a new pairing code.')}</p>
+    </div>
+  );
+
+  /** 内置 Host 状态读取中：不渲染任何表单，避免先闪一下手动连接再切换。 */
+  const hostPending = host === undefined || !polled;
+  const primary = hostPending
+    ? <p className="gate-hint" role="status">{t('正在读取本机状态…', 'Checking this computer…')}</p>
+    : hostAvailable
+      ? <>{localConnect}{pairCodeForm}</>
+      : manualForm;
+
   return (
     <main className="desktop-shell gate-shell">
       <section className="gate-card">
@@ -764,102 +1061,33 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
           <GrokBotAvatar preset={JARVIS_AVATAR_PRESET} busy={connecting} size={72} />
           <h1>{t('连接 pibot 中心', 'Connect to pibot Center')}</h1>
           <p className="gate-subtitle">
-            {showPair
-              ? t('输入中心地址与所有者密码，本机将自动注册并在后台运行 Host', 'Enter the center URL and owner password; this computer registers itself and runs the Host in the background')
+            {hostAvailable
+              ? t('在中心管理页添加设备并粘贴配对码，本机将自动注册并在后台运行 Host', 'Add a device on the center’s admin page and paste the pairing code; this computer registers itself and runs the Host in the background')
               : t('统一管理多端智能体、模型、插件与记忆', 'Manage agents, models, plugins and memory across devices')}
           </p>
         </div>
-        {showPair ? (
-            <form className="gate-form" onSubmit={pair}>
-              {pairForce && <p className="gate-subtitle">{t('重新配对会替换本机 Host 的中心配置。', 'Re-pairing replaces the local Host center configuration.')}</p>}
-              <label className="gate-field">
-                <span>{t('中心地址', 'Center URL')}</span>
-                <input required type="url" value={url} disabled={busy || showerBusy} onChange={e => setUrl(e.target.value)} placeholder="https://center.example.com" />
-              </label>
-              <label className="gate-field">
-                <span>{t('所有者密码', 'Owner password')}</span>
-                <input required type="password" autoComplete="off" value={password} disabled={busy || showerBusy} onChange={e => setPassword(e.target.value)} />
-              </label>
-              <button disabled={busy || showerBusy} type="submit" className="primary-button gate-submit">
-                {busy
-                  ? (pairPhase === 'connecting' ? t('连接中…', 'Connecting…') : t('配对中…', 'Pairing…'))
-                  : pairForce ? t('重新配对', 'Re-pair') : t('配对并连接', 'Pair and connect')}
-              </button>
-              {showPairSteps && (
-                <>
-                  <ol className="gate-steps" aria-live="polite">
-                    {pairStepLabels.map((label, index) => {
-                      const state = pairStepState(index);
-                      return (
-                        <li key={label} className={`gate-step ${state}`} aria-current={state === 'active' ? 'step' : undefined}>
-                          <span className="gate-step-dot" aria-hidden />
-                          <span className="gate-step-label">{label}</span>
-                          {state === 'error' && index > 0 && pairedRef.current && (
-                            <button
-                              type="button"
-                              className="gate-step-retry"
-                              disabled={busy || showerBusy}
-                              onClick={() => void retryStep(index)}
-                            >
-                              {retryingStep === index
-                                ? index === 1
-                                  ? t('等待授权…', 'Awaiting approval…')
-                                  : t('重试中…', 'Retrying…')
-                                : t('重试', 'Retry')}
-                            </button>
-                          )}
-                        </li>
-                      );
-                    })}
-                  </ol>
-                  {pairWarnings.length > 0 && (
-                    <ul className="gate-warnings">
-                      {pairWarnings.map((warning, index) => (
-                        <li key={index}>{warning}</li>
-                      ))}
-                    </ul>
-                  )}
-                </>
-              )}
-              <details className="gate-advanced">
-                <summary>{t('本机名称与证书', 'Computer name and certificate')}</summary>
-                <div className="gate-advanced-fields">
-                  <label className="gate-field">
-                    <span>{t('本机名称（可选）', 'Computer name (optional)')}</span>
-                    <input maxLength={64} value={pairName} disabled={busy || showerBusy} onChange={e => setPairName(e.target.value)} />
-                  </label>
-                  <label className="gate-field">
-                    <span>{t('自签 CA 证书（可选）', 'Self-signed CA certificate (optional)')}</span>
-                    <textarea value={ca} disabled={busy || showerBusy} onChange={e => setCa(e.target.value)} placeholder="-----BEGIN CERTIFICATE-----" rows={4} />
-                  </label>
-                </div>
-              </details>
-            </form>
-        ) : manualForm}
+        {primary}
+        {pairProgress}
         <ErrorNotice
-          error={error}
+          {...(typeof error === 'string' ? { error } : error)}
           onDismiss={() => setError('')}
           actionLabel={canRetryPaired ? t('重试连接', 'Retry connection') : undefined}
           onAction={canRetryPaired ? retryPaired : undefined}
         />
         <details className="gate-advanced">
-          <summary>{t('其他连接选项', 'More connection options')}</summary>
+          <summary>{t('其他连接方式', 'Other ways to connect')}</summary>
           <div className="gate-advanced-fields">
-            {showPair && (
+            {hostAvailable && (
+              <details className="gate-advanced">
+                <summary>{t('使用所有者密码配对', 'Pair with the owner password')}</summary>
+                {passwordForm}
+              </details>
+            )}
+            {hostAvailable && (
               <details className="gate-advanced">
                 <summary>{t('使用已有设备 ID 和令牌', 'Use an existing device ID and token')}</summary>
                 {manualForm}
               </details>
-            )}
-            {!showPair && hasHostConfiguration && (
-              <button type="button" className="secondary-button gate-manage" disabled={busy} onClick={() => {
-                setPairForce(true);
-                setReconfigure(true);
-                setPairSteps(undefined);
-                setError('');
-              }}>
-                {t('重新配对本机 Host', 'Re-pair local Host')}
-              </button>
             )}
             {showPair && host?.platform === 'windows' && (
               <div className="gate-shower">
@@ -887,8 +1115,8 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
             <button
               type="button"
               className="secondary-button gate-manage"
-              disabled={!url}
-              onClick={() => void invoke('desktop_open_center', { url: url.trim() }).catch((e) => setError(t('无法打开中心管理页面。', 'Could not open the center management page.') + ' ' + errorText(e)))}
+              disabled={!managementUrl}
+              onClick={() => void invoke('desktop_open_center', { url: managementUrl }).catch((e) => setError(t('无法打开中心管理页面。', 'Could not open the center management page.') + ' ' + errorText(e)))}
             >
               <ExternalLink size={14} />
               {t('在浏览器打开中心管理', 'Open center management in browser')}

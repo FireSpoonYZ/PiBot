@@ -2354,6 +2354,7 @@ dependencies = [
 name = "pibot"
 version = "0.0.14"
 dependencies = [
+ "base64 0.22.1",
  "dunce",
  "reqwest",
  "serde",

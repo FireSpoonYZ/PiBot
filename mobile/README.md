@@ -59,7 +59,7 @@ Tauri 的 Android 运行链路（App.run → tauri-runtime-wry.run → tao `Even
 
 ## 首次绑定与引导检查
 
-首次绑定只需中心地址与所有者密码：本地桥新增 `pairCenter`（params
+首次绑定默认用配对码（见下）；旧版中心仍可只用中心地址与所有者密码：本地桥新增 `pairCenter`（params
 `{url,password,displayName?,ca?,force?}`，result `{centerUrl,deviceId,
 displayName,hostConfigured,connectionRequested,warnings?}`，不返回 token）。
 原生侧先以 HTTPS owner 身份 `GET /api/session` → `POST /api/session` →
@@ -81,6 +81,34 @@ displayName,hostConfigured,connectionRequested,warnings?}`，不返回 token）�
   显式按钮动作；回到应用重新查询，`requested:true` 不等于已授权。
 - 设备重启后 Shizuku 服务停止，需要用户重新启动 Shizuku（应用授权记录保
   留）；电池不受限需要用户在系统设置中确认。
+
+### 配对码配对（扫码或粘贴）
+
+首次连接的默认入口：在中心管理页「设备与 Bot → 添加设备」生成配对码和二维码，手机上点
+「扫码配对」扫描，或把配对码粘贴到输入框；识别出完整的码即自动配对并连接，不再填写地址、
+所有者密码或证书。码内含中心地址、一次性密钥和（私有 CA 部署时）CA，格式与有效期见
+[部署文档](../docs/center-linux-deployment.md#配对码)。所有者密码配对与手动令牌收进折叠项，
+中心版本不支持配对码时（`CENTER_UNSUPPORTED`）作为退路。
+
+- 本地桥新增两个 UI-local 前台动作：`scanPairingCode {}` → `{text}` 或 `{cancelled:true}`，
+  `pairCenterWithCode {code,displayName?,force?}`，result 与 `pairCenter` 相同，不返回 token。
+  配对码整串交给原生解码（`PairingCode`），中心地址、一次性密钥和私有 CA 都不经 JS 状态；
+  JS 只持有粘贴/扫到的原文，配对成功即清除。
+- 原生侧设备自带 Host 身份与待确认令牌，凭一次性密钥 `POST /api/pairing/redeem`（不需要所有者
+  会话/CSRF），随后与 `pairCenter` 共用同一段持久化与连接。兑换前不碰任何持久状态，所以码
+  已用/过期/设备不符时本机绑定原样保留；同设备同令牌重试复用待确认令牌，响应丢失后可用同一
+  个码重试。已有绑定时仍须勾选「替换本机已保存的绑定」（`force`）才会提交，勾选前不自动提交。
+- 通用码只能登记新设备或加回已删除的设备；设备仍在用时返回 `DEVICE_ALREADY_REGISTERED`，
+  需要所有者在设备卡片上点「重新配对」，用专属码。这个错误不会被当作本机绑定冲突
+  （不触发 `force` 建议）。
+- 中心证书不受信任（私有 CA 没进配对码）时报 `CENTER_CERT_UNTRUSTED` 并说明去管理页保存 CA 后
+  重新生成配对码，而不是笼统的“无法连接中心”。所有者密码配对共用这一分类。
+- 扫码用 `com.journeyapps:zxing-android-embedded` 4.3.0（Apache-2.0，ZXing core），不依赖
+  Google Play 服务。扫描界面是自有的 `PairingScanActivity`（沿用库的 `CaptureManager`），与
+  `TauriMainActivity` 同在 `:tauri_ui` 进程，方向随传感器；库自带的 `CaptureActivity` 在清单里移除。
+  相机权限由扫描界面在首次使用时请求；被拒（含系统不再询问的永久拒绝）时直接回 `CAMERA_DENIED`，
+  界面显示“没有相机权限，请在系统设置里允许相机，或直接粘贴配对码”并退回粘贴。自有界面的唯一
+  差别是关掉库默认的“Android 相机出现问题，您可能需要重启设备”对话框，它会把用户引去重启手机。
 
 ## 其他设备（手机远端页，M20-01 已交付）
 

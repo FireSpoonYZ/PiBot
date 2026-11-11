@@ -237,6 +237,17 @@ plus the pinned Tauri Android stack:
   **1.2.0**, `androidx.lifecycle:lifecycle-process` **2.10.0**,
   `androidx.webkit:webkit` **1.12.0** and
   `com.fasterxml.jackson.core:jackson-databind` **2.15.3** (Apache-2.0).
+- **QR scanning (pairing-code scan, no Google services)**:
+  `com.journeyapps:zxing-android-embedded` **4.3.0** (Apache-2.0) and its dependency
+  `com.google.zxing:core` **3.4.1** (Apache-2.0). Neither archive ships a license
+  file, so the
+  verbatim upstream texts are retained at
+  [`licenses/zxing-android-embedded-4.3.0-Apache-2.0.txt`](licenses/zxing-android-embedded-4.3.0-Apache-2.0.txt)
+  (`COPYING` at tag `v4.3.0`) and
+  [`licenses/zxing-core-3.4.1-LICENSE.txt`](licenses/zxing-core-3.4.1-LICENSE.txt)
+  (`LICENSE` at tag `zxing-3.4.1`; its trailing jai-imageio terms belong to the ZXing
+  `javase` module, which is not part of this build). `host-core/build-mobile.js` appends
+  both texts to the APK asset `THIRD_PARTY_NOTICES.txt`.
 
 Legal texts shipped inside dependency jars are handled by AGP's standard packaging
 merge: `app/build.gradle` removes only the eight default-excluded paths

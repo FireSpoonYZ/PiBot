@@ -153,6 +153,32 @@ export type DevicePlatform = 'windows' | 'linux' | 'macos' | 'android';
 export interface CreateDeviceRequest { displayName: string; platform: DevicePlatform }
 /** `201` reply; deviceToken (32 random bytes, base64url) is returned only once. */
 export interface CreateDeviceResponse { deviceId: string; deviceToken: string; displayName: string; platform: DevicePlatform }
+/**
+ * Pairing code: `"pibot1." + base64url(JSON { u, c, a? })`, where `u` is the center's HTTPS origin,
+ * `c` the one-time secret and `a` an optional PEM bundle of the private CA. Owner-only
+ * `POST /api/pairing-codes` (empty `{}` body) returns it once; only the secret's hash is stored.
+ */
+export interface CreatePairingCodeResponse { id: string; code: string; expiresAt: string; ttlSeconds: number; includesCa: boolean; target: { deviceId: string; name: string } | null }
+/**
+ * Body of `POST /api/pairing-codes`. Without `deviceId` the code can only register a brand-new device ID
+ * (an existing one answers `DEVICE_ALREADY_REGISTERED`). With it, the owner issues the code to re-bind
+ * that one active device: any other device answers `PAIRING_CODE_DEVICE_MISMATCH` without burning the code.
+ */
+export interface CreatePairingCodeRequest { deviceId?: string }
+export type PairingCodeStatus = 'pending' | 'redeemed' | 'expired' | 'revoked';
+/** `GET /api/pairing-codes/:id`; `device` is present once redeemed, `target` when the code was issued for one device. `DELETE` voids a pending code. */
+export interface PairingCodeState { id: string; status: PairingCodeStatus; createdAt: string; expiresAt: string; device?: { deviceId: string; name: string }; target?: { deviceId: string; name: string } }
+/** `GET`/`PUT /api/pairing/ca` (`PUT` body `{ ca: string | null }`): the private CA embedded into new codes. */
+export interface PairingCaState { ca: string | null; certificates: Array<{ subject: string; fingerprint256: string; validTo: string }> }
+/**
+ * Unauthenticated `POST /api/pairing/redeem`: the device brings its own identity and token
+ * (generated before the call so a lost response can be retried with the same values).
+ * A known `deviceId` is re-bound, keeping its Bots and sessions, only by a code issued for that device.
+ * Errors: `PAIRING_CODE_INVALID` (401), `PAIRING_CODE_USED` (409), `PAIRING_CODE_EXPIRED` (410, also when the
+ * target device was deleted or revoked), `PAIRING_CODE_DEVICE_MISMATCH` (409), `DEVICE_ALREADY_REGISTERED` (409).
+ */
+export interface RedeemPairingCodeRequest { code: string; deviceId: string; deviceToken: string; displayName: string; platform: DevicePlatform }
+export type RedeemPairingCodeResponse = CreateDeviceResponse;
 export interface BotAvatar {
   id: string;
   shape: string;

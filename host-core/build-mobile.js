@@ -342,7 +342,9 @@ async function writeNotices(abis) {
   // 沿用 desktop 读 licenses 文件的方式直接把同一份文本附进 Android 产物。
   const gbotUiLicense = (await readFile(path.join(ROOT, 'licenses', 'gbot-ui-MIT.txt'), 'utf8')).trim();
   const projectNotices = await Promise.all(
-    ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'licenses/Operit-LGPL-3.0.txt', 'licenses/GPL-3.0.txt']
+    ['LICENSE', 'THIRD_PARTY_NOTICES.md', 'licenses/Operit-LGPL-3.0.txt', 'licenses/GPL-3.0.txt',
+      // zxing 的 jar/aar 不带许可证文件，AGP 的 META-INF/LICENSE 合并捞不到，随通知一并附上原文。
+      'licenses/zxing-android-embedded-4.3.0-Apache-2.0.txt', 'licenses/zxing-core-3.4.1-LICENSE.txt']
       .map(async (file) => '## ' + file + '\n\n' + await readFile(path.join(ROOT, file), 'utf8'))
   );
   const content =

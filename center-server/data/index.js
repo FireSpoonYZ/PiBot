@@ -7,6 +7,7 @@ import Ajv from 'ajv';
 import deepmerge from 'deepmerge';
 import { assertPublicCredentialId } from '../auth.js';
 import { webhookStore } from './webhooks.js';
+import { pairingStore } from './pairing.js';
 
 function error(code, message, details) {
   const result = new Error(message);
@@ -364,7 +365,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     db.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
     transaction(() => {
       let version = db.prepare('PRAGMA user_version').get().user_version;
-      if (![0, 1, 2, 3, 4, 5, 6, 7, 8].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
+      if (![0, 1, 2, 3, 4, 5, 6, 7, 8, 9].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
       if (version === 0) {
         db.exec(`
           CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL, config_revision INTEGER NOT NULL);
@@ -484,11 +485,36 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           );
           PRAGMA user_version = 8;
         `);
+        version = 8;
+      }
+      if (version === 8) {
+        // Pairing codes keep only the SHA-256 of the secret; the CA is the one
+        // private root embedded into every code so devices need no manual cert paste.
+        db.exec(`
+          CREATE TABLE pairing_codes (
+            id TEXT PRIMARY KEY,
+            code_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT,
+            redeemed_at TEXT,
+            device_id TEXT,
+            token_hash TEXT,
+            target_device_id TEXT
+          );
+          CREATE TABLE pairing_settings (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            ca_pem TEXT,
+            updated_at TEXT NOT NULL
+          );
+          PRAGMA user_version = 9;
+        `);
       }
     });
 
     store = {
       ...webhookStore(db, transaction),
+      ...pairingStore(db, transaction),
       listProviders: () => rows('providers'),
       getProvider: (id) => get('providers', id),
       putProvider(provider, expectedRevision) {

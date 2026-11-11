@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import {
   Archive,
   Bot,
+  Link2,
   Pencil,
   Plus,
   Puzzle,
@@ -24,6 +25,7 @@ import type {
 } from '@e-launcher/center-contract';
 import { api, CenterApiError } from '../api';
 import { RuntimeStatusSummary } from '../components/RuntimeStatus';
+import { AddDeviceDialog } from '../components/AddDeviceDialog';
 import { SheetModal } from '../components/SheetModal';
 
 const levels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -357,6 +359,7 @@ export default function Devices() {
     forcePrimary: boolean;
   }>();
   const [editingDevice, setEditingDevice] = useState<{ deviceId: string; name: string }>();
+  const [pairing, setPairing] = useState<{ target?: { deviceId: string; name: string } }>();
   const [confirmDeleteDevice, setConfirmDeleteDevice] = useState<string>();
   const [editingBot, setEditingBot] = useState<{
     deviceId: string;
@@ -497,10 +500,16 @@ export default function Devices() {
           <h1>设备与 Bot 管理</h1>
           <p className="secondary">管理在线设备、主 Bot 守护、模型覆盖与能力绑定</p>
         </div>
-        <button className="button secondary-button button-sm" disabled={busy} onClick={() => void run(load)}>
-          <RefreshCw size={15} />
-          刷新
-        </button>
+        <div className="action-row" style={{ margin: 0 }}>
+          <button className="button button-sm" onClick={() => setPairing({})}>
+            <Plus size={15} />
+            添加设备
+          </button>
+          <button className="button secondary-button button-sm" disabled={busy} onClick={() => void run(load)}>
+            <RefreshCw size={15} />
+            刷新
+          </button>
+        </div>
       </header>
 
       {error && (
@@ -618,6 +627,18 @@ export default function Devices() {
                 >
                   <Pencil size={15} />
                   重命名设备
+                </button>
+                <button
+                  className="quiet-button"
+                  disabled={busy}
+                  title="为这台设备生成专用配对码：令牌丢失或被吊销后，用它重新接入并保留 Bot 与会话"
+                  onClick={() => {
+                    setError('');
+                    setPairing({ target: { deviceId: device.deviceId, name: device.name || device.deviceId } });
+                  }}
+                >
+                  <Link2 size={15} />
+                  重新配对
                 </button>
                 {confirmDeleteDevice !== device.deviceId ? (
                   <button
@@ -1162,6 +1183,16 @@ export default function Devices() {
           </div>
         )}
       </SheetModal>
+
+      <AddDeviceDialog
+        open={pairing !== undefined}
+        target={pairing?.target}
+        onClose={() => setPairing(undefined)}
+        onPaired={name => {
+          setNotice(name ? `设备“${name}”已${pairing?.target ? '重新配对' : '添加'}` : pairing?.target ? '设备已重新配对' : '设备已添加');
+          void run(load);
+        }}
+      />
     </main>
   );
 }

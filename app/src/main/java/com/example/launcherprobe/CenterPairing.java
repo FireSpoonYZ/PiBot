@@ -15,6 +15,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
+import java.security.cert.CertPathValidatorException;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
@@ -29,6 +30,7 @@ import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
@@ -79,17 +81,7 @@ final class CenterPairing {
         if (password.isEmpty() || password.length() > MAX_PASSWORD_CHARS) {
             throw new BridgeException("INVALID_ARGS", "not-sent", "所有者口令无效");
         }
-        String displayName = params.optString("displayName", "").trim();
-        if (displayName.isEmpty()) {
-            displayName = Build.MODEL != null ? Build.MODEL.trim() : "";
-            if (displayName.isEmpty()) displayName = "Android";
-        }
-        if (displayName.length() > 64) displayName = displayName.substring(0, 64);
-        for (int i = 0; i < displayName.length(); i++) {
-            if (Character.isISOControl(displayName.charAt(i))) {
-                throw new BridgeException("INVALID_ARGS", "not-sent", "设备名不能包含控制字符");
-            }
-        }
+        String displayName = displayNameOf(params);
         String ca = params.optString("ca", "").trim();
         if (ca.length() > MAX_CA_CHARS) {
             throw new BridgeException("INVALID_ARGS", "not-sent", "CA 证书过大");
@@ -98,26 +90,7 @@ final class CenterPairing {
 
         Context appContext = context.getApplicationContext();
         CenterClientCredentials credentials = new CenterClientCredentials(appContext);
-
-        // 已有绑定默认拒绝：客户端凭据文件或 Host 中心令牌任一存在即视为已绑定。
-        if (!force) {
-            JSONObject saved = null;
-            try {
-                saved = credentials.read();
-            } catch (Exception failure) {
-                throw new BridgeException("CREDENTIALS", "not-sent",
-                        "已保存的中心凭据无法读取，请修复存储或用 force 重新配对");
-            }
-            boolean bound = saved != null;
-            if (!bound) {
-                JSONObject settings = await(bridge.request("centerSettings", new JSONObject()));
-                bound = settings != null && settings.optBoolean("tokenConfigured");
-            }
-            if (bound) {
-                throw new BridgeException("ALREADY_CONFIGURED", "not-sent",
-                        "设备已绑定中心，只有显式 force 才能替换");
-            }
-        }
+        if (!force) rejectIfBound(credentials, bridge);
 
         String deviceId = resolveHostDeviceId(bridge);
         if (!ownerOpen.getAsBoolean()) {
@@ -147,8 +120,98 @@ final class CenterPairing {
         if (!ownerOpen.getAsBoolean()) {
             throw new BridgeException("CANCELLED", "not-sent", "界面已结束");
         }
-        android.content.SharedPreferences pending = appContext.getSharedPreferences("center_pairing", Context.MODE_PRIVATE);
-        String pendingKey = url + "\n" + deviceId + "\n" + force;
+        android.content.SharedPreferences pending = pendingPrefs(appContext);
+        String requestedToken = requestedToken(pending, url + "\n" + deviceId + "\n" + force);
+        JSONObject created = session.request("POST", url + "/api/devices",
+                new JSONObject().put("displayName", displayName)
+                        .put("platform", "android")
+                        .put("deviceId", deviceId)
+                        .put("deviceToken", requestedToken)
+                        .put("replaceExisting", force),
+                csrf, "中心会话或 CSRF 校验失败");
+        verifyRegistered(created, deviceId, requestedToken);
+        return persistAndConnect(bridge, pending, url, deviceId, requestedToken, ca,
+                created.optString("displayName", displayName));
+    }
+
+    /**
+     * 配对码配对：地址、一次性密钥与私有 CA 都在码里，用户无需再输入任何内容。
+     * 设备自带 Host 身份与令牌，凭一次性密钥直接向中心兑换（不需要所有者会话/CSRF）；
+     * 之后的持久化与连接与所有者密码配对完全相同。同一设备同一令牌重试不会另生令牌，
+     * 所以响应丢失后可以用同一个码重试（中心在 10 分钟内接受同设备同令牌的重放）。
+     * 兑换前不碰任何持久状态：被中心拒绝（码已用/过期/设备不符）时本机绑定原样保留。
+     */
+    static JSONObject pairWithCode(Context context, BotHostUiBridgeClient bridge, JSONObject params,
+                                   BooleanSupplier ownerOpen) throws Exception {
+        PairingCode code = PairingCode.parse(stringArg(params, "code"));
+        String displayName = displayNameOf(params);
+        boolean force = params.optBoolean("force", false);
+
+        Context appContext = context.getApplicationContext();
+        CenterClientCredentials credentials = new CenterClientCredentials(appContext);
+        if (!force) rejectIfBound(credentials, bridge);
+
+        String deviceId = resolveHostDeviceId(bridge);
+        if (!ownerOpen.getAsBoolean()) {
+            throw new BridgeException("CANCELLED", "not-sent", "界面已结束");
+        }
+        android.content.SharedPreferences pending = pendingPrefs(appContext);
+        String requestedToken = requestedToken(pending, code.url + "\n" + deviceId + "\nredeem");
+        JSONObject created = new Session(code.ca).redeem(code.url + "/api/pairing/redeem",
+                new JSONObject().put("code", code.secret)
+                        .put("deviceId", deviceId)
+                        .put("deviceToken", requestedToken)
+                        .put("displayName", displayName)
+                        .put("platform", "android"));
+        verifyRegistered(created, deviceId, requestedToken);
+        return persistAndConnect(bridge, pending, code.url, deviceId, requestedToken, code.ca,
+                created.optString("displayName", displayName));
+    }
+
+    /** 设备名：缺省用机型，≤64 字符，不含控制字符。 */
+    private static String displayNameOf(JSONObject params) throws BridgeException {
+        String displayName = params.optString("displayName", "").trim();
+        if (displayName.isEmpty()) {
+            displayName = Build.MODEL != null ? Build.MODEL.trim() : "";
+            if (displayName.isEmpty()) displayName = "Android";
+        }
+        if (displayName.length() > 64) displayName = displayName.substring(0, 64);
+        for (int i = 0; i < displayName.length(); i++) {
+            if (Character.isISOControl(displayName.charAt(i))) {
+                throw new BridgeException("INVALID_ARGS", "not-sent", "设备名不能包含控制字符");
+            }
+        }
+        return displayName;
+    }
+
+    /** 已有绑定默认拒绝：客户端凭据文件或 Host 中心令牌任一存在即视为已绑定。 */
+    private static void rejectIfBound(CenterClientCredentials credentials, BotHostUiBridgeClient bridge)
+            throws Exception {
+        JSONObject saved = null;
+        try {
+            saved = credentials.read();
+        } catch (Exception failure) {
+            throw new BridgeException("CREDENTIALS", "not-sent",
+                    "已保存的中心凭据无法读取，请修复存储或用 force 重新配对");
+        }
+        boolean bound = saved != null;
+        if (!bound) {
+            JSONObject settings = await(bridge.request("centerSettings", new JSONObject()));
+            bound = settings != null && settings.optBoolean("tokenConfigured");
+        }
+        if (bound) {
+            throw new BridgeException("ALREADY_CONFIGURED", "not-sent",
+                    "设备已绑定中心，只有显式 force 才能替换");
+        }
+    }
+
+    private static android.content.SharedPreferences pendingPrefs(Context appContext) {
+        return appContext.getSharedPreferences("center_pairing", Context.MODE_PRIVATE);
+    }
+
+    /** 待确认令牌：同一 key（中心+设备+方式）重试复用，登记成功后由 persistAndConnect 清除。 */
+    private static String requestedToken(android.content.SharedPreferences pending, String pendingKey)
+            throws BridgeException {
         String requestedToken = pendingKey.equals(pending.getString("key", null))
                 ? pending.getString("token", null) : null;
         if (requestedToken == null) {
@@ -160,17 +223,14 @@ final class CenterPairing {
                 throw new BridgeException("CREDENTIALS", "not-sent", "无法保存待配对凭据");
             }
         }
-        JSONObject created = session.request("POST", url + "/api/devices",
-                new JSONObject().put("displayName", displayName)
-                        .put("platform", "android")
-                        .put("deviceId", deviceId)
-                        .put("deviceToken", requestedToken)
-                        .put("replaceExisting", force),
-                csrf, "中心会话或 CSRF 校验失败");
+        return requestedToken;
+    }
 
+    /** 响应不可信：只校验不执行远端副作用；不匹配即失败，由用户重新发起。 */
+    private static void verifyRegistered(JSONObject created, String deviceId, String requestedToken)
+            throws BridgeException {
         String registeredId = created.optString("deviceId", "");
         String token = created.optString("deviceToken", "");
-        // 响应不可信：只校验不执行远端副作用；不匹配即失败，由用户重新发起。
         if (!deviceId.equals(registeredId)) {
             throw new BridgeException("CENTER_ERROR", "not-sent",
                     "中心未按请求登记本机 Host 身份");
@@ -178,16 +238,23 @@ final class CenterPairing {
         if (!DEVICE_TOKEN.matcher(token).matches() || !token.equals(requestedToken)) {
             throw new BridgeException("CENTER_ERROR", "not-sent", "中心返回的设备令牌无效");
         }
+    }
 
-        // ---------- 先持久化、再连接；登记成功后续步骤不因 UI 关闭丢弃 ----------
+    /**
+     * 先持久化、再连接；登记成功后续步骤不因 UI 关闭丢弃。
+     * 单一写入方：storeCenterCredentials 在默认进程 client 串行队列内失效旧连接代后再保存，
+     * 旧后台 connect 的迟到 persistReady 无法覆盖新凭据（displayName 随记录供 repair 回显）。
+     */
+    private static JSONObject persistAndConnect(BotHostUiBridgeClient bridge,
+                                                android.content.SharedPreferences pending,
+                                                String url, String deviceId, String token, String ca,
+                                                String displayName) throws Exception {
         JSONArray warnings = new JSONArray();
-        // 单一写入方：storeCenterCredentials 在默认进程 client 串行队列内失效旧连接代后再保存，
-        // 旧后台 connect 的迟到 persistReady 无法覆盖新凭据（displayName 随记录供 repair 回显）。
         await(bridge.request("storeCenterCredentials", new JSONObject()
                 .put("input", new JSONObject()
                         .put("url", url).put("deviceId", deviceId)
                         .put("deviceToken", token).put("ca", ca)
-                        .put("displayName", created.optString("displayName", displayName)))));
+                        .put("displayName", displayName))));
         pending.edit().clear().commit();
         boolean hostConfigured = false;
         try {
@@ -210,8 +277,7 @@ final class CenterPairing {
         } catch (Throwable failure) {
             warnings.put(warning("CONNECT_FAILED", failure));
         }
-        return result(url, deviceId, created.optString("displayName", displayName),
-                hostConfigured, connectionRequested, warnings);
+        return result(url, deviceId, displayName, hostConfigured, connectionRequested, warnings);
     }
 
     /**
@@ -316,8 +382,79 @@ final class CenterPairing {
         return message.length() > 200 ? message.substring(0, 200) : message;
     }
 
+    /** 兑换被中心拒绝：保留中心错误码并给出可操作的说明，让用户知道是码、设备还是中心版本的问题。 */
+    static BridgeException redeemFailure(int status, String body) {
+        String code = errorCodeOf(body);
+        if ("PAIRING_CODE_INVALID".equals(code)) {
+            return new BridgeException(code, "not-sent", "配对码无效，请在中心重新生成");
+        }
+        if ("PAIRING_CODE_USED".equals(code)) {
+            return new BridgeException(code, "not-sent", "配对码已被使用，请在中心重新生成");
+        }
+        if ("PAIRING_CODE_EXPIRED".equals(code)) {
+            return new BridgeException(code, "not-sent", "配对码已过期（10 分钟有效），请在中心重新生成");
+        }
+        if ("DEVICE_ALREADY_REGISTERED".equals(code)) {
+            return new BridgeException(code, "not-sent",
+                    "中心上已有这台设备的记录，新配对码不能顶替它。请所有者在管理页「设备与 Bot」里点该设备的"
+                            + "「重新配对」，使用生成的专属配对码");
+        }
+        if ("PAIRING_CODE_DEVICE_MISMATCH".equals(code)) {
+            return new BridgeException(code, "not-sent", "这个配对码是为另一台设备生成的，不能用于本机。请在中心为本机重新生成");
+        }
+        if (status == 429) {
+            return new BridgeException("RATE_LIMITED", "not-sent", "中心请求过于频繁，请稍后重试");
+        }
+        if (status == 404 || status == 405) {
+            return new BridgeException("CENTER_UNSUPPORTED", "not-sent",
+                    "该中心版本尚不支持配对码，请升级中心，或改用所有者密码配对");
+        }
+        String detail = Session.errorDetail(body);
+        return new BridgeException("CENTER_ERROR", "not-sent", detail != null ? detail : "中心返回错误 " + status);
+    }
+
+    /** 中心错误体 {@code {error:{code}}} 里的 code；取不到返回 null。 */
+    static String errorCodeOf(String text) {
+        if (text == null || text.isEmpty() || text.length() > MAX_BODY_BYTES) return null;
+        try {
+            Object error = new JSONObject(text).opt("error");
+            if (!(error instanceof JSONObject)) return null;
+            String code = ((JSONObject) error).optString("code", "");
+            return code.isEmpty() ? null : code;
+        } catch (JSONException invalid) {
+            return null;
+        }
+    }
+
+    /**
+     * 证书校验失败（不受信任的签发者、主机名不符、已过期）：中心其实应答了，只是本机不信任它。
+     * 与网络不通分开说，否则私有 CA 没进配对码时用户只会看到“无法连接中心”。
+     */
+    static boolean isCertificateFailure(Throwable failure) {
+        Throwable current = failure;
+        for (int depth = 0; current != null && depth < 8; depth++) {
+            if (current instanceof SSLPeerUnverifiedException
+                    || current instanceof CertificateException
+                    || current instanceof CertPathValidatorException) {
+                return true;
+            }
+            if (current.getCause() == current) break;
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    static BridgeException transportFailure(Throwable failure) {
+        if (isCertificateFailure(failure)) {
+            return new BridgeException("CENTER_CERT_UNTRUSTED", "not-sent",
+                    "能连上中心，但本机不信任它的证书。中心使用自签或私有 CA 时，请所有者在管理页「添加设备」窗口保存"
+                            + "私有 CA 后重新生成配对码；用所有者密码配对时，在 CA 证书栏填写它");
+        }
+        return new BridgeException("CENTER_UNREACHABLE", "not-sent", "无法连接中心");
+    }
+
     /** 与 saveCenterSettings 一致：仅 HTTPS origin，路径为空或 "/"（不保留前缀）；长度有界。 */
-    private static String normalizeCenterUrl(String raw) throws BridgeException {
+    static String normalizeCenterUrl(String raw) throws BridgeException {
         String value = raw == null ? "" : raw.trim();
         if (value.isEmpty() || value.length() > MAX_URL_CHARS) {
             throw new BridgeException("INVALID_ARGS", "not-sent", "中心地址无效");
@@ -447,35 +584,10 @@ final class CenterPairing {
         /** authFailedMessage 为 null 时 401/403 也归并到 CENTER_ERROR（CSRF/会话失效非口令问题）。 */
         JSONObject request(String method, String url, JSONObject body, String csrf,
                            String authFailedMessage) throws BridgeException {
-            Request.Builder request = new Request.Builder().url(url);
-            if (!cookies.isEmpty()) request.header("Cookie", cookieHeader());
-            if (csrf != null) request.header("x-csrf-token", csrf);
-            request.method(method, body == null
-                    ? null : RequestBody.create(JSON_MEDIA, body.toString()));
-            Response response;
-            try {
-                response = client.newCall(request.build()).execute();
-            } catch (IOException | RuntimeException failure) {
-                throw new BridgeException("CENTER_UNREACHABLE", "not-sent", "无法连接中心");
-            }
-            int code = response.code();
-            mergeCookies(response);
-            String text;
-            try {
-                text = readBody(response);
-                response.close();
-            } catch (IOException failure) {
-                response.close();
-                throw new BridgeException("CENTER_UNREACHABLE", "not-sent", "无法连接中心");
-            }
-            if (code >= 200 && code < 300) {
-                if (text.isEmpty()) return new JSONObject();
-                try {
-                    return new JSONObject(text);
-                } catch (JSONException invalid) {
-                    throw new BridgeException("CENTER_ERROR", "not-sent", "中心响应无效");
-                }
-            }
+            Reply reply = exchange(method, url, body, csrf);
+            int code = reply.code;
+            String text = reply.text;
+            if (code >= 200 && code < 300) return parseSuccess(text);
             String detail = errorDetail(text);
             if (code == 401 || code == 403) {
                 if (authFailedMessage != null) {
@@ -493,6 +605,59 @@ final class CenterPairing {
             }
             throw new BridgeException("CENTER_ERROR", "not-sent",
                     detail != null ? detail : "中心返回错误 " + code);
+        }
+
+        /** 设备端兑换配对码：不带会话与 CSRF，凭一次性密钥授权；被拒时按中心错误码给出可操作的原因。 */
+        JSONObject redeem(String url, JSONObject body) throws BridgeException {
+            Reply reply = exchange("POST", url, body, null);
+            if (reply.code >= 200 && reply.code < 300) return parseSuccess(reply.text);
+            throw redeemFailure(reply.code, reply.text);
+        }
+
+        private static JSONObject parseSuccess(String text) throws BridgeException {
+            if (text.isEmpty()) return new JSONObject();
+            try {
+                return new JSONObject(text);
+            } catch (JSONException invalid) {
+                throw new BridgeException("CENTER_ERROR", "not-sent", "中心响应无效");
+            }
+        }
+
+        /** 一次 HTTP 往返：传输失败按原因分类（证书不受信任与网络不通要分开说），响应体有界读取。 */
+        private Reply exchange(String method, String url, JSONObject body, String csrf)
+                throws BridgeException {
+            Request.Builder request = new Request.Builder().url(url);
+            if (!cookies.isEmpty()) request.header("Cookie", cookieHeader());
+            if (csrf != null) request.header("x-csrf-token", csrf);
+            request.method(method, body == null
+                    ? null : RequestBody.create(JSON_MEDIA, body.toString()));
+            Response response;
+            try {
+                response = client.newCall(request.build()).execute();
+            } catch (IOException | RuntimeException failure) {
+                throw transportFailure(failure);
+            }
+            int code = response.code();
+            mergeCookies(response);
+            String text;
+            try {
+                text = readBody(response);
+                response.close();
+            } catch (IOException failure) {
+                response.close();
+                throw transportFailure(failure);
+            }
+            return new Reply(code, text);
+        }
+
+        private static final class Reply {
+            final int code;
+            final String text;
+
+            Reply(int code, String text) {
+                this.code = code;
+                this.text = text;
+            }
         }
 
         private void mergeCookies(Response response) {

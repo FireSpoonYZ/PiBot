@@ -6,6 +6,8 @@ const APP_COMMANDS: &[&str] = &[
   "desktop_pick_file",
   "desktop_host_status",
   "desktop_host_pair",
+  "desktop_host_pair_code",
+  "desktop_host_connect_local",
   "desktop_host_adopt",
   "desktop_host_control",
   "desktop_update_status",

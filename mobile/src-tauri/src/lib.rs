@@ -55,6 +55,9 @@ const ALLOWED_METHODS: &[&str] = &[
   "screenClose",
   // C7 配对/引导：Kotlin 侧 UI-local 动作（配对内部复用既有 bridge op，不进桥白名单）
   "pairCenter",
+  "pairCenterWithCode",
+  // 应用内扫码（ZXing）：Kotlin 侧 UI-local 原生界面，只回传扫到的原文
+  "scanPairingCode",
   "repairCenterBinding",
   "onboardingStatus",
   "onboardingAction",
