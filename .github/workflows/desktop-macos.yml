@@ -1,0 +1,168 @@
+name: Desktop macOS (experimental)
+
+# Apple Silicon client, built apart from desktop.yml so that a macOS failure
+# never blocks the Windows/Linux builds or any other release item. Ad-hoc
+# signed, not notarized.
+#
+# Pull requests sign the updater bundle with a throwaway key generated in the
+# job (never the release key) and check it end to end: signature, release
+# metadata, center publish/query/download, plus the Host stop → app swap →
+# restore cycle against real launchd. Release runs use the real key; there
+# the job may fail without failing the run, and release.yml publishes without
+# macOS and records why.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [develop, master]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      source-ref:
+        type: string
+        default: ''
+      source-sha:
+        type: string
+        default: ''
+      release:
+        type: boolean
+        default: false
+      version:
+        type: string
+        default: ''
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+
+concurrency:
+  group: desktop-macos-${{ github.ref }}-${{ inputs.release || false }}
+  cancel-in-progress: ${{ !inputs.release }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Desktop macOS app,dmg
+    runs-on: macos-15
+    timeout-minutes: 90
+    # Experimental release item: a failed release build leaves the run green
+    # (candidate runs must conclude success to be reused) and simply produces
+    # no macOS artifacts. Pull request and push runs still fail visibly.
+    continue-on-error: ${{ inputs.release == true }}
+    env:
+      RELEASE: ${{ inputs.release || false }}
+      BUNDLE: desktop/build/target/release/bundle
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source-ref || github.ref }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26.13.0'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            host-core/package-lock.json
+            center-server/package-lock.json
+
+      # rust-toolchain.toml pins channel 1.99.1 (profile minimal).
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.1 --profile minimal --no-self-update
+          rustup default 1.99.1
+          rustc --version
+          cargo --version
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          npm ci
+          npm ci --prefix host-core
+          npm ci --prefix center-server
+
+      - name: Verify product version consistency
+        env:
+          TAG_ARG: ${{ inputs.release && format('--tag v{0}', inputs.version) || '' }}
+        run: node scripts/release-check.mjs $TAG_ARG
+
+      # Includes the macOS-only LaunchAgent unload tests: a stop whose unload
+      # cannot be confirmed must fail.
+      - name: Launcher tests
+        run: cargo test --locked --manifest-path desktop/host-launcher/Cargo.toml
+
+      - name: macOS release tests
+        run: node --test web/test/macos-client-release.test.mjs
+
+      - name: Build app, DMG and signed updater bundle
+        env:
+          RELEASE_PRIVATE_KEY: ${{ inputs.release && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          RELEASE_PRIVATE_KEY_PASSWORD: ${{ inputs.release && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          RELEASE_PUBLIC_KEY: ${{ inputs.release && vars.E_LAUNCHER_UPDATER_PUBLIC_KEY || '' }}
+        run: |
+          set -euo pipefail
+          if [ "$RELEASE" = true ]; then
+            test -n "$RELEASE_PRIVATE_KEY" || { echo "Missing updater private key"; exit 1; }
+            test -n "$RELEASE_PUBLIC_KEY" || { echo "Missing updater public key"; exit 1; }
+            printf '%s\n' "$RELEASE_PUBLIC_KEY" > "$RUNNER_TEMP/updater.pub"
+            export TAURI_SIGNING_PRIVATE_KEY="$RELEASE_PRIVATE_KEY"
+            export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$RELEASE_PRIVATE_KEY_PASSWORD"
+          else
+            # Throwaway key for this run only; the app trusts its public key.
+            node node_modules/@tauri-apps/cli/tauri.js signer generate --ci -p '' -w "$RUNNER_TEMP/updater.key" -f > /dev/null
+            cp "$RUNNER_TEMP/updater.key.pub" "$RUNNER_TEMP/updater.pub"
+            TAURI_SIGNING_PRIVATE_KEY=$(cat "$RUNNER_TEMP/updater.key")
+            echo "::add-mask::$TAURI_SIGNING_PRIVATE_KEY"
+            export TAURI_SIGNING_PRIVATE_KEY
+            export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=''
+          fi
+          E_LAUNCHER_UPDATER_PUBLIC_KEY=$(tr -d '\r\n' < "$RUNNER_TEMP/updater.pub")
+          export E_LAUNCHER_UPDATER_PUBLIC_KEY
+          config=$(node -p 'JSON.stringify({bundle:{createUpdaterArtifacts:true},plugins:{updater:{pubkey:process.env.E_LAUNCHER_UPDATER_PUBLIC_KEY}}})')
+          npm run desktop:build -- --bundles app,dmg --config "$config"
+
+      - name: Verify app signature
+        run: codesign --verify --deep --strict "$BUNDLE/macos/PiBot.app"
+
+      - name: Verify updater bundle (signature, metadata, center publish/query/download)
+        env:
+          SOURCE_SHA: ${{ inputs.source-sha || github.sha }}
+        run: |
+          set -euo pipefail
+          node scripts/verify-updater-artifact.mjs \
+            --file "$BUNDLE/macos/PiBot.app.tar.gz" --public-key "@$RUNNER_TEMP/updater.pub" \
+            --version "$(node -p "require('./package.json').version")" \
+            --platform macos --arch aarch64 --format app --commit "$SOURCE_SHA"
+
+      - name: Desktop crate tests
+        run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml --lib
+
+      - name: Update cycle against launchd (stop, swap, restore)
+        run: scripts/macos-update-cycle-test.sh "$BUNDLE/macos/PiBot.app"
+
+      # Only the DMG and the updater bundle: the raw PiBot.app tree carries
+      # node_modules files that release.yml's single-match patterns must not see.
+      - name: Upload bundle artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-macos-${{ inputs.version || github.sha }}
+          path: |
+            ${{ env.BUNDLE }}/dmg/*.dmg
+            ${{ env.BUNDLE }}/macos/*.app.tar.gz
+            ${{ env.BUNDLE }}/macos/*.app.tar.gz.sig
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Record failure
+        if: failure()
+        run: |
+          {
+            echo "### macOS client (experimental) not built"
+            echo "A step above failed, so no macOS artifacts were uploaded."
+            echo "Windows, Linux, Android and center builds run in other workflows and are not affected."
+          } >> "$GITHUB_STEP_SUMMARY"

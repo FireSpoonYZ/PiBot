@@ -40,7 +40,9 @@ fn desktop_open_center(webview: Webview, url: String) -> Result<(), BridgeError>
   }
   #[cfg(windows)]
   let result = std::process::Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", parsed.as_str()]).spawn();
-  #[cfg(not(windows))]
+  #[cfg(target_os = "macos")]
+  let result = std::process::Command::new("/usr/bin/open").arg(parsed.as_str()).spawn();
+  #[cfg(not(any(windows, target_os = "macos")))]
   let result = std::process::Command::new("xdg-open").arg(parsed.as_str()).spawn();
   result.map_err(|_| BridgeError::new("INTERNAL", "could not open browser", "not-sent"))?;
   Ok(())

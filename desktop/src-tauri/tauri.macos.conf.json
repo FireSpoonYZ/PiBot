@@ -1,0 +1,15 @@
+{
+  "productName": "PiBot",
+  "identifier": "io.github.firespoonyz.pibot",
+  "bundle": {
+    "icon": [
+      "../build/icons/icon.icns",
+      "../build/icons/icon.png"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.5",
+      "signingIdentity": "-",
+      "hardenedRuntime": false
+    }
+  }
+}

@@ -18,8 +18,8 @@ export interface HostStatus {
   autostart?: boolean | null;
   /** 自启动范围：仅安装用户登录后运行。 */
   autostartScope?: 'user-login' | 'system-boot';
-  platform?: 'windows' | 'linux';
-  /** 登录自启登记失败时由启动器附带的真实错误（{code,message}）。 */
+  platform?: 'windows' | 'linux' | 'macos';
+  /** 登录自启登记失败时由启动器附带的真实错误（{code,message}）；macOS 的 `AUTOSTART_STALE` 表示登录项指向旧的 App 位置。 */
   autostartError?: { code?: string; message?: string } | null;
   logFile: string;
   /** 启动器若输出则显示；契约未强制。 */

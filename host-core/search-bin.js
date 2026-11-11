@@ -14,6 +14,7 @@ const SEARCH_TOOLS = {
     sha256: {
       'win32-x64': '124510b94b6baa3380d051fdf4650eaa80a302c876d611e9dba0b2e18d87493a',
       'linux-x64': '1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599',
+      'darwin-arm64': '378e973289176ca0c6054054ee7f631a065874a352bf43f0fa60ef079b6ba715',
     },
   },
   fd: {
@@ -26,6 +27,7 @@ const SEARCH_TOOLS = {
     sha256: {
       'win32-x64': '318aa2a6fa664325933e81fda60d523fff29444129e91ebf0726b5b3bcd8b059',
       'linux-x64': '2b6bfaae8c48f12050813c2ffe1884c61ea26e750d803df9c9114550a314cd14',
+      'darwin-arm64': '0570263812089120bc2a5d84f9e65cd0c25e4a4d724c80075c357239c74ae904',
     },
   },
 };
@@ -38,9 +40,10 @@ export const SEARCH_TOOL_VERSIONS = {
 const TRIPLES = {
   'win32-x64': 'x86_64-pc-windows-msvc',
   'linux-x64': 'x86_64-unknown-linux-musl',
+  'darwin-arm64': 'aarch64-apple-darwin',
 };
 
-/** Asset metadata for the pinned Windows/Linux x64 release. */
+/** Asset metadata for the pinned Windows/Linux x64 or macOS arm64 release. */
 export function getSearchToolAsset(name, platform = process.platform, arch = process.arch) {
   assertToolName(name);
   const triple = requireTriple(platform, arch);

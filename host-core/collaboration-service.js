@@ -1,5 +1,6 @@
 import os from 'node:os';
 import { collectBotDirectory } from './bot-directory.js';
+import { hostDevicePlatform } from './device-metadata.js';
 import { openRemoteControl } from './remote-control-client.js';
 
 function serviceError(code, message) {
@@ -16,7 +17,7 @@ export function createCollaborationService({
   getLocalRuntime,
   getCenterClient,
   displayName,
-  platform = process.platform,
+  platform = hostDevicePlatform(),
 }) {
   const fallbackName = displayName?.trim() || (platform !== 'android' && os.hostname().trim()) || `${platform}-${host.deviceId.slice(0, 8)}`;
   let currentName = fallbackName;

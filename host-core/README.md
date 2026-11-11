@@ -1165,7 +1165,7 @@ CLI 均要求 `--bot-id`。`memory-status` 可选 `--input`，其余命令必须
 
 ### Windows 登录自启动（autostart-enable / autostart-disable / autostart-status）
 
-`host-service-cli.js` 的三个 autostart 命令在当前 Windows 用户的 Startup 目录（`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`）管理一个本项目专属 `.cmd` 启动文件；非 Windows 调用返回 `INVALID_ARGUMENT`，不提供 Linux/macOS 自启动。它不是系统服务、不需要管理员权限、不包含崩溃重启监督器，也不启动/停止当前正在运行的 Host。
+`host-service-cli.js` 的三个 autostart 命令在当前 Windows 用户的 Startup 目录（`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`）管理一个本项目专属 `.cmd` 启动文件；非 Windows 调用返回 `INVALID_ARGUMENT`，不提供 Linux/macOS 自启动。它不是系统服务、不需要管理员权限、不包含崩溃重启监督器，也不启动/停止当前正在运行的 Host。桌面安装包的自启动由 `pibot-host` 启动器负责（Linux systemd 用户单元、Windows 登录任务、macOS 用户 LaunchAgent），见 [desktop/README.md](../desktop/README.md#各平台的当前差异)。
 
 - **文件名**：`e-launcher-host-<dataRoot 规范化路径 SHA-256 前 16 hex>.cmd`——同一规范化 `--data-root` 始终映射到同一文件，重复 enable 幂等覆盖；不同 dataRoot 是互相独立的自启动实例，disable 只删除对应文件。
 - **enable** 复用 serve 的全部必需/可选启动参数与校验（重复 flag、env 名格式、`validateCenterUrl`、port 十进制、绝对 data-root 等），但**不读取 token 值、不要求中心在线、不打开 runtime owner**。写入的是一条完整的 `"node.exe" "<cli 绝对路径>" serve --data-root ...` 命令行；`--center-ca-file`/`--initial-settings` 与 serve 一样允许相对输入、注册时 resolve 为绝对路径，`--npm-path` 保持绝对要求（均不读文件内容），这些路径必须在登录时仍然有效。写入走同目录临时文件 + rename 原子替换；必要时创建 dataRoot 目录供重定向打开日志，但不初始化 Runtime。

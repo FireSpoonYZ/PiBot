@@ -5,12 +5,12 @@
 <h1 align="center">PiBot</h1>
 
 <p align="center">
-  <strong>自托管的多端 AI 助手与 Agent 协同平台（Windows · Linux · Android）</strong>
+  <strong>自托管的多端 AI 助手与 Agent 协同平台（Windows · Linux · macOS · Android）</strong>
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg" alt="License: AGPL-3.0"></a>
-  <a href="https://github.com/FireSpoonYZ/PiBot/releases/latest"><img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20Android-2ea44f.svg" alt="Platform"></a>
+  <a href="https://github.com/FireSpoonYZ/PiBot/releases/latest"><img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-2ea44f.svg" alt="Platform"></a>
   <a href="https://linux.do"><img src="https://img.shields.io/badge/LINUX%20DO-%E8%AE%A4%E5%8F%AF%E7%A4%BE%E5%8C%BA-000000?logo=linux&logoColor=white" alt="LINUX DO 社区"></a>
 </p>
 
@@ -21,7 +21,7 @@
 **PiBot** 采用「**中心管控 + 设备本地执行**」架构。
 
 - **中心服务器（Center）**支持通过 Docker 或 Ubuntu / Debian DEB 安装包自托管，集中管理模型服务商与 API 凭据、设备与 Bot、MCP / Skill / 插件、Bot 学习、Webhook 自动任务以及客户端版本分发。
-- **多端节点（Host & Client）**运行在 Windows、Linux 与 Android 设备上。工具在 Bot 所在设备执行，工作目录与会话主存储也在该设备。客户端通过中心的 Relay 与远端 Host 协作，Bot 学习会将会话快照传给中心处理。
+- **多端节点（Host & Client）**运行在 Windows、Linux、macOS（Apple Silicon）与 Android 设备上。工具在 Bot 所在设备执行，工作目录与会话主存储也在该设备。客户端通过中心的 Relay 与远端 Host 协作，Bot 学习会将会话快照传给中心处理。
 
 ```mermaid
 flowchart LR
@@ -55,7 +55,7 @@ flowchart LR
 ### 核心特性
 
 - **本地工具与隐私边界。** 每台设备的 Bot 绑定本地真实工作目录，内置固定版本的 `rg` / `fd` 搜索与运行时环境，设备令牌和模型凭据由系统加密存储或私有权限文件保护。
-- **后台常驻执行。** 桌面端关闭窗口不中断已受理任务（Linux 基于 `systemd --user` + `linger`，Windows 基于受保护的登录自启动任务）。Android 在独立进程运行 UI，由前台服务托管 Node Mobile 子进程。
+- **后台常驻执行。** 桌面端关闭窗口不中断已受理任务（Linux 基于 `systemd --user` + `linger`，Windows 基于受保护的登录自启动任务，macOS 基于用户 LaunchAgent）。Android 在独立进程运行 UI，由前台服务托管 Node Mobile 子进程。
 - **Bot 看板与跨机群聊。** 桌面与移动端共用「Bot 看板」，汇总所有设备的*需要你（问卷/失败）*、*工作中*、*待查看*与*空闲*状态。支持跨设备 Room 群聊协同与 Bot 私聊审阅。
 - **Shower 虚拟屏。** 按会话提供独立虚拟显示空间与 GUI 自动化能力（Linux 私有 Xvnc + 轻量桌面，Windows 交互会话桌面，Android 基于 Shizuku 的虚拟屏）。
 - **Bot 学习与 Webhook**。后台自动回顾会话并生成 Skill 建议。通用 JSON Webhook 支持幂等键，可用于 n8n、CI 或外部自动化脚本。
@@ -100,9 +100,10 @@ curl -fsS --max-time 10 https://center.example.com/api/health
 | --- | --- | --- |
 | Windows x64 | `PiBot-<version>-windows-x64-setup.exe` | 运行 NSIS 安装器，按系统提示授权。默认目录为 `C:\Program Files\pibot\` |
 | Linux amd64 | `PiBot-<version>-linux-amd64.deb` | 在支持包内依赖且使用 systemd 的 Debian/Ubuntu 环境，运行 `sudo apt install ./PiBot-*-linux-amd64.deb`。目录中应只有一个匹配的包 |
+| macOS 13.5+（Apple Silicon） | `PiBot-<version>-macos-arm64.dmg` | 打开 DMG，把 PiBot 拖到「应用程序」。安装包未经 Apple 公证，首次打开需在「系统设置 › 隐私与安全性」中选择「仍要打开」 |
 | Android 13+（ARM64） | `PiBot-<version>-android-arm64.apk` | 在手机上安装，或在已授权设备上用 `adb install -r "./PiBot-<version>-android-arm64.apk"` 覆盖同签名应用，命令中填实际版本号 |
 
-打开 PiBot，输入中心 HTTPS 地址与所有者密码，选择「配对并连接」。Windows 在配对后使用登录任务，Linux 使用 systemd 用户服务，Android 使用前台服务。配对完成后，在中心的「设备与 Bot」检查目标设备在线。 [桌面生命周期](desktop/README.md#首次连接) · [Android 生命周期](mobile/README.md#当前聊天与连接行为2026-10-29)
+打开 PiBot，输入中心 HTTPS 地址与所有者密码，选择「配对并连接」。Windows 在配对后使用登录任务，Linux 使用 systemd 用户服务，macOS 使用用户 LaunchAgent，Android 使用前台服务。配对完成后，在中心的「设备与 Bot」检查目标设备在线。 [桌面生命周期](desktop/README.md#首次连接) · [Android 生命周期](mobile/README.md#当前聊天与连接行为2026-10-29)
 
 ### 4. 配置模型并验证首轮
 
@@ -145,7 +146,7 @@ $serial = '<已授权设备序列号>'
 | 主题 | 文档链接 | 说明 |
 | --- | --- | --- |
 | **中心服务器部署** | [docs/center-linux-deployment.md](docs/center-linux-deployment.md) | Docker Compose、Nginx 反代配置、数据备份与版本升级 |
-| **桌面客户端** | [desktop/README.md](desktop/README.md) | Windows / Linux 客户端架构、服务生命周期、数据目录与自动更新 |
+| **桌面客户端** | [desktop/README.md](desktop/README.md) | Windows / Linux / macOS 客户端架构、服务生命周期、数据目录与自动更新 |
 | **Android 客户端** | [mobile/README.md](mobile/README.md) | Android 双进程架构、原生桥、远端设备控制、语音与构建细节 |
 | **Bot 管理与自学习** | [docs/bot-management-learning.md](docs/bot-management-learning.md) | 模型分配、受管 Skill / MCP / 插件与后台学习 |
 | **Webhook 自动任务** | [docs/webhooks.md](docs/webhooks.md) | Bearer 入口创建、幂等键要求、n8n / curl 触发示例与事件生命周期 |
@@ -162,7 +163,7 @@ $serial = '<已授权设备序列号>'
 | --- | --- |
 | [`center-server/`](center-server/)、[`center-web/`](center-web/)、[`center-contract/`](center-contract/) | 中心服务端、管理后台前端与共享协议契约 |
 | [`host-core/`](host-core/) | 多端通用 Host 核心、客户端 Broker、工具集、受管能力与固定 Pi SDK 集成 |
-| [`desktop/`](desktop/) | Windows / Linux Tauri 桌面客户端、`pibot-host` 启动器与 NSIS / DEB 安装包钩子 |
+| [`desktop/`](desktop/) | Windows / Linux / macOS Tauri 桌面客户端、`pibot-host` 启动器与 NSIS / DEB 安装包钩子 |
 | [`mobile/`](mobile/)、[`web/src/`](web/src/) | Android Tauri 外壳与多端共享 React / TypeScript 界面 |
 | [`app/src/main/`](app/src/main/)、[`shower-server/`](shower-server/) | Android 原生桥接、生命周期服务、任务通知、语音与虚拟屏服务 |
 | [`plugins/`](plugins/) | 内置与受管插件（如 Billion Context 等） |
@@ -176,7 +177,7 @@ $serial = '<已授权设备序列号>'
 | --- | --- |
 | 中心镜像 | 在仓库根运行 `sh scripts/center-build.sh`，得到 `pibot-center:local`。 [部署本地镜像](docs/center-linux-deployment.md#从源码构建中心镜像) |
 | 仅中心前端 | `npm ci --prefix center-web`，随后运行 `npm run center:build`，产物在 `center-web/dist/` |
-| 桌面 NSIS / DEB | `npm ci` 和 `npm ci --prefix host-core`，随后运行 `npm run desktop:build -- --bundles nsis` 或 `npm run desktop:build -- --bundles deb`。请先安装对应平台的编译依赖。 [桌面构建](desktop/README.md#构建) |
+| 桌面 NSIS / DEB / macOS | `npm ci` 和 `npm ci --prefix host-core`，随后运行 `npm run desktop:build -- --bundles nsis`、`--bundles deb` 或（Apple Silicon Mac 上）`--bundles app,dmg`。请先安装对应平台的编译依赖。 [桌面构建](desktop/README.md#构建) |
 | Android APK | 准备 JDK 21、Android Platform 36、NDK、CMake 和 Rust target，安装 npm 依赖并运行 Node Mobile 准备脚本，再执行 `:app:assembleDebug`。 [Android 完整构建命令](mobile/README.md#构建与先决条件) |
 
 桌面包位于 `desktop/build/target/release/bundle/`。Android 调试包位于 `app/build/outputs/apk/debug/app-debug.apk`。 [按改动范围选择验证](AGENTS.md#按变更范围选择验证)
