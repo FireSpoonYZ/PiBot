@@ -47,7 +47,7 @@ permissions:
 jobs:
   build:
     name: Desktop macOS app,dmg
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 90
     # Experimental release item: a failed release build leaves the run green
     # (candidate runs must conclude success to be reused) and simply produces

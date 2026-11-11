@@ -40,7 +40,7 @@
   签名的 NSIS/DEB artifact，并在 Linux 构建后运行桌面 crate 单元测试。
   这些构建不发布 GitHub Release。
 - macOS 客户端（Apple Silicon）为**实验性发布项**，由独立的 `desktop-macos.yml` 在
-  `macos-14` 上构建 ad-hoc 签名的 App 与 DMG。普通运行用作业内临时生成的 updater 密钥
+  `macos-15`（Apple Silicon）上构建 ad-hoc 签名的 App 与 DMG。普通运行用作业内临时生成的 updater 密钥
   （不使用正式私钥）签名 `PiBot.app.tar.gz`，再用 `scripts/verify-updater-artifact.mjs`
   校验签名、元数据及进程内中心的上传、发布、查询与下载；随后以测试专用 LaunchAgent
   标签在真实 launchd 上运行 `scripts/macos-update-cycle-test.sh`（停止 Host、替换 App、恢复）。

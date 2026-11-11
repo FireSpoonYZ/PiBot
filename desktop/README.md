@@ -109,7 +109,7 @@ npm run desktop:build -- --bundles nsis
 
 ### macOS Apple Silicon
 
-macOS 客户端为实验性发布项：CI 由独立的 [`desktop-macos.yml`](../.github/workflows/desktop-macos.yml) 在 `macos-14`（Apple Silicon）runner 上构建，失败不阻断 Windows/Linux 构建，也不阻断其他平台的发布。本机构建需要 Xcode 或 Command Line Tools；资源准备会下载固定的 Node `darwin-arm64` 与 rg/fd，并编译 `pibot-host`。macOS 不打包 Cua 驱动与 Shower 组件。
+macOS 客户端为实验性发布项：CI 由独立的 [`desktop-macos.yml`](../.github/workflows/desktop-macos.yml) 在 `macos-15`（Apple Silicon）runner 上构建，失败不阻断 Windows/Linux 构建，也不阻断其他平台的发布。本机构建需要 Xcode 或 Command Line Tools；资源准备会下载固定的 Node `darwin-arm64` 与 rg/fd，并编译 `pibot-host`。macOS 不打包 Cua 驱动与 Shower 组件。
 
 ```sh
 npm run desktop:build -- --bundles app,dmg
