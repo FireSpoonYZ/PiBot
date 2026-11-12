@@ -729,6 +729,9 @@ dialog::backdrop { background: rgb(15 23 32 / .45); }
 .grok-composer-action-pill { height: 36px; min-width: 44px; min-height: 36px; padding: 0 12px; border: 0; border-radius: 999px; background: var(--text); color: var(--bg); display: inline-flex; align-items: center; justify-content: center; flex: none; white-space: nowrap; transition: transform 160ms cubic-bezier(.22, 1, .36, 1); }
 .grok-composer-action-pill.send { background: var(--brand); color: #fff; }
 .grok-composer-action-pill.stop { background: var(--danger); color: #fff; }
+.grok-composer-action-pill.stop:disabled { opacity: .72; cursor: not-allowed; }
+.grok-composer-action-pill.loading { background: color-mix(in srgb, var(--text) 10%, var(--surface)); color: var(--muted); }
+.grok-composer-action-pill.loading:disabled { opacity: 1; cursor: not-allowed; }
 .grok-composer-files-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 
 /* file-ref pills inside composer (desktop local path references) */

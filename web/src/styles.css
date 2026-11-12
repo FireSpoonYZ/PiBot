@@ -597,8 +597,9 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .grok-composer-action-pill { height: 36px; min-width: 44px; padding: 0 12px; border-radius: 999px; background: var(--text); color: var(--bg); display: inline-flex; align-items: center; justify-content: center; flex: none; white-space: nowrap; transition: transform 160ms cubic-bezier(.22, 1, .36, 1); }
 .grok-composer-action-pill.send { background: #2B70F6; color: #fff; }
 .grok-composer-action-pill.stop { background: var(--danger); color: #fff; }
-/* 停止按钮独立于输入胶囊，与发送并存；与 + 按钮同高对齐。 */
-.grok-composer-row > .grok-composer-action-pill.stop { align-self: flex-end; width: 46px; height: 46px; min-width: 46px; padding: 0; border-radius: 50%; }
+.grok-composer-action-pill.stop:disabled { opacity: .72; cursor: not-allowed; }
+.grok-composer-action-pill.loading { background: color-mix(in srgb, var(--text) 10%, var(--surface)); color: var(--muted); }
+.grok-composer-action-pill.loading:disabled { opacity: 1; cursor: not-allowed; }
 .grok-subpage-topbar { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: calc(var(--top) + 6px) 18px 8px; }
 .grok-subpage-header-title { margin: 0; font-size: 1.08rem; font-weight: 650; text-align: center; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .grok-subpage-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }

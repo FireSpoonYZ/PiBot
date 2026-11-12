@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import type { BotAvatar } from '../../center-contract/index.js';
-import { botActivityText, type BotActivity } from './botActivity';
+import { botActivityText, isBotLlmRunningPhase, isBotPreLlmPhase, type BotActivity } from './botActivity';
 import {
   GROK_EXPRESSIONS,
   GROK_HEAD_CENTER,
@@ -445,6 +445,11 @@ export function GrokBotWorkingSlot({
   activity?: BotActivity;
   t: (zh: string, en: string) => string;
 }) {
+  const isPreLlmWaiting =
+    isBusy &&
+    (isBotPreLlmPhase(activity?.phase) ||
+      (Boolean(isSending) && !isBotLlmRunningPhase(activity?.phase) && activity?.phase !== 'stopping'));
+
   const resolveStartMs = () => {
     if (typeof startedAt === 'number' && Number.isFinite(startedAt) && startedAt > 0) {
       const clamped = Math.min(startedAt, Date.now());
@@ -456,19 +461,25 @@ export function GrokBotWorkingSlot({
       return cached;
     }
     const now = Date.now();
-    if (isBusy) workingStartMsByBotKey.set(botKey, now);
+    if (isBusy && !isPreLlmWaiting) workingStartMsByBotKey.set(botKey, now);
     return now;
   };
 
   const [elapsedSec, setElapsedSec] = useState(() =>
-    isBusy ? Math.max(0, Math.floor((Date.now() - resolveStartMs()) / 1000)) : 0,
+    isBusy && !isPreLlmWaiting ? Math.max(0, Math.floor((Date.now() - resolveStartMs()) / 1000)) : 0,
   );
   const [settlementOutcome, setSettlementOutcome] = useState<'success' | 'error' | 'stopped' | null>(null);
   const [emphasized, setEmphasized] = useState(false);
   const [pulseThinkingMorph, setPulseThinkingMorph] = useState(false);
-  const wasBusyRef = useRef(isBusy);
+  const wasBusyRef = useRef(isBusy && !isPreLlmWaiting);
 
   useEffect(() => {
+    if (isPreLlmWaiting) {
+      workingStartMsByBotKey.delete(botKey);
+      setSettlementOutcome(null);
+      setElapsedSec(0);
+      return undefined;
+    }
     if (isBusy) {
       wasBusyRef.current = true;
       setSettlementOutcome(null);
@@ -505,11 +516,12 @@ export function GrokBotWorkingSlot({
     workingStartMsByBotKey.delete(botKey);
     return undefined;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isBusy, startedAt, botKey, hasError, isRecovering, activity?.phase]);
+  }, [isBusy, isPreLlmWaiting, startedAt, botKey, hasError, isRecovering, activity?.phase]);
 
   const isPhaseLed =
     isBusy &&
-    (activity?.phase === 'queued' ||
+    (isPreLlmWaiting ||
+      activity?.phase === 'queued' ||
       activity?.phase === 'preparing' ||
       activity?.phase === 'compacting' ||
       activity?.phase === 'interrupting' ||
@@ -545,6 +557,7 @@ export function GrokBotWorkingSlot({
   });
 
   const mascotState: GrokMascotState = (() => {
+    if (isPreLlmWaiting) return 'waiting';
     if (isPhaseLed) {
       if (activity?.phase === 'stopping') return 'powering-down';
       // 压缩仍是真实执行中：用 working 而非等待态，配合「整理上下文中」文案。
@@ -596,7 +609,7 @@ export function GrokBotWorkingSlot({
     if (hasThinking) {
       return t('正在深入思考…', 'Thinking…');
     }
-    if (queuedCount > 0) {
+    if (!activity && queuedCount > 0) {
       return t('正在等待…', 'Waiting…');
     }
     return t('正在思考…', 'Working…');
@@ -623,16 +636,18 @@ export function GrokBotWorkingSlot({
           isEmphasized={emphasized}
           interactivePoke={true}
         />
-        <span className="sand-activity-mark-label">
-          <span className={`sand-activity-label-text${isBusy ? ' is-shimmering' : ''}`}>
-            {statusText}
-            {activity?.webhookStopPending && !isPhaseLed && !settledActivity
-              ? t(' · Webhook停止待同步', ' · Webhook stop awaiting sync') : null}
+        {!isPreLlmWaiting ? (
+          <span className="sand-activity-mark-label">
+            <span className={`sand-activity-label-text${isBusy ? ' is-shimmering' : ''}`}>
+              {statusText}
+              {activity?.webhookStopPending && !isPhaseLed && !settledActivity
+                ? t(' · Webhook停止待同步', ' · Webhook stop awaiting sync') : null}
+            </span>
+            {(isBusy || Boolean(settlementOutcome) || Boolean(settledActivity)) && (
+              <span className="sand-activity-elapsed">{formatWorkingElapsed(elapsedSec)}</span>
+            )}
           </span>
-          {(isBusy || Boolean(settlementOutcome) || Boolean(settledActivity)) && (
-            <span className="sand-activity-elapsed">{formatWorkingElapsed(elapsedSec)}</span>
-          )}
-        </span>
+        ) : null}
       </div>
     </div>
   );

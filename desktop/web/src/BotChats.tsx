@@ -77,7 +77,10 @@ import {
   botActivityText,
   canStopBotActivity,
   isBotActivityBusy,
+  isBotLlmRunningPhase,
+  isBotPreLlmPhase,
   resolveBotActivity,
+  resolveComposerActionKind,
   type BotActivity,
 } from '../../../web/src/botActivity';
 import { botAvatarKey, syncBotAvatarConfigs } from '../../../web/src/botAvatarSync';
@@ -288,13 +291,6 @@ interface TurnAdmissionView {
 }
 
 const TURN_ADMISSION_PHASES = new Set(['queued', 'checking', 'synchronizing', 'failed']);
-
-const TURN_ADMISSION_LABELS: Record<TurnAdmissionView['phase'], string> = {
-  queued: '等待中心准入',
-  checking: '正在核对 Center 版本集',
-  synchronizing: '正在同步插件版本',
-  failed: '准入失败',
-};
 
 /** Host-queued 回执：status queued 且 submissionId null，本地持久化后等待准入与原生提交。 */
 interface HostQueuedReceipt {
@@ -613,7 +609,7 @@ type SendNotice = {
   showRecordAction?: boolean;
 };
 
-function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, canPick, onPick, draftError, draftHint, draftConflict, sendState, receiptBusy, sendError, sendNotice, onSend, canSend, disabled, onRetryDraft, attempt, recOutcome, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onInsertSlash, onOpenSendRecord }: {
+function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, canPick, onPick, draftError, draftHint, draftConflict, sendState, receiptBusy, sendError, sendNotice, onSend, canSend, disabled, isPreLlm, isLlmRunning, isStopping, canStop, stopDisabled, onStop, stopButtonRef, onRetryDraft, attempt, recOutcome, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onInsertSlash, onOpenSendRecord }: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   text: string;
   onChangeText: (v: string) => void;
@@ -638,6 +634,13 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
   onSend: () => void;
   canSend: boolean;
   disabled: boolean;
+  isPreLlm: boolean;
+  isLlmRunning: boolean;
+  isStopping: boolean;
+  canStop: boolean;
+  stopDisabled: boolean;
+  onStop: () => void;
+  stopButtonRef: RefObject<HTMLButtonElement | null>;
   onRetryDraft: () => void;
   attempt: { phase: string; error: string | null } | null;
   recOutcome: { action: string; found: boolean; recordId: string | null; recordState: string | null } | null;
@@ -738,18 +741,19 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
     }
     if (e.key === 'Enter' && !e.shiftKey && !composingRef.current && !e.nativeEvent.isComposing) {
       e.preventDefault();
-      if (canSend && !disabled) onSend();
+      if (canSend && !receiptBusy && !disabled && !isPreLlm && !isStopping) onSend();
     }
   }
 
   const recoveringAttempt = attempt && (attempt.phase === 'not-sent' || attempt.phase === 'failed' ||
     draftConflict || recOutcome?.action === 'ready-clear-retry') ? attempt : null;
-  const footerStatus = receiptBusy ? null : sendNotice?.text;
+  const footerStatus = receiptBusy ? '' : (sendNotice?.text ?? '');
   const footerHint = draftHint ?? 'Enter 发送 · Shift+Enter 换行 · / 呼出命令';
   const footerRecordAction = sendState === 'idle' && sendNotice?.showRecordAction &&
     !recoveringAttempt && !sendError
     ? onOpenSendRecord
     : undefined;
+  const hasDraftContent = text.trim().length > 0 || attachments.length > 0;
 
   return (
     <div className="composer bot-composer">
@@ -904,17 +908,52 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
             rows={1}
             disabled={disabled}
           />
-          <button
-            type="button"
-            className="composer-send primary-button"
-            onClick={() => onSend()}
-            disabled={receiptBusy || disabled || !canSend}
-            aria-label={receiptBusy ? '正在发送' : '发送'}
-            aria-busy={receiptBusy}
-            title="Enter 发送 · Shift+Enter 换行"
-          >
-            <SendButtonIcon busy={receiptBusy} size={16} />
-          </button>
+          {isStopping ? (
+            <button
+              ref={stopButtonRef}
+              type="button"
+              className="composer-stop"
+              disabled
+              aria-label="正在停止…"
+              title="正在停止…"
+            >
+              <RefreshCw size={15} className="grok-spin" />
+            </button>
+          ) : isPreLlm || receiptBusy ? (
+            <button
+              type="button"
+              className="composer-loading"
+              disabled
+              aria-busy={true}
+              aria-label="处理中…"
+              title="前置准备中…"
+            >
+              <SendButtonIcon busy={true} size={16} />
+            </button>
+          ) : isLlmRunning && !hasDraftContent && canStop ? (
+            <button
+              ref={stopButtonRef}
+              type="button"
+              className="composer-stop"
+              onClick={onStop}
+              disabled={stopDisabled}
+              aria-label="停止此智能体"
+              title="停止此智能体的排队和进行中任务，包括其他会话"
+            >
+              <Square size={14} />
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="composer-send primary-button"
+              onClick={() => onSend()}
+              disabled={receiptBusy || disabled || !canSend || isPreLlm || isStopping}
+              aria-label={isLlmRunning ? '排队发送' : '发送'}
+              title={isLlmRunning ? 'Enter 排队发送 · Shift+Enter 换行' : 'Enter 发送 · Shift+Enter 换行'}
+            >
+              <SendButtonIcon busy={false} size={16} />
+            </button>
+          )}
         </div>
       </div>
       <div className="composer-footer">
@@ -1531,6 +1570,18 @@ function PrimaryChatPane({
     });
   }
 
+  const [observedLive, setObservedLive] = useState<{ session: string; state: BotLiveState } | null>(null);
+  const live = observedLive && (!online || observedLive.session === sess) ? observedLive.state : null;
+  const [liveLast, setLiveLast] = useState<string | null>(null);
+  const [liveError, setLiveError] = useState<string | null>(null);
+  const [liveEnded, setLiveEnded] = useState(false);
+  const [watchTick, setWatchTick] = useState(0);
+  const [stoppingSession, setStoppingSession] = useState<string | null>(null);
+  const [confirmedStopTarget, setConfirmedStopTarget] = useState<string | null>(null);
+  const stopButtonRef = useRef<HTMLButtonElement>(null);
+  const stopping = stoppingSession === sess;
+  const [avatarVersion, setAvatarVersion] = useState(0);
+
   /**
    * 显式发送 /clear 与 /compact：只走 Host 控制方法（clearHistory/compact），不经模型 submit。
    * 离线/忙碌/归档/发送中由入口 disabled 与这里守卫；成功后清理本地命令草稿并立即重读完整
@@ -1592,6 +1643,18 @@ function PrimaryChatPane({
   async function handleSend() {
     if (!identity || sendState !== 'idle' || lockedRef.current || isArchived) return;
     if (imageUploading) return;
+    if (online) {
+      const curActivity = resolveBotActivity(live);
+      if (
+        stopping ||
+        curActivity.phase === 'stopping' ||
+        (!isBotLlmRunningPhase(curActivity.phase) &&
+          (isBotPreLlmPhase(curActivity.phase) ||
+            (turnAdmission !== null && turnAdmission.phase !== 'failed')))
+      ) {
+        return;
+      }
+    }
     const msg = drafts.text.trim();
     const attachmentIds = drafts.attachments.map((a) => a.id);
     if (!msg && attachmentIds.length === 0) return;
@@ -1689,7 +1752,7 @@ function PrimaryChatPane({
     setTurnAdmission(hostQueued ? hostQueued.admission : null);
     if (rec.state === 'accepted') {
       drafts.finishSend(handle);
-      // 受理只说明已受理；完成与否以 live/原回执为准，界面不断言。
+      // 受理只说明已受理；前置准入与运行阶段统一由右下角按钮与 live 状态呈现，不在输入框下方写状态字。
       setSendNotice(null);
       onLiveActivityRef.current?.();
     } else if (rec.state === 'rejected') {
@@ -1812,9 +1875,6 @@ function PrimaryChatPane({
       if (!isCurrentSession()) return;
       const nextAdmission = readTurnAdmission((receipt as { admission?: unknown }).admission);
       setTurnAdmission(nextAdmission);
-      setSendError(nextAdmission && nextAdmission.phase !== 'failed'
-        ? '已重新受理：' + TURN_ADMISSION_LABELS[nextAdmission.phase]
-        : '已重新提交准入，等待 Host 受理状态更新。');
       // 本地 outbox 记录 receipt 仍带旧 admission：显式对账刷新一次（只读，不改远端状态）。
       try { await api.pending(current, 'pending_reconcile', { id: rec.id }); } catch { /* 对账失败不掩盖重试结果 */ }
     } catch (e) {
@@ -1838,18 +1898,6 @@ function PrimaryChatPane({
       setSendError(r.error ?? '无法释放');
     }
   }
-
-  const [observedLive, setObservedLive] = useState<{ session: string; state: BotLiveState } | null>(null);
-  const live = observedLive && (!online || observedLive.session === sess) ? observedLive.state : null;
-  const [liveLast, setLiveLast] = useState<string | null>(null);
-  const [liveError, setLiveError] = useState<string | null>(null);
-  const [liveEnded, setLiveEnded] = useState(false);
-  const [watchTick, setWatchTick] = useState(0);
-  const [stoppingSession, setStoppingSession] = useState<string | null>(null);
-  const [confirmedStopTarget, setConfirmedStopTarget] = useState<string | null>(null);
-  const stopButtonRef = useRef<HTMLButtonElement>(null);
-  const stopping = stoppingSession === sess;
-  const [avatarVersion, setAvatarVersion] = useState(0);
 
   const [rawItems, setRawItems] = useState<AnyRawEntry[]>([]);
   const boardTarget: BotBoardTarget | undefined = identity ? {
@@ -2166,6 +2214,33 @@ function PrimaryChatPane({
   useEffect(() => {
     if (!stopConfirmOpen) setConfirmedStopTarget(null);
   }, [stopConfirmOpen]);
+  const receiptBusy =
+    sendState === 'sending' ||
+    Boolean(
+      drafts.attempt &&
+        !['not-sent', 'failed'].includes(drafts.attempt.phase) &&
+        !drafts.conflict &&
+        recOutcome?.action !== 'ready-clear-retry',
+    );
+  const isSendingMessage = receiptBusy && slashBusy === null;
+  const desktopComposerAction = resolveComposerActionKind({
+    phase: liveActivity.phase,
+    online,
+    archived: isArchived,
+    isSending: isSendingMessage,
+    isStopping: stopping,
+    pendingAdmissionWaiting: turnAdmission !== null && turnAdmission.phase !== 'failed',
+    hasDraft: drafts.text.trim().length > 0 || drafts.attachments.length > 0,
+    canStop,
+  });
+  const isStoppingPhase = desktopComposerAction === 'stopping';
+  const isPreLlmPhase = desktopComposerAction === 'loading';
+  const isLlmRunningPhase =
+    !isArchived && !isStoppingPhase && !isPreLlmPhase && online && isBotLlmRunningPhase(liveActivity.phase);
+  const requestStop = () => {
+    if (requiresStopConfirmation) setConfirmedStopTarget(stopTarget);
+    else void stopTask();
+  };
   void avatarVersion; // 头像保存后 bump：重新计算 key 下各 GrokBotAvatar preset
 
   const statusText = !online
@@ -2307,22 +2382,6 @@ function PrimaryChatPane({
           >
             <Monitor size={15} /> 桌面
           </button>
-          {canStop || stopping ? (
-            <button
-              ref={stopButtonRef}
-              type="button"
-              className={`secondary-button chat-action-pill stop-pill${stopping ? ' is-stopping' : ''}`}
-              onClick={() => {
-                if (requiresStopConfirmation) setConfirmedStopTarget(stopTarget);
-                else void stopTask();
-              }}
-              disabled={stopDisabled}
-              title="停止此智能体的排队和进行中任务，包括其他会话"
-            >
-              <Square size={14} /> {stopping ? '正在停止…' : '停止任务'}
-              <small>含排队和其他会话</small>
-            </button>
-          ) : null}
           <div className="chat-more-wrap" ref={moreMenuRef}>
             <button
               type="button"
@@ -2493,13 +2552,14 @@ function PrimaryChatPane({
         draftHint={isArchived ? '此 Bot 已归档，当前为只读模式，恢复后可继续发送消息。' : null}
         draftConflict={drafts.conflict}
         sendState={sendState}
-        receiptBusy={sendState === 'sending' || Boolean(drafts.attempt &&
-          !['not-sent', 'failed'].includes(drafts.attempt.phase) && !drafts.conflict && recOutcome?.action !== 'ready-clear-retry')}
+        receiptBusy={receiptBusy}
         sendError={sendError}
         sendNotice={sendNotice}
         onSend={handleSend}
         canSend={
           !isArchived &&
+          !isPreLlmPhase &&
+          !isStoppingPhase &&
           !!identity &&
           !!drafts.key &&
           (drafts.text.trim().length > 0 || drafts.attachments.length > 0) &&
@@ -2508,6 +2568,13 @@ function PrimaryChatPane({
           !imageUploading
         }
         disabled={disabled}
+        isPreLlm={isPreLlmPhase}
+        isLlmRunning={isLlmRunningPhase}
+        isStopping={isStoppingPhase}
+        canStop={canStop}
+        stopDisabled={stopDisabled}
+        onStop={requestStop}
+        stopButtonRef={stopButtonRef}
         onRetryDraft={drafts.retrySave}
         attempt={drafts.attempt}
         recOutcome={recOutcome}

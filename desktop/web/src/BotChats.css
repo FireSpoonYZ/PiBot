@@ -687,7 +687,9 @@
   line-height: 20px;
 }
 .bot-composer .composer-input:focus { outline: none; }
-.bot-composer .composer-send {
+.bot-composer .composer-send,
+.bot-composer .composer-loading,
+.bot-composer .composer-stop {
   flex: none;
   width: 36px;
   height: 36px;
@@ -704,6 +706,27 @@
   opacity: 1;
 }
 .bot-composer .composer-send[aria-busy="true"] { background: var(--brand); color: #fff; }
+.bot-composer .composer-loading,
+.bot-composer .composer-loading:disabled {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  opacity: 1;
+  cursor: not-allowed;
+}
+.bot-composer .composer-stop {
+  border: 0;
+  background: var(--danger);
+  color: var(--bg);
+}
+.bot-composer .composer-stop:active:not(:disabled) {
+  filter: brightness(.94);
+  background: var(--danger);
+}
+.bot-composer .composer-stop:disabled {
+  opacity: .72;
+  cursor: not-allowed;
+}
 
 .chat-awaiting-answer {
   flex: none;

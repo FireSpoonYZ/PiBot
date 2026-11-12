@@ -143,3 +143,45 @@ export function resolveActiveActivityStartedAt(
   if (!activity || !isBotActivityBusy(activity)) return null;
   return parseBotActivityStartedAt(activity);
 }
+
+export type ComposerActionKind = 'stopping' | 'loading' | 'queue' | 'send' | 'stop' | 'idle';
+
+export function isBotPreLlmPhase(phase: BotActivityPhase | null | undefined): boolean {
+  return phase === 'queued' || phase === 'preparing' || phase === 'interrupting';
+}
+
+export function isBotLlmRunningPhase(phase: BotActivityPhase | null | undefined): boolean {
+  return phase === 'running' || phase === 'compacting';
+}
+
+export function resolveComposerActionKind({
+  phase,
+  online = true,
+  archived = false,
+  isSending = false,
+  isStopping = false,
+  pendingAdmissionWaiting = false,
+  hasDraft = false,
+  canStop = false,
+}: {
+  phase: BotActivityPhase | null | undefined;
+  online?: boolean;
+  archived?: boolean;
+  isSending?: boolean;
+  isStopping?: boolean;
+  pendingAdmissionWaiting?: boolean;
+  hasDraft?: boolean;
+  canStop?: boolean;
+}): ComposerActionKind {
+  if (archived) return 'idle';
+  if (isStopping || (online && phase === 'stopping')) return 'stopping';
+  if (isSending) return 'loading';
+  if (online && isBotLlmRunningPhase(phase)) {
+    if (hasDraft) return 'queue';
+    return canStop ? 'stop' : 'idle';
+  }
+  if (online && (isBotPreLlmPhase(phase) || pendingAdmissionWaiting)) {
+    return 'loading';
+  }
+  return hasDraft ? 'send' : 'idle';
+}

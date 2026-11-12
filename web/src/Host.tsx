@@ -109,7 +109,9 @@ import { botAvatarKey, saveCentralBotAvatar, syncBotAvatarConfigs } from './botA
 import {
   canStopBotActivity,
   isBotActivityBusy,
+  isBotPreLlmPhase,
   resolveBotActivity,
+  resolveComposerActionKind,
   type BotActivity,
 } from './botActivity';
 import {
@@ -2009,6 +2011,10 @@ export function HostPage({
     }
   }, [activeBot, chatPending, clearedMap, ensureLocalHostRunning, remoteConnected, removePending, t, updateBotMeta]);
 
+  /** 停止在途按 bot.key 去重：切换 Bot 不复用其他 Bot 的 abort Promise。 */
+  const stopInFlightRef = useRef(new Map<string, Promise<unknown>>());
+  const [stopping, setStopping] = useState<Set<string>>(() => new Set());
+
   const sendMessage = () =>
     action.run(async () => {
       const bot = activeBot;
@@ -2020,6 +2026,14 @@ export function HostPage({
       if (deletingBots.current.has(bot.key) || (chatPending?.botKey === bot.key && chatPending.phase !== 'accepted')) return;
       if (bot.archivedAt) throw new Error(t('该智能体已归档，请先恢复后再发送消息', 'This bot is archived. Unarchive it first.'));
       if (imageUploading) return;
+      const currentActivity = resolveBotActivity(chatLive);
+      if (
+        stopping.has(bot.key) ||
+        currentActivity.phase === 'stopping' ||
+        isBotPreLlmPhase(currentActivity.phase)
+      ) {
+        return;
+      }
       const draftSnapshot = chatDraft;
       const trimmed = draftSnapshot.trim();
       const draftAttachmentMetas = [...chatDraftAttachments];
@@ -2989,27 +3003,23 @@ ${newer}` : draftSnapshot;
   // generation.blocks 与 displayGeneratingText 同一过滤口径：协作生成/恢复中不传入，
   // 避免协作文本经块投影漏进普通聊天（见 allChatTurns 的 liveGeneratingBlocks）。
 
-  // 当前会话的按轮受理状态：优先 live turnAdmission，其次提交回执/持久化 pending 上的 admission。
+  // 当前会话的按轮受理状态：live 已就绪时以 chatLive.turnAdmission 为权威（null 即已离开准入阶段，不回退过期回执）；
+  // 仅在 live 尚未到达前才回退提交回执/持久化 pending 上的 admission。
   const liveTurnAdmission = chatLive?.turnAdmission ?? null;
   const pendingAdmission = chatPending?.botKey === activeBot?.key
     ? (chatPending?.admission ?? (chatReceipt as TurnAdmissionCarrier | undefined)?.admission ?? null)
     : null;
-  const chatTurnAdmission =
-    liveTurnAdmission && (!chatPending?.requestId || liveTurnAdmission.requestId === chatPending.requestId)
-      ? liveTurnAdmission
-      : pendingAdmission;
-  const admissionStatusText = !chatTurnAdmission
-    ? ''
-    : chatTurnAdmission.phase === 'failed'
-      ? t(
-          '同步失败：' + (chatTurnAdmission.error?.message || chatTurnAdmission.error?.code || '') + '，消息已保留。',
-          'Sync failed: ' + (chatTurnAdmission.error?.message || chatTurnAdmission.error?.code || '') + '; message retained.',
-        )
-      : chatTurnAdmission.phase === 'checking'
-        ? t('正在检查插件版本…', 'Checking plugin versions…')
-        : chatTurnAdmission.phase === 'synchronizing'
-          ? t('正在同步插件…', 'Synchronizing plugins…')
-          : t('排队等待受理…', 'Queued for admission…');
+  const chatTurnAdmission = chatLive !== undefined
+    ? (liveTurnAdmission && (!chatPending?.requestId || liveTurnAdmission.requestId === chatPending.requestId)
+        ? liveTurnAdmission
+        : null)
+    : pendingAdmission;
+  const admissionStatusText = chatTurnAdmission?.phase === 'failed'
+    ? t(
+        '同步失败：' + (chatTurnAdmission.error?.message || chatTurnAdmission.error?.code || '') + '，消息已保留。',
+        'Sync failed: ' + (chatTurnAdmission.error?.message || chatTurnAdmission.error?.code || '') + '; message retained.',
+      )
+    : '';
 
   // 统一活动状态：新 Host 帧带 activity 则以它为准；旧 Host 缺省走 resolveBotActivity 的旧字段 fallback。
   // 只有尚未受理的发送中阶段才允许乐观叠加 queued；一旦 Host 有真实 activity（含 failed/stopped），
@@ -3019,12 +3029,10 @@ ${newer}` : draftSnapshot;
       ? null
       : chatLive,
   );
-  /** 停止在途按 bot.key 去重：切换 Bot 不复用其他 Bot 的 abort Promise。 */
-  const stopInFlightRef = useRef(new Map<string, Promise<unknown>>());
-  const [stopping, setStopping] = useState<Set<string>>(() => new Set());
   const isStoppingBot = Boolean(activeBot && stopping.has(activeBot.key));
 
   const sendingOptimistic = !recoveringChat && chatPending?.botKey === activeBot?.key && chatPending?.phase === 'sending';
+  const sendingReceipt = Boolean(chatPending?.botKey === activeBot?.key && chatPending?.phase !== 'accepted');
   // 本地停止在途时无条件显示 stopping（覆盖 Host 尚未更新的 running）；
   // 仅未受理的发送中阶段才在 Host 空闲/failed/stopped 上叠加乐观 queued，受理后完全以 Host activity 为准。
   const botActivity: BotActivity = isStoppingBot
@@ -3040,10 +3048,25 @@ ${newer}` : draftSnapshot;
       ? botActivity.error.message || botActivity.error.code
       : undefined;
   const failureNotice = activityFailure || submissionFailure;
-  const canStopBot = Boolean(
-    activeBot && !activeBot.archivedAt && canStopBotActivity(botActivity) &&
-    (activeBot.hostKind !== 'remote' || (remoteConnected && activeBot.online !== false)),
+  const isChatTargetOnline = Boolean(
+    activeBot && (activeBot.hostKind !== 'remote' || (remoteConnected && activeBot.online !== false)),
   );
+  const canStopBot = Boolean(
+    activeBot && !activeBot.archivedAt && canStopBotActivity(botActivity) && isChatTargetOnline,
+  );
+  const localComposerAction = resolveComposerActionKind({
+    phase: botActivity.phase,
+    online: isChatTargetOnline,
+    archived: Boolean(!activeBot || activeBot.archivedAt),
+    isSending: Boolean(sendingOptimistic || sendingReceipt),
+    isStopping: isStoppingBot,
+    pendingAdmissionWaiting: chatLive === undefined && chatTurnAdmission !== null && chatTurnAdmission.phase !== 'failed',
+    hasDraft: Boolean(chatDraft.trim()) || chatDraftAttachments.length > 0,
+    canStop: canStopBot,
+  });
+  const isStoppingChat = localComposerAction === 'stopping';
+  const isPreLlmChat = localComposerAction === 'loading';
+  const isLlmRunningChat = localComposerAction === 'queue' || localComposerAction === 'stop';
   const requestStopBot = useCallback((bot: UnifiedBotItem): Promise<unknown> => {
     const inflight = stopInFlightRef.current.get(bot.key);
     if (inflight) return inflight;
@@ -3829,22 +3852,19 @@ ${newer}` : draftSnapshot;
     });
   };
   // Merged bottom status bar: render only the single highest-priority notice.
+  // Normal pre-LLM admission phases (queued/checking/synchronizing) are reflected via the composer spinner, not text banners.
   const chatConnIssue = !centerConn.ready && Boolean(centerConn.status?.error);
   const chatLoadIssue = Boolean(chatLoadError) && !(centerConn.status?.state === 'disconnected' && centerConn.status.error);
-  const chatAdmissionActive = Boolean(chatTurnAdmission) && chatPending?.botKey === activeBot?.key &&
+  const chatAdmissionActive = chatTurnAdmission?.phase === 'failed' && chatPending?.botKey === activeBot?.key &&
     (chatReceipt?.status === undefined || chatReceipt.status === 'queued');
-  const sendingReceipt = chatPending?.botKey === activeBot?.key && chatPending?.phase !== 'accepted';
   const chatStatusKind: 'fail' | 'admission' | 'conn' | 'load' | 'clear' | null =
     failureNotice ? 'fail'
-      : chatAdmissionActive && chatTurnAdmission?.phase === 'failed' ? 'admission'
+      : chatAdmissionActive ? 'admission'
       : chatConnIssue ? 'conn'
       : chatLoadIssue ? 'load'
       : clearNotice ? 'clear'
       : null;
-  // "排队等待受理" technical wording replaced; other admission phases keep the original text.
-  const chatAdmissionText = chatTurnAdmission?.phase === 'queued'
-    ? t('排队等待中…', 'Waiting in queue…')
-    : admissionStatusText;
+  const chatAdmissionText = admissionStatusText;
   // ---
   // @lane-hooks:remote-composer
   // "+" 菜单 /clear 二次确认：存首次点击时间戳，3 秒内再点才执行（自然过期，无计时器）。
@@ -4568,9 +4588,28 @@ ${newer}` : draftSnapshot;
               <div className="bot-chat-system-notice" role="status">
                 {chatAdmissionText}
                 {chatTurnAdmission?.source === 'background' ? t(' · 后台', ' · background') : null}
-                {chatTurnAdmission?.phase === 'failed' && (activeBot.hostKind === 'local'
-                  ? <button type="button" className="hub-outline-btn" onClick={() => void retryAdmission()}>{t('重试发送', 'Retry sending')}</button>
-                  : <button type="button" className="hub-outline-btn" onClick={() => void retryRemoteAdmission()}>{t('重试发送', 'Retry sending')}</button>
+                {chatTurnAdmission?.phase === 'failed' && (
+                  <>
+                    {activeBot.hostKind === 'local'
+                      ? <button type="button" className="hub-outline-btn" onClick={() => void retryAdmission()}>{t('重试发送', 'Retry sending')}</button>
+                      : <button type="button" className="hub-outline-btn" onClick={() => void retryRemoteAdmission()}>{t('重试发送', 'Retry sending')}</button>}
+                    {canStopBot && (
+                      <button
+                        type="button"
+                        className="hub-outline-btn danger"
+                        disabled={isStoppingBot}
+                        onClick={() => {
+                          setStopError('');
+                          requestStopBot(activeBot).then(
+                            () => setStopError(''),
+                            error => setStopError(errorText(error)),
+                          );
+                        }}
+                      >
+                        {t('取消', 'Cancel')}
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
             )}
@@ -4638,7 +4677,7 @@ ${newer}` : draftSnapshot;
                 identity={activeBot.remoteIdentity}
                 botId={activeBot.botId}
                 botRole={activeBot.role}
-                isBotBusy={isBotBusy}
+                activityPhase={botActivity.phase}
                 online={remoteConnected && activeBot.online !== false}
                 onOffline={() => setOfflineNotice({ botKey: activeBot.key, text: t('目标离线，草稿已保留。', 'Target offline; draft retained.') })}
                 composerMenuOpen={composerMenuOpen}
@@ -4817,7 +4856,7 @@ ${newer}` : draftSnapshot;
                     if (slash.onKeyDown(e)) return;
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
-                      void sendMessage();
+                      if (!isPreLlmChat && !isStoppingChat) void sendMessage();
                     }
                   }}
                 />
@@ -4827,6 +4866,7 @@ ${newer}` : draftSnapshot;
                     type="button"
                     className={`grok-composer-mic-inline${voiceCapturing ? ' recording' : ''}`}
                     aria-label={voiceCapturing ? t('完成语音', 'Finish voice') : t('语音输入', 'Voice input')}
+                    disabled={!voiceCapturing && (isPreLlmChat || isStoppingChat)}
                     onClick={() =>
                       action.run(async () => {
                         if (voiceCapturing) {
@@ -4857,39 +4897,53 @@ ${newer}` : draftSnapshot;
                   </button>
                 )}
 
-                {sendingReceipt || chatDraft.trim() || chatDraftAttachments.length > 0 ? (
+                {isStoppingChat ? (
+                  <button
+                    type="button"
+                    className="grok-composer-action-pill stop"
+                    aria-label={t('正在停止…', 'Stopping…')}
+                    disabled
+                  >
+                    <RefreshCw size={14} className="grok-spin" />
+                  </button>
+                ) : isPreLlmChat || sendingReceipt ? (
+                  <button
+                    type="button"
+                    className="grok-composer-action-pill loading"
+                    aria-label={t('处理中…', 'Processing…')}
+                    aria-busy={true}
+                    disabled
+                  >
+                    <SendButtonIcon busy={true} />
+                  </button>
+                ) : chatDraft.trim() || chatDraftAttachments.length > 0 ? (
                   <button
                     type="button"
                     className="grok-composer-action-pill send"
-                    aria-label={sendingReceipt ? t('正在发送', 'Sending') : t('发送', 'Send')}
-                    aria-busy={sendingReceipt}
-                    disabled={sendingReceipt || Boolean(slashBusy) || imageUploading || deletingBots.current.has(activeBot.key)}
+                    aria-label={isLlmRunningChat ? t('排队发送', 'Queue message') : t('发送', 'Send')}
+                    disabled={sendingReceipt || action.busy || Boolean(slashBusy) || imageUploading || deletingBots.current.has(activeBot.key)}
                     onClick={() => void sendMessage()}
                   >
-                    <SendButtonIcon busy={sendingReceipt} />
+                    <SendButtonIcon busy={false} />
+                  </button>
+                ) : isLlmRunningChat && canStopBot ? (
+                  <button
+                    type="button"
+                    className="grok-composer-action-pill stop"
+                    aria-label={t('停止此 Bot', 'Stop this bot')}
+                    onClick={() => {
+                      if (isStoppingBot) return;
+                      setStopError('');
+                      requestStopBot(activeBot).then(
+                        () => setStopError(''),
+                        error => setStopError(errorText(error)),
+                      );
+                    }}
+                  >
+                    <Square size={15} />
                   </button>
                 ) : null}
               </div>
-
-              {/* 停止与发送并存：草稿/附件/发送准备/失败受理都可停止；不被 action.busy/上传/草稿锁禁用，只防重复。 */}
-              {canStopBot || isStoppingBot ? (
-                <button
-                  type="button"
-                  className="grok-composer-action-pill stop"
-                  aria-label={t('停止此 Bot', 'Stop this bot')}
-                  disabled={isStoppingBot}
-                  onClick={() => {
-                    if (isStoppingBot) return;
-                    setStopError('');
-                    requestStopBot(activeBot).then(
-                      () => setStopError(''),
-                      error => setStopError(errorText(error)),
-                    );
-                  }}
-                >
-                  {isStoppingBot ? <RefreshCw size={14} className="grok-spin" /> : <Square size={15} />}
-                </button>
-              ) : null}
             </div>
             </>}
           </footer>
@@ -6861,7 +6915,7 @@ function RemotePendingComposer({
   identity,
   botId,
   botRole,
-  isBotBusy,
+  activityPhase = 'idle',
   canStop = false,
   stopping = false,
   online,
@@ -6886,7 +6940,7 @@ function RemotePendingComposer({
   identity: DesktopIdentity;
   botId: string;
   botRole: string;
-  isBotBusy: boolean;
+  activityPhase?: BotActivity['phase'];
   /** 统一活动状态允许停止（排队/准备/运行/让位/失败受理）。 */
   canStop?: boolean;
   /** 停止已受理、正在确认；发送/草稿/上传都不解除它。 */
@@ -7232,8 +7286,26 @@ function RemotePendingComposer({
     onRun: command => void runCommand(command),
   });
 
+  const waitingForReceipt = !confirmedConflict && drafts.attempt?.phase !== 'failed' &&
+    (sendingNow || blocked || Boolean(drafts.attempt && drafts.attempt.phase !== 'not-sent'));
+  const isRemoteSending =
+    waitingForReceipt ||
+    pending?.phase === 'sending' ||
+    Boolean(drafts.attempt && ['locked', 'enqueued', 'cleared'].includes(drafts.attempt.phase));
+  const remoteComposerAction = resolveComposerActionKind({
+    phase: activityPhase,
+    online,
+    isSending: isRemoteSending,
+    isStopping: stopBusy,
+    hasDraft: Boolean(drafts.text.trim()) || drafts.attachments.length > 0,
+    canStop,
+  });
+  const isStoppingPhase = remoteComposerAction === 'stopping';
+  const isPreLlmPhase = remoteComposerAction === 'loading';
+  const isLlmRunningPhase = remoteComposerAction === 'queue' || remoteComposerAction === 'stop';
+
   const send = async () => {
-    if (sending.current || commandLocked || blocked || fallbackDraft || imageUploading) return;
+    if (isPreLlmPhase || isStoppingPhase || waitingForReceipt || sending.current || commandLocked || blocked || fallbackDraft || imageUploading) return;
     const trimmed = drafts.text.trim();
     const attachmentIds = drafts.attachments.map((a) => a.id);
     if (!trimmed && attachmentIds.length === 0) return;
@@ -7333,9 +7405,6 @@ function RemotePendingComposer({
       setSendingNow(false);
     }
   };
-
-  const waitingForReceipt = !confirmedConflict && drafts.attempt?.phase !== 'failed' &&
-    (sendingNow || blocked || Boolean(drafts.attempt && drafts.attempt.phase !== 'not-sent'));
 
   return (
     <>
@@ -7508,34 +7577,48 @@ function RemotePendingComposer({
               if (slash.onKeyDown(e)) return;
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                void send();
+                if (!isPreLlmPhase && !isStoppingPhase) void send();
               }
             }}
           />
 
-          {waitingForReceipt || drafts.text.trim() || drafts.attachments.length > 0 ? (
+          {isStoppingPhase ? (
+            <button
+              type="button"
+              className="grok-composer-action-pill stop"
+              aria-label={t('正在停止…', 'Stopping…')}
+              disabled
+            >
+              <RefreshCw size={14} className="grok-spin" />
+            </button>
+          ) : isPreLlmPhase || waitingForReceipt ? (
+            <button
+              type="button"
+              className="grok-composer-action-pill loading"
+              aria-label={t('处理中…', 'Processing…')}
+              aria-busy={true}
+              disabled
+            >
+              <SendButtonIcon busy={true} />
+            </button>
+          ) : drafts.text.trim() || drafts.attachments.length > 0 ? (
             <button
               type="button"
               className="grok-composer-action-pill send"
               disabled={waitingForReceipt || (!drafts.text.trim() && drafts.attachments.length === 0) || imageUploading || Boolean(drafts.attempt) || blocked || Boolean(fallbackDraft) || commandLocked}
               onClick={() => void send()}
-              aria-label={waitingForReceipt ? t('正在发送', 'Sending') : t('发送', 'Send')}
-              aria-busy={waitingForReceipt}
+              aria-label={isLlmRunningPhase ? t('排队发送', 'Queue message') : t('发送', 'Send')}
             >
-              <SendButtonIcon busy={waitingForReceipt} />
+              <SendButtonIcon busy={false} />
             </button>
-          ) : null}
-
-          {/* 停止与发送并存：排队/准备/失败受理/草稿/附件状态下均可停止；不被发送/上传/草稿锁禁用。 */}
-          {canStop || stopBusy ? (
+          ) : isLlmRunningPhase && canStop ? (
             <button
               type="button"
               className="grok-composer-action-pill stop"
               aria-label={t('停止此 Bot', 'Stop this bot')}
-              disabled={stopBusy}
               onClick={() => void runAbort()}
             >
-              {stopBusy ? <RefreshCw size={14} className="grok-spin" /> : <Square size={15} />}
+              <Square size={15} />
             </button>
           ) : null}
         </div>
