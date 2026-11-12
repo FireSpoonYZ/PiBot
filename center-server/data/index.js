@@ -119,10 +119,29 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
   const db = new DatabaseSync(join(dataRoot, 'center.sqlite'));
   // Declared here because the snapshot helpers below run before the store object literal is built.
   let store;
-  const ajv = new Ajv({ allErrors: true, strict: false });
-  const defaultsAjv = new Ajv({ allErrors: true, strict: false, useDefaults: true });
-  ajv.addFormat('credential-ref', { type: 'string', validate: (value) => value.length > 0 });
-  defaultsAjv.addFormat('credential-ref', { type: 'string', validate: (value) => value.length > 0 });
+  function createValidatorAjv(useDefaults) {
+    const instance = new Ajv({ allErrors: true, strict: false, ...(useDefaults ? { useDefaults: true } : {}) });
+    instance.addFormat('credential-ref', { type: 'string', validate: (value) => value.length > 0 });
+    return instance;
+  }
+  let ajv = createValidatorAjv(false);
+  let defaultsAjv = createValidatorAjv(true);
+  const validatorCache = new Map();
+  const defaultsValidatorCache = new Map();
+  function compileValidator(schema, defaults) {
+    const cache = defaults ? defaultsValidatorCache : validatorCache;
+    const cacheKey = json(schema);
+    let validator = cache.get(cacheKey);
+    if (validator) return validator;
+    if (cache.size >= 512) {
+      cache.clear();
+      if (defaults) defaultsAjv = createValidatorAjv(true);
+      else ajv = createValidatorAjv(false);
+    }
+    validator = (defaults ? defaultsAjv : ajv).compile(schema);
+    cache.set(cacheKey, validator);
+    return validator;
+  }
 
   function transaction(fn, mode = 'IMMEDIATE') {
     db.exec('BEGIN ' + mode);
@@ -142,7 +161,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
   function validate(schema, value, allowMissing = false, defaults = false) {
     let validator;
     try {
-      validator = (defaults ? defaultsAjv : ajv).compile(schema);
+      validator = compileValidator(schema, defaults);
     } catch {
       throw error('VALIDATION_FAILED', 'Invalid configuration schema');
     }
@@ -317,11 +336,26 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       authMode: credential('center-internal-pi-oauth-' + provider.id)?.configured ? 'oauth' : 'api_key',
     }));
   }
+  // Snapshot/turn model fields exclude Center-only catalog bookkeeping (`source`) so Host validators see wire fields only.
+  const snapshotModelFields = ['id', 'name', 'api', 'baseUrl', 'headers', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel', 'enabled', 'revision'];
+  function executionModels(providers) {
+    return Object.fromEntries(providers.map((provider) => [
+      provider.id,
+      provider.enabled ? store.listModels(provider.id).map((model) => pick(model, snapshotModelFields)) : [],
+    ]));
+  }
+  function sanitizeSnapshotModels(models) {
+    if (!object(models)) return models;
+    return Object.fromEntries(Object.entries(models).map(([id, list]) => [
+      id,
+      Array.isArray(list) ? list.map((model) => object(model) ? pick(model, snapshotModelFields) : model) : list,
+    ]));
+  }
   /** Execution-relevant snapshot content for one device: no display names, activity fields or other devices. */
   function executionContent(deviceId) {
     const providers = executionProviders();
     for (const provider of providers) assertPublicCredentialId(provider.credentialRef);
-    const models = Object.fromEntries(providers.map((provider) => [provider.id, store.listModels(provider.id)]));
+    const models = executionModels(providers);
     const installations = store.listInstallations();
     const refs = new Set();
     const bots = store.listDeviceBots(deviceId).map((bot) => botContent(deviceId, bot, installations, providers, models, refs));
@@ -363,7 +397,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
   /** Single-Bot turn context: same content shape as a device snapshot, plus the secret-free set checksum. */
   function turnContent(deviceId, bot) {
     const providers = executionProviders();
-    const models = Object.fromEntries(providers.map((provider) => [provider.id, store.listModels(provider.id)]));
+    const models = executionModels(providers);
     const installations = store.listInstallations();
     const refs = new Set();
     const entry = botContent(deviceId, bot, installations, providers, models, refs);
@@ -1290,11 +1324,12 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             if (current.deviceId !== set.deviceId || current.botId !== set.botId || current.fingerprint !== set.fingerprint) {
               throw error('REQUEST_CONFLICT', 'Turn set identity conflicts');
             }
-            return current;
+            return current.snapshot?.models ? { ...current, snapshot: { ...current.snapshot, models: sanitizeSnapshotModels(current.snapshot.models) } } : current;
           }
+          const sanitizedSnapshot = set.snapshot?.models ? { ...set.snapshot, models: sanitizeSnapshotModels(set.snapshot.models) } : set.snapshot;
           const value = {
             setId: set.setId, deviceId: set.deviceId, botId: set.botId, fingerprint: set.fingerprint,
-            snapshot: set.snapshot, plans: set.plans, refs: set.refs, credentialRevisions: set.credentialRevisions,
+            snapshot: sanitizedSnapshot, plans: set.plans, refs: set.refs, credentialRevisions: set.credentialRevisions,
             createdAt: new Date().toISOString(),
           };
           // turn_sets 有 NOT NULL 业务列，不能用只写 (id,json) 的 generic save。
@@ -1305,7 +1340,8 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       },
       getTurnSet(setId) {
         assertId(setId);
-        return get('turn_sets', setId);
+        const set = get('turn_sets', setId);
+        return set?.snapshot?.models ? { ...set, snapshot: { ...set.snapshot, models: sanitizeSnapshotModels(set.snapshot.models) } } : set;
       },
       getTurnAdmission(admissionId) {
         assertId(admissionId);

@@ -11,8 +11,31 @@ const fail = (code, message) => { throw Object.assign(new Error(message), { code
 const required = (value, name) => value ?? fail('NOT_FOUND', `${name} not found`);
 const object = value => value && typeof value === 'object' && !Array.isArray(value) ? value : fail('INVALID_ARGUMENT', 'Expected an object');
 const text = (value, name) => typeof value === 'string' && value.length > 0 ? value : fail('INVALID_ARGUMENT', `Invalid ${name}`);
-const ajv = new Ajv({ strict: false });
-ajv.addFormat('credential-ref', { type: 'string', validate: value => value.length > 0 });
+function createRouteAjv() {
+  const instance = new Ajv({ strict: false });
+  instance.addFormat('credential-ref', { type: 'string', validate: value => value.length > 0 });
+  return instance;
+}
+let ajv = createRouteAjv();
+const schemaByRef = new WeakMap();
+const schemaByJson = new Map();
+function checkSchema(schema, value) {
+  let validator = schema && typeof schema === 'object' ? schemaByRef.get(schema) : undefined;
+  if (!validator) {
+    const cacheKey = JSON.stringify(schema);
+    validator = schemaByJson.get(cacheKey);
+    if (!validator) {
+      if (schemaByJson.size >= 512) {
+        schemaByJson.clear();
+        ajv = createRouteAjv();
+      }
+      validator = ajv.compile(schema);
+      schemaByJson.set(cacheKey, validator);
+    }
+    if (schema && typeof schema === 'object') schemaByRef.set(schema, validator);
+  }
+  return Boolean(validator(value));
+}
 
 const string = { type: 'string', minLength: 1 };
 /** Wire-bound identifiers: request/scope/set/admission IDs stay inside existing ID limits. */
@@ -78,7 +101,7 @@ const restoreTurnSchema = {
   properties: { botId: boundedId, admissionId: boundedId },
   additionalProperties: false,
 };
-function validate(schema, value) { if (!ajv.validate(schema, value)) fail('VALIDATION_FAILED', 'Invalid input'); return value; }
+function validate(schema, value) { if (!checkSchema(schema, value)) fail('VALIDATION_FAILED', 'Invalid input'); return value; }
 /** Hosts report these; 'pending' is derived by the center and never accepted. */
 const runtimeStatuses = ['applying', 'waiting-idle', 'applied', 'failed'];
 const runtimeError = value => value == null ? null : { code: typeof value.code === 'string' ? value.code : 'INTERNAL_ERROR', message: typeof value.message === 'string' ? value.message : '' };
@@ -140,7 +163,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   const changed = (result, deviceId) => { deviceId ? notify(deviceId) : notifyAll(); return result; };
   const providerInput = id => {
     const provider = required(store.getProvider(id), 'Provider');
-    const models = store.listModels(id);
+    const models = store.listModels(id).map(({ source: _source, ...model }) => model);
     const ref = provider.credentialRef && assertPublicCredentialId(provider.credentialRef);
     const credential = ref && store.getCredential(ref)?.configured ? store.resolveCredential(ref) : undefined;
     return { provider, models, ...(credential === undefined ? {} : { credential }) };
@@ -391,9 +414,9 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     if (!declared) fail('NOT_FOUND', 'Action not declared');
     object(input); text(input.deviceId, 'deviceId'); text(input.botId, 'botId'); text(input.requestId, 'requestId');
     if (!store.isActive(store.getInstallation(id)) || !store.getBotCapability(input.deviceId, input.botId, id).enabled) fail('FORBIDDEN', 'Capability unavailable');
-    if (!ajv.validate(declared.inputSchema, input.input)) fail('VALIDATION_FAILED', 'Invalid action input');
+    if (!checkSchema(declared.inputSchema, input.input)) fail('VALIDATION_FAILED', 'Invalid action input');
     const result = await bridge.call(input.deviceId, 'callCapabilityAction', { installationId: id, action: name, request: input });
-    if (declared.outputSchema !== undefined && !ajv.validate(declared.outputSchema, result.result)) fail('INVALID_STATE', 'Invalid action output');
+    if (declared.outputSchema !== undefined && !checkSchema(declared.outputSchema, result.result)) fail('INVALID_STATE', 'Invalid action output');
     return result;
   }
   route('POST', '/api/installations/:id/actions/:action', req => action(req.params.id, req.params.action, req.body), true);

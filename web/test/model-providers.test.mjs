@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const { builtinProviders } = await import(new URL('../../host-core/node_modules/@earendil-works/pi-ai/dist/providers/all.js', import.meta.url));
 import { nativeCenterProvider } from '../../host-core/native-center-providers.js';
+import { applyCenterModels } from '../../host-core/runtime-models.js';
 import { centerPiCredentialStore, openModelCatalog } from '../../center-server/model-catalog.js';
 import { openCenterStore } from '../../center-server/data/index.js';
 
@@ -124,6 +125,133 @@ test('migration updates untouched legacy models while retaining manual edits', a
     assert.equal(untouched.source, 'catalog');
     assert.equal(modified.source, 'manual');
     assert.equal(modified.contextWindow, firstTwo[1].contextWindow + 1);
+  } finally {
+    await catalog?.close();
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('device snapshots and applyCenterModels handle catalog source metadata and disabled providers cleanly', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pibot-snapshot-models-test-'));
+  const store = openCenterStore({ dataRoot: root, encryptionKey: Buffer.alloc(32, 77) });
+  let catalog;
+  try {
+    catalog = openModelCatalog({ store, dataRoot: root, onChange: () => {} });
+    await catalog.ready;
+
+    const openai = store.getProvider('openai');
+    assert.ok(openai);
+    store.putCredential('openai-api-key', { expectedRevision: null, value: 'sk-test-secret' });
+    store.putProvider({ ...openai, enabled: true }, openai.revision);
+
+    const enabledModels = store.listModels('openai').filter(m => m.enabled);
+    assert.ok(enabledModels.length > 0);
+    assert.equal(enabledModels[0].source, 'catalog');
+
+    store.replaceDeviceBots('dev-1', [{
+      deviceId: 'dev-1',
+      botId: 'bot-1',
+      name: 'Assistant',
+      isPrimary: true,
+    }]);
+    store.putBotModelConfig('dev-1', 'bot-1', 0, {
+      modelRef: `openai/${enabledModels[0].id}`,
+      thinkingLevel: null,
+      codemode: null,
+      codemodeOnly: null,
+    });
+
+    const snapshot = store.getDeviceSnapshot('dev-1', 'wss://example.com/v1/link');
+    assert.ok(snapshot.models.openai.length > 0);
+    for (const model of snapshot.models.openai) {
+      assert.equal('source' in model, false, 'snapshot models must omit Center-only source field');
+    }
+    const disabledProvider = snapshot.providers.find(p => !p.enabled);
+    assert.ok(disabledProvider);
+    assert.deepEqual(snapshot.models[disabledProvider.id], []);
+
+    const turnContext = store.getBotTurnContext('dev-1', 'bot-1');
+    for (const model of turnContext.models.openai) {
+      assert.equal('source' in model, false, 'turn context models must omit Center-only source field');
+    }
+
+    // Apply clean snapshot on Host side
+    const appliedClean = applyCenterModels(snapshot);
+    assert.ok(appliedClean.models.getModel('openai', enabledModels[0].id));
+    assert.equal(appliedClean.botModels['bot-1'].modelRef, `openai/${enabledModels[0].id}`);
+
+    // Host side also tolerates snapshots from older Center builds that still carry `source`
+    const legacySnapshot = {
+      ...snapshot,
+      models: {
+        ...snapshot.models,
+        openai: snapshot.models.openai.map(m => ({ ...m, source: 'catalog' })),
+      },
+    };
+    const appliedLegacy = applyCenterModels(legacySnapshot);
+    assert.ok(appliedLegacy.models.getModel('openai', enabledModels[0].id));
+
+    // Persisted turn_sets sanitize `source` on save/read
+    const savedSet = store.putTurnSet({
+      setId: 'set-legacy-test',
+      deviceId: 'dev-1',
+      botId: 'bot-1',
+      fingerprint: 'fp-1',
+      snapshot: legacySnapshot,
+      plans: [],
+      refs: ['openai-api-key'],
+      credentialRevisions: { 'openai-api-key': 0 },
+    });
+    assert.equal('source' in savedSet.snapshot.models.openai[0], false);
+    assert.equal('source' in store.getTurnSet('set-legacy-test').snapshot.models.openai[0], false);
+
+    // Enabled capability validation in snapshots & runtime receipts reuses cached compiled schemas
+    store.putPackageVersion({
+      packageId: 'e-launcher.test-plugin',
+      version: '1.0.0',
+      kind: 'plugin',
+      manifest: {},
+      configSchema: {
+        type: 'object',
+        properties: {
+          endpoint: { type: 'string', default: 'https://api.example.com' },
+          apiKey: { type: 'string', format: 'credential-ref' },
+        },
+        additionalProperties: false,
+      },
+    });
+    store.putInstallation({
+      installationId: 'inst-1',
+      packageId: 'e-launcher.test-plugin',
+      displayName: 'Test Plugin',
+      kind: 'plugin',
+      source: { type: 'artifact', artifactRef: 'art-1' },
+      target: 'host',
+      targetVersion: '1.0.0',
+      enabled: true,
+      activation: { status: 'enabled', error: null, updatedAt: new Date().toISOString() },
+    }, null);
+    store.putBotCapability('dev-1', 'bot-1', 'inst-1', {
+      expectedRevision: 0,
+      enabled: true,
+      overrides: { apiKey: 'openai-api-key' },
+    });
+
+    for (let i = 0; i < 200; i += 1) {
+      const snap = store.getDeviceSnapshot('dev-1', 'wss://example.com/v1/link');
+      store.putRuntimeReceipt({
+        deviceId: 'dev-1',
+        revision: snap.revision,
+        status: 'applied',
+        appliedRevision: snap.revision,
+        error: null,
+        bots: [{ botId: 'bot-1', desiredRevision: snap.revision, appliedRevision: snap.revision, status: 'applied', error: null }],
+        capabilityErrors: [],
+      });
+    }
+    const status = store.getDeviceRuntimeStatus('dev-1', true);
+    assert.equal(status.status, 'applied');
   } finally {
     await catalog?.close();
     store.close();
