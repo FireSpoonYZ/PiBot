@@ -13,6 +13,8 @@ permissions = [
   "allow-desktop-pick-file",
   "allow-desktop-host-status",
   "allow-desktop-host-pair",
+  "allow-desktop-host-pair-code",
+  "allow-desktop-host-connect-local",
   "allow-desktop-host-adopt",
   "allow-desktop-host-control",
   "allow-desktop-update-status",

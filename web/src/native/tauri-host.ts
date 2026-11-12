@@ -493,6 +493,28 @@ export function repairCenterBinding(): Promise<PairCenterResult> {
   return mobileLocalRequest<PairCenterResult>('repairCenterBinding');
 }
 
+/**
+ * 配对码配对：整串配对码交给原生解码——中心地址、一次性密钥与私有 CA 都不经 JS 状态，
+ * 这里只传用户粘贴/扫到的原文。兑换后的持久化与连接同 pairCenter；token 不回 JS。
+ * UI-local 前台动作；connectionRequested 非就绪，仍需 center_status 轮询。
+ */
+export function pairCenterWithCode(input: {
+  code: string; displayName?: string; force?: boolean;
+}): Promise<PairCenterResult> {
+  const params: Record<string, unknown> = { code: input.code };
+  if (input.displayName) params.displayName = input.displayName;
+  if (input.force) params.force = true;
+  return mobileLocalRequest<PairCenterResult>('pairCenterWithCode', params);
+}
+
+/**
+ * 应用内扫码（ZXing，不依赖 Google 服务）：返回扫到的二维码原文，用户返回/取消时 cancelled=true。
+ * 相机权限被拒以 CAMERA_DENIED 拒绝，界面应退回粘贴配对码。UI-local 前台动作。
+ */
+export function scanPairingCode(): Promise<{ text?: string; cancelled?: boolean }> {
+  return mobileLocalRequest<{ text?: string; cancelled?: boolean }>('scanPairingCode');
+}
+
 /** C7 权限/后台真实状态查询；不启动服务或授权流程。 */
 export function onboardingStatus(): Promise<OnboardingStatus> {
   return mobileLocalRequest<OnboardingStatus>('onboardingStatus');

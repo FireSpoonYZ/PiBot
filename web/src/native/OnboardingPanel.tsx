@@ -2,13 +2,17 @@
 // 密码只在本组件内存，提交即清；token 不离开原生。沿用 .hst-/.bs- 既有原语，少量 .ob- 补充样式。
 // 配对结果只表示“已登记/已请求连接”，就绪与否始终由 CenterGate 的 center_status/broker 轮询判定。
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { BatteryCharging, Bell, Server, ShieldCheck } from 'lucide-react';
+import { BatteryCharging, Bell, ScanLine, Server, ShieldCheck } from 'lucide-react';
 import { useCenterConnection } from './CenterGate';
-import { onboardingAction, onboardingStatus } from './tauri-host';
+import { onboardingAction, onboardingStatus, scanPairingCode } from './tauri-host';
 import { BotHost, type HostSnapshot, type OnboardingActionName, type OnboardingStatus, type PairCenterResult } from './index';
 import { Badge, Disclosure, Row, Section, StatusLine } from '../bot-settings/primitives';
+import { readPaste as readPairingCode } from '../pairingCode';
 import { ErrorNotice, errorText, useText } from '../ui';
 import './onboarding.css';
+
+/** 手机上的 loopback 是手机自己，不可能是中心：http 一律不收，与原生 PairingCode.parse 保持一致。 */
+const readPaste = (text: string) => readPairingCode(text, { allowLoopbackHttp: false });
 
 /** 手工令牌连接：沿用设置页原有表单（URL + 设备标识 + 客户端令牌 + 重连/清除）。 */
 function ManualCenterConnect({ onDone }: { onDone?: () => void }) {
@@ -115,6 +119,79 @@ function ManualCenterConnect({ onDone }: { onDone?: () => void }) {
   );
 }
 
+/** 配对/修复结果视图：所有者密码与配对码两种配对方式共用。 */
+function PairResultView({ result, onChange, onEdit }: {
+  result: PairCenterResult;
+  onChange: (next: PairCenterResult) => void;
+  onEdit: () => void;
+}) {
+  const t = useText();
+  const centerConn = useCenterConnection();
+  return (
+    <>
+      <div className="hst-row-static">
+        <StatusLine tone={centerConn.ready ? 'success' : result.connectionRequested ? 'accent' : 'warning'}>
+          {centerConn.ready
+            ? t('已连接中心', 'Center connected')
+            : result.connectionRequested
+              ? t('已绑定设备，正在建立连接…', 'Device bound, connecting…')
+              : t('已保存设备绑定，等待连接', 'Device bound, connection pending')}
+        </StatusLine>
+      </div>
+      <div className="hst-device-row">
+        <span className="hst-device-name">{result.displayName || result.deviceId}</span>
+        {result.hostConfigured && <Badge tone="success">{t('已登记', 'Registered')}</Badge>}
+      </div>
+      {!result.hostConfigured && (
+        <div className="hst-row-static">
+          <span className="ob-note">{t('本机绑定未完成，可用已存凭据重试', 'Local binding incomplete — you can retry with saved credentials')}</span>
+        </div>
+      )}
+      {result.warnings?.map((warning, index) => (
+        <div className="hst-row-static" key={index}>
+          <span className="ob-note">{`${warning.code}: ${warning.message}`}</span>
+        </div>
+      ))}
+      {centerConn.error && (
+        <div className="hst-row-static">
+          <ErrorNotice error={centerConn.error} compact onDismiss={() => centerConn.setError('')} />
+        </div>
+      )}
+      <div className="hst-actions">
+        <button type="button" className="hst-btn is-ghost" onClick={onEdit}>
+          {t('重新输入', 'Edit')}
+        </button>
+        {!result.hostConfigured && !centerConn.ready && (
+          <button
+            type="button"
+            className="hst-btn"
+            disabled={centerConn.busy}
+            onClick={() =>
+              // repair 不注册新设备也不需密码；结果回填为新的 PairCenterResult，warnings 随其更新。
+              void centerConn.repair().then(
+                repaired => { if (repaired) onChange(repaired); },
+                () => { /* 错误已由 gate 置 centerConn.error 展示 */ },
+              )
+            }
+          >
+            {t('重试本机绑定', 'Retry local binding')}
+          </button>
+        )}
+        {!centerConn.ready && (
+          <button
+            type="button"
+            className="hst-btn"
+            disabled={centerConn.busy || !centerConn.matchesSaved}
+            onClick={() => void centerConn.connect()}
+          >
+            {t('重连（不重复登记）', 'Reconnect')}
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
+
 /** owner 密码配对表单：成功后切换为结果视图，避免重复提交已登记设备。 */
 function PairCenterForm({ onDone }: { onDone?: () => void }) {
   const t = useText();
@@ -151,69 +228,7 @@ function PairCenterForm({ onDone }: { onDone?: () => void }) {
   };
 
   if (result) {
-    return (
-      <>
-        <div className="hst-row-static">
-          <StatusLine tone={centerConn.ready ? 'success' : result.connectionRequested ? 'accent' : 'warning'}>
-            {centerConn.ready
-              ? t('已连接中心', 'Center connected')
-              : result.connectionRequested
-                ? t('已绑定设备，正在建立连接…', 'Device bound, connecting…')
-                : t('已保存设备绑定，等待连接', 'Device bound, connection pending')}
-          </StatusLine>
-        </div>
-        <div className="hst-device-row">
-          <span className="hst-device-name">{result.displayName || result.deviceId}</span>
-          {result.hostConfigured && <Badge tone="success">{t('已登记', 'Registered')}</Badge>}
-        </div>
-        {!result.hostConfigured && (
-          <div className="hst-row-static">
-            <span className="ob-note">{t('本机绑定未完成，可用已存凭据重试', 'Local binding incomplete — you can retry with saved credentials')}</span>
-          </div>
-        )}
-        {result.warnings?.map((warning, index) => (
-          <div className="hst-row-static" key={index}>
-            <span className="ob-note">{`${warning.code}: ${warning.message}`}</span>
-          </div>
-        ))}
-        {centerConn.error && (
-          <div className="hst-row-static">
-            <ErrorNotice error={centerConn.error} compact onDismiss={() => centerConn.setError('')} />
-          </div>
-        )}
-        <div className="hst-actions">
-          <button type="button" className="hst-btn is-ghost" onClick={() => setResult(undefined)}>
-            {t('重新输入', 'Edit')}
-          </button>
-          {!result.hostConfigured && !centerConn.ready && (
-            <button
-              type="button"
-              className="hst-btn"
-              disabled={centerConn.busy}
-              onClick={() =>
-                // repair 不注册新设备也不需密码；结果回填为新的 PairCenterResult，warnings 随其更新。
-                void centerConn.repair().then(
-                  repaired => { if (repaired) setResult(repaired); },
-                  () => { /* 错误已由 gate 置 centerConn.error 展示 */ },
-                )
-              }
-            >
-              {t('重试本机绑定', 'Retry local binding')}
-            </button>
-          )}
-          {!centerConn.ready && (
-            <button
-              type="button"
-              className="hst-btn"
-              disabled={centerConn.busy || !centerConn.matchesSaved}
-              onClick={() => void centerConn.connect()}
-            >
-              {t('重连（不重复登记）', 'Reconnect')}
-            </button>
-          )}
-        </div>
-      </>
-    );
+    return <PairResultView result={result} onChange={setResult} onEdit={() => setResult(undefined)} />;
   }
 
   // force 只在本机已有保存绑定、或原生明确 ALREADY_CONFIGURED 时出现；它替换的是本机所存绑定。
@@ -294,7 +309,220 @@ function PairCenterForm({ onDone }: { onDone?: () => void }) {
 }
 
 /**
- * 中心连接卡：无已存凭据时默认 owner 密码配对（手工令牌收进“高级”），
+ * 配对码配对：扫描中心管理页「添加设备」里的二维码，或粘贴配对码；识别出完整的码就自动配对。
+ * 地址、一次性密钥与私有 CA 都在码里，由原生解码——这里只持有用户粘贴/扫到的原文，成功即清除。
+ * 失败在本表单里按原生给的说明展示（见 CenterGate.pairWithCode），不走通用归类。
+ */
+function PairCodeForm({ onDone }: { onDone?: () => void }) {
+  const t = useText();
+  const centerConn = useCenterConnection();
+  const [text, setText] = useState('');
+  const [force, setForce] = useState(false);
+  const [suggestForce, setSuggestForce] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [failure, setFailure] = useState<{ code: string; message: string }>();
+  const [result, setResult] = useState<PairCenterResult>();
+  const paste = readPaste(text);
+  const working = centerConn.busy || scanning;
+  // 本机已有绑定时（或原生刚报 ALREADY_CONFIGURED），替换必须由用户明确勾选：此时不自动提交。
+  const showForce = Boolean(centerConn.saved?.url) || suggestForce;
+  const mayAutoSubmit = !showForce || force;
+
+  const submit = (code: string) => {
+    setFailure(undefined);
+    void centerConn.pairWithCode(code, { force }).then(
+      done => {
+        if (!done) return;
+        // 配对码用过即废，登记成功后不再保留在输入框里。
+        setText('');
+        setForce(false);
+        setSuggestForce(false);
+        setResult(done);
+        // 已请求连接且无警告时交回上层收尾；等待连接/有警告时保留结果视图供用户处理。
+        if (done.connectionRequested && !(done.warnings && done.warnings.length)) onDone?.();
+      },
+      error => {
+        const info = failureOf(error);
+        if (info.code === 'ALREADY_CONFIGURED') setSuggestForce(true);
+        setFailure(info);
+      },
+    );
+  };
+
+  const onPaste = (value: string) => {
+    setText(value);
+    setFailure(undefined);
+    if (readPaste(value).kind === 'code' && !working && mayAutoSubmit) submit(value);
+  };
+
+  const scan = () => {
+    setFailure(undefined);
+    setScanning(true);
+    void scanPairingCode()
+      .then(
+        scanned => {
+          if (!scanned.text) return; // 用户返回/取消：什么都不做
+          setText(scanned.text);
+          if (readPaste(scanned.text).kind !== 'code') return; // 提示行会说明这不是配对码
+          if (mayAutoSubmit) submit(scanned.text);
+        },
+        error => setFailure(failureOf(error)),
+      )
+      .finally(() => setScanning(false));
+  };
+
+  if (result) {
+    return <PairResultView result={result} onChange={setResult} onEdit={() => setResult(undefined)} />;
+  }
+
+  const hint = paste.kind === 'code'
+    ? (mayAutoSubmit
+      ? t(`将连接到 ${paste.centerHost}`, `Will connect to ${paste.centerHost}`)
+      : t('本机已有绑定：勾选“替换本机已保存的绑定”后点击配对', 'This device is already bound: tick “Replace the binding saved on this device”, then pair'))
+    : paste.kind === 'not-code'
+      ? t('这不是配对码。请在中心管理页的「设备与 Bot」点击「添加设备」获取。', 'That is not a pairing code. Get one from “Add device” on the center’s Devices page.')
+      : paste.kind === 'damaged'
+        ? t('配对码不完整或已损坏，请重新复制完整的配对码。', 'The pairing code is incomplete or damaged. Copy the whole code again.')
+        : paste.kind === 'unsupported'
+          ? t('此配对码来自更新版本的中心，请先更新 pibot。', 'This pairing code comes from a newer center. Update pibot first.')
+          : '';
+
+  return (
+    <>
+      <div className="hst-row-static">
+        <span className="ob-note">
+          {t('在中心管理页的「设备与 Bot」点击「添加设备」，用本机扫描二维码；也可以复制配对码粘贴到下面。',
+            'On the center’s Devices page click “Add device”, then scan the QR code with this phone, or paste the pairing code below.')}
+        </span>
+      </div>
+      <div className="hst-actions">
+        <button type="button" className="hst-btn is-primary" disabled={working} onClick={scan}>
+          <ScanLine size={16} aria-hidden="true" />
+          {scanning ? t('正在扫码…', 'Scanning…') : t('扫码配对', 'Scan to Pair')}
+        </button>
+      </div>
+      <div className="hst-row-static">
+        <textarea
+          className="ob-code"
+          rows={3}
+          value={text}
+          disabled={centerConn.busy}
+          spellCheck={false}
+          autoComplete="off"
+          autoCapitalize="off"
+          placeholder={t('或在这里粘贴配对码', 'Or paste the pairing code here')}
+          onChange={event => onPaste(event.target.value)}
+        />
+      </div>
+      {hint && (
+        <div className="hst-row-static">
+          <span className={`ob-note${paste.kind !== 'code' && paste.kind !== 'empty' ? ' is-warn' : ''}`}>{hint}</span>
+        </div>
+      )}
+      {showForce && (
+        <label className="hst-row-static ob-check-row">
+          <input
+            type="checkbox"
+            className="ob-check"
+            disabled={working}
+            checked={force}
+            onChange={event => setForce(event.target.checked)}
+          />
+          <span>{t('替换本机已保存的绑定', 'Replace the binding saved on this device')}</span>
+        </label>
+      )}
+      {failure && (
+        <div className="hst-row-static">
+          <ErrorNotice
+            tone="danger"
+            title={failure.code === 'CAMERA_DENIED' ? t('无法扫码', 'Cannot scan') : t('配对失败', 'Pairing failed')}
+            description={failureText(failure, t)}
+            compact
+            onDismiss={() => setFailure(undefined)}
+          />
+        </div>
+      )}
+      <div className="hst-actions">
+        <button
+          type="button"
+          className="hst-btn is-primary"
+          disabled={working || paste.kind !== 'code' || !mayAutoSubmit}
+          onClick={() => submit(text)}
+        >
+          {centerConn.busy ? t('配对中…', 'Pairing…') : t('配对并连接', 'Pair & Connect')}
+        </button>
+      </div>
+    </>
+  );
+}
+
+/**
+ * 原生/桥错误 → {code, message}：code 用于区分可恢复原因，message 是原生给出的可操作说明。
+ * 桥层为日志把 message 拼成 `CODE: 说明`，对用户没有意义，这里去掉这个前缀。
+ */
+function failureOf(error: unknown): { code: string; message: string } {
+  const code = typeof error === 'object' && error !== null && 'code' in error ? String((error as { code: unknown }).code) : '';
+  let message = error instanceof Error && error.message
+    ? error.message
+    : typeof error === 'string' && error ? error : '配对失败，请检查配对码后重试。';
+  if (code && message.startsWith(`${code}: `)) message = message.slice(code.length + 2);
+  return { code, message };
+}
+
+type Translate = (zh: string, en: string) => string;
+
+/**
+ * 原生给的说明是中文：已知错误码按界面语言改用这里的文案，其余（带细节的 CENTER_ERROR、凭据/参数错误等）
+ * 原样显示原生说明。码 → 文案与原生 CenterPairing / PairingCode 一一对应，改一处要改两处。
+ */
+function failureText(failure: { code: string; message: string }, t: Translate): string {
+  switch (failure.code) {
+    case 'CAMERA_DENIED':
+      return t('没有相机权限。请在系统设置里允许相机，或直接粘贴配对码', 'No camera permission. Allow the camera in system settings, or paste the pairing code instead.');
+    case 'NOT_A_PAIRING_CODE':
+      return t('这不是配对码。请在中心管理页的「设备与 Bot」点击「添加设备」获取', 'That is not a pairing code. Get one from “Add device” on the center’s Devices page.');
+    case 'INVALID_PAIRING_CODE':
+      return t('配对码不完整或已损坏，请重新复制完整的配对码', 'The pairing code is incomplete or damaged. Copy the whole code again.');
+    case 'UNSUPPORTED_PAIRING_CODE':
+      return t('此配对码来自更新版本的中心，请先更新 pibot', 'This pairing code comes from a newer center. Update pibot first.');
+    case 'PAIRING_CODE_INVALID':
+      return t('配对码无效，请在中心重新生成', 'The pairing code is not valid. Generate a new one on the center.');
+    case 'PAIRING_CODE_USED':
+      return t('配对码已被使用，请在中心重新生成', 'The pairing code has already been used. Generate a new one on the center.');
+    case 'PAIRING_CODE_EXPIRED':
+      return t('配对码已过期（10 分钟有效），请在中心重新生成', 'The pairing code has expired (it is valid for 10 minutes). Generate a new one on the center.');
+    case 'PAIRING_CODE_REVOKED':
+      return t(
+        '配对码已作废：中心的「添加设备」窗口被关闭了。复制或扫描后请保持该窗口打开，直到配对完成；需要的话重新生成',
+        'The pairing code was voided because the “Add device” window on the center was closed. Keep that window open until pairing finishes, and generate a new code if needed.',
+      );
+    case 'PAIRING_CODE_DEVICE_MISMATCH':
+      return t('这个配对码是为另一台设备生成的，不能用于本机。请在中心为本机重新生成', 'This pairing code was issued for a different device and cannot be used here. Generate one for this phone on the center.');
+    case 'DEVICE_ALREADY_REGISTERED':
+      return t(
+        '中心上已有这台设备的记录，新配对码不能顶替它。请所有者在管理页「设备与 Bot」里点该设备的「重新配对」，使用生成的专属配对码',
+        'The center already has a record for this device, and a new pairing code cannot replace it. The owner should click “Re-pair” on that device in the center’s Devices page and use the code it generates.',
+      );
+    case 'CENTER_CERT_UNTRUSTED':
+      return t(
+        '能连上中心，但本机不信任它的证书。中心使用自签或私有 CA 时，请所有者在管理页「添加设备」窗口保存私有 CA 后重新生成配对码；用所有者密码配对时，在 CA 证书栏填写它',
+        'The center answered, but this phone does not trust its certificate. If the center uses a self-signed or private CA, the owner should save that CA in the center’s “Add device” window and generate a new pairing code; when pairing with the owner password, enter the CA in the CA PEM field.',
+      );
+    case 'CENTER_UNREACHABLE':
+      return t('无法连接中心', 'Cannot reach the center');
+    case 'CENTER_UNSUPPORTED':
+      return t('该中心版本尚不支持配对码，请升级中心，或改用所有者密码配对', 'This center does not support pairing codes yet. Upgrade the center, or pair with the owner password.');
+    case 'RATE_LIMITED':
+      return t('中心请求过于频繁，请稍后重试', 'The center is receiving too many requests. Try again shortly.');
+    case 'ALREADY_CONFIGURED':
+      return t('设备已绑定中心，勾选“替换本机已保存的绑定”后再配对', 'This device is already bound to a center. Tick “Replace the binding saved on this device”, then pair.');
+    default:
+      return failure.message;
+  }
+}
+
+/**
+ * 中心连接卡：无已存凭据时默认配对码配对（旧版中心用的所有者密码、手工令牌收进折叠项），
  * 有已存凭据时保持原有手工表单（自动重连不变），重新配对收进折叠项。
  */
 export function OnboardingPanel({ onDone }: { onDone?: () => void }) {
@@ -306,13 +534,19 @@ export function OnboardingPanel({ onDone }: { onDone?: () => void }) {
   return hasSaved ? (
     <>
       <ManualCenterConnect onDone={onDone} />
+      <Disclosure title={t('用配对码重新配对', 'Re-pair with a pairing code')}>
+        <PairCodeForm onDone={onDone} />
+      </Disclosure>
       <Disclosure title={t('用所有者密码重新配对', 'Re-pair with owner password')}>
         <PairCenterForm onDone={onDone} />
       </Disclosure>
     </>
   ) : (
     <>
-      <PairCenterForm onDone={onDone} />
+      <PairCodeForm onDone={onDone} />
+      <Disclosure title={t('其他连接方式：所有者密码（旧版中心）', 'Other ways: owner password (older centers)')}>
+        <PairCenterForm onDone={onDone} />
+      </Disclosure>
       <Disclosure title={t('高级：手动令牌连接', 'Advanced: manual token')}>
         <ManualCenterConnect onDone={onDone} />
       </Disclosure>

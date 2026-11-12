@@ -27,7 +27,7 @@ use tauri::{AppHandle, State, Webview, utils::platform};
 
 use crate::{
   bridge::{self, BridgeError, DesktopBridge},
-  ensure_main_webview,
+  ensure_main_webview, pairing_code,
 };
 
 const LAUNCHER_NAME: &str = "pibot-host";
@@ -54,6 +54,7 @@ const CONFIG_FILE_NAME: &str = "config.json";
 /// from the desktop process so the stdin value is always the one used.
 const SECRET_ENV_KEYS: &[&str] = &[
   "E_LAUNCHER_OWNER_PASSWORD",
+  "E_LAUNCHER_PAIRING_SECRET",
   "E_LAUNCHER_RELAY_TOKEN",
   "E_LAUNCHER_CONTROL_TOKEN",
 ];
@@ -306,6 +307,10 @@ fn confirm_stopped(result: &Value) -> Result<(), BridgeError> {
   ))
 }
 
+/// A center is addressed by its origin only: scheme, host and optional port (plain `http` only for loopback).
+/// The launcher and the center build every request path themselves, so a path, query or fragment would
+/// quietly redirect requests (`/subpath/api/...`) or be refused later with a different error. One trailing
+/// slash is dropped, which is what the launcher stores, so the same center always compares equal.
 fn validate_center_url(raw: &str) -> Result<String, BridgeError> {
   let url = raw.trim();
   if url.is_empty() || url.len() > 2048 {
@@ -315,13 +320,16 @@ fn validate_center_url(raw: &str) -> Result<String, BridgeError> {
   if !parsed.username().is_empty() || parsed.password().is_some() || parsed.host_str().is_none() {
     return Err(invalid("invalid center URL"));
   }
+  if parsed.query().is_some() || parsed.fragment().is_some() || parsed.path() != "/" {
+    return Err(invalid("center URL must be an origin: scheme, host and optional port only"));
+  }
   let loopback = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
   match parsed.scheme() {
     "https" => {}
     "http" if loopback => {}
     _ => return Err(invalid("center URL must use HTTPS")),
   }
-  Ok(url.to_string())
+  Ok(url.strip_suffix('/').unwrap_or(url).to_string())
 }
 
 fn validate_display_name(raw: &str) -> Result<String, BridgeError> {
@@ -498,12 +506,18 @@ fn control_timeout(action: &str) -> Duration {
 }
 
 const CONTROL_TOKEN_ENV: &str = "E_LAUNCHER_CONTROL_TOKEN";
+const RELAY_TOKEN_ENV: &str = "E_LAUNCHER_RELAY_TOKEN";
 const SERVICE_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_SERVICE_RESPONSE: usize = 64 * 1024;
 
 /// Reads `E_LAUNCHER_CONTROL_TOKEN` from the Host `secrets.env` using the same
 /// KEY=VALUE rules as the launcher parser. The token never leaves this process.
 fn read_control_token(home: &Path) -> Option<String> {
+  read_env_secret(home, CONTROL_TOKEN_ENV)
+}
+
+/// One `KEY=VALUE` secret from the Host `secrets.env`; the last assignment wins.
+fn read_env_secret(home: &Path, wanted: &str) -> Option<String> {
   let text = fs::read_to_string(home.join("secrets.env")).ok()?;
   let mut found = None;
   for raw in text.lines() {
@@ -515,7 +529,7 @@ fn read_control_token(home: &Path) -> Option<String> {
     let Some((key, value)) = line.split_once('=') else {
       continue;
     };
-    if key.trim() != CONTROL_TOKEN_ENV {
+    if key.trim() != wanted {
       continue;
     }
     let mut token = value.trim();
@@ -712,27 +726,28 @@ async fn store_client_credentials(
   }
 }
 
-#[tauri::command]
-pub async fn desktop_host_pair(
-  app: AppHandle,
-  webview: Webview,
-  bridge: State<'_, DesktopBridge>,
+/// Optional display name: blank means "let the launcher pick the computer name".
+fn optional_display_name(raw: Option<String>) -> Result<Option<String>, BridgeError> {
+  match raw.as_deref().map(str::trim) {
+    Some(name) if !name.is_empty() => Ok(Some(validate_display_name(name)?)),
+    _ => Ok(None),
+  }
+}
+
+/// Pairs the local Host through the launcher and records the same credentials for the
+/// desktop client. The owner-password and pairing-code flows differ only in the launcher
+/// mode (`--redeem`) and in what `secret` means; everything after registration is shared.
+async fn pair_with_launcher(
+  app: &AppHandle,
+  bridge: &DesktopBridge,
   center_url: String,
-  password: String,
+  secret: String,
   display_name: Option<String>,
   center_ca: Option<String>,
-  force: Option<bool>,
+  force: bool,
+  redeem: bool,
 ) -> Result<Value, BridgeError> {
-  ensure_main_webview(&webview)?;
-  let center_url = validate_center_url(&center_url)?;
-  validate_secret(&password, "owner password is required")?;
-  let display_name = match display_name.as_deref().map(str::trim) {
-    Some(name) if !name.is_empty() => Some(validate_display_name(name)?),
-    _ => None,
-  };
-  let center_ca = center_ca.filter(|pem| !pem.trim().is_empty());
   let store_ca = center_ca.clone();
-  let force = force.unwrap_or(false);
   let mut result = run_blocking(move || {
     let _guard = HOST_CONTROL_LOCK.lock().unwrap();
     let prior = run_launcher(&["status".to_string()], None, STATUS_TIMEOUT)?;
@@ -752,8 +767,11 @@ pub async fn desktop_host_pair(
     if force {
       args.push("--force".to_string());
     }
-    let result = run_launcher(&args, Some(password.as_str()), PAIR_TIMEOUT);
-    drop(password);
+    if redeem {
+      args.push("--redeem".to_string());
+    }
+    let result = run_launcher(&args, Some(secret.as_str()), PAIR_TIMEOUT);
+    drop(secret);
     // Commit the staged CA only once pairing actually wrote the new config;
     // a failure drops the guard and restores the previous CA bytes.
     if result.is_ok() {
@@ -764,6 +782,12 @@ pub async fn desktop_host_pair(
     result
   })
   .await?;
+  // The certificate is public. A pairing code carries it, so the webview has to be told which
+  // one the client must trust when it connects; the owner-password flow echoes what it sent.
+  let center_ca = store_ca.unwrap_or_default();
+  if let Some(obj) = result.as_object_mut() {
+    obj.insert("centerCa".to_string(), json!(center_ca));
+  }
   // Persist client credentials right after registration — long enable/start
   // steps (and any window close during them) must not lose the token.
   if let (Some(url), Some(device_id), Some(device_token)) = (
@@ -771,8 +795,143 @@ pub async fn desktop_host_pair(
     result.get("deviceId").and_then(Value::as_str).map(str::to_owned),
     result.get("deviceToken").and_then(Value::as_str).map(str::to_owned),
   ) {
-    store_client_credentials(&app, &bridge, &mut result, url, device_id, device_token, store_ca.unwrap_or_default()).await;
+    store_client_credentials(app, bridge, &mut result, url, device_id, device_token, center_ca).await;
   }
+  Ok(result)
+}
+
+#[tauri::command]
+pub async fn desktop_host_pair(
+  app: AppHandle,
+  webview: Webview,
+  bridge: State<'_, DesktopBridge>,
+  center_url: String,
+  password: String,
+  display_name: Option<String>,
+  center_ca: Option<String>,
+  force: Option<bool>,
+) -> Result<Value, BridgeError> {
+  ensure_main_webview(&webview)?;
+  let center_url = validate_center_url(&center_url)?;
+  validate_secret(&password, "owner password is required")?;
+  let display_name = optional_display_name(display_name)?;
+  let center_ca = center_ca.filter(|pem| !pem.trim().is_empty());
+  pair_with_launcher(&app, &bridge, center_url, password, display_name, center_ca, force.unwrap_or(false), false).await
+}
+
+fn pairing_code_error(error: pairing_code::PairingCodeError) -> BridgeError {
+  use pairing_code::PairingCodeError::{Malformed, NotACode, UnsupportedVersion};
+  match error {
+    NotACode => BridgeError::new("NOT_A_PAIRING_CODE", "this is not a pairing code", "not-sent"),
+    UnsupportedVersion => BridgeError::new("UNSUPPORTED_PAIRING_CODE", "this pairing code needs a newer PiBot", "not-sent"),
+    Malformed => BridgeError::new("INVALID_PAIRING_CODE", "the pairing code is damaged or incomplete", "not-sent"),
+  }
+}
+
+/// Pairs this computer with a one-time pairing code from the center: the code carries the
+/// center address, the one-time secret and (for a private CA) the certificate, so nothing
+/// else has to be typed. The webview passes the opaque string; it is decoded only here.
+#[tauri::command]
+pub async fn desktop_host_pair_code(
+  app: AppHandle,
+  webview: Webview,
+  bridge: State<'_, DesktopBridge>,
+  code: String,
+  display_name: Option<String>,
+  force: Option<bool>,
+) -> Result<Value, BridgeError> {
+  ensure_main_webview(&webview)?;
+  let (parsed, center_url) = read_pairing_code(&code)?;
+  drop(code);
+  let display_name = optional_display_name(display_name)?;
+  pair_with_launcher(&app, &bridge, center_url, parsed.secret, display_name, parsed.ca, force.unwrap_or(false), true).await
+}
+
+/// Decodes a pasted code and checks the center address it carries. A code whose address is not a bare
+/// origin (a path, query, userinfo, plain http to a remote host) is as unusable as a damaged one, and is
+/// reported the same way before anything is sent.
+fn read_pairing_code(code: &str) -> Result<(pairing_code::PairingCode, String), BridgeError> {
+  let parsed = pairing_code::parse(code).map_err(pairing_code_error)?;
+  let center_url = validate_center_url(&parsed.url)
+    .map_err(|_| BridgeError::new("INVALID_PAIRING_CODE", "the pairing code is damaged or incomplete", "not-sent"))?;
+  Ok((parsed, center_url))
+}
+
+/// What the desktop client needs to reuse an already paired Host's identity.
+struct LocalIdentity {
+  center_url: String,
+  device_id: String,
+  device_token: String,
+  ca: String,
+}
+
+/// Reads the paired Host's own credentials from its files. The token stays on the Rust
+/// side: the webview only learns whether the credentials were stored.
+fn local_identity(status: &Value) -> Result<LocalIdentity, BridgeError> {
+  let not_configured = || BridgeError::new("NOT_CONFIGURED", "the local Host is not paired yet", "not-sent");
+  if status.get("configured").and_then(Value::as_bool) != Some(true) || status.get("configError").is_some_and(|e| !e.is_null()) {
+    return Err(not_configured());
+  }
+  let text = |key: &str| status.get(key).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty());
+  let (Some(center_url), Some(device_id)) = (text("centerUrl"), text("deviceId")) else {
+    return Err(not_configured());
+  };
+  let home = reported_host_home(status).ok_or_else(|| invalid("Host home is unavailable"))?;
+  let device_token = read_env_secret(&home, RELAY_TOKEN_ENV)
+    .ok_or_else(|| BridgeError::new("NOT_CONFIGURED", "the local Host has no device token", "not-sent"))?;
+  Ok(LocalIdentity {
+    center_url: center_url.to_string(),
+    device_id: device_id.to_string(),
+    device_token,
+    ca: read_host_center_ca(&home)?,
+  })
+}
+
+/// The private CA the Host was paired with, or an empty string when it uses none.
+fn read_host_center_ca(home: &Path) -> Result<String, BridgeError> {
+  let unreadable = || BridgeError::new("STORE_FAILED", "could not read the Host center CA file", "not-sent");
+  let config: Value = match fs::read_to_string(home.join(CONFIG_FILE_NAME)) {
+    Ok(text) => serde_json::from_str(&text).map_err(|_| unreadable())?,
+    Err(_) => return Err(unreadable()),
+  };
+  let Some(path) = config.get("centerCaFile").and_then(Value::as_str).filter(|path| !path.trim().is_empty()) else {
+    return Ok(String::new());
+  };
+  let pem = fs::read_to_string(path).map_err(|_| unreadable())?;
+  if pem.len() > MAX_CA_BYTES {
+    return Err(unreadable());
+  }
+  Ok(pem.trim().to_string())
+}
+
+/// Hands the paired Host's identity to the desktop client, so a client that lost its login
+/// (reinstall, cleared data) reconnects without asking for anything. No network and no
+/// Host lifecycle: it only records credentials the Host already holds.
+#[tauri::command]
+pub async fn desktop_host_connect_local(
+  app: AppHandle,
+  webview: Webview,
+  bridge: State<'_, DesktopBridge>,
+) -> Result<Value, BridgeError> {
+  ensure_main_webview(&webview)?;
+  let identity = run_blocking(|| {
+    let _guard = HOST_CONTROL_LOCK.lock().unwrap();
+    let status = run_launcher(&["status".to_string()], None, STATUS_TIMEOUT)?;
+    local_identity(&status)
+  })
+  .await?;
+  // `centerCa` is public; the webview needs it to connect with the same trust the Host uses.
+  let mut result = json!({ "centerUrl": identity.center_url, "deviceId": identity.device_id, "centerCa": identity.ca });
+  store_client_credentials(
+    &app,
+    &bridge,
+    &mut result,
+    identity.center_url,
+    identity.device_id,
+    identity.device_token,
+    identity.ca,
+  )
+  .await;
   Ok(result)
 }
 
@@ -1217,6 +1376,181 @@ mod tests {
       assert_eq!(job(&label), Some(Some(new_pid)), "launchd should be running supervisor {new_pid}");
       let inodes = mapped_inodes(new_pid);
       assert!(inodes.contains(&new_inode) && !inodes.contains(&old_inode), "supervisor {new_pid} maps {inodes:?}, new launcher is {new_inode}, old {old_inode}");
+    }
+  }
+}
+
+#[cfg(test)]
+mod local_identity_tests {
+  use super::*;
+
+  const TOKEN: &str = "t0ken_t0ken_t0ken_t0ken_t0ken_t0ken_ABC";
+
+  /// A throw-away Host home with the files the launcher would have written.
+  struct Home(PathBuf);
+
+  impl Home {
+    fn new(tag: &str) -> Self {
+      let path = std::env::temp_dir().join(format!("pibot-local-identity-{tag}-{}", std::process::id()));
+      let _ = fs::remove_dir_all(&path);
+      fs::create_dir_all(&path).unwrap();
+      Home(path)
+    }
+
+    fn write(&self, name: &str, text: &str) -> &Self {
+      fs::write(self.0.join(name), text).unwrap();
+      self
+    }
+
+    fn status(&self) -> Value {
+      json!({
+        "configured": true,
+        "centerUrl": "https://center.example",
+        "deviceId": "mac-host-1",
+        "hostHome": self.0.to_string_lossy(),
+      })
+    }
+  }
+
+  impl Drop for Home {
+    fn drop(&mut self) {
+      let _ = fs::remove_dir_all(&self.0);
+    }
+  }
+
+  fn err_code(result: Result<LocalIdentity, BridgeError>) -> String {
+    result.err().expect("expected an error").code
+  }
+
+  #[test]
+  fn reads_the_hosts_own_credentials_without_a_ca() {
+    let home = Home::new("plain");
+    home
+      .write("secrets.env", &format!("E_LAUNCHER_CONTROL_TOKEN=ctl\nE_LAUNCHER_RELAY_TOKEN={TOKEN}\n"))
+      .write("config.json", r#"{"centerUrl":"https://center.example","deviceId":"mac-host-1"}"#);
+    let identity = local_identity(&home.status()).ok().expect("identity");
+    assert_eq!(
+      (identity.center_url.as_str(), identity.device_id.as_str(), identity.device_token.as_str(), identity.ca.as_str()),
+      ("https://center.example", "mac-host-1", TOKEN, "")
+    );
+  }
+
+  #[test]
+  fn carries_the_private_ca_the_host_was_paired_with() {
+    let home = Home::new("ca");
+    let ca_path = home.0.join("center-ca-1.pem");
+    fs::write(&ca_path, "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n").unwrap();
+    home
+      .write("secrets.env", &format!("export E_LAUNCHER_RELAY_TOKEN=\"{TOKEN}\"\n"))
+      .write("config.json", &json!({ "centerCaFile": ca_path.to_string_lossy() }).to_string());
+    let identity = local_identity(&home.status()).ok().expect("identity");
+    assert_eq!(identity.device_token, TOKEN, "quotes and `export` are part of the launcher's secrets syntax");
+    assert!(identity.ca.starts_with("-----BEGIN CERTIFICATE-----") && identity.ca.ends_with("-----END CERTIFICATE-----"));
+  }
+
+  #[test]
+  fn refuses_when_the_host_is_not_a_usable_pairing() {
+    let home = Home::new("refuse");
+    home.write("secrets.env", &format!("E_LAUNCHER_RELAY_TOKEN={TOKEN}\n")).write("config.json", "{}");
+    let status = home.status();
+    let with = |key: &str, value: Value| {
+      let mut copy = status.clone();
+      copy[key] = value;
+      copy
+    };
+    assert_eq!(err_code(local_identity(&with("configured", json!(false)))), "NOT_CONFIGURED");
+    assert_eq!(err_code(local_identity(&with("configError", json!({ "code": "CONFIG_INVALID" })))), "NOT_CONFIGURED");
+    assert_eq!(err_code(local_identity(&with("centerUrl", json!("  ")))), "NOT_CONFIGURED");
+    assert_eq!(err_code(local_identity(&with("deviceId", Value::Null))), "NOT_CONFIGURED");
+    assert_eq!(err_code(local_identity(&with("hostHome", json!("relative/home")))), "INVALID_ARGUMENT");
+    // A null configError is the launcher's way of saying "none".
+    assert!(local_identity(&with("configError", Value::Null)).is_ok());
+  }
+
+  #[test]
+  fn refuses_when_the_token_or_ca_file_is_unusable() {
+    let missing = Home::new("no-token");
+    missing.write("secrets.env", "E_LAUNCHER_CONTROL_TOKEN=ctl\n").write("config.json", "{}");
+    assert_eq!(err_code(local_identity(&missing.status())), "NOT_CONFIGURED");
+
+    let empty = Home::new("empty-token");
+    empty.write("secrets.env", "E_LAUNCHER_RELAY_TOKEN=\n").write("config.json", "{}");
+    assert_eq!(err_code(local_identity(&empty.status())), "NOT_CONFIGURED");
+
+    let dangling = Home::new("dangling-ca");
+    dangling
+      .write("secrets.env", &format!("E_LAUNCHER_RELAY_TOKEN={TOKEN}\n"))
+      .write("config.json", r#"{"centerCaFile":"/definitely/not/here.pem"}"#);
+    assert_eq!(err_code(local_identity(&dangling.status())), "STORE_FAILED");
+
+    let no_config = Home::new("no-config");
+    no_config.write("secrets.env", &format!("E_LAUNCHER_RELAY_TOKEN={TOKEN}\n"));
+    assert_eq!(err_code(local_identity(&no_config.status())), "STORE_FAILED");
+  }
+
+  #[test]
+  fn the_token_and_pairing_secret_never_reach_the_launcher_through_the_environment() {
+    for key in ["E_LAUNCHER_OWNER_PASSWORD", "E_LAUNCHER_PAIRING_SECRET", "E_LAUNCHER_RELAY_TOKEN", "E_LAUNCHER_CONTROL_TOKEN"] {
+      assert!(SECRET_ENV_KEYS.contains(&key), "{key} must be scrubbed so stdin is the only source");
+    }
+  }
+}
+
+#[cfg(test)]
+mod center_url_tests {
+  use super::*;
+  use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+
+  fn code_for(center: &str) -> String {
+    let payload = json!({ "u": center, "c": "A".repeat(43) });
+    format!("{}{}", pairing_code::PREFIX, URL_SAFE_NO_PAD.encode(payload.to_string()))
+  }
+
+  #[test]
+  fn accepts_a_bare_origin_and_drops_one_trailing_slash() {
+    for (raw, expected) in [
+      ("https://center.example", "https://center.example"),
+      (" https://center.example/ ", "https://center.example"),
+      ("https://center.example:8443", "https://center.example:8443"),
+      ("https://192.168.1.10:8443/", "https://192.168.1.10:8443"),
+      ("http://localhost:8080", "http://localhost:8080"),
+      ("http://127.0.0.1:8080/", "http://127.0.0.1:8080"),
+      ("http://[::1]:8080", "http://[::1]:8080"),
+    ] {
+      assert_eq!(validate_center_url(raw).ok().as_deref(), Some(expected), "{raw}");
+    }
+  }
+
+  #[test]
+  fn refuses_anything_that_is_more_than_an_origin() {
+    for bad in [
+      "https://center.example/subpath",
+      "https://center.example/subpath/",
+      "https://center.example//",
+      "https://center.example/?x=1",
+      "https://center.example?x=1",
+      "https://center.example/#top",
+      "https://center.example#top",
+      "https://user@center.example",
+      "https://user:pw@center.example",
+      "http://center.example",
+      "ftp://center.example",
+      "center.example",
+      "",
+    ] {
+      assert!(validate_center_url(bad).is_err(), "{bad} must be refused");
+    }
+  }
+
+  #[test]
+  fn a_pairing_code_must_carry_a_bare_origin() {
+    let center = |text: &str| read_pairing_code(&code_for(text)).ok().map(|(_, url)| url);
+    assert_eq!(center("https://center.example").as_deref(), Some("https://center.example"));
+    assert_eq!(center("https://center.example/").as_deref(), Some("https://center.example"));
+    // Each of these used to get past the check and fail later in the launcher, or send requests to a sub path.
+    for bad in ["https://center.example/sub", "https://center.example/?q=1", "https://center.example/#x", "https://u:p@center.example", "http://center.example"] {
+      let error = read_pairing_code(&code_for(bad)).err().expect(bad);
+      assert_eq!(error.code, "INVALID_PAIRING_CODE", "{bad}");
     }
   }
 }

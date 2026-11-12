@@ -2,3 +2,8 @@
 .ob-check-row { cursor: pointer; gap: 10px; }
 .ob-check { flex: none; width: 18px; height: 18px; accent-color: var(--bs-accent, currentColor); }
 .ob-note { font-size: .86rem; color: var(--muted); overflow-wrap: anywhere; }
+/* 配对码粘贴框：长串 base64 不能撑破行，等宽便于核对；警告提示沿用 .ob-note 并换色。 */
+.ob-code { flex: 1; width: 100%; min-width: 0; min-height: 76px; padding: 10px 12px; border: 1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 12px; background: transparent; color: var(--text); font: .76rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; resize: none; }
+.ob-code:focus-visible { outline: 2px solid var(--bs-accent, currentColor); outline-offset: 1px; }
+.ob-code:disabled { opacity: .6; }
+.ob-note.is-warn { color: var(--warning, #b45309); }

@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod host_service;
+pub mod pairing_code;
 pub mod updates;
 
 use serde::{Deserialize, Serialize};
@@ -179,6 +180,8 @@ pub fn run() {
       desktop_pick_file,
       host_service::desktop_host_status,
       host_service::desktop_host_pair,
+      host_service::desktop_host_pair_code,
+      host_service::desktop_host_connect_local,
       host_service::desktop_host_adopt,
       host_service::desktop_host_control,
       updates::desktop_update_status,
