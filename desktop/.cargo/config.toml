@@ -1,2 +1,7 @@
 [build]
 target-dir = "build/target"
+
+# Rust 1.90+ uses rust-lld by default on x86_64-unknown-linux-gnu; opt into
+# the toolchain-bundled rust-lld.exe on Windows MSVC as well to speed up linking.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"

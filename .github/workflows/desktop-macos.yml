@@ -79,6 +79,23 @@ jobs:
           rustc --version
           cargo --version
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            desktop/src-tauri -> ../build/target
+            desktop/host-launcher -> target
+          cache-on-failure: true
+
+      - name: Cache pinned desktop runtime archives
+        uses: actions/cache@v6
+        with:
+          path: |
+            desktop/build/cache/downloads
+            desktop/build/cache/search-tools/archives
+          key: desktop-archives-${{ runner.os }}-${{ hashFiles('host-core/build-desktop.js', 'host-core/cua-driver-release.json', 'host-core/search-bin.js') }}
+          restore-keys: |
+            desktop-archives-${{ runner.os }}-
+
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -94,7 +111,8 @@ jobs:
       # Includes the macOS-only LaunchAgent unload tests: a stop whose unload
       # cannot be confirmed must fail.
       - name: Launcher tests
-        run: cargo test --locked --manifest-path desktop/host-launcher/Cargo.toml
+        working-directory: desktop/host-launcher
+        run: cargo test --locked
 
       - name: macOS release tests
         run: node --test web/test/macos-client-release.test.mjs
@@ -140,7 +158,8 @@ jobs:
             --platform macos --arch aarch64 --format app --commit "$SOURCE_SHA"
 
       - name: Desktop crate tests
-        run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml --lib
+        working-directory: desktop
+        run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib
 
       - name: Update cycle against launchd (stop, swap, restore)
         run: scripts/macos-update-cycle-test.sh "$BUNDLE/macos/PiBot.app"

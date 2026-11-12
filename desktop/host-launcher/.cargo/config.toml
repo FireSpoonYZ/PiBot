@@ -1,0 +1,6 @@
+# Keep the standalone launcher crate's target directory separate from
+# desktop/src-tauri (desktop/build/target) so Swatinem/rust-cache does not
+# prune one workspace's dependencies while cleaning the other, and debug
+# launcher builds never collide with Tauri's bundled sidecar copy.
+[build]
+target-dir = "target"

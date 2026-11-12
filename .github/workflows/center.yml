@@ -83,7 +83,17 @@ jobs:
         with:
           node-version: '26.13.0'
           cache: npm
-          cache-dependency-path: center-server/package-lock.json
+          cache-dependency-path: |
+            center-web/package-lock.json
+            center-server/package-lock.json
+            host-core/package-lock.json
+      - name: Cache pinned Center DEB Node archives
+        uses: actions/cache@v6
+        with:
+          path: build/center-deb-cache/*.tar.gz
+          key: center-deb-node-${{ runner.os }}-${{ hashFiles('scripts/build-center-deb.mjs') }}
+          restore-keys: |
+            center-deb-node-${{ runner.os }}-
       - name: Verify product version consistency
         shell: bash
         env:
