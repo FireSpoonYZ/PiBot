@@ -86,10 +86,10 @@ export function projectInboxQueuedItems(inbox) {
     const requestId = data.requestId;
     if (
       typeof requestId !== 'string' ||
+      requestId.length === 0 ||
       requestId.trim() === '' ||
-      requestId.length > 128 ||
       !requestId.isWellFormed() ||
-      /\s/.test(requestId) ||
+      Buffer.byteLength(requestId, 'utf8') > 256 ||
       seen.has(requestId)
     ) {
       continue;

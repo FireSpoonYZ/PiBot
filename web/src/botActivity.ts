@@ -185,3 +185,29 @@ export function resolveComposerActionKind({
   }
   return hasDraft ? 'send' : 'idle';
 }
+
+export function shouldShowComposerStop({
+  phase,
+  online = true,
+  archived = false,
+  isStopping = false,
+  canStop = false,
+}: {
+  phase: BotActivityPhase | null | undefined;
+  online?: boolean;
+  archived?: boolean;
+  isStopping?: boolean;
+  canStop?: boolean;
+}): boolean {
+  if (!online || archived || isStopping || phase === 'stopping') return false;
+  return (
+    canStop &&
+    canStopBotActivity({
+      phase: phase ?? 'idle',
+      source: null,
+      scopeId: null,
+      requestId: null,
+      startedAt: null,
+    })
+  );
+}

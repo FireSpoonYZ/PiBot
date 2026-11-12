@@ -1243,9 +1243,15 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     const metaSnap = await harness.snapshot(WorkContextState, binding.nativeId, context);
     const stateSnap = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
     if (metaSnap && !stateSnap?.pending && !stateSnap?.stopped && !stateSnap?.error) {
+      const warmedScopes = new Set();
+      const warmScope = async (scopeId) => {
+        if (typeof scopeId !== 'string' || !scopeId || warmedScopes.has(scopeId)) return;
+        warmedScopes.add(scopeId);
+        await warmBotDirectoryIfNeeded(getLog().getScope(scopeId));
+      };
       const unreadPeek = inboxAfter(metaSnap.botId, metaSnap.scopeId, stateSnap?.handledLocalId ?? 0, 1);
       if (unreadPeek.items.length > 0) {
-        await warmBotDirectoryIfNeeded(getLog().getScope(metaSnap.scopeId));
+        await warmScope(metaSnap.scopeId);
       }
       if (unified && metaSnap.kind === 'dm') {
         replyOrigins = new Map();
@@ -1257,7 +1263,11 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
           if (item.selfEcho) continue;
           const message = item.message ?? {};
           if (message.category === 'reply' && typeof message.replyTo === 'string' && !replyOrigins.has(message.replyTo)) {
-            replyOrigins.set(message.replyTo, await sessions.replyOrigin(metaSnap.botId, message));
+            const originRec = await sessions.replyOrigin(metaSnap.botId, message);
+            replyOrigins.set(message.replyTo, originRec);
+            if (typeof originRec?.replyTarget?.scopeId === 'string') {
+              await warmScope(originRec.replyTarget.scopeId);
+            }
           }
         }
       }
@@ -1293,14 +1303,36 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         });
         const selfMemberId = memberKey(host.deviceId, meta.botId);
         const selfInfo = resolveBotMeta(host.deviceId, meta.botId);
-        const historyPage = getLog().history(meta.scopeId, {
-          order: 'descending',
-          limit: GROUP_PROMPT_HISTORY_LIMIT + 8,
-        });
-        const recentStored = historyPage.items
-          .filter((it) => it.localId <= batchThrough && it.message?.category === 'public')
-          .reverse()
-          .slice(-GROUP_PROMPT_HISTORY_LIMIT);
+        const collectedPublic = [];
+        let historyCursor = Number.isSafeInteger(batchThrough) && batchThrough >= 0
+          ? {
+              deviceId: host.deviceId,
+              kind: 'history-before',
+              key: meta.scopeId,
+              beforeLocalId: batchThrough + 1,
+            }
+          : null;
+        let upperLocalId = batchThrough;
+        for (let page = 0; page < 4 && collectedPublic.length < GROUP_PROMPT_HISTORY_LIMIT; page += 1) {
+          const historyPage = getLog().history(meta.scopeId, {
+            order: 'descending',
+            limit: GROUP_PROMPT_HISTORY_LIMIT + 8,
+            ...(historyCursor ? { cursor: historyCursor } : {}),
+          });
+          let progressed = false;
+          for (const it of historyPage.items) {
+            if (it.localId > upperLocalId) continue;
+            upperLocalId = it.localId - 1;
+            progressed = true;
+            if (it.message?.category === 'public') {
+              collectedPublic.push(it);
+              if (collectedPublic.length >= GROUP_PROMPT_HISTORY_LIMIT) break;
+            }
+          }
+          if (!historyPage.nextCursor || !progressed) break;
+          historyCursor = historyPage.nextCursor;
+        }
+        const recentStored = collectedPublic.reverse();
         const recentHistory = recentStored.map((it) => toGroupMessage(it, scopeMembersByBotId));
         const unreadMessages = items
           .filter((it) => it.localId <= batchThrough && !it.selfEcho && it.message?.category === 'public')
@@ -1328,8 +1360,30 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         if (trigger.replyTarget?.kind === 'room' && typeof trigger.replyTarget.scopeId === 'string') {
           const roomScope = getLog().getScope(trigger.replyTarget.scopeId);
           const roomMembers = roomScope?.members ?? [];
+          const dmScope = getLog().getScope(meta.scopeId);
+          const membersByBotId = new Map([
+            ...roomMembers.map((m) => [m.botId, m.deviceId]),
+            ...(dmScope?.members ?? []).map((m) => [m.botId, m.deviceId]),
+          ]);
           const selfMemberId = memberKey(host.deviceId, meta.botId);
           const selfInfo = resolveBotMeta(host.deviceId, meta.botId);
+          const triggerIds = new Set(trigger.triggerMessageIds ?? []);
+          const dmReplyMessages = items
+            .filter((it) =>
+              it.localId <= batchThrough &&
+              !it.selfEcho &&
+              (triggerIds.size > 0 ? triggerIds.has(it.message?.messageId) : it.message?.category === 'reply'),
+            )
+            .map((it) => {
+              const gm = toGroupMessage(it, membersByBotId);
+              if (gm.speaker?.kind === 'member' && gm.speaker.name) {
+                return {
+                  ...gm,
+                  speaker: { ...gm.speaker, name: `${gm.speaker.name} (DM reply)` },
+                };
+              }
+              return gm;
+            });
           wakeContext = {
             selfName: selfInfo.name || bot.role || meta.botId,
             selfMemberId,
@@ -1340,7 +1394,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
                 const info = resolveBotMeta(m.deviceId, m.botId);
                 return { name: info.name || m.botId, description: info.description || '' };
               }),
-            newMessages: [],
+            newMessages: dmReplyMessages,
           };
         } else {
           const peerInfo = resolveBotMeta(trigger.sender?.deviceId, trigger.sender?.botId);
@@ -1742,10 +1796,11 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         if (!meta.scopeId || meta.deviceId !== host.deviceId || publication.author?.kind !== 'bot' || publication.author.botId !== meta.botId) {
           throw messageError('BOT_CONTEXT_REQUIRED', 'publication requires the actual local work bot');
         }
+        const expectedScopeId = turn?.replyTarget?.scopeId ?? meta.scopeId;
         const log = getLog();
         if (log.getMessage(publication.messageId)) {
           const stored = log.publish(publication);
-          if (state.pending) state.pending.published = true;
+          if (state.pending && publication.scopeId === expectedScopeId) state.pending.published = true;
           return stored;
         }
         if (state.stopped) throw messageError('WORK_STOPPED', 'work context is stopped');
@@ -1766,7 +1821,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
             throw messageError('SCOPE_FORBIDDEN', 'publisher bot must be a current member of the origin scope');
           }
           const stored = log.publish(publication, guard);
-          state.pending.published = true;
+          if (publication.scopeId === expectedScopeId) state.pending.published = true;
           return stored;
         } catch (error) {
           if (error?.code !== 'STALE_INPUT' && !(error?.code === 'SCOPE_FORBIDDEN' && !currentMember(meta))) throw error;
@@ -1780,10 +1835,10 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     }, PUBLICATION_ERRORS, toolContext);
   }
 
-  async function passWork(api, toolContext, turn = null) {
+  async function passWork(api, toolContext, turn = null, options = null) {
     return guarded(async () => {
       assertHealthy();
-      await api.commit(async (tx) => {
+      const result = await api.commit(async (tx) => {
         const coordNativeId = coordinationIdFor(turn) ?? api.conversationId;
         const meta = await tx.doc(WorkContextState, coordNativeId);
         const state = await tx.doc(WorkDecisionState, coordNativeId);
@@ -1793,9 +1848,20 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
           throw messageError('BOT_CONTEXT_REQUIRED', 'silent pass requires a local work bot');
         }
         if (state.stopped) throw messageError('WORK_STOPPED', 'work context is stopped');
-        if (state.pending?.interruption) throw messageError('WORK_STOPPED', 'work decision was interrupted');
-        if (state.pending) state.pending.passed = true;
+        if (!state.pending?.prepared || state.error) throw messageError('WORK_CONTEXT_INACTIVE', 'work context has no prepared decision');
+        if (state.pending.replan || state.pending.takeover) throw messageError('STALE_INPUT', 'work decision needs newer input');
+        if (state.pending.interruption) throw messageError('WORK_STOPPED', 'work decision was interrupted');
+        if (!currentMember(meta)) {
+          state.pending.replan = true;
+          return { failure: messageError('SCOPE_FORBIDDEN', 'publisher bot must be a current member of the origin scope') };
+        }
+        const expectedScopeId = turn?.replyTarget?.scopeId ?? meta.scopeId;
+        if (!options?.scopeId || options.scopeId === expectedScopeId) {
+          state.pending.passed = true;
+        }
+        return null;
       }, toolContext);
+      if (result?.failure) throw result.failure;
     }, PUBLICATION_ERRORS, toolContext);
   }
 

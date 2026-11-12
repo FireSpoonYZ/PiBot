@@ -161,6 +161,31 @@ test('composerFlowControl: extractEditableUserText, isEditablePrimaryUserTurn, m
   const deduped = dedupeAttachmentMetas(existingAtt, resolved, 4);
   assert.deepEqual(deduped.map((x) => x.id), [idA, idB, idC]);
 
+  // Default maxCount (no 3rd argument) retains up to 16 images (does NOT truncate >4 items such as 6)
+  const makeAtt = (idx) => ({
+    id: idx.toString(16).padStart(64, '0'),
+    name: `img-${idx}.png`,
+    mimeType: 'image/png',
+    size: 68,
+    width: 1,
+    height: 1,
+  });
+  const sixDefault = dedupeAttachmentMetas(
+    [makeAtt(5), makeAtt(6)],
+    [makeAtt(1), makeAtt(2), makeAtt(3), makeAtt(4)],
+  );
+  assert.equal(sixDefault.length, 6);
+  assert.deepEqual(
+    sixDefault.map((x) => x.name),
+    ['img-1.png', 'img-2.png', 'img-3.png', 'img-4.png', 'img-5.png', 'img-6.png'],
+  );
+
+  const cappedAtSixteen = dedupeAttachmentMetas(
+    Array.from({ length: 8 }, (_, i) => makeAtt(100 + i)),
+    Array.from({ length: 12 }, (_, i) => makeAtt(1 + i)),
+  );
+  assert.equal(cappedAtSixteen.length, 16);
+
   // 5. mergeQueuedStripItems deduplicates Host live items + unsent pending outbox records
   const merged = mergeQueuedStripItems(
     [
@@ -301,6 +326,24 @@ test('remote-control-protocol & remote-live-protocol: validate delivery, withdra
     (err) => err?.code === 'INVALID_ARGUMENT',
   );
 
+  const longAsciiReqId = 'req-' + 'a'.repeat(196); // 200 UTF-8 bytes (>128 chars)
+  const emojiReqId = 'req-' + '🚀'.repeat(40); // 164 UTF-8 bytes (<=256), surrogate pairs
+  const longEmojiReqId = 'req-' + 'b'.repeat(75) + '-' + '🚀'.repeat(40); // 240 UTF-8 bytes, 160 UTF-16 code units (>128)
+  assert.ok(Buffer.byteLength(longAsciiReqId, 'utf8') === 200);
+  assert.ok(Buffer.byteLength(emojiReqId, 'utf8') <= 256);
+  assert.ok(Buffer.byteLength(longEmojiReqId, 'utf8') <= 256);
+
+  for (const id of [longAsciiReqId, emojiReqId, longEmojiReqId]) {
+    assert.equal(
+      normalizeControlCall('submit', { botId: 'bot-1', requestId: id, text: 'ok' }).params.requestId,
+      id,
+    );
+    assert.equal(
+      normalizeControlCall('withdrawQueued', { botId: 'bot-1', requestId: id }).params.requestId,
+      id,
+    );
+  }
+
   const baseLiveState = {
     history: [],
     historyTruncated: false,
@@ -309,13 +352,31 @@ test('remote-control-protocol & remote-live-protocol: validate delivery, withdra
     tools: [],
     toolsTruncated: false,
     busy: true,
-    queuedCount: 1,
+    queuedCount: 4,
     queuedItems: [
       {
         requestId: 'req-q1',
         preview: '排队摘要',
         delivery: 'steer',
         attachmentCount: 2,
+      },
+      {
+        requestId: longAsciiReqId,
+        preview: '200字节ASCII请求ID',
+        delivery: 'followUp',
+        attachmentCount: 0,
+      },
+      {
+        requestId: emojiReqId,
+        preview: 'Emoji代理对请求ID',
+        delivery: 'followUp',
+        attachmentCount: 0,
+      },
+      {
+        requestId: longEmojiReqId,
+        preview: '超128码元含Emoji请求ID',
+        delivery: 'steer',
+        attachmentCount: 1,
       },
     ],
     turnAdmission: null,
@@ -331,8 +392,12 @@ test('remote-control-protocol & remote-live-protocol: validate delivery, withdra
     },
     { kind: 'primary', botId: 'bot-1' },
   );
-  assert.equal(snapshotFrame.state.queuedItems.length, 1);
+  assert.equal(snapshotFrame.state.queuedItems.length, 4);
   assert.equal(snapshotFrame.state.queuedItems[0].delivery, 'steer');
+  assert.deepEqual(
+    snapshotFrame.state.queuedItems.map((q) => q.requestId),
+    ['req-q1', longAsciiReqId, emojiReqId, longEmojiReqId],
+  );
 
   const hostLiveFrame = readLiveHostFrame({
     type: 'live-frame',
@@ -345,7 +410,10 @@ test('remote-control-protocol & remote-live-protocol: validate delivery, withdra
       state: baseLiveState,
     },
   });
-  assert.equal(hostLiveFrame.frame.state.queuedItems[0].requestId, 'req-q1');
+  assert.deepEqual(
+    hostLiveFrame.frame.state.queuedItems.map((q) => q.requestId),
+    ['req-q1', longAsciiReqId, emojiReqId, longEmojiReqId],
+  );
 
   assert.throws(
     () =>
@@ -839,6 +907,61 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
   await waitUntil(() => (liveState?.queuedItems?.length ?? 0) === 1, { label: '1 item left in queue' });
   assert.equal(liveState.queuedItems[0].requestId, 'req-follow-keep');
 
+  // Verify 200-byte ASCII requestId & emoji surrogate-pair requestId survive submit -> live.queuedItems -> single withdrawQueued intact!
+  const e2eLongAsciiReqId = 'req-' + 'a'.repeat(196);
+  const e2eEmojiReqId = 'req-' + '🚀'.repeat(40);
+  await localAdapter(server.deviceId, 'submit', {
+    botId: bot.botId,
+    requestId: e2eLongAsciiReqId,
+    text: '长200字节ASCII排队撤回验证',
+  });
+  await localAdapter(server.deviceId, 'submit', {
+    botId: bot.botId,
+    requestId: e2eEmojiReqId,
+    text: '含Emoji代理对排队撤回验证',
+  });
+  await waitUntil(
+    () => (liveState?.queuedItems?.length ?? 0) === 3,
+    { label: 'long ASCII + emoji requestIds projected in live.queuedItems', onTimeout: () => liveState },
+  );
+  assert.equal(liveEnded, false, 'live SSE stream must not break on long or emoji requestId');
+  assert.deepEqual(
+    liveState.queuedItems.map((q) => q.requestId),
+    ['req-follow-keep', e2eLongAsciiReqId, e2eEmojiReqId],
+  );
+
+  const withdrawnLongAscii = await localAdapter(server.deviceId, 'withdrawQueued', {
+    botId: bot.botId,
+    requestId: e2eLongAsciiReqId,
+  });
+  assert.deepEqual(withdrawnLongAscii, {
+    botId: bot.botId,
+    withdrawn: [
+      {
+        requestId: e2eLongAsciiReqId,
+        text: '长200字节ASCII排队撤回验证',
+        delivery: 'followUp',
+      },
+    ],
+  });
+
+  const withdrawnEmoji = await localAdapter(server.deviceId, 'withdrawQueued', {
+    botId: bot.botId,
+    requestId: e2eEmojiReqId,
+  });
+  assert.deepEqual(withdrawnEmoji, {
+    botId: bot.botId,
+    withdrawn: [
+      {
+        requestId: e2eEmojiReqId,
+        text: '含Emoji代理对排队撤回验证',
+        delivery: 'followUp',
+      },
+    ],
+  });
+  await waitUntil(() => (liveState?.queuedItems?.length ?? 0) === 1, { label: 'back to 1 item after long/emoji withdraw' });
+  assert.equal(liveState.queuedItems[0].requestId, 'req-follow-keep');
+
   // Enqueue req-promote and promote it to steer via steerQueued, plus send a direct delivery:'steer'
   await localAdapter(server.deviceId, 'submit', {
     botId: bot.botId,
@@ -1084,6 +1207,12 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
       assert.equal(serialized.includes('第二问修改版'), false);
       return [{ type: 'text', text: '第一答重写版' }];
     }
+    if (txt.includes('分叉重写首轮并保留未读收件')) {
+      assert.equal(serialized.includes('第一问原版'), false);
+      assert.equal(serialized.includes('第二问原版'), false);
+      assert.equal(serialized.includes('未导入的群聊上下文：端口改为 9091'), true);
+      return [{ type: 'text', text: '首轮分叉且保留未读收件回答' }];
+    }
     if (txt.includes('清空后新问题')) return [{ type: 'text', text: '清空后新回答' }];
     if (txt.includes('清空后修改问题')) return [{ type: 'text', text: '清空后修改回答' }];
     return [{ type: 'text', text: '通用回答' }];
@@ -1199,15 +1328,46 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
     { label: 'req-fresh-1 done' },
   );
 
+  await localAdapter(server.deviceId, 'submit', {
+    botId: bot2.botId,
+    requestId: 'req-fresh-2',
+    text: '第二问原版',
+  });
+  await waitUntil(
+    async () => (await controlClient.getSubmission(bot2.botId, 'req-fresh-2'))?.status === 'done',
+    { label: 'req-fresh-2 done' },
+  );
+
   const bot2Hist = await controlClient.history(bot2.botId, { limit: 20 });
-  const bot2FirstUser = bot2Hist.items.find((it) => it.kind === 'host.user-message');
-  assert.ok(bot2FirstUser, 'fresh bot has entry #1');
+  const bot2UserEntries = bot2Hist.items.filter((it) => it.kind === 'host.user-message');
+  assert.equal(bot2UserEntries.length, 2, 'fresh bot has 2 user turns before edit');
+  const bot2FirstUser = bot2UserEntries[0];
+
+  // C.5: Unimported scope message protection across editMessage!
+  // Create a room scope for bot2 (with background work paused so no work decision races)
+  // and publish an inbound message to the ledger right before editing Turn #1.
+  const unimportedRoom = await controlClient.createScope({
+    requestId: 'mk-unimported-edit-room',
+    kind: 'room',
+    title: '收件保护验证群',
+    members: [
+      { deviceId: server.deviceId, botId: bot.botId },
+      { deviceId: server.deviceId, botId: bot2.botId },
+    ],
+  });
+  await controlClient.stopWork(bot.botId, unimportedRoom.scope.scopeId);
+  await controlClient.stopWork(bot2.botId, unimportedRoom.scope.scopeId);
+
+  await controlClient.publishUserMessage(unimportedRoom.scope.scopeId, {
+    messageId: 'unimported-room-msg-1',
+    text: '未导入的群聊上下文：端口改为 9091',
+  });
 
   await localAdapter(server.deviceId, 'editMessage', {
     botId: bot2.botId,
     entryId: bot2FirstUser.id,
     requestId: 'req-fresh-edit-1',
-    text: '第一问彻底重写',
+    text: '分叉重写首轮并保留未读收件',
   });
   await waitUntil(
     async () => (await controlClient.getSubmission(bot2.botId, 'req-fresh-edit-1'))?.status === 'done',
@@ -1215,10 +1375,23 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
   );
 
   const bot2HistRewound = await controlClient.history(bot2.botId, { limit: 20 });
+  const importedScopeEntries = bot2HistRewound.items.filter((it) => it.kind === 'host.scope-message');
+  assert.equal(
+    importedScopeEntries.some(
+      (it) =>
+        it.data?.message?.messageId === 'unimported-room-msg-1' &&
+        JSON.stringify(it.data?.message ?? {}).includes('未导入的群聊上下文：端口改为 9091'),
+    ),
+    true,
+    'unimported ledger message must not be lost by editMessage and must sync into the new forked primary history',
+  );
+
   const bot2Msgs = bot2HistRewound.items.filter((it) => it.kind === 'host.user-message' || it.kind === 'pi.assistant');
   assert.equal(bot2Msgs.length, 2);
-  assert.equal(JSON.stringify(bot2Msgs[0].model).includes('第一问彻底重写'), true);
-  assert.equal(JSON.stringify(bot2Msgs[1].model).includes('第一答重写版'), true);
+  assert.equal(JSON.stringify(bot2Msgs[0].model).includes('分叉重写首轮并保留未读收件'), true);
+  assert.equal(JSON.stringify(bot2Msgs[1].model).includes('首轮分叉且保留未读收件回答'), true);
+  assert.equal(JSON.stringify(bot2Msgs).includes('第一问原版'), false);
+  assert.equal(JSON.stringify(bot2Msgs).includes('第二问原版'), false);
   } finally {
     liveAbort.abort();
     await liveLoopPromise.catch(() => {});

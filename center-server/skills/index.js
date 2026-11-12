@@ -21,6 +21,7 @@
 // keep agent/background_review.py and agent/curator.py summaries working.
 
 import { createHash, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -165,6 +166,15 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
   }
 
   // --- identity / queue -------------------------------------------------------
+  function normalizeCronRefs(value) {
+    if (!value) return null;
+    const raw = Array.isArray(value) || value instanceof Set
+      ? value
+      : (Array.isArray(value?.skills) ? value.skills : (Array.isArray(value?.skillNames) ? value.skillNames : null));
+    if (!raw) return null;
+    return [...new Set([...raw].filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim()))];
+  }
+
   function normalizeIdentity(identity) {
     if (!identity || typeof identity !== 'object') throw error('INVALID_ARGUMENT', 'identity is required');
     const { deviceId, botId } = identity;
@@ -175,10 +185,12 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     if (!['foreground', 'background_review', 'curator'].includes(origin)) {
       throw error('INVALID_ARGUMENT', `Invalid identity origin '${origin}'`);
     }
+    const cronRefs = normalizeCronRefs(identity.cronReferencedSkills ?? identity.cron_referenced_skills);
     return {
       deviceId, botId, origin,
       sessionId: typeof identity.sessionId === 'string' ? identity.sessionId : null,
       requestId: typeof identity.requestId === 'string' ? identity.requestId : null,
+      ...(cronRefs ? { cronReferencedSkills: cronRefs } : {}),
     };
   }
 
@@ -249,6 +261,48 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       .some((b) => b.enabled && (b.deviceId !== row.device_id || b.botId !== row.bot_id));
   }
 
+  function cronReferencedSkillsFor(id, a) {
+    const names = new Set();
+    for (const src of [id?.cronReferencedSkills, a?.cron_referenced_skills, a?.cronReferencedSkills]) {
+      const normalized = normalizeCronRefs(src);
+      if (normalized) {
+        for (const item of normalized) names.add(item);
+      }
+    }
+    const jobId = id?.learningSource?.jobId ?? id?.sessionId ?? null;
+    if (names.size === 0 && id?.origin === 'curator' && jobId) {
+      const learningDbPath = path.join(dataRoot, 'learning.sqlite');
+      if (existsSync(learningDbPath)) {
+        let ldb = null;
+        try {
+          ldb = new DatabaseSync(learningDbPath, { readOnly: true });
+          const row = ldb.prepare(
+            "SELECT result FROM learning_calls WHERE job_id = ? AND method = 'schedule.call' AND answered = 1 AND answered_by = 'host' AND result IS NOT NULL ORDER BY seq DESC LIMIT 1",
+          ).get(jobId);
+          if (row?.result) {
+            const normalized = normalizeCronRefs(JSON.parse(row.result));
+            if (normalized) {
+              for (const item of normalized) names.add(item);
+            }
+          }
+        } catch {
+          // Best-effort lookup when learning.sqlite is present and readable.
+        } finally {
+          try { ldb?.close(); } catch { /* ignore */ }
+        }
+      }
+    }
+    return names;
+  }
+
+  function isCronReferenced(row, rawName, cronSet) {
+    if (!cronSet || cronSet.size === 0) return false;
+    if (row?.name && cronSet.has(row.name)) return true;
+    if (row?.fm_name && cronSet.has(row.fm_name)) return true;
+    if (typeof rawName === 'string' && cronSet.has(rawName.trim())) return true;
+    return false;
+  }
+
   // --- usage records ----------------------------------------------------------
   function usageRow(id, name) {
     const row = stmts.usageGet.get(id.deviceId, id.botId, name);
@@ -272,11 +326,7 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     });
   }
 
-  const bumpView = (id, name) => usageMutate(id, name, (rec) => {
-    rec.view_count = (Number(rec.view_count) || 0) + 1;
-    rec.last_viewed_at = now();
-    return null;
-  });
+  const bumpView = (id, name) => usageMutate(id, name, (rec) => U.bumpViewApply(rec));
   const bumpUse = (id, name) => usageMutate(id, name, (rec) => U.bumpUseApply(rec));
   const bumpPatch = (id, name) => usageMutate(id, name, (rec) => U.bumpPatchApply(rec));
   const forget = (id, name) => {
@@ -672,8 +722,8 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     return U.checkFilePath(filePath);
   }
 
-  /** Apply one skill_manage operation. Returns {result, row?, skillId?, archivedSkillName?, files?, usage?}. */
-  function applyManageOp(id, a, installedList) {
+  /** Apply one skill_manage operation. Returns {result, row?, skillId?, archivedSkillName?, disabledInstallationId?, files?, usage?}. */
+  function applyManageOp(id, a, installedList, options = {}) {
     const action = a.action;
     if (!action || typeof action !== 'string') return U.refusal("action is required. Use: create, patch, write_file, remove_file");
     if (action === 'create') return opCreate(id, a, installedList);
@@ -695,12 +745,18 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       if (isSharedSkill(delRow)) {
         return U.refusal(`Skill '${delRow.name}' is shared across Bots and cannot be archived by a single Bot's curator.`);
       }
+      const cronRefs = cronReferencedSkillsFor(id, a);
+      if (isCronReferenced(delRow, a.name, cronRefs)) {
+        return U.refusal(`Skill '${delRow.name}' is referenced by a scheduled task (cron) and cannot be archived.`);
+      }
       const absorbedRef = typeof a.absorbed_into === 'string' ? a.absorbed_into.trim() : '';
       const target = absorbedRef ? resolveManagedLive(id, absorbedRef) : null;
       if (!target || target.id === delRow.id) {
         return U.refusal("Consolidation delete requires absorbed_into naming a surviving live skill.");
       }
-      const [ok, msg] = archiveSkillNow(id, delRow.name, installedList);
+      const [ok, msg, disabledInstallationId] = archiveSkillNow(id, delRow.name, installedList, {
+        deferBindingDisable: options.deferBindingDisable === true,
+      });
       if (!ok) return U.refusal(msg);
       return {
         result: U.successResult({
@@ -709,6 +765,7 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
           absorbed_into: target.name,
         }),
         archivedSkillName: delRow.name,
+        disabledInstallationId: disabledInstallationId ?? null,
       };
     }
     if (!['patch', 'edit', 'write_file', 'remove_file'].includes(action)) {
@@ -744,22 +801,24 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     return null;
   }
 
-  /** Archive immediately for the management API. */
-  function archiveSkillNow(id, name, installedList) {
+  /** Archive immediately for the management API (or defer center.sqlite binding disable until batch commit). */
+  function archiveSkillNow(id, name, installedList, options = {}) {
+    const { deferBindingDisable = false } = options;
     const row = managedRow(id, name);
     if (!row) {
-      if (isHubInstalled(id, name, installedList)) return [false, `skill '${name}' is hub-installed; never archive`];
-      return [false, `skill '${name}' not found`];
+      if (isHubInstalled(id, name, installedList)) return [false, `skill '${name}' is hub-installed; never archive`, null];
+      return [false, `skill '${name}' not found`, null];
     }
     const { record } = usageRow(id, name);
-    if (record?.state === U.STATE_ARCHIVED) return [false, `skill '${name}' not found`];
+    if (record?.state === U.STATE_ARCHIVED) return [false, `skill '${name}' not found`, null];
     const current = record ?? U.emptyRecord();
     const bindingWasEnabled = Boolean(row.installation_id && bindingEnabled(id, row.installation_id));
+    const disabledInstallationId = bindingWasEnabled ? row.installation_id : null;
     U.setStateApply(current, U.STATE_ARCHIVED);
     current.archive_binding_was_enabled = bindingWasEnabled;
     usageWrite(id, name, usageRow(id, name).revision + 1, current);
-    if (bindingWasEnabled) setBindingEnabled(id, row.installation_id, false);
-    return [true, `archived to .archive/${name}`];
+    if (!deferBindingDisable && disabledInstallationId) setBindingEnabled(id, disabledInstallationId, false);
+    return [true, `archived to .archive/${name}`, disabledInstallationId];
   }
 
   function restoreSkillNow(id, name, installedList) {
@@ -941,8 +1000,11 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       if (lockErr) return [false, lockErr.error ?? `skill '${name}' is locked`];
       if (usageRow(id, row.name).record?.pinned) return [false, `skill '${name}' is pinned`];
       if (isSharedSkill(row)) return [false, `skill '${name}' is shared across Bots`];
-      const [ok, msg] = tx(() => archiveSkillNow(id, row.name, installedList));
+      const cronRefs = cronReferencedSkillsFor(id, a);
+      if (isCronReferenced(row, name, cronRefs)) return [false, `skill '${row.name}' is referenced by a scheduled task (cron)`];
+      const [ok, msg, disabledInstallationId] = tx(() => archiveSkillNow(id, row.name, installedList, { deferBindingDisable: true }));
       if (ok) {
+        if (disabledInstallationId) setBindingEnabled(id, disabledInstallationId, false);
         try { await packages.reconcileDevice(id.deviceId); } finally { notify(id.deviceId); }
       }
       return [ok, msg];
@@ -1056,7 +1118,10 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     const managed = resolveManagedLive(id, name);
     if (managed) {
       const result = viewManaged(id, managed, args.file_path);
-      if (result.success) bumpView(id, managed.name);
+      if (result.success) {
+        bumpView(id, managed.name);
+        if (result.state === U.STATE_STALE) result.state = U.STATE_ACTIVE;
+      }
       return result;
     }
     const installedList = await installedSkills(id);
@@ -1111,6 +1176,7 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       if (managed) {
         const view = viewManaged(id, managed, filePath ?? 'SKILL.md');
         if (!view.success) return view;
+        bumpView(id, managed.name);
         return sliceLines(view, args);
       }
       const installed = resolveInstalled(installedList, skillRef);
@@ -1183,20 +1249,29 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       if (replayed.hit) return json(replayed.hit);
       const ops = batch ? args.operations : [args];
       const installedList = await installedSkills(id);
+      const topCronRefs = normalizeCronRefs(args.cron_referenced_skills ?? args.cronReferencedSkills);
+      const mergedCronRefs = topCronRefs || id.cronReferencedSkills
+        ? [...new Set([...(id.cronReferencedSkills ?? []), ...(topCronRefs ?? [])])]
+        : undefined;
       // The batch owns the request id even when several edits target one Skill.
-      const draftIdentity = { ...id, requestId: null };
+      const draftIdentity = {
+        ...id,
+        requestId: null,
+        ...(mergedCronRefs ? { cronReferencedSkills: mergedCronRefs } : {}),
+      };
       let committedBatch;
       try {
         committedBatch = tx(() => {
           const results = [];
           const touchedSkillIds = [];
           const archivedSkillNames = [];
+          const disabledInstallationIds = [];
           let singleOutcome;
           for (const op of ops) {
             if (!op || typeof op !== 'object' || Array.isArray(op)) {
               throw { refusal: 'Each operation must be an object with name+action.', results };
             }
-            const applied = applyManageOp(draftIdentity, { ...op }, installedList);
+            const applied = applyManageOp(draftIdentity, { ...op }, installedList, { deferBindingDisable: true });
             const outcome = applied.result ?? applied;
             singleOutcome = outcome;
             results.push({ action: op.action, name: op.name, ...(op.file_path ? { file_path: op.file_path } : {}), ...pickResult(outcome) });
@@ -1208,11 +1283,14 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
             if (applied.archivedSkillName && !archivedSkillNames.includes(applied.archivedSkillName)) {
               archivedSkillNames.push(applied.archivedSkillName);
             }
+            if (applied.disabledInstallationId && !disabledInstallationIds.includes(applied.disabledInstallationId)) {
+              disabledInstallationIds.push(applied.disabledInstallationId);
+            }
           }
           const response = batch
             ? { success: true, results, operations_applied: ops.length }
             : singleOutcome;
-          return { response, touchedSkillIds, archivedSkillNames };
+          return { response, touchedSkillIds, archivedSkillNames, disabledInstallationIds };
         });
       } catch (err) {
         if (!err?.refusal) throw err;
@@ -1220,24 +1298,35 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
           ? { success: false, error: err.refusal, results: err.results, operations_applied: 0, rolled_back: true }
           : (err.outcome ?? U.refusal(err.refusal)));
       }
-      const { response, touchedSkillIds, archivedSkillNames } = committedBatch;
+      const { response, touchedSkillIds, archivedSkillNames, disabledInstallationIds } = committedBatch;
+      for (const installationId of disabledInstallationIds) {
+        setBindingEnabled(id, installationId, false);
+      }
       if (archivedSkillNames.length > 0) {
         try { await packages.reconcileDevice(id.deviceId); } catch { /* best-effort reconcile */ } finally { notify(id.deviceId); }
       }
       const updatedSkills = [];
+      let allPublished = true;
       for (const skillId of touchedSkillIds) {
         const currentRow = stmts.skillById.get(skillId);
         if (!currentRow || usageRow(id, currentRow.name).record?.state === U.STATE_ARCHIVED) continue;
         updatedSkills.push(currentRow.name);
         try {
-          await actions.publish({ ...id, approvedLearningDraft: true }, { skillId, expectedRevision: currentRow.revision });
+          const pubResult = await actions.publish({ ...id, approvedLearningDraft: true }, { skillId, expectedRevision: currentRow.revision });
+          const enrichedPub = pubResult?.publication ? withDeployment(id, pubResult) : pubResult;
+          const pubStatus = enrichedPub?.publication?.status;
+          const depStatus = enrichedPub?.deployment?.status;
+          if (!['enabled', 'applied'].includes(pubStatus) || depStatus === 'failed') {
+            allPublished = false;
+          }
         } catch {
           // Revision history is already durably committed; transient package state reconciles on next publish/startup.
+          allPublished = false;
         }
       }
       if (ops.length) {
         Object.assign(response, {
-          published: true,
+          published: allPublished,
           ...(updatedSkills.length ? { updatedSkills } : {}),
           ...(archivedSkillNames.length ? { archivedSkills: archivedSkillNames } : {}),
         });
@@ -1572,6 +1661,9 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       const usage = usageRow(id, row.name);
       assertRevision(input.expectedRevision, usage.revision);
       if (usage.record?.state === U.STATE_ARCHIVED) return { ...summarizeSkill(id, row), state: U.STATE_ARCHIVED };
+      if (isSharedSkill(row)) {
+        throw error('INVALID_STATE', 'shared or global skill cannot be archived; switch visibility back to private first');
+      }
       const [ok, msg] = archiveSkillNow(id, row.name, installedList);
       if (!ok) throw error('INVALID_STATE', msg);
       try { await packages.reconcileDevice(id.deviceId); } finally { notify(id.deviceId); }
@@ -1963,7 +2055,7 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     return {
       ...base,
       publishedRevision: row.published_rev ?? null,
-      hasUnpublishedDraft: Boolean(pendingSource),
+      hasUnpublishedDraft: record?.state !== U.STATE_ARCHIVED && (Boolean(pendingSource) || (row.published_rev ?? 0) < row.head_rev),
       visibilityScope: installation?.visibilityScope ?? 'private',
       useCount: record?.use_count ?? 0,
       viewCount: record?.view_count ?? 0,
@@ -2175,7 +2267,8 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       const fn = skillUsageCalls[name.slice('skill_usage.'.length)];
       if (!fn) throw error('INVALID_ARGUMENT', `Unsupported skill_usage call '${name}'`);
       const installedList = await installedSkills(id);
-      return enqueue(id, () => fn(id, a, installedList));
+      const callId = { ...id, learningSource: learningSourceOf(identity, id) };
+      return enqueue(id, () => fn(callId, a, installedList));
     }
     if (name.startsWith('skill_provenance.')) {
       const fn = provenanceCalls[name.slice('skill_provenance.'.length)];

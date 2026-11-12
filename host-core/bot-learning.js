@@ -280,6 +280,8 @@ export function createBotLearning({
   const jobs = new Map();
   // botId -> Promise：自动上报按 Bot 串行，游标推进只发生在 Center 受理之后。
   const reportChains = new Map();
+  // botId -> Promise：追踪在飞的远端 cancel 请求，确保空闲重试不早于取消到达 Center。
+  const cancelInFlightByBot = new Map();
   // botId -> 已上报的最大 entryId：Center 受理即推进；失败保留，下次完结把
   // 未上报区间一并捎上——增量从不丢、也不重发 Center 已确认的部分。
   const reportCursors = new Map();
@@ -506,10 +508,10 @@ export function createBotLearning({
       terminalStatus: null,
       summary: null,
     };
-    job.done = driveJob(bot, job);
+    const runPromise = driveJob(bot, job);
     jobs.set(bot.botId, job);
     emitLearningState(bot.botId);
-    job.done.catch(() => {}).finally(() => {
+    job.done = runPromise.catch(() => {}).finally(() => {
       if (jobs.get(bot.botId) === job) jobs.delete(bot.botId);
       const status = normalizeOutcomeStatus(job.terminalStatus, job.controller.signal.aborted);
       const seq = (outcomeSeqByBot.get(bot.botId) ?? 0) + 1;
@@ -531,12 +533,23 @@ export function createBotLearning({
   }
 
   /** 尽力取消远端作业；Center 不通时静默（Center 超时机制兜底标记 interrupted）。 */
-  async function safeCancelRemote(botId, jobId) {
-    try {
-      const client = getCenterClient?.();
-      if (!client || typeof client.botLearning !== 'function' || typeof jobId !== 'string' || jobId === '') return;
-      await client.botLearning(host.deviceId, botId, { action: 'cancel', jobId }, AbortSignal.timeout(CLOSE_CANCEL_TIMEOUT_MS));
-    } catch { /* 尽力而为 */ }
+  function safeCancelRemote(botId, jobId) {
+    const task = (async () => {
+      try {
+        const client = getCenterClient?.();
+        if (!client || typeof client.botLearning !== 'function' || typeof jobId !== 'string' || jobId === '') return;
+        await client.botLearning(host.deviceId, botId, { action: 'cancel', jobId }, AbortSignal.timeout(CLOSE_CANCEL_TIMEOUT_MS));
+      } catch { /* 尽力而为 */ }
+    })();
+    if (botId) {
+      const prev = cancelInFlightByBot.get(botId);
+      const tracked = prev ? prev.then(() => task, () => task) : task;
+      cancelInFlightByBot.set(botId, tracked);
+      tracked.finally(() => {
+        if (cancelInFlightByBot.get(botId) === tracked) cancelInFlightByBot.delete(botId);
+      });
+    }
+    return task;
   }
 
   /**
@@ -981,7 +994,7 @@ export function createBotLearning({
     }
   }
 
-  function scheduleIdleSettle(botId) {
+  function scheduleIdleSettle(botId, minDelayMs = 0) {
     if (closing || !botId) return;
     clearSettleTimer(botId);
     if (suspended) {
@@ -989,14 +1002,15 @@ export function createBotLearning({
       return;
     }
     pendingBotChecks.add(botId);
-    if (settleMs <= 0) {
+    const delayMs = Math.max(settleMs, minDelayMs);
+    if (delayMs <= 0) {
       enqueueReport(botId, () => flushIdleReview(botId));
       return;
     }
     const timer = setTimeout(() => {
       settleTimers.delete(botId);
       enqueueReport(botId, () => flushIdleReview(botId));
-    }, settleMs);
+    }, delayMs);
     timer.unref?.();
     settleTimers.set(botId, timer);
   }
@@ -1015,6 +1029,19 @@ export function createBotLearning({
       pendingBotChecks.add(botId);
       abortJob(job);
       void safeCancelRemote(botId, job.jobId);
+    }
+  }
+
+  /**
+   * 前台历史编辑等需独占空闲状态的入口：抢占后台自动反思并等待其彻底退出 jobs；
+   * 手动发起的 learn/review/curate 不中止也不等待，保持 isActive(botId)===true。
+   */
+  async function preemptAndWaitForForeground(botId) {
+    if (!botId) return;
+    const job = jobs.get(botId);
+    preemptForForeground(botId);
+    if (job && job.automatic === true) {
+      await Promise.resolve(job.done).catch(() => {});
     }
   }
 
@@ -1088,14 +1115,22 @@ export function createBotLearning({
       return;
     }
     if (isBotIdle && !(await isBotIdle(bot))) {
-      if (!closing && (preemptEpochByBot.get(botId) ?? 0) === startEpoch) scheduleIdleSettle(botId);
+      if (!closing && (preemptEpochByBot.get(botId) ?? 0) === startEpoch) scheduleIdleSettle(botId, 50);
       return;
     }
-    if ((preemptEpochByBot.get(botId) ?? 0) !== startEpoch) return;
+    const pendingCancel = cancelInFlightByBot.get(botId);
+    if (pendingCancel) await pendingCancel;
+    if (closing || (preemptEpochByBot.get(botId) ?? 0) !== startEpoch) return;
     const status = await client.botLearning(host.deviceId, botId, { action: 'status' });
-    if ((preemptEpochByBot.get(botId) ?? 0) !== startEpoch) return;
+    if (closing || (preemptEpochByBot.get(botId) ?? 0) !== startEpoch) return;
     if (isBotIdle && !(await isBotIdle(bot))) {
-      if (!closing) scheduleIdleSettle(botId);
+      if (!closing && (preemptEpochByBot.get(botId) ?? 0) === startEpoch) scheduleIdleSettle(botId, 50);
+      return;
+    }
+    // 若 Center 侧上一轮被取消作业仍在 CANCEL_GRACE_MS 结算窗口内（activeJob 尚未清空、
+    // 计数尚未回滚）或另有活动作业，保留重试标记并延后重查，避免提前 start 误返 already-reported 吞掉重试。
+    if (status?.activeJob) {
+      if (!closing && (preemptEpochByBot.get(botId) ?? 0) === startEpoch) scheduleIdleSettle(botId, 50);
       return;
     }
     if (status.settings?.reviewModelRef) assertUsableModel(status.settings.reviewModelRef);
@@ -1125,7 +1160,7 @@ export function createBotLearning({
     preemptedRetryBots.delete(botId);
     pendingWorkDeltas.delete(botId);
     // Center 已受理本次增量（无论是否成 job）：推进游标，未受理的下次完结补报。
-    reportCursors.set(botId, snapshot.span.throughEntryId);
+    reportCursors.set(botId, Math.max(reportCursors.get(botId) ?? 0, snapshot.span.throughEntryId));
     if ((preemptEpochByBot.get(botId) ?? 0) !== startEpoch) {
       if (liveJob(receipt)) {
         preemptedRetryBots.add(botId);
@@ -1217,19 +1252,25 @@ export function createBotLearning({
       for (const bot of host.listBots()) {
         if (closing || suspended || bot.archivedAt || jobs.has(bot.botId)) continue;
         try {
+          const startEpoch = preemptEpochByBot.get(bot.botId) ?? 0;
           const status = await client.botLearning(host.deviceId, bot.botId, { action: 'status' });
           const settings = status.settings;
           if (status.activeJob) continue;
           const lastActivity = Date.parse(bot.lastActivityAt ?? bot.createdAt);
           if (!Number.isFinite(lastActivity) || Date.now() - lastActivity < settings.curator.minIdleHours * 3_600_000) continue;
           if (!(await isBotIdle(bot))) continue;
+          if ((preemptEpochByBot.get(bot.botId) ?? 0) !== startEpoch) continue;
           if (settings.curatorModelRef) assertUsableModel(settings.curatorModelRef);
           const built = await buildSnapshot(bot, { incremental: false });
           if (!built) continue;
-          if (suspended) continue;
+          if (suspended || (preemptEpochByBot.get(bot.botId) ?? 0) !== startEpoch) continue;
           const receipt = await client.botLearning(host.deviceId, bot.botId, {
             action: 'start', mode: 'curate', automatic: true, requestId: randomUUID(), snapshot: built.snapshot,
           });
+          if ((preemptEpochByBot.get(bot.botId) ?? 0) !== startEpoch) {
+            if (liveJob(receipt)) void safeCancelRemote(bot.botId, receipt.jobId);
+            continue;
+          }
           if (liveJob(receipt)) startDriver(bot, receipt.jobId, { mode: 'curate', automatic: true });
         } catch { /* retry on the next idle tick */ }
       }
@@ -1279,6 +1320,7 @@ export function createBotLearning({
     await Promise.allSettled(active.map((job) => safeCancelRemote(job.botId, job.jobId)));
     jobs.clear();
     reportChains.clear();
+    cancelInFlightByBot.clear();
     pendingBotChecks.clear();
     deferredBotChecks.clear();
     preemptedRetryBots.clear();
@@ -1298,6 +1340,7 @@ export function createBotLearning({
     noteCompletedSubmission,
     noteCompletedWorkTurn,
     preemptForForeground,
+    preemptAndWaitForForeground,
     scheduleIdleCheck,
     cancelBot,
     notifyOffline,

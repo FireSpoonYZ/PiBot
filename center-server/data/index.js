@@ -199,13 +199,18 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       ...(pkg.uiSchema === undefined ? {} : { uiSchema: pkg.uiSchema }), revision: row.revision,
     };
   }
+  function publicBinding(binding) {
+    if (!binding) return binding;
+    const { autoSeeded: _autoSeeded, explicitAssigned: _explicitAssigned, autoRevoked: _autoRevoked, ...clean } = binding;
+    return clean;
+  }
   function bindingFor(deviceId, botId, id) {
     return parse(db.prepare('SELECT json FROM bindings WHERE device_id = ? AND bot_id = ? AND installation_id = ?').get(deviceId, botId, id))
       ?? { deviceId, botId, installationId: id, enabled: false, overrides: {}, revision: 0 };
   }
   function capabilityFor(deviceId, botId, id) {
     const config = configFor(id);
-    const binding = bindingFor(deviceId, botId, id);
+    const binding = publicBinding(bindingFor(deviceId, botId, id));
     return { ...binding, globalConfig: config.globalConfig, effectiveConfig: merge(config.globalConfig, binding.overrides), configSchema: config.configSchema };
   }
   /** Managed capabilities that get an enabled binding by default; overrides() can supply per-Bot defaults. */
@@ -217,6 +222,10 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     'e-launcher.vault': {},
     'e-launcher.webfox': {},
   };
+  function isGlobalAutoSeed(installation) {
+    return !(installation.kind === 'plugin' && DEFAULT_BINDINGS[installation.packageId])
+      && installation.visibilityScope === 'global';
+  }
   function defaultBindingSpec(installation) {
     if (installation.target !== 'host') return null;
     if (installation.kind === 'plugin' && DEFAULT_BINDINGS[installation.packageId]) {
@@ -231,12 +240,21 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     for (const installation of store.listInstallations()) {
       const defaults = defaultBindingSpec(installation);
       if (!defaults || !activeInstallation(installation)) continue;
-      if (bindingFor(bot.deviceId, bot.botId, installation.installationId).revision !== 0) continue;
-      const overrides = defaults.overrides?.(bot) ?? {};
+      const existing = bindingFor(bot.deviceId, bot.botId, installation.installationId);
+      if (existing.revision !== 0 && !existing.autoRevoked) continue;
+      const overrides = existing.revision !== 0 ? existing.overrides : (defaults.overrides?.(bot) ?? {});
       const config = configFor(installation.installationId);
       validate(config.configSchema, merge(config.globalConfig, overrides));
-      const binding = { deviceId: bot.deviceId, botId: bot.botId, installationId: installation.installationId, enabled: true, overrides, revision: 1 };
-      db.prepare('INSERT INTO bindings VALUES (?, ?, ?, ?)').run(bot.deviceId, bot.botId, installation.installationId, json(binding));
+      const binding = {
+        deviceId: bot.deviceId,
+        botId: bot.botId,
+        installationId: installation.installationId,
+        enabled: true,
+        overrides,
+        revision: existing.revision + 1,
+        ...(isGlobalAutoSeed(installation) ? { autoSeeded: true } : {}),
+      };
+      db.prepare('INSERT INTO bindings VALUES (?, ?, ?, ?) ON CONFLICT(device_id, bot_id, installation_id) DO UPDATE SET json = excluded.json').run(bot.deviceId, bot.botId, installation.installationId, json(binding));
       added = true;
     }
     return added;
@@ -248,12 +266,21 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     let added = false;
     const bots = db.prepare('SELECT json FROM device_bots').all().map(parse);
     for (const bot of bots) {
-      if (bindingFor(bot.deviceId, bot.botId, installation.installationId).revision !== 0) continue;
-      const overrides = defaults.overrides?.(bot) ?? {};
+      const existing = bindingFor(bot.deviceId, bot.botId, installation.installationId);
+      if (existing.revision !== 0 && !existing.autoRevoked) continue;
+      const overrides = existing.revision !== 0 ? existing.overrides : (defaults.overrides?.(bot) ?? {});
       const config = configFor(installation.installationId);
       validate(config.configSchema, merge(config.globalConfig, overrides));
-      const binding = { deviceId: bot.deviceId, botId: bot.botId, installationId: installation.installationId, enabled: true, overrides, revision: 1 };
-      db.prepare('INSERT INTO bindings VALUES (?, ?, ?, ?)').run(bot.deviceId, bot.botId, installation.installationId, json(binding));
+      const binding = {
+        deviceId: bot.deviceId,
+        botId: bot.botId,
+        installationId: installation.installationId,
+        enabled: true,
+        overrides,
+        revision: existing.revision + 1,
+        ...(isGlobalAutoSeed(installation) ? { autoSeeded: true } : {}),
+      };
+      db.prepare('INSERT INTO bindings VALUES (?, ?, ?, ?) ON CONFLICT(device_id, bot_id, installation_id) DO UPDATE SET json = excluded.json').run(bot.deviceId, bot.botId, installation.installationId, json(binding));
       added = true;
     }
     return added;
@@ -868,7 +895,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
         }, 'DEFERRED');
       },
       listBotBindings(filter = {}) {
-        return db.prepare('SELECT json FROM bindings WHERE (? IS NULL OR device_id = ?) AND (? IS NULL OR installation_id = ?) ORDER BY device_id, bot_id, installation_id').all(filter.deviceId ?? null, filter.deviceId ?? null, filter.installationId ?? null, filter.installationId ?? null).map(parse);
+        return db.prepare('SELECT json FROM bindings WHERE (? IS NULL OR device_id = ?) AND (? IS NULL OR installation_id = ?) ORDER BY device_id, bot_id, installation_id').all(filter.deviceId ?? null, filter.deviceId ?? null, filter.installationId ?? null, filter.installationId ?? null).map((row) => publicBinding(parse(row)));
       },
       listInstallations: () => rows('installations').map(withActivation),
       getInstallation: (id) => withActivation(get('installations', id)),
@@ -941,7 +968,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             throw error('FORBIDDEN', 'Capability is not globally enabled');
           }
           validate(config.configSchema, merge(config.globalConfig, input.overrides), !input.enabled);
-          const binding = { deviceId, botId, installationId: id, enabled: input.enabled, overrides: input.overrides, revision: current.revision + 1 };
+          const binding = { deviceId, botId, installationId: id, enabled: input.enabled, overrides: input.overrides, revision: current.revision + 1, explicitAssigned: true };
           db.prepare('INSERT INTO bindings VALUES (?, ?, ?, ?) ON CONFLICT(device_id, bot_id, installation_id) DO UPDATE SET json = excluded.json').run(deviceId, botId, id, json(binding));
           bump(); return capabilityFor(deviceId, botId, id);
         });
@@ -1012,6 +1039,9 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
               skillId: ownerBot.skillId,
               skillName: ownerBot.skillName,
             };
+          }
+          if (installation.visibilityScope !== undefined && !ownerBot) {
+            throw error('INVALID_ARGUMENT', 'visibilityScope is only supported on Bot-owned skills');
           }
           const visibilityScope = installation.visibilityScope ?? current?.visibilityScope ?? (ownerBot ? 'private' : undefined);
           if (visibilityScope !== undefined && !VISIBILITY_SCOPES.includes(visibilityScope)) {
@@ -1088,21 +1118,32 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           };
           save('installations', id, result);
           if (hasVisibility && nextScope !== current.visibilityScope) {
-            let bindingsChanged = false;
             if (nextScope === 'private' && current.ownerBot) {
               const allBindings = db.prepare('SELECT json FROM bindings WHERE installation_id = ?').all(id).map(parse);
               for (const b of allBindings) {
                 if (b.deviceId === current.ownerBot.deviceId && b.botId === current.ownerBot.botId) continue;
                 if (!b.enabled) continue;
-                const disabled = { ...b, enabled: false, revision: b.revision + 1 };
+                const { autoSeeded: _autoSeeded, explicitAssigned: _explicitAssigned, ...rest } = b;
+                const disabled = { ...rest, enabled: false, revision: b.revision + 1, autoRevoked: true };
                 db.prepare('UPDATE bindings SET json = ? WHERE device_id = ? AND bot_id = ? AND installation_id = ?')
                   .run(json(disabled), b.deviceId, b.botId, id);
-                bindingsChanged = true;
+              }
+            } else if (nextScope === 'assigned' && current.visibilityScope === 'global' && current.ownerBot) {
+              const allBindings = db.prepare('SELECT json FROM bindings WHERE installation_id = ?').all(id).map(parse);
+              for (const b of allBindings) {
+                if (b.deviceId === current.ownerBot.deviceId && b.botId === current.ownerBot.botId) continue;
+                if (!b.enabled) continue;
+                if (b.autoSeeded === true || !b.explicitAssigned) {
+                  const { autoSeeded: _autoSeeded, explicitAssigned: _explicitAssigned, ...rest } = b;
+                  const disabled = { ...rest, enabled: false, revision: b.revision + 1, autoRevoked: true };
+                  db.prepare('UPDATE bindings SET json = ? WHERE device_id = ? AND bot_id = ? AND installation_id = ?')
+                    .run(json(disabled), b.deviceId, b.botId, id);
+                }
               }
             } else if (nextScope === 'global' && activeInstallation(result)) {
-              if (seedBotDefaults(result)) bindingsChanged = true;
+              seedBotDefaults(result);
             }
-            if (bindingsChanged) bump();
+            bump();
           }
           return result;
         });

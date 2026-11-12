@@ -152,8 +152,10 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
   }
 
   async function send(args, identity, log, api, context, turn) {
-    const scope = log.getScope(args.scopeId);
+    const requestedScopeId = args.scopeId ?? turn?.replyTarget?.scopeId;
+    const scope = typeof requestedScopeId === 'string' ? log.getScope(requestedScopeId) : null;
     if (!scope) throw messageError('SCOPE_NOT_FOUND', 'scope not installed');
+    const targetScopeId = scope.scopeId ?? requestedScopeId;
     const peer = scope.kind === 'dm'
       ? scope.members.find((member) => !isMember(member, identity)) ?? null
       : null;
@@ -171,10 +173,10 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
         throw messageError('SCOPE_FORBIDDEN', 'the sending Bot must belong to the scope');
       }
       if (passWork && (workTurn || identity.scopeId !== null)) {
-        await passWork(api, context, turn);
+        await passWork(api, context, turn, { scopeId: targetScopeId });
       }
       return {
-        scopeId: args.scopeId,
+        scopeId: targetScopeId,
         scopeKind: scope.kind,
         ...(peer?.botId ? { peerBotId: peer.botId } : {}),
         ...(targetName ? { targetName } : {}),
@@ -231,10 +233,10 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
       ? turn.responseMessageId
       : (turn?.originRequestId === undefined ? turn?.triggerMessageId : undefined);
     const isReply = scope.kind === 'dm' && replyTarget?.kind === 'dm' &&
-      replyTarget.scopeId === args.scopeId && typeof originMessageId === 'string';
+      replyTarget.scopeId === targetScopeId && typeof originMessageId === 'string';
     const publication = {
       messageId,
-      scopeId: args.scopeId,
+      scopeId: targetScopeId,
       author: { kind: 'bot', botId: identity.botId },
       category: scope.kind === 'room' ? 'public' : (isReply ? 'reply' : 'request'),
       text: fileDelivery?.text ?? args.text,
@@ -244,7 +246,7 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     // 冻结路由是默认回复去向而非目标白名单：显式寻址的跨 scope DM 发送合法，
     // 目标成员资格与作者校验由账本承担；只有源自工作决策的轮（带 workNativeId）才把
     // 原始轮传给 driver，由其工作 scope 做 stale-source/成员/预算门禁。
-    if (fileDelivery && !log.getMessage(messageId) && log.getScope(args.scopeId)?.revision !== fileDelivery.revision) {
+    if (fileDelivery && !log.getMessage(messageId) && log.getScope(targetScopeId)?.revision !== fileDelivery.revision) {
       throw messageError('STALE_INPUT', 'scope members changed during file transfer; message was not published');
     }
     const stored = workTurn || identity.scopeId !== null

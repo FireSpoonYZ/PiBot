@@ -9,7 +9,7 @@ import type { ChatTurn } from './chatTurnModel.ts';
 export const HOST_ATTACHED_IMAGE_LINE_PREFIX =
   'Attached image on this Host (use this path to read or send the file): ';
 
-const DEFAULT_MAX_ATTACHMENTS = 4;
+const DEFAULT_MAX_ATTACHMENTS = 16;
 const MAX_PREVIEW_CODEPOINTS = 80;
 
 export interface UnifiedQueuedStripItem {

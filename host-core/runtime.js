@@ -36,7 +36,7 @@ import { WorkDecisionState } from './work-decision-state.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { createTurnAdmission } from './runtime-turns.js';
 import { createBotSessionRuntime } from './runtime-bot-session.js';
-import { BotSessionState, USER_MESSAGE_KIND, deriveEntryAttribution } from './bot-session-context.js';
+import { BotSessionState, USER_MESSAGE_KIND, WORK_TRIGGER_KIND, deriveEntryAttribution } from './bot-session-context.js';
 import { createBotLearning } from './bot-learning.js';
 import { createBotManagementSkillSection } from './bot-management-skill.js';
 import { SOUL_MAX_BYTES } from './bot-soul.js';
@@ -1173,6 +1173,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 取消确认成功才解除 gate 并置 stopped：失败保留 gate 与 stopping 可见状态，
       // 绝不伪装成功/偷偷放行旧工作（stopPending 留作崩溃恢复边界）。
       await turns.settleStop(botId);
+      learning.scheduleIdleCheck(botId);
       webhooks.wake();
       drainSelfSoul(botId);
       const withdrawn = [];
@@ -2104,103 +2105,188 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
           throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
         }
-        // 严格忙碌门禁：任何活动轮、排队轮、停止协调、插件执行或学习作业期间均禁止编辑历史消息。
-        if (
-          turns.stopped(botId) ||
-          (await turns.queuedCount(bot)) > 0 ||
-          plugins.hasActiveExecutions(botId) ||
-          learning.isActive(botId)
-        ) {
-          throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
-        }
-        await assertBotIdle(bot);
-        let attachmentBytes = 0;
-        for (const id of attachmentIds) {
-          const meta = await attachmentStore.load(botId, id);
-          attachmentBytes += meta.size;
-        }
-        if (attachmentBytes > 64 * 1024 * 1024) {
-          throw errWithCode('attachments exceed the 64 MiB per-message total image byte limit', 'INVALID_ARGUMENT');
-        }
-        const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
-        if (!conversation) {
-          throw errWithCode(`entry not found: ${entryId}`, 'INVALID_ARGUMENT');
-        }
-        // 先推进收件水位，防止分叉后把编辑前已存在的群/DM旧消息当新消息重导。
-        await sessions.sync(botId);
-        const resetId = await latestResetEntryId(conversation, CTX);
-        if (entryId <= resetId) {
-          throw errWithCode(`entry ${entryId} is before the active conversation reset`, 'INVALID_ARGUMENT');
-        }
-        const [agentSnapshot, sessionSnapshot, requestKeysSnapshot] = await Promise.all([
-          harness.snapshot(durable.AgentDoc, conversation.id, CTX),
-          harness.snapshot(BotSessionState, conversation.id, CTX),
-          harness.snapshot(RequestKeys, conversation.id, CTX),
-        ]);
-        const newNativeId = await harness.commit(async (tx) => {
-          const scan = await tx.scanEntries(
-            { conversationId: conversation.id, maxEntryId: entryId, order: 'descending' },
-            2,
-          );
-          const targetEntry = scan.items[0];
-          if (!targetEntry || targetEntry.id !== entryId) {
+        // 前台历史编辑先抢占并等待后台静默自动反思退出，手动学习作业则保持忙碌门禁拒绝。
+        await learning.preemptAndWaitForForeground(botId);
+        try {
+          // 严格忙碌门禁：任何活动轮、排队轮、停止协调、插件执行或手动学习作业期间均禁止编辑历史消息。
+          if (
+            turns.stopped(botId) ||
+            (await turns.queuedCount(bot)) > 0 ||
+            plugins.hasActiveExecutions(botId) ||
+            learning.isActive(botId)
+          ) {
+            throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+          }
+          await assertBotIdle(bot);
+          let attachmentBytes = 0;
+          for (const id of attachmentIds) {
+            const meta = await attachmentStore.load(botId, id);
+            attachmentBytes += meta.size;
+          }
+          if (attachmentBytes > 64 * 1024 * 1024) {
+            throw errWithCode('attachments exceed the 64 MiB per-message total image byte limit', 'INVALID_ARGUMENT');
+          }
+          const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
+          if (!conversation) {
             throw errWithCode(`entry not found: ${entryId}`, 'INVALID_ARGUMENT');
           }
-          const attribution = deriveEntryAttribution(targetEntry, sessionSnapshot ?? null);
-          if (
-            targetEntry.kind !== USER_MESSAGE_KIND ||
-            attribution?.kind !== 'user' ||
-            attribution?.channel !== 'primary'
-          ) {
-            throw errWithCode('only primary user messages can be edited', 'INVALID_ARGUMENT');
+          const resetId = await latestResetEntryId(conversation, CTX);
+          if (entryId <= resetId) {
+            throw errWithCode(`entry ${entryId} is before the active conversation reset`, 'INVALID_ARGUMENT');
           }
-          const beforeEntryId = scan.items[1]?.id ?? null;
-          const rec = beforeEntryId !== null
-            ? await tx.forkConversation(conversation.id, beforeEntryId, { ownership: { kind: 'ownerless' } })
-            : await tx.createConversation({ ownership: { kind: 'ownerless' } });
-          if (agentSnapshot) {
-            const agentDraft = await tx.doc(durable.AgentDoc, rec.id);
-            const copiedAgent = chord.copyJson(agentSnapshot);
-            for (const key of Object.keys(agentDraft)) {
-              if (!(key in copiedAgent)) delete agentDraft[key];
+          const [agentSnapshot, sessionSnapshot, requestKeysSnapshot] = await Promise.all([
+            harness.snapshot(durable.AgentDoc, conversation.id, CTX),
+            harness.snapshot(BotSessionState, conversation.id, CTX),
+            harness.snapshot(RequestKeys, conversation.id, CTX),
+          ]);
+          const newNativeId = await harness.commit(async (tx) => {
+            const scan = await tx.scanEntries(
+              { conversationId: conversation.id, maxEntryId: entryId, order: 'descending' },
+              2,
+            );
+            const targetEntry = scan.items[0];
+            if (!targetEntry || targetEntry.id !== entryId) {
+              throw errWithCode(`entry not found: ${entryId}`, 'INVALID_ARGUMENT');
             }
-            Object.assign(agentDraft, copiedAgent);
+            const attribution = deriveEntryAttribution(targetEntry, sessionSnapshot ?? null);
+            if (
+              targetEntry.kind !== USER_MESSAGE_KIND ||
+              attribution?.kind !== 'user' ||
+              attribution?.channel !== 'primary'
+            ) {
+              throw errWithCode('only primary user messages can be edited', 'INVALID_ARGUMENT');
+            }
+            const beforeEntryId = scan.items[1]?.id ?? null;
+            const truncatedRequestIds = new Set();
+            const truncatedTaskIds = new Set();
+            if (sessionSnapshot && beforeEntryId !== null) {
+              let cursor;
+              for (;;) {
+                const page = await tx.scanEntries(
+                  cursor
+                    ? { conversationId: conversation.id, minEntryId: entryId }
+                    : { conversationId: conversation.id, minEntryId: entryId, order: 'ascending' },
+                  200,
+                  cursor,
+                );
+                for (const item of page.items) {
+                  if (item.byTaskId !== undefined && item.byTaskId !== null) {
+                    truncatedTaskIds.add(String(item.byTaskId));
+                  }
+                  if (item.kind === USER_MESSAGE_KIND || item.kind === WORK_TRIGGER_KIND) {
+                    const data = item.data && typeof item.data === 'object' && !Array.isArray(item.data) ? item.data : null;
+                    const turn = data?.turn && typeof data.turn === 'object' && !Array.isArray(data.turn) ? data.turn : null;
+                    const reqId = data?.requestId ?? turn?.requestId ?? String(item.id);
+                    if (typeof reqId === 'string' && reqId !== '') truncatedRequestIds.add(reqId);
+                  } else if (item.kind === 'pi.user') {
+                    truncatedRequestIds.add(String(item.id));
+                  }
+                }
+                if (!page.next) break;
+                cursor = page.next;
+              }
+            }
+            const rec = beforeEntryId !== null
+              ? await tx.forkConversation(conversation.id, beforeEntryId, { ownership: { kind: 'ownerless' } })
+              : await tx.createConversation({ ownership: { kind: 'ownerless' } });
+            if (agentSnapshot) {
+              const agentDraft = await tx.doc(durable.AgentDoc, rec.id);
+              const copiedAgent = chord.copyJson(agentSnapshot);
+              for (const key of Object.keys(agentDraft)) {
+                if (!(key in copiedAgent)) delete agentDraft[key];
+              }
+              Object.assign(agentDraft, copiedAgent);
+            }
+            if (sessionSnapshot) {
+              const sessionDraft = await tx.doc(BotSessionState, rec.id);
+              const copiedSession = chord.copyJson(sessionSnapshot);
+              const copiedOutgoing = copiedSession.outgoing ?? {};
+              sessionDraft.schema = copiedSession.schema ?? 1;
+              sessionDraft.lastImportedLocalId = copiedSession.lastImportedLocalId ?? 0;
+              sessionDraft.importedCount = copiedSession.importedCount ?? 0;
+              sessionDraft.activeTurn = null;
+              sessionDraft.outgoing = copiedOutgoing;
+              if (beforeEntryId === null) {
+                sessionDraft.turnByTask = {};
+                sessionDraft.completedTurns = {};
+              } else {
+                const nextTurnByTask = {};
+                for (const [taskKey, reqId] of Object.entries(copiedSession.turnByTask ?? {})) {
+                  if (typeof reqId !== 'string' || truncatedRequestIds.has(reqId) || truncatedTaskIds.has(taskKey)) continue;
+                  nextTurnByTask[taskKey] = reqId;
+                }
+                const keptRequestIds = new Set(Object.values(nextTurnByTask));
+                const priorCompleted = copiedSession.completedTurns ?? {};
+                for (const [reqId, turnRec] of Object.entries(priorCompleted)) {
+                  if (truncatedRequestIds.has(reqId)) continue;
+                  if (turnRec?.taskId !== undefined && truncatedTaskIds.has(String(turnRec.taskId))) continue;
+                  keptRequestIds.add(reqId);
+                }
+                for (const recOut of Object.values(copiedOutgoing)) {
+                  if (
+                    recOut &&
+                    recOut.responseMessageId === undefined &&
+                    typeof recOut.requestId === 'string' &&
+                    !truncatedRequestIds.has(recOut.requestId)
+                  ) {
+                    keptRequestIds.add(recOut.requestId);
+                  }
+                }
+                const queue = [...keptRequestIds];
+                while (queue.length > 0) {
+                  const currentId = queue.pop();
+                  const originId = priorCompleted[currentId]?.originRequestId;
+                  if (
+                    typeof originId === 'string' &&
+                    originId !== '' &&
+                    !keptRequestIds.has(originId) &&
+                    !truncatedRequestIds.has(originId)
+                  ) {
+                    keptRequestIds.add(originId);
+                    queue.push(originId);
+                  }
+                }
+                const nextCompletedTurns = {};
+                for (const reqId of keptRequestIds) {
+                  if (Object.hasOwn(priorCompleted, reqId)) {
+                    nextCompletedTurns[reqId] = priorCompleted[reqId];
+                  }
+                }
+                sessionDraft.turnByTask = nextTurnByTask;
+                sessionDraft.completedTurns = nextCompletedTurns;
+              }
+              sessionDraft.updatedAt = new Date().toISOString();
+            }
+            if (requestKeysSnapshot?.digests) {
+              const reqDraft = await tx.doc(RequestKeys, rec.id);
+              const copiedDigests = chord.copyJson(requestKeysSnapshot.digests);
+              delete copiedDigests['r:' + requestId];
+              reqDraft.digests = copiedDigests;
+            }
+            const primaryIndex = await tx.doc(PrimaryIndex);
+            primaryIndex.byPrimary[bot.primaryConversationId] = rec.id;
+            return rec.id;
+          }, CTX);
+          const newConversation = await harness.conversation(newNativeId, CTX);
+          await live.rebind(botId, newConversation);
+          if (conversation.id !== newNativeId) {
+            await dropEnvFor(conversation.id);
           }
-          if (sessionSnapshot) {
-            const sessionDraft = await tx.doc(BotSessionState, rec.id);
-            const copiedSession = chord.copyJson(sessionSnapshot);
-            sessionDraft.schema = copiedSession.schema ?? 1;
-            sessionDraft.lastImportedLocalId = copiedSession.lastImportedLocalId ?? 0;
-            sessionDraft.importedCount = copiedSession.importedCount ?? 0;
-            sessionDraft.activeTurn = null;
-            sessionDraft.turnByTask = copiedSession.turnByTask ?? {};
-            sessionDraft.outgoing = copiedSession.outgoing ?? {};
-            sessionDraft.completedTurns = copiedSession.completedTurns ?? {};
-            sessionDraft.updatedAt = new Date().toISOString();
-          }
-          if (requestKeysSnapshot?.digests) {
-            const reqDraft = await tx.doc(RequestKeys, rec.id);
-            const copiedDigests = chord.copyJson(requestKeysSnapshot.digests);
-            delete copiedDigests['r:' + requestId];
-            reqDraft.digests = copiedDigests;
-          }
-          const primaryIndex = await tx.doc(PrimaryIndex);
-          primaryIndex.byPrimary[bot.primaryConversationId] = rec.id;
-          return rec.id;
-        }, CTX);
-        const newConversation = await harness.conversation(newNativeId, CTX);
-        await live.rebind(botId, newConversation);
-        return turns.enqueue(botId, {
-          requestId,
-          text,
-          ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
-          delivery: 'followUp',
-          stopEpoch: capturedStopEpoch,
-          origin: {
-            sender: { kind: 'user', name: null },
-            replyTo: null,
-          },
-        });
+          return await turns.enqueue(botId, {
+            requestId,
+            text,
+            ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
+            delivery: 'followUp',
+            stopEpoch: capturedStopEpoch,
+            origin: {
+              sender: { kind: 'user', name: null },
+              replyTo: null,
+            },
+          });
+        } catch (err) {
+          learning.scheduleIdleCheck(botId);
+          throw err;
+        }
       });
     },
 

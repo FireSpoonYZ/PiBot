@@ -85,7 +85,7 @@ export interface DraftWidgetState {
   addFile(ref: DesktopDraftFileRef): void;
   removeFile(index: number): void;
   /** 仅已成功上传到目标 Host 的附件才允许进入草稿（按 id 元数据排序保留）。
-   *  expectedKey 提供原子归属校验：当前 keyRef 不匹配/同 id 已存在/超限（4 张）均拒绝并返回 false。 */
+   *  expectedKey 提供原子归属校验：当前 keyRef 不匹配/同 id 已存在/超限（16 张）均拒绝并返回 false。 */
   addAttachment(att: ImageAttachment, expectedKey?: string): boolean;
   removeAttachment(index: number): void;
   /** 将撤回的排队消息文本与已上传图片原子合并至当前草稿最前（不覆盖未发草稿）。 */
@@ -138,6 +138,13 @@ function errText(e: unknown): string {
   return String(e);
 }
 
+const MAX_DRAFT_ATTACHMENTS = 16;
+
+interface RecalledDraftBuffer {
+  texts: string[];
+  attachments: ImageAttachment[];
+}
+
 interface MemoryDraft {
   text: string;
   files: DesktopDraftFileRef[];
@@ -146,9 +153,11 @@ interface MemoryDraft {
   version: number;
   savedVersion: number;
   lastError: string | null;
-  timer: number | null;
+  timer: ReturnType<typeof setTimeout> | null;
   chain: Promise<void> | null;
   attempt: DraftAttempt | null;
+  /** 发送锁期间收到的排队撤回暂存区；attempt 结算置 null 时前置合入草稿。 */
+  recalledBuffer: RecalledDraftBuffer | null;
   /** 普通保存遇 CAS 冲突：暂停自动写（含卸载 force），直到显式保存或采用新版。 */
   savePaused: boolean;
   /** 冲突后读到的新版持久草稿。 */
@@ -157,6 +166,107 @@ interface MemoryDraft {
 
 const memory = new Map<string, MemoryDraft>();
 const listeners = new Map<string, Set<() => void>>();
+const resolvedDraftKeys = new Map<string, string>();
+
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+function rotr32(x: number, n: number): number {
+  return ((x >>> n) | (x << (32 - n))) >>> 0;
+}
+
+/** 与 DesktopViewApiImpl.draftKey 完全一致的 UTF-8 SHA-256 十六进制摘要（同步计算）。 */
+function sha256HexUtf8(input: string): string {
+  const bytes = new TextEncoder().encode(input);
+  const bitLen = bytes.length * 8;
+  const paddedLen = Math.ceil((bytes.length + 9) / 64) * 64;
+  const buf = new Uint8Array(paddedLen);
+  buf.set(bytes);
+  buf[bytes.length] = 0x80;
+  const view = new DataView(buf.buffer);
+  view.setUint32(paddedLen - 8, Math.floor(bitLen / 0x100000000), false);
+  view.setUint32(paddedLen - 4, bitLen >>> 0, false);
+
+  let h0 = 0x6a09e667;
+  let h1 = 0xbb67ae85;
+  let h2 = 0x3c6ef372;
+  let h3 = 0xa54ff53a;
+  let h4 = 0x510e527f;
+  let h5 = 0x9b05688c;
+  let h6 = 0x1f83d9ab;
+  let h7 = 0x5be0cd19;
+  const w = new Uint32Array(64);
+
+  for (let offset = 0; offset < paddedLen; offset += 64) {
+    for (let i = 0; i < 16; i += 1) {
+      w[i] = view.getUint32(offset + i * 4, false);
+    }
+    for (let i = 16; i < 64; i += 1) {
+      const s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+      const s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+    let f = h5;
+    let g = h6;
+    let h = h7;
+    for (let i = 0; i < 64; i += 1) {
+      const S1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+      const ch = ((e & f) ^ (~e & g)) >>> 0;
+      const temp1 = (h + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
+      const S0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+      const maj = ((a & b) ^ (a & c) ^ (b & c)) >>> 0;
+      const temp2 = (S0 + maj) >>> 0;
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+    h0 = (h0 + a) >>> 0;
+    h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0;
+    h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0;
+    h5 = (h5 + f) >>> 0;
+    h6 = (h6 + g) >>> 0;
+    h7 = (h7 + h) >>> 0;
+  }
+
+  return [h0, h1, h2, h3, h4, h5, h6, h7]
+    .map((v) => v.toString(16).padStart(8, '0'))
+    .join('');
+}
+
+function draftKeyRawInput(
+  identity: DesktopIdentity,
+  target: { kind: 'primary' | 'room'; id: string },
+): string {
+  return `${identity.profileId}\u0000${identity.targetDeviceId}\u0000${target.kind}\u0000${target.id}`;
+}
+
+function resolveTargetDraftKeySync(
+  identity: DesktopIdentity,
+  target: { kind: 'primary' | 'room'; id: string },
+): string {
+  const raw = draftKeyRawInput(identity, target);
+  return resolvedDraftKeys.get(raw) ?? sha256HexUtf8(raw);
+}
 
 function getMem(key: string): MemoryDraft {
   let m = memory.get(key);
@@ -172,6 +282,7 @@ function getMem(key: string): MemoryDraft {
       timer: null,
       chain: null,
       attempt: null,
+      recalledBuffer: null,
       savePaused: false,
       conflict: null,
     };
@@ -270,6 +381,148 @@ function recordStateOf(item: PendingRecord): string {
   return item.state;
 }
 
+function hydrateMemFromSnapshotIfClean(api: DesktopViewApi, key: string, mem: MemoryDraft): void {
+  if (!mem.attempt && mem.text === '' && mem.files.length === 0 && mem.attachments.length === 0 && !mem.dirty) {
+    const saved = api.snapshot?.state.drafts[key];
+    if (saved) {
+      mem.text = saved.text;
+      mem.files = saved.files.map((f) => ({ ...f }));
+      mem.attachments = saved.attachments ? saved.attachments.map((a) => ({ ...a })) : [];
+      mem.savedVersion = mem.version;
+    }
+  }
+}
+
+function stashRecalledBuffer(
+  mem: MemoryDraft,
+  recalledTexts: readonly string[],
+  recalledAttachments: readonly ImageAttachment[],
+): boolean {
+  const validTexts = recalledTexts.filter((t): t is string => typeof t === 'string' && t.trim().length > 0);
+  const validAtts = dedupeAttachmentMetas(
+    [],
+    recalledAttachments.map((a) => ({ ...a })),
+    MAX_DRAFT_ATTACHMENTS,
+  );
+  if (validTexts.length === 0 && validAtts.length === 0) return false;
+  const prev = mem.recalledBuffer;
+  mem.recalledBuffer = {
+    texts: prev ? [...validTexts, ...prev.texts] : [...validTexts],
+    attachments: dedupeAttachmentMetas(prev ? prev.attachments : [], validAtts, MAX_DRAFT_ATTACHMENTS),
+  };
+  return true;
+}
+
+/** 保存具体 capture 的 key/内容/版本；attempt 存在时跳过（不写回冻结/旧内容）；savePaused 时一律跳过（含 force）。 */
+function persistMemDraft(
+  api: DesktopViewApi,
+  k: string,
+  content: DraftSnapshot,
+  versionAtSchedule: number,
+  force: boolean,
+): Promise<void> {
+  if (!k) return Promise.resolve();
+  const mem = getMem(k);
+  if (!mem.chain) mem.chain = Promise.resolve();
+  const run = mem.chain.then(async () => {
+    // 排队期间前一次保存可能已置暂停：已入队的普通/卸载 force 保存也必须遵守，
+    // 否则会用读回的新 revision 覆盖更新的磁盘草稿。
+    if (mem.savePaused) return;
+    if (mem.attempt && !force) return; // 发送 attempt 冻结中：不让迟到 autosave 写回旧草稿
+    await api.saveDraft(k, {
+      text: content.text,
+      files: [...content.files],
+      ...(content.attachments?.length ? { attachments: content.attachments.map((a) => ({ ...a })) } : {}),
+    } satisfies DesktopDraftEntry);
+    mem.savedVersion = Math.max(mem.savedVersion, versionAtSchedule);
+    if (mem.version <= mem.savedVersion) {
+      mem.dirty = false;
+      mem.lastError = null;
+      notify(k);
+    }
+  }).catch((e) => {
+    mem.dirty = true;
+    if (isDraftConflict(e)) {
+      // 冲突：暂停自动写（含 unmount force），保留本地编辑与新版草稿供显式选择。
+      mem.savePaused = true;
+      mem.conflict = latestPersistedDraft(api, k);
+      mem.lastError = '草稿冲突：磁盘草稿已被更新，自动保存已暂停（本地输入保留）。';
+    } else {
+      mem.lastError = '草稿保存失败，已保留本地编辑。' + errText(e);
+    }
+    notify(k);
+    api.reportError(e);
+  });
+  mem.chain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+function scheduleExternalDraftSave(api: DesktopViewApi, key: string, mem: MemoryDraft): void {
+  if (mem.timer !== null) {
+    clearTimeout(mem.timer);
+    mem.timer = null;
+  }
+  const v = ++mem.version;
+  mem.dirty = true;
+  if (mem.savePaused) return;
+  const content: DraftSnapshot = {
+    text: mem.text,
+    files: [...mem.files],
+    attachments: [...mem.attachments],
+  };
+  void persistMemDraft(api, key, content, v, false);
+}
+
+function flushRecalledBuffer(api: DesktopViewApi, key: string, mem: MemoryDraft): boolean {
+  const buf = mem.recalledBuffer;
+  if (!buf) return false;
+  mem.recalledBuffer = null;
+  const nextText = mergeWithdrawnIntoDraft(mem.text, buf.texts);
+  const nextAtts = dedupeAttachmentMetas(mem.attachments, buf.attachments, MAX_DRAFT_ATTACHMENTS);
+  const changed =
+    nextText !== mem.text ||
+    nextAtts.length !== mem.attachments.length ||
+    !nextAtts.every((a, i) => a.id === mem.attachments[i]?.id);
+  if (!changed) return false;
+  mem.text = nextText;
+  mem.attachments = nextAtts;
+  scheduleExternalDraftSave(api, key, mem);
+  return true;
+}
+
+export function mergeRecalledByTarget(
+  api: DesktopViewApi,
+  identity: DesktopIdentity,
+  target: { kind: 'primary'; id: string } | { kind: 'room'; id: string },
+  recalledTexts: readonly string[],
+  recalledAttachments: readonly ImageAttachment[] = [],
+): boolean {
+  const key = resolveTargetDraftKeySync(identity, target);
+  if (!key) return false;
+  const mem = getMem(key);
+  if (mem.attempt) {
+    const buffered = stashRecalledBuffer(mem, recalledTexts, recalledAttachments);
+    if (buffered) notify(key);
+    return buffered;
+  }
+  hydrateMemFromSnapshotIfClean(api, key, mem);
+  const incomingAtts = recalledAttachments.map((a) => ({ ...a }));
+  const nextText = mergeWithdrawnIntoDraft(mem.text, recalledTexts);
+  const nextAtts = dedupeAttachmentMetas(mem.attachments, incomingAtts, MAX_DRAFT_ATTACHMENTS);
+  if (
+    nextText === mem.text &&
+    nextAtts.length === mem.attachments.length &&
+    nextAtts.every((a, i) => a.id === mem.attachments[i]?.id)
+  ) {
+    return false;
+  }
+  mem.text = nextText;
+  mem.attachments = nextAtts;
+  scheduleExternalDraftSave(api, key, mem);
+  notify(key);
+  return true;
+}
+
 /**
  * 共享草稿 + 发送 attempt 管理（conversations 组件使用）。
  * - 模块内存按 draftKey 保留编辑与 attempt，切换视图/Bot 回来仍恢复原 ID 与锁。
@@ -309,6 +562,7 @@ export function useDrafts(opts: {
       return;
     }
     api.draftKey(identity, target).then((k) => {
+      resolvedDraftKeys.set(draftKeyRawInput(identity, target), k);
       if (!cancelled) setKey(k);
     }).catch((e) => {
       if (!cancelled) {
@@ -324,20 +578,20 @@ export function useDrafts(opts: {
     if (!key) return;
     const mem = getMem(key);
     if (pendingBuf.current) {
-      mem.text = pendingBuf.current.text;
-      mem.files = pendingBuf.current.files;
-      mem.attachments = pendingBuf.current.attachments ?? [];
+      mem.text = mem.text
+        ? mergeWithdrawnIntoDraft(pendingBuf.current.text, [mem.text])
+        : pendingBuf.current.text;
+      mem.files = [...mem.files, ...pendingBuf.current.files];
+      mem.attachments = dedupeAttachmentMetas(
+        pendingBuf.current.attachments ?? [],
+        mem.attachments,
+        MAX_DRAFT_ATTACHMENTS,
+      );
       mem.dirty = true;
       pendingBuf.current = null;
       setDirty(true);
-    } else if (!mem.attempt && mem.text === '' && mem.files.length === 0 && mem.attachments.length === 0 && !mem.dirty) {
-      const saved = api.snapshot?.state.drafts[key];
-      if (saved) {
-        mem.text = saved.text;
-        mem.files = [...saved.files];
-        mem.attachments = saved.attachments ? saved.attachments.map((a) => ({ ...a })) : [];
-        mem.savedVersion = mem.version;
-      }
+    } else {
+      hydrateMemFromSnapshotIfClean(api, key, mem);
     }
     setText(mem.text);
     setFiles([...mem.files]);
@@ -378,44 +632,7 @@ export function useDrafts(opts: {
 
   /** 保存具体 capture 的 key/内容/版本；attempt 存在时跳过（不写回冻结/旧内容）；savePaused 时一律跳过（含 force）。 */
   const persist = useCallback((k: string, content: DraftSnapshot, versionAtSchedule: number, force: boolean): Promise<void> => {
-    if (!k) return Promise.resolve();
-    const mem = getMem(k);
-    if (!mem.chain) mem.chain = Promise.resolve();
-    const run = mem.chain.then(async () => {
-      // 排队期间前一次保存可能已置暂停：已入队的普通/卸载 force 保存也必须遵守，
-      // 否则会用读回的新 revision 覆盖更新的磁盘草稿。
-      if (mem.savePaused) return;
-      if (mem.attempt && !force) return; // 发送 attempt 冻结中：不让迟到 autosave 写回旧草稿
-      await api.saveDraft(k, {
-        text: content.text,
-        files: [...content.files],
-        ...(content.attachments?.length ? { attachments: content.attachments.map((a) => ({ ...a })) } : {}),
-      } satisfies DesktopDraftEntry);
-      mem.savedVersion = Math.max(mem.savedVersion, versionAtSchedule);
-      if (mem.version <= mem.savedVersion) {
-        mem.dirty = false;
-        mem.lastError = null;
-        setDirty(false);
-        setError(null);
-      }
-    }).catch((e) => {
-      mem.dirty = true;
-      if (isDraftConflict(e)) {
-        // 冲突：暂停自动写（含 unmount force），保留本地编辑与新版草稿供显式选择。
-        mem.savePaused = true;
-        mem.conflict = latestPersistedDraft(api, k);
-        mem.lastError = '草稿冲突：磁盘草稿已被更新，自动保存已暂停（本地输入保留）。';
-      } else {
-        mem.lastError = '草稿保存失败，已保留本地编辑。' + errText(e);
-      }
-      setDirty(true);
-      setSavePaused(mem.savePaused);
-      setConflict(mem.conflict);
-      setError(mem.lastError);
-      api.reportError(e);
-    });
-    mem.chain = run.then(() => undefined, () => undefined);
-    return run;
+    return persistMemDraft(api, k, content, versionAtSchedule, force);
   }, [api]);
 
   const persistRef = useRef(persist);
@@ -432,12 +649,12 @@ export function useDrafts(opts: {
       notify(k);
       return;
     }
-    if (mem.timer !== null) window.clearTimeout(mem.timer);
+    if (mem.timer !== null) clearTimeout(mem.timer);
     const v = ++mem.version;
     mem.dirty = true;
     setDirty(true);
     const content = { text: mem.text, files: [...mem.files], attachments: [...mem.attachments] };
-    mem.timer = window.setTimeout(() => {
+    mem.timer = setTimeout(() => {
       mem.timer = null;
       void persist(k, content, v, false);
     }, 700);
@@ -496,14 +713,14 @@ export function useDrafts(opts: {
     const copy = { ...att };
     if (mem) {
       if (mem.attachments.some((a) => a.id === att.id)) return false;
-      if (mem.attachments.length >= 4) return false;
+      if (mem.attachments.length >= MAX_DRAFT_ATTACHMENTS) return false;
       mem.attachments = [...mem.attachments, copy];
       setAttachments(mem.attachments);
     } else {
       const prev = pendingBuf.current ?? { text: '', files: [], attachments: [] };
       const prevAtt = prev.attachments ?? [];
       if (prevAtt.some((a) => a.id === att.id)) return false;
-      if (prevAtt.length >= 4) return false;
+      if (prevAtt.length >= MAX_DRAFT_ATTACHMENTS) return false;
       pendingBuf.current = { text: prev.text, files: prev.files, attachments: [...prevAtt, copy] };
       setAttachments(pendingBuf.current.attachments ?? []);
     }
@@ -534,11 +751,15 @@ export function useDrafts(opts: {
     const k = keyRef.current;
     if (expectedKey !== undefined && k !== expectedKey) return false;
     const mem = k ? getMem(k) : null;
-    if (mem && mem.attempt) return false;
+    if (mem && mem.attempt) {
+      const buffered = stashRecalledBuffer(mem, recalledTexts, recalledAttachments);
+      if (buffered && k) notify(k);
+      return buffered;
+    }
     const incomingAtts = recalledAttachments.map((a) => ({ ...a }));
-    if (mem) {
+    if (mem && k) {
       const nextText = mergeWithdrawnIntoDraft(mem.text, recalledTexts);
-      const nextAtts = dedupeAttachmentMetas(mem.attachments, incomingAtts);
+      const nextAtts = dedupeAttachmentMetas(mem.attachments, incomingAtts, MAX_DRAFT_ATTACHMENTS);
       if (nextText === mem.text && nextAtts.length === mem.attachments.length && nextAtts.every((a, i) => a.id === mem.attachments[i]?.id)) {
         return false;
       }
@@ -546,14 +767,20 @@ export function useDrafts(opts: {
       mem.attachments = nextAtts;
       setText(nextText);
       setAttachments(nextAtts);
-    } else {
-      const prev = pendingBuf.current ?? { text: '', files: [], attachments: [] };
-      const nextText = mergeWithdrawnIntoDraft(prev.text, recalledTexts);
-      const nextAtts = dedupeAttachmentMetas(prev.attachments ?? [], incomingAtts);
-      pendingBuf.current = { text: nextText, files: prev.files, attachments: nextAtts };
-      setText(nextText);
-      setAttachments(nextAtts);
+      scheduleAutoSave();
+      notify(k);
+      return true;
     }
+    const prev = pendingBuf.current ?? { text: '', files: [], attachments: [] };
+    const nextText = mergeWithdrawnIntoDraft(prev.text, recalledTexts);
+    const nextAtts = dedupeAttachmentMetas(prev.attachments ?? [], incomingAtts, MAX_DRAFT_ATTACHMENTS);
+    const prevAtts = prev.attachments ?? [];
+    if (nextText === prev.text && nextAtts.length === prevAtts.length && nextAtts.every((a, i) => a.id === prevAtts[i]?.id)) {
+      return false;
+    }
+    pendingBuf.current = { text: nextText, files: prev.files, attachments: nextAtts };
+    setText(nextText);
+    setAttachments(nextAtts);
     scheduleAutoSave();
     return true;
   }, [scheduleAutoSave]);
@@ -586,7 +813,7 @@ export function useDrafts(opts: {
     // 未解决的草稿冲突下不允许发送：否则清稿 expected 会包含别人更新的版本。
     if (mem.savePaused) return null;
     if (mem.timer !== null) {
-      window.clearTimeout(mem.timer);
+      clearTimeout(mem.timer);
       mem.timer = null;
     }
     const attemptId = crypto.randomUUID();
@@ -682,10 +909,16 @@ export function useDrafts(opts: {
     if (!cur) return;
     verifiedRecords.delete(cur.attempt.id);
     cur.mem.attempt = null;
+    const flushed = flushRecalledBuffer(api, handle.key, cur.mem);
     setAttempt(null);
     setBusy(false);
+    if (flushed) {
+      setText(cur.mem.text);
+      setAttachments([...cur.mem.attachments]);
+      setDirty(cur.mem.dirty);
+    }
     notify(handle.key);
-  }, []);
+  }, [api]);
 
   const markNotSent = useCallback((handle: DraftHandle, errorText: string) => {
     const cur = currentAttempt(handle);
@@ -858,11 +1091,17 @@ export function useDrafts(opts: {
     }
     verifiedRecords.delete(cur.attempt.id);
     cur.mem.attempt = null;
+    const flushed = flushRecalledBuffer(api, handle.key, cur.mem);
     setAttempt(null);
     setBusy(false);
+    if (flushed) {
+      setText(cur.mem.text);
+      setAttachments([...cur.mem.attachments]);
+      setDirty(cur.mem.dirty);
+    }
     notify(handle.key);
     return { ok: true };
-  }, []);
+  }, [api]);
 
   const retryClearAfterVerify = useCallback(async (handle: DraftHandle): Promise<'cleared' | 'conflict' | 'failed'> => {
     const cur = currentAttempt(handle);
@@ -941,18 +1180,19 @@ export function useDrafts(opts: {
     cur.mem.savedVersion = cur.mem.version;
     cur.mem.attempt = null;
     verifiedRecords.delete(cur.attempt.id);
+    flushRecalledBuffer(api, handle.key, cur.mem);
     setText(cur.mem.text);
     setFiles(cur.mem.files);
-    setAttachments(cur.mem.attachments);
-    setDirty(false);
-    setError(null);
+    setAttachments([...cur.mem.attachments]);
+    setDirty(cur.mem.dirty);
+    setError(cur.mem.lastError);
     setConflict(null);
     setSavePaused(false);
     setAttempt(null);
     setBusy(false);
     notify(handle.key);
     return { ok: true };
-  }, []);
+  }, [api]);
 
   const adoptPersistedDraft = useCallback(async (key: string): Promise<{ ok: boolean; error?: string }> => {
     const mem = getMem(key);
@@ -962,7 +1202,7 @@ export function useDrafts(opts: {
     const snapshot = api.snapshot;
     if (!snapshot) return { ok: false, error: '持久草稿尚未加载' };
     const saved = snapshot.state.drafts[key] ?? { text: '', files: [] };
-    if (mem.timer !== null) { window.clearTimeout(mem.timer); mem.timer = null; }
+    if (mem.timer !== null) { clearTimeout(mem.timer); mem.timer = null; }
     mem.text = saved.text;
     mem.files = saved.files.map(file => ({ ...file }));
     mem.attachments = (saved.attachments ?? []).map(a => ({ ...a }));
@@ -972,11 +1212,12 @@ export function useDrafts(opts: {
     mem.savePaused = false;
     mem.version += 1;
     mem.savedVersion = mem.version;
+    flushRecalledBuffer(api, key, mem);
     setText(mem.text);
     setFiles([...mem.files]);
     setAttachments([...mem.attachments]);
-    setDirty(false);
-    setError(null);
+    setDirty(mem.dirty);
+    setError(mem.lastError);
     setConflict(null);
     setSavePaused(false);
     notify(key);
@@ -989,7 +1230,7 @@ export function useDrafts(opts: {
       if (!k) return;
       const mem = getMem(k);
       if (mem.timer !== null) {
-        window.clearTimeout(mem.timer);
+        clearTimeout(mem.timer);
         mem.timer = null;
       }
       if (mem.attempt) return; // 发送 attempt 冻结中：不写回旧内容

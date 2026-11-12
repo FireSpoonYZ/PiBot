@@ -87,6 +87,7 @@ import {
   isBotPreLlmPhase,
   resolveBotActivity,
   resolveComposerActionKind,
+  shouldShowComposerStop,
   type BotActivity,
 } from '../../../web/src/botActivity';
 import { botAvatarKey, syncBotAvatarConfigs } from '../../../web/src/botAvatarSync';
@@ -1029,19 +1030,6 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
                   <SendButtonIcon busy={false} size={16} />
                 </button>
               ) : null}
-              {canStop ? (
-                <button
-                  ref={stopButtonRef}
-                  type="button"
-                  className="composer-stop"
-                  onClick={onStop}
-                  disabled={stopDisabled}
-                  aria-label="停止此智能体"
-                  title="停止当前执行并将排队消息撤回输入框"
-                >
-                  <Square size={14} />
-                </button>
-              ) : null}
             </>
           ) : (
             <button
@@ -1055,6 +1043,19 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
               <SendButtonIcon busy={false} size={16} />
             </button>
           )}
+          {!isStopping && !receiptBusy && canStop ? (
+            <button
+              ref={stopButtonRef}
+              type="button"
+              className="composer-stop"
+              onClick={onStop}
+              disabled={stopDisabled}
+              aria-label="停止此智能体"
+              title="停止当前执行并将排队消息撤回输入框"
+            >
+              <Square size={14} />
+            </button>
+          ) : null}
         </div>
       </div>
       <div className="composer-footer">
@@ -1862,8 +1863,7 @@ function PrimaryChatPane({
       isBotActivityBusy(curActivity) ||
       (turnAdmission !== null && turnAdmission.phase !== 'failed')
     ) {
-      setEditingTurn(null);
-      setSendError('智能体忙碌时无法编辑历史消息。');
+      setSendError('智能体忙碌时无法编辑历史消息，草稿已保留，请稍后重试或按 Esc 取消。');
       return;
     }
     const msg = activeEditing.text.trim();
@@ -1893,8 +1893,7 @@ function PrimaryChatPane({
     } catch (e) {
       if (!isCurrentSession()) return;
       if (toError(e).code === 'RUNTIME_BUSY') {
-        setEditingTurn(null);
-        setSendError('智能体忙碌时无法编辑历史消息。');
+        setSendError('智能体忙碌时无法编辑历史消息，草稿已保留，请稍后重试或按 Esc 取消。');
       } else {
         setSendError('编辑重发失败：' + tErr(e));
         reportUnlessTargetOffline(api, e);
@@ -2144,7 +2143,11 @@ function PrimaryChatPane({
     setSendError(null);
     try {
       const receipt = await api.call(current, 'submit', {
-        botId: rec.botId, requestId: rec.requestId, text: rec.text,
+        botId: rec.botId,
+        requestId: rec.requestId,
+        text: rec.text,
+        ...(rec.attachments?.length ? { attachments: rec.attachments } : {}),
+        ...(rec.delivery ? { delivery: rec.delivery } : {}),
       });
       if (!isCurrentSession()) return;
       const nextAdmission = readTurnAdmission((receipt as { admission?: unknown }).admission);
@@ -2429,7 +2432,12 @@ function PrimaryChatPane({
   }
 
   async function recallQueuedItem(item: UnifiedQueuedStripItem, mergeIntoDraft: boolean) {
-    if (!identity || queueBusy || disabled) return;
+    if (!identity || queueBusy || !readsActive || isArchived) return;
+    if (mergeIntoDraft && drafts.attempt) {
+      setSendError('当前存在未确认的发送草稿，请先处理后再撤回排队消息。');
+      return;
+    }
+    if (disabled) return;
     if (item.source === 'host' && !online) {
       setSendError('目标离线，无法操作远端排队消息。');
       return;
@@ -2477,7 +2485,12 @@ function PrimaryChatPane({
   }
 
   async function recallAllQueued() {
-    if (!identity || queueBusy || disabled) return;
+    if (!identity || queueBusy || !readsActive || isArchived) return;
+    if (drafts.attempt) {
+      setSendError('当前存在未确认的发送草稿，请先处理后再撤回排队消息。');
+      return;
+    }
+    if (disabled) return;
     const frozenDraftKey = drafts.key ?? undefined;
     setQueueBusy(true);
     try {
@@ -2666,7 +2679,7 @@ function PrimaryChatPane({
         recOutcome?.action !== 'ready-clear-retry',
     );
   const isSendingMessage = receiptBusy && slashBusy === null;
-  // 严格规则：智能体忙碌时禁止编辑历史消息；一旦进入忙碌态立即自动退出编辑模式（保留用户原草稿）。
+  // 智能体忙碌时禁止发起或提交历史消息编辑；已打开的编辑草稿保留，待空闲后可重试或按 Esc 取消。
   const isBusyForEdit =
     liveBusy ||
     Boolean(live?.busy) ||
@@ -2682,12 +2695,11 @@ function PrimaryChatPane({
       editingTurn.sess !== sess ||
       editingTurn.botId !== bot.botId ||
       !online ||
-      isArchived ||
-      isBusyForEdit
+      isArchived
     ) {
       setEditingTurn(null);
     }
-  }, [editingTurn, editSubmitting, sess, bot.botId, online, isArchived, isBusyForEdit]);
+  }, [editingTurn, editSubmitting, sess, bot.botId, online, isArchived]);
   const startEditTurn = useCallback(
     (turn: ChatTurn) => {
       if (!canEditTurns) return;
@@ -2731,6 +2743,13 @@ function PrimaryChatPane({
   const isPreLlmPhase = desktopComposerAction === 'loading';
   const isLlmRunningPhase =
     !isArchived && !isStoppingPhase && !isPreLlmPhase && online && isBotLlmRunningPhase(liveActivity.phase);
+  const showComposerStop = shouldShowComposerStop({
+    phase: liveActivity.phase,
+    online,
+    archived: isArchived,
+    isStopping: stopping,
+    canStop,
+  });
   const requestStop = () => {
     if (requiresStopConfirmation) setConfirmedStopTarget(stopTarget);
     else void stopTask();
@@ -3078,7 +3097,7 @@ function PrimaryChatPane({
         isPreLlm={isPreLlmPhase}
         isLlmRunning={isLlmRunningPhase}
         isStopping={isStoppingPhase}
-        canStop={canStop}
+        canStop={showComposerStop}
         stopDisabled={stopDisabled}
         onStop={requestStop}
         stopButtonRef={stopButtonRef}

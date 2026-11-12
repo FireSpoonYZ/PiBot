@@ -6,6 +6,7 @@ import {
   isBotPreLlmPhase,
   resolveBotActivity,
   resolveComposerActionKind,
+  shouldShowComposerStop,
 } from '../src/botActivity.ts';
 
 test('isBotPreLlmPhase and isBotLlmRunningPhase partition pre-LLM vs active LLM phases', () => {
@@ -93,6 +94,87 @@ test('resolveComposerActionKind enforces pre-LLM spinner & queue lock, then stop
     assert.equal(
       resolveComposerActionKind({ phase, online: true, hasDraft: true, canStop: phase === 'failed' }),
       'send',
+    );
+  }
+});
+
+test('shouldShowComposerStop covers all 6 stoppable phases and hides when stopping, offline, archived, disallowed, or settled', () => {
+  const stoppablePhases = ['queued', 'preparing', 'running', 'compacting', 'interrupting', 'failed'];
+
+  for (const phase of stoppablePhases) {
+    assert.equal(
+      canStopBotActivity({ phase, source: 'primary', scopeId: null, requestId: 'r1', startedAt: null }),
+      true,
+      `expected canStopBotActivity to be true for ${phase}`,
+    );
+    assert.equal(
+      shouldShowComposerStop({
+        phase,
+        online: true,
+        archived: false,
+        isStopping: false,
+        canStop: true,
+      }),
+      true,
+      `expected shouldShowComposerStop to be true for ${phase}`,
+    );
+    assert.equal(
+      shouldShowComposerStop({
+        phase,
+        online: true,
+        archived: false,
+        isStopping: true,
+        canStop: true,
+      }),
+      false,
+      `expected isStopping:true to hide clickable stop for ${phase}`,
+    );
+    assert.equal(
+      shouldShowComposerStop({
+        phase,
+        online: false,
+        archived: false,
+        isStopping: false,
+        canStop: true,
+      }),
+      false,
+      `expected online:false to hide stop for ${phase}`,
+    );
+    assert.equal(
+      shouldShowComposerStop({
+        phase,
+        online: true,
+        archived: true,
+        isStopping: false,
+        canStop: true,
+      }),
+      false,
+      `expected archived:true to hide stop for ${phase}`,
+    );
+    assert.equal(
+      shouldShowComposerStop({
+        phase,
+        online: true,
+        archived: false,
+        isStopping: false,
+        canStop: false,
+      }),
+      false,
+      `expected canStop:false to hide stop for ${phase}`,
+    );
+  }
+
+  for (const phase of ['stopping', 'idle', 'stopped', null, undefined]) {
+    assert.equal(
+      shouldShowComposerStop({
+        phase,
+        online: true,
+        archived: false,
+        isStopping: false,
+        canStop: true,
+      }),
+      false,
+      `expected phase ${String(phase)} to return false`,
     );
   }
 });

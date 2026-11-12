@@ -287,7 +287,6 @@ const MAX_TURN_ADMISSION_CHARS = 256;
 const QUEUED_ITEM_KEYS = new Set(['requestId', 'delivery', 'preview', 'attachmentCount']);
 const QUEUED_DELIVERY_MODES = new Set(['followUp', 'steer']);
 const MAX_QUEUED_ITEMS = 32;
-const MAX_QUEUED_REQUEST_ID_CHARS = 128;
 const MAX_QUEUED_PREVIEW_CHARS = 160;
 
 function normalizeQueuedItems(value) {
@@ -299,9 +298,6 @@ function normalizeQueuedItems(value) {
     if (!isPlainObject(item)) throw invalid('queuedItem must be a plain object');
     rejectUnknownFields(item, QUEUED_ITEM_KEYS, 'queuedItem');
     assertId(item.requestId, 'queuedItem requestId');
-    if (item.requestId.length > MAX_QUEUED_REQUEST_ID_CHARS) {
-      throw invalid('queuedItem requestId exceeds the bound');
-    }
     if (seen.has(item.requestId)) {
       throw invalid('queuedItem requestId must be unique');
     }

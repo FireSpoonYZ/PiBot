@@ -314,6 +314,8 @@ test('end-to-end runtime: full user -> Bot A -> Bot B DM task with closing nudge
   let scenario = 'nudge_then_reply';
   let dmScopeId = '';
   let roomScopeId = '';
+  let opsRoomScopeId = '';
+  let backlogRoomScopeId = '';
   let callSeq = 0;
 
   const models = createMockModels(async (reqContext) => {
@@ -324,10 +326,14 @@ test('end-to-end runtime: full user -> Bot A -> Bot B DM task with closing nudge
     const lastMsg = messages[messages.length - 1];
     const lastIsToolResult = lastMsg?.role === 'toolResult';
     const lastUserMsg = [...messages].reverse().find((m) => m?.role === 'user');
-    const isNudge = JSON.stringify(lastUserMsg ?? {}).includes('[Host closing-reply check #');
-    const isBotA = fullSerialized.includes('You are 总控助手.') || serialized.includes(`"botId":${JSON.stringify(botA.botId)}`);
+    const wakePrompt = typeof lastUserMsg?.content === 'string' ? lastUserMsg.content : JSON.stringify(lastUserMsg ?? {});
+    const sysPrompt = typeof reqContext?.systemPrompt === 'string' ? reqContext.systemPrompt : '';
+    const isNudge = wakePrompt.includes('[Host closing-reply check #');
+    const isBotA = sysPrompt
+      ? sysPrompt.includes('You are 总控助手.')
+      : (fullSerialized.includes('You are 总控助手.') || serialized.includes(`"botId":${JSON.stringify(botA.botId)}`));
     const callerBotId = isBotA ? botA.botId : botB.botId;
-    modelCalls.push({ callerBotId, isNudge, lastIsToolResult, serialized });
+    modelCalls.push({ callerBotId, isNudge, lastIsToolResult, serialized, wakePrompt, sysPrompt });
 
     if (scenario === 'nudge_then_reply') {
       if (callerBotId === botA.botId) {
@@ -397,6 +403,84 @@ test('end-to-end runtime: full user -> Bot A -> Bot B DM task with closing nudge
             id: `call_room_${callSeq}`,
             name: 'send_to',
             arguments: { scopeId: roomScopeId, text: '收到点名，研究进度正常！' },
+          },
+        ];
+      }
+      return [];
+    }
+
+    if (scenario === 'cross_scope_publish_nudge') {
+      if (callerBotId === botA.botId) {
+        if (!isNudge) {
+          if (!lastIsToolResult) {
+            // Bot A sends to ANOTHER room instead of replying to Bot B's inbound 1v1 DM!
+            return [
+              {
+                type: 'toolCall',
+                id: `call_cross_pub_${callSeq}`,
+                name: 'send_to',
+                arguments: { scopeId: opsRoomScopeId, text: '大群播报：正在确认发布窗口' },
+              },
+            ];
+          }
+          return [{ type: 'text', text: '已先在大群播报，暂未回复私信。' }];
+        }
+        // DM closing nudge must still fire! Bot A now replies to Bot B's DM.
+        if (!lastIsToolResult) {
+          return [
+            {
+              type: 'toolCall',
+              id: `call_dm_after_cross_pub_${callSeq}`,
+              name: 'send_to',
+              arguments: { scopeId: dmScopeId, text: '发布窗口已确认为今晚 22:00。' },
+            },
+          ];
+        }
+        return [{ type: 'text', text: '已在追问后私信回复研究助手。' }];
+      }
+      return [{ type: 'text', text: 'ack' }];
+    }
+
+    if (scenario === 'cross_scope_pass_nudge') {
+      if (callerBotId === botA.botId) {
+        if (!isNudge) {
+          if (!lastIsToolResult) {
+            // Bot A sends "(pass)" to ANOTHER room instead of passing/replying on Bot B's DM!
+            return [
+              {
+                type: 'toolCall',
+                id: `call_cross_pass_${callSeq}`,
+                name: 'send_to',
+                arguments: { scopeId: opsRoomScopeId, text: '(pass)' },
+              },
+            ];
+          }
+          return [{ type: 'text', text: '另一群聊无需发言。' }];
+        }
+        // DM closing nudge must still fire! Bot A now replies to Bot B's DM.
+        if (!lastIsToolResult) {
+          return [
+            {
+              type: 'toolCall',
+              id: `call_dm_after_cross_pass_${callSeq}`,
+              name: 'send_to',
+              arguments: { scopeId: dmScopeId, text: '回滚预案已就绪。' },
+            },
+          ];
+        }
+        return [{ type: 'text', text: '已私信回复回滚预案状态。' }];
+      }
+      return [{ type: 'text', text: 'ack' }];
+    }
+
+    if (scenario === 'room_backlog_cursor') {
+      if (!lastIsToolResult) {
+        return [
+          {
+            type: 'toolCall',
+            id: `call_backlog_pass_${callSeq}`,
+            name: 'send_to',
+            arguments: { scopeId: backlogRoomScopeId, text: '(pass)' },
           },
         ];
       }
@@ -721,6 +805,223 @@ test('end-to-end runtime: full user -> Bot A -> Bot B DM task with closing nudge
       roomHistory.some(
         (it) => it.message.author.kind === 'bot' && it.message.author.botId === botB.botId && it.message.text.includes('进度正常'),
       ),
+    );
+
+    // --- 5) Cross-scope send_to / "(pass)" to another room does NOT satisfy inbound 1v1 DM replyRequired ---
+    const opsRoomCreated = log.createScope({
+      requestId: 'mk-ops-room-1',
+      kind: 'room',
+      title: '播报通知群',
+      members: [
+        { deviceId: host.deviceId, botId: botA.botId },
+        { deviceId: host.deviceId, botId: botB.botId },
+      ],
+    });
+    opsRoomScopeId = opsRoomCreated.scope.scopeId;
+    await decisions.stopWork(botB.botId, opsRoomScopeId);
+
+    // 5a: Cross-scope publish to opsRoomScopeId must keep DM pending.published = false and trigger DM closing nudge!
+    scenario = 'cross_scope_publish_nudge';
+    modelCalls.length = 0;
+    const dmFromB1 = log.publish({
+      messageId: 'dm-from-b-1',
+      scopeId: dmScopeId,
+      author: { kind: 'bot', botId: botB.botId },
+      category: 'request',
+      text: '请总控助手确认今晚发布窗口并私信回复我。',
+      replyTo: null,
+    });
+
+    const settledCrossPub = await waitUntil(
+      async () => {
+        const actA = await decisions.getWorkActivity(botA.botId, dmScopeId);
+        return actA.lastDecision?.throughLocalId === dmFromB1.localId && actA.pending === null ? actA : null;
+      },
+      { label: 'cross-scope room publish still triggers DM closing nudge' },
+    );
+    assert.equal(settledCrossPub.lastDecision.outcome, 'published');
+    assert.ok(
+      log.history(opsRoomScopeId, { order: 'ascending', limit: 10 }).items.some(
+        (it) => it.message.text === '大群播报：正在确认发布窗口',
+      ),
+      'cross-scope room send_to still publishes to target room',
+    );
+    assert.ok(modelCalls.some((c) => c.callerBotId === botA.botId && !c.isNudge));
+    assert.ok(
+      modelCalls.some((c) => c.callerBotId === botA.botId && c.isNudge),
+      'expected DM closing nudge when Bot A only published to another room in Turn 1',
+    );
+    assert.ok(
+      log.history(dmScopeId, { order: 'ascending', limit: 20 }).items.some(
+        (it) =>
+          it.message.author.kind === 'bot' &&
+          it.message.author.botId === botA.botId &&
+          it.message.category === 'reply' &&
+          it.message.replyTo === 'dm-from-b-1' &&
+          it.message.text === '发布窗口已确认为今晚 22:00。',
+      ),
+    );
+
+    // 5b: Cross-scope "(pass)" to opsRoomScopeId must keep DM pending.passed = false and trigger DM closing nudge!
+    scenario = 'cross_scope_pass_nudge';
+    modelCalls.length = 0;
+    const dmFromB2 = log.publish({
+      messageId: 'dm-from-b-2',
+      scopeId: dmScopeId,
+      author: { kind: 'bot', botId: botB.botId },
+      category: 'request',
+      text: '再确认一下回滚预案是否就绪？',
+      replyTo: null,
+    });
+
+    const settledCrossPass = await waitUntil(
+      async () => {
+        const actA = await decisions.getWorkActivity(botA.botId, dmScopeId);
+        return actA.lastDecision?.throughLocalId === dmFromB2.localId && actA.pending === null ? actA : null;
+      },
+      { label: 'cross-scope room "(pass)" still triggers DM closing nudge' },
+    );
+    assert.equal(settledCrossPass.lastDecision.outcome, 'published');
+    assert.ok(modelCalls.some((c) => c.callerBotId === botA.botId && !c.isNudge));
+    assert.ok(
+      modelCalls.some((c) => c.callerBotId === botA.botId && c.isNudge),
+      'expected DM closing nudge when Bot A only sent "(pass)" to another room in Turn 1',
+    );
+    assert.ok(
+      log.history(dmScopeId, { order: 'ascending', limit: 20 }).items.some(
+        (it) =>
+          it.message.author.kind === 'bot' &&
+          it.message.author.botId === botA.botId &&
+          it.message.category === 'reply' &&
+          it.message.replyTo === 'dm-from-b-2' &&
+          it.message.text === '回滚预案已就绪。',
+      ),
+    );
+
+    // --- 6) Room batchThrough cursor anchoring when >32 messages are backlogged ---
+    const backlogRoomCreated = log.createScope({
+      requestId: 'mk-backlog-room-1',
+      kind: 'room',
+      title: '积压游标锚定群',
+      members: [
+        { deviceId: host.deviceId, botId: botA.botId },
+        { deviceId: host.deviceId, botId: botB.botId },
+      ],
+    });
+    backlogRoomScopeId = backlogRoomCreated.scope.scopeId;
+    await decisions.stopWork(botA.botId, backlogRoomScopeId);
+    await decisions.stopWork(botB.botId, backlogRoomScopeId);
+
+    // Seed 240 messages:
+    // - Batch 1 (#1..#200, inbox page limit = 200) ends with #200 @研究助手 -> batchThrough = msg200.localId.
+    // - Batch 2 (#201..#240, 40 newer messages > 32) sits after batchThrough and ends with 10 consecutive Bot A turns (GROUP_MAX_MEMBER_TURNS).
+    for (let i = 1; i <= 199; i += 1) {
+      log.publish({
+        messageId: `backlog-m-${i}`,
+        scopeId: backlogRoomScopeId,
+        author: { kind: 'user' },
+        category: 'public',
+        text: `第一批背景记录 #${i}`,
+        replyTo: null,
+      });
+    }
+    const msg200 = log.publish({
+      messageId: 'backlog-m-200',
+      scopeId: backlogRoomScopeId,
+      author: { kind: 'user' },
+      category: 'public',
+      text: '@研究助手 第一批第200条锚点问题：请确认游标锚定',
+      replyTo: null,
+    });
+    for (let i = 201; i <= 229; i += 1) {
+      log.publish({
+        messageId: `backlog-m-${i}`,
+        scopeId: backlogRoomScopeId,
+        author: { kind: 'user' },
+        category: 'public',
+        text: `第二批过渡背景 #${i}`,
+        replyTo: null,
+      });
+    }
+    log.publish({
+      messageId: 'backlog-m-230',
+      scopeId: backlogRoomScopeId,
+      author: { kind: 'user' },
+      category: 'public',
+      text: '第二批自由讨论开始',
+      replyTo: null,
+    });
+    let msg240 = null;
+    for (let i = 231; i <= 240; i += 1) {
+      msg240 = log.publish({
+        messageId: `backlog-m-${i}`,
+        scopeId: backlogRoomScopeId,
+        author: { kind: 'bot', botId: botA.botId },
+        category: 'public',
+        text: `总控尾部连续发言 #${i}`,
+        replyTo: null,
+      });
+    }
+    assert.ok(msg240.localId - msg200.localId >= 40, 'more than 32 messages backlogged after batchThrough');
+
+    while ((await workContexts.syncWorkContext(botB.botId, backlogRoomScopeId, { limit: 200 })).hasMore) {
+      /* pre-import all 240 messages into WorkContextState */
+    }
+
+    scenario = 'room_backlog_cursor';
+    modelCalls.length = 0;
+    await decisions.resumeWork(botB.botId, backlogRoomScopeId);
+
+    await waitUntil(
+      async () => {
+        const actB = await decisions.getWorkActivity(botB.botId, backlogRoomScopeId);
+        return actB.handledLocalId >= msg240.localId && actB.pending === null ? actB : null;
+      },
+      {
+        timeoutMs: 10_000,
+        label: 'backlog room Batch 1 + Batch 2 settled',
+        onTimeout: async () => ({
+          actB: await decisions.getWorkActivity(botB.botId, backlogRoomScopeId),
+          calls: modelCalls.length,
+        }),
+      },
+    );
+
+    const backlogCallsB = modelCalls.filter(
+      (c) => c.callerBotId === botB.botId && c.wakePrompt.includes('[Group chat: "积压游标锚定群"') && !c.lastIsToolResult,
+    );
+    assert.equal(
+      backlogCallsB.length,
+      1,
+      `Bot B should wake once for Batch 1 (#1..#200) and skip Batch 2 (max_member_turns); got calls=${JSON.stringify(
+        modelCalls.map((c) => ({
+          callerBotId: c.callerBotId,
+          lastIsToolResult: c.lastIsToolResult,
+          sys: c.sysPrompt.slice(0, 40),
+          wake: c.wakePrompt.slice(0, 160),
+        })),
+      )}`,
+    );
+    const firstBacklogWake = backlogCallsB[0];
+    assert.equal(
+      firstBacklogWake.wakePrompt.includes('第一批第200条锚点问题：请确认游标锚定'),
+      true,
+      `wake prompt must anchor public history at batchThrough (#200) even when 40 newer messages exist after it; got wakePrompt=${firstBacklogWake.wakePrompt}`,
+    );
+    assert.equal(
+      firstBacklogWake.wakePrompt.includes('第一批背景记录 #199'),
+      true,
+      'recentHistory before batchThrough (#199) must be preserved in group prompt',
+    );
+    assert.equal(
+      firstBacklogWake.wakePrompt.includes('总控尾部连续发言'),
+      false,
+      'messages after batchThrough (#231..#240) must not leak into Batch 1 wake prompt',
+    );
+    assert.equal(
+      firstBacklogWake.wakePrompt.includes('第二批过渡背景'),
+      false,
+      'messages after batchThrough (#201..#229) must not leak into Batch 1 wake prompt',
     );
   } finally {
     await decisions.close();

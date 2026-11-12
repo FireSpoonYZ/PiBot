@@ -430,6 +430,144 @@ test('curator lifecycle transitions (mark_stale, archive_skill) and optional con
   });
 });
 
+test('batch skill_manage rollback preserves center.sqlite binding, global->assigned shrinks auto-seeded capabilities while keeping explicit ones, and review archive rejects shared skills', async () => {
+  await withSkillHarness(async ({ store, getSkills }) => {
+    const skills = getSkills();
+    const botA = { deviceId: 'dev-1', botId: 'bot-a' };
+    const curator = { ...botA, origin: 'curator', sessionId: 'job-batch-rollback-1' };
+
+    // 1. Batch skill_manage cross-DB rollback safety (skills.sqlite + center.sqlite)
+    for (const name of ['rollback-victim', 'surviving-skill', 'scope-shrink-skill']) {
+      const created = JSON.parse(
+        await skills.learningTool(curator, 'skill_manage', {
+          action: 'create',
+          name,
+          content: makeSkillMd(name, `Skill ${name}`, `Steps for ${name}.`),
+        }),
+      );
+      assert.equal(created.success, true);
+    }
+
+    const listedBefore = (await skills.review(botA, { action: 'list' })).items;
+    const victimItem = listedBefore.find((x) => x.name === 'rollback-victim');
+    const shrinkItem = listedBefore.find((x) => x.name === 'scope-shrink-skill');
+    assert.ok(victimItem?.installationId);
+    assert.ok(shrinkItem?.installationId);
+    assert.equal(store.getBotCapability('dev-1', 'bot-a', victimItem.installationId).enabled, true);
+
+    await skills.learningTool(curator, 'skill_view', { name: 'rollback-victim' });
+    await skills.learningTool(curator, 'skill_view', { name: 'surviving-skill' });
+
+    const batchRolledBack = JSON.parse(
+      await skills.learningTool(curator, 'skill_manage', {
+        operations: [
+          {
+            action: 'delete',
+            name: 'rollback-victim',
+            absorbed_into: 'surviving-skill',
+          },
+          {
+            action: 'intentional_invalid_op',
+            name: 'surviving-skill',
+          },
+        ],
+      }),
+    );
+    assert.equal(batchRolledBack.success, false);
+    assert.equal(batchRolledBack.rolled_back, true);
+    assert.equal(batchRolledBack.operations_applied, 0);
+    assert.equal(batchRolledBack.results?.[0]?.success, true);
+    assert.equal(batchRolledBack.results?.[1]?.success, false);
+
+    const listedAfterRollback = (await skills.review(botA, { action: 'list' })).items;
+    assert.equal(
+      listedAfterRollback.find((x) => x.name === 'rollback-victim')?.state,
+      'active',
+      'skills.sqlite state must remain active after batch rollback',
+    );
+    assert.equal(
+      store.getBotCapability('dev-1', 'bot-a', victimItem.installationId).enabled,
+      true,
+      'center.sqlite capability binding must remain enabled: true after batch rollback',
+    );
+
+    // 2. visibilityScope 'global' -> 'assigned' permission shrinkage
+    // First set to 'assigned' and explicitly grant Bot C via putBotCapability, leaving Bot B untouched.
+    const instId = shrinkItem.installationId;
+    const assignedFirst = store.renameInstallation(instId, {
+      expectedRevision: store.getInstallation(instId).revision,
+      visibilityScope: 'assigned',
+    });
+    assert.equal(assignedFirst.visibilityScope, 'assigned');
+
+    const explicitBotC = store.putBotCapability('dev-2', 'bot-c', instId, {
+      expectedRevision: store.getBotCapability('dev-2', 'bot-c', instId).revision,
+      enabled: true,
+      overrides: {},
+    });
+    assert.equal(explicitBotC.enabled, true);
+    assert.equal('explicitAssigned' in explicitBotC, false);
+    assert.equal(store.getBotCapability('dev-1', 'bot-b', instId).enabled, false);
+
+    // Promote to 'global' -> untouched non-owner Bot B automatically receives enabled: true.
+    const promotedGlobal = store.renameInstallation(instId, {
+      expectedRevision: store.getInstallation(instId).revision,
+      visibilityScope: 'global',
+    });
+    assert.equal(promotedGlobal.visibilityScope, 'global');
+    const autoBotBCap = store.getBotCapability('dev-1', 'bot-b', instId);
+    assert.equal(autoBotBCap.enabled, true, 'non-owner Bot B auto-enabled under global scope');
+    assert.equal('autoSeeded' in autoBotBCap, false);
+    assert.equal(store.getBotCapability('dev-2', 'bot-c', instId).enabled, true);
+
+    // 3a. Manual archive via foreground review() must reject while 'global' with INVALID_STATE + 'shared'
+    const currentShrinkGlobal = (await skills.review(botA, { action: 'list' })).items.find(
+      (x) => x.skillId === shrinkItem.skillId,
+    );
+    await assert.rejects(
+      skills.review(botA, {
+        action: 'archive',
+        skillId: shrinkItem.skillId,
+        expectedRevision: currentShrinkGlobal.stateRevision,
+        requestId: 'req-manual-archive-global',
+      }),
+      (err) => err?.code === 'INVALID_STATE' && String(err?.message ?? '').toLowerCase().includes('shared'),
+    );
+
+    // Downgrade 'global' -> 'assigned': auto-seeded Bot B shrinks to enabled: false, while explicit Bot C stays enabled: true!
+    const downgradedAssigned = store.renameInstallation(instId, {
+      expectedRevision: store.getInstallation(instId).revision,
+      visibilityScope: 'assigned',
+    });
+    assert.equal(downgradedAssigned.visibilityScope, 'assigned');
+    assert.equal(
+      store.getBotCapability('dev-1', 'bot-b', instId).enabled,
+      false,
+      'auto-seeded non-owner Bot B binding must shrink to enabled: false when downgraded to assigned',
+    );
+    assert.equal(
+      store.getBotCapability('dev-2', 'bot-c', instId).enabled,
+      true,
+      'explicitly assigned Bot C binding must remain enabled: true when downgraded to assigned',
+    );
+    assert.equal(store.getBotCapability('dev-1', 'bot-a', instId).enabled, true);
+
+    // 3b. Manual archive via foreground review() must also reject while 'assigned' with INVALID_STATE + 'shared'
+    const currentShrinkAssigned = (await skills.review(botA, { action: 'list' })).items.find(
+      (x) => x.skillId === shrinkItem.skillId,
+    );
+    await assert.rejects(
+      skills.review(botA, {
+        action: 'archive',
+        skillId: shrinkItem.skillId,
+        expectedRevision: currentShrinkAssigned.stateRevision,
+        requestId: 'req-manual-archive-assigned',
+      }),
+      (err) => err?.code === 'INVALID_STATE' && String(err?.message ?? '').toLowerCase().includes('shared'),
+    );
+  });
+});
+
 test('center learning defaults consolidate=false and restores automatic review counters when preempted before mutation', async () => {
   const activeSignals = [];
   await withSkillHarness(

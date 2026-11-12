@@ -594,7 +594,10 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .grok-composer-pill textarea.is-empty { height: 36px!important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .grok-composer-mic-inline { width: 36px; height: 36px; border-radius: 50%; color: var(--muted); display: inline-flex; align-items: center; justify-content: center; flex: none; }
 .grok-composer-mic-inline.recording { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.grok-composer-actions { display: inline-flex; align-items: center; gap: 5px; flex: none; }
+.grok-composer-actions:empty { display: none; }
 .grok-composer-action-pill { height: 36px; min-width: 44px; padding: 0 12px; border-radius: 999px; background: var(--text); color: var(--bg); display: inline-flex; align-items: center; justify-content: center; flex: none; white-space: nowrap; transition: transform 160ms cubic-bezier(.22, 1, .36, 1); }
+.grok-composer-actions .grok-composer-action-pill + .grok-composer-action-pill { min-width: 40px; padding: 0 10px; }
 .grok-composer-action-pill.send { background: #2B70F6; color: #fff; }
 .grok-composer-action-pill.stop { background: var(--danger); color: #fff; }
 .grok-composer-action-pill.stop:disabled { opacity: .72; cursor: not-allowed; }

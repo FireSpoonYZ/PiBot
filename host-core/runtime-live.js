@@ -15,6 +15,7 @@ import {
   diffLiveState,
   projectInboxQueuedItems,
   buildQueuedPreview,
+  truncatePrefix,
   MAX_QUEUED_ITEMS,
 } from './runtime-live-projection.js';
 
@@ -36,7 +37,7 @@ function assertNonBlank(value, name) {
 // validate structure strictly and bound every string so a status can never
 // blow the per-frame budget or smuggle text/credentials into live frames.
 const TURN_ADMISSION_PHASES = new Set(['queued', 'checking', 'synchronizing', 'failed']);
-const MAX_TURN_REQUEST_ID_CHARS = 128;
+const MAX_ID_UTF8_BYTES = 256;
 const MAX_TURN_ERROR_CHARS = 256;
 // BotActivity 统一工作状态：Host 侧合并结果写进每个 primary 快照/更新；
 // 字段严格限长，activity 永远不可能把正文/凭据塞进 live 帧。
@@ -45,7 +46,20 @@ const WORK_PENDING_KINDS = new Set(['primary', 'room', 'dm']);
 const MAX_ACTIVITY_CHARS = 256;
 
 function boundText(value, max) {
-  return value.length > max ? value.slice(0, max) : value;
+  return truncatePrefix(value, max).text;
+}
+
+function boundUtf8(value, maxBytes) {
+  if (Buffer.byteLength(value, 'utf8') <= maxBytes) return value;
+  let out = '';
+  let bytes = 0;
+  for (const ch of value) {
+    const chBytes = Buffer.byteLength(ch, 'utf8');
+    if (bytes + chBytes > maxBytes) break;
+    out += ch;
+    bytes += chBytes;
+  }
+  return out;
 }
 
 /**
@@ -64,7 +78,7 @@ function normalizeTurnAdmission(status) {
   if (!TURN_ADMISSION_PHASES.has(status.phase)) {
     throw errWithCode('turn admission phase must be queued, checking, synchronizing or failed', 'INVALID_ARGUMENT');
   }
-  const normalized = { requestId: boundText(status.requestId, MAX_TURN_REQUEST_ID_CHARS), phase: status.phase };
+  const normalized = { requestId: boundUtf8(status.requestId, MAX_ID_UTF8_BYTES), phase: status.phase };
   if (status.source !== undefined) {
     if (status.source !== 'primary' && status.source !== 'background') {
       throw errWithCode('turn admission source must be primary or background', 'INVALID_ARGUMENT');
@@ -96,13 +110,14 @@ function normalizeQueuedTurnItems(items) {
     }
     if (
       typeof item.requestId !== 'string' ||
+      item.requestId.length === 0 ||
       item.requestId.trim() === '' ||
       !item.requestId.isWellFormed() ||
-      /\s/.test(item.requestId)
+      Buffer.byteLength(item.requestId, 'utf8') > MAX_ID_UTF8_BYTES
     ) {
       throw errWithCode('queuedItem requestId must be a non-empty well-formed id', 'INVALID_ARGUMENT');
     }
-    const requestId = boundText(item.requestId, MAX_TURN_REQUEST_ID_CHARS);
+    const requestId = item.requestId;
     if (seen.has(requestId)) continue;
     seen.add(requestId);
     const delivery = item.delivery === 'steer' ? 'steer' : 'followUp';
