@@ -105,12 +105,19 @@ export function openBotManagement({ store, packages, notify }) {
     };
 
     if (action === 'catalog') {
-      return { installations: store.listInstallations().map(metadata) };
+      return {
+        installations: store.listInstallations()
+          .filter((inst) => allowShared || store.isVisibleToBot(inst, deviceId, botId))
+          .map(metadata),
+      };
     }
 
     if (['describe', 'check', 'probe'].includes(action)) {
       const installationId = text(input.installationId, 'installationId');
       const installation = existing(installationId);
+      if (!allowShared && !store.isVisibleToBot(installation, deviceId, botId)) {
+        fail('NOT_FOUND', 'Installation not found');
+      }
       const bound = () => bindingsOf(installationId).some(binding => binding.deviceId === deviceId && binding.botId === botId);
       const config = store.getInstallationConfig(installationId);
       const pkg = store.getPackageVersion(installation.packageId, installation.targetVersion);

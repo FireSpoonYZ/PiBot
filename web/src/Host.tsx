@@ -4284,6 +4284,7 @@ ${newer}` : draftSnapshot;
                 preset={resolveBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary)}
                 isPrimary={activeBot.isPrimary}
                 busy={isBotBusy}
+                reflecting={Boolean(chatLive?.learning?.active)}
                 size={28}
               />
               <span className="grok-chat-pill-name">{activeBot.role}</span>
@@ -4574,6 +4575,8 @@ ${newer}` : draftSnapshot;
               )}
               queuedCount={chatLive?.queuedCount ?? 0}
               activity={isStoppingBot ? botActivity : rawBotActivity}
+              learning={chatLive?.learning ?? null}
+              onOpenLearnedSkills={() => setSkillReviewTargetKey(botPanelIdentityKey)}
               hasError={Boolean(failureNotice) || (chatReceipt?.status === 'unanswered' && !receiptUserCancelled)}
               startedAt={activeTurnStartedAt}
               t={t}
@@ -5083,7 +5086,7 @@ ${newer}` : draftSnapshot;
                   onClick={() => setSkillReviewTargetKey(botPanelIdentityKey)}
                 >
                   <Sparkles size={20} className="grok-row-icon" />
-                  <span className="grok-row-label">{t('Skill 审阅', 'Skill Review')}</span>
+                  <span className="grok-row-label">{t('已学技能', 'Learned Skills')}</span>
                   <ChevronRight size={18} className="grok-row-chevron" />
                 </button>
                 <button
@@ -6557,8 +6560,8 @@ ${newer}` : draftSnapshot;
         (screen === 'bot-profile' || screen === 'bot-profile-manage' || (screen === 'bot-edit' && editMode === 'edit')) &&
         <BotModelSheet key={`${modelTarget.center}|${modelTarget.botKey}|${modelTarget.identity.generation}|${modelTarget.tab}`} api={modelTarget.api} identity={modelTarget.identity} botId={modelTarget.botId} initialTab={modelTarget.tab} onClose={() => setModelTarget(null)}/>}
 
-      {skillReviewTargetKey === botPanelIdentityKey && activeBot && screen === 'bot-profile' ? (
-        <SettingsSheet title={t('Skill 审阅', 'Skill Review')} onClose={() => setSkillReviewTargetKey(null)}>
+      {skillReviewTargetKey === botPanelIdentityKey && activeBot && (screen === 'bot-profile' || screen === 'chat') ? (
+        <SettingsSheet title={t('✨ 已学技能', 'Learned Skills')} onClose={() => setSkillReviewTargetKey(null)}>
           <SkillReviewPanel key={botPanelIdentityKey} connected={botPanelConnected} call={callSkillReview} />
         </SettingsSheet>
       ) : null}

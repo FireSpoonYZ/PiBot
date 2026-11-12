@@ -71,6 +71,7 @@ export interface ChatTranscriptProps {
   hasMore?: boolean;
   onLoadMore?: () => void;
   onRetry?: () => void;
+  onOpenLearnedSkills?: () => void;
   emptyActions?: ReactNode;
   knownBots?: readonly KnownBotSummary[];
 }
@@ -109,6 +110,7 @@ export function ChatTranscript({
   hasMore = false,
   onLoadMore,
   onRetry,
+  onOpenLearnedSkills,
   emptyActions,
   knownBots,
 }: ChatTranscriptProps) {
@@ -414,6 +416,8 @@ export function ChatTranscript({
         preset={avatarPreset}
         isBusy={slotBusy}
         activity={activity ?? undefined}
+        learning={live?.learning ?? null}
+        onOpenLearnedSkills={onOpenLearnedSkills}
         isStreaming={Boolean(displayGeneratingText)}
         activeToolName={activeLiveToolName}
         hasThinking={Boolean(lastTurn?.role === 'assistant' && lastTurn.thinking && !displayGeneratingText)}

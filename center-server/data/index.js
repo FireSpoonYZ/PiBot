@@ -29,6 +29,15 @@ const SAFE_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 /** Target-supplied messages can embed paths or secrets, so only an allowlisted code and a fixed message cross the boundary. */
 const safeRuntimeError = (value) => value == null ? null : { code: SAFE_CODE.test(String(value.code)) ? value.code : 'INTERNAL_ERROR', message: 'Runtime application failed' };
 const ACTIVATION_STATUSES = ['disabled', 'enabling', 'enabled', 'failed'];
+const VISIBILITY_SCOPES = ['private', 'assigned', 'global'];
+const isVisibleToBot = (installation, deviceId, botId) => {
+  if (!installation?.ownerBot) return true;
+  const scope = installation.visibilityScope ?? 'private';
+  if (scope === 'private') {
+    return installation.ownerBot.deviceId === deviceId && installation.ownerBot.botId === botId;
+  }
+  return true;
+};
 /** Activation errors are center-authored: keep the code and a bounded message, drop anything else. */
 const safeActivationError = (value, status) => status !== 'failed' || value == null ? null : {
   code: SAFE_CODE.test(String(value.code)) ? value.code : 'INTERNAL_ERROR',
@@ -208,12 +217,20 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     'e-launcher.vault': {},
     'e-launcher.webfox': {},
   };
-  /** Default bindings for a newly registered Bot: Hindsight projectId is name-botId; Billion Context uses the global config. Existing rows (incl. explicit disables) are kept. Caller must hold a transaction. */
+  function defaultBindingSpec(installation) {
+    if (installation.target !== 'host') return null;
+    if (installation.kind === 'plugin' && DEFAULT_BINDINGS[installation.packageId]) {
+      return DEFAULT_BINDINGS[installation.packageId];
+    }
+    if (installation.visibilityScope === 'global') return {};
+    return null;
+  }
+  /** Default bindings for a newly registered Bot: Hindsight projectId is name-botId; Billion Context uses the global config; global skills enable automatically. Existing rows (incl. explicit disables) are kept. Caller must hold a transaction. */
   function initializeBotDefaults(bot) {
     let added = false;
     for (const installation of store.listInstallations()) {
-      const defaults = DEFAULT_BINDINGS[installation.packageId];
-      if (!defaults || installation.kind !== 'plugin' || installation.target !== 'host' || !activeInstallation(installation)) continue;
+      const defaults = defaultBindingSpec(installation);
+      if (!defaults || !activeInstallation(installation)) continue;
       if (bindingFor(bot.deviceId, bot.botId, installation.installationId).revision !== 0) continue;
       const overrides = defaults.overrides?.(bot) ?? {};
       const config = configFor(installation.installationId);
@@ -224,10 +241,10 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     }
     return added;
   }
-  /** Backfill default bindings on existing Bots when an installation reaches the active state; rows that already exist (incl. explicit disables/overrides) are untouched. Caller must hold a transaction. */
+  /** Backfill default bindings on existing Bots when an installation reaches the active/global state; rows that already exist (incl. explicit disables/overrides) are untouched. Caller must hold a transaction. */
   function seedBotDefaults(installation) {
-    const defaults = DEFAULT_BINDINGS[installation.packageId];
-    if (!defaults || installation.kind !== 'plugin' || installation.target !== 'host' || !activeInstallation(installation)) return false;
+    const defaults = defaultBindingSpec(installation);
+    if (!defaults || !activeInstallation(installation)) return false;
     let added = false;
     const bots = db.prepare('SELECT json FROM device_bots').all().map(parse);
     for (const bot of bots) {
@@ -294,9 +311,10 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     }
     const capabilities = installations.map((installation) => {
       const config = capabilityFor(deviceId, bot.botId, installation.installationId);
-      const enabled = activeInstallation(installation) && config.enabled;
+      const visible = isVisibleToBot(installation, deviceId, bot.botId);
+      const enabled = visible && activeInstallation(installation) && config.enabled;
       // Authorization is intended global enabled plus Bot binding, independent of transient rollout status.
-      const authorized = Boolean(installation.enabled && config.enabled);
+      const authorized = Boolean(visible && installation.enabled && config.enabled);
       const capabilityRefs = new Set();
       collectCredentialRefs(config.configSchema, config.effectiveConfig, capabilityRefs);
       if (enabled) {
@@ -856,6 +874,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       getInstallation: (id) => withActivation(get('installations', id)),
       /** Effective authorization used by snapshots, execution and deployment planning. */
       isActive: activeInstallation,
+      isVisibleToBot,
       /** Activation-only patch: keeps the CAS revision so a late preparation cannot clobber a newer intent. */
       putInstallationActivation(id, activation) {
         assertObject(activation);
@@ -870,12 +889,12 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           return result;
         });
       },
-      /** Seeds missing default bindings for every currently active default plugin, e.g. a bundled capability added after Bots already existed. Explicit disables/overrides and globally inactive installations are untouched. */
+      /** Seeds missing default bindings for every currently active default plugin or global skill. Explicit disables/overrides and globally inactive installations are untouched. */
       backfillDefaultBindings() {
         return transaction(() => {
           let changed = false;
           for (const installation of store.listInstallations()) {
-            if (!DEFAULT_BINDINGS[installation.packageId]) continue;
+            if (!defaultBindingSpec(installation)) continue;
             if (seedBotDefaults(installation)) changed = true;
           }
           if (changed) bump();
@@ -898,21 +917,27 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       getBotCapability: capabilityFor,
       listBotCapabilities(deviceId, botId) {
         assertId(deviceId); assertId(botId);
-        return transaction(() => store.listInstallations().map((installation) => {
-          const config = capabilityFor(deviceId, botId, installation.installationId);
-          const { uiSchema } = configFor(installation.installationId);
-          return { installation, config, ...(uiSchema === undefined ? {} : { uiSchema }) };
-        }), 'DEFERRED');
+        return transaction(() => store.listInstallations()
+          .filter((installation) => isVisibleToBot(installation, deviceId, botId))
+          .map((installation) => {
+            const config = capabilityFor(deviceId, botId, installation.installationId);
+            const { uiSchema } = configFor(installation.installationId);
+            return { installation, config, ...(uiSchema === undefined ? {} : { uiSchema }) };
+          }), 'DEFERRED');
       },
       putBotCapability(deviceId, botId, id, input) {
         assertId(deviceId); assertId(botId); assertObject(input); assertObject(input.overrides);
         if (typeof input.enabled !== 'boolean') throw error('INVALID_ARGUMENT', 'enabled must be boolean');
         return transaction(() => {
+          const installation = requireInstallation(id);
           const config = configFor(id);
           const current = bindingFor(deviceId, botId, id);
           assertRevision(input.expectedRevision, current.revision);
+          if (input.enabled && !isVisibleToBot(installation, deviceId, botId)) {
+            throw error('FORBIDDEN', 'Skill is private to its owner Bot');
+          }
           // A new Bot enable requires a successfully enabled global installation; turning one off stays allowed.
-          if (input.enabled && !current.enabled && !activeInstallation(requireInstallation(id))) {
+          if (input.enabled && !current.enabled && !activeInstallation(installation)) {
             throw error('FORBIDDEN', 'Capability is not globally enabled');
           }
           validate(config.configSchema, merge(config.globalConfig, input.overrides), !input.enabled);
@@ -972,8 +997,33 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           const current = installation.installationId ? get('installations', installation.installationId) : null;
           const activation = installation.activation ?? legacyActivation(installation.enabled);
           if (!ACTIVATION_STATUSES.includes(activation.status)) throw error('INVALID_ARGUMENT', 'Invalid activation status');
-          const input = { ...installation, activation: { status: activation.status, error: safeActivationError(activation.error, activation.status), updatedAt: activation.updatedAt ?? null } };
-          const result = createOrUpdate('installations', pick(input, ['installationId', 'packageId', 'displayName', 'kind', 'source', 'target', 'targetVersion', 'enabled', 'activation']), 'installationId', expectedRevision);
+          let ownerBot = installation.ownerBot ?? current?.ownerBot;
+          if (ownerBot !== undefined) {
+            if (!object(ownerBot)
+                || typeof ownerBot.deviceId !== 'string' || !ownerBot.deviceId
+                || typeof ownerBot.botId !== 'string' || !ownerBot.botId
+                || typeof ownerBot.skillId !== 'string' || !ownerBot.skillId
+                || typeof ownerBot.skillName !== 'string' || !ownerBot.skillName) {
+              throw error('INVALID_ARGUMENT', 'Invalid ownerBot');
+            }
+            ownerBot = {
+              deviceId: ownerBot.deviceId,
+              botId: ownerBot.botId,
+              skillId: ownerBot.skillId,
+              skillName: ownerBot.skillName,
+            };
+          }
+          const visibilityScope = installation.visibilityScope ?? current?.visibilityScope ?? (ownerBot ? 'private' : undefined);
+          if (visibilityScope !== undefined && !VISIBILITY_SCOPES.includes(visibilityScope)) {
+            throw error('INVALID_ARGUMENT', 'Invalid visibilityScope');
+          }
+          const input = {
+            ...installation,
+            ...(ownerBot ? { ownerBot } : {}),
+            ...(visibilityScope ? { visibilityScope } : {}),
+            activation: { status: activation.status, error: safeActivationError(activation.error, activation.status), updatedAt: activation.updatedAt ?? null },
+          };
+          const result = createOrUpdate('installations', pick(input, ['installationId', 'packageId', 'displayName', 'kind', 'source', 'target', 'targetVersion', 'enabled', 'activation', 'ownerBot', 'visibilityScope']), 'installationId', expectedRevision);
           if (!current) {
             const globalConfig = {};
             validate(pkg.configSchema, globalConfig, true, true);
@@ -986,16 +1036,74 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           bump(); return result;
         });
       },
-      /** Display-name only: keeps installationId/packageId and never changes the deployment plan. */
+      /** Backfill ownerBot + visibilityScope on legacy bot-skill-* rows without bumping user CAS unnecessarily. */
+      setInstallationOwnership(id, ownerBot, defaultScope = 'private') {
+        assertId(id);
+        assertObject(ownerBot);
+        if (!VISIBILITY_SCOPES.includes(defaultScope)) throw error('INVALID_ARGUMENT', 'Invalid visibilityScope');
+        return transaction(() => {
+          const current = get('installations', id);
+          if (!current) return null;
+          if (current.ownerBot && current.visibilityScope) return withActivation(current);
+          const updated = {
+            ...current,
+            ownerBot: current.ownerBot ?? {
+              deviceId: ownerBot.deviceId,
+              botId: ownerBot.botId,
+              skillId: ownerBot.skillId,
+              skillName: ownerBot.skillName,
+            },
+            visibilityScope: current.visibilityScope ?? defaultScope,
+          };
+          save('installations', id, updated);
+          return withActivation(updated);
+        });
+      },
+      /** Display-name and/or Bot-skill visibility scope update: keeps installationId/packageId. */
       renameInstallation(id, input) {
         assertObject(input);
-        const displayName = typeof input.displayName === 'string' ? input.displayName.trim() : '';
-        if (!displayName || displayName.length > 120) throw error('INVALID_ARGUMENT', 'Invalid display name');
+        const hasDisplayName = input.displayName !== undefined;
+        const hasVisibility = input.visibilityScope !== undefined;
+        if (!hasDisplayName && !hasVisibility) throw error('INVALID_ARGUMENT', 'Invalid display name');
+        let displayName;
+        if (hasDisplayName) {
+          displayName = typeof input.displayName === 'string' ? input.displayName.trim() : '';
+          if (!displayName || displayName.length > 120) throw error('INVALID_ARGUMENT', 'Invalid display name');
+        }
+        if (hasVisibility && !VISIBILITY_SCOPES.includes(input.visibilityScope)) {
+          throw error('INVALID_ARGUMENT', 'Invalid visibilityScope');
+        }
         return transaction(() => {
           const current = requireInstallation(id);
           assertRevision(input.expectedRevision, current.revision);
-          const result = { ...current, displayName, revision: current.revision + 1 };
+          if (hasVisibility && !current.ownerBot) {
+            throw error('INVALID_ARGUMENT', 'visibilityScope is only supported on Bot-owned skills');
+          }
+          const nextScope = hasVisibility ? input.visibilityScope : current.visibilityScope;
+          const result = {
+            ...current,
+            ...(hasDisplayName ? { displayName } : {}),
+            ...(nextScope !== undefined ? { visibilityScope: nextScope } : {}),
+            revision: current.revision + 1,
+          };
           save('installations', id, result);
+          if (hasVisibility && nextScope !== current.visibilityScope) {
+            let bindingsChanged = false;
+            if (nextScope === 'private' && current.ownerBot) {
+              const allBindings = db.prepare('SELECT json FROM bindings WHERE installation_id = ?').all(id).map(parse);
+              for (const b of allBindings) {
+                if (b.deviceId === current.ownerBot.deviceId && b.botId === current.ownerBot.botId) continue;
+                if (!b.enabled) continue;
+                const disabled = { ...b, enabled: false, revision: b.revision + 1 };
+                db.prepare('UPDATE bindings SET json = ? WHERE device_id = ? AND bot_id = ? AND installation_id = ?')
+                  .run(json(disabled), b.deviceId, b.botId, id);
+                bindingsChanged = true;
+              }
+            } else if (nextScope === 'global' && activeInstallation(result)) {
+              if (seedBotDefaults(result)) bindingsChanged = true;
+            }
+            if (bindingsChanged) bump();
+          }
           return result;
         });
       },

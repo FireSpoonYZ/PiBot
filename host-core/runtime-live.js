@@ -211,11 +211,15 @@ function resolveBotActivity(botId, runActivity, queuedCount, ctx) {
   return activity('idle');
 }
 
-/** 合并统一 activity 进 primary 快照（恒写入，同 turnAdmission）。 */
+/** 合并统一 activity 与 learning 状态进 primary 快照（恒写入，同 turnAdmission）。 */
 function withBotActivity(projected, botId, runActivity, ctx) {
   const resolved = resolveBotActivity(botId, runActivity, projected.queuedCount, ctx);
   if (ctx.webhookStopPendingByBot.has(botId)) resolved.webhookStopPending = true;
-  return { ...projected, activity: resolved };
+  return {
+    ...projected,
+    activity: resolved,
+    learning: ctx.learningByBot.get(botId) ?? null,
+  };
 }
 
 /** 新的真实工作/排队输入出现：清掉旧 stopped control，防止新任务完结后又误显已停止。 */
@@ -259,7 +263,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
   // 只投影进 primary watch 的统一 activity，绝不进 work watch（保持原历史）。
   const workByBot = new Map();
   const webhookStopPendingByBot = new Set();
-  const activityCtx = { controlByBot, workByBot, admissionByBot, webhookStopPendingByBot };
+  const learningByBot = new Map();
+  const activityCtx = { controlByBot, workByBot, admissionByBot, webhookStopPendingByBot, learningByBot };
 
   function track(task) {
     inflight.add(task);
@@ -896,6 +901,16 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     for (const w of watches) w._applyActivity(botId);
   }
 
+  function setBotLearning(botId, learningState) {
+    assertNonBlank(botId, 'botId');
+    const previous = learningByBot.get(botId) ?? null;
+    const normalized = learningState ? structuredClone(learningState) : null;
+    if (JSON.stringify(previous) === JSON.stringify(normalized)) return;
+    if (normalized === null) learningByBot.delete(botId);
+    else learningByBot.set(botId, normalized);
+    for (const w of watches) w._applyActivity(botId);
+  }
+
   async function close() {
     if (closedFlag) return;
     closedFlag = true;
@@ -912,7 +927,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     controlByBot.clear();
     workByBot.clear();
     webhookStopPendingByBot.clear();
+    learningByBot.clear();
   }
 
-  return { watch, watchWork, getBotBoard, bind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, setWebhookStopPending, close };
+  return { watch, watchWork, getBotBoard, bind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, setWebhookStopPending, setBotLearning, close };
 }

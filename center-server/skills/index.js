@@ -120,6 +120,8 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     skillByScopedName: db.prepare('SELECT * FROM skills WHERE device_id = ? AND bot_id = ? AND category = ? AND name = ?'),
     skillsByFm: db.prepare('SELECT * FROM skills WHERE device_id = ? AND bot_id = ? AND fm_name = ?'),
     skillsFor: db.prepare('SELECT * FROM skills WHERE device_id = ? AND bot_id = ? ORDER BY name'),
+    allSkills: db.prepare('SELECT * FROM skills ORDER BY created_at, id'),
+    skillByInstallationId: db.prepare('SELECT * FROM skills WHERE installation_id = ?'),
     insertSkill: db.prepare('INSERT INTO skills (id, device_id, bot_id, name, fm_name, category, revision, head_rev, installation_id, package_id, published_rev, source, json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
     updateSkill: db.prepare('UPDATE skills SET fm_name = ?, revision = ?, head_rev = ?, installation_id = ?, package_id = ?, published_rev = ?, json = ?, updated_at = ? WHERE id = ?'),
     deleteSkill: db.prepare('DELETE FROM skills WHERE id = ?'),
@@ -127,6 +129,7 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     revList: db.prepare('SELECT rev, description, origin, request_id, created_at FROM skill_revisions WHERE skill_id = ? ORDER BY rev'),
     revInsert: db.prepare('INSERT INTO skill_revisions (skill_id, rev, files, description, origin, request_id, created_at, learning_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'),
     learningRevision: db.prepare("SELECT rev, origin, created_at, learning_source FROM skill_revisions WHERE skill_id = ? AND rev > ? AND rev <= ? AND (learning_source IS NOT NULL OR origin IN ('background_review', 'curator')) ORDER BY rev DESC LIMIT 1"),
+    latestLearningRevision: db.prepare("SELECT rev, origin, created_at, learning_source FROM skill_revisions WHERE skill_id = ? AND rev <= ? AND (learning_source IS NOT NULL OR origin IN ('background_review', 'curator', 'foreground')) ORDER BY rev DESC LIMIT 1"),
     revDelete: db.prepare('DELETE FROM skill_revisions WHERE skill_id = ?'),
     usageGet: db.prepare('SELECT revision, json FROM skill_usage WHERE device_id = ? AND bot_id = ? AND name = ?'),
     usagePut: db.prepare('INSERT INTO skill_usage (device_id, bot_id, name, revision, json) VALUES (?, ?, ?, ?, ?) ON CONFLICT(device_id, bot_id, name) DO UPDATE SET revision = excluded.revision, json = excluded.json'),
@@ -234,6 +237,16 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     const row = resolveManaged(id, name);
     if (row && usageRow(id, row.name).record?.state === U.STATE_ARCHIVED) return null;
     return row;
+  }
+
+  /** True when a Bot-managed skill is shared beyond its owner Bot and exempt from single-Bot auto-archival. */
+  function isSharedSkill(row) {
+    if (!row?.installation_id) return false;
+    const installation = store.getInstallation(row.installation_id);
+    if (!installation) return false;
+    if (installation.visibilityScope === 'assigned' || installation.visibilityScope === 'global') return true;
+    return store.listBotBindings({ installationId: row.installation_id })
+      .some((b) => b.enabled && (b.deviceId !== row.device_id || b.botId !== row.bot_id));
   }
 
   // --- usage records ----------------------------------------------------------
@@ -551,7 +564,7 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       hint: `To add reference files, templates, or scripts, use skill_manage(action='write_file', name='${name}', file_path='references/example.md', file_content='...')`,
     });
     U.addDescriptionPromptPreview(result, content);
-    return { result, usage: () => usageMutate(id, name, (rec) => U.recordCreatedApply(rec, AUTONOMOUS_ORIGINS.has(id.origin))) };
+    return { result, skillId: skill.id, skillName: name, usage: () => usageMutate(id, name, (rec) => U.recordCreatedApply(rec, AUTONOMOUS_ORIGINS.has(id.origin))) };
   }
 
   function locateForWrite(id, name, installedList = []) {
@@ -659,12 +672,45 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     return U.checkFilePath(filePath);
   }
 
-  /** Apply one skill_manage draft operation. Returns {result, row?, files?, usage?}. */
+  /** Apply one skill_manage operation. Returns {result, row?, skillId?, archivedSkillName?, files?, usage?}. */
   function applyManageOp(id, a, installedList) {
     const action = a.action;
     if (!action || typeof action !== 'string') return U.refusal("action is required. Use: create, patch, write_file, remove_file");
     if (action === 'create') return opCreate(id, a, installedList);
-    if (action === 'delete') return U.refusal('Deleting a skill requires a separate user decision in skill management.');
+    if (action === 'delete') {
+      if (id.origin !== 'curator') {
+        return U.refusal('Deleting a skill requires a separate user decision in skill management.');
+      }
+      const delBase = path.posix.basename(String(a.name ?? '').replace(/\\/g, '/'));
+      const delNameErr = U.validateName(delBase);
+      if (delNameErr) return U.refusal(delNameErr);
+      const locatedDel = locateForWrite(id, a.name, installedList);
+      if (locatedDel.error) return locatedDel.error;
+      const delRow = locatedDel.row;
+      const lockErr = lockedGuard(id, delRow.name);
+      if (lockErr) return lockErr;
+      if (usageRow(id, delRow.name).record?.pinned) {
+        return U.refusal(`Skill '${delRow.name}' is pinned and cannot be archived by the curator.`);
+      }
+      if (isSharedSkill(delRow)) {
+        return U.refusal(`Skill '${delRow.name}' is shared across Bots and cannot be archived by a single Bot's curator.`);
+      }
+      const absorbedRef = typeof a.absorbed_into === 'string' ? a.absorbed_into.trim() : '';
+      const target = absorbedRef ? resolveManagedLive(id, absorbedRef) : null;
+      if (!target || target.id === delRow.id) {
+        return U.refusal("Consolidation delete requires absorbed_into naming a surviving live skill.");
+      }
+      const [ok, msg] = archiveSkillNow(id, delRow.name, installedList);
+      if (!ok) return U.refusal(msg);
+      return {
+        result: U.successResult({
+          message: `Skill '${delRow.name}' archived (absorbed into '${target.name}').`,
+          archived: true,
+          absorbed_into: target.name,
+        }),
+        archivedSkillName: delRow.name,
+      };
+    }
     if (!['patch', 'edit', 'write_file', 'remove_file'].includes(action)) {
       return U.refusal(`Unknown action '${action}'. Use: create, edit, patch, write_file, remove_file`);
     }
@@ -855,11 +901,20 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       const names = new Set(skillUsageCalls.list_agent_created_skill_names(id));
       for (const row of stmts.skillsFor.all(id.deviceId, id.botId)) {
         const { record } = usageRow(id, row.name);
-        if (record?.pinned && record.state !== U.STATE_ARCHIVED && isCurationEligible(id, row.name, installedList)) names.add(row.name);
+        if ((record?.pinned || isSharedSkill(row)) && record?.state !== U.STATE_ARCHIVED && isCurationEligible(id, row.name, installedList)) {
+          names.add(row.name);
+        }
       }
       return [...names].sort().map((name) => {
+        const row = managedRow(id, name);
         const { record } = usageRow(id, name);
-        return U.reportRow(name, record, { _persisted: Boolean(record), provenance: provenanceOf(id, name, installedList) });
+        const shared = isSharedSkill(row);
+        const effectiveRecord = shared ? { ...(record ?? U.emptyRecord()), pinned: true } : record;
+        return U.reportRow(name, effectiveRecord, {
+          _persisted: Boolean(record),
+          provenance: provenanceOf(id, name, installedList),
+          ...(shared ? { shared: true } : {}),
+        });
       });
     },
     usage_report: async (id, _a, installedList) => {
@@ -874,7 +929,24 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     },
     read_suppressed_names: () => [],
     // lifecycle
-    archive_skill: () => [false, 'Archiving a skill requires a separate user decision in skill management.'],
+    archive_skill: async (id, a, installedList) => {
+      if (id.origin !== 'curator') {
+        return [false, 'Archiving a skill requires a separate user decision in skill management.'];
+      }
+      const name = a.skill_name ?? a.name;
+      if (!name) return [false, 'no skill name given'];
+      const row = managedRow(id, name);
+      if (!row) return [false, `skill '${name}' not found`];
+      const lockErr = lockedGuard(id, row.name);
+      if (lockErr) return [false, lockErr.error ?? `skill '${name}' is locked`];
+      if (usageRow(id, row.name).record?.pinned) return [false, `skill '${name}' is pinned`];
+      if (isSharedSkill(row)) return [false, `skill '${name}' is shared across Bots`];
+      const [ok, msg] = tx(() => archiveSkillNow(id, row.name, installedList));
+      if (ok) {
+        try { await packages.reconcileDevice(id.deviceId); } finally { notify(id.deviceId); }
+      }
+      return [ok, msg];
+    },
     restore_skill: () => [false, 'Restoring a skill requires a separate user decision in skill management.'],
     adopt_skill: (id, a, installedList) => {
       const name = a.skill_name ?? a.name;
@@ -1113,9 +1185,12 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       const installedList = await installedSkills(id);
       // The batch owns the request id even when several edits target one Skill.
       const draftIdentity = { ...id, requestId: null };
+      let committedBatch;
       try {
-        return json(tx(() => {
+        committedBatch = tx(() => {
           const results = [];
+          const touchedSkillIds = [];
+          const archivedSkillNames = [];
           let singleOutcome;
           for (const op of ops) {
             if (!op || typeof op !== 'object' || Array.isArray(op)) {
@@ -1128,20 +1203,47 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
             if (!outcome.success) throw { refusal: outcome.error ?? 'operation failed', results, outcome };
             const refusal = persistManageResult(draftIdentity, applied);
             if (refusal) throw { refusal: refusal.error, results, outcome: refusal };
+            const touchedId = applied.skillId ?? applied.row?.id ?? null;
+            if (touchedId && !touchedSkillIds.includes(touchedId)) touchedSkillIds.push(touchedId);
+            if (applied.archivedSkillName && !archivedSkillNames.includes(applied.archivedSkillName)) {
+              archivedSkillNames.push(applied.archivedSkillName);
+            }
           }
           const response = batch
             ? { success: true, results, operations_applied: ops.length }
             : singleOutcome;
-          if (ops.length) Object.assign(response, { draftSaved: true, reviewRequired: true });
-          recordRequest(id, replayed, response);
-          return response;
-        }));
+          return { response, touchedSkillIds, archivedSkillNames };
+        });
       } catch (err) {
         if (!err?.refusal) throw err;
         return json(batch
           ? { success: false, error: err.refusal, results: err.results, operations_applied: 0, rolled_back: true }
           : (err.outcome ?? U.refusal(err.refusal)));
       }
+      const { response, touchedSkillIds, archivedSkillNames } = committedBatch;
+      if (archivedSkillNames.length > 0) {
+        try { await packages.reconcileDevice(id.deviceId); } catch { /* best-effort reconcile */ } finally { notify(id.deviceId); }
+      }
+      const updatedSkills = [];
+      for (const skillId of touchedSkillIds) {
+        const currentRow = stmts.skillById.get(skillId);
+        if (!currentRow || usageRow(id, currentRow.name).record?.state === U.STATE_ARCHIVED) continue;
+        updatedSkills.push(currentRow.name);
+        try {
+          await actions.publish({ ...id, approvedLearningDraft: true }, { skillId, expectedRevision: currentRow.revision });
+        } catch {
+          // Revision history is already durably committed; transient package state reconciles on next publish/startup.
+        }
+      }
+      if (ops.length) {
+        Object.assign(response, {
+          published: true,
+          ...(updatedSkills.length ? { updatedSkills } : {}),
+          ...(archivedSkillNames.length ? { archivedSkills: archivedSkillNames } : {}),
+        });
+      }
+      tx(() => recordRequest(id, replayed, response));
+      return json(response);
     });
   }
 
@@ -1590,9 +1692,6 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     async publish(id, input) {
       const row = requireSkill(id, input);
       assertRevision(input.expectedRevision, row.revision);
-      if (!id.approvedLearningDraft && pendingLearningSource(row)) {
-        throw error('FORBIDDEN', 'Approve this learning draft in Skill Review before publishing');
-      }
       const usage = usageRow(id, row.name);
       if (usage.record?.state === U.STATE_ARCHIVED) throw error('INVALID_STATE', 'Skill is archived; restore it before publishing');
       const head = stmts.revGet.get(row.id, row.head_rev);
@@ -1601,6 +1700,7 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       if (typeof files['SKILL.md'] !== 'string') throw error('VALIDATION_FAILED', 'A managed skill must keep a SKILL.md');
       const version = `1.0.${head.rev}`;
       const packageId = `bot-skill-${row.id}`;
+      const ownerBot = { deviceId: id.deviceId, botId: id.botId, skillId: row.id, skillName: row.name };
       // Package ops dedupe by request_id: deterministic per (skill, rev) ids make a
       // retried publish resume the same queued operations instead of duplicating them.
       const opRequestId = (step) => `skill:${row.id}:${step}:${head.rev}`;
@@ -1608,6 +1708,9 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       if (row.published_rev === head.rev && row.installation_id && bindingEnabled(id, row.installation_id)) {
         const installation = store.getInstallation(row.installation_id);
         if (installation?.targetVersion === version) {
+          if (!installation.ownerBot) {
+            store.setInstallationOwnership?.(row.installation_id, ownerBot, installation.visibilityScope ?? 'private');
+          }
           return { ...summarizeSkill(id, row), publication: { installationId: row.installation_id, packageId: row.package_id, version, status: 'enabled', publishedRevision: head.rev } };
         }
       }
@@ -1625,6 +1728,7 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
         const receipt = await packages.install({
           kind: 'skill', source: { type: 'artifact', artifactRef }, target: 'host',
           displayName: `Skill: ${row.name}`, requestId: opRequestId('install'),
+          ownerBot, visibilityScope: 'private',
         });
         operationId = receipt.operationId;
         // Wait (bounded) for the queued install to write the installation row.
@@ -1645,6 +1749,9 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       }
 
       const installation = store.getInstallation(installationId);
+      if (installation && !installation.ownerBot) {
+        store.setInstallationOwnership?.(installationId, ownerBot, installation.visibilityScope ?? 'private');
+      }
       if (installation.targetVersion !== version) {
         const receipt = await packages.update(installationId, {
           targetVersion: version, source: { type: 'artifact', artifactRef }, requestId: opRequestId('update'),
@@ -1822,40 +1929,176 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     return { ...result, deployment: receipt ? { status: receipt.phase, error: receipt.error } : { status: 'queued' } };
   }
 
-  /** Only dedicated client-facing routes dispatch here. Model tools use execute(). */
+  function latestLearningSource(row) {
+    const revision = stmts.latestLearningRevision.get(row.id, row.head_rev);
+    if (!revision) return null;
+    const source = revision.learning_source
+      ? JSON.parse(revision.learning_source)
+      : { mode: revision.origin === 'curator' ? 'curate' : revision.origin === 'foreground' ? 'learn' : 'review' };
+    return { ...source, contentRevision: revision.rev, createdAt: source.createdAt ?? revision.created_at };
+  }
+
+  function deploymentSummaryForRow(id, row) {
+    if (!row.installation_id) return { status: 'not-published' };
+    const installation = store.getInstallation(row.installation_id);
+    if (!installation) return { status: 'not-published' };
+    const binding = store.getBotCapability(id.deviceId, id.botId, row.installation_id);
+    if (!store.isActive(installation) || !binding.enabled) return { status: 'disabled' };
+    const version = `1.0.${row.published_rev ?? row.head_rev}`;
+    const plan = store.listDeploymentPlans(id.deviceId).find((item) => item.installationId === row.installation_id);
+    if (!plan) return { status: 'pending' };
+    if (plan.targetVersion !== version || ['disable', 'uninstall'].includes(plan.action)) {
+      return { status: 'superseded' };
+    }
+    const receipt = store.listDeploymentReceipts(row.installation_id).find((item) => item.deviceId === id.deviceId);
+    return receipt ? { status: receipt.phase, error: receipt.error } : { status: 'queued' };
+  }
+
+  function learnedSkillSummary(id, row) {
+    const base = summarizeSkill(id, row);
+    const { record } = usageRow(id, row.name);
+    const installation = row.installation_id ? store.getInstallation(row.installation_id) : null;
+    const pendingSource = pendingLearningSource(row);
+    const source = pendingSource ?? latestLearningSource(row);
+    return {
+      ...base,
+      publishedRevision: row.published_rev ?? null,
+      hasUnpublishedDraft: Boolean(pendingSource),
+      visibilityScope: installation?.visibilityScope ?? 'private',
+      useCount: record?.use_count ?? 0,
+      viewCount: record?.view_count ?? 0,
+      patchCount: record?.patch_count ?? 0,
+      lastActivityAt: U.latestActivityAt(record) ?? row.updated_at,
+      source,
+      deployment: deploymentSummaryForRow(id, row),
+    };
+  }
+
+  /** Dedicated client-facing skill management & learned-skills routes dispatch here. Model tools use execute(). */
   async function review(identity, rawInput) {
     const id = normalizeIdentity(identity);
     assertBot(id);
     const input = normalizeSkillReviewInput(rawInput);
     if (input.action === 'list') {
-      const items = [];
-      for (const row of stmts.skillsFor.all(id.deviceId, id.botId)) {
-        const source = pendingLearningSource(row);
-        if (source) items.push(reviewSummary(id, row, source));
-      }
+      const items = stmts.skillsFor.all(id.deviceId, id.botId)
+        .map((row) => learnedSkillSummary(id, row))
+        .filter((item) => input.includeArchived === false ? item.state !== U.STATE_ARCHIVED : true);
       return { items };
     }
     if (input.action === 'read') {
       const row = reviewSkill(id, input.skillId);
-      if (input.path !== undefined) assertRevision(input.expectedRevision, row.revision);
-      const source = pendingLearningSource(row);
-      if (!source) throw error('NOT_FOUND', 'This skill has no learning draft awaiting review');
-      const { before, after } = draftComparison(row);
+      if (input.expectedRevision !== undefined) assertRevision(input.expectedRevision, row.revision);
+      const files = filesOf(row);
+      const revisions = actions.history(id, { skillId: row.id }).revisions;
+      const hasDraft = (row.published_rev ?? 0) < row.head_rev;
+      let changes = [];
+      let filePayload;
+      if (hasDraft) {
+        const { before, after } = draftComparison(row);
+        changes = reviewChanges(before, after);
+        if (input.path !== undefined) {
+          filePayload = Object.hasOwn(before, input.path) || Object.hasOwn(after, input.path)
+            ? (before[input.path] === after[input.path]
+              ? { path: input.path, before: before[input.path] ?? null, after: after[input.path] ?? null }
+              : reviewFile(before, after, input.path))
+            : (() => { throw error('NOT_FOUND', 'File not found'); })();
+        }
+      } else if (input.path !== undefined) {
+        if (!Object.hasOwn(files, input.path)) throw error('NOT_FOUND', 'File not found');
+        filePayload = { path: input.path, before: files[input.path], after: files[input.path] };
+        if (Buffer.byteLength(json(filePayload), 'utf8') > REVIEW_FILE_JSON_MAX_BYTES) {
+          throw error('PAYLOAD_TOO_LARGE', 'File exceeds the preview limit');
+        }
+      }
       return {
-        ...reviewSummary(id, row, source),
-        changes: reviewChanges(before, after),
-        ...(input.path === undefined ? {} : { file: reviewFile(before, after, input.path) }),
+        ...learnedSkillSummary(id, row),
+        files,
+        revisions,
+        changes,
+        ...(filePayload === undefined ? {} : { file: filePayload }),
+      };
+    }
+    if (input.action === 'history') {
+      const row = reviewSkill(id, input.skillId);
+      return {
+        ...learnedSkillSummary(id, row),
+        revisions: actions.history(id, { skillId: row.id }).revisions,
       };
     }
     return enqueue(id, async () => {
-      const replayed = replay(id, input, 'approve_skill_review');
-      if (replayed.hit) return withDeployment(id, replayed.hit);
-      const row = reviewSkill(id, input.skillId);
-      assertRevision(input.expectedRevision, row.revision);
-      if (!pendingLearningSource(row)) throw error('NOT_FOUND', 'This skill has no learning draft awaiting review');
-      const result = await actions.publish({ ...id, approvedLearningDraft: true }, input);
-      if (result.publication.status === 'enabled') recordRequest(id, replayed, result);
-      return withDeployment(id, result);
+      const replayTag = input.action === 'approve' ? 'approve_skill_review' : 'skill_review:' + input.action;
+      const replayed = replay(id, input, replayTag);
+      if (replayed.hit) return replayed.hit.publication ? withDeployment(id, replayed.hit) : replayed.hit;
+      const installedList = await installedSkills(id);
+      if (input.action === 'approve' || input.action === 'publish') {
+        const row = reviewSkill(id, input.skillId);
+        assertRevision(input.expectedRevision, row.revision);
+        const result = await actions.publish({ ...id, approvedLearningDraft: true }, input);
+        const enriched = { ...withDeployment(id, result), ...learnedSkillSummary(id, stmts.skillById.get(row.id)) };
+        if (result.publication.status === 'enabled') recordRequest(id, replayed, enriched);
+        return enriched;
+      }
+      if (input.action === 'rollback') {
+        reviewSkill(id, input.skillId);
+        const rolled = actions.rollback({ ...id, requestId: input.requestId }, input);
+        let currentRow = stmts.skillById.get(input.skillId);
+        let published = null;
+        if (usageRow(id, currentRow.name).record?.state !== U.STATE_ARCHIVED) {
+          published = await actions.publish(
+            { ...id, approvedLearningDraft: true },
+            { skillId: currentRow.id, expectedRevision: currentRow.revision },
+          );
+          currentRow = stmts.skillById.get(input.skillId);
+        }
+        const out = {
+          ...(published ? withDeployment(id, published) : rolled),
+          ...learnedSkillSummary(id, currentRow),
+          rolledBackTo: input.revision,
+          files: filesOf(currentRow),
+          revisions: actions.history(id, { skillId: currentRow.id }).revisions,
+        };
+        recordRequest(id, replayed, out);
+        return out;
+      }
+      if (input.action === 'pin') {
+        reviewSkill(id, input.skillId);
+        actions.pin(id, input, installedList);
+        const out = learnedSkillSummary(id, stmts.skillById.get(input.skillId));
+        recordRequest(id, replayed, out);
+        return out;
+      }
+      if (input.action === 'lock') {
+        reviewSkill(id, input.skillId);
+        actions.lock(id, input, installedList);
+        const out = learnedSkillSummary(id, stmts.skillById.get(input.skillId));
+        recordRequest(id, replayed, out);
+        return out;
+      }
+      if (input.action === 'archive') {
+        reviewSkill(id, input.skillId);
+        await actions.archive(id, input, installedList);
+        const out = learnedSkillSummary(id, stmts.skillById.get(input.skillId));
+        recordRequest(id, replayed, out);
+        return out;
+      }
+      if (input.action === 'restore') {
+        reviewSkill(id, input.skillId);
+        await actions.restore(id, input, installedList);
+        let currentRow = stmts.skillById.get(input.skillId);
+        if ((currentRow.published_rev ?? 0) < currentRow.head_rev) {
+          try {
+            await actions.publish(
+              { ...id, approvedLearningDraft: true },
+              { skillId: currentRow.id, expectedRevision: currentRow.revision },
+            );
+            currentRow = stmts.skillById.get(input.skillId);
+          } catch { /* best-effort publish after restore */ }
+        }
+        const out = learnedSkillSummary(id, currentRow);
+        recordRequest(id, replayed, out);
+        return out;
+      }
+      throw error('INVALID_ARGUMENT', 'Unsupported skill review action');
     });
   }
 
@@ -1884,9 +2127,13 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
         skill.name === input.skillName && skill.dir === input.skillPath && skill.files.includes(input.path));
       if (!skill) throw error('INVALID_ARGUMENT', 'Read file does not belong to this skill');
       const managed = stmts.skillsFor.all(id.deviceId, id.botId).find(row => row.installation_id === input.installationId);
+      const ownerRow = stmts.skillByInstallationId.get(input.installationId);
       const name = managed?.name ?? skill.name;
       return tx(() => {
         bumpUse(id, name);
+        if (ownerRow && (ownerRow.device_id !== id.deviceId || ownerRow.bot_id !== id.botId)) {
+          bumpUse({ deviceId: ownerRow.device_id, botId: ownerRow.bot_id }, ownerRow.name);
+        }
         const result = { recorded: true, name };
         recordRequest(id, replayed, result);
         return result;
@@ -1937,6 +2184,40 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     }
     throw error('INVALID_ARGUMENT', `Unsupported tool '${name}'. Allowed: ${[...LEARNING_SKILL_TOOLS.map((t) => t.function.name), 'skill_usage.*', 'skill_provenance.*'].join(', ')}`);
   }
+
+  async function migrateExistingSkills() {
+    for (const row of stmts.allSkills.all()) {
+      if (row.installation_id) {
+        const inst = store.getInstallation(row.installation_id);
+        if (inst && (!inst.ownerBot || !inst.visibilityScope)) {
+          const hasExternalBinding = store.listBotBindings({ installationId: row.installation_id })
+            .some((b) => b.enabled && (b.deviceId !== row.device_id || b.botId !== row.bot_id));
+          const scope = inst.visibilityScope ?? (hasExternalBinding ? 'assigned' : 'private');
+          const ownerBot = inst.ownerBot ?? {
+            deviceId: row.device_id,
+            botId: row.bot_id,
+            skillId: row.id,
+            skillName: row.name,
+          };
+          store.setInstallationOwnership?.(row.installation_id, ownerBot, scope);
+        }
+      }
+      if ((row.published_rev ?? 0) < row.head_rev) {
+        const id = { deviceId: row.device_id, botId: row.bot_id, origin: 'foreground', sessionId: null, requestId: null };
+        if (!store.listDeviceBots(id.deviceId).some((bot) => bot.botId === id.botId)) continue;
+        if (usageRow(id, row.name).record?.state === U.STATE_ARCHIVED) continue;
+        await enqueue(id, async () => {
+          const current = stmts.skillById.get(row.id);
+          if (!current || (current.published_rev ?? 0) >= current.head_rev) return;
+          await actions.publish(
+            { ...id, approvedLearningDraft: true },
+            { skillId: current.id, expectedRevision: current.revision },
+          );
+        }).catch(() => {});
+      }
+    }
+  }
+  await migrateExistingSkills();
 
   return {
     execute,

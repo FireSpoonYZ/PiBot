@@ -710,6 +710,7 @@ const STATE_KEYS = [
   'queuedCount',
   'turnAdmission',
   'activity',
+  'learning',
 ];
 
 /**

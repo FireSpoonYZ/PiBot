@@ -35,6 +35,7 @@ const TOOL_OUTPUT_MAX_BYTES = 50 * 1024;
 const REVIEW_MAX_TOOLS = 64;
 const DRIVE_MAX_CONSECUTIVE_ERRORS = 3;
 const CLOSE_CANCEL_TIMEOUT_MS = 3000;
+const DEFAULT_IDLE_SETTLE_MS = 15_000;
 
 const TERMINAL_JOB_STATUS = new Set([
   'completed', 'done', 'failed', 'cancelled', 'canceled', 'succeeded',
@@ -258,10 +259,22 @@ function addUsage(sum, usage) {
  * - registry：受限 review 扩展须先 install（SDK 按名称从注册表解析扩展），
  *   名称按 jobId+callId 唯一，运行结算或取消后在 finally 卸载，防多 Bot 互覆。
  */
-export function createBotLearning({ host, getHarness, models, getBotModels, getCenterClient, plugins, schedules, getUsableModelRefs, registry, context, openPrimaryConversation, dropEnvFor, isBotIdle }) {
+export function createBotLearning({
+  host, getHarness, models, getBotModels, getCenterClient, plugins, schedules,
+  getUsableModelRefs, registry, context, openPrimaryConversation, dropEnvFor,
+  isBotIdle, onLearningStateChange = null, idleSettleMs = DEFAULT_IDLE_SETTLE_MS,
+}) {
   let closing = false;
   let suspended = false;
-  const deferredReports = new Map();
+  const settleMs = Number.isFinite(idleSettleMs) && idleSettleMs >= 0 ? Math.floor(idleSettleMs) : DEFAULT_IDLE_SETTLE_MS;
+  const settleTimers = new Map();
+  const pendingBotChecks = new Set();
+  const deferredBotChecks = new Set();
+  const preemptEpochByBot = new Map();
+  const preemptedRetryBots = new Set();
+  const pendingWorkDeltas = new Map();
+  const outcomeSeqByBot = new Map();
+  const lastOutcomeByBot = new Map();
   // botId -> {jobId, controller, done}：一个 Bot 同时只驱动一个学习作业（Center
   // 侧本来按 Bot 串行，此处是防御性单槽）。
   const jobs = new Map();
@@ -270,6 +283,43 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
   // botId -> 已上报的最大 entryId：Center 受理即推进；失败保留，下次完结把
   // 未上报区间一并捎上——增量从不丢、也不重发 Center 已确认的部分。
   const reportCursors = new Map();
+
+  function normalizeOutcomeStatus(rawStatus, aborted = false) {
+    if (rawStatus === 'completed' || rawStatus === 'done' || rawStatus === 'succeeded') return 'completed';
+    if (rawStatus === 'cancelled' || rawStatus === 'canceled' || rawStatus === 'stopped') return 'cancelled';
+    if (rawStatus === 'interrupted') return 'interrupted';
+    if (rawStatus) return 'failed';
+    return aborted ? 'cancelled' : 'interrupted';
+  }
+
+  function emitLearningState(botId) {
+    if (typeof onLearningStateChange !== 'function') return;
+    try {
+      const job = jobs.get(botId) ?? null;
+      const lastOutcome = lastOutcomeByBot.get(botId) ?? null;
+      if (!job && !lastOutcome) {
+        onLearningStateChange(botId, null);
+        return;
+      }
+      onLearningStateChange(botId, {
+        active: Boolean(job),
+        jobId: job ? job.jobId : null,
+        mode: job ? job.mode : null,
+        automatic: job ? job.automatic === true : false,
+        phase: job ? (job.phase ?? 'reviewing') : 'idle',
+        toolName: job ? (job.toolName ?? null) : null,
+        startedAt: job ? job.startedAt : null,
+        lastOutcome,
+      });
+    } catch { /* live 通知异常不阻断学习流程 */ }
+  }
+
+  function setJobPhase(job, phase, toolName = null) {
+    if (!job || jobs.get(job.botId) !== job) return;
+    job.phase = phase;
+    job.toolName = toolName;
+    emitLearningState(job.botId);
+  }
 
   function requireClient() {
     const client = getCenterClient?.();
@@ -309,27 +359,18 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
 
   /**
    * 从已提交主会话历史构建 OpenAI 式快照：
-   * - incremental=true 时从上次已受理游标之后取真实增量；游标缺失（冷启动/重启）
-   *   回退为最近一段尾部，绝不按「每完成一条消息」强行上报全量；
-   * - incremental=false（手动 learn/review/curate）总是取最近尾部，对齐上游
-   *   显式 review 复放整段会话的行为；
-   * - pi.reset 之后的上下文才算数：扫描中遇到 reset 条目清掉已累计消息。
+   * - messages 始终携带最近一段完整对话尾部（对齐上游复放最近上下文的行为，确保多轮任务
+   *   在达到间隔阈值时不会只剩最后一轮）；
+   * - incremental=true 时仅按 cursor 之后的新条目统计增量 turns 与 iterations（包含主会话
+   *   用户轮及统一会话下的 Scope 委派工作轮 host.work-trigger）；
+   * - pi.reset 之后的上下文才算数：扫描中遇到 reset 条目清掉已累计消息与计数。
    */
-  async function buildSnapshot(bot, { incremental }) {
+  async function buildSnapshot(bot, { incremental, allowUnchangedCursor = false }) {
     const conversation = await openPrimaryConversation(bot);
     if (!conversation && incremental) return null;
     const cursor = reportCursors.get(bot.botId) ?? 0;
     const entries = [];
-    if (conversation && incremental && cursor > 0) {
-      let pageCursor;
-      for (;;) {
-        const page = await conversation.entries({ order: 'ascending', minEntryId: cursor + 1 }, SNAPSHOT_MAX_ENTRIES, pageCursor, context);
-        entries.push(...(page?.items ?? []));
-        if (!page?.next || entries.length >= SNAPSHOT_MAX_ENTRIES) break;
-        pageCursor = page.next;
-      }
-      if (entries.length === 0) return null;
-    } else if (conversation) {
+    if (conversation) {
       let pageCursor;
       for (;;) {
         const page = await conversation.entries({ order: 'descending' }, SNAPSHOT_MAX_ENTRIES, pageCursor, context);
@@ -341,19 +382,38 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
       if (entries.length > SNAPSHOT_MAX_ENTRIES) entries.splice(0, entries.length - SNAPSHOT_MAX_ENTRIES);
       if (entries.length === 0 && incremental) return null;
     }
+    const throughEntryId = entries[entries.length - 1]?.id ?? 0;
+    const workDelta = pendingWorkDeltas.get(bot.botId) ?? null;
+    if (incremental && !allowUnchangedCursor && throughEntryId <= cursor && !workDelta) {
+      return null;
+    }
     const messages = [];
-    // 每条 assistant 消息 = 一次真实模型迭代；Center 累计增量触发 skill review。
+    // 每条新增 assistant 消息 = 一次真实模型迭代；每条新增主用户轮或 Scope 工作触发 = 一次轮次。
     let iterations = 0;
+    let turns = 0;
     for (const entry of entries) {
       if (entry.kind === RESET_ENTRY_KIND) {
         messages.length = 0;
+        iterations = 0;
+        turns = 0;
         continue;
       }
+      const isNew = !incremental || (typeof entry.id === 'number' && entry.id > cursor);
+      if (isNew) {
+        const senderKind = entry?.data?.turn?.sender?.kind ?? entry?.data?.attribution?.kind;
+        if (entry.kind === 'host.work-trigger' || (entry.kind !== 'host.scope-message' && senderKind === 'user')) {
+          turns += 1;
+        }
+      }
       for (const message of entry.model ?? []) {
-        if (message?.role === 'assistant') iterations += 1;
+        if (isNew && message?.role === 'assistant') iterations += 1;
         const projected = toOpenAiMessage(message);
         if (projected) messages.push(projected);
       }
+    }
+    if (incremental && workDelta) {
+      turns += workDelta.turns ?? 0;
+      iterations += workDelta.iterations ?? 0;
     }
     // 字节预算内保留最新尾部：丢弃最旧消息并在 span.truncated 如实标记。
     let truncated = 0;
@@ -362,7 +422,6 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
       truncated += 1;
     }
     if (messages.length === 0 && incremental) return null;
-    const throughEntryId = entries[entries.length - 1]?.id ?? 0;
     const selection = getBotModels?.()[bot.botId] ?? {};
     let model = null;
     let provider = null;
@@ -380,7 +439,7 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
       memoryEnabled: memory.enabled,
       memory,
       span: {
-        afterEntryId: incremental ? cursor : 0,
+        afterEntryId: incremental ? Math.min(cursor, throughEntryId) : 0,
         throughEntryId,
         truncated,
       },
@@ -392,9 +451,9 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
     try {
       snapshot.systemPrompt = host.getBotSoul(bot.botId).text;
     } catch { /* SOUL 缺失不阻断快照 */ }
-    // iterations 随返回而非塞进 snapshot：Center 白名单会丢弃未知快照字段，
-    // 自动 start 须把它放在 action 顶层。
-    return { snapshot, iterations };
+    // iterations / turns 随返回而非塞进 snapshot：Center 白名单会丢弃未知快照字段，
+    // 自动 start 须把它们放在 action 顶层。
+    return { snapshot, iterations, turns };
   }
 
   /** 上报提交对应的可信发送者 kind（user|host|null）：只认 entry.data 注入的归属，绝不信 wire 字段。 */
@@ -429,12 +488,44 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
       void safeCancelRemote(bot.botId, existing.jobId);
     }
     const controller = new AbortController();
-    const job = { botId: bot.botId, jobId, controller, mode: meta?.mode ?? null, automatic: meta?.automatic === true,
-      sources: meta?.sources ?? [], activeRun: null, done: null };
+    const job = {
+      botId: bot.botId,
+      jobId,
+      controller,
+      mode: meta?.mode ?? 'review',
+      automatic: meta?.automatic === true,
+      sources: meta?.sources ?? [],
+      activeRun: null,
+      done: null,
+      startedAt: new Date().toISOString(),
+      phase: 'reviewing',
+      toolName: null,
+      updatedSkills: new Set(),
+      archivedSkills: new Set(),
+      memoryUpdated: false,
+      terminalStatus: null,
+      summary: null,
+    };
     job.done = driveJob(bot, job);
     jobs.set(bot.botId, job);
+    emitLearningState(bot.botId);
     job.done.catch(() => {}).finally(() => {
       if (jobs.get(bot.botId) === job) jobs.delete(bot.botId);
+      const status = normalizeOutcomeStatus(job.terminalStatus, job.controller.signal.aborted);
+      const seq = (outcomeSeqByBot.get(bot.botId) ?? 0) + 1;
+      outcomeSeqByBot.set(bot.botId, seq);
+      lastOutcomeByBot.set(bot.botId, {
+        seq,
+        jobId: job.jobId,
+        mode: job.mode ?? 'review',
+        status,
+        finishedAt: new Date().toISOString(),
+        updatedSkills: [...job.updatedSkills].slice(0, 32),
+        archivedSkills: [...job.archivedSkills].slice(0, 32),
+        memoryUpdated: job.memoryUpdated === true,
+        summary: typeof job.summary === 'string' && job.summary.trim() !== '' ? job.summary.slice(0, 512) : null,
+      });
+      emitLearningState(bot.botId);
     });
     return job;
   }
@@ -471,7 +562,20 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
         continue;
       }
       if (!isPlainObject(poll)) return;
-      if (TERMINAL_JOB_STATUS.has(poll.status)) return;
+      if (TERMINAL_JOB_STATUS.has(poll.status)) {
+        job.terminalStatus = poll.status;
+        if (isPlainObject(poll.result)) {
+          if (typeof poll.result.summary === 'string') job.summary = poll.result.summary;
+          if (Array.isArray(poll.result.updatedSkills)) {
+            for (const s of poll.result.updatedSkills) if (typeof s === 'string' && s) job.updatedSkills.add(s);
+          }
+          if (Array.isArray(poll.result.archivedSkills)) {
+            for (const s of poll.result.archivedSkills) if (typeof s === 'string' && s) job.archivedSkills.add(s);
+          }
+          if (poll.result.memoryUpdated === true) job.memoryUpdated = true;
+        }
+        return;
+      }
       const call = poll.call;
       if (!isPlainObject(call) || typeof call.id !== 'string' || call.id === '') {
         await sleep(250, job.controller.signal);
@@ -564,13 +668,16 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
     if (name === 'correctMemory' && job.automatic) throw messageError('FORBIDDEN', 'Automatic memory review is append-only');
     const args = { ...input };
     if (write) args.requestId = 'learning-' + createHash('sha256').update(JSON.stringify([job.jobId, callId])).digest('hex');
+    if (write) setJobPhase(job, 'writing', name);
     let receipt;
     try { receipt = await plugins.actionByName(bot.botId, name, args, { signal }); }
     catch (err) { throw messageError(safeCode(err), 'Hindsight action failed; check capability configuration and operation receipts'); }
+    finally { if (write) setJobPhase(job, 'reviewing', null); }
     if (!write) return { success: true, result: receipt };
     const completed = name === 'correctMemory' ? receipt?.state === 'applied'
       : Array.isArray(receipt?.jobs) && receipt.jobs.length > 0 && receipt.jobs.every((item) => item.state === 'completed');
     const failed = ['rejected', 'unconfirmed'].includes(receipt?.state) || receipt?.jobs?.some((item) => item.state === 'failed');
+    if (!failed) job.memoryUpdated = true;
     // Only a real completed receipt contributes an upstream write notification.
     return { success: !failed, completed, staged: !completed, receipt,
       message: completed ? 'Hindsight memory updated (confirmed receipt)' : 'Hindsight write not confirmed complete; inspect receipt before claiming success' };
@@ -659,15 +766,29 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
             return { output: [{ type: 'text', text: JSON.stringify(result) }], ...(result?.success === false ? { isError: true } : {}) };
           }
           const client = requireClient();
-          const envelope = await client.botLearning(host.deviceId, bot.botId, {
-            action: 'tool', jobId: job.jobId, callId: toolCallId, name: spec.name, args: isPlainObject(args) ? args : {},
-          }, signal);
+          const isSkillWrite = spec.name === 'skill_manage';
+          if (isSkillWrite) setJobPhase(job, 'writing', 'skill_manage');
+          let envelope;
+          try {
+            envelope = await client.botLearning(host.deviceId, bot.botId, {
+              action: 'tool', jobId: job.jobId, callId: toolCallId, name: spec.name, args: isPlainObject(args) ? args : {},
+            }, signal);
+          } finally {
+            if (isSkillWrite) setJobPhase(job, 'reviewing', null);
+          }
           // Center 回执 {jobId,callId,name,result}：result 为 JSON string，原样喂回模型
           // （摘要器读取其中 success/_change 等键），envelope 元信息不透给模型。
           const raw = isPlainObject(envelope) ? envelope.result : envelope;
           const text = typeof raw === 'string' ? raw : JSON.stringify(raw ?? { success: false });
           let failed = false;
-          try { failed = JSON.parse(text)?.success === false; } catch { /* 非 JSON 按成功文本透传 */ }
+          try {
+            const parsed = JSON.parse(text);
+            failed = parsed?.success === false;
+            if (isSkillWrite && parsed?.success === true) {
+              for (const s of parsed.updatedSkills ?? []) if (typeof s === 'string' && s) job.updatedSkills.add(s);
+              for (const s of parsed.archivedSkills ?? []) if (typeof s === 'string' && s) job.archivedSkills.add(s);
+            }
+          } catch { /* 非 JSON 按成功文本透传 */ }
           return {
             output: [{ type: 'text', text }],
             ...(failed ? { isError: true } : {}),
@@ -842,49 +963,177 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
     return result;
   }
 
+  function enqueueReport(botId, work) {
+    const previous = reportChains.get(botId) ?? Promise.resolve();
+    const next = previous.then(work).catch(() => {});
+    reportChains.set(botId, next);
+    next.finally(() => {
+      if (reportChains.get(botId) === next) reportChains.delete(botId);
+    });
+    return next;
+  }
+
+  function clearSettleTimer(botId) {
+    const existing = settleTimers.get(botId);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+      settleTimers.delete(botId);
+    }
+  }
+
+  function scheduleIdleSettle(botId) {
+    if (closing || !botId) return;
+    clearSettleTimer(botId);
+    if (suspended) {
+      deferredBotChecks.add(botId);
+      return;
+    }
+    pendingBotChecks.add(botId);
+    if (settleMs <= 0) {
+      enqueueReport(botId, () => flushIdleReview(botId));
+      return;
+    }
+    const timer = setTimeout(() => {
+      settleTimers.delete(botId);
+      enqueueReport(botId, () => flushIdleReview(botId));
+    }, settleMs);
+    timer.unref?.();
+    settleTimers.set(botId, timer);
+  }
+
+  /**
+   * 前台轮抢占：新用户轮入队、Scope 委派工作启动或显式停止 Bot 时立即调用。
+   * 清除空闲静置定时器，并中止任何在跑的自动学习作业（手动 learn 不抢占）。
+   */
+  function preemptForForeground(botId) {
+    if (!botId) return;
+    clearSettleTimer(botId);
+    preemptEpochByBot.set(botId, (preemptEpochByBot.get(botId) ?? 0) + 1);
+    const job = jobs.get(botId);
+    if (job && job.automatic === true) {
+      preemptedRetryBots.add(botId);
+      pendingBotChecks.add(botId);
+      abortJob(job);
+      void safeCancelRemote(botId, job.jobId);
+    }
+  }
+
+  /** 前台轮取消/失败结算后补挂空闲检查，确保被抢占恢复计数的自动反思不遗漏。 */
+  function scheduleIdleCheck(botId) {
+    if (closing || !botId) return;
+    if (preemptedRetryBots.has(botId) || pendingBotChecks.has(botId)) {
+      scheduleIdleSettle(botId);
+    }
+  }
+
   /**
    * 自动学习入口（runtime 在 recordCompletedSubmission 内 fire-and-forget 调用）：
-   * 只报 user 来源完结提交（计划任务等 host 来源与上游 skip_background_review 同型跳过），
-   * 上报真实增量快照；Center 决定是否受理成作业，Host 不保存触发阈值。
+   * 只认 user 来源完结提交（计划任务等 host 来源与上游 skip_background_review 同型跳过），
+   * 进入 15 秒空闲静置窗口；静置期间若有新轮则重置窗口，真正空闲后才向 Center 上报。
    */
   function noteCompletedSubmission(botId, formatted) {
     if (closing || !formatted || formatted.status !== 'done') return;
     const submissionId = formatted.submissionId;
     if (typeof submissionId !== 'number' && typeof submissionId !== 'string') return;
-    const previous = reportChains.get(botId) ?? Promise.resolve();
-    const next = previous.then(() => {
-      if (suspended) deferredReports.set(submissionId, botId);
-      else return reportCompletedSubmission(botId, submissionId);
-    }).catch(() => {});
-    reportChains.set(botId, next);
-    next.finally(() => {
-      if (reportChains.get(botId) === next) reportChains.delete(botId);
+    enqueueReport(botId, async () => {
+      const senderKind = await submissionSenderKind(submissionId).catch(() => null);
+      if (senderKind !== 'user') return;
+      scheduleIdleSettle(botId);
     });
   }
 
-  async function reportCompletedSubmission(botId, submissionId) {
+  /**
+   * Scope 委派工作轮（群聊/DM/Bot 间协作）完结通知：同样计入该 Bot 的空闲自学习窗口。
+   * 统一会话下条目已在主会话内；非统一旧模式下额外累计该提交的 assistant 迭代数。
+   */
+  function noteCompletedWorkTurn(botId, info = {}) {
+    if (closing || !botId) return;
+    enqueueReport(botId, async () => {
+      if (info.unified === false && (typeof info.submissionId === 'number' || typeof info.submissionId === 'string')) {
+        try {
+          const harness = getHarness();
+          const sub = await harness.submission(info.submissionId, context);
+          const rec = sub ? await sub.status(context) : null;
+          let addedIters = 1;
+          if (typeof rec?.answer === 'number') {
+            const answerEntry = await harness.commit((tx) => tx.entry(rec.answer), context);
+            const count = (answerEntry?.model ?? []).filter((m) => m?.role === 'assistant').length;
+            if (count > 0) addedIters = count;
+          }
+          const prev = pendingWorkDeltas.get(botId) ?? { turns: 0, iterations: 0 };
+          pendingWorkDeltas.set(botId, { turns: prev.turns + 1, iterations: prev.iterations + addedIters });
+        } catch {
+          const prev = pendingWorkDeltas.get(botId) ?? { turns: 0, iterations: 0 };
+          pendingWorkDeltas.set(botId, { turns: prev.turns + 1, iterations: prev.iterations + 1 });
+        }
+      }
+      scheduleIdleSettle(botId);
+    });
+  }
+
+  async function flushIdleReview(botId) {
     if (closing) return;
+    if (suspended) {
+      deferredBotChecks.add(botId);
+      return;
+    }
+    const startEpoch = preemptEpochByBot.get(botId) ?? 0;
     const client = getCenterClient?.();
     if (!client || typeof client.botLearning !== 'function') return;
     const bot = host.getBot(botId);
-    if (!bot) return;
-    // 仅真实用户轮触发；归属缺失按最保守处理（不上报），绝不拿 host 来源凑数。
-    const senderKind = await submissionSenderKind(submissionId).catch(() => null);
-    if (senderKind !== 'user') return;
+    if (!bot || bot.archivedAt) {
+      pendingBotChecks.delete(botId);
+      preemptedRetryBots.delete(botId);
+      pendingWorkDeltas.delete(botId);
+      return;
+    }
+    if (isBotIdle && !(await isBotIdle(bot))) {
+      if (!closing && (preemptEpochByBot.get(botId) ?? 0) === startEpoch) scheduleIdleSettle(botId);
+      return;
+    }
+    if ((preemptEpochByBot.get(botId) ?? 0) !== startEpoch) return;
     const status = await client.botLearning(host.deviceId, botId, { action: 'status' });
+    if ((preemptEpochByBot.get(botId) ?? 0) !== startEpoch) return;
+    if (isBotIdle && !(await isBotIdle(bot))) {
+      if (!closing) scheduleIdleSettle(botId);
+      return;
+    }
     if (status.settings?.reviewModelRef) assertUsableModel(status.settings.reviewModelRef);
     const storedCursor = status?.counters?.reviewCursor;
     reportCursors.set(botId, storedCursor?.sessionId === bot.primaryConversationId ? storedCursor.throughEntryId : 0);
-    const built = await buildSnapshot(bot, { incremental: true });
-    if (!built) return;
-    const { snapshot, iterations } = built;
-    const requestId = 'auto-review:' + bot.primaryConversationId + ':' + snapshot.span.throughEntryId;
-    if (suspended) { deferredReports.set(submissionId, botId); return; }
+    const allowRetry = preemptedRetryBots.has(botId);
+    const built = await buildSnapshot(bot, { incremental: true, allowUnchangedCursor: allowRetry });
+    if (!built) {
+      pendingBotChecks.delete(botId);
+      preemptedRetryBots.delete(botId);
+      return;
+    }
+    if (suspended) {
+      deferredBotChecks.add(botId);
+      return;
+    }
+    if ((preemptEpochByBot.get(botId) ?? 0) !== startEpoch) return;
+    const { snapshot, iterations, turns } = built;
+    const isUnchangedRetry = snapshot.span.throughEntryId === snapshot.span.afterEntryId && turns === 0 && iterations === 0;
+    const requestId = isUnchangedRetry
+      ? `auto-review-retry:${bot.primaryConversationId}:${snapshot.span.throughEntryId}:${status?.counters?.jobsCancelled ?? 0}:${status?.counters?.jobsInterrupted ?? 0}`
+      : `auto-review:${bot.primaryConversationId}:${snapshot.span.throughEntryId}`;
     const receipt = await client.botLearning(host.deviceId, botId, {
-      action: 'start', mode: 'review', automatic: true, requestId, snapshot, iterations,
+      action: 'start', mode: 'review', automatic: true, requestId, snapshot, iterations, turns,
     });
+    pendingBotChecks.delete(botId);
+    preemptedRetryBots.delete(botId);
+    pendingWorkDeltas.delete(botId);
     // Center 已受理本次增量（无论是否成 job）：推进游标，未受理的下次完结补报。
     reportCursors.set(botId, snapshot.span.throughEntryId);
+    if ((preemptEpochByBot.get(botId) ?? 0) !== startEpoch) {
+      if (liveJob(receipt)) {
+        preemptedRetryBots.add(botId);
+        pendingBotChecks.add(botId);
+        void safeCancelRemote(botId, receipt.jobId);
+      }
+      return;
+    }
     if (liveJob(receipt)) startDriver(bot, receipt.jobId, { mode: 'review', automatic: true });
   }
 
@@ -996,15 +1245,25 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
 
   /** Bot 删除/归档前调用：中止在驱动作业并尽力向 Center 取消。 */
   async function cancelBot(botId) {
+    clearSettleTimer(botId);
+    pendingBotChecks.delete(botId);
+    deferredBotChecks.delete(botId);
+    preemptedRetryBots.delete(botId);
+    pendingWorkDeltas.delete(botId);
     reportCursors.delete(botId);
+    lastOutcomeByBot.delete(botId);
     const job = jobs.get(botId);
-    if (!job) return;
+    if (!job) {
+      emitLearningState(botId);
+      return;
+    }
     abortJob(job);
     await safeCancelRemote(botId, job.jobId);
   }
 
   /** Center 断线：本地全部作业中止（provider/工具调用经 runContext 取消），不发取消请求。 */
   function notifyOffline() {
+    for (const botId of [...settleTimers.keys()]) clearSettleTimer(botId);
     // Keep cancellation visible until the provider and restricted extension settle.
     for (const job of jobs.values()) abortJob(job);
   }
@@ -1013,26 +1272,43 @@ export function createBotLearning({ host, getHarness, models, getBotModels, getC
     if (closing) return;
     closing = true;
     clearInterval(curatorTimer);
+    for (const botId of [...settleTimers.keys()]) clearSettleTimer(botId);
     const active = [...jobs.values()];
     for (const job of active) abortJob(job);
     await Promise.allSettled(active.map((job) => job.done));
     await Promise.allSettled(active.map((job) => safeCancelRemote(job.botId, job.jobId)));
     jobs.clear();
     reportChains.clear();
-    deferredReports.clear();
+    pendingBotChecks.clear();
+    deferredBotChecks.clear();
+    preemptedRetryBots.clear();
+    pendingWorkDeltas.clear();
   }
 
   function resume() {
     suspended = false;
-    for (const [submissionId, botId] of deferredReports) {
-      noteCompletedSubmission(botId, { status: 'done', submissionId });
+    for (const botId of deferredBotChecks) {
+      scheduleIdleSettle(botId);
     }
-    deferredReports.clear();
+    deferredBotChecks.clear();
   }
 
   return {
-    manageBotLearning, noteCompletedSubmission, cancelBot, notifyOffline, close,
-    suspend: () => { suspended = true; },
+    manageBotLearning,
+    noteCompletedSubmission,
+    noteCompletedWorkTurn,
+    preemptForForeground,
+    scheduleIdleCheck,
+    cancelBot,
+    notifyOffline,
+    close,
+    suspend: () => {
+      suspended = true;
+      for (const botId of [...settleTimers.keys()]) {
+        clearSettleTimer(botId);
+        deferredBotChecks.add(botId);
+      }
+    },
     resume,
     drainAdmissions: () => Promise.allSettled([...reportChains.values(), curatorRun]),
     isActive: (botId) => jobs.has(botId),

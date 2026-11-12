@@ -647,6 +647,8 @@ export interface OpenRuntimeOptions {
   onBotsChanged?: () => void | Promise<void>;
   /** Optional callback invoked on lightweight Bot metadata updates (primary, archive, profile, activity). */
   onBotsSync?: () => void | Promise<void>;
+  /** Optional idle settle delay (ms) before background automatic learning starts; defaults to 15000. */
+  learningIdleSettleMs?: number;
 }
 
 export interface Runtime {
@@ -1054,6 +1056,31 @@ export interface BotLiveState {
   turnAdmission?: TurnAdmissionStatus | null;
   /** Unified work activity; optional — frames from older Hosts omit it. The single UI authority for working status. */
   activity?: BotActivity;
+  /** Idle background reflection / skill learning state; optional — omitted on work watches and older Hosts. */
+  learning?: BotLearningLiveState | null;
+}
+
+export interface BotLearningOutcomeSummary {
+  seq: number;
+  jobId: string;
+  mode: 'review' | 'learn' | 'curate';
+  status: 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  finishedAt: string;
+  updatedSkills: string[];
+  archivedSkills: string[];
+  memoryUpdated: boolean;
+  summary: string | null;
+}
+
+export interface BotLearningLiveState {
+  active: boolean;
+  jobId: string | null;
+  mode: 'review' | 'learn' | 'curate' | null;
+  automatic: boolean;
+  phase: 'idle' | 'reviewing' | 'writing';
+  toolName: string | null;
+  startedAt: string | null;
+  lastOutcome: BotLearningOutcomeSummary | null;
 }
 
 /** Whole-field replacement of selected BotLiveState fields; never append/delta. */
@@ -1399,12 +1426,16 @@ export interface BotSkillInput {
   requestId?: string;
 }
 
-/** Review an unpublished learning change, then approve the exact revision that was read. */
+/** Manage and inspect Bot-learned skills, revision history, rollback, pin/lock, and lifecycle state. */
 export type BotSkillReviewInput =
-  | { action: 'list' }
-  | { action: 'read'; skillId: string }
-  | { action: 'read'; skillId: string; path: string; expectedRevision: number }
-  | { action: 'approve'; skillId: string; expectedRevision: number; requestId: string };
+  | { action: 'list'; includeArchived?: boolean }
+  | { action: 'read'; skillId: string; path?: string; expectedRevision?: number }
+  | { action: 'history'; skillId: string }
+  | { action: 'approve' | 'publish'; skillId: string; expectedRevision: number; requestId: string }
+  | { action: 'rollback'; skillId: string; revision: number; expectedRevision: number; requestId: string }
+  | { action: 'pin'; skillId: string; pinned: boolean; expectedRevision: number; requestId: string }
+  | { action: 'lock'; skillId: string; locked: boolean; expectedRevision: number; requestId: string }
+  | { action: 'archive' | 'restore'; skillId: string; expectedRevision: number; requestId: string };
 
 export type BotLearningAction = 'status' | 'configure' | 'learn' | 'review' | 'curate' | 'cancel';
 

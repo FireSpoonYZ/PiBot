@@ -7,8 +7,9 @@ Actions: `status | configure | learn | review | curate | cancel`.
 ## What learning is
 
 - A review/teach pass runs in a SEPARATE model context after a finalized successful user submission — it never blocks or mutates the foreground reply, and it never triggers another review (no recursion).
-- Automatic learning is always enabled and uses bounded intervals. Each Bot runs at most one learning job at a time. Explicit `learn`, `review` and `curate` runs are recorded as manual jobs.
-- Learning saves Skill changes as drafts for user review. The skill service requires a fresh read before an edit and protects locked Skills. Describe which draft was saved and direct the user to review it before publishing.
+- Automatic learning is always enabled and triggers after a 15-second idle settle window following primary or delegated Scope work turns. Foreground user turns immediately preempt any active automatic review job and restore unmutated review counters. Each Bot runs at most one learning job at a time. Explicit `learn`, `review` and `curate` runs are recorded as manual jobs.
+- Learning commits versioned Skill revisions and auto-publishes them directly to the owner Bot (`private` scope by default — no manual draft approval required; owners can share skills to `assigned` Bots or `global` in Center). The skill service requires a fresh read before an edit and protects locked/pinned/shared Skills.
+- Curation marks skills `stale` after `staleAfterDays` (default 14) and auto-archives unused private skills after `archiveAfterDays` (default 30, disabling the Bot binding while preserving history for recovery). Optional LLM consolidation (`curator.consolidate`, default `false`) snapshots managed skills before merging redundant private skills.
 - Host disconnect or shutdown cancels active jobs. Counters and receipts survive restarts, and the job history records interrupted work.
 - During a live job, a redelivered callback with the same call ID reuses the last completed outcome; response transport retries never rerun that callback's model loop or schedule/memory effects. Only one outcome is kept, replaced on the next call; restart still interrupts the job rather than replaying it.
 

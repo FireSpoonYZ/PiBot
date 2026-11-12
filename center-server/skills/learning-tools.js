@@ -1,5 +1,5 @@
 // OpenAI function definitions for the learning tool whitelist.
-// The skill tools adapt the upstream schema to versioned drafts.
+// The skill tools adapt the upstream schema to versioned managed skills (auto-published to the owner Bot).
 // read_file / search_files are ADAPTED: upstream file_tools.py is not vendored,
 // so params are scoped to the Bot's managed + bound skill content; unsupported
 // targets return success:false instead of touching a real filesystem.
@@ -25,7 +25,7 @@ export const LEARNING_SKILL_TOOLS = [
     type: 'function',
     function: {
       name: 'skills_list',
-      description: "List the skills available to this Bot: managed drafts plus bound installed skill packages, with name, description, state and provenance. Read-only.",
+      description: "List the skills available to this Bot: versioned managed skills plus bound installed skill packages, with name, description, state and provenance. Read-only.",
       parameters: { type: 'object', properties: {}, additionalProperties: false },
     },
   },
@@ -46,11 +46,11 @@ export const LEARNING_SKILL_TOOLS = [
     function: {
       name: 'skill_manage',
       description:
-        'Save Skill changes as drafts for the user to review and publish. ' +
+        'Create, patch, or curate versioned managed Skills for this Bot (committed to revision history and automatically published). ' +
         'Send an operations array with one or more edits. A failed operation rolls back the entire batch. ' +
         "Use create (full SKILL.md, before the skill's other operations), patch (prefer a targeted old_string/new_string change; " +
         'content alone REPLACES the whole file, read it via skill_view() ' +
-        'first), or write_file/remove_file (supporting files). ' +
+        'first), write_file/remove_file (supporting files), or delete (curator consolidation only, requires absorbed_into). ' +
         'Description: max ' + SKILL_PROMPT_DESC_LIMIT + " chars, 'Use when <trigger>. <behavior>.', never " +
         'the category name (the index shows it). Write lessons, not logs: ' +
         'imperative rule + why, no PR numbers/dates/incident narration, one ' +
@@ -84,6 +84,9 @@ export const LEARNING_SKILL_TOOLS = [
                 opSchema('remove_file', {
                   file_path: { type: 'string', description: "Supporting file (write_file's shape)." },
                 }, ['file_path']),
+                opSchema('delete', {
+                  absorbed_into: { type: 'string', description: 'Live target skill name that absorbed this skill during curator consolidation.' },
+                }, ['absorbed_into']),
               ],
             },
           },

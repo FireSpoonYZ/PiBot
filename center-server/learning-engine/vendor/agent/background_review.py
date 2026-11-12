@@ -454,8 +454,8 @@ _DO_NOT_CAPTURE_BLOCK = (
 )
 
 _SKILL_REVIEW_PROMPT = (
-    "Review the conversation above and save useful skill changes as drafts for the user to review. "
-    "Be ACTIVE — most sessions produce at least one skill update, even if small. A pass that does nothing is a missed learning "
+    "Review the conversation above and update the skill library. Be ACTIVE — most sessions produce "
+    "at least one skill update, even if small. A pass that does nothing is a missed learning "
     "opportunity, not a neutral outcome.\n\n"
     "Target shape of the library: CLASS-LEVEL skills, each with a SKILL.md of always-on rules and a "
     "small `references/` set of topical depth. Not a flat list of narrow one-session skills, and "
@@ -529,8 +529,8 @@ _SKILL_REVIEW_PROMPT = (
 _COMBINED_REVIEW_PROMPT = (
     "Review the conversation above and update two things:\n\n"
     "**Memory**: " + _MEMORY_ROUTING_BLOCK +
-    "**Skills**: how to do this class of task. Save skill changes as drafts for the user to review. "
-    "Be ACTIVE — most sessions produce at least one skill update. A pass that does nothing is a missed learning opportunity, not a neutral "
+    "**Skills**: how to do this class of task. Be ACTIVE — most sessions produce at least one "
+    "skill update. A pass that does nothing is a missed learning opportunity, not a neutral "
     "outcome.\n\n"
     "Target shape of the skill library: CLASS-LEVEL skills with a SKILL.md of always-on rules and a "
     "small `references/` set of topical depth — not narrow one-session skills, and not an umbrella "

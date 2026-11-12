@@ -1,6 +1,6 @@
 import type {
   Accepted, ActionRequest, ActionResult, ApiError, ArtifactUploadReceipt, BotCapabilityConfig, BotCwdConfig, CapabilityToolsListResponse,
-  BotCapabilityEntry, BotModelConfig, BotRef, BotSyncResponse, CenterCreateBotRequest, CenterUpdateBotRequest, CredentialInfo, CredentialWrite, DeploymentReceipt, Device, DeviceRuntimeStatus, DiscoveryResult,
+  BotCapabilityEntry, BotLearningStatus, BotModelConfig, BotRef, BotSyncResponse, CenterCreateBotRequest, CenterUpdateBotRequest, CredentialInfo, CredentialWrite, DeploymentReceipt, Device, DeviceRuntimeStatus, DiscoveryResult,
   EnableRequest,
   InstallRequest, Installation, InstallationConfig, LoginRequest, Model, ModelConfig, ModelSelection,
   Operation, OperationRequest, PackageVersion, Provider, ProviderAuthStatus, ProviderAuthFlow, ProviderCheckRequest, ProviderCheckResult, JsonSchema,
@@ -8,6 +8,26 @@ import type {
   CreatePairingCodeResponse, PairingCaState, PairingCodeState,
   PutBotCapability, PutInstallationConfig, PutInstallationDisplayName, RevisionWrite, SessionInfo, UpdateRequest,
 } from '@e-launcher/center-contract';
+
+export interface BotLearningPatchConfig {
+  reviewModelRef?: string | null;
+  curatorModelRef?: string | null;
+  review?: { memoryEvery?: number; skillEvery?: number };
+  curator?: {
+    intervalHours?: number;
+    minIdleHours?: number;
+    staleAfterDays?: number;
+    archiveAfterDays?: number;
+    consolidate?: boolean;
+  };
+}
+export interface BotLearningTriggerResult {
+  jobId?: string | null;
+  status: string;
+  reason?: string;
+  mode?: string;
+  summary?: string;
+}
 
 export interface InstallationCheckRequest { deviceId: string; botId: string }
 export interface ActionDescriptor { id: string; title: string; inputSchema: JsonSchema; outputSchema?: JsonSchema }
@@ -220,6 +240,14 @@ export const api = {
   install: (body: InstallRequest) => request<Accepted>('/api/installations', 'POST', body),
   getInstallation: (installationId: string) => request<Installation>(installationPath(installationId)),
   renameInstallation: (installationId: string, body: PutInstallationDisplayName) => request<Installation>(installationPath(installationId), 'PATCH', body),
+  patchInstallation: (installationId: string, body: PutInstallationDisplayName) => request<Installation>(installationPath(installationId), 'PATCH', body),
+  getBotLearningStatus: (deviceId: string, botId: string) => request<BotLearningStatus>(`${botPath(deviceId, botId)}/learning`, 'POST', { action: 'status' }),
+  configureBotLearning: (deviceId: string, botId: string, expectedRevision: number, config: BotLearningPatchConfig) =>
+    request<{ settings: BotLearningStatus['settings'] }>(`${botPath(deviceId, botId)}/learning`, 'POST', { action: 'configure', expectedRevision, config }),
+  triggerBotLearning: (deviceId: string, botId: string, action: 'curate' | 'review', focus?: string) =>
+    request<BotLearningTriggerResult>(`${botPath(deviceId, botId)}/learning`, 'POST', { action, ...(focus ? { focus } : {}) }),
+  cancelBotLearning: (deviceId: string, botId: string, jobId: string) =>
+    request<{ jobId: string; status: string }>(`${botPath(deviceId, botId)}/learning`, 'POST', { action: 'cancel', jobId }),
   getInstallationConfig: (installationId: string) => request<InstallationConfig>(`${installationPath(installationId)}/config`),
   putInstallationConfig: (installationId: string, body: PutInstallationConfig) => request<InstallationConfig>(`${installationPath(installationId)}/config`, 'PUT', body),
   listBotCapabilities: (deviceId: string, botId: string) => request<BotCapabilityEntry[]>(`${botPath(deviceId, botId)}/capabilities`),

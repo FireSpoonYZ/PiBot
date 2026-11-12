@@ -10,10 +10,12 @@ import {
   RefreshCw,
   Sliders,
   Smartphone,
+  Sparkles,
   Star,
   Trash2,
 } from 'lucide-react';
 import type {
+  BotLearningStatus,
   BotModelConfig,
   BotRef,
   BotSyncResponse,
@@ -23,7 +25,7 @@ import type {
   ModelSelection,
   Provider,
 } from '@e-launcher/center-contract';
-import { api, CenterApiError } from '../api';
+import { api, CenterApiError, type BotLearningPatchConfig } from '../api';
 import { RuntimeStatusSummary } from '../components/RuntimeStatus';
 import { AddDeviceDialog } from '../components/AddDeviceDialog';
 import { SheetModal } from '../components/SheetModal';
@@ -344,6 +346,265 @@ function CreateBotForm({
   );
 }
 
+function BotLearningPanel({
+  online,
+  status,
+  options,
+  busy,
+  onRefresh,
+  onSave,
+  onTrigger,
+  onCancelJob,
+  onClose,
+}: {
+  online: boolean;
+  status: BotLearningStatus;
+  options: ModelOption[];
+  busy: boolean;
+  onRefresh(): void;
+  onSave(patch: BotLearningPatchConfig): void;
+  onTrigger(action: 'curate' | 'review'): void;
+  onCancelJob(jobId: string): void;
+  onClose(): void;
+}) {
+  const [memoryEvery, setMemoryEvery] = useState(String(status.settings.review.memoryEvery));
+  const [skillEvery, setSkillEvery] = useState(String(status.settings.review.skillEvery));
+  const [intervalHours, setIntervalHours] = useState(String(status.settings.curator.intervalHours));
+  const [minIdleHours, setMinIdleHours] = useState(String(status.settings.curator.minIdleHours));
+  const [staleAfterDays, setStaleAfterDays] = useState(String(status.settings.curator.staleAfterDays));
+  const [archiveAfterDays, setArchiveAfterDays] = useState(String(status.settings.curator.archiveAfterDays));
+  const [consolidate, setConsolidate] = useState(Boolean(status.settings.curator.consolidate));
+  const [reviewModelRef, setReviewModelRef] = useState(status.settings.reviewModelRef ?? '');
+  const [curatorModelRef, setCuratorModelRef] = useState(status.settings.curatorModelRef ?? '');
+
+  useEffect(() => {
+    setMemoryEvery(String(status.settings.review.memoryEvery));
+    setSkillEvery(String(status.settings.review.skillEvery));
+    setIntervalHours(String(status.settings.curator.intervalHours));
+    setMinIdleHours(String(status.settings.curator.minIdleHours));
+    setStaleAfterDays(String(status.settings.curator.staleAfterDays));
+    setArchiveAfterDays(String(status.settings.curator.archiveAfterDays));
+    setConsolidate(Boolean(status.settings.curator.consolidate));
+    setReviewModelRef(status.settings.reviewModelRef ?? '');
+    setCuratorModelRef(status.settings.curatorModelRef ?? '');
+  }, [status]);
+
+  const formatTime = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString() : '暂无记录');
+
+  return (
+    <div className="form" style={{ gap: 16 }}>
+      <div className="card-group" style={{ padding: 14, margin: 0 }}>
+        <div className="card-header" style={{ marginBottom: 8 }}>
+          <strong>空闲反思与技能整理状态</strong>
+          <button type="button" className="quiet-button" disabled={busy} onClick={onRefresh}>
+            <RefreshCw size={14} />
+            刷新状态
+          </button>
+        </div>
+        <p className="secondary" style={{ marginTop: 0, marginBottom: 6 }}>
+          记忆复盘计数：{status.counters.turnsSinceMemoryReview} / {status.settings.review.memoryEvery} 轮 · 技能复盘计数：
+          {status.counters.itersSinceSkillReview} / {status.settings.review.skillEvery} 工具步（Bot 空闲静置 15s 后触发；用户插话立即抢占让路并恢复计数）
+        </p>
+        <p className="secondary" style={{ marginTop: 0, marginBottom: 6 }}>
+          上次自动复盘：{formatTime(status.counters.lastAutomaticReviewAt)} · 上次技能整理：{formatTime(status.counters.lastCuratorRunAt)}
+          {status.nextCuratorEligibleAt ? ` · 下次可整理：${formatTime(status.nextCuratorEligibleAt)}` : ''}
+        </p>
+        {status.activeJob && (
+          <div className="action-row" style={{ marginTop: 8 }}>
+            <span className="badge badge-primary">
+              运行中：{status.activeJob.mode} ({status.activeJob.status})
+            </span>
+            <button
+              type="button"
+              className="quiet-button danger"
+              disabled={busy}
+              onClick={() => onCancelJob(status.activeJob!.jobId)}
+            >
+              取消当前任务
+            </button>
+          </div>
+        )}
+        {!status.activeJob && status.lastJob && (
+          <p className="secondary" style={{ marginTop: 6, marginBottom: 0 }}>
+            最近任务：{status.lastJob.mode} · {status.lastJob.status} · {formatTime(status.lastJob.finishedAt ?? status.lastJob.createdAt)}
+            {status.lastJob.summary ? ` · ${status.lastJob.summary}` : ''}
+          </p>
+        )}
+        <div className="action-row" style={{ marginTop: 10, marginBottom: 0 }}>
+          <button
+            type="button"
+            className="button secondary-button button-sm"
+            disabled={busy || !online || Boolean(status.activeJob)}
+            title={!online ? '设备离线，无法立即执行' : undefined}
+            onClick={() => onTrigger('curate')}
+          >
+            <Sparkles size={14} />
+            立即整理技能 (Curate)
+          </button>
+          <button
+            type="button"
+            className="button secondary-button button-sm"
+            disabled={busy || !online || Boolean(status.activeJob)}
+            title={!online ? '设备离线，无法立即执行' : undefined}
+            onClick={() => onTrigger('review')}
+          >
+            立即复盘当前会话 (Review)
+          </button>
+          {!online && <span className="secondary">设备离线：策略可离线保存，立即触发需 Host 在线。</span>}
+        </div>
+      </div>
+
+      <form
+        className="form"
+        onSubmit={event => {
+          event.preventDefault();
+          onSave({
+            reviewModelRef: reviewModelRef ? reviewModelRef : null,
+            curatorModelRef: curatorModelRef ? curatorModelRef : null,
+            review: {
+              memoryEvery: Math.max(1, Math.trunc(Number(memoryEvery) || 10)),
+              skillEvery: Math.max(1, Math.trunc(Number(skillEvery) || 10)),
+            },
+            curator: {
+              intervalHours: Math.max(1, Math.trunc(Number(intervalHours) || 168)),
+              minIdleHours: Math.max(0, Number(minIdleHours) || 0),
+              staleAfterDays: Math.max(1, Math.trunc(Number(staleAfterDays) || 14)),
+              archiveAfterDays: Math.max(1, Math.trunc(Number(archiveAfterDays) || 30)),
+              consolidate,
+            },
+          });
+        }}
+      >
+        <div className="form-grid">
+          <label>
+            记忆复盘间隔（用户轮次）
+            <input
+              type="number"
+              min={1}
+              max={10000}
+              required
+              disabled={busy}
+              value={memoryEvery}
+              onChange={e => setMemoryEvery(e.target.value)}
+            />
+          </label>
+          <label>
+            技能复盘间隔（工具步数）
+            <input
+              type="number"
+              min={1}
+              max={10000}
+              required
+              disabled={busy}
+              value={skillEvery}
+              onChange={e => setSkillEvery(e.target.value)}
+            />
+          </label>
+          <label>
+            自动整理周期（小时）
+            <input
+              type="number"
+              min={1}
+              max={100000}
+              required
+              disabled={busy}
+              value={intervalHours}
+              onChange={e => setIntervalHours(e.target.value)}
+            />
+          </label>
+          <label>
+            整理前最小空闲（小时）
+            <input
+              type="number"
+              min={0}
+              max={10000}
+              step="0.5"
+              required
+              disabled={busy}
+              value={minIdleHours}
+              onChange={e => setMinIdleHours(e.target.value)}
+            />
+          </label>
+          <label>
+            标记陈旧天数 (staleAfterDays)
+            <input
+              type="number"
+              min={1}
+              max={100000}
+              required
+              disabled={busy}
+              value={staleAfterDays}
+              onChange={e => setStaleAfterDays(e.target.value)}
+            />
+          </label>
+          <label>
+            自动归档天数 (archiveAfterDays)
+            <input
+              type="number"
+              min={1}
+              max={100000}
+              required
+              disabled={busy}
+              value={archiveAfterDays}
+              onChange={e => setArchiveAfterDays(e.target.value)}
+            />
+          </label>
+          <label>
+            复盘模型覆盖（可选）
+            <select value={reviewModelRef} disabled={busy} onChange={e => setReviewModelRef(e.target.value)}>
+              <option value="">跟随 Bot 当前有效模型（默认）</option>
+              {reviewModelRef && !options.some(o => o.ref === reviewModelRef) && (
+                <option value={reviewModelRef}>{reviewModelRef}</option>
+              )}
+              {options.map(o => (
+                <option key={o.ref} value={o.ref}>
+                  {o.name} · {o.ref}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            整理模型覆盖（可选）
+            <select value={curatorModelRef} disabled={busy} onChange={e => setCuratorModelRef(e.target.value)}>
+              <option value="">跟随 Bot 当前有效模型（默认）</option>
+              {curatorModelRef && !options.some(o => o.ref === curatorModelRef) && (
+                <option value={curatorModelRef}>{curatorModelRef}</option>
+              )}
+              {options.map(o => (
+                <option key={o.ref} value={o.ref}>
+                  {o.name} · {o.ref}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={consolidate}
+            disabled={busy}
+            onChange={e => setConsolidate(e.target.checked)}
+          />
+          <span>启用 LLM 同类技能合并精简（consolidate，默认关闭）</span>
+        </label>
+        <p className="secondary" style={{ marginTop: 0 }}>
+          14 天未使用标记陈旧、30 天闲置自动归档卸载默认开启（已恢复使用、Pin 置顶或跨 Bot 共享的技能自动豁免）。开启合并精简后，Curator 会在保存历史快照的前提下合并高度重复的私有技能。
+        </p>
+
+        <div className="action-row">
+          <button className="button" type="submit" disabled={busy}>
+            保存策略
+          </button>
+          <button type="button" className="quiet-button" disabled={busy} onClick={onClose}>
+            关闭
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export default function Devices() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [bots, setBots] = useState<Record<string, BotRef[]>>({});
@@ -353,6 +614,11 @@ export default function Devices() {
   const [options, setOptions] = useState<ModelOption[]>([]);
   const [filterDeviceId, setFilterDeviceId] = useState<string>('');
   const [selected, setSelected] = useState<{ device: Device; bot: BotRef; config: BotModelConfig }>();
+  const [learningModal, setLearningModal] = useState<{
+    device: Device;
+    bot: BotRef;
+    status: BotLearningStatus;
+  }>();
   const [creatingBotFor, setCreatingBotFor] = useState<{
     deviceId: string;
     defaultPrimary: boolean;
@@ -744,6 +1010,23 @@ export default function Devices() {
                       能力分配
                     </Link>
                     <button
+                      className="button secondary-button button-sm"
+                      disabled={busy}
+                      onClick={() =>
+                        void run(async () => {
+                          setNotice('');
+                          setLearningModal({
+                            device,
+                            bot,
+                            status: await api.getBotLearningStatus(device.deviceId, bot.botId),
+                          });
+                        })
+                      }
+                    >
+                      <Sparkles size={14} />
+                      自学习与整理
+                    </button>
+                    <button
                       className="quiet-button"
                       disabled={busy}
                       title={!device.online ? '设备离线：仅工作目录可保存' : undefined}
@@ -968,6 +1251,102 @@ export default function Devices() {
                   });
                   setSelected({ ...selected, config });
                   setNotice('Bot 模型覆盖已保存');
+                })
+              }
+            />
+          </div>
+        )}
+      </SheetModal>
+
+      <SheetModal
+        open={learningModal !== undefined}
+        onOpenChange={isOpen => {
+          if (!isOpen) setLearningModal(undefined);
+        }}
+        title={
+          learningModal
+            ? `${learningModal.bot.name || learningModal.bot.botId} 的自学习与技能整理`
+            : 'Bot 自学习与技能整理'
+        }
+        description="复盘生成的技能自动发布归属于当前 Bot（无需人工审阅）；如需共享给其他 Bot，可在能力详情的「分配」页切换共享范围。"
+      >
+        {learningModal && (
+          <div>
+            {error && (
+              <p className="inline-error" role="alert">
+                {error}
+              </p>
+            )}
+            {notice && (
+              <p className="inline-notice" role="status">
+                {notice}
+              </p>
+            )}
+            <BotLearningPanel
+              online={Boolean(
+                (devices.find(d => d.deviceId === learningModal.device.deviceId) ?? learningModal.device).online,
+              )}
+              status={learningModal.status}
+              options={options}
+              busy={busy}
+              onClose={() => setLearningModal(undefined)}
+              onRefresh={() =>
+                void run(async () => {
+                  const fresh = await api.getBotLearningStatus(
+                    learningModal.device.deviceId,
+                    learningModal.bot.botId,
+                  );
+                  setLearningModal(prev => (prev ? { ...prev, status: fresh } : prev));
+                })
+              }
+              onSave={patch =>
+                void run(async () => {
+                  await api.configureBotLearning(
+                    learningModal.device.deviceId,
+                    learningModal.bot.botId,
+                    learningModal.status.settings.revision,
+                    patch,
+                  );
+                  const fresh = await api.getBotLearningStatus(
+                    learningModal.device.deviceId,
+                    learningModal.bot.botId,
+                  );
+                  setLearningModal(prev => (prev ? { ...prev, status: fresh } : prev));
+                  setNotice('自学习与过期整理策略已保存');
+                })
+              }
+              onTrigger={action =>
+                void run(async () => {
+                  const res = await api.triggerBotLearning(
+                    learningModal.device.deviceId,
+                    learningModal.bot.botId,
+                    action,
+                  );
+                  const fresh = await api.getBotLearningStatus(
+                    learningModal.device.deviceId,
+                    learningModal.bot.botId,
+                  );
+                  setLearningModal(prev => (prev ? { ...prev, status: fresh } : prev));
+                  setNotice(
+                    action === 'curate'
+                      ? `技能整理已执行（${res.status}${res.summary ? `：${res.summary}` : ''}）`
+                      : `会话复盘已执行（${res.status}${res.summary ? `：${res.summary}` : ''}）`,
+                  );
+                })
+              }
+              onCancelJob={jobId =>
+                void run(async () => {
+                  await api.cancelBotLearning(
+                    learningModal.device.deviceId,
+                    learningModal.bot.botId,
+                    jobId,
+                  );
+                  const fresh = await api.getBotLearningStatus(
+                    learningModal.device.deviceId,
+                    learningModal.bot.botId,
+                  );
+                  setLearningModal(prev => (prev ? { ...prev, status: fresh } : prev));
+                  setNotice('已取消当前学习任务');
                 })
               }
             />

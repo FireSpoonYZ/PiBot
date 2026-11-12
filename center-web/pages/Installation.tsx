@@ -14,7 +14,30 @@ import type {
   JsonSchema,
   JsonValue,
   PackageVersion,
+  SkillVisibilityScope,
 } from '@e-launcher/center-contract';
+
+const VISIBILITY_OPTIONS: Array<{
+  value: SkillVisibilityScope;
+  title: string;
+  description: string;
+}> = [
+  {
+    value: 'private',
+    title: '仅源 Bot 私有（默认）',
+    description: '只对反思生成该技能的源 Bot 可见与启用；对其他 Bot 完全隐藏且不可绑定。',
+  },
+  {
+    value: 'assigned',
+    title: '指定 Bot 共享',
+    description: '允许在下方勾选指定设备与 Bot 按需共享启用；共享期间自动豁免单 Bot 闲置归档。',
+  },
+  {
+    value: 'global',
+    title: '全局默认可用（含未来新建 Bot）',
+    description: '对所有未显式手动关闭的现有 Bot 及未来新建 Bot 自动默认开启，支持单个 Bot 独立关闭。',
+  },
+];
 import { api } from '../api';
 import { ActivationBadge, ActivationSummary, activationUsable } from '../components/ActivationStatus';
 import ConfigForm from '../components/ConfigForm';
@@ -189,6 +212,29 @@ export default function Installation() {
     });
   };
 
+  const changeVisibilityScope = async (nextScope: SkillVisibilityScope) => {
+    if (!item || (item.visibilityScope ?? 'private') === nextScope) return;
+    await run(async () => {
+      const updated = await api.patchInstallation(installationId, {
+        expectedRevision: item.revision,
+        visibilityScope: nextScope,
+      });
+      setItem(updated);
+      if (deviceId) {
+        const list = await api.listBots(deviceId);
+        const refreshed = await Promise.all(
+          list.map(async bot => ({
+            ...bot,
+            enabled: (await api.getBotCapability(deviceId, bot.botId, installationId)).enabled,
+          })),
+        );
+        setBots(refreshed);
+      }
+      const label = VISIBILITY_OPTIONS.find(opt => opt.value === nextScope)?.title ?? nextScope;
+      setMessage(`已更新技能共享范围：${label}`);
+    });
+  };
+
   const selectedAction = actions.find(entry => entry.id === action);
   const chooseDevice = (id: string) => {
     setDeviceId(id);
@@ -297,6 +343,12 @@ export default function Installation() {
                     ? item.source.url
                     : item.source.artifactRef}
               </p>
+              {item.ownerBot && (
+                <p>
+                  ✨ Bot 反思习得来源：设备 {item.ownerBot.deviceId} · Bot {item.ownerBot.botId} · 技能 {item.ownerBot.skillName} · 当前范围：
+                  {VISIBILITY_OPTIONS.find(opt => opt.value === (item.visibilityScope ?? 'private'))?.title ?? (item.visibilityScope ?? 'private')}
+                </p>
+              )}
               {item.kind === 'mcp' && (
                 <p>
                   MCP 运行位置：{item.target === 'center' ? '中心' : '目标 Host'} · MCP URL 由
@@ -573,11 +625,55 @@ export default function Installation() {
       )}
 
       {tab === '分配' && (
-        <section className="card-group">
+        <>
+          {item?.ownerBot && (
+            <section className="card-group">
+              <div className="card-header">
+                <h2>✨ 习得技能归属与共享范围</h2>
+                <span className="badge badge-neutral">
+                  源 Bot：{item.ownerBot.deviceId} / {item.ownerBot.botId}
+                </span>
+              </div>
+              <p className="secondary">
+                反思生成的技能默认仅属于源 Bot。你可在此切换为「指定 Bot 共享」或「全局默认可用」；非源 Bot 将以只读已安装技能形态挂载该能力，且共享状态下自动豁免 30 天闲置自动归档。
+              </p>
+              <div className="card-grid">
+                {VISIBILITY_OPTIONS.map(option => {
+                  const activeScope = item.visibilityScope ?? 'private';
+                  const checked = activeScope === option.value;
+                  return (
+                    <article key={option.value} className="resource-card resource-row">
+                      <div className="card-header">
+                        <label className="check" style={{ margin: 0 }}>
+                          <input
+                            type="radio"
+                            name="skill-visibility-scope"
+                            checked={checked}
+                            disabled={busy}
+                            onChange={() => void changeVisibilityScope(option.value)}
+                          />
+                          <strong>{option.title}</strong>
+                        </label>
+                        {checked && <span className="badge badge-primary">当前生效</span>}
+                      </div>
+                      <p className="secondary" style={{ marginBottom: 0 }}>
+                        {option.description}
+                      </p>
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+          <section className="card-group">
           <div className="card-header">
             <h2>Bot 分配</h2>
           </div>
-          <p className="secondary">打开 Bot 配置可启用、禁用并设置覆盖，也可直接在此处快速切换启用状态。</p>
+          <p className="secondary">
+            {item?.ownerBot && (item.visibilityScope ?? 'private') === 'private'
+              ? `当前为「仅源 Bot 私有」模式，仅源 Bot (${item.ownerBot.deviceId} / ${item.ownerBot.botId}) 可启用；如需分配给其他 Bot，请先在上方切换为「指定 Bot 共享」或「全局默认可用」。`
+              : '打开 Bot 配置可启用、禁用并设置覆盖，也可直接在此处快速切换启用状态。'}
+          </p>
           <div className="form">
             <label>
               设备
@@ -601,7 +697,16 @@ export default function Installation() {
             <p className="empty-state secondary">该设备下暂无 Bot。</p>
           ) : (
             <div className="card-grid">
-              {bots.map(bot => (
+              {bots.map(bot => {
+                const isOwnerBot =
+                  Boolean(item?.ownerBot) &&
+                  item?.ownerBot?.deviceId === bot.deviceId &&
+                  item?.ownerBot?.botId === bot.botId;
+                const lockedByPrivateScope =
+                  Boolean(item?.ownerBot) &&
+                  (item?.visibilityScope ?? 'private') === 'private' &&
+                  !isOwnerBot;
+                return (
                 <article key={bot.botId} className="resource-card resource-row">
                   <div className="card-header">
                     <div>
@@ -611,6 +716,7 @@ export default function Installation() {
                         <strong>{bot.name}</strong>
                       </Link>{' '}
                       <span className="secondary">· {bot.botId}</span>
+                      {isOwnerBot && <span className="badge badge-neutral" style={{ marginLeft: 8 }}>源 Bot</span>}
                     </div>
                     <span className={`badge ${bot.enabled ? 'badge-online' : 'badge-offline'}`}>
                       {bot.enabled ? '已分配' : '未启用'}
@@ -621,12 +727,15 @@ export default function Installation() {
                       <input
                         type="checkbox"
                         checked={bot.enabled}
-                        disabled={busy || (!bot.enabled && !globalUsable)}
+                        disabled={busy || lockedByPrivateScope || (!bot.enabled && !globalUsable)}
                         onChange={event => void toggleBotCapability(bot, event.target.checked)}
                       />
                       为此 Bot 启用
                     </label>
-                    {!globalUsable && (
+                    {lockedByPrivateScope && (
+                      <span className="secondary">当前技能仅源 Bot 私有，需先切换共享范围</span>
+                    )}
+                    {!lockedByPrivateScope && !globalUsable && (
                       <span className="secondary">
                         {bot.enabled ? '全局未启用成功，当前不生效；仍可关闭' : '全局启用成功后才能开启'}
                       </span>
@@ -639,10 +748,12 @@ export default function Installation() {
                     </Link>
                   </div>
                 </article>
-              ))}
+                );
+              })}
             </div>
           )}
-        </section>
+          </section>
+        </>
       )}
 
       {tab === '版本与状态' && (

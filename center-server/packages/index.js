@@ -489,7 +489,9 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
       await atomicJson(metaFile(id), meta);
       const installation = store.putInstallation({ installationId: id, packageId: v.packageVersion.packageId,
         displayName: request.displayName, kind: request.kind, source: request.source, target: request.target,
-        targetVersion: v.packageVersion.version, enabled: false, activation: activation('disabled'), revision: 0 }, null);
+        targetVersion: v.packageVersion.version, enabled: false, activation: activation('disabled'), revision: 0,
+        ...(request.ownerBot ? { ownerBot: request.ownerBot } : {}),
+        ...(request.visibilityScope ? { visibilityScope: request.visibilityScope } : {}) }, null);
       onChange(id);
       await dispatch(installation, meta, op);
     });

@@ -107,6 +107,13 @@ export interface PackageVersion {
   resolved: string | null;
   integrity: string | null;
 }
+export type SkillVisibilityScope = 'private' | 'assigned' | 'global';
+export interface InstallationOwnerBot {
+  deviceId: string;
+  botId: string;
+  skillId: string;
+  skillName: string;
+}
 export interface Installation {
   installationId: string;
   packageId: string;
@@ -119,6 +126,10 @@ export interface Installation {
   enabled: boolean;
   revision: number;
   activation: InstallationActivation;
+  /** Present when this installation was published from a Bot's managed skill library. */
+  ownerBot?: InstallationOwnerBot;
+  /** Visibility scope for Bot-learned skills: private (owner Bot only), assigned, or global. */
+  visibilityScope?: SkillVisibilityScope;
 }
 /** Center-owned global readiness of an installation: only 'enabled' authorizes Bots. */
 export interface InstallationActivation {
@@ -276,7 +287,15 @@ export type InstallSource =
   | { type: 'npm'; spec: string }
   | { type: 'artifact'; artifactRef: string }
   | { type: 'http'; url: string };
-export interface InstallRequest { requestId: string; displayName: string; kind: CapabilityKind; source: InstallSource; target: 'center' | 'host' }
+export interface InstallRequest {
+  requestId: string;
+  displayName: string;
+  kind: CapabilityKind;
+  source: InstallSource;
+  target: 'center' | 'host';
+  ownerBot?: InstallationOwnerBot;
+  visibilityScope?: SkillVisibilityScope;
+}
 export interface OperationRequest { requestId: string }
 /** Global enable may name an existing Bot as the OAuth validation identity for center MCP. */
 export interface EnableRequest extends OperationRequest {
@@ -435,7 +454,11 @@ export interface TurnPreparation {
   /** Present only when prepare could atomically grant because knownSetId was current. */
   admission?: TurnAdmissionGrant;
 }
-export interface PutInstallationDisplayName { expectedRevision: number; displayName: string }
+export interface PutInstallationDisplayName {
+  expectedRevision: number;
+  displayName?: string;
+  visibilityScope?: SkillVisibilityScope;
+}
 /**
  * Host directory report entry: BotRef without the center-authoritative fields
  * (cwd/cwdRevision/avatar/avatarRevision). Bootstrap and bots-sync reports carry
@@ -518,6 +541,68 @@ export interface LearningMemoryStatus {
 /** Webfox action readLearningSource; caller enforces its declared source allowlist. */
 export interface LearningSourceInput { url: string }
 export interface LearningSourceResult { url: string; content: string; truncated?: boolean }
+
+export interface BotLearningSettings {
+  revision: number;
+  enabled?: boolean;
+  reviewModelRef: string | null;
+  curatorModelRef: string | null;
+  review: { memoryEvery: number; skillEvery: number };
+  curator: {
+    intervalHours: number;
+    minIdleHours: number;
+    staleAfterDays: number;
+    archiveAfterDays: number;
+    consolidate: boolean;
+    enabled?: boolean;
+    paused?: boolean;
+  };
+  budget: {
+    maxIterations: number;
+    maxInputTokens: number | null;
+    callTimeoutMs: number;
+    jobTimeoutMs: number;
+    pollTimeoutMs: number;
+  };
+}
+export interface BotLearningCounters {
+  turnsSinceMemoryReview: number;
+  itersSinceSkillReview: number;
+  lastAutomaticReviewAt: string | null;
+  lastCuratorRunAt: string | null;
+  jobsStarted: number;
+  jobsCompleted: number;
+  jobsFailed: number;
+  jobsCancelled: number;
+  jobsInterrupted: number;
+  lastJobId: string | null;
+  lastJobStatus: string | null;
+  lastJobFinishedAt: string | null;
+  lastJobSummary: string | null;
+}
+export interface BotLearningJobSummary {
+  jobId: string;
+  mode: 'review' | 'learn' | 'curate';
+  automatic: boolean;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  summary?: string;
+  updatedSkills?: string[];
+  archivedSkills?: string[];
+  memoryUpdated?: boolean;
+  error?: { code: string; message: string };
+}
+export interface BotLearningStatus {
+  deviceId: string;
+  botId: string;
+  settings: BotLearningSettings;
+  counters: BotLearningCounters;
+  activeJob: BotLearningJobSummary | null;
+  lastJob: BotLearningJobSummary | null;
+  nextCuratorEligibleAt: string | null;
+}
 export interface OAuthStartRequest { deviceId: string; botId: string }
 export interface OAuthStartResponse { flowId: string; authorizationUrl: string }
 export interface OAuthFlowState { status: 'pending' | 'complete' | 'failed'; error?: string }

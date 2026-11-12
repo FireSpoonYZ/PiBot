@@ -1203,7 +1203,7 @@ const inspectorGroups: ReadonlyArray<{ title: string; pages: readonly InspectorP
     { id: 'schedules', label: '定时任务', Icon: Clock },
   ] },
   { title: '更多', pages: [
-    { id: 'skill-review', label: 'Skill 审阅', Icon: Sparkles },
+    { id: 'skill-review', label: '已学技能', Icon: Sparkles },
     { id: 'vault', label: '密码库', Icon: LockKeyhole },
     { id: 'management', label: '管理', Icon: Settings },
   ] },
@@ -2318,6 +2318,7 @@ function PrimaryChatPane({
             starBadge={isPrimary && !isArchived}
             platformBadge={devicePlatform}
             busy={liveBusy}
+            reflecting={Boolean(live?.learning?.active)}
             offline={!online}
             size={30}
           />
@@ -2528,6 +2529,7 @@ function PrimaryChatPane({
           setWatchTick((t) => t + 1);
           void loadRaw();
         }}
+        onOpenLearnedSkills={() => openInspector('skill-review')}
         emptyActions={
           !isArchived && !drafts.text && <button
             type="button"

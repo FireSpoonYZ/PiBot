@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL_HOURS, DEFAULT_MIN_IDLE_HOURS = 24 * 7, 2  # 7 days
 DEFAULT_STALE_AFTER_DAYS, DEFAULT_ARCHIVE_AFTER_DAYS = 14, 30
-# The optional LLM pass proposes consolidation drafts. The curator always
-# checks activity on its scheduled pass.
+# The LLM consolidation fork is opt-in; the deterministic inactivity prune
+# (apply_automatic_transitions) always runs when the curator is enabled.
 DEFAULT_CONSOLIDATE = False
 
 
@@ -132,7 +132,7 @@ def get_archive_after_days() -> int:
 
 
 def get_consolidate() -> bool:
-    """Whether to include a model pass that proposes consolidation drafts."""
+    """LLM consolidation pass — OFF by default (prune only, no aux-model fork); manual runs may override per invocation."""
     return bool(_load_config().get("consolidate", DEFAULT_CONSOLIDATE))
 
 
@@ -175,8 +175,25 @@ def _cron_referenced_skills() -> set[str]:
         return set()
 
 
+def _archive_as_curator(_u, name: str) -> bool:
+    """Archive via skill_usage with the ledger actor tagged 'curator', so the ledger entry reads as an autonomous transition, not a foreground call."""
+    try:
+        from tools.skill_ledger import reset_ledger_actor, set_ledger_actor
+        tok = set_ledger_actor("curator")
+    except Exception:
+        tok = reset_ledger_actor = None  # type: ignore[assignment]
+    try:
+        return _u.archive_skill(name)[0]
+    finally:
+        if tok is not None:
+            with contextlib.suppress(Exception):
+                reset_ledger_actor(tok)
+
+
 def apply_automatic_transitions(now: Optional[datetime] = None) -> dict[str, int]:
-    """Update activity metadata and count candidates for user-approved archival."""
+    """Move every curator-managed skill between active/stale/archived based on its latest real activity; pinned skills are
+    never touched. Built-ins are seeded with a baseline record on first sight so their inactivity clock starts NOW, not at epoch.
+    Returns a counter dict."""
     from tools import skill_usage as _u
 
     now = now or datetime.now(UTC)
@@ -185,7 +202,7 @@ def apply_automatic_transitions(now: Optional[datetime] = None) -> dict[str, int
     # Cron-referenced skills are in use by definition (usage only bumps when a
     # job fires, so paused/rare jobs would age them out). Treat as pinned.
     protected = _cron_referenced_skills()
-    counts = {"marked_stale": 0, "archive_candidates": 0, "reactivated": 0, "checked": 0, "seeded": 0}
+    counts = {"marked_stale": 0, "archived": 0, "reactivated": 0, "checked": 0, "seeded": 0}
 
     def _set(name: str, state: str, key: str) -> None:
         _u.set_state(name, state)
@@ -221,7 +238,8 @@ def apply_automatic_transitions(now: Optional[datetime] = None) -> dict[str, int
                 _set(name, _u.STATE_ACTIVE, "reactivated")
             continue
         if anchor <= archive_cutoff and current != _u.STATE_ARCHIVED:
-            counts["archive_candidates"] += 1
+            if _archive_as_curator(_u, name):
+                counts["archived"] += 1
         elif anchor <= stale_cutoff and current == _u.STATE_ACTIVE:
             _set(name, _u.STATE_STALE, "marked_stale")
         elif anchor > stale_cutoff and current == _u.STATE_STALE:
@@ -232,31 +250,187 @@ def apply_automatic_transitions(now: Optional[datetime] = None) -> dict[str, int
 # --- Review prompt for the forked agent ---
 
 CURATOR_DRY_RUN_BANNER = (
-    "Preview only. Use skills_list and skill_view to inspect the library. "
-    "Summarize proposed drafts and retirements for the user without writing them."
+    "═══════════════════════════════════════════════════════════════\n"
+    "DRY-RUN — REPORT ONLY. DO NOT MUTATE THE SKILL LIBRARY.\n"
+    "═══════════════════════════════════════════════════════════════\n"
+    "\n"
+    "This is a PREVIEW pass. Follow every instruction below EXCEPT:\n"
+    "\n"
+    "  • DO NOT call skill_manage with action=patch, create, delete, "
+    "write_file, or remove_file.\n"
+    "  • skills_list and skill_view are FINE — read as much as you need.\n"
+    "\n"
+    "Your output IS the deliverable. Produce the exact same "
+    "human-readable summary and structured YAML block you would "
+    "produce on a live run — but describe the actions you WOULD take, "
+    "not actions you took. A downstream reviewer will read the report "
+    "and decide whether to approve a live run.\n"
+    "\n"
+    "If you accidentally take a mutating action, say so explicitly in "
+    "the summary so the reviewer can revert it.\n"
+    "═══════════════════════════════════════════════════════════════"
 )
 
 
-CURATOR_REVIEW_PROMPT = """Review the skill library for useful consolidation drafts. Prefer broad
-workflow skills with a short SKILL.md and topic-specific supporting files.
-Distill duplicate lessons into reusable rules and retain the distinct
-instructions and support files each workflow still needs.
-
-Work only on curator-managed skills. Skip locked, pinned, bundled and
-externally installed skills. Use skills_list and skill_view to inspect
-each candidate and its supporting files. Read each existing file with
-skill_view before editing it. Keep paths and relative links valid in the
-destination draft.
-
-Use skill_manage create, patch or write_file to save consolidation drafts.
-Keep source skills and schedule references intact. Describe any proposed
-retirement or schedule change for the user in the summary. The user will
-review the draft before it can be published.
-
-Summarize the drafts you saved, the workflow each draft covers, and the
-skills you suggest reviewing after publication. Distinguish a saved draft
-from a deployed change.
-"""
+CURATOR_REVIEW_PROMPT = (
+    "You are running as PiBot's background skill CURATOR. This is an "
+    "UMBRELLA-BUILDING consolidation pass, not a passive audit and not a "
+    "duplicate-finder.\n\n"
+    "The goal of the skill collection is a LIBRARY OF CLASS-LEVEL "
+    "INSTRUCTIONS AND EXPERIENTIAL KNOWLEDGE. A collection of hundreds of "
+    "narrow skills where each one captures one session's specific bug is "
+    "a FAILURE of the library — not a feature. An agent searching skills "
+    "matches on descriptions, not on exact names (note: the system prompt "
+    "skill index shows 60 chars of a description — keep the trigger class "
+    "in that window). One broad umbrella "
+    "skill with labeled subsections beats five narrow siblings for "
+    "discoverability, not the other way around.\n\n"
+    "The right target shape is CLASS-LEVEL skills whose SKILL.md carries the "
+    "always-on rules and whose `references/`, `templates/`, and `scripts/` hold a "
+    "SMALL set of topical depth — not one-session-one-skill micro-entries, and "
+    "not an umbrella that hoards one references/ file per absorbed sibling. "
+    "Consolidation means DISTILLING: the absorbed content becomes rules "
+    "(imperative + one clause of why), the same lesson stated twice becomes "
+    "one rule, and incident narration, PR/issue numbers, dates and quoted "
+    "chatter are dropped — the rule must stand without the story. Moving a "
+    "file unchanged under references/ is filing, not consolidating. A SKILL.md "
+    "body over ~24k chars is a consolidation target on its own: skill_view loads "
+    "all of it into context for the rest of the session, so distill it to the "
+    "always-on rules and push topic depth into references/.\n\n"
+    "Hard rules — do not violate:\n"
+    "1. DO NOT touch bundled, hub-installed, or external-dir skills. "
+    "The candidate list below is already filtered to local curator-managed "
+    "skills only; external and shared skills are read-only to this background curator.\n"
+    "2. DO NOT permanently destroy any skill. Archiving (via skill_manage action=delete "
+    "with absorbed_into) moves the skill into the recoverable archive. "
+    "Archives are recoverable; permanent deletion is not.\n"
+    "3. DO NOT touch skills shown as pinned=yes. Skip them entirely.\n"
+    "3b. DO NOT archive, delete, consolidate, move, or otherwise modify any "
+    "skill named in the protected built-ins list. They are filtered out of the "
+    "candidate list below — never resurrect one as an archive or absorb target.\n"
+    "3c. DO NOT archive, delete, consolidate, or prune any skill marked `cron=yes` "
+    "in the candidate list. A scheduled task depends on it by name and "
+    "skill_manage action=delete refuses cron-referenced skills.\n"
+    "4. DO NOT use usage counters as a reason to skip consolidation. The "
+    "counters are new and often mostly zero. Judge overlap on CONTENT, "
+    "not on use_count. 'use=0' is not evidence a skill is valuable; it's "
+    "absence of evidence either way. Corollary: 'use=0' is ALSO not a "
+    "reason to PRUNE a skill. Never archive a never-used skill (use=0) "
+    "unless it is at least 30 days old (check last_activity / created date) "
+    "AND its content is genuinely obsolete or fully absorbed elsewhere — a "
+    "recently-created skill simply may not have had its trigger come up yet.\n"
+    "5. DO NOT reject consolidation on the grounds that 'each skill has "
+    "a distinct trigger'. Pairwise distinctness is the wrong bar. The "
+    "right bar is: 'would a human maintainer write this as N separate "
+    "skills, or as one skill with N labeled subsections?' When the "
+    "answer is the latter, merge.\n\n"
+    "How to work — not optional:\n"
+    "1. Scan the full candidate list. Identify PREFIX CLUSTERS (skills "
+    "sharing a first word or domain keyword). Expect domain clusters.\n"
+    "2. For each cluster with 2+ members, do NOT ask 'are these pairs "
+    "overlapping?' — ask 'what is the UMBRELLA CLASS these skills all "
+    "serve? Would a maintainer name that class and write one skill for "
+    "it?' If yes, pick (or create) the umbrella and absorb the siblings "
+    "into it.\n"
+    "3. Three ways to consolidate — use the right one per cluster:\n"
+    "   a. MERGE INTO EXISTING UMBRELLA — one skill in the cluster is "
+    "already broad enough to be the umbrella. Patch it to add a labeled "
+    "section for each sibling's unique insight, then archive the "
+    "siblings.\n"
+    "   b. CREATE A NEW UMBRELLA SKILL.md — no existing member is broad "
+    "enough. Use skill_manage action=create to write a new class-level "
+    "skill whose SKILL.md covers the shared workflow and has short "
+    "labeled subsections. Archive the now-absorbed narrow siblings.\n"
+    "   c. DEMOTE TO REFERENCES/TEMPLATES/SCRIPTS — a sibling has "
+    "narrow-but-valuable depth that is only needed sometimes. Distill it "
+    "into the umbrella's appropriate support directory:\n"
+    "      • `references/<topic>.md` — named by TOPIC, merged into an "
+    "existing topical file when one covers it (decision tables, recipes, "
+    "provider quirks, condensed domain notes). Never `<sibling-name>.md` "
+    "copied verbatim; never a per-incident file.\n"
+    "      • `templates/<name>.<ext>` for starter files meant to be "
+    "copied and modified\n"
+    "      • `scripts/<name>.<ext>` for statically re-runnable actions "
+    "(verification scripts, fixture generators, probes)\n"
+    "      Then archive the old sibling. Re-home the content through the "
+    "LEDGERED tool surface: `skill_manage action=write_file` on the umbrella "
+    "to place the file (subdirectories are created for you), then "
+    "`skill_manage action=delete` with `absorbed_into=<umbrella>` on the source.\n\n"
+    "Package integrity — not optional:\n"
+    "Before demoting or archiving a skill, inspect it as a COMPLETE "
+    "directory package, not just SKILL.md. A skill root may include "
+    "`references/`, `templates/`, `scripts/`, and `assets/`; `skill_view` "
+    "discovers those relative to the skill root. A reference markdown file "
+    "inside another skill is NOT a new skill root and does not get its own "
+    "linked-file discovery.\n"
+    "If the source skill has support files OR SKILL.md contains relative "
+    "links such as `references/...`, `templates/...`, `scripts/...`, or "
+    "`assets/...`, DO NOT flatten only SKILL.md into "
+    "`<umbrella>/references/<old>.md`. Choose one safe path instead:\n"
+    "   • keep it as a standalone skill, OR\n"
+    "   • fully merge it by re-homing every needed support file into the "
+    "umbrella's canonical `references/`, `templates/`, `scripts/`, or "
+    "`assets/` directories AND rewrite the destination instructions to "
+    "the new paths, OR\n"
+    "   • archive the entire original skill package unchanged.\n"
+    "Never leave archived/demoted instructions pointing at files that were "
+    "left behind under the old skill directory.\n"
+    "4. Also flag skills whose NAME is too narrow (contains a PR number, "
+    "a feature codename, a specific error string, an 'audit' / "
+    "'diagnosis' / 'salvage' session artifact). These almost always "
+    "belong as a subsection or support file under a class-level umbrella.\n"
+    "5. Iterate. After one consolidation round, scan the remaining set "
+    "and look for the NEXT umbrella opportunity.\n\n"
+    "Your toolset:\n"
+    "  - skills_list, skill_view        — read the current landscape\n"
+    "    READ BEFORE WRITE — enforced, not advisory. Before skill_manage "
+    "action=patch, action=write_file on a file that already "
+    "exists, or action=remove_file, call skill_view on that SAME target in "
+    "this review turn — skill_view(name) for SKILL.md, "
+    "skill_view(name, file_path=...) for a supporting file — and build the "
+    "write from the content it just returned. A write without that read is "
+    "REFUSED and nothing is saved.\n"
+    "  - skill_manage action=patch      — add sections to the umbrella\n"
+    "  - skill_manage action=create     — create a new umbrella SKILL.md\n"
+    "  - skill_manage action=write_file — add a references/, templates/, "
+    "or scripts/ file under an existing skill (the skill must already "
+    "exist)\n"
+    "  - skill_manage action=delete     — archive a skill. MUST pass "
+    "`absorbed_into=<umbrella>` naming the skill you merged its content "
+    "into (the umbrella must already exist). Deletes without a verified "
+    "forwarding target are refused — pruning with no absorption target is "
+    "the deterministic staleness pass's job, never this one's.\n"
+    "  You have NO terminal access in this pass — every mutation goes through "
+    "skill_manage above so it is versioned and rollback-able. Reading files "
+    "works through skill_view (including skill_view(name, file_path=...) for "
+    "support files).\n\n"
+    "'keep' is a legitimate decision ONLY when the skill is already a "
+    "class-level umbrella and none of the proposed merges would improve "
+    "discoverability. 'This is narrow but distinct from its siblings' "
+    "is NOT a reason to keep — it's a reason to move it under an "
+    "umbrella as a subsection or support file.\n\n"
+    "When done, write a human summary AND a structured machine-readable "
+    "block so downstream tooling can distinguish consolidation from "
+    "pruning. Format EXACTLY:\n\n"
+    "## Structured summary (required)\n"
+    "```yaml\n"
+    "consolidations:\n"
+    "  - from: <old-skill-name>\n"
+    "    into: <umbrella-skill-name>\n"
+    "    reason: <one short sentence — why merged, not just 'similar'>\n"
+    "prunings:\n"
+    "  - name: <skill-name>\n"
+    "    reason: <one short sentence — why archived with no merge target>\n"
+    "```\n\n"
+    "Every skill you archived MUST appear in exactly one of the "
+    "two lists. If you consolidated X into umbrella Y (patched Y, wrote "
+    "a references file to Y, or created Y with X's content absorbed), X "
+    "goes under `consolidations` with `into: Y`. If you archived X with "
+    "no absorption — truly stale, irrelevant, or obsolete — X goes under "
+    "`prunings`. Leave a list empty (`consolidations: []`) if none. Do "
+    "not omit the block. The block comes AFTER your human-readable "
+    "summary of clusters processed, patches made, and decisions left alone."
+)
 
 
 # --- Per-run reports — {YYYYMMDD-HHMMSS}/run.json + REPORT.md under logs/curator/ ---
@@ -589,7 +763,7 @@ def _render_report_markdown(p: dict[str, Any]) -> str:
         f"Agent-created skills: {counts.get('before', 0)} → {counts.get('after', 0)} ({counts.get('delta', 0):+d})\n",
         *([f"> ⚠ LLM pass error: `{error}`\n"] if error else []),
         "## Auto-transitions (pure, no LLM)\n", f"- checked: {auto.get('checked', 0)}", f"- marked stale: {auto.get('marked_stale', 0)}",
-        f"- archive candidates: {auto.get('archive_candidates', 0)}", f"- reactivated: {auto.get('reactivated', 0)}", "",
+        f"- archived (no LLM, pure time-based staleness): {auto.get('archived', 0)}", f"- reactivated: {auto.get('reactivated', 0)}", "",
         "## LLM consolidation pass\n",
         f"- tool calls: **{counts.get('tool_calls_total', 0)}** (by name: {', '.join(f'{k}={v}' for k, v in sorted(tc_counts.items())) or 'none'})",
         f"- consolidated into umbrellas: **{counts.get('consolidated_this_run', 0)}**",
@@ -691,20 +865,17 @@ def run_curator_review(
     on_summary: Optional[Callable[[str], None]] = None, synchronous: bool = False,
     dry_run: bool = False, consolidate: Optional[bool] = None, trigger: str = "manual",
 ) -> dict[str, Any]:
-    """Check skill activity, optionally write consolidation drafts, and save a report.
-
-    A synchronous pass uses the calling thread. A preview keeps skill state
-    and content intact, and writes its report alongside regular runs.
-    """
+    """Execute a single curator review pass: (1) automatic state transitions (no LLM); (2) if *consolidate* and there are
+    candidates, fork an AIAgent on the review prompt; (3) update .curator_state; (4) call *on_summary*."""
     consolidate = get_consolidate() if consolidate is None else consolidate
     start = datetime.now(UTC)
     learning_home = get_learning_home()  # the LLM pass may run on a thread with no profile binding
     if dry_run:  # count candidates without mutating state
-        counts = {"checked": len(_safe_curated_report()), "marked_stale": 0, "archive_candidates": 0, "reactivated": 0}
+        counts = {"checked": len(_safe_curated_report()), "marked_stale": 0, "archived": 0, "reactivated": 0}
     else:
         from agent import curator_backup
-        # Only the model pass edits drafts. Snapshot existing drafts for that
-        # pass and keep the same snapshot retention for activity checks.
+        # The prune-only pass archives skills (recoverable) and every edit is versioned;
+        # only the LLM consolidation pass rewrites content in place, so only it takes a whole-tree snapshot.
         if consolidate:
             # Best-effort, never blocks the run: a transient disk issue must not silently disable the curator forever.
             try:
@@ -718,7 +889,7 @@ def run_curator_review(
                 curator_backup.prune_old_snapshots()
         counts = apply_automatic_transitions(now=start)
     auto_summary = ", ".join(
-        f"{counts[key]} {label}" for key, label in (("marked_stale", "marked stale"), ("archive_candidates", "archive candidates"), ("reactivated", "reactivated")) if counts[key]
+        f"{counts[key]} {label}" for key, label in (("marked_stale", "marked stale"), ("archived", "archived"), ("reactivated", "reactivated")) if counts[key]
     ) or "no changes"
 
     # Persist before the LLM pass so a crash mid-review still records the run.

@@ -2,8 +2,9 @@
 
 The sources derive from Nous Research's revision
 `71736c9f32597bbca9d89cede5aa136e55946b2f`. See `LICENSE` for the MIT notice.
-PiBot adapts the import namespace, prompts and curation behavior to its
-managed Skill review workflow. `MANIFEST.json` records upstream Git blob IDs
+PiBot adapts the import namespace and storage callbacks to its Center-managed
+Skill lifecycle (versioned revisions, auto-publish, recoverable archival, and
+pre-consolidation snapshots). `MANIFEST.json` records upstream Git blob IDs
 and local SHA-256 digests. Git preserves the bytes in this directory.
 
 ## Learning modules
@@ -14,7 +15,7 @@ and local SHA-256 digests. Git preserves the bytes in this directory.
   `summarize_background_review_actions`, and the review prompts.
 - `agent/learn_prompt.py` — `build_learn_prompt` (the complete /learn prompt builder).
 - `agent/curator.py` — `run_curator_review`, `maybe_run_curator`,
-  `apply_automatic_transitions`, draft proposals and report generation.
+  `apply_automatic_transitions`, consolidation passes and report generation.
 - `agent/curator_backup.py` — vendored for provenance; shadowed at runtime by the facade adapter `python/facade/agent/curator_backup.py`, which forwards snapshot ops to the center skill service (local-dir snapshots would only back up an empty/nonexistent tree).
 - `agent/skill_utils.py` — `get_disabled_skill_names`, `is_excluded_skill_path` and friends.
 - `agent/interrupt_compat.py`, `agent/safe_worker_policy.py`,

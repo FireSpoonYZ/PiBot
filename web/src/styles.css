@@ -778,4 +778,7 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .sand-activity-label-text.is-shimmering { background: linear-gradient(90deg, var(--muted) 0%, var(--text) 48%, var(--muted) 100%); background-size: 220% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: sand-text-shimmer 2.1s linear infinite; }
 @keyframes sand-text-shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
 .sand-activity-elapsed { font: .76rem/1.2 ui-monospace, Consolas, monospace; color: var(--muted); opacity: 0.78; flex-shrink: 0; }
+.sand-activity-learn-link { border: 1px solid color-mix(in srgb, var(--line) 85%, transparent); border-radius: 999px; background: var(--surface); color: var(--text); font-size: .76rem; font-weight: 600; padding: 2px 9px; flex-shrink: 0; cursor: pointer; }
+.grok-bot-reflect-badge { animation: grok-reflect-float 2.6s ease-in-out infinite; }
+@keyframes grok-reflect-float { 0%, 100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-1.5px) scale(1.06); } }
 @media (prefers-reduced-motion: reduce) { *, *:before, *:after { animation: none!important; transition: none!important; scroll-behavior: auto!important; } }

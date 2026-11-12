@@ -49,6 +49,7 @@ const STATE_KEYS = new Set([
   'queuedCount',
   'turnAdmission',
   'activity',
+  'learning',
 ]);
 const HISTORY_ITEM_KEYS = new Set(['id', 'kind', 'messages', 'attribution']);
 // Live attribution is already a safe projection (Host-side whitelist + bounds in
@@ -437,6 +438,122 @@ export function normalizeLiveTarget(target) {
   throw invalid("live target.kind must be 'primary' or 'work'");
 }
 
+const LEARNING_KEYS = new Set([
+  'active',
+  'jobId',
+  'mode',
+  'automatic',
+  'phase',
+  'toolName',
+  'startedAt',
+  'lastOutcome',
+]);
+const LEARNING_OUTCOME_KEYS = new Set([
+  'seq',
+  'jobId',
+  'mode',
+  'status',
+  'finishedAt',
+  'updatedSkills',
+  'archivedSkills',
+  'memoryUpdated',
+  'summary',
+]);
+const LEARNING_MODES = new Set(['review', 'learn', 'curate']);
+const LEARNING_PHASES = new Set(['idle', 'reviewing', 'writing']);
+const LEARNING_OUTCOME_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
+const MAX_LEARNING_TOOL_CHARS = 128;
+const MAX_LEARNING_SKILL_ITEMS = 32;
+const MAX_LEARNING_SKILL_NAME_CHARS = 128;
+const MAX_LEARNING_SUMMARY_CHARS = 512;
+
+function normalizeLearningSkillNames(value, label) {
+  if (!Array.isArray(value) || value.length > MAX_LEARNING_SKILL_ITEMS) {
+    throw invalid(`${label} must be an array of at most ${MAX_LEARNING_SKILL_ITEMS} items`);
+  }
+  return value.map((item) => {
+    assertText(item, label);
+    if (item.length === 0 || item.length > MAX_LEARNING_SKILL_NAME_CHARS) {
+      throw invalid(`${label} item must be 1..${MAX_LEARNING_SKILL_NAME_CHARS} chars`);
+    }
+    return item;
+  });
+}
+
+function normalizeIsoTimestamp(value, label) {
+  if (
+    typeof value !== 'string' ||
+    !ISO_MS_Z_RE.test(value) ||
+    Number.isNaN(Date.parse(value)) ||
+    new Date(value).toISOString() !== value
+  ) {
+    throw invalid(`${label} must be an ISO 8601 millisecond UTC string`);
+  }
+  return value;
+}
+
+function normalizeBotLearningState(value) {
+  if (!isPlainObject(value)) throw invalid('state.learning must be null or a plain object');
+  rejectUnknownFields(value, LEARNING_KEYS, 'state.learning');
+  if (typeof value.active !== 'boolean') throw invalid('learning active must be a boolean');
+  if (typeof value.automatic !== 'boolean') throw invalid('learning automatic must be a boolean');
+  if (!LEARNING_PHASES.has(value.phase)) throw invalid("learning phase must be 'idle', 'reviewing' or 'writing'");
+  if (value.jobId !== null) assertId(value.jobId, 'learning jobId');
+  if (value.mode !== null && !LEARNING_MODES.has(value.mode)) {
+    throw invalid("learning mode must be 'review', 'learn', 'curate' or null");
+  }
+  if (value.toolName !== null) {
+    assertText(value.toolName, 'learning toolName');
+    if (value.toolName.length === 0 || value.toolName.length > MAX_LEARNING_TOOL_CHARS) {
+      throw invalid('learning toolName exceeds bound');
+    }
+  }
+  const startedAt = value.startedAt === null ? null : normalizeIsoTimestamp(value.startedAt, 'learning startedAt');
+  let lastOutcome = null;
+  if (value.lastOutcome !== null && value.lastOutcome !== undefined) {
+    const out = value.lastOutcome;
+    if (!isPlainObject(out)) throw invalid('learning lastOutcome must be null or a plain object');
+    rejectUnknownFields(out, LEARNING_OUTCOME_KEYS, 'learning lastOutcome');
+    assertNonNegativeSafeInteger(out.seq, 'learning lastOutcome seq');
+    assertId(out.jobId, 'learning lastOutcome jobId');
+    if (!LEARNING_MODES.has(out.mode)) throw invalid('learning lastOutcome mode is invalid');
+    if (!LEARNING_OUTCOME_STATUSES.has(out.status)) throw invalid('learning lastOutcome status is invalid');
+    const finishedAt = normalizeIsoTimestamp(out.finishedAt, 'learning lastOutcome finishedAt');
+    const updatedSkills = normalizeLearningSkillNames(out.updatedSkills, 'learning lastOutcome updatedSkills');
+    const archivedSkills = normalizeLearningSkillNames(out.archivedSkills, 'learning lastOutcome archivedSkills');
+    if (typeof out.memoryUpdated !== 'boolean') throw invalid('learning lastOutcome memoryUpdated must be a boolean');
+    let summary = null;
+    if (out.summary !== null && out.summary !== undefined) {
+      assertText(out.summary, 'learning lastOutcome summary');
+      if (out.summary.length > MAX_LEARNING_SUMMARY_CHARS) {
+        throw invalid('learning lastOutcome summary exceeds bound');
+      }
+      summary = out.summary;
+    }
+    lastOutcome = {
+      seq: out.seq,
+      jobId: out.jobId,
+      mode: out.mode,
+      status: out.status,
+      finishedAt,
+      updatedSkills,
+      archivedSkills,
+      memoryUpdated: out.memoryUpdated,
+      summary,
+    };
+  }
+  return {
+    active: value.active,
+    jobId: value.jobId,
+    mode: value.mode,
+    automatic: value.automatic,
+    phase: value.phase,
+    toolName: value.toolName,
+    startedAt,
+    lastOutcome,
+  };
+}
+
 function normalizeLiveState(state) {
   if (!isPlainObject(state)) throw invalid('state must be a plain object');
   rejectUnknownFields(state, STATE_KEYS, 'state');
@@ -547,6 +664,10 @@ function normalizeLiveState(state) {
   // null sentinel — an explicit null is malformed and rejected.
   if (state.activity !== undefined) {
     state.activity = normalizeBotActivity(state.activity);
+  }
+  // Optional on the wire: older Hosts and work watches omit it; null means idle/none.
+  if (state.learning !== undefined && state.learning !== null) {
+    state.learning = normalizeBotLearningState(state.learning);
   }
   return state;
 }

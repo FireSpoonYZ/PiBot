@@ -689,6 +689,7 @@ export async function openRuntime(options) {
     botAdmissions: bots,
     onBotsChanged: options?.onBotsChanged,
     onBotsSync: options?.onBotsSync,
+    learningIdleSettleMs: options?.learningIdleSettleMs,
     collaboration,
     shower,
     vault,
@@ -748,7 +749,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower, vault, schedules }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, vault, schedules }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -786,7 +787,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     context: CTX,
     openPrimaryConversation: (bot) => getPrimaryConversation(harness, bot, {}, CTX),
     dropEnvFor,
-    isBotIdle: (bot) => botIsIdle(bot),
+    isBotIdle: async (bot) => (await botIsIdle(bot)) && (await turns.queuedCount(bot)) === 0,
+    onLearningStateChange: (botId, state) => live.setBotLearning?.(botId, state),
+    idleSettleMs: learningIdleSettleMs,
   });
   // 自编辑 SOUL 排队：Bot 在自己的活动轮里调 set_bot_soul（协作/管理工具显式
   // self:true）不能轮中改写人格——先校验输入，再排队到空闲边界；apply 仍走
@@ -939,6 +942,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
                 trackedSubmissions.delete(submissionId);
                 drainSelfSoul(info.botId);
                 turns.pump(info.botId);
+                learning.scheduleIdleCheck(info.botId);
               }
             } catch {
               /* ignore transient/closing errors */
@@ -1075,9 +1079,12 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     recordCompletedSubmission,
     initializeBot,
     attachments: attachmentStore,
-    // 用户轮 head 实际准入前抢占同 Bot 非用户来源 work（群/DM/迟到续轮）；
+    // 用户轮 head 实际准入前抢占同 Bot 非用户来源 work（群/DM/迟到续轮）以及后台自动学习；
     // 不动主聊天用户轮、不清 Host 用户队列。work lane 未实现时静默跳过。
-    preemptWork: (botId) => decisions.interruptBotWork?.(botId, { reason: 'preempted' }),
+    preemptWork: async (botId) => {
+      learning.preemptForForeground(botId);
+      return decisions.interruptBotWork?.(botId, { reason: 'preempted' });
+    },
   });
   const webhooks = createWebhookConsumer({
     deviceId: host.deviceId,
@@ -1101,6 +1108,10 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   decisions.setTurnGate(turns.admitWorkDecision, turns.pump, turns.canRunWork);
   // 队列生命周期通知：pending 创建/结束/暂停/取消的纯元数据快照驱动统一 live 活动投影。
   decisions.setActivityListener?.((botId, summary) => live.setWorkActivity?.(botId, summary));
+  decisions.setLearningHooks?.({
+    onWorkStart: (botId) => learning.preemptForForeground(botId),
+    onWorkCompleted: (info) => learning.noteCompletedWorkTurn(info.botId, info),
+  });
 
   /**
    * 「停止此 Bot」统一协调：
@@ -1113,6 +1124,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
    * 成功置 live stopped，失败保留可见 stopping 并抛错（绝不伪装成功）；gate 内另一轮不争用资源。
    */
   async function stopBotWork(bot, botId) {
+    learning.preemptForForeground(botId);
     try { live.setBotControl?.(botId, 'stopping'); } catch { /* live lane 尚未实现时静默跳过 */ }
     try {
       // 先立停止 gate：beginStop 在首个 await 前同步推进进程代次并 arm gate，
@@ -1180,6 +1192,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         replyTo: typeof input?.origin?.replyTo === 'string' ? input.origin.replyTo : null,
       },
     };
+    // 新前台输入到达立即抢占后台静默自学习，让位给主会话响应。
+    learning.preemptForForeground(botId);
     // 离线只持久化，不通过会隐式 resume 的路径；本地停止不等待中心确认。
     if (!centerOnline || turns.isRecoveryPending()) return turns.enqueue(botId, trustedInput);
     return admitBot(botId, () => turns.enqueue(botId, trustedInput));
