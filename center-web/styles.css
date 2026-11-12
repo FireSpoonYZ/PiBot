@@ -1142,3 +1142,90 @@ details > summary {
     flex-shrink: 0;
   }
 }
+
+/* Add-device dialog: pairing code, QR and the private CA */
+.pairing {
+  display: grid;
+  grid-template-columns: minmax(0, 240px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.pairing-qr {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #ffffff;
+  line-height: 0;
+  transition: opacity 0.2s;
+}
+
+.pairing-qr svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.pairing-qr.is-expired {
+  opacity: 0.2;
+  filter: grayscale(1);
+}
+
+.pairing-main {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.pairing-main > p,
+.pairing-main > .action-row {
+  margin: 0;
+}
+
+.pairing label,
+.pairing-ca label {
+  display: grid;
+  gap: 6px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.pairing-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  word-break: break-all;
+  resize: vertical;
+}
+
+.pairing-ca-list {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.pairing-ca-list li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  font-size: 0.85rem;
+}
+
+.pairing-ca-lapsed {
+  color: var(--danger);
+}
+
+@media (max-width: 640px) {
+  .pairing {
+    grid-template-columns: 1fr;
+  }
+
+  .pairing-qr {
+    width: min(260px, 100%);
+    margin-inline: auto;
+  }
+}

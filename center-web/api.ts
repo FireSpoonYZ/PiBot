@@ -5,6 +5,7 @@ import type {
   InstallRequest, Installation, InstallationConfig, LoginRequest, Model, ModelConfig, ModelSelection,
   Operation, OperationRequest, PackageVersion, Provider, ProviderAuthStatus, ProviderAuthFlow, ProviderCheckRequest, ProviderCheckResult, JsonSchema,
   ClientReleaseListResponse, ClientReleaseMetadata, ClientReleasePublishRequest, ClientReleaseRecord,
+  CreatePairingCodeResponse, PairingCaState, PairingCodeState,
   PutBotCapability, PutInstallationConfig, PutInstallationDisplayName, RevisionWrite, SessionInfo, UpdateRequest,
 } from '@e-launcher/center-contract';
 
@@ -187,6 +188,12 @@ export const api = {
   getDeviceRuntimeStatus: (deviceId: string) => request<DeviceRuntimeStatus>(`/api/devices/${id(deviceId)}/runtime-status`),
   renameDevice: (deviceId: string, name: string) => request<Device>(`/api/devices/${id(deviceId)}`, 'PATCH', { name }),
   deleteDevice: (deviceId: string) => request<void>(`/api/devices/${id(deviceId)}`, 'DELETE'),
+  /** With `deviceId` the code re-binds that one existing device; without it, it registers a new one. */
+  createPairingCode: (deviceId?: string) => request<CreatePairingCodeResponse>('/api/pairing-codes', 'POST', deviceId === undefined ? {} : { deviceId }),
+  getPairingCode: (codeId: string) => request<PairingCodeState>(`/api/pairing-codes/${id(codeId)}`),
+  revokePairingCode: (codeId: string) => request<void>(`/api/pairing-codes/${id(codeId)}`, 'DELETE'),
+  getPairingCa: () => request<PairingCaState>('/api/pairing/ca'),
+  putPairingCa: (ca: string | null) => request<PairingCaState>('/api/pairing/ca', 'PUT', { ca }),
   getBotSync: (params?: { epoch?: string; sinceSeq?: number }) => {
     const query = new URLSearchParams();
     if (params?.epoch) query.set('epoch', params.epoch);

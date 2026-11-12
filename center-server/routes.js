@@ -5,6 +5,7 @@ import { assertId } from '../host-core/message-protocol.js';
 import { assertDeviceId, assertDeviceToken } from '../host-core/relay-protocol.js';
 import { registerWebhookRoutes } from './webhooks.js';
 import { registerVaultRoutes } from './vault-routes.js';
+import { registerPairingRoutes } from './pairing.js';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 const required = (value, name) => value ?? fail('NOT_FOUND', `${name} not found`);
@@ -466,6 +467,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   }
   const host = (method, url, handler, bodyLimit) => app.route({ method, url, onRequest: authenticate, handler, ...(bodyLimit !== undefined ? { bodyLimit } : {}) });
   registerWebhookRoutes(app, { store, bridge, route, host, publicUrl, notify: deviceId => notify(deviceId, 'webhook-ready') });
+  registerPairingRoutes(app, { store, bridge, route, notify, publicUrl, deviceRegistration });
   if (vault) registerVaultRoutes(app, { route, host, vault });
   // Learning start carries a transcript snapshot the service bounds at 8 MiB;
   // this route's body limit sits just above it — never a global raise.

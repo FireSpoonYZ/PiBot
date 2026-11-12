@@ -19,6 +19,9 @@ import app.tauri.plugin.Channel
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import com.google.zxing.client.android.Intents
+import com.journeyapps.barcodescanner.ScanIntentResult
+import com.journeyapps.barcodescanner.ScanOptions
 import org.json.JSONObject
 import java.util.ArrayDeque
 import java.util.UUID
@@ -89,6 +92,8 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
     }
     /** pair/repair 同时只允许一个在途（防并发注册）；超时的僵尸任务继续持有直到自然结束。 */
     private val pairInFlight = AtomicBoolean()
+    /** 扫码界面同时只开一个。 */
+    private val scanInFlight = AtomicBoolean()
     /** Bot 屏幕原生覆盖层（懒创建）；只观看/接管已有屏幕，与 Host 事件流无关。 */
     private var screenOverlay: BotScreenOverlay? = null
     /** 系统选图/拍照：同进程序列化在 BotImagePicker 内（单会话）。 */
@@ -238,6 +243,8 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
                 replyOk(invoke, idleScreen())
             }
             "pairCenter" -> pairCenter(invoke, params)
+            "pairCenterWithCode" -> pairCenterWithCode(invoke, params)
+            "scanPairingCode" -> scanPairingCode(invoke)
             "repairCenterBinding" -> repairCenterBinding(invoke)
             "onboardingStatus" -> onboardingStatus(invoke)
             "onboardingAction" -> onboardingAction(invoke, params)
@@ -382,6 +389,16 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
     private fun pairCenter(invoke: Invoke, params: JSONObject) {
         runPairTask(invoke) { bridge ->
             CenterPairing.pair(hostActivity.applicationContext, bridge, params) { !destroyed }
+        }
+    }
+
+    /**
+     * 配对码配对（UI 本地入口）：配对码整串由原生解码，地址/一次性密钥/私有 CA 不经 web；
+     * 兑换后的持久化与连接和 pairCenter 相同。结果同 pairCenter，绝不回传令牌/密钥。
+     */
+    private fun pairCenterWithCode(invoke: Invoke, params: JSONObject) {
+        runPairTask(invoke) { bridge ->
+            CenterPairing.pairWithCode(hostActivity.applicationContext, bridge, params) { !destroyed }
         }
     }
 
@@ -791,6 +808,53 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             is BotImagePicker.Outcome.Cancelled ->
                 replyOk(invoke, objectOf("images" to org.json.JSONArray(), "cancelled" to true))
             is BotImagePicker.Outcome.Failed -> replyInvalid(invoke, outcome.code, outcome.message)
+        }
+    }
+
+    // ---------- 扫码配对（UI 本地动作，不经 Host 桥） ----------
+
+    /**
+     * 打开应用内二维码扫描（ZXing，不依赖 Google 服务）。相机权限由扫描界面在首次使用时请求；
+     * 用户拒绝时回执 CAMERA_DENIED，界面退回粘贴配对码。只回传扫到的原文：配对码的解析与兑换
+     * 仍在原生配对链（CenterPairing.pairWithCode）里，一次性密钥不经过这里的任何存储。
+     */
+    private fun scanPairingCode(invoke: Invoke) {
+        if (!foregroundUi()) {
+            replyInvalid(invoke, "NOT_FOREGROUND", "仅可在前台扫码")
+            return
+        }
+        if (!scanInFlight.compareAndSet(false, true)) {
+            replyInvalid(invoke, "BUSY", "扫码进行中")
+            return
+        }
+        val intent = ScanOptions()
+            .setCaptureActivity(PairingScanActivity::class.java)
+            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+            .setPrompt("对准中心管理页「添加设备」里的二维码")
+            .setBeepEnabled(false)
+            .setOrientationLocked(false)
+            .setBarcodeImageEnabled(false)
+            .createScanIntent(hostActivity)
+        try {
+            startActivityForResult(invoke, intent, "onScanPairingCodeResult")
+        } catch (t: Throwable) {
+            scanInFlight.set(false)
+            replyInvalid(invoke, "NOT_AVAILABLE", "无法打开扫码界面")
+        }
+    }
+
+    /** 扫码界面 result：取到内容回 {text}；相机权限被拒回 CAMERA_DENIED；其余（返回键/取消）回 {cancelled}。 */
+    @ActivityCallback
+    private fun onScanPairingCodeResult(invoke: Invoke, result: ActivityResult) {
+        scanInFlight.set(false)
+        onMain(invoke) {
+            val contents = ScanIntentResult.parseActivityResult(result.resultCode, result.data).contents
+            when {
+                !contents.isNullOrEmpty() -> replyOk(invoke, objectOf("text" to contents))
+                result.data?.getBooleanExtra(Intents.Scan.MISSING_CAMERA_PERMISSION, false) == true ->
+                    replyInvalid(invoke, "CAMERA_DENIED", "没有相机权限。请在系统设置里允许相机，或直接粘贴配对码")
+                else -> replyOk(invoke, objectOf("cancelled" to true))
+            }
         }
     }
 

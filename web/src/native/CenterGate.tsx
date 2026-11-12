@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { BotHost, openCenterUrl, type PairCenterResult } from './index';
-import { mobileClientRequest, pairCenter, repairCenterBinding } from './tauri-host';
+import { mobileClientRequest, pairCenter, pairCenterWithCode, repairCenterBinding } from './tauri-host';
 
 export type SavedConnection = { url: string; deviceId: string; ca: string };
 export type CenterStatus = { state: 'disconnected' | 'connecting' | 'ready'; centerUrl: string; clientId?: string; savedConnection?: SavedConnection; savedConnectionError?: string; brokerGeneration?: number; error?: { code?: string; message?: string } | string | null };
@@ -39,6 +39,9 @@ export interface CenterConnectionContextValue {
   /** C7 首启配对：owner 密码换设备绑定；成功返回 PairCenterResult（被更新操作取代时 undefined）。
       失败置 error 并重新抛出原始错误，调用方可按 error.code 区分 ALREADY_CONFIGURED 等可恢复原因。 */
   pair: (password: string, options?: { displayName?: string; force?: boolean }) => Promise<PairCenterResult | undefined>;
+  /** 配对码配对（扫码或粘贴）：整串配对码交给原生，成功返回 PairCenterResult（被更新操作取代时 undefined）。
+      失败重新抛出原始错误（带 code 与可操作的 message），由调用方的表单展示，不写入通用 error。 */
+  pairWithCode: (code: string, options?: { displayName?: string; force?: boolean }) => Promise<PairCenterResult | undefined>;
   /** C7 失败恢复：用本机已存凭据重试本机绑定/连接（无密码、不注册新设备）；语义与 pair 相同。 */
   repair: () => Promise<PairCenterResult | undefined>;
   disconnect: () => void;
@@ -67,6 +70,7 @@ const defaultCenterContext: CenterConnectionContextValue = {
   setError: () => {},
   connect: async () => {},
   pair: async () => undefined,
+  pairWithCode: async () => undefined,
   repair: async () => undefined,
   disconnect: () => {},
   openManagement: () => {},
@@ -265,6 +269,26 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
     }
   };
 
+  // 配对码配对：地址、一次性密钥与私有 CA 都在码里，由原生解码并兑换。失败不写通用 error：
+  // 通用归类见到“证书”二字会换成泛泛的“在设置里填写 CA”，把真正的处理办法盖住，所以由调用方的表单自己展示。
+  const pairWithCode = async (code: string, options?: { displayName?: string; force?: boolean }): Promise<PairCenterResult | undefined> => {
+    const issued = ++epoch.current;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await pairCenterWithCode({
+        code,
+        ...(options?.displayName ? { displayName: options.displayName } : {}),
+        ...(options?.force ? { force: true } : {}),
+      });
+      if (issued !== epoch.current) return undefined;
+      await adoptPairResult(result, issued);
+      return result;
+    } finally {
+      if (issued === epoch.current) setBusy(false);
+    }
+  };
+
   // pair/repair 共用的结果回填：只写身份与既有 localStorage 键，并立即读一次真实 status；
   // connectionRequested 非就绪，连接建立仍交给既有轮询与状态效果处理。
   const adoptPairResult = async (result: PairCenterResult, issued: number) => {
@@ -351,6 +375,7 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
     setError,
     connect,
     pair,
+    pairWithCode,
     repair,
     disconnect,
     openManagement,

@@ -58,6 +58,17 @@ export interface HostPairResult {
   storeError?: { code?: string; message?: string };
   /** 强制重新配对后重启 Host 失败时由 Rust 附带。 */
   restartError?: { code: string; message: string };
+  /** 客户端连接中心应信任的私有 CA（公开证书，无则为空串）；配对码自带它，前端无法自己得知。 */
+  centerCa?: string;
+}
+
+/** `desktop_host_connect_local`：已把本机 Host 的身份存为客户端凭据（令牌始终不出 Rust）。 */
+export interface HostLocalConnectResult {
+  centerUrl: string;
+  deviceId: string;
+  centerCa?: string;
+  clientCredentialsSaved?: boolean;
+  storeError?: { code?: string; message?: string };
 }
 
 export interface HostAdoptResult {
@@ -100,6 +111,17 @@ export const hostPair = (input: HostPairInput) =>
     force: Boolean(input.force),
   });
 
+/** 用中心管理页签发的一次性配对码配对：地址、密钥与私有 CA 都在码里，前端只传整串文本。 */
+export const hostPairCode = (input: { code: string; displayName?: string; force?: boolean }) =>
+  invoke<HostPairResult>('desktop_host_pair_code', {
+    code: input.code,
+    displayName: input.displayName || null,
+    force: Boolean(input.force),
+  });
+
+/** 已配对的本机 Host 把自己的身份交给客户端，客户端无需再输入任何内容即可连接。 */
+export const hostConnectLocal = () => invoke<HostLocalConnectResult>('desktop_host_connect_local');
+
 export const hostAdopt = (input: HostAdoptInput) =>
   invoke<HostAdoptResult>('desktop_host_adopt', {
     centerUrl: input.centerUrl,
@@ -121,7 +143,8 @@ export const hostWarningText = (warning: HostWarning): string => {
 export const hostErrorCode = (error: unknown): string =>
   typeof error === 'object' && error !== null && 'code' in error ? String((error as { code: unknown }).code) : '';
 
-const rawMessage = (error: unknown): string => {
+/** 启动器/原生命令错误的原始信息（`{code, message}` 对象、Error 或字符串），用于“详情”。 */
+export const rawMessage = (error: unknown): string => {
   if (error instanceof Error) return error.message;
   if (typeof error === 'object' && error !== null && 'message' in error) return String((error as { message: unknown }).message);
   return String(error);
@@ -136,8 +159,41 @@ export function hostErrorText(error: unknown, t: Translate): string {
       return t('所有者密码不正确', 'Incorrect owner password');
     case 'CENTER_UNREACHABLE':
       return t('无法连接中心', 'Cannot reach the center');
+    case 'CENTER_CERT_UNTRUSTED':
+      return t(
+        '能连上中心，但本机不信任它的证书。中心使用自签或私有 CA 时，请所有者在管理页「添加设备」窗口展开「私有 CA 证书」保存中心的 CA，再重新生成配对码；用所有者密码配对时，在「本机名称与证书」里填写 CA。',
+        'The center answered, but this computer does not trust its certificate. If the center uses a self-signed or private CA, the owner should save that CA under “Private CA certificate” in the center’s “Add device” window and generate a new pairing code; when pairing with the owner password, enter the CA under “Computer name and certificate”.',
+      );
     case 'ALREADY_CONFIGURED':
       return t('本机已配对过中心', 'This computer is already paired with a center');
+    case 'NOT_A_PAIRING_CODE':
+      return t('这不是配对码。请在中心管理页的“设备与 Bot”点击“添加设备”获取。', 'That is not a pairing code. Get one from “Add device” on the center’s Devices page.');
+    case 'INVALID_PAIRING_CODE':
+      return t('配对码不完整或已损坏，请重新复制完整的配对码。', 'The pairing code is incomplete or damaged. Copy the whole code again.');
+    case 'UNSUPPORTED_PAIRING_CODE':
+      return t('此配对码来自更新版本的中心，请先更新 PiBot。', 'This pairing code comes from a newer center. Update PiBot first.');
+    case 'PAIRING_CODE_INVALID':
+      return t('配对码无效，请在中心重新生成。', 'The pairing code is not valid. Generate a new one on the center.');
+    case 'PAIRING_CODE_USED':
+      return t('配对码已被使用，请在中心重新生成。', 'The pairing code has already been used. Generate a new one on the center.');
+    case 'PAIRING_CODE_EXPIRED':
+      return t('配对码已过期（10 分钟有效），请在中心重新生成。', 'The pairing code has expired (it is valid for 10 minutes). Generate a new one on the center.');
+    case 'PAIRING_CODE_REVOKED':
+      return t(
+        '配对码已作废：中心的“添加设备”窗口被关闭了。复制配对码后请保持该窗口打开，直到配对完成；需要的话重新生成一个。',
+        'The pairing code was voided because the “Add device” window on the center was closed. Keep that window open until pairing finishes, and generate a new code if needed.',
+      );
+    case 'DEVICE_ALREADY_REGISTERED':
+      return t(
+        '中心上已有这台电脑的设备记录，新配对码不能顶替它。若本机仍保存着凭据，请用“用本机身份连接”；否则请所有者在中心“设备与 Bot”里点该设备的“重新配对”，并使用生成的专属配对码。',
+        'The center already has a record for this computer, and a new pairing code cannot replace it. If this computer still holds its credentials, use “Connect with this computer’s identity”; otherwise the owner should click “Re-pair” on that device in the center and use the code it generates.',
+      );
+    case 'PAIRING_CODE_DEVICE_MISMATCH':
+      return t('这个配对码是为另一台设备生成的，不能用于本机。请在中心为本机重新生成。', 'This pairing code was issued for a different device and cannot be used here. Generate one for this computer on the center.');
+    case 'CENTER_UNSUPPORTED':
+      return t('该中心版本尚不支持配对码，请升级中心，或展开“其他连接方式”使用所有者密码配对。', 'This center does not support pairing codes yet. Upgrade the center, or use the owner password under “Other ways to connect”.');
+    case 'RATE_LIMITED':
+      return t('尝试次数过多，请稍等一分钟再试。', 'Too many attempts. Wait a minute and try again.');
     case 'DEVICE_ID_MISMATCH':
       return t('设备身份与本机 Host 不匹配，请核对设备 ID 或重新配对', 'The device identity does not match this computer\u2019s paired Host — check the device ID or re-pair');
     case 'NOT_CONFIGURED':

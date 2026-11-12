@@ -198,3 +198,21 @@
 .gate-shower-result { margin: 0; font-size: 12.5px; }
 .gate-shower-result.ok { color: var(--ok, var(--accent)); }
 .gate-shower-result.error { color: var(--danger); }
+
+/* 配对码输入框：一长串 base64，等宽、任意位置换行，粘贴后一眼能看出整串都在。 */
+.gate-code {
+  width: 100%;
+  resize: vertical;
+  min-height: 72px;
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-family: var(--mono, ui-monospace, Consolas, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.gate-hint.gate-hint-warn { color: var(--danger); }
+
+/* 已配对的本机 Host：一个主按钮加一行说明，位于配对码输入框之上。 */
+.gate-local { display: flex; flex-direction: column; gap: 8px; }
