@@ -232,10 +232,9 @@ desktop or reads the physical one:
   `install`/`enable`/`disable`/`remove` may complete through a controlled
   `runas` elevation: a declined UAC returns `AUTHORIZATION_CANCELLED`, the wrong
   account `INSTALL_USER_MISMATCH`, a standard user `ADMIN_ACCOUNT_REQUIRED`, and
-  a user-writable install directory `INSTALLATION_NOT_PROTECTED` — installing is
-  therefore an administrator action into a protected directory such as Program
-  Files, and a standard user cannot satisfy it with someone else's admin
-  credentials. Results are one JSON line on the last stdout line —
+  a missing bundled launcher/runtime `LAUNCHER_NOT_FOUND` — a standard user
+  cannot satisfy it with someone else's admin credentials. Results are one JSON
+  line on the last stdout line —
   `{installed,autostart}` for status/enable/disable/install, `{status:'started'}`
   for start — with errors as `{error:{code,message}}` and a non-zero exit. The
   launcher registers the task at install/pair time but only enables and starts it

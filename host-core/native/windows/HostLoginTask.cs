@@ -5,7 +5,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Threading;
 using Microsoft.Win32;
@@ -15,8 +14,7 @@ namespace ELauncher.Shower
     /// <summary>
     /// 每用户 Host 登录计划任务 "ELauncherHost-<userSid>" 的安装与日常控制。
     /// 任务的 action 固定为同安装目录的 pibot-host.exe run（绝不接受外部传入的
-    /// exe/参数），只允许管理员保护目录内的二进制；安装/启停/删除只作用于本交互会话
-    /// 用户自己的任务，管理员代装给别的用户一律拒绝。
+    /// exe/参数）；安装/启停/删除只作用于本交互会话用户自己的任务，管理员代装给别的用户一律拒绝。
     ///
     /// 自启动开关落在登录 trigger 的 Enabled 上，任务本体 Enabled 恒为 true：
     /// 用户关闭登录自启动后仍可用 start 手动 Run。任务 ACL 只给所属用户读/运行；
@@ -39,7 +37,6 @@ namespace ELauncher.Shower
         private const string ErrCancelled = "AUTHORIZATION_CANCELLED";
         private const string ErrUserMismatch = "INSTALL_USER_MISMATCH";
         private const string ErrAdminRequired = "ADMIN_ACCOUNT_REQUIRED";
-        private const string ErrNotProtected = "INSTALLATION_NOT_PROTECTED";
         private const string ErrTaskMissing = "TASK_NOT_INSTALLED";
         private const string ErrLauncherMissing = "LAUNCHER_NOT_FOUND";
         private const string ErrSessionUnknown = "SESSION_USER_UNKNOWN";
@@ -66,7 +63,6 @@ namespace ELauncher.Shower
             {
                 case ErrUserMismatch: return 10;
                 case ErrAdminRequired: return 11;
-                case ErrNotProtected: return 12;
                 case ErrTaskMissing: return 13;
                 case ErrLauncherMissing: return 14;
                 case ErrSessionUnknown: return 15;
@@ -82,7 +78,6 @@ namespace ELauncher.Shower
             {
                 case 10: return ErrUserMismatch;
                 case 11: return ErrAdminRequired;
-                case 12: return ErrNotProtected;
                 case 13: return ErrTaskMissing;
                 case 14: return ErrLauncherMissing;
                 case 15: return ErrSessionUnknown;
@@ -98,7 +93,6 @@ namespace ELauncher.Shower
             {
                 case 10: return "提权账号与当前交互登录用户不一致，拒绝操作";
                 case 11: return "需要本机管理员账号完成该操作";
-                case 12: return "安装目录/二进制允许普通用户写入，拒绝登记高权限任务";
                 case 13: return "Host 登录任务尚未安装";
                 case 14: return "找不到固定 launcher 二进制";
                 case 15: return "无法确定当前交互登录用户";
@@ -236,7 +230,7 @@ namespace ELauncher.Shower
         private static Dictionary<string, object> Install(string sessionSid)
         {
             string installDir;
-            string launcher = ResolveProtectedLauncher(out installDir);
+            string launcher = ResolveInstallLauncher(out installDir);
             string taskName = TaskName(sessionSid);
             bool desired = false;
             RunStaThread(delegate
@@ -289,7 +283,7 @@ namespace ELauncher.Shower
                         return;
                     }
                     string installDir;
-                    string launcher = ResolveProtectedLauncher(out installDir);
+                    string launcher = ResolveInstallLauncher(out installDir);
                     RegisterDefinition(service, folder, taskName, launcher, installDir, sessionSid, enabled);
                     installed = true;
                 }
@@ -724,7 +718,7 @@ namespace ELauncher.Shower
 
         /// <summary>
         /// 固定布局推导：native/shower-windows.exe → host-runtime → 安装目录；
-        /// launcher 一律为 &lt;installDir&gt;/pibot-host.exe（仅推导路径，不做保护校验）。
+        /// launcher 一律为 &lt;installDir&gt;/pibot-host.exe。
         /// </summary>
         private static string ResolveLauncherPath(out string installDir)
         {
@@ -735,16 +729,15 @@ namespace ELauncher.Shower
             if (string.IsNullOrEmpty(installDir)
                 || !string.Equals(Path.GetFileName(runtimeDir), RuntimeDirName, StringComparison.OrdinalIgnoreCase))
             {
-                throw new TaskFault(ErrNotProtected, "helper 不在受保护的安装布局内: " + self);
+                throw new TaskFault(ErrLauncherMissing, "helper 不在固定安装布局内: " + self);
             }
             return Path.Combine(installDir, LauncherExeName);
         }
 
-        /// <summary>登记任务用的完整保护校验：目录属主/ACL 与全部相关二进制均须防普通用户写。</summary>
-        private static string ResolveProtectedLauncher(out string installDir)
+        /// <summary>登记任务前核对固定安装布局与必需二进制存在。</summary>
+        private static string ResolveInstallLauncher(out string installDir)
         {
             string launcher = ResolveLauncherPath(out installDir);
-            string self = Process.GetCurrentProcess().MainModule.FileName;
             if (!File.Exists(launcher))
             {
                 throw new TaskFault(ErrLauncherMissing, "找不到固定 launcher: " + launcher);
@@ -752,119 +745,9 @@ namespace ELauncher.Shower
             string node = Path.Combine(installDir, NodeExeName);
             if (!File.Exists(node))
             {
-                throw new TaskFault(ErrNotProtected, "安装文件缺失: " + node);
+                throw new TaskFault(ErrLauncherMissing, "安装文件缺失: " + node);
             }
-            RequireProtectedDir(installDir);
-            string parent = Path.GetDirectoryName(installDir);
-            if (!string.IsNullOrEmpty(parent) && Directory.Exists(parent))
-            {
-                RequireProtectedDir(parent);
-            }
-            RequireProtectedDir(Path.Combine(installDir, RuntimeDirName));
-            RequireProtectedDir(Path.GetDirectoryName(self));
-            RequireProtectedFile(launcher);
-            RequireProtectedFile(node);
-            RequireProtectedFile(self);
             return launcher;
-        }
-
-        /// <summary>
-        /// 目录属主必须是管理员/SYSTEM/安装服务，且 DACL 不得把写权限交给普通身份
-        /// （Everyone/Users/INTERACTIVE/认证用户或任意普通用户/组）；null DACL 视为不保护。
-        /// mask 只含原子写/删/权限位，读/执行/同步位不计——Users 组的只读执行是合法配置。
-        /// </summary>
-        private static void RequireProtectedDir(string dir)
-        {
-            DirectorySecurity security;
-            try
-            {
-                security = Directory.GetAccessControl(dir);
-            }
-            catch (Exception ex)
-            {
-                throw new TaskFault(ErrNotProtected, "无法读取安装目录权限: " + ex.Message);
-            }
-            if (!IsProtectedAcl(security))
-            {
-                throw new TaskFault(ErrNotProtected, "安装目录允许普通用户写入: " + dir);
-            }
-        }
-
-        private static void RequireProtectedFile(string file)
-        {
-            FileSecurity security;
-            try
-            {
-                security = File.GetAccessControl(file);
-            }
-            catch (Exception ex)
-            {
-                throw new TaskFault(ErrNotProtected, "无法读取二进制权限: " + ex.Message);
-            }
-            if (!IsProtectedAcl(security))
-            {
-                throw new TaskFault(ErrNotProtected, "二进制允许普通用户写入: " + file);
-            }
-        }
-
-        private static bool IsProtectedAcl(FileSystemSecurity security)
-        {
-            SecurityIdentifier owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
-            if (owner == null || !IsAdministrativeSid(owner))
-            {
-                return false;
-            }
-            // 只取原子写/删/权限位；FullControl/Modify/Write 复合位含读权限会误伤正常只读授权。
-            const FileSystemRights writeMask =
-                FileSystemRights.WriteData | FileSystemRights.AppendData |
-                FileSystemRights.WriteExtendedAttributes | FileSystemRights.WriteAttributes |
-                FileSystemRights.DeleteSubdirectoriesAndFiles | FileSystemRights.Delete |
-                FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
-            int allowRules = 0;
-            AuthorizationRuleCollection rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier));
-            foreach (AuthorizationRule rule in rules)
-            {
-                FileSystemAccessRule access = rule as FileSystemAccessRule;
-                if (access == null || access.AccessControlType != AccessControlType.Allow)
-                {
-                    continue;
-                }
-                allowRules++;
-                SecurityIdentifier identity = access.IdentityReference as SecurityIdentifier;
-                if (identity == null || IsAdministrativeSid(identity) || IsScopedSid(identity))
-                {
-                    continue;
-                }
-                if ((access.FileSystemRights & writeMask) != 0)
-                {
-                    return false;
-                }
-            }
-            return allowRules > 0;
-        }
-
-        /// <summary>SID 属于系统/管理员/服务身份：写权限交给它们不构成普通用户篡改面。</summary>
-        private static bool IsAdministrativeSid(SecurityIdentifier sid)
-        {
-            if (sid.IsWellKnown(WellKnownSidType.LocalSystemSid)
-                || sid.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid)
-                || sid.IsWellKnown(WellKnownSidType.LocalServiceSid)
-                || sid.IsWellKnown(WellKnownSidType.NetworkServiceSid))
-            {
-                return true;
-            }
-            string value = sid.Value;
-            // NT SERVICE\*（含 TrustedInstaller）服务 SID 不是交互用户主体。
-            return value != null && value.StartsWith("S-1-5-80-", StringComparison.OrdinalIgnoreCase);
-        }
-
-        /// <summary>CREATOR OWNER/OWNER RIGHTS/SELF 这类作用域伪 SID 不代表宽泛授权。</summary>
-        private static bool IsScopedSid(SecurityIdentifier sid)
-        {
-            return sid.IsWellKnown(WellKnownSidType.CreatorOwnerSid)
-                || sid.IsWellKnown(WellKnownSidType.CreatorGroupSid)
-                || sid.IsWellKnown(WellKnownSidType.SelfSid)
-                || string.Equals(sid.Value, "S-1-3-4", StringComparison.Ordinal);
         }
 
         // ------------------------------------------------------------------ legacy / pairing state

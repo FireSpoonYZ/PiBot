@@ -1,6 +1,6 @@
 !include "${__FILEDIR__}\..\build\icons\shell-icon.nsh"
 
-; Host 登录任务化安装：perMachine 安装到受保护目录，普通权限客户端保持不变。
+; Host 登录任务化安装：perMachine 安装（默认 Program Files，可自定义安装目录），普通权限客户端保持不变。
 ; 绑定数据仍在 %LOCALAPPDATA%\e-launcher\host-service（用户目录，不在安装目录）。
 
 Var /GLOBAL EHostAppData
@@ -83,41 +83,6 @@ Var /GLOBAL EOldInstallDir
     ${EndIf}
   ${EndIf}
 !macroend
-
-; perMachine（提权）安装不允许把安装目录选回用户可写目录；否则 Host 登录任务会
-; 拒绝把该路径登记为 Highest 级别 action。普通权限安装不强制（非 perMachine）。
-; hooks 在 INSTALLMODE 定义之前被 include，这里用运行时是否提权区分安装模式。
-Function .onVerifyInstDir
-  System::Call 'shell32::IsUserAnAdmin() i .R9'
-  ${If} $R9 == 1
-    Push $R0
-    Push $R1
-    Push $R2
-    StrCpy $R2 "0"
-    StrLen $R0 "$PROGRAMFILES64\"
-    StrCpy $R1 $INSTDIR $R0
-    ${If} $R1 == "$PROGRAMFILES64\"
-      StrCpy $R2 "1"
-    ${EndIf}
-    StrLen $R0 "$PROGRAMFILES32\"
-    StrCpy $R1 $INSTDIR $R0
-    ${If} $R1 == "$PROGRAMFILES32\"
-      StrCpy $R2 "1"
-    ${EndIf}
-    StrLen $R0 "$PROGRAMFILES\"
-    StrCpy $R1 $INSTDIR $R0
-    ${If} $R1 == "$PROGRAMFILES\"
-      StrCpy $R2 "1"
-    ${EndIf}
-    ${If} $R2 == "0"
-      MessageBox MB_ICONSTOP "安装目录必须位于 Program Files 内，不能选择用户可写目录。"
-      Abort
-    ${EndIf}
-    Pop $R2
-    Pop $R1
-    Pop $R0
-  ${EndIf}
-FunctionEnd
 
 !macro NSIS_HOOK_PREINSTALL
   Delete "$INSTDIR\icons\shell-icon-*.ico"
