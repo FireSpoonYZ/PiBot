@@ -9,7 +9,14 @@ import { BotSessionState } from './bot-session-context.js';
 import { GenerationFailureState } from './generation-failure.js';
 import { normalizeBotBoardParams } from './bot-board-protocol.js';
 import { readBotBoardDetails, projectBotBoardItem } from './runtime-bot-board.js';
-import { emptyLiveState, projectLiveState, diffLiveState } from './runtime-live-projection.js';
+import {
+  emptyLiveState,
+  projectLiveState,
+  diffLiveState,
+  projectInboxQueuedItems,
+  buildQueuedPreview,
+  MAX_QUEUED_ITEMS,
+} from './runtime-live-projection.js';
 
 const CTX = BACKGROUND_CONTEXT;
 
@@ -76,19 +83,69 @@ function normalizeTurnAdmission(status) {
   return normalized;
 }
 
+function normalizeQueuedTurnItems(items) {
+  if (items === undefined || items === null) return [];
+  if (!Array.isArray(items)) {
+    throw errWithCode('queuedItems must be an array', 'INVALID_ARGUMENT');
+  }
+  const out = [];
+  const seen = new Set();
+  for (const item of items) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw errWithCode('queuedItem must be an object', 'INVALID_ARGUMENT');
+    }
+    if (
+      typeof item.requestId !== 'string' ||
+      item.requestId.trim() === '' ||
+      !item.requestId.isWellFormed() ||
+      /\s/.test(item.requestId)
+    ) {
+      throw errWithCode('queuedItem requestId must be a non-empty well-formed id', 'INVALID_ARGUMENT');
+    }
+    const requestId = boundText(item.requestId, MAX_TURN_REQUEST_ID_CHARS);
+    if (seen.has(requestId)) continue;
+    seen.add(requestId);
+    const delivery = item.delivery === 'steer' ? 'steer' : 'followUp';
+    const preview = buildQueuedPreview(typeof item.preview === 'string' ? item.preview : '');
+    const attachmentCount = Number.isSafeInteger(item.attachmentCount) && item.attachmentCount > 0
+      ? Math.min(16, item.attachmentCount)
+      : 0;
+    out.push({ requestId, delivery, preview, attachmentCount });
+    if (out.length >= MAX_QUEUED_ITEMS) break;
+  }
+  return out;
+}
+
+function mergeQueuedItems(inboxItems, hostItems) {
+  const steer = [];
+  const followUp = [];
+  const seen = new Set();
+  for (const list of [inboxItems, hostItems]) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      if (!item || seen.has(item.requestId)) continue;
+      seen.add(item.requestId);
+      if (item.delivery === 'steer') steer.push(item);
+      else followUp.push(item);
+    }
+  }
+  return [...steer, ...followUp].slice(0, MAX_QUEUED_ITEMS);
+}
+
 /**
  * Merge the Host-side turn admission into a projected state for a primary
  * watch. queuedCount = pi.inbox items (projected) + Host-queued inputs, which
  * are disjoint sets — an input leaves the Host queue the moment it is
  * submitted to the SDK, so the sum never double counts.
  */
-function withTurnAdmission(projected, admission) {
-  // turnAdmission 恒写入（null 表示无等待项）：字段缺失时 diff 帧序列化会丢键，
-  // 已发布的 admission 无法被清除。
+function withTurnAdmission(projected, admission, inboxQueuedItems = []) {
+  // turnAdmission 与 queuedItems 恒写入（null / [] 表示无等待项）：字段缺失时 diff 帧序列化会丢键，
+  // 已发布的 admission / 排队摘要无法被清除。
   return {
     ...projected,
     turnAdmission: admission?.status ?? null,
     queuedCount: projected.queuedCount + (admission?.hostQueued ?? 0),
+    queuedItems: mergeQueuedItems(inboxQueuedItems, admission?.queuedItems ?? []),
   };
 }
 
@@ -285,10 +342,11 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       // 未并入 admission 的 pi.inbox 计数基线：admission 重算 queuedCount 时以此为底，
       // 避免把已并入的 hostQueued 再累加一遍。
       inboxQueued: 0,
+      inboxQueuedItems: [],
       current: deepFreeze(
         work ? emptyLiveState()
           : withBotActivity(
-            withTurnAdmission(emptyLiveState(), admissionByBot.get(botId) ?? null),
+            withTurnAdmission(emptyLiveState(), admissionByBot.get(botId) ?? null, []),
             botId, null, activityCtx,
           ),
       ),
@@ -511,6 +569,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
         next = projectLiveState(view, state.sessionState, extras);
         state.inboxQueued = next.queuedCount;
         if (!work) {
+          state.inboxQueuedItems = projectInboxQueuedItems(view?.docs?.['pi.inbox'] ?? null);
           // 保留最近一次投影的 activity 及其来源标记（hasRun/isFailure）：
           // running/真实运行的 compacting/真实 failed/空闲手动压缩均缓存，
           // 供 resolveBotActivity 按新优先级裁决（运行>压缩>失败>…）。
@@ -527,7 +586,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
             clearStoppedOnWork(activityCtx, botId);
           }
           next = withBotActivity(
-            withTurnAdmission(next, admissionByBot.get(botId) ?? null),
+            withTurnAdmission(next, admissionByBot.get(botId) ?? null, state.inboxQueuedItems),
             botId, state.runActivity, activityCtx,
           );
         }
@@ -569,6 +628,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
         await native.stop();
         return;
       }
+      const attachedNative = native;
       state.native = native;
       state.kind = 'attached';
       const key = work ? workKey(botId, work.scopeId) : botId;
@@ -603,7 +663,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
         return;
       }
       native.closed.then((nativeEnd) => {
-        if (state.endReason !== null) return;
+        if (state.endReason !== null || state.native !== attachedNative) return;
         // 新 WatchEnd.kind 映射回宿主既有 reason 词汇：control-live 的 END_REASONS 不变，
         // failed→session_failed、aborted→cancelled；stopped/ended/listener_error 原名透传。
         const kind = nativeEnd.kind;
@@ -626,9 +686,13 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     function applyAdmission(targetBotId) {
       if (work || targetBotId !== botId || state.endReason !== null) return;
       const previous = state.current;
-      // 以 inboxQueued 为底重算：previous.queuedCount 已含上一次并入的 hostQueued。
+      // 以 inboxQueued / inboxQueuedItems 为底重算：previous 已含上一次并入的 Host 排队项。
       const next = deepFreeze(withBotActivity(
-        withTurnAdmission({ ...previous, queuedCount: state.inboxQueued }, admissionByBot.get(botId) ?? null),
+        withTurnAdmission(
+          { ...previous, queuedCount: state.inboxQueued },
+          admissionByBot.get(botId) ?? null,
+          state.inboxQueuedItems,
+        ),
         botId, state.runActivity, activityCtx,
       ));
       if (diffLiveState(previous, next) !== null) {
@@ -638,6 +702,33 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
           state.dirty = true;
           kick();
         }
+      }
+    }
+
+    // 历史消息编辑分叉出新原生会话时，原地重绑已有 primary watch：
+    // 公开 conversationId 与单调 seq 不变，停止旧底层 watch 后立即附着新会话。
+    async function rebindWatch(targetBotId, conversation) {
+      if (work || board || targetBotId !== botId || state.endReason !== null) return;
+      while (state.attachPromise !== null || state.attributionLoad !== null) {
+        await (state.attachPromise ?? state.attributionLoad);
+      }
+      if (state.endReason !== null) return;
+      const previousNative = state.native;
+      state.native = null;
+      state.nativeId = null;
+      state.pendingView = null;
+      state.sessionState = null;
+      state.runActivity = null;
+      state.inboxQueued = 0;
+      state.inboxQueuedItems = [];
+      state.kind = 'pending';
+      if (previousNative) {
+        await previousNative.stop().catch(() => {});
+      }
+      if (state.endReason !== null) return;
+      await attach(conversation);
+      while (state.attachPromise !== null || state.attributionLoad !== null) {
+        await (state.attachPromise ?? state.attributionLoad);
       }
     }
 
@@ -673,6 +764,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       _readBoard: readBoard,
       _applyAdmission: applyAdmission,
       _applyActivity: applyActivity,
+      _rebind: rebindWatch,
       get value() {
         return {
           type: 'snapshot',
@@ -710,6 +802,15 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     for (const w of [...pending]) {
       await w.attach(conversation);
     }
+  }
+
+  function rebind(botId, conversation) {
+    return track((async () => {
+      assertNonBlank(botId, 'botId');
+      for (const w of [...watches]) {
+        await w._rebind(botId, conversation);
+      }
+    })());
   }
 
   // 提交成功后（事务外）附着等待中的 work watch；观察失败只停止受影响 watch，不影响导入。
@@ -837,16 +938,17 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
    * to the SDK; projection adds pi.inbox items itself, so they never double count.
    * The status applies to primary watches only — work watches never carry it.
    */
-  function setTurnAdmission(botId, status, hostQueued = 0) {
+  function setTurnAdmission(botId, status, hostQueued = 0, queuedItems = []) {
     assertNonBlank(botId, 'botId');
     if (!Number.isSafeInteger(hostQueued) || hostQueued < 0) {
       throw errWithCode('hostQueued must be a safe nonnegative integer', 'INVALID_ARGUMENT');
     }
     const normalized = normalizeTurnAdmission(status);
-    if (normalized === null && hostQueued === 0) {
+    const normalizedItems = normalizeQueuedTurnItems(queuedItems);
+    if (normalized === null && hostQueued === 0 && normalizedItems.length === 0) {
       admissionByBot.delete(botId);
     } else {
-      admissionByBot.set(botId, { status: normalized, hostQueued });
+      admissionByBot.set(botId, { status: normalized, hostQueued, queuedItems: normalizedItems });
       // 新 Host admission 受理/排队：旧 stopped 不得残留到下次完结。
       clearStoppedOnWork(activityCtx, botId);
     }
@@ -930,5 +1032,5 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     learningByBot.clear();
   }
 
-  return { watch, watchWork, getBotBoard, bind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, setWebhookStopPending, setBotLearning, close };
+  return { watch, watchWork, getBotBoard, bind, rebind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, setWebhookStopPending, setBotLearning, close };
 }

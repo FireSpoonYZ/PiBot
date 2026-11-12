@@ -167,6 +167,10 @@ const CONTROL_V2_METHODS = Object.freeze([
   // 对话命令：/clear 与 /compact 是 additive v2，只接 {botId}。
   'clearHistory',
   'compact',
+  // 流控制与历史编辑：撤回排队消息、将排队项提升为立即打断发送（steer）、编辑历史消息重生成。
+  'withdrawQueued',
+  'steerQueued',
+  'editMessage',
   'scheduleTask',
   // 图片附件：上传与读取是 additive v2；submit 通过 attachments 引用已上传 ID。
   'uploadAttachment',
@@ -386,9 +390,12 @@ function normalizeControlParams(method, params) {
       return { requestId: params.requestId };
     }
     case 'submit': {
-      rejectUnknownFields(params, new Set(['botId', 'requestId', 'text', 'attachments']), 'params');
+      rejectUnknownFields(params, new Set(['botId', 'requestId', 'text', 'attachments', 'delivery']), 'params');
       assertId(params.botId, 'botId');
       assertId(params.requestId, 'requestId');
+      if (params.delivery !== undefined && params.delivery !== 'followUp' && params.delivery !== 'steer') {
+        throw invalid("delivery must be 'followUp' or 'steer'");
+      }
       const attachments = params.attachments === undefined
         ? null
         : normalizeAttachmentIds(params.attachments);
@@ -398,6 +405,46 @@ function normalizeControlParams(method, params) {
         throw invalid('text must be a well-formed string');
       }
       const normalized = { botId: params.botId, requestId: params.requestId, text: params.text };
+      if (attachments !== null) normalized.attachments = attachments;
+      if (params.delivery !== undefined) normalized.delivery = params.delivery;
+      return normalized;
+    }
+    case 'withdrawQueued': {
+      rejectUnknownFields(params, new Set(['botId', 'requestId']), 'params');
+      assertId(params.botId, 'botId');
+      const normalized = { botId: params.botId };
+      if (params.requestId !== undefined && params.requestId !== null) {
+        assertId(params.requestId, 'requestId');
+        normalized.requestId = params.requestId;
+      }
+      return normalized;
+    }
+    case 'steerQueued': {
+      rejectUnknownFields(params, new Set(['botId', 'requestId']), 'params');
+      assertId(params.botId, 'botId');
+      assertId(params.requestId, 'requestId');
+      return { botId: params.botId, requestId: params.requestId };
+    }
+    case 'editMessage': {
+      rejectUnknownFields(params, new Set(['botId', 'entryId', 'requestId', 'text', 'attachments']), 'params');
+      assertId(params.botId, 'botId');
+      if (!Number.isSafeInteger(params.entryId) || params.entryId < 1) {
+        throw invalid('entryId must be a positive safe integer');
+      }
+      assertId(params.requestId, 'requestId');
+      const attachments = params.attachments === undefined
+        ? null
+        : normalizeAttachmentIds(params.attachments);
+      if (attachments === null) assertNonEmptyString(params.text, 'text');
+      else if (typeof params.text !== 'string' || !params.text.isWellFormed()) {
+        throw invalid('text must be a well-formed string');
+      }
+      const normalized = {
+        botId: params.botId,
+        entryId: params.entryId,
+        requestId: params.requestId,
+        text: params.text,
+      };
       if (attachments !== null) normalized.attachments = attachments;
       return normalized;
     }

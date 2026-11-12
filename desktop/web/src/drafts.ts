@@ -12,6 +12,10 @@ import type {
   PendingListPage,
   PendingRecord,
 } from '../../../host-core/index.js';
+import {
+  dedupeAttachmentMetas,
+  mergeWithdrawnIntoDraft,
+} from '../../../web/src/composerFlowControl';
 
 export interface DraftSnapshot {
   text: string;
@@ -84,6 +88,12 @@ export interface DraftWidgetState {
    *  expectedKey 提供原子归属校验：当前 keyRef 不匹配/同 id 已存在/超限（4 张）均拒绝并返回 false。 */
   addAttachment(att: ImageAttachment, expectedKey?: string): boolean;
   removeAttachment(index: number): void;
+  /** 将撤回的排队消息文本与已上传图片原子合并至当前草稿最前（不覆盖未发草稿）。 */
+  mergeRecalled(
+    recalledTexts: readonly string[],
+    recalledAttachments?: readonly ImageAttachment[],
+    expectedKey?: string,
+  ): boolean;
   retrySave(): void;
   /** 同步取得唯一发送锁并冻结完整输入（首 await 前调用），返回实际冻结副本。 */
   beginSend(input: PendingEnqueueInput): { key: string; handle: DraftHandle; attempt: DraftAttempt } | null;
@@ -514,6 +524,38 @@ export function useDrafts(opts: {
       setAttachments(pendingBuf.current.attachments ?? []);
     }
     scheduleAutoSave();
+  }, [scheduleAutoSave]);
+
+  const mergeRecalled = useCallback((
+    recalledTexts: readonly string[],
+    recalledAttachments: readonly ImageAttachment[] = [],
+    expectedKey?: string,
+  ): boolean => {
+    const k = keyRef.current;
+    if (expectedKey !== undefined && k !== expectedKey) return false;
+    const mem = k ? getMem(k) : null;
+    if (mem && mem.attempt) return false;
+    const incomingAtts = recalledAttachments.map((a) => ({ ...a }));
+    if (mem) {
+      const nextText = mergeWithdrawnIntoDraft(mem.text, recalledTexts);
+      const nextAtts = dedupeAttachmentMetas(mem.attachments, incomingAtts);
+      if (nextText === mem.text && nextAtts.length === mem.attachments.length && nextAtts.every((a, i) => a.id === mem.attachments[i]?.id)) {
+        return false;
+      }
+      mem.text = nextText;
+      mem.attachments = nextAtts;
+      setText(nextText);
+      setAttachments(nextAtts);
+    } else {
+      const prev = pendingBuf.current ?? { text: '', files: [], attachments: [] };
+      const nextText = mergeWithdrawnIntoDraft(prev.text, recalledTexts);
+      const nextAtts = dedupeAttachmentMetas(prev.attachments ?? [], incomingAtts);
+      pendingBuf.current = { text: nextText, files: prev.files, attachments: nextAtts };
+      setText(nextText);
+      setAttachments(nextAtts);
+    }
+    scheduleAutoSave();
+    return true;
   }, [scheduleAutoSave]);
 
   const retrySave = useCallback(() => {
@@ -973,6 +1015,7 @@ export function useDrafts(opts: {
     removeFile,
     addAttachment,
     removeAttachment,
+    mergeRecalled,
     retrySave,
     beginSend,
     waitQuiet,

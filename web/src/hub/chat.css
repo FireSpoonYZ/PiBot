@@ -2,3 +2,51 @@
 
 /* Divider above the destructive "clear history" item in the chat top menu. */
 .grok-menu-separator { height: 1px; margin: 4px 6px; background: var(--line); }
+
+/* 历史消息编辑态高亮与后续消息淡出 */
+.bot-chat-bubble.is-editing-target {
+  outline: 1.5px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.bot-chat-bubble.is-editing-after {
+  opacity: 0.45;
+  transition: opacity 160ms ease;
+}
+
+/* 移动端/共享界面用户气泡轻触操作胶囊（复制 / 编辑） */
+.bot-bubble-action-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 6px;
+  padding: 3px 5px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 0.08);
+  animation: grok-pop-up 140ms cubic-bezier(.22, 1, .36, 1) both;
+}
+
+.bot-bubble-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 550;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.bot-bubble-action-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+.bot-bubble-action-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}

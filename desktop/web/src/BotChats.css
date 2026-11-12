@@ -688,6 +688,7 @@
 }
 .bot-composer .composer-input:focus { outline: none; }
 .bot-composer .composer-send,
+.bot-composer .composer-steer,
 .bot-composer .composer-loading,
 .bot-composer .composer-stop {
   flex: none;
@@ -699,6 +700,188 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+.bot-composer .composer-steer {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--accent-strong, var(--accent));
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+.bot-composer .composer-steer svg {
+  width: 14px;
+  height: 14px;
+}
+.bot-composer .composer-steer:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+/* ————— 排队消息条与历史编辑横幅（仅忙碌排队/编辑时出现，空闲态零视觉变化） ————— */
+
+.bot-composer .cf-queue-strip,
+.bot-composer .cf-edit-banner {
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+.bot-composer .cf-edit-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 8px 4px 11px;
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+  background: color-mix(in srgb, var(--accent-soft) 55%, var(--surface));
+}
+.bot-composer .cf-edit-banner-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent-strong, var(--text));
+  font-weight: 550;
+}
+.bot-composer .cf-edit-banner-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+}
+.bot-composer .cf-edit-banner-icon svg {
+  width: 12px;
+  height: 12px;
+}
+.bot-composer .cf-edit-banner-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bot-composer .cf-queue-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: 32px;
+  padding: 3px 6px 3px 10px;
+}
+.bot-composer .cf-queue-expanded-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 136px;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--line-subtle);
+}
+.bot-composer .cf-queue-row.is-subrow + .cf-queue-row.is-subrow {
+  border-top: 1px solid var(--line-subtle);
+}
+.bot-composer .cf-queue-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 24px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  text-align: left;
+  color: var(--text);
+}
+.bot-composer .cf-queue-main:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+}
+.bot-composer .cf-queue-main.is-steer .cf-queue-lead-icon,
+.bot-composer .cf-queue-main.is-steer .cf-queue-tag {
+  color: var(--accent-strong, var(--accent));
+}
+.bot-composer .cf-queue-lead-icon,
+.bot-composer .cf-queue-chevron {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+}
+.bot-composer .cf-queue-lead-icon svg {
+  width: 12px;
+  height: 12px;
+}
+.bot-composer .cf-queue-chevron svg {
+  width: 13px;
+  height: 13px;
+}
+.bot-composer .cf-queue-tag {
+  flex: none;
+  font-weight: 600;
+  color: var(--muted);
+}
+.bot-composer .cf-queue-dot {
+  flex: none;
+  color: var(--muted);
+  opacity: 0.7;
+}
+.bot-composer .cf-queue-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.bot-composer .cf-queue-actions {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.bot-composer .cf-queue-icon-btn {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.bot-composer .cf-queue-icon-btn svg {
+  width: 13px;
+  height: 13px;
+}
+.bot-composer .cf-queue-icon-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--line) 65%, transparent);
+  color: var(--text);
+}
+.bot-composer .cf-queue-icon-btn.is-steer-btn:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent-strong, var(--accent));
+}
+.bot-composer .cf-queue-text-btn {
+  flex: none;
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent-strong, var(--accent));
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.bot-composer .cf-queue-text-btn:hover:not(:disabled) {
+  background: var(--accent-soft);
 }
 .bot-composer .composer-send:disabled {
   background: var(--surface);

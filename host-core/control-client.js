@@ -216,6 +216,15 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     abort(botId, options) {
       return request('POST', ['v1', 'bots', botId, 'abort'], { ...callOptions(options), body: {} });
     },
+    withdrawQueued(botId, input = {}, options) {
+      return request('POST', ['v1', 'bots', botId, 'queue', 'withdraw'], { ...callOptions(options), body: input ?? {} });
+    },
+    steerQueued(botId, input, options) {
+      return request('POST', ['v1', 'bots', botId, 'queue', 'steer'], { ...callOptions(options), body: input });
+    },
+    editMessage(botId, input, options) {
+      return request('POST', ['v1', 'bots', botId, 'history', 'edit'], { ...callOptions(options), body: input });
+    },
     getBotBoard(params, options) {
       return request('POST', ['v1', 'bot-board'], { ...callOptions(options), body: params });
     },

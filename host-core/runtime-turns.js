@@ -4,7 +4,7 @@
 // 任何一步失败都留下可重试的 queued/failed 记录：绝不静默沿用旧 set 执行模型。
 // 恢复：restoreTurns() 在冷启动 resume 之前按持久 pin/admissionId 重挂被钉住的旧版本。
 import { createHash } from 'node:crypto';
-import { ConversationBusy } from '@earendil-works/pi-durable';
+import { ConversationBusy, LiveDoc, InboxDoc } from '@earendil-works/pi-durable';
 import { TurnQueue, TurnPin, toTurnAdmissionStatus, toQueuedReceipt } from './runtime-turns-docs.js';
 import { normalizeAttachmentIds } from './attachments.js';
 import { PrimaryIndex, getPrimaryConversation, applyAgentProfile, RequestKeys } from './runtime-docs.js';
@@ -13,6 +13,8 @@ import { parseModelRef } from './runtime-models.js';
 import { WorkIndex, WorkContextState } from './work-context-docs.js';
 import { WorkDecisionState } from './work-decision-state.js';
 import { clearBotBoardResult } from './runtime-bot-board.js';
+import { BotSessionState, deriveEntryAttribution } from './bot-session-context.js';
+import { buildQueuedPreview, extractUserTextFromContent, MAX_QUEUED_ITEMS } from './runtime-live-projection.js';
 
 const MAX_PREPARE_ATTEMPTS = 3;
 // 每条消息图片解码总字节上限（64MiB）：单张合法（≤16MiB）的图仍需满足本条消息总量限制。
@@ -93,6 +95,7 @@ export function createTurnAdmission(deps) {
         source: 'host',
         requestId: item.requestId,
         botId: item.botId,
+        ...(kind === 'user' ? { userText: item.text } : {}),
         attribution: {
           kind,
           deviceId: host.deviceId,
@@ -120,6 +123,7 @@ export function createTurnAdmission(deps) {
 
   const harness = () => getHarness();
   const pumpInFlight = new Set();   // botId：每会话同时至多一个泵
+  const pumpAgain = new Set();      // botId：泵在飞期间收到新 nudge（如 steer 提升/新轮到达/前轮刚完结），泵尾立即补跑一轮
   const retryTimers = new Map();    // botId -> timer
   const retryAttempts = new Map();  // botId -> n（失败退避计数，成功清空）
   const appliedSetIds = new Map();  // botId -> 最近一次已确认/已恢复的完整 setId
@@ -240,7 +244,7 @@ export function createTurnAdmission(deps) {
           if (doc.stopPending !== true) live?.setBotControl?.(bot.botId, 'stopped');
         }
         const items = doc?.items ?? [];
-        publishStatus(bot.botId, headItem(items), items.filter((item) => item.phase !== 'cancelled').length);
+        publishQueue(bot.botId, items);
       }
       if (doc?.stopPending === true) {
         stopArmed.add(bot.botId);
@@ -251,10 +255,27 @@ export function createTurnAdmission(deps) {
     return bots;
   }
 
-  function publishStatus(botId, item, queuedCount) {
+  function toHostQueuedItems(items) {
+    const aliveUsers = items.filter((entry) => entry.phase !== 'cancelled' && entry.origin?.sender?.kind === 'user');
+    const steer = aliveUsers.filter((entry) => entry.delivery === 'steer');
+    const followUp = aliveUsers.filter((entry) => entry.delivery !== 'steer');
+    return [...steer, ...followUp].slice(0, MAX_QUEUED_ITEMS).map((entry) => ({
+      requestId: entry.requestId,
+      delivery: entry.delivery === 'steer' ? 'steer' : 'followUp',
+      preview: buildQueuedPreview(entry.text),
+      attachmentCount: Array.isArray(entry.attachments) ? Math.min(16, entry.attachments.length) : 0,
+    }));
+  }
+
+  function publishQueue(botId, items) {
+    const aliveCount = items.filter((entry) => entry.phase !== 'cancelled').length;
     try {
-      live?.setTurnAdmission?.(botId, toTurnAdmissionStatus(item), queuedCount);
+      live?.setTurnAdmission?.(botId, toTurnAdmissionStatus(headItem(items)), aliveCount, toHostQueuedItems(items));
     } catch { /* live 尚未实现 setTurnAdmission 或已关闭：不阻断准入 */ }
+  }
+
+  async function syncPublishedQueue(bot) {
+    publishQueue(bot.botId, await readQueue(bot.primaryConversationId));
   }
 
   function queueDoc(tx, primaryConversationId) {
@@ -276,7 +297,7 @@ export function createTurnAdmission(deps) {
     const bot = host.getBot(botId);
     const doc = await harness().snapshot(TurnQueue, bot.primaryConversationId, context);
     const items = doc?.items ?? [];
-    publishStatus(botId, headItem(items), items.filter((item) => item.phase !== 'cancelled').length);
+    publishQueue(botId, items);
     if (doc?.stopPending) live.setBotControl(botId, 'stopping');
   }
 
@@ -292,18 +313,21 @@ export function createTurnAdmission(deps) {
       found.updatedAt = new Date().toISOString();
       return { ...found };
     }, context);
-    const remaining = await queuedCount(bot);
-    const head = await liveHead(bot);
-    publishStatus(bot.botId, head, remaining);
+    await syncPublishedQueue(bot);
     return item;
   }
 
   /** 准入 head 选取（liveHead 与 pump 共用）：跳过 cancelled 终态受理记录，
-      各类内 FIFO（enqueuedAt 序），用户来源 head 先于 host 来源——
+      各类内 FIFO（enqueuedAt 序），用户 steer 先于用户 followUp、先于 host 来源——
       直接用户输入优先于计划任务等 Host 来源轮，绝不只取列表第一个。 */
   function headItem(items) {
     const alive = items.filter((entry) => entry.phase !== 'cancelled');
-    return alive.find((entry) => entry.origin?.sender?.kind === 'user') ?? alive[0] ?? null;
+    return (
+      alive.find((entry) => entry.origin?.sender?.kind === 'user' && entry.delivery === 'steer') ??
+      alive.find((entry) => entry.origin?.sender?.kind === 'user') ??
+      alive[0] ??
+      null
+    );
   }
 
   /** 对外可见的准入 head：与泵同一选取函数（用户优先、类内 FIFO）。 */
@@ -472,10 +496,57 @@ export function createTurnAdmission(deps) {
     return bounded;
   }
 
+  /** 判断当前是否可将本机用户主私聊输入以 steer 注入正在运行的用户主私聊轮次：
+      仅当主会话存在活跃 run、无阻塞压缩、无其他映射会话活动且活跃 run 归属为用户主私聊时返回 true。 */
+  async function canSteerActivePrimary(bot) {
+    if (stopped(bot.botId)) return false;
+    const h = harness();
+    const conversation = await getPrimaryConversation(h, bot, {}, context);
+    if (!conversation) return false;
+    const nativeIds = await mappedNativeIds(bot);
+    const otherIds = new Set(nativeIds.filter((id) => id !== conversation.id));
+    if (otherIds.size > 0) {
+      const inspection = await h.inspect(context);
+      if (
+        inspection.submissions.some((s) => otherIds.has(s.conversationId)) ||
+        inspection.tasks.some((t) => otherIds.has(t.record.conversationId))
+      ) {
+        return false;
+      }
+    }
+    const liveDoc = await h.snapshot(LiveDoc, conversation.id, context);
+    if (liveDoc?.run?.taskId == null) return false;
+    if (Array.isArray(liveDoc.compactions) && liveDoc.compactions.some((c) => c?.blocking === true)) return false;
+    const sessionState = await h.snapshot(BotSessionState, conversation.id, context);
+    const taskKey = String(liveDoc.run.taskId);
+    const mappedRequestId = sessionState?.turnByTask?.[taskKey];
+    const activeTurn = typeof mappedRequestId === 'string'
+      ? (sessionState?.completedTurns?.[mappedRequestId] ??
+         (sessionState?.activeTurn?.requestId === mappedRequestId ? sessionState.activeTurn : null))
+      : (sessionState?.activeTurn?.taskId != null && String(sessionState.activeTurn.taskId) === taskKey
+          ? sessionState.activeTurn
+          : null);
+    if (activeTurn) {
+      return (
+        activeTurn.kind === 'primary' &&
+        activeTurn.sender?.kind === 'user' &&
+        activeTurn.workNativeId === undefined
+      );
+    }
+    if (Number.isSafeInteger(liveDoc.run.first) && liveDoc.run.first > 0) {
+      const firstEntry = await h.commit((tx) => tx.entry(liveDoc.run.first), context).catch(() => null);
+      const attr = firstEntry ? deriveEntryAttribution(firstEntry, sessionState) : null;
+      return attr?.kind === 'user' && attr?.channel === 'primary';
+    }
+    return false;
+  }
+
   /** 单条 head 条目的完整准入：prepare→（需切换时确认空闲）→原子应用→confirm→pin→提交。 */
   async function admitItem(bot, item) {
     const epoch = getEpoch();
     const scopeKey = 'primary';
+    const isUserSteer = item.delivery === 'steer' && item.origin?.sender?.kind === 'user';
+    let steeringActiveRun = false;
     // 1. 已有 admissionId（授予后崩溃）：只恢复同一准入，不再向中心新申请。
     let preparation = null;
     let grant = null;
@@ -485,6 +556,9 @@ export function createTurnAdmission(deps) {
       await setPhase(bot, item.requestId, 'synchronizing');
       preparation = await centerRuntime.restoreTurn({ botId: bot.botId, admissionId: item.admissionId });
       grant = { admissionId: item.admissionId, setId: preparation.setId };
+      if (isUserSteer && appliedSetIds.get(bot.botId) === preparation.setId && await canSteerActivePrimary(bot)) {
+        steeringActiveRun = true;
+      }
     } else {
       // 2. 先过实际准入边界再查中心：Busy 检查必须在任何可能签发 grant 的操作之前。
       // 过早 prepare 的 knownSetId 快路会持久化 admission——之后排队消息即使本地仍 queued，
@@ -495,8 +569,12 @@ export function createTurnAdmission(deps) {
       // handled 水位，用户队列排空后由 work lane 按相同原始消息重新触发。
       await preemptForUserTurn(bot, item);
       if (await botBusyForSet(bot, false)) {
-        await setPhase(bot, item.requestId, 'queued');
-        return null;
+        if (isUserSteer && await canSteerActivePrimary(bot)) {
+          steeringActiveRun = true;
+        } else {
+          await setPhase(bot, item.requestId, 'queued');
+          return null;
+        }
       }
       await setPhase(bot, item.requestId, 'checking');
       let lastError = null;
@@ -523,15 +601,17 @@ export function createTurnAdmission(deps) {
         const target = (preparation.snapshot.bots ?? []).find((entry) => entry.botId === bot.botId);
         if (!target?.model?.modelRef) throw errWithCode('center model is required', 'TURN_SYNC_FAILED');
       }
-      // 3. 目标 set 与当前不同才要求全 Bot 原生空闲；相同 set 只要求主会话空闲。
+      // 3. 目标 set 与当前不同才要求全 Bot 原生空闲；相同 set 只要求主会话空闲（steer 允许同 set 注入活跃轮）。
       const needsSwitch = appliedSetIds.get(bot.botId) !== preparation.setId;
-      if (needsSwitch && await botBusyForSet(bot, true)) {
-        // 有原生工作在跑：保持 queued，等原生完成/下个触发点再泵。
+      if (needsSwitch && (steeringActiveRun || await botBusyForSet(bot, true))) {
+        // 有原生工作在跑且需切换执行集：保持 queued，等原生完成/下个触发点再泵。
         await setPhase(bot, item.requestId, 'queued');
         return null;
       }
       await setPhase(bot, item.requestId, 'synchronizing');
-      await applyPreparation(bot, preparation);
+      if (!steeringActiveRun) {
+        await applyPreparation(bot, preparation);
+      }
       if (getEpoch() !== epoch || closing || !canAdmit()) throw errWithCode('host is not connected', 'NOT_CONNECTED');
       grant = preparation.admission ?? await centerRuntime.confirmTurn({
         botId: bot.botId,
@@ -543,7 +623,7 @@ export function createTurnAdmission(deps) {
     }
     if (!grant?.admissionId) throw errWithCode('center did not grant admission', 'TURN_SYNC_FAILED');
     // 4. 原子应用（restore 路径的 apply 也在此）；随后持久 pin（grant 先于原生提交落盘）。
-    if (item.admissionId) await applyPreparation(bot, preparation);
+    if (item.admissionId && !steeringActiveRun) await applyPreparation(bot, preparation);
     const pinTarget = (preparation.snapshot?.bots ?? []).find((entry) => entry.botId === bot.botId) ?? null;
     const pinModel = pinTarget?.model ?? null;
     const pinCapabilities = (pinTarget?.capabilities ?? []).map((capability) => ({
@@ -609,7 +689,10 @@ export function createTurnAdmission(deps) {
         codemodeOnly: profile.codemodeOnly,
       }, context);
     }
-    await applyAgentProfile(harness(), conversation.id, profile, context);
+    const stillSteering = isUserSteer && await canSteerActivePrimary(bot);
+    if (!stillSteering) {
+      await applyAgentProfile(harness(), conversation.id, profile, context);
+    }
     await live.bind(bot.botId, conversation);
     // 正文摘要按会话持久化：已原生提交请求的幂等查重（含崩溃后重放）。
     await conversation.commit(async (tx) => {
@@ -640,9 +723,7 @@ export function createTurnAdmission(deps) {
           pins.admissions[grant.admissionId].submissionId = priorRecord.id;
         }
       }, context);
-      const remaining = await queuedCount(bot);
-      const head = await liveHead(bot);
-      publishStatus(bot.botId, head, remaining);
+      await syncPublishedQueue(bot);
       if (priorRecord.status === 'queued' || priorRecord.status === 'placed') {
         trackSubmission(priorRecord.id, { botId: bot.botId, nativeId: conversation.id });
       }
@@ -707,14 +788,20 @@ export function createTurnAdmission(deps) {
       await setPhase(bot, item.requestId, 'queued');
       return null;
     }
-    // 安全轮边界：提交前把该 Bot 全部收件 scope 增量导入统一主会话，
-    // 迟到回复/群消息进入本轮上下文；导入水位在 sessions 内原子提交。
-    if (sessions) await sessions.sync(bot.botId);
-    // sync 的多个 await 期间后台工作可能已占会话：提交是最后一个 grant，
-    // 提交前必须复核会话仍空闲，busy 则保持 queued 等下次泵（提交拒忙兜底）。
-    if (await botNativeBusy(bot, { withPluginOps: false })) {
-      await setPhase(bot, item.requestId, 'queued');
-      return null;
+    const wantSteer = (item.delivery === 'steer' || alive.delivery === 'steer') && item.origin?.sender?.kind === 'user';
+    const steerNow = wantSteer && await canSteerActivePrimary(bot);
+    if (!steerNow) {
+      // 安全轮边界：提交前把该 Bot 全部收件 scope 增量导入统一主会话，
+      // 迟到回复/群消息进入本轮上下文；导入水位在 sessions 内原子提交。
+      if (sessions) await sessions.sync(bot.botId);
+      // sync 的多个 await 期间后台工作可能已占会话：提交是最后一个 grant，
+      // 提交前必须复核会话仍空闲，busy 则保持 queued 等下次泵（提交拒忙兜底）。
+      if (await botNativeBusy(bot, { withPluginOps: false })) {
+        if (!(wantSteer && await canSteerActivePrimary(bot))) {
+          await setPhase(bot, item.requestId, 'queued');
+          return null;
+        }
+      }
     }
     const entry = sourceMessageEntry(item);
     if (attachmentMeta.length > 0) entry.data.attachments = attachmentMeta;
@@ -722,7 +809,13 @@ export function createTurnAdmission(deps) {
     try {
       if (!canAdmit()) throw errWithCode('host is preparing an update', 'RUNTIME_BUSY');
       submission = await conversation.submit(
-        { type: 'input', content, requestId: item.requestId, whenBusy: 'reject', entry },
+        {
+          type: 'input',
+          content,
+          requestId: item.requestId,
+          whenBusy: wantSteer ? 'steer' : 'reject',
+          entry,
+        },
         context,
       );
     } catch (err) {
@@ -759,9 +852,7 @@ export function createTurnAdmission(deps) {
         pins.admissions[grant.admissionId].submissionId = statusRecord.id;
       }
     }, context);
-    const remaining = await queuedCount(bot);
-    const head = await liveHead(bot);
-    publishStatus(bot.botId, head, remaining);
+    await syncPublishedQueue(bot);
     const formatted = await formatPrimarySubmission(harness(), bot, statusRecord, context);
     if (formatted.status === 'done') recordCompletedSubmission(bot.botId, formatted);
     return formatted;
@@ -775,7 +866,7 @@ export function createTurnAdmission(deps) {
     const items = await readQueue(bot.primaryConversationId);
     const item = headItem(items);
     if (!item) {
-      publishStatus(bot.botId, null, await queuedCount(bot));
+      publishQueue(bot.botId, items);
       return;
     }
     try {
@@ -793,12 +884,30 @@ export function createTurnAdmission(deps) {
   }
 
   function nudge(botId) {
-    if (closing || pumpInFlight.has(botId)) return;
+    if (closing) return;
+    if (pumpInFlight.has(botId)) {
+      pumpAgain.add(botId);
+      return;
+    }
     const bot = host.getBot(botId);
     if (!bot) return;
     pumpInFlight.add(botId);
-    const task = admitBot(botId, () => pump(bot));
-    const clear = () => pumpInFlight.delete(botId);
+    const runPump = async () => {
+      do {
+        pumpAgain.delete(botId);
+        const latestBot = host.getBot(botId);
+        if (!latestBot || closing) break;
+        await pump(latestBot);
+      } while (pumpAgain.has(botId) && !closing);
+    };
+    const task = admitBot(botId, runPump);
+    const clear = () => {
+      pumpInFlight.delete(botId);
+      if (pumpAgain.has(botId) && !closing) {
+        pumpAgain.delete(botId);
+        nudge(botId);
+      }
+    };
     task.then(clear, clear);
     task.catch(() => {});
   }
@@ -826,6 +935,11 @@ export function createTurnAdmission(deps) {
     if (typeof requestId !== 'string' || requestId.trim() === '') {
       throw errWithCode('requestId must be a non-empty string', 'INVALID_ARGUMENT');
     }
+    const rawDelivery = input?.delivery;
+    if (rawDelivery !== undefined && rawDelivery !== 'followUp' && rawDelivery !== 'steer') {
+      throw errWithCode("delivery must be 'followUp' or 'steer'", 'INVALID_ARGUMENT');
+    }
+    const delivery = rawDelivery === 'steer' ? 'steer' : 'followUp';
     const attachmentIds = normalizeAttachmentIds(input?.attachments);
     if (typeof text !== 'string' || (text.trim() === '' && attachmentIds.length === 0)) {
       throw errWithCode('text must be a non-empty string', 'INVALID_ARGUMENT');
@@ -902,6 +1016,10 @@ export function createTurnAdmission(deps) {
           existing.updatedAt = now;
           return toQueuedReceipt(existing);
         }
+        if (delivery === 'steer' && existing.delivery !== 'steer') {
+          existing.delivery = 'steer';
+          existing.updatedAt = now;
+        }
         if (existing.phase === 'failed') {
           // 同 requestId 的显式重试重新武装自动重试：耗尽的退避计数在重试时清零，
           // 避免这次显式尝试再失败后静默失去自动恢复。
@@ -918,6 +1036,7 @@ export function createTurnAdmission(deps) {
         digest,
         text,
         origin,
+        ...(delivery === 'steer' ? { delivery: 'steer' } : {}),
         ...(attachmentMeta.length > 0 ? { attachments: attachmentMeta } : {}),
         phase: stale ? 'cancelled' : 'queued',
         error: null,
@@ -938,8 +1057,7 @@ export function createTurnAdmission(deps) {
     // initializeBot 的 SOUL 回填等可失败工作必须在受理持久化之后：先落队列再初始化，
     // 失败的消息在 Host 端永远有可对账的 queued 记录，而不是无声丢失。
     await initializeBot(botId);
-    const count = await queuedCount(bot);
-    publishStatus(botId, await liveHead(bot), count);
+    await syncPublishedQueue(bot);
     // 受理未被停止作废：新的真实输入允许新运行，清掉旧 stopped 覆盖后再泵。
     if (receipt.status === 'queued') {
       clearStopped(botId);
@@ -967,6 +1085,163 @@ export function createTurnAdmission(deps) {
     return toQueuedReceipt(item);
   }
 
+  function toWithdrawnTurnItem(entry) {
+    const attIds = Array.isArray(entry.attachments)
+      ? entry.attachments.map((a) => a?.id).filter((id) => typeof id === 'string')
+      : [];
+    return {
+      requestId: entry.requestId,
+      delivery: entry.delivery === 'steer' ? 'steer' : 'followUp',
+      text: entry.text,
+      ...(attIds.length > 0 ? { attachments: attIds } : {}),
+    };
+  }
+
+  /** 从主会话 pi.inbox 中精准中止尚未置入轮次的本机用户主私聊提交，并返回实际被撤回的条目。 */
+  async function withdrawInboxUserItems(bot, targetRequestId = null) {
+    const h = harness();
+    const conversation = await getPrimaryConversation(h, bot, {}, context);
+    if (!conversation) return [];
+    const inbox = await h.snapshot(InboxDoc, conversation.id, context);
+    const rawItems = Array.isArray(inbox?.items) ? inbox.items : [];
+    const withdrawn = [];
+    for (const inboxItem of rawItems) {
+      if (!inboxItem || (inboxItem.mode !== 'steer' && inboxItem.mode !== 'followUp')) continue;
+      if (inboxItem.entry?.kind !== 'host.user-message') continue;
+      const data = inboxItem.entry?.data;
+      if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
+      if (data.attribution?.kind !== 'user' || data.attribution?.channel !== 'primary') continue;
+      const reqId = typeof data.requestId === 'string' ? data.requestId : null;
+      if (!reqId) continue;
+      if (targetRequestId !== null && reqId !== targetRequestId) continue;
+      const outcome = await h.abortSubmission(inboxItem.id, context, conversation.id);
+      if (outcome === 'aborted') {
+        const text = typeof data.userText === 'string'
+          ? data.userText
+          : extractUserTextFromContent(inboxItem.content);
+        const attIds = Array.isArray(data.attachments)
+          ? data.attachments.map((a) => a?.id).filter((id) => typeof id === 'string')
+          : [];
+        withdrawn.push({
+          requestId: reqId,
+          delivery: inboxItem.mode === 'steer' ? 'steer' : 'followUp',
+          text,
+          ...(attIds.length > 0 ? { attachments: attIds } : {}),
+        });
+      }
+    }
+    return withdrawn;
+  }
+
+  /** 不停止当前运行，撤回单条（传 requestId）或全部（省略/null）尚未置入轮次的用户主私聊排队项。 */
+  async function withdrawQueued(bot, requestId = null) {
+    if (requestId !== null && requestId !== undefined) {
+      if (typeof requestId !== 'string' || requestId.trim() === '') {
+        throw errWithCode('requestId must be a non-empty string', 'INVALID_ARGUMENT');
+      }
+    }
+    const targetRequestId = requestId ?? null;
+    const inboxWithdrawn = await withdrawInboxUserItems(bot, targetRequestId);
+    const now = new Date().toISOString();
+    const queueWithdrawn = await harness().commit(async (tx) => {
+      const doc = await queueDoc(tx, bot.primaryConversationId);
+      const affected = new Set();
+      const items = [];
+      for (const entry of doc.items) {
+        if (entry.phase === 'cancelled') continue;
+        if (entry.origin?.sender?.kind !== 'user') continue;
+        if (targetRequestId !== null && entry.requestId !== targetRequestId) continue;
+        if (entry.admissionId) affected.add(entry.admissionId);
+        entry.phase = 'cancelled';
+        entry.error = null;
+        entry.updatedAt = now;
+        items.push(toWithdrawnTurnItem(entry));
+      }
+      if (affected.size > 0) {
+        const pins = await tx.doc(TurnPin, bot.primaryConversationId, {});
+        for (const admissionId of affected) {
+          const pin = pins.admissions[admissionId];
+          if (pin && (pin.submissionId === null || pin.submissionId === undefined)) {
+            delete pins.admissions[admissionId];
+          }
+        }
+      }
+      return items;
+    }, context);
+    if (queueWithdrawn.length > 0) {
+      await syncPublishedQueue(bot);
+      if (!stopped(bot.botId) && (await queuedCount(bot)) > 0) {
+        nudge(bot.botId);
+      }
+    }
+    const withdrawn = [];
+    const seen = new Set();
+    for (const item of [...inboxWithdrawn, ...queueWithdrawn]) {
+      if (seen.has(item.requestId)) continue;
+      seen.add(item.requestId);
+      withdrawn.push(item);
+    }
+    return { botId: bot.botId, withdrawn };
+  }
+
+  /** 将已排队的单条用户主私聊消息提升为 steer（优先在当前轮 postTools 边界注入，不影响其余 followUp 顺序）。 */
+  async function steerQueued(bot, requestId) {
+    if (typeof requestId !== 'string' || requestId.trim() === '') {
+      throw errWithCode('requestId must be a non-empty string', 'INVALID_ARGUMENT');
+    }
+    const promotedInQueue = await harness().commit(async (tx) => {
+      const doc = await queueDoc(tx, bot.primaryConversationId);
+      const found = doc.items.find((entry) => entry.requestId === requestId);
+      if (!found || found.phase === 'cancelled' || found.origin?.sender?.kind !== 'user') {
+        return false;
+      }
+      found.delivery = 'steer';
+      if (found.phase === 'failed') {
+        found.phase = 'queued';
+        found.error = null;
+        retryAttempts.delete(bot.botId);
+      }
+      found.updatedAt = new Date().toISOString();
+      return true;
+    }, context);
+    if (promotedInQueue) {
+      await syncPublishedQueue(bot);
+      if (!stopped(bot.botId)) {
+        clearStopped(bot.botId);
+        nudge(bot.botId);
+      }
+      return { botId: bot.botId, requestId, status: 'steered' };
+    }
+    const h = harness();
+    const conversation = await getPrimaryConversation(h, bot, {}, context);
+    if (conversation) {
+      const inboxOutcome = await conversation.commit(async (tx) => {
+        const inbox = await tx.doc(InboxDoc, conversation.id);
+        const item = (inbox.items ?? []).find(
+          (entry) =>
+            (entry?.mode === 'followUp' || entry?.mode === 'steer') &&
+            entry?.entry?.kind === 'host.user-message' &&
+            entry?.entry?.data?.attribution?.kind === 'user' &&
+            entry?.entry?.data?.attribution?.channel === 'primary' &&
+            entry?.entry?.data?.requestId === requestId,
+        );
+        if (item) {
+          item.mode = 'steer';
+          return 'steered';
+        }
+        const record = await tx.submissionByRequest(conversation.id, requestId);
+        if (record && (record.status === 'placed' || record.status === 'done')) {
+          return 'already_placed';
+        }
+        return null;
+      }, context);
+      if (inboxOutcome) {
+        return { botId: bot.botId, requestId, status: inboxOutcome };
+      }
+    }
+    throw errWithCode('submission not found: ' + requestId, 'SUBMISSION_NOT_FOUND');
+  }
+
   /**
    * abort：把该 Bot 尚未原生提交的排队条目转为 cancelled 终态受理（不删除唯一记录，
    * getSubmission/wait 无原生 done 时读为 unanswered 而不是 NOT_FOUND），同时清理
@@ -980,14 +1255,18 @@ export function createTurnAdmission(deps) {
    */
   async function cancelQueued(bot, throughStopEpoch = null) {
     const now = new Date().toISOString();
-    const removed = await harness().commit(async (tx) => {
+    const result = await harness().commit(async (tx) => {
       const doc = await queueDoc(tx, bot.primaryConversationId);
       let count = 0;
+      const withdrawn = [];
       const affected = new Set();
       for (const entry of doc.items) {
         if (throughStopEpoch !== null && (entry.stopEpoch ?? 0) > throughStopEpoch) continue;
         if (entry.admissionId) affected.add(entry.admissionId);
         if (entry.phase === 'cancelled') continue;
+        if (entry.origin?.sender?.kind === 'user') {
+          withdrawn.push(toWithdrawnTurnItem(entry));
+        }
         entry.phase = 'cancelled';
         entry.error = null;
         entry.updatedAt = now;
@@ -1005,15 +1284,14 @@ export function createTurnAdmission(deps) {
           }
         }
       }
-      return count;
+      return { count, withdrawn };
     }, context);
     // 发布用实时 head 而非 null：停止期间受理的新代次排队条目仍是可见准入状态，
     // 不能用 null 覆盖假装队列已空。
-    if (removed > 0) {
-      const head = await liveHead(bot);
-      publishStatus(bot.botId, head, await queuedCount(bot));
+    if (result.count > 0) {
+      await syncPublishedQueue(bot);
     }
-    return removed;
+    return result;
   }
 
   /** pin 是否仍覆盖活动轮：有 admissionId 的队列条目/挂起决策，或有未完结 submissionId 的 pin。 */
@@ -1261,6 +1539,7 @@ export function createTurnAdmission(deps) {
 
   function close() {
     closing = true;
+    pumpAgain.clear();
     for (const timer of retryTimers.values()) clearTimeout(timer);
     retryTimers.clear();
   }
@@ -1270,7 +1549,11 @@ export function createTurnAdmission(deps) {
     refreshActivity,
     pump: nudge,
     nudgeAll,
+    queuedCount,
     queuedReceipt,
+    withdrawInboxUserItems,
+    withdrawQueued,
+    steerQueued,
     cancelQueued,
     hasActivePin,
     restoreTurns,

@@ -42,7 +42,7 @@ export function normalizeHistoryOptions(options = {}) {
  * 因此只在读取时按 reset 裁剪，不动存储。倒序沿 cursor 扫到 reset 或历史起点，不设页数上限，
  * 否则更早的 reset 之前的历史会在清空后重新出现。
  */
-async function latestResetEntryId(conversation, context) {
+export async function latestResetEntryId(conversation, context) {
   let cursor;
   for (;;) {
     const result = await conversation.entries({ order: 'descending' }, RESET_SCAN_LIMIT, cursor, context);

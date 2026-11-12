@@ -20,6 +20,7 @@ const STATE_KEYS = [
   'toolsTruncated',
   'busy',
   'queuedCount',
+  'queuedItems',
   'turnAdmission',
   'activity',
   'learning',

@@ -47,6 +47,7 @@ const STATE_KEYS = new Set([
   'toolsTruncated',
   'busy',
   'queuedCount',
+  'queuedItems',
   'turnAdmission',
   'activity',
   'learning',
@@ -282,6 +283,48 @@ const TURN_ADMISSION_KEYS = new Set(['requestId', 'phase', 'source', 'error']);
 const TURN_ADMISSION_PHASES = new Set(['queued', 'checking', 'synchronizing', 'failed']);
 const TURN_ADMISSION_ERROR_KEYS = new Set(['code', 'message']);
 const MAX_TURN_ADMISSION_CHARS = 256;
+
+const QUEUED_ITEM_KEYS = new Set(['requestId', 'delivery', 'preview', 'attachmentCount']);
+const QUEUED_DELIVERY_MODES = new Set(['followUp', 'steer']);
+const MAX_QUEUED_ITEMS = 32;
+const MAX_QUEUED_REQUEST_ID_CHARS = 128;
+const MAX_QUEUED_PREVIEW_CHARS = 160;
+
+function normalizeQueuedItems(value) {
+  if (!Array.isArray(value) || value.length > MAX_QUEUED_ITEMS) {
+    throw invalid(`state.queuedItems must be an array of at most ${MAX_QUEUED_ITEMS} items`);
+  }
+  const seen = new Set();
+  return value.map((item) => {
+    if (!isPlainObject(item)) throw invalid('queuedItem must be a plain object');
+    rejectUnknownFields(item, QUEUED_ITEM_KEYS, 'queuedItem');
+    assertId(item.requestId, 'queuedItem requestId');
+    if (item.requestId.length > MAX_QUEUED_REQUEST_ID_CHARS) {
+      throw invalid('queuedItem requestId exceeds the bound');
+    }
+    if (seen.has(item.requestId)) {
+      throw invalid('queuedItem requestId must be unique');
+    }
+    seen.add(item.requestId);
+    if (!QUEUED_DELIVERY_MODES.has(item.delivery)) {
+      throw invalid("queuedItem delivery must be 'followUp' or 'steer'");
+    }
+    assertText(item.preview, 'queuedItem preview');
+    if (item.preview.length > MAX_QUEUED_PREVIEW_CHARS) {
+      throw invalid('queuedItem preview exceeds the bound');
+    }
+    assertNonNegativeSafeInteger(item.attachmentCount, 'queuedItem attachmentCount');
+    if (item.attachmentCount > MAX_MESSAGE_ATTACHMENTS) {
+      throw invalid(`queuedItem attachmentCount must be at most ${MAX_MESSAGE_ATTACHMENTS}`);
+    }
+    return {
+      requestId: item.requestId,
+      delivery: item.delivery,
+      preview: item.preview,
+      attachmentCount: item.attachmentCount,
+    };
+  });
+}
 
 // Unified Bot activity is metadata-only: phase/source enums, bounded nullable
 // IDs, an ISO timestamp and a bounded safe failure diagnostic; it never carries
@@ -656,6 +699,9 @@ function normalizeLiveState(state) {
     if (tool.presentation !== undefined) tool.presentation = normalizeToolPresentation(tool.presentation);
   }
   assertNonNegativeSafeInteger(state.queuedCount, 'state.queuedCount');
+  if (state.queuedItems !== undefined) {
+    state.queuedItems = normalizeQueuedItems(state.queuedItems);
+  }
   // Optional on the wire: older Hosts omit it; null means nothing queued/waiting/failed.
   if (state.turnAdmission !== undefined && state.turnAdmission !== null) {
     state.turnAdmission = normalizeTurnAdmissionStatus(state.turnAdmission);

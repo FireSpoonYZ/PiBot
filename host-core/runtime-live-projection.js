@@ -29,6 +29,9 @@ const MAX_GENERATION_UNITS = 32768; // 当前生成文本上限
 const MAX_ACTIVITY_TEXT_UNITS = 256;
 const MAX_TOOLS = 32; // 工具槽总数上限（tools + nestedTools）
 const MAX_TOOL_OUTPUT_UNITS = 4096; // 工具运行输出保留尾部上限
+export const MAX_QUEUED_ITEMS = 32; // 排队用户输入预览条数上限
+export const MAX_QUEUED_PREVIEW_UNITS = 160; // 单条排队输入预览字符上限
+const HOST_ATTACHED_IMAGE_PREFIX = 'Attached image on this Host (use this path to read or send the file): ';
 // Attribution 只由 Host 端冻结 turn/信封生成，字段小而固定；仍留字符上限防伪造放大帧。
 const MAX_ATTRIBUTION_TEXT_UNITS = 256;
 // 快照/更新帧整体不超过 MAX_LIVE_JSON_BYTES（8MiB UTF-8）。presentation 预算按
@@ -40,12 +43,73 @@ const FRAME_ENVELOPE_RESERVE_BYTES = 8192;
  * 从 UTF-16 单元边界安全截断前缀，不拆分代理对。只读 max 附近的单元，
  * 不遍历巨型原文，也不使用 Array.from。
  */
-function truncatePrefix(s, max) {
+export function truncatePrefix(s, max) {
   if (s.length <= max) return { text: s, truncated: false };
   let end = max;
   const unit = s.charCodeAt(end - 1);
   if (unit >= 0xd800 && unit <= 0xdbff) end -= 1; // 切在高代理后：回退一个单元
   return { text: s.slice(0, end), truncated: true };
+}
+
+/** 提取用户输入原文：跳过 Host 注入的本地图片路径提示块与非文本块。 */
+export function extractUserTextFromContent(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const parts = [];
+  for (const block of content) {
+    if (!block || block.type !== 'text' || typeof block.text !== 'string') continue;
+    if (block.text.startsWith(HOST_ATTACHED_IMAGE_PREFIX)) continue;
+    parts.push(block.text);
+  }
+  return parts.join('\n');
+}
+
+/** 生成排队条目的单行安全摘要（折叠空白并截断至 MAX_QUEUED_PREVIEW_UNITS）。 */
+export function buildQueuedPreview(text) {
+  const normalized = typeof text === 'string' ? text.replace(/\s+/g, ' ').trim() : '';
+  const safe = normalized.isWellFormed() ? normalized : normalized.toWellFormed();
+  return truncatePrefix(safe, MAX_QUEUED_PREVIEW_UNITS).text;
+}
+
+/** 从 pi.inbox 投影尚未置入轮次的本机用户主私聊排队项（过滤后台/协作触发项）。 */
+export function projectInboxQueuedItems(inbox) {
+  const rawItems = Array.isArray(inbox?.items) ? inbox.items : [];
+  if (rawItems.length === 0) return [];
+  const items = [];
+  const seen = new Set();
+  for (const item of rawItems) {
+    if (!item || (item.mode !== 'steer' && item.mode !== 'followUp')) continue;
+    if (item.entry?.kind !== 'host.user-message') continue;
+    const data = item.entry?.data;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
+    if (data.attribution?.kind !== 'user' || data.attribution?.channel !== 'primary') continue;
+    const requestId = data.requestId;
+    if (
+      typeof requestId !== 'string' ||
+      requestId.trim() === '' ||
+      requestId.length > 128 ||
+      !requestId.isWellFormed() ||
+      /\s/.test(requestId) ||
+      seen.has(requestId)
+    ) {
+      continue;
+    }
+    seen.add(requestId);
+    const rawText = typeof data.userText === 'string'
+      ? data.userText
+      : extractUserTextFromContent(item.content);
+    const attachmentCount = Array.isArray(data.attachments)
+      ? Math.min(16, data.attachments.length)
+      : 0;
+    items.push({
+      requestId,
+      delivery: item.mode,
+      preview: buildQueuedPreview(rawText),
+      attachmentCount,
+    });
+    if (items.length >= MAX_QUEUED_ITEMS) break;
+  }
+  return items;
 }
 
 /** 保留输出尾部 max 个 UTF-16 单元；窗口起点落在低代理上时前进避开。 */
@@ -708,6 +772,7 @@ const STATE_KEYS = [
   'toolsTruncated',
   'busy',
   'queuedCount',
+  'queuedItems',
   'turnAdmission',
   'activity',
   'learning',

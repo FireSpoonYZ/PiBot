@@ -22,7 +22,7 @@ import { createGrepTool } from './grep-tool.js';
 import { createFindTool } from './find-tool.js';
 import { createLsTool } from './ls-tool.js';
 import { getPrimaryConversation, RequestKeys, PrimaryIndex, applyAgentProfile } from './runtime-docs.js';
-import { formatPrimarySubmission, normalizeHistoryOptions, readPrimaryHistory } from './runtime-history.js';
+import { formatPrimarySubmission, latestResetEntryId, normalizeHistoryOptions, readPrimaryHistory } from './runtime-history.js';
 import { RequestContext, countMessageTokens, estimateContextTokensHost, budgetRequestTokens } from './request-context.js';
 import { GenerationFailureState } from './generation-failure.js';
 import { resolveBotIdentity } from './bot-identity.js';
@@ -36,6 +36,7 @@ import { WorkDecisionState } from './work-decision-state.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { createTurnAdmission } from './runtime-turns.js';
 import { createBotSessionRuntime } from './runtime-bot-session.js';
+import { BotSessionState, USER_MESSAGE_KIND, deriveEntryAttribution } from './bot-session-context.js';
 import { createBotLearning } from './bot-learning.js';
 import { createBotManagementSkillSection } from './bot-management-skill.js';
 import { SOUL_MAX_BYTES } from './bot-soul.js';
@@ -56,6 +57,7 @@ import { createScheduleTools } from './schedule-tools.js';
 import {
   attachmentPath,
   loadAttachment,
+  normalizeAttachmentIds,
   removeBotAttachments,
   uploadAttachment,
 } from './attachments.js';
@@ -1137,7 +1139,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 与工作积压）；停止开始后受理的新代次输入保留，等停止结算后由泵处理。
       // 即使后续 HTTP/确认在飞，泵在提交前的存活核对会发现条目已取消，
       // 绝不把已取消的轮送进模型。
-      await turns.cancelQueued(bot, epoch);
+      const { withdrawn: queueWithdrawn } = await turns.cancelQueued(bot, epoch);
       // 工作 lane 取消：user_stop 覆盖各 scope 待处理积压与已有 pending；
       // 离线/恢复未完成时 quiesce=false（不调用会隐式 resume 的 abort/wait 路径）。
       if (decisions.interruptBotWork) {
@@ -1147,6 +1149,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         });
       }
       const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
+      const inboxWithdrawn = conversation ? await turns.withdrawInboxUserItems(bot) : [];
       if (conversation) {
         // 离线或恢复未完成时不能用 Conversation.abort/Submission.wait：
         // 二者会隐式 resume 调度器、唤醒未知旧任务。退化为非调度入口——
@@ -1172,6 +1175,14 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       await turns.settleStop(botId);
       webhooks.wake();
       drainSelfSoul(botId);
+      const withdrawn = [];
+      const seen = new Set();
+      for (const item of [...inboxWithdrawn, ...queueWithdrawn]) {
+        if (seen.has(item.requestId)) continue;
+        seen.add(item.requestId);
+        withdrawn.push(item);
+      }
+      return { botId, withdrawn };
     } catch (err) {
       throw err;
     }
@@ -2050,6 +2061,149 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       return { botId, conversationId: started.conversationId, compacted: true };
     },
 
+    async withdrawQueued(botId, input = {}) {
+      assertNonBlank(botId, 'botId');
+      if (input !== undefined && input !== null && (typeof input !== 'object' || Array.isArray(input))) {
+        throw errWithCode('withdrawQueued input must be an object', 'INVALID_ARGUMENT');
+      }
+      const bot = host.getBot(botId);
+      if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
+      return turns.withdrawQueued(bot, input?.requestId ?? null);
+    },
+
+    async steerQueued(botId, input) {
+      assertNonBlank(botId, 'botId');
+      if (!input || typeof input !== 'object' || Array.isArray(input)) {
+        throw errWithCode('steerQueued input must be an object', 'INVALID_ARGUMENT');
+      }
+      assertNonBlank(input.requestId, 'requestId');
+      const bot = await requireBot(botId);
+      if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
+        throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
+      }
+      return turns.steerQueued(bot, input.requestId);
+    },
+
+    async editMessage(botId, input) {
+      assertNonBlank(botId, 'botId');
+      if (!input || typeof input !== 'object' || Array.isArray(input)) {
+        throw errWithCode('editMessage input must be an object', 'INVALID_ARGUMENT');
+      }
+      const { entryId, requestId, text } = input;
+      if (!Number.isSafeInteger(entryId) || entryId < 1) {
+        throw errWithCode('entryId must be a positive safe integer', 'INVALID_ARGUMENT');
+      }
+      assertNonBlank(requestId, 'requestId');
+      const attachmentIds = normalizeAttachmentIds(input.attachments);
+      if (typeof text !== 'string' || (text.trim() === '' && attachmentIds.length === 0)) {
+        throw errWithCode('text must be a non-empty string', 'INVALID_ARGUMENT');
+      }
+      const capturedStopEpoch = turns.stopEpoch(botId);
+      return admitBot(botId, async () => {
+        const bot = await requireBot(botId);
+        if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
+          throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
+        }
+        // 严格忙碌门禁：任何活动轮、排队轮、停止协调、插件执行或学习作业期间均禁止编辑历史消息。
+        if (
+          turns.stopped(botId) ||
+          (await turns.queuedCount(bot)) > 0 ||
+          plugins.hasActiveExecutions(botId) ||
+          learning.isActive(botId)
+        ) {
+          throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+        }
+        await assertBotIdle(bot);
+        let attachmentBytes = 0;
+        for (const id of attachmentIds) {
+          const meta = await attachmentStore.load(botId, id);
+          attachmentBytes += meta.size;
+        }
+        if (attachmentBytes > 64 * 1024 * 1024) {
+          throw errWithCode('attachments exceed the 64 MiB per-message total image byte limit', 'INVALID_ARGUMENT');
+        }
+        const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
+        if (!conversation) {
+          throw errWithCode(`entry not found: ${entryId}`, 'INVALID_ARGUMENT');
+        }
+        // 先推进收件水位，防止分叉后把编辑前已存在的群/DM旧消息当新消息重导。
+        await sessions.sync(botId);
+        const resetId = await latestResetEntryId(conversation, CTX);
+        if (entryId <= resetId) {
+          throw errWithCode(`entry ${entryId} is before the active conversation reset`, 'INVALID_ARGUMENT');
+        }
+        const [agentSnapshot, sessionSnapshot, requestKeysSnapshot] = await Promise.all([
+          harness.snapshot(durable.AgentDoc, conversation.id, CTX),
+          harness.snapshot(BotSessionState, conversation.id, CTX),
+          harness.snapshot(RequestKeys, conversation.id, CTX),
+        ]);
+        const newNativeId = await harness.commit(async (tx) => {
+          const scan = await tx.scanEntries(
+            { conversationId: conversation.id, maxEntryId: entryId, order: 'descending' },
+            2,
+          );
+          const targetEntry = scan.items[0];
+          if (!targetEntry || targetEntry.id !== entryId) {
+            throw errWithCode(`entry not found: ${entryId}`, 'INVALID_ARGUMENT');
+          }
+          const attribution = deriveEntryAttribution(targetEntry, sessionSnapshot ?? null);
+          if (
+            targetEntry.kind !== USER_MESSAGE_KIND ||
+            attribution?.kind !== 'user' ||
+            attribution?.channel !== 'primary'
+          ) {
+            throw errWithCode('only primary user messages can be edited', 'INVALID_ARGUMENT');
+          }
+          const beforeEntryId = scan.items[1]?.id ?? null;
+          const rec = beforeEntryId !== null
+            ? await tx.forkConversation(conversation.id, beforeEntryId, { ownership: { kind: 'ownerless' } })
+            : await tx.createConversation({ ownership: { kind: 'ownerless' } });
+          if (agentSnapshot) {
+            const agentDraft = await tx.doc(durable.AgentDoc, rec.id);
+            const copiedAgent = chord.copyJson(agentSnapshot);
+            for (const key of Object.keys(agentDraft)) {
+              if (!(key in copiedAgent)) delete agentDraft[key];
+            }
+            Object.assign(agentDraft, copiedAgent);
+          }
+          if (sessionSnapshot) {
+            const sessionDraft = await tx.doc(BotSessionState, rec.id);
+            const copiedSession = chord.copyJson(sessionSnapshot);
+            sessionDraft.schema = copiedSession.schema ?? 1;
+            sessionDraft.lastImportedLocalId = copiedSession.lastImportedLocalId ?? 0;
+            sessionDraft.importedCount = copiedSession.importedCount ?? 0;
+            sessionDraft.activeTurn = null;
+            sessionDraft.turnByTask = copiedSession.turnByTask ?? {};
+            sessionDraft.outgoing = copiedSession.outgoing ?? {};
+            sessionDraft.completedTurns = copiedSession.completedTurns ?? {};
+            sessionDraft.updatedAt = new Date().toISOString();
+          }
+          if (requestKeysSnapshot?.digests) {
+            const reqDraft = await tx.doc(RequestKeys, rec.id);
+            const copiedDigests = chord.copyJson(requestKeysSnapshot.digests);
+            delete copiedDigests['r:' + requestId];
+            reqDraft.digests = copiedDigests;
+          }
+          const primaryIndex = await tx.doc(PrimaryIndex);
+          primaryIndex.byPrimary[bot.primaryConversationId] = rec.id;
+          return rec.id;
+        }, CTX);
+        const newConversation = await harness.conversation(newNativeId, CTX);
+        await live.rebind(botId, newConversation);
+        return turns.enqueue(botId, {
+          requestId,
+          text,
+          ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
+          delivery: 'followUp',
+          stopEpoch: capturedStopEpoch,
+          origin: {
+            sender: { kind: 'user', name: null },
+            replyTo: null,
+          },
+        });
+      });
+    },
+
     async abort(botId) {
       assertNonBlank(botId, 'botId');
       const bot = host.getBot(botId);
@@ -2216,7 +2370,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   // 模型、工具、问卷等执行路径仍受 Center 门禁（运行时本就对 SDK 抛离线错）。
   // scope 查询是纯本地账本读取（不调度、不触碰模型），离线也放行给被动浏览 UI；
   // createScope/updateScope/publishUserMessage 等写路径仍受 Center 门禁。
-  const offlineMethods = new Set(['vaultControl', 'submit', 'getSubmission', 'wait', 'abort', 'turns', 'inspect', 'history', 'watch', 'getBotBoard',
+  const offlineMethods = new Set(['vaultControl', 'submit', 'getSubmission', 'wait', 'abort', 'withdrawQueued', 'turns', 'inspect', 'history', 'watch', 'getBotBoard',
     'uploadAttachment', 'getAttachment',
     'scopeHistory', 'getScopeMessage', 'getScopeMessageDelivery', 'getScopeState', 'listScopeStates', 'listScopeReplicas']);
   const maintenanceAllowed = new Set([...offlineMethods, 'getCurrentDevice', 'getBot', 'getModelCatalog', 'getBotSoul', 'listScopes']);

@@ -70,6 +70,9 @@ const routes = [
   { method: 'GET', key: '/v1/bots/:botId/submissions/:requestId', pattern: /^\/v1\/bots\/([^/]+)\/submissions\/([^/]+)\/?$/, params: ['botId', 'requestId'], hasBody: false, handler: getSubmission },
   { method: 'GET', key: '/v1/bots/:botId/history', pattern: /^\/v1\/bots\/([^/]+)\/history\/?$/, params: ['botId'], hasBody: false, handler: history },
   { method: 'POST', key: '/v1/bots/:botId/abort', pattern: /^\/v1\/bots\/([^/]+)\/abort\/?$/, params: ['botId'], hasBody: true, handler: abort },
+  { method: 'POST', key: '/v1/bots/:botId/queue/withdraw', pattern: /^\/v1\/bots\/([^/]+)\/queue\/withdraw\/?$/, params: ['botId'], hasBody: true, handler: withdrawQueued },
+  { method: 'POST', key: '/v1/bots/:botId/queue/steer', pattern: /^\/v1\/bots\/([^/]+)\/queue\/steer\/?$/, params: ['botId'], hasBody: true, handler: steerQueued },
+  { method: 'POST', key: '/v1/bots/:botId/history/edit', pattern: /^\/v1\/bots\/([^/]+)\/history\/edit\/?$/, params: ['botId'], hasBody: true, handler: editMessage },
   { method: 'POST', key: '/v1/bots/:botId/history/clear', pattern: /^\/v1\/bots\/([^/]+)\/history\/clear\/?$/, params: ['botId'], hasBody: true, handler: clearHistory },
   { method: 'POST', key: '/v1/bots/:botId/compact', pattern: /^\/v1\/bots\/([^/]+)\/compact\/?$/, params: ['botId'], hasBody: true, handler: compact },
   { method: 'GET', key: '/v1/bots/:botId/memory', pattern: /^\/v1\/bots\/([^/]+)\/memory\/?$/, params: ['botId'], hasBody: false, handler: memoryStatus },
@@ -313,6 +316,7 @@ async function dispatch(host, runtime, authorize, req, res, ctx) {
   const OFFLINE_ALLOWED = new Set([
     '/v1/vault', '/v1/host', '/v1/settings', '/v1/service', '/v1/service/update', '/v1/bot-board',
     '/v1/bots/:botId/submissions', '/v1/bots/:botId/submissions/:requestId', '/v1/bots/:botId/abort',
+    '/v1/bots/:botId/queue/withdraw',
     '/v1/bot-requests/:requestId', '/v1/bots/:botId/history', '/v1/bots/:botId/live',
     // 只读读取已上传图片：中心离线时草稿/历史仍可展示既有附件。
     '/v1/bots/:botId/attachments/:attachmentId',
@@ -470,8 +474,29 @@ async function history(host, runtime, params, body, req, res) {
 }
 
 async function abort(host, runtime, params, body, req, res) {
-  await runtime.abort(params.botId);
-  writeControlJson(res, 200, { botId: params.botId });
+  const result = await runtime.abort(params.botId);
+  writeControlJson(res, 200, {
+    botId: params.botId,
+    withdrawn: Array.isArray(result?.withdrawn) ? result.withdrawn : [],
+  });
+}
+
+async function withdrawQueued(_host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  const { params: { botId, ...input } } = normalizeControlCall('withdrawQueued', { ...(body ?? {}), botId: params.botId });
+  writeControlJson(res, 200, await runtime.withdrawQueued(botId, input));
+}
+
+async function steerQueued(_host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  const { params: { botId, ...input } } = normalizeControlCall('steerQueued', { ...(body ?? {}), botId: params.botId });
+  writeControlJson(res, 200, await runtime.steerQueued(botId, input));
+}
+
+async function editMessage(_host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  const { params: { botId, ...input } } = normalizeControlCall('editMessage', { ...(body ?? {}), botId: params.botId });
+  writeControlJson(res, 202, await runtime.editMessage(botId, input));
 }
 
 async function getBotBoard(host, runtime, params, body, req, res) {

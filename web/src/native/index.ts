@@ -5,6 +5,7 @@ import type {
   RuntimeExtensionsConfig,
 } from '../../../host-core/index.js';
 import type {
+  AbortBotResult,
   Attribution,
   BotActivity,
   BotLiveEnd,
@@ -12,7 +13,12 @@ import type {
   BotLiveState,
   BotLiveUpdate,
   LiveGeneration,
+  QueuedTurnItem,
   RemoteControlOutcome,
+  SteerQueuedResult,
+  TurnDeliveryMode,
+  WithdrawQueuedResult,
+  WithdrawnTurnItem,
   WorkLiveEnd,
   WorkLiveSnapshot,
 } from '../../../host-core/index.js';
@@ -110,7 +116,24 @@ export type HostCallResult = { type: 'result'; id: string; result: unknown };
 export type HostLiveFrame = BotLiveSnapshot | BotLiveUpdate | WorkLiveSnapshot | BotLiveEnd | WorkLiveEnd;
 export type HostFrameEvent = { observationId: string; frame?: HostLiveFrame; error?: {code:string; outcome:string; message:string} };
 // Re-export shared live types so Host.tsx / local-scope-api.ts use the same DTO names.
-export type { Attribution, BotActivity, BotLiveEnd, BotLiveSnapshot, BotLiveState, BotLiveUpdate, LiveGeneration, RemoteControlOutcome, WorkLiveEnd, WorkLiveSnapshot };
+export type {
+  AbortBotResult,
+  Attribution,
+  BotActivity,
+  BotLiveEnd,
+  BotLiveSnapshot,
+  BotLiveState,
+  BotLiveUpdate,
+  LiveGeneration,
+  QueuedTurnItem,
+  RemoteControlOutcome,
+  SteerQueuedResult,
+  TurnDeliveryMode,
+  WithdrawQueuedResult,
+  WithdrawnTurnItem,
+  WorkLiveEnd,
+  WorkLiveSnapshot,
+};
 export type HostVoiceEngine = 'system'|'remote';
 export type HostVoiceRemote = { baseUrl: string; model: string; voice: string; configured: boolean; hasApiKey?: boolean };
 export type HostVoiceSettings = { sttEngine: HostVoiceEngine; ttsEngine: HostVoiceEngine; language: string; speechRate: number; stt: HostVoiceRemote; tts: HostVoiceRemote };
