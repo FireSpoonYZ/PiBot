@@ -9,9 +9,12 @@ use serde_json::{json, Value};
 
 use crate::util::{AppError, AppResult};
 
-/// Validates and normalizes a center origin: `https://host[:port]` (or loopback `http://`) without a trailing slash.
+/// Validates and normalizes a center origin: `https://host[:port]` (or loopback `http://`), optionally with one
+/// trailing slash that is dropped. Every request path is built from this origin, so a path, query, fragment or
+/// userinfo is refused instead of silently redirecting requests (`/subpath/api/...`) or leaking credentials.
 pub fn normalize_center_url(value: &str) -> AppResult<String> {
-    let trimmed = value.trim().trim_end_matches('/');
+    let trimmed = value.trim();
+    let trimmed = trimmed.strip_suffix('/').unwrap_or(trimmed);
     let rest = if let Some(r) = trimmed.strip_prefix("https://") {
         r
     } else if let Some(r) = trimmed.strip_prefix("http://") {
@@ -23,8 +26,8 @@ pub fn normalize_center_url(value: &str) -> AppResult<String> {
     } else {
         return Err(AppError::new("INVALID_ARGUMENT", "--center-url must be an https:// URL"));
     };
-    if rest.is_empty() || rest.contains(char::is_whitespace) || rest.contains('?') || rest.contains('#') {
-        return Err(AppError::new("INVALID_ARGUMENT", "--center-url is not a valid https origin"));
+    if rest.is_empty() || rest.contains(|c: char| c.is_whitespace() || matches!(c, '/' | '\\' | '?' | '#' | '@')) {
+        return Err(AppError::new("INVALID_ARGUMENT", "--center-url must be a bare origin (scheme, host and optional port only)"));
     }
     Ok(trimmed.to_string())
 }
@@ -296,6 +299,10 @@ fn map_redeem_fail(fail: HttpFail) -> AppError {
         (_, Some("PAIRING_CODE_INVALID")) => AppError::new("PAIRING_CODE_INVALID", "the pairing code is not valid"),
         (_, Some("PAIRING_CODE_USED")) => AppError::new("PAIRING_CODE_USED", "the pairing code has already been used"),
         (_, Some("PAIRING_CODE_EXPIRED")) => AppError::new("PAIRING_CODE_EXPIRED", "the pairing code has expired"),
+        (_, Some("PAIRING_CODE_REVOKED")) => AppError::new(
+            "PAIRING_CODE_REVOKED",
+            "the pairing code was voided because the add-device window on the center was closed",
+        ),
         (_, Some("PAIRING_CODE_DEVICE_MISMATCH")) => AppError::new(
             "PAIRING_CODE_DEVICE_MISMATCH",
             "the pairing code was issued for a different device",
@@ -360,6 +367,29 @@ mod tests {
         assert_eq!(normalize_center_url(" https://c.example:3000/ ").unwrap(), "https://c.example:3000");
         assert_eq!(normalize_center_url("http://c").unwrap_err().code, "INVALID_ARGUMENT");
         assert_eq!(normalize_center_url("https://").unwrap_err().code, "INVALID_ARGUMENT");
+        assert_eq!(normalize_center_url("http://localhost:8080/").unwrap(), "http://localhost:8080");
+        assert_eq!(normalize_center_url("http://[::1]:8080").unwrap(), "http://[::1]:8080");
+    }
+
+    #[test]
+    fn center_url_must_be_a_bare_origin() {
+        for bad in [
+            "https://c.example/subpath",
+            "https://c.example/subpath/",
+            "https://c.example//",
+            "https://c.example/?x=1",
+            "https://c.example?x=1",
+            "https://c.example/#top",
+            "https://c.example#top",
+            "https://user@c.example",
+            "https://user:pw@c.example:8443",
+            "https://c.example\\evil.example",
+            "https:// c.example",
+            "http://localhost/subpath",
+            "http://localhost@evil.example",
+        ] {
+            assert_eq!(normalize_center_url(bad).unwrap_err().code, "INVALID_ARGUMENT", "{bad}");
+        }
     }
 
     /// The exact transport error ureq/rustls produced against a private-CA center when no CA was given.
@@ -388,6 +418,7 @@ mod tests {
         assert_eq!(status(401, &coded("PAIRING_CODE_INVALID")), "PAIRING_CODE_INVALID");
         assert_eq!(status(409, &coded("PAIRING_CODE_USED")), "PAIRING_CODE_USED");
         assert_eq!(status(410, &coded("PAIRING_CODE_EXPIRED")), "PAIRING_CODE_EXPIRED");
+        assert_eq!(status(410, &coded("PAIRING_CODE_REVOKED")), "PAIRING_CODE_REVOKED");
         assert_eq!(status(429, &coded("RATE_LIMITED")), "RATE_LIMITED");
         // A generic code cannot take over a registered identity; a targeted code is for one device only.
         assert_eq!(status(409, &coded("DEVICE_ALREADY_REGISTERED")), "DEVICE_ALREADY_REGISTERED");
@@ -476,6 +507,7 @@ mod tests {
         let token = "t".repeat(43);
         for (status_line, body, expected) in [
             ("410 Gone", r#"{"error":{"code":"PAIRING_CODE_EXPIRED","message":"x"}}"#, "PAIRING_CODE_EXPIRED"),
+            ("410 Gone", r#"{"error":{"code":"PAIRING_CODE_REVOKED","message":"x"}}"#, "PAIRING_CODE_REVOKED"),
             ("409 Conflict", r#"{"error":{"code":"PAIRING_CODE_USED","message":"x"}}"#, "PAIRING_CODE_USED"),
             ("404 Not Found", r#"{"error":{"code":"NOT_FOUND","message":"Not found"}}"#, "CENTER_UNSUPPORTED"),
             ("201 Created", r#"{"deviceId":"mac-1"}"#, "CENTER_ERROR"),

@@ -134,6 +134,8 @@ export function registerPairingRoutes(app, { store, bridge, route, notify, publi
       // so a generic code may add the same machine back under its persistent ID.
     });
 
+    // A device the owner had deleted comes back as an addition, not a re-pair.
+    const added = existing === null || existing.revokedAt !== null;
     let registered;
     try {
       // Both branches are idempotent for the same token, so a replayed claim can simply run again.
@@ -142,6 +144,9 @@ export function registerPairingRoutes(app, { store, bridge, route, notify, publi
       else bridge.registry.rotate({ deviceId, token: deviceToken });
       // Only fills a missing name, so a rename made by the owner survives re-pairing.
       registered = bridge.registry.updateMetadata(deviceId, { displayName, platform });
+      // A deleted device keeps the name it had before (the delete is a soft revoke). It comes back as a
+      // new registration, so the name the machine reports now is the one to show, not the stale one.
+      if (existing !== null && added) registered = bridge.registry.rename(deviceId, displayName);
     } catch (error) {
       // The registry is a separate database, so the claim cannot be rolled back with it: give the code back.
       if (!claim.replay) store.releasePairingCode(claim.id, tokenHash);
@@ -149,8 +154,6 @@ export function registerPairingRoutes(app, { store, bridge, route, notify, publi
     }
     // A rebound device invalidates streams still holding its previous credential.
     if (existing !== null) notify(deviceId);
-    // A device the owner had deleted comes back as an addition, not a re-pair.
-    const added = existing === null || existing.revokedAt !== null;
     return reply.code(added ? 201 : 200).send({ deviceId, deviceToken, displayName: registered.displayName ?? displayName, platform });
   });
 }

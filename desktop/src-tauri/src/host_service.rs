@@ -307,6 +307,10 @@ fn confirm_stopped(result: &Value) -> Result<(), BridgeError> {
   ))
 }
 
+/// A center is addressed by its origin only: scheme, host and optional port (plain `http` only for loopback).
+/// The launcher and the center build every request path themselves, so a path, query or fragment would
+/// quietly redirect requests (`/subpath/api/...`) or be refused later with a different error. One trailing
+/// slash is dropped, which is what the launcher stores, so the same center always compares equal.
 fn validate_center_url(raw: &str) -> Result<String, BridgeError> {
   let url = raw.trim();
   if url.is_empty() || url.len() > 2048 {
@@ -316,13 +320,16 @@ fn validate_center_url(raw: &str) -> Result<String, BridgeError> {
   if !parsed.username().is_empty() || parsed.password().is_some() || parsed.host_str().is_none() {
     return Err(invalid("invalid center URL"));
   }
+  if parsed.query().is_some() || parsed.fragment().is_some() || parsed.path() != "/" {
+    return Err(invalid("center URL must be an origin: scheme, host and optional port only"));
+  }
   let loopback = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
   match parsed.scheme() {
     "https" => {}
     "http" if loopback => {}
     _ => return Err(invalid("center URL must use HTTPS")),
   }
-  Ok(url.to_string())
+  Ok(url.strip_suffix('/').unwrap_or(url).to_string())
 }
 
 fn validate_display_name(raw: &str) -> Result<String, BridgeError> {
@@ -834,12 +841,20 @@ pub async fn desktop_host_pair_code(
   force: Option<bool>,
 ) -> Result<Value, BridgeError> {
   ensure_main_webview(&webview)?;
-  let parsed = pairing_code::parse(&code).map_err(pairing_code_error)?;
+  let (parsed, center_url) = read_pairing_code(&code)?;
   drop(code);
-  let center_url = validate_center_url(&parsed.url)
-    .map_err(|_| BridgeError::new("INVALID_PAIRING_CODE", "the pairing code is damaged or incomplete", "not-sent"))?;
   let display_name = optional_display_name(display_name)?;
   pair_with_launcher(&app, &bridge, center_url, parsed.secret, display_name, parsed.ca, force.unwrap_or(false), true).await
+}
+
+/// Decodes a pasted code and checks the center address it carries. A code whose address is not a bare
+/// origin (a path, query, userinfo, plain http to a remote host) is as unusable as a damaged one, and is
+/// reported the same way before anything is sent.
+fn read_pairing_code(code: &str) -> Result<(pairing_code::PairingCode, String), BridgeError> {
+  let parsed = pairing_code::parse(code).map_err(pairing_code_error)?;
+  let center_url = validate_center_url(&parsed.url)
+    .map_err(|_| BridgeError::new("INVALID_PAIRING_CODE", "the pairing code is damaged or incomplete", "not-sent"))?;
+  Ok((parsed, center_url))
 }
 
 /// What the desktop client needs to reuse an already paired Host's identity.
@@ -1477,6 +1492,65 @@ mod local_identity_tests {
   fn the_token_and_pairing_secret_never_reach_the_launcher_through_the_environment() {
     for key in ["E_LAUNCHER_OWNER_PASSWORD", "E_LAUNCHER_PAIRING_SECRET", "E_LAUNCHER_RELAY_TOKEN", "E_LAUNCHER_CONTROL_TOKEN"] {
       assert!(SECRET_ENV_KEYS.contains(&key), "{key} must be scrubbed so stdin is the only source");
+    }
+  }
+}
+
+#[cfg(test)]
+mod center_url_tests {
+  use super::*;
+  use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+
+  fn code_for(center: &str) -> String {
+    let payload = json!({ "u": center, "c": "A".repeat(43) });
+    format!("{}{}", pairing_code::PREFIX, URL_SAFE_NO_PAD.encode(payload.to_string()))
+  }
+
+  #[test]
+  fn accepts_a_bare_origin_and_drops_one_trailing_slash() {
+    for (raw, expected) in [
+      ("https://center.example", "https://center.example"),
+      (" https://center.example/ ", "https://center.example"),
+      ("https://center.example:8443", "https://center.example:8443"),
+      ("https://192.168.1.10:8443/", "https://192.168.1.10:8443"),
+      ("http://localhost:8080", "http://localhost:8080"),
+      ("http://127.0.0.1:8080/", "http://127.0.0.1:8080"),
+      ("http://[::1]:8080", "http://[::1]:8080"),
+    ] {
+      assert_eq!(validate_center_url(raw).ok().as_deref(), Some(expected), "{raw}");
+    }
+  }
+
+  #[test]
+  fn refuses_anything_that_is_more_than_an_origin() {
+    for bad in [
+      "https://center.example/subpath",
+      "https://center.example/subpath/",
+      "https://center.example//",
+      "https://center.example/?x=1",
+      "https://center.example?x=1",
+      "https://center.example/#top",
+      "https://center.example#top",
+      "https://user@center.example",
+      "https://user:pw@center.example",
+      "http://center.example",
+      "ftp://center.example",
+      "center.example",
+      "",
+    ] {
+      assert!(validate_center_url(bad).is_err(), "{bad} must be refused");
+    }
+  }
+
+  #[test]
+  fn a_pairing_code_must_carry_a_bare_origin() {
+    let center = |text: &str| read_pairing_code(&code_for(text)).ok().map(|(_, url)| url);
+    assert_eq!(center("https://center.example").as_deref(), Some("https://center.example"));
+    assert_eq!(center("https://center.example/").as_deref(), Some("https://center.example"));
+    // Each of these used to get past the check and fail later in the launcher, or send requests to a sub path.
+    for bad in ["https://center.example/sub", "https://center.example/?q=1", "https://center.example/#x", "https://u:p@center.example", "http://center.example"] {
+      let error = read_pairing_code(&code_for(bad)).err().expect(bad);
+      assert_eq!(error.code, "INVALID_PAIRING_CODE", "{bad}");
     }
   }
 }

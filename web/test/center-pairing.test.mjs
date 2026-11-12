@@ -232,7 +232,10 @@ test('expired and revoked codes are refused and register nothing', async () => {
     assert.equal((await owner.del(`/api/pairing-codes/${revoked.id}`)).statusCode, 204);
     assert.equal((await owner.del(`/api/pairing-codes/${revoked.id}`)).statusCode, 204);
     assert.equal((await owner.get(`/api/pairing-codes/${revoked.id}`)).json().status, 'revoked');
-    assert.equal((await center.redeem(deviceBody(revoked.code))).json().error.code, 'PAIRING_CODE_EXPIRED');
+    // Voided by closing the add-device window is told apart from running out of time.
+    const voided = await center.redeem(deviceBody(revoked.code));
+    assert.equal(voided.statusCode, 410);
+    assert.equal(voided.json().error.code, 'PAIRING_CODE_REVOKED');
 
     assert.equal(center.bridge.registry.get('mac-host-1'), null);
     assert.equal((await owner.get('/api/pairing-codes/missing')).statusCode, 404);
@@ -272,8 +275,9 @@ test('a generic code cannot take over a device that already exists', async () =>
 test('a generic code adds back a device the owner deleted, as a fresh registration', async () => {
   await withCenter(async (center, owner) => {
     const first = (await owner.post('/api/pairing-codes')).json();
-    const firstBody = deviceBody(first.code);
+    const firstBody = deviceBody(first.code, { displayName: 'My Mac' });
     assert.equal((await center.redeem(firstBody)).statusCode, 201);
+    assert.equal(center.bridge.registry.get('mac-host-1').displayName, 'My Mac');
     assert.equal((await owner.del('/api/devices/mac-host-1')).statusCode, 204);
 
     // Deleting is a soft revoke, so the same machine still reports the same ID. A new code adds it back.
@@ -282,14 +286,32 @@ test('a generic code adds back a device the owner deleted, as a fresh registrati
     const res = await center.redeem(body);
     assert.equal(res.statusCode, 201);
     assert.equal(res.json().deviceId, 'mac-host-1');
+    // The name the machine reports now wins over the one it had before the deletion, in the answer and
+    // in what the owner sees afterwards.
+    assert.equal(res.json().displayName, 'MacBook Pro');
+    assert.equal(center.bridge.registry.get('mac-host-1').displayName, 'MacBook Pro');
     assert.equal(center.bridge.registry.get('mac-host-1').revokedAt, null);
     assert.ok(center.bridge.registry.authenticate('mac-host-1', body.deviceToken));
     // The credential from before the deletion stays dead.
     assert.equal(center.bridge.registry.authenticate('mac-host-1', firstBody.deviceToken), null);
-    assert.ok((await owner.get('/api/devices')).json().some(device => device.deviceId === 'mac-host-1'));
+    assert.ok((await owner.get('/api/devices')).json().some(device => device.deviceId === 'mac-host-1' && device.name === 'MacBook Pro'));
     const state = (await owner.get(`/api/pairing-codes/${second.id}`)).json();
     assert.equal(state.status, 'redeemed');
     assert.equal(state.device.deviceId, 'mac-host-1');
+  });
+});
+
+test('a code issued for the device keeps the name the owner gave it', async () => {
+  await withCenter(async (center, owner) => {
+    const first = (await owner.post('/api/pairing-codes')).json();
+    assert.equal((await center.redeem(deviceBody(first.code, { displayName: 'raw-hostname' }))).statusCode, 201);
+    center.bridge.registry.rename('mac-host-1', 'Living-room Mac');
+
+    const again = (await owner.post('/api/pairing-codes', { deviceId: 'mac-host-1' })).json();
+    const res = await center.redeem(deviceBody(again.code, { displayName: 'raw-hostname' }));
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.json().displayName, 'Living-room Mac');
+    assert.equal(center.bridge.registry.get('mac-host-1').displayName, 'Living-room Mac');
   });
 });
 

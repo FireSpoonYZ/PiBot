@@ -638,6 +638,36 @@ fn rebind_allowed(previous: Option<&Config>, center_url: &str, redeem: bool) -> 
     redeem && previous.is_some_and(|config| config.center_url == center_url)
 }
 
+/// SHA-256 (hex) of the one-time pairing secret.
+fn secret_fingerprint(secret: &str) -> String {
+    use std::fmt::Write;
+    let digest = ring::digest::digest(&ring::digest::SHA256, secret.as_bytes());
+    digest.as_ref().iter().fold(String::with_capacity(64), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    })
+}
+
+/// The device token of an earlier attempt that never got its response, when this attempt is the same
+/// one: same center, device and mode and, for a pairing code, the same code. A new code must start
+/// from a new token. If the center registered the lost attempt and the owner then deleted the device,
+/// re-using that token for the next code is refused for good (the center will not rotate a revoked
+/// device onto the token it already holds), and every later code would hit the same wall.
+fn reusable_pending_token(
+    pending: Option<&Value>,
+    center_url: &str,
+    device_id: &str,
+    force: bool,
+    code_fingerprint: Option<&str>,
+) -> Option<String> {
+    let pending = pending?;
+    let same = pending["centerUrl"] == center_url
+        && pending["deviceId"] == device_id
+        && pending["force"] == force
+        && pending["codeFingerprint"].as_str() == code_fingerprint;
+    if same { pending["deviceToken"].as_str().map(str::to_owned) } else { None }
+}
+
 fn cmd_pair(paths: &HostPaths, flags: &Flags) -> AppResult<Value> {
     let center_url = center::normalize_center_url(flags.required("center-url")?)?;
     let port = parse_port(flags.get("port"))?;
@@ -666,11 +696,16 @@ fn cmd_pair(paths: &HostPaths, flags: &Flags) -> AppResult<Value> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(AppError::io("read pending pairing", e)),
     };
-    let token = pending.as_ref().filter(|p|
-        p["centerUrl"] == center_url && p["deviceId"] == device_id && p["force"] == force
-    ).and_then(|p| p["deviceToken"].as_str()).map(str::to_owned).unwrap_or(random_token()?);
+    // Only the digest of the one-time secret is written down: it pins an unconfirmed token to the
+    // code it was requested with, and the secret itself never reaches the disk.
+    let fingerprint = redeem.then(|| secret_fingerprint(&password));
+    let token = match reusable_pending_token(pending.as_ref(), &center_url, &device_id, force, fingerprint.as_deref()) {
+        Some(token) => token,
+        None => random_token()?,
+    };
     crate::util::write_atomic(&pending_path, json!({
-        "centerUrl": center_url, "deviceId": device_id, "deviceToken": token, "force": force
+        "centerUrl": center_url, "deviceId": device_id, "deviceToken": token, "force": force,
+        "codeFingerprint": fingerprint
     }).to_string().as_bytes(), true)?;
 
     let mut client = center::CenterClient::new(&center_url, ca_file.as_deref().map(std::path::Path::new))?;
@@ -895,6 +930,52 @@ mod tests {
         assert!(!rebind_allowed(None, "https://center.example", true));
         // Same host on another port is another center.
         assert!(!rebind_allowed(Some(&paired), "https://center.example:8443", true));
+    }
+
+    #[test]
+    fn secret_fingerprint_is_the_sha256_of_the_secret() {
+        // FIPS 180-2 test vector for "abc".
+        assert_eq!(
+            secret_fingerprint("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_ne!(secret_fingerprint("abc"), secret_fingerprint("abd"));
+    }
+
+    #[test]
+    fn an_unconfirmed_token_is_only_reused_for_the_same_pairing_code() {
+        let pending = |fingerprint: Option<&str>| json!({
+            "centerUrl": "https://c", "deviceId": "d", "deviceToken": "T1", "force": false,
+            "codeFingerprint": fingerprint
+        });
+        let first = secret_fingerprint("S1");
+        let second = secret_fingerprint("S2");
+        let reuse = |pending: &Value, code: Option<&str>| reusable_pending_token(Some(pending), "https://c", "d", false, code);
+        // The same code after a lost response keeps its token, so the center's replay window applies.
+        assert_eq!(reuse(&pending(Some(&first)), Some(&first)).as_deref(), Some("T1"));
+        // A new code (e.g. after the owner deleted the device that the lost attempt registered) starts afresh.
+        assert_eq!(reuse(&pending(Some(&first)), Some(&second)), None);
+        // Owner-password and pairing-code attempts never share a token, in either direction.
+        assert_eq!(reuse(&pending(None), Some(&first)), None);
+        assert_eq!(reuse(&pending(Some(&first)), None), None);
+        assert_eq!(reuse(&pending(None), None).as_deref(), Some("T1"));
+        // A file from before the fingerprint existed has no such field at all.
+        let legacy = json!({ "centerUrl": "https://c", "deviceId": "d", "deviceToken": "T1", "force": false });
+        assert_eq!(reuse(&legacy, None).as_deref(), Some("T1"));
+        assert_eq!(reuse(&legacy, Some(&first)), None);
+    }
+
+    #[test]
+    fn an_unconfirmed_token_is_not_reused_for_another_center_device_or_mode() {
+        let pending = json!({
+            "centerUrl": "https://c", "deviceId": "d", "deviceToken": "T1", "force": false,
+            "codeFingerprint": "f"
+        });
+        assert_eq!(reusable_pending_token(Some(&pending), "https://c", "d", false, Some("f")).as_deref(), Some("T1"));
+        assert_eq!(reusable_pending_token(Some(&pending), "https://other", "d", false, Some("f")), None);
+        assert_eq!(reusable_pending_token(Some(&pending), "https://c", "e", false, Some("f")), None);
+        assert_eq!(reusable_pending_token(Some(&pending), "https://c", "d", true, Some("f")), None);
+        assert_eq!(reusable_pending_token(None, "https://c", "d", false, Some("f")), None);
     }
 
     #[test]

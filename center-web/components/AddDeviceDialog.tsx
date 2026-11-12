@@ -68,21 +68,30 @@ export function AddDeviceDialog({ open, target, onClose, onPaired }: {
     };
   }, [open, generation, targetId]);
 
-  // Watch for the device to redeem the code.
+  const remaining = code ? code.data.ttlSeconds * 1000 - (now - code.receivedAt) : 0;
+  const expired = Boolean(code) && remaining <= 0;
+
+  // Watch for the device to redeem the code. Once the code has run out nothing can redeem it any more,
+  // so the polling stops after one last look (a redemption in the final seconds must still be seen).
   const codeId = code?.data.id;
   useEffect(() => {
     if (!codeId || paired) return;
     let live = true;
-    const timer = setInterval(() => {
+    const check = () => {
       api.getPairingCode(codeId).then(state => {
         if (!live || state.status !== 'redeemed') return;
         const name = state.device?.name ?? state.device?.deviceId ?? '';
         setPaired({ name });
         pairedHandler.current(name);
       }, () => { /* transient: the next tick retries */ });
-    }, 2000);
+    };
+    if (expired) {
+      check();
+      return () => { live = false; };
+    }
+    const timer = setInterval(check, 2000);
     return () => { live = false; clearInterval(timer); };
-  }, [codeId, paired]);
+  }, [codeId, paired, expired]);
 
   useEffect(() => {
     if (!paired) return;
@@ -90,11 +99,12 @@ export function AddDeviceDialog({ open, target, onClose, onPaired }: {
     return () => clearTimeout(timer);
   }, [paired, onClose]);
 
+  // The countdown only matters while there is time left.
   useEffect(() => {
-    if (!code || paired) return;
+    if (!code || paired || expired) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [code, paired]);
+  }, [code, paired, expired]);
 
   useEffect(() => {
     if (!open) return;
@@ -106,9 +116,6 @@ export function AddDeviceDialog({ open, target, onClose, onPaired }: {
     );
     return () => { live = false; };
   }, [open]);
-
-  const remaining = code ? code.data.ttlSeconds * 1000 - (now - code.receivedAt) : 0;
-  const expired = Boolean(code) && remaining <= 0;
 
   const copy = async () => {
     if (!code) return;
@@ -189,7 +196,7 @@ export function AddDeviceDialog({ open, target, onClose, onPaired }: {
             <p className="secondary" role="status">
               {expired
                 ? '配对码已过期，请重新生成。'
-                : `仅可使用一次，${clock(remaining)} 后失效；关闭此窗口会使它立即作废。`}
+                : `仅可使用一次，${clock(remaining)} 后失效。复制后请保持此窗口打开，直到设备配对完成：关闭窗口会使配对码立即作废。`}
             </p>
             <p className="secondary">
               {code.data.includesCa

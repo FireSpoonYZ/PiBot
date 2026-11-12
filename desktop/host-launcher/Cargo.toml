@@ -18,6 +18,8 @@ serde_json = "1"
 # rustls only (no OpenSSL); same rustls feature set as ureq so no second crypto provider is built.
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# The crypto provider rustls already builds; used directly only for SHA-256 of the pairing secret.
+ring = { version = "0.17", default-features = false }
 rustls-pemfile = "2"
 webpki-roots = "0.26"
 getrandom = "0.2"

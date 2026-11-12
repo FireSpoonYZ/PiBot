@@ -5,7 +5,7 @@ import { GrokBotAvatar, JARVIS_AVATAR_PRESET } from '../../../web/src/GrokBotAva
 import { ErrorNotice, errorText, useText } from '../../../web/src/ui';
 import type { DesktopClientStatus } from '../../../host-core/desktop-client.js';
 import { hostAdopt, hostConnectLocal, hostControl, hostErrorCode, hostErrorText, hostPair, hostPairCode, hostStatus, hostWarningText, rawMessage, type HostPairResult, type HostStatus } from './hostService';
-import { readPaste } from './pairingCode';
+import { readPaste } from '../../../web/src/pairingCode';
 import { ClientUpdateProvider } from '../../../web/src/ClientUpdateProvider';
 import type { ClientUpdateOp, ClientUpdateParams, ClientUpdateStatus } from '../../../web/src/ClientUpdate';
 import './CenterGate.css';
@@ -411,12 +411,13 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
 
   /**
    * 配对码误填进手动表单（设备令牌 / 设备身份）：它不是凭据，拿去直连只会得到看不懂的 TLS 或认证错误。
-   * 有内置 Host 时转交配对码流程；没有时说明原因。返回 true 表示已按配对码处理。
+   * 有内置 Host 时转交配对码流程；没有时说明原因。无论哪种都不把码留在这个字段里（`restore` 还原字段）。
+   * 返回 true 表示已按配对码处理。
    */
-  const takeMisplacedCode = (value: string): boolean => {
+  const takeMisplacedCode = (value: string, restore: () => void): boolean => {
     if (readPaste(value).kind !== 'code') return false;
+    restore();
     if (hostAvailable) {
-      setToken('');
       onPairCodeChange(value);
     } else {
       setError(t('这是配对码，不是设备令牌。配对码需要带内置 Host 的 PiBot 客户端；当前客户端只能用设备 ID 和令牌连接。', 'That is a pairing code, not a device token. Pairing codes need a PiBot client with the built-in Host; this client can only connect with a device ID and token.'));
@@ -427,7 +428,7 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
   const connect = async (event: FormEvent) => {
     event.preventDefault();
     if (busy || showerBusy) return;
-    if ([token, deviceId].some(takeMisplacedCode)) return;
+    if (takeMisplacedCode(token, () => setToken('')) || takeMisplacedCode(deviceId, () => setDeviceId(''))) return;
     const attempt = ++epoch.current;
     autoAttempted.current = true;
     setBusy(true);
@@ -870,7 +871,13 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
       </label>
       <label className="gate-field">
         <span>{t('设备身份', 'Device identity')}</span>
-        <input required value={deviceId} disabled={busy || showerBusy} onChange={e => setDeviceId(e.target.value)} />
+        <input
+          required
+          value={deviceId}
+          disabled={busy || showerBusy}
+          // 误贴配对码在这里就转走：否则中心地址还空着时，浏览器的 required 校验会把提交拦在 connect 之前。
+          onChange={e => { const value = e.target.value; if (!takeMisplacedCode(value, () => setDeviceId(deviceId))) setDeviceId(value); }}
+        />
       </label>
       <label className="gate-field">
         <span>
@@ -883,7 +890,7 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
           autoComplete="off"
           value={token}
           disabled={busy || showerBusy}
-          onChange={e => { setToken(e.target.value); takeMisplacedCode(e.target.value); }}
+          onChange={e => { const value = e.target.value; if (!takeMisplacedCode(value, () => setToken(''))) setToken(value); }}
           placeholder={matchesSaved ? t('已保存凭据，留空使用已存令牌', 'Saved credentials — leave blank to reuse') : ''}
         />
       </label>

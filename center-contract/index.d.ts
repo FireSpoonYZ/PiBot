@@ -175,7 +175,8 @@ export interface PairingCaState { ca: string | null; certificates: Array<{ subje
  * (generated before the call so a lost response can be retried with the same values).
  * A known `deviceId` is re-bound, keeping its Bots and sessions, only by a code issued for that device.
  * Errors: `PAIRING_CODE_INVALID` (401), `PAIRING_CODE_USED` (409), `PAIRING_CODE_EXPIRED` (410, also when the
- * target device was deleted or revoked), `PAIRING_CODE_DEVICE_MISMATCH` (409), `DEVICE_ALREADY_REGISTERED` (409).
+ * target device was deleted or revoked), `PAIRING_CODE_REVOKED` (410, the owner closed the add-device window before the
+ * code was used), `PAIRING_CODE_DEVICE_MISMATCH` (409), `DEVICE_ALREADY_REGISTERED` (409).
  */
 export interface RedeemPairingCodeRequest { code: string; deviceId: string; deviceToken: string; displayName: string; platform: DevicePlatform }
 export type RedeemPairingCodeResponse = CreateDeviceResponse;

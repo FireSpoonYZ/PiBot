@@ -2,6 +2,7 @@ package com.example.launcherprobe;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -15,6 +16,7 @@ import javax.net.ssl.SSLPeerUnverifiedException;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 
 /** 兑换失败与传输失败的归类：用户看到的是“码的问题 / 设备的问题 / 证书问题 / 网络问题”，而不是笼统的失败。 */
@@ -36,8 +38,17 @@ public class CenterPairingRedeemTest {
         assertEquals("PAIRING_CODE_INVALID", codeOf(401, body("PAIRING_CODE_INVALID")));
         assertEquals("PAIRING_CODE_USED", codeOf(409, body("PAIRING_CODE_USED")));
         assertEquals("PAIRING_CODE_EXPIRED", codeOf(410, body("PAIRING_CODE_EXPIRED")));
+        assertEquals("PAIRING_CODE_REVOKED", codeOf(410, body("PAIRING_CODE_REVOKED")));
         assertEquals("DEVICE_ALREADY_REGISTERED", codeOf(409, body("DEVICE_ALREADY_REGISTERED")));
         assertEquals("PAIRING_CODE_DEVICE_MISMATCH", codeOf(409, body("PAIRING_CODE_DEVICE_MISMATCH")));
+    }
+
+    @Test public void aVoidedCodeIsToldApartFromAnExpiredOne() {
+        // Closing the add-device window voids the code: the fix is to keep it open, not to wait less.
+        String voided = CenterPairing.redeemFailure(410, body("PAIRING_CODE_REVOKED")).getMessage();
+        assertTrue(voided.contains("窗口") && voided.contains("保持"));
+        assertFalse(voided.contains("10 分钟"));
+        assertTrue(CenterPairing.redeemFailure(410, body("PAIRING_CODE_EXPIRED")).getMessage().contains("10 分钟"));
     }
 
     @Test public void anAlreadyRegisteredDeviceIsNeverReportedAsALocalBinding() {
@@ -117,5 +128,48 @@ public class CenterPairingRedeemTest {
         String message = CenterPairing.transportFailure(new SSLPeerUnverifiedException("x")).getMessage();
         assertTrue(message.contains("私有 CA"));
         assertTrue(message.contains("重新生成配对码"));
+    }
+
+    private static final String CENTER = "https://center.example";
+    private static final String DEVICE = "device-1";
+    private static final String FIRST_CODE = "a".repeat(43);
+    private static final String SECOND_CODE = "b".repeat(43);
+
+    private static android.content.SharedPreferences pendingStore() {
+        android.content.SharedPreferences store = RuntimeEnvironment.getApplication()
+                .getSharedPreferences("center_pairing_test", android.content.Context.MODE_PRIVATE);
+        assertTrue(store.edit().clear().commit());
+        return store;
+    }
+
+    @Test public void theSameCodeRetriedAfterALostResponseKeepsItsToken() throws Exception {
+        android.content.SharedPreferences store = pendingStore();
+        String key = CenterPairing.redeemPendingKey(CENTER, DEVICE, FIRST_CODE);
+        String token = CenterPairing.requestedToken(store, key);
+        assertEquals(token, CenterPairing.requestedToken(store, CenterPairing.redeemPendingKey(CENTER, DEVICE, FIRST_CODE)));
+    }
+
+    @Test public void aNewCodeNeverInheritsTheTokenOfAnEarlierUnconfirmedAttempt() throws Exception {
+        // The center may have registered the attempt whose response was lost; if the owner then deleted
+        // the device, the next code must not come back with the token the center already holds.
+        android.content.SharedPreferences store = pendingStore();
+        String lost = CenterPairing.requestedToken(store, CenterPairing.redeemPendingKey(CENTER, DEVICE, FIRST_CODE));
+        String next = CenterPairing.requestedToken(store, CenterPairing.redeemPendingKey(CENTER, DEVICE, SECOND_CODE));
+        assertNotEquals(lost, next);
+        // The new attempt is what is remembered from now on.
+        assertEquals(next, CenterPairing.requestedToken(store, CenterPairing.redeemPendingKey(CENTER, DEVICE, SECOND_CODE)));
+    }
+
+    @Test public void theKeyIsBoundToCenterDeviceAndCodeAndNeverHoldsTheSecret() throws Exception {
+        String key = CenterPairing.redeemPendingKey(CENTER, DEVICE, FIRST_CODE);
+        assertNotEquals(key, CenterPairing.redeemPendingKey("https://other.example", DEVICE, FIRST_CODE));
+        assertNotEquals(key, CenterPairing.redeemPendingKey(CENTER, "device-2", FIRST_CODE));
+        assertNotEquals(key, CenterPairing.redeemPendingKey(CENTER, DEVICE, SECOND_CODE));
+        assertFalse(key.contains(FIRST_CODE));
+        // Never the owner-password key either: those attempts do not share a token with a code.
+        assertNotEquals(CENTER + "\n" + DEVICE + "\ntrue", key);
+        android.content.SharedPreferences store = pendingStore();
+        CenterPairing.requestedToken(store, key);
+        assertFalse(store.getString("key", "").contains(FIRST_CODE));
     }
 }

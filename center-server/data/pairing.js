@@ -85,7 +85,10 @@ export function pairingStore(db, transaction) {
           admit({ replay: true, targetDeviceId: row.target_device_id });
           return { id: row.id, replay: true };
         }
-        if (row.revoked_at !== null || row.expires_at <= now) fail('PAIRING_CODE_EXPIRED', 'Pairing code has expired');
+        // Voided by the owner (the add-device window was closed) is told apart from running out of time:
+        // the first is fixed by keeping the window open, the second by asking for a new code.
+        if (row.revoked_at !== null) fail('PAIRING_CODE_REVOKED', 'Pairing code was voided when the add-device window was closed');
+        if (row.expires_at <= now) fail('PAIRING_CODE_EXPIRED', 'Pairing code has expired');
         admit({ replay: false, targetDeviceId: row.target_device_id });
         db.prepare('UPDATE pairing_codes SET redeemed_at = ?, device_id = ?, token_hash = ? WHERE id = ?').run(now, deviceId, tokenHash, row.id);
         return { id: row.id, replay: false };

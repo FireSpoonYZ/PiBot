@@ -80,24 +80,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pibot-host"
-version = "0.0.14"
-dependencies = [
- "base64",
- "ctrlc",
- "fs2",
- "getrandom",
- "libc",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "ureq",
- "webpki-roots 0.26.11",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -305,6 +287,25 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "pibot-host"
+version = "0.0.14"
+dependencies = [
+ "base64",
+ "ctrlc",
+ "fs2",
+ "getrandom",
+ "libc",
+ "ring",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "ureq",
+ "webpki-roots 0.26.11",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "potential_utf"

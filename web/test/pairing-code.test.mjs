@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { readPaste, PAIRING_CODE_PREFIX } from '../../desktop/web/src/pairingCode.ts';
+import { readPaste, PAIRING_CODE_PREFIX } from '../src/pairingCode.ts';
 import { encodePairingCode } from '../../center-server/pairing.js';
 
 const secret = () => randomBytes(24).toString('base64url');
@@ -55,6 +55,8 @@ test('rejects codes whose fields are unusable', () => {
     { u: 'not a url', c: good.c },
     { u: 'ftp://center.example.com', c: good.c },
     { u: 'javascript:alert(1)', c: good.c },
+    { u: good.u, c: good.c, a: 'not a certificate' },
+    { u: good.u, c: good.c, a: PEM + 'A'.repeat(64 * 1024) },
   ]) {
     assert.equal(readPaste(encode(bad)).kind, 'damaged', JSON.stringify(bad));
   }
@@ -66,6 +68,46 @@ test('the host shown to the user comes from the code, not from anything the page
   const shown = payload => readPaste(encode({ c: secret(), ...payload })).centerHost;
   assert.equal(shown({ u: 'https://Center.Example.com:8443/' }), 'center.example.com:8443');
   assert.equal(shown({ u: 'https://center.example.com:443' }), 'center.example.com');
-  // A look-alike userinfo trick must not display the part before the @ as the host.
-  assert.equal(shown({ u: 'https://good.example.com@evil.example.net' }), 'evil.example.net');
+  assert.equal(shown({ u: '  https://center.example.com  ' }), 'center.example.com');
+});
+
+test('the center address must be a bare origin, exactly as the native layers insist', () => {
+  const kind = (u, options) => readPaste(encode({ u, c: secret() }), options).kind;
+  for (const ok of ['https://center.example.com', 'https://center.example.com/', 'https://192.168.1.10:8443', 'https://[2001:db8::1]:8443']) {
+    assert.equal(kind(ok), 'code', ok);
+  }
+  // Each of these would be sent on and refused (or worse, followed) by the native side.
+  for (const bad of [
+    'https://center.example.com/subpath',
+    'https://center.example.com/subpath/',
+    'https://center.example.com//',
+    'https://center.example.com/?x=1',
+    'https://center.example.com?x=1',
+    'https://center.example.com/#top',
+    'https://center.example.com#top',
+    // A look-alike userinfo trick must not be accepted, let alone shown as the host.
+    'https://good.example.com@evil.example.net',
+    'https://user:pw@center.example.com',
+    'https://center.example.com\\evil.example.net',
+    'http://center.example.com',
+    'http://192.168.1.10:8080',
+    'http://localhost.evil.example',
+    'https:///center.example.com',
+    'https://',
+  ]) {
+    assert.equal(kind(bad), 'damaged', bad);
+  }
+});
+
+test('plain http is for a loopback development center only, and never on the phone', () => {
+  const kind = (u, options) => readPaste(encode({ u, c: secret() }), options).kind;
+  for (const local of ['http://localhost:8080', 'http://127.0.0.1:8080/', 'http://[::1]:8080']) {
+    assert.equal(kind(local), 'code', local);
+    assert.equal(kind(local, { allowLoopbackHttp: false }), 'damaged', `${local} on the phone`);
+  }
+  assert.equal(kind('https://center.example.com', { allowLoopbackHttp: false }), 'code');
+});
+
+test('a code that is absurdly long is refused before it is decoded', () => {
+  assert.equal(readPaste(PAIRING_CODE_PREFIX + 'A'.repeat(96 * 1024 + 1)).kind, 'damaged');
 });

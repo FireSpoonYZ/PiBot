@@ -178,6 +178,11 @@ export function hostErrorText(error: unknown, t: Translate): string {
       return t('配对码已被使用，请在中心重新生成。', 'The pairing code has already been used. Generate a new one on the center.');
     case 'PAIRING_CODE_EXPIRED':
       return t('配对码已过期（10 分钟有效），请在中心重新生成。', 'The pairing code has expired (it is valid for 10 minutes). Generate a new one on the center.');
+    case 'PAIRING_CODE_REVOKED':
+      return t(
+        '配对码已作废：中心的“添加设备”窗口被关闭了。复制配对码后请保持该窗口打开，直到配对完成；需要的话重新生成一个。',
+        'The pairing code was voided because the “Add device” window on the center was closed. Keep that window open until pairing finishes, and generate a new code if needed.',
+      );
     case 'DEVICE_ALREADY_REGISTERED':
       return t(
         '中心上已有这台电脑的设备记录，新配对码不能顶替它。若本机仍保存着凭据，请用“用本机身份连接”；否则请所有者在中心“设备与 Bot”里点该设备的“重新配对”，并使用生成的专属配对码。',

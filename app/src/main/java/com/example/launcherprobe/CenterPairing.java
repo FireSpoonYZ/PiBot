@@ -137,8 +137,8 @@ final class CenterPairing {
     /**
      * 配对码配对：地址、一次性密钥与私有 CA 都在码里，用户无需再输入任何内容。
      * 设备自带 Host 身份与令牌，凭一次性密钥直接向中心兑换（不需要所有者会话/CSRF）；
-     * 之后的持久化与连接与所有者密码配对完全相同。同一设备同一令牌重试不会另生令牌，
-     * 所以响应丢失后可以用同一个码重试（中心在 10 分钟内接受同设备同令牌的重放）。
+     * 之后的持久化与连接与所有者密码配对完全相同。同一设备同一令牌、同一个码重试不会另生令牌，
+     * 所以响应丢失后可以用同一个码重试（中心在 10 分钟内接受同设备同令牌的重放）；换新码则换新令牌。
      * 兑换前不碰任何持久状态：被中心拒绝（码已用/过期/设备不符）时本机绑定原样保留。
      */
     static JSONObject pairWithCode(Context context, BotHostUiBridgeClient bridge, JSONObject params,
@@ -156,7 +156,7 @@ final class CenterPairing {
             throw new BridgeException("CANCELLED", "not-sent", "界面已结束");
         }
         android.content.SharedPreferences pending = pendingPrefs(appContext);
-        String requestedToken = requestedToken(pending, code.url + "\n" + deviceId + "\nredeem");
+        String requestedToken = requestedToken(pending, redeemPendingKey(code.url, deviceId, code.secret));
         JSONObject created = new Session(code.ca).redeem(code.url + "/api/pairing/redeem",
                 new JSONObject().put("code", code.secret)
                         .put("deviceId", deviceId)
@@ -209,8 +209,30 @@ final class CenterPairing {
         return appContext.getSharedPreferences("center_pairing", Context.MODE_PRIVATE);
     }
 
-    /** 待确认令牌：同一 key（中心+设备+方式）重试复用，登记成功后由 persistAndConnect 清除。 */
-    private static String requestedToken(android.content.SharedPreferences pending, String pendingKey)
+    /**
+     * 配对码兑换的待确认令牌键：除了中心与设备，还绑定到这一个码（只记一次性密钥的 SHA-256）。
+     * 同一个码在响应丢失后重试沿用原令牌（中心在重放窗口内认同设备同令牌）；换新码则必须换新令牌——
+     * 否则中心已登记了上一次丢响应的请求、所有者又删除了该设备时，新码会带着已登记的旧令牌来加回，
+     * 中心不会把已撤销设备“轮换”到它本来就持有的令牌上，之后换任何码都会一直 409。
+     */
+    static String redeemPendingKey(String url, String deviceId, String secret) {
+        return url + "\n" + deviceId + "\nredeem\n" + sha256Hex(secret);
+    }
+
+    private static String sha256Hex(String value) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(digest.length * 2);
+            for (byte b : digest) hex.append(String.format(java.util.Locale.ROOT, "%02x", b & 0xff));
+            return hex.toString();
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
+    }
+
+    /** 待确认令牌：同一 key 重试复用，登记成功后由 persistAndConnect 清除。 */
+    static String requestedToken(android.content.SharedPreferences pending, String pendingKey)
             throws BridgeException {
         String requestedToken = pendingKey.equals(pending.getString("key", null))
                 ? pending.getString("token", null) : null;
@@ -393,6 +415,10 @@ final class CenterPairing {
         }
         if ("PAIRING_CODE_EXPIRED".equals(code)) {
             return new BridgeException(code, "not-sent", "配对码已过期（10 分钟有效），请在中心重新生成");
+        }
+        if ("PAIRING_CODE_REVOKED".equals(code)) {
+            return new BridgeException(code, "not-sent",
+                    "配对码已作废：中心的「添加设备」窗口被关闭了。复制或扫描后请保持该窗口打开，直到配对完成；需要的话重新生成");
         }
         if ("DEVICE_ALREADY_REGISTERED".equals(code)) {
             return new BridgeException(code, "not-sent",
