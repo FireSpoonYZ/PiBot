@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import type { BotAvatar } from '../../center-contract/index.js';
-import { botActivityText, type BotActivity } from './botActivity';
+import type { BotLearningLiveState, BotLearningOutcomeSummary } from '../../host-core/index.js';
+import { botActivityText, isBotLlmRunningPhase, isBotPreLlmPhase, type BotActivity } from './botActivity';
 import {
   GROK_EXPRESSIONS,
   GROK_HEAD_CENTER,
@@ -171,6 +172,7 @@ export interface GrokBotAvatarProps {
   starBadge?: boolean;
   platformBadge?: string | ReactNode;
   busy?: boolean;
+  reflecting?: boolean;
   offline?: boolean;
   size?: number;
   className?: string;
@@ -233,6 +235,7 @@ export function GrokBotAvatar({
   starBadge = false,
   platformBadge,
   busy = false,
+  reflecting = false,
   offline = false,
   size = 52,
   className = '',
@@ -251,10 +254,12 @@ export function GrokBotAvatar({
   const rightTransform = `translate(${rightEye.x} ${rightEye.y}) scale(${rightEye.scale} ${rightEye.scale}) translate(${-rightEye.cx} ${-rightEye.cy})`;
   const platformKind = typeof platformBadge === 'string' ? normalizeAvatarPlatform(platformBadge) : null;
   const badgeSize = Math.max(15, Math.round(size * 0.27));
+  const showReflectBadge = reflecting && !busy && !offline;
+  const reflectSize = Math.max(14, Math.round(size * 0.3));
 
   return (
     <span
-      className={`grok-bot-avatar${busy && !offline ? ' is-busy' : ''}${offline ? ' is-offline' : ''}${isPrimary ? ' is-primary' : ''}${className ? ` ${className}` : ''}`}
+      className={`grok-bot-avatar${busy && !offline ? ' is-busy' : ''}${showReflectBadge ? ' is-reflecting' : ''}${offline ? ' is-offline' : ''}${isPrimary ? ' is-primary' : ''}${className ? ` ${className}` : ''}`}
       style={{ width: `${size}px`, height: `${size}px` }}
       aria-hidden="true"
     >
@@ -285,6 +290,31 @@ export function GrokBotAvatar({
           </g>
         )}
       </svg>
+      {showReflectBadge && (
+        <span
+          className="grok-bot-reflect-badge"
+          style={{
+            position: 'absolute',
+            right: -3,
+            top: -3,
+            width: `${reflectSize}px`,
+            height: `${reflectSize}px`,
+            borderRadius: '50%',
+            background: 'var(--bg, #ffffff)',
+            border: '1.5px solid var(--line, rgba(0, 0, 0, 0.12))',
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: resolved.color,
+            boxShadow: '0 1px 4px rgba(0, 0, 0, 0.14)',
+            pointerEvents: 'none',
+          }}
+        >
+          <svg viewBox="0 0 20 20" fill="currentColor" style={{ width: '72%', height: '72%' }} aria-hidden="true">
+            <path d="M10 2.5a6.5 6.5 0 0 0-5.4 10.12c-.2.94-.68 1.87-1.35 2.55a.45.45 0 0 0 .38.76c1.48-.16 2.86-.63 3.92-1.22.78.2 1.6.3 2.45.3a6.5 6.5 0 0 0 0-12.5Zm-2.5 5.75a1 1 0 1 1 0 2 1 1 0 0 1 0-2Zm2.5 0a1 1 0 1 1 0 2 1 1 0 0 1 0-2Zm2.5 0a1 1 0 1 1 0 2 1 1 0 0 1 0-2Z" />
+          </svg>
+        </span>
+      )}
       {(platformKind || (platformBadge && typeof platformBadge !== 'string')) && (
         <span
           className={`grok-bot-platform-badge grok-bot-avatar-platform-badge${platformKind ? ` is-${platformKind}` : ''}`}
@@ -404,6 +434,7 @@ export function GrokBotAnimatedMark({
 }
 
 const workingStartMsByBotKey = new Map<string, number>();
+const seenLearningOutcomeSeqByBotKey = new Map<string, number>();
 
 export function formatWorkingElapsed(seconds: number): string {
   const safe = Math.max(0, Math.floor(seconds));
@@ -414,6 +445,15 @@ export function formatWorkingElapsed(seconds: number): string {
   const hours = Math.floor(mins / 60);
   const remMins = mins % 60;
   return `${hours}h ${String(remMins).padStart(2, '0')}m`;
+}
+
+function hasMeaningfulLearningSave(outcome: BotLearningOutcomeSummary | null | undefined): outcome is BotLearningOutcomeSummary {
+  if (!outcome || outcome.status !== 'completed') return false;
+  return (
+    (outcome.updatedSkills?.length ?? 0) > 0 ||
+    (outcome.archivedSkills?.length ?? 0) > 0 ||
+    outcome.memoryUpdated === true
+  );
 }
 
 export function GrokBotWorkingSlot({
@@ -429,6 +469,8 @@ export function GrokBotWorkingSlot({
   isRecovering = false,
   startedAt,
   activity,
+  learning,
+  onOpenLearnedSkills,
   t,
 }: {
   botKey: string;
@@ -443,8 +485,15 @@ export function GrokBotWorkingSlot({
   isRecovering?: boolean;
   startedAt?: number | null;
   activity?: BotActivity;
+  learning?: BotLearningLiveState | null;
+  onOpenLearnedSkills?: () => void;
   t: (zh: string, en: string) => string;
 }) {
+  const isPreLlmWaiting =
+    isBusy &&
+    (isBotPreLlmPhase(activity?.phase) ||
+      (Boolean(isSending) && !isBotLlmRunningPhase(activity?.phase) && activity?.phase !== 'stopping'));
+
   const resolveStartMs = () => {
     if (typeof startedAt === 'number' && Number.isFinite(startedAt) && startedAt > 0) {
       const clamped = Math.min(startedAt, Date.now());
@@ -456,22 +505,31 @@ export function GrokBotWorkingSlot({
       return cached;
     }
     const now = Date.now();
-    if (isBusy) workingStartMsByBotKey.set(botKey, now);
+    if (isBusy && !isPreLlmWaiting) workingStartMsByBotKey.set(botKey, now);
     return now;
   };
 
   const [elapsedSec, setElapsedSec] = useState(() =>
-    isBusy ? Math.max(0, Math.floor((Date.now() - resolveStartMs()) / 1000)) : 0,
+    isBusy && !isPreLlmWaiting ? Math.max(0, Math.floor((Date.now() - resolveStartMs()) / 1000)) : 0,
   );
   const [settlementOutcome, setSettlementOutcome] = useState<'success' | 'error' | 'stopped' | null>(null);
+  const [learningOutcome, setLearningOutcome] = useState<BotLearningOutcomeSummary | null>(null);
+  const [reflectionReadingPhase, setReflectionReadingPhase] = useState(false);
   const [emphasized, setEmphasized] = useState(false);
   const [pulseThinkingMorph, setPulseThinkingMorph] = useState(false);
-  const wasBusyRef = useRef(isBusy);
+  const wasBusyRef = useRef(isBusy && !isPreLlmWaiting);
 
   useEffect(() => {
+    if (isPreLlmWaiting) {
+      workingStartMsByBotKey.delete(botKey);
+      setSettlementOutcome(null);
+      setElapsedSec(0);
+      return undefined;
+    }
     if (isBusy) {
       wasBusyRef.current = true;
       setSettlementOutcome(null);
+      setLearningOutcome(null);
       const startMs = resolveStartMs();
       const update = () => {
         setElapsedSec(Math.max(0, Math.floor((Date.now() - startMs) / 1000)));
@@ -505,11 +563,33 @@ export function GrokBotWorkingSlot({
     workingStartMsByBotKey.delete(botKey);
     return undefined;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isBusy, startedAt, botKey, hasError, isRecovering, activity?.phase]);
+  }, [isBusy, isPreLlmWaiting, startedAt, botKey, hasError, isRecovering, activity?.phase]);
+
+  // 跟踪静默自学习结果：仅在真正保存了新技能、归档了过期技能或更新记忆时短暂展示 'proud' 气泡，
+  // "Nothing to save" 或被抢占/取消则静默收起，绝不打扰前台用户。
+  useEffect(() => {
+    const outcome = learning?.lastOutcome ?? null;
+    if (!outcome) return undefined;
+    const prevSeq = seenLearningOutcomeSeqByBotKey.get(botKey);
+    if (prevSeq === outcome.seq) return undefined;
+    seenLearningOutcomeSeqByBotKey.set(botKey, outcome.seq);
+    const finishedMs = Date.parse(outcome.finishedAt);
+    const isFresh = Number.isFinite(finishedMs) ? Date.now() - finishedMs <= 12_000 : true;
+    if (!isBusy && isFresh && hasMeaningfulLearningSave(outcome)) {
+      setLearningOutcome(outcome);
+      const timer = window.setTimeout(() => {
+        setLearningOutcome(current => (current?.seq === outcome.seq ? null : current));
+      }, 8000);
+      return () => window.clearTimeout(timer);
+    }
+    setLearningOutcome(null);
+    return undefined;
+  }, [botKey, isBusy, learning?.lastOutcome]);
 
   const isPhaseLed =
     isBusy &&
-    (activity?.phase === 'queued' ||
+    (isPreLlmWaiting ||
+      activity?.phase === 'queued' ||
       activity?.phase === 'preparing' ||
       activity?.phase === 'compacting' ||
       activity?.phase === 'interrupting' ||
@@ -518,6 +598,22 @@ export function GrokBotWorkingSlot({
   const settledActivity =
     !isBusy && (activity?.phase === 'stopped' || activity?.phase === 'failed' || activity?.webhookStopPending)
       ? activity : null;
+
+  const isReflecting =
+    !isBusy && !isRecovering && !settlementOutcome && !settledActivity && Boolean(learning?.active);
+  const showLearningOutcome =
+    !isBusy && !isRecovering && !settlementOutcome && !settledActivity && !isReflecting && Boolean(learningOutcome);
+
+  useEffect(() => {
+    if (!isReflecting || learning?.phase === 'writing') {
+      setReflectionReadingPhase(false);
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      setReflectionReadingPhase(prev => !prev);
+    }, 4500);
+    return () => window.clearInterval(timer);
+  }, [isReflecting, learning?.phase]);
 
   useEffect(() => {
     if (!isBusy || isStreaming || activeToolName || isPhaseLed) {
@@ -531,7 +627,9 @@ export function GrokBotWorkingSlot({
     return () => window.clearInterval(cycle);
   }, [isBusy, isStreaming, activeToolName, isPhaseLed]);
 
-  if (!isBusy && (isRecovering || (!settlementOutcome && !settledActivity))) return null;
+  if (!isBusy && (isRecovering || (!settlementOutcome && !settledActivity && !isReflecting && !showLearningOutcome))) {
+    return null;
+  }
 
   const baseState = resolveGrokMascotState({
     isBusy,
@@ -545,6 +643,13 @@ export function GrokBotWorkingSlot({
   });
 
   const mascotState: GrokMascotState = (() => {
+    if (!isBusy && showLearningOutcome) return 'proud';
+    if (!isBusy && isReflecting) {
+      if (learning?.phase === 'writing') return 'writing';
+      if (learning?.mode === 'curate') return reflectionReadingPhase ? 'curious' : 'reading';
+      return reflectionReadingPhase ? 'reading' : 'curious';
+    }
+    if (isPreLlmWaiting) return 'waiting';
     if (isPhaseLed) {
       if (activity?.phase === 'stopping') return 'powering-down';
       // 压缩仍是真实执行中：用 working 而非等待态，配合「整理上下文中」文案。
@@ -564,9 +669,43 @@ export function GrokBotWorkingSlot({
     if (!isBusy) {
       if (settledActivity) return botActivityText(settledActivity, t);
       if (settlementOutcome === 'stopped') return t('已停止', 'Stopped');
-      return settlementOutcome === 'error'
-        ? t('执行中断', 'Interrupted')
-        : t('已完成', 'Done');
+      if (settlementOutcome) {
+        return settlementOutcome === 'error'
+          ? t('执行中断', 'Interrupted')
+          : t('已完成', 'Done');
+      }
+      if (isReflecting) {
+        if (learning?.phase === 'writing') {
+          if (learning.toolName === 'memory') {
+            return t('正在沉淀长期记忆…', 'Saving memory…');
+          }
+          if (learning.mode === 'curate') {
+            return t('正在归档与精简技能…', 'Consolidating skills…');
+          }
+          return t('正在提炼新技能…', 'Writing learned skill…');
+        }
+        if (learning?.mode === 'curate') {
+          return t('正在静默整理技能库…', 'Curating skills…');
+        }
+        if (learning?.mode === 'learn') {
+          return t('正在总结学习经验…', 'Synthesizing skill…');
+        }
+        return t('空闲静默复盘中…', 'Reflecting while idle…');
+      }
+      if (showLearningOutcome && learningOutcome) {
+        const updated = learningOutcome.updatedSkills ?? [];
+        const archived = learningOutcome.archivedSkills ?? [];
+        if (updated.length > 0) {
+          const preview = updated.slice(0, 2).join('、');
+          const suffix = updated.length > 2 ? t(` 等 ${updated.length} 项`, ` +${updated.length - 2}`) : '';
+          return t(`✨ 已习得/更新技能 ${preview}${suffix}`, `✨ Learned/updated skill ${preview}${suffix}`);
+        }
+        if (archived.length > 0) {
+          return t(`✨ 已整理归档 ${archived.length} 项过期技能`, `✨ Archived ${archived.length} stale skill(s)`);
+        }
+        return t('✨ 已沉淀新的长期记忆', '✨ Saved long-term memory');
+      }
+      return t('已完成', 'Done');
     }
     if (isPhaseLed && activity) return botActivityText(activity, t);
     if (isSending) return t('正在发送…', 'Sending…');
@@ -596,15 +735,20 @@ export function GrokBotWorkingSlot({
     if (hasThinking) {
       return t('正在深入思考…', 'Thinking…');
     }
-    if (queuedCount > 0) {
+    if (!activity && queuedCount > 0) {
       return t('正在等待…', 'Waiting…');
     }
     return t('正在思考…', 'Working…');
   })();
 
+  const canInspectSkills =
+    showLearningOutcome &&
+    Boolean(onOpenLearnedSkills) &&
+    ((learningOutcome?.updatedSkills?.length ?? 0) > 0 || (learningOutcome?.archivedSkills?.length ?? 0) > 0);
+
   return (
     <div
-      className={`sand-activity-slot${!isBusy && (settlementOutcome || settledActivity) ? ' is-settling' : ''}`}
+      className={`sand-activity-slot${!isBusy && (settlementOutcome || settledActivity) ? ' is-settling' : ''}${isReflecting || showLearningOutcome ? ' is-reflecting' : ''}`}
       data-role="assistant"
       data-grok-state={mascotState}
       aria-live="polite"
@@ -619,20 +763,34 @@ export function GrokBotWorkingSlot({
           eyeColor="#FAF8F5"
           state={mascotState}
           size={36}
-          isPlaying={isBusy || Boolean(settlementOutcome)}
+          isPlaying={isBusy || Boolean(settlementOutcome) || isReflecting || showLearningOutcome}
           isEmphasized={emphasized}
           interactivePoke={true}
         />
-        <span className="sand-activity-mark-label">
-          <span className={`sand-activity-label-text${isBusy ? ' is-shimmering' : ''}`}>
-            {statusText}
-            {activity?.webhookStopPending && !isPhaseLed && !settledActivity
-              ? t(' · Webhook停止待同步', ' · Webhook stop awaiting sync') : null}
+        {!isPreLlmWaiting ? (
+          <span className="sand-activity-mark-label">
+            <span className={`sand-activity-label-text${isBusy || isReflecting ? ' is-shimmering' : ''}`}>
+              {statusText}
+              {activity?.webhookStopPending && !isPhaseLed && !settledActivity
+                ? t(' · Webhook停止待同步', ' · Webhook stop awaiting sync') : null}
+            </span>
+            {canInspectSkills ? (
+              <button
+                type="button"
+                className="sand-activity-learn-link"
+                onClick={() => {
+                  setLearningOutcome(null);
+                  onOpenLearnedSkills?.();
+                }}
+              >
+                {t('查看', 'View')}
+              </button>
+            ) : null}
+            {(isBusy || Boolean(settlementOutcome) || Boolean(settledActivity)) && (
+              <span className="sand-activity-elapsed">{formatWorkingElapsed(elapsedSec)}</span>
+            )}
           </span>
-          {(isBusy || Boolean(settlementOutcome) || Boolean(settledActivity)) && (
-            <span className="sand-activity-elapsed">{formatWorkingElapsed(elapsedSec)}</span>
-          )}
-        </span>
+        ) : null}
       </div>
     </div>
   );

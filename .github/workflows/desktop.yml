@@ -67,6 +67,11 @@ jobs:
           rustup toolchain install 1.99.1 --profile minimal --no-self-update
           rustup default 1.99.1
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/host-launcher -> target
+          cache-on-failure: true
+
       - name: Install dependencies
         shell: bash
         run: |
@@ -82,7 +87,8 @@ jobs:
         run: npm test
 
       - name: Launcher tests
-        run: cargo test --locked --manifest-path desktop/host-launcher/Cargo.toml
+        working-directory: desktop/host-launcher
+        run: cargo test --locked
 
   build:
     name: Desktop ${{ matrix.bundle }}
@@ -107,7 +113,9 @@ jobs:
         with:
           node-version: '26.13.0'
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            host-core/package-lock.json
 
       # rust-toolchain.toml pins channel 1.99.1 (profile minimal).
       - name: Install pinned Rust toolchain
@@ -118,6 +126,23 @@ jobs:
           rustup default 1.99.1
           rustc --version
           cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            desktop/src-tauri -> ../build/target
+            desktop/host-launcher -> target
+          cache-on-failure: true
+
+      - name: Cache pinned desktop runtime archives
+        uses: actions/cache@v6
+        with:
+          path: |
+            desktop/build/cache/downloads
+            desktop/build/cache/search-tools/archives
+          key: desktop-archives-${{ runner.os }}-${{ hashFiles('host-core/build-desktop.js', 'host-core/cua-driver-release.json', 'host-core/search-bin.js') }}
+          restore-keys: |
+            desktop-archives-${{ runner.os }}-
 
       - name: Install Linux webkit dependencies
         if: runner.os == 'Linux'
@@ -167,7 +192,8 @@ jobs:
       # has prepared its bundled binaries and resources.
       - name: Desktop crate tests
         if: runner.os == 'Linux'
-        run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml --lib
+        working-directory: desktop
+        run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib
 
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v7

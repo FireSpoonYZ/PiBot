@@ -3,6 +3,7 @@
 // live.history 只补齐尚未分页到的新窗口，不作为全量历史覆盖；历史问卷只读。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { Pencil } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import type { BotLiveState, BotRecord, LiveTool } from '../../../host-core/index.js';
 import { Markdown } from '../../../web/src/Markdown';
@@ -13,6 +14,7 @@ import {
   normalizeAttribution,
   type ChatTurn,
   type ChatToolCallItem,
+  type KnownBotSummary,
 } from '../../../web/src/chatTurnModel';
 import { isWebhookAttribution, MessageAttribution as MessageAttributionBadge } from '../../../web/src/MessageAttribution';
 import type { QuestionnaireSubmitPayload, VaultUnlockSubmitPayload } from '../../../web/src/ToolPresentation';
@@ -29,6 +31,7 @@ import {
 } from '../../../web/src/botActivity';
 import { ErrorNotice, useText } from '../../../web/src/ui';
 import { SentAttachments, type AttachmentFetcher } from '../../../web/src/imageAttachments';
+import { isEditablePrimaryUserTurn } from '../../../web/src/composerFlowControl';
 import './ChatTranscript.css';
 
 export interface ChatTranscriptEntry {
@@ -70,7 +73,13 @@ export interface ChatTranscriptProps {
   hasMore?: boolean;
   onLoadMore?: () => void;
   onRetry?: () => void;
+  onOpenLearnedSkills?: () => void;
   emptyActions?: ReactNode;
+  knownBots?: readonly KnownBotSummary[];
+  /** 仅空闲且在线未归档时允许编辑历史消息；忙碌时严格禁止。 */
+  canEditTurns?: boolean;
+  editingEntryId?: number | null;
+  onEditTurn?: (turn: ChatTurn) => void;
 }
 
 const asArray = <T,>(value: unknown): T[] => (Array.isArray(value) ? (value as T[]) : []);
@@ -107,7 +116,12 @@ export function ChatTranscript({
   hasMore = false,
   onLoadMore,
   onRetry,
+  onOpenLearnedSkills,
   emptyActions,
+  knownBots,
+  canEditTurns = false,
+  editingEntryId = null,
+  onEditTurn,
 }: ChatTranscriptProps) {
   const t = useText();
   const [linkError, setLinkError] = useState('');
@@ -141,10 +155,9 @@ export function ChatTranscript({
     return [...byId.values()].sort((a, b) => numericId(a) - numericId(b));
   }, [entries, live?.history]);
 
-  // dm/room 触发的生成是协作过程，不进普通聊天：generation.attribution 缺失但 tools
-  // 仍活跃时退回合并历史中最新执行来源（与 parser 内部同一判断）。
+  // 仅群聊（room）触发的生成隐藏在群聊页面内；1v1 Bot 私聊（dm）与用户主聊（primary）均在本对话页实时展示。
   const liveIsCollaborative =
-    isBusy && (liveAttribution?.channel ?? latestEntryChannel(mergedItems, bot.botId)) !== 'primary';
+    isBusy && (liveAttribution?.channel ?? latestEntryChannel(mergedItems, bot.botId)) === 'room';
   const displayGeneratingText = liveIsCollaborative ? '' : liveGeneratingText;
 
   const allTurns = useMemo<ChatTurn[]>(() =>
@@ -156,8 +169,9 @@ export function ChatTranscript({
       selfBotId: bot.botId,
       liveAttribution,
       trackAssistantTextEntries: true,
+      knownBots,
     }),
-  [mergedItems, live, isBusy, displayGeneratingText, liveAttribution, bot.botId]);
+  [mergedItems, live, isBusy, displayGeneratingText, liveAttribution, bot.botId, liveIsCollaborative, knownBots]);
 
   const activeLiveToolName = useMemo(() => {
     if (liveIsCollaborative) return null;
@@ -176,7 +190,14 @@ export function ChatTranscript({
     return allTurns.filter(
       (turn) =>
         turn.text.toLowerCase().includes(q) ||
-        Boolean(turn.tools?.some((tool) => tool.name.toLowerCase().includes(q))),
+        Boolean(
+          turn.tools?.some(
+            (tool) =>
+              tool.name.toLowerCase().includes(q) ||
+              (tool.argSummary && tool.argSummary.toLowerCase().includes(q)) ||
+              (tool.output && tool.output.toLowerCase().includes(q)),
+          ),
+        ),
     );
   }, [allTurns, search]);
 
@@ -326,8 +347,12 @@ export function ChatTranscript({
           ) : null}
           {emptyActions && !search.trim() && !loading && !error ? <div className="desktop-transcript-empty-actions">{emptyActions}</div> : null}
         </div>
-      ) : (
-        visibleTurns.map((turn, turnIdx) => {
+      ) : (() => {
+        const editingTargetIdx =
+          typeof editingEntryId === 'number'
+            ? visibleTurns.findIndex((item) => item.role === 'user' && item.entryId === editingEntryId)
+            : -1;
+        return visibleTurns.map((turn, turnIdx) => {
           const isLastAssistantTurn = turn.role === 'assistant' && turnIdx === visibleTurns.length - 1;
           const showTurnDuration =
             turn.role === 'assistant' &&
@@ -335,11 +360,32 @@ export function ChatTranscript({
             turn.durationMs > 0 &&
             !(isLastAssistantTurn && isBusy);
           const turnAttr = turn.attribution;
+          const isEditingTarget = editingTargetIdx === turnIdx;
+          const isAfterEditingTarget = editingTargetIdx !== -1 && turnIdx > editingTargetIdx;
+          const canEditThisTurn = Boolean(
+            canEditTurns &&
+              !slotBusy &&
+              !archived &&
+              !disabled &&
+              onEditTurn &&
+              isEditablePrimaryUserTurn(turn),
+          );
           return (
             <article
               key={turn.id}
-              className={`bot-chat-bubble ${isWebhookAttribution(turnAttr) ? 'assistant' : turn.role}${turn.isStreaming ? ' streaming' : ''}`}
+              className={`bot-chat-bubble ${isWebhookAttribution(turnAttr) ? 'assistant' : turn.role}${turn.role === 'user' && turnAttr?.kind === 'bot' ? ' is-peer' : ''}${turn.isStreaming ? ' streaming' : ''}${isEditingTarget ? ' is-editing-target' : ''}${isAfterEditingTarget ? ' is-editing-after' : ''}`}
             >
+              {canEditThisTurn ? (
+                <button
+                  type="button"
+                  className="desktop-turn-edit-btn"
+                  onClick={() => onEditTurn?.(turn)}
+                  title={t('编辑此消息', 'Edit message')}
+                  aria-label={t('编辑此消息', 'Edit message')}
+                >
+                  <Pencil size={13} />
+                </button>
+              ) : null}
               {turnAttr ? (
                 <MessageAttributionBadge attribution={turnAttr} />
               ) : null}
@@ -395,8 +441,8 @@ export function ChatTranscript({
               ) : null}
             </article>
           );
-        })
-      )}
+        });
+      })()}
 
       {!awaitingAnswer ? <GrokBotWorkingSlot
         key={botKey}
@@ -404,6 +450,8 @@ export function ChatTranscript({
         preset={avatarPreset}
         isBusy={slotBusy}
         activity={activity ?? undefined}
+        learning={live?.learning ?? null}
+        onOpenLearnedSkills={onOpenLearnedSkills}
         isStreaming={Boolean(displayGeneratingText)}
         activeToolName={activeLiveToolName}
         hasThinking={Boolean(lastTurn?.role === 'assistant' && lastTurn.thinking && !displayGeneratingText)}

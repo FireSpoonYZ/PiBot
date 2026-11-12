@@ -234,6 +234,7 @@ const METHOD_HANDLERS = new Map([
         requestId: params.requestId,
         text: params.text,
         ...(params.attachments !== undefined ? { attachments: params.attachments } : {}),
+        ...(params.delivery !== undefined ? { delivery: params.delivery } : {}),
       },
       { signal },
     )],
@@ -251,6 +252,25 @@ const METHOD_HANDLERS = new Map([
     control.getSubmission(params.botId, params.requestId, { signal })],
   ['history', (control, params, signal) => control.history(params.botId, { ...pageOptions(params, signal), chunked: params.chunked })],
   ['abort', (control, params, signal) => control.abort(params.botId, { signal })],
+  ['withdrawQueued', (control, params, signal) =>
+    control.withdrawQueued(
+      params.botId,
+      params.requestId !== undefined ? { requestId: params.requestId } : {},
+      { signal },
+    )],
+  ['steerQueued', (control, params, signal) =>
+    control.steerQueued(params.botId, { requestId: params.requestId }, { signal })],
+  ['editMessage', (control, params, signal) =>
+    control.editMessage(
+      params.botId,
+      {
+        entryId: params.entryId,
+        requestId: params.requestId,
+        text: params.text,
+        ...(params.attachments !== undefined ? { attachments: params.attachments } : {}),
+      },
+      { signal },
+    )],
   ['getBotBoard', (control, params, signal) => control.getBotBoard(params, { signal })],
   ['clearHistory', (control, params, signal) => control.clearHistory(params.botId, { signal })],
   ['compact', (control, params, signal) => control.compact(params.botId, { signal })],

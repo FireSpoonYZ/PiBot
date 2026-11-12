@@ -20,8 +20,10 @@ const STATE_KEYS = [
   'toolsTruncated',
   'busy',
   'queuedCount',
+  'queuedItems',
   'turnAdmission',
   'activity',
+  'learning',
 ];
 
 const END_REASONS = new Set([

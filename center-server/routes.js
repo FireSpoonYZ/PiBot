@@ -349,7 +349,20 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('GET', '/api/capabilities', () => store.listInstallations());
   route('POST', '/api/installations', async (req, reply) => { const body = object(req.body); if (body.target === 'center' && (body.kind === 'plugin' || body.kind === 'skill')) fail('UNSUPPORTED_TARGET', 'Native plugins and skills run on Hosts'); return reply.code(202).send(await packages.install(body)); }, true);
   route('GET', '/api/installations/:id', req => required(store.getInstallation(req.params.id), 'Installation'));
-  route('PATCH', '/api/installations/:id', req => store.renameInstallation(req.params.id, object(req.body)), true);
+  route('PATCH', '/api/installations/:id', async req => {
+    const body = object(req.body);
+    const beforeDevices = store.listBotBindings({ installationId: req.params.id }).map(b => b.deviceId);
+    const result = store.renameInstallation(req.params.id, body);
+    if (body.visibilityScope !== undefined) {
+      const afterDevices = store.listBotBindings({ installationId: req.params.id }).map(b => b.deviceId);
+      const affected = new Set([...beforeDevices, ...afterDevices]);
+      for (const deviceId of affected) {
+        try { await packages.reconcileDevice(deviceId); } finally { notify(deviceId); }
+      }
+      notifyInstallation(req.params.id);
+    }
+    return result;
+  }, true);
   route('GET', '/api/installations/:id/config', req => store.getInstallationConfig(req.params.id));
   route('PUT', '/api/installations/:id/config', req => {
     const body = object(req.body);
@@ -426,12 +439,20 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   };
   route('POST', '/api/devices/:deviceId/bots/:botId/skills', req => skills.execute({ ...botScope(req), origin: 'foreground' }, object(req.body)), true);
   route('POST', '/api/devices/:deviceId/bots/:botId/skill-reviews', req => skills.review(botScope(req), object(req.body)), true);
-  route('POST', '/api/devices/:deviceId/bots/:botId/learning', req => {
+  route('POST', '/api/devices/:deviceId/bots/:botId/learning', async req => {
     const body = object(req.body);
-    // Only the target Host may drive learning jobs; the owner may inspect,
-    // configure and cancel, but a start/next/respond here would strand the job.
+    const scope = botScope(req);
+    if (body.action === 'curate' || body.action === 'review') {
+      const input = {
+        action: body.action,
+        ...(typeof body.focus === 'string' && body.focus.trim() ? { focus: body.focus.trim() } : {}),
+      };
+      return await bridge.call(scope.deviceId, 'manageBotLearning', { botId: scope.botId, input });
+    }
+    // Only the target Host may drive learning jobs directly; the owner may inspect,
+    // configure, cancel, or trigger a Host-driven curate/review via bridge above.
     if (!['status', 'configure', 'cancel'].includes(body.action)) fail('FORBIDDEN', 'Learning jobs are driven by the target Host');
-    return learning.execute(botScope(req), body);
+    return learning.execute(scope, body);
   }, true);
   route('POST', '/api/devices/:deviceId/bots/:botId/installations', req => botManagement.execute(botScope(req), object(req.body), { allowShared: true, callAction: action }), true);
   const oauthInput = req => ({ installationId: req.params.id, deviceId: text(req.body?.deviceId, 'deviceId'), botId: text(req.body?.botId, 'botId') });

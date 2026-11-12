@@ -8,6 +8,13 @@ import { inboxQueryKey } from './message-queries.js';
 import { WorkIndex, WorkContextState, ensureWorkBinding, toWorkContextRecord } from './work-context-docs.js';
 import { WorkDecisionState, initialDecisionState, toWorkActivity, toFrozenTurn } from './work-decision-state.js';
 import { createWorkInput } from './work-decision-codec.js';
+import {
+  GROUP_PROMPT_HISTORY_LIMIT,
+  MAX_REPLY_NUDGES,
+  clampBlock,
+  evaluateGroupTurnEligibility,
+  messagesSinceMemberLastSpoke,
+} from './group-chat.js';
 import { RequestContext } from './request-context.js';
 import { parseModelRef } from './runtime-models.js';
 
@@ -123,12 +130,13 @@ function triggerSender(message) {
 }
 
 /** Inert until resume(); ledger import, policy consumption and the frozen model view have separate watermarks. */
-export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, models, defaultModel, context, getProfile, admitBot, admitTurn, sessions }) {
+export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, models, defaultModel, context, getProfile, admitBot, admitTurn, sessions, collaboration = null }) {
   // 无 sessions（旧线/独立测试装配）保持原行为：协调会话即执行会话，无统一轮归属。
   const unified = sessions != null;
   // 共用准入门、空闲回调与工作闸由 runtime 装配后注入（turn gate 需要在 harness/live 就位后创建）。
   // canRunWork 只读检查（排队用户优先 + 本 Bot 全部原生活动含遗留 work），不取第二条 Bot 准入通道。
   const turnGate = { fn: admitTurn ?? null, idle: null, canRunWork: null };
+  let learningHooks = null;
   let active = false;
   let closing = false;
   let timer = null;
@@ -141,6 +149,44 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
   // 墓碑 scope 一律视为无成员资格：已删除群不再触发/提交/恢复任何工作。
   const member = (scope, botId) => scope?.deletedAt === undefined && scope?.members.some((item) => item.deviceId === host.deviceId && item.botId === botId) === true;
   const currentMember = (meta) => member(getLog().getScope(meta.scopeId), meta.botId);
+
+  const DIRECTORY_TTL_MS = 15_000;
+  let directoryCache = { fetchedAt: 0, byKey: new Map(), byBotId: new Map() };
+
+  function resolveBotMeta(deviceId, botId) {
+    if (typeof botId !== 'string' || !botId) return { name: '', description: '' };
+    if (!deviceId || deviceId === host.deviceId) {
+      const local = host.getBot(botId);
+      if (local) return { name: local.role ?? '', description: local.description ?? '' };
+    }
+    if (deviceId) {
+      const exact = directoryCache.byKey.get(`${deviceId}:${botId}`);
+      if (exact) return exact;
+    }
+    return directoryCache.byBotId.get(botId) ?? { name: '', description: '' };
+  }
+
+  async function warmBotDirectoryIfNeeded(scope) {
+    if (!collaboration || typeof collaboration.listBots !== 'function' || !scope?.members) return;
+    const hasRemote = scope.members.some((m) => m.deviceId !== host.deviceId);
+    if (!hasRemote) return;
+    const now = Date.now();
+    if (now - directoryCache.fetchedAt <= DIRECTORY_TTL_MS && directoryCache.byKey.size > 0) return;
+    try {
+      const snap = await collaboration.listBots();
+      const byKey = new Map();
+      const byBotId = new Map();
+      for (const item of snap?.bots ?? []) {
+        if (!item?.botId) continue;
+        const meta = { name: item.role ?? '', description: item.description ?? '' };
+        if (item.deviceId) byKey.set(`${item.deviceId}:${item.botId}`, meta);
+        if (!byBotId.has(item.botId)) byBotId.set(item.botId, meta);
+      }
+      directoryCache = { fetchedAt: now, byKey, byBotId };
+    } catch {
+      // Directory lookup is best-effort for display/@mention; never fail work decisions.
+    }
+  }
 
   function assertHealthy() {
     if (fatalError) throw fatalError;
@@ -863,7 +909,15 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       if (unified && state.pending.turn && typeof state.pending.executionNativeId !== 'number') return null;
       const executionId = state.pending.executionNativeId ?? binding.nativeId;
       if (!await selectModel(tx, executionId, meta, state, bot)) return null;
-      const input = createWorkInput(toWorkContextRecord(meta), state.pending.requestId, state.pending.turn ?? null);
+      const wakeContext = state.pending.wakeContext
+        ? JSON.parse(JSON.stringify(state.pending.wakeContext))
+        : null;
+      const input = createWorkInput(
+        toWorkContextRecord(meta),
+        state.pending.requestId,
+        state.pending.turn ?? null,
+        wakeContext,
+      );
       return { input, executionId };
     }, context);
     if (!prepared) return;
@@ -874,6 +928,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     // 目标由 pending.executionNativeId（缺省协调会话）决定。返回 null 表示本 Bot 有
     // 原生工作在跑或准入暂不可达，保 pending 下轮重试。
     let submission;
+    try { learningHooks?.onWorkStart?.(bot.botId); } catch { /* 学习抢占通知失败不影响工作提交 */ }
     try {
       submission = turnGate.fn
         ? await turnGate.fn(binding, bot, input)
@@ -939,6 +994,8 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       ? await harness.snapshot(GenerationFailureState, executionNativeId, failureTaskKey, context).catch(() => null)
       : null;
     const diagnosed = failureDoc?.failure ?? null;
+    let shouldSubmitNudge = false;
+    let completedWorkInfo = null;
     await harness.commit(async (tx) => {
       const meta = await tx.doc(WorkContextState, binding.nativeId);
       const state = await tx.doc(WorkDecisionState, binding.nativeId);
@@ -951,8 +1008,46 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       } else if (pending.replan) {
         finishDecision(state, 'replan');
       } else if (record.status === 'done' && pending.prepared && !state.error) {
+        if (
+          pending.replyRequired === true &&
+          !pending.published &&
+          !pending.passed &&
+          !pending.interruption &&
+          !pending.takeover &&
+          currentMember(meta) &&
+          (pending.nudgeCount ?? 0) < MAX_REPLY_NUDGES
+        ) {
+          const nextNudge = (pending.nudgeCount ?? 0) + 1;
+          const nextRequestId = randomUUID();
+          pending.startedThroughLocalId = Math.max(
+            pending.startedThroughLocalId ?? 0,
+            pending.prepared.throughLocalId ?? 0,
+          );
+          pending.requestId = nextRequestId;
+          pending.submissionId = null;
+          pending.admissionId = null;
+          pending.setId = null;
+          pending.prepared = null;
+          pending.nudgeCount = nextNudge;
+          if (pending.turn) {
+            const baseTurn = JSON.parse(JSON.stringify(pending.turn));
+            pending.turn = toFrozenTurn({
+              ...baseTurn,
+              requestId: nextRequestId,
+              taskId: null,
+              nudgeCount: nextNudge,
+            });
+          }
+          const prevWake = pending.wakeContext
+            ? JSON.parse(JSON.stringify(pending.wakeContext))
+            : {};
+          pending.wakeContext = { ...prevWake, nudgeCount: nextNudge };
+          shouldSubmitNudge = true;
+          return;
+        }
         state.handledLocalId = Math.max(state.handledLocalId, pending.prepared.throughLocalId);
         finishDecision(state, pending.published ? 'published' : 'silent');
+        completedWorkInfo = { botId: bot.botId, unified, submissionId: record.id };
       } else {
         // 请求级失败（contract C）：优先 contract A 的具体诊断；缺失时回落
         // record/LiveDoc 安全原因，绝不读模型正文猜失败。
@@ -970,8 +1065,15 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         settleFailedDecision(state, meta, failure);
       }
     }, context);
+    if (shouldSubmitNudge) {
+      if (!closing && !fatalError) await submitPending(binding, bot);
+      return;
+    }
     // 决策落定为安全切换边界：唤醒该 Bot 的 Host 排队轮泵。
     try { turnGate.idle?.(bot.botId); } catch { /* 通知失败不影响结算 */ }
+    if (completedWorkInfo) {
+      try { learningHooks?.onWorkCompleted?.(completedWorkInfo); } catch { /* 学习通知失败不影响结算 */ }
+    }
   }
 
   // 分批键：同一批只合并同一回复来源（迟到回复按原始请求 originRequestId；
@@ -1086,6 +1188,37 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     return { trigger, batchThrough };
   }
 
+  const memberKey = (deviceId, botId) => `${deviceId ?? ''}:${botId ?? ''}`;
+
+  function toGroupMessage(storedItem, scopeMembersByBotId) {
+    const msg = storedItem?.message ?? {};
+    const author = msg.author ?? {};
+    if (author.kind === 'user') {
+      return {
+        id: msg.messageId ?? String(storedItem.localId ?? ''),
+        content: typeof msg.text === 'string' ? msg.text : '',
+        speaker: {
+          kind: 'user',
+          ...(typeof author.name === 'string' && author.name ? { name: author.name } : {}),
+        },
+      };
+    }
+    const botId = typeof author.botId === 'string' ? author.botId : '';
+    const deviceId = typeof msg.sourceDeviceId === 'string' && msg.sourceDeviceId
+      ? msg.sourceDeviceId
+      : (scopeMembersByBotId.get(botId) ?? '');
+    const meta = resolveBotMeta(deviceId, botId);
+    return {
+      id: msg.messageId ?? String(storedItem.localId ?? ''),
+      content: typeof msg.text === 'string' ? msg.text : '',
+      speaker: {
+        kind: 'member',
+        id: memberKey(deviceId, botId),
+        name: meta.name || botId || 'Peer Bot',
+      },
+    };
+  }
+
   async function startDecision(binding, bot) {
     // 统一执行：canRunWork 空闲边界后才做 sessions.sync（commit 外、Bot 准入内一次）；
     // 不通过表示排队用户轮/原生工作优先，下轮 poll 重试。scope/legacy 导入仍走
@@ -1104,15 +1237,23 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         if (primary === null || typeof primary.nativeId !== 'number') return;
       }
     }
-    // 迟到 DM 回复寻源在 commit 外做（replyOrigin 走 snapshot，绝不嵌进写事务）；
-    // 只按当前未处理窗口查 replyTo 键。提交内重新导出的新回复若没预查过，
-    // 按未知回复被动处理，下轮 poll 再判，绝不阻塞水位。
+    // 迟到 DM 回复寻源与远端目录预热在 commit 外做（绝不把 snapshot/网络读嵌进写事务）。
     const harness = getHarness();
     let replyOrigins = null;
-    if (unified) {
-      const metaSnap = await harness.snapshot(WorkContextState, binding.nativeId, context);
-      const stateSnap = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
-      if (metaSnap?.kind === 'dm' && !stateSnap?.pending && !stateSnap?.stopped && !stateSnap?.error) {
+    const metaSnap = await harness.snapshot(WorkContextState, binding.nativeId, context);
+    const stateSnap = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
+    if (metaSnap && !stateSnap?.pending && !stateSnap?.stopped && !stateSnap?.error) {
+      const warmedScopes = new Set();
+      const warmScope = async (scopeId) => {
+        if (typeof scopeId !== 'string' || !scopeId || warmedScopes.has(scopeId)) return;
+        warmedScopes.add(scopeId);
+        await warmBotDirectoryIfNeeded(getLog().getScope(scopeId));
+      };
+      const unreadPeek = inboxAfter(metaSnap.botId, metaSnap.scopeId, stateSnap?.handledLocalId ?? 0, 1);
+      if (unreadPeek.items.length > 0) {
+        await warmScope(metaSnap.scopeId);
+      }
+      if (unified && metaSnap.kind === 'dm') {
         replyOrigins = new Map();
         const items = inboxAfter(metaSnap.botId, metaSnap.scopeId, stateSnap?.handledLocalId ?? 0).items
           .filter((item) => item.localId <= metaSnap.lastImportedLocalId);
@@ -1122,7 +1263,11 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
           if (item.selfEcho) continue;
           const message = item.message ?? {};
           if (message.category === 'reply' && typeof message.replyTo === 'string' && !replyOrigins.has(message.replyTo)) {
-            replyOrigins.set(message.replyTo, await sessions.replyOrigin(metaSnap.botId, message));
+            const originRec = await sessions.replyOrigin(metaSnap.botId, message);
+            replyOrigins.set(message.replyTo, originRec);
+            if (typeof originRec?.replyTarget?.scopeId === 'string') {
+              await warmScope(originRec.replyTarget.scopeId);
+            }
           }
         }
       }
@@ -1142,6 +1287,140 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         if (batchThrough > 0) state.handledLocalId = batchThrough;
         return false;
       }
+
+      let wakeContext = null;
+      if (meta.kind === 'room') {
+        const scope = getLog().getScope(meta.scopeId);
+        const scopeMembers = scope?.members ?? [];
+        const scopeMembersByBotId = new Map(scopeMembers.map((m) => [m.botId, m.deviceId]));
+        const groupMembers = scopeMembers.map((m) => {
+          const info = resolveBotMeta(m.deviceId, m.botId);
+          return {
+            id: memberKey(m.deviceId, m.botId),
+            name: info.name || m.botId,
+            description: info.description || '',
+          };
+        });
+        const selfMemberId = memberKey(host.deviceId, meta.botId);
+        const selfInfo = resolveBotMeta(host.deviceId, meta.botId);
+        const collectedPublic = [];
+        let historyCursor = Number.isSafeInteger(batchThrough) && batchThrough >= 0
+          ? {
+              deviceId: host.deviceId,
+              kind: 'history-before',
+              key: meta.scopeId,
+              beforeLocalId: batchThrough + 1,
+            }
+          : null;
+        let upperLocalId = batchThrough;
+        for (let page = 0; page < 4 && collectedPublic.length < GROUP_PROMPT_HISTORY_LIMIT; page += 1) {
+          const historyPage = getLog().history(meta.scopeId, {
+            order: 'descending',
+            limit: GROUP_PROMPT_HISTORY_LIMIT + 8,
+            ...(historyCursor ? { cursor: historyCursor } : {}),
+          });
+          let progressed = false;
+          for (const it of historyPage.items) {
+            if (it.localId > upperLocalId) continue;
+            upperLocalId = it.localId - 1;
+            progressed = true;
+            if (it.message?.category === 'public') {
+              collectedPublic.push(it);
+              if (collectedPublic.length >= GROUP_PROMPT_HISTORY_LIMIT) break;
+            }
+          }
+          if (!historyPage.nextCursor || !progressed) break;
+          historyCursor = historyPage.nextCursor;
+        }
+        const recentStored = collectedPublic.reverse();
+        const recentHistory = recentStored.map((it) => toGroupMessage(it, scopeMembersByBotId));
+        const unreadMessages = items
+          .filter((it) => it.localId <= batchThrough && !it.selfEcho && it.message?.category === 'public')
+          .map((it) => toGroupMessage(it, scopeMembersByBotId));
+        const eligibility = evaluateGroupTurnEligibility({
+          memberId: selfMemberId,
+          members: groupMembers,
+          recentHistory,
+          unreadMessages,
+        });
+        if (!eligibility.eligible) {
+          state.handledLocalId = Math.max(state.handledLocalId, batchThrough);
+          return false;
+        }
+        wakeContext = {
+          selfName: selfInfo.name || bot.role || meta.botId,
+          selfMemberId,
+          groupTitle: scope?.title ?? '',
+          peers: groupMembers
+            .filter((m) => m.id !== selfMemberId)
+            .map((m) => ({ name: m.name, description: m.description })),
+          newMessages: messagesSinceMemberLastSpoke(recentHistory, selfMemberId),
+        };
+      } else if (meta.kind === 'dm') {
+        if (trigger.replyTarget?.kind === 'room' && typeof trigger.replyTarget.scopeId === 'string') {
+          const roomScope = getLog().getScope(trigger.replyTarget.scopeId);
+          const roomMembers = roomScope?.members ?? [];
+          const dmScope = getLog().getScope(meta.scopeId);
+          const membersByBotId = new Map([
+            ...roomMembers.map((m) => [m.botId, m.deviceId]),
+            ...(dmScope?.members ?? []).map((m) => [m.botId, m.deviceId]),
+          ]);
+          const selfMemberId = memberKey(host.deviceId, meta.botId);
+          const selfInfo = resolveBotMeta(host.deviceId, meta.botId);
+          const triggerIds = new Set(trigger.triggerMessageIds ?? []);
+          const dmReplyMessages = items
+            .filter((it) =>
+              it.localId <= batchThrough &&
+              !it.selfEcho &&
+              (triggerIds.size > 0 ? triggerIds.has(it.message?.messageId) : it.message?.category === 'reply'),
+            )
+            .map((it) => {
+              const gm = toGroupMessage(it, membersByBotId);
+              if (gm.speaker?.kind === 'member' && gm.speaker.name) {
+                return {
+                  ...gm,
+                  speaker: { ...gm.speaker, name: `${gm.speaker.name} (DM reply)` },
+                };
+              }
+              return gm;
+            });
+          wakeContext = {
+            selfName: selfInfo.name || bot.role || meta.botId,
+            selfMemberId,
+            groupTitle: roomScope?.title ?? '',
+            peers: roomMembers
+              .filter((m) => memberKey(m.deviceId, m.botId) !== selfMemberId)
+              .map((m) => {
+                const info = resolveBotMeta(m.deviceId, m.botId);
+                return { name: info.name || m.botId, description: info.description || '' };
+              }),
+            newMessages: dmReplyMessages,
+          };
+        } else {
+          const peerInfo = resolveBotMeta(trigger.sender?.deviceId, trigger.sender?.botId);
+          const replyTargetInfo = trigger.replyTarget?.kind === 'dm'
+            ? resolveBotMeta(undefined, trigger.replyTarget?.botId)
+            : { name: '', description: '' };
+          const triggerIds = new Set(trigger.triggerMessageIds ?? []);
+          const triggerTexts = items
+            .filter((it) => it.localId <= batchThrough && !it.selfEcho && triggerIds.has(it.message?.messageId))
+            .map((it) => (typeof it.message?.text === 'string' ? it.message.text : ''))
+            .filter(Boolean);
+          wakeContext = {
+            peerName: peerInfo.name || trigger.sender?.botId || '',
+            replyTargetName: replyTargetInfo.name || peerInfo.name || trigger.replyTarget?.botId || '',
+            category: trigger.originRequestId !== undefined ? 'reply' : 'request',
+            triggerText: clampBlock(triggerTexts.join('\n\n'), 2_000),
+            nudgeCount: 0,
+          };
+        }
+      }
+
+      const replyRequired = Boolean(
+        unified &&
+        trigger.replyTarget?.kind === 'dm' &&
+        typeof trigger.responseMessageId === 'string',
+      );
       const requestId = randomUUID();
       const turn = unified
         ? toFrozenTurn({
@@ -1171,6 +1450,10 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         startedThroughLocalId: batchThrough,
         prepared: null,
         published: false,
+        passed: false,
+        replyRequired,
+        nudgeCount: 0,
+        wakeContext,
         replan: false,
         // 统一执行：冻结 commit 外 sessions.sync 返回的真实主会话 nativeId/conversationId；
         // 绝不在 commit 内再调 Session 读或 tx.conversation 公共 ID 查询。
@@ -1513,10 +1796,11 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         if (!meta.scopeId || meta.deviceId !== host.deviceId || publication.author?.kind !== 'bot' || publication.author.botId !== meta.botId) {
           throw messageError('BOT_CONTEXT_REQUIRED', 'publication requires the actual local work bot');
         }
+        const expectedScopeId = turn?.replyTarget?.scopeId ?? meta.scopeId;
         const log = getLog();
         if (log.getMessage(publication.messageId)) {
           const stored = log.publish(publication);
-          if (state.pending) state.pending.published = true;
+          if (state.pending && publication.scopeId === expectedScopeId) state.pending.published = true;
           return stored;
         }
         if (state.stopped) throw messageError('WORK_STOPPED', 'work context is stopped');
@@ -1537,7 +1821,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
             throw messageError('SCOPE_FORBIDDEN', 'publisher bot must be a current member of the origin scope');
           }
           const stored = log.publish(publication, guard);
-          state.pending.published = true;
+          if (publication.scopeId === expectedScopeId) state.pending.published = true;
           return stored;
         } catch (error) {
           if (error?.code !== 'STALE_INPUT' && !(error?.code === 'SCOPE_FORBIDDEN' && !currentMember(meta))) throw error;
@@ -1548,6 +1832,36 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       // Throwing inside commit would roll back replan and permit another provider call on the stale request.
       if (result.failure) throw result.failure;
       return result;
+    }, PUBLICATION_ERRORS, toolContext);
+  }
+
+  async function passWork(api, toolContext, turn = null, options = null) {
+    return guarded(async () => {
+      assertHealthy();
+      const result = await api.commit(async (tx) => {
+        const coordNativeId = coordinationIdFor(turn) ?? api.conversationId;
+        const meta = await tx.doc(WorkContextState, coordNativeId);
+        const state = await tx.doc(WorkDecisionState, coordNativeId);
+        assertHealthy();
+        toolContext.abortSignal?.throwIfAborted();
+        if (!meta.scopeId || meta.deviceId !== host.deviceId) {
+          throw messageError('BOT_CONTEXT_REQUIRED', 'silent pass requires a local work bot');
+        }
+        if (state.stopped) throw messageError('WORK_STOPPED', 'work context is stopped');
+        if (!state.pending?.prepared || state.error) throw messageError('WORK_CONTEXT_INACTIVE', 'work context has no prepared decision');
+        if (state.pending.replan || state.pending.takeover) throw messageError('STALE_INPUT', 'work decision needs newer input');
+        if (state.pending.interruption) throw messageError('WORK_STOPPED', 'work decision was interrupted');
+        if (!currentMember(meta)) {
+          state.pending.replan = true;
+          return { failure: messageError('SCOPE_FORBIDDEN', 'publisher bot must be a current member of the origin scope') };
+        }
+        const expectedScopeId = turn?.replyTarget?.scopeId ?? meta.scopeId;
+        if (!options?.scopeId || options.scopeId === expectedScopeId) {
+          state.pending.passed = true;
+        }
+        return null;
+      }, toolContext);
+      if (result?.failure) throw result.failure;
     }, PUBLICATION_ERRORS, toolContext);
   }
 
@@ -1572,10 +1886,13 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     return coordinationIdFor(await sessions.getTurn(api, toolContext));
   }
 
-  return { resume, close, beforeRequest, checkBudget, publishWork, getWorkActivity, stopWork, resumeWork, stopScopeWork, takeoverShower,
+  return { resume, close, beforeRequest, checkBudget, publishWork, passWork, getWorkActivity, stopWork, resumeWork, stopScopeWork, takeoverShower,
     interruptBotWork, setActivityListener, refreshActivity,
     coordinationSelector,
     drainFailureNotices,
+    setLearningHooks: (hooks) => {
+      learningHooks = hooks ?? null;
+    },
     setTurnGate: (fn, onIdle, canRunWork = null) => {
       turnGate.fn = fn;
       turnGate.idle = onIdle ?? null;

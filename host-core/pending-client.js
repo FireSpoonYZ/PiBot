@@ -344,6 +344,7 @@ export function openPendingClient({ dataRoot, deviceId, call }) {
             requestId: record.requestId,
             text: record.text,
             ...(record.attachments !== undefined ? { attachments: record.attachments } : {}),
+            ...(record.delivery === 'steer' ? { delivery: 'steer' } : {}),
           },
           { signal }
         );

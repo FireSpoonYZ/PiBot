@@ -34,5 +34,8 @@ export PIBOT_LAUNCHD_TEST_DIR="$work/fixture"
 export E_LAUNCHER_HOST_HOME="$work/fixture/host-home"
 export E_LAUNCHER_LAUNCHD_LABEL="io.github.firespoonyz.pibot.host-update-cycle-$$"
 mkdir -p "$PIBOT_LAUNCHD_TEST_DIR"
-cargo test --locked --manifest-path "$root/desktop/src-tauri/Cargo.toml" --lib -- \
-  --ignored --exact host_service::tests::launchd::update_cycle_against_real_launchd --nocapture
+(
+  cd "$root/desktop"
+  cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib -- \
+    --ignored --exact host_service::tests::launchd::update_cycle_against_real_launchd --nocapture
+)

@@ -318,6 +318,10 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
       job.error = { code: 'INTERRUPTED', message: 'Center restarted before the job finished' };
       saveJob(job);
       const counters = getCounters(job.deviceId, job.botId);
+      if (job.automatic && job.mode === 'review' && !job.mutated && job.consumedCounters) {
+        counters.turnsSinceMemoryReview += job.consumedCounters.turns ?? 0;
+        counters.itersSinceSkillReview += job.consumedCounters.iterations ?? 0;
+      }
       counters.jobsInterrupted += 1;
       counters.lastJobId = job.jobId;
       counters.lastJobStatus = job.status;
@@ -446,6 +450,61 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
     };
   }
 
+  function noteSkillToolResult(runtime, name, args, rawResult) {
+    if (name === 'skill_manage') {
+      const parsed = typeof rawResult === 'string'
+        ? (() => { try { return JSON.parse(rawResult); } catch { return null; } })()
+        : rawResult;
+      if (parsed?.success === true) {
+        runtime.mutated = true;
+        for (const s of parsed.updatedSkills ?? []) {
+          if (typeof s === 'string' && s) runtime.updatedSkills.add(s);
+        }
+        for (const s of parsed.archivedSkills ?? []) {
+          if (typeof s === 'string' && s) runtime.archivedSkills.add(s);
+        }
+      }
+      return;
+    }
+    if (name === 'skill_usage.archive_skill' && Array.isArray(rawResult) && rawResult[0] === true) {
+      runtime.mutated = true;
+      const archivedName = args?.skill_name ?? args?.name;
+      if (typeof archivedName === 'string' && archivedName) runtime.archivedSkills.add(archivedName);
+    }
+  }
+
+  function noteAgentRunMutations(runtime, callResult) {
+    if (!Array.isArray(callResult?.messages)) return;
+    const writeToolCallIds = new Set();
+    for (const msg of callResult.messages) {
+      if (msg?.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+        for (const tc of msg.tool_calls) {
+          const fn = tc?.function;
+          if (fn?.name !== 'memory' || typeof tc?.id !== 'string') continue;
+          let parsedArgs = fn.arguments;
+          if (typeof parsedArgs === 'string') {
+            try { parsedArgs = JSON.parse(parsedArgs); } catch { parsedArgs = null; }
+          }
+          if (['add', 'replace', 'remove', 'retain', 'correct'].includes(parsedArgs?.action)) {
+            writeToolCallIds.add(tc.id);
+          }
+        }
+      }
+    }
+    if (!writeToolCallIds.size) return;
+    for (const msg of callResult.messages) {
+      if (msg?.role !== 'tool' || !writeToolCallIds.has(msg.tool_call_id)) continue;
+      let parsed = msg.content;
+      if (typeof parsed === 'string') {
+        try { parsed = JSON.parse(parsed); } catch { parsed = null; }
+      }
+      if (parsed && parsed.success !== false && !parsed.error) {
+        runtime.memoryUpdated = true;
+        runtime.mutated = true;
+      }
+    }
+  }
+
   async function onCall(runtime, method, params) {
     if (runtime.finished) throw error('INVALID_STATE', 'Job already finished');
     if (!ONCALL_METHODS.has(method)) throw error('FORBIDDEN', 'Unsupported learning callback ' + method);
@@ -453,7 +512,9 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
       const name = object(params) ? params.name : null;
       const args = object(params) && object(params.args) ? params.args : {};
       if (typeof name !== 'string' || !name) throw error('INVALID_ARGUMENT', 'skill.call requires a name');
-      return await skills.learningTool(skillContext(runtime, 'skill-' + ++runtime.skillCalls), name, args);
+      const result = await skills.learningTool(skillContext(runtime, 'skill-' + ++runtime.skillCalls), name, args);
+      noteSkillToolResult(runtime, name, args, result);
+      return result;
     }
     if (method === 'schedule.call' && (runtime.job.mode !== 'curate' || params?.name !== 'referenced_skill_names')) {
       throw error('FORBIDDEN', 'Curator jobs can only read schedule skill references');
@@ -478,6 +539,10 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
     const job = runtime.job;
     job.status = status;
     job.finishedAt = new Date().toISOString();
+    job.mutated = runtime.mutated === true;
+    if (runtime.updatedSkills.size) job.updatedSkills = [...runtime.updatedSkills];
+    if (runtime.archivedSkills.size) job.archivedSkills = [...runtime.archivedSkills];
+    if (runtime.memoryUpdated) job.memoryUpdated = true;
     if (outcome?.error) job.error = sanitizedError(outcome.error) ?? { code: 'INTERNAL_ERROR', message: 'Learning job failed' };
     for (const key of ['summary', 'actions', 'usage', 'result']) {
       if (outcome?.[key] === undefined) continue;
@@ -487,6 +552,10 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
       transaction(() => {
         saveJob(job);
         const counters = getCounters(job.deviceId, job.botId);
+        if (job.automatic && job.mode === 'review' && (status === 'cancelled' || status === 'interrupted') && !runtime.mutated && job.consumedCounters) {
+          counters.turnsSinceMemoryReview += job.consumedCounters.turns ?? 0;
+          counters.itersSinceSkillReview += job.consumedCounters.iterations ?? 0;
+        }
         if (status === 'completed') counters.jobsCompleted += 1;
         else if (status === 'failed') counters.jobsFailed += 1;
         else if (status === 'cancelled') counters.jobsCancelled += 1;
@@ -576,6 +645,9 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
       createdAt: job.createdAt, startedAt: job.startedAt ?? null, finishedAt: job.finishedAt ?? null,
     };
     if (job.summary !== undefined) picked.summary = job.summary;
+    if (Array.isArray(job.updatedSkills) && job.updatedSkills.length) picked.updatedSkills = job.updatedSkills;
+    if (Array.isArray(job.archivedSkills) && job.archivedSkills.length) picked.archivedSkills = job.archivedSkills;
+    if (job.memoryUpdated) picked.memoryUpdated = true;
     if (job.error) picked.error = job.error;
     return picked;
   }
@@ -651,14 +723,18 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
     const focus = input.focus === undefined ? null : input.focus;
     if (focus !== null && (typeof focus !== 'string' || focus.length > 4_000)) throw error('INVALID_ARGUMENT', 'Invalid focus');
     // Tool-iteration count of the completed submission — upstream _iters_since_skill counts
-    // iterations, not messages; the Host supplies the delta. Memory scope counts user turns (one per start).
+    // iterations, not messages; the Host supplies the delta. Memory scope counts turns (default 1 per start).
     const iterations = input.iterations === undefined ? 0 : intIn(input.iterations, 0, 100_000, 'iterations');
+    const turns = input.turns === undefined ? 1 : intIn(input.turns, 0, 100_000, 'turns');
 
     const bot = assertBot(store, identity.deviceId, identity.botId);
     if (bot.archivedAt) throw error('BOT_ARCHIVED', 'Bot is archived');
     const { deviceId, botId } = identity;
     const now = Date.now();
-    const fingerprint = createHash('sha256').update(stableJson({ mode, automatic, focus, snapshot, iterations, sources })).digest('hex');
+    const fingerprint = createHash('sha256').update(stableJson({
+      mode, automatic, focus, snapshot, iterations, sources,
+      ...(input.turns !== undefined ? { turns } : {}),
+    })).digest('hex');
 
     const admission = transaction(() => {
       const existing = parse(submissionStmt.get.get(deviceId, botId, input.requestId));
@@ -672,17 +748,29 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
       if (automatic && mode === 'review' && snapshot.span && snapshot.sessionId) {
         const previous = counters.reviewCursor;
         const cursor = previous?.sessionId === snapshot.sessionId ? previous.throughEntryId : 0;
-        if (snapshot.span.throughEntryId <= cursor) {
-          const decision = { status: 'deferred', jobId: null, mode, automatic, reason: 'already-reported' };
-          recordSubmission(deviceId, botId, input.requestId, fingerprint, decision);
-          return { replay: decision };
+        const hasPendingRestoredTrigger =
+          (snapshot.memoryEnabled === true && counters.turnsSinceMemoryReview >= settings.review.memoryEvery) ||
+          counters.itersSinceSkillReview >= settings.review.skillEvery;
+        const isPreemptedRetry =
+          snapshot.span.throughEntryId === cursor &&
+          snapshot.span.afterEntryId === cursor &&
+          turns === 0 &&
+          iterations === 0 &&
+          hasPendingRestoredTrigger;
+        if (!isPreemptedRetry) {
+          if (snapshot.span.throughEntryId <= cursor) {
+            const decision = { status: 'deferred', jobId: null, mode, automatic, reason: 'already-reported' };
+            recordSubmission(deviceId, botId, input.requestId, fingerprint, decision);
+            return { replay: decision };
+          }
+          if (snapshot.span.afterEntryId !== cursor) throw error('REVISION_CONFLICT', 'Learning snapshot cursor changed');
+          counters.reviewCursor = { sessionId: snapshot.sessionId, throughEntryId: snapshot.span.throughEntryId };
+          saveCounters(deviceId, botId, counters);
         }
-        if (snapshot.span.afterEntryId !== cursor) throw error('REVISION_CONFLICT', 'Learning snapshot cursor changed');
-        counters.reviewCursor = { sessionId: snapshot.sessionId, throughEntryId: snapshot.span.throughEntryId };
-        saveCounters(deviceId, botId, counters);
       }
       let reviewMemory = null;
       let reviewSkills = null;
+      let consumedCounters = null;
       if (automatic && mode === 'review') {
         // Upstream gates are two independent counters: memory fires every memory.nudge_interval
         // (default 10) USER TURNS — ticked only when the memory tool is enabled upstream, mirrored
@@ -690,7 +778,7 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
         // (default 10) TOOL ITERATIONS accumulated since the last skill review. A fired counter
         // resets even when the spawn is skipped (upstream prepare_background_review_run drops the
         // second concurrent review), so 'busy' still consumes the trigger.
-        if (snapshot.memoryEnabled === true) counters.turnsSinceMemoryReview += 1;
+        if (snapshot.memoryEnabled === true) counters.turnsSinceMemoryReview += turns;
         counters.itersSinceSkillReview += iterations;
         reviewMemory = snapshot.memoryEnabled === true && counters.turnsSinceMemoryReview >= settings.review.memoryEvery;
         reviewSkills = counters.itersSinceSkillReview >= settings.review.skillEvery;
@@ -700,6 +788,10 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
           recordSubmission(deviceId, botId, input.requestId, fingerprint, decision);
           return { replay: decision };
         }
+        consumedCounters = {
+          turns: reviewMemory ? counters.turnsSinceMemoryReview : 0,
+          iterations: reviewSkills ? counters.itersSinceSkillReview : 0,
+        };
         if (reviewMemory) counters.turnsSinceMemoryReview = 0;
         if (reviewSkills) counters.itersSinceSkillReview = 0;
       }
@@ -724,6 +816,7 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
         jobId: 'job-' + randomUUID(), deviceId, botId, requestId: input.requestId,
         mode, automatic, focus, snapshot, sources,
         ...(mode === 'review' ? { reviewMemory: automatic ? reviewMemory : snapshot.memoryEnabled === true, reviewSkills: automatic ? reviewSkills : true } : {}),
+        ...(consumedCounters ? { consumedCounters } : {}),
         status: 'queued', createdAt: new Date(now).toISOString(),
       };
       saveJob(job);
@@ -757,6 +850,7 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
       deadline: Date.now() + settings.budget.jobTimeoutMs,
       finished: false, pending: null, waiters: new Set(), toolInflight: new Map(),
       callChain: Promise.resolve(), skillCalls: 0, graceTimer: null,
+      mutated: false, updatedSkills: new Set(), archivedSkills: new Set(), memoryUpdated: false,
       budget: {
         maxIterations: settings.budget.maxIterations,
         maxInputTokens: deriveInputBudget(deviceId, botId, settings, model ? { ...snapshot, ...model } : snapshot),
@@ -837,7 +931,7 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
   function terminalReply(job) {
     const reply = { jobId: job.jobId, status: job.status };
     const result = {};
-    for (const key of ['summary', 'actions', 'usage', 'result']) {
+    for (const key of ['summary', 'actions', 'usage', 'result', 'updatedSkills', 'archivedSkills', 'memoryUpdated']) {
       if (job[key] !== undefined) result[key] = job[key];
     }
     if (Object.keys(result).length) reply.result = result;
@@ -866,6 +960,17 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
     callStmt.answer.run(pending ? 'host' : 'late', resultText, errorValue ? json(errorValue) : null, new Date().toISOString(), input.callId);
     if (!pending) {
       return { jobId: job.jobId, callId: input.callId, status: job.status, acknowledged: false, reason: 'job-finished' };
+    }
+    if (!errorValue) {
+      if (pending.method === 'memory.call') {
+        const op = pending.params?.action ?? pending.params?.name;
+        if (['add', 'replace', 'remove', 'retain', 'correct', 'retainMemory', 'correctMemory'].includes(op)) {
+          runtime.memoryUpdated = true;
+          runtime.mutated = true;
+        }
+      } else if (pending.method === 'agent.run') {
+        noteAgentRunMutations(runtime, input.result);
+      }
     }
     clearTimeout(pending.timer);
     runtime.pending = null;
@@ -959,6 +1064,7 @@ export async function openLearningService({ dataRoot, store, skills, runLearning
       let result;
       try {
         result = await skills.learningTool(skillContext(runtime, input.callId), input.name, args);
+        noteSkillToolResult(runtime, input.name, args, result);
       } catch (err) {
         // Declared tool failures surface to the review model as success:false results, not transport errors.
         result = { success: false, error: { code: typeof err?.code === 'string' ? err.code : 'TOOL_ERROR', message: typeof err?.message === 'string' ? err.message.slice(0, MAX_MESSAGE) : 'Tool failed' } };
@@ -1030,6 +1136,7 @@ export const LEARNING_INPUT_SCHEMA = {
     snapshot: { type: 'object' },
     automatic: { type: 'boolean' },
     iterations: { type: 'integer', minimum: 0 },
+    turns: { type: 'integer', minimum: 0 },
     jobId: { type: 'string', minLength: 1, maxLength: 128 },
     callId: { type: 'string', minLength: 1, maxLength: 128 },
     name: { type: 'string' },

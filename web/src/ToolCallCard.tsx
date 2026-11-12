@@ -50,6 +50,24 @@ export function ToolCallCard({
     : tool.durationMs < 1000 ? `${Math.round(tool.durationMs)}ms`
       : formatTurnDuration(tool.durationMs, (_zh, en) => en);
   const presentationKey = presentation && presentation.kind !== 'todo' ? presentation.requestId : tool.id;
+  const sendTo = !tool.parentCallId && tool.name === 'send_to' ? tool.sendTo : undefined;
+  const sendToTarget = sendTo
+    ? (sendTo.targetName ||
+       (sendTo.scopeKind === 'room' ? t('群聊', 'Group chat') : t('对端智能体', 'Peer Bot')))
+    : undefined;
+  const sendToAction = sendTo
+    ? (sendTo.silentPass
+        ? t('静默跳过', 'Silent pass')
+        : sendTo.category === 'reply'
+          ? t('回传结果', 'Reply')
+          : sendTo.category === 'request'
+            ? t('派发任务', 'Dispatch')
+            : sendTo.category === 'public'
+              ? t('群聊发言', 'Room message')
+              : sendTo.category === 'notice'
+                ? t('通知', 'Notice')
+                : t('发送消息', 'Message'))
+    : undefined;
   const hasDetails = codemode || args !== undefined || tool.output !== undefined || tool.outputTruncated ||
     (tool.parentCallId !== undefined && tool.argSummary !== undefined);
 
@@ -57,7 +75,7 @@ export function ToolCallCard({
     <div
       key={`${scopeKey}:${tool.id}`}
       role="listitem"
-      className={`tool-call-card is-${tool.status}${incomplete ? ' is-incomplete' : ''}${tool.parentCallId ? ' is-nested' : ''}`}
+      className={`tool-call-card is-${tool.status}${incomplete ? ' is-incomplete' : ''}${tool.parentCallId ? ' is-nested' : ''}${sendTo ? ' is-send-to' : ''}`}
     >
       <div className="tool-call-header">
         <span className="tool-call-icon" aria-hidden="true">{icon}</span>
@@ -66,6 +84,25 @@ export function ToolCallCard({
         <span className="tool-call-state">{statusLabel}</span>
         {duration ? <span className="tool-call-duration">{duration}</span> : null}
       </div>
+
+      {sendTo && (sendTo.text || sendTo.silentPass) ? (
+        <div className={`tool-send-to-preview${sendTo.silentPass ? ' is-silent' : ''}`}>
+          <div className="tool-send-to-meta">
+            <span className="tool-send-to-target">{sendToTarget}</span>
+            {sendToAction ? <span className="tool-send-to-badge">{sendToAction}</span> : null}
+            {sendTo.fileCount && sendTo.fileCount > 0 ? (
+              <span className="tool-send-to-files">
+                {t(`${sendTo.fileCount} 个附件`, `${sendTo.fileCount} file(s)`)}
+              </span>
+            ) : null}
+          </div>
+          {sendTo.silentPass ? (
+            <p className="tool-send-to-silent">{t('本次无需回复（pass）', 'No reply needed (pass)')}</p>
+          ) : sendTo.text ? (
+            <div className="tool-send-to-body">{sendTo.text}</div>
+          ) : null}
+        </div>
+      ) : null}
 
       {tool.error ? <pre className="tool-call-error">{tool.error}</pre> : null}
 

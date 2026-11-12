@@ -41,7 +41,7 @@ const STUDIO_TABS: { id: BotSettingsTab; label: string }[] = [
   { id: 'soul', label: '🎭 灵魂人设' },
   { id: 'model', label: '🤖 模型设置' },
   { id: 'capabilities', label: '🔌 插件与能力' },
-  { id: 'skill-review', label: '✨ Skill 审阅' },
+  { id: 'skill-review', label: '✨ 已学技能' },
   { id: 'schedules', label: '⏰ 定时任务' },
   { id: 'vault', label: '🔒 密码库' },
 ];

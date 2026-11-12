@@ -44,6 +44,59 @@
 .tool-call-section > pre,
 .tool-call-error { margin: 0; padding: 6px 8px; border-radius: 8px; background: var(--surface); font: .73rem/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow-y: auto; overscroll-behavior: contain; }
 .tool-call-notice { margin: 0; padding: 2px 8px; color: var(--muted); font-size: .72rem; }
+.tool-send-to-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 11px;
+  border: 1px solid color-mix(in srgb, var(--accent, #2b70f6) 24%, var(--line));
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--accent, #2b70f6) 6%, var(--surface));
+}
+.tool-send-to-preview.is-silent {
+  border-style: dashed;
+  border-color: var(--line);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+}
+.tool-send-to-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: .71rem;
+  line-height: 1.3;
+}
+.tool-send-to-target {
+  font-weight: 600;
+  color: var(--text);
+}
+.tool-send-to-badge,
+.tool-send-to-files {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: .66rem;
+  font-weight: 600;
+  background: color-mix(in srgb, var(--accent, #2b70f6) 14%, var(--bg));
+  color: var(--accent, #2b70f6);
+}
+.tool-send-to-preview.is-silent .tool-send-to-badge {
+  background: color-mix(in srgb, var(--line) 60%, transparent);
+  color: var(--muted);
+}
+.tool-send-to-body {
+  font-size: .82rem;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.tool-send-to-silent {
+  margin: 0;
+  font-size: .74rem;
+  color: var(--muted);
+}
 @media (max-width: 480px) {
   .tool-call-header { flex-wrap: wrap; }
   .tool-call-args { flex-basis: 35%; }

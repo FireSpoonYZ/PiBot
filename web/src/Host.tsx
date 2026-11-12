@@ -10,6 +10,7 @@ import {
   ChevronsUpDown,
   Clock,
   Code2,
+  Copy,
   Cpu,
   Download,
   ExternalLink,
@@ -39,10 +40,12 @@ import {
   User,
   Users,
   X,
+  Zap,
 } from 'lucide-react';
 import {
   BotHost,
   openCenterManagement,
+  type AbortBotResult,
   type BotSoul,
   type HostBot,
   type HostFrameEvent,
@@ -54,11 +57,15 @@ import {
   type HostVoiceEvent,
   type HostVoiceSaveInput,
   type HostVoiceSettings,
+  type QueuedTurnItem,
+  type TurnDeliveryMode,
+  type WithdrawQueuedResult,
+  type WithdrawnTurnItem,
 } from './native';
 import { mobileLocalRequest, onMobileStreamFailure } from './native/tauri-host';
 import { ActiveCenter, useCenterConnection } from './native/CenterGate';
 import { OnboardingPanel, OnboardingPermissions } from './native/OnboardingPanel';
-import { useDrafts } from '../../desktop/web/src/drafts';
+import { mergeRecalledByTarget, useDrafts } from '../../desktop/web/src/drafts';
 import { readHistoryPage } from '../../desktop/web/src/history';
 import { Scopes } from '../../desktop/web/src/Scopes';
 import { targetApi } from '../../desktop/web/src/targetApi';
@@ -83,7 +90,7 @@ import { isWebhookAttribution, MessageAttribution } from './MessageAttribution';
 import './bot-communications-mobile.css';
 import type { DesktopDraftEntry, DesktopIdentity, DesktopPanelApi } from '../../desktop/web/src/types';
 import type { DesktopConnectionInput, DesktopUiProfile } from '../../host-core/desktop-client.js';
-import type { BotBoardSnapshot, BotLiveState, ClearHistoryResult, CompactResult, DevicesDirectoryItem, PendingCursor, PendingListPage, RemoteControlMethodMap, ScopeInfo, ShowerTarget } from '../../host-core/index.js';
+import type { BotBoardSnapshot, BotLiveState, ClearHistoryResult, CompactResult, DevicesDirectoryItem, PendingCursor, PendingListPage, PendingRecord, RemoteControlMethodMap, ScopeInfo, ShowerTarget } from '../../host-core/index.js';
 import type { ShowerCall } from './ShowerPreview';
 import { Markdown } from './Markdown';
 import { BotScreenPanel } from './BotScreenPanel';
@@ -109,7 +116,10 @@ import { botAvatarKey, saveCentralBotAvatar, syncBotAvatarConfigs } from './botA
 import {
   canStopBotActivity,
   isBotActivityBusy,
+  isBotPreLlmPhase,
   resolveBotActivity,
+  resolveComposerActionKind,
+  shouldShowComposerStop,
   type BotActivity,
 } from './botActivity';
 import {
@@ -118,8 +128,19 @@ import {
   parseHistoryEntries,
   visibleAssistantTextEntryIds,
   resolveActiveTurnStartedAt,
+  type ChatTurn,
   type ChatTurnBlock,
 } from './chatTurnModel';
+import {
+  dedupeAttachmentMetas,
+  extractEditableUserText,
+  isEditablePrimaryUserTurn,
+  mergeQueuedStripItems,
+  mergeWithdrawnIntoDraft,
+  resolveAttachmentMetasByIds,
+  type UnifiedQueuedStripItem,
+} from './composerFlowControl';
+import { ComposerEditBanner, PendingQueueStrip } from './ComposerFlowStrips';
 import type { QuestionnaireSubmitPayload, VaultUnlockSubmitPayload } from './ToolPresentation';
 import {
   IMAGE_MAX_COUNT,
@@ -140,7 +161,7 @@ import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, us
 import { SendButtonIcon } from './SendButtonIcon';
 import { deleteBotAndVerify, isDefiniteSendFailure } from './botOperations';
 
-import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending, ChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, copyTextToClipboard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
+import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending as SharedChatPending, ChatPendingEntry as SharedChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, copyTextToClipboard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
 // @lane-imports:settings
 import { Badge, Disclosure, Row, Section, SettingsSheet } from './bot-settings/primitives';
 import { ClientUpdateSection, useClientUpdateSummary } from './ClientUpdateSection';
@@ -180,6 +201,23 @@ export interface HostPageProps {
 }
 
 type HubSettingsPage = 'overview' | 'connection' | 'devices' | 'manual' | 'updates' | 'permissions';
+
+interface ChatPending extends SharedChatPending {
+  attachments?: string[];
+  delivery?: TurnDeliveryMode;
+}
+
+interface ChatPendingEntry extends Omit<SharedChatPendingEntry, 'pending'> {
+  pending: ChatPending;
+}
+
+interface ActiveEditingTurn {
+  botKey: string;
+  scopeKey: string;
+  entryId: number;
+  text: string;
+  attachments: ImageAttachment[];
+}
 
 export function HostPage({
   connectionEpoch = 0,
@@ -345,6 +383,10 @@ export function HostPage({
   const [clearNotice, setClearNotice] = useState('');
   const [offlineNotice, setOfflineNotice] = useState<{ botKey: string; text: string }>();
   const [voiceCapturing, setVoiceCapturing] = useState<{ botId: string; requestId: string }>();
+  const [editingTurn, setEditingTurn] = useState<ActiveEditingTurn | null>(null);
+  const [editSubmitting, setEditSubmitting] = useState(false);
+  const [activeBubbleActionTurnId, setActiveBubbleActionTurnId] = useState<string | null>(null);
+  const [queueActionBusy, setQueueActionBusy] = useState(false);
 
   useEffect(() => {
     setOfflineNotice(undefined);
@@ -2009,7 +2051,11 @@ export function HostPage({
     }
   }, [activeBot, chatPending, clearedMap, ensureLocalHostRunning, remoteConnected, removePending, t, updateBotMeta]);
 
-  const sendMessage = () =>
+  /** 停止在途按 bot.key 去重：切换 Bot 不复用其他 Bot 的 abort Promise。 */
+  const stopInFlightRef = useRef(new Map<string, Promise<unknown>>());
+  const [stopping, setStopping] = useState<Set<string>>(() => new Set());
+
+  const sendMessage = (delivery: TurnDeliveryMode = 'followUp') =>
     action.run(async () => {
       const bot = activeBot;
       if (!bot) return;
@@ -2019,7 +2065,15 @@ export function HostPage({
       }
       if (deletingBots.current.has(bot.key) || (chatPending?.botKey === bot.key && chatPending.phase !== 'accepted')) return;
       if (bot.archivedAt) throw new Error(t('该智能体已归档，请先恢复后再发送消息', 'This bot is archived. Unarchive it first.'));
-      if (imageUploading) return;
+      if (imageUploading || editSubmitting) return;
+      const currentActivity = resolveBotActivity(chatLive);
+      if (
+        stopping.has(bot.key) ||
+        currentActivity.phase === 'stopping' ||
+        isBotPreLlmPhase(currentActivity.phase)
+      ) {
+        return;
+      }
       const draftSnapshot = chatDraft;
       const trimmed = draftSnapshot.trim();
       const draftAttachmentMetas = [...chatDraftAttachments];
@@ -2033,10 +2087,11 @@ export function HostPage({
       const scopeKey = scopeForBot(bot);
       if (!scopeKey) throw new Error(t('目标身份尚未就绪，草稿已保留。', 'Target identity unavailable; draft retained.'));
       const attachmentIds = draftAttachmentMetas.map((a) => a.id);
-      const submission = {
+      const submission: ChatPending = {
         botKey: bot.key, scopeKey, requestId: uuid(), text: trimmed,
         ...(attachmentIds.length ? { attachments: attachmentIds } : {}),
-        phase: 'sending' as const,
+        ...(delivery ? { delivery } : {}),
+        phase: 'sending',
         submittedAt: Date.now(),
         afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(chatLive?.lastEntryId) || 0, clearedMap[bot.key] ?? 0),
       };
@@ -2081,7 +2136,16 @@ ${newer}` : draftSnapshot;
         updateBotMeta(bot.key, { lastText: trimmed, updatedAt: Date.now(), unread: false });
         let receipt: HostSubmission;
         try {
-          const result = await BotHost.call({ method: 'submit', params: { botId: bot.botId, requestId: submission.requestId, text: trimmed, ...(attachmentIds.length ? { attachments: attachmentIds } : {}) } });
+          const result = await BotHost.call({
+            method: 'submit',
+            params: {
+              botId: bot.botId,
+              requestId: submission.requestId,
+              text: trimmed,
+              ...(attachmentIds.length ? { attachments: attachmentIds } : {}),
+              ...(delivery === 'steer' ? { delivery: 'steer' } : {}),
+            },
+          });
           receipt = result.result as HostSubmission;
         } catch (error) {
           if (stillOwned()) {
@@ -2113,13 +2177,131 @@ ${newer}` : draftSnapshot;
       }
     });
 
+  const submitEditedTurn = () =>
+    action.run(async () => {
+      const bot = activeBot;
+      const currentEdit = editingTurn;
+      if (!bot || !currentEdit || currentEdit.botKey !== bot.key || editSubmitting || imageUploading) return;
+      if (bot.archivedAt) throw new Error(t('该智能体已归档，请先恢复后再编辑消息', 'This bot is archived. Unarchive it first.'));
+      const currentActivity = resolveBotActivity(chatLive);
+      if (isBotActivityBusy(currentActivity) || stopping.has(bot.key) || (chatPending?.botKey === bot.key && chatPending.phase !== 'accepted')) {
+        throw new Error(t('智能体正忙，无法编辑历史消息', 'Bot is busy; cannot edit historical messages.'));
+      }
+      const trimmed = currentEdit.text.trim();
+      const attachmentIds = currentEdit.attachments.map(a => a.id);
+      if (!trimmed && attachmentIds.length === 0) return;
+      const scopeKey = scopeForBot(bot);
+      if (!scopeKey) throw new Error(t('目标身份尚未就绪。', 'Target identity unavailable.'));
+      const requestId = uuid();
+      const targetEntryId = currentEdit.entryId;
+      setEditSubmitting(true);
+      try {
+        let receipt: HostSubmission;
+        if (bot.hostKind === 'local') {
+          if (!centerConn.ready || centerConn.status?.state === 'disconnected') {
+            setOfflineNotice({ botKey: bot.key, text: t('中心离线，编辑内容已保留。', 'Center offline; edit retained.') });
+            return;
+          }
+          const snap = await ensureLocalHostRunning();
+          if (!snap || snap.phase !== 'running') {
+            setOfflineNotice({ botKey: bot.key, text: t('目标离线，编辑内容已保留。', 'Target offline; edit retained.') });
+            return;
+          }
+          const env = await BotHost.call({
+            method: 'editMessage',
+            params: {
+              botId: bot.botId,
+              requestId,
+              entryId: targetEntryId,
+              text: trimmed,
+              ...(attachmentIds.length ? { attachments: attachmentIds } : {}),
+            },
+          });
+          receipt = env.result as HostSubmission;
+        } else {
+          if (!bot.remoteIdentity || !remoteClientRef.current || !remoteConnected || bot.online === false) {
+            setOfflineNotice({ botKey: bot.key, text: t('目标离线，编辑内容已保留。', 'Target offline; edit retained.') });
+            return;
+          }
+          const res = await remoteClientRef.current.api.call(bot.remoteIdentity, 'editMessage', {
+            botId: bot.botId,
+            requestId,
+            entryId: targetEntryId,
+            text: trimmed,
+            ...(attachmentIds.length ? { attachments: attachmentIds } : {}),
+          });
+          receipt = res as unknown as HostSubmission;
+        }
+        setEditingTurn(prev => (prev?.entryId === targetEntryId && prev.botKey === bot.key ? null : prev));
+        chatHistoryEpoch.current += 1;
+        if (currentChatScope.current === scopeKey) {
+          setChatHistory(prev => prev.filter(item => Number(item.id) < targetEntryId));
+          setChatLive(prev => prev ? {
+            ...prev,
+            history: Array.isArray(prev.history)
+              ? prev.history.filter(item => Number(item.id) < targetEntryId)
+              : prev.history,
+          } : prev);
+        }
+        const submission: ChatPending = {
+          botKey: bot.key,
+          scopeKey,
+          requestId,
+          text: trimmed,
+          ...(attachmentIds.length ? { attachments: attachmentIds } : {}),
+          phase: 'accepted',
+          submittedAt: Date.now(),
+          afterEntryId: Math.max(0, targetEntryId - 1),
+          admission: (receipt as TurnAdmissionCarrier).admission ?? null,
+        };
+        if (currentChatScope.current === scopeKey) chatSubmissionRef.current = submission;
+        updatePending({ pending: submission, receipt });
+        updateBotMeta(bot.key, { lastText: trimmed, updatedAt: Date.now(), unread: false });
+        const readPages = async () => {
+          if (bot.hostKind === 'local') {
+            return fetchBotHistoryPages(async (cursor, limit, chunked) => {
+              const env = await BotHost.call({
+                method: 'history',
+                params: { botId: bot.botId, limit, ...(chunked ? { chunked: true } : {}), ...(cursor ? { cursor } : {}) },
+              });
+              return (env.result as HostHistoryPage) ?? null;
+            });
+          }
+          const api = remoteClientRef.current?.api;
+          const identity = bot.remoteIdentity;
+          if (!api || !identity) return null;
+          return fetchBotHistoryPages(async (cursor, limit, chunked) => {
+            const page = await api.call(identity, 'history', {
+              botId: bot.botId,
+              limit,
+              ...(chunked ? { chunked: true } : {}),
+              ...(cursor ? { cursor } : {}),
+            });
+            return (page as unknown as HostHistoryPage) ?? null;
+          });
+        };
+        const freshItems = await sharedHistoryRead(
+          chatHistoryFlights.current,
+          scopeKey,
+          chatHistoryEpoch,
+          () => currentChatScope.current === scopeKey,
+          () => readPages(),
+        ).catch(() => null);
+        if (currentChatScope.current === scopeKey && freshItems) {
+          setChatHistory(freshItems);
+        }
+      } finally {
+        setEditSubmitting(false);
+      }
+    });
+
   // 受理失败的 Host 队列请求按同一 requestId/原文显式重试；submit 端按请求标识幂等，不新建消息。
   const retryAdmission = () =>
     action.run(async () => {
       const bot = activeBot;
       const entry = activeChatScope ? pendingByBot.current.get(activeChatScope) : undefined;
       if (!bot || bot.hostKind !== 'local' || !entry?.pending.requestId || entry.pending.botKey !== bot.key) return;
-      const { requestId, text, scopeKey } = entry.pending;
+      const { requestId, text, scopeKey, attachments, delivery } = entry.pending;
       const stillOwned = () => pendingByBot.current.get(scopeKey)?.pending.requestId === requestId;
       if (!stillOwned()) return;
       if (!centerConn.ready || centerConn.status?.state === 'disconnected') {
@@ -2129,7 +2311,16 @@ ${newer}` : draftSnapshot;
       const snap = await ensureLocalHostRunning();
       if (!snap || snap.phase !== 'running' || !stillOwned()) return;
       try {
-        const result = await BotHost.call({ method: 'submit', params: { botId: bot.botId, requestId, text } });
+        const result = await BotHost.call({
+          method: 'submit',
+          params: {
+            botId: bot.botId,
+            requestId,
+            text,
+            ...(attachments?.length ? { attachments } : {}),
+            ...(delivery ? { delivery } : {}),
+          },
+        });
         const receipt = result.result as HostSubmission & TurnAdmissionCarrier;
         if (!stillOwned()) return;
         updatePending({ pending: { ...entry.pending, phase: 'accepted', admission: receipt.admission ?? null }, receipt });
@@ -2148,7 +2339,7 @@ ${newer}` : draftSnapshot;
       const bot = activeBot;
       const entry = activeChatScope ? pendingByBot.current.get(activeChatScope) : undefined;
       if (!bot || bot.hostKind !== 'remote' || !bot.remoteIdentity || !remoteClientRef.current || !entry?.pending.requestId || entry.pending.botKey !== bot.key) return;
-      const { requestId, text, scopeKey } = entry.pending;
+      const { requestId, text, scopeKey, attachments, delivery } = entry.pending;
       const stillOwned = () => pendingByBot.current.get(scopeKey)?.pending.requestId === requestId;
       if (!stillOwned()) return;
       if (!remoteConnected || bot.online === false) {
@@ -2156,7 +2347,13 @@ ${newer}` : draftSnapshot;
         return;
       }
       try {
-        const result = await remoteClientRef.current.api.call(bot.remoteIdentity, 'submit', { botId: bot.botId, requestId, text, ...(entry.pending.attachments?.length ? { attachments: entry.pending.attachments } : {}) });
+        const result = await remoteClientRef.current.api.call(bot.remoteIdentity, 'submit', {
+          botId: bot.botId,
+          requestId,
+          text,
+          ...(attachments?.length ? { attachments } : {}),
+          ...(delivery ? { delivery } : {}),
+        });
         const receipt = result as HostSubmission & TurnAdmissionCarrier;
         if (!stillOwned()) return;
         updatePending({ pending: { ...entry.pending, phase: 'accepted', admission: receipt?.admission ?? null }, receipt });
@@ -2989,27 +3186,23 @@ ${newer}` : draftSnapshot;
   // generation.blocks 与 displayGeneratingText 同一过滤口径：协作生成/恢复中不传入，
   // 避免协作文本经块投影漏进普通聊天（见 allChatTurns 的 liveGeneratingBlocks）。
 
-  // 当前会话的按轮受理状态：优先 live turnAdmission，其次提交回执/持久化 pending 上的 admission。
+  // 当前会话的按轮受理状态：live 已就绪时以 chatLive.turnAdmission 为权威（null 即已离开准入阶段，不回退过期回执）；
+  // 仅在 live 尚未到达前才回退提交回执/持久化 pending 上的 admission。
   const liveTurnAdmission = chatLive?.turnAdmission ?? null;
   const pendingAdmission = chatPending?.botKey === activeBot?.key
     ? (chatPending?.admission ?? (chatReceipt as TurnAdmissionCarrier | undefined)?.admission ?? null)
     : null;
-  const chatTurnAdmission =
-    liveTurnAdmission && (!chatPending?.requestId || liveTurnAdmission.requestId === chatPending.requestId)
-      ? liveTurnAdmission
-      : pendingAdmission;
-  const admissionStatusText = !chatTurnAdmission
-    ? ''
-    : chatTurnAdmission.phase === 'failed'
-      ? t(
-          '同步失败：' + (chatTurnAdmission.error?.message || chatTurnAdmission.error?.code || '') + '，消息已保留。',
-          'Sync failed: ' + (chatTurnAdmission.error?.message || chatTurnAdmission.error?.code || '') + '; message retained.',
-        )
-      : chatTurnAdmission.phase === 'checking'
-        ? t('正在检查插件版本…', 'Checking plugin versions…')
-        : chatTurnAdmission.phase === 'synchronizing'
-          ? t('正在同步插件…', 'Synchronizing plugins…')
-          : t('排队等待受理…', 'Queued for admission…');
+  const chatTurnAdmission = chatLive !== undefined
+    ? (liveTurnAdmission && (!chatPending?.requestId || liveTurnAdmission.requestId === chatPending.requestId)
+        ? liveTurnAdmission
+        : null)
+    : pendingAdmission;
+  const admissionStatusText = chatTurnAdmission?.phase === 'failed'
+    ? t(
+        '同步失败：' + (chatTurnAdmission.error?.message || chatTurnAdmission.error?.code || '') + '，消息已保留。',
+        'Sync failed: ' + (chatTurnAdmission.error?.message || chatTurnAdmission.error?.code || '') + '; message retained.',
+      )
+    : '';
 
   // 统一活动状态：新 Host 帧带 activity 则以它为准；旧 Host 缺省走 resolveBotActivity 的旧字段 fallback。
   // 只有尚未受理的发送中阶段才允许乐观叠加 queued；一旦 Host 有真实 activity（含 failed/stopped），
@@ -3019,12 +3212,10 @@ ${newer}` : draftSnapshot;
       ? null
       : chatLive,
   );
-  /** 停止在途按 bot.key 去重：切换 Bot 不复用其他 Bot 的 abort Promise。 */
-  const stopInFlightRef = useRef(new Map<string, Promise<unknown>>());
-  const [stopping, setStopping] = useState<Set<string>>(() => new Set());
   const isStoppingBot = Boolean(activeBot && stopping.has(activeBot.key));
 
   const sendingOptimistic = !recoveringChat && chatPending?.botKey === activeBot?.key && chatPending?.phase === 'sending';
+  const sendingReceipt = Boolean(chatPending?.botKey === activeBot?.key && chatPending?.phase !== 'accepted');
   // 本地停止在途时无条件显示 stopping（覆盖 Host 尚未更新的 running）；
   // 仅未受理的发送中阶段才在 Host 空闲/failed/stopped 上叠加乐观 queued，受理后完全以 Host activity 为准。
   const botActivity: BotActivity = isStoppingBot
@@ -3040,21 +3231,175 @@ ${newer}` : draftSnapshot;
       ? botActivity.error.message || botActivity.error.code
       : undefined;
   const failureNotice = activityFailure || submissionFailure;
-  const canStopBot = Boolean(
-    activeBot && !activeBot.archivedAt && canStopBotActivity(botActivity) &&
-    (activeBot.hostKind !== 'remote' || (remoteConnected && activeBot.online !== false)),
+  const isChatTargetOnline = Boolean(
+    activeBot && (activeBot.hostKind !== 'remote' || (remoteConnected && activeBot.online !== false)),
   );
+  const canStopBot = Boolean(
+    activeBot && !activeBot.archivedAt && canStopBotActivity(botActivity) && isChatTargetOnline,
+  );
+  const activeEditing = editingTurn && activeBot && editingTurn.botKey === activeBot.key ? editingTurn : null;
+  const effectiveLocalDraft = activeEditing ? activeEditing.text : chatDraft;
+  const effectiveLocalAttachments = activeEditing ? activeEditing.attachments : chatDraftAttachments;
+
+  // 严格遵守：Bot 忙碌时不允许编辑历史消息。一旦进入忙碌/停止/切走会话立即退出编辑态并收起气泡菜单。
+  useEffect(() => {
+    if (activeBubbleActionTurnId && (isBotBusy || isStoppingBot || screen !== 'chat')) {
+      setActiveBubbleActionTurnId(null);
+    }
+    if (!editingTurn || editSubmitting) return;
+    if (
+      screen !== 'chat' ||
+      !activeBot ||
+      editingTurn.botKey !== activeBot.key ||
+      isBotBusy ||
+      isStoppingBot ||
+      sendingReceipt
+    ) {
+      setEditingTurn(null);
+    }
+  }, [activeBubbleActionTurnId, editingTurn, editSubmitting, screen, activeBot, isBotBusy, isStoppingBot, sendingReceipt]);
+
+  const canEditHistoryTurn = Boolean(
+    activeBot &&
+      !activeBot.archivedAt &&
+      isChatTargetOnline &&
+      (activeBot.hostKind === 'local' ? localHost?.phase === 'running' : remoteConnected) &&
+      !isBotBusy &&
+      !isStoppingBot &&
+      !sendingReceipt &&
+      !slashBusy &&
+      !editSubmitting,
+  );
+
+  const localComposerAction = resolveComposerActionKind({
+    phase: botActivity.phase,
+    online: isChatTargetOnline,
+    archived: Boolean(!activeBot || activeBot.archivedAt),
+    isSending: Boolean(sendingOptimistic || sendingReceipt || editSubmitting),
+    isStopping: isStoppingBot,
+    pendingAdmissionWaiting: chatLive === undefined && chatTurnAdmission !== null && chatTurnAdmission.phase !== 'failed',
+    hasDraft: Boolean(effectiveLocalDraft.trim()) || effectiveLocalAttachments.length > 0,
+    canStop: canStopBot,
+  });
+  const isStoppingChat = localComposerAction === 'stopping';
+  const isPreLlmChat = localComposerAction === 'loading';
+  const isLlmRunningChat = localComposerAction === 'queue' || localComposerAction === 'stop';
+  const showLocalComposerStop =
+    !(sendingReceipt && !canStopBotActivity(rawBotActivity)) &&
+    !editSubmitting &&
+    shouldShowComposerStop({
+      phase: botActivity.phase,
+      online: isChatTargetOnline,
+      archived: Boolean(!activeBot || activeBot.archivedAt),
+      isStopping: isStoppingChat,
+      canStop: canStopBot,
+    });
+
+  const mergeWithdrawnToLocalScope = useCallback(async (
+    bot: UnifiedBotItem,
+    scopeKey: string,
+    withdrawn: readonly WithdrawnTurnItem[],
+    mergeIntoDraft: boolean,
+  ) => {
+    if (!withdrawn.length) return;
+    for (const w of withdrawn) {
+      if (scopeKey) removePending(scopeKey, w.requestId);
+    }
+    if (!mergeIntoDraft || !scopeKey) return;
+    const texts = withdrawn.map(w => extractEditableUserText(w.text));
+    const attachmentIds = withdrawn.flatMap(w => w.attachments ?? []);
+    const fetcher = attachmentIds.length > 0
+      ? async (attachmentId: string) => {
+          const env = await BotHost.call({
+            method: 'getAttachment',
+            params: { botId: bot.botId, attachmentId },
+          });
+          return env.result as ImageAttachmentData;
+        }
+      : null;
+    const resolvedAtts = await resolveAttachmentMetasByIds(attachmentIds, fetcher);
+    const baseDraft = currentChatScope.current === scopeKey ? readChatDraft(scopeKey) || chatDraft : readChatDraft(scopeKey);
+    const baseAtts = readChatDraftAttachments(scopeKey);
+    const nextDraft = mergeWithdrawnIntoDraft(baseDraft, texts);
+    const nextAtts = dedupeAttachmentMetas(baseAtts, resolvedAtts, IMAGE_MAX_COUNT);
+    writeChatDraft(scopeKey, nextDraft);
+    writeChatDraftAttachments(scopeKey, nextAtts);
+    if (currentChatScope.current === scopeKey) {
+      setChatDraft(nextDraft);
+      setChatDraftAttachments(nextAtts);
+    }
+  }, [chatDraft]);
+
+  const scopeForBotRef = useRef(scopeForBot);
+  scopeForBotRef.current = scopeForBot;
+  const mergeWithdrawnToLocalScopeRef = useRef(mergeWithdrawnToLocalScope);
+  mergeWithdrawnToLocalScopeRef.current = mergeWithdrawnToLocalScope;
+  const removePendingRef = useRef(removePending);
+  removePendingRef.current = removePending;
+
   const requestStopBot = useCallback((bot: UnifiedBotItem): Promise<unknown> => {
     const inflight = stopInFlightRef.current.get(bot.key);
     if (inflight) return inflight;
     const task = (async () => {
+      const scopeKey = scopeForBotRef.current(bot);
       if (bot.hostKind === 'local') {
-        await BotHost.call({ method: 'abort', params: { botId: bot.botId } });
+        const env = await BotHost.call({ method: 'abort', params: { botId: bot.botId } });
+        const res = env.result as AbortBotResult | undefined;
+        if (res?.withdrawn?.length) {
+          await mergeWithdrawnToLocalScopeRef.current(bot, scopeKey, res.withdrawn, true);
+        }
       } else {
         if (!bot.remoteIdentity || !remoteClientRef.current) {
           throw new Error(t('目标离线，未停止。', 'Target offline; not stopped.'));
         }
-        await remoteClientRef.current.api.call(bot.remoteIdentity, 'abort', { botId: bot.botId });
+        const api = remoteClientRef.current.api;
+        const identity = bot.remoteIdentity;
+        const outboxWithdrawn: WithdrawnTurnItem[] = [];
+        try {
+          const page = await api.pending(identity, 'pending_list', { options: { state: 'pending', limit: 50 } });
+          for (const rec of page.items) {
+            if (rec.kind === 'primary' && rec.botId === bot.botId && rec.targetDeviceId === identity.targetDeviceId) {
+              const cancelled = await api.pending(identity, 'pending_cancel', { id: rec.id }).catch(() => null);
+              if (cancelled?.state === 'rejected') {
+                outboxWithdrawn.push({
+                  requestId: rec.requestId,
+                  text: rec.text,
+                  ...(rec.attachments?.length ? { attachments: rec.attachments } : {}),
+                  delivery: rec.delivery ?? 'followUp',
+                });
+              }
+            }
+          }
+        } catch {
+          // Ignore local outbox scan error; remote abort still proceeds.
+        }
+        const res = await api.call(identity, 'abort', { botId: bot.botId });
+        const combined: WithdrawnTurnItem[] = [];
+        const seen = new Set<string>();
+        for (const item of [...(res?.withdrawn ?? []), ...outboxWithdrawn]) {
+          if (!item?.requestId || seen.has(item.requestId)) continue;
+          seen.add(item.requestId);
+          combined.push(item);
+        }
+        if (combined.length > 0) {
+          for (const w of combined) {
+            if (scopeKey) removePendingRef.current(scopeKey, w.requestId);
+          }
+          const attachmentIds = combined.flatMap(w => w.attachments ?? []);
+          const resolvedAtts = await resolveAttachmentMetasByIds(
+            attachmentIds,
+            attachmentIds.length > 0
+              ? (attachmentId: string) => api.call(identity, 'getAttachment', { botId: bot.botId, attachmentId }) as Promise<ImageAttachmentData>
+              : null,
+          );
+          mergeRecalledByTarget(
+            api,
+            identity,
+            { kind: 'primary', id: bot.botId },
+            combined.map(w => extractEditableUserText(w.text)),
+            resolvedAtts,
+          );
+        }
       }
     })();
     stopInFlightRef.current.set(bot.key, task);
@@ -3071,6 +3416,73 @@ ${newer}` : draftSnapshot;
     task.then(cleanup, cleanup);
     return task;
   }, [t]);
+
+  const localQueuedStripItems = useMemo(
+    () => (activeBot?.hostKind === 'local' ? mergeQueuedStripItems(chatLive?.queuedItems) : []),
+    [activeBot?.hostKind, chatLive?.queuedItems],
+  );
+
+  const recallLocalQueuedItem = useCallback(async (item: UnifiedQueuedStripItem, mergeIntoDraft = true) => {
+    const bot = activeBot;
+    if (!bot || bot.hostKind !== 'local' || queueActionBusy) return;
+    const scopeKey = scopeForBotRef.current(bot);
+    setQueueActionBusy(true);
+    try {
+      const env = await BotHost.call({
+        method: 'withdrawQueued',
+        params: { botId: bot.botId, requestId: item.requestId },
+      });
+      const res = env.result as WithdrawQueuedResult | undefined;
+      if (res?.withdrawn?.length) {
+        await mergeWithdrawnToLocalScopeRef.current(bot, scopeKey, res.withdrawn, mergeIntoDraft);
+        if (mergeIntoDraft) {
+          requestAnimationFrame(() => composerTextareaRef.current?.focus());
+        }
+      }
+    } catch (error) {
+      action.setError(errorText(error));
+    } finally {
+      setQueueActionBusy(false);
+    }
+  }, [activeBot, queueActionBusy, action]);
+
+  const recallAllLocalQueued = useCallback(async () => {
+    const bot = activeBot;
+    if (!bot || bot.hostKind !== 'local' || queueActionBusy) return;
+    const scopeKey = scopeForBotRef.current(bot);
+    setQueueActionBusy(true);
+    try {
+      const env = await BotHost.call({
+        method: 'withdrawQueued',
+        params: { botId: bot.botId },
+      });
+      const res = env.result as WithdrawQueuedResult | undefined;
+      if (res?.withdrawn?.length) {
+        await mergeWithdrawnToLocalScopeRef.current(bot, scopeKey, res.withdrawn, true);
+        requestAnimationFrame(() => composerTextareaRef.current?.focus());
+      }
+    } catch (error) {
+      action.setError(errorText(error));
+    } finally {
+      setQueueActionBusy(false);
+    }
+  }, [activeBot, queueActionBusy, action]);
+
+  const steerLocalQueuedItem = useCallback(async (item: UnifiedQueuedStripItem) => {
+    const bot = activeBot;
+    if (!bot || bot.hostKind !== 'local' || queueActionBusy) return;
+    setQueueActionBusy(true);
+    try {
+      await BotHost.call({
+        method: 'steerQueued',
+        params: { botId: bot.botId, requestId: item.requestId },
+      });
+    } catch (error) {
+      action.setError(errorText(error));
+    } finally {
+      setQueueActionBusy(false);
+    }
+  }, [activeBot, queueActionBusy, action]);
 
   /** 问卷提交走现有 callCapabilityAction；deviceId/botId 由宿主授权，不自建协议。 */
   const submitQuestionnaire = useCallback(
@@ -3221,12 +3633,13 @@ ${newer}` : draftSnapshot;
     return sorted;
   }, [chatHistory, chatLive, activeBot, clearedMap, chatPending, chatReceipt]);
 
-  // generation.attribution 缺失但 tools 仍活跃时，用合并历史中最新执行来源判断当前是否协作工作。
+  // generation.attribution 缺失但 tools 仍活跃时，用合并历史中最新执行来源判断当前是否群聊后台工作；
+  // 1v1 Bot 私聊（dm）与用户主聊（primary）均在当前 Bot 的 1v1 对话页内实时流式展示。
   const chatLiveIsCollaborative = Boolean(
     isBotBusy &&
-      (liveGenerationAttr?.channel ?? latestEntryChannel(allChatItems, activeBot?.botId)) !== 'primary',
+      (liveGenerationAttr?.channel ?? latestEntryChannel(allChatItems, activeBot?.botId)) === 'room',
   );
-  // 协作工作的流式文本/工具名不渲染进普通聊天忙状态。
+  // 群聊工作的流式文本/工具名不渲染进 1v1 聊天忙状态。
   const displayLiveToolName = chatLiveIsCollaborative ? null : activeLiveToolName;
   const displayGeneratingText = chatLiveIsCollaborative ? '' : liveGeneratingText;
 
@@ -3236,16 +3649,16 @@ ${newer}` : draftSnapshot;
     return parseHistoryEntries(allChatItems, clearedAfter, {
       liveTools: recoveringChat ? undefined : array<Record<string, unknown>>(chatLive?.tools),
       isBusy: isBotBusy,
-      // 协作（dm/room）生成的流式文本不进普通聊天：隐藏轮由 parser 归轮过滤。
+      // 群聊（room）生成的流式文本不进 1v1 聊天：隐藏轮由 parser 归轮过滤。
       liveGeneratingText: displayGeneratingText,
-      // 与 displayGeneratingText 同一协作过滤口径：缺 attribution 的协作生成
-      // 块同样不渲染进普通聊天。
+      // 与 displayGeneratingText 同一过滤口径：缺 attribution 的群聊生成块同样不进 1v1 聊天。
       liveGeneratingBlocks: chatLiveIsCollaborative ? undefined : chatLive?.generation?.blocks,
       // 当前 Bot 为 self echo（outgoing）判定锚点；live 流式轮的 attribution 由生成帧携带。
       selfBotId: activeBot.botId,
       liveAttribution: liveGenerationAttr,
+      knownBots,
     });
-  }, [allChatItems, chatLive, activeBot, clearedMap, recoveringChat, isBotBusy, liveGeneratingText, liveGenerationAttr, chatLiveIsCollaborative]);
+  }, [allChatItems, chatLive, activeBot, clearedMap, recoveringChat, isBotBusy, liveGeneratingText, liveGenerationAttr, chatLiveIsCollaborative, knownBots]);
 
   const activeTurnStartedAt = useMemo(
     () => resolveActiveTurnStartedAt(botActivity),
@@ -3424,6 +3837,14 @@ ${newer}` : draftSnapshot;
       setChatSearchQuery('');
       return true;
     }
+    if (activeBubbleActionTurnId) {
+      setActiveBubbleActionTurnId(null);
+      return true;
+    }
+    if (editingTurn) {
+      if (!editSubmitting) setEditingTurn(null);
+      return true;
+    }
     if (screen === 'bot-avatar') {
       setScreen(avatarReturnScreen);
       return true;
@@ -3478,6 +3899,9 @@ ${newer}` : draftSnapshot;
     chatTopMenuOpen,
     composerMenuOpen,
     chatSearchOpen,
+    activeBubbleActionTurnId,
+    editingTurn,
+    editSubmitting,
     leftDrawerOpen,
     libraryReturnScreen,
     backFromSettings,
@@ -3578,13 +4002,13 @@ ${newer}` : draftSnapshot;
   useEffect(() => {
     const el = composerTextareaRef.current;
     if (!el) return;
-    if (!chatDraft) {
+    if (!effectiveLocalDraft) {
       el.style.height = '36px';
     } else {
       el.style.height = 'auto';
       el.style.height = `${Math.min(el.scrollHeight, 110)}px`;
     }
-  }, [chatDraft, screen]);
+  }, [effectiveLocalDraft, screen]);
 
   /** 本机历史/发送后附件按需取图：统一走 BotHost.call getAttachment。 */
   const localAttachmentFetcher = useMemo<AttachmentFetcher | null>(() => {
@@ -3609,11 +4033,23 @@ ${newer}` : draftSnapshot;
   /** Tauri（Android ）界面才有原生选图/拍照；浏览器走 input type=file。 */
   const inTauriUi = (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== undefined;
 
+  const editingTurnRef = useRef(editingTurn);
+  editingTurnRef.current = editingTurn;
+
   /** 本机：上传走 BotHost.call uploadAttachment；归属冻结在发起时的 scope/botId——
    *  切换聊天后完成的上传仍只写原 scope 磁盘草稿，不回填当前 React state。
    *  相同图片 id（content SHA-256，与 backend id 一致）去重，避免 backend duplicate 拒绝。 */
-  const uploadLocalImages = useCallback(async (botId: string, scope: string, sources: PickedImageSource[]) => {
-    const existing = new Set(readChatDraftAttachments(scope).map((a) => a.id));
+  const uploadLocalImages = useCallback(async (botId: string, scope: string, sources: PickedImageSource[], targetEditEntryId?: number) => {
+    const getCurrentList = () => {
+      if (targetEditEntryId !== undefined) {
+        const cur = editingTurnRef.current;
+        return cur && cur.scopeKey === scope && cur.entryId === targetEditEntryId ? cur.attachments : null;
+      }
+      return readChatDraftAttachments(scope);
+    };
+    const initialList = getCurrentList();
+    if (!initialList) return;
+    const existing = new Set(initialList.map((a) => a.id));
     const queued: PickedImageSource[] = [];
     for (const source of sources) {
       const id = await attachmentIdOf(source.data);
@@ -3622,10 +4058,10 @@ ${newer}` : draftSnapshot;
       queued.push(source);
     }
     // 去重后总数/总字节上限校验：超限整体拒绝，保留原草稿（不静默丢最早附件）。
-    if (readChatDraftAttachments(scope).length + queued.length > IMAGE_MAX_COUNT) {
+    if (initialList.length + queued.length > IMAGE_MAX_COUNT) {
       throw new ImagePickError('IMAGE_TOO_MANY', t(`最多 ${IMAGE_MAX_COUNT} 张图片，本次未上传。`, `At most ${IMAGE_MAX_COUNT} images; nothing uploaded.`));
     }
-    const totalBytes = readChatDraftAttachments(scope).reduce((sum, a) => sum + a.size, 0)
+    const totalBytes = initialList.reduce((sum, a) => sum + a.size, 0)
       + queued.reduce((sum, s) => sum + s.size, 0);
     if (totalBytes > IMAGE_MAX_TOTAL_BYTES) {
       throw new ImagePickError('IMAGE_TOO_LARGE', t(`图片总大小超过 ${IMAGE_MAX_TOTAL_BYTES / 1048576}MB，本次未上传。`, `Total image size exceeds ${IMAGE_MAX_TOTAL_BYTES / 1048576}MB; nothing uploaded.`));
@@ -3641,9 +4077,19 @@ ${newer}` : draftSnapshot;
         },
       });
       const att = env.result as ImageAttachment;
-      const next = [...readChatDraftAttachments(scope), att];
-      writeChatDraftAttachments(scope, next);
-      if (currentChatScope.current === scope) setChatDraftAttachments(next);
+      if (targetEditEntryId !== undefined) {
+        const cur = editingTurnRef.current;
+        if (!cur || cur.scopeKey !== scope || cur.entryId !== targetEditEntryId) return;
+        setEditingTurn(prev =>
+          prev && prev.scopeKey === scope && prev.entryId === targetEditEntryId && !prev.attachments.some(a => a.id === att.id)
+            ? { ...prev, attachments: [...prev.attachments, att] }
+            : prev,
+        );
+      } else {
+        const next = [...readChatDraftAttachments(scope), att];
+        writeChatDraftAttachments(scope, next);
+        if (currentChatScope.current === scope) setChatDraftAttachments(next);
+      }
     }
   }, [t]);
 
@@ -3655,11 +4101,12 @@ ${newer}` : draftSnapshot;
     const botId = bot.botId;
     const botKey = bot.key;
     const scope = currentChatScope.current;
+    const targetEditEntryId = editingTurnRef.current?.botKey === botKey ? editingTurnRef.current.entryId : undefined;
     if (!scope) { setComposerImageError(t('目标身份尚未就绪，草稿已保留。', 'Target identity unavailable; draft retained.')); return; }
     const handleSources = async (sources: PickedImageSource[]) => {
       if (sources.length === 0) return;
       try {
-        await uploadLocalImages(botId, scope, sources);
+        await uploadLocalImages(botId, scope, sources, targetEditEntryId);
         if (activeBot?.key === botKey) setComposerImageError('');
       } catch (error) {
         if (activeBot?.key === botKey) setComposerImageError(errorText(error));
@@ -3686,9 +4133,9 @@ ${newer}` : draftSnapshot;
   }, [activeBot, imageUploading, inTauriUi, uploadLocalImages, t]);
 
   const slash = useSlashAutocomplete({
-    text: chatDraft,
-    // 未确认/待对账的原请求也不得用命令绕过（recovering 不意味着可以清空）。
-    disabled: !activeChatScope || Boolean(slashBusy) ||
+    text: effectiveLocalDraft,
+    // 未确认/待对账的原请求或历史编辑态也不得用命令绕过（recovering 不意味着可以清空）。
+    disabled: !activeChatScope || Boolean(slashBusy) || Boolean(activeEditing) ||
       Boolean(activeBot && chatPending?.botKey === activeBot.key && chatPending.phase !== 'accepted'),
     onText: text => {
       setChatDraft(text);
@@ -3829,22 +4276,19 @@ ${newer}` : draftSnapshot;
     });
   };
   // Merged bottom status bar: render only the single highest-priority notice.
+  // Normal pre-LLM admission phases (queued/checking/synchronizing) are reflected via the composer spinner, not text banners.
   const chatConnIssue = !centerConn.ready && Boolean(centerConn.status?.error);
   const chatLoadIssue = Boolean(chatLoadError) && !(centerConn.status?.state === 'disconnected' && centerConn.status.error);
-  const chatAdmissionActive = Boolean(chatTurnAdmission) && chatPending?.botKey === activeBot?.key &&
+  const chatAdmissionActive = chatTurnAdmission?.phase === 'failed' && chatPending?.botKey === activeBot?.key &&
     (chatReceipt?.status === undefined || chatReceipt.status === 'queued');
-  const sendingReceipt = chatPending?.botKey === activeBot?.key && chatPending?.phase !== 'accepted';
   const chatStatusKind: 'fail' | 'admission' | 'conn' | 'load' | 'clear' | null =
     failureNotice ? 'fail'
-      : chatAdmissionActive && chatTurnAdmission?.phase === 'failed' ? 'admission'
+      : chatAdmissionActive ? 'admission'
       : chatConnIssue ? 'conn'
       : chatLoadIssue ? 'load'
       : clearNotice ? 'clear'
       : null;
-  // "排队等待受理" technical wording replaced; other admission phases keep the original text.
-  const chatAdmissionText = chatTurnAdmission?.phase === 'queued'
-    ? t('排队等待中…', 'Waiting in queue…')
-    : admissionStatusText;
+  const chatAdmissionText = admissionStatusText;
   // ---
   // @lane-hooks:remote-composer
   // "+" 菜单 /clear 二次确认：存首次点击时间戳，3 秒内再点才执行（自然过期，无计时器）。
@@ -4263,6 +4707,7 @@ ${newer}` : draftSnapshot;
                 preset={resolveBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary)}
                 isPrimary={activeBot.isPrimary}
                 busy={isBotBusy}
+                reflecting={Boolean(chatLive?.learning?.active)}
                 size={28}
               />
               <span className="grok-chat-pill-name">{activeBot.role}</span>
@@ -4408,6 +4853,7 @@ ${newer}` : draftSnapshot;
             onClick={() => {
               if (composerMenuOpen) setComposerMenuOpen(false);
               if (chatTopMenuOpen) setChatTopMenuOpen(false);
+              if (activeBubbleActionTurnId) setActiveBubbleActionTurnId(null);
             }}
           >
             {visibleTurns.length === 0 && !displayGeneratingText ? (
@@ -4440,8 +4886,11 @@ ${newer}` : draftSnapshot;
                 </p>
               </div>
               )
-            ) : (
-              visibleTurns.map((turn, turnIdx) => {
+            ) : (() => {
+              const editingTargetIdx = activeEditing
+                ? visibleTurns.findIndex(item => item.role === 'user' && item.entryId === activeEditing.entryId)
+                : -1;
+              return visibleTurns.map((turn, turnIdx) => {
                 const isLastAssistantTurn =
                   turn.role === 'assistant' && turnIdx === visibleTurns.length - 1;
                 const showTurnDuration =
@@ -4450,10 +4899,27 @@ ${newer}` : draftSnapshot;
                   turn.durationMs > 0 &&
                   !(isLastAssistantTurn && isBotBusy);
                 const attribution = turn.attribution;
+                const isEditingTarget = editingTargetIdx === turnIdx;
+                const isAfterEditingTarget = editingTargetIdx !== -1 && turnIdx > editingTargetIdx;
+                const isPrimaryUserBubble =
+                  turn.role === 'user' &&
+                  (!attribution || (attribution.kind === 'user' && attribution.channel === 'primary'));
+                const turnEditable = canEditHistoryTurn && isEditablePrimaryUserTurn(turn);
+                const editableText = isPrimaryUserBubble ? extractEditableUserText(turn.text) : '';
+                const hasBubbleMenuItems = Boolean(editableText) || turnEditable;
+                const showBubbleActions = isPrimaryUserBubble && hasBubbleMenuItems && activeBubbleActionTurnId === turn.id;
                 return (
                   <article
                     key={turn.id}
-                    className={`bot-chat-bubble ${isWebhookAttribution(attribution) ? 'assistant' : turn.role}${turn.isStreaming ? ' streaming' : ''}`}
+                    className={`bot-chat-bubble ${isWebhookAttribution(attribution) ? 'assistant' : turn.role}${turn.role === 'user' && attribution?.kind === 'bot' ? ' is-peer' : ''}${turn.isStreaming ? ' streaming' : ''}${isEditingTarget ? ' is-editing-target' : ''}${isAfterEditingTarget ? ' is-editing-after' : ''}`}
+                    onClick={isPrimaryUserBubble && hasBubbleMenuItems ? e => {
+                      if ((e.target as HTMLElement | null)?.closest('a, button, details, summary, img')) return;
+                      if (typeof window !== 'undefined' && window.getSelection()?.toString()) return;
+                      e.stopPropagation();
+                      if (composerMenuOpen) setComposerMenuOpen(false);
+                      if (chatTopMenuOpen) setChatTopMenuOpen(false);
+                      setActiveBubbleActionTurnId(prev => (prev === turn.id ? null : turn.id));
+                    } : undefined}
                   >
                     {attribution && (
                       <MessageAttribution
@@ -4533,10 +4999,53 @@ ${newer}` : draftSnapshot;
                         <span>{formatTurnDuration(turn.durationMs!, t)}</span>
                       </div>
                     )}
+                    {showBubbleActions && (
+                      <div
+                        className="bot-bubble-action-bar"
+                        role="toolbar"
+                        aria-label={t('消息操作', 'Message actions')}
+                        onClick={e => e.stopPropagation()}
+                      >
+                        {editableText && (
+                          <button
+                            type="button"
+                            className="bot-bubble-action-btn"
+                            onClick={() => {
+                              copyTextToClipboard(editableText);
+                              setActiveBubbleActionTurnId(null);
+                            }}
+                          >
+                            <Copy size={12} />
+                            <span>{t('复制', 'Copy')}</span>
+                          </button>
+                        )}
+                        {turnEditable && (
+                          <button
+                            type="button"
+                            className="bot-bubble-action-btn"
+                            onClick={() => {
+                              setActiveBubbleActionTurnId(null);
+                              setComposerImageError('');
+                              setEditingTurn({
+                                botKey: activeBot.key,
+                                scopeKey: activeChatScope,
+                                entryId: turn.entryId,
+                                text: editableText,
+                                attachments: turn.attachments ? turn.attachments.map(a => ({ ...a })) : [],
+                              });
+                              requestAnimationFrame(() => composerTextareaRef.current?.focus());
+                            }}
+                          >
+                            <Pencil size={12} />
+                            <span>{t('编辑', 'Edit')}</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </article>
                 );
-              })
-            )}
+              });
+            })()}
             <GrokBotWorkingSlot
               key={activeBot.key}
               botKey={activeBot.key}
@@ -4553,6 +5062,8 @@ ${newer}` : draftSnapshot;
               )}
               queuedCount={chatLive?.queuedCount ?? 0}
               activity={isStoppingBot ? botActivity : rawBotActivity}
+              learning={chatLive?.learning ?? null}
+              onOpenLearnedSkills={() => setSkillReviewTargetKey(botPanelIdentityKey)}
               hasError={Boolean(failureNotice) || (chatReceipt?.status === 'unanswered' && !receiptUserCancelled)}
               startedAt={activeTurnStartedAt}
               t={t}
@@ -4568,9 +5079,28 @@ ${newer}` : draftSnapshot;
               <div className="bot-chat-system-notice" role="status">
                 {chatAdmissionText}
                 {chatTurnAdmission?.source === 'background' ? t(' · 后台', ' · background') : null}
-                {chatTurnAdmission?.phase === 'failed' && (activeBot.hostKind === 'local'
-                  ? <button type="button" className="hub-outline-btn" onClick={() => void retryAdmission()}>{t('重试发送', 'Retry sending')}</button>
-                  : <button type="button" className="hub-outline-btn" onClick={() => void retryRemoteAdmission()}>{t('重试发送', 'Retry sending')}</button>
+                {chatTurnAdmission?.phase === 'failed' && (
+                  <>
+                    {activeBot.hostKind === 'local'
+                      ? <button type="button" className="hub-outline-btn" onClick={() => void retryAdmission()}>{t('重试发送', 'Retry sending')}</button>
+                      : <button type="button" className="hub-outline-btn" onClick={() => void retryRemoteAdmission()}>{t('重试发送', 'Retry sending')}</button>}
+                    {canStopBot && (
+                      <button
+                        type="button"
+                        className="hub-outline-btn danger"
+                        disabled={isStoppingBot}
+                        onClick={() => {
+                          setStopError('');
+                          requestStopBot(activeBot).then(
+                            () => setStopError(''),
+                            error => setStopError(errorText(error)),
+                          );
+                        }}
+                      >
+                        {t('取消', 'Cancel')}
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
             )}
@@ -4638,7 +5168,13 @@ ${newer}` : draftSnapshot;
                 identity={activeBot.remoteIdentity}
                 botId={activeBot.botId}
                 botRole={activeBot.role}
-                isBotBusy={isBotBusy}
+                activityPhase={botActivity.phase}
+                liveQueuedItems={chatLive?.queuedItems}
+                editingTurn={activeEditing}
+                editSubmitting={editSubmitting}
+                onChangeEditTurn={patch => setEditingTurn(prev => (prev ? { ...prev, ...patch } : null))}
+                onCancelEditTurn={() => setEditingTurn(null)}
+                onSubmitEditTurn={() => void submitEditedTurn()}
                 online={remoteConnected && activeBot.online !== false}
                 onOffline={() => setOfflineNotice({ botKey: activeBot.key, text: t('目标离线，草稿已保留。', 'Target offline; draft retained.') })}
                 composerMenuOpen={composerMenuOpen}
@@ -4662,10 +5198,14 @@ ${newer}` : draftSnapshot;
                   writeChatDraftAttachments(activeChatScope, []);
                 }}
                 blocked={chatPending?.scopeKey === activeChatScope && chatPending.phase === 'recovering'}
-                onStarted={(requestId, text, draft) => {
+                onStarted={(requestId, text, draft, delivery) => {
                   const old = pendingByBot.current.get(activeChatScope)?.pending;
+                  const attachmentIds = draft.attachments?.map(a => a.id).filter(Boolean);
                   const pending: ChatPending = old?.requestId === requestId ? old : {
-                    botKey: activeBot.key, scopeKey: activeChatScope, requestId, text, draft, phase: 'sending',
+                    botKey: activeBot.key, scopeKey: activeChatScope, requestId, text, draft,
+                    ...(attachmentIds?.length ? { attachments: attachmentIds } : {}),
+                    ...(delivery ? { delivery } : {}),
+                    phase: 'sending',
                     submittedAt: Date.now(),
                     afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(chatLive?.lastEntryId) || 0, clearedMap[activeBot.key] ?? 0),
                   };
@@ -4715,7 +5255,7 @@ ${newer}` : draftSnapshot;
                 <button
                   type="button"
                   role="menuitem"
-                  disabled={!activeChatScope || chatDraftAttachments.length >= IMAGE_MAX_COUNT || imageUploading}
+                  disabled={!activeChatScope || effectiveLocalAttachments.length >= IMAGE_MAX_COUNT || imageUploading}
                   onClick={() => {
                     setComposerMenuOpen(false);
                     pickLocalImages('photos');
@@ -4732,7 +5272,7 @@ ${newer}` : draftSnapshot;
                   <button
                     type="button"
                     role="menuitem"
-                    disabled={!activeChatScope || chatDraftAttachments.length >= IMAGE_MAX_COUNT || imageUploading}
+                    disabled={!activeChatScope || effectiveLocalAttachments.length >= IMAGE_MAX_COUNT || imageUploading}
                     onClick={() => {
                       setComposerMenuOpen(false);
                       pickLocalImages('camera');
@@ -4750,6 +5290,7 @@ ${newer}` : draftSnapshot;
                   type="button"
                   role="menuitem"
                   className="danger"
+                  disabled={Boolean(activeEditing)}
                   onClick={() => {
                     if (clearArmedAt !== 0 && Date.now() - clearArmedAt <= 3000) {
                       setClearArmedAt(0);
@@ -4767,18 +5308,40 @@ ${newer}` : draftSnapshot;
             )}
 
             {composerImageError ? <ErrorNotice compact error={composerImageError} onDismiss={() => setComposerImageError('')} /> : null}
-            {chatDraftAttachments.length > 0 ? (
+            {!activeEditing && localQueuedStripItems.length > 0 ? (
+              <PendingQueueStrip
+                items={localQueuedStripItems}
+                disabled={queueActionBusy || isStoppingBot}
+                onRecall={item => void recallLocalQueuedItem(item, true)}
+                onRecallAll={() => void recallAllLocalQueued()}
+                onDiscard={item => void recallLocalQueuedItem(item, false)}
+                onSteer={item => void steerLocalQueuedItem(item)}
+                tr={t}
+              />
+            ) : null}
+            {activeEditing ? (
+              <ComposerEditBanner
+                disabled={editSubmitting}
+                onCancel={() => setEditingTurn(null)}
+                tr={t}
+              />
+            ) : null}
+            {effectiveLocalAttachments.length > 0 ? (
               <div className="attachments" role="group" aria-label={t('附件', 'Attachments')}>
-                {chatDraftAttachments.map((att, index) => (
+                {effectiveLocalAttachments.map((att, index) => (
                   <ImageAttachmentThumb
                     key={att.id}
                     attachment={att}
                     fetcher={localAttachmentFetcher}
-                    disabled={!activeChatScope || Boolean(slashBusy)}
+                    disabled={!activeChatScope || Boolean(slashBusy) || editSubmitting}
                     onRemove={() => {
-                      const next = chatDraftAttachments.filter((_, i) => i !== index);
-                      setChatDraftAttachments(next);
-                      if (currentChatScope.current && !writeChatDraftAttachments(currentChatScope.current, next)) setClearNotice(t('草稿未能保存，请保持页面打开。', 'Draft could not be saved; keep this page open.'));
+                      if (activeEditing) {
+                        setEditingTurn(prev => prev ? { ...prev, attachments: prev.attachments.filter((_, i) => i !== index) } : null);
+                      } else {
+                        const next = chatDraftAttachments.filter((_, i) => i !== index);
+                        setChatDraftAttachments(next);
+                        if (currentChatScope.current && !writeChatDraftAttachments(currentChatScope.current, next)) setClearNotice(t('草稿未能保存，请保持页面打开。', 'Draft could not be saved; keep this page open.'));
+                      }
                     }}
                     t={t}
                   />
@@ -4801,32 +5364,62 @@ ${newer}` : draftSnapshot;
                 <textarea
                   ref={composerTextareaRef}
                   rows={1}
-                  className={chatDraft ? 'has-text' : 'is-empty'}
-                  value={chatDraft}
-                  disabled={!activeChatScope || Boolean(slashBusy)}
+                  className={effectiveLocalDraft ? 'has-text' : 'is-empty'}
+                  value={effectiveLocalDraft}
+                  disabled={!activeChatScope || Boolean(slashBusy) || editSubmitting}
                   {...slash.textareaProps}
-                  onChange={e => { setChatDraft(e.target.value); if (currentChatScope.current && !writeChatDraft(currentChatScope.current, e.target.value)) setClearNotice(t('草稿未能保存，请保持页面打开。', 'Draft could not be saved; keep this page open.')); }}
+                  onChange={e => {
+                    const val = e.target.value;
+                    if (activeEditing) {
+                      setEditingTurn(prev => (prev ? { ...prev, text: val } : null));
+                    } else {
+                      setChatDraft(val);
+                      if (currentChatScope.current && !writeChatDraft(currentChatScope.current, val)) {
+                        setClearNotice(t('草稿未能保存，请保持页面打开。', 'Draft could not be saved; keep this page open.'));
+                      }
+                    }
+                  }}
                   placeholder={
-                    activeBot.role.length > 8
-                      ? t('发消息…', 'Message…')
-                      : t(`向 ${activeBot.role} 发消息…`, `Message ${activeBot.role}…`)
+                    activeEditing
+                      ? t('修改消息内容…', 'Edit message…')
+                      : activeBot.role.length > 8
+                        ? t('发消息…', 'Message…')
+                        : t(`向 ${activeBot.role} 发消息…`, `Message ${activeBot.role}…`)
                   }
                   aria-label={t('消息', 'Message')}
                   onKeyDown={e => {
                     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                    if (e.key === 'Escape' && activeEditing && !editSubmitting) {
+                      e.preventDefault();
+                      setEditingTurn(null);
+                      return;
+                    }
+                    if (e.altKey && e.key === 'ArrowUp' && !activeEditing && localQueuedStripItems.length > 0 && !queueActionBusy) {
+                      e.preventDefault();
+                      void recallLocalQueuedItem(localQueuedStripItems[localQueuedStripItems.length - 1], true);
+                      return;
+                    }
                     if (slash.onKeyDown(e)) return;
+                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                      e.preventDefault();
+                      if (activeEditing) void submitEditedTurn();
+                      else if (!isPreLlmChat && !isStoppingChat) void sendMessage(isLlmRunningChat ? 'steer' : 'followUp');
+                      return;
+                    }
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
-                      void sendMessage();
+                      if (activeEditing) void submitEditedTurn();
+                      else if (!isPreLlmChat && !isStoppingChat) void sendMessage('followUp');
                     }
                   }}
                 />
 
-                {activeBot.hostKind === 'local' && (
+                {activeBot.hostKind === 'local' && !activeEditing && (voiceCapturing || !((isLlmRunningChat || showLocalComposerStop) && (Boolean(effectiveLocalDraft.trim()) || effectiveLocalAttachments.length > 0))) && (
                   <button
                     type="button"
                     className={`grok-composer-mic-inline${voiceCapturing ? ' recording' : ''}`}
                     aria-label={voiceCapturing ? t('完成语音', 'Finish voice') : t('语音输入', 'Voice input')}
+                    disabled={!voiceCapturing && (isPreLlmChat || isStoppingChat)}
                     onClick={() =>
                       action.run(async () => {
                         if (voiceCapturing) {
@@ -4857,39 +5450,77 @@ ${newer}` : draftSnapshot;
                   </button>
                 )}
 
-                {sendingReceipt || chatDraft.trim() || chatDraftAttachments.length > 0 ? (
-                  <button
-                    type="button"
-                    className="grok-composer-action-pill send"
-                    aria-label={sendingReceipt ? t('正在发送', 'Sending') : t('发送', 'Send')}
-                    aria-busy={sendingReceipt}
-                    disabled={sendingReceipt || Boolean(slashBusy) || imageUploading || deletingBots.current.has(activeBot.key)}
-                    onClick={() => void sendMessage()}
-                  >
-                    <SendButtonIcon busy={sendingReceipt} />
-                  </button>
-                ) : null}
+                <div className="grok-composer-actions">
+                  {isStoppingChat ? (
+                    <button
+                      type="button"
+                      className="grok-composer-action-pill stop"
+                      aria-label={t('正在停止…', 'Stopping…')}
+                      disabled
+                    >
+                      <RefreshCw size={14} className="grok-spin" />
+                    </button>
+                  ) : (
+                    <>
+                      {isPreLlmChat || sendingReceipt || editSubmitting ? (
+                        <button
+                          type="button"
+                          className="grok-composer-action-pill loading"
+                          aria-label={t('处理中…', 'Processing…')}
+                          aria-busy={true}
+                          disabled
+                        >
+                          <SendButtonIcon busy={true} />
+                        </button>
+                      ) : effectiveLocalDraft.trim() || effectiveLocalAttachments.length > 0 ? (
+                        <>
+                          {!activeEditing && isLlmRunningChat ? (
+                            <button
+                              type="button"
+                              className="grok-composer-steer-btn"
+                              aria-label={t('打断并立即发送', 'Interrupt & send immediately')}
+                              title={t('打断并立即发送 (Ctrl+Enter)', 'Interrupt & send immediately (Ctrl+Enter)')}
+                              disabled={sendingReceipt || action.busy || Boolean(slashBusy) || imageUploading || deletingBots.current.has(activeBot.key)}
+                              onClick={() => void sendMessage('steer')}
+                            >
+                              <Zap size={16} />
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="grok-composer-action-pill send"
+                            aria-label={activeEditing ? t('保存并重发', 'Save & resend') : isLlmRunningChat ? t('排队发送', 'Queue message') : t('发送', 'Send')}
+                            disabled={sendingReceipt || editSubmitting || action.busy || Boolean(slashBusy) || imageUploading || deletingBots.current.has(activeBot.key)}
+                            onClick={() => {
+                              if (activeEditing) void submitEditedTurn();
+                              else void sendMessage('followUp');
+                            }}
+                          >
+                            <SendButtonIcon busy={false} />
+                          </button>
+                        </>
+                      ) : null}
+                      {showLocalComposerStop ? (
+                        <button
+                          type="button"
+                          className="grok-composer-action-pill stop"
+                          aria-label={t('停止此 Bot', 'Stop this bot')}
+                          onClick={() => {
+                            if (isStoppingBot) return;
+                            setStopError('');
+                            requestStopBot(activeBot).then(
+                              () => setStopError(''),
+                              error => setStopError(errorText(error)),
+                            );
+                          }}
+                        >
+                          <Square size={15} />
+                        </button>
+                      ) : null}
+                    </>
+                  )}
+                </div>
               </div>
-
-              {/* 停止与发送并存：草稿/附件/发送准备/失败受理都可停止；不被 action.busy/上传/草稿锁禁用，只防重复。 */}
-              {canStopBot || isStoppingBot ? (
-                <button
-                  type="button"
-                  className="grok-composer-action-pill stop"
-                  aria-label={t('停止此 Bot', 'Stop this bot')}
-                  disabled={isStoppingBot}
-                  onClick={() => {
-                    if (isStoppingBot) return;
-                    setStopError('');
-                    requestStopBot(activeBot).then(
-                      () => setStopError(''),
-                      error => setStopError(errorText(error)),
-                    );
-                  }}
-                >
-                  {isStoppingBot ? <RefreshCw size={14} className="grok-spin" /> : <Square size={15} />}
-                </button>
-              ) : null}
             </div>
             </>}
           </footer>
@@ -5028,7 +5659,7 @@ ${newer}` : draftSnapshot;
                   onClick={() => setSkillReviewTargetKey(botPanelIdentityKey)}
                 >
                   <Sparkles size={20} className="grok-row-icon" />
-                  <span className="grok-row-label">{t('Skill 审阅', 'Skill Review')}</span>
+                  <span className="grok-row-label">{t('已学技能', 'Learned Skills')}</span>
                   <ChevronRight size={18} className="grok-row-chevron" />
                 </button>
                 <button
@@ -6502,8 +7133,8 @@ ${newer}` : draftSnapshot;
         (screen === 'bot-profile' || screen === 'bot-profile-manage' || (screen === 'bot-edit' && editMode === 'edit')) &&
         <BotModelSheet key={`${modelTarget.center}|${modelTarget.botKey}|${modelTarget.identity.generation}|${modelTarget.tab}`} api={modelTarget.api} identity={modelTarget.identity} botId={modelTarget.botId} initialTab={modelTarget.tab} onClose={() => setModelTarget(null)}/>}
 
-      {skillReviewTargetKey === botPanelIdentityKey && activeBot && screen === 'bot-profile' ? (
-        <SettingsSheet title={t('Skill 审阅', 'Skill Review')} onClose={() => setSkillReviewTargetKey(null)}>
+      {skillReviewTargetKey === botPanelIdentityKey && activeBot && (screen === 'bot-profile' || screen === 'chat') ? (
+        <SettingsSheet title={t('✨ 已学技能', 'Learned Skills')} onClose={() => setSkillReviewTargetKey(null)}>
           <SkillReviewPanel key={botPanelIdentityKey} connected={botPanelConnected} call={callSkillReview} />
         </SettingsSheet>
       ) : null}
@@ -6861,7 +7492,13 @@ function RemotePendingComposer({
   identity,
   botId,
   botRole,
-  isBotBusy,
+  activityPhase = 'idle',
+  liveQueuedItems,
+  editingTurn = null,
+  editSubmitting = false,
+  onChangeEditTurn,
+  onCancelEditTurn,
+  onSubmitEditTurn,
   canStop = false,
   stopping = false,
   online,
@@ -6886,7 +7523,13 @@ function RemotePendingComposer({
   identity: DesktopIdentity;
   botId: string;
   botRole: string;
-  isBotBusy: boolean;
+  activityPhase?: BotActivity['phase'];
+  liveQueuedItems?: readonly QueuedTurnItem[];
+  editingTurn?: ActiveEditingTurn | null;
+  editSubmitting?: boolean;
+  onChangeEditTurn?: (patch: Partial<Pick<ActiveEditingTurn, 'text' | 'attachments'>>) => void;
+  onCancelEditTurn?: () => void;
+  onSubmitEditTurn?: () => void;
   /** 统一活动状态允许停止（排队/准备/运行/让位/失败受理）。 */
   canStop?: boolean;
   /** 停止已受理、正在确认；发送/草稿/上传都不解除它。 */
@@ -6902,7 +7545,7 @@ function RemotePendingComposer({
   /** 停止此 Bot：调用方等待 Promise；失败由调用方统一提示，此处不吞错。 */
   onAbort(): Promise<unknown>;
   onAccepted(receipt: HostSubmission): void;
-  onStarted(requestId: string, text: string, draft: DesktopDraftEntry): void;
+  onStarted(requestId: string, text: string, draft: DesktopDraftEntry, delivery?: TurnDeliveryMode): void;
   onPersist(requestId: string): boolean;
   onQueued(requestId: string, pendingId: string): void;
   pending?: ChatPending;
@@ -6917,11 +7560,50 @@ function RemotePendingComposer({
   const drafts = useDrafts({ api, identity, target });
   const [notice, setNotice] = useState('');
   const [imageError, setImageError] = useState('');
+  const [queueBusy, setQueueBusy] = useState(false);
+  const [outboxPendingItems, setOutboxPendingItems] = useState<PendingRecord[]>([]);
   /** 选图/上传在途：禁重复选择与发送（state 驱动 UI disabled）；归属冻结到发起时的 identity/botId/draftKey。 */
   const [imageUploading, setImageUploading] = useState(false);
   const remoteFetcher = useMemo<AttachmentFetcher>(() => {
     return async (attachmentId) => api.call(identity, 'getAttachment', { botId, attachmentId }) as Promise<ImageAttachmentData>;
   }, [api, identity, botId]);
+
+  const effectiveText = editingTurn ? editingTurn.text : drafts.text;
+  const effectiveAttachments = editingTurn ? editingTurn.attachments : drafts.attachments;
+  const editingTurnRef = useRef(editingTurn);
+  editingTurnRef.current = editingTurn;
+
+  useEffect(() => {
+    if (editingTurn?.entryId) {
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    }
+  }, [editingTurn?.entryId]);
+
+  const refreshOutboxPending = useCallback(async () => {
+    try {
+      const page = await api.pending(identity, 'pending_list', { options: { state: 'pending', limit: 50 } });
+      setOutboxPendingItems(
+        page.items.filter(
+          item => item.kind === 'primary' && item.botId === botId && item.targetDeviceId === identity.targetDeviceId,
+        ),
+      );
+    } catch {
+      // Ignore local outbox read errors
+    }
+  }, [api, identity, botId]);
+
+  useEffect(() => {
+    void refreshOutboxPending();
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void refreshOutboxPending();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [refreshOutboxPending]);
+
+  const queuedStripItems = useMemo(
+    () => mergeQueuedStripItems(liveQueuedItems, outboxPendingItems, botId, identity.targetDeviceId),
+    [liveQueuedItems, outboxPendingItems, botId, identity.targetDeviceId],
+  );
 
   /** Tauri（Android）界面才有原生选图/拍照；浏览器走 input type=file。 */
   const inTauriUi = (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== undefined;
@@ -6929,11 +7611,14 @@ function RemotePendingComposer({
   /** 上传选图到目标 Host 并把元数据加入草稿；归属冻结在发起时 identity/botId/draftKey。
    *  addAttachment 的 expectedKey 是原子 guard（keyRef 实时比较）：切换 Bot/身份后未完成批次中止，
    *  已上传结果不写新 scope 草稿。相同图片 id（content SHA-256）去重；去重后总数 ≤16，超限整体拒绝。 */
-  const uploadRemoteImages = useCallback(async (sources: PickedImageSource[]) => {
+  const uploadRemoteImages = useCallback(async (sources: PickedImageSource[], targetEditEntryId?: number) => {
     const draftKey = drafts.key;
-    if (!draftKey || sources.length === 0) return;
+    if ((!draftKey && targetEditEntryId === undefined) || sources.length === 0) return;
     const frozenIdentity = { ...identity };
-    const existing = new Set(drafts.attachments.map((a) => a.id));
+    const currentList = targetEditEntryId !== undefined
+      ? (editingTurnRef.current?.entryId === targetEditEntryId ? editingTurnRef.current.attachments : [])
+      : drafts.attachments;
+    const existing = new Set(currentList.map((a) => a.id));
     const queued: { source: PickedImageSource; id: string }[] = [];
     for (const source of sources) {
       const id = await attachmentIdOf(source.data);
@@ -6941,10 +7626,10 @@ function RemotePendingComposer({
       existing.add(id);
       queued.push({ source, id });
     }
-    if (drafts.attachments.length + queued.length > IMAGE_MAX_COUNT) {
+    if (currentList.length + queued.length > IMAGE_MAX_COUNT) {
       throw new ImagePickError('IMAGE_TOO_MANY', t(`最多 ${IMAGE_MAX_COUNT} 张图片，本次未上传。`, `At most ${IMAGE_MAX_COUNT} images; nothing uploaded.`));
     }
-    const totalBytes = drafts.attachments.reduce((sum, a) => sum + a.size, 0)
+    const totalBytes = currentList.reduce((sum, a) => sum + a.size, 0)
       + queued.reduce((sum, item) => sum + item.source.size, 0);
     if (totalBytes > IMAGE_MAX_TOTAL_BYTES) {
       throw new ImagePickError('IMAGE_TOO_LARGE', t(`图片总大小超过 ${IMAGE_MAX_TOTAL_BYTES / 1048576}MB，本次未上传。`, `Total image size exceeds ${IMAGE_MAX_TOTAL_BYTES / 1048576}MB; nothing uploaded.`));
@@ -6956,18 +7641,27 @@ function RemotePendingComposer({
         mimeType: item.source.mimeType,
         data: item.source.data,
       });
-      // expectedKey 原子校验：当前 key 已切换（新 Bot/重连/换代）时拒绝，中止剩余批次。
-      if (!drafts.addAttachment(att as ImageAttachment, draftKey)) return;
+      if (targetEditEntryId !== undefined) {
+        const cur = editingTurnRef.current;
+        if (!cur || cur.entryId !== targetEditEntryId) return;
+        if (!cur.attachments.some(a => a.id === (att as ImageAttachment).id)) {
+          onChangeEditTurn?.({ attachments: [...cur.attachments, att as ImageAttachment] });
+        }
+      } else if (draftKey) {
+        // expectedKey 原子校验：当前 key 已切换（新 Bot/重连/换代）时拒绝，中止剩余批次。
+        if (!drafts.addAttachment(att as ImageAttachment, draftKey)) return;
+      }
     }
-  }, [api, identity, botId, drafts, t]);
+  }, [api, identity, botId, drafts, onChangeEditTurn, t]);
 
   const pickRemoteImages = useCallback((source: 'photos' | 'camera') => {
-    if (imageUploading || !drafts.key || Boolean(drafts.attempt) || blocked || Boolean(commandBusy)) return;
+    const targetEditEntryId = editingTurnRef.current?.entryId;
+    if (imageUploading || (!drafts.key && targetEditEntryId === undefined) || Boolean(drafts.attempt) || blocked || Boolean(commandBusy)) return;
     setImageError('');
     const handleSources = async (sources: PickedImageSource[]) => {
       if (sources.length === 0) return;
       try {
-        await uploadRemoteImages(sources);
+        await uploadRemoteImages(sources, targetEditEntryId);
       } catch (error) {
         setImageError(errorText(error));
       }
@@ -7006,21 +7700,147 @@ function RemotePendingComposer({
     setStopError('');
     try {
       await onAbort();
+      void refreshOutboxPending();
     } catch (error) {
       setStopError(errorText(error));
+    }
+  };
+
+  const recallRemoteQueuedItem = async (item: UnifiedQueuedStripItem, mergeIntoDraft = true) => {
+    if (queueBusy) return;
+    if (mergeIntoDraft && (drafts.attempt || blocked || fallbackDraft)) {
+      setNotice(t('当前存在未确认草稿，请先处理后再撤回排队消息。', 'Resolve the unconfirmed draft before recalling queued messages.'));
+      return;
+    }
+    setQueueBusy(true);
+    setNotice('');
+    try {
+      let withdrawn: WithdrawnTurnItem[] = [];
+      if (item.source === 'outbox' && item.outboxRecord) {
+        const cancelled = await api.pending(identity, 'pending_cancel', { id: item.outboxRecord.id });
+        if (cancelled.state === 'rejected') {
+          withdrawn = [{
+            requestId: item.outboxRecord.requestId,
+            text: item.outboxRecord.text,
+            ...(item.outboxRecord.attachments?.length ? { attachments: item.outboxRecord.attachments } : {}),
+            delivery: item.outboxRecord.delivery ?? 'followUp',
+          }];
+        }
+      } else {
+        if (!online || !api.transportConnected) {
+          onOffline();
+          return;
+        }
+        const res = await api.call(identity, 'withdrawQueued', { botId, requestId: item.requestId });
+        withdrawn = res.withdrawn ?? [];
+      }
+      for (const w of withdrawn) {
+        onNotSent(w.requestId);
+      }
+      if (mergeIntoDraft && withdrawn.length > 0) {
+        const attachmentIds = withdrawn.flatMap(w => w.attachments ?? []);
+        const resolvedAtts = await resolveAttachmentMetasByIds(
+          attachmentIds,
+          attachmentIds.length > 0 ? remoteFetcher : null,
+        );
+        drafts.mergeRecalled(
+          withdrawn.map(w => extractEditableUserText(w.text)),
+          resolvedAtts,
+          drafts.key ?? undefined,
+        );
+        requestAnimationFrame(() => textareaRef.current?.focus());
+      }
+      void refreshOutboxPending();
+    } catch (error) {
+      setNotice(errorText(error));
+    } finally {
+      setQueueBusy(false);
+    }
+  };
+
+  const recallAllRemoteQueued = async () => {
+    if (queueBusy) return;
+    if (drafts.attempt || blocked || fallbackDraft) {
+      setNotice(t('当前存在未确认草稿，请先处理后再撤回排队消息。', 'Resolve the unconfirmed draft before recalling queued messages.'));
+      return;
+    }
+    setQueueBusy(true);
+    setNotice('');
+    try {
+      const outboxWithdrawn: WithdrawnTurnItem[] = [];
+      for (const rec of outboxPendingItems) {
+        if (rec.kind !== 'primary') continue;
+        const cancelled = await api.pending(identity, 'pending_cancel', { id: rec.id }).catch(() => null);
+        if (cancelled?.state === 'rejected') {
+          outboxWithdrawn.push({
+            requestId: rec.requestId,
+            text: rec.text,
+            ...(rec.attachments?.length ? { attachments: rec.attachments } : {}),
+            delivery: rec.delivery ?? 'followUp',
+          });
+        }
+      }
+      let hostWithdrawn: WithdrawnTurnItem[] = [];
+      if (online && api.transportConnected) {
+        const res = await api.call(identity, 'withdrawQueued', { botId });
+        hostWithdrawn = res.withdrawn ?? [];
+      }
+      const combined: WithdrawnTurnItem[] = [];
+      const seen = new Set<string>();
+      for (const w of [...hostWithdrawn, ...outboxWithdrawn]) {
+        if (!w?.requestId || seen.has(w.requestId)) continue;
+        seen.add(w.requestId);
+        combined.push(w);
+        onNotSent(w.requestId);
+      }
+      if (combined.length > 0) {
+        const attachmentIds = combined.flatMap(w => w.attachments ?? []);
+        const resolvedAtts = await resolveAttachmentMetasByIds(
+          attachmentIds,
+          attachmentIds.length > 0 ? remoteFetcher : null,
+        );
+        drafts.mergeRecalled(
+          combined.map(w => extractEditableUserText(w.text)),
+          resolvedAtts,
+          drafts.key ?? undefined,
+        );
+        requestAnimationFrame(() => textareaRef.current?.focus());
+      }
+      void refreshOutboxPending();
+    } catch (error) {
+      setNotice(errorText(error));
+    } finally {
+      setQueueBusy(false);
+    }
+  };
+
+  const steerRemoteQueuedItem = async (item: UnifiedQueuedStripItem) => {
+    if (queueBusy || item.source !== 'host') return;
+    if (!online || !api.transportConnected) {
+      onOffline();
+      return;
+    }
+    setQueueBusy(true);
+    setNotice('');
+    try {
+      await api.call(identity, 'steerQueued', { botId, requestId: item.requestId });
+    } catch (error) {
+      setNotice(errorText(error));
+    } finally {
+      setQueueBusy(false);
     }
   };
 
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
-    if (!drafts.text) {
+    if (!effectiveText) {
       el.style.height = '36px';
     } else {
       el.style.height = 'auto';
       el.style.height = `${Math.min(el.scrollHeight, 110)}px`;
     }
-  }, [drafts.text]);
+  }, [effectiveText]);
 
   const [transfer, setTransfer] = useState<{ source: string; text: string }>();
   useEffect(() => {
@@ -7039,7 +7859,7 @@ function RemotePendingComposer({
     const input = attempt.input;
     if (restoredAttempt.current !== attempt.id) {
       restoredAttempt.current = attempt.id;
-      onStarted(input.requestId, input.text, attempt.draft);
+      onStarted(input.requestId, input.text, attempt.draft, input.delivery);
       onUnconfirmed(input.requestId);
     }
     if (!online || !api.transportConnected) return;
@@ -7084,9 +7904,14 @@ function RemotePendingComposer({
             }
             drafts.finishSend(handle);
             if (attempt.cleared) {
-              drafts.editText(attempt.draft.text);
               attempt.draft.files.forEach(file => drafts.addFile(file));
-              (attempt.draft.attachments ?? []).forEach(att => drafts.addAttachment(att));
+              if (attempt.draft.text || (attempt.draft.attachments?.length ?? 0) > 0) {
+                drafts.mergeRecalled(
+                  attempt.draft.text ? [attempt.draft.text] : [],
+                  attempt.draft.attachments ?? [],
+                  handle.key,
+                );
+              }
             }
             onNotSent(input.requestId);
             setNotice(t('请求未发送，草稿已恢复。', 'Request not sent; draft restored.'));
@@ -7226,14 +8051,46 @@ function RemotePendingComposer({
   };
 
   const slash = useSlashAutocomplete({
-    text: drafts.text,
-    disabled: Boolean(drafts.attempt) || blocked || commandLocked || Boolean(fallbackDraft),
+    text: effectiveText,
+    disabled: Boolean(editingTurn) || Boolean(drafts.attempt) || blocked || commandLocked || Boolean(fallbackDraft),
     onText: text => drafts.editText(text),
     onRun: command => void runCommand(command),
   });
 
-  const send = async () => {
-    if (sending.current || commandLocked || blocked || fallbackDraft || imageUploading) return;
+  const waitingForReceipt = !confirmedConflict && drafts.attempt?.phase !== 'failed' &&
+    (sendingNow || blocked || Boolean(drafts.attempt && drafts.attempt.phase !== 'not-sent'));
+  const isRemoteSending =
+    waitingForReceipt ||
+    Boolean(editSubmitting) ||
+    pending?.phase === 'sending' ||
+    Boolean(drafts.attempt && ['locked', 'enqueued', 'cleared'].includes(drafts.attempt.phase));
+  const remoteComposerAction = resolveComposerActionKind({
+    phase: activityPhase,
+    online,
+    isSending: isRemoteSending,
+    isStopping: stopBusy,
+    hasDraft: Boolean(effectiveText.trim()) || effectiveAttachments.length > 0,
+    canStop,
+  });
+  const isStoppingPhase = remoteComposerAction === 'stopping';
+  const isPreLlmPhase = remoteComposerAction === 'loading';
+  const isLlmRunningPhase = remoteComposerAction === 'queue' || remoteComposerAction === 'stop';
+  const showRemoteComposerStop =
+    !editSubmitting &&
+    shouldShowComposerStop({
+      phase: activityPhase,
+      online,
+      archived: false,
+      isStopping: isStoppingPhase,
+      canStop,
+    });
+
+  const send = async (delivery: TurnDeliveryMode = 'followUp') => {
+    if (editingTurn) {
+      onSubmitEditTurn?.();
+      return;
+    }
+    if (isPreLlmPhase || isStoppingPhase || waitingForReceipt || sending.current || commandLocked || blocked || fallbackDraft || imageUploading) return;
     const trimmed = drafts.text.trim();
     const attachmentIds = drafts.attachments.map((a) => a.id);
     if (!trimmed && attachmentIds.length === 0) return;
@@ -7258,13 +8115,14 @@ function RemotePendingComposer({
       requestId: uuid(),
       text,
       ...(attachmentIds.length ? { attachments: attachmentIds } : {}),
+      ...(delivery === 'steer' ? { delivery: 'steer' } : {}),
     });
     if (!started) return;
     sending.current = true;
     setSendingNow(true);
     if (started.attempt.input.kind !== 'primary') return;
     const requestId = started.attempt.input.requestId;
-    onStarted(requestId, text, started.attempt.draft);
+    onStarted(requestId, text, started.attempt.draft, started.attempt.input.delivery);
     setNotice('');
     try {
       await new Promise<void>(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
@@ -7310,6 +8168,7 @@ function RemotePendingComposer({
         drafts.markUnconfirmed(started.handle);
         onUnconfirmed(requestId);
         setNotice('');
+        void refreshOutboxPending();
         return;
       }
       try {
@@ -7328,14 +8187,12 @@ function RemotePendingComposer({
         onUnconfirmed(requestId);
         setNotice('');
       }
+      void refreshOutboxPending();
     } finally {
       sending.current = false;
       setSendingNow(false);
     }
   };
-
-  const waitingForReceipt = !confirmedConflict && drafts.attempt?.phase !== 'failed' &&
-    (sendingNow || blocked || Boolean(drafts.attempt && drafts.attempt.phase !== 'not-sent'));
 
   return (
     <>
@@ -7365,7 +8222,7 @@ function RemotePendingComposer({
         </section>
       )}
 
-      {drafts.files.length > 0 && (
+      {!editingTurn && drafts.files.length > 0 && (
         <div className="grok-composer-files-row">
           {drafts.files.map((file, index) => (
             <span key={`${file.path}:${index}`} className="grok-model-quick-chip active">
@@ -7411,7 +8268,7 @@ function RemotePendingComposer({
           <button
             type="button"
             role="menuitem"
-            disabled={drafts.attachments.length >= IMAGE_MAX_COUNT || imageUploading || Boolean(drafts.attempt) || blocked || commandLocked}
+            disabled={effectiveAttachments.length >= IMAGE_MAX_COUNT || imageUploading || Boolean(drafts.attempt) || blocked || commandLocked || Boolean(editSubmitting)}
             onClick={() => {
               onToggleComposerMenu();
               pickRemoteImages('photos');
@@ -7428,7 +8285,7 @@ function RemotePendingComposer({
             <button
               type="button"
               role="menuitem"
-              disabled={drafts.attachments.length >= IMAGE_MAX_COUNT || imageUploading || Boolean(drafts.attempt) || blocked || commandLocked}
+              disabled={effectiveAttachments.length >= IMAGE_MAX_COUNT || imageUploading || Boolean(drafts.attempt) || blocked || commandLocked || Boolean(editSubmitting)}
               onClick={() => {
                 onToggleComposerMenu();
                 pickRemoteImages('camera');
@@ -7446,6 +8303,7 @@ function RemotePendingComposer({
             type="button"
             role="menuitem"
             className="danger"
+            disabled={Boolean(editingTurn)}
             onClick={() => {
               if (clearArmedAt !== 0 && Date.now() - clearArmedAt <= 3000) {
                 setClearArmedAt(0);
@@ -7462,15 +8320,39 @@ function RemotePendingComposer({
       )}
 
       {imageError ? <ErrorNotice compact error={imageError} onDismiss={() => setImageError('')} /> : null}
-      {drafts.attachments.length > 0 ? (
+      {!editingTurn && queuedStripItems.length > 0 ? (
+        <PendingQueueStrip
+          items={queuedStripItems}
+          disabled={queueBusy || stopBusy}
+          onRecall={item => void recallRemoteQueuedItem(item, true)}
+          onRecallAll={() => void recallAllRemoteQueued()}
+          onDiscard={item => void recallRemoteQueuedItem(item, false)}
+          onSteer={item => void steerRemoteQueuedItem(item)}
+          tr={t}
+        />
+      ) : null}
+      {editingTurn ? (
+        <ComposerEditBanner
+          disabled={Boolean(editSubmitting)}
+          onCancel={() => onCancelEditTurn?.()}
+          tr={t}
+        />
+      ) : null}
+      {effectiveAttachments.length > 0 ? (
         <div className="attachments" role="group" aria-label={t('附件', 'Attachments')}>
-          {drafts.attachments.map((att, index) => (
+          {effectiveAttachments.map((att, index) => (
             <ImageAttachmentThumb
               key={att.id}
               attachment={att}
               fetcher={remoteFetcher}
-              disabled={Boolean(drafts.attempt) || blocked || commandLocked}
-              onRemove={() => drafts.removeAttachment(index)}
+              disabled={Boolean(drafts.attempt) || blocked || commandLocked || Boolean(editSubmitting)}
+              onRemove={() => {
+                if (editingTurn) {
+                  onChangeEditTurn?.({ attachments: editingTurn.attachments.filter((_, i) => i !== index) });
+                } else {
+                  drafts.removeAttachment(index);
+                }
+              }}
               t={t}
             />
           ))}
@@ -7492,52 +8374,109 @@ function RemotePendingComposer({
           <textarea
             ref={textareaRef}
             rows={1}
-            className={drafts.text ? 'has-text' : 'is-empty'}
-            value={drafts.text}
-            disabled={Boolean(drafts.attempt) || blocked || commandLocked}
+            className={effectiveText ? 'has-text' : 'is-empty'}
+            value={effectiveText}
+            disabled={Boolean(drafts.attempt) || blocked || commandLocked || Boolean(editSubmitting)}
             {...slash.textareaProps}
-            onChange={event => drafts.editText(event.target.value)}
+            onChange={event => {
+              if (editingTurn) onChangeEditTurn?.({ text: event.target.value });
+              else drafts.editText(event.target.value);
+            }}
             aria-label={t('消息', 'Message')}
             placeholder={
-              botRole.length > 8
-                ? t('发消息…', 'Message…')
-                : t(`向 ${botRole} 发消息…`, `Message ${botRole}…`)
+              editingTurn
+                ? t('修改消息内容…', 'Edit message…')
+                : botRole.length > 8
+                  ? t('发消息…', 'Message…')
+                  : t(`向 ${botRole} 发消息…`, `Message ${botRole}…`)
             }
             onKeyDown={e => {
               if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+              if (e.key === 'Escape' && editingTurn && !editSubmitting) {
+                e.preventDefault();
+                onCancelEditTurn?.();
+                return;
+              }
+              if (e.altKey && e.key === 'ArrowUp' && !editingTurn && queuedStripItems.length > 0 && !queueBusy) {
+                e.preventDefault();
+                void recallRemoteQueuedItem(queuedStripItems[queuedStripItems.length - 1], true);
+                return;
+              }
               if (slash.onKeyDown(e)) return;
+              if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                e.preventDefault();
+                if (editingTurn) onSubmitEditTurn?.();
+                else if (!isPreLlmPhase && !isStoppingPhase) void send(isLlmRunningPhase ? 'steer' : 'followUp');
+                return;
+              }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                void send();
+                if (editingTurn) onSubmitEditTurn?.();
+                else if (!isPreLlmPhase && !isStoppingPhase) void send('followUp');
               }
             }}
           />
 
-          {waitingForReceipt || drafts.text.trim() || drafts.attachments.length > 0 ? (
-            <button
-              type="button"
-              className="grok-composer-action-pill send"
-              disabled={waitingForReceipt || (!drafts.text.trim() && drafts.attachments.length === 0) || imageUploading || Boolean(drafts.attempt) || blocked || Boolean(fallbackDraft) || commandLocked}
-              onClick={() => void send()}
-              aria-label={waitingForReceipt ? t('正在发送', 'Sending') : t('发送', 'Send')}
-              aria-busy={waitingForReceipt}
-            >
-              <SendButtonIcon busy={waitingForReceipt} />
-            </button>
-          ) : null}
-
-          {/* 停止与发送并存：排队/准备/失败受理/草稿/附件状态下均可停止；不被发送/上传/草稿锁禁用。 */}
-          {canStop || stopBusy ? (
-            <button
-              type="button"
-              className="grok-composer-action-pill stop"
-              aria-label={t('停止此 Bot', 'Stop this bot')}
-              disabled={stopBusy}
-              onClick={() => void runAbort()}
-            >
-              {stopBusy ? <RefreshCw size={14} className="grok-spin" /> : <Square size={15} />}
-            </button>
-          ) : null}
+          <div className="grok-composer-actions">
+            {isStoppingPhase ? (
+              <button
+                type="button"
+                className="grok-composer-action-pill stop"
+                aria-label={t('正在停止…', 'Stopping…')}
+                disabled
+              >
+                <RefreshCw size={14} className="grok-spin" />
+              </button>
+            ) : (
+              <>
+                {isPreLlmPhase || waitingForReceipt || editSubmitting ? (
+                  <button
+                    type="button"
+                    className="grok-composer-action-pill loading"
+                    aria-label={t('处理中…', 'Processing…')}
+                    aria-busy={true}
+                    disabled
+                  >
+                    <SendButtonIcon busy={true} />
+                  </button>
+                ) : effectiveText.trim() || effectiveAttachments.length > 0 ? (
+                  <>
+                    {!editingTurn && isLlmRunningPhase ? (
+                      <button
+                        type="button"
+                        className="grok-composer-steer-btn"
+                        aria-label={t('打断并立即发送', 'Interrupt & send immediately')}
+                        title={t('打断并立即发送 (Ctrl+Enter)', 'Interrupt & send immediately (Ctrl+Enter)')}
+                        disabled={waitingForReceipt || imageUploading || Boolean(drafts.attempt) || blocked || Boolean(fallbackDraft) || commandLocked}
+                        onClick={() => void send('steer')}
+                      >
+                        <Zap size={16} />
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="grok-composer-action-pill send"
+                      disabled={waitingForReceipt || Boolean(editSubmitting) || (!effectiveText.trim() && effectiveAttachments.length === 0) || imageUploading || (!editingTurn && (Boolean(drafts.attempt) || blocked || Boolean(fallbackDraft))) || commandLocked}
+                      onClick={() => void send('followUp')}
+                      aria-label={editingTurn ? t('保存并重发', 'Save & resend') : isLlmRunningPhase ? t('排队发送', 'Queue message') : t('发送', 'Send')}
+                    >
+                      <SendButtonIcon busy={false} />
+                    </button>
+                  </>
+                ) : null}
+                {showRemoteComposerStop ? (
+                  <button
+                    type="button"
+                    className="grok-composer-action-pill stop"
+                    aria-label={t('停止此 Bot', 'Stop this bot')}
+                    onClick={() => void runAbort()}
+                  >
+                    <Square size={15} />
+                  </button>
+                ) : null}
+              </>
+            )}
+          </div>
         </div>
       </div>
     </>

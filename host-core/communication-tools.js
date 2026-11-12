@@ -7,6 +7,7 @@ import { CONTROL_ERROR_CODES } from './remote-control-protocol.js';
 import { BOT_FILE_MAX_COUNT } from './bot-file-protocol.js';
 import { snapshotBotFiles, deliverBotFile } from './bot-files.js';
 import { createBotManagementTools } from './bot-management-tools.js';
+import { clampBlock, isPassContent } from './group-chat.js';
 
 const MAX_OUTPUT_BYTES = 50 * 1024;
 const MAX_TEXT_UNITS = 4096;
@@ -105,7 +106,7 @@ function previewPage(metadata, page, key) {
 }
 
 
-export function createCommunicationTools({ host, getHarness, getMessageLog, publishWork, collaboration, sessions }) {
+export function createCommunicationTools({ host, getHarness, getMessageLog, publishWork, passWork = null, collaboration, sessions }) {
   function tool({ name, description, properties, required = [], deferred, boundedCodes, run }) {
     return defineTool({
       name,
@@ -151,8 +152,38 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
   }
 
   async function send(args, identity, log, api, context, turn) {
-    const scope = log.getScope(args.scopeId);
+    const requestedScopeId = args.scopeId ?? turn?.replyTarget?.scopeId;
+    const scope = typeof requestedScopeId === 'string' ? log.getScope(requestedScopeId) : null;
     if (!scope) throw messageError('SCOPE_NOT_FOUND', 'scope not installed');
+    const targetScopeId = scope.scopeId ?? requestedScopeId;
+    const peer = scope.kind === 'dm'
+      ? scope.members.find((member) => !isMember(member, identity)) ?? null
+      : null;
+    const targetName = scope.kind === 'room'
+      ? (typeof scope.title === 'string' && scope.title.trim() ? scope.title.trim() : undefined)
+      : (peer && peer.deviceId === host.deviceId
+          ? (host.getBot(peer.botId)?.role?.trim() || undefined)
+          : undefined);
+    const workTurn = turn !== null && typeof turn.workNativeId === 'number';
+    if (!args.files?.length && isPassContent(args.text)) {
+      if (scope.deletedAt !== undefined) {
+        throw messageError('SCOPE_NOT_FOUND', 'scope not installed');
+      }
+      if (!scope.members.some((member) => isMember(member, identity))) {
+        throw messageError('SCOPE_FORBIDDEN', 'the sending Bot must belong to the scope');
+      }
+      if (passWork && (workTurn || identity.scopeId !== null)) {
+        await passWork(api, context, turn, { scopeId: targetScopeId });
+      }
+      return {
+        scopeId: targetScopeId,
+        scopeKind: scope.kind,
+        ...(peer?.botId ? { peerBotId: peer.botId } : {}),
+        ...(targetName ? { targetName } : {}),
+        status: 'silent_pass',
+        message: 'Nothing was published: "(pass)" means staying silent.',
+      };
+    }
     let messageId = await api.memo('host.message-id', context);
     if (messageId === undefined) {
       messageId = await api.memo('host.message-id', randomUUID(), context);
@@ -202,10 +233,10 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
       ? turn.responseMessageId
       : (turn?.originRequestId === undefined ? turn?.triggerMessageId : undefined);
     const isReply = scope.kind === 'dm' && replyTarget?.kind === 'dm' &&
-      replyTarget.scopeId === args.scopeId && typeof originMessageId === 'string';
+      replyTarget.scopeId === targetScopeId && typeof originMessageId === 'string';
     const publication = {
       messageId,
-      scopeId: args.scopeId,
+      scopeId: targetScopeId,
       author: { kind: 'bot', botId: identity.botId },
       category: scope.kind === 'room' ? 'public' : (isReply ? 'reply' : 'request'),
       text: fileDelivery?.text ?? args.text,
@@ -215,8 +246,7 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     // 冻结路由是默认回复去向而非目标白名单：显式寻址的跨 scope DM 发送合法，
     // 目标成员资格与作者校验由账本承担；只有源自工作决策的轮（带 workNativeId）才把
     // 原始轮传给 driver，由其工作 scope 做 stale-source/成员/预算门禁。
-    const workTurn = turn !== null && typeof turn.workNativeId === 'number';
-    if (fileDelivery && !log.getMessage(messageId) && log.getScope(args.scopeId)?.revision !== fileDelivery.revision) {
+    if (fileDelivery && !log.getMessage(messageId) && log.getScope(targetScopeId)?.revision !== fileDelivery.revision) {
       throw messageError('STALE_INPUT', 'scope members changed during file transfer; message was not published');
     }
     const stored = workTurn || identity.scopeId !== null
@@ -231,6 +261,11 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     return {
       messageId: message.messageId,
       scopeId: message.scopeId,
+      scopeKind: scope.kind,
+      category: message.category,
+      ...(peer?.botId ? { peerBotId: peer.botId } : {}),
+      ...(targetName ? { targetName } : {}),
+      previewText: clampBlock(args.text, 1200),
       author: message.author,
       rootId: message.rootId,
       createdAt: message.createdAt,
@@ -600,7 +635,7 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     }),
     tool({
       name: 'send_to',
-      description: 'Send a message as this Bot to an installed scope (a DM with one peer or a room for the group): dispatch work, add information, ask a question, or deliver a result. When this turn already answers a message in that scope, the Host links the send to the original message automatically; there is nothing extra to provide. Sending does not wait: answers and follow-ups arrive later as new rounds in this conversation, so end the turn when no independent work remains. Returns only a local stored receipt — not remote delivery, not a completed task; no scopes are created. Optional files are copied to every other member before publishing; all recipient Hosts must be online. Use original local paths (including uploaded-image paths), never base64 in text.',
+      description: 'Send a message as this Bot to an installed scope (a DM with one peer or a room for the group): dispatch work, add information, ask a question, or deliver a result. When this turn already answers a message in that scope, the Host links the send to the original message automatically; there is nothing extra to provide. Pass "(pass)" as text (with no files) to stay silent without publishing a message (e.g. when a room turn or a pure-FYI DM needs no reply). Sending does not wait: answers and follow-ups arrive later as new rounds in this conversation, so end the turn when no independent work remains. Returns only a local stored receipt — not remote delivery, not a completed task; no scopes are created. Optional files are copied to every other member before publishing; all recipient Hosts must be online. Use original local paths (including uploaded-image paths), never base64 in text.',
       properties: {
         scopeId: ID_SCHEMA,
         text: { type: 'string', minLength: 1 },

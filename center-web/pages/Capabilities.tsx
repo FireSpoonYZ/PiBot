@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Plus, Puzzle, RefreshCw, Sparkles, Wrench } from 'lucide-react';
-import type { CapabilityKind, Installation, InstallSource } from '@e-launcher/center-contract';
+import type { CapabilityKind, Installation, InstallSource, SkillVisibilityScope } from '@e-launcher/center-contract';
+
+const VISIBILITY_SCOPE_LABELS: Record<SkillVisibilityScope, { label: string; badgeClass: string }> = {
+  private: { label: '仅源 Bot 私有', badgeClass: 'badge-neutral' },
+  assigned: { label: '指定 Bot 共享', badgeClass: 'badge-accent' },
+  global: { label: '全局默认可用', badgeClass: 'badge-primary' },
+};
 import { api } from '../api';
 import { ActivationBadge, activationUsable } from '../components/ActivationStatus';
 import { ConfigOperation, errorMessage } from '../components/ConfigOperation';
@@ -25,6 +31,7 @@ export default function Capabilities() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [filterKind, setFilterKind] = useState<'all' | CapabilityKind>('all');
+  const [showPrivateLearned, setShowPrivateLearned] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
 
   const [kind, setKind] = useState<CapabilityKind>('plugin');
@@ -116,9 +123,13 @@ export default function Capabilities() {
     }
   };
 
-  const pluginCount = items.filter(item => item.kind === 'plugin').length;
-  const mcpCount = items.filter(item => item.kind === 'mcp').length;
-  const skillCount = items.filter(item => item.kind === 'skill').length;
+  const isPrivateLearned = (item: Installation) =>
+    Boolean(item.ownerBot) && (item.visibilityScope ?? 'private') === 'private';
+  const privateLearnedCount = items.filter(isPrivateLearned).length;
+  const visibleItems = showPrivateLearned ? items : items.filter(item => !isPrivateLearned(item));
+  const pluginCount = visibleItems.filter(item => item.kind === 'plugin').length;
+  const mcpCount = visibleItems.filter(item => item.kind === 'mcp').length;
+  const skillCount = visibleItems.filter(item => item.kind === 'skill').length;
   const visibleKinds: CapabilityKind[] = filterKind === 'all' ? ['plugin', 'mcp', 'skill'] : [filterKind];
 
   return (
@@ -153,7 +164,7 @@ export default function Capabilities() {
           aria-pressed={filterKind === 'all'}
           onClick={() => setFilterKind('all')}
         >
-          全部 ({items.length})
+          全部 ({visibleItems.length})
         </button>
         <button
           type="button"
@@ -179,10 +190,20 @@ export default function Capabilities() {
         >
           Skill ({skillCount})
         </button>
+        {privateLearnedCount > 0 && (
+          <button
+            type="button"
+            className={`filter-chip ${showPrivateLearned ? 'is-active' : ''}`}
+            aria-pressed={showPrivateLearned}
+            onClick={() => setShowPrivateLearned(prev => !prev)}
+          >
+            ✨ 含 Bot 私有习得技能 ({privateLearnedCount})
+          </button>
+        )}
       </div>
 
       {visibleKinds.map(type => {
-        const groupItems = items.filter(item => item.kind === type);
+        const groupItems = visibleItems.filter(item => item.kind === type);
         const meta = KIND_META[type];
         return (
           <section key={type} className="card-group">
@@ -193,10 +214,20 @@ export default function Capabilities() {
               <span className="badge badge-neutral">{groupItems.length}</span>
             </div>
             {groupItems.length === 0 ? (
-              <p className="empty-state secondary">暂无已登记的 {meta.label} 实例。</p>
+              <p className="empty-state secondary">
+                暂无已登记的 {meta.label} 实例
+                {type === 'skill' && !showPrivateLearned && privateLearnedCount > 0
+                  ? `（另有 ${privateLearnedCount} 个 Bot 私有习得技能，可点击上方筛选标签查看并修改共享范围）`
+                  : ''}
+                。
+              </p>
             ) : (
               <div className="card-grid">
-                {groupItems.map(item => (
+                {groupItems.map(item => {
+                  const scopeMeta = item.ownerBot
+                    ? VISIBILITY_SCOPE_LABELS[item.visibilityScope ?? 'private']
+                    : undefined;
+                  return (
                   <article key={item.installationId} className="resource-card resource-row">
                     <div className="card-header">
                       <Link to={`/capabilities/${encodeURIComponent(item.installationId)}`}>
@@ -204,6 +235,16 @@ export default function Capabilities() {
                       </Link>
                       <div className="action-row">
                         <span className={`badge ${meta.badgeClass}`}>{meta.label}</span>
+                        {item.ownerBot && (
+                          <span className="badge badge-neutral">
+                            ✨ Bot 习得 ({item.ownerBot.botId})
+                          </span>
+                        )}
+                        {scopeMeta && (
+                          <span className={`badge ${scopeMeta.badgeClass}`}>
+                            {scopeMeta.label}
+                          </span>
+                        )}
                         <span className={`badge ${item.enabled ? 'badge-online' : 'badge-offline'}`}>
                           {item.enabled ? '启用' : '禁用'}
                         </span>
@@ -225,6 +266,9 @@ export default function Capabilities() {
                           : item.source.type === 'http'
                             ? item.source.url
                             : '本地制品'}
+                        {item.ownerBot
+                          ? ` · 源 Bot：${item.ownerBot.deviceId} / ${item.ownerBot.botId}`
+                          : ''}
                         {item.kind === 'mcp'
                           ? ` · MCP 由${item.target === 'center' ? '中心' : '目标 Host'}访问 URL`
                           : ''}
@@ -233,7 +277,7 @@ export default function Capabilities() {
                         className="quiet-button"
                         to={`/capabilities/${encodeURIComponent(item.installationId)}`}
                       >
-                        管理详情 →
+                        {item.ownerBot ? '共享与详情 →' : '管理详情 →'}
                       </Link>
                       <button
                         type="button"
@@ -264,7 +308,8 @@ export default function Capabilities() {
                       </p>
                     )}
                   </article>
-                ))}
+                  );
+                })}
               </div>
             )}
           </section>

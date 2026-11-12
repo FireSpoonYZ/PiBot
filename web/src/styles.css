@@ -594,11 +594,15 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .grok-composer-pill textarea.is-empty { height: 36px!important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .grok-composer-mic-inline { width: 36px; height: 36px; border-radius: 50%; color: var(--muted); display: inline-flex; align-items: center; justify-content: center; flex: none; }
 .grok-composer-mic-inline.recording { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.grok-composer-actions { display: inline-flex; align-items: center; gap: 5px; flex: none; }
+.grok-composer-actions:empty { display: none; }
 .grok-composer-action-pill { height: 36px; min-width: 44px; padding: 0 12px; border-radius: 999px; background: var(--text); color: var(--bg); display: inline-flex; align-items: center; justify-content: center; flex: none; white-space: nowrap; transition: transform 160ms cubic-bezier(.22, 1, .36, 1); }
+.grok-composer-actions .grok-composer-action-pill + .grok-composer-action-pill { min-width: 40px; padding: 0 10px; }
 .grok-composer-action-pill.send { background: #2B70F6; color: #fff; }
 .grok-composer-action-pill.stop { background: var(--danger); color: #fff; }
-/* 停止按钮独立于输入胶囊，与发送并存；与 + 按钮同高对齐。 */
-.grok-composer-row > .grok-composer-action-pill.stop { align-self: flex-end; width: 46px; height: 46px; min-width: 46px; padding: 0; border-radius: 50%; }
+.grok-composer-action-pill.stop:disabled { opacity: .72; cursor: not-allowed; }
+.grok-composer-action-pill.loading { background: color-mix(in srgb, var(--text) 10%, var(--surface)); color: var(--muted); }
+.grok-composer-action-pill.loading:disabled { opacity: 1; cursor: not-allowed; }
 .grok-subpage-topbar { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: calc(var(--top) + 6px) 18px 8px; }
 .grok-subpage-header-title { margin: 0; font-size: 1.08rem; font-weight: 650; text-align: center; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .grok-subpage-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
@@ -777,4 +781,7 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .sand-activity-label-text.is-shimmering { background: linear-gradient(90deg, var(--muted) 0%, var(--text) 48%, var(--muted) 100%); background-size: 220% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: sand-text-shimmer 2.1s linear infinite; }
 @keyframes sand-text-shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
 .sand-activity-elapsed { font: .76rem/1.2 ui-monospace, Consolas, monospace; color: var(--muted); opacity: 0.78; flex-shrink: 0; }
+.sand-activity-learn-link { border: 1px solid color-mix(in srgb, var(--line) 85%, transparent); border-radius: 999px; background: var(--surface); color: var(--text); font-size: .76rem; font-weight: 600; padding: 2px 9px; flex-shrink: 0; cursor: pointer; }
+.grok-bot-reflect-badge { animation: grok-reflect-float 2.6s ease-in-out infinite; }
+@keyframes grok-reflect-float { 0%, 100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-1.5px) scale(1.06); } }
 @media (prefers-reduced-motion: reduce) { *, *:before, *:after { animation: none!important; transition: none!important; scroll-behavior: auto!important; } }

@@ -22,6 +22,22 @@ export interface MessageAttribution {
   createdAt?: string;
 }
 
+export interface SendToToolPreview {
+  scopeKind?: 'dm' | 'room';
+  category?: 'request' | 'reply' | 'public' | 'notice';
+  targetName?: string;
+  text?: string;
+  silentPass?: boolean;
+  fileCount?: number;
+}
+
+export interface KnownBotSummary {
+  botId: string;
+  deviceId?: string;
+  role?: string;
+  name?: string;
+}
+
 export interface ChatToolCallItem {
   id: string;
   name: string;
@@ -41,6 +57,8 @@ export interface ChatToolCallItem {
   output?: string;
   /** 输出是否因长度预算被截断。 */
   outputTruncated?: boolean;
+  /** send_to 跨智能体通信的结构化预览摘要（用于对话流内联展示）。 */
+  sendTo?: SendToToolPreview;
   /** host 投影的工具交互结构（todo/问卷）；来自 live slot 或历史 toolResult，未验证形状，渲染前需 readToolPresentation。 */
   presentation?: Record<string, unknown>;
   /** presentation 来自仍活跃 live slot 时为 true，历史结果替换后为 false。 */
@@ -98,6 +116,8 @@ export interface ParseHistoryOptions {
   liveGeneratingBlocks?: unknown;
   /** 保留持久正文的条目边界，供桌面根据正文在视口内的位置标记结果。 */
   trackAssistantTextEntries?: boolean;
+  /** 已知 Bot 目录（用于补全对端/本机 Bot 的可读名称，不展示裸 ID）。 */
+  knownBots?: readonly KnownBotSummary[];
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -252,6 +272,14 @@ export function summarizeToolArgs(
     return '';
   };
 
+  if (lower === 'send_to') {
+    const txt = pickStr('text');
+    if (txt) {
+      if (/^\(?\s*pass\s*\)?\.?$/i.test(txt)) return '(pass)';
+      return compactSingleLine(txt, 48);
+    }
+  }
+
   if (lower === 'bash' || lower.endsWith('_bash') || lower === 'shell' || lower === 'exec') {
     const cmd = pickStr('command', 'cmd', 'script');
     if (cmd) return compactSingleLine(cmd, 52);
@@ -376,6 +404,7 @@ interface AssistantTurnAccumulator {
   /** 该累积轮所属来源（attribution 身份序列化）；同一轮工具链跨条目只认同来源，
    *  不同触发/频道的生成绝不合并。无归属条目同为 ''，沿用原有连续合并。 */
   originKey: string;
+  channel: MessageAttribution['channel'];
   turn: ChatTurn;
   textParts: string[];
   thinkingParts: string[];
@@ -395,6 +424,101 @@ const ATTRIBUTION_DIRECTIONS = new Set(['incoming', 'outgoing']);
 
 function readString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+}
+
+function isSilentPassText(value: string): boolean {
+  const trimmed = value.trim();
+  return !trimmed || /^\(?\s*pass\s*\)?\.?$/i.test(trimmed);
+}
+
+function resolveBotDisplayName(
+  knownBots: readonly KnownBotSummary[] | undefined,
+  botId: string | undefined,
+  deviceId?: string,
+): string | undefined {
+  if (!knownBots?.length || !botId) return undefined;
+  if (deviceId) {
+    const exact = knownBots.find((b) => b.botId === botId && b.deviceId === deviceId);
+    const exactName = readString(exact?.role) ?? readString(exact?.name);
+    if (exactName) return exactName;
+  }
+  const byBotId = knownBots.find((b) => b.botId === botId);
+  return readString(byBotId?.role) ?? readString(byBotId?.name);
+}
+
+function enrichAttributionName(
+  attr: MessageAttribution | undefined,
+  knownBots: readonly KnownBotSummary[] | undefined,
+): MessageAttribution | undefined {
+  if (!attr || attr.kind !== 'bot' || attr.name) return attr;
+  const resolved = resolveBotDisplayName(knownBots, attr.botId, attr.deviceId);
+  return resolved ? { ...attr, name: resolved } : attr;
+}
+
+function applySendToMetadata(
+  tool: ChatToolCallItem,
+  args: Record<string, unknown> | undefined,
+  outputJsonText: string | undefined,
+  knownBots: readonly KnownBotSummary[] | undefined,
+): void {
+  if (tool.name !== 'send_to') return;
+  const current: SendToToolPreview = { ...(tool.sendTo ?? {}) };
+  if (args) {
+    const rawText = typeof args.text === 'string' ? args.text.trim() : '';
+    const files = Array.isArray(args.files) ? args.files.length : 0;
+    if (files > 0) current.fileCount = files;
+    if (rawText) {
+      if (files === 0 && isSilentPassText(rawText)) {
+        current.silentPass = true;
+      } else {
+        current.text = rawText;
+        current.silentPass = false;
+      }
+    }
+  }
+  if (outputJsonText) {
+    try {
+      const parsed = asRecord(JSON.parse(outputJsonText));
+      const scopeKind = parsed.scopeKind;
+      if (scopeKind === 'dm' || scopeKind === 'room') current.scopeKind = scopeKind;
+      const category = parsed.category;
+      if (
+        category === 'request' ||
+        category === 'reply' ||
+        category === 'public' ||
+        category === 'notice'
+      ) {
+        current.category = category;
+      }
+      if (parsed.status === 'silent_pass') {
+        current.silentPass = true;
+      }
+      const targetName =
+        readString(parsed.targetName) ??
+        resolveBotDisplayName(knownBots, readString(parsed.peerBotId));
+      if (targetName) current.targetName = targetName;
+      if (!current.text && !current.silentPass) {
+        const preview = readString(parsed.previewText);
+        if (preview) current.text = preview;
+      }
+      if (current.fileCount === undefined && Array.isArray(parsed.files) && parsed.files.length > 0) {
+        current.fileCount = parsed.files.length;
+      }
+    } catch {
+      // Non-JSON error output leaves existing args preview intact.
+    }
+  }
+  if (Object.keys(current).length > 0) {
+    tool.sendTo = current;
+    if (current.targetName) {
+      const snippet = current.silentPass
+        ? '(pass)'
+        : current.text
+          ? compactSingleLine(current.text, 40)
+          : '';
+      tool.argSummary = snippet ? `→ ${current.targetName}: ${snippet}` : `→ ${current.targetName}`;
+    }
+  }
 }
 
 /**
@@ -572,7 +696,10 @@ export function parseHistoryEntries(
   let currentAssistant: AssistantTurnAccumulator | null = null;
   let lastBoundaryChannel: MessageAttribution['channel'] = 'primary';
 
-  const ensureAssistant = (id: string, numericId: number, fallbackStartMs?: number, attribution?: MessageAttribution): AssistantTurnAccumulator => {
+  const knownBots = options?.knownBots;
+
+  const ensureAssistant = (id: string, numericId: number, fallbackStartMs?: number, rawAttribution?: MessageAttribution): AssistantTurnAccumulator => {
+    const attribution = enrichAttributionName(rawAttribution, knownBots);
     // 来源检查在此处闭合内完成：仅当新旧条目都带实际归属且归属不同时才终结上轮，
     // 缺归属（''）的条目继续并入当前轮，同一轮工具链跨条目不拆。
     const nextOrigin = attribution ? attributionKey(attribution) : '';
@@ -584,22 +711,21 @@ export function parseHistoryEntries(
     ) {
       finalizeCurrentAssistant(false);
     }
-    // originKey 任一为空无法精确比较时，显式新归属的 primary/协作类别与当前轮
-    // 已推断类别不同也先终结上轮：协作流式不并入旧普通轮，用户答案不并入隐藏协作轮。
+    // originKey 任一为空无法精确比较时，显式新归属的频道（primary / dm / room）
+    // 与当前轮已推断频道不同也先终结上轮：不同频道的流式生成与回答绝不互相混并。
     if (
       currentAssistant &&
       attribution !== undefined &&
-      (attribution.channel !== 'primary') !== (currentAssistant.turn.collaborative === true)
+      attribution.channel !== currentAssistant.channel
     ) {
       finalizeCurrentAssistant(false);
     }
     if (currentAssistant) return currentAssistant;
     const startMs = activeUserStartMs ?? fallbackStartMs;
-    // 无归属条目继承最近执行来源：dm/room 触发后的无归属生成仍是协作过程，
-    // 与 live 活轮同一判断（不参与 originKey，后续真实归属条目照常并入）。
-    const collaborative = attribution
-      ? attribution.channel !== 'primary'
-      : lastBoundaryChannel !== 'primary';
+    const effectiveChannel: MessageAttribution['channel'] = attribution?.channel ?? lastBoundaryChannel;
+    // 仅群聊（room）生成作为隐藏协作过程处理；1v1 用户主聊（primary）与 1v1 Bot 私聊（dm）
+    // 均在当前 Bot 的 1v1 对话页内可见执行。
+    const collaborative = effectiveChannel === 'room';
     const turn: ChatTurn = {
       id,
       role: 'assistant',
@@ -612,6 +738,7 @@ export function parseHistoryEntries(
     turns.push(turn);
     currentAssistant = {
       originKey: attribution ? attributionKey(attribution) : '',
+      channel: effectiveChannel,
       turn,
       textParts: [],
       thinkingParts: [],
@@ -642,11 +769,17 @@ export function parseHistoryEntries(
       acc.blocks.push({ kind: 'thinking', text });
     }
   };
-  /** 工具加入展示块：尾部 tools 块为同段连续工具组时并入，否则新开一组；
-   *  重复 callId 的工具不重复入块。 */
+  /** 工具加入展示块：尾部 tools 块为同段连续普通工具组时并入，否则新开一组；
+   *  send_to 始终独立成块，避免被 3+ 工具折叠收起。 */
   const accPushTool = (acc: AssistantTurnAccumulator, tool: ChatToolCallItem, joinAdjacent: boolean) => {
     const last = acc.blocks.at(-1);
-    if (last && last.kind === 'tools' && joinAdjacent) {
+    const canJoin =
+      joinAdjacent &&
+      tool.name !== 'send_to' &&
+      last !== undefined &&
+      last.kind === 'tools' &&
+      last.tools.at(-1)?.name !== 'send_to';
+    if (canJoin && last && last.kind === 'tools') {
       last.tools.push(tool);
       return;
     }
@@ -668,6 +801,7 @@ export function parseHistoryEntries(
     if (existing) {
       if (args && !existing.args) existing.args = args;
       if (summary && !existing.argSummary) existing.argSummary = summary;
+      applySendToMetadata(existing, args, existing.output, knownBots);
       return existing;
     }
     const tool: ChatToolCallItem = {
@@ -677,6 +811,7 @@ export function parseHistoryEntries(
       ...(args ? { args } : {}),
       ...(summary ? { argSummary: summary } : {}),
     };
+    applySendToMetadata(tool, args, undefined, knownBots);
     acc.tools.push(tool);
     accPushTool(acc, tool, joinAdjacent);
     return tool;
@@ -734,7 +869,7 @@ export function parseHistoryEntries(
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     const numericId = typeof item.id === 'number' ? item.id : Number(item.id);
-    const itemAttr = entryAttribution(item, selfBotId);
+    const itemAttr = enrichAttributionName(entryAttribution(item, selfBotId), knownBots);
     if (clearedAfterEntryId > 0 && Number.isFinite(numericId) && numericId <= clearedAfterEntryId) {
       continue;
     }
@@ -747,10 +882,44 @@ export function parseHistoryEntries(
       finalizeCurrentAssistant(false);
       continue;
     }
-    // host.scope-message 导入条目（含 self echo 与群用户发言）不在普通聊天中展示：
-    // 它仍是明确的轮边界——先终结当前助手累积轮，再整条跳过，隐藏内容不合入前后轮。
+    // host.scope-message：
+    // - 入站 1v1 DM 消息（非 selfEcho）在当前 Bot 的用户对话页中渲染为左侧对端气泡（is-peer）；
+    //   注意只取 data.message.text 或 live 投影 messages[0].text，绝不取 raw model[0].content 包装文本。
+    // - 出站 selfEcho（由调用点 send_to 工具卡片按真实时序内联展示）与群聊（room）导入条目跳过。
     if (item.kind === 'host.scope-message') {
       finalizeCurrentAssistant(false);
+      const isSelfEcho = asRecord(item.data).selfEcho === true || itemAttr?.direction === 'outgoing';
+      if (itemAttr?.channel === 'dm' && !isSelfEcho) {
+        const rawMsg = asRecord(asRecord(item.data).message);
+        const projectedFirst = asRecord(asArray<unknown>(item.messages)[0]);
+        const rawText = typeof rawMsg.text === 'string'
+          ? rawMsg.text
+          : typeof projectedFirst.text === 'string'
+            ? projectedFirst.text
+            : '';
+        const cleanText = rawText.trim();
+        if (cleanText) {
+          const ts =
+            typeof projectedFirst.timestamp === 'number' &&
+            Number.isFinite(projectedFirst.timestamp) &&
+            projectedFirst.timestamp > 0
+              ? projectedFirst.timestamp
+              : (() => {
+                  const parsed = Date.parse(readString(rawMsg.createdAt) ?? readString(itemAttr.createdAt) ?? '');
+                  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+                })();
+          activeUserStartMs = ts;
+          turns.push({
+            id: `${String(item.id ?? i)}-dm-in`,
+            role: 'user',
+            entryId: Number.isFinite(numericId) ? numericId : 0,
+            text: cleanText,
+            startedAt: ts,
+            attribution: itemAttr,
+            ...(itemAttr.createdAt ? { createdAt: itemAttr.createdAt } : {}),
+          });
+        }
+      }
       continue;
     }
     // 最新执行来源 channel：真实用户消息/生成归属/host 触发边界，scope 导入跳过。
@@ -936,7 +1105,7 @@ export function parseHistoryEntries(
         }
 
         const acc = ensureAssistant(`${String(item.id ?? i)}-${mIdx}`, numericId, msgTimestamp, itemAttr);
-        if (itemAttr && itemAttr.channel !== 'primary') acc.turn.collaborative = true;
+        if (itemAttr && itemAttr.channel === 'room') acc.turn.collaborative = true;
         if (Number.isFinite(numericId) && numericId > acc.turn.entryId) {
           acc.turn.entryId = numericId;
         }
@@ -1055,6 +1224,7 @@ export function parseHistoryEntries(
             matched.presentation = projectedPresentation;
             matched.presentationLive = false;
           }
+          applySendToMetadata(matched, matched.args, resultOutput || undefined, knownBots);
         } else if (toolName) {
           const id = toolCallId || `${String(item.id ?? i)}-${mIdx}-result`;
           const tool: ChatToolCallItem = {
@@ -1067,6 +1237,7 @@ export function parseHistoryEntries(
             ...(resultTruncated ? { outputTruncated: true } : {}),
             ...(projectedPresentation ? { presentation: projectedPresentation, presentationLive: false } : {}),
           };
+          applySendToMetadata(tool, undefined, resultOutput || undefined, knownBots);
           readNestedCalls(tool, entry);
           acc.settledToolIds.add(id);
           acc.tools.push(tool);
@@ -1133,7 +1304,7 @@ export function parseHistoryEntries(
       const slotOutput = slot && typeof slot.output === 'string' ? slot.output.trim() : '';
       const slotPresentation = asRecord(slot?.presentation);
       const hasPresentation = Object.keys(slotPresentation).length > 0;
-      return {
+      const liveItem: ChatToolCallItem = {
         id,
         name,
         status,
@@ -1147,6 +1318,8 @@ export function parseHistoryEntries(
         ...(hasPresentation ? { presentation: slotPresentation } : {}),
         presentationLive: hasPresentation && status === 'running',
       };
+      applySendToMetadata(liveItem, undefined, slotOutput || undefined, knownBots);
+      return liveItem;
     };
     const isPlaced = (callId: string) =>
       callId !== '' && acc.blocks.some((b) => b.kind === 'tools' && b.tools.some((t) => t.id === callId));
@@ -1260,12 +1433,12 @@ export function parseHistoryEntries(
 
   finalizeCurrentAssistant(isBusy);
 
-  // 普通聊天只显示 primary 轮：dm/room 归因的协作过程轮（文本/思考/工具/错误）
-  // 与 scope 导入一律隐藏；replyTarget 为 primary 的生成 channel 仍是 primary，不误删。
+  // 1v1 对话页显示 primary（用户主聊）与 dm（1v1 Bot 私聊任务执行）轮；
+  // 群聊（room）轮保持隔离在群聊页面内，不在各 Bot 的 1v1 对话页中刷屏。
   return turns.filter(
     (turn) =>
       turn.collaborative !== true &&
-      (turn.attribution === undefined || turn.attribution.channel === 'primary') &&
+      (turn.attribution === undefined || turn.attribution.channel !== 'room') &&
       (turn.role === 'user' ||
         Boolean(turn.text) ||
         Boolean(turn.tools && turn.tools.length > 0) ||

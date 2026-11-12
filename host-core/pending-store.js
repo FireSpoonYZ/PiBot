@@ -56,7 +56,7 @@ const REQUIRED_COLUMNS = {
   pending_identity: ['id', 'device_id'],
   pending_rows: ['id', 'device_id', 'kind', 'target_device_id', 'bot_id', 'scope_id', 'request_id',
     'message_id', 'text', 'reply_to', 'fingerprint', 'state', 'receipt_json', 'last_error_json',
-    'created_at', 'updated_at', 'attachments_json'],
+    'created_at', 'updated_at', 'attachments_json', 'delivery'],
 };
 const REQUIRED_UNIQUE_INDEXES = ['idx_pending_primary_key', 'idx_pending_room_key'];
 
@@ -135,6 +135,7 @@ function toRecord(row) {
     record.requestId = row.request_id;
     const attachments = parseJson(row.attachments_json);
     if (attachments !== null) record.attachments = attachments;
+    if (row.delivery === 'steer') record.delivery = 'steer';
   } else {
     record.scopeId = row.scope_id;
     record.messageId = row.message_id;
@@ -148,10 +149,13 @@ function normalizeEnqueue(input) {
     throw messageError('INVALID_ARGUMENT', 'enqueue input must be an object');
   }
   if (input.kind === 'primary') {
-    rejectUnknownFields(input, new Set(['kind', 'targetDeviceId', 'botId', 'requestId', 'text', 'attachments']), 'enqueue input');
+    rejectUnknownFields(input, new Set(['kind', 'targetDeviceId', 'botId', 'requestId', 'text', 'attachments', 'delivery']), 'enqueue input');
     assertId(input.targetDeviceId, 'targetDeviceId');
     assertId(input.botId, 'botId');
     assertId(input.requestId, 'requestId');
+    if (input.delivery !== undefined && input.delivery !== 'followUp' && input.delivery !== 'steer') {
+      throw messageError('INVALID_ARGUMENT', "delivery must be 'followUp' or 'steer'");
+    }
     const attachments = input.attachments === undefined ? null : normalizeAttachments(input.attachments);
     assertPendingText(input.text, attachments);
     const normalized = {
@@ -162,6 +166,7 @@ function normalizeEnqueue(input) {
       text: input.text,
     };
     if (attachments !== null) normalized.attachments = attachments;
+    if (input.delivery === 'steer') normalized.delivery = 'steer';
     return normalized;
   }
   if (input.kind === 'room') {
@@ -197,6 +202,7 @@ function fingerprintFor(normalized) {
         requestId: normalized.requestId,
         text: normalized.text,
         ...(normalized.attachments !== undefined ? { attachments: normalized.attachments } : {}),
+        ...(normalized.delivery === 'steer' ? { delivery: 'steer' } : {}),
       }
     : {
         kind: 'room',
@@ -250,13 +256,17 @@ function initSchema(db, deviceId) {
       db.exec(SCHEMA_SQL);
       db.prepare('INSERT INTO pending_identity (id, device_id) VALUES (1, ?)').run(deviceId);
       db.exec('PRAGMA user_version = ' + SCHEMA_VERSION);
-      // 新建库即含附件列；既有 schema v1 库走下方平滑迁移。
+      // 新建库即含附件列与投递模式列；既有 schema v1 库走下方平滑迁移。
       db.exec('ALTER TABLE pending_rows ADD COLUMN attachments_json TEXT');
+      db.exec('ALTER TABLE pending_rows ADD COLUMN delivery TEXT');
     } else {
-      // schema v1 平滑迁移：旧库没有附件列时补列；assertInventory 只要求列存在。
+      // schema v1 平滑迁移：旧库没有扩展列时补列；assertInventory 只要求列存在。
       const columns = new Set(db.prepare('PRAGMA table_info(pending_rows)').all().map((row) => row.name));
       if (!columns.has('attachments_json')) {
         db.exec('ALTER TABLE pending_rows ADD COLUMN attachments_json TEXT');
+      }
+      if (!columns.has('delivery')) {
+        db.exec('ALTER TABLE pending_rows ADD COLUMN delivery TEXT');
       }
       // 既有库先校验准确 inventory 与设备绑定，再恢复；失败不重置。
       assertInventory(db);
@@ -389,8 +399,8 @@ export function openPendingStore(dataRoot, deviceId) {
     const stmtInsert = db.prepare(
       `INSERT INTO pending_rows (id, device_id, kind, target_device_id, bot_id, scope_id, request_id,
                                  message_id, text, reply_to, fingerprint, state, receipt_json,
-                                 last_error_json, created_at, updated_at, attachments_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, ?)`
+                                 last_error_json, created_at, updated_at, attachments_json, delivery)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, ?, ?)`
     );
     const stmtFindPrimary = db.prepare(
       "SELECT * FROM pending_rows WHERE target_device_id = ? AND kind = 'primary' AND bot_id = ? AND request_id = ?"
@@ -441,6 +451,9 @@ export function openPendingStore(dataRoot, deviceId) {
           timestamp,
           normalized.kind === 'primary' && normalized.attachments !== undefined
             ? JSON.stringify(normalized.attachments)
+            : null,
+          normalized.kind === 'primary' && normalized.delivery === 'steer'
+            ? 'steer'
             : null
         );
         db.exec('COMMIT');

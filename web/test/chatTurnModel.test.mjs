@@ -5,7 +5,9 @@ import { normalizeLiveSnapshot } from '../../host-core/remote-live-protocol.js';
 import {
   formatTurnDuration,
   formatWorkingElapsed,
+  latestEntryChannel,
   parseHistoryEntries,
+  summarizeToolArgs,
 } from '../src/chatTurnModel.ts';
 
 test('projectLiveState projects tool-only assistant entries, empty-text toolResults, and timestamps, and passes normalizeLiveSnapshot', () => {
@@ -259,4 +261,282 @@ test('formatTurnDuration and formatWorkingElapsed format durations cleanly', () 
   assert.equal(formatWorkingElapsed(0), '0s');
   assert.equal(formatWorkingElapsed(42), '42s');
   assert.equal(formatWorkingElapsed(125), '2m 05s');
+});
+
+test('1v1 DM send_to inbound message, working steps, and outbound send_to render visibly while selfEcho and room turns stay hidden', () => {
+  const knownBots = [
+    { botId: 'bot_dispatcher', deviceId: 'dev_1', role: '总控助手' },
+    { botId: 'bot_worker', deviceId: 'dev_1', role: '数据分析师' },
+  ];
+
+  const inboundEnvelope = {
+    messageId: 'msg_req_1',
+    scopeId: 'scope_dm_1',
+    sourceDeviceId: 'dev_1',
+    author: { kind: 'bot', botId: 'bot_dispatcher' },
+    category: 'request',
+    text: '请帮我统计本周活跃用户数并回传结果。',
+    createdAt: '2026-06-01T10:00:00.000Z',
+  };
+  const inboundData = {
+    version: 2,
+    scopeKind: 'dm',
+    localId: 1,
+    selfEcho: false,
+    message: inboundEnvelope,
+    attribution: {
+      kind: 'bot',
+      botId: 'bot_dispatcher',
+      deviceId: 'dev_1',
+      channel: 'dm',
+      scopeId: 'scope_dm_1',
+      messageId: 'msg_req_1',
+      category: 'request',
+      direction: 'incoming',
+      createdAt: '2026-06-01T10:00:00.000Z',
+    },
+  };
+
+  const dmAssistantAttr = {
+    kind: 'bot',
+    botId: 'bot_worker',
+    deviceId: 'dev_1',
+    channel: 'dm',
+    scopeId: 'scope_dm_1',
+    replyTo: 'msg_req_1',
+    direction: 'outgoing',
+  };
+
+  const entries = [
+    // 1. Raw imported inbound DM scope-message (with EXTERNAL_EVENT_PREFIX wrapper in model[0].content)
+    {
+      id: 100,
+      kind: 'host.scope-message',
+      data: inboundData,
+      model: [
+        {
+          role: 'user',
+          content: 'External conversation event (actual author in message.author):\n' + JSON.stringify(inboundData),
+          timestamp: Date.parse('2026-06-01T10:00:00.000Z'),
+        },
+      ],
+    },
+    // 2. Host work-trigger boundary for DM turn
+    {
+      id: 101,
+      kind: 'host.work-trigger',
+      data: {
+        requestId: 'req_dm_1',
+        botId: 'bot_worker',
+        scopeId: 'scope_dm_1',
+        turn: {
+          requestId: 'req_dm_1',
+          kind: 'dm',
+          scopeId: 'scope_dm_1',
+          triggerMessageId: 'msg_req_1',
+          responseMessageId: 'msg_req_1',
+          replyTarget: { kind: 'dm', scopeId: 'scope_dm_1', botId: 'bot_dispatcher' },
+        },
+      },
+    },
+    // 3. Assistant working turn: thinking + 3 adjacent regular tools + send_to + text
+    {
+      id: 102,
+      kind: 'pi.assistant',
+      data: { attribution: dmAssistantAttr },
+      model: [
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: '先读取数据库脚本并查询本周活跃数' },
+            { type: 'text', text: '正在执行统计查询…' },
+            { type: 'toolCall', id: 'tc_1', name: 'ls', arguments: { path: 'data' } },
+            { type: 'toolCall', id: 'tc_2', name: 'read', arguments: { path: 'data/metrics.sql' } },
+            { type: 'toolCall', id: 'tc_3', name: 'bash', arguments: { command: 'sqlite3 metrics.db "SELECT count(*) FROM dau"' } },
+            {
+              type: 'toolCall',
+              id: 'tc_send',
+              name: 'send_to',
+              arguments: {
+                scopeId: 'scope_dm_1',
+                text: '本周活跃用户数为 12,480 人（环比 +8.2%）。',
+              },
+            },
+          ],
+          timestamp: Date.parse('2026-06-01T10:00:02.000Z'),
+          durationMs: 1_500,
+        },
+      ],
+    },
+    {
+      id: 103,
+      kind: 'pi.tool_result',
+      data: { attribution: dmAssistantAttr },
+      model: [
+        {
+          role: 'toolResult',
+          toolCallId: 'tc_send',
+          toolName: 'send_to',
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                messageId: 'msg_rep_1',
+                scopeId: 'scope_dm_1',
+                scopeKind: 'dm',
+                category: 'reply',
+                peerBotId: 'bot_dispatcher',
+                status: 'stored',
+              }),
+            },
+          ],
+          isError: false,
+          timestamp: Date.parse('2026-06-01T10:00:03.800Z'),
+          durationMs: 40,
+        },
+      ],
+    },
+    // 4. Async selfEcho imported later — must NOT create a duplicate bubble
+    {
+      id: 104,
+      kind: 'host.scope-message',
+      data: {
+        version: 2,
+        scopeKind: 'dm',
+        localId: 2,
+        selfEcho: true,
+        message: {
+          messageId: 'msg_rep_1',
+          scopeId: 'scope_dm_1',
+          sourceDeviceId: 'dev_1',
+          author: { kind: 'bot', botId: 'bot_worker' },
+          category: 'reply',
+          replyTo: 'msg_req_1',
+          text: '本周活跃用户数为 12,480 人（环比 +8.2%）。',
+          createdAt: '2026-06-01T10:00:03.800Z',
+        },
+        attribution: {
+          kind: 'bot',
+          botId: 'bot_worker',
+          deviceId: 'dev_1',
+          channel: 'dm',
+          scopeId: 'scope_dm_1',
+          messageId: 'msg_rep_1',
+          category: 'reply',
+          direction: 'outgoing',
+          createdAt: '2026-06-01T10:00:03.800Z',
+        },
+      },
+      model: [{ role: 'user', content: 'External conversation event...' }],
+    },
+    // 5. Room scope-message + room assistant turn — must stay isolated in Group Chat (hidden from 1v1 chat)
+    {
+      id: 105,
+      kind: 'host.scope-message',
+      data: {
+        version: 2,
+        scopeKind: 'room',
+        localId: 3,
+        selfEcho: false,
+        message: {
+          messageId: 'msg_room_1',
+          scopeId: 'scope_room_1',
+          sourceDeviceId: 'dev_1',
+          author: { kind: 'user' },
+          category: 'public',
+          text: '@数据分析师 群里同步一下',
+          createdAt: '2026-06-01T10:01:00.000Z',
+        },
+      },
+      model: [{ role: 'user', content: 'External conversation event...' }],
+    },
+    {
+      id: 106,
+      kind: 'host.work-trigger',
+      data: {
+        requestId: 'req_room_1',
+        botId: 'bot_worker',
+        scopeId: 'scope_room_1',
+        turn: {
+          requestId: 'req_room_1',
+          kind: 'room',
+          scopeId: 'scope_room_1',
+          replyTarget: { kind: 'room', scopeId: 'scope_room_1' },
+        },
+      },
+    },
+    {
+      id: 107,
+      kind: 'pi.assistant',
+      data: {
+        attribution: {
+          kind: 'bot',
+          botId: 'bot_worker',
+          deviceId: 'dev_1',
+          channel: 'room',
+          scopeId: 'scope_room_1',
+          direction: 'outgoing',
+        },
+      },
+      model: [
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: '这段是群聊里的工作文本，不应出现在 1v1 页面' }],
+        },
+      ],
+    },
+  ];
+
+  assert.equal(latestEntryChannel(entries.slice(0, 2), 'bot_worker'), 'dm');
+  assert.equal(latestEntryChannel(entries, 'bot_worker'), 'room');
+
+  const turns = parseHistoryEntries(entries, 0, {
+    selfBotId: 'bot_worker',
+    knownBots,
+  });
+
+  // Exactly 2 turns in 1v1 chat: [0] inbound peer DM bubble, [1] DM assistant execution turn
+  assert.equal(turns.length, 2);
+
+  const peerTurn = turns[0];
+  assert.equal(peerTurn.role, 'user');
+  // Unwrapped clean text, NOT "External conversation event..."
+  assert.equal(peerTurn.text, '请帮我统计本周活跃用户数并回传结果。');
+  assert.equal(peerTurn.attribution?.kind, 'bot');
+  assert.equal(peerTurn.attribution?.channel, 'dm');
+  assert.equal(peerTurn.attribution?.direction, 'incoming');
+  assert.equal(peerTurn.attribution?.name, '总控助手');
+
+  const workTurn = turns[1];
+  assert.equal(workTurn.role, 'assistant');
+  assert.equal(workTurn.collaborative, undefined);
+  assert.equal(workTurn.attribution?.channel, 'dm');
+  assert.equal(workTurn.attribution?.name, '数据分析师');
+  assert.equal(workTurn.thinking, '先读取数据库脚本并查询本周活跃数');
+  assert.equal(workTurn.text, '正在执行统计查询…');
+
+  // Blocks: thinking -> text -> 3 grouped regular tools -> standalone 1-item send_to block
+  assert.equal(workTurn.blocks?.length, 4);
+  assert.equal(workTurn.blocks?.[0].kind, 'thinking');
+  assert.equal(workTurn.blocks?.[1].kind, 'text');
+  assert.equal(workTurn.blocks?.[2].kind, 'tools');
+  assert.deepEqual(
+    workTurn.blocks?.[2].tools.map((t) => t.name),
+    ['ls', 'read', 'bash'],
+  );
+  assert.equal(workTurn.blocks?.[3].kind, 'tools');
+  assert.equal(workTurn.blocks?.[3].tools.length, 1);
+
+  const sendTool = workTurn.blocks?.[3].tools[0];
+  assert.equal(sendTool?.name, 'send_to');
+  assert.equal(sendTool?.status, 'done');
+  assert.deepEqual(sendTool?.sendTo, {
+    text: '本周活跃用户数为 12,480 人（环比 +8.2%）。',
+    silentPass: false,
+    scopeKind: 'dm',
+    category: 'reply',
+    targetName: '总控助手',
+  });
+  assert.ok(sendTool?.argSummary?.startsWith('→ 总控助手:'));
+  assert.equal(summarizeToolArgs('send_to', { scopeId: 'scope_dm_1', text: ' (pass) ' }), '(pass)');
 });

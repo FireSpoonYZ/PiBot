@@ -77,6 +77,7 @@
   overflow-wrap: anywhere;
 }
 .desktop-shell .desktop-transcript .bot-chat-bubble.user {
+  position: relative;
   align-self: flex-end;
   width: auto;
   max-width: min(78%, 620px);
@@ -85,6 +86,59 @@
   border-radius: 20px 20px 6px 20px;
   padding: 10px 14px;
   white-space: pre-wrap;
+}
+.desktop-shell .desktop-transcript .bot-chat-bubble.is-editing-target {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.desktop-shell .desktop-transcript .bot-chat-bubble.is-editing-after {
+  opacity: 0.45;
+  transition: opacity 160ms ease;
+}
+.desktop-shell .desktop-transcript .desktop-turn-edit-btn {
+  position: absolute;
+  left: -34px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease, color 140ms ease, background-color 140ms ease;
+}
+.desktop-shell .desktop-transcript .desktop-turn-edit-btn::after {
+  content: '';
+  position: absolute;
+  inset: -4px -10px -4px -4px;
+}
+.desktop-shell .desktop-transcript .desktop-turn-edit-btn svg {
+  width: 13px;
+  height: 13px;
+}
+.desktop-shell .desktop-transcript .bot-chat-bubble.user:hover .desktop-turn-edit-btn,
+.desktop-shell .desktop-transcript .desktop-turn-edit-btn:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.desktop-shell .desktop-transcript .desktop-turn-edit-btn:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface) 75%, var(--text) 10%);
+}
+.desktop-shell .desktop-transcript .bot-chat-bubble.user.is-peer {
+  --table-edge-bg: var(--surface);
+  align-self: flex-start;
+  max-width: min(82%, 680px);
+  background: color-mix(in srgb, var(--surface) 84%, var(--bg, transparent));
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+  border-radius: 16px 16px 16px 6px;
 }
 .desktop-shell .desktop-transcript .bot-chat-bubble.streaming {
   opacity: 0.96;

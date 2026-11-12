@@ -22,7 +22,7 @@ import { createGrepTool } from './grep-tool.js';
 import { createFindTool } from './find-tool.js';
 import { createLsTool } from './ls-tool.js';
 import { getPrimaryConversation, RequestKeys, PrimaryIndex, applyAgentProfile } from './runtime-docs.js';
-import { formatPrimarySubmission, normalizeHistoryOptions, readPrimaryHistory } from './runtime-history.js';
+import { formatPrimarySubmission, latestResetEntryId, normalizeHistoryOptions, readPrimaryHistory } from './runtime-history.js';
 import { RequestContext, countMessageTokens, estimateContextTokensHost, budgetRequestTokens } from './request-context.js';
 import { GenerationFailureState } from './generation-failure.js';
 import { resolveBotIdentity } from './bot-identity.js';
@@ -36,6 +36,7 @@ import { WorkDecisionState } from './work-decision-state.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { createTurnAdmission } from './runtime-turns.js';
 import { createBotSessionRuntime } from './runtime-bot-session.js';
+import { BotSessionState, USER_MESSAGE_KIND, WORK_TRIGGER_KIND, deriveEntryAttribution } from './bot-session-context.js';
 import { createBotLearning } from './bot-learning.js';
 import { createBotManagementSkillSection } from './bot-management-skill.js';
 import { SOUL_MAX_BYTES } from './bot-soul.js';
@@ -56,6 +57,7 @@ import { createScheduleTools } from './schedule-tools.js';
 import {
   attachmentPath,
   loadAttachment,
+  normalizeAttachmentIds,
   removeBotAttachments,
   uploadAttachment,
 } from './attachments.js';
@@ -363,6 +365,7 @@ export async function openRuntime(options) {
     models,
     defaultModel,
     context: CTX,
+    collaboration,
     // 工作决策的 stop/resume/advance 在同一 Bot 队列内执行；scope lane 在前，Bot lane 在后。
     admitBot: bots.admit,
     getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta),
@@ -413,6 +416,7 @@ export async function openRuntime(options) {
       getHarness: () => harness,
       getMessageLog: () => workContexts.getMessageLog(),
       publishWork: decisions.publishWork,
+      passWork: decisions.passWork,
       collaboration,
       sessions,
     }),
@@ -687,6 +691,7 @@ export async function openRuntime(options) {
     botAdmissions: bots,
     onBotsChanged: options?.onBotsChanged,
     onBotsSync: options?.onBotsSync,
+    learningIdleSettleMs: options?.learningIdleSettleMs,
     collaboration,
     shower,
     vault,
@@ -746,7 +751,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, shower, vault, schedules }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, vault, schedules }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -784,7 +789,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     context: CTX,
     openPrimaryConversation: (bot) => getPrimaryConversation(harness, bot, {}, CTX),
     dropEnvFor,
-    isBotIdle: (bot) => botIsIdle(bot),
+    isBotIdle: async (bot) => (await botIsIdle(bot)) && (await turns.queuedCount(bot)) === 0,
+    onLearningStateChange: (botId, state) => live.setBotLearning?.(botId, state),
+    idleSettleMs: learningIdleSettleMs,
   });
   // 自编辑 SOUL 排队：Bot 在自己的活动轮里调 set_bot_soul（协作/管理工具显式
   // self:true）不能轮中改写人格——先校验输入，再排队到空闲边界；apply 仍走
@@ -937,6 +944,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
                 trackedSubmissions.delete(submissionId);
                 drainSelfSoul(info.botId);
                 turns.pump(info.botId);
+                learning.scheduleIdleCheck(info.botId);
               }
             } catch {
               /* ignore transient/closing errors */
@@ -1073,9 +1081,12 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     recordCompletedSubmission,
     initializeBot,
     attachments: attachmentStore,
-    // 用户轮 head 实际准入前抢占同 Bot 非用户来源 work（群/DM/迟到续轮）；
+    // 用户轮 head 实际准入前抢占同 Bot 非用户来源 work（群/DM/迟到续轮）以及后台自动学习；
     // 不动主聊天用户轮、不清 Host 用户队列。work lane 未实现时静默跳过。
-    preemptWork: (botId) => decisions.interruptBotWork?.(botId, { reason: 'preempted' }),
+    preemptWork: async (botId) => {
+      learning.preemptForForeground(botId);
+      return decisions.interruptBotWork?.(botId, { reason: 'preempted' });
+    },
   });
   const webhooks = createWebhookConsumer({
     deviceId: host.deviceId,
@@ -1099,6 +1110,10 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   decisions.setTurnGate(turns.admitWorkDecision, turns.pump, turns.canRunWork);
   // 队列生命周期通知：pending 创建/结束/暂停/取消的纯元数据快照驱动统一 live 活动投影。
   decisions.setActivityListener?.((botId, summary) => live.setWorkActivity?.(botId, summary));
+  decisions.setLearningHooks?.({
+    onWorkStart: (botId) => learning.preemptForForeground(botId),
+    onWorkCompleted: (info) => learning.noteCompletedWorkTurn(info.botId, info),
+  });
 
   /**
    * 「停止此 Bot」统一协调：
@@ -1111,6 +1126,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
    * 成功置 live stopped，失败保留可见 stopping 并抛错（绝不伪装成功）；gate 内另一轮不争用资源。
    */
   async function stopBotWork(bot, botId) {
+    learning.preemptForForeground(botId);
     try { live.setBotControl?.(botId, 'stopping'); } catch { /* live lane 尚未实现时静默跳过 */ }
     try {
       // 先立停止 gate：beginStop 在首个 await 前同步推进进程代次并 arm gate，
@@ -1123,7 +1139,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 与工作积压）；停止开始后受理的新代次输入保留，等停止结算后由泵处理。
       // 即使后续 HTTP/确认在飞，泵在提交前的存活核对会发现条目已取消，
       // 绝不把已取消的轮送进模型。
-      await turns.cancelQueued(bot, epoch);
+      const { withdrawn: queueWithdrawn } = await turns.cancelQueued(bot, epoch);
       // 工作 lane 取消：user_stop 覆盖各 scope 待处理积压与已有 pending；
       // 离线/恢复未完成时 quiesce=false（不调用会隐式 resume 的 abort/wait 路径）。
       if (decisions.interruptBotWork) {
@@ -1133,6 +1149,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         });
       }
       const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
+      const inboxWithdrawn = conversation ? await turns.withdrawInboxUserItems(bot) : [];
       if (conversation) {
         // 离线或恢复未完成时不能用 Conversation.abort/Submission.wait：
         // 二者会隐式 resume 调度器、唤醒未知旧任务。退化为非调度入口——
@@ -1156,8 +1173,17 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 取消确认成功才解除 gate 并置 stopped：失败保留 gate 与 stopping 可见状态，
       // 绝不伪装成功/偷偷放行旧工作（stopPending 留作崩溃恢复边界）。
       await turns.settleStop(botId);
+      learning.scheduleIdleCheck(botId);
       webhooks.wake();
       drainSelfSoul(botId);
+      const withdrawn = [];
+      const seen = new Set();
+      for (const item of [...inboxWithdrawn, ...queueWithdrawn]) {
+        if (seen.has(item.requestId)) continue;
+        seen.add(item.requestId);
+        withdrawn.push(item);
+      }
+      return { botId, withdrawn };
     } catch (err) {
       throw err;
     }
@@ -1178,6 +1204,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         replyTo: typeof input?.origin?.replyTo === 'string' ? input.origin.replyTo : null,
       },
     };
+    // 新前台输入到达立即抢占后台静默自学习，让位给主会话响应。
+    learning.preemptForForeground(botId);
     // 离线只持久化，不通过会隐式 resume 的路径；本地停止不等待中心确认。
     if (!centerOnline || turns.isRecoveryPending()) return turns.enqueue(botId, trustedInput);
     return admitBot(botId, () => turns.enqueue(botId, trustedInput));
@@ -2034,6 +2062,234 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       return { botId, conversationId: started.conversationId, compacted: true };
     },
 
+    async withdrawQueued(botId, input = {}) {
+      assertNonBlank(botId, 'botId');
+      if (input !== undefined && input !== null && (typeof input !== 'object' || Array.isArray(input))) {
+        throw errWithCode('withdrawQueued input must be an object', 'INVALID_ARGUMENT');
+      }
+      const bot = host.getBot(botId);
+      if (!bot) throw errWithCode(`bot not found: ${botId}`, 'BOT_NOT_FOUND');
+      return turns.withdrawQueued(bot, input?.requestId ?? null);
+    },
+
+    async steerQueued(botId, input) {
+      assertNonBlank(botId, 'botId');
+      if (!input || typeof input !== 'object' || Array.isArray(input)) {
+        throw errWithCode('steerQueued input must be an object', 'INVALID_ARGUMENT');
+      }
+      assertNonBlank(input.requestId, 'requestId');
+      const bot = await requireBot(botId);
+      if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
+        throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
+      }
+      return turns.steerQueued(bot, input.requestId);
+    },
+
+    async editMessage(botId, input) {
+      assertNonBlank(botId, 'botId');
+      if (!input || typeof input !== 'object' || Array.isArray(input)) {
+        throw errWithCode('editMessage input must be an object', 'INVALID_ARGUMENT');
+      }
+      const { entryId, requestId, text } = input;
+      if (!Number.isSafeInteger(entryId) || entryId < 1) {
+        throw errWithCode('entryId must be a positive safe integer', 'INVALID_ARGUMENT');
+      }
+      assertNonBlank(requestId, 'requestId');
+      const attachmentIds = normalizeAttachmentIds(input.attachments);
+      if (typeof text !== 'string' || (text.trim() === '' && attachmentIds.length === 0)) {
+        throw errWithCode('text must be a non-empty string', 'INVALID_ARGUMENT');
+      }
+      const capturedStopEpoch = turns.stopEpoch(botId);
+      return admitBot(botId, async () => {
+        const bot = await requireBot(botId);
+        if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
+          throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
+        }
+        // 前台历史编辑先抢占并等待后台静默自动反思退出，手动学习作业则保持忙碌门禁拒绝。
+        await learning.preemptAndWaitForForeground(botId);
+        try {
+          // 严格忙碌门禁：任何活动轮、排队轮、停止协调、插件执行或手动学习作业期间均禁止编辑历史消息。
+          if (
+            turns.stopped(botId) ||
+            (await turns.queuedCount(bot)) > 0 ||
+            plugins.hasActiveExecutions(botId) ||
+            learning.isActive(botId)
+          ) {
+            throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+          }
+          await assertBotIdle(bot);
+          let attachmentBytes = 0;
+          for (const id of attachmentIds) {
+            const meta = await attachmentStore.load(botId, id);
+            attachmentBytes += meta.size;
+          }
+          if (attachmentBytes > 64 * 1024 * 1024) {
+            throw errWithCode('attachments exceed the 64 MiB per-message total image byte limit', 'INVALID_ARGUMENT');
+          }
+          const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
+          if (!conversation) {
+            throw errWithCode(`entry not found: ${entryId}`, 'INVALID_ARGUMENT');
+          }
+          const resetId = await latestResetEntryId(conversation, CTX);
+          if (entryId <= resetId) {
+            throw errWithCode(`entry ${entryId} is before the active conversation reset`, 'INVALID_ARGUMENT');
+          }
+          const [agentSnapshot, sessionSnapshot, requestKeysSnapshot] = await Promise.all([
+            harness.snapshot(durable.AgentDoc, conversation.id, CTX),
+            harness.snapshot(BotSessionState, conversation.id, CTX),
+            harness.snapshot(RequestKeys, conversation.id, CTX),
+          ]);
+          const newNativeId = await harness.commit(async (tx) => {
+            const scan = await tx.scanEntries(
+              { conversationId: conversation.id, maxEntryId: entryId, order: 'descending' },
+              2,
+            );
+            const targetEntry = scan.items[0];
+            if (!targetEntry || targetEntry.id !== entryId) {
+              throw errWithCode(`entry not found: ${entryId}`, 'INVALID_ARGUMENT');
+            }
+            const attribution = deriveEntryAttribution(targetEntry, sessionSnapshot ?? null);
+            if (
+              targetEntry.kind !== USER_MESSAGE_KIND ||
+              attribution?.kind !== 'user' ||
+              attribution?.channel !== 'primary'
+            ) {
+              throw errWithCode('only primary user messages can be edited', 'INVALID_ARGUMENT');
+            }
+            const beforeEntryId = scan.items[1]?.id ?? null;
+            const truncatedRequestIds = new Set();
+            const truncatedTaskIds = new Set();
+            if (sessionSnapshot && beforeEntryId !== null) {
+              let cursor;
+              for (;;) {
+                const page = await tx.scanEntries(
+                  cursor
+                    ? { conversationId: conversation.id, minEntryId: entryId }
+                    : { conversationId: conversation.id, minEntryId: entryId, order: 'ascending' },
+                  200,
+                  cursor,
+                );
+                for (const item of page.items) {
+                  if (item.byTaskId !== undefined && item.byTaskId !== null) {
+                    truncatedTaskIds.add(String(item.byTaskId));
+                  }
+                  if (item.kind === USER_MESSAGE_KIND || item.kind === WORK_TRIGGER_KIND) {
+                    const data = item.data && typeof item.data === 'object' && !Array.isArray(item.data) ? item.data : null;
+                    const turn = data?.turn && typeof data.turn === 'object' && !Array.isArray(data.turn) ? data.turn : null;
+                    const reqId = data?.requestId ?? turn?.requestId ?? String(item.id);
+                    if (typeof reqId === 'string' && reqId !== '') truncatedRequestIds.add(reqId);
+                  } else if (item.kind === 'pi.user') {
+                    truncatedRequestIds.add(String(item.id));
+                  }
+                }
+                if (!page.next) break;
+                cursor = page.next;
+              }
+            }
+            const rec = beforeEntryId !== null
+              ? await tx.forkConversation(conversation.id, beforeEntryId, { ownership: { kind: 'ownerless' } })
+              : await tx.createConversation({ ownership: { kind: 'ownerless' } });
+            if (agentSnapshot) {
+              const agentDraft = await tx.doc(durable.AgentDoc, rec.id);
+              const copiedAgent = chord.copyJson(agentSnapshot);
+              for (const key of Object.keys(agentDraft)) {
+                if (!(key in copiedAgent)) delete agentDraft[key];
+              }
+              Object.assign(agentDraft, copiedAgent);
+            }
+            if (sessionSnapshot) {
+              const sessionDraft = await tx.doc(BotSessionState, rec.id);
+              const copiedSession = chord.copyJson(sessionSnapshot);
+              const copiedOutgoing = copiedSession.outgoing ?? {};
+              sessionDraft.schema = copiedSession.schema ?? 1;
+              sessionDraft.lastImportedLocalId = copiedSession.lastImportedLocalId ?? 0;
+              sessionDraft.importedCount = copiedSession.importedCount ?? 0;
+              sessionDraft.activeTurn = null;
+              sessionDraft.outgoing = copiedOutgoing;
+              if (beforeEntryId === null) {
+                sessionDraft.turnByTask = {};
+                sessionDraft.completedTurns = {};
+              } else {
+                const nextTurnByTask = {};
+                for (const [taskKey, reqId] of Object.entries(copiedSession.turnByTask ?? {})) {
+                  if (typeof reqId !== 'string' || truncatedRequestIds.has(reqId) || truncatedTaskIds.has(taskKey)) continue;
+                  nextTurnByTask[taskKey] = reqId;
+                }
+                const keptRequestIds = new Set(Object.values(nextTurnByTask));
+                const priorCompleted = copiedSession.completedTurns ?? {};
+                for (const [reqId, turnRec] of Object.entries(priorCompleted)) {
+                  if (truncatedRequestIds.has(reqId)) continue;
+                  if (turnRec?.taskId !== undefined && truncatedTaskIds.has(String(turnRec.taskId))) continue;
+                  keptRequestIds.add(reqId);
+                }
+                for (const recOut of Object.values(copiedOutgoing)) {
+                  if (
+                    recOut &&
+                    recOut.responseMessageId === undefined &&
+                    typeof recOut.requestId === 'string' &&
+                    !truncatedRequestIds.has(recOut.requestId)
+                  ) {
+                    keptRequestIds.add(recOut.requestId);
+                  }
+                }
+                const queue = [...keptRequestIds];
+                while (queue.length > 0) {
+                  const currentId = queue.pop();
+                  const originId = priorCompleted[currentId]?.originRequestId;
+                  if (
+                    typeof originId === 'string' &&
+                    originId !== '' &&
+                    !keptRequestIds.has(originId) &&
+                    !truncatedRequestIds.has(originId)
+                  ) {
+                    keptRequestIds.add(originId);
+                    queue.push(originId);
+                  }
+                }
+                const nextCompletedTurns = {};
+                for (const reqId of keptRequestIds) {
+                  if (Object.hasOwn(priorCompleted, reqId)) {
+                    nextCompletedTurns[reqId] = priorCompleted[reqId];
+                  }
+                }
+                sessionDraft.turnByTask = nextTurnByTask;
+                sessionDraft.completedTurns = nextCompletedTurns;
+              }
+              sessionDraft.updatedAt = new Date().toISOString();
+            }
+            if (requestKeysSnapshot?.digests) {
+              const reqDraft = await tx.doc(RequestKeys, rec.id);
+              const copiedDigests = chord.copyJson(requestKeysSnapshot.digests);
+              delete copiedDigests['r:' + requestId];
+              reqDraft.digests = copiedDigests;
+            }
+            const primaryIndex = await tx.doc(PrimaryIndex);
+            primaryIndex.byPrimary[bot.primaryConversationId] = rec.id;
+            return rec.id;
+          }, CTX);
+          const newConversation = await harness.conversation(newNativeId, CTX);
+          await live.rebind(botId, newConversation);
+          if (conversation.id !== newNativeId) {
+            await dropEnvFor(conversation.id);
+          }
+          return await turns.enqueue(botId, {
+            requestId,
+            text,
+            ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
+            delivery: 'followUp',
+            stopEpoch: capturedStopEpoch,
+            origin: {
+              sender: { kind: 'user', name: null },
+              replyTo: null,
+            },
+          });
+        } catch (err) {
+          learning.scheduleIdleCheck(botId);
+          throw err;
+        }
+      });
+    },
+
     async abort(botId) {
       assertNonBlank(botId, 'botId');
       const bot = host.getBot(botId);
@@ -2200,7 +2456,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   // 模型、工具、问卷等执行路径仍受 Center 门禁（运行时本就对 SDK 抛离线错）。
   // scope 查询是纯本地账本读取（不调度、不触碰模型），离线也放行给被动浏览 UI；
   // createScope/updateScope/publishUserMessage 等写路径仍受 Center 门禁。
-  const offlineMethods = new Set(['vaultControl', 'submit', 'getSubmission', 'wait', 'abort', 'turns', 'inspect', 'history', 'watch', 'getBotBoard',
+  const offlineMethods = new Set(['vaultControl', 'submit', 'getSubmission', 'wait', 'abort', 'withdrawQueued', 'turns', 'inspect', 'history', 'watch', 'getBotBoard',
     'uploadAttachment', 'getAttachment',
     'scopeHistory', 'getScopeMessage', 'getScopeMessageDelivery', 'getScopeState', 'listScopeStates', 'listScopeReplicas']);
   const maintenanceAllowed = new Set([...offlineMethods, 'getCurrentDevice', 'getBot', 'getModelCatalog', 'getBotSoul', 'listScopes']);

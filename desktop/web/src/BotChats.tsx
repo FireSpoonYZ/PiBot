@@ -31,6 +31,7 @@ import {
   User,
   Users,
   X,
+  Zap,
   type LucideIcon,
 } from 'lucide-react';
 import {
@@ -53,6 +54,7 @@ import { deleteBotAndVerify } from '../../../web/src/botOperations';
 import { SendButtonIcon } from '../../../web/src/SendButtonIcon';
 import { useReceiptRecovery } from '../../../web/src/useReceiptRecovery';
 import type {
+  AbortBotResult,
   BotLiveState,
   BotDirectoryEntry,
   BotRecord,
@@ -64,7 +66,11 @@ import type {
   PendingEnqueueInput,
   PendingListPage,
   PendingRecord,
+  PrimarySubmission,
   ScopeInfo,
+  TurnDeliveryMode,
+  WithdrawQueuedResult,
+  WithdrawnTurnItem,
 } from '../../../host-core/index.js';
 import { isTargetOfflineError, toError } from './api';
 import { useDrafts } from './drafts';
@@ -77,13 +83,25 @@ import {
   botActivityText,
   canStopBotActivity,
   isBotActivityBusy,
+  isBotLlmRunningPhase,
+  isBotPreLlmPhase,
   resolveBotActivity,
+  resolveComposerActionKind,
+  shouldShowComposerStop,
   type BotActivity,
 } from '../../../web/src/botActivity';
 import { botAvatarKey, syncBotAvatarConfigs } from '../../../web/src/botAvatarSync';
 import { BotSettings, type BotSettingsTab } from './BotSettings';
 import { ShowerPreview } from './ShowerPreview';
 import { ChatTranscript } from './ChatTranscript';
+import type { ChatTurn, KnownBotSummary } from '../../../web/src/chatTurnModel';
+import {
+  extractEditableUserText,
+  mergeQueuedStripItems,
+  resolveAttachmentMetasByIds,
+  type UnifiedQueuedStripItem,
+} from '../../../web/src/composerFlowControl';
+import { ComposerEditBanner, PendingQueueStrip } from '../../../web/src/ComposerFlowStrips';
 import { BotAvatarStudio } from './BotAvatarStudio';
 import { targetApi } from './targetApi';
 import { readHistoryPage } from './history';
@@ -288,13 +306,6 @@ interface TurnAdmissionView {
 }
 
 const TURN_ADMISSION_PHASES = new Set(['queued', 'checking', 'synchronizing', 'failed']);
-
-const TURN_ADMISSION_LABELS: Record<TurnAdmissionView['phase'], string> = {
-  queued: '等待中心准入',
-  checking: '正在核对 Center 版本集',
-  synchronizing: '正在同步插件版本',
-  failed: '准入失败',
-};
 
 /** Host-queued 回执：status queued 且 submissionId null，本地持久化后等待准入与原生提交。 */
 interface HostQueuedReceipt {
@@ -613,7 +624,7 @@ type SendNotice = {
   showRecordAction?: boolean;
 };
 
-function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, canPick, onPick, draftError, draftHint, draftConflict, sendState, receiptBusy, sendError, sendNotice, onSend, canSend, disabled, onRetryDraft, attempt, recOutcome, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onInsertSlash, onOpenSendRecord }: {
+function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, canPick, onPick, draftError, draftHint, draftConflict, sendState, receiptBusy, sendError, sendNotice, onSend, canSend, disabled, isPreLlm, isLlmRunning, isStopping, canStop, stopDisabled, onStop, stopButtonRef, onRetryDraft, attempt, recOutcome, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onInsertSlash, onOpenSendRecord, queuedItems, queueBusy, onRecallQueued, onRecallAllQueued, onDiscardQueued, onSteerQueued, isEditingTurn = false, onCancelEditTurn }: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   text: string;
   onChangeText: (v: string) => void;
@@ -635,9 +646,16 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
   sendError: string | null;
   /** 发送受理与斜杠命令的提示。 */
   sendNotice: SendNotice | null;
-  onSend: () => void;
+  onSend: (delivery?: TurnDeliveryMode) => void;
   canSend: boolean;
   disabled: boolean;
+  isPreLlm: boolean;
+  isLlmRunning: boolean;
+  isStopping: boolean;
+  canStop: boolean;
+  stopDisabled: boolean;
+  onStop: () => void;
+  stopButtonRef: RefObject<HTMLButtonElement | null>;
   onRetryDraft: () => void;
   attempt: { phase: string; error: string | null } | null;
   recOutcome: { action: string; found: boolean; recordId: string | null; recordState: string | null } | null;
@@ -651,6 +669,14 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
   /** 斜杠命令先填回输入框；用户显式发送后由发送路径调用 clearHistory/compact，不当作模型 prompt。 */
   onInsertSlash: (command: string) => void;
   onOpenSendRecord?: () => void;
+  queuedItems?: readonly UnifiedQueuedStripItem[];
+  queueBusy?: boolean;
+  onRecallQueued?: (item: UnifiedQueuedStripItem) => void;
+  onRecallAllQueued?: () => void;
+  onDiscardQueued?: (item: UnifiedQueuedStripItem) => void;
+  onSteerQueued?: (item: UnifiedQueuedStripItem) => void;
+  isEditingTurn?: boolean;
+  onCancelEditTurn?: () => void;
 }) {
   const [slashIndex, setSlashIndex] = useState(0);
   const [dismissedSlash, setDismissedSlash] = useState<string | null>(null);
@@ -700,7 +726,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
     return SLASH_COMMANDS.filter((c) => c.label.slice(1).startsWith(q));
   }, [text]);
 
-  const slashOpen = slashMatches.length > 0 && !disabled && dismissedSlash !== text;
+  const slashOpen = !isEditingTurn && slashMatches.length > 0 && !disabled && dismissedSlash !== text;
 
   useEffect(() => {
     setSlashIndex(0);
@@ -736,20 +762,57 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
         return;
       }
     }
+    if (e.key === 'Escape' && isEditingTurn && onCancelEditTurn) {
+      e.preventDefault();
+      onCancelEditTurn();
+      return;
+    }
+    if (
+      e.key === 'ArrowUp' &&
+      e.altKey &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.shiftKey &&
+      !isEditingTurn &&
+      queuedItems &&
+      queuedItems.length > 0 &&
+      onRecallQueued &&
+      !queueBusy &&
+      !disabled
+    ) {
+      e.preventDefault();
+      const latest = queuedItems[queuedItems.length - 1];
+      if (latest) onRecallQueued(latest);
+      return;
+    }
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.altKey) {
+      e.preventDefault();
+      if (canSend && !receiptBusy && !disabled && !isPreLlm && !isStopping) {
+        onSend(isLlmRunning && !isEditingTurn ? 'steer' : 'followUp');
+      }
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey && !composingRef.current && !e.nativeEvent.isComposing) {
       e.preventDefault();
-      if (canSend && !disabled) onSend();
+      if (canSend && !receiptBusy && !disabled && !isPreLlm && !isStopping) onSend('followUp');
     }
   }
 
   const recoveringAttempt = attempt && (attempt.phase === 'not-sent' || attempt.phase === 'failed' ||
     draftConflict || recOutcome?.action === 'ready-clear-retry') ? attempt : null;
-  const footerStatus = receiptBusy ? null : sendNotice?.text;
-  const footerHint = draftHint ?? 'Enter 发送 · Shift+Enter 换行 · / 呼出命令';
+  const footerStatus = receiptBusy ? '' : (sendNotice?.text ?? '');
+  const footerHint =
+    draftHint ??
+    (isEditingTurn
+      ? 'Enter 重新发送 · Shift+Enter 换行 · Esc 取消编辑'
+      : isLlmRunning
+        ? 'Enter 排队 · Ctrl+Enter 立即插入 · Shift+Enter 换行'
+        : 'Enter 发送 · Shift+Enter 换行 · / 呼出命令');
   const footerRecordAction = sendState === 'idle' && sendNotice?.showRecordAction &&
     !recoveringAttempt && !sendError
     ? onOpenSendRecord
     : undefined;
+  const hasDraftContent = text.trim().length > 0 || attachments.length > 0;
 
   return (
     <div className="composer bot-composer">
@@ -825,6 +888,21 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
           </div>
         ) : null}
       </div>
+      {isEditingTurn && onCancelEditTurn ? (
+        <ComposerEditBanner
+          disabled={disabled || receiptBusy}
+          onCancel={onCancelEditTurn}
+        />
+      ) : queuedItems && queuedItems.length > 0 && onRecallQueued && onRecallAllQueued && onDiscardQueued ? (
+        <PendingQueueStrip
+          items={queuedItems}
+          disabled={Boolean(queueBusy || disabled || isStopping)}
+          onRecall={onRecallQueued}
+          onRecallAll={onRecallAllQueued}
+          onDiscard={onDiscardQueued}
+          onSteer={onSteerQueued}
+        />
+      ) : null}
       <div className="composer-input-wrap">
         {slashOpen ? (
           <div className="slash-popover" role="listbox" aria-label="斜杠命令">
@@ -883,7 +961,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
                 >
                   <FileText size={14} /> 添加图片
                 </button>
-                {!canPick ? (
+                {!canPick && !isEditingTurn ? (
                   <p className="composer-plus-note" role="note">
                     Relay 模式不可选本机文件；可将目标 Host 上已存在的路径作为普通文本引用。
                   </p>
@@ -899,22 +977,85 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
             onKeyDown={onKeyDown}
             onCompositionStart={() => { composingRef.current = true; }}
             onCompositionEnd={() => { composingRef.current = false; }}
-            aria-label="输入消息"
-            placeholder="输入消息，/ 呼出命令…"
+            aria-label={isEditingTurn ? '编辑历史消息' : '输入消息'}
+            placeholder={isEditingTurn ? '编辑消息内容…' : '输入消息，/ 呼出命令…'}
             rows={1}
             disabled={disabled}
           />
-          <button
-            type="button"
-            className="composer-send primary-button"
-            onClick={() => onSend()}
-            disabled={receiptBusy || disabled || !canSend}
-            aria-label={receiptBusy ? '正在发送' : '发送'}
-            aria-busy={receiptBusy}
-            title="Enter 发送 · Shift+Enter 换行"
-          >
-            <SendButtonIcon busy={receiptBusy} size={16} />
-          </button>
+          {isStopping ? (
+            <button
+              ref={stopButtonRef}
+              type="button"
+              className="composer-stop"
+              disabled
+              aria-label="正在停止…"
+              title="正在停止…"
+            >
+              <RefreshCw size={15} className="grok-spin" />
+            </button>
+          ) : isPreLlm || receiptBusy ? (
+            <button
+              type="button"
+              className="composer-loading"
+              disabled
+              aria-busy={true}
+              aria-label="处理中…"
+              title="前置准备中…"
+            >
+              <SendButtonIcon busy={true} size={16} />
+            </button>
+          ) : isLlmRunning ? (
+            <>
+              {hasDraftContent && !isEditingTurn ? (
+                <button
+                  type="button"
+                  className="composer-steer"
+                  onClick={() => onSend('steer')}
+                  disabled={receiptBusy || disabled || !canSend || isPreLlm || isStopping}
+                  aria-label="打断并立即发送"
+                  title="打断并立即发送 (Ctrl+Enter)"
+                >
+                  <Zap size={14} />
+                </button>
+              ) : null}
+              {hasDraftContent || !canStop ? (
+                <button
+                  type="button"
+                  className="composer-send primary-button"
+                  onClick={() => onSend('followUp')}
+                  disabled={receiptBusy || disabled || !canSend || isPreLlm || isStopping}
+                  aria-label="排队发送"
+                  title="Enter 排队发送 · Ctrl+Enter 立即插入"
+                >
+                  <SendButtonIcon busy={false} size={16} />
+                </button>
+              ) : null}
+            </>
+          ) : (
+            <button
+              type="button"
+              className="composer-send primary-button"
+              onClick={() => onSend('followUp')}
+              disabled={receiptBusy || disabled || !canSend || isPreLlm || isStopping}
+              aria-label={isEditingTurn ? '重新发送' : '发送'}
+              title={isEditingTurn ? 'Enter 重新发送 · Esc 取消编辑' : 'Enter 发送 · Shift+Enter 换行'}
+            >
+              <SendButtonIcon busy={false} size={16} />
+            </button>
+          )}
+          {!isStopping && !receiptBusy && canStop ? (
+            <button
+              ref={stopButtonRef}
+              type="button"
+              className="composer-stop"
+              onClick={onStop}
+              disabled={stopDisabled}
+              aria-label="停止此智能体"
+              title="停止当前执行并将排队消息撤回输入框"
+            >
+              <Square size={14} />
+            </button>
+          ) : null}
         </div>
       </div>
       <div className="composer-footer">
@@ -1163,7 +1304,7 @@ const inspectorGroups: ReadonlyArray<{ title: string; pages: readonly InspectorP
     { id: 'schedules', label: '定时任务', Icon: Clock },
   ] },
   { title: '更多', pages: [
-    { id: 'skill-review', label: 'Skill 审阅', Icon: Sparkles },
+    { id: 'skill-review', label: '已学技能', Icon: Sparkles },
     { id: 'vault', label: '密码库', Icon: LockKeyhole },
     { id: 'management', label: '管理', Icon: Settings },
   ] },
@@ -1191,6 +1332,7 @@ function PrimaryChatPane({
   transcriptVisible = true,
   centerInterrupted = false,
   pageActive = true,
+  knownBots,
 }: {
   api: DesktopPanelApi;
   /** 未按目标在线收窄的原 api：仅中心权威操作（cwd get/set）使用。 */
@@ -1216,6 +1358,7 @@ function PrimaryChatPane({
   transcriptVisible?: boolean;
   centerInterrupted?: boolean;
   pageActive?: boolean;
+  knownBots?: readonly KnownBotSummary[];
 }) {
   const t = useText();
   const identity = api.identity;
@@ -1441,25 +1584,65 @@ function PrimaryChatPane({
     }
   }
 
+  const [editingTurn, setEditingTurn] = useState<{
+    sess: string;
+    botId: string;
+    entryId: number;
+    text: string;
+    attachments: ImageAttachment[];
+  } | null>(null);
+  const [editSubmitting, setEditSubmitting] = useState(false);
+  const activeEditing =
+    editingTurn && editingTurn.sess === sess && editingTurn.botId === bot.botId
+      ? editingTurn
+      : null;
+
   function onChangeText(v: string) {
+    if (activeEditing) {
+      setEditingTurn((cur) =>
+        cur && cur.sess === sess && cur.botId === bot.botId ? { ...cur, text: v } : cur,
+      );
+      if (sendError) setSendError(null);
+      return;
+    }
     drafts.editText(v);
     if (sendError) setSendError(null);
     if (lastSendRecordId) setSendNotice(null);
   }
 
   function addFile(ref: { name: string; path: string; size: number }) {
+    if (activeEditing) return;
     drafts.addFile(ref);
   }
 
   function removeFile(i: number) {
+    if (activeEditing) return;
     drafts.removeFile(i);
   }
 
   function addAttachment(att: ImageAttachment) {
+    if (activeEditing) {
+      setEditingTurn((cur) => {
+        if (!cur || cur.sess !== sess || cur.botId !== bot.botId) return cur;
+        if (cur.attachments.some((a) => a.id === att.id) || cur.attachments.length >= IMAGE_MAX_COUNT) {
+          return cur;
+        }
+        return { ...cur, attachments: [...cur.attachments, { ...att }] };
+      });
+      return;
+    }
     drafts.addAttachment(att);
   }
 
   function removeAttachment(i: number) {
+    if (activeEditing) {
+      setEditingTurn((cur) =>
+        cur && cur.sess === sess && cur.botId === bot.botId
+          ? { ...cur, attachments: cur.attachments.filter((_, idx) => idx !== i) }
+          : cur,
+      );
+      return;
+    }
     drafts.removeAttachment(i);
   }
 
@@ -1469,7 +1652,7 @@ function PrimaryChatPane({
   }, [api, identity, bot.botId]);
 
   async function pickFile() {
-    if (!identity || lockedRef.current || isArchived) return;
+    if (!identity || lockedRef.current || isArchived || activeEditing) return;
     try {
       const ref = await api.pickFile();
       if (ref && isCurrentSession() && !lockedRef.current) addFile(ref);
@@ -1483,20 +1666,23 @@ function PrimaryChatPane({
   const [imageUploadSession, setImageUploadSession] = useState<string | null>(null);
   const imageUploading = imageUploadSession === sess;
 
-  /** 桌面只选图（无原生相机）；上传归属冻结在发起时的 identity/botId/draftKey。
+  /** 桌面只选图（无原生相机）；上传归属冻结在发起时的 identity/botId/draftKey（或编辑态 entryId）。
    *  addAttachment 的 expectedKey 是原子 guard（useDrafts 内部 keyRef 实时比较）：
    *  切换 Bot/身份后未完成批次中止，已上传结果不写新 scope 草稿。
    *  相同图片 id 去重；去重后总数 ≤4，超限整体拒绝保留原草稿。 */
   function pickImage() {
     const frozenIdentity = identity;
+    const frozenEditEntryId = activeEditing?.entryId ?? null;
     const draftKey = drafts.key;
-    if (!frozenIdentity || lockedRef.current || isArchived || !draftKey || imageUploading) return;
+    if (!frozenIdentity || lockedRef.current || isArchived || imageUploading) return;
+    if (frozenEditEntryId === null && !draftKey) return;
+    const baseAttachments = activeEditing ? activeEditing.attachments : drafts.attachments;
     setImageUploadSession(sess);
     pickImagesFromInput({
       onPicked: async (files) => {
         try {
           const normalized = await Promise.all(files.map((file) => normalizeImageFile(file, file.name)));
-          const existing = new Set(drafts.attachments.map((a) => a.id));
+          const existing = new Set(baseAttachments.map((a) => a.id));
           const queued: PickedImageSource[] = [];
           for (const source of normalized) {
             const id = await attachmentIdOf(source.data);
@@ -1505,7 +1691,7 @@ function PrimaryChatPane({
             queued.push(source);
           }
           if (!isCurrentSession()) return;
-          if (drafts.attachments.length + queued.length > IMAGE_MAX_COUNT) {
+          if (baseAttachments.length + queued.length > IMAGE_MAX_COUNT) {
             setSendError(`最多 ${IMAGE_MAX_COUNT} 张图片，本次未上传。`);
             return;
           }
@@ -1516,7 +1702,27 @@ function PrimaryChatPane({
               mimeType: source.mimeType,
               data: source.data,
             });
-            if (!isCurrentSession() || !drafts.addAttachment(att, draftKey)) return;
+            if (!isCurrentSession()) return;
+            if (frozenEditEntryId !== null) {
+              let applied = false;
+              setEditingTurn((cur) => {
+                if (
+                  !cur ||
+                  cur.sess !== sess ||
+                  cur.botId !== bot.botId ||
+                  cur.entryId !== frozenEditEntryId ||
+                  cur.attachments.length >= IMAGE_MAX_COUNT ||
+                  cur.attachments.some((a) => a.id === att.id)
+                ) {
+                  return cur;
+                }
+                applied = true;
+                return { ...cur, attachments: [...cur.attachments, { ...att }] };
+              });
+              if (!applied) return;
+            } else if (!draftKey || !drafts.addAttachment(att, draftKey)) {
+              return;
+            }
           }
           setSendError(null);
         } catch (e) {
@@ -1530,6 +1736,18 @@ function PrimaryChatPane({
       },
     });
   }
+
+  const [observedLive, setObservedLive] = useState<{ session: string; state: BotLiveState } | null>(null);
+  const live = observedLive && (!online || observedLive.session === sess) ? observedLive.state : null;
+  const [liveLast, setLiveLast] = useState<string | null>(null);
+  const [liveError, setLiveError] = useState<string | null>(null);
+  const [liveEnded, setLiveEnded] = useState(false);
+  const [watchTick, setWatchTick] = useState(0);
+  const [stoppingSession, setStoppingSession] = useState<string | null>(null);
+  const [confirmedStopTarget, setConfirmedStopTarget] = useState<string | null>(null);
+  const stopButtonRef = useRef<HTMLButtonElement>(null);
+  const stopping = stoppingSession === sess;
+  const [avatarVersion, setAvatarVersion] = useState(0);
 
   /**
    * 显式发送 /clear 与 /compact：只走 Host 控制方法（clearHistory/compact），不经模型 submit。
@@ -1589,9 +1807,125 @@ function PrimaryChatPane({
     }
   }
 
-  async function handleSend() {
+  const [outboxPendingItems, setOutboxPendingItems] = useState<PendingRecord[]>([]);
+  const [queueBusy, setQueueBusy] = useState(false);
+
+  const refreshOutboxPending = useCallback(async () => {
+    const current = api.identity;
+    if (!current) {
+      if (mountedRef.current) setOutboxPendingItems([]);
+      return;
+    }
+    try {
+      const matched: PendingRecord[] = [];
+      let cursor: PendingCursor | null = null;
+      for (let pageNo = 0; pageNo < 10; pageNo += 1) {
+        const page: PendingListPage = await api.pending(current, 'pending_list', { options: { limit: 50, cursor } });
+        for (const item of page.items) {
+          if (
+            item.kind === 'primary' &&
+            item.botId === bot.botId &&
+            item.targetDeviceId === current.targetDeviceId &&
+            item.state === 'pending'
+          ) {
+            matched.push(item);
+          }
+        }
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      if (mountedRef.current && sessionKey(api.identity) === sessionKey(current)) {
+        setOutboxPendingItems(matched);
+      }
+    } catch {
+      // 本地 outbox 读取失败不阻塞主视图
+    }
+  }, [api, bot.botId]);
+
+  useEffect(() => {
+    if (!pageActive) return;
+    void refreshOutboxPending();
+    if (outboxPendingItems.length === 0) return;
+    const timer = window.setInterval(() => {
+      void refreshOutboxPending();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [pageActive, sess, bot.botId, outboxPendingItems.length, refreshOutboxPending]);
+
+  async function submitEditedTurn() {
+    if (!identity || !online || !activeEditing || editSubmitting || lockedRef.current || isArchived) return;
+    if (imageUploading) return;
+    const curActivity = resolveBotActivity(live);
+    if (
+      stopping ||
+      Boolean(live?.busy) ||
+      (live?.queuedCount ?? 0) > 0 ||
+      isBotActivityBusy(curActivity) ||
+      (turnAdmission !== null && turnAdmission.phase !== 'failed')
+    ) {
+      setSendError('智能体忙碌时无法编辑历史消息，草稿已保留，请稍后重试或按 Esc 取消。');
+      return;
+    }
+    const msg = activeEditing.text.trim();
+    const attachmentIds = activeEditing.attachments.map((a) => a.id);
+    if (!msg && attachmentIds.length === 0) return;
+    const targetEntryId = activeEditing.entryId;
+    const requestId = crypto.randomUUID();
+    lockedRef.current = true;
+    setEditSubmitting(true);
+    setSendState('sending');
+    setSendError(null);
+    setSendNotice(null);
+    try {
+      const receipt = (await api.call(identity, 'editMessage', {
+        botId: bot.botId,
+        requestId,
+        entryId: targetEntryId,
+        text: msg,
+        ...(attachmentIds.length ? { attachments: attachmentIds } : {}),
+      })) as PrimarySubmission;
+      if (!isCurrentSession()) return;
+      setEditingTurn(null);
+      const nextAdmission = readTurnAdmission((receipt as { admission?: unknown }).admission);
+      setTurnAdmission(nextAdmission);
+      void loadRawLatest();
+      onLiveActivityRef.current?.();
+    } catch (e) {
+      if (!isCurrentSession()) return;
+      if (toError(e).code === 'RUNTIME_BUSY') {
+        setSendError('智能体忙碌时无法编辑历史消息，草稿已保留，请稍后重试或按 Esc 取消。');
+      } else {
+        setSendError('编辑重发失败：' + tErr(e));
+        reportUnlessTargetOffline(api, e);
+      }
+    } finally {
+      lockedRef.current = false;
+      if (mountedRef.current) {
+        setEditSubmitting(false);
+        setSendState('idle');
+      }
+    }
+  }
+
+  async function handleSend(delivery: TurnDeliveryMode = 'followUp') {
+    if (activeEditing) {
+      await submitEditedTurn();
+      return;
+    }
     if (!identity || sendState !== 'idle' || lockedRef.current || isArchived) return;
     if (imageUploading) return;
+    if (online) {
+      const curActivity = resolveBotActivity(live);
+      if (
+        stopping ||
+        curActivity.phase === 'stopping' ||
+        (!isBotLlmRunningPhase(curActivity.phase) &&
+          (isBotPreLlmPhase(curActivity.phase) ||
+            (turnAdmission !== null && turnAdmission.phase !== 'failed')))
+      ) {
+        return;
+      }
+    }
     const msg = drafts.text.trim();
     const attachmentIds = drafts.attachments.map((a) => a.id);
     if (!msg && attachmentIds.length === 0) return;
@@ -1622,6 +1956,7 @@ function PrimaryChatPane({
       requestId,
       text: composed,
       ...(attachmentIds.length ? { attachments: attachmentIds } : {}),
+      ...(delivery === 'steer' ? { delivery: 'steer' } : {}),
     };
     const started = drafts.beginSend(input);
     if (!started) return;
@@ -1680,6 +2015,7 @@ function PrimaryChatPane({
     } finally {
       lockedRef.current = false;
       setSendState('idle');
+      void refreshOutboxPending();
     }
   }
 
@@ -1689,7 +2025,7 @@ function PrimaryChatPane({
     setTurnAdmission(hostQueued ? hostQueued.admission : null);
     if (rec.state === 'accepted') {
       drafts.finishSend(handle);
-      // 受理只说明已受理；完成与否以 live/原回执为准，界面不断言。
+      // 受理只说明已受理；前置准入与运行阶段统一由右下角按钮与 live 状态呈现，不在输入框下方写状态字。
       setSendNotice(null);
       onLiveActivityRef.current?.();
     } else if (rec.state === 'rejected') {
@@ -1807,14 +2143,15 @@ function PrimaryChatPane({
     setSendError(null);
     try {
       const receipt = await api.call(current, 'submit', {
-        botId: rec.botId, requestId: rec.requestId, text: rec.text,
+        botId: rec.botId,
+        requestId: rec.requestId,
+        text: rec.text,
+        ...(rec.attachments?.length ? { attachments: rec.attachments } : {}),
+        ...(rec.delivery ? { delivery: rec.delivery } : {}),
       });
       if (!isCurrentSession()) return;
       const nextAdmission = readTurnAdmission((receipt as { admission?: unknown }).admission);
       setTurnAdmission(nextAdmission);
-      setSendError(nextAdmission && nextAdmission.phase !== 'failed'
-        ? '已重新受理：' + TURN_ADMISSION_LABELS[nextAdmission.phase]
-        : '已重新提交准入，等待 Host 受理状态更新。');
       // 本地 outbox 记录 receipt 仍带旧 admission：显式对账刷新一次（只读，不改远端状态）。
       try { await api.pending(current, 'pending_reconcile', { id: rec.id }); } catch { /* 对账失败不掩盖重试结果 */ }
     } catch (e) {
@@ -1838,18 +2175,6 @@ function PrimaryChatPane({
       setSendError(r.error ?? '无法释放');
     }
   }
-
-  const [observedLive, setObservedLive] = useState<{ session: string; state: BotLiveState } | null>(null);
-  const live = observedLive && (!online || observedLive.session === sess) ? observedLive.state : null;
-  const [liveLast, setLiveLast] = useState<string | null>(null);
-  const [liveError, setLiveError] = useState<string | null>(null);
-  const [liveEnded, setLiveEnded] = useState(false);
-  const [watchTick, setWatchTick] = useState(0);
-  const [stoppingSession, setStoppingSession] = useState<string | null>(null);
-  const [confirmedStopTarget, setConfirmedStopTarget] = useState<string | null>(null);
-  const stopButtonRef = useRef<HTMLButtonElement>(null);
-  const stopping = stoppingSession === sess;
-  const [avatarVersion, setAvatarVersion] = useState(0);
 
   const [rawItems, setRawItems] = useState<AnyRawEntry[]>([]);
   const boardTarget: BotBoardTarget | undefined = identity ? {
@@ -2043,15 +2368,192 @@ function PrimaryChatPane({
 
   async function stopTask() {
     if (!identity || stopping || !api.transportConnected) return;
+    const frozenDraftKey = drafts.key ?? undefined;
     setStoppingSession(sess);
     try {
-      await api.call(identity, 'abort', { botId: bot.botId });
+      const localTexts: string[] = [];
+      const localAttIds: string[] = [];
+      try {
+        let cursor: PendingCursor | null = null;
+        const localPending: Extract<PendingRecord, { kind: 'primary' }>[] = [];
+        for (let pageNo = 0; pageNo < 10; pageNo += 1) {
+          const page: PendingListPage = await api.pending(identity, 'pending_list', { options: { limit: 50, cursor } });
+          for (const item of page.items) {
+            if (
+              item.kind === 'primary' &&
+              item.botId === bot.botId &&
+              item.targetDeviceId === identity.targetDeviceId &&
+              item.state === 'pending'
+            ) {
+              localPending.push(item);
+            }
+          }
+          cursor = page.nextCursor;
+          if (!cursor) break;
+        }
+        for (const item of localPending) {
+          try {
+            await api.pending(identity, 'pending_cancel', { id: item.id });
+            if (item.text.trim()) localTexts.push(item.text);
+            if (item.attachments?.length) localAttIds.push(...item.attachments);
+          } catch {
+            // 若刚进入 sending/accepted 则交由下方 Host abort 撤回
+          }
+        }
+      } catch {
+        // 本地列表异常不阻断远端 abort
+      }
+      const res = (await api.call(identity, 'abort', { botId: bot.botId })) as AbortBotResult;
+      if (!isCurrentSession()) return;
+      const hostWithdrawn: WithdrawnTurnItem[] = Array.isArray(res?.withdrawn) ? res.withdrawn : [];
+      const hostTexts = hostWithdrawn
+        .map((w) => w.text)
+        .filter((s) => typeof s === 'string' && s.trim().length > 0);
+      const hostAttIds = hostWithdrawn.flatMap((w) =>
+        Array.isArray(w.attachments) ? w.attachments : [],
+      );
+      const allTexts = [...hostTexts, ...localTexts];
+      const allAttIds = [...hostAttIds, ...localAttIds];
+      if (allTexts.length > 0 || allAttIds.length > 0) {
+        const resolvedAtts = await resolveAttachmentMetasByIds(allAttIds, attachmentFetcher);
+        if (!isCurrentSession()) return;
+        if (drafts.mergeRecalled(allTexts, resolvedAtts, frozenDraftKey)) {
+          window.setTimeout(() => composerRef.current?.focus(), 0);
+        }
+      }
+      void refreshOutboxPending();
     } catch (e) {
       if (!isCurrentSession()) return;
       setLiveError('停止失败：' + tErr(e));
       reportUnlessTargetOffline(api, e);
     } finally {
       if (mountedRef.current) setStoppingSession(current => current === sess ? null : current);
+    }
+  }
+
+  async function recallQueuedItem(item: UnifiedQueuedStripItem, mergeIntoDraft: boolean) {
+    if (!identity || queueBusy || !readsActive || isArchived) return;
+    if (mergeIntoDraft && drafts.attempt) {
+      setSendError('当前存在未确认的发送草稿，请先处理后再撤回排队消息。');
+      return;
+    }
+    if (disabled) return;
+    if (item.source === 'host' && !online) {
+      setSendError('目标离线，无法操作远端排队消息。');
+      return;
+    }
+    const frozenDraftKey = drafts.key ?? undefined;
+    setQueueBusy(true);
+    try {
+      if (item.source === 'outbox' && item.outboxRecord) {
+        await api.pending(identity, 'pending_cancel', { id: item.outboxRecord.id });
+        if (!isCurrentSession()) return;
+        if (mergeIntoDraft) {
+          const texts = item.outboxRecord.text.trim() ? [item.outboxRecord.text] : [];
+          const resolvedAtts = await resolveAttachmentMetasByIds(item.outboxRecord.attachments, attachmentFetcher);
+          if (!isCurrentSession()) return;
+          if (drafts.mergeRecalled(texts, resolvedAtts, frozenDraftKey)) {
+            window.setTimeout(() => composerRef.current?.focus(), 0);
+          }
+        }
+        void refreshOutboxPending();
+        return;
+      }
+      const res = (await api.call(identity, 'withdrawQueued', {
+        botId: bot.botId,
+        requestId: item.requestId,
+      })) as WithdrawQueuedResult;
+      if (!isCurrentSession()) return;
+      if (mergeIntoDraft && Array.isArray(res?.withdrawn) && res.withdrawn.length > 0) {
+        const texts = res.withdrawn
+          .map((w) => w.text)
+          .filter((s) => typeof s === 'string' && s.trim().length > 0);
+        const attIds = res.withdrawn.flatMap((w) => (Array.isArray(w.attachments) ? w.attachments : []));
+        const resolvedAtts = await resolveAttachmentMetasByIds(attIds, attachmentFetcher);
+        if (!isCurrentSession()) return;
+        if (drafts.mergeRecalled(texts, resolvedAtts, frozenDraftKey)) {
+          window.setTimeout(() => composerRef.current?.focus(), 0);
+        }
+      }
+    } catch (e) {
+      if (!isCurrentSession()) return;
+      setSendError((mergeIntoDraft ? '撤回排队消息失败：' : '移除排队消息失败：') + tErr(e));
+      reportUnlessTargetOffline(api, e);
+    } finally {
+      if (mountedRef.current) setQueueBusy(false);
+    }
+  }
+
+  async function recallAllQueued() {
+    if (!identity || queueBusy || !readsActive || isArchived) return;
+    if (drafts.attempt) {
+      setSendError('当前存在未确认的发送草稿，请先处理后再撤回排队消息。');
+      return;
+    }
+    if (disabled) return;
+    const frozenDraftKey = drafts.key ?? undefined;
+    setQueueBusy(true);
+    try {
+      const localTexts: string[] = [];
+      const localAttIds: string[] = [];
+      for (const rec of outboxPendingItems) {
+        if (rec.kind !== 'primary' || rec.state !== 'pending') continue;
+        try {
+          await api.pending(identity, 'pending_cancel', { id: rec.id });
+          if (rec.text.trim()) localTexts.push(rec.text);
+          if (rec.attachments?.length) localAttIds.push(...rec.attachments);
+        } catch {
+          // 已发送则交由 Host withdrawQueued 处理
+        }
+      }
+      let hostTexts: string[] = [];
+      let hostAttIds: string[] = [];
+      if (online && (live?.queuedItems?.length ?? 0) > 0) {
+        const res = (await api.call(identity, 'withdrawQueued', {
+          botId: bot.botId,
+        })) as WithdrawQueuedResult;
+        if (!isCurrentSession()) return;
+        const withdrawn = Array.isArray(res?.withdrawn) ? res.withdrawn : [];
+        hostTexts = withdrawn
+          .map((w) => w.text)
+          .filter((s) => typeof s === 'string' && s.trim().length > 0);
+        hostAttIds = withdrawn.flatMap((w) => (Array.isArray(w.attachments) ? w.attachments : []));
+      }
+      const allTexts = [...hostTexts, ...localTexts];
+      const allAttIds = [...hostAttIds, ...localAttIds];
+      if (allTexts.length > 0 || allAttIds.length > 0) {
+        const resolvedAtts = await resolveAttachmentMetasByIds(allAttIds, attachmentFetcher);
+        if (!isCurrentSession()) return;
+        if (drafts.mergeRecalled(allTexts, resolvedAtts, frozenDraftKey)) {
+          window.setTimeout(() => composerRef.current?.focus(), 0);
+        }
+      }
+      void refreshOutboxPending();
+    } catch (e) {
+      if (!isCurrentSession()) return;
+      setSendError('撤回排队消息失败：' + tErr(e));
+      reportUnlessTargetOffline(api, e);
+    } finally {
+      if (mountedRef.current) setQueueBusy(false);
+    }
+  }
+
+  async function steerQueuedItem(item: UnifiedQueuedStripItem) {
+    if (!identity || !online || queueBusy || item.source !== 'host') return;
+    setQueueBusy(true);
+    try {
+      await api.call(identity, 'steerQueued', {
+        botId: bot.botId,
+        requestId: item.requestId,
+      });
+    } catch (e) {
+      if (!isCurrentSession()) return;
+      if (toError(e).code !== 'SUBMISSION_NOT_FOUND') {
+        setSendError('立即插入失败：' + tErr(e));
+        reportUnlessTargetOffline(api, e);
+      }
+    } finally {
+      if (mountedRef.current) setQueueBusy(false);
     }
   }
 
@@ -2158,14 +2660,100 @@ function PrimaryChatPane({
     ? `等待你确认 · ${pendingQuestionnaire.questions.length} 题` : null;
   // 停止独立门禁：只关联在线/归档/停止进行中，不被发送、草稿锁或附件上传禁用。
   const stopDisabled = !online || isArchived || stopping;
-  const queuedCount = live?.queuedCount ?? 0;
-  const requiresStopConfirmation = liveActivity.source === 'room' || liveActivity.source === 'dm' ||
-    liveActivity.source === 'background' || queuedCount > 1 || (live?.busy === true && queuedCount > 0);
+  // 主聊天任务直接停止并撤回排队消息到输入框；仅打断群聊/私信/后台任务时弹二次确认。
+  const requiresStopConfirmation =
+    liveActivity.source === 'room' ||
+    liveActivity.source === 'dm' ||
+    liveActivity.source === 'background';
   const stopTarget = JSON.stringify([sess, liveActivity.source, liveActivity.scopeId, liveActivity.requestId, liveActivity.startedAt]);
   const stopConfirmOpen = pageActive && canStop && !stopDisabled && confirmedStopTarget === stopTarget;
   useEffect(() => {
     if (!stopConfirmOpen) setConfirmedStopTarget(null);
   }, [stopConfirmOpen]);
+  const receiptBusy =
+    sendState === 'sending' ||
+    Boolean(
+      drafts.attempt &&
+        !['not-sent', 'failed'].includes(drafts.attempt.phase) &&
+        !drafts.conflict &&
+        recOutcome?.action !== 'ready-clear-retry',
+    );
+  const isSendingMessage = receiptBusy && slashBusy === null;
+  // 智能体忙碌时禁止发起或提交历史消息编辑；已打开的编辑草稿保留，待空闲后可重试或按 Esc 取消。
+  const isBusyForEdit =
+    liveBusy ||
+    Boolean(live?.busy) ||
+    (live?.queuedCount ?? 0) > 0 ||
+    stopping ||
+    isSendingMessage ||
+    slashBusy !== null ||
+    (turnAdmission !== null && turnAdmission.phase !== 'failed');
+  const canEditTurns = Boolean(online && !isArchived && !isBusyForEdit && !editSubmitting && !disabled);
+  useEffect(() => {
+    if (!editingTurn || editSubmitting) return;
+    if (
+      editingTurn.sess !== sess ||
+      editingTurn.botId !== bot.botId ||
+      !online ||
+      isArchived
+    ) {
+      setEditingTurn(null);
+    }
+  }, [editingTurn, editSubmitting, sess, bot.botId, online, isArchived]);
+  const startEditTurn = useCallback(
+    (turn: ChatTurn) => {
+      if (!canEditTurns) return;
+      setSendError(null);
+      setSendNotice(null);
+      setEditingTurn({
+        sess,
+        botId: bot.botId,
+        entryId: turn.entryId,
+        text: extractEditableUserText(turn.text ?? ''),
+        attachments: (turn.attachments ?? []).map((a) => ({ ...a })),
+      });
+      window.setTimeout(() => {
+        const el = composerRef.current;
+        if (!el) return;
+        el.focus();
+        const len = el.value.length;
+        el.setSelectionRange(len, len);
+      }, 0);
+    },
+    [canEditTurns, sess, bot.botId],
+  );
+  const queuedStripItems = useMemo(
+    () => mergeQueuedStripItems(live?.queuedItems, outboxPendingItems, bot.botId, identity?.targetDeviceId),
+    [live?.queuedItems, outboxPendingItems, bot.botId, identity?.targetDeviceId],
+  );
+  const composerText = activeEditing ? activeEditing.text : drafts.text;
+  const composerAttachments = activeEditing ? activeEditing.attachments : drafts.attachments;
+  const composerFiles = activeEditing ? [] : drafts.files;
+  const desktopComposerAction = resolveComposerActionKind({
+    phase: liveActivity.phase,
+    online,
+    archived: isArchived,
+    isSending: isSendingMessage,
+    isStopping: stopping,
+    pendingAdmissionWaiting: turnAdmission !== null && turnAdmission.phase !== 'failed',
+    hasDraft: composerText.trim().length > 0 || composerAttachments.length > 0,
+    canStop,
+  });
+  const isStoppingPhase = desktopComposerAction === 'stopping';
+  const isPreLlmPhase = desktopComposerAction === 'loading';
+  const isLlmRunningPhase =
+    !isArchived && !isStoppingPhase && !isPreLlmPhase && online && isBotLlmRunningPhase(liveActivity.phase);
+  const showComposerStop = shouldShowComposerStop({
+    phase: liveActivity.phase,
+    online,
+    archived: isArchived,
+    isStopping: stopping,
+    canStop,
+  });
+  const requestStop = () => {
+    if (requiresStopConfirmation) setConfirmedStopTarget(stopTarget);
+    else void stopTask();
+  };
   void avatarVersion; // 头像保存后 bump：重新计算 key 下各 GrokBotAvatar preset
 
   const statusText = !online
@@ -2240,6 +2828,7 @@ function PrimaryChatPane({
             starBadge={isPrimary && !isArchived}
             platformBadge={devicePlatform}
             busy={liveBusy}
+            reflecting={Boolean(live?.learning?.active)}
             offline={!online}
             size={30}
           />
@@ -2307,22 +2896,6 @@ function PrimaryChatPane({
           >
             <Monitor size={15} /> 桌面
           </button>
-          {canStop || stopping ? (
-            <button
-              ref={stopButtonRef}
-              type="button"
-              className={`secondary-button chat-action-pill stop-pill${stopping ? ' is-stopping' : ''}`}
-              onClick={() => {
-                if (requiresStopConfirmation) setConfirmedStopTarget(stopTarget);
-                else void stopTask();
-              }}
-              disabled={stopDisabled}
-              title="停止此智能体的排队和进行中任务，包括其他会话"
-            >
-              <Square size={14} /> {stopping ? '正在停止…' : '停止任务'}
-              <small>含排队和其他会话</small>
-            </button>
-          ) : null}
           <div className="chat-more-wrap" ref={moreMenuRef}>
             <button
               type="button"
@@ -2440,6 +3013,7 @@ function PrimaryChatPane({
         entries={rawItems}
         live={live}
         bot={bot}
+        knownBots={knownBots}
         activity={transcriptActivity}
         awaitingAnswer={Boolean(awaitingAnswer)}
         avatarKey={botAvatarKey(bot)}
@@ -2465,6 +3039,10 @@ function PrimaryChatPane({
           setWatchTick((t) => t + 1);
           void loadRaw();
         }}
+        onOpenLearnedSkills={() => openInspector('skill-review')}
+        canEditTurns={canEditTurns}
+        editingEntryId={activeEditing?.entryId ?? null}
+        onEditTurn={startEditTurn}
         emptyActions={
           !isArchived && !drafts.text && <button
             type="button"
@@ -2477,47 +3055,74 @@ function PrimaryChatPane({
 
       <Composer
         textareaRef={composerRef}
-        text={drafts.text}
+        text={composerText}
         onChangeText={onChangeText}
-        files={drafts.files}
+        files={composerFiles}
         onAddFile={addFile}
         onRemoveFile={removeFile}
-        attachments={drafts.attachments}
+        attachments={composerAttachments}
         onAddAttachment={addAttachment}
         onRemoveAttachment={removeAttachment}
         attachmentFetcher={attachmentFetcher}
         onPickImage={pickImage}
-        canPick={!isArchived && identity?.kind === 'local'}
+        canPick={!isArchived && !activeEditing && identity?.kind === 'local'}
         onPick={pickFile}
-        draftError={drafts.error}
+        draftError={activeEditing ? null : drafts.error}
         draftHint={isArchived ? '此 Bot 已归档，当前为只读模式，恢复后可继续发送消息。' : null}
-        draftConflict={drafts.conflict}
+        draftConflict={activeEditing ? null : drafts.conflict}
         sendState={sendState}
-        receiptBusy={sendState === 'sending' || Boolean(drafts.attempt &&
-          !['not-sent', 'failed'].includes(drafts.attempt.phase) && !drafts.conflict && recOutcome?.action !== 'ready-clear-retry')}
+        receiptBusy={receiptBusy}
         sendError={sendError}
         sendNotice={sendNotice}
-        onSend={handleSend}
+        onSend={(delivery) => void handleSend(delivery)}
         canSend={
-          !isArchived &&
-          !!identity &&
-          !!drafts.key &&
-          (drafts.text.trim().length > 0 || drafts.attachments.length > 0) &&
-          !drafts.attempt &&
-          !drafts.savePaused &&
-          !imageUploading
+          activeEditing
+            ? online &&
+              !isArchived &&
+              !isBusyForEdit &&
+              !editSubmitting &&
+              !imageUploading &&
+              (activeEditing.text.trim().length > 0 || activeEditing.attachments.length > 0)
+            : !isArchived &&
+              !isPreLlmPhase &&
+              !isStoppingPhase &&
+              !!identity &&
+              !!drafts.key &&
+              (drafts.text.trim().length > 0 || drafts.attachments.length > 0) &&
+              !drafts.attempt &&
+              !drafts.savePaused &&
+              !imageUploading
         }
         disabled={disabled}
+        isPreLlm={isPreLlmPhase}
+        isLlmRunning={isLlmRunningPhase}
+        isStopping={isStoppingPhase}
+        canStop={showComposerStop}
+        stopDisabled={stopDisabled}
+        onStop={requestStop}
+        stopButtonRef={stopButtonRef}
         onRetryDraft={drafts.retrySave}
-        attempt={drafts.attempt}
-        recOutcome={recOutcome}
+        attempt={activeEditing ? null : drafts.attempt}
+        recOutcome={activeEditing ? null : recOutcome}
         onReleaseNotSent={releaseNotSent}
         onRetryClearVerified={retryClearVerified}
         onAdoptNewerDraft={adoptNewerDraft}
-        turnAdmission={turnAdmission}
+        turnAdmission={activeEditing ? null : turnAdmission}
         onRetryTurnAdmission={() => void retryTurnAdmission()}
         onInsertSlash={(cmd) => drafts.editText(cmd)}
-        onOpenSendRecord={openSendRecord}
+        onOpenSendRecord={activeEditing ? undefined : openSendRecord}
+        queuedItems={queuedStripItems}
+        queueBusy={queueBusy}
+        onRecallQueued={(item) => void recallQueuedItem(item, true)}
+        onRecallAllQueued={() => void recallAllQueued()}
+        onDiscardQueued={(item) => void recallQueuedItem(item, false)}
+        onSteerQueued={(item) => void steerQueuedItem(item)}
+        isEditingTurn={Boolean(activeEditing)}
+        onCancelEditTurn={() => {
+          setEditingTurn(null);
+          setSendError(null);
+          window.setTimeout(() => composerRef.current?.focus(), 0);
+        }}
       />
       </div>
 
@@ -4392,6 +4997,7 @@ export function BotChats({
             api={scopedApi}
             centerApi={api}
             bot={selectedBot}
+            knownBots={scopeKnownBots}
             readScope={readScopeFor(selectedBot.deviceId, selectedBot.botId)}
             deviceName={selectedDeviceName}
             devicePlatform={selectedDevicePlatform}

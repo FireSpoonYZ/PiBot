@@ -109,11 +109,60 @@ export interface PrimarySubmission {
   reason: string | null;
 }
 
+export type TurnDeliveryMode = 'followUp' | 'steer';
+
 export interface SubmissionInput {
   requestId: string;
   /** With attachments present this may be an empty/blank string; text-only submits still require non-empty text. */
   text: string;
   /** Ordered previously-uploaded image attachment IDs (lowercase hex SHA-256), at most 16. */
+  attachments?: string[];
+  /** Queue delivery mode when Bot is busy; defaults to 'followUp'. 'steer' injects at the active turn's postTools boundary. */
+  delivery?: TurnDeliveryMode;
+}
+
+export interface QueuedTurnItem {
+  requestId: string;
+  delivery: TurnDeliveryMode;
+  preview: string;
+  attachmentCount: number;
+}
+
+export interface WithdrawnTurnItem {
+  requestId: string;
+  delivery: TurnDeliveryMode;
+  text: string;
+  attachments?: string[];
+}
+
+export interface AbortBotResult {
+  botId: string;
+  withdrawn?: WithdrawnTurnItem[];
+}
+
+export interface WithdrawQueuedInput {
+  requestId?: string;
+}
+
+export interface WithdrawQueuedResult {
+  botId: string;
+  withdrawn: WithdrawnTurnItem[];
+}
+
+export interface SteerQueuedInput {
+  requestId: string;
+}
+
+export interface SteerQueuedResult {
+  botId: string;
+  requestId: string;
+  status: 'steered' | 'already_placed';
+}
+
+export interface EditMessageInput {
+  entryId: number;
+  requestId: string;
+  text: string;
   attachments?: string[];
 }
 
@@ -647,6 +696,8 @@ export interface OpenRuntimeOptions {
   onBotsChanged?: () => void | Promise<void>;
   /** Optional callback invoked on lightweight Bot metadata updates (primary, archive, profile, activity). */
   onBotsSync?: () => void | Promise<void>;
+  /** Optional idle settle delay (ms) before background automatic learning starts; defaults to 15000. */
+  learningIdleSettleMs?: number;
 }
 
 export interface Runtime {
@@ -675,7 +726,13 @@ export interface Runtime {
   /** /compact：跑一次手动压缩并等待任务终态；失败抛 COMPACTION_FAILED。 */
   compact(botId: string): Promise<CompactResult>;
   /** Stop this Bot's accepted primary, room and DM work, preserving history and cancellation receipts. */
-  abort(botId: string): Promise<void>;
+  abort(botId: string): Promise<AbortBotResult>;
+  /** Recall single (by requestId) or all unplaced user primary queued messages without stopping active work. */
+  withdrawQueued(botId: string, input?: WithdrawQueuedInput): Promise<WithdrawQueuedResult>;
+  /** Promote one unplaced user primary queued message to steer delivery. */
+  steerQueued(botId: string, input: SteerQueuedInput): Promise<SteerQueuedResult>;
+  /** Edit a historical primary user message when Bot is strictly idle, rewinding context before that entry and re-running. */
+  editMessage(botId: string, input: EditMessageInput): Promise<PrimarySubmission>;
   contextStatus(botId: string): Promise<ContextStatus>;
   getWorkContext(botId: string, scopeId: string): Promise<WorkContextRecord | null>;
   syncWorkContext(botId: string, scopeId: string, options?: WorkSyncOptions): Promise<WorkSyncResult>;
@@ -1050,10 +1107,37 @@ export interface BotLiveState {
   busy: boolean;
   /** pi.inbox items plus Host-side queued primary inputs (disjoint sets, never double counted). */
   queuedCount: number;
+  /** Bounded summaries of unplaced user primary queued inputs; optional — frames from older Hosts omit it. */
+  queuedItems?: QueuedTurnItem[];
   /** Next waiting admission; optional — frames from older Hosts omit it. Never present on work watches. */
   turnAdmission?: TurnAdmissionStatus | null;
   /** Unified work activity; optional — frames from older Hosts omit it. The single UI authority for working status. */
   activity?: BotActivity;
+  /** Idle background reflection / skill learning state; optional — omitted on work watches and older Hosts. */
+  learning?: BotLearningLiveState | null;
+}
+
+export interface BotLearningOutcomeSummary {
+  seq: number;
+  jobId: string;
+  mode: 'review' | 'learn' | 'curate';
+  status: 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  finishedAt: string;
+  updatedSkills: string[];
+  archivedSkills: string[];
+  memoryUpdated: boolean;
+  summary: string | null;
+}
+
+export interface BotLearningLiveState {
+  active: boolean;
+  jobId: string | null;
+  mode: 'review' | 'learn' | 'curate' | null;
+  automatic: boolean;
+  phase: 'idle' | 'reviewing' | 'writing';
+  toolName: string | null;
+  startedAt: string | null;
+  lastOutcome: BotLearningOutcomeSummary | null;
 }
 
 /** Whole-field replacement of selected BotLiveState fields; never append/delta. */
@@ -1204,7 +1288,10 @@ export interface ControlClient {
   getBotBoard(params: BotBoardParams, options?: ControlClientCallOptions): Promise<BotBoardSnapshot>;
   clearHistory(botId: string, options?: ControlClientCallOptions): Promise<ClearHistoryResult>;
   compact(botId: string, options?: ControlClientCallOptions): Promise<CompactResult>;
-  abort(botId: string, options?: ControlClientCallOptions): Promise<{ botId: string }>;
+  abort(botId: string, options?: ControlClientCallOptions): Promise<AbortBotResult>;
+  withdrawQueued(botId: string, input?: WithdrawQueuedInput, options?: ControlClientCallOptions): Promise<WithdrawQueuedResult>;
+  steerQueued(botId: string, input: SteerQueuedInput, options?: ControlClientCallOptions): Promise<SteerQueuedResult>;
+  editMessage(botId: string, input: EditMessageInput, options?: ControlClientCallOptions): Promise<PrimarySubmission>;
   contextStatus(botId: string, options?: ControlClientCallOptions): Promise<ContextStatus>;
   memoryStatus(botId: string, input?: MemoryStatusInput, options?: ControlClientCallOptions): Promise<MemoryStatus>;
   recallMemory(botId: string, input: MemoryQueryInput, options?: ControlClientCallOptions): Promise<MemoryRecallResult>;
@@ -1399,12 +1486,16 @@ export interface BotSkillInput {
   requestId?: string;
 }
 
-/** Review an unpublished learning change, then approve the exact revision that was read. */
+/** Manage and inspect Bot-learned skills, revision history, rollback, pin/lock, and lifecycle state. */
 export type BotSkillReviewInput =
-  | { action: 'list' }
-  | { action: 'read'; skillId: string }
-  | { action: 'read'; skillId: string; path: string; expectedRevision: number }
-  | { action: 'approve'; skillId: string; expectedRevision: number; requestId: string };
+  | { action: 'list'; includeArchived?: boolean }
+  | { action: 'read'; skillId: string; path?: string; expectedRevision?: number }
+  | { action: 'history'; skillId: string }
+  | { action: 'approve' | 'publish'; skillId: string; expectedRevision: number; requestId: string }
+  | { action: 'rollback'; skillId: string; revision: number; expectedRevision: number; requestId: string }
+  | { action: 'pin'; skillId: string; pinned: boolean; expectedRevision: number; requestId: string }
+  | { action: 'lock'; skillId: string; locked: boolean; expectedRevision: number; requestId: string }
+  | { action: 'archive' | 'restore'; skillId: string; expectedRevision: number; requestId: string };
 
 export type BotLearningAction = 'status' | 'configure' | 'learn' | 'review' | 'curate' | 'cancel';
 
@@ -2188,14 +2279,17 @@ export interface RemoteControlMethodMap {
   deleteBot: { params: { botId: string }; result: DeleteBotResult };
   getBot: { params: { botId: string }; result: BotRecord };
   findByRequest: { params: { requestId: string }; result: BotRecord };
-  submit: { params: { botId: string; requestId: string; text: string; attachments?: string[] }; result: PrimarySubmission };
+  submit: { params: { botId: string; requestId: string; text: string; attachments?: string[]; delivery?: TurnDeliveryMode }; result: PrimarySubmission };
   getSubmission: { params: { botId: string; requestId: string }; result: PrimarySubmission };
   history: { params: HistoryOptions & { botId: string }; result: HistoryPage };
   getBotBoard: { params: BotBoardParams; result: BotBoardSnapshot };
   reviewBotSkills: { params: { botId: string; input: BotSkillReviewInput }; result: Record<string, unknown> };
   clearHistory: { params: { botId: string }; result: ClearHistoryResult };
   compact: { params: { botId: string }; result: CompactResult };
-  abort: { params: { botId: string }; result: { botId: string } };
+  abort: { params: { botId: string }; result: AbortBotResult };
+  withdrawQueued: { params: { botId: string; requestId?: string }; result: WithdrawQueuedResult };
+  steerQueued: { params: { botId: string; requestId: string }; result: SteerQueuedResult };
+  editMessage: { params: { botId: string; entryId: number; requestId: string; text: string; attachments?: string[] }; result: PrimarySubmission };
   contextStatus: { params: { botId: string }; result: ContextStatus };
   /* Module 14 v2 additions; memory wire params are always {botId,input}. */
   getModelCatalog: { params: Record<string, never>; result: ModelCatalog };
@@ -2406,6 +2500,7 @@ export type PendingEnqueueInput =
       text: string;
       /** Ordered previously-uploaded image attachment IDs (lowercase hex SHA-256), at most 16. */
       attachments?: string[];
+      delivery?: TurnDeliveryMode;
     }
   | { kind: 'room'; targetDeviceId: string; scopeId: string; messageId: string; text: string; replyTo?: string | null };
 
@@ -2422,7 +2517,7 @@ export interface PendingRecordBase {
 }
 
 export type PendingRecord =
-  | (PendingRecordBase & { kind: 'primary'; botId: string; requestId: string; attachments?: string[] })
+  | (PendingRecordBase & { kind: 'primary'; botId: string; requestId: string; attachments?: string[]; delivery?: TurnDeliveryMode })
   | (PendingRecordBase & { kind: 'room'; scopeId: string; messageId: string; replyTo: string | null });
 
 export interface PendingCursor {
@@ -2444,7 +2539,7 @@ export interface PendingListPage {
 
 /** Fixed injected transport: four business operations only, never an arbitrary proxy. */
 export interface PendingCall {
-  (targetDeviceId: string, method: 'submit', params: { botId: string; requestId: string; text: string; attachments?: string[] }, options?: { signal?: AbortSignal }): Promise<PrimarySubmission>;
+  (targetDeviceId: string, method: 'submit', params: { botId: string; requestId: string; text: string; attachments?: string[]; delivery?: TurnDeliveryMode }, options?: { signal?: AbortSignal }): Promise<PrimarySubmission>;
   (targetDeviceId: string, method: 'getSubmission', params: { botId: string; requestId: string }, options?: { signal?: AbortSignal }): Promise<PrimarySubmission | null>;
   (targetDeviceId: string, method: 'publishUserMessage', params: { scopeId: string; input: UserMessageInput }, options?: { signal?: AbortSignal }): Promise<StoredMessage>;
   (targetDeviceId: string, method: 'getScopeMessage', params: { scopeId: string; messageId: string }, options?: { signal?: AbortSignal }): Promise<StoredMessage | null>;

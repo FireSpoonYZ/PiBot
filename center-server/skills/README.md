@@ -47,23 +47,18 @@ REVISION_CONFLICT, REQUEST_CONFLICT, INVALID_STATE, FORBIDDEN, PAYLOAD_TOO_LARGE
 
 ## review(identity, input)
 
-The client review flow uses the dedicated Bot-scoped `skill-reviews` endpoint.
+The client learned-skills panel uses the dedicated Bot-scoped `skill-reviews` endpoint.
 The device and Bot come from the authenticated route or Host call.
 
 | action | fields | result |
 |---|---|---|
-| list | — | `{items}` with the Bot's learning drafts awaiting approval |
-| read | `skillId` | Draft summary and `changes`, the list of added, removed, and modified files |
-| read | `skillId`, `path`, `expectedRevision` | Same summary with `file: {path, before, after}` for the selected change. A missing side is `null`. |
-| approve | `skillId`, `expectedRevision`, `requestId` | Publication receipt and, once published, the current target-device deployment status |
-
-Each summary includes the Skill's current revision, its published revision, and the
-latest learning source. The source can contain the mode, job ID, conversation ID and
-entry range. Existing unpublished review and curation revisions retain their known
-mode. A stale preview or approval returns `REVISION_CONFLICT`. If an explicitly
-approved publication is queued or activating, the client can resume with the same
-revision and request ID. An `enabled` publication confirms Center activation.
-The separate deployment status reflects what the target Host has applied.
+| list | `includeArchived?` | `{items}` with all managed skills of the Bot (`active`, `stale`, and optionally `archived`), revision/state tokens, visibility scope, and deployment status |
+| read | `skillId` | Managed skill summary, `files` list, `revisions` history, and `changes` |
+| read | `skillId`, `path`, `expectedRevision?` | Same summary with `file: {path, before, after}` |
+| approve / publish | `skillId`, `expectedRevision`, `requestId` | Publishes (or retries publication of) the current revision and returns deployment status |
+| rollback | `skillId`, `revision`, `expectedRevision`, `requestId` | Restores an earlier revision as the new head and auto-publishes if active |
+| pin / lock | `skillId`, `pinned`\|`locked`, `expectedRevision`, `requestId` | Updates protection flags with `stateRevision` CAS |
+| archive / restore | `skillId`, `expectedRevision`, `requestId` | Archives (disabling Bot binding) or restores (re-enabling Bot binding) the skill |
 
 ## learningTool(identity, name, args)
 
@@ -71,20 +66,34 @@ The learning adapter handles Python `skill.call` callbacks and the internal
 `action:'tool'` path. The caller supplies the job ID, write origin and available
 source metadata. A batch request ID is scoped to the job.
 
-- `skills_list` lists managed drafts and bound Skill packages.
+- `skills_list` lists managed skills and bound shared/external Skill packages.
 - `skill_view`, `read_file` and `search_files` read the Bot's Skill library and
   record which files were viewed during the job.
 - `skill_manage` accepts an atomic `operations` array, or a single operation
   using flat arguments. Supported operations are `create`, `edit`, `patch`,
-  `write_file` and `remove_file`. A successful write reports `draftSaved` and
-  `reviewRequired`. A failed operation rolls back the batch.
+  `write_file`, `remove_file`, and (for `curator` consolidation) `delete` with
+  `absorbed_into` (which archives the absorbed skill rather than destroying history).
+  Every successful write commits a revision and auto-publishes to the owner Bot
+  (`visibilityScope: 'private'` by default, `reviewRequired: false`). A failed
+  operation rolls back the batch.
 
 Tool results are JSON strings with the usual `success`, `_change` and batch
 result fields. The internal `skill_usage.*` and `skill_provenance.*` callbacks
-use plain JSON values. Learning can read lifecycle metadata and mark a Skill
-active or stale. Archival, restoration and deletion use the separate
-management path. Existing read-before-write and lock guards apply to review
-and curation.
+use plain JSON values (`mark_stale`, `mark_active`, `archive_skill`, `curated_report`).
+Shared skills (`visibilityScope` of `'assigned'` or `'global'`, or bound to multiple
+Bots) report `pinned: true` in `curated_report` and refuse single-Bot auto-archival
+and curator consolidation deletes.
+
+## Ownership, Visibility Scopes & Usage Rollup
+
+- Managed skills install with `ownerBot: { deviceId, botId, skillId, skillName }` and
+  default `visibilityScope: 'private'`.
+- Center owners can switch `visibilityScope` via `PATCH /api/installations/:id` between
+  `'private'` (owner Bot only), `'assigned'` (explicit per-Bot bindings), and `'global'`
+  (auto-enabled for all existing `revision === 0` Bots and newly created Bots).
+- `POST /api/host/devices/:deviceId/bots/:botId/skills/usage` (`reportUse`) resolves
+  `bot-skill-<skillId>` back to `installation.ownerBot` when invoked by another Bot,
+  crediting cross-Bot usage to the owner skill's `skill_usage` record.
 
 ## Exact vs adapted (flag for integrators)
 
@@ -102,23 +111,21 @@ and curation.
 
 ## Integration
 
-Learning commits revisions atomically. Each draft keeps its source with its revision.
-Approval compares the draft with the last published content and uses the existing
-artifact installation, activation and deployment pipeline. Ordinary management
-publication requires review when the unpublished revisions include a learning draft.
+Learning commits revisions atomically and auto-publishes active skills via the
+artifact installation, activation and deployment pipeline. Each revision retains
+its learning source metadata for inspection and rollback.
 
 Curator snapshots retain managed content and metadata in the Center database.
 Recover a snapshot into drafts with `snapshots` and `restore_snapshot`, or restore
-an individual content revision with `history` and `rollback`. Recovered learning
-drafts carry their source into review. Existing published versions, bindings and
-deployment plans stay in place during draft restoration.
+an individual content revision with `history` and `rollback`.
 
 ## Host usage observations
 
-`POST /api/host/devices/:deviceId/bots/:botId/skills/usage` is Host-only, requires the authenticated device to match, and calls `reportUse(identity,input)`. Fields: `requestId` (SHA-256 of stable Host/Bot/installation/version/conversation/task/call identity), `installationId, version, skillName, skillPath, path`. Center validates the enabled Bot binding, active skill installation/version, package skill directory and actual member file, then atomically bumps existing skill_usage and records the idempotent receipt in skill_requests. Managed installation IDs resolve back to managed directory names, even when frontmatter names differ. No telemetry action is advertised to the model.
+`POST /api/host/devices/:deviceId/bots/:botId/skills/usage` is Host-only, requires the authenticated device to match, and calls `reportUse(identity,input)`. Fields: `requestId` (SHA-256 of stable Host/Bot/installation/version/conversation/task/call identity), `installationId, version, skillName, skillPath, path`. Center validates the enabled Bot binding, active skill installation/version, package skill directory and actual member file, then atomically bumps existing skill_usage and records the idempotent receipt in skill_requests. Managed installation IDs resolve back to `installation.ownerBot` and managed directory names, even when frontmatter names differ. No telemetry action is advertised to the model.
 
 ## Curator schedule references
 
 `cron.jobs.referenced_skill_names()` reads the Bot's scheduled Skill references
-through the Host callback. Curation keeps the existing bindings and schedule
-references in place while proposed content awaits review.
+through the Host callback. Scheduled skills are protected from single-Bot archival;
+when consolidation absorbs a scheduled skill into a target skill, schedule
+references can be updated transactionally.

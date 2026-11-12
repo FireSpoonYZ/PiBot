@@ -270,8 +270,16 @@ export function bumpUseApply(record) {
   Object.assign(record, {
     use_count: uses + 1, last_used_at: nowIso(), patch_generation: gen,
     last_reused_patch_generation: reuseAfterPatch ? gen : lastReused,
+    ...(record.state === STATE_STALE ? { state: STATE_ACTIVE } : {}),
   });
   return { created_by: record.created_by, use_count: uses + 1, reused: uses > 0, reuse_after_patch: reuseAfterPatch };
+}
+
+export function bumpViewApply(record) {
+  record.view_count = nonNegativeInt(record.view_count) + 1;
+  record.last_viewed_at = nowIso();
+  if (record.state === STATE_STALE) record.state = STATE_ACTIVE;
+  return null;
 }
 
 export function bumpPatchApply(record) {

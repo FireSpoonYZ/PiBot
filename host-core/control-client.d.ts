@@ -8,6 +8,12 @@ import type {
   UpdateBotProfileInput,
   PrimarySubmission,
   SubmissionInput,
+  AbortBotResult,
+  WithdrawQueuedInput,
+  WithdrawQueuedResult,
+  SteerQueuedInput,
+  SteerQueuedResult,
+  EditMessageInput,
   AttachmentUploadInput,
   ImageAttachment,
   ImageAttachmentData,
@@ -137,7 +143,10 @@ export interface ControlClient {
   getBotBoard(params: BotBoardParams, options?: ControlClientCallOptions): Promise<BotBoardSnapshot>;
   clearHistory(botId: string, options?: ControlClientCallOptions): Promise<ClearHistoryResult>;
   compact(botId: string, options?: ControlClientCallOptions): Promise<CompactResult>;
-  abort(botId: string, options?: ControlClientCallOptions): Promise<{ botId: string }>;
+  abort(botId: string, options?: ControlClientCallOptions): Promise<AbortBotResult>;
+  withdrawQueued(botId: string, input?: WithdrawQueuedInput, options?: ControlClientCallOptions): Promise<WithdrawQueuedResult>;
+  steerQueued(botId: string, input: SteerQueuedInput, options?: ControlClientCallOptions): Promise<SteerQueuedResult>;
+  editMessage(botId: string, input: EditMessageInput, options?: ControlClientCallOptions): Promise<PrimarySubmission>;
   contextStatus(botId: string, options?: ControlClientCallOptions): Promise<ContextStatus>;
   getWorkContext(botId: string, scopeId: string, options?: ControlClientCallOptions): Promise<WorkContextRecord>;
   syncWorkContext(botId: string, scopeId: string, input?: WorkSyncOptions, options?: ControlClientCallOptions): Promise<WorkSyncResult>;

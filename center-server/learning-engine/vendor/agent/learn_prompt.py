@@ -7,12 +7,10 @@ so it works identically on local, Docker, and remote backends; every surface (CL
 
 from __future__ import annotations
 
-# Guidance for reusable Skill drafts.
+# House-style rules from AGENTS.md "Skill authoring standards (HARDLINE)".
 _AUTHORING_STANDARDS = """\
-Follow these Skill authoring guidelines:
-
-Save skill changes as drafts for the user to review. Report which draft you
-changed and the practical lesson it contains.
+Follow the PiBot skill-authoring standards exactly. These are the same
+HARDLINE rules a maintainer enforces in review:
 
 Frontmatter:
 - name: lowercase-hyphenated, <=64 chars, no spaces.
@@ -56,8 +54,9 @@ Body section order (omit a section only if it genuinely has no content):
 Tools and dependencies:
 - Refer to the actual tools used in the source workflow. Document the
   prerequisite and invocation for each tool or script the Skill needs.
-- Use the managed Skill tools for editing drafts. Use the authorized material
-  tools to read the supplied sources.
+- Use the managed Skill tools (skills_list, skill_view, skill_manage) to
+  create or update the Skill. Use the authorized material tools to read the
+  supplied sources.
 
 Quality bar:
 - Prefer exact commands, endpoint URLs, function signatures, and config keys

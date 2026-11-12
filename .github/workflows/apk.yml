@@ -67,15 +67,19 @@ jobs:
             host-core/package-lock.json
             center-server/package-lock.json
 
-      - uses: actions/cache@v6
+      - id: android-sdk-cache
+        uses: actions/cache@v6
         with:
           path: |
+            ${{ env.ANDROID_HOME }}/build-tools/36.0.0
             ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
             ${{ env.ANDROID_HOME }}/cmake/3.22.1
             ${{ env.ANDROID_HOME }}/platforms/android-36
-          key: android-36-ndk-28.2.13676358-cmake-3.22.1
+            ${{ env.ANDROID_HOME }}/licenses
+          key: android-36-bt-36.0.0-ndk-28.2.13676358-cmake-3.22.1
 
       - name: Install Android packages
+        if: steps.android-sdk-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           : "${ANDROID_HOME:?ANDROID_HOME is not set}"
@@ -101,6 +105,24 @@ jobs:
           rustup target add aarch64-linux-android x86_64-linux-android
           rustc --version
           cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mobile/src-tauri -> target
+          cache-on-failure: true
+
+      - name: Cache Node Mobile, ICU data and Android host native tools
+        uses: actions/cache@v6
+        with:
+          path: |
+            build/cache
+            app/build/generated/jniLibs/hostTools
+            app/build/host-native-tools/downloads
+            app/build/host-native-tools/licenses
+            app/build/host-native-tools/native-tools-manifest.json
+          key: android-tools-${{ runner.os }}-rust-1.99.1-ndk-28.2.13676358-${{ hashFiles('scripts/prepare-node-mobile.ps1', 'host-core/prepare-android-tools.js', 'host-core/build-android.js') }}
+          restore-keys: |
+            android-tools-${{ runner.os }}-rust-1.99.1-ndk-28.2.13676358-
 
       - name: Install web dependencies
         run: npm ci
