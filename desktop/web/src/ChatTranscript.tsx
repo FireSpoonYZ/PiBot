@@ -13,6 +13,7 @@ import {
   normalizeAttribution,
   type ChatTurn,
   type ChatToolCallItem,
+  type KnownBotSummary,
 } from '../../../web/src/chatTurnModel';
 import { isWebhookAttribution, MessageAttribution as MessageAttributionBadge } from '../../../web/src/MessageAttribution';
 import type { QuestionnaireSubmitPayload, VaultUnlockSubmitPayload } from '../../../web/src/ToolPresentation';
@@ -71,6 +72,7 @@ export interface ChatTranscriptProps {
   onLoadMore?: () => void;
   onRetry?: () => void;
   emptyActions?: ReactNode;
+  knownBots?: readonly KnownBotSummary[];
 }
 
 const asArray = <T,>(value: unknown): T[] => (Array.isArray(value) ? (value as T[]) : []);
@@ -108,6 +110,7 @@ export function ChatTranscript({
   onLoadMore,
   onRetry,
   emptyActions,
+  knownBots,
 }: ChatTranscriptProps) {
   const t = useText();
   const [linkError, setLinkError] = useState('');
@@ -141,10 +144,9 @@ export function ChatTranscript({
     return [...byId.values()].sort((a, b) => numericId(a) - numericId(b));
   }, [entries, live?.history]);
 
-  // dm/room 触发的生成是协作过程，不进普通聊天：generation.attribution 缺失但 tools
-  // 仍活跃时退回合并历史中最新执行来源（与 parser 内部同一判断）。
+  // 仅群聊（room）触发的生成隐藏在群聊页面内；1v1 Bot 私聊（dm）与用户主聊（primary）均在本对话页实时展示。
   const liveIsCollaborative =
-    isBusy && (liveAttribution?.channel ?? latestEntryChannel(mergedItems, bot.botId)) !== 'primary';
+    isBusy && (liveAttribution?.channel ?? latestEntryChannel(mergedItems, bot.botId)) === 'room';
   const displayGeneratingText = liveIsCollaborative ? '' : liveGeneratingText;
 
   const allTurns = useMemo<ChatTurn[]>(() =>
@@ -156,8 +158,9 @@ export function ChatTranscript({
       selfBotId: bot.botId,
       liveAttribution,
       trackAssistantTextEntries: true,
+      knownBots,
     }),
-  [mergedItems, live, isBusy, displayGeneratingText, liveAttribution, bot.botId]);
+  [mergedItems, live, isBusy, displayGeneratingText, liveAttribution, bot.botId, liveIsCollaborative, knownBots]);
 
   const activeLiveToolName = useMemo(() => {
     if (liveIsCollaborative) return null;
@@ -176,7 +179,14 @@ export function ChatTranscript({
     return allTurns.filter(
       (turn) =>
         turn.text.toLowerCase().includes(q) ||
-        Boolean(turn.tools?.some((tool) => tool.name.toLowerCase().includes(q))),
+        Boolean(
+          turn.tools?.some(
+            (tool) =>
+              tool.name.toLowerCase().includes(q) ||
+              (tool.argSummary && tool.argSummary.toLowerCase().includes(q)) ||
+              (tool.output && tool.output.toLowerCase().includes(q)),
+          ),
+        ),
     );
   }, [allTurns, search]);
 
@@ -338,7 +348,7 @@ export function ChatTranscript({
           return (
             <article
               key={turn.id}
-              className={`bot-chat-bubble ${isWebhookAttribution(turnAttr) ? 'assistant' : turn.role}${turn.isStreaming ? ' streaming' : ''}`}
+              className={`bot-chat-bubble ${isWebhookAttribution(turnAttr) ? 'assistant' : turn.role}${turn.role === 'user' && turnAttr?.kind === 'bot' ? ' is-peer' : ''}${turn.isStreaming ? ' streaming' : ''}`}
             >
               {turnAttr ? (
                 <MessageAttributionBadge attribution={turnAttr} />

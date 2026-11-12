@@ -87,6 +87,7 @@ import { botAvatarKey, syncBotAvatarConfigs } from '../../../web/src/botAvatarSy
 import { BotSettings, type BotSettingsTab } from './BotSettings';
 import { ShowerPreview } from './ShowerPreview';
 import { ChatTranscript } from './ChatTranscript';
+import type { KnownBotSummary } from '../../../web/src/chatTurnModel';
 import { BotAvatarStudio } from './BotAvatarStudio';
 import { targetApi } from './targetApi';
 import { readHistoryPage } from './history';
@@ -1230,6 +1231,7 @@ function PrimaryChatPane({
   transcriptVisible = true,
   centerInterrupted = false,
   pageActive = true,
+  knownBots,
 }: {
   api: DesktopPanelApi;
   /** 未按目标在线收窄的原 api：仅中心权威操作（cwd get/set）使用。 */
@@ -1255,6 +1257,7 @@ function PrimaryChatPane({
   transcriptVisible?: boolean;
   centerInterrupted?: boolean;
   pageActive?: boolean;
+  knownBots?: readonly KnownBotSummary[];
 }) {
   const t = useText();
   const identity = api.identity;
@@ -2499,6 +2502,7 @@ function PrimaryChatPane({
         entries={rawItems}
         live={live}
         bot={bot}
+        knownBots={knownBots}
         activity={transcriptActivity}
         awaitingAnswer={Boolean(awaitingAnswer)}
         avatarKey={botAvatarKey(bot)}
@@ -4459,6 +4463,7 @@ export function BotChats({
             api={scopedApi}
             centerApi={api}
             bot={selectedBot}
+            knownBots={scopeKnownBots}
             readScope={readScopeFor(selectedBot.deviceId, selectedBot.botId)}
             deviceName={selectedDeviceName}
             devicePlatform={selectedDevicePlatform}

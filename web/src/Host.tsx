@@ -3244,12 +3244,13 @@ ${newer}` : draftSnapshot;
     return sorted;
   }, [chatHistory, chatLive, activeBot, clearedMap, chatPending, chatReceipt]);
 
-  // generation.attribution 缺失但 tools 仍活跃时，用合并历史中最新执行来源判断当前是否协作工作。
+  // generation.attribution 缺失但 tools 仍活跃时，用合并历史中最新执行来源判断当前是否群聊后台工作；
+  // 1v1 Bot 私聊（dm）与用户主聊（primary）均在当前 Bot 的 1v1 对话页内实时流式展示。
   const chatLiveIsCollaborative = Boolean(
     isBotBusy &&
-      (liveGenerationAttr?.channel ?? latestEntryChannel(allChatItems, activeBot?.botId)) !== 'primary',
+      (liveGenerationAttr?.channel ?? latestEntryChannel(allChatItems, activeBot?.botId)) === 'room',
   );
-  // 协作工作的流式文本/工具名不渲染进普通聊天忙状态。
+  // 群聊工作的流式文本/工具名不渲染进 1v1 聊天忙状态。
   const displayLiveToolName = chatLiveIsCollaborative ? null : activeLiveToolName;
   const displayGeneratingText = chatLiveIsCollaborative ? '' : liveGeneratingText;
 
@@ -3259,16 +3260,16 @@ ${newer}` : draftSnapshot;
     return parseHistoryEntries(allChatItems, clearedAfter, {
       liveTools: recoveringChat ? undefined : array<Record<string, unknown>>(chatLive?.tools),
       isBusy: isBotBusy,
-      // 协作（dm/room）生成的流式文本不进普通聊天：隐藏轮由 parser 归轮过滤。
+      // 群聊（room）生成的流式文本不进 1v1 聊天：隐藏轮由 parser 归轮过滤。
       liveGeneratingText: displayGeneratingText,
-      // 与 displayGeneratingText 同一协作过滤口径：缺 attribution 的协作生成
-      // 块同样不渲染进普通聊天。
+      // 与 displayGeneratingText 同一过滤口径：缺 attribution 的群聊生成块同样不进 1v1 聊天。
       liveGeneratingBlocks: chatLiveIsCollaborative ? undefined : chatLive?.generation?.blocks,
       // 当前 Bot 为 self echo（outgoing）判定锚点；live 流式轮的 attribution 由生成帧携带。
       selfBotId: activeBot.botId,
       liveAttribution: liveGenerationAttr,
+      knownBots,
     });
-  }, [allChatItems, chatLive, activeBot, clearedMap, recoveringChat, isBotBusy, liveGeneratingText, liveGenerationAttr, chatLiveIsCollaborative]);
+  }, [allChatItems, chatLive, activeBot, clearedMap, recoveringChat, isBotBusy, liveGeneratingText, liveGenerationAttr, chatLiveIsCollaborative, knownBots]);
 
   const activeTurnStartedAt = useMemo(
     () => resolveActiveTurnStartedAt(botActivity),
@@ -4473,7 +4474,7 @@ ${newer}` : draftSnapshot;
                 return (
                   <article
                     key={turn.id}
-                    className={`bot-chat-bubble ${isWebhookAttribution(attribution) ? 'assistant' : turn.role}${turn.isStreaming ? ' streaming' : ''}`}
+                    className={`bot-chat-bubble ${isWebhookAttribution(attribution) ? 'assistant' : turn.role}${turn.role === 'user' && attribution?.kind === 'bot' ? ' is-peer' : ''}${turn.isStreaming ? ' streaming' : ''}`}
                   >
                     {attribution && (
                       <MessageAttribution

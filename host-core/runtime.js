@@ -363,6 +363,7 @@ export async function openRuntime(options) {
     models,
     defaultModel,
     context: CTX,
+    collaboration,
     // 工作决策的 stop/resume/advance 在同一 Bot 队列内执行；scope lane 在前，Bot lane 在后。
     admitBot: bots.admit,
     getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta),
@@ -413,6 +414,7 @@ export async function openRuntime(options) {
       getHarness: () => harness,
       getMessageLog: () => workContexts.getMessageLog(),
       publishWork: decisions.publishWork,
+      passWork: decisions.passWork,
       collaboration,
       sessions,
     }),

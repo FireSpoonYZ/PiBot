@@ -40,6 +40,7 @@ export function toFrozenTurn(turn) {
     ...(turn.responseMessageId !== undefined ? { responseMessageId: turn.responseMessageId } : {}),
     // 迟到回复恢复时的原始请求 messageId；与 codec 的 turn.originRequestId 同字段。
     ...(turn.originRequestId !== undefined ? { originRequestId: turn.originRequestId } : {}),
+    ...(typeof turn.nudgeCount === 'number' && turn.nudgeCount > 0 ? { nudgeCount: turn.nudgeCount } : {}),
     sender: turn.sender ?? null,
     replyTarget: turn.replyTarget ?? null,
     frozenAt: turn.frozenAt ?? new Date().toISOString(),

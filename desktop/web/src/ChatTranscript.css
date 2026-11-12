@@ -86,6 +86,15 @@
   padding: 10px 14px;
   white-space: pre-wrap;
 }
+.desktop-shell .desktop-transcript .bot-chat-bubble.user.is-peer {
+  --table-edge-bg: var(--surface);
+  align-self: flex-start;
+  max-width: min(82%, 680px);
+  background: color-mix(in srgb, var(--surface) 84%, var(--bg, transparent));
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+  border-radius: 16px 16px 16px 6px;
+}
 .desktop-shell .desktop-transcript .bot-chat-bubble.streaming {
   opacity: 0.96;
 }
