@@ -176,7 +176,7 @@ async function loadSource(
           if (!stillValid()) return;
           // 失败保留该 scope 此前预览/时间，避免列表项在时间轴上乱跳。
           if (prev) history.set(scopeId, prev);
-          if (firstError === null) firstError = errText(e);
+          if (firstError === null && !isPeerOfflineError(e)) firstError = errText(e);
         }
       }
     },

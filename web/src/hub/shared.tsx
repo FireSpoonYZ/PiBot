@@ -562,7 +562,7 @@ export function writeHasRemoteFlag(hasRemote: boolean): void {
   }
 }
 
-export type CachedRemoteBot = HostBot & { deviceName: string; platform?: string; description?: string };
+export type CachedRemoteBot = HostBot & { deviceName: string; platform?: string; description?: string; online?: boolean };
 
 /** 本机 bot 列表读取的 scope：connectionEpoch+activeCenter 组合，每次变化都换新对象（同值 A→B→A 也是新引用）。 */
 export interface LocalBotsScope { key: string; center: string }

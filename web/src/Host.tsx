@@ -159,7 +159,7 @@ import {
 import type { ImageAttachment } from '../../host-core/index.js';
 import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useText } from './ui';
 import { SendButtonIcon } from './SendButtonIcon';
-import { deleteBotAndVerify, isDefiniteSendFailure } from './botOperations';
+import { deleteBotAndVerify, formatActionableDirectoryError, isDefiniteSendFailure, isRemoteBotOnline } from './botOperations';
 
 import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending as SharedChatPending, ChatPendingEntry as SharedChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, copyTextToClipboard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
 // @lane-imports:settings
@@ -684,12 +684,14 @@ export function HostPage({
         const returnedKeys = new Set(directory.bots.map(b => `${b.deviceId}:${b.botId}`));
         const merged = [
           ...directory.bots,
-          ...previous.filter(bot => failed.has(bot.deviceId) && !returnedKeys.has(`${bot.deviceId}:${bot.botId}`)),
+          ...previous
+            .filter(bot => failed.has(bot.deviceId) && !returnedKeys.has(`${bot.deviceId}:${bot.botId}`))
+            .map(bot => ({ ...bot, online: false })),
         ];
         writeCachedRemoteBots(merged);
         return merged;
       });
-      setDirectoryError(directory.errors.map(error => `${error.deviceId}: ${error.message || error.code}`).join(' · '));
+      setDirectoryError(formatActionableDirectoryError(directory.errors, directory.devices));
     } catch (error) {
       if (generation === directoryGeneration.current) setDirectoryError(errorText(error));
     } finally {
@@ -758,7 +760,7 @@ export function HostPage({
     const allRemote: UnifiedBotItem[] = [...remoteByIdentity.values()].map(b => {
       const key = `remote:${activeProfileId}:${b.deviceId}:${b.botId}`;
       const matchedDevice = remoteDevices.find(device => device.deviceId === b.deviceId);
-      const isOnline = Boolean(remoteConnected && matchedDevice?.online);
+      const isOnline = isRemoteBotOnline({ remoteConnected, deviceOnline: matchedDevice?.online, botOnline: b.online });
       const shortHostName = matchedDevice?.displayName || b.deviceName || b.deviceId.slice(0, 10);
       return {
         key,
