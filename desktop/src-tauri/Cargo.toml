@@ -1,6 +1,6 @@
 [package]
 name = "pibot"
-version = "0.0.21-dev.2"
+version = "0.0.21-dev.3"
 edition = "2021"
 publish = false
 
