@@ -157,7 +157,7 @@ import {
   type PickedImageSource,
 } from './imageAttachments';
 import type { ImageAttachment } from '../../host-core/index.js';
-import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useText } from './ui';
+import { ErrorNotice, FloatingPillToast, array, errorText, isModelConfigError, record, useAction, useHideToolOutput, useText } from './ui';
 import { SendButtonIcon } from './SendButtonIcon';
 import { deleteBotAndVerify, formatActionableDirectoryError, isDefiniteSendFailure, isRemoteBotOnline } from './botOperations';
 
@@ -986,10 +986,13 @@ export function HostPage({
     loading: roomConversationsLoading,
     error: roomConversationsError,
     refresh: refreshRoomConversations,
+    markDeleted: markRoomConversationDeleted,
   } = useScopeConversations(scopeConversationSources, active && screen === 'hub', 'room');
   // 下拉刷新用最新 refresh：ref 免除把 hook 返回值塞进 triggerHubRefresh 依赖。
   const refreshRoomConversationsRef = useRef(refreshRoomConversations);
   refreshRoomConversationsRef.current = refreshRoomConversations;
+  const markRoomConversationDeletedRef = useRef(markRoomConversationDeleted);
+  markRoomConversationDeletedRef.current = markRoomConversationDeleted;
 
   // 置顶分区：按 activeCenter 或本机稳定账号标识（不含 generation）。
   const pinStorageScope = useMemo(() => {
@@ -2754,6 +2757,12 @@ ${newer}` : draftSnapshot;
         if ((latest.scope as { deletedAt?: string }).deletedAt) {
           unconfirmedRoomDeletesRef.current.delete(scopeId);
           chatPins.removePin(roomPinKey(scopeId));
+          markRoomConversationDeletedRef.current(scopeId);
+          if (scopeConversationTarget?.scope.scope.scopeId === scopeId) {
+            setRoomSettingsOpen(false);
+            setScopeConversationTarget(null);
+            setScreen('hub');
+          }
           setRoomDeleteModal(null);
           refreshRoomConversationsRef.current();
           return;
@@ -2781,6 +2790,20 @@ ${newer}` : draftSnapshot;
         });
       } catch (err) {
         if (roomDeleteFetchSeqRef.current !== fetchSeq) return;
+        const errCode = (err as { code?: string })?.code;
+        if (errCode === 'SCOPE_DELETED') {
+          unconfirmedRoomDeletesRef.current.delete(scopeId);
+          chatPins.removePin(roomPinKey(scopeId));
+          markRoomConversationDeletedRef.current(scopeId);
+          if (scopeConversationTarget?.scope.scope.scopeId === scopeId) {
+            setRoomSettingsOpen(false);
+            setScopeConversationTarget(null);
+            setScreen('hub');
+          }
+          setRoomDeleteModal(null);
+          refreshRoomConversationsRef.current();
+          return;
+        }
         setRoomDeleteModal({
           room,
           loadingLatest: false,
@@ -2791,7 +2814,7 @@ ${newer}` : draftSnapshot;
         });
       }
     },
-    [resolveRoomApi, chatPins, roomPinKey, knownBots, t],
+    [resolveRoomApi, chatPins, roomPinKey, knownBots, scopeConversationTarget, t],
   );
 
   const openRoomDeleteConfirm = useCallback(
@@ -2843,6 +2866,7 @@ ${newer}` : draftSnapshot;
           if ((check.scope as { deletedAt?: string }).deletedAt) {
             unconfirmedRoomDeletesRef.current.delete(attempt.scopeId);
             chatPins.removePin(roomPinKey(attempt.scopeId));
+            markRoomConversationDeletedRef.current(attempt.scopeId);
             if (scopeConversationTarget?.scope.scope.scopeId === attempt.scopeId) {
               setRoomSettingsOpen(false);
               setScopeConversationTarget(null);
@@ -2857,6 +2881,7 @@ ${newer}` : draftSnapshot;
           if (checkCode === 'NOT_FOUND' || checkCode === 'SCOPE_DELETED') {
             unconfirmedRoomDeletesRef.current.delete(attempt.scopeId);
             chatPins.removePin(roomPinKey(attempt.scopeId));
+            markRoomConversationDeletedRef.current(attempt.scopeId);
             if (scopeConversationTarget?.scope.scope.scopeId === attempt.scopeId) {
               setRoomSettingsOpen(false);
               setScopeConversationTarget(null);
@@ -2879,6 +2904,7 @@ ${newer}` : draftSnapshot;
       });
       unconfirmedRoomDeletesRef.current.delete(attempt.scopeId);
       chatPins.removePin(roomPinKey(attempt.scopeId));
+      markRoomConversationDeletedRef.current(attempt.scopeId);
       if (scopeConversationTarget?.scope.scope.scopeId === attempt.scopeId) {
         setRoomSettingsOpen(false);
         setScopeConversationTarget(null);
@@ -4283,8 +4309,9 @@ ${newer}` : draftSnapshot;
   const chatLoadIssue = Boolean(chatLoadError) && !(centerConn.status?.state === 'disconnected' && centerConn.status.error);
   const chatAdmissionActive = chatTurnAdmission?.phase === 'failed' && chatPending?.botKey === activeBot?.key &&
     (chatReceipt?.status === undefined || chatReceipt.status === 'queued');
+  const lastVisibleTurnHasError = Boolean(visibleTurns.length > 0 && visibleTurns[visibleTurns.length - 1]?.error);
   const chatStatusKind: 'fail' | 'admission' | 'conn' | 'load' | 'clear' | null =
-    failureNotice ? 'fail'
+    (failureNotice && !lastVisibleTurnHasError) ? 'fail'
       : chatAdmissionActive ? 'admission'
       : chatConnIssue ? 'conn'
       : chatLoadIssue ? 'load'
@@ -4986,11 +5013,9 @@ ${newer}` : draftSnapshot;
                     {turn.role === 'user' && turn.text && <Markdown text={turn.text} />}
                     <ErrorNotice
                       compact
-                      error={turn.error === 'model_error'
-                        ? t('模型生成失败，请重试或检查模型配置。', 'Model generation failed. Retry or check the model configuration.')
-                        : turn.error}
-                      actionLabel={t('模型设置', 'Model Settings')}
-                      onAction={() => openBotProfile(activeBot)}
+                      error={turn.error}
+                      actionLabel={isModelConfigError(turn.error) ? t('模型设置', 'Model Settings') : undefined}
+                      onAction={isModelConfigError(turn.error) ? () => openBotProfile(activeBot) : undefined}
                     />
                     {showTurnDuration && (
                       <div className="bot-chat-turn-meta" aria-label={formatTurnDuration(turn.durationMs!, t)}>
@@ -5073,8 +5098,8 @@ ${newer}` : draftSnapshot;
             {chatStatusKind === 'fail' && (
               <ErrorNotice
                 error={failureNotice}
-                actionLabel={t('检查配置', 'Check Settings')}
-                onAction={() => openBotProfile(activeBot)}
+                actionLabel={isModelConfigError(failureNotice) ? t('模型设置', 'Model Settings') : undefined}
+                onAction={isModelConfigError(failureNotice) ? () => openBotProfile(activeBot) : undefined}
               />
             )}
             {chatStatusKind === 'admission' && (
@@ -6924,6 +6949,7 @@ ${newer}` : draftSnapshot;
                       const deletedScopeId = scopeConversationTarget.scope.scope.scopeId;
                       unconfirmedRoomDeletesRef.current.delete(deletedScopeId);
                       chatPins.removePin(roomPinKey(deletedScopeId));
+                      markRoomConversationDeletedRef.current(deletedScopeId);
                       setRoomSettingsOpen(false);
                       setScopeConversationTarget(null);
                       setScreen('hub');
@@ -8552,6 +8578,7 @@ function HubSettingsView({
   const [credJson, setCredJson] = useState('');
   const [voice, setVoice] = useState<HostVoiceSettings>();
   const [showLocalConfig, setShowLocalConfig] = useState(false);
+  const [hideToolOutput, setHideToolOutput] = useHideToolOutput();
 
   useLayoutEffect(() => {
     const previous = previousPage.current;
@@ -9054,6 +9081,25 @@ function HubSettingsView({
               chevron={!updateSummary}
             />
             <Row icon={<Bell />} title={t('通知与后台运行', 'Alerts & background')} onClick={() => onOpenPage('permissions')} chevron />
+          </Section>
+
+          {/* 对话体验 */}
+          <Section title={t('对话体验', 'Chat')}>
+            <div className="hst-row-static">
+              <span className="bs-row-icon" aria-hidden="true"><Code2 size={17} /></span>
+              <span className="bs-row-text">
+                <span className="bs-row-title">{t('隐藏工具输出', 'Hide Tool Output')}</span>
+                <span className="bs-row-sub">{t('默认折叠工具调用过程与原始输出', 'Collapse tool calls and hide raw output by default')}</span>
+              </span>
+              <label className="grok-toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={hideToolOutput}
+                  onChange={e => setHideToolOutput(e.target.checked)}
+                />
+                <span className="grok-toggle-slider" />
+              </label>
+            </div>
           </Section>
 
           {/* 语音 */}

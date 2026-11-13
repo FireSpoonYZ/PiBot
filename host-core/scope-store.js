@@ -100,7 +100,11 @@ export function createScopeStore(db, { deviceId, transaction, queries, installSc
        JOIN message_scope_revisions r ON r.scope_id = d.scope_id AND r.revision = d.revision
        JOIN message_scopes s ON s.scope_id = d.scope_id
        JOIN message_scope_authorities a ON a.scope_id = d.scope_id
-       WHERE a.authority_device_id = ? AND d.state = 'pending'
+      WHERE a.authority_device_id = ? AND d.state = 'pending'
+        AND (r.deleted_at IS NOT NULL OR NOT EXISTS (
+          SELECT 1 FROM message_scope_revisions td
+           WHERE td.scope_id = d.scope_id AND td.deleted_at IS NOT NULL
+        ))
        ORDER BY d.scope_id ASC, d.revision ASC, d.target_device_id ASC
        LIMIT ?`
   );
@@ -111,8 +115,12 @@ export function createScopeStore(db, { deviceId, transaction, queries, installSc
        JOIN message_scope_revisions r ON r.scope_id = d.scope_id AND r.revision = d.revision
        JOIN message_scopes s ON s.scope_id = d.scope_id
        JOIN message_scope_authorities a ON a.scope_id = d.scope_id
-       WHERE a.authority_device_id = ? AND d.state = 'pending'
-         AND (d.scope_id > ? OR (d.scope_id = ? AND d.revision > ?) OR (d.scope_id = ? AND d.revision = ? AND d.target_device_id > ?))
+      WHERE a.authority_device_id = ? AND d.state = 'pending'
+        AND (r.deleted_at IS NOT NULL OR NOT EXISTS (
+          SELECT 1 FROM message_scope_revisions td
+           WHERE td.scope_id = d.scope_id AND td.deleted_at IS NOT NULL
+        ))
+        AND (d.scope_id > ? OR (d.scope_id = ? AND d.revision > ?) OR (d.scope_id = ? AND d.revision = ? AND d.target_device_id > ?))
        ORDER BY d.scope_id ASC, d.revision ASC, d.target_device_id ASC
        LIMIT ?`
   );

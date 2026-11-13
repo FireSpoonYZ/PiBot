@@ -18,6 +18,7 @@ import {
   resolveResponders,
 } from '../../host-core/group-chat.js';
 import { openHost } from '../../host-core/host.js';
+import { openMessageLog } from '../../host-core/messages.js';
 import { applyAgentProfile, getPrimaryConversation } from '../../host-core/runtime-docs.js';
 import { readPrimaryHistory } from '../../host-core/runtime-history.js';
 import { createBotSessionRuntime } from '../../host-core/runtime-bot-session.js';
@@ -1028,5 +1029,167 @@ test('end-to-end runtime: full user -> Bot A -> Bot B DM task with closing nudge
     await workContexts.close();
     await harness.close(context);
     host.close();
+  }
+});
+
+test('scope-offer tombstones & revisions: deleting member Bots before dissolving or updating a room does not trap zombie replicas', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'pibot-scope-tombstone-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const dirA = join(rootDir, 'host-a');
+  const dirB = join(rootDir, 'host-b');
+  const initA = openHost({ dataRoot: dirA });
+  const primaryBotA = initA.createBot({ requestId: 'a-primary', role: 'A主助手', modelRef: 'mock/mock-chat', makePrimary: true });
+  const secondBotA = initA.createBot({ requestId: 'a-second', role: 'A常驻成员', modelRef: 'mock/mock-chat' });
+  const tempBotA = initA.createBot({ requestId: 'a-temp', role: 'A临时成员', modelRef: 'mock/mock-chat' });
+  const deviceA = initA.deviceId;
+  initA.close();
+
+  const initB = openHost({ dataRoot: dirB });
+  initB.createBot({ requestId: 'b-primary', role: 'B主助手', modelRef: 'mock/mock-chat', makePrimary: true });
+  const tempBotB = initB.createBot({ requestId: 'b-temp', role: 'B临时成员', modelRef: 'mock/mock-chat' });
+  const deviceB = initB.deviceId;
+  initB.close();
+
+  // 1) Create room on Host A, replicate rev=1 to Host B, publish a message, then delete both member Bots BEFORE deleteScope.
+  let logA = openMessageLog({ dataRoot: dirA });
+  let logB = openMessageLog({ dataRoot: dirB });
+  let room1Id = '';
+  try {
+    const created = logA.createScope({
+      requestId: 'req-create-zombie-room',
+      kind: 'room',
+      members: [
+        { deviceId: deviceA, botId: tempBotA.botId },
+        { deviceId: deviceB, botId: tempBotB.botId },
+      ],
+    });
+    room1Id = created.scope.scopeId;
+    const offer1 = logA.scopeOffers().items.find((o) => o.record.scope.scopeId === room1Id);
+    assert.ok(offer1, 'Host A queues rev=1 offer for Host B');
+    const ack1 = logB.acceptScopeOffer({ deviceId: deviceA }, offer1.record);
+    logA.acknowledgeScope({ deviceId: deviceB }, ack1);
+
+    const published = logA.publish({
+      messageId: 'msg-before-bot-delete',
+      scopeId: room1Id,
+      author: { kind: 'user' },
+      category: 'public',
+      text: 'hello room',
+    });
+    logB.receive({ deviceId: deviceA }, published.message);
+    assert.equal(logB.history(room1Id, { limit: 10 }).items.length, 1);
+  } finally {
+    logA.close();
+    logB.close();
+  }
+
+  // Delete the participating member Bots on both hosts while the room still exists.
+  const mutA = openHost({ dataRoot: dirA });
+  mutA.deleteBot(tempBotA.botId);
+  mutA.close();
+
+  const mutB = openHost({ dataRoot: dirB });
+  mutB.deleteBot(tempBotB.botId);
+  mutB.close();
+
+  logA = openMessageLog({ dataRoot: dirA });
+  logB = openMessageLog({ dataRoot: dirB });
+  try {
+    // Updating title on an already-installed room whose local Bot was deleted succeeds,
+    // while adding a brand-new nonexistent local Bot on Host B still rejects with BOT_NOT_FOUND.
+    const renamed = logA.updateScope(room1Id, {
+      requestId: 'req-rename-after-bot-delete',
+      expectedRevision: 1,
+      title: '改名后待解散',
+    });
+    assert.equal(renamed.scope.revision, 2);
+    const renameOffer = logA.scopeOffers().items.find(
+      (o) => o.record.scope.scopeId === room1Id && o.record.scope.revision === 2,
+    );
+    const renameAck = logB.acceptScopeOffer({ deviceId: deviceA }, renameOffer.record);
+    logA.acknowledgeScope({ deviceId: deviceB }, renameAck);
+    assert.equal(logB.getScopeState(room1Id).scope.title, '改名后待解散');
+
+    assert.throws(
+      () =>
+        logB.acceptScopeOffer(
+          { deviceId: deviceA },
+          {
+            authorityDeviceId: deviceA,
+            scope: {
+              scopeId: 'brand-new-invalid-room',
+              kind: 'room',
+              revision: 1,
+              members: [
+                { deviceId: deviceA, botId: 'any-remote-bot' },
+                { deviceId: deviceB, botId: 'nonexistent-local-bot' },
+              ],
+            },
+          },
+        ),
+      (err) => err?.code === 'BOT_NOT_FOUND',
+    );
+
+    // Dissolving the room on Host A produces a deletedAt tombstone that Host B accepts despite tempBotB being deleted.
+    const dissolved = logA.deleteScope(room1Id, {
+      requestId: 'req-dissolve-after-bot-delete',
+      expectedRevision: 2,
+    });
+    assert.ok(dissolved.scope.deletedAt, 'authority records deletedAt tombstone');
+
+    const tombstoneOffer = logA.scopeOffers().items.find(
+      (o) => o.record.scope.scopeId === room1Id && o.record.scope.revision === 3,
+    );
+    assert.ok(tombstoneOffer, 'authority offers tombstone revision');
+
+    const tombstoneAck = logB.acceptScopeOffer({ deviceId: deviceA }, tombstoneOffer.record);
+    logA.acknowledgeScope({ deviceId: deviceB }, tombstoneAck);
+
+    assert.equal(
+      logB.listScopeStates().items.some((s) => s.scope.scopeId === room1Id),
+      false,
+      'Host B removes dissolved room from active listScopeStates',
+    );
+    assert.equal(logB.history(room1Id, { limit: 10 }).items.length, 0, 'Host B purges room message ledger on tombstone');
+    assert.equal(logA.getScopeState(room1Id).delivery?.fullyAcknowledged, true, 'Host A delivery settles as fully acked');
+
+    // 2) Head-of-line blocking guard: if rev=1 targeted a deleted Bot on Host B (never installed on B),
+    // and rev=2 removed Host B before rev=3 dissolved the room while Host B was offline,
+    // scopeOffers() skips obsolete pre-delete pending offers and delivers ONLY the terminal tombstone.
+    const orphanCreated = logA.createScope({
+      requestId: 'req-create-stale-target-room',
+      kind: 'room',
+      members: [
+        { deviceId: deviceA, botId: primaryBotA.botId },
+        { deviceId: deviceB, botId: tempBotB.botId },
+      ],
+    });
+    const room2Id = orphanCreated.scope.scopeId;
+    logA.updateScope(room2Id, {
+      requestId: 'req-remove-b-before-delete',
+      expectedRevision: 1,
+      members: [
+        { deviceId: deviceA, botId: primaryBotA.botId },
+        { deviceId: deviceA, botId: secondBotA.botId },
+      ],
+    });
+    logA.deleteScope(room2Id, {
+      requestId: 'req-delete-room2',
+      expectedRevision: 2,
+    });
+
+    const room2Offers = logA.scopeOffers().items.filter((o) => o.record.scope.scopeId === room2Id);
+    assert.equal(room2Offers.length, 1, 'only the terminal tombstone offer remains active in scopeOffers');
+    assert.equal(room2Offers[0].record.scope.revision, 3);
+    assert.ok(room2Offers[0].record.scope.deletedAt);
+
+    const room2Ack = logB.acceptScopeOffer({ deviceId: deviceA }, room2Offers[0].record);
+    logA.acknowledgeScope({ deviceId: deviceB }, room2Ack);
+    assert.equal(logA.scopeOffers().items.filter((o) => o.record.scope.scopeId === room2Id).length, 0);
+    assert.equal(logB.listScopeStates().items.some((s) => s.scope.scopeId === room2Id), false);
+  } finally {
+    logA.close();
+    logB.close();
   }
 });

@@ -13,12 +13,11 @@ import {
   formatTurnDuration,
   normalizeAttribution,
   type ChatTurn,
-  type ChatToolCallItem,
   type KnownBotSummary,
 } from '../../../web/src/chatTurnModel';
 import { isWebhookAttribution, MessageAttribution as MessageAttributionBadge } from '../../../web/src/MessageAttribution';
 import type { QuestionnaireSubmitPayload, VaultUnlockSubmitPayload } from '../../../web/src/ToolPresentation';
-import { ToolCallCard } from '../../../web/src/ToolCallCard';
+import { TurnToolCallsSection } from '../../../web/src/hub/shared';
 import {
   GrokBotAvatar,
   GrokBotWorkingSlot,
@@ -209,36 +208,19 @@ export function ChatTranscript({
   const workingSlotStartedAt = resolveActiveActivityStartedAt(activity);
 
   // 持久失败可见化：Host 的 failed 终态持续显示（区别于用户主动停止），
-  // 优先 activity.error（执行失败有界诊断），回落 live.turnAdmission.error（受理失败）。
+  // 气泡已渲染 turn.error 或输入框上方已渲染 turnAdmission.phase === 'failed' 时不再重复堆叠。
   const phaseFailed = activity?.phase === 'failed';
   const activityError = activity?.error?.message || activity?.error?.code || null;
   const admissionError = useMemo(() => {
     const adm = live?.turnAdmission;
     if (!adm || adm.phase !== 'failed') return null;
     const msg = adm.error?.message || adm.error?.code || '';
-    return msg ? String(msg) : null;
+    return msg ? String(msg) : 'admission_failed';
   }, [live?.turnAdmission]);
-  const failureNotice = phaseFailed
-    ? (activityError ?? admissionError)
-      ? t('本次执行失败：', 'This run failed: ') + (activityError ?? admissionError)
-      : t('本次执行失败，请重试或检查配置。', 'This run failed. Retry or check the configuration.')
-    : null;
-
-  // 工具芯片/卡片的单工具渲染：有序块与回退 tools 列表共用同一 JSX，
-  // 保证 live→历史 与块内/块外渲染一致。
-  const renderToolChip = (tool: ChatToolCallItem) => (
-    <ToolCallCard
-      key={tool.id}
-      tool={tool}
-      scopeKey={scopeKey ?? `${botKey}:${bot.primaryConversationId}`}
-      active={isBusy && !archived}
-      disabled={disabled || archived}
-      variant="desktop"
-      requesterName={bot.role}
-      onSubmitQuestionnaire={onSubmitQuestionnaire}
-      onSubmitVaultUnlock={onSubmitVaultUnlock}
-    />
-  );
+  const failureNotice =
+    phaseFailed && !lastTurn?.error && !admissionError
+      ? activityError || t('本轮回复未能完成，请直接重试。', 'Reply could not complete. Please retry.')
+      : null;
 
   // 仅当用户停留在底部附近时跟随新流；向上翻阅历史不打断滚动位置。
   const scrollRef = useRef<HTMLElement | null>(null);
@@ -397,9 +379,18 @@ export function ChatTranscript({
                         <pre>{block.text}</pre>
                       </details>
                     ) : block.kind === 'tools' ? (
-                      <div key={block.id} className="bot-chat-tools" role="list" aria-label={t('工具调用', 'Tool calls')}>
-                        {block.tools.map((tool) => renderToolChip(tool))}
-                      </div>
+                      <TurnToolCallsSection
+                        key={block.id}
+                        tools={block.tools}
+                        scopeKey={scopeKey ?? `${botKey}:${bot.primaryConversationId}`}
+                        active={isBusy && !archived}
+                        disabled={disabled || archived}
+                        variant="desktop"
+                        requesterName={bot.role}
+                        onSubmitQuestionnaire={onSubmitQuestionnaire}
+                        onSubmitVaultUnlock={onSubmitVaultUnlock}
+                        t={t}
+                      />
                     ) : (
                       <div key={block.id} data-assistant-entry-id={block.entryId}>
                         <Markdown text={block.text} onOpenLink={openLink} />
@@ -414,22 +405,23 @@ export function ChatTranscript({
                 </details>
               ) : null}
               {!turn.blocks && turn.tools && turn.tools.length > 0 ? (
-                <div className="bot-chat-tools" role="list" aria-label={t('工具调用', 'Tool calls')}>
-                  {turn.tools.map((tool) => renderToolChip(tool))}
-                </div>
+                <TurnToolCallsSection
+                  tools={turn.tools}
+                  scopeKey={scopeKey ?? `${botKey}:${bot.primaryConversationId}`}
+                  active={isBusy && !archived}
+                  disabled={disabled || archived}
+                  variant="desktop"
+                  requesterName={bot.role}
+                  onSubmitQuestionnaire={onSubmitQuestionnaire}
+                  onSubmitVaultUnlock={onSubmitVaultUnlock}
+                  t={t}
+                />
               ) : null}
               {turn.role === 'user' && turn.attachments && turn.attachments.length > 0 ? (
                 <SentAttachments attachments={turn.attachments} fetcher={attachmentFetcher} />
               ) : null}
               {!turn.blocks && turn.text ? <Markdown text={turn.text} onOpenLink={openLink} /> : null}
-              <ErrorNotice
-                compact
-                error={
-                  turn.error === 'model_error'
-                    ? t('模型生成失败，请重试或检查模型配置。', 'Model generation failed. Retry or check the model configuration.')
-                    : turn.error
-                }
-              />
+              <ErrorNotice compact error={turn.error} />
               {showTurnDuration ? (
                 <div className="bot-chat-turn-meta" aria-label={formatTurnDuration(turn.durationMs!, t)}>
                   <svg className="bot-chat-turn-clock" viewBox="0 0 16 16" fill="none" aria-hidden="true">

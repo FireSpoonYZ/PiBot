@@ -172,8 +172,20 @@ export function openMessageLog(options) {
   const acceptScopeOffer = (peer, record) => {
     const p = normalizePeer(peer);
     const rec = normalizeScopeRecord(record);
-    for (const member of rec.scope.members) {
-      if (member.deviceId === deviceId) assertLocalBot(member.botId);
+    if (rec.scope.deletedAt === undefined) {
+      // 删除墓碑（deletedAt）不校验本机成员是否仍存在，确保先删成员 Bot 后解散群聊的墓碑仍能落库清理；
+      // 非墓碑修订仅校验全新安装或本次新加入本机的成员，允许含已删本机成员的既有群继续同步后续修订。
+      const existing = store.getScope(rec.scope.scopeId);
+      const priorLocalBots = new Set(
+        (existing?.members ?? [])
+          .filter((member) => member.deviceId === deviceId)
+          .map((member) => member.botId)
+      );
+      for (const member of rec.scope.members) {
+        if (member.deviceId === deviceId && !priorLocalBots.has(member.botId)) {
+          assertLocalBot(member.botId);
+        }
+      }
     }
     return store.acceptScopeOffer(p, rec);
   };
