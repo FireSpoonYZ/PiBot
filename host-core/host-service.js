@@ -83,6 +83,7 @@ export async function openHostService(options) {
   };
   const isOffline = (err) => err?.code === 'CENTER_OFFLINE' || err?.code === 'UNAUTHORIZED' || err?.code === 'CONTROL_UNAUTHORIZED';
   let lastReported = null;
+  let lastApplyingRevision = null;
   /** 相同回执不重复上报（30 秒核对握手时保持安静），内容变化才发。 */
   async function reportRuntime(current, receipt) {
     const body = { deviceId, ...receipt };
@@ -108,6 +109,7 @@ export async function openHostService(options) {
     clearTimeout(retryTimer);
     retryTimer = null;
     lastReported = null;
+    lastApplyingRevision = null;
     state = { ...state, state: 'disconnected', appliedRevision: null, error: { code: 'CENTER_OFFLINE', message: 'center disconnected' } };
     if (control) void control.setCenterOnline(false).catch(() => {});
     if (!closed) scheduleReconnect();
@@ -229,7 +231,8 @@ export async function openHostService(options) {
     await ensureLinkOnline(snapshot.linkUrl);
     if (gen !== generation || current !== client) throw offlineError();
     const previousRevision = state.appliedRevision;
-    if (previousRevision !== snapshot.revision) {
+    if (previousRevision !== snapshot.revision && lastApplyingRevision !== snapshot.revision) {
+      lastApplyingRevision = snapshot.revision;
       // 进度心跳；中心可忽略，失败不影响应用。
       await reportRuntime(current, { revision: snapshot.revision, status: 'applying',
         appliedRevision: previousRevision, error: null, bots: [], capabilityErrors: [] }).catch(() => {});

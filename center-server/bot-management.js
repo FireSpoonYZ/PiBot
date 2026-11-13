@@ -11,8 +11,26 @@
 import { createHash, randomUUID } from 'node:crypto';
 import Ajv from 'ajv';
 
-const ajv = new Ajv({ strict: false });
-ajv.addFormat('credential-ref', { type: 'string', validate: value => value.length > 0 });
+function createManagementAjv() {
+  const instance = new Ajv({ strict: false });
+  instance.addFormat('credential-ref', { type: 'string', validate: value => value.length > 0 });
+  return instance;
+}
+let ajv = createManagementAjv();
+const validatorCache = new Map();
+function checkSchema(schema, value) {
+  const cacheKey = JSON.stringify(schema);
+  let validator = validatorCache.get(cacheKey);
+  if (!validator) {
+    if (validatorCache.size >= 512) {
+      validatorCache.clear();
+      ajv = createManagementAjv();
+    }
+    validator = ajv.compile(schema);
+    validatorCache.set(cacheKey, validator);
+  }
+  return Boolean(validator(value));
+}
 const metadata = ({ installationId, packageId, displayName, kind, target, targetVersion, enabled }) =>
   ({ installationId, packageId, displayName, kind, target, targetVersion, enabled });
 const SETUP_GUIDANCE = 'Configure secrets only in Center Credentials / the capability configuration UI, then select credential references. Never request secret values in chat or questionnaires. Save the Bot binding, wait for deployment/configuration receipts, then explicitly probe (may incur provider charges).';
@@ -139,7 +157,7 @@ export function openBotManagement({ store, packages, notify }) {
         const global = store.getInstallationConfig(installationId);
         const botConfig = store.getBotCapability(deviceId, botId, installationId);
         const credentials = credentialStatus(store, global.configSchema, botConfig.effectiveConfig);
-        const schemaValid = ajv.validate(global.configSchema, botConfig.effectiveConfig);
+        const schemaValid = checkSchema(global.configSchema, botConfig.effectiveConfig);
         const configured = schemaValid && credentials.every(ref => ref.credentialRef === null || ref.configured);
         const deploymentDevice = current.target === 'center' ? null : deviceId;
         const plan = store.listDeploymentPlans(deploymentDevice).find(item => item.installationId === installationId);

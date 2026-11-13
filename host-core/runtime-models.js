@@ -273,6 +273,8 @@ export async function loadRuntimeConfig(file) {
   return parseRuntimeConfig(readInputObject(file));
 }
 
+const RUNTIME_MODEL_FIELDS = new Set(['id', 'name', 'api', 'baseUrl', 'headers', 'reasoning', 'contextWindow', 'maxTokens', 'input', 'cost', 'compat', 'thinkingLevelMap', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel']);
+
 function validateProviders(providers) {
   if (!Array.isArray(providers)) throw invalidArgument('runtime config: providers must be an array');
   const seenProviders = new Set();
@@ -316,7 +318,7 @@ function validateProviders(providers) {
       if (!isPlainObject(m)) {
         throw invalidArgument(`runtime config: each model of provider "${id}" must be an object`);
       }
-      rejectUnknownFields(m, new Set(['id', 'name', 'api', 'baseUrl', 'headers', 'reasoning', 'contextWindow', 'maxTokens', 'input', 'cost', 'compat', 'thinkingLevelMap', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel']), 'runtime config model');
+      rejectUnknownFields(m, RUNTIME_MODEL_FIELDS, 'runtime config model');
       const modelId = m.id;
       if (typeof modelId !== 'string' || modelId.trim() === '' || !modelId.isWellFormed()) {
         throw invalidArgument('runtime config: model id must be a non-empty well-formed string');
@@ -473,7 +475,7 @@ export function applyCenterModels(snapshot, existingModels, authResolver) {
     authMode: provider.authMode,
     ...(provider.headers === undefined ? {} : { headers: provider.headers }),
     models: (snapshot.models[provider.id] ?? []).filter((model) => model.enabled).map(
-      ({ enabled, revision, ...model }) => model
+      (model) => Object.fromEntries(Object.entries(model).filter(([key]) => RUNTIME_MODEL_FIELDS.has(key)))
     ),
   }));
   const normalized = validateProviders(providers);
