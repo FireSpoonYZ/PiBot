@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { openStore } from '../../host-core/store.js';
 import { collectBotDirectory } from '../../host-core/bot-directory.js';
 import { openCenterStore } from '../../center-server/data/index.js';
+import { formatActionableDirectoryError, isRemoteBotOnline } from '../src/botOperations.ts';
 
 test('host-core store v5 rejects legacy v4 database with UNSUPPORTED_SCHEMA and preserves existing host data', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'el-host-v5-test-'));
@@ -321,4 +322,44 @@ test('collectBotDirectory orders primary bots first, then by lastActivityAt ?? c
   );
   assert.equal(result.bots[0].isPrimary, true);
   assert.equal(result.bots[1].lastPreview, 'Fresh reply');
+});
+
+test('formatActionableDirectoryError suppresses peer offline/control-unavailable errors and names actionable peers', () => {
+  const devices = [
+    { deviceId: '384b8ea7-b7f5-4833-b6a7-9fe3c8f75005', displayName: 'Windows', online: true },
+    { deviceId: '5630ba0c-0048-479f-8c22-649e71fc8a24', displayName: 'maco', online: true },
+    { deviceId: 'c27deb86-5123-4f9c-8457-85f5b9759c77', displayName: 'Linux', online: true },
+  ];
+
+  assert.equal(
+    formatActionableDirectoryError(
+      [
+        { deviceId: '384b8ea7-b7f5-4833-b6a7-9fe3c8f75005', code: 'CONTROL_UNAVAILABLE', message: 'Target host unavailable' },
+        { deviceId: '5630ba0c-0048-479f-8c22-649e71fc8a24', code: 'OFFLINE', message: 'Remote target unavailable' },
+        { deviceId: 'c27deb86-5123-4f9c-8457-85f5b9759c77', code: 'DISCONNECTED' },
+      ],
+      devices,
+    ),
+    '',
+  );
+
+  assert.equal(
+    formatActionableDirectoryError(
+      [
+        { deviceId: '5630ba0c-0048-479f-8c22-649e71fc8a24', code: 'CONTROL_UNAVAILABLE', message: 'Target host unavailable' },
+        { deviceId: '384b8ea7-b7f5-4833-b6a7-9fe3c8f75005', code: 'TIMEOUT', message: 'call timed out' },
+      ],
+      devices,
+    ),
+    'Windows: TIMEOUT: call timed out',
+  );
+});
+
+test('isRemoteBotOnline requires both relay device online and bot online !== false', () => {
+  assert.equal(isRemoteBotOnline({ remoteConnected: true, deviceOnline: true, botOnline: true }), true);
+  assert.equal(isRemoteBotOnline({ remoteConnected: true, deviceOnline: true, botOnline: undefined }), true);
+  // Relay link open (deviceOnline=true) while Host control failed (botOnline=false) must show offline
+  assert.equal(isRemoteBotOnline({ remoteConnected: true, deviceOnline: true, botOnline: false }), false);
+  assert.equal(isRemoteBotOnline({ remoteConnected: false, deviceOnline: true, botOnline: true }), false);
+  assert.equal(isRemoteBotOnline({ remoteConnected: true, deviceOnline: false, botOnline: true }), false);
 });
