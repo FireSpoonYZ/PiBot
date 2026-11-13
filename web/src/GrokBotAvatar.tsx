@@ -786,7 +786,7 @@ export function GrokBotWorkingSlot({
                 {t('查看', 'View')}
               </button>
             ) : null}
-            {(isBusy || Boolean(settlementOutcome) || Boolean(settledActivity)) && (
+            {(isBusy || ((Boolean(settlementOutcome) || Boolean(settledActivity)) && elapsedSec > 0)) && (
               <span className="sand-activity-elapsed">{formatWorkingElapsed(elapsedSec)}</span>
             )}
           </span>

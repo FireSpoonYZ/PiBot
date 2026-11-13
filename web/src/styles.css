@@ -397,7 +397,7 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 @keyframes grok-page-in { from { opacity: 0; transform: translate3d(18px, 0, 0) scale(.992); } to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); } }
 @keyframes grok-pop-in { from { opacity: 0; transform: scale(.88) translateY(-6px); } to { opacity: 1; transform: scale(1) translateY(0); } }
 @keyframes grok-pop-up { from { opacity: 0; transform: scale(.92) translateY(8px); } to { opacity: 1; transform: scale(1) translateY(0); } }
-.grok-page-enter { animation: grok-page-in 260ms cubic-bezier(.22, 1, .36, 1) both; }
+.grok-page-enter { animation: none; }
 .bot-hub-shell { height: 100%; width: 100%; max-width: 680px; margin-inline: auto; display: flex; flex-direction: column; position: relative; overflow: hidden; background: var(--bg); color: var(--text); }
 .bot-hub-shell.is-fullscreen-computer { max-width: none; background: #000; }
 .hub-main, .bot-chat-view, .grok-subpage { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; overflow: hidden; height: 100%; background: var(--bg); transition: transform 320ms cubic-bezier(.22, 1, .36, 1), border-radius 320ms cubic-bezier(.22, 1, .36, 1), filter 320ms ease; }
@@ -513,7 +513,7 @@ small, .secondary { font-size: .85rem; color: var(--muted); }
 .bot-chat-empty-avatar-btn { padding: 6px; border-radius: 28px; filter: drop-shadow(0 8px 18px rgb(0 0 0 / .1)); }
 .bot-chat-empty h2 { margin: 6px 0 0; font-size: 1.15rem; color: var(--text); }
 .bot-chat-empty p { margin: 0; font-size: .88rem; line-height: 1.5; }
-.bot-chat-bubble { max-width: 86%; padding: 12px 16px; border-radius: 20px; line-height: 1.55; font-size: .95rem; overflow-wrap: anywhere; animation: grok-pop-up 200ms cubic-bezier(.22, 1, .36, 1) both; }
+.bot-chat-bubble { max-width: 86%; padding: 12px 16px; border-radius: 20px; line-height: 1.55; font-size: .95rem; overflow-wrap: anywhere; }
 .bot-chat-bubble:has(.table-scroll) { max-width: 96%; }
 .bot-chat-bubble.user { --table-edge-bg: var(--brand, #2B70F6); align-self: flex-end; background: #2B70F6; color: #fff; border-bottom-right-radius: 6px; }
 .bot-chat-bubble.user .attachments { min-width: min(68vw,360px); }

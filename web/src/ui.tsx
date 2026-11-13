@@ -733,6 +733,8 @@ export interface ErrorNoticeProps {
   detail?: string;
   actionLabel?: string;
   onAction?: () => void;
+  secondaryActionLabel?: string;
+  onSecondaryAction?: () => void;
   onDismiss?: () => void;
   compact?: boolean;
   darkGlass?: boolean;
@@ -746,6 +748,8 @@ export function ErrorNotice({
   detail: detailOverride,
   actionLabel,
   onAction,
+  secondaryActionLabel,
+  onSecondaryAction,
   onDismiss,
   compact = false,
   darkGlass = false,
@@ -797,11 +801,16 @@ export function ErrorNotice({
             </div>
           )}
         </div>
-        {(actionLabel && onAction) || onDismiss ? (
+        {(actionLabel && onAction) || (secondaryActionLabel && onSecondaryAction) || onDismiss ? (
           <div className="grok-notice-actions">
             {actionLabel && onAction && (
               <button type="button" className="grok-notice-action-pill" onClick={onAction}>
                 {actionLabel}
+              </button>
+            )}
+            {secondaryActionLabel && onSecondaryAction && (
+              <button type="button" className="grok-notice-action-pill" onClick={onSecondaryAction}>
+                {secondaryActionLabel}
               </button>
             )}
             {onDismiss && (

@@ -98,10 +98,10 @@ test('resolveComposerActionKind enforces pre-LLM spinner & queue lock, then stop
   }
 });
 
-test('shouldShowComposerStop covers all 6 stoppable phases and hides when stopping, offline, archived, disallowed, or settled', () => {
-  const stoppablePhases = ['queued', 'preparing', 'running', 'compacting', 'interrupting', 'failed'];
+test('shouldShowComposerStop covers active stoppable phases and settles cleanly on failed/stopped/idle', () => {
+  const activeStoppablePhases = ['queued', 'preparing', 'running', 'compacting', 'interrupting'];
 
-  for (const phase of stoppablePhases) {
+  for (const phase of activeStoppablePhases) {
     assert.equal(
       canStopBotActivity({ phase, source: 'primary', scopeId: null, requestId: 'r1', startedAt: null }),
       true,
@@ -164,7 +164,46 @@ test('shouldShowComposerStop covers all 6 stoppable phases and hides when stoppi
     );
   }
 
-  for (const phase of ['stopping', 'idle', 'stopped', null, undefined]) {
+  // Terminated generation failure (requestId: null) is already stopped/settled: neither canStopBotActivity nor composer stop stays active.
+  const runFailureActivity = resolveBotActivity({
+    activity: {
+      phase: 'failed',
+      source: null,
+      scopeId: null,
+      requestId: null,
+      startedAt: null,
+      error: { code: 'GENERATION_FAILED', message: 'generation failed: error' },
+    },
+  });
+  assert.equal(canStopBotActivity(runFailureActivity), false);
+  assert.equal(
+    shouldShowComposerStop({
+      phase: runFailureActivity.phase,
+      online: true,
+      archived: false,
+      isStopping: false,
+      canStop: canStopBotActivity(runFailureActivity),
+    }),
+    false,
+  );
+
+  // Failed pre-LLM admission (requestId !== null) remains cancellable via explicit banner, but never keeps composer stop stuck.
+  const admissionFailureActivity = resolveBotActivity({
+    turnAdmission: { phase: 'failed', requestId: 'req-adm-1', source: 'primary' },
+  });
+  assert.equal(canStopBotActivity(admissionFailureActivity), true);
+  assert.equal(
+    shouldShowComposerStop({
+      phase: admissionFailureActivity.phase,
+      online: true,
+      archived: false,
+      isStopping: false,
+      canStop: true,
+    }),
+    false,
+  );
+
+  for (const phase of ['stopping', 'idle', 'stopped', 'failed', null, undefined]) {
     assert.equal(
       shouldShowComposerStop({
         phase,

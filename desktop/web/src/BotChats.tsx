@@ -624,7 +624,7 @@ type SendNotice = {
   showRecordAction?: boolean;
 };
 
-function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, canPick, onPick, draftError, draftHint, draftConflict, sendState, receiptBusy, sendError, sendNotice, onSend, canSend, disabled, isPreLlm, isLlmRunning, isStopping, canStop, stopDisabled, onStop, stopButtonRef, onRetryDraft, attempt, recOutcome, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onInsertSlash, onOpenSendRecord, queuedItems, queueBusy, onRecallQueued, onRecallAllQueued, onDiscardQueued, onSteerQueued, isEditingTurn = false, onCancelEditTurn }: {
+function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, canPick, onPick, draftError, draftHint, draftConflict, sendState, receiptBusy, sendError, sendNotice, onSend, canSend, disabled, isPreLlm, isLlmRunning, isStopping, canStop, stopDisabled, onStop, stopButtonRef, onRetryDraft, attempt, recOutcome, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, canCancelTurnAdmission = false, onInsertSlash, onOpenSendRecord, queuedItems, queueBusy, onRecallQueued, onRecallAllQueued, onDiscardQueued, onSteerQueued, isEditingTurn = false, onCancelEditTurn }: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   text: string;
   onChangeText: (v: string) => void;
@@ -666,6 +666,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
   turnAdmission: TurnAdmissionView | null;
   /** Host 准入失败后的显式重试：沿用冻结的同一 requestId/文本重新入队，不自动重发。 */
   onRetryTurnAdmission: () => void;
+  canCancelTurnAdmission?: boolean;
   /** 斜杠命令先填回输入框；用户显式发送后由发送路径调用 clearHistory/compact，不当作模型 prompt。 */
   onInsertSlash: (command: string) => void;
   onOpenSendRecord?: () => void;
@@ -852,7 +853,10 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
         {turnAdmission?.phase === 'failed' ? (
           <ErrorNotice title="消息暂未开始处理" description="内容已保留，可以重试。"
             detail={turnAdmission.error ? `${turnAdmission.error.code}: ${turnAdmission.error.message ?? ''}` : undefined}
-            actionLabel="重试发送" onAction={onRetryTurnAdmission} compact />
+            actionLabel="重试发送" onAction={onRetryTurnAdmission}
+            secondaryActionLabel={canCancelTurnAdmission ? '取消' : undefined}
+            onSecondaryAction={canCancelTurnAdmission ? onStop : undefined}
+            compact />
         ) : null}
         {sendError && !attempt ? (
           <ErrorNotice error={sendError} actionLabel={onOpenSendRecord ? '查看发送记录' : undefined} onAction={onOpenSendRecord} compact />
@@ -3109,6 +3113,7 @@ function PrimaryChatPane({
         onAdoptNewerDraft={adoptNewerDraft}
         turnAdmission={activeEditing ? null : turnAdmission}
         onRetryTurnAdmission={() => void retryTurnAdmission()}
+        canCancelTurnAdmission={Boolean(!activeEditing && turnAdmission?.phase === 'failed' && canStop && !stopDisabled)}
         onInsertSlash={(cmd) => drafts.editText(cmd)}
         onOpenSendRecord={activeEditing ? undefined : openSendRecord}
         queuedItems={queuedStripItems}

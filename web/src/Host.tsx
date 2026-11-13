@@ -344,6 +344,13 @@ export function HostPage({
   const [chatHistory, setChatHistory] = useState<Array<Record<string, unknown>>>([]);
   const chatHistoryRef = useRef(chatHistory);
   chatHistoryRef.current = chatHistory;
+  const chatHistoryCacheRef = useRef(new Map<string, Array<Record<string, unknown>>>());
+  useEffect(() => {
+    const scope = currentChatScope.current;
+    if (scope && chatHistory.length > 0) {
+      chatHistoryCacheRef.current.set(scope, chatHistory);
+    }
+  }, [chatHistory]);
   // 同 scope+同代际并发全量历史读取的 flight 去重；代际失效后旧读不共享、结果丢弃。
   const chatHistoryFlights = useRef(new Map<string, { epoch: number; task: Promise<Array<Record<string, unknown>> | null> }>());
   // 历史读取代际：目标切换、/clear、连接代际变化都递增，旧代 flight 立即不被复用。
@@ -983,6 +990,7 @@ export function HostPage({
 
   const {
     items: roomConversations,
+    loaded: roomConversationsLoaded,
     loading: roomConversationsLoading,
     error: roomConversationsError,
     refresh: refreshRoomConversations,
@@ -1760,16 +1768,18 @@ export function HostPage({
     setActiveBotKey(bot.key);
     if (!sameScope) {
       // 切目标立即 fence 旧加载/观察，防旧 callback 回填新聊天；历史读取代际递进使在途旧读
-      // （A→B→A 同 scope 也算）不被复用/回填。空首屏先进入加载态，由 loadHistory 收尾清除。
+      // （A→B→A 同 scope 也算）不被复用/回填。同 scopeKey 命中本会话缓存时首屏直出已读消息，避免白屏闪烁。
       chatLoadGeneration.current += 1;
       chatHistoryEpoch.current += 1;
       cancelActiveObservation();
-      setChatHistory([]);
+      const cachedHistory = scopeKey ? (chatHistoryCacheRef.current.get(scopeKey) ?? []) : [];
+      chatHistoryRef.current = cachedHistory;
+      setChatHistory(cachedHistory);
       setChatLive(undefined);
       setChatObservationError('');
       setChatHistoryError('');
       chatLoadingScope.current = scopeKey ? { key: scopeKey } : null;
-      setChatHistoryLoading(Boolean(scopeKey));
+      setChatHistoryLoading(Boolean(scopeKey) && cachedHistory.length === 0);
     }
     // 恢复 pending 带终态回执（done/unanswered）只 suppress 本次进入的快照。
     suppressSeededPendingRef.current =
@@ -2021,6 +2031,7 @@ export function HostPage({
         chatSubmissionRef.current = undefined;
         chatHistoryEpoch.current += 1;
         if (chatPending) removePending(chatPending.scopeKey, chatPending.requestId);
+        chatHistoryCacheRef.current.delete(scopeKey);
         setChatPending(undefined);
         setChatHistory([]);
         setChatLive(undefined);
@@ -2239,6 +2250,12 @@ ${newer}` : draftSnapshot;
         }
         setEditingTurn(prev => (prev?.entryId === targetEntryId && prev.botKey === bot.key ? null : prev));
         chatHistoryEpoch.current += 1;
+        const cachedBeforeEdit = chatHistoryCacheRef.current.get(scopeKey);
+        if (cachedBeforeEdit) {
+          const trimmedCache = cachedBeforeEdit.filter(item => Number(item.id) < targetEntryId);
+          if (trimmedCache.length > 0) chatHistoryCacheRef.current.set(scopeKey, trimmedCache);
+          else chatHistoryCacheRef.current.delete(scopeKey);
+        }
         if (currentChatScope.current === scopeKey) {
           setChatHistory(prev => prev.filter(item => Number(item.id) < targetEntryId));
           setChatLive(prev => prev ? {
@@ -2292,6 +2309,10 @@ ${newer}` : draftSnapshot;
           () => currentChatScope.current === scopeKey,
           () => readPages(),
         ).catch(() => null);
+        if (freshItems) {
+          if (freshItems.length > 0) chatHistoryCacheRef.current.set(scopeKey, freshItems);
+          else chatHistoryCacheRef.current.delete(scopeKey);
+        }
         if (currentChatScope.current === scopeKey && freshItems) {
           setChatHistory(freshItems);
         }
@@ -2689,6 +2710,8 @@ ${newer}` : draftSnapshot;
         } else {
           throw new Error(t('无法连接目标节点', 'Target host unavailable'));
         }
+        const deletedScopeKey = scopeForBot(bot);
+        if (deletedScopeKey) chatHistoryCacheRef.current.delete(deletedScopeKey);
         chatPins.removePin(botPinKey(bot));
         setBotConfirmModal(null);
         if (activeBotKey === bot.key) {
@@ -3729,7 +3752,7 @@ ${newer}` : draftSnapshot;
     chatScrollRestorePending.current = true;
     if (chatScrollRef.current) chatScrollRef.current.scrollTop = saved;
   }, [screen]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (screen === 'chat' && chatScrollRef.current) {
       if (chatScrollRestorePending.current) {
         // 本帧是返回恢复，不覆盖刚置回的 scrollTop；后续新消息仍自动滚底。
@@ -4311,8 +4334,8 @@ ${newer}` : draftSnapshot;
     (chatReceipt?.status === undefined || chatReceipt.status === 'queued');
   const lastVisibleTurnHasError = Boolean(visibleTurns.length > 0 && visibleTurns[visibleTurns.length - 1]?.error);
   const chatStatusKind: 'fail' | 'admission' | 'conn' | 'load' | 'clear' | null =
-    (failureNotice && !lastVisibleTurnHasError) ? 'fail'
-      : chatAdmissionActive ? 'admission'
+    chatAdmissionActive ? 'admission'
+      : (failureNotice && !lastVisibleTurnHasError) ? 'fail'
       : chatConnIssue ? 'conn'
       : chatLoadIssue ? 'load'
       : clearNotice ? 'clear'
@@ -4419,7 +4442,7 @@ ${newer}` : draftSnapshot;
         }}
       />}
       {screen === 'chat' && board.storageError && <p role="alert" className="bot-board-warning">{board.storageError}</p>}
-      {(screen === 'hub' || screen === 'conversation' || screen === 'dm') && (
+      {(screen === 'hub' || screen === 'chat' || screen === 'conversation' || screen === 'dm') && (
         <main
           className={`hub-main grok-page-enter${anyDrawerOpen ? ' is-scaled' : ''}${screen === 'hub' ? '' : ' hub-hidden'}`}
           aria-label={t('智能体主页', 'Bot Hub')}
@@ -4439,7 +4462,7 @@ ${newer}` : draftSnapshot;
             </button>
 
             {(() => {
-              const isSpinning = hubRefreshing || centerConn.connecting;
+              const isSpinning = hubRefreshing;
               const isVisible = isSpinning || pullDistance > 4;
               const progress = Math.min(1, pullDistance / PULL_THRESHOLD);
               return (
@@ -4456,13 +4479,11 @@ ${newer}` : draftSnapshot;
                   role="status"
                   aria-live="polite"
                   aria-label={
-                    centerConn.connecting
-                      ? t('正在连接中心…', 'Connecting to center…')
-                      : hubRefreshing
-                        ? t('正在刷新节点与 Bot…', 'Refreshing nodes and bots…')
-                        : pullDistance >= PULL_THRESHOLD
-                          ? t('松手立即刷新', 'Release to refresh')
-                          : t('下拉刷新', 'Pull down to refresh')
+                    hubRefreshing
+                      ? t('正在刷新节点与 Bot…', 'Refreshing nodes and bots…')
+                      : pullDistance >= PULL_THRESHOLD
+                        ? t('松手立即刷新', 'Release to refresh')
+                        : t('下拉刷新', 'Pull down to refresh')
                   }
                 >
                   <RefreshCw
@@ -4571,10 +4592,8 @@ ${newer}` : draftSnapshot;
                   onAction={() => refreshRoomConversations()}
                 />
               ) : null}
-              {roomConversationsLoading && visibleHubItems.every(e => !e.room) ? (
-                <p className="hub-empty-list" role="status">{t('正在加载群聊…', 'Loading rooms…')}</p>
-              ) : null}
               {visibleHubItems.length === 0 ? (
+                hubFilter === 'rooms' && !roomConversationsLoaded && roomConversationsLoading ? null : (
                 <div className="hub-empty-list">
                   <p>
                     {searchQuery.trim()
@@ -4582,6 +4601,7 @@ ${newer}` : draftSnapshot;
                       : t('点击上方主助手直接开始对话，或点右上角 + 创建新的智能体', 'Tap the primary assistant above to chat, or + to create a new bot')}
                   </p>
                 </div>
+                )
               ) : (
                 visibleHubItems.map(entry => {
                   if (entry.room) {
@@ -4886,11 +4906,7 @@ ${newer}` : draftSnapshot;
             }}
           >
             {visibleTurns.length === 0 && !displayGeneratingText ? (
-              chatHistoryLoading ? (
-                <div className="bot-chat-empty" role="status">
-                  <p>{t('正在加载历史记录…', 'Loading history…')}</p>
-                </div>
-              ) : (
+              chatHistoryLoading ? null : (
               <div className="bot-chat-empty">
                 <button
                   type="button"
@@ -6941,6 +6957,7 @@ ${newer}` : draftSnapshot;
                     detailOnly
                     scopeKind="room"
                     initialScopeId={scopeConversationTarget.scope.scope.scopeId}
+                    initialScope={scopeConversationTarget.scope}
                     knownBots={knownBots}
                     onHistoryViewed={markRoomHistoryViewed}
                     settingsOpen={roomSettingsOpen}

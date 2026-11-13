@@ -193,20 +193,29 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
   useEffect(() => {
     let live = true;
     let retry: ReturnType<typeof setTimeout> | undefined;
-    setPreparedCenter('');
-    if (status?.state !== 'ready' || !onReady) { setPreparing(false); return; }
+    if (status?.state !== 'ready' || !onReady) {
+      setPreparedCenter('');
+      setPreparing(false);
+      return;
+    }
     const preparedKey = `${status.centerUrl}:${status.brokerGeneration ?? ''}`;
-    setPreparing(true);
+    const alreadyPrepared = preparedCenter === preparedKey;
+    if (!alreadyPrepared) {
+      setPreparedCenter('');
+      setPreparing(true);
+    }
     onReady(status.centerUrl).then(() => {
       if (live) { setPreparedCenter(preparedKey); setError(''); }
     }, failure => {
       if (live) {
+        setPreparedCenter('');
         const permanent = !isTransientCenterError(failure);
         setError(permanent ? centerErrorMessage(failure) || centerErrorCode(failure) : '正在重连…');
         if (!permanent) retry = setTimeout(() => setPrepareRetry(value => value + 1), 2000);
       }
     }).finally(() => { if (live) setPreparing(false); });
     return () => { live = false; if (retry) clearTimeout(retry); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.state, status?.centerUrl, status?.brokerGeneration, onReady, prepareRetry, recoveryEpoch]);
 
   const connect = async (event?: FormEvent) => {
