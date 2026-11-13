@@ -161,7 +161,7 @@ import { ErrorNotice, FloatingPillToast, array, errorText, isModelConfigError, r
 import { SendButtonIcon } from './SendButtonIcon';
 import { deleteBotAndVerify, formatActionableDirectoryError, isDefiniteSendFailure, isRemoteBotOnline } from './botOperations';
 
-import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending as SharedChatPending, ChatPendingEntry as SharedChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, copyTextToClipboard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
+import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, GroupCreateAttempt, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending as SharedChatPending, ChatPendingEntry as SharedChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, copyTextToClipboard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
 // @lane-imports:settings
 import { Badge, Disclosure, Row, Section, SettingsSheet } from './bot-settings/primitives';
 import { ClientUpdateSection, useClientUpdateSummary } from './ClientUpdateSection';
@@ -385,6 +385,14 @@ export function HostPage({
   const [imageUploading, setImageUploading] = useState(false);
   const [composerMenuOpen, setComposerMenuOpen] = useState(false);
   const [chatTopMenuOpen, setChatTopMenuOpen] = useState(false);
+  const [hubAddMenuOpen, setHubAddMenuOpen] = useState(false);
+  const [groupTitle, setGroupTitle] = useState('');
+  const [groupMembers, setGroupMembers] = useState<MessageMember[]>([]);
+  const [groupSearchQuery, setGroupSearchQuery] = useState('');
+  const [groupCreating, setGroupCreating] = useState(false);
+  const [groupCreateError, setGroupCreateError] = useState('');
+  const [groupCreateAttempt, setGroupCreateAttempt] = useState<GroupCreateAttempt | null>(null);
+  const groupCreateFlight = useRef(false);
   const [chatSearchOpen, setChatSearchOpen] = useState(false);
   const [chatSearchQuery, setChatSearchQuery] = useState('');
   const [clearNotice, setClearNotice] = useState('');
@@ -1163,13 +1171,14 @@ export function HostPage({
       chatScrollRestoreRef.current = chatScrollRef.current.scrollTop;
     }
     setHubContextMenu(null);
+    setHubAddMenuOpen(false);
     setChatTopMenuOpen(false);
     setComposerMenuOpen(false);
     setChatSearchOpen(false);
     setChatSearchQuery('');
     setRoomSettingsOpen(initialSettingsOpen);
     setScopeConversationTarget(item);
-    setScopeReturnScreen(screen === 'dm' || screen === 'conversation' ? 'hub' : screen);
+    setScopeReturnScreen(screen === 'dm' || screen === 'conversation' || screen === 'group-create' ? 'hub' : screen);
     setScreen('conversation');
   };
 
@@ -1201,6 +1210,7 @@ export function HostPage({
     setDmTarget(null);
     setDmSelectedScopeId(null);
     setHubContextMenu(null);
+    setHubAddMenuOpen(false);
     setBotConfirmModal(null);
     setScheduleDeleteTarget(null);
     if (screen === 'conversation') setScreen(scopeReturnScreen);
@@ -1215,6 +1225,10 @@ export function HostPage({
     scopeAccountRef.current = scopeAccountKey;
     unconfirmedRoomDeletesRef.current.clear();
     setRoomDeleteModal(null);
+    setGroupCreateAttempt(null);
+    setGroupCreateError('');
+    if (screen === 'group-create') setScreen('hub');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeAccountKey]);
 
   const scopeForBot = (bot: UnifiedBotItem) => {
@@ -1936,6 +1950,7 @@ export function HostPage({
   }, [screen, editMode, editCwdIdentity, remoteConnected, loadEditCwd]);
 
   const openCreateBotPage = useCallback((forcePrimary = false) => {
+    setHubAddMenuOpen(false);
     const nextPreset = forcePrimary
       ? JARVIS_AVATAR_PRESET
       : GROK_AVATAR_PRESETS[listBotItems.length % GROK_AVATAR_PRESETS.length];
@@ -1958,6 +1973,238 @@ export function HostPage({
     setEditVoiceLang('自动');
     setScreen('bot-edit');
   }, [listBotItems.length]);
+
+  const resolveGroupWriteApi = useCallback((deviceId: string): DesktopPanelApi | null => {
+    const mapped = roomWriteTargetApiMap.get(deviceId);
+    if (mapped?.transportConnected && mapped.identity) return mapped;
+    const liveApi = remoteClientRef.current?.api;
+    const liveIdentity = liveApi?.identity;
+    if (!liveApi || !liveIdentity || !liveApi.transportConnected) return null;
+    if (liveIdentity.kind === 'local' && liveIdentity.targetDeviceId !== deviceId) return null;
+    const online = deviceId === localHostRef.current?.deviceId
+      ? localHostRef.current?.phase === 'running'
+      : remoteDevices.some(d => d.deviceId === deviceId && d.online);
+    if (!online) return null;
+    try {
+      return targetApi(liveApi, deviceId, true);
+    } catch {
+      return null;
+    }
+  }, [roomWriteTargetApiMap, remoteDevices]);
+
+  const pickGroupAuthorityDeviceId = useCallback((members: readonly MessageMember[]): string => {
+    const localId = localHostRef.current?.deviceId ?? localHost?.deviceId;
+    if (localId && members.some(m => m.deviceId === localId)) {
+      if (resolveGroupWriteApi(localId)) return localId;
+      if (localHostRef.current?.phase === 'running' && (!getOrCreateRemoteClient || centerConn.ready)) {
+        return localId;
+      }
+    }
+    for (const member of members) {
+      if (resolveGroupWriteApi(member.deviceId)) return member.deviceId;
+    }
+    return '';
+  }, [localHost?.deviceId, resolveGroupWriteApi, getOrCreateRemoteClient, centerConn.ready]);
+
+  const openCreateGroupPage = useCallback(() => {
+    setHubAddMenuOpen(false);
+    setHubContextMenu(null);
+    setGroupSearchQuery('');
+    if (groupCreateAttempt) {
+      setGroupTitle(groupCreateAttempt.title ?? '');
+      setGroupMembers(groupCreateAttempt.members);
+    } else {
+      setGroupTitle('');
+      setGroupMembers([]);
+      setGroupCreateError('');
+    }
+    if (getOrCreateRemoteClient) {
+      void ensureRemoteApi().then(() => syncRemoteBots());
+    }
+    setScreen('group-create');
+  }, [groupCreateAttempt, getOrCreateRemoteClient, ensureRemoteApi, syncRemoteBots]);
+
+  const toggleGroupMember = useCallback((bot: { deviceId: string; botId: string }) => {
+    if (groupCreating || groupCreateAttempt) return;
+    setGroupCreateError('');
+    setGroupMembers(prev => {
+      const exists = prev.some(m => m.botId === bot.botId);
+      if (exists) return prev.filter(m => m.botId !== bot.botId);
+      if (prev.length >= 64) return prev;
+      return [...prev, { deviceId: bot.deviceId, botId: bot.botId }];
+    });
+  }, [groupCreating, groupCreateAttempt]);
+
+  const discardGroupCreateAttempt = useCallback(() => {
+    if (groupCreating) return;
+    setGroupCreateAttempt(null);
+    setGroupCreateError('');
+  }, [groupCreating]);
+
+  const handleCreateGroup = useCallback(async () => {
+    if (groupCreateFlight.current || groupCreating) return;
+    let attempt = groupCreateAttempt;
+    if (!attempt) {
+      if (groupMembers.length < 2) {
+        setGroupCreateError(t('群聊至少需要选择 2 个智能体。', 'Select at least 2 bots for a group chat.'));
+        return;
+      }
+      if (groupMembers.length > 64) {
+        setGroupCreateError(t('群聊最多支持 64 个成员。', 'A group chat supports up to 64 bots.'));
+        return;
+      }
+      const trimmedTitle = groupTitle.trim();
+      if ([...trimmedTitle].length > 120) {
+        setGroupCreateError(t('群名称最多 120 个字符。', 'Group name must be 120 characters or fewer.'));
+        return;
+      }
+      if (getOrCreateRemoteClient && !remoteClientRef.current) {
+        await ensureRemoteApi();
+      }
+      const targetDeviceId = pickGroupAuthorityDeviceId(groupMembers);
+      if (!targetDeviceId) {
+        setGroupCreateError(
+          t(
+            '所选成员所在设备当前均离线或未连接中心，请至少包含一位在线设备上的智能体。',
+            'All selected bots are on offline or disconnected hosts. Include at least one bot on an online host.',
+          ),
+        );
+        return;
+      }
+      attempt = {
+        requestId: uuid(),
+        targetDeviceId,
+        profileId: remoteClientRef.current?.api.identity?.profileId,
+        ...(trimmedTitle ? { title: trimmedTitle } : {}),
+        members: groupMembers.map(m => ({ deviceId: m.deviceId, botId: m.botId })),
+      };
+    } else if (getOrCreateRemoteClient && !remoteClientRef.current) {
+      await ensureRemoteApi();
+    }
+
+    const wApi = resolveGroupWriteApi(attempt.targetDeviceId);
+    const wIdentity = wApi?.identity;
+    const canFallbackLocal =
+      attempt.targetDeviceId === localHostRef.current?.deviceId &&
+      localHostRef.current?.phase === 'running' &&
+      (!getOrCreateRemoteClient || centerConn.ready);
+    if (!(wApi && wIdentity && wApi.transportConnected) && !canFallbackLocal) {
+      setGroupCreateError(
+        groupCreateAttempt
+          ? t(
+              '目标权威节点当前未连接或离线，请恢复连接后再按原请求重试。',
+              'Authority host is offline or disconnected; reconnect before retrying with the original request.',
+            )
+          : t('目标节点当前未连接或离线，请恢复连接后再试。', 'Target host is offline or disconnected; reconnect and retry.'),
+      );
+      return;
+    }
+
+    groupCreateFlight.current = true;
+    setGroupCreating(true);
+    setGroupCreateError('');
+    try {
+      const input = {
+        requestId: attempt.requestId,
+        kind: 'room' as const,
+        members: attempt.members,
+        ...(attempt.title ? { title: attempt.title } : {}),
+      };
+      const createdScope: ScopeInfo = wApi && wIdentity && wApi.transportConnected
+        ? await wApi.mutateIntent(wIdentity, 'createScope', { input })
+        : ((await BotHost.call({ method: 'createScope', params: { input } })).result as ScopeInfo);
+
+      setGroupCreateAttempt(null);
+      setGroupCreateError('');
+      setGroupTitle('');
+      setGroupMembers([]);
+      setGroupSearchQuery('');
+      void refreshRoomConversationsRef.current();
+
+      const localId = localHostRef.current?.deviceId;
+      const readSource = attempt.targetDeviceId === localId
+        ? scopeConversationSources.find(s => s.api === localScopeApi)
+        : scopeConversationSources.find(s => s.identity.targetDeviceId === attempt.targetDeviceId);
+      const readApi =
+        readSource?.api ??
+        (attempt.targetDeviceId === localId && localScopeApi ? localScopeApi : wApi);
+      const fallbackIdentity: DesktopIdentity =
+        wIdentity ??
+        localScopeApi?.identity ?? {
+          profileId: 'local',
+          kind: 'local',
+          generation: 0,
+          targetDeviceId: attempt.targetDeviceId,
+        };
+      if (readApi) {
+        openScopeConversation({
+          key: createdScope.scope.scopeId,
+          api: readApi,
+          identity: readSource?.identity ?? fallbackIdentity,
+          scope: createdScope,
+          title: conversationTitle(createdScope.scope, knownBots),
+          lastPreview: '',
+          lastActivityAt: null,
+        });
+      } else {
+        setScreen('hub');
+      }
+    } catch (err) {
+      const code = (err as { code?: string })?.code ?? '';
+      const outcome = (err as { outcome?: string })?.outcome;
+      const definite =
+        outcome === 'not-sent' ||
+        (outcome === 'responded' &&
+          [
+            'INVALID_INPUT',
+            'INVALID_ARGUMENT',
+            'SCOPE_FORBIDDEN',
+            'REQUEST_CONFLICT',
+            'CENTER_OFFLINE',
+            'RUNTIME_BUSY',
+            'OFFLINE',
+            'CONTROL_UNAVAILABLE',
+          ].includes(code)) ||
+        (outcome === undefined &&
+          [
+            'INVALID_INPUT',
+            'INVALID_ARGUMENT',
+            'SCOPE_FORBIDDEN',
+            'REQUEST_CONFLICT',
+            'CENTER_OFFLINE',
+            'RUNTIME_BUSY',
+          ].includes(code));
+      if (definite) {
+        setGroupCreateAttempt(null);
+        setGroupCreateError(errorText(err));
+      } else {
+        setGroupCreateAttempt(attempt);
+        setGroupCreateError(
+          t(
+            `${errorText(err)}（结果未确认，已冻结原请求 ID，可按原请求安全重试）`,
+            `${errorText(err)} (Outcome unconfirmed; original request ID frozen for idempotent retry)`,
+          ),
+        );
+      }
+    } finally {
+      groupCreateFlight.current = false;
+      if (localBotsMounted.current) setGroupCreating(false);
+    }
+  }, [
+    groupCreating,
+    groupCreateAttempt,
+    groupMembers,
+    groupTitle,
+    getOrCreateRemoteClient,
+    ensureRemoteApi,
+    pickGroupAuthorityDeviceId,
+    resolveGroupWriteApi,
+    centerConn.ready,
+    scopeConversationSources,
+    localScopeApi,
+    knownBots,
+    t,
+  ]);
 
   useEffect(() => {
     if (mustCreatePrimaryBot && screen === 'hub') {
@@ -3875,6 +4122,10 @@ ${newer}` : draftSnapshot;
       }
       return true;
     }
+    if (hubAddMenuOpen) {
+      setHubAddMenuOpen(false);
+      return true;
+    }
     if (chatTopMenuOpen) {
       setChatTopMenuOpen(false);
       return true;
@@ -3906,6 +4157,10 @@ ${newer}` : draftSnapshot;
     }
     if (screen === 'bot-screen') {
       setScreen('bot-profile');
+      return true;
+    }
+    if (screen === 'group-create') {
+      if (!groupCreating) setScreen('hub');
       return true;
     }
     if (screen === 'bot-edit') {
@@ -3947,6 +4202,8 @@ ${newer}` : draftSnapshot;
     action.busy,
     modelTarget,
     hubContextMenu,
+    hubAddMenuOpen,
+    groupCreating,
     chatTopMenuOpen,
     composerMenuOpen,
     chatSearchOpen,
@@ -4292,8 +4549,6 @@ ${newer}` : draftSnapshot;
   // @lane-hooks:hub
   // 列表类型筛选：与搜索框同时生效。
   const [hubFilter, setHubFilter] = useState<'all' | 'bots' | 'rooms'>('all');
-  // 右上角“+”弹出菜单的锚点坐标；null 表示关闭。
-  const [hubAddMenuPos, setHubAddMenuPos] = useState<{ x: number; y: number } | null>(null);
   const visibleHubItems = useMemo(
     () => hubFilter === 'all'
       ? filteredMixedHubItems
@@ -4442,7 +4697,7 @@ ${newer}` : draftSnapshot;
         }}
       />}
       {screen === 'chat' && board.storageError && <p role="alert" className="bot-board-warning">{board.storageError}</p>}
-      {(screen === 'hub' || screen === 'chat' || screen === 'conversation' || screen === 'dm') && (
+      {(screen === 'hub' || screen === 'chat' || screen === 'conversation' || screen === 'dm' || screen === 'group-create') && (
         <main
           className={`hub-main grok-page-enter${anyDrawerOpen ? ' is-scaled' : ''}${screen === 'hub' ? '' : ' hub-hidden'}`}
           aria-label={t('智能体主页', 'Bot Hub')}
@@ -4502,11 +4757,43 @@ ${newer}` : draftSnapshot;
             <button
               type="button"
               className="hub-circle-btn hub-add-btn"
-              aria-label={t('新建智能体', 'New Bot')}
-              onClick={() => openCreateBotPage(false)}
+              aria-label={t('新建', 'New')}
+              aria-haspopup="menu"
+              aria-expanded={hubAddMenuOpen}
+              onClick={() => setHubAddMenuOpen(v => !v)}
             >
               <Plus size={22} strokeWidth={2.2} />
             </button>
+
+            {hubAddMenuOpen && (
+              <>
+                <div className="grok-menu-backdrop" onClick={() => setHubAddMenuOpen(false)} />
+                <div className="grok-floating-menu" role="menu">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setHubAddMenuOpen(false);
+                      openCreateBotPage(false);
+                    }}
+                  >
+                    <Sparkles size={19} />
+                    <span>{t('新建智能体', 'New Bot')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setHubAddMenuOpen(false);
+                      openCreateGroupPage();
+                    }}
+                  >
+                    <Users size={19} />
+                    <span>{t('创建群聊', 'Create Group Chat')}</span>
+                  </button>
+                </div>
+              </>
+            )}
           </header>
 
           <div
@@ -4597,8 +4884,10 @@ ${newer}` : draftSnapshot;
                 <div className="hub-empty-list">
                   <p>
                     {searchQuery.trim()
-                      ? t('没有匹配的智能体', 'No matching bots')
-                      : t('点击上方主助手直接开始对话，或点右上角 + 创建新的智能体', 'Tap the primary assistant above to chat, or + to create a new bot')}
+                      ? t('没有匹配的智能体或群聊', 'No matching bots or groups')
+                      : hubFilter === 'rooms'
+                        ? t('还没有群聊，点右上角 + 创建群聊', 'No group chats yet. Tap + in the top right to create one')
+                        : t('点击上方主助手直接开始对话，或点右上角 + 新建智能体或群聊', 'Tap the primary assistant above to chat, or + to create a bot or group chat')}
                   </p>
                 </div>
                 )
@@ -6163,6 +6452,237 @@ ${newer}` : draftSnapshot;
           </div>
         </main>
       )}
+
+      {/* ==================== SCREEN 4B: CREATE GROUP CHAT VIEW ==================== */}
+      {screen === 'group-create' && (() => {
+        const unarchivedCandidates = allBotItems.filter(item => !item.archivedAt);
+        const q = groupSearchQuery.trim().toLowerCase();
+        const filteredCandidates = q
+          ? unarchivedCandidates.filter(
+              item =>
+                item.role.toLowerCase().includes(q) ||
+                item.hostLabel.toLowerCase().includes(q) ||
+                (item.description ?? '').toLowerCase().includes(q),
+            )
+          : unarchivedCandidates;
+        const activeMembers = groupCreateAttempt ? groupCreateAttempt.members : groupMembers;
+        const canSubmit = groupCreateAttempt
+          ? !groupCreating
+          : !groupCreating && activeMembers.length >= 2 && activeMembers.length <= 64 && [...groupTitle.trim()].length <= 120;
+        return (
+          <main className="grok-subpage grok-page-enter" aria-label={t('创建群聊', 'Create Group Chat')}>
+            <header className="grok-subpage-topbar">
+              <button
+                type="button"
+                className="grok-floating-circle-btn"
+                aria-label={t('返回', 'Back')}
+                disabled={groupCreating}
+                onClick={() => setScreen('hub')}
+              >
+                <ArrowLeft size={20} />
+              </button>
+              <h2 className="grok-subpage-header-title">{t('创建群聊', 'Create Group Chat')}</h2>
+              <button
+                type="button"
+                className="grok-done-pill-btn"
+                disabled={!canSubmit}
+                onClick={() => void handleCreateGroup()}
+              >
+                {groupCreating
+                  ? t('创建中…', 'Creating…')
+                  : groupCreateAttempt
+                    ? t('按原请求重试', 'Retry')
+                    : activeMembers.length >= 2
+                      ? t(`创建 (${activeMembers.length})`, `Create (${activeMembers.length})`)
+                      : t('创建', 'Create')}
+              </button>
+            </header>
+
+            <div className="grok-subpage-scroll">
+              {groupCreateAttempt && (
+                <div className="grok-field-section">
+                  <div className="grok-card-group">
+                    <div className="grok-card-row no-active" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 10 }}>
+                      <span style={{ fontSize: '.9rem', lineHeight: 1.5, color: 'var(--text)' }}>
+                        {t(
+                          '上次创建请求结果尚未确认，已冻结原请求 ID 与成员列表，点击右上角「按原请求重试」不会重复建群。',
+                          'Previous create request is unconfirmed. Original request ID and members are frozen so retrying will not duplicate the group.',
+                        )}
+                      </span>
+                      <button
+                        type="button"
+                        className="hub-outline-btn"
+                        disabled={groupCreating}
+                        onClick={discardGroupCreateAttempt}
+                      >
+                        {t('放弃冻结并重新编辑', 'Discard & Edit Again')}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="grok-field-section">
+                <label className="grok-section-label">{t('群名称（选填）', 'Group Name (Optional)')}</label>
+                <div className="grok-card-group">
+                  <input
+                    className="grok-card-input"
+                    value={groupCreateAttempt ? groupCreateAttempt.title ?? '' : groupTitle}
+                    onChange={e => {
+                      setGroupCreateError('');
+                      setGroupTitle(e.target.value);
+                    }}
+                    maxLength={120}
+                    disabled={groupCreating || Boolean(groupCreateAttempt)}
+                    placeholder={t('留空则按成员名称自动生成', 'Leave blank to use member names')}
+                  />
+                </div>
+              </div>
+
+              <div className="grok-field-section">
+                <label className="grok-section-label">
+                  {t(
+                    `选择成员（已选 ${activeMembers.length} 位，至少 2 位）`,
+                    `Select Members (${activeMembers.length} selected, min 2)`,
+                  )}
+                </label>
+
+                {activeMembers.length > 0 && (
+                  <div className="group-create-chips">
+                    {activeMembers.map(member => {
+                      const matched = allBotItems.find(
+                        item => item.deviceId === member.deviceId && item.botId === member.botId,
+                      );
+                      const label = matched?.role || member.botId;
+                      return (
+                        <button
+                          key={`${member.deviceId}:${member.botId}`}
+                          type="button"
+                          className="group-create-chip"
+                          disabled={groupCreating || Boolean(groupCreateAttempt)}
+                          onClick={() => toggleGroupMember(member)}
+                          aria-label={t(`移除 ${label}`, `Remove ${label}`)}
+                        >
+                          {matched ? (
+                            <GrokBotAvatar
+                              preset={resolveBotAvatarPreset(botAvatarKey(matched), matched.role, Boolean(matched.isPrimary))}
+                              size={22}
+                            />
+                          ) : null}
+                          <span className="group-create-chip-name">{label}</span>
+                          {!groupCreateAttempt && (
+                            <span className="group-create-chip-remove" aria-hidden="true">
+                              <X size={14} />
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="grok-card-group">
+                  {unarchivedCandidates.length > 4 && (
+                    <label className="group-create-search">
+                      <Search size={16} />
+                      <input
+                        type="search"
+                        value={groupSearchQuery}
+                        onChange={e => setGroupSearchQuery(e.target.value)}
+                        placeholder={t('搜索智能体或设备…', 'Search bots or hosts…')}
+                        disabled={groupCreating}
+                      />
+                      {groupSearchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => setGroupSearchQuery('')}
+                          aria-label={t('清除搜索', 'Clear search')}
+                        >
+                          <X size={15} />
+                        </button>
+                      )}
+                    </label>
+                  )}
+
+                  {unarchivedCandidates.length < 2 ? (
+                    <div className="grok-card-row no-active" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 10 }}>
+                      <span style={{ color: 'var(--muted)', fontSize: '.9rem', lineHeight: 1.5 }}>
+                        {t(
+                          '群聊至少需要 2 个未归档智能体，当前数量不足，请先新建智能体。',
+                          'At least 2 active bots are required for a group chat. Create another bot first.',
+                        )}
+                      </span>
+                      <button
+                        type="button"
+                        className="grok-done-pill-btn"
+                        disabled={groupCreating}
+                        onClick={() => openCreateBotPage(false)}
+                      >
+                        {t('去新建智能体', 'Create Bot')}
+                      </button>
+                    </div>
+                  ) : filteredCandidates.length === 0 ? (
+                    <div className="grok-card-row no-active" style={{ color: 'var(--muted)' }}>
+                      {t('没有匹配的智能体', 'No matching bots')}
+                    </div>
+                  ) : (
+                    filteredCandidates.map(bot => {
+                      const selected = activeMembers.some(m => m.botId === bot.botId);
+                      const offline = botIsOffline(bot);
+                      return (
+                        <button
+                          key={bot.key}
+                          type="button"
+                          role="checkbox"
+                          aria-checked={selected}
+                          disabled={groupCreating || Boolean(groupCreateAttempt)}
+                          className={`grok-card-row group-create-bot-row${selected ? ' is-selected' : ''}`}
+                          onClick={() => toggleGroupMember(bot)}
+                        >
+                          <GrokBotAvatar
+                            preset={resolveBotAvatarPreset(botAvatarKey(bot), bot.role, Boolean(bot.isPrimary))}
+                            isPrimary={Boolean(bot.isPrimary)}
+                            starBadge={Boolean(bot.isPrimary)}
+                            offline={offline}
+                            size={40}
+                          />
+                          <div className="group-create-bot-meta">
+                            <div className="group-create-bot-title-row">
+                              <span className="group-create-bot-name">{bot.role}</span>
+                              <span className={`hub-bot-host-badge ${bot.hostKind}${offline ? ' is-offline' : ''}`}>
+                                <PlatformLogoIcon platform={bot.platform} size={11} />
+                                <span className="hub-bot-host-text">
+                                  {bot.hostLabel}
+                                  {offline ? t(' · 离线', ' · Offline') : ''}
+                                </span>
+                              </span>
+                            </div>
+                            {bot.description ? (
+                              <span className="group-create-bot-desc">{bot.description}</span>
+                            ) : null}
+                          </div>
+                          <span className={`group-create-check${selected ? ' is-selected' : ''}`} aria-hidden="true">
+                            {selected ? <Check size={14} strokeWidth={3} /> : null}
+                          </span>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+
+              <p className="grok-card-footnote">
+                {t(
+                  '可选择本机与其他在线设备上的智能体共同加入群聊；至少包含一位在线设备上的智能体即可创建。',
+                  'Combine local and remote bots in one group chat; include at least one bot on an online host.',
+                )}
+              </p>
+
+              <ErrorNotice error={groupCreateError} onDismiss={() => setGroupCreateError('')} />
+            </div>
+          </main>
+        );
+      })()}
 
       {/* ==================== SCREEN 5: AVATAR PICKER VIEW (15848.jpg) ==================== */}
       {screen === 'bot-avatar' && (

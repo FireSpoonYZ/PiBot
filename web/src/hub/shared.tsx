@@ -188,6 +188,7 @@ export type HubScreen =
   | 'chat'
   | 'conversation'
   | 'dm'
+  | 'group-create'
   | 'bot-profile'
   | 'bot-profile-manage'
   | 'bot-edit'
@@ -199,6 +200,14 @@ export type HubScreen =
   | 'settings'
   | 'archived-bots'
   | 'pending';
+
+export interface GroupCreateAttempt {
+  requestId: string;
+  targetDeviceId: string;
+  profileId?: string;
+  title?: string;
+  members: MessageMember[];
+}
 
 export interface RoomDeleteAttempt {
   scopeId: string;

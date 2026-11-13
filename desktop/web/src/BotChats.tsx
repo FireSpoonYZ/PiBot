@@ -8,6 +8,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import {
   Archive,
   ArrowLeft,
+  Check,
   ChevronRight,
   Clock,
   Cpu,
@@ -602,6 +603,374 @@ function CreateBotForm({
       <div className="form-actions">
         <button type="submit" className="primary-button" disabled={busy || locked || !api.transportConnected}>
           {busy ? '创建中…' : '创建智能体'}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+interface FrozenGroupCreateAttempt {
+  requestId: string;
+  targetDeviceId: string;
+  title?: string;
+  members: MessageMember[];
+}
+
+function CreateGroupForm({
+  api,
+  currentDeviceId,
+  devices,
+  bots,
+  writeTargetApiMap,
+  frozenAttempt,
+  onFreezeAttempt,
+  onCreated,
+  onRequestCreateBot,
+}: {
+  api: DesktopPanelApi;
+  currentDeviceId: string;
+  devices: readonly DevicesDirectoryItem[];
+  bots: readonly BotDirectoryEntry[];
+  writeTargetApiMap: ReadonlyMap<string, DesktopPanelApi>;
+  frozenAttempt: FrozenGroupCreateAttempt | null;
+  onFreezeAttempt: (attempt: FrozenGroupCreateAttempt | null) => void;
+  onCreated: (targetDeviceId: string, scope: ScopeInfo) => void;
+  onRequestCreateBot: () => void;
+}) {
+  const [title, setTitle] = useState(() => frozenAttempt?.title ?? '');
+  const [members, setMembers] = useState<MessageMember[]>(() => frozenAttempt?.members ?? []);
+  const [memberQuery, setMemberQuery] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+  const sendingRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const candidates = useMemo(() => bots.filter((b) => !b.archivedAt), [bots]);
+  const devById = useMemo(() => new Map(devices.map((d) => [d.deviceId, d])), [devices]);
+
+  const filteredCandidates = useMemo(() => {
+    const q = memberQuery.trim().toLowerCase();
+    if (!q) return candidates;
+    return candidates.filter((b) => {
+      const devName = devById.get(b.deviceId)?.displayName || b.deviceName || '';
+      return (
+        b.role.toLowerCase().includes(q) ||
+        devName.toLowerCase().includes(q) ||
+        (b.description ?? '').toLowerCase().includes(q)
+      );
+    });
+  }, [candidates, devById, memberQuery]);
+
+  const activeMembers = frozenAttempt ? frozenAttempt.members : members;
+
+  function resolveWriteApi(deviceId: string): DesktopPanelApi | null {
+    const mapped = writeTargetApiMap.get(deviceId);
+    if (mapped?.transportConnected && mapped.identity) return mapped;
+    if (!api.transportConnected || !api.identity) return null;
+    if (api.identity.kind === 'local' && api.identity.targetDeviceId !== deviceId) return null;
+    if (!devById.get(deviceId)?.online) return null;
+    try {
+      return targetApi(api, deviceId, true);
+    } catch {
+      return null;
+    }
+  }
+
+  function pickAuthorityDeviceId(selectedMembers: readonly MessageMember[]): string {
+    if (
+      currentDeviceId &&
+      selectedMembers.some((m) => m.deviceId === currentDeviceId) &&
+      resolveWriteApi(currentDeviceId)
+    ) {
+      return currentDeviceId;
+    }
+    for (const member of selectedMembers) {
+      if (resolveWriteApi(member.deviceId)) return member.deviceId;
+    }
+    return '';
+  }
+
+  function toggleMember(bot: { deviceId: string; botId: string }) {
+    if (busy || frozenAttempt) return;
+    setError(null);
+    setMembers((prev) => {
+      const exists = prev.some((m) => m.botId === bot.botId);
+      if (exists) return prev.filter((m) => m.botId !== bot.botId);
+      if (prev.length >= 64) return prev;
+      return [...prev, { deviceId: bot.deviceId, botId: bot.botId }];
+    });
+  }
+
+  async function submit() {
+    if (sendingRef.current || busy) return;
+    let attempt = frozenAttempt;
+    if (!attempt) {
+      if (members.length < 2) {
+        setError('群聊至少需要选择 2 个智能体。');
+        return;
+      }
+      if (members.length > 64) {
+        setError('群聊最多支持 64 个成员。');
+        return;
+      }
+      const trimmedTitle = title.trim();
+      if ([...trimmedTitle].length > 120) {
+        setError('群名称最多 120 个字符。');
+        return;
+      }
+      const targetDeviceId = pickAuthorityDeviceId(members);
+      if (!targetDeviceId) {
+        setError('所选成员所在设备当前均离线或未连接，请至少包含一位在线设备上的智能体。');
+        return;
+      }
+      attempt = {
+        requestId: crypto.randomUUID(),
+        targetDeviceId,
+        ...(trimmedTitle ? { title: trimmedTitle } : {}),
+        members: members.map((m) => ({ deviceId: m.deviceId, botId: m.botId })),
+      };
+    }
+
+    const wApi = resolveWriteApi(attempt.targetDeviceId);
+    const wIdentity = wApi?.identity;
+    if (!wApi || !wIdentity || !wApi.transportConnected) {
+      setError(
+        frozenAttempt
+          ? '目标权威节点当前未连接或离线，请恢复连接后再按原请求重试。'
+          : '目标节点当前未连接或离线，请恢复连接后再试。',
+      );
+      return;
+    }
+
+    sendingRef.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      const scope = await wApi.mutateIntent(wIdentity, 'createScope', {
+        input: {
+          requestId: attempt.requestId,
+          kind: 'room',
+          members: attempt.members,
+          ...(attempt.title ? { title: attempt.title } : {}),
+        },
+      });
+      if (!mountedRef.current) return;
+      onFreezeAttempt(null);
+      setTitle('');
+      setMembers([]);
+      setMemberQuery('');
+      onCreated(attempt.targetDeviceId, scope);
+    } catch (e) {
+      if (!mountedRef.current) return;
+      const responded =
+        Boolean(e && typeof e === 'object' && (e as { outcome?: string }).outcome === 'responded');
+      if (isNotSent(e) || responded) {
+        onFreezeAttempt(null);
+        setError(errText(e));
+      } else {
+        onFreezeAttempt(attempt);
+        setError(
+          `${errText(e)}（结果未确认，已冻结原 requestId: ${attempt.requestId}，可按原请求安全重试）`,
+        );
+      }
+      reportUnlessTargetOffline(api, e);
+    } finally {
+      sendingRef.current = false;
+      if (mountedRef.current) setBusy(false);
+    }
+  }
+
+  return (
+    <form
+      className="form-grid create-group-form"
+      onSubmit={(ev) => {
+        ev.preventDefault();
+        void submit();
+      }}
+    >
+      {frozenAttempt ? (
+        <div className="status create-group-freeze-banner" role="status">
+          <span>上次创建请求结果尚未确认，已冻结原请求 ID 与成员列表，按原请求重试不会重复建群。</span>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={busy}
+            onClick={() => {
+              onFreezeAttempt(null);
+              setError(null);
+            }}
+          >
+            放弃冻结并重新编辑
+          </button>
+        </div>
+      ) : null}
+
+      <label className="field">
+        群名称（可选）
+        <input
+          value={frozenAttempt ? frozenAttempt.title ?? '' : title}
+          onChange={(e) => {
+            setError(null);
+            setTitle(e.target.value);
+          }}
+          maxLength={120}
+          disabled={busy || Boolean(frozenAttempt)}
+          placeholder="留空则按成员名称自动生成"
+          autoFocus
+        />
+      </label>
+
+      <div className="field">
+        <span>选择成员（已选 {activeMembers.length} 位，至少 2 位）</span>
+        {activeMembers.length > 0 ? (
+          <div className="create-group-chips">
+            {activeMembers.map((member) => {
+              const matched = bots.find(
+                (b) => b.deviceId === member.deviceId && b.botId === member.botId,
+              );
+              const label = matched?.role || member.botId;
+              return (
+                <button
+                  key={`${member.deviceId}:${member.botId}`}
+                  type="button"
+                  className="create-group-chip"
+                  disabled={busy || Boolean(frozenAttempt)}
+                  onClick={() => toggleMember(member)}
+                  aria-label={`移除 ${label}`}
+                >
+                  {matched ? (
+                    <GrokBotAvatar
+                      botKey={botAvatarKey(matched)}
+                      roleName={matched.role}
+                      isPrimary={matched.isPrimary}
+                      size={20}
+                    />
+                  ) : null}
+                  <span className="create-group-chip-name">{label}</span>
+                  {!frozenAttempt ? <X size={13} aria-hidden="true" /> : null}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+
+        {candidates.length > 4 ? (
+          <div className="create-group-search">
+            <Search size={14} aria-hidden="true" />
+            <input
+              type="search"
+              value={memberQuery}
+              onChange={(e) => setMemberQuery(e.target.value)}
+              placeholder="搜索智能体或设备…"
+              disabled={busy}
+            />
+            {memberQuery ? (
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setMemberQuery('')}
+                aria-label="清除搜索"
+              >
+                <X size={13} />
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
+        {candidates.length < 2 ? (
+          <div className="empty-state create-group-empty">
+            <p>群聊至少需要 2 个未归档智能体，当前数量不足。</p>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={busy}
+              onClick={onRequestCreateBot}
+            >
+              <Plus size={14} /> 去新建智能体
+            </button>
+          </div>
+        ) : filteredCandidates.length === 0 ? (
+          <div className="empty-state create-group-empty">没有匹配的智能体。</div>
+        ) : (
+          <div className="create-group-bot-list" role="group" aria-label="可选智能体">
+            {filteredCandidates.map((bot) => {
+              const selected = activeMembers.some((m) => m.botId === bot.botId);
+              const dev = devById.get(bot.deviceId);
+              const deviceLabel = dev?.displayName || bot.deviceName || '未命名设备';
+              const botOnline = Boolean(api.transportConnected && dev?.online && bot.online);
+              return (
+                <button
+                  key={`${bot.deviceId}:${bot.botId}`}
+                  type="button"
+                  role="checkbox"
+                  aria-checked={selected}
+                  disabled={busy || Boolean(frozenAttempt)}
+                  className={`create-group-bot-row${selected ? ' selected' : ''}`}
+                  onClick={() => toggleMember(bot)}
+                >
+                  <GrokBotAvatar
+                    botKey={botAvatarKey(bot)}
+                    roleName={bot.role}
+                    isPrimary={bot.isPrimary}
+                    starBadge={bot.isPrimary}
+                    platformBadge={dev?.platform || bot.platform || 'host'}
+                    offline={!botOnline}
+                    size={36}
+                  />
+                  <span className="create-group-bot-info">
+                    <span className="create-group-bot-title">
+                      <span className="create-group-bot-name">{bot.role}</span>
+                      <span className={`create-group-bot-node${botOnline ? '' : ' offline'}`}>
+                        {deviceLabel}
+                        {botOnline ? '' : ' · 离线'}
+                      </span>
+                    </span>
+                    {bot.description ? (
+                      <span className="create-group-bot-desc">{bot.description}</span>
+                    ) : null}
+                  </span>
+                  <span className={`create-group-check${selected ? ' selected' : ''}`} aria-hidden="true">
+                    {selected ? <Check size={13} strokeWidth={3} /> : null}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <p className="hint">可跨设备组合智能体加入同一群聊；所选成员中至少需包含一位在线设备上的智能体。</p>
+
+      {error ? (
+        <div className="error-banner" role="alert">
+          {error}
+        </div>
+      ) : null}
+
+      <div className="form-actions">
+        <button
+          type="submit"
+          className="primary-button"
+          disabled={
+            busy ||
+            !api.transportConnected ||
+            (!frozenAttempt && activeMembers.length < 2)
+          }
+        >
+          {busy
+            ? '创建中…'
+            : frozenAttempt
+              ? '按原请求重试'
+              : activeMembers.length >= 2
+                ? `创建群聊 (${activeMembers.length})`
+                : '创建群聊'}
         </button>
       </div>
     </form>
@@ -3422,6 +3791,8 @@ export function BotChats({
     questionnaire?: { requestId: string; conversationId: string; session: string };
   } | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [frozenGroupAttempt, setFrozenGroupAttempt] = useState<FrozenGroupCreateAttempt | null>(null);
   const [createTargetDeviceId, setCreateTargetDeviceId] = useState('');
   const [loading, setLoading] = useState(false);
   const [visible, setVisible] = useState(!document.hidden);
@@ -3435,7 +3806,7 @@ export function BotChats({
   const [stage, setStage] = useState<
     | null
     | { kind: 'dm'; member: MessageMember; name: string; deviceId: string }
-    | { kind: 'scope'; scopeId: string; deviceId: string }
+    | { kind: 'scope'; scopeId: string; deviceId: string; initialScope?: ScopeInfo | null }
   >(null);
   /** 群聊详情受控设置开关：菜单“查看群详情”以 true 打开，普通点行以 false 打开，切换/退出重置。 */
   const [roomSettingsOpen, setRoomSettingsOpen] = useState(false);
@@ -3469,6 +3840,7 @@ export function BotChats({
   const [archiving, setArchiving] = useState(false);
   const archiveFlight = useRef(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const topAddRef = useRef<HTMLDetailsElement>(null);
   const listMoreRef = useRef<HTMLDetailsElement>(null);
   const refreshQueued = useRef(false);
   const inFlight = useRef(false);
@@ -3616,6 +3988,8 @@ export function BotChats({
       setConfirmDeleteGroup(null);
       setArchiveTarget(null);
       setShowCreate(false);
+      setShowCreateGroup(false);
+      setFrozenGroupAttempt(null);
       setDeviceFilter('all');
       setQuery('');
     }
@@ -4813,27 +5187,73 @@ export function BotChats({
           ))}
         </div>
 
-        <div className="hub-search-wrap">
-          <Search size={14} aria-hidden="true" />
-          <input
-            ref={searchInputRef}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索对话…"
-            aria-label="搜索智能体或群聊"
-          />
-          {query ? (
-            <button
-              type="button"
-              className="icon-button"
-              onClick={() => setQuery('')}
-              aria-label="清除搜索"
+        <div className="hub-search-row">
+          <div className="hub-search-wrap">
+            <Search size={14} aria-hidden="true" />
+            <input
+              ref={searchInputRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="搜索对话…"
+              aria-label="搜索智能体或群聊"
+            />
+            {query ? (
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setQuery('')}
+                aria-label="清除搜索"
+              >
+                <X size={13} />
+              </button>
+            ) : (
+              <kbd className="hub-search-kbd" aria-hidden="true">Ctrl K</kbd>
+            )}
+          </div>
+          <details
+            className="hub-top-add"
+            ref={topAddRef}
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) {
+                event.currentTarget.open = false;
+              }
+            }}
+          >
+            <summary
+              className="icon-button hub-top-add-btn"
+              aria-label="新建智能体或群聊"
+              title="新建智能体或创建群聊"
             >
-              <X size={13} />
-            </button>
-          ) : (
-            <kbd className="hub-search-kbd" aria-hidden="true">Ctrl K</kbd>
-          )}
+              <Plus size={16} />
+            </summary>
+            <div className="hub-top-add-actions" role="menu">
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!identity}
+                onClick={() => {
+                  topAddRef.current?.removeAttribute('open');
+                  const preferredDevice = [stage?.deviceId, selectedBot?.deviceId, deviceFilter, currentDeviceId]
+                    .find(id => onlineDevices.some(device => device.deviceId === id));
+                  setCreateTargetDeviceId(preferredDevice ?? onlineDevices[0]?.deviceId ?? '');
+                  setShowCreate(true);
+                }}
+              >
+                <Sparkles size={15} /> 新建智能体
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!identity}
+                onClick={() => {
+                  topAddRef.current?.removeAttribute('open');
+                  setShowCreateGroup(true);
+                }}
+              >
+                <Users size={15} /> 创建群聊
+              </button>
+            </div>
+          </details>
         </div>
 
         {devices.length > 1 ? (
@@ -4882,7 +5302,7 @@ export function BotChats({
             <div className="status">目录尚未读取。</div>
           ) : primaryBots.length === 0 && regularBots.length === 0 && groupRows.length === 0 && !botsError ? (
             <div className="empty-state">
-              {query || deviceFilter !== 'all' ? '没有匹配的智能体或群聊。' : '暂无会话，可以先新建智能体。'}
+              {query || deviceFilter !== 'all' ? '没有匹配的智能体或群聊。' : '暂无会话，可以先新建智能体或创建群聊。'}
             </div>
           ) : (
             <>
@@ -4913,6 +5333,15 @@ export function BotChats({
             disabled={!identity}
           >
             <Plus size={15} /> 新建智能体
+          </button>
+          <button
+            type="button"
+            className="secondary-button hub-new-group-btn"
+            onClick={() => setShowCreateGroup(true)}
+            disabled={!identity}
+            title="创建群聊"
+          >
+            <Users size={15} /> 创建群聊
           </button>
           <details className="hub-list-more" ref={listMoreRef} onBlur={event => {
             if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false;
@@ -4973,6 +5402,11 @@ export function BotChats({
               onOpenSendRecords={onOpenSendRecords}
               onHistoryViewed={chatWorkspaceActive && !roomSettingsOpen ? onRoomHistoryViewed : undefined}
               initialScopeId={stage.scopeId}
+              initialScope={
+                stage.initialScope ??
+                groupRows.find((g) => g.scope.scope.scopeId === stage.scopeId)?.scope ??
+                null
+              }
               resolveRoomApi={resolveRoomApi}
               memberCandidates={scopeMemberCandidates}
               settingsOpen={roomSettingsOpen}
@@ -5069,7 +5503,7 @@ export function BotChats({
             onOpenPrivateChats={(bot) =>
               openDmList({ deviceId: bot.deviceId, botId: bot.botId })
             }
-            transcriptVisible={!showCreate && !confirmDeleteBot && !confirmDeleteGroup && !archiveTarget}
+            transcriptVisible={!showCreate && !showCreateGroup && !confirmDeleteBot && !confirmDeleteGroup && !archiveTarget}
             pageActive={pageActive && workspaceActive && !stage}
           />
           </div>
@@ -5119,6 +5553,50 @@ export function BotChats({
                     ];
                   });
                   triggerLoadBots();
+                }}
+              />
+            ) : null}
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+      <Dialog.Root open={showCreateGroup} onOpenChange={setShowCreateGroup}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="desktop-dialog-overlay" />
+          <Dialog.Content className="desktop-dialog create-bot-dialog create-group-dialog" aria-describedby={undefined}>
+            <div className="desktop-dialog-head">
+              <Dialog.Title>创建群聊</Dialog.Title>
+              <Dialog.Close asChild>
+                <button type="button" className="icon-button" aria-label="关闭">
+                  <X size={16} />
+                </button>
+              </Dialog.Close>
+            </div>
+            {identity ? (
+              <CreateGroupForm
+                api={api}
+                currentDeviceId={currentDeviceId}
+                devices={devices}
+                bots={bots}
+                writeTargetApiMap={roomWriteTargetApiMap}
+                frozenAttempt={frozenGroupAttempt}
+                onFreezeAttempt={setFrozenGroupAttempt}
+                onRequestCreateBot={() => {
+                  setShowCreateGroup(false);
+                  const preferredDevice = [stage?.deviceId, selectedBot?.deviceId, deviceFilter, currentDeviceId]
+                    .find(id => onlineDevices.some(device => device.deviceId === id));
+                  setCreateTargetDeviceId(preferredDevice ?? onlineDevices[0]?.deviceId ?? '');
+                  setShowCreate(true);
+                }}
+                onCreated={(targetDeviceId, scope) => {
+                  setShowCreateGroup(false);
+                  setRoomSettingsOpen(false);
+                  setStage({
+                    kind: 'scope',
+                    scopeId: scope.scope.scopeId,
+                    deviceId: targetDeviceId,
+                    initialScope: scope,
+                  });
+                  void refreshGroups();
                 }}
               />
             ) : null}
