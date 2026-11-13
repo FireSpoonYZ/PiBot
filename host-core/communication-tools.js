@@ -7,7 +7,7 @@ import { CONTROL_ERROR_CODES } from './remote-control-protocol.js';
 import { BOT_FILE_MAX_COUNT } from './bot-file-protocol.js';
 import { snapshotBotFiles, deliverBotFile } from './bot-files.js';
 import { createBotManagementTools } from './bot-management-tools.js';
-import { clampBlock, isPassContent } from './group-chat.js';
+import { GROUP_MAX_MESSAGES_PER_TURN, clampBlock, isPassContent } from './group-chat.js';
 
 const MAX_OUTPUT_BYTES = 50 * 1024;
 const MAX_TEXT_UNITS = 4096;
@@ -255,6 +255,15 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
           context.abortSignal?.throwIfAborted();
           return log.publish(publication);
         }, context);
+    if (stored?.suppressedByTurnCap) {
+      return {
+        scopeId: targetScopeId,
+        scopeKind: scope.kind,
+        ...(targetName ? { targetName } : {}),
+        status: 'turn_cap_reached',
+        message: `Per-turn room message limit (${GROUP_MAX_MESSAGES_PER_TURN}) reached; nothing further was published in this turn.`,
+      };
+    }
     // 记录本 Bot 原始 request 的来源 replyTarget：迟到回复据此回流原请求上下文（重放安全）。
     if (publication.category === 'request') await sessions.recordOutgoing(api, stored, context);
     const message = stored.message;

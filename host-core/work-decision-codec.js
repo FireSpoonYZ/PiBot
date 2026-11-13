@@ -1,6 +1,7 @@
 import {
   buildAgentInboundWakePrompt,
   buildClosingSendNudgePrompt,
+  buildGroupRedriveNote,
   buildGroupTurnWakePrompt,
 } from './group-chat.js';
 
@@ -46,14 +47,15 @@ export function createWorkInput(meta, requestId, turn = null, wakeContext = null
       originRequestId: turn.originRequestId,
     });
   } else if (turn !== null && replyTarget?.kind === 'room') {
+    const targetScopeId = replyTarget.scopeId ?? meta.scopeId;
     wakeBody = buildGroupTurnWakePrompt({
       memberName: wakeContext?.selfName,
       memberId: wakeContext?.selfMemberId,
       group: { name: wakeContext?.groupTitle ?? '' },
       peers: wakeContext?.peers ?? [],
       newMessages: wakeContext?.newMessages ?? [],
-      scopeId: replyTarget.scopeId ?? meta.scopeId,
-    });
+      scopeId: targetScopeId,
+    }) + (wakeContext?.redrive ? buildGroupRedriveNote(targetScopeId) : '');
   } else {
     wakeBody =
       'Review the source-labeled conversation events together and decide whether useful room speech or a DM is needed, or remain silent. Only communication tools publish.' +

@@ -5,7 +5,9 @@ export const GROUP_CONFIG_VERSION = 1;
 export const GROUP_MAX_MEMBER_TURNS = 10;
 export const GROUP_MAX_ROUNDS = 3;
 export const GROUP_PROMPT_HISTORY_LIMIT = 24;
+export const SHARED_ROOM_HISTORY_LIMIT = 24;
 export const GROUP_MAX_MESSAGES_PER_TURN = 2;
+export const GROUP_MAX_REDRIVE_ATTEMPTS = 3;
 export const GROUP_CHAT_TAG_PREFIX = '[Group chat: ';
 export const AGENT_INBOUND_WAKE_CUE = '[agent]';
 export const MAX_REPLY_NUDGES = 2;
@@ -191,15 +193,22 @@ export function evaluateGroupTurnEligibility({
   }
 
   let unreadEveryone = false;
+  let unreadOpenUserMessage = false;
   const unreadMentioned = new Set();
   for (const msg of unread) {
     const parsed = parseGroupMentions(typeof msg?.content === 'string' ? msg.content : '', members);
     unreadEveryone ||= parsed.isEveryone;
+    if (msg?.speaker?.kind === 'user' && !parsed.isEveryone && parsed.memberIds.length === 0) {
+      unreadOpenUserMessage = true;
+    }
     for (const id of parsed.memberIds) unreadMentioned.add(id);
   }
 
   if (unreadEveryone) {
     return { eligible: true, reason: 'everyone_mention' };
+  }
+  if (unreadOpenUserMessage) {
+    return { eligible: true, reason: 'thread_responder' };
   }
   if (unreadMentioned.size > 0) {
     return unreadMentioned.has(memberId)
@@ -224,6 +233,13 @@ export function isPotentialPassPrefix(text) {
   if (typeof text !== 'string') return true;
   const trimmed = text.trim();
   return !trimmed || isPassContent(trimmed) || /^\(?\s*(?:p(?:a(?:s(?:s\s*\)?\.?)?)?)?)?$/i.test(trimmed);
+}
+
+export function buildGroupRedriveNote(scopeId) {
+  const toolLabel = typeof scopeId === 'string' && scopeId
+    ? `send_to (scopeId ${JSON.stringify(scopeId)})`
+    : 'send_to';
+  return `\n(Redelivery: your previous attempt at this turn was interrupted by a direct message to you. The room has NOT seen any reply from you for the messages above — anything you said or did while handling that direct message stayed in that private chat. If you already did the work, send the result to this room with ${toolLabel} now; otherwise take the turn normally.)`;
 }
 
 export function formatGroupLine(message, viewerId) {

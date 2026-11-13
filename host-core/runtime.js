@@ -2362,7 +2362,11 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     },
     getScopeState: (scopeId) => runMessageOperation((log) => log.getScopeState(scopeId)),
     listScopeStates: (options) => runMessageOperation((log) => log.listScopeStates(options)),
-    publishUserMessage: (scopeId, input) => runMessageOperation((log) => log.publish(normalizeUserMessage(scopeId, input))),
+    publishUserMessage: async (scopeId, input) => {
+      const stored = await runMessageOperation((log) => log.publish(normalizeUserMessage(scopeId, input)));
+      decisions.nudge?.();
+      return stored;
+    },
     listScopeReplicas: (scopeId, options) => runMessageOperation((log) => log.listScopeReplicas(scopeId, options)),
     scopeHistory: (scopeId, options) => runMessageOperation((log) => readScopeHistory(log, scopeId, options)),
     getScopeMessage: (scopeId, messageId) => runMessageOperation((log) => readScopeMessage(log, scopeId, messageId)),
