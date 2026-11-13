@@ -1,6 +1,68 @@
-import { createContext, useCallback, useContext, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { CheckCircle2, ChevronDown, ChevronUp, CircleAlert, Info, RefreshCw, TriangleAlert, X } from 'lucide-react';
 import './error-notice.css';
+
+export const HIDE_TOOL_OUTPUT_STORAGE_KEY = 'pibot-hide-tool-output:v1';
+const HIDE_TOOL_OUTPUT_EVENT = 'pibot-hide-tool-output-change';
+
+export function readHideToolOutput(): boolean {
+  try {
+    if (typeof localStorage === 'undefined') return true;
+    const raw = localStorage.getItem(HIDE_TOOL_OUTPUT_STORAGE_KEY);
+    return raw !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+export function writeHideToolOutput(hide: boolean): void {
+  const normalized = Boolean(hide);
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(HIDE_TOOL_OUTPUT_STORAGE_KEY, normalized ? 'true' : 'false');
+    }
+  } catch {
+    // Ignore storage errors
+  }
+  try {
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+      window.dispatchEvent(new CustomEvent(HIDE_TOOL_OUTPUT_EVENT, { detail: normalized }));
+    }
+  } catch {
+    // Ignore custom event errors
+  }
+}
+
+export function useHideToolOutput(): [boolean, (next: boolean) => void] {
+  const [hideToolOutput, setHideToolOutputState] = useState<boolean>(() => readHideToolOutput());
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onCustom = (event: Event) => {
+      const detail = (event as CustomEvent<boolean>).detail;
+      setHideToolOutputState(typeof detail === 'boolean' ? detail : readHideToolOutput());
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (!event.key || event.key === HIDE_TOOL_OUTPUT_STORAGE_KEY) {
+        setHideToolOutputState(readHideToolOutput());
+      }
+    };
+    window.addEventListener(HIDE_TOOL_OUTPUT_EVENT, onCustom);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(HIDE_TOOL_OUTPUT_EVENT, onCustom);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
+
+  const setHideToolOutput = useCallback((next: boolean) => {
+    const normalized = Boolean(next);
+    writeHideToolOutput(normalized);
+    setHideToolOutputState(normalized);
+  }, []);
+
+  return [hideToolOutput, setHideToolOutput];
+}
 
 export type UiLanguage = 'system' | 'zh' | 'en';
 export const LanguageOverride = createContext<UiLanguage | undefined>(undefined);
@@ -33,7 +95,7 @@ export interface HumanizedError {
 const KNOWN_CODE_PREFIX = /^([A-Z][A-Z0-9_]{2,32}):\s*(.*)$/s;
 const OUTCOME_PREFIX = /^(unconfirmed|not-sent|responded):\s*(.*)$/is;
 const TRAILING_OUTCOME_CODE = /\s*(?:[·:;]\s*)?(?:unconfirmed|not-sent|responded):\s*([A-Z][A-Z0-9_]{2,32})$/i;
-const CONTEXT_PREFIX_RE = /^(群聊列表读取失败|目录读取失败|观察建立失败|连接失败|更换中心连接失败|无法读取配置|保存 profile 失败|设为主 Bot 失败|归档失败|恢复失败|删除失败|停止失败|选择图片失败|选择文件失败)[：:]\s*(.+)$/s;
+const CONTEXT_PREFIX_RE = /^(群聊列表读取失败|目录读取失败|观察建立失败|连接失败|更换中心连接失败|无法读取配置|保存 profile 失败|设为主 Bot 失败|归档失败|恢复失败|删除失败|停止失败|选择图片失败|选择文件失败|本次执行失败|This run failed|读取模型列表失败|模型生成失败)\s*[·:：-]\s*(.+)$/is;
 const TARGET_OFFLINE_PREFIX_RE = /^目标\s+(.+?)\s*离线[：:]\s*(.+)$/s;
 const DEVICE_CODE_PREFIX_RE = /^([^:：]{1,48}?)[：:]\s*([A-Z][A-Z0-9_]{2,32})(?:[：:\s]\s*(.*))?$/s;
 
@@ -48,9 +110,10 @@ function normalizeErrorParts(raw: string): {
   let devicePrefix = '';
   let code = '';
 
-  const ctxMatch = body.match(CONTEXT_PREFIX_RE);
-  if (ctxMatch) {
-    contextPrefix = ctxMatch[1].trim();
+  for (let i = 0; i < 3; i += 1) {
+    const ctxMatch = body.match(CONTEXT_PREFIX_RE);
+    if (!ctxMatch) break;
+    if (!contextPrefix) contextPrefix = ctxMatch[1].trim();
     body = ctxMatch[2].trim();
   }
 
@@ -118,6 +181,36 @@ function normalizeErrorParts(raw: string): {
   }
 
   return { code, body, contextPrefix, devicePrefix };
+}
+
+export function isModelConfigError(rawInput: unknown): boolean {
+  const raw = typeof rawInput === 'string' ? rawInput.trim() : rawInput == null ? '' : errorText(rawInput).trim();
+  if (!raw) return false;
+  const { code, body } = normalizeErrorParts(raw);
+  const upperCode = code.toUpperCase();
+  if (
+    upperCode === 'MODEL_NOT_CONFIGURED' ||
+    upperCode === 'MODEL_CONFIG_ERROR' ||
+    upperCode === 'INVALID_API_KEY' ||
+    upperCode === 'MISSING_API_KEY'
+  ) {
+    return true;
+  }
+  const combined = `${code} ${body} ${raw}`.toLowerCase();
+  if (
+    /api[\s_-]?key|apikey|invalid_api_key|unauthorized|authentication|credential|model[\s_-]?not[\s_-]?found|model[\s_-]?not[\s_-]?configured|no[\s_-]?model[\s_-]?configured|provider[\s_-]?not[\s_-]?found|invalid[\s_-]?model|\b(?:401|403)\b/.test(
+      combined,
+    ) ||
+    combined.includes('未配置模型') ||
+    combined.includes('模型未配置') ||
+    combined.includes('凭据') ||
+    combined.includes('密钥') ||
+    combined.includes('鉴权') ||
+    combined.includes('模型不存在')
+  ) {
+    return true;
+  }
+  return false;
 }
 
 export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => string): HumanizedError | null {
@@ -397,25 +490,58 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
   }
 
   // 6. Model & Generation errors
-  if (
-    code.startsWith('MODEL_') ||
-    body === 'model_error' ||
-    body.includes('模型生成失败') ||
-    lower.includes('model generation failed')
-  ) {
-    return {
-      tone: 'danger',
-      title: t('未能生成回复', 'Reply Generation Failed'),
-      description: t('模型服务未正常响应，请重试或检查模型与 API 密钥配置', 'The model provider did not respond properly. Retry or check your model settings'),
-      detail: body !== 'model_error' ? detail : undefined,
-    };
-  }
-
   if (body.includes('本次请求未获得回答') || lower.includes('no answer was generated')) {
     return {
       tone: 'warning',
       title: t('本次对话未返回内容', 'No Response Received'),
       description: t('生成过程已结束但未返回有效回复，您可以重新发送试一次', 'Generation ended without a reply. Please try sending your message again'),
+    };
+  }
+
+  const isRateLimit = /429|rate[\s_-]?limit|quota|overloaded|too many requests|resource_exhausted/i.test(lower);
+  const isModelConfig = isModelConfigError(raw);
+  if (
+    code.startsWith('MODEL_') ||
+    code === 'GENERATION_FAILED' ||
+    lower.includes('model_error') ||
+    contextPrefix === '模型生成失败' ||
+    contextPrefix === '本次执行失败' ||
+    lower.includes('this run failed') ||
+    body.includes('模型生成失败') ||
+    lower.includes('model generation failed') ||
+    isRateLimit ||
+    isModelConfig
+  ) {
+    const cleanMsg = (body && body !== 'model_error' ? body : '') || detail;
+    if (isRateLimit) {
+      return {
+        tone: 'warning',
+        title: t('模型服务繁忙或触发限流', 'Model Rate Limited or Busy'),
+        description: t('请求过于频繁或上游配额受限，请稍后重试。', 'Upstream rate limit or quota reached. Please retry shortly.'),
+        detail: cleanMsg || undefined,
+      };
+    }
+    if (isModelConfig) {
+      return {
+        tone: 'danger',
+        title: t('模型配置或凭据不可用', 'Model Configuration or API Key Issue'),
+        description: t('请检查模型服务商、API 密钥或所选模型是否有效。', 'Check whether the model provider, API key, and selected model are valid.'),
+        detail: cleanMsg || undefined,
+      };
+    }
+    if (/fetch failed|econnreset|etimedout|\b(?:502|503|504)\b|bad gateway|service unavailable|gateway timeout|network/i.test(lower)) {
+      return {
+        tone: 'warning',
+        title: t('网络连接波动，回复中断', 'Network Interrupted During Reply'),
+        description: t('连接上游服务时发生中断，请直接重试。', 'Connection to the upstream service was interrupted. Please retry.'),
+        detail: cleanMsg || undefined,
+      };
+    }
+    return {
+      tone: 'warning',
+      title: t('本轮回复未能完成', 'Reply Could Not Complete'),
+      description: t('生成过程中断，可直接重试；若反复出现请检查模型配置。', 'Generation was interrupted. Retry, or check model settings if this persists.'),
+      detail: cleanMsg && cleanMsg !== 'model_error' ? cleanMsg : undefined,
     };
   }
 
@@ -600,7 +726,7 @@ export function useAction() {
 }
 
 export interface ErrorNoticeProps {
-  error?: string;
+  error?: string | null;
   tone?: NoticeTone;
   title?: string;
   description?: string;

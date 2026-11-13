@@ -130,7 +130,7 @@ import {
   type PickedImageSource,
 } from '../imageAttachments';
 import type { ImageAttachment } from '../../../host-core/index.js';
-import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useText } from '../ui';
+import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useHideToolOutput, useText } from '../ui';
 
 export const uuid = () =>
   typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -795,27 +795,48 @@ export function TurnToolCallsSection({
   scopeKey,
   active,
   disabled,
+  variant,
+  requesterName,
+  hideToolOutput,
   onSubmitQuestionnaire,
   onSubmitVaultUnlock,
   t,
 }: Omit<ToolCallCardProps, 'tool'> & {
   tools: ChatToolCallItem[];
+  variant?: 'mobile' | 'desktop';
+  requesterName?: string;
+  hideToolOutput?: boolean;
   t: (zh: string, en: string) => string;
 }) {
+  const [prefHideToolOutput] = useHideToolOutput();
+  const effectiveHideToolOutput = hideToolOutput ?? prefHideToolOutput;
+
+  const hasInteractiveOrSendTo = tools.some(
+    tool =>
+      Boolean(tool.presentation && readToolPresentation(tool.presentation)) ||
+      (!tool.parentCallId && tool.name === 'send_to' && Boolean(tool.sendTo && (tool.sendTo.text || tool.sendTo.silentPass))),
+  );
   const hasActiveOrErrorOrInteractive = tools.some(
     tool =>
       tool.status === 'running' ||
       tool.status === 'error' ||
       Boolean(tool.presentation && readToolPresentation(tool.presentation)),
   );
-  const shouldAggregate = tools.length >= 3;
-  const [groupOpen, setGroupOpen] = useState(() => !shouldAggregate || hasActiveOrErrorOrInteractive);
+  const shouldAggregate = effectiveHideToolOutput
+    ? !hasInteractiveOrSendTo
+      ? tools.length >= 1
+      : tools.length >= 3
+    : tools.length >= 3;
+  const shouldAutoExpand = effectiveHideToolOutput ? hasInteractiveOrSendTo : hasActiveOrErrorOrInteractive;
+  const [groupOpen, setGroupOpen] = useState(() =>
+    effectiveHideToolOutput ? hasInteractiveOrSendTo : !shouldAggregate || hasActiveOrErrorOrInteractive,
+  );
 
   useEffect(() => {
-    if (hasActiveOrErrorOrInteractive) {
+    if (shouldAutoExpand) {
       setGroupOpen(true);
     }
-  }, [hasActiveOrErrorOrInteractive]);
+  }, [shouldAutoExpand]);
 
   const totalDurationMs = useMemo(
     () => tools.reduce((sum, item) => sum + (typeof item.durationMs === 'number' && item.durationMs > 0 ? item.durationMs : 0), 0),
@@ -823,6 +844,7 @@ export function TurnToolCallsSection({
   );
   const runningTool = tools.find(item => item.status === 'running');
   const errorCount = tools.filter(item => item.status === 'error').length;
+  const showGroupError = errorCount > 0 && (!effectiveHideToolOutput || groupOpen);
 
   if (!shouldAggregate) {
     return (
@@ -834,6 +856,9 @@ export function TurnToolCallsSection({
             scopeKey={scopeKey}
             active={active}
             disabled={disabled}
+            variant={variant}
+            requesterName={requesterName}
+            hideToolOutput={effectiveHideToolOutput}
             onSubmitQuestionnaire={onSubmitQuestionnaire}
             onSubmitVaultUnlock={onSubmitVaultUnlock}
           />
@@ -842,28 +867,32 @@ export function TurnToolCallsSection({
     );
   }
 
+  const groupTitle = runningTool
+    ? tools.length === 1
+      ? t(`正在调用 ${runningTool.name}`, `Running ${runningTool.name}`)
+      : t(`正在调用 ${runningTool.name} (${tools.length} 个工具)`, `Running ${runningTool.name} (${tools.length} tools)`)
+    : tools.length === 1
+      ? t(`已调用 ${tools[0].name}`, `Used ${tools[0].name}`)
+      : t(`已使用 ${tools.length} 个工具`, `Used ${tools.length} tools`);
+
   return (
     <div className="bot-chat-tools-group">
       <button
         type="button"
-        className={`bot-chat-tools-group-bar${runningTool ? ' is-running' : errorCount > 0 ? ' is-error' : ''}`}
+        className={`bot-chat-tools-group-bar${runningTool ? ' is-running' : showGroupError ? ' is-error' : ''}`}
         aria-expanded={groupOpen}
         onClick={() => setGroupOpen(v => !v)}
       >
         <span className="bot-tool-step-icon" aria-hidden="true">
-          {renderToolStepIcon(runningTool ? 'running' : errorCount > 0 ? 'error' : 'done')}
+          {renderToolStepIcon(runningTool ? 'running' : showGroupError ? 'error' : 'done')}
         </span>
-        <span className="bot-tools-group-title">
-          {runningTool
-            ? t(`正在调用 ${runningTool.name} (${tools.length} 个工具)`, `Running ${runningTool.name} (${tools.length} tools)`)
-            : t(`已使用 ${tools.length} 个工具`, `Used ${tools.length} tools`)}
-        </span>
+        <span className="bot-tools-group-title">{groupTitle}</span>
         {totalDurationMs > 0 && !runningTool ? (
           <span className="bot-tools-group-meta">
             {t(`耗时 ${formatToolStepDuration(totalDurationMs)}`, formatToolStepDuration(totalDurationMs))}
           </span>
         ) : null}
-        {errorCount > 0 ? (
+        {showGroupError ? (
           <span className="bot-tools-group-error">
             {t(`${errorCount} 失败`, `${errorCount} failed`)}
           </span>
@@ -880,6 +909,9 @@ export function TurnToolCallsSection({
               scopeKey={scopeKey}
               active={active}
               disabled={disabled}
+              variant={variant}
+              requesterName={requesterName}
+              hideToolOutput={effectiveHideToolOutput}
               onSubmitQuestionnaire={onSubmitQuestionnaire}
               onSubmitVaultUnlock={onSubmitVaultUnlock}
             />

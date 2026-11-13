@@ -13,6 +13,7 @@ import { HostServiceSection, useHostService } from './HostServiceSection';
 import { ClientUpdateSection, useClientUpdateSummary } from '../../../web/src/ClientUpdateSection';
 import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
 import { botAvatarKey } from '../../../web/src/botAvatarSync';
+import { ErrorNotice, useHideToolOutput } from '../../../web/src/ui';
 import { archiveExpiryAt, type BotChatsArchiveBridge } from './BotChats';
 
 interface ProfileFormState {
@@ -189,8 +190,8 @@ function ArchivedBots({ bridge, onOpenHistory }: {
           <RefreshCw size={13} aria-hidden /> 刷新
         </button>
       </div>
-      {error && <p className="error-banner" role="alert">{error}</p>}
-      {bridge?.error && <p className="error-banner" role="alert">{bridge.error}</p>}
+      <ErrorNotice compact error={error} onDismiss={() => setError('')} />
+      <ErrorNotice compact error={bridge?.error} />
       {items.length === 0 ? (
         <p className="empty-state">{bridge?.loading ? '正在读取归档…' : '暂无已归档的智能体。'}</p>
       ) : (
@@ -252,7 +253,7 @@ function ConnectionProfiles(props: SettingsPanelProps) {
       <section className="settings-section">
         <div className="section-head"><h4>连接档案</h4></div>
         {activeProfile && <p className="status">{activeProfile.title} · {props.phaseLabel}</p>}
-        {profilesError && <p className="error-banner" role="alert">{profilesError}</p>}
+        <ErrorNotice compact error={profilesError} />
         {profiles.length > 0 ? (
           <ul className="profile-list">
             {profiles.map((profile) => (
@@ -404,7 +405,7 @@ function CenterConnectionSettings({ centerStatus, onDisconnectCenter }: Pick<Set
           <ChevronRight className="settings-row-chevron" size={15} aria-hidden />
         </button>
       </div>
-      {managementError && <p className="error-banner" role="alert">{managementError}</p>}
+      <ErrorNotice compact error={managementError} onDismiss={() => setManagementError('')} />
       {clientId && (
         <details className="settings-section settings-diagnostics">
           <summary>连接详情</summary>
@@ -422,6 +423,7 @@ function CenterConnectionSettings({ centerStatus, onDisconnectCenter }: Pick<Set
 
 function ClientSettings(props: SettingsPanelProps) {
   const [page, setPage] = useState<SettingsPage>('overview');
+  const [hideToolOutput, setHideToolOutput] = useHideToolOutput();
   const titleRef = useRef<HTMLHeadingElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const nextFocus = useRef<SettingsPage | 'title' | null>(null);
@@ -481,20 +483,30 @@ function ClientSettings(props: SettingsPanelProps) {
       </Dialog.Description>
       <div className="dialog-body" ref={bodyRef}>
         {props.actionError && (page === 'connection' || page === 'profiles') && (
-          <div className="error-banner" role="alert">
-            <span className="error-banner-text">{props.actionError}</span>
-            <div className="error-banner-actions">
-              <button type="button" onClick={props.onDismissActionError}>关闭</button>
-            </div>
-          </div>
+          <ErrorNotice compact error={props.actionError} onDismiss={props.onDismissActionError} />
         )}
         {page === 'overview' && (
-          <div className="settings-row-group">
-            <SettingsLink page="connection" icon={<Globe size={17} />} summary={centerLabel} tone={centerTone} onOpen={openPage} />
-            <SettingsLink page="devices" icon={<Monitor size={17} />} summary={deviceSummary} onOpen={openPage} />
-            <SettingsLink page="update" icon={<Download size={17} />} summary={updateSummary} onOpen={openPage} />
-            <SettingsLink page="appearance" icon={<SunMoon size={17} />} summary={THEMES[props.theme]} onOpen={openPage} />
-          </div>
+          <>
+            <div className="settings-row-group">
+              <SettingsLink page="connection" icon={<Globe size={17} />} summary={centerLabel} tone={centerTone} onOpen={openPage} />
+              <SettingsLink page="devices" icon={<Monitor size={17} />} summary={deviceSummary} onOpen={openPage} />
+              <SettingsLink page="update" icon={<Download size={17} />} summary={updateSummary} onOpen={openPage} />
+              <SettingsLink page="appearance" icon={<SunMoon size={17} />} summary={THEMES[props.theme]} onOpen={openPage} />
+            </div>
+            <div className="settings-row-group">
+              <label className="settings-row settings-row-link">
+                <span className="settings-row-label">
+                  <span>隐藏工具输出</span>
+                  <span className="metadata" style={{ display: 'block', fontSize: 12 }}>默认折叠工具调用过程与原始输出</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={hideToolOutput}
+                  onChange={(event) => setHideToolOutput(event.target.checked)}
+                />
+              </label>
+            </div>
+          </>
         )}
         {page === 'connection' && <CenterConnectionSettings centerStatus={centerStatus} onDisconnectCenter={props.onDisconnectCenter} />}
         {page === 'devices' && (
@@ -506,7 +518,7 @@ function ClientSettings(props: SettingsPanelProps) {
                   <RefreshCw size={15} aria-hidden />
                 </button>
               </div>
-              {devices.error && <p className="error-banner" role="alert">{devices.error}</p>}
+              <ErrorNotice compact error={devices.error} />
               {showingLastDirectory && <p className="metadata">正在查看上次读取的设备。</p>}
               {devices.items.length ? (
                 <ul className="device-list settings-directory">
@@ -531,14 +543,29 @@ function ClientSettings(props: SettingsPanelProps) {
         {page === 'profiles' && <ConnectionProfiles {...props} />}
         {page === 'update' && <ClientUpdateSection variant="desktop" />}
         {page === 'appearance' && (
-          <div className="settings-row-group" role="group" aria-label="外观主题">
-            {(Object.keys(THEMES) as DesktopTheme[]).map((theme) => (
-              <label key={theme} className="settings-row settings-row-link">
-                <span className="settings-row-label">{THEMES[theme]}</span>
-                <input type="radio" name="desktop-theme" checked={props.theme === theme} onChange={() => props.onThemeChange(theme)} />
+          <>
+            <div className="settings-row-group" role="group" aria-label="外观主题">
+              {(Object.keys(THEMES) as DesktopTheme[]).map((theme) => (
+                <label key={theme} className="settings-row settings-row-link">
+                  <span className="settings-row-label">{THEMES[theme]}</span>
+                  <input type="radio" name="desktop-theme" checked={props.theme === theme} onChange={() => props.onThemeChange(theme)} />
+                </label>
+              ))}
+            </div>
+            <div className="settings-row-group">
+              <label className="settings-row settings-row-link">
+                <span className="settings-row-label">
+                  <span>隐藏工具输出</span>
+                  <span className="metadata" style={{ display: 'block', fontSize: 12 }}>默认折叠工具调用过程与原始输出</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={hideToolOutput}
+                  onChange={(event) => setHideToolOutput(event.target.checked)}
+                />
               </label>
-            ))}
-          </div>
+            </div>
+          </>
         )}
       </div>
     </>

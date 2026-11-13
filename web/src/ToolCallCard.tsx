@@ -6,7 +6,7 @@ import {
   type QuestionnaireSubmitPayload,
   type VaultUnlockSubmitPayload,
 } from './ToolPresentation';
-import { useText } from './ui';
+import { useHideToolOutput, useText } from './ui';
 import './tool-call-card.css';
 
 export interface ToolCallCardProps {
@@ -14,8 +14,9 @@ export interface ToolCallCardProps {
   scopeKey: string;
   active: boolean;
   disabled?: boolean;
-  variant?: 'desktop';
+  variant?: 'mobile' | 'desktop';
   requesterName?: string;
+  hideToolOutput?: boolean;
   onSubmitQuestionnaire?: (installationId: string, input: QuestionnaireSubmitPayload) => Promise<unknown>;
   onSubmitVaultUnlock?: (input: VaultUnlockSubmitPayload) => Promise<unknown>;
 }
@@ -28,10 +29,13 @@ export function ToolCallCard({
   disabled = false,
   variant,
   requesterName,
+  hideToolOutput,
   onSubmitQuestionnaire,
   onSubmitVaultUnlock,
 }: ToolCallCardProps) {
   const t = useText();
+  const [prefHideToolOutput] = useHideToolOutput();
+  const hideOutput = hideToolOutput ?? prefHideToolOutput;
   const presentation = readToolPresentation(tool.presentation);
   const codemode = tool.name === 'codemode';
   const script = codemode && typeof tool.args?.code === 'string' ? tool.args.code : undefined;
@@ -70,12 +74,14 @@ export function ToolCallCard({
     : undefined;
   const hasDetails = codemode || args !== undefined || tool.output !== undefined || tool.outputTruncated ||
     (tool.parentCallId !== undefined && tool.argSummary !== undefined);
+  const quietError = hideOutput && tool.status === 'error' && !presentation;
+  const statusClass = quietError ? 'is-quiet-error' : `is-${tool.status}`;
 
   return (
     <div
       key={`${scopeKey}:${tool.id}`}
       role="listitem"
-      className={`tool-call-card is-${tool.status}${incomplete ? ' is-incomplete' : ''}${tool.parentCallId ? ' is-nested' : ''}${sendTo ? ' is-send-to' : ''}`}
+      className={`tool-call-card ${statusClass}${incomplete ? ' is-incomplete' : ''}${tool.parentCallId ? ' is-nested' : ''}${sendTo ? ' is-send-to' : ''}`}
     >
       <div className="tool-call-header">
         <span className="tool-call-icon" aria-hidden="true">{icon}</span>
@@ -104,9 +110,9 @@ export function ToolCallCard({
         </div>
       ) : null}
 
-      {tool.error ? <pre className="tool-call-error">{tool.error}</pre> : null}
+      {!hideOutput && tool.error ? <pre className="tool-call-error">{tool.error}</pre> : null}
 
-      {tool.children && tool.children.length > 0 ? (
+      {!hideOutput && tool.children && tool.children.length > 0 ? (
         <div className="tool-call-children" role="list" aria-label={t('脚本子调用', 'Nested tool calls')}>
           {tool.children.map(child => (
             <ToolCallCard
@@ -117,20 +123,21 @@ export function ToolCallCard({
               disabled={disabled}
               variant={variant}
               requesterName={requesterName}
+              hideToolOutput={hideOutput}
               onSubmitQuestionnaire={onSubmitQuestionnaire}
               onSubmitVaultUnlock={onSubmitVaultUnlock}
             />
           ))}
         </div>
       ) : null}
-      {tool.nestedCallsTruncated ? (
+      {!hideOutput && tool.nestedCallsTruncated ? (
         <p className="tool-call-notice">{t('子调用摘要已截断，部分信息未显示。', 'Nested call summaries are truncated; some information is not shown.')}</p>
       ) : null}
-      {codemode && tool.status !== 'running' && tool.children === undefined ? (
+      {!hideOutput && codemode && tool.status !== 'running' && tool.children === undefined ? (
         <p className="tool-call-notice">{t('此记录未保留子调用摘要。', 'No nested call summaries were recorded.')}</p>
       ) : null}
 
-      {hasDetails ? (
+      {!hideOutput && hasDetails ? (
         <details className="tool-call-details">
           <summary>{codemode ? t('脚本与输出', 'Script and output') : t('调用详情', 'Call details')}</summary>
           {script !== undefined ? (
@@ -168,7 +175,7 @@ export function ToolCallCard({
           presentation={presentation}
           active={active && tool.presentationLive === true}
           disabled={disabled}
-          variant={variant}
+          variant={variant === 'desktop' ? 'desktop' : undefined}
           requesterName={requesterName}
           onSubmit={presentation.kind === 'questionnaire' && onSubmitQuestionnaire
             ? input => onSubmitQuestionnaire(presentation.installationId, input)

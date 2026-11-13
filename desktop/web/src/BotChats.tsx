@@ -1262,7 +1262,7 @@ function BotProfile({ api, centerApi, bot, page, onSaved }: {
       </label>
       <p className="hint">保存后将在智能体空闲时生效。</p>
       {cwdNotice ? <div className="status" role="status">{cwdNotice}</div> : null}
-      {cwdError || cwdFailed ? <div className="error-banner" role="alert">{cwdError ?? '无法读取工作目录。'}</div> : null}
+      {cwdError || cwdFailed ? <ErrorNotice compact error={cwdError ?? '无法读取工作目录。'} /> : null}
       <div className="form-actions">
         <button type="button" className="secondary-button" onClick={() => void saveCwd()} disabled={busy || isArchived || !centerOnline || !cwdSavable}>保存工作目录</button>
         {(cwdFailed || (cwdError && cwdRevision === null)) ? (
@@ -1276,7 +1276,7 @@ function BotProfile({ api, centerApi, bot, page, onSaved }: {
     <div className="form-grid inspector-profile-form">
       <label className="field">名称<input value={name} maxLength={120} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setName(e.target.value); }} /></label>
       <label className="field">职责<textarea value={description} maxLength={2000} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setDescription(e.target.value); }} /></label>
-      {error ? <div className="error-banner" role="alert">{error}</div> : null}
+      {error ? <ErrorNotice compact error={error} /> : null}
       <div className="form-actions">
         {locked ? (
           <button type="button" className="secondary-button" disabled={busy || !api.transportConnected} onClick={() => void adoptRemote()}>读取并采用远端资料（丢弃草稿）</button>
