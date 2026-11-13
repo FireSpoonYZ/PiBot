@@ -2352,7 +2352,7 @@ dependencies = [
 
 [[package]]
 name = "pibot"
-version = "0.0.21-dev"
+version = "0.0.21-dev.2"
 dependencies = [
  "base64 0.22.1",
  "dunce",
