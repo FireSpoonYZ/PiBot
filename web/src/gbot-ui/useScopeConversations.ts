@@ -44,6 +44,8 @@ export interface UseScopeConversationsResult {
   error: string | null;
   /** 等待本轮（或与在途合并后的）实际刷新结束。 */
   refresh: () => Promise<void>;
+  /** 外部（如权威节点 getScopeState/deleteScope 确认墓碑后）立即登记已删除 scopeId 并剔除残留副本。 */
+  markDeleted: (scopeId: string) => void;
 }
 
 const POLL_INTERVAL_MS = 5_000;
@@ -121,6 +123,7 @@ async function loadSource(
   source: ScopeConversationSource,
   kind: ScopeKind | undefined,
   prevHistory: Map<string, { preview: string; at: string | null }> | undefined,
+  knownDeletedIds: ReadonlySet<string>,
   stillValid: () => boolean,
 ): Promise<SourceSnapshot> {
   const { api, identity } = source;
@@ -141,7 +144,7 @@ async function loadSource(
   for (const s of rawScopes) {
     if (isScopeDeleted(s)) {
       deletedScopeIds.add(s.scope.scopeId);
-    } else {
+    } else if (!knownDeletedIds.has(s.scope.scopeId)) {
       activeScopes.push(s);
     }
   }
@@ -345,19 +348,21 @@ export function useScopeConversations(
         // loading 由整条刷新链持有，链末统一释放。
         setLoading(true);
         const roundRemovedIds = new Set<string>();
+        const onlineAuthorityMap = new Map<string, { source: ScopeConversationSource; activeIds: Set<string> }>();
         for (const source of online) {
           const label = source.label ?? source.identity.targetDeviceId;
           const acc = accountKey(source);
           const prev = snapshots.get(acc);
           try {
-            const snap = await loadSource(source, currentKind, prev?.history, stillValid);
+            const snap = await loadSource(source, currentKind, prev?.history, deletedScopeIds, stillValid);
             if (!stillValid()) return;
             for (const deletedId of snap.deletedScopeIds) {
               deletedScopeIds.add(deletedId);
               roundRemovedIds.add(deletedId);
             }
+            const activeIds = new Set(snap.scopes.map((s) => s.scope.scopeId));
+            onlineAuthorityMap.set(source.identity.targetDeviceId, { source, activeIds });
             if (prev) {
-              const activeIds = new Set(snap.scopes.map((s) => s.scope.scopeId));
               for (const prevItem of prev.items) {
                 if (currentKind && prevItem.scope.scope.kind !== currentKind) continue;
                 const prevId = prevItem.scope.scope.scopeId;
@@ -396,6 +401,37 @@ export function useScopeConversations(
             }
             if (!isPeerOfflineError(e)) {
               errors.push(label + ': ' + msg);
+            }
+          }
+        }
+        // 冷启动或重连时若滞后副本仍返回某群聊，而该群在线权威节点的 listScopeStates 已不含它，
+        // 向权威节点单点核实 getScopeState：确认携带 deletedAt 墓碑后立即压制滞后副本，避免僵尸群常驻。
+        const probedOrphans = new Set<string>();
+        for (const item of mergedPool) {
+          const scopeId = item.scope.scope.scopeId;
+          const authDeviceId = item.scope.authorityDeviceId;
+          if (item.scope.isAuthority || !authDeviceId || deletedScopeIds.has(scopeId) || probedOrphans.has(scopeId)) {
+            continue;
+          }
+          const authOnline = onlineAuthorityMap.get(authDeviceId);
+          if (!authOnline || authOnline.activeIds.has(scopeId)) continue;
+          probedOrphans.add(scopeId);
+          try {
+            const authLatest: ScopeInfo = await authOnline.source.api.call(
+              authOnline.source.identity,
+              'getScopeState',
+              { scopeId },
+            );
+            if (!stillValid()) return;
+            if (isScopeDeleted(authLatest)) {
+              deletedScopeIds.add(scopeId);
+              roundRemovedIds.add(scopeId);
+            }
+          } catch (checkErr) {
+            if (!stillValid()) return;
+            if ((checkErr as { code?: unknown })?.code === 'SCOPE_DELETED') {
+              deletedScopeIds.add(scopeId);
+              roundRemovedIds.add(scopeId);
             }
           }
         }
@@ -472,6 +508,18 @@ export function useScopeConversations(
 
   const refresh = useCallback((): Promise<void> => load(true), [load]);
 
+  const markDeleted = useCallback((scopeId: string): void => {
+    if (!scopeId) return;
+    deletedScopeIdsRef.current.add(scopeId);
+    for (const snap of snapshotRef.current.values()) {
+      snap.items = snap.items.filter((item) => item.scope.scope.scopeId !== scopeId);
+      snap.history.delete(scopeId);
+    }
+    if (mountedRef.current) {
+      setItems((prev) => prev.filter((item) => item.scope.scope.scopeId !== scopeId));
+    }
+  }, []);
+
   // 初次/换来源（sourcesKey）/换 kind/pageActive/可见性恢复：请求一轮合并刷新——
   // 无在途链立即开启；有则作废旧轮并入唯一待刷新槽，链内续读最新闭包的一轮。
   useEffect(() => {
@@ -488,5 +536,5 @@ export function useScopeConversations(
   // 卸载时作废旧响应；在途链经 mountedRef/while 条件自然终止，不再续网络。
   useEffect(() => () => { seqRef.current += 1; }, []);
 
-  return { items, loading, loaded: loadedKey === resultKey, error, refresh };
+  return { items, loading, loaded: loadedKey === resultKey, error, refresh, markDeleted };
 }

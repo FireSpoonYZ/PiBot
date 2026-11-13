@@ -986,10 +986,13 @@ export function HostPage({
     loading: roomConversationsLoading,
     error: roomConversationsError,
     refresh: refreshRoomConversations,
+    markDeleted: markRoomConversationDeleted,
   } = useScopeConversations(scopeConversationSources, active && screen === 'hub', 'room');
   // 下拉刷新用最新 refresh：ref 免除把 hook 返回值塞进 triggerHubRefresh 依赖。
   const refreshRoomConversationsRef = useRef(refreshRoomConversations);
   refreshRoomConversationsRef.current = refreshRoomConversations;
+  const markRoomConversationDeletedRef = useRef(markRoomConversationDeleted);
+  markRoomConversationDeletedRef.current = markRoomConversationDeleted;
 
   // 置顶分区：按 activeCenter 或本机稳定账号标识（不含 generation）。
   const pinStorageScope = useMemo(() => {
@@ -2754,6 +2757,12 @@ ${newer}` : draftSnapshot;
         if ((latest.scope as { deletedAt?: string }).deletedAt) {
           unconfirmedRoomDeletesRef.current.delete(scopeId);
           chatPins.removePin(roomPinKey(scopeId));
+          markRoomConversationDeletedRef.current(scopeId);
+          if (scopeConversationTarget?.scope.scope.scopeId === scopeId) {
+            setRoomSettingsOpen(false);
+            setScopeConversationTarget(null);
+            setScreen('hub');
+          }
           setRoomDeleteModal(null);
           refreshRoomConversationsRef.current();
           return;
@@ -2781,6 +2790,20 @@ ${newer}` : draftSnapshot;
         });
       } catch (err) {
         if (roomDeleteFetchSeqRef.current !== fetchSeq) return;
+        const errCode = (err as { code?: string })?.code;
+        if (errCode === 'SCOPE_DELETED') {
+          unconfirmedRoomDeletesRef.current.delete(scopeId);
+          chatPins.removePin(roomPinKey(scopeId));
+          markRoomConversationDeletedRef.current(scopeId);
+          if (scopeConversationTarget?.scope.scope.scopeId === scopeId) {
+            setRoomSettingsOpen(false);
+            setScopeConversationTarget(null);
+            setScreen('hub');
+          }
+          setRoomDeleteModal(null);
+          refreshRoomConversationsRef.current();
+          return;
+        }
         setRoomDeleteModal({
           room,
           loadingLatest: false,
@@ -2791,7 +2814,7 @@ ${newer}` : draftSnapshot;
         });
       }
     },
-    [resolveRoomApi, chatPins, roomPinKey, knownBots, t],
+    [resolveRoomApi, chatPins, roomPinKey, knownBots, scopeConversationTarget, t],
   );
 
   const openRoomDeleteConfirm = useCallback(
@@ -2843,6 +2866,7 @@ ${newer}` : draftSnapshot;
           if ((check.scope as { deletedAt?: string }).deletedAt) {
             unconfirmedRoomDeletesRef.current.delete(attempt.scopeId);
             chatPins.removePin(roomPinKey(attempt.scopeId));
+            markRoomConversationDeletedRef.current(attempt.scopeId);
             if (scopeConversationTarget?.scope.scope.scopeId === attempt.scopeId) {
               setRoomSettingsOpen(false);
               setScopeConversationTarget(null);
@@ -2857,6 +2881,7 @@ ${newer}` : draftSnapshot;
           if (checkCode === 'NOT_FOUND' || checkCode === 'SCOPE_DELETED') {
             unconfirmedRoomDeletesRef.current.delete(attempt.scopeId);
             chatPins.removePin(roomPinKey(attempt.scopeId));
+            markRoomConversationDeletedRef.current(attempt.scopeId);
             if (scopeConversationTarget?.scope.scope.scopeId === attempt.scopeId) {
               setRoomSettingsOpen(false);
               setScopeConversationTarget(null);
@@ -2879,6 +2904,7 @@ ${newer}` : draftSnapshot;
       });
       unconfirmedRoomDeletesRef.current.delete(attempt.scopeId);
       chatPins.removePin(roomPinKey(attempt.scopeId));
+      markRoomConversationDeletedRef.current(attempt.scopeId);
       if (scopeConversationTarget?.scope.scope.scopeId === attempt.scopeId) {
         setRoomSettingsOpen(false);
         setScopeConversationTarget(null);
@@ -6924,6 +6950,7 @@ ${newer}` : draftSnapshot;
                       const deletedScopeId = scopeConversationTarget.scope.scope.scopeId;
                       unconfirmedRoomDeletesRef.current.delete(deletedScopeId);
                       chatPins.removePin(roomPinKey(deletedScopeId));
+                      markRoomConversationDeletedRef.current(deletedScopeId);
                       setRoomSettingsOpen(false);
                       setScopeConversationTarget(null);
                       setScreen('hub');

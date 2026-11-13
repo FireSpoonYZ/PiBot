@@ -1256,9 +1256,11 @@ export function Scopes({
   const botsSessRef = useRef('');
   const targetKeyRef = useRef<string | null>(null);
   const refreshConversations = convList.refresh;
+  const markConversationDeleted = convList.markDeleted;
 
   const handleScopeDeleted = useCallback(() => {
     onSettingsOpenChange?.(false);
+    if (selectedId) markConversationDeleted(selectedId);
     setSelected(null);
     setDetailError(null);
     if (!detailOnly) {
@@ -1271,7 +1273,7 @@ export function Scopes({
     } else if (detailOnly) {
       onBack?.();
     }
-  }, [detailOnly, isControlled, onSelectScope, onDeleted, onBack, onSettingsOpenChange, refreshConversations]);
+  }, [detailOnly, isControlled, selectedId, onSelectScope, onDeleted, onBack, onSettingsOpenChange, refreshConversations, markConversationDeleted]);
 
   useEffect(() => () => { scopesSeqRef.current += 1; }, []);
 

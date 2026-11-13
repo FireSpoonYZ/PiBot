@@ -3717,6 +3717,7 @@ export function BotChats({
     loaded: groupsLoaded,
     error: groupsError,
     refresh: refreshGroups,
+    markDeleted: markGroupDeleted,
   } = useScopeConversations(scopeSources, pageActive && !boardActive, 'room');
   const hasOnlineGroupSource = scopeSources.some(source => source.api.transportConnected);
 
@@ -4288,6 +4289,7 @@ export function BotChats({
       if (sessionKey(wApi.identity) !== localSess) return;
       if (latest.scope.deletedAt) {
         removePin(roomPinKey(scopeId));
+        markGroupDeleted(scopeId);
         setStage((cur) => {
           if (cur && cur.kind === 'scope' && cur.scopeId === scopeId) {
             setRoomSettingsOpen(false);
@@ -4381,6 +4383,7 @@ export function BotChats({
       });
       if (sessionKey(wApi.identity) !== localSess) return;
       removePin(roomPinKey(scopeId));
+      markGroupDeleted(scopeId);
       setStage((cur) => {
         if (cur && cur.kind === 'scope' && cur.scopeId === scopeId) {
           setRoomSettingsOpen(false);
@@ -4971,6 +4974,7 @@ export function BotChats({
               onSettingsOpenChange={setRoomSettingsOpen}
               onDeleted={() => {
                 removePin(roomPinKey(stage.scopeId));
+                markGroupDeleted(stage.scopeId);
                 setRoomSettingsOpen(false);
                 setStage(null);
                 refreshGroups();

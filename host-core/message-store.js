@@ -410,7 +410,7 @@ export function openMessageStore(dataRoot, deviceId) {
       if (kindRow?.kind === 'dm' && stmtGetLatestScope.get(input.scopeId).members_json !== JSON.stringify(input.members)) {
         throw messageError('REQUEST_CONFLICT', 'DM participants are fixed; create a different scope for another pair');
       }
-      if (stmtCountScopeRevs.get(input.scopeId).n === 0) {
+      if (stmtCountScopeRevs.get(input.scopeId).n === 0 && input.deletedAt === undefined) {
         const hasLocalMember = input.members.some((member) => member.deviceId === deviceId);
         if (!hasLocalMember) {
           throw messageError('SCOPE_FORBIDDEN', 'first installed scope revision must include a local member bot');
