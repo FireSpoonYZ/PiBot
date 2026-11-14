@@ -906,6 +906,11 @@ code {
   padding-right: 2px;
 }
 
+/* Keep .cw-card (overflow: hidden -> min-height: 0) from shrinking instead of overflowing */
+.cw-picker-scroll > * {
+  flex-shrink: 0;
+}
+
 .cw-picker-group {
   display: flex;
   flex-direction: column;
