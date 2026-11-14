@@ -95,6 +95,18 @@ export function openModelCatalog({ store, dataRoot, onChange }) {
   const cachePath = join(dataRoot, 'pi-models-store.json');
   mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
 
+  function bundledResetSpec(providerId) {
+    const profile = bundled.get(providerId);
+    if (!profile) return null;
+    const model = profile.getModels()[0];
+    return {
+      name: profile.name,
+      api: model?.api || 'openai-completions',
+      baseUrl: profile.baseUrl ?? '',
+      credentialRef: profile.auth?.apiKey ? profile.id + '-api-key' : null,
+    };
+  }
+
   function ensureProviders() {
     let added = 0;
     for (const profile of bundled.values()) {
@@ -107,11 +119,10 @@ export function openModelCatalog({ store, dataRoot, onChange }) {
         }
         continue;
       }
-      const model = profile.getModels()[0];
+      const spec = bundledResetSpec(profile.id);
       store.putProvider({
-        id: profile.id, name: profile.name, api: model?.api || 'openai-completions',
-        baseUrl: profile.baseUrl ?? '', credentialRef: profile.id + '-api-key',
-        native: true, enabled: false,
+        id: profile.id, ...spec,
+        native: true, enabled: false, configured: false,
       }, null);
       added++;
     }
@@ -150,12 +161,13 @@ export function openModelCatalog({ store, dataRoot, onChange }) {
     for (const provider of store.listProviders()) {
       const available = runtime.getModels(provider.id);
       const bundledModels = new Map((bundled.get(provider.id)?.getModels() ?? []).map(model => [model.id, model]));
+      const existingById = new Map(store.listModels(provider.id, { includeRemoved: true }).map(row => [row.id, row]));
       const ids = new Set();
       for (const candidate of available) {
         if (candidate.type && candidate.type !== 'chat') continue;
         if (!candidate.id || typeof candidate.id !== 'string') continue;
         ids.add(candidate.id);
-        const current = store.listModels(provider.id).find(row => row.id === candidate.id);
+        const current = existingById.get(candidate.id);
         if (current && current.source !== 'catalog') {
           // Older PiBot records lack source markers. Match their former bundled Pi
           // metadata to continue automatic updates, but preserve owner edits.
@@ -173,15 +185,23 @@ export function openModelCatalog({ store, dataRoot, onChange }) {
         }
         const fields = Object.fromEntries(MODEL_FIELDS.filter(key => candidate[key] !== undefined)
           .map(key => [key, candidate[key]]));
-        const value = { ...fields, input: fields.input ?? ['text'], reasoning: Boolean(fields.reasoning),
-          enabled: current?.enabled ?? true, source: 'catalog' };
+        const isRemoved = current?.removed === true;
+        const value = {
+          ...fields,
+          input: fields.input ?? ['text'],
+          reasoning: Boolean(fields.reasoning),
+          enabled: isRemoved ? false : (current?.enabled ?? true),
+          source: 'catalog',
+          ...(isRemoved ? { removed: true } : {}),
+        };
         if (!current) {
           store.putModel(provider.id, value, null);
           modelsAdded++;
         } else {
-          const comparable = Object.fromEntries([...MODEL_FIELDS, 'input', 'enabled', 'source']
+          const compareKeys = [...MODEL_FIELDS, 'input', 'enabled', 'source', 'removed'];
+          const comparable = Object.fromEntries(compareKeys
             .filter(key => current[key] !== undefined).map(key => [key, current[key]]));
-          const next = Object.fromEntries([...MODEL_FIELDS, 'input', 'enabled', 'source']
+          const next = Object.fromEntries(compareKeys
             .filter(key => value[key] !== undefined).map(key => [key, value[key]]));
           if (JSON.stringify(comparable) !== JSON.stringify(next)) {
             store.putModel(provider.id, value, current.revision);
@@ -190,7 +210,7 @@ export function openModelCatalog({ store, dataRoot, onChange }) {
         }
       }
       // A removed dynamic catalog entry should not remain advertised as usable.
-      for (const old of store.listModels(provider.id)) {
+      for (const old of existingById.values()) {
         if (old.source === 'catalog' && old.enabled && !ids.has(old.id)) {
           store.putModel(provider.id, { ...old, enabled: false }, old.revision);
           modelsUpdated++;
@@ -240,6 +260,7 @@ export function openModelCatalog({ store, dataRoot, onChange }) {
     apply: () => enqueue({ network: false }),
     sync: () => enqueue({ network: true, force: true }),
     runtime: async () => { await ready; return catalog; },
+    bundledResetSpec,
     hasOAuth: id => Boolean(store.getCredential(piOauthCredentialId(id))?.configured),
     async getAuth(providerId) {
       await ready;

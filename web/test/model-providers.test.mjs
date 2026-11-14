@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const { builtinProviders } = await import(new URL('../../host-core/node_modules/@earendil-works/pi-ai/dist/providers/all.js', import.meta.url));
 import { nativeCenterProvider } from '../../host-core/native-center-providers.js';
-import { applyCenterModels } from '../../host-core/runtime-models.js';
+import { applyCenterModels, discoverCenterProviderModels } from '../../host-core/runtime-models.js';
+import { setupPiHttpRuntime } from '../../center-server/http-dispatcher.js';
 import { centerPiCredentialStore, openModelCatalog } from '../../center-server/model-catalog.js';
+import { openProviderAuth } from '../../center-server/provider-auth.js';
 import { openCenterStore } from '../../center-server/data/index.js';
 
 function catalogProvider(id) {
@@ -252,6 +255,235 @@ test('device snapshots and applyCenterModels handle catalog source metadata and 
     }
     const status = store.getDeviceRuntimeStatus('dev-1', true);
     assert.equal(status.status, 'applied');
+  } finally {
+    await catalog?.close();
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+async function waitForFlowCondition(providerAuth, providerId, flowId, predicate, timeoutMs = 4000) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  while (Date.now() < deadline) {
+    last = providerAuth.status(providerId, flowId);
+    if (predicate(last)) return last;
+    await new Promise(resolve => setTimeout(resolve, 40));
+  }
+  throw new Error(`Timed out waiting for OAuth flow state: ${JSON.stringify(last)}`);
+}
+
+test('ChatGPT and OpenAI Codex OAuth flows match Pi Agent contract', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pibot-oauth-parity-test-'));
+  const store = openCenterStore({ dataRoot: root, encryptionKey: Buffer.alloc(32, 81) });
+  let catalog;
+  let providerAuth;
+  try {
+    setupPiHttpRuntime();
+    assert.equal(process.env.AI_AGENT, 'pi');
+    assert.equal(process.env.PI_CODING_AGENT, 'true');
+
+    catalog = openModelCatalog({ store, dataRoot: root, onChange: () => {} });
+    await catalog.ready;
+    providerAuth = openProviderAuth({ store, catalog, onChange: () => {} });
+
+    // OAuth-only provider openai-codex must not receive a bogus API-key credentialRef
+    const codexStored = store.getProvider('openai-codex');
+    assert.equal(codexStored.credentialRef, null);
+    const codexDesc = await providerAuth.describe('openai-codex');
+    assert.equal(codexDesc.oauth, true);
+    assert.equal(codexDesc.apiKey, false);
+
+    // 1. OpenAI Codex: select -> browser -> auth_url uses originator=pi (not custom agentName)
+    const { flowId: codexFlowId } = await providerAuth.start('openai-codex');
+    const codexSelect = await waitForFlowCondition(
+      providerAuth,
+      'openai-codex',
+      codexFlowId,
+      s => s.prompt?.type === 'select',
+    );
+    assert.deepEqual(
+      codexSelect.prompt.options.map(o => o.id),
+      ['browser', 'device_code'],
+    );
+    providerAuth.answer('openai-codex', codexFlowId, 'browser');
+    const codexBrowser = await waitForFlowCondition(
+      providerAuth,
+      'openai-codex',
+      codexFlowId,
+      s => s.events.some(e => e.type === 'auth_url') && s.prompt?.type === 'manual_code',
+    );
+    const codexUrl = new URL(codexBrowser.events.find(e => e.type === 'auth_url').url);
+    assert.equal(codexUrl.origin, 'https://auth.openai.com');
+    assert.equal(codexUrl.searchParams.get('originator'), 'pi');
+    assert.equal(codexUrl.searchParams.get('codex_cli_simplified_flow'), 'true');
+    assert.equal(codexUrl.searchParams.get('redirect_uri'), 'http://localhost:1455/auth/callback');
+
+    // Invalid URL without ?code= rejects non-destructively while keeping flow pending
+    assert.throws(
+      () => providerAuth.answer('openai-codex', codexFlowId, 'http://localhost:1455/auth/callback'),
+      err => err?.code === 'INVALID_ARGUMENT',
+    );
+    assert.equal(providerAuth.status('openai-codex', codexFlowId).status, 'pending');
+    providerAuth.cancel('openai-codex', codexFlowId);
+
+    // 2. OpenAI ("Sign in with ChatGPT"): receives valid installation UUID via getDeviceId()
+    const installationUuid = store.getInstallationId();
+    assert.match(installationUuid, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+
+    const { flowId: chatgptFlowId } = await providerAuth.start('openai');
+    const chatgptReady = await waitForFlowCondition(
+      providerAuth,
+      'openai',
+      chatgptFlowId,
+      s => s.status === 'failed' || (s.events.some(e => e.type === 'auth_url') && s.prompt?.type === 'manual_code'),
+    );
+    // If port 1455 happens to be held on the host machine by another process, skip port-dependent assertion gracefully
+    if (chatgptReady.status !== 'failed') {
+      const chatgptUrl = new URL(chatgptReady.events.find(e => e.type === 'auth_url').url);
+      assert.equal(chatgptUrl.searchParams.get('ext_agent_host_id'), `urn:uuid:${installationUuid.toLowerCase()}`);
+      assert.equal(chatgptUrl.searchParams.get('agent_name_hint'), 'Pi');
+      assert.throws(
+        () => providerAuth.answer('openai', chatgptFlowId, 'not-a-url'),
+        err => err?.code === 'INVALID_ARGUMENT',
+      );
+      assert.equal(providerAuth.status('openai', chatgptFlowId).status, 'pending');
+      providerAuth.cancel('openai', chatgptFlowId);
+    }
+  } finally {
+    providerAuth?.close();
+    await catalog?.close();
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('discoverCenterProviderModels fetches /v1/models directly without a Host device', async () => {
+  setupPiHttpRuntime();
+  let seenAuth = '';
+  let seenCustom = '';
+  const upstream = createServer((req, res) => {
+    if (req.url === '/v1/models') {
+      seenAuth = req.headers.authorization ?? '';
+      seenCustom = req.headers['x-custom-test'] ?? '';
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        data: [
+          { id: 'qwen3-coder-30b', context_window: 131072, max_output_tokens: 16384 },
+          { id: 'deepseek-r1-distill', context_length: 65536 },
+          { id: 'text-embedding-3-small' },
+          { id: 'whisper-large-v3' },
+        ],
+      }));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = upstream.address();
+    const result = await discoverCenterProviderModels({
+      provider: {
+        id: 'local-openai',
+        name: 'Local OpenAI',
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        api: 'openai-completions',
+        headers: { 'X-Custom-Test': 'ok' },
+      },
+      models: [],
+      credential: 'sk-local-test',
+    });
+    assert.equal(seenAuth, 'Bearer sk-local-test');
+    assert.equal(seenCustom, 'ok');
+    assert.deepEqual(
+      result.models.map(m => m.id),
+      ['deepseek-r1-distill', 'qwen3-coder-30b'],
+    );
+    const r1 = result.models.find(m => m.id === 'deepseek-r1-distill');
+    assert.equal(r1.reasoning, true);
+    assert.equal(r1.contextWindow, 65536);
+    const qwen = result.models.find(m => m.id === 'qwen3-coder-30b');
+    assert.equal(qwen.contextWindow, 131072);
+    assert.equal(qwen.maxTokens, 16384);
+  } finally {
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
+test('deleteProvider and deleteModel wipe credentials, clean modelRefs, and persist catalog removal', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pibot-delete-provider-model-test-'));
+  const store = openCenterStore({ dataRoot: root, encryptionKey: Buffer.alloc(32, 82) });
+  let catalog;
+  try {
+    catalog = openModelCatalog({ store, dataRoot: root, onChange: () => {} });
+    await catalog.ready;
+
+    // 1. Custom provider creation + deletion cleans credentials & active modelRef
+    const custom = store.putProvider({
+      id: 'my-ollama',
+      name: 'My Ollama',
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      api: 'openai-completions',
+      credentialRef: 'my-ollama-api-key',
+      enabled: true,
+      configured: true,
+    }, null);
+    assert.equal(custom.configured, true);
+    store.putCredential('my-ollama-api-key', { expectedRevision: null, value: 'ollama-secret' });
+    store.putModelsBatch('my-ollama', [
+      { id: 'llama3.3', name: 'Llama 3.3', contextWindow: 128000, maxTokens: 8192, input: ['text'], reasoning: false, enabled: true },
+    ]);
+    store.setModelStar('my-ollama/llama3.3', true);
+    store.putModelConfig(0, { modelRef: 'my-ollama/llama3.3', thinkingLevel: 'medium' });
+
+    const delCustom = store.deleteProvider('my-ollama', null);
+    assert.equal(delCustom.reset, false);
+    assert.equal(store.getProvider('my-ollama'), null);
+    assert.equal(store.getCredential('my-ollama-api-key')?.configured, false);
+    assert.throws(() => store.resolveCredential('my-ollama-api-key'));
+    assert.equal(store.getModelConfig().global.modelRef, undefined);
+    assert.equal(store.getModelConfig().global.thinkingLevel, 'medium');
+    assert.deepEqual(store.listModelStars(), []);
+
+    // 2. Catalog model deletion marks removed=true and survives catalog.apply() without reappearing
+    const openai = store.getProvider('openai');
+    store.putCredential('openai-api-key', { expectedRevision: null, value: 'sk-openai-test' });
+    store.putProvider({ ...openai, enabled: true, configured: true }, openai.revision);
+    const catalogModels = store.listModels('openai');
+    assert.ok(catalogModels.length >= 2);
+    const victim = catalogModels[0];
+    store.putModelConfig(store.getModelConfig().revision, { modelRef: `openai/${victim.id}`, thinkingLevel: 'high' });
+
+    const delModel = store.deleteModel('openai', victim.id);
+    assert.equal(delModel.hiddenFromCatalog, true);
+    assert.equal(store.listModels('openai').some(m => m.id === victim.id), false);
+    assert.equal(store.getModelConfig().global.modelRef, undefined);
+
+    await catalog.apply();
+    assert.equal(store.listModels('openai').some(m => m.id === victim.id), false);
+    const withRemoved = store.listModels('openai', { includeRemoved: true }).find(m => m.id === victim.id);
+    assert.equal(withRemoved?.removed, true);
+    assert.equal(withRemoved?.enabled, false);
+
+    // Re-adding via batch restores the catalog model cleanly
+    store.putModelsBatch('openai', [{ ...withRemoved, enabled: true, removed: false }]);
+    assert.equal(store.listModels('openai').some(m => m.id === victim.id), true);
+
+    // 3. Native provider deletion wipes OAuth + API Key credentials and resets configured=false
+    store.putCredential('center-internal-pi-oauth-openai', {
+      expectedRevision: null,
+      value: JSON.stringify({ type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 60_000 }),
+    });
+    const resetSpec = catalog.bundledResetSpec('openai');
+    const delNative = store.deleteProvider('openai', resetSpec);
+    assert.equal(delNative.reset, true);
+    assert.equal(store.getCredential('openai-api-key')?.configured, false);
+    assert.throws(() => store.resolveCredential('openai-api-key'));
+    assert.equal(store.getCredential('center-internal-pi-oauth-openai')?.configured, false);
+    assert.throws(() => store.resolveCredential('center-internal-pi-oauth-openai'));
+    const resetOpenai = store.getProvider('openai');
+    assert.equal(resetOpenai.enabled, false);
+    assert.equal(resetOpenai.configured, false);
   } finally {
     await catalog?.close();
     store.close();

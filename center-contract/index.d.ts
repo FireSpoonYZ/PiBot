@@ -31,6 +31,8 @@ export interface Provider {
   revision: number;
   /** Native Pi provider, keeping its protocol-specific implementation. */
   native?: boolean;
+  /** Owner-added/configured marker so disabled providers stay visible in the list until deleted. */
+  configured?: boolean;
   /** Pi models.json-compatible provider overrides; omitted fields inherit Pi defaults. */
   custom?: JsonObject;
 }
@@ -53,6 +55,7 @@ export interface Model {
   samplingParams?: JsonObject;
   samplingParamsByThinkingLevel?: JsonObject;
   source?: 'catalog' | 'manual';
+  removed?: boolean;
   enabled: boolean;
   revision: number;
 }
@@ -60,6 +63,7 @@ export interface ProviderAuthStatus {
   providerId: string;
   method: 'none' | 'api_key' | 'oauth';
   oauth: boolean;
+  apiKey?: boolean;
   label: string;
   subscription: boolean;
 }
@@ -483,7 +487,39 @@ export interface CenterConnectionStatus {
 export interface SessionInfo { authenticated: boolean; csrfToken: string | null }
 export interface LoginRequest { password: string }
 export interface CredentialWrite { value: string; expectedRevision: number | null }
-export interface ProviderCheckRequest { deviceId: string }
+export interface ProviderCheckRequest {
+  deviceId?: string;
+  baseUrl?: string;
+  api?: string;
+  apiKey?: string;
+  headers?: JsonObject;
+}
+export interface ModelCatalogItem {
+  modelRef: string;
+  name: string;
+  contextWindow: number;
+  maxTokens: number;
+  reasoning: boolean;
+}
+export interface ModelPickerResponse {
+  defaultModel: string | null;
+  models: ModelCatalogItem[];
+  starredModels: string[];
+  sync: { source: string; syncedAt: string | null; error: string | null };
+}
+export interface DeleteProviderResult {
+  deleted: boolean;
+  reset?: boolean;
+  clearedGlobalModel: boolean;
+  clearedBotModels: number;
+}
+export interface DeleteModelResult {
+  deleted: boolean;
+  hiddenFromCatalog?: boolean;
+  clearedGlobalModel: boolean;
+  clearedBotModels: number;
+}
+export interface BatchModelsRequest { models: Model[] }
 /** Trusted owner-initiated Host probe; credential is transient and never persisted. */
 export interface ProviderProbeRequest { provider: Provider; models: Model[]; credential?: string }
 export interface InstallationCheckRequest { deviceId: string; botId: string }

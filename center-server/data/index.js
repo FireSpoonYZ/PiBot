@@ -368,7 +368,9 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       const slash = model.modelRef.indexOf('/');
       const provider = providers.find((item) => item.id === model.modelRef.slice(0, slash) && item.enabled);
       const selected = provider && models[provider.id].find((item) => item.id === model.modelRef.slice(slash + 1) && item.enabled);
-      if (slash > 0 && selected && provider.credentialRef && provider.authMode !== 'oauth') refs.add(provider.credentialRef);
+      if (slash > 0 && selected && provider.credentialRef && provider.authMode !== 'oauth' && credential(provider.credentialRef)?.configured) {
+        refs.add(provider.credentialRef);
+      }
     }
     const capabilities = installations.map((installation) => {
       const config = capabilityFor(deviceId, bot.botId, installation.installationId);
@@ -591,11 +593,61 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       }
     });
 
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    function enrichProvider(row) {
+      if (!row) return null;
+      if (typeof row.configured === 'boolean') return row;
+      if (!row.native) return { ...row, configured: true };
+      const hasOAuth = Boolean(credential('center-internal-pi-oauth-' + row.id)?.configured);
+      const hasApiKey = Boolean(row.credentialRef && credential(row.credentialRef)?.configured);
+      const hasCustom = Boolean(row.custom && Object.keys(row.custom).length > 0);
+      return { ...row, configured: Boolean(row.enabled || hasOAuth || hasApiKey || hasCustom) };
+    }
+    function clearModelReferences(matches) {
+      let clearedGlobalModel = false;
+      let clearedBotModels = 0;
+      const globalCfg = store.getModelConfig();
+      if (typeof globalCfg.global?.modelRef === 'string' && matches(globalCfg.global.modelRef)) {
+        const nextGlobal = { ...globalCfg.global };
+        delete nextGlobal.modelRef;
+        db.prepare('UPDATE model_config SET json = ?, revision = ? WHERE id = 1').run(json(nextGlobal), globalCfg.revision + 1);
+        clearedGlobalModel = true;
+      }
+      const botRows = db.prepare('SELECT device_id, bot_id, json, revision FROM bot_models').all();
+      const updateBotStmt = db.prepare('UPDATE bot_models SET json = ?, revision = ? WHERE device_id = ? AND bot_id = ?');
+      for (const row of botRows) {
+        const overrides = JSON.parse(row.json);
+        if (typeof overrides?.modelRef === 'string' && matches(overrides.modelRef)) {
+          const nextOverrides = { ...overrides };
+          delete nextOverrides.modelRef;
+          updateBotStmt.run(json(nextOverrides), row.revision + 1, row.device_id, row.bot_id);
+          clearedBotModels += 1;
+        }
+      }
+      return { clearedGlobalModel, clearedBotModels };
+    }
+    function wipeCredentialRow(id) {
+      const current = credential(id);
+      if (current?.configured) {
+        db.prepare('UPDATE credentials SET revision = ?, nonce = NULL, tag = NULL, ciphertext = NULL WHERE id = ?').run(current.revision + 1, id);
+      }
+    }
+    const modelStoreFields = ['name', 'api', 'baseUrl', 'headers', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel', 'source', 'enabled'];
+
     store = {
       ...webhookStore(db, transaction),
       ...pairingStore(db, transaction),
-      listProviders: () => rows('providers'),
-      getProvider: (id) => get('providers', id),
+      getInstallationId() {
+        const epoch = db.prepare('SELECT epoch FROM sync_meta WHERE id = 1').get()?.epoch;
+        if (typeof epoch === 'string' && UUID_RE.test(epoch)) return epoch.toLowerCase();
+        const bytes = Buffer.from(createHash('sha256').update(String(epoch ?? 'center')).digest().subarray(0, 16));
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        const hex = bytes.toString('hex');
+        return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+      },
+      listProviders: () => rows('providers').map(enrichProvider),
+      getProvider: (id) => enrichProvider(get('providers', id)),
       putProvider(provider, expectedRevision) {
         assertObject(provider);
         assertPublicCredentialId(provider.credentialRef);
@@ -606,11 +658,61 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
         } else if (!provider.native) throw error('INVALID_ARGUMENT', 'A custom provider requires a base URL');
         if (provider.custom !== undefined && !object(provider.custom)) throw error('INVALID_ARGUMENT', 'Provider overrides must be an object');
         if (provider.custom?.apiKey !== undefined) throw error('INVALID_ARGUMENT', 'Store API keys in encrypted credentials, not overrides');
-        const input = pick(provider, ['id', 'name', 'api', 'baseUrl', 'credentialRef', 'enabled', 'native', 'custom']);
-        return transaction(() => { const value = createOrUpdate('providers', input, 'id', expectedRevision); bump(); return value; });
+        const configured = typeof provider.configured === 'boolean' ? provider.configured : (!provider.native ? true : undefined);
+        const input = pick({ ...provider, ...(configured !== undefined ? { configured } : {}) }, ['id', 'name', 'api', 'baseUrl', 'credentialRef', 'enabled', 'native', 'configured', 'custom']);
+        return transaction(() => { const value = createOrUpdate('providers', input, 'id', expectedRevision); bump(); return enrichProvider(value); });
       },
-      listModels(providerId) {
-        return db.prepare('SELECT json FROM models WHERE provider_id = ? ORDER BY id').all(providerId).map(parse);
+      deleteProvider(providerId, nativeReset) {
+        assertId(providerId);
+        return transaction(() => {
+          const current = get('providers', providerId);
+          if (!current) throw error('NOT_FOUND', 'Provider not found');
+          wipeCredentialRow('center-internal-pi-oauth-' + providerId);
+          if (current.credentialRef) {
+            const sharedWithOtherProvider = rows('providers').some(p => p.id !== providerId && p.credentialRef === current.credentialRef);
+            if (!sharedWithOtherProvider) wipeCredentialRow(current.credentialRef);
+          }
+          const deleteStarStmt = db.prepare('DELETE FROM model_stars WHERE model_ref = ?');
+          for (const star of store.listModelStars()) {
+            if (star.startsWith(providerId + '/')) deleteStarStmt.run(star);
+          }
+          const refs = clearModelReferences(ref => ref.startsWith(providerId + '/'));
+          if (current.native && nativeReset) {
+            const existingModels = db.prepare('SELECT id, json FROM models WHERE provider_id = ?').all(providerId);
+            const deleteModelStmt = db.prepare('DELETE FROM models WHERE provider_id = ? AND id = ?');
+            const upsertModelStmt = db.prepare('UPDATE models SET json = ? WHERE provider_id = ? AND id = ?');
+            for (const row of existingModels) {
+              const parsed = JSON.parse(row.json);
+              if (parsed.source !== 'catalog') {
+                deleteModelStmt.run(providerId, row.id);
+              } else if (parsed.removed || !parsed.enabled) {
+                const { removed: _removed, ...rest } = parsed;
+                upsertModelStmt.run(json({ ...rest, enabled: true, revision: parsed.revision + 1 }), providerId, row.id);
+              }
+            }
+            const resetValue = {
+              id: providerId,
+              name: nativeReset.name,
+              api: nativeReset.api,
+              baseUrl: nativeReset.baseUrl,
+              credentialRef: nativeReset.credentialRef,
+              native: true,
+              enabled: false,
+              configured: false,
+              revision: current.revision + 1,
+            };
+            save('providers', providerId, resetValue);
+          } else {
+            db.prepare('DELETE FROM models WHERE provider_id = ?').run(providerId);
+            db.prepare('DELETE FROM providers WHERE id = ?').run(providerId);
+          }
+          bump();
+          return { deleted: true, reset: Boolean(current.native && nativeReset), ...refs };
+        });
+      },
+      listModels(providerId, { includeRemoved = false } = {}) {
+        const all = db.prepare('SELECT json FROM models WHERE provider_id = ? ORDER BY id').all(providerId).map(parse);
+        return includeRemoved ? all : all.filter(model => model.removed !== true);
       },
       putModel(providerId, model, expectedRevision) {
         return transaction(() => {
@@ -620,15 +722,65 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           assertId(id);
           const current = parse(db.prepare('SELECT json FROM models WHERE provider_id = ? AND id = ?').get(providerId, id));
           if (expectedRevision === null) {
-            if (current) throw error('REVISION_CONFLICT', 'Model already exists');
+            if (current && current.removed !== true) throw error('REVISION_CONFLICT', 'Model already exists');
           } else {
             if (!current) throw error('NOT_FOUND', 'Model not found');
             assertRevision(expectedRevision, current.revision);
           }
-          const result = { ...pick(model, ['name', 'api', 'baseUrl', 'headers', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel', 'source', 'enabled']), id, revision: current ? current.revision + 1 : 0 };
+          const result = {
+            ...pick(model, modelStoreFields),
+            ...(model.removed === true ? { removed: true } : {}),
+            id,
+            revision: current ? current.revision + 1 : 0,
+          };
           db.prepare('INSERT INTO models VALUES (?, ?, ?) ON CONFLICT(provider_id, id) DO UPDATE SET json = excluded.json').run(providerId, id, json(result));
           bump();
           return result;
+        });
+      },
+      putModelsBatch(providerId, models) {
+        return transaction(() => {
+          if (!get('providers', providerId)) throw error('NOT_FOUND', 'Provider not found');
+          if (!Array.isArray(models) || models.length === 0) throw error('INVALID_ARGUMENT', 'models must be a non-empty array');
+          const upsertStmt = db.prepare('INSERT INTO models VALUES (?, ?, ?) ON CONFLICT(provider_id, id) DO UPDATE SET json = excluded.json');
+          const getStmt = db.prepare('SELECT json FROM models WHERE provider_id = ? AND id = ?');
+          const saved = [];
+          for (const model of models) {
+            assertObject(model);
+            const id = model.id || randomUUID();
+            assertId(id);
+            const current = parse(getStmt.get(providerId, id));
+            const result = {
+              ...pick(model, modelStoreFields),
+              source: model.source ?? 'manual',
+              enabled: model.enabled ?? true,
+              id,
+              revision: current ? current.revision + 1 : 0,
+            };
+            upsertStmt.run(providerId, id, json(result));
+            saved.push(result);
+          }
+          bump();
+          return saved;
+        });
+      },
+      deleteModel(providerId, modelId) {
+        assertId(providerId);
+        assertId(modelId);
+        return transaction(() => {
+          if (!get('providers', providerId)) throw error('NOT_FOUND', 'Provider not found');
+          const current = parse(db.prepare('SELECT json FROM models WHERE provider_id = ? AND id = ?').get(providerId, modelId));
+          if (!current || current.removed === true) throw error('NOT_FOUND', 'Model not found');
+          db.prepare('DELETE FROM model_stars WHERE model_ref = ?').run(providerId + '/' + modelId);
+          const refs = clearModelReferences(ref => ref === providerId + '/' + modelId);
+          if (current.source === 'catalog') {
+            const hidden = { ...current, enabled: false, removed: true, revision: current.revision + 1 };
+            db.prepare('UPDATE models SET json = ? WHERE provider_id = ? AND id = ?').run(json(hidden), providerId, modelId);
+          } else {
+            db.prepare('DELETE FROM models WHERE provider_id = ? AND id = ?').run(providerId, modelId);
+          }
+          bump();
+          return { deleted: true, hiddenFromCatalog: current.source === 'catalog', ...refs };
         });
       },
       // Picker availability uses credential metadata, not the secrets granted to a particular Host.

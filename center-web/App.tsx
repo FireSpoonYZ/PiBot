@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, Navigate, NavLink, Route, Routes } from 'react-router-dom';
-import { LogOut, Moon, Package, Puzzle, RefreshCw, Server, Smartphone, Sun, Webhook, WifiOff } from 'lucide-react';
+import { Cpu, LogOut, Monitor, Moon, Package, Puzzle, RefreshCw, Smartphone, Sun, Webhook, WifiOff } from 'lucide-react';
 import { api } from './api';
 import type { SetupStatus } from './api';
 import Login from './pages/Login';
@@ -14,19 +14,16 @@ import BotCapabilities from './pages/BotCapabilities';
 import ClientReleases from './pages/ClientReleases';
 import Webhooks from './pages/Webhooks';
 
-type ThemeMode = 'light' | 'dark';
+type ThemeMode = 'system' | 'light' | 'dark';
 
 function getInitialTheme(): ThemeMode {
   try {
     const saved = localStorage.getItem('center-theme');
-    if (saved === 'light' || saved === 'dark') return saved;
+    if (saved === 'light' || saved === 'dark' || saved === 'system') return saved;
   } catch {
     // ignore storage errors
   }
-  if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches) {
-    return 'dark';
-  }
-  return 'light';
+  return 'system';
 }
 
 export default function App() {
@@ -51,9 +48,12 @@ export default function App() {
     }
   }, [theme]);
 
-  const toggleTheme = useCallback(() => {
-    setTheme(prev => (prev === 'dark' ? 'light' : 'dark'));
+  const cycleTheme = useCallback(() => {
+    setTheme(prev => (prev === 'system' ? 'light' : prev === 'light' ? 'dark' : 'system'));
   }, []);
+
+  const themeLabel =
+    theme === 'system' ? '主题：跟随系统（点击切换浅色）' : theme === 'light' ? '主题：浅色（点击切换深色）' : '主题：深色（点击跟随系统）';
 
   const refresh = useCallback(async () => {
     const generation = generationRef.current;
@@ -111,9 +111,6 @@ export default function App() {
     window.addEventListener('center-offline', offline);
     window.addEventListener('center-unauthenticated', unauthenticated);
     const timer = window.setInterval(() => {
-      // Offline recovery always re-runs the full bootstrap (the setup listener
-      // has no /api/session); this branch must precede the pollingRef check or
-      // a failed initial bootstrap (pollingRef=false) could never recover.
       if (stateRef.current === 'offline') {
         void bootstrap();
         return;
@@ -122,10 +119,6 @@ export default function App() {
       void refresh();
     }, 5000);
     return () => {
-      // Invalidate any in-flight bootstrap/refresh so a StrictMode remount
-      // cannot let a stale response write state, and release the in-flight
-      // flag so the replayed effect can bootstrap again (generation guards
-      // prevent the orphaned request from reclaiming it).
       generationRef.current++;
       bootstrapInFlightRef.current = false;
       pollingRef.current = false;
@@ -186,80 +179,88 @@ export default function App() {
         <div className="shell">
           <nav className="shell-sidebar" aria-label="中心管理">
             <div className="mobile-topbar">
-              <div className="brand-title">
+              <div className="brand-title" title="PiBot 中心管理">
                 <span className="brand-dot" aria-hidden="true" />
-                <span>pibot 中心</span>
+                <span className="brand-text">中心</span>
               </div>
               <div className="shell-footer">
                 <button
                   type="button"
-                  className="quiet-button icon-button"
-                  onClick={toggleTheme}
-                  aria-label={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'}
-                  title={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'}
+                  className="rail-action"
+                  onClick={cycleTheme}
+                  aria-label={themeLabel}
+                  title={themeLabel}
                 >
-                  {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+                  {theme === 'system' ? <Monitor size={18} /> : theme === 'dark' ? <Moon size={18} /> : <Sun size={18} />}
                 </button>
                 <button
                   type="button"
-                  className="quiet-button"
+                  className="rail-action"
+                  aria-label="退出登录"
+                  title="退出登录"
                   onClick={() => void api.logout().then(refresh).catch(() => refresh())}
                 >
-                  <LogOut size={16} />
-                  <span>退出登录</span>
+                  <LogOut size={18} />
                 </button>
               </div>
             </div>
             <div className="mobile-bottom-nav">
               <NavLink
                 to="/providers"
+                title="服务商与默认模型"
                 className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
               >
-                <Server size={18} />
-                <span>服务商与模型</span>
+                <Cpu size={19} />
+                <span>模型</span>
               </NavLink>
               <NavLink
                 to="/devices"
+                title="设备与 Bot"
                 className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
               >
-                <Smartphone size={18} />
-                <span>设备与 Bot</span>
+                <Smartphone size={19} />
+                <span>设备</span>
               </NavLink>
               <NavLink
                 to="/capabilities"
+                title="插件、MCP 与 Skill"
                 className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
               >
-                <Puzzle size={18} />
-                <span>插件、MCP 与 Skill</span>
+                <Puzzle size={19} />
+                <span>能力</span>
               </NavLink>
               <NavLink
                 to="/webhooks"
+                title="Webhook 触发"
                 className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
               >
-                <Webhook size={18} />
-                <span>Webhook</span>
+                <Webhook size={19} />
+                <span>触发</span>
               </NavLink>
               <NavLink
                 to="/releases"
+                title="客户端版本分发"
                 className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
               >
-                <Package size={18} />
-                <span>客户端版本</span>
+                <Package size={19} />
+                <span>版本</span>
               </NavLink>
             </div>
           </nav>
-          <Routes>
-            <Route path="/login" element={<Navigate to="/providers" replace />} />
-            <Route path="/providers" element={<Providers />} />
-            <Route path="/providers/:providerId/models" element={<Models />} />
-            <Route path="/devices" element={<Devices />} />
-            <Route path="/capabilities" element={<Capabilities />} />
-            <Route path="/capabilities/:installationId" element={<Installation />} />
-            <Route path="/devices/:deviceId/bots/:botId/capabilities" element={<BotCapabilities />} />
-            <Route path="/webhooks" element={<Webhooks />} />
-            <Route path="/releases" element={<ClientReleases />} />
-            <Route path="*" element={<Navigate to="/providers" replace />} />
-          </Routes>
+          <div className="shell-workspace">
+            <Routes>
+              <Route path="/login" element={<Navigate to="/providers" replace />} />
+              <Route path="/providers" element={<Providers />} />
+              <Route path="/providers/:providerId/models" element={<Models />} />
+              <Route path="/devices" element={<Devices />} />
+              <Route path="/capabilities" element={<Capabilities />} />
+              <Route path="/capabilities/:installationId" element={<Installation />} />
+              <Route path="/devices/:deviceId/bots/:botId/capabilities" element={<BotCapabilities />} />
+              <Route path="/webhooks" element={<Webhooks />} />
+              <Route path="/releases" element={<ClientReleases />} />
+              <Route path="*" element={<Navigate to="/providers" replace />} />
+            </Routes>
+          </div>
         </div>
       )}
     </BrowserRouter>

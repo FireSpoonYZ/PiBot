@@ -21,9 +21,7 @@ import type {
   BotSyncResponse,
   Device,
   DeviceRuntimeStatus,
-  ModelConfig,
   ModelSelection,
-  Provider,
 } from '@e-launcher/center-contract';
 import { api, CenterApiError, type BotLearningPatchConfig } from '../api';
 import { RuntimeStatusSummary } from '../components/RuntimeStatus';
@@ -609,8 +607,6 @@ export default function Devices() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [bots, setBots] = useState<Record<string, BotRef[]>>({});
   const [runtime, setRuntime] = useState<Record<string, DeviceRuntimeStatus>>({});
-  const [global, setGlobal] = useState<ModelConfig>();
-  const [globalModalOpen, setGlobalModalOpen] = useState(false);
   const [options, setOptions] = useState<ModelOption[]>([]);
   const [filterDeviceId, setFilterDeviceId] = useState<string>('');
   const [selected, setSelected] = useState<{ device: Device; bot: BotRef; config: BotModelConfig }>();
@@ -707,22 +703,13 @@ export default function Devices() {
   };
 
   const load = async () => {
-    const [sync, g, providers] = await Promise.all([
+    const [sync, picker] = await Promise.all([
       api.getBotSync({ epoch: syncCursorRef.current.epoch, sinceSeq: syncCursorRef.current.seq }),
-      api.getModelConfig(),
-      api.listProviders(),
+      api.getModelPicker(),
     ]);
-    const modelLists = await Promise.all(providers.map((p: Provider) => api.listModels(p.id)));
     applyBotSync(sync);
     await refreshRuntime(sync.devices.map(device => device.deviceId));
-    setGlobal(g);
-    setOptions(
-      modelLists.flatMap((models, i) =>
-        providers[i].enabled
-          ? models.filter(m => m.enabled).map(m => ({ ref: `${providers[i].id}/${m.id}`, name: m.name }))
-          : [],
-      ),
-    );
+    setOptions(picker.models.map(m => ({ ref: m.modelRef, name: m.name })));
   };
 
   useEffect(() => {
@@ -787,29 +774,6 @@ export default function Devices() {
         <p className="inline-notice" role="status">
           {notice}
         </p>
-      )}
-
-      {global && (
-        <section className="summary-bar card-group">
-          <div>
-            <strong>全局默认模型与高级策略</strong>
-            <p className="secondary" style={{ marginBottom: 0 }}>
-              模型：{global.global.modelRef ?? '未设置'} · 思考档位：{global.global.thinkingLevel ?? '默认'} ·{' '}
-              {formatCodemodeBadge(global.global)}
-            </p>
-          </div>
-          <button
-            className="button secondary-button button-sm"
-            disabled={busy}
-            onClick={() => {
-              setError('');
-              setGlobalModalOpen(true);
-            }}
-          >
-            <Sliders size={15} />
-            修改全局模型
-          </button>
-        </section>
       )}
 
       {devices.length > 1 && (
@@ -1178,42 +1142,6 @@ export default function Devices() {
       })}
 
       <SheetModal
-        open={globalModalOpen && Boolean(global)}
-        onOpenChange={setGlobalModalOpen}
-        title="全局默认模型设置"
-        description="为所有未单独设置模型覆盖的 Bot 指定默认模型与思考档位"
-      >
-        {global && (
-          <div>
-            {error && (
-              <p className="inline-error" role="alert">
-                {error}
-              </p>
-            )}
-            <SelectionForm
-              value={global.global}
-              options={options}
-              busy={busy}
-              onCancel={() => setGlobalModalOpen(false)}
-              save={value =>
-                void run(async () => {
-                  setGlobal(await api.putModelConfig({ expectedRevision: global.revision, value }));
-                  setNotice('全局模型已保存');
-                  setGlobalModalOpen(false);
-                  if (selected) {
-                    setSelected({
-                      ...selected,
-                      config: await api.getBotModelConfig(selected.device.deviceId, selected.bot.botId),
-                    });
-                  }
-                })
-              }
-            />
-          </div>
-        )}
-      </SheetModal>
-
-      <SheetModal
         open={selected !== undefined}
         onOpenChange={isOpen => {
           if (!isOpen) setSelected(undefined);
@@ -1237,6 +1165,9 @@ export default function Devices() {
                 {notice}
               </p>
             )}
+            <p className="secondary" style={{ marginTop: 0, marginBottom: 12 }}>
+              全局默认模型与思考强度已在 <Link to="/providers">「模型」页 ›</Link> 统一设置，此处仅配置当前 Bot 的独立覆盖。
+            </p>
             <SelectionForm
               value={selected.config.overrides}
               inherited={selected.config.global}

@@ -1,8 +1,10 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import Ajv from 'ajv';
 import { requireOwner, assertPublicCredentialId } from './auth.js';
 import { assertId } from '../host-core/message-protocol.js';
 import { assertDeviceId, assertDeviceToken } from '../host-core/relay-protocol.js';
+import { discoverCenterProviderModels, validateCenterProvider } from '../host-core/runtime-models.js';
 import { registerWebhookRoutes } from './webhooks.js';
 import { registerVaultRoutes } from './vault-routes.js';
 import { registerPairingRoutes } from './pairing.js';
@@ -43,12 +45,28 @@ const boundedId = { type: 'string', minLength: 1, maxLength: 128 };
 const revision = { type: 'integer', minimum: 0 };
 const providerSchema = {
   type: 'object', required: ['name', 'api', 'baseUrl', 'credentialRef', 'enabled'],
-  properties: { id: string, name: string, api: string, baseUrl: { type: 'string' }, credentialRef: { anyOf: [string, { type: 'null' }] }, enabled: { type: 'boolean' }, revision, native: { type: 'boolean' }, custom: { type: 'object' } },
+  properties: { id: string, name: string, api: string, baseUrl: { type: 'string' }, credentialRef: { anyOf: [string, { type: 'null' }] }, enabled: { type: 'boolean' }, revision, native: { type: 'boolean' }, configured: { type: 'boolean' }, custom: { type: 'object' } },
   additionalProperties: false,
 };
 const modelSchema = {
   type: 'object', required: ['id', 'name', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'enabled'],
-  properties: { id: string, name: string, api: string, baseUrl: string, headers: { type: 'object' }, contextWindow: { type: 'integer', minimum: 1 }, maxTokens: { type: 'integer', minimum: 1 }, input: { type: 'array', items: string }, reasoning: { type: 'boolean' }, enabled: { type: 'boolean' }, revision, thinkingLevelMap: { type: 'object' }, cost: { type: 'object' }, compat: { type: 'object' }, inputLimits: { type: 'object' }, promptCache: { type: 'object' }, samplingParams: { type: 'object' }, samplingParamsByThinkingLevel: { type: 'object' }, source: { enum: ['catalog', 'manual'] } },
+  properties: { id: string, name: string, api: string, baseUrl: string, headers: { type: 'object' }, contextWindow: { type: 'integer', minimum: 1 }, maxTokens: { type: 'integer', minimum: 1 }, input: { type: 'array', items: string }, reasoning: { type: 'boolean' }, enabled: { type: 'boolean' }, revision, thinkingLevelMap: { type: 'object' }, cost: { type: 'object' }, compat: { type: 'object' }, inputLimits: { type: 'object' }, promptCache: { type: 'object' }, samplingParams: { type: 'object' }, samplingParamsByThinkingLevel: { type: 'object' }, source: { enum: ['catalog', 'manual'] }, removed: { type: 'boolean' } },
+  additionalProperties: false,
+};
+const batchModelsSchema = {
+  type: 'object', required: ['models'],
+  properties: { models: { type: 'array', minItems: 1, maxItems: 200, items: modelSchema } },
+  additionalProperties: false,
+};
+const providerProbeBodySchema = {
+  type: 'object',
+  properties: {
+    deviceId: { type: 'string' },
+    baseUrl: { type: 'string', maxLength: 2048 },
+    api: { type: 'string', maxLength: 128 },
+    apiKey: { type: 'string', maxLength: 8192 },
+    headers: { type: 'object' },
+  },
   additionalProperties: false,
 };
 const selectionSchema = { type: 'object', properties: { modelRef: { anyOf: [string, { type: 'null' }] }, thinkingLevel: { anyOf: [string, { type: 'null' }] }, codemode: { anyOf: [{ type: 'boolean' }, { type: 'null' }] }, codemodeOnly: { anyOf: [{ type: 'boolean' }, { type: 'null' }] } }, additionalProperties: false };
@@ -161,13 +179,36 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   const mutation = [requireOwner, app.csrfProtection];
   const route = (method, path, handler, write = false) => app.route({ method, url: path, onRequest: write ? mutation : owner, handler });
   const changed = (result, deviceId) => { deviceId ? notify(deviceId) : notifyAll(); return result; };
-  const providerInput = id => {
-    const provider = required(store.getProvider(id), 'Provider');
-    const models = store.listModels(id).map(({ source: _source, ...model }) => model);
-    const ref = provider.credentialRef && assertPublicCredentialId(provider.credentialRef);
-    const credential = ref && store.getCredential(ref)?.configured ? store.resolveCredential(ref) : undefined;
+  const providerInput = async (id, overrides = {}) => {
+    const stored = required(store.getProvider(id), 'Provider');
+    const customBaseUrl = typeof stored.custom?.baseUrl === 'string' && stored.custom.baseUrl.trim() ? stored.custom.baseUrl : stored.baseUrl;
+    const customApi = typeof stored.custom?.api === 'string' && stored.custom.api.trim() ? stored.custom.api : stored.api;
+    const customHeaders = stored.custom?.headers && typeof stored.custom.headers === 'object' && !Array.isArray(stored.custom.headers)
+      ? stored.custom.headers
+      : undefined;
+    const provider = {
+      ...stored,
+      baseUrl: typeof overrides.baseUrl === 'string' && overrides.baseUrl.trim() ? overrides.baseUrl.trim() : customBaseUrl,
+      api: typeof overrides.api === 'string' && overrides.api.trim() ? overrides.api.trim() : customApi,
+      ...(overrides.headers ? { headers: overrides.headers } : customHeaders ? { headers: customHeaders } : {}),
+    };
+    const models = store.listModels(id).map(({ source: _source, removed: _removed, ...model }) => model);
+    let credential;
+    if (typeof overrides.apiKey === 'string' && overrides.apiKey.trim()) {
+      credential = overrides.apiKey.trim();
+    } else {
+      const ref = stored.credentialRef && assertPublicCredentialId(stored.credentialRef);
+      if (ref && store.getCredential(ref)?.configured) {
+        credential = store.resolveCredential(ref);
+      } else if (catalog.hasOAuth(id)) {
+        const runtime = await catalog.runtime();
+        const resolved = await runtime.getAuth(id).catch(() => null);
+        credential = resolved?.auth?.apiKey;
+      }
+    }
     return { provider, models, ...(credential === undefined ? {} : { credential }) };
   };
+  const modelMetadataKeys = ['name', 'api', 'baseUrl', 'headers', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel'];
   const modelPicker = () => ({ ...store.getModelPicker(), sync: catalog.status() });
   const setModelStar = req => {
     const body = validate({
@@ -182,9 +223,30 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('POST', '/api/model-catalog/sync', async () => { await catalog.sync().catch(() => {}); return catalog.status(); }, true);
   route('GET', '/api/providers', () => store.listProviders());
   route('POST', '/api/providers', async (req, reply) => {
-    const provider = store.putProvider({ ...validate(providerSchema, req.body), credentialRef: assertPublicCredentialId(req.body.credentialRef), id: req.body.id || randomUUID(), revision: 0 }, null);
+    const provider = store.putProvider({ ...validate(providerSchema, req.body), credentialRef: assertPublicCredentialId(req.body.credentialRef), id: req.body.id || randomUUID(), configured: true, revision: 0 }, null);
     await catalog.apply();
     return reply.code(201).send(changed(provider));
+  }, true);
+  route('POST', '/api/providers/discover', async req => {
+    const body = validate(providerProbeBodySchema, req.body ?? {});
+    const baseUrl = text(body.baseUrl, 'baseUrl');
+    const probe = {
+      provider: {
+        id: 'draft',
+        name: 'draft',
+        baseUrl,
+        api: typeof body.api === 'string' && body.api.trim() ? body.api.trim() : 'openai-completions',
+        credentialRef: null,
+        enabled: true,
+        revision: 0,
+        ...(body.headers ? { headers: body.headers } : {}),
+      },
+      models: [],
+      ...(typeof body.apiKey === 'string' && body.apiKey.trim() ? { credential: body.apiKey.trim() } : {}),
+    };
+    const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : '';
+    if (deviceId) return bridge.call(deviceId, 'discoverCenterProviderModels', probe);
+    return discoverCenterProviderModels(probe);
   }, true);
   route('GET', '/api/providers/:id', req => required(store.getProvider(req.params.id), 'Provider'));
   // Pi native OAuth is interactive; these endpoints expose only flow prompts,
@@ -195,13 +257,79 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('POST', '/api/providers/:id/login/:flowId/answer', req => providerAuth.answer(req.params.id, req.params.flowId, req.body?.answer), true);
   route('POST', '/api/providers/:id/login/:flowId/cancel', req => providerAuth.cancel(req.params.id, req.params.flowId), true);
   route('POST', '/api/providers/:id/logout', req => providerAuth.logout(req.params.id), true);
-  route('PUT', '/api/providers/:id', async req => { const body = object(req.body); validate(providerSchema, body.value); assertPublicCredentialId(body.value.credentialRef); const provider = store.putProvider({ ...body.value, id: req.params.id }, body.expectedRevision); await catalog.apply(); return changed(provider); }, true);
-  for (const [path, method] of [['validate', 'validateCenterProvider'], ['discover', 'discoverCenterProviderModels']]) {
-    route('POST', `/api/providers/:id/${path}`, req => bridge.call(text(req.body?.deviceId, 'deviceId'), method, providerInput(req.params.id)), true);
-  }
-  route('GET', '/api/providers/:id/models', req => { required(store.getProvider(req.params.id), 'Provider'); return store.listModels(req.params.id); });
-  route('POST', '/api/providers/:id/models', async (req, reply) => { required(store.getProvider(req.params.id), 'Provider'); const value = store.putModel(req.params.id, { ...validate(modelSchema, req.body), source: 'manual', revision: 0 }, null); await catalog.apply(); return reply.code(201).send(changed(value)); }, true);
-  route('PUT', '/api/providers/:id/models/:modelId', async req => { const body = object(req.body); const value = store.putModel(req.params.id, { ...validate(modelSchema, body.value), id: req.params.modelId, source: 'manual' }, body.expectedRevision); await catalog.apply(); return changed(value); }, true);
+  route('PUT', '/api/providers/:id', async req => {
+    const body = object(req.body);
+    validate(providerSchema, body.value);
+    assertPublicCredentialId(body.value.credentialRef);
+    const provider = store.putProvider({
+      ...body.value,
+      id: req.params.id,
+      configured: body.value.configured ?? true,
+    }, body.expectedRevision);
+    await catalog.apply();
+    return changed(provider);
+  }, true);
+  route('DELETE', '/api/providers/:id', async req => {
+    required(store.getProvider(req.params.id), 'Provider');
+    await providerAuth.clearAuth(req.params.id);
+    const result = store.deleteProvider(req.params.id, catalog.bundledResetSpec(req.params.id));
+    await catalog.apply();
+    return changed(result);
+  }, true);
+  route('POST', '/api/providers/:id/validate', async req => {
+    const body = validate(providerProbeBodySchema, req.body ?? {});
+    const input = await providerInput(req.params.id, body);
+    const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : '';
+    if (deviceId) return bridge.call(deviceId, 'validateCenterProvider', input);
+    return validateCenterProvider(input);
+  }, true);
+  route('POST', '/api/providers/:id/discover', async req => {
+    const body = validate(providerProbeBodySchema, req.body ?? {});
+    const input = await providerInput(req.params.id, body);
+    const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : '';
+    if (deviceId) return bridge.call(deviceId, 'discoverCenterProviderModels', input);
+    return discoverCenterProviderModels(input);
+  }, true);
+  route('GET', '/api/providers/:id/models', req => {
+    required(store.getProvider(req.params.id), 'Provider');
+    return store.listModels(req.params.id, { includeRemoved: req.query?.includeRemoved === '1' });
+  });
+  route('POST', '/api/providers/:id/models', async (req, reply) => {
+    required(store.getProvider(req.params.id), 'Provider');
+    const validated = validate(modelSchema, req.body);
+    const value = store.putModel(req.params.id, { ...validated, source: validated.source ?? 'manual', removed: false, revision: 0 }, null);
+    await catalog.apply();
+    return reply.code(201).send(changed(value));
+  }, true);
+  route('POST', '/api/providers/:id/models/batch', async req => {
+    required(store.getProvider(req.params.id), 'Provider');
+    const body = validate(batchModelsSchema, req.body);
+    const models = store.putModelsBatch(
+      req.params.id,
+      body.models.map(item => ({ ...item, source: item.source ?? 'manual', removed: false })),
+    );
+    await catalog.apply();
+    return changed({ models });
+  }, true);
+  route('PUT', '/api/providers/:id/models/:modelId', async req => {
+    const body = object(req.body);
+    const validated = validate(modelSchema, body.value);
+    const existing = store.listModels(req.params.id, { includeRemoved: true }).find(item => item.id === req.params.modelId);
+    const keepCatalogSource = existing?.source === 'catalog' && modelMetadataKeys.every(key => isDeepStrictEqual(validated[key], existing[key]));
+    const value = store.putModel(req.params.id, {
+      ...validated,
+      id: req.params.modelId,
+      source: keepCatalogSource ? 'catalog' : 'manual',
+      removed: validated.removed === true,
+    }, body.expectedRevision);
+    await catalog.apply();
+    return changed(value);
+  }, true);
+  route('DELETE', '/api/providers/:id/models/:modelId', async req => {
+    const result = store.deleteModel(req.params.id, req.params.modelId);
+    await catalog.apply();
+    return changed(result);
+  }, true);
   route('GET', '/api/model-config', () => store.getModelConfig());
   route('PUT', '/api/model-config', req => { const body = object(req.body); return changed(store.putModelConfig(body.expectedRevision, validate(selectionSchema, body.value))); }, true);
   route('GET', '/api/devices', () => bridge.listDevices());
