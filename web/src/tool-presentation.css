@@ -48,3 +48,16 @@
 .tp-answer-question { font-size: .8rem; font-weight: 550; overflow-wrap: anywhere; }
 .tp-answer-value { font-size: .85rem; overflow-wrap: anywhere; }
 .tp-answer-notes { font-size: .78rem; color: var(--muted, #656d76); overflow-wrap: anywhere; }
+
+.tp-task { gap: 0; }
+.tp-task-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.tp-task-info { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.tp-card-kicker { font-size: .72rem; color: var(--muted, #70756f); line-height: 1.35; }
+.tp-task .tp-card-title { font-size: .88rem; font-weight: 600; color: var(--text, #242622); overflow-wrap: anywhere; }
+.tp-task-open-btn { flex: none; min-height: 32px; padding: 4px 12px; font-size: .78rem; font-weight: 600; background: var(--surface-elevated, var(--surface, #efeee9)); color: var(--text, #242622); border-color: var(--line, #e5e5df); white-space: nowrap; }
+.tp-task-open-btn:hover { border-color: var(--accent, #627565); background: var(--selection, #e1e7df); }
+
+:root[data-theme="dark"] .tp-task-open-btn { background: var(--surface-elevated, #202420); }
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] .tp-task-open-btn { background: var(--surface-elevated, #202420); }
+}

@@ -1345,6 +1345,32 @@ export function openDesktopClient(options) {
     );
   }
 
+  const GLOBAL_TASK_ACTIONS = new Set([
+    'list',
+    'get',
+    'create',
+    'update',
+    'assign',
+    'confirm_plan',
+    'answer_prompt',
+    'resolve_adoption_scope',
+    'dismiss_adoption',
+    'delete',
+  ]);
+
+  async function opGlobalTasks(params, reqSignal) {
+    if (!isPlainObject(params) || typeof params.action !== 'string' || !GLOBAL_TASK_ACTIONS.has(params.action)) {
+      throw invalid('global_tasks action must be a valid global task action');
+    }
+    requireCenter();
+    return runCenterAction((client) => {
+      if (!client || typeof client.globalTasks !== 'function') {
+        throw brokerError('NOT_CONNECTED', 'not-sent', 'center is disconnected');
+      }
+      return client.globalTasks(params, reqSignal);
+    });
+  }
+
   async function opRenameDevice(params, reqSignal) {
     rejectUnknownFields(params, new Set(['deviceId', 'displayName']), 'rename_device params');
     const session = requireConnectedSession();
@@ -1774,6 +1800,7 @@ export function openDesktopClient(options) {
     ['devices', opDevices],
     ['bot_directory', opBotDirectory],
     ['bot_sync', opBotSync],
+    ['global_tasks', opGlobalTasks],
     ['rename_device', opRenameDevice],
     ['call', opCall],
     ['settings_get', opSettingsGet],

@@ -19,6 +19,9 @@ export interface ToolCallCardProps {
   hideToolOutput?: boolean;
   onSubmitQuestionnaire?: (installationId: string, input: QuestionnaireSubmitPayload) => Promise<unknown>;
   onSubmitVaultUnlock?: (input: VaultUnlockSubmitPayload) => Promise<unknown>;
+  onOpenTask?: (taskId: string, openEdit?: boolean) => void;
+  onConfirmTaskPlan?: (taskId: string) => Promise<void> | void;
+  onAnswerTaskPrompt?: (taskId: string, answer: string) => Promise<void> | void;
 }
 
 /** One model call, its script-owned children, and its own result stay in the same block. */
@@ -32,6 +35,9 @@ export function ToolCallCard({
   hideToolOutput,
   onSubmitQuestionnaire,
   onSubmitVaultUnlock,
+  onOpenTask,
+  onConfirmTaskPlan,
+  onAnswerTaskPrompt,
 }: ToolCallCardProps) {
   const t = useText();
   const [prefHideToolOutput] = useHideToolOutput();
@@ -53,7 +59,13 @@ export function ToolCallCard({
   const duration = tool.durationMs === undefined ? undefined
     : tool.durationMs < 1000 ? `${Math.round(tool.durationMs)}ms`
       : formatTurnDuration(tool.durationMs, (_zh, en) => en);
-  const presentationKey = presentation && presentation.kind !== 'todo' ? presentation.requestId : tool.id;
+  const presentationKey = presentation
+    ? presentation.kind === 'todo'
+      ? tool.id
+      : presentation.kind === 'task'
+        ? presentation.taskId
+        : presentation.requestId
+    : tool.id;
   const sendTo = !tool.parentCallId && tool.name === 'send_to' ? tool.sendTo : undefined;
   const sendToTarget = sendTo
     ? (sendTo.targetName ||
@@ -126,6 +138,9 @@ export function ToolCallCard({
               hideToolOutput={hideOutput}
               onSubmitQuestionnaire={onSubmitQuestionnaire}
               onSubmitVaultUnlock={onSubmitVaultUnlock}
+              onOpenTask={onOpenTask}
+              onConfirmTaskPlan={onConfirmTaskPlan}
+              onAnswerTaskPrompt={onAnswerTaskPrompt}
             />
           ))}
         </div>
@@ -181,6 +196,9 @@ export function ToolCallCard({
             ? input => onSubmitQuestionnaire(presentation.installationId, input)
             : undefined}
           onSubmitVaultUnlock={onSubmitVaultUnlock}
+          onOpenTask={onOpenTask}
+          onConfirmTaskPlan={onConfirmTaskPlan}
+          onAnswerTaskPrompt={onAnswerTaskPrompt}
         />
       ) : null}
     </div>

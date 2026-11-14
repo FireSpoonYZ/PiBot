@@ -74,6 +74,7 @@ const PUBLIC_OPERATIONS: &[&str] = &[
   "devices",
   "bot_directory",
   "bot_sync",
+  "global_tasks",
   "rename_device",
   "call",
   "settings_get",

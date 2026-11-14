@@ -43,12 +43,14 @@ const EXTRA_ERROR_STATUS = Object.freeze({
   BOT_ARCHIVED: 409,
   INVALID_STATE: 409,
   ATTACHMENT_NOT_FOUND: 404,
+  TASK_NOT_FOUND: 404,
   MODEL_NO_VISION: 409,
 });
 
 const routes = [
   { method: 'POST', key: '/v1/bot-board', pattern: /^\/v1\/bot-board\/?$/, params: [], hasBody: true, handler: getBotBoard },
   { method: 'POST', key: '/v1/vault', pattern: /^\/v1\/vault\/?$/, params: [], hasBody: true, handler: vaultControl },
+  { method: 'POST', key: '/v1/tasks', pattern: /^\/v1\/tasks\/?$/, params: [], hasBody: true, handler: manageTasks },
   { method: 'POST', key: '/v1/center/provider/validate', pattern: /^\/v1\/center\/provider\/validate\/?$/, params: [], hasBody: true, handler: centerValidateProvider },
   { method: 'POST', key: '/v1/center/provider/discover', pattern: /^\/v1\/center\/provider\/discover\/?$/, params: [], hasBody: true, handler: centerDiscoverProvider },
   { method: 'POST', key: '/v1/center/action', pattern: /^\/v1\/center\/action\/?$/, params: [], hasBody: true, handler: centerAction },
@@ -276,6 +278,7 @@ export async function openControlServer(options) {
     resume: () => runtime.resume(),
     // Internal SSE wakeup only; no public route or caller-supplied origin.
     notifyWebhookReady: () => runtime.notifyWebhookReady(),
+    notifyTaskReady: () => runtime.notifyTaskReady?.(),
     applyCenterSnapshot: (snapshot, options) => runtime.applyCenterSnapshot(snapshot, options),
     // 内部即时撤销；不注册 HTTP 路由，不对外暴露。
     revokeCenterCapabilities: (snapshot) => runtime.revokeCenterCapabilities(snapshot),
@@ -457,6 +460,12 @@ async function getSubmission(host, runtime, params, body, req, res) {
   const submission = await runtime.getSubmission(params.botId, params.requestId);
   if (!submission) throw new ControlHttpError(404, 'SUBMISSION_NOT_FOUND', 'submission not found');
   writeControlJson(res, 200, submission);
+}
+
+async function manageTasks(host, runtime, params, body, req, res) {
+  assertNoQuery(req);
+  const { params: input } = normalizeControlCall('manageTasks', body);
+  writeControlJson(res, 200, await runtime.manageTasks(input));
 }
 
 async function history(host, runtime, params, body, req, res) {

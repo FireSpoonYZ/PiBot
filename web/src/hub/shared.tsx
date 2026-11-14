@@ -184,6 +184,7 @@ export const SOUL_SNIPPETS: { zh: string; en: string; text: string }[] = [
 
 export type HubScreen =
   | 'hub'
+  | 'tasks'
   | 'board'
   | 'chat'
   | 'conversation'
@@ -809,6 +810,9 @@ export function TurnToolCallsSection({
   hideToolOutput,
   onSubmitQuestionnaire,
   onSubmitVaultUnlock,
+  onOpenTask,
+  onConfirmTaskPlan,
+  onAnswerTaskPrompt,
   t,
 }: Omit<ToolCallCardProps, 'tool'> & {
   tools: ChatToolCallItem[];
@@ -870,6 +874,9 @@ export function TurnToolCallsSection({
             hideToolOutput={effectiveHideToolOutput}
             onSubmitQuestionnaire={onSubmitQuestionnaire}
             onSubmitVaultUnlock={onSubmitVaultUnlock}
+            onOpenTask={onOpenTask}
+            onConfirmTaskPlan={onConfirmTaskPlan}
+            onAnswerTaskPrompt={onAnswerTaskPrompt}
           />
         ))}
       </div>
@@ -923,6 +930,9 @@ export function TurnToolCallsSection({
               hideToolOutput={effectiveHideToolOutput}
               onSubmitQuestionnaire={onSubmitQuestionnaire}
               onSubmitVaultUnlock={onSubmitVaultUnlock}
+              onOpenTask={onOpenTask}
+              onConfirmTaskPlan={onConfirmTaskPlan}
+              onAnswerTaskPrompt={onAnswerTaskPrompt}
             />
           ))}
         </div>

@@ -18,6 +18,7 @@ import type {
   PendingListPage,
   LiveTarget,
   ModelCatalog,
+  TaskActionInput,
 } from './index.js';
 import type { BotAvatar, BotAvatarConfig, BotCapabilityConfig, BotCwdConfig, Installation, JsonObject } from '../center-contract/index.js';
 
@@ -280,6 +281,7 @@ export interface DesktopOperationMap {
     result: DevicesDirectoryPage;
   };
   bot_directory: { params: Record<string, never>; result: BotDirectorySnapshot };
+  global_tasks: { params: TaskActionInput; result: Record<string, unknown> };
   rename_device: { params: { deviceId: string; displayName: string }; result: DevicesDirectoryItem };
   call: {
     params: {

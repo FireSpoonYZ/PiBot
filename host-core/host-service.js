@@ -353,7 +353,7 @@ export async function openHostService(options) {
   }
   async function connect() {
     const gen = ++generation;
-    const current = await connectCenter({ centerUrl: center.url, deviceId, deviceToken: center.deviceToken, ca: center.ca, onDisconnect: disconnect, onChange: changed, onWebhookReady: () => control?.notifyWebhookReady() });
+    const current = await connectCenter({ centerUrl: center.url, deviceId, deviceToken: center.deviceToken, ca: center.ca, onDisconnect: disconnect, onChange: changed, onWebhookReady: () => control?.notifyWebhookReady(), onTaskReady: () => control?.notifyTaskReady?.() });
     if (closed || gen !== generation) { await current.close(); throw offlineError(); }
     client = current;
     return current;
@@ -444,6 +444,9 @@ export async function openHostService(options) {
         // 每轮准入协调：只经 center client + installer.prepare，不重入快照/生命周期通道。
         // 平铺到 centerRuntime：runtime-turns 按 contract §3 直接调用 prepareTurn/confirmTurn/restoreTurn。
         ...createTurnSynchronizer({ getClient: () => client ?? null, installer }),
+        globalTasks: (input, options) => { const current = client; if (!current) throw offlineError(); return current.globalTasks(input, options?.signal); },
+        pollTaskDispatches: (input, options) => { const current = client; if (!current) throw offlineError(); return current.pollTaskDispatches(input, options?.signal); },
+        reportTaskDispatch: (id, input, options) => { const current = client; if (!current) throw offlineError(); return current.reportTaskDispatch(id, input, options?.signal); },
       },
       collaboration: { displayName, platform, relay: { url: snapshot.linkUrl, token: center.deviceToken, ...(center.ca ? { ca: center.ca } : {}) } },
       onBotsChanged: () => {

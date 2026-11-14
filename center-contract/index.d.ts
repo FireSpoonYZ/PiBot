@@ -719,3 +719,113 @@ export interface ClientReleaseRecord extends ClientReleaseMetadata {
 
 export interface ClientReleaseListResponse { releases: ClientReleaseRecord[] }
 export interface ClientReleasePublishRequest { published: boolean }
+
+export type TaskStatus = 'triaging' | 'working' | 'waiting' | 'done' | 'cancelled';
+
+export type TaskStepStatus =
+  | 'unassigned'
+  | 'todo'
+  | 'working'
+  | 'waiting'
+  | 'blocked'
+  | 'done'
+  | 'cancelled';
+
+export interface TaskOrigin {
+  kind: 'ui' | 'chat' | 'voice';
+  deviceId?: string | null;
+  botId?: string | null;
+  botName?: string | null;
+  conversationId?: string | null;
+  label: string;
+}
+
+export interface TaskBotRef {
+  deviceId: string;
+  botId: string;
+  botName?: string;
+}
+
+export interface TaskPendingPrompt {
+  kind: 'plan' | 'question';
+  deviceId: string;
+  botId: string;
+  botName?: string;
+  stepId?: string | null;
+  text: string;
+  options?: string[];
+  createdAt: number;
+}
+
+export interface TaskAdoption {
+  phase: 'recorded' | 'adjusting' | 'needs_scope' | 'adopted';
+  shortReceipt: string;
+  changeText: string;
+  scopeDesc?: string;
+  updatedAt: number;
+}
+
+export interface TaskStep {
+  id: string;
+  parentStepId: string | null;
+  text: string;
+  status: TaskStepStatus;
+  deviceId: string | null;
+  botId: string | null;
+  botName?: string | null;
+  dependsOnStepIds?: string[];
+  preserved?: boolean;
+  relationNote?: string;
+  resultSummary?: string;
+  previousResultSummary?: string;
+  executionRevision?: number;
+  claimedExecutionRevision?: number;
+  updatedAt: number;
+}
+
+export interface TaskLogEntry {
+  id: string;
+  time: number;
+  text: string;
+  previousRequirement?: string;
+  requirement?: string;
+}
+
+export interface GlobalTask {
+  id: string;
+  title: string;
+  requirement: string;
+  sourceText?: string;
+  status: TaskStatus;
+  summary: string;
+  origin: TaskOrigin;
+  coordinatorDeviceId: string | null;
+  coordinatorBotId: string | null;
+  botRefs: TaskBotRef[];
+  pendingPrompt: TaskPendingPrompt | null;
+  adoption: TaskAdoption | null;
+  steps: TaskStep[];
+  logs: TaskLogEntry[];
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface TaskDispatchItem {
+  id: string;
+  taskId: string;
+  stepId: string | null;
+  kind: 'triage' | 'execute' | 'confirm_plan' | 'answer_prompt' | 'adopt_change' | 'subtask' | 'subtask_completed';
+  deviceId: string;
+  botId: string;
+  requestId: string;
+  taskTitle: string;
+  status: 'dispatching' | 'queued' | 'running';
+  cancelRequested: boolean;
+  executionRevision?: number;
+  instruction: string;
+  payload: Record<string, unknown>;
+  createdAt: number;
+  expiresAt: number;
+  updatedAt: number;
+}

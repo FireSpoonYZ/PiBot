@@ -5,6 +5,7 @@ import type { ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
   ArrowLeft,
+  ClipboardCheck,
   FolderInput,
   LayoutDashboard,
   MessageSquare,
@@ -48,7 +49,7 @@ interface AppState {
   /** 不可变快照：与 api 可变 getter 分离，供子面板按 props 旧值检测变化。 */
   identity: DesktopIdentity | null;
   transportConnected: boolean;
-  view: 'chat' | 'board' | 'pending';
+  view: 'chat' | 'tasks' | 'board' | 'pending';
   token: string;
   ca: string;
   form: ProfileFormState;
@@ -58,8 +59,9 @@ interface AppState {
   connectionError: string | null;
   selectedDeviceId: string;
   pendingTarget?: SendRecordsTarget;
-  pendingReturnView: 'chat' | 'board';
+  pendingReturnView: 'chat' | 'tasks' | 'board';
   pendingAttention: { identity: DesktopIdentity; deviceId: string } | null;
+  taskWaitingCount: number;
   settingsOpen: boolean;
   settingsPage: 'general' | 'archive';
   devices: DevicesSectionState;
@@ -208,6 +210,7 @@ class App extends Component<AppProps, AppState> {
       selectedDeviceId: '',
       pendingReturnView: 'chat',
       pendingAttention: null,
+      taskWaitingCount: 0,
       settingsOpen: false,
       settingsPage: 'general',
       devices: emptyDevices,
@@ -655,6 +658,7 @@ class App extends Component<AppProps, AppState> {
             {(
               [
                 { key: 'chat', label: '对话', Icon: MessageSquare },
+                { key: 'tasks', label: '任务', Icon: ClipboardCheck },
                 { key: 'board', label: '看板', Icon: LayoutDashboard },
               ] as const
             ).map(({ key, label, Icon }) => (
@@ -665,7 +669,12 @@ class App extends Component<AppProps, AppState> {
                 onClick={() => this.setState({ view: key })}
                 aria-pressed={this.state.view === key}
               >
-                <Icon size={18} aria-hidden />
+                <span className="rail-icon-wrap">
+                  <Icon size={18} aria-hidden />
+                  {key === 'tasks' && identity && this.state.taskWaitingCount > 0 && (
+                    <span className="conn-dot needs-attention" />
+                  )}
+                </span>
                 <span className="rail-label">{label}</span>
               </button>
             ))}
@@ -872,8 +881,15 @@ class App extends Component<AppProps, AppState> {
             pageActive={pageActive && (view !== 'pending' || this.state.settingsOpen)}
             workspaceActive={pageActive && view !== 'pending' && !this.state.settingsOpen}
             boardActive={view === 'board'}
+            tasksActive={view === 'tasks'}
             centerInterrupted={centerInterrupted}
             onOpenBoardChat={() => this.setState({ view: 'chat' })}
+            onSwitchView={(next) => this.setState({ view: next })}
+            onTaskWaitingCountChange={(count) => {
+              if (this.state.taskWaitingCount !== count) {
+                this.setState({ taskWaitingCount: count });
+              }
+            }}
             onArchiveBridge={this.handleArchiveBridge}
             onOpenSendRecords={this.openSendRecords}
             onOpenArchived={this.handleOpenArchived}

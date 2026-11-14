@@ -120,7 +120,62 @@ import type { ConversationMenuItem } from '../../../web/src/gbot-ui/Conversation
 import { useChatPins } from '../../../web/src/gbot-ui/chatPins';
 import { SortablePinnedChat } from '../../../web/src/gbot-ui/SortablePinnedChat';
 import { useConversationUnread } from '../../../web/src/gbot-ui/useConversationUnread';
+import {
+  useGlobalTasks,
+  TaskBoardView,
+  TaskChatContextBar,
+  TaskChatPromptBanner,
+  botTasksFor,
+  type GlobalTask,
+  type TaskBotOption,
+  type TaskTransportFn,
+} from '../../../web/src/tasks';
 import './BotChats.css';
+
+type PendingTaskChatAction =
+  | {
+      kind: 'answer_prompt';
+      scopeKey: string;
+      botKey: string;
+      taskId: string;
+      taskTitle: string;
+      answer: string;
+      error: string;
+    }
+  | {
+      kind: 'confirm_plan';
+      scopeKey: string;
+      botKey: string;
+      taskId: string;
+      taskTitle: string;
+      error: string;
+    }
+  | {
+      kind: 'update_task';
+      scopeKey: string;
+      botKey: string;
+      taskId: string;
+      taskTitle: string;
+      payload: Record<string, unknown> & { taskId: string };
+      error: string;
+    };
+
+type PendingTaskChatActionInput =
+  | Omit<Extract<PendingTaskChatAction, { kind: 'answer_prompt' }>, 'error'>
+  | Omit<Extract<PendingTaskChatAction, { kind: 'confirm_plan' }>, 'error'>
+  | Omit<Extract<PendingTaskChatAction, { kind: 'update_task' }>, 'error'>;
+
+function isTaskWaitingForBot(item: GlobalTask, deviceId: string, botId: string): boolean {
+  if (!item.pendingPrompt) return false;
+  if (item.pendingPrompt.deviceId === deviceId && item.pendingPrompt.botId === botId) {
+    return true;
+  }
+  return (
+    item.pendingPrompt.kind === 'plan' &&
+    item.coordinatorDeviceId === deviceId &&
+    item.coordinatorBotId === botId
+  );
+}
 
 type AnyRawEntry = { id: unknown; kind: string; model?: unknown; data?: unknown };
 
@@ -1706,6 +1761,21 @@ function PrimaryChatPane({
   centerInterrupted = false,
   pageActive = true,
   knownBots,
+  tasks = [],
+  taskBots = [],
+  taskScopeKey = 'none',
+  selectedTaskId = null,
+  selectedStepId = null,
+  returnTaskId = null,
+  taskActionFailure = null,
+  taskActionRetrying = false,
+  onSelectTaskTopic,
+  onSelectStepFocus,
+  onOpenTask,
+  onReturnToTask,
+  onRunTaskAction,
+  onRetryTaskAction,
+  onDismissTaskAction,
 }: {
   api: DesktopPanelApi;
   /** 未按目标在线收窄的原 api：仅中心权威操作（cwd get/set）使用。 */
@@ -1732,6 +1802,21 @@ function PrimaryChatPane({
   centerInterrupted?: boolean;
   pageActive?: boolean;
   knownBots?: readonly KnownBotSummary[];
+  tasks?: GlobalTask[];
+  taskBots?: TaskBotOption[];
+  taskScopeKey?: string;
+  selectedTaskId?: string | null;
+  selectedStepId?: string | null;
+  returnTaskId?: string | null;
+  taskActionFailure?: PendingTaskChatAction | null;
+  taskActionRetrying?: boolean;
+  onSelectTaskTopic?: (taskId: string | null) => void;
+  onSelectStepFocus?: (stepId: string | null) => void;
+  onOpenTask?: (taskId: string, openEdit?: boolean) => void;
+  onReturnToTask?: (taskId: string) => void;
+  onRunTaskAction?: (action: PendingTaskChatActionInput) => Promise<boolean>;
+  onRetryTaskAction?: () => void;
+  onDismissTaskAction?: () => void;
 }) {
   const t = useText();
   const identity = api.identity;
@@ -1782,6 +1867,27 @@ function PrimaryChatPane({
   const moreMenuRef = useRef<HTMLDivElement | null>(null);
   const manageInFlightRef = useRef(false);
   const manageBusy = manageAction !== null;
+  const [taskBannerBusy, setTaskBannerBusy] = useState(false);
+
+  const linkedTask = useMemo(
+    () => (selectedTaskId ? (tasks.find((item) => item.id === selectedTaskId) ?? null) : null),
+    [tasks, selectedTaskId],
+  );
+  const focusedStep = useMemo(
+    () => (linkedTask && selectedStepId
+      ? (linkedTask.steps.find((step) => step.id === selectedStepId) ?? null)
+      : null),
+    [linkedTask, selectedStepId],
+  );
+  // banner 必须与 composer 绑定同一 task，绝不显示另一个任务的 prompt
+  const bannerTask = linkedTask;
+  const switchableWaitingTasks = useMemo(
+    () =>
+      botTasksFor(tasks, bot.deviceId, bot.botId).filter(
+        (item) => isTaskWaitingForBot(item, bot.deviceId, bot.botId) && item.id !== linkedTask?.id,
+      ),
+    [tasks, bot.deviceId, bot.botId, linkedTask?.id],
+  );
 
   const onLiveActivityRef = useRef(onLiveActivity);
   onLiveActivityRef.current = onLiveActivity;
@@ -2318,9 +2424,25 @@ function PrimaryChatPane({
       return;
     }
     const filesNow = drafts.files;
+    const linkedTaskSnapshot = linkedTask;
+    const focusedStepSnapshot = focusedStep;
+    const selectedTaskIdSnapshot = selectedTaskId;
+    const selectedStepIdSnapshot = selectedStepId;
+    const capturedTaskScopeKey = taskScopeKey;
+    const capturedBotSnapshot = { deviceId: bot.deviceId, botId: bot.botId, role: bot.role };
+    const taskPrefix = linkedTaskSnapshot
+      ? focusedStepSnapshot
+        ? `[关联任务「${linkedTaskSnapshot.title}」(${linkedTaskSnapshot.id}) · 子项「${focusedStepSnapshot.text}」(${focusedStepSnapshot.id})]\n`
+        : `[关联任务「${linkedTaskSnapshot.title}」(${linkedTaskSnapshot.id})]\n`
+      : selectedTaskIdSnapshot
+        ? selectedStepIdSnapshot
+          ? `[关联任务(${selectedTaskIdSnapshot}) · 子项(${selectedStepIdSnapshot})]\n`
+          : `[关联任务(${selectedTaskIdSnapshot})]\n`
+        : '';
+    const bodyText = taskPrefix ? (msg ? `${taskPrefix}${msg}` : taskPrefix.trimEnd()) : msg;
     const composed = filesNow.length
-      ? msg + '\n' + filesNow.map((f) => `[文件路径引用，未上传] ${f.path}`).join('\n')
-      : msg;
+      ? (bodyText ? `${bodyText}\n` : '') + filesNow.map((f) => `[文件路径引用，未上传] ${f.path}`).join('\n')
+      : bodyText;
     const requestId = crypto.randomUUID();
     const input: PendingEnqueueInput = {
       kind: 'primary',
@@ -2380,6 +2502,36 @@ function PrimaryChatPane({
       try {
         const sent = await api.pending(identity, 'pending_send', { id: pendingId });
         reportSendRecord(started.handle, sent);
+        if (sent.state === 'accepted' && linkedTaskSnapshot && msg) {
+          if (
+            linkedTaskSnapshot.pendingPrompt?.kind === 'question' &&
+            linkedTaskSnapshot.pendingPrompt.deviceId === capturedBotSnapshot.deviceId &&
+            linkedTaskSnapshot.pendingPrompt.botId === capturedBotSnapshot.botId
+          ) {
+            void onRunTaskAction?.({
+              kind: 'answer_prompt',
+              scopeKey: capturedTaskScopeKey,
+              botKey: `${capturedBotSnapshot.deviceId}:${capturedBotSnapshot.botId}`,
+              taskId: linkedTaskSnapshot.id,
+              taskTitle: linkedTaskSnapshot.title,
+              answer: msg,
+            });
+          } else if (linkedTaskSnapshot.pendingPrompt?.kind === 'plan') {
+            void onRunTaskAction?.({
+              kind: 'update_task',
+              scopeKey: capturedTaskScopeKey,
+              botKey: `${capturedBotSnapshot.deviceId}:${capturedBotSnapshot.botId}`,
+              taskId: linkedTaskSnapshot.id,
+              taskTitle: linkedTaskSnapshot.title,
+              payload: {
+                taskId: linkedTaskSnapshot.id,
+                fromChatBotId: capturedBotSnapshot.botId,
+                fromChatDeviceId: capturedBotSnapshot.deviceId,
+                logText: `${capturedBotSnapshot.role} 对话补充：${msg.slice(0, 120)}`,
+              },
+            });
+          }
+        }
       } catch (e) {
         // 回执丢失/超时/未知：已入队，保留原 ID 锁，绝不标未入队。
         drafts.markUnconfirmed(started.handle);
@@ -3344,6 +3496,21 @@ function PrimaryChatPane({
         </div>
       </header>
 
+      <TaskChatContextBar
+        variant="desktop"
+        botDeviceId={bot.deviceId}
+        botId={bot.botId}
+        botName={bot.role}
+        tasks={tasks}
+        activeTaskId={selectedTaskId}
+        activeStepId={selectedStepId}
+        returnTaskId={returnTaskId}
+        onSelectTaskTopic={(tid) => onSelectTaskTopic?.(tid)}
+        onSelectStepFocus={(sid) => onSelectStepFocus?.(sid)}
+        onOpenTaskDetail={(tid, openEdit) => onOpenTask?.(tid, openEdit)}
+        onReturnToTask={onReturnToTask}
+      />
+
       {awaitingAnswer ? <p className="chat-awaiting-answer" role="status">{awaitingAnswer}</p> : null}
 
       {isManagementPage ? null : deleteConfirmation}
@@ -3416,6 +3583,36 @@ function PrimaryChatPane({
         canEditTurns={canEditTurns}
         editingEntryId={activeEditing?.entryId ?? null}
         onEditTurn={startEditTurn}
+        onOpenTask={onOpenTask}
+        onConfirmTaskPlan={
+          onRunTaskAction
+            ? async (taskId) => {
+                const target = tasks.find((item) => item.id === taskId);
+                await onRunTaskAction({
+                  kind: 'confirm_plan',
+                  scopeKey: taskScopeKey,
+                  botKey: `${bot.deviceId}:${bot.botId}`,
+                  taskId,
+                  taskTitle: target?.title ?? taskId,
+                });
+              }
+            : undefined
+        }
+        onAnswerTaskPrompt={
+          onRunTaskAction
+            ? async (taskId, answer) => {
+                const target = tasks.find((item) => item.id === taskId);
+                await onRunTaskAction({
+                  kind: 'answer_prompt',
+                  scopeKey: taskScopeKey,
+                  botKey: `${bot.deviceId}:${bot.botId}`,
+                  taskId,
+                  taskTitle: target?.title ?? taskId,
+                  answer,
+                });
+              }
+            : undefined
+        }
         emptyActions={
           !isArchived && !drafts.text && <button
             type="button"
@@ -3424,6 +3621,95 @@ function PrimaryChatPane({
             onClick={() => { onChangeText(example); composerRef.current?.focus(); }}
           >{example}</button>
         }
+      />
+
+      {taskActionFailure ? (
+        <div
+          className="error-banner"
+          role="alert"
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}
+        >
+          <span>
+            {taskActionFailure.kind === 'answer_prompt'
+              ? `任务「${taskActionFailure.taskTitle}」澄清答复未同步（聊天消息已发出）：${taskActionFailure.error}`
+              : taskActionFailure.kind === 'confirm_plan'
+                ? `任务「${taskActionFailure.taskTitle}」确认计划失败：${taskActionFailure.error}`
+                : `任务「${taskActionFailure.taskTitle}」任务备注未同步（聊天消息已发出）：${taskActionFailure.error}`}
+          </span>
+          <span style={{ display: 'inline-flex', gap: 6 }}>
+            <button type="button" disabled={taskActionRetrying} onClick={() => onRetryTaskAction?.()}>
+              {taskActionRetrying ? '重试中…' : '仅重试任务动作'}
+            </button>
+            <button type="button" disabled={taskActionRetrying} onClick={() => onDismissTaskAction?.()}>
+              忽略
+            </button>
+          </span>
+        </div>
+      ) : null}
+
+      {!bannerTask?.pendingPrompt && switchableWaitingTasks.length > 0 ? (
+        <div
+          className="status status-offline-bar"
+          role="status"
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
+        >
+          <span>
+            {switchableWaitingTasks.length === 1
+              ? `待回应任务：「${switchableWaitingTasks[0].title}」`
+              : `有 ${switchableWaitingTasks.length} 个待回应任务：「${switchableWaitingTasks[0].title}」等`}
+          </span>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => onSelectTaskTopic?.(switchableWaitingTasks[0].id)}
+          >
+            切到此任务回应
+          </button>
+        </div>
+      ) : null}
+
+      <TaskChatPromptBanner
+        botDeviceId={bot.deviceId}
+        botId={bot.botId}
+        botName={bot.role}
+        avatar={botAvatarKey(bot)}
+        task={bannerTask}
+        bots={taskBots}
+        busy={taskBannerBusy}
+        onConfirmPlan={async (taskId) => {
+          if (!onRunTaskAction) return;
+          setTaskBannerBusy(true);
+          try {
+            const target = tasks.find((item) => item.id === taskId);
+            await onRunTaskAction({
+              kind: 'confirm_plan',
+              scopeKey: taskScopeKey,
+              botKey: `${bot.deviceId}:${bot.botId}`,
+              taskId,
+              taskTitle: target?.title ?? taskId,
+            });
+          } finally {
+            setTaskBannerBusy(false);
+          }
+        }}
+        onOpenTaskEdit={(taskId) => onOpenTask?.(taskId, true)}
+        onAnswerPrompt={async (taskId, answer) => {
+          if (!onRunTaskAction) return;
+          setTaskBannerBusy(true);
+          try {
+            const target = tasks.find((item) => item.id === taskId);
+            await onRunTaskAction({
+              kind: 'answer_prompt',
+              scopeKey: taskScopeKey,
+              botKey: `${bot.deviceId}:${bot.botId}`,
+              taskId,
+              taskTitle: target?.title ?? taskId,
+              answer,
+            });
+          } finally {
+            setTaskBannerBusy(false);
+          }
+        }}
       />
 
       <Composer
@@ -3715,9 +4001,12 @@ export function BotChats({
   initialDeviceId,
   onArchiveBridge,
   boardActive = false,
+  tasksActive = false,
   workspaceActive = pageActive,
   centerInterrupted = false,
   onOpenBoardChat,
+  onSwitchView,
+  onTaskWaitingCountChange,
   onOpenSendRecords,
   onOpenArchived,
 }: {
@@ -3730,9 +4019,12 @@ export function BotChats({
   initialDeviceId?: string;
   onArchiveBridge?: (bridge: BotChatsArchiveBridge | null) => void;
   boardActive?: boolean;
+  tasksActive?: boolean;
   workspaceActive?: boolean;
   centerInterrupted?: boolean;
   onOpenBoardChat?: () => void;
+  onSwitchView?: (next: 'chat' | 'tasks' | 'board') => void;
+  onTaskWaitingCountChange?: (count: number) => void;
   onOpenSendRecords?: (target?: SendRecordsTarget) => void;
   onOpenArchived?: () => void;
 }) {
@@ -3800,6 +4092,177 @@ export function BotChats({
   const [listCollapsed, setListCollapsed] = useState(false);
   const [query, setQuery] = useState('');
   const [deviceFilter, setDeviceFilter] = useState<string>('all');
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [creatingTask, setCreatingTask] = useState(false);
+  const [taskInitialEditMode, setTaskInitialEditMode] = useState(false);
+  const [selectedTopicByBot, setSelectedTopicByBot] = useState<Record<string, string | null>>({});
+  const [selectedStepByBotTask, setSelectedStepByBotTask] = useState<Record<string, string | null>>({});
+  const [returnTaskId, setReturnTaskId] = useState<string | null>(null);
+  const [taskBoardNotice, setTaskBoardNotice] = useState('');
+  const [fetchedTasksById, setFetchedTasksById] = useState<Record<string, GlobalTask>>({});
+  const taskFetchAttemptedRef = useRef<Set<string>>(new Set());
+  const [taskActionFailures, setTaskActionFailures] = useState<Record<string, PendingTaskChatAction>>({});
+  const [retryingTaskActionKey, setRetryingTaskActionKey] = useState<string | null>(null);
+  const autoTopicEntryRef = useRef<string | null>(null);
+
+  const taskScopeKey = profileKey || 'none';
+  const taskScopeRef = useRef(taskScopeKey);
+  taskScopeRef.current = taskScopeKey;
+
+  const onlineDeviceId = useMemo(() => {
+    const current = devices.find((d) => d.deviceId === currentDeviceId && d.online);
+    if (current) return current.deviceId;
+    const anyOnline = devices.find((d) => d.online);
+    if (anyOnline) return anyOnline.deviceId;
+    const botDevice = bots.find((b) => b.online)?.deviceId;
+    if (botDevice) return botDevice;
+    return identity?.kind === 'local' ? identity.targetDeviceId : (devices[0]?.deviceId ?? '');
+  }, [devices, bots, currentDeviceId, identity]);
+
+  const taskTransport = useMemo<TaskTransportFn | null>(() => {
+    if (!identity) return null;
+    const expectedScope = taskScopeKey;
+    const ensureCurrentScope = () => {
+      if (taskScopeRef.current !== expectedScope) {
+        throw new Error('任务作用域已切换');
+      }
+    };
+    return async (input) => {
+      ensureCurrentScope();
+      try {
+        const res = await (api.broker as (id: DesktopIdentity, op: string, params: unknown) => Promise<unknown>)(
+          identity,
+          'global_tasks',
+          input,
+        );
+        ensureCurrentScope();
+        return res;
+      } catch (err) {
+        ensureCurrentScope();
+        const e = err as { code?: unknown; message?: unknown } | null;
+        const msg = typeof e?.message === 'string' ? e.message : String(err ?? '');
+        const isUnsupported =
+          e?.code === 'INVALID_ARGUMENT' ||
+          /unsupported desktop broker operation/i.test(msg);
+        const fallbackDeviceId =
+          identity.kind === 'local'
+            ? identity.targetDeviceId
+            : onlineDeviceId;
+        if (!isUnsupported || !fallbackDeviceId) throw err;
+        const targetId = api.identityForTarget(fallbackDeviceId);
+        const res = await (api.call as (id: DesktopIdentity, method: string, params: unknown) => Promise<unknown>)(
+          targetId,
+          'manageTasks',
+          input,
+        );
+        ensureCurrentScope();
+        return res;
+      }
+    };
+  }, [api, identity, onlineDeviceId, taskScopeKey]);
+
+  const globalTasks = useGlobalTasks({
+    transport: taskTransport,
+    enabled: online && pageActive,
+    scopeKey: taskScopeKey,
+    draftStorageKey: `e-launcher:task-create-draft:v1:${profileKey || 'default'}`,
+  });
+
+  const effectiveGlobalTasks = useMemo(() => {
+    const existingIds = new Set(globalTasks.tasks.map((item) => item.id));
+    const extras = Object.values(fetchedTasksById).filter((item) => !existingIds.has(item.id));
+    return extras.length ? [...globalTasks.tasks, ...extras] : globalTasks.tasks;
+  }, [globalTasks.tasks, fetchedTasksById]);
+
+  const executeTaskChatAction = useCallback(
+    async (action: PendingTaskChatActionInput): Promise<boolean> => {
+      const failureKey = `${action.scopeKey}|${action.botKey}`;
+      try {
+        let updated: GlobalTask;
+        if (action.kind === 'answer_prompt') {
+          updated = await globalTasks.answerPrompt(action.taskId, action.answer);
+        } else if (action.kind === 'confirm_plan') {
+          updated = await globalTasks.confirmPlan(action.taskId);
+        } else {
+          updated = await globalTasks.updateTask(action.payload);
+        }
+        if (taskScopeRef.current !== action.scopeKey) return false;
+        if (updated) {
+          setFetchedTasksById((prev) => ({ ...prev, [updated.id]: updated }));
+        }
+        setTaskActionFailures((prev) => {
+          if (!prev[failureKey]) return prev;
+          const next = { ...prev };
+          delete next[failureKey];
+          return next;
+        });
+        return true;
+      } catch (err) {
+        if (taskScopeRef.current !== action.scopeKey) return false;
+        setTaskActionFailures((prev) => ({
+          ...prev,
+          [failureKey]: { ...action, error: errText(err) },
+        }));
+        return false;
+      }
+    },
+    [globalTasks],
+  );
+
+  const retryTaskChatAction = useCallback(
+    async (failure: PendingTaskChatAction) => {
+      const failureKey = `${failure.scopeKey}|${failure.botKey}`;
+      setRetryingTaskActionKey(failureKey);
+      try {
+        await executeTaskChatAction(failure);
+      } finally {
+        setRetryingTaskActionKey((cur) => (cur === failureKey ? null : cur));
+      }
+    },
+    [executeTaskChatAction],
+  );
+
+  const dismissTaskChatAction = useCallback((failure: PendingTaskChatAction) => {
+    const failureKey = `${failure.scopeKey}|${failure.botKey}`;
+    setTaskActionFailures((prev) => {
+      if (!prev[failureKey]) return prev;
+      const next = { ...prev };
+      delete next[failureKey];
+      return next;
+    });
+  }, []);
+
+  const onTaskWaitingCountRef = useRef(onTaskWaitingCountChange);
+  onTaskWaitingCountRef.current = onTaskWaitingCountChange;
+  useEffect(() => {
+    onTaskWaitingCountRef.current?.(globalTasks.waitingCount);
+  }, [globalTasks.waitingCount]);
+
+  const wasTasksActiveRef = useRef(tasksActive);
+  useEffect(() => {
+    if (wasTasksActiveRef.current && !tasksActive) {
+      if (globalTasks.createDraft.trim()) {
+        globalTasks.markDraftLeftUnpublished();
+      }
+      setCreatingTask(false);
+      setTaskInitialEditMode(false);
+    }
+    wasTasksActiveRef.current = tasksActive;
+  }, [tasksActive, globalTasks.createDraft, globalTasks.markDraftLeftUnpublished]);
+
+  const taskBotOptions = useMemo<TaskBotOption[]>(() => {
+    return bots
+      .filter((b) => !b.archivedAt)
+      .map((b) => ({
+        deviceId: b.deviceId,
+        botId: b.botId,
+        name: b.role,
+        description: b.description,
+        online: Boolean(online && b.online),
+        avatar: botAvatarKey(b),
+        isPrimary: Boolean(b.isPrimary),
+      }));
+  }, [bots, online]);
   /** 主舞台内子视图：null = 选中 Bot 的主聊天；dm = 某 Bot 的私聊列表（readOnly）；scope = 群聊详情。
    *  只保存稳定 deviceId/成员/scopeId，不保存 api：profileKey 不含 generation，
    *  冻结的 targetApi 会在同 profile 重连后 identity 永久 null、targetOnline 不随目录更新。 */
@@ -3992,6 +4455,18 @@ export function BotChats({
       setFrozenGroupAttempt(null);
       setDeviceFilter('all');
       setQuery('');
+      setActiveTaskId(null);
+      setCreatingTask(false);
+      setTaskInitialEditMode(false);
+      setSelectedTopicByBot({});
+      setSelectedStepByBotTask({});
+      setReturnTaskId(null);
+      setTaskBoardNotice('');
+      setFetchedTasksById({});
+      taskFetchAttemptedRef.current.clear();
+      setTaskActionFailures({});
+      setRetryingTaskActionKey(null);
+      autoTopicEntryRef.current = null;
     }
     seq.current += 1;
     setLoading(false);
@@ -4257,7 +4732,7 @@ export function BotChats({
       lastMessageAt: group.lastActivityAt,
     })),
   ], [bots, groupItems]);
-  const chatWorkspaceActive = pageActive && workspaceActive && !boardActive;
+  const chatWorkspaceActive = pageActive && workspaceActive && !boardActive && !tasksActive;
   const viewingBotKey = chatWorkspaceActive && !stage && scopedApi && selectedBot && !selectedBot.archivedAt
     ? botPinKey(selectedBot.deviceId, selectedBot.botId)
     : null;
@@ -4388,6 +4863,61 @@ export function BotChats({
   const selectedDevicePlatform = selectedBot
     ? devices.find((d) => d.deviceId === selectedBot.deviceId)?.platform ?? selectedBot.platform
     : undefined;
+
+  const selectedBotKey = selectedBot ? `${selectedBot.deviceId}:${selectedBot.botId}` : null;
+  const selectedBotTopicId = selectedBotKey ? (selectedTopicByBot[selectedBotKey] ?? null) : null;
+
+  useEffect(() => {
+    if (!online || !pageActive || !taskTransport) return;
+    const candidateIds = [selectedBotTopicId, returnTaskId].filter((id): id is string => Boolean(id));
+    for (const tid of candidateIds) {
+      if (globalTasks.tasks.some((item) => item.id === tid)) continue;
+      if (fetchedTasksById[tid]) continue;
+      const attemptKey = `${taskScopeKey}|${tid}`;
+      if (taskFetchAttemptedRef.current.has(attemptKey)) continue;
+      taskFetchAttemptedRef.current.add(attemptKey);
+      const capturedScope = taskScopeKey;
+      void globalTasks
+        .getTask(tid)
+        .then((fetched) => {
+          if (taskScopeRef.current !== capturedScope || !fetched) return;
+          setFetchedTasksById((prev) => ({ ...prev, [fetched.id]: fetched }));
+        })
+        .catch(() => {
+          // 列表截断补充查询失败时保留静态回退，不阻塞聊天主流程。
+        });
+    }
+  }, [online, pageActive, taskTransport, selectedBotTopicId, returnTaskId, globalTasks, fetchedTasksById, taskScopeKey]);
+
+  useEffect(() => {
+    if (!selectedBot || !selectedBotKey || stage || tasksActive || boardActive) {
+      autoTopicEntryRef.current = null;
+      return;
+    }
+    if (!globalTasks.loaded) return;
+    const entryKey = `${taskScopeKey}|${selectedBotKey}`;
+    if (autoTopicEntryRef.current === entryKey) return;
+    autoTopicEntryRef.current = entryKey;
+    if (selectedTopicByBot[selectedBotKey] !== undefined) return;
+    const waiting = botTasksFor(effectiveGlobalTasks, selectedBot.deviceId, selectedBot.botId).filter((item) =>
+      isTaskWaitingForBot(item, selectedBot.deviceId, selectedBot.botId),
+    );
+    if (waiting.length === 1) {
+      setSelectedTopicByBot((prev) =>
+        prev[selectedBotKey] !== undefined ? prev : { ...prev, [selectedBotKey]: waiting[0].id },
+      );
+    }
+  }, [
+    selectedBot,
+    selectedBotKey,
+    stage,
+    tasksActive,
+    boardActive,
+    globalTasks.loaded,
+    taskScopeKey,
+    selectedTopicByBot,
+    effectiveGlobalTasks,
+  ]);
 
   const onlineDevices = useMemo(() => devices.filter((d) => d.online), [devices]);
 
@@ -4941,6 +5471,7 @@ export function BotChats({
           />
         }
         onOpen={() => {
+          setReturnTaskId(null);
           setSelected({ deviceId: b.deviceId, botId: b.botId });
           setRoomSettingsOpen(false);
           setStage(null);
@@ -5099,15 +5630,87 @@ export function BotChats({
     ? [...new Set(groupToDissolve.scope.members.map(member => member.deviceId))].map(deviceNameOf)
     : [];
 
+  if (tasksActive) return (
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, height: '100%' }}>
+      {taskBoardNotice ? (
+        <div className="error-banner" role="alert">
+          {taskBoardNotice}
+          <button type="button" onClick={() => setTaskBoardNotice('')}>关闭</button>
+        </div>
+      ) : null}
+      <TaskBoardView
+        variant="desktop"
+        controller={globalTasks}
+        bots={taskBotOptions}
+        activeTaskId={activeTaskId}
+        creatingTask={creatingTask}
+        initialEditMode={taskInitialEditMode}
+        onOpenCreate={() => {
+          setTaskBoardNotice('');
+          setCreatingTask(true);
+          setActiveTaskId(null);
+          setTaskInitialEditMode(false);
+        }}
+        onCloseCreate={() => {
+          if (globalTasks.createDraft.trim()) globalTasks.markDraftLeftUnpublished();
+          setCreatingTask(false);
+        }}
+        onSelectTask={(taskId, openInEditMode) => {
+          setTaskBoardNotice('');
+          setCreatingTask(false);
+          setActiveTaskId(taskId);
+          setTaskInitialEditMode(Boolean(openInEditMode));
+        }}
+        onJumpToChat={({ deviceId, botId, taskId, stepId }) => {
+          const hasDeviceId = Boolean(deviceId && deviceId.trim());
+          const targetBot = hasDeviceId
+            ? (bots.find((b) => !b.archivedAt && b.deviceId === deviceId && b.botId === botId) ??
+              bots.find((b) => b.deviceId === deviceId && b.botId === botId))
+            : (bots.find((b) => !b.archivedAt && b.botId === botId) ??
+              bots.find((b) => b.botId === botId));
+          const unreachableLocal = Boolean(
+            targetBot && identity?.kind === 'local' && targetBot.deviceId !== identity.targetDeviceId,
+          );
+          if (!targetBot || unreachableLocal) {
+            setTaskBoardNotice(
+              hasDeviceId
+                ? `目标智能体不可用（设备 ${deviceId} · ${botId} 不在当前可用目录中）`
+                : `目标智能体不可用（${botId} 不在当前可用目录中）`,
+            );
+            return;
+          }
+          setTaskBoardNotice('');
+          const botKey = `${targetBot.deviceId}:${targetBot.botId}`;
+          setSelectedTopicByBot((prev) => ({ ...prev, [botKey]: taskId }));
+          const stepKey = `${targetBot.deviceId}:${targetBot.botId}:${taskId}`;
+          setSelectedStepByBotTask((prev) => ({ ...prev, [stepKey]: stepId ?? null }));
+          setReturnTaskId(taskId);
+          setSelected({ deviceId: targetBot.deviceId, botId: targetBot.botId, focusComposer: true });
+          setDeviceFilter('all');
+          setStage(null);
+          setRoomSettingsOpen(false);
+          onSwitchView?.('chat');
+        }}
+      />
+    </div>
+  );
+
   if (boardActive) return <BotBoard
     variant="desktop"
     targets={boardTargets}
     board={board}
     loading={!loaded || loading}
     error={botsError}
+    onOpenTask={(taskId) => {
+      setActiveTaskId(taskId);
+      setCreatingTask(false);
+      setTaskInitialEditMode(false);
+      onSwitchView?.('tasks');
+    }}
     onOpen={(target, questionnaire) => {
       const bot = boardBots.find(bot => botBoardKey(profileKey, bot.deviceId, bot.botId) === target.key);
       if (!bot) return;
+      setReturnTaskId(null);
       setSelected({
         deviceId: bot.deviceId,
         botId: bot.botId,
@@ -5118,7 +5721,7 @@ export function BotChats({
       setDeviceFilter('all');
       setStage(null);
       setRoomSettingsOpen(false);
-      onOpenBoardChat?.();
+      onSwitchView ? onSwitchView('chat') : onOpenBoardChat?.();
     }}
   />;
 
@@ -5132,6 +5735,7 @@ export function BotChats({
               role="listitem"
               className={`hub-hero-card${!stage && selected?.deviceId === b.deviceId && selected.botId === b.botId ? ' selected' : ''}`}
               onOpen={() => {
+                setReturnTaskId(null);
                 setSelected({ deviceId: b.deviceId, botId: b.botId });
                 setRoomSettingsOpen(false);
                 setStage(null);
@@ -5503,6 +6107,48 @@ export function BotChats({
             onOpenPrivateChats={(bot) =>
               openDmList({ deviceId: bot.deviceId, botId: bot.botId })
             }
+            tasks={effectiveGlobalTasks}
+            taskBots={taskBotOptions}
+            taskScopeKey={taskScopeKey}
+            selectedTaskId={selectedTopicByBot[`${selectedBot.deviceId}:${selectedBot.botId}`] ?? null}
+            selectedStepId={(() => {
+              const tid = selectedTopicByBot[`${selectedBot.deviceId}:${selectedBot.botId}`] ?? null;
+              return tid ? (selectedStepByBotTask[`${selectedBot.deviceId}:${selectedBot.botId}:${tid}`] ?? null) : null;
+            })()}
+            returnTaskId={returnTaskId}
+            taskActionFailure={taskActionFailures[`${taskScopeKey}|${selectedBot.deviceId}:${selectedBot.botId}`] ?? null}
+            taskActionRetrying={retryingTaskActionKey === `${taskScopeKey}|${selectedBot.deviceId}:${selectedBot.botId}`}
+            onSelectTaskTopic={(taskId) => {
+              const botKey = `${selectedBot.deviceId}:${selectedBot.botId}`;
+              setSelectedTopicByBot((prev) => ({ ...prev, [botKey]: taskId }));
+            }}
+            onSelectStepFocus={(stepId) => {
+              const tid = selectedTopicByBot[`${selectedBot.deviceId}:${selectedBot.botId}`] ?? null;
+              if (!tid) return;
+              const stepKey = `${selectedBot.deviceId}:${selectedBot.botId}:${tid}`;
+              setSelectedStepByBotTask((prev) => ({ ...prev, [stepKey]: stepId }));
+            }}
+            onOpenTask={(taskId, openEdit) => {
+              setActiveTaskId(taskId);
+              setCreatingTask(false);
+              setTaskInitialEditMode(Boolean(openEdit));
+              onSwitchView?.('tasks');
+            }}
+            onReturnToTask={(taskId) => {
+              setActiveTaskId(taskId);
+              setCreatingTask(false);
+              setTaskInitialEditMode(false);
+              onSwitchView?.('tasks');
+            }}
+            onRunTaskAction={executeTaskChatAction}
+            onRetryTaskAction={() => {
+              const failure = taskActionFailures[`${taskScopeKey}|${selectedBot.deviceId}:${selectedBot.botId}`];
+              if (failure) void retryTaskChatAction(failure);
+            }}
+            onDismissTaskAction={() => {
+              const failure = taskActionFailures[`${taskScopeKey}|${selectedBot.deviceId}:${selectedBot.botId}`];
+              if (failure) dismissTaskChatAction(failure);
+            }}
             transcriptVisible={!showCreate && !showCreateGroup && !confirmDeleteBot && !confirmDeleteGroup && !archiveTarget}
             pageActive={pageActive && workspaceActive && !stage}
           />

@@ -1,12 +1,13 @@
 import { useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type {
-  ToolPresentation,
+  ToolPresentation as HostToolPresentation,
   TodoPresentation,
   QuestionnairePresentation,
   QuestionnaireAnswerPresentation,
   VaultUnlockPresentation,
 } from '../../host-core/index.js';
+import type { TaskStatus, TaskStepStatus } from './tasks/types';
 import { useText } from './ui';
 import { VaultUnlockCard } from './vault/VaultUnlockCard';
 import './tool-presentation.css';
@@ -20,7 +21,37 @@ import './tool-presentation.css';
  * 类型 type-only 引用 host-core 契约，不维护重复接口。
  */
 
-export type { ToolPresentation, TodoPresentation, QuestionnairePresentation, VaultUnlockPresentation };
+export interface TaskStepPreviewPresentation {
+  id: string;
+  text: string;
+  status: TaskStepStatus;
+  botName?: string;
+}
+
+export interface TaskPendingPromptPresentation {
+  kind: 'plan' | 'question';
+  botId: string;
+  text: string;
+  options?: string[];
+}
+
+export interface TaskPresentation {
+  kind: 'task';
+  version: 1;
+  installationId: string;
+  taskId: string;
+  title: string;
+  status: TaskStatus;
+  cardLabel: string;
+  summary?: string;
+  stepCount: { done: number; total: number };
+  pendingPrompt?: TaskPendingPromptPresentation | null;
+  stepsPreview?: TaskStepPreviewPresentation[];
+}
+
+export type ToolPresentation = HostToolPresentation | TaskPresentation;
+
+export type { TodoPresentation, QuestionnairePresentation, VaultUnlockPresentation };
 
 /** Private vaultControl response only; never submit through questionnaire or chat actions. */
 export type VaultUnlockSubmitPayload =
@@ -100,6 +131,25 @@ function checkResult(result: unknown): boolean {
   return true;
 }
 
+const TASK_STATUSES = new Set(['triaging', 'working', 'waiting', 'done', 'cancelled']);
+const TASK_STEP_STATUSES = new Set(['unassigned', 'todo', 'working', 'waiting', 'blocked', 'done', 'cancelled']);
+
+function checkTaskPendingPrompt(prompt: unknown): boolean {
+  if (prompt === undefined || prompt === null) return true;
+  if (!isRecord(prompt)) return false;
+  if (prompt.kind !== 'plan' && prompt.kind !== 'question') return false;
+  if (!isNonEmptyString(prompt.botId) || !isNonEmptyString(prompt.text)) return false;
+  if (prompt.options !== undefined && !(Array.isArray(prompt.options) && prompt.options.every(isNonEmptyString))) return false;
+  return true;
+}
+
+function checkTaskStepPreview(step: unknown): boolean {
+  if (!isRecord(step)) return false;
+  if (!isNonEmptyString(step.id) || !isNonEmptyString(step.text)) return false;
+  if (typeof step.status !== 'string' || !TASK_STEP_STATUSES.has(step.status)) return false;
+  return isOptString(step.botName);
+}
+
 /**
  * 从 live slot / 历史消息上识别 presentation；严格 kind+version 白名单核验，
  * 任何不合规结构整体返回 null——不裁剪、不填默认值，选项保持原文原序。
@@ -110,6 +160,15 @@ export function readToolPresentation(value: unknown): ToolPresentation | null {
   if (value.kind === 'todo') {
     if (!Array.isArray(value.tasks) || !value.tasks.every(checkTodoTask)) return null;
     return value as unknown as TodoPresentation;
+  }
+  if (value.kind === 'task') {
+    if (!isNonEmptyString(value.taskId) || !isNonEmptyString(value.title) || !isNonEmptyString(value.cardLabel)) return null;
+    if (typeof value.status !== 'string' || !TASK_STATUSES.has(value.status)) return null;
+    if (!isOptString(value.summary)) return null;
+    if (!isRecord(value.stepCount) || !isInt(value.stepCount.done) || value.stepCount.done < 0 || !isInt(value.stepCount.total) || value.stepCount.total < 0) return null;
+    if (!checkTaskPendingPrompt(value.pendingPrompt)) return null;
+    if (value.stepsPreview !== undefined && !(Array.isArray(value.stepsPreview) && value.stepsPreview.every(checkTaskStepPreview))) return null;
+    return value as unknown as TaskPresentation;
   }
   if (value.kind === 'questionnaire') {
     if (!isNonEmptyString(value.requestId)) return null;
@@ -140,12 +199,29 @@ export interface ToolPresentationCardProps {
   requesterName?: string;
   onSubmit?: (input: QuestionnaireSubmitPayload) => Promise<unknown>;
   onSubmitVaultUnlock?: (input: VaultUnlockSubmitPayload) => Promise<unknown>;
+  onOpenTask?: (taskId: string, openEdit?: boolean) => void;
+  onConfirmTaskPlan?: (taskId: string) => Promise<void> | void;
+  onAnswerTaskPrompt?: (taskId: string, answer: string) => Promise<void> | void;
 }
 
-export function ToolPresentationCard({ presentation, active, disabled = false, variant, requesterName, onSubmit, onSubmitVaultUnlock }: ToolPresentationCardProps) {
+export function ToolPresentationCard({
+  presentation,
+  active,
+  disabled = false,
+  variant,
+  requesterName,
+  onSubmit,
+  onSubmitVaultUnlock,
+  onOpenTask,
+  onConfirmTaskPlan: _onConfirmTaskPlan,
+  onAnswerTaskPrompt: _onAnswerTaskPrompt,
+}: ToolPresentationCardProps) {
   const t = useText();
   if (presentation.kind === 'todo') {
     return <TodoCard presentation={presentation} t={t} />;
+  }
+  if (presentation.kind === 'task') {
+    return <TaskCard presentation={presentation} onOpenTask={onOpenTask} t={t} />;
   }
   if (presentation.kind === 'vault-unlock') {
     return <VaultUnlockCard presentation={presentation} active={active} disabled={disabled} requesterName={requesterName} onSubmit={onSubmitVaultUnlock} />;
@@ -159,6 +235,45 @@ export function ToolPresentationCard({ presentation, active, disabled = false, v
       onSubmit={onSubmit}
       t={t}
     />
+  );
+}
+
+function TaskCard({
+  presentation,
+  onOpenTask,
+  t,
+}: {
+  presentation: TaskPresentation;
+  onOpenTask?: (taskId: string, openEdit?: boolean) => void;
+  t: (zh: string, en: string) => string;
+}) {
+  const hasSteps = presentation.stepCount.total > 0;
+  return (
+    <div className="tp-card tp-task" role="group" aria-label={presentation.title}>
+      <div className="tp-task-row">
+        <div className="tp-task-info">
+          <span className="tp-card-kicker">{presentation.cardLabel}</span>
+          <span className="tp-card-title">{presentation.title}</span>
+          {hasSteps ? (
+            <span className="tp-card-meta">
+              {t(
+                `已完成 ${presentation.stepCount.done}/${presentation.stepCount.total}`,
+                `${presentation.stepCount.done}/${presentation.stepCount.total} done`,
+              )}
+            </span>
+          ) : null}
+        </div>
+        {onOpenTask ? (
+          <button
+            type="button"
+            className="tp-btn tp-task-open-btn"
+            onClick={() => onOpenTask(presentation.taskId)}
+          >
+            {t('查看任务 →', 'View task →')}
+          </button>
+        ) : null}
+      </div>
+    </div>
   );
 }
 

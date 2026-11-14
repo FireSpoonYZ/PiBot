@@ -79,6 +79,9 @@ export interface ChatTranscriptProps {
   canEditTurns?: boolean;
   editingEntryId?: number | null;
   onEditTurn?: (turn: ChatTurn) => void;
+  onOpenTask?: (taskId: string, openEdit?: boolean) => void;
+  onConfirmTaskPlan?: (taskId: string) => Promise<void> | void;
+  onAnswerTaskPrompt?: (taskId: string, answer: string) => Promise<void> | void;
 }
 
 const asArray = <T,>(value: unknown): T[] => (Array.isArray(value) ? (value as T[]) : []);
@@ -121,6 +124,9 @@ export function ChatTranscript({
   canEditTurns = false,
   editingEntryId = null,
   onEditTurn,
+  onOpenTask,
+  onConfirmTaskPlan,
+  onAnswerTaskPrompt,
 }: ChatTranscriptProps) {
   const t = useText();
   const [linkError, setLinkError] = useState('');
@@ -389,6 +395,9 @@ export function ChatTranscript({
                         requesterName={bot.role}
                         onSubmitQuestionnaire={onSubmitQuestionnaire}
                         onSubmitVaultUnlock={onSubmitVaultUnlock}
+                        onOpenTask={onOpenTask}
+                        onConfirmTaskPlan={onConfirmTaskPlan}
+                        onAnswerTaskPrompt={onAnswerTaskPrompt}
                         t={t}
                       />
                     ) : (
@@ -414,6 +423,9 @@ export function ChatTranscript({
                   requesterName={bot.role}
                   onSubmitQuestionnaire={onSubmitQuestionnaire}
                   onSubmitVaultUnlock={onSubmitVaultUnlock}
+                  onOpenTask={onOpenTask}
+                  onConfirmTaskPlan={onConfirmTaskPlan}
+                  onAnswerTaskPrompt={onAnswerTaskPrompt}
                   t={t}
                 />
               ) : null}

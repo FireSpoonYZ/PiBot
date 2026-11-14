@@ -104,6 +104,7 @@ export const BRIDGE_CLIENT_OPERATIONS = new Set([
   'status',
   'devices',
   'bot_directory',
+  'global_tasks',
   'rename_device',
   'call',
   'settings_get',
