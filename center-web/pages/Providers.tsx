@@ -26,6 +26,7 @@ import {
   type ChoiceOption,
 } from '../components/primitives';
 import { SheetModal } from '../components/SheetModal';
+import { ANTIGRAVITY_PROVIDER_ID } from '../../center-contract/antigravity.js';
 
 const PROTOCOL_OPTIONS = [
   { value: 'openai-completions', label: 'OpenAI Chat Completions (/v1/chat/completions)' },
@@ -40,6 +41,7 @@ const PRIORITY_PROVIDERS = [
   'openai-codex',
   'anthropic',
   'google',
+  ANTIGRAVITY_PROVIDER_ID,
   'github-copilot',
   'openrouter',
   'deepseek',
@@ -327,6 +329,7 @@ export default function Providers() {
     setAuthByProvider(prev => ({ ...prev, [provider.id]: status }));
     setCredential(key);
     setAllModels(models);
+    return models;
   }, []);
 
   const openProvider = useCallback(
@@ -902,24 +905,31 @@ export default function Providers() {
 
   const renderProviderStatus = (provider: Provider) => {
     const status = authByProvider[provider.id];
-    let connected = false;
+    let dotClass = '';
     let text = '';
-    if (status?.method === 'oauth') {
-      connected = true;
+    if (provider.id === ANTIGRAVITY_PROVIDER_ID && status?.method === 'oauth') {
+      dotClass = provider.enabled ? 'is-ok' : '';
+      text = '账号已连接（官方 agy）';
+    } else if (provider.id === ANTIGRAVITY_PROVIDER_ID) {
+      dotClass = 'is-warn';
+      text = '待登录 Antigravity';
+    } else if (status?.method === 'oauth') {
+      dotClass = provider.enabled ? 'is-ok' : '';
       text = '账号已连接';
     } else if (status?.method === 'api_key') {
-      connected = true;
+      dotClass = provider.enabled ? 'is-ok' : '';
       text = 'API Key 已配置';
     } else if (!provider.native && !provider.credentialRef) {
-      connected = true;
+      dotClass = provider.enabled ? 'is-ok' : '';
       text = provider.baseUrl ? `免密钥 · ${provider.baseUrl}` : '免密钥接口';
     } else {
+      dotClass = 'is-warn';
       text = '待配置认证';
     }
     if (!provider.enabled) text += ' · 已停用';
     return (
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-        <span className={`cw-status-dot ${connected && provider.enabled ? 'is-ok' : !connected ? 'is-warn' : ''}`} />
+        <span className={`cw-status-dot ${dotClass}`} />
         <span>{text}</span>
       </span>
     );
@@ -938,8 +948,26 @@ export default function Providers() {
     [flow?.events],
   );
 
-  const supportsApiKey = !edit?.native || auth?.apiKey !== false;
+  const isAntigravity = edit?.id === ANTIGRAVITY_PROVIDER_ID;
+  const supportsApiKey = !isAntigravity && (!edit?.native || auth?.apiKey !== false);
   const hideKeyInDisclosure = Boolean(edit?.native && auth?.oauth && auth.method === 'oauth' && supportsApiKey);
+
+  const refreshAntigravityCatalog = async () => {
+    if (!edit) return;
+    await runDrawerAction(async () => {
+      const check = await api.validateProvider(edit.id, {});
+      if (!check.ok) {
+        throw new Error(check.message || 'Antigravity 验证未通过，未能刷新模型目录');
+      }
+      const res = await api.syncModelCatalog();
+      const loaded = await loadProviderDetails(edit);
+      await refreshPageData();
+      if (!loaded.some(m => !m.removed)) {
+        throw new Error(res.error || '未读取到任何 Antigravity 模型，请确认中心专用目录已完成���录并重试');
+      }
+      setDrawerNotice(res.error || 'Antigravity 模型目录已刷新');
+    });
+  };
 
   const filteredDiscovered = useMemo(() => {
     const q = discoverQuery.trim().toLowerCase();
@@ -1225,48 +1253,75 @@ export default function Providers() {
 
             {/* Connection & Authentication Card */}
             <Section title={edit.native ? '连接认证' : '接口与认证'}>
-              {/* Native OAuth section (ported from Pi LoginDialog) */}
+              {/* Center Antigravity runtime controls */}
+              {!creating && isAntigravity ? (
+                <div className="cw-block">
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <span style={{ fontSize: '0.93rem', fontWeight: 600 }}>
+                        中心运行配置与目录
+                      </span>
+                      <span className="secondary" style={{ fontSize: '0.79rem', lineHeight: 1.45 }}>
+                        优先复用当前中心运行用户已有的官方 agy 登录缓存；已登录时可直接开启开关并保存，无需重复授权。
+                      </span>
+                    </div>
+                    <Switch
+                      checked={edit.enabled}
+                      disabled={drawerBusy}
+                      label="启用 Antigravity 服务商"
+                      onChange={next => setEdit({ ...edit, enabled: next })}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    <button
+                      type="button"
+                      className="cw-btn is-small"
+                      disabled={drawerBusy}
+                      onClick={() =>
+                        void runDrawerAction(async () => {
+                          const res = await api.validateProvider(edit.id, {});
+                          if (!res.ok) throw new Error(res.message || 'Antigravity 验证未通过');
+                          setDrawerNotice(res.message || 'Antigravity 验证通过');
+                        })
+                      }
+                    >
+                      验证连接
+                    </button>
+                    <button
+                      type="button"
+                      className="cw-btn is-small"
+                      disabled={drawerBusy}
+                      onClick={() => void refreshAntigravityCatalog()}
+                    >
+                      <RefreshCw size={14} />
+                      刷新目录
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Native / Official CLI OAuth section */}
               {!creating && auth?.oauth ? (
                 <div className="cw-block">
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                       <span style={{ fontSize: '0.93rem', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 7 }}>
                         <span className={`cw-status-dot ${auth.method === 'oauth' ? 'is-ok' : ''}`} />
-                        {auth.method === 'oauth' ? '账号已连接' : '账号授权'}
+                        {auth.method === 'oauth'
+                          ? (isAntigravity ? '官方 agy 已登录' : '账号已连接')
+                          : (isAntigravity ? '登录 Antigravity' : '账号授权')}
                       </span>
                       <span className="secondary" style={{ fontSize: '0.79rem' }}>
-                        {auth.method === 'oauth'
-                          ? '已通过 Pi 原生 OAuth 授权并自动维护令牌续期'
-                          : '使用官方账号授权直接调用订阅或账户模型'}
+                        {isAntigravity
+                          ? auth.method === 'oauth'
+                            ? '当前中心运行用户下已检测到有效 agy 凭据；凭据由官方 agy 保管，不会向设备端下发'
+                            : '点击登录获取官方授权链接，或使用同运行用户已有 agy 缓存；凭据由官方 agy 保管'
+                          : auth.method === 'oauth'
+                            ? '已通过 Pi 原生 OAuth 授权并自动维护令牌续期'
+                            : '使用官方账号授权直接调用订阅或账户模型'}
                       </span>
                     </div>
-                    {auth.method === 'oauth' ? (
-                      <button
-                        type="button"
-                        className="cw-btn is-small is-ghost is-danger"
-                        disabled={drawerBusy}
-                        onClick={() =>
-                          void runDrawerAction(async () => {
-                            const nextStatus = await api.providerLogout(edit.id);
-                            setAuth(nextStatus);
-                            await refreshPageData();
-                            await loadProviderDetails(edit);
-                            setDrawerNotice('已退出账号登录');
-                          })
-                        }
-                      >
-                        退出登录
-                      </button>
-                    ) : !flowId ? (
-                      <button
-                        type="button"
-                        className="cw-btn is-accent"
-                        disabled={drawerBusy}
-                        onClick={() => void startOAuthLogin()}
-                      >
-                        {auth.label || '连接账号'}
-                      </button>
-                    ) : (
+                    {flowId ? (
                       <button
                         type="button"
                         className="cw-btn is-small is-ghost"
@@ -1277,6 +1332,43 @@ export default function Providers() {
                         }}
                       >
                         取消授权
+                      </button>
+                    ) : auth.method === 'oauth' ? (
+                      isAntigravity ? (
+                        <button
+                          type="button"
+                          className="cw-btn is-small"
+                          disabled={drawerBusy}
+                          onClick={() => void startOAuthLogin()}
+                        >
+                          重新授权
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="cw-btn is-small is-ghost is-danger"
+                          disabled={drawerBusy}
+                          onClick={() =>
+                            void runDrawerAction(async () => {
+                              const nextStatus = await api.providerLogout(edit.id);
+                              setAuth(nextStatus);
+                              await refreshPageData();
+                              await loadProviderDetails(edit);
+                              setDrawerNotice('已退出账号登录');
+                            })
+                          }
+                        >
+                          退出登录
+                        </button>
+                      )
+                    ) : (
+                      <button
+                        type="button"
+                        className="cw-btn is-accent"
+                        disabled={drawerBusy}
+                        onClick={() => void startOAuthLogin()}
+                      >
+                        {auth.label || '连接账号'}
                       </button>
                     )}
                   </div>
@@ -1377,7 +1469,9 @@ export default function Providers() {
                         >
                           <span className="secondary" style={{ fontSize: '0.79rem', lineHeight: 1.45 }}>
                             {flow.prompt.type === 'manual_code'
-                              ? '若中心运行在远程服务器，浏览器登录完成后跳转到 localhost / 127.0.0.1 显示无法访问属正常现象——直接复制浏览器地址栏的完整链接粘贴到下方即可：'
+                              ? isAntigravity
+                                ? flow.prompt.message || '完成浏览器登录后，请粘贴页面显示的授权码或浏览器跳转后的完整回调链接：'
+                                : '若中心运行在远程服务器，浏览器登录完成后跳转到 localhost / 127.0.0.1 显示无法访问属正常现象——直接复制浏览器地址栏的完整链接粘贴到下方即可：'
                               : flow.prompt.message}
                           </span>
                           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -1531,21 +1625,46 @@ export default function Providers() {
               </Disclosure>
             ) : null}
 
+            {!creating && isAntigravity ? (
+              <Disclosure label="备用：手工终端登录">
+                <div className="cw-block">
+                  <span className="secondary" style={{ fontSize: '0.79rem', lineHeight: 1.5 }}>
+                    若中心无网页回调条件，也可在中心服务运行用户或容器内执行{' '}
+                    <code>agy acp --gemini-dir &lt;中心专用配置目录&gt; --login</code>{' '}
+                    完成登录（默认目录：Docker 为 <code>/data/antigravity/gemini</code>，systemd 为{' '}
+                    <code>/var/lib/pibot-center/antigravity/gemini</code>，覆盖时使用 <code>PIBOT_AGY_HOME</code>），之后返回此处开启开关并点击「验证连接」或「刷新目录」。
+                  </span>
+                </div>
+              </Disclosure>
+            ) : null}
+
             {/* Models Section inside the same unified drawer */}
             <Section
               title={`模型 (${activeModels.length})`}
               bare={activeModels.length === 0}
               action={
                 <>
-                  <button
-                    type="button"
-                    className="cw-btn is-small"
-                    disabled={drawerBusy}
-                    onClick={() => void openDiscoverSheet()}
-                  >
-                    <Sparkles size={14} />
-                    从 /v1/models 拉取
-                  </button>
+                  {isAntigravity ? (
+                    <button
+                      type="button"
+                      className="cw-btn is-small"
+                      disabled={drawerBusy}
+                      onClick={() => void refreshAntigravityCatalog()}
+                    >
+                      <RefreshCw size={14} />
+                      刷新目录
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="cw-btn is-small"
+                      disabled={drawerBusy}
+                      onClick={() => void openDiscoverSheet()}
+                    >
+                      <Sparkles size={14} />
+                      从 /v1/models 拉取
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="cw-btn is-small"
@@ -1584,9 +1703,11 @@ export default function Providers() {
 
               {activeModels.length === 0 ? (
                 <div className="cw-empty" style={{ padding: '26px 18px' }}>
-                  <strong>暂无已添加的模型</strong>
+                  <strong>{isAntigravity ? '暂未同步到 Antigravity 模型' : '暂无已添加的模型'}</strong>
                   <p className="secondary">
-                    点击「从 /v1/models 拉取」自动获取模型列表，或手动填写模型 ID。
+                    {isAntigravity
+                      ? '请确认当前中心运行用户下官方 agy 已完成网页登录或存在可用登录缓存，然后点击「刷新目录」（无法使用网页授权时可展开上方「备用：手工终端登录」）。'
+                      : '点击「从 /v1/models 拉取」自动获取模型列表，或手动填写模型 ID。'}
                   </p>
                 </div>
               ) : (

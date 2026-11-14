@@ -2,6 +2,7 @@ import path from 'node:path';
 import { createModels, createProvider } from '@earendil-works/pi-ai/models';
 import { getApiProvider } from '@earendil-works/pi-ai/compat';
 import { nativeCenterProvider } from './native-center-providers.js';
+import { ANTIGRAVITY_API, ANTIGRAVITY_PROVIDER_ID } from './antigravity-provider.js';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy';
 import { piMessagesApi } from '@earendil-works/pi-ai/api/pi-messages.lazy';
@@ -275,7 +276,7 @@ export async function loadRuntimeConfig(file) {
 
 const RUNTIME_MODEL_FIELDS = new Set(['id', 'name', 'api', 'baseUrl', 'headers', 'reasoning', 'contextWindow', 'maxTokens', 'input', 'cost', 'compat', 'thinkingLevelMap', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel']);
 
-function validateProviders(providers) {
+function validateProviders(providers, { allowAntigravity = false } = {}) {
   if (!Array.isArray(providers)) throw invalidArgument('runtime config: providers must be an array');
   const seenProviders = new Set();
   const out = [];
@@ -294,11 +295,20 @@ function validateProviders(providers) {
     if (seenProviders.has(id)) throw invalidArgument(`runtime config: duplicate provider id: ${id}`);
     seenProviders.add(id);
 
-    const baseUrl = p.native && !p.baseUrl ? undefined : normalizeProviderBaseUrl(p.baseUrl);
+    const isAntigravity = allowAntigravity && id === ANTIGRAVITY_PROVIDER_ID;
+    const baseUrl = (p.native || isAntigravity) && (p.baseUrl === undefined || p.baseUrl === '')
+      ? undefined
+      : normalizeProviderBaseUrl(p.baseUrl);
     let api;
-    if (p.api !== undefined) {
+    if (isAntigravity) {
       const requested = typeof p.api === 'string' ? p.api.trim() : '';
-      if (!PROVIDER_APIS.has(requested) && !getApiProvider(requested)) {
+      if (requested !== ANTIGRAVITY_API) {
+        throw invalidArgument(`runtime config: provider "${id}" api is not supported: ${requested || typeof p.api}`);
+      }
+      api = requested;
+    } else if (p.api !== undefined) {
+      const requested = typeof p.api === 'string' ? p.api.trim() : '';
+      if (requested === ANTIGRAVITY_API || (!PROVIDER_APIS.has(requested) && !getApiProvider(requested))) {
         throw invalidArgument(`runtime config: provider "${id}" api is not supported: ${requested || typeof p.api}`);
       }
       api = requested;
@@ -367,10 +377,16 @@ function validateProviders(providers) {
       }
       const model = { id: modelId, contextWindow, maxTokens };
       if (m.api !== undefined) {
-        if (typeof m.api !== 'string' || !getApiProvider(m.api)) throw invalidArgument('Unsupported model API');
+        if (isAntigravity) {
+          if (m.api !== ANTIGRAVITY_API) throw invalidArgument('Unsupported model API');
+        } else if (typeof m.api !== 'string' || m.api === ANTIGRAVITY_API || !getApiProvider(m.api)) {
+          throw invalidArgument('Unsupported model API');
+        }
         model.api = m.api;
       }
-      if (m.baseUrl !== undefined) model.baseUrl = normalizeProviderBaseUrl(m.baseUrl);
+      if (m.baseUrl !== undefined && !(isAntigravity && m.baseUrl === '')) {
+        model.baseUrl = normalizeProviderBaseUrl(m.baseUrl);
+      }
       for (const field of ['headers', 'samplingParams', 'samplingParamsByThinkingLevel', 'promptCache']) {
         if (m[field] !== undefined) model[field] = passThroughObject(m[field], field);
       }
@@ -465,7 +481,7 @@ function createApiKeyAuth(apiKeyEnv) {
 }
 
 /** Build the registry from the authenticated snapshot; credentials never enter local settings or process.env. */
-export function applyCenterModels(snapshot, existingModels, authResolver) {
+export function applyCenterModels(snapshot, existingModels, authResolver, streamAntigravity) {
   const providers = snapshot.providers.filter((provider) => provider.enabled).map((provider) => ({
     id: provider.id,
     name: provider.name,
@@ -478,7 +494,7 @@ export function applyCenterModels(snapshot, existingModels, authResolver) {
       (model) => Object.fromEntries(Object.entries(model).filter(([key]) => RUNTIME_MODEL_FIELDS.has(key)))
     ),
   }));
-  const normalized = validateProviders(providers);
+  const normalized = validateProviders(providers, { allowAntigravity: true });
   const botModels = {};
   for (const bot of snapshot.bots) {
     const selection = bot.model;
@@ -488,7 +504,7 @@ export function applyCenterModels(snapshot, existingModels, authResolver) {
         throw errWithCode('center selected model is unavailable', 'MODEL_NOT_FOUND');
       }
       const selected = snapshot.providers.find((p) => p.id === ref.provider);
-      if (selected.credentialRef !== null && !snapshot.credentials?.[selected.credentialRef] && selected.authMode !== 'oauth' && !authResolver) {
+      if (selected.id !== ANTIGRAVITY_PROVIDER_ID && selected.credentialRef !== null && !snapshot.credentials?.[selected.credentialRef] && selected.authMode !== 'oauth' && !authResolver) {
         throw errWithCode('center provider credential is unavailable', 'INVALID_STATE');
       }
     }
@@ -503,7 +519,7 @@ export function applyCenterModels(snapshot, existingModels, authResolver) {
     if (original.credentialRef !== null) {
       credential = snapshot.credentials[original.credentialRef] ?? null;
     }
-    return nativeCenterProvider(provider, provider.models, credential, authResolver);
+    return nativeCenterProvider(provider, provider.models, credential, authResolver, streamAntigravity);
   });
   const models = existingModels ?? createModels();
   models.clearProviders();

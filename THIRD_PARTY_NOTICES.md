@@ -328,3 +328,14 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Antigravity ACP bridge
+
+The Center's optional Antigravity ACP provider adapter incorporates protocol
+mappings adapted from **@estebanforge/pi-antigravity-bridge** **1.10.6**, by
+EstebanForge:
+
+- Repository: https://github.com/EstebanForge/pi-extensions/tree/d3ca5cc66947a3299e2ef18b8986c7dc86e9373b/packages/pi-antigravity-bridge
+- License: MIT (`Copyright (c) 2026 EstebanForge`). A verbatim copy travels with
+  the vendored sources at
+  [`center-server/antigravity/vendor/LICENSE`](center-server/antigravity/vendor/LICENSE).

@@ -413,10 +413,18 @@ export async function openHostService(options) {
       },
     });
     const bootPlans = await applyPlans(current);
-    const { models } = applyCenterModels(snapshot, undefined, (providerId, signal) => {
-      if (!client) throw offlineError();
-      return client.providerAuth(providerId, signal);
-    });
+    const { models } = applyCenterModels(
+      snapshot,
+      undefined,
+      (providerId, signal) => {
+        if (!client) throw offlineError();
+        return client.providerAuth(providerId, signal);
+      },
+      (payload, streamOptions) => {
+        if (!client) throw offlineError();
+        return client.streamAntigravity(payload, streamOptions);
+      },
+    );
     const execution = parseExecutionOptions(settings.settings.runtime);
     control = await openControlServer({
       dataRoot, token, port, models, ...execution, nativeBridge,

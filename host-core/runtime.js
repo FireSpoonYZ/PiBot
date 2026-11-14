@@ -18,6 +18,7 @@ import { openHost } from './host.js';
 import { acquireRuntimeOwner } from './runtime-owner.js';
 import { migrateBotSessionCheckpoints } from './bot-session-checkpoint-migration.js';
 import { parseExecutionOptions, parseModelRef, normalizeThinkingLevel, normalizeCodemodeFlag, describeModelCatalog, discoverProviderModels, applyCenterModels } from './runtime-models.js';
+import { ANTIGRAVITY_PROVIDER_ID } from './antigravity-provider.js';
 import { createGrepTool } from './grep-tool.js';
 import { createFindTool } from './find-tool.js';
 import { createLsTool } from './ls-tool.js';
@@ -1653,13 +1654,22 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 模型注册表只在执行字段变化时重建；Bot 选择不在此处发布。
       const nextRegistryKey = centerRegistryKey(snapshot);
       if (nextRegistryKey !== registryKey) {
-        applyCenterModels(snapshot, models, (providerId, signal) => {
-          const active = centerRuntime.getClient();
-          if (!active) throw errWithCode('center is offline', 'CENTER_OFFLINE');
-          return active.providerAuth(providerId, signal);
-        });
+        applyCenterModels(
+          snapshot,
+          models,
+          (providerId, signal) => {
+            const active = centerRuntime.getClient();
+            if (!active) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+            return active.providerAuth(providerId, signal);
+          },
+          (payload, streamOptions) => {
+            const active = centerRuntime.getClient();
+            if (!active) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+            return active.streamAntigravity(payload, streamOptions);
+          },
+        );
         learningModelRefs = new Set(snapshot.providers
-          .filter((provider) => provider.enabled && (provider.credentialRef == null || snapshot.credentials?.[provider.credentialRef]))
+          .filter((provider) => provider.enabled && (provider.id === ANTIGRAVITY_PROVIDER_ID || provider.credentialRef == null || snapshot.credentials?.[provider.credentialRef]))
           .flatMap((provider) => (snapshot.models[provider.id] ?? []).filter((model) => model.enabled).map((model) => provider.id + '/' + model.id)));
         registryKey = nextRegistryKey;
       }

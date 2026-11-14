@@ -24,6 +24,10 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - center-data:/data
+      # 可选：启用 Antigravity (agy) ACP Provider 时，可将宿主机已验证的官方 agy 二进制以只读方式挂载进容器；
+      # 专用 profile 与会话默认持久化在 /data/antigravity（由 center-data 卷保存），不得指向日常 ~/.gemini。
+      # 登录需以容器服务用户 node 执行，详见 docs/antigravity-center.md：
+      # - /usr/local/bin/agy:/usr/local/bin/agy:ro
 
 volumes:
   center-data:

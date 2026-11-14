@@ -22,6 +22,7 @@ import { setupPiHttpRuntime } from './http-dispatcher.js';
 import { initializeBuiltinPlugins } from './builtin-plugins.js';
 import { openModelCatalog } from './model-catalog.js';
 import { openProviderAuth } from './provider-auth.js';
+import { openAntigravity } from './antigravity/index.js';
 
 setupPiHttpRuntime();
 
@@ -42,7 +43,7 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
   }
   const linkUrl = `wss://${publicOrigin.host}/v1/link`;
   if (!(encryptionKey instanceof Uint8Array) || !(sessionKey instanceof Uint8Array) || encryptionKey.byteLength !== 32 || sessionKey.byteLength !== 32 || Buffer.from(encryptionKey).equals(Buffer.from(sessionKey))) throw new Error('Independent encryption and session keys are required');
-  let store, relay, bridge, packages, execution, oauth, routes, app, skills, learning, botManagement, catalog, providerAuth, vault;
+  let store, relay, bridge, packages, execution, oauth, routes, app, skills, learning, botManagement, catalog, providerAuth, antigravity, vault;
   let closing;
   async function close() {
     if (!closing) closing = (async () => {
@@ -51,7 +52,7 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
       // stopped while the HTTP listener is still owned by this process.
       // Skill/learning services close before the package manager and store
       // they mutate through; there is nothing to close on botManagement.
-      for (const fn of [() => providerAuth?.close(), () => catalog?.close(), () => routes?.close(), () => relay?.close(), () => app?.close(), () => learning?.close(), () => skills?.close(), () => vault?.close(), () => packages?.close(), () => execution?.close(), () => oauth?.close(), () => bridge?.close(), () => store?.close()]) {
+      for (const fn of [() => providerAuth?.close(), () => catalog?.close(), () => routes?.close(), () => antigravity?.close(), () => relay?.close(), () => app?.close(), () => learning?.close(), () => skills?.close(), () => vault?.close(), () => packages?.close(), () => execution?.close(), () => oauth?.close(), () => bridge?.close(), () => store?.close()]) {
         try { await fn(); } catch (error) { errors.push(error); }
       }
       if (errors.length) throw new AggregateError(errors, 'Center shutdown failed');
@@ -84,9 +85,10 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
     execution = openCenterExecution({ store, packages: { getInstalled: id => packages.getInstalled(id) }, oauth });
     packages = await openPackageManager({ dataRoot, store, npmPath: npmPath || join(dirname(require.resolve('npm/package.json')), 'bin', 'npm-cli.js'), onChange: id => routes?.notifyInstallation(id), withActivation: (id, publish) => execution.withActivation(id, publish), probeCenterMcp: (installation, config, identity) => execution.probeGlobal(installation, config, identity) });
     await initializeBuiltinPlugins({ dataRoot, store, packages });
-    catalog = openModelCatalog({ store, dataRoot, onChange: () => routes?.notifyAll() });
+    antigravity = openAntigravity({ dataRoot });
+    catalog = openModelCatalog({ store, dataRoot, antigravity, onChange: () => routes?.notifyAll() });
     await catalog.ready;
-    providerAuth = openProviderAuth({ store, catalog, onChange: () => routes?.notifyAll() });
+    providerAuth = openProviderAuth({ store, catalog, antigravity, onChange: () => routes?.notifyAll() });
     await registerAuth(app, { sessionKey, ownerPasswordHash });
     // Already configured: unauthenticated read-only probes for setup polling
     // and health checks; no reset or mutation endpoint exists here.
@@ -101,7 +103,7 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
     learning = await openLearningService({ dataRoot, store, skills, runLearningJob });
     botManagement = openBotManagement({ store, packages, notify: (deviceId) => routes?.notifyDevice?.(deviceId) });
     vault = await openCenterVault({ dataRoot, encryptionKey, store });
-    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, publicUrl, vault });
+    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault });
     if (webRoot) {
       await app.register(fastifyStatic, { root: webRoot, prefix: '/' });
       app.setNotFoundHandler((req, reply) => {

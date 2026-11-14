@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { ANTIGRAVITY_PROVIDER_ID } from '../center-contract/antigravity.js';
 
 const FLOW_TTL_MS = 15 * 60 * 1000;
 const MAX_EVENTS = 30;
+const AUTH_STATUS_TIMEOUT_MS = 10_000;
 const fail = (code, message) => Object.assign(new Error(message), { code });
 
 function redactSecretFragments(text) {
@@ -63,9 +65,10 @@ function formatOAuthError(error) {
  * browser/device/paste-code flow and token refresh. Only status events and
  * prompts are visible to the browser; credential material stays encrypted.
  */
-export function openProviderAuth({ store, catalog, onChange }) {
+export function openProviderAuth({ store, catalog, onChange, antigravity }) {
   const flows = new Map();
   const activeByProvider = new Map();
+  const serviceController = new AbortController();
   let closed = false;
 
   async function getProvider(providerId) {
@@ -77,6 +80,28 @@ export function openProviderAuth({ store, catalog, onChange }) {
   }
 
   async function describe(providerId) {
+    if (providerId === ANTIGRAVITY_PROVIDER_ID) {
+      const stored = store.getProvider(providerId);
+      if (!stored) throw fail('NOT_FOUND', 'Provider not found');
+      let authenticated = false;
+      if (!closed && typeof antigravity?.authStatus === 'function') {
+        try {
+          const signal = AbortSignal.any([serviceController.signal, AbortSignal.timeout(AUTH_STATUS_TIMEOUT_MS)]);
+          const result = await antigravity.authStatus({ signal });
+          authenticated = Boolean(result?.authenticated);
+        } catch {
+          authenticated = false;
+        }
+      }
+      return {
+        providerId,
+        method: authenticated ? 'oauth' : 'none',
+        oauth: true,
+        apiKey: false,
+        label: '登录 Antigravity',
+        subscription: true,
+      };
+    }
     const { provider, stored } = await getProvider(providerId);
     const secret = store.getCredential('center-internal-pi-oauth-' + providerId);
     const configured = Boolean(secret?.configured);
@@ -140,8 +165,16 @@ export function openProviderAuth({ store, catalog, onChange }) {
 
   async function start(providerId) {
     if (closed) throw fail('INVALID_STATE', 'Provider authentication is closed');
-    const { runtime, provider } = await getProvider(providerId);
-    if (!provider?.auth?.oauth) throw fail('INVALID_ARGUMENT', 'Provider does not support account login');
+    const isAntigravity = providerId === ANTIGRAVITY_PROVIDER_ID;
+    let runtime;
+    if (isAntigravity) {
+      if (!store.getProvider(providerId)) throw fail('NOT_FOUND', 'Provider not found');
+      if (typeof antigravity?.login !== 'function') throw fail('INVALID_STATE', 'Antigravity login is unavailable');
+    } else {
+      const loaded = await getProvider(providerId);
+      runtime = loaded.runtime;
+      if (!loaded.provider?.auth?.oauth) throw fail('INVALID_ARGUMENT', 'Provider does not support account login');
+    }
     const previousId = activeByProvider.get(providerId);
     if (previousId) abortFlow(flows.get(previousId));
     const controller = new AbortController();
@@ -161,9 +194,7 @@ export function openProviderAuth({ store, catalog, onChange }) {
     const installationId = store.getInstallationId();
     void (async () => {
       try {
-        // Keep Pi's native originator/agent_name_hint untouched (OpenAI Codex simplified OAuth
-        // validates originator) while supplying a persistent installation UUID for ChatGPT OAuth.
-        await runtime.login(providerId, 'oauth', {
+        const callbacks = {
           signal: controller.signal,
           notify(event) {
             const safe = safeEvent(event);
@@ -189,16 +220,27 @@ export function openProviderAuth({ store, catalog, onChange }) {
               }, { once: true });
             });
           },
-        }, { getDeviceId: () => installationId });
+        };
+        if (isAntigravity) {
+          await antigravity.login(callbacks);
+        } else {
+          // Keep Pi's native originator/agent_name_hint untouched (OpenAI Codex simplified OAuth
+          // validates originator) while supplying a persistent installation UUID for ChatGPT OAuth.
+          await runtime.login(providerId, 'oauth', callbacks, { getDeviceId: () => installationId });
+        }
         if (controller.signal.aborted) return;
+        if (isAntigravity) {
+          await catalog.syncAntigravity({ signal: controller.signal });
+          if (controller.signal.aborted) return;
+        }
         const current = store.getProvider(providerId);
         if (current && (!current.enabled || !current.configured)) {
           store.putProvider({ ...current, enabled: true, configured: true }, current.revision);
         }
-        flow.status = 'complete';
         await catalog.apply();
         onChange();
-        void catalog.sync().catch(() => {});
+        flow.status = 'complete';
+        if (!isAntigravity) void catalog.sync().catch(() => {});
       } catch (error) {
         if (!controller.signal.aborted) {
           flow.status = 'failed';
@@ -272,7 +314,9 @@ export function openProviderAuth({ store, catalog, onChange }) {
   function answer(providerId, flowId, rawAnswer) {
     const flow = flowFor(providerId, flowId);
     if (flow.status !== 'pending' || !flow.pending) throw fail('INVALID_STATE', 'No login input requested');
-    if (typeof rawAnswer !== 'string' || rawAnswer.length > 8192) throw fail('INVALID_ARGUMENT', 'Invalid login input');
+    if (typeof rawAnswer !== 'string' || rawAnswer.length > 8192 || (providerId === ANTIGRAVITY_PROVIDER_ID && /[\r\n]/.test(rawAnswer))) {
+      throw fail('INVALID_ARGUMENT', 'Invalid login input');
+    }
     const normalized = normalizeManualCallbackInput(flow.prompt ?? {}, rawAnswer);
     const pending = flow.pending;
     flow.pending = null;
@@ -287,9 +331,13 @@ export function openProviderAuth({ store, catalog, onChange }) {
   }
 
   async function logout(providerId) {
-    const { runtime, provider } = await getProvider(providerId);
     const id = activeByProvider.get(providerId);
     if (id) abortFlow(flows.get(id));
+    if (providerId === ANTIGRAVITY_PROVIDER_ID) {
+      if (!store.getProvider(providerId)) throw fail('NOT_FOUND', 'Provider not found');
+      return describe(providerId);
+    }
+    const { runtime, provider } = await getProvider(providerId);
     if (provider) {
       await runtime.logout(providerId);
     }
@@ -301,6 +349,7 @@ export function openProviderAuth({ store, catalog, onChange }) {
   async function clearAuth(providerId) {
     const id = activeByProvider.get(providerId);
     if (id) abortFlow(flows.get(id));
+    if (providerId === ANTIGRAVITY_PROVIDER_ID) return;
     try {
       const runtime = await catalog.runtime();
       if (runtime.getProvider(providerId)) {
@@ -313,6 +362,7 @@ export function openProviderAuth({ store, catalog, onChange }) {
 
   function close() {
     closed = true;
+    serviceController.abort();
     for (const flow of flows.values()) abortFlow(flow);
     flows.clear();
     activeByProvider.clear();

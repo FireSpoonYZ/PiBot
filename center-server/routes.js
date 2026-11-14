@@ -8,6 +8,8 @@ import { discoverCenterProviderModels, validateCenterProvider } from '../host-co
 import { registerWebhookRoutes } from './webhooks.js';
 import { registerVaultRoutes } from './vault-routes.js';
 import { registerPairingRoutes } from './pairing.js';
+import { registerAntigravityRoutes } from './antigravity-routes.js';
+import { ANTIGRAVITY_PROVIDER_ID } from '../center-contract/antigravity.js';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 const required = (value, name) => value ?? fail('NOT_FOUND', `${name} not found`);
@@ -165,7 +167,7 @@ function assertConfigCredentials(schema, value) {
 }
 
 
-export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, publicUrl, vault }) {
+export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault }) {
   const streams = new Map();
   function notify(deviceId, event = 'config-changed') {
     for (const stream of streams.get(deviceId) || []) {
@@ -278,6 +280,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   }, true);
   route('POST', '/api/providers/:id/validate', async req => {
     const body = validate(providerProbeBodySchema, req.body ?? {});
+    if (req.params.id === ANTIGRAVITY_PROVIDER_ID) return antigravityRoutes.validateProvider();
     const input = await providerInput(req.params.id, body);
     const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : '';
     if (deviceId) return bridge.call(deviceId, 'validateCenterProvider', input);
@@ -285,6 +288,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   }, true);
   route('POST', '/api/providers/:id/discover', async req => {
     const body = validate(providerProbeBodySchema, req.body ?? {});
+    if (req.params.id === ANTIGRAVITY_PROVIDER_ID) return antigravityRoutes.discoverModels();
     const input = await providerInput(req.params.id, body);
     const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : '';
     if (deviceId) return bridge.call(deviceId, 'discoverCenterProviderModels', input);
@@ -660,6 +664,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   registerWebhookRoutes(app, { store, bridge, route, host, publicUrl, notify: deviceId => notify(deviceId, 'webhook-ready') });
   registerPairingRoutes(app, { store, bridge, route, notify, publicUrl, deviceRegistration });
   if (vault) registerVaultRoutes(app, { route, host, vault });
+  const antigravityRoutes = registerAntigravityRoutes({ store, bridge, catalog, host, antigravity, changed });
   // Learning start carries a transcript snapshot the service bounds at 8 MiB;
   // this route's body limit sits just above it — never a global raise.
   const LEARNING_BODY_LIMIT = 9 * 1024 * 1024;
@@ -817,5 +822,5 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   });
   host('POST', '/api/host/capabilities/:installationId/tools/list', req => execution.listTools(req.centerDevice.deviceId, req.params.installationId, object(req.body)));
   host('POST', '/api/host/capabilities/:installationId/tools/call', req => { const body = object(req.body); text(body.callId, 'callId'); text(body.name, 'name'); object(body.args); return execution.callTool(req.centerDevice.deviceId, req.params.installationId, body); });
-  return { notifyAll, notifyInstallation, notifyDevice: notify, close() { for (const set of streams.values()) for (const stream of set) stream.reply.end(); streams.clear(); } };
+  return { notifyAll, notifyInstallation, notifyDevice: notify, close() { antigravityRoutes.close(); for (const set of streams.values()) for (const stream of set) stream.reply.end(); streams.clear(); } };
 }
