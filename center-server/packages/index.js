@@ -70,7 +70,7 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
   const activationError = (code) => ({ code, message: ACTIVATION_MESSAGES[code] });
   const activationCode = (err) => ACTIVATION_CODES.includes(err?.code) ? err.code : 'INTERNAL_ERROR';
   // Only these actions run the global validation after deployment; disable/uninstall must keep their terminal phase.
-  const VALIDATING_ACTIONS = ['enable', 'update', 'rollback'];
+  const VALIDATING_ACTIONS = ['enable', 'update'];
   const needsValidation = (operationId) => VALIDATING_ACTIONS.includes(store.getOperation(operationId)?.action);
   const retryTimer = setInterval(() => {
     if ((!waiting.size && !monitoring.size) || closed || retryQueued) return;
@@ -132,7 +132,30 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
     catch (err) { if (err.code === 'ENOENT') throw error('NOT_FOUND', 'Installation metadata not found'); throw err; }
   }
 
-  async function resolveVersion(kind, source, version, target) {
+  const ARTIFACT_GRACE_MS = 5 * 60 * 1000;
+  async function pruneArtifacts() {
+    const used = store.pruneUnusedPackages?.();
+    if (!used) return;
+    const referenced = new Set(used);
+    let entries;
+    try { entries = await readdir(artifacts, { withFileTypes: true }); }
+    catch (err) { if (err.code === 'ENOENT') return; throw err; }
+    const now = Date.now();
+    for (const entry of entries) {
+      if (!/^[a-f0-9]{64}$/.test(entry.name) || referenced.has(entry.name)) continue;
+      const file = path.join(artifacts, entry.name);
+      try {
+        const info = await stat(file);
+        if (info.isFile() && now - info.mtimeMs > ARTIFACT_GRACE_MS) {
+          await rm(file, { force: true });
+        }
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
+      }
+    }
+  }
+
+  async function resolveVersion(kind, source, version, target, fallbackPackageId = null) {
     if (target === 'center' && (kind === 'plugin' || kind === 'skill')) throw error('UNSUPPORTED_TARGET', 'Native plugins and skills run on Hosts');
     if (source.type === 'http') {
       if (kind !== 'mcp') throw error('INVALID_ARGUMENT', 'HTTP source requires MCP');
@@ -230,8 +253,15 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
         for (const dir of dirs) await scan(containedPath(temp, dir));
         if (!found) throw error('VALIDATION_FAILED', 'No managed SKILL.md found');
         manifest = { skills: dirs };
-        packageId ||= 'skill-' + saved.artifactRef;
-        packageVersion ||= '1.0.0';
+        if (source.type === 'artifact') {
+          packageId = fallbackPackageId || pkg?.name || ('skill-' + saved.artifactRef);
+          packageVersion = '0.0.0-h' + saved.artifactRef.slice(0, 12);
+        } else {
+          packageId ||= 'skill-' + saved.artifactRef;
+          if (!packageVersion || !semver.valid(packageVersion)) {
+            packageVersion = '0.0.0-h' + saved.artifactRef.slice(0, 12);
+          }
+        }
       } else throw error('INVALID_ARGUMENT', 'Unknown capability kind');
       if (!packageId || !semver.valid(packageVersion)) throw error('VALIDATION_FAILED', 'Package requires an exact version');
       let lockfile = null;
@@ -485,11 +515,16 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
       store.updateOperation(op.operationId, { phase: 'downloading', error: null });
       const v = await resolveVersion(request.kind, request.source, null, request.target);
       store.putPackageVersion(v.packageVersion);
-      const meta = { versions: { [v.packageVersion.version]: { ...v, source: request.source } }, history: [v.packageVersion.version], operationId: op.operationId, action: 'install' };
+      const meta = {
+        versions: { [v.packageVersion.version]: { ...v, source: request.source } },
+        operationId: op.operationId,
+        action: 'install',
+      };
       await atomicJson(metaFile(id), meta);
+      const autoEnable = request.autoEnable === true && request.kind === 'skill' && request.target === 'host';
       const installation = store.putInstallation({ installationId: id, packageId: v.packageVersion.packageId,
         displayName: request.displayName, kind: request.kind, source: request.source, target: request.target,
-        targetVersion: v.packageVersion.version, enabled: false, activation: activation('disabled'), revision: 0,
+        targetVersion: v.packageVersion.version, enabled: autoEnable, activation: activation(autoEnable ? 'enabled' : 'disabled'), revision: 0,
         ...(request.ownerBot ? { ownerBot: request.ownerBot } : {}),
         ...(request.visibilityScope ? { visibilityScope: request.visibilityScope } : {}) }, null);
       onChange(id);
@@ -509,34 +544,59 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
     return accept(action, id, request, installation.target, devices, async (op) => {
       const current = existing(id);
       const oldMeta = await getMeta(id);
-      const meta = structuredClone(oldMeta);
       let targetVersion = current.targetVersion;
       let source = current.source;
+      let versionEntry = oldMeta.versions?.[targetVersion];
       if (action === 'update') {
         store.updateOperation(op.operationId, { phase: 'downloading', error: null });
-        if (!semver.valid(request.targetVersion)) throw error('INVALID_ARGUMENT', 'Update requires exact version');
-        if (current.source.type === 'artifact') {
-          if (request.source?.type !== 'artifact' || !request.source.artifactRef) throw error('INVALID_ARGUMENT', 'Update requires an uploaded artifact');
-          source = request.source;
-        } else if (current.source.type !== 'npm' || request.source) {
+        const hasTargetVersion = request.targetVersion !== undefined && request.targetVersion !== null && request.targetVersion !== '';
+        let v;
+        if (request.source?.type === 'artifact' && request.source.artifactRef) {
+          if (current.source.type !== 'artifact' && request.allowSourceSwitch !== true && current.kind !== 'skill') {
+            throw error('INVALID_ARGUMENT', 'Invalid update source');
+          }
+          source = { type: 'artifact', artifactRef: request.source.artifactRef };
+          if (hasTargetVersion && !semver.valid(request.targetVersion)) {
+            throw error('INVALID_ARGUMENT', 'Update requires exact version');
+          }
+          v = await resolveVersion(current.kind, source, hasTargetVersion ? request.targetVersion : null, current.target, current.packageId);
+          if (v.packageVersion.packageId !== current.packageId ||
+              (hasTargetVersion && current.kind !== 'skill' && v.packageVersion.version !== request.targetVersion)) {
+            throw error('VALIDATION_FAILED', 'Update package identity mismatch');
+          }
+        } else if (current.source.type === 'npm' && (!request.source || (request.source.type === 'npm' && request.source.spec))) {
+          if (request.source?.type === 'npm' && request.source.spec) {
+            source = { type: 'npm', spec: request.source.spec };
+          }
+          if (hasTargetVersion) {
+            if (!semver.valid(request.targetVersion)) {
+              throw error('INVALID_ARGUMENT', 'Update requires exact version');
+            }
+            v = await resolveVersion(current.kind, source, request.targetVersion, current.target, current.packageId);
+          } else {
+            const split = source.spec.lastIndexOf('@');
+            const pkgName = split > 0 ? source.spec.slice(0, split) : source.spec;
+            v = await resolveVersion(current.kind, { type: 'npm', spec: pkgName + '@latest' }, null, current.target, current.packageId);
+          }
+          if (v.packageVersion.packageId !== current.packageId) {
+            throw error('VALIDATION_FAILED', 'Update package identity mismatch');
+          }
+        } else {
           throw error('INVALID_ARGUMENT', 'Invalid update source');
-        }
-        const v = await resolveVersion(current.kind, source, request.targetVersion, current.target);
-        if (v.packageVersion.packageId !== current.packageId || v.packageVersion.version !== request.targetVersion) {
-          throw error('VALIDATION_FAILED', 'Update package identity mismatch');
         }
         store.putPackageVersion(v.packageVersion);
         targetVersion = v.packageVersion.version;
-        meta.versions[targetVersion] = { ...v, source };
-      } else if (action === 'rollback') {
-        targetVersion = meta.history.at(-2);
-        if (!targetVersion) throw error('INVALID_STATE', 'No previous version');
-        source = meta.versions[targetVersion].source;
+        versionEntry = { ...v, source };
       }
-      if (targetVersion !== current.targetVersion) meta.history.push(targetVersion);
-      meta.operationId = op.operationId;
-      meta.action = action;
-      if (action === 'enable') meta.validationBot = request.validationBot ? { deviceId: request.validationBot.deviceId, botId: request.validationBot.botId } : null;
+      const validationBot = action === 'enable'
+        ? (request.validationBot ? { deviceId: request.validationBot.deviceId, botId: request.validationBot.botId } : null)
+        : oldMeta.validationBot;
+      const meta = {
+        versions: versionEntry ? { [targetVersion]: versionEntry } : {},
+        operationId: op.operationId,
+        action,
+        ...(validationBot !== undefined ? { validationBot } : {}),
+      };
       const intent = action === 'enable' ? true : action === 'disable' || action === 'uninstall' ? false : current.enabled;
       changing.add(id);
       let next;
@@ -562,6 +622,9 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
       }
       if (intent) await settleActivation(id, op.operationId);
       else holding.delete(op.operationId);
+      if (action === 'update' || action === 'uninstall') {
+        await pruneArtifacts().catch(() => {});
+      }
     });
   }
 
@@ -660,7 +723,7 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
     }
     store.updateOperation(op.operationId, { phase: 'failed', error: { code: 'INTERRUPTED', message: 'Operation interrupted; retry explicitly' } });
   }
-  // Finish an interrupted enable/update/rollback together with its validation; other 'enabling' settles without one.
+  // Finish an interrupted enable/update together with its validation; other 'enabling' settles without one.
   for (const [installationId, operationId] of resuming) {
     enqueue(async () => { await settleActivation(installationId, operationId).catch(() => {}); });
   }
@@ -675,7 +738,6 @@ export function openPackageManager({ dataRoot, store, npmPath, withActivation, o
     enable: (id, request) => change(id, request, 'enable'),
     disable: (id, request) => change(id, request, 'disable'),
     uninstall: (id, request) => change(id, request, 'uninstall'),
-    rollback: (id, request) => change(id, request, 'rollback'),
     checkUpdates, getInstalled: (id) => installer.getInstalled(id),
     async close() {
       closed = true;

@@ -498,7 +498,19 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return reply.code(201).send(await packages.uploadArtifact(content()));
   }, true);
   route('GET', '/api/capabilities', () => store.listInstallations());
-  route('POST', '/api/installations', async (req, reply) => { const body = object(req.body); if (body.target === 'center' && (body.kind === 'plugin' || body.kind === 'skill')) fail('UNSUPPORTED_TARGET', 'Native plugins and skills run on Hosts'); return reply.code(202).send(await packages.install(body)); }, true);
+  route('POST', '/api/installations', async (req, reply) => {
+    const body = object(req.body);
+    if (body.target === 'center' && (body.kind === 'plugin' || body.kind === 'skill')) fail('UNSUPPORTED_TARGET', 'Native plugins and skills run on Hosts');
+    if (body.kind === 'skill' && body.source?.type === 'inline') {
+      const prepared = await skills.prepareInlineSkill({ displayName: body.displayName, files: body.source.files });
+      return reply.code(202).send(await packages.install({
+        ...body,
+        source: { type: 'artifact', artifactRef: prepared.artifactRef },
+        autoEnable: body.autoEnable ?? true,
+      }));
+    }
+    return reply.code(202).send(await packages.install(body));
+  }, true);
   route('GET', '/api/installations/:id', req => required(store.getInstallation(req.params.id), 'Installation'));
   route('PATCH', '/api/installations/:id', async req => {
     const body = object(req.body);
@@ -512,6 +524,13 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
       }
       notifyInstallation(req.params.id);
     }
+    return result;
+  }, true);
+  route('GET', '/api/installations/:id/skill-files', req => skills.readInstallationFiles(req.params.id));
+  route('PUT', '/api/installations/:id/skill-files', async req => {
+    const body = object(req.body);
+    const result = await skills.writeInstallationFiles(req.params.id, body.files, { requestId: body.requestId });
+    notifyInstallation(req.params.id);
     return result;
   }, true);
   route('GET', '/api/installations/:id/config', req => store.getInstallationConfig(req.params.id));
@@ -576,7 +595,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     }
     return reply.code(202).send(await packages.enable(req.params.id, request));
   }, true);
-  for (const [method, path, fn] of [['POST','update','update'],['POST','rollback','rollback'],['POST','disable','disable'],['DELETE','','uninstall']]) {
+  for (const [method, path, fn] of [['POST','update','update'],['POST','disable','disable'],['DELETE','','uninstall']]) {
     route(method, `/api/installations/:id${path ? `/${path}` : ''}`, async (req, reply) => reply.code(202).send(await packages[fn](req.params.id, object(req.body))), true);
   }
   route('GET', '/api/installations/:id/deployments', req => store.listDeploymentReceipts(req.params.id));
@@ -760,7 +779,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     if (body.deviceId !== deviceId || !plan || plan.operationId !== body.operationId || plan.planId !== body.planId || plan.desiredRevision !== body.desiredRevision) fail('FORBIDDEN', 'Deployment not assigned');
     if (!['queued', 'downloading', 'preparing', 'waiting-idle', 'activating', 'applied', 'failed', 'removed'].includes(body.phase) || !['ready', 'disconnected', 'needs-auth', 'unsupported', 'disabled'].includes(body.health) || (body.appliedRevision !== null && (!Number.isSafeInteger(body.appliedRevision) || body.appliedRevision < 0)) || (body.actualVersion !== null && typeof body.actualVersion !== 'string')) fail('INVALID_ARGUMENT', 'Invalid deployment receipt');
     if (['applied', 'removed'].includes(body.phase) && body.appliedRevision !== plan.desiredRevision) fail('INVALID_ARGUMENT', 'Deployment revision mismatch');
-    if (body.phase === 'applied' && ['install', 'update', 'rollback', 'enable'].includes(plan.action) && body.actualVersion !== plan.targetVersion) fail('INVALID_ARGUMENT', 'Deployment version mismatch');
+    if (body.phase === 'applied' && ['install', 'update', 'enable'].includes(plan.action) && body.actualVersion !== plan.targetVersion) fail('INVALID_ARGUMENT', 'Deployment version mismatch');
     store.putDeploymentReceipt({ ...body, error: body.error ? { code: 'INTERNAL_ERROR', message: 'Deployment failed' } : null });
     const operation = store.getOperation(plan.operationId);
     if (operation && operation.target === 'host' && operation.deviceIds.length && !['applied', 'removed', 'failed'].includes(operation.phase)) {

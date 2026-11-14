@@ -26,7 +26,7 @@ All tools take `deviceId` + `botId` for the TARGET Bot — which may be another 
 ## Capabilities
 
 - `get_bot_capabilities({deviceId, botId})` → Center-managed capabilities (plugins, skills, MCP servers) with per-Bot `enabled`, `overrides`, `revision`.
-- `set_bot_capability({deviceId, botId, installationId, enabled?, overrides?, expectedRevision?})` — enable/disable or set per-Bot config overrides for one installation. Package-level install/update/rollback is `manage_bot_installation` (see references/installations.md); this tool only changes the Bot's binding/config.
+- `set_bot_capability({deviceId, botId, installationId, enabled?, overrides?, expectedRevision?})` — enable/disable or set per-Bot config overrides for one installation. Package-level install/update is `manage_bot_installation` (see references/installations.md); this tool only changes the Bot's binding/config.
 
 ## Interrupt and lifecycle
 

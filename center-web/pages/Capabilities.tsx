@@ -39,6 +39,9 @@ export default function Capabilities() {
   const [sourceType, setSourceType] = useState<InstallSource['type']>('npm');
   const [source, setSource] = useState('');
   const [file, setFile] = useState<File>();
+  const [skillSlug, setSkillSlug] = useState('');
+  const [skillDescription, setSkillDescription] = useState('');
+  const [skillBody, setSkillBody] = useState('');
   const [target, setTarget] = useState<'center' | 'host'>('host');
   const [operation, setOperation] = useState('');
   const [rename, setRename] = useState<{ installationId: string; revision: number; name: string }>();
@@ -59,26 +62,54 @@ export default function Capabilities() {
     setBusy(true);
     setError('');
     try {
-      let input: InstallSource;
-      if (sourceType === 'artifact') {
-        if (!file) throw new Error('请选择制品文件');
-        const uploaded = await api.uploadArtifact(file);
-        input = { type: 'artifact', artifactRef: uploaded.artifactRef };
+      let accepted;
+      if (sourceType === 'inline') {
+        const displayName = name.trim();
+        if (!displayName) throw new Error('请填写显示名称');
+        const slug = skillSlug.trim();
+        if (!/^[a-z0-9][a-z0-9._-]*$/.test(slug)) {
+          throw new Error('技能标识名仅支持小写字母、数字、点、下划线或连字符，且须以小写字母或数字开头');
+        }
+        const desc = skillDescription.trim();
+        if (!desc) throw new Error('请填写技能描述');
+        const normalizedBody = skillBody.replace(/\r\n/g, '\n');
+        if (!normalizedBody.trim()) throw new Error('请填写 SKILL.md 内容');
+        const skillMd = normalizedBody.startsWith('---\n')
+          ? normalizedBody
+          : `---\nname: ${slug}\ndescription: ${JSON.stringify(desc)}\n---\n\n${normalizedBody}`;
+        accepted = await api.install({
+          requestId: crypto.randomUUID(),
+          displayName,
+          kind: 'skill',
+          target: 'host',
+          source: { type: 'inline', files: { 'SKILL.md': skillMd } },
+          autoEnable: true,
+        });
       } else {
-        input = sourceType === 'http' ? { type: 'http', url: source } : { type: 'npm', spec: source };
+        let input: InstallSource;
+        if (sourceType === 'artifact') {
+          if (!file) throw new Error('请选择制品文件');
+          const uploaded = await api.uploadArtifact(file);
+          input = { type: 'artifact', artifactRef: uploaded.artifactRef };
+        } else {
+          input = sourceType === 'http' ? { type: 'http', url: source } : { type: 'npm', spec: source };
+        }
+        accepted = await api.install({
+          requestId: crypto.randomUUID(),
+          displayName: name,
+          kind,
+          source: input,
+          target,
+        });
       }
-      const accepted = await api.install({
-        requestId: crypto.randomUUID(),
-        displayName: name,
-        kind,
-        source: input,
-        target,
-      });
       setOperation(accepted.operationId);
       setInstallOpen(false);
       setName('');
       setSource('');
       setFile(undefined);
+      setSkillSlug('');
+      setSkillDescription('');
+      setSkillBody('');
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -255,7 +286,9 @@ export default function Capabilities() {
                         <span className="badge badge-neutral">
                           {item.target === 'center' ? '中心托管' : 'Host 执行'}
                         </span>
-                        <span className="badge badge-neutral">v{item.targetVersion}</span>
+                        {item.kind !== 'skill' && (
+                          <span className="badge badge-neutral">v{item.targetVersion}</span>
+                        )}
                       </div>
                     </div>
                     <div className="action-row">
@@ -265,7 +298,9 @@ export default function Capabilities() {
                           ? item.source.spec
                           : item.source.type === 'http'
                             ? item.source.url
-                            : '本地制品'}
+                            : item.source.type === 'inline'
+                              ? '在线编写'
+                              : '本地制品'}
                         {item.ownerBot
                           ? ` · 源 Bot：${item.ownerBot.deviceId} / ${item.ownerBot.botId}`
                           : ''}
@@ -329,6 +364,11 @@ export default function Capabilities() {
             void install();
           }}
         >
+          {error && (
+            <p className="inline-error" role="alert">
+              {error}
+            </p>
+          )}
           <label>
             类型
             <select
@@ -336,7 +376,15 @@ export default function Capabilities() {
               onChange={event => {
                 const next = event.target.value as CapabilityKind;
                 setKind(next);
-                if (next !== 'mcp') setTarget('host');
+                if (next === 'skill') {
+                  setSourceType('inline');
+                  setTarget('host');
+                } else {
+                  if (next !== 'mcp') setTarget('host');
+                  if (sourceType === 'inline' || (next !== 'mcp' && sourceType === 'http')) {
+                    setSourceType('npm');
+                  }
+                }
               }}
             >
               <option value="plugin">插件</option>
@@ -345,12 +393,12 @@ export default function Capabilities() {
             </select>
           </label>
           <label>
-            名称
+            {sourceType === 'inline' ? '显示名称' : '名称'}
             <input
               required
               value={name}
               onChange={event => setName(event.target.value)}
-              placeholder="例如：GitHub MCP / 代码搜索插件"
+              placeholder={sourceType === 'inline' ? '例如：部署助手' : '例如：GitHub MCP / 代码搜索插件'}
             />
           </label>
           <label>
@@ -359,12 +407,58 @@ export default function Capabilities() {
               value={sourceType}
               onChange={event => setSourceType(event.target.value as InstallSource['type'])}
             >
-              <option value="npm">npm</option>
-              <option value="artifact">本地制品</option>
-              <option value="http">HTTP MCP</option>
+              {kind === 'skill' ? (
+                <>
+                  <option value="inline">在线编写</option>
+                  <option value="artifact">本地压缩包</option>
+                  <option value="npm">npm</option>
+                </>
+              ) : (
+                <>
+                  <option value="npm">npm</option>
+                  <option value="artifact">本地制品</option>
+                  {kind === 'mcp' && <option value="http">HTTP MCP</option>}
+                </>
+              )}
             </select>
           </label>
-          {sourceType === 'artifact' ? (
+          {sourceType === 'inline' ? (
+            <>
+              <label>
+                技能标识名
+                <input
+                  required
+                  pattern="[a-z0-9][a-z0-9._-]*"
+                  value={skillSlug}
+                  onChange={event => setSkillSlug(event.target.value)}
+                  placeholder="例如：deploy-helper"
+                />
+                <small className="secondary">
+                  仅支持小写字母、数字、点、下划线或连字符，需以小写字母或数字开头
+                </small>
+              </label>
+              <label>
+                技能描述
+                <input
+                  required
+                  value={skillDescription}
+                  onChange={event => setSkillDescription(event.target.value)}
+                  placeholder="说明何时触发及技能用途（用于生成 frontmatter description）"
+                />
+              </label>
+              <label>
+                SKILL.md 内容
+                <textarea
+                  required
+                  rows={12}
+                  style={{ fontFamily: 'monospace' }}
+                  value={skillBody}
+                  onChange={event => setSkillBody(event.target.value)}
+                  placeholder="直接编写 Markdown 正文，或粘贴带 --- frontmatter 的完整 SKILL.md"
+                />
+              </label>
+            </>
+          ) : sourceType === 'artifact' ? (
             <label>
               制品
               <input
@@ -384,16 +478,18 @@ export default function Capabilities() {
               />
             </label>
           )}
-          <label>
-            执行目标
-            <select
-              value={target}
-              onChange={event => setTarget(event.target.value as 'center' | 'host')}
-            >
-              <option value="host">Host</option>
-              {kind === 'mcp' && <option value="center">中心</option>}
-            </select>
-          </label>
+          {sourceType !== 'inline' && (
+            <label>
+              执行目标
+              <select
+                value={target}
+                onChange={event => setTarget(event.target.value as 'center' | 'host')}
+              >
+                <option value="host">Host</option>
+                {kind === 'mcp' && <option value="center">中心</option>}
+              </select>
+            </label>
+          )}
           {kind === 'mcp' && (
             <p className="inline-notice secondary">
               MCP 运行位置：{target === 'center' ? '中心' : '目标 Host'}。MCP URL 由该运行位置访问，需在那里可达。

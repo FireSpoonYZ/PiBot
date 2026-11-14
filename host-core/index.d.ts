@@ -1459,43 +1459,39 @@ export interface BotSoulUpdate {
  * fixed wire shapes rather than arbitrary HTTP.
  */
 export type BotSkillAction =
-  | 'list' | 'read' | 'create' | 'update' | 'delete' | 'archive' | 'restore'
-  | 'pin' | 'lock' | 'history' | 'rollback' | 'publish' | 'adopt' | 'snapshots' | 'restore_snapshot';
+  | 'list' | 'read' | 'create' | 'update' | 'patch' | 'delete' | 'archive' | 'restore'
+  | 'pin' | 'lock' | 'adopt';
 
-/** Center skill service input; mutations require expectedRevision (create uses null), or expectedRevisions for snapshot restore. */
+/** Center skill service input; create/update/patch/adopt save and apply directly without expectedRevision or separate publish. */
 export interface BotSkillInput {
   action: BotSkillAction;
-  snapshotId?: string;
-  /** Obtain from snapshots; null means the named skill must still be absent. */
-  expectedRevisions?: Record<string, { skillId: string; revision: number; stateRevision: number } | null>;
   skillId?: string;
   name?: string;
   category?: string;
   skillName?: string;
   newName?: string;
   description?: string;
-  /** Map of relative file path to UTF-8 content for create/update. */
+  /** Map of relative file path to UTF-8 content for create/update; null deletes an extra file on update. */
   files?: Record<string, string | null>;
   path?: string;
   content?: string | null;
+  oldText?: string;
+  newText?: string;
+  replaceAll?: boolean;
   expectedRevision?: number | null;
   pinned?: boolean;
   locked?: boolean;
-  revision?: number;
   installationId?: string;
   requestId?: string;
 }
 
-/** Manage and inspect Bot-learned skills, revision history, rollback, pin/lock, and lifecycle state. */
+/** Manage and inspect Bot-learned skills, pin/lock, and lifecycle state. */
 export type BotSkillReviewInput =
   | { action: 'list'; includeArchived?: boolean }
   | { action: 'read'; skillId: string; path?: string; expectedRevision?: number }
-  | { action: 'history'; skillId: string }
-  | { action: 'approve' | 'publish'; skillId: string; expectedRevision: number; requestId: string }
-  | { action: 'rollback'; skillId: string; revision: number; expectedRevision: number; requestId: string }
-  | { action: 'pin'; skillId: string; pinned: boolean; expectedRevision: number; requestId: string }
-  | { action: 'lock'; skillId: string; locked: boolean; expectedRevision: number; requestId: string }
-  | { action: 'archive' | 'restore'; skillId: string; expectedRevision: number; requestId: string };
+  | { action: 'pin'; skillId: string; pinned: boolean; expectedRevision?: number; requestId?: string }
+  | { action: 'lock'; skillId: string; locked: boolean; expectedRevision?: number; requestId?: string }
+  | { action: 'archive' | 'restore'; skillId: string; expectedRevision?: number; requestId?: string };
 
 export type BotLearningAction = 'status' | 'configure' | 'learn' | 'review' | 'curate' | 'cancel';
 
@@ -1523,7 +1519,7 @@ export interface BotLearningInput {
 }
 
 export type BotInstallationAction =
-  | 'inspect' | 'install' | 'update' | 'rollback' | 'enable' | 'disable'
+  | 'inspect' | 'install' | 'update' | 'enable' | 'disable'
   | 'uninstall' | 'operation' | 'deployments' | 'catalog' | 'describe' | 'check' | 'probe';
 
 export type {
@@ -1544,6 +1540,7 @@ export interface BotInstallationInput {
   source?: Record<string, unknown>;
   target?: 'host' | 'center';
   displayName?: string;
+  /** Optional on update; defaults to overwriting the current version when omitted. */
   targetVersion?: string;
   /** Bot-scoped enable may only name the target Bot itself as validation identity. */
   validationBot?: { deviceId: string; botId: string };

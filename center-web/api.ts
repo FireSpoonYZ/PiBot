@@ -2,12 +2,21 @@ import type {
   Accepted, ActionRequest, ActionResult, ApiError, ArtifactUploadReceipt, BatchModelsRequest, BotCapabilityConfig, BotCwdConfig, CapabilityToolsListResponse,
   BotCapabilityEntry, BotLearningStatus, BotModelConfig, BotRef, BotSyncResponse, CenterCreateBotRequest, CenterUpdateBotRequest, CredentialInfo, CredentialWrite, DeleteModelResult, DeleteProviderResult, DeploymentReceipt, Device, DeviceRuntimeStatus, DiscoveryResult,
   EnableRequest,
-  InstallRequest, Installation, InstallationConfig, LoginRequest, Model, ModelConfig, ModelPickerResponse, ModelSelection,
+  InstallRequest, InstallSource, Installation, InstallationConfig, InstallationSkillFilesResponse, LoginRequest, Model, ModelConfig, ModelPickerResponse, ModelSelection,
   Operation, OperationRequest, PackageVersion, Provider, ProviderAuthStatus, ProviderAuthFlow, ProviderCheckRequest, ProviderCheckResult, JsonSchema,
   ClientReleaseListResponse, ClientReleaseMetadata, ClientReleasePublishRequest, ClientReleaseRecord,
   CreatePairingCodeResponse, PairingCaState, PairingCodeState,
-  PutBotCapability, PutInstallationConfig, PutInstallationDisplayName, RevisionWrite, SessionInfo, UpdateRequest,
+  PutBotCapability, PutInstallationConfig, PutInstallationDisplayName, PutInstallationSkillFilesRequest, RevisionWrite, SessionInfo, SkillPackageEntry, UpdateRequest,
 } from '@e-launcher/center-contract';
+
+export type {
+  InstallRequest,
+  InstallSource,
+  InstallationSkillFilesResponse,
+  PutInstallationSkillFilesRequest,
+  SkillPackageEntry,
+  UpdateRequest,
+};
 
 export interface BotLearningPatchConfig {
   reviewModelRef?: string | null;
@@ -256,6 +265,8 @@ export const api = {
     request<{ jobId: string; status: string }>(`${botPath(deviceId, botId)}/learning`, 'POST', { action: 'cancel', jobId }),
   getInstallationConfig: (installationId: string) => request<InstallationConfig>(`${installationPath(installationId)}/config`),
   putInstallationConfig: (installationId: string, body: PutInstallationConfig) => request<InstallationConfig>(`${installationPath(installationId)}/config`, 'PUT', body),
+  getInstallationSkillFiles: (installationId: string) => request<InstallationSkillFilesResponse>(`${installationPath(installationId)}/skill-files`),
+  putInstallationSkillFiles: (installationId: string, body: PutInstallationSkillFilesRequest) => request<InstallationSkillFilesResponse>(`${installationPath(installationId)}/skill-files`, 'PUT', body),
   listBotCapabilities: (deviceId: string, botId: string) => request<BotCapabilityEntry[]>(`${botPath(deviceId, botId)}/capabilities`),
   getBotCapability: (deviceId: string, botId: string, installationId: string) => request<BotCapabilityConfig>(`${botPath(deviceId, botId)}/capabilities/${id(installationId)}`),
   putBotCapability: (deviceId: string, botId: string, installationId: string, body: PutBotCapability) => request<BotCapabilityConfig>(`${botPath(deviceId, botId)}/capabilities/${id(installationId)}`, 'PUT', body),
@@ -267,7 +278,6 @@ export const api = {
   listInstallationTools: (installationId: string, body: InstallationCheckRequest) => request<CapabilityToolsListResponse>(`${installationPath(installationId)}/tools/list`, 'POST', body),
   checkUpdates: (installationId: string) => request<PackageVersion[]>(`${installationPath(installationId)}/updates/check`, 'POST'),
   updateInstallation: (installationId: string, body: UpdateRequest) => request<Accepted>(`${installationPath(installationId)}/update`, 'POST', body),
-  rollbackInstallation: (installationId: string, body: OperationRequest) => request<Accepted>(`${installationPath(installationId)}/rollback`, 'POST', body),
   disableInstallation: (installationId: string, body: OperationRequest) => request<Accepted>(`${installationPath(installationId)}/disable`, 'POST', body),
   enableInstallation: (installationId: string, body: EnableRequest) => request<Accepted>(`${installationPath(installationId)}/enable`, 'POST', body),
   uninstallInstallation: (installationId: string, body: OperationRequest) => request<Accepted>(installationPath(installationId), 'DELETE', body),

@@ -1195,11 +1195,50 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       putPackageVersion(version) {
         assertObject(version); assertId(version.packageId); assertId(version.version);
         return transaction(() => {
-          const previous = store.getPackageVersion(version.packageId, version.version);
-          if (previous && json(previous) !== json(version)) throw error('REQUEST_CONFLICT', 'Package version already exists');
-          if (!previous) {
-            db.prepare('INSERT INTO package_versions VALUES (?, ?, ?)').run(version.packageId, version.version, json(version));
+          db.prepare('INSERT INTO package_versions VALUES (?, ?, ?) ON CONFLICT(package_id, version) DO UPDATE SET json = excluded.json').run(version.packageId, version.version, json(version));
+        });
+      },
+      pruneUnusedPackages() {
+        return transaction(() => {
+          const usedVersions = new Set();
+          const versionKey = (packageId, version) => `${packageId}\0${version}`;
+          const addVersion = (packageId, version) => {
+            if (typeof packageId === 'string' && packageId && typeof version === 'string' && version) {
+              usedVersions.add(versionKey(packageId, version));
+            }
+          };
+          const usedArtifacts = new Set();
+          const addArtifact = (ref) => {
+            if (typeof ref === 'string' && ref) usedArtifacts.add(ref);
+          };
+
+          for (const inst of rows('installations')) {
+            addVersion(inst?.packageId, inst?.targetVersion);
+            addArtifact(inst?.source?.artifactRef);
           }
+          for (const plan of db.prepare('SELECT json FROM deployment_plans').all().map(parse)) {
+            addVersion(plan?.packageId, plan?.targetVersion);
+            addArtifact(plan?.artifactRef);
+          }
+          for (const set of db.prepare('SELECT json FROM turn_sets').all().map(parse)) {
+            for (const plan of set?.plans ?? []) {
+              addVersion(plan?.packageId, plan?.targetVersion);
+              addArtifact(plan?.artifactRef);
+            }
+          }
+
+          const deleteStmt = db.prepare('DELETE FROM package_versions WHERE package_id = ? AND version = ?');
+          for (const row of db.prepare('SELECT package_id, version FROM package_versions').all()) {
+            if (!usedVersions.has(versionKey(row.package_id, row.version))) {
+              deleteStmt.run(row.package_id, row.version);
+            }
+          }
+
+          for (const pkg of db.prepare('SELECT json FROM package_versions').all().map(parse)) {
+            addArtifact(pkg?.artifactRef);
+          }
+
+          return [...usedArtifacts];
         });
       },
       putInstallation(installation, expectedRevision) {

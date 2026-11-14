@@ -1,7 +1,10 @@
 // Center-managed per-Bot skill service.
 //
 // openSkillManager({dataRoot, store, packages, notify}) ->
-//   { execute(identity, input), learningTool(identity, name, args), review(identity, input), close() }
+//   { execute(identity, input), learningTool(identity, name, args), review(identity, input),
+//     reportUse(identity, input), readInstallationFiles(installationId),
+//     writeInstallationFiles(installationId, files, options), prepareInlineSkill(input),
+//     LEARNING_SKILL_TOOLS, close() }
 //
 // identity = {deviceId, botId, origin?: 'foreground'|'background_review'|'curator',
 //             sessionId?, requestId?}. origin drives upstream provenance and guards:
@@ -9,11 +12,10 @@
 //     enforcement and locked protections.
 //   - 'foreground' (default): owner-driven management; hard delete, no read guard.
 //
-// Storage: own SQLite at dataRoot/skills/skills.sqlite (skills, skill_revisions,
-// skill_usage, skill_requests). Managed skill files live ONLY in revisions;
-// publish builds a kind=skill artifact package through the existing packages
-// pipeline (uploadArtifact -> install/update -> enable -> Bot binding ->
-// reconcile + notify). Managed package dirs stay immutable deployment output.
+// Storage: own SQLite at dataRoot/skills/skills.sqlite (skills, skill_usage,
+// skill_requests). Managed skill files live directly in skills.files; writes
+// sync immediately to a kind=skill artifact package through packages
+// (uploadArtifact -> install/update -> enable -> Bot binding -> reconcile + notify).
 //
 // The learningTool() adapter maps upstream tools (skills_list, skill_view,
 // skill_manage, read_file, search_files) and skill_usage.*/skill_provenance.*
@@ -57,29 +59,18 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       fm_name TEXT,
       category TEXT,
       revision INTEGER NOT NULL DEFAULT 0,
-      head_rev INTEGER NOT NULL,
+      head_rev INTEGER NOT NULL DEFAULT 0,
       installation_id TEXT,
       package_id TEXT,
       published_rev INTEGER,
+      files TEXT NOT NULL DEFAULT '{}',
+      learning_source TEXT,
       source TEXT NOT NULL DEFAULT 'managed',
       json TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       UNIQUE(device_id, bot_id, name)
     );
-    CREATE TABLE IF NOT EXISTS skill_revisions (
-      skill_id TEXT NOT NULL,
-      rev INTEGER NOT NULL,
-      files TEXT NOT NULL,
-      description TEXT,
-      origin TEXT,
-      request_id TEXT,
-      created_at TEXT NOT NULL,
-      learning_source TEXT,
-      PRIMARY KEY (skill_id, rev)
-    );
-    CREATE UNIQUE INDEX IF NOT EXISTS skill_revisions_request
-      ON skill_revisions(skill_id, request_id) WHERE request_id IS NOT NULL;
     CREATE TABLE IF NOT EXISTS skill_usage (
       device_id TEXT NOT NULL,
       bot_id TEXT NOT NULL,
@@ -87,20 +78,6 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       revision INTEGER NOT NULL DEFAULT 0,
       json TEXT NOT NULL,
       PRIMARY KEY (device_id, bot_id, name)
-    );
-    CREATE TABLE IF NOT EXISTS skill_artifacts (
-      skill_id TEXT NOT NULL,
-      rev INTEGER NOT NULL,
-      artifact_ref TEXT NOT NULL,
-      PRIMARY KEY(skill_id, rev)
-    );
-    CREATE TABLE IF NOT EXISTS skill_snapshots (
-      id TEXT PRIMARY KEY,
-      device_id TEXT NOT NULL,
-      bot_id TEXT NOT NULL,
-      reason TEXT NOT NULL,
-      json TEXT NOT NULL,
-      created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS skill_requests (
       id TEXT PRIMARY KEY,
@@ -111,9 +88,46 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       created_at TEXT NOT NULL
     );
   `);
-  if (!db.prepare('PRAGMA table_info(skill_revisions)').all().some((column) => column.name === 'learning_source')) {
-    db.exec('ALTER TABLE skill_revisions ADD COLUMN learning_source TEXT');
+  const skillCols = new Set(db.prepare('PRAGMA table_info(skills)').all().map((column) => column.name));
+  if (!skillCols.has('files')) {
+    db.exec("ALTER TABLE skills ADD COLUMN files TEXT NOT NULL DEFAULT '{}'");
   }
+  if (!skillCols.has('learning_source')) {
+    db.exec('ALTER TABLE skills ADD COLUMN learning_source TEXT');
+  }
+  const hasLegacyRevisions = Boolean(
+    db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'skill_revisions'").get(),
+  );
+  if (hasLegacyRevisions) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const latestRevStmt = db.prepare(
+        'SELECT * FROM skill_revisions WHERE skill_id = ? ORDER BY rev DESC LIMIT 1',
+      );
+      const migrateSkillStmt = db.prepare(
+        'UPDATE skills SET files = ?, learning_source = COALESCE(learning_source, ?) WHERE id = ?',
+      );
+      for (const skillRow of db.prepare('SELECT id FROM skills').all()) {
+        const rev = latestRevStmt.get(skillRow.id);
+        if (!rev) continue;
+        let learningSource = rev.learning_source ?? null;
+        if (!learningSource && rev.origin) {
+          const mode = rev.origin === 'curator' ? 'curate' : rev.origin === 'foreground' ? 'learn' : 'review';
+          learningSource = json({ mode, createdAt: rev.created_at });
+        }
+        migrateSkillStmt.run(rev.files ?? '{}', learningSource, skillRow.id);
+      }
+      db.exec('COMMIT');
+    } catch (err) {
+      try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+      throw err;
+    }
+  }
+  db.exec(`
+    DROP TABLE IF EXISTS skill_revisions;
+    DROP TABLE IF EXISTS skill_snapshots;
+    DROP TABLE IF EXISTS skill_artifacts;
+  `);
 
   const stmts = {
     skillById: db.prepare('SELECT * FROM skills WHERE id = ?'),
@@ -123,27 +137,14 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     skillsFor: db.prepare('SELECT * FROM skills WHERE device_id = ? AND bot_id = ? ORDER BY name'),
     allSkills: db.prepare('SELECT * FROM skills ORDER BY created_at, id'),
     skillByInstallationId: db.prepare('SELECT * FROM skills WHERE installation_id = ?'),
-    insertSkill: db.prepare('INSERT INTO skills (id, device_id, bot_id, name, fm_name, category, revision, head_rev, installation_id, package_id, published_rev, source, json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
-    updateSkill: db.prepare('UPDATE skills SET fm_name = ?, revision = ?, head_rev = ?, installation_id = ?, package_id = ?, published_rev = ?, json = ?, updated_at = ? WHERE id = ?'),
+    insertSkill: db.prepare('INSERT INTO skills (id, device_id, bot_id, name, fm_name, category, revision, head_rev, installation_id, package_id, published_rev, files, learning_source, source, json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+    updateSkill: db.prepare('UPDATE skills SET fm_name = ?, revision = ?, installation_id = ?, package_id = ?, files = ?, learning_source = ?, json = ?, updated_at = ? WHERE id = ?'),
+    updateSkillDeployment: db.prepare('UPDATE skills SET installation_id = ?, package_id = ?, updated_at = ? WHERE id = ?'),
     deleteSkill: db.prepare('DELETE FROM skills WHERE id = ?'),
-    revGet: db.prepare('SELECT * FROM skill_revisions WHERE skill_id = ? AND rev = ?'),
-    revList: db.prepare('SELECT rev, description, origin, request_id, created_at FROM skill_revisions WHERE skill_id = ? ORDER BY rev'),
-    revInsert: db.prepare('INSERT INTO skill_revisions (skill_id, rev, files, description, origin, request_id, created_at, learning_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'),
-    learningRevision: db.prepare("SELECT rev, origin, created_at, learning_source FROM skill_revisions WHERE skill_id = ? AND rev > ? AND rev <= ? AND (learning_source IS NOT NULL OR origin IN ('background_review', 'curator')) ORDER BY rev DESC LIMIT 1"),
-    latestLearningRevision: db.prepare("SELECT rev, origin, created_at, learning_source FROM skill_revisions WHERE skill_id = ? AND rev <= ? AND (learning_source IS NOT NULL OR origin IN ('background_review', 'curator', 'foreground')) ORDER BY rev DESC LIMIT 1"),
-    revDelete: db.prepare('DELETE FROM skill_revisions WHERE skill_id = ?'),
     usageGet: db.prepare('SELECT revision, json FROM skill_usage WHERE device_id = ? AND bot_id = ? AND name = ?'),
     usagePut: db.prepare('INSERT INTO skill_usage (device_id, bot_id, name, revision, json) VALUES (?, ?, ?, ?, ?) ON CONFLICT(device_id, bot_id, name) DO UPDATE SET revision = excluded.revision, json = excluded.json'),
     usageDel: db.prepare('DELETE FROM skill_usage WHERE device_id = ? AND bot_id = ? AND name = ?'),
     usageAll: db.prepare('SELECT name, json FROM skill_usage WHERE device_id = ? AND bot_id = ?'),
-    artifactGet: db.prepare('SELECT artifact_ref FROM skill_artifacts WHERE skill_id = ? AND rev = ?'),
-    artifactPut: db.prepare('INSERT OR IGNORE INTO skill_artifacts (skill_id, rev, artifact_ref) VALUES (?, ?, ?)'),
-    artifactDelete: db.prepare('DELETE FROM skill_artifacts WHERE skill_id = ?'),
-    snapshotInsert: db.prepare('INSERT INTO skill_snapshots (id, device_id, bot_id, reason, json, created_at) VALUES (?, ?, ?, ?, ?, ?)'),
-    snapshotsFor: db.prepare('SELECT id FROM skill_snapshots WHERE device_id = ? AND bot_id = ? ORDER BY rowid DESC'),
-    snapshotGet: db.prepare('SELECT * FROM skill_snapshots WHERE id = ? AND device_id = ? AND bot_id = ?'),
-    snapshotList: db.prepare('SELECT * FROM skill_snapshots WHERE device_id = ? AND bot_id = ? ORDER BY rowid DESC LIMIT 20'),
-    snapshotDelete: db.prepare('DELETE FROM skill_snapshots WHERE id = ? AND device_id = ? AND bot_id = ?'),
     reqGet: db.prepare('SELECT * FROM skill_requests WHERE id = ?'),
     reqPut: db.prepare('INSERT INTO skill_requests (id, device_id, bot_id, fingerprint, json, created_at) VALUES (?, ?, ?, ?, ?, ?)'),
   };
@@ -222,7 +223,7 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
   }
 
   // --- managed skill rows -----------------------------------------------------
-  const skillFiles = (row) => JSON.parse(stmts.revGet.get(row.id, row.head_rev)?.files || '{}');
+  const skillFiles = (row) => JSON.parse(row?.files || '{}');
   const displayPath = (row) => (row.category ? row.category + '/' + row.name : row.name);
 
   function getManaged(id, ref) {
@@ -554,17 +555,15 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     return files;
   }
 
-  /** Files map -> new revision + skill row update inside a tx. Returns the stored rev row fields. */
-  function commitRevision(skill, files, { origin, requestId, learningSource }) {
+  /** Files map -> skill row update inside a tx. Returns updated summary fields. */
+  function commitSkillFiles(skill, files, { learningSource } = {}) {
     const description = U.descriptionOf(files['SKILL.md']);
     const fmName = fmNameOf(files['SKILL.md']);
-    const rev = skill.head_rev + 1;
-    stmts.revInsert.run(skill.id, rev, json(files), description, origin ?? null, requestId ?? null, now(),
-      learningSource ? json(learningSource) : null);
-    const revision = skill.revision + 1;
+    const revision = (skill.revision ?? 0) + 1;
     const meta = JSON.parse(skill.json || '{}');
-    stmts.updateSkill.run(fmName, revision, rev, skill.installation_id, skill.package_id, skill.published_rev, json(meta), now(), skill.id);
-    return { rev, revision, description, fmName };
+    const nextLearningSource = learningSource ? json(learningSource) : (skill.learning_source ?? null);
+    stmts.updateSkill.run(fmName, revision, skill.installation_id, skill.package_id, json(files), nextLearningSource, json(meta), now(), skill.id);
+    return { revision, description, fmName };
   }
 
   function validateSkillMd(content, { requireDescriptionBudget = false, before } = {}) {
@@ -598,23 +597,20 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     try { if (installedClaims(installedList, name)) return U.refusal(`A skill named '${name}' already exists in an installed package.`); }
     catch { /* ambiguous installed names still refuse below via managed write */ }
     const files = { 'SKILL.md': content };
-    const skill = {
-      id: randomUUID(), device_id: id.deviceId, bot_id: id.botId, name,
-      category: category ? category.trim() : null, revision: 0, head_rev: 0,
-      installation_id: null, package_id: null, published_rev: null,
-      source: 'managed', json: '{}',
-    };
-    const { rev, revision, fmName } = commitRevision({ ...skill, head_rev: 0, revision: 0, json: '{}' }, files,
-      { origin: id.origin, requestId: id.requestId, learningSource: id.learningSource });
-    stmts.insertSkill.run(skill.id, id.deviceId, id.botId, name, fmName, skill.category, revision, rev, null, null, null, 'managed', '{}', now(), now());
+    const fmName = fmNameOf(content);
+    const skillId = randomUUID();
+    const skillCategory = category ? category.trim() : null;
+    const createdAt = now();
+    const learningSource = id.learningSource ? json(id.learningSource) : null;
+    stmts.insertSkill.run(skillId, id.deviceId, id.botId, name, fmName, skillCategory, 1, 0, null, null, null, json(files), learningSource, 'managed', '{}', createdAt, createdAt);
     const result = U.successResult({
-      message: `Skill '${name}' created.`, path: displayPath({ name, category: skill.category }),
+      message: `Skill '${name}' created.`, path: displayPath({ name, category: skillCategory }),
       skill_md: 'SKILL.md', _change: { description: U.descriptionPreview(content) },
-      ...(skill.category ? { category: skill.category } : {}),
+      ...(skillCategory ? { category: skillCategory } : {}),
       hint: `To add reference files, templates, or scripts, use skill_manage(action='write_file', name='${name}', file_path='references/example.md', file_content='...')`,
     });
     U.addDescriptionPromptPreview(result, content);
-    return { result, skillId: skill.id, skillName: name, usage: () => usageMutate(id, name, (rec) => U.recordCreatedApply(rec, AUTONOMOUS_ORIGINS.has(id.origin))) };
+    return { result, skillId, skillName: name, usage: () => usageMutate(id, name, (rec) => U.recordCreatedApply(rec, AUTONOMOUS_ORIGINS.has(id.origin))) };
   }
 
   function locateForWrite(id, name, installedList = []) {
@@ -790,12 +786,12 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     return opRemoveFile(id, a, files);
   }
 
-  /** Persist one applied op inside the caller's tx: commit file revisions, then usage side effects. */
+  /** Persist one applied op inside the caller's tx: update skill files, then usage side effects. */
   function persistManageResult(id, applied) {
     if (applied.files && applied.row) {
       const err = revalidateWhole(applied.files);
       if (err) return U.refusal(err);
-      commitRevision(applied.row, applied.files, { origin: id.origin, requestId: id.requestId, learningSource: id.learningSource });
+      commitSkillFiles(applied.row, applied.files, { learningSource: id.learningSource });
     }
     applied.usage?.();
     return null;
@@ -859,20 +855,8 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
 
   // --- skill_usage.* function surface -------------------------------------------
   const skillUsageCalls = {
-    snapshot_skills: (id, a) => tx(() => {
-      const snapshotId = randomUUID();
-      const skills = stmts.skillsFor.all(id.deviceId, id.botId).map((row) => ({
-        skill: row, files: skillFiles(row), usage: usageRow(id, row.name), learningSource: pendingLearningSource(row),
-      }));
-      stmts.snapshotInsert.run(snapshotId, id.deviceId, id.botId,
-        typeof a.reason === 'string' ? a.reason.slice(0, 200) : 'manual', json(skills), now());
-      return { id: snapshotId };
-    }),
-    prune_old_snapshots: (id) => tx(() => {
-      const expired = stmts.snapshotsFor.all(id.deviceId, id.botId).slice(2);
-      for (const row of expired) stmts.snapshotDelete.run(row.id, id.deviceId, id.botId);
-      return expired.map((row) => row.id);
-    }),
+    snapshot_skills: () => ({ id: 'noop' }),
+    prune_old_snapshots: () => [],
     bump_view: (id, a) => { bumpView(id, a.skill_name ?? a.name); return null; },
     bump_use: (id, a) => { bumpUse(id, a.skill_name ?? a.name); return null; },
     bump_patch: (id, a) => { bumpPatch(id, a.skill_name ?? a.name); return null; },
@@ -1052,8 +1036,8 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       pinned: record?.pinned === true, locked: record?.locked === true,
       created_by: record?.created_by ?? null,
       use_count: record?.use_count ?? 0, view_count: record?.view_count ?? 0,
-      revision: row.revision, stateRevision: revision, headRevision: row.head_rev,
-      installationId: row.installation_id ?? undefined, publishedRevision: row.published_rev ?? undefined,
+      revision: row.revision, stateRevision: revision,
+      installationId: row.installation_id ?? undefined,
       updatedAt: row.updated_at, createdAt: row.created_at,
     };
   }
@@ -1312,7 +1296,7 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
         if (!currentRow || usageRow(id, currentRow.name).record?.state === U.STATE_ARCHIVED) continue;
         updatedSkills.push(currentRow.name);
         try {
-          const pubResult = await actions.publish({ ...id, approvedLearningDraft: true }, { skillId, expectedRevision: currentRow.revision });
+          const pubResult = await syncSkillPackage(id, currentRow);
           const enrichedPub = pubResult?.publication ? withDeployment(id, pubResult) : pubResult;
           const pubStatus = enrichedPub?.publication?.status;
           const depStatus = enrichedPub?.deployment?.status;
@@ -1320,7 +1304,7 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
             allPublished = false;
           }
         } catch {
-          // Revision history is already durably committed; transient package state reconciles on next publish/startup.
+          // Skill files are already durably committed; transient package state reconciles on next write/startup.
           allPublished = false;
         }
       }
@@ -1339,8 +1323,6 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
   const pickResult = (outcome) => ({ success: outcome.success === true, ...(outcome.success ? {} : { error: outcome.error }), ...(outcome.message ? { message: outcome.message } : {}) });
 
   function deleteManagedNow(id, row) {
-    stmts.revDelete.run(row.id);
-    stmts.artifactDelete.run(row.id);
     stmts.deleteSkill.run(row.id);
     forget(id, row.name);
     clearMarks(id, row.name);
@@ -1354,52 +1336,6 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     return row;
   }
 
-  function assertRevision(expected, actual) {
-    if (expected !== actual) throw error('REVISION_CONFLICT', 'Revision does not match');
-  }
-
-  function pendingLearningSource(row) {
-    const revision = stmts.learningRevision.get(row.id, row.published_rev ?? 0, row.head_rev);
-    if (!revision) return null;
-    const source = revision.learning_source
-      ? JSON.parse(revision.learning_source)
-      : { mode: revision.origin === 'curator' ? 'curate' : 'review' };
-    return { ...source, contentRevision: revision.rev, createdAt: source.createdAt ?? revision.created_at };
-  }
-
-  function reviewSummary(id, row, source) {
-    return {
-      skillId: row.id, name: row.name, path: displayPath(row), revision: row.revision,
-      headRevision: row.head_rev, publishedRevision: row.published_rev,
-      state: usageRow(id, row.name).record?.state ?? U.STATE_ACTIVE,
-      updatedAt: row.updated_at, source,
-    };
-  }
-
-  function draftComparison(row) {
-    const head = stmts.revGet.get(row.id, row.head_rev);
-    const published = row.published_rev === null ? null : stmts.revGet.get(row.id, row.published_rev);
-    if (!head || (row.published_rev !== null && !published)) {
-      throw error('INVALID_STATE', 'Skill comparison requires both content revisions');
-    }
-    const before = published ? JSON.parse(published.files) : {};
-    const after = JSON.parse(head.files);
-    return { before, after };
-  }
-
-  function reviewChanges(before, after) {
-    const paths = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
-    const changes = [];
-    for (const filePath of paths) {
-      if (before[filePath] === after[filePath]) continue;
-      let kind = 'modified';
-      if (!Object.hasOwn(before, filePath)) kind = 'added';
-      else if (!Object.hasOwn(after, filePath)) kind = 'removed';
-      changes.push({ path: filePath, kind });
-    }
-    return changes;
-  }
-
   function summarizeSkill(id, row) {
     const { record, revision } = usageRow(id, row.name);
     const files = skillFiles(row);
@@ -1407,10 +1343,10 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       skillId: row.id, name: row.name, path: displayPath(row),
       ...(row.category ? { category: row.category } : {}),
       description: U.descriptionOf(files['SKILL.md']) ?? null,
-      revision: row.revision, stateRevision: revision, headRevision: row.head_rev,
+      revision: row.revision, stateRevision: revision,
       state: record?.state ?? U.STATE_ACTIVE, pinned: record?.pinned === true, locked: record?.locked === true,
       createdBy: record?.created_by ?? null, source: row.source,
-      installationId: row.installation_id ?? undefined, publishedRevision: row.published_rev ?? undefined,
+      installationId: row.installation_id ?? undefined,
       createdAt: row.created_at, updatedAt: row.updated_at,
     };
   }
@@ -1440,92 +1376,165 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
 
   function filesOf(row) { return skillFiles(row); }
 
-  function snapshotSkills(id, snapshot) {
-    return JSON.parse(snapshot.json).map(entry => {
-      const current = getManaged(id, entry.skill.name);
-      return { ...entry, current };
+  async function syncSkillPackage(id, row) {
+    const latest = stmts.skillById.get(row.id) ?? row;
+    if (usageRow(id, latest.name).record?.state === U.STATE_ARCHIVED) {
+      return { ...summarizeSkill(id, latest), publication: { status: 'archived' } };
+    }
+    const files = skillFiles(latest);
+    if (typeof files['SKILL.md'] !== 'string') {
+      throw error('VALIDATION_FAILED', 'A managed skill must keep a SKILL.md');
+    }
+    const packageId = latest.package_id || `bot-skill-${latest.id}`;
+    const version = '0.0.0-h' + sha256(json(files)).slice(0, 12);
+    const description = U.descriptionOf(files['SKILL.md']) ?? latest.name;
+    const ownerBot = { deviceId: id.deviceId, botId: id.botId, skillId: latest.id, skillName: latest.name };
+    const bytes = await buildArtifact(packageId, version, files, description);
+    const { artifactRef } = await packages.uploadArtifact([bytes]);
+
+    let installationId = latest.installation_id && store.getInstallation(latest.installation_id) ? latest.installation_id : null;
+    let operationId = null;
+
+    if (!installationId) {
+      const receipt = await packages.install({
+        kind: 'skill',
+        source: { type: 'artifact', artifactRef },
+        target: 'host',
+        displayName: 'Skill: ' + latest.name,
+        requestId: randomUUID(),
+        ownerBot,
+        visibilityScope: 'private',
+        autoEnable: true,
+      });
+      operationId = receipt.operationId;
+      const installResult = await waitFor(() => {
+        const op = store.getOperation(receipt.operationId);
+        if (!op) return null;
+        if (op.phase === 'failed') return { failed: true, op };
+        const inst = op.installationId ? store.getInstallation(op.installationId) : null;
+        if (!inst) return null;
+        if (inst.enabled && inst.activation?.status === 'enabling') return null;
+        return { failed: false, op, inst };
+      }, PUBLISH_WAIT_MS);
+      if (!installResult) {
+        const op = store.getOperation(receipt.operationId);
+        const status = op?.phase === 'failed' ? 'failed' : 'queued';
+        return { ...summarizeSkill(id, latest), publication: { status, operationId, artifactRef, error: op?.error ?? undefined } };
+      }
+      if (installResult.failed) {
+        return { ...summarizeSkill(id, latest), publication: { status: 'failed', operationId, artifactRef, error: installResult.op?.error ?? undefined } };
+      }
+      installationId = installResult.inst.installationId;
+      tx(() => {
+        stmts.updateSkillDeployment.run(installationId, installResult.inst.packageId || packageId, now(), latest.id);
+      });
+      if (!installResult.inst.enabled || installResult.inst.activation?.status !== 'enabled') {
+        const enableReceipt = await packages.enable(installationId, { requestId: randomUUID() });
+        operationId = enableReceipt.operationId;
+      }
+    } else {
+      const installation = store.getInstallation(installationId);
+      if (installation && !installation.ownerBot) {
+        store.setInstallationOwnership?.(installationId, ownerBot, installation.visibilityScope ?? 'private');
+      }
+      if (installation.source?.artifactRef !== artifactRef) {
+        const updateReceipt = await packages.update(installationId, {
+          requestId: randomUUID(),
+          source: { type: 'artifact', artifactRef },
+          allowSourceSwitch: true,
+        });
+        operationId = updateReceipt.operationId;
+        const updateResult = await waitFor(() => {
+          const op = store.getOperation(operationId);
+          if (op?.phase === 'failed') return { failed: true, op };
+          const current = store.getInstallation(installationId);
+          if (!current || current.source?.artifactRef !== artifactRef) return null;
+          if (current.enabled && current.activation?.status === 'enabling') return null;
+          return { failed: false, op, inst: current };
+        }, PUBLISH_WAIT_MS);
+        if (!updateResult) {
+          const op = store.getOperation(operationId);
+          return {
+            ...summarizeSkill(id, stmts.skillById.get(latest.id)),
+            publication: { status: op?.phase === 'failed' ? 'failed' : 'activating', operationId, installationId, packageId: installation.packageId, artifactRef, error: op?.error ?? undefined },
+          };
+        }
+        if (updateResult.failed) {
+          return {
+            ...summarizeSkill(id, stmts.skillById.get(latest.id)),
+            publication: { status: 'failed', operationId, installationId, packageId: installation.packageId, artifactRef, error: updateResult.op?.error ?? undefined },
+          };
+        }
+      }
+      const currentInst = store.getInstallation(installationId);
+      if (!currentInst.enabled || currentInst.activation?.status !== 'enabled') {
+        const enableReceipt = await packages.enable(installationId, { requestId: randomUUID() });
+        operationId = enableReceipt.operationId;
+      }
+    }
+
+    const ready = await waitFor(() => {
+      const op = operationId ? store.getOperation(operationId) : null;
+      if (op?.phase === 'failed') return { failed: true, op };
+      const current = store.getInstallation(installationId);
+      if (!current) return null;
+      if (current.activation?.status === 'failed') return { failed: true, op, inst: current };
+      return current.source?.artifactRef === artifactRef && current.activation?.status === 'enabled'
+        ? { failed: false, inst: current }
+        : null;
+    }, PUBLISH_WAIT_MS);
+    if (!ready || ready.failed) {
+      const op = operationId && store.getOperation(operationId);
+      const status = ready?.failed || op?.phase === 'failed' ? 'failed' : 'activating';
+      return {
+        ...summarizeSkill(id, stmts.skillById.get(latest.id)),
+        publication: { status, operationId, installationId, packageId, artifactRef, error: op?.error ?? ready?.inst?.activation?.error ?? undefined },
+      };
+    }
+
+    const readyInst = ready.inst;
+    if (!readyInst.ownerBot) {
+      store.setInstallationOwnership?.(installationId, ownerBot, readyInst.visibilityScope ?? 'private');
+    }
+    tx(() => {
+      const current = stmts.skillById.get(latest.id);
+      if (current && (current.installation_id !== installationId || current.package_id !== (readyInst.packageId || packageId))) {
+        stmts.updateSkillDeployment.run(installationId, readyInst.packageId || packageId, now(), latest.id);
+      }
     });
+
+    const capability = store.getBotCapability(id.deviceId, id.botId, installationId);
+    if (!capability.enabled) {
+      store.putBotCapability(id.deviceId, id.botId, installationId, {
+        enabled: true,
+        overrides: capability.overrides ?? {},
+        expectedRevision: capability.revision,
+      });
+    }
+
+    const affectedDevices = new Set([
+      id.deviceId,
+      ...store.listBotBindings({ installationId }).map((binding) => binding.deviceId),
+    ]);
+    for (const deviceId of affectedDevices) {
+      try { await packages.reconcileDevice(deviceId); } finally { notify(deviceId); }
+    }
+
+    const finalRow = stmts.skillById.get(latest.id);
+    return {
+      ...summarizeSkill(id, finalRow),
+      publication: {
+        status: 'enabled',
+        operationId,
+        installationId,
+        packageId: readyInst.packageId,
+        version: readyInst.targetVersion,
+        artifactRef,
+      },
+    };
   }
 
   const actions = {
-    snapshots(id, input) {
-      const rows = input.snapshotId
-        ? [stmts.snapshotGet.get(input.snapshotId, id.deviceId, id.botId)].filter(Boolean)
-        : stmts.snapshotList.all(id.deviceId, id.botId);
-      return { snapshots: rows.map(snapshot => ({
-        snapshotId: snapshot.id, reason: snapshot.reason, createdAt: snapshot.created_at,
-        skills: snapshotSkills(id, snapshot).map(({ skill, current }) => ({
-          name: skill.name, skillId: skill.id, snapshotRevision: skill.head_rev,
-          currentSkillId: current?.id ?? null,
-        })),
-        expectedRevisions: Object.fromEntries(snapshotSkills(id, snapshot).map(({ skill, current }) => [
-          skill.name, current ? { skillId: current.id, revision: current.revision,
-            stateRevision: usageRow(id, current.name).revision } : null,
-        ])),
-      })) };
-    },
-
-    async restore_snapshot(id, input) {
-      if (typeof input.requestId !== 'string' || !input.requestId || input.requestId.length > 200) {
-        throw error('INVALID_ARGUMENT', 'restore_snapshot requires requestId');
-      }
-      if (typeof input.snapshotId !== 'string' || !input.snapshotId || input.snapshotId.length > 200) {
-        throw error('INVALID_ARGUMENT', 'restore_snapshot requires snapshotId');
-      }
-      const expected = input.expectedRevisions;
-      if (!expected || typeof expected !== 'object' || Array.isArray(expected)) {
-        throw error('INVALID_ARGUMENT', 'Use snapshots to obtain expectedRevisions');
-      }
-      const deploymentPlans = await packages.listDeploymentPlans(id.deviceId);
-      const snapshot = stmts.snapshotGet.get(input.snapshotId, id.deviceId, id.botId);
-      if (!snapshot) throw error('NOT_FOUND', 'Snapshot not found for this Bot');
-      const entries = snapshotSkills(id, snapshot);
-      if (Object.keys(expected).length !== entries.length) throw error('REVISION_CONFLICT', 'Snapshot skill set mismatch');
-      return tx(() => {
-        const replayed = replay(id, input, 'restore_snapshot');
-        if (replayed.hit) return replayed.hit;
-        for (const { skill, current } of entries) {
-          if (!Object.hasOwn(expected, skill.name)) throw error('REVISION_CONFLICT', 'Missing snapshot skill revision');
-          const token = expected[skill.name];
-          if (current) {
-            if (!token || token.skillId !== current.id) throw error('REVISION_CONFLICT', 'Skill identity changed');
-            assertRevision(token.revision, current.revision);
-            assertRevision(token.stateRevision, usageRow(id, current.name).revision);
-          } else if (token !== null) throw error('REVISION_CONFLICT', 'Skill was deleted');
-        }
-        const restored = entries.map(({ skill, files, usage, learningSource, current }) => {
-          // A deleted skill starts a new identity; surviving skills retain every revision.
-          const row = current ?? { id: randomUUID(), head_rev: 0, revision: 0,
-            installation_id: null, package_id: null, published_rev: null, json: '{}' };
-          const committed = commitRevision(row, files, { origin: 'snapshot_restore', requestId: input.requestId, learningSource });
-          if (!current) stmts.insertSkill.run(row.id, id.deviceId, id.botId, skill.name,
-            committed.fmName, skill.category, committed.revision, committed.rev, null, null, null,
-            skill.source, '{}', now(), now());
-          // Preserve live telemetry; if it was deleted too, recover the snapshot's record.
-          if (!current && !usageRow(id, skill.name).record && usage?.record) {
-            usageWrite(id, skill.name, 1, usage.record);
-          }
-          const restoredRow = stmts.skillById.get(row.id);
-          const summary = summarizeSkill(id, restoredRow);
-          const requiresRestore = summary.state === U.STATE_ARCHIVED;
-          const nextAction = pendingLearningSource(restoredRow) ? 'review' : 'publish';
-          return { ...summary, publishedRevision: row.published_rev ?? null,
-            restoredFromRevision: skill.head_rev, stage: 'draft', restoreMode: 'drafts',
-            requiresRestore, nextActions: requiresRestore ? ['restore', nextAction] : [nextAction],
-            currentDeployment: {
-              plans: deploymentPlans.filter(plan => plan.installationId === row.installation_id),
-              receipts: row.installation_id ? store.listDeploymentReceipts(row.installation_id)
-                .filter(receipt => receipt.deviceId === id.deviceId) : [],
-            },
-            publication: { status: 'not_requested' }, deployment: { status: 'not_requested' } };
-        });
-        const result = { snapshotId: snapshot.id, stage: 'draft', restoreMode: 'drafts', skills: restored,
-          publication: { status: 'not_requested' }, deployment: { status: 'not_requested' } };
-        recordRequest(id, replayed, result);
-        return result;
-      });
-    },
-
     async list(id) {
       const installedList = await installedSkills(id);
       return {
@@ -1572,11 +1581,10 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       return installedRead(installed.entry, skill, filePath);
     },
 
-    create(id, input) {
+    async create(id, input) {
       const name = input.name;
       const nameErr = U.validateName(name);
       if (nameErr) throw error('INVALID_ARGUMENT', nameErr);
-      if (input.expectedRevision !== null) throw error('INVALID_ARGUMENT', 'create requires expectedRevision null');
       const catErr = U.validateCategory(input.category ?? null);
       if (catErr) throw error('INVALID_ARGUMENT', catErr);
       if (managedRow(id, name)) throw error('REVISION_CONFLICT', `Skill '${name}' already exists`);
@@ -1585,25 +1593,26 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
         files = normalizeFilesMap(input.files);
         for (const [key, value] of Object.entries(files)) if (value === null) delete files[key];
       } else {
-        files = { 'SKILL.md': String(input.content ?? '') };
+        files = normalizeFilesMap({ 'SKILL.md': String(input.content ?? '') });
       }
       if (typeof files['SKILL.md'] !== 'string') throw error('VALIDATION_FAILED', 'files must include SKILL.md');
       const fmErr = validateSkillMd(files['SKILL.md']);
       if (fmErr) throw error('VALIDATION_FAILED', fmErr);
       if (input.description !== undefined) files['SKILL.md'] = rewriteDescription(files['SKILL.md'], input.description);
-      return tx(() => {
-        const row = { id: randomUUID(), head_rev: 0, revision: 0, installation_id: null, package_id: null, published_rev: null, json: '{}' };
-        const committed = commitRevision(row, files, { origin: id.origin, requestId: id.requestId });
-        stmts.insertSkill.run(row.id, id.deviceId, id.botId, name, committed.fmName, input.category?.trim() || null,
-          committed.revision, committed.rev, null, null, null, 'managed', '{}', now(), now());
+      const rowId = randomUUID();
+      const fmName = fmNameOf(files['SKILL.md']);
+      const createdAt = now();
+      tx(() => {
+        stmts.insertSkill.run(rowId, id.deviceId, id.botId, name, fmName, input.category?.trim() || null,
+          1, 0, null, null, null, json(files), null, 'managed', '{}', createdAt, createdAt);
         usageMutate(id, name, (rec) => U.recordCreatedApply(rec, AUTONOMOUS_ORIGINS.has(id.origin)));
-        return { ...summarizeSkill(id, stmts.skillById.get(row.id)), files };
       });
+      const synced = await syncSkillPackage(id, stmts.skillById.get(rowId));
+      return { ...synced, files };
     },
 
-    update(id, input) {
+    async update(id, input) {
       const row = requireSkill(id, input);
-      assertRevision(input.expectedRevision, row.revision);
       const hasFiles = input.files !== undefined;
       const hasPath = input.path !== undefined;
       const hasDesc = input.description !== undefined;
@@ -1632,20 +1641,55 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
         }
       }
       if (hasDesc) files['SKILL.md'] = rewriteDescription(files['SKILL.md'], input.description);
-      if (typeof files['SKILL.md'] !== 'string') throw error('VALIDATION_FAILED', 'A managed skill must keep a SKILL.md');
-      const fmErr = validateSkillMd(files['SKILL.md']);
+      const validatedFiles = normalizeFilesMap(files);
+      if (typeof validatedFiles['SKILL.md'] !== 'string') throw error('VALIDATION_FAILED', 'A managed skill must keep a SKILL.md');
+      const fmErr = validateSkillMd(validatedFiles['SKILL.md']);
       if (fmErr) throw error('VALIDATION_FAILED', fmErr);
-      return tx(() => {
-        const committed = commitRevision(row, files, { origin: id.origin, requestId: id.requestId });
+      tx(() => {
+        commitSkillFiles(row, validatedFiles);
         usageMutate(id, row.name, (rec) => U.bumpPatchApply(rec));
-        const updated = stmts.skillById.get(row.id);
-        return { ...summarizeSkill(id, updated), contentRevision: committed.rev, files };
       });
+      const updated = stmts.skillById.get(row.id);
+      if (usageRow(id, updated.name).record?.state !== U.STATE_ARCHIVED) {
+        const synced = await syncSkillPackage(id, updated);
+        return { ...synced, files: validatedFiles };
+      }
+      return { ...summarizeSkill(id, updated), files: validatedFiles };
+    },
+
+    async patch(id, input) {
+      const row = requireSkill(id, input);
+      const rawPath = input.path ?? input.file_path ?? 'SKILL.md';
+      const checked = U.checkStoragePath(rawPath);
+      if (checked.error) throw error('INVALID_ARGUMENT', checked.error);
+      const target = checked.path;
+      const files = filesOf(row);
+      if (!(target in files)) throw error('NOT_FOUND', `File '${target}' not found`);
+      const oldText = input.oldText ?? input.old_string;
+      const newText = input.newText ?? input.new_string;
+      if (typeof oldText !== 'string' || !oldText) throw error('INVALID_ARGUMENT', 'oldText is required');
+      if (typeof newText !== 'string') throw error('INVALID_ARGUMENT', 'newText must be a string');
+      const replaceAll = Boolean(input.replaceAll ?? input.replace_all);
+      const matched = U.findAndReplace(files[target], oldText, newText, replaceAll);
+      if (matched.error) throw error('INVALID_ARGUMENT', matched.error);
+      const nextFiles = normalizeFilesMap({ ...files, [target]: matched.newContent });
+      if (typeof nextFiles['SKILL.md'] !== 'string') throw error('VALIDATION_FAILED', 'A managed skill must keep a SKILL.md');
+      const fmErr = validateSkillMd(nextFiles['SKILL.md']);
+      if (fmErr) throw error('VALIDATION_FAILED', fmErr);
+      tx(() => {
+        commitSkillFiles(row, nextFiles);
+        usageMutate(id, row.name, (rec) => U.bumpPatchApply(rec));
+      });
+      const updated = stmts.skillById.get(row.id);
+      if (usageRow(id, updated.name).record?.state !== U.STATE_ARCHIVED) {
+        const synced = await syncSkillPackage(id, updated);
+        return { ...synced, files: nextFiles, replaced: matched.count };
+      }
+      return { ...summarizeSkill(id, updated), files: nextFiles, replaced: matched.count };
     },
 
     async delete(id, input) {
       const row = requireSkill(id, input);
-      assertRevision(input.expectedRevision, row.revision);
       let operationId;
       if (row.installation_id && store.getInstallation(row.installation_id)) {
         const receipt = await packages.uninstall(row.installation_id, { requestId: (input.requestId ?? randomUUID()) + ':uninstall' });
@@ -1659,7 +1703,6 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     async archive(id, input, installedList) {
       const row = requireSkill(id, input);
       const usage = usageRow(id, row.name);
-      assertRevision(input.expectedRevision, usage.revision);
       if (usage.record?.state === U.STATE_ARCHIVED) return { ...summarizeSkill(id, row), state: U.STATE_ARCHIVED };
       if (isSharedSkill(row)) {
         throw error('INVALID_STATE', 'shared or global skill cannot be archived; switch visibility back to private first');
@@ -1672,19 +1715,15 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
 
     async restore(id, input, installedList) {
       const row = requireSkill(id, input);
-      const usage = usageRow(id, row.name);
-      assertRevision(input.expectedRevision, usage.revision);
       const [ok, msg] = restoreSkillNow(id, row.name, installedList);
       if (!ok) throw error('INVALID_STATE', msg);
-      try { await packages.reconcileDevice(id.deviceId); } finally { notify(id.deviceId); }
-      return { ...summarizeSkill(id, stmts.skillById.get(row.id)), restored: msg };
+      const synced = await syncSkillPackage(id, stmts.skillById.get(row.id));
+      return { ...synced, restored: msg };
     },
 
     pin(id, input, installedList) {
       const row = requireSkill(id, input);
       if (typeof input.pinned !== 'boolean') throw error('INVALID_ARGUMENT', 'pinned must be boolean');
-      const usage = usageRow(id, row.name);
-      assertRevision(input.expectedRevision, usage.revision);
       usageMutate(id, row.name, (rec) => { rec.pinned = input.pinned; return true; }, { eligibleOnly: true, installedList });
       return { ...summarizeSkill(id, row), pinned: input.pinned };
     },
@@ -1699,40 +1738,12 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
         const installed = name ? resolveInstalled(installedList, name) : null;
         if (!installed) throw error('NOT_FOUND', `Skill '${name}' not found`);
       }
-      const usage = usageRow(id, target);
-      assertRevision(input.expectedRevision, usage.revision);
       usageMutate(id, target, (rec) => { rec.locked = input.locked; return true; });
       const base = managed ? summarizeSkill(id, managed) : { name: target };
       return { ...base, locked: input.locked, stateRevision: usageRow(id, target).revision };
     },
 
-    history(id, input) {
-      const row = requireSkill(id, input);
-      return {
-        ...summarizeSkill(id, row),
-        revisions: stmts.revList.all(row.id).map((rev) => ({
-          rev: rev.rev, description: rev.description ?? null, origin: rev.origin ?? null,
-          requestId: rev.request_id ?? null, createdAt: rev.created_at,
-        })),
-      };
-    },
-
-    rollback(id, input) {
-      const row = requireSkill(id, input);
-      assertRevision(input.expectedRevision, row.revision);
-      const target = stmts.revGet.get(row.id, input.revision);
-      if (!target) throw error('NOT_FOUND', `Revision ${input.revision} not found`);
-      const files = JSON.parse(target.files);
-      return tx(() => {
-        const learningSource = target.learning_source ? JSON.parse(target.learning_source) : null;
-        const committed = commitRevision(row, files, { origin: 'rollback', requestId: id.requestId, learningSource });
-        const updated = stmts.skillById.get(row.id);
-        return { ...summarizeSkill(id, updated), contentRevision: committed.rev, rolledBackTo: input.revision, files };
-      });
-    },
-
     async adopt(id, input, installedList) {
-      if (input.expectedRevision !== null) throw error('INVALID_ARGUMENT', 'adopt requires expectedRevision null');
       let installed = null;
       if (input.installationId) {
         const entry = installedList.find((item) => item.installation.installationId === input.installationId);
@@ -1768,115 +1779,22 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
         const rewrittenErr = U.validateFrontmatter(files['SKILL.md']);
         if (rewrittenErr) throw error('VALIDATION_FAILED', `Adopted skill name is invalid: ${rewrittenErr}`);
       }
-      return tx(() => {
-        const row = { id: randomUUID(), head_rev: 0, revision: 0, installation_id: null, package_id: null, published_rev: null, json: '{}' };
-        const committed = commitRevision(row, files, { origin: 'adopt', requestId: id.requestId });
-        stmts.insertSkill.run(row.id, id.deviceId, id.botId, newName, committed.fmName, null,
-          committed.revision, committed.rev, null, null, null, 'adopted', json({ from: { installationId: installed.entry.installation.installationId, packageId: installed.entry.installation.packageId, version: installed.entry.installation.targetVersion, dir: installed.skill.dir } }), now(), now());
-        usageMutate(id, newName, (rec) => { rec.created_by = 'agent'; return true; });
-        return {
-          ...summarizeSkill(id, stmts.skillById.get(row.id)), files,
-          from: { installationId: installed.entry.installation.installationId, packageId: installed.entry.installation.packageId, version: installed.entry.installation.targetVersion, name: installed.skill.name },
-        };
-      });
-    },
-
-    async publish(id, input) {
-      const row = requireSkill(id, input);
-      assertRevision(input.expectedRevision, row.revision);
-      const usage = usageRow(id, row.name);
-      if (usage.record?.state === U.STATE_ARCHIVED) throw error('INVALID_STATE', 'Skill is archived; restore it before publishing');
-      const head = stmts.revGet.get(row.id, row.head_rev);
-      if (!head) throw error('INVALID_STATE', 'Skill has no content revision');
-      const files = JSON.parse(head.files);
-      if (typeof files['SKILL.md'] !== 'string') throw error('VALIDATION_FAILED', 'A managed skill must keep a SKILL.md');
-      const version = `1.0.${head.rev}`;
-      const packageId = `bot-skill-${row.id}`;
-      const ownerBot = { deviceId: id.deviceId, botId: id.botId, skillId: row.id, skillName: row.name };
-      // Package ops dedupe by request_id: deterministic per (skill, rev) ids make a
-      // retried publish resume the same queued operations instead of duplicating them.
-      const opRequestId = (step) => `skill:${row.id}:${step}:${head.rev}`;
-
-      if (row.published_rev === head.rev && row.installation_id && bindingEnabled(id, row.installation_id)) {
-        const installation = store.getInstallation(row.installation_id);
-        if (installation?.targetVersion === version) {
-          if (!installation.ownerBot) {
-            store.setInstallationOwnership?.(row.installation_id, ownerBot, installation.visibilityScope ?? 'private');
-          }
-          return { ...summarizeSkill(id, row), publication: { installationId: row.installation_id, packageId: row.package_id, version, status: 'enabled', publishedRevision: head.rev } };
-        }
-      }
-
-      let artifactRef = stmts.artifactGet.get(row.id, head.rev)?.artifact_ref;
-      if (!artifactRef) {
-        const bytes = await buildArtifact(packageId, version, files, U.descriptionOf(files['SKILL.md']) ?? row.name);
-        artifactRef = (await packages.uploadArtifact([bytes])).artifactRef;
-        stmts.artifactPut.run(row.id, head.rev, artifactRef);
-      }
-
-      let installationId = row.installation_id && store.getInstallation(row.installation_id) ? row.installation_id : null;
-      let operationId = null;
-      if (!installationId) {
-        const receipt = await packages.install({
-          kind: 'skill', source: { type: 'artifact', artifactRef }, target: 'host',
-          displayName: `Skill: ${row.name}`, requestId: opRequestId('install'),
-          ownerBot, visibilityScope: 'private',
-        });
-        operationId = receipt.operationId;
-        // Wait (bounded) for the queued install to write the installation row.
-        const operation = await waitFor(() => {
-          const op = store.getOperation(receipt.operationId);
-          return op?.installationId && store.getInstallation(op.installationId) ? op : null;
-        }, PUBLISH_WAIT_MS);
-        if (!operation) {
-          const op = store.getOperation(receipt.operationId);
-          const status = op?.phase === 'failed' ? 'failed' : 'queued';
-          return { ...summarizeSkill(id, row), publication: { status, operationId, artifactRef, version, error: op?.error ?? undefined } };
-        }
-        installationId = operation.installationId;
-        tx(() => {
-          const current = stmts.skillById.get(row.id);
-          stmts.updateSkill.run(current.fm_name, current.revision, current.head_rev, installationId, packageId, current.published_rev, current.json, now(), row.id);
-        });
-      }
-
-      const installation = store.getInstallation(installationId);
-      if (installation && !installation.ownerBot) {
-        store.setInstallationOwnership?.(installationId, ownerBot, installation.visibilityScope ?? 'private');
-      }
-      if (installation.targetVersion !== version) {
-        const receipt = await packages.update(installationId, {
-          targetVersion: version, source: { type: 'artifact', artifactRef }, requestId: opRequestId('update'),
-        });
-        operationId = receipt.operationId;
-      }
-      const enabledInstallation = store.getInstallation(installationId);
-      if (!enabledInstallation.enabled || enabledInstallation.activation?.status === 'failed') {
-        const receipt = await packages.enable(installationId, { requestId: opRequestId('enable') });
-        operationId = receipt.operationId;
-      }
-      // Await bounded METADATA readiness (global activation), never device deployment.
-      const ready = await waitFor(() => {
-        const current = store.getInstallation(installationId);
-        return current && current.targetVersion === version && current.activation?.status === 'enabled' ? current : null;
-      }, PUBLISH_WAIT_MS);
-      if (!ready) {
-        const operation = operationId && store.getOperation(operationId);
-        return { ...summarizeSkill(id, stmts.skillById.get(row.id)), publication: { status: operation?.phase === 'failed' ? 'failed' : 'activating', operationId, installationId, packageId, version, artifactRef, error: operation?.error ?? undefined } };
-      }
-      const capability = store.getBotCapability(id.deviceId, id.botId, installationId);
-      if (!capability.enabled) {
-        store.putBotCapability(id.deviceId, id.botId, installationId, { enabled: true, overrides: {}, expectedRevision: capability.revision });
-      }
-      try { await packages.reconcileDevice(id.deviceId); } finally { notify(id.deviceId); }
+      const rowId = randomUUID();
+      const fmName = fmNameOf(files['SKILL.md']);
+      const createdAt = now();
+      const metaJson = json({ from: { installationId: installed.entry.installation.installationId, packageId: installed.entry.installation.packageId, version: installed.entry.installation.targetVersion, dir: installed.skill.dir } });
       tx(() => {
-        const current = stmts.skillById.get(row.id);
-        stmts.updateSkill.run(current.fm_name, current.revision, current.head_rev, installationId, packageId, head.rev, current.json, now(), row.id);
+        stmts.insertSkill.run(rowId, id.deviceId, id.botId, newName, fmName, null,
+          1, 0, null, null, null, json(files), null, 'adopted', metaJson, createdAt, createdAt);
+        usageMutate(id, newName, (rec) => { rec.created_by = 'agent'; return true; });
       });
-      const final = stmts.skillById.get(row.id);
+      const createdRow = stmts.skillById.get(rowId);
+      const synced = usageRow(id, newName).record?.state !== U.STATE_ARCHIVED
+        ? await syncSkillPackage(id, createdRow)
+        : summarizeSkill(id, createdRow);
       return {
-        ...summarizeSkill(id, final),
-        publication: { status: 'enabled', operationId, installationId, packageId, version, artifactRef, publishedRevision: head.rev },
+        ...synced, files,
+        from: { installationId: installed.entry.installation.installationId, packageId: installed.entry.installation.packageId, version: installed.entry.installation.targetVersion, name: installed.skill.name },
       };
     },
   };
@@ -1971,17 +1889,17 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     if (typeof action !== 'string' || typeof actions[action] !== 'function') {
       throw error('INVALID_ARGUMENT', `Unknown action '${action}'. Use: ${Object.keys(actions).join(', ')}`);
     }
-    const readOnly = ['list', 'read', 'history', 'snapshots'].includes(action);
+    const readOnly = ['list', 'read'].includes(action);
     if (readOnly) return actions[action](id, input ?? {});
     return enqueue(id, async () => {
       const replayed = replay(id, input, action);
       if (replayed.hit) return replayed.hit;
       const installedList = await installedSkills(id);
       const result = await actions[action](id, input, installedList);
-      // A publish that is still queued/activating/failed must NOT pin the request id:
-      // an explicit retry resumes the same package operations instead of replaying a stale receipt.
+      // A sync that is still queued/activating/failed must NOT pin the request id:
+      // an explicit retry resumes instead of replaying a stale receipt.
       const pending = result?.publication && !['enabled', 'applied'].includes(result.publication.status);
-      if (!pending && action !== 'restore_snapshot') recordRequest(id, replayed, result);
+      if (!pending) recordRequest(id, replayed, result);
       return result;
     });
   }
@@ -1992,21 +1910,6 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       throw error('NOT_FOUND', 'Skill not found for this Bot');
     }
     return row;
-  }
-
-  function reviewFile(before, after, filePath) {
-    // Read the exact revision-map key, including paths adopted from older packages.
-    const file = {
-      path: filePath,
-      before: Object.hasOwn(before, filePath) ? before[filePath] : null,
-      after: Object.hasOwn(after, filePath) ? after[filePath] : null,
-    };
-    if (file.before === file.after) throw error('NOT_FOUND', 'Changed file not found');
-    // Bound the encoded pair and leave room for the summary under the Center client's 16 MiB cap.
-    if (Buffer.byteLength(json(file), 'utf8') > REVIEW_FILE_JSON_MAX_BYTES) {
-      throw error('PAYLOAD_TOO_LARGE', 'A changed file exceeds the skill review preview limit');
-    }
-    return file;
   }
 
   function withDeployment(id, result) {
@@ -2021,25 +1924,15 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     return { ...result, deployment: receipt ? { status: receipt.phase, error: receipt.error } : { status: 'queued' } };
   }
 
-  function latestLearningSource(row) {
-    const revision = stmts.latestLearningRevision.get(row.id, row.head_rev);
-    if (!revision) return null;
-    const source = revision.learning_source
-      ? JSON.parse(revision.learning_source)
-      : { mode: revision.origin === 'curator' ? 'curate' : revision.origin === 'foreground' ? 'learn' : 'review' };
-    return { ...source, contentRevision: revision.rev, createdAt: source.createdAt ?? revision.created_at };
-  }
-
   function deploymentSummaryForRow(id, row) {
     if (!row.installation_id) return { status: 'not-published' };
     const installation = store.getInstallation(row.installation_id);
     if (!installation) return { status: 'not-published' };
     const binding = store.getBotCapability(id.deviceId, id.botId, row.installation_id);
     if (!store.isActive(installation) || !binding.enabled) return { status: 'disabled' };
-    const version = `1.0.${row.published_rev ?? row.head_rev}`;
     const plan = store.listDeploymentPlans(id.deviceId).find((item) => item.installationId === row.installation_id);
     if (!plan) return { status: 'pending' };
-    if (plan.targetVersion !== version || ['disable', 'uninstall'].includes(plan.action)) {
+    if (plan.targetVersion !== installation.targetVersion || ['disable', 'uninstall'].includes(plan.action)) {
       return { status: 'superseded' };
     }
     const receipt = store.listDeploymentReceipts(row.installation_id).find((item) => item.deviceId === id.deviceId);
@@ -2050,12 +1943,9 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     const base = summarizeSkill(id, row);
     const { record } = usageRow(id, row.name);
     const installation = row.installation_id ? store.getInstallation(row.installation_id) : null;
-    const pendingSource = pendingLearningSource(row);
-    const source = pendingSource ?? latestLearningSource(row);
+    const source = row.learning_source ? JSON.parse(row.learning_source) : null;
     return {
       ...base,
-      publishedRevision: row.published_rev ?? null,
-      hasUnpublishedDraft: record?.state !== U.STATE_ARCHIVED && (Boolean(pendingSource) || (row.published_rev ?? 0) < row.head_rev),
       visibilityScope: installation?.visibilityScope ?? 'private',
       useCount: record?.use_count ?? 0,
       viewCount: record?.view_count ?? 0,
@@ -2070,7 +1960,15 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
   async function review(identity, rawInput) {
     const id = normalizeIdentity(identity);
     assertBot(id);
-    const input = normalizeSkillReviewInput(rawInput);
+    const normalizedRaw = rawInput && typeof rawInput === 'object' && !Array.isArray(rawInput)
+      && ['pin', 'lock', 'archive', 'restore'].includes(rawInput.action)
+      && rawInput.expectedRevision === undefined
+      ? { ...rawInput, expectedRevision: 0 }
+      : rawInput;
+    const input = normalizeSkillReviewInput(normalizedRaw);
+    if (!['list', 'read', 'pin', 'lock', 'archive', 'restore'].includes(input.action)) {
+      throw error('INVALID_ARGUMENT', 'Unsupported skill review action');
+    }
     if (input.action === 'list') {
       const items = stmts.skillsFor.all(id.deviceId, id.botId)
         .map((row) => learnedSkillSummary(id, row))
@@ -2079,25 +1977,11 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     }
     if (input.action === 'read') {
       const row = reviewSkill(id, input.skillId);
-      if (input.expectedRevision !== undefined) assertRevision(input.expectedRevision, row.revision);
       const files = filesOf(row);
-      const revisions = actions.history(id, { skillId: row.id }).revisions;
-      const hasDraft = (row.published_rev ?? 0) < row.head_rev;
-      let changes = [];
       let filePayload;
-      if (hasDraft) {
-        const { before, after } = draftComparison(row);
-        changes = reviewChanges(before, after);
-        if (input.path !== undefined) {
-          filePayload = Object.hasOwn(before, input.path) || Object.hasOwn(after, input.path)
-            ? (before[input.path] === after[input.path]
-              ? { path: input.path, before: before[input.path] ?? null, after: after[input.path] ?? null }
-              : reviewFile(before, after, input.path))
-            : (() => { throw error('NOT_FOUND', 'File not found'); })();
-        }
-      } else if (input.path !== undefined) {
+      if (input.path !== undefined) {
         if (!Object.hasOwn(files, input.path)) throw error('NOT_FOUND', 'File not found');
-        filePayload = { path: input.path, before: files[input.path], after: files[input.path] };
+        filePayload = { path: input.path, content: files[input.path] };
         if (Buffer.byteLength(json(filePayload), 'utf8') > REVIEW_FILE_JSON_MAX_BYTES) {
           throw error('PAYLOAD_TOO_LARGE', 'File exceeds the preview limit');
         }
@@ -2105,53 +1989,13 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       return {
         ...learnedSkillSummary(id, row),
         files,
-        revisions,
-        changes,
         ...(filePayload === undefined ? {} : { file: filePayload }),
       };
     }
-    if (input.action === 'history') {
-      const row = reviewSkill(id, input.skillId);
-      return {
-        ...learnedSkillSummary(id, row),
-        revisions: actions.history(id, { skillId: row.id }).revisions,
-      };
-    }
     return enqueue(id, async () => {
-      const replayTag = input.action === 'approve' ? 'approve_skill_review' : 'skill_review:' + input.action;
-      const replayed = replay(id, input, replayTag);
+      const replayed = replay(id, input, 'skill_review:' + input.action);
       if (replayed.hit) return replayed.hit.publication ? withDeployment(id, replayed.hit) : replayed.hit;
       const installedList = await installedSkills(id);
-      if (input.action === 'approve' || input.action === 'publish') {
-        const row = reviewSkill(id, input.skillId);
-        assertRevision(input.expectedRevision, row.revision);
-        const result = await actions.publish({ ...id, approvedLearningDraft: true }, input);
-        const enriched = { ...withDeployment(id, result), ...learnedSkillSummary(id, stmts.skillById.get(row.id)) };
-        if (result.publication.status === 'enabled') recordRequest(id, replayed, enriched);
-        return enriched;
-      }
-      if (input.action === 'rollback') {
-        reviewSkill(id, input.skillId);
-        const rolled = actions.rollback({ ...id, requestId: input.requestId }, input);
-        let currentRow = stmts.skillById.get(input.skillId);
-        let published = null;
-        if (usageRow(id, currentRow.name).record?.state !== U.STATE_ARCHIVED) {
-          published = await actions.publish(
-            { ...id, approvedLearningDraft: true },
-            { skillId: currentRow.id, expectedRevision: currentRow.revision },
-          );
-          currentRow = stmts.skillById.get(input.skillId);
-        }
-        const out = {
-          ...(published ? withDeployment(id, published) : rolled),
-          ...learnedSkillSummary(id, currentRow),
-          rolledBackTo: input.revision,
-          files: filesOf(currentRow),
-          revisions: actions.history(id, { skillId: currentRow.id }).revisions,
-        };
-        recordRequest(id, replayed, out);
-        return out;
-      }
       if (input.action === 'pin') {
         reviewSkill(id, input.skillId);
         actions.pin(id, input, installedList);
@@ -2176,22 +2020,143 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
       if (input.action === 'restore') {
         reviewSkill(id, input.skillId);
         await actions.restore(id, input, installedList);
-        let currentRow = stmts.skillById.get(input.skillId);
-        if ((currentRow.published_rev ?? 0) < currentRow.head_rev) {
-          try {
-            await actions.publish(
-              { ...id, approvedLearningDraft: true },
-              { skillId: currentRow.id, expectedRevision: currentRow.revision },
-            );
-            currentRow = stmts.skillById.get(input.skillId);
-          } catch { /* best-effort publish after restore */ }
-        }
-        const out = learnedSkillSummary(id, currentRow);
+        const out = learnedSkillSummary(id, stmts.skillById.get(input.skillId));
         recordRequest(id, replayed, out);
         return out;
       }
       throw error('INVALID_ARGUMENT', 'Unsupported skill review action');
     });
+  }
+
+  async function readInstallationFiles(installationId) {
+    const installation = store.getInstallation(installationId);
+    if (!installation) throw error('NOT_FOUND', 'Installation not found');
+    if (installation.kind !== 'skill') throw error('INVALID_ARGUMENT', 'Installation is not a skill');
+    const row = stmts.skillByInstallationId.get(installationId);
+    if (row) {
+      const files = JSON.parse(row.files || '{}');
+      return {
+        installationId,
+        editable: true,
+        files,
+        skills: [{
+          dir: '.',
+          name: row.fm_name || row.name,
+          description: U.descriptionOf(files['SKILL.md']) ?? null,
+          files: Object.keys(files).sort(),
+        }],
+      };
+    }
+    const version = store.getPackageVersion(installation.packageId, installation.targetVersion);
+    if (!version?.artifactRef) throw error('NOT_FOUND', 'Skill package artifact is not available');
+    const entries = await installedPackageContent(version.artifactRef);
+    const editable = entries.length === 1 && entries[0].dir === '.';
+    const files = {};
+    if (editable) {
+      for (const [rel, content] of entries[0].files) {
+        if (rel.toLowerCase() === 'package.json') continue;
+        files[rel] = content;
+      }
+    } else {
+      for (const entry of entries) {
+        for (const [rel, content] of entry.files) {
+          if (rel.toLowerCase() === 'package.json') continue;
+          const key = entry.dir === '.' ? rel : `${entry.dir}/${rel}`;
+          files[key] = content;
+        }
+      }
+    }
+    return {
+      installationId,
+      editable,
+      files,
+      skills: entries.map((e) => ({
+        dir: e.dir,
+        name: e.name,
+        description: e.description ?? null,
+        files: [...e.files.keys()].filter((k) => k.toLowerCase() !== 'package.json').sort(),
+      })),
+    };
+  }
+
+  async function writeInstallationFiles(installationId, rawFiles, { requestId } = {}) {
+    const installation = store.getInstallation(installationId);
+    if (!installation) throw error('NOT_FOUND', 'Installation not found');
+    if (installation.kind !== 'skill') throw error('INVALID_ARGUMENT', 'Installation is not a skill');
+    const normalized = normalizeFilesMap(rawFiles);
+    const files = {};
+    for (const [key, value] of Object.entries(normalized)) {
+      if (value !== null) files[key] = value;
+    }
+    if (typeof files['SKILL.md'] !== 'string') throw error('VALIDATION_FAILED', 'files must include SKILL.md');
+    const fmErr = validateSkillMd(files['SKILL.md']);
+    if (fmErr) throw error('VALIDATION_FAILED', fmErr);
+
+    const row = stmts.skillByInstallationId.get(installationId);
+    if (row) {
+      const ownerId = { deviceId: row.device_id, botId: row.bot_id, origin: 'foreground', sessionId: null, requestId: null };
+      await enqueue(ownerId, async () => {
+        const current = stmts.skillById.get(row.id);
+        if (!current) throw error('NOT_FOUND', 'Managed skill not found');
+        tx(() => {
+          commitSkillFiles(current, files);
+          usageMutate(ownerId, current.name, (rec) => U.bumpPatchApply(rec));
+        });
+        const updated = stmts.skillById.get(current.id);
+        if (usageRow(ownerId, updated.name).record?.state !== U.STATE_ARCHIVED) {
+          await syncSkillPackage(ownerId, updated);
+        }
+      });
+      return await readInstallationFiles(installationId);
+    }
+
+    const existing = await readInstallationFiles(installationId);
+    if (!existing.editable) {
+      throw error('INVALID_STATE', 'Multi-skill or subdirectory skill packages are read-only');
+    }
+    const version = '0.0.0-h' + sha256(json(files)).slice(0, 12);
+    const description = U.descriptionOf(files['SKILL.md']) ?? installation.displayName;
+    const bytes = await buildArtifact(installation.packageId, version, files, description);
+    const { artifactRef } = await packages.uploadArtifact([bytes]);
+    const receipt = await packages.update(installationId, {
+      requestId: requestId || randomUUID(),
+      source: { type: 'artifact', artifactRef },
+      allowSourceSwitch: true,
+    });
+    const ready = await waitFor(() => {
+      const op = store.getOperation(receipt.operationId);
+      if (op?.phase === 'failed') return { failed: true, op };
+      const current = store.getInstallation(installationId);
+      if (current?.source?.artifactRef !== artifactRef) return null;
+      if (current.enabled && current.activation?.status === 'enabling') return null;
+      return { failed: false, op, inst: current };
+    }, PUBLISH_WAIT_MS);
+    if (!ready || ready.failed) {
+      const op = store.getOperation(receipt.operationId);
+      throw error(op?.error?.code ?? 'INTERNAL_ERROR', op?.error?.message ?? 'Skill update failed');
+    }
+    const devices = new Set(store.listBotBindings({ installationId }).map((binding) => binding.deviceId));
+    for (const deviceId of devices) {
+      try { await packages.reconcileDevice(deviceId); } finally { notify(deviceId); }
+    }
+    return await readInstallationFiles(installationId);
+  }
+
+  async function prepareInlineSkill({ displayName, files: rawFiles } = {}) {
+    const normalized = normalizeFilesMap(rawFiles);
+    const files = {};
+    for (const [key, value] of Object.entries(normalized)) {
+      if (value !== null) files[key] = value;
+    }
+    if (typeof files['SKILL.md'] !== 'string') throw error('VALIDATION_FAILED', 'files must include SKILL.md');
+    const fmErr = validateSkillMd(files['SKILL.md']);
+    if (fmErr) throw error('VALIDATION_FAILED', fmErr);
+    const packageId = 'center-skill-' + randomUUID();
+    const version = '0.0.0-h' + sha256(json(files)).slice(0, 12);
+    const description = U.descriptionOf(files['SKILL.md']) ?? (typeof displayName === 'string' && displayName.trim() ? displayName.trim() : packageId);
+    const bytes = await buildArtifact(packageId, version, files, description);
+    const { artifactRef } = await packages.uploadArtifact([bytes]);
+    return { artifactRef, packageId };
   }
 
   // Authenticated Host-only observations, separate from model-facing management actions.
@@ -2278,34 +2243,50 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     throw error('INVALID_ARGUMENT', `Unsupported tool '${name}'. Allowed: ${[...LEARNING_SKILL_TOOLS.map((t) => t.function.name), 'skill_usage.*', 'skill_provenance.*'].join(', ')}`);
   }
 
+  function sameFileMap(a, b) {
+    const keysA = Object.keys(a).filter((k) => k.toLowerCase() !== 'package.json').sort();
+    const keysB = Object.keys(b).filter((k) => k.toLowerCase() !== 'package.json').sort();
+    if (keysA.length !== keysB.length) return false;
+    return keysA.every((key, idx) => key === keysB[idx] && a[key] === b[key]);
+  }
+
   async function migrateExistingSkills() {
     for (const row of stmts.allSkills.all()) {
-      if (row.installation_id) {
-        const inst = store.getInstallation(row.installation_id);
-        if (inst && (!inst.ownerBot || !inst.visibilityScope)) {
-          const hasExternalBinding = store.listBotBindings({ installationId: row.installation_id })
-            .some((b) => b.enabled && (b.deviceId !== row.device_id || b.botId !== row.bot_id));
-          const scope = inst.visibilityScope ?? (hasExternalBinding ? 'assigned' : 'private');
-          const ownerBot = inst.ownerBot ?? {
-            deviceId: row.device_id,
-            botId: row.bot_id,
-            skillId: row.id,
-            skillName: row.name,
-          };
-          store.setInstallationOwnership?.(row.installation_id, ownerBot, scope);
+      const inst = row.installation_id ? store.getInstallation(row.installation_id) : null;
+      if (inst && (!inst.ownerBot || !inst.visibilityScope)) {
+        const hasExternalBinding = store.listBotBindings({ installationId: row.installation_id })
+          .some((b) => b.enabled && (b.deviceId !== row.device_id || b.botId !== row.bot_id));
+        const scope = inst.visibilityScope ?? (hasExternalBinding ? 'assigned' : 'private');
+        const ownerBot = inst.ownerBot ?? {
+          deviceId: row.device_id,
+          botId: row.bot_id,
+          skillId: row.id,
+          skillName: row.name,
+        };
+        store.setInstallationOwnership?.(row.installation_id, ownerBot, scope);
+      }
+      const id = { deviceId: row.device_id, botId: row.bot_id, origin: 'foreground', sessionId: null, requestId: null };
+      if (!store.listDeviceBots(id.deviceId).some((bot) => bot.botId === id.botId)) continue;
+      if (usageRow(id, row.name).record?.state === U.STATE_ARCHIVED) continue;
+
+      let needsSync = !row.installation_id || !inst || !inst.enabled || inst.activation?.status !== 'enabled'
+        || !inst.source?.artifactRef || !bindingEnabled(id, row.installation_id);
+      if (!needsSync) {
+        try {
+          const content = await installedPackageContent(inst.source.artifactRef);
+          const entry = content.length === 1 && content[0].dir === '.' ? content[0] : null;
+          if (!entry || !sameFileMap(Object.fromEntries(entry.files), skillFiles(row))) {
+            needsSync = true;
+          }
+        } catch {
+          needsSync = true;
         }
       }
-      if ((row.published_rev ?? 0) < row.head_rev) {
-        const id = { deviceId: row.device_id, botId: row.bot_id, origin: 'foreground', sessionId: null, requestId: null };
-        if (!store.listDeviceBots(id.deviceId).some((bot) => bot.botId === id.botId)) continue;
-        if (usageRow(id, row.name).record?.state === U.STATE_ARCHIVED) continue;
+      if (needsSync) {
         await enqueue(id, async () => {
           const current = stmts.skillById.get(row.id);
-          if (!current || (current.published_rev ?? 0) >= current.head_rev) return;
-          await actions.publish(
-            { ...id, approvedLearningDraft: true },
-            { skillId: current.id, expectedRevision: current.revision },
-          );
+          if (!current) return;
+          await syncSkillPackage(id, current);
         }).catch(() => {});
       }
     }
@@ -2317,6 +2298,9 @@ export async function openSkillManager({ dataRoot, store, packages, notify = () 
     reportUse,
     learningTool,
     review,
+    readInstallationFiles,
+    writeInstallationFiles,
+    prepareInlineSkill,
     LEARNING_SKILL_TOOLS,
     async close() {
       try { await Promise.allSettled([...queues.values()]); } finally { db.close(); }

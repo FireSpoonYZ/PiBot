@@ -148,6 +148,22 @@ export interface InstallationConfig {
   revision: number;
 }
 export interface PutInstallationConfig { expectedRevision: number; globalConfig: JsonObject }
+export interface SkillPackageEntry {
+  dir: string;
+  name: string;
+  description: string | null;
+  files: string[];
+}
+export interface InstallationSkillFilesResponse {
+  installationId: string;
+  editable: boolean;
+  files: Record<string, string>;
+  skills: SkillPackageEntry[];
+}
+export interface PutInstallationSkillFilesRequest {
+  files: Record<string, string | null>;
+  requestId?: string;
+}
 export interface BotBinding {
   deviceId: string;
   botId: string;
@@ -279,7 +295,7 @@ export interface DeploymentReceipt {
 export interface Operation {
   operationId: string;
   requestId: string;
-  action: 'install' | 'update' | 'enable' | 'disable' | 'uninstall' | 'rollback';
+  action: 'install' | 'update' | 'enable' | 'disable' | 'uninstall';
   installationId: string;
   /** Empty for center; Host-targeted operations may have multiple device receipts. */
   deviceIds: string[];
@@ -290,13 +306,15 @@ export interface Operation {
 export type InstallSource =
   | { type: 'npm'; spec: string }
   | { type: 'artifact'; artifactRef: string }
-  | { type: 'http'; url: string };
+  | { type: 'http'; url: string }
+  | { type: 'inline'; files: Record<string, string> };
 export interface InstallRequest {
   requestId: string;
   displayName: string;
   kind: CapabilityKind;
   source: InstallSource;
   target: 'center' | 'host';
+  autoEnable?: boolean;
   ownerBot?: InstallationOwnerBot;
   visibilityScope?: SkillVisibilityScope;
 }
@@ -306,8 +324,9 @@ export interface EnableRequest extends OperationRequest {
   validationBot?: { deviceId: string; botId: string };
 }
 export interface UpdateRequest extends OperationRequest {
-  targetVersion: string;
-  source?: { type: 'artifact'; artifactRef: string };
+  targetVersion?: string;
+  source?: { type: 'artifact'; artifactRef: string } | { type: 'npm'; spec: string };
+  allowSourceSwitch?: boolean;
 }
 export interface DeploymentPlan {
   protocol: 1;
@@ -327,7 +346,7 @@ export interface DeploymentPlan {
   integrity: string | null;
   /** npm lockfile contents when target-platform dependency installation is required. */
   lockfile: JsonObject | null;
-  action: 'install' | 'update' | 'enable' | 'disable' | 'uninstall' | 'rollback';
+  action: 'install' | 'update' | 'enable' | 'disable' | 'uninstall';
 }
 export interface EffectiveCapability {
   installationId: string;

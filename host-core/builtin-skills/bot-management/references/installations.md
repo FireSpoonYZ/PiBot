@@ -2,7 +2,7 @@
 
 `manage_bot_installation({deviceId, botId, action, ...})` uses existing Center-managed packages (plugins, skills, MCP servers), not a new marketplace.
 
-Actions: `catalog | describe | check | probe | inspect | install | update | rollback | enable | disable | uninstall | operation | deployments`.
+Actions: `catalog | describe | check | probe | inspect | install | update | enable | disable | uninstall | operation | deployments`.
 
 ## Discover and configure safely
 
@@ -29,7 +29,7 @@ Shared installations can be described/checked/probed for this Bot; a single Bot 
 - Mutations carry requestId/operation IDs: same request → same operationId; conflicting content → conflict error.
 - Install: `install {kind, source, target?, displayName?, requestId}` performs install, global enable and Bot binding in stages. `bound` means saved binding, not applied deployment. Retry the same requestId if queued.
 - Poll `operation {operationId}` and `deployments {installationId}` for allowed nonshared installations. Only matching applied/removed version/revision receipts prove completion. `waiting-idle` means deferred; `failed` is terminal for that operation.
-- Update: `update {installationId, targetVersion, source?, requestId}`; rollback returns to a prior version. Both require receipts before reporting live success.
+- Update: `update {installationId, targetVersion?, source?, requestId}` directly overwrites the current version (`targetVersion` optional); require receipts before reporting live success.
 - `disable` / `uninstall` preserve terminal phases and do not re-enter validation.
 
 ## Learning bridge actions (not installation tool actions)
