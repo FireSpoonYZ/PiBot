@@ -1,6 +1,6 @@
 {
   "productName": "pibot",
-  "version": "0.0.21-dev.3",
+  "version": "0.0.21-dev.4",
   "identifier": "com.example.launcherprobe.desktop",
   "build": {
     "beforeBuildCommand": "node ../host-core/build-desktop.js --web",
