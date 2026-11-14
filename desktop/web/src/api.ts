@@ -81,6 +81,7 @@ const REMOTE_BROKER_OPS = new Set<string>([
   'settings_get',
   'settings_set',
   'service_status',
+  'global_tasks',
 ]);
 
 function isEmptyDraft(draft: DesktopDraftEntry): boolean {

@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as durable from '@earendil-works/pi-durable';
 import * as chord from '@earendil-works/chord';
-import { Harness, createRegistry, defineExtension, section, hook, GenerationTask } from '@earendil-works/pi-durable';
+import { Harness, createRegistry, defineExtension, section, hook, GenerationTask, LiveDoc } from '@earendil-works/pi-durable';
 import { createCodemodeExtension } from '@earendil-works/pi-durable/codemode';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
@@ -28,7 +28,7 @@ import { GenerationFailureState } from './generation-failure.js';
 import { resolveBotIdentity } from './bot-identity.js';
 import { createPluginManager } from './plugins/manager.js';
 import { createRuntimeLive } from './runtime-live.js';
-import { botBoardResultHooks, clearBotBoardResult } from './runtime-bot-board.js';
+import { botBoardResultHooks, clearBotBoardResult, applyGlobalTasksToBotBoardItem } from './runtime-bot-board.js';
 import { readScopeHistory, readScopeMessage, readScopeMessageDelivery } from './runtime-scope-queries.js';
 import { createWorkContextRuntime } from './runtime-work-contexts.js';
 import { WorkIndex, WorkContextState, workInstructions } from './work-context-docs.js';
@@ -53,6 +53,7 @@ import { createRuntimeShower } from './runtime-shower.js';
 import { createVaultService } from './vault-service.js';
 import { createScheduleManager } from './host-schedules.js';
 import { createWebhookConsumer } from './host-webhooks.js';
+import { createTaskDispatchConsumer, fetchAllActiveGlobalTasks } from './host-tasks.js';
 import { createScheduleTools } from './schedule-tools.js';
 import {
   attachmentPath,
@@ -125,6 +126,48 @@ function assertNonBlank(value, name) {
   if (typeof value !== 'string' || value.trim() === '') {
     throw errWithCode(`${name} must be a non-empty string`, 'INVALID_ARGUMENT');
   }
+}
+
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+const TaskDispatchContexts = durable.defineDoc({
+  kind: 'host.task-dispatch-contexts',
+  version: 1,
+  scope: 'conversation',
+  history: 'latest',
+  fork: 'initial',
+  initial: () => ({ byRequest: {} }),
+  checkpointWhen: () => false,
+});
+
+function normalizeDispatchContext(raw) {
+  if (!isPlainObject(raw)) {
+    throw errWithCode('dispatchContext must be an object', 'INVALID_ARGUMENT');
+  }
+  if (typeof raw.taskId !== 'string' || !raw.taskId.trim()) {
+    throw errWithCode('dispatchContext.taskId must be a non-empty string', 'INVALID_ARGUMENT');
+  }
+  const stepId = raw.stepId ?? null;
+  if (stepId !== null && (typeof stepId !== 'string' || !stepId.trim())) {
+    throw errWithCode('dispatchContext.stepId must be null or a non-empty string', 'INVALID_ARGUMENT');
+  }
+  const executionRevision = raw.executionRevision ?? 1;
+  if (!Number.isSafeInteger(executionRevision) || executionRevision < 0) {
+    throw errWithCode('dispatchContext.executionRevision must be a non-negative safe integer', 'INVALID_ARGUMENT');
+  }
+  return { taskId: raw.taskId, stepId, executionRevision };
+}
+
+function sameDispatchContext(a, b) {
+  return Boolean(
+    a &&
+    b &&
+    a.taskId === b.taskId &&
+    (a.stepId ?? null) === (b.stepId ?? null) &&
+    a.executionRevision === b.executionRevision,
+  );
 }
 
 // 生命周期回执的线格式：错误码与短消息，绝不含配置或凭证。
@@ -512,7 +555,17 @@ export async function openRuntime(options) {
       },
     },
   };
-  plugins = createPluginManager({ host, registry, installer: centerRuntime.installer, services, isOnline: () => online, vaultFacade: vault.facade });
+  let tasksBridge = null;
+  const tasksFacade = {
+    invoke(botId, input, conversationId, nativeTaskId) {
+      if (!tasksBridge) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+      return tasksBridge.invoke(botId, input, conversationId, nativeTaskId);
+    },
+    getActiveForBot: (botId) => (tasksBridge ? tasksBridge.getActiveForBot(botId) : []),
+    listDirectoryBots: () => (tasksBridge ? tasksBridge.listDirectoryBots() : []),
+  };
+
+  plugins = createPluginManager({ host, registry, installer: centerRuntime.installer, services, isOnline: () => online, vaultFacade: vault.facade, tasksFacade });
   registry.install(defineExtension({
     name: 'host.request-context',
     hooks: [hook(GenerationTask, {
@@ -696,6 +749,8 @@ export async function openRuntime(options) {
     shower,
     vault,
     schedules,
+    setTasksBridge: (bridge) => { tasksBridge = bridge; },
+    resolveConversationBot: services.resolveConversationBot,
   });
   try {
     if (process.platform === 'win32') await shower.prepare();
@@ -751,7 +806,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, vault, schedules }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, vault, schedules, setTasksBridge, resolveConversationBot }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -760,6 +815,68 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   let highestRevision = -1;
   let centerConfigured = false;
   let registryKey = null;
+  let activeGlobalTasks = [];
+  let directoryBotsCache = [];
+  let lastTasksSyncAt = 0;
+  const TASKS_BOARD_REFRESH_MS = 3000;
+  let taskConsumer = null;
+
+  function getBotGlobalTasks(botId) {
+    return activeGlobalTasks.filter((task) => {
+      if (!task || task.status === 'done' || task.status === 'cancelled') return false;
+      if (task.coordinatorBotId === botId && (!task.coordinatorDeviceId || task.coordinatorDeviceId === host.deviceId)) {
+        return true;
+      }
+      if (task.pendingPrompt?.botId === botId && (!task.pendingPrompt.deviceId || task.pendingPrompt.deviceId === host.deviceId)) {
+        return true;
+      }
+      return Array.isArray(task.steps) && task.steps.some(
+        (step) => step && step.status !== 'cancelled' && step.botId === botId && (!step.deviceId || step.deviceId === host.deviceId),
+      );
+    });
+  }
+
+  function updateCachedTask(task) {
+    if (!task || typeof task.id !== 'string') return;
+    const isActive = task.status !== 'done' && task.status !== 'cancelled';
+    const next = activeGlobalTasks.filter((item) => item?.id !== task.id);
+    if (isActive) next.push(task);
+    activeGlobalTasks = next;
+    lastTasksSyncAt = Date.now();
+  }
+
+  function syncTaskResultCache(input, result) {
+    if (input?.action === 'list' &&
+        (!input.status || input.status === 'active') && !input.botId && !input.botDeviceId) {
+      const items = Array.isArray(result?.tasks)
+        ? result.tasks
+        : Array.isArray(result?.items)
+          ? result.items
+          : null;
+      if (items) {
+        if (!input.cursor && (result?.nextCursor ?? null) === null) {
+          activeGlobalTasks = items;
+          lastTasksSyncAt = Date.now();
+        } else {
+          for (const item of items) updateCachedTask(item);
+        }
+      }
+    } else if (result?.task) {
+      updateCachedTask(result.task);
+    } else if (input?.action === 'delete' && typeof input?.taskId === 'string') {
+      activeGlobalTasks = activeGlobalTasks.filter((item) => item?.id !== input.taskId);
+      lastTasksSyncAt = Date.now();
+    }
+  }
+
+  async function refreshGlobalTasksCache() {
+    if (typeof centerRuntime.globalTasks !== 'function' || !centerOnline || closing) return null;
+    const tasks = await fetchAllActiveGlobalTasks((body) => centerRuntime.globalTasks(body));
+    if (!centerOnline || closing) return null;
+    activeGlobalTasks = tasks;
+    lastTasksSyncAt = Date.now();
+    return { tasks };
+  }
   // 每 Bot 已应用的执行内容摘要与版本：只用于判断“无需重建”，不参与授权。
   const botFingerprints = new Map();
   const botAppliedRevision = new Map();
@@ -977,6 +1094,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   const close = () => {
     closing = true;
     webhooks.pause();
+    taskConsumer?.pause();
     ++epoch;
     centerOnline = false;
     setOnline(false);
@@ -1002,6 +1120,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 依次执行并收集每步错误：任何一步失败仍继续清理，最后显式抛出。
       const errors = [];
       try { await webhooks.close(); } catch (err) { errors.push(err); }
+      try { await taskConsumer?.close(); } catch (err) { errors.push(err); }
       try { turns.close(); } catch (err) { errors.push(err); }
       try { await decisions.close(); } catch (err) { errors.push(err); }
       // 学习驱动在 harness/store 释放前停止：取消在驱动作业与受限会话执行。
@@ -1175,6 +1294,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       await turns.settleStop(botId);
       learning.scheduleIdleCheck(botId);
       webhooks.wake();
+      taskConsumer?.wake();
       drainSelfSoul(botId);
       const withdrawn = [];
       const seen = new Set();
@@ -1189,26 +1309,145 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     }
   }
 
+  async function ensurePrimaryConversationForBot(bot) {
+    let conversation = await getPrimaryConversation(harness, bot, {}, CTX);
+    if (conversation) return conversation;
+    const modelRef = getBotModels()[bot.botId]?.modelRef ?? bot.modelRef ?? null;
+    if (!modelRef) throw errWithCode('center model is required', 'MODEL_REQUIRED');
+    const profile = profileFor(bot.botId, null);
+    conversation = await getPrimaryConversation(harness, { ...bot, modelRef }, {
+      create: true,
+      defaultModel: modelRef,
+      thinkingLevel: profile.thinkingLevel,
+      instructions: profile.instructions,
+      removeTools: profile.removeTools,
+      codemodeOnly: profile.codemodeOnly,
+    }, CTX);
+    await applyAgentProfile(harness, conversation.id, profile, CTX);
+    return conversation;
+  }
+
+  async function persistTaskDispatchContext(botId, requestId, dispatchContext) {
+    const bot = await requireBot(botId);
+    if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
+      throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
+    }
+    const conversation = await ensurePrimaryConversationForBot(bot);
+    await conversation.commit(async (tx) => {
+      const doc = await tx.doc(TaskDispatchContexts, conversation.id);
+      const existing = doc.byRequest[requestId];
+      if (existing) {
+        if (!sameDispatchContext(existing, dispatchContext)) {
+          throw errWithCode(`requestId ${requestId} is already bound to a different dispatchContext`, 'REQUEST_CONFLICT');
+        }
+        return;
+      }
+      doc.byRequest[requestId] = dispatchContext;
+    }, CTX);
+  }
+
+  async function resolveDispatchContextForToolCall(botId, conversationId, nativeTaskId, requireTaskContext) {
+    if (nativeTaskId === undefined || nativeTaskId === null) {
+      if (requireTaskContext) {
+        throw errWithCode('native task context is required for task mutations', 'BOT_CONTEXT_REQUIRED');
+      }
+      return null;
+    }
+    if (!Number.isSafeInteger(nativeTaskId) || nativeTaskId < 1) {
+      throw errWithCode('invalid nativeTaskId', 'BOT_CONTEXT_REQUIRED');
+    }
+    const startTask = await harness.getTask(nativeTaskId, CTX);
+    if (!startTask) {
+      throw errWithCode('native task not found', 'BOT_CONTEXT_REQUIRED');
+    }
+    const taskConvId = startTask.conversationId;
+    if (conversationId !== undefined && taskConvId !== conversationId) {
+      throw errWithCode('native task conversation mismatch', 'BOT_CONTEXT_REQUIRED');
+    }
+    const ownerBotId = await resolveConversationBot(taskConvId);
+    if (ownerBotId !== botId) {
+      throw errWithCode('native task conversation does not belong to bot', 'BOT_CONTEXT_REQUIRED');
+    }
+    const [sessionState, dispatchDoc] = await Promise.all([
+      harness.snapshot(BotSessionState, taskConvId, CTX),
+      harness.snapshot(TaskDispatchContexts, taskConvId, CTX),
+    ]);
+    const turnByTask = sessionState?.turnByTask ?? {};
+    let cur = startTask;
+    let rootTask = startTask;
+    let resolvedRequestId = null;
+    for (let depth = 0; depth < 32 && cur; depth++) {
+      rootTask = cur;
+      const mappedReq = turnByTask[String(cur.id)];
+      if (typeof mappedReq === 'string' && mappedReq.trim() !== '') {
+        resolvedRequestId = mappedReq;
+        break;
+      }
+      if (cur.owner === undefined) break;
+      cur = await harness.getTask(cur.owner, CTX);
+      if (!cur || cur.conversationId !== taskConvId) {
+        throw errWithCode('task owner chain is invalid', 'BOT_CONTEXT_REQUIRED');
+      }
+    }
+    if (resolvedRequestId) {
+      return dispatchDoc?.byRequest?.[resolvedRequestId] ?? null;
+    }
+    if (dispatchDoc?.byRequest && Object.keys(dispatchDoc.byRequest).length > 0) {
+      const liveSnapshot = await harness.snapshot(LiveDoc, taskConvId, CTX);
+      if (
+        liveSnapshot?.run &&
+        String(liveSnapshot.run.taskId) === String(rootTask.id) &&
+        Array.isArray(liveSnapshot.run.inputs) &&
+        liveSnapshot.run.inputs.length > 0
+      ) {
+        let matchedContext = null;
+        for (const subId of liveSnapshot.run.inputs) {
+          const sub = await harness.commit((tx) => tx.submission(subId), CTX);
+          const reqId = sub?.requestId;
+          if (typeof reqId === 'string' && dispatchDoc.byRequest[reqId]) {
+            const candidate = dispatchDoc.byRequest[reqId];
+            if (matchedContext && !sameDispatchContext(matchedContext, candidate)) {
+              throw errWithCode('active run mixes conflicting task dispatch contexts', 'REQUEST_CONFLICT');
+            }
+            matchedContext = candidate;
+          }
+        }
+        if (matchedContext) return matchedContext;
+      }
+    }
+    return null;
+  }
+
   // stopEpoch 由可信调用者在排队前捕获；内部 Webhook 保留 poll 前代次，绝不重捕获。
-  function submitPrimary(botId, input, stopEpoch) {
+  function submitPrimary(botId, input, stopEpoch, trustedDispatchContext = null) {
     const kind = input?.origin?.sender?.kind === 'host' ? 'host' : 'user';
+    const safeInput = isPlainObject(input) ? { ...input } : {};
+    delete safeInput.dispatchContext;
     const trustedInput = {
-      ...input,
+      ...safeInput,
       stopEpoch,
       origin: {
         sender: {
           kind,
-          name: typeof input?.origin?.sender?.name === 'string' ? input.origin.sender.name : null,
-          ...(kind === 'host' && input?.origin?.sender?.sourceType === 'webhook' ? { sourceType: 'webhook' } : {}),
+          name: typeof safeInput?.origin?.sender?.name === 'string' ? safeInput.origin.sender.name : null,
+          ...(kind === 'host' && safeInput?.origin?.sender?.sourceType === 'webhook' ? { sourceType: 'webhook' } : {}),
         },
-        replyTo: typeof input?.origin?.replyTo === 'string' ? input.origin.replyTo : null,
+        replyTo: typeof safeInput?.origin?.replyTo === 'string' ? safeInput.origin.replyTo : null,
       },
     };
     // 新前台输入到达立即抢占后台静默自学习，让位给主会话响应。
     learning.preemptForForeground(botId);
     // 离线只持久化，不通过会隐式 resume 的路径；本地停止不等待中心确认。
-    if (!centerOnline || turns.isRecoveryPending()) return turns.enqueue(botId, trustedInput);
-    return admitBot(botId, () => turns.enqueue(botId, trustedInput));
+    if (!centerOnline || turns.isRecoveryPending()) {
+      return turns.enqueue(botId, trustedInput);
+    }
+    return admitBot(botId, async () => {
+      if (trustedDispatchContext) {
+        assertNonBlank(trustedInput.requestId, 'requestId');
+        await persistTaskDispatchContext(botId, trustedInput.requestId, trustedDispatchContext);
+      }
+      return turns.enqueue(botId, trustedInput);
+    });
   }
 
   // 统一图形环境的 Runtime 门面：Actor 只来自可信主会话或工作绑定，绝不采信调用方会话。
@@ -1465,6 +1704,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   function setCenterOnline(value) {
     if (!value) {
       webhooks.pause();
+      taskConsumer?.pause();
       // 仅真实断线走这里：关闭准入、中止执行、卸载能力。
       ++epoch;
       centerOnline = false;
@@ -1499,6 +1739,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         learning.resume();
         schedules.notifyOnline();
         webhooks.wake();
+        taskConsumer?.resume();
         await turns.nudgeAll();
         return activation;
       } catch (err) {
@@ -1763,6 +2004,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     async prepareUpdate({ stopActive = false } = {}) {
       setMaintenance(true);
       webhooks.pause();
+      taskConsumer?.pause();
       learning.suspend();
       botAdmissions.suspend();
       await botAdmissions.drain();
@@ -1788,6 +2030,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         learning.resume();
         schedules.notifyOnline();
         webhooks.wake();
+        taskConsumer?.resume();
         await turns.nudgeAll();
       }
       return { maintenance: false };
@@ -1926,9 +2169,51 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     // wire 上调用方自带的任意 origin/author 字段绝不采信，由本边界重写。
     submit: async (botId, input) => {
       assertNonBlank(botId, 'botId');
+      if (isPlainObject(input) && input.dispatchContext !== undefined) {
+        throw errWithCode('dispatchContext is not allowed on public submit', 'INVALID_ARGUMENT');
+      }
       // 停止代次必须在任何 await/排队前捕获：受理晚于停止的在飞 submit 以旧代次
       // 持久化并在同事务内作废为 cancelled 回执；停止后受理的新代次输入允许新运行。
       return submitPrimary(botId, input, turns.stopEpoch(botId));
+    },
+
+    submitTaskDispatch: async (botId, input, capturedStopEpoch = turns.stopEpoch(botId)) => {
+      assertNonBlank(botId, 'botId');
+      if (!resumed || !centerOnline || closing || isMaintenance() || turns.isRecoveryPending() ||
+          turns.stopped(botId) || turns.webhookStopPending(botId)) return null;
+      const trustedDispatchContext = input?.dispatchContext !== undefined
+        ? normalizeDispatchContext(input.dispatchContext)
+        : null;
+      return submitPrimary(botId, {
+        ...input,
+        origin: {
+          sender: {
+            kind: 'host',
+            name: typeof input?.origin?.sender?.name === 'string' && input.origin.sender.name
+              ? input.origin.sender.name
+              : '任务 · 全局任务',
+            sourceType: 'webhook',
+          },
+          replyTo: null,
+        },
+      }, capturedStopEpoch, trustedDispatchContext);
+    },
+
+    async cancelTaskDispatch(botId, requestId) {
+      const bot = await requireBot(botId);
+      return turns.cancelRequest(bot, requestId);
+    },
+
+    async manageTasks(input) {
+      if (typeof centerRuntime.globalTasks !== 'function') {
+        throw errWithCode('center is offline', 'CENTER_OFFLINE');
+      }
+      const result = await centerRuntime.globalTasks(input);
+      syncTaskResultCache(input, result);
+      if (input?.action && input.action !== 'list' && input.action !== 'get') {
+        taskConsumer?.wake();
+      }
+      return result;
     },
 
     async wait(botId, requestId) {
@@ -2134,10 +2419,11 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
           if (entryId <= resetId) {
             throw errWithCode(`entry ${entryId} is before the active conversation reset`, 'INVALID_ARGUMENT');
           }
-          const [agentSnapshot, sessionSnapshot, requestKeysSnapshot] = await Promise.all([
+          const [agentSnapshot, sessionSnapshot, requestKeysSnapshot, dispatchContextsSnapshot] = await Promise.all([
             harness.snapshot(durable.AgentDoc, conversation.id, CTX),
             harness.snapshot(BotSessionState, conversation.id, CTX),
             harness.snapshot(RequestKeys, conversation.id, CTX),
+            harness.snapshot(TaskDispatchContexts, conversation.id, CTX),
           ]);
           const newNativeId = await harness.commit(async (tx) => {
             const scan = await tx.scanEntries(
@@ -2262,6 +2548,10 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
               const copiedDigests = chord.copyJson(requestKeysSnapshot.digests);
               delete copiedDigests['r:' + requestId];
               reqDraft.digests = copiedDigests;
+            }
+            if (dispatchContextsSnapshot?.byRequest) {
+              const dispatchDraft = await tx.doc(TaskDispatchContexts, rec.id);
+              dispatchDraft.byRequest = chord.copyJson(dispatchContextsSnapshot.byRequest);
             }
             const primaryIndex = await tx.doc(PrimaryIndex);
             primaryIndex.byPrimary[bot.primaryConversationId] = rec.id;
@@ -2433,15 +2723,33 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       resumed = true;
       turns.nudgeAll().catch(() => {});
       webhooks.wake();
+      taskConsumer?.resume();
     },
 
     notifyWebhookReady: () => webhooks.wake(),
+    notifyTaskReady: () => taskConsumer?.wake(),
 
-    getBotBoard(params) {
-      return live.getBotBoard(params, async (botId) => {
-        await turns.refreshActivity(botId);
-        await decisions.refreshActivity(botId);
-      });
+    async getBotBoard(params) {
+      const refreshPromise = (
+        centerOnline &&
+        !closing &&
+        !isMaintenance() &&
+        typeof centerRuntime.globalTasks === 'function' &&
+        Date.now() - lastTasksSyncAt > TASKS_BOARD_REFRESH_MS
+      ) ? refreshGlobalTasksCache().catch(() => {}) : Promise.resolve();
+      const [board] = await Promise.all([
+        live.getBotBoard(params, async (botId) => {
+          await turns.refreshActivity(botId);
+          await decisions.refreshActivity(botId);
+        }),
+        refreshPromise,
+      ]);
+      return {
+        ...board,
+        items: Array.isArray(board?.items)
+          ? board.items.map((item) => applyGlobalTasksToBotBoardItem(item, activeGlobalTasks, host.deviceId))
+          : [],
+      };
     },
 
     watch(botId, options) {
@@ -2454,13 +2762,120 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
     close,
   };
-  const lifecycleMethods = new Set(['initializeBots', 'applyCenterSnapshot', 'setCenterOnline', 'withCapabilityActivation', 'revokeCenterCapabilities', 'restoreTurns', 'prepareUpdate', 'cancelUpdate', 'getUpdateState', 'notifyWebhookReady', 'close']);
+  taskConsumer = createTaskDispatchConsumer({
+    runtime,
+    getClient: () => centerRuntime.getClient(),
+    getDeviceId: () => host.deviceId,
+    isReady: () => resumed && centerOnline && !closing && !isMaintenance() && !turns.isRecoveryPending(),
+    getStopStates: turns.getStopStates,
+    onTasksSynced: ({ tasks, bots }) => {
+      if (Array.isArray(tasks)) {
+        activeGlobalTasks = tasks;
+        lastTasksSyncAt = Date.now();
+      }
+      if (Array.isArray(bots)) {
+        directoryBotsCache = bots;
+      }
+    },
+  });
+  setTasksBridge?.({
+    async invoke(botId, input, conversationId, nativeTaskId) {
+      if (!centerOnline || closing) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+      if (typeof centerRuntime.globalTasks !== 'function') {
+        throw errWithCode('center is offline', 'CENTER_OFFLINE');
+      }
+      assertNonBlank(botId, 'botId');
+      const rawInput = isPlainObject(input) ? input : {};
+      const action = typeof rawInput.action === 'string' ? rawInput.action.trim() : '';
+      const isReadOnly = action === 'list' || action === 'get';
+      const dispatchContext = await resolveDispatchContextForToolCall(
+        botId,
+        conversationId,
+        nativeTaskId,
+        !isReadOnly,
+      );
+      let payload = {
+        ...rawInput,
+        actorBotId: botId,
+      };
+      if (!isReadOnly && dispatchContext) {
+        if (action === 'create') {
+          throw errWithCode('task-dispatched turn cannot create unrelated tasks', 'REQUEST_CONFLICT');
+        }
+        if (payload.taskId !== dispatchContext.taskId) {
+          throw errWithCode('task mutation does not match dispatched taskId', 'REQUEST_CONFLICT');
+        }
+        const latestResult = await centerRuntime.globalTasks({ action: 'get', taskId: dispatchContext.taskId });
+        const latestTask = latestResult?.task;
+        if (!isPlainObject(latestTask) || latestTask.id !== dispatchContext.taskId) {
+          throw errWithCode('dispatched task no longer exists', 'REQUEST_CONFLICT');
+        }
+        if (latestTask.status === 'done' || latestTask.status === 'cancelled') {
+          throw errWithCode(`dispatched task is already ${latestTask.status}`, 'REQUEST_CONFLICT');
+        }
+        if (dispatchContext.stepId !== null) {
+          const steps = Array.isArray(latestTask.steps) ? latestTask.steps : [];
+          const boundStep = steps.find((step) => isPlainObject(step) && step.id === dispatchContext.stepId);
+          if (!boundStep) {
+            throw errWithCode('dispatched step no longer exists', 'REQUEST_CONFLICT');
+          }
+          if (boundStep.status === 'cancelled') {
+            throw errWithCode('dispatched step is cancelled', 'REQUEST_CONFLICT');
+          }
+          if (boundStep.botId !== botId || (boundStep.deviceId && boundStep.deviceId !== host.deviceId)) {
+            throw errWithCode('dispatched step is no longer owned by this bot', 'REQUEST_CONFLICT');
+          }
+          if ((boundStep.executionRevision ?? 1) !== dispatchContext.executionRevision) {
+            throw errWithCode('dispatched step executionRevision is stale', 'REQUEST_CONFLICT');
+          }
+          if (action === 'update' && Array.isArray(payload.stepPatches)) {
+            payload = {
+              ...payload,
+              stepPatches: payload.stepPatches.map((patch) => {
+                if (!isPlainObject(patch) || patch.stepId !== dispatchContext.stepId) return patch;
+                if (
+                  patch.expectedExecutionRevision !== undefined &&
+                  patch.expectedExecutionRevision !== dispatchContext.executionRevision
+                ) {
+                  throw errWithCode(
+                    'stepPatch expectedExecutionRevision mismatches dispatched executionRevision',
+                    'REQUEST_CONFLICT',
+                  );
+                }
+                return {
+                  ...patch,
+                  expectedExecutionRevision: dispatchContext.executionRevision,
+                };
+              }),
+            };
+          }
+        } else {
+          if (
+            latestTask.coordinatorBotId != null &&
+            (latestTask.coordinatorBotId !== botId ||
+              (latestTask.coordinatorDeviceId && latestTask.coordinatorDeviceId !== host.deviceId))
+          ) {
+            throw errWithCode('dispatched task coordinator ownership changed', 'REQUEST_CONFLICT');
+          }
+        }
+      }
+      const result = await centerRuntime.globalTasks(payload);
+      syncTaskResultCache(payload, result);
+      if (action && action !== 'list' && action !== 'get') {
+        taskConsumer?.wake();
+      }
+      return result;
+    },
+    getActiveForBot: (botId) => getBotGlobalTasks(botId),
+    listDirectoryBots: () => directoryBotsCache,
+  });
+  const lifecycleMethods = new Set(['initializeBots', 'applyCenterSnapshot', 'setCenterOnline', 'withCapabilityActivation', 'revokeCenterCapabilities', 'restoreTurns', 'prepareUpdate', 'cancelUpdate', 'getUpdateState', 'notifyWebhookReady', 'notifyTaskReady', 'close']);
   // 离线/恢复暂停只放行本地已鉴权动作：持久 enqueue、被动回执/状态与取消。
   // 这些路径只用 Harness snapshot/commit/abortTask，不隐式 resume 调度器；
   // 模型、工具、问卷等执行路径仍受 Center 门禁（运行时本就对 SDK 抛离线错）。
   // scope 查询是纯本地账本读取（不调度、不触碰模型），离线也放行给被动浏览 UI；
   // createScope/updateScope/publishUserMessage 等写路径仍受 Center 门禁。
-  const offlineMethods = new Set(['vaultControl', 'submit', 'getSubmission', 'wait', 'abort', 'withdrawQueued', 'turns', 'inspect', 'history', 'watch', 'getBotBoard',
+  const offlineMethods = new Set(['vaultControl', 'submit', 'getSubmission', 'wait', 'abort', 'cancelTaskDispatch', 'withdrawQueued', 'turns', 'inspect', 'history', 'watch', 'getBotBoard',
     'uploadAttachment', 'getAttachment',
     'scopeHistory', 'getScopeMessage', 'getScopeMessageDelivery', 'getScopeState', 'listScopeStates', 'listScopeReplicas']);
   const maintenanceAllowed = new Set([...offlineMethods, 'getCurrentDevice', 'getBot', 'getModelCatalog', 'getBotSoul', 'listScopes']);

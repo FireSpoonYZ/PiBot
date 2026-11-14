@@ -8,6 +8,7 @@ import { discoverCenterProviderModels, validateCenterProvider } from '../host-co
 import { registerWebhookRoutes } from './webhooks.js';
 import { registerVaultRoutes } from './vault-routes.js';
 import { registerPairingRoutes } from './pairing.js';
+import { registerTaskRoutes } from './tasks.js';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 const required = (value, name) => value ?? fail('NOT_FOUND', `${name} not found`);
@@ -408,6 +409,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     }
     await packages.reconcileDevice(deviceId);
     notify(deviceId);
+    scheduleTaskReconcile(deviceId);
     return reply.code(201).send(bot);
   }, true);
   route('PATCH', '/api/devices/:deviceId/bots/:botId', async req => {
@@ -449,13 +451,15 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('POST', '/api/devices/:deviceId/bots/:botId/unarchive', async req => {
     const { deviceId, botId } = req.params;
     const updated = await bridge.call(deviceId, 'unarchiveBot', { botId });
-    return store.upsertDeviceBot(deviceId, {
+    const bot = store.upsertDeviceBot(deviceId, {
       ...updated,
       deviceId,
       botId,
       ...(typeof updated?.name === 'string' ? { name: updated.name } : typeof updated?.role === 'string' ? { name: updated.role } : {}),
       archivedAt: updated?.archivedAt ?? null,
     });
+    scheduleTaskReconcile(deviceId);
+    return bot;
   }, true);
   route('DELETE', '/api/devices/:deviceId/bots/:botId', async (req, reply) => {
     const { deviceId, botId } = req.params;
@@ -639,6 +643,22 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   }
   const host = (method, url, handler, bodyLimit) => app.route({ method, url, onRequest: authenticate, handler, ...(bodyLimit !== undefined ? { bodyLimit } : {}) });
   registerWebhookRoutes(app, { store, bridge, route, host, publicUrl, notify: deviceId => notify(deviceId, 'webhook-ready') });
+  const taskCoordinator = registerTaskRoutes({
+    route,
+    host,
+    store,
+    bridge,
+    packages,
+    notify,
+    notifyConfig: deviceId => notify(deviceId),
+    notifyTaskReady: deviceId => notify(deviceId, 'task-ready'),
+    isAbsolutePath,
+  });
+  const scheduleTaskReconcile = (deviceId) => {
+    setImmediate(() => {
+      void taskCoordinator.reconcilePendingTasks(deviceId).catch(() => {});
+    });
+  };
   registerPairingRoutes(app, { store, bridge, route, notify, publicUrl, deviceRegistration });
   if (vault) registerVaultRoutes(app, { route, host, vault });
   // Learning start carries a transcript snapshot the service bounds at 8 MiB;
@@ -650,6 +670,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     reply.raw.write('event: heartbeat\ndata: {}\n\n');
     const set = streams.get(deviceId) || new Set(); const stream = { reply: reply.raw, token }; set.add(stream); streams.set(deviceId, set);
+    scheduleTaskReconcile(deviceId);
     const timer = setInterval(() => { if (!bridge.registry.authenticate(deviceId, token)) return reply.raw.end(); reply.raw.write('event: heartbeat\ndata: {}\n\n'); }, 15000);
     reply.raw.on('error', () => reply.raw.destroy());
     reply.raw.on('close', () => { clearInterval(timer); set.delete(stream); if (!set.size) streams.delete(deviceId); });
@@ -659,6 +680,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     if (body.deviceId !== id || body.capabilityProtocol !== 1 || !Array.isArray(body.bots) || body.bots.some(bot => !bot || bot.deviceId !== id || typeof bot.botId !== 'string' || !bot.botId || typeof bot.name !== 'string')) fail('INVALID_ARGUMENT', 'Invalid bootstrap');
     store.replaceDeviceBots(id, body.bots.filter(bot => typeof bot.isPrimary === 'boolean'), { bumpRevision: true });
     await packages.reconcileDevice(id);
+    scheduleTaskReconcile(id);
     return { snapshot: snapshot(id) };
   });
   host('POST', '/api/host/bots-sync', async req => {
@@ -670,6 +692,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
       await packages.reconcileDevice(id);
       notify(id);
     }
+    scheduleTaskReconcile(id);
     return result;
   });
   host('GET', '/api/host/bot-directory', req => {

@@ -29,6 +29,7 @@ const LOCAL_DOMAIN_CODES = new Set([
   'BOT_NOT_FOUND',
   'BOT_REQUEST_NOT_FOUND',
   'SUBMISSION_NOT_FOUND',
+  'TASK_NOT_FOUND',
   'MODEL_REQUIRED',
   'MODEL_NOT_FOUND',
   'COMPACTION_FAILED',
@@ -331,6 +332,7 @@ const METHOD_HANDLERS = new Map([
     control.takeoverShower(showerTarget(params), params.sessionId, { signal })],
   ['releaseShowerSession', (control, params, signal) =>
     control.releaseShowerSession(showerTarget(params), params.sessionId, { signal })],
+  ['manageTasks', (control, params, signal) => control.manageTasks(params, { signal })],
 ]);
 
 function requireValidId(value) {

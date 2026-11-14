@@ -1,7 +1,7 @@
 // host-core/tool-presentation.js
 // Tool presentation contract: the ONLY UI structure a tool may publish through
 // result.details.presentation / api.details({presentation}). Supported kinds are
-// 'todo', 'questionnaire' and 'vault-unlock'; anything else (kind, version, field shape or
+// 'todo', 'questionnaire', 'vault-unlock' and 'task'; anything else (kind, version, field shape or
 // wire byte budget) is dropped by the live projection, never forwarded.
 //
 // Pure module: no I/O, no Session/Runtime/storage. Shared by
@@ -49,6 +49,19 @@ const TODO_STATUSES = new Set(['pending', 'in_progress', 'completed']);
 const QUESTIONNAIRE_STATUSES = new Set(['pending', 'answered', 'cancelled']);
 const VAULT_UNLOCK_STATUSES = new Set(['pending', 'unlocked', 'cancelled', 'interrupted']);
 const ANSWER_KINDS = new Set(['option', 'custom', 'multi']);
+const TASK_STATUSES = new Set(['triaging', 'working', 'waiting', 'done', 'cancelled']);
+const TASK_STEP_STATUSES = new Set(['unassigned', 'todo', 'working', 'waiting', 'blocked', 'done', 'cancelled']);
+const TASK_PROMPT_KINDS = new Set(['plan', 'question']);
+
+export const TASK_ID_MAX_UNITS = 128;
+export const TASK_TITLE_MAX_UNITS = 300;
+export const TASK_CARD_LABEL_MAX_UNITS = 120;
+export const TASK_SUMMARY_MAX_UNITS = 500;
+export const TASK_PROMPT_TEXT_MAX_UNITS = 1000;
+export const TASK_PROMPT_MAX_OPTIONS = 8;
+export const TASK_STEPS_PREVIEW_MAX = 20;
+export const TASK_STEP_TEXT_MAX_UNITS = 300;
+export const TASK_BOT_NAME_MAX_UNITS = 80;
 
 const TOP_KEYS = {
   todo: new Set(['kind', 'version', 'installationId', 'tasks']),
@@ -66,7 +79,23 @@ const TOP_KEYS = {
     'questions',
     'result',
   ]),
+  task: new Set([
+    'kind',
+    'version',
+    'installationId',
+    'taskId',
+    'title',
+    'status',
+    'cardLabel',
+    'summary',
+    'stepCount',
+    'pendingPrompt',
+    'stepsPreview',
+  ]),
 };
+const TASK_STEP_COUNT_KEYS = new Set(['done', 'total']);
+const TASK_PENDING_PROMPT_KEYS = new Set(['kind', 'botId', 'text', 'options']);
+const TASK_STEP_PREVIEW_KEYS = new Set(['id', 'text', 'status', 'botName']);
 const TODO_TASK_KEYS = new Set(['id', 'subject', 'status']);
 const QUESTION_KEYS = new Set(['question', 'header', 'multiSelect', 'options']);
 const OPTION_KEYS = new Set(['label', 'description', 'preview']);
@@ -188,6 +217,52 @@ function checkResult(result, onError) {
   }
 }
 
+function checkTaskStepCount(stepCount, onError) {
+  if (!isPlainObject(stepCount)) {
+    onError('task stepCount must be an object');
+    return;
+  }
+  rejectUnknownFields(stepCount, TASK_STEP_COUNT_KEYS, onError);
+  if (!Number.isSafeInteger(stepCount.done) || stepCount.done < 0) {
+    onError('task stepCount.done must be a nonnegative safe integer');
+  }
+  if (!Number.isSafeInteger(stepCount.total) || stepCount.total < 0) {
+    onError('task stepCount.total must be a nonnegative safe integer');
+  }
+}
+
+function checkTaskPendingPrompt(prompt, onError) {
+  if (prompt === null) return;
+  if (!isPlainObject(prompt)) {
+    onError('task pendingPrompt must be null or an object');
+    return;
+  }
+  rejectUnknownFields(prompt, TASK_PENDING_PROMPT_KEYS, onError);
+  if (!TASK_PROMPT_KINDS.has(prompt.kind)) onError('task pendingPrompt.kind must be plan or question');
+  checkId(prompt.botId, onError);
+  checkText(prompt.text, TASK_PROMPT_TEXT_MAX_UNITS, 0, onError);
+  if (prompt.options !== undefined) {
+    if (!Array.isArray(prompt.options) || prompt.options.length > TASK_PROMPT_MAX_OPTIONS) {
+      onError('task pendingPrompt.options must be an array of at most 8 items');
+    } else {
+      for (const opt of prompt.options) checkText(opt, 500, 0, onError);
+    }
+  }
+}
+
+function checkTaskStepPreview(step, onError) {
+  if (!isPlainObject(step)) {
+    onError('task stepsPreview item must be an object');
+    return;
+  }
+  rejectUnknownFields(step, TASK_STEP_PREVIEW_KEYS, onError);
+  checkText(step.id, TASK_ID_MAX_UNITS, 1, onError);
+  if (typeof step.id === 'string' && step.id.trim() === '') onError('task stepsPreview step.id must be non-blank');
+  checkText(step.text, TASK_STEP_TEXT_MAX_UNITS, 0, onError);
+  if (!TASK_STEP_STATUSES.has(step.status)) onError('task stepsPreview step.status is invalid');
+  if (step.botName !== undefined) checkText(step.botName, TASK_BOT_NAME_MAX_UNITS, 0, onError);
+}
+
 // kind/version gate first; the byte budget is enforced on the projected
 // whitelist output, so unknown keys can never consume the budget.
 /** 序列化 presentation 的 UTF-8 字节数；不可序列化返回 Infinity。 */
@@ -247,7 +322,29 @@ function checkPresentation(value, onError) {
     if (value.serverUrl !== undefined) checkText(value.serverUrl, 2048, 1, onError);
     return;
   }
-  onError('presentation kind must be todo, questionnaire or vault-unlock');
+  if (value.kind === 'task') {
+    rejectUnknownFields(value, TOP_KEYS.task, onError);
+    checkId(value.installationId, onError);
+    checkText(value.taskId, TASK_ID_MAX_UNITS, 1, onError);
+    if (typeof value.taskId === 'string' && value.taskId.trim() === '') onError('taskId must be non-blank');
+    checkText(value.title, TASK_TITLE_MAX_UNITS, 0, onError);
+    if (!TASK_STATUSES.has(value.status)) {
+      onError('task status must be triaging, working, waiting, done or cancelled');
+    }
+    checkText(value.cardLabel, TASK_CARD_LABEL_MAX_UNITS, 0, onError);
+    if (value.summary !== undefined) checkText(value.summary, TASK_SUMMARY_MAX_UNITS, 0, onError);
+    checkTaskStepCount(value.stepCount, onError);
+    if (value.pendingPrompt !== undefined) checkTaskPendingPrompt(value.pendingPrompt, onError);
+    if (value.stepsPreview !== undefined) {
+      if (!Array.isArray(value.stepsPreview) || value.stepsPreview.length > TASK_STEPS_PREVIEW_MAX) {
+        onError('task stepsPreview must be an array of at most 20 items');
+      } else {
+        for (const step of value.stepsPreview) checkTaskStepPreview(step, onError);
+      }
+    }
+    return;
+  }
+  onError('presentation kind must be todo, questionnaire, vault-unlock or task');
 }
 
 function buildPresentation(value) {
@@ -272,6 +369,49 @@ function buildPresentation(value) {
     if (value.source !== undefined) presentation.source = value.source;
     if (value.serverUrl !== undefined) presentation.serverUrl = value.serverUrl;
     return presentation;
+  }
+  if (value.kind === 'task') {
+    const task = {
+      kind: 'task',
+      version: 1,
+      installationId: value.installationId,
+      taskId: value.taskId,
+      title: value.title,
+      status: value.status,
+      cardLabel: value.cardLabel,
+      stepCount: {
+        done: value.stepCount.done,
+        total: value.stepCount.total,
+      },
+    };
+    if (value.summary !== undefined) task.summary = value.summary;
+    if (value.pendingPrompt !== undefined) {
+      if (value.pendingPrompt === null) {
+        task.pendingPrompt = null;
+      } else {
+        const prompt = {
+          kind: value.pendingPrompt.kind,
+          botId: value.pendingPrompt.botId,
+          text: value.pendingPrompt.text,
+        };
+        if (value.pendingPrompt.options !== undefined) {
+          prompt.options = [...value.pendingPrompt.options];
+        }
+        task.pendingPrompt = prompt;
+      }
+    }
+    if (value.stepsPreview !== undefined) {
+      task.stepsPreview = value.stepsPreview.map((step) => {
+        const preview = {
+          id: step.id,
+          text: step.text,
+          status: step.status,
+        };
+        if (step.botName !== undefined) preview.botName = step.botName;
+        return preview;
+      });
+    }
+    return task;
   }
   const questionnaire = {
     kind: 'questionnaire',

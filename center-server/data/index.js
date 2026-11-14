@@ -8,6 +8,7 @@ import deepmerge from 'deepmerge';
 import { assertPublicCredentialId } from '../auth.js';
 import { webhookStore } from './webhooks.js';
 import { pairingStore } from './pairing.js';
+import { createTaskStore } from './tasks.js';
 
 function error(code, message, details) {
   const result = new Error(message);
@@ -237,7 +238,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     'e-launcher.hindsight': { overrides: (bot) => ({ projectId: `${bot.name}-${bot.botId}` }) },
     'e-launcher.billion-context': {},
     'e-launcher.ask-user-question': {},
-    'e-launcher.todo': {},
+    'e-launcher.tasks': {},
     'e-launcher.vault': {},
     'e-launcher.webfox': {},
   };
@@ -446,7 +447,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     db.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
     transaction(() => {
       let version = db.prepare('PRAGMA user_version').get().user_version;
-      if (![0, 1, 2, 3, 4, 5, 6, 7, 8, 9].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
+      if (![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
       if (version === 0) {
         db.exec(`
           CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL, config_revision INTEGER NOT NULL);
@@ -590,6 +591,57 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           );
           PRAGMA user_version = 9;
         `);
+        version = 9;
+      }
+      if (version === 9) {
+        db.exec(`
+          CREATE TABLE tasks (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            coordinator_device_id TEXT,
+            coordinator_bot_id TEXT,
+            revision INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            json TEXT NOT NULL
+          );
+          CREATE INDEX idx_tasks_status_updated ON tasks(status, updated_at DESC);
+          CREATE TABLE task_dispatches (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            step_id TEXT,
+            kind TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            bot_id TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            task_title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            cancel_requested INTEGER NOT NULL DEFAULT 0,
+            instruction TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            error TEXT,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+          );
+          CREATE INDEX idx_task_dispatches_device_status ON task_dispatches(device_id, status, created_at);
+          CREATE INDEX idx_task_dispatches_task ON task_dispatches(task_id);
+          PRAGMA user_version = 10;
+        `);
+        version = 10;
+      }
+      if (version === 10) {
+        db.exec(`
+          CREATE TABLE task_dispatcher (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            device_id TEXT,
+            bot_id TEXT,
+            updated_at INTEGER NOT NULL
+          );
+          ALTER TABLE task_dispatches ADD COLUMN execution_revision INTEGER NOT NULL DEFAULT 1;
+          PRAGMA user_version = 11;
+        `);
+        version = 11;
       }
     });
 
@@ -633,10 +685,35 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       }
     }
     const modelStoreFields = ['name', 'api', 'baseUrl', 'headers', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel', 'source', 'enabled'];
+    const listBotsSnapshot = () => db.prepare('SELECT json FROM device_bots').all().map(parse);
+    const listBotCapabilityDirectory = () => {
+      const installations = rows('installations').map(withActivation).filter((item) => activeInstallation(item));
+      const allBindings = db.prepare('SELECT device_id, bot_id, installation_id, json FROM bindings').all();
+      const enabledSet = new Set();
+      for (const row of allBindings) {
+        const parsed = JSON.parse(row.json);
+        if (parsed?.enabled) {
+          enabledSet.add(`${row.device_id}::${row.bot_id}::${row.installation_id}`);
+        }
+      }
+      return (deviceId, botId) => {
+        const names = [];
+        for (const installation of installations) {
+          if (!isVisibleToBot(installation, deviceId, botId)) continue;
+          if (!enabledSet.has(`${deviceId}::${botId}::${installation.installationId}`)) continue;
+          const label = (typeof installation.displayName === 'string' && installation.displayName.trim())
+            || installation.packageId
+            || installation.installationId;
+          if (label && !names.includes(label)) names.push(label);
+        }
+        return names;
+      };
+    };
 
     store = {
       ...webhookStore(db, transaction),
       ...pairingStore(db, transaction),
+      ...createTaskStore({ db, transaction, listBotsSnapshot, listBotCapabilityDirectory }),
       getInstallationId() {
         const epoch = db.prepare('SELECT epoch FROM sync_meta WHERE id = 1').get()?.epoch;
         if (typeof epoch === 'string' && UUID_RE.test(epoch)) return epoch.toLowerCase();
@@ -894,6 +971,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             seq += 1;
             deleteBotStmt.run(deviceId, removedBotId);
             store.cancelWebhookEventsForBot(deviceId, removedBotId);
+            store.cancelTaskDispatchesForBot(deviceId, removedBotId);
             deleteModelStmt.run(deviceId, removedBotId);
             deleteBindingStmt.run(deviceId, removedBotId);
             insertEventStmt.run(seq, deviceId, removedBotId, 'delete', null, nowIso);
@@ -1009,6 +1087,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           const nowIso = new Date().toISOString();
           db.prepare('DELETE FROM device_bots WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
           store.cancelWebhookEventsForBot(deviceId, botId);
+          store.cancelTaskDispatchesForBot(deviceId, botId);
           db.prepare('DELETE FROM bot_models WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
           db.prepare('DELETE FROM bindings WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
           db.prepare('INSERT INTO bot_events (seq, device_id, bot_id, op, json, updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(seq, deviceId, botId, 'delete', null, nowIso);

@@ -415,6 +415,9 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
     },
     releaseShowerSession(target, sessionId, options) {
       return request('POST', ['v1', 'shower', 'release'], { ...callOptions(options), body: { ...target, sessionId } });
+    },
+    manageTasks(input, options) {
+      return request('POST', ['v1', 'tasks'], { ...callOptions(options), body: input });
     }
   };
 }

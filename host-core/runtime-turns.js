@@ -815,6 +815,9 @@ export function createTurnAdmission(deps) {
     if (attachmentMeta.length > 0) entry.data.attachments = attachmentMeta;
     let submission;
     try {
+      if (!(await itemAlive(bot, item.requestId)) || closing) {
+        throw errWithCode('queued turn was cancelled', 'NOT_CONNECTED');
+      }
       if (!canAdmit()) throw errWithCode('host is preparing an update', 'RUNTIME_BUSY');
       submission = await conversation.submit(
         {
@@ -1331,6 +1334,163 @@ export function createTurnAdmission(deps) {
     return result;
   }
 
+  /** 按单一 requestId 精准取消一次队列受理或已提交轮次，绝不停止同 Bot 的其他任务或聊天。 */
+  async function cancelRequest(bot, requestId) {
+    if (typeof requestId !== 'string' || requestId.trim() === '') {
+      throw errWithCode('requestId must be a non-empty string', 'INVALID_ARGUMENT');
+    }
+    const h = harness();
+    const now = new Date().toISOString();
+    const cancelledInQueue = await h.commit(async (tx) => {
+      const doc = await queueDoc(tx, bot.primaryConversationId);
+      const found = doc.items.find((entry) => entry.requestId === requestId);
+      if (!found) return false;
+      let changed = false;
+      if (found.phase !== 'cancelled') {
+        found.phase = 'cancelled';
+        found.error = null;
+        found.updatedAt = now;
+        changed = true;
+      }
+      if (found.admissionId) {
+        const pins = await tx.doc(TurnPin, bot.primaryConversationId, {});
+        const pin = pins.admissions[found.admissionId];
+        if (pin && (pin.submissionId === null || pin.submissionId === undefined)) {
+          delete pins.admissions[found.admissionId];
+        }
+      }
+      return changed;
+    }, context);
+    if (cancelledInQueue) await syncPublishedQueue(bot);
+    const conversation = await getPrimaryConversation(h, bot, {}, context);
+    if (conversation) {
+      let record = await h.commit((tx) => tx.submissionByRequest(conversation.id, requestId), context);
+      if (record && record.status === 'queued') {
+        const abortSubOutcome = await h.abortSubmission(record.id, context, conversation.id);
+        if (abortSubOutcome === 'not_found') {
+          throw errWithCode(`submission ${record.id} not found during cancel`, 'CANCEL_INCOMPLETE');
+        }
+        const submissionId = record.id;
+        record = await h.commit((tx) => tx.submission(submissionId), context);
+        if (!record) {
+          throw errWithCode(`submission ${submissionId} missing after ${abortSubOutcome}`, 'CANCEL_INCOMPLETE');
+        }
+      }
+      if (record && record.status === 'placed') {
+        const [sessionState, liveSnapshot] = await Promise.all([
+          h.snapshot(BotSessionState, conversation.id, context),
+          h.snapshot(LiveDoc, conversation.id, context),
+        ]);
+        const inspection = await h.inspect(context);
+        const convTasks = inspection.tasks.filter((task) => task.record.conversationId === conversation.id);
+        const turnByTask = sessionState?.turnByTask ?? {};
+        const liveRun = liveSnapshot?.run;
+        const liveRunTaskId =
+          liveRun &&
+          Array.isArray(liveRun.inputs) &&
+          liveRun.inputs.some((inputId) => inputId === record.id) &&
+          liveRun.taskId !== undefined &&
+          liveRun.taskId !== null
+            ? String(liveRun.taskId)
+            : null;
+        const byTaskId = new Map(convTasks.map((task) => [String(task.record.id), task.record]));
+        const resolveOwner = async (ownerId) => {
+          const key = String(ownerId);
+          if (byTaskId.has(key)) return byTaskId.get(key);
+          return (await h.getTask(ownerId, context)) ?? null;
+        };
+        const matchedTaskIds = [];
+        for (const task of convTasks) {
+          let cur = task.record;
+          let matched = false;
+          let belongsToOther = false;
+          for (let depth = 0; depth < 16 && cur; depth++) {
+            const key = String(cur.id);
+            const mappedReq = turnByTask[key];
+            if (typeof mappedReq === 'string') {
+              if (mappedReq === requestId) matched = true;
+              else belongsToOther = true;
+              break;
+            }
+            if (liveRunTaskId !== null && key === liveRunTaskId) {
+              matched = true;
+              break;
+            }
+            cur = cur.owner !== undefined ? await resolveOwner(cur.owner) : null;
+          }
+          if (matched && !belongsToOther) {
+            matchedTaskIds.push(task.record.id);
+          }
+        }
+        if (matchedTaskIds.length > 0) {
+          for (const taskId of matchedTaskIds) {
+            await h.abortTask(taskId, context);
+          }
+          for (const taskId of matchedTaskIds) {
+            const after = await h.getTask(taskId, context);
+            if (
+              after &&
+              after.state.status !== 'terminal' &&
+              after.state.status !== 'completing' &&
+              (!after.abortRequested || after.abortReason !== undefined)
+            ) {
+              throw errWithCode(`task ${taskId} did not retain abort mark`, 'CANCEL_INCOMPLETE');
+            }
+          }
+        }
+        const verified = await h.commit(async (tx) => {
+          const latestRecord = await tx.submission(record.id);
+          if (!latestRecord) {
+            return { ok: false, reason: `submission ${record.id} missing during cancel` };
+          }
+          if (latestRecord.status === 'done' || latestRecord.status === 'unanswered') {
+            return { ok: true };
+          }
+          if (latestRecord.status !== 'placed') {
+            return { ok: false, reason: `submission ${record.id} returned to status ${latestRecord.status}` };
+          }
+          const live = await tx.doc(LiveDoc, conversation.id);
+          const run = live?.run;
+          if (!run || !Array.isArray(run.inputs) || !run.inputs.includes(record.id) || run.taskId == null) {
+            return { ok: false, reason: `unable to confirm active run ownership for placed submission ${record.id}` };
+          }
+          const rootTask = await tx.task(run.taskId);
+          if (!rootTask || rootTask.conversationId !== conversation.id) {
+            return { ok: false, reason: `active run root task ${run.taskId} missing during cancel` };
+          }
+          const sessionDoc = await tx.doc(BotSessionState, conversation.id);
+          const mappedRootReq = sessionDoc?.turnByTask?.[String(rootTask.id)];
+          if (typeof mappedRootReq === 'string' && mappedRootReq !== requestId) {
+            return { ok: false, reason: `active run root task ${rootTask.id} belongs to another request` };
+          }
+          if (
+            rootTask.state.status !== 'terminal' &&
+            rootTask.state.status !== 'completing' &&
+            (!rootTask.abortRequested || rootTask.abortReason !== undefined)
+          ) {
+            return { ok: false, reason: `active run root task ${rootTask.id} is not aborted` };
+          }
+          return { ok: true };
+        }, context);
+        if (!verified.ok) {
+          throw errWithCode(verified.reason, 'CANCEL_INCOMPLETE');
+        }
+      } else if (record && record.status !== 'done' && record.status !== 'unanswered') {
+        throw errWithCode(`unexpected submission status ${record.status}`, 'CANCEL_INCOMPLETE');
+      }
+      if (!record && !cancelledInQueue) {
+        const queuedNow = await readQueue(bot.primaryConversationId);
+        if (queuedNow.some((entry) => entry.requestId === requestId && entry.phase !== 'cancelled')) {
+          throw errWithCode(`request ${requestId} is still queued`, 'CANCEL_INCOMPLETE');
+        }
+      }
+    }
+    if (!stopped(bot.botId) && (await queuedCount(bot)) > 0) {
+      nudge(bot.botId);
+    }
+    return { botId: bot.botId, requestId };
+  }
+
   /** pin 是否仍覆盖活动轮：有 admissionId 的队列条目/挂起决策，或有未完结 submissionId 的 pin。 */
   async function hasActivePin(botId) {
     const bot = host.getBot(botId);
@@ -1592,6 +1752,7 @@ export function createTurnAdmission(deps) {
     withdrawQueued,
     steerQueued,
     cancelQueued,
+    cancelRequest,
     hasActivePin,
     restoreTurns,
     /** 冷恢复未完成时恒为 true：禁用隐式 resume 的 SDK 路径直到下一轮成功恢复。 */

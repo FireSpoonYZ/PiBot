@@ -13,7 +13,7 @@ const output = path.join(root, 'build/builtin-plugins');
 await mkdir(output, { recursive: true });
 const plugins = [
   ['ask-user-question', '用户问卷', true],
-  ['todo', '待办任务', true],
+  ['tasks', '全局任务', true],
   ['vault', 'Vault', true],
   ['billion-context', 'Billion Context', true],
   ['hindsight', 'Hindsight（需配置服务地址）', false],

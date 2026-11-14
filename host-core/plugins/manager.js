@@ -22,7 +22,7 @@ const describe = (err) => ({
   message: typeof err?.message === 'string' && err.message ? err.message.slice(0, 200) : 'capability could not be applied',
 });
 
-export function createPluginManager({ host, registry, installer, services, isOnline, vaultFacade }) {
+export function createPluginManager({ host, registry, installer, services, isOnline, vaultFacade, tasksFacade }) {
   const ajv = new Ajv({ allErrors: true, coerceTypes: false, useDefaults: false, strict: false });
   ajv.addFormat('credential-ref', true);
   let instances = new Map(); // instanceKey(installationId, version) -> { key, installationId, plugin, manifest, version, bots, taskExtension }
@@ -307,6 +307,43 @@ export function createPluginManager({ host, registry, installer, services, isOnl
           await checkOwner(botId, id, conversationId);
           assertVaultAllowed(botId);
         }, assertVaultAllowed, id),
+      } : {}),
+      ...(installed?.manifest?.id === 'e-launcher.tasks' && tasksFacade ? {
+        tasks: {
+          invoke: async (botId, input, conversationId, nativeTaskId) => {
+            if (conversationId !== undefined) await checkOwner(botId, id, conversationId);
+            else assertCapabilityAllowed(botId, id);
+            return tasksFacade.invoke(botId, input, conversationId, nativeTaskId);
+          },
+          getActiveForBot: (botId, conversationId) => {
+            if (conversationId !== undefined) {
+              return checkOwner(botId, id, conversationId).then(
+                () => tasksFacade.getActiveForBot(botId),
+                () => [],
+              );
+            }
+            try {
+              assertCapabilityAllowed(botId, id);
+              return tasksFacade.getActiveForBot(botId);
+            } catch {
+              return [];
+            }
+          },
+          listDirectoryBots: (botId, conversationId) => {
+            if (conversationId !== undefined) {
+              return checkOwner(botId, id, conversationId).then(
+                () => tasksFacade.listDirectoryBots(),
+                () => [],
+              );
+            }
+            try {
+              assertCapabilityAllowed(botId, id);
+              return tasksFacade.listDirectoryBots();
+            } catch {
+              return [];
+            }
+          },
+        },
       } : {}),
       async tryRunBackgroundTask(botId, task) {
         if (!accepting || !isOnline() || !isAuthorized(policy.get(botId)?.get(id))) return false;

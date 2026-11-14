@@ -179,6 +179,7 @@ const CONTROL_V2_METHODS = Object.freeze([
   // Bot 学习管理（后台 review/learn/curate 作业）：params {botId,input}。
   'manageBotLearning',
   'reviewBotSkills',
+  'manageTasks',
 ]);
 
 export const CONTROL_METHODS = Object.freeze([...CONTROL_V1_METHODS, ...CONTROL_V2_METHODS]);
@@ -205,6 +206,7 @@ export const CONTROL_ERROR_CODES = new Set([
   'BOT_NOT_FOUND',
   'BOT_REQUEST_NOT_FOUND',
   'SUBMISSION_NOT_FOUND',
+  'TASK_NOT_FOUND',
   'MODEL_REQUIRED',
   'MODEL_NOT_FOUND',
   'COMPACTION_FAILED',
@@ -753,6 +755,24 @@ function normalizeControlParams(method, params) {
       rejectUnknownFields(params, new Set(['botId', 'input']), 'params');
       assertId(params.botId, 'botId');
       return { botId: params.botId, input: normalizeSkillReviewInput(params.input) };
+    }
+    case 'manageTasks': {
+      const allowedActions = new Set([
+        'list',
+        'get',
+        'create',
+        'update',
+        'assign',
+        'confirm_plan',
+        'answer_prompt',
+        'resolve_adoption_scope',
+        'dismiss_adoption',
+        'delete',
+      ]);
+      if (!isPlainObject(params) || typeof params.action !== 'string' || !allowedActions.has(params.action)) {
+        throw invalid('params.action must be a valid global task action');
+      }
+      return params;
     }
     default:
       throw invalid('unknown control method');

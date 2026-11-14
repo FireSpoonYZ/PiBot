@@ -17,7 +17,7 @@ export function validateCenterUrl(centerUrl) {
   return base;
 }
 
-export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, signal, onDisconnect, onChange, onWebhookReady }) {
+export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, signal, onDisconnect, onChange, onWebhookReady, onTaskReady }) {
   const base = validateCenterUrl(centerUrl);
   assertId(deviceId, 'deviceId');
   assertDeviceToken(deviceToken);
@@ -57,26 +57,61 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     req.setTimeout(30000, () => req.destroy(centerError('CENTER_OFFLINE', 'center request timed out')));
     const response = await new Promise((resolve, reject) => { req.once('response', resolve); req.once('error', reject); });
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      const isTaskPath = path.startsWith('/api/host/tasks/') || path.startsWith('/api/host/task-dispatches/');
       // turn 准入端点透传服务端类型化错误码（TURN_SET_CHANGED/TURN_SYNC_FAILED 等）；
       // bot 管理端点同样透传有界类型码，REVISION_CONFLICT 等 CAS 失败不会丢成
       // BAD_RESPONSE。其他路径保持既有 CENTER_REQUEST_FAILED 语义及 ownerRequest 回退。
       const typedTurnError = path.startsWith('/api/host/turns/') ||
+        isTaskPath ||
         /^\/api\/host\/devices\/[^/]+\/bots\/[^/]+\/(skills|skill-reviews|learning|installations)$/.test(path);
       // /api/host/vault/* 只透传固定 VAULT_* 码/消息；其他错误仍走状态码兜底。
       const typedVaultError = path.startsWith('/api/host/vault/');
       let errorCode = null;
       let errorMessage = null;
       if (typedTurnError || typedVaultError) {
-        const chunks = [];
-        for await (const chunk of response) chunks.push(chunk);
-        try {
-          const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          const codePattern = typedVaultError ? /^VAULT_[A-Z0-9_]{1,60}$/ : /^[A-Z][A-Z0-9_]{1,63}$/;
-          if (typeof parsed?.error?.code === 'string' && codePattern.test(parsed.error.code)) {
-            errorCode = parsed.error.code;
-            if (typeof parsed.error.message === 'string' && parsed.error.message.length <= 512) errorMessage = parsed.error.message;
+        const contentType = String(response.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+        const isJsonResponse = !isTaskPath || contentType === 'application/json' || contentType.endsWith('+json');
+        // 任务路径仅透传真实 Center 应用层 4xx JSON 错误（保留 401 断连兜底，拒绝 5xx/网关错误页透传）。
+        const allowStatus = !isTaskPath || (response.statusCode >= 400 && response.statusCode < 500 && response.statusCode !== 401);
+        if (isJsonResponse && allowStatus) {
+          const chunks = [];
+          let totalBytes = 0;
+          let oversized = false;
+          for await (const chunk of response) {
+            totalBytes += chunk.length;
+            if (totalBytes > 65536) {
+              oversized = true;
+              response.destroy();
+              break;
+            }
+            chunks.push(chunk);
           }
-        } catch { /* 非 JSON 错误体按状态码兜底 */ }
+          if (!oversized) {
+            try {
+              const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+              const codePattern = typedVaultError ? /^VAULT_[A-Z0-9_]{1,60}$/ : /^[A-Z][A-Z0-9_]{1,63}$/;
+              const blockedTaskCodes = new Set([
+                'CENTER_OFFLINE',
+                'NOT_CONNECTED',
+                'UNAUTHORIZED',
+                'RUNTIME_BUSY',
+                'BAD_RESPONSE',
+                'CENTER_REQUEST_FAILED',
+              ]);
+              if (
+                parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
+                parsed.error && typeof parsed.error === 'object' && !Array.isArray(parsed.error) &&
+                typeof parsed.error.code === 'string' && codePattern.test(parsed.error.code) &&
+                (!isTaskPath || !blockedTaskCodes.has(parsed.error.code))
+              ) {
+                errorCode = parsed.error.code;
+                if (typeof parsed.error.message === 'string' && parsed.error.message.length <= 512) errorMessage = parsed.error.message;
+              }
+            } catch { /* 非 JSON 错误体按状态码兜底 */ }
+          }
+        } else {
+          response.resume();
+        }
       } else {
         response.resume();
       }
@@ -207,6 +242,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
         const lines = frame.split(/\r?\n/);
         if (lines.includes('event: config-changed')) onChange?.();
         if (lines.includes('event: webhook-ready')) onWebhookReady?.();
+        if (lines.includes('event: task-ready')) onTaskReady?.();
       }
     });
     events.once('end', disconnected);
@@ -301,6 +337,9 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     prepareTurn: (input, options = {}) => request('/api/host/turns/prepare', { method: 'POST', body: input, signal: options.signal }),
     confirmTurn: (input, options = {}) => request('/api/host/turns/confirm', { method: 'POST', body: input, signal: options.signal }),
     restoreTurn: (input, options = {}) => request('/api/host/turns/restore', { method: 'POST', body: input, signal: options.signal }),
+    globalTasks: (body, signal) => request('/api/host/tasks/action', { method: 'POST', body, signal }),
+    pollTaskDispatches: (body, signal) => request('/api/host/task-dispatches/poll', { method: 'POST', body, signal }),
+    reportTaskDispatch: (id, body, signal) => request('/api/host/task-dispatches/' + encodeURIComponent(id) + '/receipt', { method: 'POST', body, signal }),
     // 中心外部密码库：device 认证固定路径，typed VAULT_* 码透传；密码路径不自动重试。
     vaultControl: (input, options = {}) => request('/api/host/vault/control', { method: 'POST', body: input, signal: options.signal }),
     vaultFind: (input, options = {}) => request('/api/host/vault/find', { method: 'POST', body: input, signal: options.signal }),
