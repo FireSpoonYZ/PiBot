@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // scripts/verify-antigravity-auth.mjs — Center Web-Auth broker E2E check for Antigravity (`agy`).
 // Scope: verifies existing Center HTTP auth endpoints using real `openCenterServer` and real `agy`:
-//   1. `GET /api/providers/antigravity/auth-status` detects existing CLI login cache (precondition).
-//   2. `POST /api/providers/antigravity/login` + polling exposes official Google `auth_url` and `manual_code` prompt.
-//   3. `POST /api/providers/antigravity/login/:flowId/answer` rejects empty & oversized inputs at boundary.
+//   1. `GET /api/providers/antigravity-acp/auth-status` detects existing CLI login cache (precondition).
+//   2. `POST /api/providers/antigravity-acp/login` + polling exposes official Google `auth_url` and `manual_code` prompt.
+//   3. `POST /api/providers/antigravity-acp/login/:flowId/answer` rejects empty & oversized inputs at boundary.
 //   4. Single invalid authorization code drives the flow to `failed` with a safe non-leaking error.
 //   5. Cancelling an active login flow drives it to `cancelled` and exits cleanly.
 //   6. Existing login cache & catalog remain healthy afterward (`/auth-status`, `/validate`, `/discover`).
@@ -22,7 +22,7 @@ import path from 'node:path';
 import { openCenterServer } from '../center-server/server.js';
 import { hashOwnerPassword } from '../center-server/config.js';
 
-const PROVIDER_ID = 'antigravity';
+const PROVIDER_ID = 'antigravity-acp';
 const FIXED_INVALID_CODE = 'PIBOT_VERIFY_INVALID_OAUTH_CODE_0000';
 const POLL_INTERVAL_MS = 250;
 
@@ -189,7 +189,7 @@ async function run() {
     assert.equal(initialAuth?.apiKey, false, 'antigravity auth-status must advertise apiKey=false');
     if (initialAuth?.method !== 'oauth') {
       throw new Error(
-        `Precondition failed: Antigravity CLI login cache not detected via /api/providers/antigravity/auth-status (method=${initialAuth?.method ?? 'none'}). Complete CLI login for this service user/profile first.`,
+        `Precondition failed: Antigravity CLI login cache not detected via /api/providers/${PROVIDER_ID}/auth-status (method=${initialAuth?.method ?? 'none'}). Complete CLI login for this service user/profile first.`,
       );
     }
     console.log(`[STEP 1/5] auth-status precondition ok: method=${initialAuth.method} oauth=${initialAuth.oauth}`);
@@ -311,12 +311,12 @@ async function run() {
     assert.equal(postAuth?.method, 'oauth', 'cached CLI login must stay authenticated after failed/cancelled attempts');
 
     const validation = await ownerHttp.request('POST', `/api/providers/${PROVIDER_ID}/validate`, {});
-    assert.equal(validation?.ok, true, 'POST /api/providers/antigravity/validate must stay ok after failed/cancelled flows');
+    assert.equal(validation?.ok, true, `POST /api/providers/${PROVIDER_ID}/validate must stay ok after failed/cancelled flows`);
 
     const discovered = await ownerHttp.request('POST', `/api/providers/${PROVIDER_ID}/discover`, {});
     assert.ok(
       Array.isArray(discovered?.models) && discovered.models.length > 0,
-      'POST /api/providers/antigravity/discover must still return catalog models after failed/cancelled flows',
+      `POST /api/providers/${PROVIDER_ID}/discover must still return catalog models after failed/cancelled flows`,
     );
     console.log(
       `[STEP 5/5] cancel + post-failure health ok: cancelStatus=${cancelledFlow.status} validateModel=${validation.message} catalogCount=${discovered.models.length}`,

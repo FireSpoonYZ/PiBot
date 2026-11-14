@@ -21,7 +21,7 @@ import { BACKGROUND_CONTEXT } from '../host-core/node_modules/@earendil-works/ch
 import { getSupportedThinkingLevels } from '../host-core/node_modules/@earendil-works/pi-ai/dist/models.js';
 import { createInitialSystemMessage, toToolDeclaration } from '../host-core/node_modules/@earendil-works/pi-ai/dist/utils/transcript.js';
 
-const PROVIDER_ID = 'antigravity';
+const PROVIDER_ID = 'antigravity-acp';
 const MODEL_API = 'pibot-antigravity-acp';
 
 function parseTimeoutMs() {

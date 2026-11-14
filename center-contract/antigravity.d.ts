@@ -1,4 +1,4 @@
-export const ANTIGRAVITY_PROVIDER_ID: 'antigravity';
+export const ANTIGRAVITY_PROVIDER_ID: 'antigravity-acp';
 export const ANTIGRAVITY_API: 'pibot-antigravity-acp';
 export const ANTIGRAVITY_STREAM_PATH: '/api/host/antigravity/stream';
 export const ANTIGRAVITY_CANCEL_PATH: '/api/host/antigravity/cancel';

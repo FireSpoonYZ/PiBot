@@ -1,6 +1,6 @@
 # Center Antigravity (`agy`) ACP 接入说明
 
-Center 可选接入 Google Antigravity CLI (`agy acp`) 作为服务端统一模型 Provider（Provider ID 为 `antigravity`，模型 API 为 `pibot-antigravity-acp`）。该能力默认未启用，不影响普通 Center 部署或其他模型服务商；所有用户也不必配置 `agy`。
+Center 可选接入 Google Antigravity CLI (`agy acp`) 作为服务端统一模型 Provider（Provider ID 为 `antigravity-acp`，模型 API 为 `pibot-antigravity-acp`）。该能力默认未启用，不影响普通 Center 部署或其他模型服务商；所有用户也不必配置 `agy`。
 
 ## 架构与隔离边界
 
@@ -56,12 +56,12 @@ sh scripts/center-build.sh --build-arg INSTALL_AGY=true
 
 ## 中心网页登录、既有缓存复用与启用 Provider
 
-1. **自动识别既有登录缓存**：同一系统用户若本机已登录过 `agy`，即便使用全新 `PIBOT_AGY_HOME`，Center 启动及 `GET /api/providers/antigravity/auth-status` 也会自动复用官方 CLI 登录缓存，无需强制 SSH 或重新执行终端登录。不同系统用户或独立容器则需具备各自服务用户可访问的登录缓存。
+1. **自动识别既有登录缓存**：同一系统用户若本机已登录过 `agy`，即便使用全新 `PIBOT_AGY_HOME`，Center 启动及 `GET /api/providers/antigravity-acp/auth-status` 也会自动复用官方 CLI 登录缓存，无需强制 SSH 或重新执行终端登录。不同系统用户或独立容器则需具备各自服务用户可访问的登录缓存。
 2. **中心网页授权主流程（手动登录 / 重新授权）**：
-   - 在 Center 管理页「服务商与模型」中选择 **Antigravity (Center agy)**；若未检测到可用缓存或需要更换账号/重新授权，直接点击网页登录入口（调用既有 `POST /api/providers/antigravity/login`）。
-   - 在浏览器打开页面提供的 Google 官方授权链接完成同意，将跳转后的**完整回调 URL 或授权码**粘贴到网页表单提交（`POST /api/providers/antigravity/login/:flowId/answer`），即可由 Center 传入 `agy --login` 完成授权；过程中也可随时点击取消（`POST /api/providers/antigravity/login/:flowId/cancel`）。
+   - 在 Center 管理页「服务商与模型」中选择 **Antigravity (Center agy)**；若未检测到可用缓存或需要更换账号/重新授权，直接点击网页登录入口（调用既有 `POST /api/providers/antigravity-acp/login`）。
+   - 在浏览器打开页面提供的 Google 官方授权链接完成同意，将跳转后的**完整回调 URL 或授权码**粘贴到网页表单提交（`POST /api/providers/antigravity-acp/login/:flowId/answer`），即可由 Center 传入 `agy --login` 完成授权；过程中也可随时点击取消（`POST /api/providers/antigravity-acp/login/:flowId/cancel`）。
    - 官方 `agy` CLI 自行掌管凭据与系统共享 keyring，Center Node 仅中转官方授权链接与用户输入、不触碰或复制 token，也不提供从网页清除系统共享 CLI keyring 的入口。
-3. **自动更新目录与启用切换**：登录完成（或复用既有缓存）后，模型目录会自动同步并可直接在「服务商与模型」验证/启用；随后在「设备与 Bot」页为全局默认或指定 Bot 选择 `antigravity/<modelId>` 及对应思考强度（`thinkingLevel`），可用型号与强度由 ACP 返回目录决定，不在代码中写死。
+3. **自动更新目录与启用切换**：登录完成（或复用既有缓存）后，模型目录会自动同步并可直接在「服务商与模型」验证/启用；随后在「设备与 Bot」页为全局默认或指定 Bot 选择 `antigravity-acp/<modelId>` 及对应思考强度（`thinkingLevel`），可用型号与强度由 ACP 返回目录决定，不在代码中写死。
 4. **终端命令登录（仅无浏览器环境或排查时备用）**：
 
    若需以服务用户直接在终端初始化或排查缓存，请以实际运行 Center 的服务用户执行（切勿用 `root` 写入持久目录导致服务用户无权读取）：
@@ -115,7 +115,7 @@ PIBOT_AGY_BIN=/usr/local/bin/agy \
 node scripts/verify-antigravity-auth.mjs
 ```
 
-- **前置条件**：已安装根目录与 `center-server` 依赖，本机可执行 `agy` 且当前运行用户在当前网络/代理环境下已完成过 `agy` 登录（脚本会先通过 `/api/providers/antigravity/auth-status` 核查缓存，若未检测到缓存将清晰报前置条件失败）；如传 `PIBOT_AGY_HOME`，脚本会拒绝指向 `~/.gemini` 且永不删除外部目录。
+- **前置条件**：已安装根目录与 `center-server` 依赖，本机可执行 `agy` 且当前运行用户在当前网络/代理环境下已完成过 `agy` 登录（脚本会先通过 `/api/providers/antigravity-acp/auth-status` 核查缓存，若未检测到缓存将清晰报前置条件失败）；如传 `PIBOT_AGY_HOME`，脚本会拒绝指向 `~/.gemini` 且永不删除外部目录。
 - **验证范围**：使用真实 `openCenterServer` 与真实 `agy`，验证已有缓存自动识别（`auth-status` 返回 `method: 'oauth'`）、显式发起登录获取官方 Google `auth_url` 与 `manual_code` 表单提示、空值/超长输入边界拒绝（HTTP 400 且不提交给上游）、单次固定无效授权码触发 `failed` 状态且错误信息不回显授权码或日志/token 原文、发起登录后取消（`/cancel` -> `cancelled`），以及失败与取消后既有缓存与目录（`auth-status` / `validate` / `discover`）仍保持可用。
 - **未覆盖范围**：Google 页面人工账号同意及输入真实有效授权码完成 OAuth 换取凭据不作自动化，因此该脚本不宣称端到端完整真实 OAuth 成功登录，仅覆盖授权链接生成、输入校验、无效失败、取消及既有缓存复用能力。
 

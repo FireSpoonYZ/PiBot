@@ -26,7 +26,7 @@ import { BACKGROUND_CONTEXT } from '../host-core/node_modules/@earendil-works/ch
 import { getSupportedThinkingLevels } from '../host-core/node_modules/@earendil-works/pi-ai/dist/models.js';
 import { createInitialSystemMessage, toToolDeclaration } from '../host-core/node_modules/@earendil-works/pi-ai/dist/utils/transcript.js';
 
-const PROVIDER_ID = 'antigravity';
+const PROVIDER_ID = 'antigravity-acp';
 const MODEL_API = 'pibot-antigravity-acp';
 const CENTER_PLATFORM_BY_NODE = Object.freeze({
   win32: 'windows',
@@ -340,11 +340,11 @@ async function run() {
     const discovered = await ownerHttp.request('POST', `/api/providers/${PROVIDER_ID}/discover`, {});
     if (!Array.isArray(discovered?.models) || discovered.models.length === 0) {
       throw new Error(
-        'POST /api/providers/antigravity/discover returned no models (profile may be empty or unauthenticated; run: agy acp --gemini-dir <dir> --login)',
+        `POST /api/providers/${PROVIDER_ID}/discover returned no models (profile may be empty or unauthenticated; run: agy acp --gemini-dir <dir> --login)`,
       );
     }
     const validation = await ownerHttp.request('POST', `/api/providers/${PROVIDER_ID}/validate`, {});
-    assert.equal(validation?.ok, true, 'POST /api/providers/antigravity/validate must return ok=true');
+    assert.equal(validation?.ok, true, `POST /api/providers/${PROVIDER_ID}/validate must return ok=true`);
 
     const chosenModelId = discovered.models[0].id;
     assert.ok(typeof chosenModelId === 'string' && chosenModelId.length > 0, 'discovered model must have id');
