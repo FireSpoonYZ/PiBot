@@ -73,7 +73,7 @@ function WebLoginConfirmView({
     })
       .then(
         () => setApproved(true),
-        err => setError(errorText(err, t('确认网页端登录失败，请重试', 'Failed to confirm web login'))),
+        err => setError(errorText(err) || t('确认网页端登录失败，请重试', 'Failed to confirm web login')),
       )
       .finally(() => setSubmitting(false));
   };
@@ -82,7 +82,7 @@ function WebLoginConfirmView({
     return (
       <>
         <div className="hst-row-static">
-          <StatusLine tone="good">
+          <StatusLine tone="success">
             <CheckCircle2 size={16} aria-hidden="true" />
             <span>{t('✓ 已确认网页端登录', '✓ Web login confirmed')}</span>
           </StatusLine>

@@ -370,9 +370,9 @@ export function HostPage({
   } | null>(null);
   // 群聊/私聊子页：目标 conversation + 打开来源（hub 或 chat），返回时还原；roomSettingsOpen 控制群详情设置面板。
   const [scopeConversationTarget, setScopeConversationTarget] = useState<ScopeConversation | null>(null);
-  const [scopeReturnScreen, setScopeReturnScreen] = useState<HubScreen>('hub');
+  const [scopeReturnScreen, setScopeReturnScreen] = useState<MobileHubScreen>('hub');
   const [roomSettingsOpen, setRoomSettingsOpen] = useState(false);
-  const [dmTarget, setDmTarget] = useState<{ bot: UnifiedBotItem; returnScreen: HubScreen } | null>(null);
+  const [dmTarget, setDmTarget] = useState<{ bot: UnifiedBotItem; returnScreen: MobileHubScreen } | null>(null);
   const [dmSelectedScopeId, setDmSelectedScopeId] = useState<string | null>(null);
 
   // 确认弹窗状态（不使用全局 window.confirm，适配 Android WebView）
@@ -5126,7 +5126,6 @@ ${newer}` : draftSnapshot;
 
   useEffect(() => {
     setVaultTargetKey(null);
-    setSkillReviewTargetKey(null);
   }, [screen, botPanelIdentityKey]);
 
   // @lane-hooks:settings
@@ -6200,7 +6199,10 @@ ${newer}` : draftSnapshot;
               queuedCount={chatLive?.queuedCount ?? 0}
               activity={isStoppingBot ? botActivity : rawBotActivity}
               learning={chatLive?.learning ?? null}
-              onOpenLearnedSkills={() => setSkillReviewTargetKey(botPanelIdentityKey)}
+              onOpenLearnedSkills={() => {
+                setSubPageReturnScreen('chat');
+                setScreen('bot-skills');
+              }}
               hasError={Boolean(failureNotice) || (chatReceipt?.status === 'unanswered' && !receiptUserCancelled)}
               startedAt={activeTurnStartedAt}
               t={t}
