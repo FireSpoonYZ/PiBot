@@ -1,18 +1,163 @@
 // C7 Android 首启引导 UI：owner 密码一键配对 + 通知/后台/Shizuku 真实状态与动作。
 // 密码只在本组件内存，提交即清；token 不离开原生。沿用 .hst-/.bs- 既有原语，少量 .ob- 补充样式。
 // 配对结果只表示“已登记/已请求连接”，就绪与否始终由 CenterGate 的 center_status/broker 轮询判定。
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { BatteryCharging, Bell, ScanLine, Server, ShieldCheck } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState, type FormEvent, type MouseEvent } from 'react';
+import { BatteryCharging, Bell, CheckCircle2, ScanLine, Server, ShieldCheck } from 'lucide-react';
 import { useCenterConnection } from './CenterGate';
-import { onboardingAction, onboardingStatus, scanPairingCode } from './tauri-host';
+import { mobileClientRequest, onboardingAction, onboardingStatus, scanPairingCode } from './tauri-host';
 import { BotHost, type HostSnapshot, type OnboardingActionName, type OnboardingStatus, type PairCenterResult } from './index';
-import { Badge, Disclosure, Row, Section, StatusLine } from '../bot-settings/primitives';
-import { readPaste as readPairingCode } from '../pairingCode';
+import { Badge, Disclosure, Row, Section, SettingsSheet, StatusLine } from '../bot-settings/primitives';
+import { readScannedCode } from '../pairingCode';
 import { ErrorNotice, errorText, useText } from '../ui';
 import './onboarding.css';
 
+type ScannedWebLogin = {
+  kind: 'web-login';
+  centerUrl: string;
+  centerHost: string;
+  challengeId: string;
+  qrNonce: string;
+};
+
 /** 手机上的 loopback 是手机自己，不可能是中心：http 一律不收，与原生 PairingCode.parse 保持一致。 */
-const readPaste = (text: string) => readPairingCode(text, { allowLoopbackHttp: false });
+const readPaste = (text: string) => readScannedCode(text, { allowLoopbackHttp: false });
+
+function normalizeCenterOrigin(raw: string | undefined): string {
+  if (!raw) return '';
+  try {
+    return new URL(raw.trim()).origin.toLowerCase();
+  } catch {
+    return raw.trim().replace(/\/+$/, '').toLowerCase();
+  }
+}
+
+function hostOfUrl(raw: string | undefined): string {
+  if (!raw) return '';
+  try {
+    return new URL(raw.trim()).host;
+  } catch {
+    return raw.trim();
+  }
+}
+
+/** 网页端免密登录二维码确认卡：核对中心一致后调用 center_qr_login_approve。 */
+function WebLoginConfirmView({
+  login,
+  onCancel,
+  onDone,
+}: {
+  login: ScannedWebLogin;
+  onCancel: () => void;
+  onDone?: () => void;
+}) {
+  const t = useText();
+  const centerConn = useCenterConnection();
+  const [submitting, setSubmitting] = useState(false);
+  const [approved, setApproved] = useState(false);
+  const [error, setError] = useState('');
+
+  const boundUrl = centerConn.status?.centerUrl || centerConn.saved?.url || '';
+  const boundOrigin = normalizeCenterOrigin(boundUrl);
+  const qrOrigin = normalizeCenterOrigin(login.centerUrl);
+  const boundHost = hostOfUrl(boundUrl);
+  const sameCenter = Boolean(boundOrigin && qrOrigin && boundOrigin === qrOrigin);
+  const canApprove = Boolean(centerConn.ready && sameCenter);
+
+  const approve = () => {
+    if (!canApprove || submitting) return;
+    setSubmitting(true);
+    setError('');
+    void mobileClientRequest('center_qr_login_approve', {
+      challengeId: login.challengeId,
+      qrNonce: login.qrNonce,
+    })
+      .then(
+        () => setApproved(true),
+        err => setError(errorText(err, t('确认网页端登录失败，请重试', 'Failed to confirm web login'))),
+      )
+      .finally(() => setSubmitting(false));
+  };
+
+  if (approved) {
+    return (
+      <>
+        <div className="hst-row-static">
+          <StatusLine tone="good">
+            <CheckCircle2 size={16} aria-hidden="true" />
+            <span>{t('✓ 已确认网页端登录', '✓ Web login confirmed')}</span>
+          </StatusLine>
+        </div>
+        <div className="hst-row-static">
+          <span className="ob-note">
+            {t(`电脑浏览器（${login.centerHost}）将自动进入中心管理。`, `Your browser (${login.centerHost}) will sign in shortly.`)}
+          </span>
+        </div>
+        <div className="hst-actions">
+          <button type="button" className="hst-btn is-primary" onClick={() => (onDone ?? onCancel)()}>
+            {t('完成', 'Done')}
+          </button>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div className="hst-row-static">
+        <span className="bs-row-title">{t('确认在电脑浏览器登录中心管理？', 'Confirm login to Center Admin in your browser?')}</span>
+      </div>
+      <div className="hst-row-static">
+        <span className="ob-note">{t(`目标中心：${login.centerHost}`, `Target center: ${login.centerHost}`)}</span>
+      </div>
+      {!boundOrigin && (
+        <div className="hst-row-static">
+          <ErrorNotice
+            tone="warning"
+            title={t('本机尚未绑定中心', 'This device is not bound yet')}
+            description={t('请先扫码绑定该中心后，再使用扫一扫确认网页端登录。', 'Bind this device to the center first, then scan to approve web login.')}
+            compact
+          />
+        </div>
+      )}
+      {boundOrigin && !sameCenter && (
+        <div className="hst-row-static">
+          <ErrorNotice
+            tone="danger"
+            title={t('中心地址不一致', 'Different center')}
+            description={t(
+              `此登录二维码属于其他中心（${login.centerHost}），与本机当前绑定的中心（${boundHost || boundOrigin}）不一致。`,
+              `This QR code belongs to another center (${login.centerHost}), not your bound center (${boundHost || boundOrigin}).`,
+            )}
+            compact
+          />
+        </div>
+      )}
+      {sameCenter && !centerConn.ready && (
+        <div className="hst-row-static">
+          <ErrorNotice
+            tone="warning"
+            title={t('中心连接未就绪', 'Center not connected')}
+            description={t('当前与中心的连接尚未就绪，请等待重连后再确认登录。', 'Connection to the center is not ready yet. Wait for reconnect and try again.')}
+            compact
+          />
+        </div>
+      )}
+      {error && (
+        <div className="hst-row-static">
+          <ErrorNotice error={error} compact onDismiss={() => setError('')} />
+        </div>
+      )}
+      <div className="hst-actions">
+        <button type="button" className="hst-btn" disabled={submitting} onClick={onCancel}>
+          {t('取消', 'Cancel')}
+        </button>
+        <button type="button" className="hst-btn is-primary" disabled={!canApprove || submitting} onClick={approve}>
+          {submitting ? t('确认中…', 'Confirming…') : t('确认登录', 'Confirm Login')}
+        </button>
+      </div>
+    </>
+  );
+}
 
 /** 手工令牌连接：沿用设置页原有表单（URL + 设备标识 + 客户端令牌 + 重连/清除）。 */
 function ManualCenterConnect({ onDone }: { onDone?: () => void }) {
@@ -313,22 +458,39 @@ function PairCenterForm({ onDone }: { onDone?: () => void }) {
  * 地址、一次性密钥与私有 CA 都在码里，由原生解码——这里只持有用户粘贴/扫到的原文，成功即清除。
  * 失败在本表单里按原生给的说明展示（见 CenterGate.pairWithCode），不走通用归类。
  */
-function PairCodeForm({ onDone }: { onDone?: () => void }) {
+function PairCodeForm({
+  onDone,
+  initialCode,
+  initialFailure,
+}: {
+  onDone?: () => void;
+  initialCode?: string;
+  initialFailure?: { code: string; message: string };
+}) {
   const t = useText();
   const centerConn = useCenterConnection();
-  const [text, setText] = useState('');
+  const [text, setText] = useState(() => {
+    if (!initialCode) return '';
+    return readPaste(initialCode).kind === 'web-login' ? '' : initialCode;
+  });
+  const [webLogin, setWebLogin] = useState<ScannedWebLogin | null>(() => {
+    if (!initialCode) return null;
+    const parsed = readPaste(initialCode);
+    return parsed.kind === 'web-login' ? parsed : null;
+  });
   const [force, setForce] = useState(false);
   const [suggestForce, setSuggestForce] = useState(false);
   const [scanning, setScanning] = useState(false);
-  const [failure, setFailure] = useState<{ code: string; message: string }>();
+  const [failure, setFailure] = useState<{ code: string; message: string } | undefined>(initialFailure);
   const [result, setResult] = useState<PairCenterResult>();
+  const autoSubmittedInitialRef = useRef(false);
   const paste = readPaste(text);
   const working = centerConn.busy || scanning;
   // 本机已有绑定时（或原生刚报 ALREADY_CONFIGURED），替换必须由用户明确勾选：此时不自动提交。
   const showForce = Boolean(centerConn.saved?.url) || suggestForce;
   const mayAutoSubmit = !showForce || force;
 
-  const submit = (code: string) => {
+  const submit = useCallback((code: string) => {
     setFailure(undefined);
     void centerConn.pairWithCode(code, { force }).then(
       done => {
@@ -347,12 +509,29 @@ function PairCodeForm({ onDone }: { onDone?: () => void }) {
         setFailure(info);
       },
     );
-  };
+  }, [centerConn, force, onDone]);
+
+  useEffect(() => {
+    if (autoSubmittedInitialRef.current || !initialCode || webLogin) return;
+    autoSubmittedInitialRef.current = true;
+    const parsed = readPaste(initialCode);
+    if (parsed.kind === 'code' && mayAutoSubmit && !working) {
+      submit(initialCode);
+    }
+  }, [initialCode, webLogin, mayAutoSubmit, working, submit]);
 
   const onPaste = (value: string) => {
+    const parsed = readPaste(value);
+    if (parsed.kind === 'web-login') {
+      setText('');
+      setFailure(undefined);
+      setWebLogin(parsed);
+      return;
+    }
+    setWebLogin(null);
     setText(value);
     setFailure(undefined);
-    if (readPaste(value).kind === 'code' && !working && mayAutoSubmit) submit(value);
+    if (parsed.kind === 'code' && !working && mayAutoSubmit) submit(value);
   };
 
   const scan = () => {
@@ -362,14 +541,38 @@ function PairCodeForm({ onDone }: { onDone?: () => void }) {
       .then(
         scanned => {
           if (!scanned.text) return; // 用户返回/取消：什么都不做
+          const parsed = readPaste(scanned.text);
+          if (parsed.kind === 'web-login') {
+            setText('');
+            setWebLogin(parsed);
+            return;
+          }
+          setWebLogin(null);
           setText(scanned.text);
-          if (readPaste(scanned.text).kind !== 'code') return; // 提示行会说明这不是配对码
+          if (parsed.kind !== 'code') return; // 提示行会说明这不是配对码
           if (mayAutoSubmit) submit(scanned.text);
         },
         error => setFailure(failureOf(error)),
       )
       .finally(() => setScanning(false));
   };
+
+  if (webLogin) {
+    return (
+      <WebLoginConfirmView
+        login={webLogin}
+        onCancel={() => {
+          setWebLogin(null);
+          setText('');
+        }}
+        onDone={() => {
+          setWebLogin(null);
+          setText('');
+          onDone?.();
+        }}
+      />
+    );
+  }
 
   if (result) {
     return <PairResultView result={result} onChange={setResult} onEdit={() => setResult(undefined)} />;
@@ -380,7 +583,7 @@ function PairCodeForm({ onDone }: { onDone?: () => void }) {
       ? t(`将连接到 ${paste.centerHost}`, `Will connect to ${paste.centerHost}`)
       : t('本机已有绑定：勾选“替换本机已保存的绑定”后点击配对', 'This device is already bound: tick “Replace the binding saved on this device”, then pair'))
     : paste.kind === 'not-code'
-      ? t('这不是配对码。请在中心管理页的「设备与 Bot」点击「添加设备」获取。', 'That is not a pairing code. Get one from “Add device” on the center’s Devices page.')
+      ? t('这不是配对码或网页登录码。请在中心管理页获取配对码或登录二维码。', 'That is not a pairing or web-login code. Get one from Center Admin.')
       : paste.kind === 'damaged'
         ? t('配对码不完整或已损坏，请重新复制完整的配对码。', 'The pairing code is incomplete or damaged. Copy the whole code again.')
         : paste.kind === 'unsupported'
@@ -391,14 +594,14 @@ function PairCodeForm({ onDone }: { onDone?: () => void }) {
     <>
       <div className="hst-row-static">
         <span className="ob-note">
-          {t('在中心管理页的「设备与 Bot」点击「添加设备」，用本机扫描二维码；也可以复制配对码粘贴到下面。',
-            'On the center’s Devices page click “Add device”, then scan the QR code with this phone, or paste the pairing code below.')}
+          {t('在中心管理页的「设备与 Bot」点击「添加设备」扫描二维码绑定，或扫描网页端登录二维码；也可粘贴配对码。',
+            'Scan a device pairing QR from Center Admin → Devices, scan a web login QR, or paste a pairing code below.')}
         </span>
       </div>
       <div className="hst-actions">
         <button type="button" className="hst-btn is-primary" disabled={working} onClick={scan}>
           <ScanLine size={16} aria-hidden="true" />
-          {scanning ? t('正在扫码…', 'Scanning…') : t('扫码配对', 'Scan to Pair')}
+          {scanning ? t('正在扫码…', 'Scanning…') : t('扫码配对 / 登录', 'Scan QR')}
         </button>
       </div>
       <div className="hst-row-static">
@@ -522,34 +725,97 @@ function failureText(failure: { code: string; message: string }, t: Translate): 
 }
 
 /**
- * 中心连接卡：无已存凭据时默认配对码配对（旧版中心用的所有者密码、手工令牌收进折叠项），
- * 有已存凭据时保持原有手工表单（自动重连不变），重新配对收进折叠项。
+ * 中心连接卡：无论是否曾保存过连接，始终以扫码/粘贴配对码为主视图；
+ * 所有者密码配对与手动令牌连接统一收进折叠的高级连接方式。
  */
 export function OnboardingPanel({ onDone }: { onDone?: () => void }) {
   const t = useText();
-  const centerConn = useCenterConnection();
-  // 分支在挂载时锁定：配对成功后 savedConnection 更新不得卸载结果视图/丢失 warnings 与重连入口；
-  // 重新进入设置时按最新 saved 重新选择。
-  const [hasSaved] = useState(() => Boolean(centerConn.saved?.url));
-  return hasSaved ? (
-    <>
-      <ManualCenterConnect onDone={onDone} />
-      <Disclosure title={t('用配对码重新配对', 'Re-pair with a pairing code')}>
-        <PairCodeForm onDone={onDone} />
-      </Disclosure>
-      <Disclosure title={t('用所有者密码重新配对', 'Re-pair with owner password')}>
-        <PairCenterForm onDone={onDone} />
-      </Disclosure>
-    </>
-  ) : (
+  return (
     <>
       <PairCodeForm onDone={onDone} />
-      <Disclosure title={t('其他连接方式：所有者密码（旧版中心）', 'Other ways: owner password (older centers)')}>
-        <PairCenterForm onDone={onDone} />
+      <Disclosure title={t('高级连接方式', 'Advanced connection options')}>
+        <Section title={t('所有者密码配对', 'Owner password pairing')} bare>
+          <PairCenterForm onDone={onDone} />
+        </Section>
+        <Section title={t('手动令牌连接', 'Manual token connection')} bare>
+          <ManualCenterConnect onDone={onDone} />
+        </Section>
       </Disclosure>
-      <Disclosure title={t('高级：手动令牌连接', 'Advanced: manual token')}>
-        <ManualCenterConnect onDone={onDone} />
-      </Disclosure>
+    </>
+  );
+}
+
+/** 快捷扫码按钮：同时支持网页端登录确认码（pibotlogin1.）与设备配对码（pibot1.）。 */
+export function QuickQrScanButton({
+  className = 'hst-btn',
+  disabled = false,
+  onPaired,
+}: {
+  className?: string;
+  disabled?: boolean;
+  onPaired?: () => void;
+}) {
+  const t = useText();
+  const [scanning, setScanning] = useState(false);
+  const [modalState, setModalState] = useState<
+    | { kind: 'web-login'; login: ScannedWebLogin }
+    | { kind: 'pair-code'; code?: string; failure?: { code: string; message: string } }
+    | null
+  >(null);
+
+  const startScan = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    if (scanning || disabled) return;
+    setScanning(true);
+    void scanPairingCode()
+      .then(
+        scanned => {
+          if (!scanned.text) return;
+          const parsed = readPaste(scanned.text);
+          if (parsed.kind === 'web-login') {
+            setModalState({ kind: 'web-login', login: parsed });
+          } else {
+            setModalState({ kind: 'pair-code', code: scanned.text });
+          }
+        },
+        error => {
+          setModalState({ kind: 'pair-code', failure: failureOf(error) });
+        },
+      )
+      .finally(() => setScanning(false));
+  };
+
+  return (
+    <>
+      <button type="button" className={className} disabled={disabled || scanning} onClick={startScan}>
+        <ScanLine size={15} aria-hidden="true" />
+        <span>{scanning ? t('扫码中…', 'Scanning…') : t('扫一扫', 'Scan QR')}</span>
+      </button>
+      {modalState && (
+        <SettingsSheet
+          title={modalState.kind === 'web-login' ? t('网页端登录确认', 'Web Login Confirmation') : t('扫码连接', 'Scan QR Code')}
+          onClose={() => setModalState(null)}
+        >
+          <Section>
+            {modalState.kind === 'web-login' ? (
+              <WebLoginConfirmView
+                login={modalState.login}
+                onCancel={() => setModalState(null)}
+                onDone={() => setModalState(null)}
+              />
+            ) : (
+              <PairCodeForm
+                initialCode={modalState.code}
+                initialFailure={modalState.failure}
+                onDone={() => {
+                  setModalState(null);
+                  onPaired?.();
+                }}
+              />
+            )}
+          </Section>
+        </SettingsSheet>
+      )}
     </>
   );
 }
