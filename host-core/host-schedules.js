@@ -4,7 +4,7 @@
 //   BotHostSchedules (AlarmManager + files/bot-host/schedules.sqlite).
 // - When nativeBridge is absent (Windows/Linux Desktop & Server Node Host),
 //   persists to dataRoot/schedules.sqlite with the exact same schema, CAS
-//   revision semantics, pre-send claim state machine, and recurrence rules.
+//   revision semantics, fenced handoff state machine, and recurrence rules.
 
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, existsSync } from 'node:fs';
@@ -33,6 +33,7 @@ const WAKE_INTERVAL_MS = 5_000;
 const RETRY_DELAY_MS = 2_000;
 const MAX_TIMER_MS = 60_000;
 const SOURCE_PREFIX = 'Scheduled task; not an authenticated human message';
+const HANDOFF_VERSION = 1;
 
 const TERMINAL_RUNS = new Set([
   'done',
@@ -73,6 +74,32 @@ function stableRequestId(taskId, revision, occurrence) {
   return createHash('sha256')
     .update(`${taskId}|${revision}|${occurrence}`, 'utf8')
     .digest('hex');
+}
+
+function scheduleText(run) {
+  return `${SOURCE_PREFIX}${run.skills?.length ? '\nLoad these skills with the read tool before executing: ' + JSON.stringify(run.skills) + '\n' : ' '}${run.prompt}`;
+}
+
+/** An armed handoff freezes both the input and the Host's durable stop fence. */
+function handoffOf(run) {
+  const handoff = run?.handoff;
+  if (!isPlainObject(handoff) || handoff.version !== HANDOFF_VERSION ||
+      (handoff.state !== 'pending' && handoff.state !== 'accepted') ||
+      !Number.isSafeInteger(handoff.stopEpoch) || handoff.stopEpoch < 0 ||
+      !isPlainObject(handoff.input) || handoff.input.requestId !== run.requestId ||
+      typeof handoff.input.text !== 'string' || handoff.input.text.trim() === '') return null;
+  return handoff;
+}
+
+function pendingHandoff(run) {
+  const handoff = handoffOf(run);
+  // Older Hosts can have recorded acceptance without updating the new field.
+  // Never turn a known accepted receipt into a fresh submission after downgrade.
+  return handoff?.state === 'pending' &&
+    !(Number.isSafeInteger(run.submissionId) && run.submissionId > 0) &&
+    !SUBMISSION_ACTIVE.has(run.submissionStatus) && !SUBMISSION_TERMINAL.has(run.submissionStatus) &&
+    !SUBMISSION_ACTIVE.has(run.status) && !SUBMISSION_TERMINAL.has(run.status)
+    ? handoff : null;
 }
 
 function ownerOf(value) {
@@ -236,6 +263,9 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
   let wakeTimer = null;
   let inflight = null;
   let lastPlanIndex = 0;
+  // Only a successful, authoritative lookup permits a retry. This permission is
+  // deliberately process-local: every restart reconciles the durable inbox first.
+  const missingRunIds = new Set();
 
   function openDb() {
     if (db) return db;
@@ -545,6 +575,7 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
     const now = Date.now();
     for (const run of st.runs) {
       if (run.status !== 'dispatching' || run.submitted) continue;
+      if (pendingHandoff(run)) continue;
       run.status = 'skipped_offline';
       run.reason = 'offline';
       run.finishedAt = now;
@@ -610,7 +641,7 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
     wakeTimer.unref?.();
   }
 
-  function planStepLocked() {
+  function planStepLocked(supportsHandoff) {
     try {
       return inTx((database) => {
         const st = loadFromDb(database);
@@ -622,6 +653,28 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
           const run = st.runs[i];
           const status = run.status;
           const submitted = Boolean(run.submitted);
+          if (ACTIVE_RUNS.has(status) && pendingHandoff(run)) {
+            // An armed occurrence can outlive a schedule edit. Only an actual
+            // missing inbox record permits resubmission; never infer this from a
+            // timeout, an invalid response, or a previously accepted receipt.
+            const retry = supportsHandoff && missingRunIds.has(run.id);
+            if (retry) {
+              const task = st.tasks.find((t) => t.id === run.taskId);
+              const bot = host.getBot(ownerOf(run).botId);
+              if (!task || !bot || bot.archivedAt) {
+                run.status = 'skipped_offline';
+                run.reason = !task ? 'task_deleted' : 'bot_unavailable';
+                run.finishedAt = Date.now();
+                run.submitted = true;
+                missingRunIds.delete(run.id);
+                saveToDb(database, st);
+                continue;
+              }
+            }
+            lastPlanIndex = i;
+            return { kind: retry ? 'submitScheduled' : 'getSubmission', runId: run.id,
+              run: structuredClone(run), supportsHandoff };
+          }
           if (status === 'dispatching' && !submitted) {
             const task = st.tasks.find((t) => t.id === run.taskId);
             const bot = host.getBot(ownerOf(run).botId);
@@ -634,7 +687,8 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
               continue;
             }
             lastPlanIndex = i;
-            return { kind: 'submit', runId: run.id, run: structuredClone(run) };
+            return { kind: supportsHandoff ? 'getScheduleFence' : 'submit', runId: run.id,
+              run: structuredClone(run), supportsHandoff };
           }
           if (submitted && (status === 'unconfirmed' || SUBMISSION_ACTIVE.has(status))) {
             lastPlanIndex = i;
@@ -648,16 +702,22 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
     }
   }
 
-  function claimPreSend(runId) {
+  function claimPreSend(step) {
     try {
       return inTx((database) => {
         const st = loadFromDb(database);
-        const run = st.runs.find((r) => r.id === runId);
-        if (!run || run.status !== 'dispatching' || run.submitted) return false;
+        const run = st.runs.find((r) => r.id === step.runId);
+        if (!run || !ACTIVE_RUNS.has(run.status)) return false;
+        if (step.kind === 'submitScheduled') {
+          if (!pendingHandoff(run) || !missingRunIds.has(run.id)) return false;
+        } else if (run.status !== 'dispatching' || run.submitted || run.handoff !== undefined) {
+          return false;
+        }
         run.submitted = true;
         run.status = 'unconfirmed';
         run.updatedAt = Date.now();
         saveToDb(database, st);
+        missingRunIds.delete(run.id);
         return true;
       });
     } catch {
@@ -683,16 +743,40 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
     if (closed || !ready) return;
     let status = null;
     let deleted = false;
+    let continueNow = false;
     try {
       status = inTx((database) => {
         const st = loadFromDb(database);
         const run = st.runs.find((r) => r.id === step.runId);
-        if (!run) return null;
+        // A late response cannot revive an occurrence cancelled/deleted while the
+        // lookup or submission was in flight.
+        if (!run || !ACTIVE_RUNS.has(run.status)) return null;
         const now = Date.now();
-        if (error) {
+        if (step.kind === 'getScheduleFence') {
+          const runOwner = ownerOf(run);
+          if (!error && isPlainObject(result) && result.botId === runOwner.botId &&
+              result.conversationId === runOwner.conversationId &&
+              Number.isSafeInteger(result.stopEpoch) && result.stopEpoch >= 0 &&
+              run.status === 'dispatching' && !run.submitted && run.handoff === undefined) {
+            // Freeze before any submit. A later stop makes this epoch stale; the
+            // Host will durably return a cancelled receipt instead of reviving it.
+            run.handoff = {
+              version: HANDOFF_VERSION,
+              state: 'pending',
+              input: { requestId: run.requestId, text: scheduleText(run) },
+              stopEpoch: result.stopEpoch,
+            };
+            continueNow = true;
+          }
+          // Unarmed failures remain dispatching. They must never be mistaken for
+          // an attempted legacy submission, or a durable, recoverable handoff.
+          run.updatedAt = now;
+        } else if (error) {
+          missingRunIds.delete(run.id);
           if (
-            step.kind === 'submit' &&
-            (error.outcome === 'not-sent' || NOT_SENT_ERROR_CODES.has(error.code))
+            (step.kind === 'submit' || step.kind === 'submitScheduled') &&
+            (NOT_SENT_ERROR_CODES.has(error.code) || error.code === 'REQUEST_CONFLICT' ||
+             (step.kind === 'submit' && error.outcome === 'not-sent'))
           ) {
             run.status = 'not_sent';
             run.reason = 'not_sent';
@@ -702,6 +786,14 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
             run.submitted = true;
           }
           run.updatedAt = now;
+        } else if (step.kind === 'getSubmission' && result === null && pendingHandoff(run) && step.supportsHandoff) {
+          // Null is the direct Host API's explicit "not durably accepted" result.
+          // Keep the original request and fence; restart clears this permission.
+          missingRunIds.add(run.id);
+          run.status = 'dispatching';
+          run.submitted = false;
+          run.updatedAt = now;
+          continueNow = true;
         } else if (!isPlainObject(result)) {
           run.status = 'unconfirmed';
           run.submitted = true;
@@ -710,19 +802,29 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
           const runOwner = ownerOf(run);
           const subStatus = result.status;
           const subId = result.submissionId;
+          const nativeReceipt = Number.isSafeInteger(subId) && subId > 0;
+          // Host admission is already durable before a native submission exists.
+          // A cancelled Host queue entry also retains a null-id terminal receipt.
+          const hostReceipt = subId === null && (subStatus === 'queued' ||
+            (subStatus === 'unanswered' && result.reason === 'cancelled'));
           if (
             result.botId !== runOwner.botId ||
             result.conversationId !== runOwner.conversationId ||
             result.requestId !== run.requestId ||
             typeof subStatus !== 'string' ||
             (!SUBMISSION_TERMINAL.has(subStatus) && !SUBMISSION_ACTIVE.has(subStatus)) ||
-            !Number.isSafeInteger(subId) ||
-            subId <= 0
+            (!nativeReceipt && !hostReceipt)
           ) {
             run.status = 'unconfirmed';
             run.submitted = true;
             run.updatedAt = now;
           } else {
+            missingRunIds.delete(run.id);
+            const handoff = handoffOf(run);
+            if (handoff) {
+              handoff.state = 'accepted';
+              handoff.acceptedAt ??= now;
+            }
             run.submissionStatus = subStatus;
             run.submissionId = subId;
             if (SUBMISSION_TERMINAL.has(subStatus)) {
@@ -748,7 +850,9 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
     } catch {
       /* ignore settle error */
     }
-    if (status && ACTIVE_RUNS.has(status)) {
+    if (continueNow && status && ACTIVE_RUNS.has(status)) {
+      drive();
+    } else if (status && ACTIVE_RUNS.has(status)) {
       scheduleRetry();
     } else {
       drive();
@@ -761,19 +865,20 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
       clearTimeout(wakeTimer);
       wakeTimer = null;
     }
-    const step = planStepLocked();
+    const rt = getRuntime?.();
+    const supportsHandoff = typeof rt?.getScheduleFence === 'function' && typeof rt?.submitScheduled === 'function';
+    const step = planStepLocked(supportsHandoff);
     if (!step) {
       scheduleWakeIfActive();
       return;
     }
-    const rt = getRuntime?.();
     if (!rt || (typeof isOnline === 'function' && !isOnline())) {
       scheduleRetry();
       return;
     }
     inflight = step;
-    if (step.kind === 'submit') {
-      if (!claimPreSend(step.runId)) {
+    if (step.kind === 'submit' || step.kind === 'submitScheduled') {
+      if (!claimPreSend(step)) {
         inflight = null;
         scheduleRetry();
         return;
@@ -783,16 +888,22 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
     const requestId = step.run.requestId;
     let promise;
     try {
-      promise =
-        step.kind === 'submit'
-          ? rt.submit(botId, {
-              requestId,
-              text: `${SOURCE_PREFIX}${step.run.skills?.length ? '\nLoad these skills with the read tool before executing: ' + JSON.stringify(step.run.skills) + '\n' : ' '}${step.run.prompt}`,
-              // 内部计划任务是可信 host 来源输入：稳定 requestId + host 归属，
-              // 与用户私聊轮共享准入但不冒名 user。
-              origin: { sender: { kind: 'host' }, replyTo: null },
-            })
-          : rt.getSubmission(botId, requestId);
+      if (step.kind === 'getScheduleFence') {
+        promise = rt.getScheduleFence(botId);
+      } else if (step.kind === 'submitScheduled') {
+        const handoff = handoffOf(step.run);
+        promise = rt.submitScheduled(botId, { ...handoff.input, stopEpoch: handoff.stopEpoch });
+      } else if (step.kind === 'submit') {
+        // Older runtimes retain single-attempt semantics and never acquire a new
+        // handoff marker. Only the fenced internal API permits automatic retry.
+        promise = rt.submit(botId, {
+          requestId,
+          text: scheduleText(step.run),
+          origin: { sender: { kind: 'host' }, replyTo: null },
+        });
+      } else {
+        promise = rt.getSubmission(botId, requestId);
+      }
     } catch (err) {
       settle(step, null, err);
       return;
@@ -1073,11 +1184,13 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
           st.tasks = st.tasks.filter((task) => !ownerMatches(task, owner));
           const now = Date.now();
           for (const run of st.runs) {
-            if (ownerMatches(run, owner) && run.status === 'dispatching' && !run.submitted) {
+            if (ownerMatches(run, owner) &&
+                ((run.status === 'dispatching' && !run.submitted) || pendingHandoff(run))) {
               run.status = 'skipped_offline';
               run.reason = 'task_deleted';
               run.finishedAt = now;
               run.submitted = true;
+              missingRunIds.delete(run.id);
             }
           }
           if (st.tasks.length !== before) {
@@ -1098,6 +1211,7 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
       closed = true;
       ready = false;
       inflight = null;
+      missingRunIds.clear();
       if (alarmTimer) {
         clearTimeout(alarmTimer);
         alarmTimer = null;

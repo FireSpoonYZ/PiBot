@@ -279,6 +279,20 @@ export async function openControlServer(options) {
     // Internal SSE wakeup only; no public route or caller-supplied origin.
     notifyWebhookReady: () => runtime.notifyWebhookReady(),
     notifyTaskReady: () => runtime.notifyTaskReady?.(),
+    // In-process schedule bridge only. Track accepted work so close waits for
+    // durable handoffs; never register these methods as HTTP/control routes.
+    getScheduleFence: (botId) => {
+      if (closed) throw new ControlHttpError(503, 'RUNTIME_BUSY', 'control server is closing');
+      const task = Promise.resolve().then(() => runtime.getScheduleFence(botId));
+      track(task);
+      return task;
+    },
+    submitScheduled: (botId, input) => {
+      if (closed) throw new ControlHttpError(503, 'RUNTIME_BUSY', 'control server is closing');
+      const task = Promise.resolve().then(() => runtime.submitScheduled(botId, input));
+      track(task);
+      return task;
+    },
     applyCenterSnapshot: (snapshot, options) => runtime.applyCenterSnapshot(snapshot, options),
     // 内部即时撤销；不注册 HTTP 路由，不对外暴露。
     revokeCenterCapabilities: (snapshot) => runtime.revokeCenterCapabilities(snapshot),

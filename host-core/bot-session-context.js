@@ -47,6 +47,18 @@ function cleanString(value) {
   return typeof value === 'string' && value !== '' ? value : undefined;
 }
 
+/** A presentation cannot confer authority on itself: it must address the
+ * actual tool task in this native conversation before the wait store is read. */
+export function questionnaireWaitKey(details, taskId, conversationId) {
+  const p = details?.presentation;
+  if (p?.kind !== 'questionnaire' || p.version !== 1 ||
+      typeof p.installationId !== 'string' || !p.installationId ||
+      !Number.isSafeInteger(p.conversationId) || p.conversationId < 1 ||
+      typeof p.requestId !== 'string' || p.requestId !== String(taskId) ||
+      (conversationId !== undefined && p.conversationId !== conversationId)) return null;
+  return JSON.stringify([p.installationId, p.conversationId, p.requestId]);
+}
+
 /** 把账本/触发条目的 author 归一为受信归属：只认 kind/botId/deviceId，名字仅作展示。 */
 export function senderAttribution(author, deviceId) {
   const kind = ATTRIBUTION_KINDS.has(author?.kind) ? author.kind : 'bot';
@@ -55,7 +67,7 @@ export function senderAttribution(author, deviceId) {
   const device = cleanString(deviceId) ?? cleanString(author?.deviceId);
   if (device) sender.deviceId = device;
   if (kind === 'host' && cleanString(author?.name)) sender.name = author.name.slice(0, 200);
-  if (kind === 'host' && author?.sourceType === 'webhook') sender.sourceType = 'webhook';
+  if (kind === 'host' && ['schedule', 'webhook', 'task_dispatch'].includes(author?.sourceType)) sender.sourceType = author.sourceType;
   return sender;
 }
 

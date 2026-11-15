@@ -51,6 +51,7 @@ const STATE_KEYS = new Set([
   'turnAdmission',
   'activity',
   'learning',
+  'durableWaits',
 ]);
 const HISTORY_ITEM_KEYS = new Set(['id', 'kind', 'messages', 'attribution']);
 // Live attribution is already a safe projection (Host-side whitelist + bounds in
@@ -80,8 +81,8 @@ function normalizeLiveAttribution(value) {
   }
   const out = { kind: value.kind, channel: value.channel };
   if (value.sourceType !== undefined) {
-    if (value.kind !== 'host' || value.sourceType !== 'webhook') {
-      throw invalid('attribution sourceType must be webhook on a host sender');
+    if (value.kind !== 'host' || !['schedule', 'webhook', 'task_dispatch'].includes(value.sourceType)) {
+      throw invalid('attribution sourceType must be a known Host event source');
     }
     out.sourceType = value.sourceType;
   }
@@ -120,6 +121,7 @@ const MESSAGE_KEYS = new Set([
   'nestedCalls',
   'nestedCallsTruncated',
   'presentation',
+  'durableWait',
   'attachments',
   'blocks',
 ]);
@@ -274,7 +276,37 @@ const TOOL_KEYS = new Set([
   'durationMs',
   'error',
   'presentation',
+  'durableWait',
 ]);
+
+function normalizeDurableWaits(value) {
+  // Matches the Host wait store's per-Bot active limit. This is identity only,
+  // not another copy of questions, answers, frozen routing or tool arguments.
+  if (!Array.isArray(value) || value.length > 64) throw invalid('durableWaits must contain at most 64 identities');
+  const seen = new Set();
+  return value.map((item) => {
+    if (!isPlainObject(item)) throw invalid('durableWait identity must be a plain object');
+    rejectUnknownFields(item, new Set(['installationId', 'conversationId', 'requestId']), 'durableWait identity');
+    for (const name of ['installationId', 'requestId']) {
+      if (typeof item[name] !== 'string' || !item[name].trim() || !item[name].isWellFormed() || Buffer.byteLength(item[name], 'utf8') > 1024) {
+        throw invalid(`durableWait ${name} must be a bounded id`);
+      }
+    }
+    if (!Number.isSafeInteger(item.conversationId) || item.conversationId < 1) throw invalid('durableWait conversationId must be a positive safe integer');
+    const key = JSON.stringify([item.installationId, item.conversationId, item.requestId]);
+    if (seen.has(key)) throw invalid('duplicate durableWait identity');
+    seen.add(key);
+    return { installationId: item.installationId, conversationId: item.conversationId, requestId: item.requestId };
+  });
+}
+
+function checkDurableWait(value, presentation, toolName) {
+  if (value === undefined) return;
+  if (typeof value !== 'boolean' || toolName !== 'ask_user_question' ||
+      (value && (presentation?.kind !== 'questionnaire' || presentation.status !== 'pending'))) {
+    throw invalid('durableWait is valid only on a pending questionnaire tool');
+  }
+}
 // Roles emitted by the existing projection; no extra roles are invented here.
 const MESSAGE_ROLES = new Set(['user', 'assistant', 'toolResult']);
 
@@ -635,6 +667,8 @@ function normalizeLiveState(state) {
       // Strict whitelist validation; replaces the value so any extra fields a
       // forged host added inside a presentation cannot reach clients.
       if (message.presentation !== undefined) message.presentation = normalizeToolPresentation(message.presentation);
+      if (message.durableWait !== undefined && message.role !== 'toolResult') throw invalid('durableWait is allowed only on tool results');
+      checkDurableWait(message.durableWait, message.presentation, message.toolName);
       // Metadata-only attachments are allowed on user messages; forged
       // attachments on assistant/toolResult messages are rejected.
       if (message.attachments !== undefined) {
@@ -693,6 +727,7 @@ function normalizeLiveState(state) {
       throw invalid('tool outcome must be ok, error, cancelled or interrupted');
     }
     if (tool.presentation !== undefined) tool.presentation = normalizeToolPresentation(tool.presentation);
+    checkDurableWait(tool.durableWait, tool.presentation, tool.name);
   }
   assertNonNegativeSafeInteger(state.queuedCount, 'state.queuedCount');
   if (state.queuedItems !== undefined) {
@@ -711,6 +746,7 @@ function normalizeLiveState(state) {
   if (state.learning !== undefined && state.learning !== null) {
     state.learning = normalizeBotLearningState(state.learning);
   }
+  if (state.durableWaits !== undefined) state.durableWaits = normalizeDurableWaits(state.durableWaits);
   return state;
 }
 

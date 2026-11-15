@@ -2171,6 +2171,24 @@ export function createTaskStore({ db, transaction, listBotsSnapshot, listBotCapa
     });
   }
 
+  // Bot deletion already owns the transaction that removes its directory and
+  // capability rows. Keep both dispatch updates in that same transaction so a
+  // later deletion failure rolls back the cancellation as well.
+  function cancelTaskDispatchesForBotInTransaction(deviceId, botId) {
+    if (!deviceId || !botId) return;
+    const now = nowMs();
+    db.prepare(`
+      UPDATE task_dispatches
+      SET status = 'cancelled', updated_at = ?
+      WHERE device_id = ? AND bot_id = ? AND status = 'pending'
+    `).run(now, deviceId, botId);
+    db.prepare(`
+      UPDATE task_dispatches
+      SET cancel_requested = 1, updated_at = ?
+      WHERE device_id = ? AND bot_id = ? AND status IN ('dispatching', 'queued', 'running')
+    `).run(now, deviceId, botId);
+  }
+
   return {
     getActiveTaskDispatcher,
     findExistingDispatcherBot,
@@ -2282,19 +2300,10 @@ export function createTaskStore({ db, transaction, listBotsSnapshot, listBotCapa
 
     cancelTaskDispatchesForBot(deviceId, botId) {
       if (!deviceId || !botId) return;
-      const now = nowMs();
-      transaction(() => {
-        db.prepare(`
-          UPDATE task_dispatches
-          SET status = 'cancelled', updated_at = ?
-          WHERE device_id = ? AND bot_id = ? AND status = 'pending'
-        `).run(now, deviceId, botId);
-        db.prepare(`
-          UPDATE task_dispatches
-          SET cancel_requested = 1, updated_at = ?
-          WHERE device_id = ? AND bot_id = ? AND status IN ('dispatching', 'queued', 'running')
-        `).run(now, deviceId, botId);
-      });
+      return transaction(() => cancelTaskDispatchesForBotInTransaction(deviceId, botId));
     },
+    // Internal composition entry; index.js consumes it without exposing it on
+    // the public store. Callers must already hold this database's transaction.
+    cancelTaskDispatchesForBotInTransaction,
   };
 }

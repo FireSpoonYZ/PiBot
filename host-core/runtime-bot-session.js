@@ -8,6 +8,7 @@ import { BotSessionState, WORK_TRIGGER_KIND, USER_MESSAGE_KIND,
 import { resolveBotIdentity } from './bot-identity.js';
 import { inboxQueryKey } from './message-queries.js';
 import { messageError } from './message-protocol.js';
+import { createExecutionEvent, createRunContext } from './runtime-execution-context.js';
 
 const SYNC_PAGE_LIMIT = 200;
 const OWNER_CHAIN_DEPTH = 8;
@@ -57,6 +58,7 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
       ...(origin.originRequestId ? { originRequestId: origin.originRequestId } : {}),
       sender: origin.sender,
       replyTarget: origin.replyTarget,
+      ...(Number.isSafeInteger(origin.stopEpoch) && origin.stopEpoch >= 0 ? { stopEpoch: origin.stopEpoch } : {}),
       frozenAt: new Date().toISOString(),
     };
   }
@@ -87,6 +89,7 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
         sender: senderAttribution(
           isObj(turn.sender) ? turn.sender : { kind: 'user', deviceId: host.deviceId }),
         replyTarget: isObj(turn.replyTarget) ? turn.replyTarget : { kind: 'primary' },
+        ...(Number.isSafeInteger(turn.stopEpoch) && turn.stopEpoch >= 0 ? { stopEpoch: turn.stopEpoch } : {}),
       };
     }
     if (entry.kind === WORK_TRIGGER_KIND && data) {
@@ -110,6 +113,7 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
         // identity 为已解析的本机执行 Bot：DM 默认回复目标取对端成员，不会误取成员[0]/自己。
         replyTarget: isObj(turn?.replyTarget) ? turn.replyTarget
                                               : defaultReplyTarget(identity, scope),
+        ...(Number.isSafeInteger(turn?.stopEpoch) && turn.stopEpoch >= 0 ? { stopEpoch: turn.stopEpoch } : {}),
       };
     }
     // 其他输入（含 legacy pi.user）：requestId 用实际提交身份，绝不复用先前轮来源；
@@ -329,6 +333,57 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
   }
 
   /**
+   * Passive execution projection. LiveRun.first is the SDK's persisted logical
+   * run anchor: generation handoffs (and continue after a failure) keep it.
+   * taskId identifies only the current generation. No second run ledger is
+   * created, and a tool must belong to the current run's actual owner chain.
+   * Business task contexts may only be supplied from the Host's byRequest doc.
+   */
+  async function getRunContext(api, context, { dispatchContexts = null } = {}) {
+    const h = harness();
+    const nativeId = api?.conversationId;
+    const identity = await resolveBotIdentity(host, h, nativeId, context);
+    const run = (await h.snapshot(LiveDoc, nativeId, context))?.run;
+    if (!run) return null;
+    if (api.taskId !== undefined) {
+      let current = await h.getTask(api.taskId, context);
+      let belongs = false;
+      for (let depth = 0; depth < OWNER_CHAIN_DEPTH && current; depth++) {
+        if (current.conversationId !== nativeId) return null;
+        if (String(current.id) === String(run.taskId)) { belongs = true; break; }
+        current = current.owner === undefined ? null : await h.getTask(current.owner, context);
+      }
+      if (!belongs) return null;
+    }
+    const events = [];
+    for (const id of run.inputs ?? []) {
+      const record = await h.commit((tx) => tx.submission(id), context);
+      if (record?.type !== 'input' || record.conversationId !== nativeId || record.entry === undefined) continue;
+      const entry = await h.commit((tx) => tx.entry(record.entry), context);
+      if (!entry) continue;
+      const turn = originFromInput(entry, record, identity);
+      events.push(createExecutionEvent({
+        turn,
+        submissionId: record.id,
+        dispatchContext: dispatchContexts?.[turn.requestId] ?? null,
+      }));
+    }
+    // Reads above can cross a handoff. Return no projection rather than attach
+    // one generation's identities to a newer run; the next request reads anew.
+    const latest = (await h.snapshot(LiveDoc, nativeId, context))?.run;
+    if (!latest || latest.taskId !== run.taskId || latest.first !== run.first ||
+        JSON.stringify(latest.inputs ?? []) !== JSON.stringify(run.inputs ?? [])) return null;
+    return createRunContext({
+      identity: { ...identity, nativeConversationId: nativeId },
+      nativeRun: run,
+      events,
+      runId: Number.isSafeInteger(run.first) && run.first > 0
+        ? `run:${JSON.stringify([identity.deviceId, nativeId, run.first])}` : null,
+      status: 'running',
+    });
+  }
+
+  /**
    * recordOutgoing(api, stored, context)：publishWork 幂等落账后，把 category=request 的
    * 原始发起来源持久化（键 messageId），供迟到回复寻源。首次写入后绝不覆盖：
    * 重放/重复提交保留原 replyTarget、origin requestId 与已观察水位。
@@ -417,5 +472,5 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
     }, ctx);
   }
 
-  return { sync, beforeRequest, getTurn, recordOutgoing, markRepliesObserved, replyOrigin, reset };
+  return { sync, beforeRequest, getTurn, getRunContext, recordOutgoing, markRepliesObserved, replyOrigin, reset };
 }

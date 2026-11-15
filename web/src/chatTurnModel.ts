@@ -11,7 +11,7 @@ export interface MessageAttribution {
   botId?: string;
   deviceId?: string;
   name?: string;
-  sourceType?: 'webhook';
+  sourceType?: 'schedule' | 'webhook' | 'task_dispatch';
   channel: 'primary' | 'dm' | 'room';
   scopeId?: string;
   messageId?: string;
@@ -61,8 +61,10 @@ export interface ChatToolCallItem {
   sendTo?: SendToToolPreview;
   /** host 投影的工具交互结构（todo/问卷）；来自 live slot 或历史 toolResult，未验证形状，渲染前需 readToolPresentation。 */
   presentation?: Record<string, unknown>;
-  /** presentation 来自仍活跃 live slot 时为 true，历史结果替换后为 false。 */
+  /** presentation 来自活跃 live slot 或 Host 验证的 durable wait 时为 true。 */
   presentationLive?: boolean;
+  /** Session-owned wait; the SDK tool itself may already be completed. */
+  durableWait?: boolean;
 }
 
 /**
@@ -540,7 +542,7 @@ export function normalizeAttribution(value: unknown): MessageAttribution | undef
   if (deviceId !== undefined) out.deviceId = deviceId;
   const name = readString(raw.name);
   if (name !== undefined) out.name = name;
-  if (kind === 'host' && raw.sourceType === 'webhook') out.sourceType = 'webhook';
+  if (kind === 'host' && (raw.sourceType === 'schedule' || raw.sourceType === 'webhook' || raw.sourceType === 'task_dispatch')) out.sourceType = raw.sourceType;
   const scopeId = readString(raw.scopeId);
   if (scopeId !== undefined) out.scopeId = scopeId;
   const messageId = readString(raw.messageId);
@@ -684,6 +686,60 @@ export function latestEntryChannel(
     if (c !== undefined) channel = c;
   }
   return channel;
+}
+
+function questionnaireKey(value: unknown): string | null {
+  const p = asRecord(value);
+  if (p.kind !== 'questionnaire' || p.version !== 1 ||
+      typeof p.installationId !== 'string' || !p.installationId || p.installationId.length > 1024 ||
+      !Number.isSafeInteger(p.conversationId) || (p.conversationId as number) < 1 ||
+      typeof p.requestId !== 'string' || !p.requestId || p.requestId.length > 1024) return null;
+  return JSON.stringify([p.installationId, p.conversationId, p.requestId]);
+}
+
+/** Preserve full raw tool output/arguments, but use current Host interaction
+ * state. A live identity disappearing revokes even a cached/out-of-window card.
+ * Details cannot self-authorize: only the complete live durableWaits set can. */
+export function mergeHistoryWaitProjection(
+  raw: Record<string, unknown>,
+  live: Record<string, unknown> | undefined,
+  durableWaits: unknown,
+): Record<string, unknown> {
+  const active = new Set<string>();
+  if (Array.isArray(durableWaits) && durableWaits.length <= 64) {
+    for (const identity of durableWaits) {
+      const key = questionnaireKey({ ...asRecord(identity), kind: 'questionnaire', version: 1 });
+      if (key !== null) active.add(key);
+    }
+  }
+  const latest = new Map<string, Record<string, unknown>>();
+  if (Array.isArray(live?.messages)) {
+    for (const message of live.messages) {
+      const m = asRecord(message);
+      if (m.role === 'toolResult' && typeof m.toolCallId === 'string') latest.set(m.toolCallId, m);
+    }
+  }
+  const overlay = (value: unknown) => {
+    const message = asRecord(value);
+    if (message.role !== 'toolResult') return value;
+    const details = asRecord(message.details);
+    const oldPresentation = message.presentation ?? details.presentation;
+    const key = questionnaireKey(oldPresentation);
+    const fresh = typeof message.toolCallId === 'string' ? latest.get(message.toolCallId) : undefined;
+    const freshPresentation = fresh?.presentation;
+    const same = key !== null && questionnaireKey(freshPresentation) === key;
+    const presentation = same ? asRecord(freshPresentation) : asRecord(oldPresentation);
+    const allowed = key !== null && active.has(key) && presentation.status === 'pending' && message.toolName === 'ask_user_question';
+    return {
+      ...message,
+      durableWait: allowed,
+      ...(same ? { presentation, ...(message.details !== undefined ? { details: { ...details, presentation } } : {}) } : {}),
+    };
+  };
+  return { ...raw,
+    ...(Array.isArray(raw.model) ? { model: raw.model.map(overlay) } : {}),
+    ...(Array.isArray(raw.messages) ? { messages: raw.messages.map(overlay) } : {}),
+  };
 }
 
 export function parseHistoryEntries(
@@ -1205,6 +1261,8 @@ export function parseHistoryEntries(
           acc.turn.entryId = numericId;
         }
         const presentationStatus = projectedPresentation?.status;
+        const durableWait = entry.durableWait === true && toolName === 'ask_user_question' &&
+          projectedPresentation?.kind === 'questionnaire' && presentationStatus === 'pending';
         const outcome = readToolOutcome(entry.outcome) ??
           (presentationStatus === 'cancelled' || presentationStatus === 'interrupted'
             ? presentationStatus
@@ -1214,7 +1272,8 @@ export function parseHistoryEntries(
         if (matched) {
           matched.status = resolvedStatus;
           matched.outcome = outcome;
-          matched.presentationLive = false;
+          matched.presentationLive = durableWait;
+          matched.durableWait = durableWait;
           readNestedCalls(matched, entry);
           acc.settledToolIds.add(matched.id);
           if (msgDurationMs !== undefined) matched.durationMs = msgDurationMs;
@@ -1222,7 +1281,7 @@ export function parseHistoryEntries(
           if (resultTruncated) matched.outputTruncated = true;
           if (projectedPresentation) {
             matched.presentation = projectedPresentation;
-            matched.presentationLive = false;
+            matched.presentationLive = durableWait;
           }
           applySendToMetadata(matched, matched.args, resultOutput || undefined, knownBots);
         } else if (toolName) {
@@ -1235,7 +1294,7 @@ export function parseHistoryEntries(
             durationMs: msgDurationMs,
             ...(resultOutput ? { output: resultOutput } : {}),
             ...(resultTruncated ? { outputTruncated: true } : {}),
-            ...(projectedPresentation ? { presentation: projectedPresentation, presentationLive: false } : {}),
+            ...(projectedPresentation ? { presentation: projectedPresentation, presentationLive: durableWait, durableWait } : {}),
           };
           applySendToMetadata(tool, undefined, resultOutput || undefined, knownBots);
           readNestedCalls(tool, entry);
@@ -1316,7 +1375,9 @@ export function parseHistoryEntries(
         ...(slotOutput ? { output: slotOutput } : {}),
         outputTruncated: slot?.truncated === true,
         ...(hasPresentation ? { presentation: slotPresentation } : {}),
-        presentationLive: hasPresentation && status === 'running',
+        presentationLive: hasPresentation && (status === 'running' || slot?.durableWait === true),
+        durableWait: hasPresentation && slot?.durableWait === true && name === 'ask_user_question' &&
+          slotPresentation.kind === 'questionnaire' && slotPresentation.status === 'pending',
       };
       applySendToMetadata(liveItem, undefined, slotOutput || undefined, knownBots);
       return liveItem;

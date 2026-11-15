@@ -1,11 +1,9 @@
 // e-launcher.ask-user-question — native Host plugin port of
 // @juicesharp/rpiv-ask-user-question 2.15.0 (MIT, see LICENSE). The model calls
-// ask_user_question; the questions persist in a task-scoped Durable document
-// and wait for the answerQuestionnaire capability action. Pending requests
-// survive process restarts and are answered by the same action; answers commit
-// only while their tool task is still live, so a settled task can never be
-// answered. Task-scoped docs retire with the task — terminal records never
-// linger, and history forks never clone a pending questionnaire.
+// ask_user_question. New questions persist as Host waits and end the current
+// run; the answerQuestionnaire action later enqueues a fenced continuation.
+// Task-scoped requests from older versions retain their original live-task
+// protocol until answered or stopped. Neither form is cloned by a history fork.
 import { prepareQuestionArguments, normalizeQuestionParams, normalizeLineTerminators } from './tool/normalize-params.js';
 import { validateQuestionnaire } from './tool/validate-questionnaire.js';
 import { buildQuestionnaireResponse, buildToolResult, DECLINE_MESSAGE } from './tool/response-envelope.js';
@@ -68,6 +66,7 @@ const DEFAULT_TOOL_DESCRIPTION = `Ask the user one or more structured questions 
 4. Offer choices to the user about what direction to take
 
 Usage notes:
+- Call this tool directly as the ONLY tool call in the model response, never inside codemode or another tool. Publishing a questionnaire pauses this execution and releases the Bot; a later user answer resumes the original work through a new input.
 - Users can type a custom answer via the automatically appended "Type something." row on every question or cancel the questionnaire entirely. Do NOT author "Other" or "Type something." labels yourself — reserved labels are rejected at runtime.
 - Use multiSelect: true when multiple answers are valid.
 - If you recommend a specific option, make that the first option in the list and add "(Recommended)" at the end of the label.
@@ -96,6 +95,25 @@ export function createPlugin({ installationId, host }) {
 
   return {
     async forBot({ botId }) {
+      // SDK resolves a replayed nested call against agent.callable too. Keep
+      // that path only for an actual pre-upgrade live request; new nested calls
+      // are rejected below. Normal installations expose a model-only tool.
+      let legacyNested = false;
+      if (host.waits) {
+        const harness = host.getHarness();
+        const inspection = await harness.inspect(host.context);
+        for (const item of inspection.tasks) {
+          const task = item.record;
+          if (task.kind !== TOOL_TASK_KIND || task.input?.kind !== 'nested' ||
+              task.input.call?.name !== ASK_USER_QUESTION_TOOL_NAME) continue;
+          const record = await harness.snapshot(Request, task.id, host.context);
+          if (!record || record.status === 'settled' || !isLegacyRecord(record)) continue;
+          if (await host.resolveConversationBot(task.conversationId) === botId) {
+            legacyNested = true;
+            break;
+          }
+        }
+      }
       // Combined release: the tool task's own abort (user stop) plus this
       // bot's quiesce/close — pending records stay pending either way.
       const botController = new AbortController();
@@ -139,6 +157,7 @@ export function createPlugin({ installationId, host }) {
           description: DEFAULT_TOOL_DESCRIPTION,
           parameters: QuestionParamsSchema,
           replay: 'safe',
+          ...(host.waits ? { callers: legacyNested ? ['model', 'tools'] : ['model'] } : {}),
           prepareArguments: prepareQuestionArguments,
           async execute(args, api, context) {
             context.abortSignal?.throwIfAborted();
@@ -159,6 +178,16 @@ export function createPlugin({ installationId, host }) {
               });
             }
             const phase = await api.memo('ask-user-question.phase', context);
+            // Check the old document as well as the memo: a previous process
+            // may have committed the question and stopped before its memo.
+            const legacy = phase === 'open' || (host.waits &&
+              isLegacyRecord(await api.snapshot(Request, api.taskId, context)));
+            if (host.waits && !legacy) {
+              return deferQuestionnaire(typed, api, context);
+            }
+            if (!host.waits && phase === 'deferred') {
+              throw Object.assign(new Error('The Host durable wait service is unavailable.'), { code: 'INVALID_STATE' });
+            }
             let params;
             if (phase !== 'open') {
               const details = requestDetails(installationId, conversationId, requestId, typed.questions);
@@ -229,6 +258,40 @@ export function createPlugin({ installationId, host }) {
             return answeredResult(record);
           },
         });
+      }
+
+      async function deferQuestionnaire(params, api, context) {
+        const task = await api.getTask(api.taskId, context);
+        const live = await api.snapshot(host.sdk.LiveDoc, api.conversationId, context);
+        const slots = live?.tools ?? [];
+        // terminate is honored only when every result in the model round asks
+        // for it. Requiring one direct call works in parallel and sequential
+        // mode without waiting on a sibling that may not have started yet.
+        if (task?.kind !== TOOL_TASK_KIND || task.input?.kind !== 'model' ||
+            slots.length !== 1 || slots[0].name !== ASK_USER_QUESTION_TOOL_NAME ||
+            slots[0].taskId !== api.taskId) {
+          return {
+            isError: true,
+            output: [{ type: 'text', text: 'Call ask_user_question directly as the only tool call in a separate model response. No questionnaire was opened.' }],
+          };
+        }
+        const requestId = String(api.taskId);
+        const details = requestDetails(installationId, api.conversationId, requestId, params.questions);
+        if (details === null) {
+          return buildToolResult('Error: questionnaire exceeds the presentation size budget', {
+            answers: [], cancelled: true, error: 'invalid_params',
+          });
+        }
+        const record = await host.waits.open(botId, { installationId, requestId, params, details }, api, context);
+        await api.memo('ask-user-question.phase', 'deferred', context);
+        await api.details(record.details, context);
+        return {
+          output: [{ type: 'text', text: record.status === 'pending'
+            ? 'The questionnaire is waiting for the user. This execution is paused; the Bot is free to handle other inputs. A persisted continuation will resume this work after the answer.'
+            : 'This questionnaire has already been settled. Its persisted continuation owns the next step.' }],
+          details: record.details,
+          control: { terminate: true },
+        };
       }
 
       /**
@@ -333,6 +396,26 @@ export function createPlugin({ installationId, host }) {
           throw Object.assign(new Error('Conversation does not belong to this Bot.'), { code: 'BOT_CONTEXT_REQUIRED' });
         }
 
+        const deferredIdentity = { installationId, conversationId: input.conversationId, requestId: input.requestId };
+        if (host.waits && await host.waits.get(botId, deferredIdentity, invocationContext)) {
+          return host.waits.answer(botId, deferredIdentity, (record) => {
+            const resolved = resolveAnswers(record.params.questions, {
+              cancelled: input.cancelled, answers: input.answers, globalNote,
+            });
+            if (!resolved.ok) throw Object.assign(new Error(resolved.reason), { code: 'VALIDATION_FAILED' });
+            const details = requestDetails(installationId, input.conversationId, input.requestId,
+              record.params.questions, resolved.result);
+            if (details === null || presentationBytes(details) > PRESENTATION_MAX_BYTES) {
+              throw Object.assign(new Error('Answered questionnaire exceeds the presentation size budget'), { code: 'VALIDATION_FAILED' });
+            }
+            const response = buildQuestionnaireResponse(resolved.result, record.params);
+            return {
+              result: resolved.result, details,
+              text: response.output.filter(item => item.type === 'text').map(item => item.text).join('\n'),
+            };
+          }, invocationContext);
+        }
+
         const committed = await host.getHarness().commit(async (tx) => {
           // Expired-answer guard: the request may only settle while its tool
           // task is still live — a settled task can never be asked again.
@@ -406,4 +489,10 @@ export function createPlugin({ installationId, host }) {
     },
     async close() { await Promise.all([...bots].map((bot) => bot.close())); },
   };
+}
+
+function isLegacyRecord(record) {
+  return record !== null && record !== undefined && record.status !== 'settled' &&
+    Array.isArray(record.params?.questions) && record.params.questions.length > 0 &&
+    record.details?.presentation?.kind === 'questionnaire';
 }

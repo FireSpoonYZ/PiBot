@@ -5,7 +5,7 @@
 // 中间不 await，避免漏掉此间的 commit。
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
 import { getPrimaryConversation } from './runtime-docs.js';
-import { BotSessionState } from './bot-session-context.js';
+import { BotSessionState, questionnaireWaitKey } from './bot-session-context.js';
 import { GenerationFailureState } from './generation-failure.js';
 import { normalizeBotBoardParams } from './bot-board-protocol.js';
 import { readBotBoardDetails, projectBotBoardItem } from './runtime-bot-board.js';
@@ -319,7 +319,7 @@ function deepFreeze(value) {
  * 两类 watch 共享同一生命周期/单飞行 attach/串行监听泵（projection 上限/深冻结/合并
  * 最新状态复用），不新增轮询。
  */
-export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
+export function createRuntimeLive({ host, getHarness, resolveWorkContext, getWaits = () => null }) {
   const pendingByBot = new Map(); // botId -> Set<watch>
   const pendingByWork = new Map(); // "botId\0scopeId" -> Set<watch>
   const watches = new Set(); // 全部未结束 watch，供 close 统一停止
@@ -388,6 +388,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       // 不先把无来源的 peer 正文当作用户消息推给客户端。
       sessionState: null,
       pendingView: null,
+      latestView: null,
+      projectionRevision: 0,
       attributionLoad: null,
       initialized: false,
       boardView: null,
@@ -502,6 +504,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     function onView(view) {
       if (state.endReason !== null) return;
       state.pendingView = view;
+      state.latestView = view;
+      state.projectionRevision++;
       if (state.attributionLoad === null) {
         const task = processAttribution();
         state.attributionLoad = task;
@@ -517,6 +521,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       try {
         while (state.endReason === null) {
           const view = state.pendingView;
+          const revision = state.projectionRevision;
           if (view === null || state.nativeId === null) return;
           let doc;
           try {
@@ -565,8 +570,65 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
               return;
             }
           }
+          // Session-owned waits can change without a pi.live/tool-slot change.
+          // Read their authority separately; pending details in history alone
+          // never make a completed SDK tool interactive.
+          const waits = getWaits();
+          if (waits && typeof waits.getPresentation === 'function') {
+            extras ??= {};
+            extras.waitPresentations = new Map();
+            const candidates = new Map();
+            const includeWait = (details, taskId) => {
+              const key = questionnaireWaitKey(details, taskId, state.nativeId);
+              if (key !== null) candidates.set(key, details);
+            };
+            try {
+              for (const slot of [...(live?.tools ?? []), ...(live?.nestedTools ?? [])]) {
+                includeWait(slot.details, slot.taskId);
+              }
+              let displayable = 0;
+              const entries = view.entries ?? [];
+              for (let i = entries.length - 1; i >= 0 && displayable < 51; i--) {
+                const entry = entries[i];
+                if (entry?.kind === 'host.work-trigger') continue;
+                if (entry?.kind === 'host.scope-message' || entry.model?.some((m) => ['user', 'assistant', 'toolResult'].includes(m?.role))) displayable++;
+                for (const message of (entry.model ?? []).slice(-8)) {
+                  if (message?.role === 'toolResult') includeWait(message.details, entry.byTaskId);
+                }
+              }
+              const active = typeof waits.list === 'function' ? await waits.list(botId, CTX) : [];
+              const current = active.filter((record) => record.conversationId === state.nativeId && record.status === 'pending');
+              for (const record of current) includeWait(record.details, record.toolTaskId);
+              const reads = await Promise.allSettled([...candidates].map(async ([key, details]) =>
+                [key, await waits.getPresentation(botId, details, CTX)]));
+              for (const read of reads) {
+                if (read.status === 'rejected') throw read.reason;
+                extras.waitPresentations.set(...read.value);
+              }
+              {
+                const pending = [];
+                extras.durableWaits = [];
+                for (const record of current) {
+                  const key = questionnaireWaitKey(record.details, record.toolTaskId, state.nativeId);
+                  const projected = extras.waitPresentations.get(key);
+                  if (projected?.live === true && projected.status === 'pending') {
+                    pending.push(projected.details);
+                    extras.durableWaits.push({ installationId: record.installationId,
+                      conversationId: record.conversationId, requestId: record.requestId });
+                  }
+                }
+                if (board) extras.boardDetails = { ...extras.boardDetails, waits: pending };
+              }
+            } catch {
+              // A failed authority read is fail-closed; old details remain a
+              // read-only history card until the next change refreshes it.
+              extras.waitPresentations = new Map();
+              extras.durableWaits = [];
+              if (board) extras.boardDetails = { ...extras.boardDetails, waits: [] };
+            }
+          }
           if (state.endReason !== null) return;
-          if (state.pendingView === view) {
+          if (state.pendingView === view && state.projectionRevision === revision) {
             state.pendingView = null;
             publishView(view, extras);
           }
@@ -732,6 +794,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       state.native = null;
       state.nativeId = null;
       state.pendingView = null;
+      state.latestView = null;
       state.sessionState = null;
       state.runActivity = null;
       state.inboxQueued = 0;
@@ -779,6 +842,9 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       _readBoard: readBoard,
       _applyAdmission: applyAdmission,
       _applyActivity: applyActivity,
+      _refreshWaits: (targetBotId) => {
+        if (targetBotId === botId && state.latestView !== null && state.endReason === null) onView(state.latestView);
+      },
       _rebind: rebindWatch,
       get value() {
         return {
@@ -1028,6 +1094,12 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     for (const w of watches) w._applyActivity(botId);
   }
 
+  function notifyWaitsChanged(botId) {
+    if (closedFlag) return;
+    assertNonBlank(botId, 'botId');
+    for (const watch of watches) watch._refreshWaits(botId);
+  }
+
   async function close() {
     if (closedFlag) return;
     closedFlag = true;
@@ -1047,5 +1119,5 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     learningByBot.clear();
   }
 
-  return { watch, watchWork, getBotBoard, bind, rebind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, setWebhookStopPending, setBotLearning, close };
+  return { watch, watchWork, getBotBoard, bind, rebind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, setWebhookStopPending, setBotLearning, notifyWaitsChanged, close };
 }

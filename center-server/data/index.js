@@ -710,10 +710,12 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       };
     };
 
+    const { cancelTaskDispatchesForBotInTransaction, ...taskStore } =
+      createTaskStore({ db, transaction, listBotsSnapshot, listBotCapabilityDirectory });
     store = {
       ...webhookStore(db, transaction),
       ...pairingStore(db, transaction),
-      ...createTaskStore({ db, transaction, listBotsSnapshot, listBotCapabilityDirectory }),
+      ...taskStore,
       getInstallationId() {
         const epoch = db.prepare('SELECT epoch FROM sync_meta WHERE id = 1').get()?.epoch;
         if (typeof epoch === 'string' && UUID_RE.test(epoch)) return epoch.toLowerCase();
@@ -971,7 +973,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             seq += 1;
             deleteBotStmt.run(deviceId, removedBotId);
             store.cancelWebhookEventsForBot(deviceId, removedBotId);
-            store.cancelTaskDispatchesForBot(deviceId, removedBotId);
+            cancelTaskDispatchesForBotInTransaction(deviceId, removedBotId);
             deleteModelStmt.run(deviceId, removedBotId);
             deleteBindingStmt.run(deviceId, removedBotId);
             insertEventStmt.run(seq, deviceId, removedBotId, 'delete', null, nowIso);
@@ -1087,7 +1089,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           const nowIso = new Date().toISOString();
           db.prepare('DELETE FROM device_bots WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
           store.cancelWebhookEventsForBot(deviceId, botId);
-          store.cancelTaskDispatchesForBot(deviceId, botId);
+          cancelTaskDispatchesForBotInTransaction(deviceId, botId);
           db.prepare('DELETE FROM bot_models WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
           db.prepare('DELETE FROM bindings WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
           db.prepare('INSERT INTO bot_events (seq, device_id, bot_id, op, json, updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(seq, deviceId, botId, 'delete', null, nowIso);

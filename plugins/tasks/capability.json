@@ -1,7 +1,7 @@
 {
   "manifestVersion": 1,
   "id": "e-launcher.tasks",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "kind": "plugin",
   "displayName": "Tasks",
   "hostApi": "^1.0.0",

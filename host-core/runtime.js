@@ -36,6 +36,7 @@ import { WorkIndex, WorkContextState, workInstructions } from './work-context-do
 import { WorkDecisionState } from './work-decision-state.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { createTurnAdmission } from './runtime-turns.js';
+import { createRuntimeWaits } from './runtime-waits.js';
 import { createBotSessionRuntime } from './runtime-bot-session.js';
 import { BotSessionState, USER_MESSAGE_KIND, WORK_TRIGGER_KIND, deriveEntryAttribution } from './bot-session-context.js';
 import { createBotLearning } from './bot-learning.js';
@@ -508,6 +509,10 @@ export async function openRuntime(options) {
   const services = {
     host, models, getHarness: () => harness, context: CTX, getWorkContexts: () => workContexts,
     getWorkActivity: decisions.getWorkActivity,
+    getRunContext: async (api, context = CTX) => {
+      const dispatch = await harness.snapshot(TaskDispatchContexts, api.conversationId, context);
+      return sessions.getRunContext(api, context, { dispatchContexts: dispatch?.byRequest });
+    },
     resolveConversationBot: async (id) => {
       const identity = await resolveBotIdentity(host, harness, id, CTX);
       const primary = await harness.snapshot(PrimaryIndex, CTX);
@@ -557,16 +562,22 @@ export async function openRuntime(options) {
     },
   };
   let tasksBridge = null;
+  let waitsBridge = null;
+  const waitsFacade = Object.fromEntries(['open', 'get', 'answer'].map((method) => [method, (...args) => {
+    if (!waitsBridge) throw errWithCode('durable waits are not ready', 'RUNTIME_BUSY');
+    return waitsBridge[method](...args);
+  }]));
   const tasksFacade = {
     invoke(botId, input, conversationId, nativeTaskId) {
       if (!tasksBridge) throw errWithCode('center is offline', 'CENTER_OFFLINE');
       return tasksBridge.invoke(botId, input, conversationId, nativeTaskId);
     },
     getActiveForBot: (botId) => (tasksBridge ? tasksBridge.getActiveForBot(botId) : []),
+    getExecutionContext: (botId, conversationId) => tasksBridge?.getExecutionContext(botId, conversationId) ?? null,
     listDirectoryBots: () => (tasksBridge ? tasksBridge.listDirectoryBots() : []),
   };
 
-  plugins = createPluginManager({ host, registry, installer: centerRuntime.installer, services, isOnline: () => online, vaultFacade: vault.facade, tasksFacade });
+  plugins = createPluginManager({ host, registry, installer: centerRuntime.installer, services, isOnline: () => online, vaultFacade: vault.facade, tasksFacade, waitsFacade });
   registry.install(defineExtension({
     name: 'host.request-context',
     hooks: [hook(GenerationTask, {
@@ -704,6 +715,7 @@ export async function openRuntime(options) {
   const live = createRuntimeLive({
     host,
     getHarness: () => harness,
+    getWaits: () => waitsBridge,
     // work watch 授权复用共享 MessageLog 的只读 resolveWorkContext（含 former-member 定向历史）。
     resolveWorkContext: (botId, scopeId) => workContexts.resolveWorkContext(botId, scopeId),
   });
@@ -751,6 +763,7 @@ export async function openRuntime(options) {
     vault,
     schedules,
     setTasksBridge: (bridge) => { tasksBridge = bridge; },
+    setWaitsBridge: (bridge) => { waitsBridge = bridge; },
     resolveConversationBot: services.resolveConversationBot,
   });
   try {
@@ -807,11 +820,12 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, vault, schedules, setTasksBridge, resolveConversationBot }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, vault, schedules, setTasksBridge, setWaitsBridge, resolveConversationBot }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
   let resumed = false;
+  let cancellationsRecovered = false;
   let appliedRevision = null;
   let highestRevision = -1;
   let centerConfigured = false;
@@ -1122,6 +1136,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       const errors = [];
       try { await webhooks.close(); } catch (err) { errors.push(err); }
       try { await taskConsumer?.close(); } catch (err) { errors.push(err); }
+      try { await waits.close(); } catch (err) { errors.push(err); }
       try { turns.close(); } catch (err) { errors.push(err); }
       try { await decisions.close(); } catch (err) { errors.push(err); }
       // 学习驱动在 harness/store 释放前停止：取消在驱动作业与受限会话执行。
@@ -1193,7 +1208,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     live,
     admitBot,
     getEpoch: () => epoch,
-    canAdmit: () => !isMaintenance(),
+    canAdmit: () => cancellationsRecovered && resumed && centerOnline && !closing && !isMaintenance(),
     trackSubmission: (submissionId, info) => {
       trackedSubmissions.set(submissionId, info);
       checkTrackedSubmissions();
@@ -1208,6 +1223,45 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       return decisions.interruptBotWork?.(botId, { reason: 'preempted' });
     },
   });
+  const waits = createRuntimeWaits({
+    host, getHarness: () => harness, context: CTX,
+    getStopEpoch: turns.stopEpoch,
+    canResume: () => resumed && centerOnline && !closing && !isMaintenance() && !turns.isRecoveryPending(),
+    async captureContext(botId, api, context) {
+      const stopEpoch = turns.stopEpoch(botId);
+      if (closing || turns.isRecoveryPending() || turns.stopped(botId)) {
+        throw errWithCode('originating run is not available', 'WAIT_CANCELLED');
+      }
+      if (await resolveConversationBot(api.conversationId) !== botId) {
+        throw errWithCode('conversation does not belong to bot', 'BOT_CONTEXT_REQUIRED');
+      }
+      const turn = await sessions.getTurn(api, context);
+      if (!turn) throw errWithCode('originating run context is unavailable', 'BOT_CONTEXT_REQUIRED');
+      const dispatchContext = await resolveDispatchContextForToolCall(botId, api.conversationId, api.taskId, false);
+      return { turn, dispatchContext, stopEpoch: turn.stopEpoch ?? stopEpoch };
+    },
+    getSubmission: (botId, requestId) => runtime.getSubmission(botId, requestId),
+    submitContinuation(botId, input) {
+      // Frozen routing is read from the Host wait document, never from an action
+      // payload. Continue in the same visible chat while retaining task/scope.
+      const turn = input.turn;
+      const routed = {
+        kind: turn.kind, scopeId: turn.scopeId ?? null,
+        replyTarget: structuredClone(turn.replyTarget),
+        originRequestId: turn.originRequestId ?? turn.requestId,
+        ...(turn.responseMessageId !== undefined ? { responseMessageId: turn.responseMessageId } : {}),
+        ...(turn.rootId ? { rootId: turn.rootId } : {}),
+        ...(turn.workNativeId !== undefined ? { workNativeId: turn.workNativeId } : {}),
+      };
+      return submitPrimary(botId, {
+        requestId: input.requestId, text: input.text,
+        origin: { sender: { kind: 'host', name: '用户问卷回复' }, replyTo: turn.replyTo ?? null },
+      }, input.stopEpoch, input.dispatchContext, routed, input.waitId);
+    },
+    cancelContinuation: async (botId, requestId) => turns.cancelRequest(await requireBot(botId), requestId),
+    onChange: (botId) => live.notifyWaitsChanged?.(botId),
+  });
+  setWaitsBridge?.(waits);
   const webhooks = createWebhookConsumer({
     deviceId: host.deviceId,
     getClient: () => centerRuntime.getClient(),
@@ -1228,6 +1282,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     },
   });
   decisions.setTurnGate(turns.admitWorkDecision, turns.pump, turns.canRunWork);
+  decisions.setScopeStopListener?.(async (scopeId) => {
+    for (const bot of host.listBots()) await waits.cancelScope(bot.botId, scopeId, CTX);
+  });
   // 队列生命周期通知：pending 创建/结束/暂停/取消的纯元数据快照驱动统一 live 活动投影。
   decisions.setActivityListener?.((botId, summary) => live.setWorkActivity?.(botId, summary));
   decisions.setLearningHooks?.({
@@ -1255,6 +1312,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 输入与工作积压；本地计数经 initializeBots 预载已对齐持久值，旧进程遗留
       // 队列条目（其持久 stopEpoch ≤ 预载基线）同样落在边界内，绝不漏取消。
       const epoch = await turns.beginStop(bot);
+      await waits.cancelBot(botId, epoch, CTX);
       // 再撤掉 Host 队列中已受理的未原生提交条目：仅作废旧代次受理（停止前的输入
       // 与工作积压）；停止开始后受理的新代次输入保留，等停止结算后由泵处理。
       // 即使后续 HTTP/确认在飞，泵在提交前的存活核对会发现条目已取消，
@@ -1420,18 +1478,23 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   }
 
   // stopEpoch 由可信调用者在排队前捕获；内部 Webhook 保留 poll 前代次，绝不重捕获。
-  function submitPrimary(botId, input, stopEpoch, trustedDispatchContext = null) {
+  function submitPrimary(botId, input, stopEpoch, trustedDispatchContext = null, trustedContinuationTurn = null, trustedWaitId = null) {
     const kind = input?.origin?.sender?.kind === 'host' ? 'host' : 'user';
     const safeInput = isPlainObject(input) ? { ...input } : {};
     delete safeInput.dispatchContext;
+    delete safeInput.continuationTurn;
+    delete safeInput.continuationWaitId;
     const trustedInput = {
       ...safeInput,
       stopEpoch,
+      ...(trustedContinuationTurn ? { continuationTurn: trustedContinuationTurn } : {}),
+      ...(trustedWaitId ? { continuationWaitId: trustedWaitId } : {}),
       origin: {
         sender: {
           kind,
           name: typeof safeInput?.origin?.sender?.name === 'string' ? safeInput.origin.sender.name : null,
-          ...(kind === 'host' && safeInput?.origin?.sender?.sourceType === 'webhook' ? { sourceType: 'webhook' } : {}),
+          ...(kind === 'host' && ['schedule', 'webhook', 'task_dispatch'].includes(safeInput?.origin?.sender?.sourceType)
+            ? { sourceType: safeInput.origin.sender.sourceType } : {}),
         },
         replyTo: typeof safeInput?.origin?.replyTo === 'string' ? safeInput.origin.replyTo : null,
       },
@@ -1637,6 +1700,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     if (!bot || bot.isPrimary || !bot.archivedAt) return false;
     await assertBotIdle(bot);
     await learning.cancelBot(botId);
+    await waits.cancelBot(botId, Number.MAX_SAFE_INTEGER, CTX);
     selfSoulQueue.delete(botId);
     await schedules.deleteBot(bot);
     host.deleteBot({ botId });
@@ -1723,6 +1787,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     return serial(async () => {
       if (isMaintenance()) return { capabilityErrors: [] };
       if (closing || !centerConfigured || !centerRuntime.getClient() || generation !== epoch) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+      cancellationsRecovered = false;
+      await waits.recoverCancellations();
+      cancellationsRecovered = true;
       setOnline(true);
       try {
         // 单个能力激活失败只撤销该能力，其他 Bot 与基础聊天保持在线。
@@ -1739,6 +1806,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         botAdmissions.resume();
         learning.resume();
         schedules.notifyOnline();
+        waits.reconcile().catch(() => {});
         webhooks.wake();
         taskConsumer?.resume();
         await turns.nudgeAll();
@@ -2039,6 +2107,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         plugins.resumeAdmissions();
         learning.resume();
         schedules.notifyOnline();
+        waits.reconcile().catch(() => {});
         webhooks.wake();
         taskConsumer?.resume();
         await turns.nudgeAll();
@@ -2061,9 +2130,11 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     initializeBot,
 
     async initializeBots() {
-      await purgeExpiredArchivedBots();
       // 控制入口开放前（包括离线启动）预载停止代次、恢复 gate 与中心待同步提示。
       await turns.pendingStops();
+      await waits.recoverCancellations();
+      cancellationsRecovered = true;
+      await purgeExpiredArchivedBots();
       for (const bot of host.listBots()) await initializeBot(bot.botId);
     },
 
@@ -2079,6 +2150,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       if (bot.isPrimary) throw errWithCode('primary bot cannot be archived', 'PRIMARY_BOT_PROTECTED');
       await assertBotIdle(bot);
       await learning.cancelBot(botId);
+      await waits.cancelBot(botId, Number.MAX_SAFE_INTEGER, CTX);
       await schedules.pauseBot(bot);
       const updated = host.archiveBot({ botId });
       if (onBotsSync) await onBotsSync();
@@ -2099,6 +2171,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       if (bot.isPrimary) throw errWithCode('primary bot cannot be deleted', 'PRIMARY_BOT_PROTECTED');
       await assertBotIdle(bot);
       await learning.cancelBot(botId);
+      await waits.cancelBot(botId, Number.MAX_SAFE_INTEGER, CTX);
       selfSoulQueue.delete(botId);
       await schedules.deleteBot(bot);
       const res = host.deleteBot({ botId });
@@ -2187,6 +2260,38 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       return submitPrimary(botId, input, turns.stopEpoch(botId));
     },
 
+    // Private scheduler handoff. Capture the fence before any await, then let
+    // TurnQueue cancel an old occurrence atomically if Stop wins the race.
+    // These methods are deliberately absent from the public control protocol.
+    async getScheduleFence(botId) {
+      assertNonBlank(botId, 'botId');
+      const stopEpoch = turns.stopEpoch(botId);
+      if (!resumed || !centerOnline || closing || isMaintenance() || turns.isRecoveryPending()) {
+        throw errWithCode('schedule handoff is not ready', 'RUNTIME_BUSY');
+      }
+      const bot = await requireBot(botId);
+      if (bot.archivedAt != null) throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
+      return { botId, conversationId: bot.primaryConversationId, stopEpoch };
+    },
+
+    submitScheduled(botId, input) {
+      assertNonBlank(botId, 'botId');
+      if (!isPlainObject(input) || Object.keys(input).some((key) => !['requestId', 'text', 'stopEpoch'].includes(key)) ||
+          !Number.isSafeInteger(input.stopEpoch) || input.stopEpoch < 0 || input.stopEpoch > turns.stopEpoch(botId)) {
+        throw errWithCode('invalid schedule handoff', 'INVALID_ARGUMENT');
+      }
+      assertNonBlank(input.requestId, 'requestId');
+      assertNonBlank(input.text, 'text');
+      if (!resumed || !centerOnline || closing || isMaintenance() || turns.isRecoveryPending()) {
+        throw errWithCode('schedule handoff is not ready', 'RUNTIME_BUSY');
+      }
+      return submitPrimary(botId, {
+        requestId: input.requestId,
+        text: input.text,
+        origin: { sender: { kind: 'host', name: '定时任务', sourceType: 'schedule' }, replyTo: null },
+      }, input.stopEpoch);
+    },
+
     submitTaskDispatch: async (botId, input, capturedStopEpoch = turns.stopEpoch(botId)) => {
       assertNonBlank(botId, 'botId');
       if (!resumed || !centerOnline || closing || isMaintenance() || turns.isRecoveryPending() ||
@@ -2202,7 +2307,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
             name: typeof input?.origin?.sender?.name === 'string' && input.origin.sender.name
               ? input.origin.sender.name
               : '任务 · 全局任务',
-            sourceType: 'webhook',
+            sourceType: 'task_dispatch',
           },
           replyTo: null,
         },
@@ -2286,7 +2391,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       }
       // 传 harness 让 helper 读取 BotSessionState 并给原始 entry 补 data.attribution；
       // 不传会让 raw 历史覆盖 live 归属时丢来源。helper 第4参为 {afterReset,sessionState?,harness?}。
-      const page = await readPrimaryHistory(conversation, historyOptions, CTX, { afterReset: true, harness });
+      const page = await readPrimaryHistory(conversation, historyOptions, CTX, { afterReset: true, harness, waits, botId });
       return { botId, conversationId: bot.primaryConversationId, ...page };
     },
 
@@ -2300,6 +2405,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       const conversation = await idlePrimaryConversation(bot);
       const conversationId = bot.primaryConversationId;
       if (!conversation) return { botId, conversationId, clearedThroughEntryId: 0 };
+      await waits.cancelBot(botId, Number.MAX_SAFE_INTEGER, CTX);
       // reset 前先把未导入的账本消息推进水位：lastImportedLocalId 是 reset 保留的
       // 唯一导入边界，不先捕获会让旧账本条在 reset 后当作「新消息」重现。
       // 此处 Bot lane 已持、会话空闲，是安全边界；新追加的条目随即被 pi.reset 翻篇，
@@ -2564,9 +2670,12 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
               dispatchDraft.byRequest = chord.copyJson(dispatchContextsSnapshot.byRequest);
             }
             const primaryIndex = await tx.doc(PrimaryIndex);
+            await waits.cancelConversationInTransaction(botId, conversation.id, tx);
             primaryIndex.byPrimary[bot.primaryConversationId] = rec.id;
             return rec.id;
           }, CTX);
+          await waits.recoverCancellations(botId);
+          live.notifyWaitsChanged?.(botId);
           const newConversation = await harness.conversation(newNativeId, CTX);
           await live.rebind(botId, newConversation);
           if (conversation.id !== newNativeId) {
@@ -2647,8 +2756,16 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       return plugins.actionByName(botId, 'contextStatus', { scopeId });
     },
     getWorkActivity: decisions.getWorkActivity,
-    stopWork: decisions.stopWork,
-    resumeWork: decisions.resumeWork,
+    async stopWork(botId, scopeId) {
+      await workContexts.resolveWorkContext(botId, scopeId);
+      await waits.cancelScope(botId, scopeId, CTX);
+      return decisions.stopWork(botId, scopeId);
+    },
+    async resumeWork(botId, scopeId) {
+      await workContexts.resolveWorkContext(botId, scopeId);
+      await waits.resumeScope(botId, scopeId, CTX);
+      return decisions.resumeWork(botId, scopeId);
+    },
 
     createScope: (input) => runMessageOperation((log) => log.createScope(input)),
     updateScope: (scopeId, input) => runMessageOperation((log) => log.updateScope(scopeId, input)),
@@ -2684,6 +2801,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     // 冷启动：service 在全局 resume 前调用一次，恢复被钉住的旧 set。
     // 可恢复的准入无法恢复时保持调度暂停并抛错（绝不缺定义地 resume）。
     restoreTurns: async () => {
+      cancellationsRecovered = false;
+      await waits.recoverCancellations();
       // 崩溃时丢失内存停止 gate：持久 stopPending 标记的 Bot 先补完未完成停止
       // （user_stop 标记 + 主会话取消标记，quiesce=false 不隐式 resume 调度器），
       // 绝不自动恢复漏取消工作。任一 Bot 恢复失败即向外传播
@@ -2694,6 +2813,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         try { live.setBotControl?.(bot.botId, 'stopping'); } catch { /* live 缺席 */ }
         try {
           await turns.cancelQueued(bot, turns.stopEpoch(bot.botId) - 1);
+          await waits.cancelBot(bot.botId, turns.stopEpoch(bot.botId) - 1, CTX);
           if (decisions.interruptBotWork) {
             // 已有 pending.interruption 的 scope 沿用其已捕获 through 边界（宕机后
             // 新到消息不被这次补停吞掉），由 work lane 的幂等标记保证。
@@ -2724,13 +2844,17 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
           throw failure;
         }
       }
-      return turns.restoreTurns();
+      const restored = await turns.restoreTurns();
+      cancellationsRecovered = true;
+      return restored;
     },
 
     resume() {
+      if (!cancellationsRecovered) throw errWithCode('wait cancellation recovery is incomplete', 'TURN_RECOVERY_REQUIRED');
       harness.resume();
       decisions.resume();
       resumed = true;
+      waits.reconcile().catch(() => {});
       turns.nudgeAll().catch(() => {});
       webhooks.wake();
       taskConsumer?.resume();
@@ -2877,6 +3001,23 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       return result;
     },
     getActiveForBot: (botId) => getBotGlobalTasks(botId),
+    async getExecutionContext(botId, conversationId) {
+      if (!Number.isSafeInteger(conversationId) || conversationId < 1) return null;
+      if (await resolveConversationBot(conversationId) !== botId) {
+        throw errWithCode('conversation does not belong to bot', 'BOT_CONTEXT_REQUIRED');
+      }
+      const run = (await harness.snapshot(LiveDoc, conversationId, CTX))?.run;
+      if (!run) return null;
+      const dispatch = await harness.snapshot(TaskDispatchContexts, conversationId, CTX);
+      const context = await sessions.getRunContext({ conversationId, taskId: run.taskId }, CTX, {
+        dispatchContexts: dispatch?.byRequest,
+      });
+      const contexts = (context?.events ?? []).map((event) => event.dispatchContext).filter(Boolean);
+      if (contexts.some((candidate) => !sameDispatchContext(contexts[0], candidate))) {
+        throw errWithCode('active run mixes conflicting task dispatch contexts', 'REQUEST_CONFLICT');
+      }
+      return contexts[0] ?? null;
+    },
     listDirectoryBots: () => directoryBotsCache,
   });
   const lifecycleMethods = new Set(['initializeBots', 'applyCenterSnapshot', 'setCenterOnline', 'withCapabilityActivation', 'revokeCenterCapabilities', 'restoreTurns', 'prepareUpdate', 'cancelUpdate', 'getUpdateState', 'notifyWebhookReady', 'notifyTaskReady', 'close']);

@@ -147,6 +147,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
   // canRunWork 只读检查（排队用户优先 + 本 Bot 全部原生活动含遗留 work），不取第二条 Bot 准入通道。
   const turnGate = { fn: admitTurn ?? null, idle: null, canRunWork: null };
   let learningHooks = null;
+  let scopeStopListener = null;
   let active = false;
   let closing = false;
   let timer = null;
@@ -629,6 +630,9 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
    */
   async function stopScopeWork(scopeId) {
     assertId(scopeId, 'scopeId');
+    // All tombstone paths, including peer replication, must revoke external
+    // waits before clearing work bindings. The listener persists cancellation.
+    await scopeStopListener?.(scopeId);
     const harness = getHarness();
     const index = await harness.snapshot(WorkIndex, context);
     const bindings = [];
@@ -2599,6 +2603,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     interruptBotWork, setActivityListener, refreshActivity,
     coordinationSelector,
     drainFailureNotices,
+    setScopeStopListener: (listener) => { scopeStopListener = listener ?? null; },
     setLearningHooks: (hooks) => {
       learningHooks = hooks ?? null;
     },

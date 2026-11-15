@@ -188,7 +188,7 @@ export function ToolCallCard({
         <ToolPresentationCard
           key={`${scopeKey}:${tool.id}:${presentation.kind}:${presentationKey}`}
           presentation={presentation}
-          active={active && tool.presentationLive === true}
+          active={(active || tool.durableWait === true) && tool.presentationLive === true}
           disabled={disabled}
           variant={variant === 'desktop' ? 'desktop' : undefined}
           requesterName={requesterName}

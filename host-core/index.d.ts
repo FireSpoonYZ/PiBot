@@ -1227,7 +1227,7 @@ export interface Attribution {
   /** Display-only sender name; never an identity or routing key. */
   name?: string;
   /** Trusted Host entry source only; never accepted from a user sender. */
-  sourceType?: 'webhook';
+  sourceType?: 'schedule' | 'webhook' | 'task_dispatch';
   channel: 'primary' | 'dm' | 'room';
   scopeId?: string;
   messageId?: string;
@@ -1256,6 +1256,8 @@ export interface LiveMessage {
   blocks?: LiveContentBlock[];
   /** Whitelist projection of the toolResult details.presentation; read-only. */
   presentation?: ToolPresentation;
+  /** Verified session-owned pending questionnaire, independent of SDK task liveness. */
+  durableWait?: boolean;
   /** Metadata only (no base64) on user messages carrying image attachments. */
   attachments?: ImageAttachment[];
 }
@@ -1286,6 +1288,8 @@ export interface LiveTool {
   error?: string;
   /** Whitelist projection of the running tool's slot.details.presentation; read-only. */
   presentation?: ToolPresentation;
+  /** Verified session-owned pending questionnaire, independent of SDK task liveness. */
+  durableWait?: boolean;
 }
 
 export interface LiveGeneration {
@@ -1382,6 +1386,8 @@ export interface BotLiveState {
   activity?: BotActivity;
   /** Idle background reflection / skill learning state; optional — omitted on work watches and older Hosts. */
   learning?: BotLearningLiveState | null;
+  /** Complete active questionnaire identity set (max 64); removes stale cached history authority. */
+  durableWaits?: Array<{ installationId: string; conversationId: number; requestId: string }>;
 }
 
 export interface BotLearningOutcomeSummary {

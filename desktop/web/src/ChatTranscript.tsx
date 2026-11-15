@@ -10,6 +10,7 @@ import { Markdown } from '../../../web/src/Markdown';
 import {
   latestEntryChannel,
   parseHistoryEntries,
+  mergeHistoryWaitProjection,
   formatTurnDuration,
   normalizeAttribution,
   type ChatTurn,
@@ -156,9 +157,10 @@ export function ChatTranscript({
     for (const item of asArray<Record<string, unknown>>(live?.history)) {
       byId.set(String(item.id), item);
     }
-    for (const item of entries) byId.set(String(item.id), item as unknown as Record<string, unknown>);
+    for (const item of entries) byId.set(String(item.id), mergeHistoryWaitProjection(item as unknown as Record<string, unknown>, byId.get(String(item.id)), live?.durableWaits));
+    for (const [id, item] of byId) byId.set(id, mergeHistoryWaitProjection(item, undefined, live?.durableWaits));
     return [...byId.values()].sort((a, b) => numericId(a) - numericId(b));
-  }, [entries, live?.history]);
+  }, [entries, live?.history, live?.durableWaits]);
 
   // 仅群聊（room）触发的生成隐藏在群聊页面内；1v1 Bot 私聊（dm）与用户主聊（primary）均在本对话页实时展示。
   const liveIsCollaborative =

@@ -22,7 +22,7 @@ const describe = (err) => ({
   message: typeof err?.message === 'string' && err.message ? err.message.slice(0, 200) : 'capability could not be applied',
 });
 
-export function createPluginManager({ host, registry, installer, services, isOnline, vaultFacade, tasksFacade }) {
+export function createPluginManager({ host, registry, installer, services, isOnline, vaultFacade, tasksFacade, waitsFacade }) {
   const ajv = new Ajv({ allErrors: true, coerceTypes: false, useDefaults: false, strict: false });
   ajv.addFormat('credential-ref', true);
   let instances = new Map(); // instanceKey(installationId, version) -> { key, installationId, plugin, manifest, version, bots, taskExtension }
@@ -301,6 +301,25 @@ export function createPluginManager({ host, registry, installer, services, isOnl
       assertCapabilityAllowed(botId, id);
     };
     const scopedHost = { ...services,
+      ...(installed?.manifest?.id === 'e-launcher.ask-user-question' && waitsFacade ? {
+        waits: {
+          async open(botId, input, api, context) {
+            checkTarget(input?.installationId, botId, false);
+            await checkOwner(botId, id, api?.conversationId);
+            return waitsFacade.open(botId, input, api, context);
+          },
+          async get(botId, input, context) {
+            checkTarget(input?.installationId, botId, false);
+            await checkOwner(botId, id, input?.conversationId);
+            return waitsFacade.get(botId, input, context);
+          },
+          async answer(botId, input, resolveAnswer, context) {
+            checkTarget(input?.installationId, botId, false);
+            await checkOwner(botId, id, input?.conversationId);
+            return waitsFacade.answer(botId, input, resolveAnswer, context);
+          },
+        },
+      } : {}),
       ...(installed?.manifest?.id === 'e-launcher.vault' && vaultFacade ? {
         vault: vaultFacade(async conversationId => {
           const botId = await services.resolveConversationBot(conversationId);
@@ -328,6 +347,11 @@ export function createPluginManager({ host, registry, installer, services, isOnl
             } catch {
               return [];
             }
+          },
+          getExecutionContext: async (botId, conversationId) => {
+            if (conversationId === undefined) return null;
+            await checkOwner(botId, id, conversationId);
+            return tasksFacade.getExecutionContext?.(botId, conversationId) ?? null;
           },
           listDirectoryBots: (botId, conversationId) => {
             if (conversationId !== undefined) {

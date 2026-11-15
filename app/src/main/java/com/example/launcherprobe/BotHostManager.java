@@ -770,9 +770,10 @@ public final class BotHostManager {
         });
     }
 
-    /** Schedule 引擎专用（package-private）：仅 submit/getSubmission，且必须仍是同一 RUNNING 代才发送。 */
+    /** Schedule 引擎专用（package-private）：仅调度交接与回执方法，且必须仍是同一 RUNNING 代才发送。 */
     CompletableFuture<JSONObject> scheduleCall(BotHostProcess expected, String method, JSONObject params) {
-        if (!"submit".equals(method) && !"getSubmission".equals(method)) {
+        if (!"getScheduleFence".equals(method) && !"submitScheduled".equals(method)
+                && !"getSubmission".equals(method)) {
             return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "方法不允许"));
         }
         return onControl(() -> {

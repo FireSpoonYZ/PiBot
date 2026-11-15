@@ -127,6 +127,7 @@ import {
   formatTurnDuration,
   latestEntryChannel,
   parseHistoryEntries,
+  mergeHistoryWaitProjection,
   visibleAssistantTextEntryIds,
   resolveActiveTurnStartedAt,
   type ChatTurn,
@@ -4305,7 +4306,8 @@ ${newer}` : draftSnapshot;
     for (const item of array<Record<string, unknown>>(chatLive?.history)) {
       byId.set(String(item.id), item);
     }
-    for (const item of chatHistory) byId.set(String(item.id), item);
+    for (const item of chatHistory) byId.set(String(item.id), mergeHistoryWaitProjection(item, byId.get(String(item.id)), chatLive?.durableWaits));
+    for (const [id, item] of byId) byId.set(id, mergeHistoryWaitProjection(item, undefined, chatLive?.durableWaits));
     const numericId = (item: Record<string, unknown>) => {
       const id = Number(item.id);
       return Number.isFinite(id) ? id : 0;
