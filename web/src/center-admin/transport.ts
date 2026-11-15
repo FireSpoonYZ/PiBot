@@ -14,6 +14,7 @@ import type {
   BotLearningStatus,
   BotLearningTriggerResult,
   BotModelConfig,
+  CapabilityToolsListResponse,
   CenterBotRef,
   CenterBotSyncResponse,
   CenterCreateBotRequest,
