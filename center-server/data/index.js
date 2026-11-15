@@ -668,7 +668,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       }
       if (version === 11) {
         db.exec(`
-          CREATE TABLE device_oauth_grants (
+          CREATE TABLE IF NOT EXISTS device_oauth_grants (
             device_id TEXT PRIMARY KEY,
             enabled INTEGER NOT NULL DEFAULT 1,
             token_hash TEXT,
@@ -676,7 +676,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
           );
-          CREATE INDEX idx_device_oauth_grants_token_hash
+          CREATE INDEX IF NOT EXISTS idx_device_oauth_grants_token_hash
             ON device_oauth_grants(token_hash)
             WHERE token_hash IS NOT NULL;
           PRAGMA user_version = 12;
