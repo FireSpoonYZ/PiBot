@@ -495,7 +495,7 @@ function VaultSession({
         <div className="vault-header-titles">
           <h3>{t('密码库', 'Password Vault')}</h3>
           <div className="vault-status-row">
-            <Badge tone={localReady || extReady ? 'accent' : 'warn'}>{statusBadgeText}</Badge>
+            <Badge tone={localReady || extReady ? 'accent' : 'warning'}>{statusBadgeText}</Badge>
             <span className="vault-hint">{hostLabel}</span>
             {formattedExpiresAt ? (
               <span className="vault-hint">{t('自动锁定：', 'Auto-lock: ')}{formattedExpiresAt}</span>

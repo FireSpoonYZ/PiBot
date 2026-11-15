@@ -123,9 +123,9 @@ export function ModelPicker({
         title={model.name}
         subtitle={`${providerOf(model)} · ${model.modelRef}`}
         onClick={() => onChange(model.modelRef)}
-        meta={(
+        trailing={(
           <div className="model-picker-meta">
-            {unavailable ? <Badge tone="warn">{t('不可用', 'Unavailable')}</Badge> : null}
+            {unavailable ? <Badge tone="warning">{t('不可用', 'Unavailable')}</Badge> : null}
             {model.reasoning ? <Badge>{t('推理', 'Reasoning')}</Badge> : null}
             {model.contextWindow > 0 ? <span className="model-picker-ctx">{tokensText(model.contextWindow)}</span> : null}
             <button
@@ -156,7 +156,7 @@ export function ModelPicker({
           onChange={setQuery}
           placeholder={t('搜索模型或服务商', 'Search model or provider')}
         />
-        <Chips
+        <Chips<PickerScope>
           label={t('模型筛选', 'Model filter')}
           value={scope}
           onChange={setScope}

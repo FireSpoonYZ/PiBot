@@ -7,6 +7,7 @@ import type {
   BotLearningStatus,
   Installation,
   InstallationSkillFilesResponse,
+  JsonObject,
   SkillVisibilityScope,
 } from '../../../center-contract/index.js';
 import type { CenterBotCapabilityEntry } from '../../../host-core/desktop-client.js';
@@ -262,7 +263,7 @@ export function BotSkillsPage({
       const isArchived = matchedLearned?.state === 'archived';
       const botEnabled =
         !isArchived
-        && Boolean(cap.binding?.enabled)
+        && Boolean(cap.config?.enabled)
         && Boolean(inst.enabled)
         && inst.activation?.status === 'enabled';
 
@@ -457,7 +458,7 @@ export function BotSkillsPage({
     return op.installationId;
   };
 
-  const bindInstallationToBot = async (installationId: string, enabled: boolean, overrides: Record<string, unknown> = {}) => {
+  const bindInstallationToBot = async (installationId: string, enabled: boolean, overrides: JsonObject = {}) => {
     let expectedRevision = 0;
     try {
       const binding = await centerAdminRequest<{ revision?: number }>(api, identity, {
@@ -506,9 +507,9 @@ export function BotSkillsPage({
           deviceId,
           botId,
           installationId: skill.installationId,
-          expectedRevision: skill.capability.binding?.revision ?? 0,
+          expectedRevision: skill.capability.config?.revision ?? 0,
           enabled: nextEnabled,
-          overrides: skill.capability.binding?.overrides ?? {},
+          overrides: skill.capability.config?.overrides ?? {},
         });
       } else if (skill.learned && !nextEnabled) {
         await archiveLearnedSkill(skill.learned, skill.installationId);
@@ -1036,7 +1037,7 @@ export function BotSkillsPage({
           <div className="bs-skills-detail-title">
             <span>{detailTarget.name}</span>
             {detailTarget.learned ? <Badge tone="accent">✨ {t('本 Bot 习得', 'Learned')}</Badge> : null}
-            {!detailTarget.editable ? <Badge tone="warn">{t('只读导入包', 'Read-only package')}</Badge> : null}
+            {!detailTarget.editable ? <Badge tone="warning">{t('只读导入包', 'Read-only package')}</Badge> : null}
           </div>
 
           <ErrorNotice error={error} onDismiss={() => setError('')} />
@@ -1251,7 +1252,7 @@ export function BotSkillsPage({
                 ? t(`每 ${learning.settings.review.skillEvery} 轮交互自动复盘提炼可复用技能`, `Reviews every ${learning.settings.review.skillEvery} iterations`)
                 : t('已暂停自动提炼，仍可随时点击「立即复盘」', 'Automatic extraction paused; manual review still available')
             }
-            meta={(
+            trailing={(
               <Switch
                 checked={autoExtractEnabled}
                 label={t('空闲时自动提炼技能', 'Auto-extract skills when idle')}
@@ -1394,8 +1395,8 @@ export function BotSkillsPage({
         />
       </div>
 
-      {loading ? <LoadingState label={t('正在读取技能列表...', 'Loading skills...')} /> : null}
-      {detailLoading ? <LoadingState label={t('正在打开技能文件...', 'Opening skill files...')} /> : null}
+      {loading ? <LoadingState text={t('正在读取技能列表...', 'Loading skills...')} /> : null}
+      {detailLoading ? <LoadingState text={t('正在打开技能文件...', 'Opening skill files...')} /> : null}
 
       {!loading && filteredSkills.length === 0 ? (
         <EmptyState
@@ -1433,7 +1434,7 @@ export function BotSkillsPage({
                     <Badge>{scopeLabel}</Badge>
                     {skill.learned?.pinned ? <Badge>{t('置顶', 'Pinned')}</Badge> : null}
                     {skill.learned?.locked ? <Badge>{t('已锁定', 'Locked')}</Badge> : null}
-                    {skill.learned?.state === 'stale' ? <Badge tone="warn">{t('待复审', 'Stale')}</Badge> : null}
+                    {skill.learned?.state === 'stale' ? <Badge tone="warning">{t('待复审', 'Stale')}</Badge> : null}
                     {skill.isArchived ? <Badge>{t('已归档', 'Archived')}</Badge> : null}
                   </div>
                   {skill.description ? <div className="bs-skills-item-desc">{skill.description}</div> : null}

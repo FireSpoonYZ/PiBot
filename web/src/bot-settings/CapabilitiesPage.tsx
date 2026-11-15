@@ -94,7 +94,7 @@ export function CapabilitiesPage({
 
   const handleToggle = async (entry: CenterBotCapabilityEntry, nextEnabled: boolean) => {
     const inst = entry.installation;
-    const binding = entry.binding;
+    const binding = entry.config;
     const currentRevision = binding?.revision ?? 0;
     const currentOverrides = binding?.overrides ?? {};
 
@@ -177,10 +177,10 @@ export function CapabilitiesPage({
               </option>
             ))}
           </select>
-        ) : field.kind === 'number' || field.kind === 'integer' ? (
+        ) : field.kind === 'number' ? (
           <input
             type="number"
-            step={field.kind === 'integer' ? 1 : 'any'}
+            step="any"
             className="bs-input"
             disabled={busy}
             value={typeof currentVal === 'number' ? String(currentVal) : ''}
@@ -190,7 +190,7 @@ export function CapabilitiesPage({
                 state.setOverride(field.key, undefined);
                 return;
               }
-              const parsed = field.kind === 'integer' ? parseInt(raw, 10) : Number(raw);
+              const parsed = Number(raw);
               if (Number.isFinite(parsed)) state.setOverride(field.key, parsed as JsonValue);
             }}
           />
@@ -229,7 +229,7 @@ export function CapabilitiesPage({
           <Row
             title={t('为本智能体启用', 'Enable for this Bot')}
             subtitle={state.editor?.enabled ? t('当前已启用', 'Enabled') : t('当前未启用', 'Disabled')}
-            meta={(
+            trailing={(
               <Switch
                 checked={Boolean(state.editor?.enabled)}
                 label={t('为本智能体启用', 'Enable for this Bot')}
@@ -278,7 +278,7 @@ export function CapabilitiesPage({
 
   const renderList = () => {
     if (!state.loaded && !state.error && !state.needLogin) {
-      return <LoadingState label={t('正在读取工具与插件...', 'Loading tools & plugins...')} />;
+      return <LoadingState text={t('正在读取工具与插件...', 'Loading tools & plugins...')} />;
     }
 
     if (modeEntries.length === 0) {
@@ -311,7 +311,7 @@ export function CapabilitiesPage({
             onChange={setQuery}
             placeholder={t('搜索工具或插件名称', 'Search tools or plugins')}
           />
-          <Chips
+          <Chips<KindFilter>
             label={t('能力类型筛选', 'Capability filter')}
             value={kindFilter}
             onChange={setKindFilter}
@@ -322,7 +322,7 @@ export function CapabilitiesPage({
         <div className="bs-card">
           {filteredEntries.map(entry => {
             const inst = entry.installation;
-            const botEnabled = Boolean(entry.binding?.enabled) && inst.enabled && inst.activation?.status === 'enabled';
+            const botEnabled = Boolean(entry.config?.enabled) && inst.enabled && inst.activation?.status === 'enabled';
             const working = state.busy === inst.installationId || enablingId === inst.installationId;
             const fields = flatFields(entry.config?.configSchema, entry.uiSchema);
             const hasParams = Boolean(fields && fields.length > 0);
@@ -342,7 +342,7 @@ export function CapabilitiesPage({
                         : t('未启用', 'Disabled')
                 }
                 onClick={hasParams ? () => state.openEditor(entry) : undefined}
-                meta={(
+                trailing={(
                   <div className="bs-cap-row-meta" onClick={e => e.stopPropagation()}>
                     <Badge>{kindLabel(inst.kind, t)}</Badge>
                     <Switch
