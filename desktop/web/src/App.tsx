@@ -20,7 +20,7 @@ import type {
 import type { BotDirectoryEntry, DevicesDirectoryItem } from '../../../host-core/index.js';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import { PendingPanel } from './PendingPanel';
-import { SettingsPanel, type DevicesSectionState } from './SettingsPanel';
+import { SettingsPanel, type CenterAdminTab, type DevicesSectionState, type SettingsTab } from './SettingsPanel';
 import { BotChats, type BotChatsArchiveBridge, type SendRecordsTarget } from './BotChats';
 import {
   CenterGate,
@@ -64,6 +64,9 @@ interface AppState {
   taskWaitingCount: number;
   settingsOpen: boolean;
   settingsPage: 'general' | 'archive';
+  settingsTab: SettingsTab;
+  centerAdminTab?: CenterAdminTab;
+  profileTokens: Record<string, string>;
   devices: DevicesSectionState;
   archiveBridge: BotChatsArchiveBridge | null;
 }
@@ -213,6 +216,9 @@ class App extends Component<AppProps, AppState> {
       taskWaitingCount: 0,
       settingsOpen: false,
       settingsPage: 'general',
+      settingsTab: 'connection',
+      centerAdminTab: undefined,
+      profileTokens: {},
       devices: emptyDevices,
       archiveBridge: null,
     };
@@ -229,6 +235,10 @@ class App extends Component<AppProps, AppState> {
 
   private handleOpenArchived = (): void => {
     this.setState({ settingsOpen: true, settingsPage: 'archive' });
+  };
+
+  private openCenterAdminSettings = (tab?: CenterAdminTab): void => {
+    this.setState({ settingsOpen: true, settingsPage: 'general', settingsTab: 'center-admin', centerAdminTab: tab });
   };
 
   private pendingAttentionDevice(): string | undefined {
@@ -522,12 +532,19 @@ class App extends Component<AppProps, AppState> {
 
   private selectProfile(profile: DesktopUiProfile): void {
     if (profile.id === this.state.selectedProfileId) return;
-    this.setState({ selectedProfileId: profile.id, token: '', ca: '', globalError: null });
+    this.setState((s) => ({
+      selectedProfileId: profile.id,
+      token: s.profileTokens[profile.id] ?? '',
+      globalError: null,
+    }));
   }
 
   private async connect(): Promise<void> {
-    const profile = this.state.profiles.find((p) => p.id === this.state.selectedProfileId);
-    const token = this.state.token;
+    const selected = this.state.profiles.find((p) => p.id === this.state.selectedProfileId);
+    const profile = selected?.kind === 'local'
+      ? selected
+      : this.state.profiles.find((p) => p.kind === 'local') ?? selected;
+    const token = profile ? (this.state.profileTokens[profile.id] ?? this.state.token) : this.state.token;
     const previousIdentity = this.state.identity;
     const previousDeviceId = this.state.selectedDeviceId;
     if (this.actionInFlight || !profile) return;
@@ -567,9 +584,9 @@ class App extends Component<AppProps, AppState> {
     } catch (e) {
       this.setState({ busy: false, globalError: '连接失败：' + toError(e).message });
     } finally {
-      // 无论成败都清输入，不保存 token/CA 副本。
+      // 保留各局域网调试档案输入态令牌，切换/重试不无故清空。
       this.actionInFlight = false;
-      this.setState({ token: '', ca: '' });
+      this.setState({ ca: '' });
     }
   }
 
@@ -626,12 +643,12 @@ class App extends Component<AppProps, AppState> {
         ...s,
         profiles: [...s.profiles, next],
       }));
-      this.setState({
+      this.setState((s) => ({
         form: { title: '', kind: 'local', url: '', expectedDeviceId: '', deviceId: '' },
         selectedProfileId: next.id,
-        token: '',
+        token: s.profileTokens[next.id] ?? '',
         ca: '',
-      });
+      }));
     } catch (e) {
       this.setState({ globalError: '保存 profile 失败：' + toError(e).message });
     } finally {
@@ -754,10 +771,20 @@ class App extends Component<AppProps, AppState> {
           <Dialog.Portal>
             <Dialog.Overlay className="desktop-dialog-overlay settings-dialog-overlay" />
             <Dialog.Content
-              className={'desktop-dialog settings-dialog' + (this.state.settingsPage === 'general' ? ' client-settings-dialog' : '')}
+              className={
+                this.state.settingsPage === 'archive'
+                  ? 'desktop-dialog settings-dialog'
+                  : this.state.settingsTab === 'center-admin'
+                    ? 'desktop-dialog settings-dialog settings-shell-dialog settings-shell-center-admin'
+                    : 'desktop-dialog settings-dialog settings-shell-dialog'
+              }
               onCloseAutoFocus={(e) => { e.preventDefault(); this.settingsButtonRef?.focus(); }}
             >
               <SettingsPanel
+                api={this.props.api}
+                activeTab={this.state.settingsTab}
+                onTabChange={(settingsTab) => this.setState({ settingsTab })}
+                centerAdminTab={this.state.centerAdminTab}
                 profiles={this.state.profiles}
                 profilesError={this.state.profilesError}
                 profilesBusy={this.state.busy}
@@ -766,10 +793,21 @@ class App extends Component<AppProps, AppState> {
                 form={this.state.form}
                 onFormChange={(patch) => this.setState((s) => ({ form: { ...s.form, ...patch } }))}
                 onSaveProfile={(e) => void this.saveProfile(e)}
-                token={this.state.token}
-                ca={this.state.ca}
-                onTokenChange={(token) => this.setState({ token })}
-                onCaChange={(ca) => this.setState({ ca })}
+                token={(() => {
+                  const localSel = selectedProfile?.kind === 'local'
+                    ? selectedProfile
+                    : this.state.profiles.find((p) => p.kind === 'local') ?? selectedProfile;
+                  return localSel ? (this.state.profileTokens[localSel.id] ?? this.state.token) : this.state.token;
+                })()}
+                onTokenChange={(token) => this.setState((s) => {
+                  const localSel = selectedProfile?.kind === 'local'
+                    ? selectedProfile
+                    : s.profiles.find((p) => p.kind === 'local') ?? selectedProfile;
+                  return {
+                    token,
+                    profileTokens: localSel ? { ...s.profileTokens, [localSel.id]: token } : s.profileTokens,
+                  };
+                })}
                 onConnect={() => void this.connect()}
                 onDisconnect={() => void this.disconnect()}
                 identity={identity}
@@ -778,6 +816,11 @@ class App extends Component<AppProps, AppState> {
                 phaseLabel={phaseLabel}
                 centerStatus={center}
                 onDisconnectCenter={() => this.disconnectCenter()}
+                onSaveCenterCa={(ca) => this.props.centerConnection.saveCenterCa(ca)}
+                onConfigureBot={(deviceId, botId) => {
+                  this.state.archiveBridge?.openConversation({ deviceId, botId });
+                  this.setState({ settingsOpen: false, view: 'chat' });
+                }}
                 devices={this.state.devices}
                 devicesIsRelay={identity?.kind === 'relay'}
                 lastObservedAt={status?.lastObservedAt ?? null}
@@ -893,6 +936,7 @@ class App extends Component<AppProps, AppState> {
             onArchiveBridge={this.handleArchiveBridge}
             onOpenSendRecords={this.openSendRecords}
             onOpenArchived={this.handleOpenArchived}
+            onOpenCenterAdmin={this.openCenterAdminSettings}
           />
         </div>
         {pendingNode}

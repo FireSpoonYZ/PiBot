@@ -1,18 +1,13 @@
-// 手机与桌面共用的 Bot 能力面板（插件/MCP/技能）。
-// 只经中心管理接口（owner 会话 + CAS 写入）读写，不经过目标 Host、不启用旧本地 getBotExtensions；
-// 目标离线仍可在中心保存，但只有中心回执 applied 才显示“已生效”，不伪报。
-// 桌面端视觉重构（Lane 6）：新增桌面专属样式以 .desktop-shell/.desktop-dialog 作用域，
-// 不影响手机端样式（手机端已改用 web/src/bot-settings/CapabilitiesPage）；props/数据/CAS/显式发送语义不变。
-// 数据逻辑（读取、轮询、登录、CAS 保存、草稿）在 useBotCapabilities 中，与手机端 CapabilitiesPage 共用。
-import { useState } from 'react';
-import { Plug, Lock, ChevronDown, Save, Download } from 'lucide-react';
+// Bot 工具扩展面板（MCP & 插件，已过滤 skill）。
+// 免密直连中心，不再弹出管理员密码框或暴露 revision / Center / Host 等底层黑话。
+import { Plug, Save } from 'lucide-react';
 import type {
   CenterBotCapabilityEntry,
   CenterCapabilityActivationStatus,
   CenterRuntimeApplyStatus,
 } from '../../../host-core/desktop-client.js';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
-import { flatFields, globallyReady, initialOverride, isObject, timeText, useBotCapabilities } from './useBotCapabilities';
+import { flatFields, globallyReady, initialOverride, isObject, useBotCapabilities } from './useBotCapabilities';
 import './BotCapabilities.css';
 
 type Props = {
@@ -21,15 +16,25 @@ type Props = {
   deviceId: string;
   botId: string;
   t?: (zh: string, en: string) => string;
-  /** 外层已有同名标题时可隐藏面板自带标题（手机 Bot 设置标签页）。 */
+  /** 外层已有同名标题时可隐藏面板自带标题。 */
   showTitle?: boolean;
-  /** 中心管理员登录成功后通知外层，同一弹窗内的其它视图可同步会话状态。 */
   onAuthenticated?: () => void;
+  /** 从未全局启用或全局设置跳转至设置 -> 中心管理 -> 扩展插件。 */
+  onOpenCenterAdmin?: () => void;
 };
 
 const identityText = (zh: string): string => zh;
 
-export function BotCapabilities({ api, identity, deviceId, botId, t = identityText, showTitle = true, onAuthenticated }: Props) {
+export function BotCapabilities({
+  api,
+  identity,
+  deviceId,
+  botId,
+  t = identityText,
+  showTitle = true,
+  onAuthenticated,
+  onOpenCenterAdmin,
+}: Props) {
   const {
     entries,
     runtime,
@@ -41,135 +46,101 @@ export function BotCapabilities({ api, identity, deviceId, botId, t = identityTe
     error,
     setError,
     notice,
-    login,
     save,
     openEditor,
     setOverride,
     saveEditor,
-    adoptRemote,
     receipt,
     capabilityErrors,
   } = useBotCapabilities({ api, identity, deviceId, botId, t, onAuthenticated, waitForFreshRuntime: true });
-  const [password, setPassword] = useState('');
-  /** 诊断区默认折叠；展开后显示底层 revision / 时间戳 / per-bot 回执。 */
-  const [diagOpen, setDiagOpen] = useState(false);
 
-  function submitLogin(): void {
-    const secret = password;
-    setPassword('');
-    void login(secret);
-  }
+  // 技能已拆分至独立「技能」页签；本页仅展示 MCP 与插件工具扩展。
+  const toolEntries = entries.filter((entry) => entry.installation.kind !== 'skill');
 
   const statusText = (status: CenterRuntimeApplyStatus): string =>
-    status === 'pending' ? t('已保存，等待设备应用', 'Saved, awaiting device')
-      : status === 'applying' ? t('应用中', 'Applying')
-        : status === 'waiting-idle' ? t('等待空闲', 'Waiting for idle')
-          : status === 'applied' ? t('已生效', 'Applied')
-            : t('应用失败', 'Failed');
+    status === 'applied' ? t('已生效', 'Applied')
+      : status === 'failed' ? t('应用失败', 'Failed')
+        : t('已保存，等待同步', 'Saved, syncing');
+
   const kindText = (kind: string): string =>
-    kind === 'plugin' ? t('插件', 'Plugin') : kind === 'mcp' ? 'MCP' : kind === 'skill' ? t('技能', 'Skill') : kind;
-  const targetText = (target: string): string => (target === 'center' ? t('中心', 'Center') : 'Host');
+    kind === 'plugin' ? t('插件', 'Plugin') : kind === 'mcp' ? 'MCP' : kind;
+
   const globalStateText = (entry: CenterBotCapabilityEntry): string => {
-    if (!entry.installation.enabled) return t('全局已关闭', 'disabled globally');
+    if (!entry.installation.enabled) return t('中心全局未开启', 'Disabled globally in Center');
     const status: CenterCapabilityActivationStatus | undefined = entry.installation.activation?.status;
-    if (status === 'enabled') return t('全局已启用', 'enabled globally');
-    if (status === 'enabling') return t('全局启用中', 'enabling globally');
-    if (status === 'failed') return t('全局启用失败', 'global activation failed');
-    if (status === 'disabled') return t('全局未生效', 'globally inactive');
-    return t('全局状态未确认', 'global state unknown');
+    if (status === 'enabled') return t('全局已启用', 'Enabled globally');
+    if (status === 'enabling') return t('全局正在启用中…', 'Enabling globally…');
+    if (status === 'failed') return t('全局启用失败', 'Global activation failed');
+    return t('中心全局未生效', 'Not active globally');
   };
-  const json = (value: unknown): string => (value === undefined ? t('默认', 'default') : JSON.stringify(value));
+
+  const jsonPreview = (value: unknown): string => (value === undefined ? t('默认', 'default') : JSON.stringify(value));
 
   return (
-    <section className="bot-cap" aria-label={t('Bot 能力', 'Bot capabilities')} style={{ display: 'grid', gap: 10 }}>
-      {showTitle ? <h4 className="bot-cap-title" style={{ margin: 0 }}>{t('插件与能力', 'Capabilities')}</h4> : null}
+    <section className="bot-cap" aria-label={t('工具扩展（MCP & 插件）', 'Tool extensions (MCP & Plugins)')} style={{ display: 'grid', gap: 10 }}>
+      {showTitle ? <h4 className="bot-cap-title" style={{ margin: 0 }}>{t('工具扩展 (MCP & 插件)', 'Tool Extensions (MCP & Plugins)')}</h4> : null}
 
       {runtime ? (
         <div className="bot-cap-runtime">
           <p className="metadata bot-cap-runtime-main" role="status">
             <span className={`bot-cap-dot ${runtime.online ? 'is-online' : 'is-offline'}`} aria-hidden="true" />
-            {`${t('目标设备', 'Target')} · ${runtime.online ? t('在线', 'Online') : t('离线', 'Offline')}`}
+            {runtime.online ? t('目标设备在线，修改即时同步', 'Target device online — changes sync immediately') : t('目标设备当前离线，保存后将在上线时自动同步', 'Device offline — saved changes will sync when online')}
           </p>
-          {!runtime.online
-            ? <p className="metadata">{t('保存到中心的设置会在设备上线后同步。', 'Settings saved to the center sync when the device reconnects.')}</p>
-            : null}
-          {/* 诊断区折叠：主视图只保留在线态+应用状态摘要，revision/时间戳按需展开。 */}
-          <button
-            type="button"
-            className="bot-cap-diag-toggle"
-            aria-expanded={diagOpen}
-            onClick={() => setDiagOpen((v) => !v)}
-          >
-            <ChevronDown size={13} className={`bot-cap-diag-chevron${diagOpen ? ' open' : ''}`} aria-hidden="true" />
-            {diagOpen ? t('收起诊断详情', 'Hide diagnostics') : t('诊断详情', 'Diagnostics')}
-          </button>
-          {diagOpen ? (
-            <div className="bot-cap-diag">
-              <p className="metadata bot-cap-runtime-detail">
-                {`${statusText(runtime.status)} · ${t('已下发', 'Desired')} revision ${runtime.desiredRevision ?? '—'} · ${t('已应用', 'Applied')} revision ${runtime.appliedRevision ?? '—'} · ${t('更新', 'Updated')} ${timeText(runtime.updatedAt)} · ${t('生效时间', 'Applied at')} ${timeText(runtime.appliedAt)}`}
-              </p>
-              {receipt ? (
-                <p className="metadata bot-cap-runtime-detail">
-                  {`${t('该 Bot', 'This bot')}: ${statusText(receipt.status)} · ${t('已应用', 'Applied')} revision ${receipt.appliedRevision ?? '—'}`}
-                </p>
-              ) : null}
-              {runtime.error ? <p className="metadata">{runtime.error.code} · {runtime.error.message}</p> : null}
-            </div>
-          ) : null}
         </div>
       ) : null}
 
-      {!loaded ? <p className="bot-cap-loading" role="status">{t('正在读取中心能力…', 'Loading capabilities…')}</p> : null}
+      {!loaded ? <p className="bot-cap-loading" role="status">{t('正在读取工具扩展…', 'Loading tool extensions…')}</p> : null}
 
       {needLogin ? (
-        <form className="bot-cap-login" onSubmit={(event) => { event.preventDefault(); submitLogin(); }}>
-          <p className="bot-cap-login-head">
-            <Lock size={14} aria-hidden="true" />
-            {t('需要中心管理员身份才能管理该 Bot 的能力。', 'Center administrator sign-in is required to manage this bot’s capabilities.')}
+        <div className="bot-cap-empty" role="status" style={{ display: 'grid', gap: 8 }}>
+          <p className="metadata" style={{ margin: 0 }}>
+            {t('当前中心会话需要授权认证，请检查「设置 → 中心连接」状态或前往中心管理。', 'Center authorization required. Check Center Connection or open Center Admin.')}
           </p>
-          <label className="bot-cap-field">
-            <span className="bot-cap-field-label">{t('中心管理员密码', 'Center administrator password')}</span>
-            <input
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-            />
-          </label>
-          <button className="bot-cap-primary" type="submit" disabled={!password || busy !== ''}>{t('登录', 'Log in')}</button>
-        </form>
+          {onOpenCenterAdmin && (
+            <div>
+              <button type="button" className="bot-cap-secondary" onClick={onOpenCenterAdmin}>
+                {t('前往中心管理', 'Open Center Admin')}
+              </button>
+            </div>
+          )}
+        </div>
       ) : null}
 
       {error ? <p className="bot-cap-error" role="alert">{error}</p> : null}
       {notice ? <p className="bot-cap-notice" role="status">{notice}</p> : null}
 
-      {loaded && !needLogin && entries.length === 0
-        ? (
-          <p className="metadata bot-cap-empty">
-            <Plug size={18} aria-hidden="true" />
-            {t('中心暂无可用于该 Bot 的能力。', 'No capability is available for this bot.')}
-          </p>
-        )
-        : null}
+      {loaded && !needLogin && toolEntries.length === 0 ? (
+        <div className="metadata bot-cap-empty" style={{ display: 'grid', gap: 8, justifyItems: 'start' }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <Plug size={16} aria-hidden="true" />
+            {t('中心尚未安装可用的 MCP 或插件扩展。', 'No MCP or plugin extensions installed in the center yet.')}
+          </span>
+          {onOpenCenterAdmin && (
+            <button type="button" className="bot-cap-secondary" onClick={onOpenCenterAdmin}>
+              {t('去中心管理安装扩展 →', 'Install extensions in Center Admin →')}
+            </button>
+          )}
+        </div>
+      ) : null}
 
-      {entries.map((entry) => {
+      {toolEntries.map((entry) => {
         const { installation, config } = entry;
         const draft = editor?.installationId === installation.installationId ? editor : null;
         const fields = flatFields(config.configSchema, entry.uiSchema);
         const itemBusy = busy === installation.installationId;
-        const overrideCount = Object.keys(config.overrides).length;
         const schema = config.configSchema;
         const description = isObject(schema) && typeof schema.description === 'string' ? schema.description.trim() : '';
-        const applyError = capabilityErrors.find(item => item.installationId === installation.installationId)?.error;
+        const applyError = capabilityErrors.find((item) => item.installationId === installation.installationId)?.error;
         const applyStatus = receipt?.status ?? runtime?.status;
         const globallyAvailable = globallyReady(entry);
         const availability = !globallyAvailable
           ? globalStateText(entry)
           : !config.enabled
-            ? t('此智能体未启用', 'Off for this bot')
+            ? t('此智能体未启用', 'Off for this agent')
             : applyError
-              ? t('设备应用失败', 'Device could not apply')
-              : applyStatus ? statusText(applyStatus) : t('已保存，等待设备确认', 'Saved, awaiting confirmation');
+              ? t(`应用失败：${applyError.message || applyError.code}`, `Apply failed: ${applyError.message || applyError.code}`)
+              : applyStatus ? statusText(applyStatus) : t('已保存，等待同步', 'Saved, awaiting sync');
+
         return (
           <section
             key={installation.installationId}
@@ -189,169 +160,117 @@ export function BotCapabilities({ api, identity, deviceId, botId, t = identityTe
                   disabled={busy !== '' || (!config.enabled && !globallyAvailable)}
                   onChange={(event) => {
                     const next = event.target.checked;
-                    // 不得用 Bot 开关打开全局；全局未生效时拒绝开启，但允许关闭。
                     if (next && !globallyAvailable) {
-                      setError(t('该能力全局未启用（或启用未完成），不能为本 Bot 开启；请先在中心启用并等待生效。', 'The capability is not enabled globally yet; enable it in the center first.'));
+                      setError(t('该扩展尚未在中心全局启用，请先前往中心管理开启后再为本智能体启用。', 'This extension is not enabled globally yet. Enable it in Center Admin first.'));
                       return;
                     }
                     void save(entry, next, config.overrides, config.revision);
                   }}
                 />
-                <span className="bot-cap-toggle-text">{t('为此智能体启用', 'Enable for this bot')}</span>
+                <span className="bot-cap-toggle-text">{t('为此智能体启用', 'Enable for this agent')}</span>
               </label>
             </div>
 
-            <p className="metadata">{description || `${kindText(installation.kind)} · ${targetText(installation.target)}`}</p>
-            <p className="bot-cap-item-status">{availability}</p>
-            {!globallyAvailable ? <p className="metadata">{t('可在设置中打开中心管理，查看全局启用状态。', 'Open Center management from Settings to review global activation.')}</p> : null}
-            <details className="bot-cap-item-details">
-              <summary>{t('诊断与配置详情', 'Diagnostics and configuration')}</summary>
-              <div className="bot-cap-diag">
-                <p className="metadata">{installation.installationId} · {installation.packageId}</p>
-                <p className="metadata">{globalStateText(entry)} · {timeText(installation.activation?.updatedAt ?? null)}</p>
-                <p className="metadata">
-                  {overrideCount ? t(`单独设置 ${overrideCount} 项`, `${overrideCount} bot overrides`) : t('继承全局配置', 'Inherits global config')}
-                  {' · '}{`revision ${config.revision}`}{draft ? ` · ${t('草稿基线', 'Draft baseline')} ${draft.revision}` : ''}
-                </p>
-                {installation.activation?.error ? <p className="metadata">{installation.activation.error.code} · {installation.activation.error.message}</p> : null}
-                {applyError ? <p className="metadata">{applyError.code} · {applyError.message}</p> : null}
-              </div>
-            </details>
+            <p className="metadata">{description || kindText(installation.kind)}</p>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+              <p className="bot-cap-item-status" style={{ margin: 0 }}>{availability}</p>
+              {!globallyAvailable && onOpenCenterAdmin ? (
+                <button type="button" className="bot-cap-secondary" onClick={onOpenCenterAdmin}>
+                  {t('去中心管理启用 →', 'Enable in Center Admin →')}
+                </button>
+              ) : null}
+            </div>
 
-            {draft === null ? (
-              <button className="bot-cap-secondary bot-cap-configure" type="button" disabled={busy !== ''} onClick={() => openEditor(entry)}>
-                {t('配置本 Bot', 'Configure for this bot')}
-              </button>
-            ) : (
-              <div className="bot-cap-editor" style={{ display: 'grid', gap: 6 }}>
-                <div className="bot-cap-editor-top">
-                  <label className="bot-cap-toggle">
-                    <input
-                      type="checkbox"
-                      checked={draft.enabled}
-                      disabled={busy !== '' || (!draft.enabled && !globallyAvailable)}
-                      onChange={(event) => setEditor((current) => (current ? { ...current, enabled: event.target.checked } : current))}
-                    />
-                    <span>{t('为该 Bot 启用', 'Enable for this bot')}</span>
-                  </label>
+            {fields && fields.length > 0 && (
+              draft === null ? (
+                <button className="bot-cap-secondary bot-cap-configure" type="button" disabled={busy !== ''} onClick={() => openEditor(entry)}>
+                  {t('调整扩展参数', 'Configure parameters')}
+                </button>
+              ) : (
+                <div className="bot-cap-editor" style={{ display: 'grid', gap: 8 }}>
+                  {fields.map((field) => {
+                    const overridden = field.key in draft.overrides;
+                    const value = draft.overrides[field.key];
+                    const label = field.title ?? field.key;
+                    const effectiveGlobal = config.globalConfig[field.key] ?? (field.hasDefault ? field.defaultValue : undefined);
+                    const controlId = 'bot-cap-override-' + field.key;
+                    const describedBy = field.description ? controlId + '-desc' : undefined;
+                    return (
+                      <div className="bot-cap-override" key={field.key}>
+                        <label className="bot-cap-override-head" htmlFor={controlId + '-override'}>
+                          <input
+                            id={controlId + '-override'}
+                            type="checkbox"
+                            checked={overridden}
+                            disabled={busy !== ''}
+                            aria-label={label}
+                            aria-describedby={describedBy}
+                            onChange={(event) => setOverride(field.key, event.target.checked ? initialOverride(field, config.globalConfig[field.key]) : undefined)}
+                          />
+                          <span className="bot-cap-override-label">{label}</span>
+                          <span className={`bot-cap-inherit-badge${overridden ? ' is-override' : ''}`}>
+                            {overridden ? t('自定义', 'custom') : t('跟随全局', 'global')}
+                          </span>
+                          <span className="bot-cap-override-default">{`(${jsonPreview(effectiveGlobal)})`}</span>
+                        </label>
+                        {field.description
+                          ? <p className="metadata bot-cap-item-note" id={controlId + '-desc'}>{field.description}</p>
+                          : null}
+                        {!overridden ? null : field.kind === 'boolean' ? (
+                          <select
+                            id={controlId}
+                            value={value === true ? 'true' : 'false'}
+                            disabled={busy !== ''}
+                            aria-label={label}
+                            aria-describedby={describedBy}
+                            onChange={(event) => setOverride(field.key, event.target.value === 'true')}
+                          >
+                            <option value="true">{t('启用', 'enabled')}</option>
+                            <option value="false">{t('关闭', 'disabled')}</option>
+                          </select>
+                        ) : field.kind === 'enum' ? (
+                          <select
+                            id={controlId}
+                            value={typeof value === 'string' ? value : ''}
+                            disabled={busy !== ''}
+                            aria-label={label}
+                            aria-describedby={describedBy}
+                            onChange={(event) => setOverride(field.key, event.target.value)}
+                          >
+                            <option value="">—</option>
+                            {(field.options ?? []).map((option, index) => (
+                              <option key={option} value={option}>
+                                {field.optionNames ? field.optionNames[index] : option}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <input
+                            id={controlId}
+                            type={field.kind === 'number' ? 'number' : 'text'}
+                            value={typeof value === 'string' || typeof value === 'number' ? String(value) : ''}
+                            disabled={busy !== ''}
+                            aria-label={label}
+                            aria-describedby={describedBy}
+                            onChange={(event) => setOverride(field.key, field.kind === 'number'
+                              ? (event.target.value === '' ? undefined : Number(event.target.value))
+                              : event.target.value)}
+                          />
+                        )}
+                      </div>
+                    );
+                  })}
+                  <div className="bot-cap-actions">
+                    <button className="bot-cap-primary" type="button" disabled={busy !== ''} onClick={() => void saveEditor(entry)}>
+                      <Save size={13} aria-hidden="true" />
+                      {itemBusy ? t('保存中…', 'Saving…') : t('保存参数', 'Save parameters')}
+                    </button>
+                    <button className="bot-cap-secondary" type="button" disabled={busy !== ''} onClick={() => setEditor(null)}>
+                      {t('取消', 'Cancel')}
+                    </button>
+                  </div>
                 </div>
-
-                {fields === null ? (
-                  <details className="bot-cap-item-details">
-                    <summary>{t('高级配置（JSON）', 'Advanced configuration (JSON)')}</summary>
-                    <label className="bot-cap-field">
-                      <span className="bot-cap-field-label">
-                        {t('覆盖配置 JSON（整段覆写，数组整体替换）', 'Overrides JSON (whole-value; arrays replace)')}
-                      </span>
-                      <textarea
-                        rows={6}
-                        spellCheck={false}
-                        value={draft.text ?? ''}
-                        disabled={busy !== ''}
-                        onChange={(event) => {
-                          const text = event.target.value;
-                          setEditor((current) => (current ? { ...current, text } : current));
-                        }}
-                      />
-                    </label>
-                  </details>
-                ) : fields.length === 0 ? (
-                  <p className="metadata bot-cap-item-note">{t('该能力没有可配置项。', 'This capability has no configurable field.')}</p>
-                ) : fields.map((field) => {
-                  const overridden = field.key in draft.overrides;
-                  const value = draft.overrides[field.key];
-                  const label = field.title ?? field.key;
-                  const effectiveGlobal = config.globalConfig[field.key] ?? (field.hasDefault ? field.defaultValue : undefined);
-                  const controlId = 'bot-cap-override-' + field.key;
-                  const describedBy = field.description ? controlId + '-desc' : undefined;
-                  return (
-                    <div className="bot-cap-override" key={field.key}>
-                      {/* 字段继承开关：勾选 = 覆盖该字段，取消 = 继承全局 */}
-                      <label className="bot-cap-override-head" htmlFor={controlId + '-override'}>
-                        <input
-                          id={controlId + '-override'}
-                          type="checkbox"
-                          checked={overridden}
-                          disabled={busy !== ''}
-                          aria-label={label}
-                          aria-describedby={describedBy}
-                          onChange={(event) => setOverride(field.key, event.target.checked ? initialOverride(field, config.globalConfig[field.key]) : undefined)}
-                        />
-                        <span className="bot-cap-override-label">{label}</span>
-                        <span className={`bot-cap-inherit-badge${overridden ? ' is-override' : ''}`}>
-                          {overridden ? t('覆写', 'override') : t('继承全局', 'inherit')}
-                        </span>
-                        <span className="bot-cap-override-default">{`(${json(effectiveGlobal)})`}</span>
-                      </label>
-                      {field.description
-                        ? <p className="metadata bot-cap-item-note" id={controlId + '-desc'}>{field.description}</p>
-                        : null}
-                      {!overridden ? null : field.kind === 'boolean' ? (
-                        <select
-                          id={controlId}
-                          value={value === true ? 'true' : 'false'}
-                          disabled={busy !== ''}
-                          aria-label={label}
-                          aria-describedby={describedBy}
-                          onChange={(event) => setOverride(field.key, event.target.value === 'true')}
-                        >
-                          <option value="true">{t('启用', 'enabled')}</option>
-                          <option value="false">{t('关闭', 'disabled')}</option>
-                        </select>
-                      ) : field.kind === 'enum' ? (
-                        <select
-                          id={controlId}
-                          value={typeof value === 'string' ? value : ''}
-                          disabled={busy !== ''}
-                          aria-label={label}
-                          aria-describedby={describedBy}
-                          onChange={(event) => setOverride(field.key, event.target.value)}
-                        >
-                          <option value="">—</option>
-                          {(field.options ?? []).map((option, index) => (
-                            <option key={option} value={option}>
-                              {field.optionNames ? field.optionNames[index] + '（' + option + '）' : option}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <input
-                          id={controlId}
-                          type={field.kind === 'number' ? 'number' : 'text'}
-                          value={typeof value === 'string' || typeof value === 'number' ? String(value) : ''}
-                          disabled={busy !== ''}
-                          aria-label={label}
-                          aria-describedby={describedBy}
-                          onChange={(event) => setOverride(field.key, field.kind === 'number'
-                            ? (event.target.value === '' ? undefined : Number(event.target.value))
-                            : event.target.value)}
-                        />
-                      )}
-                    </div>
-                  );
-                })}
-                <div className="bot-cap-actions">
-                  <button className="bot-cap-primary" type="button" disabled={busy !== ''} onClick={() => void saveEditor(entry)}>
-                    <Save size={13} aria-hidden="true" />
-                    {itemBusy ? t('保存中…', 'Saving…') : t('保存', 'Save')}
-                  </button>
-                  <button className="bot-cap-secondary" type="button" disabled={busy !== ''} onClick={() => setEditor(null)}>
-                    {t('取消', 'Cancel')}
-                  </button>
-                  <button
-                    className="bot-cap-secondary"
-                    type="button"
-                    disabled={busy !== ''}
-                    onClick={() => {
-                      // 显式采用远端：只有这个动作会替换草稿内容与 CAS 基线（逻辑见 useBotCapabilities.adoptRemote）。
-                      adoptRemote(entry);
-                    }}
-                  >
-                    <Download size={13} aria-hidden="true" />
-                    {t('采用远端（丢弃草稿）', 'Adopt remote (discard draft)')}
-                  </button>
-                </div>
-              </div>
+              )
             )}
           </section>
         );

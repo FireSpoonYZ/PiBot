@@ -18,6 +18,7 @@ import type {
   DesktopUiState,
 } from '../../../host-core/desktop-client.js';
 import type {
+  BotDirectoryEntry,
   CreateBotInput,
   DevicesDirectoryItem,
   DevicesDirectoryPage,
@@ -91,14 +92,30 @@ export interface ObservationHandle {
   close(): Promise<void>;
 }
 
+export interface ResolvedModelSummary {
+  effectiveModelRef: string | null;
+  effectiveModelName: string | null;
+  effectiveProviderName?: string | null;
+  source: 'bot' | 'center_default' | 'local_default' | 'unset';
+  available: boolean;
+}
+
+export type DesktopBotDirectoryEntry = BotDirectoryEntry & {
+  resolvedModel?: ResolvedModelSummary;
+};
+
 /**
  * 公共 broker op map：已有 DesktopOperationMap 的公共操作（排除 observe/unobserve）
- * 加本地 observe_ack 的交叉映射；用映射索引取 params/result，避免条件类型无法赋值。
+ * 加本地 observe_ack 与 center_admin_request 的交叉映射；用映射索引取 params/result，避免条件类型无法赋值。
  */
-export type BrokerOpMap = Omit<DesktopOperationMap, 'observe' | 'unobserve'> & {
+export type BrokerOpMap = Omit<DesktopOperationMap, 'observe' | 'unobserve' | 'center_admin_request'> & {
   observe_ack: {
     params: { observationId: string; deliveryId: string };
     result: { acknowledged: boolean };
+  };
+  center_admin_request: {
+    params: { method: string; path: string; body?: unknown };
+    result: unknown;
   };
 };
 
