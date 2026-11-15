@@ -71,6 +71,9 @@ export function webhookStore(db, transaction) {
     listWebhookRoutes() {
       return db.prepare('SELECT * FROM webhook_routes WHERE deleted_at IS NULL ORDER BY created_at DESC, rowid DESC').all().map(routeValue);
     },
+    getWebhookRoute(id) {
+      return routeValue(requireRoute(id));
+    },
     authenticateWebhookRoute(id, token) { return routeValue(authenticate(id, token)); },
     createWebhookRoute(input, token) {
       const now = new Date().toISOString();
@@ -83,10 +86,12 @@ export function webhookStore(db, transaction) {
     },
     updateWebhookRoute(id, input) {
       return transaction(() => {
-        requireRoute(id);
+        const current = requireRoute(id);
         const now = new Date().toISOString();
-        db.prepare('UPDATE webhook_routes SET name = ?, instruction = ?, enabled = ?, updated_at = ? WHERE id = ?')
-          .run(input.name, input.instruction, input.enabled ? 1 : 0, now, id);
+        const deviceId = input.deviceId ?? current.device_id;
+        const botId = input.botId ?? current.bot_id;
+        db.prepare('UPDATE webhook_routes SET name = ?, device_id = ?, bot_id = ?, instruction = ?, enabled = ?, updated_at = ? WHERE id = ?')
+          .run(input.name, deviceId, botId, input.instruction, input.enabled ? 1 : 0, now, id);
         if (!input.enabled) cancelPending('route_id = ?', [id], now, 'WEBHOOK_DISABLED', 'Webhook was disabled before dispatch');
         return routeValue(requireRoute(id));
       });

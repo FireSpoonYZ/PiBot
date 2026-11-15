@@ -147,6 +147,7 @@ export function registerPairingRoutes(app, { store, bridge, route, notify, publi
       // A deleted device keeps the name it had before (the delete is a soft revoke). It comes back as a
       // new registration, so the name the machine reports now is the one to show, not the stale one.
       if (existing !== null && added) registered = bridge.registry.rename(deviceId, displayName);
+      store.ensureDeviceOAuthGrant(deviceId, { resetToken: !claim.replay && existing !== null });
     } catch (error) {
       // The registry is a separate database, so the claim cannot be rolled back with it: give the code back.
       if (!claim.replay) store.releasePairingCode(claim.id, tokenHash);
