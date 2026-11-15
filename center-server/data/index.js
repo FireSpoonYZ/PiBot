@@ -144,8 +144,29 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     return validator;
   }
 
+  let transactionDepth = 0;
+  let savepointSeq = 0;
   function transaction(fn, mode = 'IMMEDIATE') {
+    if (transactionDepth > 0) {
+      const sp = `sp_${++savepointSeq}`;
+      db.exec(`SAVEPOINT ${sp}`);
+      transactionDepth += 1;
+      try {
+        const result = fn();
+        db.exec(`RELEASE SAVEPOINT ${sp}`);
+        return result;
+      } catch (err) {
+        try {
+          db.exec(`ROLLBACK TO SAVEPOINT ${sp}`);
+          db.exec(`RELEASE SAVEPOINT ${sp}`);
+        } catch { /* Preserve original error. */ }
+        throw err;
+      } finally {
+        transactionDepth -= 1;
+      }
+    }
     db.exec('BEGIN ' + mode);
+    transactionDepth += 1;
     try {
       const result = fn();
       db.exec('COMMIT');
@@ -153,6 +174,8 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     } catch (err) {
       try { db.exec('ROLLBACK'); } catch { /* Preserve original error. */ }
       throw err;
+    } finally {
+      transactionDepth -= 1;
     }
   }
   /** Advances the execution-configuration revision used by device snapshots; status-only writes must not call it. */
