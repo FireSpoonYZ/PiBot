@@ -1,18 +1,58 @@
 /* Bot 设置三页（模型 / 插件技能 MCP / 高级）共用样式。全部以 .bs- 前缀限定，不影响其它页面与桌面端。
    设计原则：单列、留白充足、卡片无描边无阴影、只用一种强调色；低频信息折叠。 */
 
-.bs-backdrop {
+.bs-backdrop,
+.bs-inline-panel {
   --bs-accent: #2b70f6;
   --bs-card: color-mix(in srgb, var(--surface) 62%, var(--bg));
   --bs-hairline: color-mix(in srgb, var(--line) 80%, transparent);
   --bs-radius: 16px;
+}
+
+.bs-backdrop {
   position: fixed; inset: 0; z-index: 80;
   display: flex; align-items: flex-end; justify-content: center;
   background: rgb(0 0 0 / .38);
   animation: bs-fade-in 180ms ease both;
 }
-:root[data-theme=dark] .bs-backdrop { --bs-accent: #5b93ff; --bs-card: var(--surface); }
-@media (prefers-color-scheme: dark) { :root[data-theme=system] .bs-backdrop { --bs-accent: #5b93ff; --bs-card: var(--surface); } }
+
+.bs-inline-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  color: var(--text);
+}
+.bs-inline-panel svg { width: 18px; height: 18px; stroke-width: 1.9; }
+
+:root[data-theme=dark] .bs-backdrop,
+:root[data-theme=dark] .bs-inline-panel { --bs-accent: #5b93ff; --bs-card: var(--surface); }
+@media (prefers-color-scheme: dark) {
+  :root[data-theme=system] .bs-backdrop,
+  :root[data-theme=system] .bs-inline-panel { --bs-accent: #5b93ff; --bs-card: var(--surface); }
+}
+
+.bs-inline-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.bs-save-status {
+  font-size: .8rem;
+  font-weight: 550;
+  color: var(--bs-accent);
+  white-space: nowrap;
+}
+
+.bs-auth-note {
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--bs-card);
+  font-size: .84rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
 
 .bs-sheet {
   --bs-sheet-max: min(90dvh, calc(var(--viewport-height, 100dvh) - var(--top) - 24px));

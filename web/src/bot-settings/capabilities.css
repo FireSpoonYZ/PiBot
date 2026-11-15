@@ -39,3 +39,11 @@
 .bs-cap-detail-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 4px; margin-top: -8px; }
 .bs-cap-detail-foot .bs-link:disabled { opacity: .4; }
 .bs-cap-rev { font: .7rem/1.3 ui-monospace, Consolas, monospace; color: var(--muted); opacity: .7; }
+
+.bs-cap-toolbar { display: flex; flex-direction: column; gap: 10px; }
+.bs-cap-row-meta { display: inline-flex; align-items: center; gap: 8px; }
+.bs-cap-editor { display: flex; flex-direction: column; gap: 14px; }
+.bs-cap-editor-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.bs-cap-editor-title { font-size: 1rem; font-weight: 600; color: var(--text); flex: 1; min-width: 0; }
+.bs-cap-fields { border-radius: var(--bs-radius); background: var(--bs-card); overflow: hidden; }
+.bs-cap-editor-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
