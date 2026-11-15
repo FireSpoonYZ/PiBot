@@ -1,7 +1,8 @@
 # Always-on Runtime 验收记录
 
 对应 [架构与迁移说明](always-on-runtime.md)，目标分支为 `refactor/always-on-runtime-20261115`，起点为
-`develop@f8593e40cf0d963dd55496f598fad044f0c3c8ad`。
+`develop@f8593e40cf0d963dd55496f598fad044f0c3c8ad`。交付前同步到随后新增的
+`develop@efec5522ce27a41cd29af0c38bcc25c114bac1fc`，解决测试 fixture 的重叠修改后重新运行全量测试。
 
 验收日期：2026-11-15。最终 Node 全量测试 **156 项通过，0 失败**。运行验收由父代理执行；开发 worker 只做静态实现、测试编写和审阅。以下结果对应本重构分支，Android 尚未完成运行验收。
 
@@ -17,7 +18,7 @@
 | 持久等待专项 | 22 项通过，0 失败 | `durable-waits.test.mjs`；取消、重启、事务回滚与升级路径 |
 | Live/历史与身份投影专项 | 6 项通过，0 失败 | `always-on-projections.test.mjs`；包含客户端撤权与严格协议 |
 | 真实 Host/SDK 集成 | 8 项通过，0 失败 | `always-on-host-integration.test.mjs`，约 2.22 秒；见下文 |
-| 最终 `npm test` | **156 项通过，0 失败，约 21.03 秒** | 普通测试命令正常退出；基线的两项失败已修复并新增事务故障回归 |
+| 最终 `npm test` | **156 项通过，0 失败，约 20.91 秒** | 同步最新 develop 后再次执行，普通测试命令正常退出；基线的两项失败已修复并新增事务故障回归 |
 | 前端构建 | 通过，约 4.76 秒 | `npm run build`；Vite 保留既有的大 chunk 提示 |
 | 桌面类型检查 | 通过 | `node node_modules/typescript/bin/tsc -p desktop/web/tsconfig.json --noEmit` |
 | 内置插件打包 | 通过，生成 6 个归档 | `node scripts/prepare-builtin-plugins.mjs`；问卷和 Tasks 均为 `1.1.0` |
@@ -32,6 +33,8 @@ Android 环境有 JRE 21，未发现可用的 JDK 编译器和 Android SDK。Jav
 - `web/test/main-bot-sync.test.mjs` 的数据同步用例：`cannot start a transaction within a transaction`，出现在 `replaceDeviceBots` 调用任务派发取消路径时。
 
 该轮基线测试前没有改动 Center 实现。随后修正迁移用例，使其真正移除 schema 8 之后的表再升级；生产迁移没有用 `IF NOT EXISTS` 掩盖错误。Bot 删除复用明确要求已有事务的任务派发取消 helper，独立取消入口仍自行包事务。新增两项故障注入测试验证删除、取消、seq 和配置版本一起回滚，最终全量测试中两类失败均已消除。
+
+交付时 develop 的 `efec552` 为通用事务包装增加了嵌套 savepoint，并修正了测试 fixture 与跨平台归档路径。本分支保留该实现，同时保留删除路径明确参与外层事务的 helper；两者不会重复取消或独立提交。迁移 fixture 合并时继续使用动态 `currentVersion`，没有重复执行 `DROP TABLE`。独立静态复审和合并后的 156 项全量测试均通过。
 
 真实集成测试使用生产 `openControlServer`、插件加载器、Pi Durable 1.5.0 和 SQLite，只替换 Center 服务与模型 provider。覆盖：旧调度代次跨重启保持取消；问卷结束 SDK Run 后另一输入继续执行；重启后回答且重复回答只产生一次续轮；Center 准入暂失败后的持久恢复；多工具轮拒绝；Stop 后迟到回答；历史编辑 fork 的原子清理；以及 SDK 已 placed、取消尚未执行的冷启动故障点。最后一项仅在造故障的 fixture 使用固定 SDK 的内部 admission 函数，生产实现仍使用公开 API。
 

@@ -127,8 +127,9 @@ test('host-core store enforces primary bot invariants, archive/unarchive, delete
 
 test('center-server data v2 tracks monotonic seq, bot_events changelog, and snapshot/diff sync', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'el-center-sync-test-'));
+  let store;
   try {
-    const store = openCenterStore({
+    store = openCenterStore({
       dataRoot: tmpDir,
       encryptionKey: new Uint8Array(32).fill(7),
     });
@@ -253,9 +254,8 @@ test('center-server data v2 tracks monotonic seq, bot_events changelog, and snap
     assert.equal(offlineSnapshot.bots.length, 1);
     assert.equal(offlineSnapshot.bots[0].botId, 'b1');
     assert.equal(offlineSnapshot.bots[0].online, false);
-
-    store.close();
   } finally {
+    try { store.close(); } catch { /* already closed */ }
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

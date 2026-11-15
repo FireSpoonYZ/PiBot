@@ -1,7 +1,7 @@
 # Always-on Runtime：身份、交接与持久等待
 
 本次重构从 `develop` 的 `f8593e40cf0d963dd55496f598fad044f0c3c8ad` 切出独立分支
-`refactor/always-on-runtime-20261115`。目标是让每轮执行有可追踪的输入、让定时交接可恢复、让等待用户的工作释放 Bot，并控制每轮任务上下文的大小。运行验收单独记录在 [验收记录](always-on-runtime-validation.md)。
+`refactor/always-on-runtime-20261115`；交付前已合入随后新增的 `develop@efec5522ce27a41cd29af0c38bcc25c114bac1fc` 并重新完成全量测试。目标是让每轮执行有可追踪的输入、让定时交接可恢复、让等待用户的工作释放 Bot，并控制每轮任务上下文的大小。运行验收单独记录在 [验收记录](always-on-runtime-validation.md)。
 
 ## 文章与 PiBot 的对应关系
 

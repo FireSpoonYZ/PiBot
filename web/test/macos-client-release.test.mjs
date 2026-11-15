@@ -42,16 +42,16 @@ function infoPlist({ identifier = 'io.github.firespoonyz.pibot', version }) {
  * headers before it reaches Info.plist.
  */
 function makeAppArchive(dir, { name = 'PiBot.app', version = '1.2.3', identifier, plist = true } = {}) {
-  const longDir = path.join(name, 'Contents', 'Resources', 'host-runtime', 'x'.repeat(120));
+  const longDir = path.posix.join(name, 'Contents', 'Resources', 'host-runtime', 'x'.repeat(120));
   fs.mkdirSync(path.join(dir, longDir), { recursive: true });
   fs.writeFileSync(path.join(dir, longDir, 'module.js'), 'export default 1;\n');
-  const entries = [path.join(longDir, 'module.js')];
+  const entries = [path.posix.join(longDir, 'module.js')];
   if (plist) {
     fs.writeFileSync(path.join(dir, name, 'Contents', 'Info.plist'), infoPlist({ identifier, version }));
-    entries.push(path.join(name, 'Contents', 'Info.plist'));
+    entries.push(path.posix.join(name, 'Contents', 'Info.plist'));
   }
   const archive = path.join(dir, `${name}.tar.gz`);
-  execFileSync('tar', ['-czf', archive, '-C', dir, ...entries], { env: { ...process.env, COPYFILE_DISABLE: '1' } });
+  execFileSync('tar', ['-czf', `${name}.tar.gz`, ...entries], { cwd: dir, env: { ...process.env, COPYFILE_DISABLE: '1' } });
   return archive;
 }
 
