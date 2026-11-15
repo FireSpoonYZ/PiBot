@@ -489,6 +489,7 @@ test('upgrading a schema 8 database adds the pairing tables and keeps the existi
     sql(db => db.exec(`
       INSERT INTO model_stars (model_ref) VALUES ('provider-a/model-1'), ('provider-b/model-2');
       DROP TABLE task_dispatcher; DROP TABLE task_dispatches; DROP TABLE tasks;
+      DROP TABLE IF EXISTS device_oauth_grants;
       DROP TABLE pairing_codes; DROP TABLE pairing_settings; PRAGMA user_version = 8;
     `));
     const before = sql(db => db.prepare('SELECT model_ref FROM model_stars ORDER BY model_ref').all().map(row => row.model_ref));
@@ -502,7 +503,7 @@ test('upgrading a schema 8 database adds the pairing tables and keeps the existi
     assert.equal(store.createPairingCode('a'.repeat(64), 60_000, 'mac-host-1').targetDeviceId, 'mac-host-1');
     store.close();
 
-    assert.equal(sql(db => db.prepare('PRAGMA user_version').get().user_version), 11);
+    assert.equal(sql(db => db.prepare('PRAGMA user_version').get().user_version), 12);
     assert.deepEqual(sql(db => db.prepare('SELECT model_ref FROM model_stars ORDER BY model_ref').all().map(row => row.model_ref)), before);
   } finally {
     fs.rmSync(dataRoot, { recursive: true, force: true });
