@@ -90,6 +90,17 @@ export function registerPairingRoutes(app, { store, bridge, route, notify, publi
       target: target === null ? null : deviceRef(target),
     });
   }, true);
+  route('GET', '/api/pairing-codes/active', () => {
+    const includesCa = store.getPairingCa() !== null;
+    return store.listActivePairingCodes().map(item => ({
+      id: item.id,
+      status: item.status,
+      createdAt: item.createdAt,
+      expiresAt: item.expiresAt,
+      includesCa,
+      target: item.targetDeviceId === null ? null : deviceRef(item.targetDeviceId),
+    }));
+  });
   route('GET', '/api/pairing-codes/:id', req => present(store.getPairingCode(req.params.id)));
   route('DELETE', '/api/pairing-codes/:id', (req, reply) => {
     store.revokePairingCode(req.params.id);
