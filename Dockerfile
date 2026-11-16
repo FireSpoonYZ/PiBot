@@ -2,6 +2,7 @@
 FROM node:26.13.0-bookworm AS build
 WORKDIR /app
 COPY center-contract/ center-contract/
+COPY web/ web/
 COPY center-web/ center-web/
 RUN npm ci --prefix center-web && npm run --prefix center-web build
 COPY center-server/ center-server/
