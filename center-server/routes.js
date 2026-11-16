@@ -277,6 +277,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('GET', '/api/providers/:id', req => required(store.getProvider(req.params.id), 'Provider'));
   // Pi native OAuth is interactive; these endpoints expose only flow prompts,
   // never access or refresh tokens. All mutations retain owner + CSRF checks.
+  route('GET', '/api/provider-auth-status', () => providerAuth.describeAll());
   route('GET', '/api/providers/:id/auth-status', req => providerAuth.describe(req.params.id));
   route('POST', '/api/providers/:id/login', req => providerAuth.start(req.params.id), true);
   route('GET', '/api/providers/:id/login/:flowId', req => providerAuth.status(req.params.id, req.params.flowId));
@@ -580,6 +581,17 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return result;
   }, true);
   route('GET', '/api/installations/:id/config', req => store.getInstallationConfig(req.params.id));
+  route('GET', '/api/installations/:id/bot-bindings', req => {
+    required(store.getInstallation(req.params.id), 'Installation');
+    const bindings = {};
+    for (const device of listOwnerDevices()) {
+      for (const bot of store.listDeviceBots(device.deviceId)) {
+        if (bot.archivedAt) continue;
+        bindings[`${device.deviceId}:${bot.botId}`] = store.getBotCapability(device.deviceId, bot.botId, req.params.id);
+      }
+    }
+    return { bindings };
+  });
   route('PUT', '/api/installations/:id/config', req => {
     const body = object(req.body);
     assertConfigCredentials(store.getInstallationConfig(req.params.id).configSchema, body.globalConfig);

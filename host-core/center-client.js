@@ -41,6 +41,9 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
   assertId(deviceId, 'deviceId');
   assertDeviceToken(deviceToken);
   const transport = base.protocol === 'https:' ? https : http;
+  const agent = base.protocol === 'https:'
+    ? new https.Agent({ keepAlive: true, keepAliveMsecs: 30_000, maxSockets: 12, ca })
+    : new http.Agent({ keepAlive: true, keepAliveMsecs: 30_000, maxSockets: 12 });
   const requests = new Set();
   let closed = false;
   let events;
@@ -60,13 +63,15 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     oauthTokenPromise = null;
     for (const active of requests) active.destroy();
     events?.destroy();
+    agent.destroy();
     onDisconnect?.(error);
   };
   const headers = { Authorization: `Bearer ${deviceToken}`, 'X-Device-Id': deviceId };
-  const start = (path, { method = 'GET', body, signal, headers: extraHeaders } = {}) => {
+  const start = (path, { method = 'GET', body, signal, headers: extraHeaders, agent: overrideAgent = agent } = {}) => {
     if (closed) throw centerError('CENTER_OFFLINE', 'center is disconnected');
     const req = transport.request(new URL(path, base), {
       method,
+      agent: overrideAgent,
       headers: {
         ...headers,
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
@@ -252,7 +257,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     const sendOnce = async (usedOAuthToken) => {
       if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
       const req = transport.request(new URL(path, base), {
-        method, ca, signal,
+        method, agent, ca, signal,
         headers: {
           ...(usedOAuthToken ? { Authorization: `Bearer ${usedOAuthToken}` } : {}),
           ...(ownerCookie ? { Cookie: ownerCookie } : {}),
@@ -267,18 +272,13 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
       req.end();
       const response = await new Promise((resolve, reject) => { req.once('response', resolve); req.once('error', reject); });
       if (closed || signal?.aborted) { response.resume(); throw centerError('CENTER_OFFLINE', 'center is disconnected'); }
-      const cookies = response.headers['set-cookie'];
-      if (cookies?.length) ownerCookie = cookies.map(cookie => cookie.split(';', 1)[0]).join('; ');
+      if (!usedOAuthToken) {
+        const cookies = response.headers['set-cookie'];
+        if (cookies?.length) ownerCookie = cookies.map(cookie => cookie.split(';', 1)[0]).join('; ');
+      }
       return response;
     };
-    const run = ownerQueue.then(async () => {
-      if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
-      let usedOAuthToken = '';
-      const hadCachedOAuth = Boolean(currentOAuthToken);
-      if (useOAuth) {
-        const token = await ensureOAuthToken(signal);
-        if (token) usedOAuthToken = token;
-      }
+    const executeOwnerCall = async (usedOAuthToken, hadCachedOAuth) => {
       let response = await sendOnce(usedOAuthToken);
       if (response.statusCode === 401 && usedOAuthToken && hadCachedOAuth) {
         response.on('error', () => {});
@@ -332,6 +332,32 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
         if (typeof result.csrfToken === 'string' && result.csrfToken) ownerCsrf = result.csrfToken;
       }
       return result;
+    };
+    if (useOAuth && path !== '/api/session') {
+      return (async () => {
+        if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
+        const hadCachedOAuth = Boolean(currentOAuthToken);
+        const token = await ensureOAuthToken(signal);
+        if (typeof token === 'string' && token !== '') {
+          return executeOwnerCall(token, hadCachedOAuth);
+        }
+        const run = ownerQueue.then(async () => {
+          if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
+          return executeOwnerCall('', false);
+        });
+        ownerQueue = run.catch(() => {});
+        return run;
+      })();
+    }
+    const run = ownerQueue.then(async () => {
+      if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
+      let usedOAuthToken = '';
+      const hadCachedOAuth = Boolean(currentOAuthToken);
+      if (useOAuth) {
+        const token = await ensureOAuthToken(signal);
+        if (token) usedOAuthToken = token;
+      }
+      return executeOwnerCall(usedOAuthToken, hadCachedOAuth);
     });
     ownerQueue = run.catch(() => {});
     return run;
@@ -357,7 +383,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
   const hostRuntimeStatusPath = (targetDeviceId) => '/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/runtime-status';
   const hostBotManagePath = (targetDeviceId, botId, domain) => '/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/' + domain;
   try {
-    const req = start('/api/host/events', { signal });
+    const req = start('/api/host/events', { signal, agent: false });
     req.setTimeout(15000, () => req.destroy(centerError('CENTER_OFFLINE', 'center connection timed out')));
     events = await new Promise((resolve, reject) => { req.once('response', resolve); req.once('error', reject); });
     req.setTimeout(0);
@@ -397,6 +423,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
   } catch (error) {
     closed = true;
     for (const active of requests) active.destroy();
+    agent.destroy();
     throw error;
   }
   return {
@@ -699,6 +726,6 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
 
       return eventStream;
     },
-    async close() { closed = true; clearTimeout(watchdog); ownerCookie = ''; ownerCsrf = ''; currentOAuthToken = ''; oauthTokenPromise = null; for (const active of requests) active.destroy(); events.destroy(); },
+    async close() { closed = true; clearTimeout(watchdog); ownerCookie = ''; ownerCsrf = ''; currentOAuthToken = ''; oauthTokenPromise = null; for (const active of requests) active.destroy(); events.destroy(); agent.destroy(); },
   };
 }

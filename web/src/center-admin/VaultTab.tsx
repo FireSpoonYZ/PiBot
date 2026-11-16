@@ -70,8 +70,22 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
     setDevices(sync.devices);
     setBots(sync.bots ?? []);
 
+    const vCap = caps.find(c => c.packageId === 'e-launcher.vault') ?? null;
+    setVaultInstall(vCap);
+    const activeBots = (sync.bots ?? []).filter(b => !b.archivedAt);
+
+    const [listRes, bindingsRec] = await Promise.all([
+      st.source === 'vaultwarden' && !st.locked
+        ? api.vaultControl<ExternalVaultListResult>({ action: 'list' }).catch(() => null)
+        : Promise.resolve(null),
+      vCap
+        ? api
+            .getInstallationBotBindings(vCap.installationId, activeBots)
+            .catch(() => ({} as Record<string, BotCapabilityConfig>))
+        : Promise.resolve(null),
+    ]);
+
     if (st.source === 'vaultwarden' && !st.locked) {
-      const listRes = await api.vaultControl<ExternalVaultListResult>({ action: 'list' }).catch(() => null);
       if (listRes) {
         setItems(listRes.items);
         setListRevision(listRes.revision);
@@ -80,23 +94,12 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
       setItems([]);
     }
 
-    const vCap = caps.find(c => c.packageId === 'e-launcher.vault') ?? null;
-    setVaultInstall(vCap);
-    if (vCap) {
-      const activeBots = (sync.bots ?? []).filter(b => !b.archivedAt);
-      const pairs = await Promise.all(
-        activeBots.map(async b => {
-          try {
-            const cfg = await api.getBotCapability(b.deviceId, b.botId, vCap.installationId);
-            return [botKey(b.deviceId, b.botId), cfg] as const;
-          } catch {
-            return null;
-          }
-        }),
-      );
+    if (vCap && bindingsRec) {
       const map = new Map<string, BotCapabilityConfig>();
-      for (const p of pairs) {
-        if (p) map.set(p[0], p[1]);
+      for (const b of activeBots) {
+        const key = botKey(b.deviceId, b.botId);
+        const cfg = bindingsRec[key];
+        if (cfg) map.set(key, cfg);
       }
       setVaultCapBindings(map);
     } else {

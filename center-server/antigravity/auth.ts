@@ -10,6 +10,8 @@
 //   `0`, and re-verifies auth with `probeAcpAuth()`.
 
 import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { stripVTControlCharacters } from "node:util";
 import { AGENT_NAME, ensureIsolatedProfile, type ResolvedProfile } from "./profile.ts";
@@ -148,6 +150,30 @@ function terminateChild(child: ChildProcess, exitedRef: { exited: boolean }): vo
 		}
 	} catch {
 		/* already gone */
+	}
+}
+
+export function hasStoredAcpAuthToken(profile: ResolvedProfile): boolean {
+	try {
+		const stat = fs.statSync(profile.oauthTokenPath);
+		return stat.isFile() && stat.size > 0;
+	} catch {
+		return false;
+	}
+}
+
+export function logoutAcpProfile(profile: ResolvedProfile): void {
+	const targets = [
+		profile.oauthTokenPath,
+		profile.authCachePath,
+		path.join(profile.geminiHome, "antigravity-cli", "jetski_state.pbtxt"),
+	];
+	for (const target of targets) {
+		try {
+			fs.rmSync(target, { force: true });
+		} catch {
+			/* ignore */
+		}
 	}
 }
 

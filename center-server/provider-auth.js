@@ -79,6 +79,21 @@ export function openProviderAuth({ store, catalog, onChange, antigravity }) {
     return { runtime, provider, stored };
   }
 
+  function describeStandardProvider(stored, provider) {
+    const secret = store.getCredential('center-internal-pi-oauth-' + stored.id);
+    const configured = Boolean(secret?.configured);
+    const key = stored.credentialRef;
+    const hasKey = Boolean(key && store.getCredential(key)?.configured);
+    return {
+      providerId: stored.id,
+      method: configured ? 'oauth' : hasKey ? 'api_key' : 'none',
+      oauth: Boolean(provider?.auth?.oauth),
+      apiKey: !stored.native || Boolean(provider?.auth?.apiKey),
+      label: provider?.auth?.oauth?.loginLabel ?? provider?.auth?.oauth?.name ?? '使用账号登录',
+      subscription: provider?.auth?.oauth?.isSubscription === true,
+    };
+  }
+
   async function describe(providerId) {
     if (providerId === ANTIGRAVITY_PROVIDER_ID) {
       const stored = store.getProvider(providerId);
@@ -103,18 +118,23 @@ export function openProviderAuth({ store, catalog, onChange, antigravity }) {
       };
     }
     const { provider, stored } = await getProvider(providerId);
-    const secret = store.getCredential('center-internal-pi-oauth-' + providerId);
-    const configured = Boolean(secret?.configured);
-    const key = stored.credentialRef;
-    const hasKey = Boolean(key && store.getCredential(key)?.configured);
-    return {
-      providerId,
-      method: configured ? 'oauth' : hasKey ? 'api_key' : 'none',
-      oauth: Boolean(provider?.auth?.oauth),
-      apiKey: !stored.native || Boolean(provider?.auth?.apiKey),
-      label: provider?.auth?.oauth?.loginLabel ?? provider?.auth?.oauth?.name ?? '使用账号登录',
-      subscription: provider?.auth?.oauth?.isSubscription === true,
-    };
+    return describeStandardProvider(stored, provider);
+  }
+
+  async function describeAll() {
+    const nativeProviders = store.listProviders().filter(p => p.native);
+    const runtime = nativeProviders.some(p => p.id !== ANTIGRAVITY_PROVIDER_ID)
+      ? await catalog.runtime()
+      : null;
+    const entries = await Promise.all(
+      nativeProviders.map(async (stored) => {
+        if (stored.id === ANTIGRAVITY_PROVIDER_ID) {
+          return [stored.id, await describe(ANTIGRAVITY_PROVIDER_ID)];
+        }
+        return [stored.id, describeStandardProvider(stored, runtime?.getProvider(stored.id))];
+      }),
+    );
+    return Object.fromEntries(entries);
   }
 
   function safeEvent(event) {
@@ -335,6 +355,11 @@ export function openProviderAuth({ store, catalog, onChange, antigravity }) {
     if (id) abortFlow(flows.get(id));
     if (providerId === ANTIGRAVITY_PROVIDER_ID) {
       if (!store.getProvider(providerId)) throw fail('NOT_FOUND', 'Provider not found');
+      if (typeof antigravity?.logout === 'function') {
+        await antigravity.logout();
+      }
+      await catalog.apply();
+      onChange();
       return describe(providerId);
     }
     const { runtime, provider } = await getProvider(providerId);
@@ -349,7 +374,12 @@ export function openProviderAuth({ store, catalog, onChange, antigravity }) {
   async function clearAuth(providerId) {
     const id = activeByProvider.get(providerId);
     if (id) abortFlow(flows.get(id));
-    if (providerId === ANTIGRAVITY_PROVIDER_ID) return;
+    if (providerId === ANTIGRAVITY_PROVIDER_ID) {
+      if (typeof antigravity?.logout === 'function') {
+        await antigravity.logout().catch(() => {});
+      }
+      return;
+    }
     try {
       const runtime = await catalog.runtime();
       if (runtime.getProvider(providerId)) {
@@ -368,5 +398,5 @@ export function openProviderAuth({ store, catalog, onChange, antigravity }) {
     activeByProvider.clear();
   }
 
-  return { describe, start, status, answer, cancel, logout, clearAuth, close };
+  return { describe, describeAll, start, status, answer, cancel, logout, clearAuth, close };
 }

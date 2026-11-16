@@ -41,6 +41,7 @@ import type {
   ExternalVaultStatus,
   InstallRequest,
   Installation,
+  InstallationBotBindingsResponse,
   InstallationConfig,
   InstallationSkillFilesResponse,
   JsonValue,
@@ -99,7 +100,7 @@ export function errorMessage(err: unknown, fallback = '操作失败'): string {
   return fallback;
 }
 
-const MAX_BROKER_ADMIN_CONCURRENCY = 2;
+const MAX_BROKER_ADMIN_CONCURRENCY = 5;
 let activeBrokerAdminCalls = 0;
 const brokerAdminWaiters: Array<() => void> = [];
 
@@ -279,6 +280,26 @@ export function createCenterApi(transport: CenterTransport) {
     discoverDraftModels: (body: ProviderCheckRequest) =>
       req<DiscoveryResult>('POST', '/api/providers/discover', body),
 
+    providerAuthStatuses: async (fallbackProviderIds: string[] = []): Promise<Record<string, ProviderAuthStatus>> => {
+      try {
+        return await req<Record<string, ProviderAuthStatus>>('GET', '/api/provider-auth-status');
+      } catch (err) {
+        if (!(err instanceof CenterApiError) || err.status !== 404) throw err;
+        if (fallbackProviderIds.length === 0) return {};
+        const entries = await Promise.all(
+          fallbackProviderIds.map(id =>
+            req<ProviderAuthStatus>('GET', `/api/providers/${enc(id)}/auth-status`)
+              .then(st => [id, st] as const)
+              .catch(() => null),
+          ),
+        );
+        const out: Record<string, ProviderAuthStatus> = {};
+        for (const entry of entries) {
+          if (entry) out[entry[0]] = entry[1];
+        }
+        return out;
+      }
+    },
     providerAuthStatus: (providerId: string) =>
       req<ProviderAuthStatus>('GET', `/api/providers/${enc(providerId)}/auth-status`),
     providerLogin: (providerId: string) =>
@@ -411,6 +432,30 @@ export function createCenterApi(transport: CenterTransport) {
 
     listBotCapabilities: (deviceId: string, botId: string) =>
       req<BotCapabilityEntry[]>('GET', `${botPath(deviceId, botId)}/capabilities`),
+    getInstallationBotBindings: async (
+      installationId: string,
+      fallbackBots: Array<{ deviceId: string; botId: string }> = [],
+    ): Promise<Record<string, BotCapabilityConfig>> => {
+      try {
+        const res = await req<InstallationBotBindingsResponse>('GET', `${instPath(installationId)}/bot-bindings`);
+        return res.bindings ?? {};
+      } catch (err) {
+        if (!(err instanceof CenterApiError) || err.status !== 404) throw err;
+        if (fallbackBots.length === 0) return {};
+        const entries = await Promise.all(
+          fallbackBots.map(b =>
+            req<BotCapabilityConfig>('GET', `${botPath(b.deviceId, b.botId)}/capabilities/${enc(installationId)}`)
+              .then(cfg => [`${b.deviceId}:${b.botId}`, cfg] as const)
+              .catch(() => null),
+          ),
+        );
+        const out: Record<string, BotCapabilityConfig> = {};
+        for (const entry of entries) {
+          if (entry) out[entry[0]] = entry[1];
+        }
+        return out;
+      }
+    },
     getBotCapability: (deviceId: string, botId: string, installationId: string) =>
       req<BotCapabilityConfig>('GET', `${botPath(deviceId, botId)}/capabilities/${enc(installationId)}`),
     putBotCapability: (deviceId: string, botId: string, installationId: string, body: PutBotCapability) =>

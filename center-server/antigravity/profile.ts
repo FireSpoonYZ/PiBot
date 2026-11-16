@@ -19,6 +19,8 @@ export interface ResolvedProfile {
 	sessionsPath: string;
 	agentPath: string;
 	settingsPath: string;
+	oauthTokenPath: string;
+	authCachePath: string;
 	bin: string;
 }
 
@@ -36,6 +38,8 @@ export function resolveProfile(opts: {
 	const sessionsPath = path.join(rootDir, "sessions.json");
 	const agentPath = path.join(geminiHome, "config", "agents", AGENT_NAME, AGENT_SYSTEM_FILE);
 	const settingsPath = path.join(geminiHome, "antigravity-cli", "settings.json");
+	const oauthTokenPath = path.join(geminiHome, "antigravity-cli", "antigravity-oauth-token");
+	const authCachePath = path.join(geminiHome, "antigravity-cli", "cache", "acp-auth-state.json");
 	const bin = opts.bin ?? process.env.PIBOT_AGY_BIN ?? "agy";
 	return {
 		rootDir,
@@ -44,6 +48,8 @@ export function resolveProfile(opts: {
 		sessionsPath,
 		agentPath,
 		settingsPath,
+		oauthTokenPath,
+		authCachePath,
 		bin,
 	};
 }

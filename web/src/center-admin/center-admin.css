@@ -796,6 +796,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: calc(12px + var(--top, env(safe-area-inset-top, 0px))) 12px calc(12px + var(--bottom, env(safe-area-inset-bottom, 0px)));
 }
 
 .ca-dialog-content {
@@ -815,6 +816,7 @@
   left: 50%;
   transform: translate(-50%, -50%);
   width: min(540px, calc(100vw - 24px));
+  max-height: calc(92vh - var(--top, env(safe-area-inset-top, 0px)) - var(--bottom, env(safe-area-inset-bottom, 0px)));
   border-radius: 12px;
 }
 
@@ -865,6 +867,14 @@
   padding: 16px 18px;
   overflow-y: auto;
   flex: 1;
+}
+
+.ca-dialog-content.is-drawer > .ca-dialog-header {
+  padding-top: calc(14px + var(--top, env(safe-area-inset-top, 0px)));
+}
+
+.ca-dialog-content.is-drawer > .ca-dialog-body {
+  padding-bottom: calc(16px + var(--bottom, env(safe-area-inset-bottom, 0px)));
 }
 
 /* QR box */

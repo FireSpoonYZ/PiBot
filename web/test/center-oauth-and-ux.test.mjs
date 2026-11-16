@@ -1,16 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { randomBytes, scryptSync } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { openCenterStore } from '../../center-server/data/index.js';
 import { openHostBridge } from '../../center-server/host-bridge.js';
+import { openAntigravity } from '../../center-server/antigravity/index.js';
+import { openProviderAuth } from '../../center-server/provider-auth.js';
 import { registerAuth } from '../../center-server/auth.js';
 import { registerRoutes } from '../../center-server/routes.js';
 import { PAIRING_CODE_PREFIX } from '../../center-server/pairing.js';
 import { errorStatus } from '../../center-server/server.js';
+import { connectCenter } from '../../host-core/center-client.js';
 import { readScannedCode } from '../src/pairingCode.ts';
 import { formatBotModelSummary } from '../src/bot-settings/modelDisplay.ts';
 
@@ -445,4 +449,178 @@ test('Android and Desktop client bridge allowlists expose center_admin_request, 
   const bridgeRs = fs.readFileSync(new URL('../../desktop/src-tauri/src/bridge.rs', import.meta.url), 'utf8');
   assert.match(bridgeRs, /"center_admin_request"/);
   assert.match(bridgeRs, /"center_qr_login_approve"/);
+});
+
+test('batch provider-auth-status, antigravity OAuth logout file cleanup, and batch installation bot-bindings', async () => {
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'el-center-agy-batch-test-'));
+  const store = openCenterStore({ dataRoot, encryptionKey: new Uint8Array(32).fill(9) });
+  const bridge = openHostBridge({ dataRoot, store, linkUrl: 'wss://127.0.0.1:1', relay: { getStatus: () => ({ onlineDeviceIds: [] }) } });
+  const antigravity = openAntigravity({ dataRoot });
+  const fakeCatalog = {
+    apply: async () => {},
+    sync: async () => {},
+    syncAntigravity: async () => {},
+    status: () => ({ syncedAt: null, error: null }),
+    bundledResetSpec: () => null,
+    runtime: async () => ({
+      getProvider: (id) => (id === 'openai-codex'
+        ? { auth: { oauth: { loginLabel: '登录 ChatGPT', isSubscription: true }, apiKey: true } }
+        : { auth: { apiKey: true } }),
+      logout: async () => {},
+    }),
+  };
+  const providerAuth = openProviderAuth({ store, catalog: fakeCatalog, antigravity, onChange: () => {} });
+  const app = Fastify({ logger: false });
+  await registerAuth(app, { sessionKey: randomBytes(32), ownerPasswordHash: ownerPasswordHash(PASSWORD) });
+  const routes = registerRoutes(app, {
+    store,
+    packages: {},
+    bridge,
+    execution: {},
+    oauth: {},
+    linkUrl: 'wss://127.0.0.1:1',
+    turns: {},
+    catalog: fakeCatalog,
+    providerAuth,
+    antigravity,
+    publicUrl: PUBLIC_URL,
+  });
+  await app.ready();
+
+  try {
+    let res = await app.inject({ method: 'GET', url: '/api/session' });
+    let cookie = cookieOf(res);
+    res = await app.inject({
+      method: 'POST',
+      url: '/api/session',
+      headers: { cookie, 'x-csrf-token': res.json().csrfToken },
+      payload: { password: PASSWORD },
+    });
+    cookie = cookieOf(res, cookie);
+    res = await app.inject({ method: 'GET', url: '/api/session', headers: { cookie } });
+    const csrf = res.json().csrfToken;
+    cookie = cookieOf(res, cookie);
+
+    store.putProvider({
+      id: 'antigravity-acp',
+      name: 'Antigravity (Center agy)',
+      api: 'antigravity-acp',
+      baseUrl: '',
+      credentialRef: null,
+      native: true,
+      enabled: true,
+      configured: true,
+    }, null);
+    store.putProvider({
+      id: 'openai-codex',
+      name: 'OpenAI Codex',
+      api: 'openai-responses',
+      baseUrl: 'https://api.openai.com/v1',
+      credentialRef: null,
+      native: true,
+      enabled: true,
+      configured: false,
+    }, null);
+
+    // 1. 无 token 文件时 /api/provider-auth-status 零子进程快速返回 method: 'none'
+    const batchRes = await app.inject({
+      method: 'GET',
+      url: '/api/provider-auth-status',
+      headers: { cookie },
+    });
+    assert.equal(batchRes.statusCode, 200);
+    const batchMap = batchRes.json();
+    assert.equal(batchMap['antigravity-acp'].method, 'none');
+    assert.equal(batchMap['antigravity-acp'].oauth, true);
+    assert.equal(batchMap['openai-codex'].oauth, true);
+    assert.equal(batchMap['openai-codex'].label, '登录 ChatGPT');
+
+    // 2. 写入模拟的隔离 OAuth 凭据文件，调用 POST /api/providers/antigravity-acp/logout 后必须彻底清理文件并返回 method: 'none'
+    const agyCliDir = path.join(dataRoot, 'antigravity', 'gemini', 'antigravity-cli');
+    const cacheDir = path.join(agyCliDir, 'cache');
+    fs.mkdirSync(cacheDir, { recursive: true });
+    const tokenFile = path.join(agyCliDir, 'antigravity-oauth-token');
+    const authCacheFile = path.join(cacheDir, 'acp-auth-state.json');
+    const jetskiFile = path.join(agyCliDir, 'jetski_state.pbtxt');
+    fs.writeFileSync(tokenFile, 'mock-oauth-token-payload');
+    fs.writeFileSync(authCacheFile, '{"authenticated":true}');
+    fs.writeFileSync(jetskiFile, 'state: 1');
+
+    const logoutRes = await app.inject({
+      method: 'POST',
+      url: '/api/providers/antigravity-acp/logout',
+      headers: { cookie, 'x-csrf-token': csrf },
+      payload: {},
+    });
+    assert.equal(logoutRes.statusCode, 200);
+    assert.equal(logoutRes.json().method, 'none');
+    assert.equal(fs.existsSync(tokenFile), false);
+    assert.equal(fs.existsSync(authCacheFile), false);
+    assert.equal(fs.existsSync(jetskiFile), false);
+  } finally {
+    routes.close();
+    providerAuth.close();
+    await antigravity.close();
+    await app.close();
+    bridge.close();
+    store.close();
+    fs.rmSync(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test('connectCenter executes OAuth Bearer adminRequest calls in parallel over Keep-Alive without head-of-line serialization', async () => {
+  let concurrent = 0;
+  let peakConcurrent = 0;
+  let releaseBarrier;
+  const allThreeArrived = new Promise(resolve => {
+    releaseBarrier = resolve;
+  });
+
+  const server = http.createServer((req, res) => {
+    if (req.url === '/api/host/events') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', Connection: 'keep-alive' });
+      res.write(': connected\n\n');
+      return;
+    }
+    if (req.url === '/api/oauth/token' && req.method === 'POST') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ accessToken: 'parallel-oauth-token' }));
+      return;
+    }
+    if (req.url?.startsWith('/api/parallel-')) {
+      assert.equal(req.headers.authorization, 'Bearer parallel-oauth-token');
+      concurrent += 1;
+      peakConcurrent = Math.max(peakConcurrent, concurrent);
+      if (concurrent >= 3) releaseBarrier();
+      allThreeArrived.then(() => {
+        concurrent -= 1;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ url: req.url, ok: true }));
+      });
+      return;
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { code: 'NOT_FOUND', message: 'Not found' } }));
+  });
+
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const client = await connectCenter({
+    centerUrl: `http://127.0.0.1:${port}`,
+    deviceId: 'dev-parallel-1',
+    deviceToken: 'a'.repeat(48),
+  });
+
+  try {
+    const results = await Promise.all([
+      client.adminRequest('/api/parallel-1'),
+      client.adminRequest('/api/parallel-2'),
+      client.adminRequest('/api/parallel-3'),
+    ]);
+    assert.equal(peakConcurrent, 3);
+    assert.deepEqual(results.map(r => r.url), ['/api/parallel-1', '/api/parallel-2', '/api/parallel-3']);
+  } finally {
+    await client.close();
+    await new Promise(resolve => server.close(() => resolve()));
+  }
 });

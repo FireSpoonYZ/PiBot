@@ -191,10 +191,11 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
   const [discoverError, setDiscoverError] = useState('');
 
   const refreshPageData = useCallback(async () => {
-    const [provList, pickerRes, cfgRes] = await Promise.all([
+    const [provList, pickerRes, cfgRes, batchAuth] = await Promise.all([
       api.listProviders(),
       api.getModelPicker(),
       api.getModelConfig(),
+      api.providerAuthStatuses().catch(() => null),
     ]);
     setProviders(provList);
     setPicker(pickerRes);
@@ -210,22 +211,14 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
     }
     setModelCountByProvider(counts);
 
-    // Fetch auth-status lightly only for native providers (e.g. Antigravity / OAuth ones)
-    const authEntries = await Promise.all(
-      provList.filter(p => p.native).map(async p => {
-        try {
-          const st = await api.providerAuthStatus(p.id);
-          return [p.id, st] as const;
-        } catch {
-          return null;
-        }
-      }),
-    );
-    const nextAuth: Record<string, ProviderAuthStatus> = {};
-    for (const pair of authEntries) {
-      if (pair) nextAuth[pair[0]] = pair[1];
+    if (batchAuth && (Object.keys(batchAuth).length > 0 || !provList.some(p => p.native))) {
+      setAuthByProvider(batchAuth);
+    } else {
+      void api
+        .providerAuthStatuses(provList.filter(p => p.native).map(p => p.id))
+        .then(next => setAuthByProvider(next))
+        .catch(() => {});
     }
-    setAuthByProvider(nextAuth);
   }, [api]);
 
   useEffect(() => {
@@ -642,12 +635,17 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
     if (!edit) return;
     setAuthBusy(true);
     setDrawerError('');
+    setDrawerNotice('');
     try {
       const next = await api.providerLogout(edit.id);
       setAuthStatus(next);
       setAuthByProvider(prev => ({ ...prev, [edit.id]: next }));
-      setDrawerNotice('已退出 OAuth 授权');
-      await refreshPageData();
+      if (next.method === 'oauth') {
+        setDrawerError('退出 OAuth 授权未生效，请重试');
+      } else {
+        setDrawerNotice('已退出 OAuth 授权');
+        void refreshPageData().catch(() => {});
+      }
     } catch (err) {
       setDrawerError(errorMessage(err, '退出授权失败'));
     } finally {
@@ -1190,7 +1188,11 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
                   <div>
                     <div className="ca-field-label">OAuth 账号授权</div>
                     <div className="ca-muted">
-                      {authStatus?.label || (authStatus?.method === 'oauth' ? '已授权' : '尚未登录')}
+                      {authStatus?.method === 'oauth'
+                        ? '已通过 OAuth 授权登录'
+                        : authStatus?.label
+                          ? `未授权 · 可${authStatus.label}`
+                          : '尚未登录'}
                     </div>
                   </div>
                   <div className="ca-inline-row">

@@ -383,6 +383,10 @@ export interface ExternalVaultCheckResult {
   status: ExternalVaultStatus;
 }
 
+export interface InstallationBotBindingsResponse {
+  bindings: Record<string, BotCapabilityConfig>;
+}
+
 export type ExternalVaultControlResult =
   | ExternalVaultStatus
   | ExternalVaultListResult

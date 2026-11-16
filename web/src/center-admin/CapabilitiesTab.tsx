@@ -227,24 +227,24 @@ export function CapabilitiesTab({
             ? api.getInstallationSkillFiles(instId).catch(() => null)
             : Promise.resolve(null);
         const depsPromise = api.listDeployments(instId).catch(() => [] as DeploymentReceipt[]);
+        const bindingsPromise = api
+          .getInstallationBotBindings(instId, activeBots)
+          .catch(() => ({} as Record<string, BotCapabilityConfig>));
 
-        const bindingsEntries = await Promise.all(
-          activeBots.map(async b => {
-            try {
-              const bc = await api.getBotCapability(b.deviceId, b.botId, instId);
-              return [botKey(b.deviceId, b.botId), bc] as const;
-            } catch {
-              return null;
-            }
-          }),
-        );
+        const [cfg, sFiles, deps, bindingsRec] = await Promise.all([
+          cfgPromise,
+          filesPromise,
+          depsPromise,
+          bindingsPromise,
+        ]);
+
         const bindingMap = new Map<string, BotCapabilityConfig>();
-        for (const pair of bindingsEntries) {
-          if (pair) bindingMap.set(pair[0], pair[1]);
+        for (const b of activeBots) {
+          const key = botKey(b.deviceId, b.botId);
+          const bc = bindingsRec[key];
+          if (bc) bindingMap.set(key, bc);
         }
         setBotBindings(bindingMap);
-
-        const [cfg, sFiles, deps] = await Promise.all([cfgPromise, filesPromise, depsPromise]);
         setDetailConfig(cfg);
         setDetailGlobalDraft(cfg?.globalConfig ?? {});
         setSkillFilesRes(sFiles);
