@@ -1,20 +1,23 @@
-// 设置和归档均由 App 提供对话框。连接凭据只保存在输入态。
+// 设置与归档面板：极简 4 栏架构（中心连接 / 中心管理 / 本机与权限 / 外观与通用）。
 import * as Dialog from '@radix-ui/react-dialog';
 import {
-  ArrowLeft, Check, ChevronRight, Copy, Download, ExternalLink, Globe, Monitor, Pencil,
-  RefreshCw, RotateCcw, Server, SunMoon, Trash2, X,
+  Check, Copy, Globe, Pencil, RefreshCw, RotateCcw, Server, ShieldCheck, Sliders, Trash2, X,
 } from 'lucide-react';
-import { useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { DesktopClientStatus, DesktopUiProfile } from '../../../host-core/desktop-client.js';
 import type { BotDirectoryEntry, DevicesDirectoryItem } from '../../../host-core/index.js';
-import type { DesktopIdentity } from './types';
+import type { DesktopIdentity, DesktopPanelApi } from './types';
 import { openCenterManagement, type DesktopTheme } from './CenterGate';
 import { HostServiceSection, useHostService } from './HostServiceSection';
 import { ClientUpdateSection, useClientUpdateSummary } from '../../../web/src/ClientUpdateSection';
+import { CenterAdminPanel, createBrokerCenterTransport } from '../../../web/src/center-admin';
 import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
 import { botAvatarKey } from '../../../web/src/botAvatarSync';
 import { ErrorNotice, useHideToolOutput } from '../../../web/src/ui';
 import { archiveExpiryAt, type BotChatsArchiveBridge } from './BotChats';
+
+export type SettingsTab = 'connection' | 'center-admin' | 'runtime' | 'general';
+export type CenterAdminTab = 'providers' | 'capabilities' | 'devices' | 'vault' | 'ops';
 
 interface ProfileFormState {
   title: string;
@@ -39,9 +42,14 @@ interface CenterStatusLite {
   state: 'disconnected' | 'connecting' | 'ready';
   centerUrl: string;
   clientId: string;
+  savedConnection?: { url: string; deviceId: string; ca: string };
 }
 
 export interface SettingsPanelProps {
+  api: DesktopPanelApi;
+  activeTab: SettingsTab;
+  onTabChange(tab: SettingsTab): void;
+  centerAdminTab?: CenterAdminTab;
   profiles: DesktopUiProfile[];
   profilesError: string | null;
   profilesBusy: boolean;
@@ -51,9 +59,7 @@ export interface SettingsPanelProps {
   onFormChange(patch: Partial<ProfileFormState>): void;
   onSaveProfile(event: FormEvent): void;
   token: string;
-  ca: string;
   onTokenChange(value: string): void;
-  onCaChange(value: string): void;
   onConnect(): void;
   onDisconnect(): void;
   identity: DesktopIdentity | null;
@@ -62,6 +68,8 @@ export interface SettingsPanelProps {
   phaseLabel: string;
   centerStatus: CenterStatusLite | undefined;
   onDisconnectCenter(): Promise<void>;
+  onSaveCenterCa(ca: string): Promise<void>;
+  onConfigureBot?(deviceId: string, botId: string): void;
   devices: DevicesSectionState;
   devicesIsRelay: boolean;
   lastObservedAt: string | null;
@@ -79,8 +87,14 @@ export interface SettingsPanelProps {
   onOpenArchivedBotHistory?(bot: BotDirectoryEntry): void;
 }
 
-const CONNECTION_TYPES = { local: '直连设备', relay: '经中心连接' } as const;
 const THEMES: Record<DesktopTheme, string> = { system: '跟随系统', light: '浅色', dark: '深色' };
+
+const TAB_META: Array<{ id: SettingsTab; label: string; desc: string }> = [
+  { id: 'connection', label: '中心连接', desc: '查看中心连接状态、当前设备或更换绑定' },
+  { id: 'center-admin', label: '中心管理', desc: '免密管理模型服务商、扩展插件、设备与全局密码库' },
+  { id: 'runtime', label: '本机与权限', desc: '本机后台服务状态、开机自启与高级排障' },
+  { id: 'general', label: '外观与通用', desc: '主题模式、对话显示、已归档智能体与客户端更新' },
+];
 
 function DeviceRow({ item, isRelay, local, online, busy, lastObservedAt, onRename, onError }: {
   item: DevicesDirectoryItem;
@@ -139,7 +153,6 @@ function DeviceRow({ item, isRelay, local, online, busy, lastObservedAt, onRenam
             </summary>
             <div className="settings-device-details">
               <div className="metadata">设备 ID {item.deviceId}</div>
-              {isRelay && <div className="metadata">控制协议 {item.controlProtocol} · 群聊协议 {item.scopeProtocol}</div>}
               {lastObservedAt && <div className="metadata">最近读取 {lastObservedAt}</div>}
             </div>
           </details>
@@ -185,7 +198,7 @@ function ArchivedBots({ bridge, onOpenHistory }: {
   return (
     <section className="settings-section archived-bots-subpage">
       <div className="section-head">
-        <h4>已归档 {items.length} 个</h4>
+        <h4>已归档智能体（{items.length}）</h4>
         <button type="button" className="secondary-button" disabled={!bridge?.online || bridge.loading} onClick={() => bridge?.refresh()}>
           <RefreshCw size={13} aria-hidden /> 刷新
         </button>
@@ -244,336 +257,459 @@ function ArchivedBots({ bridge, onOpenHistory }: {
   );
 }
 
-function ConnectionProfiles(props: SettingsPanelProps) {
+function LocalDebugProfiles(props: SettingsPanelProps) {
   const { profiles, profilesBusy, profilesError, form, selectedProfile, transportConnected, identity, status } = props;
-  const activeProfile = profiles.find((profile) => profile.id === identity?.profileId);
-  const selectedIsActive = Boolean(selectedProfile && activeProfile?.id === selectedProfile.id && transportConnected);
+  // 剔除与主中心连接重复混淆的 Center Relay 档案，仅保留局域网直连调试档案。
+  const localProfiles = profiles.filter((profile) => profile.kind === 'local');
+  const activeLocalProfile = selectedProfile?.kind === 'local' ? selectedProfile : localProfiles[0] ?? null;
+  const activeId = identity?.kind === 'local' ? identity.profileId : null;
+  const selectedIsActive = Boolean(activeLocalProfile && activeId === activeLocalProfile.id && transportConnected);
+
   return (
-    <>
-      <section className="settings-section">
-        <div className="section-head"><h4>连接档案</h4></div>
-        {activeProfile && <p className="status">{activeProfile.title} · {props.phaseLabel}</p>}
-        <ErrorNotice compact error={profilesError} />
-        {profiles.length > 0 ? (
-          <ul className="profile-list">
-            {profiles.map((profile) => (
-              <li key={profile.id} className={profile.id === selectedProfile?.id ? 'selected' : undefined}>
-                <button type="button" className="profile-row" aria-pressed={profile.id === selectedProfile?.id} onClick={() => props.onSelectProfile(profile)}>
-                  <strong>{profile.title}</strong>
-                  <span className="metadata">{CONNECTION_TYPES[profile.kind]}</span>
-                  {transportConnected && activeProfile?.id === profile.id && <span className="status ok">当前连接</span>}
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : <p className="empty-state">暂无连接档案。</p>}
-        <details className="settings-disclosure">
-          <summary>新增连接</summary>
-          <form className="form-grid" onSubmit={props.onSaveProfile}>
-            <label>
-              名称（可选）
-              <input value={form.title} onChange={(event) => props.onFormChange({ title: event.target.value })} />
-            </label>
-            <label>
-              连接方式
-              <select value={form.kind} onChange={(event) => props.onFormChange({ kind: event.target.value as 'local' | 'relay' })}>
-                <option value="local">直连设备</option>
-                <option value="relay">经中心连接</option>
-              </select>
-            </label>
-            <label className="form-grid-full">
-              {form.kind === 'local' ? '设备地址' : '中继地址'}
-              <input required type="url" value={form.url} onChange={(event) => props.onFormChange({ url: event.target.value })} />
-            </label>
-            {form.kind === 'local' ? (
-              <label className="form-grid-full">
-                期望设备 ID（可选）
-                <input value={form.expectedDeviceId} onChange={(event) => props.onFormChange({ expectedDeviceId: event.target.value })} />
-              </label>
-            ) : (
-              <label className="form-grid-full">
-                设备 ID
-                <input required value={form.deviceId} onChange={(event) => props.onFormChange({ deviceId: event.target.value })} />
-              </label>
-            )}
-            <div className="form-grid-full">
-              <button type="submit" className="primary-button" disabled={profilesBusy}>保存档案</button>
-            </div>
-          </form>
-        </details>
-      </section>
-      {selectedProfile && (
-        <section className="settings-section">
-          <div className="section-head"><h4>{selectedProfile.title}</h4></div>
-          <p className="metadata">{CONNECTION_TYPES[selectedProfile.kind]} · {selectedProfile.url}</p>
+    <div className="diagnostics-block">
+      <h5>局域网 IP 直连调试</h5>
+      <p className="metadata">仅用于无中心网络下的局域网直连调试。切换档案时保留当前已填令牌。</p>
+      <ErrorNotice compact error={profilesError} />
+      {localProfiles.length > 0 ? (
+        <ul className="profile-list">
+          {localProfiles.map((profile) => (
+            <li key={profile.id} className={profile.id === activeLocalProfile?.id ? 'selected' : undefined}>
+              <button
+                type="button"
+                className="profile-row"
+                aria-pressed={profile.id === activeLocalProfile?.id}
+                onClick={() => props.onSelectProfile(profile)}
+              >
+                <strong>{profile.title}</strong>
+                <span className="metadata">{profile.url}</span>
+                {transportConnected && activeId === profile.id && <span className="status ok">当前直连</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="metadata">暂无局域网直连调试档案。</p>
+      )}
+
+      {activeLocalProfile && (
+        <div className="settings-connect" style={{ marginTop: 8 }}>
           {selectedIsActive ? (
-            <button type="button" className="secondary-button" onClick={props.onDisconnect} disabled={profilesBusy}>断开连接</button>
+            <button type="button" className="secondary-button" onClick={props.onDisconnect} disabled={profilesBusy}>断开直连</button>
           ) : (
-            <div className="settings-connect">
+            <>
               <label>
-                {selectedProfile.kind === 'local' ? '本机连接令牌' : '中心设备令牌'}
-                <input type="password" autoComplete="off" value={props.token} onChange={(event) => props.onTokenChange(event.target.value)} />
+                本机直连令牌（{activeLocalProfile.title}）
+                <input
+                  type="password"
+                  autoComplete="off"
+                  value={props.token}
+                  onChange={(event) => props.onTokenChange(event.target.value)}
+                  placeholder="输入目标设备的直连令牌"
+                />
               </label>
-              {selectedProfile.kind === 'relay' && (
-                <details className="settings-diagnostics">
-                  <summary>自签证书（可选）</summary>
-                  <label>
-                    CA 证书
-                    <textarea value={props.ca} onChange={(event) => props.onCaChange(event.target.value)} />
-                  </label>
-                </details>
-              )}
               <div className="dialog-actions">
                 <button type="button" className="primary-button" onClick={props.onConnect} disabled={profilesBusy}>
-                  {transportConnected ? '切换到此连接' : '连接'}
+                  {transportConnected ? '切换到此直连' : '连接'}
                 </button>
               </div>
-            </div>
+            </>
           )}
           {status && (
-            <details className="settings-diagnostics">
-              <summary>连接诊断</summary>
-              <div className="metadata">连接代次 {status.generation} · {status.phase}{status.errorCode ? ' · ' + status.errorCode : ''}</div>
-            </details>
+            <div className="metadata">连接代次 {status.generation} · {status.phase}{status.errorCode ? ' · ' + status.errorCode : ''}</div>
           )}
-        </section>
+        </div>
       )}
-    </>
+
+      <details className="settings-disclosure" style={{ marginTop: 10 }}>
+        <summary>新增局域网直连档案</summary>
+        <form className="form-grid" onSubmit={props.onSaveProfile}>
+          <label>
+            名称（可选）
+            <input value={form.title} onChange={(event) => props.onFormChange({ title: event.target.value, kind: 'local' })} placeholder="例如：办公室台式机" />
+          </label>
+          <label>
+            期望设备 ID（可选）
+            <input value={form.expectedDeviceId} onChange={(event) => props.onFormChange({ expectedDeviceId: event.target.value, kind: 'local' })} />
+          </label>
+          <label className="form-grid-full">
+            设备局域网地址
+            <input required type="url" value={form.url} onChange={(event) => props.onFormChange({ url: event.target.value, kind: 'local' })} placeholder="http://192.168.1.x:port" />
+          </label>
+          <div className="form-grid-full">
+            <button type="submit" className="primary-button" disabled={profilesBusy}>保存直连档案</button>
+          </div>
+        </form>
+      </details>
+    </div>
   );
 }
 
-const SETTINGS_TITLES = {
-  overview: '设置',
-  connection: '中心连接',
-  devices: '设备',
-  update: '客户端更新',
-  appearance: '外观',
-  runtime: '本机服务',
-  profiles: '手动连接设备',
-} as const;
+function CustomCaSection({ centerStatus, onSaveCenterCa }: Pick<SettingsPanelProps, 'centerStatus' | 'onSaveCenterCa'>) {
+  const savedCa = centerStatus?.savedConnection?.ca ?? '';
+  const [caDraft, setCaDraft] = useState(savedCa);
+  const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [savedOk, setSavedOk] = useState(false);
+  const [error, setError] = useState('');
 
-type SettingsPage = keyof typeof SETTINGS_TITLES;
+  useEffect(() => {
+    if (!dirty) {
+      setCaDraft(savedCa);
+    }
+  }, [savedCa, dirty]);
 
-function SettingsLink({ page, icon, summary, tone, onOpen }: {
-  page: Exclude<SettingsPage, 'overview'>;
-  icon: ReactNode;
-  summary?: ReactNode;
-  tone?: 'online' | 'busy';
-  onOpen(page: SettingsPage): void;
-}) {
-  return (
-    <button type="button" className="settings-row settings-row-link" data-settings-page={page} onClick={() => onOpen(page)}>
-      <span className="settings-row-icon" aria-hidden="true">{icon}</span>
-      <span className="settings-row-label">{SETTINGS_TITLES[page]}</span>
-      {summary && <span className={tone ? 'status ' + tone : 'metadata'}>{summary}</span>}
-      <ChevronRight className="settings-row-chevron" size={15} aria-hidden />
-    </button>
-  );
-}
-
-function CenterConnectionSettings({ centerStatus, onDisconnectCenter }: Pick<SettingsPanelProps, 'centerStatus' | 'onDisconnectCenter'>) {
-  const [copied, setCopied] = useState(false);
-  const [managementError, setManagementError] = useState('');
-  const clientId = centerStatus?.clientId;
-
-  const copyClientId = () => {
-    if (!clientId) return;
-    void navigator.clipboard.writeText(clientId).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    }).catch(() => {});
+  const handleSave = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    setSavedOk(false);
+    try {
+      await onSaveCenterCa(caDraft);
+      setDirty(false);
+      setSavedOk(true);
+      setTimeout(() => setSavedOk(false), 2000);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
-    <>
-      <div className="settings-row-group">
-        {centerStatus?.centerUrl && (
-          <div className="settings-row">
-            <span className="settings-row-label">中心地址</span>
-            <span className="metadata">{centerStatus.centerUrl}</span>
-          </div>
-        )}
-        <button type="button" className="settings-row settings-row-link" onClick={() => {
-          setManagementError('');
-          void openCenterManagement(centerStatus?.centerUrl).catch(() => setManagementError('暂时无法打开中心管理。'));
-        }}>
-          <span className="settings-row-label">在浏览器打开中心管理</span>
-          <ExternalLink className="settings-row-chevron" size={15} aria-hidden />
-        </button>
-        <button type="button" className="settings-row settings-row-link" onClick={() => void onDisconnectCenter()}>
-          <span className="settings-row-label">更换中心连接</span>
-          <ChevronRight className="settings-row-chevron" size={15} aria-hidden />
-        </button>
+    <div className="diagnostics-block">
+      <h5>自定义 CA 证书</h5>
+      <p className="metadata">仅用于自建 HTTPS 中心的私有根证书（PEM 格式）。</p>
+      <div className="settings-connect" style={{ marginTop: 4 }}>
+        <textarea
+          value={caDraft}
+          disabled={busy || !centerStatus?.savedConnection}
+          onChange={(event) => {
+            setCaDraft(event.target.value);
+            setDirty(true);
+            setSavedOk(false);
+          }}
+          placeholder="-----BEGIN CERTIFICATE-----"
+          rows={4}
+        />
+        <div className="dialog-actions">
+          <button
+            type="button"
+            className="primary-button"
+            disabled={busy || !centerStatus?.savedConnection || !dirty}
+            onClick={() => void handleSave()}
+          >
+            {busy ? '正在保存…' : '保存 CA 证书'}
+          </button>
+          {savedOk && <span className="status online">✓ 已保存并生效</span>}
+        </div>
+        <ErrorNotice compact error={error} onDismiss={() => setError('')} />
       </div>
-      <ErrorNotice compact error={managementError} onDismiss={() => setManagementError('')} />
-      {clientId && (
-        <details className="settings-section settings-diagnostics">
-          <summary>连接详情</summary>
-          <div className="settings-client-id">
-            <span>客户端 {clientId}</span>
-            <button type="button" className="icon-button" onClick={copyClientId} aria-label={copied ? '已复制客户端标识' : '复制客户端标识'}>
-              {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
-            </button>
-          </div>
-        </details>
-      )}
-    </>
+    </div>
   );
 }
 
-function ClientSettings(props: SettingsPanelProps) {
-  const [page, setPage] = useState<SettingsPage>('overview');
+function TabbedSettings(props: SettingsPanelProps) {
+  const { activeTab, onTabChange, centerStatus, devices, transportConnected, devicesIsRelay, identity, api } = props;
   const [hideToolOutput, setHideToolOutput] = useHideToolOutput();
-  const titleRef = useRef<HTMLHeadingElement>(null);
+  const [copiedClientId, setCopiedClientId] = useState(false);
+  const [centerBusy, setCenterBusy] = useState<'rebind' | 'disconnect' | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
-  const nextFocus = useRef<SettingsPage | 'title' | null>(null);
   const hostService = useHostService();
   const updateSummary = useClientUpdateSummary();
-  const { centerStatus, devices, transportConnected, devicesIsRelay, identity } = props;
+
+  useEffect(() => {
+    if (bodyRef.current) bodyRef.current.scrollTop = 0;
+  }, [activeTab]);
+
   const centerReady = centerStatus?.state === 'ready';
   const centerConnecting = centerStatus?.state === 'connecting';
   const centerLabel = centerReady ? '已连接' : centerConnecting ? '正在恢复连接' : '未连接';
-  const centerTone = centerReady ? 'online' : centerConnecting ? 'busy' : undefined;
-  const localDeviceId = identity?.kind === 'local' ? props.currentDeviceId
-    : hostService.host?.configured ? hostService.host.deviceId : null;
+  const centerTone = centerReady ? 'online' : centerConnecting ? 'warn' : 'muted';
+
+  const localDeviceId = identity?.kind === 'local'
+    ? props.currentDeviceId
+    : (hostService.host?.configured ? hostService.host.deviceId : null) || props.currentDeviceId || null;
+
+  const currentDevice = devices.items.find((item) => item.deviceId === localDeviceId);
+  const currentDeviceName = currentDevice?.displayName
+    || hostService.host?.displayName
+    || hostService.host?.hostname
+    || localDeviceId
+    || '本机设备';
 
   const deviceStatusCurrent = transportConnected && !devices.stale;
   const showingLastDirectory = devices.loaded && !deviceStatusCurrent;
-  let deviceSummary = devices.busy ? '正在读取' : '尚未读取';
-  if (showingLastDirectory) deviceSummary = '上次读取';
-  else if (!transportConnected) deviceSummary = '等待连接';
-  else if (devices.loaded) {
-    deviceSummary = devices.nextCursor ? '已读取 ' + devices.items.length + ' 台'
-      : devices.items.length ? devices.items.filter((item) => item.online).length + ' 台在线' : '暂无设备';
-  } else if (devices.error) deviceSummary = '读取失败';
 
-  const openPage = (next: SettingsPage) => {
-    nextFocus.current = 'title';
-    setPage(next);
+  const centerTransport = useMemo(() => {
+    if (!identity || !centerReady) return null;
+    return createBrokerCenterTransport((op, params) =>
+      (api.broker as (id: DesktopIdentity, op: string, params: Record<string, unknown>) => Promise<unknown>)(
+        identity,
+        op,
+        params,
+      ),
+    );
+  }, [api, identity, centerReady]);
+
+  const activeMeta = TAB_META.find((tab) => tab.id === activeTab) ?? TAB_META[0];
+
+  const handleDisconnectAction = async (kind: 'rebind' | 'disconnect') => {
+    if (centerBusy) return;
+    setCenterBusy(kind);
+    try {
+      await props.onDisconnectCenter();
+    } finally {
+      setCenterBusy(null);
+    }
   };
 
-  const goBack = () => {
-    nextFocus.current = page;
-    setPage(page === 'runtime' || page === 'profiles' ? 'devices' : 'overview');
+  const copyClientId = () => {
+    if (!centerStatus?.clientId) return;
+    void navigator.clipboard?.writeText(centerStatus.clientId).then(() => {
+      setCopiedClientId(true);
+      setTimeout(() => setCopiedClientId(false), 1500);
+    }).catch(() => {});
   };
 
-  useLayoutEffect(() => {
-    const focus = nextFocus.current;
-    if (!focus) return;
-    nextFocus.current = null;
-    const body = bodyRef.current;
-    if (body) body.scrollTop = 0;
-    const link = focus === 'title' ? null : body?.querySelector<HTMLButtonElement>(`[data-settings-page="${focus}"]`);
-    (link ?? titleRef.current)?.focus();
-  }, [page]);
+  const renderTabIcon = (id: SettingsTab) => {
+    if (id === 'connection') return <Globe size={15} aria-hidden />;
+    if (id === 'center-admin') return <ShieldCheck size={15} aria-hidden />;
+    if (id === 'runtime') return <Server size={15} aria-hidden />;
+    return <Sliders size={15} aria-hidden />;
+  };
 
   return (
-    <>
-      <div className="dialog-head">
-        {page !== 'overview' && (
-          <button type="button" className="icon-button" onClick={goBack} aria-label={page === 'runtime' || page === 'profiles' ? '返回设备' : '返回设置'}>
-            <ArrowLeft size={16} aria-hidden />
-          </button>
-        )}
-        <Dialog.Title className="dialog-title" ref={titleRef} tabIndex={-1}>{SETTINGS_TITLES[page]}</Dialog.Title>
-        <Dialog.Close asChild><button type="button" className="icon-button" aria-label="关闭"><X size={16} aria-hidden /></button></Dialog.Close>
+    <div className="settings-shell-wrap">
+      <div className="dialog-head settings-shell-head">
+        <Dialog.Title className="dialog-title">设置</Dialog.Title>
+        <Dialog.Description className="sr-only">{activeMeta.desc}</Dialog.Description>
+        <Dialog.Close asChild>
+          <button type="button" className="icon-button" aria-label="关闭"><X size={16} aria-hidden /></button>
+        </Dialog.Close>
       </div>
-      <Dialog.Description className={page === 'connection' ? 'dialog-desc' : 'sr-only'}>
-        {page === 'connection' ? centerLabel : '管理中心连接、设备和客户端。'}
-      </Dialog.Description>
-      <div className="dialog-body" ref={bodyRef}>
-        {props.actionError && (page === 'connection' || page === 'profiles') && (
-          <ErrorNotice compact error={props.actionError} onDismiss={props.onDismissActionError} />
-        )}
-        {page === 'overview' && (
-          <>
-            <div className="settings-row-group">
-              <SettingsLink page="connection" icon={<Globe size={17} />} summary={centerLabel} tone={centerTone} onOpen={openPage} />
-              <SettingsLink page="devices" icon={<Monitor size={17} />} summary={deviceSummary} onOpen={openPage} />
-              <SettingsLink page="update" icon={<Download size={17} />} summary={updateSummary} onOpen={openPage} />
-              <SettingsLink page="appearance" icon={<SunMoon size={17} />} summary={THEMES[props.theme]} onOpen={openPage} />
-            </div>
-            <div className="settings-row-group">
-              <label className="settings-row settings-row-link">
-                <span className="settings-row-label">
-                  <span>隐藏工具输出</span>
-                  <span className="metadata" style={{ display: 'block', fontSize: 12 }}>默认折叠工具调用过程与原始输出</span>
-                </span>
-                <input
-                  type="checkbox"
-                  checked={hideToolOutput}
-                  onChange={(event) => setHideToolOutput(event.target.checked)}
-                />
-              </label>
-            </div>
-          </>
-        )}
-        {page === 'connection' && <CenterConnectionSettings centerStatus={centerStatus} onDisconnectCenter={props.onDisconnectCenter} />}
-        {page === 'devices' && (
-          <>
-            <section className="settings-section">
-              <div className="section-head">
-                <h4>设备列表</h4>
-                <button type="button" className="icon-button" onClick={props.onRefreshDevices} disabled={devices.busy || !transportConnected} aria-label="刷新设备">
-                  <RefreshCw size={15} aria-hidden />
+
+      <div className="settings-shell-layout">
+        <nav className="settings-shell-nav" aria-label="设置分栏">
+          {TAB_META.map((tab) => {
+            const active = tab.id === activeTab;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                className={'settings-nav-item' + (active ? ' active' : '')}
+                aria-current={active ? 'page' : undefined}
+                onClick={() => onTabChange(tab.id)}
+              >
+                {renderTabIcon(tab.id)}
+                <span>{tab.label}</span>
+                {tab.id === 'connection' && (
+                  <span className={`nav-status-dot ${centerTone}`} aria-hidden />
+                )}
+              </button>
+            );
+          })}
+        </nav>
+
+        <div className={'settings-shell-body' + (activeTab === 'center-admin' ? ' center-admin-body' : '')} ref={bodyRef}>
+          {props.actionError && activeTab !== 'center-admin' && (
+            <ErrorNotice compact error={props.actionError} onDismiss={props.onDismissActionError} />
+          )}
+
+          {activeTab === 'connection' && (
+            <div className="settings-pane">
+              <div className="settings-pane-header">
+                <h3>中心连接</h3>
+                <p className="metadata">通过加密通道与您的 PiBot 中心保持同步。</p>
+              </div>
+              <div className="settings-row-group">
+                <div className="settings-row">
+                  <span className="settings-row-label">连接状态</span>
+                  <span className={`host-status-pill ${centerTone}`}>
+                    <span className="host-status-dot" aria-hidden />
+                    {centerLabel}
+                  </span>
+                </div>
+                <div className="settings-row">
+                  <span className="settings-row-label">中心地址</span>
+                  <span className="metadata">{centerStatus?.centerUrl || '未绑定'}</span>
+                </div>
+                <div className="settings-row">
+                  <span className="settings-row-label">当前设备名</span>
+                  <span className="metadata">{currentDeviceName}</span>
+                </div>
+              </div>
+              <div className="dialog-actions" style={{ marginTop: 14 }}>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={centerBusy !== null}
+                  onClick={() => void handleDisconnectAction('rebind')}
+                >
+                  {centerBusy === 'rebind' ? '正在切换…' : '重新绑定'}
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button danger-outline"
+                  disabled={centerBusy !== null}
+                  onClick={() => void handleDisconnectAction('disconnect')}
+                >
+                  {centerBusy === 'disconnect' ? '正在断开…' : '断开连接'}
                 </button>
               </div>
-              <ErrorNotice compact error={devices.error} />
-              {showingLastDirectory && <p className="metadata">正在查看上次读取的设备。</p>}
-              {devices.items.length ? (
-                <ul className="device-list settings-directory">
-                  {devices.items.map((item) => (
-                    <DeviceRow key={item.deviceId} item={item} isRelay={devicesIsRelay}
-                      local={item.deviceId === localDeviceId} online={deviceStatusCurrent ? item.online : null} busy={devices.busy || !transportConnected}
-                      lastObservedAt={props.lastObservedAt ?? devices.loadedAt} onRename={props.onRenameDevice} onError={props.onDeviceError} />
-                  ))}
-                </ul>
-              ) : <p className="metadata">{deviceSummary}</p>}
-              {devicesIsRelay && devices.nextCursor && (
-                <button type="button" className="secondary-button" onClick={props.onLoadMoreDevices} disabled={devices.busy || !transportConnected}>加载更多</button>
+              {centerStatus?.clientId && (
+                <details className="settings-diagnostics" style={{ marginTop: 16 }}>
+                  <summary>连接详情</summary>
+                  <div className="settings-client-id">
+                    <span>客户端标识 {centerStatus.clientId}</span>
+                    <button type="button" className="icon-button" onClick={copyClientId} aria-label={copiedClientId ? '已复制客户端标识' : '复制客户端标识'}>
+                      {copiedClientId ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
+                    </button>
+                  </div>
+                </details>
               )}
-            </section>
-            <div className="settings-row-group">
-              <SettingsLink page="runtime" icon={<Server size={17} />} summary={hostService.summary} onOpen={openPage} />
-              <SettingsLink page="profiles" icon={<Monitor size={17} />} onOpen={openPage} />
             </div>
-          </>
-        )}
-        {page === 'runtime' && <HostServiceSection service={hostService} />}
-        {page === 'profiles' && <ConnectionProfiles {...props} />}
-        {page === 'update' && <ClientUpdateSection variant="desktop" />}
-        {page === 'appearance' && (
-          <>
-            <div className="settings-row-group" role="group" aria-label="外观主题">
-              {(Object.keys(THEMES) as DesktopTheme[]).map((theme) => (
-                <label key={theme} className="settings-row settings-row-link">
-                  <span className="settings-row-label">{THEMES[theme]}</span>
-                  <input type="radio" name="desktop-theme" checked={props.theme === theme} onChange={() => props.onThemeChange(theme)} />
-                </label>
-              ))}
-            </div>
-            <div className="settings-row-group">
-              <label className="settings-row settings-row-link">
-                <span className="settings-row-label">
-                  <span>隐藏工具输出</span>
-                  <span className="metadata" style={{ display: 'block', fontSize: 12 }}>默认折叠工具调用过程与原始输出</span>
-                </span>
-                <input
-                  type="checkbox"
-                  checked={hideToolOutput}
-                  onChange={(event) => setHideToolOutput(event.target.checked)}
+          )}
+
+          {activeTab === 'center-admin' && (
+            centerTransport ? (
+              <div className="settings-center-admin-embed">
+                <CenterAdminPanel
+                  key={props.centerAdminTab ?? 'default'}
+                  transport={centerTransport}
+                  embedded
+                  initialTab={props.centerAdminTab}
+                  centerUrl={centerStatus?.centerUrl}
+                  onOpenExternal={() => void openCenterManagement(centerStatus?.centerUrl)}
+                  onConfigureBot={props.onConfigureBot}
                 />
-              </label>
+              </div>
+            ) : (
+              <div className="settings-pane">
+                <div className="settings-empty-card">
+                  <h4>尚未连接到 PiBot 中心</h4>
+                  <p className="metadata">绑定并连接中心后，可在此直接免密管理模型服务商、扩展插件、设备与全局密码库。</p>
+                  <button type="button" className="primary-button" onClick={() => onTabChange('connection')}>
+                    前往中心连接
+                  </button>
+                </div>
+              </div>
+            )
+          )}
+
+          {activeTab === 'runtime' && (
+            <div className="settings-pane">
+              <div className="settings-pane-header">
+                <h3>本机与权限</h3>
+                <p className="metadata">查看本机后台服务健康状态、管理自启项与高级网络排障。</p>
+              </div>
+              <HostServiceSection
+                service={hostService}
+                diagnosticExtra={{
+                  centerState: centerStatus?.state ?? null,
+                  centerUrl: centerStatus?.centerUrl ?? null,
+                  clientId: centerStatus?.clientId ?? null,
+                  brokerPhase: props.status?.phase ?? null,
+                  brokerGeneration: props.status?.generation ?? null,
+                  brokerErrorCode: props.status?.errorCode ?? null,
+                }}
+                advancedNetwork={(
+                  <>
+                    <CustomCaSection centerStatus={centerStatus} onSaveCenterCa={props.onSaveCenterCa} />
+                    <LocalDebugProfiles {...props} />
+                  </>
+                )}
+              />
+
+              <section className="settings-section" style={{ marginTop: 8 }}>
+                <div className="section-head">
+                  <h4>已接入设备</h4>
+                  <button type="button" className="icon-button" onClick={props.onRefreshDevices} disabled={devices.busy || !transportConnected} aria-label="刷新设备">
+                    <RefreshCw size={15} aria-hidden />
+                  </button>
+                </div>
+                <ErrorNotice compact error={devices.error} />
+                {showingLastDirectory && <p className="metadata">正在查看上次读取的设备。</p>}
+                {devices.items.length > 0 ? (
+                  <ul className="device-list settings-directory">
+                    {devices.items.map((item) => (
+                      <DeviceRow
+                        key={item.deviceId}
+                        item={item}
+                        isRelay={devicesIsRelay}
+                        local={item.deviceId === localDeviceId}
+                        online={deviceStatusCurrent ? item.online : null}
+                        busy={devices.busy || !transportConnected}
+                        lastObservedAt={props.lastObservedAt ?? devices.loadedAt}
+                        onRename={props.onRenameDevice}
+                        onError={props.onDeviceError}
+                      />
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="metadata">{devices.busy ? '正在读取设备…' : '暂无其他在线设备'}</p>
+                )}
+                {devicesIsRelay && devices.nextCursor && (
+                  <button type="button" className="secondary-button" onClick={props.onLoadMoreDevices} disabled={devices.busy || !transportConnected}>加载更多</button>
+                )}
+              </section>
             </div>
-          </>
-        )}
+          )}
+
+          {activeTab === 'general' && (
+            <div className="settings-pane">
+              <div className="settings-pane-header">
+                <h3>外观与通用</h3>
+                <p className="metadata">界面主题、对话展示偏好、归档智能体与客户端版本。</p>
+              </div>
+
+              <section className="settings-section">
+                <h4>主题模式</h4>
+                <div className="settings-row-group" role="group" aria-label="外观主题">
+                  {(Object.keys(THEMES) as DesktopTheme[]).map((theme) => (
+                    <label key={theme} className="settings-row settings-row-link">
+                      <span className="settings-row-label">{THEMES[theme]}</span>
+                      <input type="radio" name="desktop-theme" checked={props.theme === theme} onChange={() => props.onThemeChange(theme)} />
+                    </label>
+                  ))}
+                </div>
+              </section>
+
+              <section className="settings-section">
+                <h4>对话显示</h4>
+                <div className="settings-row-group">
+                  <label className="settings-row settings-row-link">
+                    <span className="settings-row-label">
+                      <span>隐藏工具调用过程</span>
+                      <span className="metadata" style={{ display: 'block', fontSize: 12 }}>默认折叠工具调用过程与原始输出</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={hideToolOutput}
+                      onChange={(event) => setHideToolOutput(event.target.checked)}
+                    />
+                  </label>
+                </div>
+              </section>
+
+              <ArchivedBots bridge={props.archiveBridge} onOpenHistory={props.onOpenArchivedBotHistory} />
+
+              <section className="settings-section">
+                <div className="section-head">
+                  <h4>软件版本与检查更新</h4>
+                  {updateSummary && <span className="metadata">{updateSummary}</span>}
+                </div>
+                <ClientUpdateSection variant="desktop" />
+              </section>
+            </div>
+          )}
+        </div>
       </div>
-    </>
+    </div>
   );
 }
 
 export function SettingsPanel(props: SettingsPanelProps) {
-  if (!props.archiveOpen) return <ClientSettings {...props} />;
+  if (!props.archiveOpen) return <TabbedSettings {...props} />;
   return (
     <>
       <div className="dialog-head">

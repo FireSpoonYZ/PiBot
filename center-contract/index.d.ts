@@ -178,7 +178,13 @@ export interface BotCapabilityConfig extends BotBinding {
   configSchema: JsonSchema;
 }
 export interface PutBotCapability { expectedRevision: number; enabled: boolean; overrides: JsonObject }
-export interface Device { deviceId: string; name: string; online: boolean }
+export interface Device {
+  deviceId: string;
+  name: string;
+  online: boolean;
+  oauthAdminEnabled?: boolean;
+  platform?: DevicePlatform;
+}
 export type DevicePlatform = 'windows' | 'linux' | 'macos' | 'android';
 /** Owner-only `POST /api/devices` body; displayName is trimmed to 1..64 characters. */
 export interface CreateDeviceRequest { displayName: string; platform: DevicePlatform }
@@ -199,6 +205,22 @@ export interface CreatePairingCodeRequest { deviceId?: string }
 export type PairingCodeStatus = 'pending' | 'redeemed' | 'expired' | 'revoked';
 /** `GET /api/pairing-codes/:id`; `device` is present once redeemed, `target` when the code was issued for one device. `DELETE` voids a pending code. */
 export interface PairingCodeState { id: string; status: PairingCodeStatus; createdAt: string; expiresAt: string; device?: { deviceId: string; name: string }; target?: { deviceId: string; name: string } }
+export interface ActivePairingCodeInfo {
+  id: string;
+  code?: string;
+  status: PairingCodeStatus;
+  createdAt: string;
+  expiresAt: string;
+  includesCa: boolean;
+  target: { deviceId: string; name: string } | null;
+}
+export interface ResolvedModelSummary {
+  effectiveModelRef: string | null;
+  effectiveModelName: string | null;
+  effectiveProviderName: string | null;
+  source: 'bot' | 'center_default' | 'local_default' | 'unset';
+  available: boolean;
+}
 /** `GET`/`PUT /api/pairing/ca` (`PUT` body `{ ca: string | null }`): the private CA embedded into new codes. */
 export interface PairingCaState { ca: string | null; certificates: Array<{ subject: string; fingerprint256: string; validTo: string }> }
 /**
@@ -241,6 +263,7 @@ export interface BotRef {
   description?: string;
   cwd?: string;
   modelRef?: string | null;
+  resolvedModel?: ResolvedModelSummary;
   primaryConversationId?: string;
   createdAt?: string;
   isPrimary?: boolean;
@@ -504,6 +527,19 @@ export interface CenterConnectionStatus {
   error: ApiError['error'] | null;
 }
 export interface SessionInfo { authenticated: boolean; csrfToken: string | null }
+export interface OAuthTokenResponse { accessToken: string; tokenType: 'Bearer'; scopes: string[] }
+export interface QrLoginChallengeResponse {
+  challengeId: string;
+  browserSecret: string;
+  qrCode: string;
+  expiresAt: string;
+  ttlSeconds: number;
+}
+export interface QrLoginClaimResponse {
+  status: 'pending' | 'approved' | 'expired';
+  authenticated?: boolean;
+  csrfToken?: string | null;
+}
 export interface LoginRequest { password: string }
 export interface CredentialWrite { value: string; expectedRevision: number | null }
 export interface ProviderCheckRequest {

@@ -1,7 +1,7 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import Ajv from 'ajv';
-import { requireOwner, assertPublicCredentialId } from './auth.js';
+import { requireOwner, assertPublicCredentialId, setOwnerOAuthVerifier } from './auth.js';
 import { assertId } from '../host-core/message-protocol.js';
 import { assertDeviceId, assertDeviceToken } from '../host-core/relay-protocol.js';
 import { discoverCenterProviderModels, validateCenterProvider } from '../host-core/runtime-models.js';
@@ -16,6 +16,8 @@ const fail = (code, message) => { throw Object.assign(new Error(message), { code
 const required = (value, name) => value ?? fail('NOT_FOUND', `${name} not found`);
 const object = value => value && typeof value === 'object' && !Array.isArray(value) ? value : fail('INVALID_ARGUMENT', 'Expected an object');
 const text = (value, name) => typeof value === 'string' && value.length > 0 ? value : fail('INVALID_ARGUMENT', `Invalid ${name}`);
+const sha256 = value => createHash('sha256').update(value, 'utf8').digest('hex');
+const sha256Buffer = value => createHash('sha256').update(value, 'utf8').digest();
 function createRouteAjv() {
   const instance = new Ajv({ strict: false });
   instance.addFormat('credential-ref', { type: 'string', validate: value => value.length > 0 });
@@ -178,9 +180,30 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   }
   function notifyAll() { for (const deviceId of streams.keys()) notify(deviceId); }
   function notifyInstallation(id) { for (const deviceId of new Set(store.listBotBindings({ installationId: id }).map(b => b.deviceId))) notify(deviceId); }
+  setOwnerOAuthVerifier(app, (token) => {
+    const grant = store.verifyOAuthAdminToken(sha256(token));
+    if (!grant) return null;
+    const device = bridge.registry.get(grant.deviceId);
+    if (!device || device.revokedAt !== null || grant.deviceId === bridge.deviceId) return null;
+    return grant.deviceId;
+  });
+  const csrfUnlessOAuth = (req, reply, done) => {
+    if (req.oauthDeviceId) return done();
+    return app.csrfProtection(req, reply, done);
+  };
   const owner = [requireOwner];
-  const mutation = [requireOwner, app.csrfProtection];
+  const mutation = [requireOwner, csrfUnlessOAuth];
   const route = (method, path, handler, write = false) => app.route({ method, url: path, onRequest: write ? mutation : owner, handler });
+  const presentDevice = (device) => {
+    if (!device) return device;
+    const reg = bridge.registry.get(device.deviceId);
+    return {
+      ...device,
+      ...(reg?.platform ? { platform: reg.platform } : {}),
+      oauthAdminEnabled: store.isDeviceOAuthGrantEnabled(device.deviceId),
+    };
+  };
+  const listOwnerDevices = () => bridge.listDevices().map(presentDevice);
   const changed = (result, deviceId) => { deviceId ? notify(deviceId) : notifyAll(); return result; };
   const providerInput = async (id, overrides = {}) => {
     const stored = required(store.getProvider(id), 'Provider');
@@ -337,7 +360,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   }, true);
   route('GET', '/api/model-config', () => store.getModelConfig());
   route('PUT', '/api/model-config', req => { const body = object(req.body); return changed(store.putModelConfig(body.expectedRevision, validate(selectionSchema, body.value))); }, true);
-  route('GET', '/api/devices', () => bridge.listDevices());
+  route('GET', '/api/devices', () => listOwnerDevices());
   // 所有者登记/重绑设备：令牌只在本响应中返回一次，中心只保存其哈希，不写日志。
   route('POST', '/api/devices', (req, reply) => {
     const { displayName, platform, deviceId: requestedId, replaceExisting, deviceToken: requestedToken } = deviceRegistration(req.body);
@@ -348,6 +371,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     if (existing === null || replaceExisting !== true) {
       bridge.registry.register({ deviceId, token: deviceToken, displayName });
       bridge.registry.updateMetadata(deviceId, { platform });
+      store.ensureDeviceOAuthGrant(deviceId);
       return reply.code(existing === null ? 201 : 200).send({ deviceId, deviceToken, displayName, platform });
     }
     // 以既有身份重绑：轮换新令牌（仅存哈希），保留 Bot/会话/全部记录，按输入
@@ -355,8 +379,21 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     bridge.registry.rotate({ deviceId, token: deviceToken });
     bridge.registry.rename(deviceId, displayName);
     bridge.registry.updateMetadata(deviceId, { platform });
+    store.ensureDeviceOAuthGrant(deviceId, { resetToken: true });
     notify(deviceId);
     return reply.code(200).send({ deviceId, deviceToken, displayName, platform });
+  }, true);
+  route('PUT', '/api/devices/:deviceId/oauth-grant', req => {
+    const { deviceId } = req.params;
+    const reg = deviceId === bridge.deviceId ? null : bridge.registry.get(deviceId);
+    if (!reg || reg.revokedAt !== null) fail('NOT_FOUND', 'Device not found');
+    const body = object(req.body);
+    if (Object.keys(body).some(key => key !== 'enabled') || typeof body.enabled !== 'boolean') {
+      fail('INVALID_ARGUMENT', 'enabled must be boolean');
+    }
+    store.setDeviceOAuthGrantEnabled(deviceId, body.enabled);
+    const listed = bridge.listDevices().find(item => item.deviceId === deviceId);
+    return presentDevice(listed ?? { deviceId, name: reg.displayName || deviceId, online: false });
   }, true);
   route('PATCH', '/api/devices/:deviceId', req => {
     const { deviceId } = req.params;
@@ -369,6 +406,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     const { deviceId } = req.params;
     if (deviceId === bridge.deviceId || !bridge.registry.get(deviceId)) fail('NOT_FOUND', 'Device not found');
     bridge.registry.revoke(deviceId);
+    store.revokeDeviceOAuthGrant(deviceId);
     store.replaceDeviceBots(deviceId, []);
     notify(deviceId);
     return reply.code(204).send();
@@ -376,9 +414,9 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('GET', '/api/bot-sync', req => store.getBotSync({
     epoch: typeof req.query?.epoch === 'string' ? req.query.epoch : undefined,
     sinceSeq: req.query?.sinceSeq !== undefined ? Number(req.query.sinceSeq) : undefined,
-    devices: bridge.listDevices(),
+    devices: listOwnerDevices(),
   }));
-  route('GET', '/api/devices/:deviceId/bots', req => store.listDeviceBots(req.params.deviceId));
+  route('GET', '/api/devices/:deviceId/bots', req => store.listDeviceBots(req.params.deviceId).map(bot => store.withResolvedModel(bot)));
   route('GET', '/api/devices/:deviceId/runtime-status', req => {
     const device = bridge.listDevices().find(item => item.deviceId === req.params.deviceId);
     if (!device) fail('NOT_FOUND', 'Device not found');
@@ -414,7 +452,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     await packages.reconcileDevice(deviceId);
     notify(deviceId);
     scheduleTaskReconcile(deviceId);
-    return reply.code(201).send(bot);
+    return reply.code(201).send(store.withResolvedModel(bot));
   }, true);
   route('PATCH', '/api/devices/:deviceId/bots/:botId', async req => {
     const { deviceId, botId } = req.params;
@@ -423,34 +461,34 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
       ...(req.body?.name !== undefined ? { name: req.body.name } : {}),
       ...(req.body?.description !== undefined ? { description: req.body.description } : {}),
     });
-    return store.upsertDeviceBot(deviceId, {
+    return store.withResolvedModel(store.upsertDeviceBot(deviceId, {
       ...updated,
       deviceId,
       botId,
       ...(typeof updated?.name === 'string' ? { name: updated.name } : typeof updated?.role === 'string' ? { name: updated.role } : {}),
-    });
+    }));
   }, true);
   route('POST', '/api/devices/:deviceId/bots/:botId/primary', async req => {
     const { deviceId, botId } = req.params;
     const updated = await bridge.call(deviceId, 'setPrimaryBot', { botId });
-    return store.upsertDeviceBot(deviceId, {
+    return store.withResolvedModel(store.upsertDeviceBot(deviceId, {
       ...updated,
       deviceId,
       botId,
       ...(typeof updated?.name === 'string' ? { name: updated.name } : typeof updated?.role === 'string' ? { name: updated.role } : {}),
       isPrimary: true,
-    });
+    }));
   }, true);
   route('POST', '/api/devices/:deviceId/bots/:botId/archive', async req => {
     const { deviceId, botId } = req.params;
     const updated = await bridge.call(deviceId, 'archiveBot', { botId });
-    return store.upsertDeviceBot(deviceId, {
+    return store.withResolvedModel(store.upsertDeviceBot(deviceId, {
       ...updated,
       deviceId,
       botId,
       ...(typeof updated?.name === 'string' ? { name: updated.name } : typeof updated?.role === 'string' ? { name: updated.role } : {}),
       ...(updated?.archivedAt !== undefined ? { archivedAt: updated.archivedAt } : { archivedAt: new Date().toISOString() }),
-    });
+    }));
   }, true);
   route('POST', '/api/devices/:deviceId/bots/:botId/unarchive', async req => {
     const { deviceId, botId } = req.params;
@@ -463,7 +501,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
       archivedAt: updated?.archivedAt ?? null,
     });
     scheduleTaskReconcile(deviceId);
-    return bot;
+    return store.withResolvedModel(bot);
   }, true);
   route('DELETE', '/api/devices/:deviceId/bots/:botId', async (req, reply) => {
     const { deviceId, botId } = req.params;
@@ -615,8 +653,48 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     if (!store.listDeviceBots(deviceId).some((bot) => bot.botId === botId)) fail('NOT_FOUND', 'Bot not found');
     return { deviceId, botId };
   };
-  route('POST', '/api/devices/:deviceId/bots/:botId/skills', req => skills.execute({ ...botScope(req), origin: 'foreground' }, object(req.body)), true);
-  route('POST', '/api/devices/:deviceId/bots/:botId/skill-reviews', req => skills.review(botScope(req), object(req.body)), true);
+  async function unshareForArchive(scope, input) {
+    let installationId = typeof input.installationId === 'string' && input.installationId ? input.installationId : null;
+    let targetState = null;
+    if (!installationId) {
+      const list = await skills.review(scope, { action: 'list', includeArchived: true });
+      const target = list.items.find((item) =>
+        (typeof input.skillId === 'string' && item.skillId === input.skillId)
+        || (typeof input.name === 'string' && item.name === input.name)
+      );
+      installationId = target?.installationId ?? null;
+      targetState = target?.state ?? null;
+    }
+    if (!installationId || targetState === 'archived') return [];
+    const affectedDevices = [...new Set(store.listBotBindings({ installationId }).map((b) => b.deviceId))];
+    const { changed } = store.unshareInstallationForArchive(installationId, scope.deviceId, scope.botId);
+    return changed ? affectedDevices : [];
+  }
+  async function reconcileUnsharedDevices(affectedDevices, ownerDeviceId) {
+    for (const deviceId of affectedDevices) {
+      if (deviceId === ownerDeviceId) continue;
+      try { await packages.reconcileDevice(deviceId); } finally { notify(deviceId); }
+    }
+  }
+  async function runSkillWithOptionalUnshare(scope, rawBody, run) {
+    const body = object(rawBody);
+    const { forceUnshare, ...rest } = body;
+    if (forceUnshare !== undefined && typeof forceUnshare !== 'boolean') fail('INVALID_ARGUMENT', 'forceUnshare must be boolean');
+    const affectedDevices = rest.action === 'archive' && forceUnshare === true
+      ? await unshareForArchive(scope, rest)
+      : [];
+    const result = await run(rest);
+    await reconcileUnsharedDevices(affectedDevices, scope.deviceId);
+    return result;
+  }
+  function handleSkillExecute(scope, rawBody, identityExtra = {}) {
+    return runSkillWithOptionalUnshare(scope, rawBody, rest => skills.execute({ ...scope, ...identityExtra }, rest));
+  }
+  function handleSkillReview(scope, rawBody) {
+    return runSkillWithOptionalUnshare(scope, rawBody, rest => skills.review(scope, rest));
+  }
+  route('POST', '/api/devices/:deviceId/bots/:botId/skills', req => handleSkillExecute(botScope(req), req.body, { origin: 'foreground' }), true);
+  route('POST', '/api/devices/:deviceId/bots/:botId/skill-reviews', req => handleSkillReview(botScope(req), req.body), true);
   route('POST', '/api/devices/:deviceId/bots/:botId/learning', async req => {
     const body = object(req.body);
     const scope = botScope(req);
@@ -665,6 +743,131 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     done();
   }
   const host = (method, url, handler, bodyLimit) => app.route({ method, url, onRequest: authenticate, handler, ...(bodyLimit !== undefined ? { bodyLimit } : {}) });
+  host('POST', '/api/oauth/token', (req, reply) => {
+    const { deviceId } = req.centerDevice;
+    const device = bridge.registry.get(deviceId);
+    if (!device || device.revokedAt !== null) {
+      return reply.code(401).send({ error: { code: 'UNAUTHENTICATED', message: 'Device authentication required' } });
+    }
+    const accessToken = `pboauth_${randomBytes(32).toString('base64url')}`;
+    if (!store.issueDeviceOAuthToken(deviceId, sha256(accessToken))) {
+      return reply.code(403).send({
+        error: { code: 'OAUTH_ACCESS_REVOKED', message: 'Center admin access is disabled for this device' },
+      });
+    }
+    reply.header('Cache-Control', 'no-store');
+    return { accessToken, tokenType: 'Bearer', scopes: ['center:admin'] };
+  });
+
+  const QR_LOGIN_TTL_MS = 180 * 1000;
+  const QR_LOGIN_MAX_ENTRIES = 200;
+  const qrChallenges = new Map();
+  function pruneQrChallenges(now = Date.now()) {
+    for (const [id, entry] of qrChallenges) {
+      if (entry.expiresAtMs <= now) qrChallenges.delete(id);
+    }
+    while (qrChallenges.size >= QR_LOGIN_MAX_ENTRIES) {
+      const oldest = qrChallenges.keys().next().value;
+      if (!oldest) break;
+      qrChallenges.delete(oldest);
+    }
+  }
+  function resolveQrCenterOrigin(req) {
+    if (typeof publicUrl === 'string' && publicUrl.trim()) {
+      return new URL(publicUrl.trim()).origin;
+    }
+    const rawOrigin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+    if (/^https?:\/\//i.test(rawOrigin)) {
+      try { return new URL(rawOrigin).origin; } catch { /* Fall through to INVALID_STATE. */ }
+    }
+    fail('INVALID_STATE', 'Center public URL is not configured');
+  }
+  function authenticateQrApprover(req, reply, done) {
+    const deviceId = req.headers['x-device-id'];
+    const token = /^Bearer ([A-Za-z0-9_-]+)$/.exec(req.headers.authorization || '')?.[1];
+    if (typeof deviceId === 'string' && token && !token.startsWith('pboauth_')) {
+      const identity = bridge.registry.authenticate(deviceId, token);
+      if (!identity || deviceId === bridge.deviceId) {
+        return reply.code(401).send({ error: { code: 'UNAUTHENTICATED', message: 'Device authentication required' } });
+      }
+      if (!store.isDeviceOAuthGrantEnabled(deviceId)) {
+        return reply.code(403).send({
+          error: { code: 'OAUTH_ACCESS_REVOKED', message: 'Center admin access is disabled for this device' },
+        });
+      }
+      req.oauthDeviceId = deviceId;
+      req.centerDevice = { deviceId, token };
+      return done();
+    }
+    return requireOwner(req, reply, done);
+  }
+  app.post('/api/session/qr', {
+    bodyLimit: 4 * 1024,
+    config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
+  }, (req, reply) => {
+    const centerOrigin = resolveQrCenterOrigin(req);
+    const now = Date.now();
+    pruneQrChallenges(now);
+    const challengeId = randomUUID();
+    const qrNonce = randomBytes(24).toString('base64url');
+    const browserSecret = randomBytes(24).toString('base64url');
+    const expiresAtMs = now + QR_LOGIN_TTL_MS;
+    const expiresAt = new Date(expiresAtMs).toISOString();
+    qrChallenges.set(challengeId, {
+      status: 'pending',
+      qrNonceHash: sha256Buffer(qrNonce),
+      browserSecretHash: sha256Buffer(browserSecret),
+      expiresAtMs,
+    });
+    const qrCode = 'pibotlogin1.' + Buffer.from(JSON.stringify({ u: centerOrigin, id: challengeId, s: qrNonce }), 'utf8').toString('base64url');
+    reply.header('Cache-Control', 'no-store');
+    return { challengeId, browserSecret, qrCode, expiresAt, ttlSeconds: QR_LOGIN_TTL_MS / 1000 };
+  });
+  app.post('/api/oauth/qr-approve', {
+    onRequest: [authenticateQrApprover, csrfUnlessOAuth],
+    bodyLimit: 4 * 1024,
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, (req) => {
+    const body = object(req.body);
+    const challengeId = text(body.challengeId, 'challengeId');
+    const qrNonce = text(body.qrNonce, 'qrNonce');
+    const challenge = qrChallenges.get(challengeId);
+    if (!challenge || challenge.expiresAtMs <= Date.now()) {
+      qrChallenges.delete(challengeId);
+      fail('NOT_FOUND', 'QR login challenge not found or expired');
+    }
+    const actual = sha256Buffer(qrNonce);
+    if (actual.length !== challenge.qrNonceHash.length || !timingSafeEqual(actual, challenge.qrNonceHash)) {
+      fail('FORBIDDEN', 'Invalid QR challenge nonce');
+    }
+    challenge.status = 'approved';
+    return { approved: true };
+  });
+  app.post('/api/session/qr/:challengeId/claim', {
+    bodyLimit: 4 * 1024,
+    config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
+  }, (req, reply) => {
+    const challengeId = text(req.params?.challengeId, 'challengeId');
+    const body = object(req.body);
+    const browserSecret = text(body.browserSecret, 'browserSecret');
+    reply.header('Cache-Control', 'no-store');
+    const challenge = qrChallenges.get(challengeId);
+    if (!challenge || challenge.expiresAtMs <= Date.now()) {
+      qrChallenges.delete(challengeId);
+      return { status: 'expired' };
+    }
+    const actual = sha256Buffer(browserSecret);
+    if (actual.length !== challenge.browserSecretHash.length || !timingSafeEqual(actual, challenge.browserSecretHash)) {
+      return reply.code(401).send({ error: { code: 'UNAUTHENTICATED', message: 'Invalid browser secret' } });
+    }
+    if (challenge.status !== 'approved') {
+      return { status: 'pending' };
+    }
+    qrChallenges.delete(challengeId);
+    req.session.regenerate();
+    req.session.set('owner', true);
+    return { status: 'approved', authenticated: true, csrfToken: reply.generateCsrf() };
+  });
   registerWebhookRoutes(app, { store, bridge, route, host, publicUrl, notify: deviceId => notify(deviceId, 'webhook-ready') });
   const taskCoordinator = registerTaskRoutes({
     route,
@@ -722,7 +925,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   host('GET', '/api/host/bot-directory', req => {
     const epoch = typeof req.query?.epoch === 'string' ? req.query.epoch : undefined;
     const sinceSeq = req.query?.sinceSeq !== undefined ? Number(req.query.sinceSeq) : undefined;
-    return store.getBotSync({ epoch, sinceSeq, devices: bridge.listDevices() });
+    return store.getBotSync({ epoch, sinceSeq, devices: listOwnerDevices() });
   });
   host('GET', '/api/host/model-picker', modelPicker);
   host('GET', '/api/host/providers/:id/auth', async req => {
@@ -765,11 +968,11 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     try { await packages.reconcileDevice(deviceId); } finally { notify(deviceId); }
     return result;
   });
-  host('POST', '/api/host/devices/:deviceId/bots/:botId/skills', req => skills.execute({ ...botScope(req), origin: 'foreground' }, object(req.body)));
+  host('POST', '/api/host/devices/:deviceId/bots/:botId/skills', req => handleSkillExecute(botScope(req), req.body, { origin: 'foreground' }));
   host('POST', '/api/host/devices/:deviceId/bots/:botId/skill-reviews', req => {
     const scope = botScope(req);
     if (scope.deviceId !== req.centerDevice.deviceId) fail('FORBIDDEN', 'Device mismatch');
-    return skills.review(scope, object(req.body));
+    return handleSkillReview(scope, req.body);
   });
   host('POST', '/api/host/devices/:deviceId/bots/:botId/skills/usage', req => {
     const scope = botScope(req);

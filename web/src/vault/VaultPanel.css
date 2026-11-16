@@ -19,3 +19,12 @@
   padding-top: 12px;
   border-top: 1px solid var(--line);
 }
+
+.vault-header-bar { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.vault-header-titles { display: grid; gap: 4px; min-width: 0; }
+.vault-status-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.vault-switch-wrap { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.vault-form-card { padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); display: grid; gap: 12px; }
+.vault-global-section { display: grid; gap: 12px; padding: 12px 14px; }
+.vault-delete-confirm { display: grid; gap: 8px; padding-top: 6px; border-top: 1px solid var(--line); }
+.vault-footer-link { display: flex; justify-content: flex-start; padding-top: 2px; }

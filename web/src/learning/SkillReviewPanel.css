@@ -187,3 +187,16 @@
 }
 
 .skill-review-panel [role='alert'] { color: var(--danger); }
+
+.skill-review-editor-textarea {
+  width: 100%;
+  min-height: 260px;
+  padding: 12px;
+  border: 1px solid var(--line, rgba(128, 128, 128, 0.25));
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font: 0.82rem/1.55 ui-monospace, Consolas, monospace;
+  resize: vertical;
+  box-sizing: border-box;
+}

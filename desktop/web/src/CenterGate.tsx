@@ -90,11 +90,13 @@ type CenterConnection = {
   status: CenterStatus | undefined;
   checkCenter: () => Promise<void>;
   disconnectCenter: () => Promise<void>;
+  saveCenterCa: (ca: string) => Promise<void>;
 };
 const CenterConnectionContext = createContext<CenterConnection>({
   status: undefined,
   checkCenter: () => Promise.resolve(),
   disconnectCenter: () => Promise.resolve(),
+  saveCenterCa: () => Promise.resolve(),
 });
 
 export function useCenterConnection(): CenterConnection {
@@ -832,9 +834,25 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
     }
   };
 
+  const saveCenterCa = async (nextCa: string): Promise<void> => {
+    const savedConn = statusRef.current?.savedConnection;
+    if (!savedConn) {
+      throw new Error(t('请先连接中心后再保存自定义 CA 证书。', 'Connect to a center first before saving a custom CA certificate.'));
+    }
+    const trimmed = nextCa.trim();
+    const next = await request<CenterStatus>('center_connect', {
+      url: savedConn.url,
+      deviceId: savedConn.deviceId,
+      deviceToken: '',
+      ...(trimmed ? { ca: trimmed } : {}),
+    });
+    setCa(trimmed);
+    applyStatus(next, savedConn.deviceId);
+  };
+
   if (workspace) {
     return (
-      <CenterConnectionContext.Provider value={{ status, checkCenter: probe, disconnectCenter }}>
+      <CenterConnectionContext.Provider value={{ status, checkCenter: probe, disconnectCenter, saveCenterCa }}>
         <ClientUpdateProvider key={workspace.key} request={desktopUpdateRequest} ready={status?.state === 'ready'} centerKey={workspace.key}>
           {children}
         </ClientUpdateProvider>
@@ -927,7 +945,7 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
         : paste.kind === 'unsupported' ? 'UNSUPPORTED_PAIRING_CODE'
           : '';
   const pasteHint = paste.kind === 'code'
-    ? t(`将连接到 ${paste.centerHost}`, `Will connect to ${paste.centerHost}`)
+    ? t(`✓ 已识别 pibot1. 配对码 · 将连接到 ${paste.centerHost}`, `✓ Recognized pibot1. pairing code · Will connect to ${paste.centerHost}`)
     : pasteErrorCode ? hostErrorText({ code: pasteErrorCode }, t) : '';
 
   /** 配对进度与告警：所有者密码和配对码两种方式共用，放在表单之外以便折叠时仍可见。 */
@@ -978,7 +996,7 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
       }}
     >
       <label className="gate-field">
-        <span>{t('配对码', 'Pairing code')}</span>
+        <span>{t('粘贴配对码一键绑定', 'Paste pairing code to bind')}</span>
         <textarea
           className="gate-code"
           rows={3}
@@ -988,15 +1006,15 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
           spellCheck={false}
           autoComplete="off"
           autoCapitalize="off"
-          placeholder={t('在中心管理页的“设备与 Bot”点击“添加设备”，复制配对码后粘贴到这里', 'On the center’s Devices page click “Add device”, copy the pairing code and paste it here')}
+          placeholder={t('在已登录端「中心管理 → 设备 → 添加设备」获取配对码（pibot1. 开头）并粘贴到这里', 'Get a pairing code (starting with pibot1.) from “Center Admin → Devices → Add device” and paste it here')}
           onChange={(event) => onPairCodeChange(event.target.value)}
         />
       </label>
-      {pasteHint && <p className={`gate-hint${pasteErrorCode ? ' gate-hint-warn' : ''}`} role="status">{pasteHint}</p>}
+      {pasteHint && <p className={`gate-hint${pasteErrorCode ? ' gate-hint-warn' : ' gate-hint-ok'}`} role="status">{pasteHint}</p>}
       <button disabled={busy || showerBusy || paste.kind !== 'code'} type="submit" className="primary-button gate-submit">
         {busy
-          ? (pairPhase === 'connecting' ? t('连接中…', 'Connecting…') : t('配对中…', 'Pairing…'))
-          : codeForce ? t('替换现有配对', 'Replace existing pairing') : t('配对并连接', 'Pair and connect')}
+          ? (pairPhase === 'connecting' ? t('连接中…', 'Connecting…') : t('绑定中…', 'Pairing…'))
+          : codeForce ? t('替换现有配对并绑定', 'Replace existing pairing') : t('一键绑定并连接', 'Bind & connect')}
       </button>
     </form>
   );
@@ -1069,7 +1087,7 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
           <h1>{t('连接 pibot 中心', 'Connect to pibot Center')}</h1>
           <p className="gate-subtitle">
             {hostAvailable
-              ? t('在中心管理页添加设备并粘贴配对码，本机将自动注册并在后台运行 Host', 'Add a device on the center’s admin page and paste the pairing code; this computer registers itself and runs the Host in the background')
+              ? t('在已登录端「中心管理 → 设备 → 添加设备」获取配对码，粘贴即可一键绑定本机', 'Get a pairing code in “Center Admin → Devices → Add device” and paste it to bind this computer')
               : t('统一管理多端智能体、模型、插件与记忆', 'Manage agents, models, plugins and memory across devices')}
           </p>
         </div>
@@ -1086,17 +1104,17 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
           <div className="gate-advanced-fields">
             {hostAvailable && (
               <details className="gate-advanced">
-                <summary>{t('使用所有者密码配对', 'Pair with the owner password')}</summary>
+                <summary>{t('使用所有者口令初始化首台设备', 'Initialize first device with owner password')}</summary>
                 {passwordForm}
               </details>
             )}
             {hostAvailable && (
               <details className="gate-advanced">
-                <summary>{t('使用已有设备 ID 和令牌', 'Use an existing device ID and token')}</summary>
+                <summary>{t('手动设备令牌连接', 'Connect with manual device token')}</summary>
                 {manualForm}
               </details>
             )}
-            {showPair && host?.platform === 'windows' && (
+            {hostAvailable && host?.platform === 'windows' && (
               <div className="gate-shower">
                 <button
                   type="button"
@@ -1116,18 +1134,21 @@ export function CenterGate({ children, onInterrupted, onDisconnected }: Props) {
                 )}
               </div>
             )}
-            <button type="button" className="secondary-button gate-manage" disabled={busy} onClick={() => void probe()}>
-              {t('检查连接', 'Check connection')}
-            </button>
-            <button
-              type="button"
-              className="secondary-button gate-manage"
-              disabled={!managementUrl}
-              onClick={() => void invoke('desktop_open_center', { url: managementUrl }).catch((e) => setError(t('无法打开中心管理页面。', 'Could not open the center management page.') + ' ' + errorText(e)))}
-            >
-              <ExternalLink size={14} />
-              {t('在浏览器打开中心管理', 'Open center management in browser')}
-            </button>
+            <div className="gate-advanced-actions">
+              <button type="button" className="secondary-button gate-manage" disabled={busy} onClick={() => void probe()}>
+                {t('检查连接', 'Check connection')}
+              </button>
+              {managementUrl && (
+                <button
+                  type="button"
+                  className="secondary-button gate-manage"
+                  onClick={() => void invoke('desktop_open_center', { url: managementUrl }).catch((e) => setError(t('无法打开中心管理页面。', 'Could not open the center management page.') + ' ' + errorText(e)))}
+                >
+                  <ExternalLink size={14} />
+                  {t('在浏览器打开中心管理', 'Open center management in browser')}
+                </button>
+              )}
+            </div>
             {status?.clientId && (
               <div className="gate-client-id">
                 <span className="gate-client-label">{t('本客户端标识', 'Client ID')}</span>

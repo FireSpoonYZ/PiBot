@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { randomBytes, randomUUID, createCipheriv, createDecipheriv, createHash } from 'node:crypto';
+import { randomBytes, randomUUID, createCipheriv, createDecipheriv, createHash, timingSafeEqual } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
 import Ajv from 'ajv';
@@ -470,7 +470,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     db.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
     transaction(() => {
       let version = db.prepare('PRAGMA user_version').get().user_version;
-      if (![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
+      if (![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
       if (version === 0) {
         db.exec(`
           CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL, config_revision INTEGER NOT NULL);
@@ -666,6 +666,23 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
         `);
         version = 11;
       }
+      if (version === 11) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS device_oauth_grants (
+            device_id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            token_hash TEXT,
+            scopes TEXT NOT NULL DEFAULT 'center:admin',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_device_oauth_grants_token_hash
+            ON device_oauth_grants(token_hash)
+            WHERE token_hash IS NOT NULL;
+          PRAGMA user_version = 12;
+        `);
+        version = 12;
+      }
     });
 
     const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -709,6 +726,87 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     }
     const modelStoreFields = ['name', 'api', 'baseUrl', 'headers', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel', 'source', 'enabled'];
     const listBotsSnapshot = () => db.prepare('SELECT json FROM device_bots').all().map(parse);
+    function emitBotSyncEvents(deviceId = null, botId = null) {
+      const targetRows = (deviceId !== null && botId !== null)
+        ? db.prepare('SELECT device_id, bot_id, json FROM device_bots WHERE device_id = ? AND bot_id = ?').all(deviceId, botId)
+        : (deviceId !== null
+          ? db.prepare('SELECT device_id, bot_id, json FROM device_bots WHERE device_id = ? ORDER BY bot_id').all(deviceId)
+          : db.prepare('SELECT device_id, bot_id, json FROM device_bots ORDER BY device_id, bot_id').all());
+      if (targetRows.length === 0) return;
+      const meta = db.prepare('SELECT seq FROM sync_meta WHERE id = 1').get();
+      let seq = meta.seq;
+      const nowIso = new Date().toISOString();
+      const updateSeqStmt = db.prepare('UPDATE device_bots SET seq = ? WHERE device_id = ? AND bot_id = ?');
+      const insertEventStmt = db.prepare('INSERT INTO bot_events (seq, device_id, bot_id, op, json, updated_at) VALUES (?, ?, ?, ?, ?, ?)');
+      for (const row of targetRows) {
+        seq += 1;
+        updateSeqStmt.run(seq, row.device_id, row.bot_id);
+        insertEventStmt.run(seq, row.device_id, row.bot_id, 'upsert', row.json, nowIso);
+      }
+      db.prepare('UPDATE sync_meta SET seq = ? WHERE id = 1').run(seq);
+      if (seq > 5000) {
+        db.prepare('DELETE FROM bot_events WHERE seq <= ?').run(seq - 5000);
+      }
+    }
+    function resolveBotModelSummary(deviceId, botId) {
+      const config = store.getBotModelConfig(deviceId, botId);
+      const globalRef = typeof config.global?.modelRef === 'string' && config.global.modelRef ? config.global.modelRef : null;
+      const overrideRef = config.overrides?.modelRef;
+      let source = 'unset';
+      let effectiveModelRef = null;
+      if (typeof overrideRef === 'string' && overrideRef) {
+        source = 'bot';
+        effectiveModelRef = overrideRef;
+      } else if (overrideRef === null) {
+        source = 'unset';
+        effectiveModelRef = null;
+      } else if (globalRef) {
+        source = 'center_default';
+        effectiveModelRef = globalRef;
+      }
+      if (!effectiveModelRef) {
+        return {
+          effectiveModelRef: null,
+          effectiveModelName: null,
+          effectiveProviderName: null,
+          source,
+          available: false,
+        };
+      }
+      const slash = effectiveModelRef.indexOf('/');
+      if (slash <= 0 || slash === effectiveModelRef.length - 1) {
+        return {
+          effectiveModelRef,
+          effectiveModelName: effectiveModelRef,
+          effectiveProviderName: null,
+          source,
+          available: false,
+        };
+      }
+      const providerId = effectiveModelRef.slice(0, slash);
+      const modelId = effectiveModelRef.slice(slash + 1);
+      const provider = get('providers', providerId);
+      const model = parse(db.prepare('SELECT json FROM models WHERE provider_id = ? AND id = ?').get(providerId, modelId));
+      const effectiveProviderName = (typeof provider?.name === 'string' && provider.name) ? provider.name : providerId;
+      const effectiveModelName = (typeof model?.name === 'string' && model.name) ? model.name : modelId;
+      const available = Boolean(provider && provider.enabled === true && model && model.removed !== true && model.enabled === true);
+      return {
+        effectiveModelRef,
+        effectiveModelName,
+        effectiveProviderName,
+        source,
+        available,
+      };
+    }
+    function withResolvedModel(bot) {
+      if (!bot) return bot;
+      const resolvedModel = resolveBotModelSummary(bot.deviceId, bot.botId);
+      return {
+        ...bot,
+        modelRef: resolvedModel.effectiveModelRef,
+        resolvedModel,
+      };
+    }
     const listBotCapabilityDirectory = () => {
       const installations = rows('installations').map(withActivation).filter((item) => activeInstallation(item));
       const allBindings = db.prepare('SELECT device_id, bot_id, installation_id, json FROM bindings').all();
@@ -760,7 +858,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
         if (provider.custom?.apiKey !== undefined) throw error('INVALID_ARGUMENT', 'Store API keys in encrypted credentials, not overrides');
         const configured = typeof provider.configured === 'boolean' ? provider.configured : (!provider.native ? true : undefined);
         const input = pick({ ...provider, ...(configured !== undefined ? { configured } : {}) }, ['id', 'name', 'api', 'baseUrl', 'credentialRef', 'enabled', 'native', 'configured', 'custom']);
-        return transaction(() => { const value = createOrUpdate('providers', input, 'id', expectedRevision); bump(); return enrichProvider(value); });
+        return transaction(() => { const value = createOrUpdate('providers', input, 'id', expectedRevision); bump(); emitBotSyncEvents(); return enrichProvider(value); });
       },
       deleteProvider(providerId, nativeReset) {
         assertId(providerId);
@@ -807,6 +905,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             db.prepare('DELETE FROM providers WHERE id = ?').run(providerId);
           }
           bump();
+          emitBotSyncEvents();
           return { deleted: true, reset: Boolean(current.native && nativeReset), ...refs };
         });
       },
@@ -835,6 +934,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           };
           db.prepare('INSERT INTO models VALUES (?, ?, ?) ON CONFLICT(provider_id, id) DO UPDATE SET json = excluded.json').run(providerId, id, json(result));
           bump();
+          emitBotSyncEvents();
           return result;
         });
       },
@@ -861,6 +961,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             saved.push(result);
           }
           bump();
+          emitBotSyncEvents();
           return saved;
         });
       },
@@ -880,6 +981,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             db.prepare('DELETE FROM models WHERE provider_id = ? AND id = ?').run(providerId, modelId);
           }
           bump();
+          emitBotSyncEvents();
           return { deleted: true, hiddenFromCatalog: current.source === 'catalog', ...refs };
         });
       },
@@ -927,7 +1029,9 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           const current = store.getModelConfig();
           assertRevision(expectedRevision, current.revision);
           db.prepare('UPDATE model_config SET json = ?, revision = ? WHERE id = 1').run(json(global), current.revision + 1);
-          bump(); return store.getModelConfig();
+          bump();
+          emitBotSyncEvents();
+          return store.getModelConfig();
         });
       },
       getBotModelConfig(deviceId, botId) {
@@ -942,7 +1046,9 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           const current = store.getBotModelConfig(deviceId, botId);
           assertRevision(expectedRevision, current.revision);
           db.prepare('INSERT INTO bot_models VALUES (?, ?, ?, ?) ON CONFLICT(device_id, bot_id) DO UPDATE SET json = excluded.json, revision = excluded.revision').run(deviceId, botId, json(overrides), current.revision + 1);
-          bump(); return store.getBotModelConfig(deviceId, botId);
+          bump();
+          emitBotSyncEvents(deviceId, botId);
+          return store.getBotModelConfig(deviceId, botId);
         });
       },
       replaceDeviceBots(deviceId, bots, { bumpRevision = true } = {}) {
@@ -1122,6 +1228,8 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           return { epoch: meta.epoch, seq };
         });
       },
+      resolveBotModelSummary,
+      withResolvedModel,
       listDeviceBots(deviceId) {
         return db.prepare('SELECT json FROM device_bots WHERE device_id = ?').all(deviceId).map(parse).sort(compareBotRefs);
       },
@@ -1154,8 +1262,11 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
               .map((row) => {
                 const parsed = JSON.parse(row.json);
                 const devInfo = deviceMap.get(parsed.deviceId);
+                const resolvedModel = resolveBotModelSummary(parsed.deviceId, parsed.botId);
                 return {
                   ...parsed,
+                  modelRef: resolvedModel.effectiveModelRef,
+                  resolvedModel,
                   ...(devInfo ? { deviceName: devInfo.name || devInfo.displayName || parsed.deviceId } : {}),
                   ...(parsed.platform ? {} : devInfo?.platform ? { platform: devInfo.platform } : {}),
                   online: onlineMap.get(parsed.deviceId) ?? false,
@@ -1166,19 +1277,25 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             return { epoch: curEpoch, seq: curSeq, mode: 'snapshot', devices, bots };
           }
           const events = db.prepare('SELECT seq, device_id, bot_id, op, json, updated_at FROM bot_events WHERE seq > ? ORDER BY seq ASC').all(sinceSeq)
-            .map((row) => ({
-              seq: row.seq,
-              deviceId: row.device_id,
-              botId: row.bot_id,
-              op: row.op,
-              bot: row.json ? {
-                ...JSON.parse(row.json),
-                ...(deviceMap.has(row.device_id) ? { deviceName: deviceMap.get(row.device_id).name || deviceMap.get(row.device_id).displayName || row.device_id } : {}),
-                online: onlineMap.get(row.device_id) ?? false,
+            .map((row) => {
+              const parsed = row.json ? JSON.parse(row.json) : null;
+              const resolvedModel = parsed ? resolveBotModelSummary(row.device_id, row.bot_id) : null;
+              return {
                 seq: row.seq,
-              } : null,
-              updatedAt: row.updated_at,
-            }));
+                deviceId: row.device_id,
+                botId: row.bot_id,
+                op: row.op,
+                bot: parsed ? {
+                  ...parsed,
+                  modelRef: resolvedModel.effectiveModelRef,
+                  resolvedModel,
+                  ...(deviceMap.has(row.device_id) ? { deviceName: deviceMap.get(row.device_id).name || deviceMap.get(row.device_id).displayName || row.device_id } : {}),
+                  online: onlineMap.get(row.device_id) ?? false,
+                  seq: row.seq,
+                } : null,
+                updatedAt: row.updated_at,
+              };
+            });
           return { epoch: curEpoch, seq: curSeq, mode: 'diff', devices, events };
         }, 'DEFERRED');
       },
@@ -1761,6 +1878,124 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           AND (? IS NULL OR platform = ?) AND (? IS NULL OR arch = ?) AND (? IS NULL OR format = ?)
           ORDER BY created_at DESC, rowid DESC`)
           .all(platform ?? null, platform ?? null, arch ?? null, arch ?? null, format ?? null, format ?? null).map(parse);
+      },
+      /** Ensures a newly paired or re-bound device is granted center:admin OAuth access. */
+      ensureDeviceOAuthGrant(deviceId, { resetToken = false } = {}) {
+        assertId(deviceId);
+        return transaction(() => {
+          const now = new Date().toISOString();
+          const row = db.prepare('SELECT device_id FROM device_oauth_grants WHERE device_id = ?').get(deviceId);
+          if (!row) {
+            db.prepare('INSERT INTO device_oauth_grants (device_id, enabled, token_hash, scopes, created_at, updated_at) VALUES (?, 1, NULL, ?, ?, ?)')
+              .run(deviceId, 'center:admin', now, now);
+          } else if (resetToken) {
+            db.prepare('UPDATE device_oauth_grants SET enabled = 1, token_hash = NULL, updated_at = ? WHERE device_id = ?')
+              .run(now, deviceId);
+          } else {
+            db.prepare('UPDATE device_oauth_grants SET enabled = 1, updated_at = ? WHERE device_id = ?')
+              .run(now, deviceId);
+          }
+          return { deviceId, enabled: true };
+        });
+      },
+      /** Disables OAuth admin access for a deleted/revoked device and invalidates its token hash. */
+      revokeDeviceOAuthGrant(deviceId) {
+        assertId(deviceId);
+        return transaction(() => {
+          const now = new Date().toISOString();
+          db.prepare(`INSERT INTO device_oauth_grants (device_id, enabled, token_hash, scopes, created_at, updated_at)
+            VALUES (?, 0, NULL, ?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET enabled = 0, token_hash = NULL, updated_at = excluded.updated_at`)
+            .run(deviceId, 'center:admin', now, now);
+          return { deviceId, enabled: false };
+        });
+      },
+      /** Active historical devices without a grant row default to enabled = true until explicitly disabled. */
+      isDeviceOAuthGrantEnabled(deviceId) {
+        assertId(deviceId);
+        const row = db.prepare('SELECT enabled FROM device_oauth_grants WHERE device_id = ?').get(deviceId);
+        return row ? row.enabled === 1 : true;
+      },
+      setDeviceOAuthGrantEnabled(deviceId, enabled) {
+        assertId(deviceId);
+        if (typeof enabled !== 'boolean') throw error('INVALID_ARGUMENT', 'enabled must be boolean');
+        return transaction(() => {
+          const now = new Date().toISOString();
+          if (enabled) {
+            db.prepare(`INSERT INTO device_oauth_grants (device_id, enabled, token_hash, scopes, created_at, updated_at)
+              VALUES (?, 1, NULL, ?, ?, ?)
+              ON CONFLICT(device_id) DO UPDATE SET enabled = 1, updated_at = excluded.updated_at`)
+              .run(deviceId, 'center:admin', now, now);
+          } else {
+            db.prepare(`INSERT INTO device_oauth_grants (device_id, enabled, token_hash, scopes, created_at, updated_at)
+              VALUES (?, 0, NULL, ?, ?, ?)
+              ON CONFLICT(device_id) DO UPDATE SET enabled = 0, token_hash = NULL, updated_at = excluded.updated_at`)
+              .run(deviceId, 'center:admin', now, now);
+          }
+          return { deviceId, enabled };
+        });
+      },
+      issueDeviceOAuthToken(deviceId, tokenHash) {
+        assertId(deviceId);
+        assertId(tokenHash);
+        return transaction(() => {
+          const now = new Date().toISOString();
+          const row = db.prepare('SELECT enabled FROM device_oauth_grants WHERE device_id = ?').get(deviceId);
+          if (row && row.enabled !== 1) return false;
+          if (!row) {
+            db.prepare('INSERT INTO device_oauth_grants (device_id, enabled, token_hash, scopes, created_at, updated_at) VALUES (?, 1, ?, ?, ?, ?)')
+              .run(deviceId, tokenHash, 'center:admin', now, now);
+          } else {
+            db.prepare('UPDATE device_oauth_grants SET token_hash = ?, updated_at = ? WHERE device_id = ?')
+              .run(tokenHash, now, deviceId);
+          }
+          return true;
+        });
+      },
+      verifyOAuthAdminToken(tokenHash) {
+        if (typeof tokenHash !== 'string' || !tokenHash) return null;
+        const row = db.prepare('SELECT device_id, enabled, token_hash, scopes FROM device_oauth_grants WHERE token_hash = ?').get(tokenHash);
+        if (!row || row.enabled !== 1 || typeof row.token_hash !== 'string') return null;
+        const actual = Buffer.from(row.token_hash, 'utf8');
+        const expected = Buffer.from(tokenHash, 'utf8');
+        if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return null;
+        const scopes = String(row.scopes || 'center:admin').split(/\s+/).filter(Boolean);
+        if (!scopes.includes('center:admin')) return null;
+        return { deviceId: row.device_id, scopes };
+      },
+      /** Switches a Bot-owned skill back to private and clears other Bots' enabled bindings so archival can proceed atomically. */
+      unshareInstallationForArchive(installationId, ownerDeviceId, ownerBotId) {
+        assertId(installationId);
+        assertId(ownerDeviceId);
+        assertId(ownerBotId);
+        return transaction(() => {
+          const current = requireInstallation(installationId);
+          if (current.ownerBot && (current.ownerBot.deviceId !== ownerDeviceId || current.ownerBot.botId !== ownerBotId)) {
+            throw error('FORBIDDEN', 'Skill belongs to a different Bot');
+          }
+          let changed = false;
+          if (current.ownerBot && current.visibilityScope !== 'private') {
+            const updated = {
+              ...current,
+              visibilityScope: 'private',
+              revision: current.revision + 1,
+            };
+            save('installations', installationId, updated);
+            changed = true;
+          }
+          const allBindings = db.prepare('SELECT json FROM bindings WHERE installation_id = ?').all(installationId).map(parse);
+          for (const b of allBindings) {
+            if (b.deviceId === ownerDeviceId && b.botId === ownerBotId) continue;
+            if (!b.enabled) continue;
+            const { autoSeeded: _autoSeeded, explicitAssigned: _explicitAssigned, ...rest } = b;
+            const disabled = { ...rest, enabled: false, revision: b.revision + 1, autoRevoked: true };
+            db.prepare('UPDATE bindings SET json = ? WHERE device_id = ? AND bot_id = ? AND installation_id = ?')
+              .run(json(disabled), b.deviceId, b.botId, installationId);
+            changed = true;
+          }
+          if (changed) bump();
+          return { changed };
+        });
       },
       close() { db.close(); },
     };

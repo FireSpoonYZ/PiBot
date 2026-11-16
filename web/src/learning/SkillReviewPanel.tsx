@@ -1,9 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { Installation, InstallationSkillFilesResponse } from '../../../center-contract/index.js';
+import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
 import type { BotSkillReviewInput } from '../../../host-core/index.js';
+import { centerAdminRequest } from '../bot-settings/centerAdminBroker';
 import { useText } from '../ui';
 import './SkillReviewPanel.css';
 
 export type SkillReviewCall = (input: BotSkillReviewInput) => Promise<unknown>;
+
+export interface SkillReviewPanelProps {
+  connected: boolean;
+  call: SkillReviewCall;
+  api?: DesktopPanelApi;
+  identity?: DesktopIdentity;
+  deviceId?: string;
+  botId?: string;
+}
 
 type Translate = ReturnType<typeof useText>;
 
@@ -29,6 +41,7 @@ type LearnedSkillSummary = {
   state: 'active' | 'stale' | 'archived' | string;
   pinned: boolean;
   locked: boolean;
+  installationId?: string | null;
   visibilityScope?: 'private' | 'assigned' | 'global';
   useCount?: number;
   viewCount?: number;
@@ -123,7 +136,14 @@ function deploymentLabel(status: string | undefined, t: Translate) {
   }
 }
 
-export function SkillReviewPanel({ connected, call }: { connected: boolean; call: SkillReviewCall }) {
+export function SkillReviewPanel({
+  connected,
+  call,
+  api,
+  identity,
+  deviceId,
+  botId,
+}: SkillReviewPanelProps) {
   const t = useText();
   if (!connected) {
     return (
@@ -132,14 +152,39 @@ export function SkillReviewPanel({ connected, call }: { connected: boolean; call
       </p>
     );
   }
-  return <LearnedSkillsSession call={call} t={t} />;
+  return (
+    <LearnedSkillsSession
+      call={call}
+      t={t}
+      api={api}
+      identity={identity}
+      deviceId={deviceId}
+      botId={botId}
+    />
+  );
 }
 
-function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate }) {
+function LearnedSkillsSession({
+  call,
+  t,
+  api,
+  identity,
+  deviceId,
+  botId,
+}: {
+  call: SkillReviewCall;
+  t: Translate;
+  api?: DesktopPanelApi;
+  identity?: DesktopIdentity;
+  deviceId?: string;
+  botId?: string;
+}) {
   const [items, setItems] = useState<LearnedSkillSummary[] | null>(null);
   const [filter, setFilter] = useState<StateFilter>('all');
   const [detail, setDetail] = useState<LearnedSkillDetail | null>(null);
   const [selectedFile, setSelectedFile] = useState<string>('SKILL.md');
+  const [editing, setEditing] = useState(false);
+  const [draftFiles, setDraftFiles] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState<string | null>(null);
   const [failure, setFailure] = useState<{ error: unknown } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -200,6 +245,7 @@ function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate
 
   function openSkill(skill: LearnedSkillSummary) {
     setNotice(null);
+    setEditing(false);
     run(async () => {
       const result = await callRef.current({ action: 'read', skillId: skill.skillId }) as LearnedSkillDetail | null;
       if (!result || result.skillId !== skill.skillId || !result.files) {
@@ -208,6 +254,7 @@ function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate
       return result;
     }, loaded => {
       setDetail(loaded);
+      setDraftFiles({ ...loaded.files });
       const paths = Object.keys(loaded.files);
       setSelectedFile(paths.includes('SKILL.md') ? 'SKILL.md' : (paths[0] ?? 'SKILL.md'));
       syncSummaryIntoList(loaded);
@@ -268,14 +315,66 @@ function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate
     });
   }
 
+  function saveFiles(current: LearnedSkillDetail) {
+    run(async () => {
+      if (api && identity && current.installationId) {
+        const updated = await centerAdminRequest<InstallationSkillFilesResponse>(api, identity, {
+          method: 'PUT',
+          path: `/api/installations/${encodeURIComponent(current.installationId)}/skill-files`,
+          body: { files: draftFiles, requestId: newRequestId() },
+        });
+        return updated?.files ?? draftFiles;
+      }
+      if (api && identity && deviceId && botId) {
+        await centerAdminRequest(api, identity, {
+          method: 'POST',
+          path: `/api/devices/${encodeURIComponent(deviceId)}/bots/${encodeURIComponent(botId)}/skills`,
+          body: { action: 'update', skillId: current.skillId, files: draftFiles, requestId: newRequestId() },
+        });
+        return draftFiles;
+      }
+      await callRef.current({
+        action: 'update',
+        skillId: current.skillId,
+        files: draftFiles,
+        requestId: newRequestId(),
+      } as unknown as BotSkillReviewInput);
+      return draftFiles;
+    }, nextFiles => {
+      setDetail(prev => prev && prev.skillId === current.skillId ? { ...prev, files: { ...nextFiles } } : prev);
+      setDraftFiles({ ...nextFiles });
+      setEditing(false);
+      setNotice(t('技能内容已保存。', 'Skill files saved.'));
+    });
+  }
+
   function toggleArchive(current: LearnedSkillDetail) {
     const archiving = current.state !== 'archived';
     run(async () => {
-      return await callRef.current({
+      const archiveInput = {
         action: archiving ? 'archive' : 'restore',
         skillId: current.skillId,
         requestId: newRequestId(),
-      }) as LearnedSkillSummary;
+        ...(archiving ? { forceUnshare: true } : {}),
+      } as unknown as BotSkillReviewInput;
+      try {
+        return await callRef.current(archiveInput) as LearnedSkillSummary;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err ?? '');
+        if (archiving && api && identity && current.installationId && /shared|INVALID_STATE/i.test(msg)) {
+          const inst = await centerAdminRequest<Installation>(api, identity, {
+            method: 'GET',
+            path: `/api/installations/${encodeURIComponent(current.installationId)}`,
+          });
+          await centerAdminRequest(api, identity, {
+            method: 'PATCH',
+            path: `/api/installations/${encodeURIComponent(current.installationId)}`,
+            body: { expectedRevision: inst.revision, visibilityScope: 'private' },
+          });
+          return await callRef.current(archiveInput) as LearnedSkillSummary;
+        }
+        throw err;
+      }
     }, updated => {
       setDetail(prev => prev && prev.skillId === current.skillId ? { ...prev, ...updated } : prev);
       syncSummaryIntoList(updated);
@@ -393,6 +492,40 @@ function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate
           </div>
 
           <div className="skill-review-actions">
+            {editing ? (
+              <>
+                <button
+                  type="button"
+                  className="skill-review-primary"
+                  disabled={busy}
+                  onClick={() => saveFiles(detail)}
+                >
+                  {t('保存内容', 'Save')}
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setDraftFiles({ ...detail.files });
+                    setEditing(false);
+                  }}
+                >
+                  {t('取消编辑', 'Cancel')}
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="skill-review-primary"
+                disabled={busy}
+                onClick={() => {
+                  setDraftFiles({ ...detail.files });
+                  setEditing(true);
+                }}
+              >
+                {t('✎ 编辑内容', 'Edit')}
+              </button>
+            )}
             {detail.state !== 'archived' ? (
               <button type="button" disabled={busy} onClick={() => togglePin(detail)}>
                 {detail.pinned ? t('📌 取消固定', '📌 Unpin') : t('📌 固定不过期', '📌 Pin')}
@@ -428,7 +561,18 @@ function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate
             ) : null}
             <figure className="skill-review-codebox">
               <figcaption><code>{selectedFile}</code></figcaption>
-              <pre>{detail.files[selectedFile] || t('（空文件）', '(empty file)')}</pre>
+              {editing ? (
+                <textarea
+                  className="skill-review-editor-textarea"
+                  value={draftFiles[selectedFile] ?? ''}
+                  onChange={e => {
+                    const value = e.target.value;
+                    setDraftFiles(prev => ({ ...prev, [selectedFile]: value }));
+                  }}
+                />
+              ) : (
+                <pre>{detail.files[selectedFile] || t('（空文件）', '(empty file)')}</pre>
+              )}
             </figure>
           </div>
         </>

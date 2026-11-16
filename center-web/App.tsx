@@ -1,18 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { BrowserRouter, Navigate, NavLink, Route, Routes } from 'react-router-dom';
-import { Cpu, LogOut, Monitor, Moon, Package, Puzzle, RefreshCw, Smartphone, Sun, Webhook, WifiOff } from 'lucide-react';
-import { api } from './api';
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { LogOut, Monitor, Moon, RefreshCw, Sun, WifiOff } from 'lucide-react';
+import { CenterAdminPanel } from '../web/src/center-admin';
+import type { CenterAdminTab } from '../web/src/center-admin';
+import { api, webTransport } from './api';
 import type { SetupStatus } from './api';
+import { QrCode } from './components/QrCode';
 import Login from './pages/Login';
 import Setup from './pages/Setup';
-import Providers from './pages/Providers';
-import Models from './pages/Models';
-import Devices from './pages/Devices';
-import Capabilities from './pages/Capabilities';
-import Installation from './pages/Installation';
-import BotCapabilities from './pages/BotCapabilities';
-import ClientReleases from './pages/ClientReleases';
-import Webhooks from './pages/Webhooks';
 
 type ThemeMode = 'system' | 'light' | 'dark';
 
@@ -26,15 +21,96 @@ function getInitialTheme(): ThemeMode {
   return 'system';
 }
 
+function pathToTab(pathname: string): CenterAdminTab {
+  if (pathname.startsWith('/capabilities')) return 'capabilities';
+  if (pathname.startsWith('/devices')) return 'devices';
+  if (pathname.startsWith('/vault')) return 'vault';
+  if (pathname.startsWith('/ops') || pathname.startsWith('/webhooks') || pathname.startsWith('/releases')) {
+    return 'ops';
+  }
+  return 'providers';
+}
+
+function ReadyShell({
+  theme,
+  themeLabel,
+  onCycleTheme,
+  onLogout,
+}: {
+  theme: ThemeMode;
+  themeLabel: string;
+  onCycleTheme: () => void;
+  onLogout: () => void;
+}) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const currentTab = pathToTab(location.pathname);
+
+  const handleTabChange = useCallback(
+    (tab: CenterAdminTab) => {
+      const targetPath = `/${tab}`;
+      if (location.pathname !== targetPath) {
+        navigate(targetPath);
+      }
+    },
+    [location.pathname, navigate],
+  );
+
+  return (
+    <div style={{ minHeight: '100dvh', display: 'flex', flexDirection: 'column' }}>
+      <header
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '10px 18px',
+          borderBottom: '1px solid rgba(128, 128, 128, 0.14)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: 14.5 }}>
+          <span className="brand-dot" aria-hidden="true" />
+          <span>中心管理</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <button
+            type="button"
+            className="rail-action"
+            onClick={onCycleTheme}
+            aria-label={themeLabel}
+            title={themeLabel}
+          >
+            {theme === 'system' ? <Monitor size={17} /> : theme === 'dark' ? <Moon size={17} /> : <Sun size={17} />}
+          </button>
+          <button
+            type="button"
+            className="rail-action"
+            aria-label="退出登录"
+            title="退出登录"
+            onClick={onLogout}
+          >
+            <LogOut size={17} />
+          </button>
+        </div>
+      </header>
+
+      <div style={{ flex: 1 }}>
+        <CenterAdminPanel
+          transport={webTransport}
+          activeTab={currentTab}
+          onTabChange={handleTabChange}
+          renderQr={(value, label) => <QrCode value={value} label={label} />}
+        />
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [state, setState] = useState<'loading' | 'offline' | 'anonymous' | 'ready' | 'setup'>('loading');
   const stateRef = useRef(state);
   stateRef.current = state;
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
-  // generation cancels in-flight responses from an older bootstrap/refresh so a
-  // late /api/session reply cannot overwrite the setup state.
   const generationRef = useRef(0);
-  // No /api/session traffic runs until a bootstrap confirms required:false.
   const pollingRef = useRef(false);
   const bootstrapInFlightRef = useRef(false);
   const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
@@ -53,7 +129,11 @@ export default function App() {
   }, []);
 
   const themeLabel =
-    theme === 'system' ? '主题：跟随系统（点击切换浅色）' : theme === 'light' ? '主题：浅色（点击切换深色）' : '主题：深色（点击跟随系统）';
+    theme === 'system'
+      ? '主题：跟随系统（点击切换浅色）'
+      : theme === 'light'
+        ? '主题：浅色（点击切换深色）'
+        : '主题：深色（点击跟随系统）';
 
   const refresh = useCallback(async () => {
     const generation = generationRef.current;
@@ -67,13 +147,10 @@ export default function App() {
     }
   }, []);
 
-  // Unconfigured centers must go through onboarding before any session work:
-  // polling /api/session against the setup listener would flash the offline card.
   const bootstrap = useCallback(async () => {
     if (bootstrapInFlightRef.current) return;
     bootstrapInFlightRef.current = true;
     const generation = ++generationRef.current;
-    // Session polling stays paused until required:false is confirmed.
     pollingRef.current = false;
     try {
       let setup: SetupStatus;
@@ -92,8 +169,6 @@ export default function App() {
       pollingRef.current = true;
       void refresh();
     } finally {
-      // Only the request that still owns the generation may clear the flag; a
-      // stale bootstrap must not unblock/falsely unblock newer calls.
       if (generation === generationRef.current) bootstrapInFlightRef.current = false;
     }
   }, [refresh]);
@@ -144,7 +219,9 @@ export default function App() {
     return (
       <main className="page login">
         <div className="login-card" style={{ textAlign: 'center' }}>
-          <p className="secondary" style={{ margin: 0 }}>正在连接中心…</p>
+          <p className="secondary" style={{ margin: 0 }}>
+            正在连接中心…
+          </p>
         </div>
       </main>
     );
@@ -158,7 +235,9 @@ export default function App() {
             <WifiOff size={22} />
           </div>
           <h1>中心不可用</h1>
-          <p className="secondary" role="alert">无法连接中心，业务页面已关闭。</p>
+          <p className="secondary" role="alert">
+            无法连接中心，业务页面已关闭。
+          </p>
           <button className="button" onClick={() => void bootstrap()}>
             <RefreshCw size={16} />
             <span>重试连接</span>
@@ -172,96 +251,75 @@ export default function App() {
     <BrowserRouter>
       {state === 'anonymous' ? (
         <Routes>
-          <Route path="/login" element={<Login />} />
+          <Route path="/login" element={<Login onSuccess={() => void refresh()} />} />
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
       ) : (
-        <div className="shell">
-          <nav className="shell-sidebar" aria-label="中心管理">
-            <div className="mobile-topbar">
-              <div className="brand-title" title="PiBot 中心管理">
-                <span className="brand-dot" aria-hidden="true" />
-                <span className="brand-text">中心</span>
-              </div>
-              <div className="shell-footer">
-                <button
-                  type="button"
-                  className="rail-action"
-                  onClick={cycleTheme}
-                  aria-label={themeLabel}
-                  title={themeLabel}
-                >
-                  {theme === 'system' ? <Monitor size={18} /> : theme === 'dark' ? <Moon size={18} /> : <Sun size={18} />}
-                </button>
-                <button
-                  type="button"
-                  className="rail-action"
-                  aria-label="退出登录"
-                  title="退出登录"
-                  onClick={() => void api.logout().then(refresh).catch(() => refresh())}
-                >
-                  <LogOut size={18} />
-                </button>
-              </div>
-            </div>
-            <div className="mobile-bottom-nav">
-              <NavLink
-                to="/providers"
-                title="服务商与默认模型"
-                className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
-              >
-                <Cpu size={19} />
-                <span>模型</span>
-              </NavLink>
-              <NavLink
-                to="/devices"
-                title="设备与 Bot"
-                className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
-              >
-                <Smartphone size={19} />
-                <span>设备</span>
-              </NavLink>
-              <NavLink
-                to="/capabilities"
-                title="插件、MCP 与 Skill"
-                className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
-              >
-                <Puzzle size={19} />
-                <span>能力</span>
-              </NavLink>
-              <NavLink
-                to="/webhooks"
-                title="Webhook 触发"
-                className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
-              >
-                <Webhook size={19} />
-                <span>触发</span>
-              </NavLink>
-              <NavLink
-                to="/releases"
-                title="客户端版本分发"
-                className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
-              >
-                <Package size={19} />
-                <span>版本</span>
-              </NavLink>
-            </div>
-          </nav>
-          <div className="shell-workspace">
-            <Routes>
-              <Route path="/login" element={<Navigate to="/providers" replace />} />
-              <Route path="/providers" element={<Providers />} />
-              <Route path="/providers/:providerId/models" element={<Models />} />
-              <Route path="/devices" element={<Devices />} />
-              <Route path="/capabilities" element={<Capabilities />} />
-              <Route path="/capabilities/:installationId" element={<Installation />} />
-              <Route path="/devices/:deviceId/bots/:botId/capabilities" element={<BotCapabilities />} />
-              <Route path="/webhooks" element={<Webhooks />} />
-              <Route path="/releases" element={<ClientReleases />} />
-              <Route path="*" element={<Navigate to="/providers" replace />} />
-            </Routes>
-          </div>
-        </div>
+        <Routes>
+          <Route path="/login" element={<Navigate to="/providers" replace />} />
+          <Route path="/models" element={<Navigate to="/providers" replace />} />
+          <Route path="/providers/:providerId/models" element={<Navigate to="/providers" replace />} />
+          <Route path="/capabilities/:installationId" element={<Navigate to="/capabilities" replace />} />
+          <Route path="/devices/:deviceId/bots/:botId/capabilities" element={<Navigate to="/devices" replace />} />
+          <Route path="/webhooks" element={<Navigate to="/ops" replace />} />
+          <Route path="/releases" element={<Navigate to="/ops" replace />} />
+          <Route
+            path="/providers"
+            element={
+              <ReadyShell
+                theme={theme}
+                themeLabel={themeLabel}
+                onCycleTheme={cycleTheme}
+                onLogout={() => void api.logout().then(refresh).catch(() => refresh())}
+              />
+            }
+          />
+          <Route
+            path="/capabilities"
+            element={
+              <ReadyShell
+                theme={theme}
+                themeLabel={themeLabel}
+                onCycleTheme={cycleTheme}
+                onLogout={() => void api.logout().then(refresh).catch(() => refresh())}
+              />
+            }
+          />
+          <Route
+            path="/devices"
+            element={
+              <ReadyShell
+                theme={theme}
+                themeLabel={themeLabel}
+                onCycleTheme={cycleTheme}
+                onLogout={() => void api.logout().then(refresh).catch(() => refresh())}
+              />
+            }
+          />
+          <Route
+            path="/vault"
+            element={
+              <ReadyShell
+                theme={theme}
+                themeLabel={themeLabel}
+                onCycleTheme={cycleTheme}
+                onLogout={() => void api.logout().then(refresh).catch(() => refresh())}
+              />
+            }
+          />
+          <Route
+            path="/ops"
+            element={
+              <ReadyShell
+                theme={theme}
+                themeLabel={themeLabel}
+                onCycleTheme={cycleTheme}
+                onLogout={() => void api.logout().then(refresh).catch(() => refresh())}
+              />
+            }
+          />
+          <Route path="*" element={<Navigate to="/providers" replace />} />
+        </Routes>
       )}
     </BrowserRouter>
   );

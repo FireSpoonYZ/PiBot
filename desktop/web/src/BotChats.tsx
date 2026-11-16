@@ -92,7 +92,11 @@ import {
   type BotActivity,
 } from '../../../web/src/botActivity';
 import { botAvatarKey, syncBotAvatarConfigs } from '../../../web/src/botAvatarSync';
+import { formatBotModelSummary } from '../../../web/src/bot-settings/modelDisplay';
 import { BotSettings, type BotSettingsTab } from './BotSettings';
+import type { CenterModelPicker } from '../../../host-core/desktop-client.js';
+import type { CenterAdminTab } from './SettingsPanel';
+import type { DesktopBotDirectoryEntry } from './types';
 import { ShowerPreview } from './ShowerPreview';
 import { ChatTranscript } from './ChatTranscript';
 import type { ChatTurn, KnownBotSummary } from '../../../web/src/chatTurnModel';
@@ -517,6 +521,8 @@ function CreateBotForm({
   const [role, setRole] = useState('');
   const [description, setDescription] = useState('');
   const [cwd, setCwd] = useState('');
+  const [selectedModelRef, setSelectedModelRef] = useState('');
+  const [modelCatalog, setModelCatalog] = useState<CenterModelPicker | null>(null);
   const [makePrimary, setMakePrimary] = useState(false);
   const [busy, setBusy] = useState(false);
   const [locked, setLocked] = useState(false);
@@ -530,6 +536,31 @@ function CreateBotForm({
       mountedRef.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    const id = api.identity;
+    if (!id || !api.transportConnected) return;
+    let active = true;
+    void api.broker(id, 'center_model_picker_get', {}).then(
+      (picker) => {
+        if (active && mountedRef.current) setModelCatalog(picker);
+      },
+      () => {},
+    );
+    return () => {
+      active = false;
+    };
+  }, [api, api.identity, api.transportConnected]);
+
+  const defaultModelRef = modelCatalog?.defaultModel ?? null;
+  const defaultModelEntry = defaultModelRef
+    ? modelCatalog?.models.find((m) => m.modelRef === defaultModelRef)
+    : undefined;
+  const defaultModelLabel = defaultModelEntry
+    ? `跟随全局默认（${defaultModelEntry.name}）`
+    : defaultModelRef
+      ? `跟随全局默认（${defaultModelRef}）`
+      : '跟随全局默认';
 
   const targetHasPrimary = useMemo(
     () =>
@@ -572,10 +603,27 @@ function CreateBotForm({
         ...(effectiveMakePrimary ? { makePrimary: true } : {}),
       });
       if (!mountedRef.current) return;
+      let createdBot: BotRecord = effectiveMakePrimary ? { ...bot, isPrimary: true } : bot;
+      if (selectedModelRef && api.identity && api.transportConnected) {
+        try {
+          const cfg = await api.broker(api.identity, 'center_bot_model_get', { deviceId, botId: bot.botId });
+          await api.broker(api.identity, 'center_bot_model_set', {
+            deviceId,
+            botId: bot.botId,
+            expectedRevision: cfg.revision,
+            value: { modelRef: selectedModelRef },
+          });
+          createdBot = { ...createdBot, modelRef: selectedModelRef };
+        } catch {
+          // Bot 本体已创建成功；专属模型写入失败时仍进入对话，后续可在配置中调整。
+        }
+      }
+      if (!mountedRef.current) return;
       setRole('');
       setDescription('');
       setCwd('');
-      onCreated(deviceId, effectiveMakePrimary ? { ...bot, isPrimary: true } : bot);
+      setSelectedModelRef('');
+      onCreated(deviceId, createdBot);
     } catch (e) {
       if (!mountedRef.current) return;
       if (
@@ -619,6 +667,17 @@ function CreateBotForm({
           maxLength={2000}
           disabled={busy || locked}
         />
+      </label>
+      <label className="field">
+        模型（可选）
+        <select value={selectedModelRef} onChange={(e) => setSelectedModelRef(e.target.value)} disabled={busy || locked}>
+          <option value="">{defaultModelLabel}</option>
+          {(modelCatalog?.models ?? []).map((model) => (
+            <option key={model.modelRef} value={model.modelRef}>
+              {model.name}（{model.modelRef}）
+            </option>
+          ))}
+        </select>
       </label>
       <p className="hint">{deviceId ? `创建于 ${devices.find(device => device.deviceId === deviceId)?.displayName || '所选设备'}` : '请在高级设置中选择在线设备。'}</p>
       {forcePrimary ? (
@@ -1517,6 +1576,7 @@ function BotProfile({ api, centerApi, bot, page, onSaved }: {
   const [busy, setBusy] = useState(false);
   const [locked, setLocked] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [profileSaved, setProfileSaved] = useState(false);
   const inFlight = useRef(false);
   const dirty = useRef(false);
   const cwdDirty = useRef(false);
@@ -1601,6 +1661,8 @@ function BotProfile({ api, centerApi, bot, page, onSaved }: {
       dirty.current = false;
       setName(updated.role);
       setDescription(updated.description ?? '');
+      setProfileSaved(true);
+      window.setTimeout(() => setProfileSaved(false), 2000);
       onSaved(updated);
     } catch (e) {
       if (sessionKey(api.identity) !== sessionKey(identity)) return;
@@ -1688,12 +1750,16 @@ function BotProfile({ api, centerApi, bot, page, onSaved }: {
           onChange={(e) => { cwdDirty.current = true; setCwd(e.target.value); setCwdNotice(null); }}
         />
       </label>
-      <p className="hint">保存后将在智能体空闲时生效。</p>
+      <p className="hint">
+        {centerOnline
+          ? '保存后将在智能体空闲时生效。'
+          : '当前未连接中心，暂以只读展示本机工作目录；连接中心后可修改并同步。'}
+      </p>
       {cwdNotice ? <div className="status" role="status">{cwdNotice}</div> : null}
-      {cwdError || cwdFailed ? <ErrorNotice compact error={cwdError ?? '无法读取工作目录。'} /> : null}
+      {centerOnline && (cwdError || cwdFailed) ? <ErrorNotice compact error={cwdError ?? '无法读取工作目录。'} /> : null}
       <div className="form-actions">
         <button type="button" className="secondary-button" onClick={() => void saveCwd()} disabled={busy || isArchived || !centerOnline || !cwdSavable}>保存工作目录</button>
-        {(cwdFailed || (cwdError && cwdRevision === null)) ? (
+        {centerOnline && (cwdFailed || (cwdError && cwdRevision === null)) ? (
           <button type="button" className="secondary-button" disabled={busy || !centerOnline} onClick={() => void loadCwdRef.current()}>重新读取工作目录</button>
         ) : null}
       </div>
@@ -1702,14 +1768,15 @@ function BotProfile({ api, centerApi, bot, page, onSaved }: {
 
   return (
     <div className="form-grid inspector-profile-form">
-      <label className="field">名称<input value={name} maxLength={120} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setName(e.target.value); }} /></label>
-      <label className="field">职责<textarea value={description} maxLength={2000} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setDescription(e.target.value); }} /></label>
+      <label className="field">名称<input value={name} maxLength={120} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setProfileSaved(false); setName(e.target.value); }} /></label>
+      <label className="field">一句话简介<textarea value={description} maxLength={2000} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setProfileSaved(false); setDescription(e.target.value); }} /></label>
       {error ? <ErrorNotice compact error={error} /> : null}
       <div className="form-actions">
         {locked ? (
           <button type="button" className="secondary-button" disabled={busy || !api.transportConnected} onClick={() => void adoptRemote()}>读取并采用远端资料（丢弃草稿）</button>
         ) : null}
         <button type="button" className="primary-button" onClick={() => void save()} disabled={busy || locked || isArchived || !api.transportConnected}>保存资料</button>
+        {profileSaved ? <span className="status online" role="status">✓ 已保存</span> : null}
       </div>
     </div>
   );
@@ -1725,16 +1792,16 @@ interface InspectorPage {
 }
 
 const inspectorGroups: ReadonlyArray<{ title: string; pages: readonly InspectorPage[] }> = [
-  { title: '常用设置', pages: [
+  { title: '核心配置', pages: [
     { id: 'model', label: '模型', Icon: Cpu },
-    { id: 'soul', label: '人设', Icon: FileText },
-    { id: 'capabilities', label: '插件与能力', Icon: Puzzle },
+    { id: 'soul', label: '人设 (SOUL.md)', Icon: FileText },
+    { id: 'skills', label: '技能 (Skills)', Icon: Sparkles },
+    { id: 'capabilities', label: '工具扩展 (MCP & 插件)', Icon: Puzzle },
     { id: 'schedules', label: '定时任务', Icon: Clock },
+    { id: 'vault', label: '密码凭据', Icon: LockKeyhole },
   ] },
-  { title: '更多', pages: [
-    { id: 'skill-review', label: '已学技能', Icon: Sparkles },
-    { id: 'vault', label: '密码库', Icon: LockKeyhole },
-    { id: 'management', label: '管理', Icon: Settings },
+  { title: '更多管理', pages: [
+    { id: 'management', label: '工作目录与更多管理', Icon: Settings },
   ] },
 ];
 const inspectorPages = inspectorGroups.flatMap(group => group.pages);
@@ -1753,6 +1820,7 @@ function PrimaryChatPane({
   onOpenPrivateChats,
   onOpenSendRecords,
   onRequestArchive,
+  onOpenCenterAdmin,
   focusComposer = false,
   inspectorRequest = null,
   questionnaireRequestId,
@@ -1780,20 +1848,21 @@ function PrimaryChatPane({
   api: DesktopPanelApi;
   /** 未按目标在线收窄的原 api：仅中心权威操作（cwd get/set）使用。 */
   centerApi: DesktopPanelApi;
-  bot: BotRecord;
+  bot: DesktopBotDirectoryEntry | BotRecord;
   readScope: BotReadScope;
   /** 目录侧设备显示名（仅展示）。 */
   deviceName: string;
   /** 目录侧设备平台徽标（DevicesDirectoryItem.platform）；BotRecord 无此字段，缺省回退 host。 */
   devicePlatform?: string;
   onProfileSaved: (bot: BotRecord) => void;
-  onBotUpdated: (patch: Partial<BotRecord> & { botId: string }) => void;
+  onBotUpdated: (patch: Partial<DesktopBotDirectoryEntry> & { botId: string }) => void;
   onBotDeleted: (botId: string) => void;
   onLiveActivity?: () => void;
   /** 打开该 Bot 参与的私聊列表（只读，默认不选对话）。 */
   onOpenPrivateChats?: (bot: BotRecord) => void;
   onOpenSendRecords?: (target: SendRecordsTarget) => void;
   onRequestArchive: () => void;
+  onOpenCenterAdmin?: (tab?: CenterAdminTab) => void;
   focusComposer?: boolean;
   inspectorRequest?: { tab: InspectorTab; seq: number } | null;
   questionnaireRequestId?: string;
@@ -1858,9 +1927,11 @@ function PrimaryChatPane({
   const previousInspectorTabRef = useRef<InspectorTab | null>(null);
   const profileScrollRef = useRef(0);
 
-  const [manageAction, setManageAction] = useState<'setPrimary' | 'unarchive' | 'delete' | null>(null);
+  const [manageAction, setManageAction] = useState<'setPrimary' | 'unarchive' | 'delete' | 'clear' | null>(null);
   const [manageError, setManageError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [clearDone, setClearDone] = useState(false);
   const deleteConfirmationRef = useRef<HTMLDivElement | null>(null);
   const manageDeleteButtonRef = useRef<HTMLButtonElement | null>(null);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
@@ -2058,6 +2129,32 @@ function PrimaryChatPane({
       }
     } finally {
       if (!deleted) readScope.resume();
+      manageInFlightRef.current = false;
+      if (mountedRef.current) setManageAction(null);
+    }
+  }
+
+  async function handleClearHistory() {
+    if (!identity || !online || manageInFlightRef.current || isArchived) return;
+    manageInFlightRef.current = true;
+    setManageAction('clear');
+    setManageError(null);
+    setClearDone(false);
+    try {
+      await api.call(identity, 'clearHistory', { botId: bot.botId });
+      if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
+      setConfirmClear(false);
+      setClearDone(true);
+      void loadRawLatest();
+      window.setTimeout(() => {
+        if (mountedRef.current) setClearDone(false);
+      }, 2200);
+    } catch (e) {
+      if (mountedRef.current && sessionKey(api.identity) === sess) {
+        setManageError(`清空对话失败：${tErr(e)}`);
+        reportUnlessTargetOffline(api, e);
+      }
+    } finally {
       manageInFlightRef.current = false;
       if (mountedRef.current) setManageAction(null);
     }
@@ -3331,6 +3428,8 @@ function PrimaryChatPane({
     <ErrorNotice error={manageError} onDismiss={() => setManageError(null)} compact />
   ) : null;
   const example = '帮我梳理今天的待办事项。';
+  const connectedToCenter = Boolean(centerApi.identity?.kind === 'relay' && centerApi.transportConnected && !centerInterrupted);
+  const modelSummary = formatBotModelSummary(bot as DesktopBotDirectoryEntry, { connectedToCenter });
 
   return (
     <div className="chat-stage" ref={stageRef}>
@@ -3363,7 +3462,7 @@ function PrimaryChatPane({
               {isArchived ? <span className="archived-pill">已归档</span> : null}
             </span>
             <span className="chat-header-pill-sub">
-              {deviceName} · 模型 {bot.modelRef ?? '默认'}
+              {deviceName} · <span className={modelSummary.tone === 'warn' ? 'model-summary-warn' : undefined}>{modelSummary.headerText}</span>
             </span>
           </span>
           <span
@@ -3579,7 +3678,7 @@ function PrimaryChatPane({
           setWatchTick((t) => t + 1);
           void loadRaw();
         }}
-        onOpenLearnedSkills={() => openInspector('skill-review')}
+        onOpenLearnedSkills={() => openInspector('skills')}
         canEditTurns={canEditTurns}
         editingEntryId={activeEditing?.entryId ?? null}
         onEditTurn={startEditTurn}
@@ -3889,7 +3988,12 @@ function PrimaryChatPane({
                           >
                             <Icon size={17} aria-hidden />
                             <span className="inspector-link-label">{label}</span>
-                            {id === 'model' ? <span className="metadata inspector-link-value">{bot.modelRef ?? '默认'}</span> : null}
+                            {id === 'model' ? (
+                              <span className={'inspector-link-value' + (modelSummary.tone === 'warn' ? ' model-summary-warn' : ' metadata')}>
+                                {modelSummary.primaryText}
+                                {modelSummary.badgeText ? <span className="inspector-default-pill">{modelSummary.badgeText}</span> : null}
+                              </span>
+                            ) : null}
                             <ChevronRight size={15} aria-hidden />
                           </button>
                         ))}
@@ -3898,10 +4002,10 @@ function PrimaryChatPane({
                   </nav>
                 ) : null}
                 {isManagementPage ? (
-                  <section className="inspector-lifecycle" aria-label="智能体状态">
-                    <h3 className="inspector-section-title">智能体状态</h3>
+                  <section className="inspector-lifecycle" aria-label="更多管理">
+                    <h3 className="inspector-section-title">会话与生命周期</h3>
                     {isPrimary && !isArchived ? (
-                      <p className="hint">主 Bot 不可归档/删除，请先切换主 Bot。</p>
+                      <p className="hint">主智能体不可归档或删除，请先将其他智能体设为主智能体。</p>
                     ) : null}
                     <div className="form-actions">
                       {!isPrimary && !isArchived ? (
@@ -3911,7 +4015,17 @@ function PrimaryChatPane({
                           disabled={!online || manageBusy}
                           onClick={() => void handleSetPrimary()}
                         >
-                          {manageAction === 'setPrimary' ? '设置中…' : '★ 设为主 Bot'}
+                          {manageAction === 'setPrimary' ? '设置中…' : '★ 设为主智能体'}
+                        </button>
+                      ) : null}
+                      {!isArchived ? (
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={!online || manageBusy || liveBusy}
+                          onClick={() => setConfirmClear(true)}
+                        >
+                          {manageAction === 'clear' ? '清空中…' : '清空对话'}
                         </button>
                       ) : null}
                       {!isArchived ? (
@@ -3943,13 +4057,49 @@ function PrimaryChatPane({
                         永久删除智能体
                       </button>
                     </div>
+                    {clearDone ? <div className="status online" role="status">✓ 已清空对话历史</div> : null}
+                    {confirmClear ? (
+                      <div className="confirm-delete-banner" role="alert">
+                        <span>清空「{bot.role}」的当前对话上下文与历史记录？</span>
+                        <div className="confirm-delete-actions">
+                          <button
+                            type="button"
+                            className="primary-button danger-button"
+                            disabled={!online || manageBusy}
+                            onClick={() => void handleClearHistory()}
+                          >
+                            {manageAction === 'clear' ? '清空中…' : '确认清空'}
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            disabled={manageBusy}
+                            onClick={() => setConfirmClear(false)}
+                          >
+                            取消
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
                     {deleteConfirmation}
                     {managementError}
                   </section>
                 ) : null}
               </div>
               {settingsTab ? (
-                <BotSettings api={api} botId={bot.botId} hostLabel={deviceName} hostPlatform={devicePlatform} tab={settingsTab} open />
+                <BotSettings
+                  api={api}
+                  botId={bot.botId}
+                  botName={bot.role}
+                  hostLabel={deviceName}
+                  hostPlatform={devicePlatform}
+                  tab={settingsTab}
+                  open
+                  onOpenCenterAdmin={onOpenCenterAdmin}
+                  onModelSaved={(cfg) => {
+                    onBotUpdated({ botId: bot.botId, modelRef: cfg.overrides.modelRef ?? null });
+                  }}
+                />
               ) : null}
               {inspectorTab === 'raw' ? (
                 <RawHistoryPane
@@ -4009,6 +4159,7 @@ export function BotChats({
   onTaskWaitingCountChange,
   onOpenSendRecords,
   onOpenArchived,
+  onOpenCenterAdmin,
 }: {
   api: DesktopPanelApi;
   currentDeviceId: string;
@@ -4027,6 +4178,7 @@ export function BotChats({
   onTaskWaitingCountChange?: (count: number) => void;
   onOpenSendRecords?: (target?: SendRecordsTarget) => void;
   onOpenArchived?: () => void;
+  onOpenCenterAdmin?: (tab?: CenterAdminTab) => void;
 }) {
   const identity = api.identity;
   const sess = sessionKey(identity);
@@ -4046,7 +4198,7 @@ export function BotChats({
     error: pinsError,
   } = useChatPins(profileKey || 'default');
 
-  const [bots, setBots] = useState<BotDirectoryEntry[]>(() => initialCache?.bots ?? []);
+  const [bots, setBots] = useState<DesktopBotDirectoryEntry[]>(() => initialCache?.bots ?? []);
   const readScopes = useRef(new Map<string, BotReadScope>());
   const readScopeFor = useCallback((deviceId: string, botId: string) => {
     const key = JSON.stringify([profileKey, deviceId, botId]);
@@ -6051,6 +6203,7 @@ export function BotChats({
             focusComposer={selected?.focusComposer}
             onOpenSendRecords={onOpenSendRecords}
             onRequestArchive={() => setArchiveTarget(selectedBot)}
+            onOpenCenterAdmin={onOpenCenterAdmin}
             questionnaireRequestId={selected?.questionnaire?.session === sess &&
               selected.questionnaire.conversationId === selectedBot.primaryConversationId
               ? selected.questionnaire.requestId : undefined}

@@ -15,14 +15,15 @@ function text(value, name, max) {
   return value;
 }
 function routeInput(value, create = false) {
-  const body = fields(value, create ? ['name', 'deviceId', 'botId', 'instruction', 'enabled'] : ['name', 'instruction', 'enabled']);
+  const body = fields(value, ['name', 'deviceId', 'botId', 'instruction', 'enabled']);
   const enabled = create && body.enabled === undefined ? true : body.enabled;
   if (typeof enabled !== 'boolean') fail('INVALID_ARGUMENT', 'Invalid enabled');
   return {
     name: text(body.name, 'name', 80).trim(),
     instruction: text(body.instruction, 'instruction', 8000),
     enabled,
-    ...(create ? { deviceId: text(body.deviceId, 'deviceId', 128), botId: text(body.botId, 'botId', 128) } : {}),
+    ...(create || body.deviceId !== undefined ? { deviceId: text(body.deviceId, 'deviceId', 128) } : {}),
+    ...(create || body.botId !== undefined ? { botId: text(body.botId, 'botId', 128) } : {}),
   };
 }
 function errorInput(value) {
@@ -95,7 +96,24 @@ export function registerWebhookRoutes(app, { store, bridge, route, host, publicU
     const value = store.createWebhookRoute(input, token);
     return reply.code(201).send({ route: changed(value), token });
   }, true);
-  route('PUT', '/api/webhooks/:id', req => changed(store.updateWebhookRoute(req.params.id, routeInput(req.body))), true);
+  route('PUT', '/api/webhooks/:id', req => {
+    const input = routeInput(req.body, false);
+    const existing = store.getWebhookRoute(req.params.id);
+    const targetDeviceId = input.deviceId ?? existing.deviceId;
+    const targetBotId = input.botId ?? existing.botId;
+    if (input.deviceId !== undefined || input.botId !== undefined) {
+      const device = bridge.registry.get(targetDeviceId);
+      if (!device || device.revokedAt !== null || targetDeviceId === bridge.deviceId) fail('NOT_FOUND', 'Device not found');
+      if (!store.listDeviceBots(targetDeviceId).some(bot => bot.botId === targetBotId)) fail('BOT_NOT_FOUND', 'Bot not found');
+    }
+    const updated = store.updateWebhookRoute(req.params.id, {
+      ...input,
+      deviceId: targetDeviceId,
+      botId: targetBotId,
+    });
+    if (existing.deviceId !== updated.deviceId) notify(existing.deviceId);
+    return changed(updated);
+  }, true);
   route('POST', '/api/webhooks/:id/rotate-token', req => {
     fields(req.body, []);
     const token = randomBytes(32).toString('base64url');

@@ -2652,11 +2652,20 @@ export interface DevicesDirectoryItem {
   scopeProtocol: 0 | 1;
 }
 
+export interface ResolvedModelSummary {
+  effectiveModelRef: string | null;
+  effectiveModelName: string | null;
+  effectiveProviderName: string | null;
+  source: 'bot' | 'center_default' | 'local_default' | 'unset';
+  available: boolean;
+}
+
 export interface BotDirectoryEntry extends BotRecord {
   avatar?: BotAvatar | null;
   avatarRevision?: number;
   /** Center CAS revision for the authoritative cwd; absent on legacy centers/local-only records. */
   cwdRevision?: number;
+  resolvedModel?: ResolvedModelSummary;
   deviceName: string;
   platform?: string;
   online: boolean;
