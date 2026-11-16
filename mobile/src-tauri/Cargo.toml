@@ -1,6 +1,6 @@
 [package]
 name = "e-launcher-mobile"
-version = "0.0.21-dev.7"
+version = "0.0.21-dev.8"
 edition = "2021"
 publish = false
 
