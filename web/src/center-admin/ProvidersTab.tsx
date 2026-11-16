@@ -677,7 +677,7 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
     setModelDraft({
       id: '',
       name: '',
-      contextWindow: 128000,
+      contextWindow: 262144,
       maxTokens: 16384,
       input: ['text'],
       reasoning: false,
@@ -725,7 +725,7 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
       id: trimmedId,
       name: modelDraft.name.trim() || trimmedId,
       input: modelDraft.input.length > 0 ? modelDraft.input : ['text'],
-      contextWindow: Number(modelDraft.contextWindow) || 128000,
+      contextWindow: Number(modelDraft.contextWindow) || 262144,
       maxTokens: Number(modelDraft.maxTokens) || 16384,
     };
     for (const key of EXTRA_MODEL_KEYS) {

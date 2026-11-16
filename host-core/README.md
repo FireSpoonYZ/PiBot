@@ -211,7 +211,7 @@ node host-core/runtime-cli.js wait --data-root "$DATA_ROOT" --config "$CONFIG" -
 
 冷启动顺序（openRuntime → 中心快照 apply → resume）：Harness open 把存活 running 任务改回 pending 但不派发，调度保持 paused。此阶段初始化只 ensureBotSoul，不用空模型/插件 profile 重写已持久化 AgentDoc（否则恢复任务丢工具、记 toolsRemoved/interrupted）；配置应用的空闲门槛在调度 paused 时把磁盘遗留 pending 视为可恢复而非忙碌，先恢复已授权模型/插件注册/profile，随后 HostService 才 resume 接管任务。正常调度期 botIsIdle 保护不变。
 
-全部 Bot 沿用 SDK 默认自动 compaction（阈值/后台触发与一次 provider 溢出压缩重试），不再强制关闭；BC 插件与原生压缩可共存，两者不互斥。本模块没有注册文件、命令或屏幕工具，没有替换旧 Android/Capacitor 运行链路。
+全部 Bot 沿用 SDK 默认自动 compaction（阈值/后台触发与一次 provider 溢出压缩重试），不再强制关闭；BC 插件与原生压缩可共存，两者不互斥。插件准备后的投影超限时，在 provider 边界返回标准 overflow，复用 SDK 的压缩重试，不发送超限请求。服务商未报告上下文容量时默认 256K（262144 tokens），明确配置或上游返回的容量优先。本模块没有注册文件、命令或屏幕工具，没有替换旧 Android/Capacitor 运行链路。
 
 ### 模块 2 验收
 

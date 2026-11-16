@@ -24,7 +24,7 @@ import { createFindTool } from './find-tool.js';
 import { createLsTool } from './ls-tool.js';
 import { getPrimaryConversation, RequestKeys, PrimaryIndex, applyAgentProfile } from './runtime-docs.js';
 import { formatPrimarySubmission, latestResetEntryId, normalizeHistoryOptions, readPrimaryHistory } from './runtime-history.js';
-import { RequestContext, countMessageTokens, estimateContextTokensHost, budgetRequestTokens } from './request-context.js';
+import { RequestContext, countMessageTokens, estimateContextTokensHost, budgetRequestTokens, setRequestBudget } from './request-context.js';
 import { GenerationFailureState } from './generation-failure.js';
 import { resolveBotIdentity } from './bot-identity.js';
 import { createPluginManager } from './plugins/manager.js';
@@ -316,7 +316,7 @@ export async function openRuntime(options) {
       const code = known ? err.code : 'GENERATION_FAILED';
       const message = known ? HOST_FAILURE_MESSAGES[err.code] : 'generation failed before the provider request';
       await harness.commit(async (tx) => {
-        const doc = await tx.doc(GenerationFailureState, api.conversationId, String(api.taskId));
+        const doc = await tx.doc(GenerationFailureState, api.conversationId, String(api.taskId), null);
         doc.failure = { code, message };
       }, context);
     } catch (commitErr) {
@@ -635,7 +635,8 @@ export async function openRuntime(options) {
   }));
   // Selected after each Bot's plugin hooks, so this check sees their complete request.
   // SDK 已用 estimateContext（权威 usage + 尾部估计）做阈值压缩与溢出重试；这里的
-  // 最终守卫只做越限硬止，且用同一口径：prepared.tokenCount 是 prepareContext 后
+  // 最终守卫在 provider 边界返回标准 overflow，交给 SDK 自动压缩并至多重试一次；
+  // prepared.tokenCount 是 prepareContext 后
   // 有效请求的 SDK 估计基线，插件 beforeRequest 之后再用同一有序子序列 + 增量
   // 对齐当前 messages——新增的插件内容计入、被替换的投影只计有效值，
   // 绝不做整包 JSON 估算，也绝不误杀后台压缩期间的正常请求。
@@ -646,7 +647,8 @@ export async function openRuntime(options) {
         const prepared = (await harness.snapshot(RequestContext, api.conversationId, context))?.prepared;
         if (!prepared || prepared.taskId !== String(api.taskId)) throw errWithCode('context is not prepared', 'INVALID_STATE');
         const total = budgetRequestTokens(prepared.messages, prepared.tokenCount, request.messages);
-        if (total >= prepared.contextWindow) throw errWithCode('context limit reached', 'CONTEXT_LIMIT');
+        // Let the SDK compact/retry an oversized projection without sending it to the provider.
+        setRequestBudget(request.messages, total, prepared.contextWindow);
         await decisions.checkBudget(request, api, context);
       } catch (err) {
         if (!context.abortSignal?.aborted) {

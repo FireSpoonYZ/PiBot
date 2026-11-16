@@ -4066,7 +4066,9 @@ ${newer}` : draftSnapshot;
   // 直接展示 message/code 原文，不加「Host」字样或身份前缀；无此字段回落原回执提示。
   const activityFailure =
     botActivity.phase === 'failed' && botActivity.error
-      ? botActivity.error.message || botActivity.error.code
+      ? botActivity.error.code === 'CONTEXT_LIMIT'
+        ? t('上下文超过模型上限，请压缩对话或调整模型的上下文窗口后重试。', 'Context limit reached. Compact the conversation or adjust the model context window, then retry.')
+        : botActivity.error.message || botActivity.error.code
       : undefined;
   const failureNotice = activityFailure || submissionFailure;
   const isChatTargetOnline = Boolean(
@@ -6210,8 +6212,12 @@ ${newer}` : draftSnapshot;
             {chatStatusKind === 'fail' && (
               <ErrorNotice
                 error={failureNotice}
-                actionLabel={isModelConfigError(failureNotice) ? t('模型设置', 'Model Settings') : undefined}
-                onAction={isModelConfigError(failureNotice) ? () => openBotProfile(activeBot) : undefined}
+                actionLabel={botActivity.error?.code === 'CONTEXT_LIMIT'
+                  ? t('压缩对话', 'Compact conversation')
+                  : isModelConfigError(failureNotice) ? t('模型设置', 'Model Settings') : undefined}
+                onAction={botActivity.error?.code === 'CONTEXT_LIMIT'
+                  ? () => void action.run(() => runSlashCommand('/compact'))
+                  : isModelConfigError(failureNotice) ? () => openBotProfile(activeBot) : undefined}
               />
             )}
             {chatStatusKind === 'admission' && (

@@ -89,7 +89,7 @@ const BLANK_PROVIDER: Provider = {
 const BLANK_MODEL: Model = {
   id: '',
   name: '',
-  contextWindow: 128000,
+  contextWindow: 262144,
   maxTokens: 16384,
   input: ['text'],
   reasoning: false,
