@@ -8628,9 +8628,9 @@ ${newer}` : draftSnapshot;
               </div>
             ) : (
               <CenterAdminPanel
-                key={centerAdminTab}
                 transport={mobileCenterTransport}
                 embedded
+                hideTopbarExternal
                 initialTab={centerAdminTab}
                 centerUrl={centerConn.status?.centerUrl || centerConn.saved?.url}
                 onOpenExternal={() => void centerConn.openManagement()}

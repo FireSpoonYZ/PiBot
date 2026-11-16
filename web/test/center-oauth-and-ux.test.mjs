@@ -435,3 +435,14 @@ test('bot resolvedModel and formatBotModelSummary honestly reflect unset, center
     await center.close();
   }
 });
+
+test('Android and Desktop client bridge allowlists expose center_admin_request, center_qr_login_approve, and OAUTH_ACCESS_REVOKED', async () => {
+  const { BRIDGE_CLIENT_OPERATIONS, BRIDGE_ERROR_CODES } = await import('../../host-core/android-bridge-protocol.js');
+  assert.equal(BRIDGE_CLIENT_OPERATIONS.has('center_admin_request'), true);
+  assert.equal(BRIDGE_CLIENT_OPERATIONS.has('center_qr_login_approve'), true);
+  assert.equal(BRIDGE_ERROR_CODES.has('OAUTH_ACCESS_REVOKED'), true);
+
+  const bridgeRs = fs.readFileSync(new URL('../../desktop/src-tauri/src/bridge.rs', import.meta.url), 'utf8');
+  assert.match(bridgeRs, /"center_admin_request"/);
+  assert.match(bridgeRs, /"center_qr_login_approve"/);
+});

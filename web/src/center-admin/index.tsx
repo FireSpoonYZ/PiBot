@@ -65,6 +65,7 @@ export function CenterAdminPanel({
   onTabChange,
   centerUrl,
   onOpenExternal,
+  hideTopbarExternal = false,
   onConfigureBot,
   renderQr,
 }: CenterAdminPanelProps): React.JSX.Element {
@@ -103,7 +104,7 @@ export function CenterAdminPanel({
             ))}
           </nav>
 
-          {onOpenExternal && (
+          {onOpenExternal && !hideTopbarExternal && (
             <button
               type="button"
               className="ca-btn ca-btn-ghost ca-btn-sm"

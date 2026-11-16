@@ -183,6 +183,7 @@ export interface CenterAdminPanelProps {
   onTabChange?: (tab: CenterAdminTab) => void;
   centerUrl?: string;
   onOpenExternal?: () => void;
+  hideTopbarExternal?: boolean;
   onConfigureBot?: (deviceId: string, botId: string) => void;
   renderQr?: (value: string, label: string) => React.ReactNode;
 }

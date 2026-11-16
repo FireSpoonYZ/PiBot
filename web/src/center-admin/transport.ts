@@ -99,6 +99,26 @@ export function errorMessage(err: unknown, fallback = '操作失败'): string {
   return fallback;
 }
 
+const MAX_BROKER_ADMIN_CONCURRENCY = 2;
+let activeBrokerAdminCalls = 0;
+const brokerAdminWaiters: Array<() => void> = [];
+
+async function withBrokerAdminSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (activeBrokerAdminCalls >= MAX_BROKER_ADMIN_CONCURRENCY) {
+    await new Promise<void>(resolve => {
+      brokerAdminWaiters.push(resolve);
+    });
+  }
+  activeBrokerAdminCalls += 1;
+  try {
+    return await fn();
+  } finally {
+    activeBrokerAdminCalls -= 1;
+    const next = brokerAdminWaiters.shift();
+    if (next) next();
+  }
+}
+
 export function createBrokerCenterTransport(
   brokerCall: (op: string, params: Record<string, unknown>) => Promise<unknown>,
 ): CenterTransport {
@@ -118,7 +138,7 @@ export function createBrokerCenterTransport(
       const params: Record<string, unknown> = { method, path };
       if (body !== undefined) params.body = body;
       try {
-        const result = await brokerCall('center_admin_request', params);
+        const result = await withBrokerAdminSlot(() => brokerCall('center_admin_request', params));
         if (result && typeof result === 'object' && 'error' in result) {
           const maybeErr = (result as ApiError).error;
           if (maybeErr && typeof maybeErr === 'object' && typeof maybeErr.message === 'string') {

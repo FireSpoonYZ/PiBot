@@ -71,7 +71,7 @@ const NATIVE_RESULT_ERROR_CODES = new Set([
 
 const BRIDGE_LOCAL_CODES = new Set(['BUSY', 'IO_ERROR', 'TOO_LARGE']);
 // Client-mode codes extend CONTROL_ERROR_CODES on the private broker bridge.
-export const BRIDGE_CLIENT_CODES = new Set(['REPLACED', 'PENDING_BUSY', 'CERTIFICATE_ERROR']);
+export const BRIDGE_CLIENT_CODES = new Set(['REPLACED', 'PENDING_BUSY', 'CERTIFICATE_ERROR', 'OAUTH_ACCESS_REVOKED']);
 export const BRIDGE_ERROR_CODES = new Set([
   ...CONTROL_ERROR_CODES,
   ...ANDROID_NATIVE_CODES,
@@ -88,6 +88,8 @@ export const BRIDGE_CLIENT_OPERATIONS = new Set([
   'center_disconnect',
   'center_owner_session',
   'center_owner_login',
+  'center_admin_request',
+  'center_qr_login_approve',
   'center_model_picker_get',
   'center_model_star_set',
   'center_bot_model_get',

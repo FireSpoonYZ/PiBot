@@ -210,9 +210,9 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
     }
     setModelCountByProvider(counts);
 
-    // Fetch auth-status lightly for configured or key native providers (especially Antigravity / OAuth ones)
+    // Fetch auth-status lightly only for native providers (e.g. Antigravity / OAuth ones)
     const authEntries = await Promise.all(
-      provList.map(async p => {
+      provList.filter(p => p.native).map(async p => {
         try {
           const st = await api.providerAuthStatus(p.id);
           return [p.id, st] as const;
@@ -1024,8 +1024,8 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
       <section className="ca-section">
         <div className="ca-section-head">
           <h3 className="ca-section-title">模型服务商</h3>
-          <div className="ca-toolbar-group">
-            <div className="ca-inline-row" style={{ position: 'relative', width: 200 }}>
+          <div className="ca-toolbar-group ca-provider-toolbar">
+            <div className="ca-inline-row ca-provider-search">
               <Search size={14} style={{ position: 'absolute', left: 9, color: 'var(--ca-text-muted)' }} />
               <input
                 type="search"

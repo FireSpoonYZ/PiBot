@@ -12,13 +12,33 @@ type AdminBrokerFn = (
   params: CenterAdminRequestParams,
 ) => Promise<unknown>;
 
+const MAX_ADMIN_BROKER_CONCURRENCY = 2;
+let activeAdminBrokerCalls = 0;
+const adminBrokerQueue: Array<() => void> = [];
+
+async function withAdminBrokerSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (activeAdminBrokerCalls >= MAX_ADMIN_BROKER_CONCURRENCY) {
+    await new Promise<void>(resolve => {
+      adminBrokerQueue.push(resolve);
+    });
+  }
+  activeAdminBrokerCalls += 1;
+  try {
+    return await fn();
+  } finally {
+    activeAdminBrokerCalls -= 1;
+    const next = adminBrokerQueue.shift();
+    if (next) next();
+  }
+}
+
 export async function centerAdminRequest<T = unknown>(
   api: DesktopPanelApi,
   identity: DesktopIdentity,
   params: CenterAdminRequestParams,
 ): Promise<T> {
   const broker = api.broker as unknown as AdminBrokerFn;
-  return (await broker(identity, 'center_admin_request', params)) as T;
+  return (await withAdminBrokerSlot(() => broker(identity, 'center_admin_request', params))) as T;
 }
 
 export function newRequestId(): string {
