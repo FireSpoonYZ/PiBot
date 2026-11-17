@@ -1480,18 +1480,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
             >
               <RefreshCw size={15} className="grok-spin" />
             </button>
-          ) : isPreLlm || receiptBusy ? (
-            <button
-              type="button"
-              className="composer-loading"
-              disabled
-              aria-busy={true}
-              aria-label="处理中…"
-              title="前置准备中…"
-            >
-              <SendButtonIcon busy={true} size={16} />
-            </button>
-          ) : isLlmRunning ? (
+          ) : isPreLlm || receiptBusy ? null : isLlmRunning ? (
             <>
               {hasDraftContent && !isEditingTurn ? (
                 <button

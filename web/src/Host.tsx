@@ -6729,17 +6729,7 @@ ${newer}` : draftSnapshot;
                     </button>
                   ) : (
                     <>
-                      {isPreLlmChat || sendingReceipt || editSubmitting ? (
-                        <button
-                          type="button"
-                          className="grok-composer-action-pill loading"
-                          aria-label={t('处理中…', 'Processing…')}
-                          aria-busy={true}
-                          disabled
-                        >
-                          <SendButtonIcon busy={true} />
-                        </button>
-                      ) : effectiveLocalDraft.trim() || effectiveLocalAttachments.length > 0 ? (
+                      {!(isPreLlmChat || sendingReceipt || editSubmitting) && (effectiveLocalDraft.trim() || effectiveLocalAttachments.length > 0) ? (
                         <>
                           {!activeEditing && isLlmRunningChat ? (
                             <button
@@ -10167,17 +10157,7 @@ function RemotePendingComposer({
               </button>
             ) : (
               <>
-                {isPreLlmPhase || waitingForReceipt || editSubmitting ? (
-                  <button
-                    type="button"
-                    className="grok-composer-action-pill loading"
-                    aria-label={t('处理中…', 'Processing…')}
-                    aria-busy={true}
-                    disabled
-                  >
-                    <SendButtonIcon busy={true} />
-                  </button>
-                ) : effectiveText.trim() || effectiveAttachments.length > 0 ? (
+                {!(isPreLlmPhase || waitingForReceipt || editSubmitting) && (effectiveText.trim() || effectiveAttachments.length > 0) ? (
                   <>
                     {!editingTurn && isLlmRunningPhase ? (
                       <button
