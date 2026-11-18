@@ -65,12 +65,11 @@
   font-size: 13px;
 }
 
-/* 轮次气泡：居中舒适阅读宽度 */
+/* 轮次气泡：回复靠左，用户消息靠右。 */
 .desktop-shell .desktop-transcript .bot-chat-bubble {
-  align-self: stretch;
+  align-self: flex-start;
   max-width: 780px;
   width: 100%;
-  margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 8px;

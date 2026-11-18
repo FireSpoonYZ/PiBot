@@ -90,6 +90,8 @@ export interface ChatTurn {
   toolSummary?: string[];
   tools?: ChatToolCallItem[];
   startedAt?: number;
+  /** 持久消息的时间（毫秒）；与计算耗时用的轮次起点分开。 */
+  timestamp?: number;
   durationMs?: number;
   isStreaming?: boolean;
   createdAt?: string;
@@ -915,6 +917,7 @@ export function parseHistoryEntries(
             entryId: Number.isFinite(numericId) ? numericId : 0,
             text: cleanText,
             startedAt: ts,
+            timestamp: ts,
             attribution: itemAttr,
             ...(itemAttr.createdAt ? { createdAt: itemAttr.createdAt } : {}),
           });
@@ -977,6 +980,7 @@ export function parseHistoryEntries(
           text: joinedText,
           ...(attachments.length > 0 ? { attachments } : {}),
           startedAt: msgTimestamp,
+          timestamp: msgTimestamp,
           ...(itemAttr ? { attribution: itemAttr } : {}),
         });
         continue;
@@ -1150,6 +1154,7 @@ export function parseHistoryEntries(
           acc.turn.startedAt = msgTimestamp;
         }
         if (msgTimestamp !== undefined) {
+          acc.turn.timestamp = msgTimestamp;
           const stepEnd = msgTimestamp + (msgDurationMs ?? 0);
           acc.endMs = acc.endMs !== undefined ? Math.max(acc.endMs, stepEnd) : stepEnd;
         }

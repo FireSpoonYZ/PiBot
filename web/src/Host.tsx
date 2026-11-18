@@ -125,8 +125,8 @@ import {
   shouldShowComposerStop,
   type BotActivity,
 } from './botActivity';
+import { ChatTurnMeta } from './ChatTurnMeta';
 import {
-  formatTurnDuration,
   latestEntryChannel,
   parseHistoryEntries,
   visibleAssistantTextEntryIds,
@@ -6129,15 +6129,7 @@ ${newer}` : draftSnapshot;
                       actionLabel={isModelConfigError(turn.error) ? t('模型设置', 'Model Settings') : undefined}
                       onAction={isModelConfigError(turn.error) ? () => openBotProfile(activeBot) : undefined}
                     />
-                    {showTurnDuration && (
-                      <div className="bot-chat-turn-meta" aria-label={formatTurnDuration(turn.durationMs!, t)}>
-                        <svg className="bot-chat-turn-clock" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                          <circle cx="8" cy="8" r="5.75" stroke="currentColor" strokeWidth="1.5" />
-                          <path d="M8 5v3.25l2.1 1.35" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                        <span>{formatTurnDuration(turn.durationMs!, t)}</span>
-                      </div>
-                    )}
+                    <ChatTurnMeta timestamp={turn.timestamp} durationMs={showTurnDuration ? turn.durationMs : undefined} />
                     {showBubbleActions && (
                       <div
                         className="bot-bubble-action-bar"

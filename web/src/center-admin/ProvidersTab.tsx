@@ -152,6 +152,7 @@ export function ProvidersTab({
 
   // Provider search
   const [providerQuery, setProviderQuery] = useState('');
+  const [providerFilter, setProviderFilter] = useState<'enabled' | 'all'>('enabled');
   const [togglingProviderId, setTogglingProviderId] = useState<string | null>(null);
 
   // Provider unified drawer
@@ -867,18 +868,16 @@ export function ProvidersTab({
 
   const sortedProviders = useMemo(() => {
     const q = providerQuery.trim().toLowerCase();
-    return [...providers]
-      .filter(p => {
-        if (!q) return true;
-        return p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q);
-      })
+    return providers
+      .filter(p => (providerFilter === 'all' || p.enabled) &&
+        (!q || p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q)))
       .sort((a, b) => {
         const ra = providerSortRank(a);
         const rb = providerSortRank(b);
         if (ra !== rb) return ra - rb;
         return a.name.localeCompare(b.name);
       });
-  }, [providerQuery, providers]);
+  }, [providerFilter, providerQuery, providers]);
 
   const filteredDrawerModels = useMemo(() => {
     const q = modelQuery.trim().toLowerCase();
@@ -1044,7 +1043,14 @@ export function ProvidersTab({
       {/* 2. 服务商极简列表 */}
       <section className="ca-section">
         <div className="ca-section-head">
-          <h3 className="ca-section-title">模型服务商</h3>
+          <div className="ca-inline-row">
+            <h3 className="ca-section-title">模型服务商</h3>
+            <CaSegmented
+              value={providerFilter}
+              options={[{ value: 'enabled', label: '已启用' }, { value: 'all', label: '全部' }]}
+              onChange={setProviderFilter}
+            />
+          </div>
           <div className="ca-toolbar-group ca-provider-toolbar">
             <div className="ca-inline-row ca-provider-search">
               <Search size={14} style={{ position: 'absolute', left: 9, color: 'var(--ca-text-muted)' }} />
@@ -1066,7 +1072,11 @@ export function ProvidersTab({
 
         <div className="ca-list">
           {sortedProviders.length === 0 ? (
-            <div className="ca-empty">没有匹配的服务商</div>
+            <div className="ca-empty">
+              {providerFilter === 'enabled' && !providerQuery.trim()
+                ? '暂无已启用的服务商。切换到「全部」可查看并启用。'
+                : '没有匹配的服务商'}
+            </div>
           ) : (
             sortedProviders.map(provider => (
               <div

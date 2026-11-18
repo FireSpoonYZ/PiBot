@@ -447,25 +447,25 @@
 }
 .desktop-dialog .settings-diagnostics > summary { cursor: pointer; }
 .desktop-dialog .settings-diagnostics[open] > summary { margin-bottom: 6px; }
-.client-settings-dialog .settings-device {
+.settings-shell-dialog .settings-device {
   flex: 1;
   min-width: 0;
   border: 0;
   background: transparent;
 }
-.client-settings-dialog .settings-device > summary {
+.settings-shell-dialog .settings-device > summary {
   min-height: 44px;
   padding: 6px 4px;
   border-radius: var(--radius-xs);
   font-weight: 400;
 }
-.client-settings-dialog .settings-device > summary:hover { background: var(--surface); }
-.client-settings-dialog .settings-device > summary:focus-visible { outline-offset: -2px; }
-.client-settings-dialog .settings-device[open] > summary {
+.settings-shell-dialog .settings-device > summary:hover { background: var(--surface); }
+.settings-shell-dialog .settings-device > summary:focus-visible { outline-offset: -2px; }
+.settings-shell-dialog .settings-device[open] > summary {
   margin-bottom: 0;
   border-bottom: 0;
 }
-.client-settings-dialog .settings-device-name {
+.settings-shell-dialog .settings-device-name {
   display: flex;
   flex: 1;
   flex-wrap: wrap;
@@ -474,22 +474,21 @@
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.client-settings-dialog .settings-device > .settings-device-details {
+.settings-shell-dialog .settings-device > .settings-device-details {
   margin: 0;
   padding: 0 8px 8px 20px;
 }
-.client-settings-dialog .device-list.settings-directory { gap: 0; }
-.client-settings-dialog .settings-directory > .settings-device-item {
+.settings-shell-dialog .device-list.settings-directory { gap: 0; }
+.settings-shell-dialog .settings-directory > .settings-device-item {
   min-height: 44px;
   align-items: flex-start;
   border-top: 1px solid var(--line-subtle, var(--line));
   border-radius: 0;
 }
-.client-settings-dialog .settings-device-item > .icon-button,
-.client-settings-dialog .settings-device-item > .rename-inline {
+.settings-shell-dialog .settings-device-item > .icon-button,
+.settings-shell-dialog .settings-device-item > .rename-inline {
   margin-top: 4px;
 }
-.desktop-dialog .archive-more[open] { flex-basis: 100%; }
 .desktop-dialog .section-head {
   display: flex;
   align-items: center;
@@ -681,16 +680,22 @@
 }
 .desktop-dialog .archived-bot-actions {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   flex-wrap: wrap;
   gap: 6px;
 }
-.desktop-dialog .archived-bot-actions button {
+.desktop-dialog .archived-bot-actions :is(button, summary) {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   font-size: 12px;
   padding: 5px 10px;
+}
+.desktop-dialog .archive-more { border: 0; background: transparent; }
+.desktop-dialog .archive-more > summary { display: flex; cursor: pointer; }
+.desktop-dialog .archive-more[open] > button {
+  display: flex;
+  margin: 6px 0 0;
 }
 .desktop-dialog .archived-confirm-banner {
   margin: 0;

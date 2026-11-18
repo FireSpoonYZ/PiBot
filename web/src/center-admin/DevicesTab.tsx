@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type * as React from 'react';
-import { Archive, Check, Pencil, Plus, QrCode, Shield, X } from 'lucide-react';
+import { Archive, Check, Pencil, Plus, QrCode, Shield, Trash2, X } from 'lucide-react';
+import { RemoveDeviceDialog } from './RemoveDeviceDialog';
 import { errorMessage } from './transport';
 import type { CenterApi } from './transport';
 import {
@@ -58,6 +59,7 @@ export function DevicesTab({
   const [renamingDeviceId, setRenamingDeviceId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [oauthBusyId, setOauthBusyId] = useState<string | null>(null);
+  const [deviceToRemove, setDeviceToRemove] = useState<CenterDevice | null>(null);
 
   // Pairing code state (NEVER deleted on modal close!)
   const [pendingPairing, setPendingPairing] = useState<PendingPairingState | null>(null);
@@ -288,18 +290,6 @@ export function DevicesTab({
       setError(errorMessage(err, '切换中心管理权限失败'));
     } finally {
       setOauthBusyId(null);
-    }
-  };
-
-  const handleDeleteDevice = async (device: CenterDevice) => {
-    if (!window.confirm(`确定移除设备「${device.name}」吗？其下所有智能体绑定将一并撤销。`)) return;
-    setError('');
-    try {
-      await api.deleteDevice(device.deviceId);
-      await loadAll();
-      setNotice(`已移除设备 ${device.name}`);
-    } catch (err) {
-      setError(errorMessage(err, '移除设备失败'));
     }
   };
 
@@ -760,18 +750,20 @@ export function DevicesTab({
                     <Plus size={13} />
                     <span>新建智能体</span>
                   </button>
+                  <button
+                    type="button"
+                    className="ca-btn ca-btn-ghost ca-btn-icon"
+                    aria-label={`移除设备 ${device.name}`}
+                    title="移除设备"
+                    onClick={() => setDeviceToRemove(device)}
+                  >
+                    <Trash2 size={14} aria-hidden />
+                  </button>
                   <ActionMenu
-                    items={[
-                      {
-                        label: '重新扫码绑定',
-                        onSelect: () => void handleOpenPairing(device.deviceId),
-                      },
-                      {
-                        label: '移除此设备',
-                        danger: true,
-                        onSelect: () => void handleDeleteDevice(device),
-                      },
-                    ]}
+                    items={[{
+                      label: '重新扫码绑定',
+                      onSelect: () => void handleOpenPairing(device.deviceId),
+                    }]}
                   />
                 </div>
               </div>
@@ -872,6 +864,19 @@ export function DevicesTab({
             </section>
           </CaDisclosure>
         </div>
+      )}
+
+      {deviceToRemove && (
+        <RemoveDeviceDialog
+          name={deviceToRemove.name}
+          onClose={() => setDeviceToRemove(null)}
+          onRemove={async () => {
+            await api.deleteDevice(deviceToRemove.deviceId);
+            setError('');
+            setNotice(`已移除设备 ${deviceToRemove.name}`);
+            void loadAll().catch(err => setError(errorMessage(err, '刷新设备目录失败')));
+          }}
+        />
       )}
 
       {/* 扫码添加 / 重绑设备弹窗（关闭时不核销配对码） */}

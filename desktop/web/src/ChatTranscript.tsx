@@ -7,10 +7,10 @@ import { Pencil } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import type { BotLiveState, BotRecord, LiveTool } from '../../../host-core/index.js';
 import { Markdown } from '../../../web/src/Markdown';
+import { ChatTurnMeta } from '../../../web/src/ChatTurnMeta';
 import {
   latestEntryChannel,
   parseHistoryEntries,
-  formatTurnDuration,
   normalizeAttribution,
   type ChatTurn,
   type KnownBotSummary,
@@ -434,15 +434,7 @@ export function ChatTranscript({
               ) : null}
               {!turn.blocks && turn.text ? <Markdown text={turn.text} onOpenLink={openLink} /> : null}
               <ErrorNotice compact error={turn.error} />
-              {showTurnDuration ? (
-                <div className="bot-chat-turn-meta" aria-label={formatTurnDuration(turn.durationMs!, t)}>
-                  <svg className="bot-chat-turn-clock" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                    <circle cx="8" cy="8" r="5.75" stroke="currentColor" strokeWidth="1.5" />
-                    <path d="M8 5v3.25l2.1 1.35" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                  <span>{formatTurnDuration(turn.durationMs!, t)}</span>
-                </div>
-              ) : null}
+              <ChatTurnMeta timestamp={turn.timestamp} durationMs={showTurnDuration ? turn.durationMs : undefined} />
             </article>
           );
         });

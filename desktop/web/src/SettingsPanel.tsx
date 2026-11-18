@@ -1,7 +1,7 @@
 // 桌面客户端设置分栏。
 import * as Dialog from '@radix-ui/react-dialog';
 import {
-  Archive, Check, Copy, Download, Globe, Pencil, RefreshCw, RotateCcw, Server, ShieldCheck, Sliders, Trash2, X,
+  Archive, Check, ChevronDown, Copy, Download, Globe, Pencil, RefreshCw, RotateCcw, Server, ShieldCheck, Sliders, Trash2, X,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { DesktopClientStatus, DesktopUiProfile } from '../../../host-core/desktop-client.js';
@@ -11,7 +11,8 @@ import { openCenterManagement, type DesktopTheme } from './CenterGate';
 import { HostServiceSection, useHostService } from './HostServiceSection';
 import { ClientUpdateSection } from '../../../web/src/ClientUpdateSection';
 import { Switch } from '../../../web/src/bot-settings/primitives';
-import { CenterAdminPanel, createBrokerCenterTransport } from '../../../web/src/center-admin';
+import { CenterAdminPanel, createBrokerCenterTransport, createCenterApi } from '../../../web/src/center-admin';
+import { RemoveDeviceDialog } from '../../../web/src/center-admin/RemoveDeviceDialog';
 import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
 import { botAvatarKey } from '../../../web/src/botAvatarSync';
 import { ErrorNotice, useHideToolOutput } from '../../../web/src/ui';
@@ -98,7 +99,7 @@ const TAB_META: Array<{ id: SettingsTab; label: string; desc: string }> = [
   { id: 'updates', label: '客户端更新', desc: '查看当前版本、检查并安装更新' },
 ];
 
-function DeviceRow({ item, isRelay, local, online, busy, lastObservedAt, onRename, onError }: {
+function DeviceRow({ item, isRelay, local, online, busy, lastObservedAt, onRename, onError, onRemove }: {
   item: DevicesDirectoryItem;
   isRelay: boolean;
   local: boolean;
@@ -107,6 +108,7 @@ function DeviceRow({ item, isRelay, local, online, busy, lastObservedAt, onRenam
   lastObservedAt: string | null;
   onRename(item: DevicesDirectoryItem, displayName: string): void;
   onError(message: string): void;
+  onRemove?(): void;
 }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState('');
@@ -161,6 +163,11 @@ function DeviceRow({ item, isRelay, local, online, busy, lastObservedAt, onRenam
           {isRelay && (
             <button type="button" className="icon-button" onClick={() => { setValue(item.displayName); setEditing(true); }} disabled={busy} aria-label={'重命名设备 ' + (item.displayName || '未命名设备')}>
               <Pencil size={14} aria-hidden />
+            </button>
+          )}
+          {onRemove && (
+            <button type="button" className="icon-button danger-outline" onClick={onRemove} disabled={busy} title="移除设备" aria-label={'移除设备 ' + (item.displayName || item.deviceId)}>
+              <Trash2 size={14} aria-hidden />
             </button>
           )}
         </>
@@ -234,8 +241,8 @@ function ArchivedBots({ bridge, onOpenHistory }: {
                     <button type="button" className="primary-button" disabled={!online || busy !== null} onClick={() => void run(bot, 'restore')}>
                       <RotateCcw size={13} aria-hidden /> {busy === key ? '处理中…' : '恢复'}
                     </button>
-                    <details className="archive-more settings-diagnostics">
-                      <summary>更多</summary>
+                    <details className="archive-more">
+                      <summary className="secondary-button"><ChevronDown size={13} aria-hidden /> 更多</summary>
                       <button type="button" className="secondary-button danger-outline" disabled={!online || busy !== null} onClick={() => { setError(''); setConfirmDelete(key); }}>
                         <Trash2 size={13} aria-hidden /> 永久删除
                       </button>
@@ -418,6 +425,7 @@ export function SettingsPanel(props: SettingsPanelProps) {
   const [hideToolOutput, setHideToolOutput] = useHideToolOutput();
   const [copiedClientId, setCopiedClientId] = useState(false);
   const [centerBusy, setCenterBusy] = useState<'rebind' | 'disconnect' | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<{ item: DevicesDirectoryItem; identity: DesktopIdentity } | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const hostService = useHostService();
 
@@ -649,6 +657,10 @@ export function SettingsPanel(props: SettingsPanelProps) {
                         lastObservedAt={props.lastObservedAt ?? devices.loadedAt}
                         onRename={props.onRenameDevice}
                         onError={props.onDeviceError}
+                        onRemove={centerTransport && identity && devicesIsRelay && deviceStatusCurrent &&
+                          item.deviceId !== localDeviceId && item.deviceId !== centerStatus?.savedConnection?.deviceId
+                          ? () => setRemoveTarget({ item, identity })
+                          : undefined}
                       />
                     ))}
                   </ul>
@@ -698,6 +710,17 @@ export function SettingsPanel(props: SettingsPanelProps) {
 
           {activeTab === 'archive' && (
             <ArchivedBots bridge={props.archiveBridge} onOpenHistory={props.onOpenArchivedBotHistory} />
+          )}
+
+          {removeTarget && centerTransport && identity === removeTarget.identity && (
+            <RemoveDeviceDialog
+              name={removeTarget.item.displayName || removeTarget.item.deviceId}
+              onClose={() => setRemoveTarget(null)}
+              onRemove={async () => {
+                await createCenterApi(centerTransport).deleteDevice(removeTarget.item.deviceId);
+                props.onRefreshDevices();
+              }}
+            />
           )}
 
           {activeTab === 'updates' && (
