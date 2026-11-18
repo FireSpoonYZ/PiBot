@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { projectBotBoardItem } from '../../host-core/runtime-bot-board.js';
+import { projectLiveState } from '../../host-core/runtime-live-projection.js';
 import {
   canStopBotActivity,
   isBotLlmRunningPhase,
@@ -8,6 +10,7 @@ import {
   resolveComposerActionKind,
   shouldShowComposerStop,
 } from '../src/botActivity.ts';
+import { botBoardBucket } from '../src/useBotBoard.ts';
 
 test('isBotPreLlmPhase and isBotLlmRunningPhase partition pre-LLM vs active LLM phases', () => {
   for (const phase of ['queued', 'preparing', 'interrupting']) {
@@ -216,4 +219,22 @@ test('shouldShowComposerStop covers active stoppable phases and settles cleanly 
       `expected phase ${String(phase)} to return false`,
     );
   }
+});
+
+test('Bot Board does not ask for attention after a finished generation interruption', () => {
+  const failureSnapshot = (reason) => {
+    const view = {
+      entries: [],
+      docs: { 'pi.live': { runFailure: { taskId: 10, inputs: [1], reason, first: 1 } } },
+    };
+    return projectBotBoardItem('bot_1', 'conv_1', projectLiveState(view), view, null);
+  };
+  const interrupted = failureSnapshot('interrupted');
+  assert.equal(botBoardBucket(interrupted), 'idle');
+  assert.equal(botBoardBucket(failureSnapshot('model_error')), 'attention');
+  assert.equal(botBoardBucket({ ...interrupted, queuedCount: 1 }), 'working');
+  assert.equal(botBoardBucket({
+    ...interrupted,
+    attention: { kind: 'questionnaire', requestId: 'question_1', summary: 'Review the plan', count: 1 },
+  }), 'attention');
 });

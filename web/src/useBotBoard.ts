@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { BotBoardItem, BotBoardSnapshot } from '../../host-core/index.js';
-import { isBotActivityBusy } from './botActivity';
+import { isBotActivityBusy } from './botActivity.ts';
 
 export interface BotBoardTarget {
   key: string;
@@ -28,10 +28,16 @@ export function botBoardKey(scope: string, deviceId: string, botId: string): str
   return JSON.stringify([scope, deviceId, botId]);
 }
 
+export function isBotBoardInterrupted(activity?: BotBoardItem['activity']): boolean {
+  // shortcut: The Host carries the reason in a fixed diagnostic; use a structured reason once available.
+  return activity?.phase === 'failed' && activity.error?.code === 'GENERATION_FAILED' &&
+    activity.error.message === 'generation failed: interrupted';
+}
+
 export function botBoardBucket(item: BotBoardItem, seenId?: string): BoardBucket {
   const { activity } = item;
   if (activity.phase === 'stopping' || activity.phase === 'interrupting') return 'working';
-  if (item.attention || activity.phase === 'failed') return 'attention';
+  if (item.attention || (activity.phase === 'failed' && !isBotBoardInterrupted(activity))) return 'attention';
   if (isBotActivityBusy(activity) || item.queuedCount > 0) return 'working';
   if (activity.phase === 'idle' && item.lastResult && item.lastResult.id !== seenId) return 'review';
   return 'idle';
