@@ -18,6 +18,19 @@ function isObj(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+export function applySessionResetState(state, resetEntryId = 0, now = new Date().toISOString()) {
+  if (state.activeTurn) {
+    state.completedTurns[state.activeTurn.requestId] = {
+      ...state.activeTurn, finishedAt: now,
+    };
+    state.activeTurn = null;
+  }
+  if (Number.isSafeInteger(resetEntryId) && resetEntryId > (state.clearedThroughEntryId ?? 0)) {
+    state.clearedThroughEntryId = resetEntryId;
+  }
+  state.updatedAt = now;
+}
+
 export function createBotSessionRuntime({ host, getHarness, getMessageLog, context, getPrimary }) {
   const harness = () => getHarness();
   const log = () => getMessageLog();
@@ -407,13 +420,7 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
     if (!resolved) return;
     await harness().commit(async (tx) => {
       const state = await sessionStateDoc(tx, resolved.nativeId);
-      if (state.activeTurn) {
-        state.completedTurns[state.activeTurn.requestId] = {
-          ...state.activeTurn, finishedAt: new Date().toISOString(),
-        };
-        state.activeTurn = null;
-      }
-      state.updatedAt = new Date().toISOString();
+      applySessionResetState(state);
     }, ctx);
   }
 

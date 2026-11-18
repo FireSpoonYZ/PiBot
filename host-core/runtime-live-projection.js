@@ -700,8 +700,28 @@ export function projectLiveState(view, sessionState = null, extras = null) {
     }
   }
 
+  const sessionResetId =
+    Number.isSafeInteger(sessionState?.clearedThroughEntryId) && sessionState.clearedThroughEntryId > 0
+      ? sessionState.clearedThroughEntryId
+      : 0;
+  const fallbackResetId =
+    Number.isSafeInteger(extras?.resetEntryId) && extras.resetEntryId > 0
+      ? extras.resetEntryId
+      : 0;
+  let effectiveResetId = Math.max(sessionResetId, fallbackResetId);
+
   for (let i = entries.length - 1; i >= 0; i--) {
-    const projected = projectEntry(entries[i], sessionState, budget);
+    const entry = entries[i];
+    if (entry?.kind === 'pi.reset') {
+      if (Number.isSafeInteger(entry.id) && entry.id > effectiveResetId) {
+        effectiveResetId = entry.id;
+      }
+      break;
+    }
+    if (effectiveResetId > 0 && Number.isSafeInteger(entry?.id) && entry.id <= effectiveResetId) {
+      break;
+    }
+    const projected = projectEntry(entry, sessionState, budget);
     if (!projected) continue;
     seenDisplayable++;
     if (seenDisplayable > MAX_HISTORY_ENTRIES) {
@@ -718,10 +738,21 @@ export function projectLiveState(view, sessionState = null, extras = null) {
     usedUnits += units;
     history.unshift(projected.item);
   }
+  if (effectiveResetId > 0) {
+    history.unshift({ id: effectiveResetId, kind: 'pi.reset', messages: [] });
+    if (lastEntryId === null) lastEntryId = effectiveResetId;
+  }
 
   const generation = live?.generation?.message
     ? projectGeneration(live.generation.message, sessionState, live?.run?.taskId ?? null)
     : null;
+
+  const activeRunFailure =
+    effectiveResetId > 0 &&
+    live?.runFailure?.first != null &&
+    live.runFailure.first <= effectiveResetId
+      ? null
+      : (live?.runFailure ?? null);
 
   // 优先级：真实运行 > 正在执行的压缩 > 旧终态失败 > idle。
   // 失败后用户手动 compact 等当前活动先透出，旧 runFailure 诊断让位——
@@ -730,8 +761,8 @@ export function projectLiveState(view, sessionState = null, extras = null) {
     ?? (Array.isArray(live?.compactions) && live.compactions.length > 0
       ? { phase: 'compacting', source: null, scopeId: null, requestId: null,
           startedAt: compactionStartedAt(live.compactions, extras?.compactionStarts) }
-      : (live?.runFailure != null
-        ? failureActivity(live.runFailure, extras?.failureDoc)
+      : (activeRunFailure != null
+        ? failureActivity(activeRunFailure, extras?.failureDoc)
         : null)
       ?? idleActivity());
 
@@ -752,8 +783,8 @@ export function projectLiveState(view, sessionState = null, extras = null) {
   if (extras !== null && typeof extras === 'object') {
     extras.activityHasRun = live?.run != null;
     // aborted 仅在有 Host failure receipt 时才算真实失败（已在上文投影）。
-    extras.activityIsFailure = live?.run == null && live?.runFailure != null &&
-      (live.runFailure.reason !== 'aborted' || extras?.failureDoc?.failure != null);
+    extras.activityIsFailure = live?.run == null && activeRunFailure != null &&
+      (activeRunFailure.reason !== 'aborted' || extras?.failureDoc?.failure != null);
   }
   fitPresentationBudget(state);
   return state;
@@ -810,15 +841,18 @@ function fitPresentationBudget(state) {
     }
   }
 
-  // 2) 整条旧历史：从最旧向前删，保留连续最新窗口。
+  // 2) 整条旧历史：从最旧向前删，保留连续最新窗口（保留头部 pi.reset 边界标记）。
   if (deficit > 0) {
-    let drop = 0;
+    const resetStart = state.history[0]?.kind === 'pi.reset' ? 1 : 0;
+    let drop = resetStart;
     while (drop < state.history.length && deficit > 0) {
       deficit -= utf8JsonBytes(state.history[drop]);
       drop++;
     }
-    if (drop > 0) {
-      state.history = state.history.slice(drop);
+    if (drop > resetStart) {
+      state.history = resetStart === 1
+        ? [state.history[0], ...state.history.slice(drop)]
+        : state.history.slice(drop);
       state.lastEntryId = state.history.length === 0 ? null : state.history[state.history.length - 1].id;
       state.historyTruncated = true;
     }

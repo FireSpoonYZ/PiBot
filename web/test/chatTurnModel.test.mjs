@@ -540,3 +540,60 @@ test('1v1 DM send_to inbound message, working steps, and outbound send_to render
   assert.ok(sendTool?.argSummary?.startsWith('→ 总控助手:'));
   assert.equal(summarizeToolArgs('send_to', { scopeId: 'scope_dm_1', text: ' (pass) ' }), '(pass)');
 });
+
+test('projectLiveState preserves pi.reset marker across empty, windowed, compacted, and pre-reset failure states', () => {
+  const mkUser = (id, text) => ({
+    id,
+    kind: 'pi.user',
+    model: [{ role: 'user', content: [{ type: 'text', text }], timestamp: 1_730_000_000_000 + id }],
+  });
+
+  // 1) Empty post-reset view + pre-reset runFailure filtered by reset boundary
+  const emptyAfterClear = projectLiveState(
+    {
+      entries: [mkUser(1, 'old prompt'), { id: 2, kind: 'pi.reset' }],
+      docs: {
+        'pi.live': {
+          runFailure: { taskId: 10, inputs: [1], reason: 'model_error', first: 1 },
+        },
+      },
+    },
+    { clearedThroughEntryId: 2 },
+  );
+  assert.deepEqual(emptyAfterClear.history, [{ id: 2, kind: 'pi.reset', messages: [] }]);
+  assert.equal(emptyAfterClear.lastEntryId, 2);
+  assert.equal(emptyAfterClear.activity.phase, 'idle');
+
+  // 2) Window trimming (> 50 entries) + compaction hiding pi.reset from view.entries still retains reset marker
+  const postResetEntries = Array.from({ length: 55 }, (_, idx) => mkUser(10 + idx, `msg-${idx}`));
+  const windowedAfterCompaction = projectLiveState(
+    {
+      entries: [{ id: 9, kind: 'pi.compaction' }, ...postResetEntries],
+      docs: {
+        'pi.live': {
+          runFailure: { taskId: 11, inputs: [2], reason: 'model_error', first: 10 },
+        },
+      },
+    },
+    { clearedThroughEntryId: 5 },
+  );
+  assert.equal(windowedAfterCompaction.historyTruncated, true);
+  assert.deepEqual(windowedAfterCompaction.history[0], { id: 5, kind: 'pi.reset', messages: [] });
+  assert.equal(windowedAfterCompaction.history.length, 51);
+  assert.equal(windowedAfterCompaction.lastEntryId, 64);
+  assert.equal(windowedAfterCompaction.activity.phase, 'failed');
+
+  // Compatible with normalizeLiveSnapshot and yields zero rendered turns in parseHistoryEntries
+  const normalized = normalizeLiveSnapshot(
+    {
+      type: 'snapshot',
+      botId: 'bot_1',
+      conversationId: 'conv_1',
+      sequence: 1,
+      state: windowedAfterCompaction,
+    },
+    { kind: 'primary', botId: 'bot_1' },
+  );
+  assert.deepEqual(normalized.state.history[0], { id: 5, kind: 'pi.reset', messages: [] });
+  assert.equal(parseHistoryEntries(emptyAfterClear.history, 0).length, 0);
+});

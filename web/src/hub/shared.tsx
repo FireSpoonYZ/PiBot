@@ -624,23 +624,126 @@ export function formatArchivedRemainingDays(archivedAt: string | null | undefine
   return Math.max(1, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
 }
 
+export interface BotHistoryReadResult {
+  items: Array<Record<string, unknown>>;
+  clearedThroughEntryId?: number;
+}
+
+export function readClearedThroughEntryId(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+export function maxResetEntryId(items: readonly Record<string, unknown>[]): number {
+  let max = 0;
+  for (const item of items) {
+    if (!item || typeof item !== 'object' || item.kind !== 'pi.reset') continue;
+    const id = typeof item.id === 'number' ? item.id : Number(item.id);
+    if (Number.isSafeInteger(id) && id > max) max = id;
+  }
+  return max;
+}
+
+export function isStaleLiveState(state: BotLiveState | null | undefined, cutoff: number): boolean {
+  if (!state || cutoff <= 0) return false;
+  const history = Array.isArray(state.history) ? state.history : [];
+  if (history.some(item => item?.kind === 'pi.reset' && Number(item.id) >= cutoff)) return false;
+  const lastId = typeof state.lastEntryId === 'number' && Number.isFinite(state.lastEntryId) ? state.lastEntryId : null;
+  if (lastId !== null && lastId > cutoff) return false;
+  return !history.some(item => Number(item.id) > cutoff);
+}
+
+export function filterHistoryAfterCutoff(
+  items: readonly Record<string, unknown>[],
+  cutoff: number,
+): Array<Record<string, unknown>> {
+  return items.filter(item => {
+    if (item.kind === 'pi.reset') return false;
+    if (cutoff <= 0) return true;
+    const id = typeof item.id === 'number' ? item.id : Number(item.id);
+    return Number.isFinite(id) && id > cutoff;
+  });
+}
+
+export type ClearErrorKind = 'busy' | 'unknown' | 'definite';
+
+export function classifyClearError(error: unknown): ClearErrorKind {
+  if (!error || typeof error !== 'object') return 'unknown';
+  const { code, outcome } = error as { code?: unknown; outcome?: unknown };
+  const upperCode = typeof code === 'string' ? code.toUpperCase() : '';
+  if ((upperCode === 'RUNTIME_BUSY' || upperCode === 'BUSY') && outcome !== 'unconfirmed' && outcome !== 'not-sent') return 'busy';
+  if (outcome === 'not-sent' || outcome === 'responded') return 'definite';
+  return 'unknown';
+}
+
+export function makeClearError(message: string, code: string, outcome: 'responded' | 'unconfirmed'): Error {
+  const err = new Error(message) as Error & { code: string; outcome: 'responded' | 'unconfirmed' };
+  err.code = code;
+  err.outcome = outcome;
+  return err;
+}
+
 export async function fetchBotHistoryPages(
   fetchPage: (cursor: Record<string, unknown> | null, limit: number, chunked: boolean) => Promise<HostHistoryPage | null>,
-): Promise<Array<Record<string, unknown>> | null> {
-  const all: Array<Record<string, unknown>> = [];
-  let cursor: Record<string, unknown> | null = null;
-  for (;;) {
-    const page = await readHistoryPage(fetchPage, cursor, 200);
-    // fetchPage 返回 null 表示本次读取已失效（scope 切换/请求作废）：丢弃已读部分页，
-    // 绝不把半截历史当成完整快照回填。
-    if (!page) return null;
-    const items = array<Record<string, unknown>>(page.items);
-    if (items.length > 0) all.push(...items);
-    const next = page.nextCursor;
-    if (!next || typeof next !== 'object' || Array.isArray(next) || items.length === 0) break;
-    cursor = next as Record<string, unknown>;
+): Promise<BotHistoryReadResult | null> {
+  // 跨页或分片期间服务端 reset 边界变化时丢弃半截结果并从头重读。
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const all: Array<Record<string, unknown>> = [];
+    let cursor: Record<string, unknown> | null = null;
+    let hasEpoch = false;
+    let passEpoch: number | undefined;
+    let restart = false;
+    const trackedFetchPage: typeof fetchPage = async (pageCursor, limit, chunked) => {
+      const rawPage = await fetchPage(pageCursor, limit, chunked);
+      if (!rawPage) return null;
+      const pageCleared = readClearedThroughEntryId(
+        (rawPage as { clearedThroughEntryId?: unknown }).clearedThroughEntryId,
+      );
+      if (!hasEpoch) {
+        hasEpoch = true;
+        passEpoch = pageCleared;
+      } else if (pageCleared !== passEpoch) {
+        restart = true;
+        return null;
+      }
+      return rawPage;
+    };
+    try {
+      for (;;) {
+        const page = await readHistoryPage(trackedFetchPage, cursor, 200);
+        if (restart) break;
+        // fetchPage 返回 null 表示本次读取已失效（scope 切换/请求作废）：丢弃已读部分页。
+        if (!page) return null;
+        const pageCleared = readClearedThroughEntryId(
+          (page as { clearedThroughEntryId?: unknown }).clearedThroughEntryId,
+        );
+        if (pageCleared !== undefined && pageCleared !== passEpoch) {
+          restart = true;
+          break;
+        }
+        const items = array<Record<string, unknown>>(page.items);
+        if (items.length > 0) all.push(...items);
+        const next = page.nextCursor;
+        if (!next || typeof next !== 'object' || Array.isArray(next) || items.length === 0) break;
+        cursor = next as Record<string, unknown>;
+      }
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      if (attempt < 3 && (code === 'HISTORY_EPOCH_CHANGED' || (cursor !== null && code === 'INVALID_ARGUMENT'))) {
+        continue;
+      }
+      throw error;
+    }
+    if (restart) continue;
+    const observedReset = maxResetEntryId(all);
+    const effectiveCutoff = observedReset > 0
+      ? Math.max(passEpoch ?? 0, observedReset)
+      : passEpoch;
+    return {
+      items: filterHistoryAfterCutoff(all, effectiveCutoff ?? 0),
+      ...(effectiveCutoff !== undefined ? { clearedThroughEntryId: effectiveCutoff } : {}),
+    };
   }
-  return all;
+  throw new Error('History reset epoch kept changing during read');
 }
 
 export function mergeHistory(previous: Array<Record<string, unknown>>, next: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
@@ -652,26 +755,26 @@ export function mergeHistory(previous: Array<Record<string, unknown>>, next: Arr
 /** 同 scope+同代际的并发全量历史读取共用一个 flight；代际不符不共享（A→B→A、/clear、
     连接代际变化都不复用旧读）。fresh() 在每页边界判废：scope 被更新 flight 顶掉或代际失效
     时返回 null，读随之丢弃已读部分页，绝不回半截数据。 */
-export function sharedHistoryRead(
-  flights: Map<string, { epoch: number; task: Promise<Array<Record<string, unknown>> | null> }>,
+export function sharedHistoryRead<T = BotHistoryReadResult>(
+  flights: Map<string, { epoch: number; task: Promise<T | null> }>,
   scopeKey: string,
   epochRef: { current: number },
   current: () => boolean,
-  read: (fresh: () => boolean) => Promise<Array<Record<string, unknown>> | null>,
-): Promise<Array<Record<string, unknown>> | null> {
+  read: (fresh: () => boolean) => Promise<T | null>,
+): Promise<T | null> {
   const epoch = epochRef.current;
   const existing = flights.get(scopeKey);
   if (existing && existing.epoch === epoch) return existing.task;
-  const rec = { epoch, task: Promise.resolve(null) as Promise<Array<Record<string, unknown>> | null> };
+  const rec = { epoch, task: Promise.resolve(null) as Promise<T | null> };
   const fresh = () => epochRef.current === epoch && current() && flights.get(scopeKey) === rec;
-  rec.task = Promise.resolve().then(() => read(fresh)).then(items => fresh() ? items : null).finally(() => {
+  rec.task = Promise.resolve().then(() => read(fresh)).then(result => fresh() ? result : null).finally(() => {
     if (flights.get(scopeKey) === rec) flights.delete(scopeKey);
   });
   flights.set(scopeKey, rec);
   return rec.task;
 }
 
-export function maxHistoryEntryId(items: Array<Record<string, unknown>>): number {
+export function maxHistoryEntryId(items: readonly Record<string, unknown>[]): number {
   let max = 0;
   for (const item of items) {
     const id = typeof item.id === 'number' ? item.id : Number(item.id);

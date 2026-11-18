@@ -227,7 +227,7 @@ export function createSessionSearch({ host, getHarness, getWorkContexts }) {
       const candidate = state.conversations[state.index];
       const ascending = state.phase === 'after';
       if (ascending && state.neighbors >= request.after) { finishSide(); continue; }
-      const position = state.position ?? (state.phase === 'attachments' && args.entryId !== undefined ? args.entryId : candidate.tail);
+      const position = state.position ?? candidate.tail;
       if ((!ascending && position <= 0) || (ascending && position > candidate.tail)) {
         if (state.phase === 'locate' || (state.phase === 'attachments' && args.entryId !== undefined)) {
           fail('ENTRY_NOT_FOUND', 'entry is not visible after reset');
@@ -250,8 +250,12 @@ export function createSessionSearch({ host, getHarness, getWorkContexts }) {
         continue;
       }
       if (state.phase === 'attachments') {
-        if (args.entryId !== undefined && entry.id !== args.entryId) {
-          fail('ENTRY_NOT_FOUND', 'entry is not in this conversation');
+        if (args.entryId !== undefined) {
+          if (entry.id < args.entryId) fail('ENTRY_NOT_FOUND', 'entry is not in this conversation');
+          if (entry.id !== args.entryId) {
+            advanceEntry(entry);
+            continue;
+          }
         }
         const entryAttachments = attachmentRefs(entry);
         if (entryAttachments.length > 0) {

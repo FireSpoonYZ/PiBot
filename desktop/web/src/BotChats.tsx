@@ -112,7 +112,7 @@ import {
 import { ComposerEditBanner, PendingQueueStrip } from '../../../web/src/ComposerFlowStrips';
 import { BotAvatarStudio } from './BotAvatarStudio';
 import { targetApi } from './targetApi';
-import { readHistoryPage } from './history';
+import { HistoryEpochChangedError, readHistoryPage } from './history';
 import { Scopes } from './Scopes';
 import { invoke } from '@tauri-apps/api/core';
 import type { RoomApiResolver, ScopeReadApi } from './scope-api';
@@ -185,6 +185,63 @@ function isTaskWaitingForBot(item: GlobalTask, deviceId: string, botId: string):
 }
 
 type AnyRawEntry = { id: unknown; kind: string; model?: unknown; data?: unknown };
+
+function readClearedThroughEntryId(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function numericRawEntryId(item: unknown): number {
+  const id = Number((item as { id?: unknown } | null)?.id);
+  return Number.isFinite(id) ? id : 0;
+}
+
+function latestResetEntryIdFromItems(items: unknown): number {
+  if (!Array.isArray(items)) return 0;
+  let max = 0;
+  for (const item of items) {
+    if (item && typeof item === 'object' && (item as { kind?: unknown }).kind === 'pi.reset') {
+      const id = Number((item as { id?: unknown }).id);
+      if (Number.isSafeInteger(id) && id > max) max = id;
+    }
+  }
+  return max;
+}
+
+function isStaleLiveState(state: BotLiveState | null, cutoff: number): boolean {
+  if (!state || cutoff <= 0) return false;
+  const history = Array.isArray(state.history) ? state.history : [];
+  if (history.some((item) => item?.kind === 'pi.reset' && numericRawEntryId(item) >= cutoff)) return false;
+  const lastId = typeof state.lastEntryId === 'number' && Number.isFinite(state.lastEntryId) ? state.lastEntryId : null;
+  if (lastId !== null && lastId > cutoff) return false;
+  return !history.some((item) => numericRawEntryId(item) > cutoff);
+}
+
+function describeClearError(
+  action: '清空对话' | '/clear',
+  e: unknown,
+  connected: boolean,
+  formatErr: (err: unknown) => string,
+): { message: string; isUnknown: boolean } {
+  const err = toError(e);
+  if (err.outcome === 'unconfirmed') {
+    return {
+      isUnknown: true,
+      message: `${action} 结果未确认（${formatErr(e)}）：${connected ? '已刷新历史核实状态' : '恢复连接后请刷新历史核实'}，草稿与历史保留，不会自动重发。`,
+    };
+  }
+  if (err.outcome === 'responded' && err.code === 'RUNTIME_BUSY') {
+    return {
+      isUnknown: false,
+      message: `${action} 未执行：智能体当前忙碌（${formatErr(e)}），草稿保留，请等待任务完成后重试。`,
+    };
+  }
+  return {
+    isUnknown: false,
+    message: `${action} 失败：${formatErr(e)}；草稿与历史保留，不会自动重发。`,
+  };
+}
 
 const ARCHIVE_RETENTION_DAYS = 14;
 /** 与 BotChats.css 并排断点一致：≥1280px 抽屉并排非模态，<1280px 浮层模态。 */
@@ -1845,6 +1902,8 @@ function PrimaryChatPane({
   onOpenSendRecords,
   onRequestArchive,
   onOpenCenterAdmin,
+  initialClearedThroughEntryId = 0,
+  onClearedThroughEntryId,
   focusComposer = false,
   inspectorRequest = null,
   questionnaireRequestId,
@@ -1887,6 +1946,8 @@ function PrimaryChatPane({
   onOpenSendRecords?: (target: SendRecordsTarget) => void;
   onRequestArchive: () => void;
   onOpenCenterAdmin?: (tab?: CenterAdminTab) => void;
+  initialClearedThroughEntryId?: number;
+  onClearedThroughEntryId?: (cutoff: number) => void;
   focusComposer?: boolean;
   inspectorRequest?: { tab: InspectorTab; seq: number } | null;
   questionnaireRequestId?: string;
@@ -1963,6 +2024,11 @@ function PrimaryChatPane({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearDone, setClearDone] = useState(false);
+  const initialCutoff = readClearedThroughEntryId(initialClearedThroughEntryId) ?? 0;
+  const [clearedThroughEntryId, setClearedThroughEntryId] = useState<number>(initialCutoff);
+  const cutoffRef = useRef<number>(initialCutoff);
+  const onClearedThroughEntryIdRef = useRef(onClearedThroughEntryId);
+  onClearedThroughEntryIdRef.current = onClearedThroughEntryId;
   const deleteConfirmationRef = useRef<HTMLDivElement | null>(null);
   const manageDeleteButtonRef = useRef<HTMLButtonElement | null>(null);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
@@ -2166,14 +2232,22 @@ function PrimaryChatPane({
   }
 
   async function handleClearHistory() {
-    if (!identity || !online || manageInFlightRef.current || isArchived) return;
+    if (!identity || !online || manageInFlightRef.current || slashBusy !== null || isArchived) return;
     manageInFlightRef.current = true;
     setManageAction('clear');
     setManageError(null);
     setClearDone(false);
     try {
-      await api.call(identity, 'clearHistory', { botId: bot.botId });
+      const result = (await api.call(identity, 'clearHistory', { botId: bot.botId })) as ClearHistoryResult;
+      const clearedId = readClearedThroughEntryId(
+        (result as { clearedThroughEntryId?: unknown } | null | undefined)?.clearedThroughEntryId,
+      ) ?? 0;
+      if (sessionKey(api.identity) === sess && clearedId > 0) {
+        onClearedThroughEntryIdRef.current?.(clearedId);
+      }
       if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
+      applyCutoff(clearedId);
+      setTurnAdmission(null);
       setConfirmClear(false);
       setClearDone(true);
       void loadRawLatest();
@@ -2181,10 +2255,11 @@ function PrimaryChatPane({
         if (mountedRef.current) setClearDone(false);
       }, 2200);
     } catch (e) {
-      if (mountedRef.current && sessionKey(api.identity) === sess) {
-        setManageError(`清空对话失败：${tErr(e)}`);
-        reportUnlessTargetOffline(api, e);
-      }
+      if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
+      const { message, isUnknown } = describeClearError('清空对话', e, api.transportConnected, tErr);
+      setManageError(message);
+      if (isUnknown && api.transportConnected) void loadRawLatest();
+      reportUnlessTargetOffline(api, e);
     } finally {
       manageInFlightRef.current = false;
       if (mountedRef.current) setManageAction(null);
@@ -2356,7 +2431,8 @@ function PrimaryChatPane({
   }
 
   const [observedLive, setObservedLive] = useState<{ session: string; state: BotLiveState } | null>(null);
-  const live = observedLive && (!online || observedLive.session === sess) ? observedLive.state : null;
+  const rawLive = observedLive && (!online || observedLive.session === sess) ? observedLive.state : null;
+  const live = isStaleLiveState(rawLive, clearedThroughEntryId) ? null : rawLive;
   const [liveLast, setLiveLast] = useState<string | null>(null);
   const [liveError, setLiveError] = useState<string | null>(null);
   const [liveEnded, setLiveEnded] = useState(false);
@@ -2376,7 +2452,7 @@ function PrimaryChatPane({
     const current = api.identity;
     const draftKey = drafts.key;
     const draftText = drafts.text;
-    if (!current || !draftKey) return;
+    if (!current || !draftKey || manageInFlightRef.current) return;
     lockedRef.current = true;
     setSlashBusy(command);
     setSendState('sending');
@@ -2384,18 +2460,46 @@ function PrimaryChatPane({
     setSendNotice({ text: command === '/clear' ? '正在清空对话…' : '正在压缩上下文…' });
     try {
       const result = await api.call(current, command === '/clear' ? 'clearHistory' : 'compact', { botId: bot.botId });
+      if (command === '/clear') {
+        const clearedId = readClearedThroughEntryId(
+          (result as ClearHistoryResult | undefined)?.clearedThroughEntryId,
+        ) ?? 0;
+        if (sessionKey(api.identity) === sess && clearedId > 0) {
+          onClearedThroughEntryIdRef.current?.(clearedId);
+        }
+        if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
+        applyCutoff(clearedId);
+        setTurnAdmission(null);
+        setConfirmClear(false);
+      }
       if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
-      // 服务端已成功后才清命令草稿：沿用 clearDraft CAS，仅当持久草稿仍是该命令文本且无文件
-      // 引用时清空；等待期间写入的新文本保留（与手机端 runSlashCommand 同约定）。
+      // 服务端已成功后才清命令草稿：沿用 clearDraft CAS，仅当持久草稿仍是该命令文本且无文件/图片
+      // 引用时清空；等待期间写入的新文本或附件保留（与手机端 runSlashCommand 同约定）。
       const persisted = api.snapshot?.state.drafts[draftKey];
-      if (persisted && persisted.text === draftText && persisted.files.length === 0) {
+      if (
+        persisted &&
+        persisted.text === draftText &&
+        persisted.files.length === 0 &&
+        !(persisted.attachments?.length)
+      ) {
         try {
           await api.clearDraft(draftKey, [{ text: draftText, files: [] }]);
-          if (isCurrentSession() && drafts.text === draftText) drafts.editText('');
+          if (
+            isCurrentSession() &&
+            drafts.text === draftText &&
+            drafts.files.length === 0 &&
+            drafts.attachments.length === 0
+          ) {
+            drafts.editText('');
+          }
         } catch {
           // CAS 冲突/写失败：持久草稿保留，不掩盖服务端已成功的事实。
         }
-      } else if (drafts.text === draftText) {
+      } else if (
+        drafts.text === draftText &&
+        drafts.files.length === 0 &&
+        drafts.attachments.length === 0
+      ) {
         drafts.editText('');
       }
       // 服务端成功后立即重读完整可见历史（busy 下降沿兜底也会补跑）。
@@ -2414,8 +2518,15 @@ function PrimaryChatPane({
     } catch (e) {
       if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
       setSendNotice(null);
-      setSendError(command + ' 失败：' + tErr(e) + '；草稿与历史保留，不会当普通消息发送。');
-      reportUnlessTargetOffline(api, e);
+      if (command === '/clear') {
+        const { message, isUnknown } = describeClearError('/clear', e, api.transportConnected, tErr);
+        setSendError(message);
+        if (isUnknown && api.transportConnected) void loadRawLatest();
+        reportUnlessTargetOffline(api, e);
+      } else {
+        setSendError(command + ' 失败：' + tErr(e) + '；草稿与历史保留，不会当普通消息发送。');
+        reportUnlessTargetOffline(api, e);
+      }
     } finally {
       lockedRef.current = false;
       if (mountedRef.current) {
@@ -2562,7 +2673,13 @@ function PrimaryChatPane({
     setSendNotice(null);
     const command = parseSlashCommand(msg);
     if (command && attachmentIds.length === 0) {
-      if (live?.busy || drafts.attempt || drafts.savePaused || drafts.files.length > 0) {
+      if (
+        live?.busy ||
+        (command === '/clear' && (isBotActivityBusy(resolveBotActivity(live)) || (live?.queuedCount ?? 0) > 0 || stopping)) ||
+        drafts.attempt ||
+        drafts.savePaused ||
+        drafts.files.length > 0
+      ) {
         setSendError('请等待当前任务结束、处理未确认的发送，并移除路径引用后再执行命令。');
         return;
       }
@@ -2974,6 +3091,22 @@ function PrimaryChatPane({
   const latestFlightRef = useRef<{ session: string; dirty: boolean } | null>(null);
   const prevBusyRef = useRef(false);
 
+  const applyCutoff = useCallback((candidate: number, invalidateFlight = true): boolean => {
+    const normalized = readClearedThroughEntryId(candidate) ?? 0;
+    if (normalized <= cutoffRef.current) return false;
+    cutoffRef.current = normalized;
+    setClearedThroughEntryId(normalized);
+    onClearedThroughEntryIdRef.current?.(normalized);
+    setRawItems((prev) => {
+      const filtered = prev.filter((item) => numericRawEntryId(item) > normalized);
+      return filtered.length === prev.length ? prev : filtered;
+    });
+    setEditingTurn((cur) => (cur && cur.entryId <= normalized ? null : cur));
+    setTurnAdmission(null);
+    if (invalidateFlight && latestFlightRef.current) latestFlightRef.current.dirty = true;
+    return true;
+  }, []);
+
   const loadRawLatest = useCallback(async () => {
     if (!identity || !api.transportConnected || !isCurrentSession()) return;
     if (latestFlightRef.current?.session === sess) {
@@ -2985,21 +3118,66 @@ function PrimaryChatPane({
     try {
       const all: AnyRawEntry[] = [];
       let cursor: Record<string, unknown> | null = null;
-      for (;;) {
-        const page: Awaited<ReturnType<typeof readHistoryPage<AnyRawEntry>>> = await readHistoryPage<AnyRawEntry>(async (c, limit, chunked) => {
-          if (!isCurrentSession()) return null;
-          return api.call(identity, 'history', { botId: bot.botId, limit, cursor: c, ...(chunked ? { chunked: true } : {}) });
-        }, cursor, 200);
-        if (!page || !isCurrentSession()) return;
-        const items = page.items;
-        if (items.length === 0) break;
-        all.push(...items);
-        if (!page.nextCursor || typeof page.nextCursor !== 'object' || Array.isArray(page.nextCursor)) break;
-        cursor = page.nextCursor;
+      const startCutoff = cutoffRef.current;
+      let hasEpoch = false;
+      let passEpoch: number | undefined;
+      try {
+        for (;;) {
+          const page: Awaited<ReturnType<typeof readHistoryPage<AnyRawEntry>>> = await readHistoryPage<AnyRawEntry>(async (c, limit, chunked) => {
+            if (!isCurrentSession()) return null;
+            return api.call(identity, 'history', { botId: bot.botId, limit, cursor: c, ...(chunked ? { chunked: true } : {}) });
+          }, cursor, 200);
+          if (!page || !isCurrentSession()) return;
+
+          const pageCleared = readClearedThroughEntryId(
+            (page as { clearedThroughEntryId?: unknown }).clearedThroughEntryId,
+          );
+          if (!hasEpoch) {
+            hasEpoch = true;
+            passEpoch = pageCleared;
+          } else if (pageCleared !== passEpoch) {
+            if (pageCleared !== undefined) applyCutoff(pageCleared, false);
+            flight.dirty = true;
+            return;
+          }
+          if (pageCleared !== undefined) applyCutoff(pageCleared, false);
+
+          const items = page.items;
+          const resetInItems = latestResetEntryIdFromItems(items);
+          if (resetInItems > cutoffRef.current) {
+            applyCutoff(resetInItems, false);
+            flight.dirty = true;
+            return;
+          }
+          if (cutoffRef.current > Math.max(startCutoff, passEpoch ?? 0)) {
+            flight.dirty = true;
+            return;
+          }
+
+          if (items.length === 0) break;
+          all.push(...items);
+          if (!page.nextCursor || typeof page.nextCursor !== 'object' || Array.isArray(page.nextCursor)) break;
+          cursor = page.nextCursor;
+        }
+      } catch (pageErr) {
+        if (
+          pageErr instanceof HistoryEpochChangedError ||
+          (cursor !== null && toError(pageErr).code === 'INVALID_ARGUMENT' && cutoffRef.current > Math.max(startCutoff, passEpoch ?? 0))
+        ) {
+          flight.dirty = true;
+          return;
+        }
+        throw pageErr;
       }
+
       if (!isCurrentSession()) return;
+      const effectiveCutoff = cutoffRef.current;
+      if (effectiveCutoff > Math.max(startCutoff, passEpoch ?? 0)) {
+        flight.dirty = true;
+        return;
+      }
       // 完整可见历史整体替换：/clear 后 reset 之前的条目不再回归，不再依赖截断的 live 窗口。
-      setRawItems(all);
+      setRawItems(effectiveCutoff > 0 ? all.filter((item) => numericRawEntryId(item) > effectiveCutoff) : all);
       rawCursorRef.current = null;
       setRawError(null);
     } catch (e) {
@@ -3018,7 +3196,7 @@ function PrimaryChatPane({
         if (flight.dirty && isCurrentSession()) void loadRawLatest();
       }
     }
-  }, [api, bot.botId, identity, isCurrentSession, sess]);
+  }, [api, applyCutoff, bot.botId, identity, isCurrentSession, sess]);
 
   /**
    * 历史只读路径只有一条：无论首次进入、重连、重试或 busy 下降沿，都复用 loadRawLatest
@@ -3081,20 +3259,26 @@ function PrimaryChatPane({
           if ('scopeId' in f) return;
           setLiveLast(new Date().toISOString());
           if (f.type === 'snapshot') {
+            const resetFromLive = latestResetEntryIdFromItems(f.state.history);
+            const advanced = resetFromLive > cutoffRef.current ? applyCutoff(resetFromLive) : false;
             setObservedLive({ session: localSess, state: f.state });
             // 快照帧可能带整字段 turnAdmission；缺省/形状非法一律清空显示。
             setTurnAdmission(readTurnAdmission((f.state as { turnAdmission?: unknown }).turnAdmission));
+            if (advanced) void loadRawLatest();
             onLiveActivityRef.current?.();
           } else {
             const changes = (f as { changes?: Partial<BotLiveState> }).changes;
-            if (changes && 'turnAdmission' in changes) {
-              setTurnAdmission(readTurnAdmission((changes as { turnAdmission?: unknown }).turnAdmission));
-            }
             if (changes) {
+              const resetFromChanges = 'history' in changes ? latestResetEntryIdFromItems(changes.history) : 0;
+              const advanced = resetFromChanges > cutoffRef.current ? applyCutoff(resetFromChanges) : false;
+              if ('turnAdmission' in changes) {
+                setTurnAdmission(readTurnAdmission((changes as { turnAdmission?: unknown }).turnAdmission));
+              }
               setObservedLive(prev => prev?.session === localSess
                 ? { session: localSess, state: { ...prev.state, ...changes } }
                 : prev);
-              if ('history' in changes || 'busy' in changes || 'generation' in changes) {
+              if (advanced) void loadRawLatest();
+              if (advanced || 'history' in changes || 'busy' in changes || 'generation' in changes) {
                 onLiveActivityRef.current?.();
               }
             }
@@ -3123,7 +3307,7 @@ function PrimaryChatPane({
       disposed = true;
       if (handle) void handle.close().catch(() => {});
     };
-  }, [api, sess, bot.botId, watchTick, online, pageActive, loadRawLatest, isCurrentSession]);
+  }, [api, applyCutoff, sess, bot.botId, watchTick, online, pageActive, loadRawLatest, isCurrentSession]);
 
   async function stopTask() {
     if (!identity || stopping || !api.transportConnected) return;
@@ -3402,7 +3586,7 @@ function PrimaryChatPane({
     : undefined;
 
   // 正文从 Host 受理起显示任务活动；live 就绪后以 live.turnAdmission 为权威，未受理发送中不伪装成 queued。
-  const effectiveTurnAdmission = live !== null ? readTurnAdmission(live.turnAdmission) : turnAdmission;
+  const effectiveTurnAdmission = live !== null ? readTurnAdmission(live.turnAdmission) : (rawLive !== null ? null : turnAdmission);
   const liveActivity = resolveBotActivity(live);
   const transcriptActivity: BotActivity =
     stopping && liveActivity.phase !== 'stopping' && liveActivity.phase !== 'interrupting'
@@ -3823,6 +4007,7 @@ function PrimaryChatPane({
       <ChatTranscript
         entries={rawItems}
         live={live}
+        clearedThroughEntryId={clearedThroughEntryId}
         bot={bot}
         knownBots={knownBots}
         activity={transcriptActivity}
@@ -4197,7 +4382,7 @@ function PrimaryChatPane({
                         <button
                           type="button"
                           className="secondary-button"
-                          disabled={!online || manageBusy || liveBusy}
+                          disabled={!online || manageBusy || slashBusy !== null || liveBusy}
                           onClick={() => setConfirmClear(true)}
                         >
                           {manageAction === 'clear' ? '清空中…' : '清空对话'}
@@ -4240,7 +4425,7 @@ function PrimaryChatPane({
                           <button
                             type="button"
                             className="primary-button danger-button"
-                            disabled={!online || manageBusy}
+                            disabled={!online || manageBusy || slashBusy !== null}
                             onClick={() => void handleClearHistory()}
                           >
                             {manageAction === 'clear' ? '清空中…' : '确认清空'}
@@ -4375,6 +4560,7 @@ export function BotChats({
 
   const [bots, setBots] = useState<DesktopBotDirectoryEntry[]>(() => initialCache?.bots ?? []);
   const readScopes = useRef(new Map<string, BotReadScope>());
+  const clearedCutoffsRef = useRef(new Map<string, number>());
   const readScopeFor = useCallback((deviceId: string, botId: string) => {
     const key = JSON.stringify([profileKey, deviceId, botId]);
     let scope = readScopes.current.get(key);
@@ -6364,15 +6550,22 @@ export function BotChats({
             />
           </div>
         ) : null}
-        {scopedApi && selectedBot ? (
+        {scopedApi && selectedBot ? (() => {
+          const cutoffKey = JSON.stringify([profileKey, selectedBot.deviceId, selectedBot.botId, selectedBot.primaryConversationId]);
+          return (
           <div className={stage ? 'chat-stage-host stage-hidden' : 'chat-stage-host'}>
           <PrimaryChatPane
-            key={JSON.stringify([profileKey, selectedBot.deviceId, selectedBot.botId, selectedBot.primaryConversationId])}
+            key={cutoffKey}
             api={scopedApi}
             centerApi={api}
             bot={selectedBot}
             knownBots={scopeKnownBots}
             readScope={readScopeFor(selectedBot.deviceId, selectedBot.botId)}
+            initialClearedThroughEntryId={clearedCutoffsRef.current.get(cutoffKey) ?? 0}
+            onClearedThroughEntryId={(cutoff) => {
+              const prev = clearedCutoffsRef.current.get(cutoffKey) ?? 0;
+              if (cutoff > prev) clearedCutoffsRef.current.set(cutoffKey, cutoff);
+            }}
             deviceName={selectedDeviceName}
             devicePlatform={selectedDevicePlatform}
             focusComposer={selected?.focusComposer}
@@ -6481,7 +6674,8 @@ export function BotChats({
             pageActive={pageActive && workspaceActive && !stage}
           />
           </div>
-        ) : null}
+          );
+        })() : null}
         {!stage && !(scopedApi && selectedBot) ? (
           <div className="empty-state stage-empty">
             <span className="title" role="status">{botDeletionNotice || '选择左侧智能体开始对话'}</span>

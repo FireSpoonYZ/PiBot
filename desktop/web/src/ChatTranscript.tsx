@@ -46,6 +46,8 @@ export interface ChatTranscriptEntry {
 export interface ChatTranscriptProps {
   entries: ChatTranscriptEntry[];
   live: BotLiveState | null;
+  /** 已知最新重置边界（pi.reset id）；用于立即屏蔽 <= 此值的旧合并条目与旧失败投影。 */
+  clearedThroughEntryId?: number;
   bot: BotRecord;
   /** 统一工作状态（含本地乐观发送/停止投影），由 BotChats 唯一口径计算后传入；
    *  缺省（预览等无父级场景）按 idle 处理，不在此处二次推导。 */
@@ -100,6 +102,7 @@ function numericId(item: Record<string, unknown>): number {
 export function ChatTranscript({
   entries,
   live,
+  clearedThroughEntryId = 0,
   bot,
   activity = null,
   awaitingAnswer = false,
@@ -134,10 +137,40 @@ export function ChatTranscript({
   const t = useText();
   const [linkError, setLinkError] = useState('');
   const botKey = avatarKey ?? `${bot.deviceId}:${bot.botId}`;
-  const isBusy = live?.busy === true;
-  const liveGeneratingText = typeof live?.generation?.text === 'string' ? live.generation.text : '';
+  const effectiveClearedThrough = useMemo(() => {
+    let cutoff =
+      typeof clearedThroughEntryId === 'number' &&
+      Number.isSafeInteger(clearedThroughEntryId) &&
+      clearedThroughEntryId > 0
+        ? clearedThroughEntryId
+        : 0;
+    for (const item of asArray<Record<string, unknown>>(live?.history)) {
+      if (item?.kind === 'pi.reset') {
+        const id = numericId(item);
+        if (id > cutoff) cutoff = id;
+      }
+    }
+    for (const item of entries) {
+      if (item?.kind === 'pi.reset') {
+        const id = numericId(item as unknown as Record<string, unknown>);
+        if (id > cutoff) cutoff = id;
+      }
+    }
+    return cutoff;
+  }, [clearedThroughEntryId, live?.history, entries]);
+  const effectiveLive = useMemo(() => {
+    if (!live || effectiveClearedThrough <= 0) return live;
+    const history = asArray<Record<string, unknown>>(live.history);
+    const hasMarker = history.some((item) => item?.kind === 'pi.reset' && numericId(item) >= effectiveClearedThrough);
+    if (hasMarker) return live;
+    const lastId = typeof live.lastEntryId === 'number' && Number.isFinite(live.lastEntryId) ? live.lastEntryId : null;
+    if (lastId !== null && lastId > effectiveClearedThrough) return live;
+    return history.some((item) => numericId(item) > effectiveClearedThrough) ? live : null;
+  }, [live, effectiveClearedThrough]);
+  const isBusy = effectiveLive?.busy === true;
+  const liveGeneratingText = typeof effectiveLive?.generation?.text === 'string' ? effectiveLive.generation.text : '';
   // 工作槽覆盖排队/准备/停止中/压缩阶段：Host 原生 isBusy 之外的统一口径由父级 activity 提供。
-  const slotBusy = isBusy || (activity !== null && isBotActivityBusy(activity));
+  const slotBusy = isBusy || (effectiveLive !== null && activity !== null && isBotActivityBusy(activity));
 
   // 桌面端无 mobile 桥：Markdown 链接统一走 desktop_open_center 原生命令（仅放行 HTTPS），失败可见化。
   const openLink = useCallback((href: string) => {
@@ -150,18 +183,25 @@ export function ChatTranscript({
   // LiveGeneration.attribution（同 id 的 raw data.attribution 已由 raw 覆盖）；
   // 仍在生成的活轮用它标记协作来源/方向，不混同普通用户答案。
   const liveAttribution = useMemo(
-    () => normalizeAttribution((live?.generation as { attribution?: unknown } | null | undefined)?.attribution),
-    [live?.generation],
+    () => normalizeAttribution((effectiveLive?.generation as { attribution?: unknown } | null | undefined)?.attribution),
+    [effectiveLive?.generation],
   );
   const mergedItems = useMemo(() => {
     // 与手机端 Host.tsx 相同：live 投影窗口先放，raw 分页后放（同 id 覆盖，细节更全）。
     const byId = new Map<string, Record<string, unknown>>();
-    for (const item of asArray<Record<string, unknown>>(live?.history)) {
+    for (const item of asArray<Record<string, unknown>>(effectiveLive?.history)) {
+      const id = numericId(item);
+      if (effectiveClearedThrough > 0 && id > 0 && id <= effectiveClearedThrough) continue;
       byId.set(String(item.id), item);
     }
-    for (const item of entries) byId.set(String(item.id), item as unknown as Record<string, unknown>);
+    for (const item of entries) {
+      const rec = item as unknown as Record<string, unknown>;
+      const id = numericId(rec);
+      if (effectiveClearedThrough > 0 && id > 0 && id <= effectiveClearedThrough) continue;
+      byId.set(String(item.id), rec);
+    }
     return [...byId.values()].sort((a, b) => numericId(a) - numericId(b));
-  }, [entries, live?.history]);
+  }, [entries, effectiveLive?.history, effectiveClearedThrough]);
 
   // 仅群聊（room）触发的生成隐藏在群聊页面内；1v1 Bot 私聊（dm）与用户主聊（primary）均在本对话页实时展示。
   const liveIsCollaborative =
@@ -169,28 +209,28 @@ export function ChatTranscript({
   const displayGeneratingText = liveIsCollaborative ? '' : liveGeneratingText;
 
   const allTurns = useMemo<ChatTurn[]>(() =>
-    parseHistoryEntries(mergedItems, 0, {
-      liveTools: asArray<Record<string, unknown>>(live?.tools),
+    parseHistoryEntries(mergedItems, effectiveClearedThrough, {
+      liveTools: asArray<Record<string, unknown>>(effectiveLive?.tools),
       isBusy,
       liveGeneratingText: displayGeneratingText,
-      liveGeneratingBlocks: liveIsCollaborative ? undefined : live?.generation?.blocks,
+      liveGeneratingBlocks: liveIsCollaborative ? undefined : effectiveLive?.generation?.blocks,
       selfBotId: bot.botId,
       liveAttribution,
       trackAssistantTextEntries: true,
       knownBots,
     }),
-  [mergedItems, live, isBusy, displayGeneratingText, liveAttribution, bot.botId, liveIsCollaborative, knownBots]);
+  [mergedItems, effectiveClearedThrough, effectiveLive, isBusy, displayGeneratingText, liveAttribution, bot.botId, liveIsCollaborative, knownBots]);
 
   const activeLiveToolName = useMemo(() => {
     if (liveIsCollaborative) return null;
-    const tools = asArray<LiveTool>(live?.tools);
+    const tools = asArray<LiveTool>(effectiveLive?.tools);
     for (let i = tools.length - 1; i >= 0; i -= 1) {
       const name = typeof tools[i]?.name === 'string' ? tools[i].name.trim() : '';
       if (name && tools[i]?.status !== 'done') return name;
     }
     const last = tools[tools.length - 1];
     return typeof last?.name === 'string' && isBusy && !liveGeneratingText ? last.name.trim() : null;
-  }, [live?.tools, isBusy, liveGeneratingText, liveIsCollaborative]);
+  }, [effectiveLive?.tools, isBusy, liveGeneratingText, liveIsCollaborative]);
 
   const visibleTurns = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -220,13 +260,14 @@ export function ChatTranscript({
   // 尚未落入历史的 failed 终态（如请求前 Host 中止）由 GrokBotWorkingSlot 融合展示，避免重复与闪跳。
   const latestTurn = allTurns.at(-1);
   const latestTurnHasError = Boolean(latestTurn?.role === 'assistant' && latestTurn.error);
-  const phaseFailed = activity?.phase === 'failed';
+  const liveStale = effectiveClearedThrough > 0 && live !== null && effectiveLive === null;
+  const phaseFailed = !liveStale && activity?.phase === 'failed';
   const admissionError = useMemo(() => {
-    const adm = live?.turnAdmission;
+    const adm = effectiveLive?.turnAdmission;
     if (!adm || adm.phase !== 'failed') return null;
     const msg = adm.error?.message || adm.error?.code || '';
     return msg ? String(msg) : 'admission_failed';
-  }, [live?.turnAdmission]);
+  }, [effectiveLive?.turnAdmission]);
   const showFusedFailure = phaseFailed && !slotBusy && !awaitingAnswer && !admissionError && !latestTurnHasError;
   const rawActivityError =
     activity?.error?.message?.trim() || activity?.error?.code?.trim() || '';
@@ -476,13 +517,13 @@ export function ChatTranscript({
         botKey={botKey}
         preset={avatarPreset}
         isBusy={slotBusy}
-        activity={activity ?? undefined}
-        learning={live?.learning ?? null}
+        activity={liveStale ? undefined : (activity ?? undefined)}
+        learning={effectiveLive?.learning ?? null}
         onOpenLearnedSkills={onOpenLearnedSkills}
         isStreaming={Boolean(displayGeneratingText)}
         activeToolName={activeLiveToolName}
         hasThinking={Boolean(lastTurn?.role === 'assistant' && lastTurn.thinking && !displayGeneratingText)}
-        queuedCount={live?.queuedCount ?? 0}
+        queuedCount={effectiveLive?.queuedCount ?? 0}
         hasError={latestTurnHasError || phaseFailed}
         startedAt={workingSlotStartedAt}
         failure={slotFailure}
