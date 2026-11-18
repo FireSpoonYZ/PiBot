@@ -7,6 +7,7 @@
     "node": ">=24.22.2"
   },
   "scripts": {
+    "postinstall": "node patch-pi-durable.js",
     "build:shower-windows": "node build-shower-windows.js",
     "build:cua-driver": "node build-cua-driver.js"
   },

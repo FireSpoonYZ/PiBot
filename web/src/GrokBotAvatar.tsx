@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { ChevronDown } from 'lucide-react';
 import type { BotAvatar } from '../../center-contract/index.js';
 import type { BotLearningLiveState, BotLearningOutcomeSummary } from '../../host-core/index.js';
 import { botActivityText, isBotLlmRunningPhase, isBotPreLlmPhase, type BotActivity } from './botActivity';
@@ -456,6 +457,11 @@ function hasMeaningfulLearningSave(outcome: BotLearningOutcomeSummary | null | u
   );
 }
 
+export type GrokWorkingFailure = {
+  summary?: string;
+  detail?: string | null;
+};
+
 export function GrokBotWorkingSlot({
   botKey,
   preset,
@@ -471,6 +477,7 @@ export function GrokBotWorkingSlot({
   activity,
   learning,
   onOpenLearnedSkills,
+  failure = null,
   t,
 }: {
   botKey: string;
@@ -487,6 +494,7 @@ export function GrokBotWorkingSlot({
   activity?: BotActivity;
   learning?: BotLearningLiveState | null;
   onOpenLearnedSkills?: () => void;
+  failure?: GrokWorkingFailure | null;
   t: (zh: string, en: string) => string;
 }) {
   const isPreLlmWaiting =
@@ -517,7 +525,16 @@ export function GrokBotWorkingSlot({
   const [reflectionReadingPhase, setReflectionReadingPhase] = useState(false);
   const [emphasized, setEmphasized] = useState(false);
   const [pulseThinkingMorph, setPulseThinkingMorph] = useState(false);
+  const [showFailureDetail, setShowFailureDetail] = useState(false);
+  const failureDetailId = useId();
   const wasBusyRef = useRef(isBusy && !isPreLlmWaiting);
+  const activeFailure = !isBusy && failure ? failure : null;
+  const failureDetail = activeFailure?.detail?.trim() || '';
+  const hasActiveFailure = Boolean(activeFailure);
+
+  useEffect(() => {
+    setShowFailureDetail(false);
+  }, [botKey, isBusy, hasActiveFailure, failureDetail]);
 
   useEffect(() => {
     if (isPreLlmWaiting) {
@@ -627,7 +644,7 @@ export function GrokBotWorkingSlot({
     return () => window.clearInterval(cycle);
   }, [isBusy, isStreaming, activeToolName, isPhaseLed]);
 
-  if (!isBusy && (isRecovering || (!settlementOutcome && !settledActivity && !isReflecting && !showLearningOutcome))) {
+  if (!isBusy && (isRecovering || (!settlementOutcome && !settledActivity && !activeFailure && !isReflecting && !showLearningOutcome))) {
     return null;
   }
 
@@ -656,7 +673,7 @@ export function GrokBotWorkingSlot({
       if (activity?.phase === 'compacting') return 'working';
       return 'waiting';
     }
-    if (settledActivity) {
+    if (activeFailure || settledActivity) {
       return 'idle';
     }
     if (settlementOutcome === 'stopped') return 'idle';
@@ -667,6 +684,7 @@ export function GrokBotWorkingSlot({
 
   const statusText = (() => {
     if (!isBusy) {
+      if (activeFailure) return activeFailure.summary?.trim() || t('回复未完成', 'Reply incomplete');
       if (settledActivity) return botActivityText(settledActivity, t);
       if (settlementOutcome === 'stopped') return t('已停止', 'Stopped');
       if (settlementOutcome) {
@@ -748,7 +766,7 @@ export function GrokBotWorkingSlot({
 
   return (
     <div
-      className={`sand-activity-slot${!isBusy && (settlementOutcome || settledActivity) ? ' is-settling' : ''}${isReflecting || showLearningOutcome ? ' is-reflecting' : ''}`}
+      className={`sand-activity-slot${!isBusy && (settlementOutcome || settledActivity) && !activeFailure ? ' is-settling' : ''}${activeFailure ? ' is-failed' : ''}${isReflecting || showLearningOutcome ? ' is-reflecting' : ''}`}
       data-role="assistant"
       data-grok-state={mascotState}
       aria-live="polite"
@@ -763,7 +781,7 @@ export function GrokBotWorkingSlot({
           eyeColor="#FAF8F5"
           state={mascotState}
           size={36}
-          isPlaying={isBusy || Boolean(settlementOutcome) || isReflecting || showLearningOutcome}
+          isPlaying={isBusy || (!activeFailure && (Boolean(settlementOutcome) || isReflecting || showLearningOutcome))}
           isEmphasized={emphasized}
           interactivePoke={true}
         />
@@ -771,9 +789,21 @@ export function GrokBotWorkingSlot({
           <span className="sand-activity-mark-label">
             <span className={`sand-activity-label-text${isBusy || isReflecting ? ' is-shimmering' : ''}`}>
               {statusText}
-              {activity?.webhookStopPending && !isPhaseLed && !settledActivity
+              {activity?.webhookStopPending && !isPhaseLed && !settledActivity && !activeFailure
                 ? t(' · Webhook停止待同步', ' · Webhook stop awaiting sync') : null}
             </span>
+            {activeFailure && failureDetail ? (
+              <button
+                type="button"
+                className="sand-activity-detail-toggle"
+                aria-expanded={showFailureDetail}
+                aria-controls={failureDetailId}
+                onClick={() => setShowFailureDetail((v) => !v)}
+              >
+                <span>{t('详情', 'Details')}</span>
+                <ChevronDown size={13} aria-hidden="true" />
+              </button>
+            ) : null}
             {canInspectSkills ? (
               <button
                 type="button"
@@ -786,12 +816,17 @@ export function GrokBotWorkingSlot({
                 {t('查看', 'View')}
               </button>
             ) : null}
-            {(isBusy || ((Boolean(settlementOutcome) || Boolean(settledActivity)) && elapsedSec > 0)) && (
+            {(isBusy || (!activeFailure && (Boolean(settlementOutcome) || Boolean(settledActivity)) && elapsedSec > 0)) && (
               <span className="sand-activity-elapsed">{formatWorkingElapsed(elapsedSec)}</span>
             )}
           </span>
         ) : null}
       </div>
+      {activeFailure && failureDetail && showFailureDetail ? (
+        <pre id={failureDetailId} className="sand-activity-failure-detail">
+          {failureDetail}
+        </pre>
+      ) : null}
     </div>
   );
 }

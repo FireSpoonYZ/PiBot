@@ -9,7 +9,6 @@ import {
   ClipboardCheck,
   Clock,
   Code2,
-  Copy,
   Cpu,
   Download,
   ExternalLink,
@@ -153,6 +152,7 @@ import {
   SentAttachments,
   attachmentFileName,
   attachmentIdOf,
+  extractPastedImageFiles,
   normalizeImageFile,
   pickImagesFromInput,
   type AttachmentFetcher,
@@ -174,7 +174,7 @@ import {
   type TaskBotOption,
   type TaskTransportFn,
 } from './tasks';
-import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, GroupCreateAttempt, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending as SharedChatPending, ChatPendingEntry as SharedChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, copyTextToClipboard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
+import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, GroupCreateAttempt, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending as SharedChatPending, ChatPendingEntry as SharedChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
 // @lane-imports:settings
 import { Badge, Disclosure, Row, Section, SettingsSheet, Switch } from './bot-settings/primitives';
 import { ClientUpdateSection, useClientUpdateSummary } from './ClientUpdateSection';
@@ -4989,8 +4989,9 @@ ${newer}` : draftSnapshot;
     }
   }, [t]);
 
-  const pickLocalImages = useCallback((source: 'photos' | 'camera') => {
-    if (imageUploading) return;
+  const pickLocalImages = useCallback((source: 'photos' | 'camera', pastedFiles?: File[]) => {
+    if (pastedFiles && pastedFiles.length === 0) return;
+    if (imageUploading || Boolean(slashBusy) || editSubmitting) return;
     setComposerImageError('');
     const bot = activeBot;
     if (!bot || bot.hostKind !== 'local') return;
@@ -4999,34 +5000,42 @@ ${newer}` : draftSnapshot;
     const scope = currentChatScope.current;
     const targetEditEntryId = editingTurnRef.current?.botKey === botKey ? editingTurnRef.current.entryId : undefined;
     if (!scope) { setComposerImageError(t('目标身份尚未就绪，草稿已保留。', 'Target identity unavailable; draft retained.')); return; }
+    const release = () => setImageUploading(false);
     const handleSources = async (sources: PickedImageSource[]) => {
       if (sources.length === 0) return;
-      try {
-        await uploadLocalImages(botId, scope, sources, targetEditEntryId);
-        if (activeBot?.key === botKey) setComposerImageError('');
-      } catch (error) {
-        if (activeBot?.key === botKey) setComposerImageError(errorText(error));
-      } finally {
-        setImageUploading(false);
-      }
+      await uploadLocalImages(botId, scope, sources, targetEditEntryId);
+      if (activeBot?.key === botKey) setComposerImageError('');
+    };
+    const handleFiles = async (files: File[]) => {
+      const normalized = await Promise.all(files.map((file) => normalizeImageFile(file, file.name)));
+      await handleSources(normalized);
     };
     setImageUploading(true);
-    const release = () => setImageUploading(false);
+    if (pastedFiles) {
+      void handleFiles(pastedFiles)
+        .catch((error) => { if (activeBot?.key === botKey) setComposerImageError(errorText(error)); })
+        .finally(release);
+      return;
+    }
     if (inTauriUi) {
       void BotHost.pickImages({ source }).then(
-        (result) => void handleSources(result.cancelled ? [] : result.images).finally(release),
-        (error) => { release(); if (activeBot?.key === botKey) setComposerImageError(errorText(error)); },
-      );
+        (result) => handleSources(result.cancelled ? [] : result.images),
+      )
+        .catch((error) => { if (activeBot?.key === botKey) setComposerImageError(errorText(error)); })
+        .finally(release);
       return;
     }
     pickImagesFromInput({
       onPicked: async (files) => {
-        const normalized = await Promise.all(files.map((file) => normalizeImageFile(file, file.name)));
-        await handleSources(normalized);
+        try {
+          await handleFiles(files);
+        } catch (error) {
+          if (activeBot?.key === botKey) setComposerImageError(errorText(error));
+        }
       },
       onSettled: release,
     });
-  }, [activeBot, imageUploading, inTauriUi, uploadLocalImages, t]);
+  }, [activeBot, imageUploading, inTauriUi, uploadLocalImages, slashBusy, editSubmitting, t]);
 
   const slash = useSlashAutocomplete({
     text: effectiveLocalDraft,
@@ -5988,26 +5997,22 @@ ${newer}` : draftSnapshot;
                 const attribution = turn.attribution;
                 const isEditingTarget = editingTargetIdx === turnIdx;
                 const isAfterEditingTarget = editingTargetIdx !== -1 && turnIdx > editingTargetIdx;
-                const isPrimaryUserBubble =
-                  turn.role === 'user' &&
-                  (!attribution || (attribution.kind === 'user' && attribution.channel === 'primary'));
                 const turnEditable = canEditHistoryTurn && isEditablePrimaryUserTurn(turn);
-                const editableText = isPrimaryUserBubble ? extractEditableUserText(turn.text) : '';
-                const hasBubbleMenuItems = Boolean(editableText) || turnEditable;
-                const showBubbleActions = isPrimaryUserBubble && hasBubbleMenuItems && activeBubbleActionTurnId === turn.id;
+                const copyText = turn.role === 'user' ? extractEditableUserText(turn.text) : turn.text;
+                const showBubbleActions = turnEditable && activeBubbleActionTurnId === turn.id;
                 return (
-                  <article
-                    key={turn.id}
-                    className={`bot-chat-bubble ${isWebhookAttribution(attribution) ? 'assistant' : turn.role}${turn.role === 'user' && attribution?.kind === 'bot' ? ' is-peer' : ''}${turn.isStreaming ? ' streaming' : ''}${isEditingTarget ? ' is-editing-target' : ''}${isAfterEditingTarget ? ' is-editing-after' : ''}`}
-                    onClick={isPrimaryUserBubble && hasBubbleMenuItems ? e => {
-                      if ((e.target as HTMLElement | null)?.closest('a, button, details, summary, img')) return;
-                      if (typeof window !== 'undefined' && window.getSelection()?.toString()) return;
-                      e.stopPropagation();
-                      if (composerMenuOpen) setComposerMenuOpen(false);
-                      if (chatTopMenuOpen) setChatTopMenuOpen(false);
-                      setActiveBubbleActionTurnId(prev => (prev === turn.id ? null : turn.id));
-                    } : undefined}
-                  >
+                  <div key={turn.id} className="bot-chat-turn">
+                    <article
+                      className={`bot-chat-bubble ${isWebhookAttribution(attribution) ? 'assistant' : turn.role}${turn.role === 'user' && attribution?.kind === 'bot' ? ' is-peer' : ''}${turn.isStreaming ? ' streaming' : ''}${isEditingTarget ? ' is-editing-target' : ''}${isAfterEditingTarget ? ' is-editing-after' : ''}`}
+                      onClick={turnEditable ? e => {
+                        if ((e.target as HTMLElement | null)?.closest('a, button, details, summary, img')) return;
+                        if (typeof window !== 'undefined' && window.getSelection()?.toString()) return;
+                        e.stopPropagation();
+                        if (composerMenuOpen) setComposerMenuOpen(false);
+                        if (chatTopMenuOpen) setChatTopMenuOpen(false);
+                        setActiveBubbleActionTurnId(prev => (prev === turn.id ? null : turn.id));
+                      } : undefined}
+                    >
                     {attribution && (
                       <MessageAttribution
                         attribution={attribution}
@@ -6129,7 +6134,6 @@ ${newer}` : draftSnapshot;
                       actionLabel={isModelConfigError(turn.error) ? t('模型设置', 'Model Settings') : undefined}
                       onAction={isModelConfigError(turn.error) ? () => openBotProfile(activeBot) : undefined}
                     />
-                    <ChatTurnMeta timestamp={turn.timestamp} durationMs={showTurnDuration ? turn.durationMs : undefined} />
                     {showBubbleActions && (
                       <div
                         className="bot-bubble-action-bar"
@@ -6137,43 +6141,34 @@ ${newer}` : draftSnapshot;
                         aria-label={t('消息操作', 'Message actions')}
                         onClick={e => e.stopPropagation()}
                       >
-                        {editableText && (
-                          <button
-                            type="button"
-                            className="bot-bubble-action-btn"
-                            onClick={() => {
-                              copyTextToClipboard(editableText);
-                              setActiveBubbleActionTurnId(null);
-                            }}
-                          >
-                            <Copy size={12} />
-                            <span>{t('复制', 'Copy')}</span>
-                          </button>
-                        )}
-                        {turnEditable && (
-                          <button
-                            type="button"
-                            className="bot-bubble-action-btn"
-                            onClick={() => {
-                              setActiveBubbleActionTurnId(null);
-                              setComposerImageError('');
-                              setEditingTurn({
-                                botKey: activeBot.key,
-                                scopeKey: activeChatScope,
-                                entryId: turn.entryId,
-                                text: editableText,
-                                attachments: turn.attachments ? turn.attachments.map(a => ({ ...a })) : [],
-                              });
-                              requestAnimationFrame(() => composerTextareaRef.current?.focus());
-                            }}
-                          >
-                            <Pencil size={12} />
-                            <span>{t('编辑', 'Edit')}</span>
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          className="bot-bubble-action-btn"
+                          onClick={() => {
+                            setActiveBubbleActionTurnId(null);
+                            setComposerImageError('');
+                            setEditingTurn({
+                              botKey: activeBot.key,
+                              scopeKey: activeChatScope,
+                              entryId: turn.entryId,
+                              text: copyText,
+                              attachments: turn.attachments ? turn.attachments.map(a => ({ ...a })) : [],
+                            });
+                            requestAnimationFrame(() => composerTextareaRef.current?.focus());
+                          }}
+                        >
+                          <Pencil size={12} />
+                          <span>{t('编辑', 'Edit')}</span>
+                        </button>
                       </div>
                     )}
-                  </article>
+                    </article>
+                    <ChatTurnMeta
+                      timestamp={turn.timestamp}
+                      durationMs={showTurnDuration ? turn.durationMs : undefined}
+                      copyText={copyText}
+                    />
+                  </div>
                 );
               });
             })()}
@@ -6647,6 +6642,14 @@ ${newer}` : draftSnapshot;
                         : t(`向 ${activeBot.role} 发消息…`, `Message ${activeBot.role}…`)
                   }
                   aria-label={t('消息', 'Message')}
+                  onPaste={e => {
+                    const files = extractPastedImageFiles(e.clipboardData);
+                    if (files.length === 0) return;
+                    if (!e.clipboardData?.getData('text/plain')?.trim()) {
+                      e.preventDefault();
+                    }
+                    pickLocalImages('photos', files);
+                  }}
                   onKeyDown={e => {
                     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                     if (e.key === 'Escape' && activeEditing && !editSubmitting) {
@@ -9372,35 +9375,46 @@ function RemotePendingComposer({
     }
   }, [api, identity, botId, drafts, onChangeEditTurn, t]);
 
-  const pickRemoteImages = useCallback((source: 'photos' | 'camera') => {
+  const pickRemoteImages = useCallback((source: 'photos' | 'camera', pastedFiles?: File[]) => {
+    if (pastedFiles && pastedFiles.length === 0) return;
     const targetEditEntryId = editingTurnRef.current?.entryId;
-    if (imageUploading || (!drafts.key && targetEditEntryId === undefined) || Boolean(drafts.attempt) || blocked || Boolean(commandBusy)) return;
+    if (imageUploading || (!drafts.key && targetEditEntryId === undefined) || Boolean(drafts.attempt) || blocked || Boolean(commandBusy) || Boolean(editSubmitting)) return;
     setImageError('');
+    const release = () => setImageUploading(false);
     const handleSources = async (sources: PickedImageSource[]) => {
       if (sources.length === 0) return;
-      try {
-        await uploadRemoteImages(sources, targetEditEntryId);
-      } catch (error) {
-        setImageError(errorText(error));
-      }
+      await uploadRemoteImages(sources, targetEditEntryId);
+    };
+    const handleFiles = async (files: File[]) => {
+      const normalized = await Promise.all(files.map((file) => normalizeImageFile(file, file.name)));
+      await handleSources(normalized);
     };
     setImageUploading(true);
-    const release = () => setImageUploading(false);
+    if (pastedFiles) {
+      void handleFiles(pastedFiles)
+        .catch((error) => { setImageError(errorText(error)); })
+        .finally(release);
+      return;
+    }
     if (inTauriUi) {
       void BotHost.pickImages({ source }).then(
-        (result) => void handleSources(result.cancelled ? [] : result.images).finally(release),
-        (error) => { release(); setImageError(errorText(error)); },
-      );
+        (result) => handleSources(result.cancelled ? [] : result.images),
+      )
+        .catch((error) => { setImageError(errorText(error)); })
+        .finally(release);
       return;
     }
     pickImagesFromInput({
       onPicked: async (files) => {
-        const normalized = await Promise.all(files.map((file) => normalizeImageFile(file, file.name)));
-        await handleSources(normalized);
+        try {
+          await handleFiles(files);
+        } catch (error) {
+          setImageError(errorText(error));
+        }
       },
       onSettled: release,
     });
-  }, [imageUploading, drafts.key, drafts.attempt, blocked, commandBusy, inTauriUi, uploadRemoteImages]);
+  }, [imageUploading, drafts.key, drafts.attempt, blocked, commandBusy, editSubmitting, inTauriUi, uploadRemoteImages]);
   const [confirmedConflict, setConfirmedConflict] = useState<{ requestId: string; pendingId: string; original: DesktopDraftEntry; handle?: { key: string; attemptId: string } }>();
   const [resolvingConflict, setResolvingConflict] = useState(false);
   const [slashBusy, setSlashBusy] = useState<SlashCommandName>();
@@ -10112,6 +10126,14 @@ function RemotePendingComposer({
                   ? t('发消息…', 'Message…')
                   : t(`向 ${botRole} 发消息…`, `Message ${botRole}…`)
             }
+            onPaste={e => {
+              const files = extractPastedImageFiles(e.clipboardData);
+              if (files.length === 0) return;
+              if (!e.clipboardData?.getData('text/plain')?.trim()) {
+                e.preventDefault();
+              }
+              pickRemoteImages('photos', files);
+            }}
             onKeyDown={e => {
               if (e.nativeEvent.isComposing || e.keyCode === 229) return;
               if (e.key === 'Escape' && editingTurn && !editSubmitting) {

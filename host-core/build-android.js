@@ -8,6 +8,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { readFile, writeFile, copyFile, mkdir, readdir, access, stat, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { patchPiDurable } from './patch-pi-durable.js';
 import { downloadVerified } from './prepare-android-tools.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -317,6 +318,7 @@ async function main() {
   const entry = path.join(HERE, 'android-runtime.js');
   await access(entry); // sibling lane supplies this entry; missing is a hard error
   await assertInstalledHostDependencies();
+  patchPiDurable(path.join(HERE, 'node_modules'));
   await mkdir(OUT_DIR, { recursive: true });
   // Legacy metafile copied into the assets sourceSet is not part of the payload;
   // remove only that build graph file, never runtime/state.

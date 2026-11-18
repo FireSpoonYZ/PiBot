@@ -626,6 +626,7 @@ export function entryAttribution(
   item: Record<string, unknown>,
   selfBotId?: string,
 ): MessageAttribution | undefined {
+  if (item.kind === 'pi.compaction') return undefined;
   const data = asRecord(item.data);
   // raw 历史条目：data.attribution；live 投影条目：item.attribution（同 schema）。
   // raw 覆盖 live（外层同 id 去重已做），这里只认该条目自身携带的一份。
@@ -664,7 +665,7 @@ function entryChannel(
       ? (kind as MessageAttribution['channel'])
       : undefined;
   }
-  if (item.kind === 'host.scope-message') return undefined;
+  if (item.kind === 'host.scope-message' || item.kind === 'pi.compaction') return undefined;
   // 真实用户消息（含旧的无 attribution 历史）把执行来源重置回 primary。
   if (item.kind === 'host.user-message' || item.kind === 'pi.user') {
     return entryAttribution(item, selfBotId)?.channel ?? 'primary';
@@ -870,6 +871,10 @@ export function parseHistoryEntries(
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
+    // SDK 压缩摘要是模型上下文边界（role='user'），不渲染气泡也不参与轮次/归属/时间/编辑判断。
+    if (item.kind === 'pi.compaction') {
+      continue;
+    }
     const numericId = typeof item.id === 'number' ? item.id : Number(item.id);
     const itemAttr = enrichAttributionName(entryAttribution(item, selfBotId), knownBots);
     if (clearedAfterEntryId > 0 && Number.isFinite(numericId) && numericId <= clearedAfterEntryId) {

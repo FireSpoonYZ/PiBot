@@ -5,6 +5,7 @@ import type { ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
   ArrowLeft,
+  CircleAlert,
   ClipboardCheck,
   FolderInput,
   LayoutDashboard,
@@ -55,6 +56,7 @@ interface AppState {
   form: ProfileFormState;
   globalError: string | null;
   bannerError: string | null;
+  bannerNoticeOpen: boolean;
   /** transport/relay 断开提示（可恢复）；与请求级 bannerError 分离，目标 OFFLINE 不会进入此横幅。 */
   connectionError: string | null;
   selectedDeviceId: string;
@@ -117,6 +119,19 @@ class App extends Component<AppProps, AppState> {
   private devicesMounted = true;
   private refreshingProfiles = false;
   private settingsButtonRef: HTMLButtonElement | null = null;
+  private bannerNoticeAnchorRef: HTMLDivElement | null = null;
+  private bannerNoticeButtonRef: HTMLButtonElement | null = null;
+  private handleBannerNoticePointerDown = (e: MouseEvent): void => {
+    if (!this.state.bannerNoticeOpen) return;
+    if (this.bannerNoticeAnchorRef && e.target instanceof Node && !this.bannerNoticeAnchorRef.contains(e.target)) {
+      this.setState({ bannerNoticeOpen: false });
+    }
+  };
+  private handleBannerNoticeKeyDown = (e: KeyboardEvent): void => {
+    if (!this.state.bannerNoticeOpen || e.key !== 'Escape' || e.defaultPrevented) return;
+    e.preventDefault();
+    this.setState({ bannerNoticeOpen: false }, () => this.bannerNoticeButtonRef?.focus());
+  };
   /** 显式断开/connect 进行中不做恢复采纳：不得违背用户意图把 transport 重新置真。 */
   private suppressRecovery = false;
   /** 已应用的 broker generation；变化表示后端已重连，旧 UI 身份代次必须作废。 */
@@ -208,6 +223,7 @@ class App extends Component<AppProps, AppState> {
       form: { title: '', kind: 'local', url: '', expectedDeviceId: '', deviceId: '' },
       globalError: null,
       bannerError: null,
+      bannerNoticeOpen: false,
       connectionError: null,
       selectedDeviceId: '',
       pendingReturnView: 'chat',
@@ -299,7 +315,7 @@ class App extends Component<AppProps, AppState> {
       });
     });
     this.unsubErrors = this.props.api.subscribeErrors((message) => {
-      this.setState({ bannerError: message });
+      this.setState((s) => (s.bannerError === message ? null : { bannerError: message }));
     });
     this.unsubPending = this.props.api.subscribePending(this.schedulePendingRefresh);
     void this.refreshProfiles();
@@ -312,10 +328,22 @@ class App extends Component<AppProps, AppState> {
     if (this.unsub) this.unsub();
     if (this.unsubErrors) this.unsubErrors();
     if (this.unsubPending) this.unsubPending();
+    document.removeEventListener('mousedown', this.handleBannerNoticePointerDown);
+    document.removeEventListener('keydown', this.handleBannerNoticeKeyDown);
     clearTimeout(this.pendingRefreshTimer);
   }
 
   componentDidUpdate(prev: AppProps, prevState: AppState): void {
+    if (!prevState.bannerNoticeOpen && this.state.bannerNoticeOpen) {
+      document.addEventListener('mousedown', this.handleBannerNoticePointerDown);
+      document.addEventListener('keydown', this.handleBannerNoticeKeyDown);
+    } else if (prevState.bannerNoticeOpen && !this.state.bannerNoticeOpen) {
+      document.removeEventListener('mousedown', this.handleBannerNoticePointerDown);
+      document.removeEventListener('keydown', this.handleBannerNoticeKeyDown);
+    }
+    if (!this.state.bannerError && this.state.bannerNoticeOpen) {
+      this.setState({ bannerNoticeOpen: false });
+    }
     const a = prevState.identity;
     const b = this.state.identity;
     if (a?.profileId !== b?.profileId || a?.kind !== b?.kind) {
@@ -578,7 +606,7 @@ class App extends Component<AppProps, AppState> {
       });
       // transport 连接以 status.phase === 'connected' 为准；不代表目标 Host 在线。
       this.props.api.setTransportConnected(status.phase === 'connected');
-      this.setState({ busy: false, status, bannerError: null, selectedDeviceId: targetDeviceId || (previousIdentity?.profileId === profile.id ? previousDeviceId : '') });
+      this.setState({ busy: false, status, bannerError: null, bannerNoticeOpen: false, selectedDeviceId: targetDeviceId || (previousIdentity?.profileId === profile.id ? previousDeviceId : '') });
     } catch (e) {
       this.setState({ busy: false, globalError: '连接失败：' + toError(e).message });
     } finally {
@@ -711,6 +739,39 @@ class App extends Component<AppProps, AppState> {
           </div>
           <div className="rail-spacer" />
           <div className="rail-group">
+            {this.state.bannerError ? (
+              <div className="rail-notice-anchor" ref={(el) => { this.bannerNoticeAnchorRef = el; }}>
+                <button
+                  type="button"
+                  ref={(el) => { this.bannerNoticeButtonRef = el; }}
+                  className={'rail-item rail-notice-trigger' + (this.state.bannerNoticeOpen ? ' active' : '')}
+                  onClick={() => this.setState((s) => ({ bannerNoticeOpen: !s.bannerNoticeOpen }))}
+                  aria-expanded={this.state.bannerNoticeOpen}
+                  aria-haspopup="dialog"
+                  aria-controls="desktop-rail-notice-popover"
+                  title="查看运行提示"
+                >
+                  <span className="rail-icon-wrap">
+                    <CircleAlert size={18} aria-hidden />
+                    <span className="conn-dot needs-attention" />
+                  </span>
+                  <span className="rail-label">提示</span>
+                </button>
+                {this.state.bannerNoticeOpen ? (
+                  <div
+                    id="desktop-rail-notice-popover"
+                    className="rail-notice-popover"
+                    role="region"
+                    aria-label="运行提示"
+                  >
+                    <ErrorNotice
+                      error={this.state.bannerError}
+                      onDismiss={() => this.setState({ bannerError: null, bannerNoticeOpen: false })}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             <button
               type="button"
               className="rail-item"
@@ -727,14 +788,11 @@ class App extends Component<AppProps, AppState> {
           </div>
         </aside>
         <main className="app-workspace">
-          <aside className="app-notices" aria-label="通知">
-          {this.state.globalError && (
-            <ErrorNotice error={this.state.globalError} onDismiss={() => this.setState({ globalError: null })} />
-          )}
-          {this.state.bannerError && (
-            <ErrorNotice error={this.state.bannerError} onDismiss={() => this.setState({ bannerError: null })} />
-          )}
-          </aside>
+          {this.state.globalError ? (
+            <aside className="app-notices" aria-label="通知">
+              <ErrorNotice error={this.state.globalError} onDismiss={() => this.setState({ globalError: null })} />
+            </aside>
+          ) : null}
           {centerInterrupted && (
             <div className="center-recovery">
               <span role="status">{center?.state === 'disconnected' ? '中心连接不可用' : '正在恢复中心连接…'}</span>

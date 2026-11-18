@@ -30,7 +30,7 @@ import {
 } from '../../../web/src/botActivity';
 import { ErrorNotice, useText } from '../../../web/src/ui';
 import { SentAttachments, type AttachmentFetcher } from '../../../web/src/imageAttachments';
-import { isEditablePrimaryUserTurn } from '../../../web/src/composerFlowControl';
+import { extractEditableUserText, isEditablePrimaryUserTurn } from '../../../web/src/composerFlowControl';
 import './ChatTranscript.css';
 
 export interface ChatTranscriptEntry {
@@ -213,20 +213,30 @@ export function ChatTranscript({
   // 绝不回退历史用户/普通轮时间。
   const workingSlotStartedAt = resolveActiveActivityStartedAt(activity);
 
-  // 持久失败可见化：Host 的 failed 终态持续显示（区别于用户主动停止），
-  // 气泡已渲染 turn.error 或输入框上方已渲染 turnAdmission.phase === 'failed' 时不再重复堆叠。
+  // 持久失败可见化：Host 的 failed 终态与 GrokBotWorkingSlot 融合展示（区别于用户主动停止），
+  // 已有独立 admissionError、等待问卷或仍在忙碌时不传 failure；若本轮已有 turn.error，优先该详细错误并只展示一次。
+  const latestTurn = allTurns.at(-1);
   const phaseFailed = activity?.phase === 'failed';
-  const activityError = activity?.error?.message || activity?.error?.code || null;
   const admissionError = useMemo(() => {
     const adm = live?.turnAdmission;
     if (!adm || adm.phase !== 'failed') return null;
     const msg = adm.error?.message || adm.error?.code || '';
     return msg ? String(msg) : 'admission_failed';
   }, [live?.turnAdmission]);
-  const failureNotice =
-    phaseFailed && !lastTurn?.error && !admissionError
-      ? activityError || t('本轮回复未能完成，请直接重试。', 'Reply could not complete. Please retry.')
+  const showFusedFailure = phaseFailed && !slotBusy && !awaitingAnswer && !admissionError;
+  const currentFailedTurnId =
+    showFusedFailure && latestTurn?.role === 'assistant' && latestTurn.error
+      ? latestTurn.id
       : null;
+  const rawActivityError =
+    activity?.error?.message?.trim() || activity?.error?.code?.trim() || '';
+  const fusedFailureDetail = showFusedFailure
+    ? (currentFailedTurnId && latestTurn?.error ? latestTurn.error.trim() : '') || rawActivityError
+    : '';
+  const slotFailure = useMemo(
+    () => (showFusedFailure ? { detail: fusedFailureDetail || undefined } : undefined),
+    [showFusedFailure, fusedFailureDetail],
+  );
 
   // 仅当用户停留在底部附近时跟随新流；向上翻阅历史不打断滚动位置。
   const scrollRef = useRef<HTMLElement | null>(null);
@@ -240,7 +250,7 @@ export function ChatTranscript({
   useEffect(() => {
     const el = scrollRef.current;
     if (el && nearBottomRef.current) el.scrollTop = el.scrollHeight;
-  }, [visibleTurns.length, lastTurn?.text, lastTurn?.tools?.length, liveGeneratingText, isBusy, activeLiveToolName]);
+  }, [visibleTurns.length, lastTurn?.text, lastTurn?.tools?.length, liveGeneratingText, activeLiveToolName]);
 
   // 切换会话回到最新流。
   useEffect(() => {
@@ -358,11 +368,12 @@ export function ChatTranscript({
               onEditTurn &&
               isEditablePrimaryUserTurn(turn),
           );
+          const copyText = turn.role === 'user' ? extractEditableUserText(turn.text) : turn.text;
           return (
-            <article
-              key={turn.id}
-              className={`bot-chat-bubble ${isWebhookAttribution(turnAttr) ? 'assistant' : turn.role}${turn.role === 'user' && turnAttr?.kind === 'bot' ? ' is-peer' : ''}${turn.isStreaming ? ' streaming' : ''}${isEditingTarget ? ' is-editing-target' : ''}${isAfterEditingTarget ? ' is-editing-after' : ''}`}
-            >
+            <div key={turn.id} className="bot-chat-turn">
+              <article
+                className={`bot-chat-bubble ${isWebhookAttribution(turnAttr) ? 'assistant' : turn.role}${turn.role === 'user' && turnAttr?.kind === 'bot' ? ' is-peer' : ''}${turn.isStreaming ? ' streaming' : ''}${isEditingTarget ? ' is-editing-target' : ''}${isAfterEditingTarget ? ' is-editing-after' : ''}`}
+              >
               {canEditThisTurn ? (
                 <button
                   type="button"
@@ -433,9 +444,14 @@ export function ChatTranscript({
                 <SentAttachments attachments={turn.attachments} fetcher={attachmentFetcher} />
               ) : null}
               {!turn.blocks && turn.text ? <Markdown text={turn.text} onOpenLink={openLink} /> : null}
-              <ErrorNotice compact error={turn.error} />
-              <ChatTurnMeta timestamp={turn.timestamp} durationMs={showTurnDuration ? turn.durationMs : undefined} />
-            </article>
+              <ErrorNotice compact error={turn.id === currentFailedTurnId ? undefined : turn.error} />
+              </article>
+              <ChatTurnMeta
+                timestamp={turn.timestamp}
+                durationMs={showTurnDuration ? turn.durationMs : undefined}
+                copyText={copyText}
+              />
+            </div>
           );
         });
       })()}
@@ -452,13 +468,11 @@ export function ChatTranscript({
         activeToolName={activeLiveToolName}
         hasThinking={Boolean(lastTurn?.role === 'assistant' && lastTurn.thinking && !displayGeneratingText)}
         queuedCount={live?.queuedCount ?? 0}
-        hasError={Boolean(lastTurn?.error) || phaseFailed}
+        hasError={Boolean(latestTurn?.role === 'assistant' && latestTurn.error) || phaseFailed}
         startedAt={workingSlotStartedAt}
+        failure={slotFailure}
         t={t}
       /> : null}
-      {failureNotice ? (
-        <ErrorNotice compact error={failureNotice} />
-      ) : null}
       <ErrorNotice error={linkError} onDismiss={() => setLinkError('')} compact />
     </section>
   );

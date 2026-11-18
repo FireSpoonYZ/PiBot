@@ -37,9 +37,11 @@ import {
 } from 'lucide-react';
 import {
   IMAGE_MAX_COUNT,
+  IMAGE_MAX_TOTAL_BYTES,
   ImageAttachmentThumb,
   attachmentFileName,
   attachmentIdOf,
+  extractPastedImageFiles,
   normalizeImageFile,
   pickImagesFromInput,
   type AttachmentFetcher,
@@ -1118,7 +1120,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
   onAddAttachment: (att: ImageAttachment) => void;
   onRemoveAttachment: (i: number) => void;
   attachmentFetcher: AttachmentFetcher | null;
-  onPickImage: () => void;
+  onPickImage: (files?: File[]) => void;
   canPick: boolean;
   onPick: () => void;
   draftError: string | null;
@@ -1462,6 +1464,14 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
             value={text}
             onChange={(e) => onChangeText(e.target.value)}
             onKeyDown={onKeyDown}
+            onPaste={(e) => {
+              const files = extractPastedImageFiles(e.clipboardData);
+              if (files.length === 0) return;
+              if (!e.clipboardData?.getData('text/plain')?.trim()) {
+                e.preventDefault();
+              }
+              onPickImage(files);
+            }}
             onCompositionStart={() => { composingRef.current = true; }}
             onCompositionEnd={() => { composingRef.current = false; }}
             aria-label={isEditingTurn ? '编辑历史消息' : '输入消息'}
@@ -2223,7 +2233,6 @@ function PrimaryChatPane({
       if (ref && isCurrentSession() && !lockedRef.current) addFile(ref);
     } catch (e) {
       if (!isCurrentSession()) return;
-      api.reportError(e);
       setSendError('选择文件失败：' + errText(e));
     }
   }
@@ -2235,70 +2244,82 @@ function PrimaryChatPane({
    *  addAttachment 的 expectedKey 是原子 guard（useDrafts 内部 keyRef 实时比较）：
    *  切换 Bot/身份后未完成批次中止，已上传结果不写新 scope 草稿。
    *  相同图片 id 去重；去重后总数 ≤4，超限整体拒绝保留原草稿。 */
-  function pickImage() {
+  function pickImage(pastedFiles?: File[]) {
+    if (pastedFiles && pastedFiles.length === 0) return;
     const frozenIdentity = identity;
     const frozenEditEntryId = activeEditing?.entryId ?? null;
     const draftKey = drafts.key;
-    if (!frozenIdentity || lockedRef.current || isArchived || imageUploading) return;
+    if (!frozenIdentity || lockedRef.current || isArchived || imageUploading || editSubmitting) return;
     if (frozenEditEntryId === null && !draftKey) return;
     const baseAttachments = activeEditing ? activeEditing.attachments : drafts.attachments;
     setImageUploadSession(sess);
-    pickImagesFromInput({
-      onPicked: async (files) => {
-        try {
-          const normalized = await Promise.all(files.map((file) => normalizeImageFile(file, file.name)));
-          const existing = new Set(baseAttachments.map((a) => a.id));
-          const queued: PickedImageSource[] = [];
-          for (const source of normalized) {
-            const id = await attachmentIdOf(source.data);
-            if (existing.has(id)) continue;
-            existing.add(id);
-            queued.push(source);
-          }
+    const release = () => {
+      if (mountedRef.current) setImageUploadSession(current => current === sess ? null : current);
+    };
+    const handleFiles = async (files: File[]) => {
+      try {
+        const normalized = await Promise.all(files.map((file) => normalizeImageFile(file, file.name)));
+        const existing = new Set(baseAttachments.map((a) => a.id));
+        const queued: PickedImageSource[] = [];
+        for (const source of normalized) {
+          const id = await attachmentIdOf(source.data);
+          if (existing.has(id)) continue;
+          existing.add(id);
+          queued.push(source);
+        }
+        if (!isCurrentSession()) return;
+        if (baseAttachments.length + queued.length > IMAGE_MAX_COUNT) {
+          setSendError(`最多 ${IMAGE_MAX_COUNT} 张图片，本次未上传。`);
+          return;
+        }
+        const totalBytes = baseAttachments.reduce((sum, a) => sum + a.size, 0)
+          + queued.reduce((sum, s) => sum + s.size, 0);
+        if (totalBytes > IMAGE_MAX_TOTAL_BYTES) {
+          setSendError(`图片总大小超过 ${IMAGE_MAX_TOTAL_BYTES / 1048576}MB，本次未上传。`);
+          return;
+        }
+        for (const source of queued) {
+          const att = await api.call(frozenIdentity, 'uploadAttachment', {
+            botId: bot.botId,
+            name: attachmentFileName(source.name, source.mimeType),
+            mimeType: source.mimeType,
+            data: source.data,
+          });
           if (!isCurrentSession()) return;
-          if (baseAttachments.length + queued.length > IMAGE_MAX_COUNT) {
-            setSendError(`最多 ${IMAGE_MAX_COUNT} 张图片，本次未上传。`);
+          if (frozenEditEntryId !== null) {
+            let applied = false;
+            setEditingTurn((cur) => {
+              if (
+                !cur ||
+                cur.sess !== sess ||
+                cur.botId !== bot.botId ||
+                cur.entryId !== frozenEditEntryId ||
+                cur.attachments.length >= IMAGE_MAX_COUNT ||
+                cur.attachments.some((a) => a.id === att.id)
+              ) {
+                return cur;
+              }
+              applied = true;
+              return { ...cur, attachments: [...cur.attachments, { ...att }] };
+            });
+            if (!applied) return;
+          } else if (!draftKey || !drafts.addAttachment(att, draftKey)) {
             return;
           }
-          for (const source of queued) {
-            const att = await api.call(frozenIdentity, 'uploadAttachment', {
-              botId: bot.botId,
-              name: attachmentFileName(source.name, source.mimeType),
-              mimeType: source.mimeType,
-              data: source.data,
-            });
-            if (!isCurrentSession()) return;
-            if (frozenEditEntryId !== null) {
-              let applied = false;
-              setEditingTurn((cur) => {
-                if (
-                  !cur ||
-                  cur.sess !== sess ||
-                  cur.botId !== bot.botId ||
-                  cur.entryId !== frozenEditEntryId ||
-                  cur.attachments.length >= IMAGE_MAX_COUNT ||
-                  cur.attachments.some((a) => a.id === att.id)
-                ) {
-                  return cur;
-                }
-                applied = true;
-                return { ...cur, attachments: [...cur.attachments, { ...att }] };
-              });
-              if (!applied) return;
-            } else if (!draftKey || !drafts.addAttachment(att, draftKey)) {
-              return;
-            }
-          }
-          setSendError(null);
-        } catch (e) {
-          if (!isCurrentSession()) return;
-          api.reportError(e);
-          setSendError('选择图片失败：' + errText(e));
         }
-      },
-      onSettled: () => {
-        if (mountedRef.current) setImageUploadSession(current => current === sess ? null : current);
-      },
+        setSendError(null);
+      } catch (e) {
+        if (!isCurrentSession()) return;
+        setSendError('选择图片失败：' + errText(e));
+      }
+    };
+    if (pastedFiles) {
+      void handleFiles(pastedFiles).finally(release);
+      return;
+    }
+    pickImagesFromInput({
+      onPicked: handleFiles,
+      onSettled: release,
     });
   }
 

@@ -570,6 +570,16 @@ export async function openRuntime(options) {
   registry.install(defineExtension({
     name: 'host.request-context',
     hooks: [hook(GenerationTask, {
+      async beforeThresholdCompaction(agent, api, context) {
+        try {
+          if (!online) return;
+          if (await plugins.shouldDeclineThresholdCompaction(agent, api, context)) {
+            return { decline: true };
+          }
+        } catch (err) {
+          if (context.abortSignal?.aborted) throw err;
+        }
+      },
       async beforeRequest(request, api, context) {
         try {
           if (!online) throw errWithCode('center is offline', 'CENTER_OFFLINE');
@@ -681,7 +691,9 @@ export async function openRuntime(options) {
       models,
       registry,
       // SDK 默认自动压缩：阈值触发（含后台压缩）与一次 provider 溢出压缩重试，
-      // 对全部 Bot 生效，包括启用 BC 的 Bot；各模型仍可按 settings.compaction
+      // 仅对确实已生效并接管当前会话的 Billion Context 经 pre-threshold veto
+      // 跳过 threshold（保留其真实 overflow 与显式 /compact）；其余 Bot 与未接管
+      // 会话维持默认阈值/后台/溢出压缩策略，各模型仍可按 settings.compaction
       // modelOverrides 自行调整。不要恢复 enabled:false，也不要在 generation
       // 内调用 idle-only 的 conversation.compact()。
       settings: { extensions: coreExtensions },

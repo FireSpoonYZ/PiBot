@@ -411,6 +411,15 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     };
   }
 
+  if (code === 'NETWORK') {
+    const baseTitle = t('网络请求未确认', 'Network Request Unconfirmed');
+    return {
+      tone: 'warning',
+      title: contextPrefix ? `${contextPrefix}：${baseTitle}` : baseTitle,
+      detail,
+    };
+  }
+
   if (
     code === 'EVENT_STREAM_CLOSED' ||
     code === 'STREAM_CLOSED' ||

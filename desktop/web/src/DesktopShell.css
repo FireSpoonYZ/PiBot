@@ -33,6 +33,10 @@
   background: var(--accent-soft, #e1e7df);
   color: var(--text, #242622);
 }
+.desktop-shell .rail-item:focus-visible {
+  outline: 2px solid var(--brand, var(--accent));
+  outline-offset: 2px;
+}
 .desktop-shell .rail-item.active {
   background: var(--brand-soft, rgb(43 112 246 / 0.12));
   color: var(--brand, var(--accent, #2B70F6));
@@ -66,6 +70,25 @@
 .desktop-shell .conn-dot.online { background: var(--ok, #16a34a); }
 .desktop-shell .conn-dot.offline { background: var(--danger, #ac3434); }
 .desktop-shell .conn-dot.needs-attention { background: var(--warn, #ad6500); }
+
+.desktop-shell .rail-notice-anchor {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+.desktop-shell .rail-notice-popover {
+  position: absolute;
+  left: calc(100% + 10px);
+  bottom: 0;
+  z-index: 35;
+  width: min(380px, calc(100vw - 96px));
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
+}
+.desktop-shell .rail-notice-popover > .grok-notice-card {
+  margin: 0;
+  box-shadow: var(--shadow-md);
+}
 
 .desktop-shell .center-recovery {
   display: flex;

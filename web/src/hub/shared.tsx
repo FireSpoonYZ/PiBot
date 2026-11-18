@@ -695,15 +695,6 @@ export function formatToolStepDuration(ms: number): string {
   return secs > 0 ? `${mins}m ${String(secs).padStart(2, '0')}s` : `${mins}m`;
 }
 
-export function copyTextToClipboard(value: string): void {
-  if (!value) return;
-  try {
-    void navigator.clipboard?.writeText(value);
-  } catch {
-    // Ignore clipboard permission errors in webview
-  }
-}
-
 export function renderToolStepIcon(status: ChatToolCallItem['status']) {
   if (status === 'running') {
     return (

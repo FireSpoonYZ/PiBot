@@ -311,10 +311,10 @@ function peerBodyFromScopeMessage(entry) {
  * 投影一条条目：从最新向前保留最多 8 条可显示消息，遇到第 9 条即判定丢消息并停止，
  * 不遍历/暂存更旧消息。messagesDropped 由调用方置 historyTruncated 标示窗口不完整。
  * 无可显示消息则整条不可显示，返回 null。
- * host.work-trigger 永不渲染为气泡；host.scope-message 只显示对端原文，不显示 Host 包装。
+ * host.work-trigger / pi.compaction 永不渲染为气泡；host.scope-message 只显示对端原文，不显示 Host 包装。
  */
 function projectEntry(entry, sessionState, budget) {
-  if (entry?.kind === 'host.work-trigger') return null;
+  if (entry?.kind === 'host.work-trigger' || entry?.kind === 'pi.compaction') return null;
   const attribution = projectAttribution(deriveEntryAttribution(entry, sessionState));
   if (entry?.kind === 'host.scope-message') {
     const text = peerBodyFromScopeMessage(entry);
