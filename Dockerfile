@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
 FROM node:26.13.0-bookworm AS build
 WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
 COPY center-contract/ center-contract/
 COPY web/ web/
 COPY center-web/ center-web/
