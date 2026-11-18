@@ -164,6 +164,7 @@
 }
 .desktop-dialog.client-settings-dialog { width: min(480px, 94vw); }
 .desktop-dialog.settings-shell-dialog {
+  --bs-accent: var(--brand);
   width: min(760px, 94vw);
   height: min(620px, 84vh);
   max-height: 84vh;

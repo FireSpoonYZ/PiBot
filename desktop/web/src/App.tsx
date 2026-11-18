@@ -63,7 +63,6 @@ interface AppState {
   pendingAttention: { identity: DesktopIdentity; deviceId: string } | null;
   taskWaitingCount: number;
   settingsOpen: boolean;
-  settingsPage: 'general' | 'archive';
   settingsTab: SettingsTab;
   centerAdminTab?: CenterAdminTab;
   profileTokens: Record<string, string>;
@@ -215,7 +214,6 @@ class App extends Component<AppProps, AppState> {
       pendingAttention: null,
       taskWaitingCount: 0,
       settingsOpen: false,
-      settingsPage: 'general',
       settingsTab: 'connection',
       centerAdminTab: undefined,
       profileTokens: {},
@@ -234,11 +232,11 @@ class App extends Component<AppProps, AppState> {
   };
 
   private handleOpenArchived = (): void => {
-    this.setState({ settingsOpen: true, settingsPage: 'archive' });
+    this.setState({ settingsOpen: true, settingsTab: 'archive' });
   };
 
   private openCenterAdminSettings = (tab?: CenterAdminTab): void => {
-    this.setState({ settingsOpen: true, settingsPage: 'general', settingsTab: 'center-admin', centerAdminTab: tab });
+    this.setState({ settingsOpen: true, settingsTab: 'center-admin', centerAdminTab: tab });
   };
 
   private pendingAttentionDevice(): string | undefined {
@@ -717,7 +715,7 @@ class App extends Component<AppProps, AppState> {
               type="button"
               className="rail-item"
               ref={(el) => { this.settingsButtonRef = el; }}
-              onClick={() => this.setState({ settingsOpen: true, settingsPage: 'general' })}
+              onClick={() => this.setState({ settingsOpen: true })}
               title={identity ? '当前：' + phaseLabel : '打开设置'}
             >
               <span className="rail-icon-wrap">
@@ -772,11 +770,8 @@ class App extends Component<AppProps, AppState> {
             <Dialog.Overlay className="desktop-dialog-overlay settings-dialog-overlay" />
             <Dialog.Content
               className={
-                this.state.settingsPage === 'archive'
-                  ? 'desktop-dialog settings-dialog'
-                  : this.state.settingsTab === 'center-admin'
-                    ? 'desktop-dialog settings-dialog settings-shell-dialog settings-shell-center-admin'
-                    : 'desktop-dialog settings-dialog settings-shell-dialog'
+                'desktop-dialog settings-dialog settings-shell-dialog' +
+                (this.state.settingsTab === 'center-admin' ? ' settings-shell-center-admin' : '')
               }
               onCloseAutoFocus={(e) => { e.preventDefault(); this.settingsButtonRef?.focus(); }}
             >
@@ -834,7 +829,6 @@ class App extends Component<AppProps, AppState> {
                 actionError={this.state.globalError}
                 onDismissActionError={() => this.setState({ globalError: null })}
                 archiveBridge={this.state.archiveBridge}
-                archiveOpen={this.state.settingsPage === 'archive'}
                 onOpenArchivedBotHistory={this.handleOpenArchivedBotHistory}
               />
             </Dialog.Content>

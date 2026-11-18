@@ -1,6 +1,7 @@
 // 设置弹窗共用本机服务状态。向用户展示单一的定性人话状态，底层阶段与排障统一收入折叠区。
 import { Check, Copy, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Switch } from '../../../web/src/bot-settings/primitives';
 import { useText } from '../../../web/src/ui';
 import { hostControl, hostErrorText, hostStatus, type HostControlAction, type HostStatus } from './hostService';
 
@@ -250,17 +251,12 @@ export function HostServiceSection({ service, advancedNetwork, diagnosticExtra }
             {host.autostart == null ? (
               <span className="metadata">{t('未知', 'Unknown')}</span>
             ) : (
-              <button
-                type="button"
-                role="switch"
-                aria-checked={host.autostart}
-                aria-label={autoLabel}
-                className={'grok-toggle-switch' + (host.autostart ? ' checked' : '')}
+              <Switch
+                checked={host.autostart}
+                label={autoLabel}
                 disabled={busy !== null}
-                onClick={() => void run(host.autostart ? 'disable' : 'enable')}
-              >
-                <span className="grok-toggle-knob" />
-              </button>
+                onChange={(enabled) => void run(enabled ? 'enable' : 'disable')}
+              />
             )}
           </div>
         )}
