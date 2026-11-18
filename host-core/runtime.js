@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as durable from '@earendil-works/pi-durable';
 import * as chord from '@earendil-works/chord';
+import { copyJson } from '@earendil-works/chord/json';
 import { Harness, createRegistry, defineExtension, section, hook, GenerationTask, LiveDoc } from '@earendil-works/pi-durable';
 import { createCodemodeExtension } from '@earendil-works/pi-durable/codemode';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
@@ -2501,7 +2502,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
               : await tx.createConversation({ ownership: { kind: 'ownerless' } });
             if (agentSnapshot) {
               const agentDraft = await tx.doc(durable.AgentDoc, rec.id);
-              const copiedAgent = chord.copyJson(agentSnapshot);
+              const copiedAgent = copyJson(agentSnapshot);
               for (const key of Object.keys(agentDraft)) {
                 if (!(key in copiedAgent)) delete agentDraft[key];
               }
@@ -2509,7 +2510,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
             }
             if (sessionSnapshot) {
               const sessionDraft = await tx.doc(BotSessionState, rec.id);
-              const copiedSession = chord.copyJson(sessionSnapshot);
+              const copiedSession = copyJson(sessionSnapshot);
               const copiedOutgoing = copiedSession.outgoing ?? {};
               sessionDraft.schema = copiedSession.schema ?? 1;
               sessionDraft.lastImportedLocalId = copiedSession.lastImportedLocalId ?? 0;
@@ -2569,13 +2570,13 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
             }
             if (requestKeysSnapshot?.digests) {
               const reqDraft = await tx.doc(RequestKeys, rec.id);
-              const copiedDigests = chord.copyJson(requestKeysSnapshot.digests);
+              const copiedDigests = copyJson(requestKeysSnapshot.digests);
               delete copiedDigests['r:' + requestId];
               reqDraft.digests = copiedDigests;
             }
             if (dispatchContextsSnapshot?.byRequest) {
               const dispatchDraft = await tx.doc(TaskDispatchContexts, rec.id);
-              dispatchDraft.byRequest = chord.copyJson(dispatchContextsSnapshot.byRequest);
+              dispatchDraft.byRequest = copyJson(dispatchContextsSnapshot.byRequest);
             }
             const primaryIndex = await tx.doc(PrimaryIndex);
             primaryIndex.byPrimary[bot.primaryConversationId] = rec.id;

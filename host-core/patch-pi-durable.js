@@ -4,15 +4,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-export const PI_DURABLE_VERSION = '1.5.0';
+export const PI_DURABLE_VERSION = '1.5.2';
 
 const GENERATION_ORIGINAL = `            const threshold = compacted === undefined
-                ? thresholdCompaction(view, entries, resolved.contextWindow, compactionPolicy(settings, model))
+                ? thresholdCompaction(view, entries, resolved.contextWindow, compactionPolicy(settings, model, agent.compaction))
                 : undefined;
             if (threshold === "blocking") {`;
 
 const GENERATION_PATCHED = `            let threshold = compacted === undefined
-                ? thresholdCompaction(view, entries, resolved.contextWindow, compactionPolicy(settings, model))
+                ? thresholdCompaction(view, entries, resolved.contextWindow, compactionPolicy(settings, model, agent.compaction))
                 : undefined;
             if (threshold !== undefined) {
                 let declined = false;
