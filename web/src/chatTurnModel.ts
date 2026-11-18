@@ -694,6 +694,70 @@ export function latestEntryChannel(
   return channel;
 }
 
+const GENERIC_DONE_SUMMARIES = new Set(['任务已完成', '任务已取消', '已完成']);
+
+function extractTaskOutputSummary(output: string | undefined): string {
+  if (!output) return '';
+  const match =
+    /(?:^|\n)摘要:\s*([\s\S]*?)(?=\n(?:待回应\s*\[|需求变更\s*\[|步骤:|任务已标记完成|所有有效步骤均已完成)|$)/.exec(
+      output,
+    );
+  if (!match) return '';
+  const trimmed = match[1].trim();
+  return GENERIC_DONE_SUMMARIES.has(trimmed) ? '' : trimmed;
+}
+
+function readSingleToolTaskReply(tool: ChatToolCallItem): string {
+  if (
+    tool.status === 'error' ||
+    tool.status === 'cancelled' ||
+    tool.status === 'interrupted' ||
+    tool.outcome === 'error' ||
+    tool.outcome === 'cancelled' ||
+    tool.outcome === 'interrupted'
+  ) {
+    return '';
+  }
+  const pres = tool.presentation;
+  if (pres && pres.kind === 'task' && pres.status === 'done') {
+    const argSummary = typeof tool.args?.summary === 'string' ? tool.args.summary.trim() : '';
+    if (argSummary && !GENERIC_DONE_SUMMARIES.has(argSummary)) return argSummary;
+    const outSummary = extractTaskOutputSummary(tool.output);
+    if (outSummary) return outSummary;
+    const presSummary = typeof pres.summary === 'string' ? pres.summary.trim() : '';
+    if (presSummary && !GENERIC_DONE_SUMMARIES.has(presSummary)) return presSummary;
+  }
+  if (tool.name === 'task' && tool.args) {
+    const action = tool.args.action;
+    const status = tool.args.status;
+    if (action === 'complete' || (action === 'update' && status === 'done')) {
+      const argSummary = typeof tool.args.summary === 'string' ? tool.args.summary.trim() : '';
+      if (argSummary && !GENERIC_DONE_SUMMARIES.has(argSummary)) return argSummary;
+    }
+    if (action === 'update_step' && status === 'done') {
+      const stepRes =
+        typeof tool.args.resultSummary === 'string' ? tool.args.resultSummary.trim() : '';
+      if (stepRes && !GENERIC_DONE_SUMMARIES.has(stepRes)) return stepRes;
+    }
+  }
+  return '';
+}
+
+function extractCompletedTaskReply(tools: readonly ChatToolCallItem[]): string {
+  for (let i = tools.length - 1; i >= 0; i -= 1) {
+    const tool = tools[i];
+    if (tool.children && tool.children.length > 0) {
+      for (let j = tool.children.length - 1; j >= 0; j -= 1) {
+        const childReply = readSingleToolTaskReply(tool.children[j]);
+        if (childReply) return childReply;
+      }
+    }
+    const direct = readSingleToolTaskReply(tool);
+    if (direct) return direct;
+  }
+  return '';
+}
+
 export function parseHistoryEntries(
   items: Array<Record<string, unknown>>,
   clearedAfterEntryId = 0,
@@ -846,7 +910,27 @@ export function parseHistoryEntries(
       }
     }
 
-    acc.turn.text = acc.textParts.filter(Boolean).join('\n\n').trim();
+    let joinedTurnText = acc.textParts.filter(Boolean).join('\n\n').trim();
+    let synthesizedReply = '';
+    if (!isStillActive && acc.tools.length > 0) {
+      const taskReply = extractCompletedTaskReply(acc.tools);
+      if (taskReply) {
+        const probe = taskReply.slice(0, Math.min(16, taskReply.length));
+        const missingOrTinyAck =
+          joinedTurnText === '' ||
+          (joinedTurnText.length < 24 &&
+            taskReply.length > joinedTurnText.length * 2 &&
+            !joinedTurnText.includes(probe));
+        if (missingOrTinyAck) {
+          synthesizedReply = taskReply;
+          joinedTurnText = joinedTurnText ? `${joinedTurnText}\n\n${taskReply}` : taskReply;
+          if (options?.trackAssistantTextEntries && acc.turn.entryId > 0) {
+            (acc.turn.assistantTextEntryIds ??= []).push(String(acc.turn.entryId));
+          }
+        }
+      }
+    }
+    acc.turn.text = joinedTurnText;
     acc.turn.thinking = acc.thinkingParts.length > 0 ? acc.thinkingParts.join('\n\n') : undefined;
     acc.turn.tools = acc.tools.length > 0 ? acc.tools : undefined;
     acc.turn.toolSummary = acc.tools.length > 0 ? acc.tools.map((tool) => tool.name) : undefined;
@@ -868,6 +952,19 @@ export function parseHistoryEntries(
           ...(block.kind === 'text' && block.entryId !== undefined ? { entryId: block.entryId } : {}),
         });
       }
+    }
+    if (synthesizedReply) {
+      blockSeq += 1;
+      const entryId =
+        options?.trackAssistantTextEntries && acc.turn.entryId > 0
+          ? String(acc.turn.entryId)
+          : undefined;
+      out.push({
+        id: acc.turn.id + '-b' + blockSeq,
+        kind: 'text',
+        text: synthesizedReply,
+        ...(entryId !== undefined ? { entryId } : {}),
+      });
     }
     acc.turn.blocks = out.length > 0 ? out : undefined;
   };

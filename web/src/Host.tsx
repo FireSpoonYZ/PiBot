@@ -172,9 +172,9 @@ import { deleteBotAndVerify, formatActionableDirectoryError, isDefiniteSendFailu
 import {
   useGlobalTasks,
   TaskBoardView,
-  TaskChatContextBar,
   TaskChatPromptBanner,
-  botTasksFor,
+  isTaskWaitingForBot,
+  resolveBotChatTaskContext,
   type GlobalTask,
   type TaskBotOption,
   type TaskTransportFn,
@@ -310,18 +310,6 @@ interface RemoteTaskContext {
   prefix: string;
 }
 
-function isTaskWaitingForBot(item: GlobalTask, deviceId: string, botId: string): boolean {
-  if (!item.pendingPrompt) return false;
-  if (item.pendingPrompt.deviceId === deviceId && item.pendingPrompt.botId === botId) {
-    return true;
-  }
-  return (
-    item.pendingPrompt.kind === 'plan' &&
-    item.coordinatorDeviceId === deviceId &&
-    item.coordinatorBotId === botId
-  );
-}
-
 export function HostPage({
   connectionEpoch = 0,
   active = true,
@@ -348,8 +336,13 @@ export function HostPage({
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [creatingTask, setCreatingTask] = useState(false);
   const [taskInitialEditMode, setTaskInitialEditMode] = useState(false);
-  const [selectedTopicByBot, setSelectedTopicByBot] = useState<Record<string, string | null>>({});
-  const [selectedStepByBotTask, setSelectedStepByBotTask] = useState<Record<string, string | null>>({});
+  const [jumpedTaskQuote, setJumpedTaskQuote] = useState<{
+    deviceId: string;
+    botId: string;
+    taskId: string;
+    stepId: string | null;
+  } | null>(null);
+  const [waitingTaskOffsetByBot, setWaitingTaskOffsetByBot] = useState<Record<string, number>>({});
   const [taskReturnId, setTaskReturnId] = useState<string | null>(null);
   const [taskBannerBusy, setTaskBannerBusy] = useState(false);
   const [taskBoardNotice, setTaskBoardNotice] = useState('');
@@ -357,7 +350,6 @@ export function HostPage({
   const taskFetchAttemptedRef = useRef<Set<string>>(new Set());
   const [taskActionFailures, setTaskActionFailures] = useState<Record<string, PendingTaskChatAction>>({});
   const [retryingTaskActionKey, setRetryingTaskActionKey] = useState<string | null>(null);
-  const autoTopicEntryRef = useRef<string | null>(null);
 
   // Mobile navigation drawer shares the app's modal focus and dismissal behavior.
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
@@ -1276,8 +1268,8 @@ export function HostPage({
     setActiveTaskId(null);
     setCreatingTask(false);
     setTaskInitialEditMode(false);
-    setSelectedTopicByBot({});
-    setSelectedStepByBotTask({});
+    setJumpedTaskQuote(null);
+    setWaitingTaskOffsetByBot({});
     setTaskReturnId(null);
     setTaskBannerBusy(false);
     setTaskBoardNotice('');
@@ -1285,7 +1277,6 @@ export function HostPage({
     taskFetchAttemptedRef.current.clear();
     setTaskActionFailures({});
     setRetryingTaskActionKey(null);
-    autoTopicEntryRef.current = null;
   }, [taskScopeKey]);
 
   const wasTasksScreenRef = useRef(screen === 'tasks');
@@ -1323,11 +1314,24 @@ export function HostPage({
   }, [globalTasks.tasks, fetchedTasksById]);
 
   const activeBotTopicKey = activeBot ? `${activeBot.deviceId}:${activeBot.botId}` : '';
-  const activeBotTopicId = activeBotTopicKey ? (selectedTopicByBot[activeBotTopicKey] ?? null) : null;
+  const activeBotJumpedTaskId =
+    activeBot &&
+    jumpedTaskQuote &&
+    jumpedTaskQuote.deviceId === activeBot.deviceId &&
+    jumpedTaskQuote.botId === activeBot.botId
+      ? jumpedTaskQuote.taskId
+      : null;
+  const activeBotJumpedStepId =
+    activeBot &&
+    jumpedTaskQuote &&
+    jumpedTaskQuote.deviceId === activeBot.deviceId &&
+    jumpedTaskQuote.botId === activeBot.botId
+      ? jumpedTaskQuote.stepId
+      : null;
 
   useEffect(() => {
     if (!active || !taskTransport) return;
-    const candidateIds = [activeBotTopicId, taskReturnId].filter((id): id is string => Boolean(id));
+    const candidateIds = [activeBotJumpedTaskId, taskReturnId].filter((id): id is string => Boolean(id));
     for (const tid of candidateIds) {
       if (globalTasks.tasks.some((item) => item.id === tid)) continue;
       if (fetchedTasksById[tid]) continue;
@@ -1346,65 +1350,41 @@ export function HostPage({
           // 列表截断补充查询失败时保留静态回退，不阻塞聊天主流程。
         });
     }
-  }, [active, taskTransport, activeBotTopicId, taskReturnId, globalTasks, fetchedTasksById, taskScopeKey]);
+  }, [active, taskTransport, activeBotJumpedTaskId, taskReturnId, globalTasks, fetchedTasksById, taskScopeKey]);
 
-  const activeBotLinkedTask = useMemo<GlobalTask | null>(
-    () => (activeBotTopicId ? (effectiveGlobalTasks.find((item) => item.id === activeBotTopicId) ?? null) : null),
-    [effectiveGlobalTasks, activeBotTopicId],
-  );
-  const activeBotStepKey = activeBot && activeBotTopicId
-    ? `${activeBot.deviceId}:${activeBot.botId}:${activeBotTopicId}`
-    : '';
-  const activeBotStepId = activeBotStepKey ? (selectedStepByBotTask[activeBotStepKey] ?? null) : null;
-  const activeBotFocusedStep = useMemo(
-    () => (activeBotLinkedTask && activeBotStepId
-      ? (activeBotLinkedTask.steps.find((s) => s.id === activeBotStepId) ?? null)
-      : null),
-    [activeBotLinkedTask, activeBotStepId],
-  );
-  // banner 必须与 composer 绑定同一 task，绝不显示另一个任务的 prompt
-  const activeBotBannerTask = activeBot ? activeBotLinkedTask : null;
-  const activeBotSwitchableWaitingTasks = useMemo(
+  const activeBotTaskContext = useMemo(
     () =>
       activeBot
-        ? botTasksFor(effectiveGlobalTasks, activeBot.deviceId, activeBot.botId).filter(
-            (item) => isTaskWaitingForBot(item, activeBot.deviceId, activeBot.botId) && item.id !== activeBotLinkedTask?.id,
-          )
-        : [],
-    [activeBot, effectiveGlobalTasks, activeBotLinkedTask?.id],
+        ? resolveBotChatTaskContext({
+            tasks: effectiveGlobalTasks,
+            botDeviceId: activeBot.deviceId,
+            botId: activeBot.botId,
+            jumpedTaskId: activeBotJumpedTaskId,
+            jumpedStepId: activeBotJumpedStepId,
+            waitingOffset: waitingTaskOffsetByBot[activeBotTopicKey] ?? 0,
+          })
+        : {
+            waitingTasks: [],
+            waitingIndex: 0,
+            linkedTask: null,
+            focusedStep: null,
+            promptTask: null,
+            showQuoteStrip: false,
+            taskPrefix: '',
+          },
+    [
+      activeBot,
+      effectiveGlobalTasks,
+      activeBotJumpedTaskId,
+      activeBotJumpedStepId,
+      waitingTaskOffsetByBot,
+      activeBotTopicKey,
+    ],
   );
-  const activeBotTaskPrefix = activeBotLinkedTask
-    ? activeBotFocusedStep
-      ? `[关联任务「${activeBotLinkedTask.title}」(${activeBotLinkedTask.id}) · 子项「${activeBotFocusedStep.text}」(${activeBotFocusedStep.id})]\n`
-      : `[关联任务「${activeBotLinkedTask.title}」(${activeBotLinkedTask.id})]\n`
-    : activeBotTopicId
-      ? activeBotStepId
-        ? `[关联任务(${activeBotTopicId}) · 子项(${activeBotStepId})]\n`
-        : `[关联任务(${activeBotTopicId})]\n`
-      : '';
-
-  useEffect(() => {
-    const entryKey = screen === 'chat' && activeBot
-      ? `${taskScopeKey}|${activeBot.deviceId}:${activeBot.botId}`
-      : null;
-    if (!entryKey || !activeBot) {
-      autoTopicEntryRef.current = null;
-      return;
-    }
-    if (!globalTasks.loaded) return;
-    if (autoTopicEntryRef.current === entryKey) return;
-    autoTopicEntryRef.current = entryKey;
-    const botKey = `${activeBot.deviceId}:${activeBot.botId}`;
-    if (selectedTopicByBot[botKey] !== undefined) return;
-    const waiting = botTasksFor(effectiveGlobalTasks, activeBot.deviceId, activeBot.botId).filter((item) =>
-      isTaskWaitingForBot(item, activeBot.deviceId, activeBot.botId),
-    );
-    if (waiting.length === 1) {
-      setSelectedTopicByBot((prev) =>
-        prev[botKey] !== undefined ? prev : { ...prev, [botKey]: waiting[0].id },
-      );
-    }
-  }, [screen, activeBot, taskScopeKey, globalTasks.loaded, selectedTopicByBot, effectiveGlobalTasks]);
+  const activeBotLinkedTask = activeBotTaskContext.linkedTask;
+  const activeBotFocusedStep = activeBotTaskContext.focusedStep;
+  const activeBotBannerTask = activeBotTaskContext.linkedTask;
+  const activeBotTaskPrefix = activeBotTaskContext.taskPrefix;
 
   const executeTaskChatAction = useCallback(
     async (spec: PendingTaskChatActionInput): Promise<boolean> => {
@@ -1475,8 +1455,7 @@ export function HostPage({
       const botKey = `${botInfo.deviceId}:${botInfo.botId}`;
       if (
         linkedTaskSnapshot.pendingPrompt?.kind === 'question' &&
-        linkedTaskSnapshot.pendingPrompt.deviceId === botInfo.deviceId &&
-        linkedTaskSnapshot.pendingPrompt.botId === botInfo.botId
+        isTaskWaitingForBot(linkedTaskSnapshot, botInfo.deviceId, botInfo.botId)
       ) {
         void executeTaskChatAction({
           kind: 'answer_prompt',
@@ -1486,7 +1465,10 @@ export function HostPage({
           taskTitle: linkedTaskSnapshot.title,
           answer: rawText,
         });
-      } else if (linkedTaskSnapshot.pendingPrompt?.kind === 'plan') {
+      } else if (
+        linkedTaskSnapshot.pendingPrompt?.kind === 'plan' &&
+        isTaskWaitingForBot(linkedTaskSnapshot, botInfo.deviceId, botInfo.botId)
+      ) {
         void executeTaskChatAction({
           kind: 'update_task',
           scopeKey: capturedScope,
@@ -2365,7 +2347,10 @@ export function HostPage({
     setChatSearchQuery('');
     setClearNotice('');
     updateBotMeta(bot.key, { unread: false });
-    if (fromScreen !== 'tasks') setTaskReturnId(null);
+    if (fromScreen !== 'tasks') {
+      setTaskReturnId(null);
+      setJumpedTaskQuote(null);
+    }
     setChatReturnScreen(fromScreen ?? (screen === 'archived-bots' || bot.archivedAt ? 'archived-bots' : 'hub'));
     setScreen('chat');
   };
@@ -2969,18 +2954,7 @@ export function HostPage({
       if (!scopeKey) throw new Error(t('目标身份尚未就绪，草稿已保留。', 'Target identity unavailable; draft retained.'));
       const capturedTaskScopeKey = taskScopeKey;
       const linkedTaskSnapshot = activeBotLinkedTask;
-      const focusedStepSnapshot = activeBotFocusedStep;
-      const selectedTaskIdSnapshot = activeBotTopicId;
-      const selectedStepIdSnapshot = activeBotStepId;
-      const taskPrefix = linkedTaskSnapshot
-        ? focusedStepSnapshot
-          ? `[关联任务「${linkedTaskSnapshot.title}」(${linkedTaskSnapshot.id}) · 子项「${focusedStepSnapshot.text}」(${focusedStepSnapshot.id})]\n`
-          : `[关联任务「${linkedTaskSnapshot.title}」(${linkedTaskSnapshot.id})]\n`
-        : selectedTaskIdSnapshot
-          ? selectedStepIdSnapshot
-            ? `[关联任务(${selectedTaskIdSnapshot}) · 子项(${selectedStepIdSnapshot})]\n`
-            : `[关联任务(${selectedTaskIdSnapshot})]\n`
-          : '';
+      const taskPrefix = activeBotTaskPrefix;
       const composedText = taskPrefix ? (trimmed ? `${taskPrefix}${trimmed}` : taskPrefix.trimEnd()) : trimmed;
       const attachmentIds = draftAttachmentMetas.map((a) => a.id);
       const submission: ChatPending = {
@@ -5636,10 +5610,12 @@ ${newer}` : draftSnapshot;
                 return;
               }
               setTaskBoardNotice('');
-              const botKey = `${targetBot.deviceId}:${targetBot.botId}`;
-              setSelectedTopicByBot((prev) => ({ ...prev, [botKey]: taskId }));
-              const stepKey = `${targetBot.deviceId}:${targetBot.botId}:${taskId}`;
-              setSelectedStepByBotTask((prev) => ({ ...prev, [stepKey]: stepId ?? null }));
+              setJumpedTaskQuote({
+                deviceId: targetBot.deviceId,
+                botId: targetBot.botId,
+                taskId,
+                stepId: stepId ?? null,
+              });
               setTaskReturnId(taskId);
               openBotChat(targetBot, 'tasks');
             }}
@@ -6019,6 +5995,7 @@ ${newer}` : draftSnapshot;
                 isPrimary={activeBot.isPrimary}
                 busy={isBotBusy}
                 reflecting={Boolean(effectiveChatLive?.learning?.active)}
+                offline={activeBot.online === false}
                 size={28}
               />
               <span
@@ -6027,35 +6004,41 @@ ${newer}` : draftSnapshot;
                   flexDirection: 'column',
                   alignItems: 'flex-start',
                   minWidth: 0,
+                  flex: 1,
                   textAlign: 'left',
-                  lineHeight: 1.15,
+                  lineHeight: 1.18,
                 }}
               >
                 <span className="grok-chat-pill-name" style={{ maxWidth: '100%' }}>{activeBot.role}</span>
-                {activeBotModelSummary?.headerText && (
+                {(hasRemoteConfigured || activeBotModelSummary?.headerText) && (
                   <span
                     style={{
                       fontSize: '0.72rem',
                       fontWeight: 500,
-                      color: activeBotModelSummary.tone === 'warn' ? '#b45309' : 'var(--muted)',
+                      color: activeBot.online === false
+                        ? 'var(--danger)'
+                        : activeBotModelSummary?.tone === 'warn'
+                          ? '#b45309'
+                          : 'var(--muted)',
                       maxWidth: '100%',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
                     }}
                   >
-                    {activeBotModelSummary.headerText}
+                    {hasRemoteConfigured
+                      ? [
+                          activeBot.online === false
+                            ? `${activeBot.hostLabel} · ${t('离线', 'Offline')}`
+                            : activeBot.hostLabel,
+                          activeBotModelSummary?.headerText,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')
+                      : activeBotModelSummary?.headerText}
                   </span>
                 )}
               </span>
-              {hasRemoteConfigured && (
-                <span
-                  className={`hub-bot-host-badge ${activeBot.hostKind}${activeBot.online === false ? ' is-offline' : ''}`}
-                >
-                  <PlatformLogoIcon platform={activeBot.platform} size={11} />
-                  <span className="hub-bot-host-text">{activeBot.hostLabel}</span>
-                </span>
-              )}
             </button>
 
             <button
@@ -6183,38 +6166,6 @@ ${newer}` : draftSnapshot;
               </button>
             </div>
           )}
-
-          <TaskChatContextBar
-            variant="mobile"
-            botDeviceId={activeBot.deviceId}
-            botId={activeBot.botId}
-            botName={activeBot.role}
-            tasks={effectiveGlobalTasks}
-            activeTaskId={activeBotTopicId}
-            activeStepId={activeBotStepId}
-            returnTaskId={chatReturnScreen === 'tasks' ? taskReturnId : null}
-            onSelectTaskTopic={(tid) => {
-              const key = `${activeBot.deviceId}:${activeBot.botId}`;
-              setSelectedTopicByBot((prev) => ({ ...prev, [key]: tid }));
-            }}
-            onSelectStepFocus={(sid) => {
-              if (!activeBotTopicId) return;
-              const stepKey = `${activeBot.deviceId}:${activeBot.botId}:${activeBotTopicId}`;
-              setSelectedStepByBotTask((prev) => ({ ...prev, [stepKey]: sid }));
-            }}
-            onOpenTaskDetail={(tid, openEdit) => {
-              setActiveTaskId(tid);
-              setCreatingTask(false);
-              setTaskInitialEditMode(Boolean(openEdit));
-              setScreen('tasks');
-            }}
-            onReturnToTask={(tid) => {
-              setActiveTaskId(tid);
-              setCreatingTask(false);
-              setTaskInitialEditMode(false);
-              setScreen('tasks');
-            }}
-          />
 
           <section
             className="bot-chat-messages"
@@ -6578,37 +6529,23 @@ ${newer}` : draftSnapshot;
               />
             );
           })()}
-          {!activeBotBannerTask?.pendingPrompt && activeBotSwitchableWaitingTasks.length > 0 && (
-            <div
-              className="bot-chat-system-notice"
-              role="status"
-              style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
-            >
-              <span>
-                {activeBotSwitchableWaitingTasks.length === 1
-                  ? t(`待回应任务：「${activeBotSwitchableWaitingTasks[0].title}」`, `Waiting task: "${activeBotSwitchableWaitingTasks[0].title}"`)
-                  : t(`有 ${activeBotSwitchableWaitingTasks.length} 个待回应任务：「${activeBotSwitchableWaitingTasks[0].title}」等`, `${activeBotSwitchableWaitingTasks.length} waiting tasks: "${activeBotSwitchableWaitingTasks[0].title}"...`)}
-              </span>
-              <button
-                type="button"
-                className="hub-outline-btn"
-                onClick={() => {
-                  const botKey = `${activeBot.deviceId}:${activeBot.botId}`;
-                  setSelectedTopicByBot((prev) => ({ ...prev, [botKey]: activeBotSwitchableWaitingTasks[0].id }));
-                }}
-              >
-                {t('切到此任务回应', 'Switch to task')}
-              </button>
-            </div>
-          )}
           <TaskChatPromptBanner
+            variant="mobile"
             botDeviceId={activeBot.deviceId}
             botId={activeBot.botId}
-            botName={activeBot.role}
-            avatar={botAvatarKey(activeBot)}
             task={activeBotBannerTask}
+            focusedStep={activeBotFocusedStep}
+            showQuoteStrip={activeBotTaskContext.showQuoteStrip}
+            waitingTasksCount={activeBotTaskContext.waitingTasks.length}
+            waitingTaskIndex={activeBotTaskContext.waitingIndex}
             bots={taskBotOptions}
             busy={taskBannerBusy}
+            onClearQuote={() => setJumpedTaskQuote(null)}
+            onCycleWaitingTask={() => {
+              const botKey = `${activeBot.deviceId}:${activeBot.botId}`;
+              setJumpedTaskQuote(null);
+              setWaitingTaskOffsetByBot((prev) => ({ ...prev, [botKey]: (prev[botKey] ?? 0) + 1 }));
+            }}
             onConfirmPlan={async (tid) => {
               setTaskBannerBusy(true);
               try {
@@ -6624,10 +6561,10 @@ ${newer}` : draftSnapshot;
                 setTaskBannerBusy(false);
               }
             }}
-            onOpenTaskEdit={(tid) => {
+            onOpenTaskDetail={(tid, openEdit) => {
               setActiveTaskId(tid);
               setCreatingTask(false);
-              setTaskInitialEditMode(true);
+              setTaskInitialEditMode(Boolean(openEdit));
               setScreen('tasks');
             }}
             onAnswerPrompt={async (tid, answer) => {
