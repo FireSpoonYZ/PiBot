@@ -7,6 +7,7 @@ import {
   BotTreeSelector,
   CaChips,
   CaDisclosure,
+  CaExternalUrlBox,
   CaModal,
   CaNotice,
   CaSegmented,
@@ -72,9 +73,11 @@ function normalizeInlineSkillMarkdown(name: string, body: string): string {
 export function CapabilitiesTab({
   api,
   onOpenExternal,
+  onOpenExternalUrl,
 }: {
   api: CenterApi;
   onOpenExternal?: () => void;
+  onOpenExternalUrl?: (url: string) => void | Promise<unknown>;
 }): React.JSX.Element {
   const [segment, setSegment] = useState<'skills' | 'tools'>('skills');
   const [skillFilter, setSkillFilter] = useState<'all' | 'shared' | 'learned'>('all');
@@ -1367,16 +1370,17 @@ export function CapabilitiesTab({
                   </button>
                 </div>
                 {oauthFlow && (
-                  <div className="ca-inline-row" style={{ marginTop: 8, flexWrap: 'wrap' }}>
-                    <a
-                      href={oauthFlow.authorizationUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="ca-btn ca-btn-sm"
-                    >
-                      <ExternalLink size={13} />
-                      <span>打开 OAuth 授权页面</span>
-                    </a>
+                  <div className="ca-form-stack" style={{ marginTop: 10, gap: 8 }}>
+                    <CaExternalUrlBox
+                      url={oauthFlow.authorizationUrl}
+                      onOpenUrl={onOpenExternalUrl}
+                      onError={err =>
+                        setDetailError(
+                          errorMessage(err, '无法打开系统默认浏览器，请复制链接手动打开'),
+                        )
+                      }
+                      copyLabel="复制链接"
+                    />
                     <span className="ca-muted">当前状态：{oauthStatus || '等待授权…'}</span>
                   </div>
                 )}

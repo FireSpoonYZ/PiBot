@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import type * as React from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { Check, Copy, MoreHorizontal, X } from 'lucide-react';
+import { Check, ChevronRight, Copy, MoreHorizontal, X } from 'lucide-react';
+import { openExternalUrl } from './openExternalUrl';
 import { QrSvg } from './qrSvg';
 import type { CenterBotRef, CenterDevice } from './types';
+
+export { openExternalUrl };
 
 export function newRequestId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -230,6 +233,43 @@ export function CaNotice({
   );
 }
 
+export async function openExternalLink(
+  url: string,
+  handler?: (url: string) => void | Promise<unknown>,
+): Promise<void> {
+  return openExternalUrl(url, handler);
+}
+
+export function CaExternalUrlBox({
+  url,
+  onOpenUrl,
+  onError,
+  copyLabel = '复制',
+}: {
+  url: string;
+  onOpenUrl?: (url: string) => void | Promise<unknown>;
+  onError?: (err: unknown) => void;
+  copyLabel?: string;
+}): React.JSX.Element {
+  return (
+    <div className="ca-oauth-url-row">
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="ca-oauth-link"
+        onClick={e => {
+          e.preventDefault();
+          void openExternalUrl(url, onOpenUrl).catch(err => onError?.(err));
+        }}
+      >
+        {url}
+      </a>
+      <CopyButton value={url} label={copyLabel} />
+    </div>
+  );
+}
+
 export function CaDisclosure({
   title,
   defaultOpen = false,
@@ -246,6 +286,37 @@ export function CaDisclosure({
         <span>{open ? '▾' : '▸'} {title}</span>
       </button>
       {open && <div className="ca-disclosure-body">{children}</div>}
+    </div>
+  );
+}
+
+export function CaCardDisclosure({
+  title,
+  subtitle,
+  defaultOpen = false,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}): React.JSX.Element {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className={`ca-section ca-card-disclosure${open ? ' is-open' : ''}`}>
+      <button
+        type="button"
+        className="ca-card-disclosure-head"
+        aria-expanded={open}
+        onClick={() => setOpen(prev => !prev)}
+      >
+        <div className="ca-card-disclosure-text">
+          <span className="ca-field-label">{title}</span>
+          {subtitle && !open ? <span className="ca-muted">{subtitle}</span> : null}
+        </div>
+        <ChevronRight size={15} className={`ca-card-disclosure-chevron${open ? ' is-open' : ''}`} />
+      </button>
+      {open && <div className="ca-card-disclosure-body">{children}</div>}
     </div>
   );
 }

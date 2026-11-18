@@ -4,6 +4,7 @@ import { Check, Plus, RefreshCw, RotateCcw, Search, Star, Trash2 } from 'lucide-
 import { ANTIGRAVITY_PROVIDER_ID } from '../../../center-contract/antigravity.js';
 import { CenterApiError, errorMessage } from './transport';
 import type { CenterApi } from './transport';
+import { openExternalUrl } from './openExternalUrl';
 import {
   CaChips,
   CaDisclosure,
@@ -125,7 +126,13 @@ function providerSortRank(p: Provider): number {
   return p.native ? 100 : 200;
 }
 
-export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
+export function ProvidersTab({
+  api,
+  onOpenExternalUrl,
+}: {
+  api: CenterApi;
+  onOpenExternalUrl?: (url: string) => void | Promise<unknown>;
+}): React.JSX.Element {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -163,6 +170,7 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
   const [validatingProvider, setValidatingProvider] = useState(false);
   const [drawerError, setDrawerError] = useState('');
   const [drawerNotice, setDrawerNotice] = useState('');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   // OAuth flow state
   const [flowId, setFlowId] = useState<string | null>(null);
@@ -289,6 +297,11 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
     setRemovedModels([]);
     setCredential(null);
     setAuthStatus(authByProvider[provider.id] ?? null);
+    setAdvancedOpen(
+      Boolean(
+        provider.baseUrl.trim() || (provider.custom && Object.keys(provider.custom).length > 0),
+      ),
+    );
     setDrawerOpen(true);
     void loadProviderDetails(provider);
   };
@@ -319,6 +332,7 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
     setRemovedModels([]);
     setCredential(null);
     setAuthStatus(null);
+    setAdvancedOpen(false);
     setDrawerOpen(true);
   };
 
@@ -756,17 +770,24 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
     }
   };
 
-  const handleDeleteModel = async (model: Model) => {
+  const handleDeleteModel = async (model: Model, fromModal = false) => {
     if (!edit) return;
     if (!window.confirm(`确定移除模型「${model.name || model.id}」吗？`)) return;
     setDrawerError('');
+    if (fromModal) setModelError('');
+    if (fromModal) setModelSaving(true);
     try {
       await api.deleteModel(edit.id, model.id);
+      if (fromModal) setModelModalOpen(false);
       await loadProviderDetails(edit);
       await refreshPageData();
       setDrawerNotice(`已移除模型 ${model.name || model.id}`);
     } catch (err) {
-      setDrawerError(errorMessage(err, '移除模型失败'));
+      const msg = errorMessage(err, '移除模型失败');
+      if (fromModal) setModelError(msg);
+      else setDrawerError(msg);
+    } finally {
+      if (fromModal) setModelSaving(false);
     }
   };
 
@@ -882,8 +903,10 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
     const count = modelCountByProvider[p.id] ?? 0;
     const auth = authByProvider[p.id];
     const parts: string[] = [];
-    if (p.id === ANTIGRAVITY_PROVIDER_ID && auth?.oauth) {
+    if (auth?.method === 'oauth') {
       parts.push('OAuth 已授权');
+    } else if (p.id === ANTIGRAVITY_PROVIDER_ID && auth && auth.method === 'none') {
+      parts.push('未授权');
     } else if (p.configured || p.credentialRef) {
       parts.push('已配置');
     } else {
@@ -1176,137 +1199,121 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
         variant="drawer"
         wide
       >
-        {edit && (
-          <div className="ca-form-stack">
-            {drawerError && <CaNotice tone="danger">{drawerError}</CaNotice>}
-            {drawerNotice && <CaNotice tone="ok">{drawerNotice}</CaNotice>}
+        {edit && (() => {
+          const supportsOAuth = Boolean(
+            !creating && (authStatus?.oauth || edit.id === ANTIGRAVITY_PROVIDER_ID),
+          );
+          const supportsApiKey =
+            edit.id === ANTIGRAVITY_PROVIDER_ID
+              ? false
+              : !authStatus || authStatus.apiKey !== false;
+          const collapseForOAuth = Boolean(!creating && edit.native && supportsOAuth);
+          const hasCustomOverride = Boolean(
+            edit.baseUrl.trim() || (customJson.trim() && customJson.trim() !== '{}'),
+          );
 
-            {/* OAuth / Antigravity 授权流程 */}
-            {!creating && (authStatus?.oauth || edit.id === ANTIGRAVITY_PROVIDER_ID) && (
-              <div className="ca-section" style={{ padding: 12 }}>
-                <div className="ca-inline-between" style={{ flexWrap: 'wrap' }}>
-                  <div>
-                    <div className="ca-field-label">OAuth 账号授权</div>
-                    <div className="ca-muted">
-                      {authStatus?.method === 'oauth'
-                        ? '已通过 OAuth 授权登录'
-                        : authStatus?.label
-                          ? `未授权 · 可${authStatus.label}`
-                          : '尚未登录'}
-                    </div>
-                  </div>
-                  <div className="ca-inline-row">
-                    {authStatus?.method === 'oauth' ? (
-                      <button
-                        type="button"
-                        className="ca-btn ca-btn-sm"
-                        disabled={authBusy}
-                        onClick={() => void handleOAuthLogout()}
-                      >
-                        退出授权
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        className="ca-btn ca-btn-primary ca-btn-sm"
-                        disabled={authBusy || flow?.status === 'pending'}
-                        onClick={() => void handleStartOAuth()}
-                      >
-                        {flow?.status === 'pending' ? '授权进行中…' : '登录 OAuth 授权'}
-                      </button>
-                    )}
-                  </div>
-                </div>
+          const baseUrlField = (
+            <div className="ca-field">
+              <label className="ca-field-label">API 地址 (Base URL)</label>
+              <input
+                type="url"
+                className="ca-input"
+                placeholder={edit.native ? '留空保持内置默认地址' : 'https://api.example.com/v1'}
+                value={edit.baseUrl}
+                onChange={e => setEdit({ ...edit, baseUrl: e.target.value })}
+              />
+            </div>
+          );
 
-                {flow && flow.status === 'pending' && (
-                  <div className="ca-form-stack" style={{ marginTop: 10 }}>
-                    {flow.events.map((ev, idx) => (
-                      <div key={idx} className="ca-cred-box">
-                        {ev.message && <div style={{ fontSize: 13 }}>{ev.message}</div>}
-                        {ev.instructions && <div className="ca-muted">{ev.instructions}</div>}
-                        {(ev.url || ev.verificationUri) && (
-                          <div className="ca-inline-row" style={{ marginTop: 6, flexWrap: 'wrap' }}>
-                            <a
-                              href={ev.url || ev.verificationUri}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="ca-btn ca-btn-sm"
-                            >
-                              打开授权页面
-                            </a>
-                            {ev.userCode && (
-                              <>
-                                <span className="ca-pill ca-pill-info ca-mono">验证码：{ev.userCode}</span>
-                                <CopyButton value={ev.userCode} label="复制验证码" />
-                              </>
-                            )}
-                          </div>
-                        )}
-                        {ev.links?.map((lk, lIdx) => (
-                          <div key={lIdx} style={{ marginTop: 4 }}>
-                            <a href={lk.url} target="_blank" rel="noreferrer" className="ca-muted">
-                              {lk.label}
-                            </a>
-                          </div>
-                        ))}
-                      </div>
-                    ))}
+          const apiKeyField = supportsApiKey ? (
+            <div className="ca-field">
+              <div className="ca-field-head">
+                <label className="ca-field-label">API Key</label>
+                <span className={`ca-pill ${credential?.configured ? 'ca-pill-ok' : 'ca-pill-muted'}`}>
+                  {credential?.configured ? '已保存密钥（不回显）' : '未配置密钥'}
+                </span>
+              </div>
+              <input
+                type="password"
+                className="ca-input"
+                autoComplete="new-password"
+                placeholder={credential?.configured ? '输入新密钥以替换现有密钥' : '粘贴 API Key'}
+                value={keyValue}
+                onChange={e => setKeyValue(e.target.value)}
+              />
+            </div>
+          ) : null;
 
-                    {flow.prompt && (
-                      <div className="ca-cred-box">
-                        <div className="ca-field-label">{flow.prompt.message}</div>
-                        {flow.prompt.options && flow.prompt.options.length > 0 ? (
-                          <div className="ca-inline-row" style={{ marginTop: 6, flexWrap: 'wrap' }}>
-                            {flow.prompt.options.map(opt => (
-                              <button
-                                key={opt.id}
-                                type="button"
-                                className="ca-btn ca-btn-sm"
-                                disabled={authBusy}
-                                onClick={() => void handleSubmitPrompt(opt.id)}
-                              >
-                                {opt.label}
-                              </button>
-                            ))}
-                          </div>
-                        ) : (
-                          <div className="ca-inline-row" style={{ marginTop: 6 }}>
-                            <input
-                              type="text"
-                              className="ca-input"
-                              placeholder={flow.prompt.placeholder || '粘贴授权码或回调 URL'}
-                              value={promptInput}
-                              onChange={e => setPromptInput(e.target.value)}
-                            />
-                            <button
-                              type="button"
-                              className="ca-btn ca-btn-primary ca-btn-sm"
-                              disabled={authBusy || !promptInput.trim()}
-                              onClick={() => void handleSubmitPrompt(promptInput)}
-                            >
-                              提交
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    )}
+          const customJsonField = (
+            <div className="ca-field">
+              <label className="ca-field-label">高级协议覆盖 (models.json)</label>
+              <textarea
+                rows={4}
+                className="ca-textarea ca-mono"
+                value={customJson}
+                onChange={e => setCustomJson(e.target.value)}
+              />
+              <p className="ca-field-help">
+                对应 Pi models.json 服务商级附加字段（如 headers、compat）；保持 {'{}'} 即可。
+              </p>
+            </div>
+          );
 
-                    <div className="ca-inline-end">
-                      <button
-                        type="button"
-                        className="ca-btn ca-btn-ghost ca-btn-sm"
-                        onClick={() => void handleCancelOAuth()}
-                      >
-                        取消授权
-                      </button>
-                    </div>
-                  </div>
+          const providerActionRow = (
+            <div className="ca-inline-between ca-provider-form-actions">
+              <div>
+                {!creating && (
+                  <button
+                    type="button"
+                    className="ca-btn ca-btn-danger ca-btn-sm"
+                    disabled={savingProvider}
+                    onClick={() => void handleDeleteProvider()}
+                  >
+                    <Trash2 size={13} />
+                    <span>{edit.native ? '重置配置' : '删除服务商'}</span>
+                  </button>
                 )}
               </div>
-            )}
+              <div className="ca-inline-row">
+                {!creating && (
+                  <button
+                    type="button"
+                    className="ca-btn ca-btn-sm"
+                    disabled={savingProvider || validatingProvider}
+                    onClick={() => void handleValidateOnly()}
+                  >
+                    {validatingProvider ? '验证中…' : '验证连接'}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="ca-btn ca-btn-primary ca-btn-sm"
+                  disabled={savingProvider || validatingProvider}
+                  onClick={() => void persistProvider(true)}
+                >
+                  {savingProvider ? '保存中…' : '保存并验证'}
+                </button>
+              </div>
+            </div>
+          );
 
-            {/* 基础连接与凭据表单（统一通过「保存并验证」落库） */}
-            <div className="ca-form-stack">
+          const connectionSection = collapseForOAuth ? (
+            <details
+              key={edit.id}
+              className="ca-section ca-advanced-collapse"
+              open={advancedOpen}
+              onToggle={e => setAdvancedOpen(e.currentTarget.open)}
+            >
+              <summary className="ca-advanced-summary">高级连接与协议覆盖</summary>
+              <div className="ca-advanced-body ca-form-stack">
+                {baseUrlField}
+                {apiKeyField}
+                {customJsonField}
+                {providerActionRow}
+              </div>
+            </details>
+          ) : (
+            <div className="ca-section ca-section-body ca-form-stack">
               {!edit.native && (
                 <>
                   <div className="ca-grid-2">
@@ -1350,102 +1357,43 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
                       />
                     </div>
                   )}
+                  {baseUrlField}
                 </>
               )}
 
-              <div className="ca-field">
-                <label className="ca-field-label">API 地址 (Base URL)</label>
-                <input
-                  type="url"
-                  className="ca-input"
-                  placeholder={edit.native ? '留空保持内置默认地址' : 'https://api.example.com/v1'}
-                  value={edit.baseUrl}
-                  onChange={e => setEdit({ ...edit, baseUrl: e.target.value })}
-                />
-              </div>
+              {apiKeyField}
 
-              {(!authStatus || authStatus.apiKey !== false) && (
-                <div className="ca-field">
-                  <div className="ca-field-head">
-                    <label className="ca-field-label">API Key</label>
-                    <span className={`ca-pill ${credential?.configured ? 'ca-pill-ok' : 'ca-pill-muted'}`}>
-                      {credential?.configured ? '已保存密钥（不回显）' : '未配置密钥'}
-                    </span>
+              {edit.native ? (
+                <CaDisclosure
+                  key={`${edit.id}-adv`}
+                  title="自定义接口地址与协议覆盖"
+                  defaultOpen={hasCustomOverride}
+                >
+                  <div className="ca-form-stack">
+                    {baseUrlField}
+                    {customJsonField}
                   </div>
-                  <input
-                    type="password"
-                    className="ca-input"
-                    autoComplete="new-password"
-                    placeholder={credential?.configured ? '输入新密钥以替换现有密钥' : '粘贴 API Key'}
-                    value={keyValue}
-                    onChange={e => setKeyValue(e.target.value)}
-                  />
-                </div>
+                </CaDisclosure>
+              ) : (
+                <CaDisclosure
+                  key={`${edit.id}-json`}
+                  title="高级协议覆盖 (models.json)"
+                  defaultOpen={Boolean(customJson.trim() && customJson.trim() !== '{}')}
+                >
+                  {customJsonField}
+                </CaDisclosure>
               )}
 
-              <CaDisclosure title="高级协议覆盖 (models.json)">
-                <div className="ca-field">
-                  <textarea
-                    rows={4}
-                    className="ca-textarea ca-mono"
-                    value={customJson}
-                    onChange={e => setCustomJson(e.target.value)}
-                  />
-                  <p className="ca-field-help">对应 Pi models.json 服务商级附加字段（如 headers、compat）；保持 {'{}'} 即可。</p>
-                </div>
-              </CaDisclosure>
-
-              <div className="ca-inline-between" style={{ flexWrap: 'wrap', paddingTop: 4 }}>
-                <div>
-                  {!creating && (
-                    <button
-                      type="button"
-                      className="ca-btn ca-btn-danger ca-btn-sm"
-                      disabled={savingProvider}
-                      onClick={() => void handleDeleteProvider()}
-                    >
-                      <Trash2 size={13} />
-                      <span>{edit.native ? '重置配置' : '删除服务商'}</span>
-                    </button>
-                  )}
-                </div>
-                <div className="ca-inline-row">
-                  {!creating && (
-                    <button
-                      type="button"
-                      className="ca-btn ca-btn-sm"
-                      disabled={savingProvider || validatingProvider}
-                      onClick={() => void handleValidateOnly()}
-                    >
-                      {validatingProvider ? '验证中…' : '验证连接'}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="ca-btn ca-btn-primary ca-btn-sm"
-                    disabled={savingProvider || validatingProvider}
-                    onClick={() => void persistProvider(true)}
-                  >
-                    {savingProvider ? '保存中…' : '保存并验证'}
-                  </button>
-                </div>
-              </div>
+              {providerActionRow}
             </div>
+          );
 
-            {/* 模型列表管理 */}
-            {!creating && (
-              <div className="ca-section" style={{ marginTop: 6 }}>
-                <div className="ca-section-head" style={{ flexWrap: 'wrap' }}>
+          const modelsSection = !creating ? (
+            <div className="ca-section">
+              <div className="ca-section-head ca-models-head">
+                <div className="ca-models-head-top ca-models-toolbar">
                   <span className="ca-section-title">模型列表 ({models.length})</span>
-                  <div className="ca-inline-row" style={{ flexWrap: 'wrap' }}>
-                    <input
-                      type="search"
-                      className="ca-input"
-                      style={{ width: 140, paddingTop: 4, paddingBottom: 4 }}
-                      placeholder="筛选模型…"
-                      value={modelQuery}
-                      onChange={e => setModelQuery(e.target.value)}
-                    />
+                  <div className="ca-inline-row ca-models-actions">
                     <button type="button" className="ca-btn ca-btn-sm" onClick={openDiscoverModal}>
                       拉取目录
                     </button>
@@ -1461,68 +1409,308 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
                     </button>
                   </div>
                 </div>
+                {(models.length > 0 || Boolean(modelQuery)) && (
+                  <div className="ca-models-search">
+                    <Search size={14} className="ca-models-search-icon" />
+                    <input
+                      type="search"
+                      className="ca-input"
+                      placeholder="筛选模型名称或 ID…"
+                      value={modelQuery}
+                      onChange={e => setModelQuery(e.target.value)}
+                    />
+                  </div>
+                )}
+              </div>
 
-                <div className="ca-list">
-                  {filteredDrawerModels.length === 0 ? (
-                    <div className="ca-empty">暂无模型，点击「拉取目录」或「新增模型」添加</div>
-                  ) : (
-                    filteredDrawerModels.map(m => {
-                      const ref = `${edit.id}/${m.id}`;
-                      const isStarred = starredSet.has(ref);
-                      return (
-                        <div key={m.id} className="ca-row">
-                          <div className="ca-row-main">
-                            <div className="ca-row-title">
-                              <span>{m.name || m.id}</span>
-                              {m.reasoning && <span className="ca-pill ca-pill-info">推理</span>}
-                            </div>
-                            <div className="ca-row-sub ca-mono ca-num">
-                              {m.id} · {Math.round(m.contextWindow / 1000)}k / {Math.round(m.maxTokens / 1000)}k
-                            </div>
+              <div className="ca-list">
+                {filteredDrawerModels.length === 0 ? (
+                  <div className="ca-empty">
+                    {models.length === 0
+                      ? '暂无模型，点击「拉取目录」或「新增模型」添加'
+                      : '没有匹配的模型'}
+                  </div>
+                ) : (
+                  filteredDrawerModels.map(m => {
+                    const ref = `${edit.id}/${m.id}`;
+                    const isStarred = starredSet.has(ref);
+                    return (
+                      <div
+                        key={m.id}
+                        className="ca-row is-clickable ca-model-row"
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => openEditModelModal(m)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            openEditModelModal(m);
+                          }
+                        }}
+                      >
+                        <div className="ca-row-main">
+                          <div className="ca-row-title ca-model-row-title">
+                            <span className="ca-model-row-name">{m.name || m.id}</span>
+                            {m.reasoning && <span className="ca-pill ca-pill-info">推理</span>}
                           </div>
-                          <div className="ca-row-actions">
-                            <button
-                              type="button"
-                              className="ca-btn ca-btn-ghost ca-btn-icon"
-                              aria-label={isStarred ? '取消收藏' : '收藏'}
-                              onClick={() => void handleToggleStar(ref, !isStarred)}
-                            >
-                              <Star
-                                size={14}
-                                fill={isStarred ? 'currentColor' : 'none'}
-                                color={isStarred ? '#f59e0b' : 'currentColor'}
-                              />
-                            </button>
-                            <CaSwitch
-                              checked={m.enabled}
-                              label={`启用模型 ${m.name || m.id}`}
-                              onChange={next => void handleToggleModelEnabled(m, next)}
-                            />
-                            <button
-                              type="button"
-                              className="ca-btn ca-btn-sm"
-                              onClick={() => openEditModelModal(m)}
-                            >
-                              编辑
-                            </button>
-                            <button
-                              type="button"
-                              className="ca-btn ca-btn-ghost ca-btn-icon"
-                              aria-label="移除模型"
-                              onClick={() => void handleDeleteModel(m)}
-                            >
-                              <Trash2 size={14} />
-                            </button>
+                          <div className="ca-row-sub ca-mono ca-num">
+                            {m.id} · {Math.round(m.contextWindow / 1000)}k / {Math.round(m.maxTokens / 1000)}k
                           </div>
                         </div>
-                      );
-                    })
+                        <div
+                          className="ca-row-actions"
+                          onClick={e => e.stopPropagation()}
+                          onKeyDown={e => e.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            className="ca-btn ca-btn-ghost ca-btn-icon"
+                            aria-label={isStarred ? '取消收藏' : '收藏'}
+                            onClick={() => void handleToggleStar(ref, !isStarred)}
+                          >
+                            <Star
+                              size={14}
+                              fill={isStarred ? 'currentColor' : 'none'}
+                              color={isStarred ? '#f59e0b' : 'currentColor'}
+                            />
+                          </button>
+                          <CaSwitch
+                            checked={m.enabled}
+                            label={`启用模型 ${m.name || m.id}`}
+                            onChange={next => void handleToggleModelEnabled(m, next)}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          ) : null;
+
+          return (
+            <div className="ca-form-stack">
+              {drawerError && <CaNotice tone="danger">{drawerError}</CaNotice>}
+              {drawerNotice && <CaNotice tone="ok">{drawerNotice}</CaNotice>}
+
+              {/* OAuth / Antigravity 授权流程 */}
+              {supportsOAuth && (
+                <div className="ca-section ca-oauth-card">
+                  <div className="ca-oauth-head">
+                    <div className="ca-oauth-head-main">
+                      <div className="ca-field-label">OAuth 账号授权</div>
+                      <div className="ca-muted">
+                        {flow?.status === 'pending'
+                          ? '正在等待浏览器完成登录授权…'
+                          : authStatus?.method === 'oauth'
+                            ? '已通过 OAuth 授权登录'
+                            : authStatus?.label
+                              ? `未授权 · 可${authStatus.label}`
+                              : '尚未登录'}
+                      </div>
+                    </div>
+                    <div className="ca-inline-row">
+                      {flow?.status === 'pending' ? (
+                        <button
+                          type="button"
+                          className="ca-btn ca-btn-sm"
+                          onClick={() => void handleCancelOAuth()}
+                        >
+                          取消授权
+                        </button>
+                      ) : authStatus?.method === 'oauth' ? (
+                        <button
+                          type="button"
+                          className="ca-btn ca-btn-sm"
+                          disabled={authBusy}
+                          onClick={() => void handleOAuthLogout()}
+                        >
+                          退出授权
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="ca-btn ca-btn-primary ca-btn-sm"
+                          disabled={authBusy}
+                          onClick={() => void handleStartOAuth()}
+                        >
+                          登录 OAuth 授权
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {flow && flow.status === 'pending' && (
+                    <div className="ca-oauth-flow">
+                      {flow.events.length === 0 && !flow.prompt && (
+                        <div className="ca-muted">正在获取授权链接…</div>
+                      )}
+
+                      {flow.events.map((ev, idx) => {
+                        const targetUrl = ev.url || ev.verificationUri;
+                        if (targetUrl) {
+                          return (
+                            <div key={idx} className="ca-oauth-step">
+                              <div className="ca-oauth-step-label">
+                                {ev.instructions || ev.message || '1. 点击下方链接在系统默认浏览器中完成登录：'}
+                              </div>
+                              {ev.userCode && (
+                                <div className="ca-inline-row" style={{ flexWrap: 'wrap' }}>
+                                  <span className="ca-muted">一次性验证码：</span>
+                                  <span className="ca-pill ca-pill-info ca-mono">{ev.userCode}</span>
+                                  <CopyButton value={ev.userCode} label="复制验证码" />
+                                </div>
+                              )}
+                              <div className="ca-oauth-url-row">
+                                <a
+                                  href={targetUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="ca-oauth-link"
+                                  onClick={e => {
+                                    e.preventDefault();
+                                    void openExternalUrl(targetUrl, onOpenExternalUrl).catch(err =>
+                                      setDrawerError(
+                                        errorMessage(err, '无法打开系统默认浏览器，请复制链接手动打开'),
+                                      ),
+                                    );
+                                  }}
+                                >
+                                  {targetUrl}
+                                </a>
+                                <CopyButton value={targetUrl} />
+                              </div>
+                              {ev.links?.map((lk, lIdx) => (
+                                <div key={lIdx}>
+                                  <a
+                                    href={lk.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="ca-oauth-inline-link"
+                                    onClick={e => {
+                                      e.preventDefault();
+                                      void openExternalUrl(lk.url, onOpenExternalUrl).catch(err =>
+                                        setDrawerError(errorMessage(err, '无法打开系统默认浏览器')),
+                                      );
+                                    }}
+                                  >
+                                    {lk.label || lk.url}
+                                  </a>
+                                </div>
+                              ))}
+                            </div>
+                          );
+                        }
+                        return (
+                          <div key={idx} className="ca-oauth-step">
+                            {ev.message && <div className="ca-oauth-msg">{ev.message}</div>}
+                            {ev.instructions && <div className="ca-oauth-hint">{ev.instructions}</div>}
+                            {ev.userCode && (
+                              <div className="ca-inline-row" style={{ flexWrap: 'wrap' }}>
+                                <span className="ca-muted">一次性验证码：</span>
+                                <span className="ca-pill ca-pill-info ca-mono">{ev.userCode}</span>
+                                <CopyButton value={ev.userCode} label="复制验证码" />
+                              </div>
+                            )}
+                            {ev.links?.map((lk, lIdx) => (
+                              <div key={lIdx}>
+                                <a
+                                  href={lk.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="ca-oauth-inline-link"
+                                  onClick={e => {
+                                    e.preventDefault();
+                                    void openExternalUrl(lk.url, onOpenExternalUrl).catch(err =>
+                                      setDrawerError(errorMessage(err, '无法打开系统默认浏览器')),
+                                    );
+                                  }}
+                                >
+                                  {lk.label || lk.url}
+                                </a>
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })}
+
+                      {flow.prompt && (
+                        <div className="ca-oauth-step ca-oauth-prompt">
+                          {flow.prompt.options && flow.prompt.options.length > 0 ? (
+                            <>
+                              <div className="ca-oauth-step-label">
+                                {flow.prompt.message || '请选择登录授权方式：'}
+                              </div>
+                              <div className="ca-inline-row" style={{ flexWrap: 'wrap' }}>
+                                {flow.prompt.options.map(opt => (
+                                  <button
+                                    key={opt.id}
+                                    type="button"
+                                    className="ca-btn ca-btn-sm"
+                                    disabled={authBusy}
+                                    onClick={() => void handleSubmitPrompt(opt.id)}
+                                  >
+                                    {opt.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className="ca-oauth-step-label">
+                                {flow.prompt.message
+                                  ? flow.prompt.message.startsWith('2.')
+                                    ? flow.prompt.message
+                                    : `2. ${flow.prompt.message}`
+                                  : '2. 粘贴授权码或跳转后的完整回调地址：'}
+                              </div>
+                              <form
+                                className="ca-oauth-input-row"
+                                onSubmit={e => {
+                                  e.preventDefault();
+                                  if (!authBusy && promptInput.trim()) {
+                                    void handleSubmitPrompt(promptInput);
+                                  }
+                                }}
+                              >
+                                <input
+                                  type="text"
+                                  className="ca-input"
+                                  placeholder={flow.prompt.placeholder || '粘贴授权码或回调 URL'}
+                                  value={promptInput}
+                                  onChange={e => setPromptInput(e.target.value)}
+                                />
+                                <button
+                                  type="submit"
+                                  className="ca-btn ca-btn-primary ca-btn-sm"
+                                  disabled={authBusy || !promptInput.trim()}
+                                >
+                                  提交
+                                </button>
+                              </form>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
-              </div>
-            )}
-          </div>
-        )}
+              )}
+
+              {collapseForOAuth ? (
+                <>
+                  {modelsSection}
+                  {connectionSection}
+                </>
+              ) : (
+                <>
+                  {connectionSection}
+                  {modelsSection}
+                </>
+              )}
+            </div>
+          );
+        })()}
       </CaModal>
 
       {/* 新增 / 编辑自定义模型弹窗（极简直观字段 + 折叠高级项） */}
@@ -1630,17 +1818,32 @@ export function ProvidersTab({ api }: { api: CenterApi }): React.JSX.Element {
               />
             </CaDisclosure>
 
-            <div className="ca-form-actions">
-              <button
-                type="button"
-                className="ca-btn"
-                onClick={() => setModelModalOpen(false)}
-              >
-                取消
-              </button>
-              <button type="submit" className="ca-btn ca-btn-primary" disabled={modelSaving}>
-                {modelSaving ? '保存中…' : '保存模型'}
-              </button>
+            <div className="ca-form-actions ca-form-actions-between">
+              <div>
+                {!modelCreating && (
+                  <button
+                    type="button"
+                    className="ca-btn ca-btn-danger ca-btn-sm"
+                    disabled={modelSaving}
+                    onClick={() => void handleDeleteModel(modelDraft, true)}
+                  >
+                    <Trash2 size={13} />
+                    <span>移除该模型</span>
+                  </button>
+                )}
+              </div>
+              <div className="ca-inline-row">
+                <button
+                  type="button"
+                  className="ca-btn"
+                  onClick={() => setModelModalOpen(false)}
+                >
+                  取消
+                </button>
+                <button type="submit" className="ca-btn ca-btn-primary" disabled={modelSaving}>
+                  {modelSaving ? '保存中…' : '保存模型'}
+                </button>
+              </div>
             </div>
           </form>
         )}

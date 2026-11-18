@@ -98,6 +98,9 @@ function ReadyShell({
           transport={webTransport}
           activeTab={currentTab}
           onTabChange={handleTabChange}
+          onOpenExternalUrl={url => {
+            window.open(url, '_blank', 'noopener,noreferrer');
+          }}
           renderQr={(value, label) => <QrCode value={value} label={label} />}
         />
       </div>

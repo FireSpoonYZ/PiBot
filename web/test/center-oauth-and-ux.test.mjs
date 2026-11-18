@@ -17,6 +17,7 @@ import { errorStatus } from '../../center-server/server.js';
 import { connectCenter } from '../../host-core/center-client.js';
 import { readScannedCode } from '../src/pairingCode.ts';
 import { formatBotModelSummary } from '../src/bot-settings/modelDisplay.ts';
+import { openExternalUrl } from '../src/center-admin/openExternalUrl.ts';
 
 // Fastify 只安装在 center-server 包内，按该包解析。
 const Fastify = createRequire(new URL('../../center-server/package.json', import.meta.url))('fastify');
@@ -622,5 +623,173 @@ test('connectCenter executes OAuth Bearer adminRequest calls in parallel over Ke
   } finally {
     await client.close();
     await new Promise(resolve => server.close(() => resolve()));
+  }
+});
+
+test('openExternalUrl dispatches across handler, AndroidBridge, Tauri fallback chain, and Web fallback', async () => {
+  const prevWindowDesc = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const prevDocumentDesc = Object.getOwnPropertyDescriptor(globalThis, 'document');
+
+  const setGlobal = (key, value) => {
+    Object.defineProperty(globalThis, key, {
+      value,
+      configurable: true,
+      writable: true,
+      enumerable: true,
+    });
+  };
+
+  try {
+    // 1. Empty / whitespace URLs are ignored without touching any opener
+    let handlerCalls = [];
+    let webOpenCalls = [];
+    let bridgeCalls = [];
+    setGlobal('document', undefined);
+    setGlobal('window', {
+      AndroidBridge: {
+        openExternalUrl: u => bridgeCalls.push(u),
+      },
+      open: (...args) => {
+        webOpenCalls.push(args);
+        return {};
+      },
+    });
+    await openExternalUrl('');
+    await openExternalUrl('   \t\n  ', u => {
+      handlerCalls.push(u);
+    });
+    assert.deepEqual(handlerCalls, []);
+    assert.deepEqual(bridgeCalls, []);
+    assert.deepEqual(webOpenCalls, []);
+
+    // 2. Explicit handler takes precedence over AndroidBridge / window.open
+    await openExternalUrl('  https://example.com/oauth?step=1  ', u => {
+      handlerCalls.push(u);
+    });
+    assert.deepEqual(handlerCalls, ['https://example.com/oauth?step=1']);
+    assert.deepEqual(bridgeCalls, []);
+    assert.deepEqual(webOpenCalls, []);
+
+    // 3. AndroidBridge.openExternalUrl takes precedence over Tauri and Web
+    const tauriInvokes = [];
+    setGlobal('window', {
+      AndroidBridge: {
+        openExternalUrl: u => bridgeCalls.push(u),
+      },
+      __TAURI_INTERNALS__: {
+        invoke: async (cmd, args) => {
+          tauriInvokes.push([cmd, args]);
+        },
+      },
+      open: (...args) => {
+        webOpenCalls.push(args);
+        return {};
+      },
+    });
+    await openExternalUrl('  https://example.com/android  ');
+    assert.deepEqual(bridgeCalls, ['https://example.com/android']);
+    assert.deepEqual(tauriInvokes, []);
+    assert.deepEqual(webOpenCalls, []);
+
+    // 4a. Tauri __TAURI_INTERNALS__.invoke falls back from opener/shell errors to desktop_open_center
+    tauriInvokes.length = 0;
+    setGlobal('window', {
+      __TAURI_INTERNALS__: {
+        invoke: async (cmd, args) => {
+          tauriInvokes.push([cmd, args]);
+          if (cmd === 'plugin:opener|open_url' || cmd === 'plugin:shell|open') {
+            throw new Error(`command ${cmd} unavailable`);
+          }
+        },
+      },
+      open: (...args) => {
+        webOpenCalls.push(args);
+        return {};
+      },
+    });
+    await openExternalUrl('https://example.com/desktop');
+    assert.deepEqual(tauriInvokes, [
+      ['plugin:opener|open_url', { url: 'https://example.com/desktop' }],
+      ['plugin:shell|open', { path: 'https://example.com/desktop' }],
+      ['desktop_open_center', { url: 'https://example.com/desktop' }],
+    ]);
+    assert.deepEqual(webOpenCalls, []);
+
+    // 4b. Tauri __TAURI_INTERNALS__.invoke falls back further to mobile_host_request openCenter
+    tauriInvokes.length = 0;
+    setGlobal('window', {
+      __TAURI_INTERNALS__: {
+        invoke: async (cmd, args) => {
+          tauriInvokes.push([cmd, args]);
+          if (cmd !== 'mobile_host_request') {
+            throw new Error(`command ${cmd} unavailable`);
+          }
+        },
+      },
+      open: (...args) => {
+        webOpenCalls.push(args);
+        return {};
+      },
+    });
+    await openExternalUrl('https://example.com/mobile');
+    assert.deepEqual(tauriInvokes, [
+      ['plugin:opener|open_url', { url: 'https://example.com/mobile' }],
+      ['plugin:shell|open', { path: 'https://example.com/mobile' }],
+      ['desktop_open_center', { url: 'https://example.com/mobile' }],
+      ['mobile_host_request', { method: 'openCenter', params: { url: 'https://example.com/mobile' } }],
+    ]);
+    assert.deepEqual(webOpenCalls, []);
+
+    // 5. Standard Web environment falls back to window.open(url, '_blank', 'noopener,noreferrer')
+    const anchorClicks = [];
+    setGlobal('document', {
+      createElement: tag => {
+        const el = { tag, href: '', target: '', rel: '', clicked: false };
+        el.click = () => {
+          el.clicked = true;
+          anchorClicks.push(el);
+        };
+        return el;
+      },
+    });
+    setGlobal('window', {
+      open: (...args) => {
+        webOpenCalls.push(args);
+        return {};
+      },
+    });
+    await openExternalUrl('https://example.com/web');
+    assert.deepEqual(webOpenCalls, [['https://example.com/web', '_blank', 'noopener,noreferrer']]);
+    assert.deepEqual(anchorClicks, []);
+
+    // 5b. Blocked popup (window.open returns null) triggers synthetic <a target="_blank"> click
+    webOpenCalls.length = 0;
+    setGlobal('window', {
+      open: (...args) => {
+        webOpenCalls.push(args);
+        return null;
+      },
+    });
+    await openExternalUrl('https://example.com/web-popup-blocked');
+    assert.deepEqual(webOpenCalls, [
+      ['https://example.com/web-popup-blocked', '_blank', 'noopener,noreferrer'],
+    ]);
+    assert.equal(anchorClicks.length, 1);
+    assert.equal(anchorClicks[0].tag, 'a');
+    assert.equal(anchorClicks[0].href, 'https://example.com/web-popup-blocked');
+    assert.equal(anchorClicks[0].target, '_blank');
+    assert.equal(anchorClicks[0].rel, 'noopener noreferrer');
+    assert.equal(anchorClicks[0].clicked, true);
+  } finally {
+    if (prevWindowDesc) {
+      Object.defineProperty(globalThis, 'window', prevWindowDesc);
+    } else {
+      delete globalThis.window;
+    }
+    if (prevDocumentDesc) {
+      Object.defineProperty(globalThis, 'document', prevDocumentDesc);
+    } else {
+      delete globalThis.document;
+    }
   }
 });

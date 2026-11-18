@@ -1,7 +1,7 @@
-// 设置与归档面板：极简 4 栏架构（中心连接 / 中心管理 / 本机与权限 / 外观与通用）。
+// 桌面客户端设置分栏。
 import * as Dialog from '@radix-ui/react-dialog';
 import {
-  Check, Copy, Globe, Pencil, RefreshCw, RotateCcw, Server, ShieldCheck, Sliders, Trash2, X,
+  Archive, Check, Copy, Download, Globe, Pencil, RefreshCw, RotateCcw, Server, ShieldCheck, Sliders, Trash2, X,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { DesktopClientStatus, DesktopUiProfile } from '../../../host-core/desktop-client.js';
@@ -9,14 +9,15 @@ import type { BotDirectoryEntry, DevicesDirectoryItem } from '../../../host-core
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import { openCenterManagement, type DesktopTheme } from './CenterGate';
 import { HostServiceSection, useHostService } from './HostServiceSection';
-import { ClientUpdateSection, useClientUpdateSummary } from '../../../web/src/ClientUpdateSection';
+import { ClientUpdateSection } from '../../../web/src/ClientUpdateSection';
+import { Switch } from '../../../web/src/bot-settings/primitives';
 import { CenterAdminPanel, createBrokerCenterTransport } from '../../../web/src/center-admin';
 import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
 import { botAvatarKey } from '../../../web/src/botAvatarSync';
 import { ErrorNotice, useHideToolOutput } from '../../../web/src/ui';
 import { archiveExpiryAt, type BotChatsArchiveBridge } from './BotChats';
 
-export type SettingsTab = 'connection' | 'center-admin' | 'runtime' | 'general';
+export type SettingsTab = 'connection' | 'center-admin' | 'runtime' | 'general' | 'archive' | 'updates';
 export type CenterAdminTab = 'providers' | 'capabilities' | 'devices' | 'vault' | 'ops';
 
 interface ProfileFormState {
@@ -82,7 +83,6 @@ export interface SettingsPanelProps {
   onDeviceError(message: string): void;
   actionError: string | null;
   onDismissActionError(): void;
-  archiveOpen: boolean;
   archiveBridge?: BotChatsArchiveBridge | null;
   onOpenArchivedBotHistory?(bot: BotDirectoryEntry): void;
 }
@@ -93,7 +93,9 @@ const TAB_META: Array<{ id: SettingsTab; label: string; desc: string }> = [
   { id: 'connection', label: '中心连接', desc: '查看中心连接状态、当前设备或更换绑定' },
   { id: 'center-admin', label: '中心管理', desc: '免密管理模型服务商、扩展插件、设备与全局密码库' },
   { id: 'runtime', label: '本机与权限', desc: '本机后台服务状态、开机自启与高级排障' },
-  { id: 'general', label: '外观与通用', desc: '主题模式、对话显示、已归档智能体与客户端更新' },
+  { id: 'general', label: '外观与通用', desc: '主题模式与对话显示' },
+  { id: 'archive', label: '已归档智能体', desc: '查看历史对话、恢复或删除已归档的智能体' },
+  { id: 'updates', label: '客户端更新', desc: '查看当前版本、检查并安装更新' },
 ];
 
 function DeviceRow({ item, isRelay, local, online, busy, lastObservedAt, onRename, onError }: {
@@ -196,12 +198,15 @@ function ArchivedBots({ bridge, onOpenHistory }: {
   };
 
   return (
-    <section className="settings-section archived-bots-subpage">
-      <div className="section-head">
-        <h4>已归档智能体（{items.length}）</h4>
-        <button type="button" className="secondary-button" disabled={!bridge?.online || bridge.loading} onClick={() => bridge?.refresh()}>
-          <RefreshCw size={13} aria-hidden /> 刷新
-        </button>
+    <section className="settings-pane">
+      <div className="settings-pane-header">
+        <div className="section-head">
+          <h3>已归档智能体（{items.length}）</h3>
+          <button type="button" className="secondary-button" disabled={!bridge?.online || bridge.loading} onClick={() => bridge?.refresh()}>
+            <RefreshCw size={13} aria-hidden /> 刷新
+          </button>
+        </div>
+        <p className="metadata">归档后的智能体将在 14 天后自动清理。</p>
       </div>
       <ErrorNotice compact error={error} onDismiss={() => setError('')} />
       <ErrorNotice compact error={bridge?.error} />
@@ -408,14 +413,13 @@ function CustomCaSection({ centerStatus, onSaveCenterCa }: Pick<SettingsPanelPro
   );
 }
 
-function TabbedSettings(props: SettingsPanelProps) {
+export function SettingsPanel(props: SettingsPanelProps) {
   const { activeTab, onTabChange, centerStatus, devices, transportConnected, devicesIsRelay, identity, api } = props;
   const [hideToolOutput, setHideToolOutput] = useHideToolOutput();
   const [copiedClientId, setCopiedClientId] = useState(false);
   const [centerBusy, setCenterBusy] = useState<'rebind' | 'disconnect' | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const hostService = useHostService();
-  const updateSummary = useClientUpdateSummary();
 
   useEffect(() => {
     if (bodyRef.current) bodyRef.current.scrollTop = 0;
@@ -475,6 +479,8 @@ function TabbedSettings(props: SettingsPanelProps) {
     if (id === 'connection') return <Globe size={15} aria-hidden />;
     if (id === 'center-admin') return <ShieldCheck size={15} aria-hidden />;
     if (id === 'runtime') return <Server size={15} aria-hidden />;
+    if (id === 'archive') return <Archive size={15} aria-hidden />;
+    if (id === 'updates') return <Download size={15} aria-hidden />;
     return <Sliders size={15} aria-hidden />;
   };
 
@@ -580,6 +586,7 @@ function TabbedSettings(props: SettingsPanelProps) {
                   initialTab={props.centerAdminTab}
                   centerUrl={centerStatus?.centerUrl}
                   onOpenExternal={() => void openCenterManagement(centerStatus?.centerUrl)}
+                  onOpenExternalUrl={url => openCenterManagement(url)}
                   onConfigureBot={props.onConfigureBot}
                 />
               </div>
@@ -659,7 +666,7 @@ function TabbedSettings(props: SettingsPanelProps) {
             <div className="settings-pane">
               <div className="settings-pane-header">
                 <h3>外观与通用</h3>
-                <p className="metadata">界面主题、对话展示偏好、归档智能体与客户端版本。</p>
+                <p className="metadata">设置界面主题与对话显示偏好。</p>
               </div>
 
               <section className="settings-section">
@@ -682,44 +689,27 @@ function TabbedSettings(props: SettingsPanelProps) {
                       <span>隐藏工具调用过程</span>
                       <span className="metadata" style={{ display: 'block', fontSize: 12 }}>默认折叠工具调用过程与原始输出</span>
                     </span>
-                    <input
-                      type="checkbox"
-                      checked={hideToolOutput}
-                      onChange={(event) => setHideToolOutput(event.target.checked)}
-                    />
+                    <Switch label="隐藏工具调用过程" checked={hideToolOutput} onChange={setHideToolOutput} />
                   </label>
                 </div>
               </section>
+            </div>
+          )}
 
-              <ArchivedBots bridge={props.archiveBridge} onOpenHistory={props.onOpenArchivedBotHistory} />
+          {activeTab === 'archive' && (
+            <ArchivedBots bridge={props.archiveBridge} onOpenHistory={props.onOpenArchivedBotHistory} />
+          )}
 
-              <section className="settings-section">
-                <div className="section-head">
-                  <h4>软件版本与检查更新</h4>
-                  {updateSummary && <span className="metadata">{updateSummary}</span>}
-                </div>
-                <ClientUpdateSection variant="desktop" />
-              </section>
+          {activeTab === 'updates' && (
+            <div className="settings-pane">
+              <div className="settings-pane-header">
+                <h3>客户端更新</h3>
+              </div>
+              <ClientUpdateSection variant="desktop" />
             </div>
           )}
         </div>
       </div>
     </div>
-  );
-}
-
-export function SettingsPanel(props: SettingsPanelProps) {
-  if (!props.archiveOpen) return <TabbedSettings {...props} />;
-  return (
-    <>
-      <div className="dialog-head">
-        <Dialog.Title className="dialog-title">已归档智能体</Dialog.Title>
-        <Dialog.Close asChild><button type="button" className="icon-button" aria-label="关闭"><X size={16} aria-hidden /></button></Dialog.Close>
-      </div>
-      <Dialog.Description className="dialog-desc">归档后的智能体将在 14 天后自动清理。</Dialog.Description>
-      <div className="dialog-body">
-        <ArchivedBots bridge={props.archiveBridge} onOpenHistory={props.onOpenArchivedBotHistory} />
-      </div>
-    </>
   );
 }

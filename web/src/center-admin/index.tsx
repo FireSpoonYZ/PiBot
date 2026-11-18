@@ -36,6 +36,8 @@ export {
   errorMessage,
 };
 
+export { openExternalUrl } from './openExternalUrl';
+
 export type {
   CenterAdminPanelProps,
   CenterAdminTab,
@@ -65,6 +67,7 @@ export function CenterAdminPanel({
   onTabChange,
   centerUrl,
   onOpenExternal,
+  onOpenExternalUrl,
   hideTopbarExternal = false,
   onConfigureBot,
   renderQr,
@@ -118,9 +121,15 @@ export function CenterAdminPanel({
         </div>
 
         <main>
-          {currentTab === 'providers' && <ProvidersTab api={api} />}
+          {currentTab === 'providers' && (
+            <ProvidersTab api={api} onOpenExternalUrl={onOpenExternalUrl} />
+          )}
           {currentTab === 'capabilities' && (
-            <CapabilitiesTab api={api} onOpenExternal={onOpenExternal} />
+            <CapabilitiesTab
+              api={api}
+              onOpenExternal={onOpenExternal}
+              onOpenExternalUrl={onOpenExternalUrl}
+            />
           )}
           {currentTab === 'devices' && (
             <DevicesTab api={api} onConfigureBot={onConfigureBot} renderQr={renderQr} />

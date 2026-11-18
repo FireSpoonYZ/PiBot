@@ -44,6 +44,7 @@ import {
 } from 'lucide-react';
 import {
   BotHost,
+  openCenterUrl,
   type AbortBotResult,
   type BotSoul,
   type HostBot,
@@ -175,7 +176,7 @@ import {
 } from './tasks';
 import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, GroupCreateAttempt, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending as SharedChatPending, ChatPendingEntry as SharedChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, copyTextToClipboard, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
 // @lane-imports:settings
-import { Badge, Disclosure, Row, Section, SettingsSheet } from './bot-settings/primitives';
+import { Badge, Disclosure, Row, Section, SettingsSheet, Switch } from './bot-settings/primitives';
 import { ClientUpdateSection, useClientUpdateSummary } from './ClientUpdateSection';
 // ---
 // @lane-imports:hub
@@ -8630,6 +8631,7 @@ ${newer}` : draftSnapshot;
                 initialTab={centerAdminTab}
                 centerUrl={centerConn.status?.centerUrl || centerConn.saved?.url}
                 onOpenExternal={() => void centerConn.openManagement()}
+                onOpenExternalUrl={url => openCenterUrl(url)}
                 onConfigureBot={(deviceId, botId) => {
                   const target = allBotItems.find(item =>
                     item.botId === botId &&
@@ -10801,21 +10803,18 @@ function HubSettingsView({
 
           {/* 3. 对话与语音 */}
           <Section title={t('对话与语音', 'Chat & Voice')}>
-            <div className="hst-row-static">
-              <span className="bs-row-icon" aria-hidden="true"><Code2 size={17} /></span>
-              <span className="bs-row-text">
-                <span className="bs-row-title">{t('隐藏工具输出', 'Hide Tool Output')}</span>
-                <span className="bs-row-sub">{t('默认折叠工具调用过程与原始输出', 'Collapse tool calls and hide raw output by default')}</span>
-              </span>
-              <label className="grok-toggle-switch">
-                <input
-                  type="checkbox"
+            <Row
+              icon={<Code2 />}
+              title={t('隐藏工具输出', 'Hide Tool Output')}
+              subtitle={t('默认折叠工具调用过程与原始输出', 'Collapse tool calls and hide raw output by default')}
+              trailing={(
+                <Switch
+                  label={t('隐藏工具输出', 'Hide Tool Output')}
                   checked={hideToolOutput}
-                  onChange={e => setHideToolOutput(e.target.checked)}
+                  onChange={setHideToolOutput}
                 />
-                <span className="grok-toggle-slider" />
-              </label>
-            </div>
+              )}
+            />
             <div className="hst-row-static">
               <span className="bs-row-icon" aria-hidden="true"><AudioLines size={17} /></span>
               <span className="bs-row-text"><span className="bs-row-title">{t('语音朗读倍速', 'Speech Rate')}</span></span>

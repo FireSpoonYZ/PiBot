@@ -977,6 +977,41 @@ code {
   background: var(--bg);
 }
 
+.cw-oauth-step {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cw-oauth-step-label {
+  font-size: 0.79rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.cw-oauth-url-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--cw-card);
+  border: 1px solid var(--cw-hairline);
+}
+
+.cw-oauth-link {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
 .cw-code-pill {
   display: inline-flex;
   align-items: center;
