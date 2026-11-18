@@ -203,7 +203,9 @@ export default function BotCapabilities() {
                     >
                       全局{entry.installation.enabled ? '启用' : '禁用'}
                     </span>
-                    <span className="badge badge-neutral">版本 {entry.installation.targetVersion}</span>
+                    {entry.installation.kind !== 'skill' && (
+                      <span className="badge badge-neutral">版本 {entry.installation.targetVersion}</span>
+                    )}
                     <ActivationBadge status={entry.installation.activation.status} />
                     <span className={`badge ${overrideCount > 0 ? 'badge-accent' : 'badge-neutral'}`}>
                       {overrideCount > 0 ? '已自定义覆盖' : '继承全局配置'}
@@ -239,14 +241,16 @@ export default function BotCapabilities() {
                         : '全局启用成功后才能为此 Bot 开启'}
                     </span>
                   )}
-                  <button
-                    type="button"
-                    className="button secondary-button button-sm"
-                    onClick={() => setEditingId(entry.installation.installationId)}
-                  >
-                    <Sliders size={15} aria-hidden="true" />
-                    配置覆盖参数
-                  </button>
+                  {entry.installation.kind !== 'skill' && (
+                    <button
+                      type="button"
+                      className="button secondary-button button-sm"
+                      onClick={() => setEditingId(entry.installation.installationId)}
+                    >
+                      <Sliders size={15} aria-hidden="true" />
+                      配置覆盖参数
+                    </button>
+                  )}
                 </div>
               </section>
             );

@@ -1,6 +1,11 @@
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { createProvider } from '@earendil-works/pi-ai/models';
 import { getApiProvider } from '@earendil-works/pi-ai/compat';
+import {
+  ANTIGRAVITY_API,
+  ANTIGRAVITY_PROVIDER_ID,
+  createAntigravityProvider,
+} from './antigravity-provider.js';
 
 // Keep Pi's native stream implementations and protocol-specific behavior intact.
 // The Center is authoritative for model metadata and live authentication.
@@ -26,7 +31,13 @@ function credentialAuth(credential, resolver, providerId) {
   };
 }
 
-export function nativeCenterProvider(provider, savedModels, credential, resolver) {
+export function nativeCenterProvider(provider, savedModels, credential, resolver, streamAntigravity) {
+  if (provider.id === ANTIGRAVITY_PROVIDER_ID) {
+    return createAntigravityProvider({ provider, models: savedModels, streamAntigravity });
+  }
+  if (provider.api === ANTIGRAVITY_API || savedModels.some(model => model.api === ANTIGRAVITY_API)) {
+    throw new Error(`Unsupported antigravity API for provider "${provider.id}"`);
+  }
   const native = builtins.get(provider.id);
   const nativeModels = new Map((native?.getModels() ?? []).map(model => [model.id, model]));
   const models = savedModels.map(model => {

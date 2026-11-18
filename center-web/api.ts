@@ -1,13 +1,30 @@
+import {
+  CenterApiError,
+  createFetchCenterTransport,
+} from '../web/src/center-admin';
 import type {
-  Accepted, ActionRequest, ActionResult, ApiError, ArtifactUploadReceipt, BotCapabilityConfig, BotCwdConfig, CapabilityToolsListResponse,
-  BotCapabilityEntry, BotLearningStatus, BotModelConfig, BotRef, BotSyncResponse, CenterCreateBotRequest, CenterUpdateBotRequest, CredentialInfo, CredentialWrite, DeploymentReceipt, Device, DeviceRuntimeStatus, DiscoveryResult,
+  QrLoginChallengeResponse,
+  QrLoginClaimResponse,
+} from '../web/src/center-admin';
+import type {
+  Accepted, ActionRequest, ActionResult, ApiError, ArtifactUploadReceipt, BatchModelsRequest, BotCapabilityConfig, BotCwdConfig, CapabilityToolsListResponse,
+  BotCapabilityEntry, BotLearningStatus, BotModelConfig, BotRef, BotSyncResponse, CenterCreateBotRequest, CenterUpdateBotRequest, CredentialInfo, CredentialWrite, DeleteModelResult, DeleteProviderResult, DeploymentReceipt, Device, DeviceRuntimeStatus, DiscoveryResult,
   EnableRequest,
-  InstallRequest, Installation, InstallationConfig, LoginRequest, Model, ModelConfig, ModelSelection,
+  InstallRequest, InstallSource, Installation, InstallationConfig, InstallationSkillFilesResponse, LoginRequest, Model, ModelConfig, ModelPickerResponse, ModelSelection,
   Operation, OperationRequest, PackageVersion, Provider, ProviderAuthStatus, ProviderAuthFlow, ProviderCheckRequest, ProviderCheckResult, JsonSchema,
   ClientReleaseListResponse, ClientReleaseMetadata, ClientReleasePublishRequest, ClientReleaseRecord,
   CreatePairingCodeResponse, PairingCaState, PairingCodeState,
-  PutBotCapability, PutInstallationConfig, PutInstallationDisplayName, RevisionWrite, SessionInfo, UpdateRequest,
+  PutBotCapability, PutInstallationConfig, PutInstallationDisplayName, PutInstallationSkillFilesRequest, RevisionWrite, SessionInfo, SkillPackageEntry, UpdateRequest,
 } from '@e-launcher/center-contract';
+
+export type {
+  InstallRequest,
+  InstallSource,
+  InstallationSkillFilesResponse,
+  PutInstallationSkillFilesRequest,
+  SkillPackageEntry,
+  UpdateRequest,
+};
 
 export interface BotLearningPatchConfig {
   reviewModelRef?: string | null;
@@ -113,35 +130,13 @@ export type ExternalVaultControlResult = ExternalVaultStatus | ExternalVaultList
 export interface UpdateWebhookRequest { name: string; instruction: string; enabled: boolean }
 export interface WebhookTokenReceipt { route: WebhookRoute; token: string }
 
-let csrfToken: string | null = null;
-export class CenterApiError extends Error {
-  constructor(public code: string, message: string, public status: number, public details?: ApiError['error']['details']) {
-    super(message);
-  }
-}
+export const webTransport = createFetchCenterTransport();
+export { CenterApiError };
+export type { QrLoginChallengeResponse, QrLoginClaimResponse };
+
 const id = encodeURIComponent;
-async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
-  const headers = new Headers();
-  if (method !== 'GET') {
-    if (!csrfToken) throw new CenterApiError('CSRF_INVALID', '会话令牌不可用，请重新连接中心', 403);
-    headers.set('x-csrf-token', csrfToken);
-  }
-  if (body !== undefined && !(body instanceof FormData)) headers.set('content-type', 'application/json');
-  let response: Response;
-  try {
-    response = await fetch(path, { method, credentials: 'same-origin', headers, body: body === undefined ? undefined : body instanceof FormData ? body : JSON.stringify(body), cache: 'no-store' });
-  } catch {
-    window.dispatchEvent(new Event('center-offline'));
-    throw new CenterApiError('CENTER_OFFLINE', '无法连接中心', 503);
-  }
-  if (!response.ok) {
-    if (response.status === 401 && path !== '/api/session') window.dispatchEvent(new Event('center-unauthenticated'));
-    const payload = await response.json().catch(() => null) as ApiError | null;
-    if (payload?.error?.code === 'CENTER_OFFLINE') window.dispatchEvent(new Event('center-offline'));
-    throw new CenterApiError(payload?.error?.code || 'HTTP_ERROR', payload?.error?.message || `请求失败 (${response.status})`, response.status, payload?.error?.details);
-  }
-  if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
+function request<T>(path: string, method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' = 'GET', body?: unknown): Promise<T> {
+  return webTransport.request<T>(method, path, body);
 }
 // Onboarding runs before any session exists, so /api/setup uses a raw fetch:
 // no CSRF token is required or available yet. A 404 on GET means an older
@@ -177,12 +172,23 @@ const installationPath = (installationId: string) => `/api/installations/${id(in
 export const api = {
   getSetup: (signal?: AbortSignal) => setupRequest<SetupStatus>('GET', undefined, signal),
   submitSetup: (body: SetupRequest) => setupRequest<{ configured: boolean }>('POST', body),
-  async session() { const result = await request<SessionInfo>('/api/session'); csrfToken = result.csrfToken; return result; },
-  async login(body: LoginRequest) { const result = await request<SessionInfo>('/api/session', 'POST', body); csrfToken = result.csrfToken; return result; },
-  async logout() { await request<void>('/api/session', 'DELETE'); csrfToken = null; },
+  async session() { const result = await request<SessionInfo>('/api/session'); webTransport.setCsrfToken(result.csrfToken); return result; },
+  async login(body: LoginRequest) { const result = await request<SessionInfo>('/api/session', 'POST', body); webTransport.setCsrfToken(result.csrfToken); return result; },
+  async logout() { await request<void>('/api/session', 'DELETE'); webTransport.setCsrfToken(null); },
+  createQrLogin: () => request<QrLoginChallengeResponse>('/api/session/qr', 'POST', {}),
+  async claimQrLogin(challengeId: string, browserSecret: string) {
+    const result = await request<QrLoginClaimResponse>(`/api/session/qr/${id(challengeId)}/claim`, 'POST', { browserSecret });
+    if (result.status === 'approved' && result.csrfToken) {
+      webTransport.setCsrfToken(result.csrfToken);
+    }
+    return result;
+  },
   syncModelCatalog: () => request<{ modelsAdded?: number; error: string | null }>('/api/model-catalog/sync', 'POST'),
+  getModelPicker: () => request<ModelPickerResponse>('/api/model-picker'),
+  setModelStar: (modelRef: string, starred: boolean) => request<{ starredModels: string[] }>('/api/model-stars', 'PUT', { modelRef, starred }),
   listProviders: () => request<Provider[]>('/api/providers'),
   createProvider: (body: Provider) => request<Provider>('/api/providers', 'POST', body),
+  discoverDraftModels: (body: ProviderCheckRequest) => request<DiscoveryResult>('/api/providers/discover', 'POST', body),
   getProvider: (providerId: string) => request<Provider>(`/api/providers/${id(providerId)}`),
   providerAuthStatus: (providerId: string) => request<ProviderAuthStatus>(`/api/providers/${id(providerId)}/auth-status`),
   providerLogin: (providerId: string) => request<{ flowId: string }>(`/api/providers/${id(providerId)}/login`, 'POST'),
@@ -191,11 +197,14 @@ export const api = {
   providerLoginCancel: (providerId: string, flowId: string) => request<{status:string}>(`/api/providers/${id(providerId)}/login/${id(flowId)}/cancel`, 'POST'),
   providerLogout: (providerId: string) => request<ProviderAuthStatus>(`/api/providers/${id(providerId)}/logout`, 'POST'),
   putProvider: (providerId: string, body: RevisionWrite<Provider>) => request<Provider>(`/api/providers/${id(providerId)}`, 'PUT', body),
-  validateProvider: (providerId: string, body: ProviderCheckRequest) => request<ProviderCheckResult>(`/api/providers/${id(providerId)}/validate`, 'POST', body),
-  discoverModels: (providerId: string, body: ProviderCheckRequest) => request<DiscoveryResult>(`/api/providers/${id(providerId)}/discover`, 'POST', body),
-  listModels: (providerId: string) => request<Model[]>(`/api/providers/${id(providerId)}/models`),
+  deleteProvider: (providerId: string) => request<DeleteProviderResult>(`/api/providers/${id(providerId)}`, 'DELETE'),
+  validateProvider: (providerId: string, body: ProviderCheckRequest = {}) => request<ProviderCheckResult>(`/api/providers/${id(providerId)}/validate`, 'POST', body),
+  discoverModels: (providerId: string, body: ProviderCheckRequest = {}) => request<DiscoveryResult>(`/api/providers/${id(providerId)}/discover`, 'POST', body),
+  listModels: (providerId: string, includeRemoved = false) => request<Model[]>(`/api/providers/${id(providerId)}/models${includeRemoved ? '?includeRemoved=1' : ''}`),
   createModel: (providerId: string, body: Model) => request<Model>(`/api/providers/${id(providerId)}/models`, 'POST', body),
+  createModelsBatch: (providerId: string, body: BatchModelsRequest) => request<{ models: Model[] }>(`/api/providers/${id(providerId)}/models/batch`, 'POST', body),
   putModel: (providerId: string, modelId: string, body: RevisionWrite<Model>) => request<Model>(`/api/providers/${id(providerId)}/models/${id(modelId)}`, 'PUT', body),
+  deleteModel: (providerId: string, modelId: string) => request<DeleteModelResult>(`/api/providers/${id(providerId)}/models/${id(modelId)}`, 'DELETE'),
   getModelConfig: () => request<ModelConfig>('/api/model-config'),
   putModelConfig: (body: RevisionWrite<ModelSelection>) => request<ModelConfig>('/api/model-config', 'PUT', body),
   listWebhooks: () => request<{ items: WebhookRoute[] }>('/api/webhooks'),
@@ -250,6 +259,8 @@ export const api = {
     request<{ jobId: string; status: string }>(`${botPath(deviceId, botId)}/learning`, 'POST', { action: 'cancel', jobId }),
   getInstallationConfig: (installationId: string) => request<InstallationConfig>(`${installationPath(installationId)}/config`),
   putInstallationConfig: (installationId: string, body: PutInstallationConfig) => request<InstallationConfig>(`${installationPath(installationId)}/config`, 'PUT', body),
+  getInstallationSkillFiles: (installationId: string) => request<InstallationSkillFilesResponse>(`${installationPath(installationId)}/skill-files`),
+  putInstallationSkillFiles: (installationId: string, body: PutInstallationSkillFilesRequest) => request<InstallationSkillFilesResponse>(`${installationPath(installationId)}/skill-files`, 'PUT', body),
   listBotCapabilities: (deviceId: string, botId: string) => request<BotCapabilityEntry[]>(`${botPath(deviceId, botId)}/capabilities`),
   getBotCapability: (deviceId: string, botId: string, installationId: string) => request<BotCapabilityConfig>(`${botPath(deviceId, botId)}/capabilities/${id(installationId)}`),
   putBotCapability: (deviceId: string, botId: string, installationId: string, body: PutBotCapability) => request<BotCapabilityConfig>(`${botPath(deviceId, botId)}/capabilities/${id(installationId)}`, 'PUT', body),
@@ -261,7 +272,6 @@ export const api = {
   listInstallationTools: (installationId: string, body: InstallationCheckRequest) => request<CapabilityToolsListResponse>(`${installationPath(installationId)}/tools/list`, 'POST', body),
   checkUpdates: (installationId: string) => request<PackageVersion[]>(`${installationPath(installationId)}/updates/check`, 'POST'),
   updateInstallation: (installationId: string, body: UpdateRequest) => request<Accepted>(`${installationPath(installationId)}/update`, 'POST', body),
-  rollbackInstallation: (installationId: string, body: OperationRequest) => request<Accepted>(`${installationPath(installationId)}/rollback`, 'POST', body),
   disableInstallation: (installationId: string, body: OperationRequest) => request<Accepted>(`${installationPath(installationId)}/disable`, 'POST', body),
   enableInstallation: (installationId: string, body: EnableRequest) => request<Accepted>(`${installationPath(installationId)}/enable`, 'POST', body),
   uninstallInstallation: (installationId: string, body: OperationRequest) => request<Accepted>(installationPath(installationId), 'DELETE', body),

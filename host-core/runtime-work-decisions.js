@@ -9,12 +9,16 @@ import { WorkIndex, WorkContextState, ensureWorkBinding, toWorkContextRecord } f
 import { WorkDecisionState, initialDecisionState, toWorkActivity, toFrozenTurn } from './work-decision-state.js';
 import { createWorkInput } from './work-decision-codec.js';
 import {
+  GROUP_MAX_MESSAGES_PER_TURN,
+  GROUP_MAX_REDRIVE_ATTEMPTS,
   GROUP_PROMPT_HISTORY_LIMIT,
   MAX_REPLY_NUDGES,
   clampBlock,
   evaluateGroupTurnEligibility,
+  isHostFailureReceiptText,
   messagesSinceMemberLastSpoke,
 } from './group-chat.js';
+import { GroupChatOrchestrator, RoomTurnScheduler } from './group-chat-orchestrator.js';
 import { RequestContext } from './request-context.js';
 import { parseModelRef } from './runtime-models.js';
 
@@ -38,10 +42,16 @@ function finishDecision(state, outcome) {
   const interruption = pending.interruption ?? null;
   if (interruption?.reason === 'user_stop') {
     state.handledLocalId = Math.max(state.handledLocalId, interruption.throughLocalId);
+    state.preemptedAttempts = 0;
   } else if (interruption?.reason === 'preempted' && pending.published) {
     // 已产生发布的被抢占轮：prepared 记录的本批来源水位即已消费边界，
     // 结算推进到它，余下未消费消息留给下轮触发（不重复已发布内容）。
     state.handledLocalId = Math.max(state.handledLocalId, pending.prepared?.throughLocalId ?? 0);
+    state.preemptedAttempts = 0;
+  } else if (interruption?.reason === 'preempted' && !pending.published) {
+    state.preemptedAttempts = (state.preemptedAttempts ?? 0) + 1;
+  } else {
+    state.preemptedAttempts = 0;
   }
   state.lastDecision = {
     requestId: pending.requestId,
@@ -141,10 +151,41 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
   let closing = false;
   let timer = null;
   let pollPromise = null;
+  let pollAgain = false;
+  let commitObservation = null;
   let closePromise = null;
   let fatalError = null;
   const inflight = new Set();
   const lanes = new Map();
+  const roomScheduler = new RoomTurnScheduler();
+  const scheduledRooms = new Set();
+  const roomRescanNeeded = new Set();
+  const activeRoomEpochs = new Map(); // scopeId -> { epoch, baselineLocalId, publishedIds }
+  const roomWaiters = new Set();
+
+  function wakeRoomWaiters() {
+    for (const wake of [...roomWaiters]) {
+      roomWaiters.delete(wake);
+      wake();
+    }
+  }
+
+  function waitForRoomSignal(timeoutMs = 250) {
+    if (closing || !active || fatalError) return Promise.resolve();
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(fallback);
+        roomWaiters.delete(done);
+        resolve();
+      };
+      const fallback = setTimeout(done, timeoutMs);
+      fallback.unref?.();
+      roomWaiters.add(done);
+    });
+  }
   const getLog = () => getWorkContexts().getMessageLog();
   // 墓碑 scope 一律视为无成员资格：已删除群不再触发/提交/恢复任何工作。
   const member = (scope, botId) => scope?.deletedAt === undefined && scope?.members.some((item) => item.deviceId === host.deviceId && item.botId === botId) === true;
@@ -551,6 +592,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
           if (state.pending?.requestId === candidate.requestId) finishTakeover(state);
         }
       }, context);
+      wakeRoomWaiters();
       nudge();
     }, undefined, new Set([...CONTROL_ERRORS, 'SHOWER_SESSION_NOT_FOUND', 'SHOWER_SESSION_MISMATCH']), botId);
   }
@@ -570,6 +612,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       await abortPending(binding, true, true);
       return activity(botId, scopeId);
     }, JSON.stringify([botId, scopeId]), CONTROL_ERRORS, botId);
+    wakeRoomWaiters();
     // 取消已把该 scope pending 结算并释放 Bot 准入：按 reconcile 相同方式唤醒
     // Host 用户排队泵（用户轮优先 gate 在泵内自身检查），否则 queued user 要等
     // 下一次外部驱动才被拾取。
@@ -620,6 +663,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       }, context);
       publishActivity(entry.botId);
     }
+    wakeRoomWaiters();
   }
 
   async function resumeWork(botId, scopeId) {
@@ -656,6 +700,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     // 显式取消旧 stopped/error 任务后同样唤醒 Host 用户泵：resume 路径在 admit
     // 完成后释放 Bot 准入，queued user 应立刻可泵（用户优先 gate 在泵内）。
     try { turnGate.idle?.(botId); } catch { /* 通知失败不影响 resume 结果 */ }
+    wakeRoomWaiters();
     nudge();
     return result;
   }
@@ -804,6 +849,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     // user_stop 的边界外新消息正常唤醒。代次化发布：旧的在飞汇总结果
     // 晚到时因 generation 过期被丢弃，不会覆盖本结算的终态。
     try { turnGate.idle?.(botId); } catch { /* 通知失败不影响中断结果 */ }
+    wakeRoomWaiters();
     if (reason === 'preempted') nudge();
     publishActivity(botId);
   }
@@ -1219,14 +1265,59 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     };
   }
 
-  async function startDecision(binding, bot) {
+  function readRoomPublicStored(scopeId, maxLocalId = null) {
+    const collectedPublic = [];
+    let historyCursor = Number.isSafeInteger(maxLocalId) && maxLocalId >= 0
+      ? {
+          deviceId: host.deviceId,
+          kind: 'history-before',
+          key: scopeId,
+          beforeLocalId: maxLocalId + 1,
+        }
+      : null;
+    let upperLocalId = Number.isSafeInteger(maxLocalId) ? maxLocalId : Infinity;
+    for (let page = 0; page < 4 && collectedPublic.length < GROUP_PROMPT_HISTORY_LIMIT; page += 1) {
+      const historyPage = getLog().history(scopeId, {
+        order: 'descending',
+        limit: GROUP_PROMPT_HISTORY_LIMIT + 8,
+        ...(historyCursor ? { cursor: historyCursor } : {}),
+      });
+      let progressed = false;
+      for (const it of historyPage.items) {
+        if (it.localId > upperLocalId) continue;
+        upperLocalId = it.localId - 1;
+        progressed = true;
+        if (it.message?.category === 'public') {
+          collectedPublic.push(it);
+          if (collectedPublic.length >= GROUP_PROMPT_HISTORY_LIMIT) break;
+        }
+      }
+      if (!historyPage.nextCursor || !progressed) break;
+      historyCursor = historyPage.nextCursor;
+    }
+    return collectedPublic.reverse();
+  }
+
+  async function startDecision(binding, bot, options = null) {
+    const harness = getHarness();
+    const metaSnap = await harness.snapshot(WorkContextState, binding.nativeId, context);
+    const stateSnap = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
+    if (!metaSnap || stateSnap?.pending || stateSnap?.stopped || stateSnap?.error) {
+      return { started: false, deferred: false };
+    }
+    const unreadPeek = inboxAfter(metaSnap.botId, metaSnap.scopeId, stateSnap?.handledLocalId ?? 0, 1);
+    if (unreadPeek.items.length === 0) {
+      return { started: false, deferred: false };
+    }
     // 统一执行：canRunWork 空闲边界后才做 sessions.sync（commit 外、Bot 准入内一次）；
     // 不通过表示排队用户轮/原生工作优先，下轮 poll 重试。scope/legacy 导入仍走
     // syncWorkContext（archive 历史），不推进主会话水位。
     let primary = null;
     let configFailure = null;
     if (unified) {
-      if (turnGate.canRunWork && !(await turnGate.canRunWork(bot.botId))) return;
+      if (turnGate.canRunWork && !(await turnGate.canRunWork(bot.botId))) {
+        return { started: false, deferred: true };
+      }
       const imported = await syncPrimaryImport(bot, binding);
       if (imported?.configFailure) {
         // 确定的模型配置失败：仍要冻结本请求再请求级结算——只消费当前批，
@@ -1234,25 +1325,21 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         configFailure = imported.configFailure;
       } else {
         primary = imported;
-        if (primary === null || typeof primary.nativeId !== 'number') return;
+        if (primary === null || typeof primary.nativeId !== 'number') {
+          return { started: false, deferred: true };
+        }
       }
     }
     // 迟到 DM 回复寻源与远端目录预热在 commit 外做（绝不把 snapshot/网络读嵌进写事务）。
-    const harness = getHarness();
     let replyOrigins = null;
-    const metaSnap = await harness.snapshot(WorkContextState, binding.nativeId, context);
-    const stateSnap = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
-    if (metaSnap && !stateSnap?.pending && !stateSnap?.stopped && !stateSnap?.error) {
+    {
       const warmedScopes = new Set();
       const warmScope = async (scopeId) => {
         if (typeof scopeId !== 'string' || !scopeId || warmedScopes.has(scopeId)) return;
         warmedScopes.add(scopeId);
         await warmBotDirectoryIfNeeded(getLog().getScope(scopeId));
       };
-      const unreadPeek = inboxAfter(metaSnap.botId, metaSnap.scopeId, stateSnap?.handledLocalId ?? 0, 1);
-      if (unreadPeek.items.length > 0) {
-        await warmScope(metaSnap.scopeId);
-      }
+      await warmScope(metaSnap.scopeId);
       if (unified && metaSnap.kind === 'dm') {
         replyOrigins = new Map();
         const items = inboxAfter(metaSnap.botId, metaSnap.scopeId, stateSnap?.handledLocalId ?? 0).items
@@ -1272,24 +1359,38 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         }
       }
     }
-    const created = await harness.commit(async (tx) => {
+    const maxAllowedLocalId = Number.isSafeInteger(options?.maxLocalId) ? options.maxLocalId : null;
+    const commitOutcome = await harness.commit(async (tx) => {
       const meta = await tx.doc(WorkContextState, binding.nativeId);
       const state = await tx.doc(WorkDecisionState, binding.nativeId);
-      if (closing || fatalError || state.pending || state.stopped || state.error || !currentMember(meta)) return false;
+      if (closing || fatalError || state.pending || state.stopped || state.error || !currentMember(meta)) {
+        return { created: false };
+      }
       // A receive after sync can add another page; do not start on a knowingly incomplete import.
-      if (inboxAfter(meta.botId, meta.scopeId, meta.lastImportedLocalId, 1).items.length) return false;
+      if (maxAllowedLocalId === null && inboxAfter(meta.botId, meta.scopeId, meta.lastImportedLocalId, 1).items.length) {
+        return { created: false, needsResync: true };
+      }
+      const ceiling = maxAllowedLocalId !== null
+        ? Math.min(meta.lastImportedLocalId, maxAllowedLocalId)
+        : meta.lastImportedLocalId;
       const items = inboxAfter(meta.botId, meta.scopeId, state.handledLocalId).items
-        .filter((item) => item.localId <= meta.lastImportedLocalId);
-      if (!items.length) return false;
+        .filter((item) => item.localId <= ceiling);
+      if (!items.length) return { created: false };
       const { trigger, batchThrough } = collectTrigger(meta, items, replyOrigins);
       if (!trigger) {
         // 屏障前的被动条目已判定消费；屏障项与未判定的回复不越过。
         if (batchThrough > 0) state.handledLocalId = batchThrough;
-        return false;
+        return { created: false };
       }
 
       let wakeContext = null;
       if (meta.kind === 'room') {
+        const redriveAttempts = state.preemptedAttempts ?? 0;
+        if (redriveAttempts >= GROUP_MAX_REDRIVE_ATTEMPTS) {
+          state.preemptedAttempts = 0;
+          state.handledLocalId = Math.max(state.handledLocalId, batchThrough);
+          return { created: false };
+        }
         const scope = getLog().getScope(meta.scopeId);
         const scopeMembers = scope?.members ?? [];
         const scopeMembersByBotId = new Map(scopeMembers.map((m) => [m.botId, m.deviceId]));
@@ -1303,36 +1404,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         });
         const selfMemberId = memberKey(host.deviceId, meta.botId);
         const selfInfo = resolveBotMeta(host.deviceId, meta.botId);
-        const collectedPublic = [];
-        let historyCursor = Number.isSafeInteger(batchThrough) && batchThrough >= 0
-          ? {
-              deviceId: host.deviceId,
-              kind: 'history-before',
-              key: meta.scopeId,
-              beforeLocalId: batchThrough + 1,
-            }
-          : null;
-        let upperLocalId = batchThrough;
-        for (let page = 0; page < 4 && collectedPublic.length < GROUP_PROMPT_HISTORY_LIMIT; page += 1) {
-          const historyPage = getLog().history(meta.scopeId, {
-            order: 'descending',
-            limit: GROUP_PROMPT_HISTORY_LIMIT + 8,
-            ...(historyCursor ? { cursor: historyCursor } : {}),
-          });
-          let progressed = false;
-          for (const it of historyPage.items) {
-            if (it.localId > upperLocalId) continue;
-            upperLocalId = it.localId - 1;
-            progressed = true;
-            if (it.message?.category === 'public') {
-              collectedPublic.push(it);
-              if (collectedPublic.length >= GROUP_PROMPT_HISTORY_LIMIT) break;
-            }
-          }
-          if (!historyPage.nextCursor || !progressed) break;
-          historyCursor = historyPage.nextCursor;
-        }
-        const recentStored = collectedPublic.reverse();
+        const recentStored = readRoomPublicStored(meta.scopeId, batchThrough);
         const recentHistory = recentStored.map((it) => toGroupMessage(it, scopeMembersByBotId));
         const unreadMessages = items
           .filter((it) => it.localId <= batchThrough && !it.selfEcho && it.message?.category === 'public')
@@ -1344,9 +1416,16 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
           unreadMessages,
         });
         if (!eligibility.eligible) {
+          state.preemptedAttempts = 0;
           state.handledLocalId = Math.max(state.handledLocalId, batchThrough);
-          return false;
+          return { created: false };
         }
+        const firstUnreadIdx = recentStored.findIndex(
+          (it, idx) => it.localId > state.handledLocalId && recentHistory[idx]?.speaker?.id !== selfMemberId,
+        );
+        const newMessages = firstUnreadIdx >= 0
+          ? recentHistory.slice(firstUnreadIdx)
+          : messagesSinceMemberLastSpoke(recentHistory, selfMemberId);
         wakeContext = {
           selfName: selfInfo.name || bot.role || meta.botId,
           selfMemberId,
@@ -1354,7 +1433,8 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
           peers: groupMembers
             .filter((m) => m.id !== selfMemberId)
             .map((m) => ({ name: m.name, description: m.description })),
-          newMessages: messagesSinceMemberLastSpoke(recentHistory, selfMemberId),
+          newMessages,
+          ...(redriveAttempts > 0 ? { redrive: true } : {}),
         };
       } else if (meta.kind === 'dm') {
         if (trigger.replyTarget?.kind === 'room' && typeof trigger.replyTarget.scopeId === 'string') {
@@ -1450,6 +1530,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         startedThroughLocalId: batchThrough,
         prepared: null,
         published: false,
+        publishedCount: 0,
         passed: false,
         replyRequired,
         nudgeCount: 0,
@@ -1468,13 +1549,21 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       // 不投 native、不阻塞后续新请求。legacy selectModel 同样移到冻结后判定。
       if (configFailure !== null) {
         settleFailedDecision(state, meta, configFailure);
-        return false;
+        return { created: false };
       }
-      if (!await selectModel(tx, binding.nativeId, meta, state, bot)) return false;
-      return true;
+      if (!await selectModel(tx, binding.nativeId, meta, state, bot)) return { created: false };
+      return { created: true, requestId };
     }, context);
     // Persist the request identity before admission; crash recovery resubmits this exact request, not another turn.
-    if (created && !closing && !fatalError) await submitPending(binding, bot);
+    if (commitOutcome?.created && !closing && !fatalError) {
+      await submitPending(binding, bot);
+      return { started: true, requestId: commitOutcome.requestId };
+    }
+    return {
+      started: false,
+      deferred: false,
+      ...(commitOutcome?.needsResync ? { needsResync: true } : {}),
+    };
   }
 
   /**
@@ -1592,10 +1681,564 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     if (!imported.hasMore && !closing && !fatalError) await startDecision(binding, bot);
   }
 
+  function latestRoomPublicLocalId(scopeId) {
+    const page = getLog().history(scopeId, { order: 'descending', limit: 32 });
+    for (const item of page.items) {
+      if (item.message?.category === 'public') return item.localId;
+    }
+    return 0;
+  }
+
+  function hasExternalPublicSince(scopeId, baselineLocalId, publishedIds) {
+    let cursor = null;
+    let upperLocalId = Infinity;
+    for (let page = 0; page < 4; page += 1) {
+      const historyPage = getLog().history(scopeId, {
+        order: 'descending',
+        limit: 32,
+        ...(cursor ? { cursor } : {}),
+      });
+      let reachedBaseline = false;
+      for (const item of historyPage.items) {
+        if (item.localId > upperLocalId) continue;
+        upperLocalId = item.localId - 1;
+        if (item.localId <= baselineLocalId) {
+          reachedBaseline = true;
+          break;
+        }
+        const msg = item.message;
+        if (msg?.category !== 'public') continue;
+        if (isHostFailureReceiptText(msg.text)) continue;
+        if (publishedIds.has(msg.messageId)) continue;
+        return true;
+      }
+      if (reachedBaseline || !historyPage.nextCursor || historyPage.items.length === 0) break;
+      cursor = historyPage.nextCursor;
+    }
+    return false;
+  }
+
+  function bumpActiveRoomEpochsOnExternal() {
+    if (!existsSync(join(host.dataRoot, 'messages.sqlite'))) return;
+    for (const [scopeId, tracker] of activeRoomEpochs.entries()) {
+      if (
+        tracker.windowCeiling === null &&
+        roomScheduler.currentTurnEpoch(scopeId) === tracker.epoch &&
+        hasExternalPublicSince(scopeId, tracker.baselineLocalId, tracker.publishedIds)
+      ) {
+        roomScheduler.nextTurnEpoch(scopeId);
+        roomRescanNeeded.add(scopeId);
+      }
+    }
+  }
+
+  async function waitForRoomMemberPending(botId, scopeId, requestId) {
+    const key = JSON.stringify([botId, scopeId]);
+    while (active && !closing && !fatalError) {
+      const outcome = await admit(async () => {
+        let resolved;
+        try {
+          resolved = await getWorkContexts().resolveWorkContext(botId, scopeId);
+        } catch (error) {
+          if (error?.code === 'SCOPE_DELETED') {
+            await stopScopeWork(scopeId).catch(() => {});
+            return { done: true };
+          }
+          if (error?.code === 'SCOPE_FORBIDDEN' || error?.code === 'BOT_NOT_FOUND') {
+            return { done: true };
+          }
+          throw error;
+        }
+        const { bot, binding } = resolved;
+        if (!binding) return { done: true };
+        const harness = getHarness();
+        const meta = await harness.snapshot(WorkContextState, binding.nativeId, context);
+        await fenceLegacyError(binding, meta);
+        await drainFailureNotices(botId, binding);
+        await reconcile(binding, bot);
+        const state = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
+        if (!state?.pending || state.pending.requestId !== requestId) {
+          return {
+            done: true,
+            preempted: (state?.preemptedAttempts ?? 0) > 0,
+          };
+        }
+        // If submission could not be placed (e.g. Bot became busy or stopped before native
+        // submission/admission), roll back the unsubmitted pending so other room members are
+        // not blocked; handledLocalId stays untouched for later catch-up.
+        if (state.pending.submissionId === null && !state.pending.admissionId) {
+          const executionId = executionTargetOf(state, binding);
+          const record = await harness.commit(
+            (tx) => tx.submissionByRequest(executionId, requestId),
+            context,
+          );
+          if (!record) {
+            await harness.commit(async (tx) => {
+              const doc = await tx.doc(WorkDecisionState, binding.nativeId);
+              if (
+                doc.pending?.requestId === requestId &&
+                doc.pending.submissionId === null &&
+                !doc.pending.admissionId
+              ) {
+                doc.pending = null;
+              }
+            }, context);
+            return { done: true, deferred: true };
+          }
+        }
+        return { done: false };
+      }, key, AUTO_ERRORS, botId);
+      if (outcome?.done) return outcome;
+      await waitForRoomSignal(250);
+    }
+    return { done: true };
+  }
+
+  async function runRoomScope(scopeId) {
+    while (active && !closing && !fatalError) {
+      if (!existsSync(join(host.dataRoot, 'messages.sqlite'))) return;
+      const scope = getLog().getScope(scopeId);
+      if (!scope || scope.kind !== 'room') return;
+      if (scope.deletedAt !== undefined) {
+        await stopScopeWork(scopeId).catch(() => {});
+        return;
+      }
+
+      // 1. Drain failure notices and reconcile/await any persisted in-flight pending turns
+      //    one-by-one before starting a new round-robin pass (concurrency = 1 per room).
+      const candidateBotIds = new Set();
+      for (const m of scope.members ?? []) {
+        if (m.deviceId === host.deviceId && host.getBot(m.botId)) {
+          candidateBotIds.add(m.botId);
+        }
+      }
+      const index = await getHarness().snapshot(WorkIndex, context);
+      for (const key of Object.keys(index?.byKey ?? {})) {
+        let pair = null;
+        try { pair = JSON.parse(key); } catch { pair = null; }
+        if (Array.isArray(pair) && pair.length === 2 && pair[1] === scopeId && host.getBot(pair[0])) {
+          candidateBotIds.add(pair[0]);
+        }
+      }
+      if (candidateBotIds.size === 0) return;
+
+      for (const botId of candidateBotIds) {
+        if (!active || closing || fatalError) return;
+        const key = JSON.stringify([botId, scopeId]);
+        const activePendingId = await admit(async () => {
+          let resolved;
+          try {
+            resolved = await getWorkContexts().resolveWorkContext(botId, scopeId);
+          } catch (error) {
+            if (error?.code === 'SCOPE_DELETED') {
+              await stopScopeWork(scopeId).catch(() => {});
+              return null;
+            }
+            if (error?.code === 'SCOPE_FORBIDDEN' || error?.code === 'BOT_NOT_FOUND') return null;
+            throw error;
+          }
+          const { bot, binding } = resolved;
+          if (!binding) return null;
+          const harness = getHarness();
+          const meta = await harness.snapshot(WorkContextState, binding.nativeId, context);
+          await fenceLegacyError(binding, meta);
+          await drainFailureNotices(botId, binding);
+          await reconcile(binding, bot);
+          const state = await harness.snapshot(WorkDecisionState, binding.nativeId, context);
+          return state?.pending?.requestId ?? null;
+        }, key, AUTO_ERRORS, botId);
+        if (activePendingId !== null) {
+          await waitForRoomMemberPending(botId, scopeId, activePendingId);
+        }
+      }
+      if (!active || closing || fatalError) return;
+
+      // 2. Sync unread room pages for current local members, settle passive/unmentioned
+      //    batches without model calls, and identify eligible candidates for orchestration.
+      const freshScope = getLog().getScope(scopeId);
+      if (!freshScope || freshScope.kind !== 'room') return;
+      if (freshScope.deletedAt !== undefined) {
+        await stopScopeWork(scopeId).catch(() => {});
+        return;
+      }
+      await warmBotDirectoryIfNeeded(freshScope);
+      const scopeMembers = freshScope.members ?? [];
+      const scopeMembersByBotId = new Map(scopeMembers.map((m) => [m.botId, m.deviceId]));
+      const groupMembers = scopeMembers.map((m) => {
+        const info = resolveBotMeta(m.deviceId, m.botId);
+        return {
+          id: memberKey(m.deviceId, m.botId),
+          deviceId: m.deviceId,
+          botId: m.botId,
+          name: info.name || m.botId,
+          description: info.description || '',
+        };
+      });
+
+      let settledPassiveWithMore = false;
+      const eligibleCandidates = [];
+      for (const m of scopeMembers) {
+        if (!active || closing || fatalError) return;
+        if (m.deviceId !== host.deviceId || !host.getBot(m.botId)) continue;
+        const botId = m.botId;
+        const key = JSON.stringify([botId, scopeId]);
+        const inspection = await admit(async () => {
+          let resolved;
+          try {
+            resolved = await getWorkContexts().resolveWorkContext(botId, scopeId);
+          } catch (error) {
+            if (error?.code === 'SCOPE_DELETED') {
+              await stopScopeWork(scopeId).catch(() => {});
+              return null;
+            }
+            if (error?.code === 'SCOPE_FORBIDDEN' || error?.code === 'BOT_NOT_FOUND') return null;
+            throw error;
+          }
+          if (!resolved.binding && !inboxAfter(botId, scopeId, 0, 1).items.length) return null;
+          let imported;
+          do {
+            imported = await getWorkContexts().syncWorkContext(botId, scopeId, { limit: 200 });
+          } while (imported.hasMore && active && !closing && !fatalError);
+          let second;
+          try {
+            second = await getWorkContexts().resolveWorkContext(botId, scopeId);
+          } catch (error) {
+            if (error?.code === 'SCOPE_DELETED') {
+              await stopScopeWork(scopeId).catch(() => {});
+              return null;
+            }
+            if (error?.code === 'SCOPE_FORBIDDEN' || error?.code === 'BOT_NOT_FOUND') return null;
+            throw error;
+          }
+          const { binding } = second;
+          if (!binding || closing || fatalError) return null;
+          const harness = getHarness();
+          const metaSnap = await harness.snapshot(WorkContextState, binding.nativeId, context);
+          await fenceLegacyError(binding, metaSnap);
+          await drainFailureNotices(botId, binding);
+          return harness.commit(async (tx) => {
+            const meta = await tx.doc(WorkContextState, binding.nativeId);
+            const state = await tx.doc(WorkDecisionState, binding.nativeId);
+            if (closing || fatalError || state.pending || state.stopped || state.error || !currentMember(meta)) {
+              return null;
+            }
+            const page = inboxAfter(meta.botId, meta.scopeId, state.handledLocalId);
+            const items = page.items.filter((item) => item.localId <= meta.lastImportedLocalId);
+            if (!items.length) return null;
+            const { trigger, batchThrough } = collectTrigger(meta, items, null);
+            const hasMoreAfterBatch = Boolean(page.nextCursor) || items.some((it) => it.localId > batchThrough);
+            if (!trigger) {
+              if (batchThrough > 0) state.handledLocalId = Math.max(state.handledLocalId, batchThrough);
+              return { eligible: false, settledPassive: batchThrough > 0, hasMoreAfterBatch };
+            }
+            if ((state.preemptedAttempts ?? 0) >= GROUP_MAX_REDRIVE_ATTEMPTS) {
+              state.preemptedAttempts = 0;
+              state.handledLocalId = Math.max(state.handledLocalId, batchThrough);
+              return { eligible: false, settledPassive: true, hasMoreAfterBatch };
+            }
+            const selfMemberId = memberKey(host.deviceId, meta.botId);
+            const recentStored = readRoomPublicStored(meta.scopeId, batchThrough);
+            const recentHistory = recentStored.map((it) => toGroupMessage(it, scopeMembersByBotId));
+            const unreadMessages = items
+              .filter((it) => it.localId <= batchThrough && !it.selfEcho && it.message?.category === 'public')
+              .map((it) => toGroupMessage(it, scopeMembersByBotId));
+            const eligibility = evaluateGroupTurnEligibility({
+              memberId: selfMemberId,
+              members: groupMembers,
+              recentHistory,
+              unreadMessages,
+            });
+            if (!eligibility.eligible) {
+              state.preemptedAttempts = 0;
+              state.handledLocalId = Math.max(state.handledLocalId, batchThrough);
+              return { eligible: false, settledPassive: true, hasMoreAfterBatch };
+            }
+            return {
+              eligible: true,
+              botId,
+              memberId: selfMemberId,
+              batchThrough,
+              hasMoreAfterBatch,
+            };
+          }, context);
+        }, key, AUTO_ERRORS, botId);
+        if (!inspection) continue;
+        if (inspection.eligible) {
+          eligibleCandidates.push(inspection);
+        } else if (inspection.settledPassive && inspection.hasMoreAfterBatch) {
+          settledPassiveWithMore = true;
+        }
+      }
+
+      if (eligibleCandidates.length === 0) {
+        if (settledPassiveWithMore) continue;
+        return;
+      }
+
+      if (unified && turnGate.canRunWork) {
+        let anyCanRun = false;
+        for (const cand of eligibleCandidates) {
+          if (await turnGate.canRunWork(cand.botId)) {
+            anyCanRun = true;
+            break;
+          }
+        }
+        if (!anyCanRun) return;
+      }
+
+      // 3. Run sequential round-robin GroupChatOrchestrator under a room turn epoch.
+      const catchingUpBacklog = eligibleCandidates.some((c) => c.hasMoreAfterBatch);
+      const windowCeiling = catchingUpBacklog
+        ? Math.min(...eligibleCandidates.map((c) => c.batchThrough))
+        : null;
+
+      const epoch = roomScheduler.nextTurnEpoch(scopeId);
+      const baselineLocalId = latestRoomPublicLocalId(scopeId);
+      const publishedIds = new Set();
+      let settledThroughLocalId = windowCeiling !== null ? windowCeiling : baselineLocalId;
+      activeRoomEpochs.set(scopeId, { epoch, baselineLocalId, publishedIds, windowCeiling });
+
+      const initialHistoryStored = readRoomPublicStored(scopeId, windowCeiling);
+      const initialHistory = initialHistoryStored.map((it) => toGroupMessage(it, scopeMembersByBotId));
+      let lastUserIdx = -1;
+      for (let i = initialHistory.length - 1; i >= 0; i -= 1) {
+        if (initialHistory[i]?.speaker?.kind === 'user') {
+          lastUserIdx = i;
+          break;
+        }
+      }
+      const afterUser = lastUserIdx >= 0 ? initialHistory.slice(lastUserIdx + 1) : initialHistory;
+      let initialTotalMessages = 0;
+      for (const msg of afterUser) {
+        if (msg?.speaker?.kind === 'member' && !isHostFailureReceiptText(msg.content)) {
+          initialTotalMessages += 1;
+        }
+      }
+
+      const isCurrent = () => {
+        if (!active || closing || fatalError) return false;
+        if (windowCeiling === null && roomScheduler.currentTurnEpoch(scopeId) === epoch) {
+          if (hasExternalPublicSince(scopeId, baselineLocalId, publishedIds)) {
+            roomScheduler.nextTurnEpoch(scopeId);
+            return false;
+          }
+        }
+        return roomScheduler.currentTurnEpoch(scopeId) === epoch;
+      };
+
+      const deferredBots = new Set();
+      try {
+        const orchestrator = new GroupChatOrchestrator({
+          resolveMembers: async () => groupMembers,
+          readHistory: () =>
+            readRoomPublicStored(scopeId, windowCeiling).map((it) => toGroupMessage(it, scopeMembersByBotId)),
+          isCurrent,
+          runMemberTurn: async ({ member: groupMember }) => {
+            if (groupMember.deviceId !== host.deviceId) return [];
+            if (!isCurrent()) return [];
+            const botId = groupMember.botId;
+            if (!host.getBot(botId)) return [];
+            const beforeMaxLocalId = latestRoomPublicLocalId(scopeId);
+            const key = JSON.stringify([botId, scopeId]);
+            const startRes = await admit(async () => {
+              let resolved;
+              try {
+                resolved = await getWorkContexts().resolveWorkContext(botId, scopeId);
+              } catch (error) {
+                if (error?.code === 'SCOPE_DELETED') {
+                  await stopScopeWork(scopeId).catch(() => {});
+                  return { started: false };
+                }
+                if (error?.code === 'SCOPE_FORBIDDEN' || error?.code === 'BOT_NOT_FOUND') {
+                  return { started: false };
+                }
+                throw error;
+              }
+              const { binding } = resolved;
+              if (!binding && !inboxAfter(botId, scopeId, 0, 1).items.length) {
+                return { started: false };
+              }
+              if (windowCeiling === null) {
+                let imported;
+                do {
+                  imported = await getWorkContexts().syncWorkContext(botId, scopeId, { limit: 200 });
+                } while (imported.hasMore && active && !closing && !fatalError);
+              }
+              let second;
+              try {
+                second = await getWorkContexts().resolveWorkContext(botId, scopeId);
+              } catch (error) {
+                if (error?.code === 'BOT_NOT_FOUND' || error?.code === 'SCOPE_FORBIDDEN') {
+                  return { started: false };
+                }
+                if (error?.code === 'SCOPE_DELETED') {
+                  await stopScopeWork(scopeId).catch(() => {});
+                  return { started: false };
+                }
+                throw error;
+              }
+              if (!second.binding || closing || fatalError) return { started: false };
+              const meta = await getHarness().snapshot(WorkContextState, second.binding.nativeId, context);
+              await fenceLegacyError(second.binding, meta);
+              await drainFailureNotices(botId, second.binding);
+              await reconcile(second.binding, second.bot);
+              if (closing || fatalError) return { started: false };
+              let res = await startDecision(second.binding, second.bot, { maxLocalId: windowCeiling });
+              if (res?.needsResync && windowCeiling === null) {
+                let imported;
+                do {
+                  imported = await getWorkContexts().syncWorkContext(botId, scopeId, { limit: 200 });
+                } while (imported.hasMore && active && !closing && !fatalError);
+                res = await startDecision(second.binding, second.bot, { maxLocalId: windowCeiling });
+              }
+              return res;
+            }, key, AUTO_ERRORS, botId);
+
+            if (startRes?.deferred) {
+              deferredBots.add(botId);
+              return [];
+            }
+            if (startRes?.started && startRes.requestId) {
+              const waitRes = await waitForRoomMemberPending(botId, scopeId, startRes.requestId);
+              if (waitRes?.deferred || waitRes?.preempted) {
+                deferredBots.add(botId);
+                return [];
+              }
+            } else {
+              return [];
+            }
+
+            const recentAfter = readRoomPublicStored(scopeId, null);
+            const sent = [];
+            for (const item of recentAfter) {
+              if (item.localId <= beforeMaxLocalId) continue;
+              const msg = item.message;
+              if (msg?.category !== 'public') continue;
+              if (msg.sourceDeviceId !== host.deviceId) continue;
+              if (msg.author?.kind !== 'bot' || msg.author?.botId !== botId) continue;
+              if (isHostFailureReceiptText(msg.text)) continue;
+              publishedIds.add(msg.messageId);
+              if (
+                windowCeiling === null &&
+                !hasExternalPublicSince(scopeId, baselineLocalId, publishedIds)
+              ) {
+                settledThroughLocalId = Math.max(settledThroughLocalId, item.localId);
+              }
+              if (typeof msg.text === 'string' && msg.text.trim()) {
+                sent.push(msg.text);
+              }
+            }
+            return sent;
+          },
+        });
+
+        await orchestrator.run({
+          group: { name: freshScope.title ?? '', description: '' },
+          memberIds: groupMembers.map((m) => m.id),
+          pendingResponderIds: eligibleCandidates.map((c) => c.memberId),
+          initialTotalMessages,
+        });
+      } finally {
+        if (activeRoomEpochs.get(scopeId)?.epoch === epoch) {
+          activeRoomEpochs.delete(scopeId);
+        }
+      }
+
+      const completedCurrentEpoch = isCurrent();
+      if (completedCurrentEpoch && settledThroughLocalId > 0) {
+        for (const m of scopeMembers) {
+          if (!active || closing || fatalError) return;
+          if (m.deviceId !== host.deviceId || !host.getBot(m.botId)) continue;
+          if (deferredBots.has(m.botId)) continue;
+          const botId = m.botId;
+          const key = JSON.stringify([botId, scopeId]);
+          await admit(async () => {
+            let resolved;
+            try {
+              resolved = await getWorkContexts().resolveWorkContext(botId, scopeId);
+            } catch (error) {
+              if (
+                error?.code === 'SCOPE_DELETED' ||
+                error?.code === 'SCOPE_FORBIDDEN' ||
+                error?.code === 'BOT_NOT_FOUND'
+              ) {
+                return;
+              }
+              throw error;
+            }
+            if (!resolved.binding) return;
+            if (windowCeiling === null) {
+              let imported;
+              do {
+                imported = await getWorkContexts().syncWorkContext(botId, scopeId, { limit: 200 });
+              } while (imported.hasMore && active && !closing && !fatalError);
+            }
+            const harness = getHarness();
+            await harness.commit(async (tx) => {
+              const meta = await tx.doc(WorkContextState, resolved.binding.nativeId);
+              const state = await tx.doc(WorkDecisionState, resolved.binding.nativeId);
+              if (
+                closing ||
+                fatalError ||
+                state.pending ||
+                state.stopped ||
+                state.error ||
+                (state.preemptedAttempts ?? 0) > 0 ||
+                !currentMember(meta)
+              ) {
+                return;
+              }
+              const target = Math.min(settledThroughLocalId, meta.lastImportedLocalId);
+              if (target > state.handledLocalId) {
+                state.handledLocalId = target;
+              }
+            }, context);
+          }, key, AUTO_ERRORS, botId);
+        }
+      }
+
+      if (!completedCurrentEpoch || catchingUpBacklog) {
+        continue;
+      }
+      return;
+    }
+  }
+
+  function scheduleRoomScope(scopeId) {
+    if (!active || closing || fatalError) return;
+    if (scheduledRooms.has(scopeId)) {
+      roomRescanNeeded.add(scopeId);
+      bumpActiveRoomEpochsOnExternal();
+      return;
+    }
+    scheduledRooms.add(scopeId);
+    const task = roomScheduler.enqueueExclusive(scopeId, () =>
+      guarded(async () => {
+        try {
+          do {
+            roomRescanNeeded.delete(scopeId);
+            await runRoomScope(scopeId);
+          } while (roomRescanNeeded.delete(scopeId) && active && !closing && !fatalError);
+        } finally {
+          scheduledRooms.delete(scopeId);
+        }
+      }, AUTO_ERRORS),
+    );
+    inflight.add(task);
+    const release = () => {
+      inflight.delete(task);
+    };
+    task.then(release, release);
+  }
+
   async function poll() {
     if (!active || closing || !existsSync(join(host.dataRoot, 'messages.sqlite'))) return;
     const pairs = new Map();
+    const activeRoomIds = new Set();
     for (const scope of getLog().listScopes()) {
+      if (scope.kind === 'room' && scope.deletedAt === undefined) {
+        activeRoomIds.add(scope.scopeId);
+      }
       for (const item of scope.members) {
         if (item.deviceId === host.deviceId) pairs.set(JSON.stringify([item.botId, scope.scopeId]), [item.botId, scope.scopeId]);
       }
@@ -1608,21 +2251,43 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       }
       pairs.set(key, pair);
     }
+    const roomScopesToSchedule = new Set();
     const tasks = [];
     for (const [key, [botId, scopeId]] of pairs) {
       if (!active || closing) break;
       // 跳过本机已删除的 Bot：旧 scope 成员与 WorkIndex 绑定保留为历史，
       // 不删除数据，但已不存在的 Bot 不调度工作（authorize 只会 BOT_NOT_FOUND）。
       if (!host.getBot(botId)) continue;
+      if (activeRoomIds.has(scopeId)) {
+        roomScopesToSchedule.add(scopeId);
+        continue;
+      }
       if (!lanes.has(key)) tasks.push(admit(() => advance(botId, scopeId), key, AUTO_ERRORS, botId));
+    }
+    for (const scopeId of roomScopesToSchedule) {
+      if (!active || closing) break;
+      scheduleRoomScope(scopeId);
     }
     await Promise.all(tasks);
   }
 
   function nudge() {
-    if (!active || closing || fatalError || pollPromise) return;
+    if (!active || closing || fatalError) return;
+    bumpActiveRoomEpochsOnExternal();
+    if (pollPromise) {
+      pollAgain = true;
+      return;
+    }
     pollPromise = admit(poll, undefined, AUTO_ERRORS);
-    const clear = () => { pollPromise = null; };
+    const clear = () => {
+      pollPromise = null;
+      if (pollAgain && active && !closing && !fatalError) {
+        pollAgain = false;
+        nudge();
+      } else {
+        pollAgain = false;
+      }
+    };
     pollPromise.then(clear, clear);
   }
 
@@ -1630,6 +2295,30 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     assertOpen();
     if (active) return;
     active = true;
+    if (!commitObservation) {
+      try {
+        const harness = getHarness();
+        if (harness && typeof harness.observeCommits === 'function') {
+          commitObservation = harness.observeCommits({
+            advance(publication) {
+              if (closing || !active) return;
+              if (
+                publication &&
+                Array.isArray(publication.changes) &&
+                publication.changes.some((c) => c?.type === 'submission')
+              ) {
+                queueMicrotask(wakeRoomWaiters);
+              }
+            },
+            end() {
+              commitObservation = null;
+            },
+          });
+        }
+      } catch {
+        // Harness closing or unavailable in unit stub; fallback timer handles wakeups.
+      }
+    }
     timer = setInterval(nudge, 1000);
     timer.unref?.();
     nudge();
@@ -1787,6 +2476,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
   async function publishWork(publication, api, toolContext, turn = null) {
     return guarded(async () => {
       assertHealthy();
+      let suppressedByTurnCap = false;
       const result = await api.commit(async (tx) => {
         const coordNativeId = coordinationIdFor(turn) ?? api.conversationId;
         const meta = await tx.doc(WorkContextState, coordNativeId);
@@ -1797,10 +2487,14 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
           throw messageError('BOT_CONTEXT_REQUIRED', 'publication requires the actual local work bot');
         }
         const expectedScopeId = turn?.replyTarget?.scopeId ?? meta.scopeId;
+        const isSameRoomTarget = meta.kind === 'room' && publication.scopeId === expectedScopeId;
         const log = getLog();
         if (log.getMessage(publication.messageId)) {
           const stored = log.publish(publication);
           if (state.pending && publication.scopeId === expectedScopeId) state.pending.published = true;
+          if (isSameRoomTarget) {
+            activeRoomEpochs.get(meta.scopeId)?.publishedIds.add(publication.messageId);
+          }
           return stored;
         }
         if (state.stopped) throw messageError('WORK_STOPPED', 'work context is stopped');
@@ -1809,19 +2503,28 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         // 已中断 pending 不得再发布：已发布消息由 getMessage 幂等路径先行处理，
         // 新稿件在中断后一律拒绝（取消确认前不允许另一轮争用 Bot 资源）。
         if (state.pending.interruption) throw messageError('WORK_STOPPED', 'work decision was interrupted');
-        // 来源成员撤销对所有 scope 生效（与 log guard 同一语义，publishWork 内部
-        // 执行，不依赖发送目标）；异步 DM 不做“存在更新入站消息”的新鲜度 guard——
-        // 冻结轮只处理本轮关联消息，其后到达的 DM 留给后续决策轮，不使当前
-        // 待发布稿件失效；room 仍沿用来源 scopeId/afterLocalId 新鲜度 guard。
-        const guard = meta.kind === 'dm'
-          ? undefined
-          : { scopeId: meta.scopeId, afterLocalId: state.pending.prepared.throughLocalId };
+        if (isSameRoomTarget && (state.pending.publishedCount ?? 0) >= GROUP_MAX_MESSAGES_PER_TURN) {
+          suppressedByTurnCap = true;
+          return { suppressedByTurnCap: true };
+        }
+        // 来源成员撤销对所有 scope 生效；群聊并发度由 RoomTurnScheduler 串行锁 (=1)
+        // 与 turnEpochs 控制，新到群消息推进 epoch 在发言人边界切换轮次，不半途以
+        // STALE_INPUT 打断正在发言的成员。注意：不在工具执行中途同步调 nudge()/poll()，
+        // 避免在模型 toolCall -> toolResult 之间向统一主会话导入新消息干扰当前轮。
         try {
           if (!currentMember(meta)) {
             throw messageError('SCOPE_FORBIDDEN', 'publisher bot must be a current member of the origin scope');
           }
-          const stored = log.publish(publication, guard);
-          if (publication.scopeId === expectedScopeId) state.pending.published = true;
+          const stored = log.publish(publication);
+          if (publication.scopeId === expectedScopeId) {
+            state.pending.published = true;
+            state.pending.publishedCount = (state.pending.publishedCount ?? 0) + 1;
+          }
+          if (isSameRoomTarget) {
+            activeRoomEpochs.get(meta.scopeId)?.publishedIds.add(publication.messageId);
+          } else if (activeRoomEpochs.has(publication.scopeId)) {
+            bumpActiveRoomEpochsOnExternal();
+          }
           return stored;
         } catch (error) {
           if (error?.code !== 'STALE_INPUT' && !(error?.code === 'SCOPE_FORBIDDEN' && !currentMember(meta))) throw error;
@@ -1831,6 +2534,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
       }, toolContext);
       // Throwing inside commit would roll back replan and permit another provider call on the stale request.
       if (result.failure) throw result.failure;
+      if (suppressedByTurnCap) return { suppressedByTurnCap: true };
       return result;
     }, PUBLICATION_ERRORS, toolContext);
   }
@@ -1869,10 +2573,15 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     if (!closePromise) {
       closing = true;
       active = false;
+      pollAgain = false;
       clearInterval(timer);
       timer = null;
+      try { commitObservation?.detach(); } catch { /* ignore */ }
+      commitObservation = null;
+      roomScheduler.dispose();
+      wakeRoomWaiters();
       closePromise = (async () => {
-        await Promise.allSettled([...inflight]);
+        await Promise.allSettled([...inflight, roomScheduler.drainAll()]);
         assertHealthy();
       })();
     }
@@ -1886,7 +2595,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     return coordinationIdFor(await sessions.getTurn(api, toolContext));
   }
 
-  return { resume, close, beforeRequest, checkBudget, publishWork, passWork, getWorkActivity, stopWork, resumeWork, stopScopeWork, takeoverShower,
+  return { resume, close, nudge, beforeRequest, checkBudget, publishWork, passWork, getWorkActivity, stopWork, resumeWork, stopScopeWork, takeoverShower,
     interruptBotWork, setActivityListener, refreshActivity,
     coordinationSelector,
     drainFailureNotices,

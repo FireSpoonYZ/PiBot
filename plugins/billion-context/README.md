@@ -26,7 +26,7 @@ npm pack ./plugins/billion-context --pack-destination "$ARTIFACT_DIR"
 
 BC 按 Durable conversation 保存原有 `host.bc-context` v1 状态，未知 kernel 版本拒绝使用而非重置。原始历史保留；仅纯文本 user/assistant 消息可折叠，其余复杂内容保留。工具保留原名 `compress`、`decompress`、`search_context`、`acp_status`，以便恢复旧的待执行工具任务；会话的 selectedExtensions 与所有权检查隔离 Bot，不能跨 Bot 访问原文。主会话和工作会话的 `contextStatus` 动作是只读的，输入分别为 `{}` 和 `{"scopeId":"<非空scopeId>"}`；未绑定会话返回空状态，不创建会话。插件禁用或卸载时查询返回 `EXTENSION_DISABLED`，不是伪造空状态。
 
-上下文边界（`view.head`：`pi.reset` 或 `pi.compaction`）变化时，`prepare` 用本插件的 initial factory 重建该会话内的 `state`/`contentStore`/`prepared` 并清空 `operations`，避免 `/clear` 前的 block 摘要或旧 prepared 重新进入下一次模型请求；Durable 原历史/回执不删。SDK 原生自动 compaction（threshold/background，Host 默认启用）与 BC 可同时在同一会话生效：原生摘要作为新的 head marker，BC 在下一次 `prepare` 检测到 head 变化后只丢弃自身投影状态，原生摘要消息保留在视图中继续参与投影；原生 compaction 的 summarizer 走 `completeSimple`，不经过 BC 的 `prepareContext`，不会递归触发 BC。
+上下文边界（`view.head`：`pi.reset` 或 `pi.compaction`）变化时，`prepare` 用本插件的 initial factory 重建该会话内的 `state`/`contentStore`/`prepared` 并清空 `operations`，避免 `/clear` 前的 block 摘要或旧 prepared 重新进入下一次模型请求；Durable 原历史/回执不删。仅当 BC 确实已激活、绑定并接管当前会话时，Host 在 Durable 入队前通过 pre-threshold veto 跳过主动 `threshold`/`background` 自动压缩；未绑定、未加载、未接管或其余 Bot 保持默认阈值/后台策略。所有会话仍保留显式 `/compact` 与一次真实 context overflow 自动压缩重试；当压缩或重置真正写入新的 `head` marker 后，BC 在下一次 `prepare` 检测到 head 变化后只重建自身投影状态，原生摘要消息保留在视图中继续参与投影；原生 compaction 的 summarizer 走 `completeSimple`，不经过 BC 的 `prepareContext`，不会递归触发 BC。
 
 ## acp-kernel 许可
 

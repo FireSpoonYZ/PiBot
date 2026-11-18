@@ -2,6 +2,7 @@ import path from 'node:path';
 import { createModels, createProvider } from '@earendil-works/pi-ai/models';
 import { getApiProvider } from '@earendil-works/pi-ai/compat';
 import { nativeCenterProvider } from './native-center-providers.js';
+import { ANTIGRAVITY_API, ANTIGRAVITY_PROVIDER_ID } from './antigravity-provider.js';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { openAIResponsesApi } from '@earendil-works/pi-ai/api/openai-responses.lazy';
 import { piMessagesApi } from '@earendil-works/pi-ai/api/pi-messages.lazy';
@@ -10,8 +11,9 @@ import { googleGenerativeAIApi } from '@earendil-works/pi-ai/api/google-generati
 import { normalizeHindsightConfig, parseHindsightOptions } from './hindsight-client.js';
 import { normalizeRuntimeExtensions, resolveRuntimeExtensions } from './extension-manager.js';
 import { readInputObject } from './cli-input.js';
+import { withRequestBudget } from './request-context.js';
 
-const DEFAULT_CONTEXT_WINDOW = 32768;
+const DEFAULT_CONTEXT_WINDOW = 256 * 1024;
 const DEFAULT_MAX_TOKENS = 1024;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // pi 思考档位（pi-ai ModelThinkingLevel）；provider 原生档位差异归模型 thinkingLevelMap。
@@ -249,7 +251,7 @@ export function parseRuntimeConfig(raw) {
   const normalized = normalizeRuntimeConfig(raw);
   const models = createModels();
   for (const provider of normalized.providers) {
-    models.setProvider(buildProvider(provider));
+    models.setProvider(withRequestBudget(buildProvider(provider)));
   }
   const extensions = resolveRuntimeExtensions(normalized);
   const hindsight = extensions.hindsight?.enabled ? extensions.hindsight.config : undefined;
@@ -275,7 +277,7 @@ export async function loadRuntimeConfig(file) {
 
 const RUNTIME_MODEL_FIELDS = new Set(['id', 'name', 'api', 'baseUrl', 'headers', 'reasoning', 'contextWindow', 'maxTokens', 'input', 'cost', 'compat', 'thinkingLevelMap', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel']);
 
-function validateProviders(providers) {
+function validateProviders(providers, { allowAntigravity = false } = {}) {
   if (!Array.isArray(providers)) throw invalidArgument('runtime config: providers must be an array');
   const seenProviders = new Set();
   const out = [];
@@ -294,11 +296,20 @@ function validateProviders(providers) {
     if (seenProviders.has(id)) throw invalidArgument(`runtime config: duplicate provider id: ${id}`);
     seenProviders.add(id);
 
-    const baseUrl = p.native && !p.baseUrl ? undefined : normalizeProviderBaseUrl(p.baseUrl);
+    const isAntigravity = allowAntigravity && id === ANTIGRAVITY_PROVIDER_ID;
+    const baseUrl = (p.native || isAntigravity) && (p.baseUrl === undefined || p.baseUrl === '')
+      ? undefined
+      : normalizeProviderBaseUrl(p.baseUrl);
     let api;
-    if (p.api !== undefined) {
+    if (isAntigravity) {
       const requested = typeof p.api === 'string' ? p.api.trim() : '';
-      if (!PROVIDER_APIS.has(requested) && !getApiProvider(requested)) {
+      if (requested !== ANTIGRAVITY_API) {
+        throw invalidArgument(`runtime config: provider "${id}" api is not supported: ${requested || typeof p.api}`);
+      }
+      api = requested;
+    } else if (p.api !== undefined) {
+      const requested = typeof p.api === 'string' ? p.api.trim() : '';
+      if (requested === ANTIGRAVITY_API || (!PROVIDER_APIS.has(requested) && !getApiProvider(requested))) {
         throw invalidArgument(`runtime config: provider "${id}" api is not supported: ${requested || typeof p.api}`);
       }
       api = requested;
@@ -367,10 +378,16 @@ function validateProviders(providers) {
       }
       const model = { id: modelId, contextWindow, maxTokens };
       if (m.api !== undefined) {
-        if (typeof m.api !== 'string' || !getApiProvider(m.api)) throw invalidArgument('Unsupported model API');
+        if (isAntigravity) {
+          if (m.api !== ANTIGRAVITY_API) throw invalidArgument('Unsupported model API');
+        } else if (typeof m.api !== 'string' || m.api === ANTIGRAVITY_API || !getApiProvider(m.api)) {
+          throw invalidArgument('Unsupported model API');
+        }
         model.api = m.api;
       }
-      if (m.baseUrl !== undefined) model.baseUrl = normalizeProviderBaseUrl(m.baseUrl);
+      if (m.baseUrl !== undefined && !(isAntigravity && m.baseUrl === '')) {
+        model.baseUrl = normalizeProviderBaseUrl(m.baseUrl);
+      }
       for (const field of ['headers', 'samplingParams', 'samplingParamsByThinkingLevel', 'promptCache']) {
         if (m[field] !== undefined) model[field] = passThroughObject(m[field], field);
       }
@@ -410,7 +427,7 @@ export function syncModelsFromRuntimeConfig(models, raw) {
   const normalized = normalizeRuntimeConfig(raw);
   models.clearProviders();
   for (const provider of normalized.providers) {
-    models.setProvider(buildProvider(provider));
+    models.setProvider(withRequestBudget(buildProvider(provider)));
   }
   return normalized;
 }
@@ -465,7 +482,7 @@ function createApiKeyAuth(apiKeyEnv) {
 }
 
 /** Build the registry from the authenticated snapshot; credentials never enter local settings or process.env. */
-export function applyCenterModels(snapshot, existingModels, authResolver) {
+export function applyCenterModels(snapshot, existingModels, authResolver, streamAntigravity) {
   const providers = snapshot.providers.filter((provider) => provider.enabled).map((provider) => ({
     id: provider.id,
     name: provider.name,
@@ -478,7 +495,7 @@ export function applyCenterModels(snapshot, existingModels, authResolver) {
       (model) => Object.fromEntries(Object.entries(model).filter(([key]) => RUNTIME_MODEL_FIELDS.has(key)))
     ),
   }));
-  const normalized = validateProviders(providers);
+  const normalized = validateProviders(providers, { allowAntigravity: true });
   const botModels = {};
   for (const bot of snapshot.bots) {
     const selection = bot.model;
@@ -488,7 +505,7 @@ export function applyCenterModels(snapshot, existingModels, authResolver) {
         throw errWithCode('center selected model is unavailable', 'MODEL_NOT_FOUND');
       }
       const selected = snapshot.providers.find((p) => p.id === ref.provider);
-      if (selected.credentialRef !== null && !snapshot.credentials?.[selected.credentialRef] && selected.authMode !== 'oauth' && !authResolver) {
+      if (selected.id !== ANTIGRAVITY_PROVIDER_ID && selected.credentialRef !== null && !snapshot.credentials?.[selected.credentialRef] && selected.authMode !== 'oauth' && !authResolver) {
         throw errWithCode('center provider credential is unavailable', 'INVALID_STATE');
       }
     }
@@ -503,11 +520,11 @@ export function applyCenterModels(snapshot, existingModels, authResolver) {
     if (original.credentialRef !== null) {
       credential = snapshot.credentials[original.credentialRef] ?? null;
     }
-    return nativeCenterProvider(provider, provider.models, credential, authResolver);
+    return nativeCenterProvider(provider, provider.models, credential, authResolver, streamAntigravity);
   });
   const models = existingModels ?? createModels();
   models.clearProviders();
-  for (const provider of built) models.setProvider(provider);
+  for (const provider of built) models.setProvider(withRequestBudget(provider));
   return { models, botModels };
 }
 
@@ -527,10 +544,38 @@ export async function validateCenterProvider({ provider, models, credential }) {
 
 export async function discoverCenterProviderModels({ provider, credential }) {
   try {
-    const result = await discoverProviderModels({ baseUrl: provider.baseUrl, api: provider.api, apiKey: credential });
-    return { models: result.models.map((model) => ({ ...model, maxTokens: Math.min(DEFAULT_MAX_TOKENS, model.contextWindow), input: ['text'], enabled: true, revision: 0 })) };
-  } catch {
-    throw errWithCode('provider discovery failed', 'INVALID_ARGUMENT');
+    const baseUrl = (typeof provider?.custom?.baseUrl === 'string' && provider.custom.baseUrl.trim())
+      ? provider.custom.baseUrl
+      : provider?.baseUrl;
+    const api = (typeof provider?.custom?.api === 'string' && provider.custom.api.trim())
+      ? provider.custom.api
+      : provider?.api;
+    const customHeaders = isPlainObject(provider?.custom?.headers)
+      ? provider.custom.headers
+      : isPlainObject(provider?.headers)
+        ? provider.headers
+        : undefined;
+    const result = await discoverProviderModels({
+      baseUrl,
+      api,
+      apiKey: credential,
+      ...(customHeaders ? { headers: customHeaders } : {}),
+    });
+    return {
+      models: result.models.map((model) => ({
+        id: model.id,
+        name: model.name,
+        reasoning: model.reasoning,
+        contextWindow: model.contextWindow,
+        maxTokens: Math.min(model.maxTokens ?? Math.max(DEFAULT_MAX_TOKENS, 4096), model.contextWindow),
+        input: ['text'],
+        enabled: true,
+        revision: 0,
+      })),
+    };
+  } catch (err) {
+    const message = err instanceof Error && err.message ? err.message : 'provider discovery failed';
+    throw errWithCode(message, 'INVALID_ARGUMENT');
   }
 }
 
@@ -564,7 +609,7 @@ function extractModelRows(payload) {
 
 export async function discoverProviderModels(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    throw modelError('INVALID_ARGUMENT', 'input must be an object');
+    throw invalidArgument('input must be an object');
   }
   const apiKeyEnv = typeof input.apiKeyEnv === 'string' && ENV_NAME.test(input.apiKeyEnv.trim())
     ? input.apiKeyEnv.trim()
@@ -576,22 +621,40 @@ export async function discoverProviderModels(input) {
   if (input.syncEnvOnly === true) {
     return { models: [] };
   }
-  const baseUrl = normalizeHttpUrl(input.baseUrl, 'baseUrl');
+  if (typeof input.baseUrl !== 'string' || !input.baseUrl.trim()) {
+    throw invalidArgument('请先填写服务商 API 地址（Base URL）');
+  }
+  const baseUrl = normalizeProviderBaseUrl(input.baseUrl.trim());
   const token = rawKey || (apiKeyEnv ? (process.env[apiKeyEnv] ?? '') : '');
+  const isGoogle = baseUrl.includes('generativelanguage.googleapis.com') || input.api === 'google-generative-ai';
+  const isAnthropic = baseUrl.includes('anthropic.com') || input.api === 'anthropic-messages';
   const headers = { Accept: 'application/json' };
   if (token) {
-    headers.Authorization = `Bearer ${token}`;
-    headers['x-api-key'] = token;
+    if (isGoogle) {
+      headers['x-goog-api-key'] = token;
+    } else {
+      headers.Authorization = `Bearer ${token}`;
+      headers['x-api-key'] = token;
+    }
   }
-  if (baseUrl.includes('anthropic.com') || input.api === 'anthropic-messages') {
+  if (isAnthropic) {
     headers['anthropic-version'] = '2023-06-01';
+  }
+  if (isPlainObject(input.headers)) {
+    for (const [k, v] of Object.entries(input.headers)) {
+      if (typeof v === 'string' && k.trim()) headers[k.trim()] = v;
+    }
   }
 
   const candidateUrls = [`${baseUrl}/models`];
+  if (isGoogle && !/\/v\d+(?:beta\d*)?(?:\/openai)?$/i.test(baseUrl)) {
+    candidateUrls.push(`${baseUrl}/v1beta/models`);
+  }
   if (!/\/v\d+(?:beta\d*)?(?:\/openai)?$/i.test(baseUrl)) {
     candidateUrls.push(`${baseUrl}/v1/models`);
   }
 
+  const redact = (text) => (token && text ? text.split(token).join('***') : text);
   let lastError = null;
   let rows = null;
   for (const url of candidateUrls) {
@@ -602,7 +665,7 @@ export async function discoverProviderModels(input) {
         signal: AbortSignal.timeout(12000),
       });
       if (!res.ok) {
-        const text = await res.text().catch(() => '');
+        const text = redact(await res.text().catch(() => ''));
         lastError = new Error(`HTTP ${res.status}${text ? `: ${text.slice(0, 160)}` : ''}`);
         if (res.status === 404 && candidateUrls.length > 1) continue;
         break;
@@ -616,7 +679,8 @@ export async function discoverProviderModels(input) {
   }
 
   if (!rows) {
-    throw modelError('INVALID_ARGUMENT', `拉取模型失败: ${lastError?.message ?? '无法连接服务商 /models 接口'}`);
+    const detail = redact(lastError?.message ?? '无法连接服务商 /models 接口');
+    throw invalidArgument(`拉取模型失败: ${detail}`);
   }
 
   const seen = new Set();
@@ -643,14 +707,24 @@ export async function discoverProviderModels(input) {
       item.reasoning ||
       /(?:reasoner|[-_/]r1\b|[-_/]o1\b|[-_/]o3\b|[-_/]o4\b|thinking|qwq)/i.test(id),
     );
-    const contextWindow = Number.isSafeInteger(item.context_length) && item.context_length > 0
-      ? item.context_length
-      : Number.isSafeInteger(item.inputTokenLimit) && item.inputTokenLimit > 0
-        ? item.inputTokenLimit
-        : DEFAULT_CONTEXT_WINDOW;
-    discovered.push({ id, name, reasoning, contextWindow });
+    const contextWindow = [item.context_window, item.context_length, item.max_model_len, item.inputTokenLimit]
+      .find((n) => Number.isSafeInteger(n) && n > 0) ?? DEFAULT_CONTEXT_WINDOW;
+    const maxTokens = [
+      item.max_output_tokens,
+      item.max_completion_tokens,
+      item.max_tokens,
+      item.outputTokenLimit,
+      item.top_provider?.max_completion_tokens,
+    ].find((n) => Number.isSafeInteger(n) && n > 0);
+    discovered.push({
+      id,
+      name,
+      reasoning,
+      contextWindow,
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
+    });
   }
 
+  discovered.sort((a, b) => a.id.localeCompare(b.id));
   return { models: discovered };
-
 }

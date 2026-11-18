@@ -1,9 +1,16 @@
 import { useState } from 'react';
 import { ArrowLeft, LayoutDashboard, Search } from 'lucide-react';
+import type { BotBoardItem } from '../../host-core/index.js';
 import { GrokBotAvatar } from './GrokBotAvatar';
 import { botActivityText, isBotActivityBusy, parseBotActivityStartedAt } from './botActivity';
 import { botBoardBucket, type BoardBucket, type BotBoardState, type BotBoardTarget } from './useBotBoard';
 import './BotBoard.css';
+
+type TaskAwareBoardItem = BotBoardItem & {
+  taskId?: string | null;
+  taskTitle?: string | null;
+  taskStatusLine?: string | null;
+};
 
 const columns: { key: BoardBucket; label: string }[] = [
   { key: 'attention', label: '需要你' },
@@ -14,10 +21,11 @@ const columns: { key: BoardBucket; label: string }[] = [
 ];
 const timeText = (value: string) => new Date(value).toLocaleString();
 
-export function BotBoard({ targets, board, onOpen, onBack, loading, error, variant = 'mobile' }: {
+export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, loading, error, variant = 'mobile' }: {
   targets: BotBoardTarget[];
   board: BotBoardState;
   onOpen: (target: BotBoardTarget, questionnaire?: { conversationId: string; requestId: string }) => void;
+  onOpenTask?: (taskId: string) => void;
   onBack?: () => void;
   loading?: boolean;
   error?: string | null;
@@ -54,43 +62,97 @@ export function BotBoard({ targets, board, onOpen, onBack, loading, error, varia
     const failed = desktop && !stale && item?.activity.phase === 'failed';
     const action = questionnaire ? '回答问题' : review ? '查看结果' : failed ? '查看失败原因' : '进入聊天';
     const actionLabel = questionnaire ? `回答 ${target.name} 的问题` : review ? `查看 ${target.name} 的结果` : `打开 ${target.name} 的聊天`;
-    return <button type="button" className={`bot-board-card${!target.online ? ' is-offline' : ''}`} key={target.key} onClick={() => {
+    const taskItem = item as TaskAwareBoardItem | undefined;
+    const taskId = taskItem?.taskId ?? null;
+    const taskTitle = taskItem?.taskTitle ?? null;
+    const taskStatusLine = taskItem?.taskStatusLine ?? null;
+    const hasTaskLink = Boolean(taskId && onOpenTask);
+    const openChat = () => {
       if (variant === 'mobile' && item?.lastResult) board.markViewed(target.key, item.lastResult.id);
       onOpen(target, questionnaire);
-    }} aria-label={`${actionLabel} · ${target.deviceName}`}>
-      <span className="bot-board-card-head">
-        <GrokBotAvatar botKey={target.avatarKey} roleName={target.name} isPrimary={target.isPrimary} offline={!target.online} size={40} />
-        <span><strong>{target.name}</strong><small>{target.deviceName}</small></span>
-      </span>
-      {desktop ? (
-        <>
-          <p className="bot-board-progress">{
-            !target.online ? '设备离线' : record?.error ?? (
-              !item ? '正在读取状态…' :
-              item.attention && !controlling ? `等待你确认 · ${item.attention.count} 题` :
-              item.activity.phase === 'failed' ? item.activity.error?.message || '执行失败' :
-              item.lastResult ? item.lastResult.summary || '已完成' :
-              item.progress ? item.progress.current || `已完成 ${item.progress.completed} / ${item.progress.total} 项` :
-              item.queuedCount ? `排队 ${item.queuedCount} 项` : botActivityText(item.activity, zh => zh)
-            )
-          }</p>
-          {stale && record?.updatedAt && <small>上次更新 {timeText(record.updatedAt)}</small>}
-        </>
-      ) : (
-        <>
-          {stale && <span className={target.online ? 'bot-board-warning' : 'bot-board-offline-label'}>{!target.online ? '设备离线' : record?.error || '正在刷新'}</span>}
-          <span className="bot-board-status">{item ? botActivityText(item.activity, zh => zh) : target.online ? '等待状态读取…' : '尚无状态快照'}</span>
-          {!!item?.queuedCount && <small>排队 {item.queuedCount} 项</small>}
-          {item?.attention && !controlling && <p>待回答 · {item.attention.count} 题<br />{item.attention.summary}</p>}
-          {item?.activity.phase === 'failed' && <p>{item.activity.error?.message || '执行失败，请进入聊天处理。'}</p>}
-          {item?.progress && <span><small>已完成 {item.progress.completed} / {item.progress.total} 项</small>{item.progress.current && <p>{item.progress.current}</p>}</span>}
-          {item?.lastResult && <p>{item.lastResult.summary || '已完成，打开聊天查看结果。'}</p>}
-          {item && isBotActivityBusy(item.activity) && startedAt !== null && <small>已用时 {Math.max(0, Math.floor((clock - startedAt) / 1000))} 秒{stale ? '（截至快照）' : ''}</small>}
-          {item?.lastResult && <small>完成于 {timeText(item.lastResult.completedAt)}</small>}
-          {record?.updatedAt && <small>更新于 {timeText(record.updatedAt)}</small>}
-        </>
-      )}
-      <span className="bot-board-open">{action} →</span>
+    };
+    const cardBody = (
+      <>
+        <span className="bot-board-card-head">
+          <GrokBotAvatar botKey={target.avatarKey} roleName={target.name} isPrimary={target.isPrimary} offline={!target.online} size={40} />
+          <span>
+            <strong>{target.name}</strong>
+            <small>{target.deviceName}{taskStatusLine ? ` · ${taskStatusLine}` : ''}</small>
+          </span>
+        </span>
+        {desktop ? (
+          <>
+            <p className="bot-board-progress">{
+              !target.online ? '设备离线' : record?.error ?? (
+                !item ? '正在读取状态…' :
+                item.attention && !controlling ? `等待你确认 · ${item.attention.count} 题` :
+                item.activity.phase === 'failed' ? item.activity.error?.message || '执行失败' :
+                item.lastResult ? item.lastResult.summary || '已完成' :
+                item.progress ? item.progress.current || `已完成 ${item.progress.completed} / ${item.progress.total} 项` :
+                taskTitle ? taskTitle :
+                item.queuedCount ? `排队 ${item.queuedCount} 项` : botActivityText(item.activity, zh => zh)
+              )
+            }</p>
+            {stale && record?.updatedAt && <small>上次更新 {timeText(record.updatedAt)}</small>}
+          </>
+        ) : (
+          <>
+            {stale && <span className={target.online ? 'bot-board-warning' : 'bot-board-offline-label'}>{!target.online ? '设备离线' : record?.error || '正在刷新'}</span>}
+            <span className="bot-board-status">{taskStatusLine || (item ? botActivityText(item.activity, zh => zh) : target.online ? '等待状态读取…' : '尚无状态快照')}</span>
+            {!!item?.queuedCount && <small>排队 {item.queuedCount} 项</small>}
+            {item?.attention && !controlling && <p>待回答 · {item.attention.count} 题<br />{item.attention.summary}</p>}
+            {item?.activity.phase === 'failed' && <p>{item.activity.error?.message || '执行失败，请进入聊天处理。'}</p>}
+            {item?.progress && <span><small>已完成 {item.progress.completed} / {item.progress.total} 项</small>{item.progress.current && <p>{item.progress.current}</p>}</span>}
+            {item?.lastResult && <p>{item.lastResult.summary || '已完成，打开聊天查看结果。'}</p>}
+            {!item?.progress && !item?.lastResult && taskTitle && <p>{taskTitle}</p>}
+            {item && isBotActivityBusy(item.activity) && startedAt !== null && <small>已用时 {Math.max(0, Math.floor((clock - startedAt) / 1000))} 秒{stale ? '（截至快照）' : ''}</small>}
+            {item?.lastResult && <small>完成于 {timeText(item.lastResult.completedAt)}</small>}
+            {record?.updatedAt && <small>更新于 {timeText(record.updatedAt)}</small>}
+          </>
+        )}
+        {hasTaskLink ? (
+          <div className="bot-board-links" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, width: '100%' }}>
+            <button
+              type="button"
+              className="bot-board-open"
+              style={{ border: 0, background: 'transparent', padding: 0 }}
+              onClick={e => {
+                e.stopPropagation();
+                onOpenTask!(taskId!);
+              }}
+            >
+              查看任务 →
+            </button>
+            <span className="bot-board-open">{action} →</span>
+          </div>
+        ) : (
+          <span className="bot-board-open">{action} →</span>
+        )}
+      </>
+    );
+    if (hasTaskLink) {
+      return (
+        <div
+          role="button"
+          tabIndex={0}
+          className={`bot-board-card${!target.online ? ' is-offline' : ''}`}
+          style={{ cursor: 'pointer' }}
+          key={target.key}
+          onClick={openChat}
+          onKeyDown={e => {
+            if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+              e.preventDefault();
+              openChat();
+            }
+          }}
+          aria-label={`${actionLabel} · ${target.deviceName}`}
+        >
+          {cardBody}
+        </div>
+      );
+    }
+    return <button type="button" className={`bot-board-card${!target.online ? ' is-offline' : ''}`} key={target.key} onClick={openChat} aria-label={`${actionLabel} · ${target.deviceName}`}>
+      {cardBody}
     </button>;
   };
   const otherColumns = columns.filter(column => column.key === 'idle' || column.key === 'offline');

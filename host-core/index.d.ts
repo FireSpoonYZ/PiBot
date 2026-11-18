@@ -121,6 +121,16 @@ export interface SubmissionInput {
   delivery?: TurnDeliveryMode;
 }
 
+export interface TaskDispatchContext {
+  taskId: string;
+  stepId: string | null;
+  executionRevision: number;
+}
+
+export interface TaskDispatchSubmissionInput extends SubmissionInput {
+  dispatchContext?: TaskDispatchContext;
+}
+
 export interface QueuedTurnItem {
   requestId: string;
   delivery: TurnDeliveryMode;
@@ -711,6 +721,9 @@ export interface Runtime {
   unarchiveBot(botId: string): Promise<BotRecord>;
   deleteBot(botId: string): Promise<DeleteBotResult>;
   submit(botId: string, input: SubmissionInput): Promise<PrimarySubmission>;
+  submitTaskDispatch(botId: string, input: TaskDispatchSubmissionInput, stopEpoch?: number): Promise<PrimarySubmission | null>;
+  cancelTaskDispatch(botId: string, requestId: string): Promise<{ botId: string; requestId: string }>;
+  manageTasks(input: TaskActionInput): Promise<Record<string, unknown>>;
   wait(botId: string, requestId: string): Promise<PrimarySubmission>;
   getSubmission(botId: string, requestId: string): Promise<PrimarySubmission | null>;
   /** Persist one validated image into the Bot's private attachment dir; resolves the content-addressed record. */
@@ -813,6 +826,8 @@ export interface Runtime {
   releaseShowerSession(target: ShowerTarget, sessionId: string): Promise<Record<string, unknown>>;
   /** Internal Center notification; wakes webhook delivery without accepting public input. */
   notifyWebhookReady(): void;
+  /** Internal Center notification; wakes global task dispatch delivery without accepting public input. */
+  notifyTaskReady(): void;
   /** Idempotently resume native tasks AND activate automatic room/DM/webhook processing; may submit new work. */
   resume(): void;
   close(): Promise<void>;
@@ -914,7 +929,256 @@ export interface VaultUnlockPresentation {
   serverUrl?: string;
 }
 
-export type ToolPresentation = TodoPresentation | QuestionnairePresentation | VaultUnlockPresentation;
+export type TaskStatus = 'triaging' | 'working' | 'waiting' | 'done' | 'cancelled';
+
+export type TaskStepStatus =
+  | 'unassigned'
+  | 'todo'
+  | 'working'
+  | 'waiting'
+  | 'blocked'
+  | 'done'
+  | 'cancelled';
+
+export interface TaskOrigin {
+  kind: 'ui' | 'chat' | 'voice';
+  deviceId?: string | null;
+  botId?: string | null;
+  botName?: string | null;
+  conversationId?: string | null;
+  label: string;
+}
+
+export interface TaskBotRef {
+  deviceId: string;
+  botId: string;
+  botName?: string;
+}
+
+export interface TaskPendingPrompt {
+  kind: 'plan' | 'question';
+  deviceId: string;
+  botId: string;
+  botName?: string;
+  text: string;
+  options?: string[];
+  createdAt: number;
+}
+
+export interface TaskAdoption {
+  phase: 'recorded' | 'adjusting' | 'needs_scope' | 'adopted';
+  shortReceipt: string;
+  changeText: string;
+  scopeDesc?: string;
+  updatedAt: number;
+}
+
+export interface TaskStep {
+  id: string;
+  parentStepId: string | null;
+  text: string;
+  status: TaskStepStatus;
+  deviceId: string | null;
+  botId: string | null;
+  botName?: string | null;
+  dependsOnStepIds?: string[];
+  preserved?: boolean;
+  relationNote?: string;
+  resultSummary?: string;
+  previousResultSummary?: string;
+  executionRevision?: number;
+  claimedExecutionRevision?: number | null;
+  updatedAt: number;
+}
+
+export interface TaskLogEntry {
+  id: string;
+  time: number;
+  text: string;
+}
+
+export interface GlobalTask {
+  id: string;
+  title: string;
+  requirement: string;
+  status: TaskStatus;
+  summary: string;
+  origin: TaskOrigin;
+  coordinatorDeviceId: string | null;
+  coordinatorBotId: string | null;
+  botRefs: TaskBotRef[];
+  pendingPrompt: TaskPendingPrompt | null;
+  adoption: TaskAdoption | null;
+  steps: TaskStep[];
+  logs: TaskLogEntry[];
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type TaskActionInput =
+  | {
+      action: 'list';
+      status?: 'all' | 'active' | 'waiting' | 'done';
+      botDeviceId?: string;
+      botId?: string;
+      limit?: number;
+      cursor?: { updatedAt: number; id: string } | null;
+    }
+  | {
+      action: 'get';
+      taskId: string;
+    }
+  | {
+      action: 'create';
+      text?: string;
+      title?: string;
+      requirement?: string;
+      origin?: Partial<TaskOrigin>;
+      coordinatorDeviceId?: string | null;
+      coordinatorBotId?: string | null;
+      actorBotId?: string;
+      directStart?: boolean;
+      pendingPrompt?: { kind: 'plan' | 'question'; text: string; options?: string[] } | null;
+      steps?: Array<{
+        id?: string;
+        parentStepId?: string | null;
+        text: string;
+        status?: TaskStepStatus;
+        deviceId?: string | null;
+        botId?: string | null;
+        dependsOnStepIds?: string[];
+        relationNote?: string;
+        resultSummary?: string;
+      }>;
+    }
+  | {
+      action: 'update';
+      taskId: string;
+      expectedRevision?: number;
+      actorBotId?: string;
+      fromChatBotId?: string;
+      fromChatDeviceId?: string;
+      title?: string;
+      requirement?: string;
+      status?: TaskStatus;
+      summary?: string;
+      coordinatorDeviceId?: string | null;
+      coordinatorBotId?: string | null;
+      steps?: Array<{
+        id?: string;
+        parentStepId?: string | null;
+        text: string;
+        status?: TaskStepStatus;
+        deviceId?: string | null;
+        botId?: string | null;
+        dependsOnStepIds?: string[];
+        preserved?: boolean;
+        relationNote?: string;
+        resultSummary?: string;
+      }>;
+      stepPatches?: Array<{
+        stepId: string;
+        expectedExecutionRevision?: number;
+        parentStepId?: string | null;
+        text?: string;
+        status?: TaskStepStatus;
+        deviceId?: string | null;
+        botId?: string | null;
+        dependsOnStepIds?: string[];
+        preserved?: boolean;
+        relationNote?: string;
+        resultSummary?: string;
+      }>;
+      addSteps?: Array<{
+        id?: string;
+        parentStepId?: string | null;
+        afterStepId?: string | null;
+        text: string;
+        status?: TaskStepStatus;
+        deviceId?: string | null;
+        botId?: string | null;
+        dependsOnStepIds?: string[];
+        relationNote?: string;
+      }>;
+      pendingPrompt?: {
+        kind: 'plan' | 'question';
+        deviceId?: string;
+        botId?: string;
+        text: string;
+        options?: string[];
+      } | null;
+      adoption?: Partial<TaskAdoption> | null;
+      logText?: string;
+    }
+  | {
+      action: 'assign';
+      taskId: string;
+      expectedRevision?: number;
+      coordinatorDeviceId?: string | null;
+      coordinatorBotId?: string | null;
+    }
+  | {
+      action: 'confirm_plan';
+      taskId: string;
+      expectedRevision?: number;
+    }
+  | {
+      action: 'answer_prompt';
+      taskId: string;
+      expectedRevision?: number;
+      answer: string;
+    }
+  | {
+      action: 'resolve_adoption_scope';
+      taskId: string;
+      expectedRevision?: number;
+      scope: 'keep' | 'redo';
+    }
+  | {
+      action: 'dismiss_adoption';
+      taskId: string;
+      expectedRevision?: number;
+    }
+  | {
+      action: 'delete';
+      taskId: string;
+      expectedRevision?: number;
+    };
+
+export interface TaskStepPreviewPresentation {
+  id: string;
+  text: string;
+  status: TaskStepStatus;
+  botName?: string;
+}
+
+export interface TaskPendingPromptPresentation {
+  kind: 'plan' | 'question';
+  botId: string;
+  text: string;
+  options?: string[];
+}
+
+export interface TaskPresentation {
+  kind: 'task';
+  version: 1;
+  installationId: string;
+  taskId: string;
+  title: string;
+  status: TaskStatus;
+  cardLabel: string;
+  summary?: string;
+  stepCount: { done: number; total: number };
+  pendingPrompt?: TaskPendingPromptPresentation | null;
+  stepsPreview?: TaskStepPreviewPresentation[];
+}
+
+export type ToolPresentation =
+  | TodoPresentation
+  | QuestionnairePresentation
+  | VaultUnlockPresentation
+  | TaskPresentation;
 
 /**
  * Live preview types (module 6): bounded, non-durable projection frames for a
@@ -1089,6 +1353,9 @@ export interface BotBoardItem {
   progress: null | { completed: number; total: number; current: string | null };
   /** Committed success only, hidden while non-idle; summary <=500, attention/current <=200 characters. */
   lastResult: null | { id: string; completedAt: string; summary: string };
+  taskId?: string | null;
+  taskTitle?: string | null;
+  taskStatusLine?: string | null;
 }
 
 export interface BotBoardSnapshot {
@@ -1258,6 +1525,8 @@ export interface ControlServer {
   close(): Promise<void>;
   /** Internal Center SSE wakeup; not exposed as an HTTP/control operation. */
   notifyWebhookReady(): void;
+  /** Internal Center SSE wakeup; wakes global task dispatch delivery. */
+  notifyTaskReady(): void;
   /** Forwards runtime.restoreTurns(): cold-start pinned-turn recovery before resume. */
   restoreTurns(): Promise<void>;
 }
@@ -1337,6 +1606,7 @@ export interface ControlClient {
   sendShowerInput(target: ShowerTarget, sessionId: string, input: ShowerInput, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
   takeoverShower(target: ShowerTarget, sessionId: string, options?: ControlClientCallOptions): Promise<ShowerSession>;
   releaseShowerSession(target: ShowerTarget, sessionId: string, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
+  manageTasks(input: TaskActionInput, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
 }
 
 /**
@@ -1459,43 +1729,39 @@ export interface BotSoulUpdate {
  * fixed wire shapes rather than arbitrary HTTP.
  */
 export type BotSkillAction =
-  | 'list' | 'read' | 'create' | 'update' | 'delete' | 'archive' | 'restore'
-  | 'pin' | 'lock' | 'history' | 'rollback' | 'publish' | 'adopt' | 'snapshots' | 'restore_snapshot';
+  | 'list' | 'read' | 'create' | 'update' | 'patch' | 'delete' | 'archive' | 'restore'
+  | 'pin' | 'lock' | 'adopt';
 
-/** Center skill service input; mutations require expectedRevision (create uses null), or expectedRevisions for snapshot restore. */
+/** Center skill service input; create/update/patch/adopt save and apply directly without expectedRevision or separate publish. */
 export interface BotSkillInput {
   action: BotSkillAction;
-  snapshotId?: string;
-  /** Obtain from snapshots; null means the named skill must still be absent. */
-  expectedRevisions?: Record<string, { skillId: string; revision: number; stateRevision: number } | null>;
   skillId?: string;
   name?: string;
   category?: string;
   skillName?: string;
   newName?: string;
   description?: string;
-  /** Map of relative file path to UTF-8 content for create/update. */
+  /** Map of relative file path to UTF-8 content for create/update; null deletes an extra file on update. */
   files?: Record<string, string | null>;
   path?: string;
   content?: string | null;
+  oldText?: string;
+  newText?: string;
+  replaceAll?: boolean;
   expectedRevision?: number | null;
   pinned?: boolean;
   locked?: boolean;
-  revision?: number;
   installationId?: string;
   requestId?: string;
 }
 
-/** Manage and inspect Bot-learned skills, revision history, rollback, pin/lock, and lifecycle state. */
+/** Manage and inspect Bot-learned skills, pin/lock, and lifecycle state. */
 export type BotSkillReviewInput =
   | { action: 'list'; includeArchived?: boolean }
   | { action: 'read'; skillId: string; path?: string; expectedRevision?: number }
-  | { action: 'history'; skillId: string }
-  | { action: 'approve' | 'publish'; skillId: string; expectedRevision: number; requestId: string }
-  | { action: 'rollback'; skillId: string; revision: number; expectedRevision: number; requestId: string }
-  | { action: 'pin'; skillId: string; pinned: boolean; expectedRevision: number; requestId: string }
-  | { action: 'lock'; skillId: string; locked: boolean; expectedRevision: number; requestId: string }
-  | { action: 'archive' | 'restore'; skillId: string; expectedRevision: number; requestId: string };
+  | { action: 'pin'; skillId: string; pinned: boolean; expectedRevision?: number; requestId?: string }
+  | { action: 'lock'; skillId: string; locked: boolean; expectedRevision?: number; requestId?: string }
+  | { action: 'archive' | 'restore'; skillId: string; expectedRevision?: number; requestId?: string };
 
 export type BotLearningAction = 'status' | 'configure' | 'learn' | 'review' | 'curate' | 'cancel';
 
@@ -1523,7 +1789,7 @@ export interface BotLearningInput {
 }
 
 export type BotInstallationAction =
-  | 'inspect' | 'install' | 'update' | 'rollback' | 'enable' | 'disable'
+  | 'inspect' | 'install' | 'update' | 'enable' | 'disable'
   | 'uninstall' | 'operation' | 'deployments' | 'catalog' | 'describe' | 'check' | 'probe';
 
 export type {
@@ -1544,6 +1810,7 @@ export interface BotInstallationInput {
   source?: Record<string, unknown>;
   target?: 'host' | 'center';
   displayName?: string;
+  /** Optional on update; defaults to overwriting the current version when omitted. */
   targetVersion?: string;
   /** Bot-scoped enable may only name the target Bot itself as validation identity. */
   validationBot?: { deviceId: string; botId: string };
@@ -2268,6 +2535,7 @@ export type VaultControlResult = VaultStatus
 
 export interface RemoteControlMethodMap {
   vaultControl: { params: VaultControlInput; result: VaultControlResult };
+  manageTasks: { params: TaskActionInput; result: Record<string, unknown> };
   getHostInfo: { params: Record<string, never>; result: ControlHostInfo };
   getServiceStatus: { params: Record<string, never>; result: HostServiceStatus };
   listBots: { params: Record<string, never>; result: BotRecord[] };
@@ -2384,11 +2652,20 @@ export interface DevicesDirectoryItem {
   scopeProtocol: 0 | 1;
 }
 
+export interface ResolvedModelSummary {
+  effectiveModelRef: string | null;
+  effectiveModelName: string | null;
+  effectiveProviderName: string | null;
+  source: 'bot' | 'center_default' | 'local_default' | 'unset';
+  available: boolean;
+}
+
 export interface BotDirectoryEntry extends BotRecord {
   avatar?: BotAvatar | null;
   avatarRevision?: number;
   /** Center CAS revision for the authoritative cwd; absent on legacy centers/local-only records. */
   cwdRevision?: number;
+  resolvedModel?: ResolvedModelSummary;
   deviceName: string;
   platform?: string;
   online: boolean;

@@ -181,6 +181,20 @@ export async function normalizeImageFile(file: File | Blob, name?: string): Prom
   throw new ImagePickError('IMAGE_TOO_LARGE', '图片超出大小限制（16MiB）');
 }
 
+/** 从剪贴板 DataTransfer 提取所有 image/* File（优先 files，空则回退 items.getAsFile()，不重复添加）。 */
+export function extractPastedImageFiles(clipboardData: DataTransfer | null | undefined): File[] {
+  if (!clipboardData) return [];
+  const fromFiles = Array.from(clipboardData.files ?? []).filter((file) => file.type.startsWith('image/'));
+  if (fromFiles.length > 0) return fromFiles;
+  const fromItems: File[] = [];
+  for (const item of Array.from(clipboardData.items ?? [])) {
+    if (item.kind !== 'file' || !item.type.startsWith('image/')) continue;
+    const file = item.getAsFile();
+    if (file) fromItems.push(file);
+  }
+  return fromItems;
+}
+
 /** 浏览器/桌面选图入口：多选、逐个归一化；任一张失败整体中止并抛错（不上传半成品）。
  *  onSettled 在选图完成（成功/取消）后调用，便于释放"选择中"锁。 */
 export function pickImagesFromInput(options: {

@@ -3,6 +3,7 @@ import { PrimaryIndex } from './runtime-docs.js';
 import { WorkIndex } from './work-context-docs.js';
 import { resolveBotIdentity } from './bot-identity.js';
 import { messageError } from './message-protocol.js';
+import { formatAttachmentRef, stripLegacyAttachmentPromptBlocks } from './attachments.js';
 
 const MAX_CONVERSATIONS = 128;
 const MAX_CURSORS = 128;
@@ -33,7 +34,10 @@ function textParts(entry) {
     if (typeof message.content === 'string') {
       parts.push({ role: message.role, messageIndex, blockIndex: 0, text: message.content, source: 'model' });
     } else {
-      for (const [blockIndex, block] of (message.content ?? []).entries()) {
+      const blocks = entry.kind === 'host.user-message'
+        ? stripLegacyAttachmentPromptBlocks(entry, message.content)
+        : message.content;
+      for (const [blockIndex, block] of (blocks ?? []).entries()) {
         if (block.type === 'text') {
           parts.push({ role: message.role, messageIndex, blockIndex, text: block.text, source: 'model' });
         }
@@ -41,6 +45,28 @@ function textParts(entry) {
     }
   }
   return parts;
+}
+
+function attachmentRefs(entry) {
+  if (entry?.kind !== 'host.user-message' || entry.data?.attribution?.kind === 'host') return [];
+  const raw = entry.data?.attachments;
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  const refs = [];
+  for (const att of raw) {
+    if (!att || typeof att.id !== 'string') continue;
+    try {
+      refs.push({
+        attachmentId: att.id,
+        ref: formatAttachmentRef(att.id),
+        ...(typeof att.name === 'string' ? { name: att.name } : {}),
+        ...(typeof att.mimeType === 'string' ? { mimeType: att.mimeType } : {}),
+        ...(Number.isSafeInteger(att.size) ? { size: att.size } : {}),
+        ...(Number.isSafeInteger(att.width) ? { width: att.width } : {}),
+        ...(Number.isSafeInteger(att.height) ? { height: att.height } : {}),
+      });
+    } catch { /* ignore malformed attachment metadata */ }
+  }
+  return refs;
 }
 
 function endOfChunk(text, start, length) {
@@ -140,6 +166,10 @@ export function createSessionSearch({ host, getHarness, getWorkContexts }) {
     if (args.action === 'read' && (args.query !== undefined || !args.conversationId || args.entryId === undefined)) {
       fail('INVALID_ARGUMENT', 'read requires conversationId and entryId, and does not accept query');
     }
+    if (args.action === 'attachments' && (args.query !== undefined || args.before !== undefined ||
+        args.after !== undefined || (args.entryId !== undefined && !args.conversationId))) {
+      fail('INVALID_ARGUMENT', 'attachments does not accept query/before/after, and entryId requires conversationId');
+    }
     const request = { action: args.action, query: args.query ?? null, conversationId: args.conversationId ?? null,
       entryId: args.entryId ?? null, before: args.before ?? 2, after: args.after ?? 2, limit: args.limit ?? 10 };
     const key = JSON.stringify(request);
@@ -152,7 +182,9 @@ export function createSessionSearch({ host, getHarness, getWorkContexts }) {
     } else {
       state = { botId: caller.botId, key, expires: Date.now() + CURSOR_TTL,
         conversations: await candidates(caller.botId, args.conversationId, context),
-        index: 0, phase: args.action === 'read' ? 'locate' : 'search', position: null,
+        index: 0,
+        phase: args.action === 'read' ? 'locate' : args.action === 'attachments' ? 'attachments' : 'search',
+        position: null,
         part: 0, offset: 0, neighbors: 0 };
     }
     // Never use cursor possession as an authorization grant (including completed conversations).
@@ -195,9 +227,11 @@ export function createSessionSearch({ host, getHarness, getWorkContexts }) {
       const candidate = state.conversations[state.index];
       const ascending = state.phase === 'after';
       if (ascending && state.neighbors >= request.after) { finishSide(); continue; }
-      const position = state.position ?? candidate.tail;
+      const position = state.position ?? (state.phase === 'attachments' && args.entryId !== undefined ? args.entryId : candidate.tail);
       if ((!ascending && position <= 0) || (ascending && position > candidate.tail)) {
-        if (state.phase === 'locate') fail('ENTRY_NOT_FOUND', 'entry is not visible after reset');
+        if (state.phase === 'locate' || (state.phase === 'attachments' && args.entryId !== undefined)) {
+          fail('ENTRY_NOT_FOUND', 'entry is not visible after reset');
+        }
         finishSide();
         continue;
       }
@@ -209,27 +243,70 @@ export function createSessionSearch({ host, getHarness, getWorkContexts }) {
       steps++;
       const entry = page.items[0];
       if (!entry || entry.kind === 'pi.reset') {
-        if (state.phase === 'locate') fail('ENTRY_NOT_FOUND', 'entry is not visible after reset');
+        if (state.phase === 'locate' || (state.phase === 'attachments' && args.entryId !== undefined)) {
+          fail('ENTRY_NOT_FOUND', 'entry is not visible after reset');
+        }
         finishSide();
         continue;
       }
+      if (state.phase === 'attachments') {
+        if (args.entryId !== undefined && entry.id !== args.entryId) {
+          fail('ENTRY_NOT_FOUND', 'entry is not in this conversation');
+        }
+        const entryAttachments = attachmentRefs(entry);
+        if (entryAttachments.length > 0) {
+          const rawText = typeof entry.data?.userText === 'string'
+            ? entry.data.userText
+            : textParts(entry).map((p) => p.text).join('\n');
+          const previewEnd = endOfChunk(rawText, 0, 200);
+          const item = {
+            conversationId: candidate.conversationId,
+            scopeId: candidate.scopeId,
+            entryId: entry.id,
+            ...(typeof entry.data?.requestId === 'string' ? { requestId: entry.data.requestId } : {}),
+            ...(typeof entry.data?.attribution?.createdAt === 'string' ? { createdAt: entry.data.attribution.createdAt } : {}),
+            textPreview: rawText.slice(0, previewEnd),
+            textTruncated: previewEnd < rawText.length,
+            attachments: entryAttachments,
+          };
+          if (!add(item)) break;
+        }
+        if (args.entryId !== undefined) finishSide();
+        else advanceEntry(entry);
+        continue;
+      }
+      const entryAttachments = attachmentRefs(entry);
       if (state.phase === 'locate') {
         if (entry.id < args.entryId) fail('ENTRY_NOT_FOUND', 'entry is not in this conversation');
         if (entry.id !== args.entryId) { advanceEntry(entry); continue; }
-        if (!textParts(entry).some((part) => part.text.length)) fail('ENTRY_NOT_FOUND', 'entry has no user/assistant text');
+        if (!textParts(entry).some((part) => part.text.length) && entryAttachments.length === 0) {
+          fail('ENTRY_NOT_FOUND', 'entry has no user/assistant text');
+        }
         state.phase = 'before';
         state.position = entry.id;
       }
       const parts = textParts(entry);
+      if (parts.length === 0 && entryAttachments.length > 0 && state.part === 0) {
+        if (!add({
+          conversationId: candidate.conversationId, scopeId: candidate.scopeId, entryId: entry.id,
+          role: 'user', messageIndex: 0, blockIndex: 0, offset: 0, text: '', source: 'model',
+          truncated: false, attachments: entryAttachments,
+        })) break;
+        state.part = 1;
+      }
       if (state.part >= parts.length) {
-        if (state.phase !== 'search' && parts.some((part) => part.text.length) && entry.id !== args.entryId) state.neighbors++;
+        if (state.phase !== 'search' && (parts.some((part) => part.text.length) || entryAttachments.length > 0) && entry.id !== args.entryId) state.neighbors++;
         advanceEntry(entry);
         if (state.phase === 'before' && (entry.id === args.entryId ? request.before === 0 : state.neighbors >= request.before)) finishSide();
         continue;
       }
       const { text, ...source } = parts[state.part];
       if (state.offset >= text.length) { state.part++; state.offset = 0; continue; }
-      const base = { conversationId: candidate.conversationId, scopeId: candidate.scopeId, entryId: entry.id, ...source };
+      const base = {
+        conversationId: candidate.conversationId, scopeId: candidate.scopeId, entryId: entry.id,
+        ...source,
+        ...(entryAttachments.length > 0 ? { attachments: entryAttachments } : {}),
+      };
       if (state.phase === 'search') {
         // Literal, case-sensitive search in bounded windows, including matches across window boundaries.
         const end = endOfChunk(text, state.offset, Math.min(READ_UNITS, SCAN_UNITS - units - request.query.length));

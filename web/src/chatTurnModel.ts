@@ -1,5 +1,10 @@
 import type { ImageAttachment } from '../../host-core/index.js';
 import { resolveActiveActivityStartedAt, type BotActivity } from './botActivity.ts';
+import {
+  HOST_ATTACHED_IMAGE_LINE_PREFIX,
+  isHostInjectedAttachmentLine,
+  stripTrailingHostAttachmentLines,
+} from './composerFlowControl.ts';
 
 /**
  * Unified Bot session UI attribution (contract: safe projection of backend
@@ -90,6 +95,8 @@ export interface ChatTurn {
   toolSummary?: string[];
   tools?: ChatToolCallItem[];
   startedAt?: number;
+  /** 持久消息的时间（毫秒）；与计算耗时用的轮次起点分开。 */
+  timestamp?: number;
   durationMs?: number;
   isStreaming?: boolean;
   createdAt?: string;
@@ -624,6 +631,7 @@ export function entryAttribution(
   item: Record<string, unknown>,
   selfBotId?: string,
 ): MessageAttribution | undefined {
+  if (item.kind === 'pi.compaction') return undefined;
   const data = asRecord(item.data);
   // raw 历史条目：data.attribution；live 投影条目：item.attribution（同 schema）。
   // raw 覆盖 live（外层同 id 去重已做），这里只认该条目自身携带的一份。
@@ -662,7 +670,7 @@ function entryChannel(
       ? (kind as MessageAttribution['channel'])
       : undefined;
   }
-  if (item.kind === 'host.scope-message') return undefined;
+  if (item.kind === 'host.scope-message' || item.kind === 'pi.compaction') return undefined;
   // 真实用户消息（含旧的无 attribution 历史）把执行来源重置回 primary。
   if (item.kind === 'host.user-message' || item.kind === 'pi.user') {
     return entryAttribution(item, selfBotId)?.channel ?? 'primary';
@@ -868,6 +876,10 @@ export function parseHistoryEntries(
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
+    // SDK 压缩摘要是模型上下文边界（role='user'），不渲染气泡也不参与轮次/归属/时间/编辑判断。
+    if (item.kind === 'pi.compaction') {
+      continue;
+    }
     const numericId = typeof item.id === 'number' ? item.id : Number(item.id);
     const itemAttr = enrichAttributionName(entryAttribution(item, selfBotId), knownBots);
     if (clearedAfterEntryId > 0 && Number.isFinite(numericId) && numericId <= clearedAfterEntryId) {
@@ -915,6 +927,7 @@ export function parseHistoryEntries(
             entryId: Number.isFinite(numericId) ? numericId : 0,
             text: cleanText,
             startedAt: ts,
+            timestamp: ts,
             attribution: itemAttr,
             ...(itemAttr.createdAt ? { createdAt: itemAttr.createdAt } : {}),
           });
@@ -927,7 +940,8 @@ export function parseHistoryEntries(
     if (itemChannel !== undefined) lastBoundaryChannel = itemChannel;
     // raw 条目用 model 块（含工具/思考）；Host live 投影条目有 messages:[{role,text,truncated,toolCalls,timestamp,durationMs}]。
     // host.user-message 的图片附件元数据在条目级 data.attachments（不在单个 message 上）。
-    const entryAttachments = readMessageAttachments(asRecord(item.data).attachments);
+    const itemData = asRecord(item.data);
+    const entryAttachments = readMessageAttachments(itemData.attachments);
     const model = asArray<unknown>(item.model);
     const blocks = model.length > 0 ? model : asArray<unknown>(item.messages);
     for (let mIdx = 0; mIdx < blocks.length; mIdx++) {
@@ -948,13 +962,43 @@ export function parseHistoryEntries(
         const content = entry.content;
         const msgAttachments = readMessageAttachments(entry.attachments);
         const attachments = msgAttachments.length > 0 ? msgAttachments : entryAttachments;
-        const textParts: string[] = [];
-        if (typeof content === 'string') {
-          textParts.push(content);
+        let joinedText = '';
+        if (typeof itemData.userText === 'string' && (item.kind === 'host.user-message' || mIdx === 0)) {
+          joinedText = itemData.userText.trim();
+        } else if (typeof content === 'string') {
+          joinedText = (attachments.length > 0
+            ? stripTrailingHostAttachmentLines(content, attachments.length)
+            : content).trim();
         } else if (typeof entry.text === 'string') {
-          textParts.push(entry.text);
+          joinedText = (attachments.length > 0
+            ? stripTrailingHostAttachmentLines(entry.text, attachments.length)
+            : entry.text).trim();
         } else if (Array.isArray(content)) {
-          for (const block of content) {
+          const hasImageBlock = content.some((b) => asRecord(b).type === 'image');
+          let end = content.length;
+          let strippedHostBlock = false;
+          if (attachments.length > 0 || hasImageBlock) {
+            while (end > 0) {
+              const prev = asRecord(content[end - 1]);
+              if (prev.type === 'image') {
+                end -= 1;
+                continue;
+              }
+              if (
+                prev.type === 'text' &&
+                typeof prev.text === 'string' &&
+                prev.text.startsWith(HOST_ATTACHED_IMAGE_LINE_PREFIX) &&
+                (asRecord(content[end]).type === 'image' || isHostInjectedAttachmentLine(prev.text))
+              ) {
+                strippedHostBlock = true;
+                end -= 1;
+                continue;
+              }
+              break;
+            }
+          }
+          const textParts: string[] = [];
+          for (const block of content.slice(0, end)) {
             if (typeof block === 'string') {
               textParts.push(block);
               continue;
@@ -964,8 +1008,11 @@ export function parseHistoryEntries(
               textParts.push(part.text);
             }
           }
+          const rawJoined = textParts.join('\n');
+          joinedText = (!strippedHostBlock && attachments.length > 0
+            ? stripTrailingHostAttachmentLines(rawJoined, attachments.length)
+            : rawJoined).trim();
         }
-        const joinedText = textParts.join('\n').trim();
         if (!joinedText && attachments.length === 0) continue;
 
         finalizeCurrentAssistant(false);
@@ -977,6 +1024,7 @@ export function parseHistoryEntries(
           text: joinedText,
           ...(attachments.length > 0 ? { attachments } : {}),
           startedAt: msgTimestamp,
+          timestamp: msgTimestamp,
           ...(itemAttr ? { attribution: itemAttr } : {}),
         });
         continue;
@@ -1150,6 +1198,7 @@ export function parseHistoryEntries(
           acc.turn.startedAt = msgTimestamp;
         }
         if (msgTimestamp !== undefined) {
+          acc.turn.timestamp = msgTimestamp;
           const stepEnd = msgTimestamp + (msgDurationMs ?? 0);
           acc.endMs = acc.endMs !== undefined ? Math.max(acc.endMs, stepEnd) : stepEnd;
         }
@@ -1459,4 +1508,26 @@ export function resolveActiveTurnStartedAt(
   activity?: BotActivity | null,
 ): number | null {
   return resolveActiveActivityStartedAt(activity ?? null);
+}
+
+export function hasAssistantVisibleContent(turn: ChatTurn): boolean {
+  if (turn.role !== 'assistant') return true;
+  if (turn.blocks && turn.blocks.length > 0) return true;
+  return Boolean(
+    turn.text.trim() ||
+      turn.thinking?.trim() ||
+      (turn.tools && turn.tools.length > 0),
+  );
+}
+
+export function resolveAssistantFailureDetail(
+  error: string | undefined,
+  t: (zh: string, en: string) => string,
+): string {
+  const trimmed = typeof error === 'string' ? error.trim() : '';
+  if (!trimmed) return '';
+  if (trimmed === 'model_error') {
+    return t('模型生成失败。', 'Model generation failed.');
+  }
+  return trimmed;
 }

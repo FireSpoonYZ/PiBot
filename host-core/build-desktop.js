@@ -34,6 +34,7 @@ import path from 'node:path';
 import { parseArgs, promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveTauriCliEntry, spawnNodeScript } from './desktop-tauri.js';
+import { patchPiDurable } from './patch-pi-durable.js';
 import { prepareSearchTools } from './prepare-tools.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -66,7 +67,7 @@ const HOST_CORE_RUNTIME_SUBDIRS = ['capabilities', 'managed-install', 'plugins',
 const HOST_CORE_BUILTIN_SKILLS_DIR = 'builtin-skills';
 const BUILTIN_SKILLS_SOURCE_EXTENSIONS = ['.md'];
 // Build/dev-only top-level host-core modules that the Host never loads.
-const HOST_CORE_RUNTIME_EXCLUDED = new Set(['desktop-tauri.js', 'package-lock.json', 'prepare-android-tools.js', 'prepare-tools.js']);
+const HOST_CORE_RUNTIME_EXCLUDED = new Set(['desktop-tauri.js', 'package-lock.json', 'patch-pi-durable.js', 'prepare-android-tools.js', 'prepare-tools.js']);
 const HOST_RUNTIME_SOURCE_EXTENSIONS = ['.js', '.mjs', '.cjs', '.json'];
 // Type declarations / source maps / TS build info are never loaded by the Host;
 // pruning them roughly halves the installer file count (AWS/Smithy dist-types).
@@ -241,16 +242,16 @@ const DYNAMIC_ASSET_RE = /(?:require\s*\.\s*resolve|createRequire\s*\([^)]*\)\s*
 // licenses/standardwebhooks-1.1.1-LICENSE.txt -- that text is NOT an MIT copy.
 // `declared` is the manifest license to match, `license` the in-repo text file; a
 // package@version outside this map still fails the missing-license check.
-// Official Pi 1.5.0 packages; the exact upstream MIT text covers archives without a root license.
-const PI_MAIN_VERSION = '1.5.0';
+// Official Pi 1.5.2 packages; the exact upstream MIT text covers archives without a root license.
+const PI_MAIN_VERSION = '1.5.2';
 const UPSTREAM_LICENSE_ALLOWLIST = new Map([
-  ['@earendil-works/pi-schema', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
-  ['@earendil-works/chord', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
-  ['@earendil-works/pi-ai', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
-  ['@earendil-works/pi-codemode', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
-  ['@earendil-works/pi-durable', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
-  ['@earendil-works/pi-mcp', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
-  ['@earendil-works/pi-telemetry', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
+  ['@earendil-works/pi-schema', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.2-MIT.txt' }],
+  ['@earendil-works/chord', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.2-MIT.txt' }],
+  ['@earendil-works/pi-ai', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.2-MIT.txt' }],
+  ['@earendil-works/pi-codemode', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.2-MIT.txt' }],
+  ['@earendil-works/pi-durable', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.2-MIT.txt' }],
+  ['@earendil-works/pi-mcp', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.2-MIT.txt' }],
+  ['@earendil-works/pi-telemetry', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.2-MIT.txt' }],
   ['@vectorize-io/hindsight-client', { version: '0.9.2', declared: 'MIT', license: 'hindsight-client-0.9.2-MIT.txt' }],
   ['standardwebhooks', { version: '1.1.1', declared: 'MIT', license: 'standardwebhooks-1.1.1-LICENSE.txt' }],
   // Desktop UI packages (consumed through UI_NPM_PACKAGES, not the broker
@@ -1295,10 +1296,13 @@ async function collectHostRuntimeNatives() {
 function hostRuntimeDepsInfo() {
   const pkgPath = path.join(HERE, 'package.json');
   const lockPath = path.join(HERE, 'package-lock.json');
+  const patchPath = path.join(HERE, 'patch-pi-durable.js');
   assertStrictlyRegularFile(pkgPath, 'host-core/package.json');
   assertStrictlyRegularFile(lockPath, 'host-core/package-lock.json');
+  assertStrictlyRegularFile(patchPath, 'host-core/patch-pi-durable.js');
   const pkgRaw = readFileSync(pkgPath);
   const lockRaw = readFileSync(lockPath);
+  const patchRaw = readFileSync(patchPath);
   let pkg;
   try {
     pkg = JSON.parse(pkgRaw.toString('utf8'));
@@ -1327,6 +1331,7 @@ function hostRuntimeDepsInfo() {
   }));
   hash.update('\0package.json\0').update(pkgRaw);
   hash.update('\0package-lock.json\0').update(lockRaw);
+  hash.update('\0patch-pi-durable.js\0').update(patchRaw);
   for (const tarball of tarballs) hash.update(`\0${tarball.name}\0${tarball.sha256}`);
   return { key: hash.digest('hex'), pkg, pkgRaw, lockRaw, tarballs };
 }
@@ -1412,6 +1417,7 @@ async function installHostRuntimeDependencies(deps) {
   if (!hostRuntimeDepsComplete(nodeModules, deps.pkg)) {
     throw fail('npm ci for the bundled Host runtime finished without the expected production dependencies (incl. npm)');
   }
+  patchPiDurable(nodeModules);
   pruneHostRuntimeModules(nodeModules);
   return nodeModules;
 }

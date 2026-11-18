@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import Form from '@rjsf/core';
 import { customizeValidator } from '@rjsf/validator-ajv8';
 import type { RJSFSchema } from '@rjsf/utils';
-import { ArrowLeft, ExternalLink, Pencil, Play, Power, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
+import { ArrowLeft, ExternalLink, Pencil, Play, Power, RefreshCw, Trash2 } from 'lucide-react';
 import type {
   BotRef,
   CapabilityTool,
@@ -11,6 +11,7 @@ import type {
   Device,
   Installation as InstallationDto,
   InstallationConfig,
+  InstallationSkillFilesResponse,
   JsonSchema,
   JsonValue,
   PackageVersion,
@@ -53,8 +54,18 @@ type ActionDescriptor = {
   outputSchema?: JsonSchema;
 };
 
-const TABS = ['概览', '配置', '分配', '版本与状态', '操作'] as const;
+const SKILL_TABS = ['技能内容', '分配', '状态与操作'] as const;
+const PACKAGE_TABS = ['概览', '配置', '分配', '更新与状态', '操作'] as const;
+const ALLOWED_SKILL_FILE_PREFIXES = ['references/', 'scripts/', 'templates/', 'assets/'] as const;
 const validator = customizeValidator({ customFormats: { 'credential-ref': /.*/ } });
+
+function sortSkillFilePaths(paths: string[]): string[] {
+  return [...paths].sort((a, b) => {
+    if (a === 'SKILL.md') return -1;
+    if (b === 'SKILL.md') return 1;
+    return a.localeCompare(b);
+  });
+}
 
 export default function Installation() {
   const { installationId = '' } = useParams();
@@ -70,6 +81,14 @@ export default function Installation() {
   const [flow, setFlow] = useState<{ flowId: string; authorizationUrl: string }>();
   const [flowStatus, setFlowStatus] = useState('');
   const [tab, setTab] = useState<string>('概览');
+  const initializedTabIdRef = useRef('');
+  const [skillFiles, setSkillFiles] = useState<InstallationSkillFilesResponse>();
+  const [skillFilesLoading, setSkillFilesLoading] = useState(false);
+  const [skillFilesError, setSkillFilesError] = useState('');
+  const [editingSkillFiles, setEditingSkillFiles] = useState(false);
+  const [draftFiles, setDraftFiles] = useState<Record<string, string>>({});
+  const [selectedSkillFile, setSelectedSkillFile] = useState('SKILL.md');
+  const [newFilePath, setNewFilePath] = useState('');
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
@@ -80,6 +99,27 @@ export default function Installation() {
   const [action, setAction] = useState('');
   const [result, setResult] = useState<JsonValue>();
   const [renameDraft, setRenameDraft] = useState<string>();
+
+  const loadSkillFiles = async () => {
+    setSkillFilesLoading(true);
+    setSkillFilesError('');
+    try {
+      const next = await api.getInstallationSkillFiles(installationId);
+      setSkillFiles(next);
+      const nextPaths = sortSkillFilePaths(Object.keys(next.files));
+      setSelectedSkillFile(prev =>
+        prev && nextPaths.includes(prev)
+          ? prev
+          : nextPaths.includes('SKILL.md')
+            ? 'SKILL.md'
+            : (nextPaths[0] ?? 'SKILL.md'),
+      );
+    } catch (e) {
+      setSkillFilesError(errorMessage(e));
+    } finally {
+      setSkillFilesLoading(false);
+    }
+  };
 
   const load = async () => {
     try {
@@ -96,12 +136,26 @@ export default function Installation() {
       setDevices(nextDevices);
       setActions(descriptors);
       setError('');
+      if (initializedTabIdRef.current !== installation.installationId) {
+        initializedTabIdRef.current = installation.installationId;
+        setTab(installation.kind === 'skill' ? '技能内容' : '概览');
+      }
+      if (installation.kind === 'skill') {
+        void loadSkillFiles();
+      }
     } catch (e) {
       setError(errorMessage(e));
     }
   };
 
   useEffect(() => {
+    initializedTabIdRef.current = '';
+    setSkillFiles(undefined);
+    setSkillFilesError('');
+    setEditingSkillFiles(false);
+    setDraftFiles({});
+    setSelectedSkillFile('SKILL.md');
+    setNewFilePath('');
     void load();
   }, [installationId]);
 
@@ -145,7 +199,7 @@ export default function Installation() {
     }
   };
 
-  const request = async (kind: 'update' | 'rollback' | 'disable' | 'uninstall') => {
+  const request = async (kind: 'update' | 'disable' | 'uninstall') => {
     if (
       (kind === 'uninstall' || kind === 'disable') &&
       !window.confirm(kind === 'uninstall' ? '卸载此实例？默认保留数据。' : '停用全局启用？保留各 Bot 绑定偏好，但立即停止执行。')
@@ -154,24 +208,29 @@ export default function Installation() {
     }
     await run(async () => {
       const body = { requestId: crypto.randomUUID() };
-      let source: { type: 'artifact'; artifactRef: string } | undefined;
-      if (kind === 'update' && item?.source.type === 'artifact') {
-        if (!artifact) throw new Error('请选择新版 tgz 制品');
-        const uploaded = await api.uploadArtifact(artifact);
-        source = { type: 'artifact', artifactRef: uploaded.artifactRef };
+      if (kind === 'update') {
+        if (item?.source.type === 'artifact') {
+          if (!artifact) throw new Error('请选择新版 tgz 制品');
+          const uploaded = await api.uploadArtifact(artifact);
+          const accepted = await api.updateInstallation(installationId, {
+            ...body,
+            source: { type: 'artifact', artifactRef: uploaded.artifactRef },
+          });
+          setOperation(accepted.operationId);
+          return;
+        }
+        const nextVersion = version.trim();
+        const accepted = await api.updateInstallation(installationId, {
+          ...body,
+          ...(nextVersion ? { targetVersion: nextVersion } : {}),
+        });
+        setOperation(accepted.operationId);
+        return;
       }
       const accepted =
-        kind === 'update'
-          ? await api.updateInstallation(installationId, {
-              ...body,
-              targetVersion: version,
-              ...(source && { source }),
-            })
-          : kind === 'rollback'
-            ? await api.rollbackInstallation(installationId, body)
-            : kind === 'disable'
-              ? await api.disableInstallation(installationId, body)
-              : await api.uninstallInstallation(installationId, body);
+        kind === 'disable'
+          ? await api.disableInstallation(installationId, body)
+          : await api.uninstallInstallation(installationId, body);
       setOperation(accepted.operationId);
     });
   };
@@ -251,6 +310,265 @@ export default function Installation() {
     setFlowStatus('');
   };
 
+  const isSkill = item?.kind === 'skill';
+  const tabs = isSkill ? SKILL_TABS : PACKAGE_TABS;
+  const activeSkillFiles = editingSkillFiles ? draftFiles : (skillFiles?.files ?? {});
+  const skillFilePaths = sortSkillFilePaths(Object.keys(activeSkillFiles));
+  const currentSkillFile = skillFilePaths.includes(selectedSkillFile)
+    ? selectedSkillFile
+    : (skillFilePaths[0] ?? 'SKILL.md');
+
+  const startEditSkillFiles = () => {
+    if (!skillFiles?.editable) return;
+    setDraftFiles({ ...skillFiles.files });
+    setEditingSkillFiles(true);
+    setNewFilePath('');
+    setError('');
+    setMessage('');
+  };
+
+  const addAncillaryFile = () => {
+    const normalized = newFilePath.trim().replace(/\\/g, '/').replace(/^\.\//, '');
+    if (
+      !normalized ||
+      normalized.startsWith('/') ||
+      normalized.includes('..') ||
+      normalized.includes('//') ||
+      !ALLOWED_SKILL_FILE_PREFIXES.some(prefix => normalized.startsWith(prefix)) ||
+      normalized.endsWith('/') ||
+      !normalized.split('/').every(Boolean)
+    ) {
+      setError('附属文件路径须以 references/、scripts/、templates/ 或 assets/ 开头，且包含有效文件名');
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(draftFiles, normalized)) {
+      setSelectedSkillFile(normalized);
+      setNewFilePath('');
+      setError('');
+      return;
+    }
+    setDraftFiles(prev => ({ ...prev, [normalized]: '' }));
+    setSelectedSkillFile(normalized);
+    setNewFilePath('');
+    setError('');
+  };
+
+  const deleteAncillaryFile = (path: string) => {
+    if (path === 'SKILL.md') return;
+    setDraftFiles(prev => {
+      const next = { ...prev };
+      delete next[path];
+      return next;
+    });
+    setSelectedSkillFile('SKILL.md');
+  };
+
+  const saveSkillFiles = async () => {
+    await run(async () => {
+      const updated = await api.putInstallationSkillFiles(installationId, {
+        files: draftFiles,
+        requestId: crypto.randomUUID(),
+      });
+      setSkillFiles(updated);
+      setEditingSkillFiles(false);
+      setDraftFiles({});
+      setNewFilePath('');
+      await load();
+      setMessage('技能内容已保存并同步');
+    });
+  };
+
+  const renderGlobalEnableCard = (current: InstallationDto) => (
+    <section className="card-group">
+      <div className="card-header">
+        <h2>全局启用</h2>
+        <div className="action-row">
+          {current.enabled ? (
+            <>
+              <button
+                type="button"
+                className="button secondary-button"
+                disabled={busy}
+                onClick={() => void request('disable')}
+              >
+                <Power size={15} aria-hidden="true" />
+                停用全局
+              </button>
+              {!activationUsable(current) && (
+                <button type="button" className="button" disabled={busy} onClick={() => void enableGlobal()}>
+                  <RefreshCw size={15} aria-hidden="true" />
+                  {current.activation.status === 'enabling' ? '重新校验' : '重试全局启用'}
+                </button>
+              )}
+            </>
+          ) : (
+            <button type="button" className="button" disabled={busy} onClick={() => void enableGlobal()}>
+              <Power size={15} aria-hidden="true" />
+              全局启用
+            </button>
+          )}
+        </div>
+      </div>
+      <ActivationSummary installation={current} />
+      <p className="secondary">
+        全局启用成功前，Bot 端不能新开启该能力；全局停用立即停止执行，但保留各 Bot 的绑定偏好，已有绑定仍可关闭。
+      </p>
+      {needsValidationBot && (
+        <>
+          <p className="secondary">
+            OAuth MCP 需要一个已有 Bot 作为校验身份（该 Bot 无需已绑定此能力，令牌仍按 Bot 隔离）；先授权再重试全局启用。
+          </p>
+          <div className="action-row">
+            <button
+              type="button"
+              className="button secondary-button button-sm"
+              disabled={busy || !deviceId || !botId}
+              onClick={() =>
+                void run(async () => {
+                  setFlow(await api.startMcpOAuth(installationId, { deviceId, botId }));
+                  setFlowStatus('pending');
+                })
+              }
+            >
+              授权校验身份
+            </button>
+            {flow && (
+              <a href={flow.authorizationUrl} target="_blank" rel="noreferrer">
+                打开授权页面 <ExternalLink size={14} aria-hidden="true" />
+              </a>
+            )}
+            {flow && (
+              <button
+                type="button"
+                className="quiet-button"
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => {
+                    const status = await api.getMcpOAuthFlow(flow.flowId);
+                    setFlowStatus(status.error ? `${status.status}：${status.error}` : status.status);
+                    if (status.status === 'complete') await submitEnable();
+                  })
+                }
+              >
+                检查授权并重试启用（{flowStatus}）
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    </section>
+  );
+
+  const renderDeploymentReceiptsCard = (hideVersion: boolean) => (
+    <section className="card-group">
+      <div className="card-header">
+        <h3>部署回执</h3>
+        <button
+          type="button"
+          className="button secondary-button button-sm"
+          disabled={busy}
+          onClick={() => void load()}
+        >
+          <RefreshCw size={15} aria-hidden="true" />
+          刷新状态
+        </button>
+      </div>
+      {receipts.length === 0 ? (
+        <p className="empty-state secondary">暂无回执。</p>
+      ) : (
+        <div className="card-grid">
+          {receipts.map((receipt, index) => {
+            const mismatch = hideVersion
+              ? receipt.appliedRevision !== receipt.desiredRevision
+              : receipt.actualVersion !== item?.targetVersion ||
+                receipt.appliedRevision !== receipt.desiredRevision;
+            return (
+              <article
+                key={`${receipt.operationId}:${receipt.deviceId ?? 'center'}:${index}`}
+                className="resource-card resource-row"
+              >
+                <div className="card-header">
+                  <strong>{receipt.deviceId ?? '中心'}</strong>
+                  <div className="action-row">
+                    <span
+                      className={`badge ${
+                        receipt.phase === 'applied'
+                          ? 'badge-success'
+                          : receipt.phase === 'failed'
+                            ? 'badge-danger'
+                            : 'badge-neutral'
+                      }`}
+                    >
+                      {receipt.phase}
+                    </span>
+                    <span
+                      className={`badge ${
+                        receipt.health === 'ready'
+                          ? 'badge-online'
+                          : receipt.health === 'disabled'
+                            ? 'badge-offline'
+                            : 'badge-warn'
+                      }`}
+                    >
+                      {receipt.health}
+                    </span>
+                    {mismatch && <span className="badge badge-warn">与目标不一致</span>}
+                  </div>
+                </div>
+                <p className="secondary">
+                  {!hideVersion && `实际版本 ${receipt.actualVersion ?? '未应用'} / 目标版本 ${item?.targetVersion} · `}
+                  期望修订 {receipt.desiredRevision} / 已应用修订 {receipt.appliedRevision ?? '无'}
+                </p>
+                {receipt.error && <p className="inline-error">{receipt.error.message}</p>}
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+
+  const renderLifecycleCard = () => (
+    <section className="card-group">
+      <div className="card-header">
+        <h3>实例生命周期</h3>
+      </div>
+      <p className="secondary">可停用或重新全局启用此能力实例，或卸载实例（默认保留持久化数据）。</p>
+      <div className="action-row">
+        {item?.enabled ? (
+          <button
+            type="button"
+            className="button secondary-button"
+            disabled={busy}
+            onClick={() => void request('disable')}
+          >
+            <Power size={15} aria-hidden="true" />
+            停用全局
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="button"
+            disabled={busy || !item}
+            onClick={() => void enableGlobal()}
+          >
+            <Power size={15} aria-hidden="true" />
+            全局启用
+          </button>
+        )}
+        <button
+          type="button"
+          className="button danger-button"
+          disabled={busy}
+          onClick={() => void request('uninstall')}
+        >
+          <Trash2 size={15} aria-hidden="true" />
+          卸载（保留数据）
+        </button>
+      </div>
+    </section>
+  );
+
   return (
     <main className="page config-page">
       <div className="action-row">
@@ -286,7 +604,7 @@ export default function Installation() {
                 <span className="badge badge-warn">当前不生效</span>
               )}
               <span className="badge badge-neutral">目标：{item.target}</span>
-              <span className="badge badge-neutral">版本：{item.targetVersion}</span>
+              {!isSkill && <span className="badge badge-neutral">版本：{item.targetVersion}</span>}
               <span className="badge badge-neutral">包：{item.packageId}</span>
               <button
                 type="button"
@@ -314,15 +632,158 @@ export default function Installation() {
       )}
       {operation && <ConfigOperation key={operation} id={operation} onFinished={() => void load()} />}
 
-      <nav className="config-tabs" aria-label="详情页面">
-        {TABS.map(name => (
-          <button key={name} type="button" aria-pressed={tab === name} onClick={() => setTab(name)}>
-            {name}
-          </button>
-        ))}
-      </nav>
+      {item && (
+        <nav className="config-tabs" aria-label="详情页面">
+          {tabs.map(name => (
+            <button key={name} type="button" aria-pressed={tab === name} onClick={() => setTab(name)}>
+              {name}
+            </button>
+          ))}
+        </nav>
+      )}
 
-      {item && tab === '概览' && (
+      {item && isSkill && tab === '技能内容' && (
+        <section className="card-group">
+          <div className="card-header">
+            <h2>技能内容</h2>
+            <div className="action-row">
+              <button
+                type="button"
+                className="button secondary-button button-sm"
+                disabled={busy || skillFilesLoading || editingSkillFiles}
+                onClick={() => void loadSkillFiles()}
+              >
+                <RefreshCw size={15} aria-hidden="true" />
+                刷新
+              </button>
+              {!editingSkillFiles && skillFiles?.editable && (
+                <button
+                  type="button"
+                  className="button button-sm"
+                  disabled={busy || skillFilesLoading}
+                  onClick={startEditSkillFiles}
+                >
+                  <Pencil size={15} aria-hidden="true" />
+                  编辑内容
+                </button>
+              )}
+            </div>
+          </div>
+
+          {item.ownerBot && (
+            <p className="secondary">
+              ✨ Bot 反思习得来源：设备 {item.ownerBot.deviceId} · Bot {item.ownerBot.botId} · 技能 {item.ownerBot.skillName} · 当前范围：
+              {VISIBILITY_OPTIONS.find(opt => opt.value === (item.visibilityScope ?? 'private'))?.title ?? (item.visibilityScope ?? 'private')}
+            </p>
+          )}
+
+          {skillFilesError && (
+            <p role="alert" className="inline-error">
+              {skillFilesError}
+            </p>
+          )}
+
+          {skillFiles && !skillFiles.editable && (
+            <p className="inline-notice secondary">多技能合集包仅支持只读预览。</p>
+          )}
+
+          {skillFilesLoading && !skillFiles ? (
+            <p className="secondary">正在加载技能文件…</p>
+          ) : skillFilePaths.length === 0 ? (
+            <p className="empty-state secondary">暂无技能文件。</p>
+          ) : (
+            <>
+              <div className="filter-bar" role="group" aria-label="技能文件">
+                {skillFilePaths.map(filePath => (
+                  <button
+                    key={filePath}
+                    type="button"
+                    className={`filter-chip ${currentSkillFile === filePath ? 'is-active' : ''}`}
+                    onClick={() => setSelectedSkillFile(filePath)}
+                  >
+                    {filePath}
+                  </button>
+                ))}
+              </div>
+
+              {editingSkillFiles && skillFiles?.editable ? (
+                <div className="form">
+                  <div className="action-row">
+                    <input
+                      type="text"
+                      value={newFilePath}
+                      disabled={busy}
+                      onChange={event => setNewFilePath(event.target.value)}
+                      placeholder="新增附属文件，如 references/guide.md 或 scripts/run.sh"
+                      style={{ flex: 1, minWidth: 240 }}
+                    />
+                    <button
+                      type="button"
+                      className="button secondary-button button-sm"
+                      disabled={busy || !newFilePath.trim()}
+                      onClick={addAncillaryFile}
+                    >
+                      新增附属文件
+                    </button>
+                    {currentSkillFile !== 'SKILL.md' && (
+                      <button
+                        type="button"
+                        className="button danger-button button-sm"
+                        disabled={busy}
+                        onClick={() => deleteAncillaryFile(currentSkillFile)}
+                      >
+                        <Trash2 size={14} aria-hidden="true" />
+                        删除当前文件
+                      </button>
+                    )}
+                  </div>
+                  <textarea
+                    rows={20}
+                    style={{ width: '100%', fontFamily: 'monospace' }}
+                    disabled={busy}
+                    value={draftFiles[currentSkillFile] ?? ''}
+                    onChange={event =>
+                      setDraftFiles(prev => ({
+                        ...prev,
+                        [currentSkillFile]: event.target.value,
+                      }))
+                    }
+                  />
+                  <div className="action-row">
+                    <button
+                      type="button"
+                      className="button"
+                      disabled={busy}
+                      onClick={() => void saveSkillFiles()}
+                    >
+                      保存并同步
+                    </button>
+                    <button
+                      type="button"
+                      className="button secondary-button"
+                      disabled={busy}
+                      onClick={() => {
+                        setEditingSkillFiles(false);
+                        setDraftFiles({});
+                        setNewFilePath('');
+                        setError('');
+                      }}
+                    >
+                      取消编辑
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {activeSkillFiles[currentSkillFile] ?? ''}
+                </pre>
+              )}
+            </>
+          )}
+        </section>
+      )}
+
+      {item && !isSkill && tab === '概览' && (
         <>
           <section className="card-group">
             <div className="card-header">
@@ -341,7 +802,9 @@ export default function Installation() {
                   ? item.source.spec
                   : item.source.type === 'http'
                     ? item.source.url
-                    : item.source.artifactRef}
+                    : item.source.type === 'artifact'
+                      ? item.source.artifactRef
+                      : '在线编写'}
               </p>
               {item.ownerBot && (
                 <p>
@@ -402,84 +865,7 @@ export default function Installation() {
             </div>
           </section>
 
-          <section className="card-group">
-            <div className="card-header">
-              <h2>全局启用</h2>
-              <div className="action-row">
-                {item.enabled ? (
-                  <>
-                    <button
-                      type="button"
-                      className="button secondary-button"
-                      disabled={busy}
-                      onClick={() => void request('disable')}
-                    >
-                      <Power size={15} aria-hidden="true" />
-                      停用全局
-                    </button>
-                    {!activationUsable(item) && (
-                      <button type="button" className="button" disabled={busy} onClick={() => void enableGlobal()}>
-                        <RefreshCw size={15} aria-hidden="true" />
-                        {item.activation.status === 'enabling' ? '重新校验' : '重试全局启用'}
-                      </button>
-                    )}
-                  </>
-                ) : (
-                  <button type="button" className="button" disabled={busy} onClick={() => void enableGlobal()}>
-                    <Power size={15} aria-hidden="true" />
-                    全局启用
-                  </button>
-                )}
-              </div>
-            </div>
-            <ActivationSummary installation={item} />
-            <p className="secondary">
-              全局启用成功前，Bot 端不能新开启该能力；全局停用立即停止执行，但保留各 Bot 的绑定偏好，已有绑定仍可关闭。
-            </p>
-            {needsValidationBot && (
-              <>
-                <p className="secondary">
-                  OAuth MCP 需要一个已有 Bot 作为校验身份（该 Bot 无需已绑定此能力，令牌仍按 Bot 隔离）；先授权再重试全局启用。
-                </p>
-                <div className="action-row">
-                  <button
-                    type="button"
-                    className="button secondary-button button-sm"
-                    disabled={busy || !deviceId || !botId}
-                    onClick={() =>
-                      void run(async () => {
-                        setFlow(await api.startMcpOAuth(installationId, { deviceId, botId }));
-                        setFlowStatus('pending');
-                      })
-                    }
-                  >
-                    授权校验身份
-                  </button>
-                  {flow && (
-                    <a href={flow.authorizationUrl} target="_blank" rel="noreferrer">
-                      打开授权页面 <ExternalLink size={14} aria-hidden="true" />
-                    </a>
-                  )}
-                  {flow && (
-                    <button
-                      type="button"
-                      className="quiet-button"
-                      disabled={busy}
-                      onClick={() =>
-                        void run(async () => {
-                          const status = await api.getMcpOAuthFlow(flow.flowId);
-                          setFlowStatus(status.error ? `${status.status}：${status.error}` : status.status);
-                          if (status.status === 'complete') await submitEnable();
-                        })
-                      }
-                    >
-                      检查授权并重试启用（{flowStatus}）
-                    </button>
-                  )}
-                </div>
-              </>
-            )}
-          </section>
+          {renderGlobalEnableCard(item)}
 
           {item.kind === 'mcp' && (
             <section className="card-group">
@@ -672,7 +1058,9 @@ export default function Installation() {
           <p className="secondary">
             {item?.ownerBot && (item.visibilityScope ?? 'private') === 'private'
               ? `当前为「仅源 Bot 私有」模式，仅源 Bot (${item.ownerBot.deviceId} / ${item.ownerBot.botId}) 可启用；如需分配给其他 Bot，请先在上方切换为「指定 Bot 共享」或「全局默认可用」。`
-              : '打开 Bot 配置可启用、禁用并设置覆盖，也可直接在此处快速切换启用状态。'}
+              : isSkill
+                ? '直接在此处为指定设备下的 Bot 启用或停用此 Skill。'
+                : '打开 Bot 配置可启用、禁用并设置覆盖，也可直接在此处快速切换启用状态。'}
           </p>
           <div className="form">
             <label>
@@ -740,12 +1128,14 @@ export default function Installation() {
                         {bot.enabled ? '全局未启用成功，当前不生效；仍可关闭' : '全局启用成功后才能开启'}
                       </span>
                     )}
-                    <Link
-                      className="quiet-button"
-                      to={`/devices/${encodeURIComponent(bot.deviceId)}/bots/${encodeURIComponent(bot.botId)}/capabilities`}
-                    >
-                      配置覆盖参数 →
-                    </Link>
+                    {!isSkill && (
+                      <Link
+                        className="quiet-button"
+                        to={`/devices/${encodeURIComponent(bot.deviceId)}/bots/${encodeURIComponent(bot.botId)}/capabilities`}
+                      >
+                        配置覆盖参数 →
+                      </Link>
+                    )}
                   </div>
                 </article>
                 );
@@ -756,12 +1146,20 @@ export default function Installation() {
         </>
       )}
 
-      {tab === '版本与状态' && (
+      {item && isSkill && tab === '状态与操作' && (
+        <>
+          {renderGlobalEnableCard(item)}
+          {renderDeploymentReceiptsCard(true)}
+          {renderLifecycleCard()}
+        </>
+      )}
+
+      {item && !isSkill && tab === '更新与状态' && (
         <>
           <section className="card-group">
             <div className="card-header">
-              <h2>版本更新与回滚</h2>
-              {item?.source.type === 'npm' && (
+              <h2>版本更新</h2>
+              {item.source.type === 'npm' && (
                 <button
                   type="button"
                   className="button secondary-button button-sm"
@@ -778,31 +1176,11 @@ export default function Installation() {
                 </button>
               )}
             </div>
-            <p className="secondary">目标版本：{item?.targetVersion}</p>
-            {versions.length > 0 && (
-              <div className="filter-bar" role="group" aria-label="可用版本">
-                {versions.map(v => (
-                  <button
-                    key={v.version}
-                    type="button"
-                    className={`filter-chip ${version === v.version ? 'is-active' : ''}`}
-                    onClick={() => setVersion(v.version)}
-                  >
-                    {v.version} · {v.resolved ?? '制品'}
-                  </button>
-                ))}
-              </div>
-            )}
-            <div className="form">
-              <label>
-                目标版本
-                <input
-                  value={version}
-                  onChange={event => setVersion(event.target.value)}
-                  placeholder="输入目标版本号或点击上方检测到的版本"
-                />
-              </label>
-              {item?.source.type === 'artifact' && (
+            {item.source.type === 'http' ? (
+              <p className="secondary">远程 HTTP MCP 直接连接远端服务，无需包更新。</p>
+            ) : item.source.type === 'artifact' ? (
+              <div className="form">
+                <p className="secondary">当前版本：{item.targetVersion}</p>
                 <label>
                   新版 tgz 制品
                   <input
@@ -811,100 +1189,63 @@ export default function Installation() {
                     onChange={event => setArtifact(event.target.files?.[0])}
                   />
                 </label>
-              )}
-              <div className="action-row">
-                {item?.source.type !== 'http' && (
+                <div className="action-row">
                   <button
                     type="button"
                     className="button"
-                    disabled={busy || !version || (item?.source.type === 'artifact' && !artifact)}
+                    disabled={busy || !artifact}
                     onClick={() => void request('update')}
                   >
-                    提交更新
+                    覆盖更新
                   </button>
-                )}
-                <button
-                  type="button"
-                  className="button secondary-button"
-                  disabled={busy}
-                  onClick={() => void request('rollback')}
-                >
-                  <RotateCcw size={15} aria-hidden="true" />
-                  回滚
-                </button>
+                </div>
               </div>
-            </div>
-          </section>
-
-          <section className="card-group">
-            <div className="card-header">
-              <h3>部署回执</h3>
-              <button
-                type="button"
-                className="button secondary-button button-sm"
-                disabled={busy}
-                onClick={() => void load()}
-              >
-                <RefreshCw size={15} aria-hidden="true" />
-                刷新状态
-              </button>
-            </div>
-            {receipts.length === 0 ? (
-              <p className="empty-state secondary">暂无回执。</p>
             ) : (
-              <div className="card-grid">
-                {receipts.map((receipt, index) => {
-                  const mismatch =
-                    receipt.actualVersion !== item?.targetVersion ||
-                    receipt.appliedRevision !== receipt.desiredRevision;
-                  return (
-                    <article
-                      key={`${receipt.operationId}:${receipt.deviceId ?? 'center'}:${index}`}
-                      className="resource-card resource-row"
+              <>
+                <p className="secondary">目标版本：{item.targetVersion}</p>
+                {versions.length > 0 && (
+                  <div className="filter-bar" role="group" aria-label="可用版本">
+                    {versions.map(v => (
+                      <button
+                        key={v.version}
+                        type="button"
+                        className={`filter-chip ${version === v.version ? 'is-active' : ''}`}
+                        onClick={() => setVersion(v.version)}
+                      >
+                        {v.version} · {v.resolved ?? '制品'}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="form">
+                  <label>
+                    目标版本（可选）
+                    <input
+                      value={version}
+                      onChange={event => setVersion(event.target.value)}
+                      placeholder="留空更新到最新版，或点击上方检测到的版本"
+                    />
+                  </label>
+                  <div className="action-row">
+                    <button
+                      type="button"
+                      className="button"
+                      disabled={busy}
+                      onClick={() => void request('update')}
                     >
-                      <div className="card-header">
-                        <strong>{receipt.deviceId ?? '中心'}</strong>
-                        <div className="action-row">
-                          <span
-                            className={`badge ${
-                              receipt.phase === 'applied'
-                                ? 'badge-success'
-                                : receipt.phase === 'failed'
-                                  ? 'badge-danger'
-                                  : 'badge-neutral'
-                            }`}
-                          >
-                            {receipt.phase}
-                          </span>
-                          <span
-                            className={`badge ${
-                              receipt.health === 'ready'
-                                ? 'badge-online'
-                                : receipt.health === 'disabled'
-                                  ? 'badge-offline'
-                                  : 'badge-warn'
-                            }`}
-                          >
-                            {receipt.health}
-                          </span>
-                          {mismatch && <span className="badge badge-warn">与目标不一致</span>}
-                        </div>
-                      </div>
-                      <p className="secondary">
-                        实际版本 {receipt.actualVersion ?? '未应用'} / 目标版本 {item?.targetVersion} · 期望修订{' '}
-                        {receipt.desiredRevision} / 已应用修订 {receipt.appliedRevision ?? '无'}
-                      </p>
-                      {receipt.error && <p className="inline-error">{receipt.error.message}</p>}
-                    </article>
-                  );
-                })}
-              </div>
+                      {version.trim() ? '更新到指定版本' : '更新到最新版'}
+                    </button>
+                  </div>
+                </div>
+              </>
             )}
           </section>
+
+          {renderDeploymentReceiptsCard(false)}
         </>
       )}
 
-      {tab === '操作' && (
+      {item && !isSkill && tab === '操作' && (
         <>
           <section className="card-group">
             <div className="card-header">
@@ -991,44 +1332,7 @@ export default function Installation() {
             )}
           </section>
 
-          <section className="card-group">
-            <div className="card-header">
-              <h3>实例生命周期</h3>
-            </div>
-            <p className="secondary">可停用或重新全局启用此能力实例，或卸载实例（默认保留持久化数据）。</p>
-            <div className="action-row">
-              {item?.enabled ? (
-                <button
-                  type="button"
-                  className="button secondary-button"
-                  disabled={busy}
-                  onClick={() => void request('disable')}
-                >
-                  <Power size={15} aria-hidden="true" />
-                  停用全局
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="button"
-                  disabled={busy || !item}
-                  onClick={() => void enableGlobal()}
-                >
-                  <Power size={15} aria-hidden="true" />
-                  全局启用
-                </button>
-              )}
-              <button
-                type="button"
-                className="button danger-button"
-                disabled={busy}
-                onClick={() => void request('uninstall')}
-              >
-                <Trash2 size={15} aria-hidden="true" />
-                卸载（保留数据）
-              </button>
-            </div>
-          </section>
+          {renderLifecycleCard()}
         </>
       )}
 

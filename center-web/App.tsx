@@ -1,32 +1,111 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { BrowserRouter, Navigate, NavLink, Route, Routes } from 'react-router-dom';
-import { LogOut, Moon, Package, Puzzle, RefreshCw, Server, Smartphone, Sun, Webhook, WifiOff } from 'lucide-react';
-import { api } from './api';
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { LogOut, Monitor, Moon, RefreshCw, Sun, WifiOff } from 'lucide-react';
+import { CenterAdminPanel } from '../web/src/center-admin';
+import type { CenterAdminTab } from '../web/src/center-admin';
+import { api, webTransport } from './api';
 import type { SetupStatus } from './api';
+import { QrCode } from './components/QrCode';
 import Login from './pages/Login';
 import Setup from './pages/Setup';
-import Providers from './pages/Providers';
-import Models from './pages/Models';
-import Devices from './pages/Devices';
-import Capabilities from './pages/Capabilities';
-import Installation from './pages/Installation';
-import BotCapabilities from './pages/BotCapabilities';
-import ClientReleases from './pages/ClientReleases';
-import Webhooks from './pages/Webhooks';
 
-type ThemeMode = 'light' | 'dark';
+type ThemeMode = 'system' | 'light' | 'dark';
 
 function getInitialTheme(): ThemeMode {
   try {
     const saved = localStorage.getItem('center-theme');
-    if (saved === 'light' || saved === 'dark') return saved;
+    if (saved === 'light' || saved === 'dark' || saved === 'system') return saved;
   } catch {
     // ignore storage errors
   }
-  if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches) {
-    return 'dark';
+  return 'system';
+}
+
+function pathToTab(pathname: string): CenterAdminTab {
+  if (pathname.startsWith('/capabilities')) return 'capabilities';
+  if (pathname.startsWith('/devices')) return 'devices';
+  if (pathname.startsWith('/vault')) return 'vault';
+  if (pathname.startsWith('/ops') || pathname.startsWith('/webhooks') || pathname.startsWith('/releases')) {
+    return 'ops';
   }
-  return 'light';
+  return 'providers';
+}
+
+function ReadyShell({
+  theme,
+  themeLabel,
+  onCycleTheme,
+  onLogout,
+}: {
+  theme: ThemeMode;
+  themeLabel: string;
+  onCycleTheme: () => void;
+  onLogout: () => void;
+}) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const currentTab = pathToTab(location.pathname);
+
+  const handleTabChange = useCallback(
+    (tab: CenterAdminTab) => {
+      const targetPath = `/${tab}`;
+      if (location.pathname !== targetPath) {
+        navigate(targetPath);
+      }
+    },
+    [location.pathname, navigate],
+  );
+
+  return (
+    <div style={{ minHeight: '100dvh', display: 'flex', flexDirection: 'column' }}>
+      <header
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '10px 18px',
+          borderBottom: '1px solid rgba(128, 128, 128, 0.14)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: 14.5 }}>
+          <span className="brand-dot" aria-hidden="true" />
+          <span>中心管理</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <button
+            type="button"
+            className="rail-action"
+            onClick={onCycleTheme}
+            aria-label={themeLabel}
+            title={themeLabel}
+          >
+            {theme === 'system' ? <Monitor size={17} /> : theme === 'dark' ? <Moon size={17} /> : <Sun size={17} />}
+          </button>
+          <button
+            type="button"
+            className="rail-action"
+            aria-label="退出登录"
+            title="退出登录"
+            onClick={onLogout}
+          >
+            <LogOut size={17} />
+          </button>
+        </div>
+      </header>
+
+      <div style={{ flex: 1 }}>
+        <CenterAdminPanel
+          transport={webTransport}
+          activeTab={currentTab}
+          onTabChange={handleTabChange}
+          onOpenExternalUrl={url => {
+            window.open(url, '_blank', 'noopener,noreferrer');
+          }}
+          renderQr={(value, label) => <QrCode value={value} label={label} />}
+        />
+      </div>
+    </div>
+  );
 }
 
 export default function App() {
@@ -34,10 +113,7 @@ export default function App() {
   const stateRef = useRef(state);
   stateRef.current = state;
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
-  // generation cancels in-flight responses from an older bootstrap/refresh so a
-  // late /api/session reply cannot overwrite the setup state.
   const generationRef = useRef(0);
-  // No /api/session traffic runs until a bootstrap confirms required:false.
   const pollingRef = useRef(false);
   const bootstrapInFlightRef = useRef(false);
   const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
@@ -51,9 +127,16 @@ export default function App() {
     }
   }, [theme]);
 
-  const toggleTheme = useCallback(() => {
-    setTheme(prev => (prev === 'dark' ? 'light' : 'dark'));
+  const cycleTheme = useCallback(() => {
+    setTheme(prev => (prev === 'system' ? 'light' : prev === 'light' ? 'dark' : 'system'));
   }, []);
+
+  const themeLabel =
+    theme === 'system'
+      ? '主题：跟随系统（点击切换浅色）'
+      : theme === 'light'
+        ? '主题：浅色（点击切换深色）'
+        : '主题：深色（点击跟随系统）';
 
   const refresh = useCallback(async () => {
     const generation = generationRef.current;
@@ -67,13 +150,10 @@ export default function App() {
     }
   }, []);
 
-  // Unconfigured centers must go through onboarding before any session work:
-  // polling /api/session against the setup listener would flash the offline card.
   const bootstrap = useCallback(async () => {
     if (bootstrapInFlightRef.current) return;
     bootstrapInFlightRef.current = true;
     const generation = ++generationRef.current;
-    // Session polling stays paused until required:false is confirmed.
     pollingRef.current = false;
     try {
       let setup: SetupStatus;
@@ -92,8 +172,6 @@ export default function App() {
       pollingRef.current = true;
       void refresh();
     } finally {
-      // Only the request that still owns the generation may clear the flag; a
-      // stale bootstrap must not unblock/falsely unblock newer calls.
       if (generation === generationRef.current) bootstrapInFlightRef.current = false;
     }
   }, [refresh]);
@@ -111,9 +189,6 @@ export default function App() {
     window.addEventListener('center-offline', offline);
     window.addEventListener('center-unauthenticated', unauthenticated);
     const timer = window.setInterval(() => {
-      // Offline recovery always re-runs the full bootstrap (the setup listener
-      // has no /api/session); this branch must precede the pollingRef check or
-      // a failed initial bootstrap (pollingRef=false) could never recover.
       if (stateRef.current === 'offline') {
         void bootstrap();
         return;
@@ -122,10 +197,6 @@ export default function App() {
       void refresh();
     }, 5000);
     return () => {
-      // Invalidate any in-flight bootstrap/refresh so a StrictMode remount
-      // cannot let a stale response write state, and release the in-flight
-      // flag so the replayed effect can bootstrap again (generation guards
-      // prevent the orphaned request from reclaiming it).
       generationRef.current++;
       bootstrapInFlightRef.current = false;
       pollingRef.current = false;
@@ -151,7 +222,9 @@ export default function App() {
     return (
       <main className="page login">
         <div className="login-card" style={{ textAlign: 'center' }}>
-          <p className="secondary" style={{ margin: 0 }}>正在连接中心…</p>
+          <p className="secondary" style={{ margin: 0 }}>
+            正在连接中心…
+          </p>
         </div>
       </main>
     );
@@ -165,7 +238,9 @@ export default function App() {
             <WifiOff size={22} />
           </div>
           <h1>中心不可用</h1>
-          <p className="secondary" role="alert">无法连接中心，业务页面已关闭。</p>
+          <p className="secondary" role="alert">
+            无法连接中心，业务页面已关闭。
+          </p>
           <button className="button" onClick={() => void bootstrap()}>
             <RefreshCw size={16} />
             <span>重试连接</span>
@@ -179,88 +254,75 @@ export default function App() {
     <BrowserRouter>
       {state === 'anonymous' ? (
         <Routes>
-          <Route path="/login" element={<Login />} />
+          <Route path="/login" element={<Login onSuccess={() => void refresh()} />} />
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
       ) : (
-        <div className="shell">
-          <nav className="shell-sidebar" aria-label="中心管理">
-            <div className="mobile-topbar">
-              <div className="brand-title">
-                <span className="brand-dot" aria-hidden="true" />
-                <span>pibot 中心</span>
-              </div>
-              <div className="shell-footer">
-                <button
-                  type="button"
-                  className="quiet-button icon-button"
-                  onClick={toggleTheme}
-                  aria-label={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'}
-                  title={theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'}
-                >
-                  {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-                </button>
-                <button
-                  type="button"
-                  className="quiet-button"
-                  onClick={() => void api.logout().then(refresh).catch(() => refresh())}
-                >
-                  <LogOut size={16} />
-                  <span>退出登录</span>
-                </button>
-              </div>
-            </div>
-            <div className="mobile-bottom-nav">
-              <NavLink
-                to="/providers"
-                className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
-              >
-                <Server size={18} />
-                <span>服务商与模型</span>
-              </NavLink>
-              <NavLink
-                to="/devices"
-                className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
-              >
-                <Smartphone size={18} />
-                <span>设备与 Bot</span>
-              </NavLink>
-              <NavLink
-                to="/capabilities"
-                className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
-              >
-                <Puzzle size={18} />
-                <span>插件、MCP 与 Skill</span>
-              </NavLink>
-              <NavLink
-                to="/webhooks"
-                className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
-              >
-                <Webhook size={18} />
-                <span>Webhook</span>
-              </NavLink>
-              <NavLink
-                to="/releases"
-                className={({ isActive }) => `nav-link${isActive ? ' is-active' : ''}`}
-              >
-                <Package size={18} />
-                <span>客户端版本</span>
-              </NavLink>
-            </div>
-          </nav>
-          <Routes>
-            <Route path="/login" element={<Navigate to="/providers" replace />} />
-            <Route path="/providers" element={<Providers />} />
-            <Route path="/providers/:providerId/models" element={<Models />} />
-            <Route path="/devices" element={<Devices />} />
-            <Route path="/capabilities" element={<Capabilities />} />
-            <Route path="/capabilities/:installationId" element={<Installation />} />
-            <Route path="/devices/:deviceId/bots/:botId/capabilities" element={<BotCapabilities />} />
-            <Route path="/webhooks" element={<Webhooks />} />
-            <Route path="/releases" element={<ClientReleases />} />
-            <Route path="*" element={<Navigate to="/providers" replace />} />
-          </Routes>
-        </div>
+        <Routes>
+          <Route path="/login" element={<Navigate to="/providers" replace />} />
+          <Route path="/models" element={<Navigate to="/providers" replace />} />
+          <Route path="/providers/:providerId/models" element={<Navigate to="/providers" replace />} />
+          <Route path="/capabilities/:installationId" element={<Navigate to="/capabilities" replace />} />
+          <Route path="/devices/:deviceId/bots/:botId/capabilities" element={<Navigate to="/devices" replace />} />
+          <Route path="/webhooks" element={<Navigate to="/ops" replace />} />
+          <Route path="/releases" element={<Navigate to="/ops" replace />} />
+          <Route
+            path="/providers"
+            element={
+              <ReadyShell
+                theme={theme}
+                themeLabel={themeLabel}
+                onCycleTheme={cycleTheme}
+                onLogout={() => void api.logout().then(refresh).catch(() => refresh())}
+              />
+            }
+          />
+          <Route
+            path="/capabilities"
+            element={
+              <ReadyShell
+                theme={theme}
+                themeLabel={themeLabel}
+                onCycleTheme={cycleTheme}
+                onLogout={() => void api.logout().then(refresh).catch(() => refresh())}
+              />
+            }
+          />
+          <Route
+            path="/devices"
+            element={
+              <ReadyShell
+                theme={theme}
+                themeLabel={themeLabel}
+                onCycleTheme={cycleTheme}
+                onLogout={() => void api.logout().then(refresh).catch(() => refresh())}
+              />
+            }
+          />
+          <Route
+            path="/vault"
+            element={
+              <ReadyShell
+                theme={theme}
+                themeLabel={themeLabel}
+                onCycleTheme={cycleTheme}
+                onLogout={() => void api.logout().then(refresh).catch(() => refresh())}
+              />
+            }
+          />
+          <Route
+            path="/ops"
+            element={
+              <ReadyShell
+                theme={theme}
+                themeLabel={themeLabel}
+                onCycleTheme={cycleTheme}
+                onLogout={() => void api.logout().then(refresh).catch(() => refresh())}
+              />
+            }
+          />
+          <Route path="*" element={<Navigate to="/providers" replace />} />
+        </Routes>
       )}
     </BrowserRouter>
   );

@@ -15,6 +15,8 @@ export function initialDecisionState() {
     // 升级边界：升级前已由 scope 级 error 终态吞掉的 backlog 水位（ledger localId），
     // 不再自动重放；其后新到消息仍可正常触发新轮。仅旧文档迁移时写入。
     failureWatermark: 0,
+    // 群成员轮被 1:1 用户消息抢占但尚未成功发言的连续次数（上限 GROUP_MAX_REDRIVE_ATTEMPTS）。
+    preemptedAttempts: 0,
   };
 }
 
@@ -62,6 +64,7 @@ export const WorkDecisionState = defineDoc({
     lastError: value.lastError ?? null,
     notices: value.notices ?? {},
     failureWatermark: value.failureWatermark ?? 0,
+    preemptedAttempts: value.preemptedAttempts ?? 0,
   }),
   checkpointWhen: () => false,
 });

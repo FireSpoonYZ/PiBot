@@ -285,14 +285,27 @@ export function StatusLine({ tone = 'neutral', children, trailing }: { tone?: Ba
 }
 
 /** 折叠区：默认收起，用于诊断、配置来源等低频信息。 */
-export function Disclosure({ title, children, defaultOpen = false }: { title: ReactNode; children: ReactNode; defaultOpen?: boolean }) {
+export function Disclosure({
+  title,
+  summary,
+  children,
+  defaultOpen = false,
+}: {
+  title: ReactNode;
+  summary?: ReactNode;
+  children: ReactNode;
+  defaultOpen?: boolean;
+}) {
   const [open, setOpen] = useState(defaultOpen);
   const id = useId();
   return (
     <div className={`bs-disclosure${open ? ' is-open' : ''}`}>
       <button type="button" className="bs-disclosure-toggle" aria-expanded={open} aria-controls={id} onClick={() => setOpen(value => !value)}>
         <span>{title}</span>
-        <ChevronDown className="bs-disclosure-chevron" aria-hidden="true" />
+        <span className="bs-disclosure-right">
+          {summary ? <span className="bs-disclosure-summary">{summary}</span> : null}
+          <ChevronDown className="bs-disclosure-chevron" aria-hidden="true" />
+        </span>
       </button>
       {open ? <div id={id} className="bs-disclosure-body">{children}</div> : null}
     </div>
@@ -327,12 +340,23 @@ export function LoadingState({ text }: { text?: string }) {
   );
 }
 
-export function EmptyState({ icon, title, hint }: { icon?: ReactNode; title: ReactNode; hint?: ReactNode }) {
+export function EmptyState({
+  icon,
+  title,
+  hint,
+  action,
+}: {
+  icon?: ReactNode;
+  title: ReactNode;
+  hint?: ReactNode;
+  action?: ReactNode;
+}) {
   return (
     <div className="bs-state">
       {icon ? <span className="bs-state-icon" aria-hidden="true">{icon}</span> : null}
       <span className="bs-state-title">{title}</span>
       {hint ? <span className="bs-state-hint">{hint}</span> : null}
+      {action ? <div className="bs-state-action">{action}</div> : null}
     </div>
   );
 }

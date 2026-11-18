@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
-import { botAttachmentDirectory } from './attachments.js';
+import { attachmentPath, botAttachmentDirectory, loadAttachmentMeta, parseAttachmentRef } from './attachments.js';
 import { messageError } from './message-protocol.js';
 import { BOT_FILE_CHUNK_BYTES, safeBotFileName } from './bot-file-protocol.js';
 
@@ -29,14 +29,23 @@ export async function snapshotBotFiles(root, bot, paths, signal) {
   await mkdir(directory, { recursive: true });
   for (const input of paths) {
     signal?.throwIfAborted();
-    const source = resolve(bot.cwd, input);
-    const info = await stat(source);
-    if (!info.isFile()) throw messageError('INVALID_ARGUMENT', 'only regular files can be sent: ' + input);
-    let name = basename(source);
-    // 已上传图片按内容哈希命名，交接时保留其原展示名称和扩展名。
-    if (dirname(source) === botAttachmentDirectory(root, bot.botId) && /^[0-9a-f]{64}$/.test(name)) {
-      const metadata = JSON.parse(await readFile(source + '.json', 'utf8'));
+    const attachmentId = parseAttachmentRef(input);
+    let source;
+    let name;
+    if (attachmentId !== null) {
+      const metadata = await loadAttachmentMeta(root, bot.botId, attachmentId);
+      source = attachmentPath(root, bot.botId, attachmentId);
       name = metadata.name;
+    } else {
+      source = resolve(bot.cwd, input);
+      const info = await stat(source);
+      if (!info.isFile()) throw messageError('INVALID_ARGUMENT', 'only regular files can be sent: ' + input);
+      name = basename(source);
+      // 已上传图片按内容哈希命名，交接时保留其原展示名称和扩展名。
+      if (dirname(source) === botAttachmentDirectory(root, bot.botId) && /^[0-9a-f]{64}$/.test(name)) {
+        const metadata = JSON.parse(await readFile(source + '.json', 'utf8'));
+        name = metadata.name;
+      }
     }
     name = safeBotFileName(name);
     const temporary = join(directory, '.' + randomUUID() + '.part');

@@ -46,7 +46,7 @@ export function resolveBotActivity(
     busy?: boolean;
     queuedCount?: number;
     activity?: BotActivity;
-    turnAdmission?: { phase: string; source?: 'primary' | 'background' } | null;
+    turnAdmission?: { phase: string; requestId?: string; source?: 'primary' | 'background' } | null;
   } | null,
 ): BotActivity {
   if (live?.activity) return live.activity;
@@ -54,8 +54,14 @@ export function resolveBotActivity(
   if (live.busy) return fallbackActivity('running');
   const admissionPhase = live.turnAdmission?.phase;
   const admissionSource = live.turnAdmission?.source ?? null;
-  if (admissionPhase === 'failed') return fallbackActivity('failed', admissionSource);
-  if (admissionPhase === 'checking' || admissionPhase === 'synchronizing') {
+  if (admissionPhase === 'failed') {
+    const requestId =
+      typeof live.turnAdmission?.requestId === 'string' && live.turnAdmission.requestId
+        ? live.turnAdmission.requestId
+        : null;
+    return { ...fallbackActivity('failed', admissionSource), requestId };
+  }
+  if (admissionPhase === 'queued' || admissionPhase === 'checking' || admissionPhase === 'synchronizing') {
     return fallbackActivity('preparing', admissionSource);
   }
   if ((live.queuedCount ?? 0) > 0) return fallbackActivity('queued', admissionSource);
@@ -80,7 +86,7 @@ export function canStopBotActivity(activity: BotActivity): boolean {
     activity.phase === 'running' ||
     activity.phase === 'compacting' ||
     activity.phase === 'interrupting' ||
-    activity.phase === 'failed'
+    (activity.phase === 'failed' && activity.requestId !== null)
   );
 }
 
@@ -96,7 +102,7 @@ export function botActivityText(
       case 'queued':
         return t('排队中', 'Queued');
       case 'preparing':
-        return t('准备中', 'Preparing');
+        return t('正在准备', 'Preparing');
       case 'running':
         return t('工作中', 'Working');
       case 'compacting':
@@ -200,14 +206,20 @@ export function shouldShowComposerStop({
   canStop?: boolean;
 }): boolean {
   if (!online || archived || isStopping || phase === 'stopping') return false;
-  return (
-    canStop &&
-    canStopBotActivity({
-      phase: phase ?? 'idle',
-      source: null,
-      scopeId: null,
-      requestId: null,
-      startedAt: null,
-    })
-  );
+  return canStop && (isBotPreLlmPhase(phase) || isBotLlmRunningPhase(phase));
+}
+
+export function canSteerBotActivity({
+  activity,
+  online = true,
+  archived = false,
+  isStopping = false,
+}: {
+  activity: Pick<BotActivity, 'phase' | 'source'> | null | undefined;
+  online?: boolean;
+  archived?: boolean;
+  isStopping?: boolean;
+}): boolean {
+  if (!online || archived || isStopping || !activity) return false;
+  return activity.phase === 'running' && activity.source === 'primary';
 }

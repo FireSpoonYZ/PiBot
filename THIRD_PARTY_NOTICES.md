@@ -130,8 +130,8 @@ copied from the verified source crates into `bot-host/third-party-licenses.txt`.
 ## Current pinned Pi / Host runtime bundle
 
 The APK and desktop Host runtimes bundle the official npm Pi packages
-at version **1.5.0**, from release commit
-<https://github.com/earendil-works/pi/tree/f9a26365568127461c47a07a37dcb42c140a3ac5>,
+at version **1.5.2**, from release commit
+<https://github.com/earendil-works/pi/tree/b4afdddf44e059c67ccf5097e5317d913521b470>,
 together with the transitive dependencies actually included
 in the bundle. Each included package's name, version and license text are emitted
 at build time into the shipped `bot-host/third-party-licenses.txt` by
@@ -140,8 +140,8 @@ at build time into the shipped `bot-host/third-party-licenses.txt` by
 the repository's own `host-core` sources, not from a third-party binary kit.
 
 For packages omitting a root LICENSE, Android and desktop packagers use
-[`licenses/pi-1.5.0-MIT.txt`](licenses/pi-1.5.0-MIT.txt), copied verbatim from
-[the v1.5.0 LICENSE](https://raw.githubusercontent.com/earendil-works/pi/v1.5.0/LICENSE)
+[`licenses/pi-1.5.2-MIT.txt`](licenses/pi-1.5.2-MIT.txt), copied verbatim from
+[the v1.5.2 LICENSE](https://raw.githubusercontent.com/earendil-works/pi/v1.5.2/LICENSE)
 (Copyright (c) 2025 Mario Zechner). The fallback matches the exact installed
 version; an unrecognized bundled package without a license file fails the build.
 
@@ -155,6 +155,11 @@ license/notice files under each root's `node_modules`; it also includes this
 notice, `LICENSE`, and `licenses/`. Build-only center-web dependencies are
 retained to preserve their notices. Runtime managed packages installed by a
 user are separate artifacts and retain their own license obligations.
+`center-server` continues to pin its own Pi packages (`@earendil-works/pi-mcp`,
+`@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`) at **1.5.0**
+independently of `host-core`; the matching upstream MIT copy is retained at
+[`licenses/pi-1.5.0-MIT.txt`](licenses/pi-1.5.0-MIT.txt) from
+[the v1.5.0 LICENSE](https://raw.githubusercontent.com/earendil-works/pi/v1.5.0/LICENSE).
 
 The center uses Fastify and its official plugins (MIT), Ajv (MIT), deepmerge
 4.3.1 (MIT), pacote (ISC), semver (ISC), npm 11.6.2 (Artistic License 2.0),
@@ -173,8 +178,9 @@ The adaptation is restricted to managed directories rather than Pi's
 HOME/project scanning. Pi is Copyright (c) 2025 Mario Zechner, MIT;
 the full upstream text is retained in
 [`licenses/pi-v1.3.0-MIT.txt`](licenses/pi-v1.3.0-MIT.txt).
-The v1.3.0 text remains for this adapted source. Current pinned package
-fallbacks use the separately verified v1.5.0 copy above. These
+The v1.3.0 text remains for this adapted source. Current Host pinned package
+fallbacks use the separately verified v1.5.2 copy above, while `center-server`
+retains the separately verified v1.5.0 copy. These
 attributions do not alter this project's AGPL-3.0 license.
 
 The desktop bundle contains separate client-broker and Host runtimes,
@@ -328,3 +334,14 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Antigravity ACP bridge
+
+The Center's optional Antigravity ACP provider adapter incorporates protocol
+mappings adapted from **@estebanforge/pi-antigravity-bridge** **1.10.6**, by
+EstebanForge:
+
+- Repository: https://github.com/EstebanForge/pi-extensions/tree/d3ca5cc66947a3299e2ef18b8986c7dc86e9373b/packages/pi-antigravity-bridge
+- License: MIT (`Copyright (c) 2026 EstebanForge`). A verbatim copy travels with
+  the vendored sources at
+  [`center-server/antigravity/vendor/LICENSE`](center-server/antigravity/vendor/LICENSE).

@@ -554,7 +554,7 @@ function ScopeDetail({
   const [history, setHistory] = useState<MessageHistoryPage['items']>([]);
   /** 向更早历史翻页的 descending 游标（MessageHistoryCursor 'history-before'）；null 表示没有更早页。 */
   const [histCursor, setHistCursor] = useState<MessageHistoryPage['nextCursor']>(null);
-  const [histLoading, setHistLoading] = useState(false);
+  const [histLoading, setHistLoading] = useState(() => Boolean(identity && online));
   const [histError, setHistError] = useState<string | null>(null);
   const histCursorRef = useRef<MessageHistoryPage['nextCursor']>(null);
   /** 增量轮询锚点：最新一页 tailCursor（最高 localId 的 ascending 'history' 游标）。 */
@@ -882,8 +882,11 @@ function ScopeDetail({
     changeSettingsOpen(true);
   }
 
+  const prevScopeIdRef = useRef(scope.scope.scopeId);
   // 真正换 scope：重置内部设置视图并使旧历史/轮询请求全部过期。
   useEffect(() => {
+    if (prevScopeIdRef.current === scope.scope.scopeId) return;
+    prevScopeIdRef.current = scope.scope.scopeId;
     histSeqRef.current += 1;
     histBusyRef.current = false;
     statePollBusyRef.current = false;
@@ -896,7 +899,7 @@ function ScopeDetail({
     setHistory([]);
     setHistCursor(null);
     setHistError(null);
-    setHistLoading(false);
+    setHistLoading(Boolean(identity && online));
     setNewCount(0);
     setReplyQuotes({});
     setSettingsOpenState(false);
@@ -976,7 +979,6 @@ function ScopeDetail({
               </div>
             );
           })}
-          {histLoading ? <div className="status">加载中…</div> : null}
           {newCount > 0 ? (
             <button type="button" className="scope-new-banner" onClick={jumpToLatest}>
               查看 {newCount} 条新消息
@@ -1125,6 +1127,7 @@ export function Scopes({
   onOpenSendRecords,
   initialBotId,
   initialScopeId,
+  initialScope = null,
   readOnly = false,
   onStopBot,
   onOpenBot,
@@ -1151,6 +1154,8 @@ export function Scopes({
   onOpenSendRecords?: (target: RoomSendRecordsTarget) => void;
   /** 进入时预选 scope。 */
   initialScopeId?: string;
+  /** 进入时已知的 scope 快照（首屏直出会话头与输入栏，后台静默校准最新状态，避免闪加载中）。 */
+  initialScope?: ScopeInfo | null;
   /** 兼容保留：宿主旧导航传入；新消息界面不再按 Bot 筛选消息。 */
   initialBotId?: string;
   /** 强制只读浏览：即便 api 是完整实现也不显示编辑/发送/成员变更控件。 */
@@ -1207,7 +1212,11 @@ export function Scopes({
     onSelectScope?.(id);
     if (!isControlled) setSelectedIdState(id);
   };
-  const [selected, setSelected] = useState<ScopeInfo | null>(null);
+  const [selected, setSelected] = useState<ScopeInfo | null>(() =>
+    initialScope && (!initialScopeId || initialScope.scope.scopeId === initialScopeId)
+      ? initialScope
+      : null,
+  );
   const [detailError, setDetailError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [bots, setBots] = useState<BotRecord[]>([]);
@@ -1254,7 +1263,7 @@ export function Scopes({
   );
   const scopesSeqRef = useRef(0);
   const botsSessRef = useRef('');
-  const targetKeyRef = useRef<string | null>(null);
+  const targetKeyRef = useRef<string | null>(targetKey);
   const refreshConversations = convList.refresh;
   const markConversationDeleted = convList.markDeleted;
 
@@ -1371,6 +1380,8 @@ export function Scopes({
 
   function selectScope(id: string) {
     onSettingsOpenChange?.(false);
+    const known = rowConversations.find((c) => c.scope.scope.scopeId === id)?.scope;
+    if (known) setSelected(known);
     setSelectedId(id);
   }
 
@@ -1445,7 +1456,7 @@ export function Scopes({
             }}
           />
         ) : null}
-        {rowConversations.length === 0 && !convList.loading && !convList.error ? (
+        {rowConversations.length === 0 && (!identity || !online || convList.loaded) && !convList.loading && !convList.error ? (
           <div className="empty-state">{participant ? (variant === 'desktop' ? '暂无智能体间通信。' : '该 Bot 暂无私聊。') : '暂无会话。'}{!participant && identity ? '点击“新建会话”创建。' : (!identity ? '请先连接。' : '')}</div>
         ) : (
           <ul className="entity-list-items">
@@ -1473,7 +1484,6 @@ export function Scopes({
             ))}
           </ul>
         )}
-        {convList.loading ? <div className="status">加载中…</div> : null}
       </aside>
       <section className="chat-pane">
         {identity && selected && selected.scope.scopeId === selectedId && !isScopeDeleted(selected)
@@ -1508,9 +1518,7 @@ export function Scopes({
           />
         ) : detailError ? (
           <div className="error-banner" role="alert">{detailError}</div>
-        ) : detailOnly && selectedId ? (
-          <div className="status">加载中…</div>
-        ) : (
+        ) : detailOnly && selectedId ? null : (
           <div className="empty-state">{variant === 'desktop' && (participant || scopeKind === 'dm')
             ? '选择一条通信查看详情。'
             : '在左侧选择一个群聊或私聊查看详情。'}</div>

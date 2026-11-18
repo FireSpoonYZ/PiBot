@@ -57,7 +57,7 @@ const fail = (code, message) => { throw error(code, message); };
 const text = (value, name) => typeof value === 'string' && value ? value : fail('INVALID_ARGUMENT', `Invalid ${name}`);
 
 const READ_ACTIONS = new Set(['catalog', 'describe', 'check', 'probe', 'inspect', 'operation', 'deployments']);
-const MUTATIONS = new Set(['update', 'rollback', 'enable', 'disable', 'uninstall']);
+const MUTATIONS = new Set(['update', 'enable', 'disable', 'uninstall']);
 export const BOT_INSTALLATION_ACTIONS = new Set([...READ_ACTIONS, ...MUTATIONS, 'install']);
 
 // Phases that conclude a bounded wait: terminal results plus 'waiting-idle',
@@ -310,14 +310,16 @@ export function openBotManagement({ store, packages, notify }) {
       };
     }
 
-    // update/rollback/enable/disable/uninstall — scoped package mutations.
+    // update/enable/disable/uninstall — scoped package mutations.
     const installationId = text(input.installationId, 'installationId');
     existing(installationId);
     scopedMutation(installationId);
     const request = { requestId };
     let accepted;
     if (action === 'update') {
-      request.targetVersion = text(input.targetVersion, 'targetVersion');
+      if (input.targetVersion !== undefined && input.targetVersion !== '') {
+        request.targetVersion = text(input.targetVersion, 'targetVersion');
+      }
       if (input.source !== undefined) request.source = input.source;
       accepted = await packages.update(installationId, request);
     } else if (action === 'enable') {

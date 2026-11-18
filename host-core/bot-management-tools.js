@@ -18,12 +18,12 @@ const MEMBER_SCHEMA = {
 };
 
 const SKILL_ACTIONS = [
-  'list', 'read', 'create', 'update', 'delete', 'archive', 'restore',
-  'pin', 'lock', 'history', 'rollback', 'publish', 'adopt', 'snapshots', 'restore_snapshot',
+  'list', 'read', 'create', 'update', 'patch', 'delete', 'archive', 'restore',
+  'pin', 'lock', 'adopt',
 ];
 const LEARNING_ACTIONS = ['status', 'configure', 'learn', 'review', 'curate', 'cancel'];
 const INSTALLATION_ACTIONS = [
-  'inspect', 'install', 'update', 'rollback', 'enable', 'disable',
+  'inspect', 'install', 'update', 'enable', 'disable',
   'uninstall', 'operation', 'deployments', 'catalog', 'describe', 'check', 'probe',
 ];
 
@@ -45,24 +45,19 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
     {
       name: 'manage_bot_skill',
       description:
-        "Manage the target Bot's Center-managed skills. Actions: list, read, create, update, delete, " +
-        'archive, restore, pin, lock, history, rollback, publish, adopt, snapshots, restore_snapshot. ' +
-        'Snapshot restore requires snapshotId, expectedRevisions from snapshots, and requestId; it restores drafts only, not live state or queued deployments. Use restore for archived skills then publish. Other mutations require ' +
-        'expectedRevision (create passes expectedRevision null). publish packages the draft, enables ' +
-        'it and binds it to this Bot only; the returned deployment receipt is a queued plan, not an ' +
-        'applied install. This Bot may target itself.',
+        "Manage Center-managed skills for the current Bot or a specified target Bot. Omit deviceId/botId " +
+        "to manage the current Bot's own skills, or pass both to manage a target Bot's skills. " +
+        'Actions: list, read, create, update, patch, delete, archive, restore, pin, lock, adopt. ' +
+        'create, update, patch, and adopt save and take effect immediately in a single call — no separate ' +
+        'publish step or expectedRevision is required. create/update accept content (full SKILL.md), a ' +
+        'files map (SKILL.md and references/, scripts/, templates/, assets/; pass null on update to delete ' +
+        "an extra file), or path + content. patch replaces oldText with newText in path (defaults to 'SKILL.md'; " +
+        'set replaceAll to replace every match). External or shared skills from others are read-only; use ' +
+        'adopt to copy one into an owned skill before modifying it.',
       properties: {
         deviceId: ID_SCHEMA,
         botId: ID_SCHEMA,
         action: { type: 'string', enum: SKILL_ACTIONS },
-        snapshotId: ID_SCHEMA,
-        expectedRevisions: {
-          type: 'object', additionalProperties: { anyOf: [{ type: 'null' }, {
-            type: 'object', properties: { skillId: ID_SCHEMA, revision: { type: 'integer', minimum: 0 },
-              stateRevision: { type: 'integer', minimum: 0 } },
-            required: ['skillId', 'revision', 'stateRevision'], additionalProperties: false,
-          }] },
-        },
         skillId: ID_SCHEMA,
         name: { type: 'string', minLength: 1 },
         category: { type: 'string' },
@@ -76,18 +71,22 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
         },
         path: { type: 'string', minLength: 1 },
         content: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+        oldText: { type: 'string', minLength: 1 },
+        newText: { type: 'string' },
+        replaceAll: { type: 'boolean' },
         requestId: ID_SCHEMA,
         expectedRevision: REVISION_SCHEMA,
         pinned: { type: 'boolean' },
         locked: { type: 'boolean' },
-        revision: { type: 'integer', minimum: 0 },
         installationId: ID_SCHEMA,
       },
-      required: ['deviceId', 'botId', 'action'],
+      required: ['action'],
       boundedCodes: true,
-      async run(args, _identity, _log, api, context) {
-        assertTargetBot(args);
-        return scopedCall(args, api, context, collaboration.manageBotSkill);
+      async run(args, identity, _log, api, context) {
+        const deviceId = args.deviceId ?? identity.deviceId;
+        const botId = args.botId ?? identity.botId;
+        assertTargetBot({ deviceId, botId });
+        return scopedCall({ ...args, deviceId, botId }, api, context, collaboration.manageBotSkill);
       },
     },
     {
@@ -161,8 +160,9 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
         'UNSUPPORTED_TARGET means this installation/version cannot be probed; use describe/check instead of retrying. ' +
         'Enter secrets only in the Center credential UI, never chat/questionnaires. Other actions: inspect, install ' +
         '(creates the installation, globally enables it, then binds this Bot — the reply reports the ' +
-        'stage reached; bound means saved binding plus a queued deployment plan), update, rollback, ' +
-        'enable, disable, uninstall, operation (poll one operation receipt by operationId), ' +
+        'stage reached; bound means saved binding plus a queued deployment plan), update (directly overwrites ' +
+        'the current version; targetVersion optional), enable, disable, uninstall, operation (poll one ' +
+        'operation receipt by operationId), ' +
         'deployments (current plan and Host receipts for the target device). Mutations are rejected ' +
         'when the installation is bound to Bots outside the target; use operation/deployments for ' +
         'honest status — a queued plan is never an applied deployment.',

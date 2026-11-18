@@ -48,6 +48,58 @@ export function extractEditableUserText(rawText: string): string {
 }
 
 /**
+ * Identify whether a single line is a Host-generated image path note
+ * (`Attached image on this Host ...: {"name":...,"path":...}` or legacy path line).
+ */
+export function isHostInjectedAttachmentLine(line: string): boolean {
+  if (typeof line !== 'string' || !line.startsWith(HOST_ATTACHED_IMAGE_LINE_PREFIX)) return false;
+  const payload = line.slice(HOST_ATTACHED_IMAGE_LINE_PREFIX.length).trim();
+  if (!payload) return false;
+  if (payload.startsWith('{') && payload.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(payload) as Record<string, unknown>;
+      return Boolean(
+        parsed &&
+          typeof parsed === 'object' &&
+          typeof parsed.path === 'string' &&
+          typeof parsed.name === 'string',
+      );
+    } catch {
+      return false;
+    }
+  }
+  return payload.startsWith('/') || /^[A-Za-z]:[\\/]/.test(payload);
+}
+
+/**
+ * Strip only trailing Host-injected image path lines (and blank separator lines
+ * right before them) up to `maxLines`, preserving user-written paths and text.
+ */
+export function stripTrailingHostAttachmentLines(rawText: string, maxLines = Number.POSITIVE_INFINITY): string {
+  if (typeof rawText !== 'string' || !rawText || maxLines <= 0) return rawText || '';
+  const lines = rawText.split('\n');
+  let end = lines.length;
+  let stripped = 0;
+  while (end > 0 && stripped < maxLines) {
+    const line = lines[end - 1].replace(/\r$/, '');
+    if (isHostInjectedAttachmentLine(line)) {
+      stripped += 1;
+      end -= 1;
+      continue;
+    }
+    if (stripped > 0 && line.trim() === '') {
+      end -= 1;
+      continue;
+    }
+    break;
+  }
+  while (stripped > 0 && end > 0 && lines[end - 1].replace(/\r$/, '').trim() === '') {
+    end -= 1;
+  }
+  return stripped > 0 ? lines.slice(0, end).join('\n') : rawText;
+}
+
+/**
  * Only persisted primary-channel user messages are eligible for historical edit.
  * Optimistic bubbles (non-integer IDs), streaming turns, and room/dm/host turns
  * are never editable.

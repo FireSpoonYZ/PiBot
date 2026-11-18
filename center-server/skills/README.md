@@ -5,8 +5,8 @@ const skills = await openSkillManager({ dataRoot, store, packages, notify });
 // notify(deviceId) — same SSE push the capability route uses (reconcile+notify pair).
 ```
 
-Own SQLite: `dataRoot/skills/skills.sqlite` — `skills` (draft rows, CAS `revision`),
-`skill_revisions` (immutable content snapshots, `files` = map relative path → UTF-8),
+Own SQLite: `dataRoot/skills/skills.sqlite` — `skills` (single-state rows with `files` JSON map,
+`learning_source` JSON metadata, and CAS `revision`),
 `skill_usage` (upstream .usage.json records keyed by name + `revision` CAS),
 `skill_requests` (execute() requestId → stored result, idempotent replay).
 
@@ -16,34 +16,31 @@ limits mirror upstream (100k chars SKILL.md, 1 MiB/file, +128 files, 4 MiB total
 ## execute(identity, input)
 
 `identity = {deviceId, botId, origin?:'foreground'|'background_review'|'curator', sessionId?, requestId?}`.
-Bot must be registered. Mutations serialize per (device,bot); `expectedRevision` is required:
-- `create`, `adopt` → `expectedRevision: null`
-- `update`, `delete`, `rollback`, `publish` → current `revision` (content CAS)
-- `archive`, `restore`, `pin`, `lock` → current `stateRevision` (usage-record CAS)
-- `restore_snapshot` → `snapshotId`, `expectedRevisions` map from `snapshots`, mandatory `requestId`; atomic drafts + idempotent receipt
+Bot must be registered. Mutations serialize per (device,bot); `expectedRevision` is not required.
 
-Actions: `list | read | create | update | delete | archive | restore | pin | lock | history | rollback | publish | adopt | snapshots | restore_snapshot`.
+Actions: `list | read | create | update | patch | delete | archive | restore | pin | lock | adopt`.
 
 | action | fields | notes |
 |---|---|---|
 | list | — | `{skills:[managed summaries], installed:[bound skill packages]}` |
 | read | skillId\|name\|installationId, path? | managed → `files` map or single `content`; installed → same + `source:'installed'` |
-| create | name, files? \| content, description?, category? | files must include valid SKILL.md |
-| update | skillId\|name, files? (upsert; `null` deletes), path+content (null removes), description? | rewrites frontmatter description scalar; block scalars refused |
-| delete | skillId\|name | hard delete; published → `packages.uninstall` first (returns operationId, phase 'queued') |
-| archive / restore | skillId\|name | usage `state`; published → Bot binding disabled / restored (was-enabled only) |
+| create | name, files? \| content, description?, category? | files must include valid SKILL.md; auto-syncs to `packages` |
+| update | skillId\|name, files? (upsert; `null` deletes), path+content (null removes), description? | rewrites frontmatter description scalar; block scalars refused; auto-syncs to `packages` |
+| patch | skillId\|name, path? (`SKILL.md`), oldText\|old_string, newText\|new_string, replaceAll\|replace_all? | single/all exact match replacement on a skill file; validates SKILL.md & limits; auto-syncs to `packages` |
+| delete | skillId\|name | hard delete; synced skill → `packages.uninstall` first (returns operationId, phase 'queued') |
+| archive / restore | skillId\|name | usage `state`; active skill → Bot binding disabled / restored and synced |
 | pin / lock | skillId\|name, pinned\|locked | pin = managed only; lock = any resolvable name incl. installed |
-| snapshots | snapshotId? | latest 20 retained snapshots, or selected snapshot; current per-name CAS tokens, not file contents |
-| restore_snapshot | snapshotId, expectedRevisions, requestId | additive recovery; new draft revisions; preserves current lifecycle/bindings/deployments; preserves counters/protection flags and post-snapshot skills; no publication/deployment requested |
-| history | skillId\|name | all content revisions |
-| rollback | skillId\|name, revision | copies rev → new head (origin 'rollback') |
-| publish | skillId\|name | builds tar (`package/` root: package.json `bot-skill-<skillId>` @ `1.0.<headRev>` + files) → uploadArtifact → install (or update) → enable → `putBotCapability(enabled)` → `packages.reconcileDevice` + `notify(deviceId)`; awaits ≤8s metadata readiness (`activation.status==='enabled'`), never device deploy. Result `publication.status` ∈ 'enabled'\|'activating'\|'queued'\|'failed' — pending is NOT request-pinned so retries resume. |
-| adopt | installationId \| name, newName? | copies installed skill → managed draft (source 'adopted', created_by 'agent') |
+| adopt | installationId \| name, newName? | copies installed skill → managed skill (source 'adopted', created_by 'agent') and syncs package |
+
+Writes (`create`, `update`, `patch`, `adopt`, `restore`, `skill_manage`) immediately build a tar
+(`package/` root: package.json `bot-skill-<skillId>` @ `0.0.0-h<sha256(json).slice(0,12)>` + files),
+uploadArtifact, install (with `autoEnable: true`) or update (with `allowSourceSwitch: true`), enable
+`putBotCapability`, and call `packages.reconcileDevice` + `notify(deviceId)` across affected devices.
 
 Results: skill summaries carry `skillId, name, path, description, revision, stateRevision,
-headRevision, state, pinned, locked, createdBy, source, installationId?, publishedRevision?,
-createdAt, updatedAt`. Errors use the standard center codes (INVALID_ARGUMENT, NOT_FOUND,
-REVISION_CONFLICT, REQUEST_CONFLICT, INVALID_STATE, FORBIDDEN, PAYLOAD_TOO_LARGE).
+state, pinned, locked, createdBy, source, installationId?, createdAt, updatedAt`. Errors use the
+standard center codes (INVALID_ARGUMENT, NOT_FOUND, REVISION_CONFLICT, REQUEST_CONFLICT,
+INVALID_STATE, FORBIDDEN, PAYLOAD_TOO_LARGE).
 
 ## review(identity, input)
 
@@ -53,12 +50,9 @@ The device and Bot come from the authenticated route or Host call.
 | action | fields | result |
 |---|---|---|
 | list | `includeArchived?` | `{items}` with all managed skills of the Bot (`active`, `stale`, and optionally `archived`), revision/state tokens, visibility scope, and deployment status |
-| read | `skillId` | Managed skill summary, `files` list, `revisions` history, and `changes` |
-| read | `skillId`, `path`, `expectedRevision?` | Same summary with `file: {path, before, after}` |
-| approve / publish | `skillId`, `expectedRevision`, `requestId` | Publishes (or retries publication of) the current revision and returns deployment status |
-| rollback | `skillId`, `revision`, `expectedRevision`, `requestId` | Restores an earlier revision as the new head and auto-publishes if active |
-| pin / lock | `skillId`, `pinned`\|`locked`, `expectedRevision`, `requestId` | Updates protection flags with `stateRevision` CAS |
-| archive / restore | `skillId`, `expectedRevision`, `requestId` | Archives (disabling Bot binding) or restores (re-enabling Bot binding) the skill |
+| read | `skillId`, `path?` | Managed skill summary and `files` map (plus `file: {path, content}` when `path` is given) |
+| pin / lock | `skillId`, `pinned`\|`locked`, `expectedRevision?`, `requestId` | Updates protection flags |
+| archive / restore | `skillId`, `expectedRevision?`, `requestId` | Archives (disabling Bot binding) or restores (re-enabling Bot binding) the skill |
 
 ## learningTool(identity, name, args)
 
@@ -73,9 +67,21 @@ source metadata. A batch request ID is scoped to the job.
   using flat arguments. Supported operations are `create`, `edit`, `patch`,
   `write_file`, `remove_file`, and (for `curator` consolidation) `delete` with
   `absorbed_into` (which archives the absorbed skill rather than destroying history).
-  Every successful write commits a revision and auto-publishes to the owner Bot
+  Every successful write updates the skill in place and auto-syncs to the owner Bot
   (`visibilityScope: 'private'` by default, `reviewRequired: false`). A failed
   operation rolls back the batch.
+
+## Installation Skill Files & Inline Install
+
+`openSkillManager` also exposes three center-level helpers used by `/api/installations`:
+- `prepareInlineSkill({ name, files, content, description })` (`POST /api/installations` with `kind: 'skill'`, `source.type: 'inline'`): validates files, packages tar (`0.0.0-h<hash12>`), and stores an artifact returning `{ name, version, artifactRef }`.
+- `readInstallationFiles(installationId)` (`GET /api/installations/:id/skill-files`): reads the file map from the current installation artifact (or linked managed skill).
+- `writeInstallationFiles(installationId, { files })` (`PUT /api/installations/:id/skill-files`): validates and updates the installation's files/artifact (syncing linked managed skill when present) and pushes an update across bound devices.
+
+## Integration
+
+Learning updates managed skill files atomically and auto-syncs active skills via the
+artifact installation, activation and deployment pipeline.
 
 Tool results are JSON strings with the usual `success`, `_change` and batch
 result fields. The internal `skill_usage.*` and `skill_provenance.*` callbacks
@@ -108,16 +114,6 @@ and curator consolidation deletes.
   linter findings + security scan omitted (opt-in upstream, not vendored);
 - Dependencies: `tar` via the installed dependency tree; `yaml` resolves through
   `host-core/package.json` and is used for skill frontmatter and curator summaries.
-
-## Integration
-
-Learning commits revisions atomically and auto-publishes active skills via the
-artifact installation, activation and deployment pipeline. Each revision retains
-its learning source metadata for inspection and rollback.
-
-Curator snapshots retain managed content and metadata in the Center database.
-Recover a snapshot into drafts with `snapshots` and `restore_snapshot`, or restore
-an individual content revision with `history` and `rollback`.
 
 ## Host usage observations
 

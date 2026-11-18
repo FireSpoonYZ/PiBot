@@ -152,6 +152,9 @@ function ensureNodeArchive(cacheDir, target) {
 }
 
 function stageSharedPayload(workDir) {
+  console.log('Installing root dependencies ...');
+  run('npm', ['ci', '--prefix', ROOT, '--no-audit', '--no-fund']);
+
   console.log('Building center-web frontend ...');
   run('npm', ['ci', '--prefix', path.join(ROOT, 'center-web'), '--no-audit', '--no-fund']);
   run('npm', ['run', '--prefix', path.join(ROOT, 'center-web'), 'build']);

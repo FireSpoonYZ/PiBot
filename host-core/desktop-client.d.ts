@@ -18,6 +18,7 @@ import type {
   PendingListPage,
   LiveTarget,
   ModelCatalog,
+  TaskActionInput,
 } from './index.js';
 import type { BotAvatar, BotAvatarConfig, BotCapabilityConfig, BotCwdConfig, Installation, JsonObject } from '../center-contract/index.js';
 
@@ -241,6 +242,14 @@ export interface DesktopOperationMap {
   };
   center_owner_session: { params: Record<string, never>; result: { authenticated: boolean } };
   center_owner_login: { params: { password: string }; result: { authenticated: boolean } };
+  center_admin_request: {
+    params: { method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'; path: string; body?: unknown };
+    result: unknown;
+  };
+  center_qr_login_approve: {
+    params: { challengeId: string; qrNonce: string };
+    result: { approved: boolean };
+  };
   center_model_picker_get: { params: Record<string, never>; result: CenterModelPicker };
   center_model_star_set: { params: { modelRef: string; starred: boolean }; result: { starredModels: string[] } };
   center_bot_model_get: { params: { deviceId: string; botId: string }; result: CenterBotModelConfig };
@@ -280,6 +289,7 @@ export interface DesktopOperationMap {
     result: DevicesDirectoryPage;
   };
   bot_directory: { params: Record<string, never>; result: BotDirectorySnapshot };
+  global_tasks: { params: TaskActionInput; result: Record<string, unknown> };
   rename_device: { params: { deviceId: string; displayName: string }; result: DevicesDirectoryItem };
   call: {
     params: {

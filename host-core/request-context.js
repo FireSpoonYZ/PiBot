@@ -1,5 +1,6 @@
 import { defineDoc } from '@earendil-works/pi-durable';
 import { calculateContextTokens, estimateMessageTokens } from '@earendil-works/pi-ai/utils/estimate';
+import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
 
 // Request budgeting is independent of any context-preparation provider.
 export const RequestContext = defineDoc({
@@ -11,6 +12,36 @@ export const RequestContext = defineDoc({
   initial: () => ({ prepared: null }),
   checkpointWhen: () => true,
 });
+
+const requestBudgets = new WeakMap();
+
+export function setRequestBudget(messages, tokenCount, contextWindow) {
+  // The SDK copies the messages array but preserves its message objects.
+  requestBudgets.set(messages.at(-1), { tokenCount, contextWindow });
+}
+
+export function withRequestBudget(provider) {
+  const guard = (method) => (model, context, options) => {
+    const budget = requestBudgets.get(context.messages.at(-1));
+    if (!budget || budget.tokenCount < budget.contextWindow) {
+      return provider[method](model, context, options);
+    }
+    const error = {
+      role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: 'error',
+      errorMessage: 'context_length_exceeded: 上下文约 ' + budget.tokenCount +
+        ' tokens，达到模型配置的 ' + budget.contextWindow + ' tokens 上限。请压缩对话或调整模型上下文窗口。',
+      timestamp: Date.now(),
+    };
+    const stream = createAssistantMessageEventStream();
+    stream.push({ type: 'error', reason: 'error', error });
+    stream.end();
+    return stream;
+  };
+  return { ...provider, stream: guard('stream'), streamSimple: guard('streamSimple') };
+}
 
 export function countMessageTokens({ text = '', thinkingTokens = 0 }) {
   const cjkCount = (text.match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g) ?? []).length;

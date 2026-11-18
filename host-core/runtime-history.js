@@ -2,6 +2,7 @@
 // 不启动调度、不写记录、不合成回答；由后续运行时集成 worker 调用。
 import { ResetEntry, StorageRequestError } from '@earendil-works/pi-durable';
 import { BotSessionState, deriveEntryAttribution } from './bot-session-context.js';
+import { stripLegacyAttachmentPromptBlocks } from './attachments.js';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -207,13 +208,17 @@ export function stripAttachmentData(entry) {
   let changed = false;
   const model = entry.model.map((message) => {
     if (message?.role !== 'user' || !Array.isArray(message?.content)) return message;
-    const content = message.content.map((block) => {
+    let messageChanged = false;
+    const stripped = stripLegacyAttachmentPromptBlocks(entry, message.content);
+    if (stripped !== message.content) messageChanged = true;
+    const content = stripped.map((block) => {
       if (block?.type !== 'image') return block;
-      changed = true;
+      messageChanged = true;
       const { data: _dropped, ...rest } = block;
       return rest;
     });
-    return changed ? { ...message, content } : message;
+    if (messageChanged) changed = true;
+    return messageChanged ? { ...message, content } : message;
   });
   return changed ? { ...entry, model } : entry;
 }

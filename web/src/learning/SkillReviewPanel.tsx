@@ -1,9 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { Installation, InstallationSkillFilesResponse } from '../../../center-contract/index.js';
+import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
 import type { BotSkillReviewInput } from '../../../host-core/index.js';
+import { centerAdminRequest } from '../bot-settings/centerAdminBroker';
 import { useText } from '../ui';
 import './SkillReviewPanel.css';
 
 export type SkillReviewCall = (input: BotSkillReviewInput) => Promise<unknown>;
+
+export interface SkillReviewPanelProps {
+  connected: boolean;
+  call: SkillReviewCall;
+  api?: DesktopPanelApi;
+  identity?: DesktopIdentity;
+  deviceId?: string;
+  botId?: string;
+}
 
 type Translate = ReturnType<typeof useText>;
 
@@ -23,14 +35,13 @@ type LearnedSkillSummary = {
   path: string;
   category?: string;
   description: string | null;
-  revision: number;
-  stateRevision: number;
-  headRevision: number;
-  publishedRevision: number | null;
-  hasUnpublishedDraft?: boolean;
+  revision?: number;
+  stateRevision?: number;
+  headRevision?: number;
   state: 'active' | 'stale' | 'archived' | string;
   pinned: boolean;
   locked: boolean;
+  installationId?: string | null;
   visibilityScope?: 'private' | 'assigned' | 'global';
   useCount?: number;
   viewCount?: number;
@@ -42,16 +53,8 @@ type LearnedSkillSummary = {
   deployment?: { status: string; error?: { code?: string; message?: string } | null };
 };
 
-type SkillRevisionEntry = {
-  rev: number;
-  description: string | null;
-  origin: string | null;
-  createdAt: string;
-};
-
 type LearnedSkillDetail = LearnedSkillSummary & {
   files: Record<string, string>;
-  revisions: SkillRevisionEntry[];
 };
 
 type StateFilter = 'all' | 'active' | 'stale' | 'archived';
@@ -102,17 +105,6 @@ function sourceTitle(source: LearningSource | null | undefined, t: Translate) {
   }
 }
 
-function originTitle(origin: string | null | undefined, t: Translate) {
-  switch (origin) {
-    case 'background_review': return t('静默复盘', 'Idle reflection');
-    case 'curator': return t('自动整理', 'Curator');
-    case 'foreground': return t('对话学习', 'Foreground learn');
-    case 'rollback': return t('版本回滚', 'Rollback');
-    case 'snapshot_restore': return t('快照恢复', 'Snapshot restore');
-    default: return origin || t('更新', 'Update');
-  }
-}
-
 function stateLabel(state: string, t: Translate) {
   switch (state) {
     case 'stale': return t('待观察', 'Stale');
@@ -144,7 +136,14 @@ function deploymentLabel(status: string | undefined, t: Translate) {
   }
 }
 
-export function SkillReviewPanel({ connected, call }: { connected: boolean; call: SkillReviewCall }) {
+export function SkillReviewPanel({
+  connected,
+  call,
+  api,
+  identity,
+  deviceId,
+  botId,
+}: SkillReviewPanelProps) {
   const t = useText();
   if (!connected) {
     return (
@@ -153,15 +152,39 @@ export function SkillReviewPanel({ connected, call }: { connected: boolean; call
       </p>
     );
   }
-  return <LearnedSkillsSession call={call} t={t} />;
+  return (
+    <LearnedSkillsSession
+      call={call}
+      t={t}
+      api={api}
+      identity={identity}
+      deviceId={deviceId}
+      botId={botId}
+    />
+  );
 }
 
-function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate }) {
+function LearnedSkillsSession({
+  call,
+  t,
+  api,
+  identity,
+  deviceId,
+  botId,
+}: {
+  call: SkillReviewCall;
+  t: Translate;
+  api?: DesktopPanelApi;
+  identity?: DesktopIdentity;
+  deviceId?: string;
+  botId?: string;
+}) {
   const [items, setItems] = useState<LearnedSkillSummary[] | null>(null);
   const [filter, setFilter] = useState<StateFilter>('all');
   const [detail, setDetail] = useState<LearnedSkillDetail | null>(null);
-  const [detailTab, setDetailTab] = useState<'files' | 'history'>('files');
   const [selectedFile, setSelectedFile] = useState<string>('SKILL.md');
+  const [editing, setEditing] = useState(false);
+  const [draftFiles, setDraftFiles] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState<string | null>(null);
   const [failure, setFailure] = useState<{ error: unknown } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -222,6 +245,7 @@ function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate
 
   function openSkill(skill: LearnedSkillSummary) {
     setNotice(null);
+    setEditing(false);
     run(async () => {
       const result = await callRef.current({ action: 'read', skillId: skill.skillId }) as LearnedSkillDetail | null;
       if (!result || result.skillId !== skill.skillId || !result.files) {
@@ -230,7 +254,7 @@ function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate
       return result;
     }, loaded => {
       setDetail(loaded);
-      setDetailTab('files');
+      setDraftFiles({ ...loaded.files });
       const paths = Object.keys(loaded.files);
       setSelectedFile(paths.includes('SKILL.md') ? 'SKILL.md' : (paths[0] ?? 'SKILL.md'));
       syncSummaryIntoList(loaded);
@@ -262,7 +286,6 @@ function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate
         action: 'pin',
         skillId: current.skillId,
         pinned: nextPinned,
-        expectedRevision: current.stateRevision,
         requestId: newRequestId(),
       }) as LearnedSkillSummary;
     }, updated => {
@@ -281,7 +304,6 @@ function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate
         action: 'lock',
         skillId: current.skillId,
         locked: nextLocked,
-        expectedRevision: current.stateRevision,
         requestId: newRequestId(),
       }) as LearnedSkillSummary;
     }, updated => {
@@ -293,15 +315,66 @@ function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate
     });
   }
 
+  function saveFiles(current: LearnedSkillDetail) {
+    run(async () => {
+      if (api && identity && current.installationId) {
+        const updated = await centerAdminRequest<InstallationSkillFilesResponse>(api, identity, {
+          method: 'PUT',
+          path: `/api/installations/${encodeURIComponent(current.installationId)}/skill-files`,
+          body: { files: draftFiles, requestId: newRequestId() },
+        });
+        return updated?.files ?? draftFiles;
+      }
+      if (api && identity && deviceId && botId) {
+        await centerAdminRequest(api, identity, {
+          method: 'POST',
+          path: `/api/devices/${encodeURIComponent(deviceId)}/bots/${encodeURIComponent(botId)}/skills`,
+          body: { action: 'update', skillId: current.skillId, files: draftFiles, requestId: newRequestId() },
+        });
+        return draftFiles;
+      }
+      await callRef.current({
+        action: 'update',
+        skillId: current.skillId,
+        files: draftFiles,
+        requestId: newRequestId(),
+      } as unknown as BotSkillReviewInput);
+      return draftFiles;
+    }, nextFiles => {
+      setDetail(prev => prev && prev.skillId === current.skillId ? { ...prev, files: { ...nextFiles } } : prev);
+      setDraftFiles({ ...nextFiles });
+      setEditing(false);
+      setNotice(t('技能内容已保存。', 'Skill files saved.'));
+    });
+  }
+
   function toggleArchive(current: LearnedSkillDetail) {
     const archiving = current.state !== 'archived';
     run(async () => {
-      return await callRef.current({
+      const archiveInput = {
         action: archiving ? 'archive' : 'restore',
         skillId: current.skillId,
-        expectedRevision: current.stateRevision,
         requestId: newRequestId(),
-      }) as LearnedSkillSummary;
+        ...(archiving ? { forceUnshare: true } : {}),
+      } as unknown as BotSkillReviewInput;
+      try {
+        return await callRef.current(archiveInput) as LearnedSkillSummary;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err ?? '');
+        if (archiving && api && identity && current.installationId && /shared|INVALID_STATE/i.test(msg)) {
+          const inst = await centerAdminRequest<Installation>(api, identity, {
+            method: 'GET',
+            path: `/api/installations/${encodeURIComponent(current.installationId)}`,
+          });
+          await centerAdminRequest(api, identity, {
+            method: 'PATCH',
+            path: `/api/installations/${encodeURIComponent(current.installationId)}`,
+            body: { expectedRevision: inst.revision, visibilityScope: 'private' },
+          });
+          return await callRef.current(archiveInput) as LearnedSkillSummary;
+        }
+        throw err;
+      }
     }, updated => {
       setDetail(prev => prev && prev.skillId === current.skillId ? { ...prev, ...updated } : prev);
       syncSummaryIntoList(updated);
@@ -311,47 +384,11 @@ function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate
     });
   }
 
-  function handleRollback(current: LearnedSkillDetail, targetRev: number) {
-    run(async () => {
-      return await callRef.current({
-        action: 'rollback',
-        skillId: current.skillId,
-        revision: targetRev,
-        expectedRevision: current.revision,
-        requestId: newRequestId(),
-      }) as LearnedSkillDetail;
-    }, updated => {
-      setDetail(updated);
-      const paths = Object.keys(updated.files ?? {});
-      setSelectedFile(paths.includes('SKILL.md') ? 'SKILL.md' : (paths[0] ?? 'SKILL.md'));
-      syncSummaryIntoList(updated);
-      setNotice(t(`已回滚至 r${targetRev} 并重新同步生效（新版本 r${updated.headRevision}）。`, `Rolled back to r${targetRev} (new head r${updated.headRevision}).`));
-    });
-  }
-
-  function handlePublishDraft(current: LearnedSkillDetail) {
-    run(async () => {
-      return await callRef.current({
-        action: 'publish',
-        skillId: current.skillId,
-        expectedRevision: current.revision,
-        requestId: newRequestId(),
-      }) as LearnedSkillSummary;
-    }, () => {
-      reloadDetail(current.skillId, t('技能已同步发布到当前 Bot。', 'Skill published to this Bot.'));
-    });
-  }
-
   const filePaths = useMemo(() => Object.keys(detail?.files ?? {}).sort((a, b) => {
     if (a === 'SKILL.md') return -1;
     if (b === 'SKILL.md') return 1;
     return a.localeCompare(b);
   }), [detail?.files]);
-
-  const sortedRevisions = useMemo(
-    () => [...(detail?.revisions ?? [])].sort((a, b) => b.rev - a.rev),
-    [detail?.revisions],
-  );
 
   return (
     <section className="skill-review-panel" aria-busy={busy}>
@@ -360,7 +397,7 @@ function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate
           <h3>{detail ? detail.name : t('已学技能库', 'Learned Skills')}</h3>
           <p className="skill-review-muted">
             {detail
-              ? `${stateLabel(detail.state, t)} · r${detail.headRevision} · ${scopeLabel(detail.visibilityScope, t)}`
+              ? `${stateLabel(detail.state, t)} · ${scopeLabel(detail.visibilityScope, t)}`
               : t('空闲复盘提炼的技能会自动对本 Bot 生效；30 天未用会自动归档，可在中心调整跨 Bot 共享范围。', 'Skills learned during idle reflection auto-apply to this Bot, auto-archive after 30 days unused, and can be shared in Center.')}
           </p>
         </div>
@@ -426,7 +463,7 @@ function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate
                     </div>
                     {item.description ? <p className="skill-review-desc">{item.description}</p> : null}
                     <div className="skill-review-card-meta">
-                      <span>{sourceTitle(item.source, t)} · r{item.headRevision}</span>
+                      <span>{sourceTitle(item.source, t)}</span>
                       <span>{t(`使用 ${item.useCount ?? 0} 次`, `${item.useCount ?? 0} uses`)}</span>
                     </div>
                   </button>
@@ -455,6 +492,40 @@ function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate
           </div>
 
           <div className="skill-review-actions">
+            {editing ? (
+              <>
+                <button
+                  type="button"
+                  className="skill-review-primary"
+                  disabled={busy}
+                  onClick={() => saveFiles(detail)}
+                >
+                  {t('保存内容', 'Save')}
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setDraftFiles({ ...detail.files });
+                    setEditing(false);
+                  }}
+                >
+                  {t('取消编辑', 'Cancel')}
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="skill-review-primary"
+                disabled={busy}
+                onClick={() => {
+                  setDraftFiles({ ...detail.files });
+                  setEditing(true);
+                }}
+              >
+                {t('✎ 编辑内容', 'Edit')}
+              </button>
+            )}
             {detail.state !== 'archived' ? (
               <button type="button" disabled={busy} onClick={() => togglePin(detail)}>
                 {detail.pinned ? t('📌 取消固定', '📌 Unpin') : t('📌 固定不过期', '📌 Pin')}
@@ -463,11 +534,6 @@ function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate
             <button type="button" disabled={busy} onClick={() => toggleLock(detail)}>
               {detail.locked ? t('🔓 解除锁定', '🔓 Unlock') : t('🔒 锁定防改写', '🔒 Lock')}
             </button>
-            {detail.hasUnpublishedDraft && detail.state !== 'archived' ? (
-              <button type="button" className="skill-review-primary" disabled={busy} onClick={() => handlePublishDraft(detail)}>
-                {t('立即同步发布', 'Publish draft')}
-              </button>
-            ) : null}
             <button
               type="button"
               className={detail.state === 'archived' ? 'skill-review-primary' : ''}
@@ -478,79 +544,37 @@ function LearnedSkillsSession({ call, t }: { call: SkillReviewCall; t: Translate
             </button>
           </div>
 
-          <div className="skill-review-filters" role="tablist">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={detailTab === 'files'}
-              className={detailTab === 'files' ? 'is-active' : ''}
-              onClick={() => setDetailTab('files')}
-            >
-              {t(`文件内容 (${filePaths.length})`, `Files (${filePaths.length})`)}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={detailTab === 'history'}
-              className={detailTab === 'history' ? 'is-active' : ''}
-              onClick={() => setDetailTab('history')}
-            >
-              {t(`版本历史 (${sortedRevisions.length})`, `History (${sortedRevisions.length})`)}
-            </button>
-          </div>
-
-          {detailTab === 'files' ? (
-            <div className="skill-review-file">
-              {filePaths.length > 1 ? (
-                <div className="skill-review-filters">
-                  {filePaths.map(fp => (
-                    <button
-                      key={fp}
-                      type="button"
-                      className={selectedFile === fp ? 'is-active' : ''}
-                      onClick={() => setSelectedFile(fp)}
-                    >
-                      <code>{fp}</code>
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-              <figure className="skill-review-codebox">
-                <figcaption><code>{selectedFile}</code></figcaption>
+          <div className="skill-review-file">
+            {filePaths.length > 1 ? (
+              <div className="skill-review-filters">
+                {filePaths.map(fp => (
+                  <button
+                    key={fp}
+                    type="button"
+                    className={selectedFile === fp ? 'is-active' : ''}
+                    onClick={() => setSelectedFile(fp)}
+                  >
+                    <code>{fp}</code>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <figure className="skill-review-codebox">
+              <figcaption><code>{selectedFile}</code></figcaption>
+              {editing ? (
+                <textarea
+                  className="skill-review-editor-textarea"
+                  value={draftFiles[selectedFile] ?? ''}
+                  onChange={e => {
+                    const value = e.target.value;
+                    setDraftFiles(prev => ({ ...prev, [selectedFile]: value }));
+                  }}
+                />
+              ) : (
                 <pre>{detail.files[selectedFile] || t('（空文件）', '(empty file)')}</pre>
-              </figure>
-            </div>
-          ) : (
-            <ul className="skill-review-list">
-              {sortedRevisions.map(rev => {
-                const isCurrent = rev.rev === detail.headRevision;
-                return (
-                  <li key={rev.rev} className="skill-revision-row">
-                    <div>
-                      <strong>r{rev.rev}</strong>
-                      {' · '}
-                      <span>{originTitle(rev.origin, t)}</span>
-                      {isCurrent ? <span className="skill-badge is-active" style={{ marginLeft: 6 }}>{t('当前版本', 'Current')}</span> : null}
-                      <p className="skill-review-muted">
-                        {new Date(rev.createdAt).toLocaleString()}
-                        {rev.description ? ` · ${rev.description}` : ''}
-                      </p>
-                    </div>
-                    {!isCurrent ? (
-                      <button
-                        type="button"
-                        disabled={busy || detail.locked}
-                        title={detail.locked ? t('请先解除锁定再回滚', 'Unlock before rolling back') : undefined}
-                        onClick={() => handleRollback(detail, rev.rev)}
-                      >
-                        {t('回滚到此版本', 'Rollback')}
-                      </button>
-                    ) : null}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
+              )}
+            </figure>
+          </div>
         </>
       )}
     </section>

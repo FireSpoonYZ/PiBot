@@ -1,16 +1,23 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import Ajv from 'ajv';
-import { requireOwner, assertPublicCredentialId } from './auth.js';
+import { requireOwner, assertPublicCredentialId, setOwnerOAuthVerifier } from './auth.js';
 import { assertId } from '../host-core/message-protocol.js';
 import { assertDeviceId, assertDeviceToken } from '../host-core/relay-protocol.js';
+import { discoverCenterProviderModels, validateCenterProvider } from '../host-core/runtime-models.js';
 import { registerWebhookRoutes } from './webhooks.js';
 import { registerVaultRoutes } from './vault-routes.js';
 import { registerPairingRoutes } from './pairing.js';
+import { registerAntigravityRoutes } from './antigravity-routes.js';
+import { ANTIGRAVITY_PROVIDER_ID } from '../center-contract/antigravity.js';
+import { registerTaskRoutes } from './tasks.js';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 const required = (value, name) => value ?? fail('NOT_FOUND', `${name} not found`);
 const object = value => value && typeof value === 'object' && !Array.isArray(value) ? value : fail('INVALID_ARGUMENT', 'Expected an object');
 const text = (value, name) => typeof value === 'string' && value.length > 0 ? value : fail('INVALID_ARGUMENT', `Invalid ${name}`);
+const sha256 = value => createHash('sha256').update(value, 'utf8').digest('hex');
+const sha256Buffer = value => createHash('sha256').update(value, 'utf8').digest();
 function createRouteAjv() {
   const instance = new Ajv({ strict: false });
   instance.addFormat('credential-ref', { type: 'string', validate: value => value.length > 0 });
@@ -43,12 +50,28 @@ const boundedId = { type: 'string', minLength: 1, maxLength: 128 };
 const revision = { type: 'integer', minimum: 0 };
 const providerSchema = {
   type: 'object', required: ['name', 'api', 'baseUrl', 'credentialRef', 'enabled'],
-  properties: { id: string, name: string, api: string, baseUrl: { type: 'string' }, credentialRef: { anyOf: [string, { type: 'null' }] }, enabled: { type: 'boolean' }, revision, native: { type: 'boolean' }, custom: { type: 'object' } },
+  properties: { id: string, name: string, api: string, baseUrl: { type: 'string' }, credentialRef: { anyOf: [string, { type: 'null' }] }, enabled: { type: 'boolean' }, revision, native: { type: 'boolean' }, configured: { type: 'boolean' }, custom: { type: 'object' } },
   additionalProperties: false,
 };
 const modelSchema = {
   type: 'object', required: ['id', 'name', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'enabled'],
-  properties: { id: string, name: string, api: string, baseUrl: string, headers: { type: 'object' }, contextWindow: { type: 'integer', minimum: 1 }, maxTokens: { type: 'integer', minimum: 1 }, input: { type: 'array', items: string }, reasoning: { type: 'boolean' }, enabled: { type: 'boolean' }, revision, thinkingLevelMap: { type: 'object' }, cost: { type: 'object' }, compat: { type: 'object' }, inputLimits: { type: 'object' }, promptCache: { type: 'object' }, samplingParams: { type: 'object' }, samplingParamsByThinkingLevel: { type: 'object' }, source: { enum: ['catalog', 'manual'] } },
+  properties: { id: string, name: string, api: string, baseUrl: string, headers: { type: 'object' }, contextWindow: { type: 'integer', minimum: 1 }, maxTokens: { type: 'integer', minimum: 1 }, input: { type: 'array', items: string }, reasoning: { type: 'boolean' }, enabled: { type: 'boolean' }, revision, thinkingLevelMap: { type: 'object' }, cost: { type: 'object' }, compat: { type: 'object' }, inputLimits: { type: 'object' }, promptCache: { type: 'object' }, samplingParams: { type: 'object' }, samplingParamsByThinkingLevel: { type: 'object' }, source: { enum: ['catalog', 'manual'] }, removed: { type: 'boolean' } },
+  additionalProperties: false,
+};
+const batchModelsSchema = {
+  type: 'object', required: ['models'],
+  properties: { models: { type: 'array', minItems: 1, maxItems: 200, items: modelSchema } },
+  additionalProperties: false,
+};
+const providerProbeBodySchema = {
+  type: 'object',
+  properties: {
+    deviceId: { type: 'string' },
+    baseUrl: { type: 'string', maxLength: 2048 },
+    api: { type: 'string', maxLength: 128 },
+    apiKey: { type: 'string', maxLength: 8192 },
+    headers: { type: 'object' },
+  },
   additionalProperties: false,
 };
 const selectionSchema = { type: 'object', properties: { modelRef: { anyOf: [string, { type: 'null' }] }, thinkingLevel: { anyOf: [string, { type: 'null' }] }, codemode: { anyOf: [{ type: 'boolean' }, { type: 'null' }] }, codemodeOnly: { anyOf: [{ type: 'boolean' }, { type: 'null' }] } }, additionalProperties: false };
@@ -147,7 +170,7 @@ function assertConfigCredentials(schema, value) {
 }
 
 
-export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, publicUrl, vault }) {
+export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault }) {
   const streams = new Map();
   function notify(deviceId, event = 'config-changed') {
     for (const stream of streams.get(deviceId) || []) {
@@ -157,17 +180,61 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   }
   function notifyAll() { for (const deviceId of streams.keys()) notify(deviceId); }
   function notifyInstallation(id) { for (const deviceId of new Set(store.listBotBindings({ installationId: id }).map(b => b.deviceId))) notify(deviceId); }
+  setOwnerOAuthVerifier(app, (token) => {
+    const grant = store.verifyOAuthAdminToken(sha256(token));
+    if (!grant) return null;
+    const device = bridge.registry.get(grant.deviceId);
+    if (!device || device.revokedAt !== null || grant.deviceId === bridge.deviceId) return null;
+    return grant.deviceId;
+  });
+  const csrfUnlessOAuth = (req, reply, done) => {
+    if (req.oauthDeviceId) return done();
+    return app.csrfProtection(req, reply, done);
+  };
   const owner = [requireOwner];
-  const mutation = [requireOwner, app.csrfProtection];
+  const mutation = [requireOwner, csrfUnlessOAuth];
   const route = (method, path, handler, write = false) => app.route({ method, url: path, onRequest: write ? mutation : owner, handler });
+  const presentDevice = (device) => {
+    if (!device) return device;
+    const reg = bridge.registry.get(device.deviceId);
+    return {
+      ...device,
+      ...(reg?.platform ? { platform: reg.platform } : {}),
+      oauthAdminEnabled: store.isDeviceOAuthGrantEnabled(device.deviceId),
+    };
+  };
+  const listOwnerDevices = () => bridge.listDevices().map(presentDevice);
   const changed = (result, deviceId) => { deviceId ? notify(deviceId) : notifyAll(); return result; };
-  const providerInput = id => {
-    const provider = required(store.getProvider(id), 'Provider');
-    const models = store.listModels(id).map(({ source: _source, ...model }) => model);
-    const ref = provider.credentialRef && assertPublicCredentialId(provider.credentialRef);
-    const credential = ref && store.getCredential(ref)?.configured ? store.resolveCredential(ref) : undefined;
+  const providerInput = async (id, overrides = {}) => {
+    const stored = required(store.getProvider(id), 'Provider');
+    const customBaseUrl = typeof stored.custom?.baseUrl === 'string' && stored.custom.baseUrl.trim() ? stored.custom.baseUrl : stored.baseUrl;
+    const customApi = typeof stored.custom?.api === 'string' && stored.custom.api.trim() ? stored.custom.api : stored.api;
+    const customHeaders = stored.custom?.headers && typeof stored.custom.headers === 'object' && !Array.isArray(stored.custom.headers)
+      ? stored.custom.headers
+      : undefined;
+    const provider = {
+      ...stored,
+      baseUrl: typeof overrides.baseUrl === 'string' && overrides.baseUrl.trim() ? overrides.baseUrl.trim() : customBaseUrl,
+      api: typeof overrides.api === 'string' && overrides.api.trim() ? overrides.api.trim() : customApi,
+      ...(overrides.headers ? { headers: overrides.headers } : customHeaders ? { headers: customHeaders } : {}),
+    };
+    const models = store.listModels(id).map(({ source: _source, removed: _removed, ...model }) => model);
+    let credential;
+    if (typeof overrides.apiKey === 'string' && overrides.apiKey.trim()) {
+      credential = overrides.apiKey.trim();
+    } else {
+      const ref = stored.credentialRef && assertPublicCredentialId(stored.credentialRef);
+      if (ref && store.getCredential(ref)?.configured) {
+        credential = store.resolveCredential(ref);
+      } else if (catalog.hasOAuth(id)) {
+        const runtime = await catalog.runtime();
+        const resolved = await runtime.getAuth(id).catch(() => null);
+        credential = resolved?.auth?.apiKey;
+      }
+    }
     return { provider, models, ...(credential === undefined ? {} : { credential }) };
   };
+  const modelMetadataKeys = ['name', 'api', 'baseUrl', 'headers', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel'];
   const modelPicker = () => ({ ...store.getModelPicker(), sync: catalog.status() });
   const setModelStar = req => {
     const body = validate({
@@ -182,29 +249,119 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('POST', '/api/model-catalog/sync', async () => { await catalog.sync().catch(() => {}); return catalog.status(); }, true);
   route('GET', '/api/providers', () => store.listProviders());
   route('POST', '/api/providers', async (req, reply) => {
-    const provider = store.putProvider({ ...validate(providerSchema, req.body), credentialRef: assertPublicCredentialId(req.body.credentialRef), id: req.body.id || randomUUID(), revision: 0 }, null);
+    const provider = store.putProvider({ ...validate(providerSchema, req.body), credentialRef: assertPublicCredentialId(req.body.credentialRef), id: req.body.id || randomUUID(), configured: true, revision: 0 }, null);
     await catalog.apply();
     return reply.code(201).send(changed(provider));
+  }, true);
+  route('POST', '/api/providers/discover', async req => {
+    const body = validate(providerProbeBodySchema, req.body ?? {});
+    const baseUrl = text(body.baseUrl, 'baseUrl');
+    const probe = {
+      provider: {
+        id: 'draft',
+        name: 'draft',
+        baseUrl,
+        api: typeof body.api === 'string' && body.api.trim() ? body.api.trim() : 'openai-completions',
+        credentialRef: null,
+        enabled: true,
+        revision: 0,
+        ...(body.headers ? { headers: body.headers } : {}),
+      },
+      models: [],
+      ...(typeof body.apiKey === 'string' && body.apiKey.trim() ? { credential: body.apiKey.trim() } : {}),
+    };
+    const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : '';
+    if (deviceId) return bridge.call(deviceId, 'discoverCenterProviderModels', probe);
+    return discoverCenterProviderModels(probe);
   }, true);
   route('GET', '/api/providers/:id', req => required(store.getProvider(req.params.id), 'Provider'));
   // Pi native OAuth is interactive; these endpoints expose only flow prompts,
   // never access or refresh tokens. All mutations retain owner + CSRF checks.
+  route('GET', '/api/provider-auth-status', () => providerAuth.describeAll());
   route('GET', '/api/providers/:id/auth-status', req => providerAuth.describe(req.params.id));
   route('POST', '/api/providers/:id/login', req => providerAuth.start(req.params.id), true);
   route('GET', '/api/providers/:id/login/:flowId', req => providerAuth.status(req.params.id, req.params.flowId));
   route('POST', '/api/providers/:id/login/:flowId/answer', req => providerAuth.answer(req.params.id, req.params.flowId, req.body?.answer), true);
   route('POST', '/api/providers/:id/login/:flowId/cancel', req => providerAuth.cancel(req.params.id, req.params.flowId), true);
   route('POST', '/api/providers/:id/logout', req => providerAuth.logout(req.params.id), true);
-  route('PUT', '/api/providers/:id', async req => { const body = object(req.body); validate(providerSchema, body.value); assertPublicCredentialId(body.value.credentialRef); const provider = store.putProvider({ ...body.value, id: req.params.id }, body.expectedRevision); await catalog.apply(); return changed(provider); }, true);
-  for (const [path, method] of [['validate', 'validateCenterProvider'], ['discover', 'discoverCenterProviderModels']]) {
-    route('POST', `/api/providers/:id/${path}`, req => bridge.call(text(req.body?.deviceId, 'deviceId'), method, providerInput(req.params.id)), true);
-  }
-  route('GET', '/api/providers/:id/models', req => { required(store.getProvider(req.params.id), 'Provider'); return store.listModels(req.params.id); });
-  route('POST', '/api/providers/:id/models', async (req, reply) => { required(store.getProvider(req.params.id), 'Provider'); const value = store.putModel(req.params.id, { ...validate(modelSchema, req.body), source: 'manual', revision: 0 }, null); await catalog.apply(); return reply.code(201).send(changed(value)); }, true);
-  route('PUT', '/api/providers/:id/models/:modelId', async req => { const body = object(req.body); const value = store.putModel(req.params.id, { ...validate(modelSchema, body.value), id: req.params.modelId, source: 'manual' }, body.expectedRevision); await catalog.apply(); return changed(value); }, true);
+  route('PUT', '/api/providers/:id', async req => {
+    const body = object(req.body);
+    validate(providerSchema, body.value);
+    assertPublicCredentialId(body.value.credentialRef);
+    const provider = store.putProvider({
+      ...body.value,
+      id: req.params.id,
+      configured: body.value.configured ?? true,
+    }, body.expectedRevision);
+    await catalog.apply();
+    return changed(provider);
+  }, true);
+  route('DELETE', '/api/providers/:id', async req => {
+    required(store.getProvider(req.params.id), 'Provider');
+    await providerAuth.clearAuth(req.params.id);
+    const result = store.deleteProvider(req.params.id, catalog.bundledResetSpec(req.params.id));
+    await catalog.apply();
+    return changed(result);
+  }, true);
+  route('POST', '/api/providers/:id/validate', async req => {
+    const body = validate(providerProbeBodySchema, req.body ?? {});
+    if (req.params.id === ANTIGRAVITY_PROVIDER_ID) return antigravityRoutes.validateProvider();
+    const input = await providerInput(req.params.id, body);
+    const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : '';
+    if (deviceId) return bridge.call(deviceId, 'validateCenterProvider', input);
+    return validateCenterProvider(input);
+  }, true);
+  route('POST', '/api/providers/:id/discover', async req => {
+    const body = validate(providerProbeBodySchema, req.body ?? {});
+    if (req.params.id === ANTIGRAVITY_PROVIDER_ID) return antigravityRoutes.discoverModels();
+    const input = await providerInput(req.params.id, body);
+    const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : '';
+    if (deviceId) return bridge.call(deviceId, 'discoverCenterProviderModels', input);
+    return discoverCenterProviderModels(input);
+  }, true);
+  route('GET', '/api/providers/:id/models', req => {
+    required(store.getProvider(req.params.id), 'Provider');
+    return store.listModels(req.params.id, { includeRemoved: req.query?.includeRemoved === '1' });
+  });
+  route('POST', '/api/providers/:id/models', async (req, reply) => {
+    required(store.getProvider(req.params.id), 'Provider');
+    const validated = validate(modelSchema, req.body);
+    const value = store.putModel(req.params.id, { ...validated, source: validated.source ?? 'manual', removed: false, revision: 0 }, null);
+    await catalog.apply();
+    return reply.code(201).send(changed(value));
+  }, true);
+  route('POST', '/api/providers/:id/models/batch', async req => {
+    required(store.getProvider(req.params.id), 'Provider');
+    const body = validate(batchModelsSchema, req.body);
+    const models = store.putModelsBatch(
+      req.params.id,
+      body.models.map(item => ({ ...item, source: item.source ?? 'manual', removed: false })),
+    );
+    await catalog.apply();
+    return changed({ models });
+  }, true);
+  route('PUT', '/api/providers/:id/models/:modelId', async req => {
+    const body = object(req.body);
+    const validated = validate(modelSchema, body.value);
+    const existing = store.listModels(req.params.id, { includeRemoved: true }).find(item => item.id === req.params.modelId);
+    const keepCatalogSource = existing?.source === 'catalog' && modelMetadataKeys.every(key => isDeepStrictEqual(validated[key], existing[key]));
+    const value = store.putModel(req.params.id, {
+      ...validated,
+      id: req.params.modelId,
+      source: keepCatalogSource ? 'catalog' : 'manual',
+      removed: validated.removed === true,
+    }, body.expectedRevision);
+    await catalog.apply();
+    return changed(value);
+  }, true);
+  route('DELETE', '/api/providers/:id/models/:modelId', async req => {
+    const result = store.deleteModel(req.params.id, req.params.modelId);
+    await catalog.apply();
+    return changed(result);
+  }, true);
   route('GET', '/api/model-config', () => store.getModelConfig());
   route('PUT', '/api/model-config', req => { const body = object(req.body); return changed(store.putModelConfig(body.expectedRevision, validate(selectionSchema, body.value))); }, true);
-  route('GET', '/api/devices', () => bridge.listDevices());
+  route('GET', '/api/devices', () => listOwnerDevices());
   // 所有者登记/重绑设备：令牌只在本响应中返回一次，中心只保存其哈希，不写日志。
   route('POST', '/api/devices', (req, reply) => {
     const { displayName, platform, deviceId: requestedId, replaceExisting, deviceToken: requestedToken } = deviceRegistration(req.body);
@@ -215,6 +372,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     if (existing === null || replaceExisting !== true) {
       bridge.registry.register({ deviceId, token: deviceToken, displayName });
       bridge.registry.updateMetadata(deviceId, { platform });
+      store.ensureDeviceOAuthGrant(deviceId);
       return reply.code(existing === null ? 201 : 200).send({ deviceId, deviceToken, displayName, platform });
     }
     // 以既有身份重绑：轮换新令牌（仅存哈希），保留 Bot/会话/全部记录，按输入
@@ -222,8 +380,21 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     bridge.registry.rotate({ deviceId, token: deviceToken });
     bridge.registry.rename(deviceId, displayName);
     bridge.registry.updateMetadata(deviceId, { platform });
+    store.ensureDeviceOAuthGrant(deviceId, { resetToken: true });
     notify(deviceId);
     return reply.code(200).send({ deviceId, deviceToken, displayName, platform });
+  }, true);
+  route('PUT', '/api/devices/:deviceId/oauth-grant', req => {
+    const { deviceId } = req.params;
+    const reg = deviceId === bridge.deviceId ? null : bridge.registry.get(deviceId);
+    if (!reg || reg.revokedAt !== null) fail('NOT_FOUND', 'Device not found');
+    const body = object(req.body);
+    if (Object.keys(body).some(key => key !== 'enabled') || typeof body.enabled !== 'boolean') {
+      fail('INVALID_ARGUMENT', 'enabled must be boolean');
+    }
+    store.setDeviceOAuthGrantEnabled(deviceId, body.enabled);
+    const listed = bridge.listDevices().find(item => item.deviceId === deviceId);
+    return presentDevice(listed ?? { deviceId, name: reg.displayName || deviceId, online: false });
   }, true);
   route('PATCH', '/api/devices/:deviceId', req => {
     const { deviceId } = req.params;
@@ -236,6 +407,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     const { deviceId } = req.params;
     if (deviceId === bridge.deviceId || !bridge.registry.get(deviceId)) fail('NOT_FOUND', 'Device not found');
     bridge.registry.revoke(deviceId);
+    store.revokeDeviceOAuthGrant(deviceId);
     store.replaceDeviceBots(deviceId, []);
     notify(deviceId);
     return reply.code(204).send();
@@ -243,9 +415,9 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('GET', '/api/bot-sync', req => store.getBotSync({
     epoch: typeof req.query?.epoch === 'string' ? req.query.epoch : undefined,
     sinceSeq: req.query?.sinceSeq !== undefined ? Number(req.query.sinceSeq) : undefined,
-    devices: bridge.listDevices(),
+    devices: listOwnerDevices(),
   }));
-  route('GET', '/api/devices/:deviceId/bots', req => store.listDeviceBots(req.params.deviceId));
+  route('GET', '/api/devices/:deviceId/bots', req => store.listDeviceBots(req.params.deviceId).map(bot => store.withResolvedModel(bot)));
   route('GET', '/api/devices/:deviceId/runtime-status', req => {
     const device = bridge.listDevices().find(item => item.deviceId === req.params.deviceId);
     if (!device) fail('NOT_FOUND', 'Device not found');
@@ -280,7 +452,8 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     }
     await packages.reconcileDevice(deviceId);
     notify(deviceId);
-    return reply.code(201).send(bot);
+    scheduleTaskReconcile(deviceId);
+    return reply.code(201).send(store.withResolvedModel(bot));
   }, true);
   route('PATCH', '/api/devices/:deviceId/bots/:botId', async req => {
     const { deviceId, botId } = req.params;
@@ -289,45 +462,47 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
       ...(req.body?.name !== undefined ? { name: req.body.name } : {}),
       ...(req.body?.description !== undefined ? { description: req.body.description } : {}),
     });
-    return store.upsertDeviceBot(deviceId, {
+    return store.withResolvedModel(store.upsertDeviceBot(deviceId, {
       ...updated,
       deviceId,
       botId,
       ...(typeof updated?.name === 'string' ? { name: updated.name } : typeof updated?.role === 'string' ? { name: updated.role } : {}),
-    });
+    }));
   }, true);
   route('POST', '/api/devices/:deviceId/bots/:botId/primary', async req => {
     const { deviceId, botId } = req.params;
     const updated = await bridge.call(deviceId, 'setPrimaryBot', { botId });
-    return store.upsertDeviceBot(deviceId, {
+    return store.withResolvedModel(store.upsertDeviceBot(deviceId, {
       ...updated,
       deviceId,
       botId,
       ...(typeof updated?.name === 'string' ? { name: updated.name } : typeof updated?.role === 'string' ? { name: updated.role } : {}),
       isPrimary: true,
-    });
+    }));
   }, true);
   route('POST', '/api/devices/:deviceId/bots/:botId/archive', async req => {
     const { deviceId, botId } = req.params;
     const updated = await bridge.call(deviceId, 'archiveBot', { botId });
-    return store.upsertDeviceBot(deviceId, {
+    return store.withResolvedModel(store.upsertDeviceBot(deviceId, {
       ...updated,
       deviceId,
       botId,
       ...(typeof updated?.name === 'string' ? { name: updated.name } : typeof updated?.role === 'string' ? { name: updated.role } : {}),
       ...(updated?.archivedAt !== undefined ? { archivedAt: updated.archivedAt } : { archivedAt: new Date().toISOString() }),
-    });
+    }));
   }, true);
   route('POST', '/api/devices/:deviceId/bots/:botId/unarchive', async req => {
     const { deviceId, botId } = req.params;
     const updated = await bridge.call(deviceId, 'unarchiveBot', { botId });
-    return store.upsertDeviceBot(deviceId, {
+    const bot = store.upsertDeviceBot(deviceId, {
       ...updated,
       deviceId,
       botId,
       ...(typeof updated?.name === 'string' ? { name: updated.name } : typeof updated?.role === 'string' ? { name: updated.role } : {}),
       archivedAt: updated?.archivedAt ?? null,
     });
+    scheduleTaskReconcile(deviceId);
+    return store.withResolvedModel(bot);
   }, true);
   route('DELETE', '/api/devices/:deviceId/bots/:botId', async (req, reply) => {
     const { deviceId, botId } = req.params;
@@ -370,7 +545,19 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return reply.code(201).send(await packages.uploadArtifact(content()));
   }, true);
   route('GET', '/api/capabilities', () => store.listInstallations());
-  route('POST', '/api/installations', async (req, reply) => { const body = object(req.body); if (body.target === 'center' && (body.kind === 'plugin' || body.kind === 'skill')) fail('UNSUPPORTED_TARGET', 'Native plugins and skills run on Hosts'); return reply.code(202).send(await packages.install(body)); }, true);
+  route('POST', '/api/installations', async (req, reply) => {
+    const body = object(req.body);
+    if (body.target === 'center' && (body.kind === 'plugin' || body.kind === 'skill')) fail('UNSUPPORTED_TARGET', 'Native plugins and skills run on Hosts');
+    if (body.kind === 'skill' && body.source?.type === 'inline') {
+      const prepared = await skills.prepareInlineSkill({ displayName: body.displayName, files: body.source.files });
+      return reply.code(202).send(await packages.install({
+        ...body,
+        source: { type: 'artifact', artifactRef: prepared.artifactRef },
+        autoEnable: body.autoEnable ?? true,
+      }));
+    }
+    return reply.code(202).send(await packages.install(body));
+  }, true);
   route('GET', '/api/installations/:id', req => required(store.getInstallation(req.params.id), 'Installation'));
   route('PATCH', '/api/installations/:id', async req => {
     const body = object(req.body);
@@ -386,7 +573,25 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     }
     return result;
   }, true);
+  route('GET', '/api/installations/:id/skill-files', req => skills.readInstallationFiles(req.params.id));
+  route('PUT', '/api/installations/:id/skill-files', async req => {
+    const body = object(req.body);
+    const result = await skills.writeInstallationFiles(req.params.id, body.files, { requestId: body.requestId });
+    notifyInstallation(req.params.id);
+    return result;
+  }, true);
   route('GET', '/api/installations/:id/config', req => store.getInstallationConfig(req.params.id));
+  route('GET', '/api/installations/:id/bot-bindings', req => {
+    required(store.getInstallation(req.params.id), 'Installation');
+    const bindings = {};
+    for (const device of listOwnerDevices()) {
+      for (const bot of store.listDeviceBots(device.deviceId)) {
+        if (bot.archivedAt) continue;
+        bindings[`${device.deviceId}:${bot.botId}`] = store.getBotCapability(device.deviceId, bot.botId, req.params.id);
+      }
+    }
+    return { bindings };
+  });
   route('PUT', '/api/installations/:id/config', req => {
     const body = object(req.body);
     assertConfigCredentials(store.getInstallationConfig(req.params.id).configSchema, body.globalConfig);
@@ -448,7 +653,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     }
     return reply.code(202).send(await packages.enable(req.params.id, request));
   }, true);
-  for (const [method, path, fn] of [['POST','update','update'],['POST','rollback','rollback'],['POST','disable','disable'],['DELETE','','uninstall']]) {
+  for (const [method, path, fn] of [['POST','update','update'],['POST','disable','disable'],['DELETE','','uninstall']]) {
     route(method, `/api/installations/:id${path ? `/${path}` : ''}`, async (req, reply) => reply.code(202).send(await packages[fn](req.params.id, object(req.body))), true);
   }
   route('GET', '/api/installations/:id/deployments', req => store.listDeploymentReceipts(req.params.id));
@@ -460,8 +665,48 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     if (!store.listDeviceBots(deviceId).some((bot) => bot.botId === botId)) fail('NOT_FOUND', 'Bot not found');
     return { deviceId, botId };
   };
-  route('POST', '/api/devices/:deviceId/bots/:botId/skills', req => skills.execute({ ...botScope(req), origin: 'foreground' }, object(req.body)), true);
-  route('POST', '/api/devices/:deviceId/bots/:botId/skill-reviews', req => skills.review(botScope(req), object(req.body)), true);
+  async function unshareForArchive(scope, input) {
+    let installationId = typeof input.installationId === 'string' && input.installationId ? input.installationId : null;
+    let targetState = null;
+    if (!installationId) {
+      const list = await skills.review(scope, { action: 'list', includeArchived: true });
+      const target = list.items.find((item) =>
+        (typeof input.skillId === 'string' && item.skillId === input.skillId)
+        || (typeof input.name === 'string' && item.name === input.name)
+      );
+      installationId = target?.installationId ?? null;
+      targetState = target?.state ?? null;
+    }
+    if (!installationId || targetState === 'archived') return [];
+    const affectedDevices = [...new Set(store.listBotBindings({ installationId }).map((b) => b.deviceId))];
+    const { changed } = store.unshareInstallationForArchive(installationId, scope.deviceId, scope.botId);
+    return changed ? affectedDevices : [];
+  }
+  async function reconcileUnsharedDevices(affectedDevices, ownerDeviceId) {
+    for (const deviceId of affectedDevices) {
+      if (deviceId === ownerDeviceId) continue;
+      try { await packages.reconcileDevice(deviceId); } finally { notify(deviceId); }
+    }
+  }
+  async function runSkillWithOptionalUnshare(scope, rawBody, run) {
+    const body = object(rawBody);
+    const { forceUnshare, ...rest } = body;
+    if (forceUnshare !== undefined && typeof forceUnshare !== 'boolean') fail('INVALID_ARGUMENT', 'forceUnshare must be boolean');
+    const affectedDevices = rest.action === 'archive' && forceUnshare === true
+      ? await unshareForArchive(scope, rest)
+      : [];
+    const result = await run(rest);
+    await reconcileUnsharedDevices(affectedDevices, scope.deviceId);
+    return result;
+  }
+  function handleSkillExecute(scope, rawBody, identityExtra = {}) {
+    return runSkillWithOptionalUnshare(scope, rawBody, rest => skills.execute({ ...scope, ...identityExtra }, rest));
+  }
+  function handleSkillReview(scope, rawBody) {
+    return runSkillWithOptionalUnshare(scope, rawBody, rest => skills.review(scope, rest));
+  }
+  route('POST', '/api/devices/:deviceId/bots/:botId/skills', req => handleSkillExecute(botScope(req), req.body, { origin: 'foreground' }), true);
+  route('POST', '/api/devices/:deviceId/bots/:botId/skill-reviews', req => handleSkillReview(botScope(req), req.body), true);
   route('POST', '/api/devices/:deviceId/bots/:botId/learning', async req => {
     const body = object(req.body);
     const scope = botScope(req);
@@ -510,9 +755,151 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     done();
   }
   const host = (method, url, handler, bodyLimit) => app.route({ method, url, onRequest: authenticate, handler, ...(bodyLimit !== undefined ? { bodyLimit } : {}) });
+  host('POST', '/api/oauth/token', (req, reply) => {
+    const { deviceId } = req.centerDevice;
+    const device = bridge.registry.get(deviceId);
+    if (!device || device.revokedAt !== null) {
+      return reply.code(401).send({ error: { code: 'UNAUTHENTICATED', message: 'Device authentication required' } });
+    }
+    const accessToken = `pboauth_${randomBytes(32).toString('base64url')}`;
+    if (!store.issueDeviceOAuthToken(deviceId, sha256(accessToken))) {
+      return reply.code(403).send({
+        error: { code: 'OAUTH_ACCESS_REVOKED', message: 'Center admin access is disabled for this device' },
+      });
+    }
+    reply.header('Cache-Control', 'no-store');
+    return { accessToken, tokenType: 'Bearer', scopes: ['center:admin'] };
+  });
+
+  const QR_LOGIN_TTL_MS = 180 * 1000;
+  const QR_LOGIN_MAX_ENTRIES = 200;
+  const qrChallenges = new Map();
+  function pruneQrChallenges(now = Date.now()) {
+    for (const [id, entry] of qrChallenges) {
+      if (entry.expiresAtMs <= now) qrChallenges.delete(id);
+    }
+    while (qrChallenges.size >= QR_LOGIN_MAX_ENTRIES) {
+      const oldest = qrChallenges.keys().next().value;
+      if (!oldest) break;
+      qrChallenges.delete(oldest);
+    }
+  }
+  function resolveQrCenterOrigin(req) {
+    if (typeof publicUrl === 'string' && publicUrl.trim()) {
+      return new URL(publicUrl.trim()).origin;
+    }
+    const rawOrigin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+    if (/^https?:\/\//i.test(rawOrigin)) {
+      try { return new URL(rawOrigin).origin; } catch { /* Fall through to INVALID_STATE. */ }
+    }
+    fail('INVALID_STATE', 'Center public URL is not configured');
+  }
+  function authenticateQrApprover(req, reply, done) {
+    const deviceId = req.headers['x-device-id'];
+    const token = /^Bearer ([A-Za-z0-9_-]+)$/.exec(req.headers.authorization || '')?.[1];
+    if (typeof deviceId === 'string' && token && !token.startsWith('pboauth_')) {
+      const identity = bridge.registry.authenticate(deviceId, token);
+      if (!identity || deviceId === bridge.deviceId) {
+        return reply.code(401).send({ error: { code: 'UNAUTHENTICATED', message: 'Device authentication required' } });
+      }
+      if (!store.isDeviceOAuthGrantEnabled(deviceId)) {
+        return reply.code(403).send({
+          error: { code: 'OAUTH_ACCESS_REVOKED', message: 'Center admin access is disabled for this device' },
+        });
+      }
+      req.oauthDeviceId = deviceId;
+      req.centerDevice = { deviceId, token };
+      return done();
+    }
+    return requireOwner(req, reply, done);
+  }
+  app.post('/api/session/qr', {
+    bodyLimit: 4 * 1024,
+    config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
+  }, (req, reply) => {
+    const centerOrigin = resolveQrCenterOrigin(req);
+    const now = Date.now();
+    pruneQrChallenges(now);
+    const challengeId = randomUUID();
+    const qrNonce = randomBytes(24).toString('base64url');
+    const browserSecret = randomBytes(24).toString('base64url');
+    const expiresAtMs = now + QR_LOGIN_TTL_MS;
+    const expiresAt = new Date(expiresAtMs).toISOString();
+    qrChallenges.set(challengeId, {
+      status: 'pending',
+      qrNonceHash: sha256Buffer(qrNonce),
+      browserSecretHash: sha256Buffer(browserSecret),
+      expiresAtMs,
+    });
+    const qrCode = 'pibotlogin1.' + Buffer.from(JSON.stringify({ u: centerOrigin, id: challengeId, s: qrNonce }), 'utf8').toString('base64url');
+    reply.header('Cache-Control', 'no-store');
+    return { challengeId, browserSecret, qrCode, expiresAt, ttlSeconds: QR_LOGIN_TTL_MS / 1000 };
+  });
+  app.post('/api/oauth/qr-approve', {
+    onRequest: [authenticateQrApprover, csrfUnlessOAuth],
+    bodyLimit: 4 * 1024,
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, (req) => {
+    const body = object(req.body);
+    const challengeId = text(body.challengeId, 'challengeId');
+    const qrNonce = text(body.qrNonce, 'qrNonce');
+    const challenge = qrChallenges.get(challengeId);
+    if (!challenge || challenge.expiresAtMs <= Date.now()) {
+      qrChallenges.delete(challengeId);
+      fail('NOT_FOUND', 'QR login challenge not found or expired');
+    }
+    const actual = sha256Buffer(qrNonce);
+    if (actual.length !== challenge.qrNonceHash.length || !timingSafeEqual(actual, challenge.qrNonceHash)) {
+      fail('FORBIDDEN', 'Invalid QR challenge nonce');
+    }
+    challenge.status = 'approved';
+    return { approved: true };
+  });
+  app.post('/api/session/qr/:challengeId/claim', {
+    bodyLimit: 4 * 1024,
+    config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
+  }, (req, reply) => {
+    const challengeId = text(req.params?.challengeId, 'challengeId');
+    const body = object(req.body);
+    const browserSecret = text(body.browserSecret, 'browserSecret');
+    reply.header('Cache-Control', 'no-store');
+    const challenge = qrChallenges.get(challengeId);
+    if (!challenge || challenge.expiresAtMs <= Date.now()) {
+      qrChallenges.delete(challengeId);
+      return { status: 'expired' };
+    }
+    const actual = sha256Buffer(browserSecret);
+    if (actual.length !== challenge.browserSecretHash.length || !timingSafeEqual(actual, challenge.browserSecretHash)) {
+      return reply.code(401).send({ error: { code: 'UNAUTHENTICATED', message: 'Invalid browser secret' } });
+    }
+    if (challenge.status !== 'approved') {
+      return { status: 'pending' };
+    }
+    qrChallenges.delete(challengeId);
+    req.session.regenerate();
+    req.session.set('owner', true);
+    return { status: 'approved', authenticated: true, csrfToken: reply.generateCsrf() };
+  });
   registerWebhookRoutes(app, { store, bridge, route, host, publicUrl, notify: deviceId => notify(deviceId, 'webhook-ready') });
+  const taskCoordinator = registerTaskRoutes({
+    route,
+    host,
+    store,
+    bridge,
+    packages,
+    notify,
+    notifyConfig: deviceId => notify(deviceId),
+    notifyTaskReady: deviceId => notify(deviceId, 'task-ready'),
+    isAbsolutePath,
+  });
+  const scheduleTaskReconcile = (deviceId) => {
+    setImmediate(() => {
+      void taskCoordinator.reconcilePendingTasks(deviceId).catch(() => {});
+    });
+  };
   registerPairingRoutes(app, { store, bridge, route, notify, publicUrl, deviceRegistration });
   if (vault) registerVaultRoutes(app, { route, host, vault });
+  const antigravityRoutes = registerAntigravityRoutes({ store, bridge, catalog, host, antigravity, changed });
   // Learning start carries a transcript snapshot the service bounds at 8 MiB;
   // this route's body limit sits just above it — never a global raise.
   const LEARNING_BODY_LIMIT = 9 * 1024 * 1024;
@@ -522,6 +909,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     reply.raw.write('event: heartbeat\ndata: {}\n\n');
     const set = streams.get(deviceId) || new Set(); const stream = { reply: reply.raw, token }; set.add(stream); streams.set(deviceId, set);
+    scheduleTaskReconcile(deviceId);
     const timer = setInterval(() => { if (!bridge.registry.authenticate(deviceId, token)) return reply.raw.end(); reply.raw.write('event: heartbeat\ndata: {}\n\n'); }, 15000);
     reply.raw.on('error', () => reply.raw.destroy());
     reply.raw.on('close', () => { clearInterval(timer); set.delete(stream); if (!set.size) streams.delete(deviceId); });
@@ -531,6 +919,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     if (body.deviceId !== id || body.capabilityProtocol !== 1 || !Array.isArray(body.bots) || body.bots.some(bot => !bot || bot.deviceId !== id || typeof bot.botId !== 'string' || !bot.botId || typeof bot.name !== 'string')) fail('INVALID_ARGUMENT', 'Invalid bootstrap');
     store.replaceDeviceBots(id, body.bots.filter(bot => typeof bot.isPrimary === 'boolean'), { bumpRevision: true });
     await packages.reconcileDevice(id);
+    scheduleTaskReconcile(id);
     return { snapshot: snapshot(id) };
   });
   host('POST', '/api/host/bots-sync', async req => {
@@ -542,12 +931,13 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
       await packages.reconcileDevice(id);
       notify(id);
     }
+    scheduleTaskReconcile(id);
     return result;
   });
   host('GET', '/api/host/bot-directory', req => {
     const epoch = typeof req.query?.epoch === 'string' ? req.query.epoch : undefined;
     const sinceSeq = req.query?.sinceSeq !== undefined ? Number(req.query.sinceSeq) : undefined;
-    return store.getBotSync({ epoch, sinceSeq, devices: bridge.listDevices() });
+    return store.getBotSync({ epoch, sinceSeq, devices: listOwnerDevices() });
   });
   host('GET', '/api/host/model-picker', modelPicker);
   host('GET', '/api/host/providers/:id/auth', async req => {
@@ -590,11 +980,11 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     try { await packages.reconcileDevice(deviceId); } finally { notify(deviceId); }
     return result;
   });
-  host('POST', '/api/host/devices/:deviceId/bots/:botId/skills', req => skills.execute({ ...botScope(req), origin: 'foreground' }, object(req.body)));
+  host('POST', '/api/host/devices/:deviceId/bots/:botId/skills', req => handleSkillExecute(botScope(req), req.body, { origin: 'foreground' }));
   host('POST', '/api/host/devices/:deviceId/bots/:botId/skill-reviews', req => {
     const scope = botScope(req);
     if (scope.deviceId !== req.centerDevice.deviceId) fail('FORBIDDEN', 'Device mismatch');
-    return skills.review(scope, object(req.body));
+    return handleSkillReview(scope, req.body);
   });
   host('POST', '/api/host/devices/:deviceId/bots/:botId/skills/usage', req => {
     const scope = botScope(req);
@@ -632,7 +1022,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     if (body.deviceId !== deviceId || !plan || plan.operationId !== body.operationId || plan.planId !== body.planId || plan.desiredRevision !== body.desiredRevision) fail('FORBIDDEN', 'Deployment not assigned');
     if (!['queued', 'downloading', 'preparing', 'waiting-idle', 'activating', 'applied', 'failed', 'removed'].includes(body.phase) || !['ready', 'disconnected', 'needs-auth', 'unsupported', 'disabled'].includes(body.health) || (body.appliedRevision !== null && (!Number.isSafeInteger(body.appliedRevision) || body.appliedRevision < 0)) || (body.actualVersion !== null && typeof body.actualVersion !== 'string')) fail('INVALID_ARGUMENT', 'Invalid deployment receipt');
     if (['applied', 'removed'].includes(body.phase) && body.appliedRevision !== plan.desiredRevision) fail('INVALID_ARGUMENT', 'Deployment revision mismatch');
-    if (body.phase === 'applied' && ['install', 'update', 'rollback', 'enable'].includes(plan.action) && body.actualVersion !== plan.targetVersion) fail('INVALID_ARGUMENT', 'Deployment version mismatch');
+    if (body.phase === 'applied' && ['install', 'update', 'enable'].includes(plan.action) && body.actualVersion !== plan.targetVersion) fail('INVALID_ARGUMENT', 'Deployment version mismatch');
     store.putDeploymentReceipt({ ...body, error: body.error ? { code: 'INTERNAL_ERROR', message: 'Deployment failed' } : null });
     const operation = store.getOperation(plan.operationId);
     if (operation && operation.target === 'host' && operation.deviceIds.length && !['applied', 'removed', 'failed'].includes(operation.phase)) {
@@ -670,5 +1060,5 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   });
   host('POST', '/api/host/capabilities/:installationId/tools/list', req => execution.listTools(req.centerDevice.deviceId, req.params.installationId, object(req.body)));
   host('POST', '/api/host/capabilities/:installationId/tools/call', req => { const body = object(req.body); text(body.callId, 'callId'); text(body.name, 'name'); object(body.args); return execution.callTool(req.centerDevice.deviceId, req.params.installationId, body); });
-  return { notifyAll, notifyInstallation, notifyDevice: notify, close() { for (const set of streams.values()) for (const stream of set) stream.reply.end(); streams.clear(); } };
+  return { notifyAll, notifyInstallation, notifyDevice: notify, close() { antigravityRoutes.close(); for (const set of streams.values()) for (const stream of set) stream.reply.end(); streams.clear(); } };
 }

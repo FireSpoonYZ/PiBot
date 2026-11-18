@@ -252,3 +252,105 @@
   background: var(--accent-soft);
   color: var(--accent-strong);
 }
+
+.bot-studio .bot-model-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.bot-studio .bot-model-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.bot-studio .bot-model-default-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.bot-studio .bot-model-save-indicator {
+  font-size: 12px;
+  flex: none;
+}
+.bot-studio .bot-model-mode-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.bot-studio .bot-model-mode-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.bot-studio .bot-model-mode-card strong { font-size: 13px; }
+.bot-studio .bot-model-mode-card.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.bot-studio .bot-model-picker-wrap {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  background: var(--surface);
+}
+.bot-studio .bot-model-empty-card {
+  padding: 16px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+.bot-studio .bot-model-advanced-radios {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.bot-studio .bot-model-radio-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+}
+.bot-studio .bot-model-radio-row.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.bot-studio .bot-model-radio-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.bot-studio .bot-model-radio-copy strong { font-size: 12.5px; }
+.bot-studio .soul-preview-box {
+  min-height: 180px;
+  max-height: 360px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--surface);
+}

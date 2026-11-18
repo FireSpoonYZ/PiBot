@@ -78,7 +78,8 @@ import type {
   ShowerFrameLimits,
   ShowerInput,
   ShowerSession,
-  ShowerTarget
+  ShowerTarget,
+  TaskActionInput
 } from './index.js';
 
 export class ControlApiError extends Error {
@@ -229,6 +230,10 @@ export interface ControlClient {
   releaseShowerSession(
     target: ShowerTarget,
     sessionId: string,
+    options?: ControlClientCallOptions
+  ): Promise<Record<string, unknown>>;
+  manageTasks(
+    input: TaskActionInput,
     options?: ControlClientCallOptions
   ): Promise<Record<string, unknown>>;
 }

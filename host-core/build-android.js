@@ -8,6 +8,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { readFile, writeFile, copyFile, mkdir, readdir, access, stat, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { patchPiDurable } from './patch-pi-durable.js';
 import { downloadVerified } from './prepare-android-tools.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -35,16 +36,16 @@ const LICENSE_PREFIXES = ['license', 'licence', 'copying', 'notice'];
 // licenses/standardwebhooks-1.1.1-LICENSE.txt -- that text is NOT an MIT copy.
 // `declared` is the manifest license to match, `license` the in-repo text file; a
 // package@version outside this map still fails the missing-license check.
-// Official Pi 1.5.0 packages; the exact upstream MIT text covers archives without a root license.
-const PI_MAIN_VERSION = '1.5.0';
+// Official Pi 1.5.2 packages; the exact upstream MIT text covers archives without a root license.
+const PI_MAIN_VERSION = '1.5.2';
 const UPSTREAM_LICENSE_ALLOWLIST = new Map([
-  ['@earendil-works/pi-schema', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
-  ['@earendil-works/chord', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
-  ['@earendil-works/pi-ai', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
-  ['@earendil-works/pi-codemode', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
-  ['@earendil-works/pi-durable', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
-  ['@earendil-works/pi-mcp', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
-  ['@earendil-works/pi-telemetry', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.0-MIT.txt' }],
+  ['@earendil-works/pi-schema', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.2-MIT.txt' }],
+  ['@earendil-works/chord', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.2-MIT.txt' }],
+  ['@earendil-works/pi-ai', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.2-MIT.txt' }],
+  ['@earendil-works/pi-codemode', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.2-MIT.txt' }],
+  ['@earendil-works/pi-durable', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.2-MIT.txt' }],
+  ['@earendil-works/pi-mcp', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.2-MIT.txt' }],
+  ['@earendil-works/pi-telemetry', { version: PI_MAIN_VERSION, declared: 'MIT', license: 'pi-1.5.2-MIT.txt' }],
   ['@vectorize-io/hindsight-client', { version: '0.9.2', declared: 'MIT', license: 'hindsight-client-0.9.2-MIT.txt' }],
   ['standardwebhooks', { version: '1.1.1', declared: 'MIT', license: 'standardwebhooks-1.1.1-LICENSE.txt' }],
   ['data-uri-to-buffer', { version: '4.0.1', declared: 'MIT', license: 'desktop/data-uri-to-buffer-4.0.1-MIT.txt' }],
@@ -317,6 +318,7 @@ async function main() {
   const entry = path.join(HERE, 'android-runtime.js');
   await access(entry); // sibling lane supplies this entry; missing is a hard error
   await assertInstalledHostDependencies();
+  patchPiDurable(path.join(HERE, 'node_modules'));
   await mkdir(OUT_DIR, { recursive: true });
   // Legacy metafile copied into the assets sourceSet is not part of the payload;
   // remove only that build graph file, never runtime/state.

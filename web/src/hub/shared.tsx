@@ -184,10 +184,12 @@ export const SOUL_SNIPPETS: { zh: string; en: string; text: string }[] = [
 
 export type HubScreen =
   | 'hub'
+  | 'tasks'
   | 'board'
   | 'chat'
   | 'conversation'
   | 'dm'
+  | 'group-create'
   | 'bot-profile'
   | 'bot-profile-manage'
   | 'bot-edit'
@@ -199,6 +201,14 @@ export type HubScreen =
   | 'settings'
   | 'archived-bots'
   | 'pending';
+
+export interface GroupCreateAttempt {
+  requestId: string;
+  targetDeviceId: string;
+  profileId?: string;
+  title?: string;
+  members: MessageMember[];
+}
 
 export interface RoomDeleteAttempt {
   scopeId: string;
@@ -685,15 +695,6 @@ export function formatToolStepDuration(ms: number): string {
   return secs > 0 ? `${mins}m ${String(secs).padStart(2, '0')}s` : `${mins}m`;
 }
 
-export function copyTextToClipboard(value: string): void {
-  if (!value) return;
-  try {
-    void navigator.clipboard?.writeText(value);
-  } catch {
-    // Ignore clipboard permission errors in webview
-  }
-}
-
 export function renderToolStepIcon(status: ChatToolCallItem['status']) {
   if (status === 'running') {
     return (
@@ -800,6 +801,9 @@ export function TurnToolCallsSection({
   hideToolOutput,
   onSubmitQuestionnaire,
   onSubmitVaultUnlock,
+  onOpenTask,
+  onConfirmTaskPlan,
+  onAnswerTaskPrompt,
   t,
 }: Omit<ToolCallCardProps, 'tool'> & {
   tools: ChatToolCallItem[];
@@ -861,6 +865,9 @@ export function TurnToolCallsSection({
             hideToolOutput={effectiveHideToolOutput}
             onSubmitQuestionnaire={onSubmitQuestionnaire}
             onSubmitVaultUnlock={onSubmitVaultUnlock}
+            onOpenTask={onOpenTask}
+            onConfirmTaskPlan={onConfirmTaskPlan}
+            onAnswerTaskPrompt={onAnswerTaskPrompt}
           />
         ))}
       </div>
@@ -914,6 +921,9 @@ export function TurnToolCallsSection({
               hideToolOutput={effectiveHideToolOutput}
               onSubmitQuestionnaire={onSubmitQuestionnaire}
               onSubmitVaultUnlock={onSubmitVaultUnlock}
+              onOpenTask={onOpenTask}
+              onConfirmTaskPlan={onConfirmTaskPlan}
+              onAnswerTaskPrompt={onAnswerTaskPrompt}
             />
           ))}
         </div>

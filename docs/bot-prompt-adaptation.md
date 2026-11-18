@@ -16,7 +16,7 @@
 
 1. **公共基础行为提示词（`BASE_BEHAVIOR_PROMPT`）**
    - 语言与位置：英文，在 `host-core/runtime.js` 中通过 `defineExtension({ name: 'host.base-behavior', sections: [section('host-base-behavior', () => BASE_BEHAVIOR_PROMPT)] })` 注册在 `host.tools`（`host-execution`）、`host.communication`（`host-collaboration`）、`host.bot-management-skill` 及各 Bot 插件扩展之前。
-   - 渲染顺序：Pi Durable SDK 1.5.0 按 `selectedExtensions` 顺序依次渲染各扩展的 `sections`，最后追加 `agent.instructions`（即 `SOUL.md` 或工作会话 `workInstructions`）。`coreExtensions` 快照在空闲边界自动同步到新老主会话与工作会话。
+   - 渲染顺序：Pi Durable SDK 1.5.2 按 `selectedExtensions` 顺序依次渲染各扩展的 `sections`，最后追加 `agent.instructions`（即 `SOUL.md` 或工作会话 `workInstructions`）。`coreExtensions` 快照在空闲边界自动同步到新老主会话与工作会话。
    - 覆盖范围：
      - **任务执行与结果交付**：严格按冻结轮（frozen turn）的受信 `replyTarget` 决定输出通道：`replyTarget.kind === "primary"`（含同伴回复唤醒并续接原始用户主私聊请求的轮次）时助手文本即面向用户的回复；`dm`/`room` 范围轮仅通过 `send_to` 发布，普通助手文本为私有草稿。在人类发起的 primary 多步任务中，首次调用工具的同一轮附带一句简明起步说明，但绝不在未调用工具的情况下仅回一句确认就结束生成轮；同伴/Host/定时唤醒不发送开场确认。
      - **自主性与用户决策时机**：可逆且在用户委托范围内的步骤直接推进；仅在不可逆副作用、重大歧义或依赖用户私有偏好时暂停询问（已启用 `ask_user_question` 插件时优先调用，否则以正文清晰提问）。

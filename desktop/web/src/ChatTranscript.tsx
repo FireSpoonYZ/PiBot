@@ -7,11 +7,13 @@ import { Pencil } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import type { BotLiveState, BotRecord, LiveTool } from '../../../host-core/index.js';
 import { Markdown } from '../../../web/src/Markdown';
+import { ChatTurnMeta } from '../../../web/src/ChatTurnMeta';
 import {
+  hasAssistantVisibleContent,
   latestEntryChannel,
   parseHistoryEntries,
-  formatTurnDuration,
   normalizeAttribution,
+  resolveAssistantFailureDetail,
   type ChatTurn,
   type KnownBotSummary,
 } from '../../../web/src/chatTurnModel';
@@ -20,6 +22,7 @@ import type { QuestionnaireSubmitPayload, VaultUnlockSubmitPayload } from '../..
 import { TurnToolCallsSection } from '../../../web/src/hub/shared';
 import {
   GrokBotAvatar,
+  GrokBotFailureRow,
   GrokBotWorkingSlot,
   resolveBotAvatarPreset,
 } from '../../../web/src/GrokBotAvatar';
@@ -79,6 +82,9 @@ export interface ChatTranscriptProps {
   canEditTurns?: boolean;
   editingEntryId?: number | null;
   onEditTurn?: (turn: ChatTurn) => void;
+  onOpenTask?: (taskId: string, openEdit?: boolean) => void;
+  onConfirmTaskPlan?: (taskId: string) => Promise<void> | void;
+  onAnswerTaskPrompt?: (taskId: string, answer: string) => Promise<void> | void;
 }
 
 const asArray = <T,>(value: unknown): T[] => (Array.isArray(value) ? (value as T[]) : []);
@@ -121,6 +127,9 @@ export function ChatTranscript({
   canEditTurns = false,
   editingEntryId = null,
   onEditTurn,
+  onOpenTask,
+  onConfirmTaskPlan,
+  onAnswerTaskPrompt,
 }: ChatTranscriptProps) {
   const t = useText();
   const [linkError, setLinkError] = useState('');
@@ -207,20 +216,25 @@ export function ChatTranscript({
   // 绝不回退历史用户/普通轮时间。
   const workingSlotStartedAt = resolveActiveActivityStartedAt(activity);
 
-  // 持久失败可见化：Host 的 failed 终态持续显示（区别于用户主动停止），
-  // 气泡已渲染 turn.error 或输入框上方已渲染 turnAdmission.phase === 'failed' 时不再重复堆叠。
+  // 持久失败可见化：已入历史的 assistant 失败轮统一用轮内 GrokBotFailureRow 原位展示；
+  // 尚未落入历史的 failed 终态（如请求前 Host 中止）由 GrokBotWorkingSlot 融合展示，避免重复与闪跳。
+  const latestTurn = allTurns.at(-1);
+  const latestTurnHasError = Boolean(latestTurn?.role === 'assistant' && latestTurn.error);
   const phaseFailed = activity?.phase === 'failed';
-  const activityError = activity?.error?.message || activity?.error?.code || null;
   const admissionError = useMemo(() => {
     const adm = live?.turnAdmission;
     if (!adm || adm.phase !== 'failed') return null;
     const msg = adm.error?.message || adm.error?.code || '';
     return msg ? String(msg) : 'admission_failed';
   }, [live?.turnAdmission]);
-  const failureNotice =
-    phaseFailed && !lastTurn?.error && !admissionError
-      ? activityError || t('本轮回复未能完成，请直接重试。', 'Reply could not complete. Please retry.')
-      : null;
+  const showFusedFailure = phaseFailed && !slotBusy && !awaitingAnswer && !admissionError && !latestTurnHasError;
+  const rawActivityError =
+    activity?.error?.message?.trim() || activity?.error?.code?.trim() || '';
+  const fusedFailureDetail = showFusedFailure ? rawActivityError : '';
+  const slotFailure = useMemo(
+    () => (showFusedFailure ? { detail: fusedFailureDetail || undefined } : undefined),
+    [showFusedFailure, fusedFailureDetail],
+  );
 
   // 仅当用户停留在底部附近时跟随新流；向上翻阅历史不打断滚动位置。
   const scrollRef = useRef<HTMLElement | null>(null);
@@ -234,7 +248,7 @@ export function ChatTranscript({
   useEffect(() => {
     const el = scrollRef.current;
     if (el && nearBottomRef.current) el.scrollTop = el.scrollHeight;
-  }, [visibleTurns.length, lastTurn?.text, lastTurn?.tools?.length, liveGeneratingText, isBusy, activeLiveToolName]);
+  }, [visibleTurns.length, lastTurn?.text, lastTurn?.tools?.length, lastTurn?.error, liveGeneratingText, activeLiveToolName, showFusedFailure]);
 
   // 切换会话回到最新流。
   useEffect(() => {
@@ -352,86 +366,107 @@ export function ChatTranscript({
               onEditTurn &&
               isEditablePrimaryUserTurn(turn),
           );
+          const copyText = turn.text;
+          const isAssistantFailure = turn.role === 'assistant' && Boolean(turn.error);
+          const showArticle = !isAssistantFailure || hasAssistantVisibleContent(turn);
+          const failureDetail = isAssistantFailure ? resolveAssistantFailureDetail(
+            turn.error === 'model_error' && turn.id === latestTurn?.id && phaseFailed && rawActivityError
+              ? rawActivityError : turn.error,
+            t,
+          ) : '';
           return (
-            <article
-              key={turn.id}
-              className={`bot-chat-bubble ${isWebhookAttribution(turnAttr) ? 'assistant' : turn.role}${turn.role === 'user' && turnAttr?.kind === 'bot' ? ' is-peer' : ''}${turn.isStreaming ? ' streaming' : ''}${isEditingTarget ? ' is-editing-target' : ''}${isAfterEditingTarget ? ' is-editing-after' : ''}`}
-            >
-              {canEditThisTurn ? (
-                <button
-                  type="button"
-                  className="desktop-turn-edit-btn"
-                  onClick={() => onEditTurn?.(turn)}
-                  title={t('编辑此消息', 'Edit message')}
-                  aria-label={t('编辑此消息', 'Edit message')}
+            <div key={turn.id} className="bot-chat-turn">
+              {showArticle ? (
+                <article
+                  className={`bot-chat-bubble ${isWebhookAttribution(turnAttr) ? 'assistant' : turn.role}${turn.role === 'user' && turnAttr?.kind === 'bot' ? ' is-peer' : ''}${turn.isStreaming ? ' streaming' : ''}${isEditingTarget ? ' is-editing-target' : ''}${isAfterEditingTarget ? ' is-editing-after' : ''}`}
                 >
-                  <Pencil size={13} />
-                </button>
+                  {canEditThisTurn ? (
+                    <button
+                      type="button"
+                      className="desktop-turn-edit-btn"
+                      onClick={() => onEditTurn?.(turn)}
+                      title={t('编辑此消息', 'Edit message')}
+                      aria-label={t('编辑此消息', 'Edit message')}
+                    >
+                      <Pencil size={13} />
+                    </button>
+                  ) : null}
+                  {turnAttr ? (
+                    <MessageAttributionBadge attribution={turnAttr} />
+                  ) : null}
+                  {turn.role === 'assistant' && turn.blocks
+                    ? turn.blocks.map((block) =>
+                        block.kind === 'thinking' ? (
+                          <details key={block.id} className="bot-chat-thinking">
+                            <summary>{t('思考过程', 'Thinking')}</summary>
+                            <pre>{block.text}</pre>
+                          </details>
+                        ) : block.kind === 'tools' ? (
+                          <TurnToolCallsSection
+                            key={block.id}
+                            tools={block.tools}
+                            scopeKey={scopeKey ?? `${botKey}:${bot.primaryConversationId}`}
+                            active={isBusy && !archived}
+                            disabled={disabled || archived}
+                            variant="desktop"
+                            requesterName={bot.role}
+                            onSubmitQuestionnaire={onSubmitQuestionnaire}
+                            onSubmitVaultUnlock={onSubmitVaultUnlock}
+                            onOpenTask={onOpenTask}
+                            onConfirmTaskPlan={onConfirmTaskPlan}
+                            onAnswerTaskPrompt={onAnswerTaskPrompt}
+                            t={t}
+                          />
+                        ) : (
+                          <div key={block.id} data-assistant-entry-id={block.entryId}>
+                            <Markdown text={block.text} onOpenLink={openLink} />
+                          </div>
+                        ),
+                      )
+                    : null}
+                  {!turn.blocks && turn.thinking ? (
+                    <details className="bot-chat-thinking">
+                      <summary>{t('思考过程', 'Thinking')}</summary>
+                      <pre>{turn.thinking}</pre>
+                    </details>
+                  ) : null}
+                  {!turn.blocks && turn.tools && turn.tools.length > 0 ? (
+                    <TurnToolCallsSection
+                      tools={turn.tools}
+                      scopeKey={scopeKey ?? `${botKey}:${bot.primaryConversationId}`}
+                      active={isBusy && !archived}
+                      disabled={disabled || archived}
+                      variant="desktop"
+                      requesterName={bot.role}
+                      onSubmitQuestionnaire={onSubmitQuestionnaire}
+                      onSubmitVaultUnlock={onSubmitVaultUnlock}
+                      onOpenTask={onOpenTask}
+                      onConfirmTaskPlan={onConfirmTaskPlan}
+                      onAnswerTaskPrompt={onAnswerTaskPrompt}
+                      t={t}
+                    />
+                  ) : null}
+                  {turn.role === 'user' && turn.attachments && turn.attachments.length > 0 ? (
+                    <SentAttachments attachments={turn.attachments} fetcher={attachmentFetcher} />
+                  ) : null}
+                  {!turn.blocks && turn.text ? <Markdown text={turn.text} onOpenLink={openLink} /> : null}
+                </article>
               ) : null}
-              {turnAttr ? (
-                <MessageAttributionBadge attribution={turnAttr} />
-              ) : null}
-              {turn.role === 'assistant' && turn.blocks
-                ? turn.blocks.map((block) =>
-                    block.kind === 'thinking' ? (
-                      <details key={block.id} className="bot-chat-thinking">
-                        <summary>{t('思考过程', 'Thinking')}</summary>
-                        <pre>{block.text}</pre>
-                      </details>
-                    ) : block.kind === 'tools' ? (
-                      <TurnToolCallsSection
-                        key={block.id}
-                        tools={block.tools}
-                        scopeKey={scopeKey ?? `${botKey}:${bot.primaryConversationId}`}
-                        active={isBusy && !archived}
-                        disabled={disabled || archived}
-                        variant="desktop"
-                        requesterName={bot.role}
-                        onSubmitQuestionnaire={onSubmitQuestionnaire}
-                        onSubmitVaultUnlock={onSubmitVaultUnlock}
-                        t={t}
-                      />
-                    ) : (
-                      <div key={block.id} data-assistant-entry-id={block.entryId}>
-                        <Markdown text={block.text} onOpenLink={openLink} />
-                      </div>
-                    ),
-                  )
-                : null}
-              {!turn.blocks && turn.thinking ? (
-                <details className="bot-chat-thinking">
-                  <summary>{t('思考过程', 'Thinking')}</summary>
-                  <pre>{turn.thinking}</pre>
-                </details>
-              ) : null}
-              {!turn.blocks && turn.tools && turn.tools.length > 0 ? (
-                <TurnToolCallsSection
-                  tools={turn.tools}
-                  scopeKey={scopeKey ?? `${botKey}:${bot.primaryConversationId}`}
-                  active={isBusy && !archived}
-                  disabled={disabled || archived}
-                  variant="desktop"
-                  requesterName={bot.role}
-                  onSubmitQuestionnaire={onSubmitQuestionnaire}
-                  onSubmitVaultUnlock={onSubmitVaultUnlock}
+              {isAssistantFailure ? (
+                <GrokBotFailureRow
+                  botKey={botKey}
+                  preset={avatarPreset}
+                  detail={failureDetail || undefined}
+                  inline
                   t={t}
                 />
               ) : null}
-              {turn.role === 'user' && turn.attachments && turn.attachments.length > 0 ? (
-                <SentAttachments attachments={turn.attachments} fetcher={attachmentFetcher} />
-              ) : null}
-              {!turn.blocks && turn.text ? <Markdown text={turn.text} onOpenLink={openLink} /> : null}
-              <ErrorNotice compact error={turn.error} />
-              {showTurnDuration ? (
-                <div className="bot-chat-turn-meta" aria-label={formatTurnDuration(turn.durationMs!, t)}>
-                  <svg className="bot-chat-turn-clock" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                    <circle cx="8" cy="8" r="5.75" stroke="currentColor" strokeWidth="1.5" />
-                    <path d="M8 5v3.25l2.1 1.35" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                  <span>{formatTurnDuration(turn.durationMs!, t)}</span>
-                </div>
-              ) : null}
-            </article>
+              <ChatTurnMeta
+                timestamp={turn.timestamp}
+                durationMs={showTurnDuration ? turn.durationMs : undefined}
+                copyText={copyText}
+              />
+            </div>
           );
         });
       })()}
@@ -448,13 +483,11 @@ export function ChatTranscript({
         activeToolName={activeLiveToolName}
         hasThinking={Boolean(lastTurn?.role === 'assistant' && lastTurn.thinking && !displayGeneratingText)}
         queuedCount={live?.queuedCount ?? 0}
-        hasError={Boolean(lastTurn?.error) || phaseFailed}
+        hasError={latestTurnHasError || phaseFailed}
         startedAt={workingSlotStartedAt}
+        failure={slotFailure}
         t={t}
       /> : null}
-      {failureNotice ? (
-        <ErrorNotice compact error={failureNotice} />
-      ) : null}
       <ErrorNotice error={linkError} onDismiss={() => setLinkError('')} compact />
     </section>
   );

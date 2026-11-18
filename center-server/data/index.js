@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { randomBytes, randomUUID, createCipheriv, createDecipheriv, createHash } from 'node:crypto';
+import { randomBytes, randomUUID, createCipheriv, createDecipheriv, createHash, timingSafeEqual } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { isDeepStrictEqual } from 'node:util';
 import Ajv from 'ajv';
@@ -8,6 +8,7 @@ import deepmerge from 'deepmerge';
 import { assertPublicCredentialId } from '../auth.js';
 import { webhookStore } from './webhooks.js';
 import { pairingStore } from './pairing.js';
+import { createTaskStore } from './tasks.js';
 
 function error(code, message, details) {
   const result = new Error(message);
@@ -143,8 +144,29 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     return validator;
   }
 
+  let transactionDepth = 0;
+  let savepointSeq = 0;
   function transaction(fn, mode = 'IMMEDIATE') {
+    if (transactionDepth > 0) {
+      const sp = `sp_${++savepointSeq}`;
+      db.exec(`SAVEPOINT ${sp}`);
+      transactionDepth += 1;
+      try {
+        const result = fn();
+        db.exec(`RELEASE SAVEPOINT ${sp}`);
+        return result;
+      } catch (err) {
+        try {
+          db.exec(`ROLLBACK TO SAVEPOINT ${sp}`);
+          db.exec(`RELEASE SAVEPOINT ${sp}`);
+        } catch { /* Preserve original error. */ }
+        throw err;
+      } finally {
+        transactionDepth -= 1;
+      }
+    }
     db.exec('BEGIN ' + mode);
+    transactionDepth += 1;
     try {
       const result = fn();
       db.exec('COMMIT');
@@ -152,6 +174,8 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     } catch (err) {
       try { db.exec('ROLLBACK'); } catch { /* Preserve original error. */ }
       throw err;
+    } finally {
+      transactionDepth -= 1;
     }
   }
   /** Advances the execution-configuration revision used by device snapshots; status-only writes must not call it. */
@@ -237,7 +261,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     'e-launcher.hindsight': { overrides: (bot) => ({ projectId: `${bot.name}-${bot.botId}` }) },
     'e-launcher.billion-context': {},
     'e-launcher.ask-user-question': {},
-    'e-launcher.todo': {},
+    'e-launcher.tasks': {},
     'e-launcher.vault': {},
     'e-launcher.webfox': {},
   };
@@ -368,7 +392,9 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       const slash = model.modelRef.indexOf('/');
       const provider = providers.find((item) => item.id === model.modelRef.slice(0, slash) && item.enabled);
       const selected = provider && models[provider.id].find((item) => item.id === model.modelRef.slice(slash + 1) && item.enabled);
-      if (slash > 0 && selected && provider.credentialRef && provider.authMode !== 'oauth') refs.add(provider.credentialRef);
+      if (slash > 0 && selected && provider.credentialRef && provider.authMode !== 'oauth' && credential(provider.credentialRef)?.configured) {
+        refs.add(provider.credentialRef);
+      }
     }
     const capabilities = installations.map((installation) => {
       const config = capabilityFor(deviceId, bot.botId, installation.installationId);
@@ -444,7 +470,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     db.exec('PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
     transaction(() => {
       let version = db.prepare('PRAGMA user_version').get().user_version;
-      if (![0, 1, 2, 3, 4, 5, 6, 7, 8, 9].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
+      if (![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(version)) throw error('UNSUPPORTED_SCHEMA', 'Unsupported center database schema');
       if (version === 0) {
         db.exec(`
           CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL, config_revision INTEGER NOT NULL);
@@ -588,14 +614,238 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           );
           PRAGMA user_version = 9;
         `);
+        version = 9;
+      }
+      if (version === 9) {
+        db.exec(`
+          CREATE TABLE tasks (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            coordinator_device_id TEXT,
+            coordinator_bot_id TEXT,
+            revision INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            json TEXT NOT NULL
+          );
+          CREATE INDEX idx_tasks_status_updated ON tasks(status, updated_at DESC);
+          CREATE TABLE task_dispatches (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            step_id TEXT,
+            kind TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            bot_id TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            task_title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            cancel_requested INTEGER NOT NULL DEFAULT 0,
+            instruction TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            error TEXT,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+          );
+          CREATE INDEX idx_task_dispatches_device_status ON task_dispatches(device_id, status, created_at);
+          CREATE INDEX idx_task_dispatches_task ON task_dispatches(task_id);
+          PRAGMA user_version = 10;
+        `);
+        version = 10;
+      }
+      if (version === 10) {
+        db.exec(`
+          CREATE TABLE task_dispatcher (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            device_id TEXT,
+            bot_id TEXT,
+            updated_at INTEGER NOT NULL
+          );
+          ALTER TABLE task_dispatches ADD COLUMN execution_revision INTEGER NOT NULL DEFAULT 1;
+          PRAGMA user_version = 11;
+        `);
+        version = 11;
+      }
+      if (version === 11) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS device_oauth_grants (
+            device_id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            token_hash TEXT,
+            scopes TEXT NOT NULL DEFAULT 'center:admin',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_device_oauth_grants_token_hash
+            ON device_oauth_grants(token_hash)
+            WHERE token_hash IS NOT NULL;
+          PRAGMA user_version = 12;
+        `);
+        version = 12;
       }
     });
+
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    function enrichProvider(row) {
+      if (!row) return null;
+      if (typeof row.configured === 'boolean') return row;
+      if (!row.native) return { ...row, configured: true };
+      const hasOAuth = Boolean(credential('center-internal-pi-oauth-' + row.id)?.configured);
+      const hasApiKey = Boolean(row.credentialRef && credential(row.credentialRef)?.configured);
+      const hasCustom = Boolean(row.custom && Object.keys(row.custom).length > 0);
+      return { ...row, configured: Boolean(row.enabled || hasOAuth || hasApiKey || hasCustom) };
+    }
+    function clearModelReferences(matches) {
+      let clearedGlobalModel = false;
+      let clearedBotModels = 0;
+      const globalCfg = store.getModelConfig();
+      if (typeof globalCfg.global?.modelRef === 'string' && matches(globalCfg.global.modelRef)) {
+        const nextGlobal = { ...globalCfg.global };
+        delete nextGlobal.modelRef;
+        db.prepare('UPDATE model_config SET json = ?, revision = ? WHERE id = 1').run(json(nextGlobal), globalCfg.revision + 1);
+        clearedGlobalModel = true;
+      }
+      const botRows = db.prepare('SELECT device_id, bot_id, json, revision FROM bot_models').all();
+      const updateBotStmt = db.prepare('UPDATE bot_models SET json = ?, revision = ? WHERE device_id = ? AND bot_id = ?');
+      for (const row of botRows) {
+        const overrides = JSON.parse(row.json);
+        if (typeof overrides?.modelRef === 'string' && matches(overrides.modelRef)) {
+          const nextOverrides = { ...overrides };
+          delete nextOverrides.modelRef;
+          updateBotStmt.run(json(nextOverrides), row.revision + 1, row.device_id, row.bot_id);
+          clearedBotModels += 1;
+        }
+      }
+      return { clearedGlobalModel, clearedBotModels };
+    }
+    function wipeCredentialRow(id) {
+      const current = credential(id);
+      if (current?.configured) {
+        db.prepare('UPDATE credentials SET revision = ?, nonce = NULL, tag = NULL, ciphertext = NULL WHERE id = ?').run(current.revision + 1, id);
+      }
+    }
+    const modelStoreFields = ['name', 'api', 'baseUrl', 'headers', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel', 'source', 'enabled'];
+    const listBotsSnapshot = () => db.prepare('SELECT json FROM device_bots').all().map(parse);
+    function emitBotSyncEvents(deviceId = null, botId = null) {
+      const targetRows = (deviceId !== null && botId !== null)
+        ? db.prepare('SELECT device_id, bot_id, json FROM device_bots WHERE device_id = ? AND bot_id = ?').all(deviceId, botId)
+        : (deviceId !== null
+          ? db.prepare('SELECT device_id, bot_id, json FROM device_bots WHERE device_id = ? ORDER BY bot_id').all(deviceId)
+          : db.prepare('SELECT device_id, bot_id, json FROM device_bots ORDER BY device_id, bot_id').all());
+      if (targetRows.length === 0) return;
+      const meta = db.prepare('SELECT seq FROM sync_meta WHERE id = 1').get();
+      let seq = meta.seq;
+      const nowIso = new Date().toISOString();
+      const updateSeqStmt = db.prepare('UPDATE device_bots SET seq = ? WHERE device_id = ? AND bot_id = ?');
+      const insertEventStmt = db.prepare('INSERT INTO bot_events (seq, device_id, bot_id, op, json, updated_at) VALUES (?, ?, ?, ?, ?, ?)');
+      for (const row of targetRows) {
+        seq += 1;
+        updateSeqStmt.run(seq, row.device_id, row.bot_id);
+        insertEventStmt.run(seq, row.device_id, row.bot_id, 'upsert', row.json, nowIso);
+      }
+      db.prepare('UPDATE sync_meta SET seq = ? WHERE id = 1').run(seq);
+      if (seq > 5000) {
+        db.prepare('DELETE FROM bot_events WHERE seq <= ?').run(seq - 5000);
+      }
+    }
+    function resolveBotModelSummary(deviceId, botId) {
+      const config = store.getBotModelConfig(deviceId, botId);
+      const globalRef = typeof config.global?.modelRef === 'string' && config.global.modelRef ? config.global.modelRef : null;
+      const overrideRef = config.overrides?.modelRef;
+      let source = 'unset';
+      let effectiveModelRef = null;
+      if (typeof overrideRef === 'string' && overrideRef) {
+        source = 'bot';
+        effectiveModelRef = overrideRef;
+      } else if (overrideRef === null) {
+        source = 'unset';
+        effectiveModelRef = null;
+      } else if (globalRef) {
+        source = 'center_default';
+        effectiveModelRef = globalRef;
+      }
+      if (!effectiveModelRef) {
+        return {
+          effectiveModelRef: null,
+          effectiveModelName: null,
+          effectiveProviderName: null,
+          source,
+          available: false,
+        };
+      }
+      const slash = effectiveModelRef.indexOf('/');
+      if (slash <= 0 || slash === effectiveModelRef.length - 1) {
+        return {
+          effectiveModelRef,
+          effectiveModelName: effectiveModelRef,
+          effectiveProviderName: null,
+          source,
+          available: false,
+        };
+      }
+      const providerId = effectiveModelRef.slice(0, slash);
+      const modelId = effectiveModelRef.slice(slash + 1);
+      const provider = get('providers', providerId);
+      const model = parse(db.prepare('SELECT json FROM models WHERE provider_id = ? AND id = ?').get(providerId, modelId));
+      const effectiveProviderName = (typeof provider?.name === 'string' && provider.name) ? provider.name : providerId;
+      const effectiveModelName = (typeof model?.name === 'string' && model.name) ? model.name : modelId;
+      const available = Boolean(provider && provider.enabled === true && model && model.removed !== true && model.enabled === true);
+      return {
+        effectiveModelRef,
+        effectiveModelName,
+        effectiveProviderName,
+        source,
+        available,
+      };
+    }
+    function withResolvedModel(bot) {
+      if (!bot) return bot;
+      const resolvedModel = resolveBotModelSummary(bot.deviceId, bot.botId);
+      return {
+        ...bot,
+        modelRef: resolvedModel.effectiveModelRef,
+        resolvedModel,
+      };
+    }
+    const listBotCapabilityDirectory = () => {
+      const installations = rows('installations').map(withActivation).filter((item) => activeInstallation(item));
+      const allBindings = db.prepare('SELECT device_id, bot_id, installation_id, json FROM bindings').all();
+      const enabledSet = new Set();
+      for (const row of allBindings) {
+        const parsed = JSON.parse(row.json);
+        if (parsed?.enabled) {
+          enabledSet.add(`${row.device_id}::${row.bot_id}::${row.installation_id}`);
+        }
+      }
+      return (deviceId, botId) => {
+        const names = [];
+        for (const installation of installations) {
+          if (!isVisibleToBot(installation, deviceId, botId)) continue;
+          if (!enabledSet.has(`${deviceId}::${botId}::${installation.installationId}`)) continue;
+          const label = (typeof installation.displayName === 'string' && installation.displayName.trim())
+            || installation.packageId
+            || installation.installationId;
+          if (label && !names.includes(label)) names.push(label);
+        }
+        return names;
+      };
+    };
 
     store = {
       ...webhookStore(db, transaction),
       ...pairingStore(db, transaction),
-      listProviders: () => rows('providers'),
-      getProvider: (id) => get('providers', id),
+      ...createTaskStore({ db, transaction, listBotsSnapshot, listBotCapabilityDirectory }),
+      getInstallationId() {
+        const epoch = db.prepare('SELECT epoch FROM sync_meta WHERE id = 1').get()?.epoch;
+        if (typeof epoch === 'string' && UUID_RE.test(epoch)) return epoch.toLowerCase();
+        const bytes = Buffer.from(createHash('sha256').update(String(epoch ?? 'center')).digest().subarray(0, 16));
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        const hex = bytes.toString('hex');
+        return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+      },
+      listProviders: () => rows('providers').map(enrichProvider),
+      getProvider: (id) => enrichProvider(get('providers', id)),
       putProvider(provider, expectedRevision) {
         assertObject(provider);
         assertPublicCredentialId(provider.credentialRef);
@@ -606,11 +856,62 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
         } else if (!provider.native) throw error('INVALID_ARGUMENT', 'A custom provider requires a base URL');
         if (provider.custom !== undefined && !object(provider.custom)) throw error('INVALID_ARGUMENT', 'Provider overrides must be an object');
         if (provider.custom?.apiKey !== undefined) throw error('INVALID_ARGUMENT', 'Store API keys in encrypted credentials, not overrides');
-        const input = pick(provider, ['id', 'name', 'api', 'baseUrl', 'credentialRef', 'enabled', 'native', 'custom']);
-        return transaction(() => { const value = createOrUpdate('providers', input, 'id', expectedRevision); bump(); return value; });
+        const configured = typeof provider.configured === 'boolean' ? provider.configured : (!provider.native ? true : undefined);
+        const input = pick({ ...provider, ...(configured !== undefined ? { configured } : {}) }, ['id', 'name', 'api', 'baseUrl', 'credentialRef', 'enabled', 'native', 'configured', 'custom']);
+        return transaction(() => { const value = createOrUpdate('providers', input, 'id', expectedRevision); bump(); emitBotSyncEvents(); return enrichProvider(value); });
       },
-      listModels(providerId) {
-        return db.prepare('SELECT json FROM models WHERE provider_id = ? ORDER BY id').all(providerId).map(parse);
+      deleteProvider(providerId, nativeReset) {
+        assertId(providerId);
+        return transaction(() => {
+          const current = get('providers', providerId);
+          if (!current) throw error('NOT_FOUND', 'Provider not found');
+          wipeCredentialRow('center-internal-pi-oauth-' + providerId);
+          if (current.credentialRef) {
+            const sharedWithOtherProvider = rows('providers').some(p => p.id !== providerId && p.credentialRef === current.credentialRef);
+            if (!sharedWithOtherProvider) wipeCredentialRow(current.credentialRef);
+          }
+          const deleteStarStmt = db.prepare('DELETE FROM model_stars WHERE model_ref = ?');
+          for (const star of store.listModelStars()) {
+            if (star.startsWith(providerId + '/')) deleteStarStmt.run(star);
+          }
+          const refs = clearModelReferences(ref => ref.startsWith(providerId + '/'));
+          if (current.native && nativeReset) {
+            const existingModels = db.prepare('SELECT id, json FROM models WHERE provider_id = ?').all(providerId);
+            const deleteModelStmt = db.prepare('DELETE FROM models WHERE provider_id = ? AND id = ?');
+            const upsertModelStmt = db.prepare('UPDATE models SET json = ? WHERE provider_id = ? AND id = ?');
+            for (const row of existingModels) {
+              const parsed = JSON.parse(row.json);
+              if (parsed.source !== 'catalog') {
+                deleteModelStmt.run(providerId, row.id);
+              } else if (parsed.removed || !parsed.enabled) {
+                const { removed: _removed, ...rest } = parsed;
+                upsertModelStmt.run(json({ ...rest, enabled: true, revision: parsed.revision + 1 }), providerId, row.id);
+              }
+            }
+            const resetValue = {
+              id: providerId,
+              name: nativeReset.name,
+              api: nativeReset.api,
+              baseUrl: nativeReset.baseUrl,
+              credentialRef: nativeReset.credentialRef,
+              native: true,
+              enabled: false,
+              configured: false,
+              revision: current.revision + 1,
+            };
+            save('providers', providerId, resetValue);
+          } else {
+            db.prepare('DELETE FROM models WHERE provider_id = ?').run(providerId);
+            db.prepare('DELETE FROM providers WHERE id = ?').run(providerId);
+          }
+          bump();
+          emitBotSyncEvents();
+          return { deleted: true, reset: Boolean(current.native && nativeReset), ...refs };
+        });
+      },
+      listModels(providerId, { includeRemoved = false } = {}) {
+        const all = db.prepare('SELECT json FROM models WHERE provider_id = ? ORDER BY id').all(providerId).map(parse);
+        return includeRemoved ? all : all.filter(model => model.removed !== true);
       },
       putModel(providerId, model, expectedRevision) {
         return transaction(() => {
@@ -620,15 +921,68 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           assertId(id);
           const current = parse(db.prepare('SELECT json FROM models WHERE provider_id = ? AND id = ?').get(providerId, id));
           if (expectedRevision === null) {
-            if (current) throw error('REVISION_CONFLICT', 'Model already exists');
+            if (current && current.removed !== true) throw error('REVISION_CONFLICT', 'Model already exists');
           } else {
             if (!current) throw error('NOT_FOUND', 'Model not found');
             assertRevision(expectedRevision, current.revision);
           }
-          const result = { ...pick(model, ['name', 'api', 'baseUrl', 'headers', 'contextWindow', 'maxTokens', 'input', 'reasoning', 'thinkingLevelMap', 'cost', 'compat', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel', 'source', 'enabled']), id, revision: current ? current.revision + 1 : 0 };
+          const result = {
+            ...pick(model, modelStoreFields),
+            ...(model.removed === true ? { removed: true } : {}),
+            id,
+            revision: current ? current.revision + 1 : 0,
+          };
           db.prepare('INSERT INTO models VALUES (?, ?, ?) ON CONFLICT(provider_id, id) DO UPDATE SET json = excluded.json').run(providerId, id, json(result));
           bump();
+          emitBotSyncEvents();
           return result;
+        });
+      },
+      putModelsBatch(providerId, models) {
+        return transaction(() => {
+          if (!get('providers', providerId)) throw error('NOT_FOUND', 'Provider not found');
+          if (!Array.isArray(models) || models.length === 0) throw error('INVALID_ARGUMENT', 'models must be a non-empty array');
+          const upsertStmt = db.prepare('INSERT INTO models VALUES (?, ?, ?) ON CONFLICT(provider_id, id) DO UPDATE SET json = excluded.json');
+          const getStmt = db.prepare('SELECT json FROM models WHERE provider_id = ? AND id = ?');
+          const saved = [];
+          for (const model of models) {
+            assertObject(model);
+            const id = model.id || randomUUID();
+            assertId(id);
+            const current = parse(getStmt.get(providerId, id));
+            const result = {
+              ...pick(model, modelStoreFields),
+              source: model.source ?? 'manual',
+              enabled: model.enabled ?? true,
+              id,
+              revision: current ? current.revision + 1 : 0,
+            };
+            upsertStmt.run(providerId, id, json(result));
+            saved.push(result);
+          }
+          bump();
+          emitBotSyncEvents();
+          return saved;
+        });
+      },
+      deleteModel(providerId, modelId) {
+        assertId(providerId);
+        assertId(modelId);
+        return transaction(() => {
+          if (!get('providers', providerId)) throw error('NOT_FOUND', 'Provider not found');
+          const current = parse(db.prepare('SELECT json FROM models WHERE provider_id = ? AND id = ?').get(providerId, modelId));
+          if (!current || current.removed === true) throw error('NOT_FOUND', 'Model not found');
+          db.prepare('DELETE FROM model_stars WHERE model_ref = ?').run(providerId + '/' + modelId);
+          const refs = clearModelReferences(ref => ref === providerId + '/' + modelId);
+          if (current.source === 'catalog') {
+            const hidden = { ...current, enabled: false, removed: true, revision: current.revision + 1 };
+            db.prepare('UPDATE models SET json = ? WHERE provider_id = ? AND id = ?').run(json(hidden), providerId, modelId);
+          } else {
+            db.prepare('DELETE FROM models WHERE provider_id = ? AND id = ?').run(providerId, modelId);
+          }
+          bump();
+          emitBotSyncEvents();
+          return { deleted: true, hiddenFromCatalog: current.source === 'catalog', ...refs };
         });
       },
       // Picker availability uses credential metadata, not the secrets granted to a particular Host.
@@ -675,7 +1029,9 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           const current = store.getModelConfig();
           assertRevision(expectedRevision, current.revision);
           db.prepare('UPDATE model_config SET json = ?, revision = ? WHERE id = 1').run(json(global), current.revision + 1);
-          bump(); return store.getModelConfig();
+          bump();
+          emitBotSyncEvents();
+          return store.getModelConfig();
         });
       },
       getBotModelConfig(deviceId, botId) {
@@ -690,7 +1046,9 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           const current = store.getBotModelConfig(deviceId, botId);
           assertRevision(expectedRevision, current.revision);
           db.prepare('INSERT INTO bot_models VALUES (?, ?, ?, ?) ON CONFLICT(device_id, bot_id) DO UPDATE SET json = excluded.json, revision = excluded.revision').run(deviceId, botId, json(overrides), current.revision + 1);
-          bump(); return store.getBotModelConfig(deviceId, botId);
+          bump();
+          emitBotSyncEvents(deviceId, botId);
+          return store.getBotModelConfig(deviceId, botId);
         });
       },
       replaceDeviceBots(deviceId, bots, { bumpRevision = true } = {}) {
@@ -742,6 +1100,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             seq += 1;
             deleteBotStmt.run(deviceId, removedBotId);
             store.cancelWebhookEventsForBot(deviceId, removedBotId);
+            store.cancelTaskDispatchesForBot(deviceId, removedBotId);
             deleteModelStmt.run(deviceId, removedBotId);
             deleteBindingStmt.run(deviceId, removedBotId);
             insertEventStmt.run(seq, deviceId, removedBotId, 'delete', null, nowIso);
@@ -857,6 +1216,7 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           const nowIso = new Date().toISOString();
           db.prepare('DELETE FROM device_bots WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
           store.cancelWebhookEventsForBot(deviceId, botId);
+          store.cancelTaskDispatchesForBot(deviceId, botId);
           db.prepare('DELETE FROM bot_models WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
           db.prepare('DELETE FROM bindings WHERE device_id = ? AND bot_id = ?').run(deviceId, botId);
           db.prepare('INSERT INTO bot_events (seq, device_id, bot_id, op, json, updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(seq, deviceId, botId, 'delete', null, nowIso);
@@ -868,6 +1228,8 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           return { epoch: meta.epoch, seq };
         });
       },
+      resolveBotModelSummary,
+      withResolvedModel,
       listDeviceBots(deviceId) {
         return db.prepare('SELECT json FROM device_bots WHERE device_id = ?').all(deviceId).map(parse).sort(compareBotRefs);
       },
@@ -900,8 +1262,11 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
               .map((row) => {
                 const parsed = JSON.parse(row.json);
                 const devInfo = deviceMap.get(parsed.deviceId);
+                const resolvedModel = resolveBotModelSummary(parsed.deviceId, parsed.botId);
                 return {
                   ...parsed,
+                  modelRef: resolvedModel.effectiveModelRef,
+                  resolvedModel,
                   ...(devInfo ? { deviceName: devInfo.name || devInfo.displayName || parsed.deviceId } : {}),
                   ...(parsed.platform ? {} : devInfo?.platform ? { platform: devInfo.platform } : {}),
                   online: onlineMap.get(parsed.deviceId) ?? false,
@@ -912,19 +1277,25 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             return { epoch: curEpoch, seq: curSeq, mode: 'snapshot', devices, bots };
           }
           const events = db.prepare('SELECT seq, device_id, bot_id, op, json, updated_at FROM bot_events WHERE seq > ? ORDER BY seq ASC').all(sinceSeq)
-            .map((row) => ({
-              seq: row.seq,
-              deviceId: row.device_id,
-              botId: row.bot_id,
-              op: row.op,
-              bot: row.json ? {
-                ...JSON.parse(row.json),
-                ...(deviceMap.has(row.device_id) ? { deviceName: deviceMap.get(row.device_id).name || deviceMap.get(row.device_id).displayName || row.device_id } : {}),
-                online: onlineMap.get(row.device_id) ?? false,
+            .map((row) => {
+              const parsed = row.json ? JSON.parse(row.json) : null;
+              const resolvedModel = parsed ? resolveBotModelSummary(row.device_id, row.bot_id) : null;
+              return {
                 seq: row.seq,
-              } : null,
-              updatedAt: row.updated_at,
-            }));
+                deviceId: row.device_id,
+                botId: row.bot_id,
+                op: row.op,
+                bot: parsed ? {
+                  ...parsed,
+                  modelRef: resolvedModel.effectiveModelRef,
+                  resolvedModel,
+                  ...(deviceMap.has(row.device_id) ? { deviceName: deviceMap.get(row.device_id).name || deviceMap.get(row.device_id).displayName || row.device_id } : {}),
+                  online: onlineMap.get(row.device_id) ?? false,
+                  seq: row.seq,
+                } : null,
+                updatedAt: row.updated_at,
+              };
+            });
           return { epoch: curEpoch, seq: curSeq, mode: 'diff', devices, events };
         }, 'DEFERRED');
       },
@@ -1043,11 +1414,50 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       putPackageVersion(version) {
         assertObject(version); assertId(version.packageId); assertId(version.version);
         return transaction(() => {
-          const previous = store.getPackageVersion(version.packageId, version.version);
-          if (previous && json(previous) !== json(version)) throw error('REQUEST_CONFLICT', 'Package version already exists');
-          if (!previous) {
-            db.prepare('INSERT INTO package_versions VALUES (?, ?, ?)').run(version.packageId, version.version, json(version));
+          db.prepare('INSERT INTO package_versions VALUES (?, ?, ?) ON CONFLICT(package_id, version) DO UPDATE SET json = excluded.json').run(version.packageId, version.version, json(version));
+        });
+      },
+      pruneUnusedPackages() {
+        return transaction(() => {
+          const usedVersions = new Set();
+          const versionKey = (packageId, version) => `${packageId}\0${version}`;
+          const addVersion = (packageId, version) => {
+            if (typeof packageId === 'string' && packageId && typeof version === 'string' && version) {
+              usedVersions.add(versionKey(packageId, version));
+            }
+          };
+          const usedArtifacts = new Set();
+          const addArtifact = (ref) => {
+            if (typeof ref === 'string' && ref) usedArtifacts.add(ref);
+          };
+
+          for (const inst of rows('installations')) {
+            addVersion(inst?.packageId, inst?.targetVersion);
+            addArtifact(inst?.source?.artifactRef);
           }
+          for (const plan of db.prepare('SELECT json FROM deployment_plans').all().map(parse)) {
+            addVersion(plan?.packageId, plan?.targetVersion);
+            addArtifact(plan?.artifactRef);
+          }
+          for (const set of db.prepare('SELECT json FROM turn_sets').all().map(parse)) {
+            for (const plan of set?.plans ?? []) {
+              addVersion(plan?.packageId, plan?.targetVersion);
+              addArtifact(plan?.artifactRef);
+            }
+          }
+
+          const deleteStmt = db.prepare('DELETE FROM package_versions WHERE package_id = ? AND version = ?');
+          for (const row of db.prepare('SELECT package_id, version FROM package_versions').all()) {
+            if (!usedVersions.has(versionKey(row.package_id, row.version))) {
+              deleteStmt.run(row.package_id, row.version);
+            }
+          }
+
+          for (const pkg of db.prepare('SELECT json FROM package_versions').all().map(parse)) {
+            addArtifact(pkg?.artifactRef);
+          }
+
+          return [...usedArtifacts];
         });
       },
       putInstallation(installation, expectedRevision) {
@@ -1468,6 +1878,124 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
           AND (? IS NULL OR platform = ?) AND (? IS NULL OR arch = ?) AND (? IS NULL OR format = ?)
           ORDER BY created_at DESC, rowid DESC`)
           .all(platform ?? null, platform ?? null, arch ?? null, arch ?? null, format ?? null, format ?? null).map(parse);
+      },
+      /** Ensures a newly paired or re-bound device is granted center:admin OAuth access. */
+      ensureDeviceOAuthGrant(deviceId, { resetToken = false } = {}) {
+        assertId(deviceId);
+        return transaction(() => {
+          const now = new Date().toISOString();
+          const row = db.prepare('SELECT device_id FROM device_oauth_grants WHERE device_id = ?').get(deviceId);
+          if (!row) {
+            db.prepare('INSERT INTO device_oauth_grants (device_id, enabled, token_hash, scopes, created_at, updated_at) VALUES (?, 1, NULL, ?, ?, ?)')
+              .run(deviceId, 'center:admin', now, now);
+          } else if (resetToken) {
+            db.prepare('UPDATE device_oauth_grants SET enabled = 1, token_hash = NULL, updated_at = ? WHERE device_id = ?')
+              .run(now, deviceId);
+          } else {
+            db.prepare('UPDATE device_oauth_grants SET enabled = 1, updated_at = ? WHERE device_id = ?')
+              .run(now, deviceId);
+          }
+          return { deviceId, enabled: true };
+        });
+      },
+      /** Disables OAuth admin access for a deleted/revoked device and invalidates its token hash. */
+      revokeDeviceOAuthGrant(deviceId) {
+        assertId(deviceId);
+        return transaction(() => {
+          const now = new Date().toISOString();
+          db.prepare(`INSERT INTO device_oauth_grants (device_id, enabled, token_hash, scopes, created_at, updated_at)
+            VALUES (?, 0, NULL, ?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET enabled = 0, token_hash = NULL, updated_at = excluded.updated_at`)
+            .run(deviceId, 'center:admin', now, now);
+          return { deviceId, enabled: false };
+        });
+      },
+      /** Active historical devices without a grant row default to enabled = true until explicitly disabled. */
+      isDeviceOAuthGrantEnabled(deviceId) {
+        assertId(deviceId);
+        const row = db.prepare('SELECT enabled FROM device_oauth_grants WHERE device_id = ?').get(deviceId);
+        return row ? row.enabled === 1 : true;
+      },
+      setDeviceOAuthGrantEnabled(deviceId, enabled) {
+        assertId(deviceId);
+        if (typeof enabled !== 'boolean') throw error('INVALID_ARGUMENT', 'enabled must be boolean');
+        return transaction(() => {
+          const now = new Date().toISOString();
+          if (enabled) {
+            db.prepare(`INSERT INTO device_oauth_grants (device_id, enabled, token_hash, scopes, created_at, updated_at)
+              VALUES (?, 1, NULL, ?, ?, ?)
+              ON CONFLICT(device_id) DO UPDATE SET enabled = 1, updated_at = excluded.updated_at`)
+              .run(deviceId, 'center:admin', now, now);
+          } else {
+            db.prepare(`INSERT INTO device_oauth_grants (device_id, enabled, token_hash, scopes, created_at, updated_at)
+              VALUES (?, 0, NULL, ?, ?, ?)
+              ON CONFLICT(device_id) DO UPDATE SET enabled = 0, token_hash = NULL, updated_at = excluded.updated_at`)
+              .run(deviceId, 'center:admin', now, now);
+          }
+          return { deviceId, enabled };
+        });
+      },
+      issueDeviceOAuthToken(deviceId, tokenHash) {
+        assertId(deviceId);
+        assertId(tokenHash);
+        return transaction(() => {
+          const now = new Date().toISOString();
+          const row = db.prepare('SELECT enabled FROM device_oauth_grants WHERE device_id = ?').get(deviceId);
+          if (row && row.enabled !== 1) return false;
+          if (!row) {
+            db.prepare('INSERT INTO device_oauth_grants (device_id, enabled, token_hash, scopes, created_at, updated_at) VALUES (?, 1, ?, ?, ?, ?)')
+              .run(deviceId, tokenHash, 'center:admin', now, now);
+          } else {
+            db.prepare('UPDATE device_oauth_grants SET token_hash = ?, updated_at = ? WHERE device_id = ?')
+              .run(tokenHash, now, deviceId);
+          }
+          return true;
+        });
+      },
+      verifyOAuthAdminToken(tokenHash) {
+        if (typeof tokenHash !== 'string' || !tokenHash) return null;
+        const row = db.prepare('SELECT device_id, enabled, token_hash, scopes FROM device_oauth_grants WHERE token_hash = ?').get(tokenHash);
+        if (!row || row.enabled !== 1 || typeof row.token_hash !== 'string') return null;
+        const actual = Buffer.from(row.token_hash, 'utf8');
+        const expected = Buffer.from(tokenHash, 'utf8');
+        if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return null;
+        const scopes = String(row.scopes || 'center:admin').split(/\s+/).filter(Boolean);
+        if (!scopes.includes('center:admin')) return null;
+        return { deviceId: row.device_id, scopes };
+      },
+      /** Switches a Bot-owned skill back to private and clears other Bots' enabled bindings so archival can proceed atomically. */
+      unshareInstallationForArchive(installationId, ownerDeviceId, ownerBotId) {
+        assertId(installationId);
+        assertId(ownerDeviceId);
+        assertId(ownerBotId);
+        return transaction(() => {
+          const current = requireInstallation(installationId);
+          if (current.ownerBot && (current.ownerBot.deviceId !== ownerDeviceId || current.ownerBot.botId !== ownerBotId)) {
+            throw error('FORBIDDEN', 'Skill belongs to a different Bot');
+          }
+          let changed = false;
+          if (current.ownerBot && current.visibilityScope !== 'private') {
+            const updated = {
+              ...current,
+              visibilityScope: 'private',
+              revision: current.revision + 1,
+            };
+            save('installations', installationId, updated);
+            changed = true;
+          }
+          const allBindings = db.prepare('SELECT json FROM bindings WHERE installation_id = ?').all(installationId).map(parse);
+          for (const b of allBindings) {
+            if (b.deviceId === ownerDeviceId && b.botId === ownerBotId) continue;
+            if (!b.enabled) continue;
+            const { autoSeeded: _autoSeeded, explicitAssigned: _explicitAssigned, ...rest } = b;
+            const disabled = { ...rest, enabled: false, revision: b.revision + 1, autoRevoked: true };
+            db.prepare('UPDATE bindings SET json = ? WHERE device_id = ? AND bot_id = ? AND installation_id = ?')
+              .run(json(disabled), b.deviceId, b.botId, installationId);
+            changed = true;
+          }
+          if (changed) bump();
+          return { changed };
+        });
       },
       close() { db.close(); },
     };

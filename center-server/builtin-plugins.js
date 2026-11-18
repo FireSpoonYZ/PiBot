@@ -17,6 +17,10 @@ export async function initializeBuiltinPlugins({ dataRoot, store, packages }) {
     if (operation.phase === 'failed') throw new Error('Built-in plugin initialization failed: ' + operation.installationId);
     return operation;
   }
+  async function saveInitialized() {
+    await writeFile(receiptFile + '.tmp', JSON.stringify(initialized) + '\n', { mode: 0o600 });
+    await rename(receiptFile + '.tmp', receiptFile);
+  }
   for (const item of manifest) {
     if (initialized[item.id]) continue;
     let installation = store.listInstallations().find(value => value.packageId === item.id && value.target === 'host');
@@ -31,8 +35,16 @@ export async function initializeBuiltinPlugins({ dataRoot, store, packages }) {
     }
     // User choices, including uninstalling a bundled plugin, survive restarts.
     initialized[item.id] = item.version;
-    await writeFile(receiptFile + '.tmp', JSON.stringify(initialized) + '\n', { mode: 0o600 });
-    await rename(receiptFile + '.tmp', receiptFile);
+    await saveInitialized();
+  }
+  const retireKey = 'e-launcher.todo:retired';
+  if (!manifest.some(item => item.id === 'e-launcher.todo') && !initialized[retireKey]) {
+    const legacy = store.listInstallations().find(value => value.packageId === 'e-launcher.todo' && value.target === 'host');
+    if (legacy && (legacy.enabled || legacy.desiredEnabled)) {
+      await complete(await packages.disable(legacy.installationId, { requestId: randomUUID() }));
+    }
+    initialized[retireKey] = true;
+    await saveInitialized();
   }
   // Bots that already existed when a new default capability (e.g. vault) shipped never ran initializeBotDefaults for it; the backfill is idempotent and keeps explicit disables.
   store.backfillDefaultBindings();

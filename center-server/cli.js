@@ -5,9 +5,12 @@
 // minimal onboarding listener, then swaps in the real center after the
 // one-time submission persists the managed configuration.
 
+import { setupPiHttpRuntime } from './http-dispatcher.js';
 import { openCenterServer } from './server.js';
 import { centerServerOptions, hashOwnerPassword, loadOrCreateSetupToken, resolveCenterPlan } from './config.js';
 import { openSetupServer } from './setup.js';
+
+setupPiHttpRuntime();
 
 async function main() {
   if (process.argv[2] === 'password-hash') {

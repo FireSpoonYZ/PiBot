@@ -6,17 +6,21 @@ import test from 'node:test';
 
 import {
   GROUP_MAX_MEMBER_TURNS,
+  GROUP_MAX_MESSAGES_PER_TURN,
   GROUP_MAX_ROUNDS,
   MAX_REPLY_NUDGES,
   buildAgentInboundWakePrompt,
   buildClosingSendNudgePrompt,
+  buildGroupRedriveNote,
   buildGroupTurnWakePrompt,
   evaluateGroupTurnEligibility,
   isPassContent,
   isPotentialPassPrefix,
+  orderRoundSpeakers,
   parseGroupMentions,
   resolveResponders,
 } from '../../host-core/group-chat.js';
+import { GroupChatOrchestrator, RoomTurnScheduler } from '../../host-core/group-chat-orchestrator.js';
 import { openHost } from '../../host-core/host.js';
 import { openMessageLog } from '../../host-core/messages.js';
 import { applyAgentProfile, getPrimaryConversation } from '../../host-core/runtime-docs.js';
@@ -1191,5 +1195,740 @@ test('scope-offer tombstones & revisions: deleting member Bots before dissolving
   } finally {
     logA.close();
     logB.close();
+  }
+});
+
+test('group-chat-orchestrator: RoomTurnScheduler enforces concurrency=1 per room and GroupChatOrchestrator rotates speakers, caps messages, and honors turnEpochs', async () => {
+  const scheduler = new RoomTurnScheduler();
+  let room1Active = 0;
+  let room1MaxActive = 0;
+  let totalParallel = 0;
+  let maxParallelAcrossRooms = 0;
+  const order = [];
+
+  const mkTask = (roomId, label, delayMs) =>
+    scheduler.enqueueExclusive(roomId, async () => {
+      if (roomId === 'room-1') {
+        room1Active += 1;
+        room1MaxActive = Math.max(room1MaxActive, room1Active);
+      }
+      totalParallel += 1;
+      maxParallelAcrossRooms = Math.max(maxParallelAcrossRooms, totalParallel);
+      order.push(`start:${label}`);
+      await new Promise((r) => setTimeout(r, delayMs));
+      order.push(`end:${label}`);
+      totalParallel -= 1;
+      if (roomId === 'room-1') room1Active -= 1;
+      return label;
+    });
+
+  const results = await Promise.all([
+    mkTask('room-1', 'r1-a', 25),
+    mkTask('room-1', 'r1-b', 15),
+    mkTask('room-1', 'r1-c', 10),
+    mkTask('room-2', 'r2-a', 20),
+  ]);
+  assert.deepEqual(results, ['r1-a', 'r1-b', 'r1-c', 'r2-a']);
+  assert.equal(room1MaxActive, 1, 'same room must never exceed concurrency = 1');
+  assert.ok(maxParallelAcrossRooms >= 2, 'distinct rooms remain independent');
+  assert.deepEqual(
+    order.filter((e) => e.includes('r1-')),
+    ['start:r1-a', 'end:r1-a', 'start:r1-b', 'end:r1-b', 'start:r1-c', 'end:r1-c'],
+  );
+
+  assert.deepEqual(orderRoundSpeakers(['a', 'b', 'c'], 0), ['a', 'b', 'c']);
+  assert.deepEqual(orderRoundSpeakers(['a', 'b', 'c'], 1), ['b', 'c', 'a']);
+  assert.deepEqual(orderRoundSpeakers(['a', 'b', 'c'], 2), ['c', 'a', 'b']);
+
+  const members = [
+    { id: 'dev:a', name: 'Opus', description: '架构' },
+    { id: 'dev:b', name: 'Astra', description: '后端' },
+    { id: 'dev:c', name: 'Carbon', description: '测试' },
+  ];
+  const history = [{ id: 'u1', content: '大家讨论一下方案', speaker: { kind: 'user', name: 'Alice' } }];
+  const callLog = [];
+  const epoch1 = scheduler.nextTurnEpoch('room-1');
+
+  const orchestrator = new GroupChatOrchestrator({
+    resolveMembers: async () => members,
+    readHistory: () => [...history],
+    isCurrent: () => scheduler.currentTurnEpoch('room-1') === epoch1,
+    postMemberMessage: (member, content) => {
+      history.push({
+        id: `m-${history.length}`,
+        content,
+        speaker: { kind: 'member', id: member.id, name: member.name },
+      });
+    },
+    runMemberTurn: async ({ member, round, newMessages }) => {
+      callLog.push({ id: member.id, round, seen: newMessages.map((m) => m.content) });
+      if (round === 0) {
+        if (member.id === 'dev:a') {
+          // Returns 3 messages + a "(pass)" — orchestrator must strip "(pass)" and cap at 2!
+          return ['(pass)', 'Opus观点1', 'Opus观点2', 'Opus超限观点3'];
+        }
+        if (member.id === 'dev:b') return ['Astra补充观点'];
+        if (member.id === 'dev:c') return ['(pass)'];
+      }
+      // Round 1: speaker order rotates to [dev:b, dev:c, dev:a]; all pass -> stops early!
+      return ['(pass)'];
+    },
+  });
+
+  await orchestrator.run({
+    group: { name: '技术委员会', description: '' },
+    memberIds: members.map((m) => m.id),
+  });
+
+  // Round 0 order: a, b, c; Round 1 order: b, c, a (then stops because 0 messages in Round 1)
+  assert.deepEqual(
+    callLog.map((c) => `${c.round}:${c.id}`),
+    ['0:dev:a', '0:dev:b', '0:dev:c', '1:dev:b', '1:dev:c', '1:dev:a'],
+  );
+  // Speaker 2 (Astra) in Round 0 saw Opus's 2 messages (and NOT the 3rd capped one)!
+  assert.deepEqual(callLog[1].seen, ['大家讨论一下方案', 'Opus观点1', 'Opus观点2']);
+  assert.deepEqual(callLog[2].seen, ['大家讨论一下方案', 'Opus观点1', 'Opus观点2', 'Astra补充观点']);
+
+  // Epoch cancellation stops at the exact member boundary when nextTurnEpoch advances mid-turn:
+  const epoch2 = scheduler.nextTurnEpoch('room-1');
+  history.push({ id: 'u2', content: '新问题来了', speaker: { kind: 'user', name: 'Alice' } });
+  const epochCalls = [];
+  const epochOrchestrator = new GroupChatOrchestrator({
+    resolveMembers: async () => members,
+    readHistory: () => [...history],
+    isCurrent: () => scheduler.currentTurnEpoch('room-1') === epoch2,
+    postMemberMessage: (member, content) => {
+      history.push({
+        id: `m-${history.length}`,
+        content,
+        speaker: { kind: 'member', id: member.id, name: member.name },
+      });
+    },
+    runMemberTurn: async ({ member }) => {
+      epochCalls.push(member.id);
+      if (member.id === 'dev:a') {
+        // Simulate a new human message arriving while dev:a is speaking!
+        scheduler.nextTurnEpoch('room-1');
+        return ['Opus完成当前发言'];
+      }
+      return ['不应被调用'];
+    },
+  });
+  await epochOrchestrator.run({
+    group: { name: '技术委员会', description: '' },
+    memberIds: members.map((m) => m.id),
+  });
+  assert.deepEqual(epochCalls, ['dev:a'], 'stale epoch stops cleanly after active speaker finishes');
+  scheduler.dispose();
+  await scheduler.drainAll();
+});
+
+test('3-bot room concurrency lock e2e: exclusive sequential turns (concurrency=1), per-turn cap=2, mid-turn human message epoch switch without STALE_INPUT, and 1:1 preemption redrive note', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'pibot-room-lock-e2e-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const host = openHost({ dataRoot: join(rootDir, 'host-data') });
+  const rawBots = [
+    host.createBot({ requestId: 'lock-bot-1', role: 'Tmp1', modelRef: 'mock/mock-chat', makePrimary: true }),
+    host.createBot({ requestId: 'lock-bot-2', role: 'Tmp2', modelRef: 'mock/mock-chat' }),
+    host.createBot({ requestId: 'lock-bot-3', role: 'Tmp3', modelRef: 'mock/mock-chat' }),
+  ].sort((x, y) => x.botId.localeCompare(y.botId));
+
+  // Scope members are normalized in ascending (deviceId, botId) order; assign roles in sorted order
+  // so Round 0 speaker order [botA, botB, botC] is 100% deterministic across random UUIDs.
+  const botA = host.updateBotProfile({
+    botId: rawBots[0].botId,
+    name: '架构师',
+    description: '负责系统架构评审',
+  });
+  const botB = host.updateBotProfile({
+    botId: rawBots[1].botId,
+    name: '后端专家',
+    description: '负责存储与并发实现',
+  });
+  const botC = host.updateBotProfile({
+    botId: rawBots[2].botId,
+    name: '测试专家',
+    description: '负责回归与压测验收',
+  });
+
+  let roomScopeId = '';
+  let phase = 'sequential_round_robin';
+  let callSeq = 0;
+  let activeInRoom = 0;
+  let maxActiveInRoom = 0;
+  const wakeRecords = [];
+  const toolResultsSeen = [];
+  let midTurnStartedResolve = null;
+  let midTurnReleasePromise = null;
+  let preemptTriggered = false;
+
+  const models = createMockModels(async (reqContext) => {
+    callSeq += 1;
+    const messages = reqContext?.messages ?? [];
+    const lastMsg = messages[messages.length - 1];
+    const lastIsToolResult = lastMsg?.role === 'toolResult';
+    const lastUserIdx = messages.findLastIndex((m) => m?.role === 'user');
+    const lastUserMsg = lastUserIdx >= 0 ? messages[lastUserIdx] : undefined;
+    const currentTurnToolMessages = lastUserIdx >= 0
+      ? messages.slice(lastUserIdx + 1).filter((m) => m?.role === 'toolResult')
+      : [];
+    const wakePrompt = typeof lastUserMsg?.content === 'string' ? lastUserMsg.content : JSON.stringify(lastUserMsg ?? {});
+    const fullSerialized = JSON.stringify(reqContext ?? {});
+
+    let callerBotId = botC.botId;
+    if (
+      wakePrompt.includes(`"botId": ${JSON.stringify(botA.botId)}`) ||
+      wakePrompt.includes(`"botId":${JSON.stringify(botA.botId)}`) ||
+      fullSerialized.includes('You are 架构师.')
+    ) {
+      callerBotId = botA.botId;
+    } else if (
+      wakePrompt.includes(`"botId": ${JSON.stringify(botB.botId)}`) ||
+      wakePrompt.includes(`"botId":${JSON.stringify(botB.botId)}`) ||
+      fullSerialized.includes('You are 后端专家.')
+    ) {
+      callerBotId = botB.botId;
+    }
+
+    if (lastIsToolResult) {
+      toolResultsSeen.push({
+        callerBotId,
+        phase,
+        content: JSON.stringify(lastMsg),
+      });
+    }
+
+    activeInRoom += 1;
+    maxActiveInRoom = Math.max(maxActiveInRoom, activeInRoom);
+    try {
+      // Deliberate async delay so any parallel bot wakeup would overlap and push maxActiveInRoom > 1.
+      await new Promise((r) => setTimeout(r, 35));
+
+      if (!lastIsToolResult) {
+        wakeRecords.push({ callerBotId, phase, wakePrompt });
+      }
+
+      if (phase === 'sequential_round_robin') {
+        if (callerBotId === botA.botId) {
+          const alreadySpoke = !wakePrompt.includes('请三位分别给出数据库迁移建议');
+          if (!alreadySpoke) {
+            // Bot A tries to send 3 messages in one turn to verify GROUP_MAX_MESSAGES_PER_TURN = 2!
+            if (currentTurnToolMessages.length === 0) {
+              return [{
+                type: 'toolCall',
+                id: `a_m1_${callSeq}`,
+                name: 'send_to',
+                arguments: { scopeId: roomScopeId, text: '架构师建议1：采用双写灰度迁移' },
+              }];
+            }
+            if (currentTurnToolMessages.length === 1) {
+              return [{
+                type: 'toolCall',
+                id: `a_m2_${callSeq}`,
+                name: 'send_to',
+                arguments: { scopeId: roomScopeId, text: '架构师建议2：保留回滚开关' },
+              }];
+            }
+            if (currentTurnToolMessages.length === 2) {
+              return [{
+                type: 'toolCall',
+                id: `a_m3_cap_${callSeq}`,
+                name: 'send_to',
+                arguments: { scopeId: roomScopeId, text: '架构师第3条超限消息（不应落库）' },
+              }];
+            }
+            return [{ type: 'text', text: '架构师发言完毕。' }];
+          }
+          if (!lastIsToolResult) {
+            return [{
+              type: 'toolCall',
+              id: `a_pass_${callSeq}`,
+              name: 'send_to',
+              arguments: { scopeId: roomScopeId, text: '(pass)' },
+            }];
+          }
+          return [];
+        }
+
+        if (callerBotId === botB.botId) {
+          const alreadySpoke = !wakePrompt.includes('请三位分别给出数据库迁移建议');
+          if (!alreadySpoke) {
+            if (!lastIsToolResult) {
+              return [{
+                type: 'toolCall',
+                id: `b_m1_${callSeq}`,
+                name: 'send_to',
+                arguments: { scopeId: roomScopeId, text: '后端专家附议架构师双写方案，补充幂等校验' },
+              }];
+            }
+            return [{ type: 'text', text: '后端专家发言完毕。' }];
+          }
+          if (!lastIsToolResult) {
+            return [{
+              type: 'toolCall',
+              id: `b_pass_${callSeq}`,
+              name: 'send_to',
+              arguments: { scopeId: roomScopeId, text: '(pass)' },
+            }];
+          }
+          return [];
+        }
+
+        if (callerBotId === botC.botId) {
+          const alreadySpoke = !wakePrompt.includes('请三位分别给出数据库迁移建议');
+          if (!alreadySpoke) {
+            if (!lastIsToolResult) {
+              return [{
+                type: 'toolCall',
+                id: `c_m1_${callSeq}`,
+                name: 'send_to',
+                arguments: { scopeId: roomScopeId, text: '测试专家收到架构师与后端方案，补充影子流量比对' },
+              }];
+            }
+            return [{ type: 'text', text: '测试专家发言完毕。' }];
+          }
+          if (!lastIsToolResult) {
+            return [{
+              type: 'toolCall',
+              id: `c_pass_${callSeq}`,
+              name: 'send_to',
+              arguments: { scopeId: roomScopeId, text: '(pass)' },
+            }];
+          }
+          return [];
+        }
+      }
+
+      if (phase === 'epoch_interrupt') {
+        const hasFirstQuestion = wakePrompt.includes('第一版问题：用 Postgres 还是 MySQL？');
+        const hasNewConstraint = wakePrompt.includes('补充约束：必须支持嵌入式单文件部署');
+        if (hasFirstQuestion && !hasNewConstraint && callerBotId === botA.botId) {
+          if (!lastIsToolResult) {
+            midTurnStartedResolve?.();
+            if (midTurnReleasePromise) await midTurnReleasePromise;
+            return [{
+              type: 'toolCall',
+              id: `epoch_a_old_${callSeq}`,
+              name: 'send_to',
+              arguments: { scopeId: roomScopeId, text: '架构师初版回答：默认推荐 Postgres' },
+            }];
+          }
+          return [{ type: 'text', text: '初版回答完成。' }];
+        }
+        if (hasNewConstraint) {
+          if (!lastIsToolResult) {
+            const replyByBot = {
+              [botA.botId]: '架构师按嵌入式约束修正：改用 SQLite WAL',
+              [botB.botId]: '后端专家按嵌入式约束确认：SQLite 单写多读',
+              [botC.botId]: '测试专家按嵌入式约束确认：断电恢复压测',
+            };
+            return [{
+              type: 'toolCall',
+              id: `epoch_new_${callSeq}`,
+              name: 'send_to',
+              arguments: { scopeId: roomScopeId, text: replyByBot[callerBotId] },
+            }];
+          }
+          return [{ type: 'text', text: '新约束回答完成。' }];
+        }
+        if (!lastIsToolResult) {
+          return [{
+            type: 'toolCall',
+            id: `epoch_pass_${callSeq}`,
+            name: 'send_to',
+            arguments: { scopeId: roomScopeId, text: '(pass)' },
+          }];
+        }
+        return [];
+      }
+
+      if (phase === 'preempt_redrive') {
+        if (callerBotId === botA.botId) {
+          if (!preemptTriggered) {
+            preemptTriggered = true;
+            midTurnStartedResolve?.();
+            if (midTurnReleasePromise) await midTurnReleasePromise;
+            return [{ type: 'text', text: '被抢占前的半途输出' }];
+          }
+          if (!lastIsToolResult) {
+            return [{
+              type: 'toolCall',
+              id: `redrive_a_${callSeq}`,
+              name: 'send_to',
+              arguments: { scopeId: roomScopeId, text: '架构师重投完成：风险可控，准予上线' },
+            }];
+          }
+          return [{ type: 'text', text: '重投完成。' }];
+        }
+      }
+
+      return [];
+    } finally {
+      activeInRoom -= 1;
+    }
+  });
+
+  const registry = createRegistry();
+  let harness = null;
+  let workContexts = null;
+  let sessions = null;
+  let decisions = null;
+  let coreExtensions = [];
+
+  const makeProfile = (bot) => ({
+    instructions: `You are ${bot.role}.`,
+    thinkingLevel: 'off',
+    removeTools: [],
+    selectedExtensions: coreExtensions,
+    codemodeOnly: false,
+  });
+
+  sessions = createBotSessionRuntime({
+    host,
+    getHarness: () => harness,
+    getMessageLog: () => workContexts.getMessageLog(),
+    context,
+    getPrimary: async (bot) => {
+      const profile = makeProfile(bot);
+      const conversation = await getPrimaryConversation(
+        harness,
+        bot,
+        {
+          create: true,
+          defaultModel: 'mock/mock-chat',
+          thinkingLevel: profile.thinkingLevel,
+          instructions: profile.instructions,
+          removeTools: profile.removeTools,
+          selectedExtensions: profile.selectedExtensions,
+          codemodeOnly: profile.codemodeOnly,
+        },
+        context,
+      );
+      await applyAgentProfile(harness, conversation.id, profile, context);
+      return conversation;
+    },
+  });
+
+  const botQueues = new Map();
+  const admitBot = (botId, fn) => {
+    const prev = botQueues.get(botId) ?? Promise.resolve();
+    const next = prev.then(fn, fn);
+    botQueues.set(botId, next.catch(() => {}));
+    return next;
+  };
+
+  decisions = createWorkDecisionRuntime({
+    sessions,
+    host,
+    getHarness: () => harness,
+    getWorkContexts: () => workContexts,
+    models,
+    defaultModel: 'mock/mock-chat',
+    context,
+    admitBot,
+    getProfile: (botId) => makeProfile(host.getBot(botId) ?? { role: 'Assistant' }),
+  });
+
+  registry.install(
+    defineExtension({
+      name: 'host.communication',
+      tools: createCommunicationTools({
+        host,
+        getHarness: () => harness,
+        getMessageLog: () => workContexts.getMessageLog(),
+        publishWork: decisions.publishWork,
+        passWork: decisions.passWork,
+        collaboration: null,
+        sessions,
+      }),
+    }),
+  );
+  registry.install(
+    defineExtension({
+      name: 'host.session-hooks',
+      hooks: [
+        hook(GenerationTask, {
+          async beforeRequest(req, api, ctx) {
+            const out = await sessions.beforeRequest(req, api, ctx);
+            await decisions.beforeRequest(out, api, ctx);
+            return out;
+          },
+        }),
+      ],
+    }),
+  );
+  coreExtensions = registry.snapshot().installed();
+
+  const storage = await openNodeSqliteStorage(join(rootDir, 'durable.sqlite'));
+  harness = await Harness.open(storage, {
+    registry,
+    models,
+    settings: { extensions: coreExtensions },
+  }, context);
+  workContexts = createWorkContextRuntime({
+    host,
+    harness,
+    context,
+    sessions,
+    getProfile: () => ({ instructions: 'Work coord', removeTools: [], selectedExtensions: coreExtensions }),
+  });
+
+  try {
+    await harness.resume(context);
+    decisions.resume();
+
+    const log = workContexts.getMessageLog();
+    const createdRoom = log.createScope({
+      requestId: 'mk-3bot-committee-room',
+      kind: 'room',
+      title: '技术方案委员会',
+      members: [
+        { deviceId: host.deviceId, botId: botA.botId },
+        { deviceId: host.deviceId, botId: botB.botId },
+        { deviceId: host.deviceId, botId: botC.botId },
+      ],
+    });
+    roomScopeId = createdRoom.scope.scopeId;
+
+    // --- A) Open human question in 3-bot room: concurrency strictly = 1, sequential visibility, per-turn cap = 2 ---
+    phase = 'sequential_round_robin';
+    maxActiveInRoom = 0;
+    wakeRecords.length = 0;
+    toolResultsSeen.length = 0;
+
+    log.publish({
+      messageId: 'committee-u-1',
+      scopeId: roomScopeId,
+      author: { kind: 'user' },
+      category: 'public',
+      text: '请三位分别给出数据库迁移建议',
+      replyTo: null,
+    });
+    decisions.nudge();
+
+    await waitUntil(
+      async () => {
+        const items = log.history(roomScopeId, { order: 'ascending', limit: 20 }).items;
+        const latestId = items[items.length - 1]?.localId ?? 0;
+        if (items.length < 5) return false;
+        const [actA, actB, actC] = await Promise.all([
+          decisions.getWorkActivity(botA.botId, roomScopeId),
+          decisions.getWorkActivity(botB.botId, roomScopeId),
+          decisions.getWorkActivity(botC.botId, roomScopeId),
+        ]);
+        return (
+          actA.pending === null &&
+          actB.pending === null &&
+          actC.pending === null &&
+          actA.handledLocalId >= latestId &&
+          actB.handledLocalId >= latestId &&
+          actC.handledLocalId >= latestId
+        );
+      },
+      {
+        label: '3-bot sequential round-robin settled',
+        timeoutMs: 15_000,
+        onTimeout: async () => ({
+          texts: log.history(roomScopeId, { order: 'ascending', limit: 20 }).items.map((i) => ({ id: i.localId, text: i.message.text })),
+          actA: await decisions.getWorkActivity(botA.botId, roomScopeId),
+          actB: await decisions.getWorkActivity(botB.botId, roomScopeId),
+          actC: await decisions.getWorkActivity(botC.botId, roomScopeId),
+          wakes: wakeRecords.map((w) => ({ bot: w.callerBotId, p: w.wakePrompt.slice(0, 200) })),
+        }),
+      },
+    );
+
+    assert.equal(maxActiveInRoom, 1, 'room model concurrency must never exceed 1');
+    assert.equal(
+      toolResultsSeen.some((r) => r.content.includes('STALE_INPUT')),
+      false,
+      'no speaker should ever hit STALE_INPUT',
+    );
+    assert.equal(
+      toolResultsSeen.some((r) => r.callerBotId === botA.botId && r.content.includes('turn_cap_reached')),
+      true,
+      `Bot A's 3rd send_to in one turn must return status=turn_cap_reached (cap=${GROUP_MAX_MESSAGES_PER_TURN})`,
+    );
+
+    const historyAfterA = log.history(roomScopeId, { order: 'ascending', limit: 20 }).items;
+    const publishedTextsA = historyAfterA.map((i) => i.message.text);
+    assert.deepEqual(publishedTextsA, [
+      '请三位分别给出数据库迁移建议',
+      '架构师建议1：采用双写灰度迁移',
+      '架构师建议2：保留回滚开关',
+      '后端专家附议架构师双写方案，补充幂等校验',
+      '测试专家收到架构师与后端方案，补充影子流量比对',
+    ]);
+
+    // Verify sequential context visibility: Bot B saw Bot A's 2 messages; Bot C saw Bot A + Bot B!
+    const firstWakeB = wakeRecords.find((w) => w.callerBotId === botB.botId);
+    const firstWakeC = wakeRecords.find((w) => w.callerBotId === botC.botId);
+    assert.ok(firstWakeB?.wakePrompt.includes('架构师建议1：采用双写灰度迁移'));
+    assert.ok(firstWakeB?.wakePrompt.includes('架构师建议2：保留回滚开关'));
+    assert.ok(firstWakeC?.wakePrompt.includes('架构师建议1：采用双写灰度迁移'));
+    assert.ok(firstWakeC?.wakePrompt.includes('后端专家附议架构师双写方案，补充幂等校验'));
+
+    // --- B) Mid-turn human message advances room turn epoch: active speaker finishes without STALE_INPUT, stale Round 0 halts at boundary, fresh Round 0 runs on new constraint ---
+    phase = 'epoch_interrupt';
+    maxActiveInRoom = 0;
+    wakeRecords.length = 0;
+    toolResultsSeen.length = 0;
+
+    const botAEnteredTurn = new Promise((res) => {
+      midTurnStartedResolve = res;
+    });
+    let releaseBotA;
+    midTurnReleasePromise = new Promise((res) => {
+      releaseBotA = res;
+    });
+
+    log.publish({
+      messageId: 'committee-u-2',
+      scopeId: roomScopeId,
+      author: { kind: 'user' },
+      category: 'public',
+      text: '第一版问题：用 Postgres 还是 MySQL？',
+      replyTo: null,
+    });
+    decisions.nudge();
+
+    await botAEnteredTurn;
+
+    // While Bot A is mid-turn, user sends a newer message into the room!
+    log.publish({
+      messageId: 'committee-u-3',
+      scopeId: roomScopeId,
+      author: { kind: 'user' },
+      category: 'public',
+      text: '补充约束：必须支持嵌入式单文件部署！',
+      replyTo: null,
+    });
+    decisions.nudge();
+
+    // Release Bot A to finish its in-flight send_to!
+    releaseBotA();
+    midTurnStartedResolve = null;
+    midTurnReleasePromise = null;
+
+    await waitUntil(
+      async () => {
+        const items = log.history(roomScopeId, { order: 'ascending', limit: 30 }).items;
+        const texts = items.map((i) => i.message.text);
+        if (
+          !texts.includes('架构师初版回答：默认推荐 Postgres') ||
+          !texts.includes('架构师按嵌入式约束修正：改用 SQLite WAL') ||
+          !texts.includes('后端专家按嵌入式约束确认：SQLite 单写多读') ||
+          !texts.includes('测试专家按嵌入式约束确认：断电恢复压测')
+        ) {
+          return false;
+        }
+        const latestId = items[items.length - 1]?.localId ?? 0;
+        const [actA, actB, actC] = await Promise.all([
+          decisions.getWorkActivity(botA.botId, roomScopeId),
+          decisions.getWorkActivity(botB.botId, roomScopeId),
+          decisions.getWorkActivity(botC.botId, roomScopeId),
+        ]);
+        return (
+          actA.pending === null &&
+          actB.pending === null &&
+          actC.pending === null &&
+          actA.handledLocalId >= latestId &&
+          actB.handledLocalId >= latestId &&
+          actC.handledLocalId >= latestId
+        );
+      },
+      {
+        label: 'epoch switch after mid-turn human message settled',
+        timeoutMs: 15_000,
+        onTimeout: async () => ({
+          texts: log.history(roomScopeId, { order: 'ascending', limit: 30 }).items.map((i) => ({ id: i.localId, text: i.message.text })),
+          actA: await decisions.getWorkActivity(botA.botId, roomScopeId),
+          actB: await decisions.getWorkActivity(botB.botId, roomScopeId),
+          actC: await decisions.getWorkActivity(botC.botId, roomScopeId),
+          wakes: wakeRecords.map((w) => ({ bot: w.callerBotId, p: w.wakePrompt.slice(0, 220) })),
+        }),
+      },
+    );
+
+    assert.equal(maxActiveInRoom, 1, 'concurrency remains strictly 1 across epoch switch');
+    assert.equal(
+      toolResultsSeen.some((r) => r.content.includes('STALE_INPUT')),
+      false,
+      'active speaker must finish cleanly without STALE_INPUT when new human message arrives mid-turn',
+    );
+    // Neither Bot B nor Bot C wasted their initial turn on the stale pre-constraint epoch!
+    const firstPhaseBWakeB = wakeRecords.find((w) => w.callerBotId === botB.botId);
+    const firstPhaseBWakeC = wakeRecords.find((w) => w.callerBotId === botC.botId);
+    assert.ok(
+      firstPhaseBWakeB?.wakePrompt.includes('补充约束：必须支持嵌入式单文件部署'),
+      'Bot B must skip stale epoch and first wake with the new human constraint visible',
+    );
+    assert.ok(
+      firstPhaseBWakeC?.wakePrompt.includes('补充约束：必须支持嵌入式单文件部署'),
+      'Bot C must skip stale epoch and first wake with the new human constraint visible',
+    );
+
+    // --- C) Direct 1:1 preemption redrive appends buildGroupRedriveNote(roomScopeId) ---
+    phase = 'preempt_redrive';
+    wakeRecords.length = 0;
+    preemptTriggered = false;
+
+    const botAStartedForPreempt = new Promise((res) => {
+      midTurnStartedResolve = res;
+    });
+    let releasePreemptedTurn;
+    midTurnReleasePromise = new Promise((res) => {
+      releasePreemptedTurn = res;
+    });
+
+    log.publish({
+      messageId: 'committee-peer-4',
+      scopeId: roomScopeId,
+      author: { kind: 'bot', botId: botB.botId },
+      category: 'public',
+      text: '@架构师 请给出最终上线风险结论',
+      replyTo: null,
+    });
+    decisions.nudge();
+
+    await waitUntil(() => preemptTriggered, {
+      label: 'botA entered preemptible room turn',
+      timeoutMs: 4_000,
+      onTimeout: async () => ({
+        actA: await decisions.getWorkActivity(botA.botId, roomScopeId),
+        texts: log.history(roomScopeId, { order: 'ascending', limit: 30 }).items.map((i) => ({ id: i.localId, text: i.message.text })),
+      }),
+    });
+    const preemptPromise = decisions.interruptBotWork(botA.botId, { reason: 'preempted', quiesce: false });
+    releasePreemptedTurn();
+    await preemptPromise;
+    midTurnStartedResolve = null;
+    midTurnReleasePromise = null;
+
+    await waitUntil(
+      async () => {
+        const items = log.history(roomScopeId, { order: 'ascending', limit: 30 }).items;
+        return items.some((i) => i.message.text === '架构师重投完成：风险可控，准予上线');
+      },
+      {
+        label: 'preempted room turn redriven with redelivery note',
+        timeoutMs: 15_000,
+        onTimeout: async () => ({
+          actA: await decisions.getWorkActivity(botA.botId, roomScopeId),
+          wakes: wakeRecords.map((w) => ({ bot: w.callerBotId, p: w.wakePrompt.slice(0, 250) })),
+        }),
+      },
+    );
+
+    const redriveWake = wakeRecords.find(
+      (w) => w.callerBotId === botA.botId && w.wakePrompt.includes(buildGroupRedriveNote(roomScopeId).trim()),
+    );
+    assert.ok(redriveWake, 'redriven room turn must include buildGroupRedriveNote(roomScopeId)');
+  } finally {
+    await decisions.close();
+    await workContexts.close();
+    await harness.close(context);
+    host.close();
   }
 });

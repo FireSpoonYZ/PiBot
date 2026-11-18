@@ -18,9 +18,13 @@ import { runLearningJob } from './learning-engine/index.js';
 import { openLearningService } from './learning/index.js';
 import { openBotManagement } from './bot-management.js';
 import { openCenterVault } from './vault.js';
+import { setupPiHttpRuntime } from './http-dispatcher.js';
 import { initializeBuiltinPlugins } from './builtin-plugins.js';
 import { openModelCatalog } from './model-catalog.js';
 import { openProviderAuth } from './provider-auth.js';
+import { openAntigravity } from './antigravity/index.js';
+
+setupPiHttpRuntime();
 
 const require = createRequire(import.meta.url);
 const status = { INVALID_ARGUMENT: 400, INVALID_CWD: 400, UNSUPPORTED_TARGET: 400, VALIDATION_FAILED: 400, UNAUTHENTICATED: 401, FORBIDDEN: 403, CSRF_INVALID: 403, NOT_FOUND: 404, BOT_NOT_FOUND: 404, REVISION_CONFLICT: 409, REQUEST_CONFLICT: 409, TURN_SET_CHANGED: 409, TURN_SYNC_FAILED: 409, TURN_RECOVERY_REQUIRED: 403, INVALID_STATE: 409, PRIMARY_BOT_PROTECTED: 409, BOT_ARCHIVED: 409, PAYLOAD_TOO_LARGE: 413, RATE_LIMITED: 429, PACKAGE_NOT_READY: 409, CALL_TIMEOUT: 504, TIMEOUT: 504, LEARNING_ERROR: 502, CENTER_OFFLINE: 503, DEVICE_OFFLINE: 503, VAULT_INVALID_ARGUMENT: 400, VAULT_FORBIDDEN: 403, VAULT_NOT_FOUND: 404, VAULT_NOT_CONFIGURED: 409, VAULT_NEEDS_LOGIN: 409, VAULT_LOGIN_CHALLENGE: 409, VAULT_STALE_SESSION: 409, VAULT_CONFLICT: 409, VAULT_REQUEST_EXPIRED: 409, VAULT_REQUEST_BUSY: 409, VAULT_NOT_INITIALIZED: 409, VAULT_ALREADY_INITIALIZED: 409, VAULT_LOCKED: 409, VAULT_UNLOCK_FAILED: 409, VAULT_UNSUPPORTED: 409, VAULT_CONNECTION_FAILED: 502, VAULT_UNAVAILABLE: 503, PAIRING_CODE_INVALID: 401, PAIRING_CODE_USED: 409, PAIRING_CODE_EXPIRED: 410, PAIRING_CODE_REVOKED: 410, PAIRING_CODE_DEVICE_MISMATCH: 409, DEVICE_ALREADY_REGISTERED: 409 };
@@ -39,7 +43,7 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
   }
   const linkUrl = `wss://${publicOrigin.host}/v1/link`;
   if (!(encryptionKey instanceof Uint8Array) || !(sessionKey instanceof Uint8Array) || encryptionKey.byteLength !== 32 || sessionKey.byteLength !== 32 || Buffer.from(encryptionKey).equals(Buffer.from(sessionKey))) throw new Error('Independent encryption and session keys are required');
-  let store, relay, bridge, packages, execution, oauth, routes, app, skills, learning, botManagement, catalog, providerAuth, vault;
+  let store, relay, bridge, packages, execution, oauth, routes, app, skills, learning, botManagement, catalog, providerAuth, antigravity, vault;
   let closing;
   async function close() {
     if (!closing) closing = (async () => {
@@ -48,7 +52,7 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
       // stopped while the HTTP listener is still owned by this process.
       // Skill/learning services close before the package manager and store
       // they mutate through; there is nothing to close on botManagement.
-      for (const fn of [() => providerAuth?.close(), () => catalog?.close(), () => routes?.close(), () => relay?.close(), () => app?.close(), () => learning?.close(), () => skills?.close(), () => vault?.close(), () => packages?.close(), () => execution?.close(), () => oauth?.close(), () => bridge?.close(), () => store?.close()]) {
+      for (const fn of [() => providerAuth?.close(), () => catalog?.close(), () => routes?.close(), () => antigravity?.close(), () => relay?.close(), () => app?.close(), () => learning?.close(), () => skills?.close(), () => vault?.close(), () => packages?.close(), () => execution?.close(), () => oauth?.close(), () => bridge?.close(), () => store?.close()]) {
         try { await fn(); } catch (error) { errors.push(error); }
       }
       if (errors.length) throw new AggregateError(errors, 'Center shutdown failed');
@@ -81,9 +85,10 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
     execution = openCenterExecution({ store, packages: { getInstalled: id => packages.getInstalled(id) }, oauth });
     packages = await openPackageManager({ dataRoot, store, npmPath: npmPath || join(dirname(require.resolve('npm/package.json')), 'bin', 'npm-cli.js'), onChange: id => routes?.notifyInstallation(id), withActivation: (id, publish) => execution.withActivation(id, publish), probeCenterMcp: (installation, config, identity) => execution.probeGlobal(installation, config, identity) });
     await initializeBuiltinPlugins({ dataRoot, store, packages });
-    catalog = openModelCatalog({ store, dataRoot, onChange: () => routes?.notifyAll() });
+    antigravity = openAntigravity({ dataRoot });
+    catalog = openModelCatalog({ store, dataRoot, antigravity, onChange: () => routes?.notifyAll() });
     await catalog.ready;
-    providerAuth = openProviderAuth({ store, catalog, onChange: () => routes?.notifyAll() });
+    providerAuth = openProviderAuth({ store, catalog, antigravity, onChange: () => routes?.notifyAll() });
     await registerAuth(app, { sessionKey, ownerPasswordHash });
     // Already configured: unauthenticated read-only probes for setup polling
     // and health checks; no reset or mutation endpoint exists here.
@@ -98,7 +103,7 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
     learning = await openLearningService({ dataRoot, store, skills, runLearningJob });
     botManagement = openBotManagement({ store, packages, notify: (deviceId) => routes?.notifyDevice?.(deviceId) });
     vault = await openCenterVault({ dataRoot, encryptionKey, store });
-    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, publicUrl, vault });
+    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault });
     if (webRoot) {
       await app.register(fastifyStatic, { root: webRoot, prefix: '/' });
       app.setNotFoundHandler((req, reply) => {

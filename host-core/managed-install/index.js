@@ -199,6 +199,26 @@ export function openManagedInstaller({ dataRoot, npmPath, fetchArtifact, report,
       artifactRef: plan.artifactRef ?? staged.state.artifactRef ?? null });
   }
 
+  async function pruneOldVersions(id, keepDir) {
+    const dir = versionsDir(id);
+    const keepName = path.basename(keepDir);
+    const keepState = keepName + STATE_SUFFIX;
+    let names = [];
+    try { names = await readdir(dir); }
+    catch (error) {
+      if (error instanceof ReferenceError || error instanceof TypeError) throw error;
+      return;
+    }
+    for (const name of names) {
+      if (name === keepName || name === keepState) continue;
+      try { await rm(path.join(dir, name), { recursive: true, force: true }); }
+      catch (error) {
+        if (error instanceof ReferenceError || error instanceof TypeError) throw error;
+        if (error?.code !== 'ENOENT') { /* best-effort cleanup */ }
+      }
+    }
+  }
+
   async function applyPlan(plan) {
     const prior = await getInstalled(plan.installationId);
     let actual = prior?.version ?? null;
@@ -225,11 +245,14 @@ export function openManagedInstaller({ dataRoot, npmPath, fetchArtifact, report,
       }
       const staged = await stagePlan(plan, { onPhase: emit });
       await mkdir(dataDir(plan.installationId), { recursive: true });
-      const publish = () => writeJson(currentFile(plan.installationId), {
-        planId: plan.planId, removed: false, version: plan.targetVersion, packageRoot: staged.dir,
-        manifest: plan.manifest ?? null, digest: normalizeDigest(plan.digest) ?? staged.state.digest ?? null,
-        artifactRef: plan.artifactRef ?? staged.state.artifactRef ?? null,
-      });
+      const publish = async () => {
+        await writeJson(currentFile(plan.installationId), {
+          planId: plan.planId, removed: false, version: plan.targetVersion, packageRoot: staged.dir,
+          manifest: plan.manifest ?? null, digest: normalizeDigest(plan.digest) ?? staged.state.digest ?? null,
+          artifactRef: plan.artifactRef ?? staged.state.artifactRef ?? null,
+        });
+        if (plan.kind !== 'plugin') await pruneOldVersions(plan.installationId, path.basename(staged.dir));
+      };
       if (plan.kind === 'plugin') {
         // 原生插件版本目录不可变：直接发布可用性指针，不全局静默；
         // 运行中实例继续持有旧根目录，回合准入在安全边界内再切换。

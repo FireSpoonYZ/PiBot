@@ -26,3 +26,118 @@
 
 /* 归档行在 archived-bots 页里降低不透明度以区分。 */
 .hub-bot-row.is-archived { opacity: .72; }
+
+/* 创建群聊页（group-create）：已选成员胶囊带 + 候选智能体勾选列表。 */
+.group-create-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 2px 0 10px;
+}
+.group-create-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  padding: 5px 10px 5px 6px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--line) 85%, transparent);
+  font-size: .86rem;
+  font-weight: 550;
+  color: var(--text);
+}
+.group-create-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+}
+.group-create-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+.group-create-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  min-height: 44px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
+  color: var(--muted);
+}
+.group-create-search input {
+  flex: 1;
+  min-width: 0;
+  min-height: 40px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-size: .92rem;
+  color: var(--text);
+  outline: none;
+}
+.group-create-bot-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 11px 14px;
+  text-align: left;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+  transition: background-color 140ms ease;
+}
+.group-create-bot-row:last-child { border-bottom: 0; }
+.group-create-bot-row:hover,
+.group-create-bot-row:active {
+  background: color-mix(in srgb, var(--surface) 75%, transparent);
+}
+.group-create-bot-row.is-selected {
+  background: color-mix(in srgb, #2B70F6 8%, transparent);
+}
+.group-create-bot-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.group-create-bot-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.group-create-bot-name {
+  font-size: .95rem;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.group-create-bot-sub {
+  font-size: .8rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.group-create-check {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.8px solid var(--line);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+.group-create-bot-row.is-selected .group-create-check {
+  background: #2B70F6;
+  border-color: #2B70F6;
+}

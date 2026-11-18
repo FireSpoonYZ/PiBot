@@ -31,6 +31,8 @@ export interface Provider {
   revision: number;
   /** Native Pi provider, keeping its protocol-specific implementation. */
   native?: boolean;
+  /** Owner-added/configured marker so disabled providers stay visible in the list until deleted. */
+  configured?: boolean;
   /** Pi models.json-compatible provider overrides; omitted fields inherit Pi defaults. */
   custom?: JsonObject;
 }
@@ -53,6 +55,7 @@ export interface Model {
   samplingParams?: JsonObject;
   samplingParamsByThinkingLevel?: JsonObject;
   source?: 'catalog' | 'manual';
+  removed?: boolean;
   enabled: boolean;
   revision: number;
 }
@@ -60,6 +63,7 @@ export interface ProviderAuthStatus {
   providerId: string;
   method: 'none' | 'api_key' | 'oauth';
   oauth: boolean;
+  apiKey?: boolean;
   label: string;
   subscription: boolean;
 }
@@ -144,6 +148,22 @@ export interface InstallationConfig {
   revision: number;
 }
 export interface PutInstallationConfig { expectedRevision: number; globalConfig: JsonObject }
+export interface SkillPackageEntry {
+  dir: string;
+  name: string;
+  description: string | null;
+  files: string[];
+}
+export interface InstallationSkillFilesResponse {
+  installationId: string;
+  editable: boolean;
+  files: Record<string, string>;
+  skills: SkillPackageEntry[];
+}
+export interface PutInstallationSkillFilesRequest {
+  files: Record<string, string | null>;
+  requestId?: string;
+}
 export interface BotBinding {
   deviceId: string;
   botId: string;
@@ -158,7 +178,13 @@ export interface BotCapabilityConfig extends BotBinding {
   configSchema: JsonSchema;
 }
 export interface PutBotCapability { expectedRevision: number; enabled: boolean; overrides: JsonObject }
-export interface Device { deviceId: string; name: string; online: boolean }
+export interface Device {
+  deviceId: string;
+  name: string;
+  online: boolean;
+  oauthAdminEnabled?: boolean;
+  platform?: DevicePlatform;
+}
 export type DevicePlatform = 'windows' | 'linux' | 'macos' | 'android';
 /** Owner-only `POST /api/devices` body; displayName is trimmed to 1..64 characters. */
 export interface CreateDeviceRequest { displayName: string; platform: DevicePlatform }
@@ -179,6 +205,22 @@ export interface CreatePairingCodeRequest { deviceId?: string }
 export type PairingCodeStatus = 'pending' | 'redeemed' | 'expired' | 'revoked';
 /** `GET /api/pairing-codes/:id`; `device` is present once redeemed, `target` when the code was issued for one device. `DELETE` voids a pending code. */
 export interface PairingCodeState { id: string; status: PairingCodeStatus; createdAt: string; expiresAt: string; device?: { deviceId: string; name: string }; target?: { deviceId: string; name: string } }
+export interface ActivePairingCodeInfo {
+  id: string;
+  code?: string;
+  status: PairingCodeStatus;
+  createdAt: string;
+  expiresAt: string;
+  includesCa: boolean;
+  target: { deviceId: string; name: string } | null;
+}
+export interface ResolvedModelSummary {
+  effectiveModelRef: string | null;
+  effectiveModelName: string | null;
+  effectiveProviderName: string | null;
+  source: 'bot' | 'center_default' | 'local_default' | 'unset';
+  available: boolean;
+}
 /** `GET`/`PUT /api/pairing/ca` (`PUT` body `{ ca: string | null }`): the private CA embedded into new codes. */
 export interface PairingCaState { ca: string | null; certificates: Array<{ subject: string; fingerprint256: string; validTo: string }> }
 /**
@@ -221,6 +263,7 @@ export interface BotRef {
   description?: string;
   cwd?: string;
   modelRef?: string | null;
+  resolvedModel?: ResolvedModelSummary;
   primaryConversationId?: string;
   createdAt?: string;
   isPrimary?: boolean;
@@ -275,7 +318,7 @@ export interface DeploymentReceipt {
 export interface Operation {
   operationId: string;
   requestId: string;
-  action: 'install' | 'update' | 'enable' | 'disable' | 'uninstall' | 'rollback';
+  action: 'install' | 'update' | 'enable' | 'disable' | 'uninstall';
   installationId: string;
   /** Empty for center; Host-targeted operations may have multiple device receipts. */
   deviceIds: string[];
@@ -286,13 +329,15 @@ export interface Operation {
 export type InstallSource =
   | { type: 'npm'; spec: string }
   | { type: 'artifact'; artifactRef: string }
-  | { type: 'http'; url: string };
+  | { type: 'http'; url: string }
+  | { type: 'inline'; files: Record<string, string> };
 export interface InstallRequest {
   requestId: string;
   displayName: string;
   kind: CapabilityKind;
   source: InstallSource;
   target: 'center' | 'host';
+  autoEnable?: boolean;
   ownerBot?: InstallationOwnerBot;
   visibilityScope?: SkillVisibilityScope;
 }
@@ -302,8 +347,9 @@ export interface EnableRequest extends OperationRequest {
   validationBot?: { deviceId: string; botId: string };
 }
 export interface UpdateRequest extends OperationRequest {
-  targetVersion: string;
-  source?: { type: 'artifact'; artifactRef: string };
+  targetVersion?: string;
+  source?: { type: 'artifact'; artifactRef: string } | { type: 'npm'; spec: string };
+  allowSourceSwitch?: boolean;
 }
 export interface DeploymentPlan {
   protocol: 1;
@@ -323,7 +369,7 @@ export interface DeploymentPlan {
   integrity: string | null;
   /** npm lockfile contents when target-platform dependency installation is required. */
   lockfile: JsonObject | null;
-  action: 'install' | 'update' | 'enable' | 'disable' | 'uninstall' | 'rollback';
+  action: 'install' | 'update' | 'enable' | 'disable' | 'uninstall';
 }
 export interface EffectiveCapability {
   installationId: string;
@@ -481,9 +527,54 @@ export interface CenterConnectionStatus {
   error: ApiError['error'] | null;
 }
 export interface SessionInfo { authenticated: boolean; csrfToken: string | null }
+export interface OAuthTokenResponse { accessToken: string; tokenType: 'Bearer'; scopes: string[] }
+export interface QrLoginChallengeResponse {
+  challengeId: string;
+  browserSecret: string;
+  qrCode: string;
+  expiresAt: string;
+  ttlSeconds: number;
+}
+export interface QrLoginClaimResponse {
+  status: 'pending' | 'approved' | 'expired';
+  authenticated?: boolean;
+  csrfToken?: string | null;
+}
 export interface LoginRequest { password: string }
 export interface CredentialWrite { value: string; expectedRevision: number | null }
-export interface ProviderCheckRequest { deviceId: string }
+export interface ProviderCheckRequest {
+  deviceId?: string;
+  baseUrl?: string;
+  api?: string;
+  apiKey?: string;
+  headers?: JsonObject;
+}
+export interface ModelCatalogItem {
+  modelRef: string;
+  name: string;
+  contextWindow: number;
+  maxTokens: number;
+  reasoning: boolean;
+}
+export interface ModelPickerResponse {
+  defaultModel: string | null;
+  models: ModelCatalogItem[];
+  starredModels: string[];
+  sync: { source: string; syncedAt: string | null; error: string | null };
+}
+export interface DeleteProviderResult {
+  deleted: boolean;
+  reset?: boolean;
+  clearedGlobalModel: boolean;
+  clearedBotModels: number;
+}
+export interface DeleteModelResult {
+  deleted: boolean;
+  hiddenFromCatalog?: boolean;
+  clearedGlobalModel: boolean;
+  clearedBotModels: number;
+}
+export interface BatchModelsRequest { models: Model[] }
 /** Trusted owner-initiated Host probe; credential is transient and never persisted. */
 export interface ProviderProbeRequest { provider: Provider; models: Model[]; credential?: string }
 export interface InstallationCheckRequest { deviceId: string; botId: string }
@@ -664,3 +755,113 @@ export interface ClientReleaseRecord extends ClientReleaseMetadata {
 
 export interface ClientReleaseListResponse { releases: ClientReleaseRecord[] }
 export interface ClientReleasePublishRequest { published: boolean }
+
+export type TaskStatus = 'triaging' | 'working' | 'waiting' | 'done' | 'cancelled';
+
+export type TaskStepStatus =
+  | 'unassigned'
+  | 'todo'
+  | 'working'
+  | 'waiting'
+  | 'blocked'
+  | 'done'
+  | 'cancelled';
+
+export interface TaskOrigin {
+  kind: 'ui' | 'chat' | 'voice';
+  deviceId?: string | null;
+  botId?: string | null;
+  botName?: string | null;
+  conversationId?: string | null;
+  label: string;
+}
+
+export interface TaskBotRef {
+  deviceId: string;
+  botId: string;
+  botName?: string;
+}
+
+export interface TaskPendingPrompt {
+  kind: 'plan' | 'question';
+  deviceId: string;
+  botId: string;
+  botName?: string;
+  stepId?: string | null;
+  text: string;
+  options?: string[];
+  createdAt: number;
+}
+
+export interface TaskAdoption {
+  phase: 'recorded' | 'adjusting' | 'needs_scope' | 'adopted';
+  shortReceipt: string;
+  changeText: string;
+  scopeDesc?: string;
+  updatedAt: number;
+}
+
+export interface TaskStep {
+  id: string;
+  parentStepId: string | null;
+  text: string;
+  status: TaskStepStatus;
+  deviceId: string | null;
+  botId: string | null;
+  botName?: string | null;
+  dependsOnStepIds?: string[];
+  preserved?: boolean;
+  relationNote?: string;
+  resultSummary?: string;
+  previousResultSummary?: string;
+  executionRevision?: number;
+  claimedExecutionRevision?: number;
+  updatedAt: number;
+}
+
+export interface TaskLogEntry {
+  id: string;
+  time: number;
+  text: string;
+  previousRequirement?: string;
+  requirement?: string;
+}
+
+export interface GlobalTask {
+  id: string;
+  title: string;
+  requirement: string;
+  sourceText?: string;
+  status: TaskStatus;
+  summary: string;
+  origin: TaskOrigin;
+  coordinatorDeviceId: string | null;
+  coordinatorBotId: string | null;
+  botRefs: TaskBotRef[];
+  pendingPrompt: TaskPendingPrompt | null;
+  adoption: TaskAdoption | null;
+  steps: TaskStep[];
+  logs: TaskLogEntry[];
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface TaskDispatchItem {
+  id: string;
+  taskId: string;
+  stepId: string | null;
+  kind: 'triage' | 'execute' | 'confirm_plan' | 'answer_prompt' | 'adopt_change' | 'subtask' | 'subtask_completed';
+  deviceId: string;
+  botId: string;
+  requestId: string;
+  taskTitle: string;
+  status: 'dispatching' | 'queued' | 'running';
+  cancelRequested: boolean;
+  executionRevision?: number;
+  instruction: string;
+  payload: Record<string, unknown>;
+  createdAt: number;
+  expiresAt: number;
+  updatedAt: number;
+}

@@ -2,7 +2,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 const version = process.argv[2];
 const versionCode = Number(process.argv[3]);
-if (!/^\d+\.\d+\.\d+$/.test(version ?? '') || !Number.isSafeInteger(versionCode) || versionCode < 1) {
+if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version ?? '') || !Number.isSafeInteger(versionCode) || versionCode < 1) {
   throw new Error('Usage: node scripts/set-release-version.mjs <version> <Android versionCode>');
 }
 for (const file of ['package.json', 'desktop/src-tauri/tauri.conf.json', 'mobile/src-tauri/tauri.conf.json']) {

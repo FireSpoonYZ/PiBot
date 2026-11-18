@@ -13,6 +13,7 @@
  */
 
 export const PAIRING_CODE_PREFIX = 'pibot1.';
+export const QR_LOGIN_PREFIX = 'pibotlogin1.';
 
 export type PasteKind =
   /** Nothing pasted yet. */
@@ -26,7 +27,18 @@ export type PasteKind =
   /** Starts like a code but is cut off, garbled or carries an address that cannot be used. */
   | { kind: 'damaged' };
 
+export type ScannedCodeKind =
+  | PasteKind
+  | {
+      kind: 'web-login';
+      centerUrl: string;
+      centerHost: string;
+      challengeId: string;
+      qrNonce: string;
+    };
+
 const SECRET = /^[A-Za-z0-9_-]{32,64}$/;
+const QR_LOGIN_NONCE = /^[A-Za-z0-9_-]{16,128}$/;
 /** Same limits as the native decoders. */
 const MAX_CODE_CHARS = 96 * 1024;
 const MAX_CA_CHARS = 64 * 1024;
@@ -89,4 +101,43 @@ export function readPaste(text: string, options: ReadPasteOptions = {}): PasteKi
   }
   const centerHost = centerHostOf(payload.u.trim(), options.allowLoopbackHttp !== false);
   return centerHost === undefined ? { kind: 'damaged' } : { kind: 'code', centerHost };
+}
+
+/**
+ * Reads either a device pairing code (`pibot1.`) or a center web QR login code (`pibotlogin1.`).
+ */
+export function readScannedCode(text: string, options: ReadPasteOptions = {}): ScannedCodeKind {
+  const compact = text.replace(/\s+/g, '');
+  if (compact.startsWith(QR_LOGIN_PREFIX)) {
+    if (compact.length > MAX_CODE_CHARS) return { kind: 'damaged' };
+    const payload = decodePayload(compact.slice(QR_LOGIN_PREFIX.length)) as { u?: unknown; id?: unknown; s?: unknown } | undefined;
+    if (
+      !payload ||
+      typeof payload !== 'object' ||
+      Array.isArray(payload) ||
+      typeof payload.u !== 'string' ||
+      typeof payload.id !== 'string' ||
+      typeof payload.s !== 'string'
+    ) {
+      return { kind: 'damaged' };
+    }
+    if (payload.id.length < 1 || payload.id.length > 128 || payload.id.trim() === '') {
+      return { kind: 'damaged' };
+    }
+    if (!QR_LOGIN_NONCE.test(payload.s)) {
+      return { kind: 'damaged' };
+    }
+    const rawUrl = payload.u.trim();
+    const centerHost = centerHostOf(rawUrl, options.allowLoopbackHttp !== false);
+    if (centerHost === undefined) return { kind: 'damaged' };
+    const centerUrl = new URL(rawUrl).origin;
+    return {
+      kind: 'web-login',
+      centerUrl,
+      centerHost,
+      challengeId: payload.id,
+      qrNonce: payload.s,
+    };
+  }
+  return readPaste(text, options);
 }

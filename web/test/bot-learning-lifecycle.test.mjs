@@ -126,7 +126,6 @@ test('learned skills auto-publish to owner Bot without approval gate and support
     assert.equal(item.name, 'deploy-helper');
     assert.equal(item.state, 'active');
     assert.equal(item.visibilityScope, 'private');
-    assert.equal(item.publishedRevision, 1);
     assert.ok(item.installationId, 'expected auto-published installationId');
 
     const inst = store.getInstallation(item.installationId);
@@ -156,29 +155,19 @@ test('learned skills auto-publish to owner Bot without approval gate and support
     const edited = JSON.parse(editedRaw);
     assert.equal(edited.success, true);
     assert.equal(edited.published, true);
-    assert.equal(store.getInstallation(item.installationId).targetVersion, '1.0.2');
+    const updatedInst = store.getInstallation(item.installationId);
+    assert.match(updatedInst.targetVersion, /^0\.0\.0-h[a-f0-9]{12}$/);
+    assert.notEqual(updatedInst.targetVersion, inst.targetVersion);
 
-    // Read detail + revisions, then rollback to rev 1 -> creates rev 3 and auto-publishes 1.0.3.
+    // Read detail, then pin, lock, archive, restore via review endpoint.
     const detail = await skills.review(botA, { action: 'read', skillId: item.skillId });
-    assert.equal(detail.revisions.length, 2);
-    const rolled = await skills.review(botA, {
-      action: 'rollback',
-      skillId: item.skillId,
-      revision: 1,
-      expectedRevision: detail.revision,
-      requestId: 'req-rollback-1',
-    });
-    assert.equal(rolled.rolledBackTo, 1);
-    assert.equal(rolled.publishedRevision, 3);
-    assert.match(rolled.files['SKILL.md'], /Step 1: Run release checks\./);
-    assert.equal(store.getInstallation(item.installationId).targetVersion, '1.0.3');
+    assert.match(detail.files['SKILL.md'], /Step 1: Run v2 checks\./);
 
-    // Pin, lock, archive, restore via review endpoint.
     const pinned = await skills.review(botA, {
       action: 'pin',
       skillId: item.skillId,
       pinned: true,
-      expectedRevision: rolled.stateRevision,
+      expectedRevision: detail.stateRevision,
       requestId: 'req-pin-1',
     });
     assert.equal(pinned.pinned, true);
@@ -216,9 +205,22 @@ test('learned skills auto-publish to owner Bot without approval gate and support
     const dbPath = path.join(dataRoot, 'skills', 'skills.sqlite');
     const rawDb = new DatabaseSync(dbPath);
     const nowIso = new Date().toISOString();
+    rawDb.exec(`
+      CREATE TABLE IF NOT EXISTS skill_revisions (
+        skill_id TEXT NOT NULL,
+        rev INTEGER NOT NULL,
+        files TEXT NOT NULL,
+        description TEXT,
+        origin TEXT NOT NULL,
+        request_id TEXT,
+        created_at TEXT NOT NULL,
+        learning_source TEXT,
+        PRIMARY KEY (skill_id, rev)
+      );
+    `);
     rawDb.prepare(
-      'INSERT INTO skills (id, device_id, bot_id, name, fm_name, category, revision, head_rev, installation_id, package_id, published_rev, source, json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    ).run('legacy-skill-1', 'dev-1', 'bot-a', 'legacy-draft', 'legacy-draft', null, 1, 1, null, null, null, 'managed', '{}', nowIso, nowIso);
+      'INSERT INTO skills (id, device_id, bot_id, name, fm_name, category, revision, head_rev, installation_id, package_id, source, json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run('legacy-skill-1', 'dev-1', 'bot-a', 'legacy-draft', 'legacy-draft', null, 1, 1, null, null, 'managed', '{}', nowIso, nowIso);
     rawDb.prepare(
       'INSERT INTO skill_revisions (skill_id, rev, files, description, origin, request_id, created_at, learning_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     ).run(
@@ -237,9 +239,10 @@ test('learned skills auto-publish to owner Bot without approval gate and support
     const afterMigration = await reopened.review(botA, { action: 'list' });
     const migrated = afterMigration.items.find((entry) => entry.skillId === 'legacy-skill-1');
     assert.ok(migrated, 'expected legacy draft to appear in learned skills');
-    assert.equal(migrated.publishedRevision, 1);
     assert.ok(migrated.installationId, 'expected legacy draft to auto-publish on startup');
     assert.equal(store.getInstallation(migrated.installationId)?.visibilityScope, 'private');
+    const migratedDetail = await reopened.review(botA, { action: 'read', skillId: 'legacy-skill-1' });
+    assert.match(migratedDetail.files['SKILL.md'], /Recovered automatically\./);
   });
 });
 
@@ -873,16 +876,6 @@ test('skill-review-protocol and remote-live-protocol preserve learned-skills act
     action: 'list',
     includeArchived: true,
   });
-  assert.equal(
-    normalizeSkillReviewInput({
-      action: 'rollback',
-      skillId: 's1',
-      revision: 2,
-      expectedRevision: 3,
-      requestId: 'r1',
-    }).action,
-    'rollback',
-  );
   assert.equal(
     normalizeSkillReviewInput({
       action: 'pin',

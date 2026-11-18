@@ -22,7 +22,7 @@ const describe = (err) => ({
   message: typeof err?.message === 'string' && err.message ? err.message.slice(0, 200) : 'capability could not be applied',
 });
 
-export function createPluginManager({ host, registry, installer, services, isOnline, vaultFacade }) {
+export function createPluginManager({ host, registry, installer, services, isOnline, vaultFacade, tasksFacade }) {
   const ajv = new Ajv({ allErrors: true, coerceTypes: false, useDefaults: false, strict: false });
   ajv.addFormat('credential-ref', true);
   let instances = new Map(); // instanceKey(installationId, version) -> { key, installationId, plugin, manifest, version, bots, taskExtension }
@@ -307,6 +307,43 @@ export function createPluginManager({ host, registry, installer, services, isOnl
           await checkOwner(botId, id, conversationId);
           assertVaultAllowed(botId);
         }, assertVaultAllowed, id),
+      } : {}),
+      ...(installed?.manifest?.id === 'e-launcher.tasks' && tasksFacade ? {
+        tasks: {
+          invoke: async (botId, input, conversationId, nativeTaskId) => {
+            if (conversationId !== undefined) await checkOwner(botId, id, conversationId);
+            else assertCapabilityAllowed(botId, id);
+            return tasksFacade.invoke(botId, input, conversationId, nativeTaskId);
+          },
+          getActiveForBot: (botId, conversationId) => {
+            if (conversationId !== undefined) {
+              return checkOwner(botId, id, conversationId).then(
+                () => tasksFacade.getActiveForBot(botId),
+                () => [],
+              );
+            }
+            try {
+              assertCapabilityAllowed(botId, id);
+              return tasksFacade.getActiveForBot(botId);
+            } catch {
+              return [];
+            }
+          },
+          listDirectoryBots: (botId, conversationId) => {
+            if (conversationId !== undefined) {
+              return checkOwner(botId, id, conversationId).then(
+                () => tasksFacade.listDirectoryBots(),
+                () => [],
+              );
+            }
+            try {
+              assertCapabilityAllowed(botId, id);
+              return tasksFacade.listDirectoryBots();
+            } catch {
+              return [];
+            }
+          },
+        },
       } : {}),
       async tryRunBackgroundTask(botId, task) {
         if (!accepting || !isOnline() || !isAuthorized(policy.get(botId)?.get(id))) return false;
@@ -795,12 +832,44 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     });
   }
 
+  function selectContextProviders(botId) {
+    return [...instances.values()].flatMap((instance) => {
+      const entry = instance.bots.get(botId);
+      const hook = entry?.bot.requestContributions?.prepareContext;
+      return hook ? [{ id: instance.installationId, hook, instance, entry }] : [];
+    });
+  }
+
+  async function shouldDeclineThresholdCompaction(agent, api, context) {
+    context?.abortSignal?.throwIfAborted();
+    if (!active || !accepting || !isOnline()) return false;
+    if (!Array.isArray(agent?.extensions)) return false;
+    let botId;
+    try {
+      botId = await services.resolveConversationBot(api.conversationId);
+    } catch (err) {
+      if (context?.abortSignal?.aborted) throw err;
+      return false;
+    }
+    const providers = selectContextProviders(botId);
+    if (providers.length !== 1) return false;
+    const { id, instance, entry } = providers[0];
+    if (instance.manifest?.id !== 'e-launcher.billion-context' || instance.manifest?.kind !== 'plugin') {
+      return false;
+    }
+    if (!agent.extensions.some((extension) => extension === entry.extension)) return false;
+    try {
+      await checkOwner(botId, id, api.conversationId);
+      return active && accepting && isOnline();
+    } catch (err) {
+      if (context?.abortSignal?.aborted) throw err;
+      return false;
+    }
+  }
+
   async function prepareContext(request, api, context) {
     const botId = await services.resolveConversationBot(api.conversationId);
-    const providers = [...instances.values()].flatMap((instance) => {
-      const hook = instance.bots.get(botId)?.bot.requestContributions?.prepareContext;
-      return hook ? [{ id: instance.installationId, hook }] : [];
-    });
+    const providers = selectContextProviders(botId);
     if (providers.length > 1) throw error('INVALID_STATE', 'multiple context providers for this Bot');
     if (!providers.length) return request;
     const { id, hook } = providers[0];
@@ -907,7 +976,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
 
   return {
     applyBot, activate, quiesce, close, staleGrants, changedGrants, revoke, dropGrants, notifyGrants, capabilityTaskNames,
-    assertCapabilityAllowed, extensionsFor, prepareContext, beforeRequest, action, actionByName,
+    assertCapabilityAllowed, extensionsFor, prepareContext, shouldDeclineThresholdCompaction, beforeRequest, action, actionByName,
     isActive: () => active,
     appliedSetId: (botId) => appliedSets.get(botId) ?? null,
     hasActiveExecutions: (botId) => botId === undefined
