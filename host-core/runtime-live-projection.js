@@ -71,13 +71,26 @@ export function buildQueuedPreview(text) {
   return truncatePrefix(safe, MAX_QUEUED_PREVIEW_UNITS).text;
 }
 
-/** 从 pi.inbox 投影尚未置入轮次的本机用户主私聊排队项（过滤后台/协作触发项）。 */
-export function projectInboxQueuedItems(inbox) {
+function inboxStartingItem(rawItems) {
+  return (
+    rawItems.find((it) => it && it.mode === 'steer') ??
+    rawItems.find((it) => it && (it.mode === 'steer' || it.mode === 'followUp')) ??
+    rawItems[0] ??
+    null
+  );
+}
+
+/** 从 pi.inbox 投影尚未置入轮次、且确在等待前序执行的本机用户主私聊排队项（无前序执行时跳过即将启动的首条）。 */
+export function projectInboxQueuedItems(inbox, options = null) {
   const rawItems = Array.isArray(inbox?.items) ? inbox.items : [];
   if (rawItems.length === 0) return [];
+  const hasPrecedingExecution =
+    options === null || options === undefined ? true : Boolean(options.hasPrecedingExecution);
+  const skipItem = hasPrecedingExecution ? null : inboxStartingItem(rawItems);
   const items = [];
   const seen = new Set();
   for (const item of rawItems) {
+    if (skipItem !== null && item === skipItem) continue;
     if (!item || (item.mode !== 'steer' && item.mode !== 'followUp')) continue;
     if (item.entry?.kind !== 'host.user-message') continue;
     const data = item.entry?.data;
@@ -110,6 +123,41 @@ export function projectInboxQueuedItems(inbox) {
     if (items.length >= MAX_QUEUED_ITEMS) break;
   }
   return items;
+}
+
+/** 无在飞 run/压缩时提取 pi.inbox 即将启动的首条元信息，供 runtime-live 投影 preparing 相。 */
+export function projectInboxHeadActivity(inbox) {
+  const rawItems = Array.isArray(inbox?.items) ? inbox.items : [];
+  if (rawItems.length === 0) return null;
+  const head = inboxStartingItem(rawItems);
+  if (!head) return null;
+  const data = head.entry?.data;
+  const isPrimaryUser =
+    head.entry?.kind === 'host.user-message' &&
+    data &&
+    typeof data === 'object' &&
+    !Array.isArray(data) &&
+    data.attribution?.kind === 'user' &&
+    data.attribution?.channel === 'primary';
+  const channel = data?.attribution?.channel;
+  const source = isPrimaryUser
+    ? 'primary'
+    : channel === 'room'
+      ? 'room'
+      : channel === 'dm'
+        ? 'dm'
+        : data && typeof data === 'object' && !Array.isArray(data)
+          ? 'background'
+          : null;
+  const rawReqId = data?.requestId;
+  const requestId =
+    typeof rawReqId === 'string' &&
+    rawReqId.trim() !== '' &&
+    rawReqId.isWellFormed() &&
+    Buffer.byteLength(rawReqId, 'utf8') <= 256
+      ? rawReqId
+      : null;
+  return { source, requestId };
 }
 
 /** 保留输出尾部 max 个 UTF-16 单元；窗口起点落在低代理上时前进避开。 */
@@ -208,12 +256,102 @@ function orderedBlocksFromContent(content, cap) {
   return blocks.length === 0 ? null : { blocks, truncated };
 }
 
+function isHostAttachedImagePayload(text) {
+  if (typeof text !== 'string' || !text.startsWith(HOST_ATTACHED_IMAGE_PREFIX)) return false;
+  const payload = text.slice(HOST_ATTACHED_IMAGE_PREFIX.length).trim();
+  if (!payload) return false;
+  if (payload.startsWith('{') && payload.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(payload);
+      return Boolean(parsed && typeof parsed === 'object' && typeof parsed.path === 'string' && typeof parsed.name === 'string');
+    } catch {
+      return false;
+    }
+  }
+  return payload.startsWith('/') || /^[A-Za-z]:[\\/]/.test(payload);
+}
+
+function stripTrailingHostImageLines(rawText, maxLines) {
+  if (typeof rawText !== 'string' || !rawText || maxLines <= 0) return rawText || '';
+  const lines = rawText.split('\n');
+  let end = lines.length;
+  let stripped = 0;
+  while (end > 0 && stripped < maxLines) {
+    const line = lines[end - 1].replace(/\r$/, '');
+    if (isHostAttachedImagePayload(line)) {
+      stripped += 1;
+      end -= 1;
+      continue;
+    }
+    if (stripped > 0 && line.trim() === '') {
+      end -= 1;
+      continue;
+    }
+    break;
+  }
+  while (stripped > 0 && end > 0 && lines[end - 1].replace(/\r$/, '').trim() === '') {
+    end -= 1;
+  }
+  return stripped > 0 ? lines.slice(0, end).join('\n') : rawText;
+}
+
+function projectUserText(message, entry, attachments) {
+  if (typeof entry?.data?.userText === 'string') {
+    return truncatePrefix(entry.data.userText, MAX_MESSAGE_UNITS);
+  }
+  const attCount = attachments ? attachments.length : 0;
+  const content = message.content;
+  const hasImageBlock = Array.isArray(content) && content.some((b) => b && b.type === 'image');
+  if (attCount === 0 && !hasImageBlock) {
+    return textFromBlocks(content, MAX_MESSAGE_UNITS);
+  }
+  if (typeof content === 'string') {
+    return truncatePrefix(stripTrailingHostImageLines(content, attCount), MAX_MESSAGE_UNITS);
+  }
+  if (Array.isArray(content)) {
+    let end = content.length;
+    let strippedHostText = false;
+    while (end > 0) {
+      const prev = content[end - 1];
+      if (prev && prev.type === 'image') {
+        end -= 1;
+        continue;
+      }
+      if (
+        prev &&
+        prev.type === 'text' &&
+        typeof prev.text === 'string' &&
+        prev.text.startsWith(HOST_ATTACHED_IMAGE_PREFIX) &&
+        (content[end]?.type === 'image' || isHostAttachedImagePayload(prev.text))
+      ) {
+        strippedHostText = true;
+        end -= 1;
+        continue;
+      }
+      break;
+    }
+    const sliced = content.slice(0, end);
+    const extracted = textFromBlocks(sliced, MAX_MESSAGE_UNITS);
+    if (!strippedHostText && attCount > 0 && !extracted.truncated) {
+      return truncatePrefix(stripTrailingHostImageLines(extracted.text, attCount), MAX_MESSAGE_UNITS);
+    }
+    return extracted;
+  }
+  return textFromBlocks(content, MAX_MESSAGE_UNITS);
+}
+
 /** 投影一条消息；跳过 system/未知角色与无内容消息，只带文本和工具安全字段与时间戳。
     user 消息可携带附件展示元数据（不含 base64），图片-only 消息因此不会被空文本过滤掉。 */
 function projectMessage(message, budget, entry) {
   const role = message?.role;
   if (role !== 'user' && role !== 'assistant' && role !== 'toolResult') return null;
-  const { text, truncated } = textFromBlocks(message.content, MAX_MESSAGE_UNITS);
+  const attachments = role === 'user' && entry?.kind === 'host.user-message' &&
+    Array.isArray(entry?.data?.attachments) && entry.data.attachments.length > 0
+    ? entry.data.attachments.map(({ id, name, mimeType, size, width, height }) => ({ id, name, mimeType, size, width, height }))
+    : null;
+  const { text, truncated } = role === 'user'
+    ? projectUserText(message, entry, attachments)
+    : textFromBlocks(message.content, MAX_MESSAGE_UNITS);
   const toolCalls = role === 'assistant' ? toolCallsFromBlocks(message.content) : [];
   const hasToolResultIdentity =
     role === 'toolResult' &&
@@ -222,11 +360,6 @@ function projectMessage(message, budget, entry) {
   const isAssistantError =
     role === 'assistant' &&
     (message.stopReason === 'error' || (typeof message.errorMessage === 'string' && message.errorMessage.trim() !== ''));
-
-  const attachments = role === 'user' && entry?.kind === 'host.user-message' &&
-    Array.isArray(entry?.data?.attachments) && entry.data.attachments.length > 0
-    ? entry.data.attachments.map(({ id, name, mimeType, size, width, height }) => ({ id, name, mimeType, size, width, height }))
-    : null;
 
   if (text === '' && toolCalls.length === 0 && !hasToolResultIdentity && !isAssistantError && !attachments) return null;
 

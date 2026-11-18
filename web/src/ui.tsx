@@ -499,6 +499,18 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
   }
 
   // 6. Model & Generation errors
+  if (code === 'MODEL_NO_VISION' || lower.includes('model does not accept image input')) {
+    return {
+      tone: 'warning',
+      title: t('当前模型不支持图片输入', 'Current Model Does Not Support Images'),
+      description: t(
+        '该消息包含图片附件，请切换支持视觉的模型后重试，或恢复到输入框修改/移除图片后再发。',
+        'This message contains image attachments. Switch to a vision-capable model to retry, or restore to the composer to edit or remove images.',
+      ),
+      detail,
+    };
+  }
+
   if (body.includes('本次请求未获得回答') || lower.includes('no answer was generated')) {
     return {
       tone: 'warning',

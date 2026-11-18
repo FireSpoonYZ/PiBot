@@ -9,6 +9,7 @@ const defaultTr: TranslateFn = zh => zh;
 export interface PendingQueueStripProps {
   items: readonly UnifiedQueuedStripItem[];
   disabled?: boolean;
+  canSteer?: boolean;
   onRecall: (item: UnifiedQueuedStripItem) => void;
   onRecallAll: () => void;
   onDiscard: (item: UnifiedQueuedStripItem) => void;
@@ -19,6 +20,7 @@ export interface PendingQueueStripProps {
 export function PendingQueueStrip({
   items,
   disabled = false,
+  canSteer = false,
   onRecall,
   onRecallAll,
   onDiscard,
@@ -37,9 +39,14 @@ export function PendingQueueStrip({
 
   if (items.length === 1) {
     const item = items[0];
-    const isSteer = item.delivery === 'steer';
+    const isOutbox = item.source === 'outbox';
+    const isSteer = !isOutbox && item.delivery === 'steer';
     return (
-      <div className="cf-queue-strip" role="region" aria-label={tr('排队消息', 'Queued messages')}>
+      <div
+        className="cf-queue-strip"
+        role="region"
+        aria-label={isOutbox ? tr('待发送消息', 'Pending messages') : tr('排队消息', 'Queued messages')}
+      >
         <div className="cf-queue-row">
           <button
             type="button"
@@ -52,7 +59,11 @@ export function PendingQueueStrip({
               {isSteer ? <Zap size={12} /> : <CornerUpLeft size={12} />}
             </span>
             <span className="cf-queue-tag">
-              {isSteer ? tr('待插入', 'Steer') : tr('排队中', 'Queued')}
+              {isOutbox
+                ? tr('待发送', 'Pending')
+                : isSteer
+                  ? tr('待插入', 'Steer')
+                  : tr('排队中', 'Queued')}
             </span>
             <span className="cf-queue-dot" aria-hidden="true">·</span>
             <span className="cf-queue-preview">
@@ -60,7 +71,7 @@ export function PendingQueueStrip({
             </span>
           </button>
           <div className="cf-queue-actions">
-            {item.source === 'host' && !isSteer && onSteer ? (
+            {canSteer && !isOutbox && !isSteer && onSteer ? (
               <button
                 type="button"
                 className="cf-queue-icon-btn is-steer-btn"
@@ -77,8 +88,8 @@ export function PendingQueueStrip({
               className="cf-queue-icon-btn"
               disabled={disabled}
               onClick={() => onDiscard(item)}
-              title={tr('移除此排队消息', 'Discard queued message')}
-              aria-label={tr('移除此排队消息', 'Discard queued message')}
+              title={isOutbox ? tr('移除此待发送消息', 'Discard pending message') : tr('移除此排队消息', 'Discard queued message')}
+              aria-label={isOutbox ? tr('移除此待发送消息', 'Discard pending message') : tr('移除此排队消息', 'Discard queued message')}
             >
               <X size={13} />
             </button>
@@ -89,16 +100,21 @@ export function PendingQueueStrip({
   }
 
   const first = items[0];
+  const hostCount = items.filter(item => item.source === 'host').length;
+  const outboxCount = items.length - hostCount;
+  const onlyOutbox = outboxCount === items.length;
   return (
     <div
       className={`cf-queue-strip is-multi ${expanded ? 'is-expanded' : ''}`}
       role="region"
-      aria-label={tr('排队消息', 'Queued messages')}
+      aria-label={onlyOutbox ? tr('待发送消息', 'Pending messages') : tr('排队消息', 'Queued messages')}
     >
       {expanded ? (
         <div className="cf-queue-expanded-list">
           {items.map(item => {
-            const isSteer = item.delivery === 'steer';
+            const isOutbox = item.source === 'outbox';
+            const isSteer = !isOutbox && item.delivery === 'steer';
+            const showSubrowTag = isOutbox || isSteer || outboxCount > 0;
             return (
               <div key={item.requestId} className="cf-queue-row is-subrow">
                 <button
@@ -111,9 +127,15 @@ export function PendingQueueStrip({
                   <span className="cf-queue-lead-icon" aria-hidden="true">
                     {isSteer ? <Zap size={12} /> : <CornerUpLeft size={12} />}
                   </span>
-                  {isSteer ? (
+                  {showSubrowTag ? (
                     <>
-                      <span className="cf-queue-tag">{tr('待插入', 'Steer')}</span>
+                      <span className="cf-queue-tag">
+                        {isOutbox
+                          ? tr('待发送', 'Pending')
+                          : isSteer
+                            ? tr('待插入', 'Steer')
+                            : tr('排队中', 'Queued')}
+                      </span>
                       <span className="cf-queue-dot" aria-hidden="true">·</span>
                     </>
                   ) : null}
@@ -122,7 +144,7 @@ export function PendingQueueStrip({
                   </span>
                 </button>
                 <div className="cf-queue-actions">
-                  {item.source === 'host' && !isSteer && onSteer ? (
+                  {canSteer && !isOutbox && !isSteer && onSteer ? (
                     <button
                       type="button"
                       className="cf-queue-icon-btn is-steer-btn"
@@ -139,8 +161,8 @@ export function PendingQueueStrip({
                     className="cf-queue-icon-btn"
                     disabled={disabled}
                     onClick={() => onDiscard(item)}
-                    title={tr('移除此排队消息', 'Discard queued message')}
-                    aria-label={tr('移除此排队消息', 'Discard queued message')}
+                    title={isOutbox ? tr('移除此待发送消息', 'Discard pending message') : tr('移除此排队消息', 'Discard queued message')}
+                    aria-label={isOutbox ? tr('移除此待发送消息', 'Discard pending message') : tr('移除此排队消息', 'Discard queued message')}
                   >
                     <X size={13} />
                   </button>
@@ -156,13 +178,21 @@ export function PendingQueueStrip({
           className="cf-queue-main"
           onClick={() => setExpanded(prev => !prev)}
           aria-expanded={expanded}
-          title={expanded ? tr('收起排队列表', 'Collapse queue') : tr('展开排队列表', 'Expand queue')}
+          title={
+            expanded
+              ? (onlyOutbox ? tr('收起待发送列表', 'Collapse pending list') : tr('收起排队列表', 'Collapse queue'))
+              : (onlyOutbox ? tr('展开待发送列表', 'Expand pending list') : tr('展开排队列表', 'Expand queue'))
+          }
         >
           <span className="cf-queue-lead-icon" aria-hidden="true">
             <CornerUpLeft size={12} />
           </span>
           <span className="cf-queue-tag">
-            {tr(`${items.length} 条排队`, `${items.length} queued`)}
+            {onlyOutbox
+              ? tr(`${items.length} 条待发送`, `${items.length} pending`)
+              : outboxCount === 0
+                ? tr(`${items.length} 条排队`, `${items.length} queued`)
+                : tr(`${hostCount} 条排队 · ${outboxCount} 条待发送`, `${hostCount} queued · ${outboxCount} pending`)}
           </span>
           <span className="cf-queue-dot" aria-hidden="true">·</span>
           <span className="cf-queue-preview">
@@ -178,7 +208,7 @@ export function PendingQueueStrip({
             className="cf-queue-text-btn"
             disabled={disabled}
             onClick={onRecallAll}
-            title={tr('将全部排队消息撤回到输入框', 'Recall all queued messages into composer')}
+            title={onlyOutbox ? tr('将全部待发送消息撤回到输入框', 'Recall all pending messages into composer') : tr('将全部排队消息撤回到输入框', 'Recall all queued messages into composer')}
           >
             {tr('全部撤回', 'Recall all')}
           </button>

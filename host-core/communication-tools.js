@@ -22,7 +22,7 @@ const TOOL_ERROR_CODES = new Set([
 const ID_SCHEMA = { type: 'string', minLength: 1 };
 const FILES_SCHEMA = {
   type: 'array', items: { type: 'string', minLength: 1 }, maxItems: BOT_FILE_MAX_COUNT,
-  description: 'Paths on this Bot\'s Host (absolute or relative to its cwd). Up to 4 regular files, no file-size limit; images keep their original bytes.',
+  description: 'Paths on this Bot\'s Host (absolute or relative to its cwd) or structured attachment references (attachment://<id>) from session_search. Up to 4 regular files, no file-size limit; images keep their original bytes.',
 };
 const LIMIT_SCHEMA = { type: 'integer', minimum: 1, maximum: 200 };
 const THINKING_LEVEL_SCHEMA = {
@@ -644,7 +644,7 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     }),
     tool({
       name: 'send_to',
-      description: 'Send a message as this Bot to an installed scope (a DM with one peer or a room for the group): dispatch work, add information, ask a question, or deliver a result. When this turn already answers a message in that scope, the Host links the send to the original message automatically; there is nothing extra to provide. Pass "(pass)" as text (with no files) to stay silent without publishing a message (e.g. when a room turn or a pure-FYI DM needs no reply). Sending does not wait: answers and follow-ups arrive later as new rounds in this conversation, so end the turn when no independent work remains. Returns only a local stored receipt — not remote delivery, not a completed task; no scopes are created. Optional files are copied to every other member before publishing; all recipient Hosts must be online. Use original local paths (including uploaded-image paths), never base64 in text.',
+      description: 'Send a message as this Bot to an installed scope (a DM with one peer or a room for the group): dispatch work, add information, ask a question, or deliver a result. When this turn already answers a message in that scope, the Host links the send to the original message automatically; there is nothing extra to provide. Pass "(pass)" as text (with no files) to stay silent without publishing a message (e.g. when a room turn or a pure-FYI DM needs no reply). Sending does not wait: answers and follow-ups arrive later as new rounds in this conversation, so end the turn when no independent work remains. Returns only a local stored receipt — not remote delivery, not a completed task; no scopes are created. Optional files are copied to every other member before publishing; all recipient Hosts must be online. Use local paths or structured attachment references (attachment://<id>, looked up via session_search action "attachments") for uploaded user images, never base64 in text.',
       properties: {
         scopeId: ID_SCHEMA,
         text: { type: 'string', minLength: 1 },

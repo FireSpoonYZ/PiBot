@@ -84,6 +84,7 @@ import { BotBoard } from '../../../web/src/BotBoard';
 import { botBoardKey, useBotBoard, useMarkViewedBoardResult, type BotBoardTarget } from '../../../web/src/useBotBoard';
 import {
   botActivityText,
+  canSteerBotActivity,
   canStopBotActivity,
   isBotActivityBusy,
   isBotLlmRunningPhase,
@@ -103,9 +104,9 @@ import { ShowerPreview } from './ShowerPreview';
 import { ChatTranscript } from './ChatTranscript';
 import type { ChatTurn, KnownBotSummary } from '../../../web/src/chatTurnModel';
 import {
-  extractEditableUserText,
   mergeQueuedStripItems,
   resolveAttachmentMetasByIds,
+  stripTrailingHostAttachmentLines,
   type UnifiedQueuedStripItem,
 } from '../../../web/src/composerFlowControl';
 import { ComposerEditBanner, PendingQueueStrip } from '../../../web/src/ComposerFlowStrips';
@@ -1109,7 +1110,7 @@ type SendNotice = {
   showRecordAction?: boolean;
 };
 
-function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, canPick, onPick, draftError, draftHint, draftConflict, sendState, receiptBusy, sendError, sendNotice, onSend, canSend, disabled, isPreLlm, isLlmRunning, isStopping, canStop, stopDisabled, onStop, stopButtonRef, onRetryDraft, attempt, recOutcome, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, canCancelTurnAdmission = false, onInsertSlash, onOpenSendRecord, queuedItems, queueBusy, onRecallQueued, onRecallAllQueued, onDiscardQueued, onSteerQueued, isEditingTurn = false, onCancelEditTurn }: {
+function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, canPick, onPick, draftError, draftHint, draftConflict, sendState, receiptBusy, sendError, sendNotice, onSend, canSend, disabled, isPreLlm, isLlmRunning, canSteer = false, isStopping, canStop, stopDisabled, onStop, stopButtonRef, onRetryDraft, attempt, recOutcome, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onRestoreTurnAdmission, canRestoreTurnAdmission = false, canCancelTurnAdmission = false, onInsertSlash, onOpenSendRecord, queuedItems, queueBusy, onRecallQueued, onRecallAllQueued, onDiscardQueued, onSteerQueued, isEditingTurn = false, onCancelEditTurn }: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   text: string;
   onChangeText: (v: string) => void;
@@ -1136,6 +1137,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
   disabled: boolean;
   isPreLlm: boolean;
   isLlmRunning: boolean;
+  canSteer?: boolean;
   isStopping: boolean;
   canStop: boolean;
   stopDisabled: boolean;
@@ -1151,6 +1153,8 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
   turnAdmission: TurnAdmissionView | null;
   /** Host 准入失败后的显式重试：沿用冻结的同一 requestId/文本重新入队，不自动重发。 */
   onRetryTurnAdmission: () => void;
+  onRestoreTurnAdmission?: () => void;
+  canRestoreTurnAdmission?: boolean;
   canCancelTurnAdmission?: boolean;
   /** 斜杠命令先填回输入框；用户显式发送后由发送路径调用 clearHistory/compact，不当作模型 prompt。 */
   onInsertSlash: (command: string) => void;
@@ -1274,7 +1278,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.altKey) {
       e.preventDefault();
       if (canSend && !receiptBusy && !disabled && !isPreLlm && !isStopping) {
-        onSend(isLlmRunning && !isEditingTurn ? 'steer' : 'followUp');
+        onSend(canSteer && !isEditingTurn ? 'steer' : 'followUp');
       }
       return;
     }
@@ -1291,9 +1295,11 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
     draftHint ??
     (isEditingTurn
       ? 'Enter 重新发送 · Shift+Enter 换行 · Esc 取消编辑'
-      : isLlmRunning
+      : canSteer
         ? 'Enter 排队 · Ctrl+Enter 立即插入 · Shift+Enter 换行'
-        : 'Enter 发送 · Shift+Enter 换行 · / 呼出命令');
+        : isLlmRunning
+          ? 'Enter 排队 · Shift+Enter 换行'
+          : 'Enter 发送 · Shift+Enter 换行 · / 呼出命令');
   const footerRecordAction = sendState === 'idle' && sendNotice?.showRecordAction &&
     !recoveringAttempt && !sendError
     ? onOpenSendRecord
@@ -1336,12 +1342,30 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
           </div>
         ) : null}
         {turnAdmission?.phase === 'failed' ? (
-          <ErrorNotice title="消息暂未开始处理" description="内容已保留，可以重试。"
-            detail={turnAdmission.error ? `${turnAdmission.error.code}: ${turnAdmission.error.message ?? ''}` : undefined}
-            actionLabel="重试发送" onAction={onRetryTurnAdmission}
-            secondaryActionLabel={canCancelTurnAdmission ? '取消' : undefined}
-            onSecondaryAction={canCancelTurnAdmission ? onStop : undefined}
-            compact />
+          turnAdmission.error?.code === 'MODEL_NO_VISION' ? (
+            <ErrorNotice
+              tone="warning"
+              title="当前模型不支持图片��入"
+              description="该消息包含图片附件，请切换支持视觉的模型后重试，或恢复到输入框修改/移除图片后再发。"
+              detail={`${turnAdmission.error.code}: ${turnAdmission.error.message ?? ''}`}
+              actionLabel="重试发送"
+              onAction={onRetryTurnAdmission}
+              secondaryActionLabel={canRestoreTurnAdmission && onRestoreTurnAdmission ? '恢复编辑' : canCancelTurnAdmission ? '取消' : undefined}
+              onSecondaryAction={canRestoreTurnAdmission && onRestoreTurnAdmission ? onRestoreTurnAdmission : canCancelTurnAdmission ? onStop : undefined}
+              compact
+            />
+          ) : (
+            <ErrorNotice
+              title="消息暂未开始处理"
+              description="内容已保留，可以重试。"
+              detail={turnAdmission.error ? `${turnAdmission.error.code}: ${turnAdmission.error.message ?? ''}` : undefined}
+              actionLabel="重试发送"
+              onAction={onRetryTurnAdmission}
+              secondaryActionLabel={canRestoreTurnAdmission && onRestoreTurnAdmission ? '恢复编辑' : canCancelTurnAdmission ? '取消' : undefined}
+              onSecondaryAction={canRestoreTurnAdmission && onRestoreTurnAdmission ? onRestoreTurnAdmission : canCancelTurnAdmission ? onStop : undefined}
+              compact
+            />
+          )
         ) : null}
         {sendError && !attempt ? (
           <ErrorNotice error={sendError} actionLabel={onOpenSendRecord ? '查看发送记录' : undefined} onAction={onOpenSendRecord} compact />
@@ -1386,10 +1410,11 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
         <PendingQueueStrip
           items={queuedItems}
           disabled={Boolean(queueBusy || disabled || isStopping)}
+          canSteer={canSteer}
           onRecall={onRecallQueued}
           onRecallAll={onRecallAllQueued}
           onDiscard={onDiscardQueued}
-          onSteer={onSteerQueued}
+          onSteer={canSteer ? onSteerQueued : undefined}
         />
       ) : null}
       <div className="composer-input-wrap">
@@ -1492,7 +1517,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
             </button>
           ) : isPreLlm || receiptBusy ? null : isLlmRunning ? (
             <>
-              {hasDraftContent && !isEditingTurn ? (
+              {canSteer && hasDraftContent && !isEditingTurn ? (
                 <button
                   type="button"
                   className="composer-steer"
@@ -1511,7 +1536,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
                   onClick={() => onSend('followUp')}
                   disabled={receiptBusy || disabled || !canSend || isPreLlm || isStopping}
                   aria-label="排队发送"
-                  title="Enter 排队发送 · Ctrl+Enter 立即插入"
+                  title={canSteer ? 'Enter 排队发送 · Ctrl+Enter 立即插入' : 'Enter 排队发送'}
                 >
                   <SendButtonIcon busy={false} size={16} />
                 </button>
@@ -1918,6 +1943,13 @@ function PrimaryChatPane({
   const autoFocusedRef = useRef(false);
   /** 本聊天最新的 Host 准入状态（Host-queued 回执中的 admission）；null 表示无等待项。 */
   const [turnAdmission, setTurnAdmission] = useState<TurnAdmissionView | null>(null);
+  const lastEditedAdmissionRef = useRef<{
+    sess: string;
+    botId: string;
+    requestId: string;
+    text: string;
+    attachments: string[];
+  } | null>(null);
   /** 抽屉 Portal 容器：紧凑模态只锁本聊天气泡层，不影响左栏名录与导航。 */
   const stageRef = useRef<HTMLDivElement | null>(null);
   const inspectorContentRef = useRef<HTMLDivElement | null>(null);
@@ -2442,12 +2474,13 @@ function PrimaryChatPane({
     if (!identity || !online || !activeEditing || editSubmitting || lockedRef.current || isArchived) return;
     if (imageUploading) return;
     const curActivity = resolveBotActivity(live);
+    const curTurnAdmission = live !== null ? readTurnAdmission(live.turnAdmission) : turnAdmission;
     if (
       stopping ||
       Boolean(live?.busy) ||
       (live?.queuedCount ?? 0) > 0 ||
       isBotActivityBusy(curActivity) ||
-      (turnAdmission !== null && turnAdmission.phase !== 'failed')
+      (curTurnAdmission !== null && curTurnAdmission.phase !== 'failed')
     ) {
       setSendError('智能体忙碌时无法编辑历史消息，草稿已保留，请稍后重试或按 Esc 取消。');
       return;
@@ -2473,6 +2506,15 @@ function PrimaryChatPane({
       if (!isCurrentSession()) return;
       setEditingTurn(null);
       const nextAdmission = readTurnAdmission((receipt as { admission?: unknown }).admission);
+      if (nextAdmission) {
+        lastEditedAdmissionRef.current = {
+          sess,
+          botId: bot.botId,
+          requestId,
+          text: msg,
+          attachments: attachmentIds,
+        };
+      }
       setTurnAdmission(nextAdmission);
       void loadRawLatest();
       onLiveActivityRef.current?.();
@@ -2502,12 +2544,13 @@ function PrimaryChatPane({
     if (imageUploading) return;
     if (online) {
       const curActivity = resolveBotActivity(live);
+      const curTurnAdmission = live !== null ? readTurnAdmission(live.turnAdmission) : turnAdmission;
       if (
         stopping ||
         curActivity.phase === 'stopping' ||
         (!isBotLlmRunningPhase(curActivity.phase) &&
           (isBotPreLlmPhase(curActivity.phase) ||
-            (turnAdmission !== null && turnAdmission.phase !== 'failed')))
+            (live === null && curTurnAdmission !== null && curTurnAdmission.phase !== 'failed')))
       ) {
         return;
       }
@@ -2663,7 +2706,11 @@ function PrimaryChatPane({
     } else if (rec.state === 'rejected') {
       // 确定终态：本地 attempt 结束，原记录保留在待发送面板
       drafts.finishSend(handle);
-      setSendError('设备未接收消息。详情见发送记录。');
+      setSendError(
+        rec.lastError?.code === 'MODEL_NO_VISION'
+          ? 'MODEL_NO_VISION: model does not accept image input'
+          : '设备未接收消息。详情见发送记录。',
+      );
     } else if (rec.state === 'unconfirmed' || rec.state === 'sending') {
       drafts.markUnconfirmed(handle);
       setSendError(null);
@@ -2728,27 +2775,36 @@ function PrimaryChatPane({
     }
   }
 
-  /** 找到本 Bot 最近一条 Host-queued 记录（本地分页，只读；返回 null 表示无等待项）。 */
-  async function findHostAdmissionRecord(): Promise<PendingRecord | null> {
+  /** 找到本 Bot 最近一条 Host-queued 记录（优先匹配指定 requestId；返回 null 表示无等待项）。 */
+  async function findHostAdmissionRecord(preferredRequestId?: string): Promise<PendingRecord | null> {
     const current = api.identity;
     if (!current) return null;
     let cursor: PendingCursor | null = null;
+    let fallback: PendingRecord | null = null;
     for (let pageNo = 0; pageNo < 20; pageNo += 1) {
       const page: PendingListPage = await api.pending(current, 'pending_list', { options: { limit: 50, cursor } });
-      const hit = page.items.find(
-        (item: PendingRecord) => item.kind === 'primary' && item.botId === bot.botId && readHostQueuedReceipt(item) !== null,
-      );
-      if (hit) return hit;
+      if (preferredRequestId) {
+        const exact = page.items.find(
+          (item: PendingRecord) => item.kind === 'primary' && item.botId === bot.botId && item.requestId === preferredRequestId,
+        );
+        if (exact) return exact;
+      }
+      if (!fallback) {
+        fallback = page.items.find(
+          (item: PendingRecord) => item.kind === 'primary' && item.botId === bot.botId && readHostQueuedReceipt(item) !== null,
+        ) ?? null;
+        if (fallback && !preferredRequestId) return fallback;
+      }
       cursor = page.nextCursor;
       if (!cursor) break;
     }
-    return null;
+    return fallback;
   }
 
   /** 显式刷新 Host 准入状态；找不到等待记录即清空显示。 */
   async function refreshTurnAdmission() {
     try {
-      const rec = await findHostAdmissionRecord();
+      const rec = await findHostAdmissionRecord(turnAdmission?.requestId);
       if (isCurrentSession()) setTurnAdmission(rec ? readHostQueuedReceipt(rec)?.admission ?? null : null);
     } catch (e) {
       if (isCurrentSession()) reportUnlessTargetOffline(api, e);
@@ -2763,29 +2819,53 @@ function PrimaryChatPane({
   async function retryTurnAdmission() {
     const current = api.identity;
     if (!current || !api.transportConnected || sendState !== 'idle' || lockedRef.current || isArchived) return;
-    const rec = await findHostAdmissionRecord();
+    const failedRequestId = effectiveTurnAdmission?.phase === 'failed' ? effectiveTurnAdmission.requestId : undefined;
+    const rec = await findHostAdmissionRecord(failedRequestId);
     if (!isCurrentSession()) return;
-    const admission = rec ? readHostQueuedReceipt(rec)?.admission ?? null : null;
-    if (!rec || rec.kind !== 'primary' || !admission || admission.phase !== 'failed') {
-      if (mountedRef.current) setTurnAdmission(admission);
+    const recAdmission = rec ? readHostQueuedReceipt(rec)?.admission ?? null : null;
+    const editedFallback =
+      !rec &&
+      failedRequestId &&
+      lastEditedAdmissionRef.current?.sess === sess &&
+      lastEditedAdmissionRef.current.botId === bot.botId &&
+      lastEditedAdmissionRef.current.requestId === failedRequestId
+        ? lastEditedAdmissionRef.current
+        : null;
+    const isFailed =
+      Boolean(
+        effectiveTurnAdmission?.phase === 'failed' &&
+          (!failedRequestId || (rec?.kind === 'primary' ? rec.requestId : editedFallback?.requestId) === failedRequestId),
+      ) || recAdmission?.phase === 'failed';
+    if ((!rec && !editedFallback) || !isFailed) {
+      if (mountedRef.current && rec) setTurnAdmission(recAdmission);
       return;
     }
     lockedRef.current = true;
     setSendState('sending');
     setSendError(null);
     try {
-      const receipt = await api.call(current, 'submit', {
-        botId: rec.botId,
-        requestId: rec.requestId,
-        text: rec.text,
-        ...(rec.attachments?.length ? { attachments: rec.attachments } : {}),
-        ...(rec.delivery ? { delivery: rec.delivery } : {}),
-      });
+      const submitParams = rec && rec.kind === 'primary'
+        ? {
+            botId: rec.botId,
+            requestId: rec.requestId,
+            text: rec.text,
+            ...(rec.attachments?.length ? { attachments: rec.attachments } : {}),
+            ...(rec.delivery ? { delivery: rec.delivery } : {}),
+          }
+        : {
+            botId: editedFallback!.botId,
+            requestId: editedFallback!.requestId,
+            text: editedFallback!.text,
+            ...(editedFallback!.attachments.length ? { attachments: editedFallback!.attachments } : {}),
+          };
+      const receipt = await api.call(current, 'submit', submitParams);
       if (!isCurrentSession()) return;
       const nextAdmission = readTurnAdmission((receipt as { admission?: unknown }).admission);
       setTurnAdmission(nextAdmission);
-      // 本地 outbox 记录 receipt 仍带旧 admission：显式对账刷新一次（只读，不改远端状态）。
-      try { await api.pending(current, 'pending_reconcile', { id: rec.id }); } catch { /* 对账失败不掩盖重试结果 */ }
+      if (rec) {
+        // 本地 outbox 记录 receipt 仍带旧 admission：显式对账刷新一次（只读，不改远端状态）。
+        try { await api.pending(current, 'pending_reconcile', { id: rec.id }); } catch { /* 对账失败不掩盖重试结果 */ }
+      }
     } catch (e) {
       if (!isCurrentSession()) return;
       reportUnlessTargetOffline(api, e);
@@ -2793,6 +2873,53 @@ function PrimaryChatPane({
     } finally {
       lockedRef.current = false;
       setSendState('idle');
+    }
+  }
+
+  /** 将准入失败的消息从 Host 队列撤回并安全合并回输入框（不覆盖用户刚写的新草稿）。 */
+  async function restoreFailedTurnAdmission() {
+    const current = api.identity;
+    const targetRequestId = effectiveTurnAdmission?.phase === 'failed' ? effectiveTurnAdmission.requestId : undefined;
+    if (!current || !api.transportConnected || !targetRequestId || queueBusy || sendState !== 'idle' || lockedRef.current || isArchived) {
+      return;
+    }
+    if (drafts.attempt) {
+      setSendError('当前存在未确认的发送草稿，请先处理后再恢复失败消息。');
+      return;
+    }
+    const frozenDraftKey = drafts.key ?? undefined;
+    setQueueBusy(true);
+    setSendError(null);
+    try {
+      const res = (await api.call(current, 'withdrawQueued', {
+        botId: bot.botId,
+        requestId: targetRequestId,
+      })) as WithdrawQueuedResult;
+      if (!isCurrentSession()) return;
+      const withdrawn = Array.isArray(res?.withdrawn) ? res.withdrawn : [];
+      if (withdrawn.length > 0) {
+        const texts = withdrawn
+          .map((w) => (w.attachments?.length ? stripTrailingHostAttachmentLines(w.text, w.attachments.length) : w.text))
+          .filter((s) => typeof s === 'string' && s.trim().length > 0);
+        const attIds = withdrawn.flatMap((w) => (Array.isArray(w.attachments) ? w.attachments : []));
+        const resolvedAtts = await resolveAttachmentMetasByIds(attIds, attachmentFetcher);
+        if (!isCurrentSession()) return;
+        drafts.mergeRecalled(texts, resolvedAtts, frozenDraftKey);
+        setTurnAdmission((cur) => (cur?.requestId === targetRequestId ? null : cur));
+        if (lastEditedAdmissionRef.current?.requestId === targetRequestId) {
+          lastEditedAdmissionRef.current = null;
+        }
+        window.setTimeout(() => composerRef.current?.focus(), 0);
+      } else {
+        await refreshTurnAdmission();
+      }
+      onLiveActivityRef.current?.();
+    } catch (e) {
+      if (!isCurrentSession()) return;
+      setSendError('恢复编辑失败：' + tErr(e));
+      reportUnlessTargetOffline(api, e);
+    } finally {
+      if (mountedRef.current) setQueueBusy(false);
     }
   }
 
@@ -3171,7 +3298,15 @@ function PrimaryChatPane({
   }
 
   async function steerQueuedItem(item: UnifiedQueuedStripItem) {
-    if (!identity || !online || queueBusy || item.source !== 'host') return;
+    const curActivity = resolveBotActivity(live);
+    if (
+      !identity ||
+      queueBusy ||
+      item.source !== 'host' ||
+      !canSteerBotActivity({ activity: curActivity, online, archived: isArchived, isStopping: stopping })
+    ) {
+      return;
+    }
     setQueueBusy(true);
     try {
       await api.call(identity, 'steerQueued', {
@@ -3266,21 +3401,29 @@ function PrimaryChatPane({
     ? () => onOpenSendRecords({ deviceId: bot.deviceId, botId: bot.botId, recordId: sendRecordId ?? undefined })
     : undefined;
 
-  // 正文从 Host 受理起显示任务活动。顶部仍用本地 queued 投影维持发送期间的状态和停止入口。
+  // 正文从 Host 受理起显示任务活动；live 就绪后以 live.turnAdmission 为权威，未受理发送中不伪装成 queued。
+  const effectiveTurnAdmission = live !== null ? readTurnAdmission(live.turnAdmission) : turnAdmission;
   const liveActivity = resolveBotActivity(live);
   const transcriptActivity: BotActivity =
     stopping && liveActivity.phase !== 'stopping' && liveActivity.phase !== 'interrupting'
       ? { ...liveActivity, phase: 'stopping' }
       : liveActivity;
-  const activity: BotActivity =
-    sendState === 'sending' &&
-    slashBusy === null &&
-    (transcriptActivity.phase === 'idle' || transcriptActivity.phase === 'stopped')
-      ? {
-          phase: 'queued', source: 'primary', scopeId: null, requestId: null, startedAt: null,
-          webhookStopPending: liveActivity.webhookStopPending,
-        }
-      : transcriptActivity;
+  const acceptedPendingPreparing =
+    live === null &&
+    !stopping &&
+    !isBotActivityBusy(transcriptActivity) &&
+    effectiveTurnAdmission !== null &&
+    effectiveTurnAdmission.phase !== 'failed';
+  const activity: BotActivity = acceptedPendingPreparing
+    ? {
+        phase: 'preparing',
+        source: effectiveTurnAdmission.source ?? 'primary',
+        scopeId: null,
+        requestId: effectiveTurnAdmission.requestId,
+        startedAt: null,
+        webhookStopPending: liveActivity.webhookStopPending,
+      }
+    : transcriptActivity;
   const liveBusy = isBotActivityBusy(activity);
   const canStop = canStopBotActivity(activity);
   const pendingQuestionnaire = online && !isArchived && live?.busy && !liveEnded && !liveError &&
@@ -3319,7 +3462,7 @@ function PrimaryChatPane({
     stopping ||
     isSendingMessage ||
     slashBusy !== null ||
-    (turnAdmission !== null && turnAdmission.phase !== 'failed');
+    (effectiveTurnAdmission !== null && effectiveTurnAdmission.phase !== 'failed');
   const canEditTurns = Boolean(online && !isArchived && !isBusyForEdit && !editSubmitting && !disabled);
   useEffect(() => {
     if (!editingTurn || editSubmitting) return;
@@ -3341,7 +3484,7 @@ function PrimaryChatPane({
         sess,
         botId: bot.botId,
         entryId: turn.entryId,
-        text: extractEditableUserText(turn.text ?? ''),
+        text: turn.text ?? '',
         attachments: (turn.attachments ?? []).map((a) => ({ ...a })),
       });
       window.setTimeout(() => {
@@ -3354,10 +3497,17 @@ function PrimaryChatPane({
     },
     [canEditTurns, sess, bot.botId],
   );
-  const queuedStripItems = useMemo(
-    () => mergeQueuedStripItems(live?.queuedItems, outboxPendingItems, bot.botId, identity?.targetDeviceId),
-    [live?.queuedItems, outboxPendingItems, bot.botId, identity?.targetDeviceId],
-  );
+  const queuedStripItems = useMemo(() => {
+    const items = mergeQueuedStripItems(live?.queuedItems, outboxPendingItems, bot.botId, identity?.targetDeviceId);
+    const hiddenIds = new Set<string>();
+    if (effectiveTurnAdmission && effectiveTurnAdmission.phase !== 'queued') {
+      hiddenIds.add(effectiveTurnAdmission.requestId);
+    }
+    if (liveActivity.phase === 'preparing' && liveActivity.requestId) {
+      hiddenIds.add(liveActivity.requestId);
+    }
+    return hiddenIds.size > 0 ? items.filter((item) => !hiddenIds.has(item.requestId)) : items;
+  }, [live?.queuedItems, outboxPendingItems, bot.botId, identity?.targetDeviceId, effectiveTurnAdmission, liveActivity.phase, liveActivity.requestId]);
   const composerText = activeEditing ? activeEditing.text : drafts.text;
   const composerAttachments = activeEditing ? activeEditing.attachments : drafts.attachments;
   const composerFiles = activeEditing ? [] : drafts.files;
@@ -3367,7 +3517,7 @@ function PrimaryChatPane({
     archived: isArchived,
     isSending: isSendingMessage,
     isStopping: stopping,
-    pendingAdmissionWaiting: turnAdmission !== null && turnAdmission.phase !== 'failed',
+    pendingAdmissionWaiting: live === null && effectiveTurnAdmission !== null && effectiveTurnAdmission.phase !== 'failed',
     hasDraft: composerText.trim().length > 0 || composerAttachments.length > 0,
     canStop,
   });
@@ -3375,6 +3525,12 @@ function PrimaryChatPane({
   const isPreLlmPhase = desktopComposerAction === 'loading';
   const isLlmRunningPhase =
     !isArchived && !isStoppingPhase && !isPreLlmPhase && online && isBotLlmRunningPhase(liveActivity.phase);
+  const canSteer = canSteerBotActivity({
+    activity: liveActivity,
+    online,
+    archived: isArchived,
+    isStopping: stopping || isStoppingPhase,
+  });
   const showComposerStop = shouldShowComposerStop({
     phase: liveActivity.phase,
     online,
@@ -3395,8 +3551,14 @@ function PrimaryChatPane({
       : liveEnded
         ? '观察已结束（不断连 Agent）'
         : live
-          ? awaitingAnswer ?? botActivityText(activity, t)
-          : '正在建立观察…';
+          ? awaitingAnswer ?? (
+              isSendingMessage && !isBotActivityBusy(activity)
+                ? (activity.webhookStopPending ? '发送中 · Webhook停止待同步' : '发送中')
+                : botActivityText(activity, t)
+            )
+          : isSendingMessage
+            ? '发送中'
+            : '正在建立观察…';
 
   function openInspector(tab: InspectorTab) {
     setInspectorTab((cur) => (cur === tab ? null : tab));
@@ -3864,6 +4026,7 @@ function PrimaryChatPane({
         disabled={disabled}
         isPreLlm={isPreLlmPhase}
         isLlmRunning={isLlmRunningPhase}
+        canSteer={canSteer}
         isStopping={isStoppingPhase}
         canStop={showComposerStop}
         stopDisabled={stopDisabled}
@@ -3875,9 +4038,11 @@ function PrimaryChatPane({
         onReleaseNotSent={releaseNotSent}
         onRetryClearVerified={retryClearVerified}
         onAdoptNewerDraft={adoptNewerDraft}
-        turnAdmission={activeEditing ? null : turnAdmission}
+        turnAdmission={activeEditing ? null : effectiveTurnAdmission}
         onRetryTurnAdmission={() => void retryTurnAdmission()}
-        canCancelTurnAdmission={Boolean(!activeEditing && turnAdmission?.phase === 'failed' && canStop && !stopDisabled)}
+        onRestoreTurnAdmission={() => void restoreFailedTurnAdmission()}
+        canRestoreTurnAdmission={Boolean(!activeEditing && effectiveTurnAdmission?.phase === 'failed' && online && !isArchived && !queueBusy && !stopping && sendState === 'idle')}
+        canCancelTurnAdmission={Boolean(!activeEditing && effectiveTurnAdmission?.phase === 'failed' && canStop && !stopDisabled)}
         onInsertSlash={(cmd) => drafts.editText(cmd)}
         onOpenSendRecord={activeEditing ? undefined : openSendRecord}
         queuedItems={queuedStripItems}
@@ -3885,7 +4050,7 @@ function PrimaryChatPane({
         onRecallQueued={(item) => void recallQueuedItem(item, true)}
         onRecallAllQueued={() => void recallAllQueued()}
         onDiscardQueued={(item) => void recallQueuedItem(item, false)}
-        onSteerQueued={(item) => void steerQueuedItem(item)}
+        onSteerQueued={canSteer ? ((item) => void steerQueuedItem(item)) : undefined}
         isEditingTurn={Boolean(activeEditing)}
         onCancelEditTurn={() => {
           setEditingTurn(null);

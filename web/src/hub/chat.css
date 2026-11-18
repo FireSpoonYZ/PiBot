@@ -50,3 +50,74 @@
 .bot-bubble-action-btn:hover:not(:disabled) {
   background: color-mix(in srgb, var(--text) 7%, transparent);
 }
+
+/* 融合工作槽与失败状态行 */
+.sand-activity-slot,
+.sand-activity-mark {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.sand-activity-slot.is-inline {
+  animation: none;
+  padding: 4px 2px 2px;
+}
+
+.bot-chat-bubble + .sand-activity-slot.is-inline {
+  margin-top: 4px;
+}
+
+.sand-activity-detail-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  min-height: 0;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.sand-activity-detail-toggle:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface) 75%, var(--text) 10%);
+}
+
+.sand-activity-detail-toggle:focus-visible {
+  outline: 2px solid var(--brand, var(--accent));
+  outline-offset: 2px;
+}
+
+.sand-activity-detail-toggle svg {
+  transition: transform 140ms ease;
+}
+
+.sand-activity-detail-toggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.sand-activity-failure-detail {
+  margin: 4px 0 0 46px;
+  padding: 8px 10px;
+  max-width: calc(100% - 46px);
+  min-width: 0;
+  max-height: 180px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: 0;
+  border-radius: 8px;
+  box-shadow: none;
+  background: var(--surface);
+  color: var(--muted);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}

@@ -58,10 +58,13 @@ import { createWebhookConsumer } from './host-webhooks.js';
 import { createTaskDispatchConsumer, fetchAllActiveGlobalTasks } from './host-tasks.js';
 import { createScheduleTools } from './schedule-tools.js';
 import {
+  assertModelSupportsAttachments,
   attachmentPath,
   loadAttachment,
   normalizeAttachmentIds,
+  parseAttachmentRef,
   removeBotAttachments,
+  stripLegacyAttachmentPromptBlocks,
   uploadAttachment,
 } from './attachments.js';
 import { putBotFileChunk } from './bot-files.js';
@@ -178,6 +181,101 @@ function toRuntimeError(err) {
   const message = typeof err?.message === 'string' && err.message
     ? err.message.slice(0, 200) : 'runtime configuration could not be applied';
   return { code, message };
+}
+
+/** 构造历史请求时非破坏性去掉旧 Host 自动注入的图片路径说明，不动存储条目与显式用户文本。 */
+function sanitizeLegacyAttachmentPromptMessages(messages, cutoffView) {
+  if (!Array.isArray(messages) || !cutoffView || !Array.isArray(cutoffView.messages)) {
+    return messages;
+  }
+  if (messages.length !== cutoffView.messages.length) {
+    return messages;
+  }
+  const entryByMessage = new Map();
+  for (let i = 0; i < cutoffView.entries.length; i++) {
+    const entry = cutoffView.entries[i];
+    for (const msg of cutoffView.contributions[i] ?? []) {
+      entryByMessage.set(msg, entry);
+    }
+  }
+  let changed = false;
+  const next = messages.map((message, index) => {
+    const entry = entryByMessage.get(cutoffView.messages[index]);
+    if (entry?.kind !== USER_MESSAGE_KIND || !Array.isArray(entry.data?.attachments) || entry.data.attachments.length === 0) {
+      return message;
+    }
+    if (message?.role !== 'user' || !Array.isArray(message.content)) {
+      return message;
+    }
+    const stripped = stripLegacyAttachmentPromptBlocks(entry, message.content);
+    if (stripped === message.content) return message;
+    changed = true;
+    return { ...message, content: stripped };
+  });
+  return changed ? next : messages;
+}
+
+/**
+ * 复用 coding-tools 的 read 工具：对常规路径原样透传；对 session_search 返回的
+ * attachment://<id> 引用在 Host 侧按当前 Bot 身份解析并读取原图，不把真实磁盘路径交给模型。
+ */
+function createHostReadTool(baseTool, { host, getHarness, models }) {
+  const readError = (code, message) => ({
+    isError: true,
+    output: [{ type: 'text', text: JSON.stringify({ code, message }) }],
+  });
+  return {
+    ...baseTool,
+    description: `${baseTool.description} Also accepts a structured attachment reference (attachment://<id>) from session_search to inspect the original user-uploaded image for this Bot.`,
+    async execute(args, api, context) {
+      let attachmentId;
+      try {
+        attachmentId = parseAttachmentRef(args?.path);
+      } catch (err) {
+        return readError(err?.code ?? 'INVALID_ARGUMENT', err?.message ?? 'invalid attachment reference');
+      }
+      if (attachmentId === null) {
+        return baseTool.execute(args, api, context);
+      }
+      try {
+        context.abortSignal?.throwIfAborted();
+        const identity = await resolveBotIdentity(host, getHarness(), api.conversationId, context);
+        context.abortSignal?.throwIfAborted();
+        const agent = await api.agent(context);
+        const modelRef = agent?.model;
+        const modelRecord = modelRef
+          ? (api.models?.getModel(modelRef.provider, modelRef.modelId) ?? models.getModel(modelRef.provider, modelRef.modelId))
+          : null;
+        if (!modelRecord) {
+          return readError('MODEL_REQUIRED', 'model is required');
+        }
+        const modalities = Array.isArray(modelRecord.input) ? modelRecord.input : ['text'];
+        if (!modalities.includes('image')) {
+          return readError('MODEL_NO_VISION', 'model does not accept image input');
+        }
+        const loaded = await loadAttachment(host.dataRoot, identity.botId, attachmentId);
+        assertModelSupportsAttachments(modelRecord, [loaded]);
+        const block = { type: 'image', data: loaded.data, mimeType: loaded.mimeType };
+        return {
+          output: [block],
+          structuredOutput: block,
+          diagnostics: [{
+            severity: 'info',
+            code: 'image',
+            message: `Read attachment ${loaded.name} [${loaded.mimeType}] (${loaded.width}x${loaded.height}, ${loaded.size} bytes).`,
+          }],
+        };
+      } catch (err) {
+        context.abortSignal?.throwIfAborted();
+        if (err?.code === 'MODEL_NO_VISION' || err?.code === 'ATTACHMENT_NOT_FOUND' ||
+            err?.code === 'INVALID_ARGUMENT' || err?.code === 'INVALID_STATE' ||
+            err?.code === 'BOT_CONTEXT_REQUIRED') {
+          return readError(err.code, err.message);
+        }
+        throw err;
+      }
+    },
+  };
 }
 
 /**
@@ -307,6 +405,7 @@ export async function openRuntime(options) {
   const HOST_FAILURE_MESSAGES = {
     CENTER_OFFLINE: 'center is offline',
     MODEL_REQUIRED: 'center model is required',
+    MODEL_NO_VISION: 'model does not accept image input',
     INVALID_STATE: 'request state is invalid',
     CONTEXT_LIMIT: 'context limit reached',
     BOT_CONTEXT_REQUIRED: 'conversation ownership is ambiguous',
@@ -431,7 +530,15 @@ export async function openRuntime(options) {
     name: 'host.base-behavior',
     sections: [section('host-base-behavior', () => BASE_BEHAVIOR_PROMPT)],
   }));
-  registry.install(createCodingTools());
+  const codingTools = createCodingTools();
+  registry.install(defineExtension({
+    name: codingTools.name,
+    tools: codingTools.tools.map((baseTool) => (
+      baseTool.name === 'read'
+        ? createHostReadTool(baseTool, { host, getHarness: () => harness, models })
+        : baseTool
+    )),
+  }));
   registry.install(defineExtension({
     name: 'host.bot-board',
     hooks: [hook(GenerationTask, botBoardResultHooks(() => harness))],
@@ -591,28 +698,33 @@ export async function openRuntime(options) {
           const task = await harness.getTask(api.taskId, context);
           const actual = task?.state?.checkpoint?.model;
           if (!actual || actual.provider !== expected.provider || actual.modelId !== expected.modelId) throw errWithCode('center model changed', 'INVALID_STATE');
-          // 统一会话冻结轮最先：sessions 判定/恢复本轮来源与回复目标（prepend-only，
-          // 只把可信 Host 路由指引追加到 request 头部）。该指引是本 helper 的明确
-          // prepend-only 产物，用长度差切出，不用对象 identity/正文分类。
-          const routed = await sessions.beforeRequest(request, api, context);
-          const routingMessages = routed.messages.slice(0, routed.messages.length - request.messages.length);
-          await decisions.beforeRequest(routed, api, context);
-          // prepareContext 收原始 request（不带 Host 注入）：BC 等上下文贡献返回的
-          // 完整视图不能覆盖、也不重复计费本轮 Host 控制指引；持久 prepared 预算
-          // 仍记真实投影，最终守卫按有序子序列增量把指引只计一次。
-          const requestView = await plugins.prepareContext(request, api, context);
           const checkpoint = task.state.checkpoint;
           const model = models.getModel(actual.provider, actual.modelId);
           if (!model || checkpoint.cutoff === undefined) throw errWithCode('request checkpoint is unavailable', 'INVALID_STATE');
-          // SDK 同口径预算基线：取 checkpoint.cutoff 的权威上下文视图，
-          // 用 estimateContext（最新 assistant usage + 尾部估计）算原始历史，
-          // 再按有序子序列 + 增量把 prepareContext（如 BC 投影、路由指引）的实际
-          // 有效请求计入 tokenCount；JSON 克隆内容匹配，BC 整体替换只计投影。
           const preparedConversation = await harness.conversation(api.conversationId, context);
           if (!preparedConversation) throw errWithCode('request conversation is missing', 'INVALID_STATE');
           const cutoffView = await preparedConversation.context(context, { at: checkpoint.cutoff });
           if (!cutoffView) throw errWithCode('request context view is unavailable', 'INVALID_STATE');
-          const preparedTokens = budgetRequestTokens(cutoffView.messages, estimateContextTokensHost(cutoffView), requestView.messages);
+          // 构造模型输入视图时去掉旧版自动生成的前置路径块，不改写存储库与显式用户文本。
+          const sanitizedMessages = sanitizeLegacyAttachmentPromptMessages(request.messages, cutoffView);
+          const sanitizedRequest = sanitizedMessages === request.messages ? request : { ...request, messages: sanitizedMessages };
+          // 统一会话冻结轮最先：sessions 判定/恢复本轮来源与回复目标（prepend-only，
+          // 只把可信 Host 路由指引追加到 request 头部）。该指引是本 helper 的明确
+          // prepend-only 产物，用长度差切出，不用对象 identity/正文分类。
+          const routed = await sessions.beforeRequest(sanitizedRequest, api, context);
+          const routingMessages = routed.messages.slice(0, routed.messages.length - sanitizedRequest.messages.length);
+          await decisions.beforeRequest(routed, api, context);
+          // prepareContext 收原始 request（不带 Host 注入）：BC 等上下文贡献返回的
+          // 完整视图不能覆盖、也不重复计费本轮 Host 控制指引；持久 prepared 预算
+          // 仍记真实投影，最终守卫按有序子序列增量把指引只计一次。
+          const requestView = await plugins.prepareContext(sanitizedRequest, api, context);
+          // SDK 同口径预算基线：取 checkpoint.cutoff 的权威上下文视图，
+          // 用 estimateContext（最新 assistant usage + 尾部估计）算原始历史，
+          // 再按有序子序列 + 增量把 prepareContext（如 BC 投影、路由指引）的实际
+          // 有效请求计入 tokenCount；JSON 克隆内容匹配，BC 整体替换只计投影。
+          const baselineMessages = sanitizeLegacyAttachmentPromptMessages(cutoffView.messages, cutoffView);
+          const baselineView = baselineMessages === cutoffView.messages ? cutoffView : { ...cutoffView, messages: baselineMessages };
+          const preparedTokens = budgetRequestTokens(baselineView.messages, estimateContextTokensHost(baselineView), requestView.messages);
           await harness.commit(async (tx) => {
             const doc = await tx.doc(RequestContext, api.conversationId);
             doc.prepared = {
@@ -2428,10 +2540,12 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
             throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
           }
           await assertBotIdle(bot);
+          const attachmentMeta = [];
           let attachmentBytes = 0;
           for (const id of attachmentIds) {
             const meta = await attachmentStore.load(botId, id);
             attachmentBytes += meta.size;
+            attachmentMeta.push({ id: meta.id, name: meta.name, mimeType: meta.mimeType, size: meta.size, width: meta.width, height: meta.height });
           }
           if (attachmentBytes > 64 * 1024 * 1024) {
             throw errWithCode('attachments exceed the 64 MiB per-message total image byte limit', 'INVALID_ARGUMENT');
@@ -2443,6 +2557,23 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
           const resetId = await latestResetEntryId(conversation, CTX);
           if (entryId <= resetId) {
             throw errWithCode(`entry ${entryId} is before the active conversation reset`, 'INVALID_ARGUMENT');
+          }
+          if (attachmentMeta.length > 0) {
+            let modelRecord = null;
+            const modelRef = getBotModels()[botId]?.modelRef ?? bot.modelRef ?? null;
+            if (typeof modelRef === 'string' && modelRef.trim() !== '') {
+              try {
+                const ref = parseModelRef(modelRef.trim());
+                modelRecord = models.getModel(ref.provider, ref.modelId) ?? null;
+              } catch { /* ignore invalid ref during pre-admission check */ }
+            }
+            if (!modelRecord) {
+              const agent = await conversation.agent(CTX).catch(() => null);
+              if (agent?.model) {
+                modelRecord = models.getModel(agent.model.provider, agent.model.modelId) ?? null;
+              }
+            }
+            assertModelSupportsAttachments(modelRecord, attachmentMeta);
           }
           const [agentSnapshot, sessionSnapshot, requestKeysSnapshot, dispatchContextsSnapshot] = await Promise.all([
             harness.snapshot(durable.AgentDoc, conversation.id, CTX),

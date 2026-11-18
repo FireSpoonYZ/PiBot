@@ -61,7 +61,7 @@ export function resolveBotActivity(
         : null;
     return { ...fallbackActivity('failed', admissionSource), requestId };
   }
-  if (admissionPhase === 'checking' || admissionPhase === 'synchronizing') {
+  if (admissionPhase === 'queued' || admissionPhase === 'checking' || admissionPhase === 'synchronizing') {
     return fallbackActivity('preparing', admissionSource);
   }
   if ((live.queuedCount ?? 0) > 0) return fallbackActivity('queued', admissionSource);
@@ -102,7 +102,7 @@ export function botActivityText(
       case 'queued':
         return t('排队中', 'Queued');
       case 'preparing':
-        return t('准备中', 'Preparing');
+        return t('正在准备', 'Preparing');
       case 'running':
         return t('工作中', 'Working');
       case 'compacting':
@@ -207,4 +207,19 @@ export function shouldShowComposerStop({
 }): boolean {
   if (!online || archived || isStopping || phase === 'stopping') return false;
   return canStop && (isBotPreLlmPhase(phase) || isBotLlmRunningPhase(phase));
+}
+
+export function canSteerBotActivity({
+  activity,
+  online = true,
+  archived = false,
+  isStopping = false,
+}: {
+  activity: Pick<BotActivity, 'phase' | 'source'> | null | undefined;
+  online?: boolean;
+  archived?: boolean;
+  isStopping?: boolean;
+}): boolean {
+  if (!online || archived || isStopping || !activity) return false;
+  return activity.phase === 'running' && activity.source === 'primary';
 }

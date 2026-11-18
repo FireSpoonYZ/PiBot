@@ -17,6 +17,9 @@ const MAX_NAME_BYTES = 256;
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 const ATTACHMENT_ID_RE = /^[0-9a-f]{64}$/;
 const ACCEPTED_MIME = new Set(['image/jpeg', 'image/png']);
+export const LEGACY_ATTACHED_IMAGE_PREFIX = 'Attached image on this Host (use this path to read or send the file): ';
+export const ATTACHMENT_REF_PREFIX = 'attachment://';
+const ATTACHMENT_SHORT_PREFIX = 'attachment:';
 
 export const ATTACHMENT_LIMITS = {
   maxImageBytes: MAX_IMAGE_BYTES,
@@ -144,24 +147,31 @@ export function attachmentPath(root, botId, attachmentId) {
   return join(botAttachmentDirectory(root, botId), attachmentId);
 }
 
-/** 读已落盘的 metadata + base64（提交时组装模型内容、getAttachment 对外方法共用）。 */
-export async function loadAttachment(root, botId, attachmentId) {
+export function formatAttachmentRef(attachmentId) {
   if (typeof attachmentId !== 'string' || !ATTACHMENT_ID_RE.test(attachmentId)) {
     throw invalidArgument('attachmentId must be a 64-char lowercase hex string');
   }
-  const dir = assertBotAttachmentDir(root, botId);
-  const bytes = await readFile(join(dir, attachmentId)).catch((err) => {
-    if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') {
-      throw errWithCode('attachment not found: ' + attachmentId, 'ATTACHMENT_NOT_FOUND');
-    }
-    throw err;
-  });
-  const metaRaw = await readFile(join(dir, attachmentId + '.json'), 'utf8').catch((err) => {
-    if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') {
-      throw errWithCode('attachment metadata not found: ' + attachmentId, 'ATTACHMENT_NOT_FOUND');
-    }
-    throw err;
-  });
+  return ATTACHMENT_REF_PREFIX + attachmentId;
+}
+
+/** 解析模型传入的结构化附件引用（attachment://<sha256> 或 attachment:<sha256>）；非引用返回 null。 */
+export function parseAttachmentRef(value) {
+  if (typeof value !== 'string') return null;
+  let id = null;
+  if (value.startsWith(ATTACHMENT_REF_PREFIX)) {
+    id = value.slice(ATTACHMENT_REF_PREFIX.length);
+  } else if (value.startsWith(ATTACHMENT_SHORT_PREFIX)) {
+    id = value.slice(ATTACHMENT_SHORT_PREFIX.length);
+  } else {
+    return null;
+  }
+  if (!ATTACHMENT_ID_RE.test(id)) {
+    throw invalidArgument('attachment reference must contain a 64-char lowercase hex attachment id');
+  }
+  return id;
+}
+
+function parseAttachmentMeta(attachmentId, metaRaw) {
   let meta;
   try {
     meta = JSON.parse(metaRaw);
@@ -180,8 +190,135 @@ export async function loadAttachment(root, botId, attachmentId) {
     size: meta.size,
     width: meta.width,
     height: meta.height,
+  };
+}
+
+/** 只校验并读取已落盘的附件元数据，不分配整图 base64。 */
+export async function loadAttachmentMeta(root, botId, attachmentId) {
+  if (typeof attachmentId !== 'string' || !ATTACHMENT_ID_RE.test(attachmentId)) {
+    throw invalidArgument('attachmentId must be a 64-char lowercase hex string');
+  }
+  const dir = assertBotAttachmentDir(root, botId);
+  const info = await stat(join(dir, attachmentId)).catch((err) => {
+    if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') {
+      throw errWithCode('attachment not found: ' + attachmentId, 'ATTACHMENT_NOT_FOUND');
+    }
+    throw err;
+  });
+  if (!info.isFile()) {
+    throw errWithCode('attachment not found: ' + attachmentId, 'ATTACHMENT_NOT_FOUND');
+  }
+  const metaRaw = await readFile(join(dir, attachmentId + '.json'), 'utf8').catch((err) => {
+    if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') {
+      throw errWithCode('attachment metadata not found: ' + attachmentId, 'ATTACHMENT_NOT_FOUND');
+    }
+    throw err;
+  });
+  return parseAttachmentMeta(attachmentId, metaRaw);
+}
+
+/** 读已落盘的 metadata + base64（提交时组装模型内容、getAttachment 对外方法共用）。 */
+export async function loadAttachment(root, botId, attachmentId) {
+  if (typeof attachmentId !== 'string' || !ATTACHMENT_ID_RE.test(attachmentId)) {
+    throw invalidArgument('attachmentId must be a 64-char lowercase hex string');
+  }
+  const dir = assertBotAttachmentDir(root, botId);
+  const bytes = await readFile(join(dir, attachmentId)).catch((err) => {
+    if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') {
+      throw errWithCode('attachment not found: ' + attachmentId, 'ATTACHMENT_NOT_FOUND');
+    }
+    throw err;
+  });
+  const metaRaw = await readFile(join(dir, attachmentId + '.json'), 'utf8').catch((err) => {
+    if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') {
+      throw errWithCode('attachment metadata not found: ' + attachmentId, 'ATTACHMENT_NOT_FOUND');
+    }
+    throw err;
+  });
+  const meta = parseAttachmentMeta(attachmentId, metaRaw);
+  return {
+    ...meta,
     data: bytes.toString('base64'),
   };
+}
+
+/** 校验目标模型是否支持带图消息与模型级 inputLimits.images；无模型信息时交由后续准入终检。 */
+export function assertModelSupportsAttachments(modelRecord, attachmentMeta) {
+  if (!modelRecord || !Array.isArray(attachmentMeta) || attachmentMeta.length === 0) return;
+  const modalities = Array.isArray(modelRecord.input) ? modelRecord.input : ['text'];
+  if (!modalities.includes('image')) {
+    throw errWithCode('model does not accept image input', 'MODEL_NO_VISION');
+  }
+  const imageLimits = modelRecord.inputLimits?.images ?? null;
+  if (!imageLimits) return;
+  const maxPerMessage = imageLimits.maxPerMessage;
+  if (Number.isSafeInteger(maxPerMessage) && attachmentMeta.length > maxPerMessage) {
+    throw errWithCode('model accepts at most ' + maxPerMessage + ' images per message', 'INVALID_ARGUMENT');
+  }
+  const resize = imageLimits.resize;
+  // provider maxBytes 按 base64 编码长度计（resize profile 语义），不能拿解码后 size 比。
+  const maxBytes = resize?.maxBytes;
+  const maxWidth = resize?.maxWidth;
+  const maxHeight = resize?.maxHeight;
+  for (const meta of attachmentMeta) {
+    if (Number.isSafeInteger(maxBytes) && 4 * Math.ceil(meta.size / 3) > maxBytes) {
+      throw errWithCode('attachment exceeds model image byte limit', 'INVALID_ARGUMENT');
+    }
+    if (Number.isSafeInteger(maxWidth) && meta.width > maxWidth) {
+      throw errWithCode('attachment exceeds model image width limit', 'INVALID_ARGUMENT');
+    }
+    if (Number.isSafeInteger(maxHeight) && meta.height > maxHeight) {
+      throw errWithCode('attachment exceeds model image height limit', 'INVALID_ARGUMENT');
+    }
+  }
+}
+
+/**
+ * 仅对 host.user-message 且能可靠对应到 entry.data.attachments 的旧 Host 自动路径块做非破坏性剥离；
+ * 保留显式 userText 与任何不匹配的块，绝不修改存储库。
+ */
+export function stripLegacyAttachmentPromptBlocks(entry, content) {
+  if (entry?.kind !== 'host.user-message' || !Array.isArray(entry?.data?.attachments) ||
+      entry.data.attachments.length === 0 || !Array.isArray(content)) {
+    return content;
+  }
+  const attachments = entry.data.attachments;
+  const userText = typeof entry.data?.userText === 'string' && entry.data.userText.trim() !== ''
+    ? entry.data.userText
+    : null;
+  let stripped = null;
+  for (let i = 0; i < content.length; i++) {
+    const block = content[i];
+    let isLegacyNote = false;
+    if (
+      block?.type === 'text' &&
+      typeof block.text === 'string' &&
+      block.text.startsWith(LEGACY_ATTACHED_IMAGE_PREFIX) &&
+      !(i === 0 && userText !== null && block.text === userText) &&
+      content[i + 1]?.type === 'image'
+    ) {
+      try {
+        const parsed = JSON.parse(block.text.slice(LEGACY_ATTACHED_IMAGE_PREFIX.length));
+        if (
+          parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
+          typeof parsed.name === 'string' && typeof parsed.path === 'string'
+        ) {
+          isLegacyNote = attachments.some((att) =>
+            att && typeof att.id === 'string' && att.name === parsed.name &&
+            (parsed.path === att.id || parsed.path.endsWith('/' + att.id) || parsed.path.endsWith('\\' + att.id))
+          );
+        }
+      } catch {
+        isLegacyNote = false;
+      }
+    }
+    if (isLegacyNote) {
+      if (stripped === null) stripped = content.slice(0, i);
+    } else if (stripped !== null) {
+      stripped.push(block);
+    }
+  }
+  return stripped ?? content;
 }
 
 /** Bot 删除（含自动 purge）时整目录清除；rm 失败抛出让调用方可见，不静默吞错。 */

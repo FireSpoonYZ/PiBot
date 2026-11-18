@@ -14,6 +14,7 @@ import {
   projectLiveState,
   diffLiveState,
   projectInboxQueuedItems,
+  projectInboxHeadActivity,
   buildQueuedPreview,
   truncatePrefix,
   MAX_QUEUED_ITEMS,
@@ -153,14 +154,20 @@ function mergeQueuedItems(inboxItems, hostItems) {
  * are disjoint sets — an input leaves the Host queue the moment it is
  * submitted to the SDK, so the sum never double counts.
  */
-function withTurnAdmission(projected, admission, inboxQueuedItems = []) {
+function withTurnAdmission(projected, admission, inboxQueuedItems = [], options = null) {
   // turnAdmission 与 queuedItems 恒写入（null / [] 表示无等待项）：字段缺失时 diff 帧序列化会丢键，
   // 已发布的 admission / 排队摘要无法被清除。
+  // 无前序任务且 head 刚受理为 queued 时，head 实际正在启动准备中，不列入 queuedItems 误标排队。
+  const hasPreceding = options?.hasPreceding ?? true;
+  let hostQueuedItems = admission?.queuedItems ?? [];
+  if (!hasPreceding && admission?.status?.phase === 'queued' && typeof admission.status.requestId === 'string') {
+    hostQueuedItems = hostQueuedItems.filter((item) => item.requestId !== admission.status.requestId);
+  }
   return {
     ...projected,
     turnAdmission: admission?.status ?? null,
     queuedCount: projected.queuedCount + (admission?.hostQueued ?? 0),
-    queuedItems: mergeQueuedItems(inboxQueuedItems, admission?.queuedItems ?? []),
+    queuedItems: mergeQueuedItems(inboxQueuedItems, hostQueuedItems),
   };
 }
 
@@ -219,18 +226,27 @@ function copyWorkSummary(summary) {
   return { pending };
 }
 
+function hasPrecedingForInbox(botId, runActivity, ctx) {
+  const control = ctx.controlByBot.get(botId) ?? null;
+  if (control === 'interrupting' || control === 'stopping') return true;
+  const projected = runActivity?.activity ?? null;
+  if (projected?.phase === 'running' || projected?.phase === 'compacting') return true;
+  return (ctx.workByBot.get(botId)?.pending?.length ?? 0) > 0;
+}
+
 /**
  * 按契约优先级合并此 Bot 的统一 activity：
  * control stopping/interrupting > 真实运行 runActivity（running 或阻塞
- * compacting；自动压缩不中断 startedAt 计时）> failed admission >
- * Host admission（queued/preparing，用户直接输入优先）> 存活 work pending
- * （queued）> 原生 pi.inbox 积压（queued）> 空闲/手动 compacting > stopped > idle。
+ * compacting；自动压缩不中断 startedAt 计时）> Host admission（queued/preparing；
+ * 无前序任务时首条转 preparing）> 原生 pi.inbox 积压（无前序执行时首条转 preparing）>
+ * 空闲/手动 compacting > failed admission > 终态 runFailure > 存活 work pending（queued）>
+ * stopped > idle。
  * 例外：显式 stopped 优先于残留 failed（主动停止不被过期失败覆盖），
  * 空闲/手动 compacting 优先于 stopped（进行中的后台整理仍算活跃）。
  * stopped 只在无未完成工作时透出：新的 run/pending/admission 出现时由调用方
  * 先清掉旧 stopped 再重投影，绝不靠覆盖把 stopped 留到新任务完结后。
  */
-function resolveBotActivity(botId, runActivity, queuedCount, ctx) {
+function resolveBotActivity(botId, runActivity, queuedCount, ctx, inboxHeadActivity = null) {
   const control = ctx.controlByBot.get(botId) ?? null;
   if (control === 'interrupting' || control === 'stopping') {
     return activity(control, activityFieldsOf(runActivity?.activity ?? {}));
@@ -242,25 +258,54 @@ function resolveBotActivity(botId, runActivity, queuedCount, ctx) {
       (projected?.phase === 'compacting' && runActivity.hasRun === true)) {
     return stripInternal(projected);
   }
-  // 真实终态失败（contract B）：runFailure + Host 诊断投影的 failed 相，
-  // 与 failed admission 同位——新的运行/排队出现时已先结算或胜出；投影只
-  // 在 runFailure 存活期间产出，过期 failed 绝不覆盖新成功。显式 user_stop
-  // （control stopped）优先：主动停止仍显示 stopped，不被残留失败覆盖。
-  if (projected?.phase === 'failed' && runActivity.isFailure === true &&
-      control !== 'stopped') {
-    return stripInternal(projected);
-  }
+  const precedingForInbox = hasPrecedingForInbox(botId, runActivity, ctx);
   const admission = ctx.admissionByBot.get(botId) ?? null;
+  if (admission?.status !== null && admission?.status !== undefined && admission.status.phase !== 'failed') {
+    if (admission.status.phase !== 'queued') {
+      return activity('preparing', {
+        source: admission.status.source ?? null,
+        requestId: admission.status.requestId,
+      });
+    }
+    if (queuedCount > 0 && !precedingForInbox) {
+      return activity('preparing', {
+        source: inboxHeadActivity?.source ?? null,
+        requestId: inboxHeadActivity?.requestId ?? null,
+      });
+    }
+    if (!precedingForInbox) {
+      return activity('preparing', {
+        source: admission.status.source ?? null,
+        requestId: admission.status.requestId,
+      });
+    }
+    return activity('queued', {
+      source: admission.status.source ?? null,
+      requestId: admission.status.requestId,
+    });
+  }
+  if (queuedCount > 0) {
+    if (!precedingForInbox) {
+      return activity('preparing', {
+        source: inboxHeadActivity?.source ?? null,
+        requestId: inboxHeadActivity?.requestId ?? null,
+      });
+    }
+    return activity('queued');
+  }
+  // 空闲/手动压缩低于真实等待/启动；高于终态失败/stopped。
+  if (projected?.phase === 'compacting') return stripInternal(projected);
   if (admission?.status?.phase === 'failed') return activity('failed', {
     source: admission.status.source ?? null,
     requestId: admission.status.requestId,
     ...(admission.status.error ? { error: admission.status.error } : {}),
   });
-  if (admission?.status !== null && admission?.status !== undefined) {
-    return activity(admission.status.phase === 'queued' ? 'queued' : 'preparing', {
-      source: admission.status.source ?? null,
-      requestId: admission.status.requestId,
-    });
+  // 真实终态失败（contract B）：runFailure + Host 诊断投影的 failed 相；
+  // 新的运行/排队/准入出现时已由上方分支胜出，过期 failed 绝不盖住新准备。
+  // 显式 user_stop（control stopped）优先：主动停止仍显示 stopped，不被残留失败覆盖。
+  if (projected?.phase === 'failed' && runActivity.isFailure === true &&
+      control !== 'stopped') {
+    return stripInternal(projected);
   }
   const pending = ctx.workByBot.get(botId)?.pending ?? [];
   if (pending.length > 0) {
@@ -273,19 +318,13 @@ function resolveBotActivity(botId, runActivity, queuedCount, ctx) {
       startedAt: item.startedAt,
     });
   }
-  // 原生 pi.inbox 已有 SDK 排队项但既无运行也无 admission/work pending：
-  // 真实工作已入队，绝不能报 idle。排在空闲/手动 compacting 之前：排队的
-  // 真实输入比后台压缩更贴近用户等待；计数没有归属，不猜成 primary。
-  if (queuedCount > 0) return activity('queued');
-  // 空闲/手动压缩低于真实排队：积压的真实输入比后台整理更贴近用户等待。
-  if (projected?.phase === 'compacting') return stripInternal(projected);
   if (control === 'stopped') return activity('stopped');
   return activity('idle');
 }
 
 /** 合并统一 activity 与 learning 状态进 primary 快照（恒写入，同 turnAdmission）。 */
-function withBotActivity(projected, botId, runActivity, ctx) {
-  const resolved = resolveBotActivity(botId, runActivity, projected.queuedCount, ctx);
+function withBotActivity(projected, botId, runActivity, ctx, inboxHeadActivity = null) {
+  const resolved = resolveBotActivity(botId, runActivity, projected.queuedCount, ctx, inboxHeadActivity);
   if (ctx.webhookStopPendingByBot.has(botId)) resolved.webhookStopPending = true;
   return {
     ...projected,
@@ -357,12 +396,19 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       // 未并入 admission 的 pi.inbox 计数基线：admission 重算 queuedCount 时以此为底，
       // 避免把已并入的 hostQueued 再累加一遍。
       inboxQueued: 0,
-      inboxQueuedItems: [],
+      inboxItemsAll: [],
+      inboxItemsAfterHead: [],
+      inboxHeadActivity: null,
       current: deepFreeze(
         work ? emptyLiveState()
           : withBotActivity(
-            withTurnAdmission(emptyLiveState(), admissionByBot.get(botId) ?? null, []),
-            botId, null, activityCtx,
+            withTurnAdmission(
+              emptyLiveState(),
+              admissionByBot.get(botId) ?? null,
+              [],
+              { hasPreceding: hasPrecedingForInbox(botId, null, activityCtx) },
+            ),
+            botId, null, activityCtx, null,
           ),
       ),
       // 最近一次投影的真实运行/失败 activity：{activity, hasRun, isFailure}。
@@ -577,6 +623,24 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       }
     }
 
+    function projectPrimaryWatchState(baseState) {
+      const admission = admissionByBot.get(botId) ?? null;
+      const precedingForInbox = hasPrecedingForInbox(botId, state.runActivity, activityCtx);
+      const effectiveInboxItems = precedingForInbox ? state.inboxItemsAll : state.inboxItemsAfterHead;
+      return withBotActivity(
+        withTurnAdmission(
+          { ...baseState, queuedCount: state.inboxQueued },
+          admission,
+          effectiveInboxItems,
+          { hasPreceding: precedingForInbox || state.inboxQueued > 0 },
+        ),
+        botId,
+        state.runActivity,
+        activityCtx,
+        state.inboxHeadActivity,
+      );
+    }
+
     // 用已装载的归属快照投影并投递一帧（diff 与原串行泵一致）。
     function publishView(view, extras = null) {
       let next;
@@ -584,7 +648,10 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
         next = projectLiveState(view, state.sessionState, extras);
         state.inboxQueued = next.queuedCount;
         if (!work) {
-          state.inboxQueuedItems = projectInboxQueuedItems(view?.docs?.['pi.inbox'] ?? null);
+          const inbox = view?.docs?.['pi.inbox'] ?? null;
+          state.inboxItemsAll = projectInboxQueuedItems(inbox, { hasPrecedingExecution: true });
+          state.inboxItemsAfterHead = projectInboxQueuedItems(inbox, { hasPrecedingExecution: false });
+          state.inboxHeadActivity = projectInboxHeadActivity(inbox);
           // 保留最近一次投影的 activity 及其来源标记（hasRun/isFailure）：
           // running/真实运行的 compacting/真实 failed/空闲手动压缩均缓存，
           // 供 resolveBotActivity 按新优先级裁决（运行>压缩>失败>…）。
@@ -600,10 +667,7 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
           if (!board && (activeWork || state.inboxQueued > 0)) {
             clearStoppedOnWork(activityCtx, botId);
           }
-          next = withBotActivity(
-            withTurnAdmission(next, admissionByBot.get(botId) ?? null, state.inboxQueuedItems),
-            botId, state.runActivity, activityCtx,
-          );
+          next = projectPrimaryWatchState(next);
         }
       } catch (err) {
         end('listener_error', err);
@@ -701,15 +765,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     function applyAdmission(targetBotId) {
       if (work || targetBotId !== botId || state.endReason !== null) return;
       const previous = state.current;
-      // 以 inboxQueued / inboxQueuedItems 为底重算：previous 已含上一次并入的 Host 排队项。
-      const next = deepFreeze(withBotActivity(
-        withTurnAdmission(
-          { ...previous, queuedCount: state.inboxQueued },
-          admissionByBot.get(botId) ?? null,
-          state.inboxQueuedItems,
-        ),
-        botId, state.runActivity, activityCtx,
-      ));
+      // 以 inboxQueued / inboxItems 为底重算：previous 已含上一次并入的 Host 排队项。
+      const next = deepFreeze(projectPrimaryWatchState(previous));
       if (diffLiveState(previous, next) !== null) {
         state.current = next;
         state.seq++;
@@ -735,7 +792,9 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       state.sessionState = null;
       state.runActivity = null;
       state.inboxQueued = 0;
-      state.inboxQueuedItems = [];
+      state.inboxItemsAll = [];
+      state.inboxItemsAfterHead = [];
+      state.inboxHeadActivity = null;
       state.kind = 'pending';
       if (previousNative) {
         await previousNative.stop().catch(() => {});
@@ -747,12 +806,12 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       }
     }
 
-    // work pending 汇总或 Host control 阶段变化：只重投影统一 activity 字段，
+    // work pending 汇总或 Host control 阶段变化：只重投影统一 activity 与队列视角，
     // 以最近一次真实运行 runActivity 为准，不重算历史/工具。
     function applyActivity(targetBotId) {
       if (work || targetBotId !== botId || state.endReason !== null) return;
       const previous = state.current;
-      const next = deepFreeze(withBotActivity({ ...previous }, botId, state.runActivity, activityCtx));
+      const next = deepFreeze(projectPrimaryWatchState(previous));
       if (diffLiveState(previous, next) !== null) {
         state.current = next;
         state.seq++;

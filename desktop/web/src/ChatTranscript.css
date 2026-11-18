@@ -344,6 +344,13 @@
   min-width: 0;
   max-width: 100%;
 }
+.desktop-shell .desktop-transcript .sand-activity-slot.is-inline {
+  animation: none;
+  padding: 4px 2px 2px;
+}
+.desktop-shell .desktop-transcript .bot-chat-bubble + .sand-activity-slot.is-inline {
+  margin-top: 4px;
+}
 .desktop-shell .desktop-transcript .sand-activity-detail-toggle {
   display: inline-flex;
   align-items: center;

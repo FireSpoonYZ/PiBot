@@ -1,5 +1,10 @@
 import type { ImageAttachment } from '../../host-core/index.js';
 import { resolveActiveActivityStartedAt, type BotActivity } from './botActivity.ts';
+import {
+  HOST_ATTACHED_IMAGE_LINE_PREFIX,
+  isHostInjectedAttachmentLine,
+  stripTrailingHostAttachmentLines,
+} from './composerFlowControl.ts';
 
 /**
  * Unified Bot session UI attribution (contract: safe projection of backend
@@ -935,7 +940,8 @@ export function parseHistoryEntries(
     if (itemChannel !== undefined) lastBoundaryChannel = itemChannel;
     // raw 条目用 model 块（含工具/思考）；Host live 投影条目有 messages:[{role,text,truncated,toolCalls,timestamp,durationMs}]。
     // host.user-message 的图片附件元数据在条目级 data.attachments（不在单个 message 上）。
-    const entryAttachments = readMessageAttachments(asRecord(item.data).attachments);
+    const itemData = asRecord(item.data);
+    const entryAttachments = readMessageAttachments(itemData.attachments);
     const model = asArray<unknown>(item.model);
     const blocks = model.length > 0 ? model : asArray<unknown>(item.messages);
     for (let mIdx = 0; mIdx < blocks.length; mIdx++) {
@@ -956,13 +962,43 @@ export function parseHistoryEntries(
         const content = entry.content;
         const msgAttachments = readMessageAttachments(entry.attachments);
         const attachments = msgAttachments.length > 0 ? msgAttachments : entryAttachments;
-        const textParts: string[] = [];
-        if (typeof content === 'string') {
-          textParts.push(content);
+        let joinedText = '';
+        if (typeof itemData.userText === 'string' && (item.kind === 'host.user-message' || mIdx === 0)) {
+          joinedText = itemData.userText.trim();
+        } else if (typeof content === 'string') {
+          joinedText = (attachments.length > 0
+            ? stripTrailingHostAttachmentLines(content, attachments.length)
+            : content).trim();
         } else if (typeof entry.text === 'string') {
-          textParts.push(entry.text);
+          joinedText = (attachments.length > 0
+            ? stripTrailingHostAttachmentLines(entry.text, attachments.length)
+            : entry.text).trim();
         } else if (Array.isArray(content)) {
-          for (const block of content) {
+          const hasImageBlock = content.some((b) => asRecord(b).type === 'image');
+          let end = content.length;
+          let strippedHostBlock = false;
+          if (attachments.length > 0 || hasImageBlock) {
+            while (end > 0) {
+              const prev = asRecord(content[end - 1]);
+              if (prev.type === 'image') {
+                end -= 1;
+                continue;
+              }
+              if (
+                prev.type === 'text' &&
+                typeof prev.text === 'string' &&
+                prev.text.startsWith(HOST_ATTACHED_IMAGE_LINE_PREFIX) &&
+                (asRecord(content[end]).type === 'image' || isHostInjectedAttachmentLine(prev.text))
+              ) {
+                strippedHostBlock = true;
+                end -= 1;
+                continue;
+              }
+              break;
+            }
+          }
+          const textParts: string[] = [];
+          for (const block of content.slice(0, end)) {
             if (typeof block === 'string') {
               textParts.push(block);
               continue;
@@ -972,8 +1008,11 @@ export function parseHistoryEntries(
               textParts.push(part.text);
             }
           }
+          const rawJoined = textParts.join('\n');
+          joinedText = (!strippedHostBlock && attachments.length > 0
+            ? stripTrailingHostAttachmentLines(rawJoined, attachments.length)
+            : rawJoined).trim();
         }
-        const joinedText = textParts.join('\n').trim();
         if (!joinedText && attachments.length === 0) continue;
 
         finalizeCurrentAssistant(false);
@@ -1469,4 +1508,26 @@ export function resolveActiveTurnStartedAt(
   activity?: BotActivity | null,
 ): number | null {
   return resolveActiveActivityStartedAt(activity ?? null);
+}
+
+export function hasAssistantVisibleContent(turn: ChatTurn): boolean {
+  if (turn.role !== 'assistant') return true;
+  if (turn.blocks && turn.blocks.length > 0) return true;
+  return Boolean(
+    turn.text.trim() ||
+      turn.thinking?.trim() ||
+      (turn.tools && turn.tools.length > 0),
+  );
+}
+
+export function resolveAssistantFailureDetail(
+  error: string | undefined,
+  t: (zh: string, en: string) => string,
+): string {
+  const trimmed = typeof error === 'string' ? error.trim() : '';
+  if (!trimmed) return '';
+  if (trimmed === 'model_error') {
+    return t('模型生成失败。', 'Model generation failed.');
+  }
+  return trimmed;
 }
