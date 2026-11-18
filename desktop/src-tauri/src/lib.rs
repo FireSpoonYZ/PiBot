@@ -133,7 +133,7 @@ pub struct NavigationGuardConfig {
 
 pub fn run() {
   let bridge = DesktopBridge::new();
-  let mut builder = tauri::Builder::default()
+  let app = tauri::Builder::default()
     .manage(bridge)
     .manage(updates::UpdateState::default())
     // Reload/navigation kills every observer Channel owned by the old
@@ -148,11 +148,8 @@ pub fn run() {
         .on_navigation(|webview, url| webview.label() == "main" && is_allowed_navigation(url))
         .build(),
     )
-    .plugin(tauri_plugin_dialog::init());
-  if let Some(pubkey) = updates::configured_pubkey() {
-    builder = builder.plugin(tauri_plugin_updater::Builder::new().pubkey(pubkey).build());
-  }
-  let app = builder
+    .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_updater::Builder::new().build())
     .setup(|app| {
       if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_title("Pi Bot");

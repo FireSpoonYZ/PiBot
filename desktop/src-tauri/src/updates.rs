@@ -1,5 +1,5 @@
-//! Desktop updates use the connected center's native credentials and a
-//! compile-time publisher key; the WebView never supplies an artifact URL.
+//! Desktop updates use the connected center's native credentials and the
+//! release publisher key in `plugins.updater.pubkey`; the WebView never supplies an artifact URL.
 
 use std::{
   fs,
@@ -26,12 +26,6 @@ const PREPARE_TIMEOUT: Duration = Duration::from_secs(60);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_UPDATE_BYTES: u64 = 512 * 1024 * 1024;
 const CENTER_CREDENTIALS_FILE: &str = "center-credentials.json";
-
-pub(crate) fn configured_pubkey() -> Option<&'static str> {
-  option_env!("E_LAUNCHER_UPDATER_PUBLIC_KEY")
-    .map(str::trim)
-    .filter(|key| !key.is_empty())
-}
 
 #[derive(Clone, Copy, Default, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -464,9 +458,6 @@ pub async fn desktop_update_check(
   app: AppHandle, webview: Webview, state: State<'_, UpdateState>, automatic: Option<bool>,
 ) -> Result<Value, BridgeError> {
   ensure_main_webview(&webview)?;
-  if configured_pubkey().is_none() {
-    return Err(BridgeError::new("UPDATER_UNAVAILABLE", "desktop updater has no E_LAUNCHER_UPDATER_PUBLIC_KEY", "not-sent"));
-  }
   reconcile_center_state(&app, &state).await;
   let current = app.package_info().version.to_string();
   let (operation, mut cancel, mut previous) = {

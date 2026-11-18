@@ -60,7 +60,7 @@ Tauri 窗口只运行界面。独立 Node broker 处理客户端连接与观察�
 
 macOS 没有安装器生命周期：安装准备通过后，客户端先用当前启动器停止 Host，再原位替换 `PiBot.app`；随后在自启动开启时刷新登录项，并用新启动器重新启动原本运行的 Host，最后提示重启客户端。只有启动器确认 Host 已停止且登录项任务已卸载（`status: stopped`、`launchdLoaded: false`）才替换 App；停止失败或缺少确认时不替换，报告“update not installed”，并尝试恢复原本运行的 Host。替换后的恢复失败作为提示附在更新结果中，可在设置页重试。DMG 只用于首次安装，中心分发的是 `PiBot.app.tar.gz`（格式 `app`）。
 
-原生命令为 `desktop_update_status/check/download/install/cancel`；界面不提供任意下载 URL 或发布公钥替换入口。正式 updater 公钥由构建环境 `E_LAUNCHER_UPDATER_PUBLIC_KEY` 注入，私钥不进入安装包或中心。未配置签名材料的开发构建不具备官方更新信任。发布步骤见[发布说明](../docs/releasing.md)。
+原生命令为 `desktop_update_status/check/download/install/cancel`；界面不提供任意下载 URL 或发布公钥替换入口。桌面端只由 Tauri updater 插件消费最终合并配置 `plugins.updater.pubkey`（CI 通过构建输入 `E_LAUNCHER_UPDATER_PUBLIC_KEY` 生成 `--config` 覆盖注入），私钥不进入安装包或中心；未配置正确公钥的构建无法通过插件验签。发布步骤见[发布说明](../docs/releasing.md)。
 
 ## 服务诊断
 
