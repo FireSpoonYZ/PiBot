@@ -4,6 +4,7 @@ const APP_COMMANDS: &[&str] = &[
   "desktop_observe",
   "desktop_unobserve",
   "desktop_pick_file",
+  "desktop_pick_images",
   "desktop_host_status",
   "desktop_host_pair",
   "desktop_host_pair_code",

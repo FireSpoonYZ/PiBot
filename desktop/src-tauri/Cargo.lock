@@ -2356,6 +2356,7 @@ version = "0.0.22-dev.2"
 dependencies = [
  "base64 0.22.1",
  "dunce",
+ "gtk",
  "reqwest",
  "serde",
  "serde_json",

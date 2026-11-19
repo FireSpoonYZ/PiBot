@@ -41,7 +41,6 @@ import {
   ImageAttachmentThumb,
   attachmentFileName,
   attachmentIdOf,
-  extractPastedImageFiles,
   normalizeImageFile,
   pickImagesFromInput,
   type AttachmentFetcher,
@@ -49,7 +48,12 @@ import {
   type PickedImageSource,
 } from '../../../web/src/imageAttachments';
 import type { ImageAttachment } from '../../../host-core/index.js';
-import type { DesktopIdentity, DesktopPanelApi } from './types';
+import type { DesktopIdentity, DesktopImagePickSource, DesktopPanelApi } from './types';
+import {
+  decideImagePasteAction,
+  isDesktopLinuxPlatform,
+  pickedImagesToFiles,
+} from './imagePaste';
 import type { DesktopObservationEvent } from './types';
 import { ErrorNotice, useText } from '../../../web/src/ui';
 import { BotReadScope } from '../../../web/src/botReadScope';
@@ -1155,7 +1159,7 @@ type SendNotice = {
   showRecordAction?: boolean;
 };
 
-function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, canPick, onPick, draftError, draftHint, draftConflict, sendState, receiptBusy, sendError, sendNotice, onSend, canSend, disabled, isPreLlm, isLlmRunning, canSteer = false, isStopping, canStop, stopDisabled, onStop, stopButtonRef, onRetryDraft, attempt, recOutcome, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onRestoreTurnAdmission, canRestoreTurnAdmission = false, canCancelTurnAdmission = false, onInsertSlash, onOpenSendRecord, queuedItems, queueBusy, onRecallQueued, onRecallAllQueued, onDiscardQueued, onSteerQueued, isEditingTurn = false, onCancelEditTurn }: {
+function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, hasNativeClipboardImage = false, canPick, onPick, draftError, draftHint, draftConflict, sendState, receiptBusy, sendError, sendNotice, onSend, canSend, disabled, isPreLlm, isLlmRunning, canSteer = false, isStopping, canStop, stopDisabled, onStop, stopButtonRef, onRetryDraft, attempt, recOutcome, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onRestoreTurnAdmission, canRestoreTurnAdmission = false, canCancelTurnAdmission = false, onInsertSlash, onOpenSendRecord, queuedItems, queueBusy, onRecallQueued, onRecallAllQueued, onDiscardQueued, onSteerQueued, isEditingTurn = false, onCancelEditTurn }: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   text: string;
   onChangeText: (v: string) => void;
@@ -1166,7 +1170,8 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
   onAddAttachment: (att: ImageAttachment) => void;
   onRemoveAttachment: (i: number) => void;
   attachmentFetcher: AttachmentFetcher | null;
-  onPickImage: (files?: File[]) => void;
+  onPickImage: (input?: File[] | 'clipboard') => void;
+  hasNativeClipboardImage?: boolean;
   canPick: boolean;
   onPick: () => void;
   draftError: string | null;
@@ -1535,12 +1540,20 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
             onChange={(e) => onChangeText(e.target.value)}
             onKeyDown={onKeyDown}
             onPaste={(e) => {
-              const files = extractPastedImageFiles(e.clipboardData);
-              if (files.length === 0) return;
-              if (!e.clipboardData?.getData('text/plain')?.trim()) {
-                e.preventDefault();
+              const decision = decideImagePasteAction(e.clipboardData, {
+                isDesktopLinux: isDesktopLinuxPlatform(),
+                hasNativeClipboard: hasNativeClipboardImage,
+              });
+              if (decision.files.length > 0) {
+                if (decision.preventDefault) {
+                  e.preventDefault();
+                }
+                onPickImage(decision.files);
+                return;
               }
-              onPickImage(files);
+              if (decision.useNativeClipboardFallback) {
+                onPickImage('clipboard');
+              }
             }}
             onCompositionStart={() => { composingRef.current = true; }}
             onCompositionEnd={() => { composingRef.current = false; }}
@@ -2337,8 +2350,13 @@ function PrimaryChatPane({
    *  addAttachment 的 expectedKey 是原子 guard（useDrafts 内部 keyRef 实时比较）：
    *  切换 Bot/身份后未完成批次中止，已上传结果不写新 scope 草稿。
    *  相同图片 id 去重；去重后总数 ≤4，超限整体拒绝保留原草稿。 */
-  function pickImage(pastedFiles?: File[]) {
+  function pickImage(input?: File[] | 'clipboard') {
+    const pastedFiles = Array.isArray(input) ? input : undefined;
     if (pastedFiles && pastedFiles.length === 0) return;
+    if (input === 'clipboard' && !api.pickImages) return;
+    const nativeSource: DesktopImagePickSource | null =
+      input === 'clipboard' ? 'clipboard' : pastedFiles ? null : api.pickImages ? 'files' : null;
+    const errorPrefix = nativeSource === 'clipboard' ? '粘贴图片失败：' : '选择图片失败：';
     const frozenIdentity = identity;
     const frozenEditEntryId = activeEditing?.entryId ?? null;
     const draftKey = drafts.key;
@@ -2403,11 +2421,27 @@ function PrimaryChatPane({
         setSendError(null);
       } catch (e) {
         if (!isCurrentSession()) return;
-        setSendError('选择图片失败：' + errText(e));
+        setSendError(errorPrefix + errText(e));
       }
     };
     if (pastedFiles) {
       void handleFiles(pastedFiles).finally(release);
+      return;
+    }
+    if (nativeSource && api.pickImages) {
+      const nativePick = api.pickImages;
+      void (async () => {
+        try {
+          const picked = await nativePick(nativeSource);
+          if (!isCurrentSession()) return;
+          const files = pickedImagesToFiles(picked);
+          if (files.length === 0) return;
+          await handleFiles(files);
+        } catch (e) {
+          if (!isCurrentSession()) return;
+          setSendError(errorPrefix + errText(e));
+        }
+      })().finally(release);
       return;
     }
     pickImagesFromInput({
@@ -4136,6 +4170,7 @@ function PrimaryChatPane({
         onRemoveAttachment={removeAttachment}
         attachmentFetcher={attachmentFetcher}
         onPickImage={pickImage}
+        hasNativeClipboardImage={Boolean(api.pickImages)}
         canPick={!isArchived && !activeEditing && identity?.kind === 'local'}
         onPick={pickFile}
         draftError={activeEditing ? null : drafts.error}
