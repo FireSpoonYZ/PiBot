@@ -28,7 +28,7 @@ volumes:
 
 ### 方式 2：源码构建可选内置 `agy` 的 Center 镜像
 
-[`Dockerfile`](../Dockerfile) 提供默认关闭的可选构建参数 `INSTALL_AGY=false`。需要内置时显式传入 `INSTALL_AGY=true`（构建阶段会按固定的 `AGY_VERSION=1.5.9` 与官方 manifest URL/SHA-512 校验安装包，支持 `amd64` 与 `arm64`）：
+[`Dockerfile`](../Dockerfile) 提供默认关闭的可选构建参数 `INSTALL_AGY=false`。需要内置时显式传入 `INSTALL_AGY=true`（构建阶段会按固定的 `AGY_VERSION=1.5.12` 与官方 manifest URL/SHA-512 校验安装包，支持 `amd64` 与 `arm64`）：
 
 ```sh
 sh scripts/center-build.sh --build-arg INSTALL_AGY=true
