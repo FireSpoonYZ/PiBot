@@ -1685,9 +1685,11 @@ export function HostPage({
     pendingByBot.current.delete(scopeKey);
     try { localStorage.removeItem(`${scopeKey}:pending`); } catch { /* retain safe copy */ }
     if (currentChatScope.current === scopeKey) {
-      chatSubmissionRef.current = undefined;
-      setChatPending(undefined);
-      setChatReceipt(undefined);
+      if (chatSubmissionRef.current?.requestId === requestId) {
+        chatSubmissionRef.current = undefined;
+      }
+      setChatPending(prev => (prev?.requestId === requestId ? undefined : prev));
+      setChatReceipt(prev => (prev?.requestId === requestId ? undefined : prev));
     }
   }, []);
   const getCutoff = useCallback((botKey: string, scopeKey: string): number => {
@@ -2795,6 +2797,8 @@ export function HostPage({
   const slashBusyRef = useRef(false);
   /** 停止失败单独提示，与 action.error（发送等）分开保留；成功由 Host activity stopped 呈现。 */
   const [stopError, setStopError] = useState('');
+  const setActionError = action.setError;
+  const invalidateBoard = board.invalidate;
 
   // /clear 与 /compact 都先等后端成功，再用服务端边界重置本地可见历史；失败保留草稿与原历史。
   // 返回 true 表示服务端已成功（即使 UI 已切到别的会话），false 表示 UI 切走后不再报错的过期结果。
@@ -2808,8 +2812,10 @@ export function HostPage({
     if (bot.archivedAt) throw new Error(t('该智能体已归档，请先恢复后再操作。', 'This bot is archived. Unarchive it first.'));
     const scopeKey = scopeForBot(bot);
     if (!scopeKey) throw new Error(t('目标身份尚未就绪，草稿已保留。', 'Target identity unavailable; draft retained.'));
+    const boardKey = botBoardKey(pinStorageScope, bot.deviceId, bot.botId);
     const draftSnapshot = readChatDraft(scopeKey);
     const preClearPendingRequestId = pendingByBot.current.get(scopeKey)?.pending.requestId;
+    const preClearSubmission = chatSubmissionRef.current?.botKey === bot.key ? chatSubmissionRef.current : undefined;
     slashBusyRef.current = true;
     setSlashBusy(command);
     setClearNotice(command === '/clear'
@@ -2866,6 +2872,7 @@ export function HostPage({
         throw rpcError;
       }
       if (command === '/clear') {
+        invalidateBoard(boardKey);
         applyCutoff(bot.key, scopeKey, cleared?.clearedThroughEntryId ?? 0, { recordZero: true });
         chatHistoryCacheRef.current.delete(scopeKey);
         if (preClearPendingRequestId) removePending(scopeKey, preClearPendingRequestId);
@@ -2875,6 +2882,12 @@ export function HostPage({
         }
         updateBotMeta(bot.key, { lastText: '', updatedAt: Date.now(), unread: false });
         if (currentChatScope.current !== scopeKey) return true;
+        if (preClearSubmission && chatSubmissionRef.current === preClearSubmission) {
+          chatSubmissionRef.current = undefined;
+          setChatReceipt(prev => (prev?.requestId === preClearSubmission.requestId ? undefined : prev));
+        }
+        setStopError('');
+        setActionError('');
         setComposerMenuOpen(false);
         setChatTopMenuOpen(false);
         chatHistoryEpoch.current += 1;
@@ -2914,7 +2927,7 @@ export function HostPage({
       slashBusyRef.current = false;
       setSlashBusy(undefined);
     }
-  }, [activeBot, applyCutoff, chatPending, ensureLocalHostRunning, remoteConnected, removePending, t, updateBotMeta]);
+  }, [activeBot, applyCutoff, chatPending, ensureLocalHostRunning, invalidateBoard, pinStorageScope, remoteConnected, removePending, setActionError, t, updateBotMeta]);
 
   /** 停止在途按 bot.key 去重：切换 Bot 不复用其他 Bot 的 abort Promise。 */
   const stopInFlightRef = useRef(new Map<string, Promise<unknown>>());
@@ -10014,6 +10027,7 @@ function RemotePendingComposer({
           drafts.editText('');
         }
         setNotice('');
+        if (command === '/clear') setStopError('');
       }
     } catch (error) {
       setNotice(errorText(error));

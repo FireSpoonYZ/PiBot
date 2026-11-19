@@ -10,7 +10,13 @@ import {
   resolveComposerActionKind,
   shouldShowComposerStop,
 } from '../src/botActivity.ts';
-import { botBoardBucket } from '../src/useBotBoard.ts';
+import {
+  botBoardBucket,
+  botBoardKey,
+  getBotBoardRecord,
+  invalidateBotBoardTarget,
+  readBotBoardBatch,
+} from '../src/useBotBoard.ts';
 
 test('isBotPreLlmPhase and isBotLlmRunningPhase partition pre-LLM vs active LLM phases', () => {
   for (const phase of ['queued', 'preparing', 'interrupting']) {
@@ -237,4 +243,54 @@ test('Bot Board does not ask for attention after a finished generation interrupt
     ...interrupted,
     attention: { kind: 'questionnaire', requestId: 'question_1', summary: 'Review the plan', count: 1 },
   }), 'attention');
+});
+
+test('clearing a Bot drops its cached interruption and rejects stale board responses', async () => {
+  const boardKey = botId => botBoardKey('clear-test', 'device-1', botId);
+  const item = (botId, activity) => ({
+    botId,
+    conversationId: botId,
+    activity: { source: null, scopeId: null, requestId: null, startedAt: null, ...activity },
+    queuedCount: 0,
+    attention: null,
+    progress: null,
+    lastResult: null,
+  });
+  const interrupted = item('a', {
+    phase: 'failed', error: { code: 'GENERATION_FAILED', message: 'generation failed: interrupted' },
+  });
+  const snapshot = (...items) => ({ items, errors: [], updatedAt: new Date(0).toISOString() });
+  const read = (fetch, botIds = ['a', 'b']) => readBotBoardBatch(
+    botIds.map(botId => ({ key: boardKey(botId), botId, generation: '1', read: fetch })),
+  );
+  const key = boardKey('a');
+  const otherKey = boardKey('b');
+  await read(async () => snapshot(interrupted, item('b', { phase: 'idle' })));
+  assert.equal(getBotBoardRecord(key)?.item?.activity.phase, 'failed');
+  const otherBeforeClear = getBotBoardRecord(otherKey);
+
+  const stale = Promise.withResolvers();
+  const polling = read(() => stale.promise);
+  invalidateBotBoardTarget(key);
+  assert.deepEqual(getBotBoardRecord(key), {});
+  assert.equal(getBotBoardRecord(otherKey), otherBeforeClear);
+  stale.resolve(snapshot(interrupted, item('b', { phase: 'running' })));
+  await polling;
+  assert.deepEqual(getBotBoardRecord(key), {});
+  assert.equal(getBotBoardRecord(otherKey)?.item?.activity.phase, 'running');
+
+  for (const finish of [
+    pending => pending.reject(new Error('network timeout')),
+    pending => pending.resolve({ ...snapshot(), errors: [{ botId: 'a', code: 'BOARD_UNAVAILABLE' }] }),
+  ]) {
+    const pending = Promise.withResolvers();
+    const pollingError = read(() => pending.promise, ['a']);
+    invalidateBotBoardTarget(key);
+    finish(pending);
+    await pollingError;
+    assert.deepEqual(getBotBoardRecord(key), {});
+  }
+
+  await read(async () => snapshot(item('a', { phase: 'idle' })), ['a']);
+  assert.equal(getBotBoardRecord(key)?.item?.activity.phase, 'idle');
 });

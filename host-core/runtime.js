@@ -2443,6 +2443,12 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         if (closing) throw errWithCode('host is not connected', 'NOT_CONNECTED');
         if (isMaintenance()) throw errWithCode('host is preparing an update', 'RUNTIME_BUSY');
         if (turns.isRecoveryPending()) throw errWithCode('turn recovery is required', 'TURN_RECOVERY_REQUIRED');
+        const capturedStopEpoch = turns.stopEpoch(botId);
+        const clearSettledStopped = () => {
+          if (turns.stopEpoch(botId) === capturedStopEpoch && !stopInFlight.has(botId) && !turns.stopped(botId)) {
+            try { live.clearStoppedControl?.(botId); } catch { /* live 缺席 */ }
+          }
+        };
         const bot = await requireBot(botId);
         if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
           throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
@@ -2466,6 +2472,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
               throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
             }
           }, CTX);
+          clearSettledStopped();
           return { botId, conversationId, clearedThroughEntryId: 0 };
         }
         const [liveSnap, inboxSnap] = await Promise.all([
@@ -2528,6 +2535,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
           applySessionResetState(sessionState, resetEntry.id);
           return resetEntry.id;
         }, CTX);
+        clearSettledStopped();
         return { botId, conversationId, clearedThroughEntryId: resetEntryId };
       });
     },

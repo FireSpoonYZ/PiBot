@@ -48,7 +48,61 @@ let boardFlight: Promise<void> = Promise.resolve();
 const records = new Map<string, BotBoardRecord>();
 const seen = new Map<string, string>();
 const seenErrors = new Map<string, string>();
+const boardListeners = new Set<() => void>();
 const seenPrefix = 'bot-board-seen:v1:';
+
+function notifyBoardListeners(): void {
+  for (const listener of boardListeners) listener();
+}
+
+export function getBotBoardRecord(key: string): BotBoardRecord | undefined {
+  return records.get(key);
+}
+
+/**
+ * Drops only the target Bot's cached board snapshot and replaces its slot with a
+ * unique empty record so any older in-flight getBotBoard write (success or error)
+ * cannot overwrite it; other Bots and seen markers stay untouched.
+ */
+export function invalidateBotBoardTarget(key: string): void {
+  if (!key) return;
+  records.set(key, {});
+  notifyBoardListeners();
+}
+
+export async function readBotBoardBatch(
+  batch: readonly Pick<BotBoardTarget, 'key' | 'botId' | 'generation' | 'read'>[],
+  isCurrent: () => boolean = () => true,
+): Promise<boolean> {
+  const first = batch[0];
+  if (!first) return false;
+  const expected = new Map<string, BotBoardRecord | undefined>();
+  for (const target of batch) expected.set(target.key, records.get(target.key));
+  let changed = false;
+  try {
+    const snapshot = await first.read(batch.map(t => t.botId));
+    if (!isCurrent()) return false;
+    for (const target of batch) {
+      if (records.get(target.key) !== expected.get(target.key)) continue;
+      const item = snapshot.items.find(item => item.botId === target.botId);
+      const error = snapshot.errors.find(error => error.botId === target.botId);
+      records.set(target.key, item
+        ? { item, updatedAt: snapshot.updatedAt, generation: target.generation }
+        : { ...records.get(target.key), error: error?.code === 'BOT_NOT_FOUND'
+          ? 'Bot 已不存在，请刷新目录。' : '状态读取失败。' });
+      changed = true;
+    }
+  } catch {
+    if (!isCurrent()) return false;
+    const message = '看板不可用，请检查连接，或更新中心与 Host。';
+    for (const target of batch) {
+      if (records.get(target.key) !== expected.get(target.key)) continue;
+      records.set(target.key, { ...records.get(target.key), error: message });
+      changed = true;
+    }
+  }
+  return changed;
+}
 
 function readSeen(key: string): string | undefined {
   if (seen.has(key)) return seen.get(key);
@@ -71,6 +125,11 @@ export function useBotBoard(targets: BotBoardTarget[], active: boolean) {
     const onVisibility = () => setVisible(!document.hidden);
     document.addEventListener('visibilitychange', onVisibility);
     return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+  useEffect(() => {
+    const notify = () => setRevision(value => value + 1);
+    boardListeners.add(notify);
+    return () => { boardListeners.delete(notify); };
   }, []);
   useEffect(() => {
     try {
@@ -105,24 +164,9 @@ export function useBotBoard(targets: BotBoardTarget[], active: boolean) {
         const worker = async () => {
           while (current() && next < batches.length) {
             const batch = batches[next++]!;
-            const first = batch[0]!;
-            try {
-              const snapshot = await first.read(batch.map(t => t.botId));
-              if (!current()) return;
-              for (const target of batch) {
-                const item = snapshot.items.find(item => item.botId === target.botId);
-                const error = snapshot.errors.find(error => error.botId === target.botId);
-                records.set(target.key, item
-                  ? { item, updatedAt: snapshot.updatedAt, generation: target.generation }
-                  : { ...records.get(target.key), error: error?.code === 'BOT_NOT_FOUND'
-                    ? 'Bot 已不存在，请刷新目录。' : '状态读取失败。' });
-              }
-            } catch {
-              if (!current()) return;
-              const message = '看板不可用，请检查连接，或更新中心与 Host。';
-              for (const target of batch) records.set(target.key, { ...records.get(target.key), error: message });
+            if (await readBotBoardBatch(batch, current) && current()) {
+              setRevision(value => value + 1);
             }
-            if (current()) setRevision(value => value + 1);
           }
         };
         await Promise.all(Array.from({ length: Math.min(4, batches.length) }, worker));
@@ -151,7 +195,7 @@ export function useBotBoard(targets: BotBoardTarget[], active: boolean) {
     setRevision(value => value + 1);
   }, []);
 
-  return { records, seen, markViewed, storageError, revision, visible };
+  return { records, seen, markViewed, invalidate: invalidateBotBoardTarget, storageError, revision, visible };
 }
 
 export type BotBoardState = ReturnType<typeof useBotBoard>;

@@ -1107,6 +1107,14 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     }
   }
 
+  /** 仅清除已结算的 stopped 控制覆盖（不碰 stopping/interrupting，也不清 webhookStopPending）。 */
+  function clearStoppedControl(botId) {
+    assertNonBlank(botId, 'botId');
+    if (controlByBot.get(botId) === 'stopped') {
+      setBotControl(botId, null);
+    }
+  }
+
   function setWebhookStopPending(botId, pending) {
     if (pending) webhookStopPendingByBot.add(botId);
     else webhookStopPendingByBot.delete(botId);
@@ -1142,5 +1150,5 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     learningByBot.clear();
   }
 
-  return { watch, watchWork, getBotBoard, bind, rebind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, setWebhookStopPending, setBotLearning, close };
+  return { watch, watchWork, getBotBoard, bind, rebind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, clearStoppedControl, setWebhookStopPending, setBotLearning, close };
 }

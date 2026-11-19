@@ -2230,8 +2230,23 @@ function PrimaryChatPane({
     }
   }
 
+  function applyConfirmedClear(clearBoardKey: string, clearedId: number): boolean {
+    chatBoard.invalidate(clearBoardKey);
+    if (sessionKey(api.identity) === sess && clearedId > 0) {
+      onClearedThroughEntryIdRef.current?.(clearedId);
+    }
+    if (!mountedRef.current || sessionKey(api.identity) !== sess) return false;
+    applyCutoff(clearedId);
+    setTurnAdmission(null);
+    setConfirmClear(false);
+    setSendError(null);
+    setManageError(null);
+    return true;
+  }
+
   async function handleClearHistory() {
     if (!identity || !online || manageInFlightRef.current || slashBusy !== null || isArchived) return;
+    const clearBoardKey = botBoardKey(`${identity.profileId}|${identity.kind}`, identity.targetDeviceId, bot.botId);
     manageInFlightRef.current = true;
     setManageAction('clear');
     setManageError(null);
@@ -2241,13 +2256,7 @@ function PrimaryChatPane({
       const clearedId = readClearedThroughEntryId(
         (result as { clearedThroughEntryId?: unknown } | null | undefined)?.clearedThroughEntryId,
       ) ?? 0;
-      if (sessionKey(api.identity) === sess && clearedId > 0) {
-        onClearedThroughEntryIdRef.current?.(clearedId);
-      }
-      if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
-      applyCutoff(clearedId);
-      setTurnAdmission(null);
-      setConfirmClear(false);
+      if (!applyConfirmedClear(clearBoardKey, clearedId)) return;
       setClearDone(true);
       void loadRawLatest();
       window.setTimeout(() => {
@@ -2473,6 +2482,9 @@ function PrimaryChatPane({
     const draftKey = drafts.key;
     const draftText = drafts.text;
     if (!current || !draftKey || manageInFlightRef.current) return;
+    const clearBoardKey = command === '/clear'
+      ? botBoardKey(`${current.profileId}|${current.kind}`, current.targetDeviceId, bot.botId)
+      : null;
     lockedRef.current = true;
     setSlashBusy(command);
     setSendState('sending');
@@ -2484,13 +2496,7 @@ function PrimaryChatPane({
         const clearedId = readClearedThroughEntryId(
           (result as ClearHistoryResult | undefined)?.clearedThroughEntryId,
         ) ?? 0;
-        if (sessionKey(api.identity) === sess && clearedId > 0) {
-          onClearedThroughEntryIdRef.current?.(clearedId);
-        }
-        if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
-        applyCutoff(clearedId);
-        setTurnAdmission(null);
-        setConfirmClear(false);
+        if (!applyConfirmedClear(clearBoardKey!, clearedId)) return;
       }
       if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
       // 服务端已成功后才清命令草稿：沿用 clearDraft CAS，仅当持久草稿仍是该命令文本且无文件/图片

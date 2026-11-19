@@ -1100,8 +1100,16 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
     ],
   });
   await waitUntil(
-    () => (liveState?.queuedItems?.length ?? 0) === 0 && liveState?.activity?.phase !== 'running',
-    { label: 'queue cleared and run stopped after abort' },
+    () => (liveState?.queuedItems?.length ?? 0) === 0 && liveState?.activity?.phase === 'stopped',
+    { label: 'queue cleared and run settled as stopped after abort', onTimeout: () => liveState },
+  );
+  const webhookStopPendingBeforeClear = liveState?.activity?.webhookStopPending === true;
+  const boardBeforeClear = await controlClient.getBotBoard({ botIds: [bot.botId] });
+  assert.equal(boardBeforeClear.errors.length, 0);
+  assert.equal(boardBeforeClear.items[0]?.activity?.phase, 'stopped');
+  assert.equal(
+    boardBeforeClear.items[0]?.activity?.webhookStopPending === true,
+    webhookStopPendingBeforeClear,
   );
 
   // =========================================================================
@@ -1111,9 +1119,30 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
   //   3) First-message rewind (createConversation)
   //   4) Post-/clear (pi.reset) boundary enforcement
   // =========================================================================
-  // Clear prior history first so Scenario C has a clean slate
+  // Clear prior history first so Scenario C has a clean slate; settled stopped must clear back to idle
+  // while preserving any pending center webhook stop indicator and matching history/board snapshots.
   const initialClear = await controlClient.clearHistory(bot.botId);
-  assert.ok(Number.isSafeInteger(initialClear.clearedThroughEntryId));
+  assert.ok(Number.isSafeInteger(initialClear.clearedThroughEntryId) && initialClear.clearedThroughEntryId > 0);
+  await waitUntil(
+    () =>
+      liveState?.activity?.phase === 'idle' &&
+      liveState?.lastEntryId === initialClear.clearedThroughEntryId &&
+      liveState?.history?.length === 1 &&
+      liveState?.history?.[0]?.kind === 'pi.reset',
+    { label: 'settled stopped clears to idle and resets live history after clearHistory', onTimeout: () => liveState },
+  );
+  assert.equal(liveState?.activity?.webhookStopPending === true, webhookStopPendingBeforeClear);
+  const histAfterInitialClear = await controlClient.history(bot.botId, { limit: 50 });
+  assert.equal(histAfterInitialClear.items.length, 0);
+  assert.equal(histAfterInitialClear.clearedThroughEntryId, initialClear.clearedThroughEntryId);
+  const boardAfterInitialClear = await controlClient.getBotBoard({ botIds: [bot.botId] });
+  assert.equal(boardAfterInitialClear.errors.length, 0);
+  assert.equal(boardAfterInitialClear.items[0]?.activity?.phase, 'idle');
+  assert.equal(
+    boardAfterInitialClear.items[0]?.activity?.webhookStopPending === true,
+    webhookStopPendingBeforeClear,
+  );
+  assert.equal(boardAfterInitialClear.items[0]?.lastResult, null);
 
   const latestUserPromptJson = (reqContext) => {
     const msgs = [...(reqContext?.messages ?? [])].reverse();
