@@ -40,6 +40,34 @@ const TYPES_PATCHED = `export interface GenerationHooks {
     /** Before every request attempt, including recovery; the result is used for that request only. */
     beforeRequest(request: {`;
 
+const STORAGE_ORIGINAL = `        let value = parseJson(base.content);
+        const tail = await executor.all(\`SELECT seq, kind, version, content FROM \${this.schema.tables.documentRevisions}
+\t\t\t\tWHERE document_id = ? AND seq > ? AND seq <= ? ORDER BY seq\`, id, base.seq, upper);
+        for (const revision of tail) {
+            if (revision.kind !== "delta" || revision.version !== base.version) {
+                throw new Error(\`Document \${id} crosses a stored version boundary without a base\`);
+            }
+            value = apply(value, parseJson(revision.content));
+        }
+        return { record, version: base.version, value, deltasSinceBase: tail.length };`;
+
+const STORAGE_PATCHED = `        let value = parseJson(base.content);
+        let after = base.seq;
+        let deltasSinceBase = 0;
+        while (after < upper) {
+            const revision = await executor.get(\`SELECT seq, kind, version, content FROM \${this.schema.tables.documentRevisions}
+\t\t\t\tWHERE document_id = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT 1\`, id, after, upper);
+            if (revision === undefined)
+                break;
+            if (revision.kind !== "delta" || revision.version !== base.version) {
+                throw new Error(\`Document \${id} crosses a stored version boundary without a base\`);
+            }
+            value = apply(value, parseJson(revision.content));
+            after = revision.seq;
+            deltasSinceBase++;
+        }
+        return { record, version: base.version, value, deltasSinceBase };`;
+
 function countOccurrences(haystack, needle) {
   return haystack.split(needle).length - 1;
 }
@@ -80,7 +108,12 @@ export function patchPiDurable(nodeModulesDir = path.join(HERE, 'node_modules'))
   const typesChanged = existsSync(typesPath)
     ? applyExactPatch(typesPath, TYPES_ORIGINAL, TYPES_PATCHED)
     : false;
-  return { generationChanged, typesChanged };
+  const storageChanged = applyExactPatch(
+    path.join(pkgDir, 'dist', 'storage', 'sqlite', 'storage.js'),
+    STORAGE_ORIGINAL,
+    STORAGE_PATCHED
+  );
+  return { generationChanged, typesChanged, storageChanged };
 }
 
 if (import.meta.main) {

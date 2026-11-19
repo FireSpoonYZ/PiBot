@@ -15,5 +15,5 @@ export const createContextState = (defineDoc) => defineDoc({
     contentStore: createContentStore(),
     prepared: null,
   }),
-  checkpointWhen: () => false,
+  checkpointWhen: () => true,
 });
