@@ -57,6 +57,13 @@
   align-items: center;
   justify-content: center;
 }
+.desktop-shell .rail-update-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: #a64b24;
+  color: #fff;
+}
 .desktop-shell .conn-dot {
   position: absolute;
   top: -2px;

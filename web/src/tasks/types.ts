@@ -29,6 +29,7 @@ export interface TaskPendingPrompt {
   deviceId: string;
   botId: string;
   botName?: string;
+  stepId?: string | null;
   text: string;
   options?: string[];
   createdAt: number;
@@ -303,6 +304,105 @@ export function botTasksFor(tasks: GlobalTask[], botDeviceId: string, botId: str
     if (task.pendingPrompt && task.pendingPrompt.deviceId === botDeviceId && task.pendingPrompt.botId === botId) return true;
     return task.steps.some(step => step.status !== 'cancelled' && step.deviceId === botDeviceId && step.botId === botId);
   });
+}
+
+export function isTaskWaitingForBot(task: GlobalTask, botDeviceId: string, botId: string): boolean {
+  if (task.status === 'done' || task.status === 'cancelled') return false;
+  if (!task.pendingPrompt) return false;
+  if (task.pendingPrompt.deviceId === botDeviceId && task.pendingPrompt.botId === botId) {
+    return true;
+  }
+  return (
+    task.pendingPrompt.kind === 'plan' &&
+    task.coordinatorDeviceId === botDeviceId &&
+    task.coordinatorBotId === botId
+  );
+}
+
+export interface BotChatTaskContextInput {
+  tasks: GlobalTask[];
+  botDeviceId: string;
+  botId: string;
+  jumpedTaskId: string | null;
+  jumpedStepId: string | null;
+  waitingOffset?: number;
+}
+
+export interface BotChatTaskContextResult {
+  waitingTasks: GlobalTask[];
+  waitingIndex: number;
+  linkedTask: GlobalTask | null;
+  focusedStep: TaskStep | null;
+  promptTask: GlobalTask | null;
+  showQuoteStrip: boolean;
+  taskPrefix: string;
+}
+
+export function resolveBotChatTaskContext({
+  tasks,
+  botDeviceId,
+  botId,
+  jumpedTaskId,
+  jumpedStepId,
+  waitingOffset = 0,
+}: BotChatTaskContextInput): BotChatTaskContextResult {
+  const waitingTasks = botTasksFor(tasks, botDeviceId, botId).filter(t =>
+    isTaskWaitingForBot(t, botDeviceId, botId),
+  );
+  const waitingIndex =
+    waitingTasks.length > 0
+      ? ((waitingOffset % waitingTasks.length) + waitingTasks.length) % waitingTasks.length
+      : 0;
+
+  const rawJumpedTask = jumpedTaskId ? (tasks.find(t => t.id === jumpedTaskId) ?? null) : null;
+  const isJumpedTaskEnded =
+    rawJumpedTask != null && (rawJumpedTask.status === 'done' || rawJumpedTask.status === 'cancelled');
+  const activeJumpedTask = rawJumpedTask && !isJumpedTaskEnded ? rawJumpedTask : null;
+
+  let linkedTask: GlobalTask | null = null;
+  if (activeJumpedTask) {
+    linkedTask = activeJumpedTask;
+  } else if (jumpedTaskId && !rawJumpedTask) {
+    linkedTask = null;
+  } else if (waitingTasks.length > 0) {
+    linkedTask = waitingTasks[waitingIndex];
+  }
+
+  const promptTask =
+    linkedTask && isTaskWaitingForBot(linkedTask, botDeviceId, botId) ? linkedTask : null;
+
+  let focusedStep: TaskStep | null = null;
+  if (linkedTask && activeJumpedTask?.id === linkedTask.id && jumpedStepId) {
+    focusedStep =
+      linkedTask.steps.find(s => s.id === jumpedStepId && s.status !== 'cancelled') ?? null;
+  } else if (promptTask?.pendingPrompt?.stepId) {
+    focusedStep =
+      promptTask.steps.find(
+        s => s.id === promptTask.pendingPrompt?.stepId && s.status !== 'cancelled',
+      ) ?? null;
+  }
+
+  const showQuoteStrip = Boolean(activeJumpedTask && !promptTask);
+
+  const taskPrefix = linkedTask
+    ? focusedStep
+      ? `[关联任务「${linkedTask.title}」(${linkedTask.id}) · 子项「${focusedStep.text}」(${focusedStep.id})]\n`
+      : `[关联任务「${linkedTask.title}」(${linkedTask.id})]\n`
+    : jumpedTaskId && !rawJumpedTask
+      ? jumpedStepId
+        ? `[关联任务(${jumpedTaskId}) · 子项(${jumpedStepId})]\n`
+        : `[关联任务(${jumpedTaskId})]\n`
+      : '';
+
+  return {
+    waitingTasks,
+    waitingIndex,
+    linkedTask,
+    focusedStep,
+    promptTask,
+    showQuoteStrip,
+    taskPrefix,
+  };
 }
 
 function readTaskErrorCode(error: unknown): string | null {

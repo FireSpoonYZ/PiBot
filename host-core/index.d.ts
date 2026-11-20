@@ -284,6 +284,8 @@ export interface HistoryPage {
   items: readonly EntryRecord[];
   nextCursor: Record<string, unknown> | null;
   entryChunk?: HistoryEntryChunk;
+  /** Latest pi.reset entry id on primary history replies (0 = no known reset on a new Host; absent on old Hosts). */
+  clearedThroughEntryId?: number;
 }
 
 /** /clear 结果：SDK 用 pi.reset 开新上下文，conversationId 不变。 */

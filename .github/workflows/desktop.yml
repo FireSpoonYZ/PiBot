@@ -37,8 +37,8 @@ permissions:
   packages: write
 
 env:
-  # Updater public key is compiled into the app via env! in the Rust build
-  # script (native lane). Public material → repository variable, not secret.
+  # CI build input used to populate Tauri --config (plugins.updater.pubkey).
+  # Public material → repository variable, not secret.
   E_LAUNCHER_UPDATER_PUBLIC_KEY: ${{ vars.E_LAUNCHER_UPDATER_PUBLIC_KEY }}
 
 jobs:
@@ -178,10 +178,14 @@ jobs:
         run: |
           set -euo pipefail
           extra=()
+          pubkey=$(node -p '(process.env.E_LAUNCHER_UPDATER_PUBLIC_KEY || "").trim()')
           if [ "$RELEASE" = true ]; then
             test -n "$TAURI_SIGNING_PRIVATE_KEY" || { echo "Missing updater private key"; exit 1; }
-            test -n "$E_LAUNCHER_UPDATER_PUBLIC_KEY" || { echo "Missing updater public key"; exit 1; }
+            test -n "$pubkey" || { echo "Missing updater public key"; exit 1; }
             config=$(node -p 'JSON.stringify({bundle:{createUpdaterArtifacts:true},plugins:{updater:{pubkey:process.env.E_LAUNCHER_UPDATER_PUBLIC_KEY.trim()}}})')
+            extra=(--config "$config")
+          elif [ -n "$pubkey" ]; then
+            config=$(node -p 'JSON.stringify({plugins:{updater:{pubkey:process.env.E_LAUNCHER_UPDATER_PUBLIC_KEY.trim()}}})')
             extra=(--config "$config")
           fi
           npm run desktop:build -- --bundles ${{ matrix.bundle }} "${extra[@]}"

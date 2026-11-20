@@ -685,6 +685,10 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
   );
 
   let currentSnapshot = null;
+  let prepareTurnHandler = async () => ({
+    setId: `set-rev-${currentSnapshot.revision}`,
+    snapshot: currentSnapshot,
+  });
   const centerClient = {
     providerAuth: async () => ({ auth: { apiKey: 'mock-center-key' }, source: 'center' }),
   };
@@ -692,10 +696,7 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
     snapshot: { protocol: 1 },
     installer: {},
     getClient: () => centerClient,
-    prepareTurn: async () => ({
-      setId: `set-rev-${currentSnapshot.revision}`,
-      snapshot: currentSnapshot,
-    }),
+    prepareTurn: async (...args) => prepareTurnHandler(...args),
     confirmTurn: async ({ requestId, setId }) => ({
       admissionId: `adm-${requestId}`,
       setId,
@@ -1099,8 +1100,16 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
     ],
   });
   await waitUntil(
-    () => (liveState?.queuedItems?.length ?? 0) === 0 && liveState?.activity?.phase !== 'running',
-    { label: 'queue cleared and run stopped after abort' },
+    () => (liveState?.queuedItems?.length ?? 0) === 0 && liveState?.activity?.phase === 'stopped',
+    { label: 'queue cleared and run settled as stopped after abort', onTimeout: () => liveState },
+  );
+  const webhookStopPendingBeforeClear = liveState?.activity?.webhookStopPending === true;
+  const boardBeforeClear = await controlClient.getBotBoard({ botIds: [bot.botId] });
+  assert.equal(boardBeforeClear.errors.length, 0);
+  assert.equal(boardBeforeClear.items[0]?.activity?.phase, 'stopped');
+  assert.equal(
+    boardBeforeClear.items[0]?.activity?.webhookStopPending === true,
+    webhookStopPendingBeforeClear,
   );
 
   // =========================================================================
@@ -1110,9 +1119,30 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
   //   3) First-message rewind (createConversation)
   //   4) Post-/clear (pi.reset) boundary enforcement
   // =========================================================================
-  // Clear prior history first so Scenario C has a clean slate
+  // Clear prior history first so Scenario C has a clean slate; settled stopped must clear back to idle
+  // while preserving any pending center webhook stop indicator and matching history/board snapshots.
   const initialClear = await controlClient.clearHistory(bot.botId);
-  assert.ok(Number.isSafeInteger(initialClear.clearedThroughEntryId));
+  assert.ok(Number.isSafeInteger(initialClear.clearedThroughEntryId) && initialClear.clearedThroughEntryId > 0);
+  await waitUntil(
+    () =>
+      liveState?.activity?.phase === 'idle' &&
+      liveState?.lastEntryId === initialClear.clearedThroughEntryId &&
+      liveState?.history?.length === 1 &&
+      liveState?.history?.[0]?.kind === 'pi.reset',
+    { label: 'settled stopped clears to idle and resets live history after clearHistory', onTimeout: () => liveState },
+  );
+  assert.equal(liveState?.activity?.webhookStopPending === true, webhookStopPendingBeforeClear);
+  const histAfterInitialClear = await controlClient.history(bot.botId, { limit: 50 });
+  assert.equal(histAfterInitialClear.items.length, 0);
+  assert.equal(histAfterInitialClear.clearedThroughEntryId, initialClear.clearedThroughEntryId);
+  const boardAfterInitialClear = await controlClient.getBotBoard({ botIds: [bot.botId] });
+  assert.equal(boardAfterInitialClear.errors.length, 0);
+  assert.equal(boardAfterInitialClear.items[0]?.activity?.phase, 'idle');
+  assert.equal(
+    boardAfterInitialClear.items[0]?.activity?.webhookStopPending === true,
+    webhookStopPendingBeforeClear,
+  );
+  assert.equal(boardAfterInitialClear.items[0]?.lastResult, null);
 
   const latestUserPromptJson = (reqContext) => {
     const msgs = [...(reqContext?.messages ?? [])].reverse();
@@ -1274,6 +1304,33 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
 
   // C.4: Test /clear (pi.reset) boundary + editing on a fresh Bot with zero prior entries (beforeEntryId === null)
   const postEditClear = await controlClient.clearHistory(bot.botId);
+  assert.ok(postEditClear.clearedThroughEntryId > 0);
+
+  // Old submission receipt remains readable after /clear
+  const clearedOldReceipt = await controlClient.getSubmission(bot.botId, 'req-edit-first-after-reset');
+  assert.equal(clearedOldReceipt?.status, 'done');
+  assert.equal(clearedOldReceipt?.answerText, '第一答重写版');
+
+  // Live state exposes only the compatible non-rendered pi.reset marker without old entries
+  await waitUntil(
+    () =>
+      liveState?.lastEntryId === postEditClear.clearedThroughEntryId &&
+      liveState?.history?.length === 1 &&
+      liveState?.history?.[0]?.kind === 'pi.reset',
+    { label: 'live history holds only pi.reset marker immediately after clear', onTimeout: () => liveState },
+  );
+  assert.deepEqual(liveState.history, [
+    { id: postEditClear.clearedThroughEntryId, kind: 'pi.reset', messages: [] },
+  ]);
+
+  // Empty primary history pages (both regular and chunked) carry the same clearedThroughEntryId
+  const emptyPagedAfterClear = await controlClient.history(bot.botId, { limit: 50 });
+  assert.equal(emptyPagedAfterClear.items.length, 0);
+  assert.equal(emptyPagedAfterClear.clearedThroughEntryId, postEditClear.clearedThroughEntryId);
+  const emptyChunkedAfterClear = await controlClient.history(bot.botId, { limit: 1, chunked: true });
+  assert.equal(emptyChunkedAfterClear.items.length, 0);
+  assert.equal(emptyChunkedAfterClear.clearedThroughEntryId, postEditClear.clearedThroughEntryId);
+
   await localAdapter(server.deviceId, 'submit', {
     botId: bot.botId,
     requestId: 'req-post-clear-1',
@@ -1282,6 +1339,61 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
   await waitUntil(
     async () => (await controlClient.getSubmission(bot.botId, 'req-post-clear-1'))?.status === 'done',
     { label: 'req-post-clear-1 done' },
+  );
+
+  // Newer round is visible in both live and paged history without bringing back old entries
+  await waitUntil(
+    () =>
+      Array.isArray(liveState?.history) &&
+      liveState.history.length >= 2 &&
+      liveState.history[0]?.kind === 'pi.reset' &&
+      JSON.stringify(liveState.history).includes('清空后新回答'),
+    { label: 'live history shows pi.reset + newer round only', onTimeout: () => liveState },
+  );
+  assert.equal(liveState.history[0].id, postEditClear.clearedThroughEntryId);
+  assert.equal(JSON.stringify(liveState.history).includes('第一问彻底重写'), false);
+  assert.equal(JSON.stringify(liveState.history).includes('第一答重写版'), false);
+
+  const pagedAfterNewRound = await controlClient.history(bot.botId, { limit: 50 });
+  assert.equal(pagedAfterNewRound.clearedThroughEntryId, postEditClear.clearedThroughEntryId);
+  assert.equal(JSON.stringify(pagedAfterNewRound.items).includes('清空后新问题'), true);
+  assert.equal(JSON.stringify(pagedAfterNewRound.items).includes('清空后新回答'), true);
+  assert.equal(JSON.stringify(pagedAfterNewRound.items).includes('第一问彻底重写'), false);
+  assert.equal(JSON.stringify(pagedAfterNewRound.items).includes('第一答重写版'), false);
+
+  const chunkedAfterNewRound = await controlClient.history(bot.botId, { limit: 1, chunked: true });
+  assert.equal(chunkedAfterNewRound.clearedThroughEntryId, postEditClear.clearedThroughEntryId);
+
+  // Host queued (failed/unplaced in TurnQueue) while native conversation is idle -> RUNTIME_BUSY and no new reset
+  const defaultPrepareTurn = prepareTurnHandler;
+  prepareTurnHandler = async () => {
+    const err = new Error('simulated center sync failure');
+    err.code = 'TURN_SYNC_FAILED';
+    throw err;
+  };
+  await localAdapter(server.deviceId, 'submit', {
+    botId: bot.botId,
+    requestId: 'req-host-queued-idle',
+    text: '仅留在宿主队列的消息',
+  });
+  await waitUntil(
+    () => liveState?.turnAdmission?.requestId === 'req-host-queued-idle' && liveState?.turnAdmission?.phase === 'failed',
+    { label: 'Host queue holds unplaced item while native conversation is idle', onTimeout: () => liveState },
+  );
+  await assert.rejects(
+    localAdapter(server.deviceId, 'clearHistory', { botId: bot.botId }),
+    (err) => err?.code === 'RUNTIME_BUSY' && err?.outcome === 'responded',
+  );
+  const histAfterRejectedClear = await controlClient.history(bot.botId, { limit: 50 });
+  assert.equal(histAfterRejectedClear.clearedThroughEntryId, postEditClear.clearedThroughEntryId);
+  prepareTurnHandler = defaultPrepareTurn;
+  await localAdapter(server.deviceId, 'withdrawQueued', {
+    botId: bot.botId,
+    requestId: 'req-host-queued-idle',
+  });
+  await waitUntil(
+    () => (liveState?.queuedCount ?? 0) === 0 && liveState?.turnAdmission == null,
+    { label: 'Host queued item withdrawn after RUNTIME_BUSY clear check' },
   );
 
   // Editing an entryId <= clearedThroughEntryId must fail with INVALID_ARGUMENT
@@ -1392,6 +1504,9 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
   assert.equal(JSON.stringify(bot2Msgs[1].model).includes('首轮分叉且保留未读收件回答'), true);
   assert.equal(JSON.stringify(bot2Msgs).includes('第一问原版'), false);
   assert.equal(JSON.stringify(bot2Msgs).includes('第二问原版'), false);
+
+  // Fresh Bot with no resets reports clearedThroughEntryId: 0 in history
+  assert.equal(bot2HistRewound.clearedThroughEntryId, 0);
   } finally {
     liveAbort.abort();
     await liveLoopPromise.catch(() => {});

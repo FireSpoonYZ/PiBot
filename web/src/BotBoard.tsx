@@ -3,7 +3,7 @@ import { ArrowLeft, LayoutDashboard, Search } from 'lucide-react';
 import type { BotBoardItem } from '../../host-core/index.js';
 import { GrokBotAvatar } from './GrokBotAvatar';
 import { botActivityText, isBotActivityBusy, parseBotActivityStartedAt } from './botActivity';
-import { botBoardBucket, type BoardBucket, type BotBoardState, type BotBoardTarget } from './useBotBoard';
+import { botBoardBucket, isBotBoardInterrupted, type BoardBucket, type BotBoardState, type BotBoardTarget } from './useBotBoard';
 import './BotBoard.css';
 
 type TaskAwareBoardItem = BotBoardItem & {
@@ -58,8 +58,11 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, loading, 
       (item.activity.source === 'primary' || item.activity.source === 'background')
       ? { conversationId: item.conversationId, requestId: item.attention.requestId }
       : undefined;
+    const interrupted = isBotBoardInterrupted(item?.activity);
+    const statusText = item && (interrupted ? '回复已中断' : botActivityText(item.activity, zh => zh));
+    const failureMessage = interrupted ? 'Host 停止，回复已中断' : item?.activity.error?.message;
     const review = desktop && !stale && bucket === 'review';
-    const failed = desktop && !stale && item?.activity.phase === 'failed';
+    const failed = desktop && !stale && item?.activity.phase === 'failed' && !interrupted;
     const action = questionnaire ? '回答问题' : review ? '查看结果' : failed ? '查看失败原因' : '进入聊天';
     const actionLabel = questionnaire ? `回答 ${target.name} 的问题` : review ? `查看 ${target.name} 的结果` : `打开 ${target.name} 的聊天`;
     const taskItem = item as TaskAwareBoardItem | undefined;
@@ -86,11 +89,11 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, loading, 
               !target.online ? '设备离线' : record?.error ?? (
                 !item ? '正在读取状态…' :
                 item.attention && !controlling ? `等待你确认 · ${item.attention.count} 题` :
-                item.activity.phase === 'failed' ? item.activity.error?.message || '执行失败' :
+                item.activity.phase === 'failed' ? failureMessage || '执行失败' :
                 item.lastResult ? item.lastResult.summary || '已完成' :
                 item.progress ? item.progress.current || `已完成 ${item.progress.completed} / ${item.progress.total} 项` :
                 taskTitle ? taskTitle :
-                item.queuedCount ? `排队 ${item.queuedCount} 项` : botActivityText(item.activity, zh => zh)
+                item.queuedCount ? `排队 ${item.queuedCount} 项` : statusText
               )
             }</p>
             {stale && record?.updatedAt && <small>上次更新 {timeText(record.updatedAt)}</small>}
@@ -98,10 +101,10 @@ export function BotBoard({ targets, board, onOpen, onOpenTask, onBack, loading, 
         ) : (
           <>
             {stale && <span className={target.online ? 'bot-board-warning' : 'bot-board-offline-label'}>{!target.online ? '设备离线' : record?.error || '正在刷新'}</span>}
-            <span className="bot-board-status">{taskStatusLine || (item ? botActivityText(item.activity, zh => zh) : target.online ? '等待状态读取…' : '尚无状态快照')}</span>
+            <span className="bot-board-status">{taskStatusLine || statusText || (target.online ? '等待状态读取…' : '尚无状态快照')}</span>
             {!!item?.queuedCount && <small>排队 {item.queuedCount} 项</small>}
             {item?.attention && !controlling && <p>待回答 · {item.attention.count} 题<br />{item.attention.summary}</p>}
-            {item?.activity.phase === 'failed' && <p>{item.activity.error?.message || '执行失败，请进入聊天处理。'}</p>}
+            {item?.activity.phase === 'failed' && <p>{failureMessage || '执行失败，请进入聊天处理。'}</p>}
             {item?.progress && <span><small>已完成 {item.progress.completed} / {item.progress.total} 项</small>{item.progress.current && <p>{item.progress.current}</p>}</span>}
             {item?.lastResult && <p>{item.lastResult.summary || '已完成，打开聊天查看结果。'}</p>}
             {!item?.progress && !item?.lastResult && taskTitle && <p>{taskTitle}</p>}

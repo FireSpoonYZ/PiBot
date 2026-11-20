@@ -22,13 +22,9 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
-/** 本机 Host 前台服务；客户端生命周期拥有退出监听与重启，Manager 保留唯一进程及清理栅栏。 */
+/** 本机 Host 服务由客户端前台服务持有；只对异常发通知。 */
 public final class BotHostService extends Service {
-    static final String ACTION_START = "com.example.launcherprobe.action.HOST_START";
-    static final String ACTION_STOP = "com.example.launcherprobe.action.HOST_STOP";
-
     private static final String CHANNEL = "bot-host";
-    private static final int NOTIFICATION_ID = 3150;
     private static final int ERROR_NOTIFICATION_ID = 3151;
     private static final int REQUEST_NOTIFICATIONS = 3109;
     private static volatile BotHostService activeService;
@@ -68,7 +64,7 @@ public final class BotHostService extends Service {
     /** 已有客户端内的手动重试不得重新创建客户端生命周期。 */
     public static void startFromActivity(Activity activity) {
         if (activity == null || activity.isFinishing()) throw new IllegalArgumentException("需要前台 Activity");
-        activity.startForegroundService(new Intent(activity, BotHostService.class).setAction(ACTION_START));
+        activity.startService(new Intent(activity, BotHostService.class));
     }
 
     /** 旧的用户停止入口统一退出客户端；内部配置更新直接使用 Manager.stop。 */
@@ -78,9 +74,9 @@ public final class BotHostService extends Service {
 
     static void startForClient(Context context) {
         try {
-            context.startForegroundService(new Intent(context, BotHostService.class).setAction(ACTION_START));
+            context.startService(new Intent(context, BotHostService.class));
         } catch (RuntimeException failure) {
-            Log.e("BotHostService", "Host foreground service start failed", failure);
+            Log.e("BotHostService", "Host service start failed", failure);
             BotClientService.hostServiceFailed();
         }
     }
@@ -121,27 +117,15 @@ public final class BotHostService extends Service {
         super.onCreate();
         activeService = this;
         getSystemService(NotificationManager.class).createNotificationChannel(
-                new NotificationChannel(CHANNEL, "pibot Host", NotificationManager.IMPORTANCE_LOW));
-        getSystemService(NotificationManager.class).createNotificationChannel(
-                new NotificationChannel("bot-client-tasks", "任务完成", NotificationManager.IMPORTANCE_DEFAULT));
+                new NotificationChannel(CHANNEL, "本机 Host 异常", NotificationManager.IMPORTANCE_LOW));
         BotHostManager.get(this).attachService(this);
         main.post(checkLocal);
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
-        String action = intent == null ? null : intent.getAction();
-        if (ACTION_STOP.equals(action)) {
-            stopFromUser(this);
-            return START_NOT_STICKY;
-        }
-        if (!ACTION_START.equals(action)) return START_NOT_STICKY;
-        startForeground(NOTIFICATION_ID, notification("正在启动"));
         Consumer<Long> listener = BotClientService.hostListener();
         if (listener != null) startHost(listener, false);
-        else {
-            stopForeground(STOP_FOREGROUND_REMOVE);
-            stopSelf(startId);
-        }
+        else stopSelf(startId);
         return START_NOT_STICKY;
     }
 
@@ -154,28 +138,29 @@ public final class BotHostService extends Service {
             if (activeService != this || startAttempt != attempt || !BotClientService.ownsHostListener(listener)) return;
             if (stopError != null) {
                 showError("pibot Host 清理失败");
-                updateNotification("清理失败");
                 if (recovering) BotClientService.retryHost(listener, attempt);
                 return;
             }
-            updateNotification("正在启动");
             starting = manager.start();
             starting.whenComplete((snapshot, error) -> main.post(() -> {
                 if (activeService != this || startAttempt != attempt || !BotClientService.ownsHostListener(listener)) return;
                 if (error != null) {
                     if (!(error instanceof CancellationException)) {
                         showError("pibot Host 启动失败");
-                        updateNotification("启动失败");
                         if (recovering) BotClientService.retryHost(listener, attempt);
                     }
-                } else {
-                    refreshNotification();
                 }
             }));
         }));
     }
 
-    void onManagerStateChanged() { main.post(this::refreshNotification); }
+    void onManagerStateChanged() {
+        main.post(() -> {
+            if ("running".equals(BotHostManager.get(this).snapshot().optString("phase"))) {
+                getSystemService(NotificationManager.class).cancel(ERROR_NOTIFICATION_ID);
+            }
+        });
+    }
 
     void onManagerStopped(boolean failed, String code) {
         main.post(() -> {
@@ -188,24 +173,8 @@ public final class BotHostService extends Service {
             } else if (!failed && "stopped".equals(phase)) {
                 getSystemService(NotificationManager.class).cancel(ERROR_NOTIFICATION_ID);
             }
-            if (BotClientService.isActive()) {
-                updateNotification("failed".equals(phase) ? "已停止，请检查配置" : "已停止");
-            } else {
-                stopForeground(STOP_FOREGROUND_REMOVE);
-                stopSelf();
-            }
+            if (!BotClientService.isActive()) stopSelf();
         });
-    }
-
-    private void refreshNotification() {
-        if (BotHostManager.get(this).snapshot().optString("phase").equals("running")) {
-            getSystemService(NotificationManager.class).cancel(ERROR_NOTIFICATION_ID);
-            updateNotification("本地 pibot Host 正在运行");
-        }
-    }
-
-    private void updateNotification(String text) {
-        getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, notification(text));
     }
 
     private void showError(String text) {
@@ -219,25 +188,6 @@ public final class BotHostService extends Service {
                         .setContentIntent(open)
                         .setAutoCancel(true)
                         .build());
-    }
-
-    private Notification notification(String text) {
-        PendingIntent open = PendingIntent.getActivity(this, 1, openHostIntent(),
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        PendingIntent exit = PendingIntent.getService(this, 2,
-                new Intent(this, BotClientService.class).setAction(BotClientService.ACTION_EXIT),
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        return new Notification.Builder(this, CHANNEL)
-                .setSmallIcon(android.R.drawable.stat_notify_sync)
-                .setContentTitle("pibot Host")
-                .setContentText(text)
-                .setContentIntent(open)
-                .addAction(new Notification.Action.Builder(
-                        android.R.drawable.ic_menu_close_clear_cancel, "退出客户端", exit).build())
-                .setOngoing(true)
-                .setOnlyAlertOnce(true)
-                .setCategory(Notification.CATEGORY_SERVICE)
-                .build();
     }
 
     private Intent openHostIntent() {

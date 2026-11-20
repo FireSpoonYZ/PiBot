@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.os.Build;
+import android.os.SystemClock;
 import android.util.AtomicFile;
 
 import com.example.launcherprobe.BotHostProcess.BridgeException;
@@ -38,6 +39,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
@@ -67,6 +69,7 @@ final class ClientUpdater {
     private static final String RELEASE_NAME = "release.json";
     private static final String UPDATE_PATH = "/api/client-updates/android/";
     private static final long AUTO_INTERVAL_MS = 24L * 60 * 60 * 1000;
+    private static final long AUTO_RETRY_MS = 60_000;
     private static final long MAX_APK_BYTES = 2L * 1024 * 1024 * 1024;
     private static final int MAX_META_BYTES = 256 * 1024;
     private static final int MAX_NOTES = 32 * 1024;
@@ -76,6 +79,7 @@ final class ClientUpdater {
     private final Context context;
     private final SharedPreferences prefs;
     private final Object lock = new Object();
+    private final AtomicBoolean automaticCheckQueued = new AtomicBoolean();
     private final ExecutorService io = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
             new ArrayBlockingQueue<>(2), runnable -> {
                 Thread thread = new Thread(runnable, "client-update-io");
@@ -99,6 +103,7 @@ final class ClientUpdater {
     private Long knownGeneration;
     private boolean installerInvalidated;
     private boolean pendingAutomaticCheck;
+    private long nextAutomaticCheckAt;
 
     private static final class Active {
         final long epoch;
@@ -259,6 +264,7 @@ final class ClientUpdater {
         downloadedBytes = 0;
         totalBytes = 0;
         restored = false;
+        nextAutomaticCheckAt = 0;
         knownGeneration = null;
         installerInvalidated = true;
         deleteArtifacts();
@@ -331,7 +337,7 @@ final class ClientUpdater {
         }
         if (checkAgain) {
             try {
-                check(new JSONObject().put("automatic", true));
+                check(true);
             } catch (Exception ignored) {
                 // 自动检查失败不打断其他操作。
             }
@@ -339,6 +345,19 @@ final class ClientUpdater {
     }
 
     // ---------- updateCheck ----------
+
+    void checkAutomatically() {
+        if (!automaticCheckQueued.compareAndSet(false, true)) return;
+        CompletableFuture.runAsync(() -> {
+            try {
+                if (BotClientService.isActive()) check(true);
+            } catch (Exception ignored) {
+                // 后台检查失败不打断客户端；下一次轮询会重试。
+            } finally {
+                automaticCheckQueued.set(false);
+            }
+        });
+    }
 
     private CompletableFuture<JSONObject> check(JSONObject params) throws Exception {
         boolean automatic = false;
@@ -352,31 +371,49 @@ final class ClientUpdater {
                 automatic = (Boolean) value;
             }
         }
-        final boolean auto = automatic;
+        return check(automatic);
+    }
+
+    private CompletableFuture<JSONObject> check(boolean automatic) throws Exception {
         synchronized (lock) {
             ensureIdentityLocked();
             JSONObject creds = currentCredentialsLocked();
             if (creds == null) {
-                if (auto) return CompletableFuture.completedFuture(statusSnapshotLocked());
+                if (automatic) return CompletableFuture.completedFuture(statusSnapshotLocked());
                 return failed(new BridgeException("NOT_CONNECTED", "not-sent", "中心连接未就绪"));
             }
             if ("waiting-permission".equals(phase) || "waiting-install".equals(phase)
                     || "installing".equals(phase)) {
                 return CompletableFuture.completedFuture(statusSnapshotLocked());
             }
-            if (active != null && !active.restoring) {
-                if (auto && active.cancelled) pendingAutomaticCheck = true;
-                if (!auto && active.cancelled) return failed(new BridgeException("BUSY", "not-sent", "更新操作正在结束"));
-                return CompletableFuture.completedFuture(statusSnapshotLocked());
-            }
-            if (auto) {
-                String key = autoKey(creds);
-                long last = prefs.getLong(key, 0L);
-                long now = System.currentTimeMillis();
-                if (last > 0 && now - last < AUTO_INTERVAL_MS) {
+            if (automatic) {
+                ensureRestoredLocked(creds);
+                if ("downloaded".equals(phase) || "waiting-tasks".equals(phase)) {
                     return CompletableFuture.completedFuture(statusSnapshotLocked());
                 }
-                prefs.edit().putLong(key, now).apply();
+            }
+            if (active != null && (automatic || !active.restoring)) {
+                if (automatic && active.cancelled) pendingAutomaticCheck = true;
+                if (!automatic && active.cancelled) return failed(new BridgeException("BUSY", "not-sent", "更新操作正在结束"));
+                return CompletableFuture.completedFuture(statusSnapshotLocked());
+            }
+            if (automatic) {
+                long now = SystemClock.elapsedRealtime();
+                if (now < nextAutomaticCheckAt) {
+                    if ("available".equals(phase)) ClientUpdateNotifications.show(context, autoKey(creds), release);
+                    return CompletableFuture.completedFuture(statusSnapshotLocked());
+                }
+                long last = prefs.getLong(upToDateKey(creds), 0L);
+                long age = System.currentTimeMillis() - last;
+                if (last > 0 && age >= 0 && age < AUTO_INTERVAL_MS) {
+                    nextAutomaticCheckAt = now + AUTO_INTERVAL_MS - age;
+                    if ("idle".equals(phase)) {
+                        phase = "up-to-date";
+                        ClientUpdateNotifications.statusChanged(context);
+                    }
+                    return CompletableFuture.completedFuture(statusSnapshotLocked());
+                }
+                nextAutomaticCheckAt = now + AUTO_RETRY_MS;
             }
             if (active != null) {
                 // 新检查取代尚未完成的缓存恢复；最多只排一个后继任务。
@@ -390,7 +427,7 @@ final class ClientUpdater {
             message = null;
             Active me = new Active(++epoch, creds.getLong("generation"), false, false);
             active = me;
-            io.execute(() -> runCheck(me, auto, prevPhase));
+            io.execute(() -> runCheck(me, automatic, prevPhase));
             return CompletableFuture.completedFuture(statusSnapshotLocked());
         }
     }
@@ -449,6 +486,18 @@ final class ClientUpdater {
                 totalBytes = rel != null ? rel.optLong("size", 0) : 0;
                 restored = true;
                 deleteArtifacts();
+                if (automatic) nextAutomaticCheckAt = SystemClock.elapsedRealtime() + AUTO_INTERVAL_MS;
+                // 已有更新时不持久化节流，进程重启后要重新查询当前发布，避免通知点开后没有更新可选。
+                String key = upToDateKey(creds);
+                if (rel == null) {
+                    prefs.edit().putLong(key, System.currentTimeMillis()).apply();
+                    ClientUpdateNotifications.cancel(context);
+                } else {
+                    prefs.edit().remove(key).apply();
+                    if (automatic && BotClientService.isActive()) {
+                        ClientUpdateNotifications.show(context, autoKey(creds), rel);
+                    }
+                }
             }
         } catch (Exception failure) {
             try {
@@ -472,6 +521,7 @@ final class ClientUpdater {
         } finally {
             me.call = null;
             finish(me);
+            if (automatic) ClientUpdateNotifications.statusChanged(context);
         }
     }
 
@@ -566,6 +616,7 @@ final class ClientUpdater {
                 if (!fenceLocked(me)) return;
                 persistRelease(rel);
                 phase = "downloaded";
+                ClientUpdateNotifications.cancel(context);
                 release = rel;
                 downloadedBytes = written;
                 totalBytes = written;
@@ -828,6 +879,10 @@ final class ClientUpdater {
         return sha256Hex(originOf(creds.getString("url")) + "|" + creds.getString("deviceId"));
     }
 
+    private String upToDateKey(JSONObject creds) throws Exception {
+        return "up-to-date:" + autoKey(creds) + ":" + installedVersionCode;
+    }
+
     private static void bindRelease(JSONObject rel, JSONObject creds, long generation) throws Exception {
         rel.put("_origin", originOf(creds.getString("url")));
         rel.put("_deviceId", creds.getString("deviceId"));
@@ -1005,6 +1060,7 @@ final class ClientUpdater {
             }
         } finally {
             finish(me);
+            ClientUpdateNotifications.statusChanged(context);
         }
     }
 

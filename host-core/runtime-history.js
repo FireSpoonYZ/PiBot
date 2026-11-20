@@ -94,7 +94,8 @@ export async function readPrimaryHistory(conversation, options = {}, context, { 
       return { items: project(result.items), next: result.next };
     };
     let page = await readPage(continuation ? 1 : limit);
-    if (!chunked) return { items: page.items, nextCursor: page.next ?? null };
+    const resetMeta = afterReset ? { clearedThroughEntryId: resetId } : {};
+    if (!chunked) return { items: page.items, nextCursor: page.next ?? null, ...resetMeta };
 
     if (continuation && page.items[0]?.id !== continuation.entryId) {
       throw invalidArgument('history chunk entry is no longer visible');
@@ -112,9 +113,9 @@ export async function readPrimaryHistory(conversation, options = {}, context, { 
         // 重读实际返回的前缀，取得 SDK 的精确游标，不跳过放不下的条目。
         if (count < page.items.length) {
           const prefix = await readPage(count);
-          return { items: prefix.items, nextCursor: prefix.next ?? null };
+          return { items: prefix.items, nextCursor: prefix.next ?? null, ...resetMeta };
         }
-        return { items: page.items, nextCursor: page.next ?? null };
+        return { items: page.items, nextCursor: page.next ?? null, ...resetMeta };
       }
       if (page.items.length > 1) {
         // 只装得下第一条：重读精确前缀并同步 next 游标，否则 complete 分支会拿整页
@@ -142,6 +143,7 @@ export async function readPrimaryHistory(conversation, options = {}, context, { 
       nextCursor: complete ? page.next ?? null : {
         kind: CHUNK_CURSOR_KIND, position: position ?? null, entryId: entry.id, offset: end,
       },
+      ...resetMeta,
     };
   } catch (err) {
     // SDK 1.3.0 没有细分游标错误码，不能把其余 StorageRequestError 当成参数错误。

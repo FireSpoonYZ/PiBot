@@ -264,7 +264,7 @@ function MobileUpdateBoundary({ children }: { children: ReactNode }) {
     ? (conn.status?.centerUrl ?? '') + '|' + (conn.saved?.deviceId ?? conn.status?.clientId ?? '')
     : '';
   return (
-    <ClientUpdateProvider request={mobileUpdateRequest} ready={ready} centerKey={centerKey}>
+    <ClientUpdateProvider request={mobileUpdateRequest} ready={ready} centerKey={centerKey} nativeCheck>
       {children}
     </ClientUpdateProvider>
   );

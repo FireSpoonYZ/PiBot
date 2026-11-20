@@ -20,7 +20,9 @@ import type {
   BrokerOpParams,
   BrokerOpResult,
   DesktopIdentity,
+  DesktopImagePickSource,
   DesktopPanelApi,
+  DesktopPickedImage,
   IntentPatch,
   ObservationHandle,
   PendingOperation,
@@ -123,6 +125,7 @@ interface ObserveInvokeArgs {
 export interface DesktopTransport {
   request<K extends PublicBrokerOperation>(op: K, params: BrokerOpParams<K>): Promise<BrokerOpResult<K>>;
   pickFile(): Promise<DesktopDraftFileRef | null>;
+  pickImages?(source: DesktopImagePickSource): Promise<DesktopPickedImage[]>;
   observe(
     observationId: string,
     targetDeviceId: string,
@@ -147,6 +150,13 @@ const tauriTransport: DesktopTransport = {
   async pickFile(): Promise<DesktopDraftFileRef | null> {
     try {
       return (await invoke('desktop_pick_file')) as DesktopDraftFileRef | null;
+    } catch (e) {
+      throw toError(e);
+    }
+  },
+  async pickImages(source: DesktopImagePickSource): Promise<DesktopPickedImage[]> {
+    try {
+      return (await invoke('desktop_pick_images', { source })) as DesktopPickedImage[];
     } catch (e) {
       throw toError(e);
     }
@@ -185,9 +195,14 @@ export function pickFile(): Promise<DesktopDraftFileRef | null> {
   return tauriTransport.pickFile();
 }
 
+export function pickImages(source: DesktopImagePickSource): Promise<DesktopPickedImage[]> {
+  return tauriTransport.pickImages ? tauriTransport.pickImages(source) : Promise.resolve([]);
+}
+
 export class DesktopViewApiImpl implements DesktopPanelApi {
   /** 传输按实例注入：默认桌面 Tauri；手机远端页注入自己的 client* 实现。 */
   private readonly transport: DesktopTransport;
+  readonly pickImages?: (source: DesktopImagePickSource) => Promise<DesktopPickedImage[]>;
   private identityValue: DesktopIdentity | null = null;
   private snapshotValue: DesktopUiSnapshot | null = null;
   private generation = 0;
@@ -201,6 +216,10 @@ export class DesktopViewApiImpl implements DesktopPanelApi {
 
   constructor(transport: DesktopTransport = tauriTransport) {
     this.transport = transport;
+    if (transport.pickImages) {
+      const pick = transport.pickImages.bind(transport);
+      this.pickImages = (source) => pick(source);
+    }
   }
 
   get identity(): DesktopIdentity | null {

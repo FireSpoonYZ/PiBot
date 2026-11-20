@@ -39,11 +39,11 @@ RUN mkdir -p /opt/bitwarden-cli && cd /opt/bitwarden-cli \
 # read-only at /usr/local/bin/agy. URLs and SHA-512 checksums match the official
 # Linux manifests (https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_{amd64,arm64}.json).
 ARG INSTALL_AGY=false
-ARG AGY_VERSION=1.5.9
-ARG AGY_AMD64_URL=https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.9-4515810895593472/linux-x64/cli_linux_x64.tar.gz
-ARG AGY_AMD64_SHA512=d01eb13ba7750eed18907f1ae8860864371e0ad9064415e8d033d22b4bd7b9b4e4c7f962058520b452d67db1c33163d9a889d55a7dffa159596ec6cd91a87b79
-ARG AGY_ARM64_URL=https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.9-4515810895593472/linux-arm/cli_linux_arm64.tar.gz
-ARG AGY_ARM64_SHA512=16c632a09b81f598f7652bc11180861f9d2ee4408ffa161dadc83b2010de7a9cd055e97b4b46cd01903e35c0e8bf21d8262462ba7c5f168cc6dada9ac3d522c0
+ARG AGY_VERSION=1.5.12
+ARG AGY_AMD64_URL=https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.12-5281398513336320/linux-x64/cli_linux_x64.tar.gz
+ARG AGY_AMD64_SHA512=26de25fccb3fbf0b093e090ce14a14ac1df1ec3e90ef4ea6106887d3a81b0cc9edb0dadea7b9101d07f9606eba159062a6fb7b78e91b73f7520684a24db73428
+ARG AGY_ARM64_URL=https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.12-5281398513336320/linux-arm/cli_linux_arm64.tar.gz
+ARG AGY_ARM64_SHA512=1030d89ce9e5cb39509e272cb89b71fde0e0d5d6527b7392525d5ef2683da54fb49230449107486d91c02ded39a678faaa649b2041304a6cf82a3a332d5819d9
 RUN if [ "$INSTALL_AGY" = "true" ]; then \
       arch="$(dpkg --print-architecture)"; \
       case "$arch" in \

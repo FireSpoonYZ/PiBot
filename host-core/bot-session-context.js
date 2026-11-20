@@ -30,6 +30,8 @@ export const BotSessionState = defineDoc({
     // 账本 localId 高水位；reset 时保留（旧账本记录不得再次导入）。
     lastImportedLocalId: 0,
     importedCount: 0,
+    // 最近一次 pi.reset 条目 id；随 reset 原子推进，供 live 投影 O(1) 裁剪与跨压缩保留边界。
+    clearedThroughEntryId: 0,
     // 冻结的活动轮 + generation taskId -> requestId 映射（生成轮换任务/工具时归属不丢）。
     activeTurn: null,
     turnByTask: {},

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import * as durable from '@earendil-works/pi-durable';
 import * as chord from '@earendil-works/chord';
 import { copyJson } from '@earendil-works/chord/json';
-import { Harness, createRegistry, defineExtension, section, hook, GenerationTask, LiveDoc } from '@earendil-works/pi-durable';
+import { Harness, createRegistry, defineExtension, section, hook, GenerationTask, LiveDoc, InboxDoc } from '@earendil-works/pi-durable';
 import { createCodemodeExtension } from '@earendil-works/pi-durable/codemode';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
@@ -37,7 +37,8 @@ import { WorkIndex, WorkContextState, workInstructions } from './work-context-do
 import { WorkDecisionState } from './work-decision-state.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { createTurnAdmission } from './runtime-turns.js';
-import { createBotSessionRuntime } from './runtime-bot-session.js';
+import { TurnQueue } from './runtime-turns-docs.js';
+import { createBotSessionRuntime, applySessionResetState } from './runtime-bot-session.js';
 import { BotSessionState, USER_MESSAGE_KIND, WORK_TRIGGER_KIND, deriveEntryAttribution } from './bot-session-context.js';
 import { createBotLearning } from './bot-learning.js';
 import { createBotManagementSkillSection } from './bot-management-skill.js';
@@ -336,12 +337,25 @@ function createBotAdmission() {
     }).then(() => true);
   }
 
+  /** 快速失败准入：关闭/断线抛 NOT_CONNECTED，lane 已有占线操作立即抛 RUNTIME_BUSY（不排队等待）。 */
+  function tryAdmit(botId, operation) {
+    if (typeof botId !== 'string' || botId === '') {
+      return Promise.reject(errWithCode('botId must be a non-empty string', 'INVALID_ARGUMENT'));
+    }
+    if (closed || suspended) return Promise.reject(errWithCode('host is not connected', 'NOT_CONNECTED'));
+    if (lanes.has(botId)) return Promise.reject(errWithCode('bot has active or queued work', 'RUNTIME_BUSY'));
+    return track(botId, () => {
+      if (closed || suspended) throw errWithCode('host is not connected', 'NOT_CONNECTED');
+      return operation();
+    });
+  }
+
   async function close() {
     closed = true;
     while (accepted.size > 0) await Promise.allSettled([...accepted]);
   }
 
-  return { admit, tryExclusive, close, suspend() { suspended = true; }, resume() { suspended = false; },
+  return { admit, tryExclusive, tryAdmit, close, suspend() { suspended = true; }, resume() { suspended = false; },
     async drain() { while (accepted.size) await Promise.allSettled([...accepted]); } };
 }
 
@@ -708,11 +722,13 @@ export async function openRuntime(options) {
           // 构造模型输入视图时去掉旧版自动生成的前置路径块，不改写存储库与显式用户文本。
           const sanitizedMessages = sanitizeLegacyAttachmentPromptMessages(request.messages, cutoffView);
           const sanitizedRequest = sanitizedMessages === request.messages ? request : { ...request, messages: sanitizedMessages };
-          // 统一会话冻结轮最先：sessions 判定/恢复本轮来源与回复目标（prepend-only，
-          // 只把可信 Host 路由指引追加到 request 头部）。该指引是本 helper 的明确
-          // prepend-only 产物，用长度差切出，不用对象 identity/正文分类。
+          // 统一会话冻结轮最先：sessions 判定/恢复本轮来源与回复目标，并在非普通人类
+          // 主聊轮时于 request 头部前置一条瞬态 SystemMessage 路由指引（普通人类主聊轮
+          // 不生成合成路由消息）。该指引是本 helper 的明确 prepend-only 产物，用长度差
+          // 切出，不用对象 identity/正文分类。
           const routed = await sessions.beforeRequest(sanitizedRequest, api, context);
-          const routingMessages = routed.messages.slice(0, routed.messages.length - sanitizedRequest.messages.length);
+          const routingCount = Math.max(0, (routed?.messages?.length ?? 0) - sanitizedRequest.messages.length);
+          const routingMessages = routingCount > 0 ? routed.messages.slice(0, routingCount) : [];
           await decisions.beforeRequest(routed, api, context);
           // prepareContext 收原始 request（不带 Host 注入）：BC 等上下文贡献返回的
           // 完整视图不能覆盖、也不重复计费本轮 Host 控制指引；持久 prepared 预算
@@ -720,7 +736,7 @@ export async function openRuntime(options) {
           const requestView = await plugins.prepareContext(sanitizedRequest, api, context);
           // SDK 同口径预算基线：取 checkpoint.cutoff 的权威上下文视图，
           // 用 estimateContext（最新 assistant usage + 尾部估计）算原始历史，
-          // 再按有序子序列 + 增量把 prepareContext（如 BC 投影、路由指引）的实际
+          // 再按有序子序列 + 增量把 prepareContext（如 BC 投影）的实际
           // 有效请求计入 tokenCount；JSON 克隆内容匹配，BC 整体替换只计投影。
           const baselineMessages = sanitizeLegacyAttachmentPromptMessages(cutoffView.messages, cutoffView);
           const baselineView = baselineMessages === cutoffView.messages ? cutoffView : { ...cutoffView, messages: baselineMessages };
@@ -736,9 +752,12 @@ export async function openRuntime(options) {
           }, context);
           if (!online) throw errWithCode('center is offline', 'CENTER_OFFLINE');
           const finalView = await plugins.beforeRequest(requestView, api, context);
-          // 只把 Host 本轮控制指引放到投影/recall 之后追加一次：任何插件
-          // （含会整体重建视图的 BC prepare）都不能丢掉冻结轮约束。
-          return { ...finalView, messages: [...finalView.messages, ...routingMessages] };
+          // 只在需要时把瞬态 SystemMessage 路由指引前置到投影/recall 之后的最终视图头部：
+          // 任何插件（含会整体重建视图的 BC prepare）都不能丢掉冻结轮约束，且末尾真实消息
+          // 角色、正文/图片与 toolCall/toolResult 配对保持完整。
+          return routingMessages.length > 0
+            ? { ...finalView, messages: [...routingMessages, ...(finalView?.messages ?? [])] }
+            : finalView;
         } catch (err) {
           if (!context.abortSignal?.aborted) {
             // Host 侧准备失败：先把安全诊断写入 GenerationFailureState（契约 A，
@@ -2409,7 +2428,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       const historyOptions = normalizeHistoryOptions(options);
       const conversation = await getPrimaryConversation(harness, bot, {}, CTX);
       if (!conversation) {
-        return { botId, conversationId: bot.primaryConversationId, items: [], nextCursor: null };
+        return { botId, conversationId: bot.primaryConversationId, items: [], nextCursor: null, clearedThroughEntryId: 0 };
       }
       // 传 harness 让 helper 读取 BotSessionState 并给原始 entry 补 data.attribution；
       // 不传会让 raw 历史覆盖 live 归属时丢来源。helper 第4参为 {afterReset,sessionState?,harness?}。
@@ -2417,33 +2436,114 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       return { botId, conversationId: bot.primaryConversationId, ...page };
     },
 
-    // /clear：SDK 用 pi.reset 开新上下文（不换 conversationId、保留原始回执条目以维持 requestId 幂等），
-    // 返回 reset 条目 id 作为所有客户端的可见历史起点。
-    clearHistory: (botId) => admitBot(botId, async () => {
-      const bot = await requireBot(botId);
-      if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
-        throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
-      }
-      const conversation = await idlePrimaryConversation(bot);
-      const conversationId = bot.primaryConversationId;
-      if (!conversation) return { botId, conversationId, clearedThroughEntryId: 0 };
-      // reset 前先把未导入的账本消息推进水位：lastImportedLocalId 是 reset 保留的
-      // 唯一导入边界，不先捕获会让旧账本条在 reset 后当作「新消息」重现。
-      // 此处 Bot lane 已持、会话空闲，是安全边界；新追加的条目随即被 pi.reset 翻篇，
-      // 只起水位捕获作用。
-      await sessions.sync(botId);
-      await conversation.reset(undefined, CTX);
-      await harness.commit((tx) => clearBotBoardResult(tx, conversation.id), CTX);
-      // 统一会话状态随 pi.reset 一起翻篇：保留账本导入水位与未决请求来源（迟到回复
-      // 仍可续接、旧账本绝不重导入），只清理已过期的活动轮状态。reset 失败则状态原样保留。
-      await sessions.reset(botId);
-      // 空闲且无并发主会话操作时，reset 就是新的 head 标记；不猜其他条目 id。
-      const head = (await conversation.context(CTX)).head;
-      if (head?.kind !== durable.ResetEntry.kind) {
-        throw errWithCode('reset entry is not the active context head', 'INVALID_STATE');
-      }
-      return { botId, conversationId, clearedThroughEntryId: head.id };
-    }),
+    // /clear：快速失败 per-Bot 准入内原子写入 pi.reset 开新上下文（保留原始回执条目以维持 requestId 幂等），
+    // 并直接返回本次提交的 reset 条目 id 作为所有客户端的可见历史起点。
+    async clearHistory(botId) {
+      assertNonBlank(botId, 'botId');
+      if (closing) throw errWithCode('host is not connected', 'NOT_CONNECTED');
+      if (isMaintenance()) throw errWithCode('host is preparing an update', 'RUNTIME_BUSY');
+      if (turns.isRecoveryPending()) throw errWithCode('turn recovery is required', 'TURN_RECOVERY_REQUIRED');
+      const ACTIVE_TASK_STATUSES = ['pending', 'running', 'waiting', 'sleeping', 'completing'];
+      return botAdmissions.tryAdmit(botId, async () => {
+        if (closing) throw errWithCode('host is not connected', 'NOT_CONNECTED');
+        if (isMaintenance()) throw errWithCode('host is preparing an update', 'RUNTIME_BUSY');
+        if (turns.isRecoveryPending()) throw errWithCode('turn recovery is required', 'TURN_RECOVERY_REQUIRED');
+        const capturedStopEpoch = turns.stopEpoch(botId);
+        const clearSettledStopped = () => {
+          if (turns.stopEpoch(botId) === capturedStopEpoch && !stopInFlight.has(botId) && !turns.stopped(botId)) {
+            try { live.clearStoppedControl?.(botId); } catch { /* live 缺席 */ }
+          }
+        };
+        const bot = await requireBot(botId);
+        if (bot.archivedAt !== null && bot.archivedAt !== undefined) {
+          throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
+        }
+        if (stopInFlight.has(botId) || turns.stopped(botId)) {
+          throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+        }
+        if ((await turns.queuedCount(bot)) > 0) {
+          throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+        }
+        const conversation = await idlePrimaryConversation(bot);
+        const conversationId = bot.primaryConversationId;
+        if (!conversation) {
+          await harness.commit(async (tx) => {
+            const queue = await tx.doc(TurnQueue, bot.primaryConversationId, {});
+            if (queue.stopPending || queue.items.some((entry) => entry.phase !== 'cancelled')) {
+              throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+            }
+            const primaryIndex = await tx.doc(PrimaryIndex);
+            if (primaryIndex?.byPrimary?.[bot.primaryConversationId] !== undefined) {
+              throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+            }
+          }, CTX);
+          clearSettledStopped();
+          return { botId, conversationId, clearedThroughEntryId: 0 };
+        }
+        const [liveSnap, inboxSnap] = await Promise.all([
+          harness.snapshot(LiveDoc, conversation.id, CTX),
+          harness.snapshot(InboxDoc, conversation.id, CTX),
+        ]);
+        if (
+          liveSnap?.run != null ||
+          (Array.isArray(liveSnap?.compactions) && liveSnap.compactions.length > 0) ||
+          (Array.isArray(inboxSnap?.items) && inboxSnap.items.length > 0)
+        ) {
+          throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+        }
+        // reset 前先把未导入的账本消息推进水位：lastImportedLocalId 是 reset 保留的
+        // 唯一导入边界，不先捕获会让旧账本条在 reset 后当作「新消息」重现。
+        await sessions.sync(botId);
+        if (closing) throw errWithCode('host is not connected', 'NOT_CONNECTED');
+        if (isMaintenance()) throw errWithCode('host is preparing an update', 'RUNTIME_BUSY');
+        if (turns.isRecoveryPending()) throw errWithCode('turn recovery is required', 'TURN_RECOVERY_REQUIRED');
+        if (stopInFlight.has(botId) || turns.stopped(botId)) {
+          throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+        }
+        const inspectionAfterSync = await harness.inspect(CTX);
+        if (
+          inspectionAfterSync.submissions.some((submission) => submission.conversationId === conversation.id) ||
+          inspectionAfterSync.tasks.some((task) => task.record.conversationId === conversation.id)
+        ) {
+          throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+        }
+        const resetEntryId = await harness.commit(async (tx) => {
+          // 全部表/文档读必须位于首次表写（appendEntry）之前，并把并发 enqueue/stop 与 reset 串行定序。
+          const queue = await tx.doc(TurnQueue, bot.primaryConversationId, {});
+          if (queue.stopPending || queue.items.some((entry) => entry.phase !== 'cancelled')) {
+            throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+          }
+          const primaryIndex = await tx.doc(PrimaryIndex);
+          if (primaryIndex?.byPrimary?.[bot.primaryConversationId] !== conversation.id) {
+            throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+          }
+          const liveDoc = await tx.doc(LiveDoc, conversation.id);
+          if (liveDoc?.run != null || (Array.isArray(liveDoc?.compactions) && liveDoc.compactions.length > 0)) {
+            throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+          }
+          const inboxDoc = await tx.doc(InboxDoc, conversation.id);
+          if (Array.isArray(inboxDoc?.items) && inboxDoc.items.length > 0) {
+            throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+          }
+          for (const status of ACTIVE_TASK_STATUSES) {
+            const page = await tx.scanTasks({ conversationId: conversation.id, status }, 1);
+            if (page.items.length > 0) {
+              throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+            }
+          }
+          const resetEntry = await tx.appendEntry(durable.ResetEntry, conversation.id, { head: 'self' });
+          if (liveDoc.runFailure !== undefined) {
+            delete liveDoc.runFailure;
+          }
+          await clearBotBoardResult(tx, conversation.id);
+          const sessionState = await tx.doc(BotSessionState, conversation.id);
+          applySessionResetState(sessionState, resetEntry.id);
+          return resetEntry.id;
+        }, CTX);
+        clearSettledStopped();
+        return { botId, conversationId, clearedThroughEntryId: resetEntryId };
+      });
+    },
 
     // /compact：准入内只创建手动压缩任务（再来 clear/compact 会被活动任务检查拒绝），
     // 等待任务终态与摘要落地在准入外，不长期占用该 Bot 的 FIFO。
@@ -2646,6 +2746,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
               sessionDraft.schema = copiedSession.schema ?? 1;
               sessionDraft.lastImportedLocalId = copiedSession.lastImportedLocalId ?? 0;
               sessionDraft.importedCount = copiedSession.importedCount ?? 0;
+              sessionDraft.clearedThroughEntryId = beforeEntryId === null
+                ? 0
+                : Math.max(copiedSession.clearedThroughEntryId ?? 0, resetId);
               sessionDraft.activeTurn = null;
               sessionDraft.outgoing = copiedOutgoing;
               if (beforeEntryId === null) {

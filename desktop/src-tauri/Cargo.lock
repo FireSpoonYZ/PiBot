@@ -2352,10 +2352,11 @@ dependencies = [
 
 [[package]]
 name = "pibot"
-version = "0.0.21"
+version = "0.0.22"
 dependencies = [
  "base64 0.22.1",
  "dunce",
+ "gtk",
  "reqwest",
  "serde",
  "serde_json",

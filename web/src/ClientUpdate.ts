@@ -57,10 +57,12 @@ export const CLIENT_UPDATE_LIVE_PHASES: ReadonlySet<ClientUpdatePhase> = new Set
   'waiting-tasks',
 ]);
 
-/** 自动检查间隔：持续连接时每 24h 最多触发一次（原生侧仍做持久节流）。 */
+/** 桌面自动检查间隔；Android 由原生客户端服务调度。 */
 export const CLIENT_UPDATE_AUTO_INTERVAL_MS = 24 * 60 * 60 * 1000;
 /** 活动阶段状态轮询间隔。 */
 export const CLIENT_UPDATE_POLL_MS = 1500;
+export const CLIENT_UPDATE_STATUS_EVENT = 'assistant-update-changed';
+export const CLIENT_UPDATE_OPEN_EVENT = 'assistant-open-update';
 
 export function formatUpdateBytes(value: number | undefined): string {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return '';

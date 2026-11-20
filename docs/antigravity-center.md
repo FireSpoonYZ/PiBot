@@ -7,6 +7,7 @@ Center 可选接入 Google Antigravity CLI (`agy acp`) 作为服务端统一模�
 - **中心单账号、设备侧执行工具**：`agy` 仅在 Center 进程中运行；Host 工具（文件、Shell、Shower、Vault 等）仍在已配对设备本机执行。Center 在隔离 profile 中生成受限的 `pibot-center` 专用 Agent，并动态注入 `pibot-bridge` MCP server，只暴露当前对话声明的 Host 工具，再通过标准 `toolCall` / `toolResult` 往返设备侧。
 - **独立 Profile 隔离**：Center 专用配置/会话目录默认为 `<CENTER_DATA_ROOT>/antigravity/gemini`，专用工作目录为 `<CENTER_DATA_ROOT>/antigravity/workspace`。严禁指向宿主机日常 `~/.gemini`，不得复制或抽取个人 Google token，也不得使用全局 `permissions.deny`。
 - **持久化目录**：专用 home 与 `agy` 会话必须位于已有持久数据目录（Docker 为 `/data`，Linux DEB/systemd 为 `/var/lib/pibot-center`）。
+- **轮级路由与辅助上下文传递**：继续沿用现有 JSON `messages` 封包，不新增配置项；ACP 不从旧版 Host 路由文本前缀猜测可信路由元数据，完整路由行为仍要求 Host 与 Center 成对更新。普通人类 `primary` 轮不带合成路由消息；非默认来源/目标由 Host 在插件最终投影头部前插瞬态 `SystemMessage`（`content: ''`、`sections: { 'host-turn-routing': <短说明> }`、`timestamp: 0`，不含其他 section、工具、`requestId` 或原始冻结轮 JSON，永不作为 `user` 消息追加），ACP 从 transcript 提取该 `host-turn-routing` section 并**按轮置于真实本轮输入之前**，**不**并入首轮粘性的原始 system prompt。对于更新后的 Host/Center，末尾的 `bcContextMaterial` / `bcSummaryMaterial` 条目以及末尾合成的 Hindsight recall、Billion Context 提醒均作为辅助上下文保留，不替代或当作最新用户输入文本或图片；该处理同样覆盖旧版已安装插件发出的 `timestamp: 0` 合成消息，无需另行强制重装插件。主会话流式输出、MCP 隔离、已存储历史、冻结轮持久化（支撑迟到同伴回复续接）与路由校验均保持不变。
 
 ## 安装与部署方式
 
@@ -28,7 +29,7 @@ volumes:
 
 ### 方式 2：源码构建可选内置 `agy` 的 Center 镜像
 
-[`Dockerfile`](../Dockerfile) 提供默认关闭的可选构建参数 `INSTALL_AGY=false`。需要内置时显式传入 `INSTALL_AGY=true`（构建阶段会按固定的 `AGY_VERSION=1.5.9` 与官方 manifest URL/SHA-512 校验安装包，支持 `amd64` 与 `arm64`）：
+[`Dockerfile`](../Dockerfile) 提供默认关闭的可选构建参数 `INSTALL_AGY=false`。需要内置时显式传入 `INSTALL_AGY=true`（构建阶段会按固定的 `AGY_VERSION=1.5.12` 与官方 manifest URL/SHA-512 校验安装包，支持 `amd64` 与 `arm64`）：
 
 ```sh
 sh scripts/center-build.sh --build-arg INSTALL_AGY=true

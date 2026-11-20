@@ -33,8 +33,14 @@ public class TauriMainActivity extends TauriActivity {
         WebView.setDataDirectorySuffix("tauri-ui");
     }
 
-    private final BroadcastReceiver clientExit = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) { finishAndRemoveTask(); }
+    private final BroadcastReceiver clientEvents = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (BotClientService.ACTION_CLOSE_UI.equals(intent.getAction())) {
+                finishAndRemoveTask();
+            } else if (ClientUpdateNotifications.ACTION_STATUS_CHANGED.equals(intent.getAction()) && activeWebView != null) {
+                activeWebView.evaluateJavascript("window.dispatchEvent(new Event('assistant-update-changed'))", null);
+            }
+        }
     };
     private volatile boolean resumed;
     private View insetsTarget;
@@ -53,7 +59,9 @@ public class TauriMainActivity extends TauriActivity {
         }
         captureLaunchTarget(getIntent());
         super.onCreate(savedInstanceState);
-        registerReceiver(clientExit, new IntentFilter(BotClientService.ACTION_CLOSE_UI), Context.RECEIVER_NOT_EXPORTED);
+        IntentFilter events = new IntentFilter(BotClientService.ACTION_CLOSE_UI);
+        events.addAction(ClientUpdateNotifications.ACTION_STATUS_CHANGED);
+        registerReceiver(clientEvents, events, Context.RECEIVER_NOT_EXPORTED);
         startClient();
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         if (Build.VERSION.SDK_INT >= 28) {
@@ -87,6 +95,9 @@ public class TauriMainActivity extends TauriActivity {
         startClient();
         if (captureLaunchTarget(intent) && activeWebView != null) {
             activeWebView.evaluateJavascript("window.dispatchEvent(new Event('assistant-open-chat'))", null);
+        }
+        if (intent != null && ClientUpdateNotifications.ACTION_OPEN.equals(intent.getAction()) && activeWebView != null) {
+            activeWebView.evaluateJavascript("window.dispatchEvent(new Event('assistant-open-update'))", null);
         }
     }
 
@@ -216,7 +227,7 @@ public class TauriMainActivity extends TauriActivity {
     @Override protected void onDestroy() {
         resumed = false;
         activeWebView = null;
-        unregisterReceiver(clientExit);
+        unregisterReceiver(clientEvents);
         super.onDestroy();
         // SDK 清理完成后只终止隔离 UI 进程，避免 C 全局析构与绘图线程冲突。
         if (!isChangingConfigurations()) {

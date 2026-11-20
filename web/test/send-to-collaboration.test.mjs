@@ -338,7 +338,7 @@ test('end-to-end runtime: full user -> Bot A -> Bot B DM task with closing nudge
       ? sysPrompt.includes('You are 总控助手.')
       : (fullSerialized.includes('You are 总控助手.') || serialized.includes(`"botId":${JSON.stringify(botA.botId)}`));
     const callerBotId = isBotA ? botA.botId : botB.botId;
-    modelCalls.push({ callerBotId, isNudge, lastIsToolResult, serialized, wakePrompt, sysPrompt });
+    modelCalls.push({ callerBotId, isNudge, lastIsToolResult, serialized, wakePrompt, sysPrompt, messages: [...messages] });
 
     if (scenario === 'nudge_then_reply') {
       if (callerBotId === botA.botId) {
@@ -367,13 +367,13 @@ test('end-to-end runtime: full user -> Bot A -> Bot B DM task with closing nudge
         return [{ type: 'text', text: '我已核实 Q2 营收为 380 万，准备汇报。' }];
       }
       if (!lastIsToolResult) {
-        // Closing Nudge #1: Bot B sees the nudge and calls send_to back to Bot A!
+        // Closing Nudge #1: Bot B sees the nudge and calls send_to omitting scopeId (Host resolves frozen DM replyTarget + replyTo linkage)!
         return [
           {
             type: 'toolCall',
             id: `call_send_${callSeq}`,
             name: 'send_to',
-            arguments: { scopeId: dmScopeId, text: 'Q2 营收核实结果为 380 万。' },
+            arguments: { text: 'Q2 营收核实结果为 380 万。' },
           },
         ];
       }
@@ -672,6 +672,57 @@ test('end-to-end runtime: full user -> Bot A -> Bot B DM task with closing nudge
     assert.ok(modelCalls.some((c) => c.callerBotId === botB.botId && !c.isNudge));
     assert.ok(modelCalls.some((c) => c.callerBotId === botB.botId && c.isNudge));
 
+    // Turn-routing contract: ordinary human primary turn has no synthetic routing message;
+    // scoped DM and peer-resumed turns prepend a transient host-turn-routing SystemMessage without replacing real input.
+    const msgText = (m) =>
+      typeof m?.content === 'string'
+        ? m.content
+        : Array.isArray(m?.content)
+          ? m.content.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n')
+          : '';
+    const routeSysMsgs = (msgs) =>
+      msgs.filter((m) => m?.role === 'system' && m?.sections && Object.hasOwn(m.sections, 'host-turn-routing'));
+    const assertNoLegacyRoutingUser = (msgs) => {
+      for (const m of msgs) {
+        if (m?.role === 'user') assert.ok(!msgText(m).includes('Host turn routing (trusted metadata'));
+      }
+    };
+    const assertPrependedRouteWithInput = (msgs, expectedSnippet) => {
+      assertNoLegacyRoutingUser(msgs);
+      const routes = routeSysMsgs(msgs);
+      assert.equal(routes.length, 1);
+      assert.equal(msgs[0], routes[0]);
+      assert.equal(routes[0].content, '');
+      assert.equal(routes[0].timestamp, 0);
+      assert.deepEqual(Object.keys(routes[0].sections), ['host-turn-routing']);
+      assert.equal(routes[0].toolsAdded, undefined);
+      assert.equal(routes[0].toolsRemoved, undefined);
+      const note = routes[0].sections['host-turn-routing'];
+      assert.ok(typeof note === 'string' && note.trim().length > 0);
+      assert.ok(!note.includes('"replyTarget"') && !note.includes('"requestId"'));
+      assert.equal(msgs.at(-1)?.role, 'user');
+      assert.ok(msgText(msgs.at(-1)).includes(expectedSnippet));
+    };
+
+    const primaryInitialA = modelCalls.find(
+      (c) => c.callerBotId === botA.botId && !c.lastIsToolResult && !c.serialized.includes('Q2 营收核实结果为 380 万'),
+    );
+    assert.ok(primaryInitialA);
+    assert.equal(routeSysMsgs(primaryInitialA.messages).length, 0);
+    assertNoLegacyRoutingUser(primaryInitialA.messages);
+    assert.equal(primaryInitialA.messages.at(-1)?.role, 'user');
+    assert.ok(msgText(primaryInitialA.messages.at(-1)).includes('请让研究助手核实一下 Q2 营收数据并告诉我。'));
+
+    const dmInitialB = modelCalls.find((c) => c.callerBotId === botB.botId && !c.isNudge && !c.lastIsToolResult);
+    assert.ok(dmInitialB);
+    assertPrependedRouteWithInput(dmInitialB.messages, '请帮我核实一下 Q2 营收数据并回传。');
+
+    const resumedPrimaryA = modelCalls.find(
+      (c) => c.callerBotId === botA.botId && c.serialized.includes('Q2 营收核实结果为 380 万'),
+    );
+    assert.ok(resumedPrimaryA);
+    assertPrependedRouteWithInput(resumedPrimaryA.messages, 'Q2 营收核实结果为 380 万');
+
     const dmHistoryAfter1 = log.history(dmScopeId, { order: 'ascending', limit: 20 }).items;
     assert.equal(dmHistoryAfter1.length, 2);
     assert.equal(dmHistoryAfter1[0].message.author.botId, botA.botId);
@@ -804,6 +855,9 @@ test('end-to-end runtime: full user -> Bot A -> Bot B DM task with closing nudge
     // Unmentioned Bot A made ZERO model calls for @研究助手's message!
     assert.equal(modelCalls.filter((c) => c.callerBotId === botA.botId).length, 0);
     assert.ok(modelCalls.filter((c) => c.callerBotId === botB.botId).length >= 1);
+    const roomInitialB = modelCalls.find((c) => c.callerBotId === botB.botId && !c.lastIsToolResult);
+    assert.ok(roomInitialB);
+    assertPrependedRouteWithInput(roomInitialB.messages, '@研究助手 请在群里同步一下进度');
 
     const roomHistory = log.history(roomScopeId, { order: 'ascending', limit: 20 }).items;
     assert.ok(

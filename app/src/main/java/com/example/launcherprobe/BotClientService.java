@@ -36,6 +36,7 @@ public final class BotClientService extends Service {
     static final String ACTION_CLOSE_UI = "com.example.launcherprobe.action.CLIENT_CLOSE_UI";
     private static final String CHANNEL = "bot-client-connection";
     private static final int NOTIFICATION_ID = 3160;
+    private static final long UPDATE_POLL_MS = 60_000;
     private static volatile BotClientService activeService;
     private static final Map<String, String> visibleChats = new HashMap<>();
     private static final AtomicBoolean localPolling = new AtomicBoolean();
@@ -91,6 +92,14 @@ public final class BotClientService extends Service {
         }
     };
 
+    private final Runnable checkUpdates = new Runnable() {
+        @Override public void run() {
+            if (!alive) return;
+            ClientUpdater.get(BotClientService.this).checkAutomatically();
+            main.postDelayed(this, UPDATE_POLL_MS);
+        }
+    };
+
     static void exit(Context context) {
         context.startService(new Intent(context, BotClientService.class).setAction(ACTION_EXIT));
     }
@@ -123,7 +132,7 @@ public final class BotClientService extends Service {
         int epoch = service.lifecycle.get();
         service.main.post(() -> {
             if (activeService == service && service.alive && service.lifecycle.get() == epoch)
-                service.updateNotification("本机 Host 前台服务启动失败");
+                service.updateNotification("本机 Host 服务启动失败");
         });
     }
 
@@ -155,7 +164,17 @@ public final class BotClientService extends Service {
         if (service != null) service.scheduleHostRetry(listener, attempt, null, true);
     }
 
+    static void checkUpdatesSoon() {
+        BotClientService service = activeService;
+        if (service == null || !service.alive) return;
+        service.main.post(() -> {
+            service.main.removeCallbacks(service.checkUpdates);
+            service.checkUpdates.run();
+        });
+    }
+
     static void centerReady() {
+        checkUpdatesSoon();
         BotClientService service = activeService;
         if (service == null) return;
         int epoch = service.lifecycle.get();
@@ -285,6 +304,7 @@ public final class BotClientService extends Service {
             activeService = this;
             attachHostListener();
             main.post(check);
+            main.post(checkUpdates);
         }
         if (hostExitListener != null) BotHostService.startForClient(this);
         return START_STICKY;
@@ -296,6 +316,7 @@ public final class BotClientService extends Service {
         Log.i("BotClientService", "Client exit requested");
         detachHostListener();
         main.removeCallbacks(check);
+        main.removeCallbacks(checkUpdates);
         CompletableFuture<Void> clientClosed = BotHostClient.get(this).shutdown();
         BotHostUiBridgeService.closeClientSessions();
         sendBroadcast(new Intent(ACTION_CLOSE_UI).setPackage(getPackageName()));
@@ -341,8 +362,12 @@ public final class BotClientService extends Service {
         alive = false;
         lifecycle.incrementAndGet();
         detachHostListener();
-        if (activeService == this) activeService = null;
+        if (activeService == this) {
+            activeService = null;
+            stopService(new Intent(this, BotHostService.class));
+        }
         main.removeCallbacks(check);
+        main.removeCallbacks(checkUpdates);
         connectivity.unregisterNetworkCallback(network);
         super.onDestroy();
     }

@@ -1,6 +1,6 @@
 # Billion Context — Host 受管插件
 
-本插件使用 [acp-kernel](https://github.com/ranxianglei/acp-kernel) **0.0.101** 管理长期上下文；不需要 bili 或代理。npm 包名 `@e-launcher/billion-context`，版本 `1.0.1`，能力 ID `e-launcher.billion-context`，要求 Host API `^1.0.0` 和 Durable API `1.4.0`。插件通过 Host 注入的 SDK 接入 Durable，不另装一份 Host 引擎。acp-kernel 的署名与完整条款见文末。
+本插件使用 [acp-kernel](https://github.com/ranxianglei/acp-kernel) **0.0.101** 管理长期上下文；不需要 bili 或代理。npm 包名 `@e-launcher/billion-context`，版本 `1.0.2`，能力 ID `e-launcher.billion-context`，要求 Host API `^1.0.0` 和 Durable API `1.4.0`。插件通过 Host 注入的 SDK 接入 Durable，不另装一份 Host 引擎。acp-kernel 的署名与完整条款见文末。
 
 ## 打包和分发
 
@@ -12,7 +12,7 @@ npm pack ./plugins/billion-context --pack-destination "$ARTIFACT_DIR"
 
 保留 npm 输出的 `.tgz` 文件，检查其中有 `package.json`、`capability.json`、manifest 指向的入口和 schema、全部本地模块及本 README，且没有 `node_modules`、越界路径或链接。标准 `npm pack` 不包含 `package-lock.json`；中心在制品未带锁文件时用固定 npm 生成锁文件并记录到部署计划，Host 的 managed installer 根据该锁文件执行 `npm ci --omit=peer --no-audit --no-fund` 安装依赖。因此中心和 Host 都需能访问锁文件所引用的依赖源；Host 还需要可用的 npm CLI。中心可选 `CENTER_NPM_PATH`、独立 Host 可选 `--npm-path` 指向各自的 npm-cli.js 绝对路径；Android 使用其已有 npm 资源。不要把 Host 的 node_modules 或引擎复制进包。
 
-以中心管理 UI 登录后，在“插件、MCP 与 Skill”选择类型 `plugin`、来源“本地制品”、目标 `host`，选择此 `.tgz` 并填写名称提交，等待 operation 完成。**实例安装后处于停用状态，需显式启用**（UI 或 `POST /api/installations/:id/enable`）；启用后中心为没有既有绑定的现有和新 Bot 默认开启绑定，**显式关闭的绑定及已有 overrides 原样保留**。从内置 BC 的旧 Host 迁移时，必须先停止旧 Host，再确认目标 Bot 绑定已开启（默认开启或手动），具体顺序见下节。启动新 Host 后查看实例的部署回执，确认该设备的实际版本为 `1.0.1` 且已应用。仅上传、安装或收到 202 不代表任何 Bot 已启用或 Host 已安装。部署由中心分配给有启用绑定的设备，不能通过手动复制到 Host 目录替代。
+以中心管理 UI 登录后，在“插件、MCP 与 Skill”选择类型 `plugin`、来源“本地制品”、目标 `host`，选择此 `.tgz` 并填写名称提交，等待 operation 完成。**实例安装后处于停用状态，需显式启用**（UI 或 `POST /api/installations/:id/enable`）；启用后中心为没有既有绑定的现有和新 Bot 默认开启绑定，**显式关闭的绑定及已有 overrides 原样保留**。从内置 BC 的旧 Host 迁移时，必须先停止旧 Host，再确认目标 Bot 绑定已开启（默认开启或手动），具体顺序见下节。启动新 Host 后查看实例的部署回执，确认该设备的实际版本为 `1.0.2` 且已应用。仅上传、安装或收到 202 不代表任何 Bot 已启用或 Host 已安装。部署由中心分配给有启用绑定的设备，不能通过手动复制到 Host 目录替代。
 
 需要 API 操作时，管理请求使用已认证 owner session；写请求还需 `x-csrf-token`。上传 `POST /api/artifacts`，multipart 字段名为 `file`，使用响应中的 `artifactRef`；`POST /api/installations` 请求体为 `{"requestId":"<唯一请求ID>","displayName":"Billion Context","kind":"plugin","source":{"type":"artifact","artifactRef":"<上传返回值>"},"target":"host"}`。先以 `GET /api/operations/:id` 跟踪返回的 `operationId`，再从 `GET /api/capabilities` 获取 `installationId`，然后 `POST /api/installations/:id/enable` 启用实例并跟踪其 operation。启用后中心自动为无既有绑定的 Bot 写入默认开启绑定；只需对必须停用的 Bot 以 `GET /api/devices/:deviceId/bots/:botId/capabilities/:id` 读取绑定及 revision，然后对同一路径 PUT `{"expectedRevision":<当前revision>,"enabled":false,"overrides":{}}`；发生 revision 冲突时重新读取，不覆盖其他配置。用 `GET /api/installations/:id/deployments` 检查设备回执。
 

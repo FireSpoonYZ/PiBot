@@ -4,6 +4,7 @@
 // SDK 的 watch.start 不投初始值：attach 成功先同步投影 native.value，再立即 start，
 // 中间不 await，避免漏掉此间的 commit。
 import { BACKGROUND_CONTEXT, withAbortSignal } from '@earendil-works/chord/context';
+import { ResetEntry } from '@earendil-works/pi-durable';
 import { getPrimaryConversation } from './runtime-docs.js';
 import { BotSessionState } from './bot-session-context.js';
 import { GenerationFailureState } from './generation-failure.js';
@@ -433,6 +434,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       // BotSessionState 快照后投影；首个快照落地前不发布任何帧——
       // 不先把无来源的 peer 正文当作用户消息推给客户端。
       sessionState: null,
+      fallbackResetEntryId: 0,
+      fallbackResetLoaded: false,
       pendingView: null,
       attributionLoad: null,
       initialized: false,
@@ -572,17 +575,48 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
           }
           if (state.endReason !== null) return;
           state.sessionState = doc ?? null;
+          const sessionResetId =
+            Number.isSafeInteger(state.sessionState?.clearedThroughEntryId) &&
+            state.sessionState.clearedThroughEntryId > 0
+              ? state.sessionState.clearedThroughEntryId
+              : 0;
+          // 兼容早于 BotSessionState.clearedThroughEntryId 落盘的既有 reset：仅在绑定后首轮做一次有界回扫，不逐帧扫库。
+          if (!work && !state.fallbackResetLoaded && sessionResetId === 0) {
+            state.fallbackResetLoaded = true;
+            try {
+              const conversation = await getHarness().conversation?.(state.nativeId, CTX);
+              if (conversation?.entries) {
+                let cursor;
+                for (let pageIndex = 0; pageIndex < 5; pageIndex++) {
+                  const page = await conversation.entries({ order: 'descending' }, 200, cursor, CTX);
+                  const reset = page.items.find((entry) => entry.kind === ResetEntry.kind);
+                  if (reset) {
+                    state.fallbackResetEntryId = reset.id;
+                    break;
+                  }
+                  if (!page.next) break;
+                  cursor = page.next;
+                }
+              }
+            } catch { /* fallback 失败不阻塞 live 帧，仍由 view.entries 就近识别 */ }
+          }
+          if (state.endReason !== null) return;
+          const effectiveResetId = Math.max(sessionResetId, state.fallbackResetEntryId);
           // contract B：runFailure 的真实终态失败读取 Host 失败诊断族文档；
           // 空闲/手动压缩读取各压缩任务的持久 startedAt。同一装载循环内完成，
           // 读取失败回落 null——投影以安全通用文案/无起点降级，绝不抛错断流。
-          let extras = null;
+          let extras = effectiveResetId > 0 ? { resetEntryId: effectiveResetId } : null;
           const live = view?.docs?.['pi.live'];
           if (live != null && state.nativeId !== null) {
-            extras = {};
+            extras ??= {};
+            const preResetFailure =
+              effectiveResetId > 0 &&
+              live.runFailure?.first != null &&
+              live.runFailure.first <= effectiveResetId;
             // aborted 也读取族文档：Host final guard abortTask 的具体诊断
             // （如 CONTEXT_LIMIT）存于 GenerationFailureState；无 receipt 的
             // 裸 abort 才是主动停止，投影按 stopped/idle 处理。
-            if (live.run == null && live.runFailure != null && live.runFailure.taskId != null) {
+            if (!preResetFailure && live.run == null && live.runFailure != null && live.runFailure.taskId != null) {
               try {
                 extras.failureDoc = await getHarness().snapshot(
                   GenerationFailureState, state.nativeId, String(live.runFailure.taskId), CTX);
@@ -790,6 +824,8 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
       state.nativeId = null;
       state.pendingView = null;
       state.sessionState = null;
+      state.fallbackResetEntryId = 0;
+      state.fallbackResetLoaded = false;
       state.runActivity = null;
       state.inboxQueued = 0;
       state.inboxItemsAll = [];
@@ -1071,6 +1107,14 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     }
   }
 
+  /** 仅清除已结算的 stopped 控制覆盖（不碰 stopping/interrupting，也不清 webhookStopPending）。 */
+  function clearStoppedControl(botId) {
+    assertNonBlank(botId, 'botId');
+    if (controlByBot.get(botId) === 'stopped') {
+      setBotControl(botId, null);
+    }
+  }
+
   function setWebhookStopPending(botId, pending) {
     if (pending) webhookStopPendingByBot.add(botId);
     else webhookStopPendingByBot.delete(botId);
@@ -1106,5 +1150,5 @@ export function createRuntimeLive({ host, getHarness, resolveWorkContext }) {
     learningByBot.clear();
   }
 
-  return { watch, watchWork, getBotBoard, bind, rebind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, setWebhookStopPending, setBotLearning, close };
+  return { watch, watchWork, getBotBoard, bind, rebind, bindWork, setTurnAdmission, setWorkActivity, setBotControl, clearStoppedControl, setWebhookStopPending, setBotLearning, close };
 }

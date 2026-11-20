@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, ChevronRight, Loader2, PanelLeft, Plus } from 'lucide-react';
+import { ArrowLeft, Loader2, PanelLeft, Plus } from 'lucide-react';
 import { GrokBotAvatar, type GrokAvatarPreset } from '../GrokBotAvatar';
 import { TaskCreateView } from './TaskCreateView';
 import { TaskDetailView } from './TaskDetailView';
@@ -85,7 +85,6 @@ export function TaskBoardView({
   onOpenMobileDrawer,
 }: TaskBoardViewProps) {
   const [filter, setFilter] = useState<TaskFilter>('active');
-  const [completedFoldOpen, setCompletedFoldOpen] = useState(false);
 
   const scopeClass = `tb-scope tasks-root${variant === 'mobile' ? ' is-mobile' : ''}`;
 
@@ -323,32 +322,6 @@ export function TaskBoardView({
           ) : (
             <p className="tasks-empty">当前筛选下没有事项。</p>
           )}
-
-          {filter === 'active' && doneList.length > 0 ? (
-            <div className="completed-fold">
-              <button
-                type="button"
-                className={`disclosure-btn${completedFoldOpen ? ' is-open' : ''}`}
-                aria-expanded={completedFoldOpen}
-                onClick={() => setCompletedFoldOpen(v => !v)}
-              >
-                <ChevronRight size={15} aria-hidden="true" />
-                <span className="tabular">已完成 · {doneList.length}</span>
-              </button>
-              {completedFoldOpen ? (
-                <>
-                  <div className="task-list" style={{ marginTop: 8 }}>
-                    {doneList.map(renderCard)}
-                  </div>
-                  {controller.historyTruncated ? (
-                    <p className="tasks-limit-note">
-                      仅显示最近 200 条已完成记录，更早任务可通过历史对话中的任务卡片打开。
-                    </p>
-                  ) : null}
-                </>
-              ) : null}
-            </div>
-          ) : null}
         </div>
       </div>
     </div>

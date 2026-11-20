@@ -172,17 +172,17 @@ import { deleteBotAndVerify, formatActionableDirectoryError, isDefiniteSendFailu
 import {
   useGlobalTasks,
   TaskBoardView,
-  TaskChatContextBar,
   TaskChatPromptBanner,
-  botTasksFor,
+  isTaskWaitingForBot,
+  resolveBotChatTaskContext,
   type GlobalTask,
   type TaskBotOption,
   type TaskTransportFn,
 } from './tasks';
-import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, GroupCreateAttempt, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending as SharedChatPending, ChatPendingEntry as SharedChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, fetchBotHistoryPages, mergeHistory, sharedHistoryRead, maxHistoryEntryId, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
+import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, GroupCreateAttempt, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending as SharedChatPending, ChatPendingEntry as SharedChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, BotHistoryReadResult, isStaleLiveState, maxResetEntryId, filterHistoryAfterCutoff, classifyClearError, makeClearError, fetchBotHistoryPages, sharedHistoryRead, maxHistoryEntryId, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
 // @lane-imports:settings
 import { Badge, Disclosure, Row, Section, SettingsSheet, Switch } from './bot-settings/primitives';
-import { ClientUpdateSection, useClientUpdateSummary } from './ClientUpdateSection';
+import { ClientUpdateSection, MobileClientUpdatePrompt, useClientUpdateSummary } from './ClientUpdateSection';
 // ---
 // @lane-imports:hub
 import { Chips } from './bot-settings/primitives';
@@ -310,18 +310,6 @@ interface RemoteTaskContext {
   prefix: string;
 }
 
-function isTaskWaitingForBot(item: GlobalTask, deviceId: string, botId: string): boolean {
-  if (!item.pendingPrompt) return false;
-  if (item.pendingPrompt.deviceId === deviceId && item.pendingPrompt.botId === botId) {
-    return true;
-  }
-  return (
-    item.pendingPrompt.kind === 'plan' &&
-    item.coordinatorDeviceId === deviceId &&
-    item.coordinatorBotId === botId
-  );
-}
-
 export function HostPage({
   connectionEpoch = 0,
   active = true,
@@ -348,8 +336,13 @@ export function HostPage({
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [creatingTask, setCreatingTask] = useState(false);
   const [taskInitialEditMode, setTaskInitialEditMode] = useState(false);
-  const [selectedTopicByBot, setSelectedTopicByBot] = useState<Record<string, string | null>>({});
-  const [selectedStepByBotTask, setSelectedStepByBotTask] = useState<Record<string, string | null>>({});
+  const [jumpedTaskQuote, setJumpedTaskQuote] = useState<{
+    deviceId: string;
+    botId: string;
+    taskId: string;
+    stepId: string | null;
+  } | null>(null);
+  const [waitingTaskOffsetByBot, setWaitingTaskOffsetByBot] = useState<Record<string, number>>({});
   const [taskReturnId, setTaskReturnId] = useState<string | null>(null);
   const [taskBannerBusy, setTaskBannerBusy] = useState(false);
   const [taskBoardNotice, setTaskBoardNotice] = useState('');
@@ -357,7 +350,6 @@ export function HostPage({
   const taskFetchAttemptedRef = useRef<Set<string>>(new Set());
   const [taskActionFailures, setTaskActionFailures] = useState<Record<string, PendingTaskChatAction>>({});
   const [retryingTaskActionKey, setRetryingTaskActionKey] = useState<string | null>(null);
-  const autoTopicEntryRef = useRef<string | null>(null);
 
   // Mobile navigation drawer shares the app's modal focus and dismissal behavior.
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
@@ -455,6 +447,8 @@ export function HostPage({
   // Bot preview metadata & clear cutoff map
   const [botMetaMap, setBotMetaMap] = useState<Record<string, BotPreviewMeta>>(() => readBotMetaMap());
   const [clearedMap, setClearedMap] = useState<Record<string, number>>(() => readClearedMap());
+  const clearedMapRef = useRef(clearedMap);
+  clearedMapRef.current = clearedMap;
   const [avatarVersion, setAvatarVersion] = useState(0);
 
   // Active Bot & Chat state
@@ -465,12 +459,15 @@ export function HostPage({
   const chatHistoryCacheRef = useRef(new Map<string, Array<Record<string, unknown>>>());
   useEffect(() => {
     const scope = currentChatScope.current;
-    if (scope && chatHistory.length > 0) {
+    if (!scope) return;
+    if (chatHistory.length > 0) {
       chatHistoryCacheRef.current.set(scope, chatHistory);
+    } else {
+      chatHistoryCacheRef.current.delete(scope);
     }
   }, [chatHistory]);
   // 同 scope+同代际并发全量历史读取的 flight 去重；代际失效后旧读不共享、结果丢弃。
-  const chatHistoryFlights = useRef(new Map<string, { epoch: number; task: Promise<Array<Record<string, unknown>> | null> }>());
+  const chatHistoryFlights = useRef(new Map<string, { epoch: number; task: Promise<BotHistoryReadResult | null> }>());
   // 历史读取代际：目标切换、/clear、连接代际变化都递增，旧代 flight 立即不被复用。
   const chatHistoryEpoch = useRef(0);
   // 正在全量读取历史的 scope 标识：每代换新对象（A→B→A 也是新标记），按身份清除不跨代误清。
@@ -605,6 +602,7 @@ export function HostPage({
   );
 
   const observeIdRef = useRef<string | undefined>(undefined);
+  const observeTargetRef = useRef<{ observationId: string; botKey: string; scopeKey: string } | undefined>(undefined);
   const remoteObserveRef = useRef<{ close(): Promise<void> } | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -1270,8 +1268,8 @@ export function HostPage({
     setActiveTaskId(null);
     setCreatingTask(false);
     setTaskInitialEditMode(false);
-    setSelectedTopicByBot({});
-    setSelectedStepByBotTask({});
+    setJumpedTaskQuote(null);
+    setWaitingTaskOffsetByBot({});
     setTaskReturnId(null);
     setTaskBannerBusy(false);
     setTaskBoardNotice('');
@@ -1279,7 +1277,6 @@ export function HostPage({
     taskFetchAttemptedRef.current.clear();
     setTaskActionFailures({});
     setRetryingTaskActionKey(null);
-    autoTopicEntryRef.current = null;
   }, [taskScopeKey]);
 
   const wasTasksScreenRef = useRef(screen === 'tasks');
@@ -1317,11 +1314,24 @@ export function HostPage({
   }, [globalTasks.tasks, fetchedTasksById]);
 
   const activeBotTopicKey = activeBot ? `${activeBot.deviceId}:${activeBot.botId}` : '';
-  const activeBotTopicId = activeBotTopicKey ? (selectedTopicByBot[activeBotTopicKey] ?? null) : null;
+  const activeBotJumpedTaskId =
+    activeBot &&
+    jumpedTaskQuote &&
+    jumpedTaskQuote.deviceId === activeBot.deviceId &&
+    jumpedTaskQuote.botId === activeBot.botId
+      ? jumpedTaskQuote.taskId
+      : null;
+  const activeBotJumpedStepId =
+    activeBot &&
+    jumpedTaskQuote &&
+    jumpedTaskQuote.deviceId === activeBot.deviceId &&
+    jumpedTaskQuote.botId === activeBot.botId
+      ? jumpedTaskQuote.stepId
+      : null;
 
   useEffect(() => {
     if (!active || !taskTransport) return;
-    const candidateIds = [activeBotTopicId, taskReturnId].filter((id): id is string => Boolean(id));
+    const candidateIds = [activeBotJumpedTaskId, taskReturnId].filter((id): id is string => Boolean(id));
     for (const tid of candidateIds) {
       if (globalTasks.tasks.some((item) => item.id === tid)) continue;
       if (fetchedTasksById[tid]) continue;
@@ -1340,65 +1350,41 @@ export function HostPage({
           // 列表截断补充查询失败时保留静态回退，不阻塞聊天主流程。
         });
     }
-  }, [active, taskTransport, activeBotTopicId, taskReturnId, globalTasks, fetchedTasksById, taskScopeKey]);
+  }, [active, taskTransport, activeBotJumpedTaskId, taskReturnId, globalTasks, fetchedTasksById, taskScopeKey]);
 
-  const activeBotLinkedTask = useMemo<GlobalTask | null>(
-    () => (activeBotTopicId ? (effectiveGlobalTasks.find((item) => item.id === activeBotTopicId) ?? null) : null),
-    [effectiveGlobalTasks, activeBotTopicId],
-  );
-  const activeBotStepKey = activeBot && activeBotTopicId
-    ? `${activeBot.deviceId}:${activeBot.botId}:${activeBotTopicId}`
-    : '';
-  const activeBotStepId = activeBotStepKey ? (selectedStepByBotTask[activeBotStepKey] ?? null) : null;
-  const activeBotFocusedStep = useMemo(
-    () => (activeBotLinkedTask && activeBotStepId
-      ? (activeBotLinkedTask.steps.find((s) => s.id === activeBotStepId) ?? null)
-      : null),
-    [activeBotLinkedTask, activeBotStepId],
-  );
-  // banner 必须与 composer 绑定同一 task，绝不显示另一个任务的 prompt
-  const activeBotBannerTask = activeBot ? activeBotLinkedTask : null;
-  const activeBotSwitchableWaitingTasks = useMemo(
+  const activeBotTaskContext = useMemo(
     () =>
       activeBot
-        ? botTasksFor(effectiveGlobalTasks, activeBot.deviceId, activeBot.botId).filter(
-            (item) => isTaskWaitingForBot(item, activeBot.deviceId, activeBot.botId) && item.id !== activeBotLinkedTask?.id,
-          )
-        : [],
-    [activeBot, effectiveGlobalTasks, activeBotLinkedTask?.id],
+        ? resolveBotChatTaskContext({
+            tasks: effectiveGlobalTasks,
+            botDeviceId: activeBot.deviceId,
+            botId: activeBot.botId,
+            jumpedTaskId: activeBotJumpedTaskId,
+            jumpedStepId: activeBotJumpedStepId,
+            waitingOffset: waitingTaskOffsetByBot[activeBotTopicKey] ?? 0,
+          })
+        : {
+            waitingTasks: [],
+            waitingIndex: 0,
+            linkedTask: null,
+            focusedStep: null,
+            promptTask: null,
+            showQuoteStrip: false,
+            taskPrefix: '',
+          },
+    [
+      activeBot,
+      effectiveGlobalTasks,
+      activeBotJumpedTaskId,
+      activeBotJumpedStepId,
+      waitingTaskOffsetByBot,
+      activeBotTopicKey,
+    ],
   );
-  const activeBotTaskPrefix = activeBotLinkedTask
-    ? activeBotFocusedStep
-      ? `[关联任务「${activeBotLinkedTask.title}」(${activeBotLinkedTask.id}) · 子项「${activeBotFocusedStep.text}」(${activeBotFocusedStep.id})]\n`
-      : `[关联任务「${activeBotLinkedTask.title}」(${activeBotLinkedTask.id})]\n`
-    : activeBotTopicId
-      ? activeBotStepId
-        ? `[关联任务(${activeBotTopicId}) · 子项(${activeBotStepId})]\n`
-        : `[关联任务(${activeBotTopicId})]\n`
-      : '';
-
-  useEffect(() => {
-    const entryKey = screen === 'chat' && activeBot
-      ? `${taskScopeKey}|${activeBot.deviceId}:${activeBot.botId}`
-      : null;
-    if (!entryKey || !activeBot) {
-      autoTopicEntryRef.current = null;
-      return;
-    }
-    if (!globalTasks.loaded) return;
-    if (autoTopicEntryRef.current === entryKey) return;
-    autoTopicEntryRef.current = entryKey;
-    const botKey = `${activeBot.deviceId}:${activeBot.botId}`;
-    if (selectedTopicByBot[botKey] !== undefined) return;
-    const waiting = botTasksFor(effectiveGlobalTasks, activeBot.deviceId, activeBot.botId).filter((item) =>
-      isTaskWaitingForBot(item, activeBot.deviceId, activeBot.botId),
-    );
-    if (waiting.length === 1) {
-      setSelectedTopicByBot((prev) =>
-        prev[botKey] !== undefined ? prev : { ...prev, [botKey]: waiting[0].id },
-      );
-    }
-  }, [screen, activeBot, taskScopeKey, globalTasks.loaded, selectedTopicByBot, effectiveGlobalTasks]);
+  const activeBotLinkedTask = activeBotTaskContext.linkedTask;
+  const activeBotFocusedStep = activeBotTaskContext.focusedStep;
+  const activeBotBannerTask = activeBotTaskContext.linkedTask;
+  const activeBotTaskPrefix = activeBotTaskContext.taskPrefix;
 
   const executeTaskChatAction = useCallback(
     async (spec: PendingTaskChatActionInput): Promise<boolean> => {
@@ -1469,8 +1455,7 @@ export function HostPage({
       const botKey = `${botInfo.deviceId}:${botInfo.botId}`;
       if (
         linkedTaskSnapshot.pendingPrompt?.kind === 'question' &&
-        linkedTaskSnapshot.pendingPrompt.deviceId === botInfo.deviceId &&
-        linkedTaskSnapshot.pendingPrompt.botId === botInfo.botId
+        isTaskWaitingForBot(linkedTaskSnapshot, botInfo.deviceId, botInfo.botId)
       ) {
         void executeTaskChatAction({
           kind: 'answer_prompt',
@@ -1480,7 +1465,10 @@ export function HostPage({
           taskTitle: linkedTaskSnapshot.title,
           answer: rawText,
         });
-      } else if (linkedTaskSnapshot.pendingPrompt?.kind === 'plan') {
+      } else if (
+        linkedTaskSnapshot.pendingPrompt?.kind === 'plan' &&
+        isTaskWaitingForBot(linkedTaskSnapshot, botInfo.deviceId, botInfo.botId)
+      ) {
         void executeTaskChatAction({
           kind: 'update_task',
           scopeKey: capturedScope,
@@ -1676,7 +1664,7 @@ export function HostPage({
 
   const scopeForBot = (bot: UnifiedBotItem) => {
     const deviceId = bot.hostKind === 'local'
-      ? localHost?.deviceId || localBots.find(item => item.botId === bot.botId)?.deviceId || ''
+      ? localHost?.deviceId || bot.deviceId || localBots.find(item => item.botId === bot.botId)?.deviceId || ''
       : bot.hostId;
     const center = centerConn.saved?.url || centerConn.url || activeCenter || localStorage.getItem('active-center-url') || '';
     return center && deviceId ? chatStorageKey(center, deviceId, bot.botId) : '';
@@ -1691,17 +1679,91 @@ export function HostPage({
     }
     return saved;
   };
-  const removePending = (scopeKey: string, requestId: string) => {
+  const removePending = useCallback((scopeKey: string, requestId: string) => {
     const entry = pendingByBot.current.get(scopeKey);
     if (!entry || entry.pending.requestId !== requestId) return;
     pendingByBot.current.delete(scopeKey);
     try { localStorage.removeItem(`${scopeKey}:pending`); } catch { /* retain safe copy */ }
     if (currentChatScope.current === scopeKey) {
-      chatSubmissionRef.current = undefined;
-      setChatPending(undefined);
-      setChatReceipt(undefined);
+      if (chatSubmissionRef.current?.requestId === requestId) {
+        chatSubmissionRef.current = undefined;
+      }
+      setChatPending(prev => (prev?.requestId === requestId ? undefined : prev));
+      setChatReceipt(prev => (prev?.requestId === requestId ? undefined : prev));
     }
-  };
+  }, []);
+  const getCutoff = useCallback((botKey: string, scopeKey: string): number => {
+    if (scopeKey && clearedMapRef.current[scopeKey] !== undefined) {
+      return clearedMapRef.current[scopeKey];
+    }
+    return botKey ? (clearedMapRef.current[botKey] ?? 0) : 0;
+  }, []);
+  const applyCutoff = useCallback((
+    botKey: string,
+    scopeKey: string,
+    entryId: number,
+    options?: { recordZero?: boolean },
+  ): number => {
+    if (!scopeKey || !Number.isSafeInteger(entryId) || entryId < 0) {
+      return getCutoff(botKey, scopeKey);
+    }
+    const existing = clearedMapRef.current[scopeKey];
+    const previous = existing !== undefined ? existing : getCutoff(botKey, scopeKey);
+    const next = existing !== undefined ? Math.max(existing, entryId) : entryId;
+    const shouldWrite = existing === undefined
+      ? (entryId > 0 || Boolean(options?.recordZero))
+      : next > existing;
+    if (shouldWrite) {
+      const updated = { ...clearedMapRef.current, [scopeKey]: next };
+      clearedMapRef.current = updated;
+      writeClearedMap(updated);
+      setClearedMap(updated);
+    }
+    if (next > previous) {
+      const cached = chatHistoryCacheRef.current.get(scopeKey);
+      if (cached) {
+        const pruned = filterHistoryAfterCutoff(cached, next);
+        if (pruned.length > 0) chatHistoryCacheRef.current.set(scopeKey, pruned);
+        else chatHistoryCacheRef.current.delete(scopeKey);
+      }
+      updateBotMeta(botKey, { lastText: '', updatedAt: Date.now(), unread: false });
+      if (currentChatScope.current === scopeKey) {
+        chatHistoryEpoch.current += 1;
+        const prunedHistory = filterHistoryAfterCutoff(chatHistoryRef.current, next);
+        chatHistoryRef.current = prunedHistory;
+        setChatHistory(prunedHistory);
+      }
+    }
+    return existing !== undefined ? next : (shouldWrite ? next : previous);
+  }, [getCutoff, updateBotMeta]);
+  const applyFetchedHistory = useCallback((
+    botKey: string,
+    scopeKey: string,
+    result: BotHistoryReadResult,
+    options?: { updateMeta?: boolean },
+  ) => {
+    if (result.clearedThroughEntryId !== undefined) {
+      applyCutoff(botKey, scopeKey, result.clearedThroughEntryId, { recordZero: true });
+    }
+    const cutoff = getCutoff(botKey, scopeKey);
+    const filteredItems = filterHistoryAfterCutoff(result.items, cutoff);
+    if (scopeKey) {
+      if (filteredItems.length > 0) chatHistoryCacheRef.current.set(scopeKey, filteredItems);
+      else chatHistoryCacheRef.current.delete(scopeKey);
+    }
+    if (currentChatScope.current === scopeKey) {
+      chatHistoryRef.current = filteredItems;
+      setChatHistory(filteredItems);
+    }
+    if (options?.updateMeta) {
+      const lastTurn = parseHistoryEntries(filteredItems, cutoff).at(-1);
+      if (lastTurn?.text) {
+        updateBotMeta(botKey, { lastText: lastTurn.text, unread: false });
+      } else if (filteredItems.length === 0 && cutoff > 0) {
+        updateBotMeta(botKey, { lastText: '', unread: false });
+      }
+    }
+  }, [applyCutoff, getCutoff, updateBotMeta]);
 
   const activeChatScope = activeBot ? scopeForBot(activeBot) : '';
   // 恢复 pending 已带终态回执（done/unanswered）时首屏不再补乐观用户气泡，其真实轮次
@@ -1769,6 +1831,7 @@ export function HostPage({
     if (observeIdRef.current) {
       const id = observeIdRef.current;
       observeIdRef.current = undefined;
+      observeTargetRef.current = undefined;
       void BotHost.cancelObservation({ observationId: id }).catch(() => {});
     }
     if (remoteObserveRef.current) {
@@ -1786,18 +1849,31 @@ export function HostPage({
         if (!alive || ev.observationId !== observeIdRef.current) return;
         if (ev.error) {
           observeIdRef.current = undefined;
+          observeTargetRef.current = undefined;
           setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…'));
           return;
         }
         const f = ev.frame;
         if (!f) return;
+        const target = observeTargetRef.current?.observationId === ev.observationId ? observeTargetRef.current : undefined;
         if (f.type === 'snapshot') {
+          const observedReset = maxResetEntryId(array<Record<string, unknown>>(f.state.history));
+          if (observedReset > 0 && target) {
+            applyCutoff(target.botKey, target.scopeKey, observedReset);
+          }
           setChatLive(f.state);
         } else if (f.type === 'update') {
+          if (Array.isArray(f.changes.history)) {
+            const observedReset = maxResetEntryId(array<Record<string, unknown>>(f.changes.history));
+            if (observedReset > 0 && target) {
+              applyCutoff(target.botKey, target.scopeKey, observedReset);
+            }
+          }
           // update 只把 changes 合并进已有快照；观察首帧必为 snapshot，update 不单独入栈。
           setChatLive(prev => (prev ? { ...prev, ...f.changes } : prev));
         } else if (f.type === 'end') {
           observeIdRef.current = undefined;
+          observeTargetRef.current = undefined;
           setChatLive(undefined);
         }
       }),
@@ -1955,24 +2031,19 @@ export function HostPage({
       const syncLoading = () =>
         setChatHistoryLoading(Boolean(chatLoadingScope.current) && chatHistoryRef.current.length === 0);
       syncLoading();
-      const loadHistory = (read: (fresh: () => boolean) => Promise<Array<Record<string, unknown>> | null>) => {
-        const start = async (): Promise<Array<Record<string, unknown>> | null> =>
+      const loadHistory = (read: (fresh: () => boolean) => Promise<BotHistoryReadResult | null>) => {
+        const start = async (): Promise<BotHistoryReadResult | null> =>
           sharedHistoryRead(chatHistoryFlights.current, scopeKey, chatHistoryEpoch,
             () => currentChatScope.current === scopeKey && chatHistoryEpoch.current === historyEpoch, read);
         const isCurrent = () => currentChatScope.current === scopeKey && chatHistoryEpoch.current === historyEpoch && current();
         void (async () => {
           try {
-            let items = await start();
-            if (items === null && isCurrent()) items = await start();
+            let result = await start();
+            if (result === null && isCurrent()) result = await start();
             if (!isCurrent()) return;
-            if (items) {
-              setChatHistory(previous => mergeHistory(previous, items));
+            if (result) {
+              applyFetchedHistory(bot.key, scopeKey, result, { updateMeta: true });
               setChatHistoryError('');
-              const turns = parseHistoryEntries(items, clearedMap[bot.key] ?? 0);
-              const lastTurn = turns.at(-1);
-              if (lastTurn?.text) {
-                updateBotMeta(bot.key, { lastText: lastTurn.text, unread: false });
-              }
             }
 
           } catch {
@@ -1998,11 +2069,12 @@ export function HostPage({
         try {
           const obsId = uuid();
           observeIdRef.current = obsId;
+          observeTargetRef.current = { observationId: obsId, botKey: bot.key, scopeKey };
           await BotHost.observe({ observationId: obsId, target: { kind: 'primary', botId: bot.botId } });
           if (current()) setChatObservationError('');
           if (!current()) void BotHost.cancelObservation({ observationId: obsId }).catch(() => {});
         } catch {
-          if (current()) { observeIdRef.current = undefined; setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…')); }
+          if (current()) { observeIdRef.current = undefined; observeTargetRef.current = undefined; setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…')); }
         }
       } else if (bot.hostKind === 'remote' && bot.remoteIdentity && remoteClientRef.current) {
         const api = remoteClientRef.current.api;
@@ -2024,8 +2096,18 @@ export function HostPage({
             if ('error' in ev) { setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…')); return; }
             const frame = ev.frame;
             if (frame.type === 'snapshot') {
+              const observedReset = maxResetEntryId(array<Record<string, unknown>>(frame.state.history));
+              if (observedReset > 0) {
+                applyCutoff(bot.key, scopeKey, observedReset);
+              }
               setChatLive(frame.state);
             } else if (frame.type === 'update') {
+              if (Array.isArray(frame.changes.history)) {
+                const observedReset = maxResetEntryId(array<Record<string, unknown>>(frame.changes.history));
+                if (observedReset > 0) {
+                  applyCutoff(bot.key, scopeKey, observedReset);
+                }
+              }
               setChatLive(prev => (prev ? { ...prev, ...frame.changes } : prev));
             } else if (frame.type === 'end') {
               setChatLive(undefined);
@@ -2043,7 +2125,7 @@ export function HostPage({
         syncLoading();
       }
     },
-    [cancelActiveObservation, clearedMap, ensureLocalHostRunning, updateBotMeta, t],
+    [applyCutoff, applyFetchedHistory, cancelActiveObservation, ensureLocalHostRunning, t],
   );
 
   // 本机或远端传输更换后，历史读取不再复用旧连接的结果。
@@ -2126,8 +2208,8 @@ export function HostPage({
     const scopeKey = chatPending?.scopeKey ?? currentChatScope.current;
     // flight 内只判 scope+代际有效（不携带本 effect 的 alive/提交身份）；活过本次轮询的共享读
     // 结果照样可用，但不带 stillOwned 的读绝不因本 effect 失效而返回半截。
-    const readHistory = async (): Promise<Array<Record<string, unknown>> | null> => {
-      const read = (fresh: () => boolean): Promise<Array<Record<string, unknown>> | null> => {
+    const readHistory = async (): Promise<BotHistoryReadResult | null> => {
+      const read = (fresh: () => boolean): Promise<BotHistoryReadResult | null> => {
         if (chatHostKind === 'local') {
           return fetchBotHistoryPages(async (cursor, limit, chunked) => {
             if (!fresh()) return null;
@@ -2160,8 +2242,10 @@ export function HostPage({
     let alive = true;
     // 语音提交也可能直接返回终态，没有 queued/placed 可供轮询。
     if (chatReceiptStatus === 'done' || chatReceiptStatus === 'unanswered') {
-      void readHistory().then(items => {
-        if (alive && chatSubmissionRef.current === submission && items) setChatHistory(previous => mergeHistory(previous, items));
+      void readHistory().then(result => {
+        if (alive && chatSubmissionRef.current === submission && result) {
+          applyFetchedHistory(chatBotKey, scopeKey, result);
+        }
       }).catch(() => {});
       return () => {
         alive = false;
@@ -2182,14 +2266,19 @@ export function HostPage({
           return;
         }
         // 终态：先回读历史再提交 receipt，避免 receipt 重渲染 cleanup 把 alive 置 false 丢掉后续写入。
-        const items = await readHistory().catch(() => null);
+        const result = await readHistory().catch(() => null);
         if (!alive || chatSubmissionRef.current !== submission) return;
+        if (result) applyFetchedHistory(chatBotKey, scopeKey, result);
         // 回读失败也要落终态 receipt，不能停在生成中；随后同步提交，无新的异步窗口。
         if (entry?.pending.requestId === requestId) updatePending({ pending: { ...entry.pending, phase: 'accepted', admission: nextAdmission }, receipt: next });
         else setChatReceipt(next);
-        if (items) setChatHistory(previous => mergeHistory(previous, items));
-        // 摘要只取真实答案；无答案（unanswered）保留 submit 时写入的用户消息摘要，不被历史旧文本覆盖。
-        if (next.answerText) {
+        const cutoff = getCutoff(chatBotKey, scopeKey);
+        const oldEpochAnswer =
+          cutoff > 0 &&
+          submission.afterEntryId < cutoff &&
+          (!result || filterHistoryAfterCutoff(result.items, cutoff).length === 0);
+        // 摘要只取当前代际的真实答案；无答案（unanswered）或旧代际摘要不覆盖新水位。
+        if (next.answerText && !oldEpochAnswer) {
           updateBotMeta(chatBotKey, { lastText: next.answerText, updatedAt: Date.now(), unread: false });
         }
         if (chatHostKind === 'local') void syncLocalBots();
@@ -2207,13 +2296,15 @@ export function HostPage({
   }, [
     screen, chatBotKey, chatBotId, chatHostKind, chatProfileId, chatDeviceId, chatGeneration,
     chatConnectionKind, chatRemoteApi, chatRemoteConnected, connectionEpoch,
-    chatRequestId, chatReceiptStatus, chatResumeEpoch, chatPending?.scopeKey, updateBotMeta, syncLocalBots, syncRemoteBots,
+    chatRequestId, chatReceiptStatus, chatResumeEpoch, chatPending?.scopeKey,
+    applyFetchedHistory, getCutoff, updateBotMeta, syncLocalBots, syncRemoteBots,
   ]);
 
   const openBotChat = (bot: UnifiedBotItem, fromScreen?: 'hub' | 'board' | 'tasks' | 'archived-bots') => {
     profileLoadGeneration.current += 1;
     scheduleLoadGeneration.current += 1;
     const scopeKey = scopeForBot(bot);
+    const scopeCutoff = getCutoff(bot.key, scopeKey);
     // 同一非空 scope 重进（前台恢复/回主页再进入）保留已加载历史与实时投影；不同 scope 才清空，防跨 Bot/跨 center 串消息。
     const sameScope = Boolean(scopeKey) && currentChatScope.current === scopeKey;
     currentChatScope.current = scopeKey;
@@ -2229,7 +2320,9 @@ export function HostPage({
       chatLoadGeneration.current += 1;
       chatHistoryEpoch.current += 1;
       cancelActiveObservation();
-      const cachedHistory = scopeKey ? (chatHistoryCacheRef.current.get(scopeKey) ?? []) : [];
+      const cachedHistory = scopeKey
+        ? filterHistoryAfterCutoff(chatHistoryCacheRef.current.get(scopeKey) ?? [], scopeCutoff)
+        : [];
       chatHistoryRef.current = cachedHistory;
       setChatHistory(cachedHistory);
       setChatLive(undefined);
@@ -2256,7 +2349,10 @@ export function HostPage({
     setChatSearchQuery('');
     setClearNotice('');
     updateBotMeta(bot.key, { unread: false });
-    if (fromScreen !== 'tasks') setTaskReturnId(null);
+    if (fromScreen !== 'tasks') {
+      setTaskReturnId(null);
+      setJumpedTaskQuote(null);
+    }
     setChatReturnScreen(fromScreen ?? (screen === 'archived-bots' || bot.archivedAt ? 'archived-bots' : 'hub'));
     setScreen('chat');
   };
@@ -2701,6 +2797,8 @@ export function HostPage({
   const slashBusyRef = useRef(false);
   /** 停止失败单独提示，与 action.error（发送等）分开保留；成功由 Host activity stopped 呈现。 */
   const [stopError, setStopError] = useState('');
+  const setActionError = action.setError;
+  const invalidateBoard = board.invalidate;
 
   // /clear 与 /compact 都先等后端成功，再用服务端边界重置本地可见历史；失败保留草稿与原历史。
   // 返回 true 表示服务端已成功（即使 UI 已切到别的会话），false 表示 UI 切走后不再报错的过期结果。
@@ -2714,72 +2812,111 @@ export function HostPage({
     if (bot.archivedAt) throw new Error(t('该智能体已归档，请先恢复后再操作。', 'This bot is archived. Unarchive it first.'));
     const scopeKey = scopeForBot(bot);
     if (!scopeKey) throw new Error(t('目标身份尚未就绪，草稿已保留。', 'Target identity unavailable; draft retained.'));
+    const boardKey = botBoardKey(pinStorageScope, bot.deviceId, bot.botId);
     const draftSnapshot = readChatDraft(scopeKey);
+    const preClearPendingRequestId = pendingByBot.current.get(scopeKey)?.pending.requestId;
+    const preClearSubmission = chatSubmissionRef.current?.botKey === bot.key ? chatSubmissionRef.current : undefined;
     slashBusyRef.current = true;
     setSlashBusy(command);
     setClearNotice(command === '/clear'
       ? t('正在清空对话…', 'Clearing conversation…')
       : t('正在压缩上下文…', 'Compacting context…'));
     try {
-      let cleared: ClearHistoryResult | undefined;
-      let compacted: CompactResult | undefined;
       if (bot.hostKind === 'local') {
         const snap = await ensureLocalHostRunning();
         if (!snap || snap.phase !== 'running') throw new Error(t('本机服务未运行，草稿已保留。', 'Local host is not running; draft retained.'));
-        const env = await BotHost.call({ method: command === '/clear' ? 'clearHistory' : 'compact', params: { botId: bot.botId } });
-        if (command === '/clear') cleared = env.result as ClearHistoryResult;
-        else compacted = env.result as CompactResult;
-      } else {
-        if (!bot.remoteIdentity || !remoteClientRef.current || !remoteConnected) {
-          throw new Error(t('目标离线，草稿已保留。', 'Target offline; draft retained.'));
+      } else if (!bot.remoteIdentity || !remoteClientRef.current || !remoteConnected) {
+        throw new Error(t('目标离线，草稿已保留。', 'Target offline; draft retained.'));
+      }
+      let cleared: ClearHistoryResult | undefined;
+      let compacted: CompactResult | undefined;
+      try {
+        if (bot.hostKind === 'local') {
+          const env = await BotHost.call({ method: command === '/clear' ? 'clearHistory' : 'compact', params: { botId: bot.botId } });
+          if (command === '/clear') cleared = env.result as ClearHistoryResult;
+          else compacted = env.result as CompactResult;
+        } else {
+          const result = await remoteClientRef.current!.api.call(
+            bot.remoteIdentity!,
+            command === '/clear' ? 'clearHistory' : 'compact',
+            { botId: bot.botId },
+          );
+          if (command === '/clear') cleared = result as unknown as ClearHistoryResult;
+          else compacted = result as unknown as CompactResult;
         }
-        const result = await remoteClientRef.current.api.call(
-          bot.remoteIdentity,
-          command === '/clear' ? 'clearHistory' : 'compact',
-          { botId: bot.botId },
-        );
-        if (command === '/clear') cleared = result as unknown as ClearHistoryResult;
-        else compacted = result as unknown as CompactResult;
+      } catch (rpcError) {
+        if (command !== '/clear') throw rpcError;
+        const kind = classifyClearError(rpcError);
+        if (kind === 'busy') {
+          throw makeClearError(
+            t('智能体正在执行任务，暂无法清空对话；请等待完成或先停止后再试。', 'Bot is busy with active work; conversation was not cleared. Wait for it to finish or stop it first.'),
+            'RUNTIME_BUSY',
+            'responded',
+          );
+        }
+        if (kind === 'unknown') {
+          // 结果未确认：绝不自动重发、不按读到新边界推断成功或清草稿/待发，只复用现有单飞刷新核对服务端状态。
+          if (currentChatScope.current === scopeKey) {
+            chatHistoryEpoch.current += 1;
+            setChatResumeEpoch(value => value + 1);
+          }
+          const errCode = typeof (rpcError as { code?: unknown })?.code === 'string'
+            ? (rpcError as { code: string }).code
+            : 'UNCONFIRMED';
+          throw makeClearError(
+            t('清空结果未确认，已刷新历史核实状态（未自动重发），草稿与待发保留。', 'Clear outcome unconfirmed; refreshing history to verify without auto-retry. Draft and pending retained.'),
+            errCode,
+            'unconfirmed',
+          );
+        }
+        throw rpcError;
+      }
+      if (command === '/clear') {
+        invalidateBoard(boardKey);
+        applyCutoff(bot.key, scopeKey, cleared?.clearedThroughEntryId ?? 0, { recordZero: true });
+        chatHistoryCacheRef.current.delete(scopeKey);
+        if (preClearPendingRequestId) removePending(scopeKey, preClearPendingRequestId);
+        // 仅当当前草稿正是 "/clear" 命令文本时清掉；保留无关草稿、图片附件与文件引用。
+        if (draftSnapshot.trim() === '/clear' && readChatDraft(scopeKey) === draftSnapshot) {
+          writeChatDraft(scopeKey, '');
+        }
+        updateBotMeta(bot.key, { lastText: '', updatedAt: Date.now(), unread: false });
+        if (currentChatScope.current !== scopeKey) return true;
+        if (preClearSubmission && chatSubmissionRef.current === preClearSubmission) {
+          chatSubmissionRef.current = undefined;
+          setChatReceipt(prev => (prev?.requestId === preClearSubmission.requestId ? undefined : prev));
+        }
+        setStopError('');
+        setActionError('');
+        setComposerMenuOpen(false);
+        setChatTopMenuOpen(false);
+        chatHistoryEpoch.current += 1;
+        chatHistoryRef.current = [];
+        setChatHistory([]);
+        setChatObservationError('');
+        setChatHistoryError('');
+        if (draftSnapshot.trim() === '/clear') {
+          setChatDraft(previous => previous.trim() === '/clear' ? '' : previous);
+        }
+        const doneText = t('已清空当前对话并重置上下文', 'Conversation cleared and context reset');
+        setClearNotice(doneText);
+        window.setTimeout(() => setClearNotice(prev => prev === doneText ? '' : prev), 2500);
+        return true;
       }
       // 切换 Bot 后只影响服务端，不清新 Bot 的草稿/UI。
       if (currentChatScope.current !== scopeKey) return true;
       setComposerMenuOpen(false);
       setChatTopMenuOpen(false);
-      if (command === '/clear') {
-        // 以服务端 reset 条目为唯一水位；未建会话时 0 也是真实水位，不额外抬高。
-        const nextCutoff = Math.max(cleared?.clearedThroughEntryId ?? 0, clearedMap[bot.key] ?? 0);
-        setClearedMap(prev => {
-          const updated = { ...prev, [bot.key]: nextCutoff };
-          writeClearedMap(updated);
-          return updated;
-        });
-        chatSubmissionRef.current = undefined;
-        chatHistoryEpoch.current += 1;
-        if (chatPending) removePending(chatPending.scopeKey, chatPending.requestId);
-        chatHistoryCacheRef.current.delete(scopeKey);
-        setChatPending(undefined);
-        setChatHistory([]);
-        setChatLive(undefined);
-        setChatObservationError('');
-        setChatHistoryError('');
-        setChatReceipt(undefined);
-        setChatDraft('');
-        setChatDraftAttachments([]);
-        writeChatDraft(scopeKey, '');
-        writeChatDraftAttachments(scopeKey, []);
-        updateBotMeta(bot.key, { lastText: '', updatedAt: Date.now(), unread: false });
-        setClearNotice(t('已清空当前对话并重置上下文', 'Conversation cleared and context reset'));
-      } else {
-        // /compact 成功后才清掉实际命令草稿；若等待期间已写入新文本则保留，不误删。
-        if (draftSnapshot.trim() === command) {
-          if (readChatDraft(scopeKey) === draftSnapshot) writeChatDraft(scopeKey, '');
-          setChatDraft(previous => previous.trim() === command ? '' : previous);
-        }
-        setClearNotice(compacted?.compacted
-          ? t('已压缩较早的上下文', 'Earlier context compacted')
-          : t('没有可压缩的历史', 'Nothing to compact'));
+      // /compact 成功后才清掉实际命令草稿；若等待期间已写入新文本则保留，不误删。
+      if (draftSnapshot.trim() === command) {
+        if (readChatDraft(scopeKey) === draftSnapshot) writeChatDraft(scopeKey, '');
+        setChatDraft(previous => previous.trim() === command ? '' : previous);
       }
-      window.setTimeout(() => setClearNotice(''), 2500);
+      const compactText = compacted?.compacted
+        ? t('已压缩较早的上下文', 'Earlier context compacted')
+        : t('没有可压缩的历史', 'Nothing to compact');
+      setClearNotice(compactText);
+      window.setTimeout(() => setClearNotice(prev => prev === compactText ? '' : prev), 2500);
       return true;
     } catch (error) {
       // 异步完成时已切到别的会话：不向新会话写错误/提示，也不把失败当成成功。
@@ -2790,7 +2927,7 @@ export function HostPage({
       slashBusyRef.current = false;
       setSlashBusy(undefined);
     }
-  }, [activeBot, chatPending, clearedMap, ensureLocalHostRunning, remoteConnected, removePending, t, updateBotMeta]);
+  }, [activeBot, applyCutoff, chatPending, ensureLocalHostRunning, invalidateBoard, pinStorageScope, remoteConnected, removePending, setActionError, t, updateBotMeta]);
 
   /** 停止在途按 bot.key 去重：切换 Bot 不复用其他 Bot 的 abort Promise。 */
   const stopInFlightRef = useRef(new Map<string, Promise<unknown>>());
@@ -2807,7 +2944,8 @@ export function HostPage({
       if (deletingBots.current.has(bot.key) || (chatPending?.botKey === bot.key && chatPending.phase !== 'accepted')) return;
       if (bot.archivedAt) throw new Error(t('该智能体已归档，请先恢复后再发送消息', 'This bot is archived. Unarchive it first.'));
       if (imageUploading || editSubmitting) return;
-      const currentActivity = resolveBotActivity(chatLive);
+      const effectiveLive = isStaleLiveState(chatLive, getCutoff(bot.key, scopeForBot(bot))) ? undefined : chatLive;
+      const currentActivity = resolveBotActivity(effectiveLive);
       if (
         stopping.has(bot.key) ||
         currentActivity.phase === 'stopping' ||
@@ -2829,18 +2967,7 @@ export function HostPage({
       if (!scopeKey) throw new Error(t('目标身份尚未就绪，草稿已保留。', 'Target identity unavailable; draft retained.'));
       const capturedTaskScopeKey = taskScopeKey;
       const linkedTaskSnapshot = activeBotLinkedTask;
-      const focusedStepSnapshot = activeBotFocusedStep;
-      const selectedTaskIdSnapshot = activeBotTopicId;
-      const selectedStepIdSnapshot = activeBotStepId;
-      const taskPrefix = linkedTaskSnapshot
-        ? focusedStepSnapshot
-          ? `[关联任务「${linkedTaskSnapshot.title}」(${linkedTaskSnapshot.id}) · 子项「${focusedStepSnapshot.text}」(${focusedStepSnapshot.id})]\n`
-          : `[关联任务「${linkedTaskSnapshot.title}」(${linkedTaskSnapshot.id})]\n`
-        : selectedTaskIdSnapshot
-          ? selectedStepIdSnapshot
-            ? `[关联任务(${selectedTaskIdSnapshot}) · 子项(${selectedStepIdSnapshot})]\n`
-            : `[关联任务(${selectedTaskIdSnapshot})]\n`
-          : '';
+      const taskPrefix = activeBotTaskPrefix;
       const composedText = taskPrefix ? (trimmed ? `${taskPrefix}${trimmed}` : taskPrefix.trimEnd()) : trimmed;
       const attachmentIds = draftAttachmentMetas.map((a) => a.id);
       const submission: ChatPending = {
@@ -2849,7 +2976,7 @@ export function HostPage({
         ...(delivery ? { delivery } : {}),
         phase: 'sending',
         submittedAt: Date.now(),
-        afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(chatLive?.lastEntryId) || 0, clearedMap[bot.key] ?? 0),
+        afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(effectiveLive?.lastEntryId) || 0, getCutoff(bot.key, scopeKey)),
       };
       chatSubmissionRef.current = submission;
       updatePending({ pending: submission }, false);
@@ -2922,7 +3049,7 @@ ${newer}` : draftSnapshot;
         }
         if (!stillOwned()) return;
         updatePending({ pending: { ...submission, phase: 'accepted', admission: (receipt as TurnAdmissionCarrier).admission ?? null }, receipt });
-        const items = await sharedHistoryRead(
+        const result = await sharedHistoryRead(
           chatHistoryFlights.current, scopeKey, chatHistoryEpoch,
           () => currentChatScope.current === scopeKey,
           fresh => fetchBotHistoryPages(async (cursor, limit, chunked) => {
@@ -2934,8 +3061,8 @@ ${newer}` : draftSnapshot;
             return (env.result as HostHistoryPage) ?? null;
           }),
         ).catch(() => null);
-        if (currentChatScope.current === scopeKey && stillOwned() && items && items.length > 0) {
-          setChatHistory(previous => mergeHistory(previous, items));
+        if (currentChatScope.current === scopeKey && stillOwned() && result) {
+          applyFetchedHistory(bot.key, scopeKey, result);
         }
       } finally {
         localInFlight.current.delete(submission.requestId);
@@ -2948,15 +3075,16 @@ ${newer}` : draftSnapshot;
       const currentEdit = editingTurn;
       if (!bot || !currentEdit || currentEdit.botKey !== bot.key || editSubmitting || imageUploading) return;
       if (bot.archivedAt) throw new Error(t('该智能体已归档，请先恢复后再编辑消息', 'This bot is archived. Unarchive it first.'));
-      const currentActivity = resolveBotActivity(chatLive);
+      const scopeKey = scopeForBot(bot);
+      if (!scopeKey) throw new Error(t('目标身份尚未就绪。', 'Target identity unavailable.'));
+      const effectiveLive = isStaleLiveState(chatLive, getCutoff(bot.key, scopeKey)) ? undefined : chatLive;
+      const currentActivity = resolveBotActivity(effectiveLive);
       if (isBotActivityBusy(currentActivity) || stopping.has(bot.key) || (chatPending?.botKey === bot.key && chatPending.phase !== 'accepted')) {
         throw new Error(t('智能体正忙，无法编辑历史消息', 'Bot is busy; cannot edit historical messages.'));
       }
       const trimmed = currentEdit.text.trim();
       const attachmentIds = currentEdit.attachments.map(a => a.id);
       if (!trimmed && attachmentIds.length === 0) return;
-      const scopeKey = scopeForBot(bot);
-      if (!scopeKey) throw new Error(t('目标身份尚未就绪。', 'Target identity unavailable.'));
       const requestId = uuid();
       const targetEntryId = currentEdit.entryId;
       setEditSubmitting(true);
@@ -3051,19 +3179,15 @@ ${newer}` : draftSnapshot;
             return (page as unknown as HostHistoryPage) ?? null;
           });
         };
-        const freshItems = await sharedHistoryRead(
+        const freshResult = await sharedHistoryRead(
           chatHistoryFlights.current,
           scopeKey,
           chatHistoryEpoch,
           () => currentChatScope.current === scopeKey,
           () => readPages(),
         ).catch(() => null);
-        if (freshItems) {
-          if (freshItems.length > 0) chatHistoryCacheRef.current.set(scopeKey, freshItems);
-          else chatHistoryCacheRef.current.delete(scopeKey);
-        }
-        if (currentChatScope.current === scopeKey && freshItems) {
-          setChatHistory(freshItems);
+        if (freshResult) {
+          applyFetchedHistory(bot.key, scopeKey, freshResult);
         }
       } finally {
         setEditSubmitting(false);
@@ -4015,6 +4139,12 @@ ${newer}` : draftSnapshot;
   const scheduleError = botScheduleState.botKey === activeBot?.key ? botScheduleState.schedulingError : '';
   const scheduleOffline = activeBot?.hostKind === 'remote' && (!remoteConnected || activeBot.online === false);
 
+  const currentClearedAfter = !activeBot
+    ? 0
+    : activeChatScope && clearedMap[activeChatScope] !== undefined
+      ? clearedMap[activeChatScope]
+      : (clearedMap[activeBot.key] ?? 0);
+  const effectiveChatLive = isStaleLiveState(chatLive, currentClearedAfter) ? undefined : chatLive;
   const submission = chatSubmissionRef.current;
   // 用户主动停止的 unanswered 回执（reason aborted/cancelled）是已停止结算，不是配置/模型故障：
   // 既不弹“未获得回答/检查配置”卡，也不让 WorkingSlot 按 error 结算；真实 model_error 等仍显示。
@@ -4022,27 +4152,28 @@ ${newer}` : draftSnapshot;
     chatReceipt?.status === 'unanswered' &&
     typeof chatReceipt.reason === 'string' &&
     /abort|cancel/i.test(chatReceipt.reason);
-  const submissionFailure = submission && chatReceipt?.status === 'unanswered' && !receiptUserCancelled &&
+  const submissionInCurrentEpoch = Boolean(submission && submission.afterEntryId >= currentClearedAfter);
+  const submissionFailure = submission && submissionInCurrentEpoch && chatReceipt?.status === 'unanswered' && !receiptUserCancelled &&
     submission.botKey === activeBot?.key && chatReceipt.requestId === submission.requestId &&
-    !parseHistoryEntries(chatHistory).some(turn => turn.error && turn.entryId > submission.afterEntryId)
+    !parseHistoryEntries(chatHistory, currentClearedAfter).some(turn => turn.error && turn.entryId > submission.afterEntryId)
       ? chatReceipt.reason === 'model_error'
         ? t('模型生成失败，请重试或检查模型配置。', 'Model generation failed. Retry or check the model configuration.')
         : t('本次请求未获得回答，请重试。', 'No answer was generated for this request. Please retry.')
       : undefined;
 
   const recoveringChat = chatPending?.botKey === activeBot?.key && chatPending?.phase === 'recovering';
-  const liveGenerationAttr = chatLive?.generation?.attribution;
-  const liveGeneratingText = recoveringChat ? '' : chatLive?.generation?.text ?? '';
+  const liveGenerationAttr = effectiveChatLive?.generation?.attribution;
+  const liveGeneratingText = recoveringChat ? '' : effectiveChatLive?.generation?.text ?? '';
   // generation.blocks 与 displayGeneratingText 同一过滤口径：协作生成/恢复中不传入，
   // 避免协作文本经块投影漏进普通聊天（见 allChatTurns 的 liveGeneratingBlocks）。
 
-  // 当前会话的按轮受理状态：live 已就绪时以 chatLive.turnAdmission 为权威（null 即已离开准入阶段，不回退过期回执）；
+  // 当前会话的按轮受理状态：live 已就绪时以 effectiveChatLive.turnAdmission 为权威（null 即已离开准入阶段，不回退过期回执）；
   // 仅在 live 尚未到达前才回退提交回执/持久化 pending 上的 admission。
-  const liveTurnAdmission = chatLive?.turnAdmission ?? null;
-  const pendingAdmission = chatPending?.botKey === activeBot?.key
-    ? (chatPending?.admission ?? (chatReceipt as TurnAdmissionCarrier | undefined)?.admission ?? null)
+  const liveTurnAdmission = effectiveChatLive?.turnAdmission ?? null;
+  const pendingAdmission = chatPending && chatPending.botKey === activeBot?.key && chatPending.afterEntryId >= currentClearedAfter
+    ? (chatPending.admission ?? (chatReceipt as TurnAdmissionCarrier | undefined)?.admission ?? null)
     : null;
-  const chatTurnAdmission = chatLive !== undefined
+  const chatTurnAdmission = effectiveChatLive !== undefined
     ? liveTurnAdmission
     : pendingAdmission;
   const admissionStatusText = chatTurnAdmission?.phase === 'failed'
@@ -4062,7 +4193,7 @@ ${newer}` : draftSnapshot;
   const rawBotActivity = resolveBotActivity(
     recoveringChat || (chatHostKind === 'remote' && !(chatRemoteConnected && activeBot?.online !== false))
       ? null
-      : chatLive,
+      : effectiveChatLive,
   );
   const isStoppingBot = Boolean(activeBot && stopping.has(activeBot.key));
 
@@ -4072,7 +4203,7 @@ ${newer}` : draftSnapshot;
     !recoveringChat &&
     !isStoppingBot &&
     !isBotActivityBusy(rawBotActivity) &&
-    chatLive === undefined &&
+    effectiveChatLive === undefined &&
     chatPending?.botKey === activeBot?.key &&
     chatPending?.phase === 'accepted' &&
     chatTurnAdmission !== null &&
@@ -4147,7 +4278,7 @@ ${newer}` : draftSnapshot;
     archived: Boolean(!activeBot || activeBot.archivedAt),
     isSending: Boolean(sendingOptimistic || sendingReceipt || editSubmitting),
     isStopping: isStoppingBot,
-    pendingAdmissionWaiting: chatLive === undefined && chatTurnAdmission !== null && chatTurnAdmission.phase !== 'failed',
+    pendingAdmissionWaiting: effectiveChatLive === undefined && chatTurnAdmission !== null && chatTurnAdmission.phase !== 'failed',
     hasDraft: Boolean(effectiveLocalDraft.trim()) || effectiveLocalAttachments.length > 0,
     canStop: canStopBot,
   });
@@ -4350,7 +4481,7 @@ ${newer}` : draftSnapshot;
 
   const localQueuedStripItems = useMemo(() => {
     if (activeBot?.hostKind !== 'local') return [];
-    const items = mergeQueuedStripItems(chatLive?.queuedItems);
+    const items = mergeQueuedStripItems(effectiveChatLive?.queuedItems);
     const hiddenIds = new Set<string>();
     if (chatTurnAdmission && chatTurnAdmission.phase !== 'queued') {
       hiddenIds.add(chatTurnAdmission.requestId);
@@ -4359,7 +4490,7 @@ ${newer}` : draftSnapshot;
       hiddenIds.add(rawBotActivity.requestId);
     }
     return hiddenIds.size > 0 ? items.filter(item => !hiddenIds.has(item.requestId)) : items;
-  }, [activeBot?.hostKind, chatLive?.queuedItems, chatTurnAdmission, rawBotActivity.phase, rawBotActivity.requestId]);
+  }, [activeBot?.hostKind, effectiveChatLive?.queuedItems, chatTurnAdmission, rawBotActivity.phase, rawBotActivity.requestId]);
 
   const recallLocalQueuedItem = useCallback(async (item: UnifiedQueuedStripItem, mergeIntoDraft = true) => {
     const bot = activeBot;
@@ -4457,7 +4588,7 @@ ${newer}` : draftSnapshot;
   );
 
   const activeLiveToolName = useMemo(() => {
-    const tools = array<Record<string, unknown>>(chatLive?.tools);
+    const tools = array<Record<string, unknown>>(effectiveChatLive?.tools);
     for (let i = tools.length - 1; i >= 0; i--) {
       const slot = tools[i];
       const name = typeof slot?.name === 'string' ? slot.name.trim() : '';
@@ -4467,10 +4598,10 @@ ${newer}` : draftSnapshot;
       }
     }
     const last = tools[tools.length - 1];
-    return typeof last?.name === 'string' && chatLive?.busy && !liveGeneratingText
+    return typeof last?.name === 'string' && effectiveChatLive?.busy && !liveGeneratingText
       ? last.name.trim()
       : null;
-  }, [chatLive?.tools, chatLive?.busy, liveGeneratingText]);
+  }, [effectiveChatLive?.tools, effectiveChatLive?.busy, liveGeneratingText]);
 
   const prevChatBusyRef = useRef(false);
   useEffect(() => {
@@ -4479,7 +4610,7 @@ ${newer}` : draftSnapshot;
     if (!wasBusy || isBotBusy || screen !== 'chat' || !active || !activeBot || document.hidden) return;
     const targetBot = activeBot;
     const scopeKey = currentChatScope.current;
-    const read = (fresh: () => boolean): Promise<Array<Record<string, unknown>> | null> => {
+    const read = (fresh: () => boolean): Promise<BotHistoryReadResult | null> => {
       if (targetBot.hostKind === 'local') {
         return fetchBotHistoryPages(async (cursor, limit, chunked) => {
           if (!fresh()) return null;
@@ -4512,14 +4643,14 @@ ${newer}` : draftSnapshot;
     // 共享到更早启动的读可能错过忙期收尾追加：复用他人 flight（非本 effect 发起）时再补读一次。
     const shared = Boolean(scopeKey && chatHistoryFlights.current.get(scopeKey));
     void (!scopeKey ? Promise.resolve(null) : go())
-      .then(items => {
-        if (items && items.length > 0 && scopeStillCurrent()) {
-          setChatHistory(previous => mergeHistory(previous, items));
+      .then(result => {
+        if (result && scopeStillCurrent()) {
+          applyFetchedHistory(targetBot.key, scopeKey, result, { updateMeta: true });
         }
-        if ((items === null || shared) && scopeStillCurrent()) {
+        if ((result === null || shared) && scopeStillCurrent()) {
           void go().then(follow => {
-            if (follow && follow.length > 0 && scopeStillCurrent()) {
-              setChatHistory(previous => mergeHistory(previous, follow));
+            if (follow && scopeStillCurrent()) {
+              applyFetchedHistory(targetBot.key, scopeKey, follow, { updateMeta: true });
             }
           }).catch(() => {});
         }
@@ -4527,14 +4658,13 @@ ${newer}` : draftSnapshot;
       .catch(() => {
         // Ignore background refresh error
       });
-  }, [isBotBusy, screen, active, activeBot]);
+  }, [isBotBusy, screen, active, activeBot, applyFetchedHistory]);
 
   const allChatItems = useMemo(() => {
     if (!activeBot) return [] as Array<Record<string, unknown>>;
-    const clearedAfter = clearedMap[activeBot.key] ?? 0;
     // raw history 是旧页，live 投影是新窗口：按 entry id 去重排序；同 id 保留 raw（工具/思考细节更全）。
     const byId = new Map<string, Record<string, unknown>>();
-    for (const item of array<Record<string, unknown>>(chatLive?.history)) {
+    for (const item of array<Record<string, unknown>>(effectiveChatLive?.history)) {
       byId.set(String(item.id), item);
     }
     for (const item of chatHistory) byId.set(String(item.id), item);
@@ -4542,18 +4672,20 @@ ${newer}` : draftSnapshot;
       const id = Number(item.id);
       return Number.isFinite(id) ? id : 0;
     };
-    const sorted = [...byId.values()].sort((a, b) => numericId(a) - numericId(b));
+    const rawSorted = [...byId.values()].sort((a, b) => numericId(a) - numericId(b));
+    const effectiveClearedAfter = Math.max(currentClearedAfter, maxResetEntryId(rawSorted));
+    const sorted = filterHistoryAfterCutoff(rawSorted, effectiveClearedAfter);
     // 恢复 pending 带终态回执（done/unanswered，本次进入由 openBotChat/scope 切换 seed 的
     // requestId）：首屏不再单独补乐观用户气泡，其真实轮次由全量历史终态回读补齐；
-    // queued/placed/未确认请求仍照常占位。
+    // queued/placed/未确认请求仍照常占位。上一代际的 pending 不得重新渲染成乐观气泡。
     const suppressPendingBubble =
       Boolean(chatPending?.requestId) &&
       suppressSeededPendingRef.current === chatPending?.requestId &&
       (chatReceipt?.status === 'done' || chatReceipt?.status === 'unanswered');
-    if (chatPending?.botKey === activeBot.key && !suppressPendingBubble) {
+    if (chatPending?.botKey === activeBot.key && !suppressPendingBubble && chatPending.afterEntryId >= effectiveClearedAfter) {
       const pendingText = chatPending.text.trim();
       const pendingAttCount = chatPending.attachments?.length ?? 0;
-      const alreadyInHistory = parseHistoryEntries(sorted, clearedAfter).some(
+      const alreadyInHistory = parseHistoryEntries(sorted, effectiveClearedAfter).some(
         turn =>
           turn.role === 'user' &&
           turn.entryId > chatPending.afterEntryId &&
@@ -4576,7 +4708,7 @@ ${newer}` : draftSnapshot;
       }
     }
     return sorted;
-  }, [chatHistory, chatLive, activeBot, clearedMap, chatPending, chatReceipt]);
+  }, [chatHistory, effectiveChatLive, activeBot, currentClearedAfter, chatPending, chatReceipt]);
 
   // generation.attribution 缺失但 tools 仍活跃时，用合并历史中最新执行来源判断当前是否群聊后台工作；
   // 1v1 Bot 私聊（dm）与用户主聊（primary）均在当前 Bot 的 1v1 对话页内实时流式展示。
@@ -4590,20 +4722,20 @@ ${newer}` : draftSnapshot;
 
   const allChatTurns = useMemo(() => {
     if (!activeBot) return [];
-    const clearedAfter = clearedMap[activeBot.key] ?? 0;
-    return parseHistoryEntries(allChatItems, clearedAfter, {
-      liveTools: recoveringChat ? undefined : array<Record<string, unknown>>(chatLive?.tools),
+    const effectiveClearedAfter = Math.max(currentClearedAfter, maxResetEntryId(allChatItems));
+    return parseHistoryEntries(allChatItems, effectiveClearedAfter, {
+      liveTools: recoveringChat ? undefined : array<Record<string, unknown>>(effectiveChatLive?.tools),
       isBusy: isBotBusy,
       // 群聊（room）生成的流式文本不进 1v1 聊天：隐藏轮由 parser 归轮过滤。
       liveGeneratingText: displayGeneratingText,
       // 与 displayGeneratingText 同一过滤口径：缺 attribution 的群聊生成块同样不进 1v1 聊天。
-      liveGeneratingBlocks: chatLiveIsCollaborative ? undefined : chatLive?.generation?.blocks,
+      liveGeneratingBlocks: chatLiveIsCollaborative ? undefined : effectiveChatLive?.generation?.blocks,
       // 当前 Bot 为 self echo（outgoing）判定锚点；live 流式轮的 attribution 由生成帧携带。
       selfBotId: activeBot.botId,
       liveAttribution: liveGenerationAttr,
       knownBots,
     });
-  }, [allChatItems, chatLive, activeBot, clearedMap, recoveringChat, isBotBusy, liveGeneratingText, liveGenerationAttr, chatLiveIsCollaborative, knownBots]);
+  }, [allChatItems, effectiveChatLive, activeBot, currentClearedAfter, recoveringChat, isBotBusy, liveGeneratingText, liveGenerationAttr, chatLiveIsCollaborative, knownBots]);
 
   const activeTurnStartedAt = useMemo(
     () => resolveActiveTurnStartedAt(botActivity),
@@ -5286,7 +5418,7 @@ ${newer}` : draftSnapshot;
   const chatConnIssue = !centerConn.ready && Boolean(centerConn.status?.error);
   const chatLoadIssue = Boolean(chatLoadError) && !(centerConn.status?.state === 'disconnected' && centerConn.status.error);
   const chatAdmissionActive = chatTurnAdmission?.phase === 'failed' &&
-    (chatLive !== undefined || (chatPending?.botKey === activeBot?.key &&
+    (effectiveChatLive !== undefined || (chatPending?.botKey === activeBot?.key &&
       (chatReceipt?.status === undefined || chatReceipt.status === 'queued')));
   const latestTurn = allChatTurns.at(-1);
   const latestTurnHasError = Boolean(latestTurn?.role === 'assistant' && latestTurn.error);
@@ -5381,6 +5513,10 @@ ${newer}` : draftSnapshot;
     <div
       className={`bot-hub-shell${screen === 'bot-screen' ? ' is-fullscreen-computer' : ''}`}
     >
+      <MobileClientUpdatePrompt active={active} onOpenUpdates={() => {
+        navigateFromSidebar('settings');
+        setSettingsPage('updates');
+      }} />
       <Dialog
         open={leftDrawerOpen}
         onOpenChange={setLeftDrawerOpen}
@@ -5491,10 +5627,12 @@ ${newer}` : draftSnapshot;
                 return;
               }
               setTaskBoardNotice('');
-              const botKey = `${targetBot.deviceId}:${targetBot.botId}`;
-              setSelectedTopicByBot((prev) => ({ ...prev, [botKey]: taskId }));
-              const stepKey = `${targetBot.deviceId}:${targetBot.botId}:${taskId}`;
-              setSelectedStepByBotTask((prev) => ({ ...prev, [stepKey]: stepId ?? null }));
+              setJumpedTaskQuote({
+                deviceId: targetBot.deviceId,
+                botId: targetBot.botId,
+                taskId,
+                stepId: stepId ?? null,
+              });
               setTaskReturnId(taskId);
               openBotChat(targetBot, 'tasks');
             }}
@@ -5763,7 +5901,8 @@ ${newer}` : draftSnapshot;
                   const isCreationPlaceholder = (!item.lastActivityAt || item.lastActivityAt === item.createdAt) &&
                     (cachedPreview === meta?.subtitle?.trim() ||
                      cachedPreview === '点击开始文字对话…' || cachedPreview === 'Tap to start chatting…');
-                  const isClearNotice = clearedMap[item.key] !== undefined &&
+                  const itemScopeKey = scopeForBot(item);
+                  const isClearNotice = ((itemScopeKey && clearedMap[itemScopeKey] !== undefined) || clearedMap[item.key] !== undefined) &&
                     (cachedPreview === '对话已清空' || cachedPreview === 'History cleared');
                   const preview = item.lastPreview?.trim() ||
                     (isCreationPlaceholder || isClearNotice ? undefined : cachedPreview);
@@ -5872,7 +6011,8 @@ ${newer}` : draftSnapshot;
                 preset={resolveBotAvatarPreset(botAvatarKey(activeBot), activeBot.role, activeBot.isPrimary)}
                 isPrimary={activeBot.isPrimary}
                 busy={isBotBusy}
-                reflecting={Boolean(chatLive?.learning?.active)}
+                reflecting={Boolean(effectiveChatLive?.learning?.active)}
+                offline={activeBot.online === false}
                 size={28}
               />
               <span
@@ -5881,35 +6021,41 @@ ${newer}` : draftSnapshot;
                   flexDirection: 'column',
                   alignItems: 'flex-start',
                   minWidth: 0,
+                  flex: 1,
                   textAlign: 'left',
-                  lineHeight: 1.15,
+                  lineHeight: 1.18,
                 }}
               >
                 <span className="grok-chat-pill-name" style={{ maxWidth: '100%' }}>{activeBot.role}</span>
-                {activeBotModelSummary?.headerText && (
+                {(hasRemoteConfigured || activeBotModelSummary?.headerText) && (
                   <span
                     style={{
                       fontSize: '0.72rem',
                       fontWeight: 500,
-                      color: activeBotModelSummary.tone === 'warn' ? '#b45309' : 'var(--muted)',
+                      color: activeBot.online === false
+                        ? 'var(--danger)'
+                        : activeBotModelSummary?.tone === 'warn'
+                          ? '#b45309'
+                          : 'var(--muted)',
                       maxWidth: '100%',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
                     }}
                   >
-                    {activeBotModelSummary.headerText}
+                    {hasRemoteConfigured
+                      ? [
+                          activeBot.online === false
+                            ? `${activeBot.hostLabel} · ${t('离线', 'Offline')}`
+                            : activeBot.hostLabel,
+                          activeBotModelSummary?.headerText,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')
+                      : activeBotModelSummary?.headerText}
                   </span>
                 )}
               </span>
-              {hasRemoteConfigured && (
-                <span
-                  className={`hub-bot-host-badge ${activeBot.hostKind}${activeBot.online === false ? ' is-offline' : ''}`}
-                >
-                  <PlatformLogoIcon platform={activeBot.platform} size={11} />
-                  <span className="hub-bot-host-text">{activeBot.hostLabel}</span>
-                </span>
-              )}
             </button>
 
             <button
@@ -6037,38 +6183,6 @@ ${newer}` : draftSnapshot;
               </button>
             </div>
           )}
-
-          <TaskChatContextBar
-            variant="mobile"
-            botDeviceId={activeBot.deviceId}
-            botId={activeBot.botId}
-            botName={activeBot.role}
-            tasks={effectiveGlobalTasks}
-            activeTaskId={activeBotTopicId}
-            activeStepId={activeBotStepId}
-            returnTaskId={chatReturnScreen === 'tasks' ? taskReturnId : null}
-            onSelectTaskTopic={(tid) => {
-              const key = `${activeBot.deviceId}:${activeBot.botId}`;
-              setSelectedTopicByBot((prev) => ({ ...prev, [key]: tid }));
-            }}
-            onSelectStepFocus={(sid) => {
-              if (!activeBotTopicId) return;
-              const stepKey = `${activeBot.deviceId}:${activeBot.botId}:${activeBotTopicId}`;
-              setSelectedStepByBotTask((prev) => ({ ...prev, [stepKey]: sid }));
-            }}
-            onOpenTaskDetail={(tid, openEdit) => {
-              setActiveTaskId(tid);
-              setCreatingTask(false);
-              setTaskInitialEditMode(Boolean(openEdit));
-              setScreen('tasks');
-            }}
-            onReturnToTask={(tid) => {
-              setActiveTaskId(tid);
-              setCreatingTask(false);
-              setTaskInitialEditMode(false);
-              setScreen('tasks');
-            }}
-          />
 
           <section
             className="bot-chat-messages"
@@ -6326,14 +6440,14 @@ ${newer}` : draftSnapshot;
                   visibleTurns[visibleTurns.length - 1]?.thinking &&
                   !displayGeneratingText,
               )}
-              queuedCount={chatLive?.queuedCount ?? 0}
+              queuedCount={effectiveChatLive?.queuedCount ?? 0}
               activity={botActivity}
-              learning={chatLive?.learning ?? null}
+              learning={effectiveChatLive?.learning ?? null}
               onOpenLearnedSkills={() => {
                 setSubPageReturnScreen('chat');
                 setScreen('bot-skills');
               }}
-              hasError={latestTurnHasError || rawBotActivity.phase === 'failed' || Boolean(effectiveFailureNotice) || (chatReceipt?.status === 'unanswered' && !receiptUserCancelled)}
+              hasError={latestTurnHasError || rawBotActivity.phase === 'failed' || Boolean(effectiveFailureNotice) || (chatReceipt?.status === 'unanswered' && !receiptUserCancelled && submissionInCurrentEpoch)}
               startedAt={activeTurnStartedAt}
               failure={slotFailure}
               t={t}
@@ -6432,37 +6546,23 @@ ${newer}` : draftSnapshot;
               />
             );
           })()}
-          {!activeBotBannerTask?.pendingPrompt && activeBotSwitchableWaitingTasks.length > 0 && (
-            <div
-              className="bot-chat-system-notice"
-              role="status"
-              style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
-            >
-              <span>
-                {activeBotSwitchableWaitingTasks.length === 1
-                  ? t(`待回应任务：「${activeBotSwitchableWaitingTasks[0].title}」`, `Waiting task: "${activeBotSwitchableWaitingTasks[0].title}"`)
-                  : t(`有 ${activeBotSwitchableWaitingTasks.length} 个待回应任务：「${activeBotSwitchableWaitingTasks[0].title}」等`, `${activeBotSwitchableWaitingTasks.length} waiting tasks: "${activeBotSwitchableWaitingTasks[0].title}"...`)}
-              </span>
-              <button
-                type="button"
-                className="hub-outline-btn"
-                onClick={() => {
-                  const botKey = `${activeBot.deviceId}:${activeBot.botId}`;
-                  setSelectedTopicByBot((prev) => ({ ...prev, [botKey]: activeBotSwitchableWaitingTasks[0].id }));
-                }}
-              >
-                {t('切到此任务回应', 'Switch to task')}
-              </button>
-            </div>
-          )}
           <TaskChatPromptBanner
+            variant="mobile"
             botDeviceId={activeBot.deviceId}
             botId={activeBot.botId}
-            botName={activeBot.role}
-            avatar={botAvatarKey(activeBot)}
             task={activeBotBannerTask}
+            focusedStep={activeBotFocusedStep}
+            showQuoteStrip={activeBotTaskContext.showQuoteStrip}
+            waitingTasksCount={activeBotTaskContext.waitingTasks.length}
+            waitingTaskIndex={activeBotTaskContext.waitingIndex}
             bots={taskBotOptions}
             busy={taskBannerBusy}
+            onClearQuote={() => setJumpedTaskQuote(null)}
+            onCycleWaitingTask={() => {
+              const botKey = `${activeBot.deviceId}:${activeBot.botId}`;
+              setJumpedTaskQuote(null);
+              setWaitingTaskOffsetByBot((prev) => ({ ...prev, [botKey]: (prev[botKey] ?? 0) + 1 }));
+            }}
             onConfirmPlan={async (tid) => {
               setTaskBannerBusy(true);
               try {
@@ -6478,10 +6578,10 @@ ${newer}` : draftSnapshot;
                 setTaskBannerBusy(false);
               }
             }}
-            onOpenTaskEdit={(tid) => {
+            onOpenTaskDetail={(tid, openEdit) => {
               setActiveTaskId(tid);
               setCreatingTask(false);
-              setTaskInitialEditMode(true);
+              setTaskInitialEditMode(Boolean(openEdit));
               setScreen('tasks');
             }}
             onAnswerPrompt={async (tid, answer) => {
@@ -6547,7 +6647,7 @@ ${newer}` : draftSnapshot;
                 botRole={activeBot.role}
                 activity={botActivity}
                 turnAdmission={chatTurnAdmission}
-                liveQueuedItems={chatLive?.queuedItems}
+                liveQueuedItems={effectiveChatLive?.queuedItems}
                 editingTurn={activeEditing}
                 editSubmitting={editSubmitting}
                 onChangeEditTurn={patch => setEditingTurn(prev => (prev ? { ...prev, ...patch } : null))}
@@ -6585,7 +6685,7 @@ ${newer}` : draftSnapshot;
                     ...(delivery ? { delivery } : {}),
                     phase: 'sending',
                     submittedAt: Date.now(),
-                    afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(chatLive?.lastEntryId) || 0, clearedMap[activeBot.key] ?? 0),
+                    afterEntryId: Math.max(maxHistoryEntryId(chatHistory), Number(effectiveChatLive?.lastEntryId) || 0, getCutoff(activeBot.key, activeChatScope)),
                   };
                   if (currentChatScope.current === activeChatScope) chatSubmissionRef.current = pending;
                   const entry = pendingByBot.current.get(activeChatScope);
@@ -6839,8 +6939,8 @@ ${newer}` : draftSnapshot;
                             botKey: activeBot.key,
                             requestId: uuid(),
                             afterEntryId: Math.max(
-                              maxHistoryEntryId(chatHistory), Number(chatLive?.lastEntryId) || 0,
-                              clearedMap[activeBot.key] ?? 0,
+                              maxHistoryEntryId(chatHistory), Number(effectiveChatLive?.lastEntryId) || 0,
+                              getCutoff(activeBot.key, activeChatScope),
                             ),
                           };
                           chatSubmissionRef.current = submission;
@@ -9918,16 +10018,20 @@ function RemotePendingComposer({
       onOffline();
       return;
     }
+    const draftTextBefore = drafts.text;
     slashBusyRef.current = true;
     setSlashBusy(command);
     // 进度提示由 Host 的 clearNotice（status）统一展示；此处不重复写错误卡片。
     setNotice('');
     try {
       const applied = await onRunCommand(command);
-      // 仅服务端确认成功时才清命令草稿；过期 scope 的 false 不清草稿。
+      // 仅服务端确认成功且当前草稿正是命令文本时清掉命令草稿；保留无关草稿、文件引用与图片附件。
       if (applied) {
-        drafts.editText('');
+        if (draftTextBefore.trim() === command && drafts.text.trim() === command) {
+          drafts.editText('');
+        }
         setNotice('');
+        if (command === '/clear') setStopError('');
       }
     } catch (error) {
       setNotice(errorText(error));
@@ -10207,6 +10311,7 @@ function RemotePendingComposer({
             onClick={() => {
               if (clearArmedAt !== 0 && Date.now() - clearArmedAt <= 3000) {
                 setClearArmedAt(0);
+                onToggleComposerMenu();
                 void runCommand('/clear');
               } else {
                 setClearArmedAt(Date.now());

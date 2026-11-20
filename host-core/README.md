@@ -920,7 +920,7 @@ pi-durable 的 HookRunner 会吞掉普通 hook 抛错，因此请求阶段失败
 | --- | --- |
 | `list_scopes` | `{offset?,limit?}`；offset 为非负整数、默认 0，limit 为 1..200 的整数、默认 50，仅列当前成员 scope；返回 `{deviceId,botId,scopes,nextOffset}`，offset 在成员变化时仅尽力分页，不是持久消息游标 |
 | `read_scope` | `{scopeId,limit?,cursor?}`；只读自身 scoped inbox，保留退出后的旧冻结目标权限，不读全 scope 或其他 Bot 的 inbox |
-| `send_to` | `{scopeId,text,files?}`；已安装 DM 或 room 均可；不暴露 request/reply/public 分类或 replyTo——本轮已在回应该 scope 某条消息时 Host 自动把发送挂到该轮的原始请求消息（嵌套委派经冻结轮还原原请求），其余发送成为可触发对端续轮的新消息 |
+| `send_to` | `{scopeId?,text,files?}`；已安装 DM 或 room 均可；省略 `scopeId` 时由 Host 解析为当前轮已校验的 DM/room 冻结 `replyTarget`，显式传入 `scopeId` 仍继续支持；不暴露 request/reply/public 分类或 replyTo——本轮已在回应该 scope 某条消息时 Host 自动把发送挂到该轮的原始请求消息（嵌套委派经冻结轮还原原请求），其余发送成为可触发对端续轮的新消息 |
 
 read 工具分页默认 50、最大 200。发送只返回紧凑落盘回执 `{messageId,scopeId,author,category,rootId,replyTo,createdAt,status:'stored'}`，**stored 不代表远端收到、开始工作或已交付**。每次发送工具的 messageId 保存在 Durable task memo 中，崩溃在账本写入后/工具回执前时重放沿用同 ID，并由账本指纹去重，不从模型 callId 派生。工具结果为 JSON 文本；已知消息/身份/工作策略错误以 `{code,message}` 和 `isError:true` 返回（如 `WORK_STOPPED`、`WORK_CONTEXT_INACTIVE`、`STALE_INPUT`），取消向上传递，未知存储故障不改报 `INVALID_ARGUMENT`。
 

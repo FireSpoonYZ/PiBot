@@ -133,6 +133,17 @@ export type PendingOperation =
   | 'pending_reconcile'
   | 'pending_cancel';
 
+/** 桌面原生选图来源（由主 WebView 调用 desktop_pick_images）。 */
+export type DesktopImagePickSource = 'files' | 'clipboard';
+
+/** 桌面原生选图返回的单张原始图片内容（不暴露客户端路径）。 */
+export interface DesktopPickedImage {
+  name: string;
+  mimeType: string;
+  /** 纯 base64（无 data: 前缀）。 */
+  data: string;
+}
+
 /** 共享给功能组件（BotChats/Scopes）的视图 API。 */
 export interface DesktopViewApi {
   readonly identity: DesktopIdentity | null;
@@ -172,6 +183,7 @@ export interface DesktopViewApi {
     target: { kind: 'primary' | 'room'; id: string },
   ): Promise<string>;
   pickFile(): Promise<DesktopDraftFileRef | null>;
+  pickImages?(source: DesktopImagePickSource): Promise<DesktopPickedImage[]>;
   reportError(error: unknown): void;
 }
 

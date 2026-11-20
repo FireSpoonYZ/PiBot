@@ -30,6 +30,7 @@ import {
 	newAssistant,
 	POLL_TOOL_NAME,
 	RESUME_PROMPT,
+	splitAntigravityTurnContext,
 	systemPromptFromMessages,
 	toMcpToolDefinitions,
 	ToolRoundTrips,
@@ -266,15 +267,18 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 				return;
 			}
 
-			const tools = toolsFromMessages(messages);
+			const turnContext = splitAntigravityTurnContext(messages);
+			const cleanMessages = turnContext.messages;
+
+			const tools = toolsFromMessages(cleanMessages);
 			const mcpTools = toMcpToolDefinitions(tools);
 			slot.currentTools = mcpTools;
 			slot.allowedToolNames = new Set(mcpTools.map((t) => t.name));
 
 			const existing = store.get(slot.key);
-			const messageCount = messages.length;
+			const messageCount = cleanMessages.length;
 
-			const results = collectToolResults(messages, slot.roundTrips.pendingIds);
+			const results = collectToolResults(cleanMessages, slot.roundTrips.pendingIds);
 			const isContinuation = results.length > 0;
 			const escalatedNames = results
 				.map((r) => slot.roundTrips.poll(r.toolCallId)?.name)
@@ -285,7 +289,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 
 			const late = [];
 			if (!isContinuation) {
-				for (const r of collectToolResults(messages, slot.roundTrips.deadIds)) {
+				for (const r of collectToolResults(cleanMessages, slot.roundTrips.deadIds)) {
 					const dead = slot.roundTrips.consumeDead(r.toolCallId);
 					if (dead) {
 						late.push({
@@ -365,9 +369,9 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 					return;
 				}
 
-				const userPrompt = extractUserPrompt({ messages });
-				const images = extractImages({ messages });
-				const lastRole = messages[messages.length - 1]?.role;
+				const userPrompt = extractUserPrompt({ messages: cleanMessages });
+				const images = extractImages({ messages: cleanMessages });
+				const lastRole = cleanMessages[cleanMessages.length - 1]?.role;
 				const resume =
 					!userPrompt &&
 					images.length === 0 &&
@@ -383,15 +387,24 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 				const watermark = existing?.lastMessageCount ?? 0;
 				const digest =
 					late.length === 0 && !resume
-						? buildContextDigest(messages, watermark, { ownProvider: ANTIGRAVITY_PROVIDER_ID })
+						? buildContextDigest(cleanMessages, watermark, { ownProvider: ANTIGRAVITY_PROVIDER_ID })
 						: "";
 				const rawSysPrompt = !existing?.conversationId
-					? systemPromptFromMessages(messages)
+					? systemPromptFromMessages(cleanMessages)
 					: undefined;
-				const fullPrompt =
+				const turnPrompt =
 					late.length > 0
 						? buildLateResultPrompt(late, prompt || undefined)
-						: buildFullPrompt(rawSysPrompt, "", prompt ?? "");
+						: (prompt ?? "");
+				const fullPrompt = buildFullPrompt(
+					late.length > 0 ? undefined : rawSysPrompt,
+					"",
+					turnPrompt,
+					{
+						routeNote: turnContext.routeNote,
+						contextNotes: turnContext.contextNotes,
+					},
+				);
 				const runImages = [...images, ...late.flatMap((l) => l.images ?? [])];
 
 				slot.turnAbort = new AbortController();

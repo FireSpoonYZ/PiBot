@@ -68,9 +68,9 @@ Secrets（仅 tag/release 构建读取）：
 - `TAURI_SIGNING_PRIVATE_KEY`（可选 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）：
   Tauri updater 签名私钥（`tauri signer generate` 产生）。
 
-Variables（非秘密，编译进客户端的 updater 公钥）：
+Variables（非秘密，公开校验材料）：
 
-- `E_LAUNCHER_UPDATER_PUBLIC_KEY`：与私钥配对的公钥。
+- `E_LAUNCHER_UPDATER_PUBLIC_KEY`：与私钥配对的公钥。桌面 CI 构建时将其写入 Tauri `--config` 的 `plugins.updater.pubkey`（客户端只读取最终合并后的 Tauri 配置 `plugins.updater.pubkey`，不直接读取该构建环境变量）。
 - `ANDROID_RELEASE_CERT_SHA256`：已核实的正式 APK 签名证书摘要；缺失或与实际签名不匹配时发布失败。
 
 Fork/外部贡献者不需要以上任何 secret 即可构建 debug 包。

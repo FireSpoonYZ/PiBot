@@ -4,7 +4,8 @@ import { Download, RefreshCw, XCircle } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useText } from './ui';
 import { Section } from './bot-settings/primitives';
-import { formatUpdateBytes, updateProgress, type ClientUpdatePhase } from './ClientUpdate';
+import { CLIENT_UPDATE_OPEN_EVENT, formatUpdateBytes, updateProgress, type ClientUpdatePhase } from './ClientUpdate';
+import { Dialog } from './components/ui/dialog';
 import { useClientUpdate, type ClientUpdateContextValue } from './ClientUpdateProvider';
 import './ClientUpdate.css';
 
@@ -40,6 +41,55 @@ export function useClientUpdateSummary(): string | undefined {
   if (actionError) return phaseLabel('error', t);
   if (!status || status.phase === 'idle' || status.phase === 'up-to-date') return status?.currentVersion;
   return phaseLabel(status.phase, t);
+}
+
+export function MobileClientUpdatePrompt({ active, onOpenUpdates }: { active: boolean; onOpenUpdates(): void }) {
+  const t = useText();
+  const update = useClientUpdate();
+  const [visible, setVisible] = useState(() => !document.hidden);
+  const [dismissedRelease, setDismissedRelease] = useState('');
+  const release = update?.ready && !update.pending && update.status?.phase === 'available' ? update.status.release : undefined;
+  const releaseKey = release ? `${release.id}:${release.versionCode ?? release.version}` : '';
+  const open = active && visible && Boolean(releaseKey) && releaseKey !== dismissedRelease;
+  const dismiss = () => setDismissedRelease(releaseKey);
+
+  useEffect(() => {
+    const syncVisibility = () => setVisible(!document.hidden);
+    const reopen = () => setDismissedRelease('');
+    document.addEventListener('visibilitychange', syncVisibility);
+    window.addEventListener(CLIENT_UPDATE_OPEN_EVENT, reopen);
+    return () => {
+      document.removeEventListener('visibilitychange', syncVisibility);
+      window.removeEventListener(CLIENT_UPDATE_OPEN_EVENT, reopen);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleBack = (event: Event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setDismissedRelease(releaseKey);
+    };
+    window.addEventListener('app-back', handleBack, true);
+    return () => window.removeEventListener('app-back', handleBack, true);
+  }, [open, releaseKey]);
+
+  return (
+    <Dialog open={open} onOpenChange={next => { if (!next) dismiss(); }} title={t('发现新版本', 'Update available')}>
+      <p className="secondary">
+        {t(`PiBot ${release?.version ?? ''} 已发布。现在下载更新吗？`, `PiBot ${release?.version ?? ''} is available. Download the update now?`)}
+      </p>
+      <div className="dialog-actions">
+        <button type="button" className="quiet-button" onClick={dismiss}>{t('稍后', 'Later')}</button>
+        <button type="button" className="button" onClick={() => {
+          dismiss();
+          update?.download();
+          onOpenUpdates();
+        }}>{t('下载更新', 'Download update')}</button>
+      </div>
+    </Dialog>
+  );
 }
 
 function DesktopUpdateSection({ update }: { update: ClientUpdateContextValue }) {
