@@ -70,7 +70,12 @@ export function createContextManager({ getHarness, models, ContextState }) {
         doc.operations = {};
       }
       // 在 commit callback 仍活跃时复制草稿内容，避免事务外访问 Draft Proxy。
-      if (doc.prepared?.key === key) return { messages: JSON.parse(JSON.stringify(doc.prepared.messages)) };
+      if (doc.prepared?.key === key) {
+        return {
+          messages: JSON.parse(JSON.stringify(doc.prepared.messages)),
+          ...(doc.prepared.turnProvenance ? { turnProvenance: JSON.parse(JSON.stringify(doc.prepared.turnProvenance)) } : {}),
+        };
+      }
 
       const state = JSON.parse(JSON.stringify(doc.state));
       // 计量已折叠后的可见视图（prune 输出），不统计原始全部历史；processTurn 仍接原始消息保持稳定 refs。
@@ -84,18 +89,27 @@ export function createContextManager({ getHarness, models, ContextState }) {
         tokenCount,
         renderTags: 'text-only',
       });
-      const messages = JSON.parse(JSON.stringify(codec.restore(result.messages)));
+      const restored = codec.restoreWithProvenance(result.messages);
+      const messages = JSON.parse(JSON.stringify(restored.messages));
+      const auxiliaryIndices = [...restored.auxiliaryIndices];
       let projectedTokenCount = result.messages.reduce((sum, message) => sum + countMessageTokens(message), 0);
       // kernel 的 nudgeNode 只返回 effects.nudge，不插入消息；宿主在此显式追加一次 user 提醒。
       if (result.nudge?.shouldInject) {
         const nudgeText = renderNudgeText(result.nudge).text;
-        messages.push({ role: 'user', content: nudgeText, timestamp: 0 });
+        auxiliaryIndices.push(messages.length);
+        messages.push({ role: 'user', content: nudgeText, timestamp: 0, bcContextMaterial: true });
         projectedTokenCount += countMessageTokens({ text: nudgeText });
       }
+      const turnProvenance = {
+        cutoff,
+        inputIndex: restored.inputIndex,
+        lostInput: restored.lostInput,
+        auxiliaryIndices,
+      };
       doc.state = JSON.parse(JSON.stringify(result.state));
       doc.contentStore = JSON.parse(JSON.stringify(result.contentStore));
-      doc.prepared = { key, taskId: String(api.taskId), cutoff, headEntryId, contextWindow: model.contextWindow, tokenCount: projectedTokenCount, messages };
-      return { messages };
+      doc.prepared = { key, taskId: String(api.taskId), cutoff, headEntryId, contextWindow: model.contextWindow, tokenCount: projectedTokenCount, messages, turnProvenance };
+      return { messages, turnProvenance };
     }, context);
   }
 

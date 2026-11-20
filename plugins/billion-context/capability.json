@@ -1,7 +1,7 @@
 {
   "manifestVersion": 1,
   "id": "e-launcher.billion-context",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "kind": "plugin",
   "displayName": "Billion Context",
   "hostApi": "^1.0.0",

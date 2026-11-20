@@ -5,7 +5,7 @@
 //   - login({ notify, prompt, signal } = {}) => Promise<void>
 //   - logout() => Promise<void>
 //   - catalog({ signal } = {}) => Promise<Model[]>
-//   - stream({ deviceId, sessionId, modelId, messages, reasoning }, { signal } = {}) => AssistantMessageEventStream
+//   - stream({ deviceId, sessionId, modelId, messages, reasoning, turnContext }, { signal } = {}) => AssistantMessageEventStream
 //   - cancel({ deviceId, sessionId }) => Promise<void>
 //   - close() => Promise<void>
 
@@ -43,6 +43,12 @@ import { AcpDriver } from "./vendor/acp/driver.ts";
 const BRIDGE_SERVER_RE = /^(?:pibot|pi)-bridge(?:-\d+)?$/i;
 const BRIDGE_PERMISSION_RE = /^(?:mcp_)?(?:pibot|pi)-bridge(?:-\d+)?(?:_|$)/i;
 const AUTH_CACHE_TTL_MS = 60_000;
+const KNOWN_MESSAGE_ROLES = new Set(["user", "system", "assistant", "toolResult"]);
+
+function safeMessageRole(msg) {
+	if (!msg) return "none";
+	return typeof msg.role === "string" && KNOWN_MESSAGE_ROLES.has(msg.role) ? msg.role : "unknown";
+}
 
 function createAbortError(message) {
 	const err = new Error(message);
@@ -198,7 +204,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 	}
 
 	async function runStreamTurn(stream, params, signal) {
-		const { deviceId, sessionId, modelId, messages, reasoning } = params;
+		const { deviceId, sessionId, modelId, messages, reasoning, turnContext: rawTurnContext } = params;
 		const blocks = { partial: newAssistant(modelId), textIdx: null, thinkingIdx: null, started: false };
 
 		if (closed) {
@@ -219,6 +225,15 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 		}
 		if (signal?.aborted) {
 			finalize(stream, blocks, "aborted", "Operation aborted");
+			return;
+		}
+
+		let resolvedTurn;
+		try {
+			resolvedTurn = splitAntigravityTurnContext(messages, rawTurnContext);
+		} catch (err) {
+			const msg = redactText(err instanceof Error ? err.message : String(err));
+			finalize(stream, blocks, "error", msg);
 			return;
 		}
 
@@ -267,8 +282,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 				return;
 			}
 
-			const turnContext = splitAntigravityTurnContext(messages);
-			const cleanMessages = turnContext.messages;
+			const cleanMessages = resolvedTurn.messages;
 
 			const tools = toolsFromMessages(cleanMessages);
 			const mcpTools = toMcpToolDefinitions(tools);
@@ -369,17 +383,26 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 					return;
 				}
 
-				const userPrompt = extractUserPrompt({ messages: cleanMessages });
-				const images = extractImages({ messages: cleanMessages });
-				const lastRole = cleanMessages[cleanMessages.length - 1]?.role;
+				const inputIndex = resolvedTurn.inputIndex;
+				const userPrompt = extractUserPrompt({ messages: cleanMessages }, inputIndex);
+				const images = extractImages({ messages: cleanMessages }, inputIndex);
+				const inputRole = inputIndex !== null ? cleanMessages[inputIndex]?.role : undefined;
 				const resume =
 					!userPrompt &&
 					images.length === 0 &&
 					late.length === 0 &&
 					Boolean(existing?.conversationId) &&
-					(lastRole === "toolResult" || lastRole === "assistant");
+					(inputRole === "toolResult" || inputRole === "assistant");
 				const prompt = resume ? RESUME_PROMPT : userPrompt;
 				if (!prompt && images.length === 0 && late.length === 0) {
+					const turnSource = rawTurnContext !== undefined ? "explicit" : "legacy";
+					const tailRole = safeMessageRole(messages[messages.length - 1]);
+					const resolvedInputRole = safeMessageRole(
+						inputIndex !== null ? cleanMessages[inputIndex] : undefined,
+					);
+					console.warn(
+						`[antigravity] no-user-message source=${turnSource} tailRole=${tailRole} inputRole=${resolvedInputRole} rawCount=${messages.length} effectiveCount=${cleanMessages.length} contextNotes=${resolvedTurn.contextNotes.length} bound=${Boolean(existing?.conversationId)}`,
+					);
 					finishConsumer("error", "No user message to send to Antigravity.");
 					return;
 				}
@@ -387,7 +410,11 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 				const watermark = existing?.lastMessageCount ?? 0;
 				const digest =
 					late.length === 0 && !resume
-						? buildContextDigest(cleanMessages, watermark, { ownProvider: ANTIGRAVITY_PROVIDER_ID })
+						? buildContextDigest(cleanMessages, watermark, {
+								ownProvider: ANTIGRAVITY_PROVIDER_ID,
+								endIndex: inputIndex,
+								auxiliaryIndices: resolvedTurn.historicalAuxiliaryIndices,
+							})
 						: "";
 				const rawSysPrompt = !existing?.conversationId
 					? systemPromptFromMessages(cleanMessages)
@@ -401,8 +428,8 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 					"",
 					turnPrompt,
 					{
-						routeNote: turnContext.routeNote,
-						contextNotes: turnContext.contextNotes,
+						routeNote: resolvedTurn.routeNote,
+						contextNotes: resolvedTurn.contextNotes,
 					},
 				);
 				const runImages = [...images, ...late.flatMap((l) => l.images ?? [])];
@@ -762,11 +789,11 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			}
 		},
 
-		stream({ deviceId, sessionId, modelId, messages, reasoning } = {}, { signal } = {}) {
+		stream({ deviceId, sessionId, modelId, messages, reasoning, turnContext } = {}, { signal } = {}) {
 			const stream = createAssistantMessageEventStream();
 			void runStreamTurn(
 				stream,
-				{ deviceId, sessionId, modelId, messages, reasoning },
+				{ deviceId, sessionId, modelId, messages, reasoning, turnContext },
 				signal,
 			).catch((err) => {
 				const blocks = {

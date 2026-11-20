@@ -19,13 +19,23 @@ import { openHost } from './host.js';
 import { acquireRuntimeOwner } from './runtime-owner.js';
 import { migrateBotSessionCheckpoints } from './bot-session-checkpoint-migration.js';
 import { parseExecutionOptions, parseModelRef, normalizeThinkingLevel, normalizeCodemodeFlag, describeModelCatalog, discoverProviderModels, applyCenterModels } from './runtime-models.js';
-import { ANTIGRAVITY_PROVIDER_ID } from './antigravity-provider.js';
+import { ANTIGRAVITY_API, ANTIGRAVITY_PROVIDER_ID } from './antigravity-provider.js';
 import { createGrepTool } from './grep-tool.js';
 import { createFindTool } from './find-tool.js';
 import { createLsTool } from './ls-tool.js';
 import { getPrimaryConversation, RequestKeys, PrimaryIndex, applyAgentProfile } from './runtime-docs.js';
 import { formatPrimarySubmission, latestResetEntryId, normalizeHistoryOptions, readPrimaryHistory } from './runtime-history.js';
-import { RequestContext, countMessageTokens, estimateContextTokensHost, budgetRequestTokens, setRequestBudget } from './request-context.js';
+import {
+  RequestContext,
+  countMessageTokens,
+  estimateContextTokensHost,
+  budgetRequestTokens,
+  setRequestBudget,
+  createTurnProvenanceStore,
+  createTurnProvenanceFromCutoff,
+  advanceTurnProvenance,
+  resolveAntigravityTurnContext,
+} from './request-context.js';
 import { GenerationFailureState } from './generation-failure.js';
 import { resolveBotIdentity } from './bot-identity.js';
 import { createPluginManager } from './plugins/manager.js';
@@ -708,6 +718,8 @@ export async function openRuntime(options) {
   };
 
   plugins = createPluginManager({ host, registry, installer: centerRuntime.installer, services, isOnline: () => online, vaultFacade: vault.facade, tasksFacade });
+  // 短生命周期每任务 Antigravity 回合归属态（仅内存，绝不写进持久历史或 RequestContext）。
+  const antigravityTurnProvenance = createTurnProvenanceStore();
   registry.install(defineExtension({
     name: 'host.request-context',
     hooks: [hook(GenerationTask, {
@@ -734,6 +746,7 @@ export async function openRuntime(options) {
           const checkpoint = task.state.checkpoint;
           const model = models.getModel(actual.provider, actual.modelId);
           if (!model || checkpoint.cutoff === undefined) throw errWithCode('request checkpoint is unavailable', 'INVALID_STATE');
+          const isAntigravity = actual.provider === ANTIGRAVITY_PROVIDER_ID || model.api === ANTIGRAVITY_API;
           const preparedConversation = await harness.conversation(api.conversationId, context);
           if (!preparedConversation) throw errWithCode('request conversation is missing', 'INVALID_STATE');
           const cutoffView = await preparedConversation.context(context, { at: checkpoint.cutoff });
@@ -753,6 +766,7 @@ export async function openRuntime(options) {
           // 完整视图不能覆盖、也不重复计费本轮 Host 控制指引；持久 prepared 预算
           // 仍记真实投影，最终守卫按有序子序列增量把指引只计一次。
           const requestView = await plugins.prepareContext(sanitizedRequest, api, context);
+          const { turnProvenance: _sideband, ...cleanRequestView } = requestView ?? {};
           // SDK 同口径预算基线：取 checkpoint.cutoff 的权威上下文视图，
           // 用 estimateContext（最新 assistant usage + 尾部估计）算原始历史，
           // 再按有序子序列 + 增量把 prepareContext（如 BC 投影）的实际
@@ -760,6 +774,12 @@ export async function openRuntime(options) {
           const baselineMessages = sanitizeLegacyAttachmentPromptMessages(cutoffView.messages, cutoffView);
           const baselineView = baselineMessages === cutoffView.messages ? cutoffView : { ...cutoffView, messages: baselineMessages };
           const preparedTokens = budgetRequestTokens(baselineView.messages, estimateContextTokensHost(baselineView), requestView.messages);
+          let turnProvenance = null;
+          if (isAntigravity) {
+            turnProvenance = createTurnProvenanceFromCutoff(cutoffView.messages, baselineMessages, requestView, checkpoint.cutoff);
+          } else {
+            antigravityTurnProvenance.delete(api.taskId);
+          }
           await harness.commit(async (tx) => {
             const doc = await tx.doc(RequestContext, api.conversationId);
             doc.prepared = {
@@ -771,14 +791,25 @@ export async function openRuntime(options) {
           }, context);
           if (!online) throw errWithCode('center is offline', 'CENTER_OFFLINE');
           await dataPrivacy.syncTrustedRuleEntries(api.conversationId, cutoffView.entries, { callContext: context });
-          const finalView = await plugins.beforeRequest(requestView, api, context);
+          const finalView = await plugins.beforeRequest(cleanRequestView, api, context);
           // 只在需要时把瞬态 SystemMessage 路由指引前置到投影/recall 之后的最终视图头部：
           // 任何插件（含会整体重建视图的 BC prepare）都不能丢掉冻结轮约束，且末尾真实消息
           // 角色、正文/图片与 toolCall/toolResult 配对保持完整。
+          const finalMessages = routingMessages.length > 0
+            ? [...routingMessages, ...(finalView?.messages ?? [])]
+            : (finalView?.messages ?? []);
+          if (isAntigravity) {
+            turnProvenance = advanceTurnProvenance(turnProvenance, finalView?.messages, { allowAppendAuxiliaryUsers: true });
+            if (routingMessages.length > 0) {
+              turnProvenance = advanceTurnProvenance(turnProvenance, finalMessages, { allowAppendAuxiliaryUsers: false });
+            }
+            antigravityTurnProvenance.set(api.taskId, turnProvenance, context.abortSignal);
+          }
           return routingMessages.length > 0
-            ? { ...finalView, messages: [...routingMessages, ...(finalView?.messages ?? [])] }
+            ? { ...finalView, messages: finalMessages }
             : finalView;
         } catch (err) {
+          antigravityTurnProvenance.delete(api.taskId);
           if (!context.abortSignal?.aborted) {
             // Host 侧准备失败：先把安全诊断写入 GenerationFailureState（契约 A，
             // work 对账/LIVE 可凭 taskId 读到具体失败），再中止当前任务。
@@ -808,17 +839,52 @@ export async function openRuntime(options) {
         if (!online) throw errWithCode('center is offline', 'CENTER_OFFLINE');
         const prepared = (await harness.snapshot(RequestContext, api.conversationId, context))?.prepared;
         if (!prepared || prepared.taskId !== String(api.taskId)) throw errWithCode('context is not prepared', 'INVALID_STATE');
+        const provenance = antigravityTurnProvenance.get(api.taskId);
+        if (provenance) {
+          antigravityTurnProvenance.set(
+            api.taskId,
+            advanceTurnProvenance(provenance, request.messages, { allowAppendAuxiliaryUsers: true }),
+            context.abortSignal,
+          );
+        }
         const total = budgetRequestTokens(prepared.messages, prepared.tokenCount, request.messages);
         // Let the SDK compact/retry an oversized projection without sending it to the provider.
         setRequestBudget(request.messages, total, prepared.contextWindow);
         await decisions.checkBudget(request, api, context);
       } catch (err) {
+        antigravityTurnProvenance.delete(api.taskId);
         if (!context.abortSignal?.aborted) {
           await recordGenerationFailure(api, err, context);
           await harness.abortTask(api.taskId, context);
         }
         throw err;
       }
+    },
+    async beforeProviderRequest({ model, payload }, api, context) {
+      if (!model || (model.provider !== ANTIGRAVITY_PROVIDER_ID && model.api !== ANTIGRAVITY_API)) {
+        return undefined;
+      }
+      try {
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          throw errWithCode('Antigravity provider payload must be an object', 'INVALID_STATE');
+        }
+        const turnContext = resolveAntigravityTurnContext(antigravityTurnProvenance.get(api.taskId), payload.messages);
+        return { payload: { ...payload, turnContext } };
+      } catch (err) {
+        antigravityTurnProvenance.delete(api.taskId);
+        if (!context.abortSignal?.aborted) {
+          await recordGenerationFailure(api, err, context);
+          try {
+            await harness.abortTask(api.taskId, context);
+          } catch (abortErr) {
+            if (!context.abortSignal?.aborted) throw abortErr;
+          }
+        }
+        throw err;
+      }
+    },
+    afterResponse(_message, api) {
+      antigravityTurnProvenance.delete(api.taskId);
     },
   })] });
   const codemodeExtension = withCodemodePresentations(createCodemodeExtension({ sandbox: createHostCodemodeSandbox() }));
