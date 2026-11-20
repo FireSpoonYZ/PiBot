@@ -19,6 +19,12 @@
 - 保留 applicationId、签名、聊天/附件/Pi/偏好数据路径及旧草稿。保留助手用到的 AppCatalog/AppSearch、Shower 和系统语音组件名。
 - 旧导航值只在 `gestures.pending_restore=true` 时恢复为 0，读回且 commit 清标成功才完成。权限不足时保留标记，并可用 ADB、系统设置或显式 Shizuku 救援入口。禁止自动写 1、更改无障碍列表或申请 HOME。 [Android 旧数据恢复](README.md#首次部署并跑通一个-bot)
 
+## 内置能力与授权
+
+- 新增或修改用户可执行的 PiBot 业务操作时，同时提供可由 Bot 代办的内置工具，并将同一业务能力接入授权后的 Center MCP；只改变本地界面展示的交互不算业务操作。契约和输入 schema 放在 `center-contract/operations/`，服务端复用现有执行逻辑、校验与回执，不让 Bot 模拟点击或调用任意管理 API。
+- 身份验证、切换 Center、信任证书、设备配对或授信、密钥和授权的发放与撤销必须由用户完成。Bot 与 MCP 不代为批准这些操作，也不得通过通用工具间接绕过认证或人工授权。外部 MCP 只接受独立 OAuth 授权，不复用设备凭据或 `center:admin`。
+- 按用户意图为工具分组；把只读查询与写操作分开，管理能力默认通过 `tool_search` 渐进加载。验收时检查 Bot 与已获相应授权的 MCP 是否调用同一业务实现，并覆盖未授权拒绝。
+
 ## 构建环境与命令
 
 使用 CI 的 **Node.js 26.13.0**，可用 `mise exec node@26.13.0 -- <命令>`。Rust **1.99.1** 由 `rust-toolchain.toml` 固定。桌面构建先装根目录与 `host-core` npm 依赖，中心镜像由 `scripts/center-build.sh` 构建。 [源码构建](README.md#从源码构建) · [桌面依赖](desktop/README.md#构建)

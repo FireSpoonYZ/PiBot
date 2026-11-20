@@ -63,6 +63,7 @@ import { createBotManagementSkillSection } from './bot-management-skill.js';
 import { SOUL_MAX_BYTES } from './bot-soul.js';
 import { normalizeUserMessage } from './scope-protocol.js';
 import { createCommunicationTools } from './communication-tools.js';
+import { createOperationTools } from './operation-tools.js';
 import { createSessionSearchTool } from './session-search-tool.js';
 import { createCollaborationService } from './collaboration-service.js';
 import { BASE_BEHAVIOR_PROMPT } from './bot-prompt.js';
@@ -631,6 +632,10 @@ export async function openRuntime(options) {
   }));
   // 内置 Bot 管理技能目录：只渲染名称/描述索引，
   // 完整 SKILL.md 由模型按目录经文件工具读取，不把整本手册塞进系统提示。
+  registry.install(defineExtension({
+    name: 'host.operations',
+    tools: createOperationTools({ host, getHarness: () => harness, getCenterClient: () => centerRuntime.getClient(), dataPrivacy }),
+  }));
   const botManagementSection = createBotManagementSkillSection();
   registry.install(defineExtension({
     name: 'host.bot-management-skill',

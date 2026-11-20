@@ -9,6 +9,10 @@ import { openPackageManager } from './packages/index.js';
 import { registerAuth } from './auth.js';
 import { registerClientReleaseRoutes } from './client-releases.js';
 import { registerRoutes } from './routes.js';
+import { openOperations } from './operations/index.js';
+import { operationScopes } from '../center-contract/operations/index.js';
+import { registerMcpOAuth } from './mcp/oauth.js';
+import { registerMcp } from './mcp/server.js';
 import { openHostBridge } from './host-bridge.js';
 import { openCenterExecution } from './execution.js';
 import { openTurnAdmission } from './turns.js';
@@ -32,11 +36,11 @@ import { GOOGLE_WORKSPACE_INSTALLATION_ID } from './google-workspace/constants.j
 setupPiHttpRuntime();
 
 const require = createRequire(import.meta.url);
-const status = { INVALID_ARGUMENT: 400, INVALID_CWD: 400, UNSUPPORTED_TARGET: 400, VALIDATION_FAILED: 400, UNAUTHENTICATED: 401, FORBIDDEN: 403, CSRF_INVALID: 403, NOT_FOUND: 404, BOT_NOT_FOUND: 404, REVISION_CONFLICT: 409, REQUEST_CONFLICT: 409, TURN_SET_CHANGED: 409, TURN_SYNC_FAILED: 409, TURN_RECOVERY_REQUIRED: 403, INVALID_STATE: 409, PRIMARY_BOT_PROTECTED: 409, BOT_ARCHIVED: 409, PAYLOAD_TOO_LARGE: 413, RATE_LIMITED: 429, PACKAGE_NOT_READY: 409, CALL_TIMEOUT: 504, TIMEOUT: 504, LEARNING_ERROR: 502, CENTER_OFFLINE: 503, DEVICE_OFFLINE: 503, VAULT_INVALID_ARGUMENT: 400, VAULT_FORBIDDEN: 403, VAULT_NOT_FOUND: 404, VAULT_NOT_CONFIGURED: 409, VAULT_NEEDS_LOGIN: 409, VAULT_LOGIN_CHALLENGE: 409, VAULT_STALE_SESSION: 409, VAULT_CONFLICT: 409, VAULT_REQUEST_EXPIRED: 409, VAULT_REQUEST_BUSY: 409, VAULT_NOT_INITIALIZED: 409, VAULT_ALREADY_INITIALIZED: 409, VAULT_LOCKED: 409, VAULT_UNLOCK_FAILED: 409, VAULT_UNSUPPORTED: 409, VAULT_CONNECTION_FAILED: 502, VAULT_UNAVAILABLE: 503, PAIRING_CODE_INVALID: 401, PAIRING_CODE_USED: 409, PAIRING_CODE_EXPIRED: 410, PAIRING_CODE_REVOKED: 410, PAIRING_CODE_DEVICE_MISMATCH: 409, DEVICE_ALREADY_REGISTERED: 409, ...GOOGLE_ERROR_STATUS };
+const status = { INVALID_ARGUMENT: 400, INVALID_CWD: 400, UNSUPPORTED_TARGET: 400, VALIDATION_FAILED: 400, UNAUTHENTICATED: 401, FORBIDDEN: 403, CSRF_INVALID: 403, NOT_FOUND: 404, BOT_NOT_FOUND: 404, REVISION_CONFLICT: 409, REQUEST_CONFLICT: 409, TURN_SET_CHANGED: 409, TURN_SYNC_FAILED: 409, TURN_RECOVERY_REQUIRED: 403, INVALID_STATE: 409, PRIMARY_BOT_PROTECTED: 409, BOT_ARCHIVED: 409, PAYLOAD_TOO_LARGE: 413, RESPONSE_TOO_LARGE: 413, RATE_LIMITED: 429, PACKAGE_NOT_READY: 409, CALL_TIMEOUT: 504, TIMEOUT: 504, LEARNING_ERROR: 502, CENTER_OFFLINE: 503, DEVICE_OFFLINE: 503, VAULT_INVALID_ARGUMENT: 400, VAULT_FORBIDDEN: 403, VAULT_NOT_FOUND: 404, VAULT_NOT_CONFIGURED: 409, VAULT_NEEDS_LOGIN: 409, VAULT_LOGIN_CHALLENGE: 409, VAULT_STALE_SESSION: 409, VAULT_CONFLICT: 409, VAULT_REQUEST_EXPIRED: 409, VAULT_REQUEST_BUSY: 409, VAULT_NOT_INITIALIZED: 409, VAULT_ALREADY_INITIALIZED: 409, VAULT_LOCKED: 409, VAULT_UNLOCK_FAILED: 409, VAULT_UNSUPPORTED: 409, VAULT_CONNECTION_FAILED: 502, VAULT_UNAVAILABLE: 503, PAIRING_CODE_INVALID: 401, PAIRING_CODE_USED: 409, PAIRING_CODE_EXPIRED: 410, PAIRING_CODE_REVOKED: 410, PAIRING_CODE_DEVICE_MISMATCH: 409, DEVICE_ALREADY_REGISTERED: 409, ...GOOGLE_ERROR_STATUS };
 /** The real error-code to HTTP-status map; exported so tests exercise it instead of a copy. */
 export const errorStatus = status;
 
-export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ownerPasswordHash, listenHost = '127.0.0.1', port = 8080, trustProxy = false, webRoot, npmPath, publicUrl }) {
+export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ownerPasswordHash, listenHost = '127.0.0.1', port = 8080, trustProxy = false, webRoot, npmPath, publicUrl, mcpClients = [] }) {
   // Single public HTTPS origin; the WSS link URL, OAuth callback and client
   // downloads are all derived from it. The service itself never terminates TLS:
   // the user's reverse proxy owns certificates and forwards plain HTTP here.
@@ -48,7 +52,7 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
   }
   const linkUrl = `wss://${publicOrigin.host}/v1/link`;
   if (!(encryptionKey instanceof Uint8Array) || !(sessionKey instanceof Uint8Array) || encryptionKey.byteLength !== 32 || sessionKey.byteLength !== 32 || Buffer.from(encryptionKey).equals(Buffer.from(sessionKey))) throw new Error('Independent encryption and session keys are required');
-  let store, relay, bridge, packages, execution, oauth, routes, app, skills, learning, botManagement, catalog, providerAuth, antigravity, vault, googleAccounts, googleWorkspaceMcp, googleRules;
+  let store, relay, bridge, packages, execution, oauth, routes, app, skills, learning, botManagement, catalog, providerAuth, antigravity, vault, googleAccounts, googleWorkspaceMcp, googleRules, mcpOAuth;
   let closing;
   async function close() {
     if (!closing) closing = (async () => {
@@ -58,7 +62,7 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
       // Google rule polling stops first; skill/learning services close before
       // the package manager and store they mutate through; execution closes
       // before the built-in Google MCP adapter and accounts service.
-      for (const fn of [() => googleRules?.close(), () => providerAuth?.close(), () => catalog?.close(), () => routes?.close(), () => antigravity?.close(), () => relay?.close(), () => app?.close(), () => learning?.close(), () => skills?.close(), () => vault?.close(), () => packages?.close(), () => execution?.close(), () => googleWorkspaceMcp?.close(), () => googleAccounts?.close(), () => oauth?.close(), () => bridge?.close(), () => store?.close()]) {
+      for (const fn of [() => googleRules?.close(), () => providerAuth?.close(), () => catalog?.close(), () => routes?.close(), () => antigravity?.close(), () => relay?.close(), () => app?.close(), () => mcpOAuth?.close?.(), () => learning?.close(), () => skills?.close(), () => vault?.close(), () => packages?.close(), () => execution?.close(), () => googleWorkspaceMcp?.close(), () => googleAccounts?.close(), () => oauth?.close(), () => bridge?.close(), () => store?.close()]) {
         try { await fn(); } catch (error) { errors.push(error); }
       }
       if (errors.length) throw new AggregateError(errors, 'Center shutdown failed');
@@ -118,11 +122,16 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
       notify: (deviceId) => routes?.notifyDevice?.(deviceId, 'webhook-ready'),
       bridge,
     });
-    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault, google: { accounts: googleAccounts, rules: googleRules } });
+    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault, google: { accounts: googleAccounts, rules: googleRules }, createOperations: openOperations });
+    if (mcpClients.length) {
+      mcpOAuth = await registerMcpOAuth(app, { publicUrl: publicOrigin.origin, clients: mcpClients, supportedScopes: operationScopes });
+      await registerMcp(app, { publicUrl: publicOrigin.origin, authenticate: mcpOAuth.authenticate, operations: routes.operations });
+    }
     if (webRoot) {
       await app.register(fastifyStatic, { root: webRoot, prefix: '/' });
       app.setNotFoundHandler((req, reply) => {
-        if (req.method === 'GET' && !req.url.startsWith('/api/')) return reply.sendFile('index.html');
+        if (req.method === 'GET' && !req.url.startsWith('/api/') &&
+            !/^(?:\/mcp(?:[/?]|$)|\/\.well-known\/oauth-)/.test(req.url)) return reply.sendFile('index.html');
         return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Not found' } });
       });
     }

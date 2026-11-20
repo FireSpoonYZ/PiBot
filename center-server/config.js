@@ -6,7 +6,7 @@
 // refuses to start rather than silently rotating keys.
 
 import { randomBytes, scryptSync } from 'node:crypto';
-import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { isAbsolute, join } from 'node:path';
 
@@ -125,6 +125,7 @@ export function resolveCenterPlan(env) {
     trustProxy: parseTrustProxy(env.CENTER_TRUST_PROXY),
     webRoot: env.CENTER_WEB_ROOT || '/app/center-web/dist',
     npmPath: env.CENTER_NPM_PATH,
+    mcpClients: readMcpClients(env.CENTER_MCP_CLIENTS_FILE),
   };
 
   const envEncryptionHex = env.CENTER_ENCRYPTION_KEY_HEX;
@@ -215,7 +216,23 @@ export function centerServerOptions(plan, config) {
     webRoot: plan.webRoot,
     npmPath: plan.npmPath,
     trustProxy: plan.trustProxy,
+    mcpClients: plan.mcpClients,
   };
+}
+
+function readMcpClients(path) {
+  if (!path) return [];
+  if (!isAbsolute(path)) throw new Error('CENTER_MCP_CLIENTS_FILE must be an absolute path');
+  let clients;
+  try {
+    const file = statSync(path);
+    if (!file.isFile() || file.size > 64 * 1024) throw new Error('invalid file');
+    clients = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    throw new Error('CENTER_MCP_CLIENTS_FILE must be a readable JSON file of at most 64 KiB');
+  }
+  if (!Array.isArray(clients)) throw new Error('CENTER_MCP_CLIENTS_FILE must contain a client array');
+  return clients;
 }
 
 function parseTrustProxy(value) {

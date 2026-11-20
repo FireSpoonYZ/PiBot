@@ -135,7 +135,8 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
       // turn 准入端点透传服务端类型化错误码（TURN_SET_CHANGED/TURN_SYNC_FAILED 等）；
       // bot 管理端点同样透传有界类型码，REVISION_CONFLICT 等 CAS 失败不会丢成
       // BAD_RESPONSE。其他路径保持既有 CENTER_REQUEST_FAILED 语义及 ownerRequest 回退。
-      const typedTurnError = path.startsWith('/api/host/turns/') ||
+      const isOperationPath = path === '/api/host/operations/call';
+      const typedTurnError = isOperationPath || path.startsWith('/api/host/turns/') ||
         isTaskPath ||
         /^\/api\/host\/devices\/[^/]+\/bots\/[^/]+\/(skills|skill-reviews|learning|installations)$/.test(path);
       // /api/host/vault/* 只透传固定 VAULT_* 码/消息；其他错误仍走状态码兜底。
@@ -161,7 +162,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
               'BAD_RESPONSE',
               'CENTER_REQUEST_FAILED',
             ]) : null,
-            requireJsonContentType: isTaskPath,
+            requireJsonContentType: isTaskPath || isOperationPath,
           });
           if (code) {
             errorCode = code;
@@ -512,6 +513,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     prepareTurn: (input, options = {}) => request('/api/host/turns/prepare', { method: 'POST', body: input, signal: options.signal }),
     confirmTurn: (input, options = {}) => request('/api/host/turns/confirm', { method: 'POST', body: input, signal: options.signal }),
     restoreTurn: (input, options = {}) => request('/api/host/turns/restore', { method: 'POST', body: input, signal: options.signal }),
+    callOperation: (body, signal) => request('/api/host/operations/call', { method: 'POST', body, signal }),
     globalTasks: (body, signal) => request('/api/host/tasks/action', { method: 'POST', body, signal }),
     pollTaskDispatches: (body, signal) => request('/api/host/task-dispatches/poll', { method: 'POST', body, signal }),
     reportTaskDispatch: (id, body, signal) => request('/api/host/task-dispatches/' + encodeURIComponent(id) + '/receipt', { method: 'POST', body, signal }),

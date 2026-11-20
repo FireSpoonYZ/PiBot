@@ -5,7 +5,7 @@ description: Manage e-launcher Bots across devices — create, save, or update t
 
 # Bot management
 
-Operate on Bots and managed skills through the management tools — never by editing their files, databases, or runtime state directly. Load the matching file under `references/` (resolve paths against this skill's directory) before acting.
+Operate on Bots and managed skills through the management tools — never by editing their files, databases, or runtime state directly. Use `tool_search` for the specific action (e.g. Bot workspace, skill files, skill visibility, learning status, or package activation). Load the matching file under `references/` (resolve paths against this skill's directory) for existing workflows.
 
 ## Hard rules
 
