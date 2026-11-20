@@ -434,6 +434,13 @@ test('real Center server routes enforce auth/CSRF/no-store, public OAuth callbac
     const { deviceId, deviceToken } = devRes.json();
     const hostHeaders = { authorization: `Bearer ${deviceToken}`, 'x-device-id': deviceId };
 
+    const hostStatus = await center.app.inject({ method: 'GET', url: '/api/host/google/status', headers: hostHeaders });
+    assert.equal(hostStatus.statusCode, 200);
+    assert.equal(hostStatus.headers['cache-control'], 'no-store');
+    assert.equal(hostStatus.json().accounts[0].email, 'alice@example.com');
+    assert.ok(!hostStatus.body.includes(clientSecret));
+    assert.doesNotMatch(hostStatus.body, /ya29.fresh|fresh-callback-refresh-token/);
+    assert.equal((await center.app.inject({ method: 'GET', url: '/api/host/google/status' })).statusCode, 401);
     const bootRes = await center.app.inject({
       method: 'POST',
       url: '/api/host/bootstrap',

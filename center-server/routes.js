@@ -947,6 +947,13 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     const sinceSeq = req.query?.sinceSeq !== undefined ? Number(req.query.sinceSeq) : undefined;
     return store.getBotSync({ epoch, sinceSeq, devices: listOwnerDevices() });
   });
+  if (google?.accounts) {
+    // The setup wizard reads readiness; configuring clients and grants remains owner-only.
+    host('GET', '/api/host/google/status', (_req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      return google.accounts.status();
+    });
+  }
   host('GET', '/api/host/model-picker', modelPicker);
   host('GET', '/api/host/providers/:id/auth', async req => {
     const providerId = req.params.id;
