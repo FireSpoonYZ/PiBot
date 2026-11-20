@@ -23,7 +23,17 @@ export function isTrustedGoogleRuleEvent(event) {
   return (
     event?.trustedSource === GOOGLE_WORKSPACE_RULE_SOURCE_TYPE &&
     event?.dataBoundary === GOOGLE_WORKSPACE_DATA_BOUNDARY &&
-    event?.toolPolicy === undefined
+    event?.toolPolicy === undefined &&
+    event?.sessionIsolation === undefined
+  );
+}
+
+function hasAnyTrustedEnvelopeMarker(event) {
+  return (
+    event?.trustedSource !== undefined ||
+    event?.dataBoundary !== undefined ||
+    event?.toolPolicy !== undefined ||
+    event?.sessionIsolation !== undefined
   );
 }
 
@@ -37,12 +47,8 @@ function validateEvent(event, deviceId) {
       !event.payload || typeof event.payload !== 'object' || Array.isArray(event.payload)) {
     throw new Error('invalid webhook event');
   }
-  const hasTrustedMarker =
-    event.trustedSource !== undefined ||
-    event.dataBoundary !== undefined ||
-    event.toolPolicy !== undefined ||
-    event.sessionIsolation !== undefined;
-  const isGoogle = isTrustedGoogleRuleEvent(event) && event.sessionIsolation === undefined;
+  const hasTrustedMarker = hasAnyTrustedEnvelopeMarker(event);
+  const isGoogle = isTrustedGoogleRuleEvent(event);
   const isMcp = isTrustedMcpDispatchEvent(event) && event.dataBoundary === undefined;
   if (hasTrustedMarker && !isGoogle && !isMcp) {
     throw new Error('invalid webhook event');
@@ -112,7 +118,13 @@ export function createWebhookConsumer({
   async function consume(event, stopState, client, signal) {
     const active = () => !signal.aborted && isReady() && getClient() === client;
     const runtime = getRuntime();
-    const isMcp = isTrustedMcpDispatchEvent(event);
+    const isMcp = isTrustedMcpDispatchEvent(event) && event.dataBoundary === undefined;
+    const isGoogle = isTrustedGoogleRuleEvent(event);
+    // Any unrecognized or incomplete trusted marker (such as an MCP envelope missing
+    // `sessionIsolation: 'isolated'`) MUST be rejected and never fall back to the primary session.
+    if (hasAnyTrustedEnvelopeMarker(event) && !isMcp && !isGoogle) {
+      throw new Error('invalid webhook event');
+    }
     activeRequestIds.add(event.requestId);
     let receipt;
     try {

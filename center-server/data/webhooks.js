@@ -192,10 +192,17 @@ export function webhookStore(db, transaction, options = {}) {
         return { botId, stopEpoch };
       });
     },
-    pollWebhookEvents(deviceId, cursor = null, nowMs = Date.now()) {
+    pollWebhookEvents(deviceId, cursor = null, nowMs = Date.now(), options = {}) {
+      let resolvedNowMs = nowMs;
+      let resolvedOptions = options;
+      if (nowMs && typeof nowMs === 'object') {
+        resolvedOptions = nowMs;
+        resolvedNowMs = resolvedOptions.nowMs ?? Date.now();
+      }
+      const pollOptions = resolvedOptions && typeof resolvedOptions === 'object' ? resolvedOptions : {};
       const after = parseCursor(cursor, extraDeliveries.length);
       return transaction(() => {
-        const now = new Date(nowMs).toISOString();
+        const now = new Date(resolvedNowMs).toISOString();
         settlePending('device_id = ?', [deviceId], now);
         for (const delivery of extraDeliveries) {
           delivery.settlePendingForDevice(deviceId, now);
@@ -206,8 +213,10 @@ export function webhookStore(db, transaction, options = {}) {
           ORDER BY received_at, rowid LIMIT 51`).all(deviceId, ...(after ?? []));
         const extraCandidates = [];
         for (let index = 0; index < extraDeliveries.length; index += 1) {
+          const delivery = extraDeliveries[index];
+          if (typeof delivery.supportsPoll === 'function' && !delivery.supportsPoll(pollOptions)) continue;
           const streamIndex = index + 1;
-          const items = extraDeliveries[index].queryActiveForDevice(deviceId, after, 51, streamIndex);
+          const items = delivery.queryActiveForDevice(deviceId, after, 51, streamIndex);
           if (items.length > 0) extraCandidates.push(...items);
         }
         const candidates = extraCandidates.length === 0

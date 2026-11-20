@@ -4,6 +4,10 @@ import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/e
 import { assertDeviceToken } from './relay-protocol.js';
 import { assertId } from './message-protocol.js';
 import {
+  MCP_DISPATCH_CAPABILITY_HEADER,
+  MCP_DISPATCH_SESSION_ISOLATION,
+} from './mcp-dispatch-policy.js';
+import {
   ANTIGRAVITY_API,
   ANTIGRAVITY_CANCEL_PATH,
   ANTIGRAVITY_MAX_FRAME_BYTES,
@@ -507,7 +511,12 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
         ? '?admissionId=' + encodeURIComponent(options.admissionId) : '';
       return request('/api/host/artifacts/' + encodeURIComponent(ref) + query, { binary: true, signal: options.signal });
     },
-    pollWebhookEvents: (options = {}) => request('/api/host/webhook-events/poll', { method: 'POST', body: { cursor: options.cursor }, signal: options.signal }),
+    pollWebhookEvents: (options = {}) => request('/api/host/webhook-events/poll', {
+      method: 'POST',
+      body: { cursor: options.cursor },
+      headers: { [MCP_DISPATCH_CAPABILITY_HEADER]: MCP_DISPATCH_SESSION_ISOLATION },
+      signal: options.signal,
+    }),
     stopWebhookEvents: (input, options = {}) => request('/api/host/webhook-events/stop', { method: 'POST', body: { botId: input.botId, stopEpoch: input.stopEpoch }, signal: options.signal }),
     reportWebhookEvent: (eventId, input, options = {}) => request('/api/host/webhook-events/' + encodeURIComponent(eventId) + '/receipt', { method: 'POST', body: input, signal: options.signal }),
     prepareTurn: (input, options = {}) => request('/api/host/turns/prepare', { method: 'POST', body: input, signal: options.signal }),

@@ -9,6 +9,8 @@ const sha256Hex = (value) => createHash('sha256').update(value, 'utf8').digest('
 
 export const MCP_DISPATCH_TRUSTED_SOURCE = 'mcp-dispatch';
 export const MCP_SAFE_TOOL_POLICY = 'mcp-safe';
+export const MCP_DISPATCH_SESSION_ISOLATION = 'isolated';
+export const MCP_DISPATCH_CAPABILITY_HEADER = 'x-pibot-mcp-dispatch';
 export const MAX_DISPATCH_ANSWER_CHARS = 128 * 1024;
 export const MAX_DISPATCH_PAYLOAD_BYTES = 48 * 1024;
 export const DISPATCH_TTL_MS = 24 * 60 * 60 * 1000;
@@ -122,6 +124,7 @@ function toHostDeliveryEvent(row) {
     // public webhook_events and google_rule_events never emit these markers.
     trustedSource: MCP_DISPATCH_TRUSTED_SOURCE,
     toolPolicy: MCP_SAFE_TOOL_POLICY,
+    sessionIsolation: MCP_DISPATCH_SESSION_ISOLATION,
     instruction: row.instruction,
     payload: safeParseJson(row.payload_json, {}),
   };
@@ -231,6 +234,9 @@ export function dispatchStore(db, transaction) {
   }
 
   const delivery = {
+    supportsPoll(pollOptions) {
+      return pollOptions?.mcpDispatch === MCP_DISPATCH_SESSION_ISOLATION;
+    },
     settlePendingForDevice(deviceId, nowIso) {
       settlePending('device_id = ?', [deviceId], nowIso);
     },

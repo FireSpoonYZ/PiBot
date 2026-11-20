@@ -1,5 +1,9 @@
 import { randomBytes } from 'node:crypto';
-import { MAX_DISPATCH_ANSWER_CHARS } from './data/dispatch.js';
+import {
+  MAX_DISPATCH_ANSWER_CHARS,
+  MCP_DISPATCH_CAPABILITY_HEADER,
+  MCP_DISPATCH_SESSION_ISOLATION,
+} from './data/dispatch.js';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 function object(value) {
@@ -112,6 +116,14 @@ function stablePayload(payload) {
 }
 const bearer = req => /^Bearer ([A-Za-z0-9_-]{43})$/i.exec(req.headers.authorization || '')?.[1];
 
+function pollOptionsFromRequest(req) {
+  const raw = req.headers?.[MCP_DISPATCH_CAPABILITY_HEADER];
+  const mcpDispatch = typeof raw === 'string' && raw.trim() === MCP_DISPATCH_SESSION_ISOLATION
+    ? MCP_DISPATCH_SESSION_ISOLATION
+    : null;
+  return { mcpDispatch };
+}
+
 export function registerWebhookRoutes(app, { store, bridge, route, host, publicUrl, notify }) {
   const present = value => ({ ...value, url: new URL(`/api/webhooks/${value.id}/events`, publicUrl).href });
   const changed = value => { notify(value.deviceId); return present(value); };
@@ -172,7 +184,7 @@ export function registerWebhookRoutes(app, { store, bridge, route, host, publicU
 
   host('POST', '/api/host/webhook-events/poll', req => {
     const body = fields(req.body, ['cursor']);
-    return store.pollWebhookEvents(req.centerDevice.deviceId, body.cursor);
+    return store.pollWebhookEvents(req.centerDevice.deviceId, body.cursor, Date.now(), pollOptionsFromRequest(req));
   });
   host('POST', '/api/host/webhook-events/stop', req => {
     const deviceId = req.centerDevice.deviceId;

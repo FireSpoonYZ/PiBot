@@ -17,6 +17,7 @@
 export const MCP_DISPATCH_TRUSTED_SOURCE = 'mcp-dispatch';
 export const MCP_SAFE_TOOL_POLICY = 'mcp-safe';
 export const MCP_DISPATCH_SESSION_ISOLATION = 'isolated';
+export const MCP_DISPATCH_CAPABILITY_HEADER = 'x-pibot-mcp-dispatch';
 export const MCP_DISPATCH_EXTENSION_NAME = 'host.mcp-dispatch';
 export const MAX_DISPATCH_ANSWER_CHARS = 128 * 1024;
 
@@ -53,13 +54,14 @@ function truncateSafeText(value, maxChars) {
 
 /**
  * Identifies trusted MCP dispatch events strictly from top-level Center envelope fields
- * emitted by `mcp_dispatch_events`. Never inspects untrusted `event.payload`.
+ * emitted by `mcp_dispatch_events`. Requires the explicit `sessionIsolation: 'isolated'`
+ * marker and never inspects untrusted `event.payload`.
  */
 export function isTrustedMcpDispatchEvent(event) {
   return (
     event?.trustedSource === MCP_DISPATCH_TRUSTED_SOURCE &&
     event?.toolPolicy === MCP_SAFE_TOOL_POLICY &&
-    (event?.sessionIsolation === undefined || event?.sessionIsolation === MCP_DISPATCH_SESSION_ISOLATION)
+    event?.sessionIsolation === MCP_DISPATCH_SESSION_ISOLATION
   );
 }
 

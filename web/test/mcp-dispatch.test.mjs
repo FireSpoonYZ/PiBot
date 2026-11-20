@@ -15,23 +15,30 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openCenterStore } from '../../center-server/data/index.js';
 import {
+  MCP_DISPATCH_CAPABILITY_HEADER,
+  MCP_DISPATCH_SESSION_ISOLATION as CENTER_MCP_DISPATCH_SESSION_ISOLATION,
   MCP_DISPATCH_TRUSTED_SOURCE,
   MCP_SAFE_TOOL_POLICY,
   DISPATCH_TTL_MS,
 } from '../../center-server/data/dispatch.js';
+import { registerWebhookRoutes } from '../../center-server/webhooks.js';
 import { createHandlers } from '../../center-server/operations/dispatch.js';
+import { connectCenter } from '../../host-core/center-client.js';
 import { openHost } from '../../host-core/host.js';
 import { resolveBotIdentity } from '../../host-core/bot-identity.js';
 import { getPrimaryConversation, PrimaryIndex } from '../../host-core/runtime-docs.js';
 import {
   createWebhookConsumer,
+  isTrustedGoogleRuleEvent,
   isTrustedMcpDispatchEvent,
 } from '../../host-core/host-webhooks.js';
 import {
+  MCP_DISPATCH_CAPABILITY_HEADER as HOST_MCP_DISPATCH_CAPABILITY_HEADER,
   MCP_DISPATCH_EXTENSION_NAME,
   MCP_DISPATCH_SESSION_ISOLATION,
   MCP_SAFE_EXTENSION_NAMES,
@@ -64,6 +71,8 @@ import {
   AgentDoc,
 } from '../../host-core/node_modules/@earendil-works/pi-durable/dist/index.js';
 import { openNodeSqliteStorage } from '../../host-core/node_modules/@earendil-works/pi-durable/dist/storage/sqlite/node.js';
+
+const Fastify = createRequire(new URL('../../center-server/package.json', import.meta.url))('fastify');
 
 function makeStore(deviceId = 'dev-1') {
   const dir = mkdtempSync(join(tmpdir(), 'pibot-mcp-dispatch-'));
@@ -677,7 +686,9 @@ test('Real Durable isolation: MCP dispatch runs in request-scoped 0-tool session
     });
 
     const centerClient = {
-      pollWebhookEvents: async ({ cursor }) => store.pollWebhookEvents(deviceId, cursor),
+      pollWebhookEvents: async ({ cursor }) => store.pollWebhookEvents(deviceId, cursor, Date.now(), {
+        mcpDispatch: MCP_DISPATCH_SESSION_ISOLATION,
+      }),
       stopWebhookEvents: async (input) => store.stopWebhookEvents(deviceId, input),
       reportWebhookEvent: async (id, receipt) => store.reportWebhookEvent(deviceId, id, receipt),
     };
@@ -927,7 +938,9 @@ test('Real Durable disconnect/retry delivers durable receipt without replaying m
     // Simulate transient network failure on the first succeeded receipt upload.
     let dropFirstSucceededReceipt = true;
     const centerClient = {
-      pollWebhookEvents: async ({ cursor }) => store.pollWebhookEvents(deviceId, cursor),
+      pollWebhookEvents: async ({ cursor }) => store.pollWebhookEvents(deviceId, cursor, Date.now(), {
+        mcpDispatch: MCP_DISPATCH_SESSION_ISOLATION,
+      }),
       stopWebhookEvents: async (input) => store.stopWebhookEvents(deviceId, input),
       reportWebhookEvent: async (id, receipt) => {
         if (dropFirstSucceededReceipt && receipt.status === 'succeeded') {
@@ -1070,7 +1083,9 @@ test('Fail-closed: missing isolated channel, tampered AgentDoc/tools, forged mar
     let fallbackWebhookCalled = false;
     let primaryGetSubmissionCalled = false;
     const client = {
-      pollWebhookEvents: async ({ cursor }) => store.pollWebhookEvents('dev-1', cursor),
+      pollWebhookEvents: async ({ cursor }) => store.pollWebhookEvents('dev-1', cursor, Date.now(), {
+        mcpDispatch: MCP_DISPATCH_SESSION_ISOLATION,
+      }),
       stopWebhookEvents: async (input) => store.stopWebhookEvents('dev-1', input),
       reportWebhookEvent: async (id, receipt) => store.reportWebhookEvent('dev-1', id, receipt),
     };
@@ -1110,13 +1125,22 @@ test('Fail-closed: missing isolated channel, tampered AgentDoc/tools, forged mar
       await consumer.close();
     }
 
-    // Forged markers in payload or invalid sessionIsolation never pass trusted check.
+    // Forged markers in payload, missing sessionIsolation, or invalid sessionIsolation never pass trusted check.
     assert.equal(isTrustedMcpDispatchEvent({
-      payload: { trustedSource: MCP_DISPATCH_TRUSTED_SOURCE, toolPolicy: MCP_SAFE_TOOL_POLICY },
+      payload: {
+        trustedSource: MCP_DISPATCH_TRUSTED_SOURCE,
+        toolPolicy: MCP_SAFE_TOOL_POLICY,
+        sessionIsolation: MCP_DISPATCH_SESSION_ISOLATION,
+      },
+    }), false);
+    assert.equal(isTrustedMcpDispatchEvent({
+      trustedSource: MCP_DISPATCH_TRUSTED_SOURCE,
+      toolPolicy: MCP_SAFE_TOOL_POLICY,
     }), false);
     assert.equal(isTrustedMcpDispatchEvent({
       trustedSource: MCP_DISPATCH_TRUSTED_SOURCE,
       toolPolicy: 'unsafe',
+      sessionIsolation: MCP_DISPATCH_SESSION_ISOLATION,
     }), false);
     assert.equal(isTrustedMcpDispatchEvent({
       trustedSource: MCP_DISPATCH_TRUSTED_SOURCE,
@@ -1288,14 +1312,32 @@ test('multi-stream pollWebhookEvents merges webhook, google-rule, and mcp-dispat
       nowMs: now,
     });
 
-    const polled = store.pollWebhookEvents('dev-1', null, now);
+    const legacyPolled = store.pollWebhookEvents('dev-1', null, now);
+    assert.equal(legacyPolled.items.length, 1);
+    assert.equal(isTrustedMcpDispatchEvent(legacyPolled.items[0]), false);
+    assert.equal(
+      store.getDispatchMessage({
+        callerKey: 'oauth:c1',
+        deviceId: 'dev-1',
+        botId: 'bot-1',
+        requestId: 'disp-1',
+        nowMs: now,
+      }).status,
+      'pending',
+    );
+
+    const polled = store.pollWebhookEvents('dev-1', null, now, {
+      mcpDispatch: MCP_DISPATCH_SESSION_ISOLATION,
+    });
     assert.equal(polled.items.length, 2);
     const mcpEvent = polled.items.find((item) => isTrustedMcpDispatchEvent(item));
     const regularEvent = polled.items.find((item) => !isTrustedMcpDispatchEvent(item));
     assert.ok(mcpEvent, 'expected trusted MCP dispatch event');
+    assert.equal(mcpEvent.sessionIsolation, MCP_DISPATCH_SESSION_ISOLATION);
     assert.ok(regularEvent, 'expected regular webhook event');
     assert.equal(regularEvent.trustedSource, undefined);
     assert.equal(regularEvent.toolPolicy, undefined);
+    assert.equal(regularEvent.sessionIsolation, undefined);
 
     store.acceptDispatchMessage({
       callerKey: 'oauth:c1',
@@ -1318,6 +1360,403 @@ test('multi-stream pollWebhookEvents merges webhook, google-rule, and mcp-dispat
     assert.equal(expired.completed, true);
     assert.equal(expired.error?.code, 'DISPATCH_EXPIRED');
   } finally {
+    cleanup();
+  }
+});
+
+test('HTTP + center-client compatibility gate: legacy Host cannot poll MCP dispatches, capable Host receives isolated envelope, past cursors remain readable, and Host never falls back without sessionIsolation marker', async () => {
+  const { store, cleanup } = makeStore('dev-1');
+  const sseResponses = new Set();
+  let app = null;
+  let centerClient = null;
+  try {
+    assert.equal(MCP_DISPATCH_CAPABILITY_HEADER, 'x-pibot-mcp-dispatch');
+    assert.equal(HOST_MCP_DISPATCH_CAPABILITY_HEADER, MCP_DISPATCH_CAPABILITY_HEADER);
+    assert.equal(CENTER_MCP_DISPATCH_SESSION_ISOLATION, MCP_DISPATCH_SESSION_ISOLATION);
+
+    const now = Date.now();
+    const whToken = randomBytes(32).toString('base64url');
+    const whRoute = store.createWebhookRoute({
+      name: 'Compat Webhook',
+      deviceId: 'dev-1',
+      botId: 'bot-1',
+      instruction: 'Handle normal webhook',
+      enabled: true,
+    }, whToken);
+    const whAccepted = store.acceptWebhookEvent(whRoute.id, whToken, 'compat-wh-1', JSON.stringify({ kind: 'build' }));
+
+    const googleRule = store.saveGoogleRule({
+      name: 'Compat Gmail',
+      deviceId: 'dev-1',
+      botId: 'bot-1',
+      account: 'alice@example.com',
+      source: 'gmail',
+      enabled: true,
+      instruction: 'Handle gmail rule',
+    }, now);
+    const googleAccepted = store.enqueueGoogleRuleEvent({
+      ruleId: googleRule.id,
+      ruleName: googleRule.name,
+      deviceId: 'dev-1',
+      botId: 'bot-1',
+      account: 'alice@example.com',
+      source: 'gmail',
+      eventKey: 'gmail:compat-1',
+      instruction: googleRule.instruction,
+      payloadJson: JSON.stringify({ source: 'gmail', messageId: 'm-compat-1' }),
+      occurredAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + DISPATCH_TTL_MS).toISOString(),
+      nowMs: now,
+    });
+
+    const dispatchAccepted = store.acceptDispatchMessage({
+      callerKey: 'oauth:compat-client',
+      callerKind: 'oauth',
+      callerId: 'compat-client',
+      deviceId: 'dev-1',
+      botId: 'bot-1',
+      requestId: 'compat-disp-1',
+      message: 'Isolated MCP dispatch',
+      nowMs: now,
+    });
+    assert.equal(dispatchAccepted.event.status, 'pending');
+
+    app = Fastify({ logger: false });
+    app.decorate('rateLimit', () => async () => {});
+    app.setErrorHandler((error, _req, reply) => {
+      const status = error?.code === 'INVALID_ARGUMENT' ? 400 : 500;
+      reply.code(status).send({
+        error: { code: error?.code ?? 'INTERNAL_ERROR', message: error?.message ?? 'Internal error' },
+      });
+    });
+    const observedPollRequests = [];
+    const route = (method, url, handler) => app.route({ method, url, handler });
+    const host = (method, url, handler) => app.route({
+      method,
+      url,
+      onRequest(req, _reply, done) {
+        req.centerDevice = { deviceId: 'dev-1' };
+        done();
+      },
+      handler(req, reply) {
+        if (url === '/api/host/webhook-events/poll') {
+          observedPollRequests.push({
+            headers: { ...req.headers },
+            body: req.body,
+          });
+        }
+        return handler(req, reply);
+      },
+    });
+    app.get('/api/host/events', (req, reply) => {
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-store',
+        Connection: 'keep-alive',
+      });
+      reply.raw.write('event: heartbeat\ndata: {}\n\n');
+      sseResponses.add(reply.raw);
+      reply.raw.on('error', () => reply.raw.destroy());
+      req.raw.once('close', () => sseResponses.delete(reply.raw));
+    });
+    registerWebhookRoutes(app, {
+      store,
+      bridge: makeBridge(['dev-1']),
+      route,
+      host,
+      publicUrl: 'https://center.example.com',
+      notify: () => {},
+    });
+    const centerUrl = await app.listen({ host: '127.0.0.1', port: 0 });
+
+    // 1. Legacy Host without capability header receives normal webhook + Google rule events,
+    //    never receives MCP dispatch, and leaves MCP dispatch in `pending`.
+    const legacyRes = await app.inject({
+      method: 'POST',
+      url: '/api/host/webhook-events/poll',
+      payload: { cursor: null },
+    });
+    assert.equal(legacyRes.statusCode, 200);
+    const legacyBody = legacyRes.json();
+    assert.equal(legacyBody.items.length, 2);
+    assert.ok(legacyBody.items.some((item) => item.id === whAccepted.event.id));
+    assert.ok(legacyBody.items.some((item) => item.id === googleAccepted.event.id && isTrustedGoogleRuleEvent(item)));
+    assert.equal(legacyBody.items.some((item) => item.id === dispatchAccepted.event.id), false);
+    assert.equal(legacyBody.items.some((item) => isTrustedMcpDispatchEvent(item)), false);
+    assert.equal(
+      store.getDispatchMessage({
+        callerKey: 'oauth:compat-client',
+        deviceId: 'dev-1',
+        botId: 'bot-1',
+        requestId: 'compat-disp-1',
+      }).status,
+      'pending',
+    );
+
+    // 2. Non-isolated capability header value is rejected fail-closed for MCP dispatch.
+    const wrongHeaderRes = await app.inject({
+      method: 'POST',
+      url: '/api/host/webhook-events/poll',
+      headers: { [MCP_DISPATCH_CAPABILITY_HEADER]: 'primary' },
+      payload: {},
+    });
+    assert.equal(wrongHeaderRes.statusCode, 200);
+    assert.equal(wrongHeaderRes.json().items.some((item) => item.id === dispatchAccepted.event.id), false);
+    assert.equal(
+      store.getDispatchMessage({
+        callerKey: 'oauth:compat-client',
+        deviceId: 'dev-1',
+        botId: 'bot-1',
+        requestId: 'compat-disp-1',
+      }).status,
+      'pending',
+    );
+
+    // 3. New Host `connectCenter` -> `pollWebhookEvents` sends fixed header `x-pibot-mcp-dispatch: isolated`
+    //    with unchanged body `{ cursor }` and receives MCP dispatch marked `dispatching` with `sessionIsolation: 'isolated'`.
+    const deviceToken = randomBytes(32).toString('base64url');
+    centerClient = await connectCenter({
+      centerUrl,
+      deviceId: 'dev-1',
+      deviceToken,
+    });
+    const capablePoll = await centerClient.pollWebhookEvents({ cursor: null });
+    const lastPollReq = observedPollRequests.at(-1);
+    assert.equal(lastPollReq.headers[MCP_DISPATCH_CAPABILITY_HEADER], MCP_DISPATCH_SESSION_ISOLATION);
+    assert.deepEqual(lastPollReq.body, { cursor: null });
+
+    const deliveredMcp = capablePoll.items.find((item) => item.id === dispatchAccepted.event.id);
+    assert.ok(deliveredMcp, 'capable Host must receive MCP dispatch');
+    assert.equal(deliveredMcp.status, 'dispatching');
+    assert.equal(deliveredMcp.trustedSource, MCP_DISPATCH_TRUSTED_SOURCE);
+    assert.equal(deliveredMcp.toolPolicy, MCP_SAFE_TOOL_POLICY);
+    assert.equal(deliveredMcp.sessionIsolation, MCP_DISPATCH_SESSION_ISOLATION);
+    assert.equal(isTrustedMcpDispatchEvent(deliveredMcp), true);
+    assert.equal(
+      store.getDispatchMessage({
+        callerKey: 'oauth:compat-client',
+        deviceId: 'dev-1',
+        botId: 'bot-1',
+        requestId: 'compat-disp-1',
+      }).status,
+      'dispatching',
+    );
+
+    // 4. Past cursors remain readable for both legacy and capable HTTP polls:
+    //    legacy 2-tuple `[iso, rowid]`, Google-era 3-tuple `[iso, 1, rowid]`, and MCP stream-2 `[iso, 2, rowid]`.
+    const earlyIso = new Date(now - 60_000).toISOString();
+    const legacy2TupleCursor = Buffer.from(JSON.stringify([earlyIso, 1])).toString('base64url');
+    const google3TupleCursor = Buffer.from(JSON.stringify([earlyIso, 1, 1])).toString('base64url');
+    const mcpStream2Cursor = Buffer.from(JSON.stringify([earlyIso, 2, 1])).toString('base64url');
+    for (const pastCursor of [legacy2TupleCursor, google3TupleCursor, mcpStream2Cursor]) {
+      const legacyWithCursor = await app.inject({
+        method: 'POST',
+        url: '/api/host/webhook-events/poll',
+        payload: { cursor: pastCursor },
+      });
+      assert.equal(legacyWithCursor.statusCode, 200);
+      const legacyIds = legacyWithCursor.json().items.map((item) => item.id);
+      assert.ok(legacyIds.includes(whAccepted.event.id));
+      assert.ok(legacyIds.includes(googleAccepted.event.id));
+      assert.equal(legacyIds.includes(dispatchAccepted.event.id), false);
+
+      const capableWithCursor = await centerClient.pollWebhookEvents({ cursor: pastCursor });
+      const capableIds = capableWithCursor.items.map((item) => item.id);
+      assert.ok(capableIds.includes(whAccepted.event.id));
+      assert.ok(capableIds.includes(googleAccepted.event.id));
+      assert.ok(capableIds.includes(dispatchAccepted.event.id));
+    }
+
+    // 5. Store pagination (>50 items): legacy Host paginates all normal webhooks cleanly while
+    //    MCP dispatches stay `pending`, and legacy cursors remain readable by capable polls.
+    const pageFixture = makeStore('dev-1');
+    try {
+      const pStore = pageFixture.store;
+      const pToken = randomBytes(32).toString('base64url');
+      const pRoute = pStore.createWebhookRoute({
+        name: 'Paged Hook',
+        deviceId: 'dev-1',
+        botId: 'bot-1',
+        instruction: 'Process paged hook',
+        enabled: true,
+      }, pToken);
+      const baseNow = Date.now();
+      const earlyDisp = pStore.acceptDispatchMessage({
+        callerKey: 'oauth:paged',
+        callerKind: 'oauth',
+        callerId: 'paged',
+        deviceId: 'dev-1',
+        botId: 'bot-1',
+        requestId: 'paged-disp-early',
+        message: 'early',
+        nowMs: baseNow - 5_000,
+      });
+      for (let i = 0; i < 52; i += 1) {
+        pStore.acceptWebhookEvent(pRoute.id, pToken, `paged-wh-${i}`, JSON.stringify({ index: i }));
+      }
+      const lateNow = Date.now() + 5_000;
+      const lateDisp = pStore.acceptDispatchMessage({
+        callerKey: 'oauth:paged',
+        callerKind: 'oauth',
+        callerId: 'paged',
+        deviceId: 'dev-1',
+        botId: 'bot-1',
+        requestId: 'paged-disp-late',
+        message: 'late',
+        nowMs: lateNow,
+      });
+      const pollNow = lateNow + 1_000;
+
+      const oldPage1 = pStore.pollWebhookEvents('dev-1', null, pollNow);
+      assert.equal(oldPage1.items.length, 50);
+      assert.equal(typeof oldPage1.nextCursor, 'string');
+      assert.equal(oldPage1.items.some((item) => isTrustedMcpDispatchEvent(item)), false);
+      const oldPage2 = pStore.pollWebhookEvents('dev-1', oldPage1.nextCursor, pollNow);
+      assert.equal(oldPage2.items.length, 2);
+      assert.equal(oldPage2.nextCursor, null);
+      assert.equal(oldPage2.items.some((item) => isTrustedMcpDispatchEvent(item)), false);
+      assert.equal(
+        pStore.getDispatchMessage({
+          callerKey: 'oauth:paged',
+          deviceId: 'dev-1',
+          botId: 'bot-1',
+          requestId: 'paged-disp-early',
+          nowMs: pollNow,
+        }).status,
+        'pending',
+      );
+      assert.equal(
+        pStore.getDispatchMessage({
+          callerKey: 'oauth:paged',
+          deviceId: 'dev-1',
+          botId: 'bot-1',
+          requestId: 'paged-disp-late',
+          nowMs: pollNow,
+        }).status,
+        'pending',
+      );
+
+      const capFromOldCursor = pStore.pollWebhookEvents('dev-1', oldPage1.nextCursor, pollNow, {
+        mcpDispatch: MCP_DISPATCH_SESSION_ISOLATION,
+      });
+      assert.equal(capFromOldCursor.items.length, 3);
+      assert.equal(capFromOldCursor.nextCursor, null);
+      assert.ok(
+        capFromOldCursor.items.some(
+          (item) => item.id === lateDisp.event.id && item.sessionIsolation === MCP_DISPATCH_SESSION_ISOLATION,
+        ),
+      );
+
+      const capPage1 = pStore.pollWebhookEvents('dev-1', null, pollNow, {
+        mcpDispatch: MCP_DISPATCH_SESSION_ISOLATION,
+      });
+      assert.equal(capPage1.items.length, 50);
+      assert.equal(capPage1.items[0].id, earlyDisp.event.id);
+      assert.equal(capPage1.items[0].sessionIsolation, MCP_DISPATCH_SESSION_ISOLATION);
+      assert.equal(typeof capPage1.nextCursor, 'string');
+      const capPage2 = pStore.pollWebhookEvents('dev-1', capPage1.nextCursor, pollNow, {
+        mcpDispatch: MCP_DISPATCH_SESSION_ISOLATION,
+      });
+      assert.equal(capPage2.items.length, 4);
+      assert.equal(capPage2.nextCursor, null);
+      assert.ok(
+        capPage2.items.some(
+          (item) => item.id === lateDisp.event.id && item.sessionIsolation === MCP_DISPATCH_SESSION_ISOLATION,
+        ),
+      );
+    } finally {
+      pageFixture.cleanup();
+    }
+
+    // 6. Host consumer requires `sessionIsolation: 'isolated'` and never falls back to primary
+    //    session (`runtime.getSubmission` / `submitWebhook`) when an envelope omits the new marker.
+    const primaryLookups = [];
+    const webhookSubmissions = [];
+    const mcpLookups = [];
+    const mcpSubmissions = [];
+    const reportedReceipts = [];
+    let normalDone = false;
+    const legacyCenterClient = {
+      pollWebhookEvents: async () => ({
+        items: [
+          {
+            id: 'mcp-evt-missing-marker',
+            routeId: 'mcp:oauth:old-center',
+            routeName: 'MCP · old-center',
+            deviceId: 'dev-1',
+            botId: 'bot-1',
+            requestId: 'legacy-mcp-req',
+            status: 'dispatching',
+            trustedSource: MCP_DISPATCH_TRUSTED_SOURCE,
+            toolPolicy: MCP_SAFE_TOOL_POLICY,
+            instruction: 'Handle MCP dispatch',
+            payload: { message: 'must not enter primary session' },
+          },
+          ...(normalDone ? [] : [{
+            id: 'wh-evt-normal-1',
+            routeId: 'wh-route-1',
+            routeName: 'Normal Hook',
+            deviceId: 'dev-1',
+            botId: 'bot-1',
+            requestId: 'normal-wh-req',
+            status: 'dispatching',
+            instruction: 'Handle normal webhook',
+            payload: { ok: true },
+          }]),
+        ],
+        nextCursor: null,
+      }),
+      stopWebhookEvents: async (input) => input,
+      reportWebhookEvent: async (id, receipt) => {
+        reportedReceipts.push({ id, receipt });
+        if (id === 'wh-evt-normal-1' && receipt.status === 'succeeded') normalDone = true;
+        return { id, status: receipt.status };
+      },
+    };
+    const consumer = createWebhookConsumer({
+      deviceId: 'dev-1',
+      getClient: () => legacyCenterClient,
+      getRuntime: () => ({
+        getSubmission: async (_botId, requestId) => {
+          primaryLookups.push(requestId);
+          return null;
+        },
+      }),
+      isReady: () => true,
+      getStopStates: async () => [{ botId: 'bot-1', stopEpoch: 1, pendingStopEpoch: null }],
+      acknowledgeStop: async () => {},
+      submitWebhook: async (_botId, input) => {
+        webhookSubmissions.push(input.requestId);
+        return { status: 'done' };
+      },
+      getMcpDispatchSubmission: async (_botId, requestId) => {
+        mcpLookups.push(requestId);
+        return null;
+      },
+      submitMcpDispatch: async (_botId, input) => {
+        mcpSubmissions.push(input.requestId);
+        return { status: 'done', answerText: 'should not run' };
+      },
+    });
+    try {
+      consumer.wake();
+      await waitUntil(() => normalDone, { label: 'normal webhook processed while legacy MCP event rejected' });
+      assert.deepEqual(primaryLookups, ['normal-wh-req']);
+      assert.deepEqual(webhookSubmissions, ['normal-wh-req']);
+      assert.deepEqual(mcpLookups, []);
+      assert.deepEqual(mcpSubmissions, []);
+      assert.deepEqual(reportedReceipts, [{ id: 'wh-evt-normal-1', receipt: { status: 'succeeded' } }]);
+    } finally {
+      await consumer.close();
+    }
+  } finally {
+    await centerClient?.close();
+    for (const res of sseResponses) {
+      res.end();
+      res.destroy();
+    }
+    if (app) await app.close();
     cleanup();
   }
 });
