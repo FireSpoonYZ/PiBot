@@ -5519,7 +5519,8 @@ ${newer}` : draftSnapshot;
         });
       }
       if (!selection.cancelled && selection.email) {
-        setChatDraft(t(`请使用 Google 账号 ${selection.email} 继续处理刚才的请求。`, `Please continue using Google account ${selection.email}.`));
+        const reply = t(`请使用 Google 账号 ${selection.email} 继续处理刚才的请求。`, `Please continue using Google account ${selection.email}.`);
+        setChatDraft(previous => previous ? `${previous}\n${reply}` : reply);
       }
       return { selected: selection.email };
     },

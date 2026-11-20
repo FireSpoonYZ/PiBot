@@ -940,6 +940,37 @@ test('multi-account ambiguity and mismatched account never guess and never send 
     assert.equal(orcaCalls.length, 0);
     assert.equal(outboundFetchCalls, 0);
 
+    // A real ambiguous tool call publishes choices for this request, without executing it or changing any grant.
+    const harness = createMemoryDurableHarness();
+    harness.appendEntry(77, { kind: 'host.user-message', data: { text: 'Choose an account for this request' } });
+    const driver = await createMcpDriver({
+      installationId: GOOGLE_WORKSPACE_INSTALLATION_ID, version: '1.0.0', target: 'center',
+      host: {
+        dataPrivacy: createGoogleWorkspacePrivacy({ getHarness: () => harness, context: {} }),
+        assertCapabilityAllowed() {}, async resolveConversationBot() { return 'bot-1'; },
+        centerClient: {
+          listCapabilityTools: async () => ({ tools: await client.listTools() }),
+          callCapabilityTool: (_id, _bot, name, args) => client.callTool(name, args),
+        },
+      },
+    });
+    try {
+      const installed = await driver.forBot({ botId: 'bot-1', effectiveConfig: {}, credentials: {} });
+      await installed.prepare();
+      await installed.activate();
+      const search = installed.durableContributions.tools.find(t => t.description.startsWith('MCP tool gmail_search:'));
+      const cards = [];
+      const res = await search.execute({ query: 'is:unread' }, {
+        conversationId: 77, callId: 'choose-once', details: ({ presentation }) => cards.push(presentation),
+      }, {});
+      assert.equal(res.isError, true);
+      assert.equal(cards.length, 1);
+      assert.equal(cards[0].kind, 'google-account-select');
+      assert.deepEqual(cards[0].accounts.map(a => a.email).sort(), ['alice@example.com', 'bob@example.com']);
+      assert.equal(orcaCalls.length, 0);
+      assert.equal(outboundFetchCalls, 0);
+    } finally { await driver.close(); }
+
     // 2. Specifying an unknown account MUST return GOOGLE_ACCOUNT_NOT_FOUND, never fall back to Alice/Bob, and perform zero outbound requests.
     const wrongAccount = await adapter.runWithCaller(
       { deviceId: 'dev-1', botId: 'bot-1', callId: 'call-wrong' },

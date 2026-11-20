@@ -197,7 +197,7 @@ export function GoogleAccountSelectCard({
   };
 
   const statusText = selectedEmail
-    ? t(`已选择 ${selectedEmail}`, `Selected ${selectedEmail}`)
+    ? (presentation.requestId ? t(`已选择 ${selectedEmail}`, `Selected ${selectedEmail}`) : t('已填入草稿，发送后继续', 'Draft ready — send to continue'))
     : cancelled
       ? t('已取消', 'Cancelled')
       : canInteract

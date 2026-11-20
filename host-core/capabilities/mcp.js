@@ -5,6 +5,7 @@ import { McpClient, StdioTransport, StreamableHttpTransport, toLlmContent } from
 import { defineTool } from '@earendil-works/pi-durable';
 import { guardGoogleWorkspaceMcpCall, GOOGLE_WORKSPACE_MCP_INSTALLATION_ID as GOOGLE_WORKSPACE_INSTALLATION_ID } from '../google-workspace-privacy.js';
 import { prepareGoogleFileCall, finishGoogleFileCall } from '../google-file-transfer.js';
+import { projectToolPresentation } from '../tool-presentation.js';
 
 
 const GOOGLE_BINARY_FIELD_KEYS = new Set([
@@ -382,6 +383,17 @@ export async function createMcpDriver({ installationId, version, target, dataBou
               }
               if (isGoogleWorkspace) {
                 try {
+                  const choices = result?.isError === true && result._meta?.['pibot/accountChoices'];
+                  if (Array.isArray(choices) && typeof api.details === 'function') {
+                    const presentation = projectToolPresentation({ presentation: {
+                      kind: 'google-account-select', version: 1, installationId, botId,
+                      status: 'pending', toolName: tool.name, accounts: choices,
+                    } });
+                    // The text error remains usable even when the live card cannot be delivered.
+                    if (presentation) {
+                      try { await api.details({ presentation }, invocation); } catch { /* advisory UI */ }
+                    }
+                  }
                   const finalized = await finalizeGoogleToolResult(tool.name, result, { transferOptions, args: rawArgs, finish: finishTransfer });
                   invocation.abortSignal?.throwIfAborted();
                   check();

@@ -368,7 +368,17 @@ export function createGoogleWorkspaceMcpServer({
     try {
       const cleanArgs = sanitizeModelArgs(request?.params?.arguments);
       const accountArg = extractAccountArg(cleanArgs);
-      const api = await accounts.api(accountArg);
+      let api;
+      try {
+        api = await accounts.api(accountArg);
+      } catch (error) {
+        // Only Center account resolution, never tool output or document text, may offer account choices.
+        if (error?.code !== 'GOOGLE_ACCOUNT_AMBIGUOUS' || accountArg) throw error;
+        const result = await formatToolError(error, accounts);
+        const choices = safeAccountList(error.accounts ?? error.details?.accounts);
+        if (choices) result._meta = { 'pibot/accountChoices': choices.slice(0, 16) };
+        return result;
+      }
       const caller = getCaller?.() ?? {};
       const toolContext = {
         api,
