@@ -31,18 +31,26 @@ final class BotHostNativeTools {
     private static final long MAX_SAFE_INTEGER = 9007199254740991L;
     private static final int MAX_TEXT_OUTPUT_BYTES = 50 * 1024;
     private static final Set<String> TOOLS = Set.of("android_apps", "android_shower", "android_speak",
-            "schedule_task", "shower_surface");
+            "schedule_task", "shower_surface", "bot_browser");
     private static final Set<String> KINDS = Set.of("primary", "room", "dm");
     /** 人工操控没有 durable task：manager 传 'human:'+UUID；仅 shower_surface 允许，其他工具仍是正安全整数。 */
     private static final Pattern HUMAN_TASK_ID = Pattern.compile("human:[0-9a-fA-F-]{8,64}");
+    /** bot_browser 可由人工控制面 ('human:'+UUID) 或受控浏览器 provider ('agent:'+UUID) 发起。 */
+    private static final Pattern BOT_BROWSER_TASK_ID = Pattern.compile("(human|agent):[0-9a-fA-F-]{8,64}");
 
     /** 与 android-bridge-protocol.js、BotHostProcess 同一严格语义的人工 taskId 检查。 */
     static boolean isHumanTaskId(Object value) {
         return value instanceof String text && HUMAN_TASK_ID.matcher(text).matches();
     }
 
+    /** 与 android-bridge-protocol.js、BotHostProcess 同一严格语义的 bot_browser taskId 检查。 */
+    static boolean isBotBrowserTaskId(Object value) {
+        return value instanceof String text && BOT_BROWSER_TASK_ID.matcher(text).matches();
+    }
+
     private final Context appContext;
     private final ShowerToolBridge showerTools;
+    private final BotBrowserBridge botBrowser;
     private final AppCatalog appCatalog;
     private final BotHostVoice voice;
     private final ThreadPoolExecutor workers;
@@ -57,6 +65,7 @@ final class BotHostNativeTools {
         this.appContext = context.getApplicationContext();
         this.voice = voice;
         showerTools = new ShowerToolBridge(context);
+        botBrowser = new BotBrowserBridge(context);
         appCatalog = new AppCatalog(context);
         workers = new ThreadPoolExecutor(WORKER_THREADS, WORKER_THREADS, 0L,
                 TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(WORK_QUEUE_CAPACITY),
@@ -158,6 +167,16 @@ final class BotHostNativeTools {
                 return isHumanTaskId(context.opt("taskId")) ? null : "taskId 无效";
             }
         }
+        if ("bot_browser".equals(frame.optString("tool"))) {
+            JSONObject browserArguments = frame.optJSONObject("arguments");
+            if (browserArguments == null || browserArguments.optString("action").isEmpty()
+                    || browserArguments.optString("source").isEmpty()) {
+                return "bot_browser 缺少 action 或 source";
+            }
+            if (context.opt("taskId") instanceof String) {
+                return isBotBrowserTaskId(context.opt("taskId")) ? null : "taskId 无效";
+            }
+        }
         if (!(context.opt("taskId") instanceof Number number)) return "taskId 必须是正整数";
         double value = number.doubleValue();
         long rounded = Math.round(value);
@@ -189,12 +208,14 @@ final class BotHostNativeTools {
         try {
             cleaner.execute(() -> {
                 showerTools.shutdown();
+                botBrowser.shutdown();
                 workers.shutdownNow();
             });
         } catch (RejectedExecutionException exception) {
             // closed CAS 保证每代最多一次清理；兜底为单次 daemon 线程，绝不阻塞调用线程。
             Thread thread = new Thread(() -> {
                 showerTools.shutdown();
+                botBrowser.shutdown();
                 workers.shutdownNow();
             }, "bot-host-native-cleanup");
             thread.setDaemon(true);
@@ -279,6 +300,7 @@ final class BotHostNativeTools {
             case "android_shower" -> shower(context, arguments, cancelled::get);
             case "shower_surface" -> ShowerSurfaceBridge.execute(showerTools, context, arguments,
                     cancelled::get);
+            case "bot_browser" -> botBrowser.execute(context, arguments, cancelled::get);
             case "android_speak" -> speak(arguments);
             case "schedule_task" -> BotHostSchedules.get(appContext)
                     .applyTool(boundProcess, context, arguments, cancelled);
@@ -347,9 +369,13 @@ final class BotHostNativeTools {
      */
     private static JSONObject fixedError(Throwable t) {
         ShowerSurfaceBridge.Failure surface = surfaceFailure(t);
+        BotBrowserBridge.Failure browser = browserFailure(t);
         try {
             if (surface != null) {
                 return new JSONObject().put("code", surface.code).put("message", surface.getMessage());
+            }
+            if (browser != null) {
+                return new JSONObject().put("code", browser.code).put("message", browser.getMessage());
             }
             return new JSONObject().put("code", "ANDROID_NATIVE_ERROR").put("message", message(t));
         } catch (RuntimeException | JSONException exception) {
@@ -367,6 +393,16 @@ final class BotHostNativeTools {
         Throwable cause = t;
         while (cause != null) {
             if (cause instanceof ShowerSurfaceBridge.Failure failure) return failure;
+            if (cause.getCause() == cause) break;
+            cause = cause.getCause();
+        }
+        return null;
+    }
+
+    private static BotBrowserBridge.Failure browserFailure(Throwable t) {
+        Throwable cause = t;
+        while (cause != null) {
+            if (cause instanceof BotBrowserBridge.Failure failure) return failure;
             if (cause.getCause() == cause) break;
             cause = cause.getCause();
         }
