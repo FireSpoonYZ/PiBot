@@ -385,3 +385,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## PDF.js (Google Drive PDF text extraction)
+
+`pdfjs-dist` 6.3.289 is distributed under Apache License 2.0. Source: [Mozilla PDF.js](https://github.com/mozilla/pdf.js). See [`licenses/pdfjs-dist-6.3.289-Apache-2.0.txt`](licenses/pdfjs-dist-6.3.289-Apache-2.0.txt).
