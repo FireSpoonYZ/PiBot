@@ -423,6 +423,8 @@ export function ChatScreen({
   );
   const activeBotBannerTask = activeBotTaskContext.linkedTask;
   const activeBotFocusedStep = activeBotTaskContext.focusedStep;
+  const hasLocalDraft = Boolean(effectiveLocalDraft.trim()) || effectiveLocalAttachments.length > 0;
+  const isVoiceActive = Boolean(voiceCapturing);
 
   return (
     <main
@@ -1251,13 +1253,13 @@ export function ChatScreen({
                   }}
                 />
 
-                {!activeEditing && (voiceCapturing || !((isLlmRunningChat || showLocalComposerStop) && (Boolean(effectiveLocalDraft.trim()) || effectiveLocalAttachments.length > 0))) && (
+                {!activeEditing && (isVoiceActive || (!hasLocalDraft && !showLocalComposerStop && !isStoppingChat)) && (
                   activeBot.hostKind === 'local' ? (
                     <button
                       type="button"
-                      className={`grok-composer-mic-inline${voiceCapturing ? ' recording' : ''}`}
-                      aria-label={voiceCapturing ? t('完成语音', 'Finish voice') : t('语音输入', 'Voice input')}
-                      disabled={!voiceCapturing && (isPreLlmChat || isStoppingChat)}
+                      className={`grok-composer-mic-inline${isVoiceActive ? ' recording' : ''}`}
+                      aria-label={isVoiceActive ? t('完成语音', 'Finish voice') : t('语音输入', 'Voice input')}
+                      disabled={!isVoiceActive && (isPreLlmChat || isStoppingChat)}
                       onClick={onToggleVoiceCapture}
                     >
                       <Mic size={19} />
@@ -1290,7 +1292,7 @@ export function ChatScreen({
                     </button>
                   ) : (
                     <>
-                      {!(isPreLlmChat || sendingReceipt || editSubmitting) && (effectiveLocalDraft.trim() || effectiveLocalAttachments.length > 0) ? (
+                      {!isVoiceActive && !(isPreLlmChat || sendingReceipt || editSubmitting) && hasLocalDraft ? (
                         <>
                           {!activeEditing && canSteerLocal ? (
                             <button
