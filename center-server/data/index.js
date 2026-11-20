@@ -7,6 +7,7 @@ import Ajv from 'ajv';
 import deepmerge from 'deepmerge';
 import { assertPublicCredentialId } from '../auth.js';
 import { webhookStore } from './webhooks.js';
+import { googleRulesStore } from './google-rules.js';
 import { pairingStore } from './pairing.js';
 import { createTaskStore } from './tasks.js';
 
@@ -831,8 +832,10 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       };
     };
 
+    const { _delivery: googleRuleDelivery, ...googleRuleMethods } = googleRulesStore(db, transaction);
     store = {
-      ...webhookStore(db, transaction),
+      ...webhookStore(db, transaction, { extraDelivery: googleRuleDelivery }),
+      ...googleRuleMethods,
       ...pairingStore(db, transaction),
       ...createTaskStore({ db, transaction, listBotsSnapshot, listBotCapabilityDirectory }),
       getInstallationId() {
