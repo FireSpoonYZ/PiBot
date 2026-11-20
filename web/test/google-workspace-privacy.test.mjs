@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { GOOGLE_WORKSPACE_INSTALLATION_ID } from '../../center-contract/google-workspace.js';
 
@@ -9,10 +12,13 @@ import {
   GOOGLE_WORKSPACE_PRIVACY_UNAVAILABLE_CODE,
   GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
   GoogleWorkspacePrivacyState,
+  applyForkPrivacyInheritanceInTx,
   createGoogleWorkspacePrivacy,
   filterCleanEntriesForLearning,
   isGoogleWorkspaceCapability,
   isTrustedGoogleWorkspaceRuleEntry,
+  prepareForkPrivacyInheritanceInTx,
+  projectPrivacyStateForFork,
 } from '../../host-core/google-workspace-privacy.js';
 import { createMcpDriver } from '../../host-core/capabilities/mcp.js';
 import { createBotLearning } from '../../host-core/bot-learning.js';
@@ -22,6 +28,10 @@ import { senderAttribution } from '../../host-core/bot-session-context.js';
 import { normalizeLiveSnapshot } from '../../host-core/remote-live-protocol.js';
 import { createHindsightSources } from '../../plugins/hindsight/hindsight-sources.js';
 import { createHindsightTools } from '../../plugins/hindsight/hindsight-tools.js';
+import { BACKGROUND_CONTEXT as durableContext } from '../../host-core/node_modules/@earendil-works/chord/dist/context/index.js';
+import { createModels } from '../../host-core/node_modules/@earendil-works/pi-ai/dist/models.js';
+import { CompactionEntry, Harness, ResetEntry, createRegistry } from '../../host-core/node_modules/@earendil-works/pi-durable/dist/index.js';
+import { openNodeSqliteStorage } from '../../host-core/node_modules/@earendil-works/pi-durable/dist/storage/sqlite/node.js';
 
 /**
  * 内存 Durable harness 模拟：支持 doc snapshot/commit、conversation entries（升/降序分页）、
@@ -740,4 +750,209 @@ test('Host protocol whitelists accept google-workspace-rule only on host senders
   assert.equal(filtered.tainted, true);
   assert.equal(filtered.isolatedCount, 3);
   assert.deepEqual(filtered.cleanEntries.map((e) => e.id), [1]);
+});
+
+test('Real SDK fork preserves prefix privacy across retained turns and compaction, resets on /clear, clears stale future marks, and fails closed', async (t) => {
+  // 1. Pure prefix projection & fail-closed contracts.
+  assert.equal(projectPrivacyStateForFork({ earliestByReset: { '0': { turnStartEntryId: 5, anchorEntryId: 6 } } }, null), null);
+  assert.throws(
+    () => projectPrivacyStateForFork({ earliestByReset: {} }, undefined),
+    (err) => err?.code === GOOGLE_WORKSPACE_PRIVACY_UNAVAILABLE_CODE,
+  );
+  assert.throws(
+    () => projectPrivacyStateForFork({ earliestByReset: {} }, 0),
+    (err) => err?.code === GOOGLE_WORKSPACE_PRIVACY_UNAVAILABLE_CODE,
+  );
+  // Clamps retained anchor <= beforeEntryId and drops proven-clean future marks (> beforeEntryId).
+  const clipped = projectPrivacyStateForFork(
+    {
+      earliestByReset: { '0': { turnStartEntryId: 5, anchorEntryId: 12, recordedAt: '2026-01-01T00:00:00.000Z' } },
+      marks: [
+        { id: 'm1', kind: 'mcp_call', resetEntryId: 0, turnStartEntryId: 5, anchorEntryId: 12, status: 'completed' },
+        { id: 'm2', kind: 'mcp_call', resetEntryId: 0, turnStartEntryId: 15, anchorEntryId: 16, status: 'completed' },
+      ],
+    },
+    8,
+  );
+  assert.equal(clipped.earliestByReset['0'].turnStartEntryId, 5);
+  assert.equal(clipped.earliestByReset['0'].anchorEntryId, 8);
+  assert.deepEqual(clipped.marks.map((m) => m.id), ['m1']);
+  assert.equal(
+    projectPrivacyStateForFork(
+      { earliestByReset: { '0': { turnStartEntryId: 9, anchorEntryId: 10 } }, marks: [] },
+      8,
+    ),
+    null,
+  );
+  // Malformed record fails closed conservatively instead of dropping protection.
+  const malformed = projectPrivacyStateForFork({ earliestByReset: { '0': { anchorEntryId: 10 } } }, 8);
+  assert.equal(malformed.earliestByReset['0'].turnStartEntryId, 0);
+  assert.equal(malformed.earliestByReset['0'].anchorEntryId, 8);
+
+  // 2. Real @earendil-works/pi-durable Harness over SQLite storage.
+  const dir = mkdtempSync(join(tmpdir(), 'pibot-privacy-fork-'));
+  let harness;
+  t.after(async () => {
+    await harness?.close(durableContext);
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+  const storage = await openNodeSqliteStorage(join(dir, 'durable.sqlite'));
+  harness = await Harness.open(storage, { registry: createRegistry(), models: createModels() }, durableContext);
+
+  const privacy = createGoogleWorkspacePrivacy({ getHarness: () => harness, context: durableContext });
+  const ownerless = { ownership: { kind: 'ownerless' } };
+
+  const source = await harness.commit(async (tx) => {
+    const conv = await tx.createConversation(ownerless);
+    const t1User = await tx.appendEntry(conv.id, {
+      kind: 'host.user-message',
+      data: { attribution: { kind: 'user', channel: 'primary' } },
+      model: [{ role: 'user', content: 'Clean Turn 1', timestamp: 100 }],
+    });
+    const t1Assistant = await tx.appendEntry(conv.id, {
+      kind: 'pi.assistant',
+      model: [{ role: 'assistant', content: [{ type: 'text', text: 'Clean Answer 1' }], timestamp: 101 }],
+    });
+    const t2User = await tx.appendEntry(conv.id, {
+      kind: 'host.user-message',
+      data: { attribution: { kind: 'user', channel: 'primary' } },
+      model: [{ role: 'user', content: 'Read confidential Gmail', timestamp: 200 }],
+    });
+    const t2Call = await tx.appendEntry(conv.id, {
+      kind: 'pi.assistant',
+      model: [{ role: 'assistant', content: [{ type: 'toolCall', id: 'g-sdk-1', name: 'mcp_google', arguments: {} }], timestamp: 201 }],
+    });
+    return { convId: conv.id, t1User, t1Assistant, t2User, t2Call };
+  }, durableContext);
+
+  // Record Google Workspace MCP call provenance on the source conversation (stored with fork:'initial').
+  await privacy.recordGoogleWorkspaceCallStart({
+    installationId: GOOGLE_WORKSPACE_MCP_INSTALLATION_ID,
+    target: 'center',
+    conversationId: source.convId,
+    callId: 'g-sdk-1',
+    botId: 'bot-a',
+  });
+
+  // Append tool result, assistant reply, follow-up Turn 3, real pi.compaction summarizing Turn 1-2, and Turn 4.
+  const rest = await harness.commit(async (tx) => {
+    await tx.appendEntry(source.convId, {
+      kind: 'pi.tool-result',
+      model: [{ role: 'toolResult', toolCallId: 'g-sdk-1', toolName: 'mcp_google', content: [{ type: 'text', text: 'CONFIDENTIAL_Q4_50M' }], timestamp: 202 }],
+    });
+    await tx.appendEntry(source.convId, {
+      kind: 'pi.assistant',
+      model: [{ role: 'assistant', content: [{ type: 'text', text: 'Budget is CONFIDENTIAL_Q4_50M' }], timestamp: 203 }],
+    });
+    const t3User = await tx.appendEntry(source.convId, {
+      kind: 'host.user-message',
+      data: { attribution: { kind: 'user', channel: 'primary' } },
+      model: [{ role: 'user', content: 'Summarize action items', timestamp: 300 }],
+    });
+    await tx.appendEntry(source.convId, {
+      kind: 'pi.assistant',
+      model: [{ role: 'assistant', content: [{ type: 'text', text: 'Action 1: lock Q4 50M.' }], timestamp: 301 }],
+    });
+    const compaction = await tx.appendEntry(CompactionEntry, source.convId, {
+      head: t3User.id,
+      model: [{ role: 'user', content: 'Summary: Gmail revealed CONFIDENTIAL_Q4_50M.', timestamp: 302 }],
+    });
+    const t4User = await tx.appendEntry(source.convId, {
+      kind: 'host.user-message',
+      data: { attribution: { kind: 'user', channel: 'primary' } },
+      model: [{ role: 'user', content: 'Draft brief from summary', timestamp: 400 }],
+    });
+    return { t3User, compaction, t4User };
+  }, durableContext);
+
+  // Case A: Single-transaction edit/fork AFTER taint + compaction (beforeEntryId = compaction.id).
+  const forkedTaintedId = await harness.commit(async (tx) => {
+    const inherited = await prepareForkPrivacyInheritanceInTx(tx, {
+      sourceConversationId: source.convId,
+      beforeEntryId: rest.compaction.id,
+    });
+    assert.equal(inherited.inherited, true);
+    const rec = await tx.forkConversation(source.convId, rest.compaction.id, ownerless);
+    await applyForkPrivacyInheritanceInTx(tx, rec.id, inherited);
+    return rec.id;
+  }, durableContext);
+
+  // Append edited Turn 4b on the forked conversation and verify isolation holds across learning + export.
+  await harness.commit(async (tx) => {
+    await tx.appendEntry(forkedTaintedId, {
+      kind: 'host.user-message',
+      data: { attribution: { kind: 'user', channel: 'primary' } },
+      model: [{ role: 'user', content: 'Edited post-compaction brief', timestamp: 410 }],
+    });
+    await tx.appendEntry(forkedTaintedId, {
+      kind: 'pi.assistant',
+      model: [{ role: 'assistant', content: [{ type: 'text', text: 'Brief based on summary.' }], timestamp: 411 }],
+    });
+  }, durableContext);
+
+  const persistedForkDoc = await harness.snapshot(GoogleWorkspacePrivacyState, forkedTaintedId, durableContext);
+  assert.equal(persistedForkDoc?.earliestByReset?.['0']?.turnStartEntryId, source.t2User.id);
+  assert.ok(persistedForkDoc.earliestByReset['0'].anchorEntryId <= rest.compaction.id);
+  assert.equal(await privacy.isConversationTainted(forkedTaintedId), true);
+  await assert.rejects(
+    () => privacy.assertExportAllowed(forkedTaintedId, { operation: 'manage_bot_skill:create' }),
+    (err) => err?.code === GOOGLE_WORKSPACE_PRIVACY_BLOCKED_CODE,
+  );
+  const forkedConv = await harness.conversation(forkedTaintedId, durableContext);
+  const forkedEntries = (await forkedConv.entries({ order: 'ascending' }, 100, undefined, durableContext)).items;
+  const filteredFork = await privacy.filterConversationEntriesForLearning(forkedTaintedId, forkedEntries);
+  assert.equal(filteredFork.tainted, true);
+  assert.deepEqual(filteredFork.cleanEntries.map((e) => e.id), [source.t1User.id, source.t1Assistant.id]);
+
+  // /clear (pi.reset) on the tainted forked conversation creates a clean reset epoch.
+  await harness.commit(async (tx) => {
+    await tx.appendEntry(ResetEntry, forkedTaintedId, { head: 'self' });
+    await tx.appendEntry(forkedTaintedId, {
+      kind: 'host.user-message',
+      data: { attribution: { kind: 'user', channel: 'primary' } },
+      model: [{ role: 'user', content: 'Fresh post-clear topic', timestamp: 500 }],
+    });
+  }, durableContext);
+  assert.equal(await privacy.isConversationTainted(forkedTaintedId), false);
+  await assert.doesNotReject(() => privacy.assertExportAllowed(forkedTaintedId, { operation: 'learning' }));
+
+  // Case B: Single-transaction edit/fork BEFORE all tainted entries (beforeEntryId = t1Assistant.id) carries NO stale marks.
+  const forkedCleanId = await harness.commit(async (tx) => {
+    const inherited = await prepareForkPrivacyInheritanceInTx(tx, {
+      sourceConversationId: source.convId,
+      beforeEntryId: source.t1Assistant.id,
+    });
+    assert.equal(inherited.inherited, false);
+    const rec = await tx.forkConversation(source.convId, source.t1Assistant.id, ownerless);
+    await applyForkPrivacyInheritanceInTx(tx, rec.id, inherited);
+    return rec.id;
+  }, durableContext);
+  await harness.commit(async (tx) => {
+    await tx.appendEntry(forkedCleanId, {
+      kind: 'host.user-message',
+      data: { attribution: { kind: 'user', channel: 'primary' } },
+      model: [{ role: 'user', content: 'Clean replacement Turn 2', timestamp: 600 }],
+    });
+  }, durableContext);
+  assert.equal(await harness.snapshot(GoogleWorkspacePrivacyState, forkedCleanId, durableContext), undefined);
+  assert.equal(await privacy.isConversationTainted(forkedCleanId), false);
+  await assert.doesNotReject(() => privacy.assertExportAllowed(forkedCleanId, { operation: 'manage_bot_skill:create' }));
+
+  // Case C: Single-transaction atomicity (e.g., if wait revocation throws after applyForkPrivacyInheritanceInTx, whole fork rolls back).
+  let rolledBackForkId = null;
+  await assert.rejects(
+    () =>
+      harness.commit(async (tx) => {
+        const inherited = await prepareForkPrivacyInheritanceInTx(tx, {
+          sourceConversationId: source.convId,
+          beforeEntryId: rest.compaction.id,
+        });
+        const rec = await tx.forkConversation(source.convId, rest.compaction.id, ownerless);
+        rolledBackForkId = rec.id;
+        await applyForkPrivacyInheritanceInTx(tx, rec.id, inherited);
+        throw new Error('simulated wait revocation failure');
+      }, durableContext),
+    /simulated wait revocation failure/,
+  );
+  assert.equal(await harness.conversation(rolledBackForkId, durableContext), undefined);
 });

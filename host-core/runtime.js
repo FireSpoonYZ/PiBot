@@ -3048,6 +3048,10 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
                 cursor = page.next;
               }
             }
+            const inheritedPrivacy = await dataPrivacy.prepareForkInheritanceInTx(tx, {
+              sourceConversationId: conversation.id,
+              beforeEntryId,
+            });
             await waits.cancelConversationInTransaction(botId, conversation.id, tx);
             const rec = beforeEntryId !== null
               ? await tx.forkConversation(conversation.id, beforeEntryId, { ownership: { kind: 'ownerless' } })
@@ -3133,6 +3137,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
               const dispatchDraft = await tx.doc(TaskDispatchContexts, rec.id);
               dispatchDraft.byRequest = copyJson(dispatchContextsSnapshot.byRequest);
             }
+            await dataPrivacy.applyForkInheritanceInTx(tx, rec.id, inheritedPrivacy);
             primaryIndex.byPrimary[bot.primaryConversationId] = rec.id;
             return rec.id;
           }, CTX);

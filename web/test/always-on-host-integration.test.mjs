@@ -11,6 +11,7 @@ import { normalizeControlCall } from '../../host-core/remote-control-protocol.js
 import { openRuntime } from '../../host-core/runtime.js';
 import { openHost } from '../../host-core/host.js';
 import { PrimaryIndex } from '../../host-core/runtime-docs.js';
+import { GoogleWorkspacePrivacyState } from '../../host-core/google-workspace-privacy.js';
 import { createTurnAdmission } from '../../host-core/runtime-turns.js';
 import { TurnPin, TurnQueue } from '../../host-core/runtime-turns-docs.js';
 import { DurableWait, DurableWaitIndex } from '../../host-core/runtime-waits.js';
@@ -427,7 +428,7 @@ test('real Host Stop cancels a released questionnaire and a late answer stays in
   assert.equal((await f.history()).some(entry => entry.data?.requestId === resumedId), false);
 });
 
-test('editing the original message forks the real Host conversation and retires its pending questionnaire', async t => {
+test('editing the original message retains prior privacy markers and retires its pending questionnaire atomically', async t => {
   const f = await hostFixture(t, { questionnaire: true });
   // A retained predecessor forces the actual fork path instead of creating an
   // empty conversation when the edited message is the first transcript entry.
@@ -443,6 +444,15 @@ test('editing the original message forks the real Host conversation and retires 
   assert.equal(question.presentation.status, 'pending');
   assert.equal(f.state.calls.length, 2);
   const before = await f.server.getScheduleFence(f.bot.botId);
+  const retainedInput = originalHistory.find(entry => entry.data?.requestId === 'before-edit');
+  assert.ok(retainedInput);
+  await f.whileStopped(harness => harness.commit(async tx => {
+    const privacy = await tx.doc(GoogleWorkspacePrivacyState, question.presentation.conversationId);
+    privacy.earliestByReset['0'] = {
+      turnStartEntryId: retainedInput.id, anchorEntryId: retainedInput.id,
+      recordedAt: new Date().toISOString(),
+    };
+  }, context));
 
   // A rejected edit must leave the old conversation's live question intact.
   await assert.rejects(f.client.editMessage(f.bot.botId, {
@@ -464,7 +474,10 @@ test('editing the original message forks the real Host conversation and retires 
 
   await f.whileStopped(async harness => {
     const current = await harness.snapshot(PrimaryIndex, context);
-    assert.notEqual(current.byPrimary[f.bot.primaryConversationId], question.presentation.conversationId);
+    const forkedId = current.byPrimary[f.bot.primaryConversationId];
+    assert.notEqual(forkedId, question.presentation.conversationId);
+    const privacy = await harness.snapshot(GoogleWorkspacePrivacyState, forkedId, context);
+    assert.equal(privacy?.earliestByReset['0']?.turnStartEntryId, retainedInput.id);
     const key = waitId(f.bot, question.presentation);
     const previous = (await harness.snapshot(DurableWait, key, context)).record;
     assert.equal(previous.status, 'cancelled');

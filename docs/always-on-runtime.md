@@ -44,7 +44,7 @@ flowchart TD
 | Wait | `botId + installationId + conversationId + requestId` | 问卷与回答；独立于已经结束的工具任务 |
 | Delivery | 原消息与送达回执 | 已存储或 ACK 只说明交付进度 |
 
-`runtime-execution-context.js` 提供纯投影函数；`sessions.getRunContext(api, context, {dispatchContexts})` 从当前 SDK run 和其实际输入读取事实。逻辑 ID 为 `run:${JSON.stringify([deviceId, nativeConversationId, first])}`；`first` 不是正安全整数时 `runId` 留空，跨 handoff 的读取不一致则不返回上下文。所有输入的 request/submission 身份都保留；冻结轮中的旧 `taskId` 表示 SDK 任务，不能据此推断 GlobalTask。
+`runtime-execution-context.js` 提供纯投影函数；`sessions.getRunContext(api, context, {dispatchContexts})` 从当前 SDK run 和其实际输入读取事实。逻辑 ID 为 `run:${JSON.stringify([deviceId, nativeConversationId, first])}`；`first` 不是正安全整数时 `runId` 留空，跨 handoff 的读取不一致则不返回上下文。所有输入的 request/submission 身份都保留；冻结轮中的旧 `taskId` 表示 SDK 任务，不能据此推断 GlobalTask。Antigravity 仍用 Durable 实际输入的归属决定 ACP 请求；问卷答案是新输入，历史里旧工具结果不能把它改判成旧轮续接。
 
 执行投影使用 `accepted / queued / running / waiting / completed / failed / cancelled`。
 原生终态回执优先于过时的等待提示；`waiting` 需要与本次请求匹配的有效等待记录。新问卷结束原生 Run 后，原生执行可以是 `completed`，而独立 Wait 仍是 `pending`。看板需同时表达“需要用户回应”和当前 Bot 的执行活动，等待本身不占用准入。
@@ -103,7 +103,7 @@ Node 内部查询以显式 `null` 表示缺失；Android IPC 还接受明确的 
 
 取消先持久写入 `cancelling`，精确取消对应 requestId 后才退出活动索引。进程退出或取消回执丢失时，冷启动的 `recoverCancellations()` 在 Harness 恢复和队列准入之前完成取消；失败阻止恢复，离线及归档 Bot 也执行这一步。TurnQueue 在入队事务和最终 SDK 提交事务中都校验 Wait，防止已经排队的旧续轮越过取消。
 
-`/clear` 把旧会话 Wait 失效、`pi.reset` 与历史水位放在同一事务；编辑历史同样在切换原生会话映射时一并撤销旧 Wait。事务失败不会丢掉待答项；提交后继续对账精确取消。归档和删除也清理所属 Bot 的等待。频道工作不借用独立 Wait 续接，仍使用现有频道停止和结算逻辑。
+`/clear` 把旧会话 Wait 失效、`pi.reset` 与历史水位放在同一事务；编辑历史同样在切换原生会话映射时一并撤销旧 Wait。事务失败不会丢掉待答项；提交后继续对账精确取消。编辑历史还在同一事务继承保留前缀中的 Google Workspace 隔离标记，包括压缩摘要涵盖的内容；旧版本已经分叉且缺失标记的会话不会自动补标。归档和删除也清理所属 Bot 的等待。频道工作不借用独立 Wait 续接，仍使用现有频道停止和结算逻辑。
 
 UI 的可答性由 Host 查询 Wait 并核对真实工具 taskId 后投影。历史工具结果本身不拥有可答权限；原工具任务已经结束也不能单独证明问卷已处理。Host 覆盖当前 details，并只对有效待答记录在工具/工具结果顶层标记 `durableWait`，不采信 details 中的自声明。Live 的 `durableWaits` 提供至多 64 个完整活动身份，使窗口外的问卷仍可答；回答或停止后从集合移除，缓存卡立即只读。新用户消息可在同一 Bot 上继续执行，等待提示不遮蔽新的运行；Bot 忙闲仍由 SDK 执行状态决定。
 
