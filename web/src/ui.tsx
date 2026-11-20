@@ -2,66 +2,62 @@ import { createContext, useCallback, useContext, useEffect, useState } from 'rea
 import { CheckCircle2, ChevronDown, ChevronUp, CircleAlert, Info, RefreshCw, TriangleAlert, X } from 'lucide-react';
 import './error-notice.css';
 
-export const HIDE_TOOL_OUTPUT_STORAGE_KEY = 'pibot-hide-tool-output:v1';
-const HIDE_TOOL_OUTPUT_EVENT = 'pibot-hide-tool-output-change';
+// The old "hide" setting only collapsed calls. Keep its stored value for that behavior.
+const COLLAPSE_TOOL_OUTPUT_STORAGE_KEY = 'pibot-hide-tool-output:v1';
+const HIDE_TOOL_OUTPUT_STORAGE_KEY = 'pibot-chat-hide-tool-output:v1';
 
-export function readHideToolOutput(): boolean {
-  try {
-    if (typeof localStorage === 'undefined') return true;
-    const raw = localStorage.getItem(HIDE_TOOL_OUTPUT_STORAGE_KEY);
-    return raw !== 'false';
-  } catch {
-    return true;
-  }
-}
-
-export function writeHideToolOutput(hide: boolean): void {
-  const normalized = Boolean(hide);
-  try {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(HIDE_TOOL_OUTPUT_STORAGE_KEY, normalized ? 'true' : 'false');
+function useToolOutputPreference(key: string, defaultValue: boolean): [boolean, (next: boolean) => void] {
+  const changeEvent = key + ':change';
+  const read = useCallback(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw === 'true' ? true : raw === 'false' ? false : defaultValue;
+    } catch {
+      return defaultValue;
     }
-  } catch {
-    // Ignore storage errors
-  }
-  try {
-    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
-      window.dispatchEvent(new CustomEvent(HIDE_TOOL_OUTPUT_EVENT, { detail: normalized }));
-    }
-  } catch {
-    // Ignore custom event errors
-  }
-}
-
-export function useHideToolOutput(): [boolean, (next: boolean) => void] {
-  const [hideToolOutput, setHideToolOutputState] = useState<boolean>(() => readHideToolOutput());
+  }, [key, defaultValue]);
+  const [value, setValue] = useState(read);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const onCustom = (event: Event) => {
+    const onChange = (event: Event) => {
       const detail = (event as CustomEvent<boolean>).detail;
-      setHideToolOutputState(typeof detail === 'boolean' ? detail : readHideToolOutput());
+      setValue(typeof detail === 'boolean' ? detail : read());
     };
     const onStorage = (event: StorageEvent) => {
-      if (!event.key || event.key === HIDE_TOOL_OUTPUT_STORAGE_KEY) {
-        setHideToolOutputState(readHideToolOutput());
-      }
+      if (!event.key || event.key === key) setValue(read());
     };
-    window.addEventListener(HIDE_TOOL_OUTPUT_EVENT, onCustom);
+    window.addEventListener(changeEvent, onChange);
     window.addEventListener('storage', onStorage);
     return () => {
-      window.removeEventListener(HIDE_TOOL_OUTPUT_EVENT, onCustom);
+      window.removeEventListener(changeEvent, onChange);
       window.removeEventListener('storage', onStorage);
     };
-  }, []);
+  }, [changeEvent, key, read]);
 
-  const setHideToolOutput = useCallback((next: boolean) => {
-    const normalized = Boolean(next);
-    writeHideToolOutput(normalized);
-    setHideToolOutputState(normalized);
-  }, []);
+  const write = useCallback((next: boolean) => {
+    try {
+      localStorage.setItem(key, String(next));
+    } catch {
+      // Keep the preference for the current page even if storage is unavailable.
+    }
+    setValue(next);
+    try {
+      window.dispatchEvent(new CustomEvent(changeEvent, { detail: next }));
+    } catch {
+      // The updated value is already applied locally.
+    }
+  }, [changeEvent, key]);
 
-  return [hideToolOutput, setHideToolOutput];
+  return [value, write];
+}
+
+export function useHideToolOutput() {
+  return useToolOutputPreference(HIDE_TOOL_OUTPUT_STORAGE_KEY, false);
+}
+
+export function useCollapseToolOutput() {
+  return useToolOutputPreference(COLLAPSE_TOOL_OUTPUT_STORAGE_KEY, true);
 }
 
 export type UiLanguage = 'system' | 'zh' | 'en';

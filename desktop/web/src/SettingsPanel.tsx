@@ -15,7 +15,7 @@ import { CenterAdminPanel, createBrokerCenterTransport, createCenterApi } from '
 import { RemoveDeviceDialog } from '../../../web/src/center-admin/RemoveDeviceDialog';
 import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
 import { botAvatarKey } from '../../../web/src/botAvatarSync';
-import { ErrorNotice, useHideToolOutput } from '../../../web/src/ui';
+import { ErrorNotice, useCollapseToolOutput, useHideToolOutput, useText } from '../../../web/src/ui';
 import { archiveExpiryAt, type BotChatsArchiveBridge } from './BotChats';
 
 export type SettingsTab = 'connection' | 'center-admin' | 'runtime' | 'general' | 'archive' | 'updates';
@@ -421,8 +421,10 @@ function CustomCaSection({ centerStatus, onSaveCenterCa }: Pick<SettingsPanelPro
 }
 
 export function SettingsPanel(props: SettingsPanelProps) {
+  const t = useText();
   const { activeTab, onTabChange, centerStatus, devices, transportConnected, devicesIsRelay, identity, api } = props;
   const [hideToolOutput, setHideToolOutput] = useHideToolOutput();
+  const [collapseToolOutput, setCollapseToolOutput] = useCollapseToolOutput();
   const [copiedClientId, setCopiedClientId] = useState(false);
   const [centerBusy, setCenterBusy] = useState<'rebind' | 'disconnect' | null>(null);
   const [removeTarget, setRemoveTarget] = useState<{ item: DevicesDirectoryItem; identity: DesktopIdentity } | null>(null);
@@ -698,11 +700,20 @@ export function SettingsPanel(props: SettingsPanelProps) {
                 <div className="settings-row-group">
                   <label className="settings-row settings-row-link">
                     <span className="settings-row-label">
-                      <span>隐藏工具调用过程</span>
-                      <span className="metadata" style={{ display: 'block', fontSize: 12 }}>默认折叠工具调用过程与原始输出</span>
+                      <span>{t('隐藏工具输出', 'Hide Tool Output')}</span>
+                      <span className="metadata" style={{ display: 'block', fontSize: 12 }}>{t('只显示回复与待操作请求', 'Show replies and prompts that need your input')}</span>
                     </span>
-                    <Switch label="隐藏工具调用过程" checked={hideToolOutput} onChange={setHideToolOutput} />
+                    <Switch label={t('隐藏工具输出', 'Hide Tool Output')} checked={hideToolOutput} onChange={setHideToolOutput} />
                   </label>
+                  {!hideToolOutput && (
+                    <label className="settings-row settings-row-link">
+                      <span className="settings-row-label">
+                        <span>{t('默认折叠工具输出', 'Collapse Tool Output by Default')}</span>
+                        <span className="metadata" style={{ display: 'block', fontSize: 12 }}>{t('保留工具调用摘要，点击可展开详情', 'Show tool summaries that can be expanded')}</span>
+                      </span>
+                      <Switch label={t('默认折叠工具输出', 'Collapse Tool Output by Default')} checked={collapseToolOutput} onChange={setCollapseToolOutput} />
+                    </label>
+                  )}
                 </div>
               </section>
             </div>

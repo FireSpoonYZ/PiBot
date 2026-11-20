@@ -128,6 +128,7 @@ import {
 } from './botActivity';
 import { ChatTurnMeta } from './ChatTurnMeta';
 import {
+  chatTurnsWithoutToolOutput,
   hasAssistantVisibleContent,
   latestEntryChannel,
   parseHistoryEntries,
@@ -165,7 +166,7 @@ import {
   type PickedImageSource,
 } from './imageAttachments';
 import type { ImageAttachment } from '../../host-core/index.js';
-import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useHideToolOutput, useText } from './ui';
+import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useCollapseToolOutput, useHideToolOutput, useText } from './ui';
 import { SendButtonIcon } from './SendButtonIcon';
 import { deleteBotAndVerify, formatActionableDirectoryError, isDefiniteSendFailure, isRemoteBotOnline } from './botOperations';
 
@@ -318,6 +319,8 @@ export function HostPage({
   onOpenSystemSettings,
 }: HostPageProps = {}) {
   const t = useText();
+  const [hideToolOutput] = useHideToolOutput();
+  const [collapseToolOutput] = useCollapseToolOutput();
   const action = useAction();
   const activeCenter = useContext(ActiveCenter);
   const centerConn = useCenterConnection();
@@ -4670,7 +4673,7 @@ ${newer}` : draftSnapshot;
       (liveGenerationAttr?.channel ?? latestEntryChannel(allChatItems, activeBot?.botId)) === 'room',
   );
   // 群聊工作的流式文本/工具名不渲染进 1v1 聊天忙状态。
-  const displayLiveToolName = chatLiveIsCollaborative ? null : activeLiveToolName;
+  const displayLiveToolName = chatLiveIsCollaborative || hideToolOutput ? null : activeLiveToolName;
   const displayGeneratingText = chatLiveIsCollaborative ? '' : liveGeneratingText;
 
   const allChatTurns = useMemo(() => {
@@ -4695,22 +4698,26 @@ ${newer}` : draftSnapshot;
     [botActivity],
   );
 
+  const displayedChatTurns = useMemo(
+    () => hideToolOutput ? chatTurnsWithoutToolOutput(allChatTurns) : allChatTurns,
+    [allChatTurns, hideToolOutput],
+  );
   const visibleTurns = useMemo(() => {
     const q = chatSearchQuery.trim().toLowerCase();
-    if (!chatSearchOpen || !q) return allChatTurns;
-    return allChatTurns.filter(
+    if (!chatSearchOpen || !q) return displayedChatTurns;
+    return displayedChatTurns.filter(
       turn =>
         turn.text.toLowerCase().includes(q) ||
-        Boolean(
+        (!hideToolOutput && Boolean(
           turn.tools?.some(
             tool =>
               tool.name.toLowerCase().includes(q) ||
               (tool.argSummary && tool.argSummary.toLowerCase().includes(q)) ||
               (tool.output && tool.output.toLowerCase().includes(q)),
           ),
-        ),
+        )),
     );
-  }, [allChatTurns, chatSearchOpen, chatSearchQuery]);
+  }, [displayedChatTurns, chatSearchOpen, chatSearchQuery, hideToolOutput]);
 
   const markViewedBoardResult = useMarkViewedBoardResult(board, activeBoardTarget, active && screen === 'chat');
   useEffect(() => {
@@ -6234,6 +6241,8 @@ ${newer}` : draftSnapshot;
                               <TurnToolCallsSection
                                 key={block.id}
                                 tools={block.tools}
+                                collapseOutput={collapseToolOutput}
+                                presentationOnly={hideToolOutput}
                                 scopeKey={toolScopeKey}
                                 active={isBotBusy}
                                 disabled={Boolean(activeBot?.archivedAt) || !botPanelConnected}
@@ -6283,6 +6292,8 @@ ${newer}` : draftSnapshot;
                           {turn.tools && turn.tools.length > 0 && (
                             <TurnToolCallsSection
                               tools={turn.tools}
+                              collapseOutput={collapseToolOutput}
+                              presentationOnly={hideToolOutput}
                               scopeKey={toolScopeKey}
                               active={isBotBusy}
                               disabled={Boolean(activeBot?.archivedAt) || !botPanelConnected}
@@ -10509,6 +10520,7 @@ function HubSettingsView({
 
   const [voice, setVoice] = useState<HostVoiceSettings>();
   const [hideToolOutput, setHideToolOutput] = useHideToolOutput();
+  const [collapseToolOutput, setCollapseToolOutput] = useCollapseToolOutput();
 
   useLayoutEffect(() => {
     const previous = previousPage.current;
@@ -11043,7 +11055,7 @@ function HubSettingsView({
             <Row
               icon={<Code2 />}
               title={t('隐藏工具输出', 'Hide Tool Output')}
-              subtitle={t('默认折叠工具调用过程与原始输出', 'Collapse tool calls and hide raw output by default')}
+              subtitle={t('只显示回复与待操作请求', 'Show replies and prompts that need your input')}
               trailing={(
                 <Switch
                   label={t('隐藏工具输出', 'Hide Tool Output')}
@@ -11052,6 +11064,20 @@ function HubSettingsView({
                 />
               )}
             />
+            {!hideToolOutput && (
+              <Row
+                icon={<Code2 />}
+                title={t('默认折叠工具输出', 'Collapse Tool Output by Default')}
+                subtitle={t('保留工具调用摘要，点击可展开详情', 'Show tool summaries that can be expanded')}
+                trailing={(
+                  <Switch
+                    label={t('默认折叠工具输出', 'Collapse Tool Output by Default')}
+                    checked={collapseToolOutput}
+                    onChange={setCollapseToolOutput}
+                  />
+                )}
+              />
+            )}
             <div className="hst-row-static">
               <span className="bs-row-icon" aria-hidden="true"><AudioLines size={17} /></span>
               <span className="bs-row-text"><span className="bs-row-title">{t('语音朗读倍速', 'Speech Rate')}</span></span>

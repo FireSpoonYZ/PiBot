@@ -1607,6 +1607,41 @@ export function resolveActiveTurnStartedAt(
   return resolveActiveActivityStartedAt(activity ?? null);
 }
 
+export function pendingToolPrompts(tools: readonly ChatToolCallItem[]): ChatToolCallItem[] {
+  return tools.flatMap(tool => {
+    if (tool.status !== 'running') return [];
+    const kind = tool.presentation?.kind;
+    const prompt = tool.presentationLive && tool.presentation?.status === 'pending' &&
+      (kind === 'questionnaire' || kind === 'vault-unlock');
+    const children = tool.children ? pendingToolPrompts(tool.children) : [];
+    return prompt ? [tool, ...children] : children;
+  });
+}
+
+export function chatTurnsWithoutToolOutput(turns: readonly ChatTurn[]): ChatTurn[] {
+  return turns.flatMap(turn => {
+    if (turn.role !== 'assistant') return [turn];
+    // Keep live prompts (including nested ones) without showing their tool calls.
+    const blocks = turn.blocks?.flatMap<ChatTurnBlock>(block => {
+      if (block.kind === 'text') return [block];
+      if (block.kind === 'thinking') return [];
+      const prompts = pendingToolPrompts(block.tools);
+      return prompts.length > 0 ? [{ ...block, tools: prompts }] : [];
+    });
+    const prompts = blocks
+      ? blocks.flatMap(block => block.kind === 'tools' ? block.tools : [])
+      : pendingToolPrompts(turn.tools ?? []);
+    if (!turn.text.trim() && !turn.error && prompts.length === 0) return [];
+    return [{
+      ...turn,
+      blocks: blocks?.length ? blocks : undefined,
+      thinking: undefined,
+      toolSummary: undefined,
+      tools: prompts.length > 0 ? prompts : undefined,
+    }];
+  });
+}
+
 export function hasAssistantVisibleContent(turn: ChatTurn): boolean {
   if (turn.role !== 'assistant') return true;
   if (turn.blocks && turn.blocks.length > 0) return true;

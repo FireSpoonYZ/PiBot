@@ -9,6 +9,7 @@ import type { BotLiveState, BotRecord, LiveTool } from '../../../host-core/index
 import { Markdown } from '../../../web/src/Markdown';
 import { ChatTurnMeta } from '../../../web/src/ChatTurnMeta';
 import {
+  chatTurnsWithoutToolOutput,
   hasAssistantVisibleContent,
   latestEntryChannel,
   parseHistoryEntries,
@@ -31,7 +32,7 @@ import {
   resolveActiveActivityStartedAt,
   type BotActivity,
 } from '../../../web/src/botActivity';
-import { ErrorNotice, useText } from '../../../web/src/ui';
+import { ErrorNotice, useCollapseToolOutput, useHideToolOutput, useText } from '../../../web/src/ui';
 import { SentAttachments, type AttachmentFetcher } from '../../../web/src/imageAttachments';
 import { isEditablePrimaryUserTurn } from '../../../web/src/composerFlowControl';
 import './ChatTranscript.css';
@@ -135,6 +136,8 @@ export function ChatTranscript({
   onAnswerTaskPrompt,
 }: ChatTranscriptProps) {
   const t = useText();
+  const [hideToolOutput] = useHideToolOutput();
+  const [collapseToolOutput] = useCollapseToolOutput();
   const [linkError, setLinkError] = useState('');
   const botKey = avatarKey ?? `${bot.deviceId}:${bot.botId}`;
   const effectiveClearedThrough = useMemo(() => {
@@ -222,7 +225,7 @@ export function ChatTranscript({
   [mergedItems, effectiveClearedThrough, effectiveLive, isBusy, displayGeneratingText, liveAttribution, bot.botId, liveIsCollaborative, knownBots]);
 
   const activeLiveToolName = useMemo(() => {
-    if (liveIsCollaborative) return null;
+    if (liveIsCollaborative || hideToolOutput) return null;
     const tools = asArray<LiveTool>(effectiveLive?.tools);
     for (let i = tools.length - 1; i >= 0; i -= 1) {
       const name = typeof tools[i]?.name === 'string' ? tools[i].name.trim() : '';
@@ -230,24 +233,25 @@ export function ChatTranscript({
     }
     const last = tools[tools.length - 1];
     return typeof last?.name === 'string' && isBusy && !liveGeneratingText ? last.name.trim() : null;
-  }, [effectiveLive?.tools, isBusy, liveGeneratingText, liveIsCollaborative]);
+  }, [effectiveLive?.tools, isBusy, liveGeneratingText, liveIsCollaborative, hideToolOutput]);
 
   const visibleTurns = useMemo(() => {
+    const turns = hideToolOutput ? chatTurnsWithoutToolOutput(allTurns) : allTurns;
     const q = search.trim().toLowerCase();
-    if (!q) return allTurns;
-    return allTurns.filter(
+    if (!q) return turns;
+    return turns.filter(
       (turn) =>
         turn.text.toLowerCase().includes(q) ||
-        Boolean(
+        (!hideToolOutput && Boolean(
           turn.tools?.some(
             (tool) =>
               tool.name.toLowerCase().includes(q) ||
               (tool.argSummary && tool.argSummary.toLowerCase().includes(q)) ||
               (tool.output && tool.output.toLowerCase().includes(q)),
           ),
-        ),
+        )),
     );
-  }, [allTurns, search]);
+  }, [allTurns, search, hideToolOutput]);
 
   const lastTurn = visibleTurns.at(-1);
 
@@ -446,6 +450,8 @@ export function ChatTranscript({
                           <TurnToolCallsSection
                             key={block.id}
                             tools={block.tools}
+                            collapseOutput={collapseToolOutput}
+                            presentationOnly={hideToolOutput}
                             scopeKey={scopeKey ?? `${botKey}:${bot.primaryConversationId}`}
                             active={isBusy && !archived}
                             disabled={disabled || archived}
@@ -474,6 +480,8 @@ export function ChatTranscript({
                   {!turn.blocks && turn.tools && turn.tools.length > 0 ? (
                     <TurnToolCallsSection
                       tools={turn.tools}
+                      collapseOutput={collapseToolOutput}
+                      presentationOnly={hideToolOutput}
                       scopeKey={scopeKey ?? `${botKey}:${bot.primaryConversationId}`}
                       active={isBusy && !archived}
                       disabled={disabled || archived}
