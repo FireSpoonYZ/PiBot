@@ -24,6 +24,10 @@ const ID_TOKEN_CLOCK_SKEW_SEC = 5 * 60;
 const BASE64URL_PART = /^[A-Za-z0-9_-]+$/;
 const SUB_PATTERN = /^[A-Za-z0-9._:-]{1,255}$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const ALLOWED_ID_TOKEN_ALGS = Object.freeze(new Set(['RS256', 'ES256', 'PS256']));
+// Module-private provenance brand proving a token payload came directly over TLS
+// from hardcoded GOOGLE_TOKEN_URL inside `exchangeGoogleCode`, never from a frontend/client.
+const TOKEN_ENDPOINT_SOURCE = Symbol('google-token-endpoint-source');
 
 const CLIENT_GONE_ERRORS = new Set(['invalid_client', 'deleted_client', 'disabled_client']);
 
@@ -168,7 +172,14 @@ export async function exchangeGoogleCode(
     TOKEN_REQUEST_TIMEOUT_MS,
     signal
   );
-  return parseTokenPayload(status, ok, body);
+  const tokens = parseTokenPayload(status, ok, body);
+  Object.defineProperty(tokens, TOKEN_ENDPOINT_SOURCE, {
+    value: GOOGLE_TOKEN_URL,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+  return tokens;
 }
 
 /**
@@ -284,19 +295,69 @@ export async function checkGoogleClientKey(http, client, redirectUri, signal) {
 }
 
 /**
- * Strictly validates an OpenID Connect ID token returned directly over TLS from
- * Google's fixed token endpoint (`https://oauth2.googleapis.com/token`).
+ * Parses and validates OIDC ID token structure and claims from a response returned
+ * DIRECTLY over TLS by `exchangeGoogleCode` against hardcoded `GOOGLE_TOKEN_URL`
+ * (`https://oauth2.googleapis.com/token`), per OpenID Connect Core 1.0 §3.1.3.7.
  *
- * Verifies 3-part JWS shape, `iss`, `aud` (and `azp`), `exp`, `iat`, `nbf`,
- * stable `sub`, verified `email`, and returns `{ sub, email }`.
+ * TRUST BOUNDARY — NOT A GENERAL-PURPOSE JWT SIGNATURE VERIFIER:
+ * This function does NOT verify cryptographic JWS signatures against Google JWKS.
+ * Authenticity relies strictly on TLS transport to the fixed Google token endpoint
+ * during server-side `authorization_code` exchange. Callers MUST NEVER pass any
+ * frontend-supplied, redirect-fragment, or otherwise untrusted `id_token`; a
+ * module-private provenance brand enforces this at runtime.
  */
-export function verifyGoogleIdToken(idToken, { expectedClientId, nowMs }) {
+export function parseGoogleTokenEndpointIdToken(tokenEndpointResponse, { expectedClientId, nowMs }) {
+  if (
+    !isPlainObject(tokenEndpointResponse) ||
+    tokenEndpointResponse[TOKEN_ENDPOINT_SOURCE] !== GOOGLE_TOKEN_URL
+  ) {
+    throw new Error(
+      'Refused untrusted ID token source: only responses returned directly over TLS from Google\'s fixed token endpoint are accepted.'
+    );
+  }
+  const idToken = tokenEndpointResponse.idToken;
   if (typeof idToken !== 'string' || idToken.length === 0) {
     throw new Error('Google did not return an ID token.');
   }
   const parts = idToken.split('.');
   if (parts.length !== 3 || parts.some((part) => !part || !BASE64URL_PART.test(part))) {
     throw new Error('Google returned a malformed ID token.');
+  }
+
+  let header;
+  try {
+    header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
+  } catch {
+    throw new Error('Google returned an unreadable ID token header.');
+  }
+  if (!isPlainObject(header)) {
+    throw new Error('Google returned an invalid ID token header.');
+  }
+  if (typeof header.alg !== 'string' || !ALLOWED_ID_TOKEN_ALGS.has(header.alg)) {
+    throw new Error('Google ID token uses an unsupported JWS algorithm.');
+  }
+  if (
+    header.typ !== undefined &&
+    (typeof header.typ !== 'string' || header.typ.toUpperCase() !== 'JWT')
+  ) {
+    throw new Error('Google ID token has an invalid JWS typ header.');
+  }
+  if (header.crit !== undefined) {
+    throw new Error('Google ID token contains unsupported critical JWS header parameters.');
+  }
+  if (
+    header.jwk !== undefined ||
+    header.jku !== undefined ||
+    header.x5u !== undefined ||
+    header.x5c !== undefined
+  ) {
+    throw new Error('Google ID token header contains disallowed key material fields.');
+  }
+  if (
+    header.kid !== undefined &&
+    (typeof header.kid !== 'string' || header.kid.trim().length === 0 || header.kid.length > 256)
+  ) {
+    throw new Error('Google ID token has an invalid JWS kid header.');
   }
 
   let claims;

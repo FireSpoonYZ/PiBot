@@ -28,9 +28,9 @@ import {
   checkGoogleClientKey,
   createPkceSecrets,
   exchangeGoogleCode,
+  parseGoogleTokenEndpointIdToken,
   refreshGoogleAccessToken,
   revokeGoogleToken,
-  verifyGoogleIdToken,
 } from './token-client.js';
 import {
   GOOGLE_SERVICE_CHOICES,
@@ -608,7 +608,9 @@ export function openGoogleAccounts({ store, publicUrl, fetchImpl, now = Date.now
 
       let identity;
       try {
-        identity = verifyGoogleIdToken(tokens.idToken, {
+        // Trust boundary (OIDC Core §3.1.3.7): `tokens` came directly over TLS from
+        // hardcoded GOOGLE_TOKEN_URL via `exchangeGoogleCode` (never frontend-supplied).
+        identity = parseGoogleTokenEndpointIdToken(tokens, {
           expectedClientId: flow.client.clientId,
           nowMs: now(),
         });

@@ -15,6 +15,7 @@ import {
   GOOGLE_SERVICE_CHOICES,
   googleSignInScopes,
 } from '../../center-server/google-workspace/scopes-readiness.js';
+import { parseGoogleTokenEndpointIdToken } from '../../center-server/google-workspace/token-client.js';
 
 const PUBLIC_URL = 'https://center.example.com';
 const REDIRECT_URI = 'https://center.example.com/api/oauth/google/callback';
@@ -38,9 +39,9 @@ function makeWebClientJson(overrides = {}) {
   });
 }
 
-function makeIdToken(claims) {
+function makeIdToken(claims, headerOverrides = {}) {
   const b64 = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
-  return `${b64({ alg: 'RS256', typ: 'JWT' })}.${b64(claims)}.fake-signature`;
+  return `${b64({ alg: 'RS256', typ: 'JWT', ...headerOverrides })}.${b64(claims)}.fake-signature`;
 }
 
 function jsonResponse(status, body) {
@@ -57,6 +58,8 @@ function createFakeGoogle(getNow) {
     expectedCode: 'auth-code-1',
     nextAccount: { sub: '1044', email: 'Ada@Acme.dev', email_verified: true },
     idTokenOverrides: null,
+    idTokenHeaderOverrides: null,
+    rawIdTokenOverride: null,
     grantedScope: ALL_SCOPES,
     omitRefreshToken: false,
     refreshMode: 'ok', // 'ok' | 'invalid_grant' | 'offline'
@@ -70,7 +73,7 @@ function createFakeGoogle(getNow) {
       const form = typeof init.body === 'string' && init.headers?.['content-type'] === 'application/x-www-form-urlencoded'
         ? new URLSearchParams(init.body)
         : null;
-      state.calls.push({ url, method: init.method ?? 'GET', headers: init.headers ?? {}, form });
+      state.calls.push({ url, method: init.method ?? 'GET', headers: init.headers ?? {}, redirect: init.redirect, form });
 
       if (url === 'https://oauth2.googleapis.com/token') {
         const grantType = form?.get('grant_type');
@@ -105,7 +108,9 @@ function createFakeGoogle(getNow) {
             expires_in: 3600,
             ...(state.omitRefreshToken ? {} : { refresh_token: `rt-${state.nextAccount.sub}` }),
             scope: state.grantedScope,
-            id_token: makeIdToken(claims),
+            id_token:
+              state.rawIdTokenOverride ??
+              makeIdToken(claims, state.idTokenHeaderOverrides ?? {}),
           });
         }
 
@@ -162,6 +167,12 @@ function createFakeGoogle(getNow) {
       if (url.startsWith('https://gmail.googleapis.com/gmail/v1/')) {
         if (state.gmailStatusSequence.length > 0) {
           const nextStatus = state.gmailStatusSequence.shift();
+          if (nextStatus === 302) {
+            return new Response(null, {
+              status: 302,
+              headers: { location: 'https://evil.example/steal-bearer' },
+            });
+          }
           if (nextStatus !== 200) {
             return jsonResponse(nextStatus, { error: { code: nextStatus, message: 'Refused' } });
           }
@@ -428,14 +439,67 @@ test('enforces owner-private flows, PKCE, single-use state, 5-min expiry, cancel
   }
 });
 
-test('strictly validates OIDC ID token iss, aud, exp, sub, and email_verified', async () => {
+test('strictly validates OIDC ID token trust boundary, JWS header, iss, aud, exp, sub, and email_verified', async () => {
   const fixture = openFixture();
   try {
     await fixture.accounts.manage('configure', { clientFile: makeWebClientJson() }, 'owner-1');
+    const nowSec = Math.floor(fixture.now() / 1000);
+    const validRawToken = makeIdToken({
+      iss: 'https://accounts.google.com',
+      aud: CLIENT_ID,
+      azp: CLIENT_ID,
+      iat: nowSec - 5,
+      exp: nowSec + 3600,
+      sub: '1044',
+      email: 'ada@acme.dev',
+      email_verified: true,
+    });
+
+    // Trust boundary: untrusted/frontend-supplied strings or plain objects are always refused.
+    assert.throws(
+      () =>
+        parseGoogleTokenEndpointIdToken(validRawToken, {
+          expectedClientId: CLIENT_ID,
+          nowMs: fixture.now(),
+        }),
+      /untrusted ID token source/i
+    );
+    assert.throws(
+      () =>
+        parseGoogleTokenEndpointIdToken(
+          { idToken: validRawToken },
+          { expectedClientId: CLIENT_ID, nowMs: fixture.now() }
+        ),
+      /untrusted ID token source/i
+    );
+
+    // Malformed / disallowed JWS headers from token endpoint are rejected.
+    const badHeaders = [
+      { alg: 'none' },
+      { alg: 'HS256' },
+      { typ: 'JWE' },
+      { crit: ['exp'] },
+      { jwk: { kty: 'RSA' } },
+      { kid: '' },
+    ];
+    for (const headerOverride of badHeaders) {
+      fixture.google.idTokenHeaderOverrides = headerOverride;
+      const { cb } = await connectAccount(fixture, { owner: 'owner-1', choices: ['gmail'] });
+      assert.equal(cb.ok, false);
+      assert.equal(cb.phase, 'failed');
+    }
+    fixture.google.idTokenHeaderOverrides = null;
+
+    fixture.google.rawIdTokenOverride = `${Buffer.from('not-json').toString('base64url')}.${validRawToken.split('.')[1]}.sig`;
+    const nonJsonHeader = await connectAccount(fixture, { owner: 'owner-1', choices: ['gmail'] });
+    assert.equal(nonJsonHeader.cb.ok, false);
+    assert.equal(nonJsonHeader.cb.phase, 'failed');
+    fixture.google.rawIdTokenOverride = null;
+
     const badCases = [
       { iss: 'https://evil.example' },
       { aud: 'other-client.apps.googleusercontent.com', azp: 'other-client.apps.googleusercontent.com' },
-      { exp: Math.floor(fixture.now() / 1000) - 10 },
+      { exp: nowSec - 10 },
       { email_verified: false },
       { sub: 'bad@subject' },
     ];
@@ -466,13 +530,24 @@ test('serializes concurrent refresh, separates invalid_grant vs offline, enforce
     await connectAccount(fixture, { owner: 'owner-1', choices: ['gmail'] });
     fixture.google.calls.length = 0;
 
-    // 1 account -> api() defaults to it and rejects arbitrary non-Google destinations.
+    // 1 account -> api() defaults to it, enforces fixed Google API origin via orca-domain,
+    // and refuses unexpected redirects so Bearer tokens never leak off-origin.
     const singleApi = fixture.accounts.api();
     assert.equal(singleApi.email, 'ada@acme.dev');
+    assert.equal(singleApi.id, '1044');
     await assert.rejects(
       () => singleApi.get('gmail', 'https://evil.example/steal', (x) => x),
-      (err) => err.code === 'FORBIDDEN'
+      (err) => err.name === 'GoogleToolError' && /disallowed Google API origin/i.test(err.message)
     );
+    assert.equal(fixture.google.calls.length, 0);
+
+    fixture.google.gmailStatusSequence = [302];
+    await assert.rejects(
+      () => singleApi.get('gmail', 'https://gmail.googleapis.com/gmail/v1/users/me/profile', (x) => x),
+      (err) => err.name === 'GoogleToolError' && /unexpected redirect/i.test(err.message)
+    );
+    assert.equal(fixture.google.calls[0]?.redirect, 'manual');
+    fixture.google.calls.length = 0;
 
     // Concurrent calls near expiry perform exactly 1 serialized token refresh.
     fixture.advance(58 * 60 * 1000);
