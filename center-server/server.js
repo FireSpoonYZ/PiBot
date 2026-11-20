@@ -12,6 +12,7 @@ import { registerRoutes } from './routes.js';
 import { openOperations } from './operations/index.js';
 import { operationScopes } from '../center-contract/operations/index.js';
 import { registerMcpOAuth } from './mcp/oauth.js';
+import { validateClients, validateSupportedScopes } from './mcp/oauth-store.js';
 import { registerMcp } from './mcp/server.js';
 import { openHostBridge } from './host-bridge.js';
 import { openCenterExecution } from './execution.js';
@@ -40,7 +41,59 @@ const status = { INVALID_ARGUMENT: 400, INVALID_CWD: 400, UNSUPPORTED_TARGET: 40
 /** The real error-code to HTTP-status map; exported so tests exercise it instead of a copy. */
 export const errorStatus = status;
 
-export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ownerPasswordHash, listenHost = '127.0.0.1', port = 8080, trustProxy = false, webRoot, npmPath, publicUrl, mcpClients = [] }) {
+export function assertRemoteMcpOptions({ mcpEnabled = false, mcpClients = [] } = {}) {
+  if (typeof mcpEnabled !== 'boolean') {
+    throw new Error('mcpEnabled must be a boolean');
+  }
+  if (!mcpEnabled) return false;
+  if (!Array.isArray(mcpClients) || mcpClients.length === 0) {
+    throw new Error('mcpEnabled requires at least one valid MCP OAuth client');
+  }
+  const supported = validateSupportedScopes(operationScopes);
+  const registry = validateClients(mcpClients, supported.set);
+  if (![...registry.values()].some((client) => client.allowedScopes.length > 0)) {
+    throw new Error('mcpEnabled requires at least one MCP OAuth client with a supported scope');
+  }
+  return true;
+}
+
+export async function registerRemoteMcpIfEnabled(app, { mcpEnabled = false, mcpClients = [], publicOrigin, operations }) {
+  if (!assertRemoteMcpOptions({ mcpEnabled, mcpClients })) return null;
+  const mcpOAuth = await registerMcpOAuth(app, { publicUrl: publicOrigin, clients: mcpClients, supportedScopes: operationScopes });
+  await registerMcp(app, { publicUrl: publicOrigin, authenticate: mcpOAuth.authenticate, operations });
+  return mcpOAuth;
+}
+
+export function isRemoteMcpPath(rawUrl) {
+  if (typeof rawUrl !== 'string') return false;
+  const rawPath = rawUrl.split(/[?#]/, 1)[0];
+  if (!rawPath.startsWith('/')) return false;
+  const normalized = rawPath.replace(/^\/+/, '/');
+  let pathname;
+  try {
+    pathname = new URL(normalized, 'http://center.local').pathname;
+  } catch {
+    pathname = normalized;
+  }
+  return pathname === '/mcp'
+    || pathname.startsWith('/mcp/')
+    || pathname === '/oauth/mcp'
+    || pathname.startsWith('/oauth/mcp/')
+    || pathname.startsWith('/.well-known/oauth-');
+}
+
+export async function registerCenterSpaFallback(app, webRoot) {
+  if (!webRoot) return;
+  await app.register(fastifyStatic, { root: webRoot, prefix: '/' });
+  app.setNotFoundHandler((req, reply) => {
+    if (req.method === 'GET' && !req.url.startsWith('/api/') && !isRemoteMcpPath(req.url)) {
+      return reply.sendFile('index.html');
+    }
+    return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Not found' } });
+  });
+}
+
+export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ownerPasswordHash, listenHost = '127.0.0.1', port = 8080, trustProxy = false, webRoot, npmPath, publicUrl, mcpEnabled = false, mcpClients = [] }) {
   // Single public HTTPS origin; the WSS link URL, OAuth callback and client
   // downloads are all derived from it. The service itself never terminates TLS:
   // the user's reverse proxy owns certificates and forwards plain HTTP here.
@@ -52,6 +105,7 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
   }
   const linkUrl = `wss://${publicOrigin.host}/v1/link`;
   if (!(encryptionKey instanceof Uint8Array) || !(sessionKey instanceof Uint8Array) || encryptionKey.byteLength !== 32 || sessionKey.byteLength !== 32 || Buffer.from(encryptionKey).equals(Buffer.from(sessionKey))) throw new Error('Independent encryption and session keys are required');
+  assertRemoteMcpOptions({ mcpEnabled, mcpClients });
   let store, relay, bridge, packages, execution, oauth, routes, app, skills, learning, botManagement, catalog, providerAuth, antigravity, vault, googleAccounts, googleWorkspaceMcp, googleRules, mcpOAuth;
   let closing;
   async function close() {
@@ -123,18 +177,13 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
       bridge,
     });
     routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault, google: { accounts: googleAccounts, rules: googleRules }, createOperations: openOperations, listReleases });
-    if (mcpClients.length) {
-      mcpOAuth = await registerMcpOAuth(app, { publicUrl: publicOrigin.origin, clients: mcpClients, supportedScopes: operationScopes });
-      await registerMcp(app, { publicUrl: publicOrigin.origin, authenticate: mcpOAuth.authenticate, operations: routes.operations });
-    }
-    if (webRoot) {
-      await app.register(fastifyStatic, { root: webRoot, prefix: '/' });
-      app.setNotFoundHandler((req, reply) => {
-        if (req.method === 'GET' && !req.url.startsWith('/api/') &&
-            !/^(?:\/mcp(?:[/?]|$)|\/\.well-known\/oauth-)/.test(req.url)) return reply.sendFile('index.html');
-        return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Not found' } });
-      });
-    }
+    mcpOAuth = await registerRemoteMcpIfEnabled(app, {
+      mcpEnabled,
+      mcpClients,
+      publicOrigin: publicOrigin.origin,
+      operations: routes.operations,
+    });
+    await registerCenterSpaFallback(app, webRoot);
     const url = await app.listen({ host: listenHost, port });
     await googleRules.start?.();
     void catalog.sync().catch(() => {});
