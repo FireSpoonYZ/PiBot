@@ -1,6 +1,27 @@
 # Always-on Runtime 验收记录
 
-对应 [架构与迁移说明](always-on-runtime.md)，目标分支为 `refactor/always-on-runtime-20261115`，起点为
+## 接入 develop 后的验收（2026-11-20）
+
+集成分支 `FireSpoonYZ/always-on-runtime-integration` 基于原重构分支 `8326770`，已合入 GitHub `develop@ba1aef1` 并解决 14 个文件的冲突。以下运行验证对应代码提交 `4d06cbf`；使用 Node.js **26.13.0**、Pi Durable **1.5.2**、Gradle **8.14.3**、JDK **21**。
+
+| 验证 | 结果 |
+| --- | --- |
+| `npm test` | **317 项通过、0 失败、2 跳过**；Windows 不运行 Snap 用例，真实桌面浏览器用例默认跳过并在下一行单独运行 |
+| `PIBOT_TEST_BROWSER_LIVE=1 node --test web/test/bot-browser-real-desktop.test.mjs` | **1 项通过**；使用真实桌面 Chrome/Edge、隔离配置与本机测试页，验证双客户端接管、旧租约失效与交还 |
+| `npm run build`、`npm run center:build`、桌面 `tsc --noEmit` | 通过 |
+| `npm run center:prepare`、`node scripts/release-check.mjs` | 6 个内置插件归档生成成功，版本一致 |
+| `:app:testDebugUnitTest :app:assembleDebug :app:lintDebug`（`-PlauncherAbis=x86_64`） | **73 项单测通过**，其中调度 13 项；Debug APK 和 lint 通过 |
+
+- 真实 Host/SQLite 回归覆盖主聊问卷释放运行、重启后仅续接一次、Stop、`/clear` 与回答并发、任务取消/修订、频道旧协议以及编辑时同时继承 Google Workspace 隔离并撤销旧问卷。
+- 5 个真实 WebSocket 回归覆盖 Host、Center relay 和客户端的混合版本；旧链路继续转发普通聊天，新链路在待答集合清空时立即撤销卡片权限。
+- ACP 回归确认问卷答案用本轮真正的用户输入发给 Antigravity，不会被历史中未结算的工具结果吞掉。Center 升级回归确认原地升级插件保留安装 ID、禁用状态和 Bot 绑定。
+
+本次没有在生产 Center 部署，没有完成 Android 真机闹钟、进程回收和通知验收。部署顺序、插件人工升级及回滚见 [架构与迁移说明](always-on-runtime.md#升级与回滚)。
+
+## 原始重构分支历史记录（2026-11-15）
+
+下文保留旧基线的验收记录，不作为接入当前 `develop` 的验收依据。
+对应 [架构与迁移说明](always-on-runtime.md)，原始分支为 `refactor/always-on-runtime-20261115`，起点为
 `develop@f8593e40cf0d963dd55496f598fad044f0c3c8ad`。交付前同步到随后新增的
 `develop@efec5522ce27a41cd29af0c38bcc25c114bac1fc`，解决测试 fixture 的重叠修改后重新运行全量测试。
 
