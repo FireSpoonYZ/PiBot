@@ -5,17 +5,24 @@
  *   (`GET /api/tasks`, `POST /api/tasks/action`), with strict CAS and anti-approval-forgery guards.
  * - Center webhooks safe subset (`GET /api/webhooks`, `GET /api/webhooks/:id/events`,
  *   `PUT /api/webhooks/:id` for name/instruction/enabled only, `DELETE /api/webhooks/:id`).
+ * - Authorized Google Workspace trigger rules safe subset (`GET /api/google/rules`,
+ *   `GET /api/google/rules/:id/events`, `POST /api/google/rules/save` for existing rules only
+ *   preserving original explicit account/target/source, `POST /api/google/rules/remove`).
  *
  * Intentionally excluded for security boundaries:
  * - Task human approvals/confirmations: `confirm_plan`, `answer_prompt`, `resolve_adoption_scope`, `dismiss_adoption`,
  *   clearing `pendingPrompt`, or advancing a task/step gated on a pending plan/question/needs_scope.
  * - Webhook secret issuance/rotation and trusted-target redirection: `POST /api/webhooks` (returns Bearer token),
  *   `POST /api/webhooks/:id/rotate-token` (returns Bearer token), and changing `deviceId`/`botId` on existing webhooks.
+ * - Google OAuth/account management and new/redirected high-privilege Google trigger rules:
+ *   `/api/google/status`, `/configure`, `/authorize`, `/flow`, `/cancel`, `/check`, `/remove`,
+ *   `/api/oauth/google/callback`, creating brand-new Google rules, or rebinding `account`/`deviceId`/`botId`/`source`.
  * - Interactive Host OS permission prompt: schedule `requestExactAlarm`.
  * - External/Host delivery routes: `POST /api/webhooks/:id/events`, `/api/host/webhook-events/*`, `/api/host/tasks/*`.
  */
 
 import { normalizeScheduleControlParams } from '../../host-core/schedule-protocol.js';
+import { createGoogleRuleHandlers } from './google-rules.js';
 
 const WEBHOOK_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -962,5 +969,8 @@ export function createHandlers(deps = {}) {
       await owner('DELETE', '/api/webhooks/:id', { params: { id }, query: {} });
       return { deleted: true, id };
     },
+
+    // ---- Authorized Google Workspace Trigger Rules (safe read/events/edit/remove) ----
+    ...createGoogleRuleHandlers(deps),
   };
 }

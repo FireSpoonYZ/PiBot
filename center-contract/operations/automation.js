@@ -1,4 +1,5 @@
 import { defineOperation } from './schema.js';
+import { googleRuleOperations } from './google-rules.js';
 
 const UUID_PATTERN = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
 const TIME_PATTERN = '^([01][0-9]|2[0-3]):[0-5][0-9]$';
@@ -601,4 +602,7 @@ export const operations = [
     readOnly: false,
     destructive: true,
   }),
+
+  // ---- Google Workspace Trigger Rules (authorized accounts; safe read/events/edit/remove) ----
+  ...googleRuleOperations,
 ];
