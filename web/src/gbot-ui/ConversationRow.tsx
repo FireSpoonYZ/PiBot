@@ -4,6 +4,7 @@
 // （title/preview 两行结构、选中/未读/时间槽位、pointer hook 展开到 button）。
 // 差异：agent 模型替换为合同 props；Tailwind utility 由 gbot-ui.css 中同名结构类替代。
 import type { ReactNode } from 'react';
+import { useText } from '../ui';
 import { useConversationRowInteractions } from './useConversationRowInteractions';
 import type { ConversationMenuPosition } from './useConversationRowInteractions';
 
@@ -26,7 +27,10 @@ const dayStart = (date: Date) =>
   new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 
 /** 上游 formatAgentTime：今天时:分，昨天 "昨天"，7 天内星期，其余 月/日（跨年带年）。 */
-function formatConversationTime(timestamp: string | number | null | undefined): string {
+function formatConversationTime(
+  timestamp: string | number | null | undefined,
+  t: (zh: string, en: string) => string,
+): string {
   if (timestamp === null || timestamp === undefined || timestamp === '') return '';
   const ms = typeof timestamp === 'number' ? timestamp : Date.parse(timestamp);
   if (!Number.isFinite(ms) || ms <= 0) return '';
@@ -36,7 +40,7 @@ function formatConversationTime(timestamp: string | number | null | undefined): 
   if (days <= 0) {
     return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   }
-  if (days === 1) return '昨天';
+  if (days === 1) return t('昨天', 'Yesterday');
   if (days < 7) return date.toLocaleDateString([], { weekday: 'short' });
   return date.toLocaleDateString([], {
     month: 'numeric',
@@ -64,11 +68,12 @@ export function ConversationRow({
   onOpenMenu,
   className,
 }: ConversationRowProps) {
+  const t = useText();
   const interactions = useConversationRowInteractions({ onOpen, onOpenMenu });
-  const label = [title, groupLabel, pinned ? '已置顶' : null, unread ? '未读' : null, connectionLabel]
+  const label = [title, groupLabel, pinned ? t('已置顶', 'Pinned') : null, unread ? t('未读', 'Unread') : null, connectionLabel]
     .filter(Boolean)
-    .join('，');
-  const time = formatConversationTime(timestamp);
+    .join(t('，', ', '));
+  const time = formatConversationTime(timestamp, t);
   const subtitle = preview?.trim();
 
   return (
@@ -86,7 +91,7 @@ export function ConversationRow({
       {...interactions}
       type="button"
     >
-      <span className="gbot-conversation-row__avatar">{avatar}</span>
+      <span className="gbot-conversation-row__avatar" aria-hidden="true">{avatar}</span>
 
       <span className="gbot-conversation-row__body">
         <span className="gbot-conversation-row__head">

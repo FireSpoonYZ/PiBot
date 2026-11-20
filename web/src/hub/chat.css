@@ -14,6 +14,47 @@
   transition: opacity 160ms ease;
 }
 
+/* 聊天顶栏居中 Bot 胶囊文字与状态副标题 */
+.grok-chat-pill-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  flex: 1;
+  text-align: left;
+  line-height: 1.18;
+}
+
+.grok-chat-pill-meta .grok-chat-pill-name {
+  max-width: 100%;
+}
+
+.grok-chat-pill-sub {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grok-chat-pill-sub.is-danger {
+  color: var(--color-danger);
+}
+
+.grok-chat-pill-sub.is-warn {
+  color: var(--color-warning);
+}
+
+.grok-row-value.is-warn {
+  color: var(--color-warning);
+}
+
+.grok-row-value.is-muted {
+  color: var(--color-text-muted);
+}
+
 /* 移动端/共享界面用户气泡轻触操作胶囊（复制 / 编辑） */
 .bot-bubble-action-bar {
   display: inline-flex;
@@ -21,25 +62,36 @@
   gap: 2px;
   margin-top: 6px;
   padding: 3px 5px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--bg);
-  color: var(--text);
-  box-shadow: 0 4px 12px rgb(0 0 0 / 0.08);
-  animation: grok-pop-up 140ms cubic-bezier(.22, 1, .36, 1) both;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-line);
+  background: var(--color-bg);
+  color: var(--color-text);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--color-text) 10%, transparent);
+  animation: grok-pop-up 140ms var(--ease-out) both;
 }
 
 .bot-bubble-action-btn {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   height: 24px;
-  padding: 0 8px;
-  border-radius: 999px;
-  font-size: 0.76rem;
-  font-weight: 550;
-  color: var(--text);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
   white-space: nowrap;
+}
+
+.bot-bubble-action-btn::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: var(--tap-min);
+  transform: translateY(-50%);
 }
 
 .bot-bubble-action-btn svg {
@@ -47,8 +99,19 @@
   height: 12px;
 }
 
-.bot-bubble-action-btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--text) 7%, transparent);
+@media (hover: hover) {
+  .bot-bubble-action-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-text) 7%, transparent);
+  }
+}
+
+.bot-bubble-action-btn:active:not(:disabled) {
+  background: color-mix(in srgb, var(--color-text) 12%, transparent);
+}
+
+.bot-bubble-action-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
 }
 
 /* 融合工作槽与失败状态行 */
@@ -64,10 +127,11 @@
 }
 
 .bot-chat-bubble + .sand-activity-slot.is-inline {
-  margin-top: 4px;
+  margin-top: var(--space-1);
 }
 
 .sand-activity-detail-toggle {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -77,24 +141,41 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--muted);
-  font-size: 0.78rem;
-  font-weight: 500;
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
   cursor: pointer;
 }
 
-.sand-activity-detail-toggle:hover {
-  color: var(--text);
-  background: color-mix(in srgb, var(--surface) 75%, var(--text) 10%);
+.sand-activity-detail-toggle::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: max(100%, var(--tap-min));
+  height: max(100%, var(--tap-min));
+}
+
+@media (hover: hover) {
+  .sand-activity-detail-toggle:hover {
+    color: var(--color-text);
+    background: color-mix(in srgb, var(--color-surface-1) 75%, var(--color-text) 10%);
+  }
+}
+
+.sand-activity-detail-toggle:active {
+  color: var(--color-text);
+  background: color-mix(in srgb, var(--color-surface-1) 65%, var(--color-text) 14%);
 }
 
 .sand-activity-detail-toggle:focus-visible {
-  outline: 2px solid var(--brand, var(--accent));
+  outline: 2px solid var(--color-primary);
   outline-offset: 2px;
 }
 
 .sand-activity-detail-toggle svg {
-  transition: transform 140ms ease;
+  transition: transform var(--dur-fast) ease;
 }
 
 .sand-activity-detail-toggle[aria-expanded="true"] svg {
@@ -103,21 +184,198 @@
 
 .sand-activity-failure-detail {
   margin: 4px 0 0 46px;
-  padding: 8px 10px;
+  padding: var(--space-2) 10px;
   max-width: calc(100% - 46px);
   min-width: 0;
   max-height: 180px;
   overflow-y: auto;
   overflow-x: hidden;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   box-shadow: none;
-  background: var(--surface);
-  color: var(--muted);
+  background: var(--color-surface-1);
+  color: var(--color-text-muted);
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+/* 聊天历史加载骨架占位 */
+.bot-chat-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: var(--space-3) var(--space-1);
+  width: 100%;
+}
+
+.bot-chat-skeleton-bar {
+  height: var(--tap-min);
+  border-radius: 18px;
+  background: var(--color-surface-1);
+  animation: bot-chat-skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+.bot-chat-skeleton-bar.is-short {
+  width: 56%;
+  align-self: flex-end;
+  border-bottom-right-radius: 6px;
+}
+
+.bot-chat-skeleton-bar.is-wide {
+  width: 82%;
+  height: 64px;
+  align-self: flex-start;
+  border-bottom-left-radius: 6px;
+}
+
+.bot-chat-skeleton-bar.is-medium {
+  width: 68%;
+  align-self: flex-start;
+  border-bottom-left-radius: 6px;
+}
+
+@keyframes bot-chat-skeleton-pulse {
+  0%, 100% { opacity: 0.48; }
+  50% { opacity: 0.92; }
+}
+
+/* 聊天搜索零结果空态 */
+.bot-chat-search-empty {
+  margin: auto;
+  padding: var(--space-8) var(--space-5);
+  text-align: center;
+  font-size: var(--text-md);
+  color: var(--color-text-muted);
+}
+
+/* 未贴底且有新内容时的「↓ 新消息」回底胶囊 */
+.bot-chat-jump-anchor {
+  position: relative;
+  height: 0;
+  flex: none;
+  z-index: var(--z-sticky);
+}
+
+.bot-chat-jump-latest {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  height: var(--tap-min);
+  min-height: var(--tap-min);
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-line);
+  background: var(--color-surface-1);
+  color: var(--color-text);
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--color-text) 14%, transparent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+  cursor: pointer;
+  animation: grok-pop-up 160ms var(--ease-out) both;
+}
+
+@media (hover: hover) {
+  .bot-chat-jump-latest:hover {
+    border-color: var(--color-primary);
+  }
+}
+
+.bot-chat-jump-latest:active {
+  transform: translateX(-50%) scale(0.96);
+  border-color: var(--color-primary);
+}
+
+.bot-chat-jump-latest:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* 长消息列表渲染性能优化：流式或活跃尾轮次保留正常排版，其余启用 content-visibility */
+.bot-chat-turn:not(.is-streaming) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 96px;
+}
+
+@media (pointer: coarse) {
+  .bot-chat-bubble {
+    -webkit-touch-callout: none;
+  }
+}
+
+/* 桌面端历史用户消息可见/悬停编辑按钮（移动端使用长按 ActionSheet） */
+.bot-chat-turn-footer {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  margin-top: 5px;
+  max-width: 100%;
+}
+
+.bot-chat-turn-footer.is-user {
+  align-self: flex-end;
+}
+
+.bot-chat-turn-footer .bot-chat-turn-meta {
+  margin-top: 0;
+}
+
+.bot-chat-turn-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1, 4px);
+  padding: 2px 6px;
+  border: 0;
+  border-radius: var(--radius-sm, 8px);
+  background: transparent;
+  color: var(--color-text-muted, var(--muted));
+  font-size: var(--text-xs, 0.75rem);
+  font-weight: var(--weight-medium, 500);
+  line-height: 1.2;
+  cursor: pointer;
+  transition: opacity var(--dur-fast, 150ms) ease, background-color var(--dur-fast, 150ms) ease, color var(--dur-fast, 150ms) ease;
+}
+
+@media (hover: hover) {
+  .bot-chat-turn-edit-btn {
+    opacity: 0;
+  }
+
+  .bot-chat-turn:hover .bot-chat-turn-edit-btn,
+  .bot-chat-turn:focus-within .bot-chat-turn-edit-btn {
+    opacity: 1;
+  }
+
+  .bot-chat-turn-edit-btn:hover:not(:disabled) {
+    color: var(--color-text, var(--text));
+    background: color-mix(in srgb, var(--color-text, var(--text)) 8%, transparent);
+  }
+}
+
+.bot-chat-turn-edit-btn:active:not(:disabled) {
+  color: var(--color-text, var(--text));
+  background: color-mix(in srgb, var(--color-text, var(--text)) 12%, transparent);
+}
+
+.bot-chat-turn-edit-btn:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--color-primary, var(--accent));
+  outline-offset: 2px;
+}
+
+/* 强制创建主 Bot 页底部 toast 锚点（复用 .bot-chat-toast 定位） */
+.bot-edit-toast-anchor {
+  position: relative;
+  flex: none;
+  height: 0;
+  margin-bottom: calc(var(--bottom) + 12px);
 }

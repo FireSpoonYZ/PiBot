@@ -62,7 +62,7 @@ export interface ChatToolCallItem {
   output?: string;
   /** 输出是否因长度预算被截断。 */
   outputTruncated?: boolean;
-  /** send_to 跨智能体通信的结构化预览摘要（用于对话流内联展示）。 */
+  /** send_to 跨 Bot 通信的结构化预览摘要（用于对话流内联展示）。 */
   sendTo?: SendToToolPreview;
   /** host 投影的工具交互结构（todo/问卷）；来自 live slot 或历史 toolResult，未验证形状，渲染前需 readToolPresentation。 */
   presentation?: Record<string, unknown>;
@@ -694,12 +694,12 @@ export function latestEntryChannel(
   return channel;
 }
 
-const GENERIC_DONE_SUMMARIES = new Set(['任务已完成', '任务已取消', '已完成']);
+const GENERIC_DONE_SUMMARIES = new Set(['任务已完成', '任务已取消', '已完成']); // i18n-ok
 
 function extractTaskOutputSummary(output: string | undefined): string {
   if (!output) return '';
   const match =
-    /(?:^|\n)摘要:\s*([\s\S]*?)(?=\n(?:待回应\s*\[|需求变更\s*\[|步骤:|任务已标记完成|所有有效步骤均已完成)|$)/.exec(
+    /(?:^|\n)摘要:\s*([\s\S]*?)(?=\n(?:待回应\s*\[|需求变更\s*\[|步骤:|任务已标记完成|所有有效步骤均已完成)|$)/.exec( // i18n-ok
       output,
     );
   if (!match) return '';

@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState, type KeyboardEvent } from 'react';
+import { useEffect, useId, useMemo, useState, type KeyboardEvent } from 'react';
 import { ArrowLeft, CheckCircle2, ChevronRight, HelpCircle, Loader2, Pencil, Trash2, X } from 'lucide-react';
 import { GrokBotAvatar, type GrokAvatarPreset } from '../GrokBotAvatar';
+import { mobileHaptic } from '../native/tauri-host';
+import { useText } from '../ui';
 import {
   getStepStatusInfo,
   getTaskStatusInfo,
@@ -158,8 +160,8 @@ function createEditDraft(task: GlobalTask): EditDraftState {
   };
 }
 
-function renderTaskStatusBadge(task: GlobalTask) {
-  const info = getTaskStatusInfo(task);
+function renderTaskStatusBadge(task: GlobalTask, t: (zh: string, en: string) => string) {
+  const info = getTaskStatusInfo(task, t);
   return (
     <span className={`bs-badge ${info.cls}`}>
       {info.spinning ? <Loader2 size={12} className="spin" aria-hidden="true" /> : null}
@@ -176,6 +178,14 @@ export function TaskDetailView({
   onBack,
   onJumpToChat,
 }: TaskDetailViewProps) {
+  const t = useText();
+  const titleInputId = useId();
+  const reqInputId = useId();
+  const logsBoxId = useId();
+  const isCoarsePointer =
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(pointer: coarse)').matches;
   const [editMode, setEditMode] = useState(initialEditMode);
   const [editDraft, setEditDraft] = useState<EditDraftState>(() => createEditDraft(task));
   const [logsOpen, setLogsOpen] = useState(false);
@@ -196,6 +206,14 @@ export function TaskDetailView({
     // Reset edit draft only when switching task or initialEditMode prop
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task.id, initialEditMode]);
+
+  useEffect(() => {
+    if (!deleteArmed) return;
+    const timer = window.setTimeout(() => {
+      setDeleteArmed(false);
+    }, 4000);
+    return () => window.clearTimeout(timer);
+  }, [deleteArmed]);
 
   const counts = useMemo(() => stepCounts(task), [task]);
   const flatSteps = useMemo(() => flattenStepsWithDepth(task.steps), [task.steps]);
@@ -246,7 +264,7 @@ export function TaskDetailView({
       setEditConflict(false);
     } catch (err) {
       setActionError(
-        err instanceof Error && err.message ? err.message : String(err || '重新载入当前版本失败'),
+        err instanceof Error && err.message ? err.message : String(err || t('重新载入当前版本失败', 'Failed to reload latest version')),
       );
     } finally {
       setReloadingEdit(false);
@@ -351,6 +369,7 @@ export function TaskDetailView({
         requirement: editDraft.requirement.trim(),
         steps: stepsPayload,
       });
+      mobileHaptic('confirm');
       setEditConflict(false);
       setEditMode(false);
     } catch (err) {
@@ -360,7 +379,7 @@ export function TaskDetailView({
         void controller.getTask(task.id).catch(() => {});
       } else {
         setActionError(
-          err instanceof Error && err.message ? err.message : String(err || '保存任务修改失败'),
+          err instanceof Error && err.message ? err.message : String(err || t('保存任务修改失败', 'Failed to save task changes')),
         );
       }
     } finally {
@@ -380,7 +399,7 @@ export function TaskDetailView({
       await controller.deleteTask(task.id);
       onBack();
     } catch (err) {
-      setActionError(err instanceof Error && err.message ? err.message : String(err || '删除任务失败'));
+      setActionError(err instanceof Error && err.message ? err.message : String(err || t('删除任务失败', 'Failed to delete task')));
       setDeleting(false);
       setDeleteArmed(false);
     }
@@ -395,10 +414,10 @@ export function TaskDetailView({
     } catch (err) {
       if (isTaskRevisionConflictError(err)) {
         void controller.getTask(task.id).catch(() => {});
-        setActionError('任务状态刚刚已有更新，已同步最新版本，请重新核对后再确认。');
+        setActionError(t('任务状态刚刚已有更新，已同步最新版本，请重新核对后再确认。', 'Task status was just updated and synced. Please review before confirming.'));
       } else {
         setActionError(
-          err instanceof Error && err.message ? err.message : String(err || '确认变更范围失败'),
+          err instanceof Error && err.message ? err.message : String(err || t('确认变更范围失败', 'Failed to confirm change scope')),
         );
       }
     } finally {
@@ -413,7 +432,7 @@ export function TaskDetailView({
     try {
       await controller.dismissAdoption(task.id);
     } catch (err) {
-      setActionError(err instanceof Error && err.message ? err.message : String(err || '收起回执失败'));
+      setActionError(err instanceof Error && err.message ? err.message : String(err || t('收起回执失败', 'Failed to dismiss receipt')));
     } finally {
       setAdoptionBusy(false);
     }
@@ -427,16 +446,16 @@ export function TaskDetailView({
         <div className="adoption-short-strip" role="status">
           <span className="adoption-short-main">
             <Loader2 size={15} className="spin" aria-hidden="true" />
-            <span>修改已保存，负责人正在调整…</span>
+            <span>{t('修改已保存，负责人正在调整…', 'Changes saved; owner is adjusting…')}</span>
           </span>
         </div>
       );
     }
     if (ad.phase === 'needs_scope') {
       return (
-        <div className="adoption-short-strip is-warn" role="region" aria-label="确认变更范围">
+        <div className="adoption-short-strip is-warn" role="region" aria-label={t('确认变更范围', 'Confirm change scope')}>
           <span className="adoption-short-main">
-            <span>此项变更是否保留已完成产出？</span>
+            <span>{t('此项变更是否保留已完成产出？', 'Keep completed outputs for this change?')}</span>
           </span>
           <div className="adoption-short-actions">
             <button
@@ -445,7 +464,7 @@ export function TaskDetailView({
               disabled={adoptionBusy}
               onClick={() => void handleAdoptionScope('keep')}
             >
-              保留已有结果
+              {t('保留已有结果', 'Keep existing results')}
             </button>
             <button
               type="button"
@@ -453,14 +472,14 @@ export function TaskDetailView({
               disabled={adoptionBusy}
               onClick={() => void handleAdoptionScope('redo')}
             >
-              连同前序重做
+              {t('连同前序重做', 'Redo previous steps')}
             </button>
           </div>
         </div>
       );
     }
     const isOk = ad.phase === 'adopted';
-    const text = ad.shortReceipt || (isOk ? '已采用变更' : '已记录变更');
+    const text = ad.shortReceipt || (isOk ? t('已采用变更', 'Changes adopted') : t('已记录变更', 'Changes recorded'));
     return (
       <div className={`adoption-short-strip${isOk ? ' is-ok' : ''}`} role="status">
         <span className="adoption-short-main">
@@ -477,14 +496,14 @@ export function TaskDetailView({
             className="receipt-log-link"
             onClick={() => setLogsOpen(true)}
           >
-            查看记录
+            {t('查看记录', 'View log')}
           </button>
           <button
             type="button"
             className="notice-dismiss"
             disabled={adoptionBusy}
             onClick={() => void handleDismissAdoption()}
-            aria-label="收起回执"
+            aria-label={t('收起回执', 'Dismiss receipt')}
           >
             <X size={13} aria-hidden="true" />
           </button>
@@ -496,8 +515,8 @@ export function TaskDetailView({
   const promptBotName = useMemo(() => {
     if (!task.pendingPrompt) return '';
     const found = findBotOption(bots, task.pendingPrompt.deviceId, task.pendingPrompt.botId);
-    return found?.name || task.pendingPrompt.botName || task.pendingPrompt.botId;
-  }, [task.pendingPrompt, bots]);
+    return found?.name || task.pendingPrompt.botName || t('未知 Bot', 'Unknown Bot');
+  }, [task.pendingPrompt, bots, t]);
 
   return (
     <div className="tasks-scroll">
@@ -505,12 +524,12 @@ export function TaskDetailView({
         <header className="detail-topbar">
           <button type="button" className="back-btn" onClick={onBack}>
             <ArrowLeft size={19} aria-hidden="true" />
-            <span>任务</span>
+            <span>{t('任务', 'Tasks')}</span>
           </button>
           {!editMode ? (
             <button type="button" className="tb-secondary-btn" onClick={openEditMode}>
               <Pencil size={15} aria-hidden="true" />
-              <span>编辑</span>
+              <span>{t('编辑', 'Edit')}</span>
             </button>
           ) : null}
         </header>
@@ -525,22 +544,22 @@ export function TaskDetailView({
           ) : null}
 
           {editMode ? (
-            <section className="detail-edit-card" aria-label="编辑任务要求与子任务">
+            <section className="detail-edit-card" aria-label={t('编辑任务要求与子任务', 'Edit task requirements and subtasks')}>
               {editConflict || task.revision !== editDraft.editBaseRevision ? (
                 <div className="detail-conflict-box" role="alert">
                   <div className="detail-conflict-head">
                     <span>
                       {editConflict
-                        ? `保存冲突（编辑基准 v${editDraft.editBaseRevision}，最新 v${task.revision}）：你的修改草稿已保留在下方`
-                        : `后台已有新进展（编辑基准 v${editDraft.editBaseRevision}，最新 v${task.revision}）`}
+                        ? t(`保存冲突（编辑基准 v${editDraft.editBaseRevision}，最新 v${task.revision}）：你的修改草稿已保留在下方`, `Save conflict (base v${editDraft.editBaseRevision}, latest v${task.revision}): your draft is preserved below`)
+                        : t(`后台已有新进展（编辑基准 v${editDraft.editBaseRevision}，最新 v${task.revision}）`, `Updated in background (base v${editDraft.editBaseRevision}, latest v${task.revision})`)}
                     </span>
                   </div>
                   <p className="detail-conflict-summary">
-                    当前最新状态：{task.title} · 已完成 {counts.done}/{counts.total}
+                    {t('当前最新状态：', 'Latest status: ')}{task.title} · {t(`已完成 ${counts.done}/${counts.total}`, `Done ${counts.done}/${counts.total}`)}
                     {task.logs.length > 0 ? ` · ${task.logs[task.logs.length - 1].text}` : ''}
                   </p>
                   <p className="detail-conflict-note">
-                    为防止覆盖 Bot 最新进展，保存会按基准版本拦截；请核对后重新载入当前版本再继续编辑。
+                    {t('为防止覆盖 Bot 最新进展，保存会按基准版本拦截；请核对后重新载入当前版本再继续编辑。', 'To avoid overwriting the latest Bot progress, saving is blocked by version mismatch. Reload the latest version to continue editing.')}
                   </p>
                   <div className="detail-conflict-actions">
                     <button
@@ -549,7 +568,7 @@ export function TaskDetailView({
                       disabled={saving || deleting || reloadingEdit}
                       onClick={() => void handleReloadLatestForEdit()}
                     >
-                      {reloadingEdit ? '载入中…' : '重新载入当前版本'}
+                      {reloadingEdit ? t('载入中…', 'Reloading…') : t('重新载入当前版本', 'Reload latest version')}
                     </button>
                     <button
                       type="button"
@@ -562,18 +581,18 @@ export function TaskDetailView({
                         setActionError(null);
                       }}
                     >
-                      退出编辑核对详情
+                      {t('退出编辑核对详情', 'Exit edit to review')}
                     </button>
                   </div>
                 </div>
               ) : null}
 
               <div>
-                <label className="edit-field-label" htmlFor="edit-task-title">
-                  任务标题
+                <label className="edit-field-label" htmlFor={titleInputId}>
+                  {t('任务标题', 'Task title')}
                 </label>
                 <input
-                  id="edit-task-title"
+                  id={titleInputId}
                   className="req-edit-title"
                   type="text"
                   value={editDraft.title}
@@ -583,11 +602,11 @@ export function TaskDetailView({
               </div>
 
               <div>
-                <label className="edit-field-label" htmlFor="edit-task-req">
-                  整体要求
+                <label className="edit-field-label" htmlFor={reqInputId}>
+                  {t('整体要求', 'Requirements')}
                 </label>
                 <textarea
-                  id="edit-task-req"
+                  id={reqInputId}
                   className="req-edit-textarea"
                   value={editDraft.requirement}
                   onChange={e => setEditDraft(prev => ({ ...prev, requirement: e.target.value }))}
@@ -596,7 +615,7 @@ export function TaskDetailView({
               </div>
 
               <div className="edit-steps-group">
-                <span className="edit-field-label">分工与子任务</span>
+                <span className="edit-field-label">{t('分工与子任务', 'Plan & subtasks')}</span>
                 {editDraft.steps.map((step, idx) => {
                   const isDone = step.status === 'done';
                   const isCancelled = step.status === 'cancelled';
@@ -613,7 +632,7 @@ export function TaskDetailView({
                         className={`edit-step-input${isCancelled ? ' is-cancelled' : ''}`}
                         type="text"
                         value={step.text}
-                        aria-label="子任务名称"
+                        aria-label={t('子任务名称', 'Subtask name')}
                         disabled={saving || deleting}
                         onChange={e => {
                           const val = e.target.value;
@@ -626,7 +645,7 @@ export function TaskDetailView({
                       />
                       <select
                         className="edit-step-select"
-                        aria-label="负责 Bot"
+                        aria-label={t('负责 Bot', 'Assigned Bot')}
                         value={step.botValue}
                         disabled={isDone || isCancelled || saving || deleting}
                         onChange={e => {
@@ -638,10 +657,10 @@ export function TaskDetailView({
                           });
                         }}
                       >
-                        <option value="">等待安排（待接手）</option>
+                        <option value="">{t('等待安排（待接手）', 'Unassigned (pending)')}</option>
                         {currentMissing ? (
                           <option value={step.botValue}>
-                            {origStep?.botName || decodedCurrent.botId}
+                            {origStep?.botName || t('未知 Bot', 'Unknown Bot')}
                           </option>
                         ) : null}
                         {bots.map(bot => (
@@ -660,10 +679,10 @@ export function TaskDetailView({
                           disabled={saving || deleting}
                           onClick={() => handleToggleStepCancel(idx)}
                         >
-                          {isCancelled ? '恢复' : '取消此项'}
+                          {isCancelled ? t('恢复', 'Restore') : t('取消此项', 'Cancel')}
                         </button>
                       ) : (
-                        <span className="step-status-pill is-done">已完成</span>
+                        <span className="step-status-pill is-done">{t('已完成', 'Done')}</span>
                       )}
                     </div>
                   );
@@ -674,20 +693,20 @@ export function TaskDetailView({
                     className="edit-step-input"
                     type="text"
                     value={editDraft.newStepText}
-                    placeholder="新增子任务名称…"
-                    aria-label="新增子任务名称"
+                    placeholder={t('新增子任务名称…', 'Add a subtask…')}
+                    aria-label={t('新增子任务名称', 'New subtask name')}
                     disabled={saving || deleting}
                     onChange={e => setEditDraft(prev => ({ ...prev, newStepText: e.target.value }))}
                     onKeyDown={handleNewStepKeyDown}
                   />
                   <select
                     className="edit-step-select"
-                    aria-label="新子任务负责 Bot"
+                    aria-label={t('新子任务负责 Bot', 'New subtask Bot')}
                     value={editDraft.newStepBotValue}
                     disabled={saving || deleting}
                     onChange={e => setEditDraft(prev => ({ ...prev, newStepBotValue: e.target.value }))}
                   >
-                    <option value="">等待安排</option>
+                    <option value="">{t('等待安排', 'Unassigned')}</option>
                     {bots.map(bot => (
                       <option
                         key={`${bot.deviceId}:${bot.botId}`}
@@ -703,7 +722,7 @@ export function TaskDetailView({
                     disabled={!editDraft.newStepText.trim() || saving || deleting}
                     onClick={handleAddDraftStep}
                   >
-                    + 添加
+                    {t('+ 添加', '+ Add')}
                   </button>
                 </div>
               </div>
@@ -716,7 +735,7 @@ export function TaskDetailView({
                   onClick={() => void handleDeleteTask()}
                 >
                   <Trash2 size={14} aria-hidden="true" />
-                  <span>{deleting ? '删除中…' : deleteArmed ? '再次点击确认删除' : '删除任务'}</span>
+                  <span>{deleting ? t('删除中…', 'Deleting…') : deleteArmed ? t('再次点击确认删除', 'Tap again to confirm delete') : t('删除任务', 'Delete task')}</span>
                 </button>
                 <div className="req-edit-actions-right">
                   <button
@@ -730,7 +749,7 @@ export function TaskDetailView({
                       setActionError(null);
                     }}
                   >
-                    取消
+                    {t('取消', 'Cancel')}
                   </button>
                   <button
                     type="button"
@@ -738,39 +757,41 @@ export function TaskDetailView({
                     disabled={saving || deleting || reloadingEdit}
                     onClick={() => void handleSaveEdit()}
                   >
-                    {saving ? '保存中…' : '保存'}
+                    {saving ? t('保存中…', 'Saving…') : t('保存', 'Save')}
                   </button>
                 </div>
               </div>
             </section>
           ) : (
             <>
-              <section className="req-card" aria-label="任务整体说明">
+              <section className="req-card" aria-label={t('任务整体说明', 'Task overview')}>
                 <div className="req-meta-row">
                   <div className="req-meta-left">
-                    {renderTaskStatusBadge(task)}
+                    {renderTaskStatusBadge(task, t)}
                     {task.origin?.label ? <span>{task.origin.label}</span> : null}
                   </div>
                   {topBots.length > 0 ? (
                     <div className="top-bots-row">
                       {topBots.map(ref => {
                         const bot = findBotOption(bots, ref.deviceId, ref.botId);
-                        const displayName = bot?.name || ref.botName || ref.botId;
+                        const displayName = bot?.name || ref.botName || t('未知 Bot', 'Unknown Bot');
                         const isPromptOwner =
                           task.pendingPrompt &&
                           task.pendingPrompt.deviceId === ref.deviceId &&
                           task.pendingPrompt.botId === ref.botId;
                         const suffix = isPromptOwner
                           ? task.pendingPrompt!.kind === 'plan'
-                            ? ' · 待确认'
-                            : ' · 待回应'
+                            ? t(' · 待确认', ' · Confirm')
+                            : t(' · 待回应', ' · Reply')
                           : '';
+                        const openChatLabel = t(`进入与 ${displayName} 的任务对话`, `Open task chat with ${displayName}`);
                         return (
                           <button
                             key={`${ref.deviceId}:${ref.botId}`}
                             type="button"
                             className="bot-chip-btn"
-                            title={`进入与 ${displayName} 的任务对话`}
+                            aria-label={openChatLabel}
+                            title={isCoarsePointer ? undefined : openChatLabel}
                             onClick={() =>
                               onJumpToChat({
                                 deviceId: ref.deviceId || bot?.deviceId || '',
@@ -797,7 +818,7 @@ export function TaskDetailView({
                       })}
                     </div>
                   ) : (
-                    <span className="bot-unassigned">等待安排</span>
+                    <span className="bot-unassigned">{t('等待安排', 'Unassigned')}</span>
                   )}
                 </div>
 
@@ -807,37 +828,38 @@ export function TaskDetailView({
                 {task.pendingPrompt ? (
                   <p className="detail-chat-hint">
                     {task.pendingPrompt.kind === 'plan'
-                      ? `待确认安排：点击「${promptBotName}」进入对话确认后开始执行`
-                      : `待你回应：点击「${promptBotName}」进入对话处理提问`}
+                      ? t(`待确认安排：点击「${promptBotName}」进入对话确认后开始执行`, `Plan awaiting confirmation: open chat with "${promptBotName}" to confirm and start`)
+                      : t(`待你回应：点击「${promptBotName}」进入对话处理提问`, `Awaiting reply: open chat with "${promptBotName}" to answer`)}
                   </p>
                 ) : null}
               </section>
 
-              <section className="steps-card" aria-label="分工与子任务">
+              <section className="steps-card" aria-label={t('分工与子任务', 'Plan & subtasks')}>
                 <div className="steps-head">
-                  <span className="steps-head-title">分工与子任务</span>
+                  <span className="steps-head-title">{t('分工与子任务', 'Plan & subtasks')}</span>
                   <span className="steps-head-count tabular">
-                    已完成 {counts.done} / {counts.total}
+                    {t(`已完成 ${counts.done} / ${counts.total}`, `Done ${counts.done} / ${counts.total}`)}
                   </span>
                 </div>
 
                 {flatSteps.length === 0 ? (
-                  <div className="tasks-empty" style={{ padding: '24px 16px' }}>
+                  <div className="tasks-empty is-compact">
                     {task.status === 'triaging'
-                      ? '正在拆分与安排子任务…'
-                      : '暂无拆分子任务，点右上角「编辑」可手动补充或进入对话协调。'}
+                      ? t('正在拆分与安排子任务…', 'Breaking down and assigning subtasks…')
+                      : t('暂无拆分子任务，点右上角「编辑」可手动补充或进入对话协调。', 'No subtasks yet. Tap Edit above to add steps or coordinate in chat.')}
                   </div>
                 ) : (
                   <div className="steps-list">
                     {flatSteps.map(({ step, depth }) => {
-                      const stInfo = getStepStatusInfo(task, step);
+                      const stInfo = getStepStatusInfo(task, step, t);
                       const noteParts: string[] = [];
-                      if (step.preserved && step.status === 'done') noteParts.push('原结果已保留');
+                      if (step.preserved && step.status === 'done') noteParts.push(t('原结果已保留', 'Previous result kept'));
                       if (step.relationNote && step.status !== 'cancelled') noteParts.push(step.relationNote);
 
                       const stepBot = findBotOption(bots, step.deviceId, step.botId);
-                      const stepBotName = stepBot?.name || step.botName || step.botId || '';
+                      const stepBotName = stepBot?.name || step.botName || (step.botId ? t('未知 Bot', 'Unknown Bot') : '');
                       const targetDeviceId = step.deviceId || stepBot?.deviceId || '';
+                      const openStepChatLabel = t(`进入 ${stepBotName} 对话查看或处理此子项`, `Open chat with ${stepBotName} for this step`);
 
                       return (
                         <div key={step.id} className={`step-item${depth > 0 ? ' is-nested' : ''}`}>
@@ -864,7 +886,8 @@ export function TaskDetailView({
                                 <button
                                   type="button"
                                   className="bot-chip-btn"
-                                  title={`进入 ${stepBotName} 对话查看或处理此子项`}
+                                  aria-label={openStepChatLabel}
+                                  title={isCoarsePointer ? undefined : openStepChatLabel}
                                   onClick={() =>
                                     onJumpToChat({
                                       deviceId: targetDeviceId,
@@ -885,7 +908,7 @@ export function TaskDetailView({
                                   <span>{stepBotName}</span>
                                 </button>
                               ) : (
-                                <span className="bot-unassigned">等待安排</span>
+                                <span className="bot-unassigned">{t('等待安排', 'Unassigned')}</span>
                               )}
                             </div>
                           </div>
@@ -903,16 +926,17 @@ export function TaskDetailView({
               type="button"
               className={`disclosure-btn${logsOpen ? ' is-open' : ''}`}
               aria-expanded={logsOpen}
+              aria-controls={logsBoxId}
               onClick={() => setLogsOpen(v => !v)}
             >
               <ChevronRight size={15} aria-hidden="true" />
-              <span className="tabular">变更与进展记录 ({task.logs.length})</span>
+              <span className="tabular">{t(`变更与进展记录 (${task.logs.length})`, `Activity & change log (${task.logs.length})`)}</span>
             </button>
             {logsOpen ? (
-              <div className="logs-box">
+              <div id={logsBoxId} className="logs-box">
                 {task.logs.length === 0 ? (
                   <div className="log-row">
-                    <span>暂无记录</span>
+                    <span>{t('暂无记录', 'No records yet')}</span>
                   </div>
                 ) : (
                   task.logs.map(lg => (

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type * as React from 'react';
+import { useText } from '../ui';
 import type { CenterApi } from './transport';
 import type { JsonObject, JsonSchema, JsonValue } from './types';
 
@@ -80,6 +81,7 @@ function CredentialField({
   api: CenterApi;
   onChange: (next: string | undefined) => void;
 }): React.JSX.Element {
+  const t = useText();
   const [status, setStatus] = useState<'empty' | 'loading' | 'configured' | 'unset' | 'error'>('empty');
   const [statusMsg, setStatusMsg] = useState('');
   const [secret, setSecret] = useState('');
@@ -92,28 +94,28 @@ function CredentialField({
     setRevision(null);
     if (!value) {
       setStatus('empty');
-      setStatusMsg('未填写凭证 ID');
+      setStatusMsg(t('未填写凭证 ID', 'No credential ID'));
       return;
     }
     setStatus('loading');
-    setStatusMsg('读取凭证状态…');
+    setStatusMsg(t('读取凭证状态…', 'Loading credential status…'));
     api
       .getCredential(value)
       .then(info => {
         if (!active) return;
         setRevision(info.revision);
         setStatus(info.configured ? 'configured' : 'unset');
-        setStatusMsg(info.configured ? '已配置密钥' : '未配置密钥');
+        setStatusMsg(info.configured ? t('已配置密钥', 'Secret configured') : t('未配置密钥', 'Secret not configured'));
       })
       .catch(() => {
         if (!active) return;
         setStatus('error');
-        setStatusMsg('暂未找到此凭证，可输入密钥直接创建');
+        setStatusMsg(t('暂未找到此凭证，可输入密钥直接创建', 'Credential not found yet; enter a secret to create it'));
       });
     return () => {
       active = false;
     };
-  }, [api, value]);
+  }, [api, t, value]);
 
   const handleSaveSecret = async () => {
     if (!value || !secret || busy) return;
@@ -123,7 +125,7 @@ function CredentialField({
       setRevision(info.revision);
       setSecret('');
       setStatus(info.configured ? 'configured' : 'unset');
-      setStatusMsg(info.configured ? '已配置密钥' : '未配置密钥');
+      setStatusMsg(info.configured ? t('已配置密钥', 'Secret configured') : t('未配置密钥', 'Secret not configured'));
     } catch (err) {
       setStatus('error');
       setStatusMsg(err instanceof Error ? err.message : String(err));
@@ -142,7 +144,7 @@ function CredentialField({
           value={value}
           disabled={disabled || busy}
           required={required}
-          placeholder={placeholder || '输入凭证 ID'}
+          placeholder={placeholder || t('输入凭证 ID', 'Enter credential ID')}
           onChange={e => onChange(e.target.value || undefined)}
         />
         <span
@@ -154,12 +156,12 @@ function CredentialField({
         </span>
       </div>
       {value && !disabled && (
-        <div className="ca-inline-row" style={{ marginTop: 6 }}>
+        <div className="ca-inline-row ca-mt-2">
           <input
             type="password"
             className="ca-input"
             autoComplete="new-password"
-            placeholder="输入新密钥写入（仅保存到中心，不回显）"
+            placeholder={t('输入新密钥写入（仅保存到中心，不回显）', 'Enter a new secret (stored on center, never shown again)')}
             value={secret}
             disabled={busy}
             onChange={e => setSecret(e.target.value)}
@@ -170,7 +172,7 @@ function CredentialField({
             disabled={!secret || busy}
             onClick={() => void handleSaveSecret()}
           >
-            {busy ? '保存中…' : '保存密钥'}
+            {busy ? t('保存中…', 'Saving…') : t('保存密钥', 'Save secret')}
           </button>
         </div>
       )}
@@ -189,6 +191,7 @@ function StringArrayField({
   enumOptions?: string[];
   onChange: (next: string[]) => void;
 }): React.JSX.Element {
+  const t = useText();
   const [draft, setDraft] = useState('');
 
   if (enumOptions && enumOptions.length > 0) {
@@ -226,7 +229,7 @@ function StringArrayField({
                 <button
                   type="button"
                   className="ca-tag-remove"
-                  aria-label={`移除 ${item}`}
+                  aria-label={t(`移除 ${item}`, `Remove ${item}`)}
                   onClick={() => onChange(value.filter((_, i) => i !== idx))}
                 >
                   ×
@@ -237,12 +240,12 @@ function StringArrayField({
         </div>
       )}
       {!disabled && (
-        <div className="ca-inline-row" style={{ marginTop: value.length > 0 ? 6 : 0 }}>
+        <div className={`ca-inline-row${value.length > 0 ? ' ca-mt-2' : ''}`}>
           <input
             type="text"
             className="ca-input"
             value={draft}
-            placeholder="输入条目后点击添加"
+            placeholder={t('输入条目后点击添加', 'Enter an item and click Add')}
             onChange={e => setDraft(e.target.value)}
             onKeyDown={e => {
               if (e.key === 'Enter') {
@@ -267,7 +270,7 @@ function StringArrayField({
               }
             }}
           >
-            添加
+            {t('添加', 'Add')}
           </button>
         </div>
       )}
@@ -302,6 +305,7 @@ export function SchemaConfigForm({
   submitBusy,
   onSubmit,
 }: SchemaConfigFormProps): React.JSX.Element {
+  const t = useText();
   const overrideMode = baseConfig !== undefined;
   const [rawOpen, setRawOpen] = useState(false);
   const [rawText, setRawText] = useState(() => JSON.stringify(formData ?? {}, null, 2));
@@ -347,7 +351,7 @@ export function SchemaConfigForm({
       if (propEntries.length === 0 && path.length === 0) {
         return (
           <div className="ca-empty-hint">
-            当前扩展暂无需要填写的可视化配置字段。
+            {t('当前扩展暂无需要填写的可视化配置字段。', 'This extension has no visual configuration fields.')}
           </div>
         );
       }
@@ -442,7 +446,7 @@ export function SchemaConfigForm({
             updateField(matched === undefined ? undefined : (matched as JsonValue));
           }}
         >
-          {!required && <option value="">（未设置）</option>}
+          {!required && <option value="">{t('（未设置）', '(Unset)')}</option>}
           {enumValues.map(item => {
             const s = String(item);
             return (
@@ -461,6 +465,7 @@ export function SchemaConfigForm({
           type="button"
           role="switch"
           aria-checked={checked}
+          aria-label={title}
           disabled={fieldDisabled}
           className={`ca-switch ${checked ? 'is-on' : ''}`}
           onClick={() => updateField(!checked)}
@@ -569,7 +574,7 @@ export function SchemaConfigForm({
                 checked={hasOverride}
                 onChange={e => toggleOverride(e.target.checked)}
               />
-              <span>{hasOverride ? '覆盖全局设置' : '继承全局默认'}</span>
+              <span>{hasOverride ? t('覆盖全局设置', 'Override global') : t('继承全局默认', 'Inherit global')}</span>
             </label>
           )}
         </div>
@@ -592,13 +597,13 @@ export function SchemaConfigForm({
     try {
       const parsed = JSON.parse(rawText || '{}') as unknown;
       if (!isJsonObject(parsed)) {
-        setRawError('配置必须是 JSON 对象');
+        setRawError(t('配置必须是 JSON 对象', 'Configuration must be a JSON object'));
         return;
       }
       setRawError('');
       onChange(parsed);
     } catch (err) {
-      setRawError(err instanceof Error ? err.message : 'JSON 解析失败');
+      setRawError(err instanceof Error ? err.message : t('JSON 解析失败', 'Failed to parse JSON'));
     }
   };
 
@@ -611,7 +616,7 @@ export function SchemaConfigForm({
     <form className="ca-schema-form" onSubmit={handleSubmit}>
       {typeof resolvedRoot === 'boolean' ? (
         <div className="ca-empty-hint">
-          {resolvedRoot ? '请使用下方高级 JSON 编辑器配置参数。' : '当前扩展无配置项。'}
+          {resolvedRoot ? t('请使用下方高级 JSON 编辑器配置参数。', 'Use the advanced JSON editor below to configure parameters.') : t('当前扩展无配置项。', 'This extension has no configuration options.')}
         </div>
       ) : (
         renderNode(resolvedRoot, [], false)
@@ -622,9 +627,10 @@ export function SchemaConfigForm({
           <button
             type="button"
             className="ca-disclosure-btn"
+            aria-expanded={rawOpen}
             onClick={() => setRawOpen(prev => !prev)}
           >
-            <span>{rawOpen ? '▾' : '▸'} 高级 JSON 配置</span>
+            <span>{rawOpen ? '▾' : '▸'} {t('高级 JSON 配置', 'Advanced JSON config')}</span>
           </button>
           {rawOpen && (
             <div className="ca-disclosure-body">
@@ -637,13 +643,13 @@ export function SchemaConfigForm({
               />
               {rawError && <p className="ca-error-text">{rawError}</p>}
               {!disabled && (
-                <div className="ca-inline-end" style={{ marginTop: 6 }}>
+                <div className="ca-inline-end ca-mt-2">
                   <button
                     type="button"
                     className="ca-btn ca-btn-secondary ca-btn-sm"
                     onClick={applyRawJson}
                   >
-                    应用 JSON
+                    {t('应用 JSON', 'Apply JSON')}
                   </button>
                 </div>
               )}
@@ -655,7 +661,7 @@ export function SchemaConfigForm({
       {submitLabel && (
         <div className="ca-form-actions">
           <button type="submit" className="ca-btn ca-btn-primary" disabled={disabled || submitBusy}>
-            {submitBusy ? '保存中…' : submitLabel}
+            {submitBusy ? t('保存中…', 'Saving…') : submitLabel}
           </button>
         </div>
       )}

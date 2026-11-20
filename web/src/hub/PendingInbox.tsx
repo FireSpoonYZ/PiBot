@@ -13,7 +13,7 @@ import type { ScopeConversation } from '../gbot-ui';
 import type { UnifiedBotItem } from './shared';
 import { GrokBotAvatar, resolveBotAvatarPreset } from '../GrokBotAvatar';
 import { botAvatarKey } from '../botAvatarSync';
-import { errorText, humanizeError, useText } from '../ui';
+import { ErrorNotice, errorText, humanizeError, splitErrorCode, useText } from '../ui';
 import './pending.css';
 
 interface Props {
@@ -49,10 +49,16 @@ function formatWhen(iso: string, yesterday: string): string {
 }
 
 export function PendingInbox({ api, identity, transportConnected, devices, bots, rooms, onOpenSettings }: Props): ReactNode {
-  const t = useText();
+  const text = useText();
+  const textRef = useRef(text);
+  textRef.current = text;
+  const t = useCallback((zh: string, en: string) => textRef.current(zh, en), []);
   const [items, setItems] = useState<PendingRecord[]>([]);
   const [intents, setIntents] = useState<DesktopUiIntent[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [loadError, setLoadError] = useState('');
+  const [reloadTick, setReloadTick] = useState(0);
+  const [settled, setSettled] = useState<{ api: DesktopPanelApi | null; key: string }>({ api: null, key: '' });
   const [busyId, setBusyId] = useState<string | null>(null);
   const [doneOpen, setDoneOpen] = useState(false);
   const epochRef = useRef(0);
@@ -72,30 +78,67 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
   const identityKey = identity
     ? [identity.profileId, identity.kind, identity.targetDeviceId, identity.generation].join('|')
     : '';
+  const devicesKey = identity?.kind === 'relay' ? devices.map(d => d.deviceId).join(',') : '';
+  const fetchKey = api && identity && (identity.kind !== 'relay' || devices.length > 0)
+    ? `${identityKey}|${devicesKey}|${reloadTick}`
+    : '';
+  const loading = Boolean(fetchKey) && (settled.api !== api || settled.key !== fetchKey);
+  const retry = useCallback(() => {
+    setLoadError('');
+    setReloadTick(v => v + 1);
+  }, []);
+
   useEffect(() => {
     const epoch = ++epochRef.current;
     setItems([]);
     setErrors({});
-    if (!api || !identity) return;
+    setLoadError('');
+    if (!api || !identity || !fetchKey) {
+      setSettled({ api, key: fetchKey });
+      return;
+    }
     // relay 覆盖目录全部设备；local 只有本机目标。
     const targets: DesktopIdentity[] = identity.kind === 'relay'
       ? devices.map(d => api.identityForTarget(d.deviceId))
       : [identity];
-    if (targets.length === 0) return;
+    if (targets.length === 0) {
+      setSettled({ api, key: fetchKey });
+      return;
+    }
     let cancelled = false;
     // shortcut: 每台设备只取前 50 条，队列很长时再加分页
-    void Promise.all(targets.map(target =>
-      api.pending(target, 'pending_list', { options: { limit: 50, cursor: null } }).catch(() => null),
-    )).then(pages => {
+    void Promise.allSettled(targets.map(target =>
+      Promise.resolve().then(() => api.pending(target, 'pending_list', { options: { limit: 50, cursor: null } })),
+    )).then(results => {
       // 旧身份（epoch 已推进）或已卸载的结果直接丢弃，同 PendingPanel.isCurrent。
       if (cancelled || epochRef.current !== epoch) return;
-      const merged = pages.flatMap(p => p?.items ?? []);
+      const merged: PendingRecord[] = [];
+      const failures: string[] = [];
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          merged.push(...(result.value?.items ?? []));
+        } else {
+          const reason = result.reason;
+          let msg = '';
+          if (reason instanceof Error && reason.message) {
+            msg = reason.message;
+          } else if (typeof reason === 'string' && reason.trim()) {
+            msg = reason.trim();
+          } else if (typeof reason === 'object' && reason !== null) {
+            const parsed = splitErrorCode(reason);
+            msg = parsed.code && parsed.message ? `${parsed.code}: ${parsed.message}` : (parsed.message || parsed.code || '');
+          }
+          failures.push(msg || t('加载待发送消息失败', 'Failed to load pending messages'));
+        }
+      }
       merged.sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
       setItems(merged);
+      setLoadError(failures.length > 0 ? failures[0] : '');
+      setSettled({ api, key: fetchKey });
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, identityKey, devices]);
+  }, [api, fetchKey]);
 
   /** 每条记录用它自己的 targetDeviceId 对应 identity 执行操作。 */
   const identityForRecord = useCallback((record: { targetDeviceId: string }): DesktopIdentity | null => {
@@ -190,7 +233,7 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
       ? rooms.find(r => r.scope.scope.scopeId === item.scopeId)
       : undefined;
     const title = item.kind === 'primary'
-      ? (bot?.role || t('已删除的智能体', 'Deleted assistant'))
+      ? (bot?.role || t('已删除的 Bot', 'Deleted Bot'))
       : (room?.title || t('群聊', 'Group chat'));
     const time = formatWhen(item.updatedAt || item.createdAt, t('昨天', 'Yesterday'));
     const subtitle = deviceName(item.targetDeviceId) + (time ? ' · ' + time : '');
@@ -252,10 +295,10 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
                 size={44}
               />
             ) : (
-              <span className="pending-card-fallback-icon"><MessageSquare size={22} /></span>
+              <span className="pending-card-fallback-icon" aria-hidden="true"><MessageSquare size={22} /></span>
             )
           ) : (
-            <span className="pending-card-fallback-icon"><Users size={22} /></span>
+            <span className="pending-card-fallback-icon" aria-hidden="true"><Users size={22} /></span>
           )}
         </div>
         <div className="pending-card-main">
@@ -278,11 +321,11 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
     const anyBusy = busyId !== null;
     const params = intent.params as { role?: string; title?: string; input?: { title?: string } };
     const name =
-      intent.method === 'createBot' ? (params.role || t('智能体', 'Assistant'))
+      intent.method === 'createBot' ? (params.role || t('Bot', 'Bot'))
       : intent.method === 'deleteScope' ? t('群聊', 'Group chat')
       : (params.title || params.input?.title || t('群聊', 'Group chat'));
     const title =
-      intent.method === 'createBot' ? t('创建智能体「' + name + '」', 'Create assistant "' + name + '"')
+      intent.method === 'createBot' ? t('创建 Bot「' + name + '」', 'Create Bot "' + name + '"')
       : intent.method === 'createScope' ? t('创建群聊「' + name + '」', 'Create group "' + name + '"')
       : intent.method === 'updateScope' ? t('更新群聊「' + name + '」', 'Update group "' + name + '"')
       : t('解散群聊', 'Dissolve group');
@@ -322,7 +365,7 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
     return (
       <div key={intent.id} className="pending-card">
         <div className="pending-card-avatar">
-          <span className="pending-card-fallback-icon">{intent.method === 'createBot' ? <Bot size={22} /> : <Users size={22} />}</span>
+          <span className="pending-card-fallback-icon" aria-hidden="true">{intent.method === 'createBot' ? <Bot size={22} /> : <Users size={22} />}</span>
         </div>
         <div className="pending-card-main">
           <div className="pending-card-head">
@@ -340,10 +383,46 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
     );
   };
 
+  if (loading) {
+    return (
+      <div
+        className="pending-inbox"
+        role="status"
+        aria-busy="true"
+        aria-label={t('正在加载待发送消息', 'Loading pending messages')}
+      >
+        {[0, 1, 2].map(idx => (
+          <div key={idx} className="pending-card is-skeleton" aria-hidden="true">
+            <div className="pending-card-avatar">
+              <span className="pending-skeleton-avatar" />
+            </div>
+            <div className="pending-card-main">
+              <span className="pending-skeleton-line is-title" />
+              <span className="pending-skeleton-line is-body" />
+              <span className="pending-skeleton-line is-foot" />
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (api && loadError && isEmpty) {
+    return (
+      <div className="pending-inbox">
+        <ErrorNotice
+          error={loadError}
+          actionLabel={t('重试', 'Retry')}
+          onAction={retry}
+        />
+      </div>
+    );
+  }
+
   if (!api || isEmpty) {
     return (
       <section className="pending-inbox-empty grok-card-group grok-schedule-empty">
-        <Inbox size={36} className="grok-row-icon" />
+        <Inbox size={36} className="grok-row-icon" aria-hidden="true" />
         <h4>{t('没有待发送的消息', 'Nothing waiting to send')}</h4>
         <p>{api
           ? t('离线时发出的消息会暂存在这里，联网后可以继续发送。',
@@ -361,6 +440,14 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
 
   return (
     <div className="pending-inbox">
+      {loadError && (
+        <ErrorNotice
+          error={loadError}
+          actionLabel={t('重试', 'Retry')}
+          onAction={retry}
+          compact
+        />
+      )}
       {offline && (
         <p className="pending-inbox-offline">
           {t('当前未联网。可以删除消息，联网后才能发送。',
@@ -373,8 +460,8 @@ export function PendingInbox({ api, identity, transportConnected, devices, bots,
         <section className="pending-done">
           <button type="button" className="pending-done-toggle" onClick={() => setDoneOpen(o => !o)}
             aria-expanded={doneOpen}>
-            {doneOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-            <span>{t('已完成', 'Done')}（{doneCount}）</span>
+            {doneOpen ? <ChevronUp size={16} aria-hidden="true" /> : <ChevronDown size={16} aria-hidden="true" />}
+            <span>{t(`已完成（${doneCount}）`, `Done (${doneCount})`)}</span>
           </button>
           {doneOpen && (
             <>

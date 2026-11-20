@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
 import { Check, Plus, RefreshCw, RotateCcw, Search, Star, Trash2 } from 'lucide-react';
 import { ANTIGRAVITY_PROVIDER_ID } from '../../../center-contract/antigravity.js';
+import { useText } from '../ui';
 import { CenterApiError, errorMessage } from './transport';
 import type { CenterApi } from './transport';
 import { openExternalUrl } from './openExternalUrl';
@@ -14,6 +15,7 @@ import {
   CaSwitch,
   CopyButton,
   formatTime,
+  useUiLocale,
 } from './primitives';
 import type {
   CenterDevice,
@@ -53,26 +55,32 @@ const API_PROTOCOLS = [
   { value: 'google-generative-ai', label: 'Google Generative AI' },
 ];
 
+type TranslateFn = (zh: string, en: string) => string;
+
 type ThinkingChoice = '' | 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
-const THINKING_OPTIONS: readonly { value: ThinkingChoice; label: string }[] = [
-  { value: '', label: '默认' },
-  { value: 'off', label: '关闭' },
-  { value: 'minimal', label: '极低' },
-  { value: 'low', label: '低' },
-  { value: 'medium', label: '中' },
-  { value: 'high', label: '高' },
-  { value: 'xhigh', label: '很高' },
-  { value: 'max', label: '最高' },
-];
+function getThinkingOptions(t: TranslateFn): readonly { value: ThinkingChoice; label: string }[] {
+  return [
+    { value: '', label: t('默认', 'Default') },
+    { value: 'off', label: t('关闭', 'Off') },
+    { value: 'minimal', label: t('极低', 'Minimal') },
+    { value: 'low', label: t('低', 'Low') },
+    { value: 'medium', label: t('中', 'Medium') },
+    { value: 'high', label: t('高', 'High') },
+    { value: 'xhigh', label: t('很高', 'Very High') },
+    { value: 'max', label: t('最高', 'Max') },
+  ];
+}
 
 type CodeModeChoice = 'off' | 'on' | 'only';
 
-const CODEMODE_OPTIONS: readonly { value: CodeModeChoice; label: string }[] = [
-  { value: 'off', label: '标准工具' },
-  { value: 'on', label: '开启 Code Mode' },
-  { value: 'only', label: '仅 Code Mode' },
-];
+function getCodeModeOptions(t: TranslateFn): readonly { value: CodeModeChoice; label: string }[] {
+  return [
+    { value: 'off', label: t('标准工具', 'Standard tools') },
+    { value: 'on', label: t('开启 Code Mode', 'Enable Code Mode') },
+    { value: 'only', label: t('仅 Code Mode', 'Code Mode only') },
+  ];
+}
 
 const EXTRA_MODEL_KEYS = [
   'api',
@@ -133,6 +141,11 @@ export function ProvidersTab({
   api: CenterApi;
   onOpenExternalUrl?: (url: string) => void | Promise<unknown>;
 }): React.JSX.Element {
+  const t = useText();
+  const locale = useUiLocale();
+  const thinkingOptions = useMemo(() => getThinkingOptions(t), [t]);
+  const codeModeOptions = useMemo(() => getCodeModeOptions(t), [t]);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -235,7 +248,7 @@ export function ProvidersTab({
     setLoading(true);
     refreshPageData()
       .catch(err => {
-        if (active) setError(errorMessage(err, '加载模型配置失败'));
+        if (active) setError(errorMessage(err, t('加载模型配置失败', 'Failed to load model settings')));
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -243,7 +256,7 @@ export function ProvidersTab({
     return () => {
       active = false;
     };
-  }, [refreshPageData]);
+  }, [refreshPageData, t]);
 
   const stopFlowPoll = useCallback(() => {
     if (flowTimerRef.current !== null) {
@@ -276,10 +289,10 @@ export function ProvidersTab({
         }
         setCredential(cred);
       } catch (err) {
-        setDrawerError(errorMessage(err, '读取服务商详情失败'));
+        setDrawerError(errorMessage(err, t('读取服务商详情失败', 'Failed to load provider details')));
       }
     },
-    [api],
+    [api, t],
   );
 
   const openExistingProvider = (provider: Provider) => {
@@ -384,7 +397,7 @@ export function ProvidersTab({
       setPicker(refreshedPicker);
       if (successMsg) setNotice(successMsg);
     } catch (err) {
-      setError(errorMessage(err, '保存全局默认模型失败'));
+      setError(errorMessage(err, t('保存全局默认模型失败', 'Failed to save global default model')));
     } finally {
       setPickerBusy(false);
     }
@@ -395,7 +408,7 @@ export function ProvidersTab({
       const res = await api.setModelStar(modelRef, nextStar);
       setPicker(prev => (prev ? { ...prev, starredModels: res.starredModels } : prev));
     } catch (err) {
-      setError(errorMessage(err, '收藏状态更新失败'));
+      setError(errorMessage(err, t('收藏状态更新失败', 'Failed to update star status')));
     }
   };
 
@@ -406,9 +419,15 @@ export function ProvidersTab({
       const res = await api.syncModelCatalog();
       await refreshPageData();
       if (res.error) setError(res.error);
-      else setNotice(`模型目录已同步${res.modelsAdded ? `（新增 ${res.modelsAdded} 个）` : ''}`);
+      else {
+        setNotice(
+          res.modelsAdded
+            ? t(`模型目录已同步（新增 ${res.modelsAdded} 个）`, `Model catalog synced (${res.modelsAdded} added)`)
+            : t('模型目录已同步', 'Model catalog synced'),
+        );
+      }
     } catch (err) {
-      setError(errorMessage(err, '同步模型目录失败'));
+      setError(errorMessage(err, t('同步模型目录失败', 'Failed to sync model catalog')));
     } finally {
       setSyncBusy(false);
     }
@@ -431,7 +450,7 @@ export function ProvidersTab({
       const pickerRes = await api.getModelPicker();
       setPicker(pickerRes);
     } catch (err) {
-      setError(errorMessage(err, '切换服务商状态失败'));
+      setError(errorMessage(err, t('切换服务商状态失败', 'Failed to toggle provider status')));
     } finally {
       setTogglingProviderId(null);
     }
@@ -446,17 +465,17 @@ export function ProvidersTab({
     try {
       const raw = JSON.parse(customJson || '{}') as unknown;
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-        setDrawerError('高级协议覆盖必须是 JSON 对象');
+        setDrawerError(t('高级协议覆盖必须是 JSON 对象', 'Advanced protocol overrides must be a JSON object'));
         return;
       }
       parsedCustom = raw as JsonObject;
     } catch (err) {
-      setDrawerError(err instanceof Error ? err.message : '高级协议 JSON 解析失败');
+      setDrawerError(err instanceof Error ? err.message : t('高级协议 JSON 解析失败', 'Failed to parse advanced protocol JSON'));
       return;
     }
 
     if (!edit.native && !edit.baseUrl.trim() && typeof parsedCustom.baseUrl !== 'string') {
-      setDrawerError('请填写 API Base URL（例如 https://api.example.com/v1）');
+      setDrawerError(t('请填写 API Base URL（例如 https://api.example.com/v1）', 'Please enter an API Base URL (e.g. https://api.example.com/v1)'));
       return;
     }
 
@@ -519,9 +538,12 @@ export function ProvidersTab({
         setValidatingProvider(true);
         try {
           const check = await api.validateProvider(saved.id, {});
-          verifyMsg = check.ok ? `连接验证通过：${check.message}` : `已保存，但验证未通过：${check.message}`;
+          verifyMsg = check.ok
+            ? t(`连接验证通过：${check.message}`, `Connection verified: ${check.message}`)
+            : t(`已保存，但验证未通过：${check.message}`, `Saved, but verification failed: ${check.message}`);
         } catch (vErr) {
-          verifyMsg = `已保存，验证失败：${errorMessage(vErr)}`;
+          const errMsg = errorMessage(vErr, t('操作失败', 'Operation failed'));
+          verifyMsg = t(`已保存，验证失败：${errMsg}`, `Saved, verification failed: ${errMsg}`);
         } finally {
           setValidatingProvider(false);
         }
@@ -529,9 +551,9 @@ export function ProvidersTab({
 
       await refreshPageData();
       await loadProviderDetails(saved);
-      setDrawerNotice(verifyMsg || (creating ? '服务商已创建并启用' : '配置已保存'));
+      setDrawerNotice(verifyMsg || (creating ? t('服务商已创建并启用', 'Provider created and enabled') : t('配置已保存', 'Settings saved')));
     } catch (err) {
-      setDrawerError(errorMessage(err, '保存服务商失败'));
+      setDrawerError(errorMessage(err, t('保存服务商失败', 'Failed to save provider')));
     } finally {
       setSavingProvider(false);
     }
@@ -544,10 +566,10 @@ export function ProvidersTab({
     setDrawerNotice('');
     try {
       const res = await api.validateProvider(edit.id, keyValue.trim() ? { apiKey: keyValue.trim() } : {});
-      if (res.ok) setDrawerNotice(`连接正常：${res.message}`);
-      else setDrawerError(`连接验证失败：${res.message}`);
+      if (res.ok) setDrawerNotice(t(`连接正常：${res.message}`, `Connection OK: ${res.message}`));
+      else setDrawerError(t(`连接验证失败：${res.message}`, `Connection check failed: ${res.message}`));
     } catch (err) {
-      setDrawerError(errorMessage(err, '验证连接失败'));
+      setDrawerError(errorMessage(err, t('验证连接失败', 'Failed to verify connection')));
     } finally {
       setValidatingProvider(false);
     }
@@ -556,8 +578,8 @@ export function ProvidersTab({
   const handleDeleteProvider = async () => {
     if (!edit || creating) return;
     const msg = edit.native
-      ? `确定重置内置服务商「${edit.name}」的凭据与自定义配置吗？`
-      : `确定删除自定义服务商「${edit.name}」及其所有模型吗？`;
+      ? t(`确定重置内置服务商「${edit.name}」的凭据与自定义配置吗？`, `Reset credentials and custom settings for built-in provider "${edit.name}"?`)
+      : t(`确定删除自定义服务商「${edit.name}」及其所有模型吗？`, `Delete custom provider "${edit.name}" and all its models?`);
     if (!window.confirm(msg)) return;
     setSavingProvider(true);
     setDrawerError('');
@@ -566,9 +588,9 @@ export function ProvidersTab({
       setDrawerOpen(false);
       setEdit(null);
       await refreshPageData();
-      setNotice(edit.native ? `已重置 ${edit.name}` : `已删除 ${edit.name}`);
+      setNotice(edit.native ? t(`已重置 ${edit.name}`, `Reset ${edit.name}`) : t(`已删除 ${edit.name}`, `Deleted ${edit.name}`));
     } catch (err) {
-      setDrawerError(errorMessage(err, '删除服务商失败'));
+      setDrawerError(errorMessage(err, t('删除服务商失败', 'Failed to delete provider')));
     } finally {
       setSavingProvider(false);
     }
@@ -585,7 +607,7 @@ export function ProvidersTab({
           if (state.status === 'pending') {
             flowTimerRef.current = window.setTimeout(() => void tick(), 1200);
           } else if (state.status === 'complete') {
-            setDrawerNotice('OAuth 授权已完成');
+            setDrawerNotice(t('OAuth 授权已完成', 'OAuth authorization completed'));
             const updatedProvider = await api.getProvider(providerId);
             setEdit(updatedProvider);
             await refreshPageData();
@@ -594,12 +616,12 @@ export function ProvidersTab({
             setDrawerError(state.error);
           }
         } catch (err) {
-          setDrawerError(errorMessage(err, '获取授权进度失败'));
+          setDrawerError(errorMessage(err, t('获取授权进度失败', 'Failed to check authorization status')));
         }
       };
       void tick();
     },
-    [api, loadProviderDetails, refreshPageData, stopFlowPoll],
+    [api, loadProviderDetails, refreshPageData, stopFlowPoll, t],
   );
 
   const handleStartOAuth = async () => {
@@ -613,7 +635,7 @@ export function ProvidersTab({
       setFlow({ status: 'pending', events: [], prompt: null, error: null });
       pollLoginFlow(edit.id, nextId);
     } catch (err) {
-      setDrawerError(errorMessage(err, '启动 OAuth 登录失败'));
+      setDrawerError(errorMessage(err, t('启动 OAuth 登录失败', 'Failed to start OAuth login')));
     } finally {
       setAuthBusy(false);
     }
@@ -628,7 +650,7 @@ export function ProvidersTab({
       setPromptInput('');
       pollLoginFlow(edit.id, flowId);
     } catch (err) {
-      setDrawerError(errorMessage(err, '提交授权输入失败'));
+      setDrawerError(errorMessage(err, t('提交授权输入失败', 'Failed to submit authorization input')));
     } finally {
       setAuthBusy(false);
     }
@@ -656,13 +678,13 @@ export function ProvidersTab({
       setAuthStatus(next);
       setAuthByProvider(prev => ({ ...prev, [edit.id]: next }));
       if (next.method === 'oauth') {
-        setDrawerError('退出 OAuth 授权未生效，请重试');
+        setDrawerError(t('退出 OAuth 授权未生效，请重试', 'OAuth sign-out did not take effect, please try again'));
       } else {
-        setDrawerNotice('已退出 OAuth 授权');
+        setDrawerNotice(t('已退出 OAuth 授权', 'Signed out of OAuth'));
         void refreshPageData().catch(() => {});
       }
     } catch (err) {
-      setDrawerError(errorMessage(err, '退出授权失败'));
+      setDrawerError(errorMessage(err, t('退出授权失败', 'Failed to sign out')));
     } finally {
       setAuthBusy(false);
     }
@@ -681,7 +703,7 @@ export function ProvidersTab({
       const pickerRes = await api.getModelPicker();
       setPicker(pickerRes);
     } catch (err) {
-      setDrawerError(errorMessage(err, '切换模型状态失败'));
+      setDrawerError(errorMessage(err, t('切换模型状态失败', 'Failed to toggle model status')));
     }
   };
 
@@ -716,7 +738,7 @@ export function ProvidersTab({
     if (!edit || !modelDraft) return;
     const trimmedId = modelDraft.id.trim();
     if (!trimmedId) {
-      setModelError('请填写模型 ID');
+      setModelError(t('请填写模型 ID', 'Please enter a model ID'));
       return;
     }
 
@@ -724,12 +746,12 @@ export function ProvidersTab({
     try {
       const parsed = JSON.parse(modelExtraJson || '{}') as unknown;
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        setModelError('高级协议覆盖必须是 JSON 对象');
+        setModelError(t('高级协议覆盖必须是 JSON 对象', 'Advanced protocol overrides must be a JSON object'));
         return;
       }
       extra = parsed as Record<string, unknown>;
     } catch (err) {
-      setModelError(err instanceof Error ? err.message : '高级覆盖 JSON 解析失败');
+      setModelError(err instanceof Error ? err.message : t('高级覆盖 JSON 解析失败', 'Failed to parse advanced overrides JSON'));
       return;
     }
 
@@ -763,9 +785,13 @@ export function ProvidersTab({
       setModelModalOpen(false);
       await loadProviderDetails(edit);
       await refreshPageData();
-      setDrawerNotice(modelCreating ? `已添加模型 ${payload.name}` : `已更新模型 ${payload.name}`);
+      setDrawerNotice(
+        modelCreating
+          ? t(`已添加模型 ${payload.name}`, `Added model ${payload.name}`)
+          : t(`已更新模型 ${payload.name}`, `Updated model ${payload.name}`),
+      );
     } catch (err) {
-      setModelError(errorMessage(err, '保存模型失败'));
+      setModelError(errorMessage(err, t('保存模型失败', 'Failed to save model')));
     } finally {
       setModelSaving(false);
     }
@@ -773,7 +799,7 @@ export function ProvidersTab({
 
   const handleDeleteModel = async (model: Model, fromModal = false) => {
     if (!edit) return;
-    if (!window.confirm(`确定移除模型「${model.name || model.id}」吗？`)) return;
+    if (!window.confirm(t(`确定移除模型「${model.name || model.id}」吗？`, `Remove model "${model.name || model.id}"?`))) return;
     setDrawerError('');
     if (fromModal) setModelError('');
     if (fromModal) setModelSaving(true);
@@ -782,9 +808,9 @@ export function ProvidersTab({
       if (fromModal) setModelModalOpen(false);
       await loadProviderDetails(edit);
       await refreshPageData();
-      setDrawerNotice(`已移除模型 ${model.name || model.id}`);
+      setDrawerNotice(t(`已移除模型 ${model.name || model.id}`, `Removed model ${model.name || model.id}`));
     } catch (err) {
-      const msg = errorMessage(err, '移除模型失败');
+      const msg = errorMessage(err, t('移除模型失败', 'Failed to remove model'));
       if (fromModal) setModelError(msg);
       else setDrawerError(msg);
     } finally {
@@ -806,7 +832,7 @@ export function ProvidersTab({
       setDiscovered(candidates);
       setSelectedIds(new Set(candidates.map(m => m.id)));
     } catch (err) {
-      setDiscoverError(errorMessage(err, '从接口拉取模型列表失败'));
+      setDiscoverError(errorMessage(err, t('从接口拉取模型列表失败', 'Failed to fetch models from API')));
     } finally {
       setDiscoverBusy(false);
     }
@@ -856,11 +882,11 @@ export function ProvidersTab({
       await refreshPageData();
       setDrawerNotice(
         discoverMode === 'restore'
-          ? `已恢复 ${chosen.length} 个模型`
-          : `已添加 ${chosen.length} 个模型`,
+          ? t(`已恢复 ${chosen.length} 个模型`, `Restored ${chosen.length} models`)
+          : t(`已添加 ${chosen.length} 个模型`, `Added ${chosen.length} models`),
       );
     } catch (err) {
-      setDiscoverError(errorMessage(err, '批量保存模型失败'));
+      setDiscoverError(errorMessage(err, t('批量保存模型失败', 'Failed to save models')));
     } finally {
       setDiscoverBusy(false);
     }
@@ -903,21 +929,21 @@ export function ProvidersTab({
     const auth = authByProvider[p.id];
     const parts: string[] = [];
     if (auth?.method === 'oauth') {
-      parts.push('OAuth 已授权');
+      parts.push(t('OAuth 已授权', 'OAuth authorized'));
     } else if (p.id === ANTIGRAVITY_PROVIDER_ID && auth && auth.method === 'none') {
-      parts.push('未授权');
+      parts.push(t('未授权', 'Not authorized'));
     } else if (p.configured || p.credentialRef) {
-      parts.push('已配置');
+      parts.push(t('已配置', 'Configured'));
     } else {
-      parts.push('未配置凭据');
+      parts.push(t('未配置凭据', 'No credentials'));
     }
-    if (count > 0) parts.push(`${count} 个模型可用`);
-    else if (!p.enabled) parts.push('已停用');
+    if (count > 0) parts.push(t(`${count} 个模型可用`, `${count} models available`));
+    else if (!p.enabled) parts.push(t('已停用', 'Disabled'));
     return parts.join(' · ');
   };
 
   if (loading) {
-    return <div className="ca-empty">正在加载模型与服务商配置…</div>;
+    return <div className="ca-empty">{t('正在加载模型与服务商配置…', 'Loading models and providers…')}</div>;
   }
 
   return (
@@ -928,7 +954,7 @@ export function ProvidersTab({
           tone="ok"
           action={
             <button type="button" className="ca-btn ca-btn-ghost ca-btn-sm" onClick={() => setNotice('')}>
-              关闭
+              {t('关闭', 'Close')}
             </button>
           }
         >
@@ -941,19 +967,19 @@ export function ProvidersTab({
         <div className="ca-default-card">
           <div className="ca-row-main">
             <div className="ca-row-title">
-              <span>全局默认模型</span>
+              <span>{t('全局默认模型', 'Global default model')}</span>
               {currentDefaultItem ? (
                 <span className="ca-pill ca-pill-ok">{currentDefaultItem.name}</span>
               ) : currentGlobalModelRef ? (
                 <span className="ca-pill ca-pill-muted">{currentGlobalModelRef}</span>
               ) : (
-                <span className="ca-pill ca-pill-warn">尚未设置默认模型</span>
+                <span className="ca-pill ca-pill-warn">{t('尚未设置默认模型', 'No default model set')}</span>
               )}
             </div>
             <div className="ca-row-sub">
               {currentDefaultItem
-                ? `${currentDefaultItem.modelRef} · 上下文 ${Math.round(currentDefaultItem.contextWindow / 1000)}k`
-                : '未单独指定模型的智能体将默认使用此模型'}
+                ? t(`${currentDefaultItem.modelRef} · 上下文 ${Math.round(currentDefaultItem.contextWindow / 1000)}k`, `${currentDefaultItem.modelRef} · Context ${Math.round(currentDefaultItem.contextWindow / 1000)}k`)
+                : t('未单独指定模型的 Bot 将默认使用此模型', 'Bots without a dedicated model will use this default')}
             </div>
           </div>
           <div className="ca-row-actions">
@@ -966,63 +992,56 @@ export function ProvidersTab({
                 setPickerOpen(true);
               }}
             >
-              {currentGlobalModelRef ? '更换默认模型' : '选择默认模型'}
+              {currentGlobalModelRef ? t('更换默认模型', 'Change default model') : t('选择默认模型', 'Select default model')}
             </button>
           </div>
         </div>
 
-        {/* 仅在当前默认模型支持推理时展示中文思考强度胶囊 */}
+        {/* 仅在当前默认模型支持推理时展示思考强度胶囊 */}
         {currentDefaultItem?.reasoning && (
-          <div
-            style={{
-              padding: '10px 16px',
-              borderTop: '1px solid var(--ca-border)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: 10,
-              flexWrap: 'wrap',
-            }}
-          >
-            <span className="ca-field-label">思考强度</span>
+          <div className="ca-default-subbar">
+            <span className="ca-field-label">{t('思考强度', 'Thinking effort')}</span>
             <CaChips
               value={currentThinking}
-              options={THINKING_OPTIONS}
-              onChange={val => void saveGlobalSelection({ thinkingLevel: val || null }, '思考强度已保存')}
+              options={thinkingOptions}
+              ariaLabel={t('思考强度', 'Thinking effort')}
+              onChange={val => void saveGlobalSelection({ thinkingLevel: val || null }, t('思考强度已保存', 'Thinking effort saved'))}
             />
           </div>
         )}
 
         {/* 高级工具调用方式 & 目录同步折叠区 */}
-        <div style={{ padding: '0 16px 12px' }}>
-          <CaDisclosure title="高级设置（工具调用方式 / 模型目录同步）">
+        <div className="ca-default-disclosure-wrap">
+          <CaDisclosure title={t('高级设置（工具调用方式 / 模型目录同步）', 'Advanced (Tool calling / Model catalog sync)')}>
             <div className="ca-form-stack">
-              <div className="ca-inline-between" style={{ flexWrap: 'wrap' }}>
+              <div className="ca-inline-between ca-wrap">
                 <div>
-                  <div className="ca-field-label">工具调用模式</div>
-                  <div className="ca-muted">控制模型通过标准 Function Calling 还是代码沙箱执行工具</div>
+                  <div className="ca-field-label">{t('工具调用模式', 'Tool calling mode')}</div>
+                  <div className="ca-muted">{t('控制模型通过标准 Function Calling 还是代码沙箱执行工具', 'Control whether models call tools via standard Function Calling or code sandbox')}</div>
                 </div>
                 <CaSegmented
                   value={currentCodeMode}
-                  options={CODEMODE_OPTIONS}
+                  options={codeModeOptions}
+                  ariaLabel={t('工具调用模式', 'Tool calling mode')}
                   onChange={val =>
                     void saveGlobalSelection(
                       {
                         codemode: val === 'on' || val === 'only',
                         codemodeOnly: val === 'only',
                       },
-                      '工具调用模式已更新',
+                      t('工具调用模式已更新', 'Tool calling mode updated'),
                     )
                   }
                 />
               </div>
 
-              <div className="ca-inline-between" style={{ flexWrap: 'wrap' }}>
+              <div className="ca-inline-between ca-wrap">
                 <div>
-                  <div className="ca-field-label">内置模型目录同步</div>
+                  <div className="ca-field-label">{t('内置模型目录同步', 'Built-in model catalog sync')}</div>
                   <div className="ca-muted">
-                    最近同步：{picker?.sync.syncedAt ? formatTime(picker.sync.syncedAt) : '尚未同步'}
-                    {picker?.sync.error ? `（${picker.sync.error}）` : ''}
+                    {t('最近同步：', 'Last synced: ')}
+                    {picker?.sync.syncedAt ? formatTime(picker.sync.syncedAt, locale) : t('尚未同步', 'Not synced yet')}
+                    {picker?.sync.error ? t(`（${picker.sync.error}）`, ` (${picker.sync.error})`) : ''}
                   </div>
                 </div>
                 <button
@@ -1032,7 +1051,7 @@ export function ProvidersTab({
                   onClick={() => void handleSyncCatalog()}
                 >
                   <RefreshCw size={13} />
-                  <span>{syncBusy ? '同步中…' : '同步目录'}</span>
+                  <span>{syncBusy ? t('同步中…', 'Syncing…') : t('同步目录', 'Sync catalog')}</span>
                 </button>
               </div>
             </div>
@@ -1044,28 +1063,31 @@ export function ProvidersTab({
       <section className="ca-section">
         <div className="ca-section-head">
           <div className="ca-inline-row">
-            <h3 className="ca-section-title">模型服务商</h3>
+            <h3 className="ca-section-title">{t('模型服务商', 'Model providers')}</h3>
             <CaSegmented
               value={providerFilter}
-              options={[{ value: 'enabled', label: '已启用' }, { value: 'all', label: '全部' }]}
+              ariaLabel={t('服务商筛选', 'Filter providers')}
+              options={[
+                { value: 'enabled', label: t('已启用', 'Enabled') },
+                { value: 'all', label: t('全部', 'All') },
+              ]}
               onChange={setProviderFilter}
             />
           </div>
           <div className="ca-toolbar-group ca-provider-toolbar">
             <div className="ca-inline-row ca-provider-search">
-              <Search size={14} style={{ position: 'absolute', left: 9, color: 'var(--ca-text-muted)' }} />
+              <Search size={14} className="ca-provider-search-icon" aria-hidden="true" />
               <input
                 type="search"
                 className="ca-input"
-                style={{ paddingLeft: 28, paddingTop: 4, paddingBottom: 4 }}
-                placeholder="筛选服务商…"
+                placeholder={t('筛选服务商…', 'Filter providers…')}
                 value={providerQuery}
                 onChange={e => setProviderQuery(e.target.value)}
               />
             </div>
             <button type="button" className="ca-btn ca-btn-sm" onClick={openCreateProvider}>
               <Plus size={14} />
-              <span>自定义服务商</span>
+              <span>{t('自定义服务商', 'Custom provider')}</span>
             </button>
           </div>
         </div>
@@ -1074,31 +1096,31 @@ export function ProvidersTab({
           {sortedProviders.length === 0 ? (
             <div className="ca-empty">
               {providerFilter === 'enabled' && !providerQuery.trim()
-                ? '暂无已启用的服务商。切换到「全部」可查看并启用。'
-                : '没有匹配的服务商'}
+                ? t('暂无已启用的服务商。切换到「全部」可查看并启用。', 'No enabled providers yet. Switch to "All" to view and enable providers.')
+                : t('没有匹配的服务商', 'No matching providers')}
             </div>
           ) : (
             sortedProviders.map(provider => (
-              <div
-                key={provider.id}
-                className="ca-row is-clickable"
-                onClick={() => openExistingProvider(provider)}
-              >
-                <div className="ca-row-main">
-                  <div className="ca-row-title">
+              <div key={provider.id} className="ca-row ca-row-split">
+                <button
+                  type="button"
+                  className="ca-row-main ca-row-trigger"
+                  onClick={() => openExistingProvider(provider)}
+                >
+                  <span className="ca-row-title">
                     <span>{provider.name || provider.id}</span>
-                    {!provider.native && <span className="ca-pill ca-pill-muted">自定义</span>}
+                    {!provider.native && <span className="ca-pill ca-pill-muted">{t('自定义', 'Custom')}</span>}
                     {provider.id === ANTIGRAVITY_PROVIDER_ID && (
                       <span className="ca-pill ca-pill-info">Antigravity</span>
                     )}
-                  </div>
-                  <div className="ca-row-sub ca-num">{providerStatusSummary(provider)}</div>
-                </div>
-                <div className="ca-row-actions" onClick={e => e.stopPropagation()}>
+                  </span>
+                  <span className="ca-row-sub ca-num">{providerStatusSummary(provider)}</span>
+                </button>
+                <div className="ca-row-actions">
                   <CaSwitch
                     checked={provider.enabled}
                     disabled={togglingProviderId === provider.id}
-                    label={`启用 ${provider.name || provider.id}`}
+                    label={t(`启用 ${provider.name || provider.id}`, `Enable ${provider.name || provider.id}`)}
                     onChange={next => void handleToggleProviderRow(provider, next)}
                   />
                 </div>
@@ -1112,25 +1134,25 @@ export function ProvidersTab({
       <CaModal
         open={pickerOpen}
         onOpenChange={setPickerOpen}
-        title="选择全局默认模型"
-        description="默认显示全部可用模型，收藏模型自动置顶"
+        title={t('选择全局默认模型', 'Select global default model')}
+        description={t('默认显示全部可用模型，收藏模型自动置顶', 'Shows all available models by default with starred models pinned at the top')}
         variant="modal"
       >
         <div className="ca-form-stack">
-          <div className="ca-inline-between" style={{ gap: 8, flexWrap: 'wrap' }}>
+          <div className="ca-inline-between ca-wrap ca-picker-bar">
             <CaSegmented
               value={pickerFilter}
+              ariaLabel={t('模型筛选', 'Filter models')}
               options={[
-                { value: 'all', label: '全部' },
-                { value: 'starred', label: `★ 收藏 (${picker?.starredModels.length ?? 0})` },
+                { value: 'all', label: t('全部', 'All') },
+                { value: 'starred', label: t(`★ 收藏 (${picker?.starredModels.length ?? 0})`, `★ Starred (${picker?.starredModels.length ?? 0})`) },
               ]}
               onChange={setPickerFilter}
             />
             <input
               type="search"
-              className="ca-input"
-              style={{ maxWidth: 220 }}
-              placeholder="搜索模型名称或 ID…"
+              className="ca-input ca-picker-search"
+              placeholder={t('搜索模型名称或 ID…', 'Search model name or ID…')}
               value={pickerQuery}
               onChange={e => setPickerQuery(e.target.value)}
             />
@@ -1139,7 +1161,9 @@ export function ProvidersTab({
           <div className="ca-model-list">
             {sortedPickerModels.length === 0 ? (
               <div className="ca-empty">
-                {pickerFilter === 'starred' ? '暂无收藏模型，可切回“全部”查看' : '暂无可用模型，请先配置并启用服务商'}
+                {pickerFilter === 'starred'
+                  ? t('暂无收藏模型，可切回“全部”查看', 'No starred models yet. Switch back to "All" to browse.')
+                  : t('暂无可用模型，请先配置并启用服务商', 'No available models. Configure and enable a provider first.')}
               </div>
             ) : (
               sortedPickerModels.map(item => {
@@ -1148,45 +1172,37 @@ export function ProvidersTab({
                 return (
                   <div
                     key={item.modelRef}
-                    className={`ca-model-option ${isSelected ? 'is-selected' : ''}`}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => {
-                      if (pickerBusy) return;
-                      void saveGlobalSelection({ modelRef: item.modelRef }, `默认模型已切换为 ${item.name}`).then(
-                        () => setPickerOpen(false),
-                      );
-                    }}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        void saveGlobalSelection({ modelRef: item.modelRef }, `默认模型已切换为 ${item.name}`).then(
-                          () => setPickerOpen(false),
-                        );
-                      }
-                    }}
+                    className={`ca-model-option ca-model-option-split ${isSelected ? 'is-selected' : ''}`}
                   >
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <div className="ca-inline-row">
+                    <button
+                      type="button"
+                      className="ca-model-option-trigger"
+                      disabled={pickerBusy}
+                      onClick={() => {
+                        if (pickerBusy) return;
+                        void saveGlobalSelection(
+                          { modelRef: item.modelRef },
+                          t(`默认模型已切换为 ${item.name}`, `Default model switched to ${item.name}`),
+                        ).then(() => setPickerOpen(false));
+                      }}
+                    >
+                      <span className="ca-inline-row">
                         <span>{item.name}</span>
-                        {item.reasoning && <span className="ca-pill ca-pill-info">推理</span>}
+                        {item.reasoning && <span className="ca-pill ca-pill-info">{t('推理', 'Reasoning')}</span>}
                         {isSelected && <Check size={14} />}
-                      </div>
-                      <div className="ca-muted ca-mono">{item.modelRef}</div>
-                    </div>
+                      </span>
+                      <span className="ca-muted ca-mono">{item.modelRef}</span>
+                    </button>
                     <button
                       type="button"
                       className="ca-btn ca-btn-ghost ca-btn-icon"
-                      aria-label={isStarred ? '取消收藏' : '收藏模型'}
-                      onClick={e => {
-                        e.stopPropagation();
-                        void handleToggleStar(item.modelRef, !isStarred);
-                      }}
+                      aria-label={isStarred ? t('取消收藏', 'Unstar model') : t('收藏模型', 'Star model')}
+                      onClick={() => void handleToggleStar(item.modelRef, !isStarred)}
                     >
                       <Star
                         size={14}
+                        className={isStarred ? 'ca-star-icon is-starred' : 'ca-star-icon'}
                         fill={isStarred ? 'currentColor' : 'none'}
-                        color={isStarred ? '#f59e0b' : 'currentColor'}
                       />
                     </button>
                   </div>
@@ -1204,8 +1220,12 @@ export function ProvidersTab({
           if (!open) stopFlowPoll();
           setDrawerOpen(open);
         }}
-        title={creating ? '添加自定义服务商' : edit?.name || edit?.id || '服务商设置'}
-        description={creating ? '填写兼容接口地址与密钥后即可拉取模型' : `服务商 ID：${edit?.id ?? ''}`}
+        title={creating ? t('添加自定义服务商', 'Add custom provider') : edit?.name || edit?.id || t('服务商设置', 'Provider settings')}
+        description={
+          creating
+            ? t('填写兼容接口地址与密钥后即可拉取模型', 'Enter a compatible API URL and key to fetch models')
+            : t(`服务商 ID：${edit?.id ?? ''}`, `Provider ID: ${edit?.id ?? ''}`)
+        }
         variant="drawer"
         wide
       >
@@ -1224,11 +1244,11 @@ export function ProvidersTab({
 
           const baseUrlField = (
             <div className="ca-field">
-              <label className="ca-field-label">API 地址 (Base URL)</label>
+              <label className="ca-field-label">{t('API 地址 (Base URL)', 'API URL (Base URL)')}</label>
               <input
                 type="url"
                 className="ca-input"
-                placeholder={edit.native ? '留空保持内置默认地址' : 'https://api.example.com/v1'}
+                placeholder={edit.native ? t('留空保持内置默认地址', 'Leave empty for built-in default URL') : 'https://api.example.com/v1'}
                 value={edit.baseUrl}
                 onChange={e => setEdit({ ...edit, baseUrl: e.target.value })}
               />
@@ -1240,14 +1260,14 @@ export function ProvidersTab({
               <div className="ca-field-head">
                 <label className="ca-field-label">API Key</label>
                 <span className={`ca-pill ${credential?.configured ? 'ca-pill-ok' : 'ca-pill-muted'}`}>
-                  {credential?.configured ? '已保存密钥（不回显）' : '未配置密钥'}
+                  {credential?.configured ? t('已保存密钥（不回显）', 'Key saved (hidden)') : t('未配置密钥', 'No key set')}
                 </span>
               </div>
               <input
                 type="password"
                 className="ca-input"
                 autoComplete="new-password"
-                placeholder={credential?.configured ? '输入新密钥以替换现有密钥' : '粘贴 API Key'}
+                placeholder={credential?.configured ? t('输入新密钥以替换现有密钥', 'Enter a new key to replace the existing one') : t('粘贴 API Key', 'Paste API Key')}
                 value={keyValue}
                 onChange={e => setKeyValue(e.target.value)}
               />
@@ -1256,7 +1276,7 @@ export function ProvidersTab({
 
           const customJsonField = (
             <div className="ca-field">
-              <label className="ca-field-label">高级协议覆盖 (models.json)</label>
+              <label className="ca-field-label">{t('高级协议覆盖 (models.json)', 'Advanced protocol overrides (models.json)')}</label>
               <textarea
                 rows={4}
                 className="ca-textarea ca-mono"
@@ -1264,7 +1284,7 @@ export function ProvidersTab({
                 onChange={e => setCustomJson(e.target.value)}
               />
               <p className="ca-field-help">
-                对应 Pi models.json 服务商级附加字段（如 headers、compat）；保持 {'{}'} 即可。
+                {t('对应 Pi models.json 服务商级附加字段（如 headers、compat）；保持 {} 即可。', 'Maps to Pi models.json provider-level extra fields (e.g. headers, compat); leave as {} if unused.')}
               </p>
             </div>
           );
@@ -1280,7 +1300,7 @@ export function ProvidersTab({
                     onClick={() => void handleDeleteProvider()}
                   >
                     <Trash2 size={13} />
-                    <span>{edit.native ? '重置配置' : '删除服务商'}</span>
+                    <span>{edit.native ? t('重置配置', 'Reset settings') : t('删除服务商', 'Delete provider')}</span>
                   </button>
                 )}
               </div>
@@ -1292,7 +1312,7 @@ export function ProvidersTab({
                     disabled={savingProvider || validatingProvider}
                     onClick={() => void handleValidateOnly()}
                   >
-                    {validatingProvider ? '验证中…' : '验证连接'}
+                    {validatingProvider ? t('验证中…', 'Verifying…') : t('验证连接', 'Verify connection')}
                   </button>
                 )}
                 <button
@@ -1301,7 +1321,7 @@ export function ProvidersTab({
                   disabled={savingProvider || validatingProvider}
                   onClick={() => void persistProvider(true)}
                 >
-                  {savingProvider ? '保存中…' : '保存并验证'}
+                  {savingProvider ? t('保存中…', 'Saving…') : t('保存并验证', 'Save & verify')}
                 </button>
               </div>
             </div>
@@ -1314,7 +1334,7 @@ export function ProvidersTab({
               open={advancedOpen}
               onToggle={e => setAdvancedOpen(e.currentTarget.open)}
             >
-              <summary className="ca-advanced-summary">高级连接与协议覆盖</summary>
+              <summary className="ca-advanced-summary">{t('高级连接与协议覆盖', 'Advanced connection & protocol overrides')}</summary>
               <div className="ca-advanced-body ca-form-stack">
                 {baseUrlField}
                 {apiKeyField}
@@ -1328,17 +1348,17 @@ export function ProvidersTab({
                 <>
                   <div className="ca-grid-2">
                     <div className="ca-field">
-                      <label className="ca-field-label">显示名称</label>
+                      <label className="ca-field-label">{t('显示名称', 'Display name')}</label>
                       <input
                         type="text"
                         className="ca-input"
-                        placeholder="如 SiliconFlow / 本地 Ollama"
+                        placeholder={t('如 SiliconFlow / 本地 Ollama', 'e.g. SiliconFlow / Local Ollama')}
                         value={edit.name}
                         onChange={e => setEdit({ ...edit, name: e.target.value })}
                       />
                     </div>
                     <div className="ca-field">
-                      <label className="ca-field-label">API 协议</label>
+                      <label className="ca-field-label">{t('API 协议', 'API protocol')}</label>
                       <select
                         className="ca-select"
                         value={edit.api}
@@ -1354,11 +1374,11 @@ export function ProvidersTab({
                   </div>
                   {creating && (
                     <div className="ca-field">
-                      <label className="ca-field-label">服务商 ID（可选）</label>
+                      <label className="ca-field-label">{t('服务商 ID（可选）', 'Provider ID (optional)')}</label>
                       <input
                         type="text"
                         className="ca-input ca-mono"
-                        placeholder="留空则按名称自动生成"
+                        placeholder={t('留空则按名称自动生成', 'Leave blank to generate from name')}
                         value={edit.id}
                         onChange={e => {
                           setCustomIdEdited(true);
@@ -1376,7 +1396,7 @@ export function ProvidersTab({
               {edit.native ? (
                 <CaDisclosure
                   key={`${edit.id}-adv`}
-                  title="自定义接口地址与协议覆盖"
+                  title={t('自定义接口地址与协议覆盖', 'Custom API URL & protocol overrides')}
                   defaultOpen={hasCustomOverride}
                 >
                   <div className="ca-form-stack">
@@ -1387,7 +1407,7 @@ export function ProvidersTab({
               ) : (
                 <CaDisclosure
                   key={`${edit.id}-json`}
-                  title="高级协议覆盖 (models.json)"
+                  title={t('高级协议覆盖 (models.json)', 'Advanced protocol overrides (models.json)')}
                   defaultOpen={Boolean(customJson.trim() && customJson.trim() !== '{}')}
                 >
                   {customJsonField}
@@ -1402,30 +1422,30 @@ export function ProvidersTab({
             <div className="ca-section">
               <div className="ca-section-head ca-models-head">
                 <div className="ca-models-head-top ca-models-toolbar">
-                  <span className="ca-section-title">模型列表 ({models.length})</span>
+                  <span className="ca-section-title">{t(`模型列表 (${models.length})`, `Models (${models.length})`)}</span>
                   <div className="ca-inline-row ca-models-actions">
                     <button type="button" className="ca-btn ca-btn-sm" onClick={openDiscoverModal}>
-                      拉取目录
+                      {t('拉取目录', 'Fetch models')}
                     </button>
                     {removedModels.length > 0 && (
                       <button type="button" className="ca-btn ca-btn-sm" onClick={openRestoreModal}>
                         <RotateCcw size={13} />
-                        <span>恢复 ({removedModels.length})</span>
+                        <span>{t(`恢复 (${removedModels.length})`, `Restore (${removedModels.length})`)}</span>
                       </button>
                     )}
                     <button type="button" className="ca-btn ca-btn-sm" onClick={openAddModelModal}>
                       <Plus size={13} />
-                      <span>新增模型</span>
+                      <span>{t('新增模型', 'Add model')}</span>
                     </button>
                   </div>
                 </div>
                 {(models.length > 0 || Boolean(modelQuery)) && (
                   <div className="ca-models-search">
-                    <Search size={14} className="ca-models-search-icon" />
+                    <Search size={14} className="ca-models-search-icon" aria-hidden="true" />
                     <input
                       type="search"
                       className="ca-input"
-                      placeholder="筛选模型名称或 ID…"
+                      placeholder={t('筛选模型名称或 ID…', 'Filter model name or ID…')}
                       value={modelQuery}
                       onChange={e => setModelQuery(e.target.value)}
                     />
@@ -1437,56 +1457,44 @@ export function ProvidersTab({
                 {filteredDrawerModels.length === 0 ? (
                   <div className="ca-empty">
                     {models.length === 0
-                      ? '暂无模型，点击「拉取目录」或「新增模型」添加'
-                      : '没有匹配的模型'}
+                      ? t('暂无模型，点击「拉取目录」或「新增模型」添加', 'No models yet. Click "Fetch models" or "Add model" to add some.')
+                      : t('没有匹配的模型', 'No matching models')}
                   </div>
                 ) : (
                   filteredDrawerModels.map(m => {
                     const ref = `${edit.id}/${m.id}`;
                     const isStarred = starredSet.has(ref);
                     return (
-                      <div
-                        key={m.id}
-                        className="ca-row is-clickable ca-model-row"
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => openEditModelModal(m)}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault();
-                            openEditModelModal(m);
-                          }
-                        }}
-                      >
-                        <div className="ca-row-main">
-                          <div className="ca-row-title ca-model-row-title">
-                            <span className="ca-model-row-name">{m.name || m.id}</span>
-                            {m.reasoning && <span className="ca-pill ca-pill-info">推理</span>}
-                          </div>
-                          <div className="ca-row-sub ca-mono ca-num">
-                            {m.id} · {Math.round(m.contextWindow / 1000)}k / {Math.round(m.maxTokens / 1000)}k
-                          </div>
-                        </div>
-                        <div
-                          className="ca-row-actions"
-                          onClick={e => e.stopPropagation()}
-                          onKeyDown={e => e.stopPropagation()}
+                      <div key={m.id} className="ca-row ca-row-split ca-model-row">
+                        <button
+                          type="button"
+                          className="ca-row-main ca-row-trigger"
+                          onClick={() => openEditModelModal(m)}
                         >
+                          <span className="ca-row-title ca-model-row-title">
+                            <span className="ca-model-row-name">{m.name || m.id}</span>
+                            {m.reasoning && <span className="ca-pill ca-pill-info">{t('推理', 'Reasoning')}</span>}
+                          </span>
+                          <span className="ca-row-sub ca-mono ca-num">
+                            {m.id} · {Math.round(m.contextWindow / 1000)}k / {Math.round(m.maxTokens / 1000)}k
+                          </span>
+                        </button>
+                        <div className="ca-row-actions">
                           <button
                             type="button"
                             className="ca-btn ca-btn-ghost ca-btn-icon"
-                            aria-label={isStarred ? '取消收藏' : '收藏'}
+                            aria-label={isStarred ? t('取消收藏', 'Unstar') : t('收藏', 'Star')}
                             onClick={() => void handleToggleStar(ref, !isStarred)}
                           >
                             <Star
                               size={14}
+                              className={isStarred ? 'ca-star-icon is-starred' : 'ca-star-icon'}
                               fill={isStarred ? 'currentColor' : 'none'}
-                              color={isStarred ? '#f59e0b' : 'currentColor'}
                             />
                           </button>
                           <CaSwitch
                             checked={m.enabled}
-                            label={`启用模型 ${m.name || m.id}`}
+                            label={t(`启用模型 ${m.name || m.id}`, `Enable model ${m.name || m.id}`)}
                             onChange={next => void handleToggleModelEnabled(m, next)}
                           />
                         </div>
@@ -1508,15 +1516,15 @@ export function ProvidersTab({
                 <div className="ca-section ca-oauth-card">
                   <div className="ca-oauth-head">
                     <div className="ca-oauth-head-main">
-                      <div className="ca-field-label">OAuth 账号授权</div>
+                      <div className="ca-field-label">{t('OAuth 账号授权', 'OAuth account authorization')}</div>
                       <div className="ca-muted">
                         {flow?.status === 'pending'
-                          ? '正在等待浏览器完成登录授权…'
+                          ? t('正在等待浏览器完成登录授权…', 'Waiting for browser authorization…')
                           : authStatus?.method === 'oauth'
-                            ? '已通过 OAuth 授权登录'
+                            ? t('已通过 OAuth 授权登录', 'Authorized via OAuth')
                             : authStatus?.label
-                              ? `未授权 · 可${authStatus.label}`
-                              : '尚未登录'}
+                              ? t(`未授权 · 可${authStatus.label}`, `Not authorized · ${authStatus.label}`)
+                              : t('尚未登录', 'Not signed in')}
                       </div>
                     </div>
                     <div className="ca-inline-row">
@@ -1526,7 +1534,7 @@ export function ProvidersTab({
                           className="ca-btn ca-btn-sm"
                           onClick={() => void handleCancelOAuth()}
                         >
-                          取消授权
+                          {t('取消授权', 'Cancel')}
                         </button>
                       ) : authStatus?.method === 'oauth' ? (
                         <button
@@ -1535,7 +1543,7 @@ export function ProvidersTab({
                           disabled={authBusy}
                           onClick={() => void handleOAuthLogout()}
                         >
-                          退出授权
+                          {t('退出授权', 'Sign out')}
                         </button>
                       ) : (
                         <button
@@ -1544,7 +1552,7 @@ export function ProvidersTab({
                           disabled={authBusy}
                           onClick={() => void handleStartOAuth()}
                         >
-                          登录 OAuth 授权
+                          {t('登录 OAuth 授权', 'Sign in with OAuth')}
                         </button>
                       )}
                     </div>
@@ -1553,7 +1561,7 @@ export function ProvidersTab({
                   {flow && flow.status === 'pending' && (
                     <div className="ca-oauth-flow">
                       {flow.events.length === 0 && !flow.prompt && (
-                        <div className="ca-muted">正在获取授权链接…</div>
+                        <div className="ca-muted">{t('正在获取授权链接…', 'Fetching authorization link…')}</div>
                       )}
 
                       {flow.events.map((ev, idx) => {
@@ -1562,13 +1570,13 @@ export function ProvidersTab({
                           return (
                             <div key={idx} className="ca-oauth-step">
                               <div className="ca-oauth-step-label">
-                                {ev.instructions || ev.message || '1. 点击下方链接在系统默认浏览器中完成登录：'}
+                                {ev.instructions || ev.message || t('1. 点击下方链接在系统默认浏览器中完成登录：', '1. Open the link below in your browser to sign in:')}
                               </div>
                               {ev.userCode && (
-                                <div className="ca-inline-row" style={{ flexWrap: 'wrap' }}>
-                                  <span className="ca-muted">一次性验证码：</span>
+                                <div className="ca-inline-row ca-wrap">
+                                  <span className="ca-muted">{t('一次性验证码：', 'One-time code:')}</span>
                                   <span className="ca-pill ca-pill-info ca-mono">{ev.userCode}</span>
-                                  <CopyButton value={ev.userCode} label="复制验证码" />
+                                  <CopyButton value={ev.userCode} label={t('复制验证码', 'Copy code')} />
                                 </div>
                               )}
                               <div className="ca-oauth-url-row">
@@ -1581,7 +1589,7 @@ export function ProvidersTab({
                                     e.preventDefault();
                                     void openExternalUrl(targetUrl, onOpenExternalUrl).catch(err =>
                                       setDrawerError(
-                                        errorMessage(err, '无法打开系统默认浏览器，请复制链接手动打开'),
+                                        errorMessage(err, t('无法打开系统默认浏览器，请复制链接手动打开', 'Could not open browser; please copy and open the link manually')),
                                       ),
                                     );
                                   }}
@@ -1600,7 +1608,7 @@ export function ProvidersTab({
                                     onClick={e => {
                                       e.preventDefault();
                                       void openExternalUrl(lk.url, onOpenExternalUrl).catch(err =>
-                                        setDrawerError(errorMessage(err, '无法打开系统默认浏览器')),
+                                        setDrawerError(errorMessage(err, t('无法打开系统默认浏览器', 'Could not open system browser'))),
                                       );
                                     }}
                                   >
@@ -1616,10 +1624,10 @@ export function ProvidersTab({
                             {ev.message && <div className="ca-oauth-msg">{ev.message}</div>}
                             {ev.instructions && <div className="ca-oauth-hint">{ev.instructions}</div>}
                             {ev.userCode && (
-                              <div className="ca-inline-row" style={{ flexWrap: 'wrap' }}>
-                                <span className="ca-muted">一次性验证码：</span>
+                              <div className="ca-inline-row ca-wrap">
+                                <span className="ca-muted">{t('一次性验证码：', 'One-time code:')}</span>
                                 <span className="ca-pill ca-pill-info ca-mono">{ev.userCode}</span>
-                                <CopyButton value={ev.userCode} label="复制验证码" />
+                                <CopyButton value={ev.userCode} label={t('复制验证码', 'Copy code')} />
                               </div>
                             )}
                             {ev.links?.map((lk, lIdx) => (
@@ -1632,7 +1640,7 @@ export function ProvidersTab({
                                   onClick={e => {
                                     e.preventDefault();
                                     void openExternalUrl(lk.url, onOpenExternalUrl).catch(err =>
-                                      setDrawerError(errorMessage(err, '无法打开系统默认浏览器')),
+                                      setDrawerError(errorMessage(err, t('无法打开系统默认浏览器', 'Could not open system browser'))),
                                     );
                                   }}
                                 >
@@ -1649,9 +1657,9 @@ export function ProvidersTab({
                           {flow.prompt.options && flow.prompt.options.length > 0 ? (
                             <>
                               <div className="ca-oauth-step-label">
-                                {flow.prompt.message || '请选择登录授权方式：'}
+                                {flow.prompt.message || t('请选择登录授权方式：', 'Choose an authorization method:')}
                               </div>
-                              <div className="ca-inline-row" style={{ flexWrap: 'wrap' }}>
+                              <div className="ca-inline-row ca-wrap">
                                 {flow.prompt.options.map(opt => (
                                   <button
                                     key={opt.id}
@@ -1672,7 +1680,7 @@ export function ProvidersTab({
                                   ? flow.prompt.message.startsWith('2.')
                                     ? flow.prompt.message
                                     : `2. ${flow.prompt.message}`
-                                  : '2. 粘贴授权码或跳转后的完整回调地址：'}
+                                  : t('2. 粘贴授权码或跳转后的完整回调地址：', '2. Paste the authorization code or full callback URL:')}
                               </div>
                               <form
                                 className="ca-oauth-input-row"
@@ -1686,7 +1694,7 @@ export function ProvidersTab({
                                 <input
                                   type="text"
                                   className="ca-input"
-                                  placeholder={flow.prompt.placeholder || '粘贴授权码或回调 URL'}
+                                  placeholder={flow.prompt.placeholder || t('粘贴授权码或回调 URL', 'Paste authorization code or callback URL')}
                                   value={promptInput}
                                   onChange={e => setPromptInput(e.target.value)}
                                 />
@@ -1695,7 +1703,7 @@ export function ProvidersTab({
                                   className="ca-btn ca-btn-primary ca-btn-sm"
                                   disabled={authBusy || !promptInput.trim()}
                                 >
-                                  提交
+                                  {t('提交', 'Submit')}
                                 </button>
                               </form>
                             </>
@@ -1727,7 +1735,11 @@ export function ProvidersTab({
       <CaModal
         open={modelModalOpen}
         onOpenChange={setModelModalOpen}
-        title={modelCreating ? '新增模型' : `编辑模型 · ${modelDraft?.name || modelDraft?.id || ''}`}
+        title={
+          modelCreating
+            ? t('新增模型', 'Add model')
+            : t(`编辑模型 · ${modelDraft?.name || modelDraft?.id || ''}`, `Edit model · ${modelDraft?.name || modelDraft?.id || ''}`)
+        }
         variant="modal"
       >
         {modelDraft && (
@@ -1735,43 +1747,44 @@ export function ProvidersTab({
             {modelError && <CaNotice tone="danger">{modelError}</CaNotice>}
             <div className="ca-field">
               <label className="ca-field-label">
-                模型 ID <span className="ca-req">*</span>
+                {t('模型 ID', 'Model ID')} <span className="ca-req">*</span>
               </label>
               <input
                 type="text"
                 className="ca-input ca-mono"
                 disabled={!modelCreating}
                 required
-                placeholder="如 gpt-4.1 / claude-sonnet-4"
+                placeholder={t('如 gpt-4.1 / claude-sonnet-4', 'e.g. gpt-4.1 / claude-sonnet-4')}
                 value={modelDraft.id}
                 onChange={e => setModelDraft({ ...modelDraft, id: e.target.value })}
               />
             </div>
 
             <div className="ca-field">
-              <label className="ca-field-label">显示名称（可选）</label>
+              <label className="ca-field-label">{t('显示名称（可选）', 'Display name (optional)')}</label>
               <input
                 type="text"
                 className="ca-input"
-                placeholder="留空默认使用模型 ID"
+                placeholder={t('留空默认使用模型 ID', 'Leave empty to use model ID')}
                 value={modelDraft.name}
                 onChange={e => setModelDraft({ ...modelDraft, name: e.target.value })}
               />
             </div>
 
             <div className="ca-inline-between">
-              <span className="ca-field-label">支持深度推理 (Reasoning)</span>
+              <span className="ca-field-label">{t('支持深度推理 (Reasoning)', 'Supports reasoning')}</span>
               <CaSwitch
                 checked={modelDraft.reasoning}
+                label={t('支持深度推理 (Reasoning)', 'Supports reasoning')}
                 onChange={next => setModelDraft({ ...modelDraft, reasoning: next })}
               />
             </div>
 
             <div className="ca-field">
-              <label className="ca-field-label">输入模态</label>
+              <label className="ca-field-label">{t('输入模态', 'Input modalities')}</label>
               <div className="ca-check-group">
                 {(['text', 'image', 'audio'] as const).map(mod => {
-                  const label = mod === 'text' ? '文本' : mod === 'image' ? '图片' : '音频';
+                  const label = mod === 'text' ? t('文本', 'Text') : mod === 'image' ? t('图片', 'Image') : t('音频', 'Audio');
                   const checked = modelDraft.input.includes(mod);
                   return (
                     <label key={mod} className="ca-check-label">
@@ -1792,10 +1805,10 @@ export function ProvidersTab({
               </div>
             </div>
 
-            <CaDisclosure title="Token 上限（默认 128k / 16k）">
+            <CaDisclosure title={t('Token 上限（默认 128k / 16k）', 'Token limits (default 128k / 16k)')}>
               <div className="ca-grid-2">
                 <div className="ca-field">
-                  <label className="ca-field-label">上下文窗口</label>
+                  <label className="ca-field-label">{t('上下文窗口', 'Context window')}</label>
                   <input
                     type="number"
                     className="ca-input ca-num"
@@ -1806,7 +1819,7 @@ export function ProvidersTab({
                   />
                 </div>
                 <div className="ca-field">
-                  <label className="ca-field-label">最大输出 Token</label>
+                  <label className="ca-field-label">{t('最大输出 Token', 'Max output tokens')}</label>
                   <input
                     type="number"
                     className="ca-input ca-num"
@@ -1819,7 +1832,7 @@ export function ProvidersTab({
               </div>
             </CaDisclosure>
 
-            <CaDisclosure title="高级协议覆盖 (models.json)">
+            <CaDisclosure title={t('高级协议覆盖 (models.json)', 'Advanced protocol overrides (models.json)')}>
               <textarea
                 rows={4}
                 className="ca-textarea ca-mono"
@@ -1838,7 +1851,7 @@ export function ProvidersTab({
                     onClick={() => void handleDeleteModel(modelDraft, true)}
                   >
                     <Trash2 size={13} />
-                    <span>移除该模型</span>
+                    <span>{t('移除该模型', 'Remove model')}</span>
                   </button>
                 )}
               </div>
@@ -1848,10 +1861,10 @@ export function ProvidersTab({
                   className="ca-btn"
                   onClick={() => setModelModalOpen(false)}
                 >
-                  取消
+                  {t('取消', 'Cancel')}
                 </button>
                 <button type="submit" className="ca-btn ca-btn-primary" disabled={modelSaving}>
-                  {modelSaving ? '保存中…' : '保存模型'}
+                  {modelSaving ? t('保存中…', 'Saving…') : t('保存模型', 'Save model')}
                 </button>
               </div>
             </div>
@@ -1863,25 +1876,23 @@ export function ProvidersTab({
       <CaModal
         open={discoverOpen}
         onOpenChange={setDiscoverOpen}
-        title={discoverMode === 'restore' ? '恢复已移除的模型' : '从 /v1/models 拉取模型'}
+        title={discoverMode === 'restore' ? t('恢复已移除的模型', 'Restore removed models') : t('从 /v1/models 拉取模型', 'Fetch models from /v1/models')}
         variant="modal"
       >
         <div className="ca-form-stack">
           {discoverError && <CaNotice tone="danger">{discoverError}</CaNotice>}
-          <div className="ca-inline-row" style={{ flexWrap: 'wrap' }}>
+          <div className="ca-inline-row ca-wrap ca-discover-bar">
             <input
               type="search"
-              className="ca-input"
-              style={{ flex: 1 }}
-              placeholder="筛选模型…"
+              className="ca-input ca-discover-search"
+              placeholder={t('筛选模型…', 'Filter models…')}
               value={discoverQuery}
               onChange={e => setDiscoverQuery(e.target.value)}
             />
             {discoverMode === 'remote' && (
               <>
                 <select
-                  className="ca-select"
-                  style={{ width: 160 }}
+                  className="ca-select ca-discover-device"
                   value={discoverDeviceId}
                   onChange={e => {
                     const nextDev = e.target.value;
@@ -1889,12 +1900,12 @@ export function ProvidersTab({
                     if (edit) void runDiscoverFetch(edit, nextDev);
                   }}
                 >
-                  <option value="">中心直连拉取</option>
+                  <option value="">{t('中心直连拉取', 'Direct from center')}</option>
                   {devices
                     .filter(d => d.online)
                     .map(d => (
                       <option key={d.deviceId} value={d.deviceId}>
-                        经 {d.name} 探测
+                        {t(`经 ${d.name} 探测`, `Via ${d.name}`)}
                       </option>
                     ))}
                 </select>
@@ -1904,7 +1915,7 @@ export function ProvidersTab({
                   disabled={discoverBusy || !edit}
                   onClick={() => edit && void runDiscoverFetch(edit, discoverDeviceId)}
                 >
-                  {discoverBusy ? '拉取中…' : '重新拉取'}
+                  {discoverBusy ? t('拉取中…', 'Fetching…') : t('重新拉取', 'Refetch')}
                 </button>
               </>
             )}
@@ -1912,14 +1923,14 @@ export function ProvidersTab({
 
           <div className="ca-model-list">
             {discoverBusy && discovered.length === 0 ? (
-              <div className="ca-empty">正在读取可用模型…</div>
+              <div className="ca-empty">{t('正在读取可用模型…', 'Loading available models…')}</div>
             ) : filteredDiscovered.length === 0 ? (
-              <div className="ca-empty">暂无可添加的新模型</div>
+              <div className="ca-empty">{t('暂无可添加的新模型', 'No new models to add')}</div>
             ) : (
               filteredDiscovered.map(item => {
                 const checked = selectedIds.has(item.id);
                 return (
-                  <label key={item.id} className="ca-model-option" style={{ cursor: 'pointer' }}>
+                  <label key={item.id} className="ca-model-option">
                     <div className="ca-inline-row">
                       <input
                         type="checkbox"
@@ -1944,7 +1955,7 @@ export function ProvidersTab({
 
           <div className="ca-form-actions">
             <button type="button" className="ca-btn" onClick={() => setDiscoverOpen(false)}>
-              取消
+              {t('取消', 'Cancel')}
             </button>
             <button
               type="button"
@@ -1953,8 +1964,8 @@ export function ProvidersTab({
               onClick={() => void confirmBatchModels()}
             >
               {discoverMode === 'restore'
-                ? `恢复所选 (${selectedIds.size})`
-                : `添加所选 (${selectedIds.size})`}
+                ? t(`恢复所选 (${selectedIds.size})`, `Restore selected (${selectedIds.size})`)
+                : t(`添加所选 (${selectedIds.size})`, `Add selected (${selectedIds.size})`)}
             </button>
           </div>
         </div>

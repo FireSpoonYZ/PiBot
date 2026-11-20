@@ -351,7 +351,7 @@ function VaultSession({
   const renderGlobalManagementBody = () => (
     <div className="vault-global-section">
       <p className="vault-hint">
-        {t('以下操作会影响当前 Host 上的全部智能体，请谨慎调整。', 'These settings affect all Bots on this Host.')}
+        {t('以下操作会影响当前 Host 上的全部 Bot，请谨慎调整。', 'These settings affect all Bots on this Host.')}
       </p>
 
       <div className="vault-actions">
@@ -551,7 +551,7 @@ function VaultSession({
               }}
             >
               <Plus aria-hidden="true" />
-              {t('+ 新增凭据并授权', '+ Add & authorize')}
+              {t('新增凭据并授权', 'Add & authorize')}
             </button>
           ) : null}
         </div>
@@ -593,9 +593,9 @@ function VaultSession({
       {/* 外部密码库列表（支持零闪烁单行授权） */}
       {extReady ? (
         <>
-          <div className="vault-actions" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+          <div className="vault-actions vault-ext-bar">
             <span className="vault-hint">
-              {t('凭据来自全局 Vaultwarden，可在此单独授权本智能体使用。', 'Entries from global Vaultwarden; toggle access for this Bot below.')}
+              {t('凭据来自全局 Vaultwarden，可在此单独授权本 Bot 使用。', 'Entries from global Vaultwarden; toggle access for this Bot below.')}
             </span>
             <button className="bs-btn is-small" type="button" disabled={disabled} onClick={() => void executeExternal({ action: 'sync' })}>
               {t('同步条目', 'Sync')}
@@ -618,10 +618,10 @@ function VaultSession({
                         {item.username ? <p className="vault-hint">{item.username}</p> : null}
                       </div>
                       <div className="vault-switch-wrap">
-                        <span className="vault-hint">{t('允许本智能体使用', 'Allow this Bot')}</span>
+                        <span className="vault-hint">{t('允许本 Bot 使用', 'Allow this Bot')}</span>
                         <Switch
                           checked={isAllowed}
-                          label={`${t('允许本智能体使用', 'Allow this Bot')}: ${item.label}`}
+                          label={`${t('允许本 Bot 使用', 'Allow this Bot')}: ${item.label}`}
                           disabled={disabled || !deviceId || togglingRef === item.secretRef}
                           onChange={next => void toggleExternalGrant(item, next)}
                         />
@@ -655,7 +655,7 @@ function VaultSession({
           <fieldset disabled={disabled}>
             <legend>{status.initialized ? t('解锁本地密码库', 'Unlock local vault') : t('创建本地密码库', 'Create local vault')}</legend>
             <p className="vault-hint">
-              {t('主密码不保存、不进入聊天上下文；解锁后可选择向当前智能体授权哪些凭据。', 'Master password is never stored or shared in chat.')}
+              {t('主密码不保存、不进入聊天上下文；解锁后可选择向当前 Bot 授权哪些凭据。', 'Master password is never stored or shared in chat.')}
             </p>
             <label>
               {t('主密码', 'Master password')}
@@ -717,8 +717,8 @@ function VaultSession({
               <input className="bs-input" name="password" type="password" autoComplete="off" required={!editing} />
             </label>
             <div className="vault-permission">
-              <span>{t('允许本智能体使用', 'Allow this Bot to use')}</span>
-              <Switch checked={allowed} label={t('允许本智能体使用', 'Allow this Bot to use')} disabled={disabled} onChange={setAllowed} />
+              <span>{t('允许本 Bot 使用', 'Allow this Bot to use')}</span>
+              <Switch checked={allowed} label={t('允许本 Bot 使用', 'Allow this Bot to use')} disabled={disabled} onChange={setAllowed} />
             </div>
 
             <div className="vault-actions">
@@ -743,7 +743,7 @@ function VaultSession({
             {editing && deleting === editing.secretRef ? (
               <div className="vault-delete-confirm">
                 <p className="vault-hint">
-                  {t('删除后此 Host 上所有智能体都将无法再使用该凭据，确认删除？', 'Deleting removes this entry for all Bots on this Host. Confirm?')}
+                  {t('删除后此 Host 上所有 Bot 都将无法再使用该凭据，确认删除？', 'Deleting removes this entry for all Bots on this Host. Confirm?')}
                 </p>
                 <div className="vault-actions">
                   <button
@@ -772,7 +772,7 @@ function VaultSession({
       {localReady ? (
         items.length === 0 ? (
           <p className="vault-hint">
-            {t('当前暂无凭据，点击右上角「+ 新增凭据并授权」添加第一条。', 'No credentials yet. Click "+ Add & authorize" above to add one.')}
+            {t('当前暂无凭据，点击右上角「新增凭据并授权」添加第一条。', 'No credentials yet. Click "Add & authorize" above to add one.')}
           </p>
         ) : (
           <ul className="vault-items">
@@ -801,7 +801,7 @@ function VaultSession({
                       </button>
                       <Switch
                         checked={isAllowed}
-                        label={`${t('允许本智能体使用', 'Allow this Bot')}: ${item.label}`}
+                        label={`${t('允许本 Bot 使用', 'Allow this Bot')}: ${item.label}`}
                         disabled={disabled || revision === null || togglingRef === item.secretRef}
                         onChange={next => void toggleLocalGrant(item, next)}
                       />
@@ -823,7 +823,7 @@ function VaultSession({
           </button>
         </div>
       ) : status ? (
-        <Disclosure title={t('▸ 全局密码库服务管理', 'Global vault service settings')} defaultOpen={false}>
+        <Disclosure title={t('全局密码库服务管理', 'Global vault service settings')} defaultOpen={false}>
           {renderGlobalManagementBody()}
         </Disclosure>
       ) : null}

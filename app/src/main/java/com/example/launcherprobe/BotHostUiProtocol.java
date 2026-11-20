@@ -44,6 +44,7 @@ final class BotHostUiProtocol {
     static final String TYPE_EVENT = "event";
 
     static final String EVENT_HOST_FRAME = "hostFrame";
+    /** 语音事件：data.type ∈ partial({text}) | level({value:0..1}) | submitted({receipt?}) | error({text?,code?,outcome?,message?})。 */
     static final String EVENT_VOICE = "voiceEvent";
     /** M20 客户端模式观察事件：data 即 DesktopObservationEvent {type,observationId,frame|error}。 */
     static final String EVENT_CLIENT_FRAME = "clientFrame";
@@ -69,7 +70,7 @@ final class BotHostUiProtocol {
     }
 
     /**
-     * 固定 Host 数据操作；start/stop/openSystemSettings/reconnect/hide
+     * 固定 Host 数据操作；start/stop/openSystemSettings/reconnect/hide/haptic
      * 属 UI 本地动作，不经服务派发。拒绝任何泛化转发。
      * client* 为 M20 无参数化的客户端入口：内层 broker 操作另有 16 项白名单（Node 侧强制）。
      * UI 会话只释放自己的观察，客户端进程由应用级 broker 持有。
@@ -115,6 +116,16 @@ final class BotHostUiProtocol {
 
     static JSONObject event(String event, JSONObject data) {
         return object("type", TYPE_EVENT, "event", event, "data", data == null ? new JSONObject() : data);
+    }
+
+    /** voiceEvent partial 负载：{type:"partial", botId, requestId, text}。 */
+    static JSONObject voicePartialEvent(String botId, String requestId, String text) {
+        return object("type", "partial", "botId", botId, "requestId", requestId, "text", text);
+    }
+
+    /** voiceEvent level 负载：{type:"level", botId, requestId, value(0..1)}。 */
+    static JSONObject voiceLevelEvent(String botId, String requestId, double value) {
+        return object("type", "level", "botId", botId, "requestId", requestId, "value", value);
     }
 
     /** client 模式观察终态事件：data 与 DesktopObservationEvent 同形（data 即事件本身）。 */

@@ -1,8 +1,9 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChevronDown } from 'lucide-react';
 import type { BotAvatar } from '../../center-contract/index.js';
 import type { BotLearningLiveState, BotLearningOutcomeSummary } from '../../host-core/index.js';
 import { botActivityText, isBotLlmRunningPhase, isBotPreLlmPhase, type BotActivity } from './botActivity';
+import { useText } from './ui';
 import {
   GROK_EXPRESSIONS,
   GROK_HEAD_CENTER,
@@ -22,50 +23,50 @@ import {
 export type GrokAvatarPreset = BotAvatar;
 
 export const GROK_COLOR_PALETTE: ReadonlyArray<{ id: string; hex: string; labelZh: string; labelEn: string }> = [
-  { id: 'black', hex: '#080808', labelZh: '曜石黑', labelEn: 'Obsidian' },
-  { id: 'brown', hex: '#7E5738', labelZh: '摩卡棕', labelEn: 'Mocha' },
-  { id: 'red', hex: '#EA403C', labelZh: '珊瑚红', labelEn: 'Coral Red' },
-  { id: 'orange', hex: '#E86B26', labelZh: '活力橙', labelEn: 'Tangerine' },
-  { id: 'amber', hex: '#F09E2B', labelZh: '暖阳黄', labelEn: 'Amber' },
-  { id: 'green', hex: '#4EBD64', labelZh: '翠竹绿', labelEn: 'Emerald' },
-  { id: 'teal', hex: '#48AB94', labelZh: '松石青', labelEn: 'Teal' },
-  { id: 'blue', hex: '#2B70F6', labelZh: '经典蓝', labelEn: 'Classic Blue' },
-  { id: 'purple', hex: '#795BF2', labelZh: '星云紫', labelEn: 'Violet' },
-  { id: 'pink', hex: '#DF4191', labelZh: '多巴胺粉', labelEn: 'Magenta' },
+  { id: 'black', hex: '#080808', labelZh: '曜石黑', labelEn: 'Obsidian' }, // i18n-ok
+  { id: 'brown', hex: '#7E5738', labelZh: '摩卡棕', labelEn: 'Mocha' }, // i18n-ok
+  { id: 'red', hex: '#EA403C', labelZh: '珊瑚红', labelEn: 'Coral Red' }, // i18n-ok
+  { id: 'orange', hex: '#E86B26', labelZh: '活力橙', labelEn: 'Tangerine' }, // i18n-ok
+  { id: 'amber', hex: '#F09E2B', labelZh: '暖阳黄', labelEn: 'Amber' }, // i18n-ok
+  { id: 'green', hex: '#4EBD64', labelZh: '翠竹绿', labelEn: 'Emerald' }, // i18n-ok
+  { id: 'teal', hex: '#48AB94', labelZh: '松石青', labelEn: 'Teal' }, // i18n-ok
+  { id: 'blue', hex: '#2B70F6', labelZh: '经典蓝', labelEn: 'Classic Blue' }, // i18n-ok
+  { id: 'purple', hex: '#795BF2', labelZh: '星云紫', labelEn: 'Violet' }, // i18n-ok
+  { id: 'pink', hex: '#DF4191', labelZh: '多巴胺粉', labelEn: 'Magenta' }, // i18n-ok
 ];
 
 export const GROK_SHAPE_ORDER: ReadonlyArray<{ shape: string; rotation: number; labelZh: string; labelEn: string }> = [
   // Row 1 (4 shapes in 15848.jpg)
-  { shape: 'blob', rotation: 0, labelZh: '经典圆', labelEn: 'Circle' },
-  { shape: 'cloud', rotation: -6, labelZh: '云朵', labelEn: 'Cloud' },
-  { shape: 'squircle', rotation: -18, labelZh: '方糖', labelEn: 'Squircle' },
-  { shape: 'gem', rotation: 0, labelZh: '四芒星', labelEn: 'Star' },
+  { shape: 'blob', rotation: 0, labelZh: '经典圆', labelEn: 'Circle' }, // i18n-ok
+  { shape: 'cloud', rotation: -6, labelZh: '云朵', labelEn: 'Cloud' }, // i18n-ok
+  { shape: 'squircle', rotation: -18, labelZh: '方糖', labelEn: 'Squircle' }, // i18n-ok
+  { shape: 'gem', rotation: 0, labelZh: '四芒星', labelEn: 'Star' }, // i18n-ok
   // Row 2 (5 shapes in 15848.jpg)
-  { shape: 'bean', rotation: -12, labelZh: '四叶草', labelEn: 'Clover' },
-  { shape: 'arch', rotation: -10, labelZh: '爱心', labelEn: 'Heart' },
-  { shape: 'crystal', rotation: 0, labelZh: '花朵', labelEn: 'Blossom' },
-  { shape: 'teardrop', rotation: 10, labelZh: '水滴', labelEn: 'Droplet' },
-  { shape: 'pebble', rotation: -14, labelZh: '胶囊豆', labelEn: 'Pebble' },
+  { shape: 'bean', rotation: -12, labelZh: '四叶草', labelEn: 'Clover' }, // i18n-ok
+  { shape: 'arch', rotation: -10, labelZh: '爱心', labelEn: 'Heart' }, // i18n-ok
+  { shape: 'crystal', rotation: 0, labelZh: '花朵', labelEn: 'Blossom' }, // i18n-ok
+  { shape: 'teardrop', rotation: 10, labelZh: '水滴', labelEn: 'Droplet' }, // i18n-ok
+  { shape: 'pebble', rotation: -14, labelZh: '胶囊豆', labelEn: 'Pebble' }, // i18n-ok
   // Row 3 (5 shapes in 15848.jpg)
-  { shape: 'wedge', rotation: 14, labelZh: '三角', labelEn: 'Wedge' },
-  { shape: 'shield', rotation: -12, labelZh: '五边形', labelEn: 'Shield' },
-  { shape: 'dome', rotation: 0, labelZh: '星芒', labelEn: 'Burst' },
-  { shape: 'hex', rotation: 10, labelZh: '六边形', labelEn: 'Hexagon' },
-  { shape: 'leaf', rotation: -8, labelZh: '果实', labelEn: 'Fruit' },
+  { shape: 'wedge', rotation: 14, labelZh: '三角', labelEn: 'Wedge' }, // i18n-ok
+  { shape: 'shield', rotation: -12, labelZh: '五边形', labelEn: 'Shield' }, // i18n-ok
+  { shape: 'dome', rotation: 0, labelZh: '星芒', labelEn: 'Burst' }, // i18n-ok
+  { shape: 'hex', rotation: 10, labelZh: '六边形', labelEn: 'Hexagon' }, // i18n-ok
+  { shape: 'leaf', rotation: -8, labelZh: '果实', labelEn: 'Fruit' }, // i18n-ok
   // Extra 4 shapes from GROK_SHAPES
-  { shape: 'egg', rotation: -8, labelZh: '卵石', labelEn: 'Egg' },
-  { shape: 'tablet', rotation: 12, labelZh: '方片', labelEn: 'Tablet' },
-  { shape: 'capsule', rotation: -15, labelZh: '长胶囊', labelEn: 'Capsule' },
-  { shape: 'cylinder', rotation: 8, labelZh: '圆柱', labelEn: 'Cylinder' },
+  { shape: 'egg', rotation: -8, labelZh: '卵石', labelEn: 'Egg' }, // i18n-ok
+  { shape: 'tablet', rotation: 12, labelZh: '方片', labelEn: 'Tablet' }, // i18n-ok
+  { shape: 'capsule', rotation: -15, labelZh: '长胶囊', labelEn: 'Capsule' }, // i18n-ok
+  { shape: 'cylinder', rotation: 8, labelZh: '圆柱', labelEn: 'Cylinder' }, // i18n-ok
 ];
 
 export const GROK_EXPRESSION_LIST: ReadonlyArray<{ index: number; labelZh: string; labelEn: string }> = [
-  { index: 0, labelZh: '专注仰视', labelEn: 'Focused' },
-  { index: 1, labelZh: '灵动平视', labelEn: 'Bright' },
-  { index: 2, labelZh: '好奇大眼', labelEn: 'Curious' },
-  { index: 3, labelZh: '俏皮眨眼', labelEn: 'Wink' },
-  { index: 4, labelZh: '向左张望', labelEn: 'Glance' },
-  { index: 5, labelZh: '圆润微笑', labelEn: 'Happy' },
+  { index: 0, labelZh: '专注仰视', labelEn: 'Focused' }, // i18n-ok
+  { index: 1, labelZh: '灵动平视', labelEn: 'Bright' }, // i18n-ok
+  { index: 2, labelZh: '好奇大眼', labelEn: 'Curious' }, // i18n-ok
+  { index: 3, labelZh: '俏皮眨眼', labelEn: 'Wink' }, // i18n-ok
+  { index: 4, labelZh: '向左张望', labelEn: 'Glance' }, // i18n-ok
+  { index: 5, labelZh: '圆润微笑', labelEn: 'Happy' }, // i18n-ok
 ];
 
 export const JARVIS_AVATAR_PRESET: GrokAvatarPreset = {
@@ -74,21 +75,21 @@ export const JARVIS_AVATAR_PRESET: GrokAvatarPreset = {
   color: '#2B70F6',
   rotation: 0,
   expressionIndex: 0,
-  labelZh: '经典蓝',
+  labelZh: '经典蓝', // i18n-ok
   labelEn: 'Classic Blue',
 };
 
 export const GROK_AVATAR_PRESETS: ReadonlyArray<GrokAvatarPreset> = [
-  { id: 'pink-wedge', shape: 'wedge', color: '#DF4191', rotation: 14, expressionIndex: 0, labelZh: '玫红三角', labelEn: 'Pink Wedge' },
-  { id: 'slate-cloud', shape: 'cloud', color: '#48AB94', rotation: -6, expressionIndex: 1, labelZh: '松石云朵', labelEn: 'Teal Cloud' },
-  { id: 'pink-pebble', shape: 'pebble', color: '#DF4191', rotation: -14, expressionIndex: 1, labelZh: '粉红胶囊', labelEn: 'Pink Pebble' },
-  { id: 'coral-wedge', shape: 'wedge', color: '#EA403C', rotation: 32, expressionIndex: 0, labelZh: '珊瑚三角', labelEn: 'Coral Wedge' },
-  { id: 'coral-pebble', shape: 'pebble', color: '#EA403C', rotation: -14, expressionIndex: 1, labelZh: '珊瑚胶囊', labelEn: 'Coral Pebble' },
-  { id: 'mint-gem', shape: 'gem', color: '#48AB94', rotation: 0, expressionIndex: 1, labelZh: '松石四芒星', labelEn: 'Teal Star' },
-  { id: 'violet-bean', shape: 'bean', color: '#795BF2', rotation: -12, expressionIndex: 3, labelZh: '星云四叶草', labelEn: 'Violet Clover' },
-  { id: 'solar-teardrop', shape: 'teardrop', color: '#F09E2B', rotation: 12, expressionIndex: 2, labelZh: '暖阳水滴', labelEn: 'Amber Drop' },
-  { id: 'sky-hex', shape: 'hex', color: '#2B70F6', rotation: 10, expressionIndex: 4, labelZh: '天蓝六边', labelEn: 'Blue Hex' },
-  { id: 'emerald-leaf', shape: 'leaf', color: '#4EBD64', rotation: -10, expressionIndex: 5, labelZh: '翠绿果实', labelEn: 'Green Fruit' },
+  { id: 'pink-wedge', shape: 'wedge', color: '#DF4191', rotation: 14, expressionIndex: 0, labelZh: '玫红三角', labelEn: 'Pink Wedge' }, // i18n-ok
+  { id: 'slate-cloud', shape: 'cloud', color: '#48AB94', rotation: -6, expressionIndex: 1, labelZh: '松石云朵', labelEn: 'Teal Cloud' }, // i18n-ok
+  { id: 'pink-pebble', shape: 'pebble', color: '#DF4191', rotation: -14, expressionIndex: 1, labelZh: '粉红胶囊', labelEn: 'Pink Pebble' }, // i18n-ok
+  { id: 'coral-wedge', shape: 'wedge', color: '#EA403C', rotation: 32, expressionIndex: 0, labelZh: '珊瑚三角', labelEn: 'Coral Wedge' }, // i18n-ok
+  { id: 'coral-pebble', shape: 'pebble', color: '#EA403C', rotation: -14, expressionIndex: 1, labelZh: '珊瑚胶囊', labelEn: 'Coral Pebble' }, // i18n-ok
+  { id: 'mint-gem', shape: 'gem', color: '#48AB94', rotation: 0, expressionIndex: 1, labelZh: '松石四芒星', labelEn: 'Teal Star' }, // i18n-ok
+  { id: 'violet-bean', shape: 'bean', color: '#795BF2', rotation: -12, expressionIndex: 3, labelZh: '星云四叶草', labelEn: 'Violet Clover' }, // i18n-ok
+  { id: 'solar-teardrop', shape: 'teardrop', color: '#F09E2B', rotation: 12, expressionIndex: 2, labelZh: '暖阳水滴', labelEn: 'Amber Drop' }, // i18n-ok
+  { id: 'sky-hex', shape: 'hex', color: '#2B70F6', rotation: 10, expressionIndex: 4, labelZh: '天蓝六边', labelEn: 'Blue Hex' }, // i18n-ok
+  { id: 'emerald-leaf', shape: 'leaf', color: '#4EBD64', rotation: -10, expressionIndex: 5, labelZh: '翠绿果实', labelEn: 'Green Fruit' }, // i18n-ok
 ];
 
 const AVATAR_CONFIG_STORE_KEY = 'bot-hub-avatar-config-v2';
@@ -97,7 +98,7 @@ const OFFLINE_COLOR = '#6F7072';
 // 旧灰色配置只调整显示颜色，保留形状及中心保存的数据。
 function onlineAvatarPreset(preset: GrokAvatarPreset): GrokAvatarPreset {
   return preset.color.toUpperCase() === OFFLINE_COLOR
-    ? { ...preset, color: '#48AB94', labelZh: '松石青', labelEn: 'Teal' }
+    ? { ...preset, color: '#48AB94', labelZh: '松石青', labelEn: 'Teal' } // i18n-ok
     : preset;
 }
 
@@ -270,6 +271,7 @@ export function GrokBotAvatar({
         height={size}
         xmlns="http://www.w3.org/2000/svg"
         className="grok-bot-svg"
+        aria-hidden="true"
       >
         <defs>
           <clipPath id={clipId}>
@@ -301,13 +303,13 @@ export function GrokBotAvatar({
             width: `${reflectSize}px`,
             height: `${reflectSize}px`,
             borderRadius: '50%',
-            background: 'var(--bg, #ffffff)',
-            border: '1.5px solid var(--line, rgba(0, 0, 0, 0.12))',
+            background: 'var(--color-bg, var(--bg))',
+            border: '1.5px solid var(--color-line, var(--line))',
             display: 'inline-flex',
             alignItems: 'center',
             justifyContent: 'center',
             color: resolved.color,
-            boxShadow: '0 1px 4px rgba(0, 0, 0, 0.14)',
+            boxShadow: '0 1px 4px color-mix(in srgb, var(--color-scrim, var(--text)) 16%, transparent)',
             pointerEvents: 'none',
           }}
         >
@@ -327,13 +329,13 @@ export function GrokBotAvatar({
             width: `${badgeSize}px`,
             height: `${badgeSize}px`,
             borderRadius: '50%',
-            background: 'var(--bg, #ffffff)',
-            border: '1.5px solid var(--line, rgba(0, 0, 0, 0.12))',
+            background: 'var(--color-bg, var(--bg))',
+            border: '1.5px solid var(--color-line, var(--line))',
             display: 'inline-flex',
             alignItems: 'center',
             justifyContent: 'center',
-            color: 'var(--text, #1d1d1f)',
-            boxShadow: '0 1px 4px rgba(0, 0, 0, 0.16)',
+            color: 'var(--color-text, var(--text))',
+            boxShadow: '0 1px 4px color-mix(in srgb, var(--color-scrim, var(--text)) 16%, transparent)',
             pointerEvents: 'none',
           }}
         >
@@ -344,6 +346,30 @@ export function GrokBotAvatar({
   );
 }
 
+export function useReducedMotion(): boolean {
+  const [reduced, setReduced] = useState<boolean>(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
+    const mql = window.matchMedia('(prefers-reduced-motion: reduce)');
+    setReduced(mql.matches);
+    const onChange = (event: MediaQueryListEvent) => {
+      setReduced(event.matches);
+    };
+    if (typeof mql.addEventListener === 'function') {
+      mql.addEventListener('change', onChange);
+      return () => mql.removeEventListener('change', onChange);
+    }
+    mql.addListener(onChange);
+    return () => mql.removeListener(onChange);
+  }, []);
+
+  return reduced;
+}
+
 export function GrokBotAnimatedMark({
   seedId,
   shape = 'cloud',
@@ -351,7 +377,9 @@ export function GrokBotAnimatedMark({
   eyeColor = '#FAF8F5',
   state = 'working',
   size = 36,
+  maxFrameRate,
   isPlaying = true,
+  isStatic = false,
   isEmphasized = false,
   interactivePoke = false,
   className = '',
@@ -362,13 +390,20 @@ export function GrokBotAnimatedMark({
   eyeColor?: string;
   state?: GrokMascotState;
   size?: number;
+  maxFrameRate?: number;
   isPlaying?: boolean;
+  isStatic?: boolean;
   isEmphasized?: boolean;
   interactivePoke?: boolean;
   className?: string;
 }) {
+  const t = useText();
+  const reducedMotion = useReducedMotion();
   const reactId = useId().replace(/:/g, '_');
   const markId = seedId ? `grok_mark_${seedId.replace(/[^a-zA-Z0-9_-]/g, '_')}_${reactId}` : `grok_mark_${reactId}`;
+  const effectiveMaxFrameRate = maxFrameRate ?? (size < 48 ? 30 : 60);
+  const effectiveIsStatic = isStatic || reducedMotion;
+  const effectiveIsPlaying = isPlaying && !effectiveIsStatic;
   const hostRef = useRef<HTMLSpanElement | null>(null);
   const canvasRef = useRef<HTMLSpanElement | null>(null);
   const controllerRef = useRef<ReturnType<typeof createGrokMascotController> | null>(null);
@@ -385,7 +420,9 @@ export function GrokBotAnimatedMark({
       eyeColor,
       state,
       size,
-      isPlaying,
+      maxFrameRate: effectiveMaxFrameRate,
+      isStatic: effectiveIsStatic,
+      isPlaying: effectiveIsPlaying,
       isEmphasized,
       seed: seedId || markId,
     });
@@ -395,7 +432,9 @@ export function GrokBotAnimatedMark({
       detach();
       controllerRef.current = null;
     };
-  }, [markId, seedId]);
+    // Recreate controller when system reduced-motion toggles so the engine's cached media-query flag refreshes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [markId, seedId, reducedMotion]);
 
   useEffect(() => {
     const ctrl = controllerRef.current;
@@ -405,16 +444,26 @@ export function GrokBotAnimatedMark({
       appearance: createGrokAppearance(color, eyeColor),
       state,
       size,
-      isPlaying,
+      maxFrameRate: effectiveMaxFrameRate,
+      isStatic: effectiveIsStatic,
+      isPlaying: effectiveIsPlaying,
       isEmphasized,
     });
-  }, [shape, color, eyeColor, state, size, isPlaying, isEmphasized]);
+  }, [shape, color, eyeColor, state, size, effectiveMaxFrameRate, effectiveIsStatic, effectiveIsPlaying, isEmphasized]);
 
   const handlePoke = () => {
-    if (!interactivePoke || !controllerRef.current) return;
+    if (!interactivePoke || effectiveIsStatic || !controllerRef.current) return;
     const kind = GROK_POKE_TYPES[pokeIndexRef.current % GROK_POKE_TYPES.length] ?? 'spin';
     pokeIndexRef.current += 1;
     controllerRef.current.poke(kind, undefined);
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLSpanElement>) => {
+    if (!interactivePoke) return;
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      handlePoke();
+    }
   };
 
   return (
@@ -424,12 +473,13 @@ export function GrokBotAnimatedMark({
       data-grok-state={state}
       style={{ width: `${size}px`, height: `${size}px` }}
       onClick={interactivePoke ? handlePoke : undefined}
+      onKeyDown={interactivePoke ? handleKeyDown : undefined}
       role={interactivePoke ? 'button' : undefined}
       tabIndex={interactivePoke ? 0 : undefined}
       aria-hidden={interactivePoke ? undefined : 'true'}
-      aria-label={interactivePoke ? 'Bot working indicator' : undefined}
+      aria-label={interactivePoke ? t('戳一戳 Bot', 'Poke Bot') : undefined}
     >
-      <span ref={canvasRef} className="sand-grok-bot-mark-canvas" />
+      <span ref={canvasRef} className="sand-grok-bot-mark-canvas" aria-hidden="true" />
     </span>
   );
 }
@@ -477,13 +527,12 @@ export function GrokBotFailureRow({
   inline?: boolean;
   t: (zh: string, en: string) => string;
 }) {
+  const reducedMotion = useReducedMotion();
   const [emphasized, setEmphasized] = useState(false);
   const [showDetail, setShowDetail] = useState(false);
   const detailId = useId();
   const cleanDetail = detail?.trim() || '';
   const statusText = summary?.trim() || t('回复未完成', 'Reply incomplete');
-
-
 
   return (
     <div
@@ -502,6 +551,7 @@ export function GrokBotFailureRow({
           eyeColor="#FAF8F5"
           state="idle"
           size={36}
+          isStatic={reducedMotion}
           isPlaying={false}
           isEmphasized={emphasized}
           interactivePoke={true}
@@ -566,6 +616,7 @@ export function GrokBotWorkingSlot({
   failure?: GrokWorkingFailure | null;
   t: (zh: string, en: string) => string;
 }) {
+  const reducedMotion = useReducedMotion();
   const isPreLlmWaiting =
     isBusy &&
     (isBotPreLlmPhase(activity?.phase) ||
@@ -586,9 +637,11 @@ export function GrokBotWorkingSlot({
     return now;
   };
 
-  const [elapsedSec, setElapsedSec] = useState(() =>
+  const elapsedRef = useRef<HTMLSpanElement | null>(null);
+  const elapsedSecRef = useRef<number>(
     isBusy && !isPreLlmWaiting ? Math.max(0, Math.floor((Date.now() - resolveStartMs()) / 1000)) : 0,
   );
+  const [finalElapsedSec, setFinalElapsedSec] = useState(0);
   const [settlementOutcome, setSettlementOutcome] = useState<'success' | 'stopped' | null>(null);
   const [learningOutcome, setLearningOutcome] = useState<BotLearningOutcomeSummary | null>(null);
   const [reflectionReadingPhase, setReflectionReadingPhase] = useState(false);
@@ -601,8 +654,9 @@ export function GrokBotWorkingSlot({
   useEffect(() => {
     if (isPreLlmWaiting) {
       workingStartMsByBotKey.delete(botKey);
+      elapsedSecRef.current = 0;
       setSettlementOutcome(null);
-      setElapsedSec(0);
+      setFinalElapsedSec(0);
       return undefined;
     }
     if (isBusy) {
@@ -611,7 +665,12 @@ export function GrokBotWorkingSlot({
       setLearningOutcome(null);
       const startMs = resolveStartMs();
       const update = () => {
-        setElapsedSec(Math.max(0, Math.floor((Date.now() - startMs) / 1000)));
+        const nextSec = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+        elapsedSecRef.current = nextSec;
+        const nextText = formatWorkingElapsed(nextSec);
+        if (elapsedRef.current && elapsedRef.current.textContent !== nextText) {
+          elapsedRef.current.textContent = nextText;
+        }
       };
       update();
       const timer = window.setInterval(update, 250);
@@ -625,22 +684,27 @@ export function GrokBotWorkingSlot({
     if (wasBusyRef.current) {
       wasBusyRef.current = false;
       const finalStartMs = workingStartMsByBotKey.get(botKey);
-      if (typeof finalStartMs === 'number' && Number.isFinite(finalStartMs) && finalStartMs > 0) {
-        setElapsedSec(Math.max(0, Math.floor((Date.now() - finalStartMs) / 1000)));
-      }
+      const finalSec =
+        typeof finalStartMs === 'number' && Number.isFinite(finalStartMs) && finalStartMs > 0
+          ? Math.max(0, Math.floor((Date.now() - finalStartMs) / 1000))
+          : elapsedSecRef.current;
       workingStartMsByBotKey.delete(botKey);
       // 'failed' 由 activeFailure 或轮次内嵌失败行持续渲染，不走 1.45s 自动清除的 error 结算，避免闪跳或重复。
       if (hasActiveFailure || hasError || activity?.phase === 'failed') {
+        elapsedSecRef.current = 0;
         setSettlementOutcome(null);
-        setElapsedSec(0);
+        setFinalElapsedSec(0);
         return undefined;
       }
+      elapsedSecRef.current = finalSec;
+      setFinalElapsedSec(finalSec);
       setSettlementOutcome(
         activity?.phase === 'stopped' ? 'stopped' : 'success',
       );
       const settleTimer = window.setTimeout(() => {
+        elapsedSecRef.current = 0;
         setSettlementOutcome(null);
-        setElapsedSec(0);
+        setFinalElapsedSec(0);
       }, 1450);
       return () => window.clearTimeout(settleTimer);
     }
@@ -781,7 +845,7 @@ export function GrokBotWorkingSlot({
         const updated = learningOutcome.updatedSkills ?? [];
         const archived = learningOutcome.archivedSkills ?? [];
         if (updated.length > 0) {
-          const preview = updated.slice(0, 2).join('、');
+          const preview = updated.slice(0, 2).join(t('、', ', '));
           const suffix = updated.length > 2 ? t(` 等 ${updated.length} 项`, ` +${updated.length - 2}`) : '';
           return t(`✨ 已习得/更新技能 ${preview}${suffix}`, `✨ Learned/updated skill ${preview}${suffix}`);
         }
@@ -848,7 +912,8 @@ export function GrokBotWorkingSlot({
           eyeColor="#FAF8F5"
           state={mascotState}
           size={36}
-          isPlaying={isBusy || Boolean(settlementOutcome) || isReflecting || showLearningOutcome}
+          isStatic={reducedMotion}
+          isPlaying={!reducedMotion && (isBusy || Boolean(settlementOutcome) || isReflecting || showLearningOutcome)}
           isEmphasized={emphasized}
           interactivePoke={true}
         />
@@ -870,8 +935,10 @@ export function GrokBotWorkingSlot({
                 {t('查看', 'View')}
               </button>
             ) : null}
-            {!isPreLlmWaiting && (isBusy || ((settlementOutcome || settledActivity) && elapsedSec > 0)) && (
-              <span className="sand-activity-elapsed">{formatWorkingElapsed(elapsedSec)}</span>
+            {!isPreLlmWaiting && (isBusy || ((settlementOutcome || settledActivity) && finalElapsedSec > 0)) && (
+              <span ref={elapsedRef} className="sand-activity-elapsed">
+                {formatWorkingElapsed(isBusy ? elapsedSecRef.current : finalElapsedSec)}
+              </span>
             )}
           </span>
       </div>

@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CenterBotModelConfig, CenterModelSelection, CenterModelPicker } from '../../../host-core/desktop-client.js';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
-import { errorText } from '../ui';
+import { errorText, useText } from '../ui';
 import { isCenterAuthOrBindError } from './centerAdminBroker';
 
 /** undefined = 跟随全局默认；null = 旧版遗留清空态；其它为本 Bot 覆盖值。 */
@@ -101,6 +101,9 @@ const applyToolMode = (next: CenterModelSelection, mode: ToolMode) => {
 };
 
 export function useBotModelConfig(api: DesktopPanelApi, identity: DesktopIdentity, deviceId: string, botId: string): BotModelConfigState {
+  const t = useText();
+  const tRef = useRef(t);
+  tRef.current = t;
   const alive = useRef(false);
   const configRef = useRef<CenterBotModelConfig | undefined>(undefined);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -180,7 +183,7 @@ export function useBotModelConfig(api: DesktopPanelApi, identity: DesktopIdentit
     };
   }, [reload]);
 
-  const commitMutation = useCallback((mutate: (next: CenterModelSelection) => void, successText = '已保存'): Promise<void> => {
+  const commitMutation = useCallback((mutate: (next: CenterModelSelection) => void, successText?: string): Promise<void> => {
     pendingMutationsRef.current += 1;
     setSavingCount(c => c + 1);
     setError('');
@@ -209,7 +212,7 @@ export function useBotModelConfig(api: DesktopPanelApi, identity: DesktopIdentit
         if (!alive.current) return;
         pendingMutationsRef.current = Math.max(0, pendingMutationsRef.current - 1);
         updateConfigState(next, pendingMutationsRef.current === 0);
-        flashNotice(successText);
+        flashNotice(successText ?? tRef.current('已保存', 'Saved'));
       } catch (failure) {
         if (!alive.current) return;
         pendingMutationsRef.current = Math.max(0, pendingMutationsRef.current - 1);
@@ -254,7 +257,7 @@ export function useBotModelConfig(api: DesktopPanelApi, identity: DesktopIdentit
       });
       if (!alive.current) return;
       updateConfigState(next, true);
-      flashNotice(successNotice || '已保存');
+      flashNotice(successNotice || tRef.current('已保存', 'Saved'));
     } catch (failure) {
       if (!alive.current) return;
       handleFailure(failure);

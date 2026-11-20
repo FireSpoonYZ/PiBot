@@ -1,5 +1,7 @@
-import { useState, type KeyboardEvent } from 'react';
+import { useId, useState, type KeyboardEvent } from 'react';
 import { ArrowLeft } from 'lucide-react';
+import { mobileHaptic } from '../native/tauri-host';
+import { useText } from '../ui';
 import type { GlobalTasksController } from './useGlobalTasks';
 
 export interface TaskCreateViewProps {
@@ -8,6 +10,8 @@ export interface TaskCreateViewProps {
 }
 
 export function TaskCreateView({ controller, onClose }: TaskCreateViewProps) {
+  const t = useText();
+  const inputId = useId();
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -25,9 +29,10 @@ export function TaskCreateView({ controller, onClose }: TaskCreateViewProps) {
     setSubmitError(null);
     try {
       await controller.createTask({ text: trimmed });
+      mobileHaptic('confirm');
       onClose();
     } catch (err) {
-      setSubmitError(err instanceof Error && err.message ? err.message : String(err || '发布任务失败'));
+      setSubmitError(err instanceof Error && err.message ? err.message : String(err || t('发布任务失败', 'Failed to publish task')));
     } finally {
       setSubmitting(false);
     }
@@ -47,17 +52,17 @@ export function TaskCreateView({ controller, onClose }: TaskCreateViewProps) {
         <header className="detail-topbar">
           <button type="button" className="back-btn" onClick={handleBack} disabled={submitting}>
             <ArrowLeft size={19} aria-hidden="true" />
-            <span>任务列表</span>
+            <span>{t('任务列表', 'Tasks')}</span>
           </button>
         </header>
 
-        <section className="create-page-card" aria-label="新建任务">
-          <h1 className="create-page-title">新建任务</h1>
-          <label htmlFor="create-task-input" className="sr-only">
-            输入想法或任务内容
+        <section className="create-page-card" aria-label={t('新建任务', 'New task')}>
+          <h1 className="create-page-title">{t('新建任务', 'New task')}</h1>
+          <label htmlFor={inputId} className="sr-only">
+            {t('输入想法或任务内容', 'Enter an idea or task description')}
           </label>
           <textarea
-            id="create-task-input"
+            id={inputId}
             className="create-page-textarea"
             value={controller.createDraft}
             onChange={event => {
@@ -65,7 +70,7 @@ export function TaskCreateView({ controller, onClose }: TaskCreateViewProps) {
               controller.setCreateDraft(event.target.value);
             }}
             onKeyDown={handleKeyDown}
-            placeholder="随手写下一句想法，或直接交代要做的事…"
+            placeholder={t('随手写下一句想法，或直接交代要做的事…', 'Jot down an idea or describe what you need done…')}
             disabled={submitting}
             autoFocus
           />
@@ -78,9 +83,9 @@ export function TaskCreateView({ controller, onClose }: TaskCreateViewProps) {
 
           <div className="create-page-footer">
             {hasDraft && controller.showDraftSaved ? (
-              <span className="create-page-hint is-saved">已保留上次未发布的草稿，可继续编辑</span>
+              <span className="create-page-hint is-saved">{t('已保留上次未发布的草稿，可继续编辑', 'Your unpublished draft was restored.')}</span>
             ) : (
-              <span className="create-page-hint">不用选谁来做，写下想法或要求即可交给助手安排</span>
+              <span className="create-page-hint">{t('不用选谁来做，写下想法或要求即可交给 Bot 安排', 'No need to pick an owner—describe what you need and a Bot will coordinate it.')}</span>
             )}
             <button
               type="button"
@@ -88,7 +93,7 @@ export function TaskCreateView({ controller, onClose }: TaskCreateViewProps) {
               disabled={!hasDraft || submitting}
               onClick={() => void handleSubmit()}
             >
-              {submitting ? '发布中…' : '发布任务'}
+              {submitting ? t('发布中…', 'Publishing…') : t('发布任务', 'Publish task')}
             </button>
           </div>
         </section>

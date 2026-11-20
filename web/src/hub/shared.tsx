@@ -145,7 +145,7 @@ export const REMOTE_PROFILES_FLAG_KEY = 'bot-hub-has-remote-v1';
 export const REMOTE_BOTS_CACHE_KEY = 'bot-hub-remote-bots-cache-v1';
 export const REMOTE_DEVICES_CACHE_KEY = 'bot-hub-remote-devices-cache-v1';
 export const PRIMARY_ROLE_OVERRIDE_KEY = 'bot-hub-primary-name-v2';
-export const DEFAULT_PRIMARY_ROLE = '主助手';
+export const DEFAULT_PRIMARY_ROLE = '主 Bot'; // i18n-ok
 export const CREATE_ATTEMPT_KEY = 'bot-hub-create-attempt-v1';
 export const ARCHIVE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 
@@ -167,19 +167,19 @@ try {
 export const SOUL_MAX_BYTES = 65536;
 export const SOUL_SNIPPETS: { zh: string; en: string; text: string }[] = [
   {
-    zh: '＋ 角色使命',
+    zh: '＋ 角色使命', // i18n-ok
     en: '+ Mission',
-    text: '\n# 角色与职责定位\n你是专注本工作区与目标领域的智能体搭档，结合上下文与实证数据直接推进任务并给出可靠结论。\n',
+    text: '\n# 角色与职责定位\n你是专注本工作区与目标领域的 Bot 搭档，结合上下文与实证数据直接推进任务并给出可靠结论。\n', // i18n-ok
   },
   {
-    zh: '＋ 沟通风格',
+    zh: '＋ 沟通风格', // i18n-ok
     en: '+ Style',
-    text: '\n# 沟通与表达风格\n- 自然温和、实事求是：像熟悉业务的靠谱搭档交流；已掌握答案或完成核查时第一句直奔结论，需调用工具排查时伴随工具调用简明交代第一步，不在核实前猜测结论，不重复问题、不加客服套话与多余尾注。\n- 篇幅克制、自然段落：日常简明扼要，复杂任务才展开完整细节；优先用连贯自然句表达，仅在真正并列或对比时使用列表与表格。\n',
+    text: '\n# 沟通与表达风格\n- 自然温和、实事求是：像熟悉业务的靠谱搭档交流；已掌握答案或完成核查时第一句直奔结论，需调用工具排查时伴随工具调用简明交代第一步，不在核实前猜测结论，不重复问题、不加客服套话与多余尾注。\n- 篇幅克制、自然段落：日常简明扼要，复杂任务才展开完整细节；优先用连贯自然句表达，仅在真正并列或对比时使用列表与表格。\n', // i18n-ok
   },
   {
-    zh: '＋ 群聊准则',
+    zh: '＋ 群聊准则', // i18n-ok
     en: '+ Room Rules',
-    text: '\n# 多 Bot 协作偏好\n- 发挥自身专长，对可并行或跨设备的子任务积极配合同伴 Bot 分工。\n- 聚焦实质进展与有效结论，其他成员已完整解答或无需补充时保持安静，不发无意义的附和与礼貌回执。\n',
+    text: '\n# 多 Bot 协作偏好\n- 发挥自身专长，对可并行或跨设备的子任务积极配合同伴 Bot 分工。\n- 聚焦实质进展与有效结论，其他成员已完整解答或无需补充时保持安静，不发无意义的附和与礼貌回执。\n', // i18n-ok
   },
 ];
 
@@ -387,7 +387,7 @@ export interface BotScheduleDraft {
   deleteAfterRun: boolean;
 }
 
-export const WEEKDAY_SHORT_ZH = ['一', '二', '三', '四', '五', '六', '日'];
+export const WEEKDAY_SHORT_ZH = ['一', '二', '三', '四', '五', '六', '日']; // i18n-ok
 export const WEEKDAY_SHORT_EN = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 export function formatScheduleRepeatLabel(
@@ -409,10 +409,8 @@ export function formatScheduleRepeatLabel(
     if (days.join(',') === '1,2,3,4,5') return t('周一至周五', 'Mon–Fri');
     if (days.join(',') === '6,7') return t('周六日', 'Weekends');
     if (days.length === 7) return t('每天', 'Every day');
-    return t(
-      `每周 ${days.map(d => WEEKDAY_SHORT_ZH[(d - 1) % 7]).join('、')}`,
-      `Weekly ${days.map(d => WEEKDAY_SHORT_EN[(d - 1) % 7]).join(', ')}`,
-    );
+    return t(`每周 ${days.map(d => WEEKDAY_SHORT_ZH[(d - 1) % 7]).join('、')}`,
+      `Weekly ${days.map(d => WEEKDAY_SHORT_EN[(d - 1) % 7]).join(', ')}`);
   }
   return t('每天', 'Every day');
 }
@@ -978,8 +976,8 @@ export function TurnToolCallsSection({
 }
 
 export const SLASH_COMMANDS = [
-  { name: '/clear', zh: '清空当前对话并重置模型上下文', en: 'Clear history and reset model context' },
-  { name: '/compact', zh: '压缩较早的上下文', en: 'Compact earlier context' },
+  { name: '/clear', zh: '清空当前对话并重置模型上下文', en: 'Clear history and reset model context' }, // i18n-ok
+  { name: '/compact', zh: '压缩较早的上下文', en: 'Compact earlier context' }, // i18n-ok
 ] as const;
 export type SlashCommandName = (typeof SLASH_COMMANDS)[number]['name'];
 

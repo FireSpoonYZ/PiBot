@@ -23,6 +23,10 @@ export interface BotBoardRecord {
 }
 
 export type BoardBucket = 'attention' | 'working' | 'review' | 'idle' | 'offline';
+export type BotBoardTranslate = (zh: string, en: string) => string;
+
+const defaultBoardText: BotBoardTranslate = (zh, en) =>
+  typeof navigator !== 'undefined' && navigator.language.startsWith('en') ? en : zh;
 
 export function botBoardKey(scope: string, deviceId: string, botId: string): string {
   return JSON.stringify([scope, deviceId, botId]);
@@ -73,6 +77,7 @@ export function invalidateBotBoardTarget(key: string): void {
 export async function readBotBoardBatch(
   batch: readonly Pick<BotBoardTarget, 'key' | 'botId' | 'generation' | 'read'>[],
   isCurrent: () => boolean = () => true,
+  t: BotBoardTranslate = defaultBoardText,
 ): Promise<boolean> {
   const first = batch[0];
   if (!first) return false;
@@ -89,12 +94,13 @@ export async function readBotBoardBatch(
       records.set(target.key, item
         ? { item, updatedAt: snapshot.updatedAt, generation: target.generation }
         : { ...records.get(target.key), error: error?.code === 'BOT_NOT_FOUND'
-          ? 'Bot 已不存在，请刷新目录。' : '状态读取失败。' });
+          ? t('Bot 已不存在，请刷新目录。', 'Bot no longer exists. Please refresh the directory.')
+          : t('状态读取失败。', 'Failed to read status.') });
       changed = true;
     }
   } catch {
     if (!isCurrent()) return false;
-    const message = '看板不可用，请检查连接，或更新中心与 Host。';
+    const message = t('看板不可用，请检查连接，或更新中心与 Host。', 'Board unavailable. Check your connection or update Center and Host.');
     for (const target of batch) {
       if (records.get(target.key) !== expected.get(target.key)) continue;
       records.set(target.key, { ...records.get(target.key), error: message });
@@ -111,12 +117,18 @@ function readSeen(key: string): string | undefined {
   return id ?? undefined;
 }
 
-export function useBotBoard(targets: BotBoardTarget[], active: boolean) {
+export function useBotBoard(
+  targets: BotBoardTarget[],
+  active: boolean,
+  t: BotBoardTranslate = defaultBoardText,
+) {
   const [revision, setRevision] = useState(0);
   const [visible, setVisible] = useState(!document.hidden);
   const [storageError, setStorageError] = useState('');
   const targetsRef = useRef(targets);
   targetsRef.current = targets;
+  const tRef = useRef(t);
+  tRef.current = t;
   // Labels and callback identities do not restart an in-flight batch.
   const signature = JSON.stringify(targets.map(t => [t.key, t.hostKey, t.generation, t.online]));
   const currentSignature = useRef(signature);
@@ -137,7 +149,7 @@ export function useBotBoard(targets: BotBoardTarget[], active: boolean) {
       setStorageError(targetsRef.current.map(target => seenErrors.get(target.key)).find(Boolean) ?? '');
       setRevision(value => value + 1);
     } catch {
-      setStorageError('无法读取本机查看标记；待查看状态可能不完整。');
+      setStorageError(tRef.current('无法读取本机查看标记；待查看状态可能不完整。', 'Unable to read local viewed markers; review status may be incomplete.'));
     }
   }, [signature]);
 
@@ -164,7 +176,7 @@ export function useBotBoard(targets: BotBoardTarget[], active: boolean) {
         const worker = async () => {
           while (current() && next < batches.length) {
             const batch = batches[next++]!;
-            if (await readBotBoardBatch(batch, current) && current()) {
+            if (await readBotBoardBatch(batch, current, tRef.current) && current()) {
               setRevision(value => value + 1);
             }
           }
@@ -188,7 +200,7 @@ export function useBotBoard(targets: BotBoardTarget[], active: boolean) {
       localStorage.setItem(seenPrefix + key, id);
       seenErrors.delete(key);
     } catch {
-      const message = '查看标记未能保存；本次会话仍有效，重启后可能再次显示待查看。';
+      const message = tRef.current('查看标记未能保存；本次会话仍有效，重启后可能再次显示待查看。', 'Failed to save viewed marker; valid for this session, may reappear after restart.');
       seenErrors.set(key, message);
       setStorageError(message);
     }

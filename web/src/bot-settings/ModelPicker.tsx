@@ -124,7 +124,7 @@ export function ModelPicker({
         subtitle={`${providerOf(model)} · ${model.modelRef}`}
         onClick={() => onChange(model.modelRef)}
         trailing={(
-          <div className="model-picker-meta">
+          <span className="model-picker-meta">
             {unavailable ? <Badge tone="warning">{t('不可用', 'Unavailable')}</Badge> : null}
             {model.reasoning ? <Badge>{t('推理', 'Reasoning')}</Badge> : null}
             {model.contextWindow > 0 ? <span className="model-picker-ctx">{tokensText(model.contextWindow)}</span> : null}
@@ -132,6 +132,7 @@ export function ModelPicker({
               type="button"
               className={`model-picker-star${starred ? ' is-starred' : ''}`}
               aria-label={starred ? t(`取消收藏 ${model.name}`, `Unstar ${model.name}`) : t(`收藏 ${model.name}`, `Star ${model.name}`)}
+              aria-pressed={starred}
               disabled={pendingStar === model.modelRef}
               onClick={event => {
                 event.stopPropagation();
@@ -140,7 +141,7 @@ export function ModelPicker({
             >
               <Star aria-hidden="true" fill={starred ? 'currentColor' : 'none'} />
             </button>
-          </div>
+          </span>
         )}
       />
     );

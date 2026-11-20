@@ -1,4 +1,3 @@
-.send-button-spinner { animation: send-button-spin .8s linear infinite; }
+.send-button-spinner { animation: spin .8s linear infinite; }
 .composer-send[aria-busy="true"]:disabled, .grok-composer-action-pill[aria-busy="true"]:disabled { opacity: 1; }
-@keyframes send-button-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .send-button-spinner { animation: none; } }

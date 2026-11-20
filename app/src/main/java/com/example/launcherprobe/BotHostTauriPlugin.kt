@@ -4,8 +4,10 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.view.HapticFeedbackConstants
 import android.webkit.WebView
 import androidx.activity.result.ActivityResult
 import androidx.appcompat.app.AppCompatActivity
@@ -50,7 +52,7 @@ internal class AckArgs {
 
 /**
  * M18 Tauri 界面的 Host 桥插件（运行在 :tauri_ui 进程）。
- * 只转发既有 Host 数据操作；UI 本地动作限于 start/stop/openSystemSettings/reconnect/hide，
+ * 只转发既有 Host 数据操作；UI 本地动作限于 start/stop/openSystemSettings/reconnect/hide/haptic，
  * 界面启动时由客户端前台生命周期管理 Host；不重放 mutation，事件按单 ACK 窗口有界投递。
  *
  * 四个 JS 命令与内部 eventsFailed 一律 resolve NativeReply：{ok:true,result} 或
@@ -218,6 +220,7 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             "start" -> startHost(invoke)
             "stop" -> stopHost(invoke)
             "hide" -> hide(invoke)
+            "haptic" -> haptic(invoke, params)
             "openSystemSettings" -> openSystemSettings(invoke)
             "openCenter" -> openCenter(invoke, params)
             "reconnect" -> reconnect(invoke)
@@ -352,6 +355,26 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             // 只把任务移到后台：不关闭 Host、不销毁 WebView 状态。
             hostActivity.moveTaskToBack(true)
             replyOk(invoke, JSObject())
+        } catch (t: Throwable) {
+            replyFailure(invoke, t)
+        }
+    }
+
+    /** UI 本地触感反馈（已在 request -> onMain 切至主线程执行）：遵从系统触感开关。 */
+    private fun haptic(invoke: Invoke, params: JSONObject) {
+        val constant = resolveHapticParams(params)
+        if (constant == null) {
+            replyInvalid(invoke, "INVALID_ARGUMENT", "触感参数无效")
+            return
+        }
+        try {
+            val performed = if (!hostActivity.isFinishing && !hostActivity.isDestroyed) {
+                // 不传 FLAG_IGNORE_GLOBAL_SETTING：遵从系统触感反馈开关。
+                hostActivity.window?.decorView?.performHapticFeedback(constant) == true
+            } else {
+                false
+            }
+            replyOk(invoke, objectOf("performed" to performed))
         } catch (t: Throwable) {
             replyFailure(invoke, t)
         }
@@ -1087,12 +1110,12 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         return current
     }
 
-    private companion object {
+    companion object {
         /** pair/repair 的 invoke 回执兜底（worker 持久化不受其影响）。 */
-        const val PAIR_REPLY_TIMEOUT_MS = 360_000L
+        private const val PAIR_REPLY_TIMEOUT_MS = 360_000L
 
         /** 固定白名单：只有既有 Host 数据操作可转发；eventsFailed 是内部流控 helper，不在其中。 */
-        val SERVICE_METHODS = setOf(
+        private val SERVICE_METHODS = setOf(
             "snapshot", "status", "centerSettings", "saveCenterSettings", "settingsGet", "settingsSet", "saveCredentials", "call",
             "observe", "cancelObservation", "voiceSettings", "saveVoiceSettings",
             "startVoice", "finishVoice", "cancelVoice", "uiSettings", "pause",
@@ -1101,5 +1124,30 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             // 客户端自更新：固定方法名直达默认进程 ClientUpdater。
             "updateStatus", "updateCheck", "updateDownload", "updateInstall", "updateCancel"
         )
+
+        /**
+         * 将前端触感类型校验并映射到 Android HapticFeedbackConstants；非法或未知值返回 null。
+         * 仅接收 longPress / confirm / reject / tick；API 30 以下 confirm→VIRTUAL_KEY、reject→LONG_PRESS。
+         */
+        @JvmStatic
+        @JvmOverloads
+        fun resolveHapticConstant(kind: String?, sdkInt: Int = Build.VERSION.SDK_INT): Int? = when (kind) {
+            "longPress" -> HapticFeedbackConstants.LONG_PRESS
+            "confirm" -> if (sdkInt >= Build.VERSION_CODES.R) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.VIRTUAL_KEY
+            "reject" -> if (sdkInt >= Build.VERSION_CODES.R) HapticFeedbackConstants.REJECT else HapticFeedbackConstants.LONG_PRESS
+            "tick" -> HapticFeedbackConstants.CLOCK_TICK
+            else -> null
+        }
+
+        /**
+         * 校验 haptic 动作参数：仅接受单一字符串键 `kind` 并映射为对应常量；缺参、多参、非字符串或未知 kind 返回 null。
+         */
+        @JvmStatic
+        @JvmOverloads
+        fun resolveHapticParams(params: JSONObject?, sdkInt: Int = Build.VERSION.SDK_INT): Int? {
+            if (params == null || params.length() != 1) return null
+            val kind = params.opt("kind") as? String ?: return null
+            return resolveHapticConstant(kind, sdkInt)
+        }
     }
 }

@@ -219,15 +219,19 @@ export interface TaskBotOption {
   isPrimary?: boolean;
 }
 
-export function getStepStatusInfo(task: GlobalTask, step: TaskStep): { label: string; cls: string } {
-  if (step.status === 'done') return { label: '已完成', cls: 'is-done' };
-  if (step.status === 'cancelled') return { label: '已取消', cls: 'is-cancelled' };
-  if (!step.botId || step.status === 'unassigned') return { label: '待接手', cls: 'is-unassigned' };
-  if (task.pendingPrompt?.kind === 'plan') return { label: '待确认', cls: 'is-waiting' };
-  if (step.status === 'waiting') return { label: '待你回应', cls: 'is-waiting' };
-  if (step.status === 'blocked') return { label: '受阻', cls: 'is-blocked' };
-  if (step.status === 'working') return { label: '进行中', cls: 'is-working' };
-  return { label: '待开始', cls: 'is-todo' };
+export function getStepStatusInfo(
+  task: GlobalTask,
+  step: TaskStep,
+  t: (zh: string, en: string) => string = zh => zh,
+): { label: string; cls: string } {
+  if (step.status === 'done') return { label: t('已完成', 'Done'), cls: 'is-done' };
+  if (step.status === 'cancelled') return { label: t('已取消', 'Cancelled'), cls: 'is-cancelled' };
+  if (!step.botId || step.status === 'unassigned') return { label: t('待接手', 'Unassigned'), cls: 'is-unassigned' };
+  if (task.pendingPrompt?.kind === 'plan') return { label: t('待确认', 'Pending'), cls: 'is-waiting' };
+  if (step.status === 'waiting') return { label: t('待你回应', 'Awaiting reply'), cls: 'is-waiting' };
+  if (step.status === 'blocked') return { label: t('受阻', 'Blocked'), cls: 'is-blocked' };
+  if (step.status === 'working') return { label: t('进行中', 'In progress'), cls: 'is-working' };
+  return { label: t('待开始', 'To do'), cls: 'is-todo' };
 }
 
 export function stepCounts(task: GlobalTask): { done: number; total: number } {
@@ -241,19 +245,22 @@ export function stepCounts(task: GlobalTask): { done: number; total: number } {
   return { done, total };
 }
 
-export function formatTaskSummary(task: GlobalTask): string {
-  const raw = String(task.summary || '').replace(/^已完成\s*\d+\s*\/\s*\d+\s*·\s*/, '');
+export function formatTaskSummary(
+  task: GlobalTask,
+  t: (zh: string, en: string) => string = zh => zh,
+): string {
+  const raw = String(task.summary || '').replace(/^已完成\s*\d+\s*\/\s*\d+\s*·\s*/, ''); // i18n-ok
   if (task.status === 'triaging') return raw;
   const counts = stepCounts(task);
   if (task.status === 'done') {
     const countPart = counts.total > 1 ? ` ${counts.done}/${counts.total}` : '';
-    return `已完成${countPart}${raw ? ` · ${raw}` : ''}`;
+    return `${t('已完成', 'Done')}${countPart}${raw ? ` · ${raw}` : ''}`;
   }
   if (task.pendingPrompt?.kind === 'plan' && counts.done === 0) {
     return raw;
   }
   if (counts.total > 1) {
-    return `已完成 ${counts.done}/${counts.total}${raw ? ` · ${raw}` : ''}`;
+    return `${t('已完成', 'Done')} ${counts.done}/${counts.total}${raw ? ` · ${raw}` : ''}`;
   }
   return raw;
 }
@@ -269,23 +276,26 @@ export function isTaskWaitingForUser(task: GlobalTask): boolean {
   return task.status === 'waiting' || task.pendingPrompt != null || task.adoption?.phase === 'needs_scope';
 }
 
-export function getTaskStatusInfo(task: GlobalTask): TaskStatusInfo {
-  if (task.status === 'done') return { label: '已完成', cls: 'is-done' };
-  if (task.status === 'cancelled') return { label: '已取消', cls: 'is-done' };
-  if (task.status === 'triaging') return { label: '正在理清…', cls: 'is-triaging', spinning: true };
-  if (task.adoption?.phase === 'needs_scope') return { label: '待你回应', cls: 'is-waiting' };
+export function getTaskStatusInfo(
+  task: GlobalTask,
+  t: (zh: string, en: string) => string = zh => zh,
+): TaskStatusInfo {
+  if (task.status === 'done') return { label: t('已完成', 'Done'), cls: 'is-done' };
+  if (task.status === 'cancelled') return { label: t('已取消', 'Cancelled'), cls: 'is-done' };
+  if (task.status === 'triaging') return { label: t('正在理清…', 'Triaging…'), cls: 'is-triaging', spinning: true };
+  if (task.adoption?.phase === 'needs_scope') return { label: t('待你回应', 'Awaiting reply'), cls: 'is-waiting' };
   if (task.status === 'waiting' || task.pendingPrompt != null) {
     return {
-      label: task.pendingPrompt?.kind === 'plan' ? '待确认安排' : '待你回应',
+      label: task.pendingPrompt?.kind === 'plan' ? t('待确认安排', 'Confirm plan') : t('待你回应', 'Awaiting reply'),
       cls: 'is-waiting',
     };
   }
   const hasCoordinator = Boolean(task.coordinatorDeviceId && task.coordinatorBotId);
   const hasWorkingStep = task.steps.some(step => step.status === 'working');
   if (!hasCoordinator && !hasWorkingStep) {
-    return { label: '待接手', cls: 'is-unassigned' };
+    return { label: t('待接手', 'Unassigned'), cls: 'is-unassigned' };
   }
-  return { label: '进行中', cls: 'is-working' };
+  return { label: t('进行中', 'In progress'), cls: 'is-working' };
 }
 
 export function countWaitingTasks(tasks: GlobalTask[]): number {

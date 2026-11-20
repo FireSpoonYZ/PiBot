@@ -75,14 +75,22 @@ export interface PolledOperation {
   error?: string | { message?: string };
 }
 
+function defaultBrokerText(zh: string, en: string): string {
+  const lang = typeof document !== 'undefined' && document.documentElement.lang
+    ? document.documentElement.lang
+    : (typeof navigator !== 'undefined' ? navigator.language : 'zh');
+  return lang.toLowerCase().startsWith('zh') ? zh : en;
+}
+
 export async function pollCenterOperation(
   api: DesktopPanelApi,
   identity: DesktopIdentity,
   operationId: string,
-  options?: { maxAttempts?: number; intervalMs?: number },
+  options?: { maxAttempts?: number; intervalMs?: number; t?: (zh: string, en: string) => string },
 ): Promise<PolledOperation> {
   const maxAttempts = options?.maxAttempts ?? 40;
   const intervalMs = options?.intervalMs ?? 300;
+  const t = options?.t ?? defaultBrokerText;
   for (let i = 0; i < maxAttempts; i += 1) {
     const op = await centerAdminRequest<PolledOperation>(api, identity, {
       method: 'GET',
@@ -92,10 +100,10 @@ export async function pollCenterOperation(
     if (op.phase === 'failed') {
       const msg = typeof op.error === 'string'
         ? op.error
-        : (op.error?.message ?? '操作执行失败');
+        : (op.error?.message ?? t('操作执行失败', 'Operation failed'));
       throw new Error(msg);
     }
     await new Promise(resolve => setTimeout(resolve, intervalMs));
   }
-  throw new Error('操作等待超时，请稍后刷新查看');
+  throw new Error(t('操作等待超时，请稍后刷新查看', 'Operation timed out. Please refresh to check status.'));
 }

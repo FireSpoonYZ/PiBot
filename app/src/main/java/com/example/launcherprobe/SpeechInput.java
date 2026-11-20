@@ -94,6 +94,14 @@ abstract class SpeechInput {
         return current != null && current.startsWith(context.getPackageName() + "/");
     }
 
+    /** 将系统识别器上报的 RMS dB 归一化到 0..1；NaN 返回 NaN 表示忽略（识别器不支持 RMS）。 */
+    static float normalizeRmsDb(float db) {
+        if (Float.isNaN(db)) return Float.NaN;
+        if (db == Float.NEGATIVE_INFINITY) return 0f;
+        if (db == Float.POSITIVE_INFINITY) return 1f;
+        return Math.max(0f, Math.min(1f, (db + 2f) / 12f));
+    }
+
     static Intent recognizerIntent(String language) {
         Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                 .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -122,7 +130,10 @@ abstract class SpeechInput {
             recognizer.setRecognitionListener(new RecognitionListener() {
                 @Override public void onReadyForSpeech(Bundle params) { }
                 @Override public void onBeginningOfSpeech() { deliver(() -> listener.onSpeechActivity(true)); }
-                @Override public void onRmsChanged(float db) { deliver(() -> listener.onLevel(Math.max(0, Math.min(1, (db + 2) / 12)))); }
+                @Override public void onRmsChanged(float db) {
+                    float level = normalizeRmsDb(db);
+                    if (!Float.isNaN(level)) deliver(() -> listener.onLevel(level));
+                }
                 @Override public void onBufferReceived(byte[] buffer) { }
                 @Override public void onEndOfSpeech() {
                     deliver(() -> { listener.onSpeechActivity(false); listener.onProcessing(); });
@@ -134,8 +145,11 @@ abstract class SpeechInput {
                 }
                 @Override public void onResults(Bundle results) { result(first(results)); release(); }
                 @Override public void onPartialResults(Bundle results) {
-                    String text = first(results);
-                    if (!text.isEmpty()) { partial = text; deliver(() -> listener.onPartial(text)); }
+                    String text = first(results).trim();
+                    if (!text.isEmpty() && !text.equals(partial)) {
+                        partial = text;
+                        deliver(() -> listener.onPartial(text));
+                    }
                 }
                 @Override public void onEvent(int type, Bundle params) { }
             });

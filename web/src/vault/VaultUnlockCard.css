@@ -1,9 +1,13 @@
 .tp-vault-unlock { min-width: 0; }
 .tp-vault-unlock p { margin: 0; overflow-wrap: anywhere; }
-.tp-vault-hint { color: var(--muted, #656d76); font-size: .78rem; }
+.tp-vault-hint { color: var(--color-text-muted, var(--muted)); font-size: var(--text-xs, .78rem); }
 .tp-vault-form, .tp-vault-form fieldset { display: grid; gap: 10px; min-width: 0; }
 .tp-vault-form fieldset { margin: 0; padding: 0; border: 0; }
-.tp-vault-legend { padding: 0; margin-bottom: 8px; font-size: .82rem; font-weight: 600; }
+.tp-vault-legend { padding: 0; margin-bottom: var(--space-2, 8px); font-size: var(--text-sm, .82rem); font-weight: var(--weight-semibold, 600); }
 .tp-vault-form label { display: grid; gap: 6px; }
 .tp-vault-form .tp-input { box-sizing: border-box; min-width: 0; }
-.tp-vault-unlock .tp-status-pill.is-unlocked { color: #22a559; border-color: color-mix(in srgb, #22a559 40%, transparent); }
+.tp-vault-form .tp-input:focus-visible { outline: 2px solid var(--color-primary, var(--brand, var(--accent))); outline-offset: 2px; }
+.tp-vault-unlock .tp-status-pill.is-unlocked {
+  color: var(--color-success, var(--ok, var(--accent)));
+  border-color: color-mix(in srgb, var(--color-success, var(--ok, var(--accent))) 40%, transparent);
+}

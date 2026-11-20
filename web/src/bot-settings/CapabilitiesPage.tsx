@@ -1,6 +1,6 @@
 // 单 Bot 工具与插件配置页（默认 mode="tools" 过滤掉 skill，由 BotSkillsPage 专属承接）：
 // 无密码墙、无内部版本/底层状态术语、无裸 JSON 框；开启开关时自动先触发全局启用。
-import { useMemo, useState } from 'react';
+import { useCallback, useId, useMemo, useState } from 'react';
 import { ChevronRight, ExternalLink, Plug } from 'lucide-react';
 import type { JsonValue } from '../../../center-contract/index.js';
 import type { CenterBotCapabilityEntry } from '../../../host-core/desktop-client.js';
@@ -23,6 +23,7 @@ import {
   Section,
   SettingsSheet,
   Switch,
+  useSettingsSheetBack,
 } from './primitives';
 import './capabilities.css';
 
@@ -57,7 +58,9 @@ export function CapabilitiesPage({
   onOpenCenterAdmin,
 }: CapabilitiesPageProps) {
   const t = useText();
+  const fieldIdPrefix = useId();
   const state = useBotCapabilities({ api, identity, deviceId, botId, t });
+  const { setEditor } = state;
   const [query, setQuery] = useState('');
   const [kindFilter, setKindFilter] = useState<KindFilter>('all');
   const [enablingId, setEnablingId] = useState<string | null>(null);
@@ -92,6 +95,13 @@ export function CapabilitiesPage({
     return modeEntries.find(e => e.installation.installationId === state.editor?.installationId) ?? null;
   }, [modeEntries, state.editor]);
 
+  const handleBackFromEditor = useCallback(() => {
+    setEditor(null);
+  }, [setEditor]);
+
+  const inOuterSheet = useSettingsSheetBack(!onClose && editingEntry ? handleBackFromEditor : null);
+  const hasSheetBack = Boolean(onClose) || inOuterSheet;
+
   const handleToggle = async (entry: CenterBotCapabilityEntry, nextEnabled: boolean) => {
     const inst = entry.installation;
     const binding = entry.config;
@@ -118,7 +128,7 @@ export function CapabilitiesPage({
         body: { requestId: newRequestId() },
       });
       if (op?.operationId) {
-        await pollCenterOperation(api, identity, op.operationId);
+        await pollCenterOperation(api, identity, op.operationId, { t });
       }
       await state.save(entry, true, currentOverrides, currentRevision);
     } catch (failure) {
@@ -136,13 +146,14 @@ export function CapabilitiesPage({
     const currentVal = hasOverride ? editor.overrides[field.key] : (globalVal ?? field.defaultValue);
     const label = field.title || field.key;
     const busy = state.busy === entry.installation.installationId;
+    const fieldId = `${fieldIdPrefix}-${field.key.replace(/\s+/g, '_')}`;
 
     return (
       <div key={field.key} className="bs-cap-field">
         <div className="bs-cap-field-head">
           <div className="bs-cap-field-title">
-            <span>{label}</span>
-            {hasOverride ? <Badge tone="accent">{t('本智能体覆盖', 'Custom')}</Badge> : null}
+            {field.kind === 'boolean' ? <span>{label}</span> : <label htmlFor={fieldId}>{label}</label>}
+            {hasOverride ? <Badge tone="accent">{t('本 Bot 覆盖', 'Custom')}</Badge> : null}
           </div>
           {hasOverride ? (
             <button
@@ -166,6 +177,7 @@ export function CapabilitiesPage({
           />
         ) : field.kind === 'enum' && field.options ? (
           <select
+            id={fieldId}
             className="bs-select"
             disabled={busy}
             value={typeof currentVal === 'string' ? currentVal : ''}
@@ -179,6 +191,7 @@ export function CapabilitiesPage({
           </select>
         ) : field.kind === 'number' ? (
           <input
+            id={fieldId}
             type="number"
             step="any"
             className="bs-input"
@@ -196,6 +209,7 @@ export function CapabilitiesPage({
           />
         ) : (
           <input
+            id={fieldId}
             className="bs-input"
             disabled={busy}
             value={typeof currentVal === 'string' ? currentVal : ''}
@@ -214,25 +228,27 @@ export function CapabilitiesPage({
     return (
       <div className="bs-cap-editor">
         <div className="bs-cap-editor-head">
-          <button
-            type="button"
-            className="bs-btn is-ghost is-small"
-            onClick={() => state.setEditor(null)}
-          >
-            ← {t('返回列表', 'Back')}
-          </button>
+          {!hasSheetBack ? (
+            <button
+              type="button"
+              className="bs-btn is-ghost is-small"
+              onClick={handleBackFromEditor}
+            >
+              ← {t('返回列表', 'Back')}
+            </button>
+          ) : null}
           <span className="bs-cap-editor-title">{inst.displayName}</span>
           <Badge>{kindLabel(inst.kind, t)}</Badge>
         </div>
 
         <div className="bs-card">
           <Row
-            title={t('为本智能体启用', 'Enable for this Bot')}
+            title={t('为本 Bot 启用', 'Enable for this Bot')}
             subtitle={state.editor?.enabled ? t('当前已启用', 'Enabled') : t('当前未启用', 'Disabled')}
             trailing={(
               <Switch
                 checked={Boolean(state.editor?.enabled)}
-                label={t('为本智能体启用', 'Enable for this Bot')}
+                label={t('为本 Bot 启用', 'Enable for this Bot')}
                 disabled={busy}
                 onChange={next => {
                   state.setEditor(prev => prev ? { ...prev, enabled: next } : prev);
@@ -284,9 +300,9 @@ export function CapabilitiesPage({
     if (modeEntries.length === 0) {
       return (
         <EmptyState
-          icon={<Plug />}
+          icon={<Plug aria-hidden="true" />}
           title={mode === 'tools' ? t('尚未安装可用工具或插件', 'No tools or plugins installed yet') : t('暂无可用能力', 'No capabilities installed yet')}
-          hint={t('前往中心管理安装插件或 MCP 工具服务后，可在这里为当前智能体按需开启。', 'Install plugins or MCP tools in Center Management, then enable them here.')}
+          hint={t('前往中心管理安装插件或 MCP 工具服务后，可在这里为当前 Bot 按需开启。', 'Install plugins or MCP tools in Center Management, then enable them here.')}
           action={(
             <button type="button" className="bs-btn is-primary is-small" onClick={openCenterProviders}>
               {t('去中心添加插件或 MCP 工具 →', 'Add plugins or MCP tools in Center →')}
@@ -336,9 +352,9 @@ export function CapabilitiesPage({
                   capError
                     ? t('当前配置或连接需要检查', 'Configuration needs attention')
                     : !inst.enabled || inst.activation?.status !== 'enabled'
-                      ? t('开启后将自动启用该工具并授权给当前智能体', 'Will auto-activate and enable for this Bot')
+                      ? t('开启后将自动启用该工具并授权给当前 Bot', 'Will auto-activate and enable for this Bot')
                       : botEnabled
-                        ? t('已为本智能体启用', 'Enabled for this Bot')
+                        ? t('已为本 Bot 启用', 'Enabled for this Bot')
                         : t('未启用', 'Disabled')
                 }
                 onClick={hasParams ? () => state.openEditor(entry) : undefined}
@@ -347,7 +363,7 @@ export function CapabilitiesPage({
                     <Badge>{kindLabel(inst.kind, t)}</Badge>
                     <Switch
                       checked={botEnabled}
-                      label={t(`为本智能体启用 ${inst.displayName}`, `Enable ${inst.displayName} for this Bot`)}
+                      label={t(`为本 Bot 启用 ${inst.displayName}`, `Enable ${inst.displayName} for this Bot`)}
                       disabled={working}
                       onChange={next => void handleToggle(entry, next)}
                     />
@@ -394,6 +410,7 @@ export function CapabilitiesPage({
       <SettingsSheet
         title={mode === 'tools' ? t('工具与插件', 'Tools & Plugins') : t('能力与配置', 'Capabilities')}
         onClose={onClose}
+        onBack={editingEntry ? handleBackFromEditor : undefined}
       >
         {body}
       </SettingsSheet>

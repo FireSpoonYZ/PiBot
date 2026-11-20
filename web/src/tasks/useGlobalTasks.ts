@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useText } from '../ui';
 import {
   countWaitingTasks,
   isTaskNotFoundError,
@@ -129,9 +130,9 @@ function parseListCursor(raw: unknown): TaskListCursor | null {
   return null;
 }
 
-function errorMessageOf(error: unknown): string {
+function errorMessageOf(error: unknown, t: (zh: string, en: string) => string): string {
   if (error instanceof Error && error.message) return error.message;
-  return String(error || '操作失败');
+  return String(error || t('操作失败', 'Operation failed'));
 }
 
 export function useGlobalTasks({
@@ -141,6 +142,9 @@ export function useGlobalTasks({
   draftStorageKey = DEFAULT_DRAFT_STORAGE_KEY,
   scopeKey,
 }: UseGlobalTasksOptions): GlobalTasksController {
+  const t = useText();
+  const tRef = useRef(t);
+  tRef.current = t;
   const effectiveScopeKey = scopeKey ?? draftStorageKey;
   const hasTransport = Boolean(transport);
 
@@ -434,7 +438,7 @@ export function useGlobalTasks({
       } catch (err) {
         if (isCurrentScope(scopeAtStart, epochAtStart) && mutationSeqRef.current === seqAtStart) {
           setScopedState(prev =>
-            prev.scopeKey === scopeAtStart ? { ...prev, error: errorMessageOf(err) } : prev,
+            prev.scopeKey === scopeAtStart ? { ...prev, error: errorMessageOf(err, tRef.current) } : prev,
           );
         }
         return tasksRef.current;
@@ -462,7 +466,7 @@ export function useGlobalTasks({
     async (taskId: string): Promise<GlobalTask | null> => {
       const fn = transportRef.current;
       if (!fn) {
-        throw new Error('当前未连接中心服务，无法加载任务详情');
+        throw new Error(tRef.current('当前未连接中心服务，无法加载任务详情', 'Not connected to Center; unable to load task details'));
       }
       const scopeAtStart = effectiveScopeKey;
       const epochAtStart = scopeEpochRef.current;
@@ -474,7 +478,7 @@ export function useGlobalTasks({
         }
         const task = res?.task as GlobalTask | undefined;
         if (!task || !task.id) {
-          throw new Error('任务响应缺少有效的任务数据');
+          throw new Error(tRef.current('任务响应缺少有效的任务数据', 'Task response is missing valid task data'));
         }
         const deletedSeq = deletedAtSeqRef.current.get(task.id);
         if (deletedSeq !== undefined && seqAtStart <= deletedSeq) {
@@ -544,16 +548,16 @@ export function useGlobalTasks({
     ): Promise<GlobalTask> => {
       const fn = transportRef.current;
       if (!fn) {
-        throw new Error('当前未连接中心服务，无法同步任务');
+        throw new Error(tRef.current('当前未连接中心服务，无法同步任务', 'Not connected to Center; unable to sync task'));
       }
       if (!isCurrentScope(scopeAtStart, epochAtStart)) {
-        throw new Error('当前任务上下文已切换，请重试');
+        throw new Error(tRef.current('当前任务上下文已切换，请重试', 'Task context changed; please retry'));
       }
       const mySeq = (mutationSeqRef.current += 1);
       const res = await fn(input);
       const task = res?.task as GlobalTask | undefined;
       if (!task || !task.id) {
-        throw new Error('任务响应缺少有效的任务数据');
+        throw new Error(tRef.current('任务响应缺少有效的任务数据', 'Task response is missing valid task data'));
       }
       if (!isCurrentScope(scopeAtStart, epochAtStart)) {
         return task;
@@ -599,10 +603,10 @@ export function useGlobalTasks({
       }
       const fetched = await getTask(taskId);
       if (!isCurrentScope(scopeAtStart, epochAtStart)) {
-        throw new Error('当前任务上下文已切换，请重试');
+        throw new Error(tRef.current('当前任务上下文已切换，请重试', 'Task context changed; please retry'));
       }
       if (!fetched) {
-        throw new Error('任务不存在或已删除');
+        throw new Error(tRef.current('任务不存在或已删除', 'Task does not exist or has been deleted'));
       }
       return fetched.revision;
     },
@@ -718,7 +722,7 @@ export function useGlobalTasks({
     async (taskId: string): Promise<void> => {
       const fn = transportRef.current;
       if (!fn) {
-        throw new Error('当前未连接中心服务，无法删除任务');
+        throw new Error(tRef.current('当前未连接中心服务，无法删除任务', 'Not connected to Center; unable to delete task'));
       }
       const scopeAtStart = effectiveScopeKey;
       const epochAtStart = scopeEpochRef.current;

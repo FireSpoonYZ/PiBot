@@ -114,7 +114,7 @@ function VaultUnlockSession({ presentation, active, disabled = false, requesterN
         <span className="tp-card-title">{t('密码库', 'Password Vault')}</span>
         <span className={`tp-status-pill is-${status}`} role="status">{statusLabel}</span>
       </div>
-      {requesterName ? <p className="tp-vault-hint">{t(`请求智能体 · ${requesterName}`, `Requested by ${requesterName}`)}</p> : null}
+      {requesterName ? <p className="tp-vault-hint">{t(`请求 Bot · ${requesterName}`, `Requested by ${requesterName}`)}</p> : null}
       <p id={descriptionId} className="tp-vault-hint">{t('作用于当前 Host 的密码库；条目仍按各 Bot 的授权控制。主密码仅通过专用通道提交，不进入聊天。', 'Applies to this Host’s Vault; each Bot’s entry permissions still apply. The master password uses a private control channel, not chat.')}</p>
       {presentation.source === 'vaultwarden' ? (
         <p className="tp-vault-hint">{t('来源', 'Source')}: Vaultwarden{presentation.serverUrl ? ' · ' + presentation.serverUrl : ''}。{t('首次使用时，本次主密码也用于登录已配置账号。', 'On first use, this master password also signs in to the configured account.')}</p>
