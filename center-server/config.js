@@ -6,9 +6,11 @@
 // refuses to start rather than silently rotating keys.
 
 import { randomBytes, scryptSync } from 'node:crypto';
-import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { isAbsolute, join } from 'node:path';
+import { operationScopes } from '../center-contract/operations/index.js';
+import { validateClients, validateSupportedScopes } from './mcp/oauth-store.js';
 
 export const CENTER_CONFIG_FILE = 'center-config.json';
 export const CENTER_SETUP_TOKEN_FILE = 'center-setup-token';
@@ -118,6 +120,7 @@ export function resolveCenterPlan(env) {
   if (!isAbsolute(dataRoot)) throw new Error('CENTER_DATA_ROOT must be an absolute path');
   const listenHost = env.CENTER_LISTEN_HOST || '0.0.0.0';
   if (isIP(listenHost) === 0) throw new Error('CENTER_LISTEN_HOST must be a literal IP address');
+  const mcpEnabled = parseMcpEnabled(env.CENTER_MCP_ENABLED);
   const plan = {
     dataRoot,
     listenHost,
@@ -125,6 +128,8 @@ export function resolveCenterPlan(env) {
     trustProxy: parseTrustProxy(env.CENTER_TRUST_PROXY),
     webRoot: env.CENTER_WEB_ROOT || '/app/center-web/dist',
     npmPath: env.CENTER_NPM_PATH,
+    mcpEnabled,
+    mcpClients: mcpEnabled ? readMcpClients(env.CENTER_MCP_CLIENTS_FILE) : [],
   };
 
   const envEncryptionHex = env.CENTER_ENCRYPTION_KEY_HEX;
@@ -204,6 +209,10 @@ export function resolveCenterPlan(env) {
 
 /** openCenterServer options for a resolved plan plus its effective config. */
 export function centerServerOptions(plan, config) {
+  if (plan.mcpEnabled !== undefined && typeof plan.mcpEnabled !== 'boolean') {
+    throw new Error('mcpEnabled must be a boolean');
+  }
+  const mcpEnabled = plan.mcpEnabled === true;
   return {
     dataRoot: plan.dataRoot,
     encryptionKey: config.encryptionKey,
@@ -215,7 +224,36 @@ export function centerServerOptions(plan, config) {
     webRoot: plan.webRoot,
     npmPath: plan.npmPath,
     trustProxy: plan.trustProxy,
+    mcpEnabled,
+    mcpClients: mcpEnabled ? (plan.mcpClients ?? []) : [],
   };
+}
+
+function parseMcpEnabled(value) {
+  if (value === undefined || value === '' || value === 'false') return false;
+  if (value === 'true') return true;
+  throw new Error('CENTER_MCP_ENABLED must be "true" or "false"');
+}
+
+function readMcpClients(path) {
+  if (!path) throw new Error('CENTER_MCP_CLIENTS_FILE is required when CENTER_MCP_ENABLED=true');
+  if (typeof path !== 'string' || !isAbsolute(path)) throw new Error('CENTER_MCP_CLIENTS_FILE must be an absolute path');
+  let clients;
+  try {
+    const file = statSync(path);
+    if (!file.isFile() || file.size > 64 * 1024) throw new Error('invalid file');
+    clients = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    throw new Error('CENTER_MCP_CLIENTS_FILE must be a readable JSON file of at most 64 KiB');
+  }
+  if (!Array.isArray(clients)) throw new Error('CENTER_MCP_CLIENTS_FILE must contain a client array');
+  if (clients.length === 0) throw new Error('CENTER_MCP_CLIENTS_FILE must contain at least one OAuth client when CENTER_MCP_ENABLED=true');
+  const supported = validateSupportedScopes(operationScopes);
+  const registry = validateClients(clients, supported.set);
+  if (![...registry.values()].some((client) => client.allowedScopes.length > 0)) {
+    throw new Error('CENTER_MCP_CLIENTS_FILE must configure at least one OAuth client with a supported scope');
+  }
+  return clients;
 }
 
 function parseTrustProxy(value) {

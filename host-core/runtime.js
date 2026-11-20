@@ -67,6 +67,7 @@ import { createBotManagementSkillSection } from './bot-management-skill.js';
 import { SOUL_MAX_BYTES } from './bot-soul.js';
 import { normalizeUserMessage } from './scope-protocol.js';
 import { createCommunicationTools } from './communication-tools.js';
+import { createOperationTools } from './operation-tools.js';
 import { createSessionSearchTool } from './session-search-tool.js';
 import { createCollaborationService } from './collaboration-service.js';
 import { BASE_BEHAVIOR_PROMPT } from './bot-prompt.js';
@@ -79,6 +80,10 @@ import { openRuntimeBrowserSetup } from './runtime-browser-setup.js';
 import { createVaultService } from './vault-service.js';
 import { createScheduleManager } from './host-schedules.js';
 import { createWebhookConsumer } from './host-webhooks.js';
+import {
+  createMcpDispatchExtension,
+  createMcpDispatchRuntime,
+} from './runtime-mcp-dispatch.js';
 import { createTaskDispatchConsumer, fetchAllActiveGlobalTasks } from './host-tasks.js';
 import { createScheduleTools } from './schedule-tools.js';
 import {
@@ -534,7 +539,6 @@ export async function openRuntime(options) {
           thinkingLevel: profile.thinkingLevel,
           instructions: profile.instructions,
           removeTools: profile.removeTools,
-          selectedExtensions: profile.selectedExtensions,
           codemodeOnly: profile.codemodeOnly,
         }, CTX);
       }
@@ -636,6 +640,10 @@ export async function openRuntime(options) {
   }));
   // 内置 Bot 管理技能目录：只渲染名称/描述索引，
   // 完整 SKILL.md 由模型按目录经文件工具读取，不把整本手册塞进系统提示。
+  registry.install(defineExtension({
+    name: 'host.operations',
+    tools: createOperationTools({ host, getHarness: () => harness, getCenterClient: () => centerRuntime.getClient(), dataPrivacy }),
+  }));
   const botManagementSection = createBotManagementSkillSection();
   registry.install(defineExtension({
     name: 'host.bot-management-skill',
@@ -1009,8 +1017,16 @@ export async function openRuntime(options) {
     },
   })] });
   const codemodeExtension = withCodemodePresentations(createCodemodeExtension({ sandbox: createHostCodemodeSandbox() }));
+  const mcpDispatchExtension = createMcpDispatchExtension({
+    host,
+    getHarness: () => harness,
+    models,
+    isOnline: () => online,
+    getBotModels: () => botModels,
+  });
   registry.install(codemodeExtension);
   registry.install(finalBudgetExtension);
+  registry.install(mcpDispatchExtension);
   try {
     releaseOwner = acquireRuntimeOwner(host.dataRoot);
     // Cua inventory：对固定 Driver 二进制跑一次只读 CLI metadata（list-tools +
@@ -1022,7 +1038,10 @@ export async function openRuntime(options) {
         tools: await createCuaTools({ host, getHarness: () => harness, manager: shower }),
       }));
     }
-    coreExtensions = registry.snapshot().installed().filter((extension) => extension !== finalBudgetExtension && extension !== codemodeExtension);
+    coreExtensions = registry.snapshot().installed().filter((extension) =>
+      extension !== finalBudgetExtension &&
+      extension !== codemodeExtension &&
+      extension !== mcpDispatchExtension);
     browserSetup = await openRuntimeBrowserSetup({
       host,
       registry,
@@ -1142,6 +1161,7 @@ export async function openRuntime(options) {
     coreExtensions,
     codemodeExtension,
     finalBudgetExtension,
+    mcpDispatchExtension,
     centerRuntime,
     setOnline: (value) => { online = value; },
     setClosing: (value) => { closing = value; },
@@ -1222,7 +1242,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, setClosing, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, setBotTurnRunningReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, browserSetup, botHostExtensionsFor, vault, schedules, setTasksBridge, setWaitsBridge, resolveConversationBot, dataPrivacy }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, mcpDispatchExtension, centerRuntime, setOnline, setClosing, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, setBotTurnRunningReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, browserSetup, botHostExtensionsFor, vault, schedules, setTasksBridge, setWaitsBridge, resolveConversationBot, dataPrivacy }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -1416,7 +1436,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   }
 
   // 跟踪在飞的主会话提交：完成时记录 lastActivityAt 与 lastPreview。
-  const trackedSubmissions = new Map(); // submissionId -> { botId, nativeId }
+  const trackedSubmissions = new Map(); // submissionId -> { botId, nativeId, requestId? }
   setBotTurnRunningReader?.((botId) => {
     for (const info of trackedSubmissions.values()) {
       if (info?.botId === botId) return true;
@@ -1427,6 +1447,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   const completedSubmissions = new Set(); // submissionId
   let submissionCheckPromise = null;
   let checkSubmissionsAgain = false;
+  let webhooks = null;
 
   function recordCompletedSubmission(botId, formatted) {
     if (!formatted || formatted.status !== 'done') return;
@@ -1445,6 +1466,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     } catch {
       /* ignore activity update error if bot was deleted or store closed */
     }
+    webhooks?.notifySubmissionSettled?.(formatted.requestId);
     // Bot 完结是安全空闲边界：先结算排队的自编辑 SOUL，再上报学习增量——
     // 两者都是 fire-and-forget，绝不阻塞前台回复或占用 Bot 准入。
     drainSelfSoul(botId);
@@ -1483,6 +1505,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
                 }
               } else if (statusRecord.status === 'unanswered') {
                 trackedSubmissions.delete(submissionId);
+                webhooks?.notifySubmissionSettled?.(statusRecord.requestId ?? info.requestId);
                 drainSelfSoul(info.botId);
                 turns.pump(info.botId);
                 learning.scheduleIdleCheck(info.botId);
@@ -1546,6 +1569,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 依次执行并收集每步错误：任何一步失败仍继续清理，最后显式抛出。
       const errors = [];
       try { await webhooks.close(); } catch (err) { errors.push(err); }
+      try { await mcpDispatch.close(); } catch (err) { errors.push(err); }
       try { await taskConsumer?.close(); } catch (err) { errors.push(err); }
       try { await waits.close(); } catch (err) { errors.push(err); }
       try { turns.close(); } catch (err) { errors.push(err); }
@@ -1690,7 +1714,23 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     onChange: (botId) => live.notifyWaitsChanged?.(botId),
   });
   setWaitsBridge?.(waits);
-  const webhooks = createWebhookConsumer({
+  const mcpDispatch = createMcpDispatchRuntime({
+    host,
+    getHarness: () => harness,
+    models,
+    getBotModels: () => getBotModels(),
+    mcpDispatchExtension,
+    getStopEpoch: (botId) => turns.stopEpoch(botId),
+    canRun: (botId) => (
+      resumed && centerOnline && !closing && !isMaintenance() && !turns.isRecoveryPending() &&
+      !turns.stopped(botId) && !turns.webhookStopPending(botId)
+    ),
+    dropEnvFor,
+    onSubmissionUpdated: (requestId) => webhooks?.notifySubmissionSettled?.(requestId),
+    onSubmissionSettled: (requestId) => webhooks?.notifySubmissionSettled?.(requestId),
+    context: CTX,
+  });
+  webhooks = createWebhookConsumer({
     deviceId: host.deviceId,
     getClient: () => centerRuntime.getClient(),
     getRuntime: () => runtime,
@@ -1725,6 +1765,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         trustedDataBoundary: GOOGLE_WORKSPACE_DATA_BOUNDARY,
       });
     },
+    getMcpDispatchSubmission: (botId, requestId) => mcpDispatch.getSubmission(botId, requestId),
+    submitMcpDispatch: (botId, input, capturedStopEpoch) => mcpDispatch.submit(botId, input, capturedStopEpoch),
+    cancelMcpDispatchUnstarted: (botId, requestId) => mcpDispatch.cancelIfUnstarted(botId, requestId),
   });
   decisions.setTurnGate(turns.admitWorkDecision, turns.pump, turns.canRunWork);
   decisions.setScopeStopListener?.(async (scopeId) => {
@@ -1763,6 +1806,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 即使后续 HTTP/确认在飞，泵在提交前的存活核对会发现条目已取消，
       // 绝不把已取消的轮送进模型。
       const { withdrawn: queueWithdrawn } = await turns.cancelQueued(bot, epoch);
+      await mcpDispatch.stopBot(botId, epoch, {
+        offline: !centerOnline || turns.isRecoveryPending(),
+      });
       // 工作 lane 取消：user_stop 覆盖各 scope 待处理积压与已有 pending；
       // 离线/恢复未完成时 quiesce=false（不调用会隐式 resume 的 abort/wait 路径）。
       if (decisions.interruptBotWork) {
@@ -2013,7 +2059,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   /** 按已绑定会话重新应用人格/工具；无变化不提交。 */
   async function refreshBotProfiles(bot) {
     const primary = await getPrimaryConversation(harness, bot, {}, CTX);
-    if (primary) await applyAgentProfile(harness, primary.id, profileFor(bot.botId, null), CTX);
+    if (primary) {
+      await applyAgentProfile(harness, primary.id, profileFor(bot.botId, null), CTX);
+    }
     const workIndex = await harness.snapshot(WorkIndex, CTX);
     for (const [key, binding] of Object.entries(workIndex?.byKey ?? {})) {
       const pair = parseBindingKey(key);
@@ -2052,6 +2100,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
   /** 编辑准入：Bot 的任一已映射会话有 queued/placed 提交、活动任务（含手动压缩）或挂起工作决策则忙。 */
   async function assertBotIdle(bot) {
+    if (await mcpDispatch.hasActiveForBot(bot.botId)) {
+      throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+    }
     const nativeIds = await botConversations(bot);
     if (nativeIds.length === 0) return;
     const inspection = await harness.inspect(CTX);
@@ -2086,6 +2137,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   async function botIsIdle(bot) {
     try {
       if (plugins.hasActiveExecutions(bot.botId)) return false;
+      if (await mcpDispatch.hasActiveForBot(bot.botId)) return false;
       const nativeIds = await botConversations(bot);
       if (nativeIds.length === 0) return true;
       const known = new Set(nativeIds);
@@ -2160,6 +2212,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     await assertBotIdle(bot);
     await learning.cancelBot(botId);
     await waits.cancelBot(botId, Number.MAX_SAFE_INTEGER, CTX);
+    await mcpDispatch.cleanupBot(botId).catch(() => {});
     selfSoulQueue.delete(botId);
     await schedules.deleteBot(bot);
     await browserSetup.releaseBot(botId);
@@ -2224,6 +2277,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       const conversation = await harness.conversation(id, CTX);
       if (conversation) await conversation.abort(CTX, { background: true });
     }
+    await mcpDispatch.abortAll();
   }
 
   function setCenterOnline(value) {
@@ -2267,6 +2321,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         learning.resume();
         schedules.notifyOnline();
         waits.reconcile().catch(() => {});
+        await mcpDispatch.resumeTracking().catch(() => {});
         webhooks.wake();
         taskConsumer?.resume();
         await turns.nudgeAll();
@@ -2568,6 +2623,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         learning.resume();
         schedules.notifyOnline();
         waits.reconcile().catch(() => {});
+        await mcpDispatch.resumeTracking().catch(() => {});
         webhooks.wake();
         taskConsumer?.resume();
         await turns.nudgeAll();
@@ -2632,6 +2688,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       await assertBotIdle(bot);
       await learning.cancelBot(botId);
       await waits.cancelBot(botId, Number.MAX_SAFE_INTEGER, CTX);
+      await mcpDispatch.cleanupBot(botId).catch(() => {});
       selfSoulQueue.delete(botId);
       await schedules.deleteBot(bot);
       await browserSetup.releaseBot(botId);
@@ -3396,6 +3453,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         try {
           await turns.cancelQueued(bot, turns.stopEpoch(bot.botId) - 1);
           await waits.cancelBot(bot.botId, turns.stopEpoch(bot.botId) - 1, CTX);
+          await mcpDispatch.stopBot(bot.botId, turns.stopEpoch(bot.botId) - 1, { offline: true });
           if (decisions.interruptBotWork) {
             // 已有 pending.interruption 的 scope 沿用其已捕获 through 边界（宕机后
             // 新到消息不被这次补停吞掉），由 work lane 的幂等标记保证。
@@ -3438,6 +3496,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       resumed = true;
       waits.reconcile().catch(() => {});
       turns.nudgeAll().catch(() => {});
+      mcpDispatch.resumeTracking().catch(() => {});
       webhooks.wake();
       taskConsumer?.resume();
     },

@@ -5,6 +5,7 @@ import { requireOwner, assertPublicCredentialId, setOwnerOAuthVerifier } from '.
 import { assertId } from '../host-core/message-protocol.js';
 import { assertDeviceId, assertDeviceToken } from '../host-core/relay-protocol.js';
 import { discoverCenterProviderModels, validateCenterProvider } from '../host-core/runtime-models.js';
+import { invokeOwnerAction, retainOwnerAction } from './operations/owner-actions.js';
 import { registerWebhookRoutes } from './webhooks.js';
 import { registerVaultRoutes } from './vault-routes.js';
 import { registerPairingRoutes } from './pairing.js';
@@ -172,7 +173,7 @@ function assertConfigCredentials(schema, value) {
 }
 
 
-export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault, google }) {
+export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault, google, createOperations, listReleases, setReleasePublished }) {
   const streams = new Map();
   function notify(deviceId, event = 'config-changed') {
     for (const stream of streams.get(deviceId) || []) {
@@ -195,7 +196,15 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   };
   const owner = [requireOwner];
   const mutation = [requireOwner, csrfUnlessOAuth];
-  const route = (method, path, handler, write = false, bodyLimit) => app.route({ method, url: path, onRequest: write ? mutation : owner, handler, ...(bodyLimit !== undefined ? { bodyLimit } : {}) });
+  const ownerActions = createOperations ? new Map() : null;
+  if (ownerActions) {
+    if (listReleases) retainOwnerAction(ownerActions, 'GET', '/api/client-releases', listReleases);
+    if (setReleasePublished) retainOwnerAction(ownerActions, 'POST', '/api/client-releases/:id/publish', setReleasePublished);
+  }
+  const route = (method, path, handler, write = false, bodyLimit) => {
+    if (ownerActions) retainOwnerAction(ownerActions, method, path, handler);
+    return app.route({ method, url: path, onRequest: write ? mutation : owner, handler, ...(bodyLimit !== undefined ? { bodyLimit } : {}) });
+  };
   const presentDevice = (device) => {
     if (!device) return device;
     const reg = bridge.registry.get(device.deviceId);
@@ -1076,5 +1085,27 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   });
   host('POST', '/api/host/capabilities/:installationId/tools/list', req => execution.listTools(req.centerDevice.deviceId, req.params.installationId, object(req.body)));
   host('POST', '/api/host/capabilities/:installationId/tools/call', req => { const body = object(req.body); text(body.callId, 'callId'); text(body.name, 'name'); object(body.args); return execution.callTool(req.centerDevice.deviceId, req.params.installationId, body); }, GOOGLE_TOOL_CALL_BODY_LIMIT);
-  return { notifyAll, notifyInstallation, notifyDevice: notify, close() { antigravityRoutes.close(); for (const set of streams.values()) for (const stream of set) stream.reply.end(); streams.clear(); } };
+  const operations = createOperations?.({
+    store, packages, bridge, execution, skills, learning, botManagement, catalog, notify, notifyAll, notifyInstallation, publicUrl, action,
+    // Invoke the same domain callback, not a synthetic HTTP request or an owner session.
+    owner: (method, path, input) => invokeOwnerAction(ownerActions, method, path, input),
+  });
+  if (operations) {
+    app.post('/api/host/operations/call', {
+      onRequest: authenticate, bodyLimit: 256 * 1024,
+      config: { rateLimit: { max: 120, timeWindow: '1 minute', keyGenerator: req => req.centerDevice?.deviceId ?? req.ip } },
+    }, async (req) => {
+      const { deviceId } = req.centerDevice;
+      const body = object(req.body);
+      if (Object.keys(body).some(key => !['botId', 'name', 'args'].includes(key))) fail('INVALID_ARGUMENT', 'Unexpected field');
+      const botId = text(body.botId, 'botId');
+      const name = text(body.name, 'name');
+      if (!store.isDeviceOAuthGrantEnabled(deviceId) ||
+          !store.listDeviceBots(deviceId).some(bot => bot.botId === botId && !bot.archivedAt)) {
+        fail('FORBIDDEN', 'Device management permission and an active local Bot are required');
+      }
+      return operations.call({ kind: 'bot', deviceId, botId }, name, object(body.args));
+    });
+  }
+  return { operations, notifyAll, notifyInstallation, notifyDevice: notify, close() { antigravityRoutes.close(); for (const set of streams.values()) for (const stream of set) stream.reply.end(); streams.clear(); } };
 }

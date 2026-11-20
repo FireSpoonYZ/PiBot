@@ -46,6 +46,7 @@ export function createBotManagementTools({ collaboration, memoRequestId, dataPri
   return [
     {
       name: 'manage_bot_skill',
+      deferred: true,
       description:
         "Manage Center-managed skills for the current Bot or a specified target Bot. Omit deviceId/botId " +
         "to manage the current Bot's own skills, or pass both to manage a target Bot's skills. " +
@@ -99,6 +100,7 @@ export function createBotManagementTools({ collaboration, memoRequestId, dataPri
     },
     {
       name: 'manage_bot_learning',
+      deferred: true,
       description:
         "Manage the target Bot's always-on learning service. Actions: status (config, counters and " +
         'active/last job), configure (settings plus expectedRevision CAS), learn/review/curate ' +
@@ -167,6 +169,7 @@ export function createBotManagementTools({ collaboration, memoRequestId, dataPri
     },
     {
       name: 'manage_bot_installation',
+      deferred: true,
       description:
         'Manage Center capability installations scoped to the target Bot. Actions: catalog (minimal metadata), ' +
         'describe (schema and credential-reference status, no secret values), check (configuration versus ' +

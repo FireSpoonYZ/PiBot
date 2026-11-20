@@ -8,6 +8,7 @@ import deepmerge from 'deepmerge';
 import { assertPublicCredentialId } from '../auth.js';
 import { webhookStore } from './webhooks.js';
 import { googleRulesStore } from './google-rules.js';
+import { dispatchStore } from './dispatch.js';
 import { pairingStore } from './pairing.js';
 import { createTaskStore } from './tasks.js';
 import {
@@ -857,9 +858,11 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
     };
 
     const { _delivery: googleRuleDelivery, ...googleRuleMethods } = googleRulesStore(db, transaction);
+    const { _delivery: dispatchDelivery, ...dispatchMethods } = dispatchStore(db, transaction);
     store = {
-      ...webhookStore(db, transaction, { extraDelivery: googleRuleDelivery }),
+      ...webhookStore(db, transaction, { extraDeliveries: [googleRuleDelivery, dispatchDelivery] }),
       ...googleRuleMethods,
+      ...dispatchMethods,
       ...pairingStore(db, transaction),
       ...createTaskStore({ db, transaction, listBotsSnapshot, listBotCapabilityDirectory }),
       getInstallationId() {

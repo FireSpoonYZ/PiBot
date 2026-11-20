@@ -804,7 +804,11 @@ export function createTurnAdmission(deps) {
       }, context);
       await syncPublishedQueue(bot);
       if (priorRecord.status === 'queued' || priorRecord.status === 'placed') {
-        trackSubmission(priorRecord.id, { botId: bot.botId, nativeId: conversation.id });
+        trackSubmission(priorRecord.id, {
+          botId: bot.botId,
+          nativeId: conversation.id,
+          requestId: item.requestId,
+        });
       }
       const formatted = await formatPrimarySubmission(harness(), bot, priorRecord, context);
       if (formatted.status === 'done') recordCompletedSubmission(bot.botId, formatted);
@@ -965,7 +969,11 @@ export function createTurnAdmission(deps) {
       await syncPublishedQueue(bot);
       throw errWithCode('queued turn was cancelled', 'NOT_CONNECTED');
     }
-    trackSubmission(statusRecord.id, { botId: bot.botId, nativeId: conversation.id });
+    trackSubmission(statusRecord.id, {
+      botId: bot.botId,
+      nativeId: conversation.id,
+      requestId: item.requestId,
+    });
     await syncPublishedQueue(bot);
     const formatted = await formatPrimarySubmission(harness(), bot, statusRecord, context);
     if (formatted.status === 'done') recordCompletedSubmission(bot.botId, formatted);
@@ -1085,7 +1093,11 @@ export function createTurnAdmission(deps) {
       }, context);
       if (existing !== undefined) {
         if (existing.status === 'queued' || existing.status === 'placed') {
-          trackSubmission(existing.id, { botId, nativeId: conversation0.id });
+          trackSubmission(existing.id, {
+            botId,
+            nativeId: conversation0.id,
+            requestId,
+          });
         }
         const formatted = await formatPrimarySubmission(harness(), bot, existing, context);
         if (formatted.status === 'done') recordCompletedSubmission(botId, formatted);
