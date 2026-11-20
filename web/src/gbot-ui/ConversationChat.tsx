@@ -38,14 +38,27 @@ function findBot(
   );
 }
 
+type Translate = (zh: string, en: string) => string;
+
+function defaultText(zh: string, en: string): string {
+  if (typeof document !== 'undefined' && document.documentElement.lang) {
+    return document.documentElement.lang.toLowerCase().startsWith('en') ? en : zh;
+  }
+  if (typeof navigator !== 'undefined' && navigator.language.startsWith('en')) {
+    return en;
+  }
+  return zh;
+}
+
 /** 成员可视名：目录命中用 role（空 role 记作未命名），目录缺失记作已移除；不回退 ID。 */
 export function conversationMemberName(
   member: MessageMember,
   bots: readonly ConversationBot[],
+  t: Translate = defaultText,
 ): string {
   const bot = findBot(member, bots);
-  if (!bot) return '已移除的 Bot';
-  return bot.role.trim() || '未命名 Bot';
+  if (!bot) return t('已移除的 Bot', 'Removed Bot');
+  return bot.role.trim() || t('未命名 Bot', 'Unnamed Bot');
 }
 
 /**
@@ -56,16 +69,17 @@ export function conversationMemberName(
 export function conversationTitle(
   scope: MessageScope & { title?: string | null },
   bots: readonly ConversationBot[],
+  t: Translate = defaultText,
 ): string {
   const customTitle = typeof scope.title === 'string' ? scope.title.trim() : '';
   if (customTitle) return customTitle;
   const allUnknown = scope.members.every((m) => !findBot(m, bots));
   if (scope.members.length === 0 || allUnknown) {
-    return scope.kind === 'room' ? '群聊' : '私聊';
+    return scope.kind === 'room' ? t('群聊', 'Group chat') : t('私聊', 'Private chat');
   }
   return scope.members
-    .map((m) => conversationMemberName(m, bots))
-    .join('、');
+    .map((m) => conversationMemberName(m, bots, t))
+    .join(t('、', ', '));
 }
 
 export interface ConversationChatHeaderProps {
@@ -116,7 +130,7 @@ export function ConversationChatHeader({
       )}
 
       <div className="conversation-chat-header__pill">
-        <span className="conversation-chat-header__avatar">{avatar}</span>
+        <span className="conversation-chat-header__avatar" aria-hidden="true">{avatar}</span>
         <span className="conversation-chat-header__text">
           <span className="conversation-chat-header__title" title={title}>
             {title}
@@ -299,7 +313,7 @@ const dayStart = (date: Date) =>
   new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 
 /** 上游 formatTranscriptTimestamp：当天时刻、昨天、7 天内星期、其余月日。 */
-function formatDividerTime(ms: number): string {
+function formatDividerTime(ms: number, t: Translate): string {
   const date = new Date(ms);
   const now = new Date();
   const days = Math.round((dayStart(now) - dayStart(date)) / 86_400_000);
@@ -308,7 +322,7 @@ function formatDividerTime(ms: number): string {
     minute: '2-digit',
   });
   if (days <= 0) return time;
-  if (days === 1) return '昨天 ' + time;
+  if (days === 1) return t('昨天', 'Yesterday') + ' ' + time;
   if (days < 7) {
     return date.toLocaleDateString([], { weekday: 'long' }) + ' ' + time;
   }
@@ -327,6 +341,7 @@ export function ConversationTimeDivider({
   at,
   previousAt,
 }: ConversationTimeDividerProps) {
+  const t = useText();
   const ms = Date.parse(at);
   if (!Number.isFinite(ms) || ms <= 0) return null;
   if (previousAt) {
@@ -337,7 +352,7 @@ export function ConversationTimeDivider({
   }
   return (
     <div className="conversation-chat-time" role="separator">
-      {formatDividerTime(ms)}
+      {formatDividerTime(ms, t)}
     </div>
   );
 }

@@ -1,15 +1,34 @@
 // gbot-ui lane：会话右键/长按菜单。
-// 复制自 lenML/gbot-ui（MIT，仓库 licenses/gbot-ui-MIT.txt）：
-// 上游 src/components/grok-bot/ContextMenu.tsx 的定位/焦点/关闭/键盘逻辑（MENU_MARGIN=8、
-// 视口边界、portal 到最近 .baby-grok-bot、首项聚焦、关闭恢复焦点、外点/Escape/滚动/resize
-// 关闭、方向键/Home/End/Tab 导航）。
-// 差异：本仓库无 GrokBotStore；菜单动作收缩为合同要求的单一“查看私聊”。
+// 桌面端沿用指针定位 popover（右键/Shift+F10/外点/Escape/方向键/焦点恢复）；
+// coarse 触屏端改用 components/ui 的 ActionSheet 底部操作表，打开时触发轻触感反馈。
 import { createPortal } from 'react-dom';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
+import { ActionSheet } from '../components/ui';
+import { mobileHaptic } from '../native/tauri-host';
+import { useText } from '../ui';
 import type { ConversationMenuPosition } from './useConversationRowInteractions';
 
 const MENU_MARGIN = 8;
+
+function isCoarsePointer(): boolean {
+  return typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia('(pointer: coarse)').matches;
+}
+
+function useIsCoarsePointer(): boolean {
+  const [coarse, setCoarse] = useState(isCoarsePointer);
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mql = window.matchMedia('(pointer: coarse)');
+    const onChange = (event: MediaQueryListEvent) => setCoarse(event.matches);
+    setCoarse(mql.matches);
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, []);
+  return coarse;
+}
 
 export interface ConversationMenuItem {
   key: string;
@@ -34,6 +53,8 @@ export function ConversationContextMenu({
   items,
   onViewPrivateChats,
 }: ConversationContextMenuProps) {
+  const t = useText();
+  const coarsePointer = useIsCoarsePointer();
   const hostRef = useRef<HTMLSpanElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const focusReturnRef = useRef<HTMLElement | null>(null);
@@ -53,14 +74,23 @@ export function ConversationContextMenu({
       ? [
           {
             key: 'view-private-chats',
-            label: '查看私聊',
+            label: t('查看私聊', 'View private chats'),
             onSelect: onViewPrivateChats,
           },
         ]
       : []);
 
+  const shouldRenderMenu = Boolean(position && resolvedItems.length > 0);
+  const useSheet = coarsePointer;
+
+  useEffect(() => {
+    if (shouldRenderMenu && useSheet) {
+      mobileHaptic('longPress');
+    }
+  }, [shouldRenderMenu, useSheet]);
+
   useLayoutEffect(() => {
-    if (!position || resolvedItems.length === 0) {
+    if (useSheet || !position || resolvedItems.length === 0) {
       setMenuPosition({ left: 0, top: 0, ready: false });
       return;
     }
@@ -77,7 +107,7 @@ export function ConversationContextMenu({
       Math.min(position.y, window.innerHeight - rect.height - MENU_MARGIN),
     );
     setMenuPosition({ left, top, ready: true });
-  }, [position, resolvedItems.length]);
+  }, [useSheet, position, resolvedItems.length]);
 
   const close = (restoreFocus = true) => {
     const returnTarget = focusReturnRef.current;
@@ -93,7 +123,7 @@ export function ConversationContextMenu({
   closeRef.current = close;
 
   useEffect(() => {
-    if (!position) return;
+    if (!position || useSheet) return;
 
     const active = document.activeElement;
     focusReturnRef.current = active instanceof HTMLElement ? active : null;
@@ -103,10 +133,19 @@ export function ConversationContextMenu({
         ?.focus({ preventScroll: true });
     });
     return () => cancelAnimationFrame(frame);
-  }, [position]);
+  }, [position, useSheet]);
 
   useEffect(() => {
     if (!position) return;
+
+    const handleForceClose = () => closeRef.current(false);
+    window.addEventListener('gbot-close-context-menu', handleForceClose);
+
+    if (useSheet) {
+      return () => {
+        window.removeEventListener('gbot-close-context-menu', handleForceClose);
+      };
+    }
 
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target;
@@ -115,7 +154,6 @@ export function ConversationContextMenu({
       closeRef.current(true);
     };
     const handleViewportChange = () => closeRef.current(true);
-    const handleForceClose = () => closeRef.current(false);
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       event.preventDefault();
@@ -127,7 +165,6 @@ export function ConversationContextMenu({
     document.addEventListener('keydown', handleEscape, true);
     window.addEventListener('resize', handleViewportChange);
     window.addEventListener('scroll', handleViewportChange, true);
-    window.addEventListener('gbot-close-context-menu', handleForceClose);
     return () => {
       document.removeEventListener('pointerdown', handlePointerDown, true);
       document.removeEventListener('keydown', handleEscape, true);
@@ -135,36 +172,36 @@ export function ConversationContextMenu({
       window.removeEventListener('scroll', handleViewportChange, true);
       window.removeEventListener('gbot-close-context-menu', handleForceClose);
     };
-  }, [position]);
+  }, [position, useSheet]);
 
   // 锚点 span 常驻：position 首次非空即开菜单时 hostRef 已挂载，portal 目标解析不丢。
   const anchor = <span aria-hidden="true" className="gbot-menu-anchor" ref={hostRef} />;
 
   const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    const items = Array.from(
+    const menuItems = Array.from(
       menuRef.current?.querySelectorAll<HTMLButtonElement>(
         '[role="menuitem"]:not(:disabled)',
       ) ?? [],
     );
-    if (items.length === 0) return;
+    if (menuItems.length === 0) return;
 
     const currentIndex = Math.max(
       0,
-      items.indexOf(document.activeElement as HTMLButtonElement),
+      menuItems.indexOf(document.activeElement as HTMLButtonElement),
     );
     let nextIndex: number | null = null;
     switch (event.key) {
       case 'ArrowDown':
-        nextIndex = (currentIndex + 1) % items.length;
+        nextIndex = (currentIndex + 1) % menuItems.length;
         break;
       case 'ArrowUp':
-        nextIndex = (currentIndex - 1 + items.length) % items.length;
+        nextIndex = (currentIndex - 1 + menuItems.length) % menuItems.length;
         break;
       case 'Home':
         nextIndex = 0;
         break;
       case 'End':
-        nextIndex = items.length - 1;
+        nextIndex = menuItems.length - 1;
         break;
       case 'Tab':
         closeRef.current(false);
@@ -174,12 +211,27 @@ export function ConversationContextMenu({
     }
 
     event.preventDefault();
-    items[nextIndex]?.focus();
+    menuItems[nextIndex]?.focus();
   };
 
+  if (useSheet) {
+    return (
+      <>
+        {anchor}
+        <ActionSheet
+          open={shouldRenderMenu}
+          onOpenChange={open => { if (!open) close(false); }}
+          title={t('会话操作', 'Conversation actions')}
+          items={resolvedItems}
+        />
+      </>
+    );
+  }
+
+  const menuTitle = t('会话操作', 'Conversation actions');
   const menu = (
     <div
-      aria-label="会话操作"
+      aria-label={menuTitle}
       className="baby-grok-bot-context-menu gbot-context-menu"
       data-ready={menuPosition.ready || undefined}
       onContextMenu={(event) => event.preventDefault()}
@@ -188,7 +240,7 @@ export function ConversationContextMenu({
       role="menu"
       style={{ left: menuPosition.left, top: menuPosition.top }}
     >
-      <div className="baby-grok-bot-context-menu__label">会话操作</div>
+      <div className="baby-grok-bot-context-menu__label">{menuTitle}</div>
       {resolvedItems.map((item) => (
         <button
           className={
@@ -218,8 +270,6 @@ export function ConversationContextMenu({
       ))}
     </div>
   );
-
-  const shouldRenderMenu = Boolean(position && resolvedItems.length > 0);
 
   return (
     <>

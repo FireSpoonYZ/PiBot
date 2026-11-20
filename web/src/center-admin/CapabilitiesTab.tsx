@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
 import { ExternalLink, FileCode2, Plus, RefreshCw, Sparkles, Trash2, Upload, Wrench } from 'lucide-react';
+import { useText } from '../ui';
 import { errorMessage } from './transport';
 import type { CenterApi } from './transport';
 import {
@@ -33,25 +34,27 @@ import type {
   SkillVisibilityScope,
 } from './types';
 
-function activationLabel(item: Installation): { text: string; tone: 'ok' | 'warn' | 'danger' | 'muted' } {
+type TranslateFn = (zh: string, en: string) => string;
+
+function activationLabel(item: Installation, t: TranslateFn): { text: string; tone: 'ok' | 'warn' | 'danger' | 'muted' } {
   const st = item.activation?.status;
-  if (item.enabled && st === 'enabled') return { text: '已启用', tone: 'ok' };
-  if (item.enabled && st === 'enabling') return { text: '启用中', tone: 'warn' };
-  if (st === 'failed') return { text: '启用失败', tone: 'danger' };
-  if (item.enabled) return { text: '已开启', tone: 'ok' };
-  return { text: '已停用', tone: 'muted' };
+  if (item.enabled && st === 'enabled') return { text: t('已启用', 'Enabled'), tone: 'ok' };
+  if (item.enabled && st === 'enabling') return { text: t('启用中', 'Enabling'), tone: 'warn' };
+  if (st === 'failed') return { text: t('启用失败', 'Failed'), tone: 'danger' };
+  if (item.enabled) return { text: t('已开启', 'On'), tone: 'ok' };
+  return { text: t('已停用', 'Disabled'), tone: 'muted' };
 }
 
-function scopeLabel(scope?: SkillVisibilityScope): string {
+function scopeLabel(scope: SkillVisibilityScope | undefined, t: TranslateFn): string {
   switch (scope) {
     case 'private':
-      return '仅源 Bot 私有';
+      return t('仅源 Bot 私有', 'Source Bot only');
     case 'assigned':
-      return '指定 Bot 共享';
+      return t('指定 Bot 共享', 'Assigned Bots');
     case 'global':
-      return '全局默认可用';
+      return t('全局默认可用', 'Global default');
     default:
-      return '默认分配';
+      return t('默认分配', 'Default scope');
   }
 }
 
@@ -79,6 +82,9 @@ export function CapabilitiesTab({
   onOpenExternal?: () => void;
   onOpenExternalUrl?: (url: string) => void | Promise<unknown>;
 }): React.JSX.Element {
+  const t = useText();
+  const defaultSkillMarkdown = t('# 技能说明\n\n描述此技能的目标、触发时机与执行步骤。\n', '# Skill Guide\n\nDescribe the goal, triggers, and execution steps for this skill.\n');
+
   const [segment, setSegment] = useState<'skills' | 'tools'>('skills');
   const [skillFilter, setSkillFilter] = useState<'all' | 'shared' | 'learned'>('all');
   const [query, setQuery] = useState('');
@@ -96,9 +102,9 @@ export function CapabilitiesTab({
   const [createSkillOpen, setCreateSkillOpen] = useState(false);
   const [newSkillName, setNewSkillName] = useState('');
   const [newSkillScope, setNewSkillScope] = useState<SkillVisibilityScope>('global');
-  const [newSkillFiles, setNewSkillFiles] = useState<Record<string, string>>({
-    'SKILL.md': '# 技能说明\n\n描述此技能的目标、触发时机与执行步骤。\n',
-  });
+  const [newSkillFiles, setNewSkillFiles] = useState<Record<string, string>>(() => ({
+    'SKILL.md': defaultSkillMarkdown,
+  }));
   const [newSkillActiveFile, setNewSkillActiveFile] = useState('SKILL.md');
   const [newSkillAddPath, setNewSkillAddPath] = useState('');
   const [createSkillBusy, setCreateSkillBusy] = useState(false);
@@ -181,7 +187,7 @@ export function CapabilitiesTab({
     setLoading(true);
     loadAll()
       .catch(err => {
-        if (active) setError(errorMessage(err, '加载技能与扩展失败'));
+        if (active) setError(errorMessage(err, t('加载技能与扩展失败', 'Failed to load skills and extensions')));
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -189,7 +195,7 @@ export function CapabilitiesTab({
     return () => {
       active = false;
     };
-  }, [loadAll]);
+  }, [loadAll, t]);
 
   const activeBots = useMemo(() => bots.filter(b => !b.archivedAt), [bots]);
   const onlineBots = useMemo(
@@ -258,10 +264,10 @@ export function CapabilitiesTab({
         }
         setDeployments(deps);
       } catch (err) {
-        setDetailError(errorMessage(err, '加载扩展详情失败'));
+        setDetailError(errorMessage(err, t('加载扩展详情失败', 'Failed to load extension details')));
       }
     },
-    [activeBots, api],
+    [activeBots, api, t],
   );
 
   const openDetailDrawer = (inst: Installation) => {
@@ -327,10 +333,10 @@ export function CapabilitiesTab({
       await loadAll();
     } catch (err) {
       // If OAuth / validationBot needed, open drawer smoothly so user can complete OAuth right inside drawer
-      const msg = errorMessage(err);
-      if (msg.toLowerCase().includes('oauth') || msg.includes('validationBot') || msg.includes('授权')) {
+      const msg = errorMessage(err, t('操作失败', 'Operation failed'));
+      if (msg.toLowerCase().includes('oauth') || msg.includes('validationBot') || msg.includes('授权')) { // i18n-ok
         openDetailDrawer(inst);
-        setDetailError('此 MCP 需要先完成 OAuth Bot 授权后才能全局启用，请在下方选择 Bot 一键授权。');
+        setDetailError(t('此 MCP 需要先完成 OAuth Bot 授权后才能全局启用，请在下方选择 Bot 一键授权。', 'This MCP requires OAuth authorization with a Bot before enabling globally. Choose a Bot below to authorize.'));
       } else {
         setError(msg);
       }
@@ -344,12 +350,12 @@ export function CapabilitiesTab({
     e.preventDefault();
     const title = newSkillName.trim();
     if (!title) {
-      setCreateSkillError('请填写技能名称');
+      setCreateSkillError(t('请填写技能名称', 'Please enter a skill name'));
       return;
     }
     const md = newSkillFiles['SKILL.md'] ?? '';
     if (!md.trim()) {
-      setCreateSkillError('请填写 SKILL.md 内容');
+      setCreateSkillError(t('请填写 SKILL.md 内容', 'Please enter SKILL.md content'));
       return;
     }
     const preparedFiles: Record<string, string> = {
@@ -371,16 +377,16 @@ export function CapabilitiesTab({
       const op = await api.getOperation(accepted.operationId).catch(() => null);
       setCreateSkillOpen(false);
       setNewSkillName('');
-      setNewSkillFiles({ 'SKILL.md': '# 技能说明\n\n描述此技能的目标、触发时机与执行步骤。\n' });
+      setNewSkillFiles({ 'SKILL.md': defaultSkillMarkdown });
       setNewSkillActiveFile('SKILL.md');
       await loadAll();
       if (op?.installationId) {
         const created = await api.getInstallation(op.installationId).catch(() => null);
         if (created) openDetailDrawer(created);
       }
-      setNotice(`技能「${title}」已创建并启用`);
+      setNotice(t(`技能「${title}」已创建并启用`, `Skill "${title}" created and enabled`));
     } catch (err) {
-      setCreateSkillError(errorMessage(err, '创建技能失败'));
+      setCreateSkillError(errorMessage(err, t('创建技能失败', 'Failed to create skill')));
     } finally {
       setCreateSkillBusy(false);
     }
@@ -404,7 +410,7 @@ export function CapabilitiesTab({
     e.preventDefault();
     const name = importName.trim();
     if (!name) {
-      setImportError('请填写名称');
+      setImportError(t('请填写名称', 'Please enter a name'));
       return;
     }
     setImportBusy(true);
@@ -412,14 +418,14 @@ export function CapabilitiesTab({
     try {
       let source: Parameters<CenterApi['install']>[0]['source'];
       if (importSource === 'artifact') {
-        if (!importFile) throw new Error('请选择要上传的压缩包文件');
+        if (!importFile) throw new Error(t('请选择要上传的压缩包文件', 'Please select an archive file to upload'));
         const uploaded = await api.uploadArtifact(importFile);
         source = { type: 'artifact', artifactRef: uploaded.artifactRef };
       } else if (importSource === 'npm') {
-        if (!importSpec.trim()) throw new Error('请填写 npm 包名');
+        if (!importSpec.trim()) throw new Error(t('请填写 npm 包名', 'Please enter an npm package spec'));
         source = { type: 'npm', spec: importSpec.trim() };
       } else {
-        if (!importUrl.trim()) throw new Error('请填写 URL 地址');
+        if (!importUrl.trim()) throw new Error(t('请填写 URL 地址', 'Please enter a URL'));
         source = { type: 'http', url: importUrl.trim() };
       }
 
@@ -434,9 +440,13 @@ export function CapabilitiesTab({
       setImportOpen(false);
       await loadAll();
       watchOperation(accepted.operationId);
-      setNotice(`已提交「${name}」安装任务${importAutoEnable ? '（完成后自动启用）' : ''}`);
+      setNotice(
+        importAutoEnable
+          ? t(`已提交「${name}」安装任务（完成后自动启用）`, `Submitted install task for "${name}" (auto-enable on completion)`)
+          : t(`已提交「${name}」安装任务`, `Submitted install task for "${name}"`),
+      );
     } catch (err) {
-      setImportError(errorMessage(err, '安装失败'));
+      setImportError(errorMessage(err, t('安装失败', 'Installation failed')));
     } finally {
       setImportBusy(false);
     }
@@ -456,9 +466,9 @@ export function CapabilitiesTab({
       });
       setDetailInst(updated);
       setInstallations(prev => prev.map(x => (x.installationId === updated.installationId ? updated : x)));
-      setDetailNotice('名称与共享范围已更新');
+      setDetailNotice(t('名称与共享范围已更新', 'Name and visibility updated'));
     } catch (err) {
-      setDetailError(errorMessage(err, '保存信息失败'));
+      setDetailError(errorMessage(err, t('保存信息失败', 'Failed to save details')));
     } finally {
       setDetailBusy(false);
     }
@@ -483,9 +493,9 @@ export function CapabilitiesTab({
       });
       setSkillFilesRes(updated);
       setSkillFilesDraft({ ...updated.files });
-      setDetailNotice('技能文件已保存并下发至关联设备');
+      setDetailNotice(t('技能文件已保存并下发至关联设备', 'Skill files saved and synced to connected devices'));
     } catch (err) {
-      setDetailError(errorMessage(err, '保存技能文件失败'));
+      setDetailError(errorMessage(err, t('保存技能文件失败', 'Failed to save skill files')));
     } finally {
       setDetailBusy(false);
     }
@@ -496,7 +506,7 @@ export function CapabilitiesTab({
     setDetailBusy(true);
     setDetailError('');
     try {
-      const copyName = `${detailInst.displayName}（可编辑副本）`;
+      const copyName = t(`${detailInst.displayName}（可编辑副本）`, `${detailInst.displayName} (Editable Copy)`);
       const accepted = await api.install({
         requestId: newRequestId(),
         displayName: copyName,
@@ -511,12 +521,12 @@ export function CapabilitiesTab({
       if (op?.installationId) {
         setSelectedId(op.installationId);
         await loadDetail(op.installationId);
-        setDetailNotice(`已创建可编辑副本「${copyName}」`);
+        setDetailNotice(t(`已创建可编辑副本「${copyName}」`, `Created editable copy "${copyName}"`));
       } else {
-        setDetailNotice(`已创建可编辑副本「${copyName}」，请在列表中打开编辑`);
+        setDetailNotice(t(`已创建可编辑副本「${copyName}」，请在列表中打开编辑`, `Created editable copy "${copyName}". Open it from the list to edit.`));
       }
     } catch (err) {
-      setDetailError(errorMessage(err, '转为可编辑副本失败'));
+      setDetailError(errorMessage(err, t('转为可编辑副本失败', 'Failed to create editable copy')));
     } finally {
       setDetailBusy(false);
     }
@@ -534,9 +544,9 @@ export function CapabilitiesTab({
       });
       setDetailConfig(updated);
       setDetailGlobalDraft(updated.globalConfig);
-      setDetailNotice('全局参数已保存');
+      setDetailNotice(t('全局参数已保存', 'Global settings saved'));
     } catch (err) {
-      setDetailError(errorMessage(err, '保存配置失败'));
+      setDetailError(errorMessage(err, t('保存配置失败', 'Failed to save settings')));
     } finally {
       setDetailBusy(false);
     }
@@ -560,7 +570,7 @@ export function CapabilitiesTab({
         return next;
       });
     } catch (err) {
-      setDetailError(errorMessage(err, '更新 Bot 授权失败'));
+      setDetailError(errorMessage(err, t('更新 Bot 授权失败', 'Failed to update Bot access')));
     } finally {
       setBindingBusyKeys(prev => {
         const next = new Set(prev);
@@ -600,9 +610,9 @@ export function CapabilitiesTab({
         return next;
       });
       setOverrideBot(null);
-      setDetailNotice(`已保存 ${overrideBot.name} 的独立覆盖参数`);
+      setDetailNotice(t(`已保存 ${overrideBot.name} 的独立覆盖参数`, `Saved override settings for ${overrideBot.name}`));
     } catch (err) {
-      setDetailError(errorMessage(err, '保存 Bot 覆盖参数失败'));
+      setDetailError(errorMessage(err, t('保存 Bot 覆盖参数失败', 'Failed to save Bot override settings')));
     } finally {
       setOverrideSaving(false);
     }
@@ -631,10 +641,10 @@ export function CapabilitiesTab({
         requestId: newRequestId(),
         ...(needsOAuth && targetBot ? { validationBot: targetBot } : {}),
       });
-      setDetailNotice('已受理全局启用请求');
+      setDetailNotice(t('已受理全局启用请求', 'Global enable request accepted'));
       watchOperation(accepted.operationId);
     } catch (err) {
-      setDetailError(errorMessage(err, '全局启用失败'));
+      setDetailError(errorMessage(err, t('全局启用失败', 'Failed to enable globally')));
     } finally {
       setDetailBusy(false);
     }
@@ -649,10 +659,10 @@ export function CapabilitiesTab({
       const accepted = await api.disableInstallation(detailInst.installationId, {
         requestId: newRequestId(),
       });
-      setDetailNotice('已受理全局停用请求');
+      setDetailNotice(t('已受理全局停用请求', 'Global disable request accepted'));
       watchOperation(accepted.operationId);
     } catch (err) {
-      setDetailError(errorMessage(err, '全局停用失败'));
+      setDetailError(errorMessage(err, t('全局停用失败', 'Failed to disable globally')));
     } finally {
       setDetailBusy(false);
     }
@@ -662,7 +672,7 @@ export function CapabilitiesTab({
     if (!detailInst) return;
     const targetBot = parseBotKey(selectedValidationBotKey);
     if (!targetBot) {
-      setDetailError('请先选择一个在线或可用 Bot 作为 OAuth 校验身份');
+      setDetailError(t('请先选择一个在线或可用 Bot 作为 OAuth 校验身份', 'Select an available Bot to authorize OAuth'));
       return;
     }
     setDetailBusy(true);
@@ -677,7 +687,7 @@ export function CapabilitiesTab({
           const st = await api.getMcpOAuthFlow(started.flowId);
           setOauthStatus(st.error ? `${st.status}: ${st.error}` : st.status);
           if (st.status === 'complete') {
-            setDetailNotice('OAuth 授权已完成，正在自动启用…');
+            setDetailNotice(t('OAuth 授权已完成，正在自动启用…', 'OAuth authorized, enabling automatically…'));
             await handleEnableInDrawer();
             return;
           }
@@ -685,12 +695,12 @@ export function CapabilitiesTab({
             oauthTimerRef.current = window.setTimeout(() => void poll(), 1200);
           }
         } catch (pErr) {
-          setOauthStatus(errorMessage(pErr));
+          setOauthStatus(errorMessage(pErr, t('查询授权状态失败', 'Failed to check OAuth status')));
         }
       };
       oauthTimerRef.current = window.setTimeout(() => void poll(), 1500);
     } catch (err) {
-      setDetailError(errorMessage(err, '启动 OAuth 授权失败'));
+      setDetailError(errorMessage(err, t('启动 OAuth 授权失败', 'Failed to start OAuth authorization')));
     } finally {
       setDetailBusy(false);
     }
@@ -700,7 +710,7 @@ export function CapabilitiesTab({
     if (!detailInst) return;
     const targetBot = parseBotKey(selectedValidationBotKey);
     if (!targetBot) {
-      setDetailError('暂无可用的设备与 Bot 执行连接探测');
+      setDetailError(t('暂无可用的设备与 Bot 执行连接探测', 'No available device and Bot to run connection check'));
       return;
     }
     setProbeBusy(true);
@@ -709,11 +719,15 @@ export function CapabilitiesTab({
     setDetailError('');
     try {
       const check = await api.validateInstallation(detailInst.installationId, targetBot);
-      setProbeResult(check.ok ? `连接正常：${check.message}` : `探测未通过：${check.message}`);
+      setProbeResult(
+        check.ok
+          ? t(`连接正常：${check.message}`, `Connection OK: ${check.message}`)
+          : t(`探测未通过：${check.message}`, `Probe failed: ${check.message}`),
+      );
       const tools = await api.listInstallationTools(detailInst.installationId, targetBot).catch(() => null);
       if (tools) setToolsResult(tools.tools);
     } catch (err) {
-      setDetailError(errorMessage(err, '探测连接与工具列表失败'));
+      setDetailError(errorMessage(err, t('探测连接与工具列表失败', 'Failed to check connection and tools')));
     } finally {
       setProbeBusy(false);
     }
@@ -726,9 +740,9 @@ export function CapabilitiesTab({
     try {
       const list = await api.checkUpdates(detailInst.installationId);
       setUpdates(list);
-      if (list.length === 0) setDetailNotice('当前已是最新版本');
+      if (list.length === 0) setDetailNotice(t('当前已是最新版本', 'Already up to date'));
     } catch (err) {
-      setDetailError(errorMessage(err, '检查更新失败'));
+      setDetailError(errorMessage(err, t('检查更新失败', 'Failed to check updates')));
     } finally {
       setDetailBusy(false);
     }
@@ -743,10 +757,10 @@ export function CapabilitiesTab({
         requestId: newRequestId(),
         targetVersion,
       });
-      setDetailNotice(`已发起更新到 ${targetVersion}`);
+      setDetailNotice(t(`已发起更新到 ${targetVersion}`, `Started update to ${targetVersion}`));
       watchOperation(accepted.operationId);
     } catch (err) {
-      setDetailError(errorMessage(err, '更新失败'));
+      setDetailError(errorMessage(err, t('更新失败', 'Update failed')));
     } finally {
       setDetailBusy(false);
     }
@@ -754,16 +768,16 @@ export function CapabilitiesTab({
 
   const handleUninstall = async () => {
     if (!detailInst) return;
-    if (!window.confirm(`确定卸载「${detailInst.displayName}」吗？此操作会从中心与设备移除。`)) return;
+    if (!window.confirm(t(`确定卸载「${detailInst.displayName}」吗？此操作会从中心与设备移除。`, `Uninstall "${detailInst.displayName}"? This removes it from center and devices.`))) return;
     setDetailBusy(true);
     setDetailError('');
     try {
       await api.uninstallInstallation(detailInst.installationId, { requestId: newRequestId() });
       setDetailOpen(false);
       await loadAll();
-      setNotice(`已卸载 ${detailInst.displayName}`);
+      setNotice(t(`已卸载 ${detailInst.displayName}`, `Uninstalled ${detailInst.displayName}`));
     } catch (err) {
-      setDetailError(errorMessage(err, '卸载失败'));
+      setDetailError(errorMessage(err, t('卸载失败', 'Uninstall failed')));
     } finally {
       setDetailBusy(false);
     }
@@ -798,7 +812,7 @@ export function CapabilitiesTab({
   }, [botBindings]);
 
   if (loading) {
-    return <div className="ca-empty">正在加载技能与扩展…</div>;
+    return <div className="ca-empty">{t('正在加载技能与扩展…', 'Loading skills and extensions…')}</div>;
   }
 
   return (
@@ -809,7 +823,7 @@ export function CapabilitiesTab({
           tone="ok"
           action={
             <button type="button" className="ca-btn ca-btn-ghost ca-btn-sm" onClick={() => setNotice('')}>
-              关闭
+              {t('关闭', 'Close')}
             </button>
           }
         >
@@ -820,9 +834,10 @@ export function CapabilitiesTab({
       <div className="ca-toolbar">
         <CaSegmented
           value={segment}
+          ariaLabel={t('能力分类', 'Capability category')}
           options={[
-            { value: 'skills', label: '技能 (Skills)' },
-            { value: 'tools', label: '工具扩展 (MCP & 插件)' },
+            { value: 'skills', label: t('技能 (Skills)', 'Skills') },
+            { value: 'tools', label: t('工具扩展 (MCP & 插件)', 'Extensions (MCP & Plugins)') },
           ]}
           onChange={next => {
             setSegment(next);
@@ -833,9 +848,8 @@ export function CapabilitiesTab({
         <div className="ca-toolbar-group">
           <input
             type="search"
-            className="ca-input"
-            style={{ width: 180, paddingTop: 5, paddingBottom: 5 }}
-            placeholder={segment === 'skills' ? '搜索技能…' : '搜索扩展…'}
+            className="ca-input ca-toolbar-search"
+            placeholder={segment === 'skills' ? t('搜索技能…', 'Search skills…') : t('搜索扩展…', 'Search extensions…')}
             value={query}
             onChange={e => setQuery(e.target.value)}
           />
@@ -850,7 +864,7 @@ export function CapabilitiesTab({
                 }}
               >
                 <Plus size={14} />
-                <span>新建技能</span>
+                <span>{t('新建技能', 'New skill')}</span>
               </button>
               <button
                 type="button"
@@ -858,7 +872,7 @@ export function CapabilitiesTab({
                 onClick={() => openImportModal('skill')}
               >
                 <Upload size={14} />
-                <span>导入技能包</span>
+                <span>{t('导入技能包', 'Import skill')}</span>
               </button>
             </>
           ) : (
@@ -868,7 +882,7 @@ export function CapabilitiesTab({
               onClick={() => openImportModal('mcp')}
             >
               <Plus size={14} />
-              <span>安装扩展</span>
+              <span>{t('安装扩展', 'Install extension')}</span>
             </button>
           )}
         </div>
@@ -876,37 +890,38 @@ export function CapabilitiesTab({
 
       {segment === 'skills' ? (
         <section className="ca-section">
-          <div className="ca-section-head" style={{ flexWrap: 'wrap' }}>
+          <div className="ca-section-head">
             <CaChips
               value={skillFilter}
+              ariaLabel={t('技能筛选', 'Filter skills')}
               options={[
-                { value: 'all', label: '全部' },
-                { value: 'shared', label: '全局共享' },
-                { value: 'learned', label: '✨ Bot 习得' },
+                { value: 'all', label: t('全部', 'All') },
+                { value: 'shared', label: t('全局共享', 'Shared') },
+                { value: 'learned', label: t('✨ Bot 习得', '✨ Learned by Bot') },
               ]}
               onChange={setSkillFilter}
             />
-            <span className="ca-muted ca-num">{skillItems.length} 项</span>
+            <span className="ca-muted ca-num">{t(`${skillItems.length} 项`, `${skillItems.length} items`)}</span>
           </div>
 
           <div className="ca-list">
             {skillItems.length === 0 ? (
-              <div className="ca-empty">暂无技能，点击右上角「+ 新建技能」或「导入技能包」</div>
+              <div className="ca-empty">{t('暂无技能，点击右上角「+ 新建技能」或「导入技能包」', 'No skills yet. Click "+ New skill" or "Import skill" above.')}</div>
             ) : (
               skillItems.map(inst => {
-                const badge = activationLabel(inst);
+                const badge = activationLabel(inst, t);
                 const ownerLabel = inst.ownerBot
                   ? botNameByKey.get(botKey(inst.ownerBot.deviceId, inst.ownerBot.botId)) ||
                     inst.ownerBot.botId
                   : null;
                 return (
-                  <div
-                    key={inst.installationId}
-                    className="ca-row is-clickable"
-                    onClick={() => openDetailDrawer(inst)}
-                  >
-                    <div className="ca-row-main">
-                      <div className="ca-row-title">
+                  <div key={inst.installationId} className="ca-row ca-row-split">
+                    <button
+                      type="button"
+                      className="ca-row-main ca-row-trigger"
+                      onClick={() => openDetailDrawer(inst)}
+                    >
+                      <span className="ca-row-title">
                         <span>{inst.displayName}</span>
                         <span
                           className={`ca-pill ${
@@ -924,30 +939,32 @@ export function CapabilitiesTab({
                         {inst.ownerBot && (
                           <span className="ca-pill ca-pill-info">
                             <Sparkles size={11} />
-                            <span>来自 {ownerLabel}</span>
+                            <span>{t(`来自 ${ownerLabel}`, `From ${ownerLabel}`)}</span>
                           </span>
                         )}
                         {inst.visibilityScope && (
-                          <span className="ca-pill ca-pill-muted">{scopeLabel(inst.visibilityScope)}</span>
+                          <span className="ca-pill ca-pill-muted">{scopeLabel(inst.visibilityScope, t)}</span>
                         )}
-                      </div>
-                      <div className="ca-row-sub">
-                        {inst.source.type === 'inline' ? '在线 Markdown 技能' : `${inst.packageId} · v${inst.targetVersion}`}
-                      </div>
-                    </div>
-                    <div className="ca-row-actions" onClick={e => e.stopPropagation()}>
+                      </span>
+                      <span className="ca-row-sub">
+                        {inst.source.type === 'inline'
+                          ? t('在线 Markdown 技能', 'Inline Markdown skill')
+                          : `${inst.packageId} · v${inst.targetVersion}`}
+                      </span>
+                    </button>
+                    <div className="ca-row-actions">
                       <button
                         type="button"
                         className="ca-btn ca-btn-sm"
                         onClick={() => openDetailDrawer(inst)}
                       >
                         <FileCode2 size={13} />
-                        <span>编辑</span>
+                        <span>{t('编辑', 'Edit')}</span>
                       </button>
                       <CaSwitch
                         checked={inst.enabled}
                         disabled={togglingId === inst.installationId}
-                        label={`启用 ${inst.displayName}`}
+                        label={t(`启用 ${inst.displayName}`, `Enable ${inst.displayName}`)}
                         onChange={next => void handleToggleGlobalRow(inst, next)}
                       />
                     </div>
@@ -960,28 +977,28 @@ export function CapabilitiesTab({
       ) : (
         <section className="ca-section">
           <div className="ca-section-head">
-            <h3 className="ca-section-title">MCP 服务与插件</h3>
-            <span className="ca-muted ca-num">{toolItems.length} 项</span>
+            <h3 className="ca-section-title">{t('MCP 服务与插件', 'MCP servers & plugins')}</h3>
+            <span className="ca-muted ca-num">{t(`${toolItems.length} 项`, `${toolItems.length} items`)}</span>
           </div>
 
           <div className="ca-list">
             {toolItems.length === 0 ? (
-              <div className="ca-empty">尚未安装 MCP 服务或插件，点击右上角「安装扩展」</div>
+              <div className="ca-empty">{t('尚未安装 MCP 服务或插件，点击右上角「安装扩展」', 'No MCP servers or plugins installed. Click "Install extension" above.')}</div>
             ) : (
               toolItems.map(inst => {
-                const badge = activationLabel(inst);
+                const badge = activationLabel(inst, t);
                 return (
-                  <div
-                    key={inst.installationId}
-                    className="ca-row is-clickable"
-                    onClick={() => openDetailDrawer(inst)}
-                  >
-                    <div className="ca-row-main">
-                      <div className="ca-row-title">
+                  <div key={inst.installationId} className="ca-row ca-row-split">
+                    <button
+                      type="button"
+                      className="ca-row-main ca-row-trigger"
+                      onClick={() => openDetailDrawer(inst)}
+                    >
+                      <span className="ca-row-title">
                         <span>{inst.displayName}</span>
-                        <span className="ca-pill ca-pill-muted">{inst.kind === 'mcp' ? 'MCP' : '插件'}</span>
+                        <span className="ca-pill ca-pill-muted">{inst.kind === 'mcp' ? 'MCP' : t('插件', 'Plugin')}</span>
                         <span className="ca-pill ca-pill-muted">
-                          {inst.target === 'center' ? '中心托管' : '设备运行'}
+                          {inst.target === 'center' ? t('中心托管', 'Center-hosted') : t('设备运行', 'On-device')}
                         </span>
                         <span
                           className={`ca-pill ${
@@ -996,25 +1013,25 @@ export function CapabilitiesTab({
                         >
                           {badge.text}
                         </span>
-                      </div>
-                      <div className="ca-row-sub">
+                      </span>
+                      <span className="ca-row-sub">
                         {inst.packageId} · v{inst.targetVersion}
                         {inst.activation?.error?.message ? ` · ${inst.activation.error.message}` : ''}
-                      </div>
-                    </div>
-                    <div className="ca-row-actions" onClick={e => e.stopPropagation()}>
+                      </span>
+                    </button>
+                    <div className="ca-row-actions">
                       <button
                         type="button"
                         className="ca-btn ca-btn-sm"
                         onClick={() => openDetailDrawer(inst)}
                       >
                         <Wrench size={13} />
-                        <span>配置</span>
+                        <span>{t('配置', 'Configure')}</span>
                       </button>
                       <CaSwitch
                         checked={inst.enabled}
                         disabled={togglingId === inst.installationId}
-                        label={`启用 ${inst.displayName}`}
+                        label={t(`启用 ${inst.displayName}`, `Enable ${inst.displayName}`)}
                         onChange={next => void handleToggleGlobalRow(inst, next)}
                       />
                     </div>
@@ -1030,8 +1047,8 @@ export function CapabilitiesTab({
       <CaModal
         open={createSkillOpen}
         onOpenChange={setCreateSkillOpen}
-        title="新建技能"
-        description="支持多文件 Markdown 与脚本目录，创建后默认立即可用"
+        title={t('新建技能', 'New skill')}
+        description={t('支持多文件 Markdown 与脚本目录，创建后默认立即可用', 'Supports multi-file Markdown and scripts; enabled immediately on creation')}
         variant="drawer"
         wide
       >
@@ -1040,26 +1057,26 @@ export function CapabilitiesTab({
           <div className="ca-grid-2">
             <div className="ca-field">
               <label className="ca-field-label">
-                技能名称 <span className="ca-req">*</span>
+                {t('技能名称', 'Skill name')} <span className="ca-req">*</span>
               </label>
               <input
                 type="text"
                 className="ca-input"
                 required
-                placeholder="例如：代码审查规范 / 日报整理"
+                placeholder={t('例如：代码审查规范 / 日报整理', 'e.g. Code review checklist / Daily report')}
                 value={newSkillName}
                 onChange={e => setNewSkillName(e.target.value)}
               />
             </div>
             <div className="ca-field">
-              <label className="ca-field-label">可见范围</label>
+              <label className="ca-field-label">{t('可见范围', 'Visibility')}</label>
               <select
                 className="ca-select"
                 value={newSkillScope}
                 onChange={e => setNewSkillScope(e.target.value as SkillVisibilityScope)}
               >
-                <option value="global">全局默认可用</option>
-                <option value="assigned">仅指定 Bot 共享</option>
+                <option value="global">{t('全局默认可用', 'Global default')}</option>
+                <option value="assigned">{t('仅指定 Bot 共享', 'Assigned Bots only')}</option>
               </select>
             </div>
           </div>
@@ -1077,11 +1094,11 @@ export function CapabilitiesTab({
             ))}
           </div>
 
-          <div className="ca-inline-row">
+          <div className="ca-inline-row ca-skill-subfile-row">
             <input
               type="text"
               className="ca-input ca-mono"
-              placeholder="新增附属文件路径（如 scripts/run.py 或 references/guide.md）"
+              placeholder={t('新增附属文件路径（如 scripts/run.py 或 references/guide.md）', 'Add file path (e.g. scripts/run.py or references/guide.md)')}
               value={newSkillAddPath}
               onChange={e => setNewSkillAddPath(e.target.value)}
             />
@@ -1097,7 +1114,7 @@ export function CapabilitiesTab({
                 setNewSkillAddPath('');
               }}
             >
-              新增文件
+              {t('新增文件', 'Add file')}
             </button>
             {newSkillActiveFile !== 'SKILL.md' && (
               <button
@@ -1113,7 +1130,7 @@ export function CapabilitiesTab({
                   setNewSkillActiveFile('SKILL.md');
                 }}
               >
-                删除当前文件
+                {t('删除当前文件', 'Delete file')}
               </button>
             )}
           </div>
@@ -1130,10 +1147,10 @@ export function CapabilitiesTab({
 
           <div className="ca-form-actions">
             <button type="button" className="ca-btn" onClick={() => setCreateSkillOpen(false)}>
-              取消
+              {t('取消', 'Cancel')}
             </button>
             <button type="submit" className="ca-btn ca-btn-primary" disabled={createSkillBusy}>
-              {createSkillBusy ? '创建中…' : '创建并启用'}
+              {createSkillBusy ? t('创建中…', 'Creating…') : t('创建并启用', 'Create & enable')}
             </button>
           </div>
         </form>
@@ -1143,7 +1160,7 @@ export function CapabilitiesTab({
       <CaModal
         open={importOpen}
         onOpenChange={setImportOpen}
-        title={importKind === 'skill' ? '导入技能包' : '安装工具扩展'}
+        title={importKind === 'skill' ? t('导入技能包', 'Import skill package') : t('安装工具扩展', 'Install extension')}
         variant="modal"
       >
         <form className="ca-form-stack" onSubmit={e => void handleSubmitImport(e)}>
@@ -1154,7 +1171,7 @@ export function CapabilitiesTab({
                 importSource === 'artifact' && onOpenExternal ? (
                   <button type="button" className="ca-btn ca-btn-sm" onClick={onOpenExternal}>
                     <ExternalLink size={13} />
-                    <span>在浏览器打开</span>
+                    <span>{t('在浏览器打开', 'Open in browser')}</span>
                   </button>
                 ) : undefined
               }
@@ -1166,7 +1183,7 @@ export function CapabilitiesTab({
           {importKind !== 'skill' && (
             <div className="ca-grid-2">
               <div className="ca-field">
-                <label className="ca-field-label">扩展类型</label>
+                <label className="ca-field-label">{t('扩展类型', 'Extension type')}</label>
                 <select
                   className="ca-select"
                   value={importKind}
@@ -1177,19 +1194,19 @@ export function CapabilitiesTab({
                     if (next === 'plugin' && importSource === 'http') setImportSource('npm');
                   }}
                 >
-                  <option value="mcp">MCP 服务</option>
-                  <option value="plugin">原生插件</option>
+                  <option value="mcp">{t('MCP 服务', 'MCP server')}</option>
+                  <option value="plugin">{t('原生插件', 'Native plugin')}</option>
                 </select>
               </div>
               <div className="ca-field">
-                <label className="ca-field-label">运行位置</label>
+                <label className="ca-field-label">{t('运行位置', 'Runtime target')}</label>
                 <select
                   className="ca-select"
                   value={importTarget}
                   onChange={e => setImportTarget(e.target.value as 'center' | 'host')}
                 >
-                  {importKind === 'mcp' && <option value="center">中心托管</option>}
-                  <option value="host">设备 Host</option>
+                  {importKind === 'mcp' && <option value="center">{t('中心托管', 'Center-hosted')}</option>}
+                  <option value="host">{t('设备 Host', 'Device Host')}</option>
                 </select>
               </div>
             </div>
@@ -1197,31 +1214,32 @@ export function CapabilitiesTab({
 
           <div className="ca-field">
             <label className="ca-field-label">
-              显示名称 <span className="ca-req">*</span>
+              {t('显示名称', 'Display name')} <span className="ca-req">*</span>
             </label>
             <input
               type="text"
               className="ca-input"
               required
-              placeholder={importKind === 'skill' ? '例如：团队规范技能包' : '例如：GitHub MCP'}
+              placeholder={importKind === 'skill' ? t('例如：团队规范技能包', 'e.g. Team guidelines skill') : t('例如：GitHub MCP', 'e.g. GitHub MCP')}
               value={importName}
               onChange={e => setImportName(e.target.value)}
             />
           </div>
 
           <div className="ca-field">
-            <label className="ca-field-label">来源方式</label>
+            <label className="ca-field-label">{t('来源方式', 'Source')}</label>
             <CaSegmented
               value={importSource}
+              ariaLabel={t('来源方式', 'Source')}
               options={
                 importKind === 'plugin'
                   ? [
-                      { value: 'npm', label: 'npm 包' },
-                      { value: 'artifact', label: '压缩包' },
+                      { value: 'npm', label: t('npm 包', 'npm package') },
+                      { value: 'artifact', label: t('压缩包', 'Archive') },
                     ]
                   : [
-                      { value: 'artifact', label: '压缩包' },
-                      { value: 'npm', label: 'npm 包' },
+                      { value: 'artifact', label: t('压缩包', 'Archive') },
+                      { value: 'npm', label: t('npm 包', 'npm package') },
                       { value: 'http', label: 'HTTP URL' },
                     ]
               }
@@ -1231,7 +1249,7 @@ export function CapabilitiesTab({
 
           {importSource === 'artifact' && (
             <div className="ca-field">
-              <label className="ca-field-label">选择包文件 (.zip / .tar.gz / .tgz)</label>
+              <label className="ca-field-label">{t('选择包文件 (.zip / .tar.gz / .tgz)', 'Select package archive (.zip / .tar.gz / .tgz)')}</label>
               <input
                 type="file"
                 className="ca-input"
@@ -1243,7 +1261,7 @@ export function CapabilitiesTab({
 
           {importSource === 'npm' && (
             <div className="ca-field">
-              <label className="ca-field-label">npm 包标识</label>
+              <label className="ca-field-label">{t('npm 包标识', 'npm package spec')}</label>
               <input
                 type="text"
                 className="ca-input ca-mono"
@@ -1256,7 +1274,7 @@ export function CapabilitiesTab({
 
           {importSource === 'http' && (
             <div className="ca-field">
-              <label className="ca-field-label">URL 地址</label>
+              <label className="ca-field-label">{t('URL 地址', 'URL')}</label>
               <input
                 type="url"
                 className="ca-input"
@@ -1273,15 +1291,15 @@ export function CapabilitiesTab({
               checked={importAutoEnable}
               onChange={e => setImportAutoEnable(e.target.checked)}
             />
-            <span>安装后立即全局启用</span>
+            <span>{t('安装后立即全局启用', 'Enable globally right after install')}</span>
           </label>
 
           <div className="ca-form-actions">
             <button type="button" className="ca-btn" onClick={() => setImportOpen(false)}>
-              取消
+              {t('取消', 'Cancel')}
             </button>
             <button type="submit" className="ca-btn ca-btn-primary" disabled={importBusy}>
-              {importBusy ? '安装中…' : '开始安装'}
+              {importBusy ? t('安装中…', 'Installing…') : t('开始安装', 'Install')}
             </button>
           </div>
         </form>
@@ -1294,10 +1312,10 @@ export function CapabilitiesTab({
           if (!open) stopTimers();
           setDetailOpen(open);
         }}
-        title={detailInst?.displayName || '扩展配置'}
+        title={detailInst?.displayName || t('扩展配置', 'Extension settings')}
         description={
           detailInst
-            ? `${detailInst.kind === 'skill' ? '技能' : detailInst.kind === 'mcp' ? 'MCP 服务' : '原生插件'} · ${
+            ? `${detailInst.kind === 'skill' ? t('技能', 'Skill') : detailInst.kind === 'mcp' ? t('MCP 服务', 'MCP server') : t('原生插件', 'Native plugin')} · ${
                 detailInst.packageId
               }`
             : ''
@@ -1311,13 +1329,13 @@ export function CapabilitiesTab({
             {detailNotice && <CaNotice tone="ok">{detailNotice}</CaNotice>}
 
             {/* 唯一全局启停状态栏 */}
-            <div className="ca-section" style={{ padding: 12 }}>
+            <div className="ca-section ca-section-pad">
               <div className="ca-inline-between">
                 <div>
-                  <div className="ca-field-label">全局启用状态</div>
+                  <div className="ca-field-label">{t('全局启用状态', 'Global status')}</div>
                   <div className="ca-muted">
-                    {activationLabel(detailInst).text}
-                    {operation ? ` · 任务进度：${operation.phase}` : ''}
+                    {activationLabel(detailInst, t).text}
+                    {operation ? t(` · 任务进度：${operation.phase}`, ` · Task: ${operation.phase}`) : ''}
                     {detailInst.activation?.error?.message
                       ? ` · ${detailInst.activation.error.message}`
                       : ''}
@@ -1326,7 +1344,7 @@ export function CapabilitiesTab({
                 <CaSwitch
                   checked={detailInst.enabled}
                   disabled={detailBusy}
-                  label={`启用 ${detailInst.displayName}`}
+                  label={t(`启用 ${detailInst.displayName}`, `Enable ${detailInst.displayName}`)}
                   onChange={next => (next ? void handleEnableInDrawer() : void handleDisableInDrawer())}
                 />
               </div>
@@ -1334,18 +1352,17 @@ export function CapabilitiesTab({
 
             {/* OAuth MCP 一键解锁与授权（消除 OAuth 死锁） */}
             {(needsOAuth || detailInst.activation?.error?.code?.includes('OAUTH') || detailError.includes('OAuth')) && (
-              <div className="ca-section" style={{ padding: 12 }}>
-                <div className="ca-field-label" style={{ marginBottom: 6 }}>
-                  OAuth 身份授权（选择任意可用 Bot 完成授权即可启用）
+              <div className="ca-section ca-section-pad">
+                <div className="ca-field-label ca-mb-2">
+                  {t('OAuth 身份授权（选择任意可用 Bot 完成授权即可启用）', 'OAuth authorization (choose any available Bot to authorize and enable)')}
                 </div>
-                <div className="ca-inline-row" style={{ flexWrap: 'wrap' }}>
+                <div className="ca-inline-row ca-wrap">
                   <select
-                    className="ca-select"
-                    style={{ flex: 1, minWidth: 180 }}
+                    className="ca-select ca-oauth-bot-select"
                     value={selectedValidationBotKey}
                     onChange={e => setSelectedValidationBotKey(e.target.value)}
                   >
-                    {activeBots.length === 0 && <option value="">暂无可用 Bot</option>}
+                    {activeBots.length === 0 && <option value="">{t('暂无可用 Bot', 'No available Bots')}</option>}
                     {activeBots.map(b => (
                       <option key={botKey(b.deviceId, b.botId)} value={botKey(b.deviceId, b.botId)}>
                         {b.deviceName || b.deviceId} / {b.name || b.botId}
@@ -1358,7 +1375,7 @@ export function CapabilitiesTab({
                     disabled={detailBusy || !selectedValidationBotKey}
                     onClick={() => void handleStartMcpOAuth()}
                   >
-                    发起 OAuth 授权
+                    {t('发起 OAuth 授权', 'Start OAuth')}
                   </button>
                   <button
                     type="button"
@@ -1366,32 +1383,35 @@ export function CapabilitiesTab({
                     disabled={detailBusy || !selectedValidationBotKey}
                     onClick={() => void handleEnableInDrawer()}
                   >
-                    带此身份重试启用
+                    {t('带此身份重试启用', 'Retry enable with Bot')}
                   </button>
                 </div>
                 {oauthFlow && (
-                  <div className="ca-form-stack" style={{ marginTop: 10, gap: 8 }}>
+                  <div className="ca-form-stack ca-oauth-status-box">
                     <CaExternalUrlBox
                       url={oauthFlow.authorizationUrl}
                       onOpenUrl={onOpenExternalUrl}
                       onError={err =>
                         setDetailError(
-                          errorMessage(err, '无法打开系统默认浏览器，请复制链接手动打开'),
+                          errorMessage(err, t('无法打开系统默认浏览器，请复制链接手动打开', 'Could not open browser; please copy and open the link manually')),
                         )
                       }
-                      copyLabel="复制链接"
+                      copyLabel={t('复制链接', 'Copy link')}
                     />
-                    <span className="ca-muted">当前状态：{oauthStatus || '等待授权…'}</span>
+                    <span className="ca-muted">
+                      {t('当前状态：', 'Status: ')}
+                      {oauthStatus || t('等待授权…', 'Waiting for authorization…')}
+                    </span>
                   </div>
                 )}
               </div>
             )}
 
             {/* 名称与可见范围设置 */}
-            <div className="ca-section" style={{ padding: 12 }}>
+            <div className="ca-section ca-section-pad">
               <div className={detailInst.kind === 'skill' ? 'ca-grid-2' : 'ca-field'}>
                 <div className="ca-field">
-                  <label className="ca-field-label">显示名称</label>
+                  <label className="ca-field-label">{t('显示名称', 'Display name')}</label>
                   <input
                     type="text"
                     className="ca-input"
@@ -1401,36 +1421,36 @@ export function CapabilitiesTab({
                 </div>
                 {detailInst.kind === 'skill' && (
                   <div className="ca-field">
-                    <label className="ca-field-label">可用范围</label>
+                    <label className="ca-field-label">{t('可用范围', 'Visibility')}</label>
                     <select
                       className="ca-select"
                       value={detailScopeDraft}
                       onChange={e => setDetailScopeDraft(e.target.value as SkillVisibilityScope)}
                     >
-                      {detailInst.ownerBot && <option value="private">仅源 Bot 私有</option>}
-                      <option value="assigned">仅指定 Bot 共享</option>
-                      <option value="global">全局默认可用</option>
+                      {detailInst.ownerBot && <option value="private">{t('仅源 Bot 私有', 'Source Bot only')}</option>}
+                      <option value="assigned">{t('仅指定 Bot 共享', 'Assigned Bots only')}</option>
+                      <option value="global">{t('全局默认可用', 'Global default')}</option>
                     </select>
                   </div>
                 )}
               </div>
-              <div className="ca-inline-end" style={{ marginTop: 10 }}>
+              <div className="ca-inline-end ca-mt-3">
                 <button
                   type="button"
                   className="ca-btn ca-btn-sm"
                   disabled={detailBusy}
                   onClick={() => void handleSaveDetailMeta()}
                 >
-                  保存基础信息
+                  {t('保存基础信息', 'Save info')}
                 </button>
               </div>
             </div>
 
             {/* Skill 多文件在线编辑器 */}
             {detailInst.kind === 'skill' && skillFilesRes && (
-              <div className="ca-section" style={{ padding: 12 }}>
-                <div className="ca-inline-between" style={{ marginBottom: 8, flexWrap: 'wrap' }}>
-                  <span className="ca-field-label">技能文件</span>
+              <div className="ca-section ca-section-pad">
+                <div className="ca-inline-between ca-wrap ca-mb-2">
+                  <span className="ca-field-label">{t('技能文件', 'Skill files')}</span>
                   {!skillFilesRes.editable && (
                     <button
                       type="button"
@@ -1438,14 +1458,14 @@ export function CapabilitiesTab({
                       disabled={detailBusy}
                       onClick={() => void handleCloneToEditable()}
                     >
-                      转为可编辑副本
+                      {t('转为可编辑副本', 'Clone to editable copy')}
                     </button>
                   )}
                 </div>
 
                 {!skillFilesRes.editable && (
                   <CaNotice tone="info">
-                    当前技能来自只读安装包；如需在线修改文件内容，可点击上方「转为可编辑副本」。
+                    {t('当前技能来自只读安装包；如需在线修改文件内容，可点击上方「转为可编辑副本」。', 'This skill comes from a read-only package. Click "Clone to editable copy" above to edit files inline.')}
                   </CaNotice>
                 )}
 
@@ -1463,11 +1483,11 @@ export function CapabilitiesTab({
                 </div>
 
                 {skillFilesRes.editable && (
-                  <div className="ca-inline-row" style={{ marginBottom: 8 }}>
+                  <div className="ca-inline-row ca-mb-2 ca-skill-subfile-row">
                     <input
                       type="text"
                       className="ca-input ca-mono"
-                      placeholder="新增文件（如 scripts/tool.sh、references/spec.md）"
+                      placeholder={t('新增文件（如 scripts/tool.sh、references/spec.md）', 'Add file (e.g. scripts/tool.sh, references/spec.md)')}
                       value={newSubfilePath}
                       onChange={e => setNewSubfilePath(e.target.value)}
                     />
@@ -1483,7 +1503,7 @@ export function CapabilitiesTab({
                         setNewSubfilePath('');
                       }}
                     >
-                      新增
+                      {t('新增', 'Add')}
                     </button>
                     {activeSkillPath !== 'SKILL.md' && (
                       <button
@@ -1499,7 +1519,7 @@ export function CapabilitiesTab({
                           setActiveSkillPath('SKILL.md');
                         }}
                       >
-                        删除文件
+                        {t('删除文件', 'Delete file')}
                       </button>
                     )}
                   </div>
@@ -1517,14 +1537,14 @@ export function CapabilitiesTab({
                 />
 
                 {skillFilesRes.editable && (
-                  <div className="ca-inline-end" style={{ marginTop: 8 }}>
+                  <div className="ca-inline-end ca-mt-2">
                     <button
                       type="button"
                       className="ca-btn ca-btn-primary ca-btn-sm"
                       disabled={detailBusy}
                       onClick={() => void handleSaveSkillFiles()}
                     >
-                      保存技能文件
+                      {t('保存技能文件', 'Save skill files')}
                     </button>
                   </div>
                 )}
@@ -1533,9 +1553,9 @@ export function CapabilitiesTab({
 
             {/* MCP / Plugin 全局参数配置 */}
             {detailInst.kind !== 'skill' && detailConfig && (
-              <div className="ca-section" style={{ padding: 12 }}>
-                <div className="ca-field-label" style={{ marginBottom: 8 }}>
-                  全局默认参数
+              <div className="ca-section ca-section-pad">
+                <div className="ca-field-label ca-mb-2">
+                  {t('全局默认参数', 'Global default settings')}
                 </div>
                 <SchemaConfigForm
                   schema={detailConfig.configSchema}
@@ -1543,7 +1563,7 @@ export function CapabilitiesTab({
                   formData={detailGlobalDraft}
                   onChange={setDetailGlobalDraft}
                   api={api}
-                  submitLabel="保存全局参数"
+                  submitLabel={t('保存全局参数', 'Save global settings')}
                   submitBusy={detailBusy}
                   onSubmit={() => void handleSaveGlobalToolConfig()}
                 />
@@ -1551,9 +1571,9 @@ export function CapabilitiesTab({
             )}
 
             {/* 跨设备树形多选框直接勾选分配 Bot */}
-            <div className="ca-section" style={{ padding: 12 }}>
-              <div className="ca-field-label" style={{ marginBottom: 8 }}>
-                跨设备 Bot 授权分配
+            <div className="ca-section ca-section-pad">
+              <div className="ca-field-label ca-mb-2">
+                {t('跨设备 Bot 授权分配', 'Cross-device Bot access')}
               </div>
               <BotTreeSelector
                 devices={devices}
@@ -1570,7 +1590,7 @@ export function CapabilitiesTab({
                             className="ca-btn ca-btn-sm"
                             onClick={() => openBotOverrideModal(bot)}
                           >
-                            独立参数
+                            {t('独立参数', 'Overrides')}
                           </button>
                         ) : null
                     : undefined
@@ -1580,17 +1600,16 @@ export function CapabilitiesTab({
 
             {/* MCP / Plugin 连接与工具列表检查 */}
             {detailInst.kind !== 'skill' && (
-              <div className="ca-section" style={{ padding: 12 }}>
-                <div className="ca-inline-between" style={{ flexWrap: 'wrap' }}>
+              <div className="ca-section ca-section-pad">
+                <div className="ca-inline-between ca-wrap">
                   <div>
-                    <div className="ca-field-label">连接与工具列表</div>
-                    <div className="ca-muted">自动选用在线设备的 Bot 验证连接并读取工具定义</div>
+                    <div className="ca-field-label">{t('连接与工具列表', 'Connection & tools')}</div>
+                    <div className="ca-muted">{t('自动选用在线设备的 Bot 验证连接并读取工具定义', 'Automatically uses an online Bot to verify connectivity and inspect tools')}</div>
                   </div>
-                  <div className="ca-inline-row">
+                  <div className="ca-inline-row ca-probe-actions">
                     {activeBots.length > 1 && (
                       <select
-                        className="ca-select"
-                        style={{ width: 170 }}
+                        className="ca-select ca-probe-select"
                         value={selectedValidationBotKey}
                         onChange={e => setSelectedValidationBotKey(e.target.value)}
                       >
@@ -1607,25 +1626,25 @@ export function CapabilitiesTab({
                       disabled={probeBusy || !selectedValidationBotKey}
                       onClick={() => void handleCheckAndListTools()}
                     >
-                      {probeBusy ? '探测中…' : '检查连接与工具列表'}
+                      {probeBusy ? t('探测中…', 'Probing…') : t('检查连接与工具列表', 'Check connection & tools')}
                     </button>
                   </div>
                 </div>
                 {probeResult && (
-                  <div className="ca-muted" style={{ marginTop: 8 }}>
+                  <div className="ca-muted ca-mt-2">
                     {probeResult}
                   </div>
                 )}
                 {toolsResult && (
-                  <div className="ca-list" style={{ marginTop: 8, border: '1px solid var(--ca-border)', borderRadius: 7 }}>
+                  <div className="ca-list ca-tools-list">
                     {toolsResult.length === 0 ? (
-                      <div className="ca-empty">未暴露可用工具</div>
+                      <div className="ca-empty">{t('未暴露可用工具', 'No tools exposed')}</div>
                     ) : (
-                      toolsResult.map(t => (
-                        <div key={t.name} className="ca-row" style={{ padding: '8px 10px' }}>
+                      toolsResult.map(tool => (
+                        <div key={tool.name} className="ca-row ca-row-compact">
                           <div className="ca-row-main">
-                            <div className="ca-row-title ca-mono">{t.name}</div>
-                            {t.description && <div className="ca-row-sub">{t.description}</div>}
+                            <div className="ca-row-title ca-mono">{tool.name}</div>
+                            {tool.description && <div className="ca-row-sub">{tool.description}</div>}
                           </div>
                         </div>
                       ))
@@ -1636,25 +1655,25 @@ export function CapabilitiesTab({
             )}
 
             {/* 更新、部署回执与卸载折叠区 */}
-            <CaDisclosure title="更新、部署状态与卸载">
+            <CaDisclosure title={t('更新、部署状态与卸载', 'Updates, deployment & uninstall')}>
               <div className="ca-form-stack">
                 {deployments.length > 0 && (
                   <div className="ca-cred-box">
-                    <div className="ca-field-label" style={{ marginBottom: 4 }}>
-                      各节点同步状态
+                    <div className="ca-field-label ca-mb-1">
+                      {t('各节点同步状态', 'Node sync status')}
                     </div>
                     {deployments.map((d, idx) => (
                       <div key={idx} className="ca-muted ca-num">
-                        {d.deviceId ?? '中心节点'} · {d.phase} · {d.health}
-                        {d.error ? `（${d.error.message}）` : ''}
+                        {d.deviceId ?? t('中心节点', 'Center node')} · {d.phase} · {d.health}
+                        {d.error ? t(`（${d.error.message}）`, ` (${d.error.message})`) : ''}
                       </div>
                     ))}
                   </div>
                 )}
 
                 {detailInst.source.type !== 'inline' && (
-                  <div className="ca-inline-between" style={{ flexWrap: 'wrap' }}>
-                    <span className="ca-muted">当前版本：v{detailInst.targetVersion}</span>
+                  <div className="ca-inline-between ca-wrap">
+                    <span className="ca-muted">{t(`当前版本：v${detailInst.targetVersion}`, `Current version: v${detailInst.targetVersion}`)}</span>
                     <button
                       type="button"
                       className="ca-btn ca-btn-sm"
@@ -1662,13 +1681,13 @@ export function CapabilitiesTab({
                       onClick={() => void handleCheckUpdates()}
                     >
                       <RefreshCw size={13} />
-                      <span>检查更新</span>
+                      <span>{t('检查更新', 'Check updates')}</span>
                     </button>
                   </div>
                 )}
 
                 {updates && updates.length > 0 && (
-                  <div className="ca-inline-row" style={{ flexWrap: 'wrap' }}>
+                  <div className="ca-inline-row ca-wrap">
                     {updates.map(v => (
                       <button
                         key={v.version}
@@ -1676,7 +1695,7 @@ export function CapabilitiesTab({
                         className="ca-btn ca-btn-sm"
                         onClick={() => void handleApplyUpdate(v.version)}
                       >
-                        更新到 v{v.version}
+                        {t(`更新到 v${v.version}`, `Update to v${v.version}`)}
                       </button>
                     ))}
                   </div>
@@ -1690,7 +1709,7 @@ export function CapabilitiesTab({
                     onClick={() => void handleUninstall()}
                   >
                     <Trash2 size={13} />
-                    <span>卸载{detailInst.kind === 'skill' ? '技能' : '扩展'}</span>
+                    <span>{detailInst.kind === 'skill' ? t('卸载技能', 'Uninstall skill') : t('卸载扩展', 'Uninstall extension')}</span>
                   </button>
                 </div>
               </div>
@@ -1705,8 +1724,8 @@ export function CapabilitiesTab({
         onOpenChange={open => {
           if (!open) setOverrideBot(null);
         }}
-        title={`独立参数覆盖 · ${overrideBot?.name ?? ''}`}
-        description="未勾选覆盖的字段自动继承全局配置"
+        title={t(`独立参数覆盖 · ${overrideBot?.name ?? ''}`, `Override settings · ${overrideBot?.name ?? ''}`)}
+        description={t('未勾选覆盖的字段自动继承全局配置', 'Unchecked fields automatically inherit global settings')}
         variant="modal"
       >
         {overrideBot && detailConfig && (
@@ -1717,7 +1736,7 @@ export function CapabilitiesTab({
             baseConfig={detailGlobalDraft}
             onChange={setOverrideDraft}
             api={api}
-            submitLabel="保存覆盖参数"
+            submitLabel={t('保存覆盖参数', 'Save overrides')}
             submitBusy={overrideSaving}
             onSubmit={() => void handleSaveBotOverride()}
           />

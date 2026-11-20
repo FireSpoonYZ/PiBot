@@ -1,29 +1,29 @@
 /* 客户端更新区共享样式：仅 .cu- 前缀，桌面/Android 设置页共用。 */
-.cu-row { display: flex; flex-direction: column; gap: 8px; padding: 10px 0; }
-.cu-row + .cu-row { border-top: 1px solid var(--line); }
-.cu-line { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: .9rem; }
-.cu-label { color: var(--muted); flex: none; }
+.cu-row { display: flex; flex-direction: column; gap: var(--space-2, 8px); padding: 10px 0; }
+.cu-row + .cu-row { border-top: 1px solid var(--color-line, var(--line)); }
+.cu-line { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: var(--text-md, .9rem); }
+.cu-label { color: var(--color-text-muted, var(--muted)); flex: none; }
 .cu-value { min-width: 0; overflow-wrap: anywhere; text-align: right; }
 .cu-notes {
-  max-height: 140px; overflow-y: auto; padding: 10px 12px; border-radius: 12px;
-  background: color-mix(in srgb, var(--surface) 70%, transparent);
-  border: 1px solid var(--line); font-size: .82rem; line-height: 1.5;
-  color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 140px; overflow-y: auto; padding: 10px var(--space-3, 12px); border-radius: var(--radius-md, 12px);
+  background: color-mix(in srgb, var(--color-surface-1, var(--surface)) 70%, transparent);
+  border: 1px solid var(--color-line, var(--line)); font-size: var(--text-sm, .82rem); line-height: 1.5;
+  color: var(--color-text, var(--text)); white-space: pre-wrap; overflow-wrap: anywhere;
 }
-.cu-progress { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; }
-.cu-progress > span { display: block; height: 100%; border-radius: 999px; background: var(--accent); transition: width .3s ease; }
-.cu-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.cu-message { font-size: .82rem; color: var(--muted); overflow-wrap: anywhere; }
-.cu-message.is-error { color: var(--danger); }
-.cu-meta { font-size: .78rem; color: var(--muted); overflow-wrap: anywhere; }
+.cu-progress { height: var(--space-2, 8px); border-radius: var(--radius-full, 999px); background: var(--color-line, var(--line)); overflow: hidden; }
+.cu-progress > span { display: block; height: 100%; border-radius: var(--radius-full, 999px); background: var(--color-primary, var(--brand, var(--accent))); transition: width .3s ease; }
+.cu-actions { display: flex; flex-wrap: wrap; gap: var(--space-2, 8px); align-items: center; }
+.cu-message { font-size: var(--text-sm, .82rem); color: var(--color-text-muted, var(--muted)); overflow-wrap: anywhere; }
+.cu-message.is-error { color: var(--color-danger, var(--danger)); }
+.cu-meta { font-size: var(--text-xs, .78rem); color: var(--color-text-muted, var(--muted)); overflow-wrap: anywhere; }
 
-.cu-desktop .cu-message { margin: 8px 0 0; }
-.cu-desktop-progress { width: 100%; height: 10px; accent-color: var(--brand, var(--accent)); }
+.cu-desktop .cu-message { margin: var(--space-2, 8px) 0 0; }
+.cu-desktop-progress { width: 100%; height: 10px; accent-color: var(--color-primary, var(--brand, var(--accent))); }
 .cu-stop-confirm {
   margin-top: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--surface);
+  padding: 10px var(--space-3, 12px);
+  border: 1px solid var(--color-line, var(--line));
+  border-radius: var(--radius-md, 12px);
+  background: var(--color-surface-1, var(--surface));
 }
-.cu-stop-confirm .cu-message { margin: 0 0 8px; }
+.cu-stop-confirm .cu-message { margin: 0 0 var(--space-2, 8px); }

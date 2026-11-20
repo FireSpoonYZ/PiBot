@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type * as React from 'react';
 import { KeyRound, Lock, RefreshCw, Settings2, Unlock } from 'lucide-react';
+import { useText } from '../ui';
 import { errorMessage } from './transport';
 import type { CenterApi } from './transport';
 import {
@@ -10,6 +11,7 @@ import {
   CaSegmented,
   botKey,
   formatTime,
+  useUiLocale,
 } from './primitives';
 import type {
   BotCapabilityConfig,
@@ -25,6 +27,9 @@ import type {
 } from './types';
 
 export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
+  const t = useText();
+  const locale = useUiLocale();
+
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -112,7 +117,7 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
     setLoading(true);
     loadAll()
       .catch(err => {
-        if (active) setError(errorMessage(err, '加载密码库状态失败'));
+        if (active) setError(errorMessage(err, t('加载密码库状态失败', 'Failed to load vault status')));
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -120,13 +125,13 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
     return () => {
       active = false;
     };
-  }, [loadAll]);
+  }, [loadAll, t]);
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!status) return;
     if (sourceDraft === 'vaultwarden' && (!serverUrlDraft.trim() || !emailDraft.trim())) {
-      setSettingsError('请填写 Vaultwarden 服务地址与账号邮箱');
+      setSettingsError(t('请填写 Vaultwarden 服务地址与账号邮箱', 'Please enter the Vaultwarden server URL and account email'));
       return;
     }
     setBusy(true);
@@ -143,9 +148,13 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
       setStatus(next);
       setSettingsOpen(false);
       await loadAll();
-      setNotice(sourceDraft === 'local' ? '已切换为内置本地密码库' : 'Vaultwarden 服务配置已保存');
+      setNotice(
+        sourceDraft === 'local'
+          ? t('已切换为内置本地密码库', 'Switched to built-in local vault')
+          : t('Vaultwarden 服务配置已保存', 'Vaultwarden settings saved'),
+      );
     } catch (err) {
-      setSettingsError(errorMessage(err, '保存密码库配置失败'));
+      setSettingsError(errorMessage(err, t('保存密码库配置失败', 'Failed to save vault settings')));
     } finally {
       setBusy(false);
     }
@@ -157,10 +166,10 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
     try {
       const res = await api.vaultControl<ExternalVaultCheckResult>({ action: 'check' });
       setStatus(res.status);
-      if (res.reachable) setNotice('Vaultwarden 服务器连接正常');
-      else setSettingsError('无法连接到 Vaultwarden 服务器');
+      if (res.reachable) setNotice(t('Vaultwarden 服务器连接正常', 'Vaultwarden server connection OK'));
+      else setSettingsError(t('无法连接到 Vaultwarden 服务器', 'Unable to connect to Vaultwarden server'));
     } catch (err) {
-      setSettingsError(errorMessage(err, '检测连接失败'));
+      setSettingsError(errorMessage(err, t('检测连接失败', 'Connection check failed')));
     } finally {
       setBusy(false);
     }
@@ -181,9 +190,9 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
       setStatus(unlocked);
       await api.vaultControl<ExternalVaultStatus>({ action: 'sync' }).catch(() => null);
       await loadAll();
-      setNotice('Vaultwarden 已解锁并同步凭据列表');
+      setNotice(t('Vaultwarden 已解锁并同步凭据列表', 'Vaultwarden unlocked and credentials synced'));
     } catch (err) {
-      setError(errorMessage(err, '解锁失败，请检查主密码'));
+      setError(errorMessage(err, t('解锁失败，请检查主密码', 'Unlock failed. Please check your master password')));
     } finally {
       setBusy(false);
     }
@@ -195,9 +204,9 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
     try {
       await api.vaultControl<ExternalVaultStatus>({ action: 'sync' });
       await loadAll();
-      setNotice('凭据目录已同步');
+      setNotice(t('凭据目录已同步', 'Credential catalog synced'));
     } catch (err) {
-      setError(errorMessage(err, '同步失败'));
+      setError(errorMessage(err, t('同步失败', 'Sync failed')));
     } finally {
       setBusy(false);
     }
@@ -210,9 +219,9 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
       const next = await api.vaultControl<ExternalVaultStatus>({ action: 'lock' });
       setStatus(next);
       setItems([]);
-      setNotice('Vaultwarden 已锁定');
+      setNotice(t('Vaultwarden 已锁定', 'Vaultwarden locked'));
     } catch (err) {
-      setError(errorMessage(err, '锁定失败'));
+      setError(errorMessage(err, t('锁定失败', 'Lock failed')));
     } finally {
       setBusy(false);
     }
@@ -226,9 +235,9 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
       setStatus(next);
       setItems([]);
       setSettingsOpen(false);
-      setNotice('已清除 Vaultwarden 会话');
+      setNotice(t('已清除 Vaultwarden 会话', 'Vaultwarden session cleared'));
     } catch (err) {
-      setSettingsError(errorMessage(err, '清除会话失败'));
+      setSettingsError(errorMessage(err, t('清除会话失败', 'Failed to clear session')));
     } finally {
       setBusy(false);
     }
@@ -264,7 +273,7 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
       const nextSelected = updated.items.find(i => i.secretRef === item.secretRef) ?? null;
       setGrantItem(nextSelected);
     } catch (err) {
-      setError(errorMessage(err, '更新凭据授权失败'));
+      setError(errorMessage(err, t('更新凭据授权失败', 'Failed to update credential authorization')));
     } finally {
       setGrantBusyKeys(prev => {
         const next = new Set(prev);
@@ -295,7 +304,7 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
         return next;
       });
     } catch (err) {
-      setError(errorMessage(err, '更新本地密码库能力授权失败'));
+      setError(errorMessage(err, t('更新本地密码库能力授权失败', 'Failed to update local vault capability authorization')));
     } finally {
       setCapBusyKeys(prev => {
         const next = new Set(prev);
@@ -334,7 +343,7 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
   }, [vaultCapBindings]);
 
   if (loading || !status) {
-    return <div className="ca-empty">正在加载密码库…</div>;
+    return <div className="ca-empty">{t('正在加载密码库…', 'Loading vault…')}</div>;
   }
 
   return (
@@ -345,7 +354,7 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
           tone="ok"
           action={
             <button type="button" className="ca-btn ca-btn-ghost ca-btn-sm" onClick={() => setNotice('')}>
-              关闭
+              {t('关闭', 'Close')}
             </button>
           }
         >
@@ -355,25 +364,31 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
 
       {/* 顶部密码源与状态卡片 */}
       <section className="ca-section">
-        <div className="ca-default-card" style={{ flexWrap: 'wrap' }}>
+        <div className="ca-default-card ca-wrap">
           <div className="ca-row-main">
             <div className="ca-row-title">
-              <KeyRound size={15} />
-              <span>{status.source === 'vaultwarden' ? 'Vaultwarden 集中密码库' : '内置本地密码库'}</span>
+              <KeyRound size={15} aria-hidden="true" />
+              <span>
+                {status.source === 'vaultwarden'
+                  ? t('Vaultwarden 集中密码库', 'Vaultwarden Central Vault')
+                  : t('内置本地密码库', 'Built-in Local Vault')}
+              </span>
               {status.source === 'vaultwarden' ? (
                 <span className={`ca-pill ${status.locked ? 'ca-pill-warn' : 'ca-pill-ok'}`}>
-                  {status.locked ? '已锁定' : '已解锁'}
+                  {status.locked ? t('已锁定', 'Locked') : t('已解锁', 'Unlocked')}
                 </span>
               ) : (
-                <span className="ca-pill ca-pill-ok">设备本地加密存储</span>
+                <span className="ca-pill ca-pill-ok">{t('设备本地加密存储', 'Encrypted locally on device')}</span>
               )}
             </div>
             <div className="ca-row-sub">
               {status.source === 'vaultwarden'
-                ? `${status.serverUrl || '未配置地址'} · ${status.email || '未配置账号'}${
-                    status.lastSyncAt ? ` · 最近同步 ${formatTime(status.lastSyncAt)}` : ''
+                ? `${status.serverUrl || t('未配置地址', 'URL not set')} · ${status.email || t('未配置账号', 'Account not set')}${
+                    status.lastSyncAt
+                      ? t(` · 最近同步 ${formatTime(status.lastSyncAt, locale)}`, ` · Last synced ${formatTime(status.lastSyncAt, locale)}`)
+                      : ''
                   }`
-                : '凭据密文保存于各已绑定设备本地，仅响应明确授权给智能体的读取请求'}
+                : t('凭据密文保存于各已绑定设备本地，仅响应明确授权给 Bot 的读取请求', 'Encrypted credentials are stored locally on each bound device and only answer read requests explicitly authorized for a Bot')}
             </div>
           </div>
 
@@ -386,8 +401,8 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
                   disabled={busy}
                   onClick={() => void handleSync()}
                 >
-                  <RefreshCw size={13} />
-                  <span>同步</span>
+                  <RefreshCw size={13} aria-hidden="true" />
+                  <span>{t('同步', 'Sync')}</span>
                 </button>
                 <button
                   type="button"
@@ -395,8 +410,8 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
                   disabled={busy}
                   onClick={() => void handleLock()}
                 >
-                  <Lock size={13} />
-                  <span>锁定</span>
+                  <Lock size={13} aria-hidden="true" />
+                  <span>{t('锁定', 'Lock')}</span>
                 </button>
               </>
             )}
@@ -408,8 +423,8 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
                 setSettingsOpen(true);
               }}
             >
-              <Settings2 size={13} />
-              <span>切换服务 / 设置</span>
+              <Settings2 size={13} aria-hidden="true" />
+              <span>{t('切换服务 / 设置', 'Switch Service / Settings')}</span>
             </button>
           </div>
         </div>
@@ -419,32 +434,34 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
         status.locked ? (
           <section className="ca-section">
             <div className="ca-section-head">
-              <h3 className="ca-section-title">解锁 Vaultwarden</h3>
+              <h3 className="ca-section-title">{t('解锁 Vaultwarden', 'Unlock Vaultwarden')}</h3>
             </div>
             <form className="ca-section-body ca-form-stack" onSubmit={e => void handleUnlock(e)}>
               {!status.configured ? (
                 <CaNotice tone="warn">
-                  尚未配置 Vaultwarden 服务器地址与邮箱，请先点击右上角「切换服务 / 设置」完成配置。
+                  {t('尚未配置 Vaultwarden 服务器地址与邮箱，请先点击右上角「切换服务 / 设置」完成配置。', 'Vaultwarden server URL and email are not configured yet. Click "Switch Service / Settings" in the top right to set them up.')}
                 </CaNotice>
               ) : (
                 <>
-                  <div className="ca-field" style={{ maxWidth: 420 }}>
-                    <label className="ca-field-label">主密码 (Master Password)</label>
+                  <div className="ca-field ca-field-narrow">
+                    <label className="ca-field-label">{t('主密码 (Master Password)', 'Master Password')}</label>
                     <input
                       type="password"
                       className="ca-input"
                       required
                       autoComplete="current-password"
-                      placeholder="输入 Vaultwarden 主密码以解锁目录"
+                      placeholder={t('输入 Vaultwarden 主密码以解锁目录', 'Enter Vaultwarden master password to unlock catalog')}
                       value={masterPassword}
                       onChange={e => setMasterPassword(e.target.value)}
                     />
-                    <p className="ca-field-help">主密码仅用于解密当前中心会话内存，中心不落盘明文秘密。</p>
+                    <p className="ca-field-help">
+                      {t('主密码仅用于解密当前中心会话内存，中心不落盘明文秘密。', 'The master password is only used to decrypt the current center session in memory; plaintext secrets are never written to disk.')}
+                    </p>
                   </div>
                   <div className="ca-inline-row">
                     <button type="submit" className="ca-btn ca-btn-primary ca-btn-sm" disabled={busy}>
-                      <Unlock size={13} />
-                      <span>{busy ? '解锁中…' : '解锁并同步凭据'}</span>
+                      <Unlock size={13} aria-hidden="true" />
+                      <span>{busy ? t('解锁中…', 'Unlocking…') : t('解锁并同步凭据', 'Unlock & Sync')}</span>
                     </button>
                   </div>
                 </>
@@ -453,13 +470,14 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
           </section>
         ) : (
           <section className="ca-section">
-            <div className="ca-section-head" style={{ flexWrap: 'wrap' }}>
-              <h3 className="ca-section-title">凭据条目 ({items.length})</h3>
+            <div className="ca-section-head">
+              <h3 className="ca-section-title">
+                {t(`凭据条目 (${items.length})`, `Credentials (${items.length})`)}
+              </h3>
               <input
                 type="search"
-                className="ca-input"
-                style={{ width: 220, paddingTop: 4, paddingBottom: 4 }}
-                placeholder="筛选凭据标题或账号…"
+                className="ca-input ca-search-compact"
+                placeholder={t('筛选凭据标题或账号…', 'Filter by title or username…')}
                 value={query}
                 onChange={e => setQuery(e.target.value)}
               />
@@ -468,34 +486,40 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
             <div className="ca-list">
               {filteredItems.length === 0 ? (
                 <div className="ca-empty">
-                  {items.length === 0 ? 'Vaultwarden 暂无同步条目，可点击上方「同步」刷新' : '没有匹配的凭据条目'}
+                  {items.length === 0
+                    ? t('Vaultwarden 暂无同步条目，可点击上方「同步」刷新', 'No synced Vaultwarden entries yet. Click "Sync" above to refresh.')
+                    : t('没有匹配的凭据条目', 'No matching credentials')}
                 </div>
               ) : (
                 filteredItems.map(item => (
-                  <div
-                    key={item.secretRef}
-                    className="ca-row is-clickable"
-                    onClick={() => setGrantItem(item)}
-                  >
-                    <div className="ca-row-main">
-                      <div className="ca-row-title">
+                  <div key={item.secretRef} className="ca-row ca-row-split">
+                    <button
+                      type="button"
+                      className="ca-row-trigger"
+                      onClick={() => setGrantItem(item)}
+                    >
+                      <span className="ca-row-title">
                         <span>{item.label || item.secretRef}</span>
                         <span
                           className={`ca-pill ${
                             item.allowedBots.length > 0 ? 'ca-pill-ok' : 'ca-pill-muted'
                           } ca-num`}
                         >
-                          已授权 {item.allowedBots.length} 个 Bot
+                          {t(`已授权 ${item.allowedBots.length} 个 Bot`, `${item.allowedBots.length} ${item.allowedBots.length === 1 ? 'Bot' : 'Bots'} authorized`)}
                         </span>
-                      </div>
-                      <div className="ca-row-sub">
-                        {item.username ? `账号：${item.username} · ` : ''}
+                      </span>
+                      <span className="ca-row-sub">
+                        {item.username ? t(`账号：${item.username} · `, `Account: ${item.username} · `) : ''}
                         <span className="ca-mono">{item.secretRef}</span>
-                      </div>
-                    </div>
+                      </span>
+                    </button>
                     <div className="ca-row-actions">
-                      <button type="button" className="ca-btn ca-btn-sm">
-                        授权 Bot
+                      <button
+                        type="button"
+                        className="ca-btn ca-btn-sm"
+                        onClick={() => setGrantItem(item)}
+                      >
+                        {t('授权 Bot', 'Authorize Bots')}
                       </button>
                     </div>
                   </div>
@@ -507,18 +531,19 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
       ) : (
         <section className="ca-section">
           <div className="ca-section-head">
-            <h3 className="ca-section-title">本机密码条目与授权</h3>
+            <h3 className="ca-section-title">{t('本机密码条目与授权', 'Local Credentials & Authorization')}</h3>
           </div>
           <div className="ca-section-body ca-form-stack">
             <CaNotice tone="info">
-              内置本地密码库的数据加密保存在各设备本机（桌面/手机端「密码凭据」页面中增删管理）。
-              如需由中心统一保管并向多个设备跨机分发凭据，可在右上角切换为 <strong>Vaultwarden</strong>。
+              {t('内置本地密码库的数据加密保存在各设备本机（桌面/手机端「密码凭据」页面中增删管理）。如需由中心统一保管并向多个设备跨机分发凭据，可在右上角切换为 ', 'Built-in local vault data is stored encrypted on each device (manage entries in the desktop/mobile Vault page). To manage centrally and distribute across devices, switch in the top right to ')}
+              <strong>Vaultwarden</strong>
+              {t('。', '.')}
             </CaNotice>
 
             {vaultInstall && (
               <div>
-                <div className="ca-field-label" style={{ marginBottom: 8 }}>
-                  允许读取本机密码库的智能体（{vaultInstall.displayName}）
+                <div className="ca-field-label ca-mb-2">
+                  {t(`允许读取本机密码库的 Bot（${vaultInstall.displayName}）`, `Bots allowed to read local vault (${vaultInstall.displayName})`)}
                 </div>
                 <BotTreeSelector
                   devices={devices}
@@ -539,18 +564,19 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
       <CaModal
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
-        title="密码库服务设置"
-        description="选择中心协同使用的密码库后端"
+        title={t('密码库服务设置', 'Vault Service Settings')}
+        description={t('选择中心协同使用的密码库后端', 'Choose the vault backend coordinated by the center')}
         variant="drawer"
       >
         <form className="ca-form-stack" onSubmit={e => void handleSaveSettings(e)}>
           {settingsError && <CaNotice tone="danger">{settingsError}</CaNotice>}
           <div className="ca-field">
-            <label className="ca-field-label">密码库模式</label>
+            <label className="ca-field-label">{t('密码库模式', 'Vault Mode')}</label>
             <CaSegmented
+              ariaLabel={t('密码库模式', 'Vault Mode')}
               value={sourceDraft}
               options={[
-                { value: 'local', label: '内置本地密码库' },
+                { value: 'local', label: t('内置本地密码库', 'Built-in Local Vault') },
                 { value: 'vaultwarden', label: 'Vaultwarden' },
               ]}
               onChange={setSourceDraft}
@@ -561,7 +587,7 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
             <>
               <div className="ca-field">
                 <label className="ca-field-label">
-                  服务器地址 <span className="ca-req">*</span>
+                  {t('服务器地址', 'Server URL')} <span className="ca-req">*</span>
                 </label>
                 <input
                   type="url"
@@ -574,7 +600,7 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
               </div>
               <div className="ca-field">
                 <label className="ca-field-label">
-                  登录邮箱 <span className="ca-req">*</span>
+                  {t('登录邮箱', 'Login Email')} <span className="ca-req">*</span>
                 </label>
                 <input
                   type="email"
@@ -586,14 +612,14 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
                 />
               </div>
 
-              <div className="ca-inline-row" style={{ flexWrap: 'wrap' }}>
+              <div className="ca-inline-row ca-wrap">
                 <button
                   type="button"
                   className="ca-btn ca-btn-sm"
                   disabled={busy || !status.configured}
                   onClick={() => void handleCheckServer()}
                 >
-                  检测连接
+                  {t('检测连接', 'Check Connection')}
                 </button>
                 {status.authenticated && (
                   <button
@@ -602,7 +628,7 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
                     disabled={busy}
                     onClick={() => void handleLogoutVaultwarden()}
                   >
-                    清除登录会话
+                    {t('清除登录会话', 'Clear Login Session')}
                   </button>
                 )}
               </div>
@@ -611,10 +637,10 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
 
           <div className="ca-form-actions">
             <button type="button" className="ca-btn" onClick={() => setSettingsOpen(false)}>
-              取消
+              {t('取消', 'Cancel')}
             </button>
             <button type="submit" className="ca-btn ca-btn-primary" disabled={busy}>
-              {busy ? '保存中…' : '保存设置'}
+              {busy ? t('保存中…', 'Saving…') : t('保存设置', 'Save Settings')}
             </button>
           </div>
         </form>
@@ -626,15 +652,19 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
         onOpenChange={open => {
           if (!open) setGrantItem(null);
         }}
-        title={`授权访问 · ${grantItem?.label || grantItem?.secretRef || ''}`}
-        description="勾选即刻生效，仅授权的智能体可在运行期请求此凭据"
+        title={t(`授权访问 · ${grantItem?.label || grantItem?.secretRef || ''}`, `Authorize Access · ${grantItem?.label || grantItem?.secretRef || ''}`)}
+        description={t('勾选即刻生效，仅授权的 Bot 可在运行期请求此凭据', 'Changes take effect immediately. Only authorized Bots can request this credential at runtime.')}
         variant="drawer"
       >
         {grantItem && (
           <div className="ca-form-stack">
             <div className="ca-cred-box">
-              <div className="ca-muted">账号：{grantItem.username || '（无）'}</div>
-              <div className="ca-muted ca-mono">引用 ID：{grantItem.secretRef}</div>
+              <div className="ca-muted">
+                {t(`账号：${grantItem.username || '（无）'}`, `Account: ${grantItem.username || '(none)'}`)}
+              </div>
+              <div className="ca-muted ca-mono">
+                {t(`引用 ID：${grantItem.secretRef}`, `Ref ID: ${grantItem.secretRef}`)}
+              </div>
             </div>
 
             <BotTreeSelector

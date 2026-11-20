@@ -135,7 +135,7 @@ export function ModelSettingsPage({
     if (state.notConnected) {
       return (
         <div className="bs-auth-note">
-          <span>{t('当前设备尚未绑定或连接中心，扫码绑定后即可为智能体分配模型。', 'Device is not connected to a center yet. Bind to a center to configure models.')}</span>
+          <span>{t('当前设备尚未绑定或连接中心，扫码绑定后即可为 Bot 分配模型。', 'Device is not connected to a center yet. Bind to a center to configure models.')}</span>
         </div>
       );
     }
@@ -247,7 +247,7 @@ export function ModelSettingsPage({
       },
       {
         mode: 'codemode',
-        title: '代码编排 (Code Mode)',
+        title: t('代码编排 (Code Mode)', 'Code Mode'),
         subtitle: t('允许生成脚本批量编排工具，同时保留标准工具', 'Allows code orchestration alongside standard tools'),
       },
       {

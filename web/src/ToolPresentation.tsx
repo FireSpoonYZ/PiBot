@@ -256,10 +256,7 @@ function TaskCard({
           <span className="tp-card-title">{presentation.title}</span>
           {hasSteps ? (
             <span className="tp-card-meta">
-              {t(
-                `已完成 ${presentation.stepCount.done}/${presentation.stepCount.total}`,
-                `${presentation.stepCount.done}/${presentation.stepCount.total} done`,
-              )}
+              {t(`已完成 ${presentation.stepCount.done}/${presentation.stepCount.total}`, `${presentation.stepCount.done}/${presentation.stepCount.total} done`)}
             </span>
           ) : null}
         </div>
@@ -565,8 +562,8 @@ function QuestionnaireCard({
                 {/* multi 同时显示 selected 与自定义文本；option/custom 显示标量答案。 */}
                 {answer.kind === 'multi' && answer.selected?.length
                   ? answer.answer
-                    ? `${answer.selected.join('、')}、${answer.answer}`
-                    : answer.selected.join('、')
+                    ? `${answer.selected.join(t('、', ', '))}${t('、', ', ')}${answer.answer}`
+                    : answer.selected.join(t('、', ', '))
                   : answer.answer ?? t('（未回答）', '(unanswered)')}
               </div>
               {answer.notes ? <div className="tp-answer-notes">{t('备注：', 'Notes: ')}{answer.notes}</div> : null}

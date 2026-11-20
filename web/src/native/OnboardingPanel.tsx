@@ -4,11 +4,11 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type MouseEvent } from 'react';
 import { BatteryCharging, Bell, CheckCircle2, ScanLine, Server, ShieldCheck } from 'lucide-react';
 import { useCenterConnection } from './CenterGate';
-import { mobileClientRequest, onboardingAction, onboardingStatus, scanPairingCode } from './tauri-host';
+import { mobileClientRequest, mobileHaptic, onboardingAction, onboardingStatus, scanPairingCode } from './tauri-host';
 import { BotHost, type HostSnapshot, type OnboardingActionName, type OnboardingStatus, type PairCenterResult } from './index';
 import { Badge, Disclosure, Row, Section, SettingsSheet, StatusLine } from '../bot-settings/primitives';
 import { readScannedCode } from '../pairingCode';
-import { ErrorNotice, errorText, useText } from '../ui';
+import { ErrorNotice, errorText, splitErrorCode, useText } from '../ui';
 import './onboarding.css';
 
 type ScannedWebLogin = {
@@ -72,7 +72,10 @@ function WebLoginConfirmView({
       qrNonce: login.qrNonce,
     })
       .then(
-        () => setApproved(true),
+        () => {
+          mobileHaptic('confirm');
+          setApproved(true);
+        },
         err => setError(errorText(err) || t('确认网页端登录失败，请重试', 'Failed to confirm web login')),
       )
       .finally(() => setSubmitting(false));
@@ -124,10 +127,8 @@ function WebLoginConfirmView({
           <ErrorNotice
             tone="danger"
             title={t('中心地址不一致', 'Different center')}
-            description={t(
-              `此登录二维码属于其他中心（${login.centerHost}），与本机当前绑定的中心（${boundHost || boundOrigin}）不一致。`,
-              `This QR code belongs to another center (${login.centerHost}), not your bound center (${boundHost || boundOrigin}).`,
-            )}
+            description={t(`此登录二维码属于其他中心（${login.centerHost}），与本机当前绑定的中心（${boundHost || boundOrigin}）不一致。`,
+              `This QR code belongs to another center (${login.centerHost}), not your bound center (${boundHost || boundOrigin}).`)}
             compact
           />
         </div>
@@ -159,6 +160,55 @@ function WebLoginConfirmView({
   );
 }
 
+/** 中心连接状态提示：重连态走 progress，真实错误仅将 message 放标题、code 放 detail 折叠区。 */
+function CenterStatusNotice() {
+  const t = useText();
+  const centerConn = useCenterConnection();
+  if (centerConn.reconnecting) {
+    return (
+      <div className="hst-row-static">
+        <ErrorNotice tone="progress" title={t('正在重连…', 'Reconnecting…')} compact />
+      </div>
+    );
+  }
+  if (!centerConn.error) return null;
+  return (
+    <div className="hst-row-static">
+      <ErrorNotice
+        tone="danger"
+        title={centerConn.error}
+        detail={centerConn.errorCode || undefined}
+        compact
+        onDismiss={() => centerConn.setError('')}
+      />
+    </div>
+  );
+}
+
+/** 配对/修复警告列表：标题仅展示 message，错误码收纳进 ErrorNotice 的 detail 折叠区。 */
+function PairWarnings({ warnings }: { warnings?: PairCenterResult['warnings'] }) {
+  if (!warnings?.length) return null;
+  return (
+    <>
+      {warnings.map((warning, index) => {
+        const parsed = splitErrorCode(warning);
+        const title = parsed.message || parsed.code || '';
+        if (!title) return null;
+        return (
+          <div className="hst-row-static" key={index}>
+            <ErrorNotice
+              tone="warning"
+              title={title}
+              detail={parsed.code && parsed.code !== title ? parsed.code : undefined}
+              compact
+            />
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 /** 手工令牌连接：沿用设置页原有表单（URL + 设备标识 + 客户端令牌 + 重连/清除）。 */
 function ManualCenterConnect({ onDone }: { onDone?: () => void }) {
   const t = useText();
@@ -168,18 +218,25 @@ function ManualCenterConnect({ onDone }: { onDone?: () => void }) {
       <label className="hst-input-row">
         <span className="hst-input-label">{t('中心地址', 'Center URL')}</span>
         <input
-          className="hst-input"
+          type="url"
           inputMode="url"
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          className="hst-input"
           disabled={centerConn.busy}
           value={centerConn.url}
           onChange={e => centerConn.setUrl(e.target.value)}
-          placeholder="https://127.0.0.1:4318"
+          placeholder="https://center.example.com"
         />
       </label>
 
       <label className="hst-input-row">
         <span className="hst-input-label">{t('设备标识', 'Device ID')}</span>
         <input
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
           className="hst-input"
           disabled={centerConn.busy}
           value={centerConn.deviceId}
@@ -205,11 +262,7 @@ function ManualCenterConnect({ onDone }: { onDone?: () => void }) {
         />
       </label>
 
-      {centerConn.error && (
-        <div className="hst-row-static">
-          <ErrorNotice error={centerConn.error} compact onDismiss={() => centerConn.setError('')} />
-        </div>
-      )}
+      <CenterStatusNotice />
 
       <div className="hst-actions">
         {centerConn.saved?.url && (
@@ -292,16 +345,8 @@ function PairResultView({ result, onChange, onEdit }: {
           <span className="ob-note">{t('本机绑定未完成，可用已存凭据重试', 'Local binding incomplete — you can retry with saved credentials')}</span>
         </div>
       )}
-      {result.warnings?.map((warning, index) => (
-        <div className="hst-row-static" key={index}>
-          <span className="ob-note">{`${warning.code}: ${warning.message}`}</span>
-        </div>
-      ))}
-      {centerConn.error && (
-        <div className="hst-row-static">
-          <ErrorNotice error={centerConn.error} compact onDismiss={() => centerConn.setError('')} />
-        </div>
-      )}
+      <PairWarnings warnings={result.warnings} />
+      <CenterStatusNotice />
       <div className="hst-actions">
         <button type="button" className="hst-btn is-ghost" onClick={onEdit}>
           {t('重新输入', 'Edit')}
@@ -357,6 +402,7 @@ function PairCenterForm({ onDone }: { onDone?: () => void }) {
       .then(
         done => {
           if (!done) return;
+          mobileHaptic('confirm');
           setResult(done);
           setForce(false);
           // 已请求连接且无警告时交回上层收尾；等待连接/有警告时保留结果视图供用户处理。
@@ -383,8 +429,12 @@ function PairCenterForm({ onDone }: { onDone?: () => void }) {
       <label className="hst-input-row">
         <span className="hst-input-label">{t('中心地址', 'Center URL')}</span>
         <input
-          className="hst-input"
+          type="url"
           inputMode="url"
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          className="hst-input"
           disabled={centerConn.busy}
           value={centerConn.url}
           onChange={e => centerConn.setUrl(e.target.value)}
@@ -413,10 +463,14 @@ function PairCenterForm({ onDone }: { onDone?: () => void }) {
           placeholder={t('选填，例如：我的手机', 'Optional, e.g. My phone')}
         />
       </label>
-      <label className="hst-input-row">
+      <label className="hst-input-row ob-textarea-row">
         <span className="hst-input-label">{t('CA 证书', 'CA PEM')}</span>
-        <input
-          className="hst-input"
+        <textarea
+          className="ob-pem"
+          rows={4}
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
           disabled={centerConn.busy}
           value={centerConn.ca}
           onChange={e => centerConn.setCa(e.target.value)}
@@ -425,21 +479,19 @@ function PairCenterForm({ onDone }: { onDone?: () => void }) {
       </label>
       {showForce && (
         <label className="hst-row-static ob-check-row">
-          <input
-            type="checkbox"
-            className="ob-check"
-            disabled={centerConn.busy}
-            checked={force}
-            onChange={e => setForce(e.target.checked)}
-          />
+          <span className="ob-check-hit">
+            <input
+              type="checkbox"
+              className="ob-check"
+              disabled={centerConn.busy}
+              checked={force}
+              onChange={e => setForce(e.target.checked)}
+            />
+          </span>
           <span>{t('替换本机已保存的绑定', 'Replace the binding saved on this device')}</span>
         </label>
       )}
-      {centerConn.error && (
-        <div className="hst-row-static">
-          <ErrorNotice error={centerConn.error} compact onDismiss={() => centerConn.setError('')} />
-        </div>
-      )}
+      <CenterStatusNotice />
       <div className="hst-actions">
         <button
           type="submit"
@@ -495,6 +547,7 @@ function PairCodeForm({
     void centerConn.pairWithCode(code, { force }).then(
       done => {
         if (!done) return;
+        mobileHaptic('confirm');
         // 配对码用过即废，登记成功后不再保留在输入框里。
         setText('');
         setForce(false);
@@ -613,6 +666,7 @@ function PairCodeForm({
           spellCheck={false}
           autoComplete="off"
           autoCapitalize="off"
+          autoCorrect="off"
           placeholder={t('或在这里粘贴配对码', 'Or paste the pairing code here')}
           onChange={event => onPaste(event.target.value)}
         />
@@ -624,13 +678,15 @@ function PairCodeForm({
       )}
       {showForce && (
         <label className="hst-row-static ob-check-row">
-          <input
-            type="checkbox"
-            className="ob-check"
-            disabled={working}
-            checked={force}
-            onChange={event => setForce(event.target.checked)}
-          />
+          <span className="ob-check-hit">
+            <input
+              type="checkbox"
+              className="ob-check"
+              disabled={working}
+              checked={force}
+              onChange={event => setForce(event.target.checked)}
+            />
+          </span>
           <span>{t('替换本机已保存的绑定', 'Replace the binding saved on this device')}</span>
         </label>
       )}
@@ -640,6 +696,7 @@ function PairCodeForm({
             tone="danger"
             title={failure.code === 'CAMERA_DENIED' ? t('无法扫码', 'Cannot scan') : t('配对失败', 'Pairing failed')}
             description={failureText(failure, t)}
+            detail={failure.code || undefined}
             compact
             onDismiss={() => setFailure(undefined)}
           />
@@ -648,7 +705,7 @@ function PairCodeForm({
       <div className="hst-actions">
         <button
           type="button"
-          className="hst-btn is-primary"
+          className="hst-btn"
           disabled={working || paste.kind !== 'code' || !mayAutoSubmit}
           onClick={() => submit(text)}
         >
@@ -661,15 +718,14 @@ function PairCodeForm({
 
 /**
  * 原生/桥错误 → {code, message}：code 用于区分可恢复原因，message 是原生给出的可操作说明。
- * 桥层为日志把 message 拼成 `CODE: 说明`，对用户没有意义，这里去掉这个前缀。
+ * 桥层为日志把 message 拼成 `CODE: 说明`，对用户没有意义，这里经 splitErrorCode 拆分。
  */
 function failureOf(error: unknown): { code: string; message: string } {
-  const code = typeof error === 'object' && error !== null && 'code' in error ? String((error as { code: unknown }).code) : '';
-  let message = error instanceof Error && error.message
-    ? error.message
-    : typeof error === 'string' && error ? error : '配对失败，请检查配对码后重试。';
-  if (code && message.startsWith(`${code}: `)) message = message.slice(code.length + 2);
-  return { code, message };
+  const parsed = splitErrorCode(error);
+  return {
+    code: parsed.code ?? '',
+    message: parsed.message,
+  };
 }
 
 type Translate = (zh: string, en: string) => string;
@@ -695,22 +751,16 @@ function failureText(failure: { code: string; message: string }, t: Translate): 
     case 'PAIRING_CODE_EXPIRED':
       return t('配对码已过期（10 分钟有效），请在中心重新生成', 'The pairing code has expired (it is valid for 10 minutes). Generate a new one on the center.');
     case 'PAIRING_CODE_REVOKED':
-      return t(
-        '配对码已作废：中心的「添加设备」窗口被关闭了。复制或扫描后请保持该窗口打开，直到配对完成；需要的话重新生成',
-        'The pairing code was voided because the “Add device” window on the center was closed. Keep that window open until pairing finishes, and generate a new code if needed.',
-      );
+      return t('配对码已作废：中心的「添加设备」窗口被关闭了。复制或扫描后请保持该窗口打开，直到配对完成；需要的话重新生成',
+        'The pairing code was voided because the “Add device” window on the center was closed. Keep that window open until pairing finishes, and generate a new code if needed.');
     case 'PAIRING_CODE_DEVICE_MISMATCH':
       return t('这个配对码是为另一台设备生成的，不能用于本机。请在中心为本机重新生成', 'This pairing code was issued for a different device and cannot be used here. Generate one for this phone on the center.');
     case 'DEVICE_ALREADY_REGISTERED':
-      return t(
-        '中心上已有这台设备的记录，新配对码不能顶替它。请所有者在管理页「设备与 Bot」里点该设备的「重新配对」，使用生成的专属配对码',
-        'The center already has a record for this device, and a new pairing code cannot replace it. The owner should click “Re-pair” on that device in the center’s Devices page and use the code it generates.',
-      );
+      return t('中心上已有这台设备的记录，新配对码不能顶替它。请所有者在管理页「设备与 Bot」里点该设备的「重新配对」，使用生成的专属配对码',
+        'The center already has a record for this device, and a new pairing code cannot replace it. The owner should click “Re-pair” on that device in the center’s Devices page and use the code it generates.');
     case 'CENTER_CERT_UNTRUSTED':
-      return t(
-        '能连上中心，但本机不信任它的证书。中心使用自签或私有 CA 时，请所有者在管理页「添加设备」窗口保存私有 CA 后重新生成配对码；用所有者密码配对时，在 CA 证书栏填写它',
-        'The center answered, but this phone does not trust its certificate. If the center uses a self-signed or private CA, the owner should save that CA in the center’s “Add device” window and generate a new pairing code; when pairing with the owner password, enter the CA in the CA PEM field.',
-      );
+      return t('能连上中心，但本机不信任它的证书。中心使用自签或私有 CA 时，请所有者在管理页「添加设备」窗口保存私有 CA 后重新生成配对码；用所有者密码配对时，在 CA 证书栏填写它',
+        'The center answered, but this phone does not trust its certificate. If the center uses a self-signed or private CA, the owner should save that CA in the center’s “Add device” window and generate a new pairing code; when pairing with the owner password, enter the CA in the CA PEM field.');
     case 'CENTER_UNREACHABLE':
       return t('无法连接中心', 'Cannot reach the center');
     case 'CENTER_UNSUPPORTED':
@@ -720,7 +770,7 @@ function failureText(failure: { code: string; message: string }, t: Translate): 
     case 'ALREADY_CONFIGURED':
       return t('设备已绑定中心，勾选“替换本机已保存的绑定”后再配对', 'This device is already bound to a center. Tick “Replace the binding saved on this device”, then pair.');
     default:
-      return failure.message;
+      return failure.message || t('配对失败，请检查配对码后重试。', 'Pairing failed. Check the pairing code and try again.');
   }
 }
 
@@ -820,13 +870,20 @@ export function QuickQrScanButton({
   );
 }
 
-const HOST_PHASE_LABEL: Record<HostSnapshot['phase'], [string, string]> = {
-  running: ['运行中', 'Running'],
-  starting: ['启动中', 'Starting'],
-  stopping: ['停止中', 'Stopping'],
-  failed: ['失败', 'Failed'],
-  stopped: ['已停止', 'Stopped'],
-};
+function hostPhaseLabel(phase: HostSnapshot['phase'], t: Translate): string {
+  switch (phase) {
+    case 'running':
+      return t('运行中', 'Running');
+    case 'starting':
+      return t('启动中', 'Starting');
+    case 'stopping':
+      return t('停止中', 'Stopping');
+    case 'failed':
+      return t('失败', 'Failed');
+    case 'stopped':
+      return t('已停止', 'Stopped');
+  }
+}
 
 /** 通知/后台电池/Shizuku/本机 Host 真实状态区：按钮仅发起系统动作，回到应用后重查。 */
 export function OnboardingPermissions() {
@@ -948,7 +1005,7 @@ export function OnboardingPermissions() {
           : { tone: 'success', label: t('已授权', 'Granted') }
     : undefined;
 
-  const hostLabel = host ? t(HOST_PHASE_LABEL[host.phase][0], HOST_PHASE_LABEL[host.phase][1]) : t('读取中…', 'Checking…');
+  const hostLabel = host ? hostPhaseLabel(host.phase, t) : t('读取中…', 'Checking…');
 
   return (
     <Section
@@ -958,10 +1015,8 @@ export function OnboardingPermissions() {
           {t('刷新', 'Refresh')}
         </button>
       }
-      hint={t(
-        '通知与电池优化影响消息提醒与后台连接；Shizuku 重启后需在管理器中重新启动，权限只影响对应功能，可先完成聊天连接再处理。',
-        'Notifications and battery affect alerts and background connection; after a reboot Shizuku must be started in its manager again. Permissions only affect their own features — chat works without them.'
-      )}
+      hint={t('通知与电池优化影响消息提醒与后台连接；Shizuku 重启后需在管理器中重新启动，权限只影响对应功能，可先完成聊天连接再处理。',
+        'Notifications and battery affect alerts and background connection; after a reboot Shizuku must be started in its manager again. Permissions only affect their own features — chat works without them.')}
     >
       {actionError && (
         <div className="hst-row-static">
@@ -1087,11 +1142,7 @@ export function OnboardingPermissions() {
               <span className="ob-note">{t('已保存设备绑定，等待连接', 'Device bound, connection pending')}</span>
             </div>
           )}
-          {repairResult?.warnings?.map((warning, index) => (
-            <div className="hst-row-static" key={index}>
-              <span className="ob-note">{`${warning.code}: ${warning.message}`}</span>
-            </div>
-          ))}
+          <PairWarnings warnings={repairResult?.warnings} />
         </>
       )}
     </Section>

@@ -1,4 +1,5 @@
 import type * as React from 'react';
+import { useText } from '../ui';
 
 interface EccSpec {
   ecPerBlock: number;
@@ -421,11 +422,12 @@ export function encodeQrMatrix(text: string): QrMatrix | null {
 }
 
 export function QrSvg({ value, label }: { value: string; label: string }): React.JSX.Element {
+  const t = useText();
   const matrix = encodeQrMatrix(value);
   if (!matrix) {
     return (
       <div className="ca-qr-fallback">
-        内容较长暂无法生成二维码，请使用复制文本或链接方式导入。
+        {t('内容较长暂无法生成二维码，请使用复制文本或链接方式导入。', 'Content is too long for a QR code. Copy the text or link to import instead.')}
       </div>
     );
   }

@@ -5,7 +5,7 @@ import type { DesktopClientStatus } from '../../../host-core/desktop-client';
 import { HashRouter } from 'react-router-dom';
 import { HostPage } from '../../../web/src/Host';
 import { CenterGate, isTransientCenterError, useCenterConnection, type CenterStatus } from '../../../web/src/native/CenterGate';
-import { ErrorNotice, LanguageOverride, errorText } from '../../../web/src/ui';
+import { ErrorNotice, LanguageOverride, errorText, useText } from '../../../web/src/ui';
 import { ClientUpdateProvider } from '../../../web/src/ClientUpdateProvider';
 import type { ClientUpdateOp, ClientUpdateParams, ClientUpdateStatus } from '../../../web/src/ClientUpdate';
 import {
@@ -22,14 +22,42 @@ import '../../../web/src/styles.css';
 import './mobile.css';
 import '../../../web/src/hub/lanes.css';
 
+const DARK_SCHEME_QUERY = '(prefers-color-scheme: dark)';
+
+const darkMediaQuery = (): MediaQueryList | null =>
+  typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia(DARK_SCHEME_QUERY)
+    : null;
+
+const resolveTheme = (appearance: MobileUiSettings['appearance']): 'light' | 'dark' => {
+  if (appearance === 'dark' || appearance === 'light') return appearance;
+  return darkMediaQuery()?.matches ? 'dark' : 'light';
+};
+
+const applyTheme = (appearance: MobileUiSettings['appearance']) => {
+  document.documentElement.dataset.themePref = appearance;
+  document.documentElement.dataset.theme = resolveTheme(appearance);
+};
+
 const applyUi = (ui: MobileUiSettings) => {
-  document.documentElement.dataset.theme = ui.appearance;
+  applyTheme(ui.appearance);
   document.documentElement.lang = ui.language === 'system' ? navigator.language : ui.language;
 };
+
+// 模块顶层同步解析一次 system 主题，避免首帧浅色闪烁（不写 inline script 以满足 CSP）。
+applyTheme('system');
+
+function ReconnectingNotice() {
+  const t = useText();
+  return <ErrorNotice tone="progress" title={t('正在重连…', 'Reconnecting…')} compact />;
+}
 
 function MobileShell() {
   const [ui, setUi] = useState<MobileUiSettings>({ language: 'system', appearance: 'system' });
   const [notice, setNotice] = useState('');
+  const [ipcReconnecting, setIpcReconnecting] = useState(false);
+  const [centerReconnecting, setCenterReconnecting] = useState(false);
+  const reconnecting = ipcReconnecting || centerReconnecting;
   const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [adoptEpoch, setAdoptEpoch] = useState(0);
   const adopting = useRef<Promise<void> | null>(null);
@@ -46,6 +74,7 @@ function MobileShell() {
     connectionRevision.current += 1;
     adoptedGeneration.current = undefined;
     remoteRef.current?.invalidate();
+    setCenterReconnecting(false);
   }, []);
 
   const getOrCreateRemoteClient = useCallback(() => {
@@ -86,6 +115,7 @@ function MobileShell() {
       api.setIdentity({ profileId: profile.id, targetDeviceId: '', kind: 'relay' });
       api.setTransportConnected(true);
       adoptedGeneration.current = status.generation;
+      setCenterReconnecting(false);
       setNotice('');
     })();
     adopting.current = run;
@@ -98,21 +128,49 @@ function MobileShell() {
   }, [getOrCreateRemoteClient]);
 
   useEffect(() => {
+    applyTheme(ui.appearance);
+    if (ui.appearance !== 'system') return;
+    const media = darkMediaQuery();
+    if (!media) return;
+    const onChange = () => {
+      applyTheme('system');
+    };
+    media.addEventListener('change', onChange);
+    return () => {
+      media.removeEventListener('change', onChange);
+    };
+  }, [ui.appearance]);
+
+  useEffect(() => {
     let live = true;
-    mobileUiSettings().then(
-      next => {
-        if (!live) return;
-        applyUi(next);
-        setUi(next);
-      },
-      error => {
-        if (live) setNotice(errorText(error));
-      },
-    );
+    let seq = 0;
+    const syncUi = (reportError: boolean) => {
+      const current = ++seq;
+      mobileUiSettings().then(
+        next => {
+          if (!live || current !== seq) return;
+          applyUi(next);
+          setUi(prev =>
+            prev.language === next.language && prev.appearance === next.appearance ? prev : next,
+          );
+        },
+        error => {
+          if (live && current === seq && reportError) setNotice(errorText(error));
+        },
+      );
+    };
+    syncUi(connectionEpoch === 0);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        syncUi(false);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
       live = false;
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, []);
+  }, [connectionEpoch]);
 
   useEffect(() => {
     let live = true;
@@ -131,6 +189,7 @@ function MobileShell() {
           if (!live) return;
           repairIpc.current = null;
           delay = 500;
+          setIpcReconnecting(false);
           setConnectionEpoch(value => value + 1);
         } catch (error) {
           if (!live) return;
@@ -148,7 +207,8 @@ function MobileShell() {
       if (!live) return;
       if (repairIpc.current) { failedAgain = true; return; }
       centerDisconnected();
-      setNotice('正在重连…');
+      setIpcReconnecting(true);
+      setNotice('');
       repairIpc.current = attempt;
       void attempt().catch(() => {});
     };
@@ -182,17 +242,20 @@ function MobileShell() {
             await centerReady(center.centerUrl);
             if (!live || revision !== connectionRevision.current) return;
             if (!wasConnected || previousGeneration !== adoptedGeneration.current) setAdoptEpoch(value => value + 1);
+            setCenterReconnecting(false);
             setNotice('');
             delay = 1000;
           } else {
             if (remoteRef.current?.api.transportConnected) centerDisconnected();
             retry = center.state === 'connecting';
-            setNotice(retry ? '正在重连…' : center.savedConnectionError || (center.error ? errorText(center.error) : ''));
+            setCenterReconnecting(retry);
+            setNotice(retry ? '' : center.savedConnectionError || (center.error ? errorText(center.error) : ''));
           }
         } catch (error) {
           if (!live || revision !== connectionRevision.current) return;
           retry = isTransientCenterError(error);
-          setNotice(retry ? '正在重连…' : errorText(error));
+          setCenterReconnecting(retry);
+          setNotice(retry ? '' : errorText(error));
           throw error;
         }
       })();
@@ -244,6 +307,7 @@ function MobileShell() {
             </MobileUpdateBoundary>
           </CenterGate>
         </div>
+        {reconnecting && <ReconnectingNotice />}
         <ErrorNotice error={notice} compact onDismiss={() => setNotice('')} />
       </div>
     </LanguageOverride.Provider>

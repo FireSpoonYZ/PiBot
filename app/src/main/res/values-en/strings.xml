@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="client_start_failed">Failed to start client. Please reopen the app.</string>
+</resources>

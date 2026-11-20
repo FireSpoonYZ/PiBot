@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type * as React from 'react';
 import { Archive, Check, Pencil, Plus, QrCode, Shield, Trash2, X } from 'lucide-react';
+import { useText } from '../ui';
 import { RemoveDeviceDialog } from './RemoveDeviceDialog';
 import { errorMessage } from './transport';
 import type { CenterApi } from './transport';
@@ -16,6 +17,7 @@ import {
   formatCountdown,
   formatTime,
   platformLabel,
+  useUiLocale,
 } from './primitives';
 import type {
   ActivePairingCodeInfo,
@@ -46,6 +48,9 @@ export function DevicesTab({
   onConfigureBot?: (deviceId: string, botId: string) => void;
   renderQr?: (value: string, label: string) => React.ReactNode;
 }): React.JSX.Element {
+  const t = useText();
+  const locale = useUiLocale();
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -138,7 +143,7 @@ export function DevicesTab({
     setLoading(true);
     loadAll()
       .catch(err => {
-        if (active) setError(errorMessage(err, '加载设备与智能体失败'));
+        if (active) setError(errorMessage(err, t('加载设备与 Bot 失败', 'Failed to load devices and Bots')));
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -146,7 +151,7 @@ export function DevicesTab({
     return () => {
       active = false;
     };
-  }, [loadAll]);
+  }, [loadAll, t]);
 
   // Countdown tick & pairing status poll
   useEffect(() => {
@@ -159,7 +164,8 @@ export function DevicesTab({
           if (state.status === 'redeemed') {
             setPendingPairing(null);
             setPairingModalOpen(false);
-            setNotice(`设备「${state.device?.name || '新设备'}」已扫码绑定成功`);
+            const deviceName = state.device?.name || t('新设备', 'New device');
+            setNotice(t(`设备「${deviceName}」已扫码绑定成功`, `Device "${deviceName}" paired successfully`));
             void loadAll();
           } else if (state.status === 'expired' || state.status === 'revoked') {
             setPendingPairing(null);
@@ -174,7 +180,7 @@ export function DevicesTab({
       window.clearInterval(tickTimer);
       window.clearInterval(pollTimer);
     };
-  }, [api, loadAll, pendingPairing]);
+  }, [api, loadAll, pendingPairing, t]);
 
   // Clear expired local banner
   useEffect(() => {
@@ -208,7 +214,7 @@ export function DevicesTab({
       setNowMs(Date.now());
       setPairingModalOpen(true);
     } catch (err) {
-      setError(errorMessage(err, '生成配对码失败'));
+      setError(errorMessage(err, t('生成配对码失败', 'Failed to generate pairing code')));
     } finally {
       setPairingBusy(false);
     }
@@ -221,9 +227,9 @@ export function DevicesTab({
     setPairingModalOpen(false);
     try {
       await api.revokePairingCode(targetId);
-      setNotice('已作废待用配对码');
+      setNotice(t('已作废待用配对码', 'Pending pairing code revoked'));
     } catch (err) {
-      setError(errorMessage(err, '作废配对码失败'));
+      setError(errorMessage(err, t('作废配对码失败', 'Failed to revoke pairing code')));
     }
   };
 
@@ -237,7 +243,7 @@ export function DevicesTab({
         setCaState(st);
         setCaDraft(st.ca ?? '');
       })
-      .catch(err => setCaError(errorMessage(err, '读取证书配置失败')));
+      .catch(err => setCaError(errorMessage(err, t('读取证书配置失败', 'Failed to load certificate settings'))));
   };
 
   const handleSaveCa = async (nextCa: string | null) => {
@@ -247,9 +253,13 @@ export function DevicesTab({
       const updated = await api.putPairingCa(nextCa);
       setCaState(updated);
       setCaDraft(updated.ca ?? '');
-      setNotice(nextCa ? '私有 CA 证书已保存，新生成的配对码将自动携带' : '已清除私有 CA 证书');
+      setNotice(
+        nextCa
+          ? t('私有 CA 证书已保存，新生成的配对码将自动携带', 'Private CA certificate saved; new pairing codes will embed it automatically')
+          : t('已清除私有 CA 证书', 'Private CA certificate cleared'),
+      );
     } catch (err) {
-      setCaError(errorMessage(err, '保存证书失败'));
+      setCaError(errorMessage(err, t('保存证书失败', 'Failed to save certificate')));
     } finally {
       setCaBusy(false);
     }
@@ -265,7 +275,7 @@ export function DevicesTab({
       setDevices(prev => prev.map(d => (d.deviceId === updated.deviceId ? { ...d, ...updated } : d)));
       setRenamingDeviceId(null);
     } catch (err) {
-      setError(errorMessage(err, '重命名设备失败'));
+      setError(errorMessage(err, t('重命名设备失败', 'Failed to rename device')));
     }
   };
 
@@ -283,11 +293,11 @@ export function DevicesTab({
       );
       setNotice(
         nextEnabled
-          ? `已开启「${device.name}」的中心管理权限`
-          : `已收回「${device.name}」的中心管理权限`,
+          ? t(`已开启「${device.name}」的中心管理权限`, `Enabled center admin access for "${device.name}"`)
+          : t(`已收回「${device.name}」的中心管理权限`, `Revoked center admin access for "${device.name}"`),
       );
     } catch (err) {
-      setError(errorMessage(err, '切换中心管理权限失败'));
+      setError(errorMessage(err, t('切换中心管理权限失败', 'Failed to update center admin access')));
     } finally {
       setOauthBusyId(null);
     }
@@ -299,7 +309,7 @@ export function DevicesTab({
     if (!createBotDevice) return;
     const role = newBotRole.trim();
     if (!role) {
-      setCreateBotError('请填写智能体名称');
+      setCreateBotError(t('请填写 Bot 名称', 'Please enter a Bot name'));
       return;
     }
     setCreateBotBusy(true);
@@ -325,9 +335,9 @@ export function DevicesTab({
       setNewBotPrimary(false);
       setNewBotModelRef('');
       await loadAll();
-      setNotice(`已创建智能体「${created.name}」`);
+      setNotice(t(`已创建 Bot「${created.name}」`, `Created Bot "${created.name}"`));
     } catch (err) {
-      setCreateBotError(errorMessage(err, '创建智能体失败'));
+      setCreateBotError(errorMessage(err, t('创建 Bot 失败', 'Failed to create Bot')));
     } finally {
       setCreateBotBusy(false);
     }
@@ -341,21 +351,21 @@ export function DevicesTab({
     try {
       if (action === 'primary') {
         await api.setPrimaryBot(bot.deviceId, bot.botId);
-        setNotice(`已将「${bot.name}」设为主智能体`);
+        setNotice(t(`已将「${bot.name}」设为主 Bot`, `Set "${bot.name}" as Primary Bot`));
       } else if (action === 'archive') {
         await api.archiveBot(bot.deviceId, bot.botId);
-        setNotice(`已归档「${bot.name}」`);
+        setNotice(t(`已归档「${bot.name}」`, `Archived "${bot.name}"`));
       } else if (action === 'unarchive') {
         await api.unarchiveBot(bot.deviceId, bot.botId);
-        setNotice(`已恢复「${bot.name}」`);
+        setNotice(t(`已恢复「${bot.name}」`, `Restored "${bot.name}"`));
       } else {
-        if (!window.confirm(`确定彻底删除智能体「${bot.name}」吗？`)) return;
+        if (!window.confirm(t(`确定彻底删除 Bot「${bot.name}」吗？`, `Permanently delete Bot "${bot.name}"?`))) return;
         await api.deleteBot(bot.deviceId, bot.botId);
-        setNotice(`已删除「${bot.name}」`);
+        setNotice(t(`已删除「${bot.name}」`, `Deleted "${bot.name}"`));
       }
       await loadAll();
     } catch (err) {
-      setError(errorMessage(err, '操作智能体失败'));
+      setError(errorMessage(err, t('操作 Bot 失败', 'Bot operation failed')));
     }
   };
 
@@ -394,7 +404,7 @@ export function DevicesTab({
         setLearnMinIdleHours(learningRes.settings.curator.minIdleHours);
       }
     } catch (err) {
-      setCfgError(errorMessage(err, '读取智能体配置失败'));
+      setCfgError(errorMessage(err, t('读取 Bot 配置失败', 'Failed to load Bot settings')));
     } finally {
       setCfgBusy(false);
     }
@@ -413,10 +423,14 @@ export function DevicesTab({
         value: nextOverrides,
       });
       setCfgModel(updated);
-      setCfgNotice(modelRef ? '已切换专属模型' : '已设为跟随全局默认模型');
+      setCfgNotice(
+        modelRef
+          ? t('已切换专属模型', 'Switched to dedicated model')
+          : t('已设为跟随全局默认模型', 'Set to follow global default model'),
+      );
       await loadAll();
     } catch (err) {
-      setCfgError(errorMessage(err, '保存模型设置失败'));
+      setCfgError(errorMessage(err, t('保存模型设置失败', 'Failed to save model settings')));
     } finally {
       setCfgBusy(false);
     }
@@ -441,9 +455,9 @@ export function DevicesTab({
         setCfgCwdRev(nextCwd.revision);
       }
       await loadAll();
-      setCfgNotice('基础信息与工作目录已保存');
+      setCfgNotice(t('基础信息与工作目录已保存', 'Profile and working directory saved'));
     } catch (err) {
-      setCfgError(errorMessage(err, '保存失败'));
+      setCfgError(errorMessage(err, t('保存失败', 'Failed to save')));
     } finally {
       setCfgBusy(false);
     }
@@ -471,7 +485,7 @@ export function DevicesTab({
         ),
       );
     } catch (err) {
-      setCfgError(errorMessage(err, '切换能力授权失败'));
+      setCfgError(errorMessage(err, t('切换能力授权失败', 'Failed to update capability authorization')));
     }
   };
 
@@ -485,9 +499,13 @@ export function DevicesTab({
         curator: { enabled: nextEnabled },
       });
       setCfgLearning(prev => (prev ? { ...prev, settings: res.settings } : prev));
-      setCfgNotice(nextEnabled ? '已开启空闲自动学习技能' : '已暂停空闲自动学习');
+      setCfgNotice(
+        nextEnabled
+          ? t('已开启空闲自动学习技能', 'Idle auto-learning enabled')
+          : t('已暂停空闲自动学习', 'Idle auto-learning paused'),
+      );
     } catch (err) {
-      setCfgError(errorMessage(err, '更新学习开关失败'));
+      setCfgError(errorMessage(err, t('更新学习开关失败', 'Failed to update learning toggle')));
     } finally {
       setCfgBusy(false);
     }
@@ -499,11 +517,16 @@ export function DevicesTab({
     setCfgError('');
     try {
       const res = await api.triggerBotLearning(cfgBot.deviceId, cfgBot.botId, mode);
-      setCfgNotice(res.reason || `已提交${mode === 'review' ? '复盘' : '整理'}任务`);
+      setCfgNotice(
+        res.reason ||
+          (mode === 'review'
+            ? t('已提交复盘任务', 'Review task submitted')
+            : t('已提交整理任务', 'Curate task submitted')),
+      );
       const refreshed = await api.getBotLearningStatus(cfgBot.deviceId, cfgBot.botId).catch(() => null);
       if (refreshed) setCfgLearning(refreshed);
     } catch (err) {
-      setCfgError(errorMessage(err, '触发学习任务失败'));
+      setCfgError(errorMessage(err, t('触发学习任务失败', 'Failed to trigger learning task')));
     } finally {
       setCfgBusy(false);
     }
@@ -522,19 +545,19 @@ export function DevicesTab({
         },
       });
       setCfgLearning(prev => (prev ? { ...prev, settings: res.settings } : prev));
-      setCfgNotice('学习周期参数已保存');
+      setCfgNotice(t('学习周期参数已保存', 'Learning schedule parameters saved'));
     } catch (err) {
-      setCfgError(errorMessage(err, '保存学习参数失败'));
+      setCfgError(errorMessage(err, t('保存学习参数失败', 'Failed to save learning parameters')));
     } finally {
       setCfgBusy(false);
     }
   };
 
   const globalDefaultName = useMemo(() => {
-    if (!picker?.defaultModel) return '未设置';
+    if (!picker?.defaultModel) return t('未设置', 'Not set');
     const found = picker.models.find(m => m.modelRef === picker.defaultModel);
     return found?.name || picker.defaultModel;
-  }, [picker]);
+  }, [picker, t]);
 
   const sortedPickerModels = useMemo(() => {
     if (!picker) return [];
@@ -558,7 +581,7 @@ export function DevicesTab({
   const botModelDisplay = (bot: CenterBotRef): { label: string; unset: boolean } => {
     if (bot.resolvedModel) {
       return {
-        label: bot.resolvedModel.effectiveModelName || '未配置模型',
+        label: bot.resolvedModel.effectiveModelName || t('未配置模型', 'Model not set'),
         unset: !bot.resolvedModel.effectiveModelName || bot.resolvedModel.source === 'unset',
       };
     }
@@ -567,14 +590,16 @@ export function DevicesTab({
       return { label: found?.name || bot.modelRef, unset: false };
     }
     if (picker?.defaultModel) {
-      return { label: `默认 (${globalDefaultName})`, unset: false };
+      return { label: t(`默认 (${globalDefaultName})`, `Default (${globalDefaultName})`), unset: false };
     }
-    return { label: '未配置模型', unset: true };
+    return { label: t('未配置模型', 'Model not set'), unset: true };
   };
 
   if (loading) {
-    return <div className="ca-empty">正在加载设备与智能体…</div>;
+    return <div className="ca-empty">{t('正在加载设备与 Bot…', 'Loading devices and Bots…')}</div>;
   }
+
+  const activeBotCount = bots.filter(b => !b.archivedAt).length;
 
   return (
     <div>
@@ -584,7 +609,7 @@ export function DevicesTab({
           tone="ok"
           action={
             <button type="button" className="ca-btn ca-btn-ghost ca-btn-sm" onClick={() => setNotice('')}>
-              关闭
+              {t('关闭', 'Close')}
             </button>
           }
         >
@@ -603,24 +628,23 @@ export function DevicesTab({
                 className="ca-btn ca-btn-sm"
                 onClick={() => setPairingModalOpen(true)}
               >
-                查看二维码
+                {t('查看二维码', 'View QR Code')}
               </button>
-              <CopyButton value={pendingPairing.code} label="复制配对码" />
+              <CopyButton value={pendingPairing.code} label={t('复制配对码', 'Copy Code')} />
               <button
                 type="button"
                 className="ca-btn ca-btn-danger ca-btn-sm"
                 onClick={() => void handleRevokePendingPairing()}
               >
-                作废
+                {t('作废', 'Revoke')}
               </button>
             </>
           }
         >
           <span className="ca-num">
             {pendingPairing.target
-              ? `设备「${pendingPairing.target.name}」待重绑配对码生效中`
-              : '新设备待绑定配对码生效中'}
-            （剩余 {formatCountdown(pendingPairing.expiresAt, nowMs)}）
+              ? t(`设备「${pendingPairing.target.name}」待重绑配对码生效中（剩余 ${formatCountdown(pendingPairing.expiresAt, nowMs)}）`, `Re-pairing code active for "${pendingPairing.target.name}" (${formatCountdown(pendingPairing.expiresAt, nowMs)} left)`)
+              : t(`新设备待绑定配对码生效中（剩余 ${formatCountdown(pendingPairing.expiresAt, nowMs)}）`, `New device pairing code active (${formatCountdown(pendingPairing.expiresAt, nowMs)} left)`)}
           </span>
         </CaNotice>
       )}
@@ -628,12 +652,12 @@ export function DevicesTab({
       {/* 工具栏 */}
       <div className="ca-toolbar">
         <div className="ca-muted ca-num">
-          共 {devices.length} 台设备 · {bots.filter(b => !b.archivedAt).length} 个活跃智能体
+          {t(`共 ${devices.length} 台设备 · ${activeBotCount} 个活跃 Bot`, `${devices.length} ${devices.length === 1 ? 'device' : 'devices'} · ${activeBotCount} active ${activeBotCount === 1 ? 'Bot' : 'Bots'}`)}
         </div>
         <div className="ca-toolbar-group">
           <button type="button" className="ca-btn ca-btn-sm" onClick={openCaDrawer}>
-            <Shield size={14} />
-            <span>证书设置</span>
+            <Shield size={14} aria-hidden="true" />
+            <span>{t('证书设置', 'CA Settings')}</span>
           </button>
           <button
             type="button"
@@ -641,8 +665,8 @@ export function DevicesTab({
             disabled={pairingBusy}
             onClick={() => void handleOpenPairing()}
           >
-            <QrCode size={14} />
-            <span>{pairingBusy ? '生成中…' : '扫码添加设备'}</span>
+            <QrCode size={14} aria-hidden="true" />
+            <span>{pairingBusy ? t('生成中…', 'Generating…') : t('扫码添加设备', 'Pair Device')}</span>
           </button>
         </div>
       </div>
@@ -651,7 +675,7 @@ export function DevicesTab({
       {devices.length === 0 ? (
         <section className="ca-section">
           <div className="ca-empty">
-            暂无已绑定设备，点击右上角「扫码添加设备」生成配对码连接桌面或手机客户端
+            {t('暂无已绑定设备，点击右上角「扫码添加设备」生成配对码连接桌面或手机客户端', 'No paired devices yet. Click "Pair Device" in the top right to generate a pairing code for desktop or mobile.')}
           </div>
         </section>
       ) : (
@@ -662,15 +686,14 @@ export function DevicesTab({
 
           return (
             <section key={device.deviceId} className="ca-section">
-              <div className="ca-section-head" style={{ flexWrap: 'wrap' }}>
-                <div className="ca-inline-row" style={{ flex: 1, minWidth: 200 }}>
+              <div className="ca-section-head">
+                <div className="ca-inline-row ca-device-head-main">
                   <span className={`ca-dot ${device.online ? 'is-online' : ''}`} />
                   {isRenaming ? (
-                    <div className="ca-inline-row" style={{ flex: 1, maxWidth: 280 }}>
+                    <div className="ca-inline-row ca-rename-row">
                       <input
                         type="text"
-                        className="ca-input"
-                        style={{ paddingTop: 3, paddingBottom: 3 }}
+                        className="ca-input ca-input-compact"
                         value={renameDraft}
                         onChange={e => setRenameDraft(e.target.value)}
                         onKeyDown={e => {
@@ -683,17 +706,17 @@ export function DevicesTab({
                         type="button"
                         className="ca-btn ca-btn-ghost ca-btn-icon"
                         onClick={() => void handleSaveDeviceRename(device)}
-                        aria-label="保存名称"
+                        aria-label={t('保存名称', 'Save name')}
                       >
-                        <Check size={14} />
+                        <Check size={14} aria-hidden="true" />
                       </button>
                       <button
                         type="button"
                         className="ca-btn ca-btn-ghost ca-btn-icon"
                         onClick={() => setRenamingDeviceId(null)}
-                        aria-label="取消"
+                        aria-label={t('取消', 'Cancel')}
                       >
-                        <X size={14} />
+                        <X size={14} aria-hidden="true" />
                       </button>
                     </div>
                   ) : (
@@ -702,35 +725,34 @@ export function DevicesTab({
                       <button
                         type="button"
                         className="ca-btn ca-btn-ghost ca-btn-icon"
-                        aria-label="重命名设备"
+                        aria-label={t('重命名设备', 'Rename device')}
                         onClick={() => {
                           setRenamingDeviceId(device.deviceId);
                           setRenameDraft(device.name);
                         }}
                       >
-                        <Pencil size={13} />
+                        <Pencil size={13} aria-hidden="true" />
                       </button>
                     </>
                   )}
                   {device.platform && (
-                    <span className="ca-pill ca-pill-muted">{platformLabel(device.platform)}</span>
+                    <span className="ca-pill ca-pill-muted">{platformLabel(device.platform, t)}</span>
                   )}
                   <span className={`ca-pill ${device.online ? 'ca-pill-ok' : 'ca-pill-muted'}`}>
-                    {device.online ? '在线' : '离线'}
+                    {device.online ? t('在线', 'Online') : t('离线', 'Offline')}
                   </span>
                 </div>
 
-                <div className="ca-inline-row" style={{ flexWrap: 'wrap' }}>
+                <div className="ca-inline-row ca-wrap">
                   <label
-                    className="ca-inline-row"
-                    style={{ fontSize: 12.5, color: 'var(--ca-text-muted)', cursor: 'pointer' }}
-                    title="控制该设备扫码绑定后是否具备免密管理中心的 OAuth 权限"
+                    className="ca-inline-row ca-switch-label"
+                    title={t('控制该设备扫码绑定后是否具备免密管理中心的 OAuth 权限', 'Controls whether this device has passwordless OAuth admin access to the center after pairing')}
                   >
-                    <span>中心管理权限</span>
+                    <span>{t('中心管理权限', 'Center admin access')}</span>
                     <CaSwitch
                       checked={oauthEnabled}
                       disabled={oauthBusyId === device.deviceId}
-                      label={`切换 ${device.name} 中心管理权限`}
+                      label={t(`切换 ${device.name} 中心管理权限`, `Toggle center admin access for ${device.name}`)}
                       onChange={next => void handleToggleOAuthGrant(device, next)}
                     />
                   </label>
@@ -747,21 +769,21 @@ export function DevicesTab({
                       setCreateBotError('');
                     }}
                   >
-                    <Plus size={13} />
-                    <span>新建智能体</span>
+                    <Plus size={13} aria-hidden="true" />
+                    <span>{t('新建 Bot', 'New Bot')}</span>
                   </button>
                   <button
                     type="button"
                     className="ca-btn ca-btn-ghost ca-btn-icon"
-                    aria-label={`移除设备 ${device.name}`}
-                    title="移除设备"
+                    aria-label={t(`移除设备 ${device.name}`, `Remove device ${device.name}`)}
+                    title={t('移除设备', 'Remove device')}
                     onClick={() => setDeviceToRemove(device)}
                   >
-                    <Trash2 size={14} aria-hidden />
+                    <Trash2 size={14} aria-hidden="true" />
                   </button>
                   <ActionMenu
                     items={[{
-                      label: '重新扫码绑定',
+                      label: t('重新扫码绑定', 'Re-pair via QR'),
                       onSelect: () => void handleOpenPairing(device.deviceId),
                     }]}
                   />
@@ -771,7 +793,9 @@ export function DevicesTab({
               {/* 下属 Bot 列表：极简行，直显 Bot 名 + 当前真实生效模型名 */}
               <div className="ca-list">
                 {devBots.length === 0 ? (
-                  <div className="ca-empty">此设备暂无智能体，点击上方「+ 新建智能体」创建</div>
+                  <div className="ca-empty">
+                    {t('此设备暂无 Bot，点击上方「+ 新建 Bot」创建', 'No Bots on this device yet. Click "+ New Bot" above to create one.')}
+                  </div>
                 ) : (
                   devBots.map(bot => {
                     const modelDisp = botModelDisplay(bot);
@@ -780,7 +804,7 @@ export function DevicesTab({
                         <div className="ca-row-main">
                           <div className="ca-row-title">
                             <span>{bot.name}</span>
-                            {bot.isPrimary && <span className="ca-pill ca-pill-info">主智能体</span>}
+                            {bot.isPrimary && <span className="ca-pill ca-pill-info">{t('主 Bot', 'Primary Bot')}</span>}
                             <span className={`ca-pill ${modelDisp.unset ? 'ca-pill-warn' : 'ca-pill-muted'}`}>
                               {modelDisp.label}
                             </span>
@@ -796,21 +820,21 @@ export function DevicesTab({
                               else void openBuiltinBotConfig(bot);
                             }}
                           >
-                            配置
+                            {t('配置', 'Configure')}
                           </button>
                           <ActionMenu
                             items={[
                               {
-                                label: '设为主智能体',
+                                label: t('设为主 Bot', 'Set as Primary Bot'),
                                 disabled: Boolean(bot.isPrimary),
                                 onSelect: () => void handleBotMenuAction(bot, 'primary'),
                               },
                               {
-                                label: '归档智能体',
+                                label: t('归档 Bot', 'Archive Bot'),
                                 onSelect: () => void handleBotMenuAction(bot, 'archive'),
                               },
                               {
-                                label: '删除智能体',
+                                label: t('删除 Bot', 'Delete Bot'),
                                 danger: true,
                                 onSelect: () => void handleBotMenuAction(bot, 'delete'),
                               },
@@ -827,17 +851,17 @@ export function DevicesTab({
         })
       )}
 
-      {/* 已归档智能体折叠区 */}
+      {/* 已归档 Bot 折叠区 */}
       {archivedBots.length > 0 && (
-        <div style={{ marginTop: 14 }}>
-          <CaDisclosure title={`已归档智能体 (${archivedBots.length})`}>
+        <div className="ca-section-gap">
+          <CaDisclosure title={t(`已归档 Bot (${archivedBots.length})`, `Archived Bots (${archivedBots.length})`)}>
             <section className="ca-section">
               <div className="ca-list">
                 {archivedBots.map(bot => (
                   <div key={`${bot.deviceId}-${bot.botId}`} className="ca-row">
                     <div className="ca-row-main">
                       <div className="ca-row-title">
-                        <Archive size={14} />
+                        <Archive size={14} aria-hidden="true" />
                         <span>{bot.name}</span>
                         <span className="ca-pill ca-pill-muted">{bot.deviceName || bot.deviceId}</span>
                       </div>
@@ -848,14 +872,14 @@ export function DevicesTab({
                         className="ca-btn ca-btn-sm"
                         onClick={() => void handleBotMenuAction(bot, 'unarchive')}
                       >
-                        恢复
+                        {t('恢复', 'Restore')}
                       </button>
                       <button
                         type="button"
                         className="ca-btn ca-btn-danger ca-btn-sm"
                         onClick={() => void handleBotMenuAction(bot, 'delete')}
                       >
-                        删除
+                        {t('删除', 'Delete')}
                       </button>
                     </div>
                   </div>
@@ -873,8 +897,8 @@ export function DevicesTab({
           onRemove={async () => {
             await api.deleteDevice(deviceToRemove.deviceId);
             setError('');
-            setNotice(`已移除设备 ${deviceToRemove.name}`);
-            void loadAll().catch(err => setError(errorMessage(err, '刷新设备目录失败')));
+            setNotice(t(`已移除设备 ${deviceToRemove.name}`, `Removed device ${deviceToRemove.name}`));
+            void loadAll().catch(err => setError(errorMessage(err, t('刷新设备目录失败', 'Failed to refresh device directory'))));
           }}
         />
       )}
@@ -883,35 +907,40 @@ export function DevicesTab({
       <CaModal
         open={pairingModalOpen}
         onOpenChange={setPairingModalOpen}
-        title={pendingPairing?.target ? `重新绑定设备 · ${pendingPairing.target.name}` : '扫码添加设备'}
-        description="使用手机端或桌面端扫一扫 / 粘贴配对码即可完成绑定"
+        title={
+          pendingPairing?.target
+            ? t(`重新绑定设备 · ${pendingPairing.target.name}`, `Re-pair Device · ${pendingPairing.target.name}`)
+            : t('扫码添加设备', 'Pair Device')
+        }
+        description={t('使用手机端或桌面端扫一扫 / 粘贴配对码即可完成绑定', 'Scan the QR code or paste the pairing code on mobile or desktop to pair')}
         variant="modal"
       >
         {pendingPairing ? (
-          <div className="ca-form-stack" style={{ alignItems: 'center', textAlign: 'center' }}>
-            <CaQrBox value={pendingPairing.code} label="设备配对二维码" renderQr={renderQr} />
+          <div className="ca-form-stack ca-center-stack">
+            <CaQrBox value={pendingPairing.code} label={t('设备配对二维码', 'Device pairing QR code')} renderQr={renderQr} />
 
             <div className="ca-muted ca-num">
-              有效期剩余 <strong>{formatCountdown(pendingPairing.expiresAt, nowMs)}</strong>
-              {pendingPairing.includesCa ? ' · 已内嵌私有 CA 证书' : ''}
+              {t('有效期剩余 ', 'Expires in ')}
+              <strong>{formatCountdown(pendingPairing.expiresAt, nowMs)}</strong>
+              {pendingPairing.includesCa ? t(' · 已内嵌私有 CA 证书', ' · Private CA embedded') : ''}
             </div>
 
-            <div className="ca-inline-row" style={{ flexWrap: 'wrap', justifyContent: 'center' }}>
-              <CopyButton value={pendingPairing.code} label="复制配对码" />
+            <div className="ca-inline-row ca-wrap ca-justify-center">
+              <CopyButton value={pendingPairing.code} label={t('复制配对码', 'Copy Code')} />
               <button
                 type="button"
                 className="ca-btn ca-btn-danger ca-btn-sm"
                 onClick={() => void handleRevokePendingPairing()}
               >
-                作废此配对码
+                {t('作废此配对码', 'Revoke Code')}
               </button>
             </div>
             <p className="ca-field-help">
-              关闭此窗口不会作废配对码，可在设备页顶部状态条随时重新打开或作废。
+              {t('关闭此窗口不会作废配对码，可在设备页顶部状态条随时重新打开或作废。', 'Closing this window will not revoke the code. You can reopen or revoke it from the status bar at the top of the Devices tab.')}
             </p>
           </div>
         ) : (
-          <div className="ca-empty">正在生成配对码…</div>
+          <div className="ca-empty">{t('正在生成配对码…', 'Generating pairing code…')}</div>
         )}
       </CaModal>
 
@@ -919,32 +948,34 @@ export function DevicesTab({
       <CaModal
         open={caOpen}
         onOpenChange={setCaOpen}
-        title="私有 CA 证书设置"
-        description="若中心使用自签或内网 HTTPS 证书，可在此配置信任根证书（新配对码将自动携带）"
+        title={t('私有 CA 证书设置', 'Private CA Certificate Settings')}
+        description={t('若中心使用自签或内网 HTTPS 证书，可在此配置信任根证书（新配对码将自动携带）', 'Configure a trusted root CA if the center uses a self-signed or private HTTPS certificate (embedded in new pairing codes)')}
         variant="drawer"
       >
         <div className="ca-form-stack">
           {caError && <CaNotice tone="danger">{caError}</CaNotice>}
           {caState && caState.certificates.length > 0 && (
             <div className="ca-cred-box">
-              <div className="ca-field-label" style={{ marginBottom: 4 }}>
-                当前已解析证书 ({caState.certificates.length})
+              <div className="ca-field-label ca-mb-1">
+                {t(`当前已解析证书 (${caState.certificates.length})`, `Parsed Certificates (${caState.certificates.length})`)}
               </div>
               {caState.certificates.map(cert => (
-                <div key={cert.fingerprint256} className="ca-muted" style={{ marginTop: 4 }}>
+                <div key={cert.fingerprint256} className="ca-muted ca-mt-1">
                   <div>{cert.subject}</div>
-                  <div className="ca-mono">有效期至 {formatTime(cert.validTo)}</div>
+                  <div className="ca-mono">
+                    {t(`有效期至 ${formatTime(cert.validTo, locale)}`, `Valid until ${formatTime(cert.validTo, locale)}`)}
+                  </div>
                 </div>
               ))}
             </div>
           )}
 
           <div className="ca-field">
-            <label className="ca-field-label">PEM 根证书内容</label>
+            <label className="ca-field-label">{t('PEM 根证书内容', 'PEM Root Certificate')}</label>
             <textarea
               rows={8}
               className="ca-textarea ca-mono"
-              placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"
+              placeholder={'-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----'}
               value={caDraft}
               onChange={e => setCaDraft(e.target.value)}
             />
@@ -957,7 +988,7 @@ export function DevicesTab({
               disabled={caBusy || !caState?.ca}
               onClick={() => void handleSaveCa(null)}
             >
-              清除证书
+              {t('清除证书', 'Clear Certificate')}
             </button>
             <button
               type="button"
@@ -965,45 +996,45 @@ export function DevicesTab({
               disabled={caBusy || !caDraft.trim()}
               onClick={() => void handleSaveCa(caDraft)}
             >
-              {caBusy ? '保存中…' : '保存证书'}
+              {caBusy ? t('保存中…', 'Saving…') : t('保存证书', 'Save Certificate')}
             </button>
           </div>
         </div>
       </CaModal>
 
-      {/* 新建智能体弹窗（直接支持选模型） */}
+      {/* 新建 Bot 弹窗（直接支持选模型） */}
       <CaModal
         open={Boolean(createBotDevice)}
         onOpenChange={open => {
           if (!open) setCreateBotDevice(null);
         }}
-        title={`在「${createBotDevice?.name ?? ''}」新建智能体`}
+        title={t(`在「${createBotDevice?.name ?? ''}」新建 Bot`, `New Bot on "${createBotDevice?.name ?? ''}"`)}
         variant="modal"
       >
         <form className="ca-form-stack" onSubmit={e => void handleCreateBot(e)}>
           {createBotError && <CaNotice tone="danger">{createBotError}</CaNotice>}
           <div className="ca-field">
             <label className="ca-field-label">
-              智能体名称 <span className="ca-req">*</span>
+              {t('Bot 名称', 'Bot Name')} <span className="ca-req">*</span>
             </label>
             <input
               type="text"
               className="ca-input"
               required
-              placeholder="例如：代码助手 / 运维助理"
+              placeholder={t('例如：代码助手 / 运维助理', 'e.g. Coding Assistant / Ops Helper')}
               value={newBotRole}
               onChange={e => setNewBotRole(e.target.value)}
             />
           </div>
 
           <div className="ca-field">
-            <label className="ca-field-label">模型选择</label>
+            <label className="ca-field-label">{t('模型选择', 'Model')}</label>
             <select
               className="ca-select"
               value={newBotModelRef}
               onChange={e => setNewBotModelRef(e.target.value)}
             >
-              <option value="">跟随默认（{globalDefaultName}）</option>
+              <option value="">{t(`跟随默认（${globalDefaultName}）`, `Follow default (${globalDefaultName})`)}</option>
               {sortedPickerModels.map(m => (
                 <option key={m.modelRef} value={m.modelRef}>
                   {m.name} ({m.modelRef})
@@ -1013,22 +1044,22 @@ export function DevicesTab({
           </div>
 
           <div className="ca-field">
-            <label className="ca-field-label">简介（可选）</label>
+            <label className="ca-field-label">{t('简介（可选）', 'Description (optional)')}</label>
             <input
               type="text"
               className="ca-input"
-              placeholder="简述职责或定位"
+              placeholder={t('简述职责或定位', 'Briefly describe its role')}
               value={newBotDesc}
               onChange={e => setNewBotDesc(e.target.value)}
             />
           </div>
 
           <div className="ca-field">
-            <label className="ca-field-label">工作目录 CWD（可选）</label>
+            <label className="ca-field-label">{t('工作目录 CWD（可选）', 'Working Directory CWD (optional)')}</label>
             <input
               type="text"
               className="ca-input ca-mono"
-              placeholder="留空由设备端分配默认目录"
+              placeholder={t('留空由设备端分配默认目录', 'Leave empty to use device default')}
               value={newBotCwd}
               onChange={e => setNewBotCwd(e.target.value)}
             />
@@ -1040,27 +1071,27 @@ export function DevicesTab({
               checked={newBotPrimary}
               onChange={e => setNewBotPrimary(e.target.checked)}
             />
-            <span>设为此设备主智能体</span>
+            <span>{t('设为此设备主 Bot', 'Set as Primary Bot on this device')}</span>
           </label>
 
           <div className="ca-form-actions">
             <button type="button" className="ca-btn" onClick={() => setCreateBotDevice(null)}>
-              取消
+              {t('取消', 'Cancel')}
             </button>
             <button type="submit" className="ca-btn ca-btn-primary" disabled={createBotBusy}>
-              {createBotBusy ? '创建中…' : '创建智能体'}
+              {createBotBusy ? t('创建中…', 'Creating…') : t('创建 Bot', 'Create Bot')}
             </button>
           </div>
         </form>
       </CaModal>
 
-      {/* 内置聚合智能体配置抽屉（未传外部 onConfigureBot 时使用） */}
+      {/* 内置聚合 Bot 配置抽屉（未传外部 onConfigureBot 时使用） */}
       <CaModal
         open={Boolean(cfgBot)}
         onOpenChange={open => {
           if (!open) setCfgBot(null);
         }}
-        title={`配置智能体 · ${cfgBot?.name ?? ''}`}
+        title={t(`配置 Bot · ${cfgBot?.name ?? ''}`, `Configure Bot · ${cfgBot?.name ?? ''}`)}
         description={cfgBot?.deviceName || cfgBot?.deviceId}
         variant="drawer"
         wide
@@ -1071,30 +1102,31 @@ export function DevicesTab({
             {cfgNotice && <CaNotice tone="ok">{cfgNotice}</CaNotice>}
 
             <CaSegmented
+              ariaLabel={t('Bot 配置分区', 'Bot configuration sections')}
               value={cfgTab}
               options={[
-                { value: 'basic', label: '模型与基础信息' },
-                { value: 'caps', label: '技能与扩展' },
-                { value: 'learning', label: '自主学习' },
+                { value: 'basic', label: t('模型与基础信息', 'Model & Profile') },
+                { value: 'caps', label: t('技能与扩展', 'Skills & Extensions') },
+                { value: 'learning', label: t('自主学习', 'Self-Learning') },
               ]}
               onChange={setCfgTab}
             />
 
             {cfgTab === 'basic' && (
               <div className="ca-form-stack">
-                <div className="ca-section" style={{ padding: 12 }}>
-                  <div className="ca-field-label" style={{ marginBottom: 6 }}>
-                    模型配置（即点即存）
+                <div className="ca-section ca-section-pad">
+                  <div className="ca-field-label ca-mb-2">
+                    {t('模型配置（即点即存）', 'Model Selection (saves immediately)')}
                   </div>
-                  <div className="ca-model-list" style={{ maxHeight: 220 }}>
+                  <div className="ca-model-list ca-model-list-sm">
                     <button
                       type="button"
                       className={`ca-model-option ${!cfgModel?.overrides.modelRef ? 'is-selected' : ''}`}
                       disabled={cfgBusy}
                       onClick={() => void handleSetBotModel(null)}
                     >
-                      <span>跟随全局默认（{globalDefaultName}）</span>
-                      {!cfgModel?.overrides.modelRef && <Check size={14} />}
+                      <span>{t(`跟随全局默认（${globalDefaultName}）`, `Follow global default (${globalDefaultName})`)}</span>
+                      {!cfgModel?.overrides.modelRef && <Check size={14} aria-hidden="true" />}
                     </button>
                     {sortedPickerModels.map(m => {
                       const active = cfgModel?.overrides.modelRef === m.modelRef;
@@ -1106,22 +1138,22 @@ export function DevicesTab({
                           disabled={cfgBusy}
                           onClick={() => void handleSetBotModel(m.modelRef)}
                         >
-                          <div>
-                            <div>{m.name}</div>
-                            <div className="ca-muted ca-mono">{m.modelRef}</div>
-                          </div>
-                          {active && <Check size={14} />}
+                          <span className="ca-model-option-main">
+                            <span>{m.name}</span>
+                            <span className="ca-muted ca-mono">{m.modelRef}</span>
+                          </span>
+                          {active && <Check size={14} aria-hidden="true" />}
                         </button>
                       );
                     })}
                   </div>
                 </div>
 
-                <div className="ca-section" style={{ padding: 12 }}>
+                <div className="ca-section ca-section-pad">
                   <div className="ca-form-stack">
                     <div className="ca-grid-2">
                       <div className="ca-field">
-                        <label className="ca-field-label">智能体名称</label>
+                        <label className="ca-field-label">{t('Bot 名称', 'Bot Name')}</label>
                         <input
                           type="text"
                           className="ca-input"
@@ -1130,7 +1162,7 @@ export function DevicesTab({
                         />
                       </div>
                       <div className="ca-field">
-                        <label className="ca-field-label">简介</label>
+                        <label className="ca-field-label">{t('简介', 'Description')}</label>
                         <input
                           type="text"
                           className="ca-input"
@@ -1141,7 +1173,9 @@ export function DevicesTab({
                     </div>
 
                     <div className="ca-field">
-                      <label className="ca-field-label">工作目录 (CWD · 离线可修改，在线后自动同步)</label>
+                      <label className="ca-field-label">
+                        {t('工作目录 (CWD · 离线可修改，在线后自动同步)', 'Working Directory (CWD · editable offline, syncs when online)')}
+                      </label>
                       <input
                         type="text"
                         className="ca-input ca-mono"
@@ -1158,7 +1192,7 @@ export function DevicesTab({
                         disabled={cfgBusy}
                         onClick={() => void handleSaveBotProfileAndCwd()}
                       >
-                        保存信息与目录
+                        {t('保存信息与目录', 'Save Profile & CWD')}
                       </button>
                     </div>
                   </div>
@@ -1170,7 +1204,7 @@ export function DevicesTab({
               <div className="ca-section">
                 <div className="ca-list">
                   {cfgCaps.length === 0 ? (
-                    <div className="ca-empty">中心暂无已安装的技能或工具扩展</div>
+                    <div className="ca-empty">{t('中心暂无已安装的技能或工具扩展', 'No skills or extensions installed in center yet')}</div>
                   ) : (
                     cfgCaps.map(entry => (
                       <div key={entry.installation.installationId} className="ca-row">
@@ -1184,7 +1218,7 @@ export function DevicesTab({
                         <div className="ca-row-actions">
                           <CaSwitch
                             checked={entry.config.enabled}
-                            label={`为 ${cfgBot.name} 启用 ${entry.installation.displayName}`}
+                            label={t(`为 ${cfgBot.name} 启用 ${entry.installation.displayName}`, `Enable ${entry.installation.displayName} for ${cfgBot.name}`)}
                             onChange={next => void handleToggleBotCap(entry, next)}
                           />
                         </div>
@@ -1198,15 +1232,17 @@ export function DevicesTab({
             {cfgTab === 'learning' && (
               <div className="ca-form-stack">
                 {!cfgLearning ? (
-                  <div className="ca-empty">正在读取学习状态或当前智能体暂不支持自主学习…</div>
+                  <div className="ca-empty">
+                    {t('正在读取学习状态或当前 Bot 暂不支持自主学习…', 'Loading learning status, or this Bot does not support self-learning yet…')}
+                  </div>
                 ) : (
                   <>
-                    <div className="ca-section" style={{ padding: 12 }}>
+                    <div className="ca-section ca-section-pad">
                       <div className="ca-inline-between">
                         <div>
-                          <div className="ca-field-label">空闲自动学习技能</div>
+                          <div className="ca-field-label">{t('空闲自动学习技能', 'Idle Auto-Learning')}</div>
                           <div className="ca-muted">
-                            开启后，智能体会在对话间隙自动提炼记忆并沉淀新技能
+                            {t('开启后，Bot 会在对话间隙自动提炼记忆并沉淀新技能', 'When enabled, the Bot automatically distills memories and skills while idle')}
                           </div>
                         </div>
                         <CaSwitch
@@ -1216,17 +1252,18 @@ export function DevicesTab({
                             true
                           }
                           disabled={cfgBusy}
+                          label={t('切换空闲自动学习技能', 'Toggle idle auto-learning')}
                           onChange={next => void handleToggleLearning(next)}
                         />
                       </div>
-                      <div className="ca-inline-row" style={{ marginTop: 12, flexWrap: 'wrap' }}>
+                      <div className="ca-inline-row ca-wrap ca-mt-3">
                         <button
                           type="button"
                           className="ca-btn ca-btn-primary ca-btn-sm"
                           disabled={cfgBusy}
                           onClick={() => void handleTriggerReview('review')}
                         >
-                          立即复盘
+                          {t('立即复盘', 'Review Now')}
                         </button>
                         <button
                           type="button"
@@ -1234,21 +1271,21 @@ export function DevicesTab({
                           disabled={cfgBusy}
                           onClick={() => void handleTriggerReview('curate')}
                         >
-                          整理记忆与技能
+                          {t('整理记忆与技能', 'Curate Memory & Skills')}
                         </button>
                         {cfgLearning.lastJob && (
                           <span className="ca-muted">
-                            最近任务：{cfgLearning.lastJob.mode} · {cfgLearning.lastJob.status}
+                            {t(`最近任务：${cfgLearning.lastJob.mode} · ${cfgLearning.lastJob.status}`, `Last job: ${cfgLearning.lastJob.mode} · ${cfgLearning.lastJob.status}`)}
                           </span>
                         )}
                       </div>
                     </div>
 
-                    <CaDisclosure title="高级学习周期参数">
+                    <CaDisclosure title={t('高级学习周期参数', 'Advanced Learning Schedule')}>
                       <div className="ca-form-stack">
                         <div className="ca-grid-2">
                           <div className="ca-field">
-                            <label className="ca-field-label">记忆复盘间隔（轮次）</label>
+                            <label className="ca-field-label">{t('记忆复盘间隔（轮次）', 'Memory review interval (turns)')}</label>
                             <input
                               type="number"
                               className="ca-input ca-num"
@@ -1257,7 +1294,7 @@ export function DevicesTab({
                             />
                           </div>
                           <div className="ca-field">
-                            <label className="ca-field-label">技能提炼间隔（迭代）</label>
+                            <label className="ca-field-label">{t('技能提炼间隔（迭代）', 'Skill extraction interval (iterations)')}</label>
                             <input
                               type="number"
                               className="ca-input ca-num"
@@ -1266,7 +1303,7 @@ export function DevicesTab({
                             />
                           </div>
                           <div className="ca-field">
-                            <label className="ca-field-label">整理周期（小时）</label>
+                            <label className="ca-field-label">{t('整理周期（小时）', 'Curation interval (hours)')}</label>
                             <input
                               type="number"
                               className="ca-input ca-num"
@@ -1275,7 +1312,7 @@ export function DevicesTab({
                             />
                           </div>
                           <div className="ca-field">
-                            <label className="ca-field-label">最小空闲时间（小时）</label>
+                            <label className="ca-field-label">{t('最小空闲时间（小时）', 'Minimum idle time (hours)')}</label>
                             <input
                               type="number"
                               className="ca-input ca-num"
@@ -1291,7 +1328,7 @@ export function DevicesTab({
                             disabled={cfgBusy}
                             onClick={() => void handleSaveLearningAdvanced()}
                           >
-                            保存高级参数
+                            {t('保存高级参数', 'Save Advanced Settings')}
                           </button>
                         </div>
                       </div>

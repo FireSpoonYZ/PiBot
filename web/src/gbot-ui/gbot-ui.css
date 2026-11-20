@@ -1,6 +1,6 @@
 /* gbot-ui lane 局部样式。菜单类名沿用上游 baby-grok-bot-context-menu（portal 定位
  * 依赖最近的 .baby-grok-bot 祖先约定与上游一致）；行/头像用 gbot-* 前缀，
- * 全部映射到本仓库主题变量（--surface/--text/--muted/--line/--accent 系）。 */
+ * 全部映射到本仓库全局令牌（附旧令牌与数值回退，兼容桌面端）。 */
 
 .gbot-menu-anchor {
   display: none;
@@ -15,32 +15,39 @@
   user-select: none;
 }
 .baby-grok-bot-conversation-row:focus-visible {
-  outline: 2px solid var(--accent, #627565);
+  outline: 2px solid var(--color-primary, var(--brand, var(--accent)));
   outline-offset: -2px;
 }
 
 .gbot-conversation-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-2, 8px);
   width: 100%;
+  min-height: var(--tap-min, 44px);
   text-align: left;
   border: 0;
   background: transparent;
-  border-radius: 12px;
-  padding: 8px 10px;
-  color: var(--text, inherit);
+  border-radius: var(--radius-md, 12px);
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  color: var(--color-text, var(--text));
+  transition: background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
 }
-.gbot-conversation-row:hover {
-  background: var(--accent-soft, var(--selection, rgb(0 0 0 / 0.05)));
+@media (hover: hover) {
+  .gbot-conversation-row:hover {
+    background: var(--color-primary-soft, var(--accent-soft, var(--selection)));
+  }
+}
+.gbot-conversation-row:active {
+  background: var(--color-selection, var(--selection));
 }
 .gbot-conversation-row[data-active] {
-  background: var(--accent-soft, var(--selection, rgb(0 0 0 / 0.05)));
+  background: var(--color-primary-soft, var(--accent-soft, var(--selection)));
 }
 .gbot-conversation-row.hub-bot-row {
   min-height: 54px;
-  padding: 6px 8px;
-  border-radius: 10px;
+  padding: 6px var(--space-2, 8px);
+  border-radius: var(--radius-md, 12px);
   line-height: 1.4;
 }
 .gbot-conversation-row__avatar {
@@ -65,45 +72,46 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: var(--text-md, .9375rem);
+  font-weight: var(--weight-semibold, 600);
 }
 .gbot-conversation-row__time {
   flex: none;
-  font-size: 11px;
+  font-size: var(--text-xs, .75rem);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  color: var(--muted, inherit);
+  color: var(--color-text-muted, var(--muted));
 }
 .gbot-conversation-row__preview {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
-  color: var(--muted, inherit);
+  font-size: var(--text-xs, .75rem);
+  color: var(--color-text-muted, var(--muted));
 }
 .gbot-conversation-row__unread-dot {
   flex: none;
   width: 7px;
   height: 7px;
-  border-radius: 999px;
-  background: var(--accent, #627565);
+  border-radius: var(--radius-full, 999px);
+  background: var(--color-primary, var(--brand, var(--accent)));
 }
 
-/* ————— 上下文菜单（上游 baby-grok-bot-context-menu 结构，映射本仓库变量） ————— */
+/* ————— 上下文菜单（上游 baby-grok-bot-context-menu 结构，映射全局令牌） ————— */
 
 .baby-grok-bot-context-menu {
   position: fixed;
-  z-index: 300;
+  z-index: var(--z-dialog, 300);
   width: max-content;
   min-width: 200px;
-  max-width: min(280px, calc(100vw - 16px));
-  padding: 5px;
-  border: 0.5px solid var(--line, rgb(0 0 0 / 0.12));
-  border-radius: 12px;
-  background: var(--surface-elevated, var(--surface, #fff));
-  color: var(--text, inherit);
-  box-shadow: 0 22px 54px -20px rgb(0 0 0 / 0.55), 0 1px 2px rgb(0 0 0 / 0.1);
+  max-width: min(280px, calc(100vw - var(--space-4, 16px)));
+  padding: var(--space-1, 4px);
+  border: 1px solid var(--color-line, var(--line));
+  border-radius: var(--radius-md, 12px);
+  background: var(--color-surface-2, var(--surface-elevated, var(--surface)));
+  color: var(--color-text, var(--text));
+  box-shadow: 0 22px 54px -20px var(--color-scrim, color-mix(in srgb, var(--text) 45%, transparent)),
+    0 1px 2px color-mix(in srgb, var(--color-text, var(--text)) 10%, transparent);
   opacity: 0;
   transform: translateY(-3px) scale(0.97);
   transform-origin: top left;
@@ -113,61 +121,96 @@
   opacity: 1;
   transform: none;
   pointer-events: auto;
-  transition: opacity 100ms ease-out, transform 120ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)),
+    transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
 }
 .baby-grok-bot-context-menu__label {
-  padding: 5px 8px 6px;
-  color: var(--muted, inherit);
-  font-size: 10px;
-  line-height: 14px;
-  font-weight: 600;
+  padding: var(--space-1, 4px) var(--space-2, 8px) 6px;
+  color: var(--color-text-muted, var(--muted));
+  font-size: var(--text-xs, .75rem);
+  line-height: 1.3;
+  font-weight: var(--weight-semibold, 600);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 .baby-grok-bot-context-menu__item {
+  position: relative;
   display: flex;
   width: 100%;
-  min-height: 32px;
+  min-height: 36px;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3, 12px);
   border: 0;
-  border-radius: 7px;
-  padding: 6px 8px;
+  border-radius: var(--radius-sm, 8px);
+  padding: 6px var(--space-2, 8px);
   background: transparent;
-  color: var(--text, inherit);
-  font-size: 12px;
-  line-height: 18px;
+  color: var(--color-text, var(--text));
+  font-size: var(--text-sm, .8125rem);
+  line-height: 1.4;
   text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background-color var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
 }
-.baby-grok-bot-context-menu__item:hover,
+.baby-grok-bot-context-menu__item::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: max(100%, var(--tap-min, 44px));
+  height: max(100%, var(--tap-min, 44px));
+}
+@media (pointer: coarse) {
+  .baby-grok-bot-context-menu__item {
+    min-height: var(--tap-min, 44px);
+    font-size: var(--text-md, .9375rem);
+  }
+}
+@media (hover: hover) {
+  .baby-grok-bot-context-menu__item:hover:not(:disabled) {
+    background: var(--color-primary-soft, var(--accent-soft, var(--selection)));
+  }
+}
+.baby-grok-bot-context-menu__item:active:not(:disabled) {
+  background: var(--color-selection, var(--selection));
+}
 .baby-grok-bot-context-menu__item:focus-visible {
-  outline: none;
-  background: var(--accent-soft, var(--selection, rgb(0 0 0 / 0.06)));
+  outline: 2px solid var(--color-primary, var(--brand, var(--accent)));
+  outline-offset: -2px;
+  background: var(--color-primary-soft, var(--accent-soft, var(--selection)));
 }
 .baby-grok-bot-context-menu__item:disabled {
-  color: var(--muted, inherit);
-  opacity: 0.6;
+  color: var(--color-text-muted, var(--muted));
+  opacity: 0.72;
+  cursor: not-allowed;
 }
 .baby-grok-bot-context-menu__item--danger,
 .baby-grok-bot-context-menu__item[data-danger] {
-  color: var(--danger, #ac3434);
+  color: var(--color-danger, var(--danger));
 }
-.baby-grok-bot-context-menu__item--danger:hover:not(:disabled),
+@media (hover: hover) {
+  .baby-grok-bot-context-menu__item--danger:hover:not(:disabled),
+  .baby-grok-bot-context-menu__item[data-danger]:hover:not(:disabled) {
+    background: var(--danger-soft, color-mix(in srgb, var(--color-danger, var(--danger)) 12%, transparent));
+  }
+}
+.baby-grok-bot-context-menu__item--danger:active:not(:disabled),
+.baby-grok-bot-context-menu__item[data-danger]:active:not(:disabled),
 .baby-grok-bot-context-menu__item--danger:focus-visible:not(:disabled),
-.baby-grok-bot-context-menu__item[data-danger]:hover:not(:disabled),
 .baby-grok-bot-context-menu__item[data-danger]:focus-visible:not(:disabled) {
-  background: var(--danger-soft, color-mix(in srgb, var(--danger, #ac3434) 12%, transparent));
+  background: var(--danger-soft, color-mix(in srgb, var(--color-danger, var(--danger)) 12%, transparent));
 }
 .gbot-context-menu__item-icon {
   flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--muted, inherit);
+  color: var(--color-text-muted, var(--muted));
 }
 .gbot-context-menu__item-icon svg {
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
 }
 .baby-grok-bot-context-menu__item--danger .gbot-context-menu__item-icon,
 .baby-grok-bot-context-menu__item[data-danger] .gbot-context-menu__item-icon {
@@ -189,7 +232,7 @@
   flex: none;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
+  border-radius: var(--radius-full, 999px);
 }
 .gbot-group-avatar__surface {
   position: relative;
@@ -207,7 +250,7 @@
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  border-radius: 999px;
+  border-radius: var(--radius-full, 999px);
   /* 用户反馈：去掉每个成员位格的灰底/灰圈；成员 SVG 颜色不受影响。 */
   background: transparent;
 }
@@ -228,8 +271,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
-  background: var(--selection, rgb(0 0 0 / 0.12));
-  color: var(--text, inherit);
-  font-weight: 650;
+  border-radius: var(--radius-full, 999px);
+  background: var(--color-selection, var(--selection));
+  color: var(--color-text, var(--text));
+  font-weight: var(--weight-semibold, 600);
 }

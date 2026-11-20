@@ -16,6 +16,7 @@ import type {
   ReactNode,
 } from 'react';
 import { reorderExistingPins } from './chatPins';
+import { mobileHaptic } from '../native/tauri-host';
 import './sortable-pinned-chat.css';
 
 const DRAG_THRESHOLD_PX = 5;
@@ -152,6 +153,7 @@ export function SortablePinnedChat({
 
       if (session.moved) {
         armClickGuard();
+        mobileHaptic('tick');
       }
 
       if (
@@ -196,6 +198,7 @@ export function SortablePinnedChat({
         session.moved = true;
         setDragging(true);
         armClickGuard();
+        mobileHaptic('longPress');
         // 若用户按住已超过 500ms 导致上下文菜单刚弹出，继续拖动时立即收起菜单转为排序
         window.dispatchEvent(new CustomEvent('gbot-close-context-menu'));
         try {

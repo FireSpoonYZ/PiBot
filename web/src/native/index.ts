@@ -139,7 +139,7 @@ export type HostVoiceRemote = { baseUrl: string; model: string; voice: string; c
 export type HostVoiceSettings = { sttEngine: HostVoiceEngine; ttsEngine: HostVoiceEngine; language: string; speechRate: number; stt: HostVoiceRemote; tts: HostVoiceRemote };
 /** Write shape: apiKey omitted keeps the stored key, empty string clears it, a value replaces it. */
 export type HostVoiceSaveInput = { sttEngine?: HostVoiceEngine; ttsEngine?: HostVoiceEngine; language?: string; speechRate?: number; stt?: HostVoiceRemote & {apiKey?: string}; tts?: HostVoiceRemote & {apiKey?: string} };
-export type HostVoiceEvent = { type: 'partial'|'submitted'|'error'; botId: string; requestId: string; text?: string; receipt?: Record<string, unknown>; code?: string; outcome?: string; message?: string };
+export type HostVoiceEvent = { type: 'partial'|'level'|'submitted'|'error'; botId: string; requestId: string; text?: string; value?: number; receipt?: Record<string, unknown>; code?: string; outcome?: string; message?: string };
 
 /** 系统选图/拍照返回的单张图片：data 为纯 base64（不含 dataURL），mimeType 限定 JPEG/PNG。 */
 export type BotHostImage = { name: string; mimeType: 'image/jpeg'|'image/png'; data: string; size: number; width: number; height: number };

@@ -146,6 +146,14 @@ pub struct NavigationGuardConfig {
 pub fn run() {
   let bridge = DesktopBridge::new();
   let app = tauri::Builder::default()
+    // Register single-instance first so secondary launches exit before other plugins initialize.
+    .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+      if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+      }
+    }))
     .manage(bridge)
     .manage(updates::UpdateState::default())
     // Reload/navigation kills every observer Channel owned by the old

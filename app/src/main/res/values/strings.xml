@@ -1,2 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources />
+<resources>
+    <string name="client_start_failed">客户端启动失败，请重新打开应用</string>
+</resources>

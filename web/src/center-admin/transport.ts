@@ -93,7 +93,11 @@ export class CenterApiError extends Error {
   }
 }
 
-export function errorMessage(err: unknown, fallback = '操作失败'): string {
+function t(zh: string, en: string): string {
+  return typeof navigator !== 'undefined' && navigator.language.startsWith('en') ? en : zh;
+}
+
+export function errorMessage(err: unknown, fallback = t('操作失败', 'Operation failed')): string {
   if (err instanceof CenterApiError) return err.message || fallback;
   if (err instanceof Error) return err.message || fallback;
   if (typeof err === 'string' && err) return err;
@@ -132,7 +136,7 @@ export function createBrokerCenterTransport(
       if (typeof FormData !== 'undefined' && body instanceof FormData) {
         throw new CenterApiError(
           'UNSUPPORTED_FORM_DATA',
-          '当前应用内通道不支持文件直传，请在浏览器中打开中心管理完成上传',
+          t('当前应用内通道不支持文件直传，请在浏览器中打开中心管理完成上传', 'In-app channel does not support direct file uploads. Open Center Admin in your browser to upload.'),
           400,
         );
       }
@@ -154,7 +158,7 @@ export function createBrokerCenterTransport(
         const status = typeof rec?.status === 'number' ? rec.status : 500;
         const message = err instanceof Error ? err.message : typeof rec?.message === 'string' ? rec.message : String(err);
         const details = rec && 'details' in rec ? (rec.details as JsonValue) : undefined;
-        throw new CenterApiError(code, message || '中心请求失败', status, details);
+        throw new CenterApiError(code, message || t('中心请求失败', 'Center request failed'), status, details);
       }
     },
   };
@@ -194,7 +198,7 @@ export function createFetchCenterTransport(options: FetchCenterTransportOptions 
         (path.startsWith('/api/session/qr/') && path.endsWith('/claim'));
       if (method !== 'GET' && !isPublicQrAuth) {
         if (!csrfToken) {
-          throw new CenterApiError('CSRF_INVALID', '会话令牌不可用，请重新连接中心', 403);
+          throw new CenterApiError('CSRF_INVALID', t('会话令牌不可用，请重新连接中心', 'Session token unavailable. Please reconnect to the center.'), 403);
         }
         headers.set('x-csrf-token', csrfToken);
       }
@@ -215,7 +219,7 @@ export function createFetchCenterTransport(options: FetchCenterTransportOptions 
       } catch {
         if (options.onOffline) options.onOffline();
         else if (typeof window !== 'undefined') window.dispatchEvent(new Event('center-offline'));
-        throw new CenterApiError('CENTER_OFFLINE', '无法连接中心', 503);
+        throw new CenterApiError('CENTER_OFFLINE', t('无法连接中心', 'Unable to connect to center'), 503);
       }
 
       if (!response.ok) {
@@ -230,7 +234,7 @@ export function createFetchCenterTransport(options: FetchCenterTransportOptions 
         }
         throw new CenterApiError(
           payload?.error?.code || 'HTTP_ERROR',
-          payload?.error?.message || `请求失败 (${response.status})`,
+          payload?.error?.message || t(`请求失败 (${response.status})`, `Request failed (${response.status})`),
           response.status,
           payload?.error?.details,
         );

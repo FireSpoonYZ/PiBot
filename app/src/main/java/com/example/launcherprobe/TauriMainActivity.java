@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.res.Configuration;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Process;
@@ -51,6 +52,8 @@ public class TauriMainActivity extends TauriActivity {
     private String launchBotId;
     private static final String TARGET_DEVICE = "assistant_device_id";
     private static final String TARGET_BOT = "assistant_bot_id";
+    private static final int LIGHT_BG_COLOR = 0xfffaf9f6;
+    private static final int DARK_BG_COLOR = 0xff191b19;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         if (savedInstanceState != null) {
@@ -72,8 +75,18 @@ public class TauriMainActivity extends TauriActivity {
             getWindow().setAttributes(lp);
         }
         // 沿用既有外观偏好决定状态/导航栏图标明暗；状态栏与导航栏完全透明以实现全面屏沉浸。
+        applyAppearance();
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override public void handleOnBackPressed() {
+                handleBackNavigation();
+            }
+        });
+    }
+
+    /** 同步状态栏/导航栏明暗及窗口、WebView 底色，避免系统深浅色或外观偏好变更后残留旧色。 */
+    private void applyAppearance() {
         AppAppearance appearance = AppAppearance.read(this);
-        int bgColor = appearance.dark ? 0xff191b19 : 0xfffaf9f6;
+        int bgColor = appearance.dark ? DARK_BG_COLOR : LIGHT_BG_COLOR;
         appearance.applySystemBars(this, Color.TRANSPARENT);
         WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
         if (controller != null) {
@@ -82,11 +95,9 @@ public class TauriMainActivity extends TauriActivity {
         }
         // edge-to-edge 下窗口底色与前端主背景一致，避免首帧或边缘露白。
         getWindow().getDecorView().setBackgroundColor(bgColor);
-        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
-            @Override public void handleOnBackPressed() {
-                handleBackNavigation();
-            }
-        });
+        if (activeWebView != null) {
+            activeWebView.setBackgroundColor(bgColor);
+        }
     }
 
     @Override protected void onNewIntent(Intent intent) {
@@ -106,7 +117,7 @@ public class TauriMainActivity extends TauriActivity {
             BotHostService.startClientFromActivity(this);
         } catch (RuntimeException failure) {
             Log.e("TauriMainActivity", "Client foreground service start failed", failure);
-            Toast.makeText(this, "客户端启动失败，请重新打开应用", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, R.string.client_start_failed, Toast.LENGTH_LONG).show();
         }
     }
 
@@ -206,7 +217,7 @@ public class TauriMainActivity extends TauriActivity {
         super.onWebViewCreate(webView);
         activeWebView = webView;
         AppAppearance appearance = AppAppearance.read(this);
-        webView.setBackgroundColor(appearance.dark ? 0xff191b19 : 0xfffaf9f6);
+        webView.setBackgroundColor(appearance.dark ? DARK_BG_COLOR : LIGHT_BG_COLOR);
         // 仅 debug 构建开启 WebView 检查；release 保持 false，不放松 CSP/Origin/TLS。
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
         // 此回调早于 Rust 的 setContentView（见上），post 到当前调用栈之后再绑定真实内容容器。
@@ -217,6 +228,12 @@ public class TauriMainActivity extends TauriActivity {
     @Override protected void onResume() {
         super.onResume();
         resumed = true;
+        applyAppearance();
+    }
+
+    @Override public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        applyAppearance();
     }
 
     @Override protected void onPause() {
