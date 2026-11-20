@@ -13,7 +13,6 @@ import {
   SETUP_ERROR_CODES,
   normalizeBrowserControl,
   normalizeGoogleSetupControl,
-  projectBrowserControlForService,
   projectGoogleSetupControlForService,
   safeBrowserControlError,
   safeGoogleSetupError,
@@ -144,7 +143,8 @@ test('browserControl and googleSetupControl normalizers align with real services
   for (const action of BROWSER_CONTROL_ACTIONS) {
     const base = { action, botId: 'bot-1' };
     if (action === 'navigate') base.url = 'https://console.cloud.google.com/';
-    if (action === 'input') base.event = { kind: 'click', x: 0.5, y: 0.25 };
+    if (['input', 'select', 'closeTab'].includes(action)) base.pageId = 'page-1';
+    if (action === 'input') Object.assign(base, { lease: 'fixture-lease', revision: 2, event: { kind: 'click', x: 0.5, y: 0.25 } });
     if (action === 'reload') base.ignoreCache = true;
     if (action === 'frame') {
       base.format = 'jpeg';
@@ -162,8 +162,8 @@ test('browserControl and googleSetupControl normalizers align with real services
     const normalized = normalizeBrowserControl(base);
     assert.equal(normalized.action, action);
     assert.equal(normalized.botId, 'bot-1');
-    const projected = projectBrowserControlForService(normalized);
-    assert.equal(projected.action, action);
+    assert.deepEqual(normalizeBrowserControl(normalized), normalized);
+    if (action === 'frame') assert.equal(normalized.quality, 80);
   }
 
   for (const action of GOOGLE_SETUP_ACTIONS) {

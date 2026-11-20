@@ -51,40 +51,20 @@ const MAX_MODE_BYTES = 64;
 const MAX_VALUES_COUNT = 20;
 const MAX_SERVICES_COUNT = 16;
 
-// Exact fields accepted by bot-browser/protocol.js CONTROL_ACTION_FIELDS.
-const SERVICE_BROWSER_FIELDS = Object.freeze({
+const WIRE_BROWSER_FIELDS = Object.freeze({
   status: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease']),
-  open: new Set(['action', 'botId', 'scopeId', 'url', 'lease']),
+  open: new Set(['action', 'botId', 'scopeId', 'pageId', 'revision', 'url', 'lease']),
   navigate: new Set(['action', 'botId', 'scopeId', 'pageId', 'url', 'lease', 'revision']),
   back: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
   forward: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
   reload: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'ignoreCache']),
   select: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
   closeTab: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
-  frame: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes']),
-  takeover: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'force', 'preempt', 'resume', 'holderLabel']),
+  frame: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes']),
+  takeover: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'force', 'preempt', 'resume', 'holderLabel']),
   input: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'frameSeq', 'event']),
   handback: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
-  release: new Set(['action', 'botId', 'scopeId', 'lease', 'force', 'preempt']),
-});
-
-// Wire fields accepted from BotBrowserPanel.tsx + bot-browser/protocol.js.
-// Adds only bounded advisory pageId/revision where BotBrowserPanel sends them;
-// strictly rejects authority/clientId/actor/eval/cookies/cdp spoofing.
-const WIRE_BROWSER_FIELDS = Object.freeze({
-  status: SERVICE_BROWSER_FIELDS.status,
-  open: new Set([...SERVICE_BROWSER_FIELDS.open, 'pageId', 'revision']),
-  navigate: SERVICE_BROWSER_FIELDS.navigate,
-  back: SERVICE_BROWSER_FIELDS.back,
-  forward: SERVICE_BROWSER_FIELDS.forward,
-  reload: SERVICE_BROWSER_FIELDS.reload,
-  select: SERVICE_BROWSER_FIELDS.select,
-  closeTab: SERVICE_BROWSER_FIELDS.closeTab,
-  frame: new Set([...SERVICE_BROWSER_FIELDS.frame, 'revision']),
-  takeover: new Set([...SERVICE_BROWSER_FIELDS.takeover, 'revision']),
-  input: SERVICE_BROWSER_FIELDS.input,
-  handback: SERVICE_BROWSER_FIELDS.handback,
-  release: new Set([...SERVICE_BROWSER_FIELDS.release, 'pageId', 'revision']),
+  release: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'force', 'preempt']),
 });
 
 // Wire fields accepted for googleSetupControl (union of google-setup/service.js
@@ -242,24 +222,6 @@ function assertStringArray(value, name, maxItems, maxItemBytes) {
 }
 
 /**
- * Project a validated wire browserControl payload onto the exact field set
- * accepted by host-core/bot-browser/protocol.js `normalizeControlInput`.
- */
-export function projectBrowserControlForService(input, maxFrameBase64Bytes = BROWSER_MAX_FRAME_BASE64_BYTES) {
-  if (!isPlainObject(input) || typeof input.action !== 'string' || !Object.hasOwn(SERVICE_BROWSER_FIELDS, input.action)) {
-    throw invalid('browserControl action is unsupported');
-  }
-  const allowed = SERVICE_BROWSER_FIELDS[input.action];
-  const projected = {};
-  for (const key of Object.keys(input)) {
-    if (allowed.has(key) && input[key] !== undefined) {
-      projected[key] = input[key];
-    }
-  }
-  return normalizeControlInput(projected, maxFrameBase64Bytes);
-}
-
-/**
  * Normalize and strictly validate owner browserControl params across wire & HTTP.
  * Delegates core action/input validation to bot-browser/protocol.js so both sides
  * agree on coordinates, keys, modifiers, frame limits, and forbidden fields.
@@ -274,15 +236,9 @@ export function normalizeBrowserControl(input, maxFrameBase64Bytes = BROWSER_MAX
   }
   rejectUnknownOrForbiddenFields(input, WIRE_BROWSER_FIELDS[action], `browserControl.${action}`);
 
-  // Validate advisory wire fields that may be omitted when projecting to service.
-  const out = projectBrowserControlForService(input, maxFrameBase64Bytes);
-  if (input.revision !== undefined && input.revision !== null && out.revision === undefined) {
-    out.revision = assertNonNegativeInt(input.revision, 'revision');
-  }
-  if (input.pageId !== undefined && input.pageId !== null && out.pageId === undefined) {
-    out.pageId = assertBoundedString(input.pageId, 'pageId', 128).trim();
-  }
-  return out;
+  // Keep the control wire flat across broker, relay and Host; frameLimits is service-internal.
+  const { frameLimits, ...wire } = normalizeControlInput(input, maxFrameBase64Bytes);
+  return frameLimits ? { ...wire, ...frameLimits } : wire;
 }
 
 /**

@@ -28,7 +28,6 @@ import {
   googleSetupError,
   normalizeBrowserControl,
   normalizeGoogleSetupControl,
-  projectBrowserControlForService,
   projectGoogleSetupControlForService,
   safeBrowserControlError,
   safeGoogleSetupError,
@@ -344,8 +343,7 @@ export async function openRuntimeBrowserSetup({
       );
     }
     const normalized = normalizeBrowserControl(rawInput);
-    const projected = projectBrowserControlForService(normalized);
-    return browserService.control(projected, SYSTEM_BROWSER_LOCK_AUTHORITY);
+    return browserService.control(normalized, SYSTEM_BROWSER_LOCK_AUTHORITY);
   }
 
   async function browserLockForSetup({ botId, pageId, step, reason }) {
@@ -673,9 +671,8 @@ export async function openRuntimeBrowserSetup({
     const input = normalizeBrowserControl(rawInput);
     const allowArchived = input.action === 'status' || input.action === 'release';
     const authority = await resolveOwnerAuthority(input.botId, input.scopeId, callerContext, { allowArchived });
-    const serviceInput = projectBrowserControlForService(input);
     try {
-      const result = await browserService.control(serviceInput, authority);
+      const result = await browserService.control(input, authority);
       // Defense-in-depth: status queries MUST NEVER expose a lease token to any client.
       if (input.action === 'status' && isPlainObject(result) && Object.hasOwn(result, 'lease')) {
         const { lease: _omitted, ...safeResult } = result;
