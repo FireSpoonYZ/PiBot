@@ -5,7 +5,7 @@ Bot 可通过 `tool_search` 按需加载内置管理工具。Center 可以把同
 ## 登记客户端
 
 1. 让 MCP 客户端能访问 Center 的公网 HTTPS 地址，使用其信任的证书；反向代理同时转发 `/mcp`、`/.well-known/oauth-*` 与 `/oauth/mcp/*`。不要在这些路径记录认证头、表单或回执正文。
-2. 在服务器上创建仅所有者可读、Center 服务可读取的 JSON 文件（下例为占位值，密钥应独立随机生成）。设置 `CENTER_MCP_CLIENTS_FILE` 为服务看到的绝对路径后重启；容器部署需用只读文件挂载，不能把该文件提交到 Git。
+2. 在服务器上创建只有所有者与 Center 服务可读的 JSON 文件（下例为占位值，密钥应独立随机生成）。设置 `CENTER_MCP_CLIENTS_FILE` 为服务看到的绝对路径后重启。容器部署可在 `center` 的 `volumes` 增加 `./center-mcp-clients.json:/run/secrets/pibot-mcp-clients.json:ro`，配置为容器内路径。不要把该文件提交到 Git。
 3. 将 `https://你的中心/mcp` 添加到 MCP 客户端。对于 [Gemini Apps 的自定义应用](https://support.google.com/gemini/answer/17209137)，使用网页版添加，并按 [手动客户端注册方式](https://developers.google.com/connected-apps/mcp/dev-mode/usage) 填入客户端 ID 和密钥。以客户端显示的实际回调地址为准，必须逐字匹配配置；不支持动态注册。跳转到 Center 后由所有者登录并确认同意。
 4. 如需撤销单次授权，可由客户端向 OAuth 撤销端点撤销；管理员移除客户端配置并重启可撤销该客户端。当前 access token 和 refresh token 状态在内存中，**Center 重启后客户端需重新授权**。
 

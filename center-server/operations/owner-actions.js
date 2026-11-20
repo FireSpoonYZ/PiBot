@@ -74,6 +74,11 @@ const reusableActions = new Set([
   'DELETE /api/providers/:id/models/:modelId',
 ]);
 
+export function retainOwnerAction(actions, method, path, handler) {
+  const key = method + ' ' + path;
+  if (reusableActions.has(key)) actions.set(key, handler);
+}
+
 export async function invokeOwnerAction(actions, method, path, { params = {}, body, query = {} } = {}) {
   const key = method + ' ' + path;
   const handler = reusableActions.has(key) && actions.get(key);

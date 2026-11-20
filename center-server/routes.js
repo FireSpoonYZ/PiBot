@@ -5,7 +5,7 @@ import { requireOwner, assertPublicCredentialId, setOwnerOAuthVerifier } from '.
 import { assertId } from '../host-core/message-protocol.js';
 import { assertDeviceId, assertDeviceToken } from '../host-core/relay-protocol.js';
 import { discoverCenterProviderModels, validateCenterProvider } from '../host-core/runtime-models.js';
-import { invokeOwnerAction } from './operations/owner-actions.js';
+import { invokeOwnerAction, retainOwnerAction } from './operations/owner-actions.js';
 import { registerWebhookRoutes } from './webhooks.js';
 import { registerVaultRoutes } from './vault-routes.js';
 import { registerPairingRoutes } from './pairing.js';
@@ -199,7 +199,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   const ownerActions = createOperations ? new Map() : null;
   if (listReleases) ownerActions?.set('GET /api/client-releases', listReleases);
   const route = (method, path, handler, write = false, bodyLimit) => {
-    ownerActions?.set(method + ' ' + path, handler);
+    if (ownerActions) retainOwnerAction(ownerActions, method, path, handler);
     return app.route({ method, url: path, onRequest: write ? mutation : owner, handler, ...(bodyLimit !== undefined ? { bodyLimit } : {}) });
   };
   const presentDevice = (device) => {
