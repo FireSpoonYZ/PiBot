@@ -1,11 +1,11 @@
 // e-launcher.ask-user-question — native Host plugin port of
 // @juicesharp/rpiv-ask-user-question 2.15.0 (MIT, see LICENSE). The model calls
-// ask_user_question; the questions persist in a task-scoped Durable document
-// and wait for the answerQuestionnaire capability action. Pending requests
-// survive process restarts and are answered by the same action; answers commit
-// only while their tool task is still live, so a settled task can never be
-// answered. Task-scoped docs retire with the task — terminal records never
-// linger, and history forks never clone a pending questionnaire.
+// ask_user_question. Standalone direct calls in eligible primary turns persist
+// as Host waits and terminate the current run; answerQuestionnaire later
+// enqueues a fenced continuation. Nested/codemode calls, multi-tool rounds,
+// unsupported scopes/dispatches and legacy open requests use the task-scoped
+// live-task protocol until answered or stopped. Neither form is cloned by a
+// history fork.
 import { prepareQuestionArguments, normalizeQuestionParams, normalizeLineTerminators } from './tool/normalize-params.js';
 import { validateQuestionnaire } from './tool/validate-questionnaire.js';
 import { buildQuestionnaireResponse, buildToolResult, DECLINE_MESSAGE } from './tool/response-envelope.js';
@@ -150,7 +150,7 @@ export function createPlugin({ installationId, host }) {
             // invalid arguments fail fast even on a replay. The pending
             // request record then commits exactly once, guarded by the phase
             // memo; a resumed execution skips re-publishing and only replays
-            // the wait, keeping any answer committed in between.
+            // the wait or returns the persisted deferred result.
             const typed = normalizeQuestionParams(args);
             const validation = validateQuestionnaire(typed);
             if (!validation.ok) {
@@ -159,9 +159,59 @@ export function createPlugin({ installationId, host }) {
               });
             }
             const phase = await api.memo('ask-user-question.phase', context);
+            const deferredIdentity = { installationId, conversationId, requestId };
+
+            // An already-deferred call stays on the persisted wait path on
+            // replay and never duplicates into a live-task Request document.
+            if (phase === 'deferred') {
+              if (!host.waits) {
+                throw Object.assign(new Error('The Host durable wait service is unavailable.'), { code: 'INVALID_STATE' });
+              }
+              return resumeDeferredQuestionnaire(typed, deferredIdentity, api, context);
+            }
+
+            // Check the task-scoped document as well as the memo: a previous
+            // process may have committed the live-task question before its memo.
+            const hasLegacyRequest = phase === 'open' ||
+              isLegacyRecord(typeof api.snapshot === 'function'
+                ? await api.snapshot(Request, api.taskId, context)
+                : null);
+
+            let preparedDetails;
+            if (!hasLegacyRequest && host.waits) {
+              // Close the crash window between waits.open() and memo('deferred'):
+              // if a DurableWait was already persisted for this task, stay on it.
+              const existingWait = typeof host.waits.get === 'function'
+                ? await host.waits.get(botId, deferredIdentity, context)
+                : null;
+              if (existingWait) {
+                return finishDeferredQuestionnaire(typed, existingWait, api, context, true);
+              }
+              if (await canTerminateSafely(api, context)) {
+                preparedDetails = requestDetails(installationId, conversationId, requestId, typed.questions);
+                if (preparedDetails === null) {
+                  return buildToolResult(
+                    'Error: questionnaire exceeds the presentation size budget',
+                    { answers: [], cancelled: true, error: 'invalid_params' },
+                  );
+                }
+                const record = await host.waits.open(botId, {
+                  installationId, requestId, params: typed, details: preparedDetails,
+                }, api, context);
+                // null means the originating turn is out of scope for detached
+                // waits (e.g. DM/room, task dispatch, workNativeId); fall back
+                // cleanly to the in-run live-task questionnaire protocol.
+                if (record !== null) {
+                  return finishDeferredQuestionnaire(typed, record, api, context, true);
+                }
+              }
+            }
+
             let params;
             if (phase !== 'open') {
-              const details = requestDetails(installationId, conversationId, requestId, typed.questions);
+              const details = preparedDetails !== undefined
+                ? preparedDetails
+                : requestDetails(installationId, conversationId, requestId, typed.questions);
               if (details === null) {
                 return buildToolResult(
                   'Error: questionnaire exceeds the presentation size budget',
@@ -229,6 +279,69 @@ export function createPlugin({ installationId, host }) {
             return answeredResult(record);
           },
         });
+      }
+
+      async function canTerminateSafely(api, context) {
+        if (!host.sdk?.LiveDoc || typeof api.getTask !== 'function' || typeof api.snapshot !== 'function') {
+          return false;
+        }
+        const task = await api.getTask(api.taskId, context);
+        if (task?.kind !== TOOL_TASK_KIND || task.input?.kind !== 'model') return false;
+        const live = await api.snapshot(host.sdk.LiveDoc, api.conversationId, context);
+        const slots = live?.tools ?? [];
+        // terminate is honored only when every result in the model round asks
+        // for it. Requiring one direct call works in parallel and sequential
+        // mode without waiting on a sibling that may not have started yet.
+        return slots.length === 1 &&
+          slots[0].name === ASK_USER_QUESTION_TOOL_NAME &&
+          slots[0].taskId === api.taskId;
+      }
+
+      function deferredToolResult(record) {
+        const text = record.status === 'pending'
+          ? 'The questionnaire is waiting for the user. This execution is paused; the Bot is free to handle other inputs. A persisted continuation will resume this work after the answer.'
+          : record.reason === 'user'
+            ? 'This questionnaire has already been settled. Its persisted continuation owns the next step.'
+            : 'This questionnaire has already been cancelled.';
+        return {
+          output: [{ type: 'text', text }],
+          details: record.details,
+          control: { terminate: true },
+        };
+      }
+
+      async function finishDeferredQuestionnaire(typed, record, api, context, writeMemo) {
+        if (record.params !== undefined && JSON.stringify(record.params) !== JSON.stringify(typed)) {
+          throw Object.assign(new Error('Durable wait identity already has different questions.'), { code: 'INVALID_STATE' });
+        }
+        if (writeMemo) {
+          await api.memo('ask-user-question.phase', 'deferred', context);
+        }
+        await api.details(record.details, context);
+        return deferredToolResult(record);
+      }
+
+      async function resumeDeferredQuestionnaire(typed, deferredIdentity, api, context) {
+        if (typeof host.waits.get === 'function') {
+          const existing = await host.waits.get(botId, deferredIdentity, context);
+          if (!existing) {
+            throw Object.assign(new Error('Persisted durable wait record is missing.'), { code: 'INVALID_STATE' });
+          }
+          return finishDeferredQuestionnaire(typed, existing, api, context, false);
+        }
+        const details = requestDetails(installationId, api.conversationId, deferredIdentity.requestId, typed.questions);
+        if (details === null) {
+          return buildToolResult('Error: questionnaire exceeds the presentation size budget', {
+            answers: [], cancelled: true, error: 'invalid_params',
+          });
+        }
+        const record = await host.waits.open(botId, {
+          installationId, requestId: deferredIdentity.requestId, params: typed, details,
+        }, api, context);
+        if (record === null) {
+          throw Object.assign(new Error('Persisted durable wait is no longer supported for deferred replay.'), { code: 'INVALID_STATE' });
+        }
+        return finishDeferredQuestionnaire(typed, record, api, context, false);
       }
 
       /**
@@ -333,6 +446,27 @@ export function createPlugin({ installationId, host }) {
           throw Object.assign(new Error('Conversation does not belong to this Bot.'), { code: 'BOT_CONTEXT_REQUIRED' });
         }
 
+        const deferredIdentity = { installationId, conversationId: input.conversationId, requestId: input.requestId };
+        if (host.waits && typeof host.waits.get === 'function' &&
+            await host.waits.get(botId, deferredIdentity, invocationContext)) {
+          return host.waits.answer(botId, deferredIdentity, (record) => {
+            const resolved = resolveAnswers(record.params.questions, {
+              cancelled: input.cancelled, answers: input.answers, globalNote,
+            });
+            if (!resolved.ok) throw Object.assign(new Error(resolved.reason), { code: 'VALIDATION_FAILED' });
+            const details = requestDetails(installationId, input.conversationId, input.requestId,
+              record.params.questions, resolved.result);
+            if (details === null || presentationBytes(details) > PRESENTATION_MAX_BYTES) {
+              throw Object.assign(new Error('Answered questionnaire exceeds the presentation size budget'), { code: 'VALIDATION_FAILED' });
+            }
+            const response = buildQuestionnaireResponse(resolved.result, record.params);
+            return {
+              result: resolved.result, details,
+              text: response.output.filter(item => item.type === 'text').map(item => item.text).join('\n'),
+            };
+          }, invocationContext);
+        }
+
         const committed = await host.getHarness().commit(async (tx) => {
           // Expired-answer guard: the request may only settle while its tool
           // task is still live — a settled task can never be asked again.
@@ -406,4 +540,10 @@ export function createPlugin({ installationId, host }) {
     },
     async close() { await Promise.all([...bots].map((bot) => bot.close())); },
   };
+}
+
+function isLegacyRecord(record) {
+  return record !== null && record !== undefined && record.status !== 'settled' &&
+    Array.isArray(record.params?.questions) && record.params.questions.length > 0 &&
+    record.details?.presentation?.kind === 'questionnaire';
 }

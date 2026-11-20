@@ -510,6 +510,14 @@ export async function openHostService(options) {
   let closePromise;
   return {
     deviceId, url: control.url, getStatus,
+    getScheduleFence(botId) {
+      if (closed || phase !== 'running') throw Object.assign(new Error('host service is not ready'), { code: 'RUNTIME_BUSY' });
+      return control.getScheduleFence(botId);
+    },
+    submitScheduled(botId, input) {
+      if (closed || phase !== 'running') throw Object.assign(new Error('host service is not ready'), { code: 'RUNTIME_BUSY' });
+      return control.submitScheduled(botId, input);
+    },
     close() {
       return closePromise ??= (async () => {
         closed = true;

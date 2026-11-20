@@ -99,10 +99,10 @@ export function openLiveRoutes() {
     // monotonic sequence / conversationId transition rules. Returns the
     // normalized snapshot on success; on violation the caller closes the host
     // and nothing is forwarded. No payload is retained in the record.
-    applyFrame(record, frame) {
+    applyFrame(record, frame, options) {
       let snapshot;
       try {
-        snapshot = normalizeLiveSnapshot(frame, record.target);
+        snapshot = normalizeLiveSnapshot(frame, record.target, options);
       } catch {
         return { ok: false };
       }

@@ -1,7 +1,7 @@
 // 模块 2：Pi Durable 本机主私聊的只读 helper。
 // 不启动调度、不写记录、不合成回答；由后续运行时集成 worker 调用。
 import { ResetEntry, StorageRequestError } from '@earendil-works/pi-durable';
-import { BotSessionState, deriveEntryAttribution } from './bot-session-context.js';
+import { BotSessionState, deriveEntryAttribution, questionnaireWaitKey } from './bot-session-context.js';
 import { stripLegacyAttachmentPromptBlocks } from './attachments.js';
 
 const DEFAULT_LIMIT = 50;
@@ -63,7 +63,7 @@ export async function latestResetEntryId(conversation, context) {
  * （byTaskId 精确归属），同一会话跨页/续页的归属输出稳定，不逐页重造。
  * 返回的条目是新对象，原始 EntryRecord 不被改写。
  */
-export async function readPrimaryHistory(conversation, options = {}, context, { afterReset = false, sessionState, harness = null } = {}) {
+export async function readPrimaryHistory(conversation, options = {}, context, { afterReset = false, sessionState, harness = null, waits = null, botId = null } = {}) {
   const { limit, cursor, chunked } = normalizeHistoryOptions(options);
   if (sessionState === undefined) {
     sessionState = harness === null
@@ -91,7 +91,25 @@ export async function readPrimaryHistory(conversation, options = {}, context, { 
       : items.map((entry) => withAttribution(stripAttachmentData(entry), sessionState));
     const readPage = async (count) => {
       const result = await read(count);
-      return { items: project(result.items), next: result.next };
+      const items = await Promise.all(project(result.items).map(async (entry) => {
+        if (!chunked) {
+          return overlayHistoryWaits(entry, {
+            waits, botId, conversationId: conversation.id, context, allowOverlay: true,
+          });
+        }
+        const base = await overlayHistoryWaits(entry, { allowOverlay: false });
+        // Oversized entries use byte-offset continuation. Their serialization
+        // must remain immutable across chunks if an answer arrives mid-read.
+        if (continuation || Buffer.byteLength(JSON.stringify(base), 'utf8') + 1 > TRANSFER_PAGE_BYTES) {
+          return base;
+        }
+        const projected = await overlayHistoryWaits(entry, {
+          waits, botId, conversationId: conversation.id, context, allowOverlay: true,
+        });
+        return Buffer.byteLength(JSON.stringify(projected), 'utf8') + 1 > TRANSFER_PAGE_BYTES
+          ? base : projected;
+      }));
+      return { items, next: result.next };
     };
     let page = await readPage(continuation ? 1 : limit);
     const resetMeta = afterReset ? { clearedThroughEntryId: resetId } : {};
@@ -112,16 +130,16 @@ export async function readPrimaryHistory(conversation, options = {}, context, { 
       if (count > 0 || page.items.length === 0) {
         // 重读实际返回的前缀，取得 SDK 的精确游标，不跳过放不下的条目。
         if (count < page.items.length) {
-          const prefix = await readPage(count);
-          return { items: prefix.items, nextCursor: prefix.next ?? null, ...resetMeta };
+          const prefix = await read(count);
+          return { items: page.items.slice(0, count), nextCursor: prefix.next ?? null, ...resetMeta };
         }
         return { items: page.items, nextCursor: page.next ?? null, ...resetMeta };
       }
       if (page.items.length > 1) {
         // 只装得下第一条：重读精确前缀并同步 next 游标，否则 complete 分支会拿整页
         // 游标跳过中间历史。continuation position 语义不变（仍是原分页位置）。
-        const first = await readPage(1);
-        page.items = first.items;
+        const first = await read(1);
+        page.items = page.items.slice(0, 1);
         page.next = first.next;
       }
     }
@@ -155,6 +173,32 @@ export async function readPrimaryHistory(conversation, options = {}, context, { 
     }
     throw err;
   }
+}
+
+/** Read-time overlay only. Raw history/details cannot mark an interaction live.
+ * The original SDK result stays immutable and is still a completed tool result. */
+export async function overlayHistoryWaits(entry, { waits = null, botId = null, conversationId, context, allowOverlay = true } = {}) {
+  const { durableWait: _entryFlag, ...safeEntry } = entry;
+  if (!Array.isArray(entry.model)) return safeEntry;
+  const model = await Promise.all(entry.model.map(async (message) => {
+    if (!message || typeof message !== 'object') return message;
+    const { durableWait: _messageFlag, ...safe } = message;
+    if (message.role !== 'toolResult') return safe;
+    if (message.details && typeof message.details === 'object' && !Array.isArray(message.details)) {
+      const { durableWait: _detailsFlag, ...details } = message.details;
+      safe.details = details;
+    }
+    const key = questionnaireWaitKey(safe.details, entry.byTaskId, conversationId);
+    if (!allowOverlay || key === null || !botId || typeof waits?.getPresentation !== 'function') return safe;
+    const projected = await waits.getPresentation(botId, safe.details, context);
+    if (!projected) return safe;
+    return {
+      ...safe,
+      details: projected.details,
+      durableWait: safe.toolName === 'ask_user_question' && projected.live === true && projected.status === 'pending',
+    };
+  }));
+  return { ...safeEntry, model };
 }
 
 /** 在条目副本上写入冻结归属；data.attribution 与 derive 结果一致时不再分配新对象。 */

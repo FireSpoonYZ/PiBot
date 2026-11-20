@@ -13,9 +13,10 @@ import { parseModelRef } from './runtime-models.js';
 import { WorkIndex, WorkContextState } from './work-context-docs.js';
 import { WorkDecisionState } from './work-decision-state.js';
 import { clearBotBoardResult } from './runtime-bot-board.js';
-import { BotSessionState, deriveEntryAttribution } from './bot-session-context.js';
+import { BotSessionState, deriveEntryAttribution, isAllowedHostSourceType } from './bot-session-context.js';
+import { canDetachPrimaryWait, DurableWait } from './runtime-waits.js';
 import { buildQueuedPreview, extractUserTextFromContent, MAX_QUEUED_ITEMS } from './runtime-live-projection.js';
-import { isTrustedDataBoundary, isTrustedHostSourceType } from './google-workspace-privacy.js';
+import { isTrustedDataBoundary } from './google-workspace-privacy.js';
 
 const MAX_PREPARE_ATTEMPTS = 3;
 // 每条消息图片解码总字节上限（64MiB）：单张合法（≤16MiB）的图仍需满足本条消息总量限制。
@@ -28,6 +29,22 @@ function errWithCode(message, code) {
   const err = new Error(message);
   err.code = code;
   return err;
+}
+
+function continuationMatches(wait, botId, input) {
+  return wait?.botId === botId && canDetachPrimaryWait(wait.turn, wait.dispatchContext) &&
+    wait.stopEpoch === input.stopEpoch &&
+    wait.reason === 'user' && ['pending', 'accepted'].includes(wait.resume?.state) &&
+    wait.resumeRequestId === input.requestId && wait.resume.input?.text === input.text;
+}
+
+function continuationResetMatches(wait, sessionState) {
+  const waitResetEpoch = wait?.turn?.resetEpoch;
+  if (!Number.isSafeInteger(waitResetEpoch)) return true;
+  const currentResetEpoch = Number.isSafeInteger(sessionState?.clearedThroughEntryId) && sessionState.clearedThroughEntryId >= 0
+    ? sessionState.clearedThroughEntryId
+    : 0;
+  return waitResetEpoch === currentResetEpoch;
 }
 
 const RETRYABLE_TURN_ERROR_CODES = new Set([
@@ -82,7 +99,7 @@ export function createTurnAdmission(deps) {
     }
     const name = typeof origin.sender?.name === 'string' ? origin.sender.name.slice(0, 200) : null;
     const replyTo = typeof origin.replyTo === 'string' ? origin.replyTo : null;
-    const sourceType = kind === 'host' && isTrustedHostSourceType(origin.sender?.sourceType)
+    const sourceType = kind === 'host' && isAllowedHostSourceType(origin.sender?.sourceType)
       ? origin.sender.sourceType
       : null;
     const dataBoundary = kind === 'host' && isTrustedDataBoundary(origin.dataBoundary)
@@ -108,23 +125,27 @@ export function createTurnAdmission(deps) {
     const kind = item.origin?.sender?.kind === 'user' ? 'user' : 'host';
     const name = typeof item.origin?.sender?.name === 'string' ? item.origin.sender.name : null;
     const replyTo = typeof item.origin?.replyTo === 'string' ? item.origin.replyTo : null;
-    const source = kind === 'host' && isTrustedHostSourceType(item.origin?.sender?.sourceType)
+    const source = kind === 'host' && isAllowedHostSourceType(item.origin?.sender?.sourceType)
       ? { sourceType: item.origin.sender.sourceType } : {};
     const dataBoundary = kind === 'host' && isTrustedDataBoundary(item.origin?.dataBoundary)
       ? { dataBoundary: item.origin.dataBoundary } : {};
+    // Only Runtime's private wait continuation path may populate this field.
+    // Keep the original reply destination when the answer starts a new SDK run.
+    const continuation = item.continuationTurn;
     return {
-      kind: 'host.user-message',
+      kind: continuation ? 'host.work-trigger' : 'host.user-message',
       data: {
         version: 1,
         source: 'host',
         requestId: item.requestId,
         botId: item.botId,
         ...dataBoundary,
-        ...(kind === 'user' ? { userText: item.text } : {}),
+        ...(kind === 'user' && !continuation ? { userText: item.text } : {}),
         attribution: {
           kind,
           deviceId: host.deviceId,
-          channel: 'primary',
+          channel: continuation?.kind ?? 'primary',
+          ...(continuation?.scopeId ? { scopeId: continuation.scopeId } : {}),
           messageId: item.requestId,
           direction: 'incoming',
           createdAt: item.enqueuedAt,
@@ -133,14 +154,17 @@ export function createTurnAdmission(deps) {
           ...(replyTo !== null ? { replyTo } : {}),
         },
         turn: {
+          ...(continuation ?? {}),
           requestId: item.requestId,
           taskId: null,
-          kind: 'primary',
-          scopeId: null,
+          kind: continuation?.kind ?? 'primary',
+          scopeId: continuation?.scopeId ?? null,
           triggerMessageId: item.requestId,
           replyTo,
           sender: { kind, deviceId: host.deviceId, ...(name !== null ? { name } : {}), ...source },
-          replyTarget: { kind: 'primary' },
+          replyTarget: continuation?.replyTarget ?? { kind: 'primary' },
+          stopEpoch: item.stopEpoch,
+          ...dataBoundary,
         },
       },
     };
@@ -834,17 +858,59 @@ export function createTurnAdmission(deps) {
         throw errWithCode('queued turn was cancelled', 'NOT_CONNECTED');
       }
       if (!canAdmit()) throw errWithCode('host is preparing an update', 'RUNTIME_BUSY');
-      submission = await conversation.submit(
-        {
-          type: 'input',
-          content,
-          requestId: item.requestId,
-          whenBusy: wantSteer ? 'steer' : 'reject',
-          ...(skippedIdlePrep ? { whenIdle: 'reject' } : {}),
-          entry,
-        },
-        context,
-      );
+      const draft = {
+        type: 'input',
+        content,
+        requestId: item.requestId,
+        whenBusy: wantSteer ? 'steer' : 'reject',
+        ...(skippedIdlePrep ? { whenIdle: 'reject' } : {}),
+        entry,
+      };
+      if (item.continuationWaitId) {
+        // Scope/reset/fork cancellation and SDK admission share one commit.
+        // Checking only enqueue would leave a previously queued continuation
+        // able to start after its wait was cancelled or the session forked/reset.
+        const submissionId = await harness().commit(async (tx) => {
+          const queue = await queueDoc(tx, bot.primaryConversationId);
+          const queued = queue.items.find((candidate) => candidate.requestId === item.requestId);
+          const wait = (await tx.doc(DurableWait, item.continuationWaitId, {})).record;
+          const primaryIndex = await tx.doc(PrimaryIndex);
+          const mappedNativeId = primaryIndex?.byPrimary?.[bot.primaryConversationId];
+          const sessionState = mappedNativeId !== undefined
+            ? await tx.doc(BotSessionState, mappedNativeId)
+            : null;
+          if (!queued || queued.phase === 'cancelled') return null;
+          if (
+            !continuationMatches(wait, bot.botId, queued) ||
+            queued.stopEpoch < stopEpoch(bot.botId) ||
+            mappedNativeId !== conversation.id ||
+            wait.conversationId !== conversation.id ||
+            !continuationResetMatches(wait, sessionState)
+          ) {
+            queued.phase = 'cancelled';
+            queued.error = null;
+            queued.updatedAt = new Date().toISOString();
+            return null;
+          }
+          if (stopped(bot.botId) || closing || !canAdmit()) {
+            throw errWithCode('continuation admission is suspended', 'RUNTIME_BUSY');
+          }
+          const id = await conversation.submit(tx, draft);
+          // Bot Stop advances its in-process fence before awaiting this commit.
+          // Throwing rolls back the provisional SDK admission as well.
+          if (queued.stopEpoch < stopEpoch(bot.botId) || stopped(bot.botId) || closing || !canAdmit()) {
+            throw errWithCode('continuation admission was cancelled', 'RUNTIME_BUSY');
+          }
+          return id;
+        }, context);
+        if (submissionId === null) {
+          await syncPublishedQueue(bot);
+          return null;
+        }
+        submission = await harness().submission(submissionId, context);
+      } else {
+        submission = await conversation.submit(draft, context);
+      }
     } catch (err) {
       if (err instanceof ConversationBusy) {
         // 空闲检查与提交之间原生工作先到：保持 queued，等下次触发再泵。
@@ -1053,7 +1119,23 @@ export function createTurnAdmission(deps) {
       // 该受理按作废落 cancelled 终态（保留回执可答），绝不排队待泵。
       // 计数恒定义（0 基线）：并发首批 submit 捕获同值不互相误作废；
       // 持久 doc.stopEpoch 仅审计/崩溃恢复，不与本地计数比较。
-      const stale = capturedStopEpoch < (stopEpochs.get(botId) ?? 0);
+      let waitValid = true;
+      if (input.continuationWaitId) {
+        const wait = (await tx.doc(DurableWait, input.continuationWaitId, {})).record;
+        const primaryIndex = await tx.doc(PrimaryIndex);
+        const mappedNativeId = primaryIndex?.byPrimary?.[bot.primaryConversationId];
+        const sessionState = mappedNativeId !== undefined
+          ? await tx.doc(BotSessionState, mappedNativeId)
+          : null;
+        waitValid = continuationMatches(wait, botId, { requestId, text, stopEpoch: capturedStopEpoch }) &&
+          mappedNativeId !== undefined &&
+          wait.conversationId === mappedNativeId &&
+          continuationResetMatches(wait, sessionState);
+      }
+      // The wait cancellation, reset/fork boundary and this check share the same
+      // durable transaction. A scope Stop, /clear or edit fork can therefore
+      // fence a late answer handoff atomically without reviving stale waits.
+      const stale = capturedStopEpoch < (stopEpochs.get(botId) ?? 0) || !waitValid;
       const existing = doc.items.find((entry) => entry.requestId === requestId);
       if (existing) {
         if (existing.digest !== digest) {
@@ -1094,6 +1176,8 @@ export function createTurnAdmission(deps) {
         digest,
         text,
         origin,
+        ...(input.continuationTurn ? { continuationTurn: structuredClone(input.continuationTurn) } : {}),
+        ...(input.continuationWaitId ? { continuationWaitId: input.continuationWaitId } : {}),
         ...(delivery === 'steer' ? { delivery: 'steer' } : {}),
         ...(attachmentMeta.length > 0 ? { attachments: attachmentMeta } : {}),
         phase: stale ? 'cancelled' : 'queued',

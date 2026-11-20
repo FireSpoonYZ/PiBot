@@ -27,6 +27,15 @@ import {
   normalizeControlCall,
 } from './remote-control-protocol.js';
 import { installRemoteLive } from './remote-live-client.js';
+import {
+  ALL_LIVE_EXTENSIONS,
+  NO_LIVE_EXTENSIONS,
+  LIVE_EXTENSIONS_HEADER,
+  LIVE_EXTENSIONS_HEADER_WIRE,
+  parseLiveExtensionsHeader,
+  formatLiveExtensionsHeader,
+  intersectLiveExtensions,
+} from './remote-live-protocol.js';
 
 const WATCHDOG_MS = RELAY_HEARTBEAT_MS * 3;
 
@@ -100,6 +109,7 @@ export async function openRemoteControl(options) {
   const client = {
     deviceId: null,
     ws: null,
+    liveExtensions: NO_LIVE_EXTENSIONS,
     ready: false,
     opened: false,
     closed: false,
@@ -473,7 +483,7 @@ export async function openRemoteControl(options) {
     if (client.violated || client.closed) return;
     let frame;
     try {
-      frame = readServerFrame(data, isBinary);
+      frame = readServerFrame(data, isBinary, { liveExtensions: client.liveExtensions });
     } catch {
       protocolViolation();
       return;
@@ -572,10 +582,12 @@ export async function openRemoteControl(options) {
   }
 
   function connect() {
+    const liveExtHeader = formatLiveExtensionsHeader(ALL_LIVE_EXTENSIONS);
     let ws;
     try {
       ws = new WebSocket(url.href, {
         ...(ca !== undefined ? { ca } : {}),
+        ...(liveExtHeader ? { headers: { [LIVE_EXTENSIONS_HEADER_WIRE]: liveExtHeader } } : {}),
         maxPayload: MAX_RELAY_FRAME_BYTES,
         perMessageDeflate: false,
         followRedirects: false,
@@ -586,6 +598,15 @@ export async function openRemoteControl(options) {
       return;
     }
     client.ws = ws;
+    client.liveExtensions = NO_LIVE_EXTENSIONS;
+
+    ws.on('upgrade', (res) => {
+      if (ws !== client.ws || client.closed) return;
+      client.liveExtensions = intersectLiveExtensions(
+        ALL_LIVE_EXTENSIONS,
+        parseLiveExtensionsHeader(res?.headers?.[LIVE_EXTENSIONS_HEADER]),
+      );
+    });
 
     ws.on('open', () => {
       if (ws !== client.ws || client.closed) return;

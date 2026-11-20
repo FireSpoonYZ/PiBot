@@ -16,7 +16,7 @@ export interface MessageAttribution {
   botId?: string;
   deviceId?: string;
   name?: string;
-  sourceType?: 'webhook' | 'google-workspace-rule';
+  sourceType?: 'schedule' | 'webhook' | 'task_dispatch' | 'google-workspace-rule';
   channel: 'primary' | 'dm' | 'room';
   scopeId?: string;
   messageId?: string;
@@ -66,8 +66,10 @@ export interface ChatToolCallItem {
   sendTo?: SendToToolPreview;
   /** host 投影的工具交互结构（todo/问卷）；来自 live slot 或历史 toolResult，未验证形状，渲染前需 readToolPresentation。 */
   presentation?: Record<string, unknown>;
-  /** presentation 来自仍活跃 live slot 时为 true，历史结果替换后为 false。 */
+  /** presentation 来自活跃 live slot 或 Host 验证的 durable wait 时为 true。 */
   presentationLive?: boolean;
+  /** Session-owned wait; the SDK tool itself may already be completed. */
+  durableWait?: boolean;
 }
 
 /**
@@ -125,6 +127,8 @@ export interface ParseHistoryOptions {
   trackAssistantTextEntries?: boolean;
   /** 已知 Bot 目录（用于补全对端/本机 Bot 的可读名称，不展示裸 ID）。 */
   knownBots?: readonly KnownBotSummary[];
+  /** 当前 live 权威完整 durable wait 身份集合（缺省 = 不支持/离线 -> 历史持久等待只读；[] = 已知无活跃）。 */
+  durableWaits?: unknown;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -547,7 +551,13 @@ export function normalizeAttribution(value: unknown): MessageAttribution | undef
   if (deviceId !== undefined) out.deviceId = deviceId;
   const name = readString(raw.name);
   if (name !== undefined) out.name = name;
-  if (kind === 'host' && (raw.sourceType === 'webhook' || raw.sourceType === 'google-workspace-rule')) {
+  if (
+    kind === 'host' &&
+    (raw.sourceType === 'schedule' ||
+      raw.sourceType === 'webhook' ||
+      raw.sourceType === 'task_dispatch' ||
+      raw.sourceType === 'google-workspace-rule')
+  ) {
     out.sourceType = raw.sourceType;
   }
   const scopeId = readString(raw.scopeId);
@@ -696,6 +706,158 @@ export function latestEntryChannel(
   return channel;
 }
 
+const MAX_DURABLE_WAITS = 64;
+const MAX_DURABLE_WAIT_ID_LEN = 1024;
+
+function questionnaireKey(value: unknown): string | null {
+  const p = asRecord(value);
+  if (
+    p.kind !== 'questionnaire' ||
+    p.version !== 1 ||
+    typeof p.installationId !== 'string' ||
+    !p.installationId.trim() ||
+    p.installationId.length > MAX_DURABLE_WAIT_ID_LEN ||
+    !Number.isSafeInteger(p.conversationId) ||
+    (p.conversationId as number) < 1 ||
+    typeof p.requestId !== 'string' ||
+    !p.requestId.trim() ||
+    p.requestId.length > MAX_DURABLE_WAIT_ID_LEN
+  ) {
+    return null;
+  }
+  return JSON.stringify([p.installationId, p.conversationId, p.requestId]);
+}
+
+function parseActiveDurableWaits(durableWaits: unknown): Set<string> | null {
+  if (!Array.isArray(durableWaits) || durableWaits.length > MAX_DURABLE_WAITS) {
+    return null;
+  }
+  const active = new Set<string>();
+  for (const identity of durableWaits) {
+    if (!identity || typeof identity !== 'object' || Array.isArray(identity)) return null;
+    const rec = identity as Record<string, unknown>;
+    const keys = Object.keys(rec);
+    if (keys.some((k) => k !== 'installationId' && k !== 'conversationId' && k !== 'requestId')) {
+      return null;
+    }
+    const key = questionnaireKey({
+      kind: 'questionnaire',
+      version: 1,
+      installationId: rec.installationId,
+      conversationId: rec.conversationId,
+      requestId: rec.requestId,
+    });
+    if (key === null) return null;
+    active.add(key);
+  }
+  return active;
+}
+
+/** Preserve full raw tool output/arguments, but use current Host interaction
+ * state. A live identity disappearing revokes even a cached/out-of-window card.
+ * Details cannot self-authorize: only the complete live durableWaits set can
+ * (absent = unsupported -> historical durable wait read-only; [] = known none). */
+export function mergeHistoryWaitProjection(
+  raw: Record<string, unknown>,
+  live: Record<string, unknown> | undefined,
+  durableWaits: unknown,
+): Record<string, unknown> {
+  const active = parseActiveDurableWaits(durableWaits);
+  const latest = new Map<string, Record<string, unknown>>();
+  if (Array.isArray(live?.messages)) {
+    for (const message of live.messages) {
+      const m = asRecord(message);
+      if (m.role === 'toolResult' && typeof m.toolCallId === 'string') latest.set(m.toolCallId, m);
+    }
+  }
+  const isRawModelEntry = Array.isArray(raw.model);
+  const entryTaskId = raw.byTaskId;
+  const matchesEntryTask = (p: Record<string, unknown>, requireTaskMatch: boolean): boolean => {
+    if (!requireTaskMatch && entryTaskId === undefined) return true;
+    return (
+      Number.isSafeInteger(entryTaskId) &&
+      (entryTaskId as number) >= 1 &&
+      p.requestId === String(entryTaskId)
+    );
+  };
+  const overlay = (value: unknown, fromRawModel: boolean) => {
+    const message = asRecord(value);
+    if (message.role !== 'toolResult') return value;
+    const hasRawDetails =
+      message.details !== null && typeof message.details === 'object' && !Array.isArray(message.details);
+    const rawDetails = hasRawDetails ? (message.details as Record<string, unknown>) : {};
+    const cleanDetails = hasRawDetails && 'durableWait' in rawDetails
+      ? (() => {
+          const { durableWait: _forged, ...rest } = rawDetails;
+          return rest;
+        })()
+      : rawDetails;
+    const isQuestionnaireTool = message.toolName === 'ask_user_question';
+    const oldPresentation = message.presentation ?? cleanDetails.presentation;
+    const key = isQuestionnaireTool ? questionnaireKey(oldPresentation) : null;
+    const fresh = typeof message.toolCallId === 'string' ? latest.get(message.toolCallId) : undefined;
+    const freshPresentation = fresh?.presentation;
+    const same = key !== null && questionnaireKey(freshPresentation) === key;
+    const presentation = same ? asRecord(freshPresentation) : asRecord(oldPresentation);
+    const outcome = readToolOutcome(message.outcome);
+    const notFailed =
+      message.isError !== true &&
+      outcome !== 'error' &&
+      outcome !== 'cancelled' &&
+      outcome !== 'interrupted';
+    const allowed =
+      active !== null &&
+      key !== null &&
+      notFailed &&
+      matchesEntryTask(presentation, fromRawModel) &&
+      active.has(key) &&
+      presentation.status === 'pending' &&
+      isQuestionnaireTool;
+    return {
+      ...message,
+      durableWait: allowed,
+      ...(same
+        ? {
+            presentation,
+            ...(hasRawDetails ? { details: { ...cleanDetails, presentation } } : {}),
+          }
+        : hasRawDetails && 'durableWait' in rawDetails
+          ? { details: cleanDetails }
+          : {}),
+    };
+  };
+  const { durableWait: _forgedEntryFlag, ...safeRaw } = raw;
+  return {
+    ...safeRaw,
+    ...(isRawModelEntry ? { model: (raw.model as unknown[]).map((m) => overlay(m, true)) } : {}),
+    ...(Array.isArray(raw.messages) ? { messages: raw.messages.map((m) => overlay(m, false)) } : {}),
+  };
+}
+
+export interface ScopedLiveBinding {
+  scopeKey: string;
+  botKey: string;
+  conversationId: string;
+  transportKey: string;
+}
+
+export interface ScopedLiveState<TState> extends ScopedLiveBinding {
+  state: TState;
+}
+
+export function matchesScopedLiveBinding(
+  current: ScopedLiveBinding | null | undefined,
+  expected: ScopedLiveBinding | null | undefined,
+): boolean {
+  if (!current || !expected) return false;
+  return (
+    current.scopeKey === expected.scopeKey &&
+    current.botKey === expected.botKey &&
+    current.conversationId === expected.conversationId &&
+    current.transportKey === expected.transportKey
+  );
+}
+
 const GENERIC_DONE_SUMMARIES = new Set(['任务已完成', '任务已取消', '已完成']); // i18n-ok
 
 function extractTaskOutputSummary(output: string | undefined): string {
@@ -771,6 +933,13 @@ export function parseHistoryEntries(
   let lastBoundaryChannel: MessageAttribution['channel'] = 'primary';
 
   const knownBots = options?.knownBots;
+  const hasDurableWaitsOption = options !== undefined && Object.prototype.hasOwnProperty.call(options, 'durableWaits');
+  const activeDurableWaits = hasDurableWaitsOption ? parseActiveDurableWaits(options?.durableWaits) : null;
+  const isAuthorizedWait = (presentation: Record<string, unknown> | null): boolean => {
+    const key = questionnaireKey(presentation);
+    if (key === null) return false;
+    return !hasDurableWaitsOption || (activeDurableWaits !== null && activeDurableWaits.has(key));
+  };
 
   const ensureAssistant = (id: string, numericId: number, fallbackStartMs?: number, rawAttribution?: MessageAttribution): AssistantTurnAccumulator => {
     const attribution = enrichAttributionName(rawAttribution, knownBots);
@@ -1358,11 +1527,21 @@ export function parseHistoryEntries(
             ? presentationStatus
             : isError ? 'error' : 'ok');
         const resolvedStatus = toolStatus(outcome, true);
+        const durableWait =
+          entry.durableWait === true &&
+          !isError &&
+          outcome === 'ok' &&
+          resolvedStatus === 'done' &&
+          toolName === 'ask_user_question' &&
+          projectedPresentation?.kind === 'questionnaire' &&
+          presentationStatus === 'pending' &&
+          isAuthorizedWait(projectedPresentation);
         const matched = toolCallId ? acc.tools.find((t) => t.id === toolCallId) : undefined;
         if (matched) {
           matched.status = resolvedStatus;
           matched.outcome = outcome;
-          matched.presentationLive = false;
+          matched.presentationLive = durableWait;
+          matched.durableWait = durableWait;
           readNestedCalls(matched, entry);
           acc.settledToolIds.add(matched.id);
           if (msgDurationMs !== undefined) matched.durationMs = msgDurationMs;
@@ -1370,7 +1549,7 @@ export function parseHistoryEntries(
           if (resultTruncated) matched.outputTruncated = true;
           if (projectedPresentation) {
             matched.presentation = projectedPresentation;
-            matched.presentationLive = false;
+            matched.presentationLive = durableWait;
           }
           applySendToMetadata(matched, matched.args, resultOutput || undefined, knownBots);
         } else if (toolName) {
@@ -1383,7 +1562,7 @@ export function parseHistoryEntries(
             durationMs: msgDurationMs,
             ...(resultOutput ? { output: resultOutput } : {}),
             ...(resultTruncated ? { outputTruncated: true } : {}),
-            ...(projectedPresentation ? { presentation: projectedPresentation, presentationLive: false } : {}),
+            ...(projectedPresentation ? { presentation: projectedPresentation, presentationLive: durableWait, durableWait } : {}),
           };
           applySendToMetadata(tool, undefined, resultOutput || undefined, knownBots);
           readNestedCalls(tool, entry);
@@ -1452,6 +1631,15 @@ export function parseHistoryEntries(
       const slotOutput = slot && typeof slot.output === 'string' ? slot.output.trim() : '';
       const slotPresentation = asRecord(slot?.presentation);
       const hasPresentation = Object.keys(slotPresentation).length > 0;
+      const slotDurableWait =
+        hasPresentation &&
+        slot?.durableWait === true &&
+        typeof slot?.parentCallId !== 'string' &&
+        (status === 'running' || status === 'done') &&
+        name === 'ask_user_question' &&
+        slotPresentation.kind === 'questionnaire' &&
+        slotPresentation.status === 'pending' &&
+        isAuthorizedWait(slotPresentation);
       const liveItem: ChatToolCallItem = {
         id,
         name,
@@ -1464,7 +1652,8 @@ export function parseHistoryEntries(
         ...(slotOutput ? { output: slotOutput } : {}),
         outputTruncated: slot?.truncated === true,
         ...(hasPresentation ? { presentation: slotPresentation } : {}),
-        presentationLive: hasPresentation && status === 'running',
+        presentationLive: hasPresentation && (status === 'running' || slotDurableWait),
+        durableWait: slotDurableWait,
       };
       applySendToMetadata(liveItem, undefined, slotOutput || undefined, knownBots);
       return liveItem;
@@ -1609,9 +1798,44 @@ export function resolveActiveTurnStartedAt(
   return resolveActiveActivityStartedAt(activity ?? null);
 }
 
+export function isActiveDurableQuestionnaireTool(tool: ChatToolCallItem): boolean {
+  return (
+    tool.durableWait === true &&
+    tool.presentationLive === true &&
+    tool.parentCallId === undefined &&
+    (tool.status === 'running' || tool.status === 'done') &&
+    tool.name === 'ask_user_question' &&
+    tool.presentation?.kind === 'questionnaire' &&
+    tool.presentation?.status === 'pending' &&
+    questionnaireKey(tool.presentation) !== null
+  );
+}
+
+/** Shared activation gate for ToolCallCard: ordinary live tools keep their
+ *  existing `active && tool.presentationLive` semantics; durable wait
+ *  activation is strictly limited to valid pending top-level questionnaires
+ *  and never enables Google setup/browser, task, vault, or todo cards. */
+export function resolveToolPresentationActive(
+  tool: ChatToolCallItem,
+  presentation: { kind?: unknown; status?: unknown } | null | undefined,
+  active: boolean,
+  disabled = false,
+): boolean {
+  if (!presentation) return false;
+  if (active && tool.presentationLive === true) return true;
+  if (disabled) return false;
+  return (
+    presentation.kind === 'questionnaire' &&
+    presentation.status === 'pending' &&
+    isActiveDurableQuestionnaireTool(tool)
+  );
+}
+
 export function pendingToolPrompts(tools: readonly ChatToolCallItem[]): ChatToolCallItem[] {
   return tools.flatMap(tool => {
-    if (tool.status !== 'running') return [];
+    if (tool.status !== 'running') {
+      return isActiveDurableQuestionnaireTool(tool) ? [tool] : [];
+    }
     const kind = tool.presentation?.kind;
     const prompt = tool.presentationLive && tool.presentation?.status === 'pending' &&
       (kind === 'questionnaire' || kind === 'vault-unlock');

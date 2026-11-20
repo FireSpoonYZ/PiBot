@@ -12,6 +12,7 @@ import {
   chatTurnsWithoutToolOutput,
   hasAssistantVisibleContent,
   latestEntryChannel,
+  mergeHistoryWaitProjection,
   parseHistoryEntries,
   normalizeAttribution,
   resolveAssistantFailureDetail,
@@ -195,22 +196,24 @@ export function ChatTranscript({
     () => normalizeAttribution((effectiveLive?.generation as { attribution?: unknown } | null | undefined)?.attribution),
     [effectiveLive?.generation],
   );
+  const activeDurableWaits = disabled || archived ? undefined : effectiveLive?.durableWaits;
   const mergedItems = useMemo(() => {
-    // 与手机端 Host.tsx 相同：live 投影窗口先放，raw 分页后放（同 id 覆盖，细节更全）。
+    // 与手机端 Host.tsx 相同：live 投影窗口先放，raw 分页后放（同 id 覆盖，细节更全），
+    // 同时合入 Host 投影的 durable wait 状态（缺省 = 不支持/离线 -> 只读；[] = 已知无活跃）。
     const byId = new Map<string, Record<string, unknown>>();
     for (const item of asArray<Record<string, unknown>>(effectiveLive?.history)) {
       const id = numericId(item);
       if (effectiveClearedThrough > 0 && id > 0 && id <= effectiveClearedThrough) continue;
-      byId.set(String(item.id), item);
+      byId.set(String(item.id), mergeHistoryWaitProjection(item, undefined, activeDurableWaits));
     }
     for (const item of entries) {
       const rec = item as unknown as Record<string, unknown>;
       const id = numericId(rec);
       if (effectiveClearedThrough > 0 && id > 0 && id <= effectiveClearedThrough) continue;
-      byId.set(String(item.id), rec);
+      byId.set(String(item.id), mergeHistoryWaitProjection(rec, byId.get(String(item.id)), activeDurableWaits));
     }
     return [...byId.values()].sort((a, b) => numericId(a) - numericId(b));
-  }, [entries, effectiveLive?.history, effectiveClearedThrough]);
+  }, [entries, effectiveLive?.history, effectiveClearedThrough, activeDurableWaits]);
 
   // 仅群聊（room）触发的生成隐藏在群聊页面内；1v1 Bot 私聊（dm）与用户主聊（primary）均在本对话页实时展示。
   const liveIsCollaborative =
@@ -227,8 +230,9 @@ export function ChatTranscript({
       liveAttribution,
       trackAssistantTextEntries: true,
       knownBots,
+      durableWaits: activeDurableWaits,
     }),
-  [mergedItems, effectiveClearedThrough, effectiveLive, isBusy, displayGeneratingText, liveAttribution, bot.botId, liveIsCollaborative, knownBots]);
+  [mergedItems, effectiveClearedThrough, effectiveLive, isBusy, displayGeneratingText, liveAttribution, bot.botId, liveIsCollaborative, knownBots, activeDurableWaits]);
 
   const activeLiveToolName = useMemo(() => {
     if (liveIsCollaborative || hideToolOutput) return null;

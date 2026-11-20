@@ -100,9 +100,13 @@ import {
 import {
   chatTurnsWithoutToolOutput,
   latestEntryChannel,
+  matchesScopedLiveBinding,
+  mergeHistoryWaitProjection,
   parseHistoryEntries,
   visibleAssistantTextEntryIds,
   resolveActiveTurnStartedAt,
+  type ScopedLiveBinding,
+  type ScopedLiveState,
 } from './chatTurnModel';
 import {
   dedupeAttachmentMetas,
@@ -223,6 +227,25 @@ import {
   ScopesSubpageScreen,
 } from './screens/LibraryScreens';
 import { ChatScreen } from './screens/ChatScreen';
+
+function buildScopedLiveBinding(
+  bot: UnifiedBotItem | null | undefined,
+  scopeKey: string,
+  localDeviceId: string,
+  connectionEpoch: number,
+): ScopedLiveBinding | null {
+  if (!bot?.primaryConversationId) return null;
+  const resolvedLocalDeviceId = localDeviceId || bot.deviceId || '';
+  const transportKey = bot.hostKind === 'local'
+    ? `local:${connectionEpoch}:${resolvedLocalDeviceId}`
+    : `remote:${bot.remoteIdentity?.profileId ?? ''}:${bot.remoteIdentity?.generation ?? ''}:${bot.remoteIdentity?.kind ?? ''}`;
+  return {
+    scopeKey,
+    botKey: bot.key,
+    conversationId: bot.primaryConversationId,
+    transportKey,
+  };
+}
 
 export interface HostPageProps {
   onBack?(): void;
@@ -401,10 +424,15 @@ export function HostPage({
   const chatHistoryEpoch = useRef(0);
   // 正在全量读取历史的 scope 标识：每代换新对象（A→B→A 也是新标记），按身份清除不跨代误清。
   const chatLoadingScope = useRef<{ key: string } | null>(null);
-  // chatLive 保存累计的实时会话状态（BotLiveState），不是原始帧联合：
-    // snapshot 全量替换、update 只把 changes 合并进现有快照，end 清空。
-    // 字段访问直接读 BotLiveState，真实类型不含 state 包装。
-  const [chatLive, setChatLive] = useState<BotLiveState | undefined>();
+  // scopedChatLive 保存绑定到精确 scope/bot/conversation/transport 的实时会话状态（BotLiveState），
+  // snapshot 全量替换、update 仅在绑定完全一致时合并 changes，end/切换/重绑清空，防止 durableWaits 等状态跨边界泄漏。
+  const [scopedChatLive, setScopedChatLive] = useState<ScopedLiveState<BotLiveState> | undefined>();
+  const connectionEpochRef = useRef(connectionEpoch);
+  connectionEpochRef.current = connectionEpoch;
+  const chatLiveForBot = (bot: UnifiedBotItem | null | undefined, scopeKey: string): BotLiveState | undefined => {
+    const binding = buildScopedLiveBinding(bot, scopeKey, localHost?.deviceId || '', connectionEpoch);
+    return matchesScopedLiveBinding(scopedChatLive, binding) ? scopedChatLive?.state : undefined;
+  };
   const [chatReceipt, setChatReceipt] = useState<HostSubmission>();
   const [chatPending, setChatPending] = useState<ChatPending>();
   const pendingByBot = useRef(new Map<string, ChatPendingEntry>());
@@ -549,7 +577,7 @@ export function HostPage({
   );
 
   const observeIdRef = useRef<string | undefined>(undefined);
-  const observeTargetRef = useRef<{ observationId: string; botKey: string; scopeKey: string } | undefined>(undefined);
+  const observeTargetRef = useRef<(ScopedLiveBinding & { observationId: string }) | undefined>(undefined);
   const remoteObserveRef = useRef<{ close(): Promise<void> } | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const chatScrollRestoreRef = useRef<number | null>(null);
@@ -1767,6 +1795,7 @@ export function HostPage({
       return;
     }
     currentChatScope.current = activeChatScope;
+    setScopedChatLive(prev => (prev && prev.scopeKey === activeChatScope && prev.botKey === activeBot.key ? prev : undefined));
     const stored = pendingByBot.current.get(activeChatScope) || readChatPending(activeChatScope);
     const entry = stored ? { ...stored, pending: { ...stored.pending, botKey: activeBot.key } } : undefined;
     if (entry) pendingByBot.current.set(activeChatScope, entry);
@@ -1845,7 +1874,15 @@ export function HostPage({
           if (observedReset > 0 && target) {
             applyCutoff(target.botKey, target.scopeKey, observedReset);
           }
-          setChatLive(f.state);
+          if (target) {
+            setScopedChatLive({
+              scopeKey: target.scopeKey,
+              botKey: target.botKey,
+              conversationId: target.conversationId,
+              transportKey: target.transportKey,
+              state: f.state,
+            });
+          }
         } else if (f.type === 'update') {
           if (Array.isArray(f.changes.history)) {
             const observedReset = maxResetEntryId(array<Record<string, unknown>>(f.changes.history));
@@ -1853,12 +1890,16 @@ export function HostPage({
               applyCutoff(target.botKey, target.scopeKey, observedReset);
             }
           }
-          // update 只把 changes 合并进已有快照；观察首帧必为 snapshot，update 不单独入栈。
-          setChatLive(prev => (prev ? { ...prev, ...f.changes } : prev));
+          // update 只把 changes 合并进同一绑定的已有快照；观察首帧必为 snapshot，update 不单独入栈。
+          setScopedChatLive(prev =>
+            prev && target && matchesScopedLiveBinding(prev, target)
+              ? { ...prev, state: { ...prev.state, ...f.changes } }
+              : prev,
+          );
         } else if (f.type === 'end') {
           observeIdRef.current = undefined;
           observeTargetRef.current = undefined;
-          setChatLive(undefined);
+          setScopedChatLive(undefined);
         }
       }),
       BotHost.addListener('voiceEvent', (ev: HostVoiceEvent) => {
@@ -1906,7 +1947,7 @@ export function HostPage({
   }, [connectionEpoch]);
 
   // 传输失效即撤陈旧 LIVE 与其中待定交互（历史保留只读），恢复后由新快照重建。
-  useEffect(() => onMobileStreamFailure(() => { chatLoadGeneration.current += 1; profileLoadGeneration.current += 1; cancelActiveObservation(); setChatLive(undefined); setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…')); }), [cancelActiveObservation]);
+  useEffect(() => onMobileStreamFailure(() => { chatLoadGeneration.current += 1; profileLoadGeneration.current += 1; cancelActiveObservation(); setScopedChatLive(undefined); setChatObservationError(t('连接中断，正在恢复…', 'Connection interrupted; recovering…')); }), [cancelActiveObservation]);
   useEffect(() => {
     const resume = () => { if (!document.hidden) setChatResumeEpoch(value => value + 1); };
     document.addEventListener('visibilitychange', resume);
@@ -2073,8 +2114,14 @@ export function HostPage({
         }));
         try {
           const obsId = uuid();
+          const binding = buildScopedLiveBinding(
+            bot,
+            scopeKey,
+            snap.deviceId || localHostRef.current?.deviceId || '',
+            connectionEpochRef.current,
+          );
           observeIdRef.current = obsId;
-          observeTargetRef.current = { observationId: obsId, botKey: bot.key, scopeKey };
+          observeTargetRef.current = binding ? { observationId: obsId, ...binding } : undefined;
           await BotHost.observe({ observationId: obsId, target: { kind: 'primary', botId: bot.botId } });
           if (current()) setChatObservationError('');
           if (!current()) void BotHost.cancelObservation({ observationId: obsId }).catch(() => {});
@@ -2085,6 +2132,7 @@ export function HostPage({
         const api = remoteClientRef.current.api;
         if (!api.transportConnected || !current()) { if (chatLoadingScope.current === loadingMarker) { chatLoadingScope.current = null; syncLoading(); } return; }
         const identity = bot.remoteIdentity;
+        const binding = buildScopedLiveBinding(bot, scopeKey, '', connectionEpochRef.current);
         loadHistory(fresh => fetchBotHistoryPages(async (cursor, limit, chunked) => {
           if (!fresh()) return null;
           const page = await api.call(identity, 'history', {
@@ -2105,7 +2153,7 @@ export function HostPage({
               if (observedReset > 0) {
                 applyCutoff(bot.key, scopeKey, observedReset);
               }
-              setChatLive(frame.state);
+              if (binding) setScopedChatLive({ ...binding, state: frame.state });
             } else if (frame.type === 'update') {
               if (Array.isArray(frame.changes.history)) {
                 const observedReset = maxResetEntryId(array<Record<string, unknown>>(frame.changes.history));
@@ -2113,9 +2161,13 @@ export function HostPage({
                   applyCutoff(bot.key, scopeKey, observedReset);
                 }
               }
-              setChatLive(prev => (prev ? { ...prev, ...frame.changes } : prev));
+              setScopedChatLive(prev =>
+                prev && binding && matchesScopedLiveBinding(prev, binding)
+                  ? { ...prev, state: { ...prev.state, ...frame.changes } }
+                  : prev,
+              );
             } else if (frame.type === 'end') {
-              setChatLive(undefined);
+              setScopedChatLive(undefined);
             }
           });
           remoteObserveRef.current = handle;
@@ -2145,7 +2197,7 @@ export function HostPage({
     return () => { chatLoadGeneration.current += 1; cancelActiveObservation(); };
     // Rebuild for a new target, transport generation, or foreground transition, not display metadata.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [screen, active, activeBot?.key, activeBot?.remoteIdentity?.generation, activeBot?.online, remoteConnected, chatResumeEpoch, connectionEpoch]);
+  }, [screen, active, activeBot?.key, activeBot?.primaryConversationId, activeChatScope, activeBot?.remoteIdentity?.generation, activeBot?.online, remoteConnected, chatResumeEpoch, connectionEpoch]);
 
   useEffect(() => {
     if (!chatLoadError || screen !== 'chat' || !active || document.hidden || (activeBot?.hostKind === 'remote' && (!remoteConnected || activeBot.online === false))) return;
@@ -2330,7 +2382,7 @@ export function HostPage({
         : [];
       chatHistoryRef.current = cachedHistory;
       setChatHistory(cachedHistory);
-      setChatLive(undefined);
+      setScopedChatLive(undefined);
       setChatObservationError('');
       setChatHistoryError('');
       chatLoadingScope.current = scopeKey ? { key: scopeKey } : null;
@@ -2891,6 +2943,17 @@ export function HostPage({
         chatHistoryEpoch.current += 1;
         chatHistoryRef.current = [];
         setChatHistory([]);
+        setScopedChatLive(prev =>
+          prev && prev.scopeKey === scopeKey
+            ? {
+                ...prev,
+                state: {
+                  ...prev.state,
+                  ...(prev.state.durableWaits !== undefined ? { durableWaits: [] } : {}),
+                },
+              }
+            : prev,
+        );
         setChatObservationError('');
         setChatHistoryError('');
         if (draftSnapshot.trim() === '/clear') {
@@ -2942,7 +3005,9 @@ export function HostPage({
       if (deletingBots.current.has(bot.key) || (chatPending?.botKey === bot.key && chatPending.phase !== 'accepted')) return;
       if (bot.archivedAt) throw new Error(t('该 Bot 已归档，请先恢复后再发送消息', 'This bot is archived. Unarchive it first.'));
       if (imageUploading || editSubmitting) return;
-      const effectiveLive = isStaleLiveState(chatLive, getCutoff(bot.key, scopeForBot(bot))) ? undefined : chatLive;
+      const botScopeKey = scopeForBot(bot);
+      const botLive = chatLiveForBot(bot, botScopeKey);
+      const effectiveLive = isStaleLiveState(botLive, getCutoff(bot.key, botScopeKey)) ? undefined : botLive;
       const currentActivity = resolveBotActivity(effectiveLive);
       if (
         stopping.has(bot.key) ||
@@ -3077,7 +3142,8 @@ ${newer}` : draftSnapshot;
       if (bot.archivedAt) throw new Error(t('该 Bot 已归档，请先恢复后再编辑消息', 'This bot is archived. Unarchive it first.'));
       const scopeKey = scopeForBot(bot);
       if (!scopeKey) throw new Error(t('目标身份尚未就绪。', 'Target identity unavailable.'));
-      const effectiveLive = isStaleLiveState(chatLive, getCutoff(bot.key, scopeKey)) ? undefined : chatLive;
+      const botLive = chatLiveForBot(bot, scopeKey);
+      const effectiveLive = isStaleLiveState(botLive, getCutoff(bot.key, scopeKey)) ? undefined : botLive;
       const currentActivity = resolveBotActivity(effectiveLive);
       if (isBotActivityBusy(currentActivity) || stopping.has(bot.key) || (chatPending?.botKey === bot.key && chatPending.phase !== 'accepted')) {
         throw new Error(t('Bot 正忙，无法编辑历史消息', 'Bot is busy; cannot edit historical messages.'));
@@ -3136,12 +3202,20 @@ ${newer}` : draftSnapshot;
         }
         if (currentChatScope.current === scopeKey) {
           setChatHistory(prev => prev.filter(item => Number(item.id) < targetEntryId));
-          setChatLive(prev => prev ? {
-            ...prev,
-            history: Array.isArray(prev.history)
-              ? prev.history.filter(item => Number(item.id) < targetEntryId)
-              : prev.history,
-          } : prev);
+          setScopedChatLive(prev =>
+            prev && prev.scopeKey === scopeKey
+              ? {
+                  ...prev,
+                  state: {
+                    ...prev.state,
+                    history: Array.isArray(prev.state.history)
+                      ? prev.state.history.filter(item => Number(item.id) < targetEntryId)
+                      : prev.state.history,
+                    ...(prev.state.durableWaits !== undefined ? { durableWaits: [] } : {}),
+                  },
+                }
+              : prev,
+          );
         }
         const submission: ChatPending = {
           botKey: bot.key,
@@ -3633,6 +3707,7 @@ ${newer}` : draftSnapshot;
         setBotConfirmModal(null);
         if (activeBotKey === bot.key) {
           cancelActiveObservation();
+          setScopedChatLive(undefined);
           setActiveBotKey(null);
         }
         const returnToArchived = nav.stackRef.current.some(entry => entry.screen === 'archived-bots');
@@ -4147,6 +4222,7 @@ ${newer}` : draftSnapshot;
     : activeChatScope && clearedMap[activeChatScope] !== undefined
       ? clearedMap[activeChatScope]
       : (clearedMap[activeBot.key] ?? 0);
+  const chatLive = chatLiveForBot(activeBot, activeChatScope);
   const effectiveChatLive = isStaleLiveState(chatLive, currentClearedAfter) ? undefined : chatLive;
   const submission = chatSubmissionRef.current;
   // 用户主动停止的 unanswered 回执（reason aborted/cancelled）是已停止结算，不是配置/模型故障：
@@ -4582,9 +4658,12 @@ ${newer}` : draftSnapshot;
   const submitQuestionnaire = useCallback(
     async (installationId: string, input: QuestionnaireSubmitPayload) => {
       if (!activeBot) throw new Error(t('目标不可用，未提交', 'Target unavailable; not submitted'));
+      if (activeBot.archivedAt) throw new Error(t('该 Bot 已归档，不能提交', 'This bot is archived; not submitted'));
       if (activeBot.hostKind === 'local') {
         const deviceId = localHost?.deviceId;
-        if (!deviceId) throw new Error(t('本机设备身份未就绪，未提交', 'Local device identity not ready; not submitted'));
+        if (localHost?.phase !== 'running' || !deviceId || activeBot.deviceId !== deviceId) {
+          throw new Error(t('本机设备身份未就绪，未提交', 'Local device identity not ready; not submitted'));
+        }
         const env = await BotHost.call({
           method: 'callCapabilityAction',
           params: {
@@ -4593,7 +4672,8 @@ ${newer}` : draftSnapshot;
             request: { requestId: uuid(), deviceId, botId: activeBot.botId, input },
           },
         });
-        return env?.result;
+        const body = env?.result as { result?: unknown } | undefined;
+        return body && typeof body === 'object' && 'result' in body ? body.result : body;
       }
       const api = remoteClientRef.current?.api;
       const identity = activeBot.remoteIdentity;
@@ -4607,8 +4687,7 @@ ${newer}` : draftSnapshot;
       });
       return (res as { result?: unknown })?.result;
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [activeBot?.key, localHost?.deviceId, remoteConnected, t],
+    [activeBot, localHost?.phase, localHost?.deviceId, remoteConnected, t],
   );
 
   const activeLiveToolName = useMemo(() => {
@@ -4684,14 +4763,28 @@ ${newer}` : draftSnapshot;
       });
   }, [isBotBusy, screen, active, activeBot, applyFetchedHistory]);
 
+  const chatTargetOnline = Boolean(
+    activeBot &&
+      (activeBot.hostKind === 'local'
+        ? localHost?.phase === 'running' && activeBot.deviceId === localHost?.deviceId
+        : remoteConnected && activeBot.online !== false),
+  );
+  const activeDurableWaits =
+    !activeBot || activeBot.archivedAt || recoveringChat || !chatTargetOnline || Boolean(chatObservationError)
+      ? undefined
+      : effectiveChatLive?.durableWaits;
+
   const allChatItems = useMemo(() => {
     if (!activeBot) return [] as Array<Record<string, unknown>>;
-    // raw history 是旧页，live 投影是新窗口：按 entry id 去重排序；同 id 保留 raw（工具/思考细节更全）。
+    // raw history 是旧页，live 投影是新窗口：按 entry id 去重排序；同 id 保留 raw（工具/思考细节更全），
+    // 同时合入 Host 投影的 durable wait 状态（缺省 = 不支持/离线 -> 只读；[] = 已知无活跃）。
     const byId = new Map<string, Record<string, unknown>>();
     for (const item of array<Record<string, unknown>>(effectiveChatLive?.history)) {
-      byId.set(String(item.id), item);
+      byId.set(String(item.id), mergeHistoryWaitProjection(item, undefined, activeDurableWaits));
     }
-    for (const item of chatHistory) byId.set(String(item.id), item);
+    for (const item of chatHistory) {
+      byId.set(String(item.id), mergeHistoryWaitProjection(item, byId.get(String(item.id)), activeDurableWaits));
+    }
     const numericId = (item: Record<string, unknown>) => {
       const id = Number(item.id);
       return Number.isFinite(id) ? id : 0;
@@ -4699,7 +4792,7 @@ ${newer}` : draftSnapshot;
     const rawSorted = [...byId.values()].sort((a, b) => numericId(a) - numericId(b));
     const effectiveClearedAfter = Math.max(currentClearedAfter, maxResetEntryId(rawSorted));
     return filterHistoryAfterCutoff(rawSorted, effectiveClearedAfter);
-  }, [chatHistory, effectiveChatLive, activeBot, currentClearedAfter]);
+  }, [chatHistory, effectiveChatLive, activeBot, currentClearedAfter, activeDurableWaits]);
 
   // generation.attribution 缺失但 tools 仍活跃时，用合并历史中最新执行来源判断当前是否群聊后台工作；
   // 1v1 Bot 私聊（dm）与用户主聊（primary）均在当前 Bot 的 1v1 对话页内实时流式展示。
@@ -4725,8 +4818,9 @@ ${newer}` : draftSnapshot;
       selfBotId: activeBot.botId,
       liveAttribution: liveGenerationAttr,
       knownBots,
+      durableWaits: activeDurableWaits,
     });
-  }, [allChatItems, effectiveChatLive, activeBot, currentClearedAfter, recoveringChat, isBotBusy, liveGeneratingText, liveGenerationAttr, chatLiveIsCollaborative, knownBots]);
+  }, [allChatItems, effectiveChatLive, activeBot, currentClearedAfter, recoveringChat, isBotBusy, liveGeneratingText, liveGenerationAttr, chatLiveIsCollaborative, knownBots, activeDurableWaits]);
 
   const activeTurnStartedAt = useMemo(
     () => resolveActiveTurnStartedAt(botActivity),

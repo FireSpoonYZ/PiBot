@@ -2074,23 +2074,26 @@ function PrimaryChatPane({
 
   /** 问卷提交复用现有 callCapabilityAction；deviceId/botId 取自当前身份与 Bot。 */
   const submitQuestionnaire = useCallback(
-    (installationId: string, input: QuestionnaireSubmitPayload): Promise<unknown> => {
+    async (installationId: string, input: QuestionnaireSubmitPayload): Promise<unknown> => {
       const current = api.identity;
-      if (!current || !api.transportConnected) {
-        return Promise.reject(new Error('NOT_CONNECTED: 没有活动连接身份'));
+      if (isArchived || !identity || !current || !api.transportConnected ||
+        current.profileId !== identity.profileId || current.targetDeviceId !== identity.targetDeviceId ||
+        current.kind !== identity.kind || current.generation !== identity.generation) {
+        throw Object.assign(new Error('NOT_CONNECTED: 没有活动连接身份'), { code: 'NOT_CONNECTED' });
       }
-      return api.call(current, 'callCapabilityAction', {
+      const reply = await api.call(identity, 'callCapabilityAction', {
         installationId,
         action: 'answerQuestionnaire',
         request: {
           requestId: crypto.randomUUID(),
-          deviceId: current.targetDeviceId,
+          deviceId: identity.targetDeviceId,
           botId: bot.botId,
           input,
         },
       });
+      return reply?.result;
     },
-    [api, bot.botId],
+    [api, identity, isArchived, bot.botId],
   );
 
   // 私有解锁回执绑定当前目标身份，不经过聊天提交或离线待发队列。
@@ -3723,13 +3726,19 @@ function PrimaryChatPane({
     : transcriptActivity;
   const liveBusy = isBotActivityBusy(activity);
   const canStop = canStopBotActivity(activity);
-  const pendingQuestionnaire = online && !isArchived && live?.busy && !liveEnded && !liveError &&
-    activity.source !== 'room' && activity.source !== 'dm' && activity.phase !== 'stopping' && activity.phase !== 'interrupting'
+  const questionnaireLive = online && !isArchived && live !== null && !liveEnded && !liveError &&
+    activity.phase !== 'stopping' && activity.phase !== 'interrupting';
+  const pendingQuestionnaire = questionnaireLive && live.busy && activity.source !== 'room' && activity.source !== 'dm'
     ? readToolPresentation(live.tools?.find(tool => tool.status === 'running' &&
         tool.presentation?.kind === 'questionnaire' && tool.presentation.status === 'pending')?.presentation)
     : null;
+  const hasDurableQuestionnaire = questionnaireLive && (live.durableWaits?.length ?? 0) > 0;
   const awaitingAnswer = pendingQuestionnaire?.kind === 'questionnaire'
-    ? `等待你确认 · ${pendingQuestionnaire.questions.length} 题` : null;
+    ? `等待你确认 · ${pendingQuestionnaire.questions.length} 题`
+    : hasDurableQuestionnaire && !liveBusy ? t('等待你确认', 'Waiting for your answer') : null;
+  const focusQuestionnaire = transcriptActive && questionnaireLive && questionnaireRequestId &&
+    (live.busy || live.durableWaits?.some(wait => wait.requestId === questionnaireRequestId))
+    ? questionnaireRequestId : undefined;
   // 停止独立门禁：只关联在线/归档/停止进行中，不被发送、草稿锁或附件上传禁用。
   const stopDisabled = !online || isArchived || stopping;
   // 主聊天任务直接停止并撤回排队消息到输入框；仅打断群聊/私信/后台任务时弹二次确认。
@@ -4145,8 +4154,7 @@ function PrimaryChatPane({
         search={chatSearch}
         boardResultId={boardResultId}
         onViewedResult={onViewedResult}
-        questionnaireRequestId={transcriptActive && live?.busy &&
-          activity.phase !== 'stopping' && activity.phase !== 'interrupting' ? questionnaireRequestId : undefined}
+        questionnaireRequestId={focusQuestionnaire}
         onQuestionnaireFocused={onQuestionnaireFocused}
         archived={isArchived}
         scopeKey={toolScopeKey}

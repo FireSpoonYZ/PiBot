@@ -37,6 +37,8 @@ export function isWebhookAttribution(a: MessageAttributionData | undefined): boo
   return a?.kind === 'host' && (
     a.sourceType === 'webhook' ||
     a.sourceType === 'google-workspace-rule' ||
+    a.sourceType === 'task_dispatch' ||
+    a.sourceType === 'schedule' ||
     (a.sourceType === undefined && a.channel === 'primary' && /^Webhook · \S/.test(a.name ?? ''))
   );
 }

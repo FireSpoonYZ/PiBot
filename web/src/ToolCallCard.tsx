@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ChatToolCallItem } from './chatTurnModel';
-import { formatTurnDuration, pendingToolPrompts } from './chatTurnModel';
+import { formatTurnDuration, pendingToolPrompts, resolveToolPresentationActive } from './chatTurnModel';
 import {
   readToolPresentation,
   ToolPresentationCard,
@@ -136,7 +136,9 @@ export function ToolCallCard({
               ? (presentation.pageId ?? tool.id)
               : presentation.kind === 'google-readiness'
                 ? `${presentation.account ?? ''}:${presentation.service ?? ''}:${tool.id}`
-                : presentation.requestId
+                : presentation.kind === 'questionnaire'
+                  ? `${presentation.installationId}:${presentation.conversationId}:${presentation.requestId}`
+                  : presentation.requestId
     : tool.id;
   const sendTo = !tool.parentCallId && tool.name === 'send_to' ? tool.sendTo : undefined;
   const sendToTarget = sendTo
@@ -167,11 +169,12 @@ export function ToolCallCard({
   }, [collapseOutput, mobileCompact, hasLiveChildPresentation]);
   const hasCompactBody = hasDetails || Boolean(tool.argSummary || tool.error || tool.children?.length ||
     tool.nestedCallsTruncated || (codemode && tool.status !== 'running' && tool.children === undefined));
+  const presentationActive = resolveToolPresentationActive(tool, presentation, active, disabled);
   const presentationCard = presentation ? (
     <ToolPresentationCard
       key={`${scopeKey}:${tool.id}:${presentation.kind}:${presentationKey}`}
       presentation={presentation}
-      active={active && tool.presentationLive === true}
+      active={presentationActive}
       disabled={disabled}
       variant={variant === 'desktop' ? 'desktop' : undefined}
       requesterName={requesterName}

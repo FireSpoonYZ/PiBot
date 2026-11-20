@@ -50,6 +50,153 @@ function safeNonNegativeInt(value, fallback = 0) {
   return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
 }
 
+const NON_NEGATIVE_INT_KEY_RE = /^(0|[1-9]\d*)$/;
+const isValidNonNegativeInt = (v) => Number.isSafeInteger(v) && v >= 0;
+const isValidPositiveInt = (v) => Number.isSafeInteger(v) && v >= 1;
+const privacyUnavailableError = (msg, cause) =>
+  Object.assign(messageError(GOOGLE_WORKSPACE_PRIVACY_UNAVAILABLE_CODE, msg), cause !== undefined ? { cause } : {});
+
+function foldProjectedEarliest(map, resetId, startId, anchorId, recordedAt) {
+  const key = String(resetId);
+  const prev = map[key];
+  if (!prev) {
+    map[key] = { turnStartEntryId: startId, anchorEntryId: anchorId, recordedAt };
+    return;
+  }
+  if (startId < prev.turnStartEntryId) prev.turnStartEntryId = startId;
+  if (anchorId > prev.anchorEntryId) prev.anchorEntryId = anchorId;
+  if (prev.recordedAt === null && typeof recordedAt === 'string') prev.recordedAt = recordedAt;
+}
+
+function projectBoundsForPrefix(rawReset, rawStart, rawAnchor, beforeEntryId) {
+  const validReset = isValidNonNegativeInt(rawReset);
+  const validStart = isValidNonNegativeInt(rawStart);
+  const validAnchor = isValidNonNegativeInt(rawAnchor);
+  if (validReset && validStart && validAnchor && rawStart > beforeEntryId && rawAnchor > beforeEntryId) {
+    return null;
+  }
+  const resetEntryId = validReset && rawReset <= beforeEntryId ? rawReset : 0;
+  const turnStartEntryId = validStart && validAnchor
+    ? Math.min(rawStart, rawAnchor, beforeEntryId)
+    : (validStart && rawStart <= beforeEntryId
+      ? rawStart
+      : (resetEntryId > 0 ? Math.min(resetEntryId + 1, beforeEntryId) : 0));
+  const anchorEntryId = validAnchor ? Math.max(turnStartEntryId, Math.min(rawAnchor, beforeEntryId)) : beforeEntryId;
+  return { resetEntryId, turnStartEntryId, anchorEntryId };
+}
+
+/**
+ * 将源会话的 GoogleWorkspacePrivacyState 按真实 SDK 条目 id 投影到 fork 保留前缀（id <= beforeEntryId）：
+ * - beforeEntryId === null（无保留前缀）返回 null；非正安全整数 fail-closed；
+ * - 仅当边界字段合法且 turnStartEntryId > beforeEntryId && anchorEntryId > beforeEntryId 时丢弃未来标记；
+ * - 其余（含 pi.compaction 摘要覆盖的早期污染或损坏字段）保守保留并夹紧 anchorEntryId <= beforeEntryId，
+ *   确保 fork 后的 /clear（pi.reset, id > beforeEntryId）仍开启干净代次。
+ * 注：历史版本中在引入本事务继承前已 fork 的旧会话因未落盘继承文档，无法由本函数追溯迁移。
+ */
+export function projectPrivacyStateForFork(privacyState, beforeEntryId, { nowIso = null } = {}) {
+  if (beforeEntryId === null) return null;
+  if (!isValidPositiveInt(beforeEntryId)) {
+    throw privacyUnavailableError('Invalid fork cutoff entryId; refusing unguarded fork');
+  }
+  if (privacyState === null || privacyState === undefined) return null;
+  const stamp = typeof nowIso === 'string' && nowIso !== '' ? nowIso : new Date().toISOString();
+  const earliestByReset = {};
+  const marks = [];
+  if (!isPlainObject(privacyState)) {
+    foldProjectedEarliest(earliestByReset, 0, 0, beforeEntryId, stamp);
+    return { schema: 1, boundary: GOOGLE_WORKSPACE_DATA_BOUNDARY, earliestByReset, marks, updatedAt: stamp };
+  }
+  if (privacyState.earliestByReset != null && !isPlainObject(privacyState.earliestByReset)) {
+    foldProjectedEarliest(earliestByReset, 0, 0, beforeEntryId, stamp);
+  } else if (isPlainObject(privacyState.earliestByReset)) {
+    for (const [resetKey, rec] of Object.entries(privacyState.earliestByReset)) {
+      const markReset = NON_NEGATIVE_INT_KEY_RE.test(resetKey) ? Number(resetKey) : Number.NaN;
+      if (!isPlainObject(rec)) {
+        foldProjectedEarliest(earliestByReset, 0, 0, beforeEntryId, stamp);
+        continue;
+      }
+      const projected = projectBoundsForPrefix(markReset, rec.turnStartEntryId, rec.anchorEntryId, beforeEntryId);
+      if (!projected) continue;
+      const recordedAt = typeof rec.recordedAt === 'string' ? rec.recordedAt : stamp;
+      foldProjectedEarliest(earliestByReset, projected.resetEntryId, projected.turnStartEntryId, projected.anchorEntryId, recordedAt);
+    }
+  }
+  if (privacyState.marks != null && !Array.isArray(privacyState.marks)) {
+    foldProjectedEarliest(earliestByReset, 0, 0, beforeEntryId, stamp);
+  } else if (Array.isArray(privacyState.marks)) {
+    for (const mark of privacyState.marks) {
+      if (!isPlainObject(mark)) {
+        foldProjectedEarliest(earliestByReset, 0, 0, beforeEntryId, stamp);
+        continue;
+      }
+      const projected = projectBoundsForPrefix(mark.resetEntryId, mark.turnStartEntryId, mark.anchorEntryId, beforeEntryId);
+      if (!projected) continue;
+      const startedAt = typeof mark.startedAt === 'string' ? mark.startedAt : stamp;
+      foldProjectedEarliest(earliestByReset, projected.resetEntryId, projected.turnStartEntryId, projected.anchorEntryId, startedAt);
+      marks.push({
+        id: typeof mark.id === 'string' && mark.id !== '' ? mark.id : 'gwp_fork_' + randomUUID(),
+        kind: typeof mark.kind === 'string' && mark.kind !== '' ? mark.kind : 'mcp_call',
+        ...(typeof mark.installationId === 'string' && mark.installationId ? { installationId: mark.installationId } : {}),
+        ...(typeof mark.botId === 'string' && mark.botId ? { botId: mark.botId } : {}),
+        ...(mark.callId != null ? { callId: String(mark.callId) } : {}),
+        ...(mark.taskId != null ? { taskId: String(mark.taskId) } : {}),
+        ...(mark.requestId != null ? { requestId: String(mark.requestId) } : {}),
+        ...projected,
+        status: typeof mark.status === 'string' && mark.status ? mark.status : 'started',
+        startedAt,
+        settledAt: typeof mark.settledAt === 'string' ? mark.settledAt : null,
+      });
+    }
+  }
+  if (marks.length > MAX_STORED_MARKS) marks.splice(0, marks.length - MAX_STORED_MARKS);
+  if (Object.keys(earliestByReset).length === 0 && marks.length === 0) return null;
+  return {
+    schema: 1,
+    boundary: GOOGLE_WORKSPACE_DATA_BOUNDARY,
+    earliestByReset,
+    marks,
+    updatedAt: typeof privacyState.updatedAt === 'string' ? privacyState.updatedAt : stamp,
+  };
+}
+
+/** 在单一 fork 事务内、tx.forkConversation 之前只读源隐私文档并计算前缀继承计划（fail-closed）。 */
+export async function prepareForkPrivacyInheritanceInTx(tx, { sourceConversationId, beforeEntryId, nowIso = null } = {}) {
+  if (beforeEntryId === null) return { inherited: false, state: null };
+  if (!tx || typeof tx.doc !== 'function' || !isValidPositiveInt(sourceConversationId) || !isValidPositiveInt(beforeEntryId)) {
+    throw privacyUnavailableError('Valid tx, sourceConversationId, and beforeEntryId are required before fork');
+  }
+  try {
+    const sourceDoc = await tx.doc(GoogleWorkspacePrivacyState, sourceConversationId);
+    const state = projectPrivacyStateForFork(sourceDoc, beforeEntryId, { nowIso });
+    return { inherited: state !== null, state };
+  } catch (err) {
+    if (err?.code === GOOGLE_WORKSPACE_PRIVACY_UNAVAILABLE_CODE) throw err;
+    throw privacyUnavailableError('Failed to read Google Workspace privacy state before fork', err);
+  }
+}
+
+/** 在同一 fork 事务内、tx.forkConversation 之后将继承的隐私状态原子写入目标会话文档（fail-closed）。 */
+export async function applyForkPrivacyInheritanceInTx(tx, targetConversationId, prepared, { nowIso = null } = {}) {
+  if (prepared === null) return { applied: false };
+  if (!isPlainObject(prepared)) throw privacyUnavailableError('Missing fork privacy inheritance plan');
+  if (prepared.inherited === false && prepared.state === null) return { applied: false };
+  if (prepared.inherited !== true || !isPlainObject(prepared.state) || !tx || typeof tx.doc !== 'function' || !isValidPositiveInt(targetConversationId)) {
+    throw privacyUnavailableError('Invalid fork privacy inheritance target or plan');
+  }
+  try {
+    const targetDoc = await tx.doc(GoogleWorkspacePrivacyState, targetConversationId);
+    targetDoc.schema = 1;
+    targetDoc.boundary = GOOGLE_WORKSPACE_DATA_BOUNDARY;
+    targetDoc.earliestByReset = prepared.state.earliestByReset;
+    targetDoc.marks = prepared.state.marks;
+    targetDoc.updatedAt = typeof nowIso === 'string' && nowIso !== '' ? nowIso : prepared.state.updatedAt;
+    return { applied: true };
+  } catch (err) {
+    if (err?.code === GOOGLE_WORKSPACE_PRIVACY_UNAVAILABLE_CODE) throw err;
+    throw privacyUnavailableError('Failed to persist Google Workspace privacy state on forked conversation', err);
+  }
+}
+
 /**
  * 会话级持久 Google Workspace 隐私边界文档（每条 Durable 会话一份）。
  * - earliestByReset：按最近 pi.reset 条目 id（无 reset 为 "0"）永久保留该代次最早的隔离起点
@@ -752,6 +899,9 @@ export function createGoogleWorkspacePrivacy({ getHarness, context, documents = 
   return {
     isGoogleWorkspaceCapability,
     isTrustedGoogleWorkspaceRuleEntry,
+    projectPrivacyStateForFork,
+    prepareForkInheritanceInTx: prepareForkPrivacyInheritanceInTx,
+    applyForkInheritanceInTx: applyForkPrivacyInheritanceInTx,
     recordGoogleWorkspaceCallStart,
     recordGoogleWorkspaceCallOutcome,
     syncTrustedRuleEntries,

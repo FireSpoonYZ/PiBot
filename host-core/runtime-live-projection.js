@@ -18,7 +18,7 @@
 import { projectToolPresentation, toolPresentationBytes } from './tool-presentation.js';
 import { projectCodemodeCalls, projectNestedToolFields } from './tool-call-summary.js';
 import { MAX_LIVE_JSON_BYTES } from './remote-live-protocol.js';
-import { deriveEntryAttribution } from './bot-session-context.js';
+import { deriveEntryAttribution, questionnaireWaitKey } from './bot-session-context.js';
 
 const MAX_HISTORY_ENTRIES = 50; // 最新可显示条目数
 const MAX_MESSAGES_PER_ENTRY = 8; // 每条目最多消息数（保留最新）
@@ -342,7 +342,7 @@ function projectUserText(message, entry, attachments) {
 
 /** 投影一条消息；跳过 system/未知角色与无内容消息，只带文本和工具安全字段与时间戳。
     user 消息可携带附件展示元数据（不含 base64），图片-only 消息因此不会被空文本过滤掉。 */
-function projectMessage(message, budget, entry) {
+function projectMessage(message, budget, entry, waitPresentations) {
   const role = message?.role;
   if (role !== 'user' && role !== 'assistant' && role !== 'toolResult') return null;
   const attachments = role === 'user' && entry?.kind === 'host.user-message' &&
@@ -372,9 +372,14 @@ function projectMessage(message, budget, entry) {
     // Durable 1.4 把结果 details 存在 toolResult message 上（entry.data 只存 diagnostics）；
     // abort/interrupt 由 fromSlot 复用 slot.details 合成结果，因此取消的工具结果同样可能
     // 携带最后一次发布的 presentation。大小在加入前计算，超剩余预算省略并置 truncated。
-    const presentation = projectToolPresentation(message.details);
+    const key = questionnaireWaitKey(message.details, entry?.byTaskId);
+    const wait = key === null ? null : waitPresentations?.get(key);
+    const presentation = projectToolPresentation(wait?.details ?? message.details);
     if (presentation && budget.canFit(toolPresentationBytes(presentation))) {
       projected.presentation = presentation;
+      if (message.toolName === 'ask_user_question' && wait?.live === true && wait.status === 'pending' && presentation.status === 'pending') {
+        projected.durableWait = true;
+      }
       budget.take(presentation);
     } else if (presentation !== null ||
         (message.details != null && typeof message.details === 'object' && message.details.presentation != null)) {
@@ -422,7 +427,7 @@ function projectAttribution(raw) {
   const channel = raw.channel;
   if (channel !== 'primary' && channel !== 'dm' && channel !== 'room') return null;
   const out = { kind, channel };
-  if (kind === 'host' && (raw.sourceType === 'webhook' || raw.sourceType === 'google-workspace-rule')) {
+  if (kind === 'host' && (raw.sourceType === 'webhook' || raw.sourceType === 'google-workspace-rule' || raw.sourceType === 'schedule' || raw.sourceType === 'task_dispatch')) {
     out.sourceType = raw.sourceType;
   }
   for (const key of ['botId', 'deviceId', 'name', 'scopeId', 'messageId', 'replyTo', 'rootId', 'createdAt']) {
@@ -448,7 +453,7 @@ function peerBodyFromScopeMessage(entry) {
  * 无可显示消息则整条不可显示，返回 null。
  * host.work-trigger / pi.compaction 永不渲染为气泡；host.scope-message 只显示对端原文，不显示 Host 包装。
  */
-function projectEntry(entry, sessionState, budget) {
+function projectEntry(entry, sessionState, budget, waitPresentations) {
   if (entry?.kind === 'host.work-trigger' || entry?.kind === 'pi.compaction') return null;
   const attribution = projectAttribution(deriveEntryAttribution(entry, sessionState));
   if (entry?.kind === 'host.scope-message') {
@@ -469,7 +474,7 @@ function projectEntry(entry, sessionState, budget) {
   let seenMessages = 0;
   let messagesDropped = false;
   for (let i = model.length - 1; i >= 0; i--) {
-    const projected = projectMessage(model[i], budget, entry);
+    const projected = projectMessage(model[i], budget, entry, waitPresentations);
     if (!projected) continue;
     seenMessages++;
     if (seenMessages > MAX_MESSAGES_PER_ENTRY) {
@@ -502,7 +507,7 @@ function isPendingInteraction(presentation) {
 }
 
 /** 投影工具槽、白名单 presentation 与嵌套摘要，不带原始参数/details/诊断。 */
-function projectTool(slot, budget) {
+function projectTool(slot, budget, waitPresentations) {
   const truncated = (slot.droppedBytes ?? 0) > 0 || (slot.droppedLines ?? 0) > 0;
   const tool = {
     callId: slot.callId,
@@ -529,9 +534,14 @@ function projectTool(slot, budget) {
   // 运行中工具经 api.details({presentation}) 发布到 pi.live slot.details；
   // finishSlot 会在 settle 时清除 details，终态卡片由历史 toolResult 投影承担。
   // 大小在加入前计算，超剩余预算省略并置 truncated，不静默丢结构。
-  const presentation = projectToolPresentation(slot.details);
+  const key = questionnaireWaitKey(slot.details, slot.taskId);
+  const wait = key === null ? null : waitPresentations?.get(key);
+  const presentation = projectToolPresentation(wait?.details ?? slot.details);
   if (presentation && budget.canFit(toolPresentationBytes(presentation))) {
     tool.presentation = presentation;
+    if (slot.name === 'ask_user_question' && wait?.live === true && wait.status === 'pending' && presentation.status === 'pending') {
+      tool.durableWait = true;
+    }
     budget.take(presentation);
   } else if (presentation !== null ||
       (slot.details != null && typeof slot.details === 'object' && slot.details.presentation != null)) {
@@ -667,6 +677,7 @@ export function emptyLiveState() {
     busy: false,
     queuedCount: 0,
     activity: idleActivity(),
+    durableWaits: [],
   };
 }
 
@@ -703,7 +714,7 @@ export function projectLiveState(view, sessionState = null, extras = null) {
       for (const slot of slots) {
         if (tools.length >= MAX_TOOLS) break;
         if (isPendingInteraction(slot.details?.presentation) !== pending) continue;
-        tools.push(projectTool(slot, budget));
+        tools.push(projectTool(slot, budget, extras?.waitPresentations));
       }
     }
   }
@@ -729,7 +740,7 @@ export function projectLiveState(view, sessionState = null, extras = null) {
     if (effectiveResetId > 0 && Number.isSafeInteger(entry?.id) && entry.id <= effectiveResetId) {
       break;
     }
-    const projected = projectEntry(entry, sessionState, budget);
+    const projected = projectEntry(entry, sessionState, budget, extras?.waitPresentations);
     if (!projected) continue;
     seenDisplayable++;
     if (seenDisplayable > MAX_HISTORY_ENTRIES) {
@@ -784,6 +795,11 @@ export function projectLiveState(view, sessionState = null, extras = null) {
     busy: Boolean(live?.run),
     queuedCount: Array.isArray(inbox?.items) ? inbox.items.length : 0,
     activity,
+    // A complete, small active identity set lets clients revoke cached history
+    // cards even after the card leaves the bounded live history window.
+    durableWaits: (extras?.durableWaits ?? []).map(({ installationId, conversationId, requestId }) => ({
+      installationId, conversationId, requestId,
+    })),
   };
   // 内部提示写入 extras（out-param）：activity 是否源自真实 live.run（阻塞压缩
   // 的 compacting 仍是真实运行，区别于无 run 的空闲/手动压缩）、是否来自真实
@@ -828,6 +844,7 @@ function fitPresentationBudget(state) {
       if (message.presentation === undefined) continue;
       deficit -= utf8JsonBytes(message.presentation);
       delete message.presentation;
+      delete message.durableWait;
       message.truncated = true;
       state.historyTruncated = true;
     }
@@ -920,6 +937,7 @@ function fitPresentationBudget(state) {
         if (tool.presentation === undefined || isPendingInteraction(tool.presentation) !== pending) continue;
         overflow -= utf8JsonBytes(tool.presentation);
         delete tool.presentation;
+        delete tool.durableWait;
         tool.truncated = true;
       }
     }
@@ -951,6 +969,7 @@ const STATE_KEYS = [
   'turnAdmission',
   'activity',
   'learning',
+  'durableWaits',
 ];
 
 /**

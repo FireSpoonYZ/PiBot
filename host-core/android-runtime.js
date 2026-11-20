@@ -703,6 +703,31 @@ export function createAndroidBridge(options = {}) {
           const value = await broker.request(cmd.method, cmd.params);
           if (controller.signal.aborted) return; // cancelled: never answer late
           result = { value: value === undefined ? null : value };
+        } else if (mode === 'host' && (cmd.method === 'getScheduleFence' || cmd.method === 'submitScheduled')) {
+          // Trusted Java scheduler IPC, host mode only. No remote adapter or
+          // public control method can supply an origin or choose a new fence.
+          const params = cmd.params;
+          const allowed = cmd.method === 'getScheduleFence'
+            ? ['botId'] : ['botId', 'requestId', 'text', 'stopEpoch'];
+          if (!params || typeof params !== 'object' || Array.isArray(params) ||
+              Object.keys(params).some((key) => !allowed.includes(key)) ||
+              typeof params.botId !== 'string' || !params.botId.trim() ||
+              (cmd.method === 'submitScheduled' && (
+                typeof params.requestId !== 'string' || !params.requestId.trim() ||
+                typeof params.text !== 'string' || !params.text.trim() ||
+                !Number.isSafeInteger(params.stopEpoch) || params.stopEpoch < 0
+              ))) {
+            throw messageError('INVALID_ARGUMENT', 'invalid schedule handoff');
+          }
+          if (!service || typeof service[cmd.method] !== 'function') {
+            throw messageError('RUNTIME_BUSY', 'host service is not ready');
+          }
+          if (controller.signal.aborted) return;
+          result = cmd.method === 'getScheduleFence'
+            ? await service.getScheduleFence(params.botId)
+            : await service.submitScheduled(params.botId, {
+              requestId: params.requestId, text: params.text, stopEpoch: params.stopEpoch,
+            });
         } else {
           result = await adapter(deviceId, cmd.method, cmd.params, {
             signal: controller.signal,
