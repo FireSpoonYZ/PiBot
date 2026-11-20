@@ -1,4 +1,4 @@
-import { scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
+import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import secureSession from '@fastify/secure-session';
 import csrfProtection from '@fastify/csrf-protection';
@@ -74,6 +74,7 @@ export async function registerAuth(app, { sessionKey, ownerPasswordHash }) {
     if (!timingSafeEqual(actual, expected)) return reply.code(401).send({ error: { code: 'UNAUTHENTICATED', message: 'Invalid credentials' } });
     req.session.regenerate();
     req.session.set('owner', true);
+    req.session.set('ownerSessionId', randomBytes(16).toString('base64url'));
     return { authenticated: true, csrfToken: reply.generateCsrf() };
   });
   app.delete('/api/session', { onRequest: [requireOwner, app.csrfProtection] }, async (req, reply) => {

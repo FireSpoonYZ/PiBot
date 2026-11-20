@@ -3,6 +3,163 @@ import { readFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { McpClient, StdioTransport, StreamableHttpTransport, toLlmContent } from '@earendil-works/pi-mcp';
 import { defineTool } from '@earendil-works/pi-durable';
+import { prepareGoogleFileCall, finishGoogleFileCall } from '../google-file-transfer.js';
+
+const GOOGLE_WORKSPACE_INSTALLATION_ID = 'builtin-google-workspace-mcp';
+
+const GOOGLE_BINARY_FIELD_KEYS = new Set([
+  'base64',
+  'contentBase64',
+  'dataBase64',
+  'bytesBase64',
+  'fileBase64',
+  'attachmentBase64',
+  'bodyBase64',
+  'binary',
+  'bytes',
+  'buffer',
+  'rawBytes',
+]);
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasBinaryTransferField(value, depth = 0) {
+  if (depth > 12 || value === null || value === undefined) return false;
+  if (value instanceof Uint8Array || Buffer.isBuffer(value)) return true;
+  if (typeof value !== 'object') return false;
+  if (Array.isArray(value)) return value.some(item => hasBinaryTransferField(item, depth + 1));
+  for (const [key, item] of Object.entries(value)) {
+    if (GOOGLE_BINARY_FIELD_KEYS.has(key) && item !== null && item !== undefined && item !== '') return true;
+    if (hasBinaryTransferField(item, depth + 1)) return true;
+  }
+  return false;
+}
+
+function redactBinaryFields(value, keyName = '', depth = 0) {
+  if (depth > 16) return '[truncated]';
+  if (value === null || value === undefined) return value;
+  if (value instanceof Uint8Array || Buffer.isBuffer(value)) {
+    return `[binary omitted (${value.byteLength} bytes)]`;
+  }
+  if (typeof value === 'string') {
+    if (GOOGLE_BINARY_FIELD_KEYS.has(keyName) && value.length > 0) {
+      return '[binary payload omitted]';
+    }
+    return value;
+  }
+  if (typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(item => redactBinaryFields(item, '', depth + 1));
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (GOOGLE_BINARY_FIELD_KEYS.has(key) && item !== null && item !== undefined && item !== '') {
+      out[key] = '[binary payload omitted]';
+      continue;
+    }
+    out[key] = redactBinaryFields(item, key, depth + 1);
+  }
+  return out;
+}
+
+function sanitizeGoogleMcpResultForLlm(result) {
+  if (!isPlainObject(result)) {
+    return { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(redactBinaryFields(result)) }] };
+  }
+  const blocks = Array.isArray(result.content)
+    ? result.content.map(block => {
+      if (!isPlainObject(block)) return { type: 'text', text: '' };
+      if (block.type === 'text' && typeof block.text === 'string') {
+        return { type: 'text', text: block.text };
+      }
+      if (block.type === 'resource' && isPlainObject(block.resource) && typeof block.resource.text === 'string') {
+        return { type: 'text', text: block.resource.text };
+      }
+      if (block.type === 'image' || block.type === 'audio' || block.type === 'resource') {
+        return { type: 'text', text: `[${block.type} binary payload omitted; saved on Host when downloaded]` };
+      }
+      return { type: 'text', text: JSON.stringify(redactBinaryFields(block)) };
+    })
+    : [];
+  const safeStructured = isPlainObject(result.structuredContent) ? redactBinaryFields(result.structuredContent) : undefined;
+  return {
+    content: blocks.length ? blocks : [{ type: 'text', text: safeStructured !== undefined ? JSON.stringify(safeStructured) : '' }],
+    ...(safeStructured !== undefined ? { structuredContent: safeStructured } : {}),
+    ...(result.isError === true ? { isError: true } : {}),
+  };
+}
+
+async function resolveBotCwd(host, botId, conversationId) {
+  if (typeof host?.getHarness === 'function' && conversationId) {
+    try {
+      const conversation = await host.getHarness().conversation(conversationId, host.context);
+      const agent = await conversation?.agent?.(host.context);
+      if (typeof agent?.cwd === 'string' && agent.cwd) return agent.cwd;
+    } catch {
+      // Fall back to the Bot record cwd.
+    }
+  }
+  const bot = typeof host?.host?.getBot === 'function' ? host.host.getBot(botId) : null;
+  if (typeof bot?.cwd === 'string' && bot.cwd) return bot.cwd;
+  return undefined;
+}
+
+function unwrapPreparedArgs(prepared, fallback) {
+  if (prepared === undefined) return fallback;
+  if (isPlainObject(prepared) && isPlainObject(prepared.args)
+      && Object.keys(prepared).every(key => key === 'args' || key === 'meta' || key === 'transfer')) {
+    return prepared.args;
+  }
+  return prepared;
+}
+
+function safeTransferErrorMessage(error, fallback) {
+  const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'GOOGLE_FILE_TRANSFER_ERROR';
+  const message = typeof error?.message === 'string' && error.message.trim()
+    ? error.message.trim().slice(0, 400)
+    : fallback;
+  return JSON.stringify({ error: { code, message } });
+}
+
+async function finalizeGoogleToolResult(toolName, mcpResult, { cwd, args, finish }) {
+  if (mcpResult?.isError === true) {
+    return sanitizeGoogleMcpResultForLlm(mcpResult);
+  }
+  if (isPlainObject(mcpResult) && isPlainObject(mcpResult.structuredContent)) {
+    let finished = await finish(toolName, mcpResult.structuredContent, { cwd, args });
+    if (finished === mcpResult.structuredContent && hasBinaryTransferField(mcpResult.structuredContent)) {
+      finished = await finish(toolName, mcpResult, { cwd, args });
+    }
+    if (isPlainObject(finished) && Array.isArray(finished.content)) {
+      return sanitizeGoogleMcpResultForLlm(finished);
+    }
+    if (finished !== mcpResult.structuredContent) {
+      if (typeof finished === 'string') {
+        return { content: [{ type: 'text', text: finished }], isError: false };
+      }
+      const sanitized = redactBinaryFields(finished);
+      return {
+        content: [{ type: 'text', text: JSON.stringify(sanitized) }],
+        ...(isPlainObject(sanitized) ? { structuredContent: sanitized } : {}),
+        isError: false,
+      };
+    }
+    return sanitizeGoogleMcpResultForLlm(mcpResult);
+  }
+  const finished = await finish(toolName, mcpResult, { cwd, args });
+  if (isPlainObject(finished) && Array.isArray(finished.content)) {
+    return sanitizeGoogleMcpResultForLlm(finished);
+  }
+  if (typeof finished === 'string') {
+    return { content: [{ type: 'text', text: finished }], isError: false };
+  }
+  const sanitized = redactBinaryFields(finished);
+  return {
+    content: [{ type: 'text', text: JSON.stringify(sanitized) }],
+    ...(isPlainObject(sanitized) ? { structuredContent: sanitized } : {}),
+    isError: false,
+  };
+}
 
 function fail(code, message) {
   return Object.assign(new Error(message), { code });
@@ -72,8 +229,11 @@ export function mcpToolName(installationId, botId, remoteName) {
   return 'mcp_' + hash.slice(0, 32);
 }
 
-export async function createMcpDriver({ installationId, version, target, packageRoot, host }) {
+export async function createMcpDriver({ installationId, version, target, packageRoot, host, googleFileTransfer }) {
   const bots = new Set();
+  const isGoogleWorkspace = target === 'center' && installationId === GOOGLE_WORKSPACE_INSTALLATION_ID;
+  const prepareTransfer = googleFileTransfer?.prepareGoogleFileCall ?? prepareGoogleFileCall;
+  const finishTransfer = googleFileTransfer?.finishGoogleFileCall ?? finishGoogleFileCall;
   return {
     async forBot(context) {
       const { botId, effectiveConfig, credentials } = context;
@@ -149,18 +309,53 @@ export async function createMcpDriver({ installationId, version, target, package
               if (owner !== botId) throw fail('MCP_FORBIDDEN', 'MCP tool is not available to this Bot.');
               if (!active) throw fail('MCP_CLOSED', 'MCP capability is not active.');
               const signal = invocation.abortSignal ? AbortSignal.any([invocation.abortSignal, abort.signal]) : abort.signal;
-              try {
-                const result = target === 'center'
-                  ? await host.centerClient.callCapabilityTool(installationId, botId, tool.name, args, api.callId, { signal })
-                  : await client.callTool(tool.name, args, { signal, timeoutMs: effectiveConfig.timeoutMs });
+              const rawArgs = isPlainObject(args) ? args : {};
+              let callArgs = args;
+              let cwd;
+              if (isGoogleWorkspace) {
+                cwd = await resolveBotCwd(host, botId, api.conversationId);
                 invocation.abortSignal?.throwIfAborted();
                 check();
-                return { output: toLlmContent(result), isError: result.isError === true };
+                try {
+                  const prepared = await prepareTransfer(tool.name, rawArgs, { cwd });
+                  callArgs = unwrapPreparedArgs(prepared, rawArgs);
+                } catch (error) {
+                  invocation.abortSignal?.throwIfAborted();
+                  check();
+                  return {
+                    output: [{ type: 'text', text: safeTransferErrorMessage(error, 'Failed to prepare Google file transfer.') }],
+                    isError: true,
+                  };
+                }
+              }
+              let result;
+              try {
+                result = target === 'center'
+                  ? await host.centerClient.callCapabilityTool(installationId, botId, tool.name, callArgs, api.callId, { signal })
+                  : await client.callTool(tool.name, callArgs, { signal, timeoutMs: effectiveConfig.timeoutMs });
+                invocation.abortSignal?.throwIfAborted();
+                check();
               } catch (error) {
                 invocation.abortSignal?.throwIfAborted();
                 check();
                 throw fail('MCP_CALL_FAILED', 'MCP call failed; external effects may have occurred.');
               }
+              if (isGoogleWorkspace) {
+                try {
+                  const finalized = await finalizeGoogleToolResult(tool.name, result, { cwd, args: rawArgs, finish: finishTransfer });
+                  invocation.abortSignal?.throwIfAborted();
+                  check();
+                  return { output: toLlmContent(finalized), isError: finalized.isError === true };
+                } catch (error) {
+                  invocation.abortSignal?.throwIfAborted();
+                  check();
+                  return {
+                    output: [{ type: 'text', text: safeTransferErrorMessage(error, 'Failed to finish Google file transfer.') }],
+                    isError: true,
+                  };
+                }
+              }
+              return { output: toLlmContent(result), isError: result.isError === true };
             },
           }));
         },

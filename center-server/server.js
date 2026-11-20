@@ -23,11 +23,17 @@ import { initializeBuiltinPlugins } from './builtin-plugins.js';
 import { openModelCatalog } from './model-catalog.js';
 import { openProviderAuth } from './provider-auth.js';
 import { openAntigravity } from './antigravity/index.js';
+import { openGoogleAccounts } from './google-workspace/accounts.js';
+import { openGoogleRules } from './google-workspace/rules.js';
+import { createGoogleWorkspaceMcpAdapter } from './google-workspace/mcp-server.js';
+import { createGoogleRuleDispatcher } from './google-workspace/rule-dispatch.js';
+import { GOOGLE_ERROR_STATUS } from './google-workspace/routes.js';
+import { GOOGLE_WORKSPACE_INSTALLATION_ID } from './google-workspace/constants.js';
 
 setupPiHttpRuntime();
 
 const require = createRequire(import.meta.url);
-const status = { INVALID_ARGUMENT: 400, INVALID_CWD: 400, UNSUPPORTED_TARGET: 400, VALIDATION_FAILED: 400, UNAUTHENTICATED: 401, FORBIDDEN: 403, CSRF_INVALID: 403, NOT_FOUND: 404, BOT_NOT_FOUND: 404, REVISION_CONFLICT: 409, REQUEST_CONFLICT: 409, TURN_SET_CHANGED: 409, TURN_SYNC_FAILED: 409, TURN_RECOVERY_REQUIRED: 403, INVALID_STATE: 409, PRIMARY_BOT_PROTECTED: 409, BOT_ARCHIVED: 409, PAYLOAD_TOO_LARGE: 413, RATE_LIMITED: 429, PACKAGE_NOT_READY: 409, CALL_TIMEOUT: 504, TIMEOUT: 504, LEARNING_ERROR: 502, CENTER_OFFLINE: 503, DEVICE_OFFLINE: 503, VAULT_INVALID_ARGUMENT: 400, VAULT_FORBIDDEN: 403, VAULT_NOT_FOUND: 404, VAULT_NOT_CONFIGURED: 409, VAULT_NEEDS_LOGIN: 409, VAULT_LOGIN_CHALLENGE: 409, VAULT_STALE_SESSION: 409, VAULT_CONFLICT: 409, VAULT_REQUEST_EXPIRED: 409, VAULT_REQUEST_BUSY: 409, VAULT_NOT_INITIALIZED: 409, VAULT_ALREADY_INITIALIZED: 409, VAULT_LOCKED: 409, VAULT_UNLOCK_FAILED: 409, VAULT_UNSUPPORTED: 409, VAULT_CONNECTION_FAILED: 502, VAULT_UNAVAILABLE: 503, PAIRING_CODE_INVALID: 401, PAIRING_CODE_USED: 409, PAIRING_CODE_EXPIRED: 410, PAIRING_CODE_REVOKED: 410, PAIRING_CODE_DEVICE_MISMATCH: 409, DEVICE_ALREADY_REGISTERED: 409 };
+const status = { INVALID_ARGUMENT: 400, INVALID_CWD: 400, UNSUPPORTED_TARGET: 400, VALIDATION_FAILED: 400, UNAUTHENTICATED: 401, FORBIDDEN: 403, CSRF_INVALID: 403, NOT_FOUND: 404, BOT_NOT_FOUND: 404, REVISION_CONFLICT: 409, REQUEST_CONFLICT: 409, TURN_SET_CHANGED: 409, TURN_SYNC_FAILED: 409, TURN_RECOVERY_REQUIRED: 403, INVALID_STATE: 409, PRIMARY_BOT_PROTECTED: 409, BOT_ARCHIVED: 409, PAYLOAD_TOO_LARGE: 413, RATE_LIMITED: 429, PACKAGE_NOT_READY: 409, CALL_TIMEOUT: 504, TIMEOUT: 504, LEARNING_ERROR: 502, CENTER_OFFLINE: 503, DEVICE_OFFLINE: 503, VAULT_INVALID_ARGUMENT: 400, VAULT_FORBIDDEN: 403, VAULT_NOT_FOUND: 404, VAULT_NOT_CONFIGURED: 409, VAULT_NEEDS_LOGIN: 409, VAULT_LOGIN_CHALLENGE: 409, VAULT_STALE_SESSION: 409, VAULT_CONFLICT: 409, VAULT_REQUEST_EXPIRED: 409, VAULT_REQUEST_BUSY: 409, VAULT_NOT_INITIALIZED: 409, VAULT_ALREADY_INITIALIZED: 409, VAULT_LOCKED: 409, VAULT_UNLOCK_FAILED: 409, VAULT_UNSUPPORTED: 409, VAULT_CONNECTION_FAILED: 502, VAULT_UNAVAILABLE: 503, PAIRING_CODE_INVALID: 401, PAIRING_CODE_USED: 409, PAIRING_CODE_EXPIRED: 410, PAIRING_CODE_REVOKED: 410, PAIRING_CODE_DEVICE_MISMATCH: 409, DEVICE_ALREADY_REGISTERED: 409, ...GOOGLE_ERROR_STATUS };
 /** The real error-code to HTTP-status map; exported so tests exercise it instead of a copy. */
 export const errorStatus = status;
 
@@ -43,16 +49,17 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
   }
   const linkUrl = `wss://${publicOrigin.host}/v1/link`;
   if (!(encryptionKey instanceof Uint8Array) || !(sessionKey instanceof Uint8Array) || encryptionKey.byteLength !== 32 || sessionKey.byteLength !== 32 || Buffer.from(encryptionKey).equals(Buffer.from(sessionKey))) throw new Error('Independent encryption and session keys are required');
-  let store, relay, bridge, packages, execution, oauth, routes, app, skills, learning, botManagement, catalog, providerAuth, antigravity, vault;
+  let store, relay, bridge, packages, execution, oauth, routes, app, skills, learning, botManagement, catalog, providerAuth, antigravity, vault, googleAccounts, googleWorkspaceMcp, googleRules;
   let closing;
   async function close() {
     if (!closing) closing = (async () => {
       const errors = [];
       // Relay WS teardown runs before app.close() so upgraded sockets are
       // stopped while the HTTP listener is still owned by this process.
-      // Skill/learning services close before the package manager and store
-      // they mutate through; there is nothing to close on botManagement.
-      for (const fn of [() => providerAuth?.close(), () => catalog?.close(), () => routes?.close(), () => antigravity?.close(), () => relay?.close(), () => app?.close(), () => learning?.close(), () => skills?.close(), () => vault?.close(), () => packages?.close(), () => execution?.close(), () => oauth?.close(), () => bridge?.close(), () => store?.close()]) {
+      // Google rule polling stops first; skill/learning services close before
+      // the package manager and store they mutate through; execution closes
+      // before the built-in Google MCP adapter and accounts service.
+      for (const fn of [() => googleRules?.close(), () => providerAuth?.close(), () => catalog?.close(), () => routes?.close(), () => antigravity?.close(), () => relay?.close(), () => app?.close(), () => learning?.close(), () => skills?.close(), () => vault?.close(), () => packages?.close(), () => execution?.close(), () => googleWorkspaceMcp?.close(), () => googleAccounts?.close(), () => oauth?.close(), () => bridge?.close(), () => store?.close()]) {
         try { await fn(); } catch (error) { errors.push(error); }
       }
       if (errors.length) throw new AggregateError(errors, 'Center shutdown failed');
@@ -82,7 +89,10 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
     relay = await openRelayServer({ dataRoot, httpServer: app.server, onHostDisconnect: (deviceId) => { if (!closing) learning?.cancelDevice(deviceId); } });
     bridge = openHostBridge({ dataRoot, store, relay });
     oauth = openMcpOAuth({ store, publicUrl });
-    execution = openCenterExecution({ store, packages: { getInstalled: id => packages.getInstalled(id) }, oauth });
+    googleAccounts = await openGoogleAccounts({ store, publicUrl });
+    googleWorkspaceMcp = createGoogleWorkspaceMcpAdapter({ accounts: googleAccounts });
+    const builtinAdapters = new Map([[GOOGLE_WORKSPACE_INSTALLATION_ID, googleWorkspaceMcp]]);
+    execution = openCenterExecution({ store, packages: { getInstalled: id => packages.getInstalled(id) }, oauth, builtinAdapters });
     packages = await openPackageManager({ dataRoot, store, npmPath: npmPath || join(dirname(require.resolve('npm/package.json')), 'bin', 'npm-cli.js'), onChange: id => routes?.notifyInstallation(id), withActivation: (id, publish) => execution.withActivation(id, publish), probeCenterMcp: (installation, config, identity) => execution.probeGlobal(installation, config, identity) });
     await initializeBuiltinPlugins({ dataRoot, store, packages });
     antigravity = openAntigravity({ dataRoot });
@@ -103,7 +113,16 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
     learning = await openLearningService({ dataRoot, store, skills, runLearningJob });
     botManagement = openBotManagement({ store, packages, notify: (deviceId) => routes?.notifyDevice?.(deviceId) });
     vault = await openCenterVault({ dataRoot, encryptionKey, store });
-    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault });
+    const googleRuleDispatch = createGoogleRuleDispatcher({
+      store,
+      notify: (deviceId) => routes?.notifyDevice?.(deviceId, 'webhook-ready'),
+    });
+    googleRules = await openGoogleRules({
+      store,
+      google: googleAccounts,
+      dispatch: googleRuleDispatch.dispatch,
+    });
+    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault, google: { accounts: googleAccounts, rules: googleRules, ruleDispatch: googleRuleDispatch } });
     if (webRoot) {
       await app.register(fastifyStatic, { root: webRoot, prefix: '/' });
       app.setNotFoundHandler((req, reply) => {
@@ -112,6 +131,7 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
       });
     }
     const url = await app.listen({ host: listenHost, port });
+    await googleRules.start?.();
     void catalog.sync().catch(() => {});
     return { url, linkUrl, close };
   } catch (error) { try { await close(); } catch {} throw error; }
