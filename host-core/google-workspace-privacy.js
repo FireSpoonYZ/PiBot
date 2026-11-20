@@ -17,9 +17,8 @@ import { randomUUID } from 'node:crypto';
 import { defineDoc, ResetEntry } from '@earendil-works/pi-durable';
 import { messageError } from './message-protocol.js';
 
-import { GOOGLE_WORKSPACE_INSTALLATION_ID as GOOGLE_WORKSPACE_MCP_INSTALLATION_ID } from '../center-contract/google-workspace.js';
-
-export { GOOGLE_WORKSPACE_MCP_INSTALLATION_ID };
+// Mirror center-contract/google-workspace.js: the standalone Host cannot import Center packages.
+export const GOOGLE_WORKSPACE_MCP_INSTALLATION_ID = 'builtin.google-workspace';
 export const GOOGLE_WORKSPACE_DATA_BOUNDARY = 'google-workspace';
 export const GOOGLE_WORKSPACE_RULE_SOURCE_TYPE = 'google-workspace-rule';
 export const GOOGLE_WORKSPACE_PRIVACY_DOC_KIND = 'host.google-workspace-privacy';

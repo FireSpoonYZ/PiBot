@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { GOOGLE_WORKSPACE_INSTALLATION_ID } from '../../center-contract/google-workspace.js';
 
 import {
   GOOGLE_WORKSPACE_DATA_BOUNDARY,
@@ -149,6 +150,7 @@ function createMemoryDurableStore() {
 }
 
 test('Google Workspace provenance relies strictly on Center assignment and structured Host rule metadata, never text prefixes or model fields', () => {
+  assert.equal(GOOGLE_WORKSPACE_MCP_INSTALLATION_ID, GOOGLE_WORKSPACE_INSTALLATION_ID);
   assert.equal(
     isGoogleWorkspaceCapability({ target: 'center', installationId: GOOGLE_WORKSPACE_MCP_INSTALLATION_ID }),
     true,
