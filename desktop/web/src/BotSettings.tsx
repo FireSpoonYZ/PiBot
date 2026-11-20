@@ -847,6 +847,7 @@ function BotSettingsSession({
             onOpenBrowser={onOpenBrowser}
             showTitle={false}
             onOpenCenterAdmin={() => onOpenCenterAdmin?.('capabilities')}
+            onOpenCenterGoogle={() => onOpenCenterAdmin?.('google')}
           />
         </div>
       ) : null}

@@ -199,6 +199,7 @@ export type HubScreen =
   | 'bot-schedules'
   | 'bot-screen'
   | 'bot-browser'
+  | 'bot-google-setup'
   | 'bot-model'
   | 'settings'
   | 'archived-bots'

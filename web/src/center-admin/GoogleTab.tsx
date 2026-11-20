@@ -2198,7 +2198,7 @@ export function GoogleTab({
                   }}
                 >
                   <Bot size={14} aria-hidden="true" />
-                  <span>{t('打开目标 Bot 向导', 'Open target Bot wizard')}</span>
+                  <span>{onStartGoogleSetupWizard ? t('打开目标 Bot 向导', 'Open target Bot wizard') : t('打开目标 Bot', 'Open target Bot')}</span>
                 </button>
               )}
             </div>

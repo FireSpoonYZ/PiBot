@@ -719,7 +719,7 @@ export function GoogleCapabilitySection({
           callGoogleSetup={callGoogleSetup}
           onOpenBrowser={onOpenBrowser}
           onOpenCenterAdmin={onOpenCenterAdmin}
-          onStatusUpdated={nextSnap => setSnapshot(nextSnap)}
+          onStatusUpdated={setSnapshot}
           onClose={() => setActivePanel(null)}
         />
       ) : null}

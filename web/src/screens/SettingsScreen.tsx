@@ -42,6 +42,7 @@ export interface SettingsCenterAdminScreenProps {
   onBack(): void;
   onOpenCenterSettings(): void;
   onConfigureBot(deviceId: string, botId: string): void;
+  onStartGoogleSetupWizard(deviceId: string, botId: string): void;
 }
 
 export function SettingsCenterAdminScreen({
@@ -50,6 +51,7 @@ export function SettingsCenterAdminScreen({
   onBack,
   onOpenCenterSettings,
   onConfigureBot,
+  onStartGoogleSetupWizard,
 }: SettingsCenterAdminScreenProps) {
   const t = useText();
   const centerConn = useCenterConnection();
@@ -107,6 +109,7 @@ export function SettingsCenterAdminScreen({
             onOpenExternal={() => void centerConn.openManagement()}
             onOpenExternalUrl={url => openCenterUrl(url)}
             onConfigureBot={onConfigureBot}
+            onStartGoogleSetupWizard={onStartGoogleSetupWizard}
           />
         )}
       </div>

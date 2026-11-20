@@ -42,7 +42,7 @@ export interface CapabilitiesPageProps {
   callGoogleSetup?: GoogleSetupControlCall;
   onOpenBrowser?: () => void;
   onClose?: () => void;
-  onOpenCenterAdmin?: () => void;
+  onOpenCenterAdmin?: (tab?: 'capabilities' | 'google') => void;
 }
 
 type KindFilter = 'all' | 'plugin' | 'mcp' | 'skill';
@@ -318,7 +318,7 @@ export function CapabilitiesPage({
       isLocalAndroid={isLocalAndroid}
       callGoogleSetup={callGoogleSetup}
       onOpenBrowser={onOpenBrowser}
-      onOpenCenterAdmin={openCenterProviders}
+      onOpenCenterAdmin={onOpenCenterAdmin ? () => onOpenCenterAdmin('google') : openCenterProviders}
     />
   );
 

@@ -28,6 +28,7 @@ type Props = {
   onAuthenticated?: () => void;
   /** 从未全局启用或全局设置跳转至设置 -> 中心管理 -> 扩展插件。 */
   onOpenCenterAdmin?: () => void;
+  onOpenCenterGoogle?: () => void;
 };
 
 const identityText = (zh: string): string => zh;
@@ -45,6 +46,7 @@ export function BotCapabilities({
   showTitle = true,
   onAuthenticated,
   onOpenCenterAdmin,
+  onOpenCenterGoogle,
 }: Props) {
   const {
     entries,
@@ -103,7 +105,7 @@ export function BotCapabilities({
         hostPlatform={hostPlatform}
         callGoogleSetup={callGoogleSetup}
         onOpenBrowser={onOpenBrowser}
-        onOpenCenterAdmin={onOpenCenterAdmin}
+        onOpenCenterAdmin={onOpenCenterGoogle}
       />
 
       {runtime ? (

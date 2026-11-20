@@ -64,6 +64,7 @@ import type {
 import type { ShowerCall } from './ShowerPreview';
 import { BotScreenPanel } from './BotScreenPanel';
 import BotBrowserPanel from './bot-browser/BotBrowserPanel';
+import { GoogleSetupWizard } from './google/GoogleSetupWizard';
 import { openExternalUrl } from './center-admin/openExternalUrl';
 import type {
   BotBrowserControlCall,
@@ -5554,7 +5555,7 @@ ${newer}` : draftSnapshot;
           openCenterSettings();
         }
       },
-      onOpenCenterAdmin: () => openInAppCenterAdmin('capabilities'),
+      onOpenCenterAdmin: () => openInAppCenterAdmin('google'),
       onSelectGoogleAccount: selectGoogleAccount,
     };
   }, [
@@ -6349,6 +6350,24 @@ ${newer}` : draftSnapshot;
       )}
 
       {/* ==================== SCREEN 3C: FULL-SCREEN BOT BROWSER VIEW ==================== */}
+      {screen === 'bot-google-setup' && activeBot && (
+        <SettingsSheet title={t('Google 配置向导', 'Google setup wizard')} onClose={() => { popScreen(); }}>
+          <GoogleSetupWizard
+            key={activeBot.key}
+            api={mobileGoogleContext?.api}
+            identity={mobileGoogleContext?.identity}
+            botId={activeBot.botId}
+            botName={activeBot.role}
+            isLocalAndroid={activeBot.hostKind === 'local' || activeBot.platform?.toLowerCase() === 'android'}
+            autoStart
+            callGoogleSetup={callGoogleSetup}
+            onOpenBrowser={openBotBrowser}
+            onOpenCenterAdmin={() => openInAppCenterAdmin('google')}
+            onClose={() => { popScreen(); }}
+          />
+        </SettingsSheet>
+      )}
+
       {screen === 'bot-browser' && activeBot && (
         <div className="gws-mobile-browser-screen">
           <BotBrowserPanel
@@ -6364,14 +6383,7 @@ ${newer}` : draftSnapshot;
               void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
               if (url) void openExternalUrl(url).catch(() => {});
             }}
-            onOpenSystemGoogleAuth={() => {
-              if (!popScreen()) nav.push({ screen: 'bot-profile', botKey: activeBot.key });
-              if (remoteConnected && remoteIdentity && (activeBot.hostKind !== 'local' || localHost?.deviceId)) {
-                openModelPickerSheet('capabilities');
-              } else {
-                openCenterSettings();
-              }
-            }}
+            onOpenSystemGoogleAuth={() => openInAppCenterAdmin('google')}
             onClose={() => {
               if (!popScreen()) nav.push({ screen: 'chat', botKey: activeBot.key });
             }}
@@ -6656,6 +6668,12 @@ ${newer}` : draftSnapshot;
             );
             if (target) openBotProfile(target);
           }}
+          onStartGoogleSetupWizard={(deviceId, botId) => {
+            const target = allBotItems.find(item => item.deviceId === deviceId && item.botId === botId);
+            if (!target) return;
+            setActiveBotKey(target.key);
+            nav.push({ screen: 'bot-google-setup', botKey: target.key });
+          }}
         />
       )}
 
@@ -6717,9 +6735,9 @@ ${newer}` : draftSnapshot;
               setModelTarget(null);
               openBotBrowser();
             }}
-            onOpenCenterAdmin={() => {
+            onOpenCenterAdmin={(tab = 'capabilities') => {
               setModelTarget(null);
-              openInAppCenterAdmin('capabilities');
+              openInAppCenterAdmin(tab);
             }}
             onClose={closeModelTarget}
           />

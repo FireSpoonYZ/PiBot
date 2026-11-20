@@ -12,6 +12,8 @@ import { openHostBridge } from '../../center-server/host-bridge.js';
 import { openCenterExecution } from '../../center-server/execution.js';
 import { registerAuth } from '../../center-server/auth.js';
 import { registerRoutes } from '../../center-server/routes.js';
+import { centerAdminRequest } from '../src/bot-settings/centerAdminBroker.ts';
+import { isSharedGoogleCapabilityEntry } from '../src/google/googleCopy.ts';
 import { errorStatus } from '../../center-server/server.js';
 import {
   openGoogleAccounts,
@@ -347,6 +349,14 @@ test('real Center server routes enforce auth/CSRF/no-store, public OAuth callbac
     assert.equal(statusBefore.headers['cache-control'], 'no-store');
     assert.equal(statusBefore.json().client.configured, false);
     assert.equal(statusBefore.json().client.redirectUri, REDIRECT_URI);
+    const uiBroker = { async broker(_identity, op, params) {
+      assert.equal(this, uiBroker);
+      assert.equal(op, 'center_admin_request');
+      return (await center.app.inject({ method: params.method, url: params.path, headers: { cookie: ownerA.cookie } })).json();
+    } };
+    assert.deepEqual(await centerAdminRequest(uiBroker, {}, { method: 'GET', path: '/api/google/status' }), statusBefore.json());
+    assert.equal(isSharedGoogleCapabilityEntry({ installation: { installationId: GOOGLE_WORKSPACE_INSTALLATION_ID } }), true);
+    assert.equal(isSharedGoogleCapabilityEntry({ installation: { installationId: 'user-mcp', packageId: 'e-launcher.google-workspace' } }), false);
 
     // 2. Owner mutation without CSRF rejected.
     const noCsrf = await center.app.inject({

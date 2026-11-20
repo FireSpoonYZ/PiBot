@@ -19,7 +19,8 @@ import { ErrorNotice, useCollapseToolOutput, useHideToolOutput, useText } from '
 import { archiveExpiryAt, type BotChatsArchiveBridge } from './BotChats';
 
 export type SettingsTab = 'connection' | 'center-admin' | 'runtime' | 'general' | 'archive' | 'updates';
-export type CenterAdminTab = 'providers' | 'capabilities' | 'devices' | 'vault' | 'ops';
+import type { CenterAdminTab } from '../../../web/src/center-admin/types';
+export type { CenterAdminTab } from '../../../web/src/center-admin/types';
 
 interface ProfileFormState {
   title: string;
@@ -72,6 +73,7 @@ export interface SettingsPanelProps {
   onDisconnectCenter(): Promise<void>;
   onSaveCenterCa(ca: string): Promise<void>;
   onConfigureBot?(deviceId: string, botId: string): void;
+  onStartGoogleSetupWizard?(deviceId: string, botId: string): void;
   devices: DevicesSectionState;
   devicesIsRelay: boolean;
   lastObservedAt: string | null;
@@ -598,6 +600,7 @@ export function SettingsPanel(props: SettingsPanelProps) {
                   onOpenExternal={() => void openCenterManagement(centerStatus?.centerUrl)}
                   onOpenExternalUrl={url => openCenterManagement(url)}
                   onConfigureBot={props.onConfigureBot}
+                  onStartGoogleSetupWizard={props.onStartGoogleSetupWizard}
                 />
               </div>
             ) : (

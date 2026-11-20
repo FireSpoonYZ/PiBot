@@ -386,14 +386,5 @@ export function validateWebClientJson(
 export function isSharedGoogleCapabilityEntry(entry: {
   installation: { installationId?: string; packageId?: string; displayName?: string };
 }): boolean {
-  const id = (entry.installation.installationId ?? '').toLowerCase();
-  const pkg = (entry.installation.packageId ?? '').toLowerCase();
-  return (
-    id === 'google-workspace' ||
-    id === 'e-launcher.google-workspace' ||
-    id === 'center.google-workspace' ||
-    pkg === 'e-launcher.google-workspace' ||
-    pkg === '@e-launcher/google-workspace' ||
-    pkg === 'google-workspace'
-  );
+  return entry.installation.installationId === 'builtin.google-workspace';
 }

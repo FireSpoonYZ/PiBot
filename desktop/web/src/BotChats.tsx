@@ -90,6 +90,7 @@ import {
   type VaultUnlockSubmitPayload,
 } from '../../../web/src/ToolPresentation';
 import BotBrowserPanel from '../../../web/src/bot-browser/BotBrowserPanel';
+import { GoogleSetupWizard } from '../../../web/src/google/GoogleSetupWizard';
 import { openExternalUrl } from '../../../web/src/center-admin/openExternalUrl';
 import {
   createBrowserControlRequest,
@@ -359,7 +360,7 @@ export interface BotChatsArchiveBridge {
   unarchiveBot: (bot: BotDirectoryEntry) => Promise<void>;
   deleteBot: (bot: BotDirectoryEntry) => Promise<void>;
   conversationName: (target: SendRecordsTarget) => string | undefined;
-  openConversation: (target: SendRecordsTarget) => void;
+  openConversation: (target: SendRecordsTarget, panel?: 'google-setup') => void;
 }
 
 export interface SendRecordsTarget {
@@ -1877,7 +1878,7 @@ function BotProfile({ api, centerApi, bot, page, onSaved }: {
 }
 
 type InspectorDetail = BotSettingsTab | 'management';
-type InspectorTab = 'profile' | InspectorDetail | 'raw' | 'shower' | 'browser';
+type InspectorTab = 'profile' | InspectorDetail | 'raw' | 'shower' | 'browser' | 'google-setup';
 
 interface InspectorPage {
   id: InspectorDetail;
@@ -2167,7 +2168,7 @@ function PrimaryChatPane({
       callBrowser,
       onOpenBrowser: () => setInspectorTab('browser'),
       onOpenCapabilities: () => setInspectorTab('capabilities'),
-      onOpenCenterAdmin: onOpenCenterAdmin ? () => onOpenCenterAdmin('capabilities') : undefined,
+      onOpenCenterAdmin: onOpenCenterAdmin ? () => onOpenCenterAdmin('google') : undefined,
       onSelectGoogleAccount: selectGoogleAccount,
     }),
     [
@@ -3874,6 +3875,7 @@ function PrimaryChatPane({
       ? '智能体资料'
       : inspectorTab === 'raw'
         ? '诊断与原始记录'
+        : inspectorTab === 'google-setup' ? t('Google 配置向导', 'Google setup wizard')
         : inspectorTab === 'browser'
           ? 'Bot 内置浏览器'
           : '虚拟桌面');
@@ -4596,6 +4598,17 @@ function PrimaryChatPane({
                   onClose={() => setInspectorTab(null)}
                 />
               ) : null}
+              {inspectorTab === 'google-setup' && (
+                <GoogleSetupWizard
+                  key={`google-setup:${sess}:${bot.botId}`}
+                  api={api} identity={identity} botId={bot.botId} botName={bot.role}
+                  isLocalAndroid={devicePlatform?.toLowerCase() === 'android'}
+                  autoStart callGoogleSetup={callGoogleSetup}
+                  onOpenBrowser={() => setInspectorTab('browser')}
+                  onOpenCenterAdmin={() => onOpenCenterAdmin?.('google')}
+                  onClose={() => setInspectorTab(null)}
+                />
+              )}
               {inspectorTab === 'browser' ? (
                 <div className="gws-desktop-browser-pane">
                   <BotBrowserPanel
@@ -5710,8 +5723,9 @@ export function BotChats({
       group.identity.profileId === identity.profileId && group.identity.kind === identity.kind)?.title;
   }, [identity, profileReady, bots, groupItems]);
 
-  const openConversation = useCallback((target: SendRecordsTarget) => {
+  const openConversation = useCallback((target: SendRecordsTarget, panel?: 'google-setup') => {
     if (!conversationName(target)) return;
+    if (panel && target.botId) setInspectorRequest({ deviceId: target.deviceId, botId: target.botId, tab: panel, seq: Date.now() });
     setDeviceFilter('all');
     setQuery('');
     setRoomSettingsOpen(false);
