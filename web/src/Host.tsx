@@ -1766,9 +1766,6 @@ export function HostPage({
   }, [applyCutoff, getCutoff, updateBotMeta]);
 
   const activeChatScope = activeBot ? scopeForBot(activeBot) : '';
-  // 恢复 pending 已带终态回执（done/unanswered）时首屏不再补乐观用户气泡，其真实轮次
-  // 由全量历史终态回读补齐；suppress 按 requestId 比对，仅本次进入 seed 的快照生效。
-  const suppressSeededPendingRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (!activeBot || screen !== 'chat' || !activeChatScope) return;
     if (currentChatScope.current === activeChatScope) {
@@ -1785,11 +1782,6 @@ export function HostPage({
     const entry = stored ? { ...stored, pending: { ...stored.pending, botKey: activeBot.key } } : undefined;
     if (entry) pendingByBot.current.set(activeChatScope, entry);
     chatSubmissionRef.current = entry ? { botKey: activeBot.key, requestId: entry.pending.requestId, afterEntryId: entry.pending.afterEntryId } : undefined;
-    suppressSeededPendingRef.current =
-      entry?.pending.requestId &&
-      (entry.receipt?.status === 'done' || entry.receipt?.status === 'unanswered')
-        ? entry.pending.requestId
-        : undefined;
     setChatPending(entry?.pending);
     setChatReceipt(entry?.receipt);
     setChatDraft(readChatDraft(activeChatScope));
@@ -2331,12 +2323,6 @@ export function HostPage({
       chatLoadingScope.current = scopeKey ? { key: scopeKey } : null;
       setChatHistoryLoading(Boolean(scopeKey) && cachedHistory.length === 0);
     }
-    // 恢复 pending 带终态回执（done/unanswered）只 suppress 本次进入的快照。
-    suppressSeededPendingRef.current =
-      saved?.pending.requestId &&
-      (saved.receipt?.status === 'done' || saved.receipt?.status === 'unanswered')
-        ? saved.pending.requestId
-        : undefined;
     setChatPending(saved?.pending);
     setChatReceipt(saved?.receipt);
     setChatDraft(scopeKey ? readChatDraft(scopeKey) : '');
@@ -4674,41 +4660,8 @@ ${newer}` : draftSnapshot;
     };
     const rawSorted = [...byId.values()].sort((a, b) => numericId(a) - numericId(b));
     const effectiveClearedAfter = Math.max(currentClearedAfter, maxResetEntryId(rawSorted));
-    const sorted = filterHistoryAfterCutoff(rawSorted, effectiveClearedAfter);
-    // 恢复 pending 带终态回执（done/unanswered，本次进入由 openBotChat/scope 切换 seed 的
-    // requestId）：首屏不再单独补乐观用户气泡，其真实轮次由全量历史终态回读补齐；
-    // queued/placed/未确认请求仍照常占位。上一代际的 pending 不得重新渲染成乐观气泡。
-    const suppressPendingBubble =
-      Boolean(chatPending?.requestId) &&
-      suppressSeededPendingRef.current === chatPending?.requestId &&
-      (chatReceipt?.status === 'done' || chatReceipt?.status === 'unanswered');
-    if (chatPending?.botKey === activeBot.key && !suppressPendingBubble && chatPending.afterEntryId >= effectiveClearedAfter) {
-      const pendingText = chatPending.text.trim();
-      const pendingAttCount = chatPending.attachments?.length ?? 0;
-      const alreadyInHistory = parseHistoryEntries(sorted, effectiveClearedAfter).some(
-        turn =>
-          turn.role === 'user' &&
-          turn.entryId > chatPending.afterEntryId &&
-          turn.text === pendingText &&
-          (pendingText !== '' || (turn.attachments?.length ?? 0) === pendingAttCount),
-      );
-      if (!alreadyInHistory) {
-        sorted.push({
-          id: chatPending.afterEntryId + 0.5,
-          kind: 'pi.user',
-          model: [
-            {
-              role: 'user',
-              content: chatPending.text,
-              ...(chatPending.attachments?.length ? { attachments: chatPending.attachments.map((id) => ({ id })) } : {}),
-              ...(typeof chatPending.submittedAt === 'number' ? { timestamp: chatPending.submittedAt } : {}),
-            },
-          ],
-        });
-      }
-    }
-    return sorted;
-  }, [chatHistory, effectiveChatLive, activeBot, currentClearedAfter, chatPending, chatReceipt]);
+    return filterHistoryAfterCutoff(rawSorted, effectiveClearedAfter);
+  }, [chatHistory, effectiveChatLive, activeBot, currentClearedAfter]);
 
   // generation.attribution 缺失但 tools 仍活跃时，用合并历史中最新执行来源判断当前是否群聊后台工作；
   // 1v1 Bot 私聊（dm）与用户主聊（primary）均在当前 Bot 的 1v1 对话页内实时流式展示。
