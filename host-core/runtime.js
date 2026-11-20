@@ -40,6 +40,12 @@ import { createTurnAdmission } from './runtime-turns.js';
 import { TurnQueue } from './runtime-turns-docs.js';
 import { createBotSessionRuntime, applySessionResetState } from './runtime-bot-session.js';
 import { BotSessionState, USER_MESSAGE_KIND, WORK_TRIGGER_KIND, deriveEntryAttribution } from './bot-session-context.js';
+import {
+  createGoogleWorkspacePrivacy,
+  GoogleWorkspacePrivacyState,
+  isTrustedDataBoundary,
+  isTrustedHostSourceType,
+} from './google-workspace-privacy.js';
 import { createBotLearning } from './bot-learning.js';
 import { createBotManagementSkillSection } from './bot-management-skill.js';
 import { SOUL_MAX_BYTES } from './bot-soul.js';
@@ -578,6 +584,11 @@ export async function openRuntime(options) {
       return `Tools execute on this host (device ${host.deviceId}) through ${shell}; they are not sandboxed. Default working directory: ${JSON.stringify(cwd ?? null)}.`;
     })],
   }));
+  const dataPrivacy = createGoogleWorkspacePrivacy({
+    getHarness: () => harness,
+    context: CTX,
+    documents: { BotSessionState },
+  });
   registry.install(defineExtension({
     name: 'host.communication',
     tools: createCommunicationTools({
@@ -588,6 +599,7 @@ export async function openRuntime(options) {
       passWork: decisions.passWork,
       collaboration,
       sessions,
+      dataPrivacy,
     }),
     sections: [section('host-collaboration', async (input, context) => renderCollaborationPrompt({
       device: await collaboration.getCurrentDevice(),
@@ -661,7 +673,8 @@ export async function openRuntime(options) {
     assertCapabilityAllowed: (botId, id) => plugins.assertCapabilityAllowed(botId, id),
     getExecutionEnv: async (botId) => envFor({ conversationId: 'plugin:' + botId, cwd: host.getBot(botId).cwd }),
     getBotEntryWatermark: (botId) => getBotEntryWatermark(botId),
-    documents: { PrimaryIndex, RequestKeys, WorkIndex, WorkContextState, WorkDecisionState, RequestContext, ContextState: RequestContext, GenerationFailureState },
+    dataPrivacy,
+    documents: { PrimaryIndex, RequestKeys, WorkIndex, WorkContextState, WorkDecisionState, RequestContext, ContextState: RequestContext, GenerationFailureState, GoogleWorkspacePrivacyState },
     sdk: {
       ...durable,
       defineDoc: (definition) => durable.defineDoc({ checkpointWhen: () => false, ...definition }),
@@ -754,6 +767,7 @@ export async function openRuntime(options) {
             };
           }, context);
           if (!online) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+          await dataPrivacy.syncTrustedRuleEntries(api.conversationId, cutoffView.entries, { callContext: context });
           const finalView = await plugins.beforeRequest(requestView, api, context);
           // 只在需要时把瞬态 SystemMessage 路由指引前置到投影/recall 之后的最终视图头部：
           // 任何插件（含会整体重建视图的 BC prepare）都不能丢掉冻结轮约束，且末尾真实消息
@@ -939,6 +953,7 @@ export async function openRuntime(options) {
     schedules,
     setTasksBridge: (bridge) => { tasksBridge = bridge; },
     resolveConversationBot: services.resolveConversationBot,
+    dataPrivacy,
   });
   try {
     if (process.platform === 'win32') await shower.prepare();
@@ -996,7 +1011,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, browserSetup, botHostExtensionsFor, vault, schedules, setTasksBridge, resolveConversationBot }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, browserSetup, botHostExtensionsFor, vault, schedules, setTasksBridge, resolveConversationBot, dataPrivacy }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -1099,6 +1114,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     isBotIdle: async (bot) => (await botIsIdle(bot)) && (await turns.queuedCount(bot)) === 0,
     onLearningStateChange: (botId, state) => live.setBotLearning?.(botId, state),
     idleSettleMs: learningIdleSettleMs,
+    dataPrivacy,
   });
   // 自编辑 SOUL 排队：Bot 在自己的活动轮里调 set_bot_soul（协作/管理工具显式
   // self:true）不能轮中改写人格——先校验输入，再排队到空闲边界；apply 仍走
@@ -1611,10 +1627,19 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   }
 
   // stopEpoch 由可信调用者在排队前捕获；内部 Webhook 保留 poll 前代次，绝不重捕获。
-  function submitPrimary(botId, input, stopEpoch, trustedDispatchContext = null) {
+  // allowGoogleWorkspaceRule 仅允许内部 Google 规则分发器启用，绝不向公开 submit/webhook 开放。
+  function submitPrimary(botId, input, stopEpoch, trustedDispatchContext = null, { allowGoogleWorkspaceRule = false } = {}) {
     const kind = input?.origin?.sender?.kind === 'host' ? 'host' : 'user';
     const safeInput = isPlainObject(input) ? { ...input } : {};
     delete safeInput.dispatchContext;
+    const rawSourceType = safeInput?.origin?.sender?.sourceType;
+    const sourceType = kind === 'host' && (
+      rawSourceType === 'webhook' ||
+      (allowGoogleWorkspaceRule && isTrustedHostSourceType(rawSourceType))
+    ) ? rawSourceType : null;
+    const dataBoundary = kind === 'host' && allowGoogleWorkspaceRule && isTrustedDataBoundary(safeInput?.origin?.dataBoundary)
+      ? safeInput.origin.dataBoundary
+      : null;
     const trustedInput = {
       ...safeInput,
       stopEpoch,
@@ -1622,8 +1647,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         sender: {
           kind,
           name: typeof safeInput?.origin?.sender?.name === 'string' ? safeInput.origin.sender.name : null,
-          ...(kind === 'host' && safeInput?.origin?.sender?.sourceType === 'webhook' ? { sourceType: 'webhook' } : {}),
+          ...(sourceType !== null ? { sourceType } : {}),
         },
+        ...(dataBoundary !== null ? { dataBoundary } : {}),
         replyTo: typeof safeInput?.origin?.replyTo === 'string' ? safeInput.origin.replyTo : null,
       },
     };

@@ -1235,7 +1235,7 @@ export interface Attribution {
   /** Display-only sender name; never an identity or routing key. */
   name?: string;
   /** Trusted Host entry source only; never accepted from a user sender. */
-  sourceType?: 'webhook';
+  sourceType?: 'webhook' | 'google-workspace-rule';
   channel: 'primary' | 'dm' | 'room';
   scopeId?: string;
   messageId?: string;

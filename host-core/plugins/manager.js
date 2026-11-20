@@ -10,8 +10,9 @@ import { vaultError } from '../vault-protocol.js';
 const error = (code, message) => Object.assign(new Error(message), { code });
 const nameFor = (...parts) => 'cap-' + createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 const botKey = (botId, installationId) => botId + '\u0000' + installationId;
-// 实例按安装 + 精确代码身份（版本）索引：不同 Bot 可同时绑定旧/新版本。
-const instanceKey = (installationId, version) => installationId + '\u0000' + (version ?? '');
+// 实例按安装 + 精确代码身份（版本 + 数据边界）索引：不同 Bot 可同时绑定旧/新版本。
+const instanceKey = (installationId, version, dataBoundary) =>
+  installationId + '\u0000' + (version ?? '') + '\u0000' + (dataBoundary ?? '');
 /** 授权意图：Center 提供 authorized 时以它为准（与瞬态部署状态分离），旧快照回退 enabled。 */
 const isAuthorized = (capability) => capability?.authorized ?? capability?.enabled === true;
 /** 授权且启用的能力才建立绑定；authorized:false 视为显式撤销，绝不由 pin 覆盖。 */
@@ -131,11 +132,12 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     return { ...source, tasks: undefined, tools, sections, hooks, wraps };
   }
 
-  /** 执行内容摘要：只包含会改变执行结果的字段（配置、凭证值、版本），不含展示名称。 */
+  /** 执行内容摘要：只包含会改变执行结果的字段（配置、凭证值、版本、数据边界），不含展示名称。 */
   function capabilityFingerprint(capability, credentials) {
     const refs = capability.target === 'host' ? capability.credentialRefs ?? [] : [];
     return createHash('sha256').update(JSON.stringify([
       capability.kind, capability.target, capability.targetVersion,
+      capability.dataBoundary ?? null,
       capability.effectiveConfig ?? null,
       refs.map((ref) => [ref, credentials?.[ref] ?? null]),
     ])).digest('hex');
@@ -278,7 +280,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
   /** 打开（或复用）一个精确版本的安装实例；不同版本实例可并存，由各自的 Bot 绑定持有。 */
   async function openInstance(capability) {
     const id = capability.installationId;
-    const key = instanceKey(id, capability.targetVersion);
+    const key = instanceKey(id, capability.targetVersion, capability.dataBoundary);
     const existing = instances.get(key);
     if (existing) return { instance: existing, created: false };
     let installed = null;
@@ -367,7 +369,8 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     };
     const args = {
       installationId: id, version: capability.targetVersion,
-      target: capability.target, packageRoot: installed?.packageRoot ?? null,
+      target: capability.target, dataBoundary: capability.dataBoundary,
+      packageRoot: installed?.packageRoot ?? null,
       dataDir: installed?.dataDir ?? join(host.dataRoot, 'center-capabilities', id),
       host: scopedHost,
     };

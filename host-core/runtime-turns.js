@@ -15,6 +15,7 @@ import { WorkDecisionState } from './work-decision-state.js';
 import { clearBotBoardResult } from './runtime-bot-board.js';
 import { BotSessionState, deriveEntryAttribution } from './bot-session-context.js';
 import { buildQueuedPreview, extractUserTextFromContent, MAX_QUEUED_ITEMS } from './runtime-live-projection.js';
+import { isTrustedDataBoundary, isTrustedHostSourceType } from './google-workspace-privacy.js';
 
 const MAX_PREPARE_ATTEMPTS = 3;
 // 每条消息图片解码总字节上限（64MiB）：单张合法（≤16MiB）的图仍需满足本条消息总量限制。
@@ -81,9 +82,21 @@ export function createTurnAdmission(deps) {
     }
     const name = typeof origin.sender?.name === 'string' ? origin.sender.name.slice(0, 200) : null;
     const replyTo = typeof origin.replyTo === 'string' ? origin.replyTo : null;
-    return { sender: { kind, ...(name !== null ? { name } : {}),
-      ...(kind === 'host' && origin.sender?.sourceType === 'webhook' ? { sourceType: 'webhook' } : {}),
-    }, replyTo };
+    const sourceType = kind === 'host' && isTrustedHostSourceType(origin.sender?.sourceType)
+      ? origin.sender.sourceType
+      : null;
+    const dataBoundary = kind === 'host' && isTrustedDataBoundary(origin.dataBoundary)
+      ? origin.dataBoundary
+      : null;
+    return {
+      sender: {
+        kind,
+        ...(name !== null ? { name } : {}),
+        ...(sourceType !== null ? { sourceType } : {}),
+      },
+      ...(dataBoundary !== null ? { dataBoundary } : {}),
+      replyTo,
+    };
   }
 
   /** 受理条目在原生提交时附带的可信入口：entry.data 携带发送方归属与
@@ -95,8 +108,10 @@ export function createTurnAdmission(deps) {
     const kind = item.origin?.sender?.kind === 'user' ? 'user' : 'host';
     const name = typeof item.origin?.sender?.name === 'string' ? item.origin.sender.name : null;
     const replyTo = typeof item.origin?.replyTo === 'string' ? item.origin.replyTo : null;
-    const source = kind === 'host' && item.origin?.sender?.sourceType === 'webhook'
-      ? { sourceType: 'webhook' } : {};
+    const source = kind === 'host' && isTrustedHostSourceType(item.origin?.sender?.sourceType)
+      ? { sourceType: item.origin.sender.sourceType } : {};
+    const dataBoundary = kind === 'host' && isTrustedDataBoundary(item.origin?.dataBoundary)
+      ? { dataBoundary: item.origin.dataBoundary } : {};
     return {
       kind: 'host.user-message',
       data: {
@@ -104,6 +119,7 @@ export function createTurnAdmission(deps) {
         source: 'host',
         requestId: item.requestId,
         botId: item.botId,
+        ...dataBoundary,
         ...(kind === 'user' ? { userText: item.text } : {}),
         attribution: {
           kind,

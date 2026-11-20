@@ -3,9 +3,9 @@ import { readFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { McpClient, StdioTransport, StreamableHttpTransport, toLlmContent } from '@earendil-works/pi-mcp';
 import { defineTool } from '@earendil-works/pi-durable';
+import { guardGoogleWorkspaceMcpCall, GOOGLE_WORKSPACE_MCP_INSTALLATION_ID as GOOGLE_WORKSPACE_INSTALLATION_ID } from '../google-workspace-privacy.js';
 import { prepareGoogleFileCall, finishGoogleFileCall } from '../google-file-transfer.js';
 
-const GOOGLE_WORKSPACE_INSTALLATION_ID = 'builtin-google-workspace-mcp';
 
 const GOOGLE_BINARY_FIELD_KEYS = new Set([
   'base64',
@@ -229,7 +229,7 @@ export function mcpToolName(installationId, botId, remoteName) {
   return 'mcp_' + hash.slice(0, 32);
 }
 
-export async function createMcpDriver({ installationId, version, target, packageRoot, host, googleFileTransfer }) {
+export async function createMcpDriver({ installationId, version, target, dataBoundary, packageRoot, host, googleFileTransfer }) {
   const bots = new Set();
   const isGoogleWorkspace = target === 'center' && installationId === GOOGLE_WORKSPACE_INSTALLATION_ID;
   const prepareTransfer = googleFileTransfer?.prepareGoogleFileCall ?? prepareGoogleFileCall;
@@ -308,6 +308,21 @@ export async function createMcpDriver({ installationId, version, target, package
               check();
               if (owner !== botId) throw fail('MCP_FORBIDDEN', 'MCP tool is not available to this Bot.');
               if (!active) throw fail('MCP_CLOSED', 'MCP capability is not active.');
+              // 内置 Center Google Workspace MCP：真实执行前原子持久化会话隐私隔离标记；
+              // 标记失败则 fail-closed 拒调 Center，绝不以 tools/list 或默认可见触发标记。
+              const privacyGuard = await guardGoogleWorkspaceMcpCall({
+                installationId,
+                target,
+                dataBoundary,
+                botId,
+                conversationId: api.conversationId,
+                callId: api.callId,
+                taskId: api.taskId,
+                host,
+              });
+              invocation.abortSignal?.throwIfAborted();
+              check();
+              if (!active) throw fail('MCP_CLOSED', 'MCP capability is not active.');
               const signal = invocation.abortSignal ? AbortSignal.any([invocation.abortSignal, abort.signal]) : abort.signal;
               const rawArgs = isPlainObject(args) ? args : {};
               let callArgs = args;
@@ -333,9 +348,12 @@ export async function createMcpDriver({ installationId, version, target, package
                 result = target === 'center'
                   ? await host.centerClient.callCapabilityTool(installationId, botId, tool.name, callArgs, api.callId, { signal })
                   : await client.callTool(tool.name, callArgs, { signal, timeoutMs: effectiveConfig.timeoutMs });
+                await privacyGuard.finish(result?.isError ? 'failed' : 'completed');
                 invocation.abortSignal?.throwIfAborted();
                 check();
               } catch (error) {
+                const aborted = invocation.abortSignal?.aborted === true || abort.signal.aborted === true;
+                await privacyGuard.finish(aborted ? 'aborted' : 'failed');
                 invocation.abortSignal?.throwIfAborted();
                 check();
                 throw fail('MCP_CALL_FAILED', 'MCP call failed; external effects may have occurred.');
