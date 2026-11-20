@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   operations,
   BOT_AVATAR_SHAPES,
@@ -7,12 +10,13 @@ import {
   BOT_SESSION_ACTIONS,
 } from '../../center-contract/operations/bots.js';
 import { createHandlers } from '../../center-server/operations/bots.js';
+import { invokeOwnerAction } from '../../center-server/operations/owner-actions.js';
+import { openCenterStore } from '../../center-server/data/index.js';
 
 const VALID_SHA256 = 'a'.repeat(64);
 const UPDATED_SHA256 = 'b'.repeat(64);
 
 const ALLOWED_OWNER_ROUTES = new Set([
-  'GET /api/bot-sync',
   'GET /api/devices',
   'GET /api/devices/:deviceId/bots',
   'POST /api/devices/:deviceId/bots',
@@ -598,7 +602,7 @@ test('create, update_profile, set_primary, set_model, set_cwd, set_avatar enforc
   assert.equal(modelUpdated.revision, 4);
   assert.equal(modelUpdated.overrides.modelRef, 'openai/gpt-5');
   assert.equal(modelUpdated.overrides.thinkingLevel, 'high');
-  assert.equal(modelUpdated.overrides.codemode, null);
+  assert.equal('codemode' in modelUpdated.overrides, false);
 
   await assert.rejects(
     () =>
@@ -817,4 +821,84 @@ test('self-stopping and destructive lifecycle operations reject calling Bot self
 
   const deleted = await handlers.pibot_bot_delete({ deviceId: 'dev-1', botId: 'bot-2' }, selfBot);
   assert.deepEqual(deleted, { deviceId: 'dev-1', botId: 'bot-2', deleted: true });
+});
+
+test('production invokeOwnerAction and openCenterStore: bots_list uses reusable routes and set_model null clears override back to global default', async () => {
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-bots-ops-real-'));
+  const store = openCenterStore({ dataRoot, encryptionKey: new Uint8Array(32).fill(17) });
+  try {
+    store.putProvider({
+      id: 'openai',
+      name: 'OpenAI',
+      api: 'openai-responses',
+      baseUrl: 'https://api.openai.com/v1',
+      credentialRef: null,
+      enabled: true,
+      native: true,
+      configured: true,
+    }, null);
+    store.putModel('openai', {
+      id: 'gpt-5',
+      name: 'GPT-5',
+      contextWindow: 200000,
+      maxTokens: 16384,
+      input: ['text'],
+      reasoning: true,
+      enabled: true,
+      source: 'manual',
+    }, null);
+    store.putModel('openai', {
+      id: 'gpt-5-mini',
+      name: 'GPT-5 Mini',
+      contextWindow: 128000,
+      maxTokens: 8192,
+      input: ['text'],
+      reasoning: true,
+      enabled: true,
+      source: 'manual',
+    }, null);
+    store.putModelConfig(0, { modelRef: 'openai/gpt-5', thinkingLevel: 'medium', codemode: true });
+    store.upsertDeviceBot('dev-1', { botId: 'bot-1', name: 'Alpha', isPrimary: true });
+    store.putBotModelConfig('dev-1', 'bot-1', 0, { modelRef: 'openai/gpt-5-mini', codemode: false });
+
+    const actions = new Map([
+      ['GET /api/devices', () => [
+        { deviceId: 'center-internal', name: 'Center', platform: 'linux', online: true },
+        { deviceId: 'dev-1', name: 'Workstation', platform: 'linux', online: true },
+      ]],
+      ['GET /api/devices/:deviceId/bots', (req) => store.listDeviceBots(req.params.deviceId).map((bot) => store.withResolvedModel(bot))],
+      ['GET /api/devices/:deviceId/bots/:botId/model-config', (req) => store.getBotModelConfig(req.params.deviceId, req.params.botId)],
+      ['PUT /api/devices/:deviceId/bots/:botId/model-config', (req) => store.putBotModelConfig(req.params.deviceId, req.params.botId, req.body.expectedRevision, req.body.value)],
+    ]);
+    const handlers = createHandlers({
+      owner: (method, routePath, input) => invokeOwnerAction(actions, method, routePath, input),
+      bridge: { deviceId: 'center-internal', async call() { throw new Error('unexpected bridge call'); } },
+    });
+    const oauthActor = { kind: 'oauth', clientId: 'client-real' };
+
+    await assert.rejects(() => handlers.pibot_bots_list({}, null), { code: 'UNAUTHENTICATED' });
+
+    const listed = await handlers.pibot_bots_list({}, oauthActor);
+    assert.equal(listed.devices.length, 1);
+    assert.equal(listed.devices[0].deviceId, 'dev-1');
+    assert.equal(listed.bots.length, 1);
+    assert.equal(listed.bots[0].resolvedModel.effectiveModelRef, 'openai/gpt-5-mini');
+    assert.equal(listed.bots[0].resolvedModel.source, 'bot');
+
+    // Clearing modelRef and codemode with null deletes the override keys so the Bot inherits global defaults.
+    const cleared = await handlers.pibot_bot_set_model(
+      { deviceId: 'dev-1', botId: 'bot-1', expectedRevision: 1, modelRef: null, codemode: null },
+      oauthActor,
+    );
+    assert.deepEqual(cleared.overrides, {});
+    assert.equal(cleared.effective.modelRef, 'openai/gpt-5');
+    assert.equal(cleared.effective.codemode, true);
+
+    const listedAfter = await handlers.pibot_bots_list({ deviceId: 'dev-1' }, oauthActor);
+    assert.equal(listedAfter.bots[0].resolvedModel.effectiveModelRef, 'openai/gpt-5');
+    assert.equal(listedAfter.bots[0].resolvedModel.source, 'center_default');
+  } finally {
+    store.close();
+    fs.rmSync(dataRoot, { recursive: true, force: true });
+  }
 });

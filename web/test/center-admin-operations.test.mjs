@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { operations } from '../../center-contract/operations/center-admin.js';
 import { createHandlers } from '../../center-server/operations/center-admin.js';
+import { invokeOwnerAction } from '../../center-server/operations/owner-actions.js';
 import { openCenterStore } from '../../center-server/data/index.js';
 
 const BOT_ACTOR = { kind: 'bot', deviceId: 'dev-1', botId: 'bot-1' };
@@ -76,6 +77,7 @@ test('center-admin descriptors match handlers 1:1 with valid JSON Schema and saf
 
   const destructiveNames = operations.filter((op) => op.destructive).map((op) => op.name);
   assert.deepEqual(destructiveNames, ['center_delete_provider_model']);
+  assert.equal(operations.find((op) => op.name === 'center_validate_provider')?.readOnly, false);
   assert.equal(operations.find((op) => op.name === 'center_discover_provider_models')?.readOnly, false);
   assert.throws(() => createHandlers({}), TypeError);
 });
@@ -599,6 +601,195 @@ test('integration with real openCenterStore enforces CAS, preserves hidden upstr
     assert.equal(deleted.clearedGlobalModel, true);
     const pickerAfter = await handlers.center_get_model_picker({}, BOT_ACTOR);
     assert.deepEqual(pickerAfter.starredModels, []);
+  } finally {
+    store.close();
+    fs.rmSync(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test('production invokeOwnerAction + real openCenterStore: non-reusable routes use deps, real catalog/manual model contextWindow/maxTokens/safe fields stay editable', async () => {
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-center-admin-real-'));
+  const store = openCenterStore({ dataRoot, encryptionKey: new Uint8Array(32).fill(55) });
+  let catalogApplyCount = 0;
+  let notifyAllCount = 0;
+
+  try {
+    store.putCredential('openai-api-key', { expectedRevision: null, value: 'sk-secret-key' });
+    store.putProvider({
+      id: 'openai',
+      name: 'OpenAI',
+      api: 'openai-responses',
+      baseUrl: 'https://api.openai.com/v1',
+      credentialRef: 'openai-api-key',
+      enabled: true,
+      native: true,
+      configured: true,
+      custom: { headers: { 'X-Internal': 'secret-hdr' } },
+    }, null);
+
+    // Seed a real catalog model that includes empty baseUrl (like native/antigravity models) plus hidden headers.
+    store.putModel('openai', {
+      id: 'gpt-5-catalog',
+      name: 'GPT-5 Catalog',
+      api: 'openai-responses',
+      baseUrl: '',
+      headers: { 'X-Model-Secret': 'keep-me-secret' },
+      contextWindow: 128000,
+      maxTokens: 8192,
+      input: ['text', 'image'],
+      reasoning: true,
+      enabled: true,
+      cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 },
+      source: 'catalog',
+    }, null);
+
+    store.upsertDeviceBot('dev-1', { botId: 'bot-1', name: 'Alpha', isPrimary: true });
+    store.createClientRelease({
+      id: 'rel-win-1',
+      platform: 'windows',
+      arch: 'x64',
+      format: 'nsis',
+      version: '0.0.25',
+      size: 1024,
+      sha256: 'a'.repeat(64),
+      notes: 'Release notes',
+      sourceCommit: 'ae37e23',
+      filename: 'pibot-0.0.25-win-x64.exe',
+      published: true,
+      publishedAt: '2026-11-20T00:00:00.000Z',
+      createdAt: '2026-11-20T00:00:00.000Z',
+    });
+
+    // Register ONLY routes allowed by owner-actions.js; PUT model enforces routes.js minLength:1 for baseUrl/api.
+    const actions = new Map([
+      ['GET /api/devices', () => [
+        { deviceId: 'center-internal', name: 'Center', platform: 'linux', online: true },
+        { deviceId: 'dev-1', name: 'Workstation', platform: 'linux', online: true, oauthAdminEnabled: true },
+      ]],
+      ['GET /api/providers', () => store.listProviders()],
+      ['GET /api/providers/:id', (req) => {
+        const provider = store.getProvider(req.params.id);
+        if (!provider) throw Object.assign(new Error('Provider not found'), { code: 'NOT_FOUND' });
+        return provider;
+      }],
+      ['GET /api/providers/:id/models', (req) => store.listModels(req.params.id, { includeRemoved: req.query?.includeRemoved === '1' })],
+      ['PUT /api/providers/:id/models/:modelId', (req) => {
+        const val = req.body.value;
+        // Mirror routes.js modelSchema constraint: baseUrl/api, if present, must be non-empty strings.
+        if ('baseUrl' in val && (typeof val.baseUrl !== 'string' || val.baseUrl.length < 1)) {
+          throw Object.assign(new Error('Invalid input'), { code: 'VALIDATION_FAILED' });
+        }
+        if ('api' in val && (typeof val.api !== 'string' || val.api.length < 1)) {
+          throw Object.assign(new Error('Invalid input'), { code: 'VALIDATION_FAILED' });
+        }
+        return store.putModel(req.params.id, { ...val, id: req.params.modelId }, req.body.expectedRevision);
+      }],
+    ]);
+
+    const handlers = createHandlers({
+      owner: (method, routePath, input) => invokeOwnerAction(actions, method, routePath, input),
+      store,
+      bridge: { deviceId: 'center-internal' },
+      catalog: {
+        async apply() { catalogApplyCount += 1; },
+        async runtime() { return { getProvider: () => ({ auth: { apiKey: true, oauth: null } }) }; },
+      },
+      notifyAll() { notifyAllCount += 1; },
+      publicUrl: 'https://center.example.com',
+    });
+
+    // Reject missing actor and reserved center-* devices.
+    await assert.rejects(() => handlers.center_list_devices({}, null), { code: 'UNAUTHENTICATED' });
+    await assert.rejects(
+      () => handlers.center_rename_device({ deviceId: 'center-internal', name: 'Nope' }, OAUTH_ACTOR),
+      { code: 'NOT_FOUND' },
+    );
+
+    // Non-reusable routes work in production via deps.store + deps.catalog + deps.publicUrl.
+    const sync = await handlers.center_get_bot_sync({}, OAUTH_ACTOR);
+    assert.equal(sync.mode, 'snapshot');
+    assert.equal(sync.devices.length, 1);
+    assert.equal(sync.devices[0].deviceId, 'dev-1');
+    assert.equal(sync.bots.length, 1);
+
+    const auth = await handlers.center_get_provider_auth_status({ providerId: 'openai' }, OAUTH_ACTOR);
+    assert.equal(auth.statuses[0].method, 'api_key');
+
+    const updatedProv = await handlers.center_update_provider(
+      { providerId: 'openai', expectedRevision: 0, name: 'OpenAI Prod' },
+      OAUTH_ACTOR,
+    );
+    assert.equal(updatedProv.name, 'OpenAI Prod');
+    assert.equal(updatedProv.revision, 1);
+    assert.equal(catalogApplyCount, 1);
+    assert.equal(notifyAllCount, 1);
+    assert.equal(store.getProvider('openai').custom.headers['X-Internal'], 'secret-hdr');
+
+    const batch = await handlers.center_batch_create_provider_models(
+      {
+        providerId: 'openai',
+        models: [
+          { id: 'batch-1', name: 'Batch 1', contextWindow: 64000, maxTokens: 4096, input: ['text'], reasoning: false },
+        ],
+      },
+      OAUTH_ACTOR,
+    );
+    assert.equal(batch.models.length, 1);
+    assert.equal(batch.models[0].id, 'batch-1');
+
+    const releases = await handlers.center_list_client_releases({ publishedOnly: true }, OAUTH_ACTOR);
+    assert.equal(releases.releases.length, 1);
+    assert.equal(releases.releases[0].downloadUrl, 'https://center.example.com/api/client-releases/rel-win-1/download');
+
+    // Existing catalog model with empty baseUrl can update contextWindow, maxTokens, and safe fields cleanly.
+    const updatedCatalogModel = await handlers.center_update_provider_model(
+      {
+        providerId: 'openai',
+        modelId: 'gpt-5-catalog',
+        expectedRevision: 0,
+        contextWindow: 256000,
+        maxTokens: 32768,
+        name: 'GPT-5 Catalog Tuned',
+        input: ['text', 'image'],
+        reasoning: true,
+        compat: { supportsDeveloperRole: true, maxTokensField: 'max_completion_tokens' },
+        samplingParams: { temperature: 0.3 },
+        thinkingLevelMap: { high: 'high' },
+      },
+      OAUTH_ACTOR,
+    );
+    assert.equal(updatedCatalogModel.revision, 1);
+    assert.equal(updatedCatalogModel.contextWindow, 256000);
+    assert.equal(updatedCatalogModel.maxTokens, 32768);
+    assert.equal(updatedCatalogModel.name, 'GPT-5 Catalog Tuned');
+    assert.deepEqual(updatedCatalogModel.compat, { supportsDeveloperRole: true, maxTokensField: 'max_completion_tokens' });
+    assert.deepEqual(updatedCatalogModel.samplingParams, { temperature: 0.3 });
+    assert.equal('headers' in updatedCatalogModel, false);
+    assert.equal('baseUrl' in updatedCatalogModel, false);
+    const persisted = store.listModels('openai').find((m) => m.id === 'gpt-5-catalog');
+    assert.equal(persisted.headers['X-Model-Secret'], 'keep-me-secret');
+    assert.equal(persisted.api, 'openai-responses');
+
+    // maxTokens > contextWindow and prototype pollution keys are rejected.
+    await assert.rejects(
+      () => handlers.center_update_provider_model(
+        { providerId: 'openai', modelId: 'gpt-5-catalog', expectedRevision: 1, maxTokens: 300000 },
+        OAUTH_ACTOR,
+      ),
+      { code: 'INVALID_ARGUMENT' },
+    );
+    await assert.rejects(
+      () => handlers.center_update_provider_model(
+        {
+          providerId: 'openai',
+          modelId: 'gpt-5-catalog',
+          expectedRevision: 1,
+          compat: JSON.parse('{"__proto__":{"polluted":true}}'),
+        },
+        OAUTH_ACTOR,
+      ),
+      { code: 'INVALID_ARGUMENT' },
+    );
   } finally {
     store.close();
     fs.rmSync(dataRoot, { recursive: true, force: true });

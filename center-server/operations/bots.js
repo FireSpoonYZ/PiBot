@@ -4,6 +4,7 @@ const MAX_SOUL_BYTES = 64 * 1024;
 const MAX_ID_BYTES = 256;
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+const MODEL_REF_RE = /^[^/\s]+\/.+$/u;
 const VISIBLE_ASCII_DEVICE_ID_RE = /^[\x21-\x7e]{1,200}$/;
 const CONTROL_CHARS_RE = /[\x00-\x1f\x7f]/;
 
@@ -279,6 +280,39 @@ function normalizeAvatarInput(raw) {
   };
 }
 
+function assertActor(actor) {
+  if (!isPlainObject(actor)) {
+    fail('UNAUTHENTICATED', 'Valid actor is required');
+  }
+  if (actor.kind === 'bot') {
+    if (
+      typeof actor.deviceId !== 'string' ||
+      !actor.deviceId.trim() ||
+      actor.deviceId.length > 200 ||
+      CONTROL_CHARS_RE.test(actor.deviceId) ||
+      typeof actor.botId !== 'string' ||
+      !actor.botId.trim() ||
+      Buffer.byteLength(actor.botId, 'utf8') > MAX_ID_BYTES ||
+      CONTROL_CHARS_RE.test(actor.botId)
+    ) {
+      fail('UNAUTHENTICATED', 'Invalid bot actor identity');
+    }
+    return actor;
+  }
+  if (actor.kind === 'oauth') {
+    if (
+      typeof actor.clientId !== 'string' ||
+      !actor.clientId.trim() ||
+      actor.clientId.length > 128 ||
+      CONTROL_CHARS_RE.test(actor.clientId)
+    ) {
+      fail('UNAUTHENTICATED', 'Invalid oauth actor identity');
+    }
+    return actor;
+  }
+  fail('UNAUTHENTICATED', 'Unsupported actor kind');
+}
+
 function isSelfTarget(actor, deviceId, botId) {
   return Boolean(
     actor &&
@@ -460,7 +494,8 @@ export function createHandlers(deps) {
   const { owner, bridge } = deps;
 
   return {
-    async pibot_bots_list(args) {
+    async pibot_bots_list(args, actor) {
+      assertActor(actor);
       const input = assertArgsObject(args, LIST_ARGS_KEYS, { allowUndefined: true });
       const includeArchived = input.includeArchived === undefined ? true : input.includeArchived;
       if (typeof includeArchived !== 'boolean') {
@@ -486,15 +521,23 @@ export function createHandlers(deps) {
         const deviceList = Array.isArray(allDevices) ? allDevices : [];
         const matchedDevice = deviceList.find((item) => item?.deviceId === deviceId) ?? null;
         const botList = Array.isArray(deviceBots) ? deviceBots : [];
-        if (deviceList.length > 0 && !matchedDevice && botList.length === 0) {
+        if (!matchedDevice && botList.length === 0) {
           fail('NOT_FOUND', 'Device not found');
         }
         rawDevices = matchedDevice ? [matchedDevice] : [];
         rawBots = botList;
       } else {
-        const sync = await owner('GET', '/api/bot-sync', { query: {} });
-        rawDevices = Array.isArray(sync?.devices) ? sync.devices : [];
-        rawBots = Array.isArray(sync?.bots) ? sync.bots : [];
+        const allDevices = await owner('GET', '/api/devices', {});
+        const visibleDevices = (Array.isArray(allDevices) ? allDevices : [])
+          .filter((item) => item && typeof item.deviceId === 'string' && !isInternalDeviceId(item.deviceId, bridge))
+          .sort((a, b) => (a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : 0));
+        const perDeviceBots = await Promise.all(
+          visibleDevices.map((device) =>
+            owner('GET', '/api/devices/:deviceId/bots', { params: { deviceId: device.deviceId } }),
+          ),
+        );
+        rawDevices = visibleDevices;
+        rawBots = perDeviceBots.flatMap((list) => (Array.isArray(list) ? list : []));
       }
 
       const devices = rawDevices
@@ -522,7 +565,8 @@ export function createHandlers(deps) {
       return { devices, bots: page, total, offset, limit, nextOffset };
     },
 
-    async pibot_bot_get(args) {
+    async pibot_bot_get(args, actor) {
+      assertActor(actor);
       const input = assertArgsObject(args, TARGET_BOT_ARGS_KEYS);
       const deviceId = assertDeviceTarget(input.deviceId, bridge);
       const botId = assertBotId(input.botId);
@@ -594,7 +638,8 @@ export function createHandlers(deps) {
       };
     },
 
-    async pibot_bot_soul_get(args) {
+    async pibot_bot_soul_get(args, actor) {
+      assertActor(actor);
       const input = assertArgsObject(args, TARGET_BOT_ARGS_KEYS);
       const deviceId = assertDeviceTarget(input.deviceId, bridge);
       const botId = assertBotId(input.botId);
@@ -603,7 +648,8 @@ export function createHandlers(deps) {
       return sanitizeSoul(deviceId, botId, soul);
     },
 
-    async pibot_bot_create(args) {
+    async pibot_bot_create(args, actor) {
+      assertActor(actor);
       const input = assertArgsObject(args, CREATE_BOT_ARGS_KEYS);
       const deviceId = assertDeviceTarget(input.deviceId, bridge);
       const name = assertBotName(input.name);
@@ -633,7 +679,8 @@ export function createHandlers(deps) {
       };
     },
 
-    async pibot_bot_update_profile(args) {
+    async pibot_bot_update_profile(args, actor) {
+      assertActor(actor);
       const input = assertArgsObject(args, UPDATE_PROFILE_ARGS_KEYS);
       const deviceId = assertDeviceTarget(input.deviceId, bridge);
       const botId = assertBotId(input.botId);
@@ -656,7 +703,8 @@ export function createHandlers(deps) {
       return { bot: sanitizeBot(updated) };
     },
 
-    async pibot_bot_set_primary(args) {
+    async pibot_bot_set_primary(args, actor) {
+      assertActor(actor);
       const input = assertArgsObject(args, TARGET_BOT_ARGS_KEYS);
       const deviceId = assertDeviceTarget(input.deviceId, bridge);
       const botId = assertBotId(input.botId);
@@ -667,7 +715,8 @@ export function createHandlers(deps) {
       return { bot: sanitizeBot(updated) };
     },
 
-    async pibot_bot_set_model(args) {
+    async pibot_bot_set_model(args, actor) {
+      assertActor(actor);
       const input = assertArgsObject(args, SET_MODEL_ARGS_KEYS);
       const deviceId = assertDeviceTarget(input.deviceId, bridge);
       const botId = assertBotId(input.botId);
@@ -688,11 +737,12 @@ export function createHandlers(deps) {
           if (
             typeof input.modelRef !== 'string' ||
             !input.modelRef.isWellFormed() ||
-            input.modelRef.trim().length < 1 ||
+            input.modelRef.trim() !== input.modelRef ||
             input.modelRef.length > 512 ||
-            CONTROL_CHARS_RE.test(input.modelRef)
+            CONTROL_CHARS_RE.test(input.modelRef) ||
+            !MODEL_REF_RE.test(input.modelRef)
           ) {
-            fail('INVALID_ARGUMENT', 'modelRef must be a non-empty string or null');
+            fail('INVALID_ARGUMENT', 'modelRef must be in providerId/modelId format or null');
           }
         }
         patch.modelRef = input.modelRef;
@@ -728,10 +778,14 @@ export function createHandlers(deps) {
         fail('REVISION_CONFLICT', 'Revision does not match');
       }
 
-      const mergedOverrides = {
-        ...sanitizeModelSelection(current?.overrides),
-        ...patch,
-      };
+      const mergedOverrides = sanitizeModelSelection(current?.overrides);
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === null) {
+          delete mergedOverrides[key];
+        } else {
+          mergedOverrides[key] = value;
+        }
+      }
 
       const updated = await owner('PUT', '/api/devices/:deviceId/bots/:botId/model-config', {
         params: { deviceId, botId },
@@ -745,6 +799,7 @@ export function createHandlers(deps) {
     },
 
     async pibot_bot_set_soul(args, actor) {
+      assertActor(actor);
       const input = assertArgsObject(args, SET_SOUL_ARGS_KEYS);
       const deviceId = assertDeviceTarget(input.deviceId, bridge);
       const botId = assertBotId(input.botId);
@@ -767,7 +822,8 @@ export function createHandlers(deps) {
       return sanitizeSoul(deviceId, botId, updated, { includeStatus: true });
     },
 
-    async pibot_bot_set_cwd(args) {
+    async pibot_bot_set_cwd(args, actor) {
+      assertActor(actor);
       const input = assertArgsObject(args, SET_CWD_ARGS_KEYS);
       const deviceId = assertDeviceTarget(input.deviceId, bridge);
       const botId = assertBotId(input.botId);
@@ -786,7 +842,8 @@ export function createHandlers(deps) {
       };
     },
 
-    async pibot_bot_set_avatar(args) {
+    async pibot_bot_set_avatar(args, actor) {
+      assertActor(actor);
       const input = assertArgsObject(args, SET_AVATAR_ARGS_KEYS);
       const deviceId = assertDeviceTarget(input.deviceId, bridge);
       const botId = assertBotId(input.botId);
@@ -805,6 +862,7 @@ export function createHandlers(deps) {
     },
 
     async pibot_bot_session_control(args, actor) {
+      assertActor(actor);
       const input = assertArgsObject(args, SESSION_CONTROL_ARGS_KEYS);
       const deviceId = assertDeviceTarget(input.deviceId, bridge);
       const botId = assertBotId(input.botId);
@@ -853,6 +911,7 @@ export function createHandlers(deps) {
     },
 
     async pibot_bot_archive(args, actor) {
+      assertActor(actor);
       const input = assertArgsObject(args, TARGET_BOT_ARGS_KEYS);
       const deviceId = assertDeviceTarget(input.deviceId, bridge);
       const botId = assertBotId(input.botId);
@@ -865,7 +924,8 @@ export function createHandlers(deps) {
       return { bot: sanitizeBot(updated) };
     },
 
-    async pibot_bot_unarchive(args) {
+    async pibot_bot_unarchive(args, actor) {
+      assertActor(actor);
       const input = assertArgsObject(args, TARGET_BOT_ARGS_KEYS);
       const deviceId = assertDeviceTarget(input.deviceId, bridge);
       const botId = assertBotId(input.botId);
@@ -877,6 +937,7 @@ export function createHandlers(deps) {
     },
 
     async pibot_bot_delete(args, actor) {
+      assertActor(actor);
       const input = assertArgsObject(args, TARGET_BOT_ARGS_KEYS);
       const deviceId = assertDeviceTarget(input.deviceId, bridge);
       const botId = assertBotId(input.botId);

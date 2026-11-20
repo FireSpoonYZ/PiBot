@@ -326,12 +326,12 @@ export const operations = [
 
   defineOperation({
     name: 'center_validate_provider',
-    description: 'Validate connectivity for an existing stored provider directly from Center without modifying credentials or upstream endpoints.',
+    description: 'Validate connectivity for an existing stored provider directly from Center without modifying credentials or upstream endpoints (sends a live probe completion).',
     properties: {
       providerId: PROVIDER_ID_SCHEMA,
     },
     required: ['providerId'],
-    readOnly: true,
+    readOnly: false,
     destructive: false,
   }),
 

@@ -1,9 +1,15 @@
+import { assertPublicCredentialId } from '../auth.js';
+import { ANTIGRAVITY_PROVIDER_ID } from '../../center-contract/antigravity.js';
+import { discoverCenterProviderModels, validateCenterProvider } from '../../host-core/runtime-models.js';
+
 const fail = (code, message) => {
   throw Object.assign(new Error(message), { code });
 };
 
 const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
 const MODEL_REF_RE = /^[^/\s]+\/.+$/u;
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 
 const OPTIONAL_MODEL_PUBLIC_FIELDS = [
   'thinkingLevelMap',
@@ -13,28 +19,6 @@ const OPTIONAL_MODEL_PUBLIC_FIELDS = [
   'promptCache',
   'samplingParams',
   'samplingParamsByThinkingLevel',
-];
-
-const MODEL_ROUTE_VALUE_KEYS = [
-  'id',
-  'name',
-  'api',
-  'baseUrl',
-  'headers',
-  'contextWindow',
-  'maxTokens',
-  'input',
-  'reasoning',
-  'enabled',
-  'thinkingLevelMap',
-  'cost',
-  'compat',
-  'inputLimits',
-  'promptCache',
-  'samplingParams',
-  'samplingParamsByThinkingLevel',
-  'source',
-  'removed',
 ];
 
 const EMPTY_KEYS = new Set();
@@ -153,10 +137,88 @@ function assertModalities(value, name = 'input') {
   return value.map((item, index) => assertBoundedText(item, `${name}[${index}]`, { min: 1, max: 64 }));
 }
 
+function assertNoForbiddenKeysDeep(value, label, depth = 0) {
+  if (depth > 16) fail('INVALID_ARGUMENT', `${label} nesting depth exceeds limit`);
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) {
+      assertNoForbiddenKeysDeep(value[i], `${label}[${i}]`, depth + 1);
+    }
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+  if (!isPlainObject(value)) fail('INVALID_ARGUMENT', `${label} must be a plain object`);
+  for (const key of Object.keys(value)) {
+    if (FORBIDDEN_KEYS.has(key)) fail('INVALID_ARGUMENT', `Forbidden ${label} key: ${key}`);
+    assertNoForbiddenKeysDeep(value[key], `${label}.${key}`, depth + 1);
+  }
+}
+
 function cloneOptionalPlainObject(value, name) {
   if (value === undefined) return undefined;
   if (!isPlainObject(value)) fail('INVALID_ARGUMENT', `${name} must be an object`);
+  assertNoForbiddenKeysDeep(value, name);
   return structuredClone(value);
+}
+
+function assertActor(actor) {
+  if (!isPlainObject(actor)) fail('UNAUTHENTICATED', 'Valid actor is required');
+  if (actor.kind === 'bot') {
+    if (
+      typeof actor.deviceId !== 'string' ||
+      !actor.deviceId.trim() ||
+      actor.deviceId.length > 200 ||
+      CONTROL_CHAR_RE.test(actor.deviceId) ||
+      typeof actor.botId !== 'string' ||
+      !actor.botId.trim() ||
+      actor.botId.length > 256 ||
+      CONTROL_CHAR_RE.test(actor.botId)
+    ) {
+      fail('UNAUTHENTICATED', 'Invalid bot actor identity');
+    }
+    return actor;
+  }
+  if (actor.kind === 'oauth') {
+    if (
+      typeof actor.clientId !== 'string' ||
+      !actor.clientId.trim() ||
+      actor.clientId.length > 128 ||
+      CONTROL_CHAR_RE.test(actor.clientId)
+    ) {
+      fail('UNAUTHENTICATED', 'Invalid oauth actor identity');
+    }
+    return actor;
+  }
+  fail('UNAUTHENTICATED', 'Unsupported actor kind');
+}
+
+function isInternalDeviceId(deviceId, bridge) {
+  if (typeof deviceId !== 'string') return true;
+  if (deviceId.startsWith('center-')) return true;
+  if (typeof bridge?.deviceId === 'string' && deviceId === bridge.deviceId) return true;
+  return false;
+}
+
+function assertDeviceTarget(deviceId, bridge) {
+  const value = assertBoundedText(deviceId, 'deviceId', { min: 1, max: 128 });
+  if (value === '.' || value === '..' || value.includes('/') || value.includes('\\')) {
+    fail('INVALID_ARGUMENT', 'Invalid deviceId');
+  }
+  if (isInternalDeviceId(value, bridge)) {
+    fail('NOT_FOUND', 'Device not found');
+  }
+  return value;
+}
+
+function isVisibleInstallationToActor(store, installation, actor) {
+  if (!installation || actor.kind === 'oauth') return true;
+  if (typeof store?.isVisibleToBot === 'function') {
+    return Boolean(store.isVisibleToBot(installation, actor.deviceId, actor.botId));
+  }
+  if (!installation.ownerBot) return true;
+  if ((installation.visibilityScope ?? 'private') === 'private') {
+    return installation.ownerBot.deviceId === actor.deviceId && installation.ownerBot.botId === actor.botId;
+  }
+  return true;
 }
 
 function normalizeModelSelection(value) {
@@ -166,12 +228,18 @@ function normalizeModelSelection(value) {
   if (value.modelRef !== undefined) {
     normalized.modelRef = value.modelRef === null
       ? null
-      : assertBoundedText(value.modelRef, 'value.modelRef', { min: 1, max: 512 });
+      : assertModelRef(value.modelRef, 'value.modelRef');
   }
   if (value.thinkingLevel !== undefined) {
-    normalized.thinkingLevel = value.thinkingLevel === null
-      ? null
-      : assertBoundedText(value.thinkingLevel, 'value.thinkingLevel', { min: 1, max: 64 });
+    if (value.thinkingLevel === null) {
+      normalized.thinkingLevel = null;
+    } else {
+      const level = assertBoundedText(value.thinkingLevel, 'value.thinkingLevel', { min: 1, max: 64 });
+      if (!THINKING_LEVELS.has(level)) {
+        fail('INVALID_ARGUMENT', 'Invalid value.thinkingLevel');
+      }
+      normalized.thinkingLevel = level;
+    }
   }
   if (value.codemode !== undefined) {
     normalized.codemode = value.codemode === null ? null : assertBoolean(value.codemode, 'value.codemode');
@@ -185,11 +253,16 @@ function normalizeModelSelection(value) {
 function normalizeCreateModelItem(raw, label) {
   if (!isPlainObject(raw)) fail('INVALID_ARGUMENT', `${label} must be an object`);
   assertAllowedKeys(raw, CREATE_MODEL_ITEM_KEYS, label);
+  const contextWindow = assertPositiveInt(raw.contextWindow, `${label}.contextWindow`);
+  const maxTokens = assertPositiveInt(raw.maxTokens, `${label}.maxTokens`);
+  if (maxTokens > contextWindow) {
+    fail('INVALID_ARGUMENT', `${label}.maxTokens must not exceed ${label}.contextWindow`);
+  }
   const model = {
     id: assertBoundedText(raw.id, `${label}.id`, { min: 1, max: 256 }),
     name: assertBoundedText(raw.name, `${label}.name`, { min: 1, max: 256, trim: true }),
-    contextWindow: assertPositiveInt(raw.contextWindow, `${label}.contextWindow`),
-    maxTokens: assertPositiveInt(raw.maxTokens, `${label}.maxTokens`),
+    contextWindow,
+    maxTokens,
     input: assertModalities(raw.input, `${label}.input`),
     reasoning: assertBoolean(raw.reasoning, `${label}.reasoning`),
     enabled: raw.enabled === undefined ? true : assertBoolean(raw.enabled, `${label}.enabled`),
@@ -233,10 +306,40 @@ function sanitizeRuntimeStatus(status) {
   };
 }
 
-function sanitizeBotSync(result) {
+function sanitizeSyncBot(bot) {
+  if (!isPlainObject(bot) || typeof bot.deviceId !== 'string' || typeof bot.botId !== 'string') return null;
+  const resolved = isPlainObject(bot.resolvedModel)
+    ? {
+      effectiveModelRef: typeof bot.resolvedModel.effectiveModelRef === 'string' ? bot.resolvedModel.effectiveModelRef : null,
+      effectiveModelName: typeof bot.resolvedModel.effectiveModelName === 'string' ? bot.resolvedModel.effectiveModelName : null,
+      effectiveProviderName: typeof bot.resolvedModel.effectiveProviderName === 'string' ? bot.resolvedModel.effectiveProviderName : null,
+      source: typeof bot.resolvedModel.source === 'string' ? bot.resolvedModel.source : null,
+      available: Boolean(bot.resolvedModel.available),
+    }
+    : null;
+  return {
+    deviceId: bot.deviceId,
+    botId: bot.botId,
+    name: typeof bot.name === 'string' ? bot.name : '',
+    ...(typeof bot.description === 'string' ? { description: bot.description } : {}),
+    ...(typeof bot.isPrimary === 'boolean' ? { isPrimary: bot.isPrimary } : {}),
+    ...(bot.archivedAt !== undefined ? { archivedAt: typeof bot.archivedAt === 'string' ? bot.archivedAt : null } : {}),
+    ...(typeof bot.deviceName === 'string' ? { deviceName: bot.deviceName } : {}),
+    ...(typeof bot.platform === 'string' ? { platform: bot.platform } : {}),
+    online: Boolean(bot.online),
+    ...(bot.modelRef !== undefined ? { modelRef: typeof bot.modelRef === 'string' ? bot.modelRef : null } : {}),
+    ...(resolved ? { resolvedModel: resolved } : {}),
+    ...(Number.isSafeInteger(bot.seq) ? { seq: bot.seq } : {}),
+  };
+}
+
+function sanitizeBotSync(result, bridge) {
   if (!isPlainObject(result)) return null;
   const devices = Array.isArray(result.devices)
-    ? result.devices.map(sanitizeDevice).filter(Boolean)
+    ? result.devices
+      .filter((item) => item && typeof item.deviceId === 'string' && !isInternalDeviceId(item.deviceId, bridge))
+      .map(sanitizeDevice)
+      .filter(Boolean)
     : [];
   const base = {
     epoch: result.epoch,
@@ -245,10 +348,22 @@ function sanitizeBotSync(result) {
     devices,
   };
   if (Array.isArray(result.bots)) {
-    base.bots = structuredClone(result.bots);
+    base.bots = result.bots
+      .filter((item) => item && typeof item.deviceId === 'string' && !isInternalDeviceId(item.deviceId, bridge))
+      .map(sanitizeSyncBot)
+      .filter(Boolean);
   }
   if (Array.isArray(result.events)) {
-    base.events = structuredClone(result.events);
+    base.events = result.events
+      .filter((event) => isPlainObject(event) && typeof event.deviceId === 'string' && !isInternalDeviceId(event.deviceId, bridge))
+      .map((event) => ({
+        seq: event.seq,
+        deviceId: event.deviceId,
+        botId: event.botId,
+        op: event.op,
+        bot: event.bot ? sanitizeSyncBot(event.bot) : null,
+        updatedAt: event.updatedAt ?? null,
+      }));
   }
   return base;
 }
@@ -409,22 +524,83 @@ export function createHandlers(deps) {
   if (!deps || typeof deps.owner !== 'function') {
     throw new TypeError('createHandlers requires deps.owner');
   }
-  const { owner } = deps;
+  const { owner, store, bridge, catalog, notifyAll, publicUrl } = deps;
+
+  async function buildStoredProviderProbeInput(providerId) {
+    const stored = store.getProvider(providerId);
+    if (!stored) fail('NOT_FOUND', 'Provider not found');
+    const customBaseUrl = typeof stored.custom?.baseUrl === 'string' && stored.custom.baseUrl.trim()
+      ? stored.custom.baseUrl
+      : stored.baseUrl;
+    const customApi = typeof stored.custom?.api === 'string' && stored.custom.api.trim()
+      ? stored.custom.api
+      : stored.api;
+    const customHeaders = isPlainObject(stored.custom?.headers) ? stored.custom.headers : undefined;
+    const provider = {
+      ...stored,
+      baseUrl: customBaseUrl,
+      api: customApi,
+      ...(customHeaders ? { headers: customHeaders } : {}),
+    };
+    const models = store.listModels(providerId).map(({ source: _source, removed: _removed, ...model }) => model);
+    let credential;
+    const ref = stored.credentialRef ? assertPublicCredentialId(stored.credentialRef) : null;
+    if (ref && store.getCredential(ref)?.configured) {
+      credential = store.resolveCredential(ref);
+    } else if (typeof catalog?.hasOAuth === 'function' && catalog.hasOAuth(providerId)) {
+      const runtime = await catalog.runtime();
+      const resolved = await runtime.getAuth(providerId).catch(() => null);
+      credential = resolved?.auth?.apiKey;
+    }
+    return { provider, models, ...(credential === undefined ? {} : { credential }) };
+  }
+
+  function describeStoredProviderAuth(stored, runtimeProvider) {
+    if (stored.id === ANTIGRAVITY_PROVIDER_ID) {
+      return {
+        providerId: stored.id,
+        method: 'none',
+        oauth: true,
+        apiKey: false,
+        label: '登录 Antigravity',
+        subscription: true,
+      };
+    }
+    const secret = store.getCredential('center-internal-pi-oauth-' + stored.id);
+    const configured = Boolean(secret?.configured);
+    const key = stored.credentialRef;
+    const hasKey = Boolean(key && store.getCredential(key)?.configured);
+    return {
+      providerId: stored.id,
+      method: configured ? 'oauth' : hasKey ? 'api_key' : 'none',
+      oauth: Boolean(runtimeProvider?.auth?.oauth),
+      apiKey: !stored.native || Boolean(runtimeProvider?.auth?.apiKey),
+      label: runtimeProvider?.auth?.oauth?.loginLabel ?? runtimeProvider?.auth?.oauth?.name ?? '使用账号登录',
+      subscription: runtimeProvider?.auth?.oauth?.isSubscription === true,
+    };
+  }
 
   return {
-    async center_list_devices(args, _actor) {
+    async center_list_devices(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, EMPTY_KEYS, 'center_list_devices');
       const devices = await owner('GET', '/api/devices', {});
       return {
-        devices: Array.isArray(devices) ? devices.map(sanitizeDevice).filter(Boolean) : [],
+        devices: Array.isArray(devices)
+          ? devices
+            .filter((item) => item && typeof item.deviceId === 'string' && !isInternalDeviceId(item.deviceId, bridge))
+            .map(sanitizeDevice)
+            .filter(Boolean)
+          : [],
       };
     },
 
-    async center_rename_device(args, _actor) {
+    async center_rename_device(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, RENAME_DEVICE_KEYS, 'center_rename_device');
-      const deviceId = assertBoundedText(input.deviceId, 'deviceId', { min: 1, max: 128 });
+      const deviceId = assertDeviceTarget(input.deviceId, bridge);
       const name = assertBoundedText(input.name, 'name', { min: 1, max: 120, trim: true });
       const renamed = await owner('PATCH', '/api/devices/:deviceId', {
         params: { deviceId },
@@ -433,36 +609,49 @@ export function createHandlers(deps) {
       return sanitizeDevice(renamed);
     },
 
-    async center_get_device_runtime_status(args, _actor) {
+    async center_get_device_runtime_status(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, DEVICE_ID_KEYS, 'center_get_device_runtime_status');
-      const deviceId = assertBoundedText(input.deviceId, 'deviceId', { min: 1, max: 128 });
+      const deviceId = assertDeviceTarget(input.deviceId, bridge);
       const status = await owner('GET', '/api/devices/:deviceId/runtime-status', {
         params: { deviceId },
       });
       return sanitizeRuntimeStatus(status);
     },
 
-    async center_get_bot_sync(args, _actor) {
+    async center_get_bot_sync(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, BOT_SYNC_KEYS, 'center_get_bot_sync');
       const epoch = assertOptionalBoundedText(input.epoch, 'epoch', { min: 1, max: 128 });
       const sinceSeq = input.sinceSeq === undefined ? undefined : assertRevision(input.sinceSeq, 'sinceSeq');
-      const query = {};
-      if (epoch !== undefined) query.epoch = epoch;
-      if (sinceSeq !== undefined) query.sinceSeq = String(sinceSeq);
-      const result = await owner('GET', '/api/bot-sync', { query });
-      return sanitizeBotSync(result);
+      let result;
+      if (typeof store?.getBotSync === 'function') {
+        const rawDevices = await owner('GET', '/api/devices', {});
+        const devices = Array.isArray(rawDevices)
+          ? rawDevices.filter((item) => item && typeof item.deviceId === 'string' && !isInternalDeviceId(item.deviceId, bridge))
+          : [];
+        result = store.getBotSync({ epoch, sinceSeq, devices });
+      } else {
+        const query = {};
+        if (epoch !== undefined) query.epoch = epoch;
+        if (sinceSeq !== undefined) query.sinceSeq = String(sinceSeq);
+        result = await owner('GET', '/api/bot-sync', { query });
+      }
+      return sanitizeBotSync(result, bridge);
     },
 
-    async center_get_model_config(args, _actor) {
+    async center_get_model_config(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, EMPTY_KEYS, 'center_get_model_config');
       const result = await owner('GET', '/api/model-config', {});
       return sanitizeModelConfig(result);
     },
 
-    async center_set_model_config(args, _actor) {
+    async center_set_model_config(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, SET_MODEL_CONFIG_KEYS, 'center_set_model_config');
       const expectedRevision = assertRevision(input.expectedRevision);
@@ -473,28 +662,32 @@ export function createHandlers(deps) {
       return sanitizeModelConfig(updated);
     },
 
-    async center_get_model_picker(args, _actor) {
+    async center_get_model_picker(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, EMPTY_KEYS, 'center_get_model_picker');
       const result = await owner('GET', '/api/model-picker', {});
       return sanitizeModelPicker(result);
     },
 
-    async center_get_model_catalog_status(args, _actor) {
+    async center_get_model_catalog_status(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, EMPTY_KEYS, 'center_get_model_catalog_status');
       const result = await owner('GET', '/api/model-catalog', {});
       return sanitizeCatalogStatus(result);
     },
 
-    async center_sync_model_catalog(args, _actor) {
+    async center_sync_model_catalog(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, EMPTY_KEYS, 'center_sync_model_catalog');
       const result = await owner('POST', '/api/model-catalog/sync', {});
       return sanitizeCatalogStatus(result);
     },
 
-    async center_set_model_star(args, _actor) {
+    async center_set_model_star(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, MODEL_STAR_KEYS, 'center_set_model_star');
       const modelRef = assertModelRef(input.modelRef, 'modelRef');
@@ -507,7 +700,8 @@ export function createHandlers(deps) {
       };
     },
 
-    async center_list_providers(args, _actor) {
+    async center_list_providers(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, LIST_PROVIDERS_KEYS, 'center_list_providers');
       const configuredOnly = assertOptionalBoolean(input.configuredOnly, 'configuredOnly');
@@ -519,7 +713,8 @@ export function createHandlers(deps) {
       return { providers };
     },
 
-    async center_get_provider(args, _actor) {
+    async center_get_provider(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, PROVIDER_ID_KEYS, 'center_get_provider');
       const providerId = assertBoundedText(input.providerId, 'providerId', { min: 1, max: 128 });
@@ -529,10 +724,35 @@ export function createHandlers(deps) {
       return sanitizeProvider(provider);
     },
 
-    async center_get_provider_auth_status(args, _actor) {
+    async center_get_provider_auth_status(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, PROVIDER_ID_KEYS, 'center_get_provider_auth_status');
       const providerId = assertOptionalBoundedText(input.providerId, 'providerId', { min: 1, max: 128 });
+      if (typeof store?.getProvider === 'function' && typeof store?.listProviders === 'function') {
+        if (providerId !== undefined) {
+          const stored = store.getProvider(providerId);
+          if (!stored) fail('NOT_FOUND', 'Provider not found');
+          const runtime = stored.id !== ANTIGRAVITY_PROVIDER_ID && typeof catalog?.runtime === 'function'
+            ? await catalog.runtime().catch(() => null)
+            : null;
+          const sanitized = sanitizeProviderAuthStatus(
+            describeStoredProviderAuth(stored, runtime?.getProvider?.(stored.id)),
+          );
+          return { statuses: sanitized ? [sanitized] : [] };
+        }
+        const nativeProviders = store.listProviders().filter((p) => p.native);
+        const runtime = nativeProviders.some((p) => p.id !== ANTIGRAVITY_PROVIDER_ID) && typeof catalog?.runtime === 'function'
+          ? await catalog.runtime().catch(() => null)
+          : null;
+        const statuses = nativeProviders
+          .map((stored) => sanitizeProviderAuthStatus(
+            describeStoredProviderAuth(stored, runtime?.getProvider?.(stored.id)),
+          ))
+          .filter(Boolean);
+        statuses.sort((a, b) => (a.providerId < b.providerId ? -1 : a.providerId > b.providerId ? 1 : 0));
+        return { statuses };
+      }
       if (providerId !== undefined) {
         const status = await owner('GET', '/api/providers/:id/auth-status', {
           params: { id: providerId },
@@ -547,7 +767,8 @@ export function createHandlers(deps) {
       return { statuses };
     },
 
-    async center_update_provider(args, _actor) {
+    async center_update_provider(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, UPDATE_PROVIDER_KEYS, 'center_update_provider');
       const providerId = assertBoundedText(input.providerId, 'providerId', { min: 1, max: 128 });
@@ -571,42 +792,76 @@ export function createHandlers(deps) {
         ...(typeof existing.configured === 'boolean' ? { configured: existing.configured } : {}),
         ...(existing.custom !== undefined ? { custom: structuredClone(existing.custom) } : {}),
       };
-      const updated = await owner('PUT', '/api/providers/:id', {
-        params: { id: providerId },
-        body: { expectedRevision, value: nextValue },
-      });
+      let updated;
+      if (typeof store?.putProvider === 'function') {
+        assertPublicCredentialId(nextValue.credentialRef);
+        updated = store.putProvider({ ...nextValue, id: providerId }, expectedRevision);
+        if (typeof catalog?.apply === 'function') await catalog.apply();
+        if (typeof notifyAll === 'function') notifyAll();
+      } else {
+        updated = await owner('PUT', '/api/providers/:id', {
+          params: { id: providerId },
+          body: { expectedRevision, value: nextValue },
+        });
+      }
       return sanitizeProvider(updated);
     },
 
-    async center_validate_provider(args, _actor) {
+    async center_validate_provider(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, PROVIDER_ID_KEYS, 'center_validate_provider');
       const providerId = assertBoundedText(input.providerId, 'providerId', { min: 1, max: 128 });
-      const result = await owner('POST', '/api/providers/:id/validate', {
-        params: { id: providerId },
-        body: {},
-      });
+      let result;
+      if (typeof store?.getProvider === 'function' && typeof store?.listModels === 'function') {
+        if (providerId === ANTIGRAVITY_PROVIDER_ID) {
+          fail('INVALID_STATE', 'Antigravity provider validation must be triggered from Center UI');
+        }
+        const probeInput = await buildStoredProviderProbeInput(providerId);
+        result = await validateCenterProvider(probeInput);
+      } else {
+        result = await owner('POST', '/api/providers/:id/validate', {
+          params: { id: providerId },
+          body: {},
+        });
+      }
       return {
         ok: Boolean(result?.ok),
         ...(typeof result?.message === 'string' ? { message: result.message } : {}),
       };
     },
 
-    async center_discover_provider_models(args, _actor) {
+    async center_discover_provider_models(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, PROVIDER_ID_KEYS, 'center_discover_provider_models');
       const providerId = assertBoundedText(input.providerId, 'providerId', { min: 1, max: 128 });
-      const result = await owner('POST', '/api/providers/:id/discover', {
-        params: { id: providerId },
-        body: {},
-      });
+      let result;
+      if (typeof store?.getProvider === 'function' && typeof store?.listModels === 'function') {
+        if (providerId === ANTIGRAVITY_PROVIDER_ID) {
+          fail('INVALID_STATE', 'Antigravity model discovery must be triggered from Center UI');
+        }
+        const probeInput = await buildStoredProviderProbeInput(providerId);
+        try {
+          result = await discoverCenterProviderModels(probeInput);
+        } catch (err) {
+          if (err?.code === 'NOT_FOUND' || err?.code === 'FORBIDDEN' || err?.code === 'INVALID_STATE') throw err;
+          fail('INVALID_ARGUMENT', 'Provider model discovery failed');
+        }
+      } else {
+        result = await owner('POST', '/api/providers/:id/discover', {
+          params: { id: providerId },
+          body: {},
+        });
+      }
       return {
         providerId,
         models: Array.isArray(result?.models) ? result.models.map(sanitizeModel).filter(Boolean) : [],
       };
     },
 
-    async center_list_provider_models(args, _actor) {
+    async center_list_provider_models(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, LIST_PROVIDER_MODELS_KEYS, 'center_list_provider_models');
       const providerId = assertBoundedText(input.providerId, 'providerId', { min: 1, max: 128 });
@@ -622,7 +877,8 @@ export function createHandlers(deps) {
       };
     },
 
-    async center_create_provider_model(args, _actor) {
+    async center_create_provider_model(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, CREATE_PROVIDER_MODEL_KEYS, 'center_create_provider_model');
       const providerId = assertBoundedText(input.providerId, 'providerId', { min: 1, max: 128 });
@@ -635,7 +891,8 @@ export function createHandlers(deps) {
       return sanitizeModel(created);
     },
 
-    async center_batch_create_provider_models(args, _actor) {
+    async center_batch_create_provider_models(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, BATCH_CREATE_MODELS_KEYS, 'center_batch_create_provider_models');
       const providerId = assertBoundedText(input.providerId, 'providerId', { min: 1, max: 128 });
@@ -663,17 +920,29 @@ export function createHandlers(deps) {
           fail('REVISION_CONFLICT', `Model already exists: ${item.id}`);
         }
       }
-      const result = await owner('POST', '/api/providers/:id/models/batch', {
-        params: { id: providerId },
-        body: { models },
-      });
+      let resultModels;
+      if (typeof store?.putModelsBatch === 'function') {
+        resultModels = store.putModelsBatch(
+          providerId,
+          models.map((item) => ({ ...item, source: 'manual', removed: false })),
+        );
+        if (typeof catalog?.apply === 'function') await catalog.apply();
+        if (typeof notifyAll === 'function') notifyAll();
+      } else {
+        const result = await owner('POST', '/api/providers/:id/models/batch', {
+          params: { id: providerId },
+          body: { models },
+        });
+        resultModels = result?.models;
+      }
       return {
         providerId,
-        models: Array.isArray(result?.models) ? result.models.map(sanitizeModel).filter(Boolean) : [],
+        models: Array.isArray(resultModels) ? resultModels.map(sanitizeModel).filter(Boolean) : [],
       };
     },
 
-    async center_update_provider_model(args, _actor) {
+    async center_update_provider_model(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, UPDATE_PROVIDER_MODEL_KEYS, 'center_update_provider_model');
       const providerId = assertBoundedText(input.providerId, 'providerId', { min: 1, max: 128 });
@@ -716,11 +985,43 @@ export function createHandlers(deps) {
         ? existingList.find((item) => isPlainObject(item) && item.id === modelId)
         : null;
       if (!existing) fail('NOT_FOUND', 'Model not found');
-      const nextValue = {};
-      for (const key of MODEL_ROUTE_VALUE_KEYS) {
-        if (existing[key] !== undefined) nextValue[key] = structuredClone(existing[key]);
+      const nextValue = {
+        id: modelId,
+        name: typeof existing.name === 'string' && existing.name.length > 0 ? existing.name : modelId,
+        contextWindow: existing.contextWindow,
+        maxTokens: existing.maxTokens,
+        input: Array.isArray(existing.input) && existing.input.length > 0 ? [...existing.input] : ['text'],
+        reasoning: Boolean(existing.reasoning),
+        enabled: existing.enabled !== undefined ? Boolean(existing.enabled) : true,
+      };
+      if (typeof existing.api === 'string' && existing.api.length > 0) {
+        nextValue.api = existing.api;
+      }
+      if (typeof existing.baseUrl === 'string' && existing.baseUrl.length > 0) {
+        nextValue.baseUrl = existing.baseUrl;
+      }
+      if (isPlainObject(existing.headers)) {
+        nextValue.headers = structuredClone(existing.headers);
+      }
+      for (const field of OPTIONAL_MODEL_PUBLIC_FIELDS) {
+        if (isPlainObject(existing[field])) {
+          nextValue[field] = structuredClone(existing[field]);
+        }
+      }
+      if (existing.source === 'catalog' || existing.source === 'manual') {
+        nextValue.source = existing.source;
+      }
+      if (typeof existing.removed === 'boolean') {
+        nextValue.removed = existing.removed;
       }
       Object.assign(nextValue, patch, { id: modelId });
+      if (
+        Number.isSafeInteger(nextValue.contextWindow) &&
+        Number.isSafeInteger(nextValue.maxTokens) &&
+        nextValue.maxTokens > nextValue.contextWindow
+      ) {
+        fail('INVALID_ARGUMENT', 'maxTokens must not exceed contextWindow');
+      }
       const updated = await owner('PUT', '/api/providers/:id/models/:modelId', {
         params: { id: providerId, modelId },
         body: { expectedRevision, value: nextValue },
@@ -728,7 +1029,8 @@ export function createHandlers(deps) {
       return sanitizeModel(updated);
     },
 
-    async center_delete_provider_model(args, _actor) {
+    async center_delete_provider_model(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, DELETE_PROVIDER_MODEL_KEYS, 'center_delete_provider_model');
       const providerId = assertBoundedText(input.providerId, 'providerId', { min: 1, max: 128 });
@@ -744,16 +1046,29 @@ export function createHandlers(deps) {
       };
     },
 
-    async center_list_client_releases(args, _actor) {
+    async center_list_client_releases(args, actor) {
+      assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, CLIENT_RELEASES_KEYS, 'center_list_client_releases');
       const platform = assertOptionalBoundedText(input.platform, 'platform', { min: 1, max: 32, trim: true });
       const arch = assertOptionalBoundedText(input.arch, 'arch', { min: 1, max: 32, trim: true });
       const format = assertOptionalBoundedText(input.format, 'format', { min: 1, max: 32, trim: true });
       const publishedOnly = assertOptionalBoolean(input.publishedOnly, 'publishedOnly');
-      const result = await owner('GET', '/api/client-releases', {});
-      let releases = Array.isArray(result?.releases)
-        ? result.releases.map(sanitizeClientRelease).filter(Boolean)
+      let rawReleases;
+      if (typeof store?.listClientReleases === 'function') {
+        const base = typeof publicUrl === 'string' && publicUrl.trim() ? new URL(publicUrl) : null;
+        rawReleases = store.listClientReleases().map((record) => ({
+          ...record,
+          downloadUrl: base
+            ? new URL('/api/client-releases/' + record.id + '/download', base).toString()
+            : `/api/client-releases/${record.id}/download`,
+        }));
+      } else {
+        const result = await owner('GET', '/api/client-releases', {});
+        rawReleases = result?.releases;
+      }
+      let releases = Array.isArray(rawReleases)
+        ? rawReleases.map(sanitizeClientRelease).filter(Boolean)
         : [];
       if (platform !== undefined) releases = releases.filter((item) => item.platform === platform);
       if (arch !== undefined) releases = releases.filter((item) => item.arch === arch);
@@ -762,28 +1077,45 @@ export function createHandlers(deps) {
       return { releases };
     },
 
-    async center_get_operation(args, _actor) {
+    async center_get_operation(args, actor) {
+      const checkedActor = assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, OPERATION_ID_KEYS, 'center_get_operation');
       const operationId = assertBoundedText(input.operationId, 'operationId', { min: 1, max: 128 });
       const operation = await owner('GET', '/api/operations/:id', {
         params: { id: operationId },
       });
+      if (checkedActor.kind === 'bot' && operation?.installationId && typeof store?.getInstallation === 'function') {
+        const installation = store.getInstallation(operation.installationId);
+        if (installation && !isVisibleInstallationToActor(store, installation, checkedActor)) {
+          fail('NOT_FOUND', 'Operation not found');
+        }
+      }
       return sanitizeOperation(operation);
     },
 
-    async center_list_installation_deployments(args, _actor) {
+    async center_list_installation_deployments(args, actor) {
+      const checkedActor = assertActor(actor);
       const input = asInputObject(args);
       assertAllowedKeys(input, INSTALLATION_ID_KEYS, 'center_list_installation_deployments');
       const installationId = assertBoundedText(input.installationId, 'installationId', { min: 1, max: 128 });
+      if (checkedActor.kind === 'bot' && typeof store?.getInstallation === 'function') {
+        const installation = store.getInstallation(installationId);
+        if (installation && !isVisibleInstallationToActor(store, installation, checkedActor)) {
+          fail('NOT_FOUND', 'Installation not found');
+        }
+      }
       const receipts = await owner('GET', '/api/installations/:id/deployments', {
         params: { id: installationId },
       });
+      const visibleReceipts = Array.isArray(receipts)
+        ? (checkedActor.kind === 'bot'
+          ? receipts.filter((item) => item?.deviceId === checkedActor.deviceId || item?.deviceId === null)
+          : receipts)
+        : [];
       return {
         installationId,
-        deployments: Array.isArray(receipts)
-          ? receipts.map(sanitizeDeploymentReceipt).filter(Boolean)
-          : [],
+        deployments: visibleReceipts.map(sanitizeDeploymentReceipt).filter(Boolean),
       };
     },
   };

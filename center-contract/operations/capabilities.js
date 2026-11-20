@@ -33,19 +33,19 @@ const botRefSchema = {
 const skillFilesWriteMapSchema = {
   type: 'object',
   additionalProperties: { type: 'string' },
-  description: 'Map of skill-relative paths (must include SKILL.md; optional references/, templates/, scripts/, assets/) to UTF-8 text.',
+  description: 'Map of skill-relative paths (must include SKILL.md; optional non-executable references/, templates/, assets/) to UTF-8 text. Script files, executable extensions, shebangs, and local/traversal file links are forbidden.',
 };
 
 const skillFilesPatchMapSchema = {
   type: 'object',
   additionalProperties: { anyOf: [{ type: 'string' }, { type: 'null' }] },
-  description: 'Map of skill-relative paths to UTF-8 text, or null to remove an extra supporting file.',
+  description: 'Map of skill-relative paths to UTF-8 text (SKILL.md or non-executable references/, templates/, assets/), or null to remove an extra supporting file.',
 };
 
 const safeConfigPatchSchema = {
   type: 'object',
   description:
-    'Validated non-secret configuration fields to merge. Restricted fields (credential refs, secrets, URLs/endpoints, env, headers, commands, providers, credentials, or free-form maps) are rejected and must be configured in Center UI. Pass null for an optional safe field to unset it.',
+    'Validated non-secret configuration fields to merge. Restricted fields (credential refs, secrets, external service/provider names, URLs/endpoints, env, headers, commands, host file/directory paths, or free-form maps) are rejected and must be configured in Center UI. Pass null for an optional safe field to unset it.',
 };
 
 const learningConfigSchema = {
@@ -387,7 +387,7 @@ export const operations = Object.freeze([
   defineOperation({
     name: 'capability_operation_get',
     description:
-      'Poll the status of an async installation lifecycle operation (enable, disable, update, uninstall) by operationId.',
+      'Poll the status of an async installation lifecycle operation (enable, disable, uninstall) by operationId.',
     properties: {
       operationId: { ...idSchema, description: 'Operation ID returned by an async lifecycle mutation.' },
     },
@@ -458,31 +458,17 @@ export const operations = Object.freeze([
   defineOperation({
     name: 'capability_installation_toggle',
     description:
-      'Request async global enable or disable of an already-installed capability (returns an accepted operationId; poll capability_operation_get and check globallyEffective to confirm activation).',
+      'Request async global disable of an already-installed capability (returns an accepted operationId; poll capability_operation_get). Globally enabling an installed capability requires explicit owner approval in Center UI and returns FORBIDDEN; use capability_bot_binding_set to toggle an already globally active capability per Bot.',
     properties: {
       installationId: { ...idSchema, description: 'Target installationId.' },
-      action: { type: 'string', enum: ['enable', 'disable'], description: 'Global lifecycle toggle action.' },
+      action: { type: 'string', enum: ['enable', 'disable'], description: 'Global lifecycle toggle action ("disable" supported; "enable" requires Center UI approval).' },
       requestId: { ...idSchema, description: 'Required idempotency key for safe retries.' },
       validationBot: {
         ...botRefSchema,
-        description: 'Optional validation Bot used when action="enable" requires Bot-scoped OAuth/connection validation.',
+        description: 'Reserved optional validation Bot reference (global enable requires Center UI approval).',
       },
     },
     required: ['installationId', 'action', 'requestId'],
-    readOnly: false,
-    destructive: false,
-  }),
-
-  defineOperation({
-    name: 'capability_installation_update',
-    description:
-      'Request an async version update of an already-installed npm capability within the same package identity (returns an accepted operationId). Arbitrary package sources, URLs, or artifacts are not accepted.',
-    properties: {
-      installationId: { ...idSchema, description: 'Target installed npm capability installationId.' },
-      requestId: { ...idSchema, description: 'Required idempotency key for safe retries.' },
-      targetVersion: { type: 'string', minLength: 1, maxLength: 128, description: 'Optional exact semver version to update to (defaults to latest of the same package).' },
-    },
-    required: ['installationId', 'requestId'],
     readOnly: false,
     destructive: false,
   }),

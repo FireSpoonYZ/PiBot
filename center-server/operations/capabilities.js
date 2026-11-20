@@ -11,29 +11,54 @@
 // - Never expose arbitrary plugin actions; allowlist only listTools/validate/probe.
 // - Always distinguish desired/enabled intent from globally effective and Host-applied state.
 
+import { randomUUID } from 'node:crypto';
+
 export const SAFE_CAPABILITY_ACTIONS = Object.freeze(['listTools', 'validate', 'probe']);
 
+const CONTROL_CHARS_RE = /[\x00-\x1f\x7f]/;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const RESTRICTED_KEY_EXACT = new Set([
   'credentials', 'credential', 'credentialref', 'apikey', 'apikeyref',
   'secret', 'secrets', 'token', 'tokens', 'password', 'passwd', 'passphrase',
   'privatekey', 'clientsecret', 'accesstoken', 'refreshtoken',
   'authorization', 'auth', 'oauth', 'cookie', 'cookies', 'bearer',
-  'cert', 'certificate', 'pem',
+  'cert', 'certificate', 'pem', 'ca', 'cacert', 'clientcert', 'clientkey', 'clientid',
   'env', 'environment', 'envrefs', 'headers', 'httpheaders', 'headerrefs',
   'command', 'cmd', 'bin', 'binary', 'args', 'argv', 'cwd', 'workdir',
   'shell', 'executable', 'script', 'scripts', 'entry', 'entrypoint',
-  'path', 'filepath', 'transport',
-  'url', 'baseurl', 'endpoint', 'uri', 'host', 'hostname', 'port',
-  'proxy', 'proxyurl', 'origin', 'server', 'serverurl',
-  'webhook', 'webhookurl', 'callbackurl', 'redirecturi', 'providers',
+  'exec', 'execute', 'run', 'spawn', 'interpreter', 'runtime', 'commandline', 'cmdline',
+  'program', 'prog', 'process', 'hook', 'hooks', 'preinstall', 'postinstall', 'lifecycle',
+  'module', 'package', 'plugin', 'extension', 'library', 'loader', 'handler', 'eval', 'code', 'expression',
+  'path', 'filepath', 'dir', 'directory', 'folder', 'root', 'rootdir', 'basedir',
+  'homedir', 'home', 'workspace', 'workspacedir', 'datadir', 'cachedir', 'tempdir', 'tmpdir',
+  'logdir', 'configdir', 'file', 'filename', 'files', 'mount', 'mounts', 'volume', 'volumes',
+  'socket', 'socketpath', 'pipe', 'fifo', 'symlink', 'link', 'targetpath', 'source', 'sources',
+  'transport', 'url', 'baseurl', 'endpoint', 'uri', 'host', 'hostname', 'port',
+  'proxy', 'proxyurl', 'origin', 'server', 'serverurl', 'service', 'services', 'servicename',
+  'provider', 'providers', 'upstream', 'backend', 'domain', 'fqdn', 'address', 'addr',
+  'ip', 'ipaddress', 'dns', 'gateway', 'broker', 'registry', 'mirror', 'remote', 'relay',
+  'tunnel', 'ssh', 'tls', 'ssl', 'tenant', 'tenantid', 'account', 'accountid', 'org', 'orgid', 'organization',
+  'webhook', 'webhookurl', 'callbackurl', 'redirecturi',
 ]);
-const RESTRICTED_KEY_SUFFIX_RE = /(?:ref|refs|url|uri|endpoint|host|proxy|secret|token|password|apikey|key|auth|env|header|headers|command|cmd|cwd|path)$/i;
-const RESTRICTED_KEY_SUBSTRING_RE = /(?:secret|token|password|passwd|apikey|credential|privatekey|bearer|cookie|oauth)/i;
+const RESTRICTED_KEY_SUFFIX_RE = /(?:ref|refs|url|uri|endpoint|host|hostname|port|proxy|secret|token|password|passwd|apikey|key|auth|env|header|headers|command|cmd|args|argv|bin|binary|shell|script|scripts|exec|cwd|dir|directory|folder|path|file|filename|socket|mount|volume|provider|providers|service|services|server|servers|domain|upstream|backend|gateway|registry|remote|addr|address|ip|cert|pem)$/i;
+const RESTRICTED_KEY_SUBSTRING_RE = /(?:secret|token|password|passwd|apikey|credential|privatekey|bearer|cookie|oauth|filepath|dirpath|workdir|baseurl|serverurl|endpoint|webhook|callback|redirect|command|script|executable|symlink)/i;
 const RESTRICTED_FORMATS = new Set([
   'credential-ref', 'uri', 'uri-reference', 'iri', 'iri-reference',
   'hostname', 'idn-hostname', 'ipv4', 'ipv6',
 ]);
+const SAFE_SKILL_SUBDIRS = new Set(['references', 'templates', 'assets']);
+const FORBIDDEN_SKILL_EXTENSIONS = new Set([
+  '.sh', '.bash', '.zsh', '.fish', '.ksh', '.csh',
+  '.ps1', '.psm1', '.psd1', '.bat', '.cmd', '.vbs', '.vbe', '.wsf', '.wsh',
+  '.js', '.mjs', '.cjs', '.ts', '.mts', '.cts',
+  '.py', '.pyw', '.rb', '.pl', '.pm', '.php', '.lua', '.awk', '.sed',
+  '.exe', '.dll', '.so', '.dylib', '.com', '.msi', '.app', '.jar', '.wasm', '.bin',
+  '.lnk', '.url', '.webloc', '.desktop', '.command', '.workflow', '.scpt', '.applescript',
+]);
+const SHEBANG_RE = /^\uFEFF?#![ \t]*\S/;
+const FILE_URI_RE = /\bfile:\/\//i;
+const MARKDOWN_LINK_TARGET_RE = /!?\[[^\]]*\]\(\s*<?([^)\s>]+)>?/g;
+const HTML_LINK_ATTR_RE = /\b(?:href|src)\s*=\s*(?:"([^"]+)"|'([^']+)')/gi;
 const SAFE_SCALAR_TYPES = new Set(['boolean', 'integer', 'number', 'string']);
 const SKILL_LIFECYCLE_ACTIONS = new Set(['pin', 'lock', 'archive', 'restore']);
 const VISIBILITY_SCOPES = new Set(['private', 'assigned', 'global']);
@@ -103,7 +128,33 @@ function assertActor(actor) {
   fail('UNAUTHENTICATED', 'Unsupported actor kind');
 }
 
-function resolveBotTarget(args, actor) {
+function isInternalDeviceId(deviceId, bridge) {
+  if (typeof deviceId !== 'string') return true;
+  if (deviceId.startsWith('center-')) return true;
+  if (typeof bridge?.deviceId === 'string' && deviceId === bridge.deviceId) return true;
+  return false;
+}
+
+function assertDeviceId(value, bridge, name = 'deviceId') {
+  const id = requireId(value, name);
+  if (CONTROL_CHARS_RE.test(id) || id === '.' || id === '..' || id.includes('/') || id.includes('\\')) {
+    fail('INVALID_ARGUMENT', `Invalid ${name}`);
+  }
+  if (isInternalDeviceId(id, bridge)) {
+    fail('NOT_FOUND', 'Device not found');
+  }
+  return id;
+}
+
+function assertBotId(value, name = 'botId') {
+  const id = requireId(value, name);
+  if (CONTROL_CHARS_RE.test(id) || id === '.' || id === '..' || id.includes('/') || id.includes('\\')) {
+    fail('INVALID_ARGUMENT', `Invalid ${name}`);
+  }
+  return id;
+}
+
+function resolveBotTarget(args, actor, bridge) {
   const hasDevice = args.deviceId !== undefined;
   const hasBot = args.botId !== undefined;
   if (hasDevice !== hasBot) {
@@ -111,8 +162,8 @@ function resolveBotTarget(args, actor) {
   }
   if (hasDevice && hasBot) {
     return {
-      deviceId: requireId(args.deviceId, 'deviceId'),
-      botId: requireId(args.botId, 'botId'),
+      deviceId: assertDeviceId(args.deviceId, bridge, 'deviceId'),
+      botId: assertBotId(args.botId, 'botId'),
     };
   }
   if (actor.kind === 'bot') {
@@ -121,7 +172,7 @@ function resolveBotTarget(args, actor) {
   fail('INVALID_ARGUMENT', 'deviceId and botId are required');
 }
 
-function resolveOptionalBotTarget(args) {
+function resolveOptionalBotTarget(args, bridge) {
   const hasDevice = args.deviceId !== undefined;
   const hasBot = args.botId !== undefined;
   if (hasDevice !== hasBot) {
@@ -129,8 +180,8 @@ function resolveOptionalBotTarget(args) {
   }
   if (!hasDevice) return null;
   return {
-    deviceId: requireId(args.deviceId, 'deviceId'),
-    botId: requireId(args.botId, 'botId'),
+    deviceId: assertDeviceId(args.deviceId, bridge, 'deviceId'),
+    botId: assertBotId(args.botId, 'botId'),
   };
 }
 
@@ -208,10 +259,34 @@ function schemaAllowsNull(node) {
   return schemaTypesOf(node).includes('null');
 }
 
+function hasRestrictedFormat(node) {
+  if (!isPlainObject(node)) return false;
+  if (typeof node.format === 'string' && RESTRICTED_FORMATS.has(node.format)) return true;
+  if (node.items && hasRestrictedFormat(node.items)) return true;
+  for (const combiner of ['anyOf', 'oneOf', 'allOf']) {
+    if (Array.isArray(node[combiner]) && node[combiner].some((branch) => hasRestrictedFormat(branch))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isCredentialRefSchema(node) {
+  if (!isPlainObject(node)) return false;
+  if (node.format === 'credential-ref') return true;
+  for (const combiner of ['anyOf', 'oneOf', 'allOf']) {
+    if (Array.isArray(node[combiner]) && node[combiner].some((branch) => isCredentialRefSchema(branch))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function isSafePrimitiveNode(node, key) {
   if (!isPlainObject(node)) return false;
   if (key !== null && isRestrictedKeyName(key)) return false;
-  if (typeof node.format === 'string' && RESTRICTED_FORMATS.has(node.format)) return false;
+  if (hasRestrictedFormat(node)) return false;
+  if (Array.isArray(node.oneOf) || Array.isArray(node.allOf)) return false;
   const nonNullTypes = schemaTypesOf(node).filter((type) => type !== 'null');
   if (!nonNullTypes.length) return false;
   if (nonNullTypes.every((type) => SAFE_SCALAR_TYPES.has(type))) return true;
@@ -225,7 +300,9 @@ function isClosedObjectSchema(node) {
   if (!isPlainObject(node)) return false;
   const nonNullTypes = schemaTypesOf(node).filter((type) => type !== 'null');
   if (nonNullTypes.length !== 1 || nonNullTypes[0] !== 'object') return false;
-  if (node.additionalProperties === true || isPlainObject(node.additionalProperties)) return false;
+  if (node.additionalProperties !== false) return false;
+  if (isPlainObject(node.patternProperties)) return false;
+  if (Array.isArray(node.oneOf) || Array.isArray(node.allOf)) return false;
   return isPlainObject(node.properties);
 }
 
@@ -248,7 +325,7 @@ function pointerSegment(segment) {
 
 function collectCredentialSlots(store, schema, value, pointer = '') {
   if (!isPlainObject(schema)) return [];
-  if (schema.format === 'credential-ref') {
+  if (isCredentialRefSchema(schema)) {
     const ref = typeof value === 'string' && value.length > 0 ? value : null;
     const record = ref && typeof store?.getCredential === 'function' ? store.getCredential(ref) : null;
     return [{
@@ -655,17 +732,104 @@ function sanitizeCheckOrProbeResult(store, rawResult, installation) {
   };
 }
 
+function assertSafeSkillRelativePath(rawPath, { allowScriptsForDelete = false, allowRootSkillMd = true } = {}) {
+  if (typeof rawPath !== 'string' || !rawPath.trim() || rawPath.length > 240 || !rawPath.isWellFormed()) {
+    fail('INVALID_ARGUMENT', 'Invalid skill file path');
+  }
+  if (FORBIDDEN_KEYS.has(rawPath) || CONTROL_CHARS_RE.test(rawPath)) {
+    fail('INVALID_ARGUMENT', `Invalid file path '${rawPath}'`);
+  }
+  if (
+    rawPath.startsWith('/')
+    || rawPath.startsWith('\\')
+    || rawPath.startsWith('~')
+    || rawPath.includes('\\')
+    || /^[A-Za-z]:/.test(rawPath)
+    || /^[a-z][a-z0-9+.-]*:/i.test(rawPath)
+  ) {
+    fail('FORBIDDEN', `Absolute, URI, or host file path '${rawPath}' is forbidden in skills`);
+  }
+  const parts = rawPath.split('/');
+  if (parts.some((part) => !part || part === '.' || part === '..' || /^[.]+$/.test(part))) {
+    fail('FORBIDDEN', `Path traversal or invalid segment in skill path '${rawPath}' is forbidden`);
+  }
+  if (parts.length === 1 && parts[0] === 'SKILL.md') {
+    if (!allowRootSkillMd) {
+      fail('INVALID_ARGUMENT', 'SKILL.md cannot be removed');
+    }
+    return 'SKILL.md';
+  }
+  const topDir = parts[0].toLowerCase();
+  if (topDir === 'scripts') {
+    if (allowScriptsForDelete && parts.length >= 2) {
+      return rawPath;
+    }
+    fail('FORBIDDEN', `Writing or editing files under 'scripts/' ('${rawPath}') is forbidden; only SKILL.md and non-executable references/, templates/, or assets/ are allowed`);
+  }
+  if (!SAFE_SKILL_SUBDIRS.has(parts[0]) || parts.length < 2) {
+    fail('INVALID_ARGUMENT', `Skill file '${rawPath}' must be SKILL.md or under references/, templates/, or assets/`);
+  }
+  if (!allowScriptsForDelete) {
+    const filename = parts[parts.length - 1].toLowerCase();
+    const dot = filename.lastIndexOf('.');
+    const ext = dot > 0 ? filename.slice(dot) : '';
+    if (ext && FORBIDDEN_SKILL_EXTENSIONS.has(ext)) {
+      fail('FORBIDDEN', `Executable, script, or link file '${rawPath}' is forbidden in skills`);
+    }
+  }
+  return rawPath;
+}
+
+function isForbiddenSkillLinkTarget(target) {
+  const trimmed = String(target ?? '').trim();
+  if (!trimmed) return false;
+  if (/^(?:file|javascript|vbscript):/i.test(trimmed)) return true;
+  if (trimmed.startsWith('/') || trimmed.startsWith('~') || trimmed.startsWith('\\\\')) return true;
+  if (/^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.includes('\\')) return true;
+  if (/(?:^|\/)\.\.(?:\/|$)/.test(trimmed)) return true;
+  const relNormalized = trimmed.replace(/^\.\//, '').toLowerCase();
+  if (relNormalized === 'scripts' || relNormalized.startsWith('scripts/')) return true;
+  return false;
+}
+
+function assertSafeSkillFileContent(pathLabel, content) {
+  if (typeof content !== 'string' || !content.isWellFormed()) {
+    fail('INVALID_ARGUMENT', `File '${pathLabel}' content must be well-formed UTF-8 text`);
+  }
+  if (SHEBANG_RE.test(content)) {
+    fail('FORBIDDEN', `Executable shebang script content in '${pathLabel}' is forbidden`);
+  }
+  if (FILE_URI_RE.test(content)) {
+    fail('FORBIDDEN', `Local file:// link in '${pathLabel}' is forbidden`);
+  }
+  MARKDOWN_LINK_TARGET_RE.lastIndex = 0;
+  let match;
+  while ((match = MARKDOWN_LINK_TARGET_RE.exec(content)) !== null) {
+    if (isForbiddenSkillLinkTarget(match[1])) {
+      fail('FORBIDDEN', `Local host path, traversal, or script link in '${pathLabel}' is forbidden`);
+    }
+  }
+  HTML_LINK_ATTR_RE.lastIndex = 0;
+  while ((match = HTML_LINK_ATTR_RE.exec(content)) !== null) {
+    const target = match[1] ?? match[2] ?? '';
+    if (isForbiddenSkillLinkTarget(target)) {
+      fail('FORBIDDEN', `Local host path, traversal, or script link in '${pathLabel}' is forbidden`);
+    }
+  }
+}
+
 function sanitizeSkillFilesWriteMap(rawFiles) {
   if (!isPlainObject(rawFiles)) {
     fail('INVALID_ARGUMENT', 'files must be an object mapping relative paths to UTF-8 strings');
   }
   const files = {};
   for (const [key, value] of Object.entries(rawFiles)) {
-    if (FORBIDDEN_KEYS.has(key)) fail('INVALID_ARGUMENT', `Invalid file path '${key}'`);
+    const safePath = assertSafeSkillRelativePath(key);
     if (typeof value !== 'string') {
       fail('INVALID_ARGUMENT', `File '${key}' content must be a UTF-8 string`);
     }
-    files[key] = value;
+    assertSafeSkillFileContent(safePath, value);
+    files[safePath] = value;
   }
   return files;
 }
@@ -676,11 +840,20 @@ function sanitizeSkillFilesPatchMap(rawFiles) {
   }
   const files = {};
   for (const [key, value] of Object.entries(rawFiles)) {
-    if (FORBIDDEN_KEYS.has(key)) fail('INVALID_ARGUMENT', `Invalid file path '${key}'`);
-    if (value !== null && typeof value !== 'string') {
+    if (value === null) {
+      const safeDeletePath = assertSafeSkillRelativePath(key, {
+        allowScriptsForDelete: true,
+        allowRootSkillMd: false,
+      });
+      files[safeDeletePath] = null;
+      continue;
+    }
+    if (typeof value !== 'string') {
       fail('INVALID_ARGUMENT', `File '${key}' content must be a UTF-8 string or null`);
     }
-    files[key] = value;
+    const safePath = assertSafeSkillRelativePath(key);
+    assertSafeSkillFileContent(safePath, value);
+    files[safePath] = value;
   }
   return files;
 }
@@ -804,7 +977,16 @@ export function createHandlers(deps) {
   if (!deps || typeof deps.owner !== 'function') {
     throw new Error('deps.owner is required');
   }
-  const { owner, store, execution } = deps;
+  const {
+    owner,
+    store,
+    execution,
+    skills,
+    packages,
+    bridge,
+    action: callCapabilityAction,
+    notifyInstallation,
+  } = deps;
 
   function assertTargetBotExists(target) {
     if (
@@ -831,7 +1013,7 @@ export function createHandlers(deps) {
     async capability_skill_list(rawArgs, rawActor) {
       const actor = assertActor(rawActor);
       const args = assertArgsObject(rawArgs);
-      const target = resolveBotTarget(args, actor);
+      const target = resolveBotTarget(args, actor, bridge);
       const includeArchived = optionalBoolean(args.includeArchived, 'includeArchived') ?? true;
 
       const [listed, reviewed] = await Promise.all([
@@ -876,12 +1058,14 @@ export function createHandlers(deps) {
     async capability_skill_read(rawArgs, rawActor) {
       const actor = assertActor(rawActor);
       const args = assertArgsObject(rawArgs);
-      const target = resolveBotTarget(args, actor);
+      const target = resolveBotTarget(args, actor, bridge);
       const skillId = optionalId(args.skillId, 'skillId');
       const name = optionalId(args.name, 'name');
       const installationId = optionalId(args.installationId, 'installationId');
       const skillName = optionalId(args.skillName, 'skillName');
-      const path = optionalId(args.path, 'path', 240);
+      const path = args.path !== undefined
+        ? assertSafeSkillRelativePath(args.path, { allowScriptsForDelete: true, allowRootSkillMd: true })
+        : undefined;
 
       if (!skillId && !name && !installationId) {
         fail('INVALID_ARGUMENT', 'Provide skillId, name, or installationId');
@@ -916,7 +1100,7 @@ export function createHandlers(deps) {
     async capability_skill_create(rawArgs, rawActor) {
       const actor = assertActor(rawActor);
       const args = assertArgsObject(rawArgs);
-      const target = resolveBotTarget(args, actor);
+      const target = resolveBotTarget(args, actor, bridge);
       const name = requireId(args.name, 'name', 64);
       const hasContent = args.content !== undefined;
       const hasFiles = args.files !== undefined;
@@ -932,9 +1116,13 @@ export function createHandlers(deps) {
         if (typeof args.content !== 'string' || !args.content.trim()) {
           fail('INVALID_ARGUMENT', 'content must be a non-empty string');
         }
+        assertSafeSkillFileContent('SKILL.md', args.content);
         body.content = args.content;
       } else {
         body.files = sanitizeSkillFilesWriteMap(args.files);
+        if (typeof body.files['SKILL.md'] !== 'string') {
+          fail('VALIDATION_FAILED', 'files must include SKILL.md');
+        }
       }
       if (args.category !== undefined) body.category = requireId(args.category, 'category', 64);
       if (args.description !== undefined) body.description = requireId(args.description, 'description', 1024);
@@ -951,7 +1139,7 @@ export function createHandlers(deps) {
     async capability_skill_edit(rawArgs, rawActor) {
       const actor = assertActor(rawActor);
       const args = assertArgsObject(rawArgs);
-      const target = resolveBotTarget(args, actor);
+      const target = resolveBotTarget(args, actor, bridge);
       const mode = args.mode;
       if (mode !== 'update' && mode !== 'patch') {
         fail('INVALID_ARGUMENT', 'mode must be "update" or "patch"');
@@ -981,14 +1169,24 @@ export function createHandlers(deps) {
         }
         if (hasFiles) body.files = sanitizeSkillFilesPatchMap(args.files);
         if (hasPath) {
-          body.path = requireId(args.path, 'path', 240);
           if (args.content === undefined) {
             fail('INVALID_ARGUMENT', 'mode="update" with path requires content (string or null)');
           }
-          if (args.content !== null && typeof args.content !== 'string') {
-            fail('INVALID_ARGUMENT', 'content must be a UTF-8 string or null');
+          if (args.content === null) {
+            body.path = assertSafeSkillRelativePath(args.path, {
+              allowScriptsForDelete: true,
+              allowRootSkillMd: false,
+            });
+            body.content = null;
+          } else {
+            if (typeof args.content !== 'string') {
+              fail('INVALID_ARGUMENT', 'content must be a UTF-8 string or null');
+            }
+            const safePath = assertSafeSkillRelativePath(args.path);
+            assertSafeSkillFileContent(safePath, args.content);
+            body.path = safePath;
+            body.content = args.content;
           }
-          body.content = args.content;
         } else if (args.content !== undefined) {
           fail('INVALID_ARGUMENT', 'content requires path in mode="update"');
         }
@@ -1003,9 +1201,11 @@ export function createHandlers(deps) {
         if (typeof args.newText !== 'string') {
           fail('INVALID_ARGUMENT', 'newText must be a string for mode="patch"');
         }
+        const targetPath = args.path !== undefined ? assertSafeSkillRelativePath(args.path) : 'SKILL.md';
+        assertSafeSkillFileContent(targetPath, args.newText);
         body.oldText = args.oldText;
         body.newText = args.newText;
-        if (args.path !== undefined) body.path = requireId(args.path, 'path', 240);
+        if (args.path !== undefined) body.path = targetPath;
         if (args.replaceAll !== undefined) body.replaceAll = requireBoolean(args.replaceAll, 'replaceAll');
       }
 
@@ -1020,7 +1220,7 @@ export function createHandlers(deps) {
     async capability_skill_adopt(rawArgs, rawActor) {
       const actor = assertActor(rawActor);
       const args = assertArgsObject(rawArgs);
-      const target = resolveBotTarget(args, actor);
+      const target = resolveBotTarget(args, actor, bridge);
       const installationId = optionalId(args.installationId, 'installationId');
       const name = optionalId(args.name, 'name');
       if (!installationId && !name) {
@@ -1044,7 +1244,7 @@ export function createHandlers(deps) {
     async capability_skill_lifecycle(rawArgs, rawActor) {
       const actor = assertActor(rawActor);
       const args = assertArgsObject(rawArgs);
-      const target = resolveBotTarget(args, actor);
+      const target = resolveBotTarget(args, actor, bridge);
       const action = args.action;
       if (typeof action !== 'string' || !SKILL_LIFECYCLE_ACTIONS.has(action)) {
         fail('INVALID_ARGUMENT', 'action must be one of: pin, lock, archive, restore');
@@ -1096,7 +1296,7 @@ export function createHandlers(deps) {
     async capability_skill_delete(rawArgs, rawActor) {
       const actor = assertActor(rawActor);
       const args = assertArgsObject(rawArgs);
-      const target = resolveBotTarget(args, actor);
+      const target = resolveBotTarget(args, actor, bridge);
       const skillId = optionalId(args.skillId, 'skillId');
       const name = optionalId(args.name, 'name');
       if (!skillId && !name) {
@@ -1120,6 +1320,9 @@ export function createHandlers(deps) {
       const args = assertArgsObject(rawArgs);
       const installationId = requireId(args.installationId, 'installationId');
       await fetchInstallationForActor(installationId, actor);
+      if (typeof skills?.readInstallationFiles === 'function') {
+        return skills.readInstallationFiles(installationId);
+      }
       return owner('GET', '/api/installations/:id/skill-files', {
         params: { id: installationId },
         query: {},
@@ -1131,9 +1334,26 @@ export function createHandlers(deps) {
       const args = assertArgsObject(rawArgs);
       const installationId = requireId(args.installationId, 'installationId');
       const installation = await fetchInstallationForActor(installationId, actor);
+      if (installation.kind !== 'skill') {
+        fail('INVALID_ARGUMENT', 'Installation is not a skill');
+      }
+      if (installation.source?.type === 'npm') {
+        fail('FORBIDDEN', 'Installed npm skill packages cannot be overwritten via operations; adopt into a managed skill or edit in Center UI');
+      }
+      if (actor.kind === 'bot' && !installation.ownerBot) {
+        fail('FORBIDDEN', 'Only Bot-owned skills can be edited by a Bot');
+      }
       assertInstallationMutableByActor(store, installation, actor);
       const files = sanitizeSkillFilesWriteMap(args.files);
+      if (typeof files['SKILL.md'] !== 'string') {
+        fail('VALIDATION_FAILED', 'files must include SKILL.md');
+      }
       const requestId = optionalId(args.requestId, 'requestId');
+      if (typeof skills?.writeInstallationFiles === 'function') {
+        const result = await skills.writeInstallationFiles(installationId, files, { requestId });
+        if (typeof notifyInstallation === 'function') notifyInstallation(installationId);
+        return result;
+      }
       return owner('PUT', '/api/installations/:id/skill-files', {
         params: { id: installationId },
         body: { files, ...(requestId !== undefined ? { requestId } : {}) },
@@ -1145,7 +1365,7 @@ export function createHandlers(deps) {
     async capability_learning_status(rawArgs, rawActor) {
       const actor = assertActor(rawActor);
       const args = assertArgsObject(rawArgs);
-      const target = resolveBotTarget(args, actor);
+      const target = resolveBotTarget(args, actor, bridge);
       return owner('POST', '/api/devices/:deviceId/bots/:botId/learning', {
         params: target,
         body: { action: 'status' },
@@ -1156,7 +1376,7 @@ export function createHandlers(deps) {
     async capability_learning_configure(rawArgs, rawActor) {
       const actor = assertActor(rawActor);
       const args = assertArgsObject(rawArgs);
-      const target = resolveBotTarget(args, actor);
+      const target = resolveBotTarget(args, actor, bridge);
       const expectedRevision = requireRevision(args.expectedRevision);
       const config = sanitizeLearningConfigPatch(args.config);
       return owner('POST', '/api/devices/:deviceId/bots/:botId/learning', {
@@ -1169,7 +1389,7 @@ export function createHandlers(deps) {
     async capability_learning_run(rawArgs, rawActor) {
       const actor = assertActor(rawActor);
       const args = assertArgsObject(rawArgs);
-      const target = resolveBotTarget(args, actor);
+      const target = resolveBotTarget(args, actor, bridge);
       if (args.sources !== undefined) {
         fail('FORBIDDEN', 'Explicit local/remote learning sources are not accepted by Center operations');
       }
@@ -1194,7 +1414,7 @@ export function createHandlers(deps) {
     async capability_learning_cancel(rawArgs, rawActor) {
       const actor = assertActor(rawActor);
       const args = assertArgsObject(rawArgs);
-      const target = resolveBotTarget(args, actor);
+      const target = resolveBotTarget(args, actor, bridge);
       const jobId = requireId(args.jobId, 'jobId');
       return owner('POST', '/api/devices/:deviceId/bots/:botId/learning', {
         params: target,
@@ -1207,7 +1427,7 @@ export function createHandlers(deps) {
     async capability_bot_list(rawArgs, rawActor) {
       const actor = assertActor(rawActor);
       const args = assertArgsObject(rawArgs);
-      const target = resolveBotTarget(args, actor);
+      const target = resolveBotTarget(args, actor, bridge);
       const kind = args.kind;
       if (kind !== undefined && !CAPABILITY_KINDS.has(kind)) {
         fail('INVALID_ARGUMENT', 'kind must be one of: plugin, mcp, skill');
@@ -1235,7 +1455,7 @@ export function createHandlers(deps) {
     async capability_bot_get(rawArgs, rawActor) {
       const actor = assertActor(rawActor);
       const args = assertArgsObject(rawArgs);
-      const target = resolveBotTarget(args, actor);
+      const target = resolveBotTarget(args, actor, bridge);
       const installationId = requireId(args.installationId, 'installationId');
 
       assertTargetBotExists(target);
@@ -1268,7 +1488,7 @@ export function createHandlers(deps) {
     async capability_bot_binding_set(rawArgs, rawActor) {
       const actor = assertActor(rawActor);
       const args = assertArgsObject(rawArgs);
-      const target = resolveBotTarget(args, actor);
+      const target = resolveBotTarget(args, actor, bridge);
       const installationId = requireId(args.installationId, 'installationId');
       const expectedRevision = requireRevision(args.expectedRevision);
       const enabled = requireBoolean(args.enabled, 'enabled');
@@ -1287,6 +1507,16 @@ export function createHandlers(deps) {
       const nextOverrides = args.safeOverridesPatch !== undefined
         ? applySafeConfigPatch(current.configSchema, current.overrides, args.safeOverridesPatch)
         : (isPlainObject(current.overrides) ? current.overrides : {});
+
+      if (Number.isSafeInteger(current?.revision) && current.revision !== expectedRevision) {
+        fail('REVISION_CONFLICT', 'Revision does not match');
+      }
+      const globallyEffective = Boolean(
+        installation.enabled && (installation.activation?.status ?? 'enabled') === 'enabled',
+      );
+      if (enabled && !current.enabled && !globallyEffective) {
+        fail('FORBIDDEN', 'Capability is not globally enabled');
+      }
 
       const updated = await owner('PUT', '/api/devices/:deviceId/bots/:botId/capabilities/:id', {
         params: { ...target, id: installationId },
@@ -1328,10 +1558,14 @@ export function createHandlers(deps) {
       const includeDeployments = optionalBoolean(args.includeDeployments, 'includeDeployments') ?? false;
 
       const installation = await fetchInstallationForActor(installationId, actor);
-      const [configRaw, declaredActions] = await Promise.all([
-        owner('GET', '/api/installations/:id/config', { params: { id: installationId }, query: {} }),
-        owner('GET', '/api/installations/:id/actions', { params: { id: installationId }, query: {} }).catch(() => []),
-      ]);
+      const configRaw = await owner('GET', '/api/installations/:id/config', { params: { id: installationId }, query: {} });
+      let declaredActions;
+      if (typeof store?.getPackageVersion === 'function') {
+        const version = store.getPackageVersion(installation.packageId, installation.targetVersion);
+        declaredActions = version?.manifest?.actions ?? [];
+      } else {
+        declaredActions = await owner('GET', '/api/installations/:id/actions', { params: { id: installationId }, query: {} }).catch(() => []);
+      }
 
       const sanitizedConfig = inspectAndSanitizeConfig(
         configRaw?.configSchema,
@@ -1357,21 +1591,37 @@ export function createHandlers(deps) {
 
       if (includeBindings) {
         if (actor.kind === 'oauth') {
-          const rawBindings = await owner('GET', '/api/installations/:id/bot-bindings', {
-            params: { id: installationId },
-            query: {},
-          });
           const bindings = {};
-          for (const [key, binding] of Object.entries(rawBindings?.bindings ?? {})) {
-            const sep = key.indexOf(':');
-            const deviceId = typeof binding?.deviceId === 'string'
-              ? binding.deviceId
-              : (sep > 0 ? key.slice(0, sep) : '');
-            const botId = typeof binding?.botId === 'string'
-              ? binding.botId
-              : (sep > 0 ? key.slice(sep + 1) : '');
-            if (!deviceId || !botId) continue;
-            bindings[key] = sanitizeBotCapabilityView(store, installation, binding, deviceId, botId);
+          if (
+            typeof bridge?.listDevices === 'function'
+            && typeof store?.listDeviceBots === 'function'
+            && typeof store?.getBotCapability === 'function'
+          ) {
+            for (const device of bridge.listDevices()) {
+              if (!device || isInternalDeviceId(device.deviceId, bridge)) continue;
+              for (const bot of store.listDeviceBots(device.deviceId)) {
+                if (bot.archivedAt) continue;
+                const key = `${device.deviceId}:${bot.botId}`;
+                const binding = store.getBotCapability(device.deviceId, bot.botId, installationId);
+                bindings[key] = sanitizeBotCapabilityView(store, installation, binding, device.deviceId, bot.botId);
+              }
+            }
+          } else {
+            const rawBindings = await owner('GET', '/api/installations/:id/bot-bindings', {
+              params: { id: installationId },
+              query: {},
+            });
+            for (const [key, binding] of Object.entries(rawBindings?.bindings ?? {})) {
+              const sep = key.indexOf(':');
+              const deviceId = typeof binding?.deviceId === 'string'
+                ? binding.deviceId
+                : (sep > 0 ? key.slice(0, sep) : '');
+              const botId = typeof binding?.botId === 'string'
+                ? binding.botId
+                : (sep > 0 ? key.slice(sep + 1) : '');
+              if (!deviceId || !botId) continue;
+              bindings[key] = sanitizeBotCapabilityView(store, installation, binding, deviceId, botId);
+            }
           }
           result.bindings = bindings;
         } else {
@@ -1410,7 +1660,7 @@ export function createHandlers(deps) {
       const actor = assertActor(rawActor);
       const args = assertArgsObject(rawArgs);
       const installationId = requireId(args.installationId, 'installationId');
-      const target = resolveOptionalBotTarget(args);
+      const target = resolveOptionalBotTarget(args, bridge);
 
       const installation = await fetchInstallationForActor(installationId, actor);
       if (target) {
@@ -1473,28 +1723,77 @@ export function createHandlers(deps) {
       if (typeof action !== 'string' || !SAFE_CAPABILITY_ACTIONS.includes(action)) {
         fail('FORBIDDEN', `Action is not in the safe diagnostic allowlist: ${SAFE_CAPABILITY_ACTIONS.join(', ')}`);
       }
-      const target = resolveBotTarget(args, actor);
+      const target = resolveBotTarget(args, actor, bridge);
 
       if (action === 'listTools') {
-        if (!execution?.hasBuiltin?.(installationId)) {
-          await fetchInstallationForActor(installationId, actor);
+        const isBuiltin = Boolean(execution?.hasBuiltin?.(installationId));
+        const installation = isBuiltin ? null : await fetchInstallationForActor(installationId, actor);
+        let result;
+        if (
+          typeof store?.listDeviceBots === 'function'
+          && (typeof execution?.listTools === 'function' || typeof callCapabilityAction === 'function')
+        ) {
+          const botExists = store.listDeviceBots(target.deviceId).some((bot) => bot.botId === target.botId);
+          if (isBuiltin) {
+            if (!botExists) fail('FORBIDDEN', 'Capability unavailable');
+            result = await execution.listTools(target.deviceId, installationId, { botId: target.botId });
+          } else {
+            const active = typeof store.isActive === 'function'
+              ? store.isActive(installation)
+              : Boolean(installation.enabled && installation.activation?.status === 'enabled');
+            const botEnabled = Boolean(store.getBotCapability?.(target.deviceId, target.botId, installationId)?.enabled);
+            if (installation.kind !== 'mcp' || !active || !botExists || !botEnabled) {
+              fail('FORBIDDEN', 'Capability unavailable');
+            }
+            if (installation.target === 'center') {
+              result = await execution.listTools(target.deviceId, installationId, { botId: target.botId });
+            } else if (installation.target === 'host') {
+              const res = await callCapabilityAction(installationId, 'listTools', {
+                requestId: randomUUID(),
+                deviceId: target.deviceId,
+                botId: target.botId,
+                input: {},
+              });
+              result = res.result;
+            } else {
+              fail('UNSUPPORTED_TARGET', 'Unsupported MCP target');
+            }
+          }
+        } else {
+          result = await owner('POST', '/api/installations/:id/tools/list', {
+            params: { id: installationId },
+            body: target,
+            query: {},
+          });
         }
-        const result = await owner('POST', '/api/installations/:id/tools/list', {
-          params: { id: installationId },
-          body: target,
-          query: {},
-        });
         return { installationId, ...target, action: 'listTools', result };
       }
 
       const installation = await fetchInstallationForActor(installationId, actor);
 
       if (action === 'validate') {
-        const result = await owner('POST', '/api/installations/:id/validate', {
-          params: { id: installationId },
-          body: target,
-          query: {},
-        });
+        let result;
+        if (typeof callCapabilityAction === 'function' && typeof store?.getPackageVersion === 'function') {
+          const version = store.getPackageVersion(installation.packageId, installation.targetVersion);
+          const declared = version?.manifest?.actions ?? [];
+          if (!declared.some((item) => item.id === 'validate')) {
+            result = { ok: false, message: 'Connection validation is not supported' };
+          } else {
+            const res = await callCapabilityAction(installationId, 'validate', {
+              requestId: randomUUID(),
+              deviceId: target.deviceId,
+              botId: target.botId,
+              input: {},
+            });
+            result = res.result;
+          }
+        } else {
+          result = await owner('POST', '/api/installations/:id/validate', {
+            params: { id: installationId },
+            body: target,
+            query: {},
+          });
+        }
         return { installationId, ...target, action: 'validate', result };
       }
 
@@ -1517,11 +1816,13 @@ export function createHandlers(deps) {
       const args = assertArgsObject(rawArgs);
       const installationId = requireId(args.installationId, 'installationId');
       const installation = await fetchInstallationForActor(installationId, actor);
-      const updates = await owner('POST', '/api/installations/:id/updates/check', {
-        params: { id: installationId },
-        body: {},
-        query: {},
-      });
+      const updates = typeof packages?.checkUpdates === 'function'
+        ? await packages.checkUpdates(installationId)
+        : await owner('POST', '/api/installations/:id/updates/check', {
+            params: { id: installationId },
+            body: {},
+            query: {},
+          });
       return {
         installationId,
         installation: sanitizeInstallation(installation),
@@ -1614,6 +1915,16 @@ export function createHandlers(deps) {
       const installation = await fetchInstallationForActor(installationId, actor);
       assertInstallationMutableByActor(store, installation, actor, { allowOwnerSkillShare: true });
 
+      if (hasVisibility && (args.visibilityScope === 'assigned' || args.visibilityScope === 'global')) {
+        if (installation.kind !== 'skill' || !installation.ownerBot) {
+          fail('INVALID_ARGUMENT', 'visibilityScope is only supported on Bot-owned skills');
+        }
+        if (typeof skills?.readInstallationFiles === 'function') {
+          const existingFiles = await skills.readInstallationFiles(installationId);
+          sanitizeSkillFilesWriteMap(existingFiles?.files ?? {});
+        }
+      }
+
       const updated = await owner('PATCH', '/api/installations/:id', {
         params: { id: installationId },
         body,
@@ -1636,22 +1947,10 @@ export function createHandlers(deps) {
       assertInstallationMutableByActor(store, installation, actor);
 
       if (action === 'enable') {
-        const body = { requestId };
-        if (args.validationBot !== undefined) {
-          if (!isPlainObject(args.validationBot)) {
-            fail('INVALID_ARGUMENT', 'validationBot must be an object with deviceId and botId');
-          }
-          body.validationBot = {
-            deviceId: requireId(args.validationBot.deviceId, 'validationBot.deviceId'),
-            botId: requireId(args.validationBot.botId, 'validationBot.botId'),
-          };
-        }
-        const accepted = await owner('POST', '/api/installations/:id/enable', {
-          params: { id: installationId },
-          body,
-          query: {},
-        });
-        return formatAcceptedOperation(store, 'enable', installationId, accepted);
+        fail(
+          'FORBIDDEN',
+          'Globally enabling an installed capability requires explicit owner approval in Center UI; use capability_bot_binding_set to toggle an already globally active capability per Bot',
+        );
       }
 
       if (args.validationBot !== undefined) {
@@ -1665,36 +1964,6 @@ export function createHandlers(deps) {
       return formatAcceptedOperation(store, 'disable', installationId, accepted);
     },
 
-    async capability_installation_update(rawArgs, rawActor) {
-      const actor = assertActor(rawActor);
-      const args = assertArgsObject(rawArgs);
-      if (args.source !== undefined) {
-        fail('FORBIDDEN', 'Arbitrary package sources are not allowed; only updates within an already-installed npm package are supported');
-      }
-      const installationId = requireId(args.installationId, 'installationId');
-      const requestId = requireId(args.requestId, 'requestId');
-      let targetVersion;
-      if (args.targetVersion !== undefined) {
-        targetVersion = requireId(args.targetVersion, 'targetVersion');
-        if (/\s/.test(targetVersion)) {
-          fail('INVALID_ARGUMENT', 'targetVersion must not contain whitespace');
-        }
-      }
-
-      const installation = await fetchInstallationForActor(installationId, actor);
-      assertInstallationMutableByActor(store, installation, actor);
-      if (installation.source?.type !== 'npm') {
-        fail('INVALID_STATE', 'Only already-installed npm capabilities can be updated by version');
-      }
-
-      const accepted = await owner('POST', '/api/installations/:id/update', {
-        params: { id: installationId },
-        body: { requestId, ...(targetVersion !== undefined ? { targetVersion } : {}) },
-        query: {},
-      });
-      return formatAcceptedOperation(store, 'update', installationId, accepted);
-    },
-
     async capability_installation_uninstall(rawArgs, rawActor) {
       const actor = assertActor(rawActor);
       const args = assertArgsObject(rawArgs);
@@ -1704,11 +1973,13 @@ export function createHandlers(deps) {
       const installation = await fetchInstallationForActor(installationId, actor);
       assertInstallationMutableByActor(store, installation, actor);
 
-      const accepted = await owner('DELETE', '/api/installations/:id', {
-        params: { id: installationId },
-        body: { requestId },
-        query: {},
-      });
+      const accepted = typeof packages?.uninstall === 'function'
+        ? await packages.uninstall(installationId, { requestId })
+        : await owner('DELETE', '/api/installations/:id', {
+            params: { id: installationId },
+            body: { requestId },
+            query: {},
+          });
       return formatAcceptedOperation(store, 'uninstall', installationId, accepted);
     },
   };

@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { operations, SAFE_CAPABILITY_ACTIONS } from '../../center-contract/operations/capabilities.js';
 import { createHandlers } from '../../center-server/operations/capabilities.js';
+import { invokeOwnerAction } from '../../center-server/operations/owner-actions.js';
 import { openCenterStore } from '../../center-server/data/index.js';
 import { GOOGLE_WORKSPACE_INSTALLATION_ID } from '../../center-contract/google-workspace.js';
 
@@ -342,6 +343,7 @@ test('capabilities contract descriptors align 1-to-1 with handlers and enforce n
 
   const destructiveNames = operations.filter((op) => op.destructive).map((op) => op.name).sort();
   assert.deepEqual(destructiveNames, ['capability_installation_uninstall', 'capability_skill_delete']);
+  assert.equal(names.includes('capability_installation_update'), false);
   assert.deepEqual([...SAFE_CAPABILITY_ACTIONS], ['listTools', 'validate', 'probe']);
 });
 
@@ -425,10 +427,12 @@ test('reads never leak raw configs, URLs, credentials, env, headers, or commands
     assert.deepEqual(wfDetail.safeActions, ['probe']);
     assert.deepEqual(mcpDetail.safeActions, ['validate', 'listTools']);
     assert.deepEqual(wfDetail.safeGlobalConfig, {
-      capabilities: { search: { provider: 'tavily', maxResults: 5 } },
+      capabilities: { search: { maxResults: 5 } },
       timeoutMs: 30000,
       retries: 1,
     });
+    assert.ok(wfDetail.restrictedFields.includes('capabilities.search.provider'));
+    assert.ok(wfDetail.restrictedFields.includes('capabilities.research'));
 
     // Reject restricted config fields on global write (even null).
     for (const badPatch of [
@@ -452,6 +456,31 @@ test('reads never leak raw configs, URLs, credentials, env, headers, or commands
       ),
       { code: 'FORBIDDEN' },
     );
+    await assert.rejects(
+      () => fx.handlers.capability_installation_config_set(
+        { installationId: 'inst-webfox', expectedRevision: 1, safeConfigPatch: { capabilities: { search: { provider: 'openai' } } } },
+        OAUTH_ADMIN,
+      ),
+      { code: 'FORBIDDEN' },
+    );
+    await assert.rejects(
+      () => fx.handlers.capability_installation_config_set(
+        { installationId: 'inst-webfox', expectedRevision: 1, safeConfigPatch: { capabilities: { research: { provider: 'openai' } } } },
+        OAUTH_ADMIN,
+      ),
+      { code: 'FORBIDDEN' },
+    );
+    // Safe Webfox update preserves restricted external service provider untouched.
+    const updatedWf = await fx.handlers.capability_installation_config_set(
+      { installationId: 'inst-webfox', expectedRevision: 1, safeConfigPatch: { capabilities: { search: { maxResults: 10 } }, retries: 2 } },
+      OAUTH_ADMIN,
+    );
+    assert.deepEqual(updatedWf.safeGlobalConfig, {
+      capabilities: { search: { maxResults: 10 } },
+      timeoutMs: 30000,
+      retries: 2,
+    });
+    assert.equal(fx.store.getInstallationConfig('inst-webfox').globalConfig.capabilities.search.provider, 'tavily');
     await assert.rejects(
       () => fx.handlers.capability_installation_config_set(
         { installationId: 'inst-mcp-npm', expectedRevision: 1, safeConfigPatch: { env: { A: '1' } } },
@@ -685,31 +714,24 @@ test('diagnostics allowlist only listTools, validate, and probe; learning reject
       { code: 'FORBIDDEN' },
     );
 
-    // Update rejects arbitrary source and non-npm installations; accepts version update on existing npm installation.
+    // Unreviewed npm package upgrade is not exposed; global enable requires Center UI approval.
+    assert.equal('capability_installation_update' in fx.handlers, false);
     await assert.rejects(
-      () => fx.handlers.capability_installation_update(
-        { installationId: 'inst-mcp-npm', requestId: 'req-1', source: { type: 'http', url: 'https://evil.example' } },
+      () => fx.handlers.capability_installation_toggle(
+        { installationId: 'inst-webfox', action: 'enable', requestId: 'req-enable-unapproved' },
         OAUTH_ADMIN,
       ),
       { code: 'FORBIDDEN' },
     );
-    await assert.rejects(
-      () => fx.handlers.capability_installation_update(
-        { installationId: 'inst-hindsight', requestId: 'req-2' },
-        OAUTH_ADMIN,
-      ),
-      { code: 'INVALID_STATE' },
-    );
-    const updAccepted = await fx.handlers.capability_installation_update(
-      { installationId: 'inst-mcp-npm', requestId: 'req-3', targetVersion: '1.3.0' },
+
+    const disabledOp = await fx.handlers.capability_installation_toggle(
+      { installationId: 'inst-mcp-npm', action: 'disable', requestId: 'req-dis-op' },
       OAUTH_ADMIN,
     );
-    assert.equal(updAccepted.accepted, true);
-    assert.equal(updAccepted.action, 'update');
-    assert.equal(updAccepted.operation.phase, 'queued');
-
-    const polled = await fx.handlers.capability_operation_get({ operationId: updAccepted.operationId }, OAUTH_ADMIN);
-    assert.equal(polled.operation.operationId, updAccepted.operationId);
+    assert.equal(disabledOp.accepted, true);
+    assert.equal(disabledOp.action, 'disable');
+    const polled = await fx.handlers.capability_operation_get({ operationId: disabledOp.operationId }, OAUTH_ADMIN);
+    assert.equal(polled.operation.operationId, disabledOp.operationId);
   } finally {
     fx.close();
   }
@@ -885,6 +907,310 @@ test('covers skill CRUD/lifecycle/files, learning status/configure/cancel, updat
       OAUTH_ADMIN,
     );
     assert.equal(depsOut.plans[0].planId, 'plan-1');
+  } finally {
+    fx.close();
+  }
+});
+
+test('trust boundaries: blocks skill scripts, executable extensions, shebangs, local/traversal links, npm overwrite, external service/path/anyOf-cred config, and unapproved package enable while allowing normal skill editing and reviewed per-Bot toggles', async () => {
+  const fx = openFixture();
+  try {
+    // Seed a custom schema with anyOf credential-ref, external service name, host directory path, exec command, and open object.
+    const COMPLEX_SCHEMA = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        label: { type: 'string', minLength: 1 },
+        serviceName: { type: 'string' },
+        rootDir: { type: 'string' },
+        execBin: { type: 'string' },
+        nullableCred: { anyOf: [{ type: 'string', format: 'credential-ref' }, { type: 'null' }] },
+        openMap: { type: 'object', properties: { flag: { type: 'boolean' } } },
+      },
+    };
+    fx.store.putPackageVersion({
+      packageId: 'custom.complex',
+      version: '1.0.0',
+      kind: 'plugin',
+      digest: 'sha256:complex',
+      artifactRef: null,
+      manifest: { id: 'custom.complex', actions: [] },
+      configSchema: COMPLEX_SCHEMA,
+    });
+    fx.store.putInstallation({
+      installationId: 'inst-complex',
+      packageId: 'custom.complex',
+      displayName: 'Complex Plugin',
+      kind: 'plugin',
+      source: { type: 'artifact', artifactRef: 'art-complex' },
+      target: 'host',
+      targetVersion: '1.0.0',
+      enabled: false,
+      activation: { status: 'disabled', error: null, updatedAt: '2026-11-20T00:00:00.000Z' },
+      revision: 0,
+    }, null);
+    fx.store.putInstallationConfig('inst-complex', {
+      expectedRevision: 0,
+      globalConfig: {
+        label: 'safe-label',
+        serviceName: 'internal-svc',
+        rootDir: '/var/lib/secret',
+        execBin: '/usr/bin/python3',
+        nullableCred: 'cred-hindsight',
+        openMap: { flag: true, hidden: 'secret-val' },
+      },
+    });
+
+    // Seed an npm-sourced skill package.
+    fx.store.putPackageVersion({
+      packageId: '@example/npm-skill',
+      version: '1.0.0',
+      kind: 'skill',
+      digest: 'sha256:npm-skill',
+      artifactRef: null,
+      manifest: { actions: [] },
+      configSchema: { type: 'object', properties: {}, additionalProperties: false },
+    });
+    fx.store.putInstallation({
+      installationId: 'inst-npm-skill',
+      packageId: '@example/npm-skill',
+      displayName: 'NPM Skill',
+      kind: 'skill',
+      source: { type: 'npm', spec: '@example/npm-skill@1.0.0' },
+      target: 'host',
+      targetVersion: '1.0.0',
+      enabled: true,
+      activation: { status: 'enabled', error: null, updatedAt: '2026-11-20T00:00:00.000Z' },
+      revision: 0,
+    }, null);
+
+    // 1. Complex config redacts serviceName, rootDir, execBin, anyOf credential-ref, and openMap; blocks patching them.
+    const complexDetail = await fx.handlers.capability_installation_get({ installationId: 'inst-complex' }, OAUTH_ADMIN);
+    assert.deepEqual(complexDetail.safeGlobalConfig, { label: 'safe-label' });
+    assert.ok(!JSON.stringify(complexDetail).includes('internal-svc'));
+    assert.ok(!JSON.stringify(complexDetail).includes('/var/lib/secret'));
+    assert.ok(!JSON.stringify(complexDetail).includes('/usr/bin/python3'));
+    assert.ok(!JSON.stringify(complexDetail).includes('cred-hindsight'));
+    assert.deepEqual(complexDetail.credentialSlots, [
+      { path: '/nullableCred', refSet: true, configured: true, revision: 0 },
+    ]);
+    for (const badPatch of [
+      { serviceName: 'other-svc' },
+      { rootDir: '/etc' },
+      { execBin: '/bin/sh' },
+      { nullableCred: 'cred-tavily' },
+      { openMap: { flag: false } },
+    ]) {
+      await assert.rejects(
+        () => fx.handlers.capability_installation_config_set(
+          { installationId: 'inst-complex', expectedRevision: 1, safeConfigPatch: badPatch },
+          OAUTH_ADMIN,
+        ),
+        { code: 'FORBIDDEN' },
+      );
+    }
+
+    // 2. Unapproved/disabled package cannot be enabled globally or per Bot.
+    await assert.rejects(
+      () => fx.handlers.capability_installation_toggle(
+        { installationId: 'inst-complex', action: 'enable', requestId: 'req-en-1' },
+        OAUTH_ADMIN,
+      ),
+      { code: 'FORBIDDEN' },
+    );
+    await assert.rejects(
+      () => fx.handlers.capability_bot_binding_set(
+        { deviceId: 'dev-1', botId: 'bot-a', installationId: 'inst-complex', expectedRevision: 0, enabled: true },
+        OAUTH_ADMIN,
+      ),
+      { code: 'FORBIDDEN' },
+    );
+    // Legitimate per-Bot toggle on an already globally active (reviewed) capability succeeds.
+    const toggledOn = await fx.handlers.capability_bot_binding_set(
+      { deviceId: 'dev-1', botId: 'bot-a', installationId: 'inst-hindsight', expectedRevision: 0, enabled: true },
+      OAUTH_ADMIN,
+    );
+    assert.equal(toggledOn.botEnabled, true);
+    assert.equal(toggledOn.effectivelyEnabled, true);
+    const toggledOff = await fx.handlers.capability_bot_binding_set(
+      { deviceId: 'dev-1', botId: 'bot-a', installationId: 'inst-hindsight', expectedRevision: 1, enabled: false },
+      OAUTH_ADMIN,
+    );
+    assert.equal(toggledOff.botEnabled, false);
+
+    // 3. Skill write operations block scripts/, executable extensions, shebangs, traversal, and host/file:// links.
+    fx.customResponses.set('POST /api/devices/:deviceId/bots/:botId/skills', ({ body }) => ({
+      skillId: 'skill-a-1',
+      name: body.name ?? 'alpha-skill',
+      state: 'active',
+      installationId: 'inst-skill-a',
+    }));
+
+    const forbiddenSkillFiles = [
+      { 'SKILL.md': '---\nname: x\n---\nhi', 'scripts/run.sh': 'echo hi' },
+      { 'SKILL.md': '---\nname: x\n---\nhi', 'references/helper.py': 'import os' },
+      { 'SKILL.md': '---\nname: x\n---\nhi', 'assets/tool.js': 'console.log(1)' },
+      { 'SKILL.md': '---\nname: x\n---\nhi', 'assets/jump.lnk': 'shortcut' },
+      { 'SKILL.md': '---\nname: x\n---\nhi', 'assets/runner': '#!/bin/sh\nid' },
+      { 'SKILL.md': '---\nname: x\n---\nhi', '../escape.md': 'nope' },
+      { 'SKILL.md': '---\nname: x\n---\nRead [passwd](file:///etc/passwd)' },
+      { 'SKILL.md': '---\nname: x\n---\nRead [passwd](/etc/passwd)' },
+      { 'SKILL.md': '---\nname: x\n---\nRead [key](../../../.ssh/id_rsa)' },
+      { 'SKILL.md': '---\nname: x\n---\nRead [home](~/.env)' },
+      { 'SKILL.md': '---\nname: x\n---\nRun [script](scripts/run.sh)' },
+      { 'SKILL.md': '---\nname: x\n---\n<a href="C:\\Windows\\win.ini">x</a>' },
+    ];
+    for (const files of forbiddenSkillFiles) {
+      await assert.rejects(
+        () => fx.handlers.capability_skill_create({ name: 'bad-skill', files }, BOT_A),
+        { code: 'FORBIDDEN' },
+      );
+      await assert.rejects(
+        () => fx.handlers.capability_installation_skill_files_write(
+          { installationId: 'inst-skill-a', files },
+          OAUTH_ADMIN,
+        ),
+        { code: 'FORBIDDEN' },
+      );
+    }
+
+    await assert.rejects(
+      () => fx.handlers.capability_skill_edit(
+        { mode: 'patch', name: 'alpha-skill', path: 'scripts/run.sh', oldText: 'a', newText: 'b' },
+        BOT_A,
+      ),
+      { code: 'FORBIDDEN' },
+    );
+    await assert.rejects(
+      () => fx.handlers.capability_skill_edit(
+        { mode: 'patch', name: 'alpha-skill', oldText: 'hi', newText: '[leak](file:///etc/hosts)' },
+        BOT_A,
+      ),
+      { code: 'FORBIDDEN' },
+    );
+    // Overwriting an npm skill package is forbidden.
+    await assert.rejects(
+      () => fx.handlers.capability_installation_skill_files_write(
+        { installationId: 'inst-npm-skill', files: { 'SKILL.md': '---\nname: s\n---\nhi' } },
+        OAUTH_ADMIN,
+      ),
+      { code: 'FORBIDDEN' },
+    );
+
+    // Normal Skill prose + non-executable references with relative and https links succeeds.
+    const normalCreated = await fx.handlers.capability_skill_create(
+      {
+        name: 'clean-guide',
+        files: {
+          'SKILL.md': '---\nname: clean-guide\ndescription: Clean docs.\n---\nSee [guide](references/guide.md) and [docs](https://example.com/docs).',
+          'references/guide.md': '# Guide\nStep 1: Follow instructions.',
+        },
+      },
+      BOT_A,
+    );
+    assert.equal(normalCreated.name, 'clean-guide');
+    // Removing an existing old script file via null is allowed.
+    await fx.handlers.capability_skill_edit(
+      { mode: 'update', name: 'alpha-skill', files: { 'scripts/legacy.sh': null } },
+      BOT_A,
+    );
+
+    // 4. Production invokeOwnerAction + deps wiring works without non-reusable routes AND blocks sharing script-bearing skills.
+    let readSkillFiles = { 'SKILL.md': '---\nname: alpha-skill\n---\nbody', 'scripts/sneaky.sh': 'echo pwn' };
+    let writeSkillCalls = 0;
+    let checkUpdatesCalls = 0;
+    let uninstallCalls = 0;
+    const actions = new Map([
+      ['GET /api/installations/:id', (req) => fx.store.getInstallation(req.params.id)],
+      ['GET /api/installations/:id/config', (req) => fx.store.getInstallationConfig(req.params.id)],
+      ['PATCH /api/installations/:id', (req) => fx.store.renameInstallation(req.params.id, req.body)],
+    ]);
+    const prodHandlers = createHandlers({
+      owner: (method, routePath, input) => invokeOwnerAction(actions, method, routePath, input),
+      store: fx.store,
+      bridge: {
+        deviceId: 'center-internal',
+        listDevices: () => [{ deviceId: 'dev-1', name: 'Workstation', online: true }],
+      },
+      skills: {
+        async readInstallationFiles(id) {
+          return { installationId: id, editable: true, files: readSkillFiles, skills: [] };
+        },
+        async writeInstallationFiles(id, files) {
+          writeSkillCalls += 1;
+          readSkillFiles = files;
+          return { installationId: id, editable: true, files, skills: [] };
+        },
+      },
+      packages: {
+        async checkUpdates() {
+          checkUpdatesCalls += 1;
+          return [{ packageId: '@example/demo-mcp', version: '1.3.0', kind: 'mcp', digest: 'sha256:new' }];
+        },
+        async uninstall(id, { requestId }) {
+          uninstallCalls += 1;
+          return { operationId: `op-uninst-${id}-${requestId}` };
+        },
+      },
+      execution: {
+        hasBuiltin: (id) => id === GOOGLE_WORKSPACE_INSTALLATION_ID,
+        async listTools(_deviceId, id) { return { tools: [{ name: `tool-for-${id}` }] }; },
+      },
+      action: async (_id, name) => ({ result: name === 'validate' ? { ok: true } : { tools: [] } }),
+    });
+
+    // Sharing a skill that contains scripts/ is blocked with FORBIDDEN.
+    await assert.rejects(
+      () => prodHandlers.capability_installation_sharing_set(
+        { installationId: 'inst-skill-a', expectedRevision: 0, visibilityScope: 'global' },
+        BOT_A,
+      ),
+      { code: 'FORBIDDEN' },
+    );
+
+    // Replacing skill files with clean prose via deps.skills works under strict invokeOwnerAction.
+    const cleanWrite = await prodHandlers.capability_installation_skill_files_write(
+      { installationId: 'inst-skill-a', files: { 'SKILL.md': '---\nname: alpha-skill\n---\nclean body' } },
+      BOT_A,
+    );
+    assert.equal(writeSkillCalls, 1);
+    assert.match(cleanWrite.files['SKILL.md'], /clean body/);
+
+    // Now that scripts/ is gone, sharing succeeds.
+    const sharedClean = await prodHandlers.capability_installation_sharing_set(
+      { installationId: 'inst-skill-a', expectedRevision: 0, visibilityScope: 'assigned' },
+      BOT_A,
+    );
+    assert.equal(sharedClean.installation.visibilityScope, 'assigned');
+
+    // capability_installation_get reads safeActions from store and bindings via bridge+store without non-reusable routes.
+    const prodDetail = await prodHandlers.capability_installation_get(
+      { installationId: 'inst-hindsight', includeBindings: true },
+      OAUTH_ADMIN,
+    );
+    assert.deepEqual(prodDetail.safeActions, ['probe']);
+    assert.ok('dev-1:bot-a' in prodDetail.bindings);
+
+    // Diagnose, updates check, and uninstall work via real deps under strict invokeOwnerAction.
+    const diagList = await prodHandlers.capability_installation_diagnose(
+      { deviceId: 'dev-1', botId: 'bot-a', installationId: GOOGLE_WORKSPACE_INSTALLATION_ID, action: 'listTools' },
+      OAUTH_ADMIN,
+    );
+    assert.equal(diagList.result.tools[0].name, `tool-for-${GOOGLE_WORKSPACE_INSTALLATION_ID}`);
+    const diagVal = await prodHandlers.capability_installation_diagnose(
+      { deviceId: 'dev-1', botId: 'bot-a', installationId: 'inst-mcp-npm', action: 'validate' },
+      OAUTH_ADMIN,
+    );
+    assert.equal(diagVal.result.ok, true);
+    const upd = await prodHandlers.capability_installation_updates_check({ installationId: 'inst-mcp-npm' }, OAUTH_ADMIN);
+    assert.equal(checkUpdatesCalls, 1);
+    assert.equal(upd.updates[0].version, '1.3.0');
+    const uninst = await prodHandlers.capability_installation_uninstall(
+      { installationId: 'inst-skill-a', requestId: 'req-u-prod' },
+      OAUTH_ADMIN,
+    );
+    assert.equal(uninstallCalls, 1);
+    assert.equal(uninst.accepted, true);
   } finally {
     fx.close();
   }
