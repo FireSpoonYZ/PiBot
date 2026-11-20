@@ -1,5 +1,6 @@
 /* Shared Google Workspace & Bot Browser chat/capability styles (.gws-*).
-   Inherits PiBot's existing CSS custom properties for light & dark themes on Desktop and Mobile. */
+   Inherits PiBot's existing CSS custom properties for light & dark themes on Desktop and Mobile.
+   Zero hardcoded color literals: all colors derive strictly from existing theme tokens. */
 
 .gws-card,
 .gws-cap-card {
@@ -7,9 +8,9 @@
   gap: 10px;
   padding: 12px 14px;
   border-radius: var(--radius-md, 14px);
-  background: color-mix(in srgb, var(--color-surface, var(--surface, var(--bg, #faf9f6))) 75%, var(--color-bg, var(--bg, #ffffff)));
-  border: 1px solid color-mix(in srgb, var(--color-line, var(--line, #e5e5df)) 85%, transparent);
-  color: var(--color-text, var(--text, #18181b));
+  background: color-mix(in srgb, var(--color-surface-1, var(--surface, var(--color-bg, var(--bg)))) 75%, var(--color-bg, var(--bg)));
+  border: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 85%, transparent);
+  color: var(--color-text, var(--text));
   font-size: 0.86rem;
   line-height: 1.48;
   min-width: 0;
@@ -17,20 +18,20 @@
 }
 
 .gws-cap-card.is-mobile {
-  background: var(--bs-card, var(--color-surface, var(--surface)));
+  background: var(--bs-card, var(--color-surface-1, var(--surface)));
   border-radius: var(--bs-radius, 16px);
   padding: 14px;
 }
 
 .gws-cap-card.is-desktop {
-  background: var(--bg, #faf9f6);
+  background: var(--color-bg, var(--bg));
   border-radius: 18px;
   padding: 14px 16px;
 }
 
 .gws-card.is-takeover {
-  border-color: color-mix(in srgb, var(--color-warning, var(--warn, #d97706)) 45%, var(--color-line, var(--line, #e5e5df)));
-  background: color-mix(in srgb, var(--color-warning, var(--warn, #d97706)) 6%, var(--color-bg, var(--bg, #ffffff)));
+  border-color: color-mix(in srgb, var(--color-warning, var(--warn)) 45%, var(--color-line, var(--line)));
+  background: color-mix(in srgb, var(--color-warning, var(--warn)) 6%, var(--color-bg, var(--bg)));
 }
 
 .gws-card.is-muted {
@@ -144,27 +145,27 @@
 }
 
 .gws-pill.is-ok {
-  color: var(--color-success, var(--ok, #15803d));
-  border-color: color-mix(in srgb, var(--color-success, var(--ok, #15803d)) 35%, transparent);
-  background: color-mix(in srgb, var(--color-success, var(--ok, #15803d)) 10%, transparent);
+  color: var(--color-success, var(--ok));
+  border-color: color-mix(in srgb, var(--color-success, var(--ok)) 35%, transparent);
+  background: color-mix(in srgb, var(--color-success, var(--ok)) 10%, transparent);
 }
 
 .gws-pill.is-accent {
-  color: var(--color-primary, var(--accent, #2563eb));
-  border-color: color-mix(in srgb, var(--color-primary, var(--accent, #2563eb)) 35%, transparent);
-  background: color-mix(in srgb, var(--color-primary, var(--accent, #2563eb)) 10%, transparent);
+  color: var(--color-primary, var(--brand, var(--accent)));
+  border-color: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 35%, transparent);
+  background: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 10%, transparent);
 }
 
 .gws-pill.is-warn {
-  color: var(--color-warning, var(--warn, #b45309));
-  border-color: color-mix(in srgb, var(--color-warning, var(--warn, #b45309)) 40%, transparent);
-  background: color-mix(in srgb, var(--color-warning, var(--warn, #b45309)) 12%, transparent);
+  color: var(--color-warning, var(--warn));
+  border-color: color-mix(in srgb, var(--color-warning, var(--warn)) 40%, transparent);
+  background: color-mix(in srgb, var(--color-warning, var(--warn)) 12%, transparent);
 }
 
 .gws-pill.is-danger {
-  color: var(--color-danger, var(--danger, #b91c1c));
-  border-color: color-mix(in srgb, var(--color-danger, var(--danger, #b91c1c)) 40%, transparent);
-  background: color-mix(in srgb, var(--color-danger, var(--danger, #b91c1c)) 10%, transparent);
+  color: var(--color-danger, var(--danger));
+  border-color: color-mix(in srgb, var(--color-danger, var(--danger)) 40%, transparent);
+  background: color-mix(in srgb, var(--color-danger, var(--danger)) 10%, transparent);
 }
 
 /* Buttons */
@@ -184,7 +185,7 @@
   padding: 6px 12px;
   border-radius: 10px;
   border: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 90%, transparent);
-  background: var(--color-surface, var(--surface, transparent));
+  background: var(--color-surface-1, var(--surface, transparent));
   color: var(--color-text, var(--text));
   font-size: 0.8rem;
   font-weight: var(--weight-medium, 500);
@@ -207,21 +208,21 @@
 }
 
 .gws-btn.is-primary {
-  background: var(--color-primary, var(--accent, #1f2937));
-  border-color: var(--color-primary, var(--accent, #1f2937));
-  color: var(--color-primary-contrast, #ffffff);
+  background: var(--color-primary, var(--brand, var(--accent)));
+  border-color: var(--color-primary, var(--brand, var(--accent)));
+  color: var(--color-on-primary, var(--surface-elevated, var(--bg)));
 }
 
 .gws-btn.is-warn {
-  background: var(--color-warning, var(--warn, #d97706));
-  border-color: var(--color-warning, var(--warn, #d97706));
-  color: #ffffff;
+  background: var(--color-warning, var(--warn));
+  border-color: var(--color-warning, var(--warn));
+  color: var(--color-on-primary, var(--surface-elevated, var(--bg)));
 }
 
 .gws-btn.is-danger {
-  background: var(--color-danger, var(--danger, #b91c1c));
-  border-color: var(--color-danger, var(--danger, #b91c1c));
-  color: #ffffff;
+  background: var(--color-danger, var(--danger));
+  border-color: var(--color-danger, var(--danger));
+  color: var(--color-on-primary, var(--surface-elevated, var(--bg)));
 }
 
 .gws-btn.is-ghost {
@@ -237,7 +238,7 @@
 .gws-link-btn:focus-visible,
 .gws-mode-option:focus-visible,
 .gws-collapse-trigger:focus-visible {
-  outline: 2px solid var(--color-primary, var(--accent, #2563eb));
+  outline: 2px solid var(--color-primary, var(--brand, var(--accent)));
   outline-offset: 2px;
 }
 
@@ -248,7 +249,7 @@
   padding: 2px 4px;
   border: 0;
   background: transparent;
-  color: var(--color-primary, var(--accent, #2563eb));
+  color: var(--color-primary, var(--brand, var(--accent)));
   font-size: 0.78rem;
   font-weight: var(--weight-medium, 500);
   cursor: pointer;
@@ -261,17 +262,17 @@
   padding: 12px;
   border-radius: 12px;
   background: color-mix(in srgb, var(--color-bg, var(--bg)) 88%, transparent);
-  border: 1px dashed color-mix(in srgb, var(--color-primary, var(--accent, #2563eb)) 42%, var(--color-line, var(--line)));
+  border: 1px dashed color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 42%, var(--color-line, var(--line)));
 }
 
 .gws-private-box.is-success {
   border-style: solid;
-  border-color: color-mix(in srgb, var(--color-success, var(--ok, #15803d)) 40%, transparent);
+  border-color: color-mix(in srgb, var(--color-success, var(--ok)) 40%, transparent);
 }
 
 .gws-private-box.is-pending {
   border-style: solid;
-  border-color: color-mix(in srgb, var(--color-primary, var(--accent, #2563eb)) 45%, transparent);
+  border-color: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 45%, transparent);
 }
 
 .gws-private-head {
@@ -326,9 +327,9 @@
 }
 
 .gws-seg-btn.is-active {
-  background: var(--color-bg, var(--bg, #ffffff));
+  background: var(--color-surface-2, var(--surface-elevated, var(--color-bg, var(--bg))));
   color: var(--color-text, var(--text));
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--shadow-sm, 0 1px 2px color-mix(in srgb, var(--color-text, var(--text)) 10%, transparent));
 }
 
 .gws-upload-area {
@@ -368,7 +369,7 @@
   padding: 7px 10px;
   border-radius: 10px;
   border: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 90%, transparent);
-  background: var(--color-bg, var(--bg, #ffffff));
+  background: var(--color-surface-2, var(--surface-elevated, var(--color-bg, var(--bg))));
   color: var(--color-text, var(--text));
   font-size: 0.82rem;
 }
@@ -404,8 +405,8 @@
 }
 
 .gws-choice-card.is-selected {
-  border-color: color-mix(in srgb, var(--color-primary, var(--accent, #2563eb)) 48%, transparent);
-  background: color-mix(in srgb, var(--color-primary, var(--accent, #2563eb)) 7%, transparent);
+  border-color: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 48%, transparent);
+  background: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 7%, transparent);
 }
 
 .gws-choice-card input {
@@ -413,7 +414,7 @@
   width: 17px;
   height: 17px;
   flex: none;
-  accent-color: var(--color-primary, var(--accent, #2563eb));
+  accent-color: var(--color-primary, var(--brand, var(--accent)));
 }
 
 .gws-choice-body {
@@ -482,7 +483,7 @@
 }
 
 .gws-account-pick-row.is-selected {
-  border-color: color-mix(in srgb, var(--color-success, var(--ok, #15803d)) 45%, transparent);
+  border-color: color-mix(in srgb, var(--color-success, var(--ok)) 45%, transparent);
 }
 
 .gws-account-id {
@@ -551,8 +552,8 @@
 }
 
 .gws-mode-option.is-selected {
-  border-color: color-mix(in srgb, var(--color-primary, var(--accent, #2563eb)) 55%, transparent);
-  background: color-mix(in srgb, var(--color-primary, var(--accent, #2563eb)) 8%, transparent);
+  border-color: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 55%, transparent);
+  background: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 8%, transparent);
 }
 
 .gws-mode-option.is-disabled {
@@ -601,14 +602,14 @@
 }
 
 .gws-step-item.is-done .gws-step-dot {
-  background: var(--color-success, var(--ok, #15803d));
-  border-color: var(--color-success, var(--ok, #15803d));
-  color: #ffffff;
+  background: var(--color-success, var(--ok));
+  border-color: var(--color-success, var(--ok));
+  color: var(--color-on-primary, var(--surface-elevated, var(--bg)));
 }
 
 .gws-step-item.is-current .gws-step-dot {
-  border-color: var(--color-primary, var(--accent, #2563eb));
-  background: color-mix(in srgb, var(--color-primary, var(--accent, #2563eb)) 16%, transparent);
+  border-color: var(--color-primary, var(--brand, var(--accent)));
+  background: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 16%, transparent);
 }
 
 .gws-step-content {
@@ -659,16 +660,16 @@
 }
 
 .gws-error {
-  border: 1px solid color-mix(in srgb, var(--color-danger, var(--danger, #b91c1c)) 35%, transparent);
-  background: color-mix(in srgb, var(--color-danger, var(--danger, #b91c1c)) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-danger, var(--danger)) 35%, transparent);
+  background: color-mix(in srgb, var(--color-danger, var(--danger)) 8%, transparent);
   color: var(--color-text, var(--text));
 }
 
 .gws-warning,
 .gws-blocker,
 .gws-takeover-alert {
-  border: 1px solid color-mix(in srgb, var(--color-warning, var(--warn, #d97706)) 40%, transparent);
-  background: color-mix(in srgb, var(--color-warning, var(--warn, #d97706)) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-warning, var(--warn)) 40%, transparent);
+  background: color-mix(in srgb, var(--color-warning, var(--warn)) 10%, transparent);
   color: var(--color-text, var(--text));
 }
 
@@ -692,7 +693,7 @@
   align-items: flex-start;
   gap: 6px;
   font-size: 0.76rem;
-  color: var(--color-warning, var(--warn, #b45309));
+  color: var(--color-warning, var(--warn));
 }
 
 .gws-notice {
@@ -700,8 +701,8 @@
   padding: 7px 10px;
   border-radius: 9px;
   font-size: 0.78rem;
-  color: var(--color-success, var(--ok, #15803d));
-  background: color-mix(in srgb, var(--color-success, var(--ok, #15803d)) 10%, transparent);
+  color: var(--color-success, var(--ok));
+  background: color-mix(in srgb, var(--color-success, var(--ok)) 10%, transparent);
 }
 
 .gws-url-pill {
@@ -809,10 +810,10 @@
 .gws-mobile-browser-screen {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  z-index: var(--z-dialog, 300);
   display: flex;
   flex-direction: column;
-  background: var(--color-bg, var(--bg, #0f1110));
+  background: var(--color-bg, var(--bg));
 }
 
 .gws-desktop-browser-pane {
@@ -832,8 +833,8 @@
   padding: 9px 14px;
   margin-bottom: 6px;
   border-radius: 14px;
-  border: 1px solid color-mix(in srgb, var(--color-warning, var(--warn, #d97706)) 45%, transparent);
-  background: color-mix(in srgb, var(--color-warning, var(--warn, #d97706)) 12%, var(--color-bg, var(--bg, #ffffff)));
+  border: 1px solid color-mix(in srgb, var(--color-warning, var(--warn)) 45%, transparent);
+  background: color-mix(in srgb, var(--color-warning, var(--warn)) 12%, var(--color-bg, var(--bg)));
   color: var(--color-text, var(--text));
   font-size: 0.81rem;
   font-weight: var(--weight-medium, 500);

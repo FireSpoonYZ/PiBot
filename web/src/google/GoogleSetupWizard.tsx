@@ -1,5 +1,9 @@
 // Real googleSetupControl-driven 3-mode owner setup wizard (shared by chat cards & capabilities entry).
-// Never trusts model plain text as authorization completion; verifies Center status and respects privacy boundaries.
+// Aligned with host-core/google-setup/{service,rules,blocker,guidance}.js & host-core/browser-setup-protocol.js:
+// - Uses `expectedRevision` for CAS on cancel/resume/answer/advance.
+// - Submits canonical `answer` shape `{ action: 'answer', card, values, expectedRevision, runId?, step?, cardCopy? }`
+//   with safe fallback to `{ action: 'resume', mode, expectedRevision }` for mode switches if transport rejects `card`/`values`.
+// - Never trusts model plain text as authorization completion; verifies Center status and respects privacy boundaries.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
@@ -16,7 +20,10 @@ import { openExternalUrl } from '../center-admin/openExternalUrl';
 import { useText } from '../ui';
 import { checkGoogleAccount, classifyGoogleError, fetchGoogleStatus } from './googleClient';
 import {
+  GOOGLE_SERVICE_CHOICES,
   googleAdminTrustRequestText,
+  googleChoiceDescription,
+  googleChoiceLabel,
   googleSetupModeMeta,
   googleStepInstructions,
   googleStepTitle,
@@ -28,6 +35,7 @@ import { GoogleClientConfigForm, GoogleSignInFlow } from './GoogleSignInFlow';
 import type {
   GoogleServiceChoice,
   GoogleSetupAction,
+  GoogleSetupBlocker,
   GoogleSetupControlCall,
   GoogleSetupControlState,
   GoogleSetupMode,
@@ -41,8 +49,11 @@ export interface GoogleSetupWizardProps {
   botId: string;
   botName?: string;
   isLocalAndroid?: boolean;
-  /** If this card comes from chat history with an older run/revision, keep read-only when stale. */
+  /** If this card comes from chat history with an older run/copy, keep read-only when stale. */
   expectedRunId?: string;
+  expectedCard?: string;
+  expectedStep?: string;
+  expectedCardCopy?: number;
   readOnly?: boolean;
   autoStart?: boolean;
   callGoogleSetup?: GoogleSetupControlCall;
@@ -54,6 +65,36 @@ export interface GoogleSetupWizardProps {
 
 const ALL_MODES: readonly GoogleSetupMode[] = ['do-it-for-me', 'guide-here', 'guide-browser'];
 
+function describeBlocker(blocker: GoogleSetupBlocker, t: (zh: string, en: string) => string): string {
+  if (typeof blocker.message === 'string' && blocker.message.trim()) return blocker.message.trim();
+  switch (blocker.kind) {
+    case 'center-unreachable':
+      return t('当前暂时无法连接 Center 核验状态，原有连接不受影响，请稍后重试检查。', 'Center is temporarily unreachable. Existing connections are unchanged; check again shortly.');
+    case 'admin-required':
+      return t('当前 Center 尚未配置 Google Web OAuth 应用，请联系 Center 管理员完成一次性配置。', 'Center does not have a Google Web OAuth app configured yet. Contact your Center administrator.');
+    case 'no-key':
+      return t('Center 尚未��存有效的 Web OAuth 凭据，请通过下方私密表单录入或重新创建。', 'Center has no saved Web OAuth client yet. Save it via the private form below or create a new client.');
+    case 'key-gone':
+      return t('Center 已保存的 Google 应用凭据已失效，请重新创建并私密录入 Web OAuth 凭据。', 'Saved Web OAuth client credentials are no longer valid. Create and save a new Web client.');
+    case 'key-other-project':
+      return t('Center 当前保存的 Web OAuth 凭据属于其他 Google Cloud 项目，请核对并重新录入。', 'Saved Web OAuth client belongs to a different Google Cloud project.');
+    case 'other-account':
+      return t(`系统浏览器中登录的是 ${blocker.signedIn ?? ''}，与目标账号 ${blocker.wanted ?? ''} 不同；请选择保留该账号或重新登录目标账号。`, `Signed in as ${blocker.signedIn ?? ''} instead of ${blocker.wanted ?? ''}. Keep this account or sign in again.`);
+    case 'signed-out':
+      return t(`账号 ${blocker.email ?? ''} 授权已失效，需要账号本人在系统浏览器重新连接。`, `Authorization for ${blocker.email ?? ''} ended. Reconnect in your system browser.`);
+    case 'needs-permission':
+      return t('部分所选 Google 服务尚未获得授权，你可以补授权或跳过未授权项继续。', 'Some selected Google services still need permission. Grant permission or continue without them.');
+    case 'api-off':
+      return t('Google Cloud 项目中尚未启用对应服务 API，请前往控制台启用后点重新检查。', 'Required Google Cloud APIs are still turned off. Enable them in Cloud Console, then check again.');
+    case 'admin-blocked':
+      return t('Google Workspace 组织管理员阻止了此应用访问所选服务，可复制说明发给管理员。', 'Your Google Workspace administrator blocked access. Copy the request note for your admin.');
+    case 'check-failed':
+      return t('探测 Google 服务就绪度时发生错误，请点重新检查。', 'Could not verify Google service readiness. Check again.');
+    default:
+      return t('当前步骤需要你的处理后才能继续。', 'Action needed before setup can continue.');
+  }
+}
+
 export function GoogleSetupWizard({
   api,
   identity,
@@ -61,6 +102,9 @@ export function GoogleSetupWizard({
   botName,
   isLocalAndroid = false,
   expectedRunId,
+  expectedCard,
+  expectedStep,
+  expectedCardCopy,
   readOnly = false,
   autoStart = false,
   callGoogleSetup,
@@ -81,8 +125,14 @@ export function GoogleSetupWizard({
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [showDirectConfig, setShowDirectConfig] = useState(false);
-  const [showSignIn, setShowSignIn] = useState(false);
+  const [signInConfig, setSignInConfig] = useState<{
+    open: boolean;
+    mode?: 'connect' | 'expand' | 'reconnect';
+    targetAccount?: string;
+    choices?: GoogleServiceChoice[];
+  }>({ open: false });
   const [projectIdInput, setProjectIdInput] = useState('');
+  const [serviceDraft, setServiceDraft] = useState<GoogleServiceChoice[]>(['gmail', 'calendar']);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -106,49 +156,47 @@ export function GoogleSetupWizard({
   }, [api, identity, onStatusUpdated]);
 
   const sendControl = useCallback(
-    async (payload: Record<string, unknown>) => {
+    async (payload: Record<string, unknown>, opts?: { silentError?: boolean }) => {
       if (!callGoogleSetup) {
-        setUnavailableReason(
-          t(
-            '当前目标 Host 未提供 Google 向导控制通道，可直接通过私密表单录入 Web OAuth 凭据或前往中心管理。',
-            'Google setup control is unavailable on this Host. Use the private credential form or Center Admin directly.',
-          ),
-        );
+        setUnavailableReason(t('当前目标 Host 未提供 Google 向导控制通道，可直接通过私密表单录入 Web OAuth 凭据或前往中心管理。', 'Google setup control is unavailable on this Host. Use the private credential form or Center Admin directly.'));
         return null;
       }
       setBusy(true);
-      setError('');
+      if (!opts?.silentError) setError('');
       try {
         const next = await callGoogleSetup({ botId, ...payload });
         if (!mountedRef.current) return null;
         if (next.unavailable) {
-          setUnavailableReason(
-            next.reason ||
-              t(
-                '当前 Host 暂不可运行向导控制，可使用私密表单直接录入凭据。',
-                'Setup control is unavailable on this Host. Use the private credential form instead.',
-              ),
-          );
+          setUnavailableReason(next.reason || t('当前 Host 暂不可运行向导控制，可使用私密表单直接录入凭据。', 'Setup control is unavailable on this Host. Use the private credential form instead.'));
           setSetup(next);
           return next;
         }
         setUnavailableReason('');
         setSetup(next);
         if (next.projectId) setProjectIdInput(next.projectId);
+        if (Array.isArray(next.choices) && next.choices.length > 0) {
+          setServiceDraft(next.choices);
+        }
         return next;
       } catch (cause) {
         if (!mountedRef.current) return null;
         const info = classifyGoogleError(cause);
+        if (info.conflict) {
+          // Re-sync latest revision on CAS mismatch so the user never gets stuck on stale revision.
+          const latest = await callGoogleSetup({ botId, action: 'status' }).catch(() => null);
+          if (mountedRef.current && latest) setSetup(latest);
+          if (!opts?.silentError) {
+            setError(t('向导进度已更新，已自动刷新为最新状态，请再次确认操作。', 'Setup state changed and has been refreshed. Please confirm your action again.'));
+          }
+          return null;
+        }
         if (info.unavailable) {
-          setUnavailableReason(
-            t(
-              '当前 Host 尚未启用 Google 建项向导控制，可直接录入 Web OAuth 凭据或前往中心管理。',
-              'Google setup control is not available on this Host yet. Enter Web OAuth credentials directly or open Center Admin.',
-            ),
-          );
+          setUnavailableReason(t('当前 Host 尚未启用 Google 建项向导控制，可直接录入 Web OAuth 凭据或前往中心管理。', 'Google setup control is not available on this Host yet. Enter Web OAuth credentials directly or open Center Admin.'));
         } else if (info.offline) {
-          setError(t('目标 Host 当前离线，请恢复在线后继续。', 'Target Host is offline. Reconnect to continue.'));
-        } else {
+          if (!opts?.silentError) {
+            setError(t('目标 Host 当前离线，请恢复在线后继续。', 'Target Host is offline. Reconnect to continue.'));
+          }
+        } else if (!opts?.silentError) {
           setError(info.message);
         }
         return null;
@@ -157,6 +205,52 @@ export function GoogleSetupWizard({
       }
     },
     [botId, callGoogleSetup, t],
+  );
+
+  /** Submit canonical service.js `answer` (`card` + `values` + `expectedRevision`), returning whether it applied. */
+  const sendCardAnswer = useCallback(
+    async (
+      card: 'path' | 'account' | 'kind' | 'services' | 'step',
+      values: string[],
+      fallback?: () => Promise<GoogleSetupControlState | null>,
+    ) => {
+      if (!callGoogleSetup) return null;
+      const payload: Record<string, unknown> = {
+        action: 'answer',
+        card,
+        values,
+        ...(setup ? { expectedRevision: setup.revision } : {}),
+        ...(setup?.id ? { runId: setup.id } : {}),
+        ...(expectedStep ? { step: expectedStep } : {}),
+        ...(expectedCardCopy !== undefined ? { cardCopy: expectedCardCopy } : {}),
+      };
+      setBusy(true);
+      setError('');
+      try {
+        const next = await callGoogleSetup({ botId, ...payload });
+        if (!mountedRef.current) return null;
+        setSetup(next);
+        return next;
+      } catch (cause) {
+        if (!mountedRef.current) return null;
+        const info = classifyGoogleError(cause);
+        // If transport protocol layer does not yet whitelist `card`/`values`, invoke safe fallback when available.
+        if (info.invalidArgument && fallback) {
+          return await fallback();
+        }
+        if (info.conflict) {
+          const latest = await callGoogleSetup({ botId, action: 'status' }).catch(() => null);
+          if (mountedRef.current && latest) setSetup(latest);
+          setError(t('向导进度已更新，已自动刷新为最新状态，请再试一次。', 'Setup state changed and has been refreshed. Try again.'));
+          return null;
+        }
+        setError(info.message);
+        return null;
+      } finally {
+        if (mountedRef.current) setBusy(false);
+      }
+    },
+    [botId, callGoogleSetup, expectedCardCopy, expectedStep, setup, t],
   );
 
   useEffect(() => {
@@ -188,26 +282,76 @@ export function GoogleSetupWizard({
   }, [autoStart, callGoogleSetup, refreshCenter, sendControl]);
 
   const staleRun = Boolean(expectedRunId && setup?.id && setup.id !== expectedRunId);
-  const effectiveReadOnly = readOnly || staleRun;
-  const activeMode = normalizeSetupMode(setup?.mode);
-  const embeddedSupported = !isLocalAndroid && setup?.canUseEmbeddedBrowser !== false;
+  const staleCopy = Boolean(
+    expectedCardCopy !== undefined &&
+      setup?.card &&
+      (!expectedCard || setup.card.card === expectedCard) &&
+      (!expectedStep || setup.card.step === expectedStep) &&
+      typeof setup.card.copy === 'number' &&
+      expectedCardCopy < setup.card.copy,
+  );
+  const effectiveReadOnly = readOnly || staleRun || staleCopy;
+  const activeMode = normalizeSetupMode(setup?.mode ?? undefined);
+
+  const modeAvailMap = setup?.modeAvailability?.modes;
+  const doItAvailable = !isLocalAndroid && setup?.canUseEmbeddedBrowser !== false && modeAvailMap?.['do-it-for-me']?.available !== false;
+  const guideHereAvailable = !isLocalAndroid && setup?.canUseEmbeddedBrowser !== false && modeAvailMap?.['guide-here']?.available !== false;
+  const embeddedSupported = doItAvailable || guideHereAvailable;
+  const embeddedUnavailableDetail =
+    modeAvailMap?.['do-it-for-me']?.reason || modeAvailMap?.['guide-here']?.reason || '';
+
   const steps = normalizeSetupSteps(setup?.steps);
-  const currentStep = setup?.step || steps.find(s => s.status === 'active' || s.status === 'waiting-human')?.id;
-  const redirectUri = setup?.redirectUri || centerStatus?.client.redirectUri;
-  const clientConfigured = Boolean(centerStatus?.client.configured);
-  const hasConnectedAccount = Boolean(centerStatus?.accounts.some(a => a.status === 'connected'));
+  const currentStep =
+    setup?.step ||
+    steps.find(s => s.status === 'active' || s.status === 'needs-user' || s.status === 'waiting-human')?.id ||
+    null;
+
+  const effectiveCenterClient = centerStatus?.client ?? setup?.center?.client;
+  const effectiveCenterAccounts = centerStatus?.accounts ?? setup?.center?.accounts ?? [];
+  const redirectUri =
+    setup?.brandingLinks?.redirectUri ||
+    setup?.redirectUri ||
+    effectiveCenterClient?.redirectUri;
+  const clientConfigured = Boolean(effectiveCenterClient?.configured);
+  const hasConnectedAccount = Boolean(effectiveCenterAccounts.some(a => a.status === 'connected'));
+  const nonAdminBlocked =
+    setup?.center?.isAdmin === false || setup?.blocker?.kind === 'admin-required';
+  const browserLocked = Boolean(setup?.browserLock?.active || setup?.browserTakeoverRequired);
+  const lockRequiresSystemBrowser = Boolean(setup?.browserLock?.requiresSystemBrowser);
 
   const handleSelectMode = async (mode: GoogleSetupMode) => {
     if (effectiveReadOnly) return;
-    if ((mode === 'do-it-for-me' || mode === 'guide-here') && !embeddedSupported) return;
-    const actionPayload =
-      !setup?.id || setup.state === 'idle' || setup.state === 'not_started'
-        ? { action: 'start', mode }
-        : { action: 'answer', field: 'mode', value: mode, revision: setup.revision };
-    const updated = await sendControl(actionPayload);
+    if (mode === 'do-it-for-me' && !doItAvailable) return;
+    if (mode === 'guide-here' && !guideHereAvailable) return;
+    let updated: GoogleSetupControlState | null = null;
+    if (!setup?.id || setup.state === 'idle' || setup.state === 'not_started') {
+      updated = await sendControl({ action: 'start', mode });
+    } else if (setup.mode === 'unchosen' || setup.card?.card === 'path') {
+      updated = await sendCardAnswer('path', [mode], () =>
+        sendControl({ action: 'resume', mode, expectedRevision: setup.revision }),
+      );
+    } else {
+      updated = await sendControl({ action: 'resume', mode, expectedRevision: setup.revision });
+    }
     if (updated && (mode === 'do-it-for-me' || mode === 'guide-here') && onOpenBrowser) {
       onOpenBrowser();
     }
+  };
+
+  const handleSaveServiceChoices = async () => {
+    if (effectiveReadOnly || serviceDraft.length === 0) return;
+    if (!setup?.id || setup.state === 'idle' || setup.state === 'not_started') {
+      await sendControl({ action: 'start', choices: serviceDraft });
+      return;
+    }
+    await sendCardAnswer('services', serviceDraft, () =>
+      sendControl({
+        action: 'advance',
+        choices: serviceDraft,
+        ...(currentStep ? { step: currentStep } : {}),
+        expectedRevision: setup.revision,
+      }),
+    );
   };
 
   const handleBlockerAction = async (action: GoogleSetupAction) => {
@@ -215,10 +359,31 @@ export function GoogleSetupWizard({
     setNotice('');
     setError('');
     switch (action.id) {
-      case 'take-over':
-      case 'take-over-browser':
       case 'open-browser':
+      case 'take-over-browser':
         onOpenBrowser?.();
+        return;
+      case 'take-over':
+        if (browserLocked && onOpenBrowser) {
+          onOpenBrowser();
+          return;
+        }
+        await sendCardAnswer('step', ['take-over'], () =>
+          sendControl({ action: 'resume', mode: 'do-it-for-me', expectedRevision: setup?.revision }),
+        );
+        return;
+      case 'let-me':
+        await sendCardAnswer(
+          'step',
+          ['let-me', action.step || currentStep || 'branding'],
+          () => sendControl({ action: 'resume', mode: 'guide-here', expectedRevision: setup?.revision }),
+        );
+        return;
+      case 'make-new-key':
+        await sendCardAnswer('step', ['redo', 'client'], () => {
+          setShowDirectConfig(true);
+          return Promise.resolve(null);
+        });
         return;
       case 'import-key':
       case 'configure-client':
@@ -228,59 +393,76 @@ export function GoogleSetupWizard({
       case 'allow':
       case 'sign-in-again':
       case 'connect':
-        setShowSignIn(true);
+        setSignInConfig({
+          open: true,
+          mode: action.id === 'sign-in-again' ? 'reconnect' : action.id === 'allow' ? 'expand' : 'connect',
+          targetAccount: action.email || setup?.account,
+          choices: action.services ?? setup?.choices,
+        });
         return;
-      case 'turn-on':
-        if (action.url) {
-          await openExternalUrl(action.url);
-        } else if (setup?.blocker?.enableUrl) {
-          await openExternalUrl(setup.blocker.enableUrl);
+      case 'continue-without':
+        if (Array.isArray(action.services) && action.services.length > 0) {
+          await sendCardAnswer('step', ['continue-without', ...action.services]);
         }
         return;
+      case 'keep-account':
+        if (action.email) {
+          await sendCardAnswer('step', ['keep-account', action.email], () =>
+            sendControl({ action: 'advance', account: action.email, step: 'connect', expectedRevision: setup?.revision }),
+          );
+        }
+        return;
+      case 'turn-on': {
+        const targetUrl =
+          action.url ||
+          setup?.blocker?.enableUrls?.[0]?.url ||
+          setup?.blocker?.enableUrl ||
+          'https://console.cloud.google.com/apis/library';
+        await openExternalUrl(targetUrl);
+        return;
+      }
       case 'copy-for-admin': {
-        const text = googleAdminTrustRequestText(centerStatus?.client.clientId, t);
+        const text = googleAdminTrustRequestText(effectiveCenterClient?.clientId, t);
         try {
           await navigator.clipboard.writeText(text);
-          setNotice(t('已复制管理员申请说明，请发送给 Workspace 管理员。', 'Copied admin request text.'));
+          setNotice(t('已复制管理员申请说明，请发送给 Workspace 或 Center 管理员。', 'Copied administrator instructions to clipboard.'));
         } catch {
           setError(t('无法复制到剪贴板。', 'Could not copy to clipboard.'));
         }
         return;
       }
       case 'check-again':
-        if (api && identity && (action.email || setup?.account)) {
+        if (api && identity) {
           setBusy(true);
           try {
             await checkGoogleAccount(api, identity, action.email || setup?.account || '');
             await refreshCenter();
-            await sendControl({ action: 'resume', revision: setup?.revision });
           } catch (cause) {
             setError(classifyGoogleError(cause).message);
           } finally {
             setBusy(false);
           }
-          return;
         }
-        await refreshCenter();
-        await sendControl({ action: 'resume', revision: setup?.revision });
+        if (currentStep === 'client' || currentStep === 'connect') {
+          await sendControl({ action: 'advance', step: currentStep, expectedRevision: setup?.revision });
+        } else {
+          await sendControl({ action: 'resume', expectedRevision: setup?.revision });
+        }
         return;
       case 'cancel':
-        await sendControl({ action: 'cancel', revision: setup?.revision });
+        await sendControl({ action: 'cancel', expectedRevision: setup?.revision });
         return;
       case 'resume':
       case 'continue':
-        await sendControl({ action: 'resume', revision: setup?.revision });
+        await sendControl({ action: 'resume', expectedRevision: setup?.revision });
         return;
       case 'start-over':
-        await sendControl({ action: 'start' });
+        await sendControl({ action: 'start', restart: true });
         return;
       default:
-        await sendControl({
-          action: 'answer',
-          actionId: action.id,
-          step: action.step,
-          revision: setup?.revision,
-        });
+        await sendCardAnswer('step', [action.id, ...(action.step ? [action.step] : [])], () =>
+          sendControl({ action: 'resume', expectedRevision: setup?.revision }),
+        );
     }
   };
 
@@ -295,15 +477,15 @@ export function GoogleSetupWizard({
     );
   }
 
-  if (staleRun) {
+  if (staleRun || staleCopy) {
     return (
       <div className="gws-card is-muted">
         <div className="gws-card-head">
           <span className="gws-card-title">{t('Google 应用建项向导', 'Google Workspace Setup')}</span>
-          <span className="gws-pill is-muted">{t('历史快照', 'Previous run')}</span>
+          <span className="gws-pill is-muted">{t('历史快照', 'Previous card')}</span>
         </div>
         <p className="gws-muted">
-          {t('此向导记录已结束或被新进度取代，请以最新状态卡片或 Bot 能力页为准。', 'This setup card is from an earlier run. Follow the latest status card or Bot Capabilities.')}
+          {t('此向导卡片已由最新进度替代，请以最新卡片或 Bot 能力页为准。', 'This setup card has been superseded. Follow the latest card or Bot Capabilities.')}
         </p>
       </div>
     );
@@ -311,9 +493,13 @@ export function GoogleSetupWizard({
 
   const stepInfo = currentStep ? googleStepInstructions(currentStep, redirectUri, t) : null;
   const setupCompleted =
-    (setup?.state === 'completed' || setup?.state === 'done') && clientConfigured && hasConnectedAccount;
+    (setup?.state === 'done' || setup?.state === 'completed') && clientConfigured && hasConnectedAccount;
   const setupClaimsDoneWithoutCenter =
-    (setup?.state === 'completed' || setup?.state === 'done') && (!clientConfigured || !hasConnectedAccount);
+    (setup?.state === 'done' || setup?.state === 'completed') && (!clientConfigured || !hasConnectedAccount);
+  const activeBlockerActions =
+    (Array.isArray(setup?.blocker?.actions) && setup.blocker.actions.length > 0
+      ? setup.blocker.actions
+      : setup?.actions) ?? [];
 
   return (
     <section className="gws-card" aria-label={t('Google 应用建项向导', 'Google Workspace Setup')}>
@@ -323,10 +509,10 @@ export function GoogleSetupWizard({
           {botName ? <span className="gws-card-sub">{botName}</span> : null}
         </div>
         <div className="gws-head-actions">
-          <span className={`gws-pill ${setupCompleted ? 'is-ok' : setup?.browserTakeoverRequired ? 'is-warn' : 'is-accent'}`}>
+          <span className={`gws-pill ${setupCompleted ? 'is-ok' : browserLocked ? 'is-warn' : 'is-accent'}`}>
             {setupCompleted
               ? t('已就绪', 'Ready')
-              : setup?.browserTakeoverRequired
+              : browserLocked
                 ? t('等待本人接管', 'Needs takeover')
                 : activeMode
                   ? googleSetupModeMeta(activeMode, t).title.split(' ')[0]
@@ -344,7 +530,7 @@ export function GoogleSetupWizard({
       <div className="gws-truth-bar">
         <span>
           {clientConfigured
-            ? t(`Center 应用：已配置 (${maskClientId(centerStatus?.client.clientId)})`, `Center app: Configured (${maskClientId(centerStatus?.client.clientId)})`)
+            ? t(`Center 应用：已配置 (${maskClientId(effectiveCenterClient?.clientId)})`, `Center app: Configured (${maskClientId(effectiveCenterClient?.clientId)})`)
             : t('Center 应用：未配置 Web OAuth Client', 'Center app: Web OAuth Client not configured')}
         </span>
         <button
@@ -361,15 +547,25 @@ export function GoogleSetupWizard({
         </button>
       </div>
 
+      {nonAdminBlocked && !clientConfigured ? (
+        <div className="gws-warning" role="status">
+          <ShieldAlert size={15} aria-hidden="true" />
+          <div className="gws-error-body">
+            <span>{t('当前 Center 尚未配置 Google OAuth 应用，请联系 Center 管理员完成一次性配置后再连接你的账号。', 'Center does not have a Google OAuth app configured yet. Ask your Center administrator to configure it once before connecting your account.')}</span>
+            <div className="gws-actions">
+              <button type="button" className="gws-btn is-ghost is-xs" onClick={() => void handleBlockerAction({ id: 'copy-for-admin' })}>
+                <Copy size={12} aria-hidden="true" />
+                <span>{t('复制管理员配置指引', 'Copy admin guide')}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {setupClaimsDoneWithoutCenter ? (
         <div className="gws-warning" role="status">
           <AlertTriangle size={15} aria-hidden="true" />
-          <span>
-            {t(
-              '尚未在 Center 核验到已就绪的 Google 账号连接；授权完成以 Center 实际回调与探活结果为准，不采信聊天文本说明。',
-              'Center has not verified a connected Google account yet. Completion is determined strictly by Center status, never chat text.',
-            )}
-          </span>
+          <span>{t('尚未在 Center 核验到已就绪的 Google 账号连接；授权完成以 Center 实际回调与探活结果为准，不采信聊天文本说明。', 'Center has not verified a connected Google account yet. Completion is determined strictly by Center status, never chat text.')}</span>
         </div>
       ) : null}
 
@@ -381,7 +577,7 @@ export function GoogleSetupWizard({
       ) : null}
 
       {/* Quick path vs 3-mode selector */}
-      {!effectiveReadOnly && !setupCompleted ? (
+      {!effectiveReadOnly && !setupCompleted && !nonAdminBlocked ? (
         <div className="gws-section-block">
           <div className="gws-row-between">
             <span className="gws-label-xs">{t('选择协作方式（可随时切换或接管）', 'Choose how to set up (switchable anytime)')}</span>
@@ -404,10 +600,13 @@ export function GoogleSetupWizard({
           <div className="gws-mode-list" role="radiogroup" aria-label={t('向导协作模式', 'Setup collaboration mode')}>
             {ALL_MODES.map(mode => {
               const meta = googleSetupModeMeta(mode, t);
-              const disabledMode =
-                busy ||
-                Boolean(unavailableReason) ||
-                ((mode === 'do-it-for-me' || mode === 'guide-here') && !embeddedSupported);
+              const modeAvailable =
+                mode === 'guide-browser'
+                  ? true
+                  : mode === 'do-it-for-me'
+                    ? doItAvailable
+                    : guideHereAvailable;
+              const disabledMode = busy || Boolean(unavailableReason) || !modeAvailable;
               const isSelected = activeMode === mode;
               return (
                 <button
@@ -424,7 +623,7 @@ export function GoogleSetupWizard({
                     {mode === 'guide-browser' && !embeddedSupported ? (
                       <span className="gws-pill is-accent">{t('推荐', 'Recommended')}</span>
                     ) : null}
-                    {(mode === 'do-it-for-me' || mode === 'guide-here') && !embeddedSupported ? (
+                    {!modeAvailable ? (
                       <span className="gws-pill is-muted">{t('当前设备不可用', 'Unavailable here')}</span>
                     ) : null}
                   </span>
@@ -435,29 +634,99 @@ export function GoogleSetupWizard({
           </div>
           {!embeddedSupported ? (
             <p className="gws-muted">
-              {isLocalAndroid
-                ? t('Android 本机 Host 不提供桌面级内置自动化浏览器，已默认推荐「外部浏览器指导」。', 'Android local Host does not bundle a desktop automation browser; “Guide me in my browser” is recommended.')
-                : t('当前 Host 无法提供实时内置浏览器交互，请使用「外部浏览器指导」或直接录入凭据。', 'Embedded interactive browser is unavailable on this Host. Use “Guide me in my browser” or direct credential input.')}
+              {embeddedUnavailableDetail ||
+                (isLocalAndroid
+                  ? t('Android 本机 Host 不提供桌面级内置自动化浏览器，已默认推荐「外部浏览器指导」。', 'Android local Host does not bundle a desktop automation browser; “Guide me in my browser” is recommended.')
+                  : t('当前 Host 无法提供实时内置浏览器交互，请使用「外部浏览器指导」或直接录入凭据。', 'Embedded interactive browser is unavailable on this Host. Use “Guide me in my browser” or direct credential input.'))}
             </p>
           ) : null}
         </div>
       ) : null}
 
-      {/* Browser takeover banner */}
-      {setup?.browserTakeoverRequired ? (
+      {/* Service group selection card when setup awaits `services` */}
+      {!effectiveReadOnly && !setupCompleted && setup?.card?.card === 'services' ? (
+        <div className="gws-section-block">
+          <span className="gws-label-xs">{t('选择要启用的 Google 服务组（创建项目与后续授权将沿用此选择）', 'Choose Google services to enable (reused for API setup and sign-in)')}</span>
+          <div className="gws-choice-grid" role="group" aria-label={t('向导服务选择', 'Setup service selection')}>
+            {GOOGLE_SERVICE_CHOICES.map(choice => {
+              const checked = serviceDraft.includes(choice);
+              return (
+                <label key={choice} className={`gws-choice-card${checked ? ' is-selected' : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={busy}
+                    onChange={() =>
+                      setServiceDraft(prev =>
+                        prev.includes(choice)
+                          ? prev.filter(item => item !== choice)
+                          : GOOGLE_SERVICE_CHOICES.filter(c => prev.includes(c) || c === choice),
+                      )
+                    }
+                  />
+                  <span className="gws-choice-body">
+                    <span className="gws-choice-title">{googleChoiceLabel(choice, t)}</span>
+                    <span className="gws-choice-desc">{googleChoiceDescription(choice, t)}</span>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          <div className="gws-actions">
+            <button
+              type="button"
+              className="gws-btn is-primary is-sm"
+              disabled={busy || serviceDraft.length === 0}
+              onClick={() => void handleSaveServiceChoices()}
+            >
+              {t('确认服务选择', 'Confirm services')}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Cloud Console account selection when multiple console accounts are detected */}
+      {!effectiveReadOnly &&
+      !setupCompleted &&
+      setup?.card?.card === 'account' &&
+      Array.isArray(setup.accounts) &&
+      setup.accounts.length > 0 ? (
+        <div className="gws-section-block">
+          <span className="gws-label-xs">{t('选择用于建项的 Google Cloud 账号', 'Choose the Google account for Cloud Console')}</span>
+          <div className="gws-actions">
+            {setup.accounts.map(email => (
+              <button
+                key={email}
+                type="button"
+                className="gws-btn is-ghost is-sm"
+                disabled={busy}
+                onClick={() =>
+                  void sendCardAnswer('account', [email], () =>
+                    sendControl({ action: 'advance', account: email, step: 'account', expectedRevision: setup.revision }),
+                  )
+                }
+              >
+                {email}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {/* Browser lock / sensitive takeover banner */}
+      {browserLocked ? (
         <div className="gws-takeover-alert" role="alert">
           <div className="gws-takeover-body">
-            <strong>{t('Bot 已停手，等待你接管当前页面', 'Bot paused — waiting for your takeover')}</strong>
+            <strong>{t('Bot 已停手并锁定敏感页，等待你亲自完成', 'Bot paused & locked sensitive step for your takeover')}</strong>
             <span>
-              {setup.browserPrompt ||
-                t(
-                  '即将进入登录、条款勾选或凭据创建步骤，请亲自接管操作，Bot 不会代你勾选或读取密钥。',
-                  'Reached sign-in, policy consent, or client secret step. Take over directly — Bot will not accept terms or read secrets.',
-                )}
+              {setup?.browserPrompt ||
+                (lockRequiresSystemBrowser
+                  ? t('当前 Host 无法隔离此敏感步骤（如 Client Secret 创建），请改在本人系统浏览器操作并通过下方私密表单提交。', 'This Host cannot isolate this sensitive step in-page. Complete it in your system browser and submit via the private form below.')
+                  : t('即将进入登录、政策勾选或凭据创建步骤，请亲自接管操作，Bot 不会代你勾选或读取密钥。', 'Reached sign-in, policy consent, or client secret step. Take over directly — Bot will not accept terms or read secrets.'))}
             </span>
           </div>
           <div className="gws-actions">
-            {onOpenBrowser && embeddedSupported ? (
+            {onOpenBrowser && embeddedSupported && !lockRequiresSystemBrowser ? (
               <button type="button" className="gws-btn is-warn is-sm" onClick={onOpenBrowser}>
                 <Globe size={14} aria-hidden="true" />
                 <span>{t('接管当前页面', 'Take over page')}</span>
@@ -479,7 +748,7 @@ export function GoogleSetupWizard({
       {steps.length > 0 ? (
         <ol className="gws-steps" aria-label={t('建项步骤进度', 'Setup steps')}>
           {steps.map(item => {
-            const isDone = item.status === 'done';
+            const isDone = item.status === 'done' || item.status === 'skipped';
             const isCurrent = item.id === currentStep;
             return (
               <li
@@ -544,8 +813,8 @@ export function GoogleSetupWizard({
                   void sendControl({
                     action: 'advance',
                     step: 'project',
-                    projectId: projectIdInput.trim() || undefined,
-                    revision: setup?.revision,
+                    ...(projectIdInput.trim() ? { projectId: projectIdInput.trim() } : {}),
+                    ...(setup ? { expectedRevision: setup.revision } : {}),
                   })
                 }
               >
@@ -568,7 +837,7 @@ export function GoogleSetupWizard({
                   void sendControl({
                     action: 'advance',
                     step: currentStep,
-                    revision: setup?.revision,
+                    ...(setup ? { expectedRevision: setup.revision } : {}),
                   })
                 }
               >
@@ -584,13 +853,13 @@ export function GoogleSetupWizard({
         <div className="gws-blocker" role="alert">
           <div className="gws-blocker-msg">
             <AlertTriangle size={15} aria-hidden="true" />
-            <span>{setup.blocker.message || t('当前步骤需要你的处理后才能继续。', 'Action needed before setup can continue.')}</span>
+            <span>{describeBlocker(setup.blocker, t)}</span>
           </div>
-          {Array.isArray(setup.actions) && setup.actions.length > 0 && !effectiveReadOnly ? (
+          {activeBlockerActions.length > 0 && !effectiveReadOnly ? (
             <div className="gws-actions">
-              {setup.actions.map(action => (
+              {activeBlockerActions.map(action => (
                 <button
-                  key={action.id}
+                  key={`${action.id}:${action.step ?? ''}:${action.email ?? ''}`}
                   type="button"
                   className="gws-btn is-ghost is-sm"
                   disabled={busy}
@@ -611,16 +880,16 @@ export function GoogleSetupWizard({
           api={api}
           identity={identity}
           redirectUri={redirectUri}
-          configuredClientId={centerStatus?.client.clientId}
+          configuredClientId={effectiveCenterClient?.clientId}
           onOpenCenterAdmin={onOpenCenterAdmin}
           onCancel={showDirectConfig ? () => setShowDirectConfig(false) : undefined}
           onSaved={snapshot => {
             setCenterStatus(snapshot);
             onStatusUpdated?.(snapshot);
             setShowDirectConfig(false);
-            setShowSignIn(true);
-            if (callGoogleSetup && setup && !setup.unavailable) {
-              void sendControl({ action: 'resume', step: 'client', revision: setup.revision });
+            setSignInConfig({ open: true, mode: 'connect', choices: setup?.choices });
+            if (callGoogleSetup && setup && !setup.unavailable && setup.state === 'running') {
+              void sendControl({ action: 'advance', step: 'client', expectedRevision: setup.revision });
             }
           }}
         />
@@ -631,20 +900,27 @@ export function GoogleSetupWizard({
       identity &&
       !effectiveReadOnly &&
       clientConfigured &&
-      (showSignIn || currentStep === 'connect') &&
+      (signInConfig.open || currentStep === 'connect') &&
       !setupCompleted ? (
         <GoogleSignInFlow
           api={api}
           identity={identity}
-          initialChoices={setup?.choices as GoogleServiceChoice[] | undefined}
-          targetAccount={setup?.account}
-          onCompleted={(_account, snapshot) => {
+          mode={signInConfig.mode ?? 'connect'}
+          initialChoices={signInConfig.choices ?? setup?.choices}
+          targetAccount={signInConfig.targetAccount ?? setup?.account}
+          onCompleted={(account, snapshot) => {
             if (snapshot) {
               setCenterStatus(snapshot);
               onStatusUpdated?.(snapshot);
             }
-            if (callGoogleSetup && setup && !setup.unavailable) {
-              void sendControl({ action: 'resume', step: 'connect', revision: setup.revision });
+            setSignInConfig({ open: false });
+            if (callGoogleSetup && setup && !setup.unavailable && setup.state === 'running') {
+              void sendControl({
+                action: 'advance',
+                step: 'connect',
+                ...(account?.email ? { account: account.email } : {}),
+                expectedRevision: setup.revision,
+              });
             }
           }}
         />
@@ -673,12 +949,12 @@ export function GoogleSetupWizard({
               <span>{t('前往中心管理', 'Open Center Admin')}</span>
             </button>
           ) : null}
-          {callGoogleSetup && setup?.id && !setupCompleted && !setup.unavailable ? (
+          {callGoogleSetup && setup?.id && !setupCompleted && !setup.unavailable && setup.state === 'running' ? (
             <button
               type="button"
               className="gws-btn is-ghost is-sm"
               disabled={busy}
-              onClick={() => void sendControl({ action: 'cancel', revision: setup.revision })}
+              onClick={() => void sendControl({ action: 'cancel', expectedRevision: setup.revision })}
             >
               {t('中止向导', 'Cancel setup')}
             </button>

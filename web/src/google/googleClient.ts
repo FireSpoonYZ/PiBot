@@ -1,4 +1,5 @@
 // Real owner-broker API client for Center Google Workspace & target-Host browser/setup volatile RPCs.
+// Strictly aligned with center-server/google-workspace/{routes,accounts,rules}.js and host-core/browser-setup-protocol.js.
 // Never sends secrets or OAuth codes through chat messages, drafts, or durable outboxes.
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
 import { centerAdminRequest, errorCodeOf, isCenterAuthOrBindError } from '../bot-settings/centerAdminBroker';
@@ -9,9 +10,9 @@ import type {
   GoogleAuthFlowStatus,
   GoogleRuleDto,
   GoogleServiceChoice,
-  GoogleStatusSnapshot,
   GoogleSetupControlCall,
   GoogleSetupControlState,
+  GoogleStatusSnapshot,
 } from './types';
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -47,6 +48,8 @@ export interface GoogleErrorClassification {
   message: string;
   adminRequired: boolean;
   authOrBind: boolean;
+  conflict: boolean;
+  invalidArgument: boolean;
   tempError: boolean;
   offline: boolean;
   unavailable: boolean;
@@ -72,9 +75,19 @@ export function classifyGoogleError(failure: unknown): GoogleErrorClassification
     code === 'ADMIN_REQUIRED' ||
     code === 'OWNER_REQUIRED' ||
     code === 'CENTER_ADMIN_REQUIRED' ||
+    code === 'SETUP_ADMIN_REQUIRED' ||
     status === 403 ||
     lowerMsg.includes('admin required') ||
     lowerMsg.includes('owner required');
+
+  const conflict =
+    code === 'REVISION_CONFLICT' ||
+    code === 'SETUP_REVISION_CONFLICT' ||
+    code === 'GOOGLE_SETUP_CONFLICT' ||
+    code === 'REQUEST_CONFLICT' ||
+    code === 'STALE_INPUT';
+
+  const invalidArgument = code === 'INVALID_ARGUMENT';
 
   const offline =
     code === 'OFFLINE' ||
@@ -89,6 +102,7 @@ export function classifyGoogleError(failure: unknown): GoogleErrorClassification
     code === 'METHOD_NOT_FOUND' ||
     code === 'CONTROL_UNAVAILABLE' ||
     code === 'GOOGLE_UNAVAILABLE' ||
+    code === 'GOOGLE_SETUP_UNAVAILABLE' ||
     status === 404 ||
     status === 501 ||
     lowerMsg.includes('not implemented') ||
@@ -96,6 +110,7 @@ export function classifyGoogleError(failure: unknown): GoogleErrorClassification
 
   const tempError =
     !adminRequired &&
+    !conflict &&
     !brokerAuth.oauthRevoked &&
     (code === 'TIMEOUT' ||
       code === 'NETWORK_ERROR' ||
@@ -114,6 +129,8 @@ export function classifyGoogleError(failure: unknown): GoogleErrorClassification
     message,
     adminRequired,
     authOrBind: brokerAuth.oauthRevoked || brokerAuth.notConnected || brokerAuth.unauthorized,
+    conflict,
+    invalidArgument,
     tempError,
     offline,
     unavailable,
@@ -198,7 +215,7 @@ export async function checkGoogleAccount(
   const raw = await centerAdminRequest<unknown>(api, identity, {
     method: 'POST',
     path: '/api/google/check',
-    body: { account },
+    body: account ? { account } : {},
   });
   return unwrapEnvelope<GoogleAccountView | GoogleStatusSnapshot>(raw);
 }
@@ -214,10 +231,45 @@ export async function listGoogleRules(
     method: 'GET',
     path: `/api/google/rules?${qs}`,
   });
-  const data = unwrapEnvelope<GoogleRuleDto[] | { rules?: GoogleRuleDto[] }>(raw);
+  const data = unwrapEnvelope<GoogleRuleDto[] | { items?: GoogleRuleDto[]; rules?: GoogleRuleDto[] }>(raw);
   if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data.items)) return data.items;
   if (data && Array.isArray(data.rules)) return data.rules;
   return [];
+}
+
+/** Build a strictly whitelisted payload matching center-server/google-workspace/rules.js SAVE_ALLOWED_FIELDS. */
+export function buildGoogleRuleSaveBody(rule: GoogleRuleDto): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    deviceId: rule.deviceId,
+    botId: rule.botId,
+    account: rule.account,
+    source: rule.source,
+    enabled: Boolean(rule.enabled),
+    instruction: rule.instruction,
+  };
+  if (rule.id) body.id = rule.id;
+  if (rule.name) body.name = rule.name;
+  if (rule.source === 'gmail') {
+    if (rule.from !== undefined && (Array.isArray(rule.from) ? rule.from.length > 0 : rule.from.trim().length > 0)) {
+      body.from = rule.from;
+    }
+    if (rule.to !== undefined && (Array.isArray(rule.to) ? rule.to.length > 0 : rule.to.trim().length > 0)) {
+      body.to = rule.to;
+    }
+    if (rule.subjectContains && rule.subjectContains.trim()) {
+      body.subjectContains = rule.subjectContains.trim();
+    }
+    if (rule.label && rule.label.trim()) {
+      body.label = rule.label.trim();
+    }
+  } else {
+    body.calendar = rule.calendar && rule.calendar.trim() ? rule.calendar.trim() : 'primary';
+    if (typeof rule.minutesBefore === 'number' && Number.isFinite(rule.minutesBefore)) {
+      body.minutesBefore = Math.max(0, Math.min(1440, Math.round(rule.minutesBefore)));
+    }
+  }
+  return body;
 }
 
 export async function saveGoogleRule(
@@ -228,20 +280,25 @@ export async function saveGoogleRule(
   const raw = await centerAdminRequest<unknown>(api, identity, {
     method: 'POST',
     path: '/api/google/rules/save',
-    body: rule,
+    body: buildGoogleRuleSaveBody(rule),
   });
-  return unwrapEnvelope<GoogleRuleDto>(raw);
+  const data = unwrapEnvelope<GoogleRuleDto | { rule?: GoogleRuleDto }>(raw);
+  if (data && typeof data === 'object' && 'rule' in data && data.rule) {
+    return data.rule;
+  }
+  return data as GoogleRuleDto;
 }
 
+/** Matches center-server/google-workspace/rules.js REMOVE_ALLOWED_FIELDS (`{ id }` only). */
 export async function removeGoogleRule(
   api: DesktopPanelApi,
   identity: DesktopIdentity,
-  input: { id: string; deviceId: string; botId: string },
+  input: { id: string },
 ): Promise<void> {
   const raw = await centerAdminRequest<unknown>(api, identity, {
     method: 'POST',
     path: '/api/google/rules/remove',
-    body: input,
+    body: { id: input.id },
   });
   unwrapEnvelope<unknown>(raw);
 }

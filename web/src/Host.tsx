@@ -64,6 +64,7 @@ import type {
 import type { ShowerCall } from './ShowerPreview';
 import { BotScreenPanel } from './BotScreenPanel';
 import BotBrowserPanel from './bot-browser/BotBrowserPanel';
+import { openExternalUrl } from './center-admin/openExternalUrl';
 import type {
   BotBrowserControlCall,
   GoogleChatCardContext,
@@ -6353,7 +6354,23 @@ ${newer}` : draftSnapshot;
             key={`${showerPreviewKey}:browser:${activeBot.botId}`}
             botId={activeBot.botId}
             deviceId={activeBot.deviceId}
+            botName={activeBot.role}
+            hostLabel={activeBot.hostKind === 'remote' ? `${t('远程', 'Remote')} · ${activeBot.hostLabel}` : activeBot.hostLabel}
+            mode="fullscreen"
+            connected={botPanelConnected}
             request={callBrowser}
+            onSwitchToExternalGuide={url => {
+              void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
+              if (url) void openExternalUrl(url).catch(() => {});
+            }}
+            onOpenSystemGoogleAuth={() => {
+              if (!popScreen()) nav.push({ screen: 'bot-profile', botKey: activeBot.key });
+              if (remoteConnected && remoteIdentity && (activeBot.hostKind !== 'local' || localHost?.deviceId)) {
+                openModelPickerSheet('capabilities');
+              } else {
+                openCenterSettings();
+              }
+            }}
             onClose={() => {
               if (!popScreen()) nav.push({ screen: 'chat', botKey: activeBot.key });
             }}

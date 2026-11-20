@@ -109,6 +109,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const isNonEmptyString = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
 const isOptString = (v: unknown): v is string | undefined => v === undefined || typeof v === 'string';
+const isOptNullableString = (v: unknown): v is string | null | undefined => v === undefined || v === null || typeof v === 'string';
 const isInt = (v: unknown): v is number => Number.isSafeInteger(v);
 
 /** 严格核验一条 todo 任务；任一字段不合规即整条记录拒绝（调用方整体 null）。 */
@@ -180,12 +181,14 @@ function checkTaskStepPreview(step: unknown): boolean {
  * wire（live）值已过 normalizeToolPresentation，raw 历史值按同一契约把关。
  */
 export function readToolPresentation(value: unknown): ToolPresentation | null {
-  if (!isRecord(value) || value.version !== 1 || !isNonEmptyString(value.installationId)) return null;
+  if (!isRecord(value) || value.version !== 1) return null;
   if (value.kind === 'todo') {
+    if (!isNonEmptyString(value.installationId)) return null;
     if (!Array.isArray(value.tasks) || !value.tasks.every(checkTodoTask)) return null;
     return value as unknown as TodoPresentation;
   }
   if (value.kind === 'task') {
+    if (!isNonEmptyString(value.installationId)) return null;
     if (!isNonEmptyString(value.taskId) || !isNonEmptyString(value.title) || !isNonEmptyString(value.cardLabel)) return null;
     if (typeof value.status !== 'string' || !TASK_STATUSES.has(value.status)) return null;
     if (!isOptString(value.summary)) return null;
@@ -195,6 +198,7 @@ export function readToolPresentation(value: unknown): ToolPresentation | null {
     return value as unknown as TaskPresentation;
   }
   if (value.kind === 'questionnaire') {
+    if (!isNonEmptyString(value.installationId)) return null;
     if (!isNonEmptyString(value.requestId)) return null;
     if (value.status !== 'pending' && value.status !== 'answered' && value.status !== 'cancelled') return null;
     if (!isInt(value.conversationId)) return null;
@@ -203,6 +207,7 @@ export function readToolPresentation(value: unknown): ToolPresentation | null {
     return value as unknown as QuestionnairePresentation;
   }
   if (value.kind === 'vault-unlock') {
+    if (!isNonEmptyString(value.installationId)) return null;
     if (Object.keys(value).some(key => !['kind', 'version', 'installationId', 'conversationId', 'requestId', 'mode', 'status', 'source', 'serverUrl'].includes(key))) return null;
     if (!isNonEmptyString(value.requestId) || !isInt(value.conversationId) || value.conversationId < 0) return null;
     if (value.mode !== 'initialize' && value.mode !== 'unlock') return null;
@@ -212,12 +217,23 @@ export function readToolPresentation(value: unknown): ToolPresentation | null {
     return value as unknown as VaultUnlockPresentation;
   }
   if (value.kind === 'google-setup') {
-    if (!isOptString(value.botId) || !isOptString(value.runId) || !isOptString(value.card) || !isOptString(value.step)) return null;
-    if (!isOptString(value.mode) || !isOptString(value.state) || !isOptString(value.summary)) return null;
+    if (!isOptString(value.installationId) || !isOptString(value.botId)) return null;
+    if (!isOptNullableString(value.runId) || !isOptNullableString(value.card) || !isOptNullableString(value.step)) return null;
+    if (!isOptNullableString(value.mode) || !isOptString(value.state) || !isOptString(value.title) || !isOptString(value.summary)) return null;
+    if (!isOptNullableString(value.blockerKind)) return null;
     if (value.revision !== undefined && !isInt(value.revision)) return null;
+    if (value.copy !== undefined && (!isInt(value.copy) || (value.copy as number) < 0)) return null;
+    if (value.actions !== undefined) {
+      if (!Array.isArray(value.actions)) return null;
+      const validActions = value.actions.every(item =>
+        isRecord(item) && isNonEmptyString(item.id) && isOptString(item.label) && isOptString(item.step),
+      );
+      if (!validActions) return null;
+    }
     return value as unknown as GoogleSetupPresentation;
   }
   if (value.kind === 'google-account-select') {
+    if (!isOptString(value.installationId)) return null;
     if (!isOptString(value.requestId) || !isOptString(value.botId) || !isOptString(value.actionLabel)) return null;
     if (!isOptString(value.toolName) || !isOptString(value.service) || !isOptString(value.reason) || !isOptString(value.selectedEmail)) return null;
     if (value.conversationId !== undefined && !isInt(value.conversationId)) return null;
@@ -235,12 +251,14 @@ export function readToolPresentation(value: unknown): ToolPresentation | null {
     return value as unknown as GoogleAccountSelectPresentation;
   }
   if (value.kind === 'google-browser-takeover') {
+    if (!isOptString(value.installationId)) return null;
     if (!isOptString(value.botId) || !isOptString(value.pageId) || !isOptString(value.phase)) return null;
     if (!isOptString(value.reason) || !isOptString(value.url) || !isOptString(value.step)) return null;
     if (value.canStreamInteract !== undefined && typeof value.canStreamInteract !== 'boolean') return null;
     return value as unknown as GoogleBrowserTakeoverPresentation;
   }
   if (value.kind === 'google-readiness') {
+    if (!isOptString(value.installationId)) return null;
     if (!isOptString(value.account) || !isOptString(value.service) || !isOptString(value.detail) || !isOptString(value.enableUrl)) return null;
     if (value.state !== undefined && !['ready', 'needs-permission', 'api-disabled', 'blocked-by-admin', 'error', 'unconfigured', 'disconnected', 'reconnect', 'ambiguous-account'].includes(String(value.state))) return null;
     if (value.accounts !== undefined && !(Array.isArray(value.accounts) && value.accounts.every(isNonEmptyString))) return null;

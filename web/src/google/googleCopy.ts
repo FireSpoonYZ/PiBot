@@ -199,10 +199,12 @@ export function normalizeSetupMode(raw: string | undefined): GoogleSetupMode | n
   return null;
 }
 
-export const GOOGLE_SETUP_STEP_ORDER = ['project', 'apis', 'branding', 'links', 'publish', 'client', 'connect'] as const;
+export const GOOGLE_SETUP_STEP_ORDER = ['account', 'project', 'apis', 'branding', 'links', 'publish', 'client', 'connect'] as const;
 
 export function googleStepTitle(step: string, t: Translator): string {
   switch (step) {
+    case 'account':
+      return t('确认 Google Cloud 账号', 'Confirm Google Cloud account');
     case 'project':
       return t('创建 Google Cloud 项目', 'Create Google Cloud project');
     case 'apis':
@@ -229,6 +231,12 @@ export function googleStepInstructions(
 ): { lines: string[]; sensitiveWarning?: string } {
   const uri = redirectUri || 'https://<your-center-domain>/api/oauth/google/callback';
   switch (step) {
+    case 'account':
+      return {
+        lines: [
+          t('确认用于创建 Google Cloud 项目的 Google 账号（个人 Gmail 为 External，Workspace 组织按权限可选 Internal）。', 'Confirm which Google account will own the Cloud project (External for Gmail, or Internal if your Workspace allows it).'),
+        ],
+      };
     case 'project':
       return {
         lines: [

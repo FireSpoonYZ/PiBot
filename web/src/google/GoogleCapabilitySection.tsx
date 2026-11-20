@@ -1,6 +1,6 @@
 // Shared Bot Capabilities Google Workspace section + operable Bot Rules (Triggers) editor.
 // Mounted in both mobile CapabilitiesPage.tsx and desktop BotCapabilities.tsx.
-// Strictly follows 04 product decisions:
+// Strictly follows 04 product decisions & real Center /api/google/* contracts:
 // - All Bots automatically share Center's Google connection (NO per-Bot Google toggle or assignment).
 // - 1 connected account is used directly; >1 asks per request in chat.
 // - Per-service readiness keeps People (Contacts) independent from Gmail.
@@ -77,35 +77,54 @@ type ActivePanel =
       initialChoices?: GoogleServiceChoice[];
     };
 
+function formatRuleFrom(from: string | string[] | undefined): string {
+  if (!from) return '';
+  return Array.isArray(from) ? from.join(', ') : from;
+}
+
 function ruleStatusDisplay(
   rule: GoogleRuleDto,
   account: GoogleAccountView | undefined,
   t: (zh: string, en: string) => string,
 ): { label: string; tone: 'ok' | 'warn' | 'muted' | 'danger' } {
-  if (!rule.enabled) {
+  const rt = rule.runtime;
+  const rtStatus = rt?.status ?? rule.status;
+  if (!rule.enabled || rtStatus === 'paused_disabled') {
     return { label: t('已暂停（规则已关闭）', 'Paused (disabled)'), tone: 'muted' };
   }
-  if (account?.status === 'reconnect' || rule.status === 'paused_reconnect') {
+  if (
+    account?.status === 'reconnect' ||
+    rtStatus === 'paused_account_reconnect' ||
+    rtStatus === 'paused_reconnect'
+  ) {
     return { label: t('已暂停（账号需重连）', 'Paused (reconnect required)'), tone: 'warn' };
   }
-  if (rule.status === 'backoff' || rule.backoffUntil) {
+  if (rtStatus === 'paused_account_missing') {
+    return { label: t('已暂停（账号已移除）', 'Paused (account removed)'), tone: 'warn' };
+  }
+  if (rtStatus === 'paused_service_unavailable') {
+    return { label: t('已暂停（服务未就绪）', 'Paused (service unavailable)'), tone: 'warn' };
+  }
+  if (rtStatus === 'paused_bot_unavailable') {
+    return { label: t('已暂停（Bot 不可用）', 'Paused (Bot unavailable)'), tone: 'muted' };
+  }
+  if (rt?.rateLimited || rtStatus === 'backoff' || rt?.backoffUntil || rule.backoffUntil) {
     return { label: t('限流退避中', 'Rate-limited backoff'), tone: 'warn' };
   }
-  if (rule.status === 'error' || rule.lastError) {
+  if (rtStatus === 'error' || rule.lastError) {
     return { label: t('检查出错', 'Check error'), tone: 'danger' };
   }
-  if (rule.status === 'paused') {
+  if (rtStatus === 'paused') {
+    const reason = rt?.detail ?? rule.pausedReason;
     return {
-      label: rule.pausedReason
-        ? t(`已暂停（${rule.pausedReason}）`, `Paused (${rule.pausedReason})`)
-        : t('已暂停', 'Paused'),
+      label: reason ? t(`已暂停（${reason}）`, `Paused (${reason})`) : t('已暂停', 'Paused'),
       tone: 'muted',
     };
   }
   return { label: t('运行中', 'Active'), tone: 'ok' };
 }
 
-function formatRuleTime(iso: string | undefined): string {
+function formatRuleTime(iso: string | null | undefined): string {
   if (!iso) return '';
   const ts = Date.parse(iso);
   if (!Number.isFinite(ts)) return iso;
@@ -189,12 +208,7 @@ export function GoogleCapabilitySection({
       const info = classifyGoogleError(cause);
       if (info.unavailable) {
         setUnavailable(true);
-        setStatusError(
-          t(
-            '当前 Center 尚未开启 Google Workspace 共享服务接口。',
-            'Shared Google Workspace endpoints are not available on this Center.',
-          ),
-        );
+        setStatusError(t('当前 Center 尚未开启 Google Workspace 共享服务接口。', 'Shared Google Workspace endpoints are not available on this Center.'));
       } else if (info.tempError || info.offline) {
         // Keep last known snapshot intact — never downgrade connected accounts on transient errors!
         setTempError(true);
@@ -310,7 +324,7 @@ export function GoogleCapabilitySection({
     setEditingRuleId(rule.id);
     setRuleSource(rule.source);
     setRuleAccount(rule.account);
-    setRuleFrom(rule.from ?? '');
+    setRuleFrom(formatRuleFrom(rule.from));
     setRuleSubject(rule.subjectContains ?? '');
     setRuleCalendar(rule.calendar ?? 'primary');
     setRuleMinutesBefore(rule.minutesBefore ?? 15);
@@ -349,7 +363,7 @@ export function GoogleCapabilitySection({
             }
           : {
               calendar: ruleCalendar.trim() || 'primary',
-              minutesBefore: Math.max(1, Math.min(180, Number(ruleMinutesBefore) || 15)),
+              minutesBefore: Math.max(0, Math.min(1440, Math.round(Number(ruleMinutesBefore) || 15))),
             }),
       };
       await saveGoogleRule(api, identity, payload);
@@ -375,7 +389,23 @@ export function GoogleCapabilitySection({
     setRulesBusyId(key);
     setRulesError('');
     try {
-      await saveGoogleRule(api, identity, { ...rule, enabled: !rule.enabled });
+      // Pass only whitelisted save fields (buildGoogleRuleSaveBody strips runtime/createdAt/etc.).
+      await saveGoogleRule(api, identity, {
+        id: rule.id,
+        name: rule.name,
+        deviceId: rule.deviceId,
+        botId: rule.botId,
+        account: rule.account,
+        source: rule.source,
+        enabled: !rule.enabled,
+        from: rule.from,
+        to: rule.to,
+        subjectContains: rule.subjectContains,
+        label: rule.label,
+        calendar: rule.calendar,
+        minutesBefore: rule.minutesBefore,
+        instruction: rule.instruction,
+      });
       if (!mountedRef.current) return;
       await loadRules();
     } catch (cause) {
@@ -391,7 +421,7 @@ export function GoogleCapabilitySection({
     setRulesBusyId(rule.id);
     setRulesError('');
     try {
-      await removeGoogleRule(api, identity, { id: rule.id, deviceId, botId });
+      await removeGoogleRule(api, identity, { id: rule.id });
       if (!mountedRef.current) return;
       setConfirmDeleteId(null);
       await loadRules();
@@ -441,10 +471,7 @@ export function GoogleCapabilitySection({
       </div>
 
       <p className="gws-muted">
-        {t(
-          'Gmail、日历、云盘/文档/表格与联系人工具默认对所有现有及新建 Bot 开放，无需逐 Bot 开关。',
-          'Gmail, Calendar, Drive/Docs/Sheets, and Contacts are shared across all Bots automatically — no per-Bot toggle needed.',
-        )}
+        {t('Gmail、日历、云盘/文档/表格与联系人工具默认对所有现有及新建 Bot 开放，无需逐 Bot 开关。', 'Gmail, Calendar, Drive/Docs/Sheets, and Contacts are shared across all Bots automatically — no per-Bot toggle needed.')}
       </p>
 
       {/* Dimension A: Center OAuth App status */}
@@ -473,10 +500,7 @@ export function GoogleCapabilitySection({
       {!unavailable && snapshot && !client?.configured ? (
         <div className="gws-empty-box">
           <p className="gws-muted">
-            {t(
-              '配置一次 Center Web OAuth 应用后，所有主机上的 Bot 都可复用，无需在每台设备重复导入密钥文件。若你不是管理员，请联系 Center 管理员配置。',
-              'Configure Center’s Web OAuth app once and every Host & Bot shares it. If you are not an admin, contact your Center administrator.',
-            )}
+            {t('配置一次 Center Web OAuth 应用后，所有主机上的 Bot 都可复用，无需在每台设备重复导入密钥文件。若你不是管理员，请联系 Center 管理员配置。', 'Configure Center’s Web OAuth app once and every Host & Bot shares it. If you are not an admin, contact your Center administrator.')}
           </p>
           <div className="gws-actions">
             <button
@@ -507,10 +531,7 @@ export function GoogleCapabilitySection({
         accounts.length === 0 ? (
           <div className="gws-empty-box">
             <p className="gws-muted">
-              {t(
-                'Center 应用已就绪，尚未连接 Google 账号。在系统浏览器登录授权后，所有 Bot 即可使用已批准的服务。',
-                'Center app is ready, but no Google account is connected yet. Sign in via system browser to enable approved services for all Bots.',
-              )}
+              {t('Center 应用已就绪，尚未连接 Google 账号。在系统浏览器登录授权后，所有 Bot 即可使用已批准的服务。', 'Center app is ready, but no Google account is connected yet. Sign in via system browser to enable approved services for all Bots.')}
             </p>
             <div className="gws-actions">
               <button
@@ -529,10 +550,7 @@ export function GoogleCapabilitySection({
               <span className="gws-label-xs">
                 {accounts.length === 1
                   ? t('共享账号（单账号 · 对话中默认使用）', 'Shared account (single · used by default)')
-                  : t(
-                      `共享账号（共 ${accounts.length} 个 · 对话未指明时会询问本次使用哪个）`,
-                      `Shared accounts (${accounts.length} · chat asks when unspecified)`,
-                    )}
+                  : t(`共享账号（共 ${accounts.length} 个 · 对话未指明时会询问本次使用哪个）`, `Shared accounts (${accounts.length} · chat asks when unspecified)`)}
               </span>
               <button
                 type="button"
@@ -742,10 +760,7 @@ export function GoogleCapabilitySection({
           {rulesOpen ? (
             <div className="gws-rules-body">
               <p className="gws-muted">
-                {t(
-                  '规则仅决定新邮件或会议开始前自动通知本 Bot，不是为本 Bot 开通 Google 授权。暂停单条规则不影响手动查询或其他规则。',
-                  'Rules trigger this Bot on new mail or upcoming meetings (not per-Bot Google authorization). Pausing a rule never affects manual queries.',
-                )}
+                {t('规则仅决定新邮件或会议开始前自动通知本 Bot，不是为本 Bot 开通 Google 授权。暂停单条规则不影响手动查询或其他规则。', 'Rules trigger this Bot on new mail or upcoming meetings (not per-Bot Google authorization). Pausing a rule never affects manual queries.')}
               </p>
 
               {rulesError ? (
@@ -763,10 +778,13 @@ export function GoogleCapabilitySection({
                 <div className="gws-rule-list">
                   {rules.map(rule => {
                     const key = rule.id ?? `${rule.source}:${rule.account}:${rule.instruction}`;
-                    const acc = accounts.find(a => a.email === rule.account);
+                    const acc = accounts.find(a => a.email.toLowerCase() === rule.account.toLowerCase());
                     const status = ruleStatusDisplay(rule, acc, t);
                     const busy = rulesBusyId === key;
                     const confirmingDelete = confirmDeleteId === rule.id;
+                    const fromDisplay = formatRuleFrom(rule.from);
+                    const lastChecked = rule.runtime?.lastCheckedAt ?? rule.lastCheckedAt;
+                    const pendingCount = rule.runtime?.pendingCount ?? 0;
 
                     return (
                       <div key={key} className="gws-rule-item">
@@ -783,10 +801,11 @@ export function GoogleCapabilitySection({
                         </div>
                         <div className="gws-rule-meta">
                           <span>{rule.account}</span>
-                          {rule.source === 'gmail' && rule.from ? <span>· {t(`发件人: ${rule.from}`, `From: ${rule.from}`)}</span> : null}
+                          {rule.source === 'gmail' && fromDisplay ? <span>· {t(`发件人: ${fromDisplay}`, `From: ${fromDisplay}`)}</span> : null}
                           {rule.source === 'gmail' && rule.subjectContains ? <span>· {t(`主题含: ${rule.subjectContains}`, `Subject: ${rule.subjectContains}`)}</span> : null}
                           {rule.source === 'calendar' && rule.calendar ? <span>· {t(`日历: ${rule.calendar}`, `Calendar: ${rule.calendar}`)}</span> : null}
-                          {rule.lastCheckedAt ? <span>· {t(`上次检查 ${formatRuleTime(rule.lastCheckedAt)}`, `Checked ${formatRuleTime(rule.lastCheckedAt)}`)}</span> : null}
+                          {lastChecked ? <span>· {t(`上次检查 ${formatRuleTime(lastChecked)}`, `Checked ${formatRuleTime(lastChecked)}`)}</span> : null}
+                          {pendingCount > 0 ? <span>· {t(`待投递 ${pendingCount}`, `${pendingCount} pending`)}</span> : null}
                         </div>
                         <p className="gws-rule-instruction">{rule.instruction}</p>
                         <div className="gws-rule-actions">
@@ -966,8 +985,8 @@ export function GoogleCapabilitySection({
                         <input
                           id={`${fieldId}-rule-mins`}
                           type="number"
-                          min={1}
-                          max={180}
+                          min={0}
+                          max={1440}
                           className="gws-input"
                           value={ruleMinutesBefore}
                           disabled={ruleSaving}

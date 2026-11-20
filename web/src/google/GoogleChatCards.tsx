@@ -46,7 +46,6 @@ import './google-ui.css';
 
 export function GoogleSetupChatCard({
   presentation,
-  active,
   disabled,
   googleContext,
 }: {
@@ -60,7 +59,7 @@ export function GoogleSetupChatCard({
     return (
       <div className="gws-card is-muted">
         <div className="gws-card-head">
-          <span className="gws-card-title">{t('Google 应用配置向导', 'Google App Setup')}</span>
+          <span className="gws-card-title">{presentation.title || t('Google 应用配置向导', 'Google App Setup')}</span>
           <span className="gws-pill is-muted">{t('只读', 'Read-only')}</span>
         </div>
         <p className="gws-muted">
@@ -70,6 +69,8 @@ export function GoogleSetupChatCard({
     );
   }
 
+  // Note: Setup cards remain interactive even after the Bot ends its turn (in chat history)
+  // as long as the live run ID and card copy match `googleSetupControl(action='status')`.
   return (
     <GoogleSetupWizard
       api={googleContext.api}
@@ -77,8 +78,11 @@ export function GoogleSetupChatCard({
       botId={presentation.botId || googleContext.botId}
       botName={googleContext.botName}
       isLocalAndroid={googleContext.isLocalAndroid}
-      expectedRunId={presentation.runId}
-      readOnly={Boolean(disabled) || (!active && presentation.state === 'completed')}
+      expectedRunId={presentation.runId ?? undefined}
+      expectedCard={presentation.card ?? undefined}
+      expectedStep={presentation.step ?? undefined}
+      expectedCardCopy={presentation.copy}
+      readOnly={Boolean(disabled) || presentation.state === 'done' || presentation.state === 'cancelled'}
       callGoogleSetup={googleContext.callGoogleSetup}
       onOpenBrowser={googleContext.onOpenBrowser}
       onOpenCenterAdmin={googleContext.onOpenCenterAdmin}
@@ -146,7 +150,12 @@ export function GoogleAccountSelectCard({
       }));
 
   const isSettled = Boolean(selectedEmail) || cancelled || presentation.status === 'selected' || presentation.status === 'cancelled';
-  const canInteract = active && !disabled && !isSettled && Boolean(googleContext?.onSelectGoogleAccount);
+  // Blocking capability requests (`requestId`) require active live slot; non-blocking ambiguity prompts stay clickable in chat.
+  const canInteract =
+    !disabled &&
+    !isSettled &&
+    Boolean(googleContext?.onSelectGoogleAccount) &&
+    (active || !presentation.requestId);
 
   const handleChoose = async (email: string) => {
     if (!canInteract || submitting || !googleContext?.onSelectGoogleAccount) return;
@@ -208,11 +217,7 @@ export function GoogleAccountSelectCard({
       </div>
 
       <p className="gws-muted">
-        {presentation.reason ||
-          t(
-            'Center 已连接多个 Google 账号且本次请求未指明目标账号。此选择仅用于本次操作，不是逐 Bot 授权。',
-            'Multiple shared Google accounts are connected and this request did not specify one. This choice applies to this action only — it is not per-Bot authorization.',
-          )}
+        {presentation.reason || t('Center 已连接多个 Google 账号且本次请求未指明目标账号。此选择仅用于本次操作，不是逐 Bot 授权。', 'Multiple shared Google accounts are connected and this request did not specify one. This choice applies to this action only — it is not per-Bot authorization.')}
       </p>
 
       {presentation.actionLabel || presentation.service ? (
@@ -324,7 +329,10 @@ export function GoogleBrowserTakeoverCard({
     if (googleContext?.callBrowser) {
       setBusy(true);
       try {
-        await googleContext.callBrowser({ action: 'status', pageId: presentation.pageId });
+        await googleContext.callBrowser({
+          action: 'status',
+          ...(presentation.pageId ? { pageId: presentation.pageId } : {}),
+        });
       } catch (cause) {
         setError(classifyGoogleError(cause).message);
       } finally {
@@ -338,7 +346,7 @@ export function GoogleBrowserTakeoverCard({
     setBusy(true);
     setError('');
     try {
-      await googleContext.callGoogleSetup({ action: 'answer', field: 'mode', value: 'guide-browser' });
+      await googleContext.callGoogleSetup({ action: 'resume', mode: 'guide-browser' });
     } catch (cause) {
       setError(classifyGoogleError(cause).message);
     } finally {
@@ -357,17 +365,13 @@ export function GoogleBrowserTakeoverCard({
           {canStream
             ? active
               ? t('已停手 · 待接管', 'Paused · Ready')
-              : t('已记录', 'Logged')
+              : t('待查看', 'Open to check')
             : t('不可实时投屏', 'Stream unavailable')}
         </span>
       </div>
 
       <p className="gws-muted">
-        {presentation.reason ||
-          t(
-            '当前页面到达登录、政策条款或敏感凭据步骤。Bot 已停止操作，请在原页面完成并点击「交还给 Bot」。',
-            'Reached sign-in, policy agreement, or a sensitive credential step. Bot has stopped — complete the step on the same page, then hand back.',
-          )}
+        {presentation.reason || t('当前页面到达登录、政策条款或敏感凭据步骤。Bot 已停止操作，请在原页面完成并点击「交还给 Bot」。', 'Reached sign-in, policy agreement, or a sensitive credential step. Bot has stopped — complete the step on the same page, then hand back.')}
       </p>
 
       {presentation.url ? (
@@ -380,12 +384,7 @@ export function GoogleBrowserTakeoverCard({
       {isGoogleLoginUrl ? (
         <p className="gws-sensitive-note">
           <ShieldAlert size={14} aria-hidden="true" />
-          <span>
-            {t(
-              '提示：Google API 授权须在系统浏览器完成，此处网页登录不会同步为 Bot 的 Google API 权限。',
-              'Note: Google API authorization happens in your system browser. Signing in here does not grant Google API access.',
-            )}
-          </span>
+          <span>{t('提示：Google API 授权须在系统浏览器完成，此处网页登录不会同步为 Bot 的 Google API 权限。', 'Note: Google API authorization happens in your system browser. Signing in here does not grant Google API access.')}</span>
         </p>
       ) : null}
 

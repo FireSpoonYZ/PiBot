@@ -90,6 +90,7 @@ import {
   type VaultUnlockSubmitPayload,
 } from '../../../web/src/ToolPresentation';
 import BotBrowserPanel from '../../../web/src/bot-browser/BotBrowserPanel';
+import { openExternalUrl } from '../../../web/src/center-admin/openExternalUrl';
 import {
   createBrowserControlRequest,
   createGoogleSetupControlRequest,
@@ -4600,7 +4601,16 @@ function PrimaryChatPane({
                     key={`browser:${sess}:${bot.botId}`}
                     botId={bot.botId}
                     deviceId={bot.deviceId}
+                    botName={bot.role}
+                    hostLabel={deviceName}
+                    mode="sidebar"
+                    connected={online && pageActive}
                     request={callBrowser}
+                    onSwitchToExternalGuide={(url) => {
+                      void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
+                      if (url) void openExternalUrl(url).catch(() => {});
+                    }}
+                    onOpenSystemGoogleAuth={() => setInspectorTab('capabilities')}
                     onClose={() => setInspectorTab(null)}
                   />
                 </div>

@@ -1,5 +1,6 @@
 // Shared Google Workspace & Bot Browser UI contracts for PiBot chat cards and capability views.
-// Type-only imports from desktop/web so no runtime cycles are introduced.
+// Aligned with center-server/google-workspace/*, host-core/google-setup/service.js,
+// and host-core/browser-setup-protocol.js.
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
 
 export type GoogleServiceChoice = 'gmail' | 'calendar' | 'files';
@@ -56,19 +57,40 @@ export interface GoogleAuthFlowStatus {
 
 export type GoogleRuleSource = 'gmail' | 'calendar';
 
+export interface GoogleRuleRuntimeView {
+  status: string;
+  reason?: string | null;
+  detail?: string | null;
+  enableUrl?: string | null;
+  lastCheckedAt?: string | null;
+  lastEventAt?: string | null;
+  backoffUntil?: string | null;
+  rateLimited?: boolean;
+  targetOnline?: boolean | null;
+  pendingCount?: number;
+  missedCount?: number;
+}
+
 export interface GoogleRuleDto {
   id?: string;
+  name?: string;
   deviceId: string;
   botId: string;
   account: string;
   source: GoogleRuleSource;
+  event?: 'new_email' | 'starting_soon';
   enabled: boolean;
-  from?: string;
+  from?: string | string[];
+  to?: string | string[];
   subjectContains?: string;
+  label?: string;
   calendar?: string;
   minutesBefore?: number;
   instruction: string;
-  status?: 'active' | 'paused' | 'paused_reconnect' | 'backoff' | 'error' | string;
+  listeningSince?: string | null;
+  runtime?: GoogleRuleRuntimeView;
+  // Optional legacy flat fallbacks
+  status?: string;
   pausedReason?: string;
   lastCheckedAt?: string;
   backoffUntil?: string;
@@ -80,7 +102,9 @@ export type GoogleSetupMode = 'do-it-for-me' | 'guide-here' | 'guide-browser';
 export interface GoogleSetupStepView {
   id?: string;
   step?: string;
-  status?: 'pending' | 'active' | 'done' | 'skipped' | 'blocked' | 'waiting-human' | string;
+  status?: 'pending' | 'active' | 'needs-user' | 'done' | 'skipped' | 'failed' | string;
+  by?: 'user' | 'bot';
+  note?: string;
   title?: string;
   detail?: string;
   url?: string;
@@ -92,8 +116,12 @@ export interface GoogleSetupBlocker {
   message?: string;
   step?: string;
   email?: string;
+  signedIn?: string;
+  wanted?: string;
   services?: GoogleServiceChoice[];
   enableUrl?: string;
+  enableUrls?: Array<{ service: string; url: string }>;
+  actions?: GoogleSetupAction[];
   [key: string]: unknown;
 }
 
@@ -107,24 +135,80 @@ export interface GoogleSetupAction {
   [key: string]: unknown;
 }
 
+export interface GoogleSetupModeAvailabilityEntry {
+  available?: boolean;
+  reason?: string;
+  caveat?: string;
+  fallbackMode?: string;
+  recommended?: boolean;
+  canIsolateSensitivePages?: boolean;
+  clientStepRequiresSystemBrowser?: boolean;
+}
+
+export interface GoogleSetupModeAvailability {
+  recommendedMode?: GoogleSetupMode;
+  clientStepRequiresSystemBrowser?: boolean;
+  modes?: Partial<Record<GoogleSetupMode, GoogleSetupModeAvailabilityEntry>>;
+}
+
+export interface GoogleSetupBrowserLock {
+  active: boolean;
+  step?: string;
+  reason?: string;
+  lockedAt?: number;
+  requiresSystemBrowser?: boolean;
+}
+
+export interface GoogleSetupCardView {
+  card?: string;
+  step?: string;
+  copy?: number;
+  title?: string;
+  summary?: string;
+  actions?: GoogleSetupAction[];
+}
+
 export interface GoogleSetupControlState {
-  id?: string;
+  id?: string | null;
+  botId?: string;
   revision: number;
   state: string;
-  mode?: string;
-  step?: string;
+  mode?: string | null;
+  step?: string | null;
   steps?: Record<string, GoogleSetupStepView> | GoogleSetupStepView[];
   choices?: GoogleServiceChoice[];
   projectId?: string;
   account?: string;
-  accounts?: GoogleAccountView[];
+  accounts?: string[];
+  kind?: 'work' | 'personal';
+  personStep?: string;
+  browserPageId?: string;
+  browserLock?: GoogleSetupBrowserLock;
+  brandingLinks?: {
+    homePage?: string;
+    privacyPolicy?: string;
+    authorizedDomain?: string;
+    redirectUri?: string;
+  };
+  center?: {
+    reachable?: boolean;
+    isAdmin?: boolean;
+    client?: GoogleClientStatus;
+    accounts?: GoogleAccountView[];
+  } | null;
+  modeAvailability?: GoogleSetupModeAvailability;
   blocker?: GoogleSetupBlocker | null;
   actions?: GoogleSetupAction[];
+  card?: GoogleSetupCardView | null;
   canUseEmbeddedBrowser?: boolean;
   browserTakeoverRequired?: boolean;
   browserPrompt?: string;
   redirectUri?: string;
+  applied?: boolean;
+  stale?: boolean;
+  staleReason?: string;
   error?: string;
+  lastError?: string;
   unavailable?: boolean;
   reason?: string;
 }
@@ -141,15 +225,19 @@ export type BotBrowserControlCall = (
 export interface GoogleSetupPresentation {
   kind: 'google-setup';
   version: 1;
-  installationId: string;
+  installationId?: string;
   botId?: string;
-  runId?: string;
-  card?: string;
-  step?: string;
+  runId?: string | null;
+  card?: string | null;
+  step?: string | null;
+  copy?: number;
   revision?: number;
-  mode?: string;
+  mode?: string | null;
   state?: string;
+  title?: string;
   summary?: string;
+  blockerKind?: string | null;
+  actions?: Array<{ id: string; label?: string; step?: string }>;
 }
 
 export interface GoogleAccountSelectOption {
@@ -161,7 +249,7 @@ export interface GoogleAccountSelectOption {
 export interface GoogleAccountSelectPresentation {
   kind: 'google-account-select';
   version: 1;
-  installationId: string;
+  installationId?: string;
   requestId?: string;
   conversationId?: number;
   botId?: string;
@@ -177,7 +265,7 @@ export interface GoogleAccountSelectPresentation {
 export interface GoogleBrowserTakeoverPresentation {
   kind: 'google-browser-takeover';
   version: 1;
-  installationId: string;
+  installationId?: string;
   botId?: string;
   pageId?: string;
   phase?: 'bot' | 'taking' | 'human' | 'held' | string;
@@ -190,7 +278,7 @@ export interface GoogleBrowserTakeoverPresentation {
 export interface GoogleReadinessPresentation {
   kind: 'google-readiness';
   version: 1;
-  installationId: string;
+  installationId?: string;
   account?: string;
   service?: GoogleServiceKey | GoogleServiceChoice | string;
   state?: GoogleServiceReadinessState | 'unconfigured' | 'disconnected' | 'reconnect' | 'ambiguous-account';

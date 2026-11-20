@@ -101,12 +101,7 @@ export function GoogleClientConfigForm({
     const info = classifyGoogleError(cause);
     if (info.adminRequired) {
       setAdminBlocked(true);
-      setError(
-        t(
-          '当前账号不是 Center 管理员，无法修改 Center Google OAuth 应用配置。请联系 Center 管理员完成一次性配置。',
-          'Center admin permission is required to configure the Google OAuth app. Contact your Center administrator.',
-        ),
-      );
+      setError(t('当前账号不是 Center 管理员，无法修改 Center Google OAuth 应用配置。请联系 Center 管理员完成一次性配置。', 'Center admin permission is required to configure the Google OAuth app. Contact your Center administrator.'));
       return;
     }
     if (info.offline) {
@@ -192,10 +187,7 @@ export function GoogleClientConfigForm({
           <span>{t('Center Google 应用已加密保存', 'Center Google app encrypted & saved')}</span>
         </div>
         <p className="gws-muted">
-          {t(
-            `Web Client ID：${maskClientId(savedClientId)} · 已就绪。出于安全原因，Client Secret 不再回显，也不支持导出共享。`,
-            `Web Client ID: ${maskClientId(savedClientId)} · Ready. For security, Client Secret is never shown again and cannot be exported.`,
-          )}
+          {t(`Web Client ID：${maskClientId(savedClientId)} · 已就绪。出于安全原因，Client Secret 不再回显，也不支持导出共享。`, `Web Client ID: ${maskClientId(savedClientId)} · Ready. For security, Client Secret is never shown again and cannot be exported.`)}
         </p>
       </div>
     );
@@ -208,10 +200,7 @@ export function GoogleClientConfigForm({
         <span>{t('私密录入 Center Web OAuth 凭据', 'Private Center Web OAuth Configuration')}</span>
       </div>
       <p className="gws-muted">
-        {t(
-          '凭据通过独立可信通道直传 Center 加密保存，不进入聊天记录或模型上下文；保存后永不回显或导出 Client Secret。',
-          'Submitted directly to Center over the trusted owner channel — never enters chat or model context, and never exported.',
-        )}
+        {t('凭据通过独立可信通道直传 Center 加密保存，不进入聊天记录或模型上下文；保存后永不回显或导出 Client Secret。', 'Submitted directly to Center over the trusted owner channel — never enters chat or model context, and never exported.')}
       </p>
 
       {configuredClientId ? (
@@ -518,6 +507,7 @@ export function GoogleSignInFlow({
       setFlow(started);
       setPhase('pending');
       setNowMs(Date.now());
+      // Always launch system browser (never Bot WebView).
       await openExternalUrl(started.authorizationUrl);
     } catch (cause) {
       if (!mountedRef.current) return;
@@ -551,10 +541,7 @@ export function GoogleSignInFlow({
           <span>{t('等待系统浏览器完成 Google 授权', 'Waiting for Google sign-in in system browser')}</span>
         </div>
         <p className="gws-muted">
-          {t(
-            `请在刚打开的系统浏览器中完成 Google 登录、MFA 与授权同意${remaining ? `（剩余 ${remaining}）` : ''}。完成后会自动回流核验，无需复制回调地址到聊天。`,
-            `Complete Google sign-in, MFA, and consent in your system browser${remaining ? ` (${remaining} left)` : ''}. Center verifies the callback automatically — never paste callbacks into chat.`,
-          )}
+          {t(`请在刚打开的系统浏览器中完成 Google 登录、MFA 与授权同意${remaining ? `（剩余 ${remaining}）` : ''}。完成后会自动回流核验，无需复制回调地址到聊天。`, `Complete Google sign-in, MFA, and consent in your system browser${remaining ? ` (${remaining} left)` : ''}. Center verifies the callback automatically — never paste callbacks into chat.`)}
         </p>
         <div className="gws-actions">
           <button
@@ -585,10 +572,7 @@ export function GoogleSignInFlow({
         <div className="gws-private-head">
           <Check size={15} aria-hidden="true" />
           <span>
-            {t(
-              `已连接 ${connectedAccount.email} · 所有 Bot 可用`,
-              `Connected ${connectedAccount.email} · Available to all Bots`,
-            )}
+            {t(`已连接 ${connectedAccount.email} · 所有 Bot 可用`, `Connected ${connectedAccount.email} · Available to all Bots`)}
           </span>
         </div>
         {readyNames.length > 0 ? (
@@ -618,10 +602,7 @@ export function GoogleSignInFlow({
         </div>
         {missingChoices.length > 0 ? (
           <p className="gws-muted">
-            {t(
-              '未勾选的服务已保持「未授权」状态，你可以现在补授权，或暂不使用此项。',
-              'Unchecked services remain “Needs permission”. You can grant permission now or skip them.',
-            )}
+            {t('未勾选的服务已保持「未授权」状态，你可以现在补授权，或暂不使用此项。', 'Unchecked services remain “Needs permission”. You can grant permission now or skip them.')}
           </p>
         ) : null}
         {onCancel ? (
@@ -684,17 +665,11 @@ export function GoogleSignInFlow({
       </div>
 
       <p className="gws-base-scope-note">
-        {t(
-          '基础附带（不可单独取消）：账号识别与联系人联查（People API，用于按姓名查找联系人，将独立探测就绪度）。',
-          'Base included (always requested): Account identity & People API contacts lookup (probed independently).',
-        )}
+        {t('基础附带（不可单独取消）：账号识别与联系人联查（People API，用于按姓名查找联系人，将独立探测就绪度）。', 'Base included (always requested): Account identity & People API contacts lookup (probed independently).')}
       </p>
 
       <p className="gws-share-disclosure">
-        {t(
-          '连接后，本中心现在和以后创建的所有 Bot 都能以你的身份使用你同意的 Google 服务；能向这些 Bot 发起任务的人也可能通过它们访问数据。',
-          'Once connected, all current and future Bots in this Center can use the services you approve; anyone allowed to message those Bots may access that data through them.',
-        )}
+        {t('连接后，本中心现在和以后创建的所有 Bot 都能以你的身份使用你同意的 Google 服务；能向这些 Bot 发起任务的人也可能通过它们访问数据。', 'Once connected, all current and future Bots in this Center can use the services you approve; anyone allowed to message those Bots may access that data through them.')}
       </p>
 
       {phase === 'cancelled' ? (
