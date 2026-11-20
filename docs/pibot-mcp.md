@@ -21,7 +21,7 @@ Bot 可通过 `tool_search` 按需加载内置管理工具。Center 可以把同
 ]
 ```
 
-权限按业务分组（`bots`、`capabilities`、`collaboration`、`automation`、`center`、`messages`），每组有独立 `read` / `write`；写权限不隐含读权限。**除 `messages` 限定到 `botTargets` 外，管理类 scope 可能影响整个 Center**（例如更改全局配置、提交自动化、向真实群发信）。不要给只需要聊天的客户端发管理权限。用户确认、配对、信任证书、密钥和连接授权不在操作目录。安装或更新未经审核的可执行能力、全局启用能力包仍由所有者操作；已全局启用的能力可按 Bot 开关。
+权限按业务分组（`bots`、`capabilities`、`collaboration`、`automation`、`center`、`messages`），每组有独立 `read` / `write`；写权限不隐含读权限。**除 `messages` 限定到 `botTargets` 外，管理类 scope 可能影响整个 Center**（例如更改全局配置、提交自动化、向真实群发信）。只需聊天时，只授予 `messages` 权限。管理类写权限可以修改日程、群聊和自动化指令；这些普通 Bot 任务仍可使用该 Bot 已有的工具，不受外部问答的隔离规则保护。只向受信任的客户端开放对应的管理权限。用户确认、配对、信任证书、密钥和连接授权不在操作目录。安装或更新未经审核的可执行能力、全局启用能力包仍由所有者操作；已全局启用的能力可按 Bot 开关。
 
 ## 发消息和取回复
 
