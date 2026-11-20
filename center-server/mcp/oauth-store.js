@@ -345,6 +345,9 @@ export function createOAuthStateStore({
   limits = {},
   cleanupIntervalMs = DEFAULT_CLEANUP_INTERVAL_MS,
 } = {}) {
+  if (typeof now !== 'function') {
+    throw new Error('now must be a function');
+  }
   const resolvedTtl = {
     consent: positiveInt(ttl.consent, DEFAULT_TTL_MS.consent, 'ttl.consent'),
     authCode: positiveInt(ttl.authCode, DEFAULT_TTL_MS.authCode, 'ttl.authCode'),
@@ -552,7 +555,7 @@ export function createOAuthStateStore({
       usedRefreshTokens.set(hash, {
         grantId: entry.grantId,
         clientId: entry.clientId,
-        expiresAtMs: entry.expiresAtMs,
+        expiresAtMs: Math.max(entry.expiresAtMs, ts + resolvedTtl.refreshToken),
       });
     },
     revokeToken(token, clientId, tokenTypeHint) {
@@ -566,9 +569,20 @@ export function createOAuthStateStore({
       };
       const checkRefresh = () => {
         const entry = refreshTokens.get(hash);
-        if (!entry || entry.clientId !== clientId) return false;
-        refreshTokens.delete(hash);
-        revokeGrant(entry.grantId);
+        if (entry) {
+          if (entry.clientId !== clientId) return false;
+          refreshTokens.delete(hash);
+          revokeGrant(entry.grantId);
+          return true;
+        }
+        const used = usedRefreshTokens.get(hash);
+        if (!used) return false;
+        if (used.expiresAtMs <= now()) {
+          usedRefreshTokens.delete(hash);
+          return false;
+        }
+        if (used.clientId !== clientId) return false;
+        revokeGrant(used.grantId);
         return true;
       };
       if (tokenTypeHint === 'refresh_token') {

@@ -124,16 +124,19 @@ async function createTestHarness({
     return { cookie: cookieOf(res, cookie) };
   }
 
-  async function authorizeAndApprove({
-    ownerCookie,
-    client = CLIENT_A,
-    redirectUri = client.redirectUris[0],
-    scope = 'mcp:read mcp:dispatch',
-    state = 'state-xyz-123',
-    resource = RESOURCE_URL,
-    includeResource = true,
-    pkce = makePkce(),
-  }) {
+  async function authorizeAndApprove(options = {}) {
+    const {
+      ownerCookie,
+      client = CLIENT_A,
+      redirectUri = client.redirectUris[0],
+      includeScope = true,
+      state = 'state-xyz-123',
+      resource = RESOURCE_URL,
+      includeResource = true,
+      pkce = makePkce(),
+    } = options;
+    const hasScope = Object.prototype.hasOwnProperty.call(options, 'scope');
+    const scope = hasScope ? options.scope : 'mcp:read mcp:dispatch';
     const query = new URLSearchParams({
       response_type: 'code',
       client_id: client.clientId,
@@ -142,7 +145,7 @@ async function createTestHarness({
       code_challenge: pkce.challenge,
       code_challenge_method: 'S256',
     });
-    if (scope !== undefined) query.set('scope', scope);
+    if (includeScope && scope !== undefined) query.set('scope', scope);
     if (includeResource && resource !== undefined) query.set('resource', resource);
 
     const getRes = await app.inject({
@@ -173,7 +176,7 @@ async function createTestHarness({
     assert.ok(code, 'authorization code must be returned on approval');
     assert.equal(location.searchParams.get('state'), state);
     assert.equal(location.searchParams.get('iss'), PUBLIC_URL);
-    return { code, pkce, redirectUri, state, getRes, postRes };
+    return { code, pkce, redirectUri, state, getRes, postRes, authorizeQuery: query };
   }
 
   async function exchangeCode({
@@ -396,6 +399,8 @@ test('full OAuth 2.1 S256 PKCE flow with client_secret_basic and client_secret_p
       includeResource: false,
       state: 'google-state-002',
     });
+    assert.equal(flow2.authorizeQuery.has('scope'), false);
+    assert.equal(flow2.authorizeQuery.has('resource'), false);
     assert.match(flow2.getRes.body, /No dispatch Bots configured/i);
     const tokenRes2 = await harness.exchangeCode({
       code: flow2.code,
@@ -642,6 +647,11 @@ test('rejects invalid authorize parameters, redirect mismatches, non-S256 PKCE, 
         params: { response_type: 'code', state: 's-sc2', code_challenge: pkce.challenge, code_challenge_method: 'S256', scope: 'mcp:bots:list' },
         expectedError: 'invalid_scope',
       },
+      {
+        name: 'empty scope rejected fail-closed',
+        params: { response_type: 'code', state: 's-sc-empty', code_challenge: pkce.challenge, code_challenge_method: 'S256', scope: '' },
+        expectedError: 'invalid_scope',
+      },
     ];
 
     for (const tc of errorCases) {
@@ -669,6 +679,7 @@ test('rejects invalid authorize parameters, redirect mismatches, non-S256 PKCE, 
       scope: undefined,
       state: 's-intersect',
     });
+    assert.equal(flowDefault.authorizeQuery.has('scope'), false);
     const tokDefault = await harness.exchangeCode({ code: flowDefault.code, pkce: flowDefault.pkce, client: CLIENT_A });
     assert.equal(tokDefault.statusCode, 200);
     assert.equal(tokDefault.json().scope, 'mcp:read mcp:dispatch');
@@ -1118,6 +1129,234 @@ test('bounded in-memory capacity evicts oldest tokens and close() invalidates ac
       payload: {},
     });
     assert.equal(afterClose.statusCode, 401);
+  } finally {
+    await harness.close();
+  }
+});
+
+test('enforces consent expiry, refresh expiry, long-lived replay revocation, and rotated refresh revocation', async () => {
+  let clockMs = 1_700_000_000_000;
+  const harness = await createTestHarness({
+    now: () => clockMs,
+    ttl: {
+      consent: 60_000,
+      authCode: 60_000,
+      accessToken: 120_000,
+      refreshToken: 600_000,
+    },
+  });
+  try {
+    const owner = await harness.loginOwner();
+
+    // 1. Expired consent fails closed (400 HTML, no code issued)
+    const pkceConsent = makePkce();
+    const consentGet = await harness.app.inject({
+      method: 'GET',
+      url: `${MCP_OAUTH_PATHS.authorize}?${new URLSearchParams({
+        response_type: 'code',
+        client_id: CLIENT_A.clientId,
+        redirect_uri: CLIENT_A.redirectUris[0],
+        scope: 'mcp:read',
+        state: 'state-consent-expiry',
+        code_challenge: pkceConsent.challenge,
+        code_challenge_method: 'S256',
+      }).toString()}`,
+      headers: { cookie: owner.cookie },
+    });
+    assert.equal(consentGet.statusCode, 200);
+    const { consentId, csrfToken } = extractConsentForm(consentGet.body);
+    clockMs += 60_000;
+    const expiredConsentPost = await harness.app.inject({
+      method: 'POST',
+      url: MCP_OAUTH_PATHS.authorize,
+      headers: {
+        cookie: owner.cookie,
+        origin: PUBLIC_URL,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: formBody({ consent_id: consentId, csrf_token: csrfToken, decision: 'approve' }),
+    });
+    assert.equal(expiredConsentPost.statusCode, 400);
+    assert.equal(expiredConsentPost.headers.location, undefined);
+
+    // 2. Auth-code replay after accessToken expiry (while refreshToken is still alive) revokes the refreshToken
+    const codeReplayFlow = await harness.authorizeAndApprove({
+      ownerCookie: owner.cookie,
+      client: CLIENT_A,
+      scope: 'mcp:read',
+      state: 'state-long-code-replay',
+    });
+    const codeReplayTok = await harness.exchangeCode({
+      code: codeReplayFlow.code,
+      pkce: codeReplayFlow.pkce,
+      client: CLIENT_A,
+    });
+    assert.equal(codeReplayTok.statusCode, 200);
+    const { refresh_token: codeReplayRt } = codeReplayTok.json();
+    clockMs += 120_001;
+    const lateReplay = await harness.exchangeCode({
+      code: codeReplayFlow.code,
+      pkce: codeReplayFlow.pkce,
+      client: CLIENT_A,
+    });
+    assert.equal(lateReplay.statusCode, 400);
+    assert.equal(lateReplay.json().error, 'invalid_grant');
+    const refreshAfterLateReplay = await harness.app.inject({
+      method: 'POST',
+      url: MCP_OAUTH_PATHS.token,
+      headers: {
+        authorization: basicAuthHeader(CLIENT_A.clientId, CLIENT_A.clientSecret),
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: formBody({ grant_type: 'refresh_token', refresh_token: codeReplayRt }),
+    });
+    assert.equal(refreshAfterLateReplay.statusCode, 400);
+    assert.equal(refreshAfterLateReplay.json().error, 'invalid_grant');
+
+    // 3. Refresh token TTL expiry fails closed
+    const expRtFlow = await harness.authorizeAndApprove({
+      ownerCookie: owner.cookie,
+      client: CLIENT_A,
+      scope: 'mcp:read',
+      state: 'state-rt-expiry',
+    });
+    const expRtTok = await harness.exchangeCode({
+      code: expRtFlow.code,
+      pkce: expRtFlow.pkce,
+      client: CLIENT_A,
+    });
+    assert.equal(expRtTok.statusCode, 200);
+    clockMs += 600_000;
+    const expiredRefresh = await harness.app.inject({
+      method: 'POST',
+      url: MCP_OAUTH_PATHS.token,
+      headers: {
+        authorization: basicAuthHeader(CLIENT_A.clientId, CLIENT_A.clientSecret),
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: formBody({ grant_type: 'refresh_token', refresh_token: expRtTok.json().refresh_token }),
+    });
+    assert.equal(expiredRefresh.statusCode, 400);
+    assert.equal(expiredRefresh.json().error, 'invalid_grant');
+
+    // 4. Refresh reuse detection after rotating near original rt1 expiry still revokes live rt2/at2
+    const nearExpiryFlow = await harness.authorizeAndApprove({
+      ownerCookie: owner.cookie,
+      client: CLIENT_A,
+      scope: 'mcp:read',
+      state: 'state-near-expiry-reuse',
+    });
+    const nearExpiryTok = await harness.exchangeCode({
+      code: nearExpiryFlow.code,
+      pkce: nearExpiryFlow.pkce,
+      client: CLIENT_A,
+    });
+    assert.equal(nearExpiryTok.statusCode, 200);
+    const rt1 = nearExpiryTok.json().refresh_token;
+    clockMs += 590_000;
+    const rotated = await harness.app.inject({
+      method: 'POST',
+      url: MCP_OAUTH_PATHS.token,
+      headers: {
+        authorization: basicAuthHeader(CLIENT_A.clientId, CLIENT_A.clientSecret),
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: formBody({ grant_type: 'refresh_token', refresh_token: rt1 }),
+    });
+    assert.equal(rotated.statusCode, 200);
+    const { access_token: at2, refresh_token: rt2 } = rotated.json();
+    clockMs += 20_000;
+    const lateReuse = await harness.app.inject({
+      method: 'POST',
+      url: MCP_OAUTH_PATHS.token,
+      headers: {
+        authorization: basicAuthHeader(CLIENT_A.clientId, CLIENT_A.clientSecret),
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: formBody({ grant_type: 'refresh_token', refresh_token: rt1 }),
+    });
+    assert.equal(lateReuse.statusCode, 400);
+    assert.equal(lateReuse.json().error, 'invalid_grant');
+    const at2AfterReuse = await harness.app.inject({
+      method: 'POST',
+      url: '/mcp',
+      headers: { authorization: `Bearer ${at2}` },
+      payload: {},
+    });
+    assert.equal(at2AfterReuse.statusCode, 401);
+    const rt2AfterReuse = await harness.app.inject({
+      method: 'POST',
+      url: MCP_OAUTH_PATHS.token,
+      headers: {
+        authorization: basicAuthHeader(CLIENT_A.clientId, CLIENT_A.clientSecret),
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: formBody({ grant_type: 'refresh_token', refresh_token: rt2 }),
+    });
+    assert.equal(rt2AfterReuse.statusCode, 400);
+    assert.equal(rt2AfterReuse.json().error, 'invalid_grant');
+
+    // 5. Revoking a previously rotated refresh token revokes the active grant only for the owning client
+    const revRotatedFlow = await harness.authorizeAndApprove({
+      ownerCookie: owner.cookie,
+      client: CLIENT_A,
+      scope: 'mcp:read',
+      state: 'state-revoke-rotated',
+    });
+    const revRotatedTok = await harness.exchangeCode({
+      code: revRotatedFlow.code,
+      pkce: revRotatedFlow.pkce,
+      client: CLIENT_A,
+    });
+    assert.equal(revRotatedTok.statusCode, 200);
+    const oldRt = revRotatedTok.json().refresh_token;
+    const rotatedForRevoke = await harness.app.inject({
+      method: 'POST',
+      url: MCP_OAUTH_PATHS.token,
+      headers: {
+        authorization: basicAuthHeader(CLIENT_A.clientId, CLIENT_A.clientSecret),
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: formBody({ grant_type: 'refresh_token', refresh_token: oldRt }),
+    });
+    assert.equal(rotatedForRevoke.statusCode, 200);
+    const { access_token: activeAt } = rotatedForRevoke.json();
+
+    const crossRevokeOld = await harness.app.inject({
+      method: 'POST',
+      url: MCP_OAUTH_PATHS.revoke,
+      headers: {
+        authorization: basicAuthHeader(CLIENT_B.clientId, CLIENT_B.clientSecret),
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: formBody({ token: oldRt, token_type_hint: 'refresh_token' }),
+    });
+    assert.equal(crossRevokeOld.statusCode, 200);
+    const stillActive = await harness.app.inject({
+      method: 'POST',
+      url: '/mcp',
+      headers: { authorization: `Bearer ${activeAt}` },
+      payload: {},
+    });
+    assert.equal(stillActive.statusCode, 200);
+
+    const ownRevokeOld = await harness.app.inject({
+      method: 'POST',
+      url: MCP_OAUTH_PATHS.revoke,
+      headers: {
+        authorization: basicAuthHeader(CLIENT_A.clientId, CLIENT_A.clientSecret),
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: formBody({ token: oldRt, token_type_hint: 'refresh_token' }),
+    });
+    assert.equal(ownRevokeOld.statusCode, 200);
+    const revokedActive = await harness.app.inject({
+      method: 'POST',
+      url: '/mcp',
+      headers: { authorization: `Bearer ${activeAt}` },
+      payload: {},
+    });
+    assert.equal(revokedActive.statusCode, 401);
   } finally {
     await harness.close();
   }

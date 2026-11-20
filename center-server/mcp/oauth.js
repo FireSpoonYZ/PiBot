@@ -622,10 +622,15 @@ export function registerMcpOAuth(app, options = {}) {
           if (!issued) {
             return sendOAuthJsonError(reply, 503, 'temporarily_unavailable', 'MCP OAuth service is closed');
           }
+          const consumedAtMs = store.now();
           store.recordConsumedAuthCode(
             codeHash,
             issued.grantId,
-            Math.max(entry.expiresAtMs, store.now() + store.ttl.accessToken),
+            Math.max(
+              entry.expiresAtMs,
+              consumedAtMs + store.ttl.accessToken,
+              consumedAtMs + store.ttl.refreshToken,
+            ),
           );
 
           return reply.code(200).send({
