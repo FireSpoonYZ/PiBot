@@ -42,12 +42,14 @@ import {
   useUiLocale,
 } from './primitives';
 import {
+  DEFAULT_CALENDAR_MINUTES_BEFORE,
   GOOGLE_CLOUD_AUTH_CLIENTS_URL,
   GOOGLE_CLOUD_AUTH_OVERVIEW_URL,
   GOOGLE_CLOUD_CREATE_PROJECT_URL,
   GOOGLE_CONNECTIONS_URL,
   GOOGLE_SERVICE_CHOICES,
   buildReadinessRows,
+  calendarMinutesBeforeInputValue,
   canonicalChoices,
   deriveFallbackRedirectUri,
   googleAdminTrustMessage,
@@ -60,6 +62,7 @@ import {
   maskClientId,
   mergeChoices,
   normalizeGoogleRulesResponse,
+  parseCalendarMinutesBefore,
   readinessBadgeMeta,
   ruleEffectiveStatus,
   validateWebClientJson,
@@ -94,7 +97,7 @@ interface NoticeBanner {
   onAction?: () => void;
 }
 
-const MINUTES_BEFORE_PRESETS = [5, 10, 15, 30] as const;
+const MINUTES_BEFORE_PRESETS = [0, 5, 10, 15, 30] as const;
 
 function toIsoExpiresAt(raw: string | number): string {
   if (typeof raw === 'number') {
@@ -202,7 +205,7 @@ export function GoogleTab({
   const [ruleFrom, setRuleFrom] = useState('');
   const [ruleSubject, setRuleSubject] = useState('');
   const [ruleCalendar, setRuleCalendar] = useState('primary');
-  const [ruleMinutesBefore, setRuleMinutesBefore] = useState(15);
+  const [ruleMinutesBefore, setRuleMinutesBefore] = useState(String(DEFAULT_CALENDAR_MINUTES_BEFORE));
   const [ruleInstruction, setRuleInstruction] = useState('');
   const [ruleEnabled, setRuleEnabled] = useState(true);
   const [ruleBusy, setRuleBusy] = useState(false);
@@ -824,7 +827,7 @@ export function GoogleTab({
     setRuleFrom('');
     setRuleSubject('');
     setRuleCalendar('primary');
-    setRuleMinutesBefore(15);
+    setRuleMinutesBefore(String(DEFAULT_CALENDAR_MINUTES_BEFORE));
     setRuleInstruction('');
     setRuleEnabled(true);
     setRuleFormError('');
@@ -839,7 +842,7 @@ export function GoogleTab({
     setRuleFrom(rule.from ?? '');
     setRuleSubject(rule.subjectContains ?? '');
     setRuleCalendar(rule.calendar || 'primary');
-    setRuleMinutesBefore(typeof rule.minutesBefore === 'number' ? rule.minutesBefore : 15);
+    setRuleMinutesBefore(calendarMinutesBeforeInputValue(rule.minutesBefore));
     setRuleInstruction(rule.instruction);
     setRuleEnabled(rule.enabled);
     setRuleFormError('');
@@ -864,7 +867,7 @@ export function GoogleTab({
       setRuleFormError(t('请填写触发指令', 'Please enter a trigger instruction.'));
       return;
     }
-    const minutes = Math.max(1, Math.min(24 * 60, Math.round(Number(ruleMinutesBefore) || 15)));
+    const minutes = parseCalendarMinutesBefore(ruleMinutesBefore);
 
     const payload: GoogleRule = {
       ...(editingRule?.id ? { id: editingRule.id } : {}),
@@ -1746,7 +1749,9 @@ export function GoogleTab({
                     ]
                       .filter(Boolean)
                       .join(' · ') || t('全部新到达邮件', 'All new arriving mail')
-                  : t(`日历：${rule.calendar || 'primary'} · 提前 ${rule.minutesBefore ?? 15} 分钟`, `Calendar: ${rule.calendar || 'primary'} · ${rule.minutesBefore ?? 15} min before`);
+                  : parseCalendarMinutesBefore(rule.minutesBefore) === 0
+                    ? t(`日历：${rule.calendar || 'primary'} · 开始时（0 分钟）`, `Calendar: ${rule.calendar || 'primary'} · At start (0 min)`)
+                    : t(`日历：${rule.calendar || 'primary'} · 提前 ${parseCalendarMinutesBefore(rule.minutesBefore)} 分钟`, `Calendar: ${rule.calendar || 'primary'} · ${parseCalendarMinutesBefore(rule.minutesBefore)} min before`);
 
               return (
                 <div key={idKey} className="ca-row">
@@ -2557,22 +2562,23 @@ export function GoogleTab({
                 <input
                   id="ca-google-rule-mins"
                   type="number"
-                  min={1}
+                  min={0}
                   max={1440}
+                  step={1}
                   className="ca-input ca-num"
                   value={ruleMinutesBefore}
-                  onChange={e => setRuleMinutesBefore(Number(e.target.value))}
+                  onChange={e => setRuleMinutesBefore(e.target.value)}
                 />
                 <div className="ca-chips" style={{ marginTop: 4 }}>
                   {MINUTES_BEFORE_PRESETS.map(m => (
                     <button
                       key={m}
                       type="button"
-                      className={`ca-chip${ruleMinutesBefore === m ? ' is-active' : ''}`}
-                      onClick={() => setRuleMinutesBefore(m)}
+                      className={`ca-chip${parseCalendarMinutesBefore(ruleMinutesBefore, -1) === m ? ' is-active' : ''}`}
+                      onClick={() => setRuleMinutesBefore(String(m))}
                     >
                       <CalendarClock size={11} aria-hidden="true" style={{ marginRight: 3 }} />
-                      {t(`${m} 分钟`, `${m}m`)}
+                      {m === 0 ? t('开始时 (0 分钟)', 'At start (0m)') : t(`${m} 分钟`, `${m}m`)}
                     </button>
                   ))}
                 </div>

@@ -645,7 +645,12 @@ export function createAndroidBridge(options = {}) {
       }, BRIDGE_NATIVE_TIMEOUT_MS);
       if (signal) {
         rec.onAbort = () => {
-          if (rec.state === 'sent') fire(sendNativeCancel(id));
+          if (rec.state === 'sent') {
+            fire(sendNativeCancel(id));
+            // An already-dispatched browser action can still be on the WebView thread.
+            // Keep its original deadline and wait for native settlement before granting takeover.
+            if (rec.tool === 'bot_browser') return;
+          }
           settleCancelledNative(id, rec, () => reject(new DOMException('The operation was aborted.', 'AbortError')));
         };
         signal.addEventListener('abort', rec.onAbort, { once: true });
@@ -663,7 +668,8 @@ export function createAndroidBridge(options = {}) {
     if (!rec || rec.state !== 'sent') return;
     clearNativeRec(frame.id, rec);
     if (frame.error) {
-      rec.reject(nativeError(frame.error.code, 'responded', frame.error.message));
+      const outcome = frame.error.code === 'ANDROID_NATIVE_UNCONFIRMED' ? 'unconfirmed' : 'responded';
+      rec.reject(nativeError(frame.error.code, outcome, frame.error.message));
     } else {
       rec.resolve(frame.result);
     }

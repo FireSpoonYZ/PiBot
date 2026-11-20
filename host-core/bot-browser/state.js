@@ -58,6 +58,7 @@ export function createBotBrowserState({
 
   // Single-writer human lease (memory-only, never persisted, never logged).
   let lease = null; // { token, clientId, holderLabel, issuedAt, lastSeenAt, expiresAt }
+  let leaseGeneration = 0;
   let lastHolderLabel = null;
   let leaseTimer = null;
 
@@ -229,6 +230,10 @@ export function createBotBrowserState({
     return inFlightBotOp.done;
   }
 
+  async function confirmSettlement(done) {
+    if (await done === 'unconfirmed') throw browserError('BROWSER_TAKEOVER_UNCONFIRMED');
+  }
+
   function pumpBotQueue() {
     if (closed || phase !== 'bot' || inFlightBotOp !== null || botQueue.length === 0) {
       return;
@@ -278,7 +283,9 @@ export function createBotBrowserState({
           op.outcome = controller.signal.aborted ? 'aborted' : 'failed';
           op.settled = true;
           if (inFlightBotOp === op) inFlightBotOp = null;
-          resolveDone();
+          const uncertain = next.mutating && error?.outcome === 'unconfirmed';
+          if (uncertain && phase === 'bot') holdForSensitive({ reason: 'action_unconfirmed' });
+          resolveDone(uncertain ? 'unconfirmed' : 'settled');
           next.reject(error);
         }
       )
@@ -289,7 +296,7 @@ export function createBotBrowserState({
       });
   }
 
-  function enqueueBotOp(action, fn) {
+  function enqueueBotOp(action, fn, { mutating = true } = {}) {
     expireLeaseIfNeeded();
     if (closed) {
       return Promise.reject(browserError('BROWSER_CLOSED'));
@@ -305,7 +312,7 @@ export function createBotBrowserState({
     }
 
     return new Promise((resolve, reject) => {
-      botQueue.push({ action, fn, resolve, reject, cancelled: false });
+      botQueue.push({ action, fn, mutating, resolve, reject, cancelled: false });
       pumpBotQueue();
     });
   }
@@ -451,6 +458,7 @@ export function createBotBrowserState({
   function grantLease(authority, displayLabelOverride = null) {
     const issuedAt = now();
     const holderLabel = displayLabelOverride || authority.holderLabel;
+    leaseGeneration += 1;
     lease = {
       token: randomToken(),
       clientId: authority.clientId,
@@ -619,7 +627,7 @@ export function createBotBrowserState({
 
     const drainPromise = (async () => {
       const waitTargets = [];
-      if (inFlightDone) waitTargets.push(inFlightDone);
+      if (inFlightDone) waitTargets.push(confirmSettlement(inFlightDone));
       if (typeof onTakeoverHook === 'function') {
         waitTargets.push(Promise.resolve().then(() => onTakeoverHook({
           botId,
@@ -706,7 +714,7 @@ export function createBotBrowserState({
     cancelQueuedBotOps(reason);
     const inFlightDone = abortInFlightBotOp(reason);
     const waitTargets = [];
-    if (inFlightDone) waitTargets.push(inFlightDone);
+    if (inFlightDone) waitTargets.push(confirmSettlement(inFlightDone));
     if (typeof onTakeoverHook === 'function') {
       waitTargets.push(Promise.resolve().then(() => onTakeoverHook({
         botId,
@@ -723,6 +731,13 @@ export function createBotBrowserState({
           timer.unref?.();
         });
         await Promise.race([Promise.all(waitTargets), timeoutPromise]);
+      } catch (err) {
+        if (!closed) {
+          phase = 'held';
+          holdReason = 'takeover_unconfirmed';
+          bumpRevision(true);
+        }
+        throw err;
       } finally {
         if (timer !== null) clearTimeout(timer);
       }
@@ -909,6 +924,7 @@ export function createBotBrowserState({
     verifyHumanLease,
     renewLease,
     isActiveLeaseHolder,
+    get leaseGeneration() { return leaseGeneration; },
     recordFrame,
     assertInputFreshness,
     assertOwnsPage,

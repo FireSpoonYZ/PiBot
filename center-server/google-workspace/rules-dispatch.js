@@ -4,6 +4,17 @@
 // channel without forging public bearer webhook routes or human chat messages.
 
 export const DEFAULT_GMAIL_EVENT_TTL_MS = 24 * 60 * 60 * 1000;
+// Bounded post-start fire and Host admission grace windows for `minutesBefore: 0`
+// calendar reminders so normal timer jitter / polling ticks deliver once to online
+// Hosts without creating already-expired rows or relaxing positive-lead expiry.
+export const DEFAULT_ZERO_LEAD_FIRE_WINDOW_MS = 90_000;
+export const DEFAULT_ZERO_LEAD_ADMISSION_GRACE_MS = 60_000;
+
+export function calendarReminderExpiresAtMs(startMs, minutesBefore, nowMs) {
+  if (minutesBefore !== 0) return startMs;
+  const latestFire = startMs + DEFAULT_ZERO_LEAD_FIRE_WINDOW_MS;
+  return nowMs >= latestFire ? latestFire : Math.max(startMs, nowMs) + DEFAULT_ZERO_LEAD_ADMISSION_GRACE_MS;
+}
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 
@@ -62,7 +73,8 @@ function resolveExpiresAtIso(input, nowMs, gmailEventTtlMs) {
   const source = input.source ?? input.payload?.source;
   const startMs = input.payload?.startMs;
   if (source === 'calendar' && typeof startMs === 'number' && Number.isFinite(startMs)) {
-    return new Date(startMs).toISOString();
+    const minutesBefore = input.minutesBefore ?? input.payload?.minutesBefore;
+    return new Date(calendarReminderExpiresAtMs(startMs, minutesBefore, nowMs)).toISOString();
   }
   return new Date(nowMs + gmailEventTtlMs).toISOString();
 }

@@ -3,6 +3,7 @@ import { googleRuleOperations } from './google-rules.js';
 
 const UUID_PATTERN = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
 const TIME_PATTERN = '^([01][0-9]|2[0-3]):[0-5][0-9]$';
+const DATE_PATTERN = '^[1-9][0-9]{3}-[0-9]{2}-[0-9]{2}$';
 const SKILL_NAME_PATTERN = '^[a-z0-9][a-z0-9-]{0,63}$';
 const WEBHOOK_ID_PATTERN = '^[A-Za-z0-9_-]{1,128}$';
 
@@ -64,6 +65,11 @@ const SCHEDULE_MUTABLE_PROPERTIES = {
     type: 'string',
     pattern: TIME_PATTERN,
     description: 'Wall-clock trigger time in 24-hour HH:mm format.',
+  },
+  date: {
+    type: 'string',
+    pattern: DATE_PATTERN,
+    description: 'Optional YYYY-MM-DD local date in the target Host time zone for repeat="once" tasks (past timestamps are rejected). Omit to schedule the next matching wall-clock time.',
   },
   weekday: {
     type: 'integer',
@@ -187,7 +193,7 @@ export const operations = [
   // ---- Host Scheduled Tasks (fixed Host RPC: scheduleTask) ----
   defineOperation({
     name: 'automation_schedule_list',
-    description: 'List scheduled tasks for a target Bot on an online Host device via fixed scheduleTask RPC.',
+    description: 'List scheduled tasks for a target Bot on an online Host device via fixed scheduleTask RPC. Returns the target Host now (Unix ms) and timeZone alongside task summaries.',
     properties: {
       ...SCHEDULE_TARGET_PROPERTIES,
       cursor: {
@@ -211,7 +217,7 @@ export const operations = [
 
   defineOperation({
     name: 'automation_schedule_create',
-    description: 'Create a new scheduled task for a target Bot on an online Host device via fixed scheduleTask RPC. The Host allocates task id and revision.',
+    description: 'Create a new scheduled task for a target Bot on an online Host device via fixed scheduleTask RPC. The Host allocates task id and revision. For a dated one-shot task, set repeat="once", date="YYYY-MM-DD", and time (evaluated in the target Host time zone; past timestamps are rejected; omit date to schedule the next matching wall-clock time). Receipt task.nextRunAt is the scheduled Unix ms timestamp.',
     properties: {
       ...SCHEDULE_TARGET_PROPERTIES,
       ...SCHEDULE_MUTABLE_PROPERTIES,
@@ -223,7 +229,7 @@ export const operations = [
 
   defineOperation({
     name: 'automation_schedule_update',
-    description: 'Update fields of an existing scheduled task on a Host device with strict revision CAS (fetch latest id and revision via automation_schedule_list first).',
+    description: 'Update fields of an existing scheduled task on a Host device with strict revision CAS (fetch latest id and revision via automation_schedule_list first). Dated one-shot updates use repeat="once" with date="YYYY-MM-DD" in the target Host time zone, or pass date=null to clear the specified date.',
     properties: {
       ...SCHEDULE_TARGET_PROPERTIES,
       id: {
@@ -237,6 +243,13 @@ export const operations = [
         description: 'Expected positive integer revision for strict CAS.',
       },
       ...SCHEDULE_MUTABLE_PROPERTIES,
+      date: {
+        anyOf: [
+          { type: 'string', pattern: DATE_PATTERN },
+          { type: 'null' },
+        ],
+        description: 'Optional YYYY-MM-DD local date in the target Host time zone for repeat="once" tasks, or null to clear the specified date.',
+      },
     },
     required: ['id', 'revision'],
     readOnly: false,

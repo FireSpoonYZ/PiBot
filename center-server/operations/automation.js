@@ -39,6 +39,7 @@ const SCHEDULE_MUTABLE_KEYS = [
   'skills',
   'repeat',
   'time',
+  'date',
   'weekday',
   'weekdays',
   'monthDay',

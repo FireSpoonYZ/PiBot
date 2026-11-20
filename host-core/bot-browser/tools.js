@@ -59,10 +59,28 @@ const ACT_SCHEMA = {
     },
     direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] },
     amount: { type: 'number', minimum: 1, maximum: 4000 },
-    selector: { type: 'string', minLength: 1, maxLength: 512 },
-    url: { type: 'string', minLength: 1, maxLength: 512 },
-    load: { type: 'string', enum: ['load', 'domcontentloaded', 'networkidle'] },
-    state: { type: 'string', enum: ['visible', 'hidden'] },
+    selector: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 512,
+      description: 'CSS selector for act.wait (defaults to visible unless state="hidden" is also specified).',
+    },
+    url: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 512,
+      description: 'Exact current page URL to wait for in act.wait.',
+    },
+    load: {
+      type: 'string',
+      enum: ['load', 'domcontentloaded'],
+      description: "Page load state for act.wait ('load' or 'domcontentloaded'; 'networkidle' is unsupported).",
+    },
+    state: {
+      type: 'string',
+      enum: ['visible', 'hidden'],
+      description: 'Element visibility state for act.wait; requires selector (hidden matches absent or non-visible elements).',
+    },
     timeoutMs: { type: 'integer', minimum: 50, maximum: 15000 },
   },
   required: ['kind'],
@@ -110,6 +128,7 @@ function errorOutput(code, message, extra = {}) {
   if (PAUSED_ERROR_CODES.has(code)) {
     payload.status = 'PAUSED_FOR_HUMAN';
   }
+  if (extra.outcome === 'unconfirmed' || extra.outcome === 'not-sent') payload.outcome = extra.outcome;
   for (const key of ['phase', 'reason', 'guidance', 'fallbackToSystemBrowser', 'pageId', 'revision']) {
     if (extra[key] !== undefined && extra[key] !== null) {
       payload[key] = extra[key];
@@ -222,6 +241,9 @@ export function createBotBrowserTools({
         'Actions: status, open, navigate, back, forward, reload, select, closeTab, snapshot, act, screenshot, requestTakeover. ' +
         'Use snapshot (interactive/compact/depth/selector/urls/delta/full) to inspect elements and get refs, then act ' +
         '(click/dblclick/fill/type/select/scroll/hover/press/wait) with those refs. ' +
+        'For act.wait, omitting conditions sleeps timeoutMs; supplying any combination of selector (+ optional state: visible|hidden, ' +
+        'requiring selector; hidden includes absent), text (visible document text substring), url (exact current URL), and load ' +
+        '(load|domcontentloaded; networkidle returns BROWSER_UNSUPPORTED) waits until all conditions hold simultaneously or fails with BROWSER_TIMEOUT. ' +
         'Arbitrary JS eval, cookie access/import, CDP passthrough, and local file:// URLs are forbidden. ' +
         'If the human owner takes over, or if the page reaches sign-in/MFA/OAuth consent, Terms/User Data Policy checkboxes, ' +
         'password/payment fields, or OAuth Client Secret creation, this tool returns PAUSED_FOR_HUMAN and halts immediately: ' +
@@ -316,7 +338,7 @@ export function createBotBrowserTools({
         } catch (err) {
           const code = typeof err?.code === 'string' ? err.code : 'BROWSER_BACKEND_FAILED';
           const details = isPlainObject(err?.details) ? err.details : {};
-          return errorOutput(code, err?.message || 'Bot browser operation failed.', details);
+          return errorOutput(code, err?.message || 'Bot browser operation failed.', { ...details, outcome: err?.outcome });
         }
       },
     }),

@@ -795,6 +795,7 @@ export const SENSITIVE_DOM_PROBE_EXPRESSION = `(() => {
   return {
     title: String(document.title || '').slice(0, 300),
     url: String(location.href || '').slice(0, 2048),
+    readyState: String(document.readyState || ''),
     passwordFocused,
     hasVisiblePasswordInput,
     hasClientSecretModal,
@@ -804,6 +805,111 @@ export const SENSITIVE_DOM_PROBE_EXPRESSION = `(() => {
     activeInputType,
   };
 })()`;
+
+// Fixed, read-only expression used only to obtain a CDP RemoteObjectId for `document`
+// so `Runtime.callFunctionOn` can invoke fixed probe functions with structured arguments.
+export const INTERNAL_DOCUMENT_HANDLE_EXPRESSION = 'document';
+
+// Fixed, reusable, read-only DOM condition check for `act.wait`.
+// Invoked ONLY via `Runtime.callFunctionOn` with structured CDP arguments (never string
+// interpolation of user input). Returns only bounded booleans and `document.readyState`;
+// NEVER returns page text, element values, or DOM content.
+export const INTERNAL_WAIT_CONDITION_FUNCTION = `function(params) {
+  const doc = this && typeof this.querySelectorAll === 'function'
+    ? this
+    : (typeof document !== 'undefined' ? document : null);
+  const win = doc && doc.defaultView ? doc.defaultView : (typeof window !== 'undefined' ? window : null);
+  const opts = params && typeof params === 'object' ? params : {};
+  const readyState = doc && typeof doc.readyState === 'string' ? doc.readyState : '';
+
+  const isElementVisible = (el, nestedDepth = 0) => {
+    if (!el || !el.isConnected || nestedDepth >= 8) return false;
+    const style = win && typeof win.getComputedStyle === 'function' ? win.getComputedStyle(el) : null;
+    if (style) {
+      if (
+        style.display === 'none' ||
+        style.visibility === 'hidden' ||
+        style.visibility === 'collapse' ||
+        style.contentVisibility === 'hidden'
+      ) {
+        return false;
+      }
+      if (parseFloat(style.opacity) === 0) return false;
+
+      let cur = el.parentElement;
+      let depth = 0;
+      while (cur && depth < 64) {
+        const pStyle = win.getComputedStyle(cur);
+        if (pStyle) {
+          if (pStyle.display === 'none' || pStyle.contentVisibility === 'hidden') return false;
+          if (parseFloat(pStyle.opacity) === 0) return false;
+        }
+        cur = cur.parentElement;
+        depth += 1;
+      }
+
+      if (style.display === 'contents') {
+        const children = el.children;
+        if (!children || children.length === 0) return false;
+        const childLimit = Math.min(children.length, 32);
+        for (let i = 0; i < childLimit; i++) {
+          if (isElementVisible(children[i], nestedDepth + 1)) return true;
+        }
+        return false;
+      }
+    }
+
+    const rects = typeof el.getClientRects === 'function' ? el.getClientRects() : null;
+    if (rects && rects.length === 0) return false;
+    const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null;
+    return Boolean(rect && rect.width > 0 && rect.height > 0);
+  };
+
+  let selectorInvalid = false;
+  let selectorMatched = true;
+  if (typeof opts.selector === 'string' && opts.selector.length > 0) {
+    if (!doc || typeof doc.querySelectorAll !== 'function') {
+      selectorMatched = false;
+    } else {
+      const targetState = opts.state === 'hidden' ? 'hidden' : 'visible';
+      let nodes;
+      try {
+        nodes = doc.querySelectorAll(opts.selector);
+      } catch {
+        return {
+          readyState,
+          selectorInvalid: true,
+          urlMatched: false,
+          selectorMatched: false,
+          textMatched: false,
+        };
+      }
+      let anyVisible = false;
+      for (let i = 0; i < nodes.length; i++) {
+        if (isElementVisible(nodes[i], 0)) {
+          anyVisible = true;
+          break;
+        }
+      }
+      selectorMatched = targetState === 'hidden' ? !anyVisible : anyVisible;
+    }
+  }
+
+  let textMatched = true;
+  if (typeof opts.text === 'string' && opts.text.length > 0) {
+    const root = doc ? (doc.body || doc.documentElement) : null;
+    const visibleText = root && typeof root.innerText === 'string' ? root.innerText : '';
+    textMatched = visibleText.includes(opts.text);
+  }
+
+  return {
+    readyState,
+    selectorInvalid,
+    urlMatched: opts.url === undefined || doc.URL === opts.url,
+    selectorMatched,
+    textMatched,
+  };
+}`;
 
 // Fixed internal element helper functions (never caller-supplied JS), adapted from
 // Orca's safe element fill/select semantics with password/file guards.

@@ -6,9 +6,13 @@ import test from 'node:test';
 import { randomBytes } from 'node:crypto';
 import { operations } from '../../center-contract/operations/automation.js';
 import { createHandlers } from '../../center-server/operations/automation.js';
+import { openOperations } from '../../center-server/operations/index.js';
 import { openCenterStore } from '../../center-server/data/index.js';
 import { registerTaskRoutes } from '../../center-server/tasks.js';
 import { registerWebhookRoutes } from '../../center-server/webhooks.js';
+import { openHost } from '../../host-core/host.js';
+import { createScheduleManager } from '../../host-core/host-schedules.js';
+import { zonedWallTimeToEpochMs } from '../../host-core/schedule-calendar.js';
 
 const BOT_COORD = { kind: 'bot', deviceId: 'dev-1', botId: 'bot-coord' };
 const BOT_WORKER = { kind: 'bot', deviceId: 'dev-1', botId: 'bot-worker' };
@@ -131,6 +135,7 @@ function createAutomationHarness() {
 
   return {
     store,
+    owner,
     bridge,
     bridgeCalls,
     ownerCalls,
@@ -290,7 +295,71 @@ test('automation_schedule_* calls fixed Host scheduleTask RPC with strict target
       }, BOT_COORD),
       (err) => err?.code === 'INVALID_ARGUMENT',
     );
+
+    // Direct handler call also rejects date:null on create, invalid calendar dates, and non-once dates.
+    await assert.rejects(
+      () => env.handlers.automation_schedule_create({
+        title: 'Null Date',
+        prompt: 'Should fail on create',
+        repeat: 'once',
+        time: '09:00',
+        date: null,
+      }, BOT_COORD),
+      (err) => err?.code === 'INVALID_ARGUMENT',
+    );
   } finally {
+    env.close();
+  }
+});
+
+test('openOperations exposes dated one-shot schedule create/update with schema, Host receipt, CAS, and auth enforcement', async (t) => {
+  const fixedNow = Date.parse('2026-12-31T00:00:00Z');
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: fixedNow });
+
+  const env = createAutomationHarness();
+  const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'el-center-dated-'));
+  const host = openHost({ dataRoot });
+  const bot = host.createBot({ requestId: 'test-schedule', role: 'Test', cwd: dataRoot, makePrimary: true });
+  const schedules = createScheduleManager({ host, getRuntime: () => null, isOnline: () => true });
+  schedules.start();
+  try {
+    const target = { deviceId: host.deviceId, botId: bot.botId };
+    let calls = 0;
+    const ops = openOperations({ store: env.store, owner: env.owner, bridge: {
+      async call(deviceId, method, params) {
+        calls++;
+        assert.equal(deviceId, host.deviceId);
+        assert.equal(method, 'scheduleTask');
+        assert.equal(params.botId, target.botId);
+        return schedules.execute(bot, params.input);
+      },
+    } });
+    const botActor = { kind: 'bot', ...target };
+    const oauth = { kind: 'oauth', clientId: 'calendar' };
+    const create = { title: 'Leap Day', prompt: 'Review', repeat: 'once', time: '20:00', date: '2028-02-29' };
+    await assert.rejects(ops.call({ ...oauth, scopes: ['pibot:automation:read'] },
+      'automation_schedule_create', { ...target, ...create }), { code: 'FORBIDDEN' });
+    assert.equal(calls, 0);
+    const created = await ops.call(botActor, 'automation_schedule_create', create);
+    assert.equal(created.task.date, create.date);
+    assert.equal(created.task.nextRunAt, zonedWallTimeToEpochMs(2028, 2, 29, 20, 0, created.timeZone));
+    const update = (actor, patch) => ops.call(actor, 'automation_schedule_update', { ...target,
+      id: created.task.id, revision: created.task.revision, ...patch });
+    const changed = await update({ ...oauth, scopes: ['pibot:automation:write'] }, { date: '2028-03-01' });
+    assert.equal(changed.task.date, '2028-03-01');
+    await assert.rejects(update(botActor, { date: null }), { code: 'REQUEST_CONFLICT' });
+    for (const patch of [{ date: '2027-02-29' }, { repeat: 'daily', date: create.date }]) {
+      await assert.rejects(update(botActor, { revision: changed.task.revision, ...patch }), { code: 'INVALID_ARGUMENT' });
+    }
+    const cleared = await update(botActor, { revision: changed.task.revision, date: null });
+    assert.equal(Object.hasOwn(cleared.task, 'date'), false);
+    for (const date of [null, '2028/2/29', '2027-02-29', '2025-01-01']) {
+      await assert.rejects(ops.call(botActor, 'automation_schedule_create', { ...create, date }), { code: 'INVALID_ARGUMENT' });
+    }
+  } finally {
+    await schedules.close();
+    host.close();
+    fs.rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     env.close();
   }
 });

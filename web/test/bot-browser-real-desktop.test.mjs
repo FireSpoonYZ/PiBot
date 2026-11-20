@@ -9,6 +9,7 @@ import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { createDesktopBrowserProvider } from '../../host-core/bot-browser/desktop-provider.js';
 import { createBotBrowserService } from '../../host-core/bot-browser/service.js';
 import { normalizeBrowserControl } from '../../host-core/browser-setup-protocol.js';
 
@@ -55,6 +56,11 @@ function startLoopbackFormServer() {
     if (req.method === 'GET' && reqUrl.pathname === '/form') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
       res.end(FORM_HTML);
+      return;
+    }
+    if (req.method === 'GET' && reqUrl.pathname === '/links') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end('<a href="/form" target="_blank" rel="noopener">Open form</a>');
       return;
     }
     if (req.method === 'POST' && reqUrl.pathname === '/submit') {
@@ -482,3 +488,36 @@ test(
     }
   }
 );
+
+test('real desktop: follow a web-opened tab and wait for actual page conditions', { skip: !LIVE }, async (t) => {
+  const { server, baseUrl } = await startLoopbackFormServer();
+  const profileDir = await mkdtemp(join(tmpdir(), 'pibot-popup-wait-'));
+  const provider = await createDesktopBrowserProvider({ botId: 'popup-bot', profileDir, maxTabs: 2 });
+  t.after(async () => {
+    try { await provider.close(); }
+    finally {
+      await new Promise(resolve => server.close(resolve));
+      await rm(profileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+  const main = await provider.perform({ action: 'open', url: baseUrl + '/links' });
+  const snapshot = await provider.perform({ action: 'snapshot', pageId: main.pageId });
+  const link = snapshot.refs.find(el => el.role === 'link' && el.name === 'Open form');
+  assert.ok(link);
+  await provider.perform({ action: 'act', pageId: main.pageId, command: { kind: 'click', ref: link.ref } });
+  const popup = await waitForCondition(async () => {
+    const status = await provider.perform({ action: 'status' });
+    assert.equal(status.pageId, main.pageId);
+    return status.tabs.find(tab => tab.id !== main.pageId && tab.url === baseUrl + '/form');
+  });
+  assert.ok(popup, 'the opened form must appear in the tab list');
+  await provider.perform({ action: 'select', pageId: popup.id });
+  const wait = command => provider.perform({ action: 'act', pageId: popup.id, command: { kind: 'wait', ...command } });
+  assert.equal((await wait({ selector: '#humanNote', url: baseUrl + '/form', text: 'Finish and Submit',
+    load: 'load', timeoutMs: 2000 })).ok, true);
+  await assert.rejects(wait({ selector: '#absent', timeoutMs: 100 }), { code: 'BROWSER_TIMEOUT' });
+  await assert.rejects(wait({ url: baseUrl + '/other', timeoutMs: 100 }), { code: 'BROWSER_TIMEOUT' });
+  const result = await provider.perform({ action: 'closeTab', pageId: popup.id });
+  assert.equal(result.pageId, main.pageId);
+  assert.equal(result.tabs.length, 1);
+});

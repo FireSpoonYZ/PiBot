@@ -584,6 +584,21 @@ test('automation_google_rule_update edits safe source-matched fields and rejects
     assert.equal(updatedCal.rule.minutesBefore, 30);
     assert.equal(updatedCal.rule.instruction, 'Prepare slides 30m early');
     assert.equal(updatedCal.rule.account, 'alice@example.com');
+
+    // Calendar edit supports minutesBefore: 0 and preserves 0 across pause/resume and list.
+    const zeroCal = await env.handlers.automation_google_rule_update({
+      id: calSeed.rule.id,
+      minutesBefore: 0,
+      instruction: 'Join meeting right at start',
+    }, BOT_MAIN);
+    assert.equal(zeroCal.rule.minutesBefore, 0);
+    const pausedZeroCal = await env.handlers.automation_google_rule_set_enabled({
+      id: calSeed.rule.id,
+      enabled: false,
+    }, BOT_MAIN);
+    assert.equal(pausedZeroCal.rule.minutesBefore, 0);
+    const listedAfterZero = await env.handlers.automation_google_rule_list({}, BOT_MAIN);
+    assert.equal(listedAfterZero.items.find((item) => item.id === calSeed.rule.id)?.minutesBefore, 0);
   } finally {
     await env.close();
   }

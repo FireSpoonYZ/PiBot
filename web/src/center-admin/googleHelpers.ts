@@ -511,3 +511,46 @@ export function ruleEffectiveStatus(
     tone: 'ok',
   };
 }
+
+export const DEFAULT_CALENDAR_MINUTES_BEFORE = 15;
+export const MAX_CALENDAR_MINUTES_BEFORE = 24 * 60;
+
+/**
+ * Parse and clamp a Calendar reminder lead-time input (`0..1440` minutes).
+ * Preserves explicit `0` (at event start) instead of treating it as falsy.
+ */
+export function parseCalendarMinutesBefore(
+  raw: string | number | null | undefined,
+  fallback = DEFAULT_CALENDAR_MINUTES_BEFORE,
+): number {
+  if (raw === null || raw === undefined) return fallback;
+  if (typeof raw === 'string' && raw.trim() === '') return fallback;
+  const parsed = typeof raw === 'number' ? raw : Number(raw.trim());
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.min(MAX_CALENDAR_MINUTES_BEFORE, Math.round(parsed)));
+}
+
+/**
+ * Convert a rule's stored `minutesBefore` into the controlled value for a number input.
+ */
+export function calendarMinutesBeforeInputValue(
+  minutesBefore: number | null | undefined,
+  fallback = DEFAULT_CALENDAR_MINUTES_BEFORE,
+): string {
+  return String(parseCalendarMinutesBefore(minutesBefore, fallback));
+}
+
+/**
+ * Format a Calendar rule's lead time for display while preserving explicit `0`.
+ */
+export function formatCalendarMinutesBefore(
+  minutesBefore: number | null | undefined,
+  t: TranslateFn,
+  fallback = DEFAULT_CALENDAR_MINUTES_BEFORE,
+): string {
+  const minutes = parseCalendarMinutesBefore(minutesBefore, fallback);
+  if (minutes === 0) {
+    return t('开始时（0 分钟）', 'At start (0m)');
+  }
+  return t(`会前 ${minutes} 分钟`, `${minutes}m before event`);
+}

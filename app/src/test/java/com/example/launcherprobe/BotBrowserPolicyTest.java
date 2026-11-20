@@ -15,6 +15,7 @@ import org.robolectric.annotation.Config;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
@@ -229,6 +230,383 @@ public class BotBrowserPolicyTest {
         assertEquals(1, backend.destroyedTabs.get());
     }
 
+    @Test
+    public void waitEnforcesMultiConditionAndLoadStatesAndRejectsNetworkidleOrEval() throws Exception {
+        AtomicInteger createCalls = new AtomicInteger();
+        AtomicLong now = new AtomicLong(10_000L);
+        FakeBackend backend = new FakeBackend(BotBrowserManager.Availability.supported(), createCalls);
+        BotBrowserManager manager = new BotBrowserManager(backend, now::get);
+        BotBrowserBridge bridge = new BotBrowserBridge(manager);
+        JSONObject ctx = new JSONObject().put("deviceId", "dev-1").put("botId", "bot-wait");
+
+        JSONObject opened = bridge.execute(ctx, new JSONObject()
+                .put("action", "open")
+                .put("source", "agent")
+                .put("url", "https://example.com/start"), () -> false);
+        String pageId = opened.getString("pageId");
+
+        // networkidle 无法在 Android WebView 上可靠支持 -> 明确返回 BROWSER_UNSUPPORTED，绝不假成功。
+        BotBrowserBridge.Failure networkIdle = assertThrows(BotBrowserBridge.Failure.class, () ->
+                bridge.execute(ctx, new JSONObject()
+                        .put("action", "act")
+                        .put("source", "agent")
+                        .put("pageId", pageId)
+                        .put("act", new JSONObject().put("kind", "wait").put("load", "networkidle").put("timeoutMs", 500)),
+                        () -> false));
+        assertEquals("BROWSER_UNSUPPORTED", networkIdle.code);
+        assertEquals(0, backend.waitProbeConditions.size());
+
+        // 禁止 eval/fn 任意表达式与无 selector 的孤立 state。
+        BotBrowserBridge.Failure evalReject = assertThrows(BotBrowserBridge.Failure.class, () ->
+                bridge.execute(ctx, new JSONObject()
+                        .put("action", "act")
+                        .put("source", "agent")
+                        .put("pageId", pageId)
+                        .put("act", new JSONObject().put("kind", "wait").put("fn", "() => true")),
+                        () -> false));
+        assertEquals("INVALID_ARGUMENT", evalReject.code);
+
+        BotBrowserBridge.Failure orphanState = assertThrows(BotBrowserBridge.Failure.class, () ->
+                bridge.execute(ctx, new JSONObject()
+                        .put("action", "act")
+                        .put("source", "agent")
+                        .put("pageId", pageId)
+                        .put("act", new JSONObject().put("kind", "wait").put("state", "hidden")),
+                        () -> false));
+        assertEquals("INVALID_ARGUMENT", orphanState.code);
+
+        // 多条件 AND：selector + state + text + exact url + load 必须同时满足。
+        backend.waitProbeHandler = (conditions, attempt) -> {
+            now.addAndGet(10L);
+            if (attempt == 1) {
+                return new JSONObject()
+                        .put("selectorMatched", true)
+                        .put("textMatched", false)
+                        .put("currentUrl", "https://example.com/done")
+                        .put("readyState", "complete");
+            }
+            if (attempt == 2) {
+                // URL 多出 query，不是精确匹配，不能放行。
+                return new JSONObject()
+                        .put("selectorMatched", true)
+                        .put("textMatched", true)
+                        .put("currentUrl", "https://example.com/done?extra=1")
+                        .put("readyState", "complete");
+            }
+            if (attempt == 3) {
+                // readyState 为 interactive 且仍在 loading，load='load' 不能放行。
+                return new JSONObject()
+                        .put("selectorMatched", true)
+                        .put("textMatched", true)
+                        .put("currentUrl", "https://example.com/done")
+                        .put("readyState", "interactive");
+            }
+            backend.lastCallbacks.onPageFinished("https://example.com/done");
+            return new JSONObject()
+                    .put("selectorMatched", true)
+                    .put("textMatched", true)
+                    .put("currentUrl", "https://example.com/done")
+                    .put("readyState", "complete");
+        };
+
+        JSONObject waited = bridge.execute(ctx, new JSONObject()
+                .put("action", "act")
+                .put("source", "agent")
+                .put("pageId", pageId)
+                .put("act", new JSONObject()
+                        .put("kind", "wait")
+                        .put("selector", "#ready")
+                        .put("state", "visible")
+                        .put("text", "Saved")
+                        .put("url", "https://example.com/done")
+                        .put("load", "load")
+                        .put("timeoutMs", 2000)), () -> false);
+        assertTrue(waited.getBoolean("ok"));
+        assertEquals(4, backend.waitProbeConditions.size());
+        JSONObject sentCond = backend.waitProbeConditions.get(0);
+        assertEquals("#ready", sentCond.getString("selector"));
+        assertEquals("visible", sentCond.getString("state"));
+        assertEquals("Saved", sentCond.getString("text"));
+        assertEquals("https://example.com/done", sentCond.getString("url"));
+        assertEquals("load", sentCond.getString("load"));
+
+        // navigate 后 tab.loading=true：domcontentloaded 忽略旧页残留 complete，直到 interactive 才放行。
+        bridge.execute(ctx, new JSONObject()
+                .put("action", "navigate")
+                .put("source", "agent")
+                .put("pageId", pageId)
+                .put("url", "https://example.com/next"), () -> false);
+        backend.waitProbeConditions.clear();
+        backend.waitProbeHandler = (conditions, attempt) -> {
+            now.addAndGet(10L);
+            if (attempt == 1) {
+                return new JSONObject().put("readyState", "complete");
+            }
+            return new JSONObject().put("readyState", "interactive");
+        };
+        JSONObject dclWait = bridge.execute(ctx, new JSONObject()
+                .put("action", "act")
+                .put("source", "agent")
+                .put("pageId", pageId)
+                .put("act", new JSONObject()
+                        .put("kind", "wait")
+                        .put("load", "domcontentloaded")
+                        .put("timeoutMs", 1000)), () -> false);
+        assertTrue(dclWait.getBoolean("ok"));
+        assertEquals(2, backend.waitProbeConditions.size());
+
+        // selector hidden + 非法 CSS 选择器不得假算隐藏。
+        backend.waitProbeConditions.clear();
+        backend.waitProbeHandler = (conditions, attempt) -> new JSONObject()
+                .put("invalidSelector", true)
+                .put("selectorMatched", false);
+        BotBrowserBridge.Failure badSelector = assertThrows(BotBrowserBridge.Failure.class, () ->
+                bridge.execute(ctx, new JSONObject()
+                        .put("action", "act")
+                        .put("source", "agent")
+                        .put("pageId", pageId)
+                        .put("act", new JSONObject()
+                                .put("kind", "wait")
+                                .put("selector", "[[[bad")
+                                .put("state", "hidden")
+                                .put("timeoutMs", 500)), () -> false));
+        assertEquals("INVALID_ARGUMENT", badSelector.code);
+        assertEquals("hidden", backend.waitProbeConditions.get(0).getString("state"));
+
+        bridge.shutdown();
+    }
+
+    @Test
+    public void waitHandlesTimeoutCancellationMidWaitSensitivityAndDelayOnlyCompat() throws Exception {
+        AtomicInteger createCalls = new AtomicInteger();
+        AtomicLong now = new AtomicLong(20_000L);
+        FakeBackend backend = new FakeBackend(BotBrowserManager.Availability.supported(), createCalls);
+        BotBrowserManager manager = new BotBrowserManager(backend, now::get);
+        BotBrowserBridge bridge = new BotBrowserBridge(manager);
+        JSONObject ctx = new JSONObject().put("deviceId", "dev-1").put("botId", "bot-wait-edge");
+
+        JSONObject opened = bridge.execute(ctx, new JSONObject()
+                .put("action", "open")
+                .put("source", "agent")
+                .put("url", "https://example.com/form"), () -> false);
+        String pageId = opened.getString("pageId");
+        backend.lastCallbacks.onPageFinished("https://example.com/form");
+
+        // 条件一直未满足 -> 超时失败（绝不 sleep 后假成功）。
+        backend.waitProbeConditions.clear();
+        backend.waitProbeHandler = (conditions, attempt) -> {
+            now.addAndGet(100L);
+            return new JSONObject().put("selectorMatched", false);
+        };
+        BotBrowserBridge.Failure timedOut = assertThrows(BotBrowserBridge.Failure.class, () ->
+                bridge.execute(ctx, new JSONObject()
+                        .put("action", "act")
+                        .put("source", "agent")
+                        .put("pageId", pageId)
+                        .put("act", new JSONObject()
+                                .put("kind", "wait")
+                                .put("selector", "#never-appears")
+                                .put("timeoutMs", 200)), () -> false));
+        assertEquals("BROWSER_TIMEOUT", timedOut.code);
+        assertTrue(backend.waitProbeConditions.size() >= 2);
+
+        // 等待过程中被取消 -> 返回 CANCELLED。
+        backend.waitProbeConditions.clear();
+        AtomicBoolean cancelled = new AtomicBoolean(false);
+        backend.waitProbeHandler = (conditions, attempt) -> {
+            if (attempt >= 1) cancelled.set(true);
+            return new JSONObject().put("textMatched", false);
+        };
+        BotBrowserBridge.Failure cancelFail = assertThrows(BotBrowserBridge.Failure.class, () ->
+                bridge.execute(ctx, new JSONObject()
+                        .put("action", "act")
+                        .put("source", "agent")
+                        .put("pageId", pageId)
+                        .put("act", new JSONObject()
+                                .put("kind", "wait")
+                                .put("text", "Never")
+                                .put("timeoutMs", 2000)), cancelled::get));
+        assertEquals("CANCELLED", cancelFail.code);
+
+        // 只延时兼容（正常页 ms=0 与 timeoutMs=50）。
+        backend.waitProbeConditions.clear();
+        backend.waitProbeHandler = (conditions, attempt) -> {
+            now.addAndGet(60L);
+            return new JSONObject().put("sensitiveBlocked", false);
+        };
+        JSONObject delayZero = bridge.execute(ctx, new JSONObject()
+                .put("action", "act")
+                .put("source", "agent")
+                .put("pageId", pageId)
+                .put("act", new JSONObject().put("kind", "wait").put("ms", 0)), () -> false);
+        assertTrue(delayZero.getBoolean("ok"));
+
+        JSONObject delayCompat = bridge.execute(ctx, new JSONObject()
+                .put("action", "act")
+                .put("source", "agent")
+                .put("pageId", pageId)
+                .put("act", new JSONObject().put("kind", "wait").put("timeoutMs", 50)), () -> false);
+        assertTrue(delayCompat.getBoolean("ok"));
+
+        // 等待中进入敏感态（DOM 出现密码框）-> 立即中断返回 BROWSER_SENSITIVE_BLOCKED。
+        backend.waitProbeConditions.clear();
+        backend.waitProbeHandler = (conditions, attempt) -> {
+            if (attempt == 1) {
+                return new JSONObject().put("selectorMatched", false);
+            }
+            return new JSONObject()
+                    .put("sensitiveBlocked", true)
+                    .put("hasPasswordField", true);
+        };
+        BotBrowserBridge.Failure midWaitSensitive = assertThrows(BotBrowserBridge.Failure.class, () ->
+                bridge.execute(ctx, new JSONObject()
+                        .put("action", "act")
+                        .put("source", "agent")
+                        .put("pageId", pageId)
+                        .put("act", new JSONObject()
+                                .put("kind", "wait")
+                                .put("selector", "#done")
+                                .put("timeoutMs", 2000)), () -> false));
+        assertEquals("BROWSER_SENSITIVE_BLOCKED", midWaitSensitive.code);
+        assertEquals(2, backend.waitProbeConditions.size());
+
+        // 只延时等待期间触发受阻外部 OAuth 跳转同样阻断。
+        backend.waitProbeConditions.clear();
+        JSONObject opened2 = bridge.execute(ctx, new JSONObject()
+                .put("action", "open")
+                .put("source", "agent")
+                .put("url", "https://example.com/step2"), () -> false);
+        String page2 = opened2.getString("pageId");
+        backend.waitProbeHandler = (conditions, attempt) -> {
+            backend.lastCallbacks.onBlockedExternalNavigation("google_auth_requires_system_browser");
+            return new JSONObject().put("sensitiveBlocked", false);
+        };
+        BotBrowserBridge.Failure blockedRedirect = assertThrows(BotBrowserBridge.Failure.class, () ->
+                bridge.execute(ctx, new JSONObject()
+                        .put("action", "act")
+                        .put("source", "agent")
+                        .put("pageId", page2)
+                        .put("act", new JSONObject().put("kind", "wait").put("ms", 200)), () -> false));
+        assertEquals("BROWSER_SENSITIVE_BLOCKED", blockedRedirect.code);
+
+        bridge.shutdown();
+    }
+
+    @Test
+    public void refLessTypeTargetsFocusedEditableWithoutHumanInputAndKeepsSensitivityGuards() throws Exception {
+        AtomicInteger createCalls = new AtomicInteger();
+        AtomicLong now = new AtomicLong(30_000L);
+        FakeBackend backend = new FakeBackend(BotBrowserManager.Availability.supported(), createCalls);
+        BotBrowserManager manager = new BotBrowserManager(backend, now::get);
+        BotBrowserBridge bridge = new BotBrowserBridge(manager);
+        JSONObject ctx = new JSONObject().put("deviceId", "dev-1").put("botId", "bot-type");
+
+        JSONObject opened = bridge.execute(ctx, new JSONObject()
+                .put("action", "open")
+                .put("source", "agent")
+                .put("url", "https://console.cloud.google.com/auth/overview/create"), () -> false);
+        String pageId = opened.getString("pageId");
+
+        // 公共 type 仅提供 text（无 ref、无需先 snapshot），走 agent actDom，绝不借用人类 input 通道。
+        backend.nextActResult = new JSONObject().put("ok", true);
+        JSONObject typed = bridge.execute(ctx, new JSONObject()
+                .put("action", "act")
+                .put("source", "agent")
+                .put("pageId", pageId)
+                .put("act", new JSONObject().put("kind", "type").put("text", "PiBot-App")), () -> false);
+        assertTrue(typed.getBoolean("ok"));
+        assertEquals(0, backend.dispatchedInputs.size());
+        assertEquals(1, backend.actDomCalls.size());
+        assertEquals("agent", backend.actDomSources.get(0));
+        assertEquals("type", backend.actDomCalls.get(0).getString("kind"));
+        assertEquals("PiBot-App", backend.actDomCalls.get(0).getString("text"));
+        assertFalse(backend.actDomCalls.get(0).has("ref"));
+
+        // 空文本被拒。
+        BotBrowserBridge.Failure emptyType = assertThrows(BotBrowserBridge.Failure.class, () ->
+                bridge.execute(ctx, new JSONObject()
+                        .put("action", "act")
+                        .put("source", "agent")
+                        .put("pageId", pageId)
+                        .put("act", new JSONObject().put("kind", "type").put("text", "")), () -> false));
+        assertEquals("INVALID_ARGUMENT", emptyType.code);
+
+        // 非编辑聚焦目标被拒，不借人类输入。
+        backend.nextActResult = new JSONObject()
+                .put("ok", false)
+                .put("code", "BROWSER_BACKEND_FAILED")
+                .put("message", "当前没有聚焦的可编辑控件，无法执行 type");
+        BotBrowserBridge.Failure nonEditable = assertThrows(BotBrowserBridge.Failure.class, () ->
+                bridge.execute(ctx, new JSONObject()
+                        .put("action", "act")
+                        .put("source", "agent")
+                        .put("pageId", pageId)
+                        .put("act", new JSONObject().put("kind", "type").put("text", "hello")), () -> false));
+        assertEquals("BROWSER_BACKEND_FAILED", nonEditable.code);
+        assertEquals(0, backend.dispatchedInputs.size());
+
+        // 聚焦敏感密码框时被元素级检查硬阻断并升级 SECRET_SHIELD，且绝不落入人类输入。
+        backend.nextActResult = new JSONObject()
+                .put("ok", false)
+                .put("code", "BROWSER_SENSITIVE_BLOCKED")
+                .put("secretShield", true)
+                .put("sensitiveReason", "password_input_detected")
+                .put("message", "命中条款/凭据敏感控件，Bot 已停手等待人类接管");
+        BotBrowserBridge.Failure sensitiveType = assertThrows(BotBrowserBridge.Failure.class, () ->
+                bridge.execute(ctx, new JSONObject()
+                        .put("action", "act")
+                        .put("source", "agent")
+                        .put("pageId", pageId)
+                        .put("act", new JSONObject().put("kind", "type").put("text", "secret")), () -> false));
+        assertEquals("BROWSER_SENSITIVE_BLOCKED", sensitiveType.code);
+        assertEquals(0, backend.dispatchedInputs.size());
+
+        // 升级 SECRET_SHIELD 后，后续 agent act 直接在进入 DOM 前被阻断。
+        int actCountBefore = backend.actDomCalls.size();
+        BotBrowserBridge.Failure blockedAfterShield = assertThrows(BotBrowserBridge.Failure.class, () ->
+                bridge.execute(ctx, new JSONObject()
+                        .put("action", "act")
+                        .put("source", "agent")
+                        .put("pageId", pageId)
+                        .put("act", new JSONObject().put("kind", "type").put("text", "again")), () -> false));
+        assertEquals("BROWSER_SENSITIVE_BLOCKED", blockedAfterShield.code);
+        assertEquals(actCountBefore, backend.actDomCalls.size());
+
+        // 固定脚本契约检查：只读 wait 探测无 eval、转义安全、支持不存在算隐藏/子串/精确 URL；
+        // 无 ref type 脚本聚焦 activeElement、执行敏感与可编辑校验并按光标/选区插入。
+        String waitScript = BotBrowserManager.buildWaitProbeScript("agent", new JSONObject()
+                .put("selector", "div[data-x=\"a\"]")
+                .put("state", "hidden")
+                .put("text", "Hello</script>")
+                .put("url", "https://example.com/exact"));
+        assertFalse(waitScript.contains("eval("));
+        assertFalse(waitScript.contains("new Function"));
+        assertTrue(waitScript.contains("state === 'hidden') ? !anyVisible : anyVisible"));
+        assertTrue(waitScript.contains("bodyText.includes(targetText)"));
+        assertTrue(waitScript.contains("currentUrl === targetUrl"));
+        assertTrue(waitScript.contains("sensitiveBlocked: true"));
+        assertTrue(waitScript.contains("\\u003c/script\\u003e"));
+
+        String typeScript = BotBrowserManager.buildActScript(null, "agent",
+                "https://console.cloud.google.com/auth/overview/create",
+                new JSONObject().put("kind", "type").put("text", "PiBot"));
+        assertFalse(typeScript.contains("eval("));
+        assertFalse(typeScript.contains("new Function"));
+        assertTrue(typeScript.contains("document.activeElement"));
+        assertTrue(typeScript.contains("hasSecretDialog"));
+        assertTrue(typeScript.contains("checkSensitiveNode"));
+        assertTrue(typeScript.contains("isEditableControl"));
+        assertTrue(typeScript.contains("selectionStart"));
+        assertTrue(typeScript.contains("setSelectionRange"));
+        assertTrue(typeScript.contains("range.deleteContents()"));
+
+        bridge.shutdown();
+    }
+
+    private interface WaitProbeHandler {
+        JSONObject probe(JSONObject conditions, int attempt) throws Exception;
+    }
+
     private static final class FakeHandle implements BotBrowserManager.TabHandle {
         final String profileName;
         FakeHandle(String profileName) { this.profileName = profileName; }
@@ -243,7 +621,13 @@ public class BotBrowserPolicyTest {
         final AtomicInteger createCalls;
         final AtomicInteger destroyedTabs = new AtomicInteger();
         final List<JSONObject> dispatchedInputs = new ArrayList<>();
+        final List<JSONObject> actDomCalls = new ArrayList<>();
+        final List<String> actDomSources = new ArrayList<>();
+        final List<JSONObject> waitProbeConditions = new ArrayList<>();
+        BotBrowserManager.TabCallbacks lastCallbacks;
         JSONObject nextSnapshot = new JSONObject();
+        JSONObject nextActResult = new JSONObject();
+        WaitProbeHandler waitProbeHandler;
 
         FakeBackend(BotBrowserManager.Availability availability, AtomicInteger createCalls) {
             this.availability = availability;
@@ -259,6 +643,7 @@ public class BotBrowserPolicyTest {
         public BotBrowserManager.TabHandle createTab(String profileName, int width, int height,
                 BotBrowserManager.TabCallbacks callbacks, BooleanSupplier cancelled) {
             createCalls.incrementAndGet();
+            lastCallbacks = callbacks;
             assertNotEquals(BotBrowserPolicy.DEFAULT_PROFILE_NAME, profileName);
             return new FakeHandle(profileName);
         }
@@ -283,7 +668,25 @@ public class BotBrowserPolicyTest {
         @Override
         public JSONObject actDom(BotBrowserManager.TabHandle tab, String snapshotToken, String source,
                 String currentUrl, JSONObject act, BooleanSupplier cancelled) {
-            return new JSONObject();
+            actDomCalls.add(act);
+            actDomSources.add(source);
+            return nextActResult;
+        }
+
+        @Override
+        public JSONObject probeWaitCondition(BotBrowserManager.TabHandle tab, String source,
+                JSONObject conditions, BooleanSupplier cancelled) throws BotBrowserBridge.Failure {
+            waitProbeConditions.add(conditions);
+            if (waitProbeHandler == null) {
+                return new JSONObject();
+            }
+            try {
+                return waitProbeHandler.probe(conditions, waitProbeConditions.size());
+            } catch (BotBrowserBridge.Failure failure) {
+                throw failure;
+            } catch (Exception other) {
+                throw new BotBrowserBridge.Failure("BROWSER_BACKEND_FAILED", other.getMessage());
+            }
         }
 
         @Override

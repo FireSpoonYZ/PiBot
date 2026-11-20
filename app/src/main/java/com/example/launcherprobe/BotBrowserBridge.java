@@ -37,9 +37,10 @@ final class BotBrowserBridge {
         } catch (Failure failure) {
             throw failure;
         } catch (InterruptedException interrupted) {
-            throw new Failure("CANCELLED", "浏览器操作已取消");
+            Thread.currentThread().interrupt();
+            throw new Failure("CANCELLED", "浏览器操作已中断", OUTCOME_NOT_SENT);
         } catch (IllegalArgumentException invalid) {
-            throw new Failure("INVALID_ARGUMENT", "bot_browser 参数无效");
+            throw new Failure("INVALID_ARGUMENT", "bot_browser 参数无效", OUTCOME_NOT_SENT);
         } catch (Exception other) {
             throw new Failure("BROWSER_BACKEND_FAILED", "Android Bot 浏览器操作失败");
         }
@@ -48,7 +49,10 @@ final class BotBrowserBridge {
     private JSONObject run(JSONObject context, JSONObject arguments, BooleanSupplier cancelled)
             throws Exception {
         if (cancelled != null && cancelled.getAsBoolean()) {
-            throw new Failure("CANCELLED", "浏览器操作已取消");
+            throw new Failure("CANCELLED", "浏览器操作已取消", OUTCOME_NOT_SENT);
+        }
+        if (Thread.currentThread().isInterrupted()) {
+            throw new Failure("CANCELLED", "浏览器操作已中断", OUTCOME_NOT_SENT);
         }
         if (context == null) {
             throw new IllegalArgumentException("缺少调用上下文");
@@ -98,13 +102,34 @@ final class BotBrowserBridge {
         manager.shutdown();
     }
 
+    static final String OUTCOME_NOT_SENT = "not-sent";
+    static final String OUTCOME_UNCONFIRMED = "unconfirmed";
+    static final String OUTCOME_RESPONDED = "responded";
+
     /** 带固定协议错误码的受控失败，由 BotHostNativeTools 透传到 native_result.error。 */
     static final class Failure extends Exception {
         final String code;
+        final String outcome;
 
         Failure(String code, String message) {
+            this(code, message, "ANDROID_NATIVE_UNCONFIRMED".equals(code)
+                    ? OUTCOME_UNCONFIRMED
+                    : OUTCOME_RESPONDED);
+        }
+
+        Failure(String code, String message, String outcome) {
             super(message);
             this.code = code;
+            this.outcome = outcome;
+        }
+
+        boolean isUnconfirmed() {
+            return OUTCOME_UNCONFIRMED.equals(outcome)
+                    || "ANDROID_NATIVE_UNCONFIRMED".equals(code);
+        }
+
+        boolean isNotSent() {
+            return OUTCOME_NOT_SENT.equals(outcome);
         }
     }
 }

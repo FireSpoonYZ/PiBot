@@ -17,6 +17,8 @@ import { openCenterStore } from '../../center-server/data/index.js';
 import {
   openGoogleRules,
   createGoogleRuleDispatcher,
+  DEFAULT_ZERO_LEAD_ADMISSION_GRACE_MS,
+  DEFAULT_ZERO_LEAD_FIRE_WINDOW_MS,
 } from '../../center-server/google-workspace/rules.js';
 import {
   assertGoogleTrigger,
@@ -38,6 +40,11 @@ import {
   isTrustedHostSourceType,
 } from '../../host-core/google-workspace-privacy.js';
 import { normalizeAttribution } from '../src/chatTurnModel.ts';
+import {
+  calendarMinutesBeforeInputValue,
+  formatCalendarMinutesBefore,
+  parseCalendarMinutesBefore,
+} from '../src/center-admin/googleHelpers.ts';
 
 const NOW = Date.parse('2026-11-20T10:00:00.000Z');
 const GMAIL_PATH = '/gmail/v1/users/me';
@@ -1016,4 +1023,472 @@ test('Host webhook consumer fails closed on partial trusted markers and when sub
   assert.equal(receipts[0].id, 'evt-google');
   assert.equal(receipts[0].receipt.status, 'failed');
   assert.equal(receipts[0].receipt.error.code, GOOGLE_WORKSPACE_PRIVACY_UNAVAILABLE_CODE);
+});
+
+test('Calendar minutesBefore: 0 preserves 0 across save/list/edit/UI helpers, forbids early dispatch, fires once within bounded jitter window, and lets online Host consume', async () => {
+  assert.equal(parseCalendarMinutesBefore(0), 0);
+  assert.equal(parseCalendarMinutesBefore('0'), 0);
+  assert.equal(parseCalendarMinutesBefore(' 0 '), 0);
+  assert.equal(parseCalendarMinutesBefore(''), 15);
+  assert.equal(parseCalendarMinutesBefore(undefined), 15);
+  assert.equal(parseCalendarMinutesBefore(-5), 0);
+  assert.equal(parseCalendarMinutesBefore(2000), 1440);
+  assert.equal(calendarMinutesBeforeInputValue(0), '0');
+  assert.equal(calendarMinutesBeforeInputValue(10), '10');
+  assert.equal(calendarMinutesBeforeInputValue(undefined), '15');
+  assert.match(formatCalendarMinutesBefore(0, zh => zh), /0/);
+  assert.match(formatCalendarMinutesBefore(0, (_zh, en) => en), /0/);
+  assert.match(formatCalendarMinutesBefore(10, zh => zh), /10/);
+
+  const { store, cleanup } = makeStore();
+  let now = NOW;
+  const activeTimers = new Set();
+  const notified = [];
+  let resolveNotified;
+  const firstNotify = new Promise(resolve => { resolveNotified = resolve; });
+  try {
+    const fake = makeFakeApi(
+      'ada@acme.dev',
+      calendarRoutes([{ id: 'on-time', startsIn: 30_000 }]),
+    );
+    const google = {
+      status: async () => ({
+        client: { configured: true },
+        accounts: [{
+          id: 'a1',
+          email: 'ada@acme.dev',
+          status: 'connected',
+          choices: ['calendar'],
+          services: [{ service: 'calendar', state: 'ready' }],
+        }],
+      }),
+      api: async () => fake.api,
+    };
+
+    const dispatch = createGoogleRuleDispatcher({
+      store,
+      notify: deviceId => {
+        notified.push({ deviceId, at: now });
+        resolveNotified();
+      },
+      now: () => now,
+    });
+    const rules = openGoogleRules({
+      store,
+      google,
+      dispatch,
+      now: () => now,
+      tickMs: 60_000,
+      setTimer: (fn, ms) => {
+        const handle = { fn, ms, cleared: false };
+        activeTimers.add(handle);
+        return handle;
+      },
+      clearTimer: handle => {
+        handle.cleared = true;
+        activeTimers.delete(handle);
+      },
+    });
+
+    const { rule: saved } = await rules.manage('save', {
+      deviceId: 'dev-1',
+      botId: 'bot-1',
+      account: 'ada@acme.dev',
+      source: 'calendar',
+      enabled: true,
+      minutesBefore: 0,
+      instruction: 'Join meeting now.',
+    });
+    assert.equal(saved.minutesBefore, 0);
+    assert.match(saved.name, /\(0m\)/);
+
+    const listed = await rules.manage('list', { deviceId: 'dev-1', botId: 'bot-1' });
+    assert.equal(listed.items.length, 1);
+    assert.equal(listed.items[0].minutesBefore, 0);
+
+    const { rule: edited } = await rules.manage('save', {
+      id: saved.id,
+      instruction: 'Join meeting right on time.',
+    });
+    assert.equal(edited.minutesBefore, 0);
+
+    // Tick 30s before meeting start: must arm a timer and never dispatch early.
+    await rules.tick();
+    assert.equal(store.listGoogleRuleEvents(saved.id, { nowMs: now }).length, 0);
+    assert.equal(notified.length, 0);
+    assert.equal(activeTimers.size, 1);
+    const [firstTimer] = activeTimers;
+    assert.equal(firstTimer.ms, 30_000);
+
+    // Timer firing 1ms before startMs must be ignored (no early dispatch).
+    now = NOW + 29_999;
+    activeTimers.delete(firstTimer);
+    firstTimer.fn();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(store.listGoogleRuleEvents(saved.id, { nowMs: now }).length, 0);
+    assert.equal(notified.length, 0);
+
+    // Tick 10s before startMs re-arms a 10s timer and still does not fire early.
+    now = NOW + 20_000;
+    await rules.tick();
+    assert.equal(store.listGoogleRuleEvents(saved.id, { nowMs: now }).length, 0);
+    assert.equal(activeTimers.size, 1);
+    const [dueTimer] = activeTimers;
+    assert.equal(dueTimer.ms, 10_000);
+
+    // Normal post-start timer jitter (+2.5s): fires once as pending with future expiresAt.
+    now = NOW + 32_500;
+    activeTimers.delete(dueTimer);
+    dueTimer.fn();
+    await firstNotify;
+    await new Promise(resolve => setImmediate(resolve));
+
+    const afterFire = store.listGoogleRuleEvents(saved.id, { nowMs: now });
+    assert.equal(afterFire.length, 1);
+    assert.equal(afterFire[0].status, 'pending');
+    assert.equal(Date.parse(afterFire[0].expiresAt), now + DEFAULT_ZERO_LEAD_ADMISSION_GRACE_MS);
+    assert.equal(notified.length, 1);
+
+    // Repeated ticks within the post-start window must remain idempotent.
+    now = NOW + 40_000;
+    await rules.tick();
+    now = NOW + 50_000;
+    await rules.tick();
+    assert.equal(store.listGoogleRuleEvents(saved.id, { nowMs: now }).length, 1);
+    assert.equal(notified.length, 1);
+
+    // A fresh openGoogleRules instance (empty in-memory `fired` cache) must still dedupe via SQLite.
+    const rulesRestarted = openGoogleRules({
+      store,
+      google,
+      dispatch,
+      now: () => now,
+      tickMs: 60_000,
+    });
+    await rulesRestarted.tick();
+    assert.equal(store.listGoogleRuleEvents(saved.id, { nowMs: now }).length, 1);
+    assert.equal(notified.length, 1);
+    await rulesRestarted.close();
+
+    // Online Host consumes the pending zero-lead reminder within the admission grace window.
+    now = NOW + 55_000;
+    const submitted = [];
+    let resolveConsumed;
+    const consumed = new Promise(resolve => { resolveConsumed = resolve; });
+    const hostClient = {
+      pollWebhookEvents: async ({ cursor } = {}) => store.pollWebhookEvents('dev-1', cursor ?? null, now),
+      stopWebhookEvents: async input => input,
+      reportWebhookEvent: async (id, receipt) => {
+        const res = store.reportWebhookEvent('dev-1', id, receipt, now);
+        if (receipt.status === 'succeeded') resolveConsumed();
+        return res;
+      },
+    };
+    const consumer = createWebhookConsumer({
+      deviceId: 'dev-1',
+      getClient: () => hostClient,
+      getRuntime: () => ({ getSubmission: async () => null }),
+      isReady: () => true,
+      getStopStates: async () => [{ botId: 'bot-1', stopEpoch: 1, pendingStopEpoch: null }],
+      acknowledgeStop: async () => {},
+      submitWebhook: async () => { throw new Error('unexpected public webhook'); },
+      submitGoogleRule: async (botId, input) => {
+        submitted.push({ botId, input });
+        return { status: 'done' };
+      },
+    });
+    consumer.wake();
+    await consumed;
+    await consumer.close();
+
+    assert.equal(submitted.length, 1);
+    assert.equal(submitted[0].botId, 'bot-1');
+    assert.match(submitted[0].input.text, /"minutesBefore":0/);
+    assert.equal(store.listGoogleRuleEvents(saved.id, { nowMs: now })[0].status, 'succeeded');
+
+    await rules.close();
+    assert.equal(activeTimers.size, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('Calendar minutesBefore: 0 schedule cache rebuilds around startMs and upgrades positive-only cache without firing positive rules late', async () => {
+  const { store, cleanup } = makeStore();
+  let now = NOW + 10_000;
+  try {
+    const fake = makeFakeApi(
+      'ada@acme.dev',
+      calendarRoutes([{ id: 'just-started', startsIn: 0 }]),
+    );
+    const google = {
+      status: async () => ({
+        client: { configured: true },
+        accounts: [{
+          id: 'a1',
+          email: 'ada@acme.dev',
+          status: 'connected',
+          choices: ['calendar'],
+          services: [{ service: 'calendar', state: 'ready' }],
+        }],
+      }),
+      api: async () => fake.api,
+    };
+    const dispatch = createGoogleRuleDispatcher({ store, notify: () => {}, now: () => now });
+    const rules = openGoogleRules({
+      store,
+      google,
+      dispatch,
+      now: () => now,
+      tickMs: 60_000,
+    });
+
+    const { rule: posRule } = await rules.manage('save', {
+      deviceId: 'dev-1',
+      botId: 'bot-1',
+      account: 'ada@acme.dev',
+      source: 'calendar',
+      enabled: true,
+      minutesBefore: 10,
+      instruction: 'Positive lead rule.',
+    });
+
+    // First tick caches schedule with positive-only queryFromMs = now (excluding the event at NOW).
+    await rules.tick();
+    const firstUpcoming = fake.calls.filter(u => !u.searchParams.has('fields'));
+    assert.equal(firstUpcoming.length, 1);
+    assert.equal(firstUpcoming[0].searchParams.get('timeMin'), new Date(now).toISOString());
+    assert.equal(store.listGoogleRuleEvents(posRule.id, { nowMs: now }).length, 0);
+
+    // Add a zero-lead rule on the same calendar without any calendar sync change (`changed: false`).
+    now = NOW + 20_000;
+    const { rule: zeroRule } = await rules.manage('save', {
+      deviceId: 'dev-1',
+      botId: 'bot-2',
+      account: 'ada@acme.dev',
+      source: 'calendar',
+      enabled: true,
+      minutesBefore: 0,
+      instruction: 'Zero lead rule.',
+    });
+
+    await rules.tick();
+    const afterUpgradeUpcoming = fake.calls.filter(u => !u.searchParams.has('fields'));
+    assert.equal(afterUpgradeUpcoming.length, 2);
+    assert.equal(
+      afterUpgradeUpcoming[1].searchParams.get('timeMin'),
+      new Date(now - DEFAULT_ZERO_LEAD_FIRE_WINDOW_MS).toISOString(),
+    );
+
+    const zeroEvents = store.listGoogleRuleEvents(zeroRule.id, { nowMs: now });
+    // This rule was enabled after the meeting began; a cache rebuild must not replay it.
+    assert.equal(zeroEvents.length, 0);
+    assert.equal(store.listGoogleRuleEvents(posRule.id, { nowMs: now }).length, 0);
+    assert.equal(store.pollWebhookEvents('dev-1', null, now).items.length, 0);
+
+    await rules.close();
+  } finally {
+    cleanup();
+  }
+
+  // Also verify 410 syncToken re-seed right after startMs still keeps the zero-lead event.
+  const { store: store2, cleanup: cleanup2 } = makeStore();
+  let now2 = NOW - 120_000;
+  try {
+    const fake410 = makeFakeApi(
+      'ada@acme.dev',
+      calendarRoutes([{ id: 'reseed-zero', startsIn: 0 }], 410),
+    );
+    const google410 = {
+      status: async () => ({
+        client: { configured: true },
+        accounts: [{
+          id: 'a1',
+          email: 'ada@acme.dev',
+          status: 'connected',
+          choices: ['calendar'],
+          services: [{ service: 'calendar', state: 'ready' }],
+        }],
+      }),
+      api: async () => fake410.api,
+    };
+    const rules410 = openGoogleRules({
+      store: store2,
+      google: google410,
+      dispatch: createGoogleRuleDispatcher({ store: store2, notify: () => {}, now: () => now2 }),
+      now: () => now2,
+      tickMs: 60_000,
+    });
+    const { rule: zero410 } = await rules410.manage('save', {
+      deviceId: 'dev-1',
+      botId: 'bot-1',
+      account: 'ada@acme.dev',
+      source: 'calendar',
+      enabled: true,
+      minutesBefore: 0,
+      instruction: 'Zero lead after 410 re-seed.',
+    });
+
+    await rules410.tick();
+    assert.equal(store2.listGoogleRuleEvents(zero410.id, { nowMs: now2 }).length, 0);
+
+    // Second tick lands after startMs and triggers a 410 syncToken re-seed + schedule rebuild.
+    now2 = NOW + 25_000;
+    await rules410.tick();
+    assert.equal(store2.getGoogleTriggerState().accounts['ada@acme.dev']?.calendars?.primary?.syncToken, 'sync-2');
+    const reseedEvents = store2.listGoogleRuleEvents(zero410.id, { nowMs: now2 });
+    assert.equal(reseedEvents.length, 1);
+    assert.equal(reseedEvents[0].status, 'pending');
+
+    await rules410.close();
+  } finally {
+    cleanup2();
+  }
+});
+
+test('Calendar minutesBefore: 0 enforces bounded fire window and offline expiry while preserving strict positive-lead expiry', async () => {
+  const { store, cleanup } = makeStore();
+  let now = NOW - 2 * DEFAULT_ZERO_LEAD_FIRE_WINDOW_MS;
+  const activeTimers = new Set();
+  try {
+    const fake = makeFakeApi(
+      'ada@acme.dev',
+      calendarRoutes([
+        { id: 'too-old', startsIn: -DEFAULT_ZERO_LEAD_FIRE_WINDOW_MS },
+        { id: 'zero-offline', startsIn: -5_000 },
+        { id: 'pos-offline', startsIn: 30_000 },
+      ]),
+    );
+    const google = {
+      status: async () => ({
+        client: { configured: true },
+        accounts: [{
+          id: 'a1',
+          email: 'ada@acme.dev',
+          status: 'connected',
+          choices: ['calendar'],
+          services: [{ service: 'calendar', state: 'ready' }],
+        }],
+      }),
+      api: async () => fake.api,
+    };
+    const dispatch = createGoogleRuleDispatcher({ store, notify: () => {}, now: () => now });
+    const rules = openGoogleRules({
+      store,
+      google,
+      dispatch,
+      now: () => now,
+      tickMs: 60_000,
+      setTimer: (fn, ms) => {
+        const handle = { fn, ms, cleared: false };
+        activeTimers.add(handle);
+        return handle;
+      },
+      clearTimer: handle => {
+        handle.cleared = true;
+        activeTimers.delete(handle);
+      },
+    });
+
+    const { rule: zeroRule } = await rules.manage('save', {
+      deviceId: 'dev-1',
+      botId: 'bot-1',
+      account: 'ada@acme.dev',
+      source: 'calendar',
+      enabled: true,
+      minutesBefore: 0,
+      instruction: 'Zero lead rule.',
+    });
+    const { rule: posRule } = await rules.manage('save', {
+      deviceId: 'dev-1',
+      botId: 'bot-2',
+      account: 'ada@acme.dev',
+      source: 'calendar',
+      enabled: true,
+      minutesBefore: 10,
+      instruction: 'Positive lead rule.',
+    });
+
+    now = NOW;
+    await rules.tick();
+
+    // Zero-lead rule fires ONLY `zero-offline`; never backfills `too-old`, never fires `pos-offline` early.
+    const zeroEvents = store.listGoogleRuleEvents(zeroRule.id, { nowMs: now });
+    assert.equal(zeroEvents.length, 1);
+    assert.match(zeroEvents[0].eventKey, /zero-offline/);
+    assert.equal(zeroEvents[0].status, 'pending');
+    assert.equal(Date.parse(zeroEvents[0].expiresAt), NOW + DEFAULT_ZERO_LEAD_ADMISSION_GRACE_MS);
+
+    // Positive-lead rule fires ONLY `pos-offline` with exact `startMs` expiry (no post-start relaxation).
+    const posEvents = store.listGoogleRuleEvents(posRule.id, { nowMs: now });
+    assert.equal(posEvents.length, 1);
+    assert.match(posEvents[0].eventKey, /pos-offline/);
+    assert.equal(posEvents[0].status, 'pending');
+    assert.equal(Date.parse(posEvents[0].expiresAt), NOW + 30_000);
+
+    // At exact `pos-offline` startMs while Host is offline: positive-lead is immediately missed,
+    // while `zero-offline` is still within its short admission grace window.
+    now = NOW + 30_000;
+    const posAtStart = store.listGoogleRuleEvents(posRule.id, { nowMs: now });
+    assert.equal(posAtStart[0].status, 'missed');
+    assert.equal(posAtStart[0].error.code, 'MEETING_STARTED_WHILE_OFFLINE');
+    assert.equal(store.listGoogleRuleEvents(zeroRule.id, { nowMs: now })[0].status, 'pending');
+
+    // Once zero-lead admission grace passes while Host stays offline, zero-lead is also missed and never delivered.
+    now = NOW + DEFAULT_ZERO_LEAD_ADMISSION_GRACE_MS;
+    const pollAfterGrace = store.pollWebhookEvents('dev-1', null, now);
+    assert.equal(pollAfterGrace.items.length, 0);
+    const zeroAfterGrace = store.listGoogleRuleEvents(zeroRule.id, { nowMs: now });
+    assert.equal(zeroAfterGrace[0].status, 'missed');
+    assert.equal(zeroAfterGrace[0].error.code, 'MEETING_STARTED_WHILE_OFFLINE');
+
+    // Direct dispatcher fallback without explicit `expiresAt` enforces the same zero vs positive expiry bounds.
+    const directStartMs = NOW + 10 * 60_000;
+    now = directStartMs + 5_000;
+    const directZeroOk = await dispatch({
+      deviceId: 'dev-1',
+      botId: 'bot-1',
+      ruleId: zeroRule.id,
+      account: 'ada@acme.dev',
+      source: 'calendar',
+      eventKey: 'direct-zero-ok',
+      instruction: 'Zero ok.',
+      payload: { source: 'calendar', startMs: directStartMs, minutesBefore: 0 },
+    });
+    assert.equal(directZeroOk.status, 'pending');
+    assert.equal(directZeroOk.created, true);
+
+    now = directStartMs + DEFAULT_ZERO_LEAD_FIRE_WINDOW_MS;
+    const directZeroLate = await dispatch({
+      deviceId: 'dev-1',
+      botId: 'bot-1',
+      ruleId: zeroRule.id,
+      account: 'ada@acme.dev',
+      source: 'calendar',
+      eventKey: 'direct-zero-late',
+      instruction: 'Zero late.',
+      payload: { source: 'calendar', startMs: directStartMs, minutesBefore: 0 },
+    });
+    assert.equal(directZeroLate.status, 'missed');
+    assert.equal(directZeroLate.created, false);
+
+    now = directStartMs;
+    const directPosAtStart = await dispatch({
+      deviceId: 'dev-1',
+      botId: 'bot-2',
+      ruleId: posRule.id,
+      account: 'ada@acme.dev',
+      source: 'calendar',
+      eventKey: 'direct-pos-at-start',
+      instruction: 'Pos late.',
+      payload: { source: 'calendar', startMs: directStartMs, minutesBefore: 10 },
+    });
+    assert.equal(directPosAtStart.status, 'missed');
+    assert.equal(directPosAtStart.created, false);
+
+    await rules.close();
+    assert.equal(activeTimers.size, 0);
+  } finally {
+    cleanup();
+  }
 });

@@ -22,6 +22,12 @@ import {
   Trash2,
 } from 'lucide-react';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
+import {
+  calendarMinutesBeforeInputValue,
+  DEFAULT_CALENDAR_MINUTES_BEFORE,
+  formatCalendarMinutesBefore,
+  parseCalendarMinutesBefore,
+} from '../center-admin/googleHelpers';
 import { openExternalUrl } from '../center-admin/openExternalUrl';
 import { useText } from '../ui';
 import {
@@ -183,7 +189,7 @@ export function GoogleCapabilitySection({
   const [ruleFrom, setRuleFrom] = useState('');
   const [ruleSubject, setRuleSubject] = useState('');
   const [ruleCalendar, setRuleCalendar] = useState('primary');
-  const [ruleMinutesBefore, setRuleMinutesBefore] = useState(15);
+  const [ruleMinutesBefore, setRuleMinutesBefore] = useState(String(DEFAULT_CALENDAR_MINUTES_BEFORE));
   const [ruleInstruction, setRuleInstruction] = useState('');
   const [ruleSaving, setRuleSaving] = useState(false);
 
@@ -310,7 +316,7 @@ export function GoogleCapabilitySection({
     setRuleFrom('');
     setRuleSubject('');
     setRuleCalendar('primary');
-    setRuleMinutesBefore(15);
+    setRuleMinutesBefore(String(DEFAULT_CALENDAR_MINUTES_BEFORE));
     setRuleInstruction(
       source === 'gmail'
         ? t('总结新邮件要点并提醒我', 'Summarize the new email and notify me')
@@ -327,7 +333,7 @@ export function GoogleCapabilitySection({
     setRuleFrom(formatRuleFrom(rule.from));
     setRuleSubject(rule.subjectContains ?? '');
     setRuleCalendar(rule.calendar ?? 'primary');
-    setRuleMinutesBefore(rule.minutesBefore ?? 15);
+    setRuleMinutesBefore(calendarMinutesBeforeInputValue(rule.minutesBefore));
     setRuleInstruction(rule.instruction);
     setRulesError('');
     setRuleFormOpen(true);
@@ -363,7 +369,7 @@ export function GoogleCapabilitySection({
             }
           : {
               calendar: ruleCalendar.trim() || 'primary',
-              minutesBefore: Math.max(0, Math.min(1440, Math.round(Number(ruleMinutesBefore) || 15))),
+              minutesBefore: parseCalendarMinutesBefore(ruleMinutesBefore),
             }),
       };
       await saveGoogleRule(api, identity, payload);
@@ -794,7 +800,7 @@ export function GoogleCapabilitySection({
                             <span>
                               {rule.source === 'gmail'
                                 ? t('新邮件触发', 'New email')
-                                : t(`会前 ${rule.minutesBefore ?? 15} 分钟`, `${rule.minutesBefore ?? 15}m before event`)}
+                                : formatCalendarMinutesBefore(rule.minutesBefore, t)}
                             </span>
                           </span>
                           <span className={`gws-pill is-${status.tone}`}>{status.label}</span>
@@ -987,10 +993,11 @@ export function GoogleCapabilitySection({
                           type="number"
                           min={0}
                           max={1440}
+                          step={1}
                           className="gws-input"
                           value={ruleMinutesBefore}
                           disabled={ruleSaving}
-                          onChange={e => setRuleMinutesBefore(Number(e.target.value) || 15)}
+                          onChange={e => setRuleMinutesBefore(e.target.value)}
                         />
                       </label>
                     </>

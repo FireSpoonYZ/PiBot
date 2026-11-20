@@ -91,6 +91,8 @@ export const BROWSER_ERROR_CODES = Object.freeze([
   'BROWSER_HANDBACK_BLOCKED_SENSITIVE',
   'BROWSER_URL_BLOCKED',
   'BROWSER_ACTION_BLOCKED',
+  'BROWSER_ACTION_UNCONFIRMED',
+  'BROWSER_TIMEOUT',
   'BROWSER_FRAME_TOO_LARGE',
   'BROWSER_STREAM_UNAVAILABLE',
   'BROWSER_BACKEND_FAILED',
@@ -125,6 +127,8 @@ const SAFE_DEFAULT_MESSAGES = Object.freeze({
   BROWSER_HANDBACK_BLOCKED_SENSITIVE: 'Cannot hand control back to the bot while on a sensitive, login, MFA, policy, or secret page.',
   BROWSER_URL_BLOCKED: 'URL is blocked by browser security policy.',
   BROWSER_ACTION_BLOCKED: 'Browser action is blocked by security policy.',
+  BROWSER_ACTION_UNCONFIRMED: 'Browser action may have already occurred. Check the page before retrying.',
+  BROWSER_TIMEOUT: 'Browser operation timed out.',
   BROWSER_FRAME_TOO_LARGE: 'Browser frame exceeds size limit.',
   BROWSER_STREAM_UNAVAILABLE: 'Live interactive browser stream is unavailable on this host.',
   BROWSER_BACKEND_FAILED: 'Browser backend failed.',
@@ -169,7 +173,7 @@ const ALLOWED_MOUSE_BUTTONS = new Set(['left', 'right', 'middle']);
 const ALLOWED_FRAME_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 const ALLOWED_FRAME_FORMATS = new Set(['png', 'jpeg', 'webp']);
 const ALLOWED_SCROLL_DIRECTIONS = new Set(['up', 'down', 'left', 'right']);
-const ALLOWED_WAIT_LOAD_STATES = new Set(['load', 'domcontentloaded', 'networkidle']);
+const ALLOWED_WAIT_LOAD_STATES = new Set(['load', 'domcontentloaded']);
 const ALLOWED_WAIT_ELEMENT_STATES = new Set(['visible', 'hidden']);
 
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -716,7 +720,11 @@ export function normalizeBotActInput(act) {
       rejectUnknownFields(act, ['kind', 'selector', 'text', 'url', 'load', 'state', 'timeoutMs'], 'act.wait');
       const normalized = { kind: 'wait' };
       if (act.selector !== undefined) {
-        normalized.selector = assertBoundedString(act.selector, 'act.selector', { min: 1, max: MAX_SELECTOR_CHARS, maxBytes: MAX_SELECTOR_CHARS });
+        const selector = assertBoundedString(act.selector, 'act.selector', { min: 1, max: MAX_SELECTOR_CHARS, maxBytes: MAX_SELECTOR_CHARS });
+        if (selector.trim() === '') {
+          throw browserError('INVALID_ARGUMENT', 'act.selector must not be blank');
+        }
+        normalized.selector = selector;
       }
       if (act.text !== undefined) {
         normalized.text = assertBoundedString(act.text, 'act.text', { min: 1, max: 256, maxBytes: 512 });
@@ -725,14 +733,23 @@ export function normalizeBotActInput(act) {
         normalized.url = assertBoundedString(act.url, 'act.url', { min: 1, max: 512, maxBytes: 512 });
       }
       if (act.load !== undefined) {
+        if (act.load === 'networkidle') {
+          throw browserError(
+            'BROWSER_UNSUPPORTED',
+            "act.wait load='networkidle' is not supported; use 'load' or 'domcontentloaded'."
+          );
+        }
         if (!ALLOWED_WAIT_LOAD_STATES.has(act.load)) {
-          throw browserError('INVALID_ARGUMENT', 'act.load must be load, domcontentloaded, or networkidle');
+          throw browserError('INVALID_ARGUMENT', 'act.load must be load or domcontentloaded');
         }
         normalized.load = act.load;
       }
       if (act.state !== undefined) {
         if (!ALLOWED_WAIT_ELEMENT_STATES.has(act.state)) {
           throw browserError('INVALID_ARGUMENT', 'act.state must be visible or hidden');
+        }
+        if (normalized.selector === undefined) {
+          throw browserError('INVALID_ARGUMENT', 'act.state requires act.selector');
         }
         normalized.state = act.state;
       }
@@ -764,6 +781,25 @@ function verifyImageMagic(buffer, mimeType) {
     );
   }
   return false;
+}
+
+export function hasWaitCondition(act) {
+  return act.selector !== undefined || act.text !== undefined || act.url !== undefined || act.load !== undefined;
+}
+
+// Providers also accept the legacy millisecond-only delay. All condition fields
+// use the public validator so the two backends cannot silently drop a predicate.
+export function normalizeProviderWait({ ms, ...act }, defaultDelayMs) {
+  if (ms !== undefined && (!Number.isFinite(ms) || ms < 0)) {
+    throw browserError('INVALID_ARGUMENT', 'wait.ms must be a finite non-negative number');
+  }
+  const conditional = hasWaitCondition(act);
+  if (conditional && act.timeoutMs === undefined && ms !== undefined) act.timeoutMs = ms;
+  const normalized = normalizeBotActInput(act);
+  if (!conditional && normalized.timeoutMs === undefined) {
+    normalized.ms = Math.min(MAX_WAIT_TIMEOUT_MS, Math.trunc(ms ?? defaultDelayMs));
+  }
+  return normalized;
 }
 
 /** Validates a provider-returned frame before sending over trusted control or vision tool channels. */

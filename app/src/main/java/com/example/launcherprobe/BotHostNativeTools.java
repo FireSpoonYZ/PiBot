@@ -133,7 +133,7 @@ final class BotHostNativeTools {
         }
         try {
             task.future = workers.submit(task);
-            if (task.cancelled.get()) task.future.cancel(true);
+            if (task.cancelled.get() && !task.isBrowserCall()) task.future.cancel(true);
         } catch (RejectedExecutionException exception) {
             tasks.remove(id, task);
             sendErrorAsync(process, id, "ANDROID_NATIVE_BUSY", "原生调用并发已满");
@@ -187,9 +187,15 @@ final class BotHostNativeTools {
     }
 
     private void cancel(String id) {
-        Task task = tasks.remove(id);
+        Task task = tasks.get(id);
         if (task == null) return;
         task.cancelled.set(true);
+        if (task.isBrowserCall()) {
+            // Browser takeover waits for the worker's receipt, not just delivery of native_cancel.
+            task.interruptIfRunning();
+            return;
+        }
+        if (!tasks.remove(id, task)) return;
         Future<?> future = task.future;
         if (future != null) future.cancel(true);
     }
@@ -260,12 +266,16 @@ final class BotHostNativeTools {
             this.frame = frame;
         }
 
+        boolean isBrowserCall() {
+            return "bot_browser".equals(frame.optString("tool"));
+        }
+
         synchronized void interruptIfRunning() {
             if (runner != null) runner.interrupt();
         }
 
         @Override public void run() {
-            if (closed.get() || cancelled.get()) return;
+            if (closed.get() || (cancelled.get() && !isBrowserCall())) return;
             Object result = null;
             JSONObject error = null;
             synchronized (this) { runner = Thread.currentThread(); }
@@ -277,7 +287,7 @@ final class BotHostNativeTools {
                 synchronized (this) { runner = null; }
                 Thread.interrupted(); // 接管中断只针对本次执行，不泄漏到回执写入或下一个任务。
             }
-            if (closed.get() || cancelled.get()) return;
+            if (closed.get() || (cancelled.get() && !isBrowserCall())) return;
             if (!tasks.remove(id, this)) return; // 已被取消而抑制回执。
             try {
                 JSONObject reply = new JSONObject().put("type", "native_result").put("id", id);

@@ -14,6 +14,7 @@ import {
   botBrowserProfileDirectory,
   browserError,
   isPlainObject,
+  hasWaitCondition,
   normalizeBotActInput,
   normalizeBotSnapshotOptions,
   normalizeControlAuthority,
@@ -114,7 +115,7 @@ function formatProviderAct(normalizedAct) {
     return { ...normalizedAct, amount, deltaX, deltaY };
   }
   if (normalizedAct.kind === 'wait') {
-    const timeoutMs = normalizedAct.timeoutMs ?? 500;
+    const timeoutMs = normalizedAct.timeoutMs ?? (hasWaitCondition(normalizedAct) ? 5_000 : 500);
     return { ...normalizedAct, timeoutMs, ms: timeoutMs };
   }
   return { ...normalizedAct };
@@ -254,6 +255,7 @@ export function createBotBrowserService(options = {}) {
         const provider = assertProviderShape(await factory({
           botId: entry.state.botId,
           profileDir: entry.state.profileDir,
+          maxTabs: maxTabsPerBot,
           deviceId: host.deviceId,
           ...(nativeBridge ? { nativeBridge } : {}),
         }));
@@ -564,8 +566,10 @@ export function createBotBrowserService(options = {}) {
       }
 
       case 'frame': {
-        if (req.lease) {
-          state.renewLease(auth, req.lease);
+        const presentedLease = req.lease ?? null;
+        const hasPresentedLease = presentedLease !== null;
+        if (hasPresentedLease) {
+          state.renewLease(auth, presentedLease);
         }
         const provider = await ensureProvider(entry, { allowUnavailable: true });
         if (!provider) {
@@ -573,6 +577,9 @@ export function createBotBrowserService(options = {}) {
         }
         if (!state.available || !state.pageId) {
           await refreshProviderStatus(entry, { allowUnavailable: true, pageId: req.pageId });
+        }
+        if (closed || state.closed) {
+          throw browserError('BROWSER_CLOSED');
         }
         if (!state.available || !state.canStreamInteract) {
           throw browserError(
@@ -588,24 +595,34 @@ export function createBotBrowserService(options = {}) {
           throw browserError('BROWSER_PAGE_NOT_FOUND', 'No active page open in this bot browser.');
         }
 
-        // Pre-check known secret/sensitivity state before asking provider for pixels.
-        const isHolder = state.isActiveLeaseHolder(auth, req.lease ?? null);
-        if (state.sensitivity.blockNormalFrame) {
-          throw browserError(
-            'BROWSER_SECRET_STEP_BLOCKED',
-            state.sensitivity.guidance,
-            { phase: state.phase, reason: 'secret_risk', fallbackToSystemBrowser: true }
-          );
-        }
-        if (state.sensitivity.blockBystanderFrame) {
-          if (!auth.canViewSensitive || (state.phase === 'human' && !isHolder)) {
-            throw browserError(
-              'BROWSER_SENSITIVE_BLOCKED',
-              'Sensitive page frames are withheld from bystanders and non-holder viewers.',
-              { phase: state.phase, reason: state.sensitivity.reasons[0] ?? 'sensitive_page' }
-            );
+        const sessionAtStart = state.sessionId;
+        const targetTab = () => state.tabs.find(tab => tab.id === targetPageId);
+        const targetSensitivity = () => targetPageId === state.pageId ? state.sensitivity : classifyPageSensitivity({
+          url: targetTab()?.url ?? '', title: targetTab()?.title ?? '', botId: req.botId,
+          pageId: targetPageId, isPageWithheld: checkWithheld,
+        });
+        const mayViewRestricted = () => {
+          const holder = state.isActiveLeaseHolder(auth, presentedLease); // also expires stale leases
+          if (!auth.canViewSensitive) return false;
+          if (state.phase === 'human' || hasPresentedLease) return holder;
+          return state.phase !== 'taking' && state.reason !== 'disconnected_hold';
+        };
+        const assertMayDeliver = (sensitivity, allowed) => {
+          if (sensitivity.blockNormalFrame) {
+            throw browserError('BROWSER_SECRET_STEP_BLOCKED', sensitivity.guidance,
+              { phase: state.phase, reason: 'secret_risk', fallbackToSystemBrowser: true });
           }
-        }
+          if (sensitivity.blockBystanderFrame && !allowed) {
+            throw browserError('BROWSER_SENSITIVE_BLOCKED',
+              'Sensitive page frames are withheld from bystanders and non-holder viewers.',
+              { phase: state.phase, reason: sensitivity.reasons[0] ?? 'sensitive_page' });
+          }
+        };
+        const allowedBefore = mayViewRestricted();
+        const leaseAtStart = state.leaseGeneration;
+        const humanAtStart = state.phase === 'human';
+        const sensitivityBefore = targetSensitivity();
+        assertMayDeliver(sensitivityBefore, allowedBefore);
 
         let rawFrame;
         try {
@@ -622,12 +639,25 @@ export function createBotBrowserService(options = {}) {
         } catch (err) {
           throw mapProviderError(err, state);
         }
+
+        if (closed || state.closed) {
+          throw browserError('BROWSER_CLOSED');
+        }
+
         const validated = validateFramePayload(rawFrame, req.frameLimits.maxBytes);
         const framePageId = validated.pageId ?? targetPageId;
         const frameHints = mergeProviderHints(rawFrame, validated.hints);
+
+        if (framePageId !== targetPageId) throw browserError('BROWSER_STALE_PAGE');
+
+        const sessionStillCurrent = entry.provider === provider && state.sessionId === sessionAtStart && state.hasActiveSession;
+        const currentTab = targetTab();
+        const staleDocument = framePageId === state.pageId && Number.isSafeInteger(validated.documentGeneration)
+          && Number.isSafeInteger(state.documentGeneration) && validated.documentGeneration < state.documentGeneration;
+        const sensitivityAtDelivery = targetSensitivity();
         const liveSensitivity = classifyPageSensitivity({
-          url: validated.url ?? state.activeTab()?.url ?? '',
-          title: validated.title ?? state.activeTab()?.title ?? '',
+          url: validated.url ?? currentTab?.url ?? '',
+          title: validated.title ?? currentTab?.title ?? '',
           hints: frameHints,
           providerSensitive: validated.sensitive,
           botId: req.botId,
@@ -635,36 +665,29 @@ export function createBotBrowserService(options = {}) {
           isPageWithheld: checkWithheld,
         });
 
-        // Sync metadata/sensitivity (never dropping security state).
-        state.syncProviderResult({
-          pageId: framePageId,
-          ...(validated.url !== undefined ? { url: validated.url } : {}),
-          ...(validated.title !== undefined ? { title: validated.title } : {}),
-          ...(validated.documentGeneration !== undefined ? { documentGeneration: validated.documentGeneration } : {}),
-          ...(frameHints !== null ? { hints: frameHints } : {}),
-          ...(validated.sensitive ? { sensitive: true } : {}),
-          ...(typeof rawFrame?.sensitiveCategory === 'string' ? { sensitiveCategory: rawFrame.sensitiveCategory } : {}),
-          ...(typeof rawFrame?.sensitiveReason === 'string' ? { sensitiveReason: rawFrame.sensitiveReason } : {}),
-          ...(rawFrame?.authUseSystemBrowser === true ? { authUseSystemBrowser: true } : {}),
-        }, { invalidateFramesOnChange: true });
+        // Sync metadata/sensitivity only while the same provider session and document are current.
+        if (sessionStillCurrent && !staleDocument && currentTab && framePageId === state.pageId) {
+          state.syncProviderResult({
+            pageId: framePageId,
+            ...(validated.url !== undefined ? { url: validated.url } : {}),
+            ...(validated.title !== undefined ? { title: validated.title } : {}),
+            ...(validated.documentGeneration !== undefined ? { documentGeneration: validated.documentGeneration } : {}),
+            ...(frameHints !== null ? { hints: frameHints } : {}),
+            ...(validated.sensitive ? { sensitive: true } : {}),
+            ...(typeof rawFrame?.sensitiveCategory === 'string' ? { sensitiveCategory: rawFrame.sensitiveCategory } : {}),
+            ...(typeof rawFrame?.sensitiveReason === 'string' ? { sensitiveReason: rawFrame.sensitiveReason } : {}),
+            ...(rawFrame?.authUseSystemBrowser === true ? { authUseSystemBrowser: true } : {}),
+          }, { invalidateFramesOnChange: true });
+        }
 
-        // Post-capture Privacy Shield gate BEFORE returning any image bytes.
-        if (liveSensitivity.blockNormalFrame) {
-          throw browserError(
-            'BROWSER_SECRET_STEP_BLOCKED',
-            liveSensitivity.guidance,
-            { phase: state.phase, reason: 'secret_risk', fallbackToSystemBrowser: true }
-          );
-        }
-        if (liveSensitivity.blockBystanderFrame) {
-          if (!auth.canViewSensitive || (state.phase === 'human' && !isHolder)) {
-            throw browserError(
-              'BROWSER_SENSITIVE_BLOCKED',
-              'Sensitive page frames are withheld from bystanders and non-holder viewers.',
-              { phase: state.phase, reason: liveSensitivity.reasons[0] ?? 'sensitive_page' }
-            );
-          }
-        }
+        // A renewal is harmless, but never deliver restricted pixels across a lease boundary.
+        const allowedAfter = mayViewRestricted() && allowedBefore && sessionStillCurrent
+          && state.leaseGeneration === leaseAtStart && (state.phase === 'human') === humanAtStart;
+        assertMayDeliver(liveSensitivity, allowedAfter);
+        assertMayDeliver(sensitivityAtDelivery, allowedAfter);
+        assertMayDeliver(sensitivityBefore, allowedAfter);
+        if (!sessionStillCurrent) throw browserError('BROWSER_STREAM_UNAVAILABLE');
+        if (!currentTab || staleDocument) throw browserError('BROWSER_STALE_PAGE');
 
         const stamped = state.recordFrame({ pageId: framePageId });
         return {
@@ -1264,7 +1287,7 @@ export function createBotBrowserService(options = {}) {
         default:
           throw browserError('INVALID_ARGUMENT', 'Unsupported bot_browser action');
       }
-    });
+    }, { mutating: action !== 'snapshot' && action !== 'screenshot' && !(action === 'act' && rawArgs.act?.kind === 'wait') });
   }
 
   /**

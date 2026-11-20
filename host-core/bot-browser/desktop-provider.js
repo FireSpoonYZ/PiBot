@@ -22,6 +22,7 @@ import { homedir } from 'node:os';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertId } from '../message-protocol.js';
+import { hasWaitCondition, normalizeProviderWait } from './protocol.js';
 import { launchDesktopChromium } from './desktop-cdp.js';
 import {
   discoverDesktopBrowser,
@@ -43,13 +44,14 @@ import {
   DESKTOP_BROWSER_MAX_SNAPSHOT_NODES,
   DESKTOP_BROWSER_MAX_SNAPSHOT_TEXT_BYTES,
   DESKTOP_BROWSER_MAX_TABS_PER_BOT,
-  DESKTOP_BROWSER_MAX_WAIT_MS,
   DESKTOP_BROWSER_MIN_FRAME_INTERVAL_MS,
   DESKTOP_BROWSER_SCREENCAST_IDLE_STOP_MS,
   FORBIDDEN_ACT_KINDS,
+  INTERNAL_DOCUMENT_HANDLE_EXPRESSION,
   INTERNAL_ELEMENT_META_FUNCTION,
   INTERNAL_FILL_ELEMENT_FUNCTION,
   INTERNAL_SELECT_OPTION_FUNCTION,
+  INTERNAL_WAIT_CONDITION_FUNCTION,
   isGoogleApiOAuthUrl,
   isPlainObject,
   normalizeHumanInputEvent,
@@ -70,6 +72,8 @@ const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const HOST_CORE_DIR = dirname(MODULE_DIR);
 const DEFAULT_COMMAND_TIMEOUT_MS = 25_000;
 const DEFAULT_NAVIGATION_TIMEOUT_MS = 30_000;
+const DEFAULT_CONDITIONAL_WAIT_TIMEOUT_MS = 5_000;
+const WAIT_POLL_INTERVAL_MS = 50;
 const FIRST_SCREENCAST_WAIT_MS = 180;
 const ADAPTIVE_JPEG_QUALITIES = Object.freeze([65, 50, 38, 26]);
 const INTERACTIVE_AX_ROLES = new Set([
@@ -112,32 +116,53 @@ function truncateText(value, maxChars = 200) {
   return `${str.slice(0, Math.max(0, maxChars - 1))}…`;
 }
 
-function sleepAbortable(ms, signal, registerCancel) {
+function sleepAbortable(ms, signal, registerCancel, registerWakeup) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(browserError('CANCELLED', 'Browser wait cancelled.', { outcome: 'not-sent' }));
       return;
     }
     let finished = false;
+    let timer = null;
+    let unregisterCancel = null;
+    let unregisterWakeup = null;
     const cleanup = () => {
       if (finished) return;
       finished = true;
-      clearTimeout(timer);
+      if (timer !== null) clearTimeout(timer);
       if (signal) signal.removeEventListener('abort', onAbort);
-      unregister?.();
+      unregisterCancel?.();
+      unregisterWakeup?.();
     };
     const onAbort = () => {
       cleanup();
       reject(browserError('CANCELLED', 'Browser wait cancelled.', { outcome: 'not-sent' }));
     };
-    const timer = setTimeout(() => {
+    const onWake = () => {
       cleanup();
       resolve();
-    }, ms);
+    };
+    timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, Math.max(0, ms));
     timer.unref?.();
-    const unregister = registerCancel?.(() => onAbort());
+    unregisterCancel = registerCancel?.(() => onAbort()) ?? null;
+    unregisterWakeup = registerWakeup?.(() => onWake()) ?? null;
     if (signal) signal.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+function normalizeDesktopWaitCommand(input) {
+  let command = input.command;
+  if (!isPlainObject(command)) {
+    // The legacy flat provider API carries routing fields alongside the DOM action.
+    const { selector, state, text, url, load, timeoutMs, ms } = input;
+    command = { kind: 'wait', selector, state, text, url, load, timeoutMs, ms };
+  }
+  const wait = normalizeProviderWait(command, 500);
+  return { ...wait, hasCondition: hasWaitCondition(wait),
+    timeoutMs: wait.timeoutMs ?? wait.ms ?? DEFAULT_CONDITIONAL_WAIT_TIMEOUT_MS };
 }
 
 function isSensitiveFieldRoleOrName(role, name, inputType) {
@@ -330,13 +355,22 @@ export async function createDesktopBrowserProvider(opts = {}) {
   let lastLaunchFailure = null;
   let resolvedProfilePath = null;
   let initialTargetId = null;
+  let managedBrowserContextId = null;
   let activePageId = null;
+  let explicitOpenReserved = false;
+  let explicitCreateInFlight = false;
   let offCdpEvent = null;
   let offCdpClose = null;
 
   const pagesById = new Map();
   const pagesByTargetId = new Map();
   const pagesBySessionId = new Map();
+  const unmanagedStartupTargetIds = new Set();
+  const explicitOpeningTargets = new Map();
+  const pendingPopupTargets = new Map();
+  const closingTargetIds = new Set();
+  const deferredCreatedInfos = [];
+  const pendingTargetTasks = new Set();
   const activeWaits = new Set();
 
   function enqueue(operation) {
@@ -353,6 +387,29 @@ export async function createDesktopBrowserProvider(opts = {}) {
     return revision;
   }
 
+  function notifyWaitWakeups(page) {
+    if (!page || !page.waitWakeups || page.waitWakeups.size === 0) return;
+    for (const wake of Array.from(page.waitWakeups)) {
+      wake();
+    }
+  }
+
+  function assertPageNotSensitiveForBot(page) {
+    if (page.sensitive) {
+      throw browserError(
+        'BROWSER_SENSITIVE_PAGE',
+        page.sensitiveReason || 'Bot actions are blocked on sensitive pages; request human takeover.',
+        {
+          outcome: 'not-sent',
+          sensitive: true,
+          sensitiveCategory: page.sensitiveCategory,
+          sensitiveReason: page.sensitiveReason,
+          authUseSystemBrowser: page.authUseSystemBrowser,
+        }
+      );
+    }
+  }
+
   function clearPageScreencastTimers(page) {
     if (page.screencastIdleTimer) {
       clearTimeout(page.screencastIdleTimer);
@@ -364,6 +421,8 @@ export async function createDesktopBrowserProvider(opts = {}) {
       }
       page.pendingFrameWaiters.clear();
     }
+    notifyWaitWakeups(page);
+    page.waitWakeups?.clear();
   }
 
   function clearRuntimeState() {
@@ -375,6 +434,21 @@ export async function createDesktopBrowserProvider(opts = {}) {
     pagesById.clear();
     pagesByTargetId.clear();
     pagesBySessionId.clear();
+    for (const pending of pendingPopupTargets.values()) {
+      pending.destroyed = true;
+    }
+    pendingPopupTargets.clear();
+    for (const opening of explicitOpeningTargets.values()) {
+      opening.destroyed = true;
+    }
+    explicitOpeningTargets.clear();
+    unmanagedStartupTargetIds.clear();
+    closingTargetIds.clear();
+    deferredCreatedInfos.length = 0;
+    pendingTargetTasks.clear();
+    explicitOpenReserved = false;
+    explicitCreateInFlight = false;
+    managedBrowserContextId = null;
     activePageId = null;
     initialTargetId = null;
     sessionId = null;
@@ -383,6 +457,202 @@ export async function createDesktopBrowserProvider(opts = {}) {
     offCdpEvent = null;
     offCdpClose = null;
     browserHandle = null;
+  }
+
+  function removeOwnedPage(page) {
+    clearPageScreencastTimers(page);
+    pagesById.delete(page.pageId);
+    pagesByTargetId.delete(page.targetId);
+    pagesBySessionId.delete(page.sessionId);
+    if (activePageId === page.pageId) {
+      const next = pagesById.values().next().value ?? null;
+      activePageId = next ? next.pageId : null;
+    }
+    bumpRevision();
+  }
+
+  function occupiedTabCount() {
+    return pagesByTargetId.size + pendingPopupTargets.size + (explicitOpenReserved ? 1 : 0);
+  }
+
+  function maybeRecordBrowserContext(info) {
+    if (managedBrowserContextId) return;
+    if (!info || typeof info.targetId !== 'string' || !info.targetId) return;
+    if (typeof info.browserContextId !== 'string' || !info.browserContextId) return;
+    if (
+      info.targetId === initialTargetId ||
+      pagesByTargetId.has(info.targetId) ||
+      explicitOpeningTargets.has(info.targetId)
+    ) {
+      managedBrowserContextId = info.browserContextId;
+    }
+  }
+
+  function isAllowedPopupUrl(rawUrl) {
+    if (rawUrl === undefined || rawUrl === null) return true;
+    if (typeof rawUrl !== 'string') return false;
+    const trimmed = rawUrl.trim();
+    if (!trimmed || trimmed === 'about:blank') return true;
+    if (trimmed.startsWith('about:blank?') || trimmed.startsWith('about:blank#')) return true;
+    return normalizeNavigationUrl(trimmed) !== null;
+  }
+
+  function isManagedPopupTargetInfo(info) {
+    if (!info || typeof info.targetId !== 'string' || !info.targetId) return false;
+    if (info.type !== 'page') return false;
+
+    const infoCtx =
+      typeof info.browserContextId === 'string' && info.browserContextId
+        ? info.browserContextId
+        : null;
+    if (managedBrowserContextId && infoCtx && infoCtx !== managedBrowserContextId) {
+      return false;
+    }
+
+    const openerId =
+      typeof info.openerId === 'string' && info.openerId ? info.openerId : null;
+    if (openerId) {
+      return pagesByTargetId.has(openerId) || pendingPopupTargets.has(openerId);
+    }
+
+    // No openerId (e.g. target="_blank" rel="noopener" or window.open(..., "noopener")):
+    // only accept while this Bot browser already owns a page, and if the Chromium
+    // instance reports browserContextId it must match our managed context.
+    if (pagesByTargetId.size === 0 && pendingPopupTargets.size === 0) {
+      return false;
+    }
+    if (managedBrowserContextId && infoCtx !== managedBrowserContextId) {
+      return false;
+    }
+    return true;
+  }
+
+  function trackTargetTask(promise) {
+    const tracked = Promise.resolve(promise).finally(() => {
+      pendingTargetTasks.delete(tracked);
+    });
+    pendingTargetTasks.add(tracked);
+    return tracked;
+  }
+
+  async function settlePendingTargetTasks() {
+    let rounds = 0;
+    while (
+      pendingTargetTasks.size > 0 &&
+      rounds < 8 &&
+      browserHandle &&
+      !browserHandle.client.closed &&
+      !closed
+    ) {
+      rounds += 1;
+      await Promise.allSettled(Array.from(pendingTargetTasks));
+    }
+  }
+
+  function closeExcessTarget(handle, targetId) {
+    if (!handle || handle.client.closed || closed) return;
+    if (closingTargetIds.has(targetId)) return;
+    closingTargetIds.add(targetId);
+    trackTargetTask(
+      handle.client
+        .send('Target.closeTarget', { targetId }, { timeoutMs: 3_000 })
+        .catch(() => undefined)
+        .finally(() => {
+          closingTargetIds.delete(targetId);
+        })
+    );
+  }
+
+  function handleTargetCreated(info, { allowDefer = true } = {}) {
+    const handle = browserHandle;
+    if (!handle || handle.client.closed || closed) return;
+    if (!info || typeof info.targetId !== 'string' || !info.targetId) return;
+
+    const targetId = info.targetId;
+    maybeRecordBrowserContext(info);
+
+    if (
+      pagesByTargetId.has(targetId) ||
+      explicitOpeningTargets.has(targetId) ||
+      pendingPopupTargets.has(targetId) ||
+      closingTargetIds.has(targetId) ||
+      targetId === initialTargetId ||
+      unmanagedStartupTargetIds.has(targetId)
+    ) {
+      return;
+    }
+
+    if (info.type !== 'page') return;
+
+    const openerId =
+      typeof info.openerId === 'string' && info.openerId ? info.openerId : null;
+    if (allowDefer && explicitCreateInFlight && !openerId) {
+      if (!deferredCreatedInfos.some((item) => item.targetId === targetId)) {
+        deferredCreatedInfos.push(info);
+      }
+      return;
+    }
+
+    if (!isManagedPopupTargetInfo(info)) {
+      return;
+    }
+
+    if (!isAllowedPopupUrl(info.url)) {
+      // A page spawned by an owned tab must not live untracked on a blocked scheme.
+      if (openerId || !/^(?:chrome|chrome-extension|devtools):/i.test(info.url)) closeExcessTarget(handle, targetId);
+      return;
+    }
+    if (occupiedTabCount() >= maxTabs) {
+      closeExcessTarget(handle, targetId);
+      return;
+    }
+
+    const pendingEntry = { destroyed: false, sessionId: null };
+    pendingPopupTargets.set(targetId, pendingEntry);
+
+    trackTargetTask(
+      (async () => {
+        try {
+          const page = await attachOwnedTarget(targetId, {
+            initialUrl: typeof info.url === 'string' && info.url ? info.url : 'about:blank',
+            initialTitle: typeof info.title === 'string' ? info.title : '',
+            isPopup: true,
+            isCancelled: () => pendingEntry.destroyed,
+            onSessionAttached: (sid) => {
+              pendingEntry.sessionId = sid;
+            },
+            onCommit: () => {
+              pendingPopupTargets.delete(targetId);
+            },
+          });
+
+          // Never steal activePageId when attaching a background popup.
+          bumpRevision();
+
+          if (
+            !pendingEntry.destroyed &&
+            browserHandle === handle &&
+            !handle.client.closed &&
+            pagesByTargetId.get(targetId) === page
+          ) {
+            await refreshPageState(page).catch(() => undefined);
+          }
+        } catch {
+          pendingPopupTargets.delete(targetId);
+          if (!pendingEntry.destroyed && browserHandle === handle && !handle.client.closed && !closed) {
+            closeExcessTarget(handle, targetId);
+          }
+        }
+      })()
+    );
+  }
+
+  function flushDeferredTargetCreated() {
+    if (deferredCreatedInfos.length === 0) return;
+    const queued = deferredCreatedInfos.splice(0, deferredCreatedInfos.length);
+    for (const info of queued) {
+      handleTargetCreated(info, { allowDefer: false });
+    }
   }
 
   function serializeTabs() {
@@ -512,19 +782,25 @@ export async function createDesktopBrowserProvider(opts = {}) {
       // Drop cached pre-transition frame when entering a sensitive page.
       page.latestFrame = null;
     }
+    if (page.sensitive) {
+      notifyWaitWakeups(page);
+    }
   }
 
-  async function refreshPageState(page, { signal } = {}) {
+  async function refreshPageState(page, { signal, timeoutMs } = {}) {
     if (!browserHandle || browserHandle.client.closed) {
       throw browserError('BROWSER_PROCESS_EXITED', 'Desktop browser process is not running.');
     }
+
+    const frameTreeTimeout = timeoutMs === undefined ? 5_000 : Math.max(50, Math.min(5_000, timeoutMs));
+    const probeTimeout = timeoutMs === undefined ? 4_000 : Math.max(50, Math.min(4_000, timeoutMs));
 
     let domSignals = null;
     try {
       const frameTree = await browserHandle.client.send(
         'Page.getFrameTree',
         {},
-        { sessionId: page.sessionId, timeoutMs: 5_000, signal }
+        { sessionId: page.sessionId, timeoutMs: frameTreeTimeout, signal }
       );
       const mainFrame = frameTree?.frameTree?.frame;
       if (mainFrame) {
@@ -555,7 +831,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
           awaitPromise: false,
           silent: true,
         },
-        { sessionId: page.sessionId, timeoutMs: 4_000, signal }
+        { sessionId: page.sessionId, timeoutMs: probeTimeout, signal }
       );
       if (isPlainObject(evalRes?.result?.value)) {
         domSignals = evalRes.result.value;
@@ -576,6 +852,11 @@ export async function createDesktopBrowserProvider(opts = {}) {
       // URL-based classification still applies if document is mid-navigation.
     }
 
+    if (page.isPopup && !isAllowedPopupUrl(page.url)) {
+      if (pagesByTargetId.get(page.targetId) === page) removeOwnedPage(page);
+      closeExcessTarget(browserHandle, page.targetId);
+      throw browserError('BROWSER_URL_BLOCKED', 'Popup left the supported web URL schemes.');
+    }
     const classification = classifySensitivePage({
       url: page.url,
       title: page.title,
@@ -615,41 +896,94 @@ export async function createDesktopBrowserProvider(opts = {}) {
     page.screencastIdleTimer.unref?.();
   }
 
-  async function handleCdpEvent(event) {
+  async function handleCdpEvent(event, handle) {
+    if (closed || !handle || browserHandle !== handle || handle.client.closed) return;
     const { method, params, sessionId: evSessionId } = event;
 
     if (method === 'Target.targetDestroyed' || method === 'Target.detachedFromTarget') {
-      const targetId = params.targetId;
+      const targetId = typeof params.targetId === 'string' && params.targetId ? params.targetId : null;
+      const detachedSessionId =
+        typeof params.sessionId === 'string' && params.sessionId
+          ? params.sessionId
+          : evSessionId || null;
+
+      if (targetId) {
+        if (method === 'Target.targetDestroyed') {
+          if (targetId === initialTargetId) initialTargetId = null;
+          unmanagedStartupTargetIds.delete(targetId);
+          closingTargetIds.delete(targetId);
+          for (let i = deferredCreatedInfos.length - 1; i >= 0; i -= 1) {
+            if (deferredCreatedInfos[i]?.targetId === targetId) {
+              deferredCreatedInfos.splice(i, 1);
+            }
+          }
+        }
+        const pendingPopup = pendingPopupTargets.get(targetId);
+        if (pendingPopup) {
+          pendingPopup.destroyed = true;
+          pendingPopupTargets.delete(targetId);
+        }
+        const opening = explicitOpeningTargets.get(targetId);
+        if (opening) {
+          opening.destroyed = true;
+        }
+      } else if (detachedSessionId) {
+        for (const [tid, pendingPopup] of pendingPopupTargets.entries()) {
+          if (pendingPopup.sessionId === detachedSessionId) {
+            pendingPopup.destroyed = true;
+            pendingPopupTargets.delete(tid);
+            break;
+          }
+        }
+        for (const opening of explicitOpeningTargets.values()) {
+          if (opening.sessionId === detachedSessionId) {
+            opening.destroyed = true;
+            break;
+          }
+        }
+      }
+
       const page = targetId
         ? pagesByTargetId.get(targetId)
-        : evSessionId
-          ? pagesBySessionId.get(evSessionId)
+        : detachedSessionId
+          ? pagesBySessionId.get(detachedSessionId)
           : null;
       if (page) {
-        clearPageScreencastTimers(page);
-        pagesById.delete(page.pageId);
-        pagesByTargetId.delete(page.targetId);
-        pagesBySessionId.delete(page.sessionId);
-        if (activePageId === page.pageId) {
-          const next = pagesById.values().next().value ?? null;
-          activePageId = next ? next.pageId : null;
-        }
-        bumpRevision();
-      }
-      if (targetId && targetId === initialTargetId) {
-        initialTargetId = null;
+        removeOwnedPage(page);
       }
       return;
     }
 
     if (method === 'Target.targetCreated') {
+      handleTargetCreated(params.targetInfo);
+      return;
+    }
+
+    if (method === 'Target.targetInfoChanged') {
       const info = params.targetInfo;
-      if (info && info.type === 'page' && info.openerId && pagesByTargetId.has(info.openerId)) {
-        // Popup opened by an owned Bot tab: enforce maxTabs resource ceiling.
-        if (pagesById.size >= maxTabs && browserHandle && !browserHandle.client.closed) {
-          browserHandle.client
-            .send('Target.closeTarget', { targetId: info.targetId }, { timeoutMs: 3_000 })
-            .catch(() => undefined);
+      if (info && typeof info.targetId === 'string') {
+        maybeRecordBrowserContext(info);
+        const page = pagesByTargetId.get(info.targetId);
+        if (page) {
+          if (page.isPopup && !isAllowedPopupUrl(info.url)) {
+            removeOwnedPage(page);
+            closeExcessTarget(handle, page.targetId);
+            return;
+          }
+          let changed = false;
+          if (typeof info.title === 'string' && info.title !== page.title) {
+            page.title = info.title;
+            changed = true;
+          }
+          if (typeof info.url === 'string' && info.url && info.url !== page.url) {
+            page.url = info.url;
+            page.latestFrame = null;
+            changed = true;
+          }
+          if (changed) {
+            applySensitiveState(page, classifySensitivePage({ url: page.url, title: page.title }));
+            bumpRevision();
+          }
         }
       }
       return;
@@ -658,6 +992,15 @@ export async function createDesktopBrowserProvider(opts = {}) {
     if (!evSessionId) return;
     const page = pagesBySessionId.get(evSessionId);
     if (!page) return;
+
+    if (method === 'Page.frameStartedLoading') {
+      if (!params.frameId || !page.frameId || params.frameId === page.frameId) {
+        page.isNavigating = true;
+        page.domContentLoaded = false;
+        notifyWaitWakeups(page);
+      }
+      return;
+    }
 
     if (method === 'Page.frameNavigated') {
       const frame = params.frame;
@@ -668,10 +1011,12 @@ export async function createDesktopBrowserProvider(opts = {}) {
           page.url = frame.url;
         }
         page.documentGeneration += 1;
+        page.domContentLoaded = false;
         page.refs.clear();
         page.latestFrame = null;
         bumpRevision();
         applySensitiveState(page, classifySensitivePage({ url: page.url, title: page.title }));
+        notifyWaitWakeups(page);
       }
       return;
     }
@@ -683,6 +1028,28 @@ export async function createDesktopBrowserProvider(opts = {}) {
         }
         bumpRevision();
         applySensitiveState(page, classifySensitivePage({ url: page.url, title: page.title }));
+        notifyWaitWakeups(page);
+      }
+      return;
+    }
+
+    if (method === 'Page.domContentEventFired') {
+      page.domContentLoaded = true;
+      notifyWaitWakeups(page);
+      return;
+    }
+
+    if (method === 'Page.loadEventFired') {
+      page.isNavigating = false;
+      page.domContentLoaded = true;
+      notifyWaitWakeups(page);
+      return;
+    }
+
+    if (method === 'Page.frameStoppedLoading') {
+      if (!params.frameId || !page.frameId || params.frameId === page.frameId) {
+        page.isNavigating = false;
+        notifyWaitWakeups(page);
       }
       return;
     }
@@ -807,11 +1174,32 @@ export async function createDesktopBrowserProvider(opts = {}) {
     browserHandle = handle;
     sessionId = randomUUID();
     offCdpEvent = handle.client.onEvent((event) => {
-      void handleCdpEvent(event);
+      void handleCdpEvent(event, handle);
     });
     offCdpClose = handle.client.onClose(() => {
-      clearRuntimeState();
+      if (browserHandle === handle) {
+        clearRuntimeState();
+      }
     });
+
+    // Record the initial about:blank target and managed context before target discovery
+    // so startup targets are not mistaken for web-opened popups.
+    try {
+      const { targetInfos } = await handle.client.send('Target.getTargets', {}, { timeoutMs: 5_000, signal });
+      const targets = Array.isArray(targetInfos) ? targetInfos : [];
+      const initialPage = targets.find((t) => t && t.type === 'page' && typeof t.targetId === 'string' && t.targetId);
+      initialTargetId = initialPage ? initialPage.targetId : null;
+      if (initialPage && typeof initialPage.browserContextId === 'string' && initialPage.browserContextId) {
+        managedBrowserContextId = initialPage.browserContextId;
+      }
+      for (const t of targets) {
+        if (t && typeof t.targetId === 'string' && t.targetId && t.targetId !== initialTargetId) {
+          unmanagedStartupTargetIds.add(t.targetId);
+        }
+      }
+    } catch {
+      initialTargetId = null;
+    }
 
     // Enable target discovery & deny automatic file downloads (prevents silent secret JSON downloads).
     await handle.client
@@ -821,24 +1209,56 @@ export async function createDesktopBrowserProvider(opts = {}) {
       .send('Browser.setDownloadBehavior', { behavior: 'deny' }, { timeoutMs: 5_000, signal })
       .catch(() => undefined);
 
-    // Record the initial about:blank target so the first `open` reuses it cleanly.
-    try {
-      const { targetInfos } = await handle.client.send('Target.getTargets', {}, { timeoutMs: 5_000, signal });
-      const initialPage = (Array.isArray(targetInfos) ? targetInfos : []).find((t) => t.type === 'page');
-      initialTargetId = initialPage ? initialPage.targetId : null;
-    } catch {
-      initialTargetId = null;
-    }
-
     return handle;
   }
 
-  async function attachOwnedTarget(targetId, requestedPageId, signal) {
-    const { sessionId: targetSessionId } = await browserHandle.client.send(
+  async function attachOwnedTarget(
+    targetId,
+    {
+      requestedPageId = null,
+      initialUrl = 'about:blank',
+      initialTitle = '',
+      isPopup = false,
+      signal = undefined,
+      isCancelled = null,
+      onSessionAttached = null,
+      onCommit = null,
+    } = {}
+  ) {
+    const handle = browserHandle;
+    if (!handle || handle.client.closed || closed) {
+      throw browserError('BROWSER_PROCESS_EXITED', 'Desktop browser process is not running.');
+    }
+
+    const { sessionId: targetSessionId } = await handle.client.send(
       'Target.attachToTarget',
       { targetId, flatten: true },
       { timeoutMs: commandTimeoutMs, signal }
     );
+
+    if (typeof targetSessionId !== 'string' || !targetSessionId) {
+      throw browserError('BROWSER_ATTACH_FAILED', `Target.attachToTarget returned invalid sessionId for ${targetId}.`);
+    }
+
+    onSessionAttached?.(targetSessionId);
+
+    const isAborted = () => closed || browserHandle !== handle || handle.client.closed || Boolean(isCancelled?.());
+    const detachBestEffort = () => {
+      if (handle && !handle.client.closed) {
+        handle.client
+          .send('Target.detachFromTarget', { sessionId: targetSessionId }, { timeoutMs: 2_000 })
+          .catch(() => undefined);
+      }
+    };
+
+    if (isAborted()) {
+      detachBestEffort();
+      throw browserError('BROWSER_TAB_NOT_FOUND', `Browser target '${targetId}' was closed during attach.`);
+    }
+
+    const normalizedUrl = initialUrl && initialUrl !== 'about:blank'
+      ? (normalizeNavigationUrl(initialUrl) ?? 'about:blank')
+      : 'about:blank';
 
     const pageId = requestedPageId || randomUUID();
     const page = {
@@ -847,9 +1267,12 @@ export async function createDesktopBrowserProvider(opts = {}) {
       sessionId: targetSessionId,
       frameId: null,
       loaderId: null,
-      url: 'about:blank',
-      title: '',
+      url: normalizedUrl,
+      isPopup,
+      title: typeof initialTitle === 'string' ? initialTitle : '',
       documentGeneration: 1,
+      isNavigating: false,
+      domContentLoaded: false,
       sensitive: false,
       sensitiveCategory: null,
       sensitiveReason: null,
@@ -863,27 +1286,40 @@ export async function createDesktopBrowserProvider(opts = {}) {
       lastAcceptedFrameAt: 0,
       frameOversizedHint: false,
       pendingFrameWaiters: new Set(),
+      waitWakeups: new Set(),
     };
+    applySensitiveState(page, classifySensitivePage({ url: page.url, title: page.title }));
 
+    try {
+      await Promise.all([
+        handle.client.send('Page.enable', {}, { sessionId: targetSessionId, timeoutMs: 5_000, signal }),
+        handle.client.send('DOM.enable', {}, { sessionId: targetSessionId, timeoutMs: 5_000, signal }),
+        handle.client.send('Accessibility.enable', {}, { sessionId: targetSessionId, timeoutMs: 5_000, signal }),
+        handle.client.send(
+          'Emulation.setDeviceMetricsOverride',
+          {
+            width: viewport.width,
+            height: viewport.height,
+            deviceScaleFactor: 1,
+            mobile: false,
+          },
+          { sessionId: targetSessionId, timeoutMs: 5_000, signal }
+        ),
+      ]);
+    } catch (err) {
+      detachBestEffort();
+      throw err;
+    }
+
+    if (isAborted()) {
+      detachBestEffort();
+      throw browserError('BROWSER_TAB_NOT_FOUND', `Browser target '${targetId}' was closed during attach.`);
+    }
+
+    onCommit?.(page);
     pagesById.set(pageId, page);
     pagesByTargetId.set(targetId, page);
     pagesBySessionId.set(targetSessionId, page);
-
-    await Promise.all([
-      browserHandle.client.send('Page.enable', {}, { sessionId: targetSessionId, timeoutMs: 5_000, signal }),
-      browserHandle.client.send('DOM.enable', {}, { sessionId: targetSessionId, timeoutMs: 5_000, signal }),
-      browserHandle.client.send('Accessibility.enable', {}, { sessionId: targetSessionId, timeoutMs: 5_000, signal }),
-      browserHandle.client.send(
-        'Emulation.setDeviceMetricsOverride',
-        {
-          width: viewport.width,
-          height: viewport.height,
-          deviceScaleFactor: 1,
-          mobile: false,
-        },
-        { sessionId: targetSessionId, timeoutMs: 5_000, signal }
-      ),
-    ]);
 
     return page;
   }
@@ -1175,27 +1611,30 @@ export async function createDesktopBrowserProvider(opts = {}) {
 
   async function performStatus() {
     if (browserHandle && !browserHandle.client.closed) {
+      await settlePendingTargetTasks();
       try {
         const { targetInfos } = await browserHandle.client.send('Target.getTargets', {}, { timeoutMs: 4_000 });
-        const liveTargetIds = new Set((Array.isArray(targetInfos) ? targetInfos : []).map((t) => t.targetId));
+        const infos = Array.isArray(targetInfos) ? targetInfos : [];
+        const liveTargetIds = new Set(infos.map((t) => t?.targetId).filter(Boolean));
         for (const page of Array.from(pagesById.values())) {
           if (!liveTargetIds.has(page.targetId)) {
-            clearPageScreencastTimers(page);
-            pagesById.delete(page.pageId);
-            pagesByTargetId.delete(page.targetId);
-            pagesBySessionId.delete(page.sessionId);
-            if (activePageId === page.pageId) {
-              activePageId = null;
-            }
-            bumpRevision();
+            removeOwnedPage(page);
           }
         }
+        for (const info of infos) {
+          handleTargetCreated(info, { allowDefer: false });
+        }
+        await settlePendingTargetTasks();
         const active = getActivePage();
         if (active) {
           await refreshPageState(active);
         }
       } catch {
         // Keep last state if target refresh momentarily failed.
+      }
+      if (!browserHandle || browserHandle.client.closed) {
+        const probe = await probeAvailability();
+        return buildStatusView(probe);
       }
       return buildStatusView({ available: true, canStreamInteract: true });
     }
@@ -1225,6 +1664,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
     }
 
     await ensureBrowserStarted(signal);
+    await settlePendingTargetTasks();
 
     const requestedPageId =
       typeof input.pageId === 'string' && input.pageId.trim() ? input.pageId.trim() : null;
@@ -1248,7 +1688,7 @@ export async function createDesktopBrowserProvider(opts = {}) {
       return buildStatusView({ available: true, canStreamInteract: true });
     }
 
-    if (pagesById.size >= maxTabs) {
+    if (occupiedTabCount() >= maxTabs) {
       throw browserError(
         'BROWSER_TAB_LIMIT_REACHED',
         `Bot browser reached maximum open tabs limit (${maxTabs}). Close a tab before opening another.`,
@@ -1256,20 +1696,69 @@ export async function createDesktopBrowserProvider(opts = {}) {
       );
     }
 
-    let targetId;
-    if (initialTargetId && pagesById.size === 0) {
-      targetId = initialTargetId;
-      initialTargetId = null;
-    } else {
-      const created = await browserHandle.client.send(
-        'Target.createTarget',
-        { url: 'about:blank', width: viewport.width, height: viewport.height },
-        { timeoutMs: commandTimeoutMs, signal }
-      );
-      targetId = created.targetId;
-    }
+    explicitOpenReserved = true;
+    let targetId = null;
+    let createdNewTarget = false;
+    let openingEntry = null;
+    let page;
+    try {
+      if (initialTargetId && pagesById.size === 0) {
+        targetId = initialTargetId;
+        initialTargetId = null;
+      } else {
+        explicitCreateInFlight = true;
+        try {
+          const created = await browserHandle.client.send(
+            'Target.createTarget',
+            { url: 'about:blank', width: viewport.width, height: viewport.height },
+            { timeoutMs: commandTimeoutMs, signal }
+          );
+          targetId = typeof created?.targetId === 'string' && created.targetId ? created.targetId : null;
+          if (!targetId) {
+            throw browserError('BROWSER_OPEN_FAILED', 'Target.createTarget did not return a targetId.');
+          }
+          createdNewTarget = true;
+        } finally {
+          explicitCreateInFlight = false;
+          if (targetId) {
+            openingEntry = { destroyed: false, sessionId: null };
+            explicitOpeningTargets.set(targetId, openingEntry);
+          } else {
+            explicitOpenReserved = false;
+          }
+          flushDeferredTargetCreated();
+        }
+      }
 
-    const page = await attachOwnedTarget(targetId, requestedPageId, signal);
+      if (!openingEntry) {
+        openingEntry = { destroyed: false, sessionId: null };
+        explicitOpeningTargets.set(targetId, openingEntry);
+      }
+
+      page = await attachOwnedTarget(targetId, {
+        requestedPageId,
+        signal,
+        isCancelled: () => Boolean(openingEntry?.destroyed),
+        onSessionAttached: (sid) => {
+          if (openingEntry) openingEntry.sessionId = sid;
+        },
+        onCommit: () => {
+          explicitOpeningTargets.delete(targetId);
+          explicitOpenReserved = false;
+        },
+      });
+    } catch (err) {
+      if (targetId) {
+        explicitOpeningTargets.delete(targetId);
+        if (createdNewTarget && !openingEntry?.destroyed && browserHandle && !browserHandle.client.closed) {
+          browserHandle.client
+            .send('Target.closeTarget', { targetId }, { timeoutMs: 3_000 })
+            .catch(() => undefined);
+        }
+      }
+      explicitOpenReserved = false;
+      throw err;
+    }
     if (activePageId && activePageId !== page.pageId) {
       await stopPageScreencast(pagesById.get(activePageId));
     }
@@ -1561,6 +2050,155 @@ export async function createDesktopBrowserProvider(opts = {}) {
     };
   }
 
+  async function probeWaitDomCondition(page, { selector, state, text, url }, signal, timeoutMs) {
+    const client = browserHandle.client;
+    const evalTimeout = Math.max(50, Math.min(commandTimeoutMs, timeoutMs));
+    const docRes = await client.send(
+      'Runtime.evaluate',
+      {
+        expression: INTERNAL_DOCUMENT_HANDLE_EXPRESSION,
+        returnByValue: false,
+        awaitPromise: false,
+        silent: true,
+      },
+      { sessionId: page.sessionId, timeoutMs: evalTimeout, signal }
+    );
+    const objectId = docRes?.result?.objectId;
+    if (!objectId) {
+      return null;
+    }
+    try {
+      const callRes = await client.send(
+        'Runtime.callFunctionOn',
+        {
+          objectId,
+          functionDeclaration: INTERNAL_WAIT_CONDITION_FUNCTION,
+          arguments: [
+            {
+              value: {
+                ...(selector !== undefined ? { selector } : {}),
+                ...(state !== undefined ? { state } : {}),
+                ...(text !== undefined ? { text } : {}),
+                ...(url !== undefined ? { url } : {}),
+              },
+            },
+          ],
+          returnByValue: true,
+          awaitPromise: false,
+          silent: true,
+        },
+        { sessionId: page.sessionId, timeoutMs: evalTimeout, signal }
+      );
+      if (callRes?.exceptionDetails) {
+        return null;
+      }
+      return isPlainObject(callRes?.result?.value) ? callRes.result.value : null;
+    } finally {
+      client
+        .send('Runtime.releaseObject', { objectId }, { sessionId: page.sessionId, timeoutMs: 2_000 })
+        .catch(() => undefined);
+    }
+  }
+
+  async function performWait(page, waitSpec, signal) {
+    if (signal?.aborted) {
+      throw browserError('CANCELLED', 'Browser wait cancelled.', { outcome: 'not-sent' });
+    }
+
+    if (!waitSpec.hasCondition) {
+      const waitMs = waitSpec.timeoutMs;
+      const deadline = Date.now() + waitMs;
+      while (true) {
+        assertPageNotSensitiveForBot(page);
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        await sleepAbortable(
+          remaining,
+          signal,
+          (cancel) => {
+            activeWaits.add(cancel);
+            return () => activeWaits.delete(cancel);
+          },
+          (wake) => {
+            page.waitWakeups.add(wake);
+            return () => page.waitWakeups.delete(wake);
+          }
+        );
+        if (closed) {
+          throw browserError('BROWSER_CLOSED', 'Desktop browser provider has been closed.', {
+            outcome: 'not-sent',
+          });
+        }
+        if (!browserHandle || browserHandle.client.closed) {
+          throw browserError('BROWSER_PROCESS_EXITED', 'Desktop browser process is not running.');
+        }
+        if (!pagesById.has(page.pageId)) {
+          throw browserError('BROWSER_TAB_NOT_FOUND', `Browser page '${page.pageId}' was not found for this Bot.`);
+        }
+        assertPageNotSensitiveForBot(page);
+      }
+      await refreshPageState(page, { signal });
+      assertPageNotSensitiveForBot(page);
+      return { waitedMs: waitMs };
+    }
+
+    const startedAt = performance.now();
+    const deadlineSignal = AbortSignal.timeout(waitSpec.timeoutMs);
+    const closeController = new AbortController();
+    const onClose = () => closeController.abort();
+    const waitSignal = AbortSignal.any([deadlineSignal, closeController.signal, ...(signal ? [signal] : [])]);
+    activeWaits.add(onClose);
+
+    const assertWaiting = () => {
+      if (signal?.aborted || closeController.signal.aborted) throw browserError('CANCELLED', 'Wait cancelled.');
+      if (deadlineSignal.aborted || performance.now() - startedAt >= waitSpec.timeoutMs) {
+        throw browserError('BROWSER_TIMEOUT', 'Browser wait conditions were not met before timeout.');
+      }
+      if (pagesById.get(page.pageId) !== page) throw browserError('BROWSER_TAB_NOT_FOUND', 'Wait target closed.');
+      assertPageNotSensitiveForBot(page);
+    };
+
+    try {
+      for (;;) {
+        assertWaiting();
+        const { domSignals } = await refreshPageState(page, { signal: waitSignal });
+        assertWaiting();
+        const generation = page.documentGeneration;
+        let probe = null;
+        if (domSignals) {
+          // All predicates refer to one document, never cached metadata from an earlier navigation.
+          try {
+            probe = await probeWaitDomCondition(page, waitSpec, waitSignal, waitSpec.timeoutMs);
+          } catch {
+            // A navigation can destroy the execution context; sample the new document on the next pass.
+          }
+        }
+        assertWaiting();
+        if (probe?.selectorInvalid) throw browserError('INVALID_ARGUMENT', 'Invalid CSS selector in act.wait.');
+        if (probe && generation === page.documentGeneration) {
+          const loaded = !waitSpec.load || (waitSpec.load === 'load'
+            ? !page.isNavigating && probe.readyState === 'complete'
+            : (probe.readyState === 'interactive' || probe.readyState === 'complete')
+              && (!page.isNavigating || page.domContentLoaded));
+          if (loaded && (!waitSpec.selector || probe.selectorMatched) && (!waitSpec.text || probe.textMatched)
+              && (!waitSpec.url || probe.urlMatched)) {
+            return { waitedMs: Math.round(performance.now() - startedAt) };
+          }
+        }
+        try {
+          await sleepAbortable(WAIT_POLL_INTERVAL_MS, waitSignal, null, wake => {
+            page.waitWakeups.add(wake);
+            return () => page.waitWakeups.delete(wake);
+          });
+        } catch {
+          assertWaiting();
+        }
+      }
+    } finally {
+      activeWaits.delete(onClose);
+    }
+  }
+
   async function performAct(input) {
     const signal = input.signal;
     const cmd = isPlainObject(input.command) ? input.command : input;
@@ -1579,23 +2217,12 @@ export async function createDesktopBrowserProvider(opts = {}) {
       });
     }
 
-    const page = resolveOwnedPage(input.pageId);
-    await refreshPageState(page, { signal });
-    revalidateTargetState(page, input);
+    const waitSpec = kind === 'wait' ? normalizeDesktopWaitCommand(input) : null;
 
-    if (page.sensitive) {
-      throw browserError(
-        'BROWSER_SENSITIVE_PAGE',
-        page.sensitiveReason || 'Bot actions are blocked on sensitive pages; request human takeover.',
-        {
-          outcome: 'not-sent',
-          sensitive: true,
-          sensitiveCategory: page.sensitiveCategory,
-          sensitiveReason: page.sensitiveReason,
-          authUseSystemBrowser: page.authUseSystemBrowser,
-        }
-      );
-    }
+    const page = resolveOwnedPage(input.pageId);
+    if (!waitSpec?.hasCondition) await refreshPageState(page, { signal });
+    revalidateTargetState(page, kind === 'wait' ? { ...input, documentGeneration: undefined } : input);
+    assertPageNotSensitiveForBot(page);
 
     const resolveRef = async () => {
       const refId = String(cmd.ref ?? cmd.element ?? '').trim();
@@ -1780,18 +2407,13 @@ export async function createDesktopBrowserProvider(opts = {}) {
       );
       detail = { scrolled: direction, amount };
     } else if (kind === 'wait') {
-      const waitMs = clampInt(cmd.timeoutMs ?? cmd.ms, 0, DESKTOP_BROWSER_MAX_WAIT_MS, 500);
-      await sleepAbortable(waitMs, signal, (cancel) => {
-        activeWaits.add(cancel);
-        return () => activeWaits.delete(cancel);
-      });
-      detail = { waitedMs: waitMs };
+      detail = await performWait(page, waitSpec, signal);
     }
 
     if (kind !== 'wait') {
       page.latestFrame = null;
+      await refreshPageState(page, { signal });
     }
-    await refreshPageState(page, { signal });
     return {
       ok: true,
       kind,

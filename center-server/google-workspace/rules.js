@@ -4,7 +4,12 @@
 // adapting to PiBot's Center shared Google account pool, per-(deviceId, botId) rule targeting,
 // and durable Center->Host idempotent delivery with offline pending/missed handling.
 
-import { createGoogleRuleDispatcher, DEFAULT_GMAIL_EVENT_TTL_MS } from './rules-dispatch.js';
+import {
+  calendarReminderExpiresAtMs,
+  createGoogleRuleDispatcher,
+  DEFAULT_GMAIL_EVENT_TTL_MS,
+  DEFAULT_ZERO_LEAD_FIRE_WINDOW_MS,
+} from './rules-dispatch.js';
 import {
   assertGoogleTrigger,
   classifyCheckError,
@@ -19,7 +24,12 @@ import {
   SEED_RETRY_MS,
 } from './rules-orca.js';
 
-export { createGoogleRuleDispatcher } from './rules-dispatch.js';
+export {
+  calendarReminderExpiresAtMs,
+  createGoogleRuleDispatcher,
+  DEFAULT_ZERO_LEAD_ADMISSION_GRACE_MS,
+  DEFAULT_ZERO_LEAD_FIRE_WINDOW_MS,
+} from './rules-dispatch.js';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 
@@ -552,7 +562,27 @@ export function openGoogleRules({
     }
   }
 
-  async function getCalendarSchedule(ops, api, account, calendarId, savedCal, nowMs) {
+  function isCalendarPastFireWindow(minutesBefore, startMs, nowMs) {
+    return minutesBefore === 0
+      ? nowMs >= startMs + DEFAULT_ZERO_LEAD_FIRE_WINDOW_MS
+      : nowMs >= startMs;
+  }
+
+  function isCalendarDueNow(minutesBefore, startMs, dueAt, nowMs) {
+    if (nowMs < dueAt) return false;
+    return !isCalendarPastFireWindow(minutesBefore, startMs, nowMs);
+  }
+
+  function buildCalendarExtra(target, calendarId, event, firedAtMs) {
+    return {
+      startMs: event.startMs,
+      calendarId,
+      minutesBefore: target.rule.minutesBefore,
+      expiresAt: new Date(calendarReminderExpiresAtMs(event.startMs, target.rule.minutesBefore, firedAtMs)).toISOString(),
+    };
+  }
+
+  async function getCalendarSchedule(ops, api, account, calendarId, savedCal, nowMs, lookbackMs = 0) {
     const key = `${account} ${calendarId}`;
     let changed = false;
     if (savedCal.syncToken || nowMs - (seedFailedAt.get(key) ?? -Infinity) >= SEED_RETRY_MS) {
@@ -565,46 +595,54 @@ export function openGoogleRules({
         seedFailedAt.set(key, nowMs);
       }
     }
+    const queryFromMs = lookbackMs > 0 ? nowMs - lookbackMs : nowMs;
     const built = schedules.get(key);
-    if (built && !changed && nowMs - built.builtAt < SCHEDULE_MAX_AGE_MS) {
+    if (
+      built
+      && !changed
+      && nowMs - built.builtAt < SCHEDULE_MAX_AGE_MS
+      && built.queryFromMs <= queryFromMs
+    ) {
       return built.events;
     }
-    const events = await ops.upcomingEvents(api, calendarId, nowMs);
-    schedules.set(key, { builtAt: nowMs, events });
+    const events = await ops.upcomingEvents(api, calendarId, queryFromMs);
+    schedules.set(key, { builtAt: nowMs, queryFromMs, events });
     return events;
   }
 
   async function fireWhenDue(ops, target, calendarId, event, nowMs) {
-    if (nowMs >= event.startMs) return;
+    const minutesBefore = target.rule.minutesBefore;
+    // The lookback is for late ticks, not for replaying meetings that predate this listener.
+    if (minutesBefore === 0 && Number.isFinite(target.listeningSinceMs) && event.startMs < target.listeningSinceMs) return;
+    if (isCalendarPastFireWindow(minutesBefore, event.startMs, nowMs)) return;
     const dueAt = ops.calendarDueAt(target.rule, event);
     const runEvent = ops.calendarRunEvent(target, event);
-    const extra = {
-      startMs: event.startMs,
-      calendarId,
-      minutesBefore: target.rule.minutesBefore,
-      expiresAt: new Date(event.startMs).toISOString(),
-    };
-    if (dueAt <= nowMs) {
-      await fire(target, runEvent, extra);
+    const timerKey = `${target.ruleId} ${runEvent.key}`;
+    if (isCalendarDueNow(minutesBefore, event.startMs, dueAt, nowMs)) {
+      const existingTimer = timers.get(timerKey);
+      if (existingTimer) {
+        clearTimer(existingTimer.handle);
+        timers.delete(timerKey);
+      }
+      await fire(target, runEvent, buildCalendarExtra(target, calendarId, event, nowMs));
       return;
     }
-    const timerKey = `${target.ruleId} ${runEvent.key}`;
-    if (stopped || dueAt - nowMs > tickMs || timers.has(timerKey)) {
+    if (stopped || dueAt - nowMs > tickMs || timers.has(timerKey) || fired.has(timerKey)) {
       return;
     }
     const handle = setTimer(() => {
       timers.delete(timerKey);
       if (stopped) return;
       const currentMs = now();
-      if (currentMs >= event.startMs) return;
-      // Re-verify the rule is still enabled before firing a deferred reminder.
+      if (!isCalendarDueNow(minutesBefore, event.startMs, dueAt, currentMs)) return;
+      // Re-verify the rule is still enabled with matching lead time before firing a deferred reminder.
       try {
         const latest = store.getGoogleRule(target.ruleId);
-        if (!latest || !latest.enabled) return;
+        if (!latest || !latest.enabled || latest.minutesBefore !== minutesBefore) return;
       } catch {
         return;
       }
-      void fire(target, runEvent, extra);
+      void fire(target, runEvent, buildCalendarExtra(target, calendarId, event, currentMs));
     }, dueAt - nowMs);
     handle?.unref?.();
     timers.set(timerKey, { handle, ruleId: target.ruleId, account: target.account });
@@ -627,6 +665,10 @@ export function openGoogleRules({
     const api = await google.api(account);
     const calendars = ((state.accounts[account] ??= {}).calendars ??= {});
     for (const calendarId of ids) {
+      const mine = targets.filter(target => (target.rule.calendar ?? 'primary') === calendarId);
+      const lookbackMs = mine.some(target => target.rule.minutesBefore === 0)
+        ? DEFAULT_ZERO_LEAD_FIRE_WINDOW_MS
+        : 0;
       const events = await getCalendarSchedule(
         ops,
         api,
@@ -634,11 +676,11 @@ export function openGoogleRules({
         calendarId,
         (calendars[calendarId] ??= {}),
         nowMs,
+        lookbackMs,
       );
-      const mine = targets.filter(target => (target.rule.calendar ?? 'primary') === calendarId);
       for (const target of mine) {
         for (const event of events) {
-          await fireWhenDue(ops, target, calendarId, event, nowMs);
+          await fireWhenDue(ops, target, calendarId, event, now());
         }
       }
     }

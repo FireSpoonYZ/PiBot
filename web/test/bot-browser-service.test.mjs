@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createBotBrowserService } from '../../host-core/bot-browser/service.js';
-import { botBrowserProfileDirectory } from '../../host-core/bot-browser/protocol.js';
+import {
+  BROWSER_ERROR_CODES,
+  botBrowserProfileDirectory,
+  normalizeBotActInput,
+} from '../../host-core/bot-browser/protocol.js';
 import {
   classifyPageSensitivity,
   containsSecretLeak,
@@ -273,6 +277,96 @@ test('policy: URL validation blocks file/javascript/chrome/credentialed/internal
   assert.equal(containsSecretLeak('Normal page heading'), false);
 });
 
+test('protocol & tool contract: act.wait validates state/selector/networkidle and preserves BROWSER_TIMEOUT', async () => {
+  assert.equal(BROWSER_ERROR_CODES.includes('BROWSER_TIMEOUT'), true);
+  assert.throws(
+    () => normalizeBotActInput({ kind: 'wait', state: 'hidden' }),
+    { code: 'INVALID_ARGUMENT' }
+  );
+  assert.throws(
+    () => normalizeBotActInput({ kind: 'wait', selector: '   ' }),
+    { code: 'INVALID_ARGUMENT' }
+  );
+  assert.throws(
+    () => normalizeBotActInput({ kind: 'wait', load: 'networkidle' }),
+    { code: 'BROWSER_UNSUPPORTED' }
+  );
+  assert.deepEqual(
+    normalizeBotActInput({
+      kind: 'wait',
+      selector: '#done',
+      state: 'hidden',
+      text: 'Saved',
+      url: 'https://example.com/done',
+      load: 'domcontentloaded',
+      timeoutMs: 1200,
+    }),
+    {
+      kind: 'wait',
+      selector: '#done',
+      state: 'hidden',
+      text: 'Saved',
+      url: 'https://example.com/done',
+      load: 'domcontentloaded',
+      timeoutMs: 1200,
+    }
+  );
+  assert.deepEqual(normalizeBotActInput({ kind: 'wait', timeoutMs: 300 }), {
+    kind: 'wait',
+    timeoutMs: 300,
+  });
+
+  const host = createFakeHost(['bot-a']);
+  const mock = createMockProviderFactory({
+    onPerform: async (input) => {
+      if (input.action === 'act' && input.act?.kind === 'wait' && input.act?.selector === '#missing') {
+        const err = new Error('Timed out waiting for browser condition(s): selector.');
+        err.code = 'BROWSER_TIMEOUT';
+        throw err;
+      }
+      return undefined;
+    },
+  });
+  const service = createBotBrowserService({
+    host,
+    createProvider: mock.factory,
+    resolveConversationBot: async () => 'bot-a',
+  });
+
+  try {
+    const [tool] = service.toolsForBot();
+    const opened = await tool.execute({ action: 'open', url: 'https://example.com/app' }, { conversationId: 101 }, {});
+    assert.notEqual(opened.isError, true);
+    const pageId = parseToolJson(opened).pageId;
+
+    const badState = await tool.execute(
+      { action: 'act', pageId, act: { kind: 'wait', state: 'hidden' } },
+      { conversationId: 101 },
+      {}
+    );
+    assert.equal(badState.isError, true);
+    assert.equal(parseToolJson(badState).code, 'INVALID_ARGUMENT');
+
+    const badLoad = await tool.execute(
+      { action: 'act', pageId, act: { kind: 'wait', load: 'networkidle' } },
+      { conversationId: 101 },
+      {}
+    );
+    assert.equal(badLoad.isError, true);
+    assert.equal(parseToolJson(badLoad).code, 'BROWSER_UNSUPPORTED');
+
+    const timedOut = await tool.execute(
+      { action: 'act', pageId, act: { kind: 'wait', selector: '#missing', timeoutMs: 200 } },
+      { conversationId: 101 },
+      {}
+    );
+    assert.equal(timedOut.isError, true);
+    assert.equal(parseToolJson(timedOut).code, 'BROWSER_TIMEOUT');
+  } finally {
+    await service.close();
+  }
+});
+
 test('per-bot profile isolation and persistent conversation ownership binding', async () => {
   assert.throws(() => botBrowserProfileDirectory('/tmp/root', '../escape'), { code: 'INVALID_ARGUMENT' });
   assert.throws(() => botBrowserProfileDirectory('/tmp/root', 'a/b'), { code: 'INVALID_ARGUMENT' });
@@ -282,7 +376,11 @@ test('per-bot profile isolation and persistent conversation ownership binding', 
   const mock = createMockProviderFactory();
   const service = createBotBrowserService({
     host,
-    createProvider: mock.factory,
+    maxTabsPerBot: 2,
+    createProvider: opts => {
+      assert.equal(opts.maxTabs, 2);
+      return mock.factory(opts);
+    },
     resolveConversationBot: async (convId) => {
       if (convId === 101) return 'bot-a';
       if (convId === 202) return 'bot-b';
@@ -470,6 +568,31 @@ test('real takeover cancels queued bot ops, awaits in-flight settlement, unlocks
   );
 
   await service.close();
+});
+
+test('an unconfirmed native mutation cannot grant the pending human takeover', async (t) => {
+  const started = Promise.withResolvers();
+  const mock = createMockProviderFactory({ async onPerform(input) {
+    if (input.action !== 'act') return;
+    started.resolve();
+    await new Promise(resolve => input.signal.addEventListener('abort', resolve, { once: true }));
+    throw Object.assign(new Error('Native action did not confirm completion'), {
+      code: 'BROWSER_BACKEND_FAILED', outcome: 'unconfirmed',
+    });
+  } });
+  const service = createBotBrowserService({ host: createFakeHost(['bot-a']), createProvider: mock.factory,
+    resolveConversationBot: async () => 'bot-a' });
+  t.after(() => service.close());
+  const context = { conversationId: 1 };
+  const owner = ownerAuth('phone', 'Phone');
+  const [tool] = service.toolsForBot();
+  await tool.execute({ action: 'open', url: 'https://example.com' }, context, {});
+  const act = tool.execute({ action: 'act', act: { kind: 'type', text: 'draft' } }, context, {});
+  await started.promise;
+  await assert.rejects(service.control({ action: 'takeover', botId: 'bot-a' }, owner),
+    { code: 'BROWSER_TAKEOVER_UNCONFIRMED' });
+  assert.equal(parseToolJson(await act).outcome, 'unconfirmed');
+  assert.equal((await service.control({ action: 'status', botId: 'bot-a' }, owner)).phase, 'held');
 });
 
 test('unconfirmed in-flight takeover times out fail-closed into held without opening input', async () => {
@@ -754,4 +877,473 @@ test('unavailable / non-streamable provider degrades honestly and close() is ide
     () => service.control({ action: 'status', botId: 'bot-a' }, ownerAuth('desktop-1')),
     { code: 'BROWSER_CLOSED' }
   );
+});
+
+function createFrameGateController() {
+  let nextGate = null;
+  return {
+    arm() {
+      let markStarted;
+      const started = new Promise((resolve) => { markStarted = resolve; });
+      let resolveFrame;
+      let rejectFrame;
+      const promise = new Promise((resolve, reject) => {
+        resolveFrame = resolve;
+        rejectFrame = reject;
+      });
+      const gate = {
+        started,
+        markStarted,
+        promise,
+        resolve: resolveFrame,
+        reject: rejectFrame,
+      };
+      nextGate = gate;
+      return gate;
+    },
+    onPerform(input) {
+      if (input.action === 'frame' && nextGate) {
+        const gate = nextGate;
+        nextGate = null;
+        gate.markStarted();
+        return gate.promise;
+      }
+      return undefined;
+    },
+  };
+}
+
+function syntheticFramePayload(overrides = {}) {
+  return {
+    mimeType: 'image/png',
+    data: VALID_PNG_BASE64,
+    width: 1,
+    height: 1,
+    ...overrides,
+  };
+}
+
+test('in-flight sensitive frame is withheld when holder is preempted during async capture (with or without lease)', async () => {
+  const host = createFakeHost(['bot-a']);
+  const frameGate = createFrameGateController();
+  const mock = createMockProviderFactory({
+    onPerform: (input) => frameGate.onPerform(input),
+  });
+  const service = createBotBrowserService({
+    host,
+    createProvider: mock.factory,
+    resolveConversationBot: async () => 'bot-a',
+  });
+
+  const desktop = ownerAuth('desktop-1', 'MacBook-Pro');
+  const phone = ownerAuth('phone-1', 'Android Phone');
+
+  const opened = await service.control({ action: 'open', botId: 'bot-a', url: 'https://example.test/public' }, desktop);
+  const takenA = await service.control({ action: 'takeover', botId: 'bot-a' }, desktop);
+  await service.control({
+    action: 'navigate',
+    botId: 'bot-a',
+    lease: takenA.lease,
+    url: 'https://example.test/signin',
+  }, desktop);
+
+  // 1. In-flight sensitive frame WITH lease is rejected when phone preempts desktop.
+  const gate1 = frameGate.arm();
+  const framePromise1 = service.control({
+    action: 'frame',
+    botId: 'bot-a',
+    lease: takenA.lease,
+  }, desktop);
+  await gate1.started;
+
+  const takenB = await service.control({ action: 'takeover', botId: 'bot-a', force: true }, phone);
+  assert.equal(takenB.phase, 'human');
+  assert.equal(takenB.holderLabel, 'Android Phone');
+
+  gate1.resolve(syntheticFramePayload({
+    pageId: opened.pageId,
+    url: 'https://example.test/signin',
+    title: 'Synthetic Sign-in',
+  }));
+  await assert.rejects(() => framePromise1, { code: 'BROWSER_SENSITIVE_BLOCKED' });
+
+  // 2. In-flight sensitive frame WITHOUT lease (clientId semantics) is also rejected when desktop preempts phone.
+  const gate2 = frameGate.arm();
+  const framePromise2 = service.control({
+    action: 'frame',
+    botId: 'bot-a',
+  }, phone);
+  await gate2.started;
+
+  const takenC = await service.control({ action: 'takeover', botId: 'bot-a', force: true }, desktop);
+  gate2.resolve(syntheticFramePayload({
+    pageId: opened.pageId,
+    url: 'https://example.test/signin',
+    title: 'Synthetic Sign-in',
+  }));
+  await assert.rejects(() => framePromise2, { code: 'BROWSER_SENSITIVE_BLOCKED' });
+
+  // 3. Current active holder can still fetch fresh sensitive frames (both with lease and via clientId without lease).
+  const okWithLease = await service.control({ action: 'frame', botId: 'bot-a', lease: takenC.lease }, desktop);
+  assert.equal(okWithLease.mimeType, 'image/png');
+  const okWithoutLease = await service.control({ action: 'frame', botId: 'bot-a' }, desktop);
+  assert.equal(okWithoutLease.mimeType, 'image/png');
+
+  await service.close();
+});
+
+test('in-flight sensitive frame is withheld when lease expires during async capture and post-expiry pre-check blocks before provider', async () => {
+  let clock = 2_000_000;
+  const host = createFakeHost(['bot-a']);
+  const frameGate = createFrameGateController();
+  const mock = createMockProviderFactory({
+    onPerform: (input) => frameGate.onPerform(input),
+  });
+  const service = createBotBrowserService({
+    host,
+    createProvider: mock.factory,
+    resolveConversationBot: async () => 'bot-a',
+    now: () => clock,
+    leaseTtlMs: 5_000,
+  });
+
+  const desktop = ownerAuth('desktop-1', 'MacBook-Pro');
+  const opened = await service.control({ action: 'open', botId: 'bot-a', url: 'https://example.test/public' }, desktop);
+  const taken1 = await service.control({ action: 'takeover', botId: 'bot-a' }, desktop);
+  await service.control({
+    action: 'navigate',
+    botId: 'bot-a',
+    lease: taken1.lease,
+    url: 'https://example.test/signin',
+  }, desktop);
+
+  // 1. Lease expires while frame (with lease) is in flight -> withheld and transitions fail-closed into held.
+  const gate1 = frameGate.arm();
+  const framePromise1 = service.control({
+    action: 'frame',
+    botId: 'bot-a',
+    lease: taken1.lease,
+  }, desktop);
+  await gate1.started;
+
+  clock += 6_000;
+  gate1.resolve(syntheticFramePayload({
+    pageId: opened.pageId,
+    url: 'https://example.test/signin',
+    title: 'Synthetic Sign-in',
+  }));
+  await assert.rejects(() => framePromise1, { code: 'BROWSER_SENSITIVE_BLOCKED' });
+
+  const heldStatus = await service.control({ action: 'status', botId: 'bot-a' }, desktop);
+  assert.equal(heldStatus.phase, 'held');
+  assert.equal(heldStatus.reason, 'disconnected_hold');
+
+  // 2. Pre-capture check blocks expired holder BEFORE hitting provider (both with old lease and without lease).
+  const frameCallsBefore = mock.calls.filter((c) => c.action === 'frame').length;
+  await assert.rejects(
+    () => service.control({ action: 'frame', botId: 'bot-a', lease: taken1.lease }, desktop),
+    { code: 'BROWSER_SENSITIVE_BLOCKED' }
+  );
+  await assert.rejects(
+    () => service.control({ action: 'frame', botId: 'bot-a' }, desktop),
+    { code: 'BROWSER_SENSITIVE_BLOCKED' }
+  );
+  assert.equal(mock.calls.filter((c) => c.action === 'frame').length, frameCallsBefore);
+
+  // 3. Resume takeover, then let lease expire during a lease-less in-flight sensitive frame -> also withheld.
+  const resumed = await service.control({ action: 'takeover', botId: 'bot-a', resume: true }, desktop);
+  assert.equal(resumed.phase, 'human');
+  const gate2 = frameGate.arm();
+  const framePromise2 = service.control({ action: 'frame', botId: 'bot-a' }, desktop);
+  await gate2.started;
+
+  clock += 6_000;
+  gate2.resolve(syntheticFramePayload({
+    pageId: opened.pageId,
+    url: 'https://example.test/signin',
+    title: 'Synthetic Sign-in',
+  }));
+  await assert.rejects(() => framePromise2, { code: 'BROWSER_SENSITIVE_BLOCKED' });
+
+  await service.close();
+});
+
+test('in-flight sensitive frame is withheld on handback or release during async capture without corrupting state', async () => {
+  const host = createFakeHost(['bot-a']);
+  const frameGate = createFrameGateController();
+  const mock = createMockProviderFactory({
+    onPerform: (input) => frameGate.onPerform(input),
+  });
+  const service = createBotBrowserService({
+    host,
+    createProvider: mock.factory,
+    resolveConversationBot: async () => 'bot-a',
+  });
+
+  const desktop = ownerAuth('desktop-1', 'MacBook-Pro');
+  const opened = await service.control({ action: 'open', botId: 'bot-a', url: 'https://example.test/public' }, desktop);
+
+  // 1. Handback during capture: started on normal page, handed back, frame resolves with sensitive password hint.
+  const taken1 = await service.control({ action: 'takeover', botId: 'bot-a' }, desktop);
+  const gate1 = frameGate.arm();
+  const framePromise1 = service.control({ action: 'frame', botId: 'bot-a', lease: taken1.lease }, desktop);
+  await gate1.started;
+
+  const handedBack1 = await service.control({ action: 'handback', botId: 'bot-a', lease: taken1.lease }, desktop);
+  assert.equal(handedBack1.phase, 'bot');
+
+  gate1.resolve(syntheticFramePayload({
+    pageId: opened.pageId,
+    url: 'https://example.test/public',
+    title: 'Synthetic Password Step',
+    hints: { hasPasswordInput: true },
+  }));
+  await assert.rejects(() => framePromise1, { code: 'BROWSER_SENSITIVE_BLOCKED' });
+
+  // 2. Handback after navigating away: stale in-flight sensitive frame is rejected and does NOT roll state back.
+  const taken2 = await service.control({ action: 'takeover', botId: 'bot-a' }, desktop);
+  await service.control({
+    action: 'navigate',
+    botId: 'bot-a',
+    lease: taken2.lease,
+    url: 'https://example.test/signin',
+  }, desktop);
+
+  const gate2 = frameGate.arm();
+  const framePromise2 = service.control({ action: 'frame', botId: 'bot-a', lease: taken2.lease }, desktop);
+  await gate2.started;
+
+  await service.control({
+    action: 'navigate',
+    botId: 'bot-a',
+    lease: taken2.lease,
+    url: 'https://example.test/done',
+  }, desktop);
+  const handedBack2 = await service.control({ action: 'handback', botId: 'bot-a', lease: taken2.lease }, desktop);
+  assert.equal(handedBack2.phase, 'bot');
+
+  // open(docGen=2) -> navigate signin(docGen=3) -> navigate done(docGen=4); stale frame carries docGen=3.
+  gate2.resolve(syntheticFramePayload({
+    pageId: opened.pageId,
+    documentGeneration: 3,
+    url: 'https://example.test/signin',
+    title: 'Synthetic Sign-in',
+  }));
+  await assert.rejects(() => framePromise2, { code: 'BROWSER_SENSITIVE_BLOCKED' });
+
+  const statusAfterHandback = await service.control({ action: 'status', botId: 'bot-a' }, desktop);
+  assert.equal(statusAfterHandback.phase, 'bot');
+  assert.equal(statusAfterHandback.sensitive, false);
+  assert.equal(statusAfterHandback.tabs[0]?.url, 'https://example.test/done');
+
+  // 3. Release during in-flight sensitive frame: even a minimal payload without url/hints is withheld and does not resurrect tabs.
+  const taken3 = await service.control({ action: 'takeover', botId: 'bot-a' }, desktop);
+  await service.control({
+    action: 'navigate',
+    botId: 'bot-a',
+    lease: taken3.lease,
+    url: 'https://example.test/signin',
+  }, desktop);
+
+  const gate3 = frameGate.arm();
+  const framePromise3 = service.control({ action: 'frame', botId: 'bot-a', lease: taken3.lease }, desktop);
+  await gate3.started;
+
+  const released = await service.control({ action: 'release', botId: 'bot-a', lease: taken3.lease }, desktop);
+  assert.equal(released.phase, 'bot');
+  assert.equal(released.tabs.length, 0);
+
+  gate3.resolve(syntheticFramePayload({ pageId: opened.pageId }));
+  await assert.rejects(() => framePromise3, { code: 'BROWSER_SENSITIVE_BLOCKED' });
+
+  const statusAfterRelease = await service.control({ action: 'status', botId: 'bot-a' }, desktop);
+  assert.equal(statusAfterRelease.phase, 'bot');
+  assert.equal(statusAfterRelease.tabs.length, 0);
+  assert.equal(statusAfterRelease.pageId, undefined);
+
+  await service.close();
+});
+
+test('lease-less sensitive frame keeps clientId semantics on same generation but rejects same clientId re-acquired lease generation', async () => {
+  let clock = 3_000_000;
+  const host = createFakeHost(['bot-a']);
+  const frameGate = createFrameGateController();
+  const mock = createMockProviderFactory({
+    onPerform: (input) => frameGate.onPerform(input),
+  });
+  const service = createBotBrowserService({
+    host,
+    createProvider: mock.factory,
+    resolveConversationBot: async () => 'bot-a',
+    now: () => clock,
+    leaseTtlMs: 5_000,
+  });
+
+  const desktop = ownerAuth('desktop-1', 'MacBook-Pro');
+  const phone = ownerAuth('phone-1', 'Android Phone');
+
+  const opened = await service.control({ action: 'open', botId: 'bot-a', url: 'https://example.test/public' }, desktop);
+  const taken1 = await service.control({ action: 'takeover', botId: 'bot-a' }, desktop);
+  await service.control({
+    action: 'navigate',
+    botId: 'bot-a',
+    lease: taken1.lease,
+    url: 'https://example.test/signin',
+  }, desktop);
+
+  // 1. Same generation + heartbeat renewal while lease-less frame is in flight -> allowed.
+  const gateRenew = frameGate.arm();
+  const renewFramePromise = service.control({ action: 'frame', botId: 'bot-a' }, desktop);
+  await gateRenew.started;
+
+  clock += 3_000;
+  await service.control({ action: 'status', botId: 'bot-a', lease: taken1.lease }, desktop);
+  clock += 3_000;
+
+  gateRenew.resolve(syntheticFramePayload({
+    pageId: opened.pageId,
+    url: 'https://example.test/signin',
+    title: 'Synthetic Sign-in',
+  }));
+  const renewedFrame = await renewFramePromise;
+  assert.equal(renewedFrame.mimeType, 'image/png');
+
+  // 2. Same clientId force-rotates lease (new generation) while lease-less frame is in flight -> rejected.
+  const gateRotate = frameGate.arm();
+  const rotateFramePromise = service.control({ action: 'frame', botId: 'bot-a' }, desktop);
+  await gateRotate.started;
+
+  const taken2 = await service.control({
+    action: 'takeover',
+    botId: 'bot-a',
+    lease: taken1.lease,
+    force: true,
+  }, desktop);
+  assert.notEqual(taken2.lease, taken1.lease);
+
+  gateRotate.resolve(syntheticFramePayload({
+    pageId: opened.pageId,
+    url: 'https://example.test/signin',
+    title: 'Synthetic Sign-in',
+  }));
+  await assert.rejects(() => rotateFramePromise, { code: 'BROWSER_SENSITIVE_BLOCKED' });
+
+  // 3. Same clientId expires and resumes takeover (new generation) while lease-less frame is in flight -> rejected.
+  const gateResume = frameGate.arm();
+  const resumeFramePromise = service.control({ action: 'frame', botId: 'bot-a' }, desktop);
+  await gateResume.started;
+
+  clock += 6_000;
+  const taken3 = await service.control({ action: 'takeover', botId: 'bot-a', resume: true }, desktop);
+  assert.notEqual(taken3.lease, taken2.lease);
+
+  gateResume.resolve(syntheticFramePayload({
+    pageId: opened.pageId,
+    url: 'https://example.test/signin',
+    title: 'Synthetic Sign-in',
+  }));
+  await assert.rejects(() => resumeFramePromise, { code: 'BROWSER_SENSITIVE_BLOCKED' });
+
+  // 4. Phone preempts then desktop preempts back (new generation for same clientId) -> rejected.
+  const gateBounce = frameGate.arm();
+  const bounceFramePromise = service.control({ action: 'frame', botId: 'bot-a' }, desktop);
+  await gateBounce.started;
+
+  await service.control({ action: 'takeover', botId: 'bot-a', force: true }, phone);
+  const taken5 = await service.control({ action: 'takeover', botId: 'bot-a', force: true }, desktop);
+  assert.notEqual(taken5.lease, taken3.lease);
+
+  gateBounce.resolve(syntheticFramePayload({
+    pageId: opened.pageId,
+    url: 'https://example.test/signin',
+    title: 'Synthetic Sign-in',
+  }));
+  await assert.rejects(() => bounceFramePromise, { code: 'BROWSER_SENSITIVE_BLOCKED' });
+
+  // Fresh lease-less request under the latest generation succeeds.
+  const freshFrame = await service.control({ action: 'frame', botId: 'bot-a' }, desktop);
+  assert.equal(freshFrame.mimeType, 'image/png');
+
+  await service.close();
+});
+
+test('human frame retains pre-capture gate, never relaxes secret risk, and preserves normal viewing policy', async () => {
+  const host = createFakeHost(['bot-a']);
+  const frameGate = createFrameGateController();
+  const mock = createMockProviderFactory({
+    onPerform: (input) => frameGate.onPerform(input),
+  });
+  const service = createBotBrowserService({
+    host,
+    createProvider: mock.factory,
+    resolveConversationBot: async () => 'bot-a',
+  });
+
+  const desktop = ownerAuth('desktop-1', 'MacBook-Pro');
+  const phone = ownerAuth('phone-1', 'Android Phone');
+  const viewer = { role: 'viewer', clientId: 'viewer-1', holderLabel: 'Read-only Viewer', authenticated: true };
+
+  const opened = await service.control({ action: 'open', botId: 'bot-a', url: 'https://example.test/public' }, desktop);
+  const takenDesktop = await service.control({ action: 'takeover', botId: 'bot-a' }, desktop);
+
+  // 1. Normal viewing policy preserved for bystander owner and read-only viewer on non-sensitive pages.
+  const phoneNormal = await service.control({ action: 'frame', botId: 'bot-a' }, phone);
+  assert.equal(phoneNormal.mimeType, 'image/png');
+  const viewerNormal = await service.control({ action: 'frame', botId: 'bot-a' }, viewer);
+  assert.equal(viewerNormal.mimeType, 'image/png');
+
+  // In-flight normal frame still succeeds even if lease holder changes while page stays non-sensitive.
+  const gateNormal = frameGate.arm();
+  const normalPromise = service.control({ action: 'frame', botId: 'bot-a', lease: takenDesktop.lease }, desktop);
+  await gateNormal.started;
+
+  const takenPhone = await service.control({ action: 'takeover', botId: 'bot-a', force: true }, phone);
+  gateNormal.resolve(syntheticFramePayload({
+    pageId: opened.pageId,
+    url: 'https://example.test/public',
+    title: 'Public Page',
+  }));
+  const normalFrame = await normalPromise;
+  assert.equal(normalFrame.mimeType, 'image/png');
+
+  // 2. Post-capture secret risk is NEVER relaxed even when the exact same active holder captures the frame.
+  const gateSecret = frameGate.arm();
+  const secretPromise = service.control({ action: 'frame', botId: 'bot-a', lease: takenPhone.lease }, phone);
+  await gateSecret.started;
+
+  gateSecret.resolve(syntheticFramePayload({
+    pageId: opened.pageId,
+    url: 'https://example.test/public',
+    title: 'Synthetic Secret Dialog',
+    hints: { secretDialogVisible: true },
+  }));
+  await assert.rejects(
+    () => secretPromise,
+    (err) => err?.code === 'BROWSER_SECRET_STEP_BLOCKED' && err?.details?.fallbackToSystemBrowser === true
+  );
+
+  // 3. Pre-capture gate still blocks known secret and sensitive pages BEFORE calling provider.perform(frame).
+  const frameCallsBeforePreCheck = mock.calls.filter((c) => c.action === 'frame').length;
+  await assert.rejects(
+    () => service.control({ action: 'frame', botId: 'bot-a', lease: takenPhone.lease }, phone),
+    { code: 'BROWSER_SECRET_STEP_BLOCKED' }
+  );
+
+  await service.control({
+    action: 'navigate',
+    botId: 'bot-a',
+    lease: takenPhone.lease,
+    url: 'https://example.test/signin',
+  }, phone);
+  await assert.rejects(
+    () => service.control({ action: 'frame', botId: 'bot-a' }, desktop),
+    { code: 'BROWSER_SENSITIVE_BLOCKED' }
+  );
+  await assert.rejects(
+    () => service.control({ action: 'frame', botId: 'bot-a' }, viewer),
+    { code: 'BROWSER_SENSITIVE_BLOCKED' }
+  );
+  assert.equal(mock.calls.filter((c) => c.action === 'frame').length, frameCallsBeforePreCheck);
+
+  await service.close();
 });
