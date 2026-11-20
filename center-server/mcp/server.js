@@ -20,6 +20,7 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
+import { OPERATION_ERROR_MESSAGES } from '../operations/errors.js';
 
 export const DEFAULT_MCP_PATH = '/mcp';
 export const DEFAULT_MAX_REQUEST_BYTES = 256 * 1024;
@@ -70,25 +71,11 @@ const SENSITIVE_KEY_NAMES = new Set([
   'xbridgetoken',
 ]);
 
+const OFFLINE_ERROR_CODES = new Set(['OFFLINE', 'NOT_CONNECTED', 'DISCONNECTED', 'CONNECT_FAILED']);
+
 const SAFE_TOOL_ERROR_CODES = new Map([
-  ['INVALID_ARGUMENT', 'Invalid argument'],
-  ['VALIDATION_FAILED', 'Validation failed'],
-  ['NOT_FOUND', 'Not found'],
-  ['BOT_NOT_FOUND', 'Bot not found'],
+  ...Object.entries(OPERATION_ERROR_MESSAGES),
   ['TOOL_NOT_FOUND', 'Unknown tool'],
-  ['FORBIDDEN', 'Forbidden'],
-  ['CONFLICT', 'Conflict'],
-  ['REVISION_CONFLICT', 'Revision conflict'],
-  ['REQUEST_CONFLICT', 'Request conflict'],
-  ['INVALID_STATE', 'Invalid state'],
-  ['RATE_LIMITED', 'Rate limit exceeded'],
-  ['TIMEOUT', 'Operation timed out'],
-  ['CALL_TIMEOUT', 'Operation timed out'],
-  ['PAYLOAD_TOO_LARGE', 'Payload too large'],
-  ['RESPONSE_TOO_LARGE', 'Response exceeds size limit'],
-  ['UNSUPPORTED_TARGET', 'Unsupported target'],
-  ['DEVICE_OFFLINE', 'Device offline'],
-  ['CENTER_OFFLINE', 'Center offline'],
 ]);
 
 function isPlainObject(value) {
@@ -383,8 +370,9 @@ function formatToolResult(rawResult, maxToolJsonBytes) {
 
 function formatToolError(err) {
   const rawCode = typeof err?.code === 'string' ? err.code : '';
-  const mappedMessage = SAFE_TOOL_ERROR_CODES.get(rawCode);
-  const code = mappedMessage ? rawCode : 'TOOL_EXECUTION_FAILED';
+  const normalizedCode = OFFLINE_ERROR_CODES.has(rawCode) ? 'DEVICE_OFFLINE' : rawCode;
+  const mappedMessage = SAFE_TOOL_ERROR_CODES.get(normalizedCode);
+  const code = mappedMessage ? normalizedCode : 'TOOL_EXECUTION_FAILED';
   const message = mappedMessage || 'Tool execution failed';
   return {
     isError: true,
