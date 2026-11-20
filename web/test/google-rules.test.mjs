@@ -1,6 +1,8 @@
-// Regression tests for Center Google Gmail/Calendar trigger rules, Orca MIT trigger matching,
-// durable cursors/idempotency, offline pending/missed handling, multi-account isolation,
-// and the shared Center->Host webhook poll/receipt/stop delivery seam.
+// Regression tests for Center Google Gmail/Calendar trigger rules, pinned vendored Orca
+// trigger matching via `orca-domain.js`, durable cursors/idempotency, offline pending/missed
+// handling, multi-account isolation, and end-to-end Google Workspace rule privacy boundaries
+// (trusted Center envelope -> Host createWebhookConsumer -> submitPrimary allowGoogleWorkspaceRule
+// -> Durable host.user-message -> syncTrustedRuleEntries / learning isolation / chatTurnModel).
 //
 // Includes MIT-preserved test cases adapted from stablyai/orca@e64e561738d8d465ab459e7e3f9e46d08b6396ea
 // (Copyright (c) 2026 Lovecast Inc.).
@@ -19,7 +21,23 @@ import {
 import {
   assertGoogleTrigger,
   gmailRuleMatches,
+  GoogleToolError,
 } from '../../center-server/google-workspace/rules-orca.js';
+import {
+  createWebhookConsumer,
+  isTrustedGoogleRuleEvent,
+} from '../../host-core/host-webhooks.js';
+import {
+  createGoogleWorkspacePrivacy,
+  GOOGLE_WORKSPACE_DATA_BOUNDARY,
+  GOOGLE_WORKSPACE_PRIVACY_BLOCKED_CODE,
+  GOOGLE_WORKSPACE_PRIVACY_UNAVAILABLE_CODE,
+  GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
+  isTrustedDataBoundary,
+  isTrustedGoogleWorkspaceRuleEntry,
+  isTrustedHostSourceType,
+} from '../../host-core/google-workspace-privacy.js';
+import { normalizeAttribution } from '../src/chatTurnModel.ts';
 
 const NOW = Date.parse('2026-11-20T10:00:00.000Z');
 const GMAIL_PATH = '/gmail/v1/users/me';
@@ -51,17 +69,16 @@ function makeFakeApi(email, routes) {
       if (answer) {
         if (allow404 && answer.status === 404) return null;
         if (answer.status < 200 || answer.status >= 300) {
-          throw Object.assign(
-            new Error(answer.message ?? `Google HTTP ${answer.status}`),
-            { status: answer.status, code: answer.code },
-          );
+          const err = new GoogleToolError(answer.message ?? `Google HTTP ${answer.status}`, answer.status);
+          if (answer.code) err.code = answer.code;
+          throw err;
         }
         const parsed = read(answer.body);
         if (parsed === null) throw new Error('Unexpected response shape');
         return parsed;
       }
     }
-    throw Object.assign(new Error(`Unhandled route ${url.pathname}`), { status: 404 });
+    throw new GoogleToolError(`Unhandled route ${url.pathname}`, 404);
   };
   return {
     calls,
@@ -72,6 +89,135 @@ function makeFakeApi(email, routes) {
       send: async () => { throw new Error('unexpected write'); },
       bytes: async () => { throw new Error('unexpected bytes'); },
     },
+  };
+}
+
+function createMemoryDurableHarness() {
+  const docs = new Map();
+  const conversations = new Map();
+  const docKey = (def, conversationId) => {
+    const scope = def?.scope ?? def?.definition?.scope;
+    const kind = def?.kind ?? def?.definition?.kind ?? String(def);
+    const id = scope === 'session' || typeof conversationId !== 'number' ? 'session' : conversationId;
+    return `${kind}:${id}`;
+  };
+  const initialOf = (def) => {
+    const fn = def?.definition?.initial ?? def?.initial;
+    return typeof fn === 'function' ? fn() : {};
+  };
+  return {
+    appendEntry(nativeId, entry) {
+      const list = conversations.get(nativeId) ?? [];
+      const id = entry.id ?? (list.length ? list[list.length - 1].id + 1 : 1);
+      const stored = { conversationId: nativeId, ...entry, id };
+      list.push(stored);
+      conversations.set(nativeId, list);
+      return stored;
+    },
+    entriesOf(nativeId) {
+      return conversations.get(nativeId) ?? [];
+    },
+    harness: {
+      async snapshot(def, conversationId) {
+        const key = docKey(def, conversationId);
+        return docs.has(key) ? structuredClone(docs.get(key)) : null;
+      },
+      async commit(fn) {
+        const pending = new Map();
+        const tx = {
+          async doc(def, conversationId) {
+            const key = docKey(def, conversationId);
+            if (!pending.has(key)) {
+              pending.set(key, docs.has(key) ? structuredClone(docs.get(key)) : initialOf(def));
+            }
+            return pending.get(key);
+          },
+          async latestEntryId(conversationId) {
+            const list = conversations.get(conversationId) ?? [];
+            return list.length ? list[list.length - 1].id : 0;
+          },
+          entry(entryId) {
+            for (const list of conversations.values()) {
+              const found = list.find(e => e.id === entryId);
+              if (found) return found;
+            }
+            return null;
+          },
+        };
+        const result = await fn(tx);
+        for (const [key, value] of pending.entries()) {
+          docs.set(key, structuredClone(value));
+        }
+        return result;
+      },
+      async conversation(nativeId) {
+        if (!conversations.has(nativeId)) return null;
+        return {
+          id: nativeId,
+          async entries(query = {}, limit = 100, cursor) {
+            const list = conversations.get(nativeId) ?? [];
+            const minId = query.minEntryId ?? 0;
+            const maxId = query.maxEntryId ?? Number.POSITIVE_INFINITY;
+            let filtered = list.filter(e => e.id >= minId && e.id <= maxId);
+            if (query.order === 'descending') filtered = [...filtered].reverse();
+            const start = typeof cursor?.offset === 'number' ? cursor.offset : 0;
+            const items = filtered.slice(start, start + limit);
+            const next = start + items.length < filtered.length ? { offset: start + items.length } : null;
+            return { items, next };
+          },
+        };
+      },
+    },
+  };
+}
+
+// Mirrors host-core/runtime.js submitPrimary + host-core/runtime-turns.js sourceMessageEntry boundary.
+function buildTrustedPrimaryEntry({ deviceId, botId, input, allowGoogleWorkspaceRule, nowMs = NOW }) {
+  const kind = input?.origin?.sender?.kind === 'host' ? 'host' : 'user';
+  const rawSourceType = input?.origin?.sender?.sourceType;
+  const sourceType = kind === 'host' && (
+    rawSourceType === 'webhook' ||
+    (allowGoogleWorkspaceRule && isTrustedHostSourceType(rawSourceType))
+  ) ? rawSourceType : null;
+  const dataBoundary = kind === 'host' && allowGoogleWorkspaceRule && isTrustedDataBoundary(input?.origin?.dataBoundary)
+    ? input.origin.dataBoundary
+    : null;
+  const name = typeof input?.origin?.sender?.name === 'string' ? input.origin.sender.name : null;
+  return {
+    kind: 'host.user-message',
+    data: {
+      version: 1,
+      source: 'host',
+      requestId: input.requestId,
+      botId,
+      ...(dataBoundary !== null ? { dataBoundary } : {}),
+      attribution: {
+        kind,
+        deviceId,
+        channel: 'primary',
+        messageId: input.requestId,
+        direction: 'incoming',
+        createdAt: new Date(nowMs).toISOString(),
+        ...(name !== null ? { name } : {}),
+        ...(sourceType !== null ? { sourceType } : {}),
+      },
+      turn: {
+        requestId: input.requestId,
+        taskId: null,
+        kind: 'primary',
+        scopeId: null,
+        triggerMessageId: input.requestId,
+        replyTo: null,
+        sender: {
+          kind,
+          deviceId,
+          ...(name !== null ? { name } : {}),
+          ...(sourceType !== null ? { sourceType } : {}),
+        },
+        replyTarget: { kind: 'primary' },
+      },
+    },
+    model: [{ role: 'user', content: input.text, timestamp: nowMs }],
   };
 }
 
@@ -214,7 +360,7 @@ test('Orca RFC 5322 Gmail from= and to= matching rejects spoofed display names a
   assert.equal(toOps('"Lee, Kim" <lk@x.com>, Ops <OPS@acme.com>'), true);
 });
 
-test('Gmail rule seeds history from now, filters DMARC/ignored/old mail, and delivers durably through Host poll/receipt without fake webhook routes', async () => {
+test('Gmail rule seeds history via vendored orca-domain, filters DMARC/ignored/old mail, and emits trusted Google envelope without fake webhook routes', async () => {
   const { store, cleanup } = makeStore();
   let now = NOW;
   const woken = [];
@@ -250,7 +396,6 @@ test('Gmail rule seeds history from now, filters DMARC/ignored/old mail, and del
       google,
       dispatch,
       now: () => now,
-      loadOrca: async () => null,
     });
 
     const { rule } = await rules.manage('save', {
@@ -282,7 +427,7 @@ test('Gmail rule seeds history from now, filters DMARC/ignored/old mail, and del
     // Must NOT create any public bearer webhook route.
     assert.deepEqual(store.listWebhookRoutes(), []);
 
-    // Host polls via existing webhook delivery seam and receives validated delivery event.
+    // Host polls via existing delivery seam and receives trusted top-level envelope markers.
     const poll = store.pollWebhookEvents('dev-1', null, now);
     assert.equal(poll.items.length, 1);
     const delivery = poll.items[0];
@@ -291,6 +436,9 @@ test('Gmail rule seeds history from now, filters DMARC/ignored/old mail, and del
     assert.equal(delivery.routeId, rule.id);
     assert.equal(delivery.status, 'dispatching');
     assert.equal(delivery.idempotencyKey, 'gmail:ada@acme.dev:m1');
+    assert.equal(delivery.trustedSource, GOOGLE_WORKSPACE_RULE_SOURCE_TYPE);
+    assert.equal(delivery.dataBoundary, GOOGLE_WORKSPACE_DATA_BOUNDARY);
+    assert.equal(isTrustedGoogleRuleEvent(delivery), true);
     assert.equal(delivery.payload.source, 'gmail');
     assert.equal(delivery.payload.google.ref, 'gmail:thread:t-m1');
 
@@ -357,7 +505,6 @@ test('Gmail 429 rate-limit backoff exposes backing_off/rateLimited, retries from
         dispatched.push(input);
       },
       now: () => now,
-      loadOrca: async () => null,
     });
 
     await rules.manage('save', {
@@ -372,39 +519,33 @@ test('Gmail 429 rate-limit backoff exposes backing_off/rateLimited, retries from
     });
     store.saveGoogleTriggerState({ accounts: { 'ada@acme.dev': { historyId: '7' } }, listeners: {} }, now);
 
-    // Tick 1: label lookup hits 429 -> backs off 60s and keeps historyId at 7.
     await rules.tick();
     assert.equal(store.getGoogleTriggerState().accounts['ada@acme.dev']?.historyId, '7');
     const listed = await rules.manage('list', { deviceId: 'dev-1', botId: 'bot-1' });
     assert.equal(listed.items[0].runtime.status, 'backing_off');
     assert.equal(listed.items[0].runtime.rateLimited, true);
 
-    // Within 60s backoff window: no new API calls.
     const callsAfter429 = fake.calls.length;
     labelsUp = true;
     now += 30_000;
     await rules.tick();
     assert.equal(fake.calls.length, callsAfter429);
 
-    // After backoff expires: dispatch fails once -> historyId stays at 7.
     now += 60_000;
     await rules.tick();
     assert.equal(dispatched.length, 0);
     assert.equal(store.getGoogleTriggerState().accounts['ada@acme.dev']?.historyId, '7');
 
-    // Next tick succeeds -> dispatches m1 and commits historyId 120.
     await rules.tick();
     assert.deepEqual(dispatched.map(d => d.eventKey), ['gmail:ada@acme.dev:m1']);
     assert.equal(store.getGoogleTriggerState().accounts['ada@acme.dev']?.historyId, '120');
 
-    // Simulate expired history (404): re-seeds to 100 without firing old mail.
     const expiredFake = makeFakeApi('ada@acme.dev', gmailRoutes([gmailMessage('m9')], 404));
     const rules2 = openGoogleRules({
       store,
       google: { ...google, api: async () => expiredFake.api },
       dispatch: async input => { dispatched.push(input); },
       now: () => now,
-      loadOrca: async () => null,
     });
     await rules2.tick();
     assert.equal(dispatched.length, 1);
@@ -427,7 +568,7 @@ test('Calendar rule handles 410 syncToken re-seed, skips declined/all-day, marks
       calendarRoutes(
         [
           { id: 'soon', startsIn: 5 * 60_000 },
-          { id: 'in-window', startsIn: 10 * 60_000 + 20_000 }, // due in 20s -> schedules timer
+          { id: 'in-window', startsIn: 10 * 60_000 + 20_000 },
           { id: 'later', startsIn: 3 * 3_600_000 },
           { id: 'declined', startsIn: 4 * 60_000, declined: true },
           { id: 'allday', startsIn: 4 * 60_000, allDay: true },
@@ -465,7 +606,6 @@ test('Calendar rule handles 410 syncToken re-seed, skips declined/all-day, marks
         handle.cleared = true;
         activeTimers.delete(handle);
       },
-      loadOrca: async () => null,
     });
 
     const { rule } = await rules.manage('save', {
@@ -478,17 +618,14 @@ test('Calendar rule handles 410 syncToken re-seed, skips declined/all-day, marks
       instruction: 'Prepare meeting brief.',
     });
 
-    // Tick 1: seeds sync-1, enqueues 'soon' (due now), schedules timer for 'in-window'.
     await rules.tick();
     assert.equal(store.getGoogleTriggerState().accounts['ada@acme.dev']?.calendars?.primary?.syncToken, 'sync-1');
     assert.equal(activeTimers.size, 1);
 
-    // Tick 2: Calendar returns 410 -> re-seeds sync-2, does NOT duplicate 'soon'.
     await rules.tick();
     assert.equal(store.getGoogleTriggerState().accounts['ada@acme.dev']?.calendars?.primary?.syncToken, 'sync-2');
     assert.equal(store.listGoogleRuleEvents(rule.id, { nowMs: now }).length, 1);
 
-    // Host stays offline past meeting start time (NOW + 5m) -> event transitions to 'missed', never dispatched late!
     now = NOW + 6 * 60_000;
     const pollAfterStart = store.pollWebhookEvents('dev-1', null, now);
     assert.equal(pollAfterStart.items.length, 0);
@@ -496,7 +633,6 @@ test('Calendar rule handles 410 syncToken re-seed, skips declined/all-day, marks
     assert.equal(events[0].status, 'missed');
     assert.equal(events[0].error.code, 'MEETING_STARTED_WHILE_OFFLINE');
 
-    // close() clears all pending timers.
     await rules.close();
     assert.equal(activeTimers.size, 0);
   } finally {
@@ -525,10 +661,8 @@ test('Multi-account enforcement requires explicit account, pauses on reconnect/r
       google,
       dispatch: createGoogleRuleDispatcher({ store, notify: () => {}, now: () => now }),
       now: () => now,
-      loadOrca: async () => null,
     });
 
-    // Multiple accounts without explicit account must fail.
     await assert.rejects(
       () => rules.manage('save', {
         deviceId: 'dev-1',
@@ -557,7 +691,6 @@ test('Multi-account enforcement requires explicit account, pauses on reconnect/r
       instruction: 'Paused rule.',
     });
 
-    // Alice goes into reconnect -> Alice's rule pauses, NEVER falls back to Bob.
     accountsState = [
       { id: 'a1', email: 'alice@acme.dev', status: 'reconnect', choices: ['gmail'], services: [{ service: 'gmail', state: 'needs-permission' }] },
       { id: 'a2', email: 'bob@acme.dev', status: 'connected', choices: ['gmail'], services: [{ service: 'gmail', state: 'ready' }] },
@@ -565,12 +698,9 @@ test('Multi-account enforcement requires explicit account, pauses on reconnect/r
     await rules.tick();
     assert.deepEqual(apiCalledFor, []);
     const pausedList = await rules.manage('list', { account: 'alice@acme.dev' });
-    const aliceView = pausedList.items.find(r => r.id === aliceRule.id);
-    const manualView = pausedList.items.find(r => r.id === manualPaused.id);
-    assert.equal(aliceView.runtime.status, 'paused_account_reconnect');
-    assert.equal(manualView.runtime.status, 'paused_disabled');
+    assert.equal(pausedList.items.find(r => r.id === aliceRule.id).runtime.status, 'paused_account_reconnect');
+    assert.equal(pausedList.items.find(r => r.id === manualPaused.id).runtime.status, 'paused_disabled');
 
-    // Alice reconnects -> Alice's enabled rule resumes; manually disabled rule stays paused!
     accountsState = [
       { id: 'a1', email: 'alice@acme.dev', status: 'connected', choices: ['gmail'], services: [{ service: 'gmail', state: 'ready' }] },
       { id: 'a2', email: 'bob@acme.dev', status: 'connected', choices: ['gmail'], services: [{ service: 'gmail', state: 'ready' }] },
@@ -581,7 +711,6 @@ test('Multi-account enforcement requires explicit account, pauses on reconnect/r
     assert.equal(resumedList.items.find(r => r.id === aliceRule.id).runtime.status, 'running');
     assert.equal(resumedList.items.find(r => r.id === manualPaused.id).runtime.status, 'paused_disabled');
 
-    // Enqueue a pending event and verify stopWebhookEvents cancels it cleanly.
     const dispatch = createGoogleRuleDispatcher({ store, notify: () => {}, now: () => now });
     const res = await dispatch({
       deviceId: 'dev-1',
@@ -597,7 +726,6 @@ test('Multi-account enforcement requires explicit account, pauses on reconnect/r
     assert.equal(afterStop[0].status, 'cancelled');
     assert.equal(afterStop[0].error.code, 'USER_STOP');
 
-    // Removing Alice from Center pauses Alice's rule and never uses Bob.
     accountsState = [accountsState[1]];
     rules.onAccountRemoved('alice@acme.dev');
     await rules.tick();
@@ -609,4 +737,283 @@ test('Multi-account enforcement requires explicit account, pauses on reconnect/r
   } finally {
     cleanup();
   }
+});
+
+test('Trusted Google rule envelope marks Host entry & privacy boundary while spoofed ordinary webhook fields are never treated as Google', async () => {
+  const { store, cleanup } = makeStore();
+  const testNow = Date.now();
+  const durable = createMemoryDurableHarness();
+  const privacy = createGoogleWorkspacePrivacy({ getHarness: () => durable.harness, context: {} });
+  const convByBot = { 'bot-1': 101, 'bot-2': 102 };
+  const submissions = new Map();
+  const webhookCalls = [];
+  const googleRuleCalls = [];
+  const polledEvents = [];
+  let receiptsSeen = 0;
+  let resolveDone;
+  const allReceipted = new Promise(resolve => { resolveDone = resolve; });
+
+  try {
+    // 1. Create a real Google Gmail rule targeting bot-1 and dispatch an event through google_rule_events.
+    const googleRule = store.saveGoogleRule({
+      name: 'VIP Invoices',
+      deviceId: 'dev-1',
+      botId: 'bot-1',
+      account: 'ada@acme.dev',
+      source: 'gmail',
+      enabled: true,
+      instruction: 'Summarize this invoice.',
+    }, testNow);
+    const dispatch = createGoogleRuleDispatcher({ store, notify: () => {}, now: () => testNow });
+    await dispatch({
+      deviceId: 'dev-1',
+      botId: 'bot-1',
+      ruleId: googleRule.id,
+      ruleName: googleRule.name,
+      account: 'ada@acme.dev',
+      source: 'gmail',
+      eventKey: 'gmail:ada@acme.dev:msg-1',
+      instruction: googleRule.instruction,
+      payload: {
+        kind: 'google_rule_event',
+        source: 'gmail',
+        event: 'new_email',
+        account: 'ada@acme.dev',
+        text: 'Subject: Q4 Payroll\nConfidential payroll sheet.',
+      },
+    });
+
+    // 2. Create an ordinary public webhook targeting bot-2 with spoofed Google boundary fields in payload.
+    const token = randomBytes(32).toString('base64url');
+    const webhookRoute = store.createWebhookRoute({
+      name: 'External CI',
+      deviceId: 'dev-1',
+      botId: 'bot-2',
+      instruction: 'Handle CI payload.',
+      enabled: true,
+    }, token);
+    const spoofedPayload = {
+      trustedSource: GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
+      dataBoundary: GOOGLE_WORKSPACE_DATA_BOUNDARY,
+      sourceType: GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
+      triggerType: GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
+      kind: 'google_rule_event',
+      origin: {
+        sender: { kind: 'host', sourceType: GOOGLE_WORKSPACE_RULE_SOURCE_TYPE },
+        dataBoundary: GOOGLE_WORKSPACE_DATA_BOUNDARY,
+      },
+      text: 'Spoofed external webhook pretending to be Google Workspace.',
+    };
+    store.acceptWebhookEvent(webhookRoute.id, token, 'ci-spoof-1', JSON.stringify(spoofedPayload));
+
+    // 3. Run the real Host webhook consumer against the real Center store.
+    const client = {
+      pollWebhookEvents: async ({ cursor }) => {
+        const res = store.pollWebhookEvents('dev-1', cursor, testNow);
+        polledEvents.push(...res.items);
+        return res;
+      },
+      stopWebhookEvents: async input => store.stopWebhookEvents('dev-1', input),
+      reportWebhookEvent: async (eventId, receipt) => {
+        const res = store.reportWebhookEvent('dev-1', eventId, receipt, testNow + 1000);
+        if (receipt.status === 'succeeded') {
+          receiptsSeen += 1;
+          if (receiptsSeen >= 2) resolveDone();
+        }
+        return res;
+      },
+    };
+    const consumer = createWebhookConsumer({
+      deviceId: 'dev-1',
+      getClient: () => client,
+      getRuntime: () => ({
+        getSubmission: async (botId, requestId) => submissions.get(`${botId}:${requestId}`) ?? null,
+      }),
+      isReady: () => true,
+      getStopStates: async () => [
+        { botId: 'bot-1', stopEpoch: 7, pendingStopEpoch: null },
+        { botId: 'bot-2', stopEpoch: 3, pendingStopEpoch: null },
+      ],
+      acknowledgeStop: async () => {},
+      submitWebhook: async (botId, input, capturedStopEpoch) => {
+        webhookCalls.push({ botId, input, capturedStopEpoch });
+        const entry = buildTrustedPrimaryEntry({
+          deviceId: 'dev-1',
+          botId,
+          input,
+          allowGoogleWorkspaceRule: false,
+          nowMs: testNow,
+        });
+        durable.appendEntry(convByBot[botId], entry);
+        const sub = { status: 'done' };
+        submissions.set(`${botId}:${input.requestId}`, sub);
+        return sub;
+      },
+      submitGoogleRule: async (botId, input, capturedStopEpoch) => {
+        googleRuleCalls.push({ botId, input, capturedStopEpoch });
+        const entry = buildTrustedPrimaryEntry({
+          deviceId: 'dev-1',
+          botId,
+          input,
+          allowGoogleWorkspaceRule: true,
+          nowMs: testNow,
+        });
+        durable.appendEntry(convByBot[botId], entry);
+        const sub = { status: 'done' };
+        submissions.set(`${botId}:${input.requestId}`, sub);
+        return sub;
+      },
+    });
+
+    consumer.wake();
+    await allReceipted;
+    await consumer.close();
+
+    // Verify Center envelope separation: Google table emits trusted envelope, webhook table never does.
+    const googlePolled = polledEvents.find(e => e.routeId === googleRule.id);
+    const webhookPolled = polledEvents.find(e => e.routeId === webhookRoute.id);
+    assert.ok(googlePolled);
+    assert.ok(webhookPolled);
+    assert.equal(googlePolled.trustedSource, GOOGLE_WORKSPACE_RULE_SOURCE_TYPE);
+    assert.equal(googlePolled.dataBoundary, GOOGLE_WORKSPACE_DATA_BOUNDARY);
+    assert.equal(isTrustedGoogleRuleEvent(googlePolled), true);
+    assert.equal(webhookPolled.trustedSource, undefined);
+    assert.equal(webhookPolled.dataBoundary, undefined);
+    assert.equal(isTrustedGoogleRuleEvent(webhookPolled), false);
+    assert.equal(webhookPolled.payload.dataBoundary, GOOGLE_WORKSPACE_DATA_BOUNDARY);
+
+    // Verify Host consumer routed each event strictly to its own channel with preserved stopEpoch.
+    assert.equal(googleRuleCalls.length, 1);
+    assert.equal(googleRuleCalls[0].botId, 'bot-1');
+    assert.equal(googleRuleCalls[0].capturedStopEpoch, 7);
+    assert.equal(googleRuleCalls[0].input.origin.sender.kind, 'host');
+    assert.equal(googleRuleCalls[0].input.origin.sender.sourceType, GOOGLE_WORKSPACE_RULE_SOURCE_TYPE);
+    assert.equal(googleRuleCalls[0].input.origin.dataBoundary, GOOGLE_WORKSPACE_DATA_BOUNDARY);
+
+    assert.equal(webhookCalls.length, 1);
+    assert.equal(webhookCalls[0].botId, 'bot-2');
+    assert.equal(webhookCalls[0].capturedStopEpoch, 3);
+    assert.equal(webhookCalls[0].input.origin.sender.kind, 'host');
+    assert.equal(webhookCalls[0].input.origin.sender.sourceType, 'webhook');
+    assert.equal(webhookCalls[0].input.origin.dataBoundary, undefined);
+
+    // Verify Google rule entry is marked, synced via syncTrustedRuleEntries, and isolated from learning/export.
+    const bot1Entries = durable.entriesOf(101);
+    assert.equal(bot1Entries.length, 1);
+    assert.equal(isTrustedGoogleWorkspaceRuleEntry(bot1Entries[0]), true);
+    const syncRes1 = await privacy.syncTrustedRuleEntries(101, bot1Entries);
+    assert.equal(syncRes1.marked, true);
+    assert.equal(await privacy.isConversationTainted(101), true);
+    const learning1 = await privacy.filterConversationEntriesForLearning(101, bot1Entries);
+    assert.equal(learning1.tainted, true);
+    assert.equal(learning1.cleanEntries.length, 0);
+    await assert.rejects(
+      () => privacy.assertExportAllowed(101, { operation: 'learning' }),
+      err => err.code === GOOGLE_WORKSPACE_PRIVACY_BLOCKED_CODE,
+    );
+
+    // Verify spoofed ordinary webhook entry is NOT treated as Google Workspace and stays clean for learning.
+    const bot2Entries = durable.entriesOf(102);
+    assert.equal(bot2Entries.length, 1);
+    assert.equal(isTrustedGoogleWorkspaceRuleEntry(bot2Entries[0]), false);
+    const syncRes2 = await privacy.syncTrustedRuleEntries(102, bot2Entries);
+    assert.equal(syncRes2.marked, false);
+    assert.equal(await privacy.isConversationTainted(102), false);
+    const learning2 = await privacy.filterConversationEntriesForLearning(102, bot2Entries);
+    assert.equal(learning2.tainted, false);
+    assert.equal(learning2.cleanEntries.length, 1);
+    await assert.doesNotReject(() => privacy.assertExportAllowed(102, { operation: 'learning' }));
+
+    // Verify frontend chatTurnModel attribution whitelist preserves google-workspace-rule only on host senders.
+    const attrGoogle = normalizeAttribution(bot1Entries[0].data.attribution);
+    assert.equal(attrGoogle?.sourceType, GOOGLE_WORKSPACE_RULE_SOURCE_TYPE);
+    const attrWebhook = normalizeAttribution(bot2Entries[0].data.attribution);
+    assert.equal(attrWebhook?.sourceType, 'webhook');
+    const attrSpoofedUser = normalizeAttribution({
+      kind: 'user',
+      channel: 'primary',
+      sourceType: GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
+    });
+    assert.equal(attrSpoofedUser?.sourceType, undefined);
+
+    // Verify receipts reached both Center tables.
+    assert.equal(store.listGoogleRuleEvents(googleRule.id, { nowMs: testNow })[0].status, 'succeeded');
+    assert.equal(store.listWebhookEvents(webhookRoute.id)[0].status, 'succeeded');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Host webhook consumer fails closed on partial trusted markers and when submitGoogleRule is unavailable', async () => {
+  const webhookCalls = [];
+  const receipts = [];
+  let resolveDone;
+  const receipted = new Promise(resolve => { resolveDone = resolve; });
+
+  const malformedPartialEvent = {
+    id: 'evt-partial',
+    routeId: 'r1',
+    routeName: 'Partial',
+    deviceId: 'dev-1',
+    botId: 'bot-1',
+    requestId: 'req-partial',
+    idempotencyKey: 'k1',
+    status: 'dispatching',
+    cancelRequested: false,
+    admission: null,
+    receivedAt: new Date(NOW).toISOString(),
+    expiresAt: new Date(NOW + 60_000).toISOString(),
+    updatedAt: new Date(NOW).toISOString(),
+    dataBoundary: GOOGLE_WORKSPACE_DATA_BOUNDARY,
+    // Missing trustedSource: must be rejected by validateEvent!
+    instruction: 'Do something.',
+    payload: { ok: true },
+  };
+  const validGoogleEvent = {
+    ...malformedPartialEvent,
+    id: 'evt-google',
+    requestId: 'req-google',
+    idempotencyKey: 'k2',
+    trustedSource: GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
+    dataBoundary: GOOGLE_WORKSPACE_DATA_BOUNDARY,
+  };
+
+  let polled = false;
+  const client = {
+    pollWebhookEvents: async () => {
+      if (polled) return { items: [], nextCursor: null };
+      polled = true;
+      return { items: [malformedPartialEvent, validGoogleEvent], nextCursor: null };
+    },
+    stopWebhookEvents: async input => input,
+    reportWebhookEvent: async (id, receipt) => {
+      receipts.push({ id, receipt });
+      resolveDone();
+      return { id, ...receipt };
+    },
+  };
+
+  const consumer = createWebhookConsumer({
+    deviceId: 'dev-1',
+    getClient: () => client,
+    getRuntime: () => ({ getSubmission: async () => null }),
+    isReady: () => true,
+    getStopStates: async () => [{ botId: 'bot-1', stopEpoch: 1, pendingStopEpoch: null }],
+    acknowledgeStop: async () => {},
+    submitWebhook: async (...args) => {
+      webhookCalls.push(args);
+      return { status: 'done' };
+    },
+    // Intentionally omit submitGoogleRule to verify fail-closed behavior.
+  });
+
+  consumer.wake();
+  await receipted;
+  await consumer.close();
+
+  assert.equal(webhookCalls.length, 0);
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].id, 'evt-google');
+  assert.equal(receipts[0].receipt.status, 'failed');
+  assert.equal(receipts[0].receipt.error.code, GOOGLE_WORKSPACE_PRIVACY_UNAVAILABLE_CODE);
 });

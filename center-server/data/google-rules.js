@@ -9,6 +9,8 @@ const fail = (code, message) => { throw Object.assign(new Error(message), { code
 const terminal = new Set(['succeeded', 'failed', 'cancelled', 'expired', 'missed']);
 const progress = { dispatching: 0, queued: 1, running: 2 };
 const sha256Hex = value => createHash('sha256').update(value).digest('hex');
+const GOOGLE_WORKSPACE_DATA_BOUNDARY = 'google-workspace';
+const GOOGLE_WORKSPACE_RULE_SOURCE_TYPE = 'google-workspace-rule';
 
 function safeParseJson(raw, fallback) {
   if (typeof raw !== 'string' || !raw) return fallback;
@@ -91,6 +93,10 @@ function toHostDeliveryEvent(row) {
     expiresAt: row.expires_at,
     updatedAt: row.updated_at,
     ...(row.error_json === null ? {} : { error: safeParseJson(row.error_json, null) }),
+    // Trusted Center envelope markers emitted exclusively from google_rule_events;
+    // public webhook_events rows never emit these top-level fields regardless of payload.
+    trustedSource: GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
+    dataBoundary: GOOGLE_WORKSPACE_DATA_BOUNDARY,
     instruction: row.instruction,
     payload: safeParseJson(row.payload_json, {}),
   };

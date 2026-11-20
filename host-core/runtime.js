@@ -42,6 +42,8 @@ import { createBotSessionRuntime, applySessionResetState } from './runtime-bot-s
 import { BotSessionState, USER_MESSAGE_KIND, WORK_TRIGGER_KIND, deriveEntryAttribution } from './bot-session-context.js';
 import {
   createGoogleWorkspacePrivacy,
+  GOOGLE_WORKSPACE_DATA_BOUNDARY,
+  GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
   GoogleWorkspacePrivacyState,
   isTrustedDataBoundary,
   isTrustedHostSourceType,
@@ -1432,6 +1434,22 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
           replyTo: null,
         },
       }, capturedStopEpoch);
+    },
+    submitGoogleRule: async (botId, input, capturedStopEpoch) => {
+      if (!resumed || !centerOnline || closing || isMaintenance() || turns.isRecoveryPending() ||
+          turns.stopped(botId) || turns.webhookStopPending(botId)) return null;
+      return submitPrimary(botId, {
+        ...input,
+        origin: {
+          sender: {
+            kind: 'host',
+            name: input?.origin?.sender?.name,
+            sourceType: GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
+          },
+          dataBoundary: GOOGLE_WORKSPACE_DATA_BOUNDARY,
+          replyTo: null,
+        },
+      }, capturedStopEpoch, null, { allowGoogleWorkspaceRule: true });
     },
   });
   decisions.setTurnGate(turns.admitWorkDecision, turns.pump, turns.canRunWork);

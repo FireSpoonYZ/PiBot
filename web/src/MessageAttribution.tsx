@@ -34,8 +34,11 @@ function senderLabel(a: MessageAttributionData, t: (zh: string, en: string) => s
 
 // Legacy history lacks sourceType; only its Host/primary attribution name is a fallback, never message text.
 export function isWebhookAttribution(a: MessageAttributionData | undefined): boolean {
-  return a?.kind === 'host' && (a.sourceType === 'webhook' ||
-    (a.sourceType === undefined && a.channel === 'primary' && /^Webhook · \S/.test(a.name ?? '')));
+  return a?.kind === 'host' && (
+    a.sourceType === 'webhook' ||
+    a.sourceType === 'google-workspace-rule' ||
+    (a.sourceType === undefined && a.channel === 'primary' && /^Webhook · \S/.test(a.name ?? ''))
+  );
 }
 
 /**
