@@ -124,11 +124,26 @@ export function assertMcpSafeAgentState(agentState) {
 
 /** Fail-closed guard verifying the outgoing provider request carries zero tool definitions. */
 export function assertMcpSafeProviderRequest(request) {
-  if (request && Array.isArray(request.tools) && request.tools.length > 0) {
+  if (!request || typeof request !== 'object') return;
+  if (Array.isArray(request.tools) && request.tools.length > 0) {
     throw errWithCode(
       'MCP safe tool policy violation: provider request contains tools',
       'FORBIDDEN',
     );
+  }
+  if (Array.isArray(request.messages)) {
+    for (const message of request.messages) {
+      if (
+        message?.role === 'system' &&
+        Array.isArray(message.toolsAdded) &&
+        message.toolsAdded.length > 0
+      ) {
+        throw errWithCode(
+          'MCP safe tool policy violation: provider request contains system toolsAdded',
+          'FORBIDDEN',
+        );
+      }
+    }
   }
 }
 
