@@ -1,11 +1,11 @@
 // Center-hosted Streamable HTTP MCP transport over Fastify.
 //
 // Uses the official @modelcontextprotocol/sdk Server + WebStandardStreamableHTTPServerTransport
-// in stateless JSON-response mode (POST only; GET/DELETE return 405).
+// in stateless JSON-response mode (POST only; authenticated GET/DELETE/etc. return 405).
 //
 // Security invariants:
 // - Executes MCP handlers and operations ONLY after `authenticate` succeeds.
-// - Auth failures return HTTP 401/403 (never JSON-RPC 200).
+// - Auth failures on POST and unsupported methods return HTTP 401/403 (never JSON-RPC 200).
 // - Origin validation allows absent Origin (server-to-server HTTPS clients such as Gemini)
 //   and explicitly configured HTTPS origins (publicUrl + allowedOrigins); never trusts Host.
 // - Explicit routes on /mcp and /mcp/* prevent static SPA index.html fallback.
@@ -28,7 +28,7 @@ export const DEFAULT_RATE_LIMIT_MAX = 60;
 export const DEFAULT_RATE_LIMIT_WINDOW_MS = 60_000;
 
 const DEFAULT_SERVER_INFO = Object.freeze({ name: 'pibot-center', version: '0.1.0' });
-const UNSUPPORTED_BODY_METHODS = Object.freeze(['GET', 'DELETE', 'PUT', 'PATCH', 'OPTIONS']);
+const UNSUPPORTED_METHODS = Object.freeze(['GET', 'HEAD', 'DELETE', 'PUT', 'PATCH', 'OPTIONS']);
 const MAX_TOOLS_PER_ACTOR = 256;
 const MAX_TOOL_DESCRIPTION_CHARS = 4096;
 const MAX_JSON_DEPTH = 20;
@@ -85,6 +85,7 @@ const SAFE_TOOL_ERROR_CODES = new Map([
   ['TIMEOUT', 'Operation timed out'],
   ['CALL_TIMEOUT', 'Operation timed out'],
   ['PAYLOAD_TOO_LARGE', 'Payload too large'],
+  ['RESPONSE_TOO_LARGE', 'Response exceeds size limit'],
   ['UNSUPPORTED_TARGET', 'Unsupported target'],
   ['DEVICE_OFFLINE', 'Device offline'],
   ['CENTER_OFFLINE', 'Center offline'],
@@ -158,7 +159,7 @@ export function scrubSecrets(text) {
   return text
     .replace(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g, '[redacted-key]')
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{4,}/gi, 'Bearer [redacted]')
-    .replace(/\b(?:pboauth|pbpair)_[A-Za-z0-9_-]{8,}/g, '[redacted-token]')
+    .replace(/\b(?:pboauth|pbpair|pbmcp)_[A-Za-z0-9_-]{8,}/g, '[redacted-token]')
     .replace(/\bya29\.[A-Za-z0-9._-]{10,}/g, '[redacted-token]')
     .replace(/\b1\/\/[A-Za-z0-9._-]{10,}/g, '[redacted-token]')
     .replace(/\bGOCSPX-[A-Za-z0-9._-]{6,}/g, '[redacted-secret]')
@@ -211,28 +212,42 @@ function isJsonContentType(contentTypeHeader) {
 
 function acceptsJson(acceptHeader) {
   if (acceptHeader === undefined) return true;
-  const value = singleHeader(acceptHeader);
+  const value = Array.isArray(acceptHeader)
+    ? acceptHeader.filter((item) => typeof item === 'string').join(',')
+    : typeof acceptHeader === 'string'
+      ? acceptHeader
+      : undefined;
   if (value === undefined) return false;
   if (value.trim() === '') return true;
-  const ranges = value.split(',');
-  for (const rawRange of ranges) {
+
+  let jsonQ = null;
+  let appWildcardQ = null;
+  let anyWildcardQ = null;
+
+  for (const rawRange of value.split(',')) {
     const parts = rawRange.trim().toLowerCase().split(';').map((part) => part.trim());
     const mediaType = parts[0];
     if (!mediaType) continue;
     let q = 1;
     for (let i = 1; i < parts.length; i += 1) {
-      const match = /^q=([0-9.]+)$/.exec(parts[i]);
+      const match = /^q=([0-9]+(?:\.[0-9]+)?)$/.exec(parts[i]);
       if (match) {
         q = Number(match[1]);
         break;
       }
     }
-    if (!Number.isFinite(q) || q <= 0) continue;
-    if (mediaType === 'application/json' || mediaType === 'application/*' || mediaType === '*/*') {
-      return true;
+    if (!Number.isFinite(q) || q < 0 || q > 1) continue;
+    if (mediaType === 'application/json') {
+      jsonQ = jsonQ === null ? q : Math.max(jsonQ, q);
+    } else if (mediaType === 'application/*') {
+      appWildcardQ = appWildcardQ === null ? q : Math.max(appWildcardQ, q);
+    } else if (mediaType === '*/*') {
+      anyWildcardQ = anyWildcardQ === null ? q : Math.max(anyWildcardQ, q);
     }
   }
-  return false;
+
+  const effectiveQ = jsonQ ?? appWildcardQ ?? anyWildcardQ ?? 0;
+  return effectiveQ > 0;
 }
 
 function withinJsonLimits(root, maxDepth, maxNodes) {
@@ -349,42 +364,6 @@ function truncateTextToJsonByteBudget(text, maxJsonBytes) {
   return best;
 }
 
-function isCallToolResultEnvelope(value) {
-  return isPlainObject(value)
-    && Array.isArray(value.content)
-    && value.content.every((block) => isPlainObject(block) && typeof block.type === 'string');
-}
-
-function sanitizeContentBlocks(blocks, maxTotalJsonBytes) {
-  const result = [];
-  let remaining = Math.max(0, maxTotalJsonBytes);
-  const blockOverhead = 32;
-
-  for (const block of blocks) {
-    if (remaining <= blockOverhead) {
-      if (result.length === 0) {
-        result.push({ type: 'text', text: truncateTextToJsonByteBudget('[truncated]', maxTotalJsonBytes) });
-      }
-      break;
-    }
-    let text;
-    if (block.type === 'text' && typeof block.text === 'string') {
-      text = scrubSecrets(block.text);
-    } else if (block.type === 'resource' && isPlainObject(block.resource) && typeof block.resource.text === 'string') {
-      text = scrubSecrets(block.resource.text);
-    } else if (block.type === 'image' || block.type === 'audio' || block.type === 'resource') {
-      text = `[${block.type} payload omitted]`;
-    } else {
-      text = JSON.stringify(sanitizeOutputValue(block));
-    }
-    const bounded = truncateTextToJsonByteBudget(text, remaining - blockOverhead);
-    result.push({ type: 'text', text: bounded });
-    remaining -= Buffer.byteLength(JSON.stringify(bounded), 'utf8') + blockOverhead;
-  }
-
-  return result.length > 0 ? result : [{ type: 'text', text: '' }];
-}
-
 function formatToolResult(rawResult, maxToolJsonBytes) {
   const textBudget = Math.max(32, maxToolJsonBytes);
   if (rawResult === undefined || rawResult === null) {
@@ -395,22 +374,8 @@ function formatToolResult(rawResult, maxToolJsonBytes) {
       content: [{ type: 'text', text: truncateTextToJsonByteBudget(scrubSecrets(rawResult), textBudget) }],
     };
   }
-  if (isCallToolResultEnvelope(rawResult)) {
-    const out = {
-      content: sanitizeContentBlocks(rawResult.content, textBudget),
-      ...(rawResult.isError === true ? { isError: true } : {}),
-    };
-    if (isPlainObject(rawResult.structuredContent)) {
-      const safeStructured = sanitizeOutputValue(rawResult.structuredContent);
-      const candidate = { ...out, structuredContent: safeStructured };
-      if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') <= textBudget) {
-        out.structuredContent = safeStructured;
-      }
-    }
-    return out;
-  }
   const safeValue = sanitizeOutputValue(rawResult);
-  const serialized = JSON.stringify(safeValue);
+  const serialized = JSON.stringify(safeValue) ?? '';
   return {
     content: [{ type: 'text', text: truncateTextToJsonByteBudget(serialized, textBudget) }],
   };
@@ -420,12 +385,7 @@ function formatToolError(err) {
   const rawCode = typeof err?.code === 'string' ? err.code : '';
   const mappedMessage = SAFE_TOOL_ERROR_CODES.get(rawCode);
   const code = mappedMessage ? rawCode : 'TOOL_EXECUTION_FAILED';
-  let message = mappedMessage || 'Tool execution failed';
-  if (typeof err?.publicMessage === 'string' && err.publicMessage.trim()) {
-    message = scrubSecrets(err.publicMessage.replace(/[\r\n\x00-\x1f\x7f]+/g, ' ').trim()).slice(0, 256);
-  } else if (err?.expose === true && typeof err?.message === 'string' && err.message.trim()) {
-    message = scrubSecrets(err.message.replace(/[\r\n\x00-\x1f\x7f]+/g, ' ').trim()).slice(0, 256);
-  }
+  const message = mappedMessage || 'Tool execution failed';
   return {
     isError: true,
     content: [{ type: 'text', text: JSON.stringify({ error: { code, message } }) }],
@@ -456,8 +416,8 @@ function normalizeOperationList(rawOperations) {
     if (!VALID_TOOL_NAME.test(name) || byName.has(name)) {
       throw new Error('Invalid or duplicate operation name');
     }
-    const destructiveHint = op.destructive === true;
-    const readOnlyHint = !destructiveHint && op.readOnly === true;
+    const readOnlyHint = op.readOnly === true && op.destructive !== true;
+    const destructiveHint = readOnlyHint ? false : op.destructive !== false;
     const description = typeof op.description === 'string'
       ? scrubSecrets(op.description).slice(0, MAX_TOOL_DESCRIPTION_CHARS)
       : '';
@@ -541,6 +501,9 @@ function setSecurityHeaders(reply) {
 
 function sendHttpError(reply, statusCode, code, message) {
   setSecurityHeaders(reply);
+  if (reply.request?.method === 'HEAD') {
+    return reply.code(statusCode).send();
+  }
   return reply.code(statusCode).type('application/json').send({
     error: { code, message },
   });
@@ -549,49 +512,75 @@ function sendHttpError(reply, statusCode, code, message) {
 function sanitizeWwwAuthenticate(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
-  if (!trimmed || trimmed.length > 512 || /[\r\n\x00-\x1f\x7f]/.test(trimmed)) return null;
+  if (!trimmed || trimmed.length > 2048 || /[\r\n\x00-\x1f\x7f]/.test(trimmed)) return null;
   return trimmed;
 }
 
+function hasAuthorizationHeader(req) {
+  const raw = req?.headers?.authorization;
+  if (typeof raw === 'string') return raw.trim().length > 0;
+  if (Array.isArray(raw)) return raw.some((item) => typeof item === 'string' && item.trim().length > 0);
+  return false;
+}
+
+function buildDefaultWwwAuthenticate(resourceMetadataUrl, { error } = {}) {
+  const parts = [`resource_metadata="${resourceMetadataUrl}"`];
+  if (error) {
+    parts.push(`error="${error}"`);
+  }
+  return `Bearer ${parts.join(', ')}`;
+}
+
+function applyWwwAuthenticate(reply, candidate, fallback) {
+  if (reply.getHeader('www-authenticate')) return;
+  const headerValue = sanitizeWwwAuthenticate(candidate) || fallback;
+  if (headerValue) {
+    reply.header('WWW-Authenticate', headerValue);
+  }
+}
+
 async function runAuthenticate(authenticate, req, reply, resourceMetadataUrl) {
-  const defaultWwwAuth = `Bearer resource_metadata="${resourceMetadataUrl}"`;
+  const default401WwwAuth = buildDefaultWwwAuthenticate(
+    resourceMetadataUrl,
+    hasAuthorizationHeader(req) ? { error: 'invalid_token' } : {},
+  );
+  const default403ScopeWwwAuth = buildDefaultWwwAuthenticate(resourceMetadataUrl, {
+    error: 'insufficient_scope',
+  });
+
+  function sendAuthFailure({ statusCode, code, wwwAuthenticate } = {}) {
+    const numericStatus = Number(statusCode);
+    const normalizedCode = typeof code === 'string' ? code : '';
+
+    if (numericStatus === 403 || normalizedCode === 'FORBIDDEN' || normalizedCode === 'INSUFFICIENT_SCOPE') {
+      const isInsufficientScope = normalizedCode === 'INSUFFICIENT_SCOPE';
+      applyWwwAuthenticate(reply, wwwAuthenticate, isInsufficientScope ? default403ScopeWwwAuth : null);
+      sendHttpError(reply, 403, isInsufficientScope ? 'INSUFFICIENT_SCOPE' : 'FORBIDDEN', 'Forbidden');
+      return { ok: false };
+    }
+    if (numericStatus >= 500 && numericStatus <= 599) {
+      sendHttpError(reply, 500, 'INTERNAL_ERROR', 'Internal error');
+      return { ok: false };
+    }
+    applyWwwAuthenticate(reply, wwwAuthenticate, default401WwwAuth);
+    sendHttpError(reply, 401, 'UNAUTHENTICATED', 'Authentication required');
+    return { ok: false };
+  }
+
   try {
     const actor = await authenticate(req, reply);
     if (reply.sent || reply.raw.headersSent || reply.raw.writableEnded) {
       return { ok: false };
     }
     if (!actor || (typeof actor === 'object' && (actor.authenticated === false || actor.ok === false))) {
-      if (!reply.getHeader('www-authenticate')) {
-        reply.header('WWW-Authenticate', defaultWwwAuth);
-      }
-      sendHttpError(reply, 401, 'UNAUTHENTICATED', 'Authentication required');
-      return { ok: false };
+      return sendAuthFailure(typeof actor === 'object' && actor !== null ? actor : undefined);
     }
     return { ok: true, actor };
   } catch (error) {
     if (reply.sent || reply.raw.headersSent || reply.raw.writableEnded) {
       return { ok: false };
     }
-    const statusCode = Number(error?.statusCode);
-    const code = typeof error?.code === 'string' ? error.code : '';
-    const customWwwAuth = sanitizeWwwAuthenticate(error?.wwwAuthenticate);
-
-    if (statusCode === 403 || code === 'FORBIDDEN' || code === 'INSUFFICIENT_SCOPE') {
-      if (customWwwAuth && !reply.getHeader('www-authenticate')) {
-        reply.header('WWW-Authenticate', customWwwAuth);
-      }
-      sendHttpError(reply, 403, code === 'INSUFFICIENT_SCOPE' ? 'INSUFFICIENT_SCOPE' : 'FORBIDDEN', 'Forbidden');
-      return { ok: false };
-    }
-    if (statusCode >= 500 && statusCode <= 599) {
-      sendHttpError(reply, 500, 'INTERNAL_ERROR', 'Internal error');
-      return { ok: false };
-    }
-    if (!reply.getHeader('www-authenticate')) {
-      reply.header('WWW-Authenticate', customWwwAuth || defaultWwwAuth);
-    }
-    sendHttpError(reply, 401, 'UNAUTHENTICATED', 'Authentication required');
-    return { ok: false };
+    return sendAuthFailure(error);
   }
 }
 
@@ -612,15 +601,9 @@ function sendOversizedResponseError(reply, requestBody, maxResponseBytes) {
 
 function createStatelessMcpServer({ actor, operations, serverInfo, maxResponseBytes, requestIdBytes }) {
   const mcpServer = new Server(serverInfo, { capabilities: { tools: {} } });
-  let cachedCatalogPromise = null;
 
-  function loadCatalog() {
-    if (!cachedCatalogPromise) {
-      cachedCatalogPromise = Promise.resolve()
-        .then(() => operations.list(actor))
-        .then((rawList) => normalizeOperationList(rawList));
-    }
-    return cachedCatalogPromise;
+  async function loadCatalog() {
+    return normalizeOperationList(await operations.list(actor));
   }
 
   mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -721,7 +704,7 @@ export function registerMcp(app, options) {
 
   const mcpPath = normalizeMcpPath(path);
   const canonicalEndpointUrl = new URL(mcpPath, publicOrigin).href;
-  const resourceMetadataUrl = new URL('/.well-known/oauth-protected-resource', publicOrigin).href;
+  const resourceMetadataUrl = new URL(`/.well-known/oauth-protected-resource${mcpPath}`, publicOrigin).href;
 
   const allowedOriginSet = new Set([publicOrigin.origin]);
   if (allowedOrigins !== undefined && allowedOrigins !== null) {
@@ -777,7 +760,7 @@ export function registerMcp(app, options) {
       }
       return sendHttpError(reply, 500, 'INTERNAL_ERROR', 'Internal error');
     },
-    preParsing: async (req, reply, payload) => {
+    onRequest: async (req, reply) => {
       setSecurityHeaders(reply);
 
       if (!isAllowedOrigin(req.headers.origin, allowedOriginSet)) {
@@ -819,15 +802,13 @@ export function registerMcp(app, options) {
           return sendHttpError(reply, 413, 'PAYLOAD_TOO_LARGE', 'Request payload too large');
         }
       }
-
-      return payload;
     },
     handler: async (req, reply) => {
       setSecurityHeaders(reply);
 
       const actor = actorByRequest.get(req);
       if (!actor) {
-        reply.header('WWW-Authenticate', `Bearer resource_metadata="${resourceMetadataUrl}"`);
+        reply.header('WWW-Authenticate', buildDefaultWwwAuthenticate(resourceMetadataUrl));
         return sendHttpError(reply, 401, 'UNAUTHENTICATED', 'Authentication required');
       }
 
@@ -850,6 +831,12 @@ export function registerMcp(app, options) {
         return sendHttpError(reply, 413, 'PAYLOAD_TOO_LARGE', 'Request payload too large');
       }
 
+      const rawProtocolVersion = req.headers['mcp-protocol-version'];
+      const protocolVersion = singleHeader(rawProtocolVersion);
+      if (rawProtocolVersion !== undefined && (protocolVersion === undefined || !/^[\x21-\x7e]{1,64}$/.test(protocolVersion))) {
+        return sendHttpError(reply, 400, 'INVALID_ARGUMENT', 'Invalid Mcp-Protocol-Version header');
+      }
+
       const requestIdBytes = sanitizedBody.id === undefined
         ? 4
         : Buffer.byteLength(JSON.stringify(sanitizedBody.id), 'utf8');
@@ -869,7 +856,6 @@ export function registerMcp(app, options) {
       const webHeaders = new Headers();
       webHeaders.set('content-type', 'application/json');
       webHeaders.set('accept', 'application/json, text/event-stream');
-      const protocolVersion = singleHeader(req.headers['mcp-protocol-version']);
       if (protocolVersion) {
         webHeaders.set('mcp-protocol-version', protocolVersion);
       }
@@ -906,6 +892,8 @@ export function registerMcp(app, options) {
     },
   });
 
+  const stripHeadPayload = async (req, _reply, payload) => (req.method === 'HEAD' ? null : payload);
+
   const handleUnsupportedMethod = async (req, reply) => {
     setSecurityHeaders(reply);
     if (!isAllowedOrigin(req.headers.origin, allowedOriginSet)) {
@@ -916,45 +904,37 @@ export function registerMcp(app, options) {
       reply.header('Retry-After', String(ipLimit.retryAfterSeconds));
       return sendHttpError(reply, 429, 'RATE_LIMITED', 'Rate limit exceeded');
     }
-    reply.header('Allow', 'POST');
-    if (req.method === 'HEAD') {
-      return reply.code(405).send();
+    const authResult = await runAuthenticate(authenticate, req, reply, resourceMetadataUrl);
+    if (!authResult.ok) {
+      return reply;
     }
+    const actorLimit = actorLimiter.consume(deriveActorRateKey(authResult.actor, req));
+    if (!actorLimit.allowed) {
+      reply.header('Retry-After', String(actorLimit.retryAfterSeconds));
+      return sendHttpError(reply, 429, 'RATE_LIMITED', 'Rate limit exceeded');
+    }
+    reply.header('Allow', 'POST');
     return sendHttpError(reply, 405, 'METHOD_NOT_ALLOWED', 'Method not allowed; use POST');
   };
 
   app.route({
-    method: [...UNSUPPORTED_BODY_METHODS],
+    method: [...UNSUPPORTED_METHODS],
     url: mcpPath,
-    exposeHeadRoutes: false,
-    handler: handleUnsupportedMethod,
+    exposeHeadRoute: false,
+    onRequest: handleUnsupportedMethod,
+    onSend: stripHeadPayload,
+    handler: async (_req, reply) => reply,
   });
 
-  app.route({
-    method: 'HEAD',
-    url: mcpPath,
-    handler: handleUnsupportedMethod,
-  });
-
-  const handleSubpathNotFound = async (req, reply) => {
-    setSecurityHeaders(reply);
-    if (req.method === 'HEAD') {
-      return reply.code(404).send();
-    }
-    return sendHttpError(reply, 404, 'NOT_FOUND', 'Not found');
-  };
+  const handleSubpathNotFound = async (_req, reply) => sendHttpError(reply, 404, 'NOT_FOUND', 'Not found');
 
   app.route({
-    method: ['POST', ...UNSUPPORTED_BODY_METHODS],
+    method: ['POST', ...UNSUPPORTED_METHODS],
     url: `${mcpPath}/*`,
-    exposeHeadRoutes: false,
-    handler: handleSubpathNotFound,
-  });
-
-  app.route({
-    method: 'HEAD',
-    url: `${mcpPath}/*`,
-    handler: handleSubpathNotFound,
+    exposeHeadRoute: false,
+    onRequest: handleSubpathNotFound,
+    onSend: stripHeadPayload,
+    handler: async (_req, reply) => reply,
   });
 
   return {

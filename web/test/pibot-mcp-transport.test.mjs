@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { registerMcpOAuth } from '../../center-server/mcp/oauth.js';
 import { registerMcp } from '../../center-server/mcp/server.js';
 
 const centerRequire = createRequire(new URL('../../center-server/package.json', import.meta.url));
@@ -50,6 +51,18 @@ function sampleOperations(calls = []) {
           inputSchema: { type: 'object', properties: {} },
           readOnly: true,
           destructive: true,
+        },
+        {
+          name: 'unspecified_write_tool',
+          description: 'Fails safe when destructive is omitted on a non-readOnly tool',
+          inputSchema: { type: 'object', properties: {} },
+          readOnly: false,
+        },
+        {
+          name: 'readonly_default_tool',
+          description: 'Read-only tool with destructive omitted',
+          inputSchema: { type: 'object', properties: {} },
+          readOnly: true,
         },
       ];
       if (actor?.role === 'admin') {
@@ -178,6 +191,14 @@ test('Streamable HTTP stateless JSON/POST supports initialize, notification, too
       readOnlyHint: false,
       destructiveHint: true,
     });
+    assert.deepEqual(byName.get('unspecified_write_tool')?.annotations, {
+      readOnlyHint: false,
+      destructiveHint: true,
+    });
+    assert.deepEqual(byName.get('readonly_default_tool')?.annotations, {
+      readOnlyHint: true,
+      destructiveHint: false,
+    });
 
     const callRes = await mcpPost(app, {
       jsonrpc: '2.0',
@@ -204,6 +225,7 @@ test('Fastify + official MCP SDK Client and StreamableHTTPClientTransport intero
   const { app, calls } = await createMcpApp();
   try {
     const baseUrl = await app.listen({ host: '127.0.0.1', port: 0 });
+    const transportErrors = [];
     const transport = new StreamableHTTPClientTransport(new URL('/mcp', baseUrl), {
       requestInit: {
         headers: {
@@ -211,11 +233,18 @@ test('Fastify + official MCP SDK Client and StreamableHTTPClientTransport intero
         },
       },
     });
+    transport.onerror = (err) => {
+      transportErrors.push(err);
+    };
     const client = new Client({ name: 'pibot-sdk-interop-test', version: '1.0.0' });
     try {
       await client.connect(transport);
       const listed = await client.listTools();
-      assert.ok(listed.tools.some((tool) => tool.name === 'bots_list'));
+      const botsList = listed.tools.find((tool) => tool.name === 'bots_list');
+      const botDelete = listed.tools.find((tool) => tool.name === 'bot_delete');
+      assert.ok(botsList);
+      assert.deepEqual(botsList.annotations, { readOnlyHint: true, destructiveHint: false });
+      assert.deepEqual(botDelete?.annotations, { readOnlyHint: false, destructiveHint: true });
 
       const called = await client.callTool({
         name: 'note_append',
@@ -225,35 +254,58 @@ test('Fastify + official MCP SDK Client and StreamableHTTPClientTransport intero
       assert.deepEqual(JSON.parse(called.content[0].text), { appended: 'hello over real http' });
       assert.equal(calls.length, 1);
       assert.equal(calls[0].actor.id, 'actor-admin');
+
+      // Allow the SDK client's background GET /mcp SSE probe (expecting 405) to settle cleanly.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.deepEqual(transportErrors, []);
     } finally {
       await client.close();
+    }
+
+    // Unauthenticated official SDK client must fail over real HTTP without executing operations.
+    const unauthTransport = new StreamableHTTPClientTransport(new URL('/mcp', baseUrl));
+    const unauthClient = new Client({ name: 'pibot-sdk-unauth-test', version: '1.0.0' });
+    try {
+      await assert.rejects(() => unauthClient.connect(unauthTransport));
+      assert.equal(calls.length, 1);
+    } finally {
+      await unauthClient.close();
     }
   } finally {
     await app.close();
   }
 });
 
-test('GET and DELETE return explicit 405 with Allow: POST and never hit static SPA fallback', async () => {
+test('Unsupported methods enforce auth before 405 Allow: POST, register without duplicate HEAD routes, and never hit static SPA fallback', async () => {
   const webRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-mcp-spa-'));
   fs.writeFileSync(path.join(webRoot, 'index.html'), '<!doctype html><html><body>SPA SHELL</body></html>');
 
   let listInvocations = 0;
   let callInvocations = 0;
+  const operations = {
+    list() {
+      listInvocations += 1;
+      return [];
+    },
+    async call() {
+      callInvocations += 1;
+      return {};
+    },
+  };
+
+  // Must also register cleanly when global exposeHeadRoutes is explicitly false.
+  const noHeadApp = Fastify({ logger: false, exposeHeadRoutes: false });
+  registerMcp(noHeadApp, { publicUrl: PUBLIC_URL, authenticate: defaultAuthenticate, operations });
+  await noHeadApp.ready();
+  await noHeadApp.close();
+
+  // Default Fastify has exposeHeadRoutes: true; registering /mcp and /mcp/* must not throw FST_ERR_DUPLICATED_ROUTE.
   const app = Fastify({ logger: false });
   try {
     registerMcp(app, {
       publicUrl: PUBLIC_URL,
       authenticate: defaultAuthenticate,
-      operations: {
-        list() {
-          listInvocations += 1;
-          return [];
-        },
-        async call() {
-          callInvocations += 1;
-          return {};
-        },
-      },
+      operations,
     });
     await app.register(fastifyStatic, { root: webRoot, prefix: '/' });
     app.setNotFoundHandler((req, reply) => {
@@ -262,29 +314,75 @@ test('GET and DELETE return explicit 405 with Allow: POST and never hit static S
     });
     await app.ready();
 
-    const getRes = await app.inject({ method: 'GET', url: '/mcp', headers: { authorization: VALID_BEARER } });
-    assert.equal(getRes.statusCode, 405);
-    assert.equal(getRes.headers.allow, 'POST');
-    assert.equal(getRes.headers['cache-control'], 'no-store');
-    assert.doesNotMatch(getRes.body, /SPA SHELL/);
+    // Authenticated GET (including Accept: text/event-stream used by MCP SDK) -> 405 Allow: POST
+    for (const accept of [undefined, 'text/event-stream', 'text/html', 'application/json']) {
+      const headers = { authorization: VALID_BEARER, ...(accept ? { accept } : {}) };
+      const getRes = await app.inject({ method: 'GET', url: '/mcp', headers });
+      assert.equal(getRes.statusCode, 405, `expected 405 for authenticated GET Accept=${accept}`);
+      assert.equal(getRes.headers.allow, 'POST');
+      assert.equal(getRes.headers['cache-control'], 'no-store');
+      assert.doesNotMatch(getRes.body, /SPA SHELL/);
+    }
 
-    const unauthGetRes = await app.inject({ method: 'GET', url: '/mcp' });
-    assert.equal(unauthGetRes.statusCode, 405);
-    assert.equal(unauthGetRes.headers.allow, 'POST');
-    assert.doesNotMatch(unauthGetRes.body, /SPA SHELL/);
-
+    // Authenticated DELETE / PUT (even with non-JSON body) / PATCH / OPTIONS / HEAD -> 405 Allow: POST
     const delRes = await app.inject({ method: 'DELETE', url: '/mcp', headers: { authorization: VALID_BEARER } });
     assert.equal(delRes.statusCode, 405);
     assert.equal(delRes.headers.allow, 'POST');
 
-    const headRes = await app.inject({ method: 'HEAD', url: '/mcp' });
+    const putRes = await app.inject({
+      method: 'PUT',
+      url: '/mcp',
+      headers: { authorization: VALID_BEARER, 'content-type': 'text/plain' },
+      payload: 'not-json',
+    });
+    assert.equal(putRes.statusCode, 405);
+    assert.equal(putRes.headers.allow, 'POST');
+
+    const headRes = await app.inject({ method: 'HEAD', url: '/mcp', headers: { authorization: VALID_BEARER } });
     assert.equal(headRes.statusCode, 405);
     assert.equal(headRes.headers.allow, 'POST');
     assert.equal(headRes.body, '');
 
+    // Unauthenticated GET / DELETE / HEAD / PUT / PATCH / OPTIONS -> 401 with soft WWW-Authenticate (never 405 or SPA)
+    for (const method of ['GET', 'DELETE', 'HEAD', 'PUT', 'PATCH', 'OPTIONS']) {
+      const unauthRes = await app.inject({ method, url: '/mcp' });
+      assert.equal(unauthRes.statusCode, 401, `expected 401 for unauthenticated ${method} /mcp`);
+      assert.match(
+        unauthRes.headers['www-authenticate'],
+        /Bearer resource_metadata="https:\/\/center\.example\.com\/\.well-known\/oauth-protected-resource\/mcp"/,
+      );
+      assert.doesNotMatch(unauthRes.headers['www-authenticate'], /error="invalid_token"/);
+      assert.doesNotMatch(unauthRes.body, /SPA SHELL/);
+      if (method === 'HEAD') {
+        assert.equal(unauthRes.body, '');
+      }
+    }
+
+    // Invalid Bearer token on GET -> 401 with hard invalid_token challenge
+    const badTokenGetRes = await app.inject({
+      method: 'GET',
+      url: '/mcp',
+      headers: { authorization: 'Bearer wrong-token', accept: 'text/event-stream' },
+    });
+    assert.equal(badTokenGetRes.statusCode, 401);
+    assert.match(badTokenGetRes.headers['www-authenticate'], /error="invalid_token"/);
+
+    // /mcp/* subpaths (including /mcp/ and non-JSON POST) -> 404, never SPA fallback or 415
     const subpathRes = await app.inject({ method: 'GET', url: '/mcp/subpath' });
     assert.equal(subpathRes.statusCode, 404);
     assert.doesNotMatch(subpathRes.body, /SPA SHELL/);
+
+    const subpathPostRes = await app.inject({
+      method: 'POST',
+      url: '/mcp/subpath',
+      headers: { 'content-type': 'text/plain' },
+      payload: 'raw',
+    });
+    assert.equal(subpathPostRes.statusCode, 404);
+
+    const subpathHeadRes = await app.inject({ method: 'HEAD', url: '/mcp/subpath' });
+    assert.equal(subpathHeadRes.statusCode, 404);
+    assert.equal(subpathHeadRes.body, '');
 
     const trailingSlashRes = await app.inject({ method: 'GET', url: '/mcp/' });
     assert.equal(trailingSlashRes.statusCode, 404);
@@ -316,21 +414,36 @@ test('Authentication failure returns HTTP 401/403 (never JSON-RPC 200) and never
     },
   };
 
-  // Case 1: authenticate returns null
+  // Case 1: authenticate returns null (soft vs hard WWW-Authenticate header)
   const app1 = Fastify({ logger: false });
   registerMcp(app1, { publicUrl: PUBLIC_URL, authenticate: () => null, operations });
   await app1.ready();
   try {
-    const res = await app1.inject({
+    const softRes = await app1.inject({
       method: 'POST',
       url: '/mcp',
       payload: { jsonrpc: '2.0', id: 10, method: 'tools/list', params: {} },
     });
-    assert.equal(res.statusCode, 401);
-    assert.match(res.headers['www-authenticate'], /Bearer resource_metadata="https:\/\/center\.example\.com\/\.well-known\/oauth-protected-resource"/);
-    const body = res.json();
-    assert.equal(body.jsonrpc, undefined);
-    assert.equal(body.error.code, 'UNAUTHENTICATED');
+    assert.equal(softRes.statusCode, 401);
+    assert.equal(
+      softRes.headers['www-authenticate'],
+      'Bearer resource_metadata="https://center.example.com/.well-known/oauth-protected-resource/mcp"',
+    );
+    const softBody = softRes.json();
+    assert.equal(softBody.jsonrpc, undefined);
+    assert.equal(softBody.error.code, 'UNAUTHENTICATED');
+
+    const hardRes = await app1.inject({
+      method: 'POST',
+      url: '/mcp',
+      headers: { authorization: 'Bearer invalid-token' },
+      payload: { jsonrpc: '2.0', id: 101, method: 'tools/list', params: {} },
+    });
+    assert.equal(hardRes.statusCode, 401);
+    assert.equal(
+      hardRes.headers['www-authenticate'],
+      'Bearer resource_metadata="https://center.example.com/.well-known/oauth-protected-resource/mcp", error="invalid_token"',
+    );
   } finally {
     await app1.close();
   }
@@ -359,7 +472,7 @@ test('Authentication failure returns HTTP 401/403 (never JSON-RPC 200) and never
     await app2.close();
   }
 
-  // Case 3: authenticate rejects with 403 insufficient scope
+  // Case 3: authenticate rejects with 403 insufficient scope (thrown and soft-returned)
   const app3 = Fastify({ logger: false });
   registerMcp(app3, {
     publicUrl: PUBLIC_URL,
@@ -378,9 +491,41 @@ test('Authentication failure returns HTTP 401/403 (never JSON-RPC 200) and never
     assert.equal(res.statusCode, 403);
     assert.equal(res.json().jsonrpc, undefined);
     assert.equal(res.json().error.code, 'INSUFFICIENT_SCOPE');
+    assert.equal(
+      res.headers['www-authenticate'],
+      'Bearer resource_metadata="https://center.example.com/.well-known/oauth-protected-resource/mcp", error="insufficient_scope"',
+    );
     assert.doesNotMatch(res.body, /internal detail/);
   } finally {
     await app3.close();
+  }
+
+  const app3b = Fastify({ logger: false });
+  registerMcp(app3b, {
+    publicUrl: PUBLIC_URL,
+    authenticate: async () => ({
+      ok: false,
+      statusCode: 403,
+      code: 'INSUFFICIENT_SCOPE',
+      wwwAuthenticate: 'Bearer resource_metadata="https://center.example.com/.well-known/oauth-protected-resource/mcp", error="insufficient_scope", scope="pibot:bots:write"',
+    }),
+    operations,
+  });
+  await app3b.ready();
+  try {
+    const res = await app3b.inject({
+      method: 'POST',
+      url: '/mcp',
+      payload: { jsonrpc: '2.0', id: 121, method: 'tools/list', params: {} },
+    });
+    assert.equal(res.statusCode, 403);
+    assert.equal(res.json().error.code, 'INSUFFICIENT_SCOPE');
+    assert.equal(
+      res.headers['www-authenticate'],
+      'Bearer resource_metadata="https://center.example.com/.well-known/oauth-protected-resource/mcp", error="insufficient_scope", scope="pibot:bots:write"',
+    );
+  } finally {
+    await app3b.close();
   }
 
   // Case 4: authenticate sends reply directly
@@ -404,6 +549,54 @@ test('Authentication failure returns HTTP 401/403 (never JSON-RPC 200) and never
     assert.equal(res.json().error.code, 'INVALID_TOKEN');
   } finally {
     await app4.close();
+  }
+
+  // Case 5: real registerMcpOAuth + registerMcp preserves soft/hard OAuth WWW-Authenticate headers
+  const app5 = Fastify({ logger: false });
+  const mcpOAuth = registerMcpOAuth(app5, {
+    publicUrl: PUBLIC_URL,
+    clients: [],
+    supportedScopes: ['pibot:bots:read', 'pibot:messages:write'],
+  });
+  registerMcp(app5, {
+    publicUrl: PUBLIC_URL,
+    authenticate: mcpOAuth.authenticate,
+    operations,
+  });
+  await app5.ready();
+  try {
+    for (const method of ['POST', 'GET']) {
+      const softOAuthRes = await app5.inject({
+        method,
+        url: '/mcp',
+        ...(method === 'POST' ? { payload: { jsonrpc: '2.0', id: 14, method: 'tools/list', params: {} } } : {}),
+      });
+      assert.equal(softOAuthRes.statusCode, 401);
+      assert.equal(softOAuthRes.headers['cache-control'], 'no-store');
+      assert.equal(softOAuthRes.headers['vary'], 'Origin');
+      const softWwwAuth = softOAuthRes.headers['www-authenticate'];
+      assert.match(softWwwAuth, /resource_metadata="https:\/\/center\.example\.com\/\.well-known\/oauth-protected-resource\/mcp"/);
+      assert.match(softWwwAuth, /scope="pibot:bots:read pibot:messages:write"/);
+      assert.doesNotMatch(softWwwAuth, /error="invalid_token"/);
+    }
+
+    for (const method of ['POST', 'GET', 'HEAD']) {
+      const hardOAuthRes = await app5.inject({
+        method,
+        url: '/mcp',
+        headers: { authorization: 'Bearer pbmcp_at_invalidtokenvalue00000000000000000000000' },
+        ...(method === 'POST' ? { payload: { jsonrpc: '2.0', id: 15, method: 'tools/list', params: {} } } : {}),
+      });
+      assert.equal(hardOAuthRes.statusCode, 401);
+      const hardWwwAuth = hardOAuthRes.headers['www-authenticate'];
+      assert.match(hardWwwAuth, /resource_metadata="https:\/\/center\.example\.com\/\.well-known\/oauth-protected-resource\/mcp"/);
+      assert.match(hardWwwAuth, /error="invalid_token"/);
+      if (method === 'HEAD') {
+        assert.equal(hardOAuthRes.body, '');
+      }
+    }
+  } finally {
+    await app5.close();
   }
 
   assert.equal(listInvocations, 0);
@@ -529,13 +722,42 @@ test('Enforces bounded requests, content-type/accept checks, and rejects batch o
     });
     assert.equal(badCtRes.statusCode, 415);
 
-    // Non-JSON Accept -> 406
-    const badAcceptRes = await mcpPost(
+    // Non-JSON Accept (HTML, SSE-only, or JSON explicitly q=0) -> 406
+    for (const badAccept of ['text/html', 'text/event-stream', 'application/json;q=0, */*;q=1']) {
+      const badAcceptRes = await mcpPost(
+        app,
+        { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+        { accept: badAccept },
+      );
+      assert.equal(badAcceptRes.statusCode, 406, `expected 406 for Accept=${badAccept}`);
+    }
+
+    // Absent Accept or wildcard Accept -> 200 JSON (Gemini / simple HTTPS clients)
+    const noAcceptRes = await app.inject({
+      method: 'POST',
+      url: '/mcp',
+      headers: {
+        authorization: VALID_BEARER,
+        'content-type': 'application/json',
+      },
+      payload: { jsonrpc: '2.0', id: 21, method: 'tools/list', params: {} },
+    });
+    assert.equal(noAcceptRes.statusCode, 200);
+
+    const wildcardAcceptRes = await mcpPost(
       app,
-      { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
-      { accept: 'text/html' },
+      { jsonrpc: '2.0', id: 22, method: 'tools/list', params: {} },
+      { accept: '*/*' },
     );
-    assert.equal(badAcceptRes.statusCode, 406);
+    assert.equal(wildcardAcceptRes.statusCode, 200);
+
+    // Invalid Mcp-Protocol-Version header -> 400
+    const badProtoRes = await mcpPost(
+      app,
+      { jsonrpc: '2.0', id: 23, method: 'tools/list', params: {} },
+      { 'mcp-protocol-version': '' },
+    );
+    assert.equal(badProtoRes.statusCode, 400);
 
     // Invalid JSON syntax -> 400 safe error
     const badJsonRes = await app.inject({
@@ -616,6 +838,20 @@ test('Bounds responses, scrubs secrets, hides internal errors, and isolates per-
             readOnly: true,
             destructive: false,
           },
+          {
+            name: 'domain_content_tool',
+            description: 'Returns plain domain object with a content field',
+            inputSchema: { type: 'object', properties: {} },
+            readOnly: true,
+            destructive: false,
+          },
+          {
+            name: 'oversized_error_tool',
+            description: 'Throws RESPONSE_TOO_LARGE',
+            inputSchema: { type: 'object', properties: {} },
+            readOnly: true,
+            destructive: false,
+          },
         ];
         if (actor.role === 'admin') {
           list.push({
@@ -638,17 +874,26 @@ test('Bounds responses, scrubs secrets, hides internal errors, and isolates per-
             ok: true,
             deviceToken: 'secret-device-token-value',
             ownerPasswordHash: 'scrypt$0123456789abcdef0123456789abcdef$' + 'a'.repeat(128),
-            note: 'Auth header was Bearer pboauth_supersecret1234567890 and token ya29.abcdefghijklmnop',
+            note: 'Auth header was Bearer pboauth_supersecret1234567890, pbmcp_at_secretmcpaccess1234567890, and token ya29.abcdefghijklmnop',
           };
         }
         if (name === 'failing_tool') {
-          throw new Error('SQLITE_CANTOPEN /var/lib/pibot/center.db with Bearer pboauth_secret999999999999');
+          throw Object.assign(
+            new Error('SQLITE_CANTOPEN /var/lib/pibot/center.db with Bearer pboauth_secret999999999999'),
+            { expose: true, publicMessage: 'leaked publicMessage detail' },
+          );
         }
         if (name === 'safe_code_fail_tool') {
           throw Object.assign(new Error('internal row id 42 leaked'), { code: 'NOT_FOUND' });
         }
         if (name === 'echo_args') {
           return { keys: Object.keys(args) };
+        }
+        if (name === 'domain_content_tool') {
+          return { content: [{ type: 'text', text: 'raw-domain-item' }], extra: 42 };
+        }
+        if (name === 'oversized_error_tool') {
+          throw Object.assign(new Error('internal size detail'), { code: 'RESPONSE_TOO_LARGE' });
         }
         return { ok: true };
       },
@@ -680,10 +925,11 @@ test('Bounds responses, scrubs secrets, hides internal errors, and isolates per-
     assert.equal(leakyRes.statusCode, 200);
     assert.doesNotMatch(leakyRes.body, /secret-device-token-value/);
     assert.doesNotMatch(leakyRes.body, /pboauth_supersecret/);
+    assert.doesNotMatch(leakyRes.body, /pbmcp_at_secretmcpaccess/);
     assert.doesNotMatch(leakyRes.body, /ya29\.abcdefghijklmnop/);
     assert.doesNotMatch(leakyRes.body, /scrypt\$/);
 
-    // 3. Internal thrown error never exposed
+    // 3. Internal thrown error never exposed (even if expose/publicMessage are set)
     const failRes = await mcpPost(app, {
       jsonrpc: '2.0',
       id: 3,
@@ -699,8 +945,9 @@ test('Bounds responses, scrubs secrets, hides internal errors, and isolates per-
     assert.doesNotMatch(failRes.body, /SQLITE_CANTOPEN/);
     assert.doesNotMatch(failRes.body, /center\.db/);
     assert.doesNotMatch(failRes.body, /pboauth_secret/);
+    assert.doesNotMatch(failRes.body, /leaked publicMessage/);
 
-    // 4. Known safe code exposes code + generic message, never internal message
+    // 4. Known safe codes expose code + generic message, never internal message
     const safeCodeRes = await mcpPost(app, {
       jsonrpc: '2.0',
       id: 4,
@@ -714,6 +961,30 @@ test('Bounds responses, scrubs secrets, hides internal errors, and isolates per-
       error: { code: 'NOT_FOUND', message: 'Not found' },
     });
     assert.doesNotMatch(safeCodeRes.body, /row id 42/);
+
+    const oversizedErrRes = await mcpPost(app, {
+      jsonrpc: '2.0',
+      id: 41,
+      method: 'tools/call',
+      params: { name: 'oversized_error_tool', arguments: {} },
+    });
+    assert.equal(oversizedErrRes.statusCode, 200);
+    assert.deepEqual(JSON.parse(oversizedErrRes.json().result.content[0].text), {
+      error: { code: 'RESPONSE_TOO_LARGE', message: 'Response exceeds size limit' },
+    });
+
+    // Domain object containing a `content` array is serialized intact (not treated as an MCP envelope)
+    const domainContentRes = await mcpPost(app, {
+      jsonrpc: '2.0',
+      id: 42,
+      method: 'tools/call',
+      params: { name: 'domain_content_tool', arguments: {} },
+    });
+    assert.equal(domainContentRes.statusCode, 200);
+    assert.deepEqual(JSON.parse(domainContentRes.json().result.content[0].text), {
+      content: [{ type: 'text', text: 'raw-domain-item' }],
+      extra: 42,
+    });
 
     // 5. Prototype pollution payloads are rejected/stripped before reaching operations.call
     const protoRejectRes = await app.inject({
