@@ -6,11 +6,25 @@ import { assertPublicCredentialId } from './auth.js';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 
-export function openCenterExecution({ store, packages, oauth }) {
+export function openCenterExecution({ store, packages, oauth, builtinAdapters = new Map() }) {
   const current = new Map();
   const entries = new Set();
   const active = new Map();
   const activating = new Set();
+  const builtins = builtinAdapters instanceof Map ? builtinAdapters : new Map(Object.entries(builtinAdapters || {}));
+
+  async function useBuiltin(deviceId, installationId, botId, callerExtra, work) {
+    const adapter = builtins.get(installationId);
+    if (!adapter) fail('FORBIDDEN', 'Capability unavailable');
+    if (typeof botId !== 'string' || !botId || !store.listDeviceBots(deviceId).some(bot => bot.botId === botId)) {
+      fail('FORBIDDEN', 'Capability unavailable');
+    }
+    const client = await adapter.getClient();
+    const run = () => work(client);
+    return typeof adapter.runWithCaller === 'function'
+      ? adapter.runWithCaller({ deviceId, botId, ...(callerExtra || {}) }, run)
+      : run();
+  }
 
   function retire(entry) {
     entry.retired = true;
@@ -119,7 +133,15 @@ export function openCenterExecution({ store, packages, oauth }) {
   }
 
   return {
+    hasBuiltin(id) {
+      return builtins.has(id);
+    },
     listTools(deviceId, id, input) {
+      if (builtins.has(id)) {
+        return useBuiltin(deviceId, id, input?.botId, null, async client => ({
+          tools: (await client.listTools()).map(({ name, description, inputSchema }) => ({ name, ...(description ? { description } : {}), inputSchema })),
+        }));
+      }
       return use(deviceId, id, input.botId, async client => ({ tools: (await client.listTools()).map(({ name, description, inputSchema }) => ({ name, ...(description ? { description } : {}), inputSchema })) }));
     },
     /** Independent global validation: uses the global config only, never a Bot binding; one-shot connection. */
@@ -132,6 +154,12 @@ export function openCenterExecution({ store, packages, oauth }) {
       finally { await client.close(); }
     },
     callTool(deviceId, id, input) {
+      if (builtins.has(id)) {
+        return useBuiltin(deviceId, id, input?.botId, { callId: input?.callId }, async client => {
+          if (!(await client.listTools()).some(tool => tool.name === input.name)) fail('FORBIDDEN', 'Tool unavailable');
+          return client.callTool(input.name, input.args);
+        });
+      }
       return use(deviceId, id, input.botId, async client => {
         if (!(await client.listTools()).some(tool => tool.name === input.name)) fail('FORBIDDEN', 'Tool unavailable');
         return client.callTool(input.name, input.args);
@@ -144,6 +172,9 @@ export function openCenterExecution({ store, packages, oauth }) {
     },
     async close() {
       const closing = [...entries].map(retire);
+      for (const adapter of builtins.values()) {
+        if (typeof adapter?.close === 'function') closing.push(adapter.close().catch(() => {}));
+      }
       await Promise.all(closing);
     },
   };

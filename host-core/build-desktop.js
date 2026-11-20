@@ -61,7 +61,7 @@ const HOST_RUNTIME_DIR = path.join(DESKTOP_BUILD, 'host-runtime');
 // so the lockfile's relative file:../build/pi-main/*.tgz specs resolve unchanged.
 const HOST_RUNTIME_DEPS_DIR = path.join(CACHE_DIR, 'host-runtime-deps');
 const HOST_RUNTIME_LAYOUT_VERSION = 1;
-const HOST_CORE_RUNTIME_SUBDIRS = ['capabilities', 'managed-install', 'plugins', 'third-party'];
+const HOST_CORE_RUNTIME_SUBDIRS = ['bot-browser', 'capabilities', 'google-setup', 'managed-install', 'plugins', 'third-party'];
 // Builtin skill resources are runtime data the host loads at request time, so
 // they stage under their own extension list (docs only, no code).
 const HOST_CORE_BUILTIN_SKILLS_DIR = 'builtin-skills';

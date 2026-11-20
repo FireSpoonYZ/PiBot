@@ -7,8 +7,14 @@ import Ajv from 'ajv';
 import deepmerge from 'deepmerge';
 import { assertPublicCredentialId } from '../auth.js';
 import { webhookStore } from './webhooks.js';
+import { googleRulesStore } from './google-rules.js';
 import { pairingStore } from './pairing.js';
 import { createTaskStore } from './tasks.js';
+import {
+  GOOGLE_WORKSPACE_DISPLAY_NAME,
+  GOOGLE_WORKSPACE_INSTALLATION_ID,
+  GOOGLE_WORKSPACE_VERSION,
+} from '../google-workspace/constants.js';
 
 function error(code, message, details) {
   const result = new Error(message);
@@ -418,6 +424,22 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
         })),
       };
     });
+    // Shared built-in Center-hosted Google Workspace MCP: visible to every existing
+    // and future Bot without per-Bot bindings, toggles, or user grants in Host snapshots.
+    if (!capabilities.some((capability) => capability.installationId === GOOGLE_WORKSPACE_INSTALLATION_ID)) {
+      capabilities.push({
+        installationId: GOOGLE_WORKSPACE_INSTALLATION_ID,
+        kind: 'mcp',
+        target: 'center',
+        targetVersion: GOOGLE_WORKSPACE_VERSION,
+        enabled: true,
+        authorized: true,
+        revision: 1,
+        effectiveConfig: {},
+        credentialRefs: [],
+        credentialRevisions: {},
+      });
+    }
     return { botId: bot.botId, cwd: bot.cwd, model, capabilities };
   }
   /** Single-Bot turn context: same content shape as a device snapshot, plus the secret-free set checksum. */
@@ -827,12 +849,17 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
             || installation.installationId;
           if (label && !names.includes(label)) names.push(label);
         }
+        if (!names.includes(GOOGLE_WORKSPACE_DISPLAY_NAME)) {
+          names.push(GOOGLE_WORKSPACE_DISPLAY_NAME);
+        }
         return names;
       };
     };
 
+    const { _delivery: googleRuleDelivery, ...googleRuleMethods } = googleRulesStore(db, transaction);
     store = {
-      ...webhookStore(db, transaction),
+      ...webhookStore(db, transaction, { extraDelivery: googleRuleDelivery }),
+      ...googleRuleMethods,
       ...pairingStore(db, transaction),
       ...createTaskStore({ db, transaction, listBotsSnapshot, listBotCapabilityDirectory }),
       getInstallationId() {
@@ -1359,6 +1386,9 @@ export function openCenterStore({ dataRoot, encryptionKey }) {
       },
       putBotCapability(deviceId, botId, id, input) {
         assertId(deviceId); assertId(botId); assertObject(input); assertObject(input.overrides);
+        if (id === GOOGLE_WORKSPACE_INSTALLATION_ID) {
+          throw error('FORBIDDEN', 'Google Workspace MCP is shared across all Bots and cannot be toggled per Bot');
+        }
         if (typeof input.enabled !== 'boolean') throw error('INVALID_ARGUMENT', 'enabled must be boolean');
         return transaction(() => {
           const installation = requireInstallation(id);

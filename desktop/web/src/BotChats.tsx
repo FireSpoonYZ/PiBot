@@ -13,6 +13,7 @@ import {
   Clock,
   Cpu,
   FileText,
+  Globe,
   History,
   LockKeyhole,
   MessageSquare,
@@ -82,7 +83,19 @@ import type {
 import { isTargetOfflineError, toError } from './api';
 import { useDrafts } from './drafts';
 import type { DraftSnapshot } from './drafts';
-import { readToolPresentation, type QuestionnaireSubmitPayload, type VaultUnlockSubmitPayload } from '../../../web/src/ToolPresentation';
+import {
+  readToolPresentation,
+  type GoogleChatCardContext,
+  type QuestionnaireSubmitPayload,
+  type VaultUnlockSubmitPayload,
+} from '../../../web/src/ToolPresentation';
+import BotBrowserPanel from '../../../web/src/bot-browser/BotBrowserPanel';
+import { GoogleSetupWizard } from '../../../web/src/google/GoogleSetupWizard';
+import { openExternalUrl } from '../../../web/src/center-admin/openExternalUrl';
+import {
+  createBrowserControlRequest,
+  createGoogleSetupControlRequest,
+} from '../../../web/src/google/googleClient';
 import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
 import { BotBoard } from '../../../web/src/BotBoard';
 import { botBoardKey, useBotBoard, useMarkViewedBoardResult, type BotBoardTarget } from '../../../web/src/useBotBoard';
@@ -347,7 +360,7 @@ export interface BotChatsArchiveBridge {
   unarchiveBot: (bot: BotDirectoryEntry) => Promise<void>;
   deleteBot: (bot: BotDirectoryEntry) => Promise<void>;
   conversationName: (target: SendRecordsTarget) => string | undefined;
-  openConversation: (target: SendRecordsTarget) => void;
+  openConversation: (target: SendRecordsTarget, panel?: 'google-setup') => void;
 }
 
 export interface SendRecordsTarget {
@@ -1865,7 +1878,7 @@ function BotProfile({ api, centerApi, bot, page, onSaved }: {
 }
 
 type InspectorDetail = BotSettingsTab | 'management';
-type InspectorTab = 'profile' | InspectorDetail | 'raw' | 'shower';
+type InspectorTab = 'profile' | InspectorDetail | 'raw' | 'shower' | 'browser' | 'google-setup';
 
 interface InspectorPage {
   id: InspectorDetail;
@@ -2090,6 +2103,89 @@ function PrimaryChatPane({
     }
     return api.call(identity, 'vaultControl', { action: 'respondUnlock', ...input });
   }, [api, identity]);
+
+  // Bot 内置浏览器与 Google 建项向导控制：volatile RPC 绑定当前目标设备与 Bot，不经持久 outbox。
+  const callBrowser = useMemo(
+    () => createBrowserControlRequest(api, identity, bot.botId),
+    [api, identity, bot.botId],
+  );
+  const callGoogleSetup = useMemo(
+    () => createGoogleSetupControlRequest(api, identity, bot.botId),
+    [api, identity, bot.botId],
+  );
+  const selectGoogleAccount = useCallback(
+    async (selection: {
+      email: string;
+      requestId?: string;
+      installationId?: string;
+      conversationId?: number;
+      cancelled?: boolean;
+    }) => {
+      const current = api.identity;
+      if (!current || !api.transportConnected) {
+        throw Object.assign(new Error('NOT_CONNECTED: 没有活动连接身份'), { code: 'NOT_CONNECTED' });
+      }
+      if (selection.requestId && selection.installationId) {
+        const actionInput: Record<string, string | number | boolean> = {
+          requestId: selection.requestId,
+          account: selection.email,
+          cancelled: Boolean(selection.cancelled),
+        };
+        if (selection.conversationId !== undefined) {
+          actionInput.conversationId = selection.conversationId;
+        }
+        return api.call(current, 'callCapabilityAction', {
+          installationId: selection.installationId,
+          action: 'selectGoogleAccount',
+          request: {
+            requestId: crypto.randomUUID(),
+            deviceId: current.targetDeviceId,
+            botId: bot.botId,
+            input: actionInput,
+          },
+        });
+      }
+      if (!selection.cancelled && selection.email) {
+        const reply = t(`请使用 Google 账号 ${selection.email} 继续处理刚才的请求。`, `Please continue using Google account ${selection.email}.`);
+        drafts.editText(drafts.text ? `${drafts.text}\n${reply}` : reply);
+      }
+      return { selected: selection.email };
+    },
+    [api, bot.botId, drafts, t],
+  );
+  const googleContext = useMemo<GoogleChatCardContext>(
+    () => ({
+      api: centerApi,
+      identity: centerApi.identity ?? identity,
+      deviceId: bot.deviceId,
+      botId: bot.botId,
+      botName: bot.role,
+      hostLabel: deviceName,
+      hostPlatform: devicePlatform,
+      isLocalAndroid: false,
+      connected: online,
+      callGoogleSetup,
+      callBrowser,
+      onOpenBrowser: () => setInspectorTab('browser'),
+      onOpenCapabilities: () => setInspectorTab('capabilities'),
+      onOpenCenterAdmin: onOpenCenterAdmin ? () => onOpenCenterAdmin('google') : undefined,
+      onSelectGoogleAccount: selectGoogleAccount,
+    }),
+    [
+      centerApi,
+      identity,
+      bot.deviceId,
+      bot.botId,
+      bot.role,
+      deviceName,
+      devicePlatform,
+      online,
+      callGoogleSetup,
+      callBrowser,
+      onOpenCenterAdmin,
+      selectGoogleAccount,
+    ],
+  );
   const toolScopeKey = JSON.stringify([
     identity?.profileId, identity?.targetDeviceId, identity?.kind, identity?.generation,
     bot.botId, bot.primaryConversationId, online,
@@ -3768,9 +3864,21 @@ function PrimaryChatPane({
   const inspectorPage = inspectorPages.find(page => page.id === inspectorTab);
   const isProfilePage = inspectorTab === 'profile';
   const isManagementPage = inspectorTab === 'management';
+  const pendingBrowserTakeover = online && !isArchived && live?.busy && !liveEnded && !liveError
+    ? (live.tools
+        ?.map(tool => (tool.status === 'running' ? readToolPresentation(tool.presentation) : null))
+        .find(pres => pres?.kind === 'google-browser-takeover') ?? null)
+    : null;
   const settingsTab = inspectorPage && inspectorPage.id !== 'management' ? inspectorPage.id : null;
   const inspectorTitle = inspectorPage?.label ??
-    (isProfilePage ? '智能体资料' : inspectorTab === 'raw' ? '诊断与原始记录' : '虚拟桌面');
+    (isProfilePage
+      ? '智能体资料'
+      : inspectorTab === 'raw'
+        ? '诊断与原始记录'
+        : inspectorTab === 'google-setup' ? t('Google 配置向导', 'Google setup wizard')
+        : inspectorTab === 'browser'
+          ? 'Bot 内置浏览器'
+          : '虚拟桌面');
   const deleteConfirmation = confirmDelete && !isPrimary ? (
     <div className="confirm-delete-banner" role="alert" ref={deleteConfirmationRef} tabIndex={isManagementPage ? -1 : undefined}>
       <span>确定要永久删除智能体「{bot.role}」吗？此操作不可撤销。</span>
@@ -3894,6 +4002,14 @@ function PrimaryChatPane({
             aria-label="会话内搜索"
           >
             <Search size={17} />
+          </button>
+          <button
+            type="button"
+            className={`secondary-button chat-action-pill${inspectorTab === 'browser' ? ' active' : ''}`}
+            onClick={() => openInspector('browser')}
+            title="Bot 内置浏览器（仅本 Bot 独立会话，与 Google API 授权隔离）"
+          >
+            <Globe size={15} /> {pendingBrowserTakeover ? '浏览器 · 待接管' : '浏览器'}
           </button>
           <button
             type="button"
@@ -4037,6 +4153,7 @@ function PrimaryChatPane({
         disabled={!online}
         onSubmitQuestionnaire={submitQuestionnaire}
         onSubmitVaultUnlock={submitVaultUnlock}
+        googleContext={googleContext}
         attachmentFetcher={attachmentFetcher}
         loading={online && rawLoading}
         error={online ? (rawError || liveError) : null}
@@ -4453,6 +4570,8 @@ function PrimaryChatPane({
                   tab={settingsTab}
                   open
                   onOpenCenterAdmin={onOpenCenterAdmin}
+                  onOpenBrowser={() => setInspectorTab('browser')}
+                  callGoogleSetup={callGoogleSetup}
                   onModelSaved={(cfg) => {
                     onBotUpdated({ botId: bot.botId, modelRef: cfg.overrides.modelRef ?? null });
                   }}
@@ -4478,6 +4597,37 @@ function PrimaryChatPane({
                   connected={api.transportConnected && pageActive}
                   onClose={() => setInspectorTab(null)}
                 />
+              ) : null}
+              {inspectorTab === 'google-setup' && (
+                <GoogleSetupWizard
+                  key={`google-setup:${sess}:${bot.botId}`}
+                  api={api} identity={identity} botId={bot.botId} botName={bot.role}
+                  isLocalAndroid={devicePlatform?.toLowerCase() === 'android'}
+                  autoStart callGoogleSetup={callGoogleSetup}
+                  onOpenBrowser={() => setInspectorTab('browser')}
+                  onOpenCenterAdmin={() => onOpenCenterAdmin?.('google')}
+                  onClose={() => setInspectorTab(null)}
+                />
+              )}
+              {inspectorTab === 'browser' ? (
+                <div className="gws-desktop-browser-pane">
+                  <BotBrowserPanel
+                    key={`browser:${sess}:${bot.botId}`}
+                    botId={bot.botId}
+                    deviceId={bot.deviceId}
+                    botName={bot.role}
+                    hostLabel={deviceName}
+                    mode="sidebar"
+                    connected={online && pageActive}
+                    request={callBrowser}
+                    onSwitchToExternalGuide={(url) => {
+                      void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
+                      if (url) void openExternalUrl(url).catch(() => {});
+                    }}
+                    onOpenSystemGoogleAuth={() => setInspectorTab('capabilities')}
+                    onClose={() => setInspectorTab(null)}
+                  />
+                </div>
               ) : null}
             </div>
           </Dialog.Content>
@@ -5573,8 +5723,9 @@ export function BotChats({
       group.identity.profileId === identity.profileId && group.identity.kind === identity.kind)?.title;
   }, [identity, profileReady, bots, groupItems]);
 
-  const openConversation = useCallback((target: SendRecordsTarget) => {
+  const openConversation = useCallback((target: SendRecordsTarget, panel?: 'google-setup') => {
     if (!conversationName(target)) return;
+    if (panel && target.botId) setInspectorRequest({ deviceId: target.deviceId, botId: target.botId, tab: panel, seq: Date.now() });
     setDeviceFilter('all');
     setQuery('');
     setRoomSettingsOpen(false);

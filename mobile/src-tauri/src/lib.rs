@@ -42,6 +42,8 @@ const ALLOWED_METHODS: &[&str] = &[
   "stop",
   "openSystemSettings",
   "openCenter",
+  // 最小受限外部系统浏览器打开器（仅受信 Center HTTPS origin / Google 授权与控制台页）
+  "openExternalAuth",
   "reconnect",
   "clientLaunchTarget",
   "hide",

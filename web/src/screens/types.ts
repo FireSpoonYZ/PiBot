@@ -39,7 +39,7 @@ export function useIsCoarsePointer(): boolean {
 
 export type HubSettingsPage = 'overview' | 'connection' | 'devices' | 'manual' | 'updates' | 'permissions';
 export type MobileHubScreen = HubScreen | 'bot-skills' | 'settings-center-admin';
-export type CenterAdminTab = 'providers' | 'capabilities' | 'devices' | 'vault' | 'ops';
+export type { CenterAdminTab } from '../center-admin/types';
 
 export type MobileBotItem = UnifiedBotItem & {
   resolvedModel?: BotModelDisplayInput['resolvedModel'];

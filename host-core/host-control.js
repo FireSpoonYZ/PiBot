@@ -91,7 +91,15 @@ export function createHostControlReceiver({ deviceId, execute, send }) {
     active.set(rec.routeId, rec);
     let promise;
     try {
-      promise = execute(deviceId, frame.method, frame.params, { signal: rec.controller.signal });
+      const caller =
+        typeof frame.fromDeviceId === 'string' && frame.fromDeviceId.trim() !== ''
+          ? {
+              transport: 'relay',
+              clientId: `relay:${frame.fromDeviceId.trim()}`,
+              fromDeviceId: frame.fromDeviceId.trim(),
+            }
+          : { transport: 'relay', clientId: 'relay:unknown' };
+      promise = execute(deviceId, frame.method, frame.params, { signal: rec.controller.signal, caller });
     } catch (err) {
       finishErr(rec, err);
       return;

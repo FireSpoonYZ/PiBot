@@ -19,6 +19,10 @@ import { messageError } from './message-protocol.js';
 import { parseModelRef } from './runtime-models.js';
 import { countRequestTokens, countMessageTokens } from './request-context.js';
 import { declareLearningSources, readLearningSource } from './learning-sources.js';
+import {
+  createGoogleWorkspacePrivacy,
+  GOOGLE_WORKSPACE_PRIVACY_BLOCKED_CODE,
+} from './google-workspace-privacy.js';
 
 const REPLAY_ENTRY_KIND = 'learning.replay';
 const INPUT_ENTRY_KIND = 'learning.review-input';
@@ -57,6 +61,7 @@ const SAFE_ERROR_CODES = new Set([
   'REQUEST_CONFLICT', 'MODEL_REQUIRED', 'MODEL_NOT_FOUND', 'RUNTIME_BUSY',
   'NOT_CONNECTED', 'CONTEXT_LIMIT', 'INTERNAL', 'EXTENSION_DISABLED',
   'EXTENSION_READ_ONLY', 'FORBIDDEN', 'VALIDATION_FAILED', 'CANCELLED',
+  GOOGLE_WORKSPACE_PRIVACY_BLOCKED_CODE,
 ]);
 
 function isPlainObject(value) {
@@ -263,7 +268,9 @@ export function createBotLearning({
   host, getHarness, models, getBotModels, getCenterClient, plugins, schedules,
   getUsableModelRefs, registry, context, openPrimaryConversation, dropEnvFor,
   isBotIdle, onLearningStateChange = null, idleSettleMs = DEFAULT_IDLE_SETTLE_MS,
+  dataPrivacy = null,
 }) {
+  const privacy = dataPrivacy ?? createGoogleWorkspacePrivacy({ getHarness, context });
   let closing = false;
   let suspended = false;
   const settleMs = Number.isFinite(idleSettleMs) && idleSettleMs >= 0 ? Math.floor(idleSettleMs) : DEFAULT_IDLE_SETTLE_MS;
@@ -384,7 +391,11 @@ export function createBotLearning({
       if (entries.length > SNAPSHOT_MAX_ENTRIES) entries.splice(0, entries.length - SNAPSHOT_MAX_ENTRIES);
       if (entries.length === 0 && incremental) return null;
     }
-    const throughEntryId = entries[entries.length - 1]?.id ?? 0;
+    const filtered = conversation
+      ? await privacy.filterConversationEntriesForLearning(conversation.id, entries, { callContext: context })
+      : { cleanEntries: entries, isolatedCount: 0, tainted: false, taintStartEntryId: null };
+    const cleanEntries = filtered.cleanEntries;
+    const throughEntryId = cleanEntries[cleanEntries.length - 1]?.id ?? 0;
     const workDelta = pendingWorkDeltas.get(bot.botId) ?? null;
     if (incremental && !allowUnchangedCursor && throughEntryId <= cursor && !workDelta) {
       return null;
@@ -393,7 +404,7 @@ export function createBotLearning({
     // 每条新增 assistant 消息 = 一次真实模型迭代；每条新增主用户轮或 Scope 工作触发 = 一次轮次。
     let iterations = 0;
     let turns = 0;
-    for (const entry of entries) {
+    for (const entry of cleanEntries) {
       if (entry.kind === RESET_ENTRY_KIND) {
         messages.length = 0;
         iterations = 0;
@@ -455,7 +466,13 @@ export function createBotLearning({
     } catch { /* SOUL 缺失不阻断快照 */ }
     // iterations / turns 随返回而非塞进 snapshot：Center 白名单会丢弃未知快照字段，
     // 自动 start 须把它们放在 action 顶层。
-    return { snapshot, iterations, turns };
+    return {
+      snapshot,
+      iterations,
+      turns,
+      isolated: filtered.tainted === true,
+      isolatedCount: filtered.isolatedCount ?? 0,
+    };
   }
 
   /** 上报提交对应的可信发送者 kind（user|host|null）：只认 entry.data 注入的归属，绝不信 wire 字段。 */
@@ -1076,11 +1093,25 @@ export function createBotLearning({
   function noteCompletedWorkTurn(botId, info = {}) {
     if (closing || !botId) return;
     enqueueReport(botId, async () => {
-      if (info.unified === false && (typeof info.submissionId === 'number' || typeof info.submissionId === 'string')) {
+      let rec = null;
+      if (typeof info.submissionId === 'number' || typeof info.submissionId === 'string') {
         try {
           const harness = getHarness();
           const sub = await harness.submission(info.submissionId, context);
-          const rec = sub ? await sub.status(context) : null;
+          rec = sub ? await sub.status(context) : null;
+          if (typeof rec?.conversationId === 'number') {
+            const throughEntryId = typeof rec.answer === 'number' ? rec.answer : undefined;
+            if (await privacy.isConversationTainted(rec.conversationId, { throughEntryId, callContext: context })) {
+              return;
+            }
+          }
+        } catch {
+          // 读取失败时下方按既有逻辑回退；主会话路径仍由 buildSnapshot 复核隔离。
+        }
+      }
+      if (info.unified === false && (typeof info.submissionId === 'number' || typeof info.submissionId === 'string')) {
+        try {
+          const harness = getHarness();
           let addedIters = 1;
           if (typeof rec?.answer === 'number') {
             const answerEntry = await harness.commit((tx) => tx.entry(rec.answer), context);
@@ -1230,6 +1261,18 @@ export function createBotLearning({
       start.snapshot = { ...input.snapshot, memory, memoryEnabled: memory.enabled };
     } else {
       const built = await buildSnapshot(bot, { incremental: false });
+      if (
+        built?.isolated === true &&
+        built.snapshot.messages.length === 0 &&
+        (action === 'review' || (action === 'learn' && sources.length === 0))
+      ) {
+        return {
+          status: 'skipped',
+          skipped: true,
+          reason: 'google_workspace_isolated',
+          driven: false,
+        };
+      }
       if (built) start.snapshot = built.snapshot;
     }
     if (suspended) throw messageError('RUNTIME_BUSY', 'host is preparing an update');

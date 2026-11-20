@@ -11,6 +11,8 @@ import { registerPairingRoutes } from './pairing.js';
 import { registerAntigravityRoutes } from './antigravity-routes.js';
 import { ANTIGRAVITY_PROVIDER_ID } from '../center-contract/antigravity.js';
 import { registerTaskRoutes } from './tasks.js';
+import { registerGoogleWorkspaceRoutes } from './google-workspace/routes.js';
+import { GOOGLE_TOOL_CALL_BODY_LIMIT } from './google-workspace/constants.js';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 const required = (value, name) => value ?? fail('NOT_FOUND', `${name} not found`);
@@ -170,7 +172,7 @@ function assertConfigCredentials(schema, value) {
 }
 
 
-export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault }) {
+export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault, google }) {
   const streams = new Map();
   function notify(deviceId, event = 'config-changed') {
     for (const stream of streams.get(deviceId) || []) {
@@ -193,7 +195,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   };
   const owner = [requireOwner];
   const mutation = [requireOwner, csrfUnlessOAuth];
-  const route = (method, path, handler, write = false) => app.route({ method, url: path, onRequest: write ? mutation : owner, handler });
+  const route = (method, path, handler, write = false, bodyLimit) => app.route({ method, url: path, onRequest: write ? mutation : owner, handler, ...(bodyLimit !== undefined ? { bodyLimit } : {}) });
   const presentDevice = (device) => {
     if (!device) return device;
     const reg = bridge.registry.get(device.deviceId);
@@ -607,7 +609,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return store.listBotCapabilities(deviceId, botId);
   });
   route('GET', '/api/devices/:deviceId/bots/:botId/capabilities/:id', req => store.getBotCapability(req.params.deviceId, req.params.botId, req.params.id));
-  route('PUT', '/api/devices/:deviceId/bots/:botId/capabilities/:id', async req => { const { deviceId, botId, id } = req.params; const body = object(req.body); assertConfigCredentials(store.getInstallationConfig(id).configSchema, body.overrides); const result = store.putBotCapability(deviceId, botId, id, body); try { await packages.reconcileDevice(deviceId); } finally { notify(deviceId); } return result; }, true);
+  route('PUT', '/api/devices/:deviceId/bots/:botId/capabilities/:id', async req => { const { deviceId, botId, id } = req.params; if (execution.hasBuiltin?.(id)) fail('FORBIDDEN', 'Shared built-in capability cannot be toggled per Bot'); const body = object(req.body); assertConfigCredentials(store.getInstallationConfig(id).configSchema, body.overrides); const result = store.putBotCapability(deviceId, botId, id, body); try { await packages.reconcileDevice(deviceId); } finally { notify(deviceId); } return result; }, true);
   function actions(id) {
     const installation = required(store.getInstallation(id), 'Installation');
     const version = required(store.getPackageVersion(installation.packageId, installation.targetVersion), 'Package version');
@@ -627,6 +629,10 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   route('POST', '/api/installations/:id/actions/:action', req => action(req.params.id, req.params.action, req.body), true);
   route('POST', '/api/installations/:id/tools/list', async req => {
     const body = object(req.body); const deviceId = text(body.deviceId, 'deviceId'); const botId = text(body.botId, 'botId');
+    if (execution.hasBuiltin?.(req.params.id)) {
+      if (!store.listDeviceBots(deviceId).some(bot => bot.botId === botId)) fail('FORBIDDEN', 'Capability unavailable');
+      return execution.listTools(deviceId, req.params.id, { botId });
+    }
     const installation = required(store.getInstallation(req.params.id), 'Installation');
     if (installation.kind !== 'mcp' || !store.isActive(installation) || !store.listDeviceBots(deviceId).some(bot => bot.botId === botId) || !store.getBotCapability(deviceId, botId, req.params.id).enabled) fail('FORBIDDEN', 'Capability unavailable');
     if (installation.target === 'center') return execution.listTools(deviceId, req.params.id, { botId });
@@ -878,9 +884,11 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     qrChallenges.delete(challengeId);
     req.session.regenerate();
     req.session.set('owner', true);
+    req.session.set('ownerSessionId', randomBytes(16).toString('base64url'));
     return { status: 'approved', authenticated: true, csrfToken: reply.generateCsrf() };
   });
   registerWebhookRoutes(app, { store, bridge, route, host, publicUrl, notify: deviceId => notify(deviceId, 'webhook-ready') });
+  if (google) registerGoogleWorkspaceRoutes(app, { route, store, bridge, publicUrl, google });
   const taskCoordinator = registerTaskRoutes({
     route,
     host,
@@ -939,6 +947,13 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     const sinceSeq = req.query?.sinceSeq !== undefined ? Number(req.query.sinceSeq) : undefined;
     return store.getBotSync({ epoch, sinceSeq, devices: listOwnerDevices() });
   });
+  if (google?.accounts) {
+    // The setup wizard reads readiness; configuring clients and grants remains owner-only.
+    host('GET', '/api/host/google/status', (_req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      return google.accounts.status();
+    });
+  }
   host('GET', '/api/host/model-picker', modelPicker);
   host('GET', '/api/host/providers/:id/auth', async req => {
     const providerId = req.params.id;
@@ -974,6 +989,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   host('GET', '/api/host/devices/:deviceId/bots/:botId/capabilities/:id', req => store.getBotCapability(req.params.deviceId, req.params.botId, req.params.id));
   host('PUT', '/api/host/devices/:deviceId/bots/:botId/capabilities/:id', async req => {
     const { deviceId, botId, id } = req.params;
+    if (execution.hasBuiltin?.(id)) fail('FORBIDDEN', 'Shared built-in capability cannot be toggled per Bot');
     const body = object(req.body);
     assertConfigCredentials(store.getInstallationConfig(id).configSchema, body.overrides);
     const result = store.putBotCapability(deviceId, botId, id, body);
@@ -1059,6 +1075,6 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
     return reply.type('application/octet-stream').send(Buffer.from(await packages.readArtifact(req.params.artifactRef)));
   });
   host('POST', '/api/host/capabilities/:installationId/tools/list', req => execution.listTools(req.centerDevice.deviceId, req.params.installationId, object(req.body)));
-  host('POST', '/api/host/capabilities/:installationId/tools/call', req => { const body = object(req.body); text(body.callId, 'callId'); text(body.name, 'name'); object(body.args); return execution.callTool(req.centerDevice.deviceId, req.params.installationId, body); });
+  host('POST', '/api/host/capabilities/:installationId/tools/call', req => { const body = object(req.body); text(body.callId, 'callId'); text(body.name, 'name'); object(body.args); return execution.callTool(req.centerDevice.deviceId, req.params.installationId, body); }, GOOGLE_TOOL_CALL_BODY_LIMIT);
   return { notifyAll, notifyInstallation, notifyDevice: notify, close() { antigravityRoutes.close(); for (const set of streams.values()) for (const stream of set) stream.reply.end(); streams.clear(); } };
 }

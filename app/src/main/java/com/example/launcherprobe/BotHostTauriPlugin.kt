@@ -223,6 +223,7 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             "haptic" -> haptic(invoke, params)
             "openSystemSettings" -> openSystemSettings(invoke)
             "openCenter" -> openCenter(invoke, params)
+            "openExternalAuth" -> openExternalAuth(invoke, params)
             "reconnect" -> reconnect(invoke)
             "clientLaunchTarget" -> {
                 val target = (hostActivity as? TauriMainActivity)?.takeClientLaunchTarget()
@@ -391,6 +392,68 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             replyOk(invoke, JSObject())
         } catch (t: Throwable) {
             replyFailure(invoke, t)
+        }
+    }
+
+    /**
+     * 外部系统浏览器授权最小打开器：仅允许受信 Google 授权/控制台页与已配置的 Center HTTPS origin，
+     * 绝不打开任意第三方链接，绝不进入应用内 WebView，且仅允许在前台触发。
+     */
+    private fun openExternalAuth(invoke: Invoke, params: JSONObject) {
+        if (!foregroundUi()) {
+            replyInvalid(invoke, "NOT_FOREGROUND", "仅可在前台打开外部授权浏览器")
+            return
+        }
+        val rawUrl = params.optString("url", "")
+        val savedClientCenterUrl = try {
+            CenterClientCredentials(hostActivity.applicationContext).read()?.optString("url", "")
+        } catch (_: Throwable) {
+            null
+        }
+        val directValidated = try {
+            TrustedExternalOpener.validateUrl(rawUrl, savedClientCenterUrl)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+        if (directValidated != null) {
+            try {
+                TrustedExternalOpener.launch(hostActivity, directValidated)
+                replyOk(invoke, JSObject())
+            } catch (t: Throwable) {
+                replyFailure(invoke, t)
+            }
+            return
+        }
+        if (!uiReady()) {
+            replyInvalid(invoke, "INVALID_ARGS", "仅允许打开受信 Center origin 或 Google 授权/控制台页面")
+            return
+        }
+        val future = try {
+            bridge().request("centerSettings", JSONObject())
+        } catch (_: Throwable) {
+            replyInvalid(invoke, "INVALID_ARGS", "仅允许打开受信 Center origin 或 Google 授权/控制台页面")
+            return
+        }
+        future.whenComplete { result, _ ->
+            main.post {
+                if (destroyed || !foregroundUi()) {
+                    replyInvalid(invoke, "NOT_FOREGROUND", "仅可在前台打开外部授权浏览器")
+                    return@post
+                }
+                val hostCenterUrl = result?.optString("centerUrl", "")
+                val validated = try {
+                    TrustedExternalOpener.validateUrl(rawUrl, hostCenterUrl)
+                } catch (invalid: IllegalArgumentException) {
+                    replyInvalid(invoke, "INVALID_ARGS", invalid.message ?: "外部授权地址不受信任")
+                    return@post
+                }
+                try {
+                    TrustedExternalOpener.launch(hostActivity, validated)
+                    replyOk(invoke, JSObject())
+                } catch (t: Throwable) {
+                    replyFailure(invoke, t)
+                }
+            }
         }
     }
 

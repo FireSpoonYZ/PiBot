@@ -80,8 +80,8 @@ function normalizeLiveAttribution(value) {
   }
   const out = { kind: value.kind, channel: value.channel };
   if (value.sourceType !== undefined) {
-    if (value.kind !== 'host' || value.sourceType !== 'webhook') {
-      throw invalid('attribution sourceType must be webhook on a host sender');
+    if (value.kind !== 'host' || (value.sourceType !== 'webhook' && value.sourceType !== 'google-workspace-rule')) {
+      throw invalid('attribution sourceType must be webhook or google-workspace-rule on a host sender');
     }
     out.sourceType = value.sourceType;
   }

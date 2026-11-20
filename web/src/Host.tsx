@@ -63,6 +63,15 @@ import type {
 } from '../../host-core/index.js';
 import type { ShowerCall } from './ShowerPreview';
 import { BotScreenPanel } from './BotScreenPanel';
+import BotBrowserPanel from './bot-browser/BotBrowserPanel';
+import { GoogleSetupWizard } from './google/GoogleSetupWizard';
+import { openExternalUrl } from './center-admin/openExternalUrl';
+import type {
+  BotBrowserControlCall,
+  GoogleChatCardContext,
+  GoogleSetupControlCall,
+  GoogleSetupControlState,
+} from './google/types';
 import { BotBoard } from './BotBoard';
 import { botBoardKey, useBotBoard, useMarkViewedBoardResult, type BotBoardTarget } from './useBotBoard';
 import { CapabilitiesPage } from './bot-settings/CapabilitiesPage';
@@ -5417,6 +5426,160 @@ ${newer}` : draftSnapshot;
     (input: VaultUnlockSubmitPayload) => callVault({ action: 'respondUnlock', ...input }),
     [callVault],
   );
+  // Bot 内置浏览器与 Google 建项向导控制：volatile RPC 绑定当前目标 Host 与 Bot，不经持久 outbox。
+  const callHostVolatile = useCallback(
+    async (method: 'browserControl' | 'googleSetupControl', input: Record<string, unknown>) => {
+      if (!activeBot || !botPanelConnected) throw Object.assign(new Error('Host offline'), { code: 'OFFLINE' });
+      const payload = { ...input, botId: activeBot.botId };
+      if (activeBot.hostKind === 'local') {
+        if (localHostRef.current?.phase !== 'running' || localHostRef.current.deviceId !== activeBot.deviceId) {
+          throw Object.assign(new Error('Local host offline'), { code: 'OFFLINE' });
+        }
+        const env = await BotHost.call({ method, params: payload });
+        return (env?.result ?? {}) as Record<string, unknown>;
+      }
+      const api = remoteClientRef.current?.api;
+      const current = api?.identity;
+      if (
+        !api ||
+        !api.transportConnected ||
+        !current ||
+        !showerIdentity ||
+        current.profileId !== showerIdentity.profileId ||
+        current.generation !== showerIdentity.generation ||
+        current.kind !== showerIdentity.kind
+      ) {
+        throw Object.assign(new Error('Target host not connected'), { code: 'NOT_CONNECTED' });
+      }
+      const rawApi = api as unknown as {
+        call: (id: DesktopIdentity, m: string, params: Record<string, unknown>) => Promise<unknown>;
+      };
+      const res = await rawApi.call(showerIdentity, method, payload);
+      return (res ?? {}) as Record<string, unknown>;
+    },
+    [activeBot, botPanelConnected, showerIdentity],
+  );
+  const callBrowser = useCallback<BotBrowserControlCall>(
+    input => callHostVolatile('browserControl', input),
+    [callHostVolatile],
+  );
+  const callGoogleSetup = useCallback<GoogleSetupControlCall>(
+    async input => (await callHostVolatile('googleSetupControl', input)) as unknown as GoogleSetupControlState,
+    [callHostVolatile],
+  );
+  const selectGoogleAccount = useCallback(
+    async (selection: {
+      email: string;
+      requestId?: string;
+      installationId?: string;
+      conversationId?: number;
+      cancelled?: boolean;
+    }) => {
+      if (!activeBot) throw new Error(t('目标不可用，未提交', 'Target unavailable; not submitted'));
+      if (selection.requestId && selection.installationId) {
+        const actionInput: Record<string, string | number | boolean> = {
+          requestId: selection.requestId,
+          account: selection.email,
+          cancelled: Boolean(selection.cancelled),
+        };
+        if (selection.conversationId !== undefined) {
+          actionInput.conversationId = selection.conversationId;
+        }
+        if (activeBot.hostKind === 'local') {
+          const deviceId = localHost?.deviceId;
+          if (!deviceId) throw new Error(t('本机设备身份未就绪，未提交', 'Local device identity not ready'));
+          const env = await BotHost.call({
+            method: 'callCapabilityAction',
+            params: {
+              installationId: selection.installationId,
+              action: 'selectGoogleAccount',
+              request: {
+                requestId: uuid(),
+                deviceId,
+                botId: activeBot.botId,
+                input: actionInput,
+              },
+            },
+          });
+          return env?.result;
+        }
+        const api = remoteClientRef.current?.api;
+        const identity = activeBot.remoteIdentity;
+        if (!api || !identity || !remoteConnected || activeBot.online === false) {
+          throw new Error(t('目标设备离线，未提交', 'Target device offline'));
+        }
+        return api.call(identity, 'callCapabilityAction', {
+          installationId: selection.installationId,
+          action: 'selectGoogleAccount',
+          request: {
+            requestId: uuid(),
+            deviceId: identity.targetDeviceId,
+            botId: activeBot.botId,
+            input: actionInput,
+          },
+        });
+      }
+      if (!selection.cancelled && selection.email) {
+        const reply = t(`请使用 Google 账号 ${selection.email} 继续处理刚才的请求。`, `Please continue using Google account ${selection.email}.`);
+        setChatDraft(previous => previous ? `${previous}\n${reply}` : reply);
+      }
+      return { selected: selection.email };
+    },
+    [activeBot, localHost?.deviceId, remoteConnected, t],
+  );
+  const openBotBrowser = useCallback(() => {
+    if (!activeBot) return;
+    nav.push({ screen: 'bot-browser', botKey: activeBot.key });
+  }, [activeBot, nav]);
+  const mobileGoogleContext = useMemo<GoogleChatCardContext | undefined>(() => {
+    if (!activeBot) return undefined;
+    const brokerApi = remoteClientRef.current?.api ?? null;
+    const brokerIdentity = activeBot.remoteIdentity ?? remoteIdentity ?? null;
+    return {
+      api: brokerApi,
+      identity: brokerIdentity,
+      deviceId: activeBot.deviceId,
+      botId: activeBot.botId,
+      botName: activeBot.role,
+      hostLabel: activeBot.hostLabel,
+      hostPlatform: activeBot.platform,
+      isLocalAndroid: activeBot.hostKind === 'local' && !inTauriUi,
+      connected: botPanelConnected,
+      callGoogleSetup,
+      callBrowser,
+      onOpenBrowser: openBotBrowser,
+      onOpenCapabilities: () => {
+        if (remoteConnected && remoteIdentity && (activeBot.hostKind !== 'local' || localHost?.deviceId)) {
+          openModelPickerSheet('capabilities');
+        } else {
+          openCenterSettings();
+        }
+      },
+      onOpenCenterAdmin: () => openInAppCenterAdmin('google'),
+      onSelectGoogleAccount: selectGoogleAccount,
+    };
+  }, [
+    activeBot,
+    remoteIdentity,
+    inTauriUi,
+    botPanelConnected,
+    callGoogleSetup,
+    callBrowser,
+    openBotBrowser,
+    remoteConnected,
+    localHost?.deviceId,
+    openInAppCenterAdmin,
+    selectGoogleAccount,
+  ]);
+  const browserTakeoverHint = useMemo(() => {
+    const tools = array<Record<string, unknown>>(effectiveChatLive?.tools);
+    const activeTakeover = tools.find(slot => {
+      const pres = slot?.presentation as Record<string, unknown> | undefined;
+      return slot?.status === 'running' && pres?.kind === 'google-browser-takeover';
+    });
+    if (!activeTakeover) return null;
+    return t('Bot 浏览器待接管 · 点击查看', 'Bot browser needs takeover · Tap to open');
+  }, [effectiveChatLive?.tools, t]);
   const toolScopeKey = JSON.stringify([botPanelIdentityKey, activeBot?.primaryConversationId, botPanelConnected]);
 
   useEffect(() => {
@@ -5487,6 +5650,7 @@ ${newer}` : draftSnapshot;
       screen === 'bot-soul' ||
       screen === 'bot-schedules' ||
       screen === 'bot-screen' ||
+      screen === 'bot-browser' ||
       screen === 'bot-skills' ||
       (screen === 'settings-center-admin' && nav.previous?.screen === 'bot-profile');
     const key = activeBot?.key ?? null;
@@ -5533,7 +5697,7 @@ ${newer}` : draftSnapshot;
 
   return (
     <div
-      className={`bot-hub-shell${screen === 'bot-screen' ? ' is-fullscreen-computer' : ''}`}
+      className={`bot-hub-shell${screen === 'bot-screen' || screen === 'bot-browser' ? ' is-fullscreen-computer' : ''}`}
     >
       <MobileClientUpdatePrompt active={active} onOpenUpdates={() => {
         navigateFromSidebar('settings');
@@ -5841,6 +6005,9 @@ ${newer}` : draftSnapshot;
           onOpenBubbleActions={setBubbleActionTurn}
           onSubmitQuestionnaire={submitQuestionnaire}
           onSubmitVaultUnlock={submitVaultUnlock}
+          googleContext={mobileGoogleContext}
+          onOpenBrowser={openBotBrowser}
+          browserTakeoverHint={browserTakeoverHint}
           canStopBot={canStopBot}
           isStoppingBot={isStoppingBot}
           queueActionBusy={queueActionBusy}
@@ -6123,6 +6290,7 @@ ${newer}` : draftSnapshot;
             onOpenSchedules={() => openBotSchedules(activeBot)}
             onOpenVault={() => setVaultTargetKey(botPanelIdentityKey)}
             onOpenComputer={() => nav.push({ screen: 'bot-screen', botKey: activeBot.key })}
+            onOpenBrowser={openBotBrowser}
             onOpenManage={() => nav.push({ screen: 'bot-profile-manage', botKey: activeBot.key })}
           />
         );
@@ -6179,6 +6347,48 @@ ${newer}` : draftSnapshot;
             }
           }}
         />
+      )}
+
+      {/* ==================== SCREEN 3C: FULL-SCREEN BOT BROWSER VIEW ==================== */}
+      {screen === 'bot-google-setup' && activeBot && (
+        <SettingsSheet title={t('Google 配置向导', 'Google setup wizard')} onClose={() => { popScreen(); }}>
+          <GoogleSetupWizard
+            key={activeBot.key}
+            api={mobileGoogleContext?.api}
+            identity={mobileGoogleContext?.identity}
+            botId={activeBot.botId}
+            botName={activeBot.role}
+            isLocalAndroid={activeBot.hostKind === 'local' || activeBot.platform?.toLowerCase() === 'android'}
+            autoStart
+            callGoogleSetup={callGoogleSetup}
+            onOpenBrowser={openBotBrowser}
+            onOpenCenterAdmin={() => openInAppCenterAdmin('google')}
+            onClose={() => { popScreen(); }}
+          />
+        </SettingsSheet>
+      )}
+
+      {screen === 'bot-browser' && activeBot && (
+        <div className="gws-mobile-browser-screen">
+          <BotBrowserPanel
+            key={`${showerPreviewKey}:browser:${activeBot.botId}`}
+            botId={activeBot.botId}
+            deviceId={activeBot.deviceId}
+            botName={activeBot.role}
+            hostLabel={activeBot.hostKind === 'remote' ? `${t('远程', 'Remote')} · ${activeBot.hostLabel}` : activeBot.hostLabel}
+            mode="fullscreen"
+            connected={botPanelConnected}
+            request={callBrowser}
+            onSwitchToExternalGuide={url => {
+              void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
+              if (url) void openExternalUrl(url).catch(() => {});
+            }}
+            onOpenSystemGoogleAuth={() => openInAppCenterAdmin('google')}
+            onClose={() => {
+              if (!popScreen()) nav.push({ screen: 'chat', botKey: activeBot.key });
+            }}
+          />
+        </div>
       )}
 
       {/* ==================== SCREEN 4: CREATE BOT VIEW (15847.jpg) ==================== */}
@@ -6458,6 +6668,12 @@ ${newer}` : draftSnapshot;
             );
             if (target) openBotProfile(target);
           }}
+          onStartGoogleSetupWizard={(deviceId, botId) => {
+            const target = allBotItems.find(item => item.deviceId === deviceId && item.botId === botId);
+            if (!target) return;
+            setActiveBotKey(target.key);
+            nav.push({ screen: 'bot-google-setup', botKey: target.key });
+          }}
         />
       )}
 
@@ -6510,10 +6726,18 @@ ${newer}` : draftSnapshot;
             identity={modelTarget.identity}
             deviceId={modelTarget.identity.targetDeviceId}
             botId={modelTarget.botId}
+            botName={activeBot.role}
             mode="tools"
-            onOpenCenterAdmin={() => {
+            hostPlatform={activeBot.platform}
+            isLocalAndroid={activeBot.hostKind === 'local' && !inTauriUi}
+            callGoogleSetup={callGoogleSetup}
+            onOpenBrowser={() => {
               setModelTarget(null);
-              openInAppCenterAdmin('capabilities');
+              openBotBrowser();
+            }}
+            onOpenCenterAdmin={(tab = 'capabilities') => {
+              setModelTarget(null);
+              openInAppCenterAdmin(tab);
             }}
             onClose={closeModelTarget}
           />

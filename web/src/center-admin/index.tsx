@@ -5,6 +5,7 @@ import { useText } from '../ui';
 import './center-admin.css';
 import { CapabilitiesTab } from './CapabilitiesTab';
 import { DevicesTab } from './DevicesTab';
+import { GoogleTab } from './GoogleTab';
 import { OpsTab } from './OpsTab';
 import { ProvidersTab } from './ProvidersTab';
 import { VaultTab } from './VaultTab';
@@ -20,6 +21,26 @@ import type {
   CenterAdminPanelProps,
   CenterAdminTab,
   CenterTransport,
+  GoogleAccountStatus,
+  GoogleAuthorizeRequest,
+  GoogleAuthorizeResponse,
+  GoogleCancelRequest,
+  GoogleCheckRequest,
+  GoogleCheckResponse,
+  GoogleClientStatus,
+  GoogleConfigureRequest,
+  GoogleFlowRequest,
+  GoogleFlowResponse,
+  GoogleRemoveRequest,
+  GoogleRemoveResponse,
+  GoogleRule,
+  GoogleRuleRemoveRequest,
+  GoogleRulesListResponse,
+  GoogleServiceChoice,
+  GoogleServiceId,
+  GoogleServiceReadiness,
+  GoogleServiceState,
+  GoogleStatusResponse,
   QrLoginChallengeResponse,
   QrLoginClaimResponse,
   SessionInfo,
@@ -45,6 +66,26 @@ export type {
   CenterTransport,
   FetchCenterTransport,
   FetchCenterTransportOptions,
+  GoogleAccountStatus,
+  GoogleAuthorizeRequest,
+  GoogleAuthorizeResponse,
+  GoogleCancelRequest,
+  GoogleCheckRequest,
+  GoogleCheckResponse,
+  GoogleClientStatus,
+  GoogleConfigureRequest,
+  GoogleFlowRequest,
+  GoogleFlowResponse,
+  GoogleRemoveRequest,
+  GoogleRemoveResponse,
+  GoogleRule,
+  GoogleRuleRemoveRequest,
+  GoogleRulesListResponse,
+  GoogleServiceChoice,
+  GoogleServiceId,
+  GoogleServiceReadiness,
+  GoogleServiceState,
+  GoogleStatusResponse,
   QrLoginChallengeResponse,
   QrLoginClaimResponse,
   SessionInfo,
@@ -63,6 +104,7 @@ export function CenterAdminPanel({
   onOpenExternalUrl,
   hideTopbarExternal = false,
   onConfigureBot,
+  onStartGoogleSetupWizard,
   renderQr,
 }: CenterAdminPanelProps): React.JSX.Element {
   const t = useText();
@@ -85,6 +127,7 @@ export function CenterAdminPanel({
     () => [
       { id: 'providers', label: t('模型', 'Models') },
       { id: 'capabilities', label: t('技能与扩展', 'Skills & Extensions') },
+      { id: 'google', label: 'Google' },
       { id: 'devices', label: t('设备', 'Devices') },
       { id: 'vault', label: t('密码库', 'Vault') },
       { id: 'ops', label: t('触发与版本', 'Triggers & Releases') },
@@ -134,6 +177,15 @@ export function CenterAdminPanel({
               api={api}
               onOpenExternal={onOpenExternal}
               onOpenExternalUrl={onOpenExternalUrl}
+            />
+          )}
+          {currentTab === 'google' && (
+            <GoogleTab
+              api={api}
+              centerUrl={centerUrl}
+              onOpenExternalUrl={onOpenExternalUrl}
+              onConfigureBot={onConfigureBot}
+              onStartGoogleSetupWizard={onStartGoogleSetupWizard}
             />
           )}
           {currentTab === 'devices' && (

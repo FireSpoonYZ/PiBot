@@ -43,6 +43,9 @@ const MEMORY_METHODS: &[&str] = &[
   "correctMemory",
   "retryMemory",
   "compact",
+  "vaultControl",
+  "browserControl",
+  "googleSetupControl",
 ];
 const MAX_OBSERVER_FRAME_FIFO: usize = 8;
 const MAX_OBSERVER_FIFO_BYTES: usize = 80 * 1024 * 1024;

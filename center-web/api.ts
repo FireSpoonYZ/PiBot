@@ -3,6 +3,26 @@ import {
   createFetchCenterTransport,
 } from '../web/src/center-admin';
 import type {
+  GoogleAccountStatus,
+  GoogleAuthorizeRequest,
+  GoogleAuthorizeResponse,
+  GoogleCancelRequest,
+  GoogleCheckRequest,
+  GoogleCheckResponse,
+  GoogleClientStatus,
+  GoogleConfigureRequest,
+  GoogleFlowRequest,
+  GoogleFlowResponse,
+  GoogleRemoveRequest,
+  GoogleRemoveResponse,
+  GoogleRule,
+  GoogleRuleRemoveRequest,
+  GoogleRulesListResponse,
+  GoogleServiceChoice,
+  GoogleServiceId,
+  GoogleServiceReadiness,
+  GoogleServiceState,
+  GoogleStatusResponse,
   QrLoginChallengeResponse,
   QrLoginClaimResponse,
 } from '../web/src/center-admin';
@@ -132,7 +152,30 @@ export interface WebhookTokenReceipt { route: WebhookRoute; token: string }
 
 export const webTransport = createFetchCenterTransport();
 export { CenterApiError };
-export type { QrLoginChallengeResponse, QrLoginClaimResponse };
+export type {
+  GoogleAccountStatus,
+  GoogleAuthorizeRequest,
+  GoogleAuthorizeResponse,
+  GoogleCancelRequest,
+  GoogleCheckRequest,
+  GoogleCheckResponse,
+  GoogleClientStatus,
+  GoogleConfigureRequest,
+  GoogleFlowRequest,
+  GoogleFlowResponse,
+  GoogleRemoveRequest,
+  GoogleRemoveResponse,
+  GoogleRule,
+  GoogleRuleRemoveRequest,
+  GoogleRulesListResponse,
+  GoogleServiceChoice,
+  GoogleServiceId,
+  GoogleServiceReadiness,
+  GoogleServiceState,
+  GoogleStatusResponse,
+  QrLoginChallengeResponse,
+  QrLoginClaimResponse,
+};
 
 const id = encodeURIComponent;
 function request<T>(path: string, method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' = 'GET', body?: unknown): Promise<T> {
@@ -279,6 +322,24 @@ export const api = {
   listDeployments: (installationId: string) => request<DeploymentReceipt[]>(`${installationPath(installationId)}/deployments`),
   getOperation: (operationId: string) => request<Operation>(`/api/operations/${id(operationId)}`),
   vaultControl: (body: ExternalVaultControlInput) => request<ExternalVaultControlResult>('/api/vault/control', 'POST', body),
+  getGoogleStatus: () => request<GoogleStatusResponse>('/api/google/status'),
+  configureGoogle: (body: GoogleConfigureRequest) => request<GoogleStatusResponse>('/api/google/configure', 'POST', body),
+  authorizeGoogle: (body: GoogleAuthorizeRequest) => request<GoogleAuthorizeResponse>('/api/google/authorize', 'POST', body),
+  getGoogleFlow: (body: GoogleFlowRequest) => request<GoogleFlowResponse>('/api/google/flow', 'POST', body),
+  cancelGoogleFlow: (body: GoogleCancelRequest) => request<{ ok?: boolean; phase?: string }>('/api/google/cancel', 'POST', body),
+  checkGoogleAccount: (body: GoogleCheckRequest) => request<GoogleCheckResponse>('/api/google/check', 'POST', body),
+  removeGoogleAccount: (body: GoogleRemoveRequest) => request<GoogleRemoveResponse>('/api/google/remove', 'POST', body),
+  listGoogleRules: (params?: { deviceId?: string; botId?: string }) => {
+    const query = new URLSearchParams();
+    if (params?.deviceId) query.set('deviceId', params.deviceId);
+    if (params?.botId) query.set('botId', params.botId);
+    const qs = query.toString();
+    return request<GoogleRulesListResponse>(`/api/google/rules${qs ? `?${qs}` : ''}`);
+  },
+  saveGoogleRule: (body: GoogleRule) =>
+    request<{ rule?: GoogleRule; rules?: GoogleRule[] } | GoogleRule>('/api/google/rules/save', 'POST', body),
+  removeGoogleRule: (body: GoogleRuleRemoveRequest) =>
+    request<{ removed?: boolean; ok?: boolean } | void>('/api/google/rules/remove', 'POST', body),
   listClientReleases: () => request<ClientReleaseListResponse>('/api/client-releases'),
   createClientRelease: (metadata: ClientReleaseMetadata, artifact: File) => {
     const body = new FormData();

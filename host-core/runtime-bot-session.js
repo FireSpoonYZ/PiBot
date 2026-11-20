@@ -5,6 +5,7 @@
 import { LiveDoc } from '@earendil-works/pi-durable';
 import { BotSessionState, WORK_TRIGGER_KIND, USER_MESSAGE_KIND,
   createSessionMessageEntry, senderAttribution } from './bot-session-context.js';
+import { GOOGLE_WORKSPACE_RULE_SOURCE_TYPE } from './google-workspace-privacy.js';
 import { resolveBotIdentity } from './bot-identity.js';
 import { inboxQueryKey } from './message-queries.js';
 import { messageError } from './message-protocol.js';
@@ -46,7 +47,11 @@ function describeTurnSource(frozen) {
   const originKind = frozen?.kind;
 
   if (senderKind === 'host') {
-    const isWebhook = frozen?.sender?.sourceType === 'webhook';
+    const sourceType = frozen?.sender?.sourceType;
+    if (sourceType === GOOGLE_WORKSPACE_RULE_SOURCE_TYPE) {
+      return 'Source: Host Google Workspace rule event (not human chat). Start directly without an opening acknowledgement; stay quiet if no action is needed.';
+    }
+    const isWebhook = sourceType === 'webhook';
     return isWebhook
       ? 'Source: Host webhook/automation (not human chat). Start directly without an opening acknowledgement; stay quiet if no action is needed.'
       : 'Source: Host scheduled run or signal (not human chat). Start directly without an opening acknowledgement; stay quiet if nothing changed or no action is needed.';

@@ -422,7 +422,9 @@ function projectAttribution(raw) {
   const channel = raw.channel;
   if (channel !== 'primary' && channel !== 'dm' && channel !== 'room') return null;
   const out = { kind, channel };
-  if (kind === 'host' && raw.sourceType === 'webhook') out.sourceType = 'webhook';
+  if (kind === 'host' && (raw.sourceType === 'webhook' || raw.sourceType === 'google-workspace-rule')) {
+    out.sourceType = raw.sourceType;
+  }
   for (const key of ['botId', 'deviceId', 'name', 'scopeId', 'messageId', 'replyTo', 'rootId', 'createdAt']) {
     const value = raw[key];
     if (typeof value === 'string') out[key] = boundAttributionString(value);
@@ -489,8 +491,14 @@ function entryTextUnits(entry) {
 }
 
 function isPendingInteraction(presentation) {
+  if (presentation?.kind === 'google-setup') {
+    return presentation.state === 'running';
+  }
+  if (presentation?.kind === 'google-browser-takeover') {
+    return presentation.phase !== 'bot';
+  }
   return presentation?.status === 'pending' &&
-    (presentation.kind === 'questionnaire' || presentation.kind === 'vault-unlock');
+    (presentation.kind === 'questionnaire' || presentation.kind === 'vault-unlock' || presentation.kind === 'google-account-select');
 }
 
 /** 投影工具槽、白名单 presentation 与嵌套摘要，不带原始参数/details/诊断。 */

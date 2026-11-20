@@ -4,6 +4,7 @@ import { formatTurnDuration, pendingToolPrompts } from './chatTurnModel';
 import {
   readToolPresentation,
   ToolPresentationCard,
+  type GoogleChatCardContext,
   type QuestionnaireSubmitPayload,
   type VaultUnlockSubmitPayload,
 } from './ToolPresentation';
@@ -71,6 +72,7 @@ export interface ToolCallCardProps {
   presentationOnly?: boolean;
   /** 内部嵌套层级计数（默认 0），移动端精简模式用于限制最大缩进 2 层。 */
   depth?: number;
+  googleContext?: GoogleChatCardContext;
   onSubmitQuestionnaire?: (installationId: string, input: QuestionnaireSubmitPayload) => Promise<unknown>;
   onSubmitVaultUnlock?: (input: VaultUnlockSubmitPayload) => Promise<unknown>;
   onOpenTask?: (taskId: string, openEdit?: boolean) => void;
@@ -89,6 +91,7 @@ export function ToolCallCard({
   collapseOutput,
   presentationOnly = false,
   depth = 0,
+  googleContext,
   onSubmitQuestionnaire,
   onSubmitVaultUnlock,
   onOpenTask,
@@ -125,7 +128,15 @@ export function ToolCallCard({
       ? tool.id
       : presentation.kind === 'task'
         ? presentation.taskId
-        : presentation.requestId
+        : presentation.kind === 'google-setup'
+          ? (presentation.runId ?? tool.id)
+          : presentation.kind === 'google-account-select'
+            ? (presentation.requestId ?? tool.id)
+            : presentation.kind === 'google-browser-takeover'
+              ? (presentation.pageId ?? tool.id)
+              : presentation.kind === 'google-readiness'
+                ? `${presentation.account ?? ''}:${presentation.service ?? ''}:${tool.id}`
+                : presentation.requestId
     : tool.id;
   const sendTo = !tool.parentCallId && tool.name === 'send_to' ? tool.sendTo : undefined;
   const sendToTarget = sendTo
@@ -164,6 +175,7 @@ export function ToolCallCard({
       disabled={disabled}
       variant={variant === 'desktop' ? 'desktop' : undefined}
       requesterName={requesterName}
+      googleContext={googleContext}
       onSubmit={presentation.kind === 'questionnaire' && onSubmitQuestionnaire
         ? input => onSubmitQuestionnaire(presentation.installationId, input)
         : undefined}
@@ -193,6 +205,7 @@ export function ToolCallCard({
             requesterName={requesterName}
             collapseOutput={collapseOutput}
             depth={depth + 1}
+            googleContext={googleContext}
             onSubmitQuestionnaire={onSubmitQuestionnaire}
             onSubmitVaultUnlock={onSubmitVaultUnlock}
             onOpenTask={onOpenTask}

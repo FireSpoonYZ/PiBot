@@ -19,7 +19,11 @@ import {
   type KnownBotSummary,
 } from '../../../web/src/chatTurnModel';
 import { isWebhookAttribution, MessageAttribution as MessageAttributionBadge } from '../../../web/src/MessageAttribution';
-import type { QuestionnaireSubmitPayload, VaultUnlockSubmitPayload } from '../../../web/src/ToolPresentation';
+import type {
+  GoogleChatCardContext,
+  QuestionnaireSubmitPayload,
+  VaultUnlockSubmitPayload,
+} from '../../../web/src/ToolPresentation';
 import { TurnToolCallsSection } from '../../../web/src/hub/shared';
 import {
   GrokBotAvatar,
@@ -71,6 +75,7 @@ export interface ChatTranscriptProps {
   disabled?: boolean;
   onSubmitQuestionnaire: (installationId: string, input: QuestionnaireSubmitPayload) => Promise<unknown>;
   onSubmitVaultUnlock?: (input: VaultUnlockSubmitPayload) => Promise<unknown>;
+  googleContext?: GoogleChatCardContext;
   /** 按 attachmentId 取图显示；null 表示当前不可读取附件（离线/无权限）。 */
   attachmentFetcher?: AttachmentFetcher | null;
   loading?: boolean;
@@ -119,6 +124,7 @@ export function ChatTranscript({
   disabled = false,
   onSubmitQuestionnaire,
   onSubmitVaultUnlock,
+  googleContext,
   attachmentFetcher = null,
   loading = false,
   error = null,
@@ -457,6 +463,7 @@ export function ChatTranscript({
                             disabled={disabled || archived}
                             variant="desktop"
                             requesterName={bot.role}
+                            googleContext={googleContext}
                             onSubmitQuestionnaire={onSubmitQuestionnaire}
                             onSubmitVaultUnlock={onSubmitVaultUnlock}
                             onOpenTask={onOpenTask}
@@ -487,6 +494,7 @@ export function ChatTranscript({
                       disabled={disabled || archived}
                       variant="desktop"
                       requesterName={bot.role}
+                      googleContext={googleContext}
                       onSubmitQuestionnaire={onSubmitQuestionnaire}
                       onSubmitVaultUnlock={onSubmitVaultUnlock}
                       onOpenTask={onOpenTask}

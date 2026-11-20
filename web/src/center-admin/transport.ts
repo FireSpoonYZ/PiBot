@@ -39,6 +39,20 @@ import type {
   ExternalVaultControlInput,
   ExternalVaultListResult,
   ExternalVaultStatus,
+  GoogleAuthorizeRequest,
+  GoogleAuthorizeResponse,
+  GoogleCancelRequest,
+  GoogleCheckRequest,
+  GoogleCheckResponse,
+  GoogleConfigureRequest,
+  GoogleFlowRequest,
+  GoogleFlowResponse,
+  GoogleRemoveRequest,
+  GoogleRemoveResponse,
+  GoogleRule,
+  GoogleRuleRemoveRequest,
+  GoogleRulesListResponse,
+  GoogleStatusResponse,
   InstallRequest,
   Installation,
   InstallationBotBindingsResponse,
@@ -488,6 +502,32 @@ export function createCenterApi(transport: CenterTransport) {
     vaultControl: <T = ExternalVaultStatus | ExternalVaultListResult | ExternalVaultCheckResult>(
       body: ExternalVaultControlInput,
     ) => req<T>('POST', '/api/vault/control', body),
+
+    // Google Workspace
+    getGoogleStatus: () => req<GoogleStatusResponse>('GET', '/api/google/status'),
+    configureGoogle: (body: GoogleConfigureRequest) =>
+      req<GoogleStatusResponse>('POST', '/api/google/configure', body),
+    authorizeGoogle: (body: GoogleAuthorizeRequest) =>
+      req<GoogleAuthorizeResponse>('POST', '/api/google/authorize', body),
+    getGoogleFlow: (body: GoogleFlowRequest) =>
+      req<GoogleFlowResponse>('POST', '/api/google/flow', body),
+    cancelGoogleFlow: (body: GoogleCancelRequest) =>
+      req<{ ok?: boolean; phase?: string }>('POST', '/api/google/cancel', body),
+    checkGoogleAccount: (body: GoogleCheckRequest) =>
+      req<GoogleCheckResponse>('POST', '/api/google/check', body),
+    removeGoogleAccount: (body: GoogleRemoveRequest) =>
+      req<GoogleRemoveResponse>('POST', '/api/google/remove', body),
+    listGoogleRules: (params?: { deviceId?: string; botId?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.deviceId) query.set('deviceId', params.deviceId);
+      if (params?.botId) query.set('botId', params.botId);
+      const qs = query.toString();
+      return req<GoogleRulesListResponse>('GET', `/api/google/rules${qs ? `?${qs}` : ''}`);
+    },
+    saveGoogleRule: (body: GoogleRule) =>
+      req<{ rule?: GoogleRule; rules?: GoogleRule[] } | GoogleRule>('POST', '/api/google/rules/save', body),
+    removeGoogleRule: (body: GoogleRuleRemoveRequest) =>
+      req<{ removed?: boolean; ok?: boolean } | void>('POST', '/api/google/rules/remove', body),
 
     // Webhooks
     listWebhooks: () => req<{ items: WebhookRoute[] }>('GET', '/api/webhooks'),

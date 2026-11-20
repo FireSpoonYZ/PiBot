@@ -173,7 +173,7 @@ export interface CenterTransport {
   ): Promise<T>;
 }
 
-export type CenterAdminTab = 'providers' | 'capabilities' | 'devices' | 'vault' | 'ops';
+export type CenterAdminTab = 'providers' | 'capabilities' | 'google' | 'devices' | 'vault' | 'ops';
 
 export interface CenterAdminPanelProps {
   transport: CenterTransport;
@@ -186,6 +186,7 @@ export interface CenterAdminPanelProps {
   onOpenExternalUrl?: (url: string) => void | Promise<unknown>;
   hideTopbarExternal?: boolean;
   onConfigureBot?: (deviceId: string, botId: string) => void;
+  onStartGoogleSetupWizard?: (deviceId: string, botId: string) => void;
   renderQr?: (value: string, label: string) => React.ReactNode;
 }
 
@@ -392,3 +393,160 @@ export type ExternalVaultControlResult =
   | ExternalVaultStatus
   | ExternalVaultListResult
   | ExternalVaultCheckResult;
+
+// Google Workspace Center Control API (/api/google/*)
+export type GoogleServiceChoice = 'gmail' | 'calendar' | 'files';
+
+export type GoogleServiceId =
+  | 'gmail'
+  | 'calendar'
+  | 'drive'
+  | 'docs'
+  | 'sheets'
+  | 'contacts'
+  | 'people';
+
+export type GoogleServiceState =
+  | 'ready'
+  | 'needs-permission'
+  | 'api-disabled'
+  | 'blocked-by-admin'
+  | 'error';
+
+export interface GoogleServiceReadiness {
+  service: GoogleServiceId;
+  state: GoogleServiceState;
+  detail?: string;
+  enableUrl?: string;
+}
+
+export interface GoogleClientStatus {
+  configured: boolean;
+  clientId?: string;
+  projectId?: string;
+  redirectUri?: string;
+  status?: 'unconfigured' | 'configured' | 'invalid';
+  clientKey?: 'works' | 'gone' | 'unknown';
+  error?: string;
+  updatedAt?: string;
+}
+
+export type GoogleAccountConnectionState =
+  | 'connected'
+  | 'reconnect'
+  | 'reconnect_required'
+  | 'temp_error';
+
+export interface GoogleAccountStatus {
+  id: string;
+  email: string;
+  status: GoogleAccountConnectionState;
+  choices: GoogleServiceChoice[];
+  services: GoogleServiceReadiness[];
+  reason?: string;
+  error?: string;
+  connectedAt?: string | number;
+  checkedAt?: string | number;
+}
+
+export interface GoogleStatusResponse {
+  client: GoogleClientStatus;
+  accounts: GoogleAccountStatus[];
+  clientKey?: 'works' | 'gone' | 'unknown';
+  available?: boolean;
+  reason?: string;
+}
+
+export interface GoogleConfigureRequest {
+  clientFile?: string;
+  clientId?: string;
+  clientSecret?: string;
+}
+
+export interface GoogleAuthorizeRequest {
+  choices: GoogleServiceChoice[];
+  account?: string;
+}
+
+export interface GoogleAuthorizeResponse {
+  flowId: string;
+  authorizationUrl: string;
+  expiresAt: string | number;
+}
+
+export interface GoogleFlowRequest {
+  flowId: string;
+}
+
+export type GoogleFlowPhase = 'pending' | 'connected' | 'failed' | 'cancelled';
+
+export interface GoogleFlowResponse {
+  phase: GoogleFlowPhase;
+  error?: string;
+  account?: GoogleAccountStatus;
+}
+
+export interface GoogleCancelRequest {
+  flowId: string;
+}
+
+export interface GoogleCheckRequest {
+  account: string;
+}
+
+export interface GoogleCheckResponse {
+  account?: GoogleAccountStatus;
+  status?: GoogleStatusResponse;
+  client?: GoogleClientStatus;
+  accounts?: GoogleAccountStatus[];
+  reachable?: boolean;
+  error?: string;
+}
+
+export interface GoogleRemoveRequest {
+  account: string;
+  revoke?: boolean;
+}
+
+export interface GoogleRemoveResponse {
+  removed?: boolean;
+  revoked?: boolean;
+  revokeAttempted?: boolean;
+  revokeError?: string | null;
+  revokeWarning?: string | null;
+  error?: string;
+}
+
+export type GoogleRuleSource = 'gmail' | 'calendar';
+
+export interface GoogleRule {
+  id?: string;
+  deviceId: string;
+  botId: string;
+  account: string;
+  source: GoogleRuleSource;
+  enabled: boolean;
+  from?: string;
+  subjectContains?: string;
+  calendar?: string;
+  minutesBefore?: number;
+  instruction: string;
+  status?: string;
+  pausedReason?: string | null;
+  pauseReason?: string | null;
+  lastCheckedAt?: string | number | null;
+  lastError?: string | null;
+  backoffUntil?: string | number | null;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type GoogleRulesListResponse =
+  | GoogleRule[]
+  | { items?: GoogleRule[]; rules?: GoogleRule[] };
+
+export interface GoogleRuleRemoveRequest {
+  id: string;
+  deviceId?: string;
+  botId?: string;
+}

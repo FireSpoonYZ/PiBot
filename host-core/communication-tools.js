@@ -106,7 +106,7 @@ function previewPage(metadata, page, key) {
 }
 
 
-export function createCommunicationTools({ host, getHarness, getMessageLog, publishWork, passWork = null, collaboration, sessions }) {
+export function createCommunicationTools({ host, getHarness, getMessageLog, publishWork, passWork = null, collaboration, sessions, dataPrivacy = null }) {
   function tool({ name, description, properties, required = [], deferred, boundedCodes, run }) {
     return defineTool({
       name,
@@ -538,7 +538,7 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
           return collaboration.unarchiveBot({ ...args, signal: context.abortSignal });
         },
       }),
-      ...createBotManagementTools({ collaboration, memoRequestId }).map((spec) => tool(spec)),
+      ...createBotManagementTools({ collaboration, memoRequestId, dataPrivacy }).map((spec) => tool(spec)),
       tool({
         name: 'delete_bot',
         description: 'Permanently delete an idle, non-primary Bot from the specified device.',

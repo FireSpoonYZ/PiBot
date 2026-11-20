@@ -5,6 +5,7 @@ import { useText } from './ui';
 import { AdvancedSettingsPage } from './bot-settings/AdvancedSettingsPage';
 import { BotSkillsPage } from './bot-settings/BotSkillsPage';
 import { CapabilitiesPage } from './bot-settings/CapabilitiesPage';
+import type { GoogleSetupControlCall } from './google/types';
 import { ModelSettingsPage } from './bot-settings/ModelSettingsPage';
 import { SettingsSheet } from './bot-settings/primitives';
 import { useBotModelConfig } from './bot-settings/useBotModelConfig';
@@ -16,6 +17,10 @@ interface Props {
   identity: DesktopIdentity;
   botId: string;
   botName?: string;
+  hostPlatform?: string;
+  isLocalAndroid?: boolean;
+  callGoogleSetup?: GoogleSetupControlCall;
+  onOpenBrowser?: () => void;
   initialTab?: BotSettingsTab;
   onClose(): void;
   onOpenCenterAdmin?: () => void;
@@ -28,6 +33,10 @@ export function BotModelSheet({
   identity,
   botId,
   botName,
+  hostPlatform,
+  isLocalAndroid,
+  callGoogleSetup,
+  onOpenBrowser,
   initialTab = 'model',
   onClose,
   onOpenCenterAdmin,
@@ -42,7 +51,12 @@ export function BotModelSheet({
         identity={target.identity}
         deviceId={target.deviceId}
         botId={target.botId}
+        botName={botName}
         mode="tools"
+        hostPlatform={hostPlatform}
+        isLocalAndroid={isLocalAndroid}
+        callGoogleSetup={callGoogleSetup}
+        onOpenBrowser={onOpenBrowser}
         onClose={onClose}
         onOpenCenterAdmin={onOpenCenterAdmin}
       />

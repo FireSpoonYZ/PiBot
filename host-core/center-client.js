@@ -519,6 +519,8 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     vaultControl: (input, options = {}) => request('/api/host/vault/control', { method: 'POST', body: input, signal: options.signal }),
     vaultFind: (input, options = {}) => request('/api/host/vault/find', { method: 'POST', body: input, signal: options.signal }),
     vaultResolve: (input, options = {}) => request('/api/host/vault/resolve', { method: 'POST', body: input, signal: options.signal }),
+    // 中心共享 Google Workspace 状态（只读，复用 device Bearer 认证，不授予普通 Host owner 凭据）。
+    getGoogleStatus: (options = {}) => request('/api/host/google/status', { signal: options?.signal }),
     listCapabilityTools: (id, botId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/list', { method: 'POST', body: { botId }, signal: options.signal }),
     callCapabilityTool: (id, botId, name, args, callId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/call', { method: 'POST', body: { botId, name, args, callId }, signal: options.signal }),
     streamAntigravity(payload, options = {}) {

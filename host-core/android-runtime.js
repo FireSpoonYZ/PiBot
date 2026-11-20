@@ -704,7 +704,10 @@ export function createAndroidBridge(options = {}) {
           if (controller.signal.aborted) return; // cancelled: never answer late
           result = { value: value === undefined ? null : value };
         } else {
-          result = await adapter(deviceId, cmd.method, cmd.params, { signal: controller.signal });
+          result = await adapter(deviceId, cmd.method, cmd.params, {
+            signal: controller.signal,
+            caller: { transport: 'local', clientId: `local-android:${deviceId}` },
+          });
         }
         await sendResultChecked(cmd.id, result);
       } catch (err) {

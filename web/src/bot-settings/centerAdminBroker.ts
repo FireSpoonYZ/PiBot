@@ -6,12 +6,6 @@ export interface CenterAdminRequestParams {
   body?: unknown;
 }
 
-type AdminBrokerFn = (
-  identity: DesktopIdentity,
-  op: 'center_admin_request',
-  params: CenterAdminRequestParams,
-) => Promise<unknown>;
-
 const MAX_ADMIN_BROKER_CONCURRENCY = 2;
 let activeAdminBrokerCalls = 0;
 const adminBrokerQueue: Array<() => void> = [];
@@ -37,8 +31,7 @@ export async function centerAdminRequest<T = unknown>(
   identity: DesktopIdentity,
   params: CenterAdminRequestParams,
 ): Promise<T> {
-  const broker = api.broker as unknown as AdminBrokerFn;
-  return (await withAdminBrokerSlot(() => broker(identity, 'center_admin_request', params))) as T;
+  return (await withAdminBrokerSlot(() => api.broker(identity, 'center_admin_request', params))) as T;
 }
 
 export function newRequestId(): string {
@@ -64,7 +57,7 @@ export function isCenterAuthOrBindError(failure: unknown): {
   const code = errorCodeOf(failure);
   const oauthRevoked = code === 'OAUTH_ACCESS_REVOKED' || code === 'OAUTH_REQUIRED';
   const notConnected = code === 'NOT_CONNECTED';
-  const unauthorized = code === 'CONTROL_UNAUTHORIZED';
+  const unauthorized = code === 'CONTROL_UNAUTHORIZED' || code === 'UNAUTHORIZED';
   return { oauthRevoked, notConnected, unauthorized };
 }
 

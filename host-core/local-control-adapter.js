@@ -3,6 +3,7 @@
 // only to the local control server via createControlClient over a bounded
 // fetch; never opens Runtime, files, or other local state. All errors carry a
 // fixed .code and .outcome (not-sent / unconfirmed / responded).
+import { randomUUID } from 'node:crypto';
 import { createControlClient, ControlApiError } from './control-client.js';
 import { assertId } from './message-protocol.js';
 import {
@@ -12,6 +13,7 @@ import {
 import { normalizeLiveTarget } from './remote-live-protocol.js';
 import { SHOWER_ERROR_CODES } from './shower-protocol.js';
 import { VAULT_ERROR_CODES } from './vault-protocol.js';
+import { BROWSER_SETUP_ERROR_CODES } from './browser-setup-protocol.js';
 
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,512}$/;
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '[::1]']);
@@ -78,6 +80,7 @@ const LOCAL_DOMAIN_CODES = new Set([
   'MODEL_NO_VISION',
   ...SHOWER_ERROR_CODES,
   ...VAULT_ERROR_CODES,
+  ...BROWSER_SETUP_ERROR_CODES,
 ]);
 
 function controlError(code, outcome) {
@@ -321,6 +324,8 @@ const METHOD_HANDLERS = new Map([
   ['discoverCenterProviderModels', (control, params, signal) => control.discoverCenterProviderModels(params, { signal })],
   ['callCapabilityAction', (control, params, signal) => control.callCapabilityAction(params, { signal })],
   ['vaultControl', (control, params, signal) => control.vaultControl(params, { signal })],
+  ['browserControl', (control, params, signal) => control.browserControl(params, { signal })],
+  ['googleSetupControl', (control, params, signal) => control.googleSetupControl(params, { signal })],
   ['getShowerStatus', (control, params, signal) => control.getShowerStatus(showerTarget(params), { signal })],
   ['createShowerSession', (control, params, signal) =>
     control.createShowerSession(showerTarget(params), params.input ?? {}, { signal })],
@@ -371,7 +376,7 @@ function dispatchError(err, state, signal) {
   return controlError('INTERNAL', 'unconfirmed');
 }
 
-async function executeCall(config, expectedDeviceId, method, params, { signal } = {}) {
+async function executeCall(config, expectedDeviceId, method, params, { signal, caller } = {}) {
   requireValidId(expectedDeviceId);
   // 先按协议表规范化（含方法参数形状/未知键/JSON 字节限制）再映射。
   let normalized;
@@ -392,6 +397,8 @@ async function executeCall(config, expectedDeviceId, method, params, { signal } 
     url: config.url,
     token: config.token,
     fetch: boundedFetch(state),
+    clientId: caller?.clientId ?? config.defaultClientId,
+    controlTransport: caller?.transport ?? 'local',
   });
 
   let info;
@@ -594,7 +601,7 @@ async function getServiceStatus(config, expectedDeviceId, callOptions = {}) {
 }
 
 export function createLocalControlAdapter(options) {
-  const config = validateOptions(options);
+  const config = { ...validateOptions(options), defaultClientId: `local-adapter:${randomUUID()}` };
   const execute = async function execute(expectedDeviceId, method, params, callOptions = {}) {
     return executeCall(config, expectedDeviceId, method, params, callOptions);
   };
