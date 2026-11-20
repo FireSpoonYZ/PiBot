@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   CircleAlert,
   ClipboardCheck,
+  Download,
   FolderInput,
   LayoutDashboard,
   MessageSquare,
@@ -32,6 +33,7 @@ import { targetApi } from './targetApi';
 import type { DesktopViewApi } from './types';
 import './DesktopShell.css';
 import { ErrorNotice } from '../../../web/src/ui';
+import { useClientUpdate } from '../../../web/src/ClientUpdateProvider';
 
 interface ProfileFormState {
   title: string;
@@ -106,6 +108,20 @@ function phaseText(status: DesktopClientStatus | null, transportConnected: boole
   return status.phase === 'connected' && transportConnected ? '已连接' : '未连接';
 }
 
+function WindowsUpdateRailButton({ onOpen }: { onOpen(button: HTMLButtonElement): void }) {
+  const update = useClientUpdate();
+  const status = update?.status;
+  if (!navigator.userAgent.includes('Windows') || !update?.ready || !status?.release ||
+      !['available', 'downloading', 'downloaded', 'waiting-tasks', 'installing'].includes(status.phase)) return null;
+  const label = '客户端更新 · ' + status.release.version;
+  return (
+    <button type="button" className="rail-item" title={label} aria-label={label} aria-haspopup="dialog"
+      onClick={event => onOpen(event.currentTarget)}>
+      <span className="rail-icon-wrap rail-update-icon"><Download size={18} aria-hidden /></span>
+    </button>
+  );
+}
+
 class App extends Component<AppProps, AppState> {
   private unsub: (() => void) | null = null;
   private unsubErrors: (() => void) | null = null;
@@ -119,6 +135,7 @@ class App extends Component<AppProps, AppState> {
   private devicesMounted = true;
   private refreshingProfiles = false;
   private settingsButtonRef: HTMLButtonElement | null = null;
+  private updateSettingsTrigger: HTMLButtonElement | null = null;
   private bannerNoticeAnchorRef: HTMLDivElement | null = null;
   private bannerNoticeButtonRef: HTMLButtonElement | null = null;
   private handleBannerNoticePointerDown = (e: MouseEvent): void => {
@@ -772,6 +789,10 @@ class App extends Component<AppProps, AppState> {
                 ) : null}
               </div>
             ) : null}
+            <WindowsUpdateRailButton onOpen={button => {
+              this.updateSettingsTrigger = button;
+              this.setState({ settingsOpen: true, settingsTab: 'updates' });
+            }} />
             <button
               type="button"
               className="rail-item"
@@ -831,7 +852,12 @@ class App extends Component<AppProps, AppState> {
                 'desktop-dialog settings-dialog settings-shell-dialog' +
                 (this.state.settingsTab === 'center-admin' ? ' settings-shell-center-admin' : '')
               }
-              onCloseAutoFocus={(e) => { e.preventDefault(); this.settingsButtonRef?.focus(); }}
+              onCloseAutoFocus={(e) => {
+                e.preventDefault();
+                const trigger = this.updateSettingsTrigger?.isConnected ? this.updateSettingsTrigger : this.settingsButtonRef;
+                this.updateSettingsTrigger = null;
+                trigger?.focus();
+              }}
             >
               <SettingsPanel
                 api={this.props.api}

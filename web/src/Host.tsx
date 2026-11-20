@@ -182,7 +182,7 @@ import {
 import { uuid, V5_CLEANUP_KEY, BOT_META_CACHE_KEY, BOT_CLEAR_MAP_KEY, REMOTE_PROFILES_FLAG_KEY, REMOTE_BOTS_CACHE_KEY, REMOTE_DEVICES_CACHE_KEY, PRIMARY_ROLE_OVERRIDE_KEY, DEFAULT_PRIMARY_ROLE, CREATE_ATTEMPT_KEY, ARCHIVE_RETENTION_MS, SOUL_MAX_BYTES, SOUL_SNIPPETS, HubScreen, GroupCreateAttempt, RoomDeleteAttempt, RoomDeleteModalState, BotConfirmModalState, UnifiedBotItem, normalizePlatformKind, PlatformLogoIcon, BotPreviewMeta, BotScheduleRepeat, BotScheduleLatestRun, BotScheduleTask, BotScheduleState, BotScheduleDraft, WEEKDAY_SHORT_ZH, WEEKDAY_SHORT_EN, formatScheduleNextRun, TurnAdmissionStatus, TurnAdmissionCarrier, ChatPending as SharedChatPending, ChatPendingEntry as SharedChatPendingEntry, chatStorageKey, readChatPending, readChatDraft, writeChatDraft, readChatDraftAttachments, writeChatDraftAttachments, readBotMetaMap, writeBotMetaMap, readClearedMap, writeClearedMap, readHasRemoteFlag, writeHasRemoteFlag, CachedRemoteBot, LocalBotsScope, LocalBotsFlight, readCachedRemoteBots, writeCachedRemoteBots, readCachedRemoteDevices, writeCachedRemoteDevices, formatArchivedRemainingDays, BotHistoryReadResult, isStaleLiveState, maxResetEntryId, filterHistoryAfterCutoff, classifyClearError, makeClearError, fetchBotHistoryPages, sharedHistoryRead, maxHistoryEntryId, TurnToolCallsSection, SLASH_COMMANDS, SlashCommandName, slashMatches, parseSlashCommand, useSlashAutocomplete, soulBytes, parseBotSoul } from './hub/shared';
 // @lane-imports:settings
 import { Badge, Disclosure, Row, Section, SettingsSheet, Switch } from './bot-settings/primitives';
-import { ClientUpdateSection, useClientUpdateSummary } from './ClientUpdateSection';
+import { ClientUpdateSection, MobileClientUpdatePrompt, useClientUpdateSummary } from './ClientUpdateSection';
 // ---
 // @lane-imports:hub
 import { Chips } from './bot-settings/primitives';
@@ -5513,6 +5513,10 @@ ${newer}` : draftSnapshot;
     <div
       className={`bot-hub-shell${screen === 'bot-screen' ? ' is-fullscreen-computer' : ''}`}
     >
+      <MobileClientUpdatePrompt active={active} onOpenUpdates={() => {
+        navigateFromSidebar('settings');
+        setSettingsPage('updates');
+      }} />
       <Dialog
         open={leftDrawerOpen}
         onOpenChange={setLeftDrawerOpen}
