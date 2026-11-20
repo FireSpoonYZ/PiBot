@@ -16,7 +16,6 @@ import { clearBotBoardResult } from './runtime-bot-board.js';
 import { BotSessionState, deriveEntryAttribution } from './bot-session-context.js';
 import { buildQueuedPreview, extractUserTextFromContent, MAX_QUEUED_ITEMS } from './runtime-live-projection.js';
 import { isTrustedDataBoundary, isTrustedHostSourceType } from './google-workspace-privacy.js';
-import { isTrustedToolPolicy } from './mcp-dispatch-policy.js';
 
 const MAX_PREPARE_ATTEMPTS = 3;
 // 每条消息图片解码总字节上限（64MiB）：单张合法（≤16MiB）的图仍需满足本条消息总量限制。
@@ -89,9 +88,6 @@ export function createTurnAdmission(deps) {
     const dataBoundary = kind === 'host' && isTrustedDataBoundary(origin.dataBoundary)
       ? origin.dataBoundary
       : null;
-    const toolPolicy = kind === 'host' && isTrustedToolPolicy(origin.toolPolicy)
-      ? origin.toolPolicy
-      : null;
     return {
       sender: {
         kind,
@@ -99,7 +95,6 @@ export function createTurnAdmission(deps) {
         ...(sourceType !== null ? { sourceType } : {}),
       },
       ...(dataBoundary !== null ? { dataBoundary } : {}),
-      ...(toolPolicy !== null ? { toolPolicy } : {}),
       replyTo,
     };
   }
@@ -117,8 +112,6 @@ export function createTurnAdmission(deps) {
       ? { sourceType: item.origin.sender.sourceType } : {};
     const dataBoundary = kind === 'host' && isTrustedDataBoundary(item.origin?.dataBoundary)
       ? { dataBoundary: item.origin.dataBoundary } : {};
-    const toolPolicy = kind === 'host' && isTrustedToolPolicy(item.origin?.toolPolicy)
-      ? { toolPolicy: item.origin.toolPolicy } : {};
     return {
       kind: 'host.user-message',
       data: {
@@ -146,7 +139,6 @@ export function createTurnAdmission(deps) {
           scopeId: null,
           triggerMessageId: item.requestId,
           replyTo,
-          ...toolPolicy,
           sender: { kind, deviceId: host.deviceId, ...(name !== null ? { name } : {}), ...source },
           replyTarget: { kind: 'primary' },
         },
@@ -733,10 +725,7 @@ export function createTurnAdmission(deps) {
         throw errWithCode('center model is unavailable', 'TURN_SYNC_FAILED');
       }
     }
-    const turnToolPolicy = item.origin?.sender?.kind === 'host' && isTrustedToolPolicy(item.origin?.toolPolicy)
-      ? item.origin.toolPolicy
-      : null;
-    const profile = profileFor(bot.botId, null, turnToolPolicy ? { toolPolicy: turnToolPolicy } : undefined);
+    const profile = profileFor(bot.botId, null);
     // applyPreparation 可能已切换 cwd：会话创建与绑定一律读取持久化的最新记录。
     const current = host.getBot(bot.botId) ?? bot;
     let conversation = await getPrimaryConversation(harness(), current, {}, context);
@@ -751,9 +740,7 @@ export function createTurnAdmission(deps) {
         defaultModel: modelRef,
         thinkingLevel: profile.thinkingLevel,
         instructions: profile.instructions,
-        selectedExtensions: profile.selectedExtensions,
         removeTools: profile.removeTools,
-        allowTools: profile.allowTools,
         codemodeOnly: profile.codemodeOnly,
       }, context);
     }
@@ -797,7 +784,6 @@ export function createTurnAdmission(deps) {
           botId: bot.botId,
           nativeId: conversation.id,
           requestId: item.requestId,
-          ...(turnToolPolicy ? { toolPolicy: turnToolPolicy } : {}),
         });
       }
       const formatted = await formatPrimarySubmission(harness(), bot, priorRecord, context);
@@ -844,11 +830,6 @@ export function createTurnAdmission(deps) {
       }
     }
     const skippedIdlePrep = steeringActiveRun || stillSteering || steerNow;
-    if (!skippedIdlePrep) {
-      // sessions.sync 可能在主会话上触发过 profile 应用；提交前再按本轮策略收敛一次，
-      // 确保 MCP-safe 轮严格使用安全扩展/工具子集，普通轮恢复完整工具集。
-      await applyAgentProfile(harness(), conversation.id, profile, context);
-    }
     const entry = sourceMessageEntry(item);
     if (attachmentMeta.length > 0) entry.data.attachments = attachmentMeta;
     let submission;
@@ -926,7 +907,6 @@ export function createTurnAdmission(deps) {
       botId: bot.botId,
       nativeId: conversation.id,
       requestId: item.requestId,
-      ...(turnToolPolicy ? { toolPolicy: turnToolPolicy } : {}),
     });
     await syncPublishedQueue(bot);
     const formatted = await formatPrimarySubmission(harness(), bot, statusRecord, context);
@@ -1047,14 +1027,10 @@ export function createTurnAdmission(deps) {
       }, context);
       if (existing !== undefined) {
         if (existing.status === 'queued' || existing.status === 'placed') {
-          const existingToolPolicy = input?.origin?.sender?.kind === 'host' && isTrustedToolPolicy(input?.origin?.toolPolicy)
-            ? input.origin.toolPolicy
-            : null;
           trackSubmission(existing.id, {
             botId,
             nativeId: conversation0.id,
             requestId,
-            ...(existingToolPolicy ? { toolPolicy: existingToolPolicy } : {}),
           });
         }
         const formatted = await formatPrimarySubmission(harness(), bot, existing, context);
@@ -1773,9 +1749,6 @@ export function createTurnAdmission(deps) {
       if (!(await pendingViable(binding.nativeId, input.requestId))) return null;
       const conversation = await h.conversation(executionNativeId, context);
       if (!conversation) throw new Error('work conversation is missing');
-      if (unifiedExecution) {
-        await applyAgentProfile(h, executionNativeId, profileFor(bot.botId, null), context);
-      }
       if (!canAdmit()) return null;
       const submission = await conversation.submit(input, context);
       // submit 在飞期间 stop/preempt 已作旧 pending：立即中止刚提交的原生工作，

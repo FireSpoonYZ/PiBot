@@ -79,12 +79,12 @@ function resolveActor(actor) {
   };
 }
 
-function assertTargetAuthorized(caller, deviceId, botId) {
-  if (!caller.requireTargets) return;
+function findAuthorizedTarget(caller, deviceId, botId) {
+  if (!caller.requireTargets) return null;
   if (!Array.isArray(caller.botTargets) || caller.botTargets.length === 0) {
     fail('FORBIDDEN', 'External dispatch is denied: no authorized Bot targets');
   }
-  const matched = caller.botTargets.some((target) => (
+  const matched = caller.botTargets.find((target) => (
     isPlainObject(target) &&
     typeof target.deviceId === 'string' &&
     typeof target.botId === 'string' &&
@@ -93,6 +93,22 @@ function assertTargetAuthorized(caller, deviceId, botId) {
   ));
   if (!matched) {
     fail('FORBIDDEN', 'Target Bot is not authorized for this client');
+  }
+  return matched;
+}
+
+function assertRouteAuthorized(caller, matchedTarget, routeId) {
+  if (routeId === null) return;
+  // External OAuth callers cannot select arbitrary webhook routes merely by holding a botTarget,
+  // because webhook routes carry owner-authored fixed instructions. Reject by default unless
+  // an administrator explicitly approved the routeId on the matched target grant.
+  if (caller.kind === 'oauth' || caller.requireTargets) {
+    const approved = Array.isArray(matchedTarget?.approvedRouteIds)
+      ? matchedTarget.approvedRouteIds
+      : [];
+    if (!approved.some((id) => typeof id === 'string' && id === routeId)) {
+      fail('FORBIDDEN', 'External dispatch routeId is not approved for this client');
+    }
   }
 }
 
@@ -151,7 +167,8 @@ export function createHandlers(deps) {
       const routeId = body.routeId === undefined ? null : requiredId(body.routeId, 'routeId');
       const metadata = normalizeMetadata(body.metadata);
 
-      assertTargetAuthorized(caller, deviceId, botId);
+      const matchedTarget = findAuthorizedTarget(caller, deviceId, botId);
+      assertRouteAuthorized(caller, matchedTarget, routeId);
       assertDeviceExists(deps.bridge, deviceId);
 
       const { event, created } = deps.store.acceptDispatchMessage({
@@ -177,7 +194,7 @@ export function createHandlers(deps) {
       const botId = requiredId(body.botId, 'botId');
       const requestId = requiredId(body.requestId, 'requestId', MAX_REQUEST_ID_LEN);
 
-      assertTargetAuthorized(caller, deviceId, botId);
+      findAuthorizedTarget(caller, deviceId, botId);
 
       const event = deps.store.getDispatchMessage({
         callerKey: caller.callerKey,

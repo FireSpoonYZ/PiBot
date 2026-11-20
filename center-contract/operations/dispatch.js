@@ -6,9 +6,9 @@ export const operations = [
     description:
       'Durably dispatch a message to an authorized target Bot via Center Webhook delivery. ' +
       'Requires a stable caller-generated requestId for idempotency (retrying with the same requestId and payload returns the existing dispatch record; different payloads fail with REQUEST_CONFLICT). ' +
-      'Optionally binds to a pre-approved fixed Webhook route on the same target Bot without exposing Webhook tokens. ' +
       'Returns acceptance/delivery status distinct from completion; poll dispatch_get_bot_message for completion and final answerText. ' +
-      'External MCP-triggered turns run under a restricted safe tool policy on Host without local file, CLI, or admin tools.',
+      'External MCP-triggered turns run on Host in an isolated request-scoped zero-tool Durable session using only the target Bot model configuration and safe public persona fields, without reading private chat history, Hindsight memory, enabled plugins, or SOUL private documents, and without writing replies into the Bot private chat. ' +
+      'External OAuth callers cannot select webhook routeId by default unless explicitly approved by an administrator on the target grant.',
     properties: {
       deviceId: {
         type: 'string',
@@ -38,7 +38,7 @@ export const operations = [
         type: 'string',
         minLength: 1,
         maxLength: 128,
-        description: 'Optional pre-approved fixed Webhook route ID bound to the same target deviceId and botId.',
+        description: 'Optional admin-approved fixed Webhook route ID bound to the same target deviceId and botId. Rejected by default for external OAuth callers unless explicitly approved on the target grant.',
       },
       metadata: {
         type: 'object',
