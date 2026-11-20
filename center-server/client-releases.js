@@ -359,13 +359,14 @@ export function registerClientReleaseRoutes(app, { store, dataRoot, registry, in
     }
   });
 
-  app.post('/api/client-releases/:id/publish', { onRequest: ownerWrite }, async (req) => {
-    const body = req.body;
+  const setReleasePublished = async (req) => {
+    const body = req?.body;
     if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.published !== 'boolean' || Object.keys(body).some((key) => key !== 'published')) {
       fail('INVALID_ARGUMENT', 'Expected {published: boolean}');
     }
-    return publicRecord(store.setClientReleasePublished(req.params.id, body.published), base);
-  });
+    return publicRecord(store.setClientReleasePublished(req?.params?.id, body.published), base);
+  };
+  app.post('/api/client-releases/:id/publish', { onRequest: ownerWrite }, setReleasePublished);
 
   app.get('/api/client-releases/:id/download', async (req, reply) => {
     const access = requestAccess(req);
@@ -431,5 +432,5 @@ export function registerClientReleaseRoutes(app, { store, dataRoot, registry, in
       sourceCommit: best.sourceCommit,
     };
   });
-  return { listReleases };
+  return { listReleases, setReleasePublished };
 }
