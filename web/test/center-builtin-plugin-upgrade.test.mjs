@@ -397,7 +397,7 @@ test('owner upgrades existing ask-user-question@1.0.2 and tasks@1.0.0 in place t
     });
     assert.equal(mismatchOpRes.statusCode, 200);
     assert.equal(mismatchOpRes.json().phase, 'failed');
-    assert.equal(mismatchOpRes.json().error.code, 'VALIDATION_FAILED');
+    assert.deepEqual(mismatchOpRes.json().error, { code: 'INTERNAL_ERROR', message: 'Operation failed' });
 
     const askStillRes = await app.inject({
       method: 'GET',

@@ -585,6 +585,18 @@ test('hiding tool output keeps reply order, failures, and only live prompts that
   assert.equal(logTool.output, 'raw output');
 });
 
+test('hiding tool output keeps a finished tool\'s authoritative pending questionnaire until revoked', () => {
+  const tool = {
+    id: 'question', name: 'ask_user_question', status: 'done',
+    durableWait: true, presentationLive: true,
+    presentation: { kind: 'questionnaire', version: 1, installationId: 'ask',
+      conversationId: 11, requestId: '42', status: 'pending' },
+  };
+  const turn = { id: 'reply', role: 'assistant', entryId: 5, text: '', tools: [tool] };
+  assert.deepEqual(chatTurnsWithoutToolOutput([turn])[0].tools, [tool]);
+  assert.deepEqual(chatTurnsWithoutToolOutput([{ ...turn, tools: [{ ...tool, durableWait: false }] }]), []);
+});
+
 test('projectLiveState preserves pi.reset marker across empty, windowed, compacted, and pre-reset failure states', () => {
   const mkUser = (id, text) => ({
     id,

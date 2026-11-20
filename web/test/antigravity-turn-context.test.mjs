@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   ANTIGRAVITY_API,
@@ -361,6 +363,10 @@ export function createPlugin({ host }) {
     ['test-bc-context', { version: '1.0.0', packageRoot: bcDir, dataDir: path.join(bcDir, 'data'), manifest: { id: 'test.bc-context', kind: 'plugin', components: { host: { entry: 'entry.mjs' } } } }],
     ['test-hindsight-recall', { version: '1.0.0', packageRoot: recallDir, dataDir: path.join(recallDir, 'data'), manifest: { id: 'test.hindsight-recall', kind: 'plugin', components: { host: { entry: 'entry.mjs' } } } }],
   ]);
+  const questionnaireRoot = fileURLToPath(new URL('../../plugins/ask-user-question/', import.meta.url));
+  const questionnaireManifest = JSON.parse(fs.readFileSync(path.join(questionnaireRoot, 'capability.json'), 'utf8'));
+  installed.set('test-questionnaire', { version: questionnaireManifest.version, packageRoot: questionnaireRoot,
+    dataDir: path.join(rootDir, 'questionnaire-data'), manifest: questionnaireManifest });
   return { async getInstalled(id, opts) { const e = installed.get(id); return !e || (opts?.version && e.version !== opts.version) ? null : e; } };
 }
 
@@ -537,6 +543,65 @@ test('Real Host Runtime + Durable -> openAntigravity: trailing SDK SystemEntry (
     assert.ok(captured[3].messages.slice(tc3.inputIndex + 1).some((m) => m.role === 'system' && (m.toolsRemoved ?? []).some((x) => x.name === 'ping_probe_tool')));
     assert.deepEqual(driverHarness.runs[2].request.images, [{ data: PNG_1X1, mimeType: 'image/png' }]);
     assert.ok(!driverHarness.runs[2].mcpTools.some((tool) => tool.name === 'ping_probe_tool'));
+  } catch (err) {
+    hadError = true;
+    throw err;
+  } finally {
+    await closeAndRemove({ runtime, antigravity, rootDir, hadError });
+  }
+});
+
+test('Antigravity sends the detached questionnaire answer as a fresh authoritative input', async (t) => {
+  const driver = createControlledAcpDriverHarness(t);
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pibot-agy-wait-'));
+  const cwd = path.join(rootDir, 'workspace');
+  fs.mkdirSync(cwd, { recursive: true });
+  const antigravity = openIsolatedAntigravity(rootDir);
+  const captured = [];
+  let runtime;
+  let hadError = false;
+  try {
+    const env = await openTestHostRuntime({ rootDir, antigravity, capturedPayloads: captured });
+    runtime = env.runtime;
+    const bot = await runtime.createBot({ requestId: 'create-acp-wait', role: 'Acp Assistant', cwd, makePrimary: true });
+    await env.applySnapshot(env.makeSnapshot(2, [{ botId: bot.botId, cwd, model: BASE_MODEL_SEL, capabilities: [
+      { ...makeCapability('test-questionnaire', {}), targetVersion: '1.1.0' },
+    ] }]));
+    driver.setOnRun(async ctx => {
+      if (driver.runs.length === 1) {
+        await ctx.mcp.handler.onToolCall('wait-question', 'ask_user_question', {
+          questions: [{ header: 'Design', question: 'Pick a finish', options: [
+            { label: 'Copper', description: 'Warm' }, { label: 'Steel', description: 'Cool' },
+          ] }],
+        }, ctx.signal ?? new AbortController().signal);
+      }
+      ctx.emit({ type: 'text', delta: 'ack' });
+      ctx.finish({ conversationId: ctx.conversationId, status: 'OK', response: 'ack', finished: true, aborted: false });
+    });
+    await runtime.submit(bot.botId, { requestId: 'acp-wait-input', text: 'Pick a finish first' });
+    assert.equal((await env.waitForSubmission(bot.botId, 'acp-wait-input')).status, 'done');
+    const history = (await runtime.history(bot.botId, { limit: 30 })).items;
+    const question = history.flatMap(entry => entry.model ?? []).find(message => message.durableWait === true)?.details.presentation;
+    assert.equal(question?.status, 'pending');
+
+    const { result } = await runtime.callCapabilityAction('test-questionnaire', 'answerQuestionnaire', {
+      requestId: 'acp-wait-answer', deviceId: (await runtime.getCurrentDevice()).deviceId, botId: bot.botId,
+      input: { conversationId: question.conversationId, requestId: question.requestId,
+        cancelled: false, answers: [{ questionIndex: 0, selectedOptions: [0] }] },
+    });
+    assert.equal(result.status, 'answered');
+    const key = createHash('sha256').update(JSON.stringify([
+      bot.primaryConversationId, question.installationId, question.conversationId, question.requestId,
+    ])).digest('hex');
+    const receipt = await env.waitForSubmission(bot.botId, `wait-${key.slice(0, 40)}`);
+    assert.equal(receipt.status, 'done', JSON.stringify(receipt));
+    assert.equal(driver.runs.length, 2, `Captured ACP requests: ${JSON.stringify(captured.map(p => p.turnContext))}`);
+    const resumed = captured.at(-1);
+    const liveInput = resumed.messages[resumed.turnContext.inputIndex];
+    assert.equal(liveInput.role, 'user');
+    assert.match(messageText(liveInput), /Pick a finish.*Copper/);
+    assert.doesNotMatch(messageText(liveInput), /Pick a finish first/);
+    assert.match(driver.runs[1].request.prompt, /Copper/);
   } catch (err) {
     hadError = true;
     throw err;

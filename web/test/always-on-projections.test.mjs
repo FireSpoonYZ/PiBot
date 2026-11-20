@@ -121,14 +121,18 @@ test('wire accepts bounded active identities and rejects forged wait fields', ()
 
 test('run contexts retain all input events and use the persisted first entry across handoffs', async () => {
   const bot = { botId: 'bot', deviceId: 'device', primaryConversationId: 'public' };
-  let run = { taskId: 40, first: 10, inputs: [1, 2] };
+  let run = { taskId: 40, first: 10, inputs: [1, 2, 3] };
   const submissions = {
     1: { id: 1, type: 'input', conversationId: 11, requestId: 'r1', entry: 10 },
     2: { id: 2, type: 'input', conversationId: 11, requestId: 'r2', entry: 12 },
+    3: { id: 3, type: 'input', conversationId: 11, requestId: 'r3', entry: 13 },
   };
   const entries = {
     10: { id: 10, kind: 'host.user-message', data: { requestId: 'r1', turn: { sender: { kind: 'user' }, replyTarget: { kind: 'primary' }, stopEpoch: 3 } } },
     12: { id: 12, kind: 'host.work-trigger', data: { requestId: 'r2', turn: { kind: 'dm', scopeId: 'dm', sender: { kind: 'bot', botId: 'peer' }, replyTarget: { kind: 'dm', scopeId: 'dm', botId: 'peer' }, stopEpoch: 3 } } },
+    13: { id: 13, kind: 'host.user-message', data: { requestId: 'r3', turn: {
+      sender: { kind: 'host', sourceType: 'google-workspace-rule' }, replyTarget: { kind: 'primary' },
+    } } },
   };
   const harness = {
     async snapshot(token) {
@@ -146,10 +150,12 @@ test('run contexts retain all input events and use the persisted first entry acr
   });
   const dispatchContexts = { r1: { taskId: 'global-task', stepId: 'step', executionRevision: 3 } };
   const first = await sessions.getRunContext({ conversationId: 11, taskId: 40 }, {}, { dispatchContexts });
-  assert.deepEqual(first.requestIds, ['r1', 'r2']);
-  assert.deepEqual(first.submissionIds, [1, 2]);
+  assert.deepEqual(first.requestIds, ['r1', 'r2', 'r3']);
+  assert.deepEqual(first.submissionIds, [1, 2, 3]);
   assert.equal(first.events[0].dispatchContext.taskId, 'global-task');
   assert.equal(first.events[1].dispatchContext, null);
+  assert.equal(first.events[2].source, 'google-workspace-rule');
+  assert.equal(first.events[2].sender.sourceType, 'google-workspace-rule');
   assert.equal(first.runId, 'run:["device",11,10]');
   run.taskId = 41;
   const next = await sessions.getRunContext({ conversationId: 11, taskId: 41 }, {});

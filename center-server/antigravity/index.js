@@ -292,7 +292,13 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			const existing = store.get(slot.key);
 			const messageCount = cleanMessages.length;
 
-			const results = collectToolResults(cleanMessages, slot.roundTrips.pendingIds);
+			const inputIndex = resolvedTurn.inputIndex;
+			const inputRole = inputIndex !== null ? cleanMessages[inputIndex]?.role : undefined;
+			// A fresh user input can carry a parked call's result in history
+			// (for example after a detached questionnaire). It is not a tool resume.
+			const results = inputRole === "toolResult"
+				? collectToolResults(cleanMessages, slot.roundTrips.pendingIds)
+				: [];
 			const isContinuation = results.length > 0;
 			const escalatedNames = results
 				.map((r) => slot.roundTrips.poll(r.toolCallId)?.name)
@@ -383,10 +389,8 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 					return;
 				}
 
-				const inputIndex = resolvedTurn.inputIndex;
 				const userPrompt = extractUserPrompt({ messages: cleanMessages }, inputIndex);
 				const images = extractImages({ messages: cleanMessages }, inputIndex);
-				const inputRole = inputIndex !== null ? cleanMessages[inputIndex]?.role : undefined;
 				const resume =
 					!userPrompt &&
 					images.length === 0 &&
