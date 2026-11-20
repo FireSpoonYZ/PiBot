@@ -2008,6 +2008,10 @@ a.ca-btn:focus {
     align-items: stretch;
   }
 
+  .ca-default-card > .ca-row-main {
+    flex-basis: auto;
+  }
+
   .ca-default-card .ca-row-actions {
     justify-content: flex-end;
     flex-wrap: wrap;
