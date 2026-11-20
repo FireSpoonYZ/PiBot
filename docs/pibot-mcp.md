@@ -25,7 +25,7 @@ Bot 可通过 `tool_search` 按需加载内置管理工具。Center 可以把同
 
 ## 发消息和取回复
 
-1. 调用 `dispatch_send_bot_message`，指定已授权的 `deviceId`、`botId`、`message` 和稳定的 `requestId`。回执表示已受理；Host 离线时等待上线，不会由 Center 代跑模型。
+1. 先用 `dispatch_list_targets` 查看本客户端获准的 Bot。调用 `dispatch_send_bot_message` 时指定已授权的 `deviceId`、`botId`、`message` 和稳定的 `requestId`。回执表示已受理；Host 离线时等待上线，不会由 Center 代跑模型。
 2. 用相同的目标和 `requestId` 调用 `dispatch_get_bot_message`。只有执行成功才返回该请求的答复；同一客户端重试同一请求不会生成第二次执行。外部请求使用独立会话，只复用目标 Bot 的模型选择和角色资料，不读取它的私聊、SOUL 或记忆，也不运行它的工具。
 3. Bot 本身在对话中仍用 `send_to` 发送 DM 或群消息，保留发送 Bot 的身份和原始回复关系；MCP 不冒充该 Bot。
 

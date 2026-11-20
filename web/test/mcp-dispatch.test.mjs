@@ -1774,7 +1774,7 @@ test('dispatch contract descriptors align 1-to-1 with dispatch handlers', async 
     const descriptorNames = operations.map((op) => op.name).sort();
     const handlerNames = Object.keys(handlers).sort();
     assert.deepEqual(descriptorNames, handlerNames);
-    assert.deepEqual(descriptorNames, ['dispatch_get_bot_message', 'dispatch_send_bot_message']);
+    assert.deepEqual(descriptorNames, ['dispatch_get_bot_message', 'dispatch_list_targets', 'dispatch_send_bot_message']);
     const sendOp = operations.find((op) => op.name === 'dispatch_send_bot_message');
     const getOp = operations.find((op) => op.name === 'dispatch_get_bot_message');
     assert.equal(sendOp.readOnly, false);
