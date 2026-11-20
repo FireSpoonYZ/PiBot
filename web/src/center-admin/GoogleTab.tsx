@@ -1573,12 +1573,11 @@ export function GoogleTab({
                                     className="ca-btn ca-btn-sm"
                                     disabled={activeFlow?.phase === 'pending' || !clientConfigured}
                                     onClick={() => {
-                                      const union = row.choice
+                                      const choices = row.choice
                                         ? mergeChoices(existingChoices, [row.choice])
-                                        : existingChoices.length > 0
-                                          ? existingChoices
-                                          : ['gmail', 'calendar', 'files'];
-                                      void startAuthorize(union, account.email);
+                                        : existingChoices;
+                                      if (choices.length) void startAuthorize(choices, account.email);
+                                      else openConnectModal(account);
                                     }}
                                   >
                                     {t('补授权', 'Grant permission')}

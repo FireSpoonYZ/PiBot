@@ -1,6 +1,6 @@
 // Shared built-in identity and wire bounds for Center-hosted Google Workspace MCP.
 
-export const GOOGLE_WORKSPACE_INSTALLATION_ID = 'builtin-google-workspace-mcp';
+export { GOOGLE_WORKSPACE_INSTALLATION_ID } from '../../center-contract/google-workspace.js';
 export const GOOGLE_WORKSPACE_PACKAGE_ID = 'e-launcher.google-workspace';
 export const GOOGLE_WORKSPACE_VERSION = '1.0.0';
 export const GOOGLE_WORKSPACE_DISPLAY_NAME = 'Google Workspace';

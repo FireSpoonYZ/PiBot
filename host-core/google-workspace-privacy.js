@@ -1,7 +1,7 @@
 // host-core/google-workspace-privacy.js
 // Google Workspace 业务结果的数据使用边界（Host 侧权威隐私 provenance Helper）：
 // - 只认 Center 受信解析分配：target === 'center' 且
-//   (installationId === 'builtin.google-workspace' || 顶层 dataBoundary === 'google-workspace')；
+//   installationId === 'builtin.google-workspace'；
 //   绝不以 packageId、effectiveConfig、工具名、业务结果文本前缀或模型可写字段作为身份依据。
 // - 仅 tools/list 或默认对全部 Bot 可见绝不标记会话；只有在真实执行 Google Workspace MCP
 //   调用时（进入 Center 网络调用前）才原子持久化标记到 Durable 文档，标记失败则 fail-closed
@@ -17,7 +17,9 @@ import { randomUUID } from 'node:crypto';
 import { defineDoc, ResetEntry } from '@earendil-works/pi-durable';
 import { messageError } from './message-protocol.js';
 
-export const GOOGLE_WORKSPACE_MCP_INSTALLATION_ID = 'builtin.google-workspace';
+import { GOOGLE_WORKSPACE_INSTALLATION_ID as GOOGLE_WORKSPACE_MCP_INSTALLATION_ID } from '../center-contract/google-workspace.js';
+
+export { GOOGLE_WORKSPACE_MCP_INSTALLATION_ID };
 export const GOOGLE_WORKSPACE_DATA_BOUNDARY = 'google-workspace';
 export const GOOGLE_WORKSPACE_RULE_SOURCE_TYPE = 'google-workspace-rule';
 export const GOOGLE_WORKSPACE_PRIVACY_DOC_KIND = 'host.google-workspace-privacy';
@@ -75,10 +77,7 @@ export const GoogleWorkspacePrivacyState = defineDoc({
 export function isGoogleWorkspaceCapability(capability) {
   if (!isPlainObject(capability)) return false;
   if (capability.target !== 'center') return false;
-  return (
-    capability.installationId === GOOGLE_WORKSPACE_MCP_INSTALLATION_ID ||
-    capability.dataBoundary === GOOGLE_WORKSPACE_DATA_BOUNDARY
-  );
+  return capability.installationId === GOOGLE_WORKSPACE_MCP_INSTALLATION_ID;
 }
 
 /** Host 侧合法的自动化 sourceType 白名单。 */
@@ -767,7 +766,7 @@ export function createGoogleWorkspacePrivacy({ getHarness, context, documents = 
 /**
  * 供 host-core/capabilities/mcp.js（及 center 组复用）调用的单一门控入口：
  * - 非 Google Workspace MCP 直接返回 { guarded: false, finish }（零开销）；
- * - 命中 target === 'center' 且 (installationId === 'builtin.google-workspace' || dataBoundary === 'google-workspace') 时，
+ * - 命中 target === 'center' 且 installationId === 'builtin.google-workspace' 时，
  *   必须在真实调用 Center 之前完成持久标记；host.dataPrivacy 缺失或提交失败一律 fail-closed 抛
  *   GOOGLE_WORKSPACE_PRIVACY_UNAVAILABLE，绝不执行未受保护的调用。
  */

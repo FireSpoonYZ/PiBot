@@ -335,6 +335,7 @@ export async function createMcpDriver({ installationId, version, target, dataBou
                   const prepared = await prepareTransfer(tool.name, rawArgs, { cwd });
                   callArgs = unwrapPreparedArgs(prepared, rawArgs);
                 } catch (error) {
+                  await privacyGuard.finish(invocation.abortSignal?.aborted ? 'aborted' : 'failed');
                   invocation.abortSignal?.throwIfAborted();
                   check();
                   return {

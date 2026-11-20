@@ -155,7 +155,7 @@ test('Google Workspace provenance relies strictly on Center assignment and struc
   );
   assert.equal(
     isGoogleWorkspaceCapability({ target: 'center', installationId: 'other-id', dataBoundary: GOOGLE_WORKSPACE_DATA_BOUNDARY }),
-    true,
+    false,
   );
   // target=host, packageId, effectiveConfig, tool names must NEVER match.
   assert.equal(
