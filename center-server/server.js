@@ -26,7 +26,6 @@ import { openAntigravity } from './antigravity/index.js';
 import { openGoogleAccounts } from './google-workspace/accounts.js';
 import { openGoogleRules } from './google-workspace/rules.js';
 import { createGoogleWorkspaceMcpAdapter } from './google-workspace/mcp-server.js';
-import { createGoogleRuleDispatcher } from './google-workspace/rule-dispatch.js';
 import { GOOGLE_ERROR_STATUS } from './google-workspace/routes.js';
 import { GOOGLE_WORKSPACE_INSTALLATION_ID } from './google-workspace/constants.js';
 
@@ -113,16 +112,13 @@ export async function openCenterServer({ dataRoot, encryptionKey, sessionKey, ow
     learning = await openLearningService({ dataRoot, store, skills, runLearningJob });
     botManagement = openBotManagement({ store, packages, notify: (deviceId) => routes?.notifyDevice?.(deviceId) });
     vault = await openCenterVault({ dataRoot, encryptionKey, store });
-    const googleRuleDispatch = createGoogleRuleDispatcher({
-      store,
-      notify: (deviceId) => routes?.notifyDevice?.(deviceId, 'webhook-ready'),
-    });
     googleRules = await openGoogleRules({
       store,
       google: googleAccounts,
-      dispatch: googleRuleDispatch.dispatch,
+      notify: (deviceId) => routes?.notifyDevice?.(deviceId, 'webhook-ready'),
+      bridge,
     });
-    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault, google: { accounts: googleAccounts, rules: googleRules, ruleDispatch: googleRuleDispatch } });
+    routes = registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault, google: { accounts: googleAccounts, rules: googleRules } });
     if (webRoot) {
       await app.register(fastifyStatic, { root: webRoot, prefix: '/' });
       app.setNotFoundHandler((req, reply) => {

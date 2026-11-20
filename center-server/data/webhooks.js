@@ -4,8 +4,6 @@ const fail = (code, message) => { throw Object.assign(new Error(message), { code
 const terminal = new Set(['succeeded', 'failed', 'cancelled', 'expired']);
 const progress = { dispatching: 0, queued: 1, running: 2 };
 const hash = value => createHash('sha256').update(value).digest();
-const INTERNAL_ROUTE_PREFIX = 'center-internal-';
-const isInternalRouteId = (id) => typeof id === 'string' && id.startsWith(INTERNAL_ROUTE_PREFIX);
 
 function parseCursor(cursor) {
   if (cursor == null) return null;
@@ -58,7 +56,6 @@ function eventValue(row, host = false) {
 export function webhookStore(db, transaction, options = {}) {
   const extraDelivery = options.extraDelivery || null;
   function requireRoute(id) {
-    if (isInternalRouteId(id)) fail('NOT_FOUND', 'Webhook not found');
     const row = db.prepare('SELECT * FROM webhook_routes WHERE id = ? AND deleted_at IS NULL').get(id);
     if (!row) fail('NOT_FOUND', 'Webhook not found');
     return row;
@@ -85,7 +82,7 @@ export function webhookStore(db, transaction, options = {}) {
   }
   return {
     listWebhookRoutes() {
-      return db.prepare("SELECT * FROM webhook_routes WHERE deleted_at IS NULL AND id NOT LIKE 'center-internal-%' ORDER BY created_at DESC, rowid DESC").all().map(routeValue);
+      return db.prepare('SELECT * FROM webhook_routes WHERE deleted_at IS NULL ORDER BY created_at DESC, rowid DESC').all().map(routeValue);
     },
     getWebhookRoute(id) {
       return routeValue(requireRoute(id));
@@ -155,57 +152,6 @@ export function webhookStore(db, transaction, options = {}) {
             now, new Date(Date.parse(now) + 24 * 60 * 60 * 1000).toISOString(), now, route.instruction, payloadJson);
         settlePending('id = ?', [eventId], now);
         return { event: eventValue(db.prepare('SELECT * FROM webhook_events WHERE id = ?').get(eventId)), created: true };
-      });
-    },
-    // Internal Center -> Host durable trigger delivery (e.g. Google Workspace rules).
-    // Uses the reserved `center-internal-` route namespace that is hidden from all public
-    // /api/webhooks/* management and Bearer-auth endpoints, while reusing the durable
-    // webhook_events inbox, 24h expiry, Host poll, stop-epoch and receipt ledger.
-    enqueueInternalWebhookEvent({ routeId, routeName, deviceId, botId, idempotencyKey, instruction, payloadJson }) {
-      if (!isInternalRouteId(routeId)) fail('FORBIDDEN', 'Internal webhook route ID required');
-      return transaction(() => {
-        const botExists = db.prepare('SELECT 1 FROM device_bots WHERE device_id = ? AND bot_id = ?').get(deviceId, botId);
-        if (!botExists) fail('BOT_NOT_FOUND', 'Bot not found');
-        const now = new Date().toISOString();
-        const existingRoute = db.prepare('SELECT id FROM webhook_routes WHERE id = ?').get(routeId);
-        if (!existingRoute) {
-          db.prepare(`INSERT INTO webhook_routes
-            (id, name, device_id, bot_id, instruction, enabled, token_hash, created_at, updated_at, deleted_at)
-            VALUES (?, ?, ?, ?, ?, 1, '', ?, ?, NULL)`)
-            .run(routeId, routeName, deviceId, botId, instruction, now, now);
-        } else {
-          db.prepare(`UPDATE webhook_routes
-            SET name = ?, device_id = ?, bot_id = ?, instruction = ?, enabled = 1, updated_at = ?, deleted_at = NULL
-            WHERE id = ?`)
-            .run(routeName, deviceId, botId, instruction, now, routeId);
-        }
-        settlePending('route_id = ?', [routeId], now);
-        const digest = hash(payloadJson).toString('hex');
-        const previous = db.prepare('SELECT * FROM webhook_events WHERE route_id = ? AND idempotency_key = ?').get(routeId, idempotencyKey);
-        if (previous) {
-          return { event: eventValue(previous), created: false };
-        }
-        const eventId = randomUUID();
-        db.prepare(`INSERT INTO webhook_events
-          (id, route_id, route_name, device_id, bot_id, request_id, idempotency_key, body_digest,
-           status, received_at, expires_at, updated_at, instruction, payload_json)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`)
-          .run(eventId, routeId, routeName, deviceId, botId, randomUUID(), idempotencyKey, digest,
-            now, new Date(Date.parse(now) + 24 * 60 * 60 * 1000).toISOString(), now, instruction, payloadJson);
-        settlePending('id = ?', [eventId], now);
-        return { event: eventValue(db.prepare('SELECT * FROM webhook_events WHERE id = ?').get(eventId)), created: true };
-      });
-    },
-    cancelInternalWebhookRoute(routeId, code = 'WEBHOOK_DELETED', message = 'Internal route was removed before dispatch') {
-      if (!isInternalRouteId(routeId)) fail('FORBIDDEN', 'Internal webhook route ID required');
-      return transaction(() => {
-        const now = new Date().toISOString();
-        db.prepare('UPDATE webhook_routes SET enabled = 0, deleted_at = ?, updated_at = ? WHERE id = ?')
-          .run(now, now, routeId);
-        const info = db.prepare(`UPDATE webhook_events SET status = 'cancelled', updated_at = ?, error_json = ?
-          WHERE status = 'pending' AND route_id = ?`)
-          .run(now, JSON.stringify({ code, message }), routeId);
-        return { cancelled: Number(info?.changes ?? 0) };
       });
     },
     listWebhookEvents(id) {

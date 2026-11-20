@@ -25,11 +25,24 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function isBinaryDownloadObject(value) {
+  return isPlainObject(value)
+    && typeof value.data === 'string'
+    && value.data.length > 0
+    && (value.file !== undefined
+      || value.name !== undefined
+      || value.mimeType !== undefined
+      || value.ref !== undefined
+      || value.attachmentId !== undefined
+      || value.size !== undefined);
+}
+
 function hasBinaryTransferField(value, depth = 0) {
   if (depth > 12 || value === null || value === undefined) return false;
   if (value instanceof Uint8Array || Buffer.isBuffer(value)) return true;
   if (typeof value !== 'object') return false;
   if (Array.isArray(value)) return value.some(item => hasBinaryTransferField(item, depth + 1));
+  if (isBinaryDownloadObject(value)) return true;
   for (const [key, item] of Object.entries(value)) {
     if (GOOGLE_BINARY_FIELD_KEYS.has(key) && item !== null && item !== undefined && item !== '') return true;
     if (hasBinaryTransferField(item, depth + 1)) return true;
@@ -51,9 +64,10 @@ function redactBinaryFields(value, keyName = '', depth = 0) {
   }
   if (typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map(item => redactBinaryFields(item, '', depth + 1));
+  const redactDataHere = isBinaryDownloadObject(value);
   const out = {};
   for (const [key, item] of Object.entries(value)) {
-    if (GOOGLE_BINARY_FIELD_KEYS.has(key) && item !== null && item !== undefined && item !== '') {
+    if ((GOOGLE_BINARY_FIELD_KEYS.has(key) || (redactDataHere && key === 'data' && typeof item === 'string')) && item !== null && item !== undefined && item !== '') {
       out[key] = '[binary payload omitted]';
       continue;
     }
@@ -121,14 +135,15 @@ function safeTransferErrorMessage(error, fallback) {
   return JSON.stringify({ error: { code, message } });
 }
 
-async function finalizeGoogleToolResult(toolName, mcpResult, { cwd, args, finish }) {
+async function finalizeGoogleToolResult(toolName, mcpResult, { transferOptions, args, finish }) {
   if (mcpResult?.isError === true) {
     return sanitizeGoogleMcpResultForLlm(mcpResult);
   }
+  const finishOpts = { ...transferOptions, args };
   if (isPlainObject(mcpResult) && isPlainObject(mcpResult.structuredContent)) {
-    let finished = await finish(toolName, mcpResult.structuredContent, { cwd, args });
+    let finished = await finish(toolName, mcpResult.structuredContent, finishOpts);
     if (finished === mcpResult.structuredContent && hasBinaryTransferField(mcpResult.structuredContent)) {
-      finished = await finish(toolName, mcpResult, { cwd, args });
+      finished = await finish(toolName, mcpResult, finishOpts);
     }
     if (isPlainObject(finished) && Array.isArray(finished.content)) {
       return sanitizeGoogleMcpResultForLlm(finished);
@@ -146,7 +161,7 @@ async function finalizeGoogleToolResult(toolName, mcpResult, { cwd, args, finish
     }
     return sanitizeGoogleMcpResultForLlm(mcpResult);
   }
-  const finished = await finish(toolName, mcpResult, { cwd, args });
+  const finished = await finish(toolName, mcpResult, finishOpts);
   if (isPlainObject(finished) && Array.isArray(finished.content)) {
     return sanitizeGoogleMcpResultForLlm(finished);
   }
@@ -326,13 +341,19 @@ export async function createMcpDriver({ installationId, version, target, dataBou
               const signal = invocation.abortSignal ? AbortSignal.any([invocation.abortSignal, abort.signal]) : abort.signal;
               const rawArgs = isPlainObject(args) ? args : {};
               let callArgs = args;
-              let cwd;
+              let transferOptions;
               if (isGoogleWorkspace) {
-                cwd = await resolveBotCwd(host, botId, api.conversationId);
+                const cwd = await resolveBotCwd(host, botId, api.conversationId);
+                const dataRoot = typeof host?.host?.dataRoot === 'string' && host.host.dataRoot ? host.host.dataRoot : undefined;
+                transferOptions = {
+                  cwd,
+                  ...(dataRoot ? { dataRoot, botId } : {}),
+                  signal,
+                };
                 invocation.abortSignal?.throwIfAborted();
                 check();
                 try {
-                  const prepared = await prepareTransfer(tool.name, rawArgs, { cwd });
+                  const prepared = await prepareTransfer(tool.name, rawArgs, transferOptions);
                   callArgs = unwrapPreparedArgs(prepared, rawArgs);
                 } catch (error) {
                   await privacyGuard.finish(invocation.abortSignal?.aborted ? 'aborted' : 'failed');
@@ -361,7 +382,7 @@ export async function createMcpDriver({ installationId, version, target, dataBou
               }
               if (isGoogleWorkspace) {
                 try {
-                  const finalized = await finalizeGoogleToolResult(tool.name, result, { cwd, args: rawArgs, finish: finishTransfer });
+                  const finalized = await finalizeGoogleToolResult(tool.name, result, { transferOptions, args: rawArgs, finish: finishTransfer });
                   invocation.abortSignal?.throwIfAborted();
                   check();
                   return { output: toLlmContent(finalized), isError: finalized.isError === true };

@@ -13,5 +13,3 @@ export const GOOGLE_CONFIGURE_BODY_LIMIT = 64 * 1024;
 export const GOOGLE_ACTION_BODY_LIMIT = 32 * 1024;
 export const GOOGLE_RULE_BODY_LIMIT = 64 * 1024;
 export const GOOGLE_TOOL_CALL_BODY_LIMIT = 6 * 1024 * 1024;
-
-export const INTERNAL_GOOGLE_RULE_ROUTE_PREFIX = 'center-internal-google-rule:';

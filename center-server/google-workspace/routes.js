@@ -38,6 +38,7 @@ export const GOOGLE_ERROR_STATUS = Object.freeze({
   GOOGLE_RULE_NOT_FOUND: 404,
   GOOGLE_NOT_CONFIGURED: 409,
   GOOGLE_NOT_CONNECTED: 409,
+  GOOGLE_ACCOUNT_NOT_CONNECTED: 409,
   GOOGLE_NO_ACCOUNTS: 409,
   GOOGLE_ACCOUNT_REQUIRED: 409,
   GOOGLE_ACCOUNT_AMBIGUOUS: 409,
@@ -60,6 +61,19 @@ export const GOOGLE_ERROR_STATUS = Object.freeze({
 });
 
 const GOOGLE_CODE_RE = /^GOOGLE_[A-Z0-9_]{1,56}$/;
+const STANDARD_CLIENT_ERROR_STATUS = Object.freeze({
+  INVALID_ARGUMENT: 400,
+  VALIDATION_FAILED: 400,
+  UNAUTHENTICATED: 401,
+  FORBIDDEN: 403,
+  NOT_FOUND: 404,
+  BOT_NOT_FOUND: 404,
+  BOT_ARCHIVED: 409,
+  INVALID_STATE: 409,
+  REQUEST_CONFLICT: 409,
+  REVISION_CONFLICT: 409,
+  PAYLOAD_TOO_LARGE: 413,
+});
 
 const fail = (code, message) => {
   throw Object.assign(new Error(message), { code });
@@ -72,12 +86,28 @@ function requireObject(value) {
   return value;
 }
 
-function optionalBoundedId(value, name) {
+function optionalBoundedText(value, name, max = 128) {
   if (value === undefined || value === null || value === '') return undefined;
-  if (typeof value !== 'string' || !value.trim() || value.length > 128 || !value.isWellFormed()) {
+  if (typeof value !== 'string' || !value.trim() || value.length > max || !value.isWellFormed()) {
     fail('INVALID_ARGUMENT', `Invalid ${name}`);
   }
   return value.trim();
+}
+
+function optionalQueryBoolean(value, name) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (value === true || value === 'true') return true;
+  if (value === false || value === 'false') return false;
+  fail('INVALID_ARGUMENT', `Invalid ${name}`);
+}
+
+function optionalQueryInt(value, name, min, max) {
+  if (value === undefined || value === null || value === '') return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    fail('INVALID_ARGUMENT', `Invalid ${name}`);
+  }
+  return parsed;
 }
 
 function setNoCacheHeaders(reply) {
@@ -144,8 +174,9 @@ function safeGoogleErrorDetails(err) {
 
 function handleGoogleRouteError(reply, err) {
   const code = typeof err?.code === 'string' ? err.code : '';
-  if (GOOGLE_CODE_RE.test(code)) {
+  if (GOOGLE_CODE_RE.test(code) || Object.prototype.hasOwnProperty.call(STANDARD_CLIENT_ERROR_STATUS, code)) {
     const mapped = GOOGLE_ERROR_STATUS[code]
+      ?? STANDARD_CLIENT_ERROR_STATUS[code]
       ?? (Number.isInteger(err?.statusCode) && err.statusCode >= 400 && err.statusCode <= 599 ? err.statusCode : 400);
     const message = typeof err?.message === 'string' && err.message.trim()
       ? scrubGoogleSecrets(err.message.trim()).slice(0, 400)
@@ -252,8 +283,8 @@ function renderCallbackHtml({ ok, phase, email, errorMessage }) {
 </html>`;
 }
 
-export function registerGoogleWorkspaceRoutes(app, { route, store, bridge, publicUrl, google }) {
-  const { accounts, rules, ruleDispatch } = google || {};
+export function registerGoogleWorkspaceRoutes(app, { route, publicUrl, google }) {
+  const { accounts, rules } = google || {};
   if (!accounts) throw new Error('google.accounts is required');
 
   const runOwner = (fn) => async (req, reply) => {
@@ -280,7 +311,13 @@ export function registerGoogleWorkspaceRoutes(app, { route, store, bridge, publi
     route('POST', `/api/google/${action}`, runOwner(async (req) => {
       const body = requireObject(req.body ?? {});
       const ownerKey = deriveGoogleOwnerKey(req);
-      return await accounts.manage(action, body, ownerKey);
+      const result = await accounts.manage(action, body, ownerKey);
+      if (action === 'remove' && result?.removed === true) {
+        try { rules?.onAccountRemoved?.(result.email ?? body.account); } catch { /* non-fatal runtime sync */ }
+      } else if (action === 'check') {
+        try { rules?.onAccountChanged?.(body.account); } catch { /* non-fatal runtime sync */ }
+      }
+      return result;
     }), true, bodyLimit);
   }
 
@@ -293,6 +330,9 @@ export function registerGoogleWorkspaceRoutes(app, { route, store, bridge, publi
     try {
       const raw = await accounts.callback(searchParams);
       const safe = sanitizeCallbackResult(raw);
+      if (safe.ok && safe.phase === 'connected') {
+        try { rules?.onAccountChanged?.(safe.account?.email); } catch { /* non-fatal runtime sync */ }
+      }
       if (jsonWanted) return safe;
       const statusCode = safe.ok ? 200 : (safe.phase === 'cancelled' ? 200 : 400);
       return reply
@@ -308,7 +348,8 @@ export function registerGoogleWorkspaceRoutes(app, { route, store, bridge, publi
       if (jsonWanted) return handleGoogleRouteError(reply, err);
       const code = typeof err?.code === 'string' ? err.code : '';
       const statusCode = GOOGLE_ERROR_STATUS[code]
-        ?? (code === 'INVALID_ARGUMENT' ? 400 : code === 'NOT_FOUND' ? 404 : code === 'FORBIDDEN' ? 403 : 400);
+        ?? STANDARD_CLIENT_ERROR_STATUS[code]
+        ?? 400;
       const message = typeof err?.message === 'string' && err.message.trim()
         ? scrubGoogleSecrets(err.message.trim()).slice(0, 300)
         : 'Authorization state is invalid or expired. Return to PiBot to start again.';
@@ -321,40 +362,37 @@ export function registerGoogleWorkspaceRoutes(app, { route, store, bridge, publi
 
   if (rules) {
     route('GET', '/api/google/rules', runOwner(async (req) => {
-      const deviceId = optionalBoundedId(req.query?.deviceId, 'deviceId');
-      const botId = optionalBoundedId(req.query?.botId, 'botId');
+      const deviceId = optionalBoundedText(req.query?.deviceId, 'deviceId', 128);
+      const botId = optionalBoundedText(req.query?.botId, 'botId', 128);
+      const account = optionalBoundedText(req.query?.account, 'account', 320);
+      const enabled = optionalQueryBoolean(req.query?.enabled, 'enabled');
       const filter = {
         ...(deviceId !== undefined ? { deviceId } : {}),
         ...(botId !== undefined ? { botId } : {}),
+        ...(account !== undefined ? { account } : {}),
+        ...(enabled !== undefined ? { enabled } : {}),
       };
       return await rules.manage('list', filter);
     }));
 
     route('POST', '/api/google/rules/save', runOwner(async (req) => {
       const body = requireObject(req.body);
-      const deviceId = optionalBoundedId(body.deviceId, 'deviceId');
-      const botId = optionalBoundedId(body.botId, 'botId');
-      if (deviceId !== undefined) {
-        const device = bridge?.registry?.get?.(deviceId);
-        if (!device || device.revokedAt !== null || deviceId === bridge?.deviceId) {
-          fail('NOT_FOUND', 'Device not found');
-        }
-        if (botId !== undefined && !store.listDeviceBots(deviceId).some((bot) => bot.botId === botId)) {
-          fail('BOT_NOT_FOUND', 'Bot not found');
-        }
-      }
       return await rules.manage('save', body);
     }), true, GOOGLE_RULE_BODY_LIMIT);
 
     route('POST', '/api/google/rules/remove', runOwner(async (req) => {
       const body = requireObject(req.body);
-      const ruleId = optionalBoundedId(body.id ?? body.ruleId, 'id');
-      const result = await rules.manage('remove', body);
-      const removedId = ruleId ?? optionalBoundedId(result?.id ?? result?.ruleId, 'id');
-      if (removedId) {
-        try { ruleDispatch?.cancelRule?.(removedId); } catch { /* best-effort cancel of pending events */ }
-      }
-      return result;
+      return await rules.manage('remove', body);
     }), true, GOOGLE_ACTION_BODY_LIMIT);
+
+    route('GET', '/api/google/rules/:id/events', runOwner(async (req) => {
+      const ruleId = optionalBoundedText(req.params?.id, 'id', 128);
+      if (!ruleId) fail('INVALID_ARGUMENT', 'Invalid id');
+      const limit = optionalQueryInt(req.query?.limit, 'limit', 1, 200);
+      return await rules.manage('events', {
+        ruleId,
+        ...(limit !== undefined ? { limit } : {}),
+      });
+    }));
   }
 }

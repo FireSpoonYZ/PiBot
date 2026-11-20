@@ -37,6 +37,8 @@ const FORBIDDEN_MODEL_ARG_KEYS = new Set([
   'askedBy',
   'caller',
   'actor',
+  'botToken',
+  'callerSessionId',
   'deviceId',
   'botId',
   'ownerKey',
@@ -168,39 +170,58 @@ function extractAccountArg(args) {
   return trimmed;
 }
 
-function redactBinaryValue(value, keyName = '', depth = 0) {
+const DOWNLOAD_TOOL_NAMES = new Set([
+  'drive_download',
+  'gmail_attachment',
+  'gmail_read',
+]);
+
+function isBinaryDownloadObject(value) {
+  return isPlainObject(value)
+    && typeof value.data === 'string'
+    && value.data.length > 0
+    && (value.file !== undefined
+      || value.name !== undefined
+      || value.mimeType !== undefined
+      || value.ref !== undefined
+      || value.attachmentId !== undefined
+      || value.size !== undefined);
+}
+
+function redactBinaryValue(value, keyName = '', depth = 0, forceRedactDataString = false) {
   if (depth > 16) return '[truncated]';
   if (value === null || value === undefined) return value;
   if (value instanceof Uint8Array || Buffer.isBuffer(value)) {
     return `[binary omitted (${value.byteLength} bytes)]`;
   }
   if (typeof value === 'string') {
-    if (BINARY_PAYLOAD_KEYS.has(keyName) && value.length > 0) {
+    if ((BINARY_PAYLOAD_KEYS.has(keyName) || (forceRedactDataString && keyName === 'data')) && value.length > 0) {
       return '[binary payload omitted; handled by host file transfer]';
     }
     return scrubGoogleSecrets(value);
   }
   if (typeof value !== 'object') return value;
   if (Array.isArray(value)) {
-    return value.map((item) => redactBinaryValue(item, '', depth + 1));
+    return value.map((item) => redactBinaryValue(item, '', depth + 1, forceRedactDataString));
   }
+  const redactDataHere = forceRedactDataString || isBinaryDownloadObject(value);
   const out = {};
   for (const [key, item] of Object.entries(value)) {
-    if (BINARY_PAYLOAD_KEYS.has(key)) {
+    if (BINARY_PAYLOAD_KEYS.has(key) || (redactDataHere && key === 'data' && typeof item === 'string' && item.length > 0)) {
       if (typeof item === 'string' && item.length > 0) {
         out[key] = '[binary payload omitted; handled by host file transfer]';
       } else if (item instanceof Uint8Array || Buffer.isBuffer(item)) {
         out[key] = `[binary omitted (${item.byteLength} bytes)]`;
       } else {
-        out[key] = redactBinaryValue(item, key, depth + 1);
+        out[key] = redactBinaryValue(item, key, depth + 1, forceRedactDataString);
       }
       continue;
     }
     if (TRANSFER_CONTAINER_KEYS.has(key) && isPlainObject(item)) {
-      out[key] = redactBinaryValue(item, key, depth + 1);
+      out[key] = redactBinaryValue(item, key, depth + 1, true);
       continue;
     }
-    out[key] = redactBinaryValue(item, key, depth + 1);
+    out[key] = redactBinaryValue(item, key, depth + 1, forceRedactDataString);
   }
   return out;
 }
@@ -231,7 +252,8 @@ function sanitizeContentBlocks(blocks) {
   return result.length ? result : [{ type: 'text', text: '' }];
 }
 
-function formatToolResult(rawResult) {
+function formatToolResult(rawResult, toolName = '') {
+  const isDownloadTool = DOWNLOAD_TOOL_NAMES.has(toolName);
   if (rawResult === undefined || rawResult === null) {
     return { content: [{ type: 'text', text: '' }] };
   }
@@ -249,14 +271,14 @@ function formatToolResult(rawResult) {
     return out;
   }
   if (isPlainObject(rawResult)) {
-    const safeForText = redactBinaryValue(rawResult);
+    const safeForText = redactBinaryValue(rawResult, '', 0, isDownloadTool);
     return {
       content: [{ type: 'text', text: JSON.stringify(safeForText) }],
       structuredContent: rawResult,
     };
   }
   return {
-    content: [{ type: 'text', text: JSON.stringify(redactBinaryValue(rawResult)) }],
+    content: [{ type: 'text', text: JSON.stringify(redactBinaryValue(rawResult, '', 0, isDownloadTool)) }],
   };
 }
 
@@ -357,7 +379,7 @@ export function createGoogleWorkspaceMcpServer({
         ...(typeof caller.askedBy === 'string' && caller.askedBy.trim() ? { askedBy: caller.askedBy.trim() } : {}),
       };
       const result = await tool.run(cleanArgs, toolContext);
-      return formatToolResult(result);
+      return formatToolResult(result, tool.name);
     } catch (err) {
       return await formatToolError(err, accounts);
     }
