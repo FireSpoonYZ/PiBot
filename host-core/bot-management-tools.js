@@ -21,7 +21,9 @@ const SKILL_ACTIONS = [
   'list', 'read', 'create', 'update', 'patch', 'delete', 'archive', 'restore',
   'pin', 'lock', 'adopt',
 ];
+const SKILL_WRITE_ACTIONS = new Set(['create', 'update', 'patch', 'adopt']);
 const LEARNING_ACTIONS = ['status', 'configure', 'learn', 'review', 'curate', 'cancel'];
+const LEARNING_START_ACTIONS = new Set(['learn', 'review', 'curate']);
 const INSTALLATION_ACTIONS = [
   'inspect', 'install', 'update', 'enable', 'disable',
   'uninstall', 'operation', 'deployments', 'catalog', 'describe', 'check', 'probe',
@@ -32,7 +34,7 @@ function assertTargetBot(args) {
   assertId(args.botId, 'botId');
 }
 
-export function createBotManagementTools({ collaboration, memoRequestId }) {
+export function createBotManagementTools({ collaboration, memoRequestId, dataPrivacy = null }) {
   // Everything except the target pair plus a memoized requestId goes to the
   // service verbatim; per-action fields stay owned by the service contract.
   async function scopedCall(args, api, context, invoke) {
@@ -44,6 +46,7 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
   return [
     {
       name: 'manage_bot_skill',
+      deferred: true,
       description:
         "Manage Center-managed skills for the current Bot or a specified target Bot. Omit deviceId/botId " +
         "to manage the current Bot's own skills, or pass both to manage a target Bot's skills. " +
@@ -86,11 +89,18 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
         const deviceId = args.deviceId ?? identity.deviceId;
         const botId = args.botId ?? identity.botId;
         assertTargetBot({ deviceId, botId });
+        if (SKILL_WRITE_ACTIONS.has(args.action) && typeof dataPrivacy?.assertExportAllowed === 'function') {
+          await dataPrivacy.assertExportAllowed(api.conversationId, {
+            operation: 'manage_bot_skill:' + args.action,
+            callContext: context,
+          });
+        }
         return scopedCall({ ...args, deviceId, botId }, api, context, collaboration.manageBotSkill);
       },
     },
     {
       name: 'manage_bot_learning',
+      deferred: true,
       description:
         "Manage the target Bot's always-on learning service. Actions: status (config, counters and " +
         'active/last job), configure (settings plus expectedRevision CAS), learn/review/curate ' +
@@ -148,11 +158,18 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
       boundedCodes: true,
       async run(args, _identity, _log, api, context) {
         assertTargetBot(args);
+        if (LEARNING_START_ACTIONS.has(args.action) && typeof dataPrivacy?.assertExportAllowed === 'function') {
+          await dataPrivacy.assertExportAllowed(api.conversationId, {
+            operation: 'manage_bot_learning:' + args.action,
+            callContext: context,
+          });
+        }
         return scopedCall(args, api, context, collaboration.manageBotLearning);
       },
     },
     {
       name: 'manage_bot_installation',
+      deferred: true,
       description:
         'Manage Center capability installations scoped to the target Bot. Actions: catalog (minimal metadata), ' +
         'describe (schema and credential-reference status, no secret values), check (configuration versus ' +

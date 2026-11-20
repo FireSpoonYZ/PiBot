@@ -5,9 +5,10 @@ import {
   ANTIGRAVITY_PROVIDER_ID,
   ANTIGRAVITY_STREAM_PATH,
 } from '../center-contract/antigravity.js';
+import { validateAntigravityTurnContext } from './antigravity/turn-context.js';
 
 const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
-const STREAM_BODY_KEYS = new Set(['sessionId', 'modelId', 'messages', 'reasoning']);
+const STREAM_BODY_KEYS = new Set(['sessionId', 'modelId', 'messages', 'reasoning', 'turnContext']);
 const CANCEL_BODY_KEYS = new Set(['sessionId']);
 const MAX_ID_LENGTH = 256;
 const MAX_MESSAGES = 4096;
@@ -151,11 +152,14 @@ function validateStreamBody(raw) {
     fail('INVALID_ARGUMENT', 'Invalid messages');
   }
   for (const msg of raw.messages) validateMessage(msg);
+  const turnContext =
+    raw.turnContext !== undefined ? validateAntigravityTurnContext(raw.messages, raw.turnContext) : undefined;
   return {
     sessionId,
     modelId,
     messages: raw.messages,
     ...(raw.reasoning !== undefined ? { reasoning: raw.reasoning } : {}),
+    ...(turnContext !== undefined ? { turnContext } : {}),
   };
 }
 
@@ -310,7 +314,7 @@ export function registerAntigravityRoutes({ store, bridge, catalog, host, antigr
 
   host('POST', ANTIGRAVITY_STREAM_PATH, async (req, reply) => {
     const { deviceId, token } = req.centerDevice;
-    const { sessionId, modelId, messages, reasoning } = validateStreamBody(req.body);
+    const { sessionId, modelId, messages, reasoning, turnContext } = validateStreamBody(req.body);
     assertDeviceAuthorized(deviceId, modelId);
     if (!antigravity) fail('INVALID_STATE', 'Antigravity service is unavailable');
     if (req.raw.aborted || req.raw.destroyed || reply.raw.destroyed) {
@@ -319,7 +323,14 @@ export function registerAntigravityRoutes({ store, bridge, catalog, host, antigr
 
     const controller = new AbortController();
     const eventStream = antigravity.stream(
-      { deviceId, sessionId, modelId, messages, ...(reasoning !== undefined ? { reasoning } : {}) },
+      {
+        deviceId,
+        sessionId,
+        modelId,
+        messages,
+        ...(reasoning !== undefined ? { reasoning } : {}),
+        ...(turnContext !== undefined ? { turnContext } : {}),
+      },
       { signal: controller.signal },
     );
     const iterator = eventStream?.[Symbol.asyncIterator]?.();

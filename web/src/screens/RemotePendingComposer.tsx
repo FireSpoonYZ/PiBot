@@ -696,12 +696,13 @@ export function RemotePendingComposer({
     Boolean(editSubmitting) ||
     pending?.phase === 'sending' ||
     Boolean(drafts.attempt && ['locked', 'enqueued', 'cleared'].includes(drafts.attempt.phase));
+  const hasRemoteDraft = Boolean(effectiveText.trim()) || effectiveAttachments.length > 0;
   const remoteComposerAction = resolveComposerActionKind({
     phase: activity.phase,
     online,
     isSending: isRemoteSending,
     isStopping: stopBusy,
-    hasDraft: Boolean(effectiveText.trim()) || effectiveAttachments.length > 0,
+    hasDraft: hasRemoteDraft,
     canStop,
   });
   const isStoppingPhase = remoteComposerAction === 'stopping';
@@ -1075,7 +1076,7 @@ export function RemotePendingComposer({
             }}
           />
 
-          {!editingTurn && !((isLlmRunningPhase || showRemoteComposerStop) && (Boolean(effectiveText.trim()) || effectiveAttachments.length > 0)) && (
+          {!editingTurn && !hasRemoteDraft && !showRemoteComposerStop && !isStoppingPhase && (
             <button
               type="button"
               className="grok-composer-mic-inline is-unsupported"
@@ -1100,7 +1101,7 @@ export function RemotePendingComposer({
               </button>
             ) : (
               <>
-                {!(isPreLlmPhase || waitingForReceipt || editSubmitting) && (effectiveText.trim() || effectiveAttachments.length > 0) ? (
+                {!(isPreLlmPhase || waitingForReceipt || editSubmitting) && hasRemoteDraft ? (
                   <>
                     {!editingTurn && canSteerRemote ? (
                       <button

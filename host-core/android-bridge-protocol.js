@@ -57,14 +57,30 @@ export const ANDROID_NATIVE_CODES = new Set([
   'ANDROID_NATIVE_ERROR',
 ]);
 
-// Inbound native_result may additionally carry the shared shower protocol code of
-// a classified shower_surface failure (or the shared CANCELLED/INVALID_ARGUMENT),
-// so the Android backend keeps SHOWER_UNSUPPORTED/SHOWER_SESSION_MISMATCH instead
-// of collapsing every native failure onto a transport error. Outbound bridge
-// error frames are unchanged (BRIDGE_ERROR_CODES does not use this set).
+export const ANDROID_BROWSER_ERROR_CODES = Object.freeze([
+  'BROWSER_UNAVAILABLE',
+  'BROWSER_PROFILE_UNSUPPORTED',
+  'BROWSER_PAGE_NOT_FOUND',
+  'BROWSER_REVISION_MISMATCH',
+  'BROWSER_SENSITIVE_BLOCKED',
+  'BROWSER_NAVIGATION_BLOCKED',
+  'BROWSER_TAB_LIMIT',
+  'BROWSER_FRAME_TOO_LARGE',
+  'BROWSER_BUSY',
+  'BROWSER_TIMEOUT',
+  'BROWSER_BACKEND_FAILED',
+  'BROWSER_UNSUPPORTED',
+]);
+
+// Inbound native_result may additionally carry the shared shower or bot_browser
+// protocol code of a classified failure (or the shared CANCELLED/INVALID_ARGUMENT),
+// so the Android backends keep exact semantics instead of collapsing every native
+// failure onto a transport error. Outbound bridge error frames are unchanged
+// (BRIDGE_ERROR_CODES does not use this set).
 const NATIVE_RESULT_ERROR_CODES = new Set([
   ...ANDROID_NATIVE_CODES,
   ...SHOWER_ERROR_CODES,
+  ...ANDROID_BROWSER_ERROR_CODES,
   'CANCELLED',
   'INVALID_ARGUMENT',
 ]);
@@ -385,7 +401,14 @@ export function normalizeNativeResultFrame(parsed) {
   };
 }
 
-const NATIVE_TOOLS = new Set(['android_apps', 'android_shower', 'android_speak', 'schedule_task', 'shower_surface']);
+const NATIVE_TOOLS = new Set([
+  'android_apps',
+  'android_shower',
+  'android_speak',
+  'schedule_task',
+  'shower_surface',
+  'bot_browser',
+]);
 const NATIVE_KINDS = new Set(['primary', 'room', 'dm']);
 // Unified Shower private entry: environment actions and private Vault input cross this IPC.
 // Arguments are assembled by the trusted Android backend, never by model output.
@@ -399,9 +422,27 @@ const SHOWER_SURFACE_ACTIONS = new Map([
   ['release', null],
 ]);
 const SHOWER_SURFACE_SOURCES = new Set(['agent', 'human']);
+// Private Android Bot Browser actions crossing the trusted native bridge.
+const BOT_BROWSER_ACTIONS = new Set([
+  'status',
+  'open',
+  'navigate',
+  'back',
+  'forward',
+  'reload',
+  'select',
+  'closeTab',
+  'frame',
+  'snapshot',
+  'act',
+  'input',
+  'release',
+]);
+const BOT_BROWSER_SOURCES = new Set(['agent', 'human']);
 // Human operations have no durable numeric task; the manager still must pass a
 // nonempty synthetic id so the native side can tell human calls apart.
 const HUMAN_TASK_ID_RE = /^human:[0-9a-fA-F-]{8,64}$/;
+const BOT_BROWSER_TASK_ID_RE = /^(human|agent):[0-9a-fA-F-]{8,64}$/;
 
 function normalizeShowerSurfaceArguments(value) {
   const action = value.action;
@@ -439,10 +480,87 @@ function normalizeShowerSurfaceArguments(value) {
   return value;
 }
 
+function normalizeBotBrowserArguments(value) {
+  const action = value.action;
+  if (typeof action !== 'string' || !BOT_BROWSER_ACTIONS.has(action)) {
+    throw invalid('INVALID_ARGUMENT', 'bot_browser action is invalid');
+  }
+  if (!BOT_BROWSER_SOURCES.has(value.source)) {
+    throw invalid('INVALID_ARGUMENT', "bot_browser source must be 'agent' or 'human'");
+  }
+  const allowed = new Set(['action', 'source']);
+  if (action === 'open') {
+    allowed.add('url');
+    allowed.add('width');
+    allowed.add('height');
+  } else if (action === 'navigate') {
+    allowed.add('pageId');
+    allowed.add('revision');
+    allowed.add('url');
+  } else if (action === 'back' || action === 'forward' || action === 'reload' || action === 'snapshot') {
+    allowed.add('pageId');
+    allowed.add('revision');
+  } else if (action === 'select' || action === 'closeTab') {
+    allowed.add('pageId');
+  } else if (action === 'frame') {
+    allowed.add('pageId');
+    allowed.add('limits');
+  } else if (action === 'act') {
+    allowed.add('pageId');
+    allowed.add('revision');
+    allowed.add('act');
+  } else if (action === 'input') {
+    if (value.source !== 'human') {
+      throw invalid('INVALID_ARGUMENT', "bot_browser input requires source 'human'");
+    }
+    allowed.add('pageId');
+    allowed.add('revision');
+    allowed.add('event');
+  }
+  rejectUnknownFields(value, allowed, 'bot_browser arguments');
+  if (value.pageId !== undefined && value.pageId !== null) {
+    assertId(value.pageId, 'pageId');
+  }
+  if (value.revision !== undefined && value.revision !== null) {
+    if (!Number.isSafeInteger(value.revision) || value.revision < 0) {
+      throw invalid('INVALID_ARGUMENT', 'bot_browser revision must be a non-negative safe integer');
+    }
+  }
+  if (action === 'select') {
+    assertId(value.pageId, 'pageId');
+  }
+  if (action === 'navigate') {
+    if (typeof value.url !== 'string' || value.url.trim() === '' || value.url.length > 4096) {
+      throw invalid('INVALID_ARGUMENT', 'bot_browser navigate requires a bounded url string');
+    }
+  }
+  if (action === 'open' && value.url !== undefined && value.url !== null) {
+    if (typeof value.url !== 'string' || value.url.length > 4096) {
+      throw invalid('INVALID_ARGUMENT', 'bot_browser open url must be a bounded string');
+    }
+  }
+  if (action === 'frame' && value.limits !== undefined && !isPlainObject(value.limits)) {
+    throw invalid('INVALID_ARGUMENT', 'bot_browser frame limits must be an object');
+  }
+  if (action === 'act' && !isPlainObject(value.act)) {
+    throw invalid('INVALID_ARGUMENT', 'bot_browser act requires an act object');
+  }
+  if (action === 'input' && !isPlainObject(value.event)) {
+    throw invalid('INVALID_ARGUMENT', 'bot_browser input requires an event object');
+  }
+  return value;
+}
+
 function normalizeNativeTaskId(value, tool) {
   if (tool === 'shower_surface' && typeof value === 'string') {
     if (!HUMAN_TASK_ID_RE.test(value)) {
       throw invalid('INVALID_ARGUMENT', "shower_surface human taskId must be 'human:<id>'");
+    }
+    return value;
+  }
+  if (tool === 'bot_browser' && typeof value === 'string') {
+    if (!BOT_BROWSER_TASK_ID_RE.test(value)) {
+      throw invalid('INVALID_ARGUMENT', "bot_browser taskId must be 'human:<id>' or 'agent:<id>'");
     }
     return value;
   }
@@ -455,21 +573,23 @@ function normalizeNativeTaskId(value, tool) {
 /**
  * Normalize the trusted native tool request (core factory contract) into the
  * native_call context. Caller metadata only, no arbitrary fields. taskId is
- * a Durable numeric Id<'task'>; only the private shower_surface entry may carry
- * the manager's synthetic 'human:<id>' task instead. kind is primary|room|dm
+ * a Durable numeric Id<'task'>; only the private shower_surface and bot_browser
+ * entries may carry synthetic task ids instead. kind is primary|room|dm
  * with scope relation (primary has no scope, work kinds require one). Only the
- * five private native tools are allowed.
+ * six private native tools are allowed.
  */
 export function normalizeNativeRequest(request) {
   if (!isPlainObject(request)) throw invalid('INVALID_ARGUMENT', 'native request must be an object');
   if (typeof request.tool !== 'string' || !NATIVE_TOOLS.has(request.tool)) {
-    throw invalid('INVALID_ARGUMENT', 'native tool must be one of android_apps, android_shower, android_speak, schedule_task, shower_surface');
+    throw invalid('INVALID_ARGUMENT', 'native tool must be one of android_apps, android_shower, android_speak, schedule_task, shower_surface, bot_browser');
   }
   const rawArguments = request.arguments === undefined ? {} : request.arguments;
   if (!isPlainObject(rawArguments)) throw invalid('INVALID_ARGUMENT', 'native request arguments must be an object');
   const args = request.tool === 'shower_surface'
     ? normalizeShowerSurfaceArguments(rawArguments)
-    : rawArguments;
+    : request.tool === 'bot_browser'
+      ? normalizeBotBrowserArguments(rawArguments)
+      : rawArguments;
   const actor = request.actor;
   if (!isPlainObject(actor)) throw invalid('INVALID_ARGUMENT', 'native request actor must be an object');
   rejectUnknownFields(actor, new Set(['deviceId', 'botId', 'conversationId', 'scopeId', 'kind']), 'native actor');

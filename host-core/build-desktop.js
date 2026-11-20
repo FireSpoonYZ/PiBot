@@ -61,7 +61,7 @@ const HOST_RUNTIME_DIR = path.join(DESKTOP_BUILD, 'host-runtime');
 // so the lockfile's relative file:../build/pi-main/*.tgz specs resolve unchanged.
 const HOST_RUNTIME_DEPS_DIR = path.join(CACHE_DIR, 'host-runtime-deps');
 const HOST_RUNTIME_LAYOUT_VERSION = 1;
-const HOST_CORE_RUNTIME_SUBDIRS = ['capabilities', 'managed-install', 'plugins', 'third-party'];
+const HOST_CORE_RUNTIME_SUBDIRS = ['bot-browser', 'capabilities', 'google-setup', 'managed-install', 'plugins', 'third-party'];
 // Builtin skill resources are runtime data the host loads at request time, so
 // they stage under their own extension list (docs only, no code).
 const HOST_CORE_BUILTIN_SKILLS_DIR = 'builtin-skills';
@@ -1087,7 +1087,7 @@ function listRuntimeSourceTree(dir, out, extensions = HOST_RUNTIME_SOURCE_EXTENS
 // minus build-only scripts, plus the runtime subdirectories), then follows
 // static/literal-dynamic relative imports so out-of-tree re-exports (e.g.
 // host-core/hindsight-protocol.js -> ../plugins/hindsight/*) are staged at the
-// same relative location. Imports leaving host-core/ must stay under plugins/.
+// same relative location. Only plugins and the dependency-free operation contract may leave host-core.
 function collectHostRuntimeSources() {
   const roots = [];
   for (const entry of readdirSync(HERE).sort()) {
@@ -1122,6 +1122,7 @@ function collectHostRuntimeSources() {
   const files = new Set(roots);
   const queue = roots.filter((file) => /\.[cm]?js$/.test(file));
   const pluginsDir = path.join(ROOT, 'plugins');
+  const operationsDir = path.join(ROOT, 'center-contract', 'operations');
   const pluginRoots = new Set();
   while (queue.length > 0) {
     const file = queue.pop();
@@ -1134,10 +1135,13 @@ function collectHostRuntimeSources() {
         throw fail(`host runtime module ${display} imports missing file ${spec}`);
       }
       if (!isInsideDir(HERE, target)) {
-        if (!isInsideDir(pluginsDir, target)) {
-          throw fail(`host runtime module ${display} imports ${spec} outside host-core/ and plugins/; it cannot be bundled`);
+        if (isInsideDir(pluginsDir, target)) {
+          pluginRoots.add(path.join(pluginsDir, path.relative(pluginsDir, target).split(path.sep)[0]));
+        } else if (isInsideDir(operationsDir, target)) {
+          files.add(path.join(ROOT, 'center-contract', 'package.json'));
+        } else {
+          throw fail(`host runtime module ${display} imports ${spec} outside the allowed source roots`);
         }
-        pluginRoots.add(path.join(pluginsDir, path.relative(pluginsDir, target).split(path.sep)[0]));
       } else if (isInsideDir(path.join(HERE, 'node_modules'), target)) {
         throw fail(`host runtime module ${display} imports node_modules by relative path: ${spec}`);
       }

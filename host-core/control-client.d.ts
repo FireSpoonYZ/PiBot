@@ -1,6 +1,10 @@
 import type {
   VaultControlInput,
   VaultControlResult,
+  BrowserControlInput,
+  BrowserControlResult,
+  GoogleSetupControlInput,
+  GoogleSetupControlResult,
   BotRecord,
   BotBoardParams,
   BotBoardSnapshot,
@@ -203,6 +207,8 @@ export interface ControlClient {
    * client supplied. takeover/release are not replayed.
    */
   vaultControl(input: VaultControlInput, options?: ControlClientCallOptions): Promise<VaultControlResult>;
+  browserControl(input: BrowserControlInput, options?: ControlClientCallOptions): Promise<BrowserControlResult>;
+  googleSetupControl(input: GoogleSetupControlInput, options?: ControlClientCallOptions): Promise<GoogleSetupControlResult>;
   getShowerStatus(target: ShowerTarget, options?: ControlClientCallOptions): Promise<ShowerSession>;
   createShowerSession(
     target: ShowerTarget,

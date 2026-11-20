@@ -90,7 +90,7 @@ export function initialToolsChange(removeTools) {
   return removeTools && removeTools.length > 0 ? { remove: removeTools } : null;
 }
 
-/** SDK 仍按 enabled tools 取交集；这里只保留 model-only，并且不自动加载 deferred 工具。 */
+/** SDK 仍按 enabled tools 取交集；问卷须直接调用，升级恢复旧 nested 问卷时也保留 model 入口。 */
 export function codemodeModelTools(profile, modelTools) {
   const definitions = new Map((profile.selectedExtensions ?? [])
     .flatMap((extension) => extension.tools ?? [])
@@ -100,7 +100,7 @@ export function codemodeModelTools(profile, modelTools) {
   const modelOnly = [...definitions.values()].filter((tool) =>
     tool.name !== 'codemode'
     && tool.callers?.includes('model')
-    && !tool.callers.includes('tools')
+    && (!tool.callers.includes('tools') || tool.name === 'ask_user_question')
     && !removed.has(tool.name)
     && (tool.deferred !== true || loaded.has(tool.name)));
   return [{ name: 'codemode' }, ...modelOnly.map((tool) => ({ name: tool.name }))];

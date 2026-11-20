@@ -10,8 +10,9 @@ import { vaultError } from '../vault-protocol.js';
 const error = (code, message) => Object.assign(new Error(message), { code });
 const nameFor = (...parts) => 'cap-' + createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 const botKey = (botId, installationId) => botId + '\u0000' + installationId;
-// 实例按安装 + 精确代码身份（版本）索引：不同 Bot 可同时绑定旧/新版本。
-const instanceKey = (installationId, version) => installationId + '\u0000' + (version ?? '');
+// 实例按安装 + 精确代码身份（版本 + 数据边界）索引：不同 Bot 可同时绑定旧/新版本。
+const instanceKey = (installationId, version, dataBoundary) =>
+  installationId + '\u0000' + (version ?? '') + '\u0000' + (dataBoundary ?? '');
 /** 授权意图：Center 提供 authorized 时以它为准（与瞬态部署状态分离），旧快照回退 enabled。 */
 const isAuthorized = (capability) => capability?.authorized ?? capability?.enabled === true;
 /** 授权且启用的能力才建立绑定；authorized:false 视为显式撤销，绝不由 pin 覆盖。 */
@@ -22,7 +23,7 @@ const describe = (err) => ({
   message: typeof err?.message === 'string' && err.message ? err.message.slice(0, 200) : 'capability could not be applied',
 });
 
-export function createPluginManager({ host, registry, installer, services, isOnline, vaultFacade, tasksFacade }) {
+export function createPluginManager({ host, registry, installer, services, isOnline, vaultFacade, tasksFacade, waitsFacade }) {
   const ajv = new Ajv({ allErrors: true, coerceTypes: false, useDefaults: false, strict: false });
   ajv.addFormat('credential-ref', true);
   let instances = new Map(); // instanceKey(installationId, version) -> { key, installationId, plugin, manifest, version, bots, taskExtension }
@@ -131,11 +132,12 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     return { ...source, tasks: undefined, tools, sections, hooks, wraps };
   }
 
-  /** 执行内容摘要：只包含会改变执行结果的字段（配置、凭证值、版本），不含展示名称。 */
+  /** 执行内容摘要：只包含会改变执行结果的字段（配置、凭证值、版本、数据边界），不含展示名称。 */
   function capabilityFingerprint(capability, credentials) {
     const refs = capability.target === 'host' ? capability.credentialRefs ?? [] : [];
     return createHash('sha256').update(JSON.stringify([
       capability.kind, capability.target, capability.targetVersion,
+      capability.dataBoundary ?? null,
       capability.effectiveConfig ?? null,
       refs.map((ref) => [ref, credentials?.[ref] ?? null]),
     ])).digest('hex');
@@ -278,7 +280,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
   /** 打开（或复用）一个精确版本的安装实例；不同版本实例可并存，由各自的 Bot 绑定持有。 */
   async function openInstance(capability) {
     const id = capability.installationId;
-    const key = instanceKey(id, capability.targetVersion);
+    const key = instanceKey(id, capability.targetVersion, capability.dataBoundary);
     const existing = instances.get(key);
     if (existing) return { instance: existing, created: false };
     let installed = null;
@@ -301,6 +303,25 @@ export function createPluginManager({ host, registry, installer, services, isOnl
       assertCapabilityAllowed(botId, id);
     };
     const scopedHost = { ...services,
+      ...(installed?.manifest?.id === 'e-launcher.ask-user-question' && waitsFacade ? {
+        waits: {
+          async open(botId, input, api, context) {
+            checkTarget(input?.installationId, botId, false);
+            await checkOwner(botId, id, api?.conversationId);
+            return waitsFacade.open(botId, input, api, context);
+          },
+          async get(botId, input, context) {
+            checkTarget(input?.installationId, botId, false);
+            await checkOwner(botId, id, input?.conversationId);
+            return waitsFacade.get(botId, input, context);
+          },
+          async answer(botId, input, resolveAnswer, context) {
+            checkTarget(input?.installationId, botId, false);
+            await checkOwner(botId, id, input?.conversationId);
+            return waitsFacade.answer(botId, input, resolveAnswer, context);
+          },
+        },
+      } : {}),
       ...(installed?.manifest?.id === 'e-launcher.vault' && vaultFacade ? {
         vault: vaultFacade(async conversationId => {
           const botId = await services.resolveConversationBot(conversationId);
@@ -328,6 +349,11 @@ export function createPluginManager({ host, registry, installer, services, isOnl
             } catch {
               return [];
             }
+          },
+          getExecutionContext: async (botId, conversationId) => {
+            if (conversationId === undefined) return null;
+            await checkOwner(botId, id, conversationId);
+            return tasksFacade.getExecutionContext?.(botId, conversationId) ?? null;
           },
           listDirectoryBots: (botId, conversationId) => {
             if (conversationId !== undefined) {
@@ -367,7 +393,8 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     };
     const args = {
       installationId: id, version: capability.targetVersion,
-      target: capability.target, packageRoot: installed?.packageRoot ?? null,
+      target: capability.target, dataBoundary: capability.dataBoundary,
+      packageRoot: installed?.packageRoot ?? null,
       dataDir: installed?.dataDir ?? join(host.dataRoot, 'center-capabilities', id),
       host: scopedHost,
     };
@@ -832,6 +859,18 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     });
   }
 
+  const preparedContextBindings = new WeakMap();
+  const BILLION_CONTEXT_MANIFEST_ID = 'e-launcher.billion-context';
+  const COMPACT_CONTEXT_STATUSES = new Set(['compacted', 'unchanged', 'no_range', 'summary_failed', 'still_over_limit']);
+
+  function isBillionContextProvider(provider) {
+    return Boolean(
+      provider &&
+      provider.instance?.manifest?.id === BILLION_CONTEXT_MANIFEST_ID &&
+      provider.instance?.manifest?.kind === 'plugin',
+    );
+  }
+
   function selectContextProviders(botId) {
     return [...instances.values()].flatMap((instance) => {
       const entry = instance.bots.get(botId);
@@ -853,8 +892,9 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     }
     const providers = selectContextProviders(botId);
     if (providers.length !== 1) return false;
-    const { id, instance, entry } = providers[0];
-    if (instance.manifest?.id !== 'e-launcher.billion-context' || instance.manifest?.kind !== 'plugin') {
+    const provider = providers[0];
+    const { id, entry } = provider;
+    if (!isBillionContextProvider(provider)) {
       return false;
     }
     if (!agent.extensions.some((extension) => extension === entry.extension)) return false;
@@ -867,21 +907,84 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     }
   }
 
-  async function prepareContext(request, api, context) {
+  async function prepareContext(request, api, context, turnKey, preflightTarget) {
     const botId = await services.resolveConversationBot(api.conversationId);
     const providers = selectContextProviders(botId);
     if (providers.length > 1) throw error('INVALID_STATE', 'multiple context providers for this Bot');
     if (!providers.length) return request;
-    const { id, hook } = providers[0];
+    const { id, hook, instance, entry } = providers[0];
     return runAccepted(async () => {
       context.abortSignal?.throwIfAborted();
       await checkOwner(botId, id, api.conversationId);
       context.abortSignal?.throwIfAborted();
-      const next = { ...request, ...(await hook(request, api, context)) };
+      const prepared = isBillionContextProvider(providers[0])
+        ? await hook(request, api, context, turnKey, preflightTarget)
+        : await hook(request, api, context);
+      const next = { ...request, ...prepared };
       context.abortSignal?.throwIfAborted();
       await checkOwner(botId, id, api.conversationId);
       context.abortSignal?.throwIfAborted();
+      preparedContextBindings.set(next, { botId, id, instance, entry });
       return next;
+    }, botId);
+  }
+
+  function getBillionContextBinding(requestView) {
+    if (!requestView || typeof requestView !== 'object') return null;
+    const binding = preparedContextBindings.get(requestView);
+    if (!binding || !isBillionContextProvider(binding)) return null;
+    if (typeof binding.entry?.bot?.requestContributions?.compactContext !== 'function') return null;
+    return { ...binding, autoFold: binding.entry.context.effectiveConfig?.autoFold === true };
+  }
+
+  async function compactContext(options, api, context, expectedBinding = null) {
+    context?.abortSignal?.throwIfAborted();
+    if (!active || !accepting || !isOnline()) return null;
+    if (!expectedBinding || !isBillionContextProvider(expectedBinding)) return null;
+    if (!options || (options.reason !== 'preflight' && options.reason !== 'overflow')) {
+      throw error('INVALID_ARGUMENT', 'invalid compactContext reason');
+    }
+    const botId = await services.resolveConversationBot(api.conversationId);
+    if (botId !== expectedBinding.botId) return null;
+    const providers = selectContextProviders(botId);
+    if (providers.length !== 1) return null;
+    const current = providers[0];
+    if (
+      !isBillionContextProvider(current) ||
+      current.id !== expectedBinding.id ||
+      current.instance !== expectedBinding.instance ||
+      current.entry !== expectedBinding.entry
+    ) {
+      return null;
+    }
+    const hook = current.entry?.bot?.requestContributions?.compactContext;
+    if (typeof hook !== 'function') return null;
+    if (!isAuthorized(policy.get(botId)?.get(current.id))) return null;
+    if (typeof api?.agent === 'function') {
+      const agent = await api.agent(context);
+      if (!Array.isArray(agent?.extensions) || !agent.extensions.some((ext) => ext === current.entry.extension)) {
+        return null;
+      }
+    }
+    return runAccepted(async () => {
+      context?.abortSignal?.throwIfAborted();
+      await checkOwner(botId, current.id, api.conversationId);
+      context?.abortSignal?.throwIfAborted();
+      const result = await hook({
+        reason: options.reason,
+        targetTokens: options.targetTokens,
+        estimateTokens: options.estimateTokens,
+        ...(options.turnKey !== undefined ? { turnKey: options.turnKey } : {}),
+      }, api, context);
+      context?.abortSignal?.throwIfAborted();
+      await checkOwner(botId, current.id, api.conversationId);
+      context?.abortSignal?.throwIfAborted();
+      if (!result || typeof result !== 'object') return null;
+      if (!COMPACT_CONTEXT_STATUSES.has(result.status)) return null;
+      return {
+        status: result.status,
+        ...(Array.isArray(result.messages) ? { messages: result.messages } : {}),
+      };
     }, botId);
   }
 
@@ -976,7 +1079,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
 
   return {
     applyBot, activate, quiesce, close, staleGrants, changedGrants, revoke, dropGrants, notifyGrants, capabilityTaskNames,
-    assertCapabilityAllowed, extensionsFor, prepareContext, shouldDeclineThresholdCompaction, beforeRequest, action, actionByName,
+    assertCapabilityAllowed, extensionsFor, prepareContext, getBillionContextBinding, compactContext, shouldDeclineThresholdCompaction, beforeRequest, action, actionByName,
     isActive: () => active,
     appliedSetId: (botId) => appliedSets.get(botId) ?? null,
     hasActiveExecutions: (botId) => botId === undefined

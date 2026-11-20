@@ -82,7 +82,7 @@
   color: var(--color-text-muted);
 }
 .group-create-search:focus-within {
-  border-bottom-color: var(--color-primary);
+  border-bottom-color: color-mix(in srgb, var(--color-text-muted) 45%, var(--color-line));
 }
 .group-create-search input {
   flex: 1;
@@ -96,9 +96,7 @@
   outline: none;
 }
 .group-create-search input:focus-visible {
-  outline: 2px solid var(--color-primary);
-  outline-offset: 2px;
-  border-radius: var(--radius-sm);
+  outline: none;
 }
 .group-create-bot-row {
   display: flex;

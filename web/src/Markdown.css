@@ -1,20 +1,29 @@
-.markdown a {
+.markdown .markdown-host-path {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-primary, var(--brand, var(--accent)));
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.markdown :is(a, .markdown-host-path) {
   touch-action: manipulation;
   transition: opacity var(--dur-fast, 150ms) ease;
 }
 
 @media (hover: hover) {
-  .markdown a:hover {
+  .markdown :is(a, .markdown-host-path):hover {
     opacity: .82;
   }
 }
 
-.markdown a:active {
+.markdown :is(a, .markdown-host-path):active {
   opacity: .68;
 }
 
-.markdown a:focus-visible,
-.markdown pre:focus-visible {
+.markdown :is(a, .markdown-host-path, pre):focus-visible {
   outline: 2px solid var(--color-primary, var(--brand, var(--accent)));
   outline-offset: 2px;
   border-radius: var(--radius-sm, 6px);

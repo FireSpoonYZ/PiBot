@@ -7,7 +7,10 @@
 // 连接，reset 后旧代回调不会发到新连接。
 import {
   LIVE_MAX_HOST_SUBSCRIPTIONS,
+  NO_LIVE_EXTENSIONS,
+  normalizeLiveExtensions,
   normalizeLiveSnapshot,
+  projectLiveSnapshotForPeer,
 } from './remote-live-protocol.js';
 import { CONTROL_ERROR_CODES } from './remote-control-protocol.js';
 
@@ -24,6 +27,7 @@ const STATE_KEYS = [
   'turnAdmission',
   'activity',
   'learning',
+  'durableWaits',
 ];
 
 const END_REASONS = new Set([
@@ -50,11 +54,16 @@ function fixedCode(err) {
  * 的订阅与跨 reset 代次的未收尾记录）；inflight 跨代次跟踪所有观察 promise，保证
  * reset/close 不会遗忘。
  */
-export function createHostLiveReceiver({ deviceId, observe, send }) {
+export function createHostLiveReceiver({ deviceId, observe, send, liveExtensions = NO_LIVE_EXTENSIONS }) {
   let generation = 0;
   let closed = false;
+  let negotiatedExtensions = normalizeLiveExtensions(liveExtensions);
   const active = new Map(); // routeId -> rec（slot 持有至 teardown 完成）
   const inflight = new Set(); // 跨代次全部观察 promise（settle 后移除）
+
+  function setExtensions(next) {
+    negotiatedExtensions = normalizeLiveExtensions(next);
+  }
 
   const canSend = (rec) =>
     !closed && !rec.done && !rec.cancelled && rec.gen === generation && active.get(rec.routeId) === rec;
@@ -197,9 +206,10 @@ export function createHostLiveReceiver({ deviceId, observe, send }) {
             state,
           };
           if (frame.scopeId !== undefined) out.scopeId = frame.scopeId;
+          const wireOut = projectLiveSnapshotForPeer(out, rec.liveExtensions);
           let normalized;
           try {
-            normalized = normalizeLiveSnapshot(out, target);
+            normalized = normalizeLiveSnapshot(wireOut, target, { liveExtensions: rec.liveExtensions });
           } catch {
             finish(rec, { reason: 'error', code: 'BAD_FRAME' });
             return;
@@ -244,6 +254,7 @@ export function createHostLiveReceiver({ deviceId, observe, send }) {
     const rec = {
       routeId: frame.routeId,
       gen: generation,
+      liveExtensions: negotiatedExtensions,
       done: false,
       cancelled: false,
       controller: null,
@@ -275,6 +286,7 @@ export function createHostLiveReceiver({ deviceId, observe, send }) {
   // 待各自 finally 释放。
   function reset() {
     generation += 1;
+    negotiatedExtensions = NO_LIVE_EXTENSIONS;
     for (const rec of active.values()) {
       rec.controller?.abort();
       if (!rec.done) finish(rec, null);
@@ -287,6 +299,7 @@ export function createHostLiveReceiver({ deviceId, observe, send }) {
     closePromise = (async () => {
       closed = true;
       generation += 1;
+      negotiatedExtensions = NO_LIVE_EXTENSIONS;
       for (const rec of active.values()) {
         rec.controller?.abort();
         if (!rec.done) finish(rec, null);
@@ -298,5 +311,5 @@ export function createHostLiveReceiver({ deviceId, observe, send }) {
     return closePromise;
   }
 
-  return { handle, reset, close };
+  return { handle, setExtensions, reset, close };
 }

@@ -40,9 +40,11 @@
 | 跨机文件传递 | `/home/box`、`/workspace`、`CopyToBox`/`CopyFromBox`、`ExternalRead` | 每台设备文件系统独立；跨 Bot 传文件使用 `send_to` 的 `files` 数组（最多 4 个本地文件/图片，双方 Host 在线时自动复制并生成接收端本地路径） |
 | 决策提问 | 固定 JSON `{"type":"widget","widget":...}` | 若当前 Bot 启用了 `ask_user_question` 插件工具则调用该工具并提供真实验证过的选项；未启用时直接用自然语言提问 |
 | 图形虚拟屏与 Android 宿主工具 | 共享 Linux 桌面、强制派发 `computerUse` / `watchVideo` 子代理 | 虚拟屏操作使用 `shower`（`status`/`create`/`launch`/`screenshot`/`input`/`release`）配合 Windows/Linux `cua_*` 或 Android `android_shower`，仅作用于当前 Bot 分配的 Shower 会话；Android 另提供 `android_apps`（已安装应用查询）与 `android_speak`（TTS 朗读，`accepted: true` 仅代表已受理） |
-| 定时与自动化 | `UpdateRoutine`、外部事件监听、`<automation_status>` | 核心工具 `schedule_task`（支持当前或指定 `deviceId`/`botId`，重复模式 `once`/`daily`/`weekly`/`monthly`/`statutoryWorkday`/`statutoryHoliday`），仅在目标 Host 在线运行时触发，离线错过不补发 |
+| 定时与自动化 | `update_state` 的 Routine、五段 cron、外部事件监听、`<automation_status>` | 核心工具 `schedule_task`（支持当前或指定 `deviceId`/`botId`，重复模式 `once`/`daily`/`weekly`/`monthly`/`statutoryWorkday`/`statutoryHoliday`）；指定日期的单次任务用 `repeat: "once"`、`date: "YYYY-MM-DD"`、`time: "HH:mm"`，仅在目标 Host 在线运行时触发，离线错过不补发 |
 | 记忆、联网与外部服务 | 固定 `/tmp/.../memory`、`RecallMemory`、`GetDynamicTools`、`request_smart_mode_approval` | Hindsight、Webfox、MCP 与技能由 Center 按 Bot 授权启用，工具名可能带命名空间或动态发现；按当前实际暴露的工具 schema 调用 |
 | 前端 Markdown 渲染 | `\( ... \)` 行内公式与 `mermaid` 渲染块 | `web/src/Markdown.tsx` 使用 `ReactMarkdown` + `remarkGfm` + `remarkMath` + `rehypeKatex`，支持 GFM 表格/代码块与 `$...$` / `$$...$$` 数学公式，不要求 `mermaid` 渲染 |
+
+逆向仓库的 [时间规则](https://github.com/b-nnett/grok-bot-0.18-reconstructed/blob/a9f633e09d49a85829b8236331b9e21f7e612634/source/shared/automation-schedule.ts#L4-L13) 用 cron 或 `@every` 计算 `nextRunAt`，未提供带年份的单次日期。本项目不模拟年复发的 cron，而是按目标 Host 时区解析明确的日期和时间。创建或重新启用时若该时刻已过，直接拒绝，不顺延。旧的单次任务不带 `date`，仍按下一次到点执行。
 
 ## 4. SOUL 初始化与存量兼容语义
 

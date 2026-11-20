@@ -2,6 +2,12 @@
 
 import { readControlLive, readWorkLive } from './control-live-client.js';
 import { normalizeVaultControl, safeVaultError } from './vault-protocol.js';
+import {
+  normalizeBrowserControl,
+  normalizeGoogleSetupControl,
+  safeBrowserControlError,
+  safeGoogleSetupError,
+} from './browser-setup-protocol.js';
 
 export class ControlApiError extends Error {
   constructor(message, options = {}) {
@@ -66,13 +72,25 @@ function callOptions(options) {
   return options && options.signal ? { signal: options.signal } : {};
 }
 
-export function createControlClient({ url, token, fetch: fetchImpl = globalThis.fetch }) {
+function defaultClientId() {
+  const uuid = typeof globalThis.crypto?.randomUUID === 'function'
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  return `local-http:${uuid}`;
+}
+
+const VALID_CLIENT_ID_RE = /^[A-Za-z0-9:._-]{3,128}$/;
+
+export function createControlClient({ url, token, fetch: fetchImpl = globalThis.fetch, clientId, controlTransport }) {
   if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{32,512}$/.test(token)) {
     throw new TypeError('createControlClient: token must be a URL-safe string of 32-512 characters');
   }
   if (typeof fetchImpl !== 'function') {
     throw new TypeError('createControlClient: fetch must be a function');
   }
+  const resolvedClientId =
+    typeof clientId === 'string' && VALID_CLIENT_ID_RE.test(clientId) ? clientId : defaultClientId();
+  const resolvedTransport = controlTransport === 'relay' ? 'relay' : 'local';
   const base = parseBaseUrl(url);
   const host = new URL(base).host;
 
@@ -82,7 +100,9 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
 
     const headers = {
       Accept: 'application/json',
-      Authorization: `Bearer ${token}`
+      Authorization: `Bearer ${token}`,
+      'X-PiBot-Control-Client': resolvedClientId,
+      'X-PiBot-Control-Transport': resolvedTransport,
     };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
 
@@ -395,6 +415,28 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
           throw new ControlApiError('Vault request is unconfirmed.', { code: error.code, status: error.status });
         }
         const safe = safeVaultError(error);
+        throw new ControlApiError(safe.message, { code: safe.code, status: error?.status });
+      }
+    },
+    async browserControl(input, options) {
+      try {
+        return await request('POST', ['v1', 'browser', 'control'], { ...callOptions(options), body: normalizeBrowserControl(input) });
+      } catch (error) {
+        if (error instanceof ControlApiError && ['NETWORK', 'BAD_RESPONSE'].includes(error.code)) {
+          throw new ControlApiError('Browser control request is unconfirmed.', { code: error.code, status: error.status });
+        }
+        const safe = safeBrowserControlError(error);
+        throw new ControlApiError(safe.message, { code: safe.code, status: error?.status });
+      }
+    },
+    async googleSetupControl(input, options) {
+      try {
+        return await request('POST', ['v1', 'google', 'setup', 'control'], { ...callOptions(options), body: normalizeGoogleSetupControl(input) });
+      } catch (error) {
+        if (error instanceof ControlApiError && ['NETWORK', 'BAD_RESPONSE'].includes(error.code)) {
+          throw new ControlApiError('Google setup control request is unconfirmed.', { code: error.code, status: error.status });
+        }
+        const safe = safeGoogleSetupError(error);
         throw new ControlApiError(safe.message, { code: safe.code, status: error?.status });
       }
     },

@@ -262,9 +262,11 @@
 
 .bot-chat-jump-latest {
   position: absolute;
-  left: 50%;
+  left: 0;
+  right: 0;
   bottom: 10px;
-  transform: translateX(-50%);
+  margin-inline: auto;
+  width: fit-content;
   height: var(--tap-min);
   min-height: var(--tap-min);
   padding: 0 var(--space-4);
@@ -291,7 +293,7 @@
 }
 
 .bot-chat-jump-latest:active {
-  transform: translateX(-50%) scale(0.96);
+  transform: scale(0.96);
   border-color: var(--color-primary);
 }
 

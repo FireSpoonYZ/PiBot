@@ -486,12 +486,31 @@ test('upgrading a schema 8 database adds the pairing tables and keeps the existi
     // A center as the previous release left it: real rows in tables that predate pairing, user_version 8.
     let store = openCenterStore({ dataRoot, encryptionKey: ENCRYPTION_KEY });
     store.close();
+    const currentVersion = sql(db => db.prepare('PRAGMA user_version').get().user_version);
+    assert.equal(currentVersion, 12);
     sql(db => db.exec(`
       INSERT INTO model_stars (model_ref) VALUES ('provider-a/model-1'), ('provider-b/model-2');
-      DROP TABLE task_dispatcher; DROP TABLE task_dispatches; DROP TABLE tasks;
-      DROP TABLE IF EXISTS device_oauth_grants;
-      DROP TABLE pairing_codes; DROP TABLE pairing_settings; PRAGMA user_version = 8;
+      DROP TABLE google_rule_events;
+      DROP TABLE google_trigger_state;
+      DROP TABLE google_rules;
+      DROP TABLE device_oauth_grants;
+      DROP TABLE task_dispatcher;
+      DROP TABLE task_dispatches;
+      DROP TABLE tasks;
+      DROP TABLE pairing_codes;
+      DROP TABLE pairing_settings;
+      PRAGMA user_version = 8;
     `));
+    // Tables introduced after schema 8 (including task_dispatches with its later
+    // execution_revision column, OAuth grants, and Google rule tables) did not
+    // exist in schema 8. Lowering only user_version is not an old schema.
+    assert.equal(sql(db => db.prepare(`SELECT COUNT(*) AS count FROM sqlite_master
+      WHERE type = 'table' AND name IN (
+        'pairing_codes', 'pairing_settings',
+        'tasks', 'task_dispatches', 'task_dispatcher',
+        'device_oauth_grants',
+        'google_rules', 'google_trigger_state', 'google_rule_events'
+      )`).get().count), 0);
     const before = sql(db => db.prepare('SELECT model_ref FROM model_stars ORDER BY model_ref').all().map(row => row.model_ref));
     assert.deepEqual(before, ['provider-a/model-1', 'provider-b/model-2']);
 
@@ -501,9 +520,19 @@ test('upgrading a schema 8 database adds the pairing tables and keeps the existi
     assert.equal(store.getPairingCa(), CA_PEM);
     // The new column is there: a targeted code can be stored and read back.
     assert.equal(store.createPairingCode('a'.repeat(64), 60_000, 'mac-host-1').targetDeviceId, 'mac-host-1');
+    // Schema v12 OAuth grants and Google rule tables are recreated cleanly on upgrade.
+    assert.equal(store.ensureDeviceOAuthGrant('mac-host-1').enabled, true);
+    assert.deepEqual(store.listGoogleRules(), []);
     store.close();
 
     assert.equal(sql(db => db.prepare('PRAGMA user_version').get().user_version), 12);
+    assert.equal(sql(db => db.prepare(`SELECT COUNT(*) AS count FROM sqlite_master
+      WHERE type = 'table' AND name IN (
+        'pairing_codes', 'pairing_settings',
+        'tasks', 'task_dispatches', 'task_dispatcher',
+        'device_oauth_grants',
+        'google_rules', 'google_trigger_state', 'google_rule_events'
+      )`).get().count), 9);
     assert.deepEqual(sql(db => db.prepare('SELECT model_ref FROM model_stars ORDER BY model_ref').all().map(row => row.model_ref)), before);
   } finally {
     fs.rmSync(dataRoot, { recursive: true, force: true });

@@ -173,7 +173,8 @@ async function collectBundledPackages(metafile, outfile, absWorkingDir) {
   for (const raw of includedBundleInputs(metafile, outfile, absWorkingDir)) {
     const inputPath = normalizeToAbsolute(absWorkingDir, raw);
     const pkg = await findPackageRoot(path.dirname(inputPath));
-    if (pkg && pkg.name !== '@e-launcher/host-core' && !roots.has(pkg.name)) {
+    // Both are first-party source trees under the repository license.
+    if (pkg && !['@e-launcher/host-core', '@e-launcher/center-contract'].includes(pkg.name) && !roots.has(pkg.name)) {
       roots.set(pkg.name, pkg);
     }
   }

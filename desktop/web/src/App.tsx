@@ -896,6 +896,10 @@ class App extends Component<AppProps, AppState> {
                 centerStatus={center}
                 onDisconnectCenter={() => this.disconnectCenter()}
                 onSaveCenterCa={(ca) => this.props.centerConnection.saveCenterCa(ca)}
+                onStartGoogleSetupWizard={this.state.archiveBridge ? (deviceId, botId) => {
+                  this.state.archiveBridge?.openConversation({ deviceId, botId }, 'google-setup');
+                  this.setState({ settingsOpen: false, view: 'chat' });
+                } : undefined}
                 onConfigureBot={(deviceId, botId) => {
                   this.state.archiveBridge?.openConversation({ deviceId, botId });
                   this.setState({ settingsOpen: false, view: 'chat' });

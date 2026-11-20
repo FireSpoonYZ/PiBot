@@ -84,6 +84,20 @@ public class ScheduleRuleTest {
         assertThrows(IllegalArgumentException.class, () -> ScheduleRule.fromJson(input));
     }
 
+    @Test public void datedOneTimeRuleKeepsTheRequestedLocalDateAndRejectsExpiredDates() throws Exception {
+        ZoneId shanghai = ZoneId.of("Asia/Shanghai");
+        JSONObject input = new JSONObject().put("repeat", "once").put("time", "20:00").put("date", "2028-02-29");
+        ScheduleRule rule = ScheduleRule.fromJson(input);
+        long due = at("2028-02-29T12:00:00Z");
+        assertEquals("2028-02-29", rule.json().getString("date"));
+        assertEquals(due, rule.nextAfter(at("2026-12-31T00:00:00Z"), shanghai));
+        assertThrows(IllegalArgumentException.class, () -> rule.nextAfter(due, shanghai));
+        input.put("date", "2027-02-29");
+        assertThrows(IllegalArgumentException.class, () -> ScheduleRule.fromJson(input));
+        input.put("repeat", "daily").put("date", "2028-02-29");
+        assertThrows(IllegalArgumentException.class, () -> ScheduleRule.fromJson(input));
+    }
+
     @Test public void chinaRulesIncludeMakeupShiftsAndAllDaysOffWithoutChangingFixedWeekly() throws Exception {
         ScheduleCalendar calendar = ScheduleCalendar.load(RuntimeEnvironment.getApplication());
         ZoneId china = ZoneId.of("Asia/Shanghai");

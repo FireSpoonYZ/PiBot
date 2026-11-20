@@ -223,8 +223,21 @@ export function applyGlobalTasksToBotBoardItem(item, globalTasks, deviceId) {
 export function projectBotBoardItem(botId, conversationId, state, view, details, options = {}) {
   let attention = null;
   const live = view?.docs?.['pi.live'];
+  // These records have already passed the wait store's ownership/fence check.
+  // Attention is independent of SDK execution: another run may be active.
+  for (const waitDetails of details?.waits ?? []) {
+    const presentation = projectToolPresentation(waitDetails);
+    if (presentation?.kind !== 'questionnaire' || presentation.status !== 'pending') continue;
+    attention = {
+      kind: 'questionnaire', requestId: presentation.requestId,
+      summary: bounded(presentation.questions.map((question) => question.question).join('\n'), 200),
+      count: presentation.questions.length,
+    };
+    break;
+  }
   // Historical tool results can retain a stale pending presentation after cancellation.
   for (const slot of [...(live?.tools ?? []), ...(live?.nestedTools ?? [])]) {
+    if (attention !== null) break;
     if (slot.status !== 'running') continue;
     const presentation = projectToolPresentation(slot.details);
     if (presentation?.kind !== 'questionnaire' || presentation.status !== 'pending') continue;

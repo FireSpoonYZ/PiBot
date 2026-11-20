@@ -19,9 +19,19 @@ import type {
 } from '../../../host-core/desktop-client.js';
 import type {
   BotDirectoryEntry,
+  BrowserControlAction,
+  BrowserControlFrameResult,
+  BrowserControlInput,
+  BrowserControlInputEvent,
+  BrowserControlResult,
+  BrowserControlStatusResult,
+  BrowserTabSummary,
   CreateBotInput,
   DevicesDirectoryItem,
   DevicesDirectoryPage,
+  GoogleSetupControlAction,
+  GoogleSetupControlInput,
+  GoogleSetupControlResult,
   HostServiceStatus,
   HostSettings,
   LiveTarget,
@@ -57,6 +67,16 @@ export type {
 } from '../../../host-core/desktop-client.js';
 
 export type {
+  BrowserControlAction,
+  BrowserControlFrameResult,
+  BrowserControlInput,
+  BrowserControlInputEvent,
+  BrowserControlResult,
+  BrowserControlStatusResult,
+  BrowserTabSummary,
+  GoogleSetupControlAction,
+  GoogleSetupControlInput,
+  GoogleSetupControlResult,
   LiveTarget,
   PrimarySubmission,
   TurnAdmissionStatus,

@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.ZoneId;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Set;
 import java.util.UUID;
@@ -37,8 +38,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * M16 Host 定时任务引擎（新独占命名空间 files/bot-host/schedules.sqlite）。
  * 全部数据库/事务/日历/闹钟 IO 与调度状态运行在专用单线程执行器上；
  * 生命周期锁（connLock）仅保护连接引用交换，bind/unbind 非阻塞、无 IO。
- * 每次 occurrence 发送前先持久化 claimed 标记并提交，之后绝不重发 submit；
- * 已尝试 run 仅按原 requestId 只读对账，定义删除/更新/禁用不影响对账。
+ * 新 occurrence 在首次提交前持久保存 Host 停止代次与不可变输入；按原 requestId
+ * 对账后可幂等补交尚未受理的事件。已取得受理回执和旧版不确定 run 只读对账。
  */
 final class BotHostSchedules {
 
@@ -66,10 +67,12 @@ final class BotHostSchedules {
     private static final Set<String> ACTIVE_RUNS = Set.of("dispatching", "unconfirmed", "queued", "placed");
     private static final Set<String> SUBMISSION_TERMINAL = Set.of("done", "unanswered");
     private static final Set<String> SUBMISSION_ACTIVE = Set.of("queued", "placed");
+    private static final Set<String> HANDOFF_REJECTED = Set.of("INVALID_ARGUMENT", "INVALID_CWD",
+            "BOT_NOT_FOUND", "BOT_ARCHIVED", "MODEL_REQUIRED", "MODEL_NOT_FOUND", "REQUEST_CONFLICT");
     private static final Set<String> CREATE_FIELDS = Set.of("action", "title", "prompt", "skills", "repeat", "time",
-            "weekday", "weekdays", "monthDay", "alarmMode", "vibrate", "deleteAfterRun");
+            "date", "weekday", "weekdays", "monthDay", "alarmMode", "vibrate", "deleteAfterRun");
     private static final Set<String> UPDATE_FIELDS = Set.of("action", "id", "revision", "title", "prompt", "skills",
-            "repeat", "time", "weekday", "weekdays", "monthDay", "alarmMode", "vibrate", "deleteAfterRun");
+            "repeat", "time", "date", "weekday", "weekdays", "monthDay", "alarmMode", "vibrate", "deleteAfterRun");
     private static final Set<String> MUTATION_ID_FIELDS = Set.of("action", "id", "revision");
     private static final Set<String> ENABLE_FIELDS = Set.of("action", "id", "revision", "enabled");
     private static final Set<String> LIST_FIELDS = Set.of("action", "cursor", "limit");
@@ -122,7 +125,7 @@ final class BotHostSchedules {
     private static final class Inflight {
         final Connection connection;
         final String runId;
-        final String kind; // submit | getSubmission
+        final String kind; // getScheduleFence | submit | getSubmission
 
         Inflight(Connection connection, String runId, String kind) {
             this.connection = connection;
@@ -164,6 +167,8 @@ final class BotHostSchedules {
     private ScheduledFuture<?> wakeFuture; // 仅执行器线程访问
     private Inflight inflight; // 仅执行器线程访问
     private int lastPlanIndex; // 仅执行器线程访问：round-robin 公平起点
+    // 仅当前连接中明确查询缺失的 run 才可补交；换代/重启后一律重新对账。
+    private final Set<String> missingRunIds = new HashSet<>();
 
     private BotHostSchedules(Context context) {
         this.context = context;
@@ -204,6 +209,7 @@ final class BotHostSchedules {
                     wakeFuture = null;
                 }
                 if (inflight != null) inflight = null;
+                missingRunIds.clear();
             }
             cancelAlarms();
         });
@@ -503,12 +509,14 @@ final class BotHostSchedules {
             long now = System.currentTimeMillis();
             for (int i = 0; i < st.runs.length(); i++) {
                 JSONObject run = st.runs.getJSONObject(i);
-                if (ownerMatches(run, owner) && "dispatching".equals(run.optString("status"))
-                        && !run.optBoolean("submitted", false)) {
+                if (ownerMatches(run, owner)
+                        && (("dispatching".equals(run.optString("status")) && !run.optBoolean("submitted", false))
+                        || pendingHandoff(run) != null)) {
                     run.put("status", "skipped_offline");
                     run.put("reason", "task_deleted");
                     run.put("finishedAt", now);
                     run.put("submitted", true);
+                    missingRunIds.remove(run.optString("id"));
                 }
             }
             save(db, st);
@@ -557,6 +565,10 @@ final class BotHostSchedules {
             // weekday/weekdays 互斥合并：更新其一须清除另一，避免旧规则静默生效。
             if (input.has("weekday") && !input.has("weekdays")) merged.remove("weekdays");
             if (input.has("weekdays") && !input.has("weekday")) merged.remove("weekday");
+            if (input.opt("date") == JSONObject.NULL
+                    || (!input.has("date") && !"once".equals(merged.optString("repeat")))) {
+                merged.remove("date");
+            }
             validateTaskFields(merged);
             long now = System.currentTimeMillis();
             ZoneId zone = ZoneId.systemDefault();
@@ -833,6 +845,7 @@ final class BotHostSchedules {
                 wakeFuture = null;
             }
             if (inflight != null) inflight = null; // 清理旧代 inflight 引用
+            missingRunIds.clear();
         }
         boolean committed = false;
         try {
@@ -856,12 +869,13 @@ final class BotHostSchedules {
         drive(bound);
     }
 
-    /** 事务内闭环所有从未尝试发送（submitted=false）的 dispatching 遗留 run；已尝试 run 保留对账。 */
+    /** 未捕获停止代次的旧/未武装 occurrence 沿用离线跳过；已武装交接保留并重新对账。 */
     private void neutralizeNeverAttempted(State st) throws JSONException {
         long now = System.currentTimeMillis();
         for (int i = 0; i < st.runs.length(); i++) {
             JSONObject run = st.runs.getJSONObject(i);
-            if (!"dispatching".equals(run.optString("status")) || run.optBoolean("submitted")) continue;
+            if (!"dispatching".equals(run.optString("status")) || run.optBoolean("submitted")
+                    || pendingHandoff(run) != null) continue;
             run.put("status", "skipped_offline").put("reason", "offline")
                     .put("finishedAt", now).put("submitted", true);
             st.runs.put(i, run);
@@ -905,7 +919,30 @@ final class BotHostSchedules {
                     String status = run.optString("status");
                     boolean submitted = run.optBoolean("submitted");
                     String runId = run.optString("id");
+                    if (ACTIVE_RUNS.contains(status) && pendingHandoff(run) != null) {
+                        boolean retry = missingRunIds.contains(runId);
+                        if (retry && findTask(st, run.optString("taskId")) == null) {
+                            // 查询已证实 Host 未受理且定义已删：闭环跳过，不再补交。
+                            run.put("status", "skipped_offline").put("reason", "task_deleted")
+                                    .put("finishedAt", System.currentTimeMillis()).put("submitted", true);
+                            st.runs.put(i, run);
+                            missingRunIds.remove(runId);
+                            save(db, st);
+                            continue;
+                        }
+                        lastPlanIndex = i;
+                        return new Step(new Inflight(c, runId, retry ? "submit" : "getSubmission"), run);
+                    }
                     if ("dispatching".equals(status) && !submitted) {
+                        if (run.has("handoff")) {
+                            JSONObject handoff = run.optJSONObject("handoff");
+                            if (handoff != null && Integer.valueOf(1).equals(handoff.opt("version"))
+                                    && "accepted".equals(handoff.optString("state"))) {
+                                lastPlanIndex = i;
+                                return new Step(new Inflight(c, runId, "getSubmission"), run);
+                            }
+                            continue;
+                        }
                         if (findTask(st, run.optString("taskId")) == null) {
                             // 定义已删且从未尝试发送：按离线错过终态闭环，不发送。
                             run.put("status", "skipped_offline").put("reason", "task_deleted")
@@ -915,7 +952,7 @@ final class BotHostSchedules {
                             continue;
                         }
                         lastPlanIndex = i;
-                        return new Step(new Inflight(c, runId, "submit"), run);
+                        return new Step(new Inflight(c, runId, "getScheduleFence"), run);
                     }
                     if (submitted && ("unconfirmed".equals(status) || SUBMISSION_ACTIVE.contains(status))) {
                         lastPlanIndex = i;
@@ -939,8 +976,8 @@ final class BotHostSchedules {
                     return true;
                 }
             }
-            // 第一次且唯一一次 submit 前：原子 claim（持久化 submitted=true/unconfirmed 并提交），
-            // 绝不重发已完成 claim 的 run；存储失败则本次不发送任何 Node 输入，限速重试。
+            // 仅持久 fence、不可变输入和本连接的明确缺失查询共同允许提交。
+            // Host 对同 requestId 去重，并用冻结 stopEpoch 取消被停止覆盖的旧事件。
             if (!claimPreSend(step)) {
                 inflight = null;
                 scheduleRetry(step.inflight.connection);
@@ -957,14 +994,19 @@ final class BotHostSchedules {
         JSONObject params;
         try {
             if ("submit".equals(step.inflight.kind)) {
-                method = "submit";
-                JSONArray skills = step.run.optJSONArray("skills");
-                String text = SOURCE_PREFIX + (skills != null && skills.length() > 0
-                        ? "\nLoad these skills with the read tool before executing: " + skills + "\n" : " ")
-                        + step.run.optString("prompt");
+                JSONObject handoff = pendingHandoff(step.run);
+                if (handoff == null) throw new JSONException("missing schedule handoff");
+                JSONObject input = handoff.getJSONObject("input");
+                method = "submitScheduled";
                 params = new JSONObject().put("botId", ownerBotId(step.run))
-                        .put("requestId", step.run.optString("requestId")).put("text", text);
+                        .put("requestId", input.getString("requestId"))
+                        .put("text", input.getString("text"))
+                        .put("stopEpoch", handoff.getLong("stopEpoch"));
+            } else if ("getScheduleFence".equals(step.inflight.kind)) {
+                method = "getScheduleFence";
+                params = new JSONObject().put("botId", ownerBotId(step.run));
             } else {
+                missingRunIds.remove(step.inflight.runId);
                 method = "getSubmission";
                 params = new JSONObject().put("botId", ownerBotId(step.run))
                         .put("requestId", step.run.optString("requestId"));
@@ -985,7 +1027,7 @@ final class BotHostSchedules {
         return true;
     }
 
-    /** 发送前持久标记：事务内验证 run 仍为未 claim 的 dispatching，置 submitted=true/unconfirmed。 */
+    /** 发送前持久标记：仅当前连接明确查无受理且持久 fence 有效时允许幂等提交。 */
     private boolean claimPreSend(Step step) {
         try {
             return inTx(db -> {
@@ -993,10 +1035,12 @@ final class BotHostSchedules {
                 int index = indexOfRun(st, step.inflight.runId);
                 if (index < 0) return false;
                 JSONObject run = st.runs.getJSONObject(index);
-                if (!"dispatching".equals(run.optString("status")) || run.optBoolean("submitted")) return false;
+                if (!ACTIVE_RUNS.contains(run.optString("status")) || pendingHandoff(run) == null
+                        || !missingRunIds.contains(step.inflight.runId)) return false;
                 run.put("submitted", true).put("status", "unconfirmed");
                 st.runs.put(index, run);
                 save(db, st);
+                missingRunIds.remove(step.inflight.runId);
                 return true;
             });
         } catch (Throwable failure) {
@@ -1013,6 +1057,7 @@ final class BotHostSchedules {
         }
         final boolean[] deletedRef = {false};
         final boolean[] vibrateRef = {false};
+        final boolean[] handoffReadyRef = {false};
         String status = null;
         try {
             status = inTx(db -> {
@@ -1020,6 +1065,8 @@ final class BotHostSchedules {
                 int index = indexOfRun(st, step.inflight.runId);
                 if (index < 0) return null;
                 JSONObject run = st.runs.getJSONObject(index);
+                // 删除/停止形成的终态不能被在飞 fence 或回执重新激活。
+                if (TERMINAL_RUNS.contains(run.optString("status"))) return run.optString("status");
                 if (error != null) {
                     applyError(run, step.inflight.kind, error);
                 } else {
@@ -1027,6 +1074,8 @@ final class BotHostSchedules {
                 }
                 st.runs.put(index, run);
                 save(db, st);
+                handoffReadyRef[0] = ("getScheduleFence".equals(step.inflight.kind) && pendingHandoff(run) != null)
+                        || ("getSubmission".equals(step.inflight.kind) && missingRunIds.contains(step.inflight.runId));
                 if ("done".equals(run.optString("status"))) {
                     vibrateRef[0] = run.optBoolean("vibrate", false);
                     deletedRef[0] = finishDoneLocked(st, run); // 终态先持久化
@@ -1059,21 +1108,88 @@ final class BotHostSchedules {
                 log("reschedule-after-delete-failed");
             }
         }
-        if (status != null && ACTIVE_RUNS.contains(status)) {
+        if (status != null && ACTIVE_RUNS.contains(status) && !handoffReadyRef[0]) {
             scheduleRetry(step.inflight.connection);
         } else {
             drive(step.inflight.connection);
         }
     }
 
+    /** 已受理证据优先于 pending 标记，兼容旧版本写过回执后再次升级的记录。 */
+    private static JSONObject pendingHandoff(JSONObject run) {
+        JSONObject handoff = run.optJSONObject("handoff");
+        if (handoff == null || !Integer.valueOf(1).equals(handoff.opt("version"))
+                || !"pending".equals(handoff.optString("state"))) return null;
+        Object epoch = handoff.opt("stopEpoch");
+        if (!(epoch instanceof Number) || ((Number) epoch).doubleValue() < 0
+                || ((Number) epoch).doubleValue() > MAX_SAFE_INTEGER
+                || ((Number) epoch).doubleValue() != Math.floor(((Number) epoch).doubleValue())) return null;
+        JSONObject input = handoff.optJSONObject("input");
+        if (input == null || !(input.opt("text") instanceof String) || input.optString("text").trim().isEmpty()
+                || !run.optString("requestId").equals(input.optString("requestId"))) return null;
+        Object submissionId = run.opt("submissionId");
+        String runStatus = run.optString("status");
+        if (!ACTIVE_RUNS.contains(runStatus)
+                || (submissionId instanceof Number && ((Number) submissionId).doubleValue() > 0)
+                || SUBMISSION_ACTIVE.contains(run.optString("submissionStatus"))
+                || SUBMISSION_TERMINAL.contains(run.optString("submissionStatus"))
+                || SUBMISSION_ACTIVE.contains(runStatus)) return null;
+        return handoff;
+    }
+
+    /** Fence 响应只武装原 occurrence，不再捕获后来的停止代次。 */
+    private void armHandoff(JSONObject run, JSONObject result) throws JSONException {
+        if (!"dispatching".equals(run.optString("status")) || run.optBoolean("submitted")
+                || run.has("handoff") || result == null
+                || !ownerBotId(run).equals(result.optString("botId"))
+                || !ownerConversationId(run).equals(result.optString("conversationId"))) return;
+        Object epoch = result.opt("stopEpoch");
+        if (!(epoch instanceof Number) || ((Number) epoch).doubleValue() < 0
+                || ((Number) epoch).doubleValue() > MAX_SAFE_INTEGER
+                || ((Number) epoch).doubleValue() != Math.floor(((Number) epoch).doubleValue())) return;
+        JSONArray skills = run.optJSONArray("skills");
+        String text = SOURCE_PREFIX + (skills != null && skills.length() > 0
+                ? "\nLoad these skills with the read tool before executing: " + skills + "\n" : " ")
+                + run.optString("prompt");
+        JSONObject input = new JSONObject().put("requestId", run.optString("requestId")).put("text", text);
+        run.put("handoff", new JSONObject().put("version", 1).put("state", "pending")
+                .put("input", input).put("stopEpoch", ((Number) epoch).longValue()));
+        run.put("updatedAt", System.currentTimeMillis());
+    }
+
+    private void markSubmissionMissing(JSONObject run) throws JSONException {
+        if (pendingHandoff(run) != null) missingRunIds.add(run.optString("id"));
+        run.put("status", "unconfirmed").put("submitted", true)
+                .put("updatedAt", System.currentTimeMillis());
+    }
+
     private void applyError(JSONObject run, String kind, Throwable error) throws JSONException {
         Throwable root = unwrap(error);
+        if ("getScheduleFence".equals(kind)) {
+            if (root instanceof BotHostProcess.BridgeException bridge
+                    && HANDOFF_REJECTED.contains(bridge.code)
+                    && ("responded".equals(bridge.outcome) || "not-sent".equals(bridge.outcome))) {
+                run.put("status", "not_sent").put("reason", "not_sent")
+                        .put("finishedAt", System.currentTimeMillis()).put("submitted", true);
+            }
+            // 没有成功捕获 fence 就没有可恢复交接；瞬态失败本次在线继续重试，重启沿用离线跳过。
+            run.put("updatedAt", System.currentTimeMillis());
+            return;
+        }
+        if ("getSubmission".equals(kind) && root instanceof BotHostProcess.BridgeException bridge
+                && "SUBMISSION_NOT_FOUND".equals(bridge.code) && "responded".equals(bridge.outcome)) {
+            markSubmissionMissing(run);
+            return;
+        }
+        missingRunIds.remove(run.optString("id"));
+        boolean pending = pendingHandoff(run) != null;
         if ("submit".equals(kind) && root instanceof BotHostProcess.BridgeException bridge
-                && "not-sent".equals(bridge.outcome)) {
+                && ((pending && HANDOFF_REJECTED.contains(bridge.code))
+                || (!pending && "not-sent".equals(bridge.outcome)))) {
             run.put("status", "not_sent").put("reason", "not_sent")
                     .put("finishedAt", System.currentTimeMillis());
         } else {
-            // 错误/timeout/进程切换：保原 ID，绝不自动重发 submit，留 unconfirmed 只读对账。
+            // 新交接先重新对账；旧版及已受理记录保持只读查询，未知结果不直接重投。
             run.put("status", "unconfirmed").put("submitted", true);
         }
         run.put("updatedAt", System.currentTimeMillis());
@@ -1081,17 +1197,25 @@ final class BotHostSchedules {
 
     private void applyEnvelope(JSONObject run, String kind, JSONObject envelope) throws JSONException {
         long now = System.currentTimeMillis();
+        if ("getScheduleFence".equals(kind)) {
+            if (envelope != null && "result".equals(envelope.optString("type"))) {
+                armHandoff(run, envelope.optJSONObject("result"));
+            }
+            return;
+        }
+        if (envelope != null && "result".equals(envelope.optString("type"))
+                && "getSubmission".equals(kind) && envelope.has("result")
+                && envelope.isNull("result")) {
+            markSubmissionMissing(run);
+            return;
+        }
+        missingRunIds.remove(run.optString("id"));
         if (envelope == null || !"result".equals(envelope.optString("type"))
                 || !(envelope.opt("result") instanceof JSONObject)) {
             run.put("status", "unconfirmed").put("submitted", true).put("updatedAt", now);
             return;
         }
         JSONObject result = envelope.optJSONObject("result");
-        // getSubmission 返回 null 不能证明原 submit 未执行：保 unconfirmed，不 POST。
-        if ("getSubmission".equals(kind) && result.length() == 0) {
-            run.put("status", "unconfirmed").put("submitted", true).put("updatedAt", now);
-            return;
-        }
         if (!ownerBotId(run).equals(result.optString("botId"))
                 || !ownerConversationId(run).equals(result.optString("conversationId"))
                 || !run.optString("requestId").equals(result.optString("requestId"))) {
@@ -1104,13 +1228,21 @@ final class BotHostSchedules {
             return;
         }
         Object submissionId = result.opt("submissionId");
-        if (!(submissionId instanceof Number) || ((Number) submissionId).doubleValue() <= 0
-                || ((Number) submissionId).doubleValue() > MAX_SAFE_INTEGER
-                || ((Number) submissionId).doubleValue() != Math.floor(((Number) submissionId).doubleValue())) {
+        boolean nativeId = submissionId instanceof Number && ((Number) submissionId).doubleValue() > 0
+                && ((Number) submissionId).doubleValue() <= MAX_SAFE_INTEGER
+                && ((Number) submissionId).doubleValue() == Math.floor(((Number) submissionId).doubleValue());
+        boolean hostReceipt = result.has("submissionId") && submissionId == JSONObject.NULL
+                && ("queued".equals(status) || ("unanswered".equals(status) && "cancelled".equals(result.optString("reason"))));
+        if (!nativeId && !hostReceipt) {
             run.put("status", "unconfirmed").put("submitted", true).put("updatedAt", now);
             return;
         }
-        run.put("submissionStatus", status).put("submissionId", submissionId);
+        JSONObject handoff = run.optJSONObject("handoff");
+        if (handoff != null && Integer.valueOf(1).equals(handoff.opt("version"))) {
+            handoff.put("state", "accepted");
+            if (handoff.isNull("acceptedAt")) handoff.put("acceptedAt", now);
+        }
+        run.put("submissionStatus", status).put("submissionId", nativeId ? submissionId : JSONObject.NULL);
         if (SUBMISSION_TERMINAL.contains(status)) {
             run.put("status", status).put("finishedAt", now);
         } else {
@@ -1414,6 +1546,7 @@ final class BotHostSchedules {
             task.put("skills", input.has("skills") ? input.get("skills") : new JSONArray());
             copyField(input, task, "repeat");
             copyField(input, task, "time");
+            if (input.has("date")) copyField(input, task, "date");
             if (input.has("weekday")) copyField(input, task, "weekday");
             if (input.has("weekdays")) copyField(input, task, "weekdays");
             if (input.has("monthDay")) copyField(input, task, "monthDay");
@@ -1656,8 +1789,8 @@ final class BotHostSchedules {
     private JSONObject taskDTO(JSONObject task, JSONArray runs) throws JSONException {
         JSONObject dto = new JSONObject();
         dto.put("skills", task.has("skills") ? task.getJSONArray("skills") : new JSONArray());
-        String[] keys = {"id", "revision", "enabled", "title", "prompt", "skills", "repeat", "time", "weekday", "weekdays",
-                "monthDay", "alarmMode", "vibrate", "deleteAfterRun", "nextRunAt", "sourceTaskId",
+        String[] keys = {"id", "revision", "enabled", "title", "prompt", "skills", "repeat", "time", "date",
+                "weekday", "weekdays", "monthDay", "alarmMode", "vibrate", "deleteAfterRun", "nextRunAt", "sourceTaskId",
                 "createdAt", "updatedAt"};
         for (String key : keys) {
             if (task.has(key)) dto.put(key, task.get(key));

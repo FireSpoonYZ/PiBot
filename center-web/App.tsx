@@ -23,6 +23,7 @@ function getInitialTheme(): ThemeMode {
 
 function pathToTab(pathname: string): CenterAdminTab {
   if (pathname.startsWith('/capabilities')) return 'capabilities';
+  if (pathname.startsWith('/google')) return 'google';
   if (pathname.startsWith('/devices')) return 'devices';
   if (pathname.startsWith('/vault')) return 'vault';
   if (pathname.startsWith('/ops') || pathname.startsWith('/webhooks') || pathname.startsWith('/releases')) {
@@ -288,6 +289,18 @@ export default function App() {
               />
             }
           />
+          <Route
+            path="/google"
+            element={
+              <ReadyShell
+                theme={theme}
+                themeLabel={themeLabel}
+                onCycleTheme={cycleTheme}
+                onLogout={() => void api.logout().then(refresh).catch(() => refresh())}
+              />
+            }
+          />
+          <Route path="/google/*" element={<Navigate to="/google" replace />} />
           <Route
             path="/devices"
             element={

@@ -13,6 +13,9 @@ import { clipMemoryText, redactMemoryText } from './hindsight-format.js';
 const SCOPE_MESSAGE_KIND = 'host.scope-message';
 const WORK_TRIGGER_KIND = 'host.work-trigger';
 const PRIMARY_INPUT_KIND = 'pi.user';
+const RESET_ENTRY_KIND = 'pi.reset';
+const GOOGLE_WORKSPACE_DATA_BOUNDARY = 'google-workspace';
+const GOOGLE_WORKSPACE_RULE_SOURCE_TYPE = 'google-workspace-rule';
 
 const PAGE_SIZE = 50; // work collection page of scope-message entries
 const CHUNK_MAX_UNITS = 16384; // per source text chunk, UTF-16 units
@@ -134,17 +137,68 @@ function normalizeTarget(target) {
  * getBotPolicy(botId) 提供每 Bot 策略：关闭时 captureRequest 返回 null，
  * 只读时保留 query 但 canWrite=false；retentionFloor 以下的历史条目不入 source/query。
  */
-export function createHindsightSources({ host, getHarness, context, getBotPolicy, documents }) {
+export function createHindsightSources({ host, getHarness, context, getBotPolicy, documents, dataPrivacy = null }) {
   if (!host || typeof getHarness !== 'function' || !context) {
     throw sourceError('INVALID_ARGUMENT', 'createHindsightSources requires host, getHarness and context');
   }
-  const { WorkContextState, WorkDecisionState, RequestKeys } = documents;
+  const { WorkContextState, WorkDecisionState, RequestKeys, GoogleWorkspacePrivacyState } = documents;
   const deviceId = nonBlankString(host.deviceId, 'host.deviceId');
 
   function harness() {
     const value = getHarness();
     if (!value) throw sourceError('HINDSIGHT_STORE_FAILED', 'harness is not initialized');
     return value;
+  }
+
+  /**
+   * 检查会话截至 throughEntryId 是否已受 Google Workspace 数据边界污染：
+   * 优先复用 Host 注入的 dataPrivacy 服务；未注入时直接读持久 GoogleWorkspacePrivacyState
+   * 与受信规则条目（插件打包独立，绝不跨包相对导入 host-core）。
+   */
+  async function isGoogleWorkspaceTainted(nativeId, { throughEntryId, entries = null, callContext = context } = {}) {
+    if (typeof dataPrivacy?.isConversationTainted === 'function') {
+      return await dataPrivacy.isConversationTainted(nativeId, { throughEntryId, entries, callContext });
+    }
+    if (!GoogleWorkspacePrivacyState) return false;
+    const h = harness();
+    const state = typeof h.snapshot === 'function'
+      ? await h.snapshot(GoogleWorkspacePrivacyState, nativeId, callContext)
+      : null;
+    let resetEntryId = 0;
+    const list = Array.isArray(entries) ? entries : [];
+    for (const entry of list) {
+      if (entry?.kind === RESET_ENTRY_KIND && Number.isSafeInteger(entry.id)) {
+        if (!Number.isSafeInteger(throughEntryId) || entry.id <= throughEntryId) {
+          if (entry.id > resetEntryId) resetEntryId = entry.id;
+        }
+      }
+    }
+    const bound = Number.isSafeInteger(throughEntryId) ? throughEntryId : Number.POSITIVE_INFINITY;
+    if (isPlainObject(state?.earliestByReset)) {
+      for (const [resetKey, rec] of Object.entries(state.earliestByReset)) {
+        const markReset = Number(resetKey);
+        if (!Number.isSafeInteger(markReset) || markReset < 0 || !isPlainObject(rec)) continue;
+        const anchor = Number.isSafeInteger(rec.anchorEntryId) ? rec.anchorEntryId : 0;
+        const start = Number.isSafeInteger(rec.turnStartEntryId) ? rec.turnStartEntryId : anchor;
+        if (markReset === resetEntryId || (markReset < resetEntryId && anchor > resetEntryId)) {
+          const effectiveStart = markReset < resetEntryId ? Math.max(start, resetEntryId + 1) : start;
+          if (effectiveStart <= bound) return true;
+        }
+      }
+    }
+    for (const entry of list) {
+      if (!Number.isSafeInteger(entry?.id) || entry.id <= resetEntryId || entry.id > bound) continue;
+      const data = entry?.data;
+      if (!isPlainObject(data)) continue;
+      if (
+        (data.dataBoundary === GOOGLE_WORKSPACE_DATA_BOUNDARY && (data.source === 'host' || data.attribution?.kind === 'host' || data.turn?.sender?.kind === 'host')) ||
+        (data.attribution?.kind === 'host' && data.attribution?.sourceType === GOOGLE_WORKSPACE_RULE_SOURCE_TYPE) ||
+        (data.turn?.sender?.kind === 'host' && data.turn?.sender?.sourceType === GOOGLE_WORKSPACE_RULE_SOURCE_TYPE)
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   async function resolveIdentity(nativeId, callContext) {
@@ -259,6 +313,11 @@ export function createHindsightSources({ host, getHarness, context, getBotPolicy
     const conversation = await h.conversation(api.conversationId, callContext);
     if (!conversation) return null;
     const view = await conversation.context(callContext, { at: cutoff });
+    if (await isGoogleWorkspaceTainted(api.conversationId, { throughEntryId: cutoff, entries: view.entries, callContext })) {
+      // 会话当前代次已含 Google Workspace 业务数据：不记录自动 retention，也不将可能派生自
+      // 邮件/文档的后续输入发往外部 Hindsight recall 服务。
+      return null;
+    }
     const visible = visibleMessages(view);
 
     const inspection = await h.inspect(callContext);
@@ -462,9 +521,19 @@ export function createHindsightSources({ host, getHarness, context, getBotPolicy
     verifyRunOwner(run, identity, meta);
 
     if (run.kind === 'primary') {
-      const items = await primaryItems(run, record, conversation, callContext, identity);
       const after = Math.max(record.entry, record.answer);
+      // 轮中调用 Google Workspace MCP 或规则事件：beforeRequest 虽先于工具调用记下 run，
+      // 收集时复查持久隐私边界，命中则整轮（含衍生回答）保守跳过，不入 Hindsight。
+      if (await isGoogleWorkspaceTainted(run.nativeId, { throughEntryId: after, callContext })) {
+        return { status: 'ready', items: [], afterEntryId: after, done: true };
+      }
+      const items = await primaryItems(run, record, conversation, callContext, identity);
       return { status: 'ready', items, afterEntryId: after, done: true };
+    }
+
+    const workBound = Math.max(run.cutoff, Number.isSafeInteger(record.answer) ? record.answer : 0);
+    if (await isGoogleWorkspaceTainted(run.nativeId, { throughEntryId: workBound, callContext })) {
+      return { status: 'ready', items: [], afterEntryId: workBound, done: true };
     }
 
     // 工作：冻结 native 视图（stored cutoff），取贡献的 scope-message 条目（分页 50）。

@@ -83,7 +83,10 @@ export function createScheduleTools({ host, getHarness, schedules, collaboration
         'action=list 列出目标 Bot 的任务摘要（可选 cursor/limit 分页）；' +
         'create 新建任务，title/prompt/repeat/time 必填，ID 由宿主分配，不接受 id/revision；' +
         'update/delete/setEnabled 必须提供 id 和正整数 revision 做严格 CAS（先 list 获取最新 id 与 revision）。' +
-        'repeat 支持 once/daily/weekly/monthly/statutoryWorkday/statutoryHoliday，time 格式 HH:mm，' +
+        'repeat 支持 once/daily/weekly/monthly/statutoryWorkday/statutoryHoliday，time 格式 HH:mm。' +
+        '指定日期的单次任务（包括今天、明天）用 repeat=once、date=YYYY-MM-DD 和 time，按目标 Host 时区计算，时间已过则拒绝。' +
+        'list 返回目标 Host 的 now（Unix 毫秒）和 timeZone；创建回执的 task.nextRunAt 为实际执行时间（Unix 毫秒）。' +
+        '单次任务不填 date 则安排在下一次到点；update 可用 date=null 清除指定日期。' +
         'skills 是显式技能名称数组（默认空），执行时先加载；不从 prompt 推断依赖。可选 alarmMode exact|alarmClock（默认 alarmClock）、vibrate、deleteAfterRun。',
       parameters: {
         type: 'object',
@@ -109,6 +112,7 @@ export function createScheduleTools({ host, getHarness, schedules, collaboration
             ],
           },
           time: { type: 'string', pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' },
+          date: { anyOf: [{ type: 'string', pattern: '^[1-9][0-9]{3}-[0-9]{2}-[0-9]{2}$' }, { type: 'null' }] },
           weekday: { type: 'integer', minimum: 1, maximum: 7 },
           weekdays: {
             type: 'array',

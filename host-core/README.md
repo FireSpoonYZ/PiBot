@@ -221,7 +221,7 @@ node host-core/runtime-cli.js wait --data-root "$DATA_ROOT" --config "$CONFIG" -
 
 ## 模块 3：受管 Billion Context 插件
 
-受管插件使用 [acp-kernel](https://github.com/ranxianglei/acp-kernel) 0.0.101 管理长期上下文，不需要另外启动 bili 或代理；新 Host 不内嵌 BC。以下迁移步骤仅适用于从旧内嵌 BC 版本升级：先在中心上传并安装插件实例且保持 Bot 绑定关闭，停止旧 Host 并保留数据后才启用目标 Bot 绑定，再更新并启动新 Host，等待安装及 snapshot/profile 应用完成后恢复调度；不要在旧 Host 运行时下发启用，旧内置工具与插件原名冲突。详细步骤见 [插件 README](../plugins/billion-context/README.md)。中心安装并全局启用后给无显式绑定的既有/新 Bot 默认启用 BC（安装本身实例初始停用），显式 false 与已有 overrides 原样保留；未启用的 Bot 只跑 SDK 原生压缩与最终预算检查。上游负责范围选择、分层压缩、引用、摘要投影与搜索；摘要由模型通过工具提供。完整条款及署名见 [第三方声明](../THIRD_PARTY_NOTICES.md#acp-kernel)。
+受管插件使用 [acp-kernel](https://github.com/ranxianglei/acp-kernel) 0.0.101 管理长期上下文，不需要另外启动 bili 或代理；新 Host 不内嵌 BC。以下迁移步骤仅适用于从旧内嵌 BC 版本升级：先在中心上传并安装插件实例且保持 Bot 绑定关闭，停止旧 Host 并保留数据后才启用目标 Bot 绑定，再更新并启动新 Host，等待安装及 snapshot/profile 应用完成后恢复调度；不要在旧 Host 运行时下发启用，旧内置工具与插件原名冲突。详细步骤见 [插件 README](../plugins/billion-context/README.md)。中心安装并全局启用后给无显式绑定的既有/新 Bot 默认启用 BC（安装本身实例初始停用），显式 false 与已有 overrides 原样保留；未启用的 Bot 只跑 SDK 原生压缩与最终预算检查。上游内核负责范围选择、分层压缩、引用、摘要投影与搜索；模型可以通过 `compress` 主动提交摘要，Host 也可在请求太大时调用插件先分段摘要。完整条款及署名见 [第三方声明](../THIRD_PARTY_NOTICES.md#acp-kernel)。
 
 ### 持久状态和请求投影
 
@@ -874,13 +874,13 @@ node host-core/control-cli.js work-context --url http://127.0.0.1:8787 \
 - `STALE_INPUT` 不写入消息/序号/outbox/目标。驱动持久标记 replan，旧生成不再发起下一次 provider 调用，保留未处理水位，随后用新批次重新考虑；不保证远端尚未到达的消息也被看见。
 - 合法的同 messageId、同发布指纹重试在数据库 guard/成员检查前返回原回执；异内容仍报 `REQUEST_CONFLICT`。guard 不进信封或指纹。已落盘发送在停止或崩溃后可对账，不能把失败/中止结果解释为此前绝无发布或其他副作用。
 
-BC 插件启用时负责其投影压缩，原文不删；SDK 原生自动压缩对所有 Bot 生效（含 BC 启用的 Bot），两者共存，原生 head 前移后 BC 在现有投影上重建。Host 在插件和 Durable 贡献之后执行最终预算检查：基线用 cutoff 视图的 SDK usage+尾部估计，插件投影按有序子序列 + 增量对齐，真实越限才以 `CONTEXT_LIMIT` 阻止 provider 调用；不截掉最新大事件、不按整包 JSON 估算误杀正常上下文。窗口估计不是 provider 接受请求的保证。
+BC 接管当前会话后，Host 不再提前触发 SDK 的阈值／后台压缩，保留手动 `/compact` 和 SDK 原生溢出兜底。对支持预压的模型路径，Host 在插件和 Durable 贡献之后计量实际模型视图；较大的请求可以先让 BC 折叠旧历史，再重建并复核预算。模型尚未输出就明确拒绝超限时，可以在同一个生成任务里用较小的视图重试，不重投用户消息、不重跑工具。BC 不删除原始历史；窗口估计也不是 provider 接受请求的保证。
 
 pi-durable 的 HookRunner 会吞掉普通 hook 抛错，因此请求阶段失败需要按当前生成任务的取消保护处理；此前内嵌实现的故障验收不等于新插件链路已验证。
 
 ### 当前约定：自动压缩与失败闭环
 
-- **压缩**：全部 Bot 默认 SDK 自动 compaction（阈值 blocking/background 与一次 overflow 重试）；中心安装并全局启用后对无显式绑定的既有/新 Bot 默认启用 BC（安装本身实例初始停用），显式 false/overrides 在再次全局启用后仍保留；两者共存，原生 head 变化后 BC 重建投影。已实跑：原 478 会话 threshold 自动压缩完成（任务 4908 completed）与 BC 共存、手动压缩完成（任务 4957 completed）、默认绑定与既有显式 false 均已核验。
+- **压缩**：未被 BC 接管的会话维持 SDK 默认阈值、后台与溢出压缩。中心全局启用 BC 后为没有显式绑定的既有/新 Bot 默认开启绑定；显式关闭和已有 overrides 保留。SDK 写入新上下文边界时，BC 重建当前投影，不删除原文。
 - **预算**：prepare 与最终守卫都用 cutoff 视图的 SDK usage+尾部估计，插件投影按有序子序列 + 增量计费；真实越限才 CONTEXT_LIMIT，不按整包 JSON 误杀。
 - **失败**：只结算本冻结请求批；诊断写 GenerationFailureState 家族（String(taskId) 键、固定安全文案），并向原请求 replyTo 发普通 bot-author `[Host 执行失败]` 回执（前缀只是标签，不提供可信 Host 身份，信封 author 仍是实际 Bot）。旧 scope 闸门错误经迁移边界封存、不重放 backlog，新到消息正常执行。已实跑：委派发起方插入 >20k token 填充后手动 compact，恢复接收方后收到一次稳定 messageId 的 MODEL_REQUIRED 普通 bot 回信（replyTo 原请求），发起方在原 primary 自动报告错误；修复模型后无 resumeWork/无重发旧请求，同一 DM 新请求与回信成功，双方 lastError 归零；Host 重启未重复发失败回执。
 - **LIVE**：blocking 与手动压缩显示 compacting（手动 compacting.startedAt 与原生任务一致），后台压缩不抢占 running；失败展示安全 failed.error；计时用冻结轮 frozenAt / nativeTask.startedAt，不取历史用户消息日期。

@@ -8,6 +8,7 @@ import { assertId } from './message-protocol.js';
 import {
   LIVE_MAX_CLIENT_SUBSCRIPTIONS,
   LIVE_OPEN_TIMEOUT_MS,
+  normalizeLiveExtensions,
   normalizeLiveTarget,
   normalizeLiveSnapshot,
 } from './remote-live-protocol.js';
@@ -120,7 +121,9 @@ export function installRemoteLive(client, hooks) {
     }
     let snapshot;
     try {
-      snapshot = normalizeLiveSnapshot(frame.frame, sub.target);
+      snapshot = normalizeLiveSnapshot(frame.frame, sub.target, {
+        liveExtensions: normalizeLiveExtensions(client.liveExtensions),
+      });
     } catch {
       protocolViolation();
       return;

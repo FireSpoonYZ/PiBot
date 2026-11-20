@@ -181,6 +181,8 @@
 }
 .desktop-shell .bot-sched-row input[type="time"],
 .desktop-dialog .bot-sched-row input[type="time"],
+.desktop-shell .bot-sched-row input[type="date"],
+.desktop-dialog .bot-sched-row input[type="date"],
 .desktop-shell .bot-sched-row input[type="number"],
 .desktop-dialog .bot-sched-row input[type="number"],
 .desktop-shell .bot-sched-row input[type="text"],

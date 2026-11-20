@@ -39,6 +39,16 @@ import {
   LIVE_MAX_HOST_SUBSCRIPTIONS,
   LIVE_MAX_SUBSCRIPTIONS
 } from './relay-live.js';
+import {
+  ALL_LIVE_EXTENSIONS,
+  NO_LIVE_EXTENSIONS,
+  LIVE_EXTENSIONS_HEADER,
+  LIVE_EXTENSIONS_HEADER_WIRE,
+  parseLiveExtensionsHeader,
+  formatLiveExtensionsHeader,
+  intersectLiveExtensions,
+  projectLiveSnapshotForPeer
+} from './remote-live-protocol.js';
 import { controlMethodTimeoutMs, controlMethodVersion, normalizeControlCall } from './remote-control-protocol.js';
 
 const DEFAULT_PORT = 8790;
@@ -168,6 +178,7 @@ export async function openRelayServer(options = {}) {
   let wss = null;
   let server = null;
   let registry = null;
+  const upgradeLiveExtensions = new WeakMap();
   // The caller owns the HTTP listener in shared mode: close() cleans WS state
   // and the registry but never closes or reconfigures that server.
   let ownsServer = false;
@@ -176,6 +187,13 @@ export async function openRelayServer(options = {}) {
       noServer: true,
       maxPayload: MAX_RELAY_FRAME_BYTES,
       perMessageDeflate: false
+    });
+    wss.on('headers', (headers, req) => {
+      const negotiated = upgradeLiveExtensions.get(req);
+      const value = formatLiveExtensionsHeader(negotiated);
+      if (value !== null) {
+        headers.push(`${LIVE_EXTENSIONS_HEADER_WIRE}: ${value}`);
+      }
     });
     if (sharedServer) {
       server = httpServer;
@@ -651,6 +669,7 @@ export async function openRelayServer(options = {}) {
         role: 'client',
         controlProtocol: 2,
         scopeProtocol: 0,
+        liveExtensions: NO_LIVE_EXTENSIONS,
         helloTimer: null,
         alive: true,
         dead: false,
@@ -776,15 +795,16 @@ export async function openRelayServer(options = {}) {
       }
       return;
     }
-    const applied = liveRoutes.applyFrame(record, frame.frame);
+    const applied = liveRoutes.applyFrame(record, frame.frame, { liveExtensions: conn.liveExtensions });
     if (!applied.ok) {
       return closeWith(conn, RELAY_CLOSE.BAD_FRAME);
     }
+    const outboundSnapshot = projectLiveSnapshotForPeer(applied.snapshot, record.client.liveExtensions);
     if (!writeFrame(record.client.ws, {
       type: 'live-frame',
       watchId: record.watchId,
       targetDeviceId: record.targetDeviceId,
-      frame: applied.snapshot
+      frame: outboundSnapshot
     }, noop)) {
       // Backpressured client cannot receive the stream: cancel the host and
       // terminate rather than queue unboundedly or silently drop frames.
@@ -899,7 +919,7 @@ export async function openRelayServer(options = {}) {
   function onFrame(conn, data, isBinary) {
     let frame;
     try {
-      frame = readClientFrame(data, isBinary);
+      frame = readClientFrame(data, isBinary, { liveExtensions: conn.liveExtensions });
     } catch {
       return closeWith(conn, RELAY_CLOSE.BAD_FRAME);
     }
@@ -1061,7 +1081,7 @@ export async function openRelayServer(options = {}) {
     }
   }
 
-  function onConnection(ws) {
+  function onConnection(ws, liveExtensions = NO_LIVE_EXTENSIONS) {
     if (closed) {
       try { ws.terminate(); } catch { /* socket gone */ }
       return;
@@ -1073,6 +1093,7 @@ export async function openRelayServer(options = {}) {
       role: 'host',
       controlProtocol: 0,
       scopeProtocol: 0,
+      liveExtensions,
       helloTimer: null,
       alive: true,
       dead: false,
@@ -1119,9 +1140,14 @@ export async function openRelayServer(options = {}) {
     socket.on('close', () => {
       upgradeSockets.delete(socket);
     });
+    const liveExtensions = intersectLiveExtensions(
+      ALL_LIVE_EXTENSIONS,
+      parseLiveExtensionsHeader(req.headers?.[LIVE_EXTENSIONS_HEADER]),
+    );
+    upgradeLiveExtensions.set(req, liveExtensions);
     try {
       wss.handleUpgrade(req, socket, head, (ws) => {
-        onConnection(ws);
+        onConnection(ws, liveExtensions);
       });
     } catch {
       socket.destroy();

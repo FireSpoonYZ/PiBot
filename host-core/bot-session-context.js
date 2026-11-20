@@ -4,6 +4,7 @@
 // 归属只来自受信账本字段（author/scopeId/envelope），绝不从正文文本推断；
 // scopeMessageAttribution 对未知/畸形 author 一律回退 bot，不采信发送方声称的 user。
 import { defineDoc } from '@earendil-works/pi-durable';
+import { isTrustedHostSourceType } from './google-workspace-privacy.js';
 
 export const SCOPE_MESSAGE_KIND = 'host.scope-message';
 export const WORK_TRIGGER_KIND = 'host.work-trigger';
@@ -15,6 +16,12 @@ const ATTRIBUTION_KINDS = new Set(['user', 'bot', 'host']);
 const ATTRIBUTION_CHANNELS = new Set(['primary', 'dm', 'room']);
 const ATTRIBUTION_CATEGORIES = new Set(['public', 'notice', 'request', 'reply']);
 const ATTRIBUTION_DIRECTIONS = new Set(['incoming', 'outgoing']);
+const PRIVATE_HOST_SOURCE_TYPES = new Set(['schedule', 'task_dispatch']);
+
+/** Host 侧合法的受信事件来源白名单（含 Google Workspace 规则与内部 schedule/task_dispatch）。 */
+export function isAllowedHostSourceType(value) {
+  return isTrustedHostSourceType(value) || PRIVATE_HOST_SOURCE_TYPES.has(value);
+}
 
 export const BOT_SESSION_CHECKPOINT_INTERVAL = 128;
 
@@ -49,6 +56,18 @@ function cleanString(value) {
   return typeof value === 'string' && value !== '' ? value : undefined;
 }
 
+/** A presentation cannot confer authority on itself: it must address the
+ * actual tool task in this native conversation before the wait store is read. */
+export function questionnaireWaitKey(details, taskId, conversationId) {
+  const p = details?.presentation;
+  if (p?.kind !== 'questionnaire' || p.version !== 1 ||
+      typeof p.installationId !== 'string' || !p.installationId ||
+      !Number.isSafeInteger(p.conversationId) || p.conversationId < 1 ||
+      typeof p.requestId !== 'string' || p.requestId !== String(taskId) ||
+      (conversationId !== undefined && p.conversationId !== conversationId)) return null;
+  return JSON.stringify([p.installationId, p.conversationId, p.requestId]);
+}
+
 /** 把账本/触发条目的 author 归一为受信归属：只认 kind/botId/deviceId，名字仅作展示。 */
 export function senderAttribution(author, deviceId) {
   const kind = ATTRIBUTION_KINDS.has(author?.kind) ? author.kind : 'bot';
@@ -57,7 +76,7 @@ export function senderAttribution(author, deviceId) {
   const device = cleanString(deviceId) ?? cleanString(author?.deviceId);
   if (device) sender.deviceId = device;
   if (kind === 'host' && cleanString(author?.name)) sender.name = author.name.slice(0, 200);
-  if (kind === 'host' && author?.sourceType === 'webhook') sender.sourceType = 'webhook';
+  if (kind === 'host' && isAllowedHostSourceType(author?.sourceType)) sender.sourceType = author.sourceType;
   return sender;
 }
 

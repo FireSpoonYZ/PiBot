@@ -101,20 +101,36 @@ test('ScheduleRule: daily, weekly, monthly, DST, and statutory calendar rules ma
   );
 });
 
+test('dated one-shot rules keep the requested local date and reject invalid or expired dates', () => {
+  const shanghai = 'Asia/Shanghai';
+  const input = { repeat: 'once', date: '2028-02-29', time: '20:00' };
+  const rule = ScheduleRule.fromJson(input);
+  const due = Date.parse('2028-02-29T12:00:00Z');
+  assert.equal(rule.json().date, input.date);
+  assert.equal(rule.nextAfter(Date.parse('2026-12-31T00:00:00Z'), shanghai), due);
+  assert.throws(() => rule.nextAfter(due, shanghai), /已过/);
+  assert.throws(() => ScheduleRule.fromJson({ ...input, date: '2027-02-29' }), /YYYY-MM-DD/);
+  assert.throws(() => ScheduleRule.fromJson({ ...input, repeat: 'daily' }), /只有单次/);
+  const legacy = ScheduleRule.fromJson({ repeat: 'once', time: input.time });
+  assert.equal(legacy.nextAfter(due, shanghai), Date.parse('2028-03-01T12:00:00Z'));
+});
+
 test('schedule-protocol and remote-control-protocol validate scheduleTask calls strictly', () => {
   const validCreate = normalizeControlCall('scheduleTask', {
     botId: 'bot-alpha',
     input: {
       action: 'create',
-      title: '每日早报',
-      prompt: '汇总今日待办',
-      repeat: 'daily',
+      title: '新年提醒',
+      prompt: '提醒我看新年安排',
+      repeat: 'once',
+      date: '2028-01-01',
       time: '08:30',
     },
   });
   assert.equal(validCreate.method, 'scheduleTask');
   assert.equal(validCreate.params.botId, 'bot-alpha');
   assert.equal(validCreate.params.input.action, 'create');
+  assert.equal(validCreate.params.input.date, '2028-01-01');
 
   assert.throws(
     () =>
@@ -138,9 +154,11 @@ test('schedule-protocol and remote-control-protocol validate scheduleTask calls 
   );
 });
 
-test('createScheduleManager (Node SQLite): multi-bot CRUD, CAS, trigger execution, archive pause, and delete cleanup', async () => {
+test('createScheduleManager (Node SQLite): multi-bot CRUD, CAS, and durable one-time execution', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse('2026-12-31T00:00:00Z') });
   const dataRoot = mkdtempSync(join(tmpdir(), 'schedule-mgr-test-'));
   const host = openHost({ dataRoot });
+  let schedules;
   try {
     const primaryBot = host.createBot({
       requestId: 'req-primary',
@@ -180,11 +198,8 @@ test('createScheduleManager (Node SQLite): multi-bot CRUD, CAS, trigger executio
       },
     };
 
-    const schedules = createScheduleManager({
-      host,
-      getRuntime: () => fakeRuntime,
-      isOnline: () => true,
-    });
+    const options = { host, getRuntime: () => fakeRuntime, isOnline: () => true };
+    schedules = createScheduleManager(options);
     schedules.start();
 
     // Non-primary workerBot creates its own scheduled task
@@ -242,8 +257,44 @@ test('createScheduleManager (Node SQLite): multi-bot CRUD, CAS, trigger executio
     const afterDelete = await schedules.execute(workerBot, { action: 'list' });
     assert.equal(afterDelete.tasks.length, 0);
 
+    const dated = { action: 'create', title: '提醒', prompt: '提醒我提交报告', repeat: 'once', date: '2028-02-29', time: '20:00' };
+    await assert.rejects(() => schedules.execute(primaryBot, { ...dated, date: '2026-01-01' }), /已过/);
+    const missed = await schedules.execute(primaryBot, { ...dated, date: '2028-02-28' });
+    const created = await schedules.execute(primaryBot, dated);
+    const due = epochMs(created.timeZone, 2028, 2, 29, 20, 0);
+    assert.equal(created.task.nextRunAt, due);
+
+    const revised = await schedules.execute(primaryBot, {
+      action: 'update', id: created.task.id, revision: created.task.revision, title: '报告提醒',
+    });
+    assert.equal(revised.task.date, dated.date);
+    assert.equal(revised.task.nextRunAt, due);
     await schedules.close();
+
+    t.mock.timers.setTime(due - 1_000);
+    schedules = createScheduleManager(options);
+    schedules.start();
+    const restored = await schedules.execute(primaryBot, { action: 'list' });
+    assert.equal(restored.tasks.find(task => task.id === created.task.id).date, dated.date);
+    assert.equal(restored.tasks.find(task => task.id === missed.task.id).latestRun.status, 'skipped_offline');
+    t.mock.timers.tick(999);
+    assert.equal(submitted.length, 0);
+    t.mock.timers.tick(1);
+    assert.equal(submitted.length, 1);
+    assert.equal(submitted[0].botId, primaryBot.botId);
+
+    const afterRun = await schedules.execute(primaryBot, { action: 'list' });
+    const executed = afterRun.tasks.find(task => task.id === created.task.id);
+    assert.equal(executed.latestRun.occurrence, due);
+    assert.equal(executed.enabled, false);
+    assert.equal(executed.nextRunAt, 0);
+    await assert.rejects(() => schedules.execute(primaryBot, {
+      action: 'setEnabled', id: executed.id, revision: executed.revision, enabled: true,
+    }), /已过/);
+    t.mock.timers.tick(24 * 60 * 60 * 1_000);
+    assert.equal(submitted.length, 1);
   } finally {
+    await schedules?.close();
     host.close();
     rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }

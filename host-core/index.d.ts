@@ -710,6 +710,14 @@ export interface OpenRuntimeOptions {
   onBotsSync?: () => void | Promise<void>;
   /** Optional idle settle delay (ms) before background automatic learning starts; defaults to 15000. */
   learningIdleSettleMs?: number;
+  /** Optional trusted in-process factory override for host-core/bot-browser/service.js. */
+  createBotBrowserService?: (options: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  /** Optional trusted in-process factory override for host-core/google-setup/service.js. */
+  createGoogleSetupService?: (options: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  /** Optional trusted in-process browser provider factory override (for headless testing). */
+  createBrowserProvider?: (options: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  onBrowserEvent?: (event: Record<string, unknown>) => void;
+  onSetupEvent?: (event: Record<string, unknown>) => void;
 }
 
 export interface Runtime {
@@ -818,6 +826,8 @@ export interface Runtime {
   scheduleTask(botId: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
   /* Unified Shower environment (host.shower): the same six methods on every platform. */
   vaultControl(input: VaultControlInput): Promise<VaultControlResult>;
+  browserControl(input: BrowserControlInput): Promise<BrowserControlResult>;
+  googleSetupControl(input: GoogleSetupControlInput): Promise<GoogleSetupControlResult>;
   getShowerStatus(target: ShowerTarget): Promise<ShowerSession>;
   createShowerSession(target: ShowerTarget, input?: ShowerCreateOptions): Promise<ShowerSession>;
   getShowerFrame(target: ShowerTarget, sessionId: string, limits?: ShowerFrameLimits): Promise<ShowerFrame>;
@@ -1229,7 +1239,7 @@ export interface Attribution {
   /** Display-only sender name; never an identity or routing key. */
   name?: string;
   /** Trusted Host entry source only; never accepted from a user sender. */
-  sourceType?: 'webhook';
+  sourceType?: 'webhook' | 'google-workspace-rule' | 'schedule' | 'task_dispatch';
   channel: 'primary' | 'dm' | 'room';
   scopeId?: string;
   messageId?: string;
@@ -1258,6 +1268,8 @@ export interface LiveMessage {
   blocks?: LiveContentBlock[];
   /** Whitelist projection of the toolResult details.presentation; read-only. */
   presentation?: ToolPresentation;
+  /** Verified session-owned pending questionnaire, independent of SDK task liveness. */
+  durableWait?: boolean;
   /** Metadata only (no base64) on user messages carrying image attachments. */
   attachments?: ImageAttachment[];
 }
@@ -1288,6 +1300,8 @@ export interface LiveTool {
   error?: string;
   /** Whitelist projection of the running tool's slot.details.presentation; read-only. */
   presentation?: ToolPresentation;
+  /** Verified session-owned pending questionnaire, independent of SDK task liveness. */
+  durableWait?: boolean;
 }
 
 export interface LiveGeneration {
@@ -1384,6 +1398,8 @@ export interface BotLiveState {
   activity?: BotActivity;
   /** Idle background reflection / skill learning state; optional — omitted on work watches and older Hosts. */
   learning?: BotLearningLiveState | null;
+  /** Complete active questionnaire identity set (max 64); removes stale cached history authority. */
+  durableWaits?: Array<{ installationId: string; conversationId: number; requestId: string }>;
 }
 
 export interface BotLearningOutcomeSummary {
@@ -1602,6 +1618,8 @@ export interface ControlClient {
   reviewBotSkills(botId: string, input: BotSkillReviewInput, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
   scheduleTask(botId: string, input: Record<string, unknown>, options?: ControlClientCallOptions): Promise<Record<string, unknown>>;
   vaultControl(input: VaultControlInput, options?: ControlClientCallOptions): Promise<VaultControlResult>;
+  browserControl(input: BrowserControlInput, options?: ControlClientCallOptions): Promise<BrowserControlResult>;
+  googleSetupControl(input: GoogleSetupControlInput, options?: ControlClientCallOptions): Promise<GoogleSetupControlResult>;
   getShowerStatus(target: ShowerTarget, options?: ControlClientCallOptions): Promise<ShowerSession>;
   createShowerSession(target: ShowerTarget, input?: ShowerCreateOptions, options?: ControlClientCallOptions): Promise<ShowerSession>;
   getShowerFrame(target: ShowerTarget, sessionId: string, limits?: ShowerFrameLimits, options?: ControlClientCallOptions): Promise<ShowerFrame>;
@@ -2535,8 +2553,139 @@ export type VaultControlResult = VaultStatus
   | { revision: number }
   | ExternalVaultControlResult;
 
+export type BrowserControlAction =
+  | 'status'
+  | 'open'
+  | 'navigate'
+  | 'back'
+  | 'forward'
+  | 'reload'
+  | 'select'
+  | 'closeTab'
+  | 'frame'
+  | 'takeover'
+  | 'input'
+  | 'handback'
+  | 'release';
+
+export type BrowserControlInputEvent =
+  | { kind: 'click'; x: number; y: number; button?: 'left' | 'right' | 'middle'; count?: 1 | 2; modifiers?: string[] }
+  | { kind: 'text'; text: string }
+  | { kind: 'key'; key: string; modifiers?: string[] }
+  | { kind: 'wheel'; x?: number; y?: number; deltaX?: number; deltaY?: number; modifiers?: string[] };
+
+export interface BrowserControlInput {
+  action: BrowserControlAction;
+  botId: string;
+  scopeId?: string;
+  pageId?: string;
+  lease?: string;
+  revision?: number;
+  frameSeq?: number;
+  format?: 'png' | 'jpeg' | 'webp';
+  maxWidth?: number;
+  maxHeight?: number;
+  maxBytes?: number;
+  quality?: number;
+  url?: string;
+  holderLabel?: string;
+  force?: boolean;
+  preempt?: boolean;
+  resume?: boolean;
+  ignoreCache?: boolean;
+  event?: BrowserControlInputEvent;
+}
+
+export interface BrowserTabSummary {
+  id: string;
+  title: string;
+  url: string;
+}
+
+export interface BrowserControlStatusResult {
+  available: boolean;
+  reason?: string;
+  canStreamInteract: boolean;
+  phase: 'bot' | 'taking' | 'human' | 'held';
+  sessionId?: string | null;
+  pageId?: string | null;
+  revision: number;
+  tabs: BrowserTabSummary[];
+  holderLabel?: string | null;
+  lease?: string | null;
+  [key: string]: unknown;
+}
+
+export interface BrowserControlFrameResult {
+  seq: number;
+  mimeType: string;
+  data: string;
+  width: number;
+  height: number;
+  revision: number;
+  pageId: string;
+  [key: string]: unknown;
+}
+
+export type BrowserControlResult =
+  | BrowserControlStatusResult
+  | BrowserControlFrameResult
+  | Record<string, unknown>;
+
+export type GoogleSetupControlAction =
+  | 'status'
+  | 'start'
+  | 'answer'
+  | 'advance'
+  | 'cancel'
+  | 'resume';
+
+export interface GoogleSetupControlInput {
+  action: GoogleSetupControlAction;
+  botId: string;
+  scopeId?: string;
+  fresh?: boolean;
+  runId?: string;
+  revision?: number;
+  expectedRevision?: number;
+  mode?: string;
+  step?: string;
+  card?: string;
+  cardCopy?: number;
+  values?: string[];
+  field?: string;
+  value?: string | string[];
+  actionId?: string;
+  choices?: string[];
+  services?: string[];
+  kind?: 'work' | 'personal';
+  projectId?: string;
+  account?: string;
+  browserPageId?: string;
+  restart?: boolean;
+  reconfigureClient?: boolean;
+  note?: string;
+  reason?: string;
+}
+
+export interface GoogleSetupControlResult {
+  id?: string;
+  revision: number;
+  state: string;
+  mode?: string;
+  step?: string;
+  steps: unknown[];
+  choices?: string[];
+  projectId?: string;
+  blocker?: unknown;
+  actions?: unknown[];
+  [key: string]: unknown;
+}
+
 export interface RemoteControlMethodMap {
   vaultControl: { params: VaultControlInput; result: VaultControlResult };
+  browserControl: { params: BrowserControlInput; result: BrowserControlResult };
+  googleSetupControl: { params: GoogleSetupControlInput; result: GoogleSetupControlResult };
   manageTasks: { params: TaskActionInput; result: Record<string, unknown> };
   getHostInfo: { params: Record<string, never>; result: ControlHostInfo };
   getServiceStatus: { params: Record<string, never>; result: HostServiceStatus };

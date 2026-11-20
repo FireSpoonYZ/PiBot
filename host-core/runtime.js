@@ -19,13 +19,27 @@ import { openHost } from './host.js';
 import { acquireRuntimeOwner } from './runtime-owner.js';
 import { migrateBotSessionCheckpoints } from './bot-session-checkpoint-migration.js';
 import { parseExecutionOptions, parseModelRef, normalizeThinkingLevel, normalizeCodemodeFlag, describeModelCatalog, discoverProviderModels, applyCenterModels } from './runtime-models.js';
-import { ANTIGRAVITY_PROVIDER_ID } from './antigravity-provider.js';
+import { ANTIGRAVITY_API, ANTIGRAVITY_PROVIDER_ID } from './antigravity-provider.js';
 import { createGrepTool } from './grep-tool.js';
 import { createFindTool } from './find-tool.js';
 import { createLsTool } from './ls-tool.js';
 import { getPrimaryConversation, RequestKeys, PrimaryIndex, applyAgentProfile } from './runtime-docs.js';
 import { formatPrimarySubmission, latestResetEntryId, normalizeHistoryOptions, readPrimaryHistory } from './runtime-history.js';
-import { RequestContext, countMessageTokens, estimateContextTokensHost, budgetRequestTokens, setRequestBudget } from './request-context.js';
+import {
+  RequestContext,
+  countMessageTokens,
+  estimateContextTokensHost,
+  budgetRequestTokens,
+  setRequestBudget,
+  isLocalBudgetOverflowError,
+  createBaseProjectionReplacer,
+  computePreflightTargetTokens,
+  computeOverflowRecoveryBudget,
+  createTurnProvenanceStore,
+  createTurnProvenanceFromCutoff,
+  advanceTurnProvenance,
+  resolveAntigravityTurnContext,
+} from './request-context.js';
 import { GenerationFailureState } from './generation-failure.js';
 import { resolveBotIdentity } from './bot-identity.js';
 import { createPluginManager } from './plugins/manager.js';
@@ -37,14 +51,23 @@ import { WorkIndex, WorkContextState, workInstructions } from './work-context-do
 import { WorkDecisionState } from './work-decision-state.js';
 import { createWorkDecisionRuntime } from './runtime-work-decisions.js';
 import { createTurnAdmission } from './runtime-turns.js';
+import { canDetachPrimaryWait, createRuntimeWaits } from './runtime-waits.js';
 import { TurnQueue } from './runtime-turns-docs.js';
 import { createBotSessionRuntime, applySessionResetState } from './runtime-bot-session.js';
-import { BotSessionState, USER_MESSAGE_KIND, WORK_TRIGGER_KIND, deriveEntryAttribution } from './bot-session-context.js';
+import { BotSessionState, USER_MESSAGE_KIND, WORK_TRIGGER_KIND, deriveEntryAttribution, isAllowedHostSourceType } from './bot-session-context.js';
+import {
+  createGoogleWorkspacePrivacy,
+  GOOGLE_WORKSPACE_DATA_BOUNDARY,
+  GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
+  GoogleWorkspacePrivacyState,
+  isTrustedDataBoundary,
+} from './google-workspace-privacy.js';
 import { createBotLearning } from './bot-learning.js';
 import { createBotManagementSkillSection } from './bot-management-skill.js';
 import { SOUL_MAX_BYTES } from './bot-soul.js';
 import { normalizeUserMessage } from './scope-protocol.js';
 import { createCommunicationTools } from './communication-tools.js';
+import { createOperationTools } from './operation-tools.js';
 import { createSessionSearchTool } from './session-search-tool.js';
 import { createCollaborationService } from './collaboration-service.js';
 import { BASE_BEHAVIOR_PROMPT } from './bot-prompt.js';
@@ -53,9 +76,14 @@ import { createCuaTools } from './cua-tools.js';
 import { createShowerManager } from './shower-manager.js';
 import { createShowerTools } from './shower-tools.js';
 import { createRuntimeShower } from './runtime-shower.js';
+import { openRuntimeBrowserSetup } from './runtime-browser-setup.js';
 import { createVaultService } from './vault-service.js';
 import { createScheduleManager } from './host-schedules.js';
 import { createWebhookConsumer } from './host-webhooks.js';
+import {
+  createMcpDispatchExtension,
+  createMcpDispatchRuntime,
+} from './runtime-mcp-dispatch.js';
 import { createTaskDispatchConsumer, fetchAllActiveGlobalTasks } from './host-tasks.js';
 import { createScheduleTools } from './schedule-tools.js';
 import {
@@ -382,11 +410,15 @@ export async function openRuntime(options) {
   let storage = null;
   let harness = null;
   let workContexts = null;
+  let browserSetup = null;
   let coreExtensions = [];
+  const botHostExtensionsFor = (botId) => browserSetup?.extensionsForBot(botId) ?? [];
   let online = false;
+  let closing = false;
   let maintenance = false;
   let botModels = {};
   let getBotEntryWatermark;
+  let isBotTurnRunningReader = null;
   let runtime;
   const collaboration = createCollaborationService({
     host,
@@ -496,7 +528,7 @@ export async function openRuntime(options) {
     // 与准入泵同口径解析/配置主会话：已映射直接返回；未映射用当前 Center 模型选择
     // 与 profile 创建（导入需要可写目标），随后应用人格/工具，保证导入与执行同一会话。
     getPrimary: async (bot) => {
-      const profile = botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, bot.botId, null);
+      const profile = botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, bot.botId, null, botHostExtensionsFor);
       let conversation = await getPrimaryConversation(harness, bot, {}, CTX);
       if (!conversation) {
         const modelRef = botModels[bot.botId]?.modelRef;
@@ -507,7 +539,6 @@ export async function openRuntime(options) {
           thinkingLevel: profile.thinkingLevel,
           instructions: profile.instructions,
           removeTools: profile.removeTools,
-          selectedExtensions: profile.selectedExtensions,
           codemodeOnly: profile.codemodeOnly,
         }, CTX);
       }
@@ -526,7 +557,7 @@ export async function openRuntime(options) {
     collaboration,
     // 工作决策的 stop/resume/advance 在同一 Bot 队列内执行；scope lane 在前，Bot lane 在后。
     admitBot: bots.admit,
-    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta),
+    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor),
   });
 
   // 统一图形环境：管理器按注入的可信原生桥接（Android）或当前平台（Windows/Linux）选后端；
@@ -575,6 +606,11 @@ export async function openRuntime(options) {
       return `Tools execute on this host (device ${host.deviceId}) through ${shell}; they are not sandboxed. Default working directory: ${JSON.stringify(cwd ?? null)}.`;
     })],
   }));
+  const dataPrivacy = createGoogleWorkspacePrivacy({
+    getHarness: () => harness,
+    context: CTX,
+    documents: { BotSessionState },
+  });
   registry.install(defineExtension({
     name: 'host.communication',
     tools: createCommunicationTools({
@@ -585,6 +621,7 @@ export async function openRuntime(options) {
       passWork: decisions.passWork,
       collaboration,
       sessions,
+      dataPrivacy,
     }),
     sections: [section('host-collaboration', async (input, context) => renderCollaborationPrompt({
       device: await collaboration.getCurrentDevice(),
@@ -603,6 +640,10 @@ export async function openRuntime(options) {
   }));
   // 内置 Bot 管理技能目录：只渲染名称/描述索引，
   // 完整 SKILL.md 由模型按目录经文件工具读取，不把整本手册塞进系统提示。
+  registry.install(defineExtension({
+    name: 'host.operations',
+    tools: createOperationTools({ host, getHarness: () => harness, getCenterClient: () => centerRuntime.getClient(), dataPrivacy }),
+  }));
   const botManagementSection = createBotManagementSkillSection();
   registry.install(defineExtension({
     name: 'host.bot-management-skill',
@@ -630,6 +671,10 @@ export async function openRuntime(options) {
   const services = {
     host, models, getHarness: () => harness, context: CTX, getWorkContexts: () => workContexts,
     getWorkActivity: decisions.getWorkActivity,
+    getRunContext: async (api, context = CTX) => {
+      const dispatch = await harness.snapshot(TaskDispatchContexts, api.conversationId, context);
+      return sessions.getRunContext(api, context, { dispatchContexts: dispatch?.byRequest });
+    },
     resolveConversationBot: async (id) => {
       const identity = await resolveBotIdentity(host, harness, id, CTX);
       const primary = await harness.snapshot(PrimaryIndex, CTX);
@@ -658,7 +703,8 @@ export async function openRuntime(options) {
     assertCapabilityAllowed: (botId, id) => plugins.assertCapabilityAllowed(botId, id),
     getExecutionEnv: async (botId) => envFor({ conversationId: 'plugin:' + botId, cwd: host.getBot(botId).cwd }),
     getBotEntryWatermark: (botId) => getBotEntryWatermark(botId),
-    documents: { PrimaryIndex, RequestKeys, WorkIndex, WorkContextState, WorkDecisionState, RequestContext, ContextState: RequestContext, GenerationFailureState },
+    dataPrivacy,
+    documents: { PrimaryIndex, RequestKeys, WorkIndex, WorkContextState, WorkDecisionState, RequestContext, ContextState: RequestContext, GenerationFailureState, GoogleWorkspacePrivacyState },
     sdk: {
       ...durable,
       defineDoc: (definition) => durable.defineDoc({ checkpointWhen: () => false, ...definition }),
@@ -679,16 +725,26 @@ export async function openRuntime(options) {
     },
   };
   let tasksBridge = null;
+  let waitsBridge = null;
+  const waitsFacade = Object.fromEntries(['open', 'get', 'answer'].map((method) => [method, (...args) => {
+    if (!waitsBridge) throw errWithCode('durable waits are not ready', 'RUNTIME_BUSY');
+    return waitsBridge[method](...args);
+  }]));
   const tasksFacade = {
     invoke(botId, input, conversationId, nativeTaskId) {
       if (!tasksBridge) throw errWithCode('center is offline', 'CENTER_OFFLINE');
       return tasksBridge.invoke(botId, input, conversationId, nativeTaskId);
     },
     getActiveForBot: (botId) => (tasksBridge ? tasksBridge.getActiveForBot(botId) : []),
+    getExecutionContext: (botId, conversationId) => tasksBridge?.getExecutionContext(botId, conversationId) ?? null,
     listDirectoryBots: () => (tasksBridge ? tasksBridge.listDirectoryBots() : []),
   };
 
-  plugins = createPluginManager({ host, registry, installer: centerRuntime.installer, services, isOnline: () => online, vaultFacade: vault.facade, tasksFacade });
+  plugins = createPluginManager({ host, registry, installer: centerRuntime.installer, services, isOnline: () => online, vaultFacade: vault.facade, tasksFacade, waitsFacade });
+  // 短生命周期每任务 Antigravity 回合归属态（仅内存，绝不写进持久历史或 RequestContext）。
+  const antigravityTurnProvenance = createTurnProvenanceStore();
+  // 短生命周期每任务非 AGY 同轮预压/溢出恢复态（仅内存，随任务结束或 abort 自动清理）。
+  const requestRecoveryState = createTurnProvenanceStore();
   registry.install(defineExtension({
     name: 'host.request-context',
     hooks: [hook(GenerationTask, {
@@ -715,6 +771,7 @@ export async function openRuntime(options) {
           const checkpoint = task.state.checkpoint;
           const model = models.getModel(actual.provider, actual.modelId);
           if (!model || checkpoint.cutoff === undefined) throw errWithCode('request checkpoint is unavailable', 'INVALID_STATE');
+          const isAntigravity = actual.provider === ANTIGRAVITY_PROVIDER_ID || model.api === ANTIGRAVITY_API;
           const preparedConversation = await harness.conversation(api.conversationId, context);
           if (!preparedConversation) throw errWithCode('request conversation is missing', 'INVALID_STATE');
           const cutoffView = await preparedConversation.context(context, { at: checkpoint.cutoff });
@@ -730,17 +787,42 @@ export async function openRuntime(options) {
           const routingCount = Math.max(0, (routed?.messages?.length ?? 0) - sanitizedRequest.messages.length);
           const routingMessages = routingCount > 0 ? routed.messages.slice(0, routingCount) : [];
           await decisions.beforeRequest(routed, api, context);
+          const frozenTurn = !isAntigravity ? await sessions.getTurn(api, context) : null;
+          const turnKey = typeof frozenTurn?.requestId === 'string' && frozenTurn.requestId.length > 0
+            ? frozenTurn.requestId
+            : undefined;
           // prepareContext 收原始 request（不带 Host 注入）：BC 等上下文贡献返回的
           // 完整视图不能覆盖、也不重复计费本轮 Host 控制指引；持久 prepared 预算
           // 仍记真实投影，最终守卫按有序子序列增量把指引只计一次。
-          const requestView = await plugins.prepareContext(sanitizedRequest, api, context);
+          const preflightTarget = !isAntigravity
+            ? computePreflightTargetTokens(model.contextWindow, model.maxTokens, model.api)
+            : undefined;
+          const requestView = await plugins.prepareContext(sanitizedRequest, api, context, turnKey, preflightTarget);
+          const { turnProvenance: _sideband, ...cleanRequestView } = requestView ?? {};
           // SDK 同口径预算基线：取 checkpoint.cutoff 的权威上下文视图，
           // 用 estimateContext（最新 assistant usage + 尾部估计）算原始历史，
           // 再按有序子序列 + 增量把 prepareContext（如 BC 投影）的实际
           // 有效请求计入 tokenCount；JSON 克隆内容匹配，BC 整体替换只计投影。
           const baselineMessages = sanitizeLegacyAttachmentPromptMessages(cutoffView.messages, cutoffView);
           const baselineView = baselineMessages === cutoffView.messages ? cutoffView : { ...cutoffView, messages: baselineMessages };
-          const preparedTokens = budgetRequestTokens(baselineView.messages, estimateContextTokensHost(baselineView), requestView.messages);
+          const baselineTokens = estimateContextTokensHost(baselineView);
+          const preparedTokens = budgetRequestTokens(baselineView.messages, baselineTokens, requestView.messages);
+          let turnProvenance = null;
+          if (isAntigravity) {
+            turnProvenance = createTurnProvenanceFromCutoff(cutoffView.messages, baselineMessages, requestView, checkpoint.cutoff);
+            requestRecoveryState.delete(api.taskId);
+          } else {
+            antigravityTurnProvenance.delete(api.taskId);
+            const bcProvider = plugins.getBillionContextBinding(requestView);
+            if (bcProvider) {
+              requestRecoveryState.set(api.taskId, {
+                cutoff: checkpoint.cutoff, preflightTarget, turnKey, baselineMessages, baselineTokens,
+                baseMessages: requestView.messages, bcProvider,
+              }, context.abortSignal);
+            } else {
+              requestRecoveryState.delete(api.taskId);
+            }
+          }
           await harness.commit(async (tx) => {
             const doc = await tx.doc(RequestContext, api.conversationId);
             doc.prepared = {
@@ -751,14 +833,27 @@ export async function openRuntime(options) {
             };
           }, context);
           if (!online) throw errWithCode('center is offline', 'CENTER_OFFLINE');
-          const finalView = await plugins.beforeRequest(requestView, api, context);
+          await dataPrivacy.syncTrustedRuleEntries(api.conversationId, cutoffView.entries, { callContext: context });
+          const finalView = await plugins.beforeRequest(cleanRequestView, api, context);
           // 只在需要时把瞬态 SystemMessage 路由指引前置到投影/recall 之后的最终视图头部：
           // 任何插件（含会整体重建视图的 BC prepare）都不能丢掉冻结轮约束，且末尾真实消息
           // 角色、正文/图片与 toolCall/toolResult 配对保持完整。
+          const finalMessages = routingMessages.length > 0
+            ? [...routingMessages, ...(finalView?.messages ?? [])]
+            : (finalView?.messages ?? []);
+          if (isAntigravity) {
+            turnProvenance = advanceTurnProvenance(turnProvenance, finalView?.messages, { allowAppendAuxiliaryUsers: true });
+            if (routingMessages.length > 0) {
+              turnProvenance = advanceTurnProvenance(turnProvenance, finalMessages, { allowAppendAuxiliaryUsers: false });
+            }
+            antigravityTurnProvenance.set(api.taskId, turnProvenance, context.abortSignal);
+          }
           return routingMessages.length > 0
-            ? { ...finalView, messages: [...routingMessages, ...(finalView?.messages ?? [])] }
+            ? { ...finalView, messages: finalMessages }
             : finalView;
         } catch (err) {
+          antigravityTurnProvenance.delete(api.taskId);
+          requestRecoveryState.delete(api.taskId);
           if (!context.abortSignal?.aborted) {
             // Host 侧准备失败：先把安全诊断写入 GenerationFailureState（契约 A，
             // work 对账/LIVE 可凭 taskId 读到具体失败），再中止当前任务。
@@ -775,6 +870,46 @@ export async function openRuntime(options) {
       },
     })],
   }));
+  async function compactModelRequest(messages, recovery, reason, targetTokens, contextWindow, api, context) {
+    const replacer = createBaseProjectionReplacer(messages, recovery.baseMessages);
+    if (!replacer) return null;
+
+    const measure = (projection) => budgetRequestTokens(recovery.baselineMessages, recovery.baselineTokens, projection);
+    const estimateTokens = (candidate) => {
+      const complete = replacer.replace(candidate);
+      return complete ? measure(complete) : Infinity;
+    };
+    let result;
+    try {
+      result = await plugins.compactContext({ reason, targetTokens, estimateTokens, turnKey: recovery.turnKey },
+        api, context, recovery.bcProvider);
+    } catch (err) {
+      if (context.abortSignal?.aborted || err instanceof durable.SessionFailed ||
+          err?.code === 'CENTER_OFFLINE' || err?.code === 'BOT_CONTEXT_REQUIRED') throw err;
+      return { status: 'summary_failed' };
+    }
+    context.abortSignal?.throwIfAborted();
+    if (!online || closing) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+    if (result?.status !== 'compacted') return result ? { status: result.status } : null;
+
+    const projection = replacer.replace(result.messages);
+    if (!projection) return { status: 'no_range' };
+    const total = measure(projection);
+    if (total >= contextWindow || total >= measure(messages) || (reason === 'overflow' && total >= targetTokens)) {
+      return { status: 'still_over_limit' };
+    }
+    const baseTokens = measure(result.messages);
+    const saved = await harness.commit(async (tx) => {
+      const doc = await tx.doc(RequestContext, api.conversationId);
+      if (doc.prepared?.taskId !== String(api.taskId) || doc.prepared.cutoff !== recovery.cutoff) return false;
+      doc.prepared = { ...doc.prepared, contextWindow, tokenCount: baseTokens, messages: result.messages };
+      return true;
+    }, context);
+    if (!saved) return null;
+    recovery.baseMessages = result.messages;
+    return { status: 'compacted', messages: projection, total };
+  }
+
   // Selected after each Bot's plugin hooks, so this check sees their complete request.
   // SDK 已用 estimateContext（权威 usage + 尾部估计）做阈值压缩与溢出重试；这里的
   // 最终守卫在 provider 边界返回标准 overflow，交给 SDK 自动压缩并至多重试一次；
@@ -785,14 +920,37 @@ export async function openRuntime(options) {
   const finalBudgetExtension = defineExtension({ name: 'cap-final-budget', hooks: [hook(GenerationTask, {
     async beforeRequest(request, api, context) {
       try {
-        if (!online) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+        if (!online || closing) throw errWithCode('center is offline', 'CENTER_OFFLINE');
         const prepared = (await harness.snapshot(RequestContext, api.conversationId, context))?.prepared;
         if (!prepared || prepared.taskId !== String(api.taskId)) throw errWithCode('context is not prepared', 'INVALID_STATE');
-        const total = budgetRequestTokens(prepared.messages, prepared.tokenCount, request.messages);
-        // Let the SDK compact/retry an oversized projection without sending it to the provider.
-        setRequestBudget(request.messages, total, prepared.contextWindow);
-        await decisions.checkBudget(request, api, context);
+        const provenance = antigravityTurnProvenance.get(api.taskId);
+        if (provenance) {
+          antigravityTurnProvenance.set(
+            api.taskId,
+            advanceTurnProvenance(provenance, request.messages, { allowAppendAuxiliaryUsers: true }),
+            context.abortSignal,
+          );
+        }
+        let total = budgetRequestTokens(prepared.messages, prepared.tokenCount, request.messages);
+        const recovery = requestRecoveryState.get(api.taskId);
+        const eligible = Boolean(recovery && recovery.cutoff === prepared.cutoff);
+        let compacted;
+        if (eligible) {
+          const target = recovery.preflightTarget;
+          if (total >= target || recovery.bcProvider.autoFold) {
+            compacted = await compactModelRequest(request.messages, recovery, 'preflight', target,
+              prepared.contextWindow, api, context);
+            if (compacted?.messages) total = compacted.total;
+          }
+        }
+        const nextRequest = compacted?.messages ? { ...request, messages: compacted.messages } : request;
+        setRequestBudget(nextRequest.messages, total, prepared.contextWindow, compacted?.status);
+        // Managed oversize requests go through the final guard so Durable can still run its native fallback.
+        await decisions.checkBudget(nextRequest, api, context, eligible);
+        if (nextRequest !== request) return nextRequest;
       } catch (err) {
+        antigravityTurnProvenance.delete(api.taskId);
+        requestRecoveryState.delete(api.taskId);
         if (!context.abortSignal?.aborted) {
           await recordGenerationFailure(api, err, context);
           await harness.abortTask(api.taskId, context);
@@ -800,10 +958,75 @@ export async function openRuntime(options) {
         throw err;
       }
     },
+    async recoverContextOverflow({ model, messages, error, cutoff }, api, context) {
+      if (context.abortSignal?.aborted || !online || closing || isLocalBudgetOverflowError(error)) return;
+      const recovery = requestRecoveryState.get(api.taskId);
+      if (!recovery || recovery.cutoff !== cutoff || recovery.overflowAttempted) return;
+      recovery.overflowAttempted = true;
+
+      const sentEstimatedTokens = budgetRequestTokens(recovery.baselineMessages, recovery.baselineTokens, messages);
+      const { targetTokens, effectiveContextWindow } = computeOverflowRecoveryBudget({
+        configuredContextWindow: model.contextWindow, modelMaxTokens: model.maxTokens,
+        sentEstimatedTokens, errorMessage: error.errorMessage,
+      });
+      try {
+        const result = await compactModelRequest(messages, recovery, 'overflow', targetTokens,
+          effectiveContextWindow, api, context);
+        if (!result?.messages || !online || closing) return;
+        const nextRequest = { messages: result.messages };
+        await decisions.checkBudget(nextRequest, api, context, true);
+        context.abortSignal?.throwIfAborted();
+        if (!online || closing) return;
+        setRequestBudget(result.messages, result.total, effectiveContextWindow);
+        return nextRequest;
+      } catch (err) {
+        requestRecoveryState.delete(api.taskId);
+        if (!context.abortSignal?.aborted) {
+          await recordGenerationFailure(api, err, context);
+          await harness.abortTask(api.taskId, context);
+        }
+        throw err;
+      }
+    },
+    async beforeProviderRequest({ model, payload }, api, context) {
+      if (!model || (model.provider !== ANTIGRAVITY_PROVIDER_ID && model.api !== ANTIGRAVITY_API)) {
+        return undefined;
+      }
+      try {
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          throw errWithCode('Antigravity provider payload must be an object', 'INVALID_STATE');
+        }
+        const turnContext = resolveAntigravityTurnContext(antigravityTurnProvenance.get(api.taskId), payload.messages);
+        return { payload: { ...payload, turnContext } };
+      } catch (err) {
+        antigravityTurnProvenance.delete(api.taskId);
+        if (!context.abortSignal?.aborted) {
+          await recordGenerationFailure(api, err, context);
+          try {
+            await harness.abortTask(api.taskId, context);
+          } catch (abortErr) {
+            if (!context.abortSignal?.aborted) throw abortErr;
+          }
+        }
+        throw err;
+      }
+    },
+    afterResponse(_message, api) {
+      antigravityTurnProvenance.delete(api.taskId);
+      requestRecoveryState.delete(api.taskId);
+    },
   })] });
   const codemodeExtension = withCodemodePresentations(createCodemodeExtension({ sandbox: createHostCodemodeSandbox() }));
+  const mcpDispatchExtension = createMcpDispatchExtension({
+    host,
+    getHarness: () => harness,
+    models,
+    isOnline: () => online,
+    getBotModels: () => botModels,
+  });
   registry.install(codemodeExtension);
   registry.install(finalBudgetExtension);
+  registry.install(mcpDispatchExtension);
   try {
     releaseOwner = acquireRuntimeOwner(host.dataRoot);
     // Cua inventory：对固定 Driver 二进制跑一次只读 CLI metadata（list-tools +
@@ -815,7 +1038,60 @@ export async function openRuntime(options) {
         tools: await createCuaTools({ host, getHarness: () => harness, manager: shower }),
       }));
     }
-    coreExtensions = registry.snapshot().installed().filter((extension) => extension !== finalBudgetExtension && extension !== codemodeExtension);
+    coreExtensions = registry.snapshot().installed().filter((extension) =>
+      extension !== finalBudgetExtension &&
+      extension !== codemodeExtension &&
+      extension !== mcpDispatchExtension);
+    browserSetup = await openRuntimeBrowserSetup({
+      host,
+      registry,
+      getHarness: () => harness,
+      getWorkContexts: () => workContexts,
+      resolveConversationBot: services.resolveConversationBot,
+      nativeBridge,
+      isOnline: () => online && !maintenance,
+      isMaintenance: () => maintenance,
+      getCenterUrl: () => centerRuntime.centerUrl ?? null,
+      getCenterGoogleStatus: async ({ signal } = {}) => {
+        if (!online || maintenance) {
+          return { reachable: false, client: { configured: false }, accounts: [] };
+        }
+        if (typeof centerRuntime.getGoogleStatus === 'function') {
+          return await centerRuntime.getGoogleStatus({ signal });
+        }
+        const client = centerRuntime.getClient?.();
+        if (!client || typeof client.getGoogleStatus !== 'function') {
+          return { reachable: false, client: { configured: false }, accounts: [] };
+        }
+        return await client.getGoogleStatus({ signal });
+      },
+      isBotTurnRunning: (botId) => (typeof isBotTurnRunningReader === 'function' ? isBotTurnRunningReader(botId) : null),
+      onBrowserEvent: options?.onBrowserEvent,
+      onSetupEvent: options?.onSetupEvent,
+      abortBotTurn: async (botId) => {
+        if (!harness) return;
+        const bot = host.getBot(botId);
+        if (!bot || bot.deviceId !== host.deviceId) return;
+        const [primaryIndex, workIndex] = await Promise.all([
+          harness.snapshot(PrimaryIndex, CTX),
+          harness.snapshot(WorkIndex, CTX),
+        ]);
+        const ids = new Set();
+        const primary = primaryIndex?.byPrimary?.[bot.primaryConversationId];
+        if (primary !== undefined) ids.add(primary);
+        for (const [key, binding] of Object.entries(workIndex?.byKey ?? {})) {
+          const pair = parseBindingKey(key);
+          if (pair !== null && pair[0] === bot.botId) ids.add(binding.nativeId);
+        }
+        const conversations = (await Promise.all([...ids].map((id) => harness.conversation(id, CTX)))).filter(Boolean);
+        await Promise.all(conversations.map((conversation) => conversation.abort(CTX)));
+      },
+      context: CTX,
+      createBotBrowserService: options?.createBotBrowserService,
+      createGoogleSetupService: options?.createGoogleSetupService,
+      createBrowserProvider: options?.createBrowserProvider,
+    });
+    browserSetup.prepareExistingBots();
     const durableDbPath = join(host.dataRoot, 'durable.sqlite');
     storage = await openNodeSqliteStorage(durableDbPath);
     await migrateBotSessionCheckpoints(storage, durableDbPath);
@@ -839,6 +1115,9 @@ export async function openRuntime(options) {
     }
     try { await plugins.close(); } catch { /* close 失败不掩盖原错误 */ }
     try { await schedules.close(); } catch { /* close 失败不掩盖原错误 */ }
+    if (browserSetup) {
+      try { await browserSetup.close(); } catch { /* close 失败不掩盖原错误 */ }
+    }
     await vault.close();
     try { await shower.close(); } catch { /* close 失败不掩盖原错误 */ }
     try { await collaboration.close(); } catch { /* close 失败不掩盖原错误 */ }
@@ -850,6 +1129,7 @@ export async function openRuntime(options) {
   const live = createRuntimeLive({
     host,
     getHarness: () => harness,
+    getWaits: () => waitsBridge,
     // work watch 授权复用共享 MessageLog 的只读 resolveWorkContext（含 former-member 定向历史）。
     resolveWorkContext: (botId, scopeId) => workContexts.resolveWorkContext(botId, scopeId),
   });
@@ -858,7 +1138,7 @@ export async function openRuntime(options) {
     harness,
     context: CTX,
     sessions,
-    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta),
+    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor),
     // sync 提交成功后附着等待中的 work watch（事务外，观察失败不影响导入）。
     onBound: (botId, scopeId, binding) => live.bindWork(botId, scopeId, binding),
   });
@@ -881,23 +1161,30 @@ export async function openRuntime(options) {
     coreExtensions,
     codemodeExtension,
     finalBudgetExtension,
+    mcpDispatchExtension,
     centerRuntime,
     setOnline: (value) => { online = value; },
+    setClosing: (value) => { closing = value; },
     isMaintenance: () => maintenance,
     setMaintenance: (value) => { maintenance = value; },
     setBotModels: (value) => { botModels = value; },
     getBotModels: () => botModels,
     setWatermarkReader: (fn) => { getBotEntryWatermark = fn; },
+    setBotTurnRunningReader: (fn) => { isBotTurnRunningReader = fn; },
     botAdmissions: bots,
     onBotsChanged: options?.onBotsChanged,
     onBotsSync: options?.onBotsSync,
     learningIdleSettleMs: options?.learningIdleSettleMs,
     collaboration,
     shower,
+    browserSetup,
+    botHostExtensionsFor,
     vault,
     schedules,
     setTasksBridge: (bridge) => { tasksBridge = bridge; },
+    setWaitsBridge: (bridge) => { waitsBridge = bridge; },
     resolveConversationBot: services.resolveConversationBot,
+    dataPrivacy,
   });
   try {
     if (process.platform === 'win32') await shower.prepare();
@@ -912,7 +1199,7 @@ export async function openRuntime(options) {
 }
 
 /** 构建该 Bot 的 SOUL、中心模型和明确的 core + 插件扩展视图。 */
-function botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta) {
+function botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor) {
   const selection = botModels[botId] ?? {};
   const modelRef = selection.modelRef ?? null;
   let model;
@@ -922,10 +1209,12 @@ function botProfile(host, plugins, botModels, coreExtensions, codemodeExtension,
   const soul = host.getBotSoul(botId).text;
   const instructions = workMeta ? workInstructions(soul, workMeta) : (soul === '' ? null : soul);
   const pluginExtensions = plugins.extensionsFor(botId);
+  const botHostExtensions = typeof botHostExtensionsFor === 'function' ? botHostExtensionsFor(botId) : [];
   const codemodeOnly = Boolean(selection.codemodeOnly);
   const codemodeEnabled = Boolean(selection.codemode) || codemodeOnly;
   const selectedExtensions = [
     ...coreExtensions,
+    ...botHostExtensions,
     ...(codemodeEnabled && codemodeExtension ? [codemodeExtension] : []),
     ...pluginExtensions,
     finalBudgetExtension,
@@ -953,11 +1242,12 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, vault, schedules, setTasksBridge, resolveConversationBot }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, mcpDispatchExtension, centerRuntime, setOnline, setClosing, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, setBotTurnRunningReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, browserSetup, botHostExtensionsFor, vault, schedules, setTasksBridge, setWaitsBridge, resolveConversationBot, dataPrivacy }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
   let resumed = false;
+  let cancellationsRecovered = false;
   let appliedRevision = null;
   let highestRevision = -1;
   let centerConfigured = false;
@@ -1056,6 +1346,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     isBotIdle: async (bot) => (await botIsIdle(bot)) && (await turns.queuedCount(bot)) === 0,
     onLearningStateChange: (botId, state) => live.setBotLearning?.(botId, state),
     idleSettleMs: learningIdleSettleMs,
+    dataPrivacy,
   });
   // 自编辑 SOUL 排队：Bot 在自己的活动轮里调 set_bot_soul（协作/管理工具显式
   // self:true）不能轮中改写人格——先校验输入，再排队到空闲边界；apply 仍走
@@ -1145,11 +1436,18 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   }
 
   // 跟踪在飞的主会话提交：完成时记录 lastActivityAt 与 lastPreview。
-  const trackedSubmissions = new Map(); // submissionId -> { botId, nativeId }
+  const trackedSubmissions = new Map(); // submissionId -> { botId, nativeId, requestId? }
+  setBotTurnRunningReader?.((botId) => {
+    for (const info of trackedSubmissions.values()) {
+      if (info?.botId === botId) return true;
+    }
+    return false;
+  });
   const stopInFlight = new Map();     // botId -> 在飞「停止此 Bot」Promise：重复 abort 共用同一协调，绝不并发争用。
   const completedSubmissions = new Set(); // submissionId
   let submissionCheckPromise = null;
   let checkSubmissionsAgain = false;
+  let webhooks = null;
 
   function recordCompletedSubmission(botId, formatted) {
     if (!formatted || formatted.status !== 'done') return;
@@ -1168,6 +1466,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     } catch {
       /* ignore activity update error if bot was deleted or store closed */
     }
+    webhooks?.notifySubmissionSettled?.(formatted.requestId);
     // Bot 完结是安全空闲边界：先结算排队的自编辑 SOUL，再上报学习增量——
     // 两者都是 fire-and-forget，绝不阻塞前台回复或占用 Bot 准入。
     drainSelfSoul(botId);
@@ -1206,6 +1505,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
                 }
               } else if (statusRecord.status === 'unanswered') {
                 trackedSubmissions.delete(submissionId);
+                webhooks?.notifySubmissionSettled?.(statusRecord.requestId ?? info.requestId);
                 drainSelfSoul(info.botId);
                 turns.pump(info.botId);
                 learning.scheduleIdleCheck(info.botId);
@@ -1240,6 +1540,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
   const close = () => {
     closing = true;
+    setClosing?.(true);
     webhooks.pause();
     taskConsumer?.pause();
     ++epoch;
@@ -1257,6 +1558,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     botAdmissions.suspend();
     plugins.suspend();
     plugins.abortActions();
+    browserSetup.suspend();
     closePromise ??= (async () => {
       // Seal secret access before waiting for any runtime work to drain.
       const vaultClose = vault.close();
@@ -1267,7 +1569,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 依次执行并收集每步错误：任何一步失败仍继续清理，最后显式抛出。
       const errors = [];
       try { await webhooks.close(); } catch (err) { errors.push(err); }
+      try { await mcpDispatch.close(); } catch (err) { errors.push(err); }
       try { await taskConsumer?.close(); } catch (err) { errors.push(err); }
+      try { await waits.close(); } catch (err) { errors.push(err); }
       try { turns.close(); } catch (err) { errors.push(err); }
       try { await decisions.close(); } catch (err) { errors.push(err); }
       // 学习驱动在 harness/store 释放前停止：取消在驱动作业与受限会话执行。
@@ -1280,6 +1584,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 再关闭定时任务与 Shower：丢弃排队操作并释放本 Host 拥有的资源，不把在飞结果留到关库之后。
       try { await schedules.close(); } catch (err) { errors.push(err); }
       try { await vaultClose; } catch (err) { errors.push(err); }
+      try { await browserSetup.close(); } catch (err) { errors.push(err); }
       try { await shower.close(); } catch (err) { errors.push(err); }
       // 排空已接纳导入，但共享消息账本须保留到原生工具退出。
       try { await workContexts.quiesce(); } catch (err) { errors.push(err); }
@@ -1308,7 +1613,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     return workContexts.runMessageOperation(operation);
   };
 
-  const profileFor = (botId, workMeta) => botProfile(host, plugins, getBotModels(), coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta);
+  const profileFor = (botId, workMeta) => botProfile(host, plugins, getBotModels(), coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor);
 
   // 图片附件落盘：dataRoot/attachments/<botId>/<sha256>，随 Bot 删除清理（deleteBot/purge）。
   // 附件在 Bot lane 外也可上传（本地已鉴权动作），但归属校验先于任何写盘。
@@ -1339,7 +1644,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     live,
     admitBot,
     getEpoch: () => epoch,
-    canAdmit: () => !isMaintenance(),
+    canAdmit: () => cancellationsRecovered && resumed && centerOnline && !closing && !isMaintenance(),
     trackSubmission: (submissionId, info) => {
       trackedSubmissions.set(submissionId, info);
       checkTrackedSubmissions();
@@ -1354,7 +1659,78 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       return decisions.interruptBotWork?.(botId, { reason: 'preempted' });
     },
   });
-  const webhooks = createWebhookConsumer({
+  const waits = createRuntimeWaits({
+    host, getHarness: () => harness, context: CTX,
+    getStopEpoch: turns.stopEpoch,
+    canResume: () => resumed && centerOnline && !closing && !isMaintenance() && !turns.isRecoveryPending(),
+    canDetach: canDetachPrimaryWait,
+    async captureContext(botId, api, context) {
+      const stopEpoch = turns.stopEpoch(botId);
+      if (closing || turns.isRecoveryPending() || turns.stopped(botId)) {
+        throw errWithCode('originating run is not available', 'WAIT_CANCELLED');
+      }
+      if (await resolveConversationBot(api.conversationId) !== botId) {
+        throw errWithCode('conversation does not belong to bot', 'BOT_CONTEXT_REQUIRED');
+      }
+      const turn = await sessions.getTurn(api, context);
+      if (!turn) return { turn: null, dispatchContext: null, stopEpoch };
+      const dispatchContext = await resolveDispatchContextForToolCall(botId, api.conversationId, api.taskId, false);
+      return { turn, dispatchContext, stopEpoch: turn.stopEpoch ?? stopEpoch };
+    },
+    getSubmission: (botId, requestId) => runtime.getSubmission(botId, requestId),
+    submitContinuation(botId, input) {
+      // Frozen routing is read from the Host wait document, never from an action
+      // payload. Production detaching is limited to unscoped primary routes;
+      // preserve privacy markers and reset epoch on the resumed primary request.
+      const turn = input.turn;
+      if (!canDetachPrimaryWait(turn, input.dispatchContext)) {
+        throw errWithCode('wait is not eligible for detached continuation', 'WAIT_CANCELLED');
+      }
+      const preserveGoogleRuleSource = turn.sender?.sourceType === GOOGLE_WORKSPACE_RULE_SOURCE_TYPE;
+      const preserveGoogleBoundary =
+        isTrustedDataBoundary(turn.dataBoundary) || preserveGoogleRuleSource;
+      const routed = {
+        kind: turn.kind, scopeId: turn.scopeId ?? null,
+        replyTarget: structuredClone(turn.replyTarget),
+        originRequestId: turn.originRequestId ?? turn.requestId,
+        ...(Number.isSafeInteger(turn.resetEpoch) && turn.resetEpoch >= 0 ? { resetEpoch: turn.resetEpoch } : {}),
+        ...(preserveGoogleBoundary ? { dataBoundary: GOOGLE_WORKSPACE_DATA_BOUNDARY } : {}),
+        ...(turn.responseMessageId !== undefined ? { responseMessageId: turn.responseMessageId } : {}),
+        ...(turn.rootId ? { rootId: turn.rootId } : {}),
+        ...(turn.workNativeId !== undefined ? { workNativeId: turn.workNativeId } : {}),
+      };
+      return submitPrimary(botId, {
+        requestId: input.requestId, text: input.text,
+        origin: { sender: { kind: 'host', name: '用户问卷回复' }, replyTo: turn.replyTo ?? null },
+      }, input.stopEpoch, {
+        dispatchContext: input.dispatchContext ?? null,
+        continuationTurn: routed,
+        continuationWaitId: input.waitId,
+        ...(preserveGoogleBoundary ? { trustedDataBoundary: GOOGLE_WORKSPACE_DATA_BOUNDARY } : {}),
+        ...(preserveGoogleRuleSource ? { trustedSourceType: GOOGLE_WORKSPACE_RULE_SOURCE_TYPE } : {}),
+      });
+    },
+    cancelContinuation: async (botId, requestId) => turns.cancelRequest(await requireBot(botId), requestId),
+    onChange: (botId) => live.notifyWaitsChanged?.(botId),
+  });
+  setWaitsBridge?.(waits);
+  const mcpDispatch = createMcpDispatchRuntime({
+    host,
+    getHarness: () => harness,
+    models,
+    getBotModels: () => getBotModels(),
+    mcpDispatchExtension,
+    getStopEpoch: (botId) => turns.stopEpoch(botId),
+    canRun: (botId) => (
+      resumed && centerOnline && !closing && !isMaintenance() && !turns.isRecoveryPending() &&
+      !turns.stopped(botId) && !turns.webhookStopPending(botId)
+    ),
+    dropEnvFor,
+    onSubmissionUpdated: (requestId) => webhooks?.notifySubmissionSettled?.(requestId),
+    onSubmissionSettled: (requestId) => webhooks?.notifySubmissionSettled?.(requestId),
+    context: CTX,
+  });
+  webhooks = createWebhookConsumer({
     deviceId: host.deviceId,
     getClient: () => centerRuntime.getClient(),
     getRuntime: () => runtime,
@@ -1367,13 +1743,36 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       return submitPrimary(botId, {
         ...input,
         origin: {
-          sender: { kind: 'host', name: input?.origin?.sender?.name, sourceType: 'webhook' },
+          sender: { kind: 'host', name: input?.origin?.sender?.name },
           replyTo: null,
         },
-      }, capturedStopEpoch);
+      }, capturedStopEpoch, { trustedSourceType: 'webhook' });
     },
+    submitGoogleRule: async (botId, input, capturedStopEpoch) => {
+      if (!resumed || !centerOnline || closing || isMaintenance() || turns.isRecoveryPending() ||
+          turns.stopped(botId) || turns.webhookStopPending(botId)) return null;
+      return submitPrimary(botId, {
+        ...input,
+        origin: {
+          sender: {
+            kind: 'host',
+            name: input?.origin?.sender?.name,
+          },
+          replyTo: null,
+        },
+      }, capturedStopEpoch, {
+        trustedSourceType: GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
+        trustedDataBoundary: GOOGLE_WORKSPACE_DATA_BOUNDARY,
+      });
+    },
+    getMcpDispatchSubmission: (botId, requestId) => mcpDispatch.getSubmission(botId, requestId),
+    submitMcpDispatch: (botId, input, capturedStopEpoch) => mcpDispatch.submit(botId, input, capturedStopEpoch),
+    cancelMcpDispatchUnstarted: (botId, requestId) => mcpDispatch.cancelIfUnstarted(botId, requestId),
   });
   decisions.setTurnGate(turns.admitWorkDecision, turns.pump, turns.canRunWork);
+  decisions.setScopeStopListener?.(async (scopeId) => {
+    for (const bot of host.listBots()) await waits.cancelScope(bot.botId, scopeId, CTX);
+  });
   // 队列生命周期通知：pending 创建/结束/暂停/取消的纯元数据快照驱动统一 live 活动投影。
   decisions.setActivityListener?.((botId, summary) => live.setWorkActivity?.(botId, summary));
   decisions.setLearningHooks?.({
@@ -1401,11 +1800,15 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 输入与工作积压；本地计数经 initializeBots 预载已对齐持久值，旧进程遗留
       // 队列条目（其持久 stopEpoch ≤ 预载基线）同样落在边界内，绝不漏取消。
       const epoch = await turns.beginStop(bot);
+      await waits.cancelBot(botId, epoch, CTX);
       // 再撤掉 Host 队列中已受理的未原生提交条目：仅作废旧代次受理（停止前的输入
       // 与工作积压）；停止开始后受理的新代次输入保留，等停止结算后由泵处理。
       // 即使后续 HTTP/确认在飞，泵在提交前的存活核对会发现条目已取消，
       // 绝不把已取消的轮送进模型。
       const { withdrawn: queueWithdrawn } = await turns.cancelQueued(bot, epoch);
+      await mcpDispatch.stopBot(botId, epoch, {
+        offline: !centerOnline || turns.isRecoveryPending(),
+      });
       // 工作 lane 取消：user_stop 覆盖各 scope 待处理积压与已有 pending；
       // 离线/恢复未完成时 quiesce=false（不调用会隐式 resume 的 abort/wait 路径）。
       if (decisions.interruptBotWork) {
@@ -1566,19 +1969,38 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   }
 
   // stopEpoch 由可信调用者在排队前捕获；内部 Webhook 保留 poll 前代次，绝不重捕获。
-  function submitPrimary(botId, input, stopEpoch, trustedDispatchContext = null) {
+  // trustedMeta 仅允许 Host 内部受信路径传入（dispatchContext、wait continuation、
+  // 受信 sourceType/dataBoundary），绝不向公开 submit 或外部 webhook payload 开放。
+  function submitPrimary(botId, input, stopEpoch, trustedMeta = null) {
+    const meta = isPlainObject(trustedMeta) ? trustedMeta : {};
+    const trustedDispatchContext = meta.dispatchContext ?? null;
+    const trustedContinuationTurn = meta.continuationTurn ?? null;
+    const trustedWaitId = meta.continuationWaitId ?? null;
+    const trustedSourceType = typeof meta.trustedSourceType === 'string' ? meta.trustedSourceType : null;
+    const trustedDataBoundary = isTrustedDataBoundary(meta.trustedDataBoundary) ? meta.trustedDataBoundary : null;
     const kind = input?.origin?.sender?.kind === 'host' ? 'host' : 'user';
     const safeInput = isPlainObject(input) ? { ...input } : {};
     delete safeInput.dispatchContext;
+    delete safeInput.continuationTurn;
+    delete safeInput.continuationWaitId;
+    const sourceType = kind === 'host' && trustedSourceType !== null && isAllowedHostSourceType(trustedSourceType)
+      ? trustedSourceType
+      : null;
+    const dataBoundary = kind === 'host' && trustedDataBoundary !== null
+      ? trustedDataBoundary
+      : null;
     const trustedInput = {
       ...safeInput,
       stopEpoch,
+      ...(trustedContinuationTurn ? { continuationTurn: trustedContinuationTurn } : {}),
+      ...(trustedWaitId ? { continuationWaitId: trustedWaitId } : {}),
       origin: {
         sender: {
           kind,
           name: typeof safeInput?.origin?.sender?.name === 'string' ? safeInput.origin.sender.name : null,
-          ...(kind === 'host' && safeInput?.origin?.sender?.sourceType === 'webhook' ? { sourceType: 'webhook' } : {}),
+          ...(sourceType !== null ? { sourceType } : {}),
         },
+        ...(dataBoundary !== null ? { dataBoundary } : {}),
         replyTo: typeof safeInput?.origin?.replyTo === 'string' ? safeInput.origin.replyTo : null,
       },
     };
@@ -1637,7 +2059,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   /** 按已绑定会话重新应用人格/工具；无变化不提交。 */
   async function refreshBotProfiles(bot) {
     const primary = await getPrimaryConversation(harness, bot, {}, CTX);
-    if (primary) await applyAgentProfile(harness, primary.id, profileFor(bot.botId, null), CTX);
+    if (primary) {
+      await applyAgentProfile(harness, primary.id, profileFor(bot.botId, null), CTX);
+    }
     const workIndex = await harness.snapshot(WorkIndex, CTX);
     for (const [key, binding] of Object.entries(workIndex?.byKey ?? {})) {
       const pair = parseBindingKey(key);
@@ -1676,6 +2100,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
   /** 编辑准入：Bot 的任一已映射会话有 queued/placed 提交、活动任务（含手动压缩）或挂起工作决策则忙。 */
   async function assertBotIdle(bot) {
+    if (await mcpDispatch.hasActiveForBot(bot.botId)) {
+      throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+    }
     const nativeIds = await botConversations(bot);
     if (nativeIds.length === 0) return;
     const inspection = await harness.inspect(CTX);
@@ -1710,6 +2137,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   async function botIsIdle(bot) {
     try {
       if (plugins.hasActiveExecutions(bot.botId)) return false;
+      if (await mcpDispatch.hasActiveForBot(bot.botId)) return false;
       const nativeIds = await botConversations(bot);
       if (nativeIds.length === 0) return true;
       const known = new Set(nativeIds);
@@ -1783,8 +2211,11 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     if (!bot || bot.isPrimary || !bot.archivedAt) return false;
     await assertBotIdle(bot);
     await learning.cancelBot(botId);
+    await waits.cancelBot(botId, Number.MAX_SAFE_INTEGER, CTX);
+    await mcpDispatch.cleanupBot(botId).catch(() => {});
     selfSoulQueue.delete(botId);
     await schedules.deleteBot(bot);
+    await browserSetup.releaseBot(botId);
     host.deleteBot({ botId });
     await attachmentStore.removeBot(botId);
     initializedBots.delete(botId);
@@ -1846,6 +2277,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       const conversation = await harness.conversation(id, CTX);
       if (conversation) await conversation.abort(CTX, { background: true });
     }
+    await mcpDispatch.abortAll();
   }
 
   function setCenterOnline(value) {
@@ -1869,6 +2301,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     return serial(async () => {
       if (isMaintenance()) return { capabilityErrors: [] };
       if (closing || !centerConfigured || !centerRuntime.getClient() || generation !== epoch) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+      cancellationsRecovered = false;
+      await waits.recoverCancellations();
+      cancellationsRecovered = true;
       setOnline(true);
       try {
         // 单个能力激活失败只撤销该能力，其他 Bot 与基础聊天保持在线。
@@ -1885,6 +2320,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         botAdmissions.resume();
         learning.resume();
         schedules.notifyOnline();
+        waits.reconcile().catch(() => {});
+        await mcpDispatch.resumeTracking().catch(() => {});
         webhooks.wake();
         taskConsumer?.resume();
         await turns.nudgeAll();
@@ -2185,6 +2622,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         plugins.resumeAdmissions();
         learning.resume();
         schedules.notifyOnline();
+        waits.reconcile().catch(() => {});
+        await mcpDispatch.resumeTracking().catch(() => {});
         webhooks.wake();
         taskConsumer?.resume();
         await turns.nudgeAll();
@@ -2207,9 +2646,11 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     initializeBot,
 
     async initializeBots() {
-      await purgeExpiredArchivedBots();
       // 控制入口开放前（包括离线启动）预载停止代次、恢复 gate 与中心待同步提示。
       await turns.pendingStops();
+      await waits.recoverCancellations();
+      cancellationsRecovered = true;
+      await purgeExpiredArchivedBots();
       for (const bot of host.listBots()) await initializeBot(bot.botId);
     },
 
@@ -2225,6 +2666,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       if (bot.isPrimary) throw errWithCode('primary bot cannot be archived', 'PRIMARY_BOT_PROTECTED');
       await assertBotIdle(bot);
       await learning.cancelBot(botId);
+      await waits.cancelBot(botId, Number.MAX_SAFE_INTEGER, CTX);
       await schedules.pauseBot(bot);
       const updated = host.archiveBot({ botId });
       if (onBotsSync) await onBotsSync();
@@ -2245,8 +2687,11 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       if (bot.isPrimary) throw errWithCode('primary bot cannot be deleted', 'PRIMARY_BOT_PROTECTED');
       await assertBotIdle(bot);
       await learning.cancelBot(botId);
+      await waits.cancelBot(botId, Number.MAX_SAFE_INTEGER, CTX);
+      await mcpDispatch.cleanupBot(botId).catch(() => {});
       selfSoulQueue.delete(botId);
       await schedules.deleteBot(bot);
+      await browserSetup.releaseBot(botId);
       const res = host.deleteBot({ botId });
       await attachmentStore.removeBot(botId);
       initializedBots.delete(botId);
@@ -2328,9 +2773,44 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       if (isPlainObject(input) && input.dispatchContext !== undefined) {
         throw errWithCode('dispatchContext is not allowed on public submit', 'INVALID_ARGUMENT');
       }
+      if (isPlainObject(input) && (input.continuationTurn !== undefined || input.continuationWaitId !== undefined)) {
+        throw errWithCode('wait continuation metadata is not allowed on public submit', 'INVALID_ARGUMENT');
+      }
       // 停止代次必须在任何 await/排队前捕获：受理晚于停止的在飞 submit 以旧代次
       // 持久化并在同事务内作废为 cancelled 回执；停止后受理的新代次输入允许新运行。
       return submitPrimary(botId, input, turns.stopEpoch(botId));
+    },
+
+    // Private scheduler handoff. Capture the fence before any await, then let
+    // TurnQueue cancel an old occurrence atomically if Stop wins the race.
+    // These methods are deliberately absent from the public control protocol.
+    async getScheduleFence(botId) {
+      assertNonBlank(botId, 'botId');
+      const stopEpoch = turns.stopEpoch(botId);
+      if (!resumed || !centerOnline || closing || isMaintenance() || turns.isRecoveryPending()) {
+        throw errWithCode('schedule handoff is not ready', 'RUNTIME_BUSY');
+      }
+      const bot = await requireBot(botId);
+      if (bot.archivedAt != null) throw errWithCode('bot is archived and read-only', 'BOT_ARCHIVED');
+      return { botId, conversationId: bot.primaryConversationId, stopEpoch };
+    },
+
+    submitScheduled(botId, input) {
+      assertNonBlank(botId, 'botId');
+      if (!isPlainObject(input) || Object.keys(input).some((key) => !['requestId', 'text', 'stopEpoch'].includes(key)) ||
+          !Number.isSafeInteger(input.stopEpoch) || input.stopEpoch < 0 || input.stopEpoch > turns.stopEpoch(botId)) {
+        throw errWithCode('invalid schedule handoff', 'INVALID_ARGUMENT');
+      }
+      assertNonBlank(input.requestId, 'requestId');
+      assertNonBlank(input.text, 'text');
+      if (!resumed || !centerOnline || closing || isMaintenance() || turns.isRecoveryPending()) {
+        throw errWithCode('schedule handoff is not ready', 'RUNTIME_BUSY');
+      }
+      return submitPrimary(botId, {
+        requestId: input.requestId,
+        text: input.text,
+        origin: { sender: { kind: 'host', name: '定时任务' }, replyTo: null },
+      }, input.stopEpoch, { trustedSourceType: 'schedule' });
     },
 
     submitTaskDispatch: async (botId, input, capturedStopEpoch = turns.stopEpoch(botId)) => {
@@ -2348,11 +2828,13 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
             name: typeof input?.origin?.sender?.name === 'string' && input.origin.sender.name
               ? input.origin.sender.name
               : '任务 · 全局任务',
-            sourceType: 'webhook',
           },
           replyTo: null,
         },
-      }, capturedStopEpoch, trustedDispatchContext);
+      }, capturedStopEpoch, {
+        dispatchContext: trustedDispatchContext,
+        trustedSourceType: 'task_dispatch',
+      });
     },
 
     async cancelTaskDispatch(botId, requestId) {
@@ -2431,8 +2913,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         return { botId, conversationId: bot.primaryConversationId, items: [], nextCursor: null, clearedThroughEntryId: 0 };
       }
       // 传 harness 让 helper 读取 BotSessionState 并给原始 entry 补 data.attribution；
-      // 不传会让 raw 历史覆盖 live 归属时丢来源。helper 第4参为 {afterReset,sessionState?,harness?}。
-      const page = await readPrimaryHistory(conversation, historyOptions, CTX, { afterReset: true, harness });
+      // 不传会让 raw 历史覆盖 live 归属时丢来源。helper 第4参为 {afterReset,sessionState?,harness?,waits?,botId?}。
+      const page = await readPrimaryHistory(conversation, historyOptions, CTX, { afterReset: true, harness, waits, botId });
       return { botId, conversationId: bot.primaryConversationId, ...page };
     },
 
@@ -2531,6 +3013,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
               throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
             }
           }
+          await waits.cancelConversationInTransaction(botId, conversation.id, tx);
           const resetEntry = await tx.appendEntry(durable.ResetEntry, conversation.id, { head: 'self' });
           if (liveDoc.runFailure !== undefined) {
             delete liveDoc.runFailure;
@@ -2541,6 +3024,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
           return resetEntry.id;
         }, CTX);
         clearSettledStopped();
+        // The reset is already committed. Failed cleanup retains its intent and retries.
+        await waits.recoverCancellations(botId).catch(() => {});
+        live.notifyWaitsChanged?.(botId);
         return { botId, conversationId, clearedThroughEntryId: resetEntryId };
       });
     },
@@ -2682,6 +3168,10 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
             harness.snapshot(TaskDispatchContexts, conversation.id, CTX),
           ]);
           const newNativeId = await harness.commit(async (tx) => {
+            const primaryIndex = await tx.doc(PrimaryIndex);
+            if (primaryIndex?.byPrimary?.[bot.primaryConversationId] !== conversation.id) {
+              throw errWithCode('bot has active or queued work', 'RUNTIME_BUSY');
+            }
             const scan = await tx.scanEntries(
               { conversationId: conversation.id, maxEntryId: entryId, order: 'descending' },
               2,
@@ -2728,6 +3218,11 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
                 cursor = page.next;
               }
             }
+            const inheritedPrivacy = await dataPrivacy.prepareForkInheritanceInTx(tx, {
+              sourceConversationId: conversation.id,
+              beforeEntryId,
+            });
+            await waits.cancelConversationInTransaction(botId, conversation.id, tx);
             const rec = beforeEntryId !== null
               ? await tx.forkConversation(conversation.id, beforeEntryId, { ownership: { kind: 'ownerless' } })
               : await tx.createConversation({ ownership: { kind: 'ownerless' } });
@@ -2812,7 +3307,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
               const dispatchDraft = await tx.doc(TaskDispatchContexts, rec.id);
               dispatchDraft.byRequest = copyJson(dispatchContextsSnapshot.byRequest);
             }
-            const primaryIndex = await tx.doc(PrimaryIndex);
+            await dataPrivacy.applyForkInheritanceInTx(tx, rec.id, inheritedPrivacy);
             primaryIndex.byPrimary[bot.primaryConversationId] = rec.id;
             return rec.id;
           }, CTX);
@@ -2821,6 +3316,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
           if (conversation.id !== newNativeId) {
             await dropEnvFor(conversation.id);
           }
+          await waits.recoverCancellations(botId).catch(() => {});
+          live.notifyWaitsChanged?.(botId);
           return await turns.enqueue(botId, {
             requestId,
             text,
@@ -2896,8 +3393,16 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       return plugins.actionByName(botId, 'contextStatus', { scopeId });
     },
     getWorkActivity: decisions.getWorkActivity,
-    stopWork: decisions.stopWork,
-    resumeWork: decisions.resumeWork,
+    async stopWork(botId, scopeId) {
+      await workContexts.resolveWorkContext(botId, scopeId);
+      await waits.cancelScope(botId, scopeId, CTX);
+      return decisions.stopWork(botId, scopeId);
+    },
+    async resumeWork(botId, scopeId) {
+      await workContexts.resolveWorkContext(botId, scopeId);
+      await waits.resumeScope(botId, scopeId, CTX);
+      return decisions.resumeWork(botId, scopeId);
+    },
 
     createScope: (input) => runMessageOperation((log) => log.createScope(input)),
     updateScope: (scopeId, input) => runMessageOperation((log) => log.updateScope(scopeId, input)),
@@ -2923,6 +3428,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
     // 统一图形环境（Android/Windows/Linux 同签名）：status/frame 只读，takeover 复用 conversation.abort。
     vaultControl: vault.control,
+    browserControl: browserSetup.browserControl,
+    googleSetupControl: browserSetup.googleSetupControl,
     getShowerStatus: showerRuntime.getShowerStatus,
     createShowerSession: showerRuntime.createShowerSession,
     getShowerFrame: showerRuntime.getShowerFrame,
@@ -2933,6 +3440,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     // 冷启动：service 在全局 resume 前调用一次，恢复被钉住的旧 set。
     // 可恢复的准入无法恢复时保持调度暂停并抛错（绝不缺定义地 resume）。
     restoreTurns: async () => {
+      cancellationsRecovered = false;
+      await waits.recoverCancellations();
       // 崩溃时丢失内存停止 gate：持久 stopPending 标记的 Bot 先补完未完成停止
       // （user_stop 标记 + 主会话取消标记，quiesce=false 不隐式 resume 调度器），
       // 绝不自动恢复漏取消工作。任一 Bot 恢复失败即向外传播
@@ -2943,6 +3452,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
         try { live.setBotControl?.(bot.botId, 'stopping'); } catch { /* live 缺席 */ }
         try {
           await turns.cancelQueued(bot, turns.stopEpoch(bot.botId) - 1);
+          await waits.cancelBot(bot.botId, turns.stopEpoch(bot.botId) - 1, CTX);
+          await mcpDispatch.stopBot(bot.botId, turns.stopEpoch(bot.botId) - 1, { offline: true });
           if (decisions.interruptBotWork) {
             // 已有 pending.interruption 的 scope 沿用其已捕获 through 边界（宕机后
             // 新到消息不被这次补停吞掉），由 work lane 的幂等标记保证。
@@ -2973,14 +3484,19 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
           throw failure;
         }
       }
-      return turns.restoreTurns();
+      const restored = await turns.restoreTurns();
+      cancellationsRecovered = true;
+      return restored;
     },
 
     resume() {
+      if (!cancellationsRecovered) throw errWithCode('wait cancellation recovery is incomplete', 'TURN_RECOVERY_REQUIRED');
       harness.resume();
       decisions.resume();
       resumed = true;
+      waits.reconcile().catch(() => {});
       turns.nudgeAll().catch(() => {});
+      mcpDispatch.resumeTracking().catch(() => {});
       webhooks.wake();
       taskConsumer?.resume();
     },
@@ -3126,6 +3642,23 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       return result;
     },
     getActiveForBot: (botId) => getBotGlobalTasks(botId),
+    async getExecutionContext(botId, conversationId) {
+      if (!Number.isSafeInteger(conversationId) || conversationId < 1) return null;
+      if (await resolveConversationBot(conversationId) !== botId) {
+        throw errWithCode('conversation does not belong to bot', 'BOT_CONTEXT_REQUIRED');
+      }
+      const run = (await harness.snapshot(LiveDoc, conversationId, CTX))?.run;
+      if (!run) return null;
+      const dispatch = await harness.snapshot(TaskDispatchContexts, conversationId, CTX);
+      const context = await sessions.getRunContext({ conversationId, taskId: run.taskId }, CTX, {
+        dispatchContexts: dispatch?.byRequest,
+      });
+      const contexts = (context?.events ?? []).map((event) => event.dispatchContext).filter(Boolean);
+      if (contexts.some((candidate) => !sameDispatchContext(contexts[0], candidate))) {
+        throw errWithCode('active run mixes conflicting task dispatch contexts', 'REQUEST_CONFLICT');
+      }
+      return contexts[0] ?? null;
+    },
     listDirectoryBots: () => directoryBotsCache,
   });
   const lifecycleMethods = new Set(['initializeBots', 'applyCenterSnapshot', 'setCenterOnline', 'withCapabilityActivation', 'revokeCenterCapabilities', 'restoreTurns', 'prepareUpdate', 'cancelUpdate', 'getUpdateState', 'notifyWebhookReady', 'notifyTaskReady', 'close']);
@@ -3134,12 +3667,14 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   // 模型、工具、问卷等执行路径仍受 Center 门禁（运行时本就对 SDK 抛离线错）。
   // scope 查询是纯本地账本读取（不调度、不触碰模型），离线也放行给被动浏览 UI；
   // createScope/updateScope/publishUserMessage 等写路径仍受 Center 门禁。
-  const offlineMethods = new Set(['vaultControl', 'submit', 'getSubmission', 'wait', 'abort', 'cancelTaskDispatch', 'withdrawQueued', 'turns', 'inspect', 'history', 'watch', 'getBotBoard',
+  const offlineMethods = new Set(['vaultControl', 'browserControl', 'googleSetupControl', 'submit', 'getSubmission', 'wait', 'abort', 'cancelTaskDispatch', 'withdrawQueued', 'turns', 'inspect', 'history', 'watch', 'getBotBoard',
     'uploadAttachment', 'getAttachment',
     'scopeHistory', 'getScopeMessage', 'getScopeMessageDelivery', 'getScopeState', 'listScopeStates', 'listScopeReplicas']);
   const maintenanceAllowed = new Set([...offlineMethods, 'getCurrentDevice', 'getBot', 'getModelCatalog', 'getBotSoul', 'listScopes']);
   maintenanceAllowed.delete('submit');
   maintenanceAllowed.delete('uploadAttachment');
+  maintenanceAllowed.delete('browserControl');
+  maintenanceAllowed.delete('googleSetupControl');
   return new Proxy(runtime, {
     get(target, key) {
       const value = target[key];

@@ -147,6 +147,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
   // canRunWork 只读检查（排队用户优先 + 本 Bot 全部原生活动含遗留 work），不取第二条 Bot 准入通道。
   const turnGate = { fn: admitTurn ?? null, idle: null, canRunWork: null };
   let learningHooks = null;
+  let scopeStopListener = null;
   let active = false;
   let closing = false;
   let timer = null;
@@ -629,6 +630,9 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
    */
   async function stopScopeWork(scopeId) {
     assertId(scopeId, 'scopeId');
+    // All tombstone paths, including peer replication, must revoke external
+    // waits before clearing work bindings. The listener persists cancellation.
+    await scopeStopListener?.(scopeId);
     const harness = getHarness();
     const index = await harness.snapshot(WorkIndex, context);
     const bindings = [];
@@ -2435,7 +2439,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     }, WORK_ERRORS, toolContext);
   }
 
-  async function checkBudget(_request, api, toolContext) {
+  async function checkBudget(_request, api, toolContext, allowOverflowRecovery = false) {
     return guarded(async () => {
       const harness = getHarness();
       const coordNativeId = await workCoordinationId(api, toolContext);
@@ -2451,7 +2455,8 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         if (!prepared || prepared.taskId !== String(api.taskId)) {
           throw new Error('work context projection does not match the prepared request');
         }
-        if (prepared.tokenCount >= prepared.contextWindow) {
+        // The final provider guard prevents oversized dispatch and allows SDK overflow recovery for managed views.
+        if (!allowOverflowRecovery && prepared.tokenCount >= prepared.contextWindow) {
           const failure = { code: 'CONTEXT_LIMIT', message: 'work context projection reaches the model context window' };
           // 请求级预算失败：只结算本 pending，不落 scope 级 error 闸门
           // （error 闸门会无限阻断后续新请求；reconcile 走 lastError/结算路径）。
@@ -2599,6 +2604,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     interruptBotWork, setActivityListener, refreshActivity,
     coordinationSelector,
     drainFailureNotices,
+    setScopeStopListener: (listener) => { scopeStopListener = listener ?? null; },
     setLearningHooks: (hooks) => {
       learningHooks = hooks ?? null;
     },

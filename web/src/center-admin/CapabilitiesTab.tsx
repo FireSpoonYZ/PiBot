@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
 import { ExternalLink, FileCode2, Plus, RefreshCw, Sparkles, Trash2, Upload, Wrench } from 'lucide-react';
 import { useText } from '../ui';
-import { errorMessage } from './transport';
+import { CenterApiError, errorMessage } from './transport';
 import type { CenterApi } from './transport';
 import {
   BotTreeSelector,
@@ -157,6 +157,9 @@ export function CapabilitiesTab({
   const [toolsResult, setToolsResult] = useState<CapabilityTool[] | null>(null);
   const [deployments, setDeployments] = useState<DeploymentReceipt[]>([]);
   const [updates, setUpdates] = useState<PackageVersion[] | null>(null);
+  const [updateArtifactFile, setUpdateArtifactFile] = useState<File | null>(null);
+  const [updateArtifactInputKey, setUpdateArtifactInputKey] = useState(0);
+  const [detailErrorNeedsBrowser, setDetailErrorNeedsBrowser] = useState(false);
   const [operation, setOperation] = useState<Operation | null>(null);
 
   const oauthTimerRef = useRef<number | null>(null);
@@ -278,11 +281,14 @@ export function CapabilitiesTab({
     setDetailScopeDraft(inst.visibilityScope ?? (inst.ownerBot ? 'private' : 'global'));
     setDetailNotice('');
     setDetailError('');
+    setDetailErrorNeedsBrowser(false);
     setOauthFlow(null);
     setOauthStatus('');
     setProbeResult('');
     setToolsResult(null);
     setUpdates(null);
+    setUpdateArtifactFile(null);
+    setUpdateArtifactInputKey(k => k + 1);
     setOperation(null);
     setDetailOpen(true);
     void loadDetail(inst.installationId);
@@ -737,6 +743,8 @@ export function CapabilitiesTab({
     if (!detailInst) return;
     setDetailBusy(true);
     setDetailError('');
+    setDetailErrorNeedsBrowser(false);
+    setDetailNotice('');
     try {
       const list = await api.checkUpdates(detailInst.installationId);
       setUpdates(list);
@@ -752,6 +760,9 @@ export function CapabilitiesTab({
     if (!detailInst) return;
     setDetailBusy(true);
     setDetailError('');
+    setDetailErrorNeedsBrowser(false);
+    setDetailNotice('');
+    setOperation(null);
     try {
       const accepted = await api.updateInstallation(detailInst.installationId, {
         requestId: newRequestId(),
@@ -761,6 +772,37 @@ export function CapabilitiesTab({
       watchOperation(accepted.operationId);
     } catch (err) {
       setDetailError(errorMessage(err, t('更新失败', 'Update failed')));
+    } finally {
+      setDetailBusy(false);
+    }
+  };
+
+  const handleApplyArtifactUpdate = async () => {
+    if (!detailInst || detailInst.source.type !== 'artifact') return;
+    if (!updateArtifactFile) {
+      setDetailError(t('请选择新版制品压缩包 (.tgz / .tar.gz / .zip)', 'Please select a new package archive (.tgz / .tar.gz / .zip)'));
+      return;
+    }
+    setDetailBusy(true);
+    setDetailError('');
+    setDetailErrorNeedsBrowser(false);
+    setDetailNotice('');
+    setOperation(null);
+    try {
+      const uploaded = await api.uploadArtifact(updateArtifactFile);
+      const accepted = await api.updateInstallation(detailInst.installationId, {
+        requestId: newRequestId(),
+        source: { type: 'artifact', artifactRef: uploaded.artifactRef },
+      });
+      setUpdateArtifactFile(null);
+      setUpdateArtifactInputKey(k => k + 1);
+      setDetailNotice(t('已上传制品并发起原地更新（保留原实例与 Bot 绑定）', 'Artifact uploaded; in-place update started (preserving installation and Bot bindings)'));
+      watchOperation(accepted.operationId);
+    } catch (err) {
+      if (err instanceof CenterApiError && err.code === 'UNSUPPORTED_FORM_DATA') {
+        setDetailErrorNeedsBrowser(true);
+      }
+      setDetailError(errorMessage(err, t('制品更新失败', 'Artifact update failed')));
     } finally {
       setDetailBusy(false);
     }
@@ -1325,7 +1367,26 @@ export function CapabilitiesTab({
       >
         {detailInst && (
           <div className="ca-form-stack">
-            {detailError && <CaNotice tone="danger">{detailError}</CaNotice>}
+            {detailError && (
+              <CaNotice
+                tone="danger"
+                action={
+                  detailErrorNeedsBrowser && onOpenExternal ? (
+                    <button type="button" className="ca-btn ca-btn-sm" onClick={onOpenExternal}>
+                      <ExternalLink size={13} />
+                      <span>{t('在浏览器打开', 'Open in browser')}</span>
+                    </button>
+                  ) : undefined
+                }
+              >
+                {detailError}
+              </CaNotice>
+            )}
+            {operation?.phase === 'failed' && operation.error?.message && (
+              <CaNotice tone="danger">
+                {operation.error.code ? `${operation.error.code}: ${operation.error.message}` : operation.error.message}
+              </CaNotice>
+            )}
             {detailNotice && <CaNotice tone="ok">{detailNotice}</CaNotice>}
 
             {/* 唯一全局启停状态栏 */}
@@ -1671,34 +1732,71 @@ export function CapabilitiesTab({
                   </div>
                 )}
 
-                {detailInst.source.type !== 'inline' && (
-                  <div className="ca-inline-between ca-wrap">
-                    <span className="ca-muted">{t(`当前版本：v${detailInst.targetVersion}`, `Current version: v${detailInst.targetVersion}`)}</span>
-                    <button
-                      type="button"
-                      className="ca-btn ca-btn-sm"
-                      disabled={detailBusy}
-                      onClick={() => void handleCheckUpdates()}
-                    >
-                      <RefreshCw size={13} />
-                      <span>{t('检查更新', 'Check updates')}</span>
-                    </button>
+                {detailInst.source.type === 'npm' && (
+                  <>
+                    <div className="ca-inline-between ca-wrap">
+                      <span className="ca-muted">{t(`当前版本：v${detailInst.targetVersion}`, `Current version: v${detailInst.targetVersion}`)}</span>
+                      <button
+                        type="button"
+                        className="ca-btn ca-btn-sm"
+                        disabled={detailBusy}
+                        onClick={() => void handleCheckUpdates()}
+                      >
+                        <RefreshCw size={13} />
+                        <span>{t('检查更新', 'Check updates')}</span>
+                      </button>
+                    </div>
+
+                    {updates && updates.length > 0 && (
+                      <div className="ca-inline-row ca-wrap">
+                        {updates.map(v => (
+                          <button
+                            key={v.version}
+                            type="button"
+                            className="ca-btn ca-btn-sm"
+                            onClick={() => void handleApplyUpdate(v.version)}
+                          >
+                            {t(`更新到 v${v.version}`, `Update to v${v.version}`)}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {detailInst.source.type === 'artifact' && (
+                  <div className="ca-form-stack">
+                    {detailInst.kind !== 'skill' && (
+                      <span className="ca-muted">{t(`当前版本：v${detailInst.targetVersion}`, `Current version: v${detailInst.targetVersion}`)}</span>
+                    )}
+                    <div className="ca-field">
+                      <label className="ca-field-label">{t('上传新版制品包 (.tgz / .tar.gz / .zip)', 'Upload new package archive (.tgz / .tar.gz / .zip)')}</label>
+                      <input
+                        key={updateArtifactInputKey}
+                        type="file"
+                        className="ca-input"
+                        accept=".tgz,.tar.gz,.zip,.tar"
+                        disabled={detailBusy}
+                        onChange={e => setUpdateArtifactFile(e.target.files?.[0] ?? null)}
+                      />
+                      <span className="ca-field-help">{t(`包 ID 须为 ${detailInst.packageId}；原地更新不会修改实例 ID、全局启停意图或 Bot 绑定。`, `Package ID must match ${detailInst.packageId}; in-place update preserves the installation ID, enable state, and Bot bindings.`)}</span>
+                    </div>
+                    <div className="ca-inline-row">
+                      <button
+                        type="button"
+                        className="ca-btn ca-btn-primary ca-btn-sm"
+                        disabled={detailBusy || !updateArtifactFile}
+                        onClick={() => void handleApplyArtifactUpdate()}
+                      >
+                        <Upload size={13} />
+                        <span>{t('上传并原地更新', 'Upload & update in place')}</span>
+                      </button>
+                    </div>
                   </div>
                 )}
 
-                {updates && updates.length > 0 && (
-                  <div className="ca-inline-row ca-wrap">
-                    {updates.map(v => (
-                      <button
-                        key={v.version}
-                        type="button"
-                        className="ca-btn ca-btn-sm"
-                        onClick={() => void handleApplyUpdate(v.version)}
-                      >
-                        {t(`更新到 v${v.version}`, `Update to v${v.version}`)}
-                      </button>
-                    ))}
-                  </div>
+                {detailInst.source.type === 'http' && (
+                  <span className="ca-muted">{t('远程 HTTP MCP 直接连接远端服务，无需包更新。', 'Remote HTTP MCP connects directly to the remote endpoint; no package update is required.')}</span>
                 )}
 
                 <div className="ca-inline-end">

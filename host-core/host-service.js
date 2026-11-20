@@ -432,6 +432,7 @@ export async function openHostService(options) {
       deferResume: true,
       centerRuntime: {
         snapshot,
+        centerUrl: (() => { try { return new URL(center.url).origin; } catch { return null; } })(),
         getClient: () => client ?? null,
         installer,
         // 内部 Vault 桥：每次调用取当前 client，重连后不残留旧对象；只供 vault 服务
@@ -447,6 +448,8 @@ export async function openHostService(options) {
         globalTasks: (input, options) => { const current = client; if (!current) throw offlineError(); return current.globalTasks(input, options?.signal); },
         pollTaskDispatches: (input, options) => { const current = client; if (!current) throw offlineError(); return current.pollTaskDispatches(input, options?.signal); },
         reportTaskDispatch: (id, input, options) => { const current = client; if (!current) throw offlineError(); return current.reportTaskDispatch(id, input, options?.signal); },
+        // 只读 Google 状态探测：使用已配对 device Bearer 认证调用 GET /api/host/google/status，不持有 owner 凭据。
+        getGoogleStatus: (options) => { const current = client; if (!current) throw offlineError(); return current.getGoogleStatus(options); },
       },
       collaboration: { displayName, platform, relay: { url: snapshot.linkUrl, token: center.deviceToken, ...(center.ca ? { ca: center.ca } : {}) } },
       onBotsChanged: () => {
@@ -507,6 +510,14 @@ export async function openHostService(options) {
   let closePromise;
   return {
     deviceId, url: control.url, getStatus,
+    getScheduleFence(botId) {
+      if (closed || phase !== 'running') throw Object.assign(new Error('host service is not ready'), { code: 'RUNTIME_BUSY' });
+      return control.getScheduleFence(botId);
+    },
+    submitScheduled(botId, input) {
+      if (closed || phase !== 'running') throw Object.assign(new Error('host service is not ready'), { code: 'RUNTIME_BUSY' });
+      return control.submitScheduled(botId, input);
+    },
     close() {
       return closePromise ??= (async () => {
         closed = true;

@@ -1,4 +1,9 @@
 import { randomBytes } from 'node:crypto';
+import {
+  MAX_DISPATCH_ANSWER_CHARS,
+  MCP_DISPATCH_CAPABILITY_HEADER,
+  MCP_DISPATCH_SESSION_ISOLATION,
+} from './data/dispatch.js';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 function object(value) {
@@ -33,8 +38,26 @@ function errorInput(value) {
   }
   return { code: value.code, message: value.message.slice(0, 200) };
 }
+function receiptResultInput(value) {
+  const body = fields(value, ['submissionId', 'answerText']);
+  let submissionId;
+  if (body.submissionId !== undefined && body.submissionId !== null) {
+    if (typeof body.submissionId === 'number' && Number.isSafeInteger(body.submissionId) && body.submissionId >= 0) {
+      submissionId = String(body.submissionId);
+    } else {
+      submissionId = text(body.submissionId, 'submissionId', 128);
+    }
+  }
+  if (typeof body.answerText !== 'string' || body.answerText.length > MAX_DISPATCH_ANSWER_CHARS || !body.answerText.isWellFormed()) {
+    fail('INVALID_ARGUMENT', 'Invalid webhook receipt answerText');
+  }
+  return {
+    ...(submissionId !== undefined ? { submissionId } : {}),
+    answerText: body.answerText,
+  };
+}
 function receiptInput(value) {
-  const body = fields(value, ['status', 'error', 'admission']);
+  const body = fields(value, ['status', 'error', 'admission', 'result']);
   if (!['queued', 'running', 'succeeded', 'failed', 'cancelled'].includes(body.status)) fail('INVALID_ARGUMENT', 'Invalid webhook receipt');
   let admission;
   if (body.admission === null) admission = null;
@@ -46,7 +69,17 @@ function receiptInput(value) {
       ...(body.admission.error == null ? {} : { error: errorInput(body.admission.error) }),
     };
   }
-  return { status: body.status, error: body.error == null ? null : errorInput(body.error), admission };
+  let result;
+  if (body.result !== undefined && body.result !== null) {
+    if (body.status !== 'succeeded') fail('INVALID_ARGUMENT', 'Webhook receipt result is only allowed for succeeded status');
+    result = receiptResultInput(body.result);
+  }
+  return {
+    status: body.status,
+    error: body.error == null ? null : errorInput(body.error),
+    admission,
+    ...(result !== undefined ? { result } : {}),
+  };
 }
 function stopInput(value) {
   const body = fields(value, ['botId', 'stopEpoch']);
@@ -82,6 +115,14 @@ function stablePayload(payload) {
   return chunks.join('');
 }
 const bearer = req => /^Bearer ([A-Za-z0-9_-]{43})$/i.exec(req.headers.authorization || '')?.[1];
+
+function pollOptionsFromRequest(req) {
+  const raw = req.headers?.[MCP_DISPATCH_CAPABILITY_HEADER];
+  const mcpDispatch = typeof raw === 'string' && raw.trim() === MCP_DISPATCH_SESSION_ISOLATION
+    ? MCP_DISPATCH_SESSION_ISOLATION
+    : null;
+  return { mcpDispatch };
+}
 
 export function registerWebhookRoutes(app, { store, bridge, route, host, publicUrl, notify }) {
   const present = value => ({ ...value, url: new URL(`/api/webhooks/${value.id}/events`, publicUrl).href });
@@ -143,7 +184,7 @@ export function registerWebhookRoutes(app, { store, bridge, route, host, publicU
 
   host('POST', '/api/host/webhook-events/poll', req => {
     const body = fields(req.body, ['cursor']);
-    return store.pollWebhookEvents(req.centerDevice.deviceId, body.cursor);
+    return store.pollWebhookEvents(req.centerDevice.deviceId, body.cursor, Date.now(), pollOptionsFromRequest(req));
   });
   host('POST', '/api/host/webhook-events/stop', req => {
     const deviceId = req.centerDevice.deviceId;

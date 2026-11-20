@@ -15,27 +15,44 @@ protocol instead.
   1-4 questions, 2-4 options each, `multiSelect` flag, optional per-option
   `preview`. Parameters, limits, reserved labels (`Other`,
   `Type something.`, `Next`), duplicate guards, normalization and the
-  LLM-facing result text match upstream 2.15.0. Nested calls keep the tool available in Code Mode-only mode and publish the same pending questionnaire.
+  answer formatting match upstream 2.15.0. Direct standalone calls, multi-tool
+  rounds, and nested/Code Mode calls all remain supported.
 - **Capability action** `answerQuestionnaire`: submits or cancels one pending
   request. Input: `{conversationId, requestId, cancelled, answers[],
   globalNote?}` where `requestId` is the tool task id and each answer is
   `{questionIndex, selectedOptions?, customText?, notes?}`. Returns
   `{status: 'answered' | 'cancelled' | 'settled'}` — `settled` means the
-  request was already terminal or its task expired, so the UI can refresh.
+  request was already settled or unavailable, so the UI can refresh.
 
 ## State and lifecycle
 
-Requests persist in the task-scoped Durable document
-`e-launcher.ask-user-question`, owned by the question's tool task, including
-nested Code Mode calls. Several requests may be pending at once. The tool waits
-on `watchDoc` + the invocation abort signal — no polling, no persistent
-Promise across restarts. First valid answer wins inside one atomic commit; an
-answer can commit only while its tool task is still live, so a settled task can
-never be answered — the final presentation is computed inside the same commit and oversized answers are rejected before anything is stored. An interrupted live task resumes its wait after restart and picks up any
-answer committed meanwhile. Stop aborts the task; task-scoped records retire
-when their task settles. The tool's `details` always carries the
-whitelisted `presentation` shape (`kind: 'questionnaire'`, `version: 1`)
-bounded to 48 KiB; oversized calls are rejected at the tool boundary.
+Version 1.1.0 uses the Host's session-scoped `host.durable-wait` documents
+**only** when `ask_user_question` is invoked directly as the sole tool call in
+a model response during an eligible unscoped, non-task-dispatch primary turn
+(without `workNativeId`), where `control.terminate` can safely release the SDK
+run so the Bot can handle other inputs while waiting.
+
+For nested/Code Mode calls, multi-tool rounds, scoped DM/room turns, task
+dispatches, turns with `workNativeId`, and pre-existing live-task (`open`)
+requests, the plugin falls back to the task-scoped `e-launcher.ask-user-question`
+live-task protocol. That fallback waits in-band within the running tool task
+and does not pause or independently release the Bot.
+
+For persisted primary waits, the Host verifies the stored wait identity before
+making its card interactive; a completed tool task does not expire this
+external wait. The first valid answer commits atomically with immutable
+continuation text. The Host reconciles the existing TurnQueue receipt and
+submits the same request ID only when it is definitively absent. Stop, clear
+history, edit/fork, archive and deletion cancel the corresponding waits and
+continuation handoffs. Any pre-existing experimental wait record outside
+deployed eligibility is safely closed/cancelled offline without re-admitting.
+User cancellation is delivered as a refusal; a Host stop does not restart work.
+Presentations remain limited to 48 KiB, including answers.
+
+Existing in-flight live-task (`open`) and deferred (`deferred`) replays remain
+coherent and idempotent across restarts. See
+[architecture and migration](../../docs/always-on-runtime.md) and
+[verification](../../docs/always-on-runtime-validation.md) before rollback.
 
 ## Configuration
 

@@ -18,6 +18,15 @@ import { createLocalControlAdapter } from './local-control-adapter.js';
 import { createHostControlReceiver } from './host-control.js';
 import { createHostLiveReceiver } from './host-live.js';
 import {
+  ALL_LIVE_EXTENSIONS,
+  NO_LIVE_EXTENSIONS,
+  LIVE_EXTENSIONS_HEADER,
+  LIVE_EXTENSIONS_HEADER_WIRE,
+  parseLiveExtensionsHeader,
+  formatLiveExtensionsHeader,
+  intersectLiveExtensions,
+} from './remote-live-protocol.js';
+import {
   assertDeviceToken,
   parseRelayUrl,
   readServerFrame,
@@ -318,10 +327,13 @@ export async function openDeviceLink(options) {
     scopeDelivery.setOnline(false);
     replicaSync.setOnline(false);
     setPhase('connecting');
+    let negotiatedLiveExtensions = NO_LIVE_EXTENSIONS;
+    const liveExtHeader = formatLiveExtensionsHeader(ALL_LIVE_EXTENSIONS);
     let ws;
     try {
       ws = new WebSocket(url.href, {
         ...(ca !== undefined ? { ca } : {}),
+        ...(liveExtHeader ? { headers: { [LIVE_EXTENSIONS_HEADER_WIRE]: liveExtHeader } } : {}),
         maxPayload: MAX_RELAY_FRAME_BYTES,
         perMessageDeflate: false,
         followRedirects: false,
@@ -335,6 +347,14 @@ export async function openDeviceLink(options) {
     currentWs = ws;
 
     const alive = () => gen === currentGen && !closed && ws === currentWs;
+
+    ws.on('upgrade', (res) => {
+      if (!alive()) return;
+      negotiatedLiveExtensions = intersectLiveExtensions(
+        ALL_LIVE_EXTENSIONS,
+        parseLiveExtensionsHeader(res?.headers?.[LIVE_EXTENSIONS_HEADER]),
+      );
+    });
 
     ws.on('open', () => {
       if (!alive()) return;
@@ -352,7 +372,7 @@ export async function openDeviceLink(options) {
       armWatchdog(gen, ws);
       let frame;
       try {
-        frame = readServerFrame(data, isBinary);
+        frame = readServerFrame(data, isBinary, { liveExtensions: negotiatedLiveExtensions });
       } catch {
         block('BAD_FRAME');
         ws.terminate();
@@ -377,6 +397,7 @@ export async function openDeviceLink(options) {
           ws.terminate();
           return;
         }
+        liveReceiver.setExtensions(negotiatedLiveExtensions);
         ready = true;
         if (readyTimer) {
           clearTimeout(readyTimer);

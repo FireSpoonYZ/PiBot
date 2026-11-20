@@ -92,7 +92,76 @@ const TOP_KEYS = {
     'pendingPrompt',
     'stepsPreview',
   ]),
+  'google-setup': new Set([
+    'kind',
+    'version',
+    'installationId',
+    'botId',
+    'runId',
+    'revision',
+    'state',
+    'mode',
+    'step',
+    'card',
+    'copy',
+    'title',
+    'summary',
+    'blockerKind',
+    'actions',
+  ]),
+  'google-account-select': new Set([
+    'kind',
+    'version',
+    'installationId',
+    'requestId',
+    'conversationId',
+    'botId',
+    'actionLabel',
+    'toolName',
+    'service',
+    'reason',
+    'accounts',
+    'status',
+    'selectedEmail',
+  ]),
+  'google-browser-takeover': new Set([
+    'kind',
+    'version',
+    'installationId',
+    'botId',
+    'pageId',
+    'phase',
+    'reason',
+    'url',
+    'step',
+    'canStreamInteract',
+  ]),
+  'google-readiness': new Set([
+    'kind',
+    'version',
+    'installationId',
+    'account',
+    'service',
+    'state',
+    'detail',
+    'enableUrl',
+    'accounts',
+  ]),
 };
+const GOOGLE_SETUP_ACTION_KEYS = new Set(['id', 'label', 'step']);
+const GOOGLE_ACCOUNT_OPTION_KEYS = new Set(['id', 'email', 'status']);
+const GOOGLE_ACCOUNT_SELECT_STATUSES = new Set(['pending', 'selected', 'cancelled']);
+const GOOGLE_READINESS_STATES = new Set([
+  'ready',
+  'needs-permission',
+  'api-disabled',
+  'blocked-by-admin',
+  'error',
+  'unconfigured',
+  'disconnected',
+  'reconnect',
+  'ambiguous-account',
+]);
 const TASK_STEP_COUNT_KEYS = new Set(['done', 'total']);
 const TASK_PENDING_PROMPT_KEYS = new Set(['kind', 'botId', 'text', 'options']);
 const TASK_STEP_PREVIEW_KEYS = new Set(['id', 'text', 'status', 'botName']);
@@ -344,7 +413,96 @@ function checkPresentation(value, onError) {
     }
     return;
   }
-  onError('presentation kind must be todo, questionnaire, vault-unlock or task');
+  if (value.kind === 'google-setup') {
+    rejectUnknownFields(value, TOP_KEYS['google-setup'], onError);
+    checkId(value.installationId, onError);
+    for (const key of ['botId', 'runId', 'state', 'mode', 'step', 'card', 'blockerKind']) {
+      if (value[key] !== undefined) checkText(value[key], 200, 1, onError);
+    }
+    if (value.title !== undefined) checkText(value.title, 300, 0, onError);
+    if (value.summary !== undefined) checkText(value.summary, 1000, 0, onError);
+    if (value.revision !== undefined && (!Number.isSafeInteger(value.revision) || value.revision < 0)) {
+      onError('google-setup revision must be a nonnegative safe integer');
+    }
+    if (value.copy !== undefined && (!Number.isSafeInteger(value.copy) || value.copy < 0)) {
+      onError('google-setup copy must be a nonnegative safe integer');
+    }
+    if (value.actions !== undefined) {
+      if (!Array.isArray(value.actions) || value.actions.length > 4) {
+        onError('google-setup actions must be an array of at most 4 items');
+      }
+      for (const action of value.actions) {
+        if (!isPlainObject(action)) onError('google-setup action must be an object');
+        rejectUnknownFields(action, GOOGLE_SETUP_ACTION_KEYS, onError);
+        checkText(action.id, 120, 1, onError);
+        checkText(action.label, 200, 1, onError);
+        if (action.step !== undefined) checkText(action.step, 120, 1, onError);
+      }
+    }
+    return;
+  }
+  if (value.kind === 'google-account-select') {
+    rejectUnknownFields(value, TOP_KEYS['google-account-select'], onError);
+    checkId(value.installationId, onError);
+    for (const key of ['requestId', 'botId', 'actionLabel', 'toolName', 'service', 'selectedEmail']) {
+      if (value[key] !== undefined) checkText(value[key], 320, 1, onError);
+    }
+    if (value.reason !== undefined) checkText(value.reason, 500, 0, onError);
+    if (value.conversationId !== undefined && (!Number.isSafeInteger(value.conversationId) || value.conversationId < 0)) {
+      onError('google-account-select conversationId must be a nonnegative safe integer');
+    }
+    if (value.status !== undefined && !GOOGLE_ACCOUNT_SELECT_STATUSES.has(value.status)) {
+      onError('google-account-select status must be pending, selected or cancelled');
+    }
+    if (value.accounts !== undefined) {
+      if (!Array.isArray(value.accounts) || value.accounts.length > 16) {
+        onError('google-account-select accounts must be an array of at most 16 items');
+      }
+      for (const acc of value.accounts) {
+        if (!isPlainObject(acc)) onError('google-account-select account must be an object');
+        rejectUnknownFields(acc, GOOGLE_ACCOUNT_OPTION_KEYS, onError);
+        checkText(acc.email, 320, 1, onError);
+        if (acc.id !== undefined) checkText(acc.id, 200, 1, onError);
+        if (acc.status !== undefined && acc.status !== 'connected' && acc.status !== 'reconnect') {
+          onError('google-account-select account status must be connected or reconnect');
+        }
+      }
+    }
+    return;
+  }
+  if (value.kind === 'google-browser-takeover') {
+    rejectUnknownFields(value, TOP_KEYS['google-browser-takeover'], onError);
+    checkId(value.installationId, onError);
+    for (const key of ['botId', 'pageId', 'phase', 'step']) {
+      if (value[key] !== undefined) checkText(value[key], 200, 1, onError);
+    }
+    if (value.reason !== undefined) checkText(value.reason, 500, 0, onError);
+    if (value.url !== undefined) checkText(value.url, 2048, 0, onError);
+    if (value.canStreamInteract !== undefined && typeof value.canStreamInteract !== 'boolean') {
+      onError('google-browser-takeover canStreamInteract must be a boolean');
+    }
+    return;
+  }
+  if (value.kind === 'google-readiness') {
+    rejectUnknownFields(value, TOP_KEYS['google-readiness'], onError);
+    checkId(value.installationId, onError);
+    for (const key of ['account', 'service']) {
+      if (value[key] !== undefined) checkText(value[key], 320, 1, onError);
+    }
+    if (value.state !== undefined && !GOOGLE_READINESS_STATES.has(value.state)) {
+      onError('google-readiness state is invalid');
+    }
+    if (value.detail !== undefined) checkText(value.detail, 500, 0, onError);
+    if (value.enableUrl !== undefined) checkText(value.enableUrl, 2048, 1, onError);
+    if (value.accounts !== undefined) {
+      if (!Array.isArray(value.accounts) || value.accounts.length > 16) {
+        onError('google-readiness accounts must be an array of at most 16 items');
+      }
+      for (const acc of value.accounts) checkText(acc, 320, 1, onError);
+    }
+    return;
+  }
+  onError('presentation kind must be todo, questionnaire, vault-unlock, task or google-*');
 }
 
 function buildPresentation(value) {
@@ -412,6 +570,49 @@ function buildPresentation(value) {
       });
     }
     return task;
+  }
+  if (value.kind === 'google-setup') {
+    const out = { kind: 'google-setup', version: 1, installationId: value.installationId };
+    for (const key of ['botId', 'runId', 'revision', 'state', 'mode', 'step', 'card', 'copy', 'title', 'summary', 'blockerKind']) {
+      if (value[key] !== undefined) out[key] = value[key];
+    }
+    if (value.actions !== undefined) {
+      out.actions = value.actions.map((action) => ({
+        id: action.id,
+        label: action.label,
+        ...(action.step !== undefined ? { step: action.step } : {}),
+      }));
+    }
+    return out;
+  }
+  if (value.kind === 'google-account-select') {
+    const out = { kind: 'google-account-select', version: 1, installationId: value.installationId };
+    for (const key of ['requestId', 'conversationId', 'botId', 'actionLabel', 'toolName', 'service', 'reason', 'status', 'selectedEmail']) {
+      if (value[key] !== undefined) out[key] = value[key];
+    }
+    if (value.accounts !== undefined) {
+      out.accounts = value.accounts.map((acc) => ({
+        email: acc.email,
+        ...(acc.id !== undefined ? { id: acc.id } : {}),
+        ...(acc.status !== undefined ? { status: acc.status } : {}),
+      }));
+    }
+    return out;
+  }
+  if (value.kind === 'google-browser-takeover') {
+    const out = { kind: 'google-browser-takeover', version: 1, installationId: value.installationId };
+    for (const key of ['botId', 'pageId', 'phase', 'reason', 'url', 'step', 'canStreamInteract']) {
+      if (value[key] !== undefined) out[key] = value[key];
+    }
+    return out;
+  }
+  if (value.kind === 'google-readiness') {
+    const out = { kind: 'google-readiness', version: 1, installationId: value.installationId };
+    for (const key of ['account', 'service', 'state', 'detail', 'enableUrl']) {
+      if (value[key] !== undefined) out[key] = value[key];
+    }
+    if (value.accounts !== undefined) out.accounts = [...value.accounts];
+    return out;
   }
   const questionnaire = {
     kind: 'questionnaire',

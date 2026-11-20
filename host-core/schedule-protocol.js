@@ -17,6 +17,7 @@ const CREATE_FIELDS = new Set([
   'skills',
   'repeat',
   'time',
+  'date',
   'weekday',
   'weekdays',
   'monthDay',
@@ -34,6 +35,7 @@ const UPDATE_FIELDS = new Set([
   'skills',
   'repeat',
   'time',
+  'date',
   'weekday',
   'weekdays',
   'monthDay',
@@ -185,6 +187,7 @@ export function normalizeScheduleTaskInput(input) {
         out[key] = input[key];
       }
       out.skills = input.skills === undefined ? [] : validateScheduleSkills(input.skills).slice();
+      if (input.date !== undefined) out.date = input.date;
       if (input.weekday !== undefined) out.weekday = input.weekday;
       if (input.weekdays !== undefined) out.weekdays = Array.isArray(input.weekdays) ? input.weekdays.slice() : input.weekdays;
       if (input.monthDay !== undefined) out.monthDay = input.monthDay;
@@ -207,6 +210,7 @@ export function normalizeScheduleTaskInput(input) {
         'skills',
         'repeat',
         'time',
+        'date',
         'weekday',
         'weekdays',
         'monthDay',

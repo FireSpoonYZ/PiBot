@@ -4,6 +4,10 @@ import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/e
 import { assertDeviceToken } from './relay-protocol.js';
 import { assertId } from './message-protocol.js';
 import {
+  MCP_DISPATCH_CAPABILITY_HEADER,
+  MCP_DISPATCH_SESSION_ISOLATION,
+} from './mcp-dispatch-policy.js';
+import {
   ANTIGRAVITY_API,
   ANTIGRAVITY_CANCEL_PATH,
   ANTIGRAVITY_MAX_FRAME_BYTES,
@@ -135,7 +139,8 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
       // turn 准入端点透传服务端类型化错误码（TURN_SET_CHANGED/TURN_SYNC_FAILED 等）；
       // bot 管理端点同样透传有界类型码，REVISION_CONFLICT 等 CAS 失败不会丢成
       // BAD_RESPONSE。其他路径保持既有 CENTER_REQUEST_FAILED 语义及 ownerRequest 回退。
-      const typedTurnError = path.startsWith('/api/host/turns/') ||
+      const isOperationPath = path === '/api/host/operations/call';
+      const typedTurnError = isOperationPath || path.startsWith('/api/host/turns/') ||
         isTaskPath ||
         /^\/api\/host\/devices\/[^/]+\/bots\/[^/]+\/(skills|skill-reviews|learning|installations)$/.test(path);
       // /api/host/vault/* 只透传固定 VAULT_* 码/消息；其他错误仍走状态码兜底。
@@ -161,7 +166,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
               'BAD_RESPONSE',
               'CENTER_REQUEST_FAILED',
             ]) : null,
-            requireJsonContentType: isTaskPath,
+            requireJsonContentType: isTaskPath || isOperationPath,
           });
           if (code) {
             errorCode = code;
@@ -506,12 +511,18 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
         ? '?admissionId=' + encodeURIComponent(options.admissionId) : '';
       return request('/api/host/artifacts/' + encodeURIComponent(ref) + query, { binary: true, signal: options.signal });
     },
-    pollWebhookEvents: (options = {}) => request('/api/host/webhook-events/poll', { method: 'POST', body: { cursor: options.cursor }, signal: options.signal }),
+    pollWebhookEvents: (options = {}) => request('/api/host/webhook-events/poll', {
+      method: 'POST',
+      body: { cursor: options.cursor },
+      headers: { [MCP_DISPATCH_CAPABILITY_HEADER]: MCP_DISPATCH_SESSION_ISOLATION },
+      signal: options.signal,
+    }),
     stopWebhookEvents: (input, options = {}) => request('/api/host/webhook-events/stop', { method: 'POST', body: { botId: input.botId, stopEpoch: input.stopEpoch }, signal: options.signal }),
     reportWebhookEvent: (eventId, input, options = {}) => request('/api/host/webhook-events/' + encodeURIComponent(eventId) + '/receipt', { method: 'POST', body: input, signal: options.signal }),
     prepareTurn: (input, options = {}) => request('/api/host/turns/prepare', { method: 'POST', body: input, signal: options.signal }),
     confirmTurn: (input, options = {}) => request('/api/host/turns/confirm', { method: 'POST', body: input, signal: options.signal }),
     restoreTurn: (input, options = {}) => request('/api/host/turns/restore', { method: 'POST', body: input, signal: options.signal }),
+    callOperation: (body, signal) => request('/api/host/operations/call', { method: 'POST', body, signal }),
     globalTasks: (body, signal) => request('/api/host/tasks/action', { method: 'POST', body, signal }),
     pollTaskDispatches: (body, signal) => request('/api/host/task-dispatches/poll', { method: 'POST', body, signal }),
     reportTaskDispatch: (id, body, signal) => request('/api/host/task-dispatches/' + encodeURIComponent(id) + '/receipt', { method: 'POST', body, signal }),
@@ -519,6 +530,8 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     vaultControl: (input, options = {}) => request('/api/host/vault/control', { method: 'POST', body: input, signal: options.signal }),
     vaultFind: (input, options = {}) => request('/api/host/vault/find', { method: 'POST', body: input, signal: options.signal }),
     vaultResolve: (input, options = {}) => request('/api/host/vault/resolve', { method: 'POST', body: input, signal: options.signal }),
+    // 中心共享 Google Workspace 状态（只读，复用 device Bearer 认证，不授予普通 Host owner 凭据）。
+    getGoogleStatus: (options = {}) => request('/api/host/google/status', { signal: options?.signal }),
     listCapabilityTools: (id, botId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/list', { method: 'POST', body: { botId }, signal: options.signal }),
     callCapabilityTool: (id, botId, name, args, callId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/call', { method: 'POST', body: { botId, name, args, callId }, signal: options.signal }),
     streamAntigravity(payload, options = {}) {

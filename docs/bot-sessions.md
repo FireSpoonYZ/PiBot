@@ -82,8 +82,9 @@ scope 消息账本（MessageLog）仍是消息事实的唯一权威，主会话�
   （`lastImportedLocalId` 是 reset 唯一保留的导入边界），再 `conversation.reset()`，
   随后 `sessions.reset(botId)` — 账本导入水位、既有 ID/数据、回复回执与未决外发
   请求的来源记账全部保留（旧账本消息绝不重现，迟到回复仍可续接），只清理过期活动轮状态。
-- **Compact**：自动压缩保持关闭；手动 `/compact` 追加来源/scope/未决请求的保留指令
-  （`BOT_SESSION_COMPACT_INSTRUCTIONS`）；路由事实以 Durable 状态为准，不依赖摘要正文。
+- **Compact**：沿用 SDK 默认自动压缩，包括阈值触发和一次 provider 溢出压缩重试；
+  手动 `/compact` 追加来源/scope/未决请求的保留指令（`BOT_SESSION_COMPACT_INSTRUCTIONS`）。
+  路由事实以 Durable 状态为准，不依赖摘要正文。
 - **Scope Stop**：只取消所选 scope 当前请求及其所属任务，不中断其他 scope 或用户轮；
   释放 Bot 准入后唤醒用户队列。恢复 scope 时同样优先处理排队用户。
 - **旧数据**：work 原生会话历史不删除；成员工作 API 继续可读旧历史，新的共享执行
@@ -116,6 +117,9 @@ scope 消息账本（MessageLog）仍是消息事实的唯一权威，主会话�
   `restoreTurns`/pin 恢复，导入水位保证重启后不重复导入。
 
 ## UI 归属
+
+执行身份、定时交接和独立待答问卷的增量约定见 [Always-on Runtime](always-on-runtime.md)。
+其中 Run、SDK task、业务任务和等待记录分别拥有自己的生命周期，不能由聊天卡片状态相互推导。
 
 - 后端 history/live 只在安全 schema 内投影 attribution；ChatTurn 增加可选
   attribution；scope 事件 UI 渲染原始消息正文与发送者/设备/渠道/回复归属；
