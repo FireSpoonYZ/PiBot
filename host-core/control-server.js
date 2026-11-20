@@ -46,12 +46,17 @@ const EXTRA_ERROR_STATUS = Object.freeze({
   VAULT_INVALID_ARGUMENT: 400,
   VAULT_UNAVAILABLE: 503,
   BROWSER_UNAVAILABLE: 503,
+  BROWSER_CLOSED: 503,
+  BROWSER_STREAM_UNAVAILABLE: 503,
+  BROWSER_FORBIDDEN: 403,
   BROWSER_PAGE_NOT_FOUND: 404,
-  BROWSER_SESSION_NOT_FOUND: 404,
   BROWSER_FRAME_TOO_LARGE: 413,
-  GOOGLE_SETUP_UNAVAILABLE: 503,
-  GOOGLE_SETUP_FORBIDDEN: 403,
-  GOOGLE_SETUP_NOT_FOUND: 404,
+  BROWSER_BACKEND_FAILED: 502,
+  SETUP_FORBIDDEN: 403,
+  SETUP_ADMIN_REQUIRED: 403,
+  SETUP_SECRET_REJECTED: 400,
+  SETUP_CENTER_UNAVAILABLE: 503,
+  SETUP_CLOSED: 503,
   PRIMARY_BOT_PROTECTED: 409,
   BOT_ARCHIVED: 409,
   INVALID_STATE: 409,
@@ -690,17 +695,32 @@ async function vaultControl(host, runtime, params, body, req, res) {
   } catch (error) { throw safeVaultError(error); }
 }
 
+const TRUSTED_CLIENT_HEADER_RE = /^[A-Za-z0-9:._-]{3,128}$/;
+
+function extractControlCaller(req) {
+  const rawClient = req?.headers?.['x-pibot-control-client'];
+  const rawTransport = req?.headers?.['x-pibot-control-transport'];
+  const clientHeader = Array.isArray(rawClient) ? rawClient[0] : rawClient;
+  const transportHeader = Array.isArray(rawTransport) ? rawTransport[0] : rawTransport;
+  const clientId =
+    typeof clientHeader === 'string' && TRUSTED_CLIENT_HEADER_RE.test(clientHeader)
+      ? clientHeader
+      : 'local-control:anonymous';
+  const transport = transportHeader === 'relay' ? 'relay' : 'local';
+  return { clientId, transport };
+}
+
 async function browserControl(host, runtime, params, body, req, res) {
   try {
     assertNoQuery(req);
-    writeControlJson(res, 200, await runtime.browserControl(body));
+    writeControlJson(res, 200, await runtime.browserControl(body, extractControlCaller(req)));
   } catch (error) { throw safeBrowserControlError(error); }
 }
 
 async function googleSetupControl(host, runtime, params, body, req, res) {
   try {
     assertNoQuery(req);
-    writeControlJson(res, 200, await runtime.googleSetupControl(body));
+    writeControlJson(res, 200, await runtime.googleSetupControl(body, extractControlCaller(req)));
   } catch (error) { throw safeGoogleSetupError(error); }
 }
 

@@ -3,6 +3,7 @@
 // only to the local control server via createControlClient over a bounded
 // fetch; never opens Runtime, files, or other local state. All errors carry a
 // fixed .code and .outcome (not-sent / unconfirmed / responded).
+import { randomUUID } from 'node:crypto';
 import { createControlClient, ControlApiError } from './control-client.js';
 import { assertId } from './message-protocol.js';
 import {
@@ -375,7 +376,7 @@ function dispatchError(err, state, signal) {
   return controlError('INTERNAL', 'unconfirmed');
 }
 
-async function executeCall(config, expectedDeviceId, method, params, { signal } = {}) {
+async function executeCall(config, expectedDeviceId, method, params, { signal, caller } = {}) {
   requireValidId(expectedDeviceId);
   // 先按协议表规范化（含方法参数形状/未知键/JSON 字节限制）再映射。
   let normalized;
@@ -396,6 +397,8 @@ async function executeCall(config, expectedDeviceId, method, params, { signal } 
     url: config.url,
     token: config.token,
     fetch: boundedFetch(state),
+    clientId: caller?.clientId ?? config.defaultClientId,
+    controlTransport: caller?.transport ?? 'local',
   });
 
   let info;
@@ -598,7 +601,7 @@ async function getServiceStatus(config, expectedDeviceId, callOptions = {}) {
 }
 
 export function createLocalControlAdapter(options) {
-  const config = validateOptions(options);
+  const config = { ...validateOptions(options), defaultClientId: `local-adapter:${randomUUID()}` };
   const execute = async function execute(expectedDeviceId, method, params, callOptions = {}) {
     return executeCall(config, expectedDeviceId, method, params, callOptions);
   };

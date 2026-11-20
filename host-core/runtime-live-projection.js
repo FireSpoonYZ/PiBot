@@ -491,8 +491,14 @@ function entryTextUnits(entry) {
 }
 
 function isPendingInteraction(presentation) {
+  if (presentation?.kind === 'google-setup') {
+    return presentation.state === 'running';
+  }
+  if (presentation?.kind === 'google-browser-takeover') {
+    return presentation.phase !== 'bot';
+  }
   return presentation?.status === 'pending' &&
-    (presentation.kind === 'questionnaire' || presentation.kind === 'vault-unlock');
+    (presentation.kind === 'questionnaire' || presentation.kind === 'vault-unlock' || presentation.kind === 'google-account-select');
 }
 
 /** 投影工具槽、白名单 presentation 与嵌套摘要，不带原始参数/details/诊断。 */

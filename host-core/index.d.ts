@@ -714,6 +714,10 @@ export interface OpenRuntimeOptions {
   createBotBrowserService?: (options: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
   /** Optional trusted in-process factory override for host-core/google-setup/service.js. */
   createGoogleSetupService?: (options: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  /** Optional trusted in-process browser provider factory override (for headless testing). */
+  createBrowserProvider?: (options: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  onBrowserEvent?: (event: Record<string, unknown>) => void;
+  onSetupEvent?: (event: Record<string, unknown>) => void;
 }
 
 export interface Runtime {
@@ -2569,19 +2573,20 @@ export interface BrowserControlInput {
   botId: string;
   scopeId?: string;
   pageId?: string;
-  sessionId?: string;
   lease?: string;
   revision?: number;
-  expectedRevision?: number;
-  sinceSeq?: number;
+  frameSeq?: number;
+  format?: 'png' | 'jpeg' | 'webp';
   maxWidth?: number;
   maxHeight?: number;
+  maxBytes?: number;
   quality?: number;
   url?: string;
   holderLabel?: string;
   force?: boolean;
   preempt?: boolean;
-  reason?: string;
+  resume?: boolean;
+  ignoreCache?: boolean;
   event?: BrowserControlInputEvent;
 }
 
@@ -2633,27 +2638,28 @@ export interface GoogleSetupControlInput {
   action: GoogleSetupControlAction;
   botId: string;
   scopeId?: string;
-  id?: string;
-  sessionId?: string;
+  fresh?: boolean;
+  runId?: string;
   revision?: number;
   expectedRevision?: number;
   mode?: string;
   step?: string;
+  card?: string;
+  cardCopy?: number;
+  values?: string[];
+  field?: string;
+  value?: string | string[];
+  actionId?: string;
   choices?: string[];
-  audience?: string;
+  services?: string[];
+  kind?: 'work' | 'personal';
   projectId?: string;
   account?: string;
-  flowId?: string;
-  clientId?: string;
-  answer?: unknown;
-  value?: unknown;
-  confirm?: boolean;
-  done?: boolean;
-  skip?: boolean;
-  force?: boolean;
+  browserPageId?: string;
   restart?: boolean;
+  reconfigureClient?: boolean;
+  note?: string;
   reason?: string;
-  input?: Record<string, unknown>;
 }
 
 export interface GoogleSetupControlResult {

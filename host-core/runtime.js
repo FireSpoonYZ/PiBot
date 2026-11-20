@@ -398,6 +398,7 @@ export async function openRuntime(options) {
   let maintenance = false;
   let botModels = {};
   let getBotEntryWatermark;
+  let isBotTurnRunningReader = null;
   let runtime;
   const collaboration = createCollaborationService({
     host,
@@ -845,6 +846,22 @@ export async function openRuntime(options) {
       isOnline: () => online && !maintenance,
       isMaintenance: () => maintenance,
       getCenterUrl: () => centerRuntime.centerUrl ?? null,
+      getCenterGoogleStatus: async ({ signal } = {}) => {
+        if (!online || maintenance) {
+          return { reachable: false, client: { configured: false }, accounts: [] };
+        }
+        if (typeof centerRuntime.getGoogleStatus === 'function') {
+          return await centerRuntime.getGoogleStatus({ signal });
+        }
+        const client = centerRuntime.getClient?.();
+        if (!client || typeof client.getGoogleStatus !== 'function') {
+          return { reachable: false, client: { configured: false }, accounts: [] };
+        }
+        return await client.getGoogleStatus({ signal });
+      },
+      isBotTurnRunning: (botId) => (typeof isBotTurnRunningReader === 'function' ? isBotTurnRunningReader(botId) : null),
+      onBrowserEvent: options?.onBrowserEvent,
+      onSetupEvent: options?.onSetupEvent,
       abortBotTurn: async (botId) => {
         if (!harness) return;
         const bot = host.getBot(botId);
@@ -866,6 +883,7 @@ export async function openRuntime(options) {
       context: CTX,
       createBotBrowserService: options?.createBotBrowserService,
       createGoogleSetupService: options?.createGoogleSetupService,
+      createBrowserProvider: options?.createBrowserProvider,
     });
     browserSetup.prepareExistingBots();
     const durableDbPath = join(host.dataRoot, 'durable.sqlite');
@@ -943,6 +961,7 @@ export async function openRuntime(options) {
     setBotModels: (value) => { botModels = value; },
     getBotModels: () => botModels,
     setWatermarkReader: (fn) => { getBotEntryWatermark = fn; },
+    setBotTurnRunningReader: (fn) => { isBotTurnRunningReader = fn; },
     botAdmissions: bots,
     onBotsChanged: options?.onBotsChanged,
     onBotsSync: options?.onBotsSync,
@@ -1013,7 +1032,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, browserSetup, botHostExtensionsFor, vault, schedules, setTasksBridge, resolveConversationBot, dataPrivacy }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, setBotTurnRunningReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, browserSetup, botHostExtensionsFor, vault, schedules, setTasksBridge, resolveConversationBot, dataPrivacy }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -1207,6 +1226,12 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
   // 跟踪在飞的主会话提交：完成时记录 lastActivityAt 与 lastPreview。
   const trackedSubmissions = new Map(); // submissionId -> { botId, nativeId }
+  setBotTurnRunningReader?.((botId) => {
+    for (const info of trackedSubmissions.values()) {
+      if (info?.botId === botId) return true;
+    }
+    return false;
+  });
   const stopInFlight = new Map();     // botId -> 在飞「停止此 Bot」Promise：重复 abort 共用同一协调，绝不并发争用。
   const completedSubmissions = new Set(); // submissionId
   let submissionCheckPromise = null;

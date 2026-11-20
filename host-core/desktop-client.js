@@ -1639,7 +1639,10 @@ export function openDesktopClient(options) {
     try {
       let res;
       if (session.kind === 'local') {
-        res = await session.adapter(params.targetDeviceId, normalized.method, normalized.params, { signal: timeout.signal });
+        res = await session.adapter(params.targetDeviceId, normalized.method, normalized.params, {
+          signal: timeout.signal,
+          caller: { transport: 'local', clientId: `local:${clientId}` },
+        });
       } else {
         res = await session.remote.call(params.targetDeviceId, normalized.method, normalized.params, { signal: timeout.signal });
       }
