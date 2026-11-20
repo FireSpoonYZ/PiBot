@@ -5,7 +5,7 @@ const terminal = new Set(['succeeded', 'failed', 'cancelled', 'expired']);
 const progress = { dispatching: 0, queued: 1, running: 2 };
 const hash = value => createHash('sha256').update(value).digest();
 
-function parseCursor(cursor) {
+function parseCursor(cursor, maxStream = 1) {
   if (cursor == null) return null;
   if (typeof cursor !== 'string' || cursor.length > 256 || !/^[A-Za-z0-9_-]+$/.test(cursor)) {
     fail('INVALID_ARGUMENT', 'Invalid webhook cursor');
@@ -21,7 +21,7 @@ function parseCursor(cursor) {
     if (!Number.isSafeInteger(value[1]) || value[1] <= 0) fail('INVALID_ARGUMENT', 'Invalid webhook cursor');
     return [value[0], 0, value[1]];
   }
-  if ((value[1] !== 0 && value[1] !== 1) || !Number.isSafeInteger(value[2]) || value[2] <= 0) {
+  if (!Number.isSafeInteger(value[1]) || value[1] < 0 || value[1] > maxStream || !Number.isSafeInteger(value[2]) || value[2] <= 0) {
     fail('INVALID_ARGUMENT', 'Invalid webhook cursor');
   }
   return value;
@@ -54,7 +54,9 @@ function eventValue(row, host = false) {
 }
 
 export function webhookStore(db, transaction, options = {}) {
-  const extraDelivery = options.extraDelivery || null;
+  const extraDeliveries = Array.isArray(options.extraDeliveries)
+    ? options.extraDeliveries.filter(Boolean)
+    : (options.extraDelivery ? [options.extraDelivery] : []);
   function requireRoute(id) {
     const row = db.prepare('SELECT * FROM webhook_routes WHERE id = ? AND deleted_at IS NULL').get(id);
     if (!row) fail('NOT_FOUND', 'Webhook not found');
@@ -105,7 +107,12 @@ export function webhookStore(db, transaction, options = {}) {
         const botId = input.botId ?? current.bot_id;
         db.prepare('UPDATE webhook_routes SET name = ?, device_id = ?, bot_id = ?, instruction = ?, enabled = ?, updated_at = ? WHERE id = ?')
           .run(input.name, deviceId, botId, input.instruction, input.enabled ? 1 : 0, now, id);
-        if (!input.enabled) cancelPending('route_id = ?', [id], now, 'WEBHOOK_DISABLED', 'Webhook was disabled before dispatch');
+        if (!input.enabled) {
+          cancelPending('route_id = ?', [id], now, 'WEBHOOK_DISABLED', 'Webhook was disabled before dispatch');
+          for (const delivery of extraDeliveries) {
+            delivery.cancelForRoute?.(id, now, 'WEBHOOK_DISABLED', 'Webhook was disabled before dispatch');
+          }
+        }
         return routeValue(requireRoute(id));
       });
     },
@@ -121,6 +128,9 @@ export function webhookStore(db, transaction, options = {}) {
         const now = new Date().toISOString();
         db.prepare('UPDATE webhook_routes SET enabled = 0, deleted_at = ?, updated_at = ? WHERE id = ?').run(now, now, id);
         cancelPending('route_id = ?', [id], now, 'WEBHOOK_DELETED', 'Webhook was deleted before dispatch');
+        for (const delivery of extraDeliveries) {
+          delivery.cancelForRoute?.(id, now, 'WEBHOOK_DELETED', 'Webhook was deleted before dispatch');
+        }
         return routeValue(row);
       });
     },
@@ -128,7 +138,9 @@ export function webhookStore(db, transaction, options = {}) {
     cancelWebhookEventsForBot(deviceId, botId) {
       const now = new Date().toISOString();
       cancelPending('device_id = ? AND bot_id = ?', [deviceId, botId], now, 'BOT_NOT_FOUND', 'Target Bot was deleted before dispatch');
-      extraDelivery?.cancelForBot(deviceId, botId, now);
+      for (const delivery of extraDeliveries) {
+        delivery.cancelForBot(deviceId, botId, now);
+      }
     },
     acceptWebhookEvent(id, token, idempotencyKey, payloadJson) {
       return transaction(() => {
@@ -174,41 +186,50 @@ export function webhookStore(db, transaction, options = {}) {
         db.prepare(`UPDATE webhook_events SET cancel_requested = 1, updated_at = ?
           WHERE device_id = ? AND bot_id = ? AND status IN ('dispatching', 'queued', 'running') AND cancel_requested = 0`)
           .run(now, deviceId, botId);
-        extraDelivery?.stopForBot(deviceId, botId, now);
+        for (const delivery of extraDeliveries) {
+          delivery.stopForBot(deviceId, botId, now);
+        }
         return { botId, stopEpoch };
       });
     },
     pollWebhookEvents(deviceId, cursor = null, nowMs = Date.now()) {
-      const after = parseCursor(cursor);
+      const after = parseCursor(cursor, extraDeliveries.length);
       return transaction(() => {
         const now = new Date(nowMs).toISOString();
         settlePending('device_id = ?', [deviceId], now);
-        extraDelivery?.settlePendingForDevice(deviceId, now);
+        for (const delivery of extraDeliveries) {
+          delivery.settlePendingForDevice(deviceId, now);
+        }
         const webhookCandidates = db.prepare(`SELECT *, 0 AS stream, rowid AS cursor_rowid FROM webhook_events WHERE device_id = ?
           AND status IN ('pending', 'dispatching', 'queued', 'running')
           ${after ? 'AND (received_at, 0, rowid) > (?, ?, ?)' : ''}
           ORDER BY received_at, rowid LIMIT 51`).all(deviceId, ...(after ?? []));
-        const extraCandidates = extraDelivery ? extraDelivery.queryActiveForDevice(deviceId, after, 51) : [];
+        const extraCandidates = [];
+        for (let index = 0; index < extraDeliveries.length; index += 1) {
+          const streamIndex = index + 1;
+          const items = extraDeliveries[index].queryActiveForDevice(deviceId, after, 51, streamIndex);
+          if (items.length > 0) extraCandidates.push(...items);
+        }
         const candidates = extraCandidates.length === 0
           ? webhookCandidates
           : [...webhookCandidates, ...extraCandidates].sort(compareDeliveryRows);
         const rows = candidates.slice(0, 50);
         for (const row of rows) {
           if (row.status !== 'pending') continue;
-          if (row.stream === 1) {
-            extraDelivery.markDispatching(row.id, now);
-          } else {
+          if (row.stream === 0) {
             db.prepare("UPDATE webhook_events SET status = 'dispatching', updated_at = ? WHERE id = ?").run(now, row.id);
+          } else {
+            extraDeliveries[row.stream - 1].markDispatching(row.id, now);
           }
           row.status = 'dispatching';
           row.updated_at = now;
         }
         const last = rows.at(-1);
         return {
-          items: rows.map(row => (row.stream === 1 ? extraDelivery.toHostDeliveryEvent(row) : eventValue(row, true))),
+          items: rows.map(row => (row.stream === 0 ? eventValue(row, true) : extraDeliveries[row.stream - 1].toHostDeliveryEvent(row))),
           nextCursor: candidates.length > 50
             ? Buffer.from(JSON.stringify(
-              extraDelivery ? [last.received_at, last.stream, last.cursor_rowid] : [last.received_at, last.cursor_rowid],
+              extraDeliveries.length > 0 ? [last.received_at, last.stream, last.cursor_rowid] : [last.received_at, last.cursor_rowid],
             )).toString('base64url') : null,
         };
       });
@@ -217,8 +238,10 @@ export function webhookStore(db, transaction, options = {}) {
       return transaction(() => {
         const row = db.prepare('SELECT * FROM webhook_events WHERE id = ? AND device_id = ?').get(id, deviceId);
         if (!row) {
-          const extra = extraDelivery?.reportEvent(deviceId, id, input, nowMs);
-          if (extra) return extra;
+          for (const delivery of extraDeliveries) {
+            const extra = delivery.reportEvent(deviceId, id, input, nowMs);
+            if (extra) return extra;
+          }
           fail('NOT_FOUND', 'Webhook event not found');
         }
         if (terminal.has(row.status)) return eventValue(row);

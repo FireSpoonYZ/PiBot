@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import * as durable from '@earendil-works/pi-durable';
 import * as chord from '@earendil-works/chord';
 import { copyJson } from '@earendil-works/chord/json';
-import { Harness, createRegistry, defineExtension, section, hook, GenerationTask, LiveDoc, InboxDoc } from '@earendil-works/pi-durable';
+import { Harness, createRegistry, defineExtension, section, hook, GenerationTask, LiveDoc, InboxDoc, AgentDoc } from '@earendil-works/pi-durable';
 import { createCodemodeExtension } from '@earendil-works/pi-durable/codemode';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
@@ -76,6 +76,13 @@ import { openRuntimeBrowserSetup } from './runtime-browser-setup.js';
 import { createVaultService } from './vault-service.js';
 import { createScheduleManager } from './host-schedules.js';
 import { createWebhookConsumer } from './host-webhooks.js';
+import {
+  MCP_SAFE_TOOL_POLICY,
+  assertMcpSafeAgentState,
+  filterSafeMcpProfile,
+  isMcpSafeTurn,
+  isTrustedToolPolicy,
+} from './mcp-dispatch-policy.js';
 import { createTaskDispatchConsumer, fetchAllActiveGlobalTasks } from './host-tasks.js';
 import { createScheduleTools } from './schedule-tools.js';
 import {
@@ -410,6 +417,7 @@ export async function openRuntime(options) {
   let botModels = {};
   let getBotEntryWatermark;
   let isBotTurnRunningReader = null;
+  let primaryToolPolicyReader = null;
   let runtime;
   const collaboration = createCollaborationService({
     host,
@@ -519,7 +527,19 @@ export async function openRuntime(options) {
     // 与准入泵同口径解析/配置主会话：已映射直接返回；未映射用当前 Center 模型选择
     // 与 profile 创建（导入需要可写目标），随后应用人格/工具，保证导入与执行同一会话。
     getPrimary: async (bot) => {
-      const profile = botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, bot.botId, null, botHostExtensionsFor);
+      const activeToolPolicy = typeof primaryToolPolicyReader === 'function' ? primaryToolPolicyReader(bot.botId) : null;
+      const profile = botProfile(
+        host,
+        plugins,
+        botModels,
+        coreExtensions,
+        codemodeExtension,
+        finalBudgetExtension,
+        bot.botId,
+        null,
+        botHostExtensionsFor,
+        activeToolPolicy ? { toolPolicy: activeToolPolicy } : undefined,
+      );
       let conversation = await getPrimaryConversation(harness, bot, {}, CTX);
       if (!conversation) {
         const modelRef = botModels[bot.botId]?.modelRef;
@@ -530,6 +550,7 @@ export async function openRuntime(options) {
           thinkingLevel: profile.thinkingLevel,
           instructions: profile.instructions,
           removeTools: profile.removeTools,
+          allowTools: profile.allowTools,
           selectedExtensions: profile.selectedExtensions,
           codemodeOnly: profile.codemodeOnly,
         }, CTX);
@@ -764,6 +785,11 @@ export async function openRuntime(options) {
           // 不生成合成路由消息）。该指引是本 helper 的明确 prepend-only 产物，用长度差
           // 切出，不用对象 identity/正文分类。
           const routed = await sessions.beforeRequest(sanitizedRequest, api, context);
+          const activeTurn = await sessions.getTurn(api, context);
+          if (isMcpSafeTurn(activeTurn)) {
+            const agentState = await harness.snapshot(AgentDoc, api.conversationId, context);
+            assertMcpSafeAgentState(agentState);
+          }
           const routingCount = Math.max(0, (routed?.messages?.length ?? 0) - sanitizedRequest.messages.length);
           const routingMessages = routingCount > 0 ? routed.messages.slice(0, routingCount) : [];
           await decisions.beforeRequest(routed, api, context);
@@ -1033,6 +1059,7 @@ export async function openRuntime(options) {
     getBotModels: () => botModels,
     setWatermarkReader: (fn) => { getBotEntryWatermark = fn; },
     setBotTurnRunningReader: (fn) => { isBotTurnRunningReader = fn; },
+    setPrimaryToolPolicyReader: (fn) => { primaryToolPolicyReader = fn; },
     botAdmissions: bots,
     onBotsChanged: options?.onBotsChanged,
     onBotsSync: options?.onBotsSync,
@@ -1060,7 +1087,7 @@ export async function openRuntime(options) {
 }
 
 /** 构建该 Bot 的 SOUL、中心模型和明确的 core + 插件扩展视图。 */
-function botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor) {
+function botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor, turnOptions) {
   const selection = botModels[botId] ?? {};
   const modelRef = selection.modelRef ?? null;
   let model;
@@ -1081,17 +1108,22 @@ function botProfile(host, plugins, botModels, coreExtensions, codemodeExtension,
     finalBudgetExtension,
   ];
   // thinkingLevel 总是给出：(null 表示 SDK 默认) 才能让 reload 后重应用人格时回写变更。
-  return {
+  const profile = {
     // 中心权威 cwd：空闲边界/绑定重入时经 agentProfileChange 写回已映射会话。
     cwd: host.getBot(botId)?.cwd,
     instructions,
     selectedExtensions,
     pluginTools: pluginExtensions.flatMap((extension) => extension.tools ?? []),
+    allowTools: null,
     thinkingLevel: selection.thinkingLevel ?? null,
     codemode: codemodeEnabled,
     codemodeOnly,
     ...(model ? { model } : {}),
   };
+  if (!workMeta && turnOptions?.toolPolicy === MCP_SAFE_TOOL_POLICY) {
+    return filterSafeMcpProfile(profile);
+  }
+  return profile;
 }
 
 function parseBindingKey(key) {
@@ -1103,7 +1135,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, setBotTurnRunningReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, browserSetup, botHostExtensionsFor, vault, schedules, setTasksBridge, resolveConversationBot, dataPrivacy }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, setBotTurnRunningReader, setPrimaryToolPolicyReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, browserSetup, botHostExtensionsFor, vault, schedules, setTasksBridge, resolveConversationBot, dataPrivacy }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -1296,17 +1328,27 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   }
 
   // 跟踪在飞的主会话提交：完成时记录 lastActivityAt 与 lastPreview。
-  const trackedSubmissions = new Map(); // submissionId -> { botId, nativeId }
+  const trackedSubmissions = new Map(); // submissionId -> { botId, nativeId, requestId?, toolPolicy? }
+  const activePrimaryToolPolicy = (botId) => {
+    for (const info of trackedSubmissions.values()) {
+      if (info?.botId === botId && info?.toolPolicy === MCP_SAFE_TOOL_POLICY) {
+        return MCP_SAFE_TOOL_POLICY;
+      }
+    }
+    return null;
+  };
   setBotTurnRunningReader?.((botId) => {
     for (const info of trackedSubmissions.values()) {
       if (info?.botId === botId) return true;
     }
     return false;
   });
+  setPrimaryToolPolicyReader?.(activePrimaryToolPolicy);
   const stopInFlight = new Map();     // botId -> 在飞「停止此 Bot」Promise：重复 abort 共用同一协调，绝不并发争用。
   const completedSubmissions = new Set(); // submissionId
   let submissionCheckPromise = null;
   let checkSubmissionsAgain = false;
+  let webhooks = null;
 
   function recordCompletedSubmission(botId, formatted) {
     if (!formatted || formatted.status !== 'done') return;
@@ -1325,6 +1367,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     } catch {
       /* ignore activity update error if bot was deleted or store closed */
     }
+    webhooks?.notifySubmissionSettled?.(formatted.requestId);
     // Bot 完结是安全空闲边界：先结算排队的自编辑 SOUL，再上报学习增量——
     // 两者都是 fire-and-forget，绝不阻塞前台回复或占用 Bot 准入。
     drainSelfSoul(botId);
@@ -1363,6 +1406,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
                 }
               } else if (statusRecord.status === 'unanswered') {
                 trackedSubmissions.delete(submissionId);
+                webhooks?.notifySubmissionSettled?.(statusRecord.requestId ?? info.requestId);
                 drainSelfSoul(info.botId);
                 turns.pump(info.botId);
                 learning.scheduleIdleCheck(info.botId);
@@ -1467,7 +1511,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     return workContexts.runMessageOperation(operation);
   };
 
-  const profileFor = (botId, workMeta) => botProfile(host, plugins, getBotModels(), coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor);
+  const profileFor = (botId, workMeta, turnOptions) => botProfile(host, plugins, getBotModels(), coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor, turnOptions);
 
   // 图片附件落盘：dataRoot/attachments/<botId>/<sha256>，随 Bot 删除清理（deleteBot/purge）。
   // 附件在 Bot lane 外也可上传（本地已鉴权动作），但归属校验先于任何写盘。
@@ -1513,7 +1557,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       return decisions.interruptBotWork?.(botId, { reason: 'preempted' });
     },
   });
-  const webhooks = createWebhookConsumer({
+  webhooks = createWebhookConsumer({
     deviceId: host.deviceId,
     getClient: () => centerRuntime.getClient(),
     getRuntime: () => runtime,
@@ -1546,6 +1590,22 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
           replyTo: null,
         },
       }, capturedStopEpoch, null, { allowGoogleWorkspaceRule: true });
+    },
+    submitMcpDispatch: async (botId, input, capturedStopEpoch) => {
+      if (!resumed || !centerOnline || closing || isMaintenance() || turns.isRecoveryPending() ||
+          turns.stopped(botId) || turns.webhookStopPending(botId)) return null;
+      return submitPrimary(botId, {
+        ...input,
+        origin: {
+          sender: {
+            kind: 'host',
+            name: input?.origin?.sender?.name,
+            sourceType: 'webhook',
+          },
+          toolPolicy: MCP_SAFE_TOOL_POLICY,
+          replyTo: null,
+        },
+      }, capturedStopEpoch, null, { allowMcpDispatch: true });
     },
   });
   decisions.setTurnGate(turns.admitWorkDecision, turns.pump, turns.canRunWork);
@@ -1742,7 +1802,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
   // stopEpoch 由可信调用者在排队前捕获；内部 Webhook 保留 poll 前代次，绝不重捕获。
   // allowGoogleWorkspaceRule 仅允许内部 Google 规则分发器启用，绝不向公开 submit/webhook 开放。
-  function submitPrimary(botId, input, stopEpoch, trustedDispatchContext = null, { allowGoogleWorkspaceRule = false } = {}) {
+  // allowMcpDispatch 仅允许内部 MCP 派发通道启用安全工具策略，绝不向公开 submit 开放。
+  function submitPrimary(botId, input, stopEpoch, trustedDispatchContext = null, { allowGoogleWorkspaceRule = false, allowMcpDispatch = false } = {}) {
     const kind = input?.origin?.sender?.kind === 'host' ? 'host' : 'user';
     const safeInput = isPlainObject(input) ? { ...input } : {};
     delete safeInput.dispatchContext;
@@ -1754,6 +1815,9 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     const dataBoundary = kind === 'host' && allowGoogleWorkspaceRule && isTrustedDataBoundary(safeInput?.origin?.dataBoundary)
       ? safeInput.origin.dataBoundary
       : null;
+    const toolPolicy = kind === 'host' && allowMcpDispatch && isTrustedToolPolicy(safeInput?.origin?.toolPolicy)
+      ? safeInput.origin.toolPolicy
+      : null;
     const trustedInput = {
       ...safeInput,
       stopEpoch,
@@ -1764,6 +1828,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
           ...(sourceType !== null ? { sourceType } : {}),
         },
         ...(dataBoundary !== null ? { dataBoundary } : {}),
+        ...(toolPolicy !== null ? { toolPolicy } : {}),
         replyTo: typeof safeInput?.origin?.replyTo === 'string' ? safeInput.origin.replyTo : null,
       },
     };
@@ -1822,7 +1887,15 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   /** 按已绑定会话重新应用人格/工具；无变化不提交。 */
   async function refreshBotProfiles(bot) {
     const primary = await getPrimaryConversation(harness, bot, {}, CTX);
-    if (primary) await applyAgentProfile(harness, primary.id, profileFor(bot.botId, null), CTX);
+    const activeToolPolicy = activePrimaryToolPolicy(bot.botId);
+    if (primary) {
+      await applyAgentProfile(
+        harness,
+        primary.id,
+        profileFor(bot.botId, null, activeToolPolicy ? { toolPolicy: activeToolPolicy } : undefined),
+        CTX,
+      );
+    }
     const workIndex = await harness.snapshot(WorkIndex, CTX);
     for (const [key, binding] of Object.entries(workIndex?.byKey ?? {})) {
       const pair = parseBindingKey(key);
