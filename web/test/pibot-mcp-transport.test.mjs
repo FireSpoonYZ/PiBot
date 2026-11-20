@@ -1,15 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomBytes, scryptSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { registerMcpOAuth } from '../../center-server/mcp/oauth.js';
+import { registerAuth } from '../../center-server/auth.js';
+import { MCP_OAUTH_PATHS, registerMcpOAuth } from '../../center-server/mcp/oauth.js';
 import { registerMcp } from '../../center-server/mcp/server.js';
 
 const centerRequire = createRequire(new URL('../../center-server/package.json', import.meta.url));
 const Fastify = centerRequire('fastify');
 const fastifyStatic = centerRequire('@fastify/static');
+const { UnauthorizedError } = centerRequire('@modelcontextprotocol/sdk/client/auth.js');
 const { Client } = centerRequire('@modelcontextprotocol/sdk/client/index.js');
 const { StreamableHTTPClientTransport } = centerRequire('@modelcontextprotocol/sdk/client/streamableHttp.js');
 
@@ -576,7 +579,7 @@ test('Authentication failure returns HTTP 401/403 (never JSON-RPC 200) and never
       assert.equal(softOAuthRes.headers['vary'], 'Origin');
       const softWwwAuth = softOAuthRes.headers['www-authenticate'];
       assert.match(softWwwAuth, /resource_metadata="https:\/\/center\.example\.com\/\.well-known\/oauth-protected-resource\/mcp"/);
-      assert.match(softWwwAuth, /scope="pibot:bots:read pibot:messages:write"/);
+      assert.doesNotMatch(softWwwAuth, /\bscope=/i);
       assert.doesNotMatch(softWwwAuth, /error="invalid_token"/);
     }
 
@@ -591,6 +594,7 @@ test('Authentication failure returns HTTP 401/403 (never JSON-RPC 200) and never
       const hardWwwAuth = hardOAuthRes.headers['www-authenticate'];
       assert.match(hardWwwAuth, /resource_metadata="https:\/\/center\.example\.com\/\.well-known\/oauth-protected-resource\/mcp"/);
       assert.match(hardWwwAuth, /error="invalid_token"/);
+      assert.doesNotMatch(hardWwwAuth, /\bscope=/i);
       if (method === 'HEAD') {
         assert.equal(hardOAuthRes.body, '');
       }
@@ -1111,6 +1115,205 @@ test('Rate limiting enforces per-window cap with 429 + Retry-After and resets af
     });
     assert.equal(req4.statusCode, 200);
     assert.equal(calls.length, 3);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Official MCP SDK Client and StreamableHTTPClientTransport complete OAuth discovery and authorize via Fastify inject fetch for a subset-scoped client', async () => {
+  const ownerPassword = 'owner-password-for-transport-oauth-smoke';
+  const salt = randomBytes(16);
+  const ownerPasswordHash = `scrypt$${salt.toString('hex')}$${scryptSync(ownerPassword, salt, 64).toString('hex')}`;
+  const subsetClient = {
+    clientId: 'sdk-transport-subset-client',
+    clientSecret: 'super-secret-transport-subset-0001',
+    redirectUris: ['http://127.0.0.1:43124/cb'],
+    scopes: ['pibot:bots:read'],
+  };
+  const calls = [];
+  const app = Fastify({ logger: false });
+  await registerAuth(app, {
+    sessionKey: randomBytes(32),
+    ownerPasswordHash,
+  });
+  const mcpOAuth = registerMcpOAuth(app, {
+    publicUrl: PUBLIC_URL,
+    clients: [subsetClient],
+    supportedScopes: ['pibot:bots:read', 'pibot:messages:write'],
+    cleanupIntervalMs: 60 * 60 * 1000,
+  });
+  registerMcp(app, {
+    publicUrl: PUBLIC_URL,
+    authenticate: mcpOAuth.authenticate,
+    operations: sampleOperations(calls),
+  });
+  await app.ready();
+
+  const injectFetch = async (input, init = {}) => {
+    const url = input instanceof URL ? input : new URL(String(input));
+    assert.equal(url.origin, PUBLIC_URL, `Unexpected remote fetch target: ${url.href}`);
+    const method = (init.method || 'GET').toUpperCase();
+    const headers = {};
+    for (const [key, value] of new Headers(init.headers).entries()) {
+      headers[key] = value;
+    }
+    if (!headers.host) headers.host = url.host;
+    let payload;
+    if (init.body !== undefined && init.body !== null) {
+      payload = init.body instanceof URLSearchParams ? init.body.toString() : init.body;
+    }
+    const injected = await app.inject({
+      method,
+      url: `${url.pathname}${url.search}`,
+      headers,
+      ...(payload !== undefined ? { payload } : {}),
+    });
+    const resHeaders = new Headers();
+    for (const [key, value] of Object.entries(injected.headers)) {
+      if (Array.isArray(value)) {
+        for (const item of value) resHeaders.append(key, String(item));
+      } else if (value !== undefined) {
+        resHeaders.set(key, String(value));
+      }
+    }
+    const isNullBodyStatus = injected.statusCode === 204 || injected.statusCode === 205 || injected.statusCode === 304;
+    return new Response(isNullBodyStatus ? null : injected.body, {
+      status: injected.statusCode,
+      headers: resHeaders,
+    });
+  };
+
+  let clientInfo = {
+    client_id: subsetClient.clientId,
+    client_secret: subsetClient.clientSecret,
+  };
+  let savedTokens;
+  let savedVerifier = '';
+  let savedDiscovery;
+  let capturedAuthUrl;
+  const authProvider = {
+    redirectUrl: subsetClient.redirectUris[0],
+    clientMetadata: {
+      client_name: 'sdk-transport-oauth-smoke',
+      redirect_uris: [subsetClient.redirectUris[0]],
+    },
+    clientInformation: () => clientInfo,
+    saveClientInformation: (info) => {
+      clientInfo = info;
+    },
+    tokens: () => savedTokens,
+    saveTokens: (next) => {
+      savedTokens = next;
+    },
+    state: () => 'sdk-transport-state-001',
+    codeVerifier: () => savedVerifier,
+    saveCodeVerifier: (next) => {
+      savedVerifier = next;
+    },
+    discoveryState: () => savedDiscovery,
+    saveDiscoveryState: (next) => {
+      savedDiscovery = next;
+    },
+    redirectToAuthorization: (url) => {
+      capturedAuthUrl = url;
+    },
+  };
+
+  try {
+    // 1. Initial unauthenticated connect triggers 401 -> RFC 9728 / RFC 8414 discovery -> authorize redirect URL
+    const transport1 = new StreamableHTTPClientTransport(new URL('/mcp', PUBLIC_URL), {
+      authProvider,
+      fetch: injectFetch,
+    });
+    const client1 = new Client({ name: 'pibot-sdk-oauth-smoke', version: '1.0.0' });
+    await assert.rejects(() => client1.connect(transport1), UnauthorizedError);
+
+    assert.ok(capturedAuthUrl instanceof URL);
+    assert.equal(capturedAuthUrl.origin, PUBLIC_URL);
+    assert.equal(capturedAuthUrl.pathname, MCP_OAUTH_PATHS.authorize);
+    assert.equal(capturedAuthUrl.searchParams.get('client_id'), subsetClient.clientId);
+    assert.equal(capturedAuthUrl.searchParams.get('resource'), `${PUBLIC_URL}/mcp`);
+    assert.equal(capturedAuthUrl.searchParams.has('scope'), false);
+
+    // 2. Owner signs in and approves the discovered authorization request without 302 invalid_scope
+    const cookieOf = (res, previous = '') => {
+      const raw = res.headers['set-cookie'];
+      const cookies = (Array.isArray(raw) ? raw : [raw]).filter(Boolean).map((value) => value.split(';')[0]);
+      return cookies.length ? cookies.join('; ') : previous;
+    };
+    let sessionRes = await app.inject({ method: 'GET', url: '/api/session' });
+    let ownerCookie = cookieOf(sessionRes);
+    sessionRes = await app.inject({
+      method: 'POST',
+      url: '/api/session',
+      headers: { cookie: ownerCookie, 'x-csrf-token': sessionRes.json().csrfToken },
+      payload: { password: ownerPassword },
+    });
+    assert.equal(sessionRes.statusCode, 200);
+    ownerCookie = cookieOf(sessionRes, ownerCookie);
+
+    const consentRes = await app.inject({
+      method: 'GET',
+      url: `${capturedAuthUrl.pathname}${capturedAuthUrl.search}`,
+      headers: { cookie: ownerCookie },
+    });
+    assert.equal(consentRes.statusCode, 200);
+    const consentId = /name="consent_id"\s+value="([^"]+)"/.exec(consentRes.body)?.[1];
+    const csrfToken = /name="csrf_token"\s+value="([^"]+)"/.exec(consentRes.body)?.[1];
+    assert.ok(consentId);
+    assert.ok(csrfToken);
+
+    const approveRes = await app.inject({
+      method: 'POST',
+      url: MCP_OAUTH_PATHS.authorize,
+      headers: {
+        cookie: ownerCookie,
+        origin: PUBLIC_URL,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: new URLSearchParams({
+        consent_id: consentId,
+        csrf_token: csrfToken,
+        decision: 'approve',
+      }).toString(),
+    });
+    assert.equal(approveRes.statusCode, 302);
+    const callbackUrl = new URL(approveRes.headers.location);
+    assert.equal(callbackUrl.searchParams.get('error'), null);
+    assert.equal(callbackUrl.searchParams.get('state'), 'sdk-transport-state-001');
+    const code = callbackUrl.searchParams.get('code');
+    assert.ok(code);
+
+    // 3. Exchange authorization code via SDK transport.finishAuth and connect authorized MCP client
+    await transport1.finishAuth(code);
+    assert.ok(savedTokens?.access_token);
+    assert.equal(savedTokens.scope, 'pibot:bots:read');
+
+    const transport2Errors = [];
+    const transport2 = new StreamableHTTPClientTransport(new URL('/mcp', PUBLIC_URL), {
+      authProvider,
+      fetch: injectFetch,
+    });
+    transport2.onerror = (err) => {
+      transport2Errors.push(err);
+    };
+    const client2 = new Client({ name: 'pibot-sdk-oauth-smoke', version: '1.0.0' });
+    try {
+      await client2.connect(transport2);
+      const listed = await client2.listTools();
+      assert.ok(listed.tools.some((tool) => tool.name === 'bots_list'));
+
+      const called = await client2.callTool({ name: 'bots_list', arguments: {} });
+      assert.ok(!called.isError);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].actor.clientId, subsetClient.clientId);
+      assert.deepEqual(calls[0].actor.scopes, ['pibot:bots:read']);
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.deepEqual(transport2Errors, []);
+    } finally {
+      await client2.close();
+    }
   } finally {
     await app.close();
   }

@@ -118,7 +118,6 @@ export function registerMcpOAuth(app, options = {}) {
     resource: endpoints.resource,
     authorization_servers: [endpoints.issuer],
     bearer_methods_supported: ['header'],
-    scopes_supported: [...supported.list],
   });
 
   const authorizationServerMetadata = Object.freeze({
@@ -135,11 +134,8 @@ export function registerMcpOAuth(app, options = {}) {
     authorization_response_iss_parameter_supported: true,
   });
 
-  function buildWwwAuthenticate({ error, errorDescription, includeScope = false }) {
+  function buildWwwAuthenticate({ error, errorDescription }) {
     const parts = [`resource_metadata="${endpoints.resourceMetadataUrl}"`];
-    if (includeScope && supported.list.length > 0) {
-      parts.push(`scope="${supported.list.join(' ')}"`);
-    }
     if (error) {
       parts.push(`error="${error}"`);
     }
@@ -210,9 +206,9 @@ export function registerMcpOAuth(app, options = {}) {
   }
 
   async function authenticate(req, reply) {
-    function reject({ error, errorDescription, includeScope = false }) {
+    function reject({ error, errorDescription }) {
       setNoStoreHeaders(reply);
-      reply.header('WWW-Authenticate', buildWwwAuthenticate({ error, errorDescription, includeScope }));
+      reply.header('WWW-Authenticate', buildWwwAuthenticate({ error, errorDescription }));
       reply.code(401).send({
         error: error || 'unauthorized',
         error_description: errorDescription,
@@ -226,7 +222,7 @@ export function registerMcpOAuth(app, options = {}) {
 
     const header = req.headers?.authorization;
     if (typeof header !== 'string' || header.trim() === '') {
-      return reject({ errorDescription: 'Bearer access token required', includeScope: true });
+      return reject({ errorDescription: 'Bearer access token required' });
     }
     const match = BEARER_AUTH_RE.exec(header.trim());
     if (!match) {

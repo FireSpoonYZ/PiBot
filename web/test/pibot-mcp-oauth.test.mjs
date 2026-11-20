@@ -5,8 +5,10 @@ import { createRequire } from 'node:module';
 import { registerAuth, setOwnerOAuthVerifier } from '../../center-server/auth.js';
 import { MCP_OAUTH_PATHS, registerMcpOAuth } from '../../center-server/mcp/oauth.js';
 
-// Fastify 只安装在 center-server 包内，按该包解析。
-const Fastify = createRequire(new URL('../../center-server/package.json', import.meta.url))('fastify');
+// Fastify 和官方 MCP SDK 只安装在 center-server 包内，按该包解析。
+const centerRequire = createRequire(new URL('../../center-server/package.json', import.meta.url));
+const Fastify = centerRequire('fastify');
+const { auth: sdkOAuth, extractWWWAuthenticateParams } = centerRequire('@modelcontextprotocol/sdk/client/auth.js');
 
 const OWNER_PASSWORD = 'owner-password-for-mcp-oauth-tests';
 const PUBLIC_URL = 'https://center.example.com';
@@ -69,6 +71,86 @@ function extractConsentForm(html) {
   assert.ok(consentId, 'consent_id hidden input must be present');
   assert.ok(csrfToken, 'csrf_token hidden input must be present');
   return { consentId, csrfToken };
+}
+
+function createInjectFetch(app, expectedOrigin = PUBLIC_URL) {
+  return async (input, init = {}) => {
+    const url = input instanceof URL ? input : new URL(String(input));
+    assert.equal(url.origin, expectedOrigin, `Unexpected remote fetch target: ${url.href}`);
+    const method = (init.method || 'GET').toUpperCase();
+    const headers = {};
+    for (const [key, value] of new Headers(init.headers).entries()) {
+      headers[key] = value;
+    }
+    if (!headers.host) headers.host = url.host;
+    let payload;
+    if (init.body !== undefined && init.body !== null) {
+      payload = init.body instanceof URLSearchParams ? init.body.toString() : init.body;
+    }
+    const injected = await app.inject({
+      method,
+      url: `${url.pathname}${url.search}`,
+      headers,
+      ...(payload !== undefined ? { payload } : {}),
+    });
+    const resHeaders = new Headers();
+    for (const [key, value] of Object.entries(injected.headers)) {
+      if (Array.isArray(value)) {
+        for (const item of value) resHeaders.append(key, String(item));
+      } else if (value !== undefined) {
+        resHeaders.set(key, String(value));
+      }
+    }
+    const isNullBodyStatus = injected.statusCode === 204 || injected.statusCode === 205 || injected.statusCode === 304;
+    return new Response(isNullBodyStatus ? null : injected.body, {
+      status: injected.statusCode,
+      headers: resHeaders,
+    });
+  };
+}
+
+function createSdkOAuthProvider(client, { scope, state } = {}) {
+  const redirectUrl = client.redirectUris[0];
+  let clientInfo = {
+    client_id: client.clientId,
+    client_secret: client.clientSecret,
+  };
+  let tokens;
+  let verifier = '';
+  let discoveryState;
+  let authorizationUrl;
+
+  return {
+    redirectUrl,
+    clientMetadata: {
+      client_name: `sdk-test-${client.clientId}`,
+      redirect_uris: [redirectUrl],
+      ...(scope !== undefined ? { scope } : {}),
+    },
+    clientInformation: () => clientInfo,
+    saveClientInformation: (info) => {
+      clientInfo = info;
+    },
+    tokens: () => tokens,
+    saveTokens: (next) => {
+      tokens = next;
+    },
+    state: () => state || 'sdk-oauth-state-001',
+    codeVerifier: () => verifier,
+    saveCodeVerifier: (next) => {
+      verifier = next;
+    },
+    discoveryState: () => discoveryState,
+    saveDiscoveryState: (next) => {
+      discoveryState = next;
+    },
+    redirectToAuthorization: (url) => {
+      authorizationUrl = url;
+    },
+    getCapturedAuthorizationUrl: () => authorizationUrl,
+    getDiscoveryState: () => discoveryState,
+    getTokens: () => tokens,
+  };
 }
 
 async function createTestHarness({
@@ -279,7 +361,7 @@ test('default deny when clients is empty and serves RFC 9728 / RFC 8414 discover
     assert.equal(unauth.headers['cache-control'], 'no-store');
     const wwwAuth = unauth.headers['www-authenticate'];
     assert.ok(wwwAuth.includes(`resource_metadata="${PUBLIC_URL}${MCP_OAUTH_PATHS.protectedResourceMetadata}"`));
-    assert.ok(wwwAuth.includes('scope="mcp:read mcp:dispatch mcp:bots:list"'));
+    assert.doesNotMatch(wwwAuth, /\bscope=/i);
     assert.ok(!wwwAuth.includes('error="invalid_token"'));
 
     const prmRes = await harness.app.inject({ method: 'GET', url: MCP_OAUTH_PATHS.protectedResourceMetadata });
@@ -289,8 +371,8 @@ test('default deny when clients is empty and serves RFC 9728 / RFC 8414 discover
       resource: RESOURCE_URL,
       authorization_servers: [PUBLIC_URL],
       bearer_methods_supported: ['header'],
-      scopes_supported: SUPPORTED_SCOPES,
     });
+    assert.equal(Object.prototype.hasOwnProperty.call(prmRes.json(), 'scopes_supported'), false);
 
     const prmRootRes = await harness.app.inject({ method: 'GET', url: MCP_OAUTH_PATHS.protectedResourceMetadataRoot });
     assert.equal(prmRootRes.statusCode, 200);
@@ -1357,6 +1439,137 @@ test('enforces consent expiry, refresh expiry, long-lived replay revocation, and
       payload: {},
     });
     assert.equal(revokedActive.statusCode, 401);
+  } finally {
+    await harness.close();
+  }
+});
+
+test('official MCP SDK OAuth discovery and authorize succeed for subset-scoped clients and still reject explicit unauthorized scopes', async () => {
+  const harness = await createTestHarness();
+  try {
+    const owner = await harness.loginOwner();
+    const fetchFn = createInjectFetch(harness.app);
+
+    // 1. Anonymous 401 challenge omits global scope while advertising RFC 9728 resource_metadata
+    const challengeRes = await fetchFn(RESOURCE_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(challengeRes.status, 401);
+    const wwwParams = extractWWWAuthenticateParams(challengeRes);
+    assert.equal(wwwParams.resourceMetadataUrl?.href, `${PUBLIC_URL}${MCP_OAUTH_PATHS.protectedResourceMetadata}`);
+    assert.equal(wwwParams.scope, undefined);
+    assert.equal(wwwParams.error, undefined);
+
+    // 2. Subset-scoped client (CLIENT_B only has ['mcp:read']) without clientMetadata.scope discovers PRM+AS and authorizes cleanly
+    const subsetProvider = createSdkOAuthProvider(CLIENT_B, { state: 'sdk-subset-state-001' });
+    const startResult = await sdkOAuth(subsetProvider, {
+      serverUrl: RESOURCE_URL,
+      resourceMetadataUrl: wwwParams.resourceMetadataUrl,
+      scope: wwwParams.scope,
+      fetchFn,
+    });
+    assert.equal(startResult, 'REDIRECT');
+
+    const discovered = subsetProvider.getDiscoveryState();
+    assert.equal(discovered?.resourceMetadata?.resource, RESOURCE_URL);
+    assert.deepEqual(discovered?.resourceMetadata?.authorization_servers, [PUBLIC_URL]);
+    assert.equal(discovered?.resourceMetadata?.scopes_supported, undefined);
+    assert.deepEqual(discovered?.authorizationServerMetadata?.scopes_supported, SUPPORTED_SCOPES);
+
+    const authUrl = subsetProvider.getCapturedAuthorizationUrl();
+    assert.ok(authUrl instanceof URL);
+    assert.equal(authUrl.origin, PUBLIC_URL);
+    assert.equal(authUrl.pathname, MCP_OAUTH_PATHS.authorize);
+    assert.equal(authUrl.searchParams.get('client_id'), CLIENT_B.clientId);
+    assert.equal(authUrl.searchParams.get('resource'), RESOURCE_URL);
+    assert.equal(authUrl.searchParams.has('scope'), false);
+
+    const consentRes = await harness.app.inject({
+      method: 'GET',
+      url: `${authUrl.pathname}${authUrl.search}`,
+      headers: { cookie: owner.cookie },
+    });
+    assert.equal(consentRes.statusCode, 200);
+    assert.match(consentRes.body, /mcp:read/);
+    assert.doesNotMatch(consentRes.body, /mcp:dispatch/);
+    assert.doesNotMatch(consentRes.body, /mcp:bots:list/);
+
+    const { consentId, csrfToken } = extractConsentForm(consentRes.body);
+    const approveRes = await harness.app.inject({
+      method: 'POST',
+      url: MCP_OAUTH_PATHS.authorize,
+      headers: {
+        cookie: owner.cookie,
+        origin: PUBLIC_URL,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: formBody({
+        consent_id: consentId,
+        csrf_token: csrfToken,
+        decision: 'approve',
+      }),
+    });
+    assert.equal(approveRes.statusCode, 302);
+    const callbackUrl = new URL(approveRes.headers.location);
+    assert.equal(callbackUrl.searchParams.get('error'), null);
+    assert.equal(callbackUrl.searchParams.get('state'), 'sdk-subset-state-001');
+    assert.equal(callbackUrl.searchParams.get('iss'), PUBLIC_URL);
+    const code = callbackUrl.searchParams.get('code');
+    assert.ok(code);
+
+    const finishResult = await sdkOAuth(subsetProvider, {
+      serverUrl: RESOURCE_URL,
+      authorizationCode: code,
+      resourceMetadataUrl: wwwParams.resourceMetadataUrl,
+      scope: wwwParams.scope,
+      fetchFn,
+    });
+    assert.equal(finishResult, 'AUTHORIZED');
+    const issuedTokens = subsetProvider.getTokens();
+    assert.ok(issuedTokens?.access_token);
+    assert.equal(issuedTokens.scope, 'mcp:read');
+
+    const mcpRes = await harness.app.inject({
+      method: 'POST',
+      url: '/mcp',
+      headers: { authorization: `Bearer ${issuedTokens.access_token}` },
+      payload: {},
+    });
+    assert.equal(mcpRes.statusCode, 200);
+    assert.deepEqual(mcpRes.json().actor, {
+      kind: 'oauth',
+      clientId: CLIENT_B.clientId,
+      scopes: ['mcp:read'],
+      botTargets: [],
+    });
+
+    // 3. Explicit unauthorized scope in clientMetadata.scope is still rejected with 302 invalid_scope
+    const badScopeProvider = createSdkOAuthProvider(CLIENT_B, {
+      scope: 'mcp:read mcp:dispatch',
+      state: 'sdk-bad-scope-state-001',
+    });
+    const badStartResult = await sdkOAuth(badScopeProvider, {
+      serverUrl: RESOURCE_URL,
+      resourceMetadataUrl: wwwParams.resourceMetadataUrl,
+      scope: wwwParams.scope,
+      fetchFn,
+    });
+    assert.equal(badStartResult, 'REDIRECT');
+    const badAuthUrl = badScopeProvider.getCapturedAuthorizationUrl();
+    assert.equal(badAuthUrl.searchParams.get('scope'), 'mcp:read mcp:dispatch');
+
+    const badAuthorizeRes = await harness.app.inject({
+      method: 'GET',
+      url: `${badAuthUrl.pathname}${badAuthUrl.search}`,
+      headers: { cookie: owner.cookie },
+    });
+    assert.equal(badAuthorizeRes.statusCode, 302);
+    const badCallback = new URL(badAuthorizeRes.headers.location);
+    assert.equal(badCallback.searchParams.get('error'), 'invalid_scope');
+    assert.equal(badCallback.searchParams.get('state'), 'sdk-bad-scope-state-001');
+    assert.equal(badCallback.searchParams.get('iss'), PUBLIC_URL);
   } finally {
     await harness.close();
   }
