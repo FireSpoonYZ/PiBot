@@ -9,7 +9,7 @@ import {
   browserError,
   normalizeTabs,
 } from './protocol.js';
-import { classifyPageSensitivity } from './policy.js';
+import { classifyPageSensitivity, mergeProviderHints } from './policy.js';
 
 function tokensEqual(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
@@ -52,6 +52,7 @@ export function createBotBrowserState({
   let tabs = [];
   let lastHints = null;
   let lastProviderSensitive = false;
+  let providerSensitiveReason = null;
   let sensitivity = defaultSensitivity();
   let snapshotRefs = new Map();
 
@@ -432,10 +433,17 @@ export function createBotBrowserState({
       bumpRevision(invalidateFramesOnChange && pageOrNavChanged);
     }
 
+    const nextHints = mergeProviderHints(result, pageOrNavChanged ? null : lastHints);
+    if (typeof result.sensitiveReason === 'string' && result.sensitiveReason.trim() !== '') {
+      providerSensitiveReason = result.sensitiveReason.trim();
+    } else if (pageOrNavChanged) {
+      providerSensitiveReason = null;
+    }
+
     recomputeSensitivity({
       url: typeof result.url === 'string' ? result.url : undefined,
       title: typeof result.title === 'string' ? result.title : undefined,
-      hints: result.hints !== undefined ? result.hints : (pageOrNavChanged ? null : undefined),
+      hints: nextHints !== null || pageOrNavChanged ? nextHints : undefined,
       providerSensitive: result.sensitive !== undefined ? result.sensitive : (pageOrNavChanged ? false : undefined),
     });
   }
@@ -544,14 +552,14 @@ export function createBotBrowserState({
     const wantPreempt = force === true || preempt === true;
     const desiredLabel = holderLabelOverride || authority.holderLabel;
 
-    // Already in human control: handle same-client renewal vs cross-client preemption.
+    // Already in human control: handle same-client renewal vs cross-client/unverified preemption.
     if (phase === 'human' && lease) {
-      if (lease.clientId === authority.clientId) {
-        if (!wantPreempt && leaseToken && tokensEqual(leaseToken, lease.token)) {
+      if (lease.clientId === authority.clientId && leaseToken && tokensEqual(leaseToken, lease.token)) {
+        if (!wantPreempt) {
           renewLease(authority, leaseToken);
           return { token: lease.token, preempted: false, resumed: true };
         }
-        // Re-take by same client without current token (e.g. reopened tab) or with force: rotate token.
+        // Explicit force by current holder: rotate token cleanly.
         const token = grantLease(authority, desiredLabel);
         return { token, preempted: false, resumed: true };
       }
@@ -681,6 +689,53 @@ export function createBotBrowserState({
     return { token: lease.token, preempted: false, resumed: prevPhase === 'held' };
   }
 
+  async function holdForSystemLock({ reason = 'sensitive_step_lock', onTakeoverHook = null } = {}) {
+    expireLeaseIfNeeded();
+    if (closed) throw browserError('BROWSER_CLOSED');
+    if (phase === 'human') {
+      // Human owner already holds control; keep human lease intact and clear bot refs.
+      snapshotRefs.clear();
+      return { held: false, phase };
+    }
+    phase = 'taking';
+    holdReason = null;
+    clearLeaseTimer();
+    lease = null;
+    snapshotRefs.clear();
+    bumpRevision(true);
+    cancelQueuedBotOps(reason);
+    const inFlightDone = abortInFlightBotOp(reason);
+    const waitTargets = [];
+    if (inFlightDone) waitTargets.push(inFlightDone);
+    if (typeof onTakeoverHook === 'function') {
+      waitTargets.push(Promise.resolve().then(() => onTakeoverHook({
+        botId,
+        sessionId,
+        pageId,
+        reason,
+      })));
+    }
+    if (waitTargets.length > 0) {
+      let timer = null;
+      try {
+        const timeoutPromise = new Promise((_, reject) => {
+          timer = setTimeout(() => reject(browserError('BROWSER_TAKEOVER_UNCONFIRMED')), takeoverTimeoutMs);
+          timer.unref?.();
+        });
+        await Promise.race([Promise.all(waitTargets), timeoutPromise]);
+      } finally {
+        if (timer !== null) clearTimeout(timer);
+      }
+    }
+    if (!closed) {
+      phase = 'held';
+      holdReason = reason;
+      bumpRevision(true);
+      emit('held_for_sensitive', { reason });
+    }
+    return { held: true, phase };
+  }
+
   function holdForSensitive({ reason = 'sensitive_page', guidance = null } = {}) {
     expireLeaseIfNeeded();
     if (closed) return;
@@ -790,6 +845,7 @@ export function createBotBrowserState({
     tabs = [];
     lastHints = null;
     lastProviderSensitive = false;
+    providerSensitiveReason = null;
     sensitivity = defaultSensitivity();
     snapshotRefs.clear();
     phase = 'bot';
@@ -832,6 +888,7 @@ export function createBotBrowserState({
     get tabs() { return tabs; },
     get lastHints() { return lastHints; },
     get lastProviderSensitive() { return lastProviderSensitive; },
+    get providerSensitiveReason() { return providerSensitiveReason; },
     get sensitivity() { return sensitivity; },
     get holderLabel() { return currentHolderLabel(); },
     get lastActivityAt() { return lastActivityAt; },
@@ -846,6 +903,7 @@ export function createBotBrowserState({
     syncProviderResult,
     recomputeSensitivity,
     beginTakeover,
+    holdForSystemLock,
     holdForSensitive,
     handback,
     verifyHumanLease,

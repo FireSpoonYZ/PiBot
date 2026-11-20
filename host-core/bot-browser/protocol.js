@@ -131,19 +131,19 @@ const SAFE_DEFAULT_MESSAGES = Object.freeze({
 });
 
 const CONTROL_ACTION_FIELDS = Object.freeze({
-  status: ['botId', 'scopeId', 'pageId', 'lease'],
-  open: ['botId', 'scopeId', 'url', 'lease'],
-  navigate: ['botId', 'scopeId', 'pageId', 'url', 'lease', 'revision'],
-  back: ['botId', 'scopeId', 'pageId', 'lease', 'revision'],
-  forward: ['botId', 'scopeId', 'pageId', 'lease', 'revision'],
-  reload: ['botId', 'scopeId', 'pageId', 'lease', 'revision', 'ignoreCache'],
-  select: ['botId', 'scopeId', 'pageId', 'lease', 'revision'],
-  closeTab: ['botId', 'scopeId', 'pageId', 'lease', 'revision'],
-  frame: ['botId', 'scopeId', 'pageId', 'lease', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes'],
-  takeover: ['botId', 'scopeId', 'pageId', 'lease', 'force', 'preempt', 'resume', 'holderLabel'],
-  input: ['botId', 'scopeId', 'pageId', 'lease', 'revision', 'frameSeq', 'event'],
-  handback: ['botId', 'scopeId', 'pageId', 'lease', 'revision'],
-  release: ['botId', 'scopeId', 'lease', 'force', 'preempt'],
+  status: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease'],
+  open: ['botId', 'scopeId', 'pageId', 'sessionId', 'url', 'lease', 'revision', 'expectedRevision'],
+  navigate: ['botId', 'scopeId', 'pageId', 'sessionId', 'url', 'lease', 'revision', 'expectedRevision'],
+  back: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision'],
+  forward: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision'],
+  reload: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'ignoreCache'],
+  select: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision'],
+  closeTab: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision'],
+  frame: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'sinceSeq', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes'],
+  takeover: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'force', 'preempt', 'resume', 'holderLabel', 'reason', 'sensitive'],
+  input: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'frameSeq', 'event'],
+  handback: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'reason'],
+  release: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'force', 'preempt', 'reason'],
 });
 
 const PRIVILEGED_ROLES = new Set(['owner', 'admin']);
@@ -158,7 +158,13 @@ const ALLOWED_SPECIAL_KEYS = new Set([
   'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12',
 ]);
 
-const ALLOWED_MODIFIERS = new Set(['Control', 'Ctrl', 'Alt', 'Shift', 'Meta']);
+const MODIFIER_CANONICAL = Object.freeze({
+  control: 'Control',
+  ctrl: 'Control',
+  alt: 'Alt',
+  shift: 'Shift',
+  meta: 'Meta',
+});
 const ALLOWED_MOUSE_BUTTONS = new Set(['left', 'right', 'middle']);
 const ALLOWED_FRAME_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 const ALLOWED_FRAME_FORMATS = new Set(['png', 'jpeg', 'webp']);
@@ -309,6 +315,17 @@ export function normalizeControlAuthority(authority) {
   if (authority.authenticated === false) {
     throw browserError('BROWSER_FORBIDDEN', 'Control authority is not authenticated');
   }
+  if (authority.trustedSystem === true && authority.actor === 'system') {
+    return Object.freeze({
+      role: 'system',
+      clientId: 'system:google-setup',
+      holderLabel: 'System Privacy Lock',
+      principalId: null,
+      transport: 'system',
+      canControl: true,
+      canViewSensitive: false,
+    });
+  }
   const rawRole = authority.role === undefined ? 'owner' : authority.role;
   if (typeof rawRole !== 'string' || FORBIDDEN_ROLES.has(rawRole)) {
     throw browserError('BROWSER_FORBIDDEN', 'Caller role is not permitted to use browserControl');
@@ -367,10 +384,13 @@ function normalizeModifiers(modifiers) {
   }
   const out = [];
   for (const mod of modifiers) {
-    if (typeof mod !== 'string' || !ALLOWED_MODIFIERS.has(mod)) {
+    if (typeof mod !== 'string') {
       throw browserError('BROWSER_UNSUPPORTED', 'Unsupported keyboard modifier');
     }
-    const canonical = mod === 'Ctrl' ? 'Control' : mod;
+    const canonical = MODIFIER_CANONICAL[mod.trim().toLowerCase()];
+    if (!canonical) {
+      throw browserError('BROWSER_UNSUPPORTED', 'Unsupported keyboard modifier');
+    }
     if (!out.includes(canonical)) out.push(canonical);
   }
   return out;
@@ -385,7 +405,7 @@ export function normalizeInputEvent(event) {
   }
   switch (event.kind) {
     case 'click': {
-      rejectUnknownFields(event, ['kind', 'x', 'y', 'button', 'count'], 'input.event');
+      rejectUnknownFields(event, ['kind', 'x', 'y', 'button', 'count', 'clickCount', 'modifiers'], 'input.event');
       const normalized = {
         kind: 'click',
         x: assertUnitCoordinate(event.x, 'event.x'),
@@ -397,11 +417,16 @@ export function normalizeInputEvent(event) {
         }
         normalized.button = event.button;
       }
-      if (event.count !== undefined) {
-        if (event.count !== 1 && event.count !== 2) {
+      const rawCount = event.count !== undefined ? event.count : event.clickCount;
+      if (rawCount !== undefined) {
+        if (rawCount !== 1 && rawCount !== 2) {
           throw browserError('INVALID_ARGUMENT', 'event.count must be 1 or 2');
         }
-        normalized.count = event.count;
+        normalized.count = rawCount;
+      }
+      const modifiers = normalizeModifiers(event.modifiers);
+      if (modifiers !== undefined && modifiers.length > 0) {
+        normalized.modifiers = modifiers;
       }
       return normalized;
     }
@@ -429,7 +454,7 @@ export function normalizeInputEvent(event) {
       return normalized;
     }
     case 'wheel': {
-      rejectUnknownFields(event, ['kind', 'deltaX', 'deltaY', 'x', 'y'], 'input.event');
+      rejectUnknownFields(event, ['kind', 'deltaX', 'deltaY', 'x', 'y', 'modifiers'], 'input.event');
       const deltaX = event.deltaX === undefined ? 0 : event.deltaX;
       const deltaY = event.deltaY === undefined ? 0 : event.deltaY;
       if (typeof deltaX !== 'number' || !Number.isFinite(deltaX) || Math.abs(deltaX) > MAX_WHEEL_DELTA) {
@@ -444,6 +469,10 @@ export function normalizeInputEvent(event) {
       const normalized = { kind: 'wheel', deltaX, deltaY };
       if (event.x !== undefined) normalized.x = assertUnitCoordinate(event.x, 'event.x');
       if (event.y !== undefined) normalized.y = assertUnitCoordinate(event.y, 'event.y');
+      const modifiers = normalizeModifiers(event.modifiers);
+      if (modifiers !== undefined && modifiers.length > 0) {
+        normalized.modifiers = modifiers;
+      }
       return normalized;
     }
     default:
@@ -460,8 +489,8 @@ export function normalizeFrameLimits(input = {}, maxFrameBase64Bytes = BROWSER_M
     limits.format = input.format;
   }
   if (input.quality !== undefined) {
-    if (!Number.isSafeInteger(input.quality) || input.quality < 10 || input.quality > 100) {
-      throw browserError('INVALID_ARGUMENT', 'quality must be an integer between 10 and 100');
+    if (!Number.isSafeInteger(input.quality) || input.quality < 1 || input.quality > 100) {
+      throw browserError('INVALID_ARGUMENT', 'quality must be an integer between 1 and 100');
     }
     limits.quality = input.quality;
   }
@@ -508,11 +537,19 @@ export function normalizeControlInput(input, maxFrameBase64Bytes = BROWSER_MAX_F
   if (input.pageId !== undefined && input.pageId !== null) {
     normalized.pageId = normalizePageId(input.pageId);
   }
+  if (input.sessionId !== undefined && input.sessionId !== null) {
+    normalized.sessionId = assertBoundedString(input.sessionId, 'sessionId', { min: 1, max: 256, maxBytes: 256 }).trim();
+  }
   if (input.lease !== undefined && input.lease !== null) {
     normalized.lease = normalizeLeaseToken(input.lease);
   }
   if (input.revision !== undefined && input.revision !== null) {
     normalized.revision = normalizeRevision(input.revision);
+  } else if (input.expectedRevision !== undefined && input.expectedRevision !== null) {
+    normalized.revision = normalizeRevision(input.expectedRevision, 'expectedRevision');
+  }
+  if (input.sinceSeq !== undefined && input.sinceSeq !== null) {
+    normalized.sinceSeq = normalizeRevision(input.sinceSeq, 'sinceSeq');
   }
   if (input.frameSeq !== undefined && input.frameSeq !== null) {
     normalized.frameSeq = normalizeFrameSeq(input.frameSeq);
@@ -535,6 +572,13 @@ export function normalizeControlInput(input, maxFrameBase64Bytes = BROWSER_MAX_F
   if (input.ignoreCache !== undefined) {
     if (typeof input.ignoreCache !== 'boolean') throw browserError('INVALID_ARGUMENT', 'ignoreCache must be boolean');
     normalized.ignoreCache = input.ignoreCache;
+  }
+  if (input.sensitive !== undefined) {
+    if (typeof input.sensitive !== 'boolean') throw browserError('INVALID_ARGUMENT', 'sensitive must be boolean');
+    normalized.sensitive = input.sensitive;
+  }
+  if (input.reason !== undefined) {
+    normalized.reason = assertBoundedString(input.reason, 'reason', { min: 0, max: 256, maxBytes: 256 });
   }
   if (input.holderLabel !== undefined) {
     const label = normalizeHolderLabel(input.holderLabel);

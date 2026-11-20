@@ -49,21 +49,37 @@ export const GOOGLE_SETUP_ACTIONS = Object.freeze([
 ]);
 
 const BROWSER_ERROR_MESSAGES = Object.freeze({
+  BROWSER_CLOSED: 'Bot browser service is closed.',
   BROWSER_UNAVAILABLE: 'Bot browser is unavailable on this host.',
   BROWSER_UNSUPPORTED: 'This browser action is not supported on this host.',
+  BROWSER_FORBIDDEN: 'Browser control action is not permitted.',
   BROWSER_BUSY: 'Bot browser is busy settling an active action.',
   BROWSER_SENSITIVE_BLOCKED: 'Action blocked at a sensitive browser boundary.',
+  BROWSER_SECRET_STEP_BLOCKED: 'Secret creation or display cannot be observed by the bot or streamed as a normal frame; complete this step in the system browser.',
+  BROWSER_HANDBACK_BLOCKED_SENSITIVE: 'Cannot hand control back to the bot while on a sensitive, login, MFA, policy, or secret page.',
   BROWSER_PAUSED_FOR_HUMAN: 'Bot browser is paused while a human holds control.',
+  BROWSER_TAKEOVER_PENDING: 'Takeover is waiting for in-flight bot action to settle.',
+  BROWSER_TAKEOVER_UNCONFIRMED: 'Unable to confirm in-flight bot action stopped; human input remains locked.',
+  BROWSER_TAKEOVER_REQUIRED: 'Human takeover is required before performing this browser action.',
   BROWSER_LEASE_REQUIRED: 'An active takeover lease is required for this browser action.',
+  BROWSER_LEASE_EXPIRED: 'Human takeover lease expired or disconnected; explicitly resume takeover, hand back, or release.',
   BROWSER_LEASE_MISMATCH: 'Takeover lease is no longer active; refresh browser status.',
   BROWSER_LEASE_CONFLICT: 'Another client currently holds browser takeover control.',
   BROWSER_STALE_REVISION: 'Browser page state changed; refresh before sending input.',
+  BROWSER_STALE_PAGE: 'Target browser page is no longer active; refresh before sending input.',
+  BROWSER_STALE_FRAME: 'Browser frame is stale after navigation or state change; wait for a fresh frame.',
   BROWSER_PAGE_NOT_FOUND: 'Target browser tab was not found.',
   BROWSER_SESSION_NOT_FOUND: 'Browser session was not found.',
   BROWSER_INPUT_FAILED: 'Browser input could not be confirmed.',
   BROWSER_FRAME_TOO_LARGE: 'Browser frame exceeded the single-image size limit.',
+  BROWSER_STREAM_UNAVAILABLE: 'Live interactive browser stream is unavailable on this host.',
   BROWSER_NAVIGATION_BLOCKED: 'Navigation to this URL is not permitted.',
+  BROWSER_URL_BLOCKED: 'URL is blocked by browser security policy.',
+  BROWSER_ACTION_BLOCKED: 'Browser action is blocked by security policy.',
   BROWSER_LIMIT_REACHED: 'Bot browser tab or session limit reached.',
+  BROWSER_SESSION_LIMIT: 'Active bot browser session limit reached on this host.',
+  BROWSER_TAB_LIMIT: 'Tab limit reached for this bot browser.',
+  BROWSER_BACKEND_FAILED: 'Browser backend failed.',
 });
 
 const GOOGLE_SETUP_ERROR_MESSAGES = Object.freeze({
@@ -136,14 +152,14 @@ const BROWSER_ACTION_FIELDS = Object.freeze({
   navigate: new Set(['action', 'botId', 'scopeId', 'url', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision']),
   back: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision']),
   forward: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision']),
-  reload: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision']),
+  reload: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'ignoreCache']),
   select: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision']),
   closeTab: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision']),
-  frame: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'sinceSeq', 'maxWidth', 'maxHeight', 'quality']),
-  takeover: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'holderLabel', 'force', 'preempt', 'reason']),
-  input: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'event']),
+  frame: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'sinceSeq', 'format', 'maxWidth', 'maxHeight', 'maxBytes', 'quality']),
+  takeover: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'holderLabel', 'force', 'preempt', 'resume', 'reason']),
+  input: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'frameSeq', 'event']),
   handback: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'reason']),
-  release: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'force', 'reason']),
+  release: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'force', 'preempt', 'reason']),
 });
 
 const GOOGLE_SETUP_ACTION_FIELDS = Object.freeze({
@@ -403,11 +419,24 @@ export function normalizeBrowserControl(input) {
   if (input.sinceSeq !== undefined) {
     out.sinceSeq = assertNonNegativeInt(input.sinceSeq, 'sinceSeq');
   }
+  if (input.frameSeq !== undefined) {
+    out.frameSeq = assertBoundedInt(input.frameSeq, 1, Number.MAX_SAFE_INTEGER, 'frameSeq');
+  }
+  if (input.format !== undefined) {
+    const fmt = assertBoundedString(input.format, 'format', 16);
+    if (fmt !== 'png' && fmt !== 'jpeg' && fmt !== 'webp') {
+      throw invalid('format must be png, jpeg, or webp');
+    }
+    out.format = fmt;
+  }
   if (input.maxWidth !== undefined) {
     out.maxWidth = assertBoundedInt(input.maxWidth, MIN_DIMENSION, MAX_DIMENSION, 'maxWidth');
   }
   if (input.maxHeight !== undefined) {
     out.maxHeight = assertBoundedInt(input.maxHeight, MIN_DIMENSION, MAX_DIMENSION, 'maxHeight');
+  }
+  if (input.maxBytes !== undefined) {
+    out.maxBytes = assertBoundedInt(input.maxBytes, 1, 737280, 'maxBytes');
   }
   if (input.quality !== undefined) {
     out.quality = assertBoundedInt(input.quality, 1, 100, 'quality');
@@ -423,6 +452,12 @@ export function normalizeBrowserControl(input) {
   }
   if (input.preempt !== undefined) {
     out.preempt = assertBoolean(input.preempt, 'preempt');
+  }
+  if (input.resume !== undefined) {
+    out.resume = assertBoolean(input.resume, 'resume');
+  }
+  if (input.ignoreCache !== undefined) {
+    out.ignoreCache = assertBoolean(input.ignoreCache, 'ignoreCache');
   }
   if (input.action === 'navigate') {
     out.url = assertBoundedString(input.url, 'url', MAX_URL_BYTES);

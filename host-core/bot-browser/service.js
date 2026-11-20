@@ -25,6 +25,7 @@ import {
 import {
   checkBotActionSensitivity,
   classifyPageSensitivity,
+  mergeProviderHints,
   sanitizeSnapshotForBot,
   sanitizeTabsForCaller,
   sanitizeUrlForModel,
@@ -50,14 +51,99 @@ function assertProviderShape(provider) {
   return provider;
 }
 
+const PROVIDER_ERROR_CODE_MAP = Object.freeze({
+  BROWSER_SECRET_FRAME_BLOCKED: 'BROWSER_SECRET_STEP_BLOCKED',
+  BROWSER_SECRET_INPUT_BLOCKED: 'BROWSER_SECRET_STEP_BLOCKED',
+  BROWSER_SENSITIVE_PAGE: 'BROWSER_SENSITIVE_BLOCKED',
+  BROWSER_HUMAN_REQUIRED: 'BROWSER_SENSITIVE_BLOCKED',
+  BROWSER_AUTH_USE_SYSTEM_BROWSER: 'BROWSER_SENSITIVE_BLOCKED',
+  BROWSER_STALE_DOCUMENT: 'BROWSER_STALE_PAGE',
+  BROWSER_PAGE_MISMATCH: 'BROWSER_STALE_PAGE',
+  BROWSER_TAB_NOT_FOUND: 'BROWSER_PAGE_NOT_FOUND',
+  BROWSER_NO_TAB: 'BROWSER_PAGE_NOT_FOUND',
+  BROWSER_TAB_LIMIT_REACHED: 'BROWSER_TAB_LIMIT',
+  BROWSER_ACTION_FORBIDDEN: 'BROWSER_ACTION_BLOCKED',
+  BROWSER_ACTION_UNSUPPORTED: 'BROWSER_UNSUPPORTED',
+});
+
+function mapProviderError(err, state = null, { holdBotOnSensitive = false } = {}) {
+  if (!err || typeof err !== 'object') {
+    return browserError('BROWSER_BACKEND_FAILED');
+  }
+  const mappedCode = typeof err.code === 'string' && Object.hasOwn(PROVIDER_ERROR_CODE_MAP, err.code)
+    ? PROVIDER_ERROR_CODE_MAP[err.code]
+    : err.code;
+  const fallbackToSystemBrowser =
+    err.authUseSystemBrowser === true ||
+    err.requiresSystemBrowser === true ||
+    mappedCode === 'BROWSER_SECRET_STEP_BLOCKED';
+  if (
+    holdBotOnSensitive &&
+    state &&
+    (mappedCode === 'BROWSER_SENSITIVE_BLOCKED' || mappedCode === 'BROWSER_SECRET_STEP_BLOCKED')
+  ) {
+    state.holdForSensitive({
+      reason: err.sensitiveCategory || err.sensitiveReason || 'sensitive_page',
+      guidance: err.message || null,
+    });
+  }
+  const mapped = browserError(
+    mappedCode || 'BROWSER_BACKEND_FAILED',
+    err.message,
+    {
+      ...(state ? { phase: state.phase, revision: state.revision, pageId: state.pageId } : {}),
+      ...(err.sensitiveCategory ? { reason: err.sensitiveCategory } : {}),
+      ...(fallbackToSystemBrowser ? { fallbackToSystemBrowser: true } : {}),
+    }
+  );
+  if (err.outcome === 'not-sent' || err.outcome === 'unconfirmed') {
+    mapped.outcome = err.outcome;
+  }
+  return mapped;
+}
+
+/**
+ * Formats normalized bot act so BOTH desktop-provider (`input.command`, scroll `direction`/`amount`,
+ * wait `timeoutMs`) and android-provider (`input.act`, scroll `deltaX`/`deltaY`, wait `ms`) accept it.
+ */
+function formatProviderAct(normalizedAct) {
+  if (normalizedAct.kind === 'scroll') {
+    const amount = Math.min(2000, Math.max(50, normalizedAct.amount ?? 400));
+    const deltaX = normalizedAct.direction === 'right' ? amount : (normalizedAct.direction === 'left' ? -amount : 0);
+    const deltaY = normalizedAct.direction === 'down' ? amount : (normalizedAct.direction === 'up' ? -amount : 0);
+    return { ...normalizedAct, amount, deltaX, deltaY };
+  }
+  if (normalizedAct.kind === 'wait') {
+    const timeoutMs = normalizedAct.timeoutMs ?? 500;
+    return { ...normalizedAct, timeoutMs, ms: timeoutMs };
+  }
+  return { ...normalizedAct };
+}
+
+/**
+ * Formats normalized human input event so BOTH desktop-provider (`clickCount`, `modifiers`)
+ * and android-provider (`count`, `x`/`y`) accept it cleanly.
+ */
+function formatProviderInputEvent(event) {
+  if (event.kind === 'click' && event.count !== undefined) {
+    return { ...event, clickCount: event.count };
+  }
+  return { ...event };
+}
+
 export function createBotBrowserService(options = {}) {
   const host = options.host;
   if (!host || typeof host.deviceId !== 'string' || typeof host.getBot !== 'function') {
     throw browserError('INVALID_ARGUMENT', 'createBotBrowserService requires options.host with deviceId and getBot()');
   }
-  const profileRoot = typeof options.profileRoot === 'string' && options.profileRoot.trim() !== ''
-    ? options.profileRoot.trim()
-    : (typeof host.dataRoot === 'string' && host.dataRoot.trim() !== ''
+  const configuredProfileRoot =
+    (typeof options.profileRoot === 'string' && options.profileRoot.trim() !== '')
+      ? options.profileRoot.trim()
+      : (typeof options.profilesRoot === 'string' && options.profilesRoot.trim() !== '')
+        ? options.profilesRoot.trim()
+        : null;
+  const profileRoot = configuredProfileRoot
+    ?? (typeof host.dataRoot === 'string' && host.dataRoot.trim() !== ''
       ? join(host.dataRoot, 'bot-browser', 'profiles')
       : null);
   if (!profileRoot) {
@@ -74,7 +160,10 @@ export function createBotBrowserService(options = {}) {
     ? options.createProvider
     : (typeof options.providerFactory === 'function' ? options.providerFactory : null);
   const nativeBridge = options.nativeBridge ?? null;
-  const onTakeover = typeof options.onTakeover === 'function' ? options.onTakeover : null;
+  const abortBotTurn = typeof options.abortBotTurn === 'function' ? options.abortBotTurn : null;
+  const onTakeover = typeof options.onTakeover === 'function'
+    ? options.onTakeover
+    : (abortBotTurn ? async ({ botId }) => { await abortBotTurn(botId); } : null);
   const onHandback = typeof options.onHandback === 'function' ? options.onHandback : null;
   const onEvent = typeof options.onEvent === 'function' ? options.onEvent : null;
   const isMaintenance = typeof options.isMaintenance === 'function' ? options.isMaintenance : null;
@@ -256,7 +345,7 @@ export function createBotBrowserService(options = {}) {
 
   function buildControlViewDto(state, authority, { includeLeaseToken = false, presentedLease = null } = {}) {
     state.expireLeaseIfNeeded();
-    const isLeaseHolder = state.isActiveLeaseHolder(authority);
+    const isLeaseHolder = state.isActiveLeaseHolder(authority, presentedLease);
     const leaseToken = includeLeaseToken
       ? state.currentLeaseTokenFor(authority, presentedLease)
       : undefined;
@@ -272,10 +361,19 @@ export function createBotBrowserService(options = {}) {
       botId: state.botId,
     });
 
+    const sensitiveReason = state.sensitivity.sensitive
+      ? (state.sensitivity.guidance || state.providerSensitiveReason || state.sensitivity.reasons[0] || undefined)
+      : undefined;
+    const attentionRequested = state.phase === 'held';
+    const attentionMessage = attentionRequested
+      ? (state.sensitivity.guidance || state.providerSensitiveReason || state.reason || undefined)
+      : undefined;
+
     const dto = {
       available: state.available,
       ...(state.reason ? { reason: state.reason } : {}),
       canStreamInteract: state.canStreamInteract,
+      canIsolateSensitivePages: state.capabilities.privateSecretIsolation,
       phase: state.phase,
       ...(state.sessionId ? { sessionId: state.sessionId } : {}),
       ...(state.pageId ? { pageId: state.pageId } : {}),
@@ -283,8 +381,12 @@ export function createBotBrowserService(options = {}) {
       tabs,
       ...(state.holderLabel ? { holderLabel: state.holderLabel } : {}),
       ...(includeLeaseToken && leaseToken ? { lease: leaseToken } : {}),
+      isHolder: isLeaseHolder,
       isLeaseHolder,
       sensitive: state.sensitivity.sensitive,
+      ...(sensitiveReason ? { sensitiveReason } : {}),
+      ...(attentionRequested ? { attentionRequested: true } : {}),
+      ...(attentionMessage ? { attentionMessage } : {}),
       secretRisk: state.sensitivity.secretRisk,
       webLoginNotApiGrant: state.sensitivity.webLoginNotApiGrant,
       fallbackToSystemBrowser: state.sensitivity.fallbackToSystemBrowser,
@@ -384,6 +486,14 @@ export function createBotBrowserService(options = {}) {
       case 'takeover': {
         if (!auth.canControl) {
           throw browserError('BROWSER_FORBIDDEN', 'Only the owner or admin can take over the bot browser.');
+        }
+        if (auth.role === 'system') {
+          await state.holdForSystemLock({
+            reason: req.reason || 'sensitive_step_lock',
+            onTakeoverHook: onTakeover,
+          });
+          await refreshProviderStatus(entry, { allowUnavailable: true });
+          return buildControlViewDto(state, auth, { includeLeaseToken: false });
         }
         const result = await state.beginTakeover({
           authority: auth,
@@ -497,18 +607,28 @@ export function createBotBrowserService(options = {}) {
           }
         }
 
-        const rawFrame = await provider.perform({
-          action: 'frame',
-          botId: req.botId,
-          pageId: targetPageId,
-          ...req.frameLimits,
-        });
+        let rawFrame;
+        try {
+          rawFrame = await provider.perform({
+            action: 'frame',
+            actor: 'human',
+            viewer: 'human',
+            botId: req.botId,
+            pageId: targetPageId,
+            ...req.frameLimits,
+            limits: req.frameLimits,
+            ...(req.sinceSeq !== undefined ? { afterSeq: req.sinceSeq } : {}),
+          });
+        } catch (err) {
+          throw mapProviderError(err, state);
+        }
         const validated = validateFramePayload(rawFrame, req.frameLimits.maxBytes);
         const framePageId = validated.pageId ?? targetPageId;
+        const frameHints = mergeProviderHints(rawFrame, validated.hints);
         const liveSensitivity = classifyPageSensitivity({
           url: validated.url ?? state.activeTab()?.url ?? '',
           title: validated.title ?? state.activeTab()?.title ?? '',
-          hints: validated.hints,
+          hints: frameHints,
           providerSensitive: validated.sensitive,
           botId: req.botId,
           pageId: framePageId,
@@ -521,8 +641,11 @@ export function createBotBrowserService(options = {}) {
           ...(validated.url !== undefined ? { url: validated.url } : {}),
           ...(validated.title !== undefined ? { title: validated.title } : {}),
           ...(validated.documentGeneration !== undefined ? { documentGeneration: validated.documentGeneration } : {}),
-          ...(validated.hints !== undefined ? { hints: validated.hints } : {}),
+          ...(frameHints !== null ? { hints: frameHints } : {}),
           ...(validated.sensitive ? { sensitive: true } : {}),
+          ...(typeof rawFrame?.sensitiveCategory === 'string' ? { sensitiveCategory: rawFrame.sensitiveCategory } : {}),
+          ...(typeof rawFrame?.sensitiveReason === 'string' ? { sensitiveReason: rawFrame.sensitiveReason } : {}),
+          ...(rawFrame?.authUseSystemBrowser === true ? { authUseSystemBrowser: true } : {}),
         }, { invalidateFramesOnChange: true });
 
         // Post-capture Privacy Shield gate BEFORE returning any image bytes.
@@ -579,14 +702,21 @@ export function createBotBrowserService(options = {}) {
             );
           }
 
-          const res = await provider.perform({
-            action: 'input',
-            botId: req.botId,
-            pageId: req.pageId,
-            expectedRevision: state.revision,
-            expectedDocumentGeneration: state.documentGeneration,
-            event: req.event,
-          });
+          let res;
+          try {
+            res = await provider.perform({
+              action: 'input',
+              actor: 'human',
+              botId: req.botId,
+              pageId: req.pageId,
+              expectedRevision: state.revision,
+              ...(Number.isSafeInteger(state.documentGeneration) ? { documentGeneration: state.documentGeneration } : {}),
+              expectedDocumentGeneration: state.documentGeneration,
+              event: formatProviderInputEvent(req.event),
+            });
+          } catch (providerErr) {
+            throw mapProviderError(providerErr, state);
+          }
           if (isPlainObject(res)) {
             state.syncProviderResult(res);
           }
@@ -601,7 +731,7 @@ export function createBotBrowserService(options = {}) {
       }
 
       case 'open': {
-        assertControlMutationAllowed(state, auth, req);
+        assertControlMutationAllowed(state, auth, { ...req, revision: undefined });
         const safeUrl = req.url !== undefined
           ? validateNavigationUrl(req.url, { actor: 'human', allowBlank: true })
           : undefined;
@@ -612,11 +742,17 @@ export function createBotBrowserService(options = {}) {
           throw browserError('BROWSER_TAB_LIMIT', `Tab limit (${maxTabsPerBot}) reached for bot ${req.botId}.`);
         }
         const provider = await ensureProvider(entry, { allowUnavailable: false });
-        const res = await provider.perform({
-          action: 'open',
-          botId: req.botId,
-          ...(safeUrl !== undefined ? { url: safeUrl } : {}),
-        });
+        let res;
+        try {
+          res = await provider.perform({
+            action: 'open',
+            actor: 'human',
+            botId: req.botId,
+            ...(safeUrl !== undefined ? { url: safeUrl } : {}),
+          });
+        } catch (err) {
+          throw mapProviderError(err, state);
+        }
         state.ensureSessionId();
         state.syncProviderResult({ available: true, ...res });
         return buildControlViewDto(state, auth, { includeLeaseToken: false, presentedLease: req.lease });
@@ -627,12 +763,18 @@ export function createBotBrowserService(options = {}) {
         const safeUrl = validateNavigationUrl(req.url, { actor: 'human', allowBlank: false });
         if (req.pageId) state.assertOwnsPage(req.pageId);
         const provider = await ensureProvider(entry, { allowUnavailable: false });
-        const res = await provider.perform({
-          action: 'navigate',
-          botId: req.botId,
-          pageId: req.pageId ?? state.pageId,
-          url: safeUrl,
-        });
+        let res;
+        try {
+          res = await provider.perform({
+            action: 'navigate',
+            actor: 'human',
+            botId: req.botId,
+            pageId: req.pageId ?? state.pageId,
+            url: safeUrl,
+          });
+        } catch (err) {
+          throw mapProviderError(err, state);
+        }
         state.ensureSessionId();
         state.syncProviderResult(res);
         return buildControlViewDto(state, auth, { includeLeaseToken: false, presentedLease: req.lease });
@@ -650,12 +792,18 @@ export function createBotBrowserService(options = {}) {
           throw browserError('BROWSER_PAGE_NOT_FOUND', 'No active browser tab for this bot.');
         }
         const provider = await ensureProvider(entry, { allowUnavailable: false });
-        const res = await provider.perform({
-          action: req.action,
-          botId: req.botId,
-          pageId: targetPageId,
-          ...(req.action === 'reload' && req.ignoreCache !== undefined ? { ignoreCache: req.ignoreCache } : {}),
-        });
+        let res;
+        try {
+          res = await provider.perform({
+            action: req.action,
+            actor: 'human',
+            botId: req.botId,
+            pageId: targetPageId,
+            ...(req.action === 'reload' && req.ignoreCache !== undefined ? { ignoreCache: req.ignoreCache } : {}),
+          });
+        } catch (err) {
+          throw mapProviderError(err, state);
+        }
         state.syncProviderResult(res);
         return buildControlViewDto(state, auth, { includeLeaseToken: false, presentedLease: req.lease });
       }
@@ -747,12 +895,18 @@ export function createBotBrowserService(options = {}) {
             throw browserError('BROWSER_TAB_LIMIT', `Tab limit (${maxTabsPerBot}) reached for this bot.`);
           }
           const provider = await ensureProvider(entry, { allowUnavailable: false });
-          const res = await provider.perform({
-            action: 'open',
-            botId,
-            ...(safeUrl !== undefined ? { url: safeUrl } : {}),
-            signal,
-          });
+          let res;
+          try {
+            res = await provider.perform({
+              action: 'open',
+              actor: 'bot',
+              botId,
+              ...(safeUrl !== undefined ? { url: safeUrl } : {}),
+              signal,
+            });
+          } catch (err) {
+            throw mapProviderError(err, state, { holdBotOnSensitive: true });
+          }
           assertStillBot();
           state.ensureSessionId();
           state.syncProviderResult({ available: true, ...res });
@@ -789,13 +943,19 @@ export function createBotBrowserService(options = {}) {
           }
           if (reqPageId) state.assertOwnsPage(reqPageId);
           const provider = await ensureProvider(entry, { allowUnavailable: false });
-          const res = await provider.perform({
-            action: 'navigate',
-            botId,
-            pageId: reqPageId ?? state.pageId,
-            url: safeUrl,
-            signal,
-          });
+          let res;
+          try {
+            res = await provider.perform({
+              action: 'navigate',
+              actor: 'bot',
+              botId,
+              pageId: reqPageId ?? state.pageId,
+              url: safeUrl,
+              signal,
+            });
+          } catch (err) {
+            throw mapProviderError(err, state, { holdBotOnSensitive: true });
+          }
           assertStillBot();
           state.ensureSessionId();
           state.syncProviderResult(res);
@@ -831,13 +991,19 @@ export function createBotBrowserService(options = {}) {
             throw browserError('BROWSER_PAGE_NOT_FOUND', 'No active browser tab; call open first.');
           }
           const provider = await ensureProvider(entry, { allowUnavailable: false });
-          const res = await provider.perform({
-            action,
-            botId,
-            pageId: targetPageId,
-            ...(action === 'reload' && rawArgs.ignoreCache !== undefined ? { ignoreCache: Boolean(rawArgs.ignoreCache) } : {}),
-            signal,
-          });
+          let res;
+          try {
+            res = await provider.perform({
+              action,
+              actor: 'bot',
+              botId,
+              pageId: targetPageId,
+              ...(action === 'reload' && rawArgs.ignoreCache !== undefined ? { ignoreCache: Boolean(rawArgs.ignoreCache) } : {}),
+              signal,
+            });
+          } catch (err) {
+            throw mapProviderError(err, state, { holdBotOnSensitive: true });
+          }
           assertStillBot();
           state.syncProviderResult(res);
           if (action !== 'closeTab' && (state.sensitivity.blockBotObserve || state.sensitivity.blockBotAct)) {
@@ -881,13 +1047,19 @@ export function createBotBrowserService(options = {}) {
           }
           const snapshotOpts = normalizeBotSnapshotOptions(rawArgs.snapshot ?? {});
           const provider = await ensureProvider(entry, { allowUnavailable: false });
-          const res = await provider.perform({
-            action: 'snapshot',
-            botId,
-            pageId: targetPageId,
-            ...snapshotOpts,
-            signal,
-          });
+          let res;
+          try {
+            res = await provider.perform({
+              action: 'snapshot',
+              actor: 'bot',
+              botId,
+              pageId: targetPageId,
+              ...snapshotOpts,
+              signal,
+            });
+          } catch (err) {
+            throw mapProviderError(err, state, { holdBotOnSensitive: true });
+          }
           assertStillBot();
           state.syncProviderResult(res);
           const sanitized = sanitizeSnapshotForBot(res, state.sensitivity);
@@ -953,14 +1125,23 @@ export function createBotBrowserService(options = {}) {
           }
 
           const provider = await ensureProvider(entry, { allowUnavailable: false });
-          const res = await provider.perform({
-            action: 'act',
-            botId,
-            pageId: targetPageId,
-            expectedDocumentGeneration: state.documentGeneration,
-            act: normalizedAct,
-            signal,
-          });
+          const providerAct = formatProviderAct(normalizedAct);
+          let res;
+          try {
+            res = await provider.perform({
+              action: 'act',
+              actor: 'bot',
+              botId,
+              pageId: targetPageId,
+              ...(Number.isSafeInteger(state.documentGeneration) ? { documentGeneration: state.documentGeneration } : {}),
+              expectedDocumentGeneration: state.documentGeneration,
+              command: providerAct,
+              act: providerAct,
+              signal,
+            });
+          } catch (err) {
+            throw mapProviderError(err, state, { holdBotOnSensitive: true });
+          }
           assertStillBot();
           state.syncProviderResult(res);
 
@@ -1012,20 +1193,29 @@ export function createBotBrowserService(options = {}) {
             );
           }
           const provider = await ensureProvider(entry, { allowUnavailable: false });
-          const rawFrame = await provider.perform({
-            action: 'frame',
-            botId,
-            pageId: targetPageId,
-            ...(rawArgs.limits ?? {}),
-            signal,
-          });
+          let rawFrame;
+          try {
+            rawFrame = await provider.perform({
+              action: 'frame',
+              actor: 'bot',
+              viewer: 'bot',
+              botId,
+              pageId: targetPageId,
+              ...(rawArgs.limits ?? {}),
+              limits: rawArgs.limits,
+              signal,
+            });
+          } catch (err) {
+            throw mapProviderError(err, state, { holdBotOnSensitive: true });
+          }
           assertStillBot();
           const validated = validateFramePayload(rawFrame, rawArgs.limits?.maxBytes ?? maxFrameBase64Bytes);
           const framePageId = validated.pageId ?? targetPageId;
+          const frameHints = mergeProviderHints(rawFrame, validated.hints);
           const liveSensitivity = classifyPageSensitivity({
             url: validated.url ?? state.activeTab()?.url ?? '',
             title: validated.title ?? state.activeTab()?.title ?? '',
-            hints: validated.hints,
+            hints: frameHints,
             providerSensitive: validated.sensitive,
             botId,
             pageId: framePageId,
@@ -1036,8 +1226,11 @@ export function createBotBrowserService(options = {}) {
             ...(validated.url !== undefined ? { url: validated.url } : {}),
             ...(validated.title !== undefined ? { title: validated.title } : {}),
             ...(validated.documentGeneration !== undefined ? { documentGeneration: validated.documentGeneration } : {}),
-            ...(validated.hints !== undefined ? { hints: validated.hints } : {}),
+            ...(frameHints !== null ? { hints: frameHints } : {}),
             ...(validated.sensitive ? { sensitive: true } : {}),
+            ...(typeof rawFrame?.sensitiveCategory === 'string' ? { sensitiveCategory: rawFrame.sensitiveCategory } : {}),
+            ...(typeof rawFrame?.sensitiveReason === 'string' ? { sensitiveReason: rawFrame.sensitiveReason } : {}),
+            ...(rawFrame?.authUseSystemBrowser === true ? { authUseSystemBrowser: true } : {}),
           }, { invalidateFramesOnChange: false });
 
           if (liveSensitivity.blockBotObserve || liveSensitivity.secretRisk) {
@@ -1135,6 +1328,7 @@ export function createBotBrowserService(options = {}) {
     toolsForBot,
     close,
     cleanupBot,
+    releaseBot: cleanupBot,
     setWithheldPagePredicate,
   };
 }

@@ -113,6 +113,9 @@ const LEASE_INVALIDATING_CODES = new Set([
   'NOT_HUMAN',
   'BROWSER_LEASE_EXPIRED',
   'BROWSER_LEASE_MISMATCH',
+  'BROWSER_LEASE_CONFLICT',
+  'BROWSER_LEASE_REQUIRED',
+  'BROWSER_TAKEOVER_REQUIRED',
   'BROWSER_NOT_HOLDER',
   'BROWSER_HELD',
   'HELD',
@@ -129,7 +132,11 @@ const STALE_STATE_CODES = new Set([
   'SESSION_MISMATCH',
   'SESSION_EXPIRED',
   'BROWSER_REVISION_MISMATCH',
+  'BROWSER_STALE_REVISION',
+  'BROWSER_STALE_PAGE',
+  'BROWSER_STALE_FRAME',
   'BROWSER_PAGE_MISMATCH',
+  'BROWSER_PAGE_NOT_FOUND',
 ]);
 
 const SENSITIVE_CODES = new Set([
@@ -140,11 +147,15 @@ const SENSITIVE_CODES = new Set([
   'OAUTH_BLOCKED',
   'BROWSER_SENSITIVE_PAGE',
   'BROWSER_SENSITIVE_BLOCKED',
+  'BROWSER_HANDBACK_BLOCKED_SENSITIVE',
+  'BROWSER_SECRET_STEP_BLOCKED',
 ]);
 
 const UNAVAILABLE_CODES = new Set([
   'UNAVAILABLE',
   'BROWSER_UNAVAILABLE',
+  'BROWSER_STREAM_UNAVAILABLE',
+  'BROWSER_CLOSED',
   'STREAM_UNAVAILABLE',
   'NOT_AVAILABLE',
   'NO_BROWSER_PROVIDER',
@@ -268,7 +279,11 @@ export function parseBrowserView(raw: unknown): BrowserView | null {
     ...(stepText ? { stepText } : {}),
     ...(typeof obj.canGoBack === 'boolean' ? { canGoBack: obj.canGoBack } : {}),
     ...(typeof obj.canGoForward === 'boolean' ? { canGoForward: obj.canGoForward } : {}),
-    ...(typeof obj.isHolder === 'boolean' ? { isHolder: obj.isHolder } : {}),
+    ...(typeof obj.isHolder === 'boolean'
+      ? { isHolder: obj.isHolder }
+      : typeof obj.isLeaseHolder === 'boolean'
+        ? { isHolder: obj.isLeaseHolder }
+        : {}),
     ...(externalUrl ? { externalUrl } : {}),
   };
 }

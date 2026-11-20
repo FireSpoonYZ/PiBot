@@ -228,6 +228,40 @@ export function validateNavigationUrl(rawUrl, { actor = 'bot', allowBlank = fals
  * - Password / OTP / Payment: blocks bot observe/act, blocks handback, blocks bystanders
  * - Web Google login vs Center Google API MCP notice (`webLoginNotApiGrant`)
  */
+/**
+ * Synthesizes canonical sensitivity hints from desktop-provider (`sensitiveCategory`,
+ * `authUseSystemBrowser`) and android-provider (`requiresSystemBrowser`, `sensitiveReason`)
+ * fields alongside any explicit `hints` object.
+ */
+export function mergeProviderHints(result, baseHints = null) {
+  const out = isPlainObject(baseHints) ? { ...baseHints } : {};
+  if (!isPlainObject(result)) return Object.keys(out).length > 0 ? out : null;
+  if (isPlainObject(result.hints)) {
+    Object.assign(out, result.hints);
+  }
+  const cat = typeof result.sensitiveCategory === 'string'
+    ? result.sensitiveCategory.trim().toLowerCase()
+    : '';
+  if (cat === 'client_secret' || cat === 'secret_dialog' || cat === 'secret_key' || cat === 'secret') {
+    out.secretDialogVisible = true;
+  } else if (cat === 'oauth_consent' || cat === 'oauth_login' || cat === 'oauth' || cat === 'mfa' || cat === 'auth') {
+    out.isOAuthConsent = true;
+  } else if (cat === 'password_input' || cat === 'password' || cat === 'otp') {
+    out.hasPasswordInput = true;
+  } else if (cat === 'payment' || cat === 'checkout' || cat === 'billing') {
+    out.isPaymentPage = true;
+  } else if (cat === 'policy_consent' || cat === 'terms' || cat === 'tos') {
+    out.hasPolicyCheckbox = true;
+  }
+  if (result.authUseSystemBrowser === true || result.requiresSystemBrowser === true) {
+    out.isOAuthConsent = true;
+  }
+  if (result.sensitive === true) {
+    out.sensitive = true;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 export function classifyPageSensitivity({
   url = '',
   title = '',
