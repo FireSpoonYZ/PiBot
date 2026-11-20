@@ -432,6 +432,7 @@ export async function openHostService(options) {
       deferResume: true,
       centerRuntime: {
         snapshot,
+        centerUrl: (() => { try { return new URL(center.url).origin; } catch { return null; } })(),
         getClient: () => client ?? null,
         installer,
         // 内部 Vault 桥：每次调用取当前 client，重连后不残留旧对象；只供 vault 服务

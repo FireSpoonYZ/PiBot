@@ -53,6 +53,7 @@ import { createCuaTools } from './cua-tools.js';
 import { createShowerManager } from './shower-manager.js';
 import { createShowerTools } from './shower-tools.js';
 import { createRuntimeShower } from './runtime-shower.js';
+import { openRuntimeBrowserSetup } from './runtime-browser-setup.js';
 import { createVaultService } from './vault-service.js';
 import { createScheduleManager } from './host-schedules.js';
 import { createWebhookConsumer } from './host-webhooks.js';
@@ -382,7 +383,9 @@ export async function openRuntime(options) {
   let storage = null;
   let harness = null;
   let workContexts = null;
+  let browserSetup = null;
   let coreExtensions = [];
+  const botHostExtensionsFor = (botId) => browserSetup?.extensionsForBot(botId) ?? [];
   let online = false;
   let maintenance = false;
   let botModels = {};
@@ -496,7 +499,7 @@ export async function openRuntime(options) {
     // 与准入泵同口径解析/配置主会话：已映射直接返回；未映射用当前 Center 模型选择
     // 与 profile 创建（导入需要可写目标），随后应用人格/工具，保证导入与执行同一会话。
     getPrimary: async (bot) => {
-      const profile = botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, bot.botId, null);
+      const profile = botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, bot.botId, null, botHostExtensionsFor);
       let conversation = await getPrimaryConversation(harness, bot, {}, CTX);
       if (!conversation) {
         const modelRef = botModels[bot.botId]?.modelRef;
@@ -526,7 +529,7 @@ export async function openRuntime(options) {
     collaboration,
     // 工作决策的 stop/resume/advance 在同一 Bot 队列内执行；scope lane 在前，Bot lane 在后。
     admitBot: bots.admit,
-    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta),
+    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor),
   });
 
   // 统一图形环境：管理器按注入的可信原生桥接（Android）或当前平台（Windows/Linux）选后端；
@@ -816,6 +819,39 @@ export async function openRuntime(options) {
       }));
     }
     coreExtensions = registry.snapshot().installed().filter((extension) => extension !== finalBudgetExtension && extension !== codemodeExtension);
+    browserSetup = await openRuntimeBrowserSetup({
+      host,
+      registry,
+      getHarness: () => harness,
+      getWorkContexts: () => workContexts,
+      resolveConversationBot: services.resolveConversationBot,
+      nativeBridge,
+      isOnline: () => online && !maintenance,
+      isMaintenance: () => maintenance,
+      getCenterUrl: () => centerRuntime.centerUrl ?? null,
+      abortBotTurn: async (botId) => {
+        if (!harness) return;
+        const bot = host.getBot(botId);
+        if (!bot || bot.deviceId !== host.deviceId) return;
+        const [primaryIndex, workIndex] = await Promise.all([
+          harness.snapshot(PrimaryIndex, CTX),
+          harness.snapshot(WorkIndex, CTX),
+        ]);
+        const ids = new Set();
+        const primary = primaryIndex?.byPrimary?.[bot.primaryConversationId];
+        if (primary !== undefined) ids.add(primary);
+        for (const [key, binding] of Object.entries(workIndex?.byKey ?? {})) {
+          const pair = parseBindingKey(key);
+          if (pair !== null && pair[0] === bot.botId) ids.add(binding.nativeId);
+        }
+        const conversations = (await Promise.all([...ids].map((id) => harness.conversation(id, CTX)))).filter(Boolean);
+        await Promise.all(conversations.map((conversation) => conversation.abort(CTX)));
+      },
+      context: CTX,
+      createBotBrowserService: options?.createBotBrowserService,
+      createGoogleSetupService: options?.createGoogleSetupService,
+    });
+    browserSetup.prepareExistingBots();
     const durableDbPath = join(host.dataRoot, 'durable.sqlite');
     storage = await openNodeSqliteStorage(durableDbPath);
     await migrateBotSessionCheckpoints(storage, durableDbPath);
@@ -839,6 +875,9 @@ export async function openRuntime(options) {
     }
     try { await plugins.close(); } catch { /* close 失败不掩盖原错误 */ }
     try { await schedules.close(); } catch { /* close 失败不掩盖原错误 */ }
+    if (browserSetup) {
+      try { await browserSetup.close(); } catch { /* close 失败不掩盖原错误 */ }
+    }
     await vault.close();
     try { await shower.close(); } catch { /* close 失败不掩盖原错误 */ }
     try { await collaboration.close(); } catch { /* close 失败不掩盖原错误 */ }
@@ -858,7 +897,7 @@ export async function openRuntime(options) {
     harness,
     context: CTX,
     sessions,
-    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta),
+    getProfile: (botId, workMeta) => botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor),
     // sync 提交成功后附着等待中的 work watch（事务外，观察失败不影响导入）。
     onBound: (botId, scopeId, binding) => live.bindWork(botId, scopeId, binding),
   });
@@ -894,6 +933,8 @@ export async function openRuntime(options) {
     learningIdleSettleMs: options?.learningIdleSettleMs,
     collaboration,
     shower,
+    browserSetup,
+    botHostExtensionsFor,
     vault,
     schedules,
     setTasksBridge: (bridge) => { tasksBridge = bridge; },
@@ -912,7 +953,7 @@ export async function openRuntime(options) {
 }
 
 /** 构建该 Bot 的 SOUL、中心模型和明确的 core + 插件扩展视图。 */
-function botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta) {
+function botProfile(host, plugins, botModels, coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor) {
   const selection = botModels[botId] ?? {};
   const modelRef = selection.modelRef ?? null;
   let model;
@@ -922,10 +963,12 @@ function botProfile(host, plugins, botModels, coreExtensions, codemodeExtension,
   const soul = host.getBotSoul(botId).text;
   const instructions = workMeta ? workInstructions(soul, workMeta) : (soul === '' ? null : soul);
   const pluginExtensions = plugins.extensionsFor(botId);
+  const botHostExtensions = typeof botHostExtensionsFor === 'function' ? botHostExtensionsFor(botId) : [];
   const codemodeOnly = Boolean(selection.codemodeOnly);
   const codemodeEnabled = Boolean(selection.codemode) || codemodeOnly;
   const selectedExtensions = [
     ...coreExtensions,
+    ...botHostExtensions,
     ...(codemodeEnabled && codemodeExtension ? [codemodeExtension] : []),
     ...pluginExtensions,
     finalBudgetExtension,
@@ -953,7 +996,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, vault, schedules, setTasksBridge, resolveConversationBot }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, browserSetup, botHostExtensionsFor, vault, schedules, setTasksBridge, resolveConversationBot }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -1257,6 +1300,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     botAdmissions.suspend();
     plugins.suspend();
     plugins.abortActions();
+    browserSetup.suspend();
     closePromise ??= (async () => {
       // Seal secret access before waiting for any runtime work to drain.
       const vaultClose = vault.close();
@@ -1280,6 +1324,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       // 再关闭定时任务与 Shower：丢弃排队操作并释放本 Host 拥有的资源，不把在飞结果留到关库之后。
       try { await schedules.close(); } catch (err) { errors.push(err); }
       try { await vaultClose; } catch (err) { errors.push(err); }
+      try { await browserSetup.close(); } catch (err) { errors.push(err); }
       try { await shower.close(); } catch (err) { errors.push(err); }
       // 排空已接纳导入，但共享消息账本须保留到原生工具退出。
       try { await workContexts.quiesce(); } catch (err) { errors.push(err); }
@@ -1308,7 +1353,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     return workContexts.runMessageOperation(operation);
   };
 
-  const profileFor = (botId, workMeta) => botProfile(host, plugins, getBotModels(), coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta);
+  const profileFor = (botId, workMeta) => botProfile(host, plugins, getBotModels(), coreExtensions, codemodeExtension, finalBudgetExtension, botId, workMeta, botHostExtensionsFor);
 
   // 图片附件落盘：dataRoot/attachments/<botId>/<sha256>，随 Bot 删除清理（deleteBot/purge）。
   // 附件在 Bot lane 外也可上传（本地已鉴权动作），但归属校验先于任何写盘。
@@ -1785,6 +1830,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     await learning.cancelBot(botId);
     selfSoulQueue.delete(botId);
     await schedules.deleteBot(bot);
+    await browserSetup.releaseBot(botId);
     host.deleteBot({ botId });
     await attachmentStore.removeBot(botId);
     initializedBots.delete(botId);
@@ -2247,6 +2293,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
       await learning.cancelBot(botId);
       selfSoulQueue.delete(botId);
       await schedules.deleteBot(bot);
+      await browserSetup.releaseBot(botId);
       const res = host.deleteBot({ botId });
       await attachmentStore.removeBot(botId);
       initializedBots.delete(botId);
@@ -2923,6 +2970,8 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
     // 统一图形环境（Android/Windows/Linux 同签名）：status/frame 只读，takeover 复用 conversation.abort。
     vaultControl: vault.control,
+    browserControl: browserSetup.browserControl,
+    googleSetupControl: browserSetup.googleSetupControl,
     getShowerStatus: showerRuntime.getShowerStatus,
     createShowerSession: showerRuntime.createShowerSession,
     getShowerFrame: showerRuntime.getShowerFrame,
@@ -3134,12 +3183,14 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
   // 模型、工具、问卷等执行路径仍受 Center 门禁（运行时本就对 SDK 抛离线错）。
   // scope 查询是纯本地账本读取（不调度、不触碰模型），离线也放行给被动浏览 UI；
   // createScope/updateScope/publishUserMessage 等写路径仍受 Center 门禁。
-  const offlineMethods = new Set(['vaultControl', 'submit', 'getSubmission', 'wait', 'abort', 'cancelTaskDispatch', 'withdrawQueued', 'turns', 'inspect', 'history', 'watch', 'getBotBoard',
+  const offlineMethods = new Set(['vaultControl', 'browserControl', 'googleSetupControl', 'submit', 'getSubmission', 'wait', 'abort', 'cancelTaskDispatch', 'withdrawQueued', 'turns', 'inspect', 'history', 'watch', 'getBotBoard',
     'uploadAttachment', 'getAttachment',
     'scopeHistory', 'getScopeMessage', 'getScopeMessageDelivery', 'getScopeState', 'listScopeStates', 'listScopeReplicas']);
   const maintenanceAllowed = new Set([...offlineMethods, 'getCurrentDevice', 'getBot', 'getModelCatalog', 'getBotSoul', 'listScopes']);
   maintenanceAllowed.delete('submit');
   maintenanceAllowed.delete('uploadAttachment');
+  maintenanceAllowed.delete('browserControl');
+  maintenanceAllowed.delete('googleSetupControl');
   return new Proxy(runtime, {
     get(target, key) {
       const value = target[key];

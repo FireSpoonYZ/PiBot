@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { assertId, assertRevision, messageError } from './message-protocol.js';
 import { assertUuid } from './pending-store.js';
 import { openPendingClient } from './pending-client.js';
+import { BROWSER_SETUP_ERROR_CODES } from './browser-setup-protocol.js';
 import { collectBotDirectory } from './bot-directory.js';
 import { createLocalControlAdapter } from './local-control-adapter.js';
 import { openRemoteControl } from './remote-control-client.js';
@@ -49,6 +50,7 @@ export const INTENT_METHODS = new Set([
 const MAX_CA_PEM_BYTES = 65536; // 64 KiB
 const MAX_ERROR_MESSAGE_BYTES = 512;
 const STABLE_ERROR_CODES = new Set([...CONTROL_ERROR_CODES, 'REPLACED', 'PENDING_BUSY', 'CERTIFICATE_ERROR', 'OAUTH_ACCESS_REVOKED']);
+const BROWSER_SETUP_RESPONDED_CODES = new Set(BROWSER_SETUP_ERROR_CODES);
 const ADMIN_REQUEST_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
 const LOCAL_OFFLINE_OPS = new Set(['pending_enqueue', 'pending_get', 'pending_list', 'pending_cancel', 'ui_get', 'ui_set']);
 const CENTER_LIFECYCLE_OPS = new Set(['center_connect', 'center_status', 'center_disconnect', 'center_store', 'status', 'disconnect', 'unobserve']);
@@ -112,7 +114,8 @@ export function normalizeDesktopError(err, fallbackOutcome = 'unconfirmed') {
     code === 'CONTROL_UNAUTHORIZED' ||
     code === 'NOT_FOUND' ||
     code === 'FORBIDDEN' ||
-    code === 'BAD_RESPONSE'
+    code === 'BAD_RESPONSE' ||
+    BROWSER_SETUP_RESPONDED_CODES.has(code)
   ) {
     outcome = 'responded';
   }
@@ -962,6 +965,9 @@ export function openDesktopClient(options) {
     }
     if (resolved.origin !== 'https://center.invalid' || !resolved.pathname.startsWith('/api/')) {
       throw invalid('center_admin_request path must stay under /api/');
+    }
+    if (resolved.pathname === '/api/oauth/google/callback' || resolved.pathname.startsWith('/api/oauth/google/callback/')) {
+      throw invalid('center_admin_request cannot invoke OAuth callback endpoints directly');
     }
     return rawPath;
   }

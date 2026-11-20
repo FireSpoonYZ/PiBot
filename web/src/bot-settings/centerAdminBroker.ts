@@ -64,7 +64,7 @@ export function isCenterAuthOrBindError(failure: unknown): {
   const code = errorCodeOf(failure);
   const oauthRevoked = code === 'OAUTH_ACCESS_REVOKED' || code === 'OAUTH_REQUIRED';
   const notConnected = code === 'NOT_CONNECTED';
-  const unauthorized = code === 'CONTROL_UNAUTHORIZED';
+  const unauthorized = code === 'CONTROL_UNAUTHORIZED' || code === 'UNAUTHORIZED';
   return { oauthRevoked, notConnected, unauthorized };
 }
 

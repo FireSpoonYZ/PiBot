@@ -2,6 +2,12 @@
 
 import { readControlLive, readWorkLive } from './control-live-client.js';
 import { normalizeVaultControl, safeVaultError } from './vault-protocol.js';
+import {
+  normalizeBrowserControl,
+  normalizeGoogleSetupControl,
+  safeBrowserControlError,
+  safeGoogleSetupError,
+} from './browser-setup-protocol.js';
 
 export class ControlApiError extends Error {
   constructor(message, options = {}) {
@@ -395,6 +401,28 @@ export function createControlClient({ url, token, fetch: fetchImpl = globalThis.
           throw new ControlApiError('Vault request is unconfirmed.', { code: error.code, status: error.status });
         }
         const safe = safeVaultError(error);
+        throw new ControlApiError(safe.message, { code: safe.code, status: error?.status });
+      }
+    },
+    async browserControl(input, options) {
+      try {
+        return await request('POST', ['v1', 'browser', 'control'], { ...callOptions(options), body: normalizeBrowserControl(input) });
+      } catch (error) {
+        if (error instanceof ControlApiError && ['NETWORK', 'BAD_RESPONSE'].includes(error.code)) {
+          throw new ControlApiError('Browser control request is unconfirmed.', { code: error.code, status: error.status });
+        }
+        const safe = safeBrowserControlError(error);
+        throw new ControlApiError(safe.message, { code: safe.code, status: error?.status });
+      }
+    },
+    async googleSetupControl(input, options) {
+      try {
+        return await request('POST', ['v1', 'google', 'setup', 'control'], { ...callOptions(options), body: normalizeGoogleSetupControl(input) });
+      } catch (error) {
+        if (error instanceof ControlApiError && ['NETWORK', 'BAD_RESPONSE'].includes(error.code)) {
+          throw new ControlApiError('Google setup control request is unconfirmed.', { code: error.code, status: error.status });
+        }
+        const safe = safeGoogleSetupError(error);
         throw new ControlApiError(safe.message, { code: safe.code, status: error?.status });
       }
     },

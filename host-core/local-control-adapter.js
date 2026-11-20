@@ -12,6 +12,7 @@ import {
 import { normalizeLiveTarget } from './remote-live-protocol.js';
 import { SHOWER_ERROR_CODES } from './shower-protocol.js';
 import { VAULT_ERROR_CODES } from './vault-protocol.js';
+import { BROWSER_SETUP_ERROR_CODES } from './browser-setup-protocol.js';
 
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,512}$/;
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '[::1]']);
@@ -78,6 +79,7 @@ const LOCAL_DOMAIN_CODES = new Set([
   'MODEL_NO_VISION',
   ...SHOWER_ERROR_CODES,
   ...VAULT_ERROR_CODES,
+  ...BROWSER_SETUP_ERROR_CODES,
 ]);
 
 function controlError(code, outcome) {
@@ -321,6 +323,8 @@ const METHOD_HANDLERS = new Map([
   ['discoverCenterProviderModels', (control, params, signal) => control.discoverCenterProviderModels(params, { signal })],
   ['callCapabilityAction', (control, params, signal) => control.callCapabilityAction(params, { signal })],
   ['vaultControl', (control, params, signal) => control.vaultControl(params, { signal })],
+  ['browserControl', (control, params, signal) => control.browserControl(params, { signal })],
+  ['googleSetupControl', (control, params, signal) => control.googleSetupControl(params, { signal })],
   ['getShowerStatus', (control, params, signal) => control.getShowerStatus(showerTarget(params), { signal })],
   ['createShowerSession', (control, params, signal) =>
     control.createShowerSession(showerTarget(params), params.input ?? {}, { signal })],
