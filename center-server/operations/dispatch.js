@@ -7,6 +7,8 @@ const MAX_METADATA_BYTES = 16 * 1024;
 
 const SEND_FIELDS = ['deviceId', 'botId', 'requestId', 'message', 'routeId', 'metadata'];
 const GET_FIELDS = ['deviceId', 'botId', 'requestId'];
+const LIST_TARGETS_FIELDS = [];
+const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
 
 function fail(code, message) {
   throw Object.assign(new Error(message), { code });
@@ -72,6 +74,8 @@ function resolveActor(actor) {
   const botId = actor.botId.trim();
   return {
     kind: 'bot',
+    deviceId,
+    botId,
     callerId: `${deviceId}:${botId}`,
     callerKey: `bot:${deviceId}:${botId}`,
     botTargets: actor.botTargets,
@@ -118,6 +122,91 @@ function assertDeviceExists(bridge, deviceId) {
   if (!device || device.revokedAt !== null || deviceId === bridge.deviceId) {
     fail('NOT_FOUND', 'Target device not found');
   }
+}
+
+function isValidTargetId(value) {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= MAX_ID_LEN &&
+    value === value.trim() &&
+    value.isWellFormed() &&
+    !CONTROL_CHAR_RE.test(value)
+  );
+}
+
+function isActiveRegisteredDevice(bridge, deviceId) {
+  if (!isValidTargetId(deviceId) || deviceId.startsWith('center-')) return false;
+  if (typeof bridge?.deviceId === 'string' && deviceId === bridge.deviceId) return false;
+  if (typeof bridge?.registry?.get !== 'function') return false;
+  const device = bridge.registry.get(deviceId);
+  return Boolean(device && device.revokedAt === null);
+}
+
+function formatTargetBotName(bot, fallbackBotId) {
+  if (typeof bot.name === 'string' && bot.name.trim()) return bot.name;
+  if (typeof bot.role === 'string' && bot.role.trim()) return bot.role;
+  return fallbackBotId;
+}
+
+function resolveVisibleTargets(caller, deps) {
+  const rawTargets = caller.kind === 'oauth'
+    ? (Array.isArray(caller.botTargets) ? caller.botTargets : [])
+    : caller.requireTargets
+      ? (Array.isArray(caller.botTargets) ? caller.botTargets : [])
+      : [{ deviceId: caller.deviceId, botId: caller.botId }];
+
+  if (rawTargets.length === 0 || typeof deps.store.listDeviceBots !== 'function') {
+    return [];
+  }
+
+  const seen = new Set();
+  const activeBotsByDevice = new Map();
+  const targets = [];
+
+  for (const entry of rawTargets) {
+    if (!isPlainObject(entry)) continue;
+    const { deviceId, botId } = entry;
+    if (!isValidTargetId(deviceId) || !isValidTargetId(botId)) continue;
+    const key = `${deviceId}\0${botId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    if (!activeBotsByDevice.has(deviceId)) {
+      if (!isActiveRegisteredDevice(deps.bridge, deviceId)) {
+        activeBotsByDevice.set(deviceId, null);
+      } else {
+        const rawBots = deps.store.listDeviceBots(deviceId);
+        const byBotId = new Map();
+        if (Array.isArray(rawBots)) {
+          for (const bot of rawBots) {
+            if (
+              isPlainObject(bot) &&
+              typeof bot.botId === 'string' &&
+              (bot.deviceId === undefined || bot.deviceId === deviceId) &&
+              !bot.archivedAt
+            ) {
+              byBotId.set(bot.botId, bot);
+            }
+          }
+        }
+        activeBotsByDevice.set(deviceId, byBotId);
+      }
+    }
+
+    const deviceBots = activeBotsByDevice.get(deviceId);
+    if (!deviceBots) continue;
+    const bot = deviceBots.get(botId);
+    if (!bot) continue;
+
+    targets.push({
+      deviceId,
+      botId,
+      name: formatTargetBotName(bot, botId),
+    });
+  }
+
+  return targets;
 }
 
 function notifyWebhookReady(deps, deviceId) {
@@ -204,6 +293,12 @@ export function createHandlers(deps) {
       });
       if (!event) fail('NOT_FOUND', 'Dispatch message not found');
       return formatDispatchView(event);
+    },
+
+    async dispatch_list_targets(args = {}, actor) {
+      const caller = resolveActor(actor);
+      fields(args, LIST_TARGETS_FIELDS);
+      return { targets: resolveVisibleTargets(caller, deps) };
     },
   };
 }

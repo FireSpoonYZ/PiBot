@@ -80,4 +80,15 @@ export const operations = [
     readOnly: true,
     destructive: false,
   }),
+  defineOperation({
+    name: 'dispatch_list_targets',
+    description:
+      'List active, non-archived Bot targets authorized for the authenticated caller so messages can be dispatched without manually copying deviceId/botId or granting pibot:bots:read. ' +
+      'Reads targets exclusively from the trusted OAuth actor grant and returns only { targets: [{ deviceId, botId, name }] }, without exposing SOUL documents, cwd, descriptions, or tokens.',
+    properties: {},
+    required: [],
+    readOnly: true,
+    destructive: false,
+    audiences: ['oauth'],
+  }),
 ];
