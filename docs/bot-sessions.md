@@ -28,12 +28,27 @@ scope 消息账本（MessageLog）仍是消息事实的唯一权威，主会话�
   主会话提交 `host.user-message`（`data.requestId` / `data.turn` 稳定）；`turn.sender.kind`
   只由可信边界写 user 或 host，wire 自带的任意 origin/author 字段绝不采信；缺席
   origin 的遗留队列条目按 host 记，但仍有稳定 `requestId`/`turn` 元数据。
-- 冻结轮（frozen turn）记录 requestId/taskId/kind/scopeId/sender/replyTarget 等
-  路由事实，由 `sessions.beforeRequest` 按实际 SDK 任务/输入归属判定并写入请求路由指引；
-  `sessions.getTurn` 只对匹配的当前任务返回。`workNativeId` 仅内部使用，不出现在
-  UI/公开元数据。
-- 对外发布（统一 send_to 与 scope publication）用冻结轮的 replyTarget 与
-  stale-input/member 校验；peer/room 轮不会把工作草稿自动发给用户。
+- 冻结轮（frozen turn）在 Host 侧完整保留 `requestId`/`taskId`/`kind`/`scopeId`/
+  `sender`/`replyTarget`、权限、回复关联与账本状态不变；`sessions.getTurn` 只对匹配
+  的当前任务返回，`workNativeId` 仅内部使用，不出现在 UI/公开元数据。持续冻结并归档
+  每一轮的原因是：对端同伴的迟到回复会在原轮结束后经账本唤醒新一轮，Host 必须依赖
+  持久冻结轮与 `replyOrigin`/`responseMessageId` 关联把迟到回复准确续接回原始
+  `primary` 或发起 scope 的 `replyTarget`，并执行成员与 stale-input 校验，而不依赖
+  模型正文或摘要。
+- 模型侧轮级路由采用紧凑默认策略（借鉴 Grok 风格将普通主会话设为静默默认、仅非默认
+  来源附带简短指引的思路，不宣称或复制其内部实现）：普通人类发起且 `replyTarget` 为
+  `primary` 的轮次不生成合成路由消息，直接按静态行为指令作为常规主会话回复（无通用
+  显式发布工具，不改主会话流式输出、已存储历史或路由校验）；其他来源/目标（同伴 DM、
+  room、同伴回复续接回主会话、Host/定时触发）由 Host 生成瞬态 `SystemMessage`
+  （`content: ''`、`sections: { 'host-turn-routing': <短说明> }`、`timestamp: 0`，
+  不含其他 section 或工具），在插件完成最终上下文投影后**前插**到最终 `messages` 头部，
+  永不作为 `user` 消息追加，也不写入持久化历史。该说明只含来源/行为与默认去向类别，
+  不暴露 `requestId` 或原始冻结轮 JSON；传输继续沿用同一 JSON `messages` 封包，不从
+  旧版文本前缀猜测可信元数据，完整行为由 Host 与 Center 成对更新协同生效。
+- 对外发布（统一 `send_to` 与 scope publication）继续以冻结轮的受信 `replyTarget`
+  与 stale-input/member 校验为准，不新增发送工具。调用 `send_to` 时若省略 `scopeId`，
+  Host 会解析为当前轮已校验的 DM/room `replyTarget`，同时继续支持显式传入 `scopeId`；
+  peer/room 轮的普通助手文本不会自动发给用户或对端。
 - 外发 request 类消息经 `sessions.recordOutgoing` 记录原始回复去向；
   `sessions.markRepliesObserved` 记账已消费回复水位，未被消费的新回复才续接。
 
@@ -73,9 +88,10 @@ scope 消息账本（MessageLog）仍是消息事实的唯一权威，主会话�
   释放 Bot 准入后唤醒用户队列。恢复 scope 时同样优先处理排队用户。
 - **旧数据**：work 原生会话历史不删除；成员工作 API 继续可读旧历史，新的共享执行
   在主会话中呈现并带正确归属，不把其他 scope 的工作标成所选 scope。
-  普通聊天记录只显示 primary 轮：dm/room 归因的协作过程轮、scope 导入消息与 host
-  触发记录一律隐藏（replyTarget 为 primary 的生成与回复仍正常显示），协作内容只在
-  专门通信页呈现。
+  普通聊天记录只显示 `primary` 路径：普通人类 primary 轮以及同伴回复续接且
+  `replyTarget` 为 `primary` 的生成与回复仍正常可见并保持原有流式体验；dm/room 归因
+  的协作过程轮、scope 导入消息与 host 触发记录在普通主聊天中保持隐藏，仅在专门通信页
+  与成员工作视图中可见。
 - **离线**：`scopeHistory`/`getScopeMessage`/`getScopeMessageDelivery`/`getScopeState`/
   `listScopeStates`/`listScopeReplicas` 为纯本地账本读取，离线放行给被动浏览；
   scope 写路径仍受 Center 门禁。HTTP `OFFLINE_ALLOWED` 放行同一批被动只读
@@ -89,9 +105,11 @@ scope 消息账本（MessageLog）仍是消息事实的唯一权威，主会话�
   primary profile 创建并应用人格。
 - `sessions` 注入 `createWorkDecisionRuntime`、`createWorkContextRuntime`、
   `createTurnAdmission`、`createCommunicationTools`。
-- `GenerationTask.beforeRequest` 顺序：`sessions.beforeRequest` →
-  `decisions.beforeRequest` → `plugins.prepareContext` → RequestContext 计数 →
-  `plugins.beforeRequest`；`cap-final-budget` 与 `decisions.checkBudget` 仍在最后。
+- `GenerationTask.beforeRequest` 顺序：`sessions.beforeRequest`（冻结轮并在非默认
+  来源/目标时构造瞬态 `host-turn-routing` `SystemMessage`）→ `decisions.beforeRequest`
+  → `plugins.prepareContext` → RequestContext 计数 → `plugins.beforeRequest` →
+  将瞬态 `host-turn-routing` `SystemMessage`（如有）**前插**到插件计算后的最终投影
+  `messages` 头部；`cap-final-budget` 与 `decisions.checkBudget` 仍在最后。
 - 生命周期：close 顺序不变（turns → decisions → bot lane 排空 → schedules/shower →
   workContexts quiesce → live → collaboration → harness/plugins 关闭），
   session 状态全部在 Durable 文档内，随 harness 关闭自然落盘；冷恢复走既有

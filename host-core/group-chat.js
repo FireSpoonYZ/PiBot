@@ -235,11 +235,8 @@ export function isPotentialPassPrefix(text) {
   return !trimmed || isPassContent(trimmed) || /^\(?\s*(?:p(?:a(?:s(?:s\s*\)?\.?)?)?)?)?$/i.test(trimmed);
 }
 
-export function buildGroupRedriveNote(scopeId) {
-  const toolLabel = typeof scopeId === 'string' && scopeId
-    ? `send_to (scopeId ${JSON.stringify(scopeId)})`
-    : 'send_to';
-  return `\n(Redelivery: your previous attempt at this turn was interrupted by a direct message to you. The room has NOT seen any reply from you for the messages above — anything you said or did while handling that direct message stayed in that private chat. If you already did the work, send the result to this room with ${toolLabel} now; otherwise take the turn normally.)`;
+export function buildGroupRedriveNote(_scopeId) {
+  return '\n(Redelivery: your previous attempt at this turn was interrupted by a direct message to you. The room has NOT seen any reply from you for the messages above — anything you said or did while handling that direct message stayed in that private chat. If you already did the work, send the result to this room with send_to (omit scopeId to target this room) now; otherwise take the turn normally.)';
 }
 
 export function formatGroupLine(message, viewerId) {
@@ -293,12 +290,11 @@ export function buildGroupTurnWakePrompt({
   group,
   peers = [],
   newMessages = [],
-  scopeId,
 }) {
   const selfLabel = typeof memberName === 'string' && memberName.trim() ? memberName.trim() : 'this Bot';
   const lines = [
     formatGroupChatTag(group, peers),
-    `You are ${selfLabel}, participating in group chat ${describeGroup(group)} (scopeId ${JSON.stringify(scopeId)}).`,
+    `You are ${selfLabel}, participating in group chat ${describeGroup(group)}.`,
   ];
   if (Array.isArray(peers) && peers.length > 0) {
     lines.push(
@@ -319,28 +315,24 @@ export function buildGroupTurnWakePrompt({
   }
   lines.push(
     '',
-    `The ONLY way to speak in this room is calling send_to with scopeId ${JSON.stringify(scopeId)}. Keep room replies concise, natural, and in character. Speak only if you have something genuinely useful to contribute (or were directly asked/@mentioned); if you have nothing new worth adding, send "(pass)" via send_to (or end the turn without sending) to stay silent. Never leak private 1:1 context.`,
+    'The ONLY way to speak in this room is calling send_to (omit scopeId to publish to this room; pass an explicit scopeId only when intentionally messaging a different scope). Keep room replies concise, natural, and in character. Speak only if you have something genuinely useful to contribute (or were directly asked/@mentioned); if you have nothing new worth adding, send "(pass)" via send_to (or end the turn without sending) to stay silent. Never leak private 1:1 context.',
   );
   return lines.join('\n');
 }
 
 export function buildAgentInboundWakePrompt({
   peerName,
-  peerBotId,
-  scopeId,
+  replyTargetName,
   category,
   text,
   replyTarget,
-  originRequestId,
 }) {
-  const senderLabel = typeof peerName === 'string' && peerName.trim()
-    ? peerName.trim()
-    : (typeof peerBotId === 'string' && peerBotId ? `Peer Bot (${peerBotId})` : 'a peer Bot');
+  const senderLabel = typeof peerName === 'string' && peerName.trim() ? peerName.trim() : 'a peer Bot';
 
   // Case 1: Late DM reply resuming a turn that originated from the user's primary chat
   if (category === 'reply' && (!replyTarget || replyTarget.kind === 'primary')) {
     const lines = [
-      `${AGENT_INBOUND_WAKE_CUE} ${senderLabel} replied to your earlier delegated request (DM scopeId ${JSON.stringify(scopeId)}${originRequestId ? `, originRequestId ${JSON.stringify(originRequestId)}` : ''}).`,
+      `${AGENT_INBOUND_WAKE_CUE} ${senderLabel} replied to your earlier delegated request.`,
       'Your user can already see this incoming reply in your 1:1 conversation.',
     ];
     if (typeof text === 'string' && text.trim()) {
@@ -353,10 +345,28 @@ export function buildAgentInboundWakePrompt({
     return lines.join('\n');
   }
 
-  // Case 2: Inbound DM request (or multi-hop reply whose upstream origin is another DM request)
-  const targetScopeId = replyTarget?.scopeId ?? scopeId;
+  // Case 2a: Late DM reply whose upstream reply target is another DM request
+  if (category === 'reply') {
+    const targetLabel = typeof replyTargetName === 'string' && replyTargetName.trim()
+      ? replyTargetName.trim()
+      : 'the dispatching peer Bot';
+    const lines = [
+      `${AGENT_INBOUND_WAKE_CUE} ${senderLabel} replied to your earlier delegated request.`,
+      'This reply resumes an earlier peer DM task (not the human user typing directly). Your work in this turn runs visibly inside your 1:1 conversation page with the user.',
+    ];
+    if (typeof text === 'string' && text.trim()) {
+      lines.push('', `${senderLabel}: ${clampBlock(text, 2_000)}`);
+    }
+    lines.push(
+      '',
+      `Use this result to continue any remaining work, then deliver the concrete result back to ${targetLabel} by calling send_to (omit scopeId for this turn's verified DM reply target; pass an explicit scopeId only when intentionally messaging a different scope). Plain assistant text is visible to your user in this chat, NOT transmitted to peer Bots — only a real send_to tool call reaches the peer. Once send_to succeeds and no local work remains, finish the turn cleanly. Only if no reply is needed, call send_to with text "(pass)".`,
+    );
+    return lines.join('\n');
+  }
+
+  // Case 2b: Direct inbound DM request from a peer Bot
   const lines = [
-    `${AGENT_INBOUND_WAKE_CUE} A direct message arrived from peer Bot ${senderLabel} (DM scopeId ${JSON.stringify(scopeId)}).`,
+    `${AGENT_INBOUND_WAKE_CUE} A direct message arrived from peer Bot ${senderLabel}.`,
     'This is another assistant reaching out asynchronously — not the human user typing directly. Your work in this turn runs visibly inside your 1:1 conversation page with the user.',
   ];
   if (typeof text === 'string' && text.trim()) {
@@ -364,20 +374,19 @@ export function buildAgentInboundWakePrompt({
   }
   lines.push(
     '',
-    `Complete the requested work using your real tools, then deliver the concrete result back to the task dispatcher by invoking send_to with scopeId ${JSON.stringify(targetScopeId)}. Plain assistant text is visible to your user in this chat, NOT transmitted to ${senderLabel} — only a real send_to tool call reaches the peer Bot. Once send_to succeeds and no local work remains, finish the turn cleanly. Only if this message is purely informational (an FYI with no task or question to answer), call send_to with text "(pass)" to confirm no reply is needed.`,
+    `Complete the requested work using your real tools, then deliver the concrete result back to the task dispatcher by calling send_to (omit scopeId for this turn's verified DM reply target; pass an explicit scopeId only when intentionally messaging a different scope). Plain assistant text is visible to your user in this chat, NOT transmitted to ${senderLabel} — only a real send_to tool call reaches the peer Bot. Once send_to succeeds and no local work remains, finish the turn cleanly. Only if this message is purely informational (an FYI with no task or question to answer), call send_to with text "(pass)" to confirm no reply is needed.`,
   );
   return lines.join('\n');
 }
 
 export function buildClosingSendNudgePrompt({
   peerName,
-  scopeId,
   attempt = 1,
 }) {
   const targetLabel = typeof peerName === 'string' && peerName.trim() ? peerName.trim() : 'the dispatching peer Bot';
   return [
-    `[Host closing-reply check #${attempt}] Your previous turn ended without calling send_to to ${targetLabel} (scopeId ${JSON.stringify(scopeId)}).`,
+    `[Host closing-reply check #${attempt}] Your previous turn ended without calling send_to to ${targetLabel}.`,
     `Plain assistant text in this conversation is ONLY shown locally to your user and is NEVER delivered to ${targetLabel} — so ${targetLabel} received nothing and is still waiting on your result.`,
-    `If your work produced the answer or result ${targetLabel} asked for, deliver it right now by invoking the send_to tool with scopeId ${JSON.stringify(scopeId)} (make a real tool call, not plain text). If the task is genuinely unfinished, finish it and call send_to. Only if the incoming message was a pure FYI that requires no reply at all, invoke send_to with scopeId ${JSON.stringify(scopeId)} and text "(pass)" so the turn can settle cleanly.`,
+    `If your work produced the answer or result ${targetLabel} asked for, deliver it right now by invoking send_to (omit scopeId for this turn's verified DM reply target; make a real tool call, not plain text). If the task is genuinely unfinished, finish it and call send_to. Only if the incoming message was a pure FYI that requires no reply at all, invoke send_to with text "(pass)" (omit scopeId) so the turn can settle cleanly.`,
   ].join('\n');
 }

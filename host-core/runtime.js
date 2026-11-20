@@ -722,11 +722,13 @@ export async function openRuntime(options) {
           // 构造模型输入视图时去掉旧版自动生成的前置路径块，不改写存储库与显式用户文本。
           const sanitizedMessages = sanitizeLegacyAttachmentPromptMessages(request.messages, cutoffView);
           const sanitizedRequest = sanitizedMessages === request.messages ? request : { ...request, messages: sanitizedMessages };
-          // 统一会话冻结轮最先：sessions 判定/恢复本轮来源与回复目标（prepend-only，
-          // 只把可信 Host 路由指引追加到 request 头部）。该指引是本 helper 的明确
-          // prepend-only 产物，用长度差切出，不用对象 identity/正文分类。
+          // 统一会话冻结轮最先：sessions 判定/恢复本轮来源与回复目标，并在非普通人类
+          // 主聊轮时于 request 头部前置一条瞬态 SystemMessage 路由指引（普通人类主聊轮
+          // 不生成合成路由消息）。该指引是本 helper 的明确 prepend-only 产物，用长度差
+          // 切出，不用对象 identity/正文分类。
           const routed = await sessions.beforeRequest(sanitizedRequest, api, context);
-          const routingMessages = routed.messages.slice(0, routed.messages.length - sanitizedRequest.messages.length);
+          const routingCount = Math.max(0, (routed?.messages?.length ?? 0) - sanitizedRequest.messages.length);
+          const routingMessages = routingCount > 0 ? routed.messages.slice(0, routingCount) : [];
           await decisions.beforeRequest(routed, api, context);
           // prepareContext 收原始 request（不带 Host 注入）：BC 等上下文贡献返回的
           // 完整视图不能覆盖、也不重复计费本轮 Host 控制指引；持久 prepared 预算
@@ -734,7 +736,7 @@ export async function openRuntime(options) {
           const requestView = await plugins.prepareContext(sanitizedRequest, api, context);
           // SDK 同口径预算基线：取 checkpoint.cutoff 的权威上下文视图，
           // 用 estimateContext（最新 assistant usage + 尾部估计）算原始历史，
-          // 再按有序子序列 + 增量把 prepareContext（如 BC 投影、路由指引）的实际
+          // 再按有序子序列 + 增量把 prepareContext（如 BC 投影）的实际
           // 有效请求计入 tokenCount；JSON 克隆内容匹配，BC 整体替换只计投影。
           const baselineMessages = sanitizeLegacyAttachmentPromptMessages(cutoffView.messages, cutoffView);
           const baselineView = baselineMessages === cutoffView.messages ? cutoffView : { ...cutoffView, messages: baselineMessages };
@@ -750,9 +752,12 @@ export async function openRuntime(options) {
           }, context);
           if (!online) throw errWithCode('center is offline', 'CENTER_OFFLINE');
           const finalView = await plugins.beforeRequest(requestView, api, context);
-          // 只把 Host 本轮控制指引放到投影/recall 之后追加一次：任何插件
-          // （含会整体重建视图的 BC prepare）都不能丢掉冻结轮约束。
-          return { ...finalView, messages: [...finalView.messages, ...routingMessages] };
+          // 只在需要时把瞬态 SystemMessage 路由指引前置到投影/recall 之后的最终视图头部：
+          // 任何插件（含会整体重建视图的 BC prepare）都不能丢掉冻结轮约束，且末尾真实消息
+          // 角色、正文/图片与 toolCall/toolResult 配对保持完整。
+          return routingMessages.length > 0
+            ? { ...finalView, messages: [...routingMessages, ...(finalView?.messages ?? [])] }
+            : finalView;
         } catch (err) {
           if (!context.abortSignal?.aborted) {
             // Host 侧准备失败：先把安全诊断写入 GenerationFailureState（契约 A，
