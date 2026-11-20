@@ -88,6 +88,7 @@ export async function invokeOwnerAction(actions, method, path, { params = {}, bo
   let sent = false;
   let payload;
   const reply = {
+    header() { return this; },
     code(value) { status = value; return this; },
     send(value) { sent = true; payload = value; return this; },
   };

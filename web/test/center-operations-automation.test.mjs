@@ -148,7 +148,7 @@ test('automation contract descriptors and handlers match 1-to-1 and exclude forb
   assert.equal(new Set(names).size, names.length, 'operation names must be unique');
   assert.ok(names.length >= 15);
   for (const op of operations) {
-    assert.match(op.name, /^automation_(schedule|task|webhook)_/);
+    assert.match(op.name, /^automation_(schedule|task|webhook|google_rule)_/);
     assert.equal(typeof op.description, 'string');
     assert.ok(op.description.length > 0);
     assert.equal(typeof op.readOnly, 'boolean');
