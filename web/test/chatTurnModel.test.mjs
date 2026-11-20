@@ -3,6 +3,7 @@ import test from 'node:test';
 import { projectLiveState } from '../../host-core/runtime-live-projection.js';
 import { normalizeLiveSnapshot } from '../../host-core/remote-live-protocol.js';
 import {
+  chatTurnsWithoutToolOutput,
   formatTurnDuration,
   formatWorkingElapsed,
   latestEntryChannel,
@@ -539,6 +540,49 @@ test('1v1 DM send_to inbound message, working steps, and outbound send_to render
   });
   assert.ok(sendTool?.argSummary?.startsWith('→ 总控助手:'));
   assert.equal(summarizeToolArgs('send_to', { scopeId: 'scope_dm_1', text: ' (pass) ' }), '(pass)');
+});
+
+test('hiding tool output keeps reply order, failures, and only live prompts that need input', () => {
+  const user = { id: 'user', role: 'user', entryId: 1, text: 'Check status' };
+  const logTool = { id: 'log', name: 'read', status: 'done', output: 'raw output' };
+  const onlyTools = { id: 'logs-only', role: 'assistant', entryId: 2, text: '', tools: [logTool] };
+  const failure = { ...onlyTools, id: 'failure', entryId: 3, error: 'model_error' };
+  const questionnaire = {
+    id: 'question', name: 'questionnaire', status: 'running', presentationLive: true,
+    presentation: { kind: 'questionnaire', status: 'pending' },
+  };
+  const vault = {
+    id: 'vault', name: 'vault_unlock', status: 'running', presentationLive: true,
+    presentation: { kind: 'vault-unlock', status: 'pending' },
+  };
+  const historicalQuestion = { ...questionnaire, id: 'past-question', presentationLive: false };
+  const nestedCall = { id: 'script', name: 'codemode', status: 'running', children: [logTool, vault] };
+  const settledCall = { ...nestedCall, id: 'settled-script', status: 'done', children: [questionnaire] };
+  const firstText = { id: 'first', kind: 'text', text: 'Checking', entryId: '4' };
+  const lastText = { id: 'last', kind: 'text', text: 'Status is good', entryId: '5' };
+  const tools = [logTool, questionnaire, nestedCall, historicalQuestion, settledCall];
+  const reply = {
+    id: 'reply', role: 'assistant', entryId: 5, text: 'Checking\n\nStatus is good',
+    thinking: 'internal reasoning', tools, toolSummary: tools.map(tool => tool.name),
+    blocks: [
+      { id: 'thinking', kind: 'thinking', text: 'internal reasoning' },
+      firstText,
+      { id: 'calls', kind: 'tools', tools },
+      lastText,
+    ],
+  };
+
+  const visible = chatTurnsWithoutToolOutput([user, onlyTools, failure, reply]);
+  assert.deepEqual(visible.map(turn => turn.id), ['user', 'failure', 'reply']);
+  assert.equal(visible[0], user);
+  assert.equal(visible[1].error, 'model_error');
+  assert.equal(visible[1].tools, undefined);
+  assert.equal(visible[2].thinking, undefined);
+  assert.equal(visible[2].toolSummary, undefined);
+  assert.deepEqual(visible[2].blocks, [firstText, { id: 'calls', kind: 'tools', tools: [questionnaire, vault] }, lastText]);
+  assert.deepEqual(visible[2].tools, [questionnaire, vault]);
+  assert.equal(reply.blocks[2].tools, tools);
+  assert.equal(logTool.output, 'raw output');
 });
 
 test('projectLiveState preserves pi.reset marker across empty, windowed, compacted, and pre-reset failure states', () => {

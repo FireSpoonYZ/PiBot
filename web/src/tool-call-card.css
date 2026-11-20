@@ -31,9 +31,6 @@
 .tool-call-card.is-error > .tool-call-header .tool-call-icon,
 .tool-call-card.is-error > .tool-call-header .tool-call-state,
 .tool-call-error { color: var(--danger); }
-.tool-call-card.is-quiet-error > .tool-call-header { border-color: var(--line); background: color-mix(in srgb, var(--bg) 88%, transparent); }
-.tool-call-card.is-quiet-error > .tool-call-header .tool-call-icon,
-.tool-call-card.is-quiet-error > .tool-call-header .tool-call-state { color: var(--muted); }
 .tool-call-card.is-cancelled > .tool-call-header .tool-call-icon,
 .tool-call-card.is-interrupted > .tool-call-header .tool-call-icon,
 .tool-call-card.is-incomplete > .tool-call-header .tool-call-icon { color: var(--muted); }

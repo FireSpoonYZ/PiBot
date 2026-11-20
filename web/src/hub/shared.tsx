@@ -109,6 +109,7 @@ import {
   formatTurnDuration,
   latestEntryChannel,
   parseHistoryEntries,
+  pendingToolPrompts,
   resolveActiveTurnStartedAt,
   type ChatToolCallItem,
   type ChatTurnBlock,
@@ -130,7 +131,7 @@ import {
   type PickedImageSource,
 } from '../imageAttachments';
 import type { ImageAttachment } from '../../../host-core/index.js';
-import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useHideToolOutput, useText } from '../ui';
+import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useText } from '../ui';
 
 export const uuid = () =>
   typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -896,86 +897,43 @@ export function extractSmartArgEntries(
 
 export function TurnToolCallsSection({
   tools,
-  scopeKey,
-  active,
-  disabled,
-  variant,
-  requesterName,
-  hideToolOutput,
-  onSubmitQuestionnaire,
-  onSubmitVaultUnlock,
-  onOpenTask,
-  onConfirmTaskPlan,
-  onAnswerTaskPrompt,
   t,
+  collapseOutput,
+  presentationOnly = false,
+  ...cardProps
 }: Omit<ToolCallCardProps, 'tool'> & {
   tools: ChatToolCallItem[];
-  variant?: 'mobile' | 'desktop';
-  requesterName?: string;
-  hideToolOutput?: boolean;
   t: (zh: string, en: string) => string;
 }) {
-  const [prefHideToolOutput] = useHideToolOutput();
-  const effectiveHideToolOutput = hideToolOutput ?? prefHideToolOutput;
-
-  const hasInteractiveOrSendTo = tools.some(
+  const hasPresentationOrSendTo = tools.some(
     tool =>
-      Boolean(tool.presentation && readToolPresentation(tool.presentation)) ||
+      Boolean(readToolPresentation(tool.presentation)) ||
       (!tool.parentCallId && tool.name === 'send_to' && Boolean(tool.sendTo && (tool.sendTo.text || tool.sendTo.silentPass))),
-  );
-  const hasActiveOrErrorOrInteractive = tools.some(
-    tool =>
-      tool.status === 'running' ||
-      tool.status === 'error' ||
-      Boolean(tool.presentation && readToolPresentation(tool.presentation)),
-  );
-  const shouldAggregate = effectiveHideToolOutput
-    ? !hasInteractiveOrSendTo
-      ? tools.length >= 1
-      : tools.length >= 3
-    : tools.length >= 3;
-  const shouldAutoExpand = effectiveHideToolOutput ? hasInteractiveOrSendTo : hasActiveOrErrorOrInteractive;
-  const [groupOpen, setGroupOpen] = useState(() =>
-    effectiveHideToolOutput ? hasInteractiveOrSendTo : !shouldAggregate || hasActiveOrErrorOrInteractive,
-  );
+  ) || pendingToolPrompts(tools).length > 0;
+  const shouldAggregate = tools.length >= 3 || (collapseOutput && !hasPresentationOrSendTo);
+  const defaultOpen = !collapseOutput || hasPresentationOrSendTo;
+  const [groupOpen, setGroupOpen] = useState(defaultOpen);
+  useEffect(() => setGroupOpen(defaultOpen), [collapseOutput, defaultOpen]);
 
-  useEffect(() => {
-    if (shouldAutoExpand) {
-      setGroupOpen(true);
-    }
-  }, [shouldAutoExpand]);
+  const renderCards = () => tools.map(tool => (
+    <ToolCallCard key={tool.id} tool={tool} collapseOutput={collapseOutput} presentationOnly={presentationOnly} {...cardProps} />
+  ));
 
-  const totalDurationMs = useMemo(
-    () => tools.reduce((sum, item) => sum + (typeof item.durationMs === 'number' && item.durationMs > 0 ? item.durationMs : 0), 0),
-    [tools],
-  );
-  const runningTool = tools.find(item => item.status === 'running');
-  const errorCount = tools.filter(item => item.status === 'error').length;
-  const showGroupError = errorCount > 0 && (!effectiveHideToolOutput || groupOpen);
-
+  if (presentationOnly) return <div className="bot-chat-tools">{renderCards()}</div>;
   if (!shouldAggregate) {
     return (
       <div className="bot-chat-tools" role="list" aria-label={t('工具调用', 'Tool calls')}>
-        {tools.map(tool => (
-          <ToolCallCard
-            key={tool.id}
-            tool={tool}
-            scopeKey={scopeKey}
-            active={active}
-            disabled={disabled}
-            variant={variant}
-            requesterName={requesterName}
-            hideToolOutput={effectiveHideToolOutput}
-            onSubmitQuestionnaire={onSubmitQuestionnaire}
-            onSubmitVaultUnlock={onSubmitVaultUnlock}
-            onOpenTask={onOpenTask}
-            onConfirmTaskPlan={onConfirmTaskPlan}
-            onAnswerTaskPrompt={onAnswerTaskPrompt}
-          />
-        ))}
+        {renderCards()}
       </div>
     );
   }
+
+  const totalDurationMs = tools.reduce(
+    (sum, item) => sum + (typeof item.durationMs === 'number' && item.durationMs > 0 ? item.durationMs : 0), 0,
+  );
+  const runningTool = tools.find(item => item.status === 'running');
+  const errorCount = tools.filter(item => item.status === 'error').length;
+  const showGroupError = errorCount > 0 && (!collapseOutput || groupOpen);
 
   const groupTitle = runningTool
     ? tools.length === 1
@@ -1012,23 +970,7 @@ export function TurnToolCallsSection({
 
       {groupOpen && (
         <div className="bot-chat-tools is-grouped" role="list" aria-label={t('工具调用', 'Tool calls')}>
-          {tools.map(tool => (
-            <ToolCallCard
-              key={tool.id}
-              tool={tool}
-              scopeKey={scopeKey}
-              active={active}
-              disabled={disabled}
-              variant={variant}
-              requesterName={requesterName}
-              hideToolOutput={effectiveHideToolOutput}
-              onSubmitQuestionnaire={onSubmitQuestionnaire}
-              onSubmitVaultUnlock={onSubmitVaultUnlock}
-              onOpenTask={onOpenTask}
-              onConfirmTaskPlan={onConfirmTaskPlan}
-              onAnswerTaskPrompt={onAnswerTaskPrompt}
-            />
-          ))}
+          {renderCards()}
         </div>
       )}
     </div>

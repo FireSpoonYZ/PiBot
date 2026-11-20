@@ -872,6 +872,15 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
     attachments: [uploadedAtt.id],
   });
 
+  const liveUserReqIds = () =>
+    (liveState?.history ?? [])
+      .filter((it) => it.kind === 'host.user-message')
+      .map((it) => it.attribution?.messageId);
+  const histUserReqIds = async () =>
+    (await controlClient.history(bot.botId, { limit: 50 })).items
+      .filter((it) => it.kind === 'host.user-message')
+      .map((it) => it.data?.requestId);
+
   await waitUntil(
     () => (liveState?.queuedItems?.length ?? 0) === 2,
     { label: '2 followUp items projected in live.queuedItems', onTimeout: () => liveState },
@@ -887,6 +896,8 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
       { requestId: 'req-follow-withdraw', delivery: 'followUp', attachmentCount: 1 },
     ],
   );
+  assert.deepEqual(liveUserReqIds(), ['req-turn-1']);
+  assert.deepEqual(await histUserReqIds(), ['req-turn-1']);
 
   // Withdraw ONLY req-follow-withdraw WITHOUT stopping Turn 1!
   const singleWithdraw = await localAdapter(server.deviceId, 'withdrawQueued', {
@@ -996,6 +1007,8 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
     },
     { label: 'steer submissions placed into native pi.inbox' },
   );
+  assert.deepEqual(liveUserReqIds(), ['req-turn-1']);
+  assert.deepEqual(await histUserReqIds(), ['req-turn-1']);
 
   // Release Turn 1's ls tool call -> SDK runs ls -> injects steer items at postTools boundary!
   releaseTurn1ToolCall.resolve();
@@ -1015,6 +1028,12 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
       }),
     },
   );
+  await waitUntil(
+    () => liveUserReqIds().includes('req-follow-keep'),
+    { label: 'consumed followUp reflected in live.history', onTimeout: () => liveState },
+  );
+  assert.deepEqual(liveUserReqIds(), ['req-turn-1', 'req-promote-steer', 'req-direct-steer', 'req-follow-keep']);
+  assert.deepEqual(await histUserReqIds(), ['req-turn-1', 'req-promote-steer', 'req-direct-steer', 'req-follow-keep']);
 
   // Verify Turn 1's post-tool LLM request saw both steer messages BEFORE req-follow-keep!
   const postToolCall = seenRequests.find(
@@ -1081,6 +1100,11 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
     () => (liveState?.queuedItems?.length ?? 0) === 2,
     { label: 'both inbox + queue items visible in live.queuedItems', onTimeout: () => liveState },
   );
+  assert.equal(liveUserReqIds().includes('req-abort-inbox'), false);
+  assert.equal(liveUserReqIds().includes('req-abort-queue'), false);
+  const histBeforeAbort = await histUserReqIds();
+  assert.equal(histBeforeAbort.includes('req-abort-inbox'), false);
+  assert.equal(histBeforeAbort.includes('req-abort-queue'), false);
 
   const abortResult = await localAdapter(server.deviceId, 'abort', { botId: bot.botId });
   assert.deepEqual(abortResult, {
@@ -1103,6 +1127,11 @@ test('end-to-end full stack: followUp queue, withdrawQueued without stopping, st
     () => (liveState?.queuedItems?.length ?? 0) === 0 && liveState?.activity?.phase === 'stopped',
     { label: 'queue cleared and run settled as stopped after abort', onTimeout: () => liveState },
   );
+  assert.equal(liveUserReqIds().includes('req-abort-inbox'), false);
+  assert.equal(liveUserReqIds().includes('req-abort-queue'), false);
+  const histAfterAbort = await histUserReqIds();
+  assert.equal(histAfterAbort.includes('req-abort-inbox'), false);
+  assert.equal(histAfterAbort.includes('req-abort-queue'), false);
   const webhookStopPendingBeforeClear = liveState?.activity?.webhookStopPending === true;
   const boardBeforeClear = await controlClient.getBotBoard({ botIds: [bot.botId] });
   assert.equal(boardBeforeClear.errors.length, 0);

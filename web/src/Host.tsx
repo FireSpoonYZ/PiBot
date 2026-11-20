@@ -128,6 +128,7 @@ import {
 } from './botActivity';
 import { ChatTurnMeta } from './ChatTurnMeta';
 import {
+  chatTurnsWithoutToolOutput,
   hasAssistantVisibleContent,
   latestEntryChannel,
   parseHistoryEntries,
@@ -165,7 +166,7 @@ import {
   type PickedImageSource,
 } from './imageAttachments';
 import type { ImageAttachment } from '../../host-core/index.js';
-import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useHideToolOutput, useText } from './ui';
+import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useCollapseToolOutput, useHideToolOutput, useText } from './ui';
 import { SendButtonIcon } from './SendButtonIcon';
 import { deleteBotAndVerify, formatActionableDirectoryError, isDefiniteSendFailure, isRemoteBotOnline } from './botOperations';
 
@@ -318,6 +319,8 @@ export function HostPage({
   onOpenSystemSettings,
 }: HostPageProps = {}) {
   const t = useText();
+  const [hideToolOutput] = useHideToolOutput();
+  const [collapseToolOutput] = useCollapseToolOutput();
   const action = useAction();
   const activeCenter = useContext(ActiveCenter);
   const centerConn = useCenterConnection();
@@ -1766,9 +1769,6 @@ export function HostPage({
   }, [applyCutoff, getCutoff, updateBotMeta]);
 
   const activeChatScope = activeBot ? scopeForBot(activeBot) : '';
-  // 恢复 pending 已带终态回执（done/unanswered）时首屏不再补乐观用户气泡，其真实轮次
-  // 由全量历史终态回读补齐；suppress 按 requestId 比对，仅本次进入 seed 的快照生效。
-  const suppressSeededPendingRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (!activeBot || screen !== 'chat' || !activeChatScope) return;
     if (currentChatScope.current === activeChatScope) {
@@ -1785,11 +1785,6 @@ export function HostPage({
     const entry = stored ? { ...stored, pending: { ...stored.pending, botKey: activeBot.key } } : undefined;
     if (entry) pendingByBot.current.set(activeChatScope, entry);
     chatSubmissionRef.current = entry ? { botKey: activeBot.key, requestId: entry.pending.requestId, afterEntryId: entry.pending.afterEntryId } : undefined;
-    suppressSeededPendingRef.current =
-      entry?.pending.requestId &&
-      (entry.receipt?.status === 'done' || entry.receipt?.status === 'unanswered')
-        ? entry.pending.requestId
-        : undefined;
     setChatPending(entry?.pending);
     setChatReceipt(entry?.receipt);
     setChatDraft(readChatDraft(activeChatScope));
@@ -2331,12 +2326,6 @@ export function HostPage({
       chatLoadingScope.current = scopeKey ? { key: scopeKey } : null;
       setChatHistoryLoading(Boolean(scopeKey) && cachedHistory.length === 0);
     }
-    // 恢复 pending 带终态回执（done/unanswered）只 suppress 本次进入的快照。
-    suppressSeededPendingRef.current =
-      saved?.pending.requestId &&
-      (saved.receipt?.status === 'done' || saved.receipt?.status === 'unanswered')
-        ? saved.pending.requestId
-        : undefined;
     setChatPending(saved?.pending);
     setChatReceipt(saved?.receipt);
     setChatDraft(scopeKey ? readChatDraft(scopeKey) : '');
@@ -4674,41 +4663,8 @@ ${newer}` : draftSnapshot;
     };
     const rawSorted = [...byId.values()].sort((a, b) => numericId(a) - numericId(b));
     const effectiveClearedAfter = Math.max(currentClearedAfter, maxResetEntryId(rawSorted));
-    const sorted = filterHistoryAfterCutoff(rawSorted, effectiveClearedAfter);
-    // 恢复 pending 带终态回执（done/unanswered，本次进入由 openBotChat/scope 切换 seed 的
-    // requestId）：首屏不再单独补乐观用户气泡，其真实轮次由全量历史终态回读补齐；
-    // queued/placed/未确认请求仍照常占位。上一代际的 pending 不得重新渲染成乐观气泡。
-    const suppressPendingBubble =
-      Boolean(chatPending?.requestId) &&
-      suppressSeededPendingRef.current === chatPending?.requestId &&
-      (chatReceipt?.status === 'done' || chatReceipt?.status === 'unanswered');
-    if (chatPending?.botKey === activeBot.key && !suppressPendingBubble && chatPending.afterEntryId >= effectiveClearedAfter) {
-      const pendingText = chatPending.text.trim();
-      const pendingAttCount = chatPending.attachments?.length ?? 0;
-      const alreadyInHistory = parseHistoryEntries(sorted, effectiveClearedAfter).some(
-        turn =>
-          turn.role === 'user' &&
-          turn.entryId > chatPending.afterEntryId &&
-          turn.text === pendingText &&
-          (pendingText !== '' || (turn.attachments?.length ?? 0) === pendingAttCount),
-      );
-      if (!alreadyInHistory) {
-        sorted.push({
-          id: chatPending.afterEntryId + 0.5,
-          kind: 'pi.user',
-          model: [
-            {
-              role: 'user',
-              content: chatPending.text,
-              ...(chatPending.attachments?.length ? { attachments: chatPending.attachments.map((id) => ({ id })) } : {}),
-              ...(typeof chatPending.submittedAt === 'number' ? { timestamp: chatPending.submittedAt } : {}),
-            },
-          ],
-        });
-      }
-    }
-    return sorted;
-  }, [chatHistory, effectiveChatLive, activeBot, currentClearedAfter, chatPending, chatReceipt]);
+    return filterHistoryAfterCutoff(rawSorted, effectiveClearedAfter);
+  }, [chatHistory, effectiveChatLive, activeBot, currentClearedAfter]);
 
   // generation.attribution 缺失但 tools 仍活跃时，用合并历史中最新执行来源判断当前是否群聊后台工作；
   // 1v1 Bot 私聊（dm）与用户主聊（primary）均在当前 Bot 的 1v1 对话页内实时流式展示。
@@ -4717,7 +4673,7 @@ ${newer}` : draftSnapshot;
       (liveGenerationAttr?.channel ?? latestEntryChannel(allChatItems, activeBot?.botId)) === 'room',
   );
   // 群聊工作的流式文本/工具名不渲染进 1v1 聊天忙状态。
-  const displayLiveToolName = chatLiveIsCollaborative ? null : activeLiveToolName;
+  const displayLiveToolName = chatLiveIsCollaborative || hideToolOutput ? null : activeLiveToolName;
   const displayGeneratingText = chatLiveIsCollaborative ? '' : liveGeneratingText;
 
   const allChatTurns = useMemo(() => {
@@ -4742,22 +4698,26 @@ ${newer}` : draftSnapshot;
     [botActivity],
   );
 
+  const displayedChatTurns = useMemo(
+    () => hideToolOutput ? chatTurnsWithoutToolOutput(allChatTurns) : allChatTurns,
+    [allChatTurns, hideToolOutput],
+  );
   const visibleTurns = useMemo(() => {
     const q = chatSearchQuery.trim().toLowerCase();
-    if (!chatSearchOpen || !q) return allChatTurns;
-    return allChatTurns.filter(
+    if (!chatSearchOpen || !q) return displayedChatTurns;
+    return displayedChatTurns.filter(
       turn =>
         turn.text.toLowerCase().includes(q) ||
-        Boolean(
+        (!hideToolOutput && Boolean(
           turn.tools?.some(
             tool =>
               tool.name.toLowerCase().includes(q) ||
               (tool.argSummary && tool.argSummary.toLowerCase().includes(q)) ||
               (tool.output && tool.output.toLowerCase().includes(q)),
           ),
-        ),
+        )),
     );
-  }, [allChatTurns, chatSearchOpen, chatSearchQuery]);
+  }, [displayedChatTurns, chatSearchOpen, chatSearchQuery, hideToolOutput]);
 
   const markViewedBoardResult = useMarkViewedBoardResult(board, activeBoardTarget, active && screen === 'chat');
   useEffect(() => {
@@ -6281,6 +6241,8 @@ ${newer}` : draftSnapshot;
                               <TurnToolCallsSection
                                 key={block.id}
                                 tools={block.tools}
+                                collapseOutput={collapseToolOutput}
+                                presentationOnly={hideToolOutput}
                                 scopeKey={toolScopeKey}
                                 active={isBotBusy}
                                 disabled={Boolean(activeBot?.archivedAt) || !botPanelConnected}
@@ -6330,6 +6292,8 @@ ${newer}` : draftSnapshot;
                           {turn.tools && turn.tools.length > 0 && (
                             <TurnToolCallsSection
                               tools={turn.tools}
+                              collapseOutput={collapseToolOutput}
+                              presentationOnly={hideToolOutput}
                               scopeKey={toolScopeKey}
                               active={isBotBusy}
                               disabled={Boolean(activeBot?.archivedAt) || !botPanelConnected}
@@ -10556,6 +10520,7 @@ function HubSettingsView({
 
   const [voice, setVoice] = useState<HostVoiceSettings>();
   const [hideToolOutput, setHideToolOutput] = useHideToolOutput();
+  const [collapseToolOutput, setCollapseToolOutput] = useCollapseToolOutput();
 
   useLayoutEffect(() => {
     const previous = previousPage.current;
@@ -11090,7 +11055,7 @@ function HubSettingsView({
             <Row
               icon={<Code2 />}
               title={t('隐藏工具输出', 'Hide Tool Output')}
-              subtitle={t('默认折叠工具调用过程与原始输出', 'Collapse tool calls and hide raw output by default')}
+              subtitle={t('只显示回复与待操作请求', 'Show replies and prompts that need your input')}
               trailing={(
                 <Switch
                   label={t('隐藏工具输出', 'Hide Tool Output')}
@@ -11099,6 +11064,20 @@ function HubSettingsView({
                 />
               )}
             />
+            {!hideToolOutput && (
+              <Row
+                icon={<Code2 />}
+                title={t('默认折叠工具输出', 'Collapse Tool Output by Default')}
+                subtitle={t('保留工具调用摘要，点击可展开详情', 'Show tool summaries that can be expanded')}
+                trailing={(
+                  <Switch
+                    label={t('默认折叠工具输出', 'Collapse Tool Output by Default')}
+                    checked={collapseToolOutput}
+                    onChange={setCollapseToolOutput}
+                  />
+                )}
+              />
+            )}
             <div className="hst-row-static">
               <span className="bs-row-icon" aria-hidden="true"><AudioLines size={17} /></span>
               <span className="bs-row-text"><span className="bs-row-title">{t('语音朗读倍速', 'Speech Rate')}</span></span>
