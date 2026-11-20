@@ -70,7 +70,8 @@ export function createPlugin({ installationId, version, dataDir, host }) {
       const memory = createRuntimeHindsight({ host: localHost, getHarness: host.getHarness,
         getWorkContexts: host.getWorkContexts, getWorkActivity: host.getWorkActivity,
         context: host.context, documents: host.documents, countMessageTokens: host.countMessageTokens,
-        tryRunBackgroundTask: (id, task) => host.tryRunBackgroundTask(id, task), config, getBotPolicy });
+        tryRunBackgroundTask: (id, task) => host.tryRunBackgroundTask(id, task), config, getBotPolicy,
+        dataPrivacy: host.dataPrivacy ?? null });
       const projectBankId = hindsightBankId(deviceId, botId, { kind: 'primary' }, config.topic);
       const sharedBankId = hindsightBankId(deviceId, botId, { kind: 'shared' }, config.topic);
       const buildPiConfig = (cwd = botDataDir) => {
@@ -121,6 +122,12 @@ export function createPlugin({ installationId, version, dataDir, host }) {
             throw Object.assign(new Error('Conversation does not belong to this Bot.'), { code: 'BOT_CONTEXT_REQUIRED' });
           }
           check();
+          if (WRITE_ACTIONS.has(operation) && typeof host.dataPrivacy?.assertExportAllowed === 'function') {
+            await host.dataPrivacy.assertExportAllowed(api.conversationId, {
+              operation: 'hindsight:' + operation,
+              callContext: context,
+            });
+          }
           return memory.fromTool(api, context, operation, input);
         },
         async runPiTool(api, _context, isWrite, runFn) {
@@ -131,6 +138,12 @@ export function createPlugin({ installationId, version, dataDir, host }) {
           check();
           if (isWrite && mode !== 'read-write') {
             throw Object.assign(new Error('Hindsight is read-only.'), { code: 'EXTENSION_READ_ONLY' });
+          }
+          if (isWrite && typeof host.dataPrivacy?.assertExportAllowed === 'function') {
+            await host.dataPrivacy.assertExportAllowed(api.conversationId, {
+              operation: 'hindsight:catalog-write',
+              callContext: _context,
+            });
           }
           return await runFn();
         },

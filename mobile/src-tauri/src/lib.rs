@@ -42,9 +42,12 @@ const ALLOWED_METHODS: &[&str] = &[
   "stop",
   "openSystemSettings",
   "openCenter",
+  // 最小受限外部系统浏览器打开器（仅受信 Center HTTPS origin / Google 授权与控制台页）
+  "openExternalAuth",
   "reconnect",
   "clientLaunchTarget",
   "hide",
+  "haptic",
   // 系统选图/拍照：Kotlin 侧 UI-local 原生能力（返回限尺寸 base64 图片，不进 bridge 服务）
   "pickImages",
   // Bot 屏幕：Kotlin 侧 UI-local 原生覆盖层（只观看/接管已有屏幕，不进 bridge 服务）
@@ -96,6 +99,7 @@ const ALLOWED_METHODS: &[&str] = &[
 /// 不占普通准入槽的本地 UI 动作：普通槽满时仍可执行，不产生 bridge 请求堆积。
 const CLEANUP_METHODS: &[&str] = &[
   "hide",
+  "haptic",
   "reconnect",
   // 屏幕布局/状态/关闭是高频本地 UI 动作，不占普通准入槽。
   "screenLayout",

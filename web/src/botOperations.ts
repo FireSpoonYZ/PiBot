@@ -20,7 +20,7 @@ export function isDefiniteSendFailure(error: unknown): boolean {
   if (outcome === 'not-sent') return true;
   return outcome === 'responded' && new Set([
     'INVALID_ARGUMENT', 'INVALID_CWD', 'BOT_NOT_FOUND', 'BOT_ARCHIVED',
-    'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'MODEL_REQUIRED', 'MODEL_NOT_FOUND', 'REQUEST_CONFLICT',
+    'SCOPE_NOT_FOUND', 'SCOPE_FORBIDDEN', 'MODEL_REQUIRED', 'MODEL_NOT_FOUND', 'MODEL_NO_VISION', 'REQUEST_CONFLICT',
   ]).has(code ?? '');
 }
 

@@ -730,6 +730,10 @@ public final class BotHostManager {
 
     /** 固定控制调用：不隐式启动；返回完整 {type:'result',id,result} 信封，不做二次包装。 */
     public CompletableFuture<JSONObject> call(String method, JSONObject params) {
+        // 调度交接方法仅限同包 BotHostSchedules 经 scheduleCall 调用，禁止任何 UI/外部控制路径触达。
+        if ("getScheduleFence".equals(method) || "submitScheduled".equals(method)) {
+            return failedFuture(new BridgeException("INVALID_ARGUMENT", "not-sent", "方法不允许"));
+        }
         if ("uiScheduleTask".equals(method)) {
             return onControl(() -> {
                 Gen g = gen;

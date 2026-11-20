@@ -24,6 +24,87 @@ export const LIVE_MAX_SUBSCRIPTIONS = 128;
 export const LIVE_OPEN_TIMEOUT_MS = 20000;
 export const MAX_LIVE_JSON_BYTES = 8388608; // 8 MiB per frame, UTF-8 bytes
 
+// Backwards-compatible WebSocket HTTP Upgrade header negotiation for rolling
+// upgrades. Legacy peers ignore unknown request headers and omit the response
+// header, so new peers cleanly detect legacy peers before any frame is sent.
+export const LIVE_EXTENSIONS_HEADER = 'x-pibot-live-extensions';
+export const LIVE_EXTENSIONS_HEADER_WIRE = 'X-PiBot-Live-Extensions';
+export const LIVE_EXT_DURABLE_WAITS = 'durable-waits-v1';
+export const LIVE_EXT_HOST_SOURCES = 'host-sources-v1';
+export const SUPPORTED_LIVE_EXTENSIONS = Object.freeze([
+  LIVE_EXT_DURABLE_WAITS,
+  LIVE_EXT_HOST_SOURCES,
+]);
+export const NO_LIVE_EXTENSIONS = Object.freeze({
+  durableWaits: false,
+  hostSources: false,
+});
+export const ALL_LIVE_EXTENSIONS = Object.freeze({
+  durableWaits: true,
+  hostSources: true,
+});
+
+const MAX_LIVE_EXTENSIONS_HEADER_BYTES = 512;
+const MAX_LIVE_EXTENSIONS_TOKENS = 32;
+
+export function normalizeLiveExtensions(value) {
+  if (!value || typeof value !== 'object') return NO_LIVE_EXTENSIONS;
+  const durableWaits = value.durableWaits === true;
+  const hostSources = value.hostSources === true;
+  if (!durableWaits && !hostSources) return NO_LIVE_EXTENSIONS;
+  if (durableWaits && hostSources) return ALL_LIVE_EXTENSIONS;
+  return Object.freeze({ durableWaits, hostSources });
+}
+
+export function parseLiveExtensionsHeader(raw) {
+  let joined;
+  if (typeof raw === 'string') {
+    joined = raw;
+  } else if (Array.isArray(raw)) {
+    if (raw.length > 16 || raw.some((item) => typeof item !== 'string')) return NO_LIVE_EXTENSIONS;
+    joined = raw.join(',');
+  } else {
+    return NO_LIVE_EXTENSIONS;
+  }
+  if (!joined || !joined.isWellFormed() || Buffer.byteLength(joined, 'utf8') > MAX_LIVE_EXTENSIONS_HEADER_BYTES) {
+    return NO_LIVE_EXTENSIONS;
+  }
+  let durableWaits = false;
+  let hostSources = false;
+  const parts = joined.split(',');
+  if (parts.length > MAX_LIVE_EXTENSIONS_TOKENS) return NO_LIVE_EXTENSIONS;
+  for (const part of parts) {
+    const token = part.trim();
+    if (token === LIVE_EXT_DURABLE_WAITS) durableWaits = true;
+    else if (token === LIVE_EXT_HOST_SOURCES) hostSources = true;
+  }
+  return normalizeLiveExtensions({ durableWaits, hostSources });
+}
+
+export function formatLiveExtensionsHeader(extensions) {
+  const ext = normalizeLiveExtensions(extensions);
+  const tokens = [];
+  if (ext.durableWaits) tokens.push(LIVE_EXT_DURABLE_WAITS);
+  if (ext.hostSources) tokens.push(LIVE_EXT_HOST_SOURCES);
+  return tokens.length > 0 ? tokens.join(',') : null;
+}
+
+export function intersectLiveExtensions(local, remote) {
+  const a = normalizeLiveExtensions(local);
+  const b = normalizeLiveExtensions(remote);
+  return normalizeLiveExtensions({
+    durableWaits: a.durableWaits && b.durableWaits,
+    hostSources: a.hostSources && b.hostSources,
+  });
+}
+
+function resolveValidationExtensions(options) {
+  if (options && options.liveExtensions !== undefined) {
+    return normalizeLiveExtensions(options.liveExtensions);
+  }
+  return ALL_LIVE_EXTENSIONS;
+}
+
 const END_REASONS = new Set([
   'stopped',
   'cancelled',
@@ -38,7 +119,7 @@ const DEFAULT_DIRECTORY_LIMIT = 20;
 const MAX_DIRECTORY_LIMIT = 200;
 const MAX_DIRECTORY_ITEMS = 200;
 
-const STATE_KEYS = new Set([
+const LEGACY_STATE_KEYS = new Set([
   'history',
   'historyTruncated',
   'lastEntryId',
@@ -51,8 +132,8 @@ const STATE_KEYS = new Set([
   'turnAdmission',
   'activity',
   'learning',
-  'durableWaits',
 ]);
+const EXTENDED_STATE_KEYS = new Set([...LEGACY_STATE_KEYS, 'durableWaits']);
 const HISTORY_ITEM_KEYS = new Set(['id', 'kind', 'messages', 'attribution']);
 // Live attribution is already a safe projection (Host-side whitelist + bounds in
 // runtime-live-projection); validate the exact shape here so a forged Host cannot
@@ -65,12 +146,14 @@ const ATTRIBUTION_KINDS = new Set(['user', 'bot', 'host']);
 const ATTRIBUTION_CHANNELS = new Set(['primary', 'dm', 'room']);
 const ATTRIBUTION_CATEGORIES = new Set(['public', 'notice', 'request', 'reply']);
 const ATTRIBUTION_DIRECTIONS = new Set(['incoming', 'outgoing']);
+const LEGACY_HOST_SOURCE_TYPES = new Set(['webhook', 'google-workspace-rule']);
+const EXTENDED_HOST_SOURCE_TYPES = new Set(['webhook', 'google-workspace-rule', 'schedule', 'task_dispatch']);
 const ATTRIBUTION_STRING_KEYS = new Set([
   'botId', 'deviceId', 'name', 'scopeId', 'messageId', 'replyTo', 'rootId', 'createdAt',
 ]);
 const MAX_ATTRIBUTION_CHARS = 256;
 
-function normalizeLiveAttribution(value) {
+function normalizeLiveAttribution(value, ext = ALL_LIVE_EXTENSIONS) {
   if (!isPlainObject(value)) throw invalid('history item attribution must be a plain object');
   rejectUnknownFields(value, ATTRIBUTION_KEYS, 'history item attribution');
   if (!ATTRIBUTION_KINDS.has(value.kind)) {
@@ -81,7 +164,8 @@ function normalizeLiveAttribution(value) {
   }
   const out = { kind: value.kind, channel: value.channel };
   if (value.sourceType !== undefined) {
-    if (value.kind !== 'host' || !['schedule', 'webhook', 'task_dispatch'].includes(value.sourceType)) {
+    const allowedSources = ext.hostSources ? EXTENDED_HOST_SOURCE_TYPES : LEGACY_HOST_SOURCE_TYPES;
+    if (value.kind !== 'host' || !allowedSources.has(value.sourceType)) {
       throw invalid('attribution sourceType must be a known Host event source');
     }
     out.sourceType = value.sourceType;
@@ -108,7 +192,7 @@ function normalizeLiveAttribution(value) {
   }
   return out;
 }
-const MESSAGE_KEYS = new Set([
+const LEGACY_MESSAGE_KEYS = new Set([
   'role',
   'text',
   'truncated',
@@ -121,10 +205,10 @@ const MESSAGE_KEYS = new Set([
   'nestedCalls',
   'nestedCallsTruncated',
   'presentation',
-  'durableWait',
   'attachments',
   'blocks',
 ]);
+const EXTENDED_MESSAGE_KEYS = new Set([...LEGACY_MESSAGE_KEYS, 'durableWait']);
 // User messages may carry uploaded image metadata only (no base64 data, no
 // paths); bounds mirror the upload contract in attachments.js.
 const ATTACHMENT_KEYS = new Set(['id', 'name', 'mimeType', 'size', 'width', 'height']);
@@ -261,7 +345,7 @@ function normalizeLiveBlocks(value, label) {
   });
   return out;
 }
-const TOOL_KEYS = new Set([
+const LEGACY_TOOL_KEYS = new Set([
   'callId',
   'name',
   'status',
@@ -276,8 +360,8 @@ const TOOL_KEYS = new Set([
   'durationMs',
   'error',
   'presentation',
-  'durableWait',
 ]);
+const EXTENDED_TOOL_KEYS = new Set([...LEGACY_TOOL_KEYS, 'durableWait']);
 
 function normalizeDurableWaits(value) {
   // Matches the Host wait store's per-Bot active limit. This is identity only,
@@ -625,22 +709,23 @@ function normalizeBotLearningState(value) {
   };
 }
 
-function normalizeLiveState(state) {
+function normalizeLiveState(state, ext = ALL_LIVE_EXTENSIONS) {
   if (!isPlainObject(state)) throw invalid('state must be a plain object');
-  rejectUnknownFields(state, STATE_KEYS, 'state');
+  rejectUnknownFields(state, ext.durableWaits ? EXTENDED_STATE_KEYS : LEGACY_STATE_KEYS, 'state');
   if (!Array.isArray(state.history)) throw invalid('state.history must be an array');
+  const messageKeys = ext.durableWaits ? EXTENDED_MESSAGE_KEYS : LEGACY_MESSAGE_KEYS;
   for (const item of state.history) {
     if (!isPlainObject(item)) throw invalid('state.history items must be plain objects');
     rejectUnknownFields(item, HISTORY_ITEM_KEYS, 'history item');
     assertNonNegativeSafeInteger(item.id, 'history item id');
     assertText(item.kind, 'history item kind');
     if (item.attribution !== undefined && item.attribution !== null) {
-      item.attribution = normalizeLiveAttribution(item.attribution);
+      item.attribution = normalizeLiveAttribution(item.attribution, ext);
     }
     if (!Array.isArray(item.messages)) throw invalid('history item messages must be an array');
     for (const message of item.messages) {
       if (!isPlainObject(message)) throw invalid('history messages must be plain objects');
-      rejectUnknownFields(message, MESSAGE_KEYS, 'history message');
+      rejectUnknownFields(message, messageKeys, 'history message');
       if (!MESSAGE_ROLES.has(message.role)) {
         throw invalid("message role must be 'user', 'assistant' or 'toolResult'");
       }
@@ -667,8 +752,10 @@ function normalizeLiveState(state) {
       // Strict whitelist validation; replaces the value so any extra fields a
       // forged host added inside a presentation cannot reach clients.
       if (message.presentation !== undefined) message.presentation = normalizeToolPresentation(message.presentation);
-      if (message.durableWait !== undefined && message.role !== 'toolResult') throw invalid('durableWait is allowed only on tool results');
-      checkDurableWait(message.durableWait, message.presentation, message.toolName);
+      if (ext.durableWaits) {
+        if (message.durableWait !== undefined && message.role !== 'toolResult') throw invalid('durableWait is allowed only on tool results');
+        checkDurableWait(message.durableWait, message.presentation, message.toolName);
+      }
       // Metadata-only attachments are allowed on user messages; forged
       // attachments on assistant/toolResult messages are rejected.
       if (message.attachments !== undefined) {
@@ -705,13 +792,14 @@ function normalizeLiveState(state) {
       state.generation.blocks = normalizeLiveBlocks(state.generation.blocks, 'generation blocks');
     }
     if (state.generation.attribution !== undefined && state.generation.attribution !== null) {
-      state.generation.attribution = normalizeLiveAttribution(state.generation.attribution);
+      state.generation.attribution = normalizeLiveAttribution(state.generation.attribution, ext);
     }
   }
   if (!Array.isArray(state.tools)) throw invalid('state.tools must be an array');
+  const toolKeys = ext.durableWaits ? EXTENDED_TOOL_KEYS : LEGACY_TOOL_KEYS;
   for (const tool of state.tools) {
     if (!isPlainObject(tool)) throw invalid('tools must be plain objects');
-    rejectUnknownFields(tool, TOOL_KEYS, 'tool');
+    rejectUnknownFields(tool, toolKeys, 'tool');
     assertText(tool.callId, 'tool callId');
     assertText(tool.name, 'tool name');
     assertText(tool.status, 'tool status');
@@ -727,7 +815,7 @@ function normalizeLiveState(state) {
       throw invalid('tool outcome must be ok, error, cancelled or interrupted');
     }
     if (tool.presentation !== undefined) tool.presentation = normalizeToolPresentation(tool.presentation);
-    checkDurableWait(tool.durableWait, tool.presentation, tool.name);
+    if (ext.durableWaits) checkDurableWait(tool.durableWait, tool.presentation, tool.name);
   }
   assertNonNegativeSafeInteger(state.queuedCount, 'state.queuedCount');
   if (state.queuedItems !== undefined) {
@@ -746,8 +834,98 @@ function normalizeLiveState(state) {
   if (state.learning !== undefined && state.learning !== null) {
     state.learning = normalizeBotLearningState(state.learning);
   }
-  if (state.durableWaits !== undefined) state.durableWaits = normalizeDurableWaits(state.durableWaits);
+  if (ext.durableWaits) {
+    if (state.durableWaits !== undefined) {
+      state.durableWaits = normalizeDurableWaits(state.durableWaits);
+    } else if (Object.prototype.hasOwnProperty.call(state, 'durableWaits')) {
+      delete state.durableWaits;
+    }
+  }
   return state;
+}
+
+function downgradeAttributionForPeer(attribution, allowHostSources) {
+  if (allowHostSources || !attribution || typeof attribution !== 'object' || attribution.kind !== 'host') {
+    return attribution;
+  }
+  if (attribution.sourceType === 'schedule') {
+    const { sourceType: _dropped, ...rest } = attribution;
+    return rest;
+  }
+  if (attribution.sourceType === 'task_dispatch') {
+    return { ...attribution, sourceType: 'webhook' };
+  }
+  return attribution;
+}
+
+/**
+ * Project a live snapshot for a specific peer's negotiated wire extensions.
+ * Never mutates the input snapshot. When a peer did not negotiate an extension:
+ *  - durableWaits off: omits state.durableWaits and message/tool durableWait
+ *    flags so legacy peers neither reject unknown fields nor receive live-only
+ *    authority they cannot handle.
+ *  - hostSources off: maps schedule -> legacy host (no sourceType) and
+ *    task_dispatch -> webhook, while preserving google-workspace-rule and
+ *    webhook markers expected on D.
+ */
+export function projectLiveSnapshotForPeer(snapshot, peerExtensions) {
+  const ext = normalizeLiveExtensions(peerExtensions);
+  if (ext.durableWaits && ext.hostSources) return snapshot;
+  if (!isPlainObject(snapshot) || !isPlainObject(snapshot.state)) return snapshot;
+  const state = snapshot.state;
+  const nextState = { ...state };
+  if (!ext.durableWaits) {
+    delete nextState.durableWaits;
+  }
+  if (Array.isArray(state.history)) {
+    nextState.history = state.history.map((item) => {
+      if (!isPlainObject(item)) return item;
+      let changed = false;
+      const nextItem = { ...item };
+      if (item.attribution !== undefined && item.attribution !== null) {
+        const nextAttr = downgradeAttributionForPeer(item.attribution, ext.hostSources);
+        if (nextAttr !== item.attribution) {
+          nextItem.attribution = nextAttr;
+          changed = true;
+        }
+      }
+      if (!ext.durableWaits && Array.isArray(item.messages)) {
+        let msgsChanged = false;
+        const nextMessages = item.messages.map((message) => {
+          if (!isPlainObject(message) || !Object.prototype.hasOwnProperty.call(message, 'durableWait')) {
+            return message;
+          }
+          msgsChanged = true;
+          const { durableWait: _dropped, ...rest } = message;
+          return rest;
+        });
+        if (msgsChanged) {
+          nextItem.messages = nextMessages;
+          changed = true;
+        }
+      }
+      return changed ? nextItem : item;
+    });
+  }
+  if (!ext.hostSources && isPlainObject(state.generation) && state.generation.attribution !== undefined && state.generation.attribution !== null) {
+    const nextAttr = downgradeAttributionForPeer(state.generation.attribution, false);
+    if (nextAttr !== state.generation.attribution) {
+      nextState.generation = { ...state.generation, attribution: nextAttr };
+    }
+  }
+  if (!ext.durableWaits && Array.isArray(state.tools)) {
+    let toolsChanged = false;
+    const nextTools = state.tools.map((tool) => {
+      if (!isPlainObject(tool) || !Object.prototype.hasOwnProperty.call(tool, 'durableWait')) {
+        return tool;
+      }
+      toolsChanged = true;
+      const { durableWait: _dropped, ...rest } = tool;
+      return rest;
+    });
+    if (toolsChanged) nextState.tools = nextTools;
+  }
+  return { ...snapshot, state: nextState };
 }
 
 /**
@@ -762,7 +940,7 @@ function normalizeLiveState(state) {
  * so oversized frames are rejected before deep state validation. When a
  * target is supplied, botId and the scopeId presence/value must match exactly.
  */
-export function normalizeLiveSnapshot(frame, target) {
+export function normalizeLiveSnapshot(frame, target, options) {
   if (!isPlainObject(frame)) throw invalid('snapshot frame must be a plain object');
   rejectUnknownFields(frame, new Set(['type', 'botId', 'conversationId', 'sequence', 'state', 'scopeId']), 'snapshot frame');
   if (frame.type !== 'snapshot') throw invalid('snapshot frame type must be snapshot');
@@ -794,12 +972,13 @@ export function normalizeLiveSnapshot(frame, target) {
   if (Buffer.byteLength(json, 'utf8') > MAX_LIVE_JSON_BYTES) {
     throw messageError('REQUEST_TOO_LARGE', 'live frame exceeds 8 MiB');
   }
+  const ext = resolveValidationExtensions(options);
   const snapshot = {
     type: 'snapshot',
     botId: frame.botId,
     conversationId: frame.conversationId,
     sequence: frame.sequence,
-    state: normalizeLiveState(frame.state),
+    state: normalizeLiveState(frame.state, ext),
   };
   if (isWork) snapshot.scopeId = frame.scopeId;
   if (target) {
@@ -955,13 +1134,13 @@ export function readLiveClientFrame(parsed) {
  * Parse a live frame sent by a Host to the relay: live-frame(routeId) or
  * live-end(routeId). Throws INVALID_ARGUMENT on any protocol violation.
  */
-export function readLiveHostFrame(parsed) {
+export function readLiveHostFrame(parsed, options) {
   if (!isPlainObject(parsed)) throw invalid('live frame must be an object');
   switch (parsed.type) {
     case 'live-frame': {
       rejectUnknownFields(parsed, new Set(['type', 'routeId', 'frame']), 'live-frame frame');
       assertId(parsed.routeId, 'routeId');
-      return { type: 'live-frame', routeId: parsed.routeId, frame: normalizeLiveSnapshot(parsed.frame) };
+      return { type: 'live-frame', routeId: parsed.routeId, frame: normalizeLiveSnapshot(parsed.frame, undefined, options) };
     }
     case 'live-end': {
       rejectUnknownFields(parsed, new Set(['type', 'routeId', 'reason', 'code']), 'live-end frame');
@@ -978,7 +1157,7 @@ export function readLiveHostFrame(parsed) {
  * (routeId), live-frame, live-end(watchId,targetDeviceId) or
  * devices-result. Throws INVALID_ARGUMENT on any protocol violation.
  */
-export function readLiveServerFrame(parsed) {
+export function readLiveServerFrame(parsed, options) {
   if (!isPlainObject(parsed)) throw invalid('live frame must be an object');
   switch (parsed.type) {
     case 'live-request': {
@@ -1005,7 +1184,7 @@ export function readLiveServerFrame(parsed) {
         type: 'live-frame',
         watchId: parsed.watchId,
         targetDeviceId: parsed.targetDeviceId,
-        frame: normalizeLiveSnapshot(parsed.frame),
+        frame: normalizeLiveSnapshot(parsed.frame, undefined, options),
       };
     }
     case 'live-end': {

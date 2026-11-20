@@ -694,7 +694,16 @@ public final class BotHostUiBridgeService extends Service {
                 @Override public void onPartial(String text) {
                     main.post(() -> {
                         if (!ownsCapture(capturing, botId, requestId)) return;
-                        emitVoice("partial", botId, requestId, text, null, null, null, null);
+                        send(BotHostUiProtocol.event(BotHostUiProtocol.EVENT_VOICE,
+                                BotHostUiProtocol.voicePartialEvent(botId, requestId, text)));
+                    });
+                }
+
+                @Override public void onLevel(double value) {
+                    main.post(() -> {
+                        if (!ownsCapture(capturing, botId, requestId)) return;
+                        send(BotHostUiProtocol.event(BotHostUiProtocol.EVENT_VOICE,
+                                BotHostUiProtocol.voiceLevelEvent(botId, requestId, value)));
                     });
                 }
 

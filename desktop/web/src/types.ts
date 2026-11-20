@@ -18,9 +18,20 @@ import type {
   DesktopUiState,
 } from '../../../host-core/desktop-client.js';
 import type {
+  BotDirectoryEntry,
+  BrowserControlAction,
+  BrowserControlFrameResult,
+  BrowserControlInput,
+  BrowserControlInputEvent,
+  BrowserControlResult,
+  BrowserControlStatusResult,
+  BrowserTabSummary,
   CreateBotInput,
   DevicesDirectoryItem,
   DevicesDirectoryPage,
+  GoogleSetupControlAction,
+  GoogleSetupControlInput,
+  GoogleSetupControlResult,
   HostServiceStatus,
   HostSettings,
   LiveTarget,
@@ -56,6 +67,16 @@ export type {
 } from '../../../host-core/desktop-client.js';
 
 export type {
+  BrowserControlAction,
+  BrowserControlFrameResult,
+  BrowserControlInput,
+  BrowserControlInputEvent,
+  BrowserControlResult,
+  BrowserControlStatusResult,
+  BrowserTabSummary,
+  GoogleSetupControlAction,
+  GoogleSetupControlInput,
+  GoogleSetupControlResult,
   LiveTarget,
   PrimarySubmission,
   TurnAdmissionStatus,
@@ -91,14 +112,30 @@ export interface ObservationHandle {
   close(): Promise<void>;
 }
 
+export interface ResolvedModelSummary {
+  effectiveModelRef: string | null;
+  effectiveModelName: string | null;
+  effectiveProviderName?: string | null;
+  source: 'bot' | 'center_default' | 'local_default' | 'unset';
+  available: boolean;
+}
+
+export type DesktopBotDirectoryEntry = BotDirectoryEntry & {
+  resolvedModel?: ResolvedModelSummary;
+};
+
 /**
  * 公共 broker op map：已有 DesktopOperationMap 的公共操作（排除 observe/unobserve）
- * 加本地 observe_ack 的交叉映射；用映射索引取 params/result，避免条件类型无法赋值。
+ * 加本地 observe_ack 与 center_admin_request 的交叉映射；用映射索引取 params/result，避免条件类型无法赋值。
  */
-export type BrokerOpMap = Omit<DesktopOperationMap, 'observe' | 'unobserve'> & {
+export type BrokerOpMap = Omit<DesktopOperationMap, 'observe' | 'unobserve' | 'center_admin_request'> & {
   observe_ack: {
     params: { observationId: string; deliveryId: string };
     result: { acknowledged: boolean };
+  };
+  center_admin_request: {
+    params: { method: string; path: string; body?: unknown };
+    result: unknown;
   };
 };
 
@@ -115,6 +152,17 @@ export type PendingOperation =
   | 'pending_send'
   | 'pending_reconcile'
   | 'pending_cancel';
+
+/** 桌面原生选图来源（由主 WebView 调用 desktop_pick_images）。 */
+export type DesktopImagePickSource = 'files' | 'clipboard';
+
+/** 桌面原生选图返回的单张原始图片内容（不暴露客户端路径）。 */
+export interface DesktopPickedImage {
+  name: string;
+  mimeType: string;
+  /** 纯 base64（无 data: 前缀）。 */
+  data: string;
+}
 
 /** 共享给功能组件（BotChats/Scopes）的视图 API。 */
 export interface DesktopViewApi {
@@ -155,6 +203,7 @@ export interface DesktopViewApi {
     target: { kind: 'primary' | 'room'; id: string },
   ): Promise<string>;
   pickFile(): Promise<DesktopDraftFileRef | null>;
+  pickImages?(source: DesktopImagePickSource): Promise<DesktopPickedImage[]>;
   reportError(error: unknown): void;
 }
 

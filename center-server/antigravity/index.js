@@ -3,13 +3,14 @@
 // Exports openAntigravity({ dataRoot, bin, geminiHome } = {}) returning:
 //   - authStatus({ signal } = {}) => Promise<{ authenticated: boolean }>
 //   - login({ notify, prompt, signal } = {}) => Promise<void>
+//   - logout() => Promise<void>
 //   - catalog({ signal } = {}) => Promise<Model[]>
-//   - stream({ deviceId, sessionId, modelId, messages, reasoning }, { signal } = {}) => AssistantMessageEventStream
+//   - stream({ deviceId, sessionId, modelId, messages, reasoning, turnContext }, { signal } = {}) => AssistantMessageEventStream
 //   - cancel({ deviceId, sessionId }) => Promise<void>
 //   - close() => Promise<void>
 
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { loginAcpProfile, probeAcpAuth } from "./auth.ts";
+import { hasStoredAcpAuthToken, loginAcpProfile, logoutAcpProfile, probeAcpAuth } from "./auth.ts";
 import { probeAcpCatalog, resolveThoughtLevel } from "./catalog.ts";
 import { ANTIGRAVITY_BRIDGE_SERVER, ANTIGRAVITY_PROVIDER_ID } from "./constants.ts";
 import { SharedMcpBridge } from "./mcp-bridge.ts";
@@ -29,6 +30,7 @@ import {
 	newAssistant,
 	POLL_TOOL_NAME,
 	RESUME_PROMPT,
+	splitAntigravityTurnContext,
 	systemPromptFromMessages,
 	toMcpToolDefinitions,
 	ToolRoundTrips,
@@ -40,6 +42,42 @@ import { AcpDriver } from "./vendor/acp/driver.ts";
 
 const BRIDGE_SERVER_RE = /^(?:pibot|pi)-bridge(?:-\d+)?$/i;
 const BRIDGE_PERMISSION_RE = /^(?:mcp_)?(?:pibot|pi)-bridge(?:-\d+)?(?:_|$)/i;
+const AUTH_CACHE_TTL_MS = 60_000;
+const KNOWN_MESSAGE_ROLES = new Set(["user", "system", "assistant", "toolResult"]);
+
+function safeMessageRole(msg) {
+	if (!msg) return "none";
+	return typeof msg.role === "string" && KNOWN_MESSAGE_ROLES.has(msg.role) ? msg.role : "unknown";
+}
+
+function createAbortError(message) {
+	const err = new Error(message);
+	err.name = "AbortError";
+	return err;
+}
+
+function awaitWithAbort(promise, signal, message = "Antigravity auth check aborted") {
+	if (!signal) return promise;
+	if (signal.aborted) {
+		return Promise.reject(createAbortError(message));
+	}
+	return new Promise((resolve, reject) => {
+		const onAbort = () => {
+			reject(createAbortError(message));
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			(value) => {
+				signal.removeEventListener("abort", onAbort);
+				resolve(value);
+			},
+			(err) => {
+				signal.removeEventListener("abort", onAbort);
+				reject(err);
+			},
+		);
+	});
+}
 
 function isBridgePermissionRequest(req) {
 	const tc = req?.toolCall;
@@ -52,6 +90,7 @@ function isBridgePermissionRequest(req) {
 
 export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 	const profile = resolveProfile({ dataRoot, bin, geminiHome });
+	const usesDefaultAgyBin = bin === undefined && !process.env.PIBOT_AGY_BIN;
 	const store = new SessionStore(profile.sessionsPath);
 	const mcpBridge = new SharedMcpBridge();
 	const sessions = new Map();
@@ -59,7 +98,17 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 	const activeCatalogs = new Set();
 	const activeAuthProbes = new Set();
 	let activeLogin = null;
+	let cachedAuth = null;
+	let inflightAuthStatus = null;
+	let authEpoch = 0;
 	let closed = false;
+
+	function invalidateAuthCacheIfNeeded(err) {
+		if (err?.code === "UNAUTHENTICATED" || err?.name === "AcpAuthError") {
+			authEpoch += 1;
+			cachedAuth = null;
+		}
+	}
 
 	function getOrCreateSession(deviceId, sessionId) {
 		const key = makeSessionKey(deviceId, sessionId);
@@ -155,7 +204,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 	}
 
 	async function runStreamTurn(stream, params, signal) {
-		const { deviceId, sessionId, modelId, messages, reasoning } = params;
+		const { deviceId, sessionId, modelId, messages, reasoning, turnContext: rawTurnContext } = params;
 		const blocks = { partial: newAssistant(modelId), textIdx: null, thinkingIdx: null, started: false };
 
 		if (closed) {
@@ -176,6 +225,15 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 		}
 		if (signal?.aborted) {
 			finalize(stream, blocks, "aborted", "Operation aborted");
+			return;
+		}
+
+		let resolvedTurn;
+		try {
+			resolvedTurn = splitAntigravityTurnContext(messages, rawTurnContext);
+		} catch (err) {
+			const msg = redactText(err instanceof Error ? err.message : String(err));
+			finalize(stream, blocks, "error", msg);
 			return;
 		}
 
@@ -224,15 +282,17 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 				return;
 			}
 
-			const tools = toolsFromMessages(messages);
+			const cleanMessages = resolvedTurn.messages;
+
+			const tools = toolsFromMessages(cleanMessages);
 			const mcpTools = toMcpToolDefinitions(tools);
 			slot.currentTools = mcpTools;
 			slot.allowedToolNames = new Set(mcpTools.map((t) => t.name));
 
 			const existing = store.get(slot.key);
-			const messageCount = messages.length;
+			const messageCount = cleanMessages.length;
 
-			const results = collectToolResults(messages, slot.roundTrips.pendingIds);
+			const results = collectToolResults(cleanMessages, slot.roundTrips.pendingIds);
 			const isContinuation = results.length > 0;
 			const escalatedNames = results
 				.map((r) => slot.roundTrips.poll(r.toolCallId)?.name)
@@ -243,7 +303,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 
 			const late = [];
 			if (!isContinuation) {
-				for (const r of collectToolResults(messages, slot.roundTrips.deadIds)) {
+				for (const r of collectToolResults(cleanMessages, slot.roundTrips.deadIds)) {
 					const dead = slot.roundTrips.consumeDead(r.toolCallId);
 					if (dead) {
 						late.push({
@@ -323,17 +383,26 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 					return;
 				}
 
-				const userPrompt = extractUserPrompt({ messages });
-				const images = extractImages({ messages });
-				const lastRole = messages[messages.length - 1]?.role;
+				const inputIndex = resolvedTurn.inputIndex;
+				const userPrompt = extractUserPrompt({ messages: cleanMessages }, inputIndex);
+				const images = extractImages({ messages: cleanMessages }, inputIndex);
+				const inputRole = inputIndex !== null ? cleanMessages[inputIndex]?.role : undefined;
 				const resume =
 					!userPrompt &&
 					images.length === 0 &&
 					late.length === 0 &&
 					Boolean(existing?.conversationId) &&
-					(lastRole === "toolResult" || lastRole === "assistant");
+					(inputRole === "toolResult" || inputRole === "assistant");
 				const prompt = resume ? RESUME_PROMPT : userPrompt;
 				if (!prompt && images.length === 0 && late.length === 0) {
+					const turnSource = rawTurnContext !== undefined ? "explicit" : "legacy";
+					const tailRole = safeMessageRole(messages[messages.length - 1]);
+					const resolvedInputRole = safeMessageRole(
+						inputIndex !== null ? cleanMessages[inputIndex] : undefined,
+					);
+					console.warn(
+						`[antigravity] no-user-message source=${turnSource} tailRole=${tailRole} inputRole=${resolvedInputRole} rawCount=${messages.length} effectiveCount=${cleanMessages.length} contextNotes=${resolvedTurn.contextNotes.length} bound=${Boolean(existing?.conversationId)}`,
+					);
 					finishConsumer("error", "No user message to send to Antigravity.");
 					return;
 				}
@@ -341,15 +410,28 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 				const watermark = existing?.lastMessageCount ?? 0;
 				const digest =
 					late.length === 0 && !resume
-						? buildContextDigest(messages, watermark, { ownProvider: ANTIGRAVITY_PROVIDER_ID })
+						? buildContextDigest(cleanMessages, watermark, {
+								ownProvider: ANTIGRAVITY_PROVIDER_ID,
+								endIndex: inputIndex,
+								auxiliaryIndices: resolvedTurn.historicalAuxiliaryIndices,
+							})
 						: "";
 				const rawSysPrompt = !existing?.conversationId
-					? systemPromptFromMessages(messages)
+					? systemPromptFromMessages(cleanMessages)
 					: undefined;
-				const fullPrompt =
+				const turnPrompt =
 					late.length > 0
 						? buildLateResultPrompt(late, prompt || undefined)
-						: buildFullPrompt(rawSysPrompt, "", prompt ?? "");
+						: (prompt ?? "");
+				const fullPrompt = buildFullPrompt(
+					late.length > 0 ? undefined : rawSysPrompt,
+					"",
+					turnPrompt,
+					{
+						routeNote: resolvedTurn.routeNote,
+						contextNotes: resolvedTurn.contextNotes,
+					},
+				);
 				const runImages = [...images, ...late.flatMap((l) => l.images ?? [])];
 
 				slot.turnAbort = new AbortController();
@@ -374,6 +456,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 						signal: slot.turnAbort.signal,
 					});
 				} catch (err) {
+					invalidateAuthCacheIfNeeded(err);
 					for (const l of late) {
 						if (l.callId) slot.roundTrips.unclaim(l.callId);
 					}
@@ -404,6 +487,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			try {
 				drainState = await drainTurn(handle);
 			} catch (err) {
+				invalidateAuthCacheIfNeeded(err);
 				const msg = redactText(err instanceof Error ? err.message : String(err));
 				await abortSessionTurn(slot, msg);
 				finishConsumer("error", msg);
@@ -447,13 +531,15 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 						try {
 							if ((await drainTurn(lateHandle)) === "parked") return;
 						} catch (err) {
+							invalidateAuthCacheIfNeeded(err);
 							const msg = redactText(err instanceof Error ? err.message : String(err));
 							await abortSessionTurn(slot, msg);
 							finishConsumer("error", msg);
 							return;
 						}
 						outcome = await lateHandle.outcome;
-					} catch {
+					} catch (err) {
+						invalidateAuthCacheIfNeeded(err);
 						for (const l of more) {
 							if (l.callId) slot.roundTrips.unclaim(l.callId);
 						}
@@ -490,6 +576,7 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			}
 			finishConsumer("stop");
 		} catch (err) {
+			invalidateAuthCacheIfNeeded(err);
 			slot.turnAbort = null;
 			const msg = redactText(err instanceof Error ? err.message : String(err));
 			finishConsumer("error", msg);
@@ -536,29 +623,51 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			if (closed) {
 				throw new Error("Antigravity service is closed");
 			}
-			const ac = new AbortController();
-			const onCallerAbort = () => ac.abort();
-			if (signal?.aborted) ac.abort();
-			else signal?.addEventListener("abort", onCallerAbort, { once: true });
-
-			const probePromise = probeAcpAuth(profile, { signal: ac.signal });
-			const entry = { abortController: ac, promise: probePromise };
-			activeAuthProbes.add(entry);
-			try {
-				const authenticated = await probePromise;
-				return { authenticated };
-			} finally {
-				signal?.removeEventListener("abort", onCallerAbort);
-				activeAuthProbes.delete(entry);
+			if (signal?.aborted) {
+				throw createAbortError("Antigravity auth check aborted");
 			}
+			if (usesDefaultAgyBin && !hasStoredAcpAuthToken(profile)) {
+				cachedAuth = {
+					authenticated: false,
+					expiresAt: Date.now() + AUTH_CACHE_TTL_MS,
+				};
+				return { authenticated: false };
+			}
+			if (cachedAuth && Date.now() < cachedAuth.expiresAt) {
+				return { authenticated: cachedAuth.authenticated };
+			}
+			if (!inflightAuthStatus) {
+				const ac = new AbortController();
+				const startEpoch = authEpoch;
+				const probePromise = probeAcpAuth(profile, { signal: ac.signal });
+				const entry = { abortController: ac, promise: probePromise };
+				activeAuthProbes.add(entry);
+				let sharedPromise;
+				sharedPromise = probePromise
+					.then((authenticated) => {
+						const result = Boolean(authenticated);
+						if (!closed && authEpoch === startEpoch) {
+							cachedAuth = {
+								authenticated: result,
+								expiresAt: Date.now() + AUTH_CACHE_TTL_MS,
+							};
+						}
+						return { authenticated: result };
+					})
+					.finally(() => {
+						activeAuthProbes.delete(entry);
+						if (inflightAuthStatus === sharedPromise) {
+							inflightAuthStatus = null;
+						}
+					});
+				sharedPromise.catch(() => {});
+				inflightAuthStatus = sharedPromise;
+			}
+			return await awaitWithAbort(inflightAuthStatus, signal);
 		},
 
 		async login({ notify, prompt, signal } = {}) {
-			const makeAbortError = () => {
-				const err = new Error("Antigravity 登录已取消");
-				err.name = "AbortError";
-				return err;
-			};
+			const makeAbortError = () => createAbortError("Antigravity 登录已取消");
 			if (closed) {
 				throw new Error("Antigravity service is closed");
 			}
@@ -590,6 +699,11 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 			try {
 				await loginPromise;
 				if (!closed && !ac.signal.aborted) {
+					authEpoch += 1;
+					cachedAuth = {
+						authenticated: true,
+						expiresAt: Date.now() + AUTH_CACHE_TTL_MS,
+					};
 					await recycleIdleDrivers("post-login");
 				}
 			} finally {
@@ -597,6 +711,53 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 				if (activeLogin === entry) {
 					activeLogin = null;
 				}
+			}
+		},
+
+		async logout() {
+			if (closed) {
+				throw new Error("Antigravity service is closed");
+			}
+			authEpoch += 1;
+			cachedAuth = null;
+			inflightAuthStatus = null;
+			if (activeLogin) {
+				activeLogin.abortController.abort();
+				await activeLogin.promise.catch(() => {});
+			}
+			const pendingAuthProbes = [...activeAuthProbes];
+			for (const entry of pendingAuthProbes) {
+				entry.abortController.abort();
+			}
+			const pendingCatalogs = [...activeCatalogs];
+			for (const entry of pendingCatalogs) {
+				entry.abortController.abort();
+			}
+			await Promise.allSettled([
+				...pendingAuthProbes.map((entry) => entry.promise),
+				...pendingCatalogs.map((entry) => entry.promise),
+			]);
+			const allSlots = [...sessions.values()];
+			sessions.clear();
+			await Promise.allSettled(
+				allSlots.map(async (slot) => {
+					slot.cancelEpoch += 1;
+					detachCallerSignal(slot);
+					slot.roundTrips.failAll("Antigravity logged out", { includeEscalated: true });
+					if (slot.turnAbort && !slot.turnAbort.signal.aborted) {
+						slot.turnAbort.abort();
+					}
+					slot.unregisterMcp?.();
+					await slot.driver.close("recycle", "oauth logout").catch(() => {});
+				}),
+			);
+			modelMap.clear();
+			logoutAcpProfile(profile);
+			if (!closed) {
+				cachedAuth = {
+					authenticated: false,
+					expiresAt: Date.now() + AUTH_CACHE_TTL_MS,
+				};
 			}
 		},
 
@@ -619,17 +780,20 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 					modelMap.set(model.id, model);
 				}
 				return models;
+			} catch (err) {
+				invalidateAuthCacheIfNeeded(err);
+				throw err;
 			} finally {
 				signal?.removeEventListener("abort", onCallerAbort);
 				activeCatalogs.delete(entry);
 			}
 		},
 
-		stream({ deviceId, sessionId, modelId, messages, reasoning } = {}, { signal } = {}) {
+		stream({ deviceId, sessionId, modelId, messages, reasoning, turnContext } = {}, { signal } = {}) {
 			const stream = createAssistantMessageEventStream();
 			void runStreamTurn(
 				stream,
-				{ deviceId, sessionId, modelId, messages, reasoning },
+				{ deviceId, sessionId, modelId, messages, reasoning, turnContext },
 				signal,
 			).catch((err) => {
 				const blocks = {
@@ -657,6 +821,9 @@ export function openAntigravity({ dataRoot, bin, geminiHome } = {}) {
 		async close() {
 			if (closed) return;
 			closed = true;
+			authEpoch += 1;
+			cachedAuth = null;
+			inflightAuthStatus = null;
 			const pendingLogin = activeLogin;
 			if (pendingLogin) {
 				pendingLogin.abortController.abort();

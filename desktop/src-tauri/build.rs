@@ -4,6 +4,7 @@ const APP_COMMANDS: &[&str] = &[
   "desktop_observe",
   "desktop_unobserve",
   "desktop_pick_file",
+  "desktop_pick_images",
   "desktop_host_status",
   "desktop_host_pair",
   "desktop_host_pair_code",
@@ -18,7 +19,6 @@ const APP_COMMANDS: &[&str] = &[
 ];
 
 fn main() {
-  println!("cargo:rerun-if-env-changed=E_LAUNCHER_UPDATER_PUBLIC_KEY");
   println!("cargo:rerun-if-changed=../../assets/icon.png");
   println!("cargo:rerun-if-changed=../build/icons/icon.ico");
   let attributes = tauri_build::Attributes::new()

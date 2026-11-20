@@ -1,6 +1,7 @@
-import { createContext, useContext, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { BotHost, openCenterUrl, type PairCenterResult } from './index';
 import { mobileClientRequest, pairCenter, pairCenterWithCode, repairCenterBinding } from './tauri-host';
+import { splitErrorCode, useText } from '../ui';
 
 export type SavedConnection = { url: string; deviceId: string; ca: string };
 export type CenterStatus = { state: 'disconnected' | 'connecting' | 'ready'; centerUrl: string; clientId?: string; savedConnection?: SavedConnection; savedConnectionError?: string; brokerGeneration?: number; error?: { code?: string; message?: string } | string | null };
@@ -10,7 +11,6 @@ const centerErrorCode = (error: unknown) => typeof error === 'object' && error !
 export const isTransientCenterError = (error: unknown) => transientCenterErrors.has(centerErrorCode(error));
 /** RPC 拥塞：host 忙不是断线，轮询应保留已确认状态继续等待，不得当离线处理。 */
 const isBusyCenterError = (error: unknown) => { const code = centerErrorCode(error); return code === 'RPC_BUSY' || code === 'BUSY'; };
-const centerErrorMessage = (error: unknown) => typeof error === 'string' ? error : error instanceof Error ? error.message : typeof error === 'object' && error !== null && 'message' in error ? String(error.message) : '';
 
 export const ActiveCenter = createContext('');
 
@@ -31,9 +31,11 @@ export interface CenterConnectionContextValue {
   busy: boolean;
   preparing: boolean;
   connecting: boolean;
+  reconnecting: boolean;
   ready: boolean;
   matchesSaved: boolean;
   error: string;
+  errorCode: string;
   setError: (v: string) => void;
   connect: (event?: FormEvent) => Promise<void>;
   /** C7 首启配对：owner 密码换设备绑定；成功返回 PairCenterResult（被更新操作取代时 undefined）。
@@ -64,9 +66,11 @@ const defaultCenterContext: CenterConnectionContextValue = {
   busy: false,
   preparing: false,
   connecting: false,
+  reconnecting: false,
   ready: false,
   matchesSaved: false,
   error: '',
+  errorCode: '',
   setError: () => {},
   connect: async () => {},
   pair: async () => undefined,
@@ -81,6 +85,10 @@ export const CenterConnectionContext = createContext<CenterConnectionContextValu
 export const useCenterConnection = () => useContext(CenterConnectionContext);
 
 export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 0 }: { children: ReactNode; onDisconnected?: () => void; onReady?: (centerUrl: string) => Promise<void>; recoveryEpoch?: number }) {
+  const text = useText();
+  const textRef = useRef(text);
+  textRef.current = text;
+  const t = useCallback((zh: string, en: string) => textRef.current(zh, en), []);
   const [url, setUrl] = useState('');
   const [deviceId, setDeviceId] = useState(() => localStorage.getItem('center-client-device-id') ?? '');
   const [token, setToken] = useState('');
@@ -94,17 +102,52 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
   const autoAttempted = useRef(false);
   const autoConnection = useRef<Promise<CenterStatus> | null>(null);
   const wasReady = useRef(false);
-  const [error, setError] = useState('');
+  const [error, setErrorState] = useState('');
+  const [errorCode, setErrorCode] = useState('');
+  const [autoReconnecting, setAutoReconnecting] = useState(false);
+  const [prepareReconnecting, setPrepareReconnecting] = useState(false);
   const [preparedCenter, setPreparedCenter] = useState('');
   const [preparing, setPreparing] = useState(false);
   const [prepareRetry, setPrepareRetry] = useState(0);
 
+  const clearError = useCallback(() => {
+    setErrorState('');
+    setErrorCode('');
+  }, []);
+
+  const reportError = useCallback((failure: unknown, fallback: string) => {
+    const parsed = splitErrorCode(failure);
+    const message = parsed.message || fallback || parsed.code || '';
+    const code = parsed.code && parsed.code !== message ? parsed.code : '';
+    setErrorState(message);
+    setErrorCode(code);
+  }, []);
+
+  const setError = useCallback((v: string) => {
+    if (!v) {
+      clearError();
+      return;
+    }
+    reportError(v, v);
+  }, [clearError, reportError]);
+
   const updateStatus = (next: CenterStatus) => {
     setStatus(next);
     setSaved(next.savedConnection);
-    if (next.savedConnectionError) setError(next.savedConnectionError);
-    else if (next.error && permanentCenterErrors.has(centerErrorCode(next.error))) setError(centerErrorMessage(next.error) || centerErrorCode(next.error));
-    else if (next.state === 'connecting') setError('正在重连…');
+    if (next.savedConnectionError) {
+      setAutoReconnecting(false);
+      reportError(next.savedConnectionError, t('已保存的连接凭据异常，请重新配置。', 'Saved connection credentials are invalid. Please reconfigure.'));
+    } else if (next.error && permanentCenterErrors.has(centerErrorCode(next.error))) {
+      setAutoReconnecting(false);
+      reportError(next.error, t('中心连接失败，请检查中心设置。', 'Center connection failed. Check center settings.'));
+    } else if (next.state === 'connecting') {
+      setAutoReconnecting(false);
+      clearError();
+    } else if (next.state === 'ready') {
+      setAutoReconnecting(false);
+    } else if (!next.savedConnection) {
+      setAutoReconnecting(false);
+    }
   };
   const readStatus = async () => {
     const next = await mobileClientRequest<CenterStatus>('center_status', {});
@@ -136,7 +179,9 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
         setUrl(localStorage.getItem('active-center-url') ?? value.url);
         setCa(value.ca);
       } catch {
-        if (live && issued === epoch.current) setError('无法读取中心连接设置');
+        if (live && issued === epoch.current) {
+          reportError('', t('无法读取中心连接设置', 'Failed to load center connection settings'));
+        }
       }
       if (!live || issued !== epoch.current) return;
       try {
@@ -164,7 +209,13 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
               if (live && attempt === epoch.current) updateStatus(connected);
             } catch (failure) {
               if (live && attempt === epoch.current) {
-                setError(permanentCenterErrors.has(centerErrorCode(failure)) ? centerErrorMessage(failure) || centerErrorCode(failure) : '正在重连…');
+                if (permanentCenterErrors.has(centerErrorCode(failure))) {
+                  setAutoReconnecting(false);
+                  reportError(failure, t('自动连接失败，请检查中心设置。', 'Auto-connect failed. Check center settings.'));
+                } else {
+                  clearError();
+                  setAutoReconnecting(true);
+                }
               }
             } finally {
               autoConnection.current = null;
@@ -173,7 +224,9 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
           }
         }
       } catch {
-        if (live && issued === epoch.current) setError('无法读取中心连接状态');
+        if (live && issued === epoch.current) {
+          reportError('', t('无法读取中心连接状态', 'Failed to read center connection status'));
+        }
       }
       if (live) {
         setBusy(false);
@@ -192,10 +245,13 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
 
   useEffect(() => {
     let live = true;
+    const issued = epoch.current;
     let retry: ReturnType<typeof setTimeout> | undefined;
     if (status?.state !== 'ready' || !onReady) {
       setPreparedCenter('');
       setPreparing(false);
+      setPrepareReconnecting(false);
+      if (status?.state === 'ready') clearError();
       return;
     }
     const preparedKey = `${status.centerUrl}:${status.brokerGeneration ?? ''}`;
@@ -205,13 +261,23 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
       setPreparing(true);
     }
     onReady(status.centerUrl).then(() => {
-      if (live) { setPreparedCenter(preparedKey); setError(''); }
+      if (live && issued === epoch.current) {
+        setPreparedCenter(preparedKey);
+        setPrepareReconnecting(false);
+        clearError();
+      }
     }, failure => {
-      if (live) {
+      if (live && issued === epoch.current) {
         setPreparedCenter('');
         const permanent = !isTransientCenterError(failure);
-        setError(permanent ? centerErrorMessage(failure) || centerErrorCode(failure) : '正在重连…');
-        if (!permanent) retry = setTimeout(() => setPrepareRetry(value => value + 1), 2000);
+        if (permanent) {
+          setPrepareReconnecting(false);
+          reportError(failure, t('中心连接初始化失败，请重试。', 'Failed to initialize center connection. Please retry.'));
+        } else {
+          clearError();
+          setPrepareReconnecting(true);
+          retry = setTimeout(() => setPrepareRetry(value => value + 1), 2000);
+        }
       }
     }).finally(() => { if (live) setPreparing(false); });
     return () => { live = false; if (retry) clearTimeout(retry); };
@@ -222,7 +288,9 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
     event?.preventDefault();
     const issued = ++epoch.current;
     setBusy(true);
-    setError('');
+    clearError();
+    setAutoReconnecting(false);
+    setPrepareReconnecting(false);
     setPreparedCenter('');
     setStatus(undefined);
     onDisconnected?.();
@@ -244,7 +312,9 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
       if (issued !== epoch.current) return;
       setStatus(broker ? { ...next, state: broker.phase === 'connected' ? 'ready' : 'connecting', brokerGeneration: broker.generation } : next);
     } catch (failure) {
-      if (issued === epoch.current) setError(failure instanceof Error ? failure.message : '连接失败，请检查中心设置。');
+      if (issued === epoch.current) {
+        reportError(failure, t('连接失败，请检查中心设置。', 'Connection failed. Check center settings.'));
+      }
     } finally {
       if (issued === epoch.current) {
         setToken('');
@@ -258,7 +328,9 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
   const pair = async (password: string, options?: { displayName?: string; force?: boolean }): Promise<PairCenterResult | undefined> => {
     const issued = ++epoch.current;
     setBusy(true);
-    setError('');
+    clearError();
+    setAutoReconnecting(false);
+    setPrepareReconnecting(false);
     try {
       const result = await pairCenter({
         url: url.trim(),
@@ -271,7 +343,9 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
       await adoptPairResult(result, issued);
       return result;
     } catch (failure) {
-      if (issued === epoch.current) setError(failure instanceof Error ? failure.message : '配对失败，请检查中心地址与密码。');
+      if (issued === epoch.current) {
+        reportError(failure, t('配对失败，请检查中心地址与密码。', 'Pairing failed. Check the center URL and password.'));
+      }
       throw failure;
     } finally {
       if (issued === epoch.current) setBusy(false);
@@ -283,7 +357,9 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
   const pairWithCode = async (code: string, options?: { displayName?: string; force?: boolean }): Promise<PairCenterResult | undefined> => {
     const issued = ++epoch.current;
     setBusy(true);
-    setError('');
+    clearError();
+    setAutoReconnecting(false);
+    setPrepareReconnecting(false);
     try {
       const result = await pairCenterWithCode({
         code,
@@ -317,14 +393,18 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
   const repair = async (): Promise<PairCenterResult | undefined> => {
     const issued = ++epoch.current;
     setBusy(true);
-    setError('');
+    clearError();
+    setAutoReconnecting(false);
+    setPrepareReconnecting(false);
     try {
       const result = await repairCenterBinding();
       if (issued !== epoch.current) return undefined;
       await adoptPairResult(result, issued);
       return result;
     } catch (failure) {
-      if (issued === epoch.current) setError(failure instanceof Error ? failure.message : '修复绑定失败，请重试。');
+      if (issued === epoch.current) {
+        reportError(failure, t('修复绑定失败，请重试。', 'Failed to repair binding. Please retry.'));
+      }
       throw failure;
     } finally {
       if (issued === epoch.current) setBusy(false);
@@ -335,30 +415,37 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
   const disconnect = () => {
     const issued = ++epoch.current;
     setBusy(true);
-    setError('');
+    clearError();
+    setAutoReconnecting(false);
+    setPrepareReconnecting(false);
     const request = mobileClientRequest<CenterStatus>('center_disconnect', {});
     void request.then(next => {
       if (issued !== epoch.current) return;
       setSaved(undefined);
       setStatus(next);
     }).catch(failure => {
-      if (issued === epoch.current) setError(failure instanceof Error ? failure.message : '断开连接失败，请重试。');
+      if (issued === epoch.current) {
+        reportError(failure, t('断开连接失败，请重试。', 'Failed to disconnect. Please retry.'));
+      }
     }).finally(() => { if (issued === epoch.current) setBusy(false); });
   };
 
   const openManagement = () => {
     if (!url.trim()) return;
-    void openCenterUrl(url.trim()).catch(() => setError('无法打开中心管理页面'));
+    void openCenterUrl(url.trim()).catch(() => {
+      reportError('', t('无法打开中心管理页面', 'Failed to open center management page'));
+    });
   };
 
   const stopLocalHost = () => {
     void BotHost.stop().catch(failure => {
-      setError(failure instanceof Error ? failure.message : '退出客户端失败');
+      reportError(failure, t('退出客户端失败', 'Failed to quit client'));
     });
   };
 
   const ready = Boolean(status?.state === 'ready' && (!onReady || preparedCenter === `${status.centerUrl}:${status.brokerGeneration ?? ''}`));
-  const connecting = Boolean(!initialized || busy || preparing || status?.state === 'connecting');
+  const reconnecting = Boolean(!error && (status?.state === 'connecting' || autoReconnecting || prepareReconnecting));
+  const connecting = Boolean(!initialized || busy || preparing || reconnecting || status?.state === 'connecting');
   const activeCenterUrl = ready && status ? status.centerUrl : '';
 
   const contextValue: CenterConnectionContextValue = {
@@ -378,9 +465,11 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
     busy,
     preparing,
     connecting,
+    reconnecting,
     ready,
     matchesSaved,
     error,
+    errorCode,
     setError,
     connect,
     pair,

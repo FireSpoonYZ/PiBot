@@ -5,7 +5,9 @@ import type { ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
   ArrowLeft,
+  CircleAlert,
   ClipboardCheck,
+  Download,
   FolderInput,
   LayoutDashboard,
   MessageSquare,
@@ -20,7 +22,7 @@ import type {
 import type { BotDirectoryEntry, DevicesDirectoryItem } from '../../../host-core/index.js';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
 import { PendingPanel } from './PendingPanel';
-import { SettingsPanel, type DevicesSectionState } from './SettingsPanel';
+import { SettingsPanel, type CenterAdminTab, type DevicesSectionState, type SettingsTab } from './SettingsPanel';
 import { BotChats, type BotChatsArchiveBridge, type SendRecordsTarget } from './BotChats';
 import {
   CenterGate,
@@ -31,6 +33,7 @@ import { targetApi } from './targetApi';
 import type { DesktopViewApi } from './types';
 import './DesktopShell.css';
 import { ErrorNotice } from '../../../web/src/ui';
+import { useClientUpdate } from '../../../web/src/ClientUpdateProvider';
 
 interface ProfileFormState {
   title: string;
@@ -55,6 +58,7 @@ interface AppState {
   form: ProfileFormState;
   globalError: string | null;
   bannerError: string | null;
+  bannerNoticeOpen: boolean;
   /** transport/relay 断开提示（可恢复）；与请求级 bannerError 分离，目标 OFFLINE 不会进入此横幅。 */
   connectionError: string | null;
   selectedDeviceId: string;
@@ -63,7 +67,9 @@ interface AppState {
   pendingAttention: { identity: DesktopIdentity; deviceId: string } | null;
   taskWaitingCount: number;
   settingsOpen: boolean;
-  settingsPage: 'general' | 'archive';
+  settingsTab: SettingsTab;
+  centerAdminTab?: CenterAdminTab;
+  profileTokens: Record<string, string>;
   devices: DevicesSectionState;
   archiveBridge: BotChatsArchiveBridge | null;
 }
@@ -102,6 +108,20 @@ function phaseText(status: DesktopClientStatus | null, transportConnected: boole
   return status.phase === 'connected' && transportConnected ? '已连接' : '未连接';
 }
 
+function WindowsUpdateRailButton({ onOpen }: { onOpen(button: HTMLButtonElement): void }) {
+  const update = useClientUpdate();
+  const status = update?.status;
+  if (!navigator.userAgent.includes('Windows') || !update?.ready || !status?.release ||
+      !['available', 'downloading', 'downloaded', 'waiting-tasks', 'installing'].includes(status.phase)) return null;
+  const label = '客户端更新 · ' + status.release.version;
+  return (
+    <button type="button" className="rail-item" title={label} aria-label={label} aria-haspopup="dialog"
+      onClick={event => onOpen(event.currentTarget)}>
+      <span className="rail-icon-wrap rail-update-icon"><Download size={18} aria-hidden /></span>
+    </button>
+  );
+}
+
 class App extends Component<AppProps, AppState> {
   private unsub: (() => void) | null = null;
   private unsubErrors: (() => void) | null = null;
@@ -115,6 +135,20 @@ class App extends Component<AppProps, AppState> {
   private devicesMounted = true;
   private refreshingProfiles = false;
   private settingsButtonRef: HTMLButtonElement | null = null;
+  private updateSettingsTrigger: HTMLButtonElement | null = null;
+  private bannerNoticeAnchorRef: HTMLDivElement | null = null;
+  private bannerNoticeButtonRef: HTMLButtonElement | null = null;
+  private handleBannerNoticePointerDown = (e: MouseEvent): void => {
+    if (!this.state.bannerNoticeOpen) return;
+    if (this.bannerNoticeAnchorRef && e.target instanceof Node && !this.bannerNoticeAnchorRef.contains(e.target)) {
+      this.setState({ bannerNoticeOpen: false });
+    }
+  };
+  private handleBannerNoticeKeyDown = (e: KeyboardEvent): void => {
+    if (!this.state.bannerNoticeOpen || e.key !== 'Escape' || e.defaultPrevented) return;
+    e.preventDefault();
+    this.setState({ bannerNoticeOpen: false }, () => this.bannerNoticeButtonRef?.focus());
+  };
   /** 显式断开/connect 进行中不做恢复采纳：不得违背用户意图把 transport 重新置真。 */
   private suppressRecovery = false;
   /** 已应用的 broker generation；变化表示后端已重连，旧 UI 身份代次必须作废。 */
@@ -206,13 +240,16 @@ class App extends Component<AppProps, AppState> {
       form: { title: '', kind: 'local', url: '', expectedDeviceId: '', deviceId: '' },
       globalError: null,
       bannerError: null,
+      bannerNoticeOpen: false,
       connectionError: null,
       selectedDeviceId: '',
       pendingReturnView: 'chat',
       pendingAttention: null,
       taskWaitingCount: 0,
       settingsOpen: false,
-      settingsPage: 'general',
+      settingsTab: 'connection',
+      centerAdminTab: undefined,
+      profileTokens: {},
       devices: emptyDevices,
       archiveBridge: null,
     };
@@ -228,7 +265,11 @@ class App extends Component<AppProps, AppState> {
   };
 
   private handleOpenArchived = (): void => {
-    this.setState({ settingsOpen: true, settingsPage: 'archive' });
+    this.setState({ settingsOpen: true, settingsTab: 'archive' });
+  };
+
+  private openCenterAdminSettings = (tab?: CenterAdminTab): void => {
+    this.setState({ settingsOpen: true, settingsTab: 'center-admin', centerAdminTab: tab });
   };
 
   private pendingAttentionDevice(): string | undefined {
@@ -291,7 +332,7 @@ class App extends Component<AppProps, AppState> {
       });
     });
     this.unsubErrors = this.props.api.subscribeErrors((message) => {
-      this.setState({ bannerError: message });
+      this.setState((s) => (s.bannerError === message ? null : { bannerError: message }));
     });
     this.unsubPending = this.props.api.subscribePending(this.schedulePendingRefresh);
     void this.refreshProfiles();
@@ -304,10 +345,22 @@ class App extends Component<AppProps, AppState> {
     if (this.unsub) this.unsub();
     if (this.unsubErrors) this.unsubErrors();
     if (this.unsubPending) this.unsubPending();
+    document.removeEventListener('mousedown', this.handleBannerNoticePointerDown);
+    document.removeEventListener('keydown', this.handleBannerNoticeKeyDown);
     clearTimeout(this.pendingRefreshTimer);
   }
 
   componentDidUpdate(prev: AppProps, prevState: AppState): void {
+    if (!prevState.bannerNoticeOpen && this.state.bannerNoticeOpen) {
+      document.addEventListener('mousedown', this.handleBannerNoticePointerDown);
+      document.addEventListener('keydown', this.handleBannerNoticeKeyDown);
+    } else if (prevState.bannerNoticeOpen && !this.state.bannerNoticeOpen) {
+      document.removeEventListener('mousedown', this.handleBannerNoticePointerDown);
+      document.removeEventListener('keydown', this.handleBannerNoticeKeyDown);
+    }
+    if (!this.state.bannerError && this.state.bannerNoticeOpen) {
+      this.setState({ bannerNoticeOpen: false });
+    }
     const a = prevState.identity;
     const b = this.state.identity;
     if (a?.profileId !== b?.profileId || a?.kind !== b?.kind) {
@@ -522,12 +575,19 @@ class App extends Component<AppProps, AppState> {
 
   private selectProfile(profile: DesktopUiProfile): void {
     if (profile.id === this.state.selectedProfileId) return;
-    this.setState({ selectedProfileId: profile.id, token: '', ca: '', globalError: null });
+    this.setState((s) => ({
+      selectedProfileId: profile.id,
+      token: s.profileTokens[profile.id] ?? '',
+      globalError: null,
+    }));
   }
 
   private async connect(): Promise<void> {
-    const profile = this.state.profiles.find((p) => p.id === this.state.selectedProfileId);
-    const token = this.state.token;
+    const selected = this.state.profiles.find((p) => p.id === this.state.selectedProfileId);
+    const profile = selected?.kind === 'local'
+      ? selected
+      : this.state.profiles.find((p) => p.kind === 'local') ?? selected;
+    const token = profile ? (this.state.profileTokens[profile.id] ?? this.state.token) : this.state.token;
     const previousIdentity = this.state.identity;
     const previousDeviceId = this.state.selectedDeviceId;
     if (this.actionInFlight || !profile) return;
@@ -563,13 +623,13 @@ class App extends Component<AppProps, AppState> {
       });
       // transport 连接以 status.phase === 'connected' 为准；不代表目标 Host 在线。
       this.props.api.setTransportConnected(status.phase === 'connected');
-      this.setState({ busy: false, status, bannerError: null, selectedDeviceId: targetDeviceId || (previousIdentity?.profileId === profile.id ? previousDeviceId : '') });
+      this.setState({ busy: false, status, bannerError: null, bannerNoticeOpen: false, selectedDeviceId: targetDeviceId || (previousIdentity?.profileId === profile.id ? previousDeviceId : '') });
     } catch (e) {
       this.setState({ busy: false, globalError: '连接失败：' + toError(e).message });
     } finally {
-      // 无论成败都清输入，不保存 token/CA 副本。
+      // 保留各局域网调试档案输入态令牌，切换/重试不无故清空。
       this.actionInFlight = false;
-      this.setState({ token: '', ca: '' });
+      this.setState({ ca: '' });
     }
   }
 
@@ -626,12 +686,12 @@ class App extends Component<AppProps, AppState> {
         ...s,
         profiles: [...s.profiles, next],
       }));
-      this.setState({
+      this.setState((s) => ({
         form: { title: '', kind: 'local', url: '', expectedDeviceId: '', deviceId: '' },
         selectedProfileId: next.id,
-        token: '',
+        token: s.profileTokens[next.id] ?? '',
         ca: '',
-      });
+      }));
     } catch (e) {
       this.setState({ globalError: '保存 profile 失败：' + toError(e).message });
     } finally {
@@ -696,11 +756,48 @@ class App extends Component<AppProps, AppState> {
           </div>
           <div className="rail-spacer" />
           <div className="rail-group">
+            {this.state.bannerError ? (
+              <div className="rail-notice-anchor" ref={(el) => { this.bannerNoticeAnchorRef = el; }}>
+                <button
+                  type="button"
+                  ref={(el) => { this.bannerNoticeButtonRef = el; }}
+                  className={'rail-item rail-notice-trigger' + (this.state.bannerNoticeOpen ? ' active' : '')}
+                  onClick={() => this.setState((s) => ({ bannerNoticeOpen: !s.bannerNoticeOpen }))}
+                  aria-expanded={this.state.bannerNoticeOpen}
+                  aria-haspopup="dialog"
+                  aria-controls="desktop-rail-notice-popover"
+                  title="查看运行提示"
+                >
+                  <span className="rail-icon-wrap">
+                    <CircleAlert size={18} aria-hidden />
+                    <span className="conn-dot needs-attention" />
+                  </span>
+                  <span className="rail-label">提示</span>
+                </button>
+                {this.state.bannerNoticeOpen ? (
+                  <div
+                    id="desktop-rail-notice-popover"
+                    className="rail-notice-popover"
+                    role="region"
+                    aria-label="运行提示"
+                  >
+                    <ErrorNotice
+                      error={this.state.bannerError}
+                      onDismiss={() => this.setState({ bannerError: null, bannerNoticeOpen: false })}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            <WindowsUpdateRailButton onOpen={button => {
+              this.updateSettingsTrigger = button;
+              this.setState({ settingsOpen: true, settingsTab: 'updates' });
+            }} />
             <button
               type="button"
               className="rail-item"
               ref={(el) => { this.settingsButtonRef = el; }}
-              onClick={() => this.setState({ settingsOpen: true, settingsPage: 'general' })}
+              onClick={() => this.setState({ settingsOpen: true })}
               title={identity ? '当前：' + phaseLabel : '打开设置'}
             >
               <span className="rail-icon-wrap">
@@ -712,14 +809,11 @@ class App extends Component<AppProps, AppState> {
           </div>
         </aside>
         <main className="app-workspace">
-          <aside className="app-notices" aria-label="通知">
-          {this.state.globalError && (
-            <ErrorNotice error={this.state.globalError} onDismiss={() => this.setState({ globalError: null })} />
-          )}
-          {this.state.bannerError && (
-            <ErrorNotice error={this.state.bannerError} onDismiss={() => this.setState({ bannerError: null })} />
-          )}
-          </aside>
+          {this.state.globalError ? (
+            <aside className="app-notices" aria-label="通知">
+              <ErrorNotice error={this.state.globalError} onDismiss={() => this.setState({ globalError: null })} />
+            </aside>
+          ) : null}
           {centerInterrupted && (
             <div className="center-recovery">
               <span role="status">{center?.state === 'disconnected' ? '中心连接不可用' : '正在恢复中心连接…'}</span>
@@ -754,10 +848,22 @@ class App extends Component<AppProps, AppState> {
           <Dialog.Portal>
             <Dialog.Overlay className="desktop-dialog-overlay settings-dialog-overlay" />
             <Dialog.Content
-              className={'desktop-dialog settings-dialog' + (this.state.settingsPage === 'general' ? ' client-settings-dialog' : '')}
-              onCloseAutoFocus={(e) => { e.preventDefault(); this.settingsButtonRef?.focus(); }}
+              className={
+                'desktop-dialog settings-dialog settings-shell-dialog' +
+                (this.state.settingsTab === 'center-admin' ? ' settings-shell-center-admin' : '')
+              }
+              onCloseAutoFocus={(e) => {
+                e.preventDefault();
+                const trigger = this.updateSettingsTrigger?.isConnected ? this.updateSettingsTrigger : this.settingsButtonRef;
+                this.updateSettingsTrigger = null;
+                trigger?.focus();
+              }}
             >
               <SettingsPanel
+                api={this.props.api}
+                activeTab={this.state.settingsTab}
+                onTabChange={(settingsTab) => this.setState({ settingsTab })}
+                centerAdminTab={this.state.centerAdminTab}
                 profiles={this.state.profiles}
                 profilesError={this.state.profilesError}
                 profilesBusy={this.state.busy}
@@ -766,10 +872,21 @@ class App extends Component<AppProps, AppState> {
                 form={this.state.form}
                 onFormChange={(patch) => this.setState((s) => ({ form: { ...s.form, ...patch } }))}
                 onSaveProfile={(e) => void this.saveProfile(e)}
-                token={this.state.token}
-                ca={this.state.ca}
-                onTokenChange={(token) => this.setState({ token })}
-                onCaChange={(ca) => this.setState({ ca })}
+                token={(() => {
+                  const localSel = selectedProfile?.kind === 'local'
+                    ? selectedProfile
+                    : this.state.profiles.find((p) => p.kind === 'local') ?? selectedProfile;
+                  return localSel ? (this.state.profileTokens[localSel.id] ?? this.state.token) : this.state.token;
+                })()}
+                onTokenChange={(token) => this.setState((s) => {
+                  const localSel = selectedProfile?.kind === 'local'
+                    ? selectedProfile
+                    : s.profiles.find((p) => p.kind === 'local') ?? selectedProfile;
+                  return {
+                    token,
+                    profileTokens: localSel ? { ...s.profileTokens, [localSel.id]: token } : s.profileTokens,
+                  };
+                })}
                 onConnect={() => void this.connect()}
                 onDisconnect={() => void this.disconnect()}
                 identity={identity}
@@ -778,6 +895,15 @@ class App extends Component<AppProps, AppState> {
                 phaseLabel={phaseLabel}
                 centerStatus={center}
                 onDisconnectCenter={() => this.disconnectCenter()}
+                onSaveCenterCa={(ca) => this.props.centerConnection.saveCenterCa(ca)}
+                onStartGoogleSetupWizard={this.state.archiveBridge ? (deviceId, botId) => {
+                  this.state.archiveBridge?.openConversation({ deviceId, botId }, 'google-setup');
+                  this.setState({ settingsOpen: false, view: 'chat' });
+                } : undefined}
+                onConfigureBot={(deviceId, botId) => {
+                  this.state.archiveBridge?.openConversation({ deviceId, botId });
+                  this.setState({ settingsOpen: false, view: 'chat' });
+                }}
                 devices={this.state.devices}
                 devicesIsRelay={identity?.kind === 'relay'}
                 lastObservedAt={status?.lastObservedAt ?? null}
@@ -791,7 +917,6 @@ class App extends Component<AppProps, AppState> {
                 actionError={this.state.globalError}
                 onDismissActionError={() => this.setState({ globalError: null })}
                 archiveBridge={this.state.archiveBridge}
-                archiveOpen={this.state.settingsPage === 'archive'}
                 onOpenArchivedBotHistory={this.handleOpenArchivedBotHistory}
               />
             </Dialog.Content>
@@ -893,6 +1018,7 @@ class App extends Component<AppProps, AppState> {
             onArchiveBridge={this.handleArchiveBridge}
             onOpenSendRecords={this.openSendRecords}
             onOpenArchived={this.handleOpenArchived}
+            onOpenCenterAdmin={this.openCenterAdminSettings}
           />
         </div>
         {pendingNode}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { BotBoardItem, BotBoardSnapshot } from '../../host-core/index.js';
-import { isBotActivityBusy } from './botActivity';
+import { isBotActivityBusy } from './botActivity.ts';
 
 export interface BotBoardTarget {
   key: string;
@@ -23,15 +23,25 @@ export interface BotBoardRecord {
 }
 
 export type BoardBucket = 'attention' | 'working' | 'review' | 'idle' | 'offline';
+export type BotBoardTranslate = (zh: string, en: string) => string;
+
+const defaultBoardText: BotBoardTranslate = (zh, en) =>
+  typeof navigator !== 'undefined' && navigator.language.startsWith('en') ? en : zh;
 
 export function botBoardKey(scope: string, deviceId: string, botId: string): string {
   return JSON.stringify([scope, deviceId, botId]);
 }
 
+export function isBotBoardInterrupted(activity?: BotBoardItem['activity']): boolean {
+  // shortcut: The Host carries the reason in a fixed diagnostic; use a structured reason once available.
+  return activity?.phase === 'failed' && activity.error?.code === 'GENERATION_FAILED' &&
+    activity.error.message === 'generation failed: interrupted';
+}
+
 export function botBoardBucket(item: BotBoardItem, seenId?: string): BoardBucket {
   const { activity } = item;
   if (activity.phase === 'stopping' || activity.phase === 'interrupting') return 'working';
-  if (item.attention || activity.phase === 'failed') return 'attention';
+  if (item.attention || (activity.phase === 'failed' && !isBotBoardInterrupted(activity))) return 'attention';
   if (isBotActivityBusy(activity) || item.queuedCount > 0) return 'working';
   if (activity.phase === 'idle' && item.lastResult && item.lastResult.id !== seenId) return 'review';
   return 'idle';
@@ -42,7 +52,63 @@ let boardFlight: Promise<void> = Promise.resolve();
 const records = new Map<string, BotBoardRecord>();
 const seen = new Map<string, string>();
 const seenErrors = new Map<string, string>();
+const boardListeners = new Set<() => void>();
 const seenPrefix = 'bot-board-seen:v1:';
+
+function notifyBoardListeners(): void {
+  for (const listener of boardListeners) listener();
+}
+
+export function getBotBoardRecord(key: string): BotBoardRecord | undefined {
+  return records.get(key);
+}
+
+/**
+ * Drops only the target Bot's cached board snapshot and replaces its slot with a
+ * unique empty record so any older in-flight getBotBoard write (success or error)
+ * cannot overwrite it; other Bots and seen markers stay untouched.
+ */
+export function invalidateBotBoardTarget(key: string): void {
+  if (!key) return;
+  records.set(key, {});
+  notifyBoardListeners();
+}
+
+export async function readBotBoardBatch(
+  batch: readonly Pick<BotBoardTarget, 'key' | 'botId' | 'generation' | 'read'>[],
+  isCurrent: () => boolean = () => true,
+  t: BotBoardTranslate = defaultBoardText,
+): Promise<boolean> {
+  const first = batch[0];
+  if (!first) return false;
+  const expected = new Map<string, BotBoardRecord | undefined>();
+  for (const target of batch) expected.set(target.key, records.get(target.key));
+  let changed = false;
+  try {
+    const snapshot = await first.read(batch.map(t => t.botId));
+    if (!isCurrent()) return false;
+    for (const target of batch) {
+      if (records.get(target.key) !== expected.get(target.key)) continue;
+      const item = snapshot.items.find(item => item.botId === target.botId);
+      const error = snapshot.errors.find(error => error.botId === target.botId);
+      records.set(target.key, item
+        ? { item, updatedAt: snapshot.updatedAt, generation: target.generation }
+        : { ...records.get(target.key), error: error?.code === 'BOT_NOT_FOUND'
+          ? t('Bot 已不存在，请刷新目录。', 'Bot no longer exists. Please refresh the directory.')
+          : t('状态读取失败。', 'Failed to read status.') });
+      changed = true;
+    }
+  } catch {
+    if (!isCurrent()) return false;
+    const message = t('看板不可用，请检查连接，或更新中心与 Host。', 'Board unavailable. Check your connection or update Center and Host.');
+    for (const target of batch) {
+      if (records.get(target.key) !== expected.get(target.key)) continue;
+      records.set(target.key, { ...records.get(target.key), error: message });
+      changed = true;
+    }
+  }
+  return changed;
+}
 
 function readSeen(key: string): string | undefined {
   if (seen.has(key)) return seen.get(key);
@@ -51,12 +117,18 @@ function readSeen(key: string): string | undefined {
   return id ?? undefined;
 }
 
-export function useBotBoard(targets: BotBoardTarget[], active: boolean) {
+export function useBotBoard(
+  targets: BotBoardTarget[],
+  active: boolean,
+  t: BotBoardTranslate = defaultBoardText,
+) {
   const [revision, setRevision] = useState(0);
   const [visible, setVisible] = useState(!document.hidden);
   const [storageError, setStorageError] = useState('');
   const targetsRef = useRef(targets);
   targetsRef.current = targets;
+  const tRef = useRef(t);
+  tRef.current = t;
   // Labels and callback identities do not restart an in-flight batch.
   const signature = JSON.stringify(targets.map(t => [t.key, t.hostKey, t.generation, t.online]));
   const currentSignature = useRef(signature);
@@ -67,12 +139,17 @@ export function useBotBoard(targets: BotBoardTarget[], active: boolean) {
     return () => document.removeEventListener('visibilitychange', onVisibility);
   }, []);
   useEffect(() => {
+    const notify = () => setRevision(value => value + 1);
+    boardListeners.add(notify);
+    return () => { boardListeners.delete(notify); };
+  }, []);
+  useEffect(() => {
     try {
       for (const target of targetsRef.current) readSeen(target.key);
       setStorageError(targetsRef.current.map(target => seenErrors.get(target.key)).find(Boolean) ?? '');
       setRevision(value => value + 1);
     } catch {
-      setStorageError('无法读取本机查看标记；待查看状态可能不完整。');
+      setStorageError(tRef.current('无法读取本机查看标记；待查看状态可能不完整。', 'Unable to read local viewed markers; review status may be incomplete.'));
     }
   }, [signature]);
 
@@ -99,24 +176,9 @@ export function useBotBoard(targets: BotBoardTarget[], active: boolean) {
         const worker = async () => {
           while (current() && next < batches.length) {
             const batch = batches[next++]!;
-            const first = batch[0]!;
-            try {
-              const snapshot = await first.read(batch.map(t => t.botId));
-              if (!current()) return;
-              for (const target of batch) {
-                const item = snapshot.items.find(item => item.botId === target.botId);
-                const error = snapshot.errors.find(error => error.botId === target.botId);
-                records.set(target.key, item
-                  ? { item, updatedAt: snapshot.updatedAt, generation: target.generation }
-                  : { ...records.get(target.key), error: error?.code === 'BOT_NOT_FOUND'
-                    ? 'Bot 已不存在，请刷新目录。' : '状态读取失败。' });
-              }
-            } catch {
-              if (!current()) return;
-              const message = '看板不可用，请检查连接，或更新中心与 Host。';
-              for (const target of batch) records.set(target.key, { ...records.get(target.key), error: message });
+            if (await readBotBoardBatch(batch, current, tRef.current) && current()) {
+              setRevision(value => value + 1);
             }
-            if (current()) setRevision(value => value + 1);
           }
         };
         await Promise.all(Array.from({ length: Math.min(4, batches.length) }, worker));
@@ -138,14 +200,14 @@ export function useBotBoard(targets: BotBoardTarget[], active: boolean) {
       localStorage.setItem(seenPrefix + key, id);
       seenErrors.delete(key);
     } catch {
-      const message = '查看标记未能保存；本次会话仍有效，重启后可能再次显示待查看。';
+      const message = tRef.current('查看标记未能保存；本次会话仍有效，重启后可能再次显示待查看。', 'Failed to save viewed marker; valid for this session, may reappear after restart.');
       seenErrors.set(key, message);
       setStorageError(message);
     }
     setRevision(value => value + 1);
   }, []);
 
-  return { records, seen, markViewed, storageError, revision, visible };
+  return { records, seen, markViewed, invalidate: invalidateBotBoardTarget, storageError, revision, visible };
 }
 
 export type BotBoardState = ReturnType<typeof useBotBoard>;

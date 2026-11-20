@@ -1,0 +1,319 @@
+{
+  "source": "https://github.com/stablyai/orca",
+  "version": "v1.4.265",
+  "commit": "e64e561738d8d465ab459e7e3f9e46d08b6396ea",
+  "license": "MIT (see LICENSE)",
+  "note": "Upstream Git blob IDs identify the original files at the pinned revision. sha256 identifies the bytes included here after adaptation.",
+  "files": {
+    "LICENSE": {
+      "sha256": "ff1b611f80580d49f4b97e93a97b24eb050b0671b26b8afe16341fab699112f3",
+      "upstreamBlob": "fbf46fc17dacb1f65e03e2b6290eb53ba94b149d",
+      "upstreamSha256": "ff1b611f80580d49f4b97e93a97b24eb050b0671b26b8afe16341fab699112f3"
+    },
+    "src/cli/google/google-files-format.ts": {
+      "sha256": "41c5449fee53728de863868ac1bff83154bb9a35b6c017476fdda2a5b1228976",
+      "upstreamBlob": "0ea8054c56cdae6833a4490cc2dc966f2a5bb13e",
+      "upstreamSha256": "057133ff209a70a923c344a26e5562a8c7c1459fd791c69fd6ae3fd278b57dc0"
+    },
+    "src/cli/google/google-read-format.ts": {
+      "sha256": "8147e5221145476721c194b51c75a044964bcc027b1c6aa893a4ede2abe3a0a7",
+      "upstreamBlob": "673dc55b18e5051bed5452cbccfb4e790cb6e692",
+      "upstreamSha256": "b00f4606dad51961a278d67d11a75d2cfad00c628aaa1afff69f407d4810fc37"
+    },
+    "src/cli/google/google-write-format.ts": {
+      "sha256": "d5efae4daf69880f7db5bf209d42a99998278d1e72d0621c826638f6c8e0ec49",
+      "upstreamBlob": "c22ab7fa08412d72aed92932909d5e1b5d91b001",
+      "upstreamSha256": "46e1c68f6e093f4bc8ded1e39b220b5d21660602baa20de699c924feef2ef35b"
+    },
+    "src/main/google/gmail-mime-message.ts": {
+      "sha256": "6264247f3c3ce0851c3b681fddb8335a3b81d9109ba0102590fc042f12dc253c",
+      "upstreamBlob": "6600e4e2c5997c12ac4dbf978a81c5e012b6ea4b",
+      "upstreamSha256": "67d520bb951dda97ee97aee473122c6d57969879ec9d089b5525ea26cb7bb39e"
+    },
+    "src/main/google/google-api-client.ts": {
+      "sha256": "54d47be3ba424e6ac0e0e24d89b3b820c12f7b2e85357a3bf84f6203c83a4172",
+      "upstreamBlob": "97eadbcf2480fb5405e7fac86581d352c8755035",
+      "upstreamSha256": "376b0b9d73e7a6ce2d5d99a83559b3503dbf8c8e69491048d90196be388cec07"
+    },
+    "src/main/google/google-calendar-changes.ts": {
+      "sha256": "0a4f9ec06bd5a23d6ce03482112b5760b6ff89a579ec56103305ad36b1f66b9f",
+      "upstreamBlob": "7945e43d8533f568121abead9bec1c7adc6e891f",
+      "upstreamSha256": "aa42c8eae8eab11a7abcfe4086e075a589dcd65b96387e10c75bee069d3301e1"
+    },
+    "src/main/google/google-calendar-event-target.ts": {
+      "sha256": "a36125751b60e4283798f21f7068ce54d9dab8776f168025b4559b25d14e0c62",
+      "upstreamBlob": "162bf8f3e9a010b85f1bcc807ef97f0befea0203",
+      "upstreamSha256": "0cf82daad21c75fd020672b19d6b10a1e39059d7b0854364cac037db0ec8651a"
+    },
+    "src/main/google/google-calendar-free-time.ts": {
+      "sha256": "ffd7cb9ea7c537a36bc8f726d6128251cf84772ba8cb28fef3964ecc8ee3003e",
+      "upstreamBlob": "9628bbe3139d5a983ce089e570723f22a8c3bebd",
+      "upstreamSha256": "778a02810195f0f3973488ace34e15cf33cfeab5f795e8ebfd90702a168d5763"
+    },
+    "src/main/google/google-calendar-read.ts": {
+      "sha256": "01eeeff85973e4d8f19b168b01e27c64ea12e6cad27e0712e78205d20d82cda7",
+      "upstreamBlob": "ac14a55cd675f00d5c867fac3289e5d6e443c3e6",
+      "upstreamSha256": "a6fe5edb189e52817f5e5533033ba4ffdd2c7b6e5e039c33c9a299365ed7d32e"
+    },
+    "src/main/google/google-calendar-write.ts": {
+      "sha256": "9d9ed5a9ba51c5c1ce8d1839a69e3cc5e66688f1aa45b3d8f9e9f128367cfc97",
+      "upstreamBlob": "6b2f5b07b239b4c945363fe2e4c0a740c2a6af8a",
+      "upstreamSha256": "7d153c49427dd49b13447152af14235960e354baf701457197096e513ed6a00b"
+    },
+    "src/main/google/google-contacts-read.ts": {
+      "sha256": "76f52058711bd4b81642a38f14fe590c23429d325146af3ac5e29bf8caaabef0",
+      "upstreamBlob": "ff91e0d1dc7ba6f059e7e2a272882fd0bcd19fed",
+      "upstreamSha256": "a5529202b77a447c4eafae18e3aec02bc93add440e144a9e4221121eb1cba563"
+    },
+    "src/main/google/google-docs.ts": {
+      "sha256": "5cd09c9274a8f07e0137476e3c2c9979b72a7f6756c5772f412129a0fd19c55d",
+      "upstreamBlob": "45a9e83164b099933bf5ee492baf0c8dc36a19fb",
+      "upstreamSha256": "d45d0bb55e7b35eb67b4674796cd48e6a0eb834f8183bd8cd849639d1940a59b"
+    },
+    "src/main/google/google-docs-comments.ts": {
+      "sha256": "2f529403e472ca307c902aa6a7a80994eadb3710fa628ba989f4c15dddd80f09",
+      "upstreamBlob": "29d1959532cb9f4ef2a5b6108e7ef65b648a11b7",
+      "upstreamSha256": "4a2b18739e84a2ceb863270dc662820d9a357f7cf2b32fa947965a0f34e3b2da"
+    },
+    "src/main/google/google-docs-markdown.ts": {
+      "sha256": "056b7b437aefba291b65c7e244ecdaaefff98cbace26db3987cbaed795dffa5f",
+      "upstreamBlob": "c0ca35a8233ecb07be2cb8c42b1ab6474e59f7cb",
+      "upstreamSha256": "056b7b437aefba291b65c7e244ecdaaefff98cbace26db3987cbaed795dffa5f"
+    },
+    "src/main/google/google-docs-text.ts": {
+      "sha256": "31c2d115e7191a617010bfa903382752a6d4a3b1b9030de6414bf3e306ec3fd9",
+      "upstreamBlob": "b3c46f6e0d3dd1dce44db3499285cd62af4d5e76",
+      "upstreamSha256": "31c2d115e7191a617010bfa903382752a6d4a3b1b9030de6414bf3e306ec3fd9"
+    },
+    "src/main/google/google-drive.ts": {
+      "sha256": "b0c72b86f109f2d158a194579fdd3e3914c594fac9787a81f6b21434b40ae78f",
+      "upstreamBlob": "b25a062ba07689e6fc3e15342fabdabe5f9ae9ee",
+      "upstreamSha256": "711f33be475319c57eaf3cbc9aacc8a20b6d8db10ef70d1e646d269be415152f"
+    },
+    "src/main/google/google-drive-files.ts": {
+      "sha256": "0b7d8fba9e544cad68cb9fb79158481904abd31ab1863c8c903eb8a0473f9236",
+      "upstreamBlob": "46d290fd08c011074cdba51d7720c3922dbcd053",
+      "upstreamSha256": "24b8954810cd586c0aac167aa32ae771421a1b3a3d40788106bd376876badf01"
+    },
+    "src/main/google/google-drive-read.ts": {
+      "sha256": "5b38fe6646ce26f388210bc661a3091317efd176245313a304a61ae6e17431d9",
+      "upstreamBlob": "f459640c435ecc712ffe06ab8f29bd5e748effb9",
+      "upstreamSha256": "5f7d8585fba69f7ad5ea61fe29b6073a95fc4f11f7682ef5c458cddcb6f99eeb"
+    },
+    "src/main/google/google-drive-text-cache.ts": {
+      "sha256": "9f8ba37923310bf89329279d71c82d61680d377a553ddc47964689aefb4346a1",
+      "upstreamBlob": "dd8f73236fd7750c9661be867701f76b4737eb5a",
+      "upstreamSha256": "9f8ba37923310bf89329279d71c82d61680d377a553ddc47964689aefb4346a1"
+    },
+    "src/main/google/google-event-time.ts": {
+      "sha256": "dcedd9a87b16b62c99a942cdbf1a434a4797655cce0fc0cd26e4c9af1a346817",
+      "upstreamBlob": "c4ead274aade6fbec0abeac7e7d13542ffecfb9b",
+      "upstreamSha256": "c2af60668242794d366f404a093b34a0ec88a3bc6ca18633085994ece12e3f5d"
+    },
+    "src/main/google/google-gmail-changes.ts": {
+      "sha256": "4c24c016fc4101d38a89a952ef2e7903b5f7cc5e43f38a2702e96e4e52d3bc83",
+      "upstreamBlob": "b247779c314772951e668524620cdb3fbef1f143",
+      "upstreamSha256": "9982cd1077ae08c8839c5756d42cd76c9a4d972d0c60c70b7c747f9d17bf1f80"
+    },
+    "src/main/google/google-gmail-draft-compose.ts": {
+      "sha256": "6e872da2654de9425bdfea5f79f8ee822334e54f6897a4894361289c69147ef8",
+      "upstreamBlob": "d83c6cf44a5b9c804f078eae648c2c4e281fc210",
+      "upstreamSha256": "e3f814c36a2ff1fdef89043b5fa55b577f2e40637c500a8f3c0849405abc4f2c"
+    },
+    "src/main/google/google-gmail-message.ts": {
+      "sha256": "d3eace6b2a6343c1e56f3e785332041b15edd1d070dce2a2bf335e7c91cf140e",
+      "upstreamBlob": "383f9709d402d5b287651fb3bf277d8006ca67e3",
+      "upstreamSha256": "5df11759d1a8b723c51b554c24f6c74cc71c2ab3c551bd59d1213c96752cf4ec"
+    },
+    "src/main/google/google-gmail-read.ts": {
+      "sha256": "c2a0c1f9e7e2400b290b46aa309c52e0799c17288659ed0b3c8b195bd2508228",
+      "upstreamBlob": "e745de85a4110e5a9a5b37e01b8a36ba93e425d1",
+      "upstreamSha256": "0575640f208ad952b5a5597d786b2e29c64f1fc8200483b6bd846f08e5234c51"
+    },
+    "src/main/google/google-gmail-write.ts": {
+      "sha256": "db34affbcdcd9aaeda8c96b260dbd3849a9667e04549d3e623642941b8d5eb0c",
+      "upstreamBlob": "fe6cc7b748bcc565737a11cdd634389dd7bfce04",
+      "upstreamSha256": "cfd7f7aeca26b6e673c5f658d6afb6dca8d5d91400e24841de62f1cc0a111a58"
+    },
+    "src/main/google/google-html-text.ts": {
+      "sha256": "587bd8927d69d2ecf3c3e0dd084eb0722803200b0c5802c1c10eb5a8dd4a995b",
+      "upstreamBlob": "671a02dd3fb6d5c132a0958144f0b780d631a968",
+      "upstreamSha256": "587bd8927d69d2ecf3c3e0dd084eb0722803200b0c5802c1c10eb5a8dd4a995b"
+    },
+    "src/main/google/google-pdf-text.ts": {
+      "sha256": "fd1ee441e9cb5caa1b15e4717b949b0e2a00ebbcddb33242b1df386e27764d2a",
+      "upstreamBlob": "7a5a52b4b4d931d60011e58a4c864bd3f678b7ea",
+      "upstreamSha256": "a077ed15fd5039df2f0f055244838f339a2e35cee27b0ae9c9d88d9fe77c65f7"
+    },
+    "src/main/google/google-pdf-text-client.ts": {
+      "sha256": "1aa90a2914cb9553a484af7c5de37758c728a35627af90f699fd967eaaad7d6a",
+      "upstreamBlob": "d0abbadd8a0fa8a81daa7e987ce31d1d5f95f49b",
+      "upstreamSha256": "f835f1e4f12d42cbc40995ef092f08c7177928ce50d9dc712485ea723adcaa05"
+    },
+    "src/main/google/google-pdf-text-worker-entry.ts": {
+      "sha256": "949b9903680ea205f112d2561fb04a25dfe96353fd80d66d2a2ba75e4f778a3e",
+      "upstreamBlob": "1a15233fecf14342310ce017078af60a27b7a7bc",
+      "upstreamSha256": "619a84191d9f88e1ce1c07255393ec8ab9c9a102661920c33a56e354bdf33661"
+    },
+    "src/main/google/google-pdf-text-worker-protocol.ts": {
+      "sha256": "1e7bc30a936e846075d19011939641490031efc1c9d7289e1bdb60211ff74b9e",
+      "upstreamBlob": "12d062c5a97a6f79693f1c3fb3b35cf53c3783ef",
+      "upstreamSha256": "1e7bc30a936e846075d19011939641490031efc1c9d7289e1bdb60211ff74b9e"
+    },
+    "src/main/google/google-readiness.ts": {
+      "sha256": "0dd95818d9eca5fbdce06bd03d8422720a2a56bdd076809c0e98e749b753cb8f",
+      "upstreamBlob": "570c85f80091c28a8b36aa04562b65ba433fa7e7",
+      "upstreamSha256": "1e71cab946a013a5f520c8b5693ed2104d7fc7dec8726e906603933ce83e3e92"
+    },
+    "src/main/google/google-sheets.ts": {
+      "sha256": "fe04a6b962811a968b4aab4064762ebfa7b714033f1ba2511bcb44ef570bda94",
+      "upstreamBlob": "23c3869c71ab57601aa8b5840d7ee65c282bd840",
+      "upstreamSha256": "21e06979b25330bca0be7894215a1ad43676fa6a764b60ce91109a291a455538"
+    },
+    "src/main/google/google-time-zone.ts": {
+      "sha256": "ad9b6fa4709f0fdd9154ef9afec53cddcf50945648ab0910bc61e68e53d90a39",
+      "upstreamBlob": "56f597e9d2206e6b454cd1af35aeaabded3bf1fb",
+      "upstreamSha256": "ad9b6fa4709f0fdd9154ef9afec53cddcf50945648ab0910bc61e68e53d90a39"
+    },
+    "src/main/google/google-token-endpoint.ts": {
+      "sha256": "9014bf44386045097ba944228bfb3216c69c1a6c4c5e56cfa249aebf354f3a9f",
+      "upstreamBlob": "d7ce4eab4e9547abf49306eb81b0d6218c6fac6f",
+      "upstreamSha256": "a5ea07e84bb39ad057c25221f762642a99c02bb9485b7a030d7d58b39fccf52e"
+    },
+    "src/main/google/google-trigger-checker.ts": {
+      "sha256": "ba87c0e45a051358dfeae0a45077bf0009f3317048967b5ebf0a682c438aa20f",
+      "upstreamBlob": "7f73dcaf89771adf9e6bdde432abcae9a8391dbe",
+      "upstreamSha256": "6b475076abbfabf818c4bcf90da3debeb4d157f8da5ec14696c4d60a7e59f5f9"
+    },
+    "src/main/google/google-trigger-match.ts": {
+      "sha256": "902e13292664262fa13bd52f155b377c7bcb6b1b2dc0c79bfae7a1481d7c6b46",
+      "upstreamBlob": "3184e7f856f33dd81322f576059bf418a624d2ab",
+      "upstreamSha256": "95194992d2fe58c00b7d427bc39c2e8df4ce6b239ec4bf282d6294a3eb311d39"
+    },
+    "src/main/google/google-trigger-state.ts": {
+      "sha256": "9b80bb834a59b5b759c9d92c00c02ad3c89b3510c44532881a40534c816ba174",
+      "upstreamBlob": "eafb510879f71200912045f27a8384172a3bfc83",
+      "upstreamSha256": "0e17fc80cd58f0ce3299fc8979fb7871a27bad3585d807c76107d514cc7cb03f"
+    },
+    "src/shared/agent-accounts/host-account-sign-in-types.ts": {
+      "sha256": "35f7c90daa10ee4e47a0302699ccc1e2210593a6714485f98d61d45e999689c8",
+      "upstreamBlob": "a8c7f5b44513e4ff677bbfab866348ede76f0ba4",
+      "upstreamSha256": "a8eadf1681f3565f788f0204563d323f279ef0d2e8593ff992fae47d7e17837c"
+    },
+    "src/shared/automation-event-triggers.ts": {
+      "sha256": "f659e5ba9ea044edcc10e4c06b0bab747cac2d925ce1a01ced8d8b3e48f70e55",
+      "upstreamBlob": "cafac942902e3df687b93b4bf611d852e2ef63c5",
+      "upstreamSha256": "6e242013c75bd62a9bb5edb2ec2c8f4a3b681e5bbe1e7d3dbbc42cb7e6ac4840"
+    },
+    "src/shared/automation-google-triggers.ts": {
+      "sha256": "700ce6332884bcd94a6cdac3b188e85632e6b73126449fc8d1c23408826007e9",
+      "upstreamBlob": "413c82f3f6aa68cc42c2ef109c09fb20cb4f0434",
+      "upstreamSha256": "700ce6332884bcd94a6cdac3b188e85632e6b73126449fc8d1c23408826007e9"
+    },
+    "src/shared/automations/automation-definition.ts": {
+      "sha256": "ea4452ce8a31310e3a597b6ac918f55faa785df265dad2c7e0d461bc226f45e3",
+      "upstreamBlob": "6d7aeda6155698cb097c1f91c4b18ee65d094f22",
+      "upstreamSha256": "6667a6016f99f619e329e57964aaef809d847c731101848e94b3a28c6506c2df"
+    },
+    "src/shared/bot-types.ts": {
+      "sha256": "026e6f041c06b9afd362a3f37cca6e267f692d0d311046cc88aabb6e64f74188",
+      "upstreamBlob": "3738da7c19d2b881c579b131a24a675b1855bc42",
+      "upstreamSha256": "35f234a1e1a6b99f86ce5748e42db66b37fa20ada342a70c7d5ae247db702311"
+    },
+    "src/shared/file-preview/file-preview-kind.ts": {
+      "sha256": "4b6c79172ee3eaa370cb492529040c81a428f4cc5659e72af7706010882e64f4",
+      "upstreamBlob": "3fceb3ede10734cfbac17f675a783533ff2845b4",
+      "upstreamSha256": "ce0bb4e277593da780903384d4d7ecad03ca020b1f91a4409ef8a525ee288901"
+    },
+    "src/shared/file-preview/image-mime-types.ts": {
+      "sha256": "8460080a80e2a09fd64466faee1b87df4d8e4803e33bc2f9dd8b3b031a54d536",
+      "upstreamBlob": "c80496b40b3fcd0380ea23715c1e7720290d5435",
+      "upstreamSha256": "8460080a80e2a09fd64466faee1b87df4d8e4803e33bc2f9dd8b3b031a54d536"
+    },
+    "src/shared/file-preview/media-mime-types.ts": {
+      "sha256": "c7046e750a34ef4a2cd38cd5ad935e38e2adcc31e63fbd065a809f9e70b4c22a",
+      "upstreamBlob": "28a9557d169970fc4fc500ec996400fb7248ad64",
+      "upstreamSha256": "c7046e750a34ef4a2cd38cd5ad935e38e2adcc31e63fbd065a809f9e70b4c22a"
+    },
+    "src/shared/google/email-address-list.ts": {
+      "sha256": "7809b77f05697e0dd73eda312ca37a00912205c351f4d5ffa202e205f3e516b8",
+      "upstreamBlob": "8aa59eb8c2dcbbcc173dd4f4639eabca86818604",
+      "upstreamSha256": "7809b77f05697e0dd73eda312ca37a00912205c351f4d5ffa202e205f3e516b8"
+    },
+    "src/shared/google/gmail-draft-request-budget.ts": {
+      "sha256": "07229e4702db85724ea11be0fb31ae720247c4ab221bfda7eca701f0ee1a221f",
+      "upstreamBlob": "9d2ecaaaaab61b8dd48e78742590888c82dd67ac",
+      "upstreamSha256": "666334db9a47a192615097cfa443f8fa8fe6915f480bec4a7f2e3af5f6d3316b"
+    },
+    "src/shared/google/google-client-config.ts": {
+      "sha256": "1164f9a2b2a20e4eb1acd3d89156840ef26c72b0b8c6220c5a7827082a8c9ab0",
+      "upstreamBlob": "0050f02b76069648a1143b0c37ecf604f4733a40",
+      "upstreamSha256": "1164f9a2b2a20e4eb1acd3d89156840ef26c72b0b8c6220c5a7827082a8c9ab0"
+    },
+    "src/shared/google/google-connect-types.ts": {
+      "sha256": "2ace9a927ca8377b29d09f6b28c36cf70bdc026b794fa57c76294a1ada3b933b",
+      "upstreamBlob": "d40c77f911b342e4f4eced1a72bf92b2a530b65c",
+      "upstreamSha256": "49934470693a98618009a397fb274f39b81849567b0da2de9364dee17478b01c"
+    },
+    "src/shared/google/google-files-types.ts": {
+      "sha256": "f6882477620ddd5a8ea24dc70f2b9c1fefa966dc1b2c842fef8691ea28c18010",
+      "upstreamBlob": "d74720a7c312e8c170582f601e1aba05a939f92f",
+      "upstreamSha256": "f6882477620ddd5a8ea24dc70f2b9c1fefa966dc1b2c842fef8691ea28c18010"
+    },
+    "src/shared/google/google-read-types.ts": {
+      "sha256": "12cc86f5fefae1d00653cb9ba3a21a662b5f4c466ca694529297f7233ca162d8",
+      "upstreamBlob": "7a665e43b562627f6bc073c802fbf14972c39c6a",
+      "upstreamSha256": "12cc86f5fefae1d00653cb9ba3a21a662b5f4c466ca694529297f7233ca162d8"
+    },
+    "src/shared/google/google-scopes.ts": {
+      "sha256": "59671415b86418f4d285d625ba464dd37ffc09bd1b6453a79d56417967935d7c",
+      "upstreamBlob": "06809273d8f2e9091a846b471588daa00a26ec7c",
+      "upstreamSha256": "59671415b86418f4d285d625ba464dd37ffc09bd1b6453a79d56417967935d7c"
+    },
+    "src/shared/google/google-write-types.ts": {
+      "sha256": "5a70a2defb7db87e1cf468166972b23a9777e935b0dabdfc71247af00a9b43a4",
+      "upstreamBlob": "31930fe55aba6db4945ced3973370574db35a013",
+      "upstreamSha256": "c2a13ccf7f0769eaca94b2ec8dd07001a3b854b5a9a251eaf1767082c5db016c"
+    },
+    "src/shared/google/sheets-a1.ts": {
+      "sha256": "73f4d8ab3eb0d69d27783a8841c8e63d426d11b3a9f54ddbf1aedb638ba1c582",
+      "upstreamBlob": "0d2b6f98bd9fc43c22654392ad0fc4f1b1183d52",
+      "upstreamSha256": "73f4d8ab3eb0d69d27783a8841c8e63d426d11b3a9f54ddbf1aedb638ba1c582"
+    },
+    "src/shared/quoted-text-fence.ts": {
+      "sha256": "94fdef64b19a146c0a0f6199ce26e0066f27769fb85f657960cd4155cf2ef294",
+      "upstreamBlob": "b5e26923aa1675c9d4f7a74cd22e7f33c70ee0c6",
+      "upstreamSha256": "94fdef64b19a146c0a0f6199ce26e0066f27769fb85f657960cd4155cf2ef294"
+    },
+    "src/shared/remote-runtime/paired-request-budget.ts": {
+      "sha256": "c98e4fce2362caac6c4d97e9dcd0029931c55ce18d01441d4c18a47019003e2f",
+      "upstreamBlob": "465fb8c83a5dcfad0adf181c10144a527c498bce",
+      "upstreamSha256": "8c827bc108b4a4093f2923d6f827c4d32cb95a2155f77101e83b6bb5631b0330"
+    },
+    "src/shared/rpc-contract/google-call-params.ts": {
+      "sha256": "2d3e5f36cbbb982b1b43b0eaccc434e281b9747c8e1f3c2a8d6feda9f21d6504",
+      "upstreamBlob": "4666ffd9b7e950d2e3dcfaa7a08744c98a09b1fa",
+      "upstreamSha256": "126ba2370a5f15d6c108daf02e53cf53abc57272d18d8c48a92b8c43c1b59fe3"
+    },
+    "src/shared/rpc-contract/google-files-params.ts": {
+      "sha256": "72e3dcce68fb47734463aac62b5fb04e7f39a775d249546fbe2bf3aae8c3acb1",
+      "upstreamBlob": "f5ac679a412c7502f0f27bc8478ae0e13d78d4eb",
+      "upstreamSha256": "79360fea958ef4fa785881adb6654588cec356bb60f0986678bac3b04ba0cf45"
+    },
+    "src/shared/rpc-contract/google-read-params.ts": {
+      "sha256": "379452d602a76b5a45c01a24d943c8fbf65df99b0ac605b21a37a03d7c53d5a0",
+      "upstreamBlob": "beb93a1d550452647ae6fe67b43c762cc62cf2ff",
+      "upstreamSha256": "077e9cac6a55b0b8350a4b3b2832f119070fb3d2272f981658b9930a4068c360"
+    },
+    "src/shared/rpc-contract/google-write-params.ts": {
+      "sha256": "08e57060f4ce0ac52a290362a8246640d1f7aeaa340d3a192d23f9d1c6bf7550",
+      "upstreamBlob": "7f1c8f2d457d93813e56a77ea038fdb983387787",
+      "upstreamSha256": "0701b675e43d7943f4bca188daf351087eace455e516cf1a7da340eb61fa8e00"
+    },
+    "src/shared/tool-output-limits.ts": {
+      "sha256": "e6af8aafe5eddb36a1703e6583b46eff099d9aeccb7e2c1f07d4f7d64ec30e2d",
+      "upstreamBlob": "4070842b0d5b645b220314bbf6c35a87fa08a348",
+      "upstreamSha256": "e6af8aafe5eddb36a1703e6583b46eff099d9aeccb7e2c1f07d4f7d64ec30e2d"
+    }
+  }
+}

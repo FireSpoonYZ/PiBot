@@ -22,7 +22,7 @@ const TOOL_ERROR_CODES = new Set([
 const ID_SCHEMA = { type: 'string', minLength: 1 };
 const FILES_SCHEMA = {
   type: 'array', items: { type: 'string', minLength: 1 }, maxItems: BOT_FILE_MAX_COUNT,
-  description: 'Paths on this Bot\'s Host (absolute or relative to its cwd). Up to 4 regular files, no file-size limit; images keep their original bytes.',
+  description: 'Paths on this Bot\'s Host (absolute or relative to its cwd) or structured attachment references (attachment://<id>) from session_search. Up to 4 regular files, no file-size limit; images keep their original bytes.',
 };
 const LIMIT_SCHEMA = { type: 'integer', minimum: 1, maximum: 200 };
 const THINKING_LEVEL_SCHEMA = {
@@ -106,7 +106,7 @@ function previewPage(metadata, page, key) {
 }
 
 
-export function createCommunicationTools({ host, getHarness, getMessageLog, publishWork, passWork = null, collaboration, sessions }) {
+export function createCommunicationTools({ host, getHarness, getMessageLog, publishWork, passWork = null, collaboration, sessions, dataPrivacy = null }) {
   function tool({ name, description, properties, required = [], deferred, boundedCodes, run }) {
     return defineTool({
       name,
@@ -152,8 +152,29 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
   }
 
   async function send(args, identity, log, api, context, turn) {
-    const requestedScopeId = args.scopeId ?? turn?.replyTarget?.scopeId;
-    const scope = typeof requestedScopeId === 'string' ? log.getScope(requestedScopeId) : null;
+    const replyTarget = turn?.replyTarget;
+    let requestedScopeId;
+    if (args.scopeId !== undefined) {
+      assertId(args.scopeId, 'scopeId');
+      requestedScopeId = args.scopeId;
+    } else if (
+      (replyTarget?.kind === 'dm' || replyTarget?.kind === 'room') &&
+      typeof replyTarget.scopeId === 'string' &&
+      replyTarget.scopeId.trim() !== ''
+    ) {
+      requestedScopeId = replyTarget.scopeId;
+    } else if (replyTarget?.kind === 'primary') {
+      throw messageError(
+        'INVALID_ARGUMENT',
+        'scopeId is required because this turn targets the primary user chat; reply to the user with plain assistant text, or specify a DM/room scopeId explicitly',
+      );
+    } else {
+      throw messageError(
+        'INVALID_ARGUMENT',
+        'scopeId is required because this turn has no default DM or room reply target',
+      );
+    }
+    const scope = log.getScope(requestedScopeId);
     if (!scope) throw messageError('SCOPE_NOT_FOUND', 'scope not installed');
     const targetScopeId = scope.scopeId ?? requestedScopeId;
     const peer = scope.kind === 'dm'
@@ -228,7 +249,6 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     // responseMessageId（recordOutgoing/replyOrigin 链解析的原始请求消息；
     // null 表示解析不到，降级为新 request 绝不冒充）。升级前的直接旧 DM
     // 冻结轮（无 originRequestId、无该字段）才回退 triggerMessageId。
-    const replyTarget = turn?.replyTarget;
     const originMessageId = turn?.responseMessageId !== undefined
       ? turn.responseMessageId
       : (turn?.originRequestId === undefined ? turn?.triggerMessageId : undefined);
@@ -518,7 +538,7 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
           return collaboration.unarchiveBot({ ...args, signal: context.abortSignal });
         },
       }),
-      ...createBotManagementTools({ collaboration, memoRequestId }).map((spec) => tool(spec)),
+      ...createBotManagementTools({ collaboration, memoRequestId, dataPrivacy }).map((spec) => tool(spec)),
       tool({
         name: 'delete_bot',
         description: 'Permanently delete an idle, non-primary Bot from the specified device.',
@@ -644,14 +664,18 @@ export function createCommunicationTools({ host, getHarness, getMessageLog, publ
     }),
     tool({
       name: 'send_to',
-      description: 'Send a message as this Bot to an installed scope (a DM with one peer or a room for the group): dispatch work, add information, ask a question, or deliver a result. When this turn already answers a message in that scope, the Host links the send to the original message automatically; there is nothing extra to provide. Pass "(pass)" as text (with no files) to stay silent without publishing a message (e.g. when a room turn or a pure-FYI DM needs no reply). Sending does not wait: answers and follow-ups arrive later as new rounds in this conversation, so end the turn when no independent work remains. Returns only a local stored receipt — not remote delivery, not a completed task; no scopes are created. Optional files are copied to every other member before publishing; all recipient Hosts must be online. Use original local paths (including uploaded-image paths), never base64 in text.',
+      description: 'Send a message as this Bot to an installed scope (a DM with one peer or a room for the group): dispatch work, add information, ask a question, or deliver a result. Omit scopeId to reply to the current turn\'s default DM or room destination; provide scopeId explicitly to address a specific or different scope. When this turn targets the user\'s primary chat, reply to the user directly with plain assistant text — there is no default scopeId for primary chat. When this turn already answers a message in that scope, the Host links the send to the original message automatically; there is nothing extra to provide. Pass "(pass)" as text (with no files) to stay silent without publishing a message (e.g. when a room turn or a pure-FYI DM needs no reply). Sending does not wait: answers and follow-ups arrive later as new rounds in this conversation, so end the turn when no independent work remains. Returns only a local stored receipt — not remote delivery, not a completed task; no scopes are created. Optional files are copied to every other member before publishing; all recipient Hosts must be online. Use local paths or structured attachment references (attachment://<id>, looked up via session_search action "attachments") for uploaded user images, never base64 in text.',
       properties: {
-        scopeId: ID_SCHEMA,
+        scopeId: {
+          ...ID_SCHEMA,
+          description: 'Target installed DM or room scopeId. Optional when replying to a turn whose default destination is a DM or room: omit scopeId to send to the current turn\'s default DM/room reply target. Required when addressing another scope explicitly, initiating a new peer/room message, or in a primary user chat turn (where replies to the user go in plain assistant text rather than send_to).',
+        },
         text: { type: 'string', minLength: 1 },
         files: FILES_SCHEMA,
       },
-      required: ['scopeId', 'text'],
-      run: async (args, identity, log, api, context) => send(args, identity, log, api, context, await sessions.getTurn(api, context)),
+      required: ['text'],
+      run: async (args, identity, log, api, context) =>
+        send(args, identity, log, api, context, (await sessions?.getTurn?.(api, context)) ?? null),
     }),
   ];
 }

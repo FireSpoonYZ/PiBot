@@ -127,6 +127,23 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted, deviceName
   const [sendError, setSendError] = useState<string | null>(null);
   const [lastRecord, setLastRecord] = useState<{ deviceId: string; id: string; accepted: boolean } | null>(null);
   const [recOutcome, setRecOutcome] = useState<{ action: string; found: boolean; recordId: string | null; recordState: string | null } | null>(null);
+  const [coarsePointer, setCoarsePointer] = useState(
+    () => typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches,
+  );
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mql = window.matchMedia('(pointer: coarse)');
+    setCoarsePointer(mql.matches);
+    const onChange = (event: MediaQueryListEvent) => setCoarsePointer(event.matches);
+    if (typeof mql.addEventListener === 'function') {
+      mql.addEventListener('change', onChange);
+      return () => mql.removeEventListener('change', onChange);
+    }
+    if (typeof mql.addListener === 'function') {
+      mql.addListener(onChange);
+      return () => mql.removeListener(onChange);
+    }
+  }, []);
   const lockedRef = useRef(false);
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -375,10 +392,19 @@ function RoomComposer({ api, scopeId, replyTo, onReplyTo, onAccepted, deviceName
           placeholder="给群聊发消息…（Enter 发送，Shift+Enter 换行）"
           rows={2}
           disabled={disabled}
+          enterKeyHint={coarsePointer ? 'enter' : 'send'}
           onKeyDown={(e) => {
-            // 群聊 Enter 发送 / Shift+Enter 换行；IME 组合态安全放行。
+            // 群聊 Enter 发送 / Shift+Enter 换行；IME 组合态与粗指针设备放行换行。
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+              e.preventDefault();
+              void handleSend();
+              return;
+            }
             if (e.key !== 'Enter' || e.shiftKey) return;
-            if (e.nativeEvent.isComposing) return;
+            if (typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches) {
+              return;
+            }
             e.preventDefault();
             void handleSend();
           }}

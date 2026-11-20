@@ -90,6 +90,17 @@ export function registerPairingRoutes(app, { store, bridge, route, notify, publi
       target: target === null ? null : deviceRef(target),
     });
   }, true);
+  route('GET', '/api/pairing-codes/active', () => {
+    const includesCa = store.getPairingCa() !== null;
+    return store.listActivePairingCodes().map(item => ({
+      id: item.id,
+      status: item.status,
+      createdAt: item.createdAt,
+      expiresAt: item.expiresAt,
+      includesCa,
+      target: item.targetDeviceId === null ? null : deviceRef(item.targetDeviceId),
+    }));
+  });
   route('GET', '/api/pairing-codes/:id', req => present(store.getPairingCode(req.params.id)));
   route('DELETE', '/api/pairing-codes/:id', (req, reply) => {
     store.revokePairingCode(req.params.id);
@@ -147,6 +158,7 @@ export function registerPairingRoutes(app, { store, bridge, route, notify, publi
       // A deleted device keeps the name it had before (the delete is a soft revoke). It comes back as a
       // new registration, so the name the machine reports now is the one to show, not the stale one.
       if (existing !== null && added) registered = bridge.registry.rename(deviceId, displayName);
+      store.ensureDeviceOAuthGrant(deviceId, { resetToken: !claim.replay && existing !== null });
     } catch (error) {
       // The registry is a separate database, so the claim cannot be rolled back with it: give the code back.
       if (!claim.replay) store.releasePairingCode(claim.id, tokenHash);

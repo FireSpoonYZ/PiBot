@@ -1,0 +1,870 @@
+/* Shared Google Workspace & Bot Browser chat/capability styles (.gws-*).
+   Inherits PiBot's existing CSS custom properties for light & dark themes on Desktop and Mobile.
+   Zero hardcoded color literals: all colors derive strictly from existing theme tokens. */
+
+.gws-card,
+.gws-cap-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md, 14px);
+  background: color-mix(in srgb, var(--color-surface-1, var(--surface, var(--color-bg, var(--bg)))) 75%, var(--color-bg, var(--bg)));
+  border: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 85%, transparent);
+  color: var(--color-text, var(--text));
+  font-size: 0.86rem;
+  line-height: 1.48;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.gws-cap-card.is-mobile {
+  background: var(--bs-card, var(--color-surface-1, var(--surface)));
+  border-radius: var(--bs-radius, 16px);
+  padding: 14px;
+}
+
+.gws-cap-card.is-desktop {
+  background: var(--color-bg, var(--bg));
+  border-radius: 18px;
+  padding: 14px 16px;
+}
+
+.gws-card.is-takeover {
+  border-color: color-mix(in srgb, var(--color-warning, var(--warn)) 45%, var(--color-line, var(--line)));
+  background: color-mix(in srgb, var(--color-warning, var(--warn)) 6%, var(--color-bg, var(--bg)));
+}
+
+.gws-card.is-muted {
+  opacity: 0.82;
+}
+
+.gws-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gws-card-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.gws-card-title {
+  font-weight: var(--weight-semibold, 600);
+  font-size: 0.9rem;
+  color: var(--color-text, var(--text));
+}
+
+.gws-card-sub {
+  font-size: 0.78rem;
+  color: var(--color-text-muted, var(--muted));
+  overflow-wrap: anywhere;
+}
+
+.gws-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.gws-muted {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.48;
+  color: var(--color-text-muted, var(--muted));
+  overflow-wrap: anywhere;
+}
+
+.gws-hint-line {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--color-text-muted, var(--muted));
+}
+
+.gws-label-xs {
+  font-size: 0.74rem;
+  font-weight: var(--weight-semibold, 600);
+  color: var(--color-text-muted, var(--muted));
+}
+
+.gws-row-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gws-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-bg, var(--bg)) 65%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 60%, transparent);
+}
+
+.gws-status-label {
+  font-size: 0.8rem;
+  font-weight: var(--weight-medium, 500);
+}
+
+.gws-truth-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-size: 0.77rem;
+  color: var(--color-text-muted, var(--muted));
+  background: color-mix(in srgb, var(--color-line, var(--line)) 22%, transparent);
+}
+
+/* Status pills */
+.gws-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-full, 999px);
+  font-size: 0.72rem;
+  font-weight: var(--weight-semibold, 600);
+  line-height: 1.35;
+  border: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 80%, transparent);
+  color: var(--color-text-muted, var(--muted));
+  white-space: nowrap;
+}
+
+.gws-pill.is-ok {
+  color: var(--color-success, var(--ok));
+  border-color: color-mix(in srgb, var(--color-success, var(--ok)) 35%, transparent);
+  background: color-mix(in srgb, var(--color-success, var(--ok)) 10%, transparent);
+}
+
+.gws-pill.is-accent {
+  color: var(--color-primary, var(--brand, var(--accent)));
+  border-color: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 35%, transparent);
+  background: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 10%, transparent);
+}
+
+.gws-pill.is-warn {
+  color: var(--color-warning, var(--warn));
+  border-color: color-mix(in srgb, var(--color-warning, var(--warn)) 40%, transparent);
+  background: color-mix(in srgb, var(--color-warning, var(--warn)) 12%, transparent);
+}
+
+.gws-pill.is-danger {
+  color: var(--color-danger, var(--danger));
+  border-color: color-mix(in srgb, var(--color-danger, var(--danger)) 40%, transparent);
+  background: color-mix(in srgb, var(--color-danger, var(--danger)) 10%, transparent);
+}
+
+/* Buttons */
+.gws-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gws-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 90%, transparent);
+  background: var(--color-surface-1, var(--surface, transparent));
+  color: var(--color-text, var(--text));
+  font-size: 0.8rem;
+  font-weight: var(--weight-medium, 500);
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background-color 140ms ease, border-color 140ms ease, opacity 140ms ease;
+}
+
+.gws-btn.is-sm {
+  min-height: 32px;
+  padding: 5px 10px;
+  font-size: 0.78rem;
+}
+
+.gws-btn.is-xs {
+  min-height: 28px;
+  padding: 3px 9px;
+  font-size: 0.74rem;
+  border-radius: 8px;
+}
+
+.gws-btn.is-primary {
+  background: var(--color-primary, var(--brand, var(--accent)));
+  border-color: var(--color-primary, var(--brand, var(--accent)));
+  color: var(--color-on-primary, var(--surface-elevated, var(--bg)));
+}
+
+.gws-btn.is-warn {
+  background: var(--color-warning, var(--warn));
+  border-color: var(--color-warning, var(--warn));
+  color: var(--color-on-primary, var(--surface-elevated, var(--bg)));
+}
+
+.gws-btn.is-danger {
+  background: var(--color-danger, var(--danger));
+  border-color: var(--color-danger, var(--danger));
+  color: var(--color-on-primary, var(--surface-elevated, var(--bg)));
+}
+
+.gws-btn.is-ghost {
+  background: transparent;
+}
+
+.gws-btn:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.gws-btn:focus-visible,
+.gws-link-btn:focus-visible,
+.gws-mode-option:focus-visible,
+.gws-collapse-trigger:focus-visible {
+  outline: 2px solid var(--color-primary, var(--brand, var(--accent)));
+  outline-offset: 2px;
+}
+
+.gws-link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--color-primary, var(--brand, var(--accent)));
+  font-size: 0.78rem;
+  font-weight: var(--weight-medium, 500);
+  cursor: pointer;
+}
+
+/* Private sub-cards (Client Secret input & System-browser OAuth) */
+.gws-private-box {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-bg, var(--bg)) 88%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 42%, var(--color-line, var(--line)));
+}
+
+.gws-private-box.is-success {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--color-success, var(--ok)) 40%, transparent);
+}
+
+.gws-private-box.is-pending {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 45%, transparent);
+}
+
+.gws-private-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: var(--weight-semibold, 600);
+  font-size: 0.84rem;
+}
+
+.gws-uri-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-line, var(--line)) 20%, transparent);
+}
+
+.gws-uri-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.gws-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.74rem;
+  overflow-wrap: anywhere;
+  color: var(--color-text, var(--text));
+}
+
+.gws-seg {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-line, var(--line)) 30%, transparent);
+  gap: 2px;
+  width: fit-content;
+}
+
+.gws-seg-btn {
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-muted, var(--muted));
+  font-size: 0.76rem;
+  font-weight: var(--weight-medium, 500);
+  cursor: pointer;
+}
+
+.gws-seg-btn.is-active {
+  background: var(--color-surface-2, var(--surface-elevated, var(--color-bg, var(--bg))));
+  color: var(--color-text, var(--text));
+  box-shadow: var(--shadow-sm, 0 1px 2px color-mix(in srgb, var(--color-text, var(--text)) 10%, transparent));
+}
+
+.gws-upload-area {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+}
+
+.gws-form,
+.gws-rule-form {
+  display: grid;
+  gap: 10px;
+}
+
+.gws-rule-form {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-bg, var(--bg)) 78%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 75%, transparent);
+}
+
+.gws-field {
+  display: grid;
+  gap: 4px;
+}
+
+.gws-label {
+  font-size: 0.77rem;
+  font-weight: var(--weight-medium, 500);
+  color: var(--color-text, var(--text));
+}
+
+.gws-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 36px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 90%, transparent);
+  background: var(--color-surface-2, var(--surface-elevated, var(--color-bg, var(--bg))));
+  color: var(--color-text, var(--text));
+  font-size: 0.82rem;
+}
+
+.gws-textarea {
+  min-height: 58px;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.gws-inline-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Service choice cards */
+.gws-choice-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.gws-choice-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 11px;
+  border-radius: 11px;
+  border: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 85%, transparent);
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.gws-choice-card.is-selected {
+  border-color: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 48%, transparent);
+  background: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 7%, transparent);
+}
+
+.gws-choice-card input {
+  margin-top: 2px;
+  width: 17px;
+  height: 17px;
+  flex: none;
+  accent-color: var(--color-primary, var(--brand, var(--accent)));
+}
+
+.gws-choice-body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.gws-choice-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: var(--weight-semibold, 600);
+  font-size: 0.83rem;
+}
+
+.gws-choice-desc {
+  font-size: 0.76rem;
+  color: var(--color-text-muted, var(--muted));
+}
+
+.gws-base-scope-note,
+.gws-share-disclosure {
+  margin: 0;
+  padding: 7px 10px;
+  border-radius: 9px;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--color-text-muted, var(--muted));
+  background: color-mix(in srgb, var(--color-line, var(--line)) 18%, transparent);
+}
+
+/* Accounts & readiness */
+.gws-accounts,
+.gws-account-pick-list,
+.gws-rule-list {
+  display: grid;
+  gap: 8px;
+}
+
+.gws-account-card,
+.gws-rule-item {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-bg, var(--bg)) 72%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 75%, transparent);
+}
+
+.gws-account-head,
+.gws-rule-head,
+.gws-account-pick-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gws-account-pick-row {
+  padding: 9px 11px;
+  border-radius: 11px;
+  border: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 80%, transparent);
+  background: color-mix(in srgb, var(--color-bg, var(--bg)) 72%, transparent);
+}
+
+.gws-account-pick-row.is-selected {
+  border-color: color-mix(in srgb, var(--color-success, var(--ok)) 45%, transparent);
+}
+
+.gws-account-id {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.gws-account-email {
+  font-size: 0.83rem;
+  overflow-wrap: anywhere;
+}
+
+.gws-account-actions,
+.gws-rule-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.gws-readiness-list {
+  display: grid;
+  gap: 5px;
+  padding-top: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 55%, transparent);
+}
+
+.gws-readiness-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+}
+
+.gws-readiness-name {
+  flex: 1;
+  min-width: 110px;
+  color: var(--color-text, var(--text));
+}
+
+/* 3-mode setup selector & steps */
+.gws-section-block {
+  display: grid;
+  gap: 8px;
+}
+
+.gws-mode-list {
+  display: grid;
+  gap: 6px;
+}
+
+.gws-mode-option {
+  display: grid;
+  gap: 3px;
+  text-align: left;
+  padding: 9px 11px;
+  border-radius: 11px;
+  border: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 85%, transparent);
+  background: color-mix(in srgb, var(--color-bg, var(--bg)) 70%, transparent);
+  color: var(--color-text, var(--text));
+  cursor: pointer;
+}
+
+.gws-mode-option.is-selected {
+  border-color: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 55%, transparent);
+  background: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 8%, transparent);
+}
+
+.gws-mode-option.is-disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.gws-mode-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-weight: var(--weight-semibold, 600);
+  font-size: 0.82rem;
+}
+
+.gws-mode-desc {
+  font-size: 0.76rem;
+  color: var(--color-text-muted, var(--muted));
+}
+
+.gws-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.gws-step-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.79rem;
+}
+
+.gws-step-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid color-mix(in srgb, var(--color-line, var(--line)) 95%, transparent);
+}
+
+.gws-step-item.is-done .gws-step-dot {
+  background: var(--color-success, var(--ok));
+  border-color: var(--color-success, var(--ok));
+  color: var(--color-on-primary, var(--surface-elevated, var(--bg)));
+}
+
+.gws-step-item.is-current .gws-step-dot {
+  border-color: var(--color-primary, var(--brand, var(--accent)));
+  background: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 16%, transparent);
+}
+
+.gws-step-content {
+  display: grid;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+
+.gws-step-title {
+  font-weight: var(--weight-medium, 500);
+}
+
+.gws-step-guide {
+  display: grid;
+  gap: 7px;
+  padding: 10px 12px;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--color-line, var(--line)) 16%, transparent);
+}
+
+.gws-step-guide-title {
+  font-weight: var(--weight-semibold, 600);
+  font-size: 0.82rem;
+}
+
+.gws-guide-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+  font-size: 0.78rem;
+  color: var(--color-text, var(--text));
+}
+
+/* Alerts & notices */
+.gws-error,
+.gws-warning,
+.gws-blocker,
+.gws-takeover-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: 10px;
+  font-size: 0.79rem;
+  line-height: 1.45;
+}
+
+.gws-error {
+  border: 1px solid color-mix(in srgb, var(--color-danger, var(--danger)) 35%, transparent);
+  background: color-mix(in srgb, var(--color-danger, var(--danger)) 8%, transparent);
+  color: var(--color-text, var(--text));
+}
+
+.gws-warning,
+.gws-blocker,
+.gws-takeover-alert {
+  border: 1px solid color-mix(in srgb, var(--color-warning, var(--warn)) 40%, transparent);
+  background: color-mix(in srgb, var(--color-warning, var(--warn)) 10%, transparent);
+  color: var(--color-text, var(--text));
+}
+
+.gws-blocker,
+.gws-takeover-alert {
+  flex-direction: column;
+}
+
+.gws-blocker-msg,
+.gws-error-body,
+.gws-takeover-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.gws-sensitive-note {
+  margin: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 0.76rem;
+  color: var(--color-warning, var(--warn));
+}
+
+.gws-notice {
+  margin: 0;
+  padding: 7px 10px;
+  border-radius: 9px;
+  font-size: 0.78rem;
+  color: var(--color-success, var(--ok));
+  background: color-mix(in srgb, var(--color-success, var(--ok)) 10%, transparent);
+}
+
+.gws-url-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-line, var(--line)) 25%, transparent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.74rem;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Rules collapsible */
+.gws-rules-section {
+  border-top: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 65%, transparent);
+  padding-top: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.gws-collapse-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text, var(--text));
+  font-size: 0.82rem;
+  font-weight: var(--weight-semibold, 600);
+  cursor: pointer;
+}
+
+.gws-collapse-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.gws-chevron {
+  transition: transform 150ms ease;
+}
+
+.gws-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+.gws-rules-body {
+  display: grid;
+  gap: 10px;
+}
+
+.gws-rule-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: var(--weight-semibold, 600);
+  font-size: 0.8rem;
+}
+
+.gws-rule-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 0.74rem;
+  color: var(--color-text-muted, var(--muted));
+}
+
+.gws-rule-instruction {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--color-text, var(--text));
+  overflow-wrap: anywhere;
+}
+
+.gws-empty-box {
+  display: grid;
+  gap: 8px;
+}
+
+.gws-footer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 6px;
+  border-top: 1px solid color-mix(in srgb, var(--color-line, var(--line)) 55%, transparent);
+}
+
+.gws-isolation-note {
+  font-size: 0.74rem;
+  color: var(--color-text-muted, var(--muted));
+}
+
+/* Mobile & Desktop BotBrowserPanel host containers */
+.gws-mobile-browser-screen {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-dialog, 300);
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg, var(--bg));
+}
+
+.gws-desktop-browser-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* Mobile chat takeover status strip above composer (04 Layout B) */
+.gws-browser-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 14px;
+  margin-bottom: 6px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--color-warning, var(--warn)) 45%, transparent);
+  background: color-mix(in srgb, var(--color-warning, var(--warn)) 12%, var(--color-bg, var(--bg)));
+  color: var(--color-text, var(--text));
+  font-size: 0.81rem;
+  font-weight: var(--weight-medium, 500);
+  cursor: pointer;
+}
+
+.gws-browser-strip-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.gws-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.gws-spin {
+  animation: gws-spin 1s linear infinite;
+}
+
+@keyframes gws-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

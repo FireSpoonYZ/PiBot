@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod host_service;
+pub mod image_picker;
 pub mod pairing_code;
 pub mod updates;
 
@@ -9,6 +10,7 @@ use tauri::{AppHandle, Manager, RunEvent, State, Webview, ipc::Channel, webview:
 use tauri_plugin_dialog::DialogExt;
 
 pub use bridge::{BridgeError, DesktopBridge, DesktopObserveAck, DesktopRequestInput, PickedFileRef};
+pub use image_picker::{DesktopImagePickSource, PickedImageData};
 
 fn ensure_main_webview(webview: &Webview) -> Result<(), BridgeError> {
   if webview.label() != "main" || webview.window().label() != "main" {
@@ -126,6 +128,16 @@ async fn desktop_pick_file(
   bridge::validate_picked_regular_file(&raw_path).map(Some)
 }
 
+#[tauri::command]
+async fn desktop_pick_images(
+  app: AppHandle,
+  webview: Webview,
+  source: DesktopImagePickSource,
+) -> Result<Vec<PickedImageData>, BridgeError> {
+  ensure_main_webview(&webview)?;
+  image_picker::pick_images(app, source).await
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NavigationGuardConfig {
   pub main_label: String,
@@ -133,7 +145,15 @@ pub struct NavigationGuardConfig {
 
 pub fn run() {
   let bridge = DesktopBridge::new();
-  let mut builder = tauri::Builder::default()
+  let app = tauri::Builder::default()
+    // Register single-instance first so secondary launches exit before other plugins initialize.
+    .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+      if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+      }
+    }))
     .manage(bridge)
     .manage(updates::UpdateState::default())
     // Reload/navigation kills every observer Channel owned by the old
@@ -148,11 +168,8 @@ pub fn run() {
         .on_navigation(|webview, url| webview.label() == "main" && is_allowed_navigation(url))
         .build(),
     )
-    .plugin(tauri_plugin_dialog::init());
-  if let Some(pubkey) = updates::configured_pubkey() {
-    builder = builder.plugin(tauri_plugin_updater::Builder::new().pubkey(pubkey).build());
-  }
-  let app = builder
+    .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_updater::Builder::new().build())
     .setup(|app| {
       if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_title("Pi Bot");
@@ -178,6 +195,7 @@ pub fn run() {
       desktop_observe,
       desktop_unobserve,
       desktop_pick_file,
+      desktop_pick_images,
       host_service::desktop_host_status,
       host_service::desktop_host_pair,
       host_service::desktop_host_pair_code,

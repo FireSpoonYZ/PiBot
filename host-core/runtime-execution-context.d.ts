@@ -1,5 +1,6 @@
 /** Trusted Host metadata only; these types never carry prompts or credentials. */
-export type ExecutionSource = 'user' | 'schedule' | 'webhook' | 'task_dispatch' | 'peer' | 'host';
+export type HostExecutionSource = 'schedule' | 'webhook' | 'task_dispatch' | 'google-workspace-rule';
+export type ExecutionSource = 'user' | 'peer' | 'host' | HostExecutionSource;
 export type ExecutionChannel = 'primary' | 'dm' | 'room' | 'host';
 export type ExecutionState = 'accepted' | 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
 export type NativeId = number | `${number}`;
@@ -8,7 +9,7 @@ export interface ExecutionSender {
   kind: 'user' | 'bot' | 'host';
   deviceId?: string;
   botId?: string;
-  sourceType?: 'schedule' | 'webhook' | 'task_dispatch';
+  sourceType?: HostExecutionSource;
 }
 
 export type ExecutionReplyTarget =

@@ -36,17 +36,22 @@ export function validateCenterUrl(centerUrl) {
   return base;
 }
 
-export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, signal, onDisconnect, onChange, onWebhookReady, onTaskReady }) {
+export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, signal, oauthToken, onOAuthToken, onDisconnect, onChange, onWebhookReady, onTaskReady }) {
   const base = validateCenterUrl(centerUrl);
   assertId(deviceId, 'deviceId');
   assertDeviceToken(deviceToken);
   const transport = base.protocol === 'https:' ? https : http;
+  const agent = base.protocol === 'https:'
+    ? new https.Agent({ keepAlive: true, keepAliveMsecs: 30_000, maxSockets: 12, ca })
+    : new http.Agent({ keepAlive: true, keepAliveMsecs: 30_000, maxSockets: 12 });
   const requests = new Set();
   let closed = false;
   let events;
   let watchdog;
   let ownerCookie = '';
   let ownerCsrf = '';
+  let currentOAuthToken = typeof oauthToken === 'string' && oauthToken.trim() !== '' ? oauthToken : '';
+  let oauthTokenPromise = null;
   let ownerQueue = Promise.resolve();
   const disconnect = (error) => {
     if (closed) return;
@@ -54,15 +59,19 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     clearTimeout(watchdog);
     ownerCookie = '';
     ownerCsrf = '';
+    currentOAuthToken = '';
+    oauthTokenPromise = null;
     for (const active of requests) active.destroy();
     events?.destroy();
+    agent.destroy();
     onDisconnect?.(error);
   };
   const headers = { Authorization: `Bearer ${deviceToken}`, 'X-Device-Id': deviceId };
-  const start = (path, { method = 'GET', body, signal, headers: extraHeaders } = {}) => {
+  const start = (path, { method = 'GET', body, signal, headers: extraHeaders, agent: overrideAgent = agent } = {}) => {
     if (closed) throw centerError('CENTER_OFFLINE', 'center is disconnected');
     const req = transport.request(new URL(path, base), {
       method,
+      agent: overrideAgent,
       headers: {
         ...headers,
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
@@ -76,11 +85,52 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     req.end();
     return req;
   };
+  const readStructuredError = async (response, { allowedCodePattern = /^[A-Z][A-Z0-9_]{1,63}$/, blockedCodes = null, requireJsonContentType = false } = {}) => {
+    if (requireJsonContentType) {
+      const contentType = String(response.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+      if (contentType !== 'application/json' && !contentType.endsWith('+json')) {
+        response.resume();
+        return { code: null, message: null };
+      }
+    }
+    const chunks = [];
+    let totalBytes = 0;
+    let oversized = false;
+    for await (const chunk of response) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buf.length;
+      if (totalBytes > 65536) {
+        oversized = true;
+        response.destroy();
+        break;
+      }
+      chunks.push(buf);
+    }
+    if (oversized || totalBytes === 0) return { code: null, message: null };
+    try {
+      const parsed = JSON.parse(Buffer.concat(chunks, totalBytes).toString('utf8'));
+      if (
+        parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
+        parsed.error && typeof parsed.error === 'object' && !Array.isArray(parsed.error)
+      ) {
+        const rawCode = parsed.error.code;
+        const rawMsg = parsed.error.message;
+        const validCode = typeof rawCode === 'string' && allowedCodePattern.test(rawCode) && (!blockedCodes || !blockedCodes.has(rawCode));
+        const validMsg = typeof rawMsg === 'string' && rawMsg.trim() !== '' && rawMsg.length <= 512;
+        return {
+          code: validCode ? rawCode : null,
+          message: validMsg ? rawMsg : null,
+        };
+      }
+    } catch { /* 非 JSON 错误体按状态码兜底 */ }
+    return { code: null, message: null };
+  };
   const request = async (path, options = {}) => {
     const req = start(path, options);
     req.setTimeout(30000, () => req.destroy(centerError('CENTER_OFFLINE', 'center request timed out')));
     const response = await new Promise((resolve, reject) => { req.once('response', resolve); req.once('error', reject); });
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      const isOAuthTokenPath = path === '/api/oauth/token';
       const isTaskPath = path.startsWith('/api/host/tasks/') || path.startsWith('/api/host/task-dispatches/');
       // turn 准入端点透传服务端类型化错误码（TURN_SET_CHANGED/TURN_SYNC_FAILED 等）；
       // bot 管理端点同样透传有界类型码，REVISION_CONFLICT 等 CAS 失败不会丢成
@@ -92,46 +142,30 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
       const typedVaultError = path.startsWith('/api/host/vault/');
       let errorCode = null;
       let errorMessage = null;
-      if (typedTurnError || typedVaultError) {
-        const contentType = String(response.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
-        const isJsonResponse = !isTaskPath || contentType === 'application/json' || contentType.endsWith('+json');
+      if (isOAuthTokenPath && response.statusCode === 403) {
+        const { code } = await readStructuredError(response);
+        if (code === 'OAUTH_ACCESS_REVOKED') {
+          throw centerError('OAUTH_ACCESS_REVOKED', '此设备的中心管理权限已被停用');
+        }
+      } else if (typedTurnError || typedVaultError) {
         // 任务路径仅透传真实 Center 应用层 4xx JSON 错误（保留 401 断连兜底，拒绝 5xx/网关错误页透传）。
         const allowStatus = !isTaskPath || (response.statusCode >= 400 && response.statusCode < 500 && response.statusCode !== 401);
-        if (isJsonResponse && allowStatus) {
-          const chunks = [];
-          let totalBytes = 0;
-          let oversized = false;
-          for await (const chunk of response) {
-            totalBytes += chunk.length;
-            if (totalBytes > 65536) {
-              oversized = true;
-              response.destroy();
-              break;
-            }
-            chunks.push(chunk);
-          }
-          if (!oversized) {
-            try {
-              const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-              const codePattern = typedVaultError ? /^VAULT_[A-Z0-9_]{1,60}$/ : /^[A-Z][A-Z0-9_]{1,63}$/;
-              const blockedTaskCodes = new Set([
-                'CENTER_OFFLINE',
-                'NOT_CONNECTED',
-                'UNAUTHORIZED',
-                'RUNTIME_BUSY',
-                'BAD_RESPONSE',
-                'CENTER_REQUEST_FAILED',
-              ]);
-              if (
-                parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
-                parsed.error && typeof parsed.error === 'object' && !Array.isArray(parsed.error) &&
-                typeof parsed.error.code === 'string' && codePattern.test(parsed.error.code) &&
-                (!isTaskPath || !blockedTaskCodes.has(parsed.error.code))
-              ) {
-                errorCode = parsed.error.code;
-                if (typeof parsed.error.message === 'string' && parsed.error.message.length <= 512) errorMessage = parsed.error.message;
-              }
-            } catch { /* 非 JSON 错误体按状态码兜底 */ }
+        if (allowStatus) {
+          const { code, message } = await readStructuredError(response, {
+            allowedCodePattern: typedVaultError ? /^VAULT_[A-Z0-9_]{1,60}$/ : /^[A-Z][A-Z0-9_]{1,63}$/,
+            blockedCodes: isTaskPath ? new Set([
+              'CENTER_OFFLINE',
+              'NOT_CONNECTED',
+              'UNAUTHORIZED',
+              'RUNTIME_BUSY',
+              'BAD_RESPONSE',
+              'CENTER_REQUEST_FAILED',
+            ]) : null,
+            requireJsonContentType: isTaskPath,
+          });
+          if (code) {
+            errorCode = code;
+            errorMessage = message;
           }
         } else {
           response.resume();
@@ -170,14 +204,66 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     try { return JSON.parse(result.toString('utf8')); }
     catch { throw centerError('CENTER_REQUEST_FAILED', 'invalid center response'); }
   };
-  const ownerRequest = (path, { method = 'GET', body, signal } = {}) => {
-    const run = ownerQueue.then(async () => {
+  const ensureOAuthToken = async (signal) => {
+    if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
+    if (currentOAuthToken) return currentOAuthToken;
+    if (!oauthTokenPromise) {
+      const pending = (async () => {
+        try {
+          const result = await request('/api/oauth/token', { method: 'POST', body: {} });
+          if (closed) throw centerError('CENTER_OFFLINE', 'center is disconnected');
+          if (result && typeof result.accessToken === 'string' && result.accessToken.trim() !== '') {
+            currentOAuthToken = result.accessToken;
+            try {
+              const maybePromise = onOAuthToken?.(currentOAuthToken);
+              if (maybePromise && typeof maybePromise.then === 'function') {
+                maybePromise.catch(() => {});
+              }
+            } catch { /* ignore persistence errors */ }
+            return currentOAuthToken;
+          }
+          return null;
+        } catch (err) {
+          if (err?.code === 'OAUTH_ACCESS_REVOKED') throw err;
+          if (err?.code === 'CENTER_REQUEST_FAILED') return null;
+          throw err;
+        } finally {
+          if (oauthTokenPromise === pending) oauthTokenPromise = null;
+        }
+      })();
+      oauthTokenPromise = pending;
+    }
+    if (!signal) return oauthTokenPromise;
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        reject(centerError('CENTER_OFFLINE', 'center is disconnected'));
+        return;
+      }
+      const onAbort = () => reject(centerError('CENTER_OFFLINE', 'center is disconnected'));
+      signal.addEventListener('abort', onAbort, { once: true });
+      oauthTokenPromise.then(
+        (token) => {
+          signal.removeEventListener('abort', onAbort);
+          resolve(token);
+        },
+        (err) => {
+          signal.removeEventListener('abort', onAbort);
+          reject(err);
+        },
+      );
+    });
+  };
+  const rawOwnerRequest = (path, { method = 'GET', body, signal, useOAuth = true, passthroughErrors = false } = {}) => {
+    const sendOnce = async (usedOAuthToken) => {
       if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
       const req = transport.request(new URL(path, base), {
-        method, ca, signal,
-        headers: { ...(ownerCookie ? { Cookie: ownerCookie } : {}),
-          ...(method !== 'GET' ? { 'X-CSRF-Token': ownerCsrf } : {}),
-          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+        method, agent, ca, signal,
+        headers: {
+          ...(usedOAuthToken ? { Authorization: `Bearer ${usedOAuthToken}` } : {}),
+          ...(ownerCookie ? { Cookie: ownerCookie } : {}),
+          ...(method !== 'GET' && !usedOAuthToken ? { 'X-CSRF-Token': ownerCsrf } : {}),
+          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        },
       });
       requests.add(req);
       req.once('close', () => requests.delete(req));
@@ -186,12 +272,45 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
       req.end();
       const response = await new Promise((resolve, reject) => { req.once('response', resolve); req.once('error', reject); });
       if (closed || signal?.aborted) { response.resume(); throw centerError('CENTER_OFFLINE', 'center is disconnected'); }
-      const cookies = response.headers['set-cookie'];
-      if (cookies?.length) ownerCookie = cookies.map(cookie => cookie.split(';', 1)[0]).join('; ');
-      if (response.statusCode < 200 || response.statusCode >= 300) {
+      if (!usedOAuthToken) {
+        const cookies = response.headers['set-cookie'];
+        if (cookies?.length) ownerCookie = cookies.map(cookie => cookie.split(';', 1)[0]).join('; ');
+      }
+      return response;
+    };
+    const executeOwnerCall = async (usedOAuthToken, hadCachedOAuth) => {
+      let response = await sendOnce(usedOAuthToken);
+      if (response.statusCode === 401 && usedOAuthToken && hadCachedOAuth) {
+        response.on('error', () => {});
         response.resume();
-        const code = response.statusCode === 409 ? 'REQUEST_CONFLICT' : response.statusCode === 401 || response.statusCode === 403 ? 'CONTROL_UNAUTHORIZED' : 'BAD_RESPONSE';
-        throw centerError(code, response.statusCode === 409 ? 'center revision conflict; reload before saving' : response.statusCode === 401 || response.statusCode === 403 ? 'center administrator authentication failed' : `center request failed (${response.statusCode})`);
+        if (currentOAuthToken === usedOAuthToken) currentOAuthToken = '';
+        const refreshed = await ensureOAuthToken(signal);
+        usedOAuthToken = refreshed || '';
+        response = await sendOnce(usedOAuthToken);
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        const { code: serverCode, message: serverMessage } = await readStructuredError(response);
+        if (passthroughErrors && serverCode) {
+          throw Object.assign(
+            centerError(serverCode, serverMessage ?? `center request failed (${response.statusCode})`),
+            { statusCode: response.statusCode },
+          );
+        }
+        const code = response.statusCode === 409 ? 'REQUEST_CONFLICT'
+          : response.statusCode === 401 || response.statusCode === 403 ? 'CONTROL_UNAUTHORIZED'
+          : (passthroughErrors && response.statusCode === 404) ? 'NOT_FOUND'
+          : 'BAD_RESPONSE';
+        const defaultMsg = response.statusCode === 409 ? 'center revision conflict; reload before saving'
+          : response.statusCode === 401 || response.statusCode === 403 ? 'center administrator authentication failed'
+          : `center request failed (${response.statusCode})`;
+        throw Object.assign(
+          centerError(code, serverMessage ?? defaultMsg),
+          { statusCode: response.statusCode },
+        );
+      }
+      if (response.statusCode === 204) {
+        response.resume();
+        return undefined;
       }
       const chunks = [];
       let size = 0;
@@ -205,23 +324,51 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
       catch { throw centerError('BAD_RESPONSE', 'invalid center response'); }
       if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
       if (path === '/api/session') {
-        // SessionInfo.csrfToken 在未认证时为 null：保留旧 CSRF 为空串，只要求已认证时拿到令牌。
+        // SessionInfo.csrfToken 在未认证时为 null：Cookie 会话要求已认证时拿到 CSRF 令牌，Bearer OAuth 无需 CSRF。
         if (typeof result?.authenticated !== 'boolean' ||
-            (result.authenticated && (typeof result.csrfToken !== 'string' || !result.csrfToken))) {
+            (!usedOAuthToken && result.authenticated && (typeof result.csrfToken !== 'string' || !result.csrfToken))) {
           throw centerError('BAD_RESPONSE', 'invalid center session');
         }
         if (typeof result.csrfToken === 'string' && result.csrfToken) ownerCsrf = result.csrfToken;
       }
       return result;
+    };
+    if (useOAuth && path !== '/api/session') {
+      return (async () => {
+        if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
+        const hadCachedOAuth = Boolean(currentOAuthToken);
+        const token = await ensureOAuthToken(signal);
+        if (typeof token === 'string' && token !== '') {
+          return executeOwnerCall(token, hadCachedOAuth);
+        }
+        const run = ownerQueue.then(async () => {
+          if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
+          return executeOwnerCall('', false);
+        });
+        ownerQueue = run.catch(() => {});
+        return run;
+      })();
+    }
+    const run = ownerQueue.then(async () => {
+      if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
+      let usedOAuthToken = '';
+      const hadCachedOAuth = Boolean(currentOAuthToken);
+      if (useOAuth) {
+        const token = await ensureOAuthToken(signal);
+        if (token) usedOAuthToken = token;
+      }
+      return executeOwnerCall(usedOAuthToken, hadCachedOAuth);
     });
     ownerQueue = run.catch(() => {});
     return run;
   };
+  const ownerRequest = (path, options = {}) => rawOwnerRequest(path, { ...options, useOAuth: true, passthroughErrors: false });
+  const adminRequest = (path, options = {}) => rawOwnerRequest(path, { ...options, useOAuth: true, passthroughErrors: true });
   const fetchOwnerSession = async (signal) => {
     const session = await ownerRequest('/api/session', { signal });
     return { authenticated: session.authenticated };
   };
-  // 真实中心会话探测：不伪造已认证，同时让后续写请求拿到 CSRF 令牌。
+  // 真实中心会话探测：有 OAuth 令牌时带 Bearer 验证并直接返回 { authenticated: true }，旧中心回退 Cookie 会话。
   const ownerSession = async (signal) => {
     if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
     return fetchOwnerSession(signal);
@@ -236,7 +383,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
   const hostRuntimeStatusPath = (targetDeviceId) => '/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/runtime-status';
   const hostBotManagePath = (targetDeviceId, botId, domain) => '/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/' + domain;
   try {
-    const req = start('/api/host/events', { signal });
+    const req = start('/api/host/events', { signal, agent: false });
     req.setTimeout(15000, () => req.destroy(centerError('CENTER_OFFLINE', 'center connection timed out')));
     events = await new Promise((resolve, reject) => { req.once('response', resolve); req.once('error', reject); });
     req.setTimeout(0);
@@ -276,6 +423,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
   } catch (error) {
     closed = true;
     for (const active of requests) active.destroy();
+    agent.destroy();
     throw error;
   }
   return {
@@ -283,11 +431,14 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     // Fixed-path owner management requests (capabilities/runtime status). The caller
     // owns path construction and argument validation; no arbitrary owner HTTP surface.
     ownerRequest,
+    adminRequest,
+    approveQrLogin: ({ challengeId, qrNonce }, signal) =>
+      adminRequest('/api/oauth/qr-approve', { method: 'POST', body: { challengeId, qrNonce }, signal }),
     async ownerLogin(password, signal) {
       // 未认证时 GET /api/session 可能 401：探测仅用于取 CSRF，失败不阻断登录本身。
-      try { await fetchOwnerSession(signal); } catch { /* 登录 POST 会给出真实结果 */ }
+      try { await rawOwnerRequest('/api/session', { signal, useOAuth: false }); } catch { /* 登录 POST 会给出真实结果 */ }
       if (closed || signal?.aborted) throw centerError('CENTER_OFFLINE', 'center is disconnected');
-      const session = await ownerRequest('/api/session', { method: 'POST', body: { password }, signal });
+      const session = await rawOwnerRequest('/api/session', { method: 'POST', body: { password }, signal, useOAuth: false });
       return { authenticated: session.authenticated };
     },
     botAvatarGet: (targetDeviceId, botId, signal) => request('/api/host/devices/' + encodeURIComponent(targetDeviceId) + '/bots/' + encodeURIComponent(botId) + '/avatar', { signal }),
@@ -302,7 +453,7 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     botCapabilitiesGet: (targetDeviceId, botId, signal) => request(hostBotCapabilitiesPath(targetDeviceId, botId), { signal }).catch(err => {
       if (err?.code !== 'CENTER_REQUEST_FAILED') return Promise.reject(err);
       return ownerRequest(botCapabilitiesPath(targetDeviceId, botId), { signal }).catch(async (ownerErr) => {
-        if (ownerErr?.code !== 'BAD_RESPONSE' || !String(ownerErr.message).includes('(404)')) throw ownerErr;
+        if (ownerErr?.statusCode !== 404 && (ownerErr?.code !== 'BAD_RESPONSE' || !String(ownerErr.message).includes('(404)'))) throw ownerErr;
         const installations = await ownerRequest('/api/capabilities', { signal });
         if (!Array.isArray(installations)) throw ownerErr;
         return Promise.all(installations.map(async (installation) => {
@@ -368,6 +519,8 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
     vaultControl: (input, options = {}) => request('/api/host/vault/control', { method: 'POST', body: input, signal: options.signal }),
     vaultFind: (input, options = {}) => request('/api/host/vault/find', { method: 'POST', body: input, signal: options.signal }),
     vaultResolve: (input, options = {}) => request('/api/host/vault/resolve', { method: 'POST', body: input, signal: options.signal }),
+    // 中心共享 Google Workspace 状态（只读，复用 device Bearer 认证，不授予普通 Host owner 凭据）。
+    getGoogleStatus: (options = {}) => request('/api/host/google/status', { signal: options?.signal }),
     listCapabilityTools: (id, botId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/list', { method: 'POST', body: { botId }, signal: options.signal }),
     callCapabilityTool: (id, botId, name, args, callId, options = {}) => request('/api/host/capabilities/' + encodeURIComponent(id) + '/tools/call', { method: 'POST', body: { botId, name, args, callId }, signal: options.signal }),
     streamAntigravity(payload, options = {}) {
@@ -575,6 +728,6 @@ export async function connectCenter({ centerUrl, deviceId, deviceToken, ca, sign
 
       return eventStream;
     },
-    async close() { closed = true; clearTimeout(watchdog); ownerCookie = ''; ownerCsrf = ''; for (const active of requests) active.destroy(); events.destroy(); },
+    async close() { closed = true; clearTimeout(watchdog); ownerCookie = ''; ownerCsrf = ''; currentOAuthToken = ''; oauthTokenPromise = null; for (const active of requests) active.destroy(); events.destroy(); agent.destroy(); },
   };
 }

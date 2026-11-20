@@ -3,6 +3,7 @@ import test from 'node:test';
 import { projectLiveState } from '../../host-core/runtime-live-projection.js';
 import { normalizeLiveSnapshot } from '../../host-core/remote-live-protocol.js';
 import {
+  chatTurnsWithoutToolOutput,
   formatTurnDuration,
   formatWorkingElapsed,
   latestEntryChannel,
@@ -539,4 +540,104 @@ test('1v1 DM send_to inbound message, working steps, and outbound send_to render
   });
   assert.ok(sendTool?.argSummary?.startsWith('→ 总控助手:'));
   assert.equal(summarizeToolArgs('send_to', { scopeId: 'scope_dm_1', text: ' (pass) ' }), '(pass)');
+});
+
+test('hiding tool output keeps reply order, failures, and only live prompts that need input', () => {
+  const user = { id: 'user', role: 'user', entryId: 1, text: 'Check status' };
+  const logTool = { id: 'log', name: 'read', status: 'done', output: 'raw output' };
+  const onlyTools = { id: 'logs-only', role: 'assistant', entryId: 2, text: '', tools: [logTool] };
+  const failure = { ...onlyTools, id: 'failure', entryId: 3, error: 'model_error' };
+  const questionnaire = {
+    id: 'question', name: 'questionnaire', status: 'running', presentationLive: true,
+    presentation: { kind: 'questionnaire', status: 'pending' },
+  };
+  const vault = {
+    id: 'vault', name: 'vault_unlock', status: 'running', presentationLive: true,
+    presentation: { kind: 'vault-unlock', status: 'pending' },
+  };
+  const historicalQuestion = { ...questionnaire, id: 'past-question', presentationLive: false };
+  const nestedCall = { id: 'script', name: 'codemode', status: 'running', children: [logTool, vault] };
+  const settledCall = { ...nestedCall, id: 'settled-script', status: 'done', children: [questionnaire] };
+  const firstText = { id: 'first', kind: 'text', text: 'Checking', entryId: '4' };
+  const lastText = { id: 'last', kind: 'text', text: 'Status is good', entryId: '5' };
+  const tools = [logTool, questionnaire, nestedCall, historicalQuestion, settledCall];
+  const reply = {
+    id: 'reply', role: 'assistant', entryId: 5, text: 'Checking\n\nStatus is good',
+    thinking: 'internal reasoning', tools, toolSummary: tools.map(tool => tool.name),
+    blocks: [
+      { id: 'thinking', kind: 'thinking', text: 'internal reasoning' },
+      firstText,
+      { id: 'calls', kind: 'tools', tools },
+      lastText,
+    ],
+  };
+
+  const visible = chatTurnsWithoutToolOutput([user, onlyTools, failure, reply]);
+  assert.deepEqual(visible.map(turn => turn.id), ['user', 'failure', 'reply']);
+  assert.equal(visible[0], user);
+  assert.equal(visible[1].error, 'model_error');
+  assert.equal(visible[1].tools, undefined);
+  assert.equal(visible[2].thinking, undefined);
+  assert.equal(visible[2].toolSummary, undefined);
+  assert.deepEqual(visible[2].blocks, [firstText, { id: 'calls', kind: 'tools', tools: [questionnaire, vault] }, lastText]);
+  assert.deepEqual(visible[2].tools, [questionnaire, vault]);
+  assert.equal(reply.blocks[2].tools, tools);
+  assert.equal(logTool.output, 'raw output');
+});
+
+test('projectLiveState preserves pi.reset marker across empty, windowed, compacted, and pre-reset failure states', () => {
+  const mkUser = (id, text) => ({
+    id,
+    kind: 'pi.user',
+    model: [{ role: 'user', content: [{ type: 'text', text }], timestamp: 1_730_000_000_000 + id }],
+  });
+
+  // 1) Empty post-reset view + pre-reset runFailure filtered by reset boundary
+  const emptyAfterClear = projectLiveState(
+    {
+      entries: [mkUser(1, 'old prompt'), { id: 2, kind: 'pi.reset' }],
+      docs: {
+        'pi.live': {
+          runFailure: { taskId: 10, inputs: [1], reason: 'model_error', first: 1 },
+        },
+      },
+    },
+    { clearedThroughEntryId: 2 },
+  );
+  assert.deepEqual(emptyAfterClear.history, [{ id: 2, kind: 'pi.reset', messages: [] }]);
+  assert.equal(emptyAfterClear.lastEntryId, 2);
+  assert.equal(emptyAfterClear.activity.phase, 'idle');
+
+  // 2) Window trimming (> 50 entries) + compaction hiding pi.reset from view.entries still retains reset marker
+  const postResetEntries = Array.from({ length: 55 }, (_, idx) => mkUser(10 + idx, `msg-${idx}`));
+  const windowedAfterCompaction = projectLiveState(
+    {
+      entries: [{ id: 9, kind: 'pi.compaction' }, ...postResetEntries],
+      docs: {
+        'pi.live': {
+          runFailure: { taskId: 11, inputs: [2], reason: 'model_error', first: 10 },
+        },
+      },
+    },
+    { clearedThroughEntryId: 5 },
+  );
+  assert.equal(windowedAfterCompaction.historyTruncated, true);
+  assert.deepEqual(windowedAfterCompaction.history[0], { id: 5, kind: 'pi.reset', messages: [] });
+  assert.equal(windowedAfterCompaction.history.length, 51);
+  assert.equal(windowedAfterCompaction.lastEntryId, 64);
+  assert.equal(windowedAfterCompaction.activity.phase, 'failed');
+
+  // Compatible with normalizeLiveSnapshot and yields zero rendered turns in parseHistoryEntries
+  const normalized = normalizeLiveSnapshot(
+    {
+      type: 'snapshot',
+      botId: 'bot_1',
+      conversationId: 'conv_1',
+      sequence: 1,
+      state: windowedAfterCompaction,
+    },
+    { kind: 'primary', botId: 'bot_1' },
+  );
+  assert.deepEqual(normalized.state.history[0], { id: 5, kind: 'pi.reset', messages: [] });
+  assert.equal(parseHistoryEntries(emptyAfterClear.history, 0).length, 0);
 });

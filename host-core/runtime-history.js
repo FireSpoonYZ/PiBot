@@ -2,6 +2,7 @@
 // 不启动调度、不写记录、不合成回答；由后续运行时集成 worker 调用。
 import { ResetEntry, StorageRequestError } from '@earendil-works/pi-durable';
 import { BotSessionState, deriveEntryAttribution, questionnaireWaitKey } from './bot-session-context.js';
+import { stripLegacyAttachmentPromptBlocks } from './attachments.js';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -91,17 +92,28 @@ export async function readPrimaryHistory(conversation, options = {}, context, { 
     const readPage = async (count) => {
       const result = await read(count);
       const items = await Promise.all(project(result.items).map(async (entry) => {
-        const projected = await overlayHistoryWaits(entry, { waits, botId, conversationId: conversation.id, context,
-          // Oversized entries use byte-offset continuation. Their serialization
-          // must remain immutable across chunks if an answer arrives mid-read.
-          allowOverlay: !chunked || Buffer.byteLength(JSON.stringify(entry), 'utf8') <= TRANSFER_PAGE_BYTES });
-        return chunked && Buffer.byteLength(JSON.stringify(projected), 'utf8') > TRANSFER_PAGE_BYTES
-          ? overlayHistoryWaits(entry, { allowOverlay: false }) : projected;
+        if (!chunked) {
+          return overlayHistoryWaits(entry, {
+            waits, botId, conversationId: conversation.id, context, allowOverlay: true,
+          });
+        }
+        const base = await overlayHistoryWaits(entry, { allowOverlay: false });
+        // Oversized entries use byte-offset continuation. Their serialization
+        // must remain immutable across chunks if an answer arrives mid-read.
+        if (continuation || Buffer.byteLength(JSON.stringify(base), 'utf8') + 1 > TRANSFER_PAGE_BYTES) {
+          return base;
+        }
+        const projected = await overlayHistoryWaits(entry, {
+          waits, botId, conversationId: conversation.id, context, allowOverlay: true,
+        });
+        return Buffer.byteLength(JSON.stringify(projected), 'utf8') + 1 > TRANSFER_PAGE_BYTES
+          ? base : projected;
       }));
       return { items, next: result.next };
     };
     let page = await readPage(continuation ? 1 : limit);
-    if (!chunked) return { items: page.items, nextCursor: page.next ?? null };
+    const resetMeta = afterReset ? { clearedThroughEntryId: resetId } : {};
+    if (!chunked) return { items: page.items, nextCursor: page.next ?? null, ...resetMeta };
 
     if (continuation && page.items[0]?.id !== continuation.entryId) {
       throw invalidArgument('history chunk entry is no longer visible');
@@ -118,16 +130,16 @@ export async function readPrimaryHistory(conversation, options = {}, context, { 
       if (count > 0 || page.items.length === 0) {
         // 重读实际返回的前缀，取得 SDK 的精确游标，不跳过放不下的条目。
         if (count < page.items.length) {
-          const prefix = await readPage(count);
-          return { items: prefix.items, nextCursor: prefix.next ?? null };
+          const prefix = await read(count);
+          return { items: page.items.slice(0, count), nextCursor: prefix.next ?? null, ...resetMeta };
         }
-        return { items: page.items, nextCursor: page.next ?? null };
+        return { items: page.items, nextCursor: page.next ?? null, ...resetMeta };
       }
       if (page.items.length > 1) {
         // 只装得下第一条：重读精确前缀并同步 next 游标，否则 complete 分支会拿整页
         // 游标跳过中间历史。continuation position 语义不变（仍是原分页位置）。
-        const first = await readPage(1);
-        page.items = first.items;
+        const first = await read(1);
+        page.items = page.items.slice(0, 1);
         page.next = first.next;
       }
     }
@@ -149,6 +161,7 @@ export async function readPrimaryHistory(conversation, options = {}, context, { 
       nextCursor: complete ? page.next ?? null : {
         kind: CHUNK_CURSOR_KIND, position: position ?? null, entryId: entry.id, offset: end,
       },
+      ...resetMeta,
     };
   } catch (err) {
     // SDK 1.3.0 没有细分游标错误码，不能把其余 StorageRequestError 当成参数错误。
@@ -179,8 +192,11 @@ export async function overlayHistoryWaits(entry, { waits = null, botId = null, c
     if (!allowOverlay || key === null || !botId || typeof waits?.getPresentation !== 'function') return safe;
     const projected = await waits.getPresentation(botId, safe.details, context);
     if (!projected) return safe;
-    return { ...safe, details: projected.details,
-      durableWait: projected.live === true && projected.status === 'pending' };
+    return {
+      ...safe,
+      details: projected.details,
+      durableWait: safe.toolName === 'ask_user_question' && projected.live === true && projected.status === 'pending',
+    };
   }));
   return { ...safeEntry, model };
 }
@@ -238,13 +254,17 @@ export function stripAttachmentData(entry) {
   let changed = false;
   const model = entry.model.map((message) => {
     if (message?.role !== 'user' || !Array.isArray(message?.content)) return message;
-    const content = message.content.map((block) => {
+    let messageChanged = false;
+    const stripped = stripLegacyAttachmentPromptBlocks(entry, message.content);
+    if (stripped !== message.content) messageChanged = true;
+    const content = stripped.map((block) => {
       if (block?.type !== 'image') return block;
-      changed = true;
+      messageChanged = true;
       const { data: _dropped, ...rest } = block;
       return rest;
     });
-    return changed ? { ...message, content } : message;
+    if (messageChanged) changed = true;
+    return messageChanged ? { ...message, content } : message;
   });
   return changed ? { ...entry, model } : entry;
 }

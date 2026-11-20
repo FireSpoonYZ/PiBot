@@ -1,7 +1,8 @@
 // Bot 设置（模型 / 插件技能 MCP / 高级）三个手机端页面共用的极简 UI 原语。
 // 所有样式以 .bs- 前缀限定在 bot-settings.css 中，不影响其它页面与桌面端。
-import { useEffect, useId, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, Check, ChevronDown, ChevronRight, Loader2, Lock, Search, X } from 'lucide-react';
+import { Switch as UiSwitch } from '../components/ui';
 import { useText } from '../ui';
 import './bot-settings.css';
 
@@ -9,12 +10,41 @@ import './bot-settings.css';
 /* Sheet 外壳                                                          */
 /* ------------------------------------------------------------------ */
 
+interface BackEntry {
+  fn: () => void;
+}
+
+interface SettingsSheetContextValue {
+  registerBack: (entry: BackEntry) => () => void;
+}
+
+const SettingsSheetContext = createContext<SettingsSheetContextValue | null>(null);
+
+/**
+ * 在 SettingsSheet 内的二级子视图注册返回回调。
+ * 返回 true 表示当前位于 SettingsSheet 中（由 Sheet 头部统一显示返回箭头并接管 Esc / 系统返回）。
+ */
+export function useSettingsSheetBack(handler: (() => void) | null): boolean {
+  const ctx = useContext(SettingsSheetContext);
+  const handlerRef = useRef(handler);
+  handlerRef.current = handler;
+  const active = Boolean(handler);
+
+  useEffect(() => {
+    if (!ctx || !active) return;
+    const entry: BackEntry = { fn: () => handlerRef.current?.() };
+    return ctx.registerBack(entry);
+  }, [ctx, active]);
+
+  return Boolean(ctx);
+}
+
 export interface SettingsSheetProps {
   title: string;
   /** 标题下方一行弱化说明（可选）。 */
   subtitle?: ReactNode;
   onClose(): void;
-  /** 提供时在左上角显示返回箭头（用于页面内二级视图）。Esc 优先触发返回。 */
+  /** 提供时在左上角显示返回箭头（用于页面内二级视图）。Esc 与系统返回优先触发返回。 */
   onBack?: () => void;
   /** 固定在底部的操作区（通常是 SaveBar）。 */
   footer?: ReactNode;
@@ -24,41 +54,67 @@ export interface SettingsSheetProps {
 /** 底部弹出的全高设置面板：抓手 + 居中标题 + 关闭，内容区滚动，底部操作区固定。 */
 export function SettingsSheet({ title, subtitle, onClose, onBack, footer, children }: SettingsSheetProps) {
   const t = useText();
+  const [backStack, setBackStack] = useState<BackEntry[]>([]);
+  const registerBack = useCallback((entry: BackEntry) => {
+    setBackStack(prev => [...prev, entry]);
+    return () => {
+      setBackStack(prev => prev.filter(item => item !== entry));
+    };
+  }, []);
+  const contextValue = useMemo(() => ({ registerBack }), [registerBack]);
+  const effectiveOnBack = backStack.length > 0 ? backStack[backStack.length - 1].fn : onBack;
+
   useEffect(() => {
+    const hasOpenModal = () => Boolean(document.querySelector('[role="dialog"][data-state="open"]'));
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (hasOpenModal()) return;
       event.preventDefault();
-      (onBack ?? onClose)();
+      (effectiveOnBack ?? onClose)();
+    };
+    const onAppBack = (event: Event) => {
+      if (event.defaultPrevented || !effectiveOnBack) return;
+      if (hasOpenModal()) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      effectiveOnBack();
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onBack, onClose]);
+    window.addEventListener('app-back', onAppBack, true);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('app-back', onAppBack, true);
+    };
+  }, [effectiveOnBack, onClose]);
+
   return (
-    <div className="bs-backdrop" role="presentation" onClick={onClose}>
-      <section className="bs-sheet" role="dialog" aria-modal="true" aria-label={title} onClick={event => event.stopPropagation()}>
-        <div className="bs-grabber" aria-hidden="true" />
-        <header className="bs-header">
-          <div className="bs-header-side">
-            {onBack ? (
-              <button type="button" className="bs-icon-btn" aria-label={t('返回', 'Back')} onClick={onBack}>
-                <ArrowLeft />
+    <SettingsSheetContext.Provider value={contextValue}>
+      <div className="bs-backdrop" role="presentation" onClick={onClose}>
+        <section className="bs-sheet" role="dialog" aria-modal="true" aria-label={title} onClick={event => event.stopPropagation()}>
+          <div className="bs-grabber" aria-hidden="true" />
+          <header className="bs-header">
+            <div className="bs-header-side">
+              {effectiveOnBack ? (
+                <button type="button" className="bs-icon-btn" aria-label={t('返回', 'Back')} onClick={effectiveOnBack}>
+                  <ArrowLeft aria-hidden="true" />
+                </button>
+              ) : null}
+            </div>
+            <div className="bs-header-title">
+              <h2>{title}</h2>
+              {subtitle ? <p>{subtitle}</p> : null}
+            </div>
+            <div className="bs-header-side is-end">
+              <button type="button" className="bs-icon-btn" aria-label={t('关闭', 'Close')} onClick={onClose}>
+                <X aria-hidden="true" />
               </button>
-            ) : null}
-          </div>
-          <div className="bs-header-title">
-            <h2>{title}</h2>
-            {subtitle ? <p>{subtitle}</p> : null}
-          </div>
-          <div className="bs-header-side is-end">
-            <button type="button" className="bs-icon-btn" aria-label={t('关闭', 'Close')} onClick={onClose}>
-              <X />
-            </button>
-          </div>
-        </header>
-        <div className="bs-body">{children}</div>
-        {footer ? <footer className="bs-footer">{footer}</footer> : null}
-      </section>
-    </div>
+            </div>
+          </header>
+          <div className="bs-body">{children}</div>
+          {footer ? <footer className="bs-footer">{footer}</footer> : null}
+        </section>
+      </div>
+    </SettingsSheetContext.Provider>
   );
 }
 
@@ -98,7 +154,7 @@ export interface RowProps {
   subtitle?: ReactNode;
   /** 右侧附件（Badge、Switch、数值文字等）。 */
   trailing?: ReactNode;
-  /** 有 onClick 时整行可点；若同时有 trailing（非单选行），则主体与 trailing 分区，避免按钮嵌套。 */
+  /** 有 onClick 时整行可点；若同时有 trailing，则主体与 trailing 分区，避免按钮嵌套。 */
   onClick?: () => void;
   /** 单选行：显示对勾并以 role=radio 暴露选中态。 */
   radio?: boolean;
@@ -123,20 +179,28 @@ export function Row({ icon, title, subtitle, trailing, onClick, radio = false, s
   );
   const marks = (
     <>
-      {radio ? <span className={`bs-row-check${selected ? ' is-on' : ''}`} aria-hidden="true">{selected ? <Check /> : null}</span> : null}
+      {radio ? <span className={`bs-row-check${selected ? ' is-on' : ''}`} aria-hidden="true">{selected ? <Check aria-hidden="true" /> : null}</span> : null}
       {chevron ? <ChevronRight className="bs-row-chevron" aria-hidden="true" /> : null}
     </>
   );
   const cls = `bs-row${selected ? ' is-selected' : ''}${muted ? ' is-muted' : ''}${onClick ? ' is-clickable' : ''}`;
-  // 单选行的 trailing 只是静态标记（如 Badge），整行保持一个按钮，对勾始终在最右侧。
-  if (onClick && trailing && !radio) {
+  // 有 trailing 时主体按钮与 trailing 分区，避免 radio 行 trailing 内含按钮时形成嵌套按钮；单选对勾保持在最右侧。
+  if (onClick && trailing) {
     return (
-      <div className={`${cls} is-split`}>
-        <button type="button" className="bs-row-main" onClick={onClick} disabled={disabled} aria-label={ariaLabel}>
+      <div className={`${cls} is-split${radio ? ' is-radio' : ''}`}>
+        <button
+          type="button"
+          className="bs-row-main"
+          onClick={onClick}
+          disabled={disabled}
+          aria-label={ariaLabel}
+          {...(radio ? { role: 'radio', 'aria-checked': selected } : {})}
+        >
           {body}
-          {marks}
+          {!radio ? marks : null}
         </button>
-        <span className="bs-row-trailing">{trailing}</span>
+        <div className="bs-row-trailing">{trailing}</div>
+        {radio ? marks : null}
       </div>
     );
   }
@@ -179,17 +243,13 @@ export interface SwitchProps {
 /** iOS 风格拨动开关（role=switch）。点击不会冒泡到所在行。 */
 export function Switch({ checked, onChange, label, disabled = false }: SwitchProps) {
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
+    <UiSwitch
+      checked={checked}
+      onCheckedChange={onChange}
+      label={label}
       disabled={disabled}
-      className={`bs-switch${checked ? ' is-on' : ''}`}
-      onClick={event => { event.stopPropagation(); onChange(!checked); }}
-    >
-      <span className="bs-switch-knob" />
-    </button>
+      onClick={event => event.stopPropagation()}
+    />
   );
 }
 
@@ -254,13 +314,14 @@ export function Chips<V extends string>({ value, options, onChange, label, disab
 }
 
 export function SearchField({ value, onChange, placeholder }: { value: string; onChange(value: string): void; placeholder: string }) {
+  const t = useText();
   return (
     <label className="bs-search">
       <Search aria-hidden="true" />
       <input type="search" value={value} placeholder={placeholder} aria-label={placeholder} onChange={event => onChange(event.target.value)} />
       {value ? (
-        <button type="button" className="bs-search-clear" aria-label="clear" onClick={() => onChange('')}>
-          <X />
+        <button type="button" className="bs-search-clear" aria-label={t('清除', 'Clear')} onClick={() => onChange('')}>
+          <X aria-hidden="true" />
         </button>
       ) : null}
     </label>
@@ -285,14 +346,27 @@ export function StatusLine({ tone = 'neutral', children, trailing }: { tone?: Ba
 }
 
 /** 折叠区：默认收起，用于诊断、配置来源等低频信息。 */
-export function Disclosure({ title, children, defaultOpen = false }: { title: ReactNode; children: ReactNode; defaultOpen?: boolean }) {
+export function Disclosure({
+  title,
+  summary,
+  children,
+  defaultOpen = false,
+}: {
+  title: ReactNode;
+  summary?: ReactNode;
+  children: ReactNode;
+  defaultOpen?: boolean;
+}) {
   const [open, setOpen] = useState(defaultOpen);
   const id = useId();
   return (
     <div className={`bs-disclosure${open ? ' is-open' : ''}`}>
       <button type="button" className="bs-disclosure-toggle" aria-expanded={open} aria-controls={id} onClick={() => setOpen(value => !value)}>
         <span>{title}</span>
-        <ChevronDown className="bs-disclosure-chevron" aria-hidden="true" />
+        <span className="bs-disclosure-right">
+          {summary ? <span className="bs-disclosure-summary">{summary}</span> : null}
+          <ChevronDown className="bs-disclosure-chevron" aria-hidden="true" />
+        </span>
       </button>
       {open ? <div id={id} className="bs-disclosure-body">{children}</div> : null}
     </div>
@@ -327,12 +401,23 @@ export function LoadingState({ text }: { text?: string }) {
   );
 }
 
-export function EmptyState({ icon, title, hint }: { icon?: ReactNode; title: ReactNode; hint?: ReactNode }) {
+export function EmptyState({
+  icon,
+  title,
+  hint,
+  action,
+}: {
+  icon?: ReactNode;
+  title: ReactNode;
+  hint?: ReactNode;
+  action?: ReactNode;
+}) {
   return (
     <div className="bs-state">
       {icon ? <span className="bs-state-icon" aria-hidden="true">{icon}</span> : null}
       <span className="bs-state-title">{title}</span>
       {hint ? <span className="bs-state-hint">{hint}</span> : null}
+      {action ? <div className="bs-state-action">{action}</div> : null}
     </div>
   );
 }
@@ -359,7 +444,7 @@ export function LoginCard({ message, busy = false, onSubmit }: LoginCardProps) {
         onSubmit(secret);
       }}
     >
-      <span className="bs-login-icon" aria-hidden="true"><Lock /></span>
+      <span className="bs-login-icon" aria-hidden="true"><Lock aria-hidden="true" /></span>
       <p className="bs-login-title">{t('需要中心管理员身份', 'Administrator sign-in required')}</p>
       {message ? <p className="bs-login-hint">{message}</p> : null}
       <label htmlFor={id} className="sr-only">{t('中心管理员密码', 'Center administrator password')}</label>

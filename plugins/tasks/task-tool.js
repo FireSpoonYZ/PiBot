@@ -956,9 +956,11 @@ export function createTaskTool({ defineTool, installationId, host, deviceId: sel
           activeSteps.every((s) => s.status === 'done');
         const extraNote = allStepsDone
           ? coord
-            ? '所有有效步骤均已完成，请验收后显式调用 action="complete" 完成任务。'
-            : '所有有效步骤均已完成，等待任务协调人显式验收并调用 complete 收尾。'
-          : undefined;
+            ? '所有有效步骤均已完成，请验收后显式调用 action="complete" 完成任务，并在当前对话回复正文中向用户输出完整结论。'
+            : '所有有效步骤均已完成，等待任务协调人显式验收并调用 complete 收尾；请同时在当前对话回复正文中简要输出本步骤的执行结果。'
+          : patch.status === 'done'
+            ? '本步骤已标记完成，请在当前对话回复正文中简要输出本步骤的执行结果。'
+            : undefined;
         return publishTaskResult(task, directoryBots, api, context, { extraNote });
       }
 
@@ -1008,7 +1010,9 @@ export function createTaskTool({ defineTool, installationId, host, deviceId: sel
         const res = await host.tasks.invoke(selfBotId, payload, conversationId, nativeTaskId);
         const extraNote = adoptionPatch?.phase === 'needs_scope'
           ? '已提交变更影响范围澄清（needs_scope），请等待用户选择保留已完成成果或重做。'
-          : undefined;
+          : res.task.status === 'done'
+            ? '任务已标记完成。请立即在当前对话回复正文中向用户清晰完整地呈现最终结论与结果（切勿只调用工具而省略正文回复）。'
+            : undefined;
         return publishTaskResult(res.task, directoryBots, api, context, { extraNote });
       }
 
@@ -1053,7 +1057,11 @@ export function createTaskTool({ defineTool, installationId, host, deviceId: sel
           conversationId,
           nativeTaskId,
         );
-        return publishTaskResult(res.task, directoryBots, api, context, { cardLabel: '任务已完成' });
+        return publishTaskResult(res.task, directoryBots, api, context, {
+          cardLabel: '任务已完成',
+          extraNote:
+            '任务已标记完成。请立即在当前对话回复正文中向用户清晰完整地呈现最终结论与结果（切勿只把结论留在工具参数中而省略正文回复）。',
+        });
       }
 
       default:

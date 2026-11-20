@@ -211,7 +211,7 @@ node host-core/runtime-cli.js wait --data-root "$DATA_ROOT" --config "$CONFIG" -
 
 冷启动顺序（openRuntime → 中心快照 apply → resume）：Harness open 把存活 running 任务改回 pending 但不派发，调度保持 paused。此阶段初始化只 ensureBotSoul，不用空模型/插件 profile 重写已持久化 AgentDoc（否则恢复任务丢工具、记 toolsRemoved/interrupted）；配置应用的空闲门槛在调度 paused 时把磁盘遗留 pending 视为可恢复而非忙碌，先恢复已授权模型/插件注册/profile，随后 HostService 才 resume 接管任务。正常调度期 botIsIdle 保护不变。
 
-全部 Bot 沿用 SDK 默认自动 compaction（阈值/后台触发与一次 provider 溢出压缩重试），不再强制关闭；BC 插件与原生压缩可共存，两者不互斥。本模块没有注册文件、命令或屏幕工具，没有替换旧 Android/Capacitor 运行链路。
+全部 Bot 沿用 SDK 默认自动 compaction（阈值/后台触发与一次 provider 溢出压缩重试），不再强制关闭；BC 插件与原生压缩可共存，两者不互斥。插件准备后的投影超限时，在 provider 边界返回标准 overflow，复用 SDK 的压缩重试，不发送超限请求。服务商未报告上下文容量时默认 256K（262144 tokens），明确配置或上游返回的容量优先。本模块没有注册文件、命令或屏幕工具，没有替换旧 Android/Capacitor 运行链路。
 
 ### 模块 2 验收
 
@@ -920,7 +920,7 @@ pi-durable 的 HookRunner 会吞掉普通 hook 抛错，因此请求阶段失败
 | --- | --- |
 | `list_scopes` | `{offset?,limit?}`；offset 为非负整数、默认 0，limit 为 1..200 的整数、默认 50，仅列当前成员 scope；返回 `{deviceId,botId,scopes,nextOffset}`，offset 在成员变化时仅尽力分页，不是持久消息游标 |
 | `read_scope` | `{scopeId,limit?,cursor?}`；只读自身 scoped inbox，保留退出后的旧冻结目标权限，不读全 scope 或其他 Bot 的 inbox |
-| `send_to` | `{scopeId,text,files?}`；已安装 DM 或 room 均可；不暴露 request/reply/public 分类或 replyTo——本轮已在回应该 scope 某条消息时 Host 自动把发送挂到该轮的原始请求消息（嵌套委派经冻结轮还原原请求），其余发送成为可触发对端续轮的新消息 |
+| `send_to` | `{scopeId?,text,files?}`；已安装 DM 或 room 均可；省略 `scopeId` 时由 Host 解析为当前轮已校验的 DM/room 冻结 `replyTarget`，显式传入 `scopeId` 仍继续支持；不暴露 request/reply/public 分类或 replyTo——本轮已在回应该 scope 某条消息时 Host 自动把发送挂到该轮的原始请求消息（嵌套委派经冻结轮还原原请求），其余发送成为可触发对端续轮的新消息 |
 
 read 工具分页默认 50、最大 200。发送只返回紧凑落盘回执 `{messageId,scopeId,author,category,rootId,replyTo,createdAt,status:'stored'}`，**stored 不代表远端收到、开始工作或已交付**。每次发送工具的 messageId 保存在 Durable task memo 中，崩溃在账本写入后/工具回执前时重放沿用同 ID，并由账本指纹去重，不从模型 callId 派生。工具结果为 JSON 文本；已知消息/身份/工作策略错误以 `{code,message}` 和 `isError:true` 返回（如 `WORK_STOPPED`、`WORK_CONTEXT_INACTIVE`、`STALE_INPUT`），取消向上传递，未知存储故障不改报 `INVALID_ARGUMENT`。
 

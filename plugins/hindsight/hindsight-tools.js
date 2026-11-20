@@ -26,6 +26,7 @@ const TOOL_ERROR_CODES = new Set([
   'HINDSIGHT_INVALID_REQUEST', 'HINDSIGHT_PROTOCOL_ERROR',
   'HINDSIGHT_STORE_FAILED', 'HINDSIGHT_BINDING_MISMATCH',
   'UNSUPPORTED_SCHEMA', 'RESPONSE_TOO_LARGE',
+  'GOOGLE_WORKSPACE_PRIVACY_BLOCKED',
 ]);
 
 const SAFE_ERROR_MESSAGES = {
@@ -52,6 +53,7 @@ const SAFE_ERROR_MESSAGES = {
   HINDSIGHT_BINDING_MISMATCH: 'The Hindsight endpoint binding does not match.',
   UNSUPPORTED_SCHEMA: 'The local Hindsight store schema is unsupported.',
   RESPONSE_TOO_LARGE: 'The memory response exceeds the tool output size limit.',
+  GOOGLE_WORKSPACE_PRIVACY_BLOCKED: 'Long-term memory writes are blocked in conversations containing Google Workspace data.',
 };
 
 function output(result) {

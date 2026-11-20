@@ -10,6 +10,8 @@ export type {
   GlobalTask,
   TaskActionInput,
   TaskBotOption,
+  BotChatTaskContextInput,
+  BotChatTaskContextResult,
 } from './types';
 
 export {
@@ -18,6 +20,8 @@ export {
   formatTaskSummary,
   countWaitingTasks,
   botTasksFor,
+  isTaskWaitingForBot,
+  resolveBotChatTaskContext,
 } from './types';
 
 export type {
@@ -30,11 +34,5 @@ export { useGlobalTasks } from './useGlobalTasks';
 export type { TaskBoardViewProps } from './TaskBoardView';
 export { TaskBoardView } from './TaskBoardView';
 
-export type {
-  TaskChatContextBarProps,
-  TaskChatPromptBannerProps,
-} from './TaskChatBars';
-export {
-  TaskChatContextBar,
-  TaskChatPromptBanner,
-} from './TaskChatBars';
+export type { TaskChatPromptBannerProps } from './TaskChatBars';
+export { TaskChatPromptBanner } from './TaskChatBars';

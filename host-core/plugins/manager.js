@@ -10,8 +10,9 @@ import { vaultError } from '../vault-protocol.js';
 const error = (code, message) => Object.assign(new Error(message), { code });
 const nameFor = (...parts) => 'cap-' + createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 const botKey = (botId, installationId) => botId + '\u0000' + installationId;
-// 实例按安装 + 精确代码身份（版本）索引：不同 Bot 可同时绑定旧/新版本。
-const instanceKey = (installationId, version) => installationId + '\u0000' + (version ?? '');
+// 实例按安装 + 精确代码身份（版本 + 数据边界）索引：不同 Bot 可同时绑定旧/新版本。
+const instanceKey = (installationId, version, dataBoundary) =>
+  installationId + '\u0000' + (version ?? '') + '\u0000' + (dataBoundary ?? '');
 /** 授权意图：Center 提供 authorized 时以它为准（与瞬态部署状态分离），旧快照回退 enabled。 */
 const isAuthorized = (capability) => capability?.authorized ?? capability?.enabled === true;
 /** 授权且启用的能力才建立绑定；authorized:false 视为显式撤销，绝不由 pin 覆盖。 */
@@ -131,11 +132,12 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     return { ...source, tasks: undefined, tools, sections, hooks, wraps };
   }
 
-  /** 执行内容摘要：只包含会改变执行结果的字段（配置、凭证值、版本），不含展示名称。 */
+  /** 执行内容摘要：只包含会改变执行结果的字段（配置、凭证值、版本、数据边界），不含展示名称。 */
   function capabilityFingerprint(capability, credentials) {
     const refs = capability.target === 'host' ? capability.credentialRefs ?? [] : [];
     return createHash('sha256').update(JSON.stringify([
       capability.kind, capability.target, capability.targetVersion,
+      capability.dataBoundary ?? null,
       capability.effectiveConfig ?? null,
       refs.map((ref) => [ref, credentials?.[ref] ?? null]),
     ])).digest('hex');
@@ -278,7 +280,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
   /** 打开（或复用）一个精确版本的安装实例；不同版本实例可并存，由各自的 Bot 绑定持有。 */
   async function openInstance(capability) {
     const id = capability.installationId;
-    const key = instanceKey(id, capability.targetVersion);
+    const key = instanceKey(id, capability.targetVersion, capability.dataBoundary);
     const existing = instances.get(key);
     if (existing) return { instance: existing, created: false };
     let installed = null;
@@ -391,7 +393,8 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     };
     const args = {
       installationId: id, version: capability.targetVersion,
-      target: capability.target, packageRoot: installed?.packageRoot ?? null,
+      target: capability.target, dataBoundary: capability.dataBoundary,
+      packageRoot: installed?.packageRoot ?? null,
       dataDir: installed?.dataDir ?? join(host.dataRoot, 'center-capabilities', id),
       host: scopedHost,
     };
@@ -856,12 +859,44 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     });
   }
 
+  function selectContextProviders(botId) {
+    return [...instances.values()].flatMap((instance) => {
+      const entry = instance.bots.get(botId);
+      const hook = entry?.bot.requestContributions?.prepareContext;
+      return hook ? [{ id: instance.installationId, hook, instance, entry }] : [];
+    });
+  }
+
+  async function shouldDeclineThresholdCompaction(agent, api, context) {
+    context?.abortSignal?.throwIfAborted();
+    if (!active || !accepting || !isOnline()) return false;
+    if (!Array.isArray(agent?.extensions)) return false;
+    let botId;
+    try {
+      botId = await services.resolveConversationBot(api.conversationId);
+    } catch (err) {
+      if (context?.abortSignal?.aborted) throw err;
+      return false;
+    }
+    const providers = selectContextProviders(botId);
+    if (providers.length !== 1) return false;
+    const { id, instance, entry } = providers[0];
+    if (instance.manifest?.id !== 'e-launcher.billion-context' || instance.manifest?.kind !== 'plugin') {
+      return false;
+    }
+    if (!agent.extensions.some((extension) => extension === entry.extension)) return false;
+    try {
+      await checkOwner(botId, id, api.conversationId);
+      return active && accepting && isOnline();
+    } catch (err) {
+      if (context?.abortSignal?.aborted) throw err;
+      return false;
+    }
+  }
+
   async function prepareContext(request, api, context) {
     const botId = await services.resolveConversationBot(api.conversationId);
-    const providers = [...instances.values()].flatMap((instance) => {
-      const hook = instance.bots.get(botId)?.bot.requestContributions?.prepareContext;
-      return hook ? [{ id: instance.installationId, hook }] : [];
-    });
+    const providers = selectContextProviders(botId);
     if (providers.length > 1) throw error('INVALID_STATE', 'multiple context providers for this Bot');
     if (!providers.length) return request;
     const { id, hook } = providers[0];
@@ -968,7 +1003,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
 
   return {
     applyBot, activate, quiesce, close, staleGrants, changedGrants, revoke, dropGrants, notifyGrants, capabilityTaskNames,
-    assertCapabilityAllowed, extensionsFor, prepareContext, beforeRequest, action, actionByName,
+    assertCapabilityAllowed, extensionsFor, prepareContext, shouldDeclineThresholdCompaction, beforeRequest, action, actionByName,
     isActive: () => active,
     appliedSetId: (botId) => appliedSets.get(botId) ?? null,
     hasActiveExecutions: (botId) => botId === undefined

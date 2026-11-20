@@ -16,9 +16,9 @@
 
 1. **公共基础行为提示词（`BASE_BEHAVIOR_PROMPT`）**
    - 语言与位置：英文，在 `host-core/runtime.js` 中通过 `defineExtension({ name: 'host.base-behavior', sections: [section('host-base-behavior', () => BASE_BEHAVIOR_PROMPT)] })` 注册在 `host.tools`（`host-execution`）、`host.communication`（`host-collaboration`）、`host.bot-management-skill` 及各 Bot 插件扩展之前。
-   - 渲染顺序：Pi Durable SDK 1.5.0 按 `selectedExtensions` 顺序依次渲染各扩展的 `sections`，最后追加 `agent.instructions`（即 `SOUL.md` 或工作会话 `workInstructions`）。`coreExtensions` 快照在空闲边界自动同步到新老主会话与工作会话。
+   - 渲染顺序：Pi Durable SDK 1.5.2 按 `selectedExtensions` 顺序依次渲染各扩展的 `sections`，最后追加 `agent.instructions`（即 `SOUL.md` 或工作会话 `workInstructions`）。`coreExtensions` 快照在空闲边界自动同步到新老主会话与工作会话。
    - 覆盖范围：
-     - **任务执行与结果交付**：严格按冻结轮（frozen turn）的受信 `replyTarget` 决定输出通道：`replyTarget.kind === "primary"`（含同伴回复唤醒并续接原始用户主私聊请求的轮次）时助手文本即面向用户的回复；`dm`/`room` 范围轮仅通过 `send_to` 发布，普通助手文本为私有草稿。在人类发起的 primary 多步任务中，首次调用工具的同一轮附带一句简明起步说明，但绝不在未调用工具的情况下仅回一句确认就结束生成轮；同伴/Host/定时唤醒不发送开场确认。
+     - **任务执行与结果交付**：采用借鉴 Grok 风格的紧凑来源/发布默认约定（仅记录其紧凑默认思路，不宣称或复制其内部实现）：静态基础行为提示词说明普通主会话默认规则、同伴 DM/room 与自动化（Host/定时）行为，并明确轮级路由说明独立于用户/同伴输入本身。普通人类发起且目标为 `primary` 的轮次不附加合成路由消息，助手文本直接作为主会话面向用户的回复（不引入新发送工具或通用显式发布，主会话流式输出不变）；其他来源/目标由 Host 在插件最终投影前插一条瞬态 `SystemMessage`（`content: ''`、`sections: { 'host-turn-routing': <短说明> }`、`timestamp: 0`，不含其他 section 或工具，仅含来源/行为与默认去向类别，不含 `requestId` 或原始冻结轮 JSON，永不作为 `user` 消息追加）。Host 侧完整冻结轮、权限、回复关联与账本保持不变以支撑迟到同伴回复续接与路由校验；`replyTarget.kind === "primary"`（含同伴回复唤醒并续接回主私聊的轮次）在普通主聊天保持可见，`dm`/`room` 协作轮在普通主聊天隐藏、仅于专门通信/成员工作视图可见，且须经 `send_to` 对外发布（省略 `scopeId` 时由 Host 解析为当前已校验的 DM/room `replyTarget`，显式 `scopeId` 仍支持）。在人类发起的 primary 多步任务中，首次调用工具的同一轮附带一句简明起步说明，但绝不在未调用工具的情况下仅回一句确认就结束生成轮；同伴/Host/定时唤醒不发送开场确认。
      - **自主性与用户决策时机**：可逆且在用户委托范围内的步骤直接推进；仅在不可逆副作用、重大歧义或依赖用户私有偏好时暂停询问（已启用 `ask_user_question` 插件时优先调用，否则以正文清晰提问）。
      - **工具发现与真实运行环境**：区分本机非沙箱文件/终端工具、`tool_search`、可选 `codemode`、Center 授权的按 Bot 插件能力（Hindsight、Webfox、MCP、技能）、图形虚拟屏工具（`shower` + Windows/Linux `cua_*` / Android `android_shower`）以及 Android 宿主工具（`android_apps` 应用目录查询、`android_speak` 语音朗读）。
      - **事实证据与回执语义**：严禁编造数据、输出或路径；如实区分 `send_to` 的 `stored`（已记入本地账本）、Bot 管理/能力变更的 `queued`/`waiting-idle`/`enabling`/`unconfirmed`（已受理待生效）、`android_speak` 的 `accepted: true`（宿主语音引擎已受理，不代表播报结束）与最终完成状态。
@@ -34,7 +34,7 @@
 
 | 维度 | 剥离的上游/泄露样本假设 | `e-launcher` 真实机制与提示词表述 |
 | --- | --- | --- |
-| 用户回复与会话路由 | `SendToUser` / `SendMessage` 唯一出口、`end_turn`、线程 `reply_to` | 严格由冻结轮 `replyTarget` 决定：`replyTarget.kind === "primary"`（含同伴回复续接回主私聊的轮次）时助手回复直达用户；`dm`/`room` 轮通过 `send_to` 发往冻结 `replyTarget`，未发布文本为私有草稿 |
+| 用户回复与会话路由 | `SendToUser` / `SendMessage` 唯一出口、`end_turn`、线程 `reply_to` | 采用借鉴 Grok 风格的紧凑默认约定（不宣称其内部实现，无新发送工具或通用显式发布）：普通人类 `primary` 轮无合成路由消息，助手回复直达主聊天；其他来源/目标由 Host 在插件最终投影头部前插瞬态 `SystemMessage`（仅 `sections: { 'host-turn-routing': ... }`、`content: ''`、`timestamp: 0`，独立于输入、只含来源/行为与默认去向类别，不含 `requestId` 或冻结轮 JSON）；Host 完整保留冻结轮支撑迟到同伴回复续接与校验；`dm`/`room` 轮通过 `send_to` 发布（省略 `scopeId` 由 Host 解析为当前已校验 DM/room `replyTarget`，显式 `scopeId` 仍支持），普通助手文本不发往对端/群组 |
 | 首句响应与运行结束语义 | 先单独调一次 `SendMessage(..., end_turn: false)` 再开始工具调用 | 人类发起的 primary 多步任务在发起首个工具调用的同一助手响应内附带简明起步说明；因无工具调用的普通助手文本会直接结束生成轮，严禁仅输出确认语而不调用工具 |
 | 多智能体协作与子任务 | 超过两轮工具调用强制派发 `Task(executor)`、`CloudAgent`、`SendToAgent(priority)` | 本机可直接处理任意步数的常规任务；需要跨机、专业分工或并行独立子任务时，通过 `list_bots`/`get_bot`/`list_scopes`/`ensure_dm`/`create_room`/`send_to` 主动联合在线同伴 Bot（不共享同一文件写入或同一 Shower 屏幕） |
 | 跨机文件传递 | `/home/box`、`/workspace`、`CopyToBox`/`CopyFromBox`、`ExternalRead` | 每台设备文件系统独立；跨 Bot 传文件使用 `send_to` 的 `files` 数组（最多 4 个本地文件/图片，双方 Host 在线时自动复制并生成接收端本地路径） |

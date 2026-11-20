@@ -21,7 +21,9 @@ const SKILL_ACTIONS = [
   'list', 'read', 'create', 'update', 'patch', 'delete', 'archive', 'restore',
   'pin', 'lock', 'adopt',
 ];
+const SKILL_WRITE_ACTIONS = new Set(['create', 'update', 'patch', 'adopt']);
 const LEARNING_ACTIONS = ['status', 'configure', 'learn', 'review', 'curate', 'cancel'];
+const LEARNING_START_ACTIONS = new Set(['learn', 'review', 'curate']);
 const INSTALLATION_ACTIONS = [
   'inspect', 'install', 'update', 'enable', 'disable',
   'uninstall', 'operation', 'deployments', 'catalog', 'describe', 'check', 'probe',
@@ -32,7 +34,7 @@ function assertTargetBot(args) {
   assertId(args.botId, 'botId');
 }
 
-export function createBotManagementTools({ collaboration, memoRequestId }) {
+export function createBotManagementTools({ collaboration, memoRequestId, dataPrivacy = null }) {
   // Everything except the target pair plus a memoized requestId goes to the
   // service verbatim; per-action fields stay owned by the service contract.
   async function scopedCall(args, api, context, invoke) {
@@ -86,6 +88,12 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
         const deviceId = args.deviceId ?? identity.deviceId;
         const botId = args.botId ?? identity.botId;
         assertTargetBot({ deviceId, botId });
+        if (SKILL_WRITE_ACTIONS.has(args.action) && typeof dataPrivacy?.assertExportAllowed === 'function') {
+          await dataPrivacy.assertExportAllowed(api.conversationId, {
+            operation: 'manage_bot_skill:' + args.action,
+            callContext: context,
+          });
+        }
         return scopedCall({ ...args, deviceId, botId }, api, context, collaboration.manageBotSkill);
       },
     },
@@ -148,6 +156,12 @@ export function createBotManagementTools({ collaboration, memoRequestId }) {
       boundedCodes: true,
       async run(args, _identity, _log, api, context) {
         assertTargetBot(args);
+        if (LEARNING_START_ACTIONS.has(args.action) && typeof dataPrivacy?.assertExportAllowed === 'function') {
+          await dataPrivacy.assertExportAllowed(api.conversationId, {
+            operation: 'manage_bot_learning:' + args.action,
+            callContext: context,
+          });
+        }
         return scopedCall(args, api, context, collaboration.manageBotLearning);
       },
     },

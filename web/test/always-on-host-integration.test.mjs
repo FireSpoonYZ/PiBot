@@ -8,6 +8,8 @@ import test from 'node:test';
 import { createControlClient } from '../../host-core/control-client.js';
 import { openControlServer } from '../../host-core/control-server.js';
 import { normalizeControlCall } from '../../host-core/remote-control-protocol.js';
+import { openRuntime } from '../../host-core/runtime.js';
+import { openHost } from '../../host-core/host.js';
 import { PrimaryIndex } from '../../host-core/runtime-docs.js';
 import { createTurnAdmission } from '../../host-core/runtime-turns.js';
 import { TurnPin, TurnQueue } from '../../host-core/runtime-turns-docs.js';
@@ -38,8 +40,8 @@ function askOnce(id) {
   };
 }
 
-async function until(read, label) {
-  const deadline = Date.now() + 8000;
+async function until(read, label, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
   let last;
   while (Date.now() < deadline) {
     last = await read();
@@ -49,9 +51,15 @@ async function until(read, label) {
   assert.fail(`Timed out waiting for ${label}; last=${JSON.stringify(last)}`);
 }
 
+function pendingLiveQuestionnaires(liveState) {
+  return (liveState?.tools ?? [])
+    .map(tool => tool?.presentation)
+    .filter(p => p?.kind === 'questionnaire' && p.status === 'pending');
+}
+
 // Real Host, control protocol, plugin loader, SDK task scheduler and SQLite. Only
 // Center configuration/credentials and the LLM provider are replaced by fixtures.
-async function hostFixture(t, { questionnaire = false } = {}) {
+async function hostFixture(t, { questionnaire = false, codemode = false, codemodeOnly = false, extraBots = 0 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pibot-always-on-e2e-'));
   const dataRoot = join(root, 'host');
   const cwd = join(root, 'workspace');
@@ -154,18 +162,44 @@ async function hostFixture(t, { questionnaire = false } = {}) {
   });
   await start();
   bot = await client.createBot({ requestId: 'fixture-create', role: 'Integration Assistant', cwd, makePrimary: true });
-  snapshot = makeSnapshot(2, [{ botId: bot.botId, cwd,
-    model: { modelRef: 'fixture-provider/fixture-model', thinkingLevel: 'off', codemode: false, codemodeOnly: false },
+  const peerBots = [];
+  for (let i = 0; i < extraBots; i += 1) {
+    peerBots.push(await client.createBot({
+      requestId: `fixture-create-peer-${i}`, role: `Peer Assistant ${i}`, cwd, makePrimary: false,
+    }));
+  }
+  const botConfigs = [bot, ...peerBots].map(item => ({
+    botId: item.botId, cwd,
+    model: { modelRef: 'fixture-provider/fixture-model', thinkingLevel: 'off', codemode, codemodeOnly },
     capabilities: questionnaire ? [{ installationId: INSTALLATION, kind: 'plugin', target: 'host',
       targetVersion: MANIFEST.version, enabled: true, authorized: true, effectiveConfig: {}, credentialRefs: [] }] : [],
-  }]);
+  }));
+  snapshot = makeSnapshot(2, botConfigs);
   const applied = await server.applyCenterSnapshot(snapshot);
   assert.equal(applied.status, 'applied', JSON.stringify(applied));
   return {
-    bot, state,
+    bot, peerBots, state,
     get server() { return server; },
     get client() { return client; },
     async restart() { await server.close(); server = null; await start(); },
+    watchLive(targetBotId = bot.botId) {
+      const controller = new AbortController();
+      let current = null;
+      const loop = (async () => {
+        try {
+          for await (const frame of client.live(targetBotId, { signal: controller.signal })) {
+            if (frame.type === 'snapshot') current = frame.state;
+            else if (frame.type === 'update' && current) current = { ...current, ...frame.changes };
+          }
+        } catch { /* closed on stop or teardown */ }
+      })();
+      const stop = async () => {
+        if (!controller.signal.aborted) controller.abort();
+        await loop;
+      };
+      t.after(stop);
+      return { get state() { return current; }, stop };
+    },
     async whileStopped(read) {
       await server.close();
       server = null;
@@ -324,24 +358,52 @@ test('an answered questionnaire survives restart while its continuation is waiti
   assert.equal((await f.history()).filter(entry => entry.data?.requestId === resumedId).length, 1);
 });
 
-test('real questionnaire rejects a multi-tool model round without creating a durable wait', async t => {
+test('real questionnaire multi-tool model round preserves live-task fallback without creating a durable wait', async t => {
   const f = await hostFixture(t, { questionnaire: true });
   let issued = false;
   f.state.handler = async () => {
     if (!issued) { issued = true; return [ask('question-a'), ask('question-b')]; }
-    return text('The model can retry with a single question in a future turn.');
+    return text('Multi-tool answers received in-band.');
   };
-  await f.client.submit(f.bot.botId, { requestId: 'multi-tool-work', text: 'produce a deliberately invalid mixed tool round' });
-  await f.done('multi-tool-work');
+  const live = f.watchLive();
+  await f.client.submit(f.bot.botId, { requestId: 'multi-tool-work', text: 'ask two questions in one round' });
+  const answeredIds = new Set();
+  await until(async () => {
+    for (const pending of pendingLiveQuestionnaires(live.state)) {
+      if (!answeredIds.has(pending.requestId)) {
+        answeredIds.add(pending.requestId);
+        const reply = await f.answer(pending, `answer-multi-${pending.requestId}`, 0);
+        assert.equal(reply.status, 'answered');
+      }
+    }
+    try {
+      const receipt = await f.client.getSubmission(f.bot.botId, 'multi-tool-work');
+      return receipt.status === 'done' ? receipt : null;
+    } catch (error) {
+      if (error.code === 'SUBMISSION_NOT_FOUND') return null;
+      throw error;
+    }
+  }, 'multi-tool live-task questionnaires answered and turn completed');
+  await live.stop();
+  assert.equal(answeredIds.size, 2);
   assert.equal(f.state.calls.length, 2);
   const history = await f.history();
-  assert.equal(questionnaires(history).length, 0);
-  const results = history.flatMap(entry => entry.model ?? []).filter(message => message.role === 'toolResult');
-  assert.equal(results.length, 2);
-  for (const result of results) {
-    assert.equal(result.isError, true);
-    assert.match(JSON.stringify(result.content), /only tool call/);
+  const cards = questionnaires(history);
+  assert.equal(cards.length, 2);
+  for (const card of cards) {
+    assert.equal(card.presentation.status, 'answered');
+    assert.notEqual(card.message.isError, true);
+    assert.notEqual(card.message.durableWait, true);
+    assert.doesNotMatch(JSON.stringify(card.message.content), /execution is paused|Bot is free/i);
   }
+  assert.equal(history.some(entry => String(entry.data?.requestId ?? '').startsWith('wait-')), false);
+  await f.whileStopped(async harness => {
+    const index = await harness.snapshot(DurableWaitIndex, f.bot.primaryConversationId, context);
+    assert.deepEqual(Object.keys(index?.active ?? {}), []);
+    for (const card of cards) {
+      assert.equal(await harness.snapshot(DurableWait, waitId(f.bot, card.presentation), context) ?? null, null);
+    }
+  });
 });
 
 test('real Host Stop cancels a released questionnaire and a late answer stays inert after restart', async t => {
@@ -507,7 +569,7 @@ test('cold Host startup recovers cancellation intent before an already placed SD
   assert.equal(f.state.calls.length, 2, 'the cancelled native continuation must never call the provider');
 });
 
-test('real TurnQueue transaction rejects a cancelled wait continuation without consuming the Bot stop epoch', async t => {
+test('real TurnQueue transaction rejects a cancelled wait continuation and unsupported experimental task/room waits without consuming the Bot stop epoch', async t => {
   const root = mkdtempSync(join(tmpdir(), 'pibot-cancelled-wait-admission-'));
   const dbPath = join(root, 'durable.sqlite');
   let harness;
@@ -533,14 +595,31 @@ test('real TurnQueue transaction rejects a cancelled wait continuation without c
       resumeRequestId: 'wait-continuation',
       resume: { state: 'cancelled', input: { requestId: 'wait-continuation', text: 'late answer' } },
     };
+    (await tx.doc(DurableWait, 'experimental-room-task-wait', {})).record = {
+      botId: bot.botId, stopEpoch: 0, status: 'answered', reason: 'user',
+      turn: {
+        requestId: 'legacy-room-req', kind: 'room', scopeId: 'legacy-room',
+        replyTarget: { kind: 'room', scopeId: 'legacy-room' },
+        sender: { kind: 'user', deviceId: 'device-a' },
+      },
+      dispatchContext: { taskId: 'legacy-global-task', stepId: 'step-1', executionRevision: 1 },
+      resumeRequestId: 'wait-experimental-room-task',
+      resume: { state: 'pending', input: { requestId: 'wait-experimental-room-task', text: 'experimental answer' } },
+    };
   }, context);
   const input = { requestId: 'wait-continuation', text: 'late answer', stopEpoch: 0,
     origin: { sender: { kind: 'host' }, replyTo: null }, continuationWaitId: 'cancelled-scope-wait',
     continuationTurn: { kind: 'room', scopeId: 'stopped-room', replyTarget: { kind: 'room', scopeId: 'stopped-room' } } };
+  const unsupportedInput = { requestId: 'wait-experimental-room-task', text: 'experimental answer', stopEpoch: 0,
+    origin: { sender: { kind: 'host' }, replyTo: null }, continuationWaitId: 'experimental-room-task-wait',
+    continuationTurn: { kind: 'room', scopeId: 'legacy-room', replyTarget: { kind: 'room', scopeId: 'legacy-room' } } };
   const rejected = await turns.enqueue(bot.botId, input);
   assert.equal(rejected.status, 'unanswered');
   assert.equal(rejected.reason, 'cancelled');
-  assert.equal(turns.stopEpoch(bot.botId), 0, 'scope cancellation must not stop unrelated Bot work');
+  const rejectedUnsupported = await turns.enqueue(bot.botId, unsupportedInput);
+  assert.equal(rejectedUnsupported.status, 'unanswered');
+  assert.equal(rejectedUnsupported.reason, 'cancelled');
+  assert.equal(turns.stopEpoch(bot.botId), 0, 'scope/unsupported cancellation must not stop unrelated Bot work');
   assert.equal(await turns.queuedCount(bot), 0);
   turns.close();
   await harness.close(context);
@@ -549,8 +628,467 @@ test('real TurnQueue transaction rejects a cancelled wait continuation without c
   const retried = await turns.enqueue(bot.botId, input);
   assert.equal(retried.status, 'unanswered');
   assert.equal(retried.reason, 'cancelled');
+  const retriedUnsupported = await turns.enqueue(bot.botId, unsupportedInput);
+  assert.equal(retriedUnsupported.status, 'unanswered');
+  assert.equal(retriedUnsupported.reason, 'cancelled');
   assert.equal(await turns.queuedCount(bot), 0);
   const inspection = await harness.inspect(context);
   assert.equal(inspection.tasks.length, 0);
   assert.equal(inspection.submissions.length, 0);
+});
+
+async function runtimeFixture(t, { questionnaire = true, codemode = false, codemodeOnly = false } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'pibot-always-on-rt-'));
+  const dataRoot = join(root, 'host');
+  const cwd = join(root, 'workspace');
+  mkdirSync(cwd, { recursive: true });
+  const api = `always-on-rt-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const state = { calls: [], handler: async () => text('completed') };
+  const stream = (model, request, options) => {
+    const events = createAssistantMessageEventStream();
+    const usage = { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+    let finished = false;
+    const finish = (content, reason, errorMessage) => {
+      if (finished) return;
+      finished = true;
+      const message = { role: 'assistant', content, api: model.api, provider: model.provider,
+        model: model.id, usage, stopReason: reason, timestamp: Date.now(),
+        ...(errorMessage ? { errorMessage } : {}) };
+      events.push(reason === 'error' || reason === 'aborted'
+        ? { type: 'error', reason, error: message } : { type: 'done', reason, message });
+      events.end(message);
+    };
+    const abort = () => finish([], 'aborted', 'Fixture invocation aborted');
+    queueMicrotask(async () => {
+      if (options?.signal?.aborted) { abort(); return; }
+      options?.signal?.addEventListener('abort', abort, { once: true });
+      try {
+        state.calls.push(structuredClone(request));
+        const content = await state.handler(request);
+        if (options?.signal?.aborted) abort();
+        else finish(content, content.some(block => block.type === 'toolCall') ? 'toolUse' : 'stop');
+      } catch (error) {
+        finish([], 'error', error.message);
+      } finally { options?.signal?.removeEventListener('abort', abort); }
+    });
+    return events;
+  };
+  registerApiProvider({ api, stream, streamSimple: stream }, api);
+  let runtime;
+  const storedHost = openHost({ dataRoot });
+  const { deviceId } = storedHost;
+  storedHost.close();
+  let bot;
+  let snapshot;
+  const centerClient = { providerAuth: async () => ({ auth: { apiKey: 'fixture-key' }, source: 'center' }) };
+  const centerRuntime = {
+    snapshot: { protocol: 1 },
+    installer: {
+      async getInstalled(id, selector) {
+        assert.equal(id, INSTALLATION);
+        if (selector?.version !== undefined) assert.equal(selector.version, MANIFEST.version);
+        return { version: MANIFEST.version, packageRoot: PACKAGE_ROOT,
+          dataDir: join(root, 'questionnaire-data'), manifest: MANIFEST };
+      },
+    },
+    getClient: () => centerClient,
+    prepareTurn: async () => ({ setId: `set-${snapshot.revision}`, snapshot }),
+    confirmTurn: async ({ requestId, setId }) => ({ admissionId: `admission-${requestId}`, setId }),
+    restoreTurn: async () => ({ setId: `set-${snapshot.revision}`, snapshot }),
+  };
+  const makeSnapshot = (revision, bots) => ({
+    protocol: 1, deviceId, revision,
+    providers: [{ id: 'fixture-provider', name: 'Fixture', api, baseUrl: 'http://127.0.0.1:9', enabled: true, credentialRef: null }],
+    models: { 'fixture-provider': [{ id: 'fixture-model', name: 'Fixture', api,
+      contextWindow: 128000, maxTokens: 4096, input: ['text'], reasoning: false, enabled: true, revision: 1 }] },
+    credentials: {}, bots,
+  });
+  async function start() {
+    const opening = await openRuntime({ dataRoot, nativeBridge: async () => ({}), centerRuntime });
+    runtime = opening;
+    try {
+      snapshot ??= makeSnapshot(1, []);
+      const applied = await opening.applyCenterSnapshot(snapshot);
+      if (!bot) assert.equal(applied.status, 'applied', JSON.stringify(applied));
+      else assert.ok(['applied', 'waiting-idle'].includes(applied.status), JSON.stringify(applied));
+      await opening.restoreTurns();
+      await opening.setCenterOnline(true);
+      opening.resume();
+    } catch (error) {
+      runtime = null;
+      try { await opening.close(); }
+      catch (closeError) { throw new AggregateError([error, closeError], 'Fixture Runtime startup and cleanup failed'); }
+      throw error;
+    }
+  }
+  t.after(async () => {
+    await runtime?.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+  await start();
+  bot = await runtime.createBot({ requestId: 'fixture-rt-create', role: 'Task Assistant', cwd, makePrimary: true });
+  snapshot = makeSnapshot(2, [{ botId: bot.botId, cwd,
+    model: { modelRef: 'fixture-provider/fixture-model', thinkingLevel: 'off', codemode, codemodeOnly },
+    capabilities: questionnaire ? [{ installationId: INSTALLATION, kind: 'plugin', target: 'host',
+      targetVersion: MANIFEST.version, enabled: true, authorized: true, effectiveConfig: {}, credentialRefs: [] }] : [],
+  }]);
+  const applied = await runtime.applyCenterSnapshot(snapshot);
+  assert.equal(applied.status, 'applied', JSON.stringify(applied));
+  return {
+    bot, state,
+    get deviceId() { return deviceId; },
+    get runtime() { return runtime; },
+    async restart() { await runtime.close(); runtime = null; await start(); },
+    async whileStopped(read) {
+      await runtime.close();
+      runtime = null;
+      const storage = await openNodeSqliteStorage(join(dataRoot, 'durable.sqlite'));
+      const harness = await Harness.open(storage, { registry: createRegistry(), models: createModels() }, context);
+      try { return await read(harness); }
+      finally { await harness.close(context); await start(); }
+    },
+    async watchLive() {
+      const handle = await runtime.watch(bot.botId);
+      handle.start(() => {});
+      const stop = async () => { await handle.stop().catch(() => {}); };
+      t.after(stop);
+      return { get state() { return handle.value?.state ?? null; }, stop };
+    },
+    async answer(presentation, requestId, selected = 0) {
+      const { result } = await runtime.callCapabilityAction(INSTALLATION, 'answerQuestionnaire', {
+        requestId, deviceId, botId: bot.botId,
+        input: { conversationId: presentation.conversationId, requestId: presentation.requestId,
+          cancelled: false, answers: [{ questionIndex: 0, selectedOptions: [selected] }] },
+      });
+      return result;
+    },
+  };
+}
+
+test('real nested codemode-only questionnaire preserves live-task fallback without creating a durable wait', async t => {
+  const f = await hostFixture(t, { questionnaire: true, codemode: true, codemodeOnly: true });
+  let issued = false;
+  f.state.handler = async () => {
+    if (!issued) {
+      issued = true;
+      return [{
+        type: 'toolCall',
+        id: 'codemode-nested-q',
+        name: 'codemode',
+        arguments: { code: `return await tools.ask_user_question(${JSON.stringify(QUESTION)});` },
+      }];
+    }
+    return text('Codemode nested questionnaire completed in-band.');
+  };
+  const live = f.watchLive();
+  await f.client.submit(f.bot.botId, { requestId: 'codemode-only-work', text: 'ask via nested codemode call' });
+  const pending = await until(
+    () => pendingLiveQuestionnaires(live.state)[0] ?? null,
+    'pending nested questionnaire in codemode-only live state',
+  );
+  assert.deepEqual(await f.answer(pending, 'answer-codemode-nested', 0), { status: 'answered' });
+  await f.done('codemode-only-work');
+  await live.stop();
+  assert.equal(f.state.calls.length, 2);
+  const history = await f.history();
+  assert.equal(history.some(entry => String(entry.data?.requestId ?? '').startsWith('wait-')), false);
+  await f.whileStopped(async harness => {
+    const index = await harness.snapshot(DurableWaitIndex, f.bot.primaryConversationId, context);
+    assert.deepEqual(Object.keys(index?.active ?? {}), []);
+    assert.equal(await harness.snapshot(DurableWait, waitId(f.bot, pending), context) ?? null, null);
+  });
+});
+
+test('scoped room turn keeps live-task questionnaire fallback with no detached wait or auto-wake', async t => {
+  const f = await hostFixture(t, { questionnaire: true, extraBots: 1 });
+  await f.client.submit(f.bot.botId, { requestId: 'room-test-primary', text: 'Initialize primary watch' });
+  await f.done('room-test-primary');
+  const peer = f.peerBots[0];
+  const created = await f.client.createScope({
+    requestId: 'create-room-no-detach',
+    kind: 'room',
+    title: 'Scoped Questionnaire Room',
+    members: [
+      { deviceId: f.server.deviceId, botId: f.bot.botId },
+      { deviceId: f.server.deviceId, botId: peer.botId },
+    ],
+  });
+  const scopeId = created.scope.scopeId;
+  await f.client.stopWork(peer.botId, scopeId);
+
+  const callsBeforeRoom = f.state.calls.length;
+  let asked1 = false;
+  f.state.handler = async () => {
+    if (!asked1) { asked1 = true; return [ask('room-question-1')]; }
+    return text('Room turn completed with Alpha.');
+  };
+  const live = f.watchLive();
+  await f.client.publishUserMessage(scopeId, {
+    messageId: 'room-msg-1',
+    text: `@${f.bot.role} Please clarify choice inside this room`,
+  });
+  const pending1 = await until(
+    () => pendingLiveQuestionnaires(live.state)[0] ?? null,
+    'live-task room questionnaire 1',
+    12000,
+  );
+  assert.deepEqual(await f.answer(pending1, 'answer-room-1', 0), { status: 'answered' });
+  await until(
+    () => f.state.calls.length >= callsBeforeRoom + 2 &&
+      pendingLiveQuestionnaires(live.state).length === 0 &&
+      live.state?.activity?.phase === 'idle',
+    'room turn settled in-band after live answer',
+    12000,
+  );
+  await live.stop();
+  await f.whileStopped(async harness => {
+    const index = await harness.snapshot(DurableWaitIndex, f.bot.primaryConversationId, context);
+    assert.deepEqual(Object.keys(index?.active ?? {}), []);
+    assert.equal(await harness.snapshot(DurableWait, waitId(f.bot, pending1), context) ?? null, null);
+  });
+
+  // A cancelled/aborted room questionnaire must never leave a detached wait or auto-wake after restart.
+  let asked2 = false;
+  f.state.handler = async () => {
+    if (!asked2) { asked2 = true; return [ask('room-question-2')]; }
+    return text('unexpected room continuation');
+  };
+  const live2 = f.watchLive();
+  await f.client.publishUserMessage(scopeId, {
+    messageId: 'room-msg-2',
+    text: `@${f.bot.role} Ask a second room question then abort`,
+  });
+  const pending2 = await until(
+    () => pendingLiveQuestionnaires(live2.state)[0] ?? null,
+    'live-task room questionnaire 2',
+    12000,
+  );
+  await f.client.abort(f.bot.botId);
+  await live2.stop();
+  const callsAfterAbort = f.state.calls.length;
+  await f.restart();
+  assert.deepEqual(await f.answer(pending2, 'late-room-answer', 1), { status: 'settled' });
+  await f.whileStopped(async harness => {
+    const index = await harness.snapshot(DurableWaitIndex, f.bot.primaryConversationId, context);
+    assert.deepEqual(Object.keys(index?.active ?? {}), []);
+    assert.equal(await harness.snapshot(DurableWait, waitId(f.bot, pending2), context) ?? null, null);
+  });
+  assert.equal(f.state.calls.length, callsAfterAbort);
+  assert.equal((await f.history()).some(entry => String(entry.data?.requestId ?? '').startsWith('wait-')), false);
+});
+
+test('real task dispatch questionnaire stays live-task with no detached wait or auto-wake across cancellation and revision', async t => {
+  const f = await runtimeFixture(t, { questionnaire: true });
+  let step = 0;
+  f.state.handler = async () => {
+    if (step === 0) { step = 1; return [ask('task-rev1-q')]; }
+    if (step === 1) { step = 2; return [ask('task-rev2-q')]; }
+    return text('Task dispatch revision 2 completed in-band.');
+  };
+  const live = await f.watchLive();
+  await f.runtime.submitTaskDispatch(f.bot.botId, {
+    requestId: 'task-dispatch-rev-1',
+    text: 'Execute global task step revision 1',
+    dispatchContext: { taskId: 'global-task-compat', stepId: 'step-1', executionRevision: 1 },
+    origin: { sender: { kind: 'host', name: '任务 · 全局任务', sourceType: 'webhook' }, replyTo: null },
+  });
+  const pendingRev1 = await until(
+    () => pendingLiveQuestionnaires(live.state)[0] ?? null,
+    'live-task questionnaire during task dispatch rev 1',
+  );
+  await f.runtime.cancelTaskDispatch(f.bot.botId, 'task-dispatch-rev-1');
+  const cancelledRev1 = await until(async () => {
+    const receipt = await f.runtime.getSubmission(f.bot.botId, 'task-dispatch-rev-1');
+    return receipt?.status === 'unanswered' ? receipt : null;
+  }, 'cancelled task dispatch rev 1 receipt');
+  assert.ok(['aborted', 'cancelled'].includes(cancelledRev1.reason));
+  await live.stop();
+  const callsAfterCancel = f.state.calls.length;
+  assert.equal(callsAfterCancel, 1);
+
+  await f.whileStopped(async harness => {
+    const index = await harness.snapshot(DurableWaitIndex, f.bot.primaryConversationId, context);
+    assert.deepEqual(Object.keys(index?.active ?? {}), []);
+    assert.equal(await harness.snapshot(DurableWait, waitId(f.bot, pendingRev1), context) ?? null, null);
+  });
+  assert.deepEqual(await f.answer(pendingRev1, 'late-answer-cancelled-task', 0), { status: 'settled' });
+  assert.equal(f.state.calls.length, callsAfterCancel, 'cancelled task dispatch must never auto-wake');
+
+  // Revised task dispatch executionRevision=2 also stays on live-task path with no detached wait.
+  const live2 = await f.watchLive();
+  await f.runtime.submitTaskDispatch(f.bot.botId, {
+    requestId: 'task-dispatch-rev-2',
+    text: 'Execute global task step revision 2',
+    dispatchContext: { taskId: 'global-task-compat', stepId: 'step-1', executionRevision: 2 },
+    origin: { sender: { kind: 'host', name: '任务 · 全局任务', sourceType: 'webhook' }, replyTo: null },
+  });
+  const pendingRev2 = await until(
+    () => pendingLiveQuestionnaires(live2.state)[0] ?? null,
+    'live-task questionnaire during task dispatch rev 2',
+  );
+  assert.deepEqual(await f.answer(pendingRev2, 'answer-task-rev-2', 1), { status: 'answered' });
+  const doneRev2 = await until(async () => {
+    const receipt = await f.runtime.getSubmission(f.bot.botId, 'task-dispatch-rev-2');
+    return receipt?.status === 'done' ? receipt : null;
+  }, 'completed task dispatch rev 2 receipt');
+  assert.equal(doneRev2.status, 'done');
+  await live2.stop();
+  assert.equal(f.state.calls.length, 3);
+  await f.whileStopped(async harness => {
+    const index = await harness.snapshot(DurableWaitIndex, f.bot.primaryConversationId, context);
+    assert.deepEqual(Object.keys(index?.active ?? {}), []);
+    assert.equal(await harness.snapshot(DurableWait, waitId(f.bot, pendingRev2), context) ?? null, null);
+  });
+});
+
+test('cold Host startup cancels an existing experimental unsupported task/room wait and its placed continuation before provider runs', async t => {
+  const f = await hostFixture(t, { questionnaire: true });
+  await f.client.submit(f.bot.botId, { requestId: 'seed-primary-for-experimental', text: 'initialize primary conversation' });
+  await f.done('seed-primary-for-experimental');
+  assert.equal(f.state.calls.length, 1);
+  const before = await f.server.getScheduleFence(f.bot.botId);
+  const deviceId = f.server.deviceId;
+
+  const expReqId = '999';
+  let expKey;
+  let expResumeId;
+  let nativePlaced;
+  await f.whileStopped(async harness => {
+    const primary = await harness.snapshot(PrimaryIndex, context);
+    const nativeId = primary.byPrimary[f.bot.primaryConversationId];
+    assert.ok(Number.isSafeInteger(nativeId) && nativeId >= 1);
+    const pinSnapshot = await harness.snapshot(TurnPin, f.bot.primaryConversationId, context);
+    const originalPin = Object.values(pinSnapshot.admissions).find(pin => pin.requestId === 'seed-primary-for-experimental');
+    assert.ok(originalPin);
+    const presentation = {
+      kind: 'questionnaire', version: 1, installationId: INSTALLATION,
+      conversationId: nativeId, requestId: expReqId, status: 'answered', questions: QUESTION.questions,
+    };
+    expKey = waitId(f.bot, presentation);
+    expResumeId = resumeRequestId(f.bot, presentation);
+    nativePlaced = await harness.commit(async tx => {
+      const admitted = await admitSubmission(tx, nativeId, {
+        type: 'input', requestId: expResumeId, content: 'stale experimental room/task answer',
+      }, Date.now(), { steeringMode: 'all', followUpMode: 'one' });
+      assert.equal(admitted.status, 'placed');
+      const admissionId = `admission-${expResumeId}`;
+      const pins = await tx.doc(TurnPin, f.bot.primaryConversationId, {});
+      pins.admissions[admissionId] = { ...originalPin, admissionId,
+        requestId: expResumeId, submissionId: admitted.id, admittedAt: new Date().toISOString() };
+      const doc = await tx.doc(DurableWait, expKey, {});
+      doc.record = {
+        version: 1, kind: 'questionnaire', waitId: expKey, botId: f.bot.botId,
+        installationId: INSTALLATION, conversationId: nativeId, requestId: expReqId,
+        toolTaskId: Number(expReqId), sourceRequestId: 'legacy-room-task-req',
+        stopEpoch: before.stopEpoch,
+        turn: {
+          requestId: 'legacy-room-task-req', kind: 'room', scopeId: 'legacy-room',
+          replyTarget: { kind: 'room', scopeId: 'legacy-room' },
+          sender: { kind: 'user', deviceId },
+        },
+        dispatchContext: { taskId: 'legacy-global-task', stepId: 'step-1', executionRevision: 1 },
+        status: 'answered', reason: 'user', params: QUESTION,
+        details: { presentation, questions: QUESTION.questions },
+        createdAt: Date.now(), settledAt: Date.now(),
+        resumeRequestId: expResumeId,
+        resume: { state: 'accepted', acceptedAt: Date.now(),
+          input: { requestId: expResumeId, text: 'stale experimental room/task answer' } },
+      };
+      const index = await tx.doc(DurableWaitIndex, f.bot.primaryConversationId, {});
+      index.active[expKey] = { installationId: INSTALLATION, conversationId: nativeId, requestId: expReqId };
+      return admitted;
+    }, context);
+    f.state.handler = async () => text('fresh work after unsupported wait cleanup');
+  });
+
+  const cancelled = await until(async () => {
+    const receipt = await f.client.getSubmission(f.bot.botId, expResumeId);
+    assert.notEqual(receipt.status, 'done', 'unsupported experimental continuation must never execute');
+    return receipt.status === 'unanswered' ? receipt : null;
+  }, 'cancelled unsupported experimental continuation');
+  assert.equal(cancelled.submissionId, nativePlaced.id);
+  assert.equal(cancelled.reason, 'aborted');
+  assert.equal(f.state.calls.length, 1);
+
+  await f.whileStopped(async harness => {
+    const record = (await harness.snapshot(DurableWait, expKey, context)).record;
+    assert.equal(record.status, 'cancelled');
+    assert.equal(record.resume.state, 'cancelled');
+    assert.equal((await harness.snapshot(DurableWaitIndex, f.bot.primaryConversationId, context)).active[expKey], undefined);
+  });
+  await f.client.submit(f.bot.botId, { requestId: 'fresh-work-after-experimental-cleanup', text: 'continue cleanly' });
+  await f.done('fresh-work-after-experimental-cleanup');
+  assert.equal(f.state.calls.length, 2);
+});
+
+test('real /clear revokes pending durable wait atomically, preserves wait on RUNTIME_BUSY rejection, and stays coherent on answer-vs-clear race', async t => {
+  const f = await hostFixture(t, { questionnaire: true });
+  f.state.handler = askOnce('question-before-clear');
+  await f.client.submit(f.bot.botId, { requestId: 'work-before-clear', text: 'ask before /clear' });
+  await f.done('work-before-clear');
+  const [question] = questionnaires(await f.history());
+  assert.equal(question.presentation.status, 'pending');
+  const key = waitId(f.bot, question.presentation);
+  assert.equal(f.state.calls.length, 1);
+
+  // 1) Rejected /clear (RUNTIME_BUSY due to queued turn) must roll back / leave the pending wait intact.
+  f.state.failPrepare = true;
+  await f.client.submit(f.bot.botId, { requestId: 'queued-blocks-clear', text: 'queued turn blocks clear' });
+  await until(() => f.state.prepareFailures > 0, 'queued turn blocking clearHistory');
+  await assert.rejects(f.client.clearHistory(f.bot.botId), { code: 'RUNTIME_BUSY' });
+  assert.equal(questionnaires(await f.history())[0].presentation.status, 'pending');
+  await f.client.withdrawQueued(f.bot.botId, { requestId: 'queued-blocks-clear' });
+  await until(async () => {
+    const receipt = await f.client.getSubmission(f.bot.botId, 'queued-blocks-clear');
+    return receipt?.status === 'unanswered' ? receipt : null;
+  }, 'withdrawn queued turn before clearHistory');
+  f.state.failPrepare = false;
+
+  // 2) Successful /clear revokes the pending wait atomically with pi.reset.
+  const cleared = await f.client.clearHistory(f.bot.botId);
+  assert.ok(Number.isSafeInteger(cleared.clearedThroughEntryId) && cleared.clearedThroughEntryId > 0);
+  assert.equal((await f.history()).length, 0);
+  await f.whileStopped(async harness => {
+    const record = (await harness.snapshot(DurableWait, key, context)).record;
+    assert.equal(record.status, 'cancelled');
+    assert.equal(record.resume.state, 'cancelled');
+    assert.equal((await harness.snapshot(DurableWaitIndex, f.bot.primaryConversationId, context)).active[key], undefined);
+  });
+  assert.deepEqual(await f.answer(question.presentation, 'late-answer-after-clear', 0), { status: 'settled' });
+  assert.equal(f.state.calls.length, 1);
+
+  // 3) Answer-vs-/clear race stays coherent under either commit order.
+  f.state.handler = askOnce('question-race-clear');
+  await f.client.submit(f.bot.botId, { requestId: 'work-race-clear', text: 'ask before answer-vs-clear race' });
+  await f.done('work-race-clear');
+  const [q2] = questionnaires(await f.history());
+  assert.equal(q2.presentation.status, 'pending');
+  const key2 = waitId(f.bot, q2.presentation);
+  const resumedId2 = resumeRequestId(f.bot, q2.presentation);
+  f.state.handler = async () => text('race continuation completed');
+
+  const [clearOutcome, answerOutcome] = await Promise.allSettled([
+    f.client.clearHistory(f.bot.botId),
+    f.answer(q2.presentation, 'race-answer', 0),
+  ]);
+  assert.equal(answerOutcome.status, 'fulfilled');
+  if (clearOutcome.status === 'fulfilled') {
+    assert.ok(Number.isSafeInteger(clearOutcome.value.clearedThroughEntryId) && clearOutcome.value.clearedThroughEntryId > 0);
+    assert.ok(['settled', 'answered'].includes(answerOutcome.value.status));
+    await f.whileStopped(async harness => {
+      const record = (await harness.snapshot(DurableWait, key2, context)).record;
+      assert.equal(record.status, 'cancelled');
+      assert.equal(record.resume.state, 'cancelled');
+      assert.equal((await harness.snapshot(DurableWaitIndex, f.bot.primaryConversationId, context)).active[key2], undefined);
+    });
+    assert.deepEqual(await f.answer(q2.presentation, 'late-answer-after-race-clear', 1), { status: 'settled' });
+  } else {
+    assert.equal(clearOutcome.reason?.code, 'RUNTIME_BUSY');
+    assert.equal(answerOutcome.value.status, 'answered');
+    await f.done(resumedId2);
+    await f.restart();
+    assert.deepEqual(await f.answer(q2.presentation, 'late-answer-after-race-answered', 1), { status: 'settled' });
+    assert.equal((await f.history()).filter(entry => entry.data?.requestId === resumedId2).length, 1);
+  }
 });

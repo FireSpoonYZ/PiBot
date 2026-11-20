@@ -56,7 +56,7 @@ flowchart LR
 
 - **本地工具与隐私边界。** 每台设备的 Bot 绑定本地真实工作目录，内置固定版本的 `rg` / `fd` 搜索与运行时环境，设备令牌和模型凭据由系统加密存储或私有权限文件保护。
 - **后台常驻执行。** 桌面端关闭窗口不中断已受理任务（Linux 基于 `systemd --user` + `linger`，Windows 基于受保护的登录自启动任务，macOS 基于用户 LaunchAgent）。Android 在独立进程运行 UI，由前台服务托管 Node Mobile 子进程。
-- **Bot 看板与跨机群聊。** 桌面与移动端共用「Bot 看板」，汇总所有设备的*需要你（问卷/失败）*、*工作中*、*待查看*与*空闲*状态。支持跨设备 Room 群聊协同与 Bot 私聊审阅。
+- **Bot 看板与跨机群聊。** 桌面与移动端共用「Bot 看板」，汇总所有设备的*需要你（待确认或其他执行失败）*、*工作中*、*待查看*与*空闲*状态。因 Host 停止而中断回复的 Bot，在无待确认事项或排队任务时归入空闲，卡片仍显示中断原因。支持跨设备 Room 群聊协同与 Bot 私聊审阅。
 - **Shower 虚拟屏。** 按会话提供独立虚拟显示空间与 GUI 自动化能力（Linux 私有 Xvnc + 轻量桌面，Windows 交互会话桌面，Android 基于 Shizuku 的虚拟屏）。
 - **Bot 学习与 Webhook**。后台自动回顾会话并生成 Skill 建议。通用 JSON Webhook 支持幂等键，可用于 n8n、CI 或外部自动化脚本。
 
@@ -155,6 +155,7 @@ $serial = '<已授权设备序列号>'
 | **桌面客户端** | [desktop/README.md](desktop/README.md) | Windows / Linux / macOS 客户端架构、服务生命周期、数据目录与自动更新 |
 | **Android 客户端** | [mobile/README.md](mobile/README.md) | Android 双进程架构、原生桥、远端设备控制、语音与构建细节 |
 | **Bot 管理与自学习** | [docs/bot-management-learning.md](docs/bot-management-learning.md) | 模型分配、受管 Skill / MCP / 插件与后台学习 |
+| **Google Workspace 与 Bot 浏览器** | [docs/google-workspace-browser.md](docs/google-workspace-browser.md) | Center 共享授权、Google 自动规则、同页接管与敏感步骤 |
 | **Webhook 自动任务** | [docs/webhooks.md](docs/webhooks.md) | Bearer 入口创建、幂等键要求、n8n / curl 触发示例与事件生命周期 |
 | **Always-on Runtime** | [docs/always-on-runtime.md](docs/always-on-runtime.md) | 执行身份、可恢复定时交接、持久问卷、上下文与迁移验收 |
 | **Shower 虚拟屏** | [docs/shower-cross-platform.md](docs/shower-cross-platform.md) | Windows / Linux / Android 跨平台虚拟屏原理与权限配置 |

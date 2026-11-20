@@ -1,5 +1,10 @@
 import type { ImageAttachment } from '../../host-core/index.js';
 import { resolveActiveActivityStartedAt, type BotActivity } from './botActivity.ts';
+import {
+  HOST_ATTACHED_IMAGE_LINE_PREFIX,
+  isHostInjectedAttachmentLine,
+  stripTrailingHostAttachmentLines,
+} from './composerFlowControl.ts';
 
 /**
  * Unified Bot session UI attribution (contract: safe projection of backend
@@ -11,7 +16,7 @@ export interface MessageAttribution {
   botId?: string;
   deviceId?: string;
   name?: string;
-  sourceType?: 'schedule' | 'webhook' | 'task_dispatch';
+  sourceType?: 'schedule' | 'webhook' | 'task_dispatch' | 'google-workspace-rule';
   channel: 'primary' | 'dm' | 'room';
   scopeId?: string;
   messageId?: string;
@@ -57,7 +62,7 @@ export interface ChatToolCallItem {
   output?: string;
   /** 输出是否因长度预算被截断。 */
   outputTruncated?: boolean;
-  /** send_to 跨智能体通信的结构化预览摘要（用于对话流内联展示）。 */
+  /** send_to 跨 Bot 通信的结构化预览摘要（用于对话流内联展示）。 */
   sendTo?: SendToToolPreview;
   /** host 投影的工具交互结构（todo/问卷）；来自 live slot 或历史 toolResult，未验证形状，渲染前需 readToolPresentation。 */
   presentation?: Record<string, unknown>;
@@ -92,6 +97,8 @@ export interface ChatTurn {
   toolSummary?: string[];
   tools?: ChatToolCallItem[];
   startedAt?: number;
+  /** 持久消息的时间（毫秒）；与计算耗时用的轮次起点分开。 */
+  timestamp?: number;
   durationMs?: number;
   isStreaming?: boolean;
   createdAt?: string;
@@ -120,6 +127,8 @@ export interface ParseHistoryOptions {
   trackAssistantTextEntries?: boolean;
   /** 已知 Bot 目录（用于补全对端/本机 Bot 的可读名称，不展示裸 ID）。 */
   knownBots?: readonly KnownBotSummary[];
+  /** 当前 live 权威完整 durable wait 身份集合（缺省 = 不支持/离线 -> 历史持久等待只读；[] = 已知无活跃）。 */
+  durableWaits?: unknown;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -542,7 +551,15 @@ export function normalizeAttribution(value: unknown): MessageAttribution | undef
   if (deviceId !== undefined) out.deviceId = deviceId;
   const name = readString(raw.name);
   if (name !== undefined) out.name = name;
-  if (kind === 'host' && (raw.sourceType === 'schedule' || raw.sourceType === 'webhook' || raw.sourceType === 'task_dispatch')) out.sourceType = raw.sourceType;
+  if (
+    kind === 'host' &&
+    (raw.sourceType === 'schedule' ||
+      raw.sourceType === 'webhook' ||
+      raw.sourceType === 'task_dispatch' ||
+      raw.sourceType === 'google-workspace-rule')
+  ) {
+    out.sourceType = raw.sourceType;
+  }
   const scopeId = readString(raw.scopeId);
   if (scopeId !== undefined) out.scopeId = scopeId;
   const messageId = readString(raw.messageId);
@@ -626,6 +643,7 @@ export function entryAttribution(
   item: Record<string, unknown>,
   selfBotId?: string,
 ): MessageAttribution | undefined {
+  if (item.kind === 'pi.compaction') return undefined;
   const data = asRecord(item.data);
   // raw 历史条目：data.attribution；live 投影条目：item.attribution（同 schema）。
   // raw 覆盖 live（外层同 id 去重已做），这里只认该条目自身携带的一份。
@@ -664,7 +682,7 @@ function entryChannel(
       ? (kind as MessageAttribution['channel'])
       : undefined;
   }
-  if (item.kind === 'host.scope-message') return undefined;
+  if (item.kind === 'host.scope-message' || item.kind === 'pi.compaction') return undefined;
   // 真实用户消息（含旧的无 attribution 历史）把执行来源重置回 primary。
   if (item.kind === 'host.user-message' || item.kind === 'pi.user') {
     return entryAttribution(item, selfBotId)?.channel ?? 'primary';
@@ -688,30 +706,63 @@ export function latestEntryChannel(
   return channel;
 }
 
+const MAX_DURABLE_WAITS = 64;
+const MAX_DURABLE_WAIT_ID_LEN = 1024;
+
 function questionnaireKey(value: unknown): string | null {
   const p = asRecord(value);
-  if (p.kind !== 'questionnaire' || p.version !== 1 ||
-      typeof p.installationId !== 'string' || !p.installationId || p.installationId.length > 1024 ||
-      !Number.isSafeInteger(p.conversationId) || (p.conversationId as number) < 1 ||
-      typeof p.requestId !== 'string' || !p.requestId || p.requestId.length > 1024) return null;
+  if (
+    p.kind !== 'questionnaire' ||
+    p.version !== 1 ||
+    typeof p.installationId !== 'string' ||
+    !p.installationId.trim() ||
+    p.installationId.length > MAX_DURABLE_WAIT_ID_LEN ||
+    !Number.isSafeInteger(p.conversationId) ||
+    (p.conversationId as number) < 1 ||
+    typeof p.requestId !== 'string' ||
+    !p.requestId.trim() ||
+    p.requestId.length > MAX_DURABLE_WAIT_ID_LEN
+  ) {
+    return null;
+  }
   return JSON.stringify([p.installationId, p.conversationId, p.requestId]);
+}
+
+function parseActiveDurableWaits(durableWaits: unknown): Set<string> | null {
+  if (!Array.isArray(durableWaits) || durableWaits.length > MAX_DURABLE_WAITS) {
+    return null;
+  }
+  const active = new Set<string>();
+  for (const identity of durableWaits) {
+    if (!identity || typeof identity !== 'object' || Array.isArray(identity)) return null;
+    const rec = identity as Record<string, unknown>;
+    const keys = Object.keys(rec);
+    if (keys.some((k) => k !== 'installationId' && k !== 'conversationId' && k !== 'requestId')) {
+      return null;
+    }
+    const key = questionnaireKey({
+      kind: 'questionnaire',
+      version: 1,
+      installationId: rec.installationId,
+      conversationId: rec.conversationId,
+      requestId: rec.requestId,
+    });
+    if (key === null) return null;
+    active.add(key);
+  }
+  return active;
 }
 
 /** Preserve full raw tool output/arguments, but use current Host interaction
  * state. A live identity disappearing revokes even a cached/out-of-window card.
- * Details cannot self-authorize: only the complete live durableWaits set can. */
+ * Details cannot self-authorize: only the complete live durableWaits set can
+ * (absent = unsupported -> historical durable wait read-only; [] = known none). */
 export function mergeHistoryWaitProjection(
   raw: Record<string, unknown>,
   live: Record<string, unknown> | undefined,
   durableWaits: unknown,
 ): Record<string, unknown> {
-  const active = new Set<string>();
-  if (Array.isArray(durableWaits) && durableWaits.length <= 64) {
-    for (const identity of durableWaits) {
-      const key = questionnaireKey({ ...asRecord(identity), kind: 'questionnaire', version: 1 });
-      if (key !== null) active.add(key);
-    }
-  }
+  const active = parseActiveDurableWaits(durableWaits);
   const latest = new Map<string, Record<string, unknown>>();
   if (Array.isArray(live?.messages)) {
     for (const message of live.messages) {
@@ -719,27 +770,156 @@ export function mergeHistoryWaitProjection(
       if (m.role === 'toolResult' && typeof m.toolCallId === 'string') latest.set(m.toolCallId, m);
     }
   }
-  const overlay = (value: unknown) => {
+  const isRawModelEntry = Array.isArray(raw.model);
+  const entryTaskId = raw.byTaskId;
+  const matchesEntryTask = (p: Record<string, unknown>, requireTaskMatch: boolean): boolean => {
+    if (!requireTaskMatch && entryTaskId === undefined) return true;
+    return (
+      Number.isSafeInteger(entryTaskId) &&
+      (entryTaskId as number) >= 1 &&
+      p.requestId === String(entryTaskId)
+    );
+  };
+  const overlay = (value: unknown, fromRawModel: boolean) => {
     const message = asRecord(value);
     if (message.role !== 'toolResult') return value;
-    const details = asRecord(message.details);
-    const oldPresentation = message.presentation ?? details.presentation;
-    const key = questionnaireKey(oldPresentation);
+    const hasRawDetails =
+      message.details !== null && typeof message.details === 'object' && !Array.isArray(message.details);
+    const rawDetails = hasRawDetails ? (message.details as Record<string, unknown>) : {};
+    const cleanDetails = hasRawDetails && 'durableWait' in rawDetails
+      ? (() => {
+          const { durableWait: _forged, ...rest } = rawDetails;
+          return rest;
+        })()
+      : rawDetails;
+    const isQuestionnaireTool = message.toolName === 'ask_user_question';
+    const oldPresentation = message.presentation ?? cleanDetails.presentation;
+    const key = isQuestionnaireTool ? questionnaireKey(oldPresentation) : null;
     const fresh = typeof message.toolCallId === 'string' ? latest.get(message.toolCallId) : undefined;
     const freshPresentation = fresh?.presentation;
     const same = key !== null && questionnaireKey(freshPresentation) === key;
     const presentation = same ? asRecord(freshPresentation) : asRecord(oldPresentation);
-    const allowed = key !== null && active.has(key) && presentation.status === 'pending' && message.toolName === 'ask_user_question';
+    const outcome = readToolOutcome(message.outcome);
+    const notFailed =
+      message.isError !== true &&
+      outcome !== 'error' &&
+      outcome !== 'cancelled' &&
+      outcome !== 'interrupted';
+    const allowed =
+      active !== null &&
+      key !== null &&
+      notFailed &&
+      matchesEntryTask(presentation, fromRawModel) &&
+      active.has(key) &&
+      presentation.status === 'pending' &&
+      isQuestionnaireTool;
     return {
       ...message,
       durableWait: allowed,
-      ...(same ? { presentation, ...(message.details !== undefined ? { details: { ...details, presentation } } : {}) } : {}),
+      ...(same
+        ? {
+            presentation,
+            ...(hasRawDetails ? { details: { ...cleanDetails, presentation } } : {}),
+          }
+        : hasRawDetails && 'durableWait' in rawDetails
+          ? { details: cleanDetails }
+          : {}),
     };
   };
-  return { ...raw,
-    ...(Array.isArray(raw.model) ? { model: raw.model.map(overlay) } : {}),
-    ...(Array.isArray(raw.messages) ? { messages: raw.messages.map(overlay) } : {}),
+  const { durableWait: _forgedEntryFlag, ...safeRaw } = raw;
+  return {
+    ...safeRaw,
+    ...(isRawModelEntry ? { model: (raw.model as unknown[]).map((m) => overlay(m, true)) } : {}),
+    ...(Array.isArray(raw.messages) ? { messages: raw.messages.map((m) => overlay(m, false)) } : {}),
   };
+}
+
+export interface ScopedLiveBinding {
+  scopeKey: string;
+  botKey: string;
+  conversationId: string;
+  transportKey: string;
+}
+
+export interface ScopedLiveState<TState> extends ScopedLiveBinding {
+  state: TState;
+}
+
+export function matchesScopedLiveBinding(
+  current: ScopedLiveBinding | null | undefined,
+  expected: ScopedLiveBinding | null | undefined,
+): boolean {
+  if (!current || !expected) return false;
+  return (
+    current.scopeKey === expected.scopeKey &&
+    current.botKey === expected.botKey &&
+    current.conversationId === expected.conversationId &&
+    current.transportKey === expected.transportKey
+  );
+}
+
+const GENERIC_DONE_SUMMARIES = new Set(['任务已完成', '任务已取消', '已完成']); // i18n-ok
+
+function extractTaskOutputSummary(output: string | undefined): string {
+  if (!output) return '';
+  const match =
+    /(?:^|\n)摘要:\s*([\s\S]*?)(?=\n(?:待回应\s*\[|需求变更\s*\[|步骤:|任务已标记完成|所有有效步骤均已完成)|$)/.exec( // i18n-ok
+      output,
+    );
+  if (!match) return '';
+  const trimmed = match[1].trim();
+  return GENERIC_DONE_SUMMARIES.has(trimmed) ? '' : trimmed;
+}
+
+function readSingleToolTaskReply(tool: ChatToolCallItem): string {
+  if (
+    tool.status === 'error' ||
+    tool.status === 'cancelled' ||
+    tool.status === 'interrupted' ||
+    tool.outcome === 'error' ||
+    tool.outcome === 'cancelled' ||
+    tool.outcome === 'interrupted'
+  ) {
+    return '';
+  }
+  const pres = tool.presentation;
+  if (pres && pres.kind === 'task' && pres.status === 'done') {
+    const argSummary = typeof tool.args?.summary === 'string' ? tool.args.summary.trim() : '';
+    if (argSummary && !GENERIC_DONE_SUMMARIES.has(argSummary)) return argSummary;
+    const outSummary = extractTaskOutputSummary(tool.output);
+    if (outSummary) return outSummary;
+    const presSummary = typeof pres.summary === 'string' ? pres.summary.trim() : '';
+    if (presSummary && !GENERIC_DONE_SUMMARIES.has(presSummary)) return presSummary;
+  }
+  if (tool.name === 'task' && tool.args) {
+    const action = tool.args.action;
+    const status = tool.args.status;
+    if (action === 'complete' || (action === 'update' && status === 'done')) {
+      const argSummary = typeof tool.args.summary === 'string' ? tool.args.summary.trim() : '';
+      if (argSummary && !GENERIC_DONE_SUMMARIES.has(argSummary)) return argSummary;
+    }
+    if (action === 'update_step' && status === 'done') {
+      const stepRes =
+        typeof tool.args.resultSummary === 'string' ? tool.args.resultSummary.trim() : '';
+      if (stepRes && !GENERIC_DONE_SUMMARIES.has(stepRes)) return stepRes;
+    }
+  }
+  return '';
+}
+
+function extractCompletedTaskReply(tools: readonly ChatToolCallItem[]): string {
+  for (let i = tools.length - 1; i >= 0; i -= 1) {
+    const tool = tools[i];
+    if (tool.children && tool.children.length > 0) {
+      for (let j = tool.children.length - 1; j >= 0; j -= 1) {
+        const childReply = readSingleToolTaskReply(tool.children[j]);
+        if (childReply) return childReply;
+      }
+    }
+    const direct = readSingleToolTaskReply(tool);
+    if (direct) return direct;
+  }
+  return '';
 }
 
 export function parseHistoryEntries(
@@ -753,6 +933,13 @@ export function parseHistoryEntries(
   let lastBoundaryChannel: MessageAttribution['channel'] = 'primary';
 
   const knownBots = options?.knownBots;
+  const hasDurableWaitsOption = options !== undefined && Object.prototype.hasOwnProperty.call(options, 'durableWaits');
+  const activeDurableWaits = hasDurableWaitsOption ? parseActiveDurableWaits(options?.durableWaits) : null;
+  const isAuthorizedWait = (presentation: Record<string, unknown> | null): boolean => {
+    const key = questionnaireKey(presentation);
+    if (key === null) return false;
+    return !hasDurableWaitsOption || (activeDurableWaits !== null && activeDurableWaits.has(key));
+  };
 
   const ensureAssistant = (id: string, numericId: number, fallbackStartMs?: number, rawAttribution?: MessageAttribution): AssistantTurnAccumulator => {
     const attribution = enrichAttributionName(rawAttribution, knownBots);
@@ -894,7 +1081,27 @@ export function parseHistoryEntries(
       }
     }
 
-    acc.turn.text = acc.textParts.filter(Boolean).join('\n\n').trim();
+    let joinedTurnText = acc.textParts.filter(Boolean).join('\n\n').trim();
+    let synthesizedReply = '';
+    if (!isStillActive && acc.tools.length > 0) {
+      const taskReply = extractCompletedTaskReply(acc.tools);
+      if (taskReply) {
+        const probe = taskReply.slice(0, Math.min(16, taskReply.length));
+        const missingOrTinyAck =
+          joinedTurnText === '' ||
+          (joinedTurnText.length < 24 &&
+            taskReply.length > joinedTurnText.length * 2 &&
+            !joinedTurnText.includes(probe));
+        if (missingOrTinyAck) {
+          synthesizedReply = taskReply;
+          joinedTurnText = joinedTurnText ? `${joinedTurnText}\n\n${taskReply}` : taskReply;
+          if (options?.trackAssistantTextEntries && acc.turn.entryId > 0) {
+            (acc.turn.assistantTextEntryIds ??= []).push(String(acc.turn.entryId));
+          }
+        }
+      }
+    }
+    acc.turn.text = joinedTurnText;
     acc.turn.thinking = acc.thinkingParts.length > 0 ? acc.thinkingParts.join('\n\n') : undefined;
     acc.turn.tools = acc.tools.length > 0 ? acc.tools : undefined;
     acc.turn.toolSummary = acc.tools.length > 0 ? acc.tools.map((tool) => tool.name) : undefined;
@@ -917,6 +1124,19 @@ export function parseHistoryEntries(
         });
       }
     }
+    if (synthesizedReply) {
+      blockSeq += 1;
+      const entryId =
+        options?.trackAssistantTextEntries && acc.turn.entryId > 0
+          ? String(acc.turn.entryId)
+          : undefined;
+      out.push({
+        id: acc.turn.id + '-b' + blockSeq,
+        kind: 'text',
+        text: synthesizedReply,
+        ...(entryId !== undefined ? { entryId } : {}),
+      });
+    }
     acc.turn.blocks = out.length > 0 ? out : undefined;
   };
 
@@ -924,6 +1144,10 @@ export function parseHistoryEntries(
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
+    // SDK 压缩摘要是模型上下文边界（role='user'），不渲染气泡也不参与轮次/归属/时间/编辑判断。
+    if (item.kind === 'pi.compaction') {
+      continue;
+    }
     const numericId = typeof item.id === 'number' ? item.id : Number(item.id);
     const itemAttr = enrichAttributionName(entryAttribution(item, selfBotId), knownBots);
     if (clearedAfterEntryId > 0 && Number.isFinite(numericId) && numericId <= clearedAfterEntryId) {
@@ -971,6 +1195,7 @@ export function parseHistoryEntries(
             entryId: Number.isFinite(numericId) ? numericId : 0,
             text: cleanText,
             startedAt: ts,
+            timestamp: ts,
             attribution: itemAttr,
             ...(itemAttr.createdAt ? { createdAt: itemAttr.createdAt } : {}),
           });
@@ -983,7 +1208,8 @@ export function parseHistoryEntries(
     if (itemChannel !== undefined) lastBoundaryChannel = itemChannel;
     // raw 条目用 model 块（含工具/思考）；Host live 投影条目有 messages:[{role,text,truncated,toolCalls,timestamp,durationMs}]。
     // host.user-message 的图片附件元数据在条目级 data.attachments（不在单个 message 上）。
-    const entryAttachments = readMessageAttachments(asRecord(item.data).attachments);
+    const itemData = asRecord(item.data);
+    const entryAttachments = readMessageAttachments(itemData.attachments);
     const model = asArray<unknown>(item.model);
     const blocks = model.length > 0 ? model : asArray<unknown>(item.messages);
     for (let mIdx = 0; mIdx < blocks.length; mIdx++) {
@@ -1004,13 +1230,43 @@ export function parseHistoryEntries(
         const content = entry.content;
         const msgAttachments = readMessageAttachments(entry.attachments);
         const attachments = msgAttachments.length > 0 ? msgAttachments : entryAttachments;
-        const textParts: string[] = [];
-        if (typeof content === 'string') {
-          textParts.push(content);
+        let joinedText = '';
+        if (typeof itemData.userText === 'string' && (item.kind === 'host.user-message' || mIdx === 0)) {
+          joinedText = itemData.userText.trim();
+        } else if (typeof content === 'string') {
+          joinedText = (attachments.length > 0
+            ? stripTrailingHostAttachmentLines(content, attachments.length)
+            : content).trim();
         } else if (typeof entry.text === 'string') {
-          textParts.push(entry.text);
+          joinedText = (attachments.length > 0
+            ? stripTrailingHostAttachmentLines(entry.text, attachments.length)
+            : entry.text).trim();
         } else if (Array.isArray(content)) {
-          for (const block of content) {
+          const hasImageBlock = content.some((b) => asRecord(b).type === 'image');
+          let end = content.length;
+          let strippedHostBlock = false;
+          if (attachments.length > 0 || hasImageBlock) {
+            while (end > 0) {
+              const prev = asRecord(content[end - 1]);
+              if (prev.type === 'image') {
+                end -= 1;
+                continue;
+              }
+              if (
+                prev.type === 'text' &&
+                typeof prev.text === 'string' &&
+                prev.text.startsWith(HOST_ATTACHED_IMAGE_LINE_PREFIX) &&
+                (asRecord(content[end]).type === 'image' || isHostInjectedAttachmentLine(prev.text))
+              ) {
+                strippedHostBlock = true;
+                end -= 1;
+                continue;
+              }
+              break;
+            }
+          }
+          const textParts: string[] = [];
+          for (const block of content.slice(0, end)) {
             if (typeof block === 'string') {
               textParts.push(block);
               continue;
@@ -1020,8 +1276,11 @@ export function parseHistoryEntries(
               textParts.push(part.text);
             }
           }
+          const rawJoined = textParts.join('\n');
+          joinedText = (!strippedHostBlock && attachments.length > 0
+            ? stripTrailingHostAttachmentLines(rawJoined, attachments.length)
+            : rawJoined).trim();
         }
-        const joinedText = textParts.join('\n').trim();
         if (!joinedText && attachments.length === 0) continue;
 
         finalizeCurrentAssistant(false);
@@ -1033,6 +1292,7 @@ export function parseHistoryEntries(
           text: joinedText,
           ...(attachments.length > 0 ? { attachments } : {}),
           startedAt: msgTimestamp,
+          timestamp: msgTimestamp,
           ...(itemAttr ? { attribution: itemAttr } : {}),
         });
         continue;
@@ -1206,6 +1466,7 @@ export function parseHistoryEntries(
           acc.turn.startedAt = msgTimestamp;
         }
         if (msgTimestamp !== undefined) {
+          acc.turn.timestamp = msgTimestamp;
           const stepEnd = msgTimestamp + (msgDurationMs ?? 0);
           acc.endMs = acc.endMs !== undefined ? Math.max(acc.endMs, stepEnd) : stepEnd;
         }
@@ -1261,13 +1522,20 @@ export function parseHistoryEntries(
           acc.turn.entryId = numericId;
         }
         const presentationStatus = projectedPresentation?.status;
-        const durableWait = entry.durableWait === true && toolName === 'ask_user_question' &&
-          projectedPresentation?.kind === 'questionnaire' && presentationStatus === 'pending';
         const outcome = readToolOutcome(entry.outcome) ??
           (presentationStatus === 'cancelled' || presentationStatus === 'interrupted'
             ? presentationStatus
             : isError ? 'error' : 'ok');
         const resolvedStatus = toolStatus(outcome, true);
+        const durableWait =
+          entry.durableWait === true &&
+          !isError &&
+          outcome === 'ok' &&
+          resolvedStatus === 'done' &&
+          toolName === 'ask_user_question' &&
+          projectedPresentation?.kind === 'questionnaire' &&
+          presentationStatus === 'pending' &&
+          isAuthorizedWait(projectedPresentation);
         const matched = toolCallId ? acc.tools.find((t) => t.id === toolCallId) : undefined;
         if (matched) {
           matched.status = resolvedStatus;
@@ -1363,6 +1631,15 @@ export function parseHistoryEntries(
       const slotOutput = slot && typeof slot.output === 'string' ? slot.output.trim() : '';
       const slotPresentation = asRecord(slot?.presentation);
       const hasPresentation = Object.keys(slotPresentation).length > 0;
+      const slotDurableWait =
+        hasPresentation &&
+        slot?.durableWait === true &&
+        typeof slot?.parentCallId !== 'string' &&
+        (status === 'running' || status === 'done') &&
+        name === 'ask_user_question' &&
+        slotPresentation.kind === 'questionnaire' &&
+        slotPresentation.status === 'pending' &&
+        isAuthorizedWait(slotPresentation);
       const liveItem: ChatToolCallItem = {
         id,
         name,
@@ -1375,9 +1652,8 @@ export function parseHistoryEntries(
         ...(slotOutput ? { output: slotOutput } : {}),
         outputTruncated: slot?.truncated === true,
         ...(hasPresentation ? { presentation: slotPresentation } : {}),
-        presentationLive: hasPresentation && (status === 'running' || slot?.durableWait === true),
-        durableWait: hasPresentation && slot?.durableWait === true && name === 'ask_user_question' &&
-          slotPresentation.kind === 'questionnaire' && slotPresentation.status === 'pending',
+        presentationLive: hasPresentation && (status === 'running' || slotDurableWait),
+        durableWait: slotDurableWait,
       };
       applySendToMetadata(liveItem, undefined, slotOutput || undefined, knownBots);
       return liveItem;
@@ -1520,4 +1796,96 @@ export function resolveActiveTurnStartedAt(
   activity?: BotActivity | null,
 ): number | null {
   return resolveActiveActivityStartedAt(activity ?? null);
+}
+
+export function isActiveDurableQuestionnaireTool(tool: ChatToolCallItem): boolean {
+  return (
+    tool.durableWait === true &&
+    tool.presentationLive === true &&
+    tool.parentCallId === undefined &&
+    (tool.status === 'running' || tool.status === 'done') &&
+    tool.name === 'ask_user_question' &&
+    tool.presentation?.kind === 'questionnaire' &&
+    tool.presentation?.status === 'pending' &&
+    questionnaireKey(tool.presentation) !== null
+  );
+}
+
+/** Shared activation gate for ToolCallCard: ordinary live tools keep their
+ *  existing `active && tool.presentationLive` semantics; durable wait
+ *  activation is strictly limited to valid pending top-level questionnaires
+ *  and never enables Google setup/browser, task, vault, or todo cards. */
+export function resolveToolPresentationActive(
+  tool: ChatToolCallItem,
+  presentation: { kind?: unknown; status?: unknown } | null | undefined,
+  active: boolean,
+  disabled = false,
+): boolean {
+  if (!presentation) return false;
+  if (active && tool.presentationLive === true) return true;
+  if (disabled) return false;
+  return (
+    presentation.kind === 'questionnaire' &&
+    presentation.status === 'pending' &&
+    isActiveDurableQuestionnaireTool(tool)
+  );
+}
+
+export function pendingToolPrompts(tools: readonly ChatToolCallItem[]): ChatToolCallItem[] {
+  return tools.flatMap(tool => {
+    if (tool.status !== 'running') {
+      return isActiveDurableQuestionnaireTool(tool) ? [tool] : [];
+    }
+    const kind = tool.presentation?.kind;
+    const prompt = tool.presentationLive && tool.presentation?.status === 'pending' &&
+      (kind === 'questionnaire' || kind === 'vault-unlock');
+    const children = tool.children ? pendingToolPrompts(tool.children) : [];
+    return prompt ? [tool, ...children] : children;
+  });
+}
+
+export function chatTurnsWithoutToolOutput(turns: readonly ChatTurn[]): ChatTurn[] {
+  return turns.flatMap(turn => {
+    if (turn.role !== 'assistant') return [turn];
+    // Keep live prompts (including nested ones) without showing their tool calls.
+    const blocks = turn.blocks?.flatMap<ChatTurnBlock>(block => {
+      if (block.kind === 'text') return [block];
+      if (block.kind === 'thinking') return [];
+      const prompts = pendingToolPrompts(block.tools);
+      return prompts.length > 0 ? [{ ...block, tools: prompts }] : [];
+    });
+    const prompts = blocks
+      ? blocks.flatMap(block => block.kind === 'tools' ? block.tools : [])
+      : pendingToolPrompts(turn.tools ?? []);
+    if (!turn.text.trim() && !turn.error && prompts.length === 0) return [];
+    return [{
+      ...turn,
+      blocks: blocks?.length ? blocks : undefined,
+      thinking: undefined,
+      toolSummary: undefined,
+      tools: prompts.length > 0 ? prompts : undefined,
+    }];
+  });
+}
+
+export function hasAssistantVisibleContent(turn: ChatTurn): boolean {
+  if (turn.role !== 'assistant') return true;
+  if (turn.blocks && turn.blocks.length > 0) return true;
+  return Boolean(
+    turn.text.trim() ||
+      turn.thinking?.trim() ||
+      (turn.tools && turn.tools.length > 0),
+  );
+}
+
+export function resolveAssistantFailureDetail(
+  error: string | undefined,
+  t: (zh: string, en: string) => string,
+): string {
+  const trimmed = typeof error === 'string' ? error.trim() : '';
+  if (!trimmed) return '';
+  if (trimmed === 'model_error') {
+    return t('模型生成失败。', 'Model generation failed.');
+  }
+  return trimmed;
 }

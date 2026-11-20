@@ -1,19 +1,33 @@
-// Bot 模型页：当前生效摘要 + 模型单选 + 思考强度 + 服务商入口，底部统一保存栏。
-// 数据与草稿由 useBotModelConfig 提供；“显式清空”只在高级设置页切换，本页仅提示并允许恢复。
+// 单 Bot 模型配置页：模型选择（默认全量 + 收藏置顶）-> 智能联动思考强度 -> 默认折叠的工具调用方式。
+// 所有修改点击即存（乐观更新 + CAS 串行提交），无保存草稿栏与密码墙。
 import { ExternalLink } from 'lucide-react';
 import type { ModelCatalogEntry } from '../../../host-core/index.js';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
-import { ModelPicker } from './ModelPicker';
 import { openCenterManagement } from '../native';
 import { ErrorNotice, errorText, useText } from '../ui';
-import { Badge, Chips, LoadingState, LoginCard, Row, SaveBar, Section, SettingsSheet, type ChoiceOption } from './primitives';
-import { THINKING_LEVELS, type BotModelConfigState } from './useBotModelConfig';
+import { ModelPicker } from './ModelPicker';
+import { Chips, Disclosure, LoadingState, Row, Section, SettingsSheet, type ChoiceOption } from './primitives';
+import { toolModeFromSelection, type BotModelConfigState, type ToolMode } from './useBotModelConfig';
 import './model-settings.css';
 
 const INHERIT = '__inherit';
-const CLEARED = '__null';
+const STANDARD_THINKING_LEVELS = ['off', 'low', 'medium', 'high', 'max'] as const;
 
-export function ModelSettingsPage({ state, api, identity, onClose }: { state: BotModelConfigState; api: DesktopPanelApi; identity: DesktopIdentity; onClose(): void }) {
+export interface ModelSettingsPageProps {
+  state: BotModelConfigState;
+  api?: DesktopPanelApi;
+  identity?: DesktopIdentity;
+  onClose?: () => void;
+  onOpenCenterAdmin?: () => void;
+}
+
+export function ModelSettingsPage({
+  state,
+  api,
+  identity,
+  onClose,
+  onOpenCenterAdmin,
+}: ModelSettingsPageProps) {
   const t = useText();
   const { config, catalog, draft, busy } = state;
   const models: ModelCatalogEntry[] = catalog?.models ?? [];
@@ -30,127 +44,260 @@ export function ModelSettingsPage({ state, api, identity, onClose }: { state: Bo
       default: return level;
     }
   };
-  const modelName = (ref: string | null | undefined) => {
-    if (!ref) return undefined;
-    return models.find(model => model.modelRef === ref)?.name ?? ref;
+
+  const toolModeLabel = (mode: Exclude<ToolMode, 'inherit'>) => {
+    switch (mode) {
+      case 'standard': return t('标准工具调用', 'Standard tool calling');
+      case 'codemode': return t('代码编排 (Code Mode)', 'Code Mode');
+      case 'codemode_only': return t('仅代码编排（省上下文）', 'Code Mode only (compact context)');
+    }
   };
 
-  const thinkingOptions: ChoiceOption<string>[] = [
-    { value: INHERIT, label: t('跟随默认', 'Default'), hint: config?.global.thinkingLevel ? levelLabel(config.global.thinkingLevel) : undefined },
-    ...(typeof draft.thinkingLevel === 'string' && !(THINKING_LEVELS as readonly string[]).includes(draft.thinkingLevel)
-      ? [{ value: draft.thinkingLevel, label: draft.thinkingLevel }]
-      : []),
-    ...THINKING_LEVELS.map(level => ({ value: level as string, label: levelLabel(level) })),
-  ];
-  const thinkingValue = draft.thinkingLevel === undefined ? INHERIT : draft.thinkingLevel === null ? CLEARED : draft.thinkingLevel;
+  const openCenterProviders = () => {
+    if (onOpenCenterAdmin) {
+      onOpenCenterAdmin();
+      return;
+    }
+    void openCenterManagement().catch(failure => state.setError(errorText(failure)));
+  };
 
-  const renderSummary = () => {
-    if (!config) return null;
-    const effectiveRef = config.effective.modelRef;
-    const name = modelName(effectiveRef);
-    const level = config.effective.thinkingLevel;
-    const codemodeLabel = config.effective.codemodeOnly === true
-      ? t('仅 Code Mode', 'Code Mode only')
-      : config.effective.codemode === true ? 'Code Mode' : undefined;
-    const custom = config.overrides.modelRef !== undefined;
-    return (
-      <div className={`bs-model-summary${name ? '' : ' is-unset'}`}>
-        <span className="bs-model-summary-label">{t('当前生效', 'In effect')}</span>
-        <span className="bs-model-summary-name">{name ?? t('未设置', 'Not set')}</span>
-        {effectiveRef && effectiveRef !== name ? <span className="bs-model-ref">{effectiveRef}</span> : null}
-        <div className="bs-model-summary-badges">
-          <Badge tone={custom ? 'accent' : 'neutral'}>{custom ? t('单独指定', 'Custom') : t('跟随默认', 'Default')}</Badge>
-          {level ? <Badge>{t('思考', 'Thinking')} · {levelLabel(level)}</Badge> : null}
-          {codemodeLabel ? <Badge>{codemodeLabel}</Badge> : null}
+  const effectiveModelRef =
+    typeof draft.modelRef === 'string' && draft.modelRef.trim()
+      ? draft.modelRef
+      : (config?.global.modelRef ?? config?.effective.modelRef ?? null);
+
+  const effectiveModelEntry = effectiveModelRef
+    ? models.find(model => model.modelRef === effectiveModelRef)
+    : undefined;
+
+  const showThinking = Boolean(
+    config
+    && effectiveModelRef
+    && (effectiveModelEntry ? effectiveModelEntry.reasoning !== false : true),
+  );
+
+  const thinkingOptions: ChoiceOption<string>[] = config
+    ? [
+        {
+          value: INHERIT,
+          label: t('默认', 'Default'),
+          hint: config.global.thinkingLevel ? levelLabel(config.global.thinkingLevel) : undefined,
+        },
+        ...(typeof draft.thinkingLevel === 'string'
+          && !(STANDARD_THINKING_LEVELS as readonly string[]).includes(draft.thinkingLevel)
+          ? [{ value: draft.thinkingLevel, label: levelLabel(draft.thinkingLevel) }]
+          : []),
+        ...STANDARD_THINKING_LEVELS.map(level => ({
+          value: level,
+          label: levelLabel(level),
+        })),
+      ]
+    : [];
+
+  const thinkingValue =
+    typeof draft.thinkingLevel === 'string' && draft.thinkingLevel.trim()
+      ? draft.thinkingLevel
+      : INHERIT;
+
+  const currentToolMode = toolModeFromSelection(draft);
+  const globalToolMode = toolModeFromSelection(config?.global);
+  const resolvedGlobalToolMode: Exclude<ToolMode, 'inherit'> =
+    globalToolMode === 'inherit' ? 'standard' : globalToolMode;
+
+  const toolModeSummary =
+    currentToolMode === 'inherit'
+      ? `${t('跟随全局默认', 'Default')}（${toolModeLabel(resolvedGlobalToolMode)}）`
+      : toolModeLabel(currentToolMode);
+
+  const renderStatusPill = () => {
+    if (state.saving) {
+      return <span className="bs-save-status">{t('保存中...', 'Saving...')}</span>;
+    }
+    if (state.notice) {
+      return <span className="bs-save-status">✓ {state.notice}</span>;
+    }
+    return null;
+  };
+
+  const renderAuthGuidance = () => {
+    if (state.oauthRevoked) {
+      return (
+        <div className="bs-auth-note">
+          <span>{t('当前中心授权已失效，请在设备设置中重新扫码绑定中心后重试。', 'Center authorization expired. Please re-bind with the center QR code and retry.')}</span>
+          <div className="bs-auth-note-actions">
+            <button type="button" className="bs-btn is-small" onClick={() => void state.reload()}>
+              {t('重试读取', 'Retry')}
+            </button>
+          </div>
         </div>
-      </div>
-    );
+      );
+    }
+    if (state.notConnected) {
+      return (
+        <div className="bs-auth-note">
+          <span>{t('当前设备尚未绑定或连接中心，扫码绑定后即可为 Bot 分配模型。', 'Device is not connected to a center yet. Bind to a center to configure models.')}</span>
+        </div>
+      );
+    }
+    return null;
   };
 
-  const renderModels = () => {
+  const renderModelSection = () => {
     if (!config) return null;
-    const globalName = modelName(config.global.modelRef);
-    const cleared = draft.modelRef === null;
+    const selectedValue = typeof draft.modelRef === 'string' ? draft.modelRef : undefined;
+    const globalName = config.global.modelRef
+      ? (models.find(m => m.modelRef === config.global.modelRef)?.name
+        ?? config.global.modelRef.split('/').pop()
+        ?? config.global.modelRef)
+      : undefined;
+
     return (
       <Section
-        title={t('模型', 'Model')}
+        title={t('模型选择', 'Model')}
         bare
-        hint={cleared ? t('已在高级设置中清空模型覆盖；选择任一项即可恢复。', 'Model override is explicitly cleared in Advanced; pick any option to restore.') : undefined}
+        hint={renderStatusPill()}
       >
-        <div className="bs-card">
-          <Row
-            radio
-            selected={draft.modelRef === undefined}
+        {catalog && api && identity ? (
+          <ModelPicker
+            catalog={catalog}
+            api={api}
+            identity={identity}
+            value={selectedValue}
+            onChange={modelRef => void state.selectModelRef(modelRef)}
+            onStarsChange={state.setStarredModels}
             disabled={busy}
-            title={t('跟随中心默认', 'Use center default')}
-            subtitle={`${t('当前默认：', 'Current default: ')}${globalName ?? t('未设置', 'Not set')}`}
-            onClick={() => state.setModelRef(undefined)}
+            allowInherit
+            globalDefaultModelRef={config.global.modelRef}
+            onSelectInherit={() => void state.selectModelRef(undefined)}
+            onOpenCenterAdmin={openCenterProviders}
           />
-        </div>
-        {catalog ? (
-          <ModelPicker catalog={catalog} api={api} identity={identity} value={draft.modelRef} onChange={state.setModelRef} onStarsChange={state.setStarredModels} disabled={busy} />
+        ) : (
+          <div className="bs-card">
+            <Row
+              radio
+              selected={selectedValue === undefined}
+              disabled={busy}
+              title={t('跟随全局默认', 'Follow global default')}
+              subtitle={
+                globalName
+                  ? `${t('当前默认：', 'Current default: ')}${globalName}`
+                  : t('当前全局未设置默认模型', 'No global default model configured')
+              }
+              onClick={() => void state.selectModelRef(undefined)}
+            />
+            {models.map(model => (
+              <Row
+                key={model.modelRef}
+                radio
+                selected={selectedValue === model.modelRef}
+                disabled={busy}
+                title={model.name}
+                subtitle={model.modelRef}
+                onClick={() => void state.selectModelRef(model.modelRef)}
+              />
+            ))}
+          </div>
+        )}
+
+        {models.length > 0 ? (
+          <button
+            type="button"
+            className="bs-link bs-model-link"
+            onClick={openCenterProviders}
+          >
+            {t('管理模型与服务商', 'Manage models & providers')}
+            <ExternalLink aria-hidden="true" />
+          </button>
         ) : null}
       </Section>
     );
   };
 
-  const renderThinking = () => {
-    if (!config) return null;
+  const renderThinkingSection = () => {
+    if (!showThinking) return null;
     return (
       <Section
         title={t('思考强度', 'Thinking level')}
         bare
-        hint={draft.thinkingLevel === null
-          ? t('已在高级设置中清空思考强度覆盖', 'Thinking level override is cleared in Advanced')
-          : t('越高越慎重、越慢；仅对支持推理的模型生效。', 'Higher is more deliberate but slower; only applies to reasoning models.')}
+        hint={t('越高越慎重、耗时越长；点击立即生效。', 'Higher is more deliberate; applies immediately on click.')}
       >
         <Chips
           label={t('思考强度', 'Thinking level')}
           value={thinkingValue}
           options={thinkingOptions}
           disabled={busy}
-          onChange={value => state.setThinkingLevel(value === INHERIT ? undefined : value)}
+          onChange={value => void state.selectThinkingLevel(value === INHERIT ? undefined : value)}
         />
       </Section>
     );
   };
 
-  return (
-    <SettingsSheet
-      title={t('模型', 'Model')}
-      onClose={onClose}
-      footer={config ? (
-        <SaveBar
-          dirty={state.dirty}
-          busy={busy}
-          onSave={() => void state.save(t('模型设置已保存', 'Model settings saved'))}
-          onReset={state.reset}
-        />
-      ) : undefined}
-    >
+  const renderToolModeSection = () => {
+    if (!config) return null;
+    const options: Array<{ mode: ToolMode; title: string; subtitle: string }> = [
+      {
+        mode: 'inherit',
+        title: t('跟随全局默认', 'Follow global default'),
+        subtitle: `${t('当前默认：', 'Current default: ')}${toolModeLabel(resolvedGlobalToolMode)}`,
+      },
+      {
+        mode: 'standard',
+        title: t('标准工具调用', 'Standard tool calling'),
+        subtitle: t('常规单步/多步工具声明与调用', 'Standard structured tool calls'),
+      },
+      {
+        mode: 'codemode',
+        title: t('代码编排 (Code Mode)', 'Code Mode'),
+        subtitle: t('允许生成脚本批量编排工具，同时保留标准工具', 'Allows code orchestration alongside standard tools'),
+      },
+      {
+        mode: 'codemode_only',
+        title: t('仅代码编排（省上下文）', 'Code Mode only (compact context)'),
+        subtitle: t('仅暴露代码执行入口，显著降低工具定义占用', 'Exposes only code execution to save context tokens'),
+      },
+    ];
+
+    return (
+      <Disclosure
+        title={t('高级工具调用方式', 'Advanced tool calling')}
+        summary={toolModeSummary}
+        defaultOpen={false}
+      >
+        <div className="bs-card">
+          {options.map(option => (
+            <Row
+              key={option.mode}
+              radio
+              selected={currentToolMode === option.mode}
+              disabled={busy}
+              title={option.title}
+              subtitle={option.subtitle}
+              onClick={() => void state.selectToolMode(option.mode)}
+            />
+          ))}
+        </div>
+      </Disclosure>
+    );
+  };
+
+  const content = (
+    <>
       {state.loading ? <LoadingState /> : null}
-      {state.needsLogin ? (
-        <LoginCard
-          busy={busy}
-          onSubmit={password => void state.login(password)}
-          message={t('读取 Bot 模型设置需要管理员身份', 'Reading bot model settings requires administrator sign-in')}
-        />
-      ) : null}
-      {renderSummary()}
+      {renderAuthGuidance()}
       <ErrorNotice error={state.error} onDismiss={state.dismissError} />
-      {state.notice ? <ErrorNotice error={state.notice} tone="success" compact onDismiss={state.dismissNotice} /> : null}
-      {renderThinking()}
-      {renderModels()}
-      {config ? (
-        <button
-          type="button"
-          className="bs-link bs-model-link"
-          onClick={() => void openCenterManagement().catch(failure => state.setError(errorText(failure)))}
-        >
-          {t('管理模型服务商', 'Manage model providers')}
-          <ExternalLink aria-hidden="true" />
-        </button>
-      ) : null}
-    </SettingsSheet>
+      {renderModelSection()}
+      {renderThinkingSection()}
+      {renderToolModeSection()}
+    </>
   );
+
+  if (onClose) {
+    return (
+      <SettingsSheet title={t('模型设置', 'Model')} onClose={onClose}>
+        {content}
+      </SettingsSheet>
+    );
+  }
+
+  return <div className="bs-inline-panel">{content}</div>;
 }

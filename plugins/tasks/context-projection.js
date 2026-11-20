@@ -11,7 +11,7 @@ const RULES = [
   '2. **澄清与需求变更范围（`ask_clarification` / `needs_scope`）**：想法含糊或目标边界不清时，先用 `task` (`action="ask_clarification"`) 提问并等待用户回应；若已批准或新收到的需求变更与已完成步骤存在取舍，使用 `adoptionPhase="needs_scope"` 与具体的 `scopeDesc` 说明影响范围，请用户选择保留成果或重做。',
   '3. **计划确认（`propose_plan`）**：仅任务协调人可提交或调整整体分步安排（`propose_plan`）并等待用户在界面点击「确认安排并开始」；未确认前，用户的普通聊天回复不代表批准开工。',
   '4. **已批准需求变更（`adoption.phase === "adjusting"`）**：尽量保留已完成步骤成果（`preserved: true`），使用 `update_step` 修改受影响的未完成步骤，使用 `add_steps` 新增补做项，再用 `update(adoptionPhase=\'adopted\', shortReceipt=...)` 记录回执；**切勿重复调用 `propose_plan` 要求重新确认**。',
-  '5. **角色边界与显式验收（`update_step` vs `complete`）**：普通执行 Bot 仅可用 `update_step` 更新指派给自己的步骤（如标为 `working` / `done` 并附 `resultSummary`），不得修改他人或未指派步骤、不得调用 `propose_plan` / `update` 覆盖全局计划、不得调用 `complete` 结束父任务；仅任务协调人在无待回应提示且所有有效步骤均已 `done` 后，显式调用 `complete` 完成收尾验收。',
+  '5. **角色边界与显式验收（`update_step` vs `complete`）**：普通执行 Bot 仅可用 `update_step` 更新指派给自己的步骤（如标为 `working` / `done` 并附 `resultSummary`），不得修改他人或未指派步骤、不得调用 `propose_plan` / `update` 覆盖全局计划、不得调用 `complete` 结束父任务；仅任务协调人在无待回应提示且所有有效步骤均已 `done` 后，显式调用 `complete` 完成收尾验收。调用 `complete`（或执行 Bot 完成自身步骤）后，务必在当前对话正文中直接输出面向用户的最终结论，严禁只调工具而不回复正文。',
 ].join('\n');
 
 const FOOTER = '以上是有界快照；… 表示字段删节，省略不代表已完成、已批准或没有依赖。操作前用 task(action="get", taskId=...) 核实完整任务；用 task(action="list") 分页查阅其余任务。Center 的权限、待确认状态与版本校验仍是依据。';

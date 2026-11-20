@@ -89,7 +89,7 @@ test('owner POST /api/devices registers a device that can authenticate with the 
     assert.equal(center.bridge.registry.authenticate(body.deviceId, randomBytes(32).toString('base64url')), null);
 
     const list = await center.app.inject({ method: 'GET', url: '/api/devices', headers: { cookie } });
-    assert.deepEqual(list.json().find(device => device.deviceId === body.deviceId), { deviceId: body.deviceId, name: 'my-pc', online: false });
+    assert.deepEqual(list.json().find(device => device.deviceId === body.deviceId), { deviceId: body.deviceId, name: 'my-pc', online: false, platform: 'windows', oauthAdminEnabled: true });
 
     const second = await center.app.inject({
       method: 'POST', url: '/api/devices',

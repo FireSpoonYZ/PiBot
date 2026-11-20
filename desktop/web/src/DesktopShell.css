@@ -33,6 +33,10 @@
   background: var(--accent-soft, #e1e7df);
   color: var(--text, #242622);
 }
+.desktop-shell .rail-item:focus-visible {
+  outline: 2px solid var(--brand, var(--accent));
+  outline-offset: 2px;
+}
 .desktop-shell .rail-item.active {
   background: var(--brand-soft, rgb(43 112 246 / 0.12));
   color: var(--brand, var(--accent, #2B70F6));
@@ -53,6 +57,13 @@
   align-items: center;
   justify-content: center;
 }
+.desktop-shell .rail-update-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: #a64b24;
+  color: #fff;
+}
 .desktop-shell .conn-dot {
   position: absolute;
   top: -2px;
@@ -66,6 +77,25 @@
 .desktop-shell .conn-dot.online { background: var(--ok, #16a34a); }
 .desktop-shell .conn-dot.offline { background: var(--danger, #ac3434); }
 .desktop-shell .conn-dot.needs-attention { background: var(--warn, #ad6500); }
+
+.desktop-shell .rail-notice-anchor {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+.desktop-shell .rail-notice-popover {
+  position: absolute;
+  left: calc(100% + 10px);
+  bottom: 0;
+  z-index: 35;
+  width: min(380px, calc(100vw - 96px));
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
+}
+.desktop-shell .rail-notice-popover > .grok-notice-card {
+  margin: 0;
+  box-shadow: var(--shadow-md);
+}
 
 .desktop-shell .center-recovery {
   display: flex;
@@ -163,6 +193,179 @@
   box-shadow: var(--shadow-lg, 0 16px 42px rgb(0 0 0 / 0.14));
 }
 .desktop-dialog.client-settings-dialog { width: min(480px, 94vw); }
+.desktop-dialog.settings-shell-dialog {
+  --bs-accent: var(--brand);
+  width: min(760px, 94vw);
+  height: min(620px, 84vh);
+  max-height: 84vh;
+  transition: width 0.16s ease, height 0.16s ease;
+}
+.desktop-dialog.settings-shell-dialog.settings-shell-center-admin {
+  width: 92vw;
+  max-width: 1120px;
+  height: 84vh;
+  max-height: 84vh;
+}
+.settings-shell-wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.settings-shell-head {
+  flex: none;
+  border-bottom: 1px solid var(--line-subtle, var(--line, #e5e5df));
+  padding-bottom: 10px !important;
+}
+.settings-shell-layout {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.settings-shell-nav {
+  flex: none;
+  width: 176px;
+  padding: 12px 10px;
+  border-right: 1px solid var(--line-subtle, var(--line, #e5e5df));
+  background: var(--surface, #f6f5f0);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 11px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text, #242622);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.settings-nav-item:hover {
+  background: var(--surface-hover, rgb(0 0 0 / 0.04));
+}
+.settings-nav-item.active {
+  background: var(--surface-elevated, #fff);
+  color: var(--brand, #2563eb);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.06);
+}
+.settings-nav-item .nav-status-dot {
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted, #8c9189);
+}
+.settings-nav-item .nav-status-dot.online { background: var(--ok, #16a34a); }
+.settings-nav-item .nav-status-dot.warn { background: #d97706; }
+
+.settings-shell-body {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 22px 22px;
+}
+.settings-shell-body.center-admin-body {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.settings-center-admin-embed {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+.settings-pane-header {
+  margin-bottom: 14px;
+}
+.settings-pane-header h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 650;
+}
+.settings-pane-header p { margin: 0; }
+
+.host-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.host-status-pill.online { color: var(--ok, #16a34a); }
+.host-status-pill.warn { color: #b45309; }
+.host-status-pill.muted { color: var(--muted, #70756f); }
+.host-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.host-repair-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--warn-line, rgb(217 119 6 / 0.35));
+  background: var(--warn-bg, rgb(217 119 6 / 0.08));
+}
+.host-repair-banner button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.settings-diagnostics-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 10px;
+}
+.diagnostics-block {
+  padding-top: 10px;
+  border-top: 1px dashed var(--line-subtle, var(--line, #e5e5df));
+}
+.diagnostics-block:first-child { padding-top: 0; border-top: 0; }
+.diagnostics-block h5 {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 4px 12px;
+}
+.settings-empty-card {
+  margin: 24px auto;
+  max-width: 420px;
+  padding: 24px;
+  border-radius: 14px;
+  border: 1px solid var(--line, #e5e5df);
+  background: var(--surface, #f6f5f0);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.settings-empty-card h4 { margin: 0; font-size: 15px; }
+.settings-empty-card p { margin: 0; }
+.danger-outline { color: var(--danger, #dc2626); border-color: rgb(220 38 38 / 0.35); }
 .desktop-dialog .dialog-head {
   display: flex;
   align-items: center;
@@ -184,9 +387,11 @@
 }
 
 /* 设置首页与详情共用的列表行 */
+.settings-shell-dialog .settings-row-group,
 .client-settings-dialog .settings-row-group {
   border-top: 1px solid var(--line-subtle, var(--line));
 }
+.settings-shell-dialog .settings-row,
 .client-settings-dialog .settings-row {
   display: flex;
   align-items: center;
@@ -199,34 +404,44 @@
   color: var(--text);
   text-align: left;
 }
+.settings-shell-dialog .settings-row + .settings-row,
 .client-settings-dialog .settings-row + .settings-row {
   border-top: 1px solid var(--line-subtle, var(--line));
 }
+.settings-shell-dialog .settings-row-label,
 .client-settings-dialog .settings-row-label {
   flex: 1;
   min-width: 0;
   overflow-wrap: anywhere;
 }
+.settings-shell-dialog .settings-row > .metadata,
+.settings-shell-dialog .settings-row > .status,
 .client-settings-dialog .settings-row > .metadata,
 .client-settings-dialog .settings-row > .status {
   max-width: 60%;
   text-align: right;
 }
+.settings-shell-dialog .settings-row-link,
 .client-settings-dialog .settings-row-link { cursor: pointer; }
+.settings-shell-dialog .settings-row-link:hover,
 .client-settings-dialog .settings-row-link:hover { background: var(--surface); }
+.settings-shell-dialog .settings-row-link:focus-visible,
 .client-settings-dialog .settings-row-link:focus-visible {
   outline: 2px solid var(--brand);
   outline-offset: -2px;
 }
+.settings-shell-dialog .settings-row-icon,
 .client-settings-dialog .settings-row-icon {
   flex: none;
   display: inline-flex;
   color: var(--muted);
 }
+.settings-shell-dialog .settings-row-chevron,
 .client-settings-dialog .settings-row-chevron {
   flex: none;
   color: var(--muted);
 }
+.settings-shell-dialog .settings-row input[type="radio"],
 .client-settings-dialog .settings-row input[type="radio"] { accent-color: var(--brand); }
 
 /* 弹窗分区 */
@@ -262,25 +477,25 @@
 }
 .desktop-dialog .settings-diagnostics > summary { cursor: pointer; }
 .desktop-dialog .settings-diagnostics[open] > summary { margin-bottom: 6px; }
-.client-settings-dialog .settings-device {
+.settings-shell-dialog .settings-device {
   flex: 1;
   min-width: 0;
   border: 0;
   background: transparent;
 }
-.client-settings-dialog .settings-device > summary {
+.settings-shell-dialog .settings-device > summary {
   min-height: 44px;
   padding: 6px 4px;
   border-radius: var(--radius-xs);
   font-weight: 400;
 }
-.client-settings-dialog .settings-device > summary:hover { background: var(--surface); }
-.client-settings-dialog .settings-device > summary:focus-visible { outline-offset: -2px; }
-.client-settings-dialog .settings-device[open] > summary {
+.settings-shell-dialog .settings-device > summary:hover { background: var(--surface); }
+.settings-shell-dialog .settings-device > summary:focus-visible { outline-offset: -2px; }
+.settings-shell-dialog .settings-device[open] > summary {
   margin-bottom: 0;
   border-bottom: 0;
 }
-.client-settings-dialog .settings-device-name {
+.settings-shell-dialog .settings-device-name {
   display: flex;
   flex: 1;
   flex-wrap: wrap;
@@ -289,22 +504,21 @@
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.client-settings-dialog .settings-device > .settings-device-details {
+.settings-shell-dialog .settings-device > .settings-device-details {
   margin: 0;
   padding: 0 8px 8px 20px;
 }
-.client-settings-dialog .device-list.settings-directory { gap: 0; }
-.client-settings-dialog .settings-directory > .settings-device-item {
+.settings-shell-dialog .device-list.settings-directory { gap: 0; }
+.settings-shell-dialog .settings-directory > .settings-device-item {
   min-height: 44px;
   align-items: flex-start;
   border-top: 1px solid var(--line-subtle, var(--line));
   border-radius: 0;
 }
-.client-settings-dialog .settings-device-item > .icon-button,
-.client-settings-dialog .settings-device-item > .rename-inline {
+.settings-shell-dialog .settings-device-item > .icon-button,
+.settings-shell-dialog .settings-device-item > .rename-inline {
   margin-top: 4px;
 }
-.desktop-dialog .archive-more[open] { flex-basis: 100%; }
 .desktop-dialog .section-head {
   display: flex;
   align-items: center;
@@ -496,16 +710,22 @@
 }
 .desktop-dialog .archived-bot-actions {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   flex-wrap: wrap;
   gap: 6px;
 }
-.desktop-dialog .archived-bot-actions button {
+.desktop-dialog .archived-bot-actions :is(button, summary) {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   font-size: 12px;
   padding: 5px 10px;
+}
+.desktop-dialog .archive-more { border: 0; background: transparent; }
+.desktop-dialog .archive-more > summary { display: flex; cursor: pointer; }
+.desktop-dialog .archive-more[open] > button {
+  display: flex;
+  margin: 6px 0 0;
 }
 .desktop-dialog .archived-confirm-banner {
   margin: 0;

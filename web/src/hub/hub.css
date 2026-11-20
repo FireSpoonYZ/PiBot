@@ -27,25 +27,38 @@
 /* 归档行在 archived-bots 页里降低不透明度以区分。 */
 .hub-bot-row.is-archived { opacity: .72; }
 
-/* 创建群聊页（group-create）：已选成员胶囊带 + 候选智能体勾选列表。 */
+/* 创建群聊页（group-create）：已选成员胶囊带 + 候选 Bot 勾选列表。 */
 .group-create-chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-2);
   padding: 2px 0 10px;
 }
 .group-create-chip {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 7px;
   max-width: 100%;
   padding: 5px 10px 5px 6px;
-  border-radius: 999px;
-  background: var(--surface);
-  border: 1px solid color-mix(in srgb, var(--line) 85%, transparent);
-  font-size: .86rem;
-  font-weight: 550;
-  color: var(--text);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-1);
+  border: 1px solid color-mix(in srgb, var(--color-line) 85%, transparent);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
+.group-create-chip::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: max(100%, var(--tap-min));
+  height: max(100%, var(--tap-min));
+}
+.group-create-chip:active {
+  background: var(--color-surface-3);
 }
 .group-create-chip-name {
   overflow: hidden;
@@ -57,16 +70,19 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--muted);
+  color: var(--color-text-muted);
 }
 .group-create-search {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   padding: 0 14px;
-  min-height: 44px;
-  border-bottom: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
-  color: var(--muted);
+  min-height: var(--tap-min);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-line) 65%, transparent);
+  color: var(--color-text-muted);
+}
+.group-create-search:focus-within {
+  border-bottom-color: color-mix(in srgb, var(--color-text-muted) 45%, var(--color-line));
 }
 .group-create-search input {
   flex: 1;
@@ -75,27 +91,35 @@
   border: 0;
   background: transparent;
   padding: 0;
-  font-size: .92rem;
-  color: var(--text);
+  font-size: var(--text-md);
+  color: var(--color-text);
+  outline: none;
+}
+.group-create-search input:focus-visible {
   outline: none;
 }
 .group-create-bot-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
   width: 100%;
+  min-height: var(--tap-min);
   padding: 11px 14px;
   text-align: left;
-  border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
-  transition: background-color 140ms ease;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-line) 55%, transparent);
+  transition: background-color var(--dur-fast) ease;
 }
 .group-create-bot-row:last-child { border-bottom: 0; }
-.group-create-bot-row:hover,
+@media (hover: hover) {
+  .group-create-bot-row:hover {
+    background: color-mix(in srgb, var(--color-surface-1) 75%, transparent);
+  }
+}
 .group-create-bot-row:active {
-  background: color-mix(in srgb, var(--surface) 75%, transparent);
+  background: color-mix(in srgb, var(--color-surface-1) 75%, transparent);
 }
 .group-create-bot-row.is-selected {
-  background: color-mix(in srgb, #2B70F6 8%, transparent);
+  background: var(--color-primary-soft);
 }
 .group-create-bot-info {
   flex: 1;
@@ -111,16 +135,16 @@
   min-width: 0;
 }
 .group-create-bot-name {
-  font-size: .95rem;
-  font-weight: 600;
-  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .group-create-bot-sub {
-  font-size: .8rem;
-  color: var(--muted);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -129,15 +153,15 @@
   flex: none;
   width: 22px;
   height: 22px;
-  border-radius: 50%;
-  border: 1.8px solid var(--line);
+  border-radius: var(--radius-full);
+  border: 1.8px solid var(--color-line);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
-  transition: background-color 140ms ease, border-color 140ms ease;
+  color: var(--color-on-primary);
+  transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease;
 }
 .group-create-bot-row.is-selected .group-create-check {
-  background: #2B70F6;
-  border-color: #2B70F6;
+  background: var(--color-primary);
+  border-color: var(--color-primary);
 }

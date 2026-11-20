@@ -1,10 +1,37 @@
-import { scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
+import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import secureSession from '@fastify/secure-session';
 import csrfProtection from '@fastify/csrf-protection';
 import rateLimit from '@fastify/rate-limit';
 
 const scrypt = promisify(scryptCallback);
+const oauthVerifiers = new WeakMap();
+
+export function setOwnerOAuthVerifier(app, verifier) {
+  oauthVerifiers.set(app, verifier);
+}
+
+function hasOAuthBearerAttempt(req) {
+  const header = req.headers.authorization;
+  return typeof header === 'string' && /^Bearer\s+pboauth_/i.test(header.trim());
+}
+
+function extractOAuthBearer(req) {
+  const header = req.headers.authorization;
+  if (typeof header !== 'string') return null;
+  const match = /^Bearer\s+([^\s]+)$/i.exec(header.trim());
+  if (!match) return null;
+  const token = match[1];
+  return /^pboauth_[A-Za-z0-9_-]{16,128}$/.test(token) ? token : null;
+}
+
+function verifyOAuthBearer(req, appOverride = null) {
+  const token = extractOAuthBearer(req);
+  if (!token) return null;
+  const verifier = oauthVerifiers.get(appOverride ?? req.server);
+  if (typeof verifier !== 'function') return null;
+  return verifier(token) || null;
+}
 
 export async function registerAuth(app, { sessionKey, ownerPasswordHash }) {
   const match = /^scrypt\$([0-9a-f]{32})\$([0-9a-f]{128})$/i.exec(ownerPasswordHash ?? '');
@@ -13,8 +40,33 @@ export async function registerAuth(app, { sessionKey, ownerPasswordHash }) {
   const expected = Buffer.from(match[2], 'hex');
   await app.register(secureSession, { key: sessionKey, cookie: { path: '/', httpOnly: true, secure: true, sameSite: 'strict', maxAge: 30 * 24 * 60 * 60 } });
   await app.register(csrfProtection, { sessionPlugin: '@fastify/secure-session', getToken: req => req.headers['x-csrf-token'] });
+  const baseCsrfProtection = app.csrfProtection;
+  const csrfUnlessOAuth = function csrfUnlessOAuth(req, reply, done) {
+    if (req.oauthDeviceId) return done();
+    return baseCsrfProtection.call(this, req, reply, done);
+  };
+  try {
+    const desc = Object.getOwnPropertyDescriptor(app, 'csrfProtection');
+    if (!desc || desc.writable || desc.configurable) {
+      Object.defineProperty(app, 'csrfProtection', {
+        value: csrfUnlessOAuth,
+        writable: true,
+        configurable: true,
+      });
+    }
+  } catch { /* Keep default decorator if non-configurable. */ }
   await app.register(rateLimit, { global: false });
-  app.get('/api/session', async (req, reply) => ({ authenticated: req.session.get('owner') === true, csrfToken: reply.generateCsrf() }));
+  app.get('/api/session', async (req, reply) => {
+    if (hasOAuthBearerAttempt(req)) {
+      const oauthDeviceId = verifyOAuthBearer(req, app);
+      if (oauthDeviceId) {
+        req.oauthDeviceId = oauthDeviceId;
+        return { authenticated: true, csrfToken: 'oauth-bearer' };
+      }
+      return { authenticated: false, csrfToken: reply.generateCsrf() };
+    }
+    return { authenticated: req.session.get('owner') === true, csrfToken: reply.generateCsrf() };
+  });
   app.post('/api/session', { onRequest: app.csrfProtection, config: { rateLimit: { max: 5, timeWindow: '1 minute' } } }, async (req, reply) => {
     const password = req.body?.password;
     if (typeof password !== 'string' || password.length > 1024) return reply.code(401).send({ error: { code: 'UNAUTHENTICATED', message: 'Invalid credentials' } });
@@ -22,16 +74,25 @@ export async function registerAuth(app, { sessionKey, ownerPasswordHash }) {
     if (!timingSafeEqual(actual, expected)) return reply.code(401).send({ error: { code: 'UNAUTHENTICATED', message: 'Invalid credentials' } });
     req.session.regenerate();
     req.session.set('owner', true);
+    req.session.set('ownerSessionId', randomBytes(16).toString('base64url'));
     return { authenticated: true, csrfToken: reply.generateCsrf() };
   });
-  app.delete('/api/session', { onRequest: [app.csrfProtection, requireOwner] }, async (req, reply) => {
+  app.delete('/api/session', { onRequest: [requireOwner, app.csrfProtection] }, async (req, reply) => {
     req.session.delete();
     return reply.code(204).send();
   });
 }
 
 export function requireOwner(req, reply, done) {
-  if (req.session.get('owner') !== true) return reply.code(401).send({ error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } });
+  if (hasOAuthBearerAttempt(req)) {
+    const oauthDeviceId = verifyOAuthBearer(req);
+    if (oauthDeviceId) {
+      req.oauthDeviceId = oauthDeviceId;
+      return done();
+    }
+    return reply.code(401).send({ error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } });
+  }
+  if (req.session?.get('owner') !== true) return reply.code(401).send({ error: { code: 'UNAUTHENTICATED', message: 'Authentication required' } });
   done();
 }
 

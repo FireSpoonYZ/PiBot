@@ -4,8 +4,10 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.view.HapticFeedbackConstants
 import android.webkit.WebView
 import androidx.activity.result.ActivityResult
 import androidx.appcompat.app.AppCompatActivity
@@ -50,7 +52,7 @@ internal class AckArgs {
 
 /**
  * M18 Tauri 界面的 Host 桥插件（运行在 :tauri_ui 进程）。
- * 只转发既有 Host 数据操作；UI 本地动作限于 start/stop/openSystemSettings/reconnect/hide，
+ * 只转发既有 Host 数据操作；UI 本地动作限于 start/stop/openSystemSettings/reconnect/hide/haptic，
  * 界面启动时由客户端前台生命周期管理 Host；不重放 mutation，事件按单 ACK 窗口有界投递。
  *
  * 四个 JS 命令与内部 eventsFailed 一律 resolve NativeReply：{ok:true,result} 或
@@ -218,8 +220,10 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             "start" -> startHost(invoke)
             "stop" -> stopHost(invoke)
             "hide" -> hide(invoke)
+            "haptic" -> haptic(invoke, params)
             "openSystemSettings" -> openSystemSettings(invoke)
             "openCenter" -> openCenter(invoke, params)
+            "openExternalAuth" -> openExternalAuth(invoke, params)
             "reconnect" -> reconnect(invoke)
             "clientLaunchTarget" -> {
                 val target = (hostActivity as? TauriMainActivity)?.takeClientLaunchTarget()
@@ -357,6 +361,26 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         }
     }
 
+    /** UI 本地触感反馈（已在 request -> onMain 切至主线程执行）：遵从系统触感开关。 */
+    private fun haptic(invoke: Invoke, params: JSONObject) {
+        val constant = resolveHapticParams(params)
+        if (constant == null) {
+            replyInvalid(invoke, "INVALID_ARGUMENT", "触感参数无效")
+            return
+        }
+        try {
+            val performed = if (!hostActivity.isFinishing && !hostActivity.isDestroyed) {
+                // 不传 FLAG_IGNORE_GLOBAL_SETTING：遵从系统触感反馈开关。
+                hostActivity.window?.decorView?.performHapticFeedback(constant) == true
+            } else {
+                false
+            }
+            replyOk(invoke, objectOf("performed" to performed))
+        } catch (t: Throwable) {
+            replyFailure(invoke, t)
+        }
+    }
+
     private fun openCenter(invoke: Invoke, params: JSONObject) {
         val uri = android.net.Uri.parse(params.optString("url"))
         if (uri.scheme != "https" || uri.host.isNullOrEmpty() || uri.userInfo != null) {
@@ -368,6 +392,68 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             replyOk(invoke, JSObject())
         } catch (t: Throwable) {
             replyFailure(invoke, t)
+        }
+    }
+
+    /**
+     * 外部系统浏览器授权最小打开器：仅允许受信 Google 授权/控制台页与已配置的 Center HTTPS origin，
+     * 绝不打开任意第三方链接，绝不进入应用内 WebView，且仅允许在前台触发。
+     */
+    private fun openExternalAuth(invoke: Invoke, params: JSONObject) {
+        if (!foregroundUi()) {
+            replyInvalid(invoke, "NOT_FOREGROUND", "仅可在前台打开外部授权浏览器")
+            return
+        }
+        val rawUrl = params.optString("url", "")
+        val savedClientCenterUrl = try {
+            CenterClientCredentials(hostActivity.applicationContext).read()?.optString("url", "")
+        } catch (_: Throwable) {
+            null
+        }
+        val directValidated = try {
+            TrustedExternalOpener.validateUrl(rawUrl, savedClientCenterUrl)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+        if (directValidated != null) {
+            try {
+                TrustedExternalOpener.launch(hostActivity, directValidated)
+                replyOk(invoke, JSObject())
+            } catch (t: Throwable) {
+                replyFailure(invoke, t)
+            }
+            return
+        }
+        if (!uiReady()) {
+            replyInvalid(invoke, "INVALID_ARGS", "仅允许打开受信 Center origin 或 Google 授权/控制台页面")
+            return
+        }
+        val future = try {
+            bridge().request("centerSettings", JSONObject())
+        } catch (_: Throwable) {
+            replyInvalid(invoke, "INVALID_ARGS", "仅允许打开受信 Center origin 或 Google 授权/控制台页面")
+            return
+        }
+        future.whenComplete { result, _ ->
+            main.post {
+                if (destroyed || !foregroundUi()) {
+                    replyInvalid(invoke, "NOT_FOREGROUND", "仅可在前台打开外部授权浏览器")
+                    return@post
+                }
+                val hostCenterUrl = result?.optString("centerUrl", "")
+                val validated = try {
+                    TrustedExternalOpener.validateUrl(rawUrl, hostCenterUrl)
+                } catch (invalid: IllegalArgumentException) {
+                    replyInvalid(invoke, "INVALID_ARGS", invalid.message ?: "外部授权地址不受信任")
+                    return@post
+                }
+                try {
+                    TrustedExternalOpener.launch(hostActivity, validated)
+                    replyOk(invoke, JSObject())
+                } catch (t: Throwable) {
+                    replyFailure(invoke, t)
+                }
+            }
         }
     }
 
@@ -1087,12 +1173,12 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
         return current
     }
 
-    private companion object {
+    companion object {
         /** pair/repair 的 invoke 回执兜底（worker 持久化不受其影响）。 */
-        const val PAIR_REPLY_TIMEOUT_MS = 360_000L
+        private const val PAIR_REPLY_TIMEOUT_MS = 360_000L
 
         /** 固定白名单：只有既有 Host 数据操作可转发；eventsFailed 是内部流控 helper，不在其中。 */
-        val SERVICE_METHODS = setOf(
+        private val SERVICE_METHODS = setOf(
             "snapshot", "status", "centerSettings", "saveCenterSettings", "settingsGet", "settingsSet", "saveCredentials", "call",
             "observe", "cancelObservation", "voiceSettings", "saveVoiceSettings",
             "startVoice", "finishVoice", "cancelVoice", "uiSettings", "pause",
@@ -1101,5 +1187,30 @@ class BotHostTauriPlugin(private val hostActivity: Activity) : Plugin(hostActivi
             // 客户端自更新：固定方法名直达默认进程 ClientUpdater。
             "updateStatus", "updateCheck", "updateDownload", "updateInstall", "updateCancel"
         )
+
+        /**
+         * 将前端触感类型校验并映射到 Android HapticFeedbackConstants；非法或未知值返回 null。
+         * 仅接收 longPress / confirm / reject / tick；API 30 以下 confirm→VIRTUAL_KEY、reject→LONG_PRESS。
+         */
+        @JvmStatic
+        @JvmOverloads
+        fun resolveHapticConstant(kind: String?, sdkInt: Int = Build.VERSION.SDK_INT): Int? = when (kind) {
+            "longPress" -> HapticFeedbackConstants.LONG_PRESS
+            "confirm" -> if (sdkInt >= Build.VERSION_CODES.R) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.VIRTUAL_KEY
+            "reject" -> if (sdkInt >= Build.VERSION_CODES.R) HapticFeedbackConstants.REJECT else HapticFeedbackConstants.LONG_PRESS
+            "tick" -> HapticFeedbackConstants.CLOCK_TICK
+            else -> null
+        }
+
+        /**
+         * 校验 haptic 动作参数：仅接受单一字符串键 `kind` 并映射为对应常量；缺参、多参、非字符串或未知 kind 返回 null。
+         */
+        @JvmStatic
+        @JvmOverloads
+        fun resolveHapticParams(params: JSONObject?, sdkInt: Int = Build.VERSION.SDK_INT): Int? {
+            if (params == null || params.length() != 1) return null
+            val kind = params.opt("kind") as? String ?: return null
+            return resolveHapticConstant(kind, sdkInt)
+        }
     }
 }

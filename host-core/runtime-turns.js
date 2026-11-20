@@ -6,16 +6,17 @@
 import { createHash } from 'node:crypto';
 import { ConversationBusy, ConversationIdle, LiveDoc, InboxDoc } from '@earendil-works/pi-durable';
 import { TurnQueue, TurnPin, toTurnAdmissionStatus, toQueuedReceipt } from './runtime-turns-docs.js';
-import { normalizeAttachmentIds } from './attachments.js';
+import { assertModelSupportsAttachments, normalizeAttachmentIds } from './attachments.js';
 import { PrimaryIndex, getPrimaryConversation, applyAgentProfile, RequestKeys } from './runtime-docs.js';
 import { formatPrimarySubmission } from './runtime-history.js';
 import { parseModelRef } from './runtime-models.js';
 import { WorkIndex, WorkContextState } from './work-context-docs.js';
 import { WorkDecisionState } from './work-decision-state.js';
 import { clearBotBoardResult } from './runtime-bot-board.js';
-import { BotSessionState, deriveEntryAttribution } from './bot-session-context.js';
-import { DurableWait } from './runtime-waits.js';
+import { BotSessionState, deriveEntryAttribution, isAllowedHostSourceType } from './bot-session-context.js';
+import { canDetachPrimaryWait, DurableWait } from './runtime-waits.js';
 import { buildQueuedPreview, extractUserTextFromContent, MAX_QUEUED_ITEMS } from './runtime-live-projection.js';
+import { isTrustedDataBoundary } from './google-workspace-privacy.js';
 
 const MAX_PREPARE_ATTEMPTS = 3;
 // 每条消息图片解码总字节上限（64MiB）：单张合法（≤16MiB）的图仍需满足本条消息总量限制。
@@ -31,17 +32,36 @@ function errWithCode(message, code) {
 }
 
 function continuationMatches(wait, botId, input) {
-  return wait?.botId === botId && wait.stopEpoch === input.stopEpoch &&
+  return wait?.botId === botId && canDetachPrimaryWait(wait.turn, wait.dispatchContext) &&
+    wait.stopEpoch === input.stopEpoch &&
     wait.reason === 'user' && ['pending', 'accepted'].includes(wait.resume?.state) &&
     wait.resumeRequestId === input.requestId && wait.resume.input?.text === input.text;
 }
 
-// 只携带短码与短消息的可重试错误；其余按同步失败落盘。
+function continuationResetMatches(wait, sessionState) {
+  const waitResetEpoch = wait?.turn?.resetEpoch;
+  if (!Number.isSafeInteger(waitResetEpoch)) return true;
+  const currentResetEpoch = Number.isSafeInteger(sessionState?.clearedThroughEntryId) && sessionState.clearedThroughEntryId >= 0
+    ? sessionState.clearedThroughEntryId
+    : 0;
+  return waitResetEpoch === currentResetEpoch;
+}
+
+const RETRYABLE_TURN_ERROR_CODES = new Set([
+  'TURN_SET_CHANGED', 'TURN_SYNC_FAILED', 'CENTER_OFFLINE', 'RUNTIME_BUSY', 'NOT_CONNECTED',
+]);
+const PRESERVED_TURN_ERROR_CODES = new Set([
+  ...RETRYABLE_TURN_ERROR_CODES,
+  'MODEL_NO_VISION',
+  'INVALID_ARGUMENT',
+  'ATTACHMENT_NOT_FOUND',
+]);
+
+// 只携带短码与短消息；语义明确的非重试错误（如 MODEL_NO_VISION）原样保留。
 function boundedTurnError(err) {
   const code = typeof err?.code === 'string' && err.code ? err.code : 'TURN_SYNC_FAILED';
-  const retryable = new Set(['TURN_SET_CHANGED', 'TURN_SYNC_FAILED', 'CENTER_OFFLINE', 'RUNTIME_BUSY', 'NOT_CONNECTED']);
   return {
-    code: retryable.has(code) ? code : 'TURN_SYNC_FAILED',
+    code: PRESERVED_TURN_ERROR_CODES.has(code) ? code : 'TURN_SYNC_FAILED',
     message: (typeof err?.message === 'string' && err.message ? err.message : 'turn synchronization failed').slice(0, 200),
   };
 }
@@ -79,10 +99,21 @@ export function createTurnAdmission(deps) {
     }
     const name = typeof origin.sender?.name === 'string' ? origin.sender.name.slice(0, 200) : null;
     const replyTo = typeof origin.replyTo === 'string' ? origin.replyTo : null;
-    return { sender: { kind, ...(name !== null ? { name } : {}),
-      ...(kind === 'host' && ['schedule', 'webhook', 'task_dispatch'].includes(origin.sender?.sourceType)
-        ? { sourceType: origin.sender.sourceType } : {}),
-    }, replyTo };
+    const sourceType = kind === 'host' && isAllowedHostSourceType(origin.sender?.sourceType)
+      ? origin.sender.sourceType
+      : null;
+    const dataBoundary = kind === 'host' && isTrustedDataBoundary(origin.dataBoundary)
+      ? origin.dataBoundary
+      : null;
+    return {
+      sender: {
+        kind,
+        ...(name !== null ? { name } : {}),
+        ...(sourceType !== null ? { sourceType } : {}),
+      },
+      ...(dataBoundary !== null ? { dataBoundary } : {}),
+      replyTo,
+    };
   }
 
   /** 受理条目在原生提交时附带的可信入口：entry.data 携带发送方归属与
@@ -94,8 +125,10 @@ export function createTurnAdmission(deps) {
     const kind = item.origin?.sender?.kind === 'user' ? 'user' : 'host';
     const name = typeof item.origin?.sender?.name === 'string' ? item.origin.sender.name : null;
     const replyTo = typeof item.origin?.replyTo === 'string' ? item.origin.replyTo : null;
-    const source = kind === 'host' && ['schedule', 'webhook', 'task_dispatch'].includes(item.origin?.sender?.sourceType)
+    const source = kind === 'host' && isAllowedHostSourceType(item.origin?.sender?.sourceType)
       ? { sourceType: item.origin.sender.sourceType } : {};
+    const dataBoundary = kind === 'host' && isTrustedDataBoundary(item.origin?.dataBoundary)
+      ? { dataBoundary: item.origin.dataBoundary } : {};
     // Only Runtime's private wait continuation path may populate this field.
     // Keep the original reply destination when the answer starts a new SDK run.
     const continuation = item.continuationTurn;
@@ -106,7 +139,8 @@ export function createTurnAdmission(deps) {
         source: 'host',
         requestId: item.requestId,
         botId: item.botId,
-        ...(kind === 'user' ? { userText: item.text } : {}),
+        ...dataBoundary,
+        ...(kind === 'user' && !continuation ? { userText: item.text } : {}),
         attribution: {
           kind,
           deviceId: host.deviceId,
@@ -130,6 +164,7 @@ export function createTurnAdmission(deps) {
           sender: { kind, deviceId: host.deviceId, ...(name !== null ? { name } : {}), ...source },
           replyTarget: continuation?.replyTarget ?? { kind: 'primary' },
           stopEpoch: item.stopEpoch,
+          ...dataBoundary,
         },
       },
     };
@@ -271,9 +306,10 @@ export function createTurnAdmission(deps) {
   }
 
   function toHostQueuedItems(items) {
-    const aliveUsers = items.filter((entry) => entry.phase !== 'cancelled' && entry.origin?.sender?.kind === 'user');
-    const steer = aliveUsers.filter((entry) => entry.delivery === 'steer');
-    const followUp = aliveUsers.filter((entry) => entry.delivery !== 'steer');
+    // 仅投影仍在排队等待前序任务的条目；checking/synchronizing（准备中）、failed（准入失败）与 cancelled 不进入排队条。
+    const queuedUsers = items.filter((entry) => entry.phase === 'queued' && entry.origin?.sender?.kind === 'user');
+    const steer = queuedUsers.filter((entry) => entry.delivery === 'steer');
+    const followUp = queuedUsers.filter((entry) => entry.delivery !== 'steer');
     return [...steer, ...followUp].slice(0, MAX_QUEUED_ITEMS).map((entry) => ({
       requestId: entry.requestId,
       delivery: entry.delivery === 'steer' ? 'steer' : 'followUp',
@@ -493,10 +529,14 @@ export function createTurnAdmission(deps) {
     appliedSetIds.set(bot.botId, preparation.setId);
   }
 
-  /** 准入失败：条目转 failed、保留正文供同 requestId 重试，并按退避安排自动重试。 */
+  /** 准入失败：条目转 failed、保留正文供同 requestId 重试，并对可重试错误安排退避自动重试。 */
   async function failItem(bot, item, err) {
     const bounded = boundedTurnError(err);
     await setPhase(bot, item.requestId, 'failed', bounded);
+    if (!RETRYABLE_TURN_ERROR_CODES.has(bounded.code)) {
+      retryAttempts.delete(bot.botId);
+      return bounded;
+    }
     const attempts = (retryAttempts.get(bot.botId) ?? 0) + 1;
     retryAttempts.set(bot.botId, attempts);
     if (attempts <= RETRY_MAX_ATTEMPTS && !closing) {
@@ -509,6 +549,24 @@ export function createTurnAdmission(deps) {
       retryTimers.set(bot.botId, timer);
     }
     return bounded;
+  }
+
+  async function resolveModelRecordForBot(botId, bot, conversation = null) {
+    const modelRef = getBotModels()[botId]?.modelRef ?? bot?.modelRef ?? null;
+    if (typeof modelRef === 'string' && modelRef.trim() !== '') {
+      try {
+        const ref = parseModelRef(modelRef.trim());
+        const record = models.getModel(ref.provider, ref.modelId);
+        if (record) return record;
+      } catch { /* ignore invalid ref during pre-admission check; admitItem enforces */ }
+    }
+    if (conversation) {
+      const agent = await conversation.agent(context).catch(() => null);
+      if (agent?.model) {
+        return models.getModel(agent.model.provider, agent.model.modelId) ?? null;
+      }
+    }
+    return null;
   }
 
   /** 判断当前是否可将本机用户主私聊输入以 steer 注入正在运行的用户主私聊轮次：
@@ -760,46 +818,13 @@ export function createTurnAdmission(deps) {
     }
     // 带图提交前明确校验模型视觉能力与 provider inputLimits（无声明时按 Host 上限已满足）。
     const attachmentMeta = Array.isArray(item.attachments) ? item.attachments : [];
-    if (attachmentMeta.length > 0) {
-      const modalities = Array.isArray(convModelRecord.input) ? convModelRecord.input : ['text'];
-      if (!modalities.includes('image')) {
-        throw errWithCode('model does not accept image input', 'MODEL_NO_VISION');
-      }
-      const imageLimits = convModelRecord.inputLimits?.images ?? null;
-      if (imageLimits) {
-        const maxPerMessage = imageLimits.maxPerMessage;
-        if (Number.isSafeInteger(maxPerMessage) && attachmentMeta.length > maxPerMessage) {
-          throw errWithCode('model accepts at most ' + maxPerMessage + ' images per message', 'INVALID_ARGUMENT');
-        }
-        const resize = imageLimits.resize;
-        // provider maxBytes 按 base64 编码长度计（resize profile 语义），不能拿解码后 size 比。
-        const maxBytes = resize?.maxBytes;
-        const maxWidth = resize?.maxWidth;
-        const maxHeight = resize?.maxHeight;
-        for (const meta of attachmentMeta) {
-          if (Number.isSafeInteger(maxBytes) && 4 * Math.ceil(meta.size / 3) > maxBytes) {
-            throw errWithCode('attachment exceeds model image byte limit', 'INVALID_ARGUMENT');
-          }
-          if (Number.isSafeInteger(maxWidth) && meta.width > maxWidth) {
-            throw errWithCode('attachment exceeds model image width limit', 'INVALID_ARGUMENT');
-          }
-          if (Number.isSafeInteger(maxHeight) && meta.height > maxHeight) {
-            throw errWithCode('attachment exceeds model image height limit', 'INVALID_ARGUMENT');
-          }
-        }
-      }
-    }
+    assertModelSupportsAttachments(convModelRecord, attachmentMeta);
     let content = item.text;
     if (attachmentMeta.length > 0) {
       const blocks = [];
       if (item.text.trim() !== '') blocks.push({ type: 'text', text: item.text });
       for (const meta of attachmentMeta) {
         const loaded = await attachments.load(bot.botId, meta.id);
-        blocks.push({
-          type: 'text',
-          text: 'Attached image on this Host (use this path to read or send the file): ' +
-            JSON.stringify({ name: meta.name, path: attachments.path(bot.botId, meta.id) }),
-        });
         blocks.push({ type: 'image', data: loaded.data, mimeType: meta.mimeType });
       }
       content = blocks;
@@ -834,23 +859,34 @@ export function createTurnAdmission(deps) {
       }
       if (!canAdmit()) throw errWithCode('host is preparing an update', 'RUNTIME_BUSY');
       const draft = {
-          type: 'input',
-          content,
-          requestId: item.requestId,
-          whenBusy: wantSteer ? 'steer' : 'reject',
-          ...(skippedIdlePrep ? { whenIdle: 'reject' } : {}),
-          entry,
+        type: 'input',
+        content,
+        requestId: item.requestId,
+        whenBusy: wantSteer ? 'steer' : 'reject',
+        ...(skippedIdlePrep ? { whenIdle: 'reject' } : {}),
+        entry,
       };
       if (item.continuationWaitId) {
-        // Scope cancellation and SDK admission share one commit. Checking only
-        // enqueue would leave a previously queued continuation able to start
-        // after its wait was cancelled, especially after a crash.
+        // Scope/reset/fork cancellation and SDK admission share one commit.
+        // Checking only enqueue would leave a previously queued continuation
+        // able to start after its wait was cancelled or the session forked/reset.
         const submissionId = await harness().commit(async (tx) => {
           const queue = await queueDoc(tx, bot.primaryConversationId);
           const queued = queue.items.find((candidate) => candidate.requestId === item.requestId);
           const wait = (await tx.doc(DurableWait, item.continuationWaitId, {})).record;
+          const primaryIndex = await tx.doc(PrimaryIndex);
+          const mappedNativeId = primaryIndex?.byPrimary?.[bot.primaryConversationId];
+          const sessionState = mappedNativeId !== undefined
+            ? await tx.doc(BotSessionState, mappedNativeId)
+            : null;
           if (!queued || queued.phase === 'cancelled') return null;
-          if (!continuationMatches(wait, bot.botId, queued) || queued.stopEpoch < stopEpoch(bot.botId)) {
+          if (
+            !continuationMatches(wait, bot.botId, queued) ||
+            queued.stopEpoch < stopEpoch(bot.botId) ||
+            mappedNativeId !== conversation.id ||
+            wait.conversationId !== conversation.id ||
+            !continuationResetMatches(wait, sessionState)
+          ) {
             queued.phase = 'cancelled';
             queued.error = null;
             queued.updatedAt = new Date().toISOString();
@@ -1070,6 +1106,11 @@ export function createTurnAdmission(deps) {
     if (attachmentBytes > MAX_ATTACHMENTS_TOTAL_BYTES) {
       throw errWithCode('attachments exceed the 64 MiB per-message total image byte limit', 'INVALID_ARGUMENT');
     }
+    // 能在真正受理入队前判断模型能力时尽早拒绝，以便前端保留正文和附件；
+    // 模型未知（如离线未同步）或后续切换模型时，仍由 admitItem 保留 Host 最终检查。
+    const earlyModelRecord = attachmentMeta.length > 0
+      ? await resolveModelRecordForBot(botId, bot, conversation0)
+      : null;
     const now = new Date().toISOString();
     // 回执在事务内投影为普通元数据；浅拷贝会让 origin/附件保留已结算的 overlay。
     const receipt = await harness().commit(async (tx) => {
@@ -1081,11 +1122,19 @@ export function createTurnAdmission(deps) {
       let waitValid = true;
       if (input.continuationWaitId) {
         const wait = (await tx.doc(DurableWait, input.continuationWaitId, {})).record;
-        waitValid = continuationMatches(wait, botId, { requestId, text, stopEpoch: capturedStopEpoch });
+        const primaryIndex = await tx.doc(PrimaryIndex);
+        const mappedNativeId = primaryIndex?.byPrimary?.[bot.primaryConversationId];
+        const sessionState = mappedNativeId !== undefined
+          ? await tx.doc(BotSessionState, mappedNativeId)
+          : null;
+        waitValid = continuationMatches(wait, botId, { requestId, text, stopEpoch: capturedStopEpoch }) &&
+          mappedNativeId !== undefined &&
+          wait.conversationId === mappedNativeId &&
+          continuationResetMatches(wait, sessionState);
       }
-      // The wait cancellation and this check share the same durable transaction
-      // boundary. A scope Stop can therefore fence a late answer handoff without
-      // advancing the entire Bot's stop epoch or cancelling unrelated chat.
+      // The wait cancellation, reset/fork boundary and this check share the same
+      // durable transaction. A scope Stop, /clear or edit fork can therefore
+      // fence a late answer handoff atomically without reviving stale waits.
       const stale = capturedStopEpoch < (stopEpochs.get(botId) ?? 0) || !waitValid;
       const existing = doc.items.find((entry) => entry.requestId === requestId);
       if (existing) {
@@ -1107,13 +1156,18 @@ export function createTurnAdmission(deps) {
           existing.updatedAt = now;
         }
         if (existing.phase === 'failed') {
+          if (earlyModelRecord) assertModelSupportsAttachments(earlyModelRecord, attachmentMeta);
           // 同 requestId 的显式重试重新武装自动重试：耗尽的退避计数在重试时清零，
           // 避免这次显式尝试再失败后静默失去自动恢复。
+          existing.phase = 'queued';
           existing.error = null;
           existing.updatedAt = now;
           retryAttempts.delete(botId);
         }
         return toQueuedReceipt(existing);
+      }
+      if (!stale && earlyModelRecord) {
+        assertModelSupportsAttachments(earlyModelRecord, attachmentMeta);
       }
       const next = {
         requestId,

@@ -1,3 +1,31 @@
+import {
+  CenterApiError,
+  createFetchCenterTransport,
+} from '../web/src/center-admin';
+import type {
+  GoogleAccountStatus,
+  GoogleAuthorizeRequest,
+  GoogleAuthorizeResponse,
+  GoogleCancelRequest,
+  GoogleCheckRequest,
+  GoogleCheckResponse,
+  GoogleClientStatus,
+  GoogleConfigureRequest,
+  GoogleFlowRequest,
+  GoogleFlowResponse,
+  GoogleRemoveRequest,
+  GoogleRemoveResponse,
+  GoogleRule,
+  GoogleRuleRemoveRequest,
+  GoogleRulesListResponse,
+  GoogleServiceChoice,
+  GoogleServiceId,
+  GoogleServiceReadiness,
+  GoogleServiceState,
+  GoogleStatusResponse,
+  QrLoginChallengeResponse,
+  QrLoginClaimResponse,
+} from '../web/src/center-admin';
 import type {
   Accepted, ActionRequest, ActionResult, ApiError, ArtifactUploadReceipt, BatchModelsRequest, BotCapabilityConfig, BotCwdConfig, CapabilityToolsListResponse,
   BotCapabilityEntry, BotLearningStatus, BotModelConfig, BotRef, BotSyncResponse, CenterCreateBotRequest, CenterUpdateBotRequest, CredentialInfo, CredentialWrite, DeleteModelResult, DeleteProviderResult, DeploymentReceipt, Device, DeviceRuntimeStatus, DiscoveryResult,
@@ -122,35 +150,36 @@ export type ExternalVaultControlResult = ExternalVaultStatus | ExternalVaultList
 export interface UpdateWebhookRequest { name: string; instruction: string; enabled: boolean }
 export interface WebhookTokenReceipt { route: WebhookRoute; token: string }
 
-let csrfToken: string | null = null;
-export class CenterApiError extends Error {
-  constructor(public code: string, message: string, public status: number, public details?: ApiError['error']['details']) {
-    super(message);
-  }
-}
+export const webTransport = createFetchCenterTransport();
+export { CenterApiError };
+export type {
+  GoogleAccountStatus,
+  GoogleAuthorizeRequest,
+  GoogleAuthorizeResponse,
+  GoogleCancelRequest,
+  GoogleCheckRequest,
+  GoogleCheckResponse,
+  GoogleClientStatus,
+  GoogleConfigureRequest,
+  GoogleFlowRequest,
+  GoogleFlowResponse,
+  GoogleRemoveRequest,
+  GoogleRemoveResponse,
+  GoogleRule,
+  GoogleRuleRemoveRequest,
+  GoogleRulesListResponse,
+  GoogleServiceChoice,
+  GoogleServiceId,
+  GoogleServiceReadiness,
+  GoogleServiceState,
+  GoogleStatusResponse,
+  QrLoginChallengeResponse,
+  QrLoginClaimResponse,
+};
+
 const id = encodeURIComponent;
-async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
-  const headers = new Headers();
-  if (method !== 'GET') {
-    if (!csrfToken) throw new CenterApiError('CSRF_INVALID', '会话令牌不可用，请重新连接中心', 403);
-    headers.set('x-csrf-token', csrfToken);
-  }
-  if (body !== undefined && !(body instanceof FormData)) headers.set('content-type', 'application/json');
-  let response: Response;
-  try {
-    response = await fetch(path, { method, credentials: 'same-origin', headers, body: body === undefined ? undefined : body instanceof FormData ? body : JSON.stringify(body), cache: 'no-store' });
-  } catch {
-    window.dispatchEvent(new Event('center-offline'));
-    throw new CenterApiError('CENTER_OFFLINE', '无法连接中心', 503);
-  }
-  if (!response.ok) {
-    if (response.status === 401 && path !== '/api/session') window.dispatchEvent(new Event('center-unauthenticated'));
-    const payload = await response.json().catch(() => null) as ApiError | null;
-    if (payload?.error?.code === 'CENTER_OFFLINE') window.dispatchEvent(new Event('center-offline'));
-    throw new CenterApiError(payload?.error?.code || 'HTTP_ERROR', payload?.error?.message || `请求失败 (${response.status})`, response.status, payload?.error?.details);
-  }
-  if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
+function request<T>(path: string, method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' = 'GET', body?: unknown): Promise<T> {
+  return webTransport.request<T>(method, path, body);
 }
 // Onboarding runs before any session exists, so /api/setup uses a raw fetch:
 // no CSRF token is required or available yet. A 404 on GET means an older
@@ -186,9 +215,17 @@ const installationPath = (installationId: string) => `/api/installations/${id(in
 export const api = {
   getSetup: (signal?: AbortSignal) => setupRequest<SetupStatus>('GET', undefined, signal),
   submitSetup: (body: SetupRequest) => setupRequest<{ configured: boolean }>('POST', body),
-  async session() { const result = await request<SessionInfo>('/api/session'); csrfToken = result.csrfToken; return result; },
-  async login(body: LoginRequest) { const result = await request<SessionInfo>('/api/session', 'POST', body); csrfToken = result.csrfToken; return result; },
-  async logout() { await request<void>('/api/session', 'DELETE'); csrfToken = null; },
+  async session() { const result = await request<SessionInfo>('/api/session'); webTransport.setCsrfToken(result.csrfToken); return result; },
+  async login(body: LoginRequest) { const result = await request<SessionInfo>('/api/session', 'POST', body); webTransport.setCsrfToken(result.csrfToken); return result; },
+  async logout() { await request<void>('/api/session', 'DELETE'); webTransport.setCsrfToken(null); },
+  createQrLogin: () => request<QrLoginChallengeResponse>('/api/session/qr', 'POST', {}),
+  async claimQrLogin(challengeId: string, browserSecret: string) {
+    const result = await request<QrLoginClaimResponse>(`/api/session/qr/${id(challengeId)}/claim`, 'POST', { browserSecret });
+    if (result.status === 'approved' && result.csrfToken) {
+      webTransport.setCsrfToken(result.csrfToken);
+    }
+    return result;
+  },
   syncModelCatalog: () => request<{ modelsAdded?: number; error: string | null }>('/api/model-catalog/sync', 'POST'),
   getModelPicker: () => request<ModelPickerResponse>('/api/model-picker'),
   setModelStar: (modelRef: string, starred: boolean) => request<{ starredModels: string[] }>('/api/model-stars', 'PUT', { modelRef, starred }),
@@ -285,6 +322,24 @@ export const api = {
   listDeployments: (installationId: string) => request<DeploymentReceipt[]>(`${installationPath(installationId)}/deployments`),
   getOperation: (operationId: string) => request<Operation>(`/api/operations/${id(operationId)}`),
   vaultControl: (body: ExternalVaultControlInput) => request<ExternalVaultControlResult>('/api/vault/control', 'POST', body),
+  getGoogleStatus: () => request<GoogleStatusResponse>('/api/google/status'),
+  configureGoogle: (body: GoogleConfigureRequest) => request<GoogleStatusResponse>('/api/google/configure', 'POST', body),
+  authorizeGoogle: (body: GoogleAuthorizeRequest) => request<GoogleAuthorizeResponse>('/api/google/authorize', 'POST', body),
+  getGoogleFlow: (body: GoogleFlowRequest) => request<GoogleFlowResponse>('/api/google/flow', 'POST', body),
+  cancelGoogleFlow: (body: GoogleCancelRequest) => request<{ ok?: boolean; phase?: string }>('/api/google/cancel', 'POST', body),
+  checkGoogleAccount: (body: GoogleCheckRequest) => request<GoogleCheckResponse>('/api/google/check', 'POST', body),
+  removeGoogleAccount: (body: GoogleRemoveRequest) => request<GoogleRemoveResponse>('/api/google/remove', 'POST', body),
+  listGoogleRules: (params?: { deviceId?: string; botId?: string }) => {
+    const query = new URLSearchParams();
+    if (params?.deviceId) query.set('deviceId', params.deviceId);
+    if (params?.botId) query.set('botId', params.botId);
+    const qs = query.toString();
+    return request<GoogleRulesListResponse>(`/api/google/rules${qs ? `?${qs}` : ''}`);
+  },
+  saveGoogleRule: (body: GoogleRule) =>
+    request<{ rule?: GoogleRule; rules?: GoogleRule[] } | GoogleRule>('/api/google/rules/save', 'POST', body),
+  removeGoogleRule: (body: GoogleRuleRemoveRequest) =>
+    request<{ removed?: boolean; ok?: boolean } | void>('/api/google/rules/remove', 'POST', body),
   listClientReleases: () => request<ClientReleaseListResponse>('/api/client-releases'),
   createClientRelease: (metadata: ClientReleaseMetadata, artifact: File) => {
     const body = new FormData();

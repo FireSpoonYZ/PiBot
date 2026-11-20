@@ -4,7 +4,8 @@ import { Download, RefreshCw, XCircle } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useText } from './ui';
 import { Section } from './bot-settings/primitives';
-import { formatUpdateBytes, updateProgress, type ClientUpdatePhase } from './ClientUpdate';
+import { CLIENT_UPDATE_OPEN_EVENT, formatUpdateBytes, updateProgress, type ClientUpdatePhase } from './ClientUpdate';
+import { Dialog } from './components/ui/dialog';
 import { useClientUpdate, type ClientUpdateContextValue } from './ClientUpdateProvider';
 import './ClientUpdate.css';
 
@@ -42,6 +43,61 @@ export function useClientUpdateSummary(): string | undefined {
   return phaseLabel(status.phase, t);
 }
 
+export function MobileClientUpdatePrompt({ active, onOpenUpdates }: { active: boolean; onOpenUpdates(): void }) {
+  const t = useText();
+  const update = useClientUpdate();
+  const [visible, setVisible] = useState(() => !document.hidden);
+  const [dismissedRelease, setDismissedRelease] = useState('');
+  const release = update?.ready && !update.pending && update.status?.phase === 'available' ? update.status.release : undefined;
+  const releaseKey = release ? `${release.id}:${release.versionCode ?? release.version}` : '';
+  const open = active && visible && Boolean(releaseKey) && releaseKey !== dismissedRelease;
+  const dismiss = () => setDismissedRelease(releaseKey);
+
+  useEffect(() => {
+    const syncVisibility = () => setVisible(!document.hidden);
+    const reopen = () => setDismissedRelease('');
+    document.addEventListener('visibilitychange', syncVisibility);
+    window.addEventListener(CLIENT_UPDATE_OPEN_EVENT, reopen);
+    return () => {
+      document.removeEventListener('visibilitychange', syncVisibility);
+      window.removeEventListener(CLIENT_UPDATE_OPEN_EVENT, reopen);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleBack = (event: Event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setDismissedRelease(releaseKey);
+    };
+    window.addEventListener('app-back', handleBack, true);
+    return () => window.removeEventListener('app-back', handleBack, true);
+  }, [open, releaseKey]);
+
+  return (
+    <Dialog open={open} onOpenChange={next => { if (!next) dismiss(); }} title={t('发现新版本', 'Update available')}>
+      <p className="secondary">
+        {t(`PiBot ${release?.version ?? ''} 已发布。现在下载更新吗？`, `PiBot ${release?.version ?? ''} is available. Download the update now?`)}
+      </p>
+      <div className="dialog-actions">
+        <button type="button" className="quiet-button" onClick={dismiss}>{t('稍后', 'Later')}</button>
+        <button type="button" className="button" onClick={() => {
+          dismiss();
+          update?.download();
+          onOpenUpdates();
+        }}>{t('下载更新', 'Download update')}</button>
+      </div>
+    </Dialog>
+  );
+}
+
+function parseActiveTaskCount(waiting: boolean, message?: string): number | null {
+  const taskMatch = waiting && /^(\d+) host task\(s\) still active$/.exec(message ?? '');
+  const count = taskMatch ? Number(taskMatch[1]) : NaN;
+  return Number.isSafeInteger(count) && count > 0 ? count : null;
+}
+
 function DesktopUpdateSection({ update }: { update: ClientUpdateContextValue }) {
   const t = useText();
   const { status, pending, ready, actionError, check, download, install, cancel } = update;
@@ -54,9 +110,7 @@ function DesktopUpdateSection({ update }: { update: ClientUpdateContextValue }) 
   const busy = pending !== null || !ready;
   const progress = updateProgress(status);
   const size = formatUpdateBytes(status?.totalBytes ?? release?.size);
-  const taskMatch = waiting && /^(\d+) host task\(s\) still active$/.exec(status?.message ?? '');
-  const count = taskMatch ? Number(taskMatch[1]) : NaN;
-  const taskCount = Number.isSafeInteger(count) && count > 0 ? count : null;
+  const taskCount = parseActiveTaskCount(waiting, status?.message);
   const canCheck = ['idle', 'up-to-date', 'available', 'cancelled', 'error', 'complete'].includes(phase) && !downloading && !installing;
   const canCancelDownload = pending === 'check' || pending === 'download' || phase === 'checking' || phase === 'downloading';
   const summary = installing ? t('正在安装', 'Installing')
@@ -102,10 +156,10 @@ function DesktopUpdateSection({ update }: { update: ClientUpdateContextValue }) 
       </div>
       <div className="cu-actions">
         {canCheck && (
-          <button type="button" className="secondary-button" disabled={busy} onClick={check}><RefreshCw size={13} aria-hidden /> {t('检查更新', 'Check for updates')}</button>
+          <button type="button" className="secondary-button" disabled={busy} onClick={check}><RefreshCw size={13} aria-hidden="true" /> {t('检查更新', 'Check for updates')}</button>
         )}
         {phase === 'available' && !downloading && (
-          <button type="button" className="primary-button" disabled={busy} onClick={download}><Download size={13} aria-hidden /> {t('下载更新', 'Download update')}</button>
+          <button type="button" className="primary-button" disabled={busy} onClick={download}><Download size={13} aria-hidden="true" /> {t('下载更新', 'Download update')}</button>
         )}
         {phase === 'downloaded' && !installing && (
           <button type="button" className="primary-button" disabled={busy} onClick={() => install(false)}>{t('安装更新', 'Install update')}</button>
@@ -151,19 +205,20 @@ function DesktopUpdateSection({ update }: { update: ClientUpdateContextValue }) 
   );
 }
 
-export function ClientUpdateSection(props: { variant: 'desktop' | 'mobile' }) {
+function MobileUpdateSection({ update }: { update: ClientUpdateContextValue }) {
   const t = useText();
-  const update = useClientUpdate();
-  if (!update) return null;
-  if (props.variant === 'desktop') return <DesktopUpdateSection update={update} />;
   const { status, pending, ready, actionError, check, download, install, cancel } = update;
+  const [confirmStop, setConfirmStop] = useState(false);
   const primary = 'hst-btn is-primary';
   const secondary = 'hst-btn';
   const busy = pending !== null || !ready;
   const progress = updateProgress(status);
   const phase = status?.phase ?? (pending === 'check' ? 'checking' : 'idle');
+  const waiting = phase === 'waiting-tasks';
+  const installing = pending === 'install' || phase === 'installing';
   const canCancel = ready && (pending === null || pending === 'check' || pending === 'download');
   const release = status?.release;
+  const taskCount = parseActiveTaskCount(waiting, status?.message);
   const sizeText = formatUpdateBytes(status?.totalBytes ?? release?.size);
   const showRelease = Boolean(
     release &&
@@ -171,6 +226,10 @@ export function ClientUpdateSection(props: { variant: 'desktop' | 'mobile' }) {
       phase === 'waiting-tasks' || phase === 'waiting-permission' ||
       phase === 'waiting-install' || phase === 'installing'),
   );
+
+  useEffect(() => {
+    setConfirmStop(false);
+  }, [ready, phase, release?.id, status?.message]);
 
   const body = (
     <>
@@ -196,15 +255,22 @@ export function ClientUpdateSection(props: { variant: 'desktop' | 'mobile' }) {
           <pre className="cu-notes">{release.notes}</pre>
         )}
         {status?.message && (
-          <div className={'cu-message' + (phase === 'error' ? ' is-error' : '')}>{status.message}</div>
+          <div className={'cu-message' + (phase === 'error' ? ' is-error' : '')} role={phase === 'error' ? 'alert' : 'status'}>{status.message}</div>
         )}
         {phase === 'downloading' && (
-          <div className="cu-progress" role="progressbar" aria-valuenow={progress ?? undefined}>
+          <div
+            className="cu-progress"
+            role="progressbar"
+            aria-label={t('下载进度', 'Download progress')}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={progress ?? 0}
+          >
             <span style={{ width: (progress ?? 0) + '%' }} />
           </div>
         )}
         {phase === 'downloading' && (
-          <div className="cu-meta">
+          <div className="cu-meta" role="status">
             {formatUpdateBytes(status?.downloadedBytes)}
             {status?.totalBytes ? ' / ' + formatUpdateBytes(status.totalBytes) : ''}
             {progress !== null ? ' · ' + progress + '%' : ''}
@@ -215,12 +281,12 @@ export function ClientUpdateSection(props: { variant: 'desktop' | 'mobile' }) {
       <div className="cu-actions">
         {(phase === 'idle' || phase === 'up-to-date' || phase === 'available' || phase === 'cancelled' || phase === 'error' || phase === 'complete') && (
           <button type="button" className={secondary} disabled={busy} onClick={check}>
-            <RefreshCw size={13} aria-hidden /> {t('检查更新', 'Check for updates')}
+            <RefreshCw size={13} aria-hidden="true" /> {t('检查更新', 'Check for updates')}
           </button>
         )}
         {phase === 'available' && (
           <button type="button" className={primary} disabled={busy} onClick={download}>
-            <Download size={13} aria-hidden /> {pending === 'download' ? t('正在准备…', 'Preparing…') : t('下载更新', 'Download update')}
+            <Download size={13} aria-hidden="true" /> {pending === 'download' ? t('正在准备…', 'Preparing…') : t('下载更新', 'Download update')}
           </button>
         )}
         {phase === 'downloaded' && (
@@ -228,16 +294,16 @@ export function ClientUpdateSection(props: { variant: 'desktop' | 'mobile' }) {
             {pending === 'install' ? t('正在准备…', 'Preparing…') : t('安装更新', 'Install update')}
           </button>
         )}
-        {phase === 'waiting-tasks' && (
+        {waiting && !installing && (
           <>
-            <button type="button" className={secondary} disabled={busy} onClick={() => install(false)}>
+            <button type="button" className={secondary} disabled={busy} onClick={() => { setConfirmStop(false); install(false); }}>
               {t('等待任务结束后重试', 'Retry after tasks finish')}
             </button>
-            <button type="button" className={primary} disabled={busy} onClick={() => install(true)}>
-              {t('停止活动任务并继续', 'Stop running tasks and continue')}
+            <button type="button" className={primary} disabled={busy} aria-expanded={confirmStop} onClick={() => setConfirmStop(true)}>
+              {t('停止活动任务并继续…', 'Stop running tasks and continue…')}
             </button>
-            <button type="button" className={secondary} disabled={busy} onClick={cancel}>
-              <XCircle size={13} aria-hidden /> {t('取消', 'Cancel')}
+            <button type="button" className={secondary} disabled={busy} onClick={() => { setConfirmStop(false); cancel(); }}>
+              <XCircle size={13} aria-hidden="true" /> {t('取消', 'Cancel')}
             </button>
           </>
         )}
@@ -248,7 +314,7 @@ export function ClientUpdateSection(props: { variant: 'desktop' | 'mobile' }) {
         )}
         {phase !== 'installing' && (pending === 'check' || pending === 'download' || phase === 'checking' || phase === 'downloading' || phase === 'waiting-permission' || phase === 'waiting-install') && (
           <button type="button" className={secondary} disabled={!canCancel} onClick={cancel}>
-            <XCircle size={13} aria-hidden /> {phase === 'waiting-install' ? t('取消等待', 'Cancel waiting') : t('取消', 'Cancel')}
+            <XCircle size={13} aria-hidden="true" /> {phase === 'waiting-install' ? t('取消等待', 'Cancel waiting') : t('取消', 'Cancel')}
           </button>
         )}
         {phase === 'checking' && (
@@ -268,6 +334,22 @@ export function ClientUpdateSection(props: { variant: 'desktop' | 'mobile' }) {
         )}
       </div>
 
+      {waiting && confirmStop && !installing && (
+        <div className="cu-stop-confirm" role="group" aria-label={t('确认停止活动任务', 'Confirm stopping running tasks')}>
+          <p className="cu-message">
+            {taskCount === null
+              ? t('继续会停止当前活动任务。任务数量暂未上报。', 'Continuing stops active tasks. The task count is unavailable.')
+              : t(`继续会停止本机活动任务（上次检查为 ${taskCount} 个）并开始安装。`, `Continuing stops local tasks (${taskCount} at the last check) and starts installation.`)}
+          </p>
+          <div className="cu-actions">
+            <button type="button" className={secondary} onClick={() => setConfirmStop(false)}>{t('返回', 'Back')}</button>
+            <button type="button" className="hst-btn is-danger" disabled={busy} onClick={() => { setConfirmStop(false); install(true); }}>
+              {t('停止任务并安装', 'Stop tasks and install')}
+            </button>
+          </div>
+        </div>
+      )}
+
       {!ready && <div className="cu-message">{t('连接中心后可检查更新。', 'Connect to the center to check for updates.')}</div>}
 
       {actionError && (
@@ -279,4 +361,11 @@ export function ClientUpdateSection(props: { variant: 'desktop' | 'mobile' }) {
   );
 
   return <Section>{body}</Section>;
+}
+
+export function ClientUpdateSection(props: { variant: 'desktop' | 'mobile' }) {
+  const update = useClientUpdate();
+  if (!update) return null;
+  if (props.variant === 'desktop') return <DesktopUpdateSection update={update} />;
+  return <MobileUpdateSection update={update} />;
 }

@@ -59,10 +59,10 @@ function endpointHashOf(baseUrl) {
  * Disabled 时不创建 client、不打开 store、不注册任何后台状态。
  * getBotPolicy(botId) 返回每 Bot 策略 {enabled,mode,canRead,canWrite,retentionFloor}；未提供时全部放行。
  */
-export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getWorkActivity, config, context, getBotPolicy, documents, countMessageTokens, tryRunBackgroundTask }) {
+export function createRuntimeHindsight({ host, getHarness, getWorkContexts, getWorkActivity, config, context, getBotPolicy, documents, countMessageTokens, tryRunBackgroundTask, dataPrivacy = null }) {
   const { ContextState } = documents;
   const client = config ? createHindsightClient(config) : null;
-  const sources = createHindsightSources({ host, getHarness, context, getBotPolicy, documents });
+  const sources = createHindsightSources({ host, getHarness, context, getBotPolicy, documents, dataPrivacy });
 
   function policyFor(botId) {
     return getBotPolicy ? (getBotPolicy(botId) ?? null) : null;

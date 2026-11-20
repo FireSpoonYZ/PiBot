@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, ChevronRight, Loader2, PanelLeft, Plus } from 'lucide-react';
+import { ArrowLeft, Loader2, PanelLeft, Plus } from 'lucide-react';
 import { GrokBotAvatar, type GrokAvatarPreset } from '../GrokBotAvatar';
+import { useText } from '../ui';
 import { TaskCreateView } from './TaskCreateView';
 import { TaskDetailView } from './TaskDetailView';
 import { formatTaskSummary, getTaskStatusInfo, isTaskWaitingForUser, type GlobalTask, type TaskBotOption, type TaskBotRef } from './types';
@@ -37,8 +38,8 @@ function resolveBot(bots: TaskBotOption[], ref: TaskBotRef): TaskBotOption | und
   );
 }
 
-function ListStatusBadge({ task }: { task: GlobalTask }) {
-  const info = getTaskStatusInfo(task);
+function ListStatusBadge({ task, t }: { task: GlobalTask; t: (zh: string, en: string) => string }) {
+  const info = getTaskStatusInfo(task, t);
   return (
     <span className={`bs-badge ${info.cls}`}>
       {info.spinning ? <Loader2 size={12} className="spin" aria-hidden="true" /> : null}
@@ -47,14 +48,27 @@ function ListStatusBadge({ task }: { task: GlobalTask }) {
   );
 }
 
-function AvatarStack({ botRefs, bots }: { botRefs: TaskBotRef[]; bots: TaskBotOption[] }) {
+function AvatarStack({
+  botRefs,
+  bots,
+  t,
+}: {
+  botRefs: TaskBotRef[];
+  bots: TaskBotOption[];
+  t: (zh: string, en: string) => string;
+}) {
   if (!botRefs.length) return null;
   const visible = botRefs.slice(0, 4);
+  const allNames = botRefs.map(ref => {
+    const bot = resolveBot(bots, ref);
+    return bot?.name || ref.botName || t('未知 Bot', 'Unknown Bot');
+  });
   return (
     <span className="avatar-stack">
+      <span className="sr-only">{t(`参与 Bot：${allNames.join('、')}`, `Participating bots: ${allNames.join(', ')}`)}</span>
       {visible.map(ref => {
         const bot = resolveBot(bots, ref);
-        const name = bot?.name || ref.botName || ref.botId;
+        const name = bot?.name || ref.botName || t('未知 Bot', 'Unknown Bot');
         return (
           <GrokBotAvatar
             key={`${ref.deviceId}:${ref.botId}`}
@@ -84,13 +98,13 @@ export function TaskBoardView({
   onJumpToChat,
   onOpenMobileDrawer,
 }: TaskBoardViewProps) {
+  const t = useText();
   const [filter, setFilter] = useState<TaskFilter>('active');
-  const [completedFoldOpen, setCompletedFoldOpen] = useState(false);
 
   const scopeClass = `tb-scope tasks-root${variant === 'mobile' ? ' is-mobile' : ''}`;
 
   const activeList = useMemo(
-    () => controller.tasks.filter(t => t.status !== 'done' && t.status !== 'cancelled'),
+    () => controller.tasks.filter(item => item.status !== 'done' && item.status !== 'cancelled'),
     [controller.tasks],
   );
   const waitingList = useMemo(
@@ -98,12 +112,12 @@ export function TaskBoardView({
     [controller.tasks],
   );
   const doneList = useMemo(
-    () => controller.tasks.filter(t => t.status === 'done' || t.status === 'cancelled'),
+    () => controller.tasks.filter(item => item.status === 'done' || item.status === 'cancelled'),
     [controller.tasks],
   );
 
   const visibleList = filter === 'active' ? activeList : filter === 'waiting' ? waitingList : doneList;
-  const activeTask = activeTaskId ? controller.tasks.find(t => t.id === activeTaskId) ?? null : null;
+  const activeTask = activeTaskId ? controller.tasks.find(item => item.id === activeTaskId) ?? null : null;
   const hasActiveTask = Boolean(activeTask);
   const { getTask } = controller;
 
@@ -143,7 +157,7 @@ export function TaskBoardView({
           getTaskRef: getTask,
           status: 'error',
           errorMessage:
-            err instanceof Error && err.message ? err.message : String(err || '加载任务详情失败'),
+            err instanceof Error && err.message ? err.message : String(err || ''),
         });
       });
     return () => {
@@ -185,24 +199,24 @@ export function TaskBoardView({
             <header className="detail-topbar">
               <button type="button" className="back-btn" onClick={() => onSelectTask(null)}>
                 <ArrowLeft size={19} aria-hidden="true" />
-                <span>任务</span>
+                <span>{t('任务', 'Tasks')}</span>
               </button>
             </header>
             {matchedFetch?.status === 'not_found' ? (
-              <div className="tasks-empty">该任务不存在或已删除。</div>
+              <div className="tasks-empty" role="status">{t('该任务不存在或已删除。', 'This task does not exist or has been deleted.')}</div>
             ) : matchedFetch?.status === 'error' ? (
               <div className="tasks-error-strip" role="alert">
-                <span>{matchedFetch.errorMessage || '加载任务详情失败'}</span>
+                <span>{matchedFetch.errorMessage || t('加载任务详情失败', 'Failed to load task details')}</span>
                 <button
                   type="button"
                   className="mini-pill"
                   onClick={() => setDetailRetryTick(n => n + 1)}
                 >
-                  重试
+                  {t('重试', 'Retry')}
                 </button>
               </div>
             ) : (
-              <div className="tasks-empty">正在加载任务详情…</div>
+              <div className="tasks-empty" role="status">{t('正在加载任务详情…', 'Loading task details…')}</div>
             )}
           </div>
         </div>
@@ -219,14 +233,14 @@ export function TaskBoardView({
       className={`task-row-card${task.status === 'done' || task.status === 'cancelled' ? ' is-done' : ''}`}
       onClick={() => onSelectTask(task.id)}
     >
-      <div className="task-row-head">
+      <span className="task-row-head">
         <span className="task-row-title">{task.title}</span>
-        <ListStatusBadge task={task} />
-      </div>
-      <div className="task-row-foot">
-        <span className="task-row-summary">{formatTaskSummary(task)}</span>
-        <AvatarStack botRefs={task.botRefs} bots={bots} />
-      </div>
+        <ListStatusBadge task={task} t={t} />
+      </span>
+      <span className="task-row-foot">
+        <span className="task-row-summary">{formatTaskSummary(task, t)}</span>
+        <AvatarStack botRefs={task.botRefs} bots={bots} t={t} />
+      </span>
     </button>
   );
 
@@ -241,49 +255,49 @@ export function TaskBoardView({
                   type="button"
                   className="tb-circle-btn"
                   onClick={onOpenMobileDrawer}
-                  aria-label="打开导航菜单"
+                  aria-label={t('打开导航菜单', 'Open navigation menu')}
                 >
                   <PanelLeft size={20} aria-hidden="true" />
                 </button>
               ) : null}
-              <h1>任务</h1>
+              <h1>{t('任务', 'Tasks')}</h1>
             </div>
             <div className="view-topbar-right">
               <button
                 type="button"
                 className="new-task-btn"
                 onClick={onOpenCreate}
-                aria-label={hasDraft ? '新建任务（有未发布草稿）' : '新建任务'}
-                title={hasDraft ? '继续编辑未发布草稿' : '新建任务'}
+                aria-label={hasDraft ? t('新建任务（有未发布草稿）', 'New task (unpublished draft)') : t('新建任务', 'New task')}
+                title={variant === 'mobile' ? undefined : (hasDraft ? t('继续编辑未发布草稿', 'Continue editing unpublished draft') : t('新建任务', 'New task'))}
               >
                 <Plus size={17} strokeWidth={2.2} aria-hidden="true" />
-                <span className="new-task-btn-text">新建任务</span>
+                <span className="new-task-btn-text">{t('新建任务', 'New task')}</span>
                 {hasDraft ? <span className="draft-dot" aria-hidden="true" /> : null}
               </button>
             </div>
           </header>
 
-          <nav className="filter-pills tabular" aria-label="事项筛选">
+          <nav className="filter-pills tabular" aria-label={t('事项筛选', 'Filter tasks')}>
             <button
               type="button"
               aria-pressed={filter === 'active'}
               onClick={() => setFilter('active')}
             >
-              未完成 {activeList.length}
+              {t('未完成', 'Active')} {activeList.length}
             </button>
             <button
               type="button"
               aria-pressed={filter === 'waiting'}
               onClick={() => setFilter('waiting')}
             >
-              待你回应 {waitingList.length}
+              {t('待你回应', 'Awaiting reply')} {waitingList.length}
             </button>
             <button
               type="button"
               aria-pressed={filter === 'done'}
               onClick={() => setFilter('done')}
             >
-              已完成 {doneList.length}
+              {t('已完成', 'Completed')} {doneList.length}
             </button>
           </nav>
 
@@ -295,60 +309,34 @@ export function TaskBoardView({
                 className="mini-pill"
                 onClick={() => void controller.refresh()}
               >
-                重试
+                {t('重试', 'Retry')}
               </button>
             </div>
           ) : null}
 
           {!controller.loaded && controller.loading && controller.tasks.length === 0 ? (
-            <p className="tasks-empty">正在加载任务…</p>
+            <p className="tasks-empty" role="status">{t('正在加载任务…', 'Loading tasks…')}</p>
           ) : visibleList.length > 0 ? (
             <>
               <div className="task-list">{visibleList.map(renderCard)}</div>
               {controller.activeTruncated && filter !== 'done' ? (
                 <p className="tasks-limit-note">
-                  当前进行中任务数量已达分页上限，部分较早事项未全部显示。
+                  {t('当前进行中任务数量已达分页上限，部分较早事项未全部显示。', 'Active task list reached the pagination limit; some older tasks are not shown.')}
                 </p>
               ) : null}
               {controller.historyTruncated && filter === 'done' ? (
                 <p className="tasks-limit-note">
-                  仅显示最近 200 条已完成记录，更早任务可通过历史对话中的任务卡片打开。
+                  {t('仅显示最近 200 条已完成记录，更早任务可通过历史对话中的任务卡片打开。', 'Showing the most recent 200 completed tasks. Older tasks can be opened from task cards in chat history.')}
                 </p>
               ) : null}
             </>
           ) : controller.tasks.length === 0 ? (
             <p className="tasks-empty">
-              还没有跟进中的任务，点右上角新建任务，或在和 Bot 聊天时随时交代。
+              {t('还没有跟进中的任务，点右上角新建任务，或在和 Bot 聊天时随时交代。', 'No tasks yet. Tap New task above, or ask a Bot in chat anytime.')}
             </p>
           ) : (
-            <p className="tasks-empty">当前筛选下没有事项。</p>
+            <p className="tasks-empty">{t('当前筛选下没有事项。', 'No tasks match this filter.')}</p>
           )}
-
-          {filter === 'active' && doneList.length > 0 ? (
-            <div className="completed-fold">
-              <button
-                type="button"
-                className={`disclosure-btn${completedFoldOpen ? ' is-open' : ''}`}
-                aria-expanded={completedFoldOpen}
-                onClick={() => setCompletedFoldOpen(v => !v)}
-              >
-                <ChevronRight size={15} aria-hidden="true" />
-                <span className="tabular">已完成 · {doneList.length}</span>
-              </button>
-              {completedFoldOpen ? (
-                <>
-                  <div className="task-list" style={{ marginTop: 8 }}>
-                    {doneList.map(renderCard)}
-                  </div>
-                  {controller.historyTruncated ? (
-                    <p className="tasks-limit-note">
-                      仅显示最近 200 条已完成记录，更早任务可通过历史对话中的任务卡片打开。
-                    </p>
-                  ) : null}
-                </>
-              ) : null}
-            </div>
-          ) : null}
         </div>
       </div>
     </div>

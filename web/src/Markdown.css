@@ -1,3 +1,25 @@
+.markdown a {
+  touch-action: manipulation;
+  transition: opacity var(--dur-fast, 150ms) ease;
+}
+
+@media (hover: hover) {
+  .markdown a:hover {
+    opacity: .82;
+  }
+}
+
+.markdown a:active {
+  opacity: .68;
+}
+
+.markdown a:focus-visible,
+.markdown pre:focus-visible {
+  outline: 2px solid var(--color-primary, var(--brand, var(--accent)));
+  outline-offset: 2px;
+  border-radius: var(--radius-sm, 6px);
+}
+
 .markdown .table-scroll {
   width: fit-content;
   max-width: 100%;
@@ -8,14 +30,14 @@
   -webkit-overflow-scrolling: touch;
   touch-action: pan-x pan-y;
   background:
-    linear-gradient(to left, var(--table-edge-bg, var(--bg)) 12px, transparent 20px) right center / 20px 100% no-repeat local,
+    linear-gradient(to left, var(--table-edge-bg, var(--color-bg, var(--bg))) 12px, transparent 20px) right center / 20px 100% no-repeat local,
     linear-gradient(to left, color-mix(in srgb, currentColor 14%, transparent), transparent) right center / 12px 100% no-repeat scroll;
 }
 
 .markdown .table-scroll:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--color-primary, var(--brand, var(--accent)));
   outline-offset: 2px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm, 6px);
 }
 
 .markdown .table-scroll > table {
@@ -31,7 +53,7 @@
   min-width: 5rem;
   max-width: clamp(12rem, 60vw, 24rem);
   padding: 6px 10px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--color-line, var(--line));
   text-align: left;
   vertical-align: top;
   overflow-wrap: anywhere;
@@ -39,7 +61,7 @@
 }
 
 .markdown .table-scroll th {
-  font-weight: 600;
+  font-weight: var(--weight-semibold, 600);
   background: color-mix(in srgb, currentColor 6%, transparent);
 }
 

@@ -55,14 +55,14 @@ async function until(predicate, message) {
   assert.ok(predicate(), message);
 }
 
-function fixture(t, runs = [occurrence()]) {
+function fixture(t, runs = [occurrence()], { tasks, bot = BOT, isOnline = () => true } = {}) {
   const dataRoot = mkdtempSync(join(tmpdir(), 'always-on-schedule-'));
   const dbPath = join(dataRoot, 'schedules.sqlite');
   const database = new DatabaseSync(dbPath);
   database.exec('CREATE TABLE state(id INTEGER NOT NULL PRIMARY KEY, version INTEGER NOT NULL, json TEXT NOT NULL)');
   database.prepare('INSERT INTO state(id, version, json) VALUES(1, 1, ?)').run(JSON.stringify({
     version: 1,
-    tasks: [{ id: TASK_ID, revision: 2, owner: { ...OWNER }, title: 'edited definition',
+    tasks: tasks ?? [{ id: TASK_ID, revision: 2, owner: { ...OWNER }, title: 'edited definition',
       prompt: 'new definition must not replace the occurrence', skills: ['new-skill'],
       enabled: false, nextRunAt: 0, repeat: 'daily', time: '09:00' }],
     runs,
@@ -71,22 +71,29 @@ function fixture(t, runs = [occurrence()]) {
   database.close();
   const managers = [];
   const host = { dataRoot, deviceId: OWNER.deviceId,
-    getBot: (botId) => botId === BOT.botId ? BOT : null };
+    getBot: (botId) => (bot && botId === bot.botId ? bot : null) };
   t.after(async () => {
     await Promise.all(managers.map((manager) => manager.close()));
     rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
   return {
-    open(runtime) {
-      const manager = createScheduleManager({ host, getRuntime: () => runtime, isOnline: () => true });
+    open(runtime, openOptions = {}) {
+      const manager = createScheduleManager({
+        host,
+        getRuntime: () => runtime,
+        isOnline: openOptions.isOnline ?? isOnline,
+      });
       managers.push(manager);
       manager.start();
       return manager;
     },
-    readRun() {
+    readState() {
       const db = new DatabaseSync(dbPath, { readOnly: true });
-      try { return JSON.parse(db.prepare('SELECT json FROM state WHERE id = 1').get().json).runs[0]; }
+      try { return JSON.parse(db.prepare('SELECT json FROM state WHERE id = 1').get().json); }
       finally { db.close(); }
+    },
+    readRun() {
+      return this.readState().runs[0];
     },
   };
 }
@@ -280,6 +287,153 @@ test('schedule recovery: delete during an in-flight lookup prevents a late recei
   assert.equal(f.readRun().status, 'skipped_offline');
   assert.equal(f.readRun().reason, 'task_deleted');
   assert.equal(f.readRun().handoff.state, 'pending');
+});
+
+test('schedule recovery: offline or maintenance pauses handoff until notifyOnline resumes with frozen fence', async (t) => {
+  let online = false;
+  const f = fixture(t, [occurrence()], { isOnline: () => online });
+  const calls = [];
+  const manager = f.open(fencedRuntime({
+    getSubmission(botId, requestId) { calls.push(['lookup', botId, requestId]); return null; },
+    submitScheduled(botId, input) {
+      calls.push(['submit', botId, structuredClone(input)]);
+      return receipt('done');
+    },
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, []);
+  assert.equal(f.readRun().status, 'dispatching');
+  assert.equal(f.readRun().handoff.state, 'pending');
+
+  online = true;
+  manager.notifyOnline();
+  await until(() => f.readRun().status === 'done', 'resumed occurrence did not settle after notifyOnline');
+  assert.deepEqual(calls, [
+    ['lookup', BOT.botId, REQUEST_ID],
+    ['submit', BOT.botId, { requestId: REQUEST_ID, text: FROZEN_TEXT, stopEpoch: 7 }],
+  ]);
+  assert.equal(f.readRun().handoff.state, 'accepted');
+  assert.equal(f.readRun().handoff.stopEpoch, 7);
+});
+
+test('schedule handoff: transient fence errors stay unarmed for offline skip, permanent rejections terminate as not_sent', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
+  const transientTask = {
+    id: TASK_ID, revision: 1, owner: { ...OWNER }, title: 'once-transient',
+    prompt: 'transient fence test', skills: [], enabled: true,
+    nextRunAt: Date.now() + 25, repeat: 'once', time: '09:00', deleteAfterRun: false,
+  };
+  const transientFixture = fixture(t, [], { tasks: [transientTask] });
+  const transientFence = deferred();
+  const first = transientFixture.open(fencedRuntime({
+    getScheduleFence() {
+      transientFence.resolve();
+      throw Object.assign(new Error('host is preparing an update'), { code: 'RUNTIME_BUSY' });
+    },
+  }));
+  t.mock.timers.tick(25);
+  await transientFence.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+  await until(() => transientFixture.readRun()?.status === 'dispatching', 'transient fence failure did not keep dispatching');
+  assert.equal(transientFixture.readRun().submitted, false);
+  assert.equal(transientFixture.readRun().handoff, undefined);
+  await first.close();
+
+  // Restart neutralizes the unarmed dispatching run as skipped_offline without calling the runtime.
+  let restartCalls = 0;
+  transientFixture.open(fencedRuntime({
+    getScheduleFence() { restartCalls += 1; return { ...OWNER, stopEpoch: 9 }; },
+    getSubmission() { restartCalls += 1; return null; },
+  }));
+  assert.equal(transientFixture.readRun().status, 'skipped_offline');
+  assert.equal(transientFixture.readRun().reason, 'offline');
+  assert.equal(restartCalls, 0);
+
+  const permanentTask = {
+    id: TASK_ID, revision: 1, owner: { ...OWNER }, title: 'once-permanent',
+    prompt: 'permanent fence rejection test', skills: [], enabled: true,
+    nextRunAt: Date.now() + 25, repeat: 'once', time: '09:00', deleteAfterRun: false,
+  };
+  const permanentFixture = fixture(t, [], { tasks: [permanentTask] });
+  const permanentFence = deferred();
+  let fenceCalls = 0;
+  permanentFixture.open(fencedRuntime({
+    getScheduleFence() {
+      fenceCalls += 1;
+      permanentFence.resolve();
+      throw Object.assign(new Error('bot is archived and read-only'), { code: 'BOT_ARCHIVED' });
+    },
+  }));
+  t.mock.timers.tick(25);
+  await permanentFence.promise;
+  await until(() => permanentFixture.readRun()?.status === 'not_sent', 'permanent fence rejection did not settle as not_sent');
+  assert.equal(permanentFixture.readRun().reason, 'not_sent');
+  assert.equal(permanentFixture.readRun().submitted, true);
+  assert.equal(permanentFixture.readRun().handoff, undefined);
+  assert.equal(fenceCalls, 1);
+});
+
+test('schedule recovery: deleted task or archived bot closes armed occurrence after missing lookup and deleteBot preserves terminal runs', async (t) => {
+  const deletedTaskFixture = fixture(t, [occurrence()], { tasks: [] });
+  let deletedLookups = 0;
+  deletedTaskFixture.open(fencedRuntime({
+    getSubmission() { deletedLookups += 1; return null; },
+  }));
+  await until(() => deletedTaskFixture.readRun().status === 'skipped_offline', 'deleted task occurrence did not skip');
+  assert.equal(deletedTaskFixture.readRun().reason, 'task_deleted');
+  assert.equal(deletedLookups, 1);
+
+  const archivedBotFixture = fixture(t, [occurrence()], { bot: { ...BOT, archivedAt: Date.now() } });
+  let archivedLookups = 0;
+  archivedBotFixture.open(fencedRuntime({
+    getSubmission() { archivedLookups += 1; return null; },
+  }));
+  await until(() => archivedBotFixture.readRun().status === 'skipped_offline', 'archived bot occurrence did not skip');
+  assert.equal(archivedBotFixture.readRun().reason, 'bot_unavailable');
+  assert.equal(archivedLookups, 1);
+
+  const terminalFixture = fixture(t, [occurrence({
+    status: 'not_sent', reason: 'not_sent', finishedAt: 1234, submitted: true,
+  })]);
+  const manager = terminalFixture.open(fencedRuntime());
+  await manager.deleteBot(BOT);
+  assert.equal(terminalFixture.readRun().status, 'not_sent');
+  assert.equal(terminalFixture.readRun().reason, 'not_sent');
+  assert.equal(terminalFixture.readRun().finishedAt, 1234);
+});
+
+test('schedule recovery: past-due tasks on restart are marked skipped_offline without catch-up submission', async (t) => {
+  const pastDue = Date.now() - 60_000;
+  const onceId = '33333333-3333-4333-8333-333333333333';
+  const dailyId = '44444444-4444-4444-8444-444444444444';
+  const f = fixture(t, [], {
+    tasks: [
+      { id: onceId, revision: 1, owner: { ...OWNER }, title: 'missed once', prompt: 'once',
+        skills: [], enabled: true, nextRunAt: pastDue, repeat: 'once', time: '09:00', deleteAfterRun: false },
+      { id: dailyId, revision: 1, owner: { ...OWNER }, title: 'missed daily', prompt: 'daily',
+        skills: [], enabled: true, nextRunAt: pastDue, repeat: 'daily', time: '09:00', deleteAfterRun: false },
+    ],
+  });
+  let runtimeCalls = 0;
+  f.open(fencedRuntime({
+    getScheduleFence() { runtimeCalls += 1; return { ...OWNER, stopEpoch: 1 }; },
+    getSubmission() { runtimeCalls += 1; return null; },
+    submitScheduled() { runtimeCalls += 1; return receipt('done'); },
+  }));
+  const state = f.readState();
+  assert.equal(state.runs.length, 2);
+  for (const run of state.runs) {
+    assert.equal(run.status, 'skipped_offline');
+    assert.equal(run.reason, 'offline');
+    assert.equal(run.submitted, true);
+  }
+  const onceTask = state.tasks.find((task) => task.id === onceId);
+  const dailyTask = state.tasks.find((task) => task.id === dailyId);
+  assert.equal(onceTask.enabled, false);
+  assert.equal(onceTask.nextRunAt, 0);
+  assert.equal(dailyTask.enabled, true);
+  assert.ok(dailyTask.nextRunAt > Date.now());
+  assert.equal(runtimeCalls, 0);
 });
 
 function event(overrides = {}) {

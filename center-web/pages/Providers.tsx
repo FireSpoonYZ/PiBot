@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Check, Copy, ExternalLink, Plus, RefreshCw, Sparkles, Trash2 } from 'lucide-react';
+import { Check, Copy, Plus, RefreshCw, Sparkles, Trash2 } from 'lucide-react';
 import type {
   CredentialInfo,
   Device,
@@ -89,7 +89,7 @@ const BLANK_PROVIDER: Provider = {
 const BLANK_MODEL: Model = {
   id: '',
   name: '',
-  contextWindow: 128000,
+  contextWindow: 262144,
   maxTokens: 16384,
   input: ['text'],
   reasoning: false,
@@ -1400,16 +1400,22 @@ export default function Providers() {
 
                       {/* 2. Browser authorization URL event */}
                       {latestAuthEvent?.type === 'auth_url' && latestAuthEvent.url ? (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                        <div className="cw-oauth-step">
+                          <div className="cw-oauth-step-label">
+                            {latestAuthEvent.instructions || '1. 点击下方链接在系统默认浏览器中完成登录：'}
+                          </div>
+                          <div className="cw-oauth-url-row">
                             <a
-                              className="cw-btn is-accent"
                               href={latestAuthEvent.url}
                               target="_blank"
                               rel="noopener noreferrer"
+                              className="cw-oauth-link"
+                              onClick={e => {
+                                e.preventDefault();
+                                window.open(latestAuthEvent.url!, '_blank', 'noopener,noreferrer');
+                              }}
                             >
-                              <ExternalLink size={15} />
-                              打开授权页面
+                              {latestAuthEvent.url}
                             </a>
                             <button
                               type="button"
@@ -1417,7 +1423,7 @@ export default function Providers() {
                               onClick={() => void copyToClipboard(latestAuthEvent.url!, 'auth_url')}
                             >
                               {copiedText === 'auth_url' ? <Check size={14} /> : <Copy size={14} />}
-                              {copiedText === 'auth_url' ? '已复制链接' : '复制授权链接'}
+                              {copiedText === 'auth_url' ? '已复制' : '复制'}
                             </button>
                           </div>
                         </div>
@@ -1439,17 +1445,33 @@ export default function Providers() {
                             </button>
                           </div>
                           {latestAuthEvent.verificationUri ? (
-                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                              <a
-                                className="cw-btn is-accent"
-                                href={latestAuthEvent.verificationUri}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                onClick={() => void copyToClipboard(latestAuthEvent.userCode!, 'device_code')}
-                              >
-                                <ExternalLink size={15} />
-                                复制授权码并打开验证页
-                              </a>
+                            <div className="cw-oauth-step">
+                              <div className="cw-oauth-step-label">
+                                点击下方验证页链接打开并输入上方授权码（点击时会自动复制授权码）：
+                              </div>
+                              <div className="cw-oauth-url-row">
+                                <a
+                                  href={latestAuthEvent.verificationUri}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="cw-oauth-link"
+                                  onClick={e => {
+                                    e.preventDefault();
+                                    void copyToClipboard(latestAuthEvent.userCode!, 'device_code');
+                                    window.open(latestAuthEvent.verificationUri!, '_blank', 'noopener,noreferrer');
+                                  }}
+                                >
+                                  {latestAuthEvent.verificationUri}
+                                </a>
+                                <button
+                                  type="button"
+                                  className="cw-btn is-small"
+                                  onClick={() => void copyToClipboard(latestAuthEvent.verificationUri!, 'verification_uri')}
+                                >
+                                  {copiedText === 'verification_uri' ? <Check size={14} /> : <Copy size={14} />}
+                                  {copiedText === 'verification_uri' ? '已复制' : '复制'}
+                                </button>
+                              </div>
                             </div>
                           ) : null}
                           <span className="secondary" style={{ fontSize: '0.79rem' }}>

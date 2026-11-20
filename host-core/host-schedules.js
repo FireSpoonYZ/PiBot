@@ -94,8 +94,9 @@ function handoffOf(run) {
 function pendingHandoff(run) {
   const handoff = handoffOf(run);
   // Older Hosts can have recorded acceptance without updating the new field.
-  // Never turn a known accepted receipt into a fresh submission after downgrade.
+  // Never turn a known accepted receipt or terminal run into a fresh submission.
   return handoff?.state === 'pending' &&
+    ACTIVE_RUNS.has(run.status) &&
     !(Number.isSafeInteger(run.submissionId) && run.submissionId > 0) &&
     !SUBMISSION_ACTIVE.has(run.submissionStatus) && !SUBMISSION_TERMINAL.has(run.submissionStatus) &&
     !SUBMISSION_ACTIVE.has(run.status) && !SUBMISSION_TERMINAL.has(run.status)
@@ -676,6 +677,13 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
               run: structuredClone(run), supportsHandoff };
           }
           if (status === 'dispatching' && !submitted) {
+            if (run.handoff !== undefined) {
+              if (handoffOf(run)?.state === 'accepted') {
+                lastPlanIndex = i;
+                return { kind: 'getSubmission', runId: run.id, run: structuredClone(run) };
+              }
+              continue;
+            }
             const task = st.tasks.find((t) => t.id === run.taskId);
             const bot = host.getBot(ownerOf(run).botId);
             if (!task || !bot || bot.archivedAt) {
@@ -754,7 +762,12 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
         const now = Date.now();
         if (step.kind === 'getScheduleFence') {
           const runOwner = ownerOf(run);
-          if (!error && isPlainObject(result) && result.botId === runOwner.botId &&
+          if (error && (NOT_SENT_ERROR_CODES.has(error.code) || error.code === 'REQUEST_CONFLICT')) {
+            run.status = 'not_sent';
+            run.reason = 'not_sent';
+            run.finishedAt = now;
+            run.submitted = true;
+          } else if (!error && isPlainObject(result) && result.botId === runOwner.botId &&
               result.conversationId === runOwner.conversationId &&
               Number.isSafeInteger(result.stopEpoch) && result.stopEpoch >= 0 &&
               run.status === 'dispatching' && !run.submitted && run.handoff === undefined) {
@@ -768,7 +781,7 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
             };
             continueNow = true;
           }
-          // Unarmed failures remain dispatching. They must never be mistaken for
+          // Unarmed transient failures remain dispatching. They must never be mistaken for
           // an attempted legacy submission, or a durable, recoverable handoff.
           run.updatedAt = now;
         } else if (error) {

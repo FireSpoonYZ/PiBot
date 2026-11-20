@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createRuntimeWaits } from '../../host-core/runtime-waits.js';
+import { canDetachPrimaryWait, createRuntimeWaits } from '../../host-core/runtime-waits.js';
 import { createPlugin } from '../../plugins/ask-user-question/entry.js';
 
 // A transactional store shared by successive factory instances. These tests
@@ -418,90 +418,439 @@ test('cancellation recovery reports incomplete cancellation and can retry an arc
   assert.equal(f.state.sent.length, 0);
 });
 
-async function questionTool(t, { inputKind = 'model', toolCount = 1 } = {}) {
+async function questionTool(t, {
+  inputKind = 'model',
+  toolCount = 1,
+  openResult = undefined,
+  existingWait = null,
+  existingRequest = null,
+  initialPhase = undefined,
+  watchAnswer = null,
+  withWaits = true,
+} = {}) {
   const LiveDoc = { definition: { kind: 'pi.live' } };
   const calls = [];
+  const memos = new Map();
+  if (initialPhase !== undefined) memos.set('ask-user-question.phase', initialPhase);
+  let requestDoc = existingRequest ? structuredClone(existingRequest) : null;
+  let commitCount = 0;
+  const publishedDetails = [];
   const host = {
     context: {},
     sdk: { defineDoc: definition => ({ definition }), defineTool: definition => definition, LiveDoc },
     getHarness: () => ({ inspect: async () => ({ tasks: [] }) }),
     assertCapabilityAllowed() {},
-    waits: { open: async (_botId, input) => {
-      calls.push(input);
-      return { status: 'pending', details: input.details };
-    } },
+    ...(withWaits ? {
+      waits: {
+        get: async () => existingWait ? structuredClone(existingWait) : null,
+        open: async (_botId, input) => {
+          calls.push(input);
+          if (openResult !== undefined) return openResult;
+          return { status: 'pending', params: input.params, details: input.details };
+        },
+      },
+    } : {}),
   };
   const instance = createPlugin({ installationId: 'question-plugin', host });
   const bot = await instance.forBot({ botId: 'alpha' });
   t.after(() => instance.close());
   const api = {
     taskId: 42, conversationId: 12,
-    memo: async () => undefined,
+    async memo(key, value) {
+      if (arguments.length >= 3 || (arguments.length === 2 && typeof value === 'string')) {
+        memos.set(key, value);
+        return value;
+      }
+      return memos.get(key);
+    },
     getTask: async () => ({ kind: 'pi.tool', input: { kind: inputKind } }),
-    snapshot: async token => token === LiveDoc ? {
-      tools: Array.from({ length: toolCount }, (_, i) => ({
-        taskId: i === 0 ? 42 : 43, name: i === 0 ? 'ask_user_question' : 'another_tool',
-      })),
-    } : null,
-    details: async () => {},
+    snapshot: async token => {
+      if (token === LiveDoc) {
+        return {
+          tools: Array.from({ length: toolCount }, (_, i) => ({
+            taskId: i === 0 ? 42 : 43, name: i === 0 ? 'ask_user_question' : 'another_tool',
+          })),
+        };
+      }
+      return requestDoc ? structuredClone(requestDoc) : null;
+    },
+    commit: async (fn) => {
+      commitCount += 1;
+      const draft = requestDoc ? structuredClone(requestDoc) : {
+        version: 1,
+        status: 'settled',
+        params: { questions: [] },
+        details: { presentation: { kind: 'questionnaire', version: 1 }, questions: [] },
+      };
+      await fn({
+        task: async () => ({
+          id: 42, kind: 'pi.tool', conversationId: 12,
+          abortRequested: false, state: { status: 'running' },
+        }),
+        doc: async () => draft,
+      });
+      requestDoc = draft;
+    },
+    watchDoc: async () => {
+      const value = watchAnswer
+        ? {
+            ...(requestDoc ?? { params: { questions } }),
+            status: watchAnswer.cancelled ? 'cancelled' : 'answered',
+            result: {
+              ...watchAnswer,
+              answers: watchAnswer.answers.map(answer => ({
+                question: questions[answer.questionIndex].question,
+                kind: 'option',
+                ...answer,
+              })),
+            },
+          }
+        : structuredClone(requestDoc);
+      return {
+        value,
+        closed: new Promise(() => {}),
+        start() {},
+        stop: async () => {},
+      };
+    },
+    details: async (d) => { publishedDetails.push(structuredClone(d)); },
   };
-  return { tool: bot.durableContributions.tools[0], api, calls };
+  return {
+    tool: bot.durableContributions.tools[0],
+    api, calls, memos, publishedDetails,
+    get requestDoc() { return requestDoc; },
+    get commitCount() { return commitCount; },
+  };
 }
 
+test('canDetachPrimaryWait strictly admits only unscoped non-task-dispatch primary turns without workNativeId', () => {
+  const basePrimary = {
+    requestId: 'req-1', kind: 'primary', scopeId: null,
+    replyTarget: { kind: 'primary' },
+    sender: { kind: 'user', deviceId: 'device' },
+  };
+  assert.equal(canDetachPrimaryWait(basePrimary, null), true);
+  assert.equal(canDetachPrimaryWait({ ...basePrimary, sender: { kind: 'host', sourceType: 'schedule' } }, null), true);
+  assert.equal(canDetachPrimaryWait({ ...basePrimary, sender: { kind: 'host', sourceType: 'webhook' } }, null), true);
+  assert.equal(canDetachPrimaryWait({ ...basePrimary, originRequestId: 'req-0', sender: { kind: 'host' } }, undefined), true);
+
+  assert.equal(canDetachPrimaryWait(null, null), false);
+  assert.equal(canDetachPrimaryWait(undefined, null), false);
+  assert.equal(canDetachPrimaryWait(basePrimary, { taskId: 'global-task', stepId: 's1', executionRevision: 1 }), false);
+  assert.equal(canDetachPrimaryWait({ ...basePrimary, sender: { kind: 'host', sourceType: 'task_dispatch' } }, null), false);
+  assert.equal(canDetachPrimaryWait({ ...basePrimary, workNativeId: 7 }, null), false);
+  assert.equal(canDetachPrimaryWait({ ...basePrimary, scopeId: 'room-1' }, null), false);
+  assert.equal(canDetachPrimaryWait({ ...basePrimary, kind: 'dm', scopeId: 'dm-1', replyTarget: { kind: 'dm', scopeId: 'dm-1', botId: 'peer' } }, null), false);
+  assert.equal(canDetachPrimaryWait({ ...basePrimary, kind: 'room', scopeId: 'room-1', replyTarget: { kind: 'room', scopeId: 'room-1' } }, null), false);
+  assert.equal(canDetachPrimaryWait({ ...basePrimary, replyTarget: { kind: 'room', scopeId: 'room-1' } }, null), false);
+  assert.equal(canDetachPrimaryWait({ ...basePrimary, replyTarget: { kind: 'primary', scopeId: 'room-1' } }, null), false);
+  assert.equal(canDetachPrimaryWait({ ...basePrimary, replyTarget: null }, null), false);
+});
+
+test('open with canDetach returns null and writes no wait for out-of-scope turns while keeping Stop fencing', async t => {
+  let changes = 0;
+  const f = fixture(t, { canDetach: canDetachPrimaryWait, onChange() { changes += 1; } });
+
+  // Fixture defaults to a DM + task dispatch source -> out of scope.
+  assert.equal(await f.open('42', 'scope-a', 12), null);
+  assert.deepEqual(await f.waits.list('alpha'), []);
+  assert.equal(await f.waits.get('alpha', f.identity), null);
+  assert.equal(changes, 0);
+
+  // Scoped room without dispatchContext -> still out of scope.
+  f.source.dispatchContext = null;
+  f.source.turn = {
+    requestId: 'room-req', kind: 'room', scopeId: 'room-1',
+    replyTarget: { kind: 'room', scopeId: 'room-1' },
+    sender: { kind: 'user', deviceId: 'device' },
+  };
+  assert.equal(await f.open('43', 'room-1', 12), null);
+
+  // Primary with task dispatchContext -> out of scope.
+  f.source.turn = {
+    requestId: 'task-req', kind: 'primary', scopeId: null,
+    replyTarget: { kind: 'primary' },
+    sender: { kind: 'host', sourceType: 'webhook', deviceId: 'device' },
+  };
+  f.source.dispatchContext = { taskId: 'global-task', stepId: 'step-1', executionRevision: 1 };
+  assert.equal(await f.open('44', null, 12), null);
+
+  // Primary late work-reply carrying workNativeId -> out of scope.
+  f.source.dispatchContext = null;
+  f.source.turn = {
+    requestId: 'late-work-reply', kind: 'primary', scopeId: null, workNativeId: 9,
+    replyTarget: { kind: 'primary' },
+    sender: { kind: 'host', deviceId: 'device' },
+  };
+  assert.equal(await f.open('45', null, 12), null);
+
+  // Non-primary conversation returning { turn: null } without Stop -> out of scope (returns null).
+  f.dependencies.captureContext = async () => ({ turn: null, dispatchContext: null, stopEpoch: f.state.epoch });
+  await f.reopen();
+  assert.equal(await f.open('46', null, 12), null);
+  assert.deepEqual(await f.waits.list('alpha'), []);
+  assert.equal(changes, 0);
+
+  // Actual Stop race must still throw WAIT_CANCELLED rather than silently falling back.
+  f.dependencies.captureContext = async () => {
+    f.state.epoch += 1;
+    return { turn: null, dispatchContext: null, stopEpoch: f.state.epoch };
+  };
+  await f.reopen();
+  await assert.rejects(f.open('47', null, 12), error => error.code === 'WAIT_CANCELLED');
+  assert.deepEqual(await f.waits.list('alpha'), []);
+
+  // Eligible unscoped primary without dispatchContext or workNativeId -> persists detached wait.
+  f.dependencies.captureContext = async () => ({
+    turn: {
+      requestId: 'primary-req', kind: 'primary', scopeId: null,
+      replyTarget: { kind: 'primary' },
+      sender: { kind: 'user', deviceId: 'device' },
+    },
+    dispatchContext: null,
+    stopEpoch: f.state.epoch,
+  });
+  await f.reopen();
+  const opened = await f.open('48', null, 12);
+  assert.equal(opened?.status, 'pending');
+  assert.equal((await f.waits.list('alpha')).length, 1);
+  assert.equal(changes, 1);
+});
+
+test('existing experimental unsupported waits are safely retired offline and never submitted or re-admitted', async t => {
+  // Seed experimental waits using an unrestricted instance (pre-compatibility state).
+  const f = fixture(t);
+  // 1) Pending DM wait
+  const dmId = { ...f.identity, requestId: '42' };
+  await f.open('42', 'scope-dm', 12);
+
+  // 2) Answered room wait already accepted into TurnQueue (resume.state = 'accepted')
+  const roomAcceptedId = { ...f.identity, requestId: '43' };
+  f.source.dispatchContext = null;
+  f.source.turn = {
+    requestId: 'room-req-1', kind: 'room', scopeId: 'room-1',
+    replyTarget: { kind: 'room', scopeId: 'room-1' },
+    sender: { kind: 'user', deviceId: 'device' },
+  };
+  const roomAccepted = await f.open('43', 'room-1', 12);
+  await f.waits.answer('alpha', roomAcceptedId, record => ({
+    result: { answers: [{ questionIndex: 0, answer: 'B' }], cancelled: false },
+    details: { ...record.details, presentation: { ...record.details.presentation, status: 'answered' } },
+    text: 'Room answer already accepted',
+  }));
+  f.state.ready = true;
+  await f.waits.reconcile('alpha');
+  assert.equal((await f.waits.get('alpha', roomAcceptedId)).resume.state, 'accepted');
+  const sentBeforeUpgrade = f.state.sent.length;
+  assert.equal(sentBeforeUpgrade, 1);
+
+  // 3) Answered task-dispatch wait still waiting for admission (resume.state = 'pending')
+  f.state.ready = false;
+  const taskPendingId = { ...f.identity, requestId: '44' };
+  f.source.turn = {
+    requestId: 'task-req-1', kind: 'primary', scopeId: null,
+    replyTarget: { kind: 'primary' },
+    sender: { kind: 'host', sourceType: 'webhook', deviceId: 'device' },
+  };
+  f.source.dispatchContext = { taskId: 'global-task', stepId: 'step-1', executionRevision: 1 };
+  const taskPending = await f.open('44', null, 12);
+  await f.waits.answer('alpha', taskPendingId, record => ({
+    result: { answers: [{ questionIndex: 0, answer: 'A' }], cancelled: false },
+    details: { ...record.details, presentation: { ...record.details.presentation, status: 'answered' } },
+    text: 'Task answer before restart',
+  }));
+  assert.equal((await f.waits.get('alpha', taskPendingId)).resume.state, 'pending');
+
+  // Reopen offline with strict deployed eligibility (canDetachPrimaryWait).
+  let lookups = 0;
+  const origGetSubmission = f.dependencies.getSubmission;
+  f.dependencies.canDetach = canDetachPrimaryWait;
+  f.dependencies.getSubmission = async (...args) => { lookups += 1; return origGetSubmission(...args); };
+  f.state.ready = false;
+  await f.reopen();
+
+  // Projection never marks unsupported records as live; late answer cancels & stays inert.
+  const dmDetails = { ...f.details, presentation: { ...f.details.presentation, requestId: '42' } };
+  const projected = await f.waits.getPresentation('alpha', dmDetails);
+  assert.equal(projected.live, false);
+  assert.equal(projected.status, 'cancelled');
+
+  let resolveCalled = false;
+  assert.deepEqual(await f.waits.answer('alpha', dmId, () => {
+    resolveCalled = true;
+    throw new Error('unsupported wait must not resolve');
+  }), { status: 'settled' });
+  assert.equal(resolveCalled, false);
+  assert.equal((await f.waits.get('alpha', dmId)).status, 'cancelled');
+
+  // Offline cancellation recovery cancels accepted/pending unsupported continuations
+  // without looking up or submitting anything.
+  await f.waits.recoverCancellations();
+  assert.equal(lookups, 0, 'offline recovery must not look up submissions');
+  assert.equal(f.state.sent.length, sentBeforeUpgrade, 'unsupported waits must never submit');
+  assert.ok(f.state.cancelledRequests.includes(taskPending.resumeRequestId));
+  assert.ok(f.state.cancelledRequests.includes(roomAccepted.resumeRequestId));
+  assert.equal((await f.waits.get('alpha', taskPendingId)).resume.state, 'cancelled');
+  assert.equal((await f.waits.get('alpha', roomAcceptedId)).resume.state, 'cancelled');
+  assert.deepEqual(await f.waits.list('alpha'), []);
+
+  // Even if reconcile runs online afterwards, nothing re-admits.
+  f.state.ready = true;
+  await f.waits.reconcile('alpha');
+  assert.equal(f.state.sent.length, sentBeforeUpgrade);
+});
+
+test('unsupported experimental wait retries offline cancellation after error and rechecks canDetach before submission', async t => {
+  const f = fixture(t);
+  let allowDetach = true;
+  f.dependencies.canDetach = () => allowDetach;
+  await f.reopen();
+
+  const opened = await f.open('42', 'scope-a', 12);
+  await f.answer('Answer while temporarily allowed');
+
+  // Flip eligibility while getSubmission is in flight: reconcile must recheck
+  // canDetach right before submitContinuation and cancel instead of submitting.
+  let releaseLookup;
+  const origCancel = f.dependencies.cancelContinuation;
+  let failCancelOnce = true;
+  f.dependencies.getSubmission = async () => new Promise(resolve => {
+    allowDetach = false;
+    releaseLookup = resolve;
+    queueMicrotask(() => releaseLookup(null));
+  });
+  f.dependencies.cancelContinuation = async (...args) => {
+    if (failCancelOnce) {
+      failCancelOnce = false;
+      throw Object.assign(new Error('offline cancel error'), { code: 'CANCEL_INCOMPLETE' });
+    }
+    return origCancel(...args);
+  };
+  await f.reopen();
+  allowDetach = true;
+  f.state.ready = true;
+  await assert.rejects(f.waits.reconcile('alpha'), error => error.code === 'CANCEL_INCOMPLETE');
+  assert.equal(f.state.sent.length, 0, 'pre-submit canDetach recheck must prevent submission');
+  const cancelling = await f.waits.get('alpha', f.identity);
+  assert.equal(cancelling.status, 'cancelled');
+  assert.equal(cancelling.resume.state, 'cancelling');
+  assert.equal((await f.waits.list('alpha')).length, 1);
+
+  // Subsequent offline recovery finishes cancelling and retires the record.
+  f.state.ready = false;
+  await f.waits.recoverCancellations('alpha');
+  assert.deepEqual(f.state.cancelledRequests, [opened.resumeRequestId]);
+  assert.equal((await f.waits.get('alpha', f.identity)).resume.state, 'cancelled');
+  assert.deepEqual(await f.waits.list('alpha'), []);
+});
+
 test('a sole model-issued questionnaire publishes a durable wait and returns terminate immediately', async t => {
-  const { tool, api, calls } = await questionTool(t);
-  assert.deepEqual(tool.callers, ['model']);
+  const { tool, api, calls, memos } = await questionTool(t);
+  assert.equal(tool.callers, undefined, 'SDK default [model, tools] callers must remain preserved');
   const result = await tool.execute({ questions }, api, {});
   assert.equal(calls.length, 1);
+  assert.equal(memos.get('ask-user-question.phase'), 'deferred');
   assert.equal(result.details.presentation.status, 'pending');
   assert.deepEqual(result.control, { terminate: true });
 });
 
-test('a multi-tool round cannot create a wait that would fail to release the run', async t => {
-  const { tool, api, calls } = await questionTool(t, { toolCount: 2 });
-  const result = await tool.execute({ questions }, api, {});
-  assert.equal(result.isError, true);
-  assert.equal(calls.length, 0);
+test('out-of-scope standalone questionnaire falls back to live-task protocol when waits.open returns null', async t => {
+  const q = await questionTool(t, {
+    openResult: null,
+    watchAnswer: { answers: [{ questionIndex: 0, answer: 'A' }], cancelled: false },
+  });
+  const result = await q.tool.execute({ questions }, q.api, {});
+  assert.equal(q.calls.length, 1);
+  assert.equal(q.memos.get('ask-user-question.phase'), 'open');
+  assert.equal(result.isError, undefined);
   assert.equal(result.control, undefined);
+  assert.match(result.output[0].text, /A/);
+  assert.doesNotMatch(result.output[0].text, /execution is paused|Bot is free/i);
+  assert.equal(q.requestDoc?.status, 'pending');
 });
 
-test('a new nested tool invocation cannot create a wait whose control is ignored', async t => {
-  const { tool, api, calls } = await questionTool(t, { inputKind: 'nested' });
+test('a multi-tool round preserves live-task fallback without creating a durable wait', async t => {
+  const { tool, api, calls, memos } = await questionTool(t, {
+    toolCount: 2,
+    watchAnswer: { answers: [{ questionIndex: 0, answer: 'B' }], cancelled: false },
+  });
   const result = await tool.execute({ questions }, api, {});
-  assert.equal(result.isError, true);
+  assert.equal(result.isError, undefined);
   assert.equal(calls.length, 0);
+  assert.equal(memos.get('ask-user-question.phase'), 'open');
+  assert.equal(result.control, undefined);
+  assert.match(result.output[0].text, /B/);
+  assert.doesNotMatch(result.output[0].text, /execution is paused|Bot is free/i);
 });
 
-test('an existing nested questionnaire retains its old live-task protocol during upgrade', async t => {
+test('a nested or codemode-only tool invocation preserves live-task fallback without creating a durable wait', async t => {
+  const { tool, api, calls, memos } = await questionTool(t, {
+    inputKind: 'nested',
+    watchAnswer: { answers: [{ questionIndex: 0, answer: 'A' }], cancelled: false },
+  });
+  assert.equal(tool.callers, undefined, 'nested/codemode callers must remain enabled');
+  const result = await tool.execute({ questions }, api, {});
+  assert.equal(result.isError, undefined);
+  assert.equal(calls.length, 0);
+  assert.equal(memos.get('ask-user-question.phase'), 'open');
+  assert.equal(result.control, undefined);
+  assert.match(result.output[0].text, /A/);
+  assert.doesNotMatch(result.output[0].text, /execution is paused|Bot is free/i);
+});
+
+test('existing in-flight open and deferred replays remain coherent and idempotent across memo boundaries', async t => {
   const oldDetails = { presentation: {
     kind: 'questionnaire', version: 1, installationId: 'question-plugin',
     conversationId: 12, requestId: '42', status: 'pending', questions,
   }, questions };
   const oldRecord = { status: 'pending', params: { questions }, details: oldDetails };
-  const nestedTask = { id: 42, kind: 'pi.tool', conversationId: 12,
-    input: { kind: 'nested', call: { name: 'ask_user_question' } } };
-  let newWaitCalls = 0;
-  const host = {
-    context: {},
-    sdk: { defineDoc: definition => ({ definition }), defineTool: definition => definition },
-    getHarness: () => ({
-      inspect: async () => ({ tasks: [{ record: nestedTask }] }),
-      snapshot: async () => oldRecord,
-    }),
-    resolveConversationBot: async () => 'alpha', assertCapabilityAllowed() {},
-    waits: { open() { newWaitCalls += 1; throw new Error('legacy request must not be republished'); } },
-  };
-  const instance = createPlugin({ installationId: 'question-plugin', host });
-  const bot = await instance.forBot({ botId: 'alpha' });
-  t.after(() => instance.close());
-  const tool = bot.durableContributions.tools[0];
-  assert.deepEqual(tool.callers, ['model', 'tools']);
-  const result = await tool.execute({ questions }, {
-    taskId: 42, conversationId: 12, memo: async () => 'open',
-    watchDoc: async () => ({ value: { ...oldRecord, status: 'answered',
-      result: { answers: [], cancelled: true } }, stop: async () => {} }),
-  }, {});
-  assert.equal(newWaitCalls, 0);
-  assert.equal(result.control, undefined);
-  assert.match(result.output[0].text, /declined/);
+
+  // 1) Pre-upgrade/in-flight 'open' memo stays on live-task path without calling waits.open.
+  const openReplay = await questionTool(t, {
+    inputKind: 'nested',
+    initialPhase: 'open',
+    existingRequest: oldRecord,
+    watchAnswer: { answers: [], cancelled: true },
+  });
+  const openResult = await openReplay.tool.execute({ questions }, openReplay.api, {});
+  assert.equal(openReplay.calls.length, 0);
+  assert.equal(openResult.control, undefined);
+  assert.match(openResult.output[0].text, /declined/);
+
+  // 2) Pre-memo committed Request doc (crash before memo('open')) stays on live-task path.
+  const preMemoOpen = await questionTool(t, {
+    inputKind: 'model',
+    toolCount: 1,
+    existingRequest: oldRecord,
+    watchAnswer: { answers: [{ questionIndex: 0, answer: 'A' }], cancelled: false },
+  });
+  const preMemoOpenResult = await preMemoOpen.tool.execute({ questions }, preMemoOpen.api, {});
+  assert.equal(preMemoOpen.calls.length, 0);
+  assert.equal(preMemoOpen.memos.get('ask-user-question.phase'), 'open');
+  assert.equal(preMemoOpenResult.control, undefined);
+  assert.match(preMemoOpenResult.output[0].text, /A/);
+
+  // 3) Replayed 'deferred' memo reads existing DurableWait idempotently without writing Request.
+  const deferredReplay = await questionTool(t, {
+    initialPhase: 'deferred',
+    existingWait: { status: 'cancelled', reason: 'stopped', params: { questions }, details: {
+      ...oldDetails, presentation: { ...oldDetails.presentation, status: 'cancelled' },
+    } },
+  });
+  const deferredResult = await deferredReplay.tool.execute({ questions }, deferredReplay.api, {});
+  assert.equal(deferredReplay.calls.length, 0);
+  assert.equal(deferredReplay.commitCount, 0);
+  assert.deepEqual(deferredResult.control, { terminate: true });
+  assert.equal(deferredResult.details.presentation.status, 'cancelled');
+  assert.match(deferredResult.output[0].text, /cancelled/i);
+
+  // 4) Pre-memo committed DurableWait (crash between waits.open and memo('deferred')) stays deferred.
+  const preMemoDeferred = await questionTool(t, {
+    existingWait: { status: 'pending', params: { questions }, details: oldDetails },
+  });
+  const preMemoDeferredResult = await preMemoDeferred.tool.execute({ questions }, preMemoDeferred.api, {});
+  assert.equal(preMemoDeferred.calls.length, 0);
+  assert.equal(preMemoDeferred.commitCount, 0);
+  assert.equal(preMemoDeferred.memos.get('ask-user-question.phase'), 'deferred');
+  assert.deepEqual(preMemoDeferredResult.control, { terminate: true });
 });

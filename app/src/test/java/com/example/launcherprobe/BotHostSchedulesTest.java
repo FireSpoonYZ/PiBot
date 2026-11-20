@@ -5,13 +5,19 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import android.content.Context;
+import android.database.sqlite.SQLiteDatabase;
+import java.io.File;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -40,7 +46,13 @@ public class BotHostSchedulesTest {
     }
 
     @After public void stopUnusedExecutor() throws Exception {
-        if (schedules != null) ((ScheduledExecutorService) field("executor")).shutdownNow();
+        if (schedules != null) {
+            SQLiteDatabase db = (SQLiteDatabase) field("db");
+            if (db != null && db.isOpen()) db.close();
+            ((ScheduledExecutorService) field("executor")).shutdownNow();
+        }
+        File dbFile = new File(RuntimeEnvironment.getApplication().getFilesDir(), "bot-host/schedules.sqlite");
+        if (dbFile.exists()) dbFile.delete();
     }
 
     private Object field(String name) throws Exception {
@@ -236,5 +248,148 @@ public class BotHostSchedulesTest {
         assertFalse(mayRetry(recovered.getJSONObject(0)));
         assertEquals("skipped_offline", recovered.getJSONObject(1).getString("status"));
         assertEquals("offline", recovered.getJSONObject(1).getString("reason"));
+    }
+
+    @Test public void publicCallRejectsPrivateScheduleHandoffMethodsWhileScheduleCallAllowsThem() throws Exception {
+        Constructor<BotHostManager> ctor = BotHostManager.class.getDeclaredConstructor(Context.class);
+        ctor.setAccessible(true);
+        BotHostManager manager = ctor.newInstance(RuntimeEnvironment.getApplication());
+        Field controlField = BotHostManager.class.getDeclaredField("control");
+        controlField.setAccessible(true);
+        ExecutorService control = (ExecutorService) controlField.get(manager);
+        try {
+            for (String method : new String[] {"getScheduleFence", "submitScheduled"}) {
+                CompletableFuture<JSONObject> publicCall = manager.call(method, new JSONObject().put("botId", "bot-a"));
+                try {
+                    publicCall.join();
+                    fail("public call must reject " + method);
+                } catch (CompletionException error) {
+                    Throwable cause = error;
+                    while (cause instanceof CompletionException && cause.getCause() != null) cause = cause.getCause();
+                    assertTrue(cause instanceof BotHostProcess.BridgeException);
+                    BotHostProcess.BridgeException bridge = (BotHostProcess.BridgeException) cause;
+                    assertEquals("INVALID_ARGUMENT", bridge.code);
+                    assertEquals("not-sent", bridge.outcome);
+                }
+
+                CompletableFuture<JSONObject> privateCall =
+                        manager.scheduleCall(null, method, new JSONObject().put("botId", "bot-a"));
+                try {
+                    privateCall.join();
+                    fail("scheduleCall without running process must fail with NOT_CONNECTED");
+                } catch (CompletionException error) {
+                    Throwable cause = error;
+                    while (cause instanceof CompletionException && cause.getCause() != null) cause = cause.getCause();
+                    assertTrue(cause instanceof BotHostProcess.BridgeException);
+                    BotHostProcess.BridgeException bridge = (BotHostProcess.BridgeException) cause;
+                    assertEquals("NOT_CONNECTED", bridge.code);
+                }
+            }
+        } finally {
+            control.shutdownNow();
+        }
+    }
+
+    @Test public void getScheduleFencePermanentRejectionTerminatesWhileTransientFailureStaysUnarmed() throws Exception {
+        JSONObject transientRun = run();
+        call("applyError", new Class<?>[] {JSONObject.class, String.class, Throwable.class}, transientRun,
+                "getScheduleFence", new BotHostProcess.BridgeException("RUNTIME_BUSY", "responded", "maintenance"));
+        assertEquals("dispatching", transientRun.getString("status"));
+        assertFalse(transientRun.getBoolean("submitted"));
+        assertFalse(transientRun.has("handoff"));
+
+        call("applyError", new Class<?>[] {JSONObject.class, String.class, Throwable.class}, transientRun,
+                "getScheduleFence", new BotHostProcess.BridgeException("BOT_ARCHIVED", "unknown", "ambiguous"));
+        assertEquals("dispatching", transientRun.getString("status"));
+        assertFalse(transientRun.getBoolean("submitted"));
+        assertFalse(transientRun.has("handoff"));
+
+        JSONObject archivedRun = run();
+        call("applyError", new Class<?>[] {JSONObject.class, String.class, Throwable.class}, archivedRun,
+                "getScheduleFence", new BotHostProcess.BridgeException("BOT_ARCHIVED", "responded", "bot archived"));
+        assertEquals("not_sent", archivedRun.getString("status"));
+        assertEquals("not_sent", archivedRun.getString("reason"));
+        assertTrue(archivedRun.getBoolean("submitted"));
+        assertTrue(archivedRun.has("finishedAt"));
+        assertFalse(archivedRun.has("handoff"));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test public void terminalRunsAreNeverPendingAndDeleteOwnerNeutralizesArmedRunsOnly() throws Exception {
+        JSONObject terminalNotSent = armed().put("id", "run-not-sent")
+                .put("status", "not_sent").put("reason", "not_sent").put("finishedAt", 1234L).put("submitted", true);
+        assertNull(pending(terminalNotSent));
+        JSONObject terminalSkipped = armed().put("id", "run-skipped")
+                .put("status", "skipped_offline").put("reason", "offline").put("submitted", true);
+        assertNull(pending(terminalSkipped));
+
+        JSONObject armedUnconfirmed = armed().put("id", "run-armed").put("status", "unconfirmed").put("submitted", true);
+        JSONObject queuedRun = armed().put("id", "run-queued");
+        apply(queuedRun, "submit", envelope(receipt("queued", JSONObject.NULL)));
+        ((Set<String>) field("missingRunIds")).add("run-armed");
+
+        JSONObject serialized = new JSONObject().put("version", 1).put("tasks", new JSONArray())
+                .put("runs", new JSONArray().put(armedUnconfirmed).put(terminalNotSent).put(queuedRun));
+        SQLiteDatabase db = (SQLiteDatabase) call("db", new Class<?>[0]);
+        Class<?> stateClass = Class.forName("com.example.launcherprobe.BotHostSchedules$State");
+        Object state = call("parseState", new Class<?>[] {String.class}, serialized.toString());
+        call("save", new Class<?>[] {SQLiteDatabase.class, stateClass}, db, state);
+
+        Class<?> ownerClass = Class.forName("com.example.launcherprobe.BotHostSchedules$Owner");
+        Constructor<?> ownerCtor = ownerClass.getDeclaredConstructor(String.class, String.class, String.class);
+        ownerCtor.setAccessible(true);
+        Object owner = ownerCtor.newInstance("device-a", "bot-a", "primary-a");
+        call("deleteOwner", new Class<?>[] {ownerClass}, owner);
+
+        Object loaded = call("load", new Class<?>[] {SQLiteDatabase.class}, db);
+        Field runsField = stateClass.getDeclaredField("runs");
+        runsField.setAccessible(true);
+        JSONArray runs = (JSONArray) runsField.get(loaded);
+        assertEquals("skipped_offline", runs.getJSONObject(0).getString("status"));
+        assertEquals("task_deleted", runs.getJSONObject(0).getString("reason"));
+        assertFalse(mayRetry(runs.getJSONObject(0)));
+        assertEquals("not_sent", runs.getJSONObject(1).getString("status"));
+        assertEquals(1234L, runs.getJSONObject(1).getLong("finishedAt"));
+        assertEquals("queued", runs.getJSONObject(2).getString("status"));
+    }
+
+    @Test public void planStepLockedClosesArmedRunOfDeletedTaskAfterMissingLookup() throws Exception {
+        JSONObject armedRun = armed().put("status", "unconfirmed").put("submitted", true);
+        JSONObject serialized = new JSONObject().put("version", 1).put("tasks", new JSONArray())
+                .put("runs", new JSONArray().put(armedRun));
+        SQLiteDatabase db = (SQLiteDatabase) call("db", new Class<?>[0]);
+        Class<?> stateClass = Class.forName("com.example.launcherprobe.BotHostSchedules$State");
+        Object state = call("parseState", new Class<?>[] {String.class}, serialized.toString());
+        call("save", new Class<?>[] {SQLiteDatabase.class, stateClass}, db, state);
+
+        Class<?> connClass = Class.forName("com.example.launcherprobe.BotHostSchedules$Connection");
+        Constructor<?> connCtor = connClass.getDeclaredConstructor(
+                BotHostManager.class, BotHostProcess.class, String.class);
+        connCtor.setAccessible(true);
+        Object conn = connCtor.newInstance(null, null, "device-a");
+
+        // Before an authoritative missing lookup, still reconcile with getSubmission first.
+        Object firstStep = call("planStepLocked", new Class<?>[] {connClass}, conn);
+        assertNotNull(firstStep);
+        Field inflightField = firstStep.getClass().getDeclaredField("inflight");
+        inflightField.setAccessible(true);
+        Object inflight = inflightField.get(firstStep);
+        Field kindField = inflight.getClass().getDeclaredField("kind");
+        kindField.setAccessible(true);
+        assertEquals("getSubmission", kindField.get(inflight));
+
+        // Once missing is proven, deleted task closes as skipped_offline rather than submitting.
+        apply(armedRun, "getSubmission", envelope(JSONObject.NULL));
+        assertTrue(mayRetry(armedRun));
+        Object secondStep = call("planStepLocked", new Class<?>[] {connClass}, conn);
+        assertNull(secondStep);
+
+        Object loaded = call("load", new Class<?>[] {SQLiteDatabase.class}, db);
+        Field runsField = stateClass.getDeclaredField("runs");
+        runsField.setAccessible(true);
+        JSONObject settled = ((JSONArray) runsField.get(loaded)).getJSONObject(0);
+        assertEquals("skipped_offline", settled.getString("status"));
+        assertEquals("task_deleted", settled.getString("reason"));
+        assertFalse(mayRetry(settled));
     }
 }

@@ -2,6 +2,7 @@
 // 存储分区按 storageScope 隔离（自动剥离连接 generation，避免重连/刷新造成重置或重排）。
 // 仅在显式置顶/取消置顶/拖拽或键盘重排/移除时写入 localStorage，换分区绝不将旧分区值写入新分区。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useText } from '../ui';
 
 const STORAGE_KEY_PREFIX = 'gbot-chat-pins:v1:';
 
@@ -98,10 +99,19 @@ export function reorderExistingPins(
   return currentPins.map((key) => (seen.has(key) ? subset[subsetIndex++]! : key));
 }
 
-function formatStorageError(action: string, error: unknown): string {
+type PinTextFn = (zh: string, en: string) => string;
+
+function defaultPinText(zh: string, en: string): string {
+  const lang = typeof document !== 'undefined' && document.documentElement.lang
+    ? document.documentElement.lang
+    : (typeof navigator !== 'undefined' ? navigator.language : 'zh');
+  return lang.toLowerCase().startsWith('zh') ? zh : en;
+}
+
+function formatStorageError(action: string, error: unknown, t: PinTextFn): string {
   const detail =
     error instanceof Error && error.message ? error.message : String(error ?? 'unknown error');
-  return `${action}：${detail}`;
+  return `${action}${t('：', ': ')}${detail}`;
 }
 
 // 内存态按分区缓存：当 localStorage 不可用或写入配额失败时，当前会话内仍可继续置顶与排序交互。
@@ -115,11 +125,11 @@ interface ScopedPinState {
   error: string | null;
 }
 
-function readScopePins(scope: string): ScopedPinState {
+function readScopePins(scope: string, t: PinTextFn = defaultPinText): ScopedPinState {
   try {
     if (typeof window === 'undefined' || !window.localStorage) {
       const fallback = memoryByScope.get(scope) ?? [];
-      const err = '本地存储不可用 (localStorage unavailable)';
+      const err = t('本地存储不可用 (localStorage unavailable)', 'Local storage unavailable');
       errorByScope.set(scope, err);
       return { scope, keys: [...fallback], error: err };
     }
@@ -139,7 +149,7 @@ function readScopePins(scope: string): ScopedPinState {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) {
       const fallback = memoryByScope.get(scope) ?? [];
-      const err = '读取置顶状态失败：存储数据格式无效';
+      const err = t('读取置顶状态失败：存储数据格式无效', 'Failed to read pins: invalid stored data format');
       errorByScope.set(scope, err);
       return { scope, keys: [...fallback], error: err };
     }
@@ -149,31 +159,34 @@ function readScopePins(scope: string): ScopedPinState {
     return { scope, keys, error: null };
   } catch (err) {
     const fallback = memoryByScope.get(scope) ?? [];
-    const message = formatStorageError('读取置顶状态失败', err);
+    const message = formatStorageError(t('读取置顶状态失败', 'Failed to read pins'), err, t);
     errorByScope.set(scope, message);
     return { scope, keys: [...fallback], error: message };
   }
 }
 
-function writeScopePins(scope: string, keys: readonly string[]): string | null {
+function writeScopePins(scope: string, keys: readonly string[], t: PinTextFn = defaultPinText): string | null {
   try {
     if (typeof window === 'undefined' || !window.localStorage) {
-      return '本地存储不可用 (localStorage unavailable)';
+      return t('本地存储不可用 (localStorage unavailable)', 'Local storage unavailable');
     }
     window.localStorage.setItem(storageKeyForScope(scope), JSON.stringify(keys));
     return null;
   } catch (err) {
-    return formatStorageError('保存置顶状态失败', err);
+    return formatStorageError(t('保存置顶状态失败', 'Failed to save pins'), err, t);
   }
 }
 
 export function useChatPins(storageScope: string): UseChatPinsResult {
+  const t = useText();
+  const tRef = useRef<PinTextFn>(t);
+  tRef.current = t;
   const scope = useMemo(() => normalizePinStorageScope(storageScope), [storageScope]);
-  const [state, setState] = useState<ScopedPinState>(() => readScopePins(scope));
+  const [state, setState] = useState<ScopedPinState>(() => readScopePins(scope, tRef.current));
 
   // 分区切换时当拍同步按新分区读取，不经过写 effect，杜绝把旧分区状态写进新分区。
   const activeState = useMemo<ScopedPinState>(
-    () => (state.scope === scope ? state : readScopePins(scope)),
+    () => (state.scope === scope ? state : readScopePins(scope, tRef.current)),
     [state, scope],
   );
   const activeRef = useRef<ScopedPinState>(activeState);
@@ -181,7 +194,7 @@ export function useChatPins(storageScope: string): UseChatPinsResult {
 
   useEffect(() => {
     if (state.scope !== scope) {
-      setState(readScopePins(scope));
+      setState(readScopePins(scope, tRef.current));
     }
   }, [scope, state.scope]);
 
@@ -193,7 +206,7 @@ export function useChatPins(storageScope: string): UseChatPinsResult {
       return;
     }
     memoryByScope.set(targetScope, nextKeys);
-    const writeError = writeScopePins(targetScope, nextKeys);
+    const writeError = writeScopePins(targetScope, nextKeys, tRef.current);
     if (writeError !== null) {
       dirtyMemoryScopes.add(targetScope);
       errorByScope.set(targetScope, writeError);

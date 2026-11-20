@@ -1,6 +1,6 @@
 [package]
 name = "pibot"
-version = "0.0.21-dev.5"
+version = "0.0.25-dev.2"
 edition = "2021"
 publish = false
 
@@ -18,6 +18,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "=2.12.5", features = [] }
 tauri-plugin-dialog = "=2.8.3"
+tauri-plugin-single-instance = "=2.5.5"
 tauri-plugin-updater = "=2.14.1"
 reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider"] }
 sha2 = "0.10"
@@ -25,3 +26,6 @@ tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "=0.18.2"

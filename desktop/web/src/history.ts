@@ -1,10 +1,25 @@
 import type { HistoryEntryChunk } from '../../../host-core/index.js';
 
 type Cursor = Record<string, unknown> | null;
-interface HistoryPage<T> {
+export interface HistoryPage<T> {
   items: readonly T[];
   nextCursor: Cursor;
   entryChunk?: HistoryEntryChunk;
+  clearedThroughEntryId?: number;
+}
+
+export class HistoryEpochChangedError extends Error {
+  readonly code = 'HISTORY_EPOCH_CHANGED';
+  constructor(message = 'History reset epoch changed during read') {
+    super(message);
+    this.name = 'HistoryEpochChangedError';
+  }
+}
+
+function readClearedThroughEntryId(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
 }
 
 /** 一次返回完整条目；传输中的分片不进入聊天状态，也不截断原文。 */
@@ -17,6 +32,8 @@ export async function readHistoryPage<T>(
   let entryId: number | undefined;
   let offset = 0;
   let chunked = true;
+  let seenCleared = false;
+  let clearedThroughEntryId: number | undefined;
   for (;;) {
     let page: HistoryPage<T> | null;
     try {
@@ -35,6 +52,13 @@ export async function readHistoryPage<T>(
       throw error;
     }
     if (!page) return null;
+    const pageCleared = readClearedThroughEntryId(page.clearedThroughEntryId);
+    if (!seenCleared && chunks.length === 0) {
+      seenCleared = true;
+      clearedThroughEntryId = pageCleared;
+    } else if (pageCleared !== clearedThroughEntryId) {
+      throw new HistoryEpochChangedError();
+    }
     const chunk = page.entryChunk;
     if (!chunk && chunks.length === 0) return page;
     if (!chunk || typeof chunk.json !== 'string' || chunk.json.length === 0 ||
@@ -48,7 +72,11 @@ export async function readHistoryPage<T>(
     if (chunk.complete) {
       const entry = JSON.parse(chunks.join(''));
       if (entry?.id !== entryId) throw new Error('History entry chunk identity mismatch');
-      return { items: [entry as T], nextCursor: page.nextCursor };
+      return {
+        items: [entry as T],
+        nextCursor: page.nextCursor,
+        ...(clearedThroughEntryId !== undefined ? { clearedThroughEntryId } : {}),
+      };
     }
     if (!page.nextCursor) throw new Error('Incomplete history entry');
     cursor = page.nextCursor;

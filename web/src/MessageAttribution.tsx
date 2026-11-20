@@ -12,26 +12,18 @@ export interface MessageAttributionProps {
   className?: string;
 }
 
-const CHANNEL_LABELS: Record<MessageAttributionData['channel'], { zh: string; en: string }> = {
-  primary: { zh: '私聊', en: 'DM' },
-  dm: { zh: 'Bot 私聊', en: 'bot DM' },
-  room: { zh: '群聊', en: 'room' },
-};
-
-const KIND_LABELS: Record<MessageAttributionData['kind'], { zh: string; en: string }> = {
-  user: { zh: '用户', en: 'user' },
-  bot: { zh: 'Bot', en: 'bot' },
-  host: { zh: 'Host', en: 'host' },
-};
-
 function channelLabel(channel: MessageAttributionData['channel'], t: (zh: string, en: string) => string): string {
-  const l = CHANNEL_LABELS[channel];
-  return l ? t(l.zh, l.en) : channel;
+  if (channel === 'primary') return t('私聊', 'DM');
+  if (channel === 'dm') return t('Bot 私聊', 'bot DM');
+  if (channel === 'room') return t('群聊', 'room');
+  return channel;
 }
 
 function kindLabel(kind: MessageAttributionData['kind'], t: (zh: string, en: string) => string): string {
-  const l = KIND_LABELS[kind];
-  return l ? t(l.zh, l.en) : kind;
+  if (kind === 'user') return t('用户', 'user');
+  if (kind === 'bot') return t('Bot', 'bot');
+  if (kind === 'host') return t('Host', 'host');
+  return kind;
 }
 
 /** 来源可读名：有目录名用名字；bot 无名回退自然标签，绝不回退 botId。 */
@@ -42,8 +34,13 @@ function senderLabel(a: MessageAttributionData, t: (zh: string, en: string) => s
 
 // Legacy history lacks sourceType; only its Host/primary attribution name is a fallback, never message text.
 export function isWebhookAttribution(a: MessageAttributionData | undefined): boolean {
-  return a?.kind === 'host' && (a.sourceType === 'webhook' ||
-    (a.sourceType === undefined && a.channel === 'primary' && /^Webhook · \S/.test(a.name ?? '')));
+  return a?.kind === 'host' && (
+    a.sourceType === 'webhook' ||
+    a.sourceType === 'google-workspace-rule' ||
+    a.sourceType === 'task_dispatch' ||
+    a.sourceType === 'schedule' ||
+    (a.sourceType === undefined && a.channel === 'primary' && /^Webhook · \S/.test(a.name ?? ''))
+  );
 }
 
 /**

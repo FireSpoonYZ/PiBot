@@ -1,67 +1,63 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { CheckCircle2, ChevronDown, ChevronUp, CircleAlert, Info, RefreshCw, TriangleAlert, X } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronUp, CircleAlert, Info, Loader2, RefreshCw, TriangleAlert, X } from 'lucide-react';
 import './error-notice.css';
 
-export const HIDE_TOOL_OUTPUT_STORAGE_KEY = 'pibot-hide-tool-output:v1';
-const HIDE_TOOL_OUTPUT_EVENT = 'pibot-hide-tool-output-change';
+// The old "hide" setting only collapsed calls. Keep its stored value for that behavior.
+const COLLAPSE_TOOL_OUTPUT_STORAGE_KEY = 'pibot-hide-tool-output:v1';
+const HIDE_TOOL_OUTPUT_STORAGE_KEY = 'pibot-chat-hide-tool-output:v1';
 
-export function readHideToolOutput(): boolean {
-  try {
-    if (typeof localStorage === 'undefined') return true;
-    const raw = localStorage.getItem(HIDE_TOOL_OUTPUT_STORAGE_KEY);
-    return raw !== 'false';
-  } catch {
-    return true;
-  }
-}
-
-export function writeHideToolOutput(hide: boolean): void {
-  const normalized = Boolean(hide);
-  try {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(HIDE_TOOL_OUTPUT_STORAGE_KEY, normalized ? 'true' : 'false');
+function useToolOutputPreference(key: string, defaultValue: boolean): [boolean, (next: boolean) => void] {
+  const changeEvent = key + ':change';
+  const read = useCallback(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw === 'true' ? true : raw === 'false' ? false : defaultValue;
+    } catch {
+      return defaultValue;
     }
-  } catch {
-    // Ignore storage errors
-  }
-  try {
-    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
-      window.dispatchEvent(new CustomEvent(HIDE_TOOL_OUTPUT_EVENT, { detail: normalized }));
-    }
-  } catch {
-    // Ignore custom event errors
-  }
-}
-
-export function useHideToolOutput(): [boolean, (next: boolean) => void] {
-  const [hideToolOutput, setHideToolOutputState] = useState<boolean>(() => readHideToolOutput());
+  }, [key, defaultValue]);
+  const [value, setValue] = useState(read);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const onCustom = (event: Event) => {
+    const onChange = (event: Event) => {
       const detail = (event as CustomEvent<boolean>).detail;
-      setHideToolOutputState(typeof detail === 'boolean' ? detail : readHideToolOutput());
+      setValue(typeof detail === 'boolean' ? detail : read());
     };
     const onStorage = (event: StorageEvent) => {
-      if (!event.key || event.key === HIDE_TOOL_OUTPUT_STORAGE_KEY) {
-        setHideToolOutputState(readHideToolOutput());
-      }
+      if (!event.key || event.key === key) setValue(read());
     };
-    window.addEventListener(HIDE_TOOL_OUTPUT_EVENT, onCustom);
+    window.addEventListener(changeEvent, onChange);
     window.addEventListener('storage', onStorage);
     return () => {
-      window.removeEventListener(HIDE_TOOL_OUTPUT_EVENT, onCustom);
+      window.removeEventListener(changeEvent, onChange);
       window.removeEventListener('storage', onStorage);
     };
-  }, []);
+  }, [changeEvent, key, read]);
 
-  const setHideToolOutput = useCallback((next: boolean) => {
-    const normalized = Boolean(next);
-    writeHideToolOutput(normalized);
-    setHideToolOutputState(normalized);
-  }, []);
+  const write = useCallback((next: boolean) => {
+    try {
+      localStorage.setItem(key, String(next));
+    } catch {
+      // Keep the preference for the current page even if storage is unavailable.
+    }
+    setValue(next);
+    try {
+      window.dispatchEvent(new CustomEvent(changeEvent, { detail: next }));
+    } catch {
+      // The updated value is already applied locally.
+    }
+  }, [changeEvent, key]);
 
-  return [hideToolOutput, setHideToolOutput];
+  return [value, write];
+}
+
+export function useHideToolOutput() {
+  return useToolOutputPreference(HIDE_TOOL_OUTPUT_STORAGE_KEY, false);
+}
+
+export function useCollapseToolOutput() {
+  return useToolOutputPreference(COLLAPSE_TOOL_OUTPUT_STORAGE_KEY, true);
 }
 
 export type UiLanguage = 'system' | 'zh' | 'en';
@@ -82,7 +78,12 @@ export const record = (value: unknown): Record<string, any> =>
   value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, any>) : {};
 export const array = <T,>(value: unknown): T[] => (Array.isArray(value) ? (value as T[]) : []);
 
-export type NoticeTone = 'danger' | 'warning' | 'info' | 'success';
+export type NoticeTone = 'danger' | 'warning' | 'info' | 'success' | 'progress';
+
+export interface ParsedErrorCode {
+  message: string;
+  code?: string;
+}
 
 export interface HumanizedError {
   tone: NoticeTone;
@@ -93,10 +94,55 @@ export interface HumanizedError {
 }
 
 const KNOWN_CODE_PREFIX = /^([A-Z][A-Z0-9_]{2,32}):\s*(.*)$/s;
+
+/** 将形如 `CODE: message` 的原生错误（或带 code/message 字段的对象）拆成标题文案与错误码。 */
+export function splitErrorCode(rawInput: unknown): ParsedErrorCode {
+  if (rawInput == null) return { message: '' };
+  let objCode = '';
+  let raw = '';
+  if (typeof rawInput === 'string') {
+    raw = rawInput.trim();
+  } else if (rawInput instanceof Error) {
+    raw = rawInput.message.trim();
+    if ('code' in rawInput && typeof (rawInput as { code?: unknown }).code === 'string') {
+      objCode = (rawInput as { code: string }).code.trim();
+    }
+  } else if (typeof rawInput === 'object') {
+    const shape = rawInput as { code?: unknown; message?: unknown };
+    if (typeof shape.code === 'string') objCode = shape.code.trim();
+    if (typeof shape.message === 'string') raw = shape.message.trim();
+  } else {
+    raw = String(rawInput).trim();
+  }
+
+  let code = objCode;
+  let message = raw;
+  for (let i = 0; i < 4; i += 1) {
+    const match = message.match(KNOWN_CODE_PREFIX);
+    if (match) {
+      if (!code || code === 'INTERNAL') code = match[1];
+      message = match[2].trim();
+      continue;
+    }
+    if (code && message.startsWith(`${code}:`)) {
+      message = message.slice(code.length + 1).trim();
+      continue;
+    }
+    break;
+  }
+  if (code && message === code) {
+    message = '';
+  } else if (!code && /^[A-Z][A-Z0-9_]{2,32}$/.test(message)) {
+    code = message;
+    message = '';
+  }
+
+  return code ? { message, code } : { message };
+}
 const OUTCOME_PREFIX = /^(unconfirmed|not-sent|responded):\s*(.*)$/is;
 const TRAILING_OUTCOME_CODE = /\s*(?:[·:;]\s*)?(?:unconfirmed|not-sent|responded):\s*([A-Z][A-Z0-9_]{2,32})$/i;
-const CONTEXT_PREFIX_RE = /^(群聊列表读取失败|目录读取失败|观察建立失败|连接失败|更换中心连接失败|无法读取配置|保存 profile 失败|设为主 Bot 失败|归档失败|恢复失败|删除失败|停止失败|选择图片失败|选择文件失败|本次执行失败|This run failed|读取模型列表失败|模型生成失败)\s*[·:：-]\s*(.+)$/is;
-const TARGET_OFFLINE_PREFIX_RE = /^目标\s+(.+?)\s*离线[：:]\s*(.+)$/s;
+const CONTEXT_PREFIX_RE = /^(群聊列表读取失败|目录读取失败|观察建立失败|连接失败|更换中心连接失败|无法读取配置|保存 profile 失败|设为主 Bot 失败|归档失败|恢复失败|删除失败|停止失败|选择图片失败|选择文件失败|本次执行失败|This run failed|读取模型列表失败|模型生成失败)\s*[·:：-]\s*(.+)$/is; // i18n-ok
+const TARGET_OFFLINE_PREFIX_RE = /^目标\s+(.+?)\s*离线[：:]\s*(.+)$/s; // i18n-ok
 const DEVICE_CODE_PREFIX_RE = /^([^:：]{1,48}?)[：:]\s*([A-Z][A-Z0-9_]{2,32})(?:[：:\s]\s*(.*))?$/s;
 
 function normalizeErrorParts(raw: string): {
@@ -201,12 +247,12 @@ export function isModelConfigError(rawInput: unknown): boolean {
     /api[\s_-]?key|apikey|invalid_api_key|unauthorized|authentication|credential|model[\s_-]?not[\s_-]?found|model[\s_-]?not[\s_-]?configured|no[\s_-]?model[\s_-]?configured|provider[\s_-]?not[\s_-]?found|invalid[\s_-]?model|\b(?:401|403)\b/.test(
       combined,
     ) ||
-    combined.includes('未配置模型') ||
-    combined.includes('模型未配置') ||
-    combined.includes('凭据') ||
-    combined.includes('密钥') ||
-    combined.includes('鉴权') ||
-    combined.includes('模型不存在')
+    combined.includes('未配置模型') || // i18n-ok
+    combined.includes('模型未配置') || // i18n-ok
+    combined.includes('凭据') || // i18n-ok
+    combined.includes('密钥') || // i18n-ok
+    combined.includes('鉴权') || // i18n-ok
+    combined.includes('模型不存在') // i18n-ok
   ) {
     return true;
   }
@@ -241,14 +287,14 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
 
   // 1. Syncing / Reconnecting states (not actual errors!)
   if (
-    body === '正在重连…' ||
+    body === '正在重连…' || // i18n-ok
     body === 'Reconnecting…' ||
-    body.includes('连接中断，正在恢复') ||
+    body.includes('连接中断，正在恢复') || // i18n-ok
     lower.includes('connection interrupted; recovering') ||
-    body.includes('正在恢复设备连接') ||
-    body.includes('设备中继正在恢复') ||
-    body.includes('设备连接已变化，正在恢复') ||
-    body.includes('正在读取目标身份') ||
+    body.includes('正在恢复设备连接') || // i18n-ok
+    body.includes('设备中继正在恢复') || // i18n-ok
+    body.includes('设备连接已变化，正在恢复') || // i18n-ok
+    body.includes('正在读取目标身份') || // i18n-ok
     lower.includes('loading target identity')
   ) {
     return {
@@ -260,14 +306,14 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
   }
 
   if (
-    body.includes('正在初始化运行环境') ||
-    body.includes('正在启动本机运行环境') ||
+    body.includes('正在初始化运行环境') || // i18n-ok
+    body.includes('正在启动本机运行环境') || // i18n-ok
     lower.includes('initializing runtime') ||
     lower.includes('starting local runtime')
   ) {
     return {
       tone: 'info',
-      title: t('正在唤醒本机助手环境', 'Starting Local Assistant'),
+      title: t('正在唤醒本机 Bot 环境', 'Starting Local Bot Runtime'),
       description: t('首次启动约需几秒钟，请稍候再试', 'Initial startup takes a few seconds, please try again shortly'),
       spinning: true,
     };
@@ -275,11 +321,11 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
 
   // 2. Success / Completed notices
   if (
-    body.includes('已清空当前对话历史') ||
+    body.includes('已清空当前对话历史') || // i18n-ok
     lower.includes('conversation history cleared') ||
-    body.includes('模型设置已保存') ||
+    body.includes('模型设置已保存') || // i18n-ok
     lower.includes('model settings saved') ||
-    body.includes('已保留新版草稿') ||
+    body.includes('已保留新版草稿') || // i18n-ok
     lower.includes('kept the newer draft')
   ) {
     return {
@@ -290,9 +336,9 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
 
   // 3. Offline / Draft retained / Pending warnings
   if (
-    body.includes('目标离线，草稿已保留') ||
+    body.includes('目标离线，草稿已保留') || // i18n-ok
     lower.includes('target offline; draft retained') ||
-    body.includes('目标节点离线') ||
+    body.includes('目标节点离线') || // i18n-ok
     lower.includes('target offline; restoring')
   ) {
     return {
@@ -302,7 +348,7 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     };
   }
 
-  if (body.includes('中心离线，草稿已保留') || lower.includes('center offline; draft retained')) {
+  if (body.includes('中心离线，草稿已保留') || lower.includes('center offline; draft retained')) { // i18n-ok
     return {
       tone: 'warning',
       title: t('中心服务暂未连接', 'Center Disconnected'),
@@ -310,7 +356,7 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     };
   }
 
-  if (body.includes('请求未发送，草稿已恢复') || lower.includes('request not sent; draft restored')) {
+  if (body.includes('请求未发送，草稿已恢复') || lower.includes('request not sent; draft restored')) { // i18n-ok
     return {
       tone: 'info',
       title: t('消息未发送，已恢复到输入框', 'Message Not Sent · Draft Restored'),
@@ -319,13 +365,13 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
   }
 
   if (
-    body.includes('原请求尚未确认') ||
+    body.includes('原请求尚未确认') || // i18n-ok
     lower.includes('original request is unconfirmed') ||
-    body.includes('发送结果待确认') ||
+    body.includes('发送结果待确认') || // i18n-ok
     lower.includes('send result unconfirmed') ||
-    body.includes('回执未确认') ||
+    body.includes('回执未确认') || // i18n-ok
     lower.includes('receipt unconfirmed') ||
-    body.includes('连接中断，请按原 ID 确认结果')
+    body.includes('连接中断，请按原 ID 确认结果') // i18n-ok
   ) {
     return {
       tone: 'warning',
@@ -335,7 +381,7 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     };
   }
 
-  if (body.includes('创建回执未确认') || lower.includes('creation unconfirmed')) {
+  if (body.includes('创建回执未确认') || lower.includes('creation unconfirmed')) { // i18n-ok
     return {
       tone: 'warning',
       title: t('上次创建请求仍在确认中', 'Previous Creation Still Confirming'),
@@ -354,9 +400,9 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     code === 'INVALID_CREDENTIALS' ||
     code === 'CREDENTIALS_NOT_FOUND' ||
     code === 'REVOKED' ||
-    body.includes('凭据无法读取') ||
-    body.includes('请输入新令牌') ||
-    body.includes('请输入令牌')
+    body.includes('凭据无法读取') || // i18n-ok
+    body.includes('请输入新令牌') || // i18n-ok
+    body.includes('请输入令牌') // i18n-ok
   ) {
     return {
       tone: 'danger',
@@ -376,7 +422,7 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     code === 'SELF_SIGNED_CERT_IN_CHAIN' ||
     code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
     lower.includes('certificate') ||
-    body.includes('证书')
+    body.includes('证书') // i18n-ok
   ) {
     return {
       tone: 'danger',
@@ -393,10 +439,10 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     body === 'Remote target unavailable' ||
     body === 'Not connected' ||
     body === 'Original connection unavailable' ||
-    body.includes('无法连接目标节点') ||
+    body.includes('无法连接目标节点') || // i18n-ok
     lower.includes('target host unavailable') ||
-    body.includes('目标设备离线，已拒绝修改') ||
-    body.includes('所选设备不可用')
+    body.includes('目标设备离线，已拒绝修改') || // i18n-ok
+    body.includes('所选设备不可用') // i18n-ok
   ) {
     const targetLabel = devicePrefix ? `「${devicePrefix}」` : t('目标设备', 'Target Device');
     return {
@@ -411,6 +457,15 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     };
   }
 
+  if (code === 'NETWORK') {
+    const baseTitle = t('网络请求未确认', 'Network Request Unconfirmed');
+    return {
+      tone: 'warning',
+      title: contextPrefix ? `${contextPrefix}：${baseTitle}` : baseTitle,
+      detail,
+    };
+  }
+
   if (
     code === 'EVENT_STREAM_CLOSED' ||
     code === 'STREAM_CLOSED' ||
@@ -418,8 +473,8 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     code === 'NOT_CONNECTED' ||
     code === 'DISCONNECTED' ||
     code === 'TIMEOUT' ||
-    body.includes('事件流未就绪') ||
-    body.includes('准入前事件缓冲溢出')
+    body.includes('事件流未就绪') || // i18n-ok
+    body.includes('准入前事件缓冲溢出') // i18n-ok
   ) {
     const baseTitle =
       code === 'TIMEOUT'
@@ -458,15 +513,15 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     code === 'STARTUP_TIMEOUT' ||
     code === 'CLOSED' ||
     body === 'Host unavailable' ||
-    body.includes('本机服务未运行') ||
+    body.includes('本机服务未运行') || // i18n-ok
     lower.includes('local host not running') ||
-    body.includes('客户端启动失败') ||
-    body.includes('Host 启动超时') ||
-    body.includes('Host 已关闭')
+    body.includes('客户端启动失败') || // i18n-ok
+    body.includes('Host 启动超时') || // i18n-ok
+    body.includes('Host 已关闭') // i18n-ok
   ) {
     return {
       tone: 'danger',
-      title: t('本机助手服务未就绪', 'Local Assistant Service Unavailable'),
+      title: t('本机 Bot 服务未就绪', 'Local Bot Service Unavailable'),
       description: t('后台运行环境尚未完成启动或已停止，请稍后重试', 'The background runtime is starting or stopped. Please try again in a moment'),
       detail,
     };
@@ -476,10 +531,10 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     code === 'BUSY' ||
     code === 'RUNTIME_BUSY' ||
     code === 'RPC_BUSY' ||
-    body.includes('队列已满') ||
-    body.includes('并发已满') ||
-    body.includes('队列繁忙') ||
-    body.includes('观察数已达上限')
+    body.includes('队列已满') || // i18n-ok
+    body.includes('并发已满') || // i18n-ok
+    body.includes('队列繁忙') || // i18n-ok
+    body.includes('观察数已达上限') // i18n-ok
   ) {
     return {
       tone: 'warning',
@@ -490,7 +545,17 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
   }
 
   // 6. Model & Generation errors
-  if (body.includes('本次请求未获得回答') || lower.includes('no answer was generated')) {
+  if (code === 'MODEL_NO_VISION' || lower.includes('model does not accept image input')) {
+    return {
+      tone: 'warning',
+      title: t('当前模型不支持图片输入', 'Current Model Does Not Support Images'),
+      description: t('该消息包含图片附件，请切换支持视觉的模型后重试，或恢复到输入框修改/移除图片后再发。',
+        'This message contains image attachments. Switch to a vision-capable model to retry, or restore to the composer to edit or remove images.'),
+      detail,
+    };
+  }
+
+  if (body.includes('本次请求未获得回答') || lower.includes('no answer was generated')) { // i18n-ok
     return {
       tone: 'warning',
       title: t('本次对话未返回内容', 'No Response Received'),
@@ -504,10 +569,10 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     code.startsWith('MODEL_') ||
     code === 'GENERATION_FAILED' ||
     lower.includes('model_error') ||
-    contextPrefix === '模型生成失败' ||
-    contextPrefix === '本次执行失败' ||
+    contextPrefix === '模型生成失败' || // i18n-ok
+    contextPrefix === '本次执行失败' || // i18n-ok
     lower.includes('this run failed') ||
-    body.includes('模型生成失败') ||
+    body.includes('模型生成失败') || // i18n-ok
     lower.includes('model generation failed') ||
     isRateLimit ||
     isModelConfig
@@ -549,31 +614,31 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
   if (code === 'BOT_NOT_FOUND') {
     return {
       tone: 'info',
-      title: t('该智能体已不存在', 'This bot no longer exists'),
-      description: t('请刷新对话列表，选择其他智能体继续。', 'Refresh the conversation list and select another bot.'),
+      title: t('该 Bot 已不存在', 'This bot no longer exists'),
+      description: t('请刷新对话列表，选择其他 Bot 继续。', 'Refresh the conversation list and select another bot.'),
       detail,
     };
   }
-  if (code === 'PRIMARY_BOT_PROTECTED' || body.includes('主智能体受保护') || lower.includes('primary bot is protected')) {
+  if (code === 'PRIMARY_BOT_PROTECTED' || body.includes('主智能体受保护') || body.includes('主 Bot 受保护') || lower.includes('primary bot is protected')) { // i18n-ok
     return {
       tone: 'warning',
-      title: t('主助手受保护，无法直接归档或删除', 'Primary Assistant is Protected'),
-      description: t('请先将其他智能体设为主助手，再对此智能体执行归档或删除操作', 'Set another bot as your primary assistant first before archiving or deleting this one'),
+      title: t('主 Bot 受保护，无法直接归档或删除', 'Primary Bot is Protected'),
+      description: t('请先将其他 Bot 设为主 Bot，再对此 Bot 执行归档或删除操作', 'Set another Bot as your primary Bot first before archiving or deleting this one'),
     };
   }
 
-  if (body.includes('已归档') || lower.includes('archived')) {
+  if (body.includes('已归档') || lower.includes('archived')) { // i18n-ok
     return {
       tone: 'warning',
-      title: t('该智能体处于归档只读状态', 'Bot is Archived (Read-Only)'),
-      description: t('请先恢复该智能体，即可继续发送消息或设为主助手', 'Unarchive this bot first to resume chatting or set it as primary'),
+      title: t('该 Bot 处于归档只读状态', 'Bot is Archived (Read-Only)'),
+      description: t('请先恢复该 Bot，即可继续发送消息或设为主 Bot', 'Unarchive this Bot first to resume chatting or set it as primary'),
     };
   }
 
   // 8. Voice & Speech errors
   if (
-    body.includes('未识别到语音') ||
-    body.includes('未检测到语音') ||
+    body.includes('未识别到语音') || // i18n-ok
+    body.includes('未检测到语音') || // i18n-ok
     lower.includes('no speech')
   ) {
     return {
@@ -583,17 +648,17 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     };
   }
 
-  if (body.includes('麦克风') || lower.includes('microphone')) {
+  if (body.includes('麦克风') || lower.includes('microphone')) { // i18n-ok
     return {
       tone: 'danger',
       title: t('无法使用麦克风', 'Microphone Unavailable'),
-      description: body.includes('权限')
+      description: body.includes('权限') // i18n-ok
         ? t('请在系统设置中授予应用麦克风录音权限', 'Please grant microphone permission in Android system settings')
         : t('麦克风可能被其他应用占用，请关闭其他录音应用后重试', 'Microphone may be in use by another app. Close other audio apps and retry'),
     };
   }
 
-  if (body.includes('语音识别') || body.includes('语音合成') || body.includes('朗读')) {
+  if (body.includes('语音识别') || body.includes('语音合成') || body.includes('朗读')) { // i18n-ok
     return {
       tone: 'warning',
       title: body,
@@ -649,8 +714,8 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
 
   if (
     code === 'SHOWER_BACKEND_FAILED' ||
-    body.includes('虚拟屏') ||
-    body.includes('还没有活跃的虚拟屏幕') ||
+    body.includes('虚拟屏') || // i18n-ok
+    body.includes('还没有活跃的虚拟屏幕') || // i18n-ok
     lower.includes('virtual screen')
   ) {
     return {
@@ -669,7 +734,7 @@ export function humanizeError(rawInput: unknown, t: (zh: string, en: string) => 
     return {
       tone: 'warning',
       title: t('部分远程节点同步未完成', 'Some Remote Nodes Could Not Sync'),
-      description: t('已为您展示最近缓存的智能体列表，可展开查看具体节点原因', 'Showing cached bots while some remote nodes are unreachable'),
+      description: t('已为您展示最近缓存的 Bot 列表，可展开查看具体节点原因', 'Showing cached bots while some remote nodes are unreachable'),
       detail: raw,
     };
   }
@@ -756,16 +821,24 @@ export function ErrorNotice({
 }: ErrorNoticeProps) {
   const t = useText();
   const [showDetail, setShowDetail] = useState(false);
-  const parsed = error ? humanizeError(error, t) : null;
-  if (!parsed && !titleOverride) return null;
+  const isProgress = toneOverride === 'progress';
+  const parsed = !isProgress && error ? humanizeError(error, t) : null;
+  const progressTitle = isProgress ? (titleOverride ?? (error ? error.trim() : '')) : '';
+  if (isProgress) {
+    if (!progressTitle) return null;
+  } else if (!parsed && !titleOverride) {
+    return null;
+  }
 
-  const tone = toneOverride ?? parsed?.tone ?? 'danger';
-  const title = titleOverride ?? parsed?.title ?? '';
-  const description = descOverride ?? parsed?.description;
-  const detail = detailOverride ?? parsed?.detail;
-  const spinning = parsed?.spinning ?? false;
+  const tone: NoticeTone = isProgress ? 'progress' : (toneOverride ?? parsed?.tone ?? 'danger');
+  const title = isProgress ? progressTitle : (titleOverride ?? parsed?.title ?? '');
+  const description = isProgress ? descOverride : (descOverride ?? parsed?.description);
+  const detail = isProgress ? detailOverride : (detailOverride ?? parsed?.detail);
+  const spinning = isProgress || (parsed?.spinning ?? false);
+  const showDismiss = Boolean(onDismiss && tone !== 'progress');
 
   const renderIcon = () => {
+    if (tone === 'progress') return <Loader2 className="grok-notice-icon grok-spin" size={18} />;
     if (spinning) return <RefreshCw className="grok-notice-icon grok-spin" size={18} />;
     if (tone === 'success') return <CheckCircle2 className="grok-notice-icon" size={18} />;
     if (tone === 'warning') return <TriangleAlert className="grok-notice-icon" size={18} />;
@@ -776,7 +849,7 @@ export function ErrorNotice({
   return (
     <div
       className={`inline-error grok-notice-card is-${tone}${compact ? ' is-compact' : ''}${darkGlass ? ' is-dark-glass' : ''}`}
-      role={tone === 'info' || tone === 'success' ? 'status' : 'alert'}
+      role={tone === 'info' || tone === 'success' || tone === 'progress' ? 'status' : 'alert'}
       aria-live="polite"
     >
       <div className="grok-notice-main">
@@ -795,13 +868,13 @@ export function ErrorNotice({
                 aria-expanded={showDetail}
               >
                 <span>{showDetail ? t('收起详情', 'Hide details') : t('查看详情', 'Details')}</span>
-                {showDetail ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                {showDetail ? <ChevronUp size={13} aria-hidden="true" /> : <ChevronDown size={13} aria-hidden="true" />}
               </button>
               {showDetail && <pre className="grok-notice-detail-code">{detail}</pre>}
             </div>
           )}
         </div>
-        {(actionLabel && onAction) || (secondaryActionLabel && onSecondaryAction) || onDismiss ? (
+        {(actionLabel && onAction) || (secondaryActionLabel && onSecondaryAction) || showDismiss ? (
           <div className="grok-notice-actions">
             {actionLabel && onAction && (
               <button type="button" className="grok-notice-action-pill" onClick={onAction}>
@@ -813,14 +886,14 @@ export function ErrorNotice({
                 {secondaryActionLabel}
               </button>
             )}
-            {onDismiss && (
+            {showDismiss && (
               <button
                 type="button"
                 className="grok-notice-dismiss-btn"
                 aria-label={t('关闭提示', 'Dismiss')}
                 onClick={onDismiss}
               >
-                <X size={15} />
+                <X size={15} aria-hidden="true" />
               </button>
             )}
           </div>
@@ -845,37 +918,42 @@ export function FloatingPillToast({
 }) {
   const t = useText();
   if (!message) return null;
-  const parsed = humanizeError(message, t);
-  if (!parsed) return null;
-  const tone = toneOverride ?? parsed.tone;
+  const isProgress = toneOverride === 'progress';
+  const parsed = isProgress ? null : humanizeError(message, t);
+  if (!isProgress && !parsed) return null;
+  const tone: NoticeTone = isProgress ? 'progress' : (toneOverride ?? parsed!.tone);
+  const title = isProgress ? message : parsed!.title;
+  const description = isProgress ? undefined : parsed!.description;
+  const showDismiss = Boolean(onDismiss && tone !== 'progress');
   const renderIcon = () => {
-    if (parsed.spinning) return <RefreshCw className="grok-toast-icon grok-spin" size={16} />;
-    if (tone === 'success') return <CheckCircle2 className="grok-toast-icon" size={16} />;
-    if (tone === 'warning') return <TriangleAlert className="grok-toast-icon" size={16} />;
-    if (tone === 'info') return <Info className="grok-toast-icon" size={16} />;
-    return <CircleAlert className="grok-toast-icon" size={16} />;
+    if (tone === 'progress') return <Loader2 className="grok-toast-icon grok-spin" size={16} aria-hidden="true" />;
+    if (parsed?.spinning) return <RefreshCw className="grok-toast-icon grok-spin" size={16} aria-hidden="true" />;
+    if (tone === 'success') return <CheckCircle2 className="grok-toast-icon" size={16} aria-hidden="true" />;
+    if (tone === 'warning') return <TriangleAlert className="grok-toast-icon" size={16} aria-hidden="true" />;
+    if (tone === 'info') return <Info className="grok-toast-icon" size={16} aria-hidden="true" />;
+    return <CircleAlert className="grok-toast-icon" size={16} aria-hidden="true" />;
   };
 
   return (
     <div className={`bot-chat-toast grok-pill-toast is-${tone}`} role="status" aria-atomic="true">
       {renderIcon()}
       <div className="grok-pill-toast-body">
-        <span className="grok-pill-toast-title">{parsed.title}</span>
-        {parsed.description && <span className="grok-pill-toast-desc">{parsed.description}</span>}
+        <span className="grok-pill-toast-title">{title}</span>
+        {description && <span className="grok-pill-toast-desc">{description}</span>}
       </div>
       {actionLabel && onAction && (
         <button type="button" className="grok-pill-toast-action" onClick={onAction}>
           {actionLabel}
         </button>
       )}
-      {onDismiss && (
+      {showDismiss && (
         <button
           type="button"
           className="grok-pill-toast-close"
           aria-label={t('关闭', 'Close')}
           onClick={onDismiss}
         >
-          <X size={14} />
+          <X size={14} aria-hidden="true" />
         </button>
       )}
     </div>

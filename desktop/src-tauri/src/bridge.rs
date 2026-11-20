@@ -43,6 +43,9 @@ const MEMORY_METHODS: &[&str] = &[
   "correctMemory",
   "retryMemory",
   "compact",
+  "vaultControl",
+  "browserControl",
+  "googleSetupControl",
 ];
 const MAX_OBSERVER_FRAME_FIFO: usize = 8;
 const MAX_OBSERVER_FIFO_BYTES: usize = 80 * 1024 * 1024;
@@ -57,6 +60,8 @@ const PUBLIC_OPERATIONS: &[&str] = &[
   "center_store",
   "center_owner_session",
   "center_owner_login",
+  "center_admin_request",
+  "center_qr_login_approve",
   "center_model_picker_get",
   "center_model_star_set",
   "center_bot_model_get",

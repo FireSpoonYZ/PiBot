@@ -509,12 +509,14 @@ final class BotHostSchedules {
             long now = System.currentTimeMillis();
             for (int i = 0; i < st.runs.length(); i++) {
                 JSONObject run = st.runs.getJSONObject(i);
-                if (ownerMatches(run, owner) && "dispatching".equals(run.optString("status"))
-                        && !run.optBoolean("submitted", false)) {
+                if (ownerMatches(run, owner)
+                        && (("dispatching".equals(run.optString("status")) && !run.optBoolean("submitted", false))
+                        || pendingHandoff(run) != null)) {
                     run.put("status", "skipped_offline");
                     run.put("reason", "task_deleted");
                     run.put("finishedAt", now);
                     run.put("submitted", true);
+                    missingRunIds.remove(run.optString("id"));
                 }
             }
             save(db, st);
@@ -914,11 +916,29 @@ final class BotHostSchedules {
                     boolean submitted = run.optBoolean("submitted");
                     String runId = run.optString("id");
                     if (ACTIVE_RUNS.contains(status) && pendingHandoff(run) != null) {
+                        boolean retry = missingRunIds.contains(runId);
+                        if (retry && findTask(st, run.optString("taskId")) == null) {
+                            // 查询已证实 Host 未受理且定义已删：闭环跳过，不再补交。
+                            run.put("status", "skipped_offline").put("reason", "task_deleted")
+                                    .put("finishedAt", System.currentTimeMillis()).put("submitted", true);
+                            st.runs.put(i, run);
+                            missingRunIds.remove(runId);
+                            save(db, st);
+                            continue;
+                        }
                         lastPlanIndex = i;
-                        String kind = missingRunIds.contains(runId) ? "submit" : "getSubmission";
-                        return new Step(new Inflight(c, runId, kind), run);
+                        return new Step(new Inflight(c, runId, retry ? "submit" : "getSubmission"), run);
                     }
                     if ("dispatching".equals(status) && !submitted) {
+                        if (run.has("handoff")) {
+                            JSONObject handoff = run.optJSONObject("handoff");
+                            if (handoff != null && Integer.valueOf(1).equals(handoff.opt("version"))
+                                    && "accepted".equals(handoff.optString("state"))) {
+                                lastPlanIndex = i;
+                                return new Step(new Inflight(c, runId, "getSubmission"), run);
+                            }
+                            continue;
+                        }
                         if (findTask(st, run.optString("taskId")) == null) {
                             // 定义已删且从未尝试发送：按离线错过终态闭环，不发送。
                             run.put("status", "skipped_offline").put("reason", "task_deleted")
@@ -1104,10 +1124,12 @@ final class BotHostSchedules {
         if (input == null || !(input.opt("text") instanceof String) || input.optString("text").trim().isEmpty()
                 || !run.optString("requestId").equals(input.optString("requestId"))) return null;
         Object submissionId = run.opt("submissionId");
-        if ((submissionId instanceof Number && ((Number) submissionId).doubleValue() > 0)
+        String runStatus = run.optString("status");
+        if (!ACTIVE_RUNS.contains(runStatus)
+                || (submissionId instanceof Number && ((Number) submissionId).doubleValue() > 0)
                 || SUBMISSION_ACTIVE.contains(run.optString("submissionStatus"))
                 || SUBMISSION_TERMINAL.contains(run.optString("submissionStatus"))
-                || SUBMISSION_ACTIVE.contains(run.optString("status"))) return null;
+                || SUBMISSION_ACTIVE.contains(runStatus)) return null;
         return handoff;
     }
 
@@ -1140,7 +1162,13 @@ final class BotHostSchedules {
     private void applyError(JSONObject run, String kind, Throwable error) throws JSONException {
         Throwable root = unwrap(error);
         if ("getScheduleFence".equals(kind)) {
-            // 没有成功捕获 fence 就没有可恢复交接；本次在线继续重试，重启沿用离线跳过。
+            if (root instanceof BotHostProcess.BridgeException bridge
+                    && HANDOFF_REJECTED.contains(bridge.code)
+                    && ("responded".equals(bridge.outcome) || "not-sent".equals(bridge.outcome))) {
+                run.put("status", "not_sent").put("reason", "not_sent")
+                        .put("finishedAt", System.currentTimeMillis()).put("submitted", true);
+            }
+            // 没有成功捕获 fence 就没有可恢复交接；瞬态失败本次在线继续重试，重启沿用离线跳过。
             run.put("updatedAt", System.currentTimeMillis());
             return;
         }
@@ -1208,7 +1236,7 @@ final class BotHostSchedules {
         JSONObject handoff = run.optJSONObject("handoff");
         if (handoff != null && Integer.valueOf(1).equals(handoff.opt("version"))) {
             handoff.put("state", "accepted");
-            if (!handoff.has("acceptedAt")) handoff.put("acceptedAt", now);
+            if (handoff.isNull("acceptedAt")) handoff.put("acceptedAt", now);
         }
         run.put("submissionStatus", status).put("submissionId", nativeId ? submissionId : JSONObject.NULL);
         if (SUBMISSION_TERMINAL.contains(status)) {

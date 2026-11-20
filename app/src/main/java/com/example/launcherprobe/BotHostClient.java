@@ -332,11 +332,13 @@ final class BotHostClient {
         JSONObject connection = status.optJSONObject("connection");
         boolean ready = "connected".equals(status.optString("phase")) && connection != null
                 && "relay".equals(connection.optString("kind"));
+        boolean becameReady = ready && !brokerReadyObserved && centerReadyObserved;
         if (brokerGeneration != next || brokerReadyObserved != ready) ++updateGeneration;
         brokerGeneration = next;
         brokerReadyObserved = ready;
         brokerDeviceId = ready ? connection.optString("deviceId") : null;
         if (!ready) centerReadyObserved = false;
+        if (becameReady) BotClientService.checkUpdatesSoon();
     }
 
     /** 调用方持 lock；只有 broker 确认 ready 才保存本次凭据。 */

@@ -333,7 +333,7 @@ function readUnavailable(frame) {
  * Throws messageError with code INVALID_ARGUMENT on any protocol violation.
  * Role legality of control frames is enforced by the relay server, not here.
  */
-export function readClientFrame(data, isBinary = false) {
+export function readClientFrame(data, isBinary = false, options) {
   if (isBinary) throw invalid('relay frames must be text frames');
   const frame = parseFrame(data);
   const scopeFrame = readScopeClientFrame(frame);
@@ -359,7 +359,7 @@ export function readClientFrame(data, isBinary = false) {
       return readLiveClientFrame(frame);
     case 'live-frame':
     case 'live-end':
-      return readLiveHostFrame(frame);
+      return readLiveHostFrame(frame, options);
     default:
       throw invalid('unknown relay frame type');
   }
@@ -370,7 +370,7 @@ export function readClientFrame(data, isBinary = false) {
  * (ready/deliver/ack/reject/unavailable/control-*).
  * "Ready first" ordering is enforced by the link lifecycle, not here.
  */
-export function readServerFrame(data, isBinary = false) {
+export function readServerFrame(data, isBinary = false, options) {
   if (isBinary) throw invalid('relay frames must be text frames');
   const frame = parseFrame(data);
   const scopeFrame = readScopeServerFrame(frame);
@@ -396,7 +396,7 @@ export function readServerFrame(data, isBinary = false) {
     case 'live-end':
     case 'devices-result':
     case 'device-renamed':
-      return readLiveServerFrame(frame);
+      return readLiveServerFrame(frame, options);
     default:
       throw invalid('unknown relay frame type');
   }

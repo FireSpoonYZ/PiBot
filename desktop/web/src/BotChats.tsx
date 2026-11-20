@@ -13,6 +13,7 @@ import {
   Clock,
   Cpu,
   FileText,
+  Globe,
   History,
   LockKeyhole,
   MessageSquare,
@@ -37,6 +38,7 @@ import {
 } from 'lucide-react';
 import {
   IMAGE_MAX_COUNT,
+  IMAGE_MAX_TOTAL_BYTES,
   ImageAttachmentThumb,
   attachmentFileName,
   attachmentIdOf,
@@ -47,7 +49,12 @@ import {
   type PickedImageSource,
 } from '../../../web/src/imageAttachments';
 import type { ImageAttachment } from '../../../host-core/index.js';
-import type { DesktopIdentity, DesktopPanelApi } from './types';
+import type { DesktopIdentity, DesktopImagePickSource, DesktopPanelApi } from './types';
+import {
+  decideImagePasteAction,
+  isDesktopLinuxPlatform,
+  pickedImagesToFiles,
+} from './imagePaste';
 import type { DesktopObservationEvent } from './types';
 import { ErrorNotice, useText } from '../../../web/src/ui';
 import { BotReadScope } from '../../../web/src/botReadScope';
@@ -76,12 +83,25 @@ import type {
 import { isTargetOfflineError, toError } from './api';
 import { useDrafts } from './drafts';
 import type { DraftSnapshot } from './drafts';
-import { readToolPresentation, type QuestionnaireSubmitPayload, type VaultUnlockSubmitPayload } from '../../../web/src/ToolPresentation';
+import {
+  readToolPresentation,
+  type GoogleChatCardContext,
+  type QuestionnaireSubmitPayload,
+  type VaultUnlockSubmitPayload,
+} from '../../../web/src/ToolPresentation';
+import BotBrowserPanel from '../../../web/src/bot-browser/BotBrowserPanel';
+import { GoogleSetupWizard } from '../../../web/src/google/GoogleSetupWizard';
+import { openExternalUrl } from '../../../web/src/center-admin/openExternalUrl';
+import {
+  createBrowserControlRequest,
+  createGoogleSetupControlRequest,
+} from '../../../web/src/google/googleClient';
 import { GrokBotAvatar } from '../../../web/src/GrokBotAvatar';
 import { BotBoard } from '../../../web/src/BotBoard';
 import { botBoardKey, useBotBoard, useMarkViewedBoardResult, type BotBoardTarget } from '../../../web/src/useBotBoard';
 import {
   botActivityText,
+  canSteerBotActivity,
   canStopBotActivity,
   isBotActivityBusy,
   isBotLlmRunningPhase,
@@ -92,20 +112,24 @@ import {
   type BotActivity,
 } from '../../../web/src/botActivity';
 import { botAvatarKey, syncBotAvatarConfigs } from '../../../web/src/botAvatarSync';
+import { formatBotModelSummary } from '../../../web/src/bot-settings/modelDisplay';
 import { BotSettings, type BotSettingsTab } from './BotSettings';
+import type { CenterModelPicker } from '../../../host-core/desktop-client.js';
+import type { CenterAdminTab } from './SettingsPanel';
+import type { DesktopBotDirectoryEntry } from './types';
 import { ShowerPreview } from './ShowerPreview';
 import { ChatTranscript } from './ChatTranscript';
 import type { ChatTurn, KnownBotSummary } from '../../../web/src/chatTurnModel';
 import {
-  extractEditableUserText,
   mergeQueuedStripItems,
   resolveAttachmentMetasByIds,
+  stripTrailingHostAttachmentLines,
   type UnifiedQueuedStripItem,
 } from '../../../web/src/composerFlowControl';
 import { ComposerEditBanner, PendingQueueStrip } from '../../../web/src/ComposerFlowStrips';
 import { BotAvatarStudio } from './BotAvatarStudio';
 import { targetApi } from './targetApi';
-import { readHistoryPage } from './history';
+import { HistoryEpochChangedError, readHistoryPage } from './history';
 import { Scopes } from './Scopes';
 import { invoke } from '@tauri-apps/api/core';
 import type { RoomApiResolver, ScopeReadApi } from './scope-api';
@@ -123,9 +147,9 @@ import { useConversationUnread } from '../../../web/src/gbot-ui/useConversationU
 import {
   useGlobalTasks,
   TaskBoardView,
-  TaskChatContextBar,
   TaskChatPromptBanner,
-  botTasksFor,
+  isTaskWaitingForBot,
+  resolveBotChatTaskContext,
   type GlobalTask,
   type TaskBotOption,
   type TaskTransportFn,
@@ -165,19 +189,64 @@ type PendingTaskChatActionInput =
   | Omit<Extract<PendingTaskChatAction, { kind: 'confirm_plan' }>, 'error'>
   | Omit<Extract<PendingTaskChatAction, { kind: 'update_task' }>, 'error'>;
 
-function isTaskWaitingForBot(item: GlobalTask, deviceId: string, botId: string): boolean {
-  if (!item.pendingPrompt) return false;
-  if (item.pendingPrompt.deviceId === deviceId && item.pendingPrompt.botId === botId) {
-    return true;
-  }
-  return (
-    item.pendingPrompt.kind === 'plan' &&
-    item.coordinatorDeviceId === deviceId &&
-    item.coordinatorBotId === botId
-  );
+type AnyRawEntry = { id: unknown; kind: string; model?: unknown; data?: unknown };
+
+function readClearedThroughEntryId(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
 }
 
-type AnyRawEntry = { id: unknown; kind: string; model?: unknown; data?: unknown };
+function numericRawEntryId(item: unknown): number {
+  const id = Number((item as { id?: unknown } | null)?.id);
+  return Number.isFinite(id) ? id : 0;
+}
+
+function latestResetEntryIdFromItems(items: unknown): number {
+  if (!Array.isArray(items)) return 0;
+  let max = 0;
+  for (const item of items) {
+    if (item && typeof item === 'object' && (item as { kind?: unknown }).kind === 'pi.reset') {
+      const id = Number((item as { id?: unknown }).id);
+      if (Number.isSafeInteger(id) && id > max) max = id;
+    }
+  }
+  return max;
+}
+
+function isStaleLiveState(state: BotLiveState | null, cutoff: number): boolean {
+  if (!state || cutoff <= 0) return false;
+  const history = Array.isArray(state.history) ? state.history : [];
+  if (history.some((item) => item?.kind === 'pi.reset' && numericRawEntryId(item) >= cutoff)) return false;
+  const lastId = typeof state.lastEntryId === 'number' && Number.isFinite(state.lastEntryId) ? state.lastEntryId : null;
+  if (lastId !== null && lastId > cutoff) return false;
+  return !history.some((item) => numericRawEntryId(item) > cutoff);
+}
+
+function describeClearError(
+  action: '清空对话' | '/clear',
+  e: unknown,
+  connected: boolean,
+  formatErr: (err: unknown) => string,
+): { message: string; isUnknown: boolean } {
+  const err = toError(e);
+  if (err.outcome === 'unconfirmed') {
+    return {
+      isUnknown: true,
+      message: `${action} 结果未确认（${formatErr(e)}）：${connected ? '已刷新历史核实状态' : '恢复连接后请刷新历史核实'}，草稿与历史保留，不会自动重发。`,
+    };
+  }
+  if (err.outcome === 'responded' && err.code === 'RUNTIME_BUSY') {
+    return {
+      isUnknown: false,
+      message: `${action} 未执行：智能体当前忙碌（${formatErr(e)}），草稿保留，请等待任务完成后重试。`,
+    };
+  }
+  return {
+    isUnknown: false,
+    message: `${action} 失败：${formatErr(e)}；草稿与历史保留，不会自动重发。`,
+  };
+}
 
 const ARCHIVE_RETENTION_DAYS = 14;
 /** 与 BotChats.css 并排断点一致：≥1280px 抽屉并排非模态，<1280px 浮层模态。 */
@@ -291,7 +360,7 @@ export interface BotChatsArchiveBridge {
   unarchiveBot: (bot: BotDirectoryEntry) => Promise<void>;
   deleteBot: (bot: BotDirectoryEntry) => Promise<void>;
   conversationName: (target: SendRecordsTarget) => string | undefined;
-  openConversation: (target: SendRecordsTarget) => void;
+  openConversation: (target: SendRecordsTarget, panel?: 'google-setup') => void;
 }
 
 export interface SendRecordsTarget {
@@ -517,6 +586,8 @@ function CreateBotForm({
   const [role, setRole] = useState('');
   const [description, setDescription] = useState('');
   const [cwd, setCwd] = useState('');
+  const [selectedModelRef, setSelectedModelRef] = useState('');
+  const [modelCatalog, setModelCatalog] = useState<CenterModelPicker | null>(null);
   const [makePrimary, setMakePrimary] = useState(false);
   const [busy, setBusy] = useState(false);
   const [locked, setLocked] = useState(false);
@@ -530,6 +601,31 @@ function CreateBotForm({
       mountedRef.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    const id = api.identity;
+    if (!id || !api.transportConnected) return;
+    let active = true;
+    void api.broker(id, 'center_model_picker_get', {}).then(
+      (picker) => {
+        if (active && mountedRef.current) setModelCatalog(picker);
+      },
+      () => {},
+    );
+    return () => {
+      active = false;
+    };
+  }, [api, api.identity, api.transportConnected]);
+
+  const defaultModelRef = modelCatalog?.defaultModel ?? null;
+  const defaultModelEntry = defaultModelRef
+    ? modelCatalog?.models.find((m) => m.modelRef === defaultModelRef)
+    : undefined;
+  const defaultModelLabel = defaultModelEntry
+    ? `跟随全局默认（${defaultModelEntry.name}）`
+    : defaultModelRef
+      ? `跟随全局默认（${defaultModelRef}）`
+      : '跟随全局默认';
 
   const targetHasPrimary = useMemo(
     () =>
@@ -572,10 +668,27 @@ function CreateBotForm({
         ...(effectiveMakePrimary ? { makePrimary: true } : {}),
       });
       if (!mountedRef.current) return;
+      let createdBot: BotRecord = effectiveMakePrimary ? { ...bot, isPrimary: true } : bot;
+      if (selectedModelRef && api.identity && api.transportConnected) {
+        try {
+          const cfg = await api.broker(api.identity, 'center_bot_model_get', { deviceId, botId: bot.botId });
+          await api.broker(api.identity, 'center_bot_model_set', {
+            deviceId,
+            botId: bot.botId,
+            expectedRevision: cfg.revision,
+            value: { modelRef: selectedModelRef },
+          });
+          createdBot = { ...createdBot, modelRef: selectedModelRef };
+        } catch {
+          // Bot 本体已创建成功；专属模型写入失败时仍进入对话，后续可在配置中调整。
+        }
+      }
+      if (!mountedRef.current) return;
       setRole('');
       setDescription('');
       setCwd('');
-      onCreated(deviceId, effectiveMakePrimary ? { ...bot, isPrimary: true } : bot);
+      setSelectedModelRef('');
+      onCreated(deviceId, createdBot);
     } catch (e) {
       if (!mountedRef.current) return;
       if (
@@ -619,6 +732,17 @@ function CreateBotForm({
           maxLength={2000}
           disabled={busy || locked}
         />
+      </label>
+      <label className="field">
+        模型（可选）
+        <select value={selectedModelRef} onChange={(e) => setSelectedModelRef(e.target.value)} disabled={busy || locked}>
+          <option value="">{defaultModelLabel}</option>
+          {(modelCatalog?.models ?? []).map((model) => (
+            <option key={model.modelRef} value={model.modelRef}>
+              {model.name}（{model.modelRef}）
+            </option>
+          ))}
+        </select>
       </label>
       <p className="hint">{deviceId ? `创建于 ${devices.find(device => device.deviceId === deviceId)?.displayName || '所选设备'}` : '请在高级设置中选择在线设备。'}</p>
       {forcePrimary ? (
@@ -1048,7 +1172,7 @@ type SendNotice = {
   showRecordAction?: boolean;
 };
 
-function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, canPick, onPick, draftError, draftHint, draftConflict, sendState, receiptBusy, sendError, sendNotice, onSend, canSend, disabled, isPreLlm, isLlmRunning, isStopping, canStop, stopDisabled, onStop, stopButtonRef, onRetryDraft, attempt, recOutcome, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, canCancelTurnAdmission = false, onInsertSlash, onOpenSendRecord, queuedItems, queueBusy, onRecallQueued, onRecallAllQueued, onDiscardQueued, onSteerQueued, isEditingTurn = false, onCancelEditTurn }: {
+function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveFile, attachments, onAddAttachment, onRemoveAttachment, attachmentFetcher, onPickImage, hasNativeClipboardImage = false, canPick, onPick, draftError, draftHint, draftConflict, sendState, receiptBusy, sendError, sendNotice, onSend, canSend, disabled, isPreLlm, isLlmRunning, canSteer = false, isStopping, canStop, stopDisabled, onStop, stopButtonRef, onRetryDraft, attempt, recOutcome, onReleaseNotSent, onRetryClearVerified, onAdoptNewerDraft, turnAdmission, onRetryTurnAdmission, onRestoreTurnAdmission, canRestoreTurnAdmission = false, canCancelTurnAdmission = false, onInsertSlash, onOpenSendRecord, queuedItems, queueBusy, onRecallQueued, onRecallAllQueued, onDiscardQueued, onSteerQueued, isEditingTurn = false, onCancelEditTurn }: {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   text: string;
   onChangeText: (v: string) => void;
@@ -1059,7 +1183,8 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
   onAddAttachment: (att: ImageAttachment) => void;
   onRemoveAttachment: (i: number) => void;
   attachmentFetcher: AttachmentFetcher | null;
-  onPickImage: () => void;
+  onPickImage: (input?: File[] | 'clipboard') => void;
+  hasNativeClipboardImage?: boolean;
   canPick: boolean;
   onPick: () => void;
   draftError: string | null;
@@ -1075,6 +1200,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
   disabled: boolean;
   isPreLlm: boolean;
   isLlmRunning: boolean;
+  canSteer?: boolean;
   isStopping: boolean;
   canStop: boolean;
   stopDisabled: boolean;
@@ -1090,6 +1216,8 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
   turnAdmission: TurnAdmissionView | null;
   /** Host 准入失败后的显式重试：沿用冻结的同一 requestId/文本重新入队，不自动重发。 */
   onRetryTurnAdmission: () => void;
+  onRestoreTurnAdmission?: () => void;
+  canRestoreTurnAdmission?: boolean;
   canCancelTurnAdmission?: boolean;
   /** 斜杠命令先填回输入框；用户显式发送后由发送路径调用 clearHistory/compact，不当作模型 prompt。 */
   onInsertSlash: (command: string) => void;
@@ -1213,7 +1341,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.altKey) {
       e.preventDefault();
       if (canSend && !receiptBusy && !disabled && !isPreLlm && !isStopping) {
-        onSend(isLlmRunning && !isEditingTurn ? 'steer' : 'followUp');
+        onSend(canSteer && !isEditingTurn ? 'steer' : 'followUp');
       }
       return;
     }
@@ -1230,9 +1358,11 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
     draftHint ??
     (isEditingTurn
       ? 'Enter 重新发送 · Shift+Enter 换行 · Esc 取消编辑'
-      : isLlmRunning
+      : canSteer
         ? 'Enter 排队 · Ctrl+Enter 立即插入 · Shift+Enter 换行'
-        : 'Enter 发送 · Shift+Enter 换行 · / 呼出命令');
+        : isLlmRunning
+          ? 'Enter 排队 · Shift+Enter 换行'
+          : 'Enter 发送 · Shift+Enter 换行 · / 呼出命令');
   const footerRecordAction = sendState === 'idle' && sendNotice?.showRecordAction &&
     !recoveringAttempt && !sendError
     ? onOpenSendRecord
@@ -1275,12 +1405,30 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
           </div>
         ) : null}
         {turnAdmission?.phase === 'failed' ? (
-          <ErrorNotice title="消息暂未开始处理" description="内容已保留，可以重试。"
-            detail={turnAdmission.error ? `${turnAdmission.error.code}: ${turnAdmission.error.message ?? ''}` : undefined}
-            actionLabel="重试发送" onAction={onRetryTurnAdmission}
-            secondaryActionLabel={canCancelTurnAdmission ? '取消' : undefined}
-            onSecondaryAction={canCancelTurnAdmission ? onStop : undefined}
-            compact />
+          turnAdmission.error?.code === 'MODEL_NO_VISION' ? (
+            <ErrorNotice
+              tone="warning"
+              title="当前模型不支持图片��入"
+              description="该消息包含图片附件，请切换支持视觉的模型后重试，或恢复到输入框修改/移除图片后再发。"
+              detail={`${turnAdmission.error.code}: ${turnAdmission.error.message ?? ''}`}
+              actionLabel="重试发送"
+              onAction={onRetryTurnAdmission}
+              secondaryActionLabel={canRestoreTurnAdmission && onRestoreTurnAdmission ? '恢复编辑' : canCancelTurnAdmission ? '取消' : undefined}
+              onSecondaryAction={canRestoreTurnAdmission && onRestoreTurnAdmission ? onRestoreTurnAdmission : canCancelTurnAdmission ? onStop : undefined}
+              compact
+            />
+          ) : (
+            <ErrorNotice
+              title="消息暂未开始处理"
+              description="内容已保留，可以重试。"
+              detail={turnAdmission.error ? `${turnAdmission.error.code}: ${turnAdmission.error.message ?? ''}` : undefined}
+              actionLabel="重试发送"
+              onAction={onRetryTurnAdmission}
+              secondaryActionLabel={canRestoreTurnAdmission && onRestoreTurnAdmission ? '恢复编辑' : canCancelTurnAdmission ? '取消' : undefined}
+              onSecondaryAction={canRestoreTurnAdmission && onRestoreTurnAdmission ? onRestoreTurnAdmission : canCancelTurnAdmission ? onStop : undefined}
+              compact
+            />
+          )
         ) : null}
         {sendError && !attempt ? (
           <ErrorNotice error={sendError} actionLabel={onOpenSendRecord ? '查看发送记录' : undefined} onAction={onOpenSendRecord} compact />
@@ -1325,10 +1473,11 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
         <PendingQueueStrip
           items={queuedItems}
           disabled={Boolean(queueBusy || disabled || isStopping)}
+          canSteer={canSteer}
           onRecall={onRecallQueued}
           onRecallAll={onRecallAllQueued}
           onDiscard={onDiscardQueued}
-          onSteer={onSteerQueued}
+          onSteer={canSteer ? onSteerQueued : undefined}
         />
       ) : null}
       <div className="composer-input-wrap">
@@ -1403,6 +1552,22 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
             value={text}
             onChange={(e) => onChangeText(e.target.value)}
             onKeyDown={onKeyDown}
+            onPaste={(e) => {
+              const decision = decideImagePasteAction(e.clipboardData, {
+                isDesktopLinux: isDesktopLinuxPlatform(),
+                hasNativeClipboard: hasNativeClipboardImage,
+              });
+              if (decision.files.length > 0) {
+                if (decision.preventDefault) {
+                  e.preventDefault();
+                }
+                onPickImage(decision.files);
+                return;
+              }
+              if (decision.useNativeClipboardFallback) {
+                onPickImage('clipboard');
+              }
+            }}
             onCompositionStart={() => { composingRef.current = true; }}
             onCompositionEnd={() => { composingRef.current = false; }}
             aria-label={isEditingTurn ? '编辑历史消息' : '输入消息'}
@@ -1421,20 +1586,9 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
             >
               <RefreshCw size={15} className="grok-spin" />
             </button>
-          ) : isPreLlm || receiptBusy ? (
-            <button
-              type="button"
-              className="composer-loading"
-              disabled
-              aria-busy={true}
-              aria-label="处理中…"
-              title="前置准备中…"
-            >
-              <SendButtonIcon busy={true} size={16} />
-            </button>
-          ) : isLlmRunning ? (
+          ) : isPreLlm || receiptBusy ? null : isLlmRunning ? (
             <>
-              {hasDraftContent && !isEditingTurn ? (
+              {canSteer && hasDraftContent && !isEditingTurn ? (
                 <button
                   type="button"
                   className="composer-steer"
@@ -1453,7 +1607,7 @@ function Composer({ textareaRef, text, onChangeText, files, onAddFile, onRemoveF
                   onClick={() => onSend('followUp')}
                   disabled={receiptBusy || disabled || !canSend || isPreLlm || isStopping}
                   aria-label="排队发送"
-                  title="Enter 排队发送 · Ctrl+Enter 立即插入"
+                  title={canSteer ? 'Enter 排队发送 · Ctrl+Enter 立即插入' : 'Enter 排队发送'}
                 >
                   <SendButtonIcon busy={false} size={16} />
                 </button>
@@ -1517,6 +1671,7 @@ function BotProfile({ api, centerApi, bot, page, onSaved }: {
   const [busy, setBusy] = useState(false);
   const [locked, setLocked] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [profileSaved, setProfileSaved] = useState(false);
   const inFlight = useRef(false);
   const dirty = useRef(false);
   const cwdDirty = useRef(false);
@@ -1601,6 +1756,8 @@ function BotProfile({ api, centerApi, bot, page, onSaved }: {
       dirty.current = false;
       setName(updated.role);
       setDescription(updated.description ?? '');
+      setProfileSaved(true);
+      window.setTimeout(() => setProfileSaved(false), 2000);
       onSaved(updated);
     } catch (e) {
       if (sessionKey(api.identity) !== sessionKey(identity)) return;
@@ -1688,12 +1845,16 @@ function BotProfile({ api, centerApi, bot, page, onSaved }: {
           onChange={(e) => { cwdDirty.current = true; setCwd(e.target.value); setCwdNotice(null); }}
         />
       </label>
-      <p className="hint">保存后将在智能体空闲时生效。</p>
+      <p className="hint">
+        {centerOnline
+          ? '保存后将在智能体空闲时生效。'
+          : '当前未连接中心，暂以只读展示本机工作目录；连接中心后可修改并同步。'}
+      </p>
       {cwdNotice ? <div className="status" role="status">{cwdNotice}</div> : null}
-      {cwdError || cwdFailed ? <ErrorNotice compact error={cwdError ?? '无法读取工作目录。'} /> : null}
+      {centerOnline && (cwdError || cwdFailed) ? <ErrorNotice compact error={cwdError ?? '无法读取工作目录。'} /> : null}
       <div className="form-actions">
         <button type="button" className="secondary-button" onClick={() => void saveCwd()} disabled={busy || isArchived || !centerOnline || !cwdSavable}>保存工作目录</button>
-        {(cwdFailed || (cwdError && cwdRevision === null)) ? (
+        {centerOnline && (cwdFailed || (cwdError && cwdRevision === null)) ? (
           <button type="button" className="secondary-button" disabled={busy || !centerOnline} onClick={() => void loadCwdRef.current()}>重新读取工作目录</button>
         ) : null}
       </div>
@@ -1702,21 +1863,22 @@ function BotProfile({ api, centerApi, bot, page, onSaved }: {
 
   return (
     <div className="form-grid inspector-profile-form">
-      <label className="field">名称<input value={name} maxLength={120} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setName(e.target.value); }} /></label>
-      <label className="field">职责<textarea value={description} maxLength={2000} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setDescription(e.target.value); }} /></label>
+      <label className="field">名称<input value={name} maxLength={120} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setProfileSaved(false); setName(e.target.value); }} /></label>
+      <label className="field">一句话简介<textarea value={description} maxLength={2000} disabled={busy || locked || isArchived} onChange={(e) => { dirty.current = true; setProfileSaved(false); setDescription(e.target.value); }} /></label>
       {error ? <ErrorNotice compact error={error} /> : null}
       <div className="form-actions">
         {locked ? (
           <button type="button" className="secondary-button" disabled={busy || !api.transportConnected} onClick={() => void adoptRemote()}>读取并采用远端资料（丢弃草稿）</button>
         ) : null}
         <button type="button" className="primary-button" onClick={() => void save()} disabled={busy || locked || isArchived || !api.transportConnected}>保存资料</button>
+        {profileSaved ? <span className="status online" role="status">✓ 已保存</span> : null}
       </div>
     </div>
   );
 }
 
 type InspectorDetail = BotSettingsTab | 'management';
-type InspectorTab = 'profile' | InspectorDetail | 'raw' | 'shower';
+type InspectorTab = 'profile' | InspectorDetail | 'raw' | 'shower' | 'browser' | 'google-setup';
 
 interface InspectorPage {
   id: InspectorDetail;
@@ -1725,16 +1887,16 @@ interface InspectorPage {
 }
 
 const inspectorGroups: ReadonlyArray<{ title: string; pages: readonly InspectorPage[] }> = [
-  { title: '常用设置', pages: [
+  { title: '核心配置', pages: [
     { id: 'model', label: '模型', Icon: Cpu },
-    { id: 'soul', label: '人设', Icon: FileText },
-    { id: 'capabilities', label: '插件与能力', Icon: Puzzle },
+    { id: 'soul', label: '人设 (SOUL.md)', Icon: FileText },
+    { id: 'skills', label: '技能 (Skills)', Icon: Sparkles },
+    { id: 'capabilities', label: '工具扩展 (MCP & 插件)', Icon: Puzzle },
     { id: 'schedules', label: '定时任务', Icon: Clock },
+    { id: 'vault', label: '密码凭据', Icon: LockKeyhole },
   ] },
-  { title: '更多', pages: [
-    { id: 'skill-review', label: '已学技能', Icon: Sparkles },
-    { id: 'vault', label: '密码库', Icon: LockKeyhole },
-    { id: 'management', label: '管理', Icon: Settings },
+  { title: '更多管理', pages: [
+    { id: 'management', label: '工作目录与更多管理', Icon: Settings },
   ] },
 ];
 const inspectorPages = inspectorGroups.flatMap(group => group.pages);
@@ -1753,6 +1915,9 @@ function PrimaryChatPane({
   onOpenPrivateChats,
   onOpenSendRecords,
   onRequestArchive,
+  onOpenCenterAdmin,
+  initialClearedThroughEntryId = 0,
+  onClearedThroughEntryId,
   focusComposer = false,
   inspectorRequest = null,
   questionnaireRequestId,
@@ -1764,13 +1929,14 @@ function PrimaryChatPane({
   tasks = [],
   taskBots = [],
   taskScopeKey = 'none',
-  selectedTaskId = null,
-  selectedStepId = null,
+  jumpedTaskId = null,
+  jumpedStepId = null,
+  waitingTaskOffset = 0,
   returnTaskId = null,
   taskActionFailure = null,
   taskActionRetrying = false,
-  onSelectTaskTopic,
-  onSelectStepFocus,
+  onClearTaskQuote,
+  onCycleWaitingTask,
   onOpenTask,
   onReturnToTask,
   onRunTaskAction,
@@ -1780,20 +1946,23 @@ function PrimaryChatPane({
   api: DesktopPanelApi;
   /** 未按目标在线收窄的原 api：仅中心权威操作（cwd get/set）使用。 */
   centerApi: DesktopPanelApi;
-  bot: BotRecord;
+  bot: DesktopBotDirectoryEntry | BotRecord;
   readScope: BotReadScope;
   /** 目录侧设备显示名（仅展示）。 */
   deviceName: string;
   /** 目录侧设备平台徽标（DevicesDirectoryItem.platform）；BotRecord 无此字段，缺省回退 host。 */
   devicePlatform?: string;
   onProfileSaved: (bot: BotRecord) => void;
-  onBotUpdated: (patch: Partial<BotRecord> & { botId: string }) => void;
+  onBotUpdated: (patch: Partial<DesktopBotDirectoryEntry> & { botId: string }) => void;
   onBotDeleted: (botId: string) => void;
   onLiveActivity?: () => void;
   /** 打开该 Bot 参与的私聊列表（只读，默认不选对话）。 */
   onOpenPrivateChats?: (bot: BotRecord) => void;
   onOpenSendRecords?: (target: SendRecordsTarget) => void;
   onRequestArchive: () => void;
+  onOpenCenterAdmin?: (tab?: CenterAdminTab) => void;
+  initialClearedThroughEntryId?: number;
+  onClearedThroughEntryId?: (cutoff: number) => void;
   focusComposer?: boolean;
   inspectorRequest?: { tab: InspectorTab; seq: number } | null;
   questionnaireRequestId?: string;
@@ -1805,13 +1974,14 @@ function PrimaryChatPane({
   tasks?: GlobalTask[];
   taskBots?: TaskBotOption[];
   taskScopeKey?: string;
-  selectedTaskId?: string | null;
-  selectedStepId?: string | null;
+  jumpedTaskId?: string | null;
+  jumpedStepId?: string | null;
+  waitingTaskOffset?: number;
   returnTaskId?: string | null;
   taskActionFailure?: PendingTaskChatAction | null;
   taskActionRetrying?: boolean;
-  onSelectTaskTopic?: (taskId: string | null) => void;
-  onSelectStepFocus?: (stepId: string | null) => void;
+  onClearTaskQuote?: () => void;
+  onCycleWaitingTask?: () => void;
   onOpenTask?: (taskId: string, openEdit?: boolean) => void;
   onReturnToTask?: (taskId: string) => void;
   onRunTaskAction?: (action: PendingTaskChatActionInput) => Promise<boolean>;
@@ -1850,6 +2020,13 @@ function PrimaryChatPane({
   const autoFocusedRef = useRef(false);
   /** 本聊天最新的 Host 准入状态（Host-queued 回执中的 admission）；null 表示无等待项。 */
   const [turnAdmission, setTurnAdmission] = useState<TurnAdmissionView | null>(null);
+  const lastEditedAdmissionRef = useRef<{
+    sess: string;
+    botId: string;
+    requestId: string;
+    text: string;
+    attachments: string[];
+  } | null>(null);
   /** 抽屉 Portal 容器：紧凑模态只锁本聊天气泡层，不影响左栏名录与导航。 */
   const stageRef = useRef<HTMLDivElement | null>(null);
   const inspectorContentRef = useRef<HTMLDivElement | null>(null);
@@ -1858,9 +2035,16 @@ function PrimaryChatPane({
   const previousInspectorTabRef = useRef<InspectorTab | null>(null);
   const profileScrollRef = useRef(0);
 
-  const [manageAction, setManageAction] = useState<'setPrimary' | 'unarchive' | 'delete' | null>(null);
+  const [manageAction, setManageAction] = useState<'setPrimary' | 'unarchive' | 'delete' | 'clear' | null>(null);
   const [manageError, setManageError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [clearDone, setClearDone] = useState(false);
+  const initialCutoff = readClearedThroughEntryId(initialClearedThroughEntryId) ?? 0;
+  const [clearedThroughEntryId, setClearedThroughEntryId] = useState<number>(initialCutoff);
+  const cutoffRef = useRef<number>(initialCutoff);
+  const onClearedThroughEntryIdRef = useRef(onClearedThroughEntryId);
+  onClearedThroughEntryIdRef.current = onClearedThroughEntryId;
   const deleteConfirmationRef = useRef<HTMLDivElement | null>(null);
   const manageDeleteButtonRef = useRef<HTMLButtonElement | null>(null);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
@@ -1869,48 +2053,47 @@ function PrimaryChatPane({
   const manageBusy = manageAction !== null;
   const [taskBannerBusy, setTaskBannerBusy] = useState(false);
 
-  const linkedTask = useMemo(
-    () => (selectedTaskId ? (tasks.find((item) => item.id === selectedTaskId) ?? null) : null),
-    [tasks, selectedTaskId],
-  );
-  const focusedStep = useMemo(
-    () => (linkedTask && selectedStepId
-      ? (linkedTask.steps.find((step) => step.id === selectedStepId) ?? null)
-      : null),
-    [linkedTask, selectedStepId],
-  );
-  // banner 必须与 composer 绑定同一 task，绝不显示另一个任务的 prompt
-  const bannerTask = linkedTask;
-  const switchableWaitingTasks = useMemo(
+  const resolvedTaskContext = useMemo(
     () =>
-      botTasksFor(tasks, bot.deviceId, bot.botId).filter(
-        (item) => isTaskWaitingForBot(item, bot.deviceId, bot.botId) && item.id !== linkedTask?.id,
-      ),
-    [tasks, bot.deviceId, bot.botId, linkedTask?.id],
+      resolveBotChatTaskContext({
+        tasks,
+        botDeviceId: bot.deviceId,
+        botId: bot.botId,
+        jumpedTaskId,
+        jumpedStepId,
+        waitingOffset: waitingTaskOffset,
+      }),
+    [tasks, bot.deviceId, bot.botId, jumpedTaskId, jumpedStepId, waitingTaskOffset],
   );
+  const linkedTask = resolvedTaskContext.linkedTask;
+  const focusedStep = resolvedTaskContext.focusedStep;
+  const bannerTask = resolvedTaskContext.linkedTask;
 
   const onLiveActivityRef = useRef(onLiveActivity);
   onLiveActivityRef.current = onLiveActivity;
 
   /** 问卷提交复用现有 callCapabilityAction；deviceId/botId 取自当前身份与 Bot。 */
   const submitQuestionnaire = useCallback(
-    (installationId: string, input: QuestionnaireSubmitPayload): Promise<unknown> => {
+    async (installationId: string, input: QuestionnaireSubmitPayload): Promise<unknown> => {
       const current = api.identity;
-      if (!current || !api.transportConnected) {
-        return Promise.reject(new Error('NOT_CONNECTED: 没有活动连接身份'));
+      if (isArchived || !identity || !current || !api.transportConnected ||
+        current.profileId !== identity.profileId || current.targetDeviceId !== identity.targetDeviceId ||
+        current.kind !== identity.kind || current.generation !== identity.generation) {
+        throw Object.assign(new Error('NOT_CONNECTED: 没有活动连接身份'), { code: 'NOT_CONNECTED' });
       }
-      return api.call(current, 'callCapabilityAction', {
+      const reply = await api.call(identity, 'callCapabilityAction', {
         installationId,
         action: 'answerQuestionnaire',
         request: {
           requestId: crypto.randomUUID(),
-          deviceId: current.targetDeviceId,
+          deviceId: identity.targetDeviceId,
           botId: bot.botId,
           input,
         },
       });
+      return reply?.result;
     },
-    [api, bot.botId],
+    [api, identity, isArchived, bot.botId],
   );
 
   // 私有解锁回执绑定当前目标身份，不经过聊天提交或离线待发队列。
@@ -1923,6 +2106,89 @@ function PrimaryChatPane({
     }
     return api.call(identity, 'vaultControl', { action: 'respondUnlock', ...input });
   }, [api, identity]);
+
+  // Bot 内置浏览器与 Google 建项向导控制：volatile RPC 绑定当前目标设备与 Bot，不经持久 outbox。
+  const callBrowser = useMemo(
+    () => createBrowserControlRequest(api, identity, bot.botId),
+    [api, identity, bot.botId],
+  );
+  const callGoogleSetup = useMemo(
+    () => createGoogleSetupControlRequest(api, identity, bot.botId),
+    [api, identity, bot.botId],
+  );
+  const selectGoogleAccount = useCallback(
+    async (selection: {
+      email: string;
+      requestId?: string;
+      installationId?: string;
+      conversationId?: number;
+      cancelled?: boolean;
+    }) => {
+      const current = api.identity;
+      if (!current || !api.transportConnected) {
+        throw Object.assign(new Error('NOT_CONNECTED: 没有活动连接身份'), { code: 'NOT_CONNECTED' });
+      }
+      if (selection.requestId && selection.installationId) {
+        const actionInput: Record<string, string | number | boolean> = {
+          requestId: selection.requestId,
+          account: selection.email,
+          cancelled: Boolean(selection.cancelled),
+        };
+        if (selection.conversationId !== undefined) {
+          actionInput.conversationId = selection.conversationId;
+        }
+        return api.call(current, 'callCapabilityAction', {
+          installationId: selection.installationId,
+          action: 'selectGoogleAccount',
+          request: {
+            requestId: crypto.randomUUID(),
+            deviceId: current.targetDeviceId,
+            botId: bot.botId,
+            input: actionInput,
+          },
+        });
+      }
+      if (!selection.cancelled && selection.email) {
+        const reply = t(`请使用 Google 账号 ${selection.email} 继续处理刚才的请求。`, `Please continue using Google account ${selection.email}.`);
+        drafts.editText(drafts.text ? `${drafts.text}\n${reply}` : reply);
+      }
+      return { selected: selection.email };
+    },
+    [api, bot.botId, drafts, t],
+  );
+  const googleContext = useMemo<GoogleChatCardContext>(
+    () => ({
+      api: centerApi,
+      identity: centerApi.identity ?? identity,
+      deviceId: bot.deviceId,
+      botId: bot.botId,
+      botName: bot.role,
+      hostLabel: deviceName,
+      hostPlatform: devicePlatform,
+      isLocalAndroid: false,
+      connected: online,
+      callGoogleSetup,
+      callBrowser,
+      onOpenBrowser: () => setInspectorTab('browser'),
+      onOpenCapabilities: () => setInspectorTab('capabilities'),
+      onOpenCenterAdmin: onOpenCenterAdmin ? () => onOpenCenterAdmin('google') : undefined,
+      onSelectGoogleAccount: selectGoogleAccount,
+    }),
+    [
+      centerApi,
+      identity,
+      bot.deviceId,
+      bot.botId,
+      bot.role,
+      deviceName,
+      devicePlatform,
+      online,
+      callGoogleSetup,
+      callBrowser,
+      onOpenCenterAdmin,
+      selectGoogleAccount,
+    ],
+  );
   const toolScopeKey = JSON.stringify([
     identity?.profileId, identity?.targetDeviceId, identity?.kind, identity?.generation,
     bot.botId, bot.primaryConversationId, online,
@@ -2063,6 +2329,50 @@ function PrimaryChatPane({
     }
   }
 
+  function applyConfirmedClear(clearBoardKey: string, clearedId: number): boolean {
+    chatBoard.invalidate(clearBoardKey);
+    if (sessionKey(api.identity) === sess && clearedId > 0) {
+      onClearedThroughEntryIdRef.current?.(clearedId);
+    }
+    if (!mountedRef.current || sessionKey(api.identity) !== sess) return false;
+    applyCutoff(clearedId);
+    setTurnAdmission(null);
+    setConfirmClear(false);
+    setSendError(null);
+    setManageError(null);
+    return true;
+  }
+
+  async function handleClearHistory() {
+    if (!identity || !online || manageInFlightRef.current || slashBusy !== null || isArchived) return;
+    const clearBoardKey = botBoardKey(`${identity.profileId}|${identity.kind}`, identity.targetDeviceId, bot.botId);
+    manageInFlightRef.current = true;
+    setManageAction('clear');
+    setManageError(null);
+    setClearDone(false);
+    try {
+      const result = (await api.call(identity, 'clearHistory', { botId: bot.botId })) as ClearHistoryResult;
+      const clearedId = readClearedThroughEntryId(
+        (result as { clearedThroughEntryId?: unknown } | null | undefined)?.clearedThroughEntryId,
+      ) ?? 0;
+      if (!applyConfirmedClear(clearBoardKey, clearedId)) return;
+      setClearDone(true);
+      void loadRawLatest();
+      window.setTimeout(() => {
+        if (mountedRef.current) setClearDone(false);
+      }, 2200);
+    } catch (e) {
+      if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
+      const { message, isUnknown } = describeClearError('清空对话', e, api.transportConnected, tErr);
+      setManageError(message);
+      if (isUnknown && api.transportConnected) void loadRawLatest();
+      reportUnlessTargetOffline(api, e);
+    } finally {
+      manageInFlightRef.current = false;
+      if (mountedRef.current) setManageAction(null);
+    }
+  }
+
   const [editingTurn, setEditingTurn] = useState<{
     sess: string;
     botId: string;
@@ -2137,7 +2447,6 @@ function PrimaryChatPane({
       if (ref && isCurrentSession() && !lockedRef.current) addFile(ref);
     } catch (e) {
       if (!isCurrentSession()) return;
-      api.reportError(e);
       setSendError('选择文件失败：' + errText(e));
     }
   }
@@ -2149,75 +2458,109 @@ function PrimaryChatPane({
    *  addAttachment 的 expectedKey 是原子 guard（useDrafts 内部 keyRef 实时比较）：
    *  切换 Bot/身份后未完成批次中止，已上传结果不写新 scope 草稿。
    *  相同图片 id 去重；去重后总数 ≤4，超限整体拒绝保留原草稿。 */
-  function pickImage() {
+  function pickImage(input?: File[] | 'clipboard') {
+    const pastedFiles = Array.isArray(input) ? input : undefined;
+    if (pastedFiles && pastedFiles.length === 0) return;
+    if (input === 'clipboard' && !api.pickImages) return;
+    const nativeSource: DesktopImagePickSource | null =
+      input === 'clipboard' ? 'clipboard' : pastedFiles ? null : api.pickImages ? 'files' : null;
+    const errorPrefix = nativeSource === 'clipboard' ? '粘贴图片失败：' : '选择图片失败：';
     const frozenIdentity = identity;
     const frozenEditEntryId = activeEditing?.entryId ?? null;
     const draftKey = drafts.key;
-    if (!frozenIdentity || lockedRef.current || isArchived || imageUploading) return;
+    if (!frozenIdentity || lockedRef.current || isArchived || imageUploading || editSubmitting) return;
     if (frozenEditEntryId === null && !draftKey) return;
     const baseAttachments = activeEditing ? activeEditing.attachments : drafts.attachments;
     setImageUploadSession(sess);
-    pickImagesFromInput({
-      onPicked: async (files) => {
-        try {
-          const normalized = await Promise.all(files.map((file) => normalizeImageFile(file, file.name)));
-          const existing = new Set(baseAttachments.map((a) => a.id));
-          const queued: PickedImageSource[] = [];
-          for (const source of normalized) {
-            const id = await attachmentIdOf(source.data);
-            if (existing.has(id)) continue;
-            existing.add(id);
-            queued.push(source);
-          }
+    const release = () => {
+      if (mountedRef.current) setImageUploadSession(current => current === sess ? null : current);
+    };
+    const handleFiles = async (files: File[]) => {
+      try {
+        const normalized = await Promise.all(files.map((file) => normalizeImageFile(file, file.name)));
+        const existing = new Set(baseAttachments.map((a) => a.id));
+        const queued: PickedImageSource[] = [];
+        for (const source of normalized) {
+          const id = await attachmentIdOf(source.data);
+          if (existing.has(id)) continue;
+          existing.add(id);
+          queued.push(source);
+        }
+        if (!isCurrentSession()) return;
+        if (baseAttachments.length + queued.length > IMAGE_MAX_COUNT) {
+          setSendError(`最多 ${IMAGE_MAX_COUNT} 张图片，本次未上传。`);
+          return;
+        }
+        const totalBytes = baseAttachments.reduce((sum, a) => sum + a.size, 0)
+          + queued.reduce((sum, s) => sum + s.size, 0);
+        if (totalBytes > IMAGE_MAX_TOTAL_BYTES) {
+          setSendError(`图片总大小超过 ${IMAGE_MAX_TOTAL_BYTES / 1048576}MB，本次未上传。`);
+          return;
+        }
+        for (const source of queued) {
+          const att = await api.call(frozenIdentity, 'uploadAttachment', {
+            botId: bot.botId,
+            name: attachmentFileName(source.name, source.mimeType),
+            mimeType: source.mimeType,
+            data: source.data,
+          });
           if (!isCurrentSession()) return;
-          if (baseAttachments.length + queued.length > IMAGE_MAX_COUNT) {
-            setSendError(`最多 ${IMAGE_MAX_COUNT} 张图片，本次未上传。`);
+          if (frozenEditEntryId !== null) {
+            let applied = false;
+            setEditingTurn((cur) => {
+              if (
+                !cur ||
+                cur.sess !== sess ||
+                cur.botId !== bot.botId ||
+                cur.entryId !== frozenEditEntryId ||
+                cur.attachments.length >= IMAGE_MAX_COUNT ||
+                cur.attachments.some((a) => a.id === att.id)
+              ) {
+                return cur;
+              }
+              applied = true;
+              return { ...cur, attachments: [...cur.attachments, { ...att }] };
+            });
+            if (!applied) return;
+          } else if (!draftKey || !drafts.addAttachment(att, draftKey)) {
             return;
           }
-          for (const source of queued) {
-            const att = await api.call(frozenIdentity, 'uploadAttachment', {
-              botId: bot.botId,
-              name: attachmentFileName(source.name, source.mimeType),
-              mimeType: source.mimeType,
-              data: source.data,
-            });
-            if (!isCurrentSession()) return;
-            if (frozenEditEntryId !== null) {
-              let applied = false;
-              setEditingTurn((cur) => {
-                if (
-                  !cur ||
-                  cur.sess !== sess ||
-                  cur.botId !== bot.botId ||
-                  cur.entryId !== frozenEditEntryId ||
-                  cur.attachments.length >= IMAGE_MAX_COUNT ||
-                  cur.attachments.some((a) => a.id === att.id)
-                ) {
-                  return cur;
-                }
-                applied = true;
-                return { ...cur, attachments: [...cur.attachments, { ...att }] };
-              });
-              if (!applied) return;
-            } else if (!draftKey || !drafts.addAttachment(att, draftKey)) {
-              return;
-            }
-          }
-          setSendError(null);
+        }
+        setSendError(null);
+      } catch (e) {
+        if (!isCurrentSession()) return;
+        setSendError(errorPrefix + errText(e));
+      }
+    };
+    if (pastedFiles) {
+      void handleFiles(pastedFiles).finally(release);
+      return;
+    }
+    if (nativeSource && api.pickImages) {
+      const nativePick = api.pickImages;
+      void (async () => {
+        try {
+          const picked = await nativePick(nativeSource);
+          if (!isCurrentSession()) return;
+          const files = pickedImagesToFiles(picked);
+          if (files.length === 0) return;
+          await handleFiles(files);
         } catch (e) {
           if (!isCurrentSession()) return;
-          api.reportError(e);
-          setSendError('选择图片失败：' + errText(e));
+          setSendError(errorPrefix + errText(e));
         }
-      },
-      onSettled: () => {
-        if (mountedRef.current) setImageUploadSession(current => current === sess ? null : current);
-      },
+      })().finally(release);
+      return;
+    }
+    pickImagesFromInput({
+      onPicked: handleFiles,
+      onSettled: release,
     });
   }
 
   const [observedLive, setObservedLive] = useState<{ session: string; state: BotLiveState } | null>(null);
-  const live = observedLive && (!online || observedLive.session === sess) ? observedLive.state : null;
+  const rawLive = observedLive && (!online || observedLive.session === sess) ? observedLive.state : null;
+  const live = isStaleLiveState(rawLive, clearedThroughEntryId) ? null : rawLive;
   const [liveLast, setLiveLast] = useState<string | null>(null);
   const [liveError, setLiveError] = useState<string | null>(null);
   const [liveEnded, setLiveEnded] = useState(false);
@@ -2237,7 +2580,10 @@ function PrimaryChatPane({
     const current = api.identity;
     const draftKey = drafts.key;
     const draftText = drafts.text;
-    if (!current || !draftKey) return;
+    if (!current || !draftKey || manageInFlightRef.current) return;
+    const clearBoardKey = command === '/clear'
+      ? botBoardKey(`${current.profileId}|${current.kind}`, current.targetDeviceId, bot.botId)
+      : null;
     lockedRef.current = true;
     setSlashBusy(command);
     setSendState('sending');
@@ -2245,18 +2591,40 @@ function PrimaryChatPane({
     setSendNotice({ text: command === '/clear' ? '正在清空对话…' : '正在压缩上下文…' });
     try {
       const result = await api.call(current, command === '/clear' ? 'clearHistory' : 'compact', { botId: bot.botId });
+      if (command === '/clear') {
+        const clearedId = readClearedThroughEntryId(
+          (result as ClearHistoryResult | undefined)?.clearedThroughEntryId,
+        ) ?? 0;
+        if (!applyConfirmedClear(clearBoardKey!, clearedId)) return;
+      }
       if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
-      // 服务端已成功后才清命令草稿：沿用 clearDraft CAS，仅当持久草稿仍是该命令文本且无文件
-      // 引用时清空；等待期间写入的新文本保留（与手机端 runSlashCommand 同约定）。
+      // 服务端已成功后才清命令草稿：沿用 clearDraft CAS，仅当持久草稿仍是该命令文本且无文件/图片
+      // 引用时清空；等待期间写入的新文本或附件保留（与手机端 runSlashCommand 同约定）。
       const persisted = api.snapshot?.state.drafts[draftKey];
-      if (persisted && persisted.text === draftText && persisted.files.length === 0) {
+      if (
+        persisted &&
+        persisted.text === draftText &&
+        persisted.files.length === 0 &&
+        !(persisted.attachments?.length)
+      ) {
         try {
           await api.clearDraft(draftKey, [{ text: draftText, files: [] }]);
-          if (isCurrentSession() && drafts.text === draftText) drafts.editText('');
+          if (
+            isCurrentSession() &&
+            drafts.text === draftText &&
+            drafts.files.length === 0 &&
+            drafts.attachments.length === 0
+          ) {
+            drafts.editText('');
+          }
         } catch {
           // CAS 冲突/写失败：持久草稿保留，不掩盖服务端已成功的事实。
         }
-      } else if (drafts.text === draftText) {
+      } else if (
+        drafts.text === draftText &&
+        drafts.files.length === 0 &&
+        drafts.attachments.length === 0
+      ) {
         drafts.editText('');
       }
       // 服务端成功后立即重读完整可见历史（busy 下降沿兜底也会补跑）。
@@ -2275,8 +2643,15 @@ function PrimaryChatPane({
     } catch (e) {
       if (!mountedRef.current || sessionKey(api.identity) !== sess) return;
       setSendNotice(null);
-      setSendError(command + ' 失败：' + tErr(e) + '；草稿与历史保留，不会当普通消息发送。');
-      reportUnlessTargetOffline(api, e);
+      if (command === '/clear') {
+        const { message, isUnknown } = describeClearError('/clear', e, api.transportConnected, tErr);
+        setSendError(message);
+        if (isUnknown && api.transportConnected) void loadRawLatest();
+        reportUnlessTargetOffline(api, e);
+      } else {
+        setSendError(command + ' 失败：' + tErr(e) + '；草稿与历史保留，不会当普通消息发送。');
+        reportUnlessTargetOffline(api, e);
+      }
     } finally {
       lockedRef.current = false;
       if (mountedRef.current) {
@@ -2335,12 +2710,13 @@ function PrimaryChatPane({
     if (!identity || !online || !activeEditing || editSubmitting || lockedRef.current || isArchived) return;
     if (imageUploading) return;
     const curActivity = resolveBotActivity(live);
+    const curTurnAdmission = live !== null ? readTurnAdmission(live.turnAdmission) : turnAdmission;
     if (
       stopping ||
       Boolean(live?.busy) ||
       (live?.queuedCount ?? 0) > 0 ||
       isBotActivityBusy(curActivity) ||
-      (turnAdmission !== null && turnAdmission.phase !== 'failed')
+      (curTurnAdmission !== null && curTurnAdmission.phase !== 'failed')
     ) {
       setSendError('智能体忙碌时无法编辑历史消息，草稿已保留，请稍后重试或按 Esc 取消。');
       return;
@@ -2366,6 +2742,15 @@ function PrimaryChatPane({
       if (!isCurrentSession()) return;
       setEditingTurn(null);
       const nextAdmission = readTurnAdmission((receipt as { admission?: unknown }).admission);
+      if (nextAdmission) {
+        lastEditedAdmissionRef.current = {
+          sess,
+          botId: bot.botId,
+          requestId,
+          text: msg,
+          attachments: attachmentIds,
+        };
+      }
       setTurnAdmission(nextAdmission);
       void loadRawLatest();
       onLiveActivityRef.current?.();
@@ -2395,12 +2780,13 @@ function PrimaryChatPane({
     if (imageUploading) return;
     if (online) {
       const curActivity = resolveBotActivity(live);
+      const curTurnAdmission = live !== null ? readTurnAdmission(live.turnAdmission) : turnAdmission;
       if (
         stopping ||
         curActivity.phase === 'stopping' ||
         (!isBotLlmRunningPhase(curActivity.phase) &&
           (isBotPreLlmPhase(curActivity.phase) ||
-            (turnAdmission !== null && turnAdmission.phase !== 'failed')))
+            (live === null && curTurnAdmission !== null && curTurnAdmission.phase !== 'failed')))
       ) {
         return;
       }
@@ -2412,7 +2798,13 @@ function PrimaryChatPane({
     setSendNotice(null);
     const command = parseSlashCommand(msg);
     if (command && attachmentIds.length === 0) {
-      if (live?.busy || drafts.attempt || drafts.savePaused || drafts.files.length > 0) {
+      if (
+        live?.busy ||
+        (command === '/clear' && (isBotActivityBusy(resolveBotActivity(live)) || (live?.queuedCount ?? 0) > 0 || stopping)) ||
+        drafts.attempt ||
+        drafts.savePaused ||
+        drafts.files.length > 0
+      ) {
         setSendError('请等待当前任务结束、处理未确认的发送，并移除路径引用后再执行命令。');
         return;
       }
@@ -2425,20 +2817,9 @@ function PrimaryChatPane({
     }
     const filesNow = drafts.files;
     const linkedTaskSnapshot = linkedTask;
-    const focusedStepSnapshot = focusedStep;
-    const selectedTaskIdSnapshot = selectedTaskId;
-    const selectedStepIdSnapshot = selectedStepId;
     const capturedTaskScopeKey = taskScopeKey;
     const capturedBotSnapshot = { deviceId: bot.deviceId, botId: bot.botId, role: bot.role };
-    const taskPrefix = linkedTaskSnapshot
-      ? focusedStepSnapshot
-        ? `[关联任务「${linkedTaskSnapshot.title}」(${linkedTaskSnapshot.id}) · 子项「${focusedStepSnapshot.text}」(${focusedStepSnapshot.id})]\n`
-        : `[关联任务「${linkedTaskSnapshot.title}」(${linkedTaskSnapshot.id})]\n`
-      : selectedTaskIdSnapshot
-        ? selectedStepIdSnapshot
-          ? `[关联任务(${selectedTaskIdSnapshot}) · 子项(${selectedStepIdSnapshot})]\n`
-          : `[关联任务(${selectedTaskIdSnapshot})]\n`
-        : '';
+    const taskPrefix = resolvedTaskContext.taskPrefix;
     const bodyText = taskPrefix ? (msg ? `${taskPrefix}${msg}` : taskPrefix.trimEnd()) : msg;
     const composed = filesNow.length
       ? (bodyText ? `${bodyText}\n` : '') + filesNow.map((f) => `[文件路径引用，未上传] ${f.path}`).join('\n')
@@ -2505,8 +2886,7 @@ function PrimaryChatPane({
         if (sent.state === 'accepted' && linkedTaskSnapshot && msg) {
           if (
             linkedTaskSnapshot.pendingPrompt?.kind === 'question' &&
-            linkedTaskSnapshot.pendingPrompt.deviceId === capturedBotSnapshot.deviceId &&
-            linkedTaskSnapshot.pendingPrompt.botId === capturedBotSnapshot.botId
+            isTaskWaitingForBot(linkedTaskSnapshot, capturedBotSnapshot.deviceId, capturedBotSnapshot.botId)
           ) {
             void onRunTaskAction?.({
               kind: 'answer_prompt',
@@ -2516,7 +2896,10 @@ function PrimaryChatPane({
               taskTitle: linkedTaskSnapshot.title,
               answer: msg,
             });
-          } else if (linkedTaskSnapshot.pendingPrompt?.kind === 'plan') {
+          } else if (
+            linkedTaskSnapshot.pendingPrompt?.kind === 'plan' &&
+            isTaskWaitingForBot(linkedTaskSnapshot, capturedBotSnapshot.deviceId, capturedBotSnapshot.botId)
+          ) {
             void onRunTaskAction?.({
               kind: 'update_task',
               scopeKey: capturedTaskScopeKey,
@@ -2556,7 +2939,11 @@ function PrimaryChatPane({
     } else if (rec.state === 'rejected') {
       // 确定终态：本地 attempt 结束，原记录保留在待发送面板
       drafts.finishSend(handle);
-      setSendError('设备未接收消息。详情见发送记录。');
+      setSendError(
+        rec.lastError?.code === 'MODEL_NO_VISION'
+          ? 'MODEL_NO_VISION: model does not accept image input'
+          : '设备未接收消息。详情见发送记录。',
+      );
     } else if (rec.state === 'unconfirmed' || rec.state === 'sending') {
       drafts.markUnconfirmed(handle);
       setSendError(null);
@@ -2621,27 +3008,36 @@ function PrimaryChatPane({
     }
   }
 
-  /** 找到本 Bot 最近一条 Host-queued 记录（本地分页，只读；返回 null 表示无等待项）。 */
-  async function findHostAdmissionRecord(): Promise<PendingRecord | null> {
+  /** 找到本 Bot 最近一条 Host-queued 记录（优先匹配指定 requestId；返回 null 表示无等待项）。 */
+  async function findHostAdmissionRecord(preferredRequestId?: string): Promise<PendingRecord | null> {
     const current = api.identity;
     if (!current) return null;
     let cursor: PendingCursor | null = null;
+    let fallback: PendingRecord | null = null;
     for (let pageNo = 0; pageNo < 20; pageNo += 1) {
       const page: PendingListPage = await api.pending(current, 'pending_list', { options: { limit: 50, cursor } });
-      const hit = page.items.find(
-        (item: PendingRecord) => item.kind === 'primary' && item.botId === bot.botId && readHostQueuedReceipt(item) !== null,
-      );
-      if (hit) return hit;
+      if (preferredRequestId) {
+        const exact = page.items.find(
+          (item: PendingRecord) => item.kind === 'primary' && item.botId === bot.botId && item.requestId === preferredRequestId,
+        );
+        if (exact) return exact;
+      }
+      if (!fallback) {
+        fallback = page.items.find(
+          (item: PendingRecord) => item.kind === 'primary' && item.botId === bot.botId && readHostQueuedReceipt(item) !== null,
+        ) ?? null;
+        if (fallback && !preferredRequestId) return fallback;
+      }
       cursor = page.nextCursor;
       if (!cursor) break;
     }
-    return null;
+    return fallback;
   }
 
   /** 显式刷新 Host 准入状态；找不到等待记录即清空显示。 */
   async function refreshTurnAdmission() {
     try {
-      const rec = await findHostAdmissionRecord();
+      const rec = await findHostAdmissionRecord(turnAdmission?.requestId);
       if (isCurrentSession()) setTurnAdmission(rec ? readHostQueuedReceipt(rec)?.admission ?? null : null);
     } catch (e) {
       if (isCurrentSession()) reportUnlessTargetOffline(api, e);
@@ -2656,29 +3052,53 @@ function PrimaryChatPane({
   async function retryTurnAdmission() {
     const current = api.identity;
     if (!current || !api.transportConnected || sendState !== 'idle' || lockedRef.current || isArchived) return;
-    const rec = await findHostAdmissionRecord();
+    const failedRequestId = effectiveTurnAdmission?.phase === 'failed' ? effectiveTurnAdmission.requestId : undefined;
+    const rec = await findHostAdmissionRecord(failedRequestId);
     if (!isCurrentSession()) return;
-    const admission = rec ? readHostQueuedReceipt(rec)?.admission ?? null : null;
-    if (!rec || rec.kind !== 'primary' || !admission || admission.phase !== 'failed') {
-      if (mountedRef.current) setTurnAdmission(admission);
+    const recAdmission = rec ? readHostQueuedReceipt(rec)?.admission ?? null : null;
+    const editedFallback =
+      !rec &&
+      failedRequestId &&
+      lastEditedAdmissionRef.current?.sess === sess &&
+      lastEditedAdmissionRef.current.botId === bot.botId &&
+      lastEditedAdmissionRef.current.requestId === failedRequestId
+        ? lastEditedAdmissionRef.current
+        : null;
+    const isFailed =
+      Boolean(
+        effectiveTurnAdmission?.phase === 'failed' &&
+          (!failedRequestId || (rec?.kind === 'primary' ? rec.requestId : editedFallback?.requestId) === failedRequestId),
+      ) || recAdmission?.phase === 'failed';
+    if ((!rec && !editedFallback) || !isFailed) {
+      if (mountedRef.current && rec) setTurnAdmission(recAdmission);
       return;
     }
     lockedRef.current = true;
     setSendState('sending');
     setSendError(null);
     try {
-      const receipt = await api.call(current, 'submit', {
-        botId: rec.botId,
-        requestId: rec.requestId,
-        text: rec.text,
-        ...(rec.attachments?.length ? { attachments: rec.attachments } : {}),
-        ...(rec.delivery ? { delivery: rec.delivery } : {}),
-      });
+      const submitParams = rec && rec.kind === 'primary'
+        ? {
+            botId: rec.botId,
+            requestId: rec.requestId,
+            text: rec.text,
+            ...(rec.attachments?.length ? { attachments: rec.attachments } : {}),
+            ...(rec.delivery ? { delivery: rec.delivery } : {}),
+          }
+        : {
+            botId: editedFallback!.botId,
+            requestId: editedFallback!.requestId,
+            text: editedFallback!.text,
+            ...(editedFallback!.attachments.length ? { attachments: editedFallback!.attachments } : {}),
+          };
+      const receipt = await api.call(current, 'submit', submitParams);
       if (!isCurrentSession()) return;
       const nextAdmission = readTurnAdmission((receipt as { admission?: unknown }).admission);
       setTurnAdmission(nextAdmission);
-      // 本地 outbox 记录 receipt 仍带旧 admission：显式对账刷新一次（只读，不改远端状态）。
-      try { await api.pending(current, 'pending_reconcile', { id: rec.id }); } catch { /* 对账失败不掩盖重试结果 */ }
+      if (rec) {
+        // 本地 outbox 记录 receipt 仍带旧 admission：显式对账刷新一次（只读，不改远端状态）。
+        try { await api.pending(current, 'pending_reconcile', { id: rec.id }); } catch { /* 对账失败不掩盖重试结果 */ }
+      }
     } catch (e) {
       if (!isCurrentSession()) return;
       reportUnlessTargetOffline(api, e);
@@ -2686,6 +3106,53 @@ function PrimaryChatPane({
     } finally {
       lockedRef.current = false;
       setSendState('idle');
+    }
+  }
+
+  /** 将准入失败的消息从 Host 队列撤回并安全合并回输入框（不覆盖用户刚写的新草稿）。 */
+  async function restoreFailedTurnAdmission() {
+    const current = api.identity;
+    const targetRequestId = effectiveTurnAdmission?.phase === 'failed' ? effectiveTurnAdmission.requestId : undefined;
+    if (!current || !api.transportConnected || !targetRequestId || queueBusy || sendState !== 'idle' || lockedRef.current || isArchived) {
+      return;
+    }
+    if (drafts.attempt) {
+      setSendError('当前存在未确认的发送草稿，请先处理后再恢复失败消息。');
+      return;
+    }
+    const frozenDraftKey = drafts.key ?? undefined;
+    setQueueBusy(true);
+    setSendError(null);
+    try {
+      const res = (await api.call(current, 'withdrawQueued', {
+        botId: bot.botId,
+        requestId: targetRequestId,
+      })) as WithdrawQueuedResult;
+      if (!isCurrentSession()) return;
+      const withdrawn = Array.isArray(res?.withdrawn) ? res.withdrawn : [];
+      if (withdrawn.length > 0) {
+        const texts = withdrawn
+          .map((w) => (w.attachments?.length ? stripTrailingHostAttachmentLines(w.text, w.attachments.length) : w.text))
+          .filter((s) => typeof s === 'string' && s.trim().length > 0);
+        const attIds = withdrawn.flatMap((w) => (Array.isArray(w.attachments) ? w.attachments : []));
+        const resolvedAtts = await resolveAttachmentMetasByIds(attIds, attachmentFetcher);
+        if (!isCurrentSession()) return;
+        drafts.mergeRecalled(texts, resolvedAtts, frozenDraftKey);
+        setTurnAdmission((cur) => (cur?.requestId === targetRequestId ? null : cur));
+        if (lastEditedAdmissionRef.current?.requestId === targetRequestId) {
+          lastEditedAdmissionRef.current = null;
+        }
+        window.setTimeout(() => composerRef.current?.focus(), 0);
+      } else {
+        await refreshTurnAdmission();
+      }
+      onLiveActivityRef.current?.();
+    } catch (e) {
+      if (!isCurrentSession()) return;
+      setSendError('恢复编辑失败：' + tErr(e));
+      reportUnlessTargetOffline(api, e);
+    } finally {
+      if (mountedRef.current) setQueueBusy(false);
     }
   }
 
@@ -2740,6 +3207,22 @@ function PrimaryChatPane({
   const latestFlightRef = useRef<{ session: string; dirty: boolean } | null>(null);
   const prevBusyRef = useRef(false);
 
+  const applyCutoff = useCallback((candidate: number, invalidateFlight = true): boolean => {
+    const normalized = readClearedThroughEntryId(candidate) ?? 0;
+    if (normalized <= cutoffRef.current) return false;
+    cutoffRef.current = normalized;
+    setClearedThroughEntryId(normalized);
+    onClearedThroughEntryIdRef.current?.(normalized);
+    setRawItems((prev) => {
+      const filtered = prev.filter((item) => numericRawEntryId(item) > normalized);
+      return filtered.length === prev.length ? prev : filtered;
+    });
+    setEditingTurn((cur) => (cur && cur.entryId <= normalized ? null : cur));
+    setTurnAdmission(null);
+    if (invalidateFlight && latestFlightRef.current) latestFlightRef.current.dirty = true;
+    return true;
+  }, []);
+
   const loadRawLatest = useCallback(async () => {
     if (!identity || !api.transportConnected || !isCurrentSession()) return;
     if (latestFlightRef.current?.session === sess) {
@@ -2751,21 +3234,66 @@ function PrimaryChatPane({
     try {
       const all: AnyRawEntry[] = [];
       let cursor: Record<string, unknown> | null = null;
-      for (;;) {
-        const page: Awaited<ReturnType<typeof readHistoryPage<AnyRawEntry>>> = await readHistoryPage<AnyRawEntry>(async (c, limit, chunked) => {
-          if (!isCurrentSession()) return null;
-          return api.call(identity, 'history', { botId: bot.botId, limit, cursor: c, ...(chunked ? { chunked: true } : {}) });
-        }, cursor, 200);
-        if (!page || !isCurrentSession()) return;
-        const items = page.items;
-        if (items.length === 0) break;
-        all.push(...items);
-        if (!page.nextCursor || typeof page.nextCursor !== 'object' || Array.isArray(page.nextCursor)) break;
-        cursor = page.nextCursor;
+      const startCutoff = cutoffRef.current;
+      let hasEpoch = false;
+      let passEpoch: number | undefined;
+      try {
+        for (;;) {
+          const page: Awaited<ReturnType<typeof readHistoryPage<AnyRawEntry>>> = await readHistoryPage<AnyRawEntry>(async (c, limit, chunked) => {
+            if (!isCurrentSession()) return null;
+            return api.call(identity, 'history', { botId: bot.botId, limit, cursor: c, ...(chunked ? { chunked: true } : {}) });
+          }, cursor, 200);
+          if (!page || !isCurrentSession()) return;
+
+          const pageCleared = readClearedThroughEntryId(
+            (page as { clearedThroughEntryId?: unknown }).clearedThroughEntryId,
+          );
+          if (!hasEpoch) {
+            hasEpoch = true;
+            passEpoch = pageCleared;
+          } else if (pageCleared !== passEpoch) {
+            if (pageCleared !== undefined) applyCutoff(pageCleared, false);
+            flight.dirty = true;
+            return;
+          }
+          if (pageCleared !== undefined) applyCutoff(pageCleared, false);
+
+          const items = page.items;
+          const resetInItems = latestResetEntryIdFromItems(items);
+          if (resetInItems > cutoffRef.current) {
+            applyCutoff(resetInItems, false);
+            flight.dirty = true;
+            return;
+          }
+          if (cutoffRef.current > Math.max(startCutoff, passEpoch ?? 0)) {
+            flight.dirty = true;
+            return;
+          }
+
+          if (items.length === 0) break;
+          all.push(...items);
+          if (!page.nextCursor || typeof page.nextCursor !== 'object' || Array.isArray(page.nextCursor)) break;
+          cursor = page.nextCursor;
+        }
+      } catch (pageErr) {
+        if (
+          pageErr instanceof HistoryEpochChangedError ||
+          (cursor !== null && toError(pageErr).code === 'INVALID_ARGUMENT' && cutoffRef.current > Math.max(startCutoff, passEpoch ?? 0))
+        ) {
+          flight.dirty = true;
+          return;
+        }
+        throw pageErr;
       }
+
       if (!isCurrentSession()) return;
+      const effectiveCutoff = cutoffRef.current;
+      if (effectiveCutoff > Math.max(startCutoff, passEpoch ?? 0)) {
+        flight.dirty = true;
+        return;
+      }
       // 完整可见历史整体替换：/clear 后 reset 之前的条目不再回归，不再依赖截断的 live 窗口。
-      setRawItems(all);
+      setRawItems(effectiveCutoff > 0 ? all.filter((item) => numericRawEntryId(item) > effectiveCutoff) : all);
       rawCursorRef.current = null;
       setRawError(null);
     } catch (e) {
@@ -2784,7 +3312,7 @@ function PrimaryChatPane({
         if (flight.dirty && isCurrentSession()) void loadRawLatest();
       }
     }
-  }, [api, bot.botId, identity, isCurrentSession, sess]);
+  }, [api, applyCutoff, bot.botId, identity, isCurrentSession, sess]);
 
   /**
    * 历史只读路径只有一条：无论首次进入、重连、重试或 busy 下降沿，都复用 loadRawLatest
@@ -2847,20 +3375,26 @@ function PrimaryChatPane({
           if ('scopeId' in f) return;
           setLiveLast(new Date().toISOString());
           if (f.type === 'snapshot') {
+            const resetFromLive = latestResetEntryIdFromItems(f.state.history);
+            const advanced = resetFromLive > cutoffRef.current ? applyCutoff(resetFromLive) : false;
             setObservedLive({ session: localSess, state: f.state });
             // 快照帧可能带整字段 turnAdmission；缺省/形状非法一律清空显示。
             setTurnAdmission(readTurnAdmission((f.state as { turnAdmission?: unknown }).turnAdmission));
+            if (advanced) void loadRawLatest();
             onLiveActivityRef.current?.();
           } else {
             const changes = (f as { changes?: Partial<BotLiveState> }).changes;
-            if (changes && 'turnAdmission' in changes) {
-              setTurnAdmission(readTurnAdmission((changes as { turnAdmission?: unknown }).turnAdmission));
-            }
             if (changes) {
+              const resetFromChanges = 'history' in changes ? latestResetEntryIdFromItems(changes.history) : 0;
+              const advanced = resetFromChanges > cutoffRef.current ? applyCutoff(resetFromChanges) : false;
+              if ('turnAdmission' in changes) {
+                setTurnAdmission(readTurnAdmission((changes as { turnAdmission?: unknown }).turnAdmission));
+              }
               setObservedLive(prev => prev?.session === localSess
                 ? { session: localSess, state: { ...prev.state, ...changes } }
                 : prev);
-              if ('history' in changes || 'busy' in changes || 'generation' in changes) {
+              if (advanced) void loadRawLatest();
+              if (advanced || 'history' in changes || 'busy' in changes || 'generation' in changes) {
                 onLiveActivityRef.current?.();
               }
             }
@@ -2889,7 +3423,7 @@ function PrimaryChatPane({
       disposed = true;
       if (handle) void handle.close().catch(() => {});
     };
-  }, [api, sess, bot.botId, watchTick, online, pageActive, loadRawLatest, isCurrentSession]);
+  }, [api, applyCutoff, sess, bot.botId, watchTick, online, pageActive, loadRawLatest, isCurrentSession]);
 
   async function stopTask() {
     if (!identity || stopping || !api.transportConnected) return;
@@ -3064,7 +3598,15 @@ function PrimaryChatPane({
   }
 
   async function steerQueuedItem(item: UnifiedQueuedStripItem) {
-    if (!identity || !online || queueBusy || item.source !== 'host') return;
+    const curActivity = resolveBotActivity(live);
+    if (
+      !identity ||
+      queueBusy ||
+      item.source !== 'host' ||
+      !canSteerBotActivity({ activity: curActivity, online, archived: isArchived, isStopping: stopping })
+    ) {
+      return;
+    }
     setQueueBusy(true);
     try {
       await api.call(identity, 'steerQueued', {
@@ -3159,30 +3701,44 @@ function PrimaryChatPane({
     ? () => onOpenSendRecords({ deviceId: bot.deviceId, botId: bot.botId, recordId: sendRecordId ?? undefined })
     : undefined;
 
-  // 正文从 Host 受理起显示任务活动。顶部仍用本地 queued 投影维持发送期间的状态和停止入口。
+  // 正文从 Host 受理起显示任务活动；live 就绪后以 live.turnAdmission 为权威，未受理发送中不伪装成 queued。
+  const effectiveTurnAdmission = live !== null ? readTurnAdmission(live.turnAdmission) : (rawLive !== null ? null : turnAdmission);
   const liveActivity = resolveBotActivity(live);
   const transcriptActivity: BotActivity =
     stopping && liveActivity.phase !== 'stopping' && liveActivity.phase !== 'interrupting'
       ? { ...liveActivity, phase: 'stopping' }
       : liveActivity;
-  const activity: BotActivity =
-    sendState === 'sending' &&
-    slashBusy === null &&
-    (transcriptActivity.phase === 'idle' || transcriptActivity.phase === 'stopped')
-      ? {
-          phase: 'queued', source: 'primary', scopeId: null, requestId: null, startedAt: null,
-          webhookStopPending: liveActivity.webhookStopPending,
-        }
-      : transcriptActivity;
+  const acceptedPendingPreparing =
+    live === null &&
+    !stopping &&
+    !isBotActivityBusy(transcriptActivity) &&
+    effectiveTurnAdmission !== null &&
+    effectiveTurnAdmission.phase !== 'failed';
+  const activity: BotActivity = acceptedPendingPreparing
+    ? {
+        phase: 'preparing',
+        source: effectiveTurnAdmission.source ?? 'primary',
+        scopeId: null,
+        requestId: effectiveTurnAdmission.requestId,
+        startedAt: null,
+        webhookStopPending: liveActivity.webhookStopPending,
+      }
+    : transcriptActivity;
   const liveBusy = isBotActivityBusy(activity);
   const canStop = canStopBotActivity(activity);
-  const pendingQuestionnaire = online && !isArchived && live?.busy && !liveEnded && !liveError &&
-    activity.source !== 'room' && activity.source !== 'dm' && activity.phase !== 'stopping' && activity.phase !== 'interrupting'
+  const questionnaireLive = online && !isArchived && live !== null && !liveEnded && !liveError &&
+    activity.phase !== 'stopping' && activity.phase !== 'interrupting';
+  const pendingQuestionnaire = questionnaireLive && live.busy && activity.source !== 'room' && activity.source !== 'dm'
     ? readToolPresentation(live.tools?.find(tool => tool.status === 'running' &&
         tool.presentation?.kind === 'questionnaire' && tool.presentation.status === 'pending')?.presentation)
     : null;
+  const hasDurableQuestionnaire = questionnaireLive && (live.durableWaits?.length ?? 0) > 0;
   const awaitingAnswer = pendingQuestionnaire?.kind === 'questionnaire'
-    ? `等待你确认 · ${pendingQuestionnaire.questions.length} 题` : null;
+    ? `等待你确认 · ${pendingQuestionnaire.questions.length} 题`
+    : hasDurableQuestionnaire && !liveBusy ? t('等待你确认', 'Waiting for your answer') : null;
+  const focusQuestionnaire = transcriptActive && questionnaireLive && questionnaireRequestId &&
+    (live.busy || live.durableWaits?.some(wait => wait.requestId === questionnaireRequestId))
+    ? questionnaireRequestId : undefined;
   // 停止独立门禁：只关联在线/归档/停止进行中，不被发送、草稿锁或附件上传禁用。
   const stopDisabled = !online || isArchived || stopping;
   // 主聊天任务直接停止并撤回排队消息到输入框；仅打断群聊/私信/后台任务时弹二次确认。
@@ -3212,7 +3768,7 @@ function PrimaryChatPane({
     stopping ||
     isSendingMessage ||
     slashBusy !== null ||
-    (turnAdmission !== null && turnAdmission.phase !== 'failed');
+    (effectiveTurnAdmission !== null && effectiveTurnAdmission.phase !== 'failed');
   const canEditTurns = Boolean(online && !isArchived && !isBusyForEdit && !editSubmitting && !disabled);
   useEffect(() => {
     if (!editingTurn || editSubmitting) return;
@@ -3234,7 +3790,7 @@ function PrimaryChatPane({
         sess,
         botId: bot.botId,
         entryId: turn.entryId,
-        text: extractEditableUserText(turn.text ?? ''),
+        text: turn.text ?? '',
         attachments: (turn.attachments ?? []).map((a) => ({ ...a })),
       });
       window.setTimeout(() => {
@@ -3247,10 +3803,17 @@ function PrimaryChatPane({
     },
     [canEditTurns, sess, bot.botId],
   );
-  const queuedStripItems = useMemo(
-    () => mergeQueuedStripItems(live?.queuedItems, outboxPendingItems, bot.botId, identity?.targetDeviceId),
-    [live?.queuedItems, outboxPendingItems, bot.botId, identity?.targetDeviceId],
-  );
+  const queuedStripItems = useMemo(() => {
+    const items = mergeQueuedStripItems(live?.queuedItems, outboxPendingItems, bot.botId, identity?.targetDeviceId);
+    const hiddenIds = new Set<string>();
+    if (effectiveTurnAdmission && effectiveTurnAdmission.phase !== 'queued') {
+      hiddenIds.add(effectiveTurnAdmission.requestId);
+    }
+    if (liveActivity.phase === 'preparing' && liveActivity.requestId) {
+      hiddenIds.add(liveActivity.requestId);
+    }
+    return hiddenIds.size > 0 ? items.filter((item) => !hiddenIds.has(item.requestId)) : items;
+  }, [live?.queuedItems, outboxPendingItems, bot.botId, identity?.targetDeviceId, effectiveTurnAdmission, liveActivity.phase, liveActivity.requestId]);
   const composerText = activeEditing ? activeEditing.text : drafts.text;
   const composerAttachments = activeEditing ? activeEditing.attachments : drafts.attachments;
   const composerFiles = activeEditing ? [] : drafts.files;
@@ -3260,7 +3823,7 @@ function PrimaryChatPane({
     archived: isArchived,
     isSending: isSendingMessage,
     isStopping: stopping,
-    pendingAdmissionWaiting: turnAdmission !== null && turnAdmission.phase !== 'failed',
+    pendingAdmissionWaiting: live === null && effectiveTurnAdmission !== null && effectiveTurnAdmission.phase !== 'failed',
     hasDraft: composerText.trim().length > 0 || composerAttachments.length > 0,
     canStop,
   });
@@ -3268,6 +3831,12 @@ function PrimaryChatPane({
   const isPreLlmPhase = desktopComposerAction === 'loading';
   const isLlmRunningPhase =
     !isArchived && !isStoppingPhase && !isPreLlmPhase && online && isBotLlmRunningPhase(liveActivity.phase);
+  const canSteer = canSteerBotActivity({
+    activity: liveActivity,
+    online,
+    archived: isArchived,
+    isStopping: stopping || isStoppingPhase,
+  });
   const showComposerStop = shouldShowComposerStop({
     phase: liveActivity.phase,
     online,
@@ -3288,8 +3857,14 @@ function PrimaryChatPane({
       : liveEnded
         ? '观察已结束（不断连 Agent）'
         : live
-          ? awaitingAnswer ?? botActivityText(activity, t)
-          : '正在建立观察…';
+          ? awaitingAnswer ?? (
+              isSendingMessage && !isBotActivityBusy(activity)
+                ? (activity.webhookStopPending ? '发送中 · Webhook停止待同步' : '发送中')
+                : botActivityText(activity, t)
+            )
+          : isSendingMessage
+            ? '发送中'
+            : '正在建立观察…';
 
   function openInspector(tab: InspectorTab) {
     setInspectorTab((cur) => (cur === tab ? null : tab));
@@ -3298,9 +3873,21 @@ function PrimaryChatPane({
   const inspectorPage = inspectorPages.find(page => page.id === inspectorTab);
   const isProfilePage = inspectorTab === 'profile';
   const isManagementPage = inspectorTab === 'management';
+  const pendingBrowserTakeover = online && !isArchived && live?.busy && !liveEnded && !liveError
+    ? (live.tools
+        ?.map(tool => (tool.status === 'running' ? readToolPresentation(tool.presentation) : null))
+        .find(pres => pres?.kind === 'google-browser-takeover') ?? null)
+    : null;
   const settingsTab = inspectorPage && inspectorPage.id !== 'management' ? inspectorPage.id : null;
   const inspectorTitle = inspectorPage?.label ??
-    (isProfilePage ? '智能体资料' : inspectorTab === 'raw' ? '诊断与原始记录' : '虚拟桌面');
+    (isProfilePage
+      ? '智能体资料'
+      : inspectorTab === 'raw'
+        ? '诊断与原始记录'
+        : inspectorTab === 'google-setup' ? t('Google 配置向导', 'Google setup wizard')
+        : inspectorTab === 'browser'
+          ? 'Bot 内置浏览器'
+          : '虚拟桌面');
   const deleteConfirmation = confirmDelete && !isPrimary ? (
     <div className="confirm-delete-banner" role="alert" ref={deleteConfirmationRef} tabIndex={isManagementPage ? -1 : undefined}>
       <span>确定要永久删除智能体「{bot.role}」吗？此操作不可撤销。</span>
@@ -3331,12 +3918,24 @@ function PrimaryChatPane({
     <ErrorNotice error={manageError} onDismiss={() => setManageError(null)} compact />
   ) : null;
   const example = '帮我梳理今天的待办事项。';
+  const connectedToCenter = Boolean(centerApi.identity?.kind === 'relay' && centerApi.transportConnected && !centerInterrupted);
+  const modelSummary = formatBotModelSummary(bot as DesktopBotDirectoryEntry, { connectedToCenter });
 
   return (
     <div className="chat-stage" ref={stageRef}>
       <div className="chat-column">
       {chatBoard.storageError && <p role="alert" className="bot-board-warning">{chatBoard.storageError}</p>}
       <header className="chat-header">
+        {returnTaskId && onReturnToTask ? (
+          <button
+            type="button"
+            className="secondary-button chat-action-pill"
+            onClick={() => onReturnToTask(returnTaskId)}
+            title="返回刚才查看的任务详情"
+          >
+            <ArrowLeft size={15} aria-hidden="true" /> 返回任务
+          </button>
+        ) : null}
         <button
           type="button"
           className="chat-header-pill"
@@ -3363,7 +3962,7 @@ function PrimaryChatPane({
               {isArchived ? <span className="archived-pill">已归档</span> : null}
             </span>
             <span className="chat-header-pill-sub">
-              {deviceName} · 模型 {bot.modelRef ?? '默认'}
+              {deviceName} · <span className={modelSummary.tone === 'warn' ? 'model-summary-warn' : undefined}>{modelSummary.headerText}</span>
             </span>
           </span>
           <span
@@ -3412,6 +4011,14 @@ function PrimaryChatPane({
             aria-label="会话内搜索"
           >
             <Search size={17} />
+          </button>
+          <button
+            type="button"
+            className={`secondary-button chat-action-pill${inspectorTab === 'browser' ? ' active' : ''}`}
+            onClick={() => openInspector('browser')}
+            title="Bot 内置浏览器（仅本 Bot 独立会话，与 Google API 授权隔离）"
+          >
+            <Globe size={15} /> {pendingBrowserTakeover ? '浏览器 · 待接管' : '浏览器'}
           </button>
           <button
             type="button"
@@ -3496,21 +4103,6 @@ function PrimaryChatPane({
         </div>
       </header>
 
-      <TaskChatContextBar
-        variant="desktop"
-        botDeviceId={bot.deviceId}
-        botId={bot.botId}
-        botName={bot.role}
-        tasks={tasks}
-        activeTaskId={selectedTaskId}
-        activeStepId={selectedStepId}
-        returnTaskId={returnTaskId}
-        onSelectTaskTopic={(tid) => onSelectTaskTopic?.(tid)}
-        onSelectStepFocus={(sid) => onSelectStepFocus?.(sid)}
-        onOpenTaskDetail={(tid, openEdit) => onOpenTask?.(tid, openEdit)}
-        onReturnToTask={onReturnToTask}
-      />
-
       {awaitingAnswer ? <p className="chat-awaiting-answer" role="status">{awaitingAnswer}</p> : null}
 
       {isManagementPage ? null : deleteConfirmation}
@@ -3552,6 +4144,7 @@ function PrimaryChatPane({
       <ChatTranscript
         entries={rawItems}
         live={live}
+        clearedThroughEntryId={clearedThroughEntryId}
         bot={bot}
         knownBots={knownBots}
         activity={transcriptActivity}
@@ -3561,14 +4154,14 @@ function PrimaryChatPane({
         search={chatSearch}
         boardResultId={boardResultId}
         onViewedResult={onViewedResult}
-        questionnaireRequestId={transcriptActive && live?.busy &&
-          activity.phase !== 'stopping' && activity.phase !== 'interrupting' ? questionnaireRequestId : undefined}
+        questionnaireRequestId={focusQuestionnaire}
         onQuestionnaireFocused={onQuestionnaireFocused}
         archived={isArchived}
         scopeKey={toolScopeKey}
         disabled={!online}
         onSubmitQuestionnaire={submitQuestionnaire}
         onSubmitVaultUnlock={submitVaultUnlock}
+        googleContext={googleContext}
         attachmentFetcher={attachmentFetcher}
         loading={online && rawLoading}
         error={online ? (rawError || liveError) : null}
@@ -3579,7 +4172,7 @@ function PrimaryChatPane({
           setWatchTick((t) => t + 1);
           void loadRaw();
         }}
-        onOpenLearnedSkills={() => openInspector('skill-review')}
+        onOpenLearnedSkills={() => openInspector('skills')}
         canEditTurns={canEditTurns}
         editingEntryId={activeEditing?.entryId ?? null}
         onEditTurn={startEditTurn}
@@ -3647,35 +4240,19 @@ function PrimaryChatPane({
         </div>
       ) : null}
 
-      {!bannerTask?.pendingPrompt && switchableWaitingTasks.length > 0 ? (
-        <div
-          className="status status-offline-bar"
-          role="status"
-          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
-        >
-          <span>
-            {switchableWaitingTasks.length === 1
-              ? `待回应任务：「${switchableWaitingTasks[0].title}」`
-              : `有 ${switchableWaitingTasks.length} 个待回应任务：「${switchableWaitingTasks[0].title}」等`}
-          </span>
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={() => onSelectTaskTopic?.(switchableWaitingTasks[0].id)}
-          >
-            切到此任务回应
-          </button>
-        </div>
-      ) : null}
-
       <TaskChatPromptBanner
+        variant="desktop"
         botDeviceId={bot.deviceId}
         botId={bot.botId}
-        botName={bot.role}
-        avatar={botAvatarKey(bot)}
         task={bannerTask}
+        focusedStep={focusedStep}
+        showQuoteStrip={resolvedTaskContext.showQuoteStrip}
+        waitingTasksCount={resolvedTaskContext.waitingTasks.length}
+        waitingTaskIndex={resolvedTaskContext.waitingIndex}
         bots={taskBots}
         busy={taskBannerBusy}
+        onClearQuote={onClearTaskQuote}
+        onCycleWaitingTask={onCycleWaitingTask}
         onConfirmPlan={async (taskId) => {
           if (!onRunTaskAction) return;
           setTaskBannerBusy(true);
@@ -3692,7 +4269,7 @@ function PrimaryChatPane({
             setTaskBannerBusy(false);
           }
         }}
-        onOpenTaskEdit={(taskId) => onOpenTask?.(taskId, true)}
+        onOpenTaskDetail={(taskId, openEdit) => onOpenTask?.(taskId, openEdit)}
         onAnswerPrompt={async (taskId, answer) => {
           if (!onRunTaskAction) return;
           setTaskBannerBusy(true);
@@ -3724,6 +4301,7 @@ function PrimaryChatPane({
         onRemoveAttachment={removeAttachment}
         attachmentFetcher={attachmentFetcher}
         onPickImage={pickImage}
+        hasNativeClipboardImage={Boolean(api.pickImages)}
         canPick={!isArchived && !activeEditing && identity?.kind === 'local'}
         onPick={pickFile}
         draftError={activeEditing ? null : drafts.error}
@@ -3755,6 +4333,7 @@ function PrimaryChatPane({
         disabled={disabled}
         isPreLlm={isPreLlmPhase}
         isLlmRunning={isLlmRunningPhase}
+        canSteer={canSteer}
         isStopping={isStoppingPhase}
         canStop={showComposerStop}
         stopDisabled={stopDisabled}
@@ -3766,9 +4345,11 @@ function PrimaryChatPane({
         onReleaseNotSent={releaseNotSent}
         onRetryClearVerified={retryClearVerified}
         onAdoptNewerDraft={adoptNewerDraft}
-        turnAdmission={activeEditing ? null : turnAdmission}
+        turnAdmission={activeEditing ? null : effectiveTurnAdmission}
         onRetryTurnAdmission={() => void retryTurnAdmission()}
-        canCancelTurnAdmission={Boolean(!activeEditing && turnAdmission?.phase === 'failed' && canStop && !stopDisabled)}
+        onRestoreTurnAdmission={() => void restoreFailedTurnAdmission()}
+        canRestoreTurnAdmission={Boolean(!activeEditing && effectiveTurnAdmission?.phase === 'failed' && online && !isArchived && !queueBusy && !stopping && sendState === 'idle')}
+        canCancelTurnAdmission={Boolean(!activeEditing && effectiveTurnAdmission?.phase === 'failed' && canStop && !stopDisabled)}
         onInsertSlash={(cmd) => drafts.editText(cmd)}
         onOpenSendRecord={activeEditing ? undefined : openSendRecord}
         queuedItems={queuedStripItems}
@@ -3776,7 +4357,7 @@ function PrimaryChatPane({
         onRecallQueued={(item) => void recallQueuedItem(item, true)}
         onRecallAllQueued={() => void recallAllQueued()}
         onDiscardQueued={(item) => void recallQueuedItem(item, false)}
-        onSteerQueued={(item) => void steerQueuedItem(item)}
+        onSteerQueued={canSteer ? ((item) => void steerQueuedItem(item)) : undefined}
         isEditingTurn={Boolean(activeEditing)}
         onCancelEditTurn={() => {
           setEditingTurn(null);
@@ -3889,7 +4470,12 @@ function PrimaryChatPane({
                           >
                             <Icon size={17} aria-hidden />
                             <span className="inspector-link-label">{label}</span>
-                            {id === 'model' ? <span className="metadata inspector-link-value">{bot.modelRef ?? '默认'}</span> : null}
+                            {id === 'model' ? (
+                              <span className={'inspector-link-value' + (modelSummary.tone === 'warn' ? ' model-summary-warn' : ' metadata')}>
+                                {modelSummary.primaryText}
+                                {modelSummary.badgeText ? <span className="inspector-default-pill">{modelSummary.badgeText}</span> : null}
+                              </span>
+                            ) : null}
                             <ChevronRight size={15} aria-hidden />
                           </button>
                         ))}
@@ -3898,10 +4484,10 @@ function PrimaryChatPane({
                   </nav>
                 ) : null}
                 {isManagementPage ? (
-                  <section className="inspector-lifecycle" aria-label="智能体状态">
-                    <h3 className="inspector-section-title">智能体状态</h3>
+                  <section className="inspector-lifecycle" aria-label="更多管理">
+                    <h3 className="inspector-section-title">会话与生命周期</h3>
                     {isPrimary && !isArchived ? (
-                      <p className="hint">主 Bot 不可归档/删除，请先切换主 Bot。</p>
+                      <p className="hint">主智能体不可归档或删除，请先将其他智能体设为主智能体。</p>
                     ) : null}
                     <div className="form-actions">
                       {!isPrimary && !isArchived ? (
@@ -3911,7 +4497,17 @@ function PrimaryChatPane({
                           disabled={!online || manageBusy}
                           onClick={() => void handleSetPrimary()}
                         >
-                          {manageAction === 'setPrimary' ? '设置中…' : '★ 设为主 Bot'}
+                          {manageAction === 'setPrimary' ? '设置中…' : '★ 设为主智能体'}
+                        </button>
+                      ) : null}
+                      {!isArchived ? (
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={!online || manageBusy || slashBusy !== null || liveBusy}
+                          onClick={() => setConfirmClear(true)}
+                        >
+                          {manageAction === 'clear' ? '清空中…' : '清空对话'}
                         </button>
                       ) : null}
                       {!isArchived ? (
@@ -3943,13 +4539,51 @@ function PrimaryChatPane({
                         永久删除智能体
                       </button>
                     </div>
+                    {clearDone ? <div className="status online" role="status">✓ 已清空对话历史</div> : null}
+                    {confirmClear ? (
+                      <div className="confirm-delete-banner" role="alert">
+                        <span>清空「{bot.role}」的当前对话上下文与历史记录？</span>
+                        <div className="confirm-delete-actions">
+                          <button
+                            type="button"
+                            className="primary-button danger-button"
+                            disabled={!online || manageBusy || slashBusy !== null}
+                            onClick={() => void handleClearHistory()}
+                          >
+                            {manageAction === 'clear' ? '清空中…' : '确认清空'}
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            disabled={manageBusy}
+                            onClick={() => setConfirmClear(false)}
+                          >
+                            取消
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
                     {deleteConfirmation}
                     {managementError}
                   </section>
                 ) : null}
               </div>
               {settingsTab ? (
-                <BotSettings api={api} botId={bot.botId} hostLabel={deviceName} hostPlatform={devicePlatform} tab={settingsTab} open />
+                <BotSettings
+                  api={api}
+                  botId={bot.botId}
+                  botName={bot.role}
+                  hostLabel={deviceName}
+                  hostPlatform={devicePlatform}
+                  tab={settingsTab}
+                  open
+                  onOpenCenterAdmin={onOpenCenterAdmin}
+                  onOpenBrowser={() => setInspectorTab('browser')}
+                  callGoogleSetup={callGoogleSetup}
+                  onModelSaved={(cfg) => {
+                    onBotUpdated({ botId: bot.botId, modelRef: cfg.overrides.modelRef ?? null });
+                  }}
+                />
               ) : null}
               {inspectorTab === 'raw' ? (
                 <RawHistoryPane
@@ -3971,6 +4605,37 @@ function PrimaryChatPane({
                   connected={api.transportConnected && pageActive}
                   onClose={() => setInspectorTab(null)}
                 />
+              ) : null}
+              {inspectorTab === 'google-setup' && (
+                <GoogleSetupWizard
+                  key={`google-setup:${sess}:${bot.botId}`}
+                  api={api} identity={identity} botId={bot.botId} botName={bot.role}
+                  isLocalAndroid={devicePlatform?.toLowerCase() === 'android'}
+                  autoStart callGoogleSetup={callGoogleSetup}
+                  onOpenBrowser={() => setInspectorTab('browser')}
+                  onOpenCenterAdmin={() => onOpenCenterAdmin?.('google')}
+                  onClose={() => setInspectorTab(null)}
+                />
+              )}
+              {inspectorTab === 'browser' ? (
+                <div className="gws-desktop-browser-pane">
+                  <BotBrowserPanel
+                    key={`browser:${sess}:${bot.botId}`}
+                    botId={bot.botId}
+                    deviceId={bot.deviceId}
+                    botName={bot.role}
+                    hostLabel={deviceName}
+                    mode="sidebar"
+                    connected={online && pageActive}
+                    request={callBrowser}
+                    onSwitchToExternalGuide={(url) => {
+                      void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
+                      if (url) void openExternalUrl(url).catch(() => {});
+                    }}
+                    onOpenSystemGoogleAuth={() => setInspectorTab('capabilities')}
+                    onClose={() => setInspectorTab(null)}
+                  />
+                </div>
               ) : null}
             </div>
           </Dialog.Content>
@@ -4009,6 +4674,7 @@ export function BotChats({
   onTaskWaitingCountChange,
   onOpenSendRecords,
   onOpenArchived,
+  onOpenCenterAdmin,
 }: {
   api: DesktopPanelApi;
   currentDeviceId: string;
@@ -4027,6 +4693,7 @@ export function BotChats({
   onTaskWaitingCountChange?: (count: number) => void;
   onOpenSendRecords?: (target?: SendRecordsTarget) => void;
   onOpenArchived?: () => void;
+  onOpenCenterAdmin?: (tab?: CenterAdminTab) => void;
 }) {
   const identity = api.identity;
   const sess = sessionKey(identity);
@@ -4046,8 +4713,9 @@ export function BotChats({
     error: pinsError,
   } = useChatPins(profileKey || 'default');
 
-  const [bots, setBots] = useState<BotDirectoryEntry[]>(() => initialCache?.bots ?? []);
+  const [bots, setBots] = useState<DesktopBotDirectoryEntry[]>(() => initialCache?.bots ?? []);
   const readScopes = useRef(new Map<string, BotReadScope>());
+  const clearedCutoffsRef = useRef(new Map<string, number>());
   const readScopeFor = useCallback((deviceId: string, botId: string) => {
     const key = JSON.stringify([profileKey, deviceId, botId]);
     let scope = readScopes.current.get(key);
@@ -4095,15 +4763,19 @@ export function BotChats({
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [creatingTask, setCreatingTask] = useState(false);
   const [taskInitialEditMode, setTaskInitialEditMode] = useState(false);
-  const [selectedTopicByBot, setSelectedTopicByBot] = useState<Record<string, string | null>>({});
-  const [selectedStepByBotTask, setSelectedStepByBotTask] = useState<Record<string, string | null>>({});
+  const [jumpedTaskQuote, setJumpedTaskQuote] = useState<{
+    deviceId: string;
+    botId: string;
+    taskId: string;
+    stepId: string | null;
+  } | null>(null);
+  const [waitingTaskOffsetByBot, setWaitingTaskOffsetByBot] = useState<Record<string, number>>({});
   const [returnTaskId, setReturnTaskId] = useState<string | null>(null);
   const [taskBoardNotice, setTaskBoardNotice] = useState('');
   const [fetchedTasksById, setFetchedTasksById] = useState<Record<string, GlobalTask>>({});
   const taskFetchAttemptedRef = useRef<Set<string>>(new Set());
   const [taskActionFailures, setTaskActionFailures] = useState<Record<string, PendingTaskChatAction>>({});
   const [retryingTaskActionKey, setRetryingTaskActionKey] = useState<string | null>(null);
-  const autoTopicEntryRef = useRef<string | null>(null);
 
   const taskScopeKey = profileKey || 'none';
   const taskScopeRef = useRef(taskScopeKey);
@@ -4458,15 +5130,14 @@ export function BotChats({
       setActiveTaskId(null);
       setCreatingTask(false);
       setTaskInitialEditMode(false);
-      setSelectedTopicByBot({});
-      setSelectedStepByBotTask({});
+      setJumpedTaskQuote(null);
+      setWaitingTaskOffsetByBot({});
       setReturnTaskId(null);
       setTaskBoardNotice('');
       setFetchedTasksById({});
       taskFetchAttemptedRef.current.clear();
       setTaskActionFailures({});
       setRetryingTaskActionKey(null);
-      autoTopicEntryRef.current = null;
     }
     seq.current += 1;
     setLoading(false);
@@ -4864,12 +5535,17 @@ export function BotChats({
     ? devices.find((d) => d.deviceId === selectedBot.deviceId)?.platform ?? selectedBot.platform
     : undefined;
 
-  const selectedBotKey = selectedBot ? `${selectedBot.deviceId}:${selectedBot.botId}` : null;
-  const selectedBotTopicId = selectedBotKey ? (selectedTopicByBot[selectedBotKey] ?? null) : null;
+  const selectedBotJumpedTaskId =
+    selectedBot &&
+    jumpedTaskQuote &&
+    jumpedTaskQuote.deviceId === selectedBot.deviceId &&
+    jumpedTaskQuote.botId === selectedBot.botId
+      ? jumpedTaskQuote.taskId
+      : null;
 
   useEffect(() => {
     if (!online || !pageActive || !taskTransport) return;
-    const candidateIds = [selectedBotTopicId, returnTaskId].filter((id): id is string => Boolean(id));
+    const candidateIds = [selectedBotJumpedTaskId, returnTaskId].filter((id): id is string => Boolean(id));
     for (const tid of candidateIds) {
       if (globalTasks.tasks.some((item) => item.id === tid)) continue;
       if (fetchedTasksById[tid]) continue;
@@ -4887,37 +5563,7 @@ export function BotChats({
           // 列表截断补充查询失败时保留静态回退，不阻塞聊天主流程。
         });
     }
-  }, [online, pageActive, taskTransport, selectedBotTopicId, returnTaskId, globalTasks, fetchedTasksById, taskScopeKey]);
-
-  useEffect(() => {
-    if (!selectedBot || !selectedBotKey || stage || tasksActive || boardActive) {
-      autoTopicEntryRef.current = null;
-      return;
-    }
-    if (!globalTasks.loaded) return;
-    const entryKey = `${taskScopeKey}|${selectedBotKey}`;
-    if (autoTopicEntryRef.current === entryKey) return;
-    autoTopicEntryRef.current = entryKey;
-    if (selectedTopicByBot[selectedBotKey] !== undefined) return;
-    const waiting = botTasksFor(effectiveGlobalTasks, selectedBot.deviceId, selectedBot.botId).filter((item) =>
-      isTaskWaitingForBot(item, selectedBot.deviceId, selectedBot.botId),
-    );
-    if (waiting.length === 1) {
-      setSelectedTopicByBot((prev) =>
-        prev[selectedBotKey] !== undefined ? prev : { ...prev, [selectedBotKey]: waiting[0].id },
-      );
-    }
-  }, [
-    selectedBot,
-    selectedBotKey,
-    stage,
-    tasksActive,
-    boardActive,
-    globalTasks.loaded,
-    taskScopeKey,
-    selectedTopicByBot,
-    effectiveGlobalTasks,
-  ]);
+  }, [online, pageActive, taskTransport, selectedBotJumpedTaskId, returnTaskId, globalTasks, fetchedTasksById, taskScopeKey]);
 
   const onlineDevices = useMemo(() => devices.filter((d) => d.online), [devices]);
 
@@ -5085,8 +5731,9 @@ export function BotChats({
       group.identity.profileId === identity.profileId && group.identity.kind === identity.kind)?.title;
   }, [identity, profileReady, bots, groupItems]);
 
-  const openConversation = useCallback((target: SendRecordsTarget) => {
+  const openConversation = useCallback((target: SendRecordsTarget, panel?: 'google-setup') => {
     if (!conversationName(target)) return;
+    if (panel && target.botId) setInspectorRequest({ deviceId: target.deviceId, botId: target.botId, tab: panel, seq: Date.now() });
     setDeviceFilter('all');
     setQuery('');
     setRoomSettingsOpen(false);
@@ -5472,6 +6119,7 @@ export function BotChats({
         }
         onOpen={() => {
           setReturnTaskId(null);
+          setJumpedTaskQuote(null);
           setSelected({ deviceId: b.deviceId, botId: b.botId });
           setRoomSettingsOpen(false);
           setStage(null);
@@ -5680,10 +6328,12 @@ export function BotChats({
             return;
           }
           setTaskBoardNotice('');
-          const botKey = `${targetBot.deviceId}:${targetBot.botId}`;
-          setSelectedTopicByBot((prev) => ({ ...prev, [botKey]: taskId }));
-          const stepKey = `${targetBot.deviceId}:${targetBot.botId}:${taskId}`;
-          setSelectedStepByBotTask((prev) => ({ ...prev, [stepKey]: stepId ?? null }));
+          setJumpedTaskQuote({
+            deviceId: targetBot.deviceId,
+            botId: targetBot.botId,
+            taskId,
+            stepId: stepId ?? null,
+          });
           setReturnTaskId(taskId);
           setSelected({ deviceId: targetBot.deviceId, botId: targetBot.botId, focusComposer: true });
           setDeviceFilter('all');
@@ -5711,6 +6361,7 @@ export function BotChats({
       const bot = boardBots.find(bot => botBoardKey(profileKey, bot.deviceId, bot.botId) === target.key);
       if (!bot) return;
       setReturnTaskId(null);
+      setJumpedTaskQuote(null);
       setSelected({
         deviceId: bot.deviceId,
         botId: bot.botId,
@@ -5736,6 +6387,7 @@ export function BotChats({
               className={`hub-hero-card${!stage && selected?.deviceId === b.deviceId && selected.botId === b.botId ? ' selected' : ''}`}
               onOpen={() => {
                 setReturnTaskId(null);
+                setJumpedTaskQuote(null);
                 setSelected({ deviceId: b.deviceId, botId: b.botId });
                 setRoomSettingsOpen(false);
                 setStage(null);
@@ -6037,20 +6689,28 @@ export function BotChats({
             />
           </div>
         ) : null}
-        {scopedApi && selectedBot ? (
+        {scopedApi && selectedBot ? (() => {
+          const cutoffKey = JSON.stringify([profileKey, selectedBot.deviceId, selectedBot.botId, selectedBot.primaryConversationId]);
+          return (
           <div className={stage ? 'chat-stage-host stage-hidden' : 'chat-stage-host'}>
           <PrimaryChatPane
-            key={JSON.stringify([profileKey, selectedBot.deviceId, selectedBot.botId, selectedBot.primaryConversationId])}
+            key={cutoffKey}
             api={scopedApi}
             centerApi={api}
             bot={selectedBot}
             knownBots={scopeKnownBots}
             readScope={readScopeFor(selectedBot.deviceId, selectedBot.botId)}
+            initialClearedThroughEntryId={clearedCutoffsRef.current.get(cutoffKey) ?? 0}
+            onClearedThroughEntryId={(cutoff) => {
+              const prev = clearedCutoffsRef.current.get(cutoffKey) ?? 0;
+              if (cutoff > prev) clearedCutoffsRef.current.set(cutoffKey, cutoff);
+            }}
             deviceName={selectedDeviceName}
             devicePlatform={selectedDevicePlatform}
             focusComposer={selected?.focusComposer}
             onOpenSendRecords={onOpenSendRecords}
             onRequestArchive={() => setArchiveTarget(selectedBot)}
+            onOpenCenterAdmin={onOpenCenterAdmin}
             questionnaireRequestId={selected?.questionnaire?.session === sess &&
               selected.questionnaire.conversationId === selectedBot.primaryConversationId
               ? selected.questionnaire.requestId : undefined}
@@ -6110,23 +6770,29 @@ export function BotChats({
             tasks={effectiveGlobalTasks}
             taskBots={taskBotOptions}
             taskScopeKey={taskScopeKey}
-            selectedTaskId={selectedTopicByBot[`${selectedBot.deviceId}:${selectedBot.botId}`] ?? null}
-            selectedStepId={(() => {
-              const tid = selectedTopicByBot[`${selectedBot.deviceId}:${selectedBot.botId}`] ?? null;
-              return tid ? (selectedStepByBotTask[`${selectedBot.deviceId}:${selectedBot.botId}:${tid}`] ?? null) : null;
-            })()}
+            jumpedTaskId={
+              jumpedTaskQuote &&
+              jumpedTaskQuote.deviceId === selectedBot.deviceId &&
+              jumpedTaskQuote.botId === selectedBot.botId
+                ? jumpedTaskQuote.taskId
+                : null
+            }
+            jumpedStepId={
+              jumpedTaskQuote &&
+              jumpedTaskQuote.deviceId === selectedBot.deviceId &&
+              jumpedTaskQuote.botId === selectedBot.botId
+                ? jumpedTaskQuote.stepId
+                : null
+            }
+            waitingTaskOffset={waitingTaskOffsetByBot[`${selectedBot.deviceId}:${selectedBot.botId}`] ?? 0}
             returnTaskId={returnTaskId}
             taskActionFailure={taskActionFailures[`${taskScopeKey}|${selectedBot.deviceId}:${selectedBot.botId}`] ?? null}
             taskActionRetrying={retryingTaskActionKey === `${taskScopeKey}|${selectedBot.deviceId}:${selectedBot.botId}`}
-            onSelectTaskTopic={(taskId) => {
+            onClearTaskQuote={() => setJumpedTaskQuote(null)}
+            onCycleWaitingTask={() => {
               const botKey = `${selectedBot.deviceId}:${selectedBot.botId}`;
-              setSelectedTopicByBot((prev) => ({ ...prev, [botKey]: taskId }));
-            }}
-            onSelectStepFocus={(stepId) => {
-              const tid = selectedTopicByBot[`${selectedBot.deviceId}:${selectedBot.botId}`] ?? null;
-              if (!tid) return;
-              const stepKey = `${selectedBot.deviceId}:${selectedBot.botId}:${tid}`;
-              setSelectedStepByBotTask((prev) => ({ ...prev, [stepKey]: stepId }));
+              setJumpedTaskQuote(null);
+              setWaitingTaskOffsetByBot((prev) => ({ ...prev, [botKey]: (prev[botKey] ?? 0) + 1 }));
             }}
             onOpenTask={(taskId, openEdit) => {
               setActiveTaskId(taskId);
@@ -6153,7 +6819,8 @@ export function BotChats({
             pageActive={pageActive && workspaceActive && !stage}
           />
           </div>
-        ) : null}
+          );
+        })() : null}
         {!stage && !(scopedApi && selectedBot) ? (
           <div className="empty-state stage-empty">
             <span className="title" role="status">{botDeletionNotice || '选择左侧智能体开始对话'}</span>

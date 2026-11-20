@@ -94,6 +94,18 @@ export function createContextCodec(view) {
 
   // 系统与 opaque 消息按原始顺序排列，restore 据此补回投影遗漏项。
   const mandatoryOrder = messages.map((core) => core.id).filter((id) => opaqueIds.has(id));
+  const isBcAuxiliary = (message) => Boolean(
+    message && message.role === 'user' && (message.bcContextMaterial === true || message.bcSummaryMaterial === true),
+  );
+  // 真实 Durable 视图中的最后一个非 system、非显式辅助消息 ordinal（无则为 -1）。
+  let rawInputOrdinal = -1;
+  for (let i = view.messages.length - 1; i >= 0; i--) {
+    const m = view.messages[i];
+    if (m && m.role !== 'system' && !isBcAuxiliary(m)) {
+      rawInputOrdinal = i;
+      break;
+    }
+  }
 
   function restoreNative(core, native) {
     if (opaqueIds.has(core.id)) return native; // opaque 原样返回，绝不把 core.text 写入任何字段
@@ -122,38 +134,58 @@ export function createContextCodec(view) {
   }
 
   /**
-   * 还原投影：按 core.id 找回原消息；纯文本未保留则从投影消失（原文不受影响），
-   * 系统/opaque 缺失时按原始顺序补回，避免重复并保持工具 pair 顺序。
-   * synthetic 消息在其投影位置立即输出，不延迟到下一个 native 之后。
+   * 还原投影并输出最小侧带来源映射：基于 Durable 真实 ordinalById 精确追踪原末条输入是否保留及
+   * 全部合成辅助 user 索引（涵盖压缩、renderTags 文本改写与 missingOpaque 补回）。
    */
-  function restore(projected) {
+  function restoreWithProvenance(projected) {
     const projectedIds = new Set(projected.map((core) => core.id));
     const missingOpaque = mandatoryOrder.filter((id) => !projectedIds.has(id));
     const restored = [];
+    const auxiliaryIndices = [];
+    let inputIndex = null;
     const seen = new Set();
     let miss = 0;
+
+    const pushNative = (ordinal, message) => {
+      const idx = restored.length;
+      restored.push(message);
+      if (ordinal === rawInputOrdinal) inputIndex = idx;
+      else if (isBcAuxiliary(message)) auxiliaryIndices.push(idx);
+    };
 
     for (const core of projected) {
       if (seen.has(core.id)) continue; // 去重，避免同一身份重复输出
       seen.add(core.id);
       const native = messageById.get(core.id);
       if (native === undefined) {
+        auxiliaryIndices.push(restored.length);
         restored.push(syntheticUserContext(core));
         continue;
       }
       const ordinal = ordinalById.get(core.id) ?? Number.POSITIVE_INFINITY;
       while (miss < missingOpaque.length && ordinalById.get(missingOpaque[miss]) <= ordinal) {
-        restored.push(messageById.get(missingOpaque[miss]));
+        const missId = missingOpaque[miss];
+        pushNative(ordinalById.get(missId), messageById.get(missId));
         miss++;
       }
-      restored.push(restoreNative(core, native));
+      pushNative(ordinal, restoreNative(core, native));
     }
     while (miss < missingOpaque.length) {
-      restored.push(messageById.get(missingOpaque[miss]));
+      const missId = missingOpaque[miss];
+      pushNative(ordinalById.get(missId), messageById.get(missId));
       miss++;
     }
-    return restored;
+    return {
+      messages: restored,
+      inputIndex,
+      lostInput: rawInputOrdinal !== -1 && inputIndex === null,
+      auxiliaryIndices,
+    };
   }
 
-  return { messages, protectedIds: opaqueIds, restore };
+  function restore(projected) {
+    return restoreWithProvenance(projected).messages;
+  }
+
+  return { messages, protectedIds: opaqueIds, restore, restoreWithProvenance };
 }

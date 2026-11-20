@@ -1,7 +1,8 @@
 // Read-only Host execution protocol. Existing queues, SDK submissions/tasks and
 // GlobalTask records remain authoritative; this module never schedules or stores.
 // Inputs must come from trusted Host records, never from model text or wire hints.
-const SOURCES = new Set(['user', 'schedule', 'webhook', 'task_dispatch', 'peer', 'host']);
+const HOST_SOURCES = ['schedule', 'webhook', 'task_dispatch', 'google-workspace-rule'];
+const SOURCES = new Set(['user', 'peer', 'host', ...HOST_SOURCES]);
 const CHANNELS = new Set(['primary', 'dm', 'room', 'host']);
 const STATES = new Set(['accepted', 'queued', 'running', 'waiting', 'completed', 'failed', 'cancelled']);
 
@@ -42,7 +43,7 @@ function sender(value) {
     kind,
     ...(text(value?.deviceId) ? { deviceId: value.deviceId } : {}),
     ...(kind === 'bot' && text(value?.botId) ? { botId: value.botId } : {}),
-    ...(kind === 'host' && ['schedule', 'webhook', 'task_dispatch'].includes(value?.sourceType)
+    ...(kind === 'host' && HOST_SOURCES.includes(value?.sourceType)
       ? { sourceType: value.sourceType } : {}),
   };
 }

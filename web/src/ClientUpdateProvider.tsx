@@ -1,4 +1,4 @@
-// 共享客户端更新 provider：连接后检查、24h 定时复查，旧中心与旧操作结果不覆盖当前状态。
+// 共享客户端更新 provider：桌面定时检查，Android 读取原生后台检查结果。
 import {
   createContext,
   useCallback,
@@ -12,7 +12,9 @@ import {
 import {
   CLIENT_UPDATE_AUTO_INTERVAL_MS,
   CLIENT_UPDATE_LIVE_PHASES,
+  CLIENT_UPDATE_OPEN_EVENT,
   CLIENT_UPDATE_POLL_MS,
+  CLIENT_UPDATE_STATUS_EVENT,
   type ClientUpdateOp,
   type ClientUpdateParams,
   type ClientUpdateRequest,
@@ -49,9 +51,10 @@ export function ClientUpdateProvider(props: {
   request: ClientUpdateRequest;
   ready: boolean;
   centerKey: string;
+  nativeCheck?: boolean;
   children: ReactNode;
 }) {
-  const { request, ready, centerKey } = props;
+  const { request, ready, centerKey, nativeCheck = false } = props;
   const [status, setStatus] = useState<ClientUpdateStatus | undefined>(undefined);
   const [pending, setPending] = useState<ClientUpdateOp | null>(null);
   const [actionError, setActionError] = useState('');
@@ -69,7 +72,7 @@ export function ClientUpdateProvider(props: {
   const appliedPoll = useRef(0);
   const lastPolledOp = useRef(0);
 
-  const refresh = useCallback(async (): Promise<void> => {
+  const refresh = useCallback(async (reportError = true): Promise<void> => {
     if (!connectedRef.current) return;
     const epoch = epochRef.current;
     const revision = statusRevision.current;
@@ -85,7 +88,7 @@ export function ClientUpdateProvider(props: {
       if (active) lastPolledOp.current = active.id;
       setStatus(next);
     } catch (error) {
-      if (epoch === epochRef.current && revision === statusRevision.current && poll >= appliedPoll.current) {
+      if (reportError && epoch === epochRef.current && revision === statusRevision.current && poll >= appliedPoll.current) {
         setActionError(errorMessage(error));
       }
     }
@@ -145,24 +148,37 @@ export function ClientUpdateProvider(props: {
     setActionError('');
     autoAtRef.current = 0;
     if (!ready || !centerKey) return;
-    autoAtRef.current = Date.now();
-    void runOp('check', { automatic: true }, true);
-    const tick = () => {
-      if (!opInFlight.current && Date.now() - autoAtRef.current >= CLIENT_UPDATE_AUTO_INTERVAL_MS) {
-        autoAtRef.current = Date.now();
-        void runOp('check', { automatic: true }, true);
-      }
+    const syncNative = () => { if (!document.hidden) void refresh(false); };
+    if (nativeCheck) {
+      window.addEventListener(CLIENT_UPDATE_STATUS_EVENT, syncNative);
+      window.addEventListener(CLIENT_UPDATE_OPEN_EVENT, syncNative);
+      document.addEventListener('visibilitychange', syncNative);
+      syncNative();
+    } else {
+      autoAtRef.current = Date.now();
+      void runOp('check', { automatic: true }, true);
+      const tick = () => {
+        if (!opInFlight.current && Date.now() - autoAtRef.current >= CLIENT_UPDATE_AUTO_INTERVAL_MS) {
+          autoAtRef.current = Date.now();
+          void runOp('check', { automatic: true }, true);
+        }
+        timerRef.current = setTimeout(tick, 60_000);
+      };
       timerRef.current = setTimeout(tick, 60_000);
-    };
-    timerRef.current = setTimeout(tick, 60_000);
+    }
     return () => {
       epochRef.current += 1;
       opInFlight.current = null;
       statusRevision.current += 1;
+      if (nativeCheck) {
+        window.removeEventListener(CLIENT_UPDATE_STATUS_EVENT, syncNative);
+        window.removeEventListener(CLIENT_UPDATE_OPEN_EVENT, syncNative);
+        document.removeEventListener('visibilitychange', syncNative);
+      }
       if (timerRef.current) clearTimeout(timerRef.current);
       timerRef.current = undefined;
     };
-  }, [ready, centerKey, runOp]);
+  }, [ready, centerKey, nativeCheck, refresh, runOp]);
 
   const live = (status !== undefined && CLIENT_UPDATE_LIVE_PHASES.has(status.phase)) || pending === 'check' || pending === 'download';
   useEffect(() => {

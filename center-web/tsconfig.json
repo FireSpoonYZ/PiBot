@@ -11,5 +11,10 @@
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["**/*.ts", "**/*.tsx"]
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    "../web/src/center-admin/**/*.ts",
+    "../web/src/center-admin/**/*.tsx"
+  ]
 }

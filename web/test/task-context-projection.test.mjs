@@ -51,6 +51,7 @@ test('task projection bounds large multilingual inputs without dropping gates or
   assert.match(output, /近期结果 stepId=step-099/);
   assert.match(output, /省略 \d+/);
   assert.match(output, /普通执行 Bot 仅可用 `update_step`/);
+  assert.match(output, /调用 `complete`（或执行 Bot 完成自身步骤）后，务必在当前对话正文中直接输出面向用户的最终结论，严禁只调工具而不回复正文/);
   assert.match(output, /切勿重复调用 `propose_plan` 要求重新确认/);
   assert.match(output, /未确认前，用户的普通聊天回复不代表批准开工/);
   assert.ok(output.endsWith('Center 的权限、待确认状态与版本校验仍是依据。'));
@@ -159,4 +160,81 @@ test('plugin reads the Host focus, ignores forged section input, and supports th
   const legacyOutput = await legacyInstance.durableContributions.sections[0].render({ conversationId: 42, taskId: 'task-001' });
   assert.match(legacyOutput, /本轮没有可信任务焦点/);
   await legacy.close();
+});
+
+test('task tool reminds Bots to output user-facing final replies on step completion and complete while keeping role boundaries', async () => {
+  const api = { conversationId: 7, taskId: 'native-7', async details() {} };
+  const partialSnapshot = task(1, {
+    coordinatorDeviceId: 'device-coord',
+    coordinatorBotId: 'bot-coord',
+    steps: [
+      step(1, { status: 'working' }),
+      step(2, { deviceId: 'device-coord', botId: 'bot-coord', status: 'todo' }),
+    ],
+  });
+  const executorPlugin = createPlugin({
+    installationId: 'tasks',
+    host: pluginHost({
+      listDirectoryBots: () => [],
+      invoke: async (_botId, payload) => {
+        if (payload.action === 'get') return { task: partialSnapshot };
+        return {
+          task: {
+            ...partialSnapshot,
+            revision: partialSnapshot.revision + 1,
+            steps: [
+              { ...partialSnapshot.steps[0], status: 'done', resultSummary: '步骤已完成' },
+              partialSnapshot.steps[1],
+            ],
+          },
+        };
+      },
+    }),
+  });
+  const executorInstance = await executorPlugin.forBot(identity);
+  const executorTool = executorInstance.durableContributions.tools[0];
+  const stepDoneResult = await executorTool.execute(
+    { action: 'update_step', taskId: 'task-001', stepId: 'step-001', status: 'done', resultSummary: '步骤已完成' },
+    api,
+    {},
+  );
+  assert.match(stepDoneResult.output[0].text, /本步骤已标记完成，请在当前对话回复正文中简要输出本步骤的执行结果/);
+  const forbiddenComplete = await executorTool.execute(
+    { action: 'complete', taskId: 'task-001', summary: '试图越权收尾' },
+    api,
+    {},
+  );
+  assert.equal(forbiddenComplete.isError, true);
+  assert.match(forbiddenComplete.output[0].text, /仅任务协调人可以调用 complete/);
+  await executorPlugin.close();
+
+  const readyToComplete = task(2, {
+    steps: [step(1, { status: 'done', resultSummary: '全部就绪' })],
+  });
+  const coordPlugin = createPlugin({
+    installationId: 'tasks',
+    host: pluginHost({
+      listDirectoryBots: () => [],
+      invoke: async (_botId, payload) => {
+        if (payload.action === 'get') return { task: readyToComplete };
+        return {
+          task: {
+            ...readyToComplete,
+            revision: readyToComplete.revision + 1,
+            status: 'done',
+            summary: payload.summary,
+          },
+        };
+      },
+    }),
+  });
+  const coordInstance = await coordPlugin.forBot(identity);
+  const coordTool = coordInstance.durableContributions.tools[0];
+  const completedResult = await coordTool.execute(
+    { action: 'complete', taskId: 'task-002', summary: '最终结论汇总' },
+    api,
+    {},
+  );
+  assert.match(completedResult.output[0].text, /任务已标记完成。请立即在当前对话回复正文中向用户清晰完整地呈现最终结论与结果/);
+  await coordPlugin.close();
 });

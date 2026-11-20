@@ -1,25 +1,89 @@
 /* avatar-soul lane styles: loaded after web/src/styles.css via hub/lanes.css. */
 
 /* 18 个形状改 6 列 3 行；格子触控区域保持 >=44px。 */
-.grok-shapes-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
-.grok-shape-cell { width: 46px; height: 46px; border-radius: 16px; }
+.grok-shapes-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+.grok-shape-cell {
+  width: 46px;
+  height: 46px;
+  min-width: var(--tap-min);
+  min-height: var(--tap-min);
+  border-radius: var(--radius-md);
+}
+.grok-shape-cell:focus-visible,
+.grok-color-swatch:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
 
 /* 灰色留给离线状态，10 个可选颜色分为两行。 */
-.grok-colors-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); justify-items: center; gap: 12px 6px; padding: 4px 0; }
-.grok-color-swatch { flex: 0 0 auto; }
+.grok-colors-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  justify-items: center;
+  gap: var(--space-3) var(--space-2);
+  padding: var(--space-1) 0;
+}
+.grok-color-swatch {
+  flex: 0 0 auto;
+  width: var(--tap-min);
+  height: var(--tap-min);
+  min-width: var(--tap-min);
+  min-height: var(--tap-min);
+}
+
+/* 活动指示与头像交互控件：扩展点击区至 >=44px 并补齐焦点态。 */
+.sand-grok-bot-mark.is-interactive::before,
+.sand-activity-learn-link::before,
+.sand-activity-detail-toggle::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: max(100%, var(--tap-min));
+  height: max(100%, var(--tap-min));
+}
+.sand-activity-learn-link,
+.sand-activity-detail-toggle {
+  position: relative;
+}
+.sand-activity-learn-link:active,
+.sand-activity-detail-toggle:active {
+  opacity: 0.78;
+}
+.sand-grok-bot-mark.is-interactive:focus-visible,
+.sand-activity-learn-link:focus-visible,
+.sand-activity-detail-toggle:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
 
 /* 灵魂文档编辑器布局（替换原内联样式）。 */
-.avatar-soul-card { padding: 14px; }
-.soul-snippet-bar { margin: 2px 2px 4px; }
+.avatar-soul-card {
+  padding: var(--space-4);
+}
+.soul-snippet-bar {
+  margin: 2px 2px var(--space-1);
+}
 .soul-meta-row {
   display: flex;
   flex-wrap: wrap;
   justify-content: space-between;
   align-items: baseline;
-  gap: 4px 10px;
-  margin-top: 10px;
-  font-size: .75rem;
-  color: var(--muted);
+  gap: var(--space-1) var(--space-3);
+  margin-top: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
 }
-.soul-meta-limit { color: var(--muted); margin-right: 8px; }
-.soul-meta-limit.over { color: #b3261e; font-weight: 600; }
+.soul-meta-limit {
+  color: var(--color-text-muted);
+  margin-right: var(--space-2);
+}
+.soul-meta-limit.over {
+  color: var(--color-danger);
+  font-weight: var(--weight-semibold);
+}

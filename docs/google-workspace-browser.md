@@ -1,0 +1,22 @@
+# Google Workspace 与 Bot 浏览器
+
+Google Workspace 在 **Center 授权一次**。这个 Center 已有和以后新建的 Bot 都可以调用已就绪的服务；不用逐 Bot 安装、分配账号或登录。**Bot 浏览器的登录状态不共享**：每只 Bot 的标签页和浏览器资料由它所在的 Host 单独管理。
+
+## 连接 Google 账号
+
+1. 以所有者身份打开 **中心管理 → Google**。复制页面显示的 HTTPS 重定向 URI，在 Google Cloud 中创建“Web 应用”类型的 OAuth 客户端，并登记这个完全一致的 URI（路径为 `/api/oauth/google/callback`）。已有客户端可直接导入；需要帮助时可从目标 Bot 的 Google 能力页启动向导。
+2. 在中心的专用配置表单导入 Web OAuth JSON 或填写客户端凭据。选择要启用的服务，在**系统浏览器**登录 Google 并同意。不要把 JSON、Client Secret、验证码、回调 URL 或令牌交给 Bot，也不要粘贴到聊天。
+3. 返回中心，分别查看账号连接状态及 Gmail、Calendar、Drive、Docs、Sheets、联系人（People）的就绪状态。缺少授权范围、API 未启用和 Workspace 管理员限制需要不同的处理；账号“已连接”并不保证每个服务可用。扩权、重连和移除都作用于该账号、影响所有 Bot，不改变其他 MCP 的权限。
+
+只有一个账号时 Bot 可直接使用；有多个且请求没有指明时，Center 不执行该操作，先请用户选择本次账号。若聊天显示选择卡，选择会填入草稿，**发送后才继续**。这个选择不保存为该 Bot 的默认账号。
+
+**新邮件与会前规则**把符合条件的事件交给指定 Bot，不是逐 Bot 授权。暂停规则不会影响手动使用 Google。账号失效时不会自动改用别的账号。Google 调用与可信规则生成的聊天内容不自动进入 Bot 学习、Hindsight 或跨 Bot 技能共享；这并不意味着这次对话不经过所选模型，也不等于删除已有聊天。
+
+## 接管同一张网页
+
+- 在目标 Bot 的聊天菜单中打开 **Bot 浏览器**。手机查看桌面 Bot 时，网页仍运行在桌面 Host。实时画面不是第二个浏览器，不需要在手机重新打开地址。
+- 点击 **接管**。只有显示 Bot 已停手且本机持有控制权后，才可以点击、滚动或输入。换设备需显式切换，旧客户端不能继续输入。离开面板或网络中断不会把控制权自动交还 Bot。
+- 要继续人工作业，选择 **恢复接管**；要让 Bot 继续，选择 **交还**。登录、MFA、条款和创建、显示密钥等敏感步骤由本人完成。**切换外部浏览器指导**是单独的向导模式，不是迁移当前表单或 Cookie。
+- 配置向导保留 Bot 代办、内嵌指导、外部浏览器指导三种路径，但只提供当前 Host 实际支持的操作。桌面需有可用的 Chrome/Edge 或兼容的 Chromium；Android 本机要求 WebView 支持独立多 Profile，不支持时不会借用应用 WebView 或默认 Cookie，Google 配置可改走系统浏览器。
+
+Center 使用固定的内置 MCP（`builtin.google-workspace`）调用 Google API，Host 不接收 Google 刷新令牌。按[中心部署指南](center-linux-deployment.md)保留并备份原数据卷和配套加密密钥；只重建容器不应要求所有 Bot 重新登录，丢失卷或密钥则不能凭镜像恢复授权。上游基线、MIT 许可与移植差异见 [Orca 来源清单](../center-server/google-workspace/vendor/orca/README.md)。

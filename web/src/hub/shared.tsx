@@ -109,6 +109,7 @@ import {
   formatTurnDuration,
   latestEntryChannel,
   parseHistoryEntries,
+  pendingToolPrompts,
   resolveActiveTurnStartedAt,
   type ChatToolCallItem,
   type ChatTurnBlock,
@@ -130,7 +131,7 @@ import {
   type PickedImageSource,
 } from '../imageAttachments';
 import type { ImageAttachment } from '../../../host-core/index.js';
-import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useHideToolOutput, useText } from '../ui';
+import { ErrorNotice, FloatingPillToast, array, errorText, record, useAction, useText } from '../ui';
 
 export const uuid = () =>
   typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -144,7 +145,7 @@ export const REMOTE_PROFILES_FLAG_KEY = 'bot-hub-has-remote-v1';
 export const REMOTE_BOTS_CACHE_KEY = 'bot-hub-remote-bots-cache-v1';
 export const REMOTE_DEVICES_CACHE_KEY = 'bot-hub-remote-devices-cache-v1';
 export const PRIMARY_ROLE_OVERRIDE_KEY = 'bot-hub-primary-name-v2';
-export const DEFAULT_PRIMARY_ROLE = '主助手';
+export const DEFAULT_PRIMARY_ROLE = '主 Bot'; // i18n-ok
 export const CREATE_ATTEMPT_KEY = 'bot-hub-create-attempt-v1';
 export const ARCHIVE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 
@@ -166,19 +167,19 @@ try {
 export const SOUL_MAX_BYTES = 65536;
 export const SOUL_SNIPPETS: { zh: string; en: string; text: string }[] = [
   {
-    zh: '＋ 角色使命',
+    zh: '＋ 角色使命', // i18n-ok
     en: '+ Mission',
-    text: '\n# 角色与职责定位\n你是专注本工作区与目标领域的智能体搭档，结合上下文与实证数据直接推进任务并给出可靠结论。\n',
+    text: '\n# 角色与职责定位\n你是专注本工作区与目标领域的 Bot 搭档，结合上下文与实证数据直接推进任务并给出可靠结论。\n', // i18n-ok
   },
   {
-    zh: '＋ 沟通风格',
+    zh: '＋ 沟通风格', // i18n-ok
     en: '+ Style',
-    text: '\n# 沟通与表达风格\n- 自然温和、实事求是：像熟悉业务的靠谱搭档交流；已掌握答案或完成核查时第一句直奔结论，需调用工具排查时伴随工具调用简明交代第一步，不在核实前猜测结论，不重复问题、不加客服套话与多余尾注。\n- 篇幅克制、自然段落：日常简明扼要，复杂任务才展开完整细节；优先用连贯自然句表达，仅在真正并列或对比时使用列表与表格。\n',
+    text: '\n# 沟通与表达风格\n- 自然温和、实事求是：像熟悉业务的靠谱搭档交流；已掌握答案或完成核查时第一句直奔结论，需调用工具排查时伴随工具调用简明交代第一步，不在核实前猜测结论，不重复问题、不加客服套话与多余尾注。\n- 篇幅克制、自然段落：日常简明扼要，复杂任务才展开完整细节；优先用连贯自然句表达，仅在真正并列或对比时使用列表与表格。\n', // i18n-ok
   },
   {
-    zh: '＋ 群聊准则',
+    zh: '＋ 群聊准则', // i18n-ok
     en: '+ Room Rules',
-    text: '\n# 多 Bot 协作偏好\n- 发挥自身专长，对可并行或跨设备的子任务积极配合同伴 Bot 分工。\n- 聚焦实质进展与有效结论，其他成员已完整解答或无需补充时保持安静，不发无意义的附和与礼貌回执。\n',
+    text: '\n# 多 Bot 协作偏好\n- 发挥自身专长，对可并行或跨设备的子任务积极配合同伴 Bot 分工。\n- 聚焦实质进展与有效结论，其他成员已完整解答或无需补充时保持安静，不发无意义的附和与礼貌回执。\n', // i18n-ok
   },
 ];
 
@@ -197,6 +198,8 @@ export type HubScreen =
   | 'bot-soul'
   | 'bot-schedules'
   | 'bot-screen'
+  | 'bot-browser'
+  | 'bot-google-setup'
   | 'bot-model'
   | 'settings'
   | 'archived-bots'
@@ -386,7 +389,7 @@ export interface BotScheduleDraft {
   deleteAfterRun: boolean;
 }
 
-export const WEEKDAY_SHORT_ZH = ['一', '二', '三', '四', '五', '六', '日'];
+export const WEEKDAY_SHORT_ZH = ['一', '二', '三', '四', '五', '六', '日']; // i18n-ok
 export const WEEKDAY_SHORT_EN = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 export function formatScheduleRepeatLabel(
@@ -408,10 +411,8 @@ export function formatScheduleRepeatLabel(
     if (days.join(',') === '1,2,3,4,5') return t('周一至周五', 'Mon–Fri');
     if (days.join(',') === '6,7') return t('周六日', 'Weekends');
     if (days.length === 7) return t('每天', 'Every day');
-    return t(
-      `每周 ${days.map(d => WEEKDAY_SHORT_ZH[(d - 1) % 7]).join('、')}`,
-      `Weekly ${days.map(d => WEEKDAY_SHORT_EN[(d - 1) % 7]).join(', ')}`,
-    );
+    return t(`每周 ${days.map(d => WEEKDAY_SHORT_ZH[(d - 1) % 7]).join('、')}`,
+      `Weekly ${days.map(d => WEEKDAY_SHORT_EN[(d - 1) % 7]).join(', ')}`);
   }
   return t('每天', 'Every day');
 }
@@ -624,23 +625,126 @@ export function formatArchivedRemainingDays(archivedAt: string | null | undefine
   return Math.max(1, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
 }
 
+export interface BotHistoryReadResult {
+  items: Array<Record<string, unknown>>;
+  clearedThroughEntryId?: number;
+}
+
+export function readClearedThroughEntryId(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+export function maxResetEntryId(items: readonly Record<string, unknown>[]): number {
+  let max = 0;
+  for (const item of items) {
+    if (!item || typeof item !== 'object' || item.kind !== 'pi.reset') continue;
+    const id = typeof item.id === 'number' ? item.id : Number(item.id);
+    if (Number.isSafeInteger(id) && id > max) max = id;
+  }
+  return max;
+}
+
+export function isStaleLiveState(state: BotLiveState | null | undefined, cutoff: number): boolean {
+  if (!state || cutoff <= 0) return false;
+  const history = Array.isArray(state.history) ? state.history : [];
+  if (history.some(item => item?.kind === 'pi.reset' && Number(item.id) >= cutoff)) return false;
+  const lastId = typeof state.lastEntryId === 'number' && Number.isFinite(state.lastEntryId) ? state.lastEntryId : null;
+  if (lastId !== null && lastId > cutoff) return false;
+  return !history.some(item => Number(item.id) > cutoff);
+}
+
+export function filterHistoryAfterCutoff(
+  items: readonly Record<string, unknown>[],
+  cutoff: number,
+): Array<Record<string, unknown>> {
+  return items.filter(item => {
+    if (item.kind === 'pi.reset') return false;
+    if (cutoff <= 0) return true;
+    const id = typeof item.id === 'number' ? item.id : Number(item.id);
+    return Number.isFinite(id) && id > cutoff;
+  });
+}
+
+export type ClearErrorKind = 'busy' | 'unknown' | 'definite';
+
+export function classifyClearError(error: unknown): ClearErrorKind {
+  if (!error || typeof error !== 'object') return 'unknown';
+  const { code, outcome } = error as { code?: unknown; outcome?: unknown };
+  const upperCode = typeof code === 'string' ? code.toUpperCase() : '';
+  if ((upperCode === 'RUNTIME_BUSY' || upperCode === 'BUSY') && outcome !== 'unconfirmed' && outcome !== 'not-sent') return 'busy';
+  if (outcome === 'not-sent' || outcome === 'responded') return 'definite';
+  return 'unknown';
+}
+
+export function makeClearError(message: string, code: string, outcome: 'responded' | 'unconfirmed'): Error {
+  const err = new Error(message) as Error & { code: string; outcome: 'responded' | 'unconfirmed' };
+  err.code = code;
+  err.outcome = outcome;
+  return err;
+}
+
 export async function fetchBotHistoryPages(
   fetchPage: (cursor: Record<string, unknown> | null, limit: number, chunked: boolean) => Promise<HostHistoryPage | null>,
-): Promise<Array<Record<string, unknown>> | null> {
-  const all: Array<Record<string, unknown>> = [];
-  let cursor: Record<string, unknown> | null = null;
-  for (;;) {
-    const page = await readHistoryPage(fetchPage, cursor, 200);
-    // fetchPage 返回 null 表示本次读取已失效（scope 切换/请求作废）：丢弃已读部分页，
-    // 绝不把半截历史当成完整快照回填。
-    if (!page) return null;
-    const items = array<Record<string, unknown>>(page.items);
-    if (items.length > 0) all.push(...items);
-    const next = page.nextCursor;
-    if (!next || typeof next !== 'object' || Array.isArray(next) || items.length === 0) break;
-    cursor = next as Record<string, unknown>;
+): Promise<BotHistoryReadResult | null> {
+  // 跨页或分片期间服务端 reset 边界变化时丢弃半截结果并从头重读。
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const all: Array<Record<string, unknown>> = [];
+    let cursor: Record<string, unknown> | null = null;
+    let hasEpoch = false;
+    let passEpoch: number | undefined;
+    let restart = false;
+    const trackedFetchPage: typeof fetchPage = async (pageCursor, limit, chunked) => {
+      const rawPage = await fetchPage(pageCursor, limit, chunked);
+      if (!rawPage) return null;
+      const pageCleared = readClearedThroughEntryId(
+        (rawPage as { clearedThroughEntryId?: unknown }).clearedThroughEntryId,
+      );
+      if (!hasEpoch) {
+        hasEpoch = true;
+        passEpoch = pageCleared;
+      } else if (pageCleared !== passEpoch) {
+        restart = true;
+        return null;
+      }
+      return rawPage;
+    };
+    try {
+      for (;;) {
+        const page = await readHistoryPage(trackedFetchPage, cursor, 200);
+        if (restart) break;
+        // fetchPage 返回 null 表示本次读取已失效（scope 切换/请求作废）：丢弃已读部分页。
+        if (!page) return null;
+        const pageCleared = readClearedThroughEntryId(
+          (page as { clearedThroughEntryId?: unknown }).clearedThroughEntryId,
+        );
+        if (pageCleared !== undefined && pageCleared !== passEpoch) {
+          restart = true;
+          break;
+        }
+        const items = array<Record<string, unknown>>(page.items);
+        if (items.length > 0) all.push(...items);
+        const next = page.nextCursor;
+        if (!next || typeof next !== 'object' || Array.isArray(next) || items.length === 0) break;
+        cursor = next as Record<string, unknown>;
+      }
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      if (attempt < 3 && (code === 'HISTORY_EPOCH_CHANGED' || (cursor !== null && code === 'INVALID_ARGUMENT'))) {
+        continue;
+      }
+      throw error;
+    }
+    if (restart) continue;
+    const observedReset = maxResetEntryId(all);
+    const effectiveCutoff = observedReset > 0
+      ? Math.max(passEpoch ?? 0, observedReset)
+      : passEpoch;
+    return {
+      items: filterHistoryAfterCutoff(all, effectiveCutoff ?? 0),
+      ...(effectiveCutoff !== undefined ? { clearedThroughEntryId: effectiveCutoff } : {}),
+    };
   }
-  return all;
+  throw new Error('History reset epoch kept changing during read');
 }
 
 export function mergeHistory(previous: Array<Record<string, unknown>>, next: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
@@ -652,26 +756,26 @@ export function mergeHistory(previous: Array<Record<string, unknown>>, next: Arr
 /** 同 scope+同代际的并发全量历史读取共用一个 flight；代际不符不共享（A→B→A、/clear、
     连接代际变化都不复用旧读）。fresh() 在每页边界判废：scope 被更新 flight 顶掉或代际失效
     时返回 null，读随之丢弃已读部分页，绝不回半截数据。 */
-export function sharedHistoryRead(
-  flights: Map<string, { epoch: number; task: Promise<Array<Record<string, unknown>> | null> }>,
+export function sharedHistoryRead<T = BotHistoryReadResult>(
+  flights: Map<string, { epoch: number; task: Promise<T | null> }>,
   scopeKey: string,
   epochRef: { current: number },
   current: () => boolean,
-  read: (fresh: () => boolean) => Promise<Array<Record<string, unknown>> | null>,
-): Promise<Array<Record<string, unknown>> | null> {
+  read: (fresh: () => boolean) => Promise<T | null>,
+): Promise<T | null> {
   const epoch = epochRef.current;
   const existing = flights.get(scopeKey);
   if (existing && existing.epoch === epoch) return existing.task;
-  const rec = { epoch, task: Promise.resolve(null) as Promise<Array<Record<string, unknown>> | null> };
+  const rec = { epoch, task: Promise.resolve(null) as Promise<T | null> };
   const fresh = () => epochRef.current === epoch && current() && flights.get(scopeKey) === rec;
-  rec.task = Promise.resolve().then(() => read(fresh)).then(items => fresh() ? items : null).finally(() => {
+  rec.task = Promise.resolve().then(() => read(fresh)).then(result => fresh() ? result : null).finally(() => {
     if (flights.get(scopeKey) === rec) flights.delete(scopeKey);
   });
   flights.set(scopeKey, rec);
   return rec.task;
 }
 
-export function maxHistoryEntryId(items: Array<Record<string, unknown>>): number {
+export function maxHistoryEntryId(items: readonly Record<string, unknown>[]): number {
   let max = 0;
   for (const item of items) {
     const id = typeof item.id === 'number' ? item.id : Number(item.id);
@@ -693,15 +797,6 @@ export function formatToolStepDuration(ms: number): string {
   const mins = Math.floor(totalSec / 60);
   const secs = totalSec % 60;
   return secs > 0 ? `${mins}m ${String(secs).padStart(2, '0')}s` : `${mins}m`;
-}
-
-export function copyTextToClipboard(value: string): void {
-  if (!value) return;
-  try {
-    void navigator.clipboard?.writeText(value);
-  } catch {
-    // Ignore clipboard permission errors in webview
-  }
 }
 
 export function renderToolStepIcon(status: ChatToolCallItem['status']) {
@@ -802,86 +897,43 @@ export function extractSmartArgEntries(
 
 export function TurnToolCallsSection({
   tools,
-  scopeKey,
-  active,
-  disabled,
-  variant,
-  requesterName,
-  hideToolOutput,
-  onSubmitQuestionnaire,
-  onSubmitVaultUnlock,
-  onOpenTask,
-  onConfirmTaskPlan,
-  onAnswerTaskPrompt,
   t,
+  collapseOutput,
+  presentationOnly = false,
+  ...cardProps
 }: Omit<ToolCallCardProps, 'tool'> & {
   tools: ChatToolCallItem[];
-  variant?: 'mobile' | 'desktop';
-  requesterName?: string;
-  hideToolOutput?: boolean;
   t: (zh: string, en: string) => string;
 }) {
-  const [prefHideToolOutput] = useHideToolOutput();
-  const effectiveHideToolOutput = hideToolOutput ?? prefHideToolOutput;
-
-  const hasInteractiveOrSendTo = tools.some(
+  const hasPresentationOrSendTo = tools.some(
     tool =>
-      Boolean(tool.presentation && readToolPresentation(tool.presentation)) ||
+      Boolean(readToolPresentation(tool.presentation)) ||
       (!tool.parentCallId && tool.name === 'send_to' && Boolean(tool.sendTo && (tool.sendTo.text || tool.sendTo.silentPass))),
-  );
-  const hasActiveOrErrorOrInteractive = tools.some(
-    tool =>
-      tool.status === 'running' ||
-      tool.status === 'error' ||
-      Boolean(tool.presentation && readToolPresentation(tool.presentation)),
-  );
-  const shouldAggregate = effectiveHideToolOutput
-    ? !hasInteractiveOrSendTo
-      ? tools.length >= 1
-      : tools.length >= 3
-    : tools.length >= 3;
-  const shouldAutoExpand = effectiveHideToolOutput ? hasInteractiveOrSendTo : hasActiveOrErrorOrInteractive;
-  const [groupOpen, setGroupOpen] = useState(() =>
-    effectiveHideToolOutput ? hasInteractiveOrSendTo : !shouldAggregate || hasActiveOrErrorOrInteractive,
-  );
+  ) || pendingToolPrompts(tools).length > 0;
+  const shouldAggregate = tools.length >= 3 || (collapseOutput && !hasPresentationOrSendTo);
+  const defaultOpen = !collapseOutput || hasPresentationOrSendTo;
+  const [groupOpen, setGroupOpen] = useState(defaultOpen);
+  useEffect(() => setGroupOpen(defaultOpen), [collapseOutput, defaultOpen]);
 
-  useEffect(() => {
-    if (shouldAutoExpand) {
-      setGroupOpen(true);
-    }
-  }, [shouldAutoExpand]);
+  const renderCards = () => tools.map(tool => (
+    <ToolCallCard key={tool.id} tool={tool} collapseOutput={collapseOutput} presentationOnly={presentationOnly} {...cardProps} />
+  ));
 
-  const totalDurationMs = useMemo(
-    () => tools.reduce((sum, item) => sum + (typeof item.durationMs === 'number' && item.durationMs > 0 ? item.durationMs : 0), 0),
-    [tools],
-  );
-  const runningTool = tools.find(item => item.status === 'running');
-  const errorCount = tools.filter(item => item.status === 'error').length;
-  const showGroupError = errorCount > 0 && (!effectiveHideToolOutput || groupOpen);
-
+  if (presentationOnly) return <div className="bot-chat-tools">{renderCards()}</div>;
   if (!shouldAggregate) {
     return (
       <div className="bot-chat-tools" role="list" aria-label={t('工具调用', 'Tool calls')}>
-        {tools.map(tool => (
-          <ToolCallCard
-            key={tool.id}
-            tool={tool}
-            scopeKey={scopeKey}
-            active={active}
-            disabled={disabled}
-            variant={variant}
-            requesterName={requesterName}
-            hideToolOutput={effectiveHideToolOutput}
-            onSubmitQuestionnaire={onSubmitQuestionnaire}
-            onSubmitVaultUnlock={onSubmitVaultUnlock}
-            onOpenTask={onOpenTask}
-            onConfirmTaskPlan={onConfirmTaskPlan}
-            onAnswerTaskPrompt={onAnswerTaskPrompt}
-          />
-        ))}
+        {renderCards()}
       </div>
     );
   }
+
+  const totalDurationMs = tools.reduce(
+    (sum, item) => sum + (typeof item.durationMs === 'number' && item.durationMs > 0 ? item.durationMs : 0), 0,
+  );
+  const runningTool = tools.find(item => item.status === 'running');
+  const errorCount = tools.filter(item => item.status === 'error').length;
+  const showGroupError = errorCount > 0 && (!collapseOutput || groupOpen);
 
   const groupTitle = runningTool
     ? tools.length === 1
@@ -918,23 +970,7 @@ export function TurnToolCallsSection({
 
       {groupOpen && (
         <div className="bot-chat-tools is-grouped" role="list" aria-label={t('工具调用', 'Tool calls')}>
-          {tools.map(tool => (
-            <ToolCallCard
-              key={tool.id}
-              tool={tool}
-              scopeKey={scopeKey}
-              active={active}
-              disabled={disabled}
-              variant={variant}
-              requesterName={requesterName}
-              hideToolOutput={effectiveHideToolOutput}
-              onSubmitQuestionnaire={onSubmitQuestionnaire}
-              onSubmitVaultUnlock={onSubmitVaultUnlock}
-              onOpenTask={onOpenTask}
-              onConfirmTaskPlan={onConfirmTaskPlan}
-              onAnswerTaskPrompt={onAnswerTaskPrompt}
-            />
-          ))}
+          {renderCards()}
         </div>
       )}
     </div>
@@ -942,8 +978,8 @@ export function TurnToolCallsSection({
 }
 
 export const SLASH_COMMANDS = [
-  { name: '/clear', zh: '清空当前对话并重置模型上下文', en: 'Clear history and reset model context' },
-  { name: '/compact', zh: '压缩较早的上下文', en: 'Compact earlier context' },
+  { name: '/clear', zh: '清空当前对话并重置模型上下文', en: 'Clear history and reset model context' }, // i18n-ok
+  { name: '/compact', zh: '压缩较早的上下文', en: 'Compact earlier context' }, // i18n-ok
 ] as const;
 export type SlashCommandName = (typeof SLASH_COMMANDS)[number]['name'];
 

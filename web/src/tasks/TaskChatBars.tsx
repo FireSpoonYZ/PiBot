@@ -1,182 +1,51 @@
-import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft } from 'lucide-react';
-import { GrokBotAvatar, type GrokAvatarPreset } from '../GrokBotAvatar';
+import { useEffect, useState } from 'react';
+import { X } from 'lucide-react';
+import { useText } from '../ui';
 import {
-  botTasksFor,
-  getStepStatusInfo,
   isTaskRevisionConflictError,
+  isTaskWaitingForBot,
   type GlobalTask,
   type TaskBotOption,
+  type TaskStep,
 } from './types';
 import './TaskBoard.css';
-
-export interface TaskChatContextBarProps {
-  botDeviceId: string;
-  botId: string;
-  botName: string;
-  tasks: GlobalTask[];
-  activeTaskId: string | null;
-  activeStepId: string | null;
-  returnTaskId: string | null;
-  onSelectTaskTopic: (taskId: string | null) => void;
-  onSelectStepFocus: (stepId: string | null) => void;
-  onOpenTaskDetail: (taskId: string, openEdit?: boolean) => void;
-  onReturnToTask?: (taskId: string) => void;
-  variant?: 'desktop' | 'mobile';
-}
 
 export interface TaskChatPromptBannerProps {
   botDeviceId: string;
   botId: string;
-  botName: string;
-  avatar?: unknown;
   task: GlobalTask | null;
+  focusedStep?: TaskStep | null;
+  showQuoteStrip?: boolean;
+  waitingTasksCount?: number;
+  waitingTaskIndex?: number;
   bots: TaskBotOption[];
   busy?: boolean;
+  variant?: 'desktop' | 'mobile';
   onConfirmPlan: (taskId: string, expectedRevision?: number) => Promise<void> | void;
-  onOpenTaskEdit: (taskId: string) => void;
+  onOpenTaskDetail: (taskId: string, openEdit?: boolean) => void;
   onAnswerPrompt: (taskId: string, answer: string, expectedRevision?: number) => Promise<void> | void;
-}
-
-function asGrokAvatar(avatar: unknown): GrokAvatarPreset | undefined {
-  if (avatar && typeof avatar === 'object' && 'shape' in avatar && 'color' in avatar) {
-    return avatar as GrokAvatarPreset;
-  }
-  return undefined;
-}
-
-export function TaskChatContextBar({
-  botDeviceId,
-  botId,
-  tasks,
-  activeTaskId,
-  activeStepId,
-  returnTaskId,
-  onSelectTaskTopic,
-  onSelectStepFocus,
-  onOpenTaskDetail,
-  onReturnToTask,
-  variant = 'desktop',
-}: TaskChatContextBarProps) {
-  const botTasks = useMemo(() => {
-    const base = botTasksFor(tasks, botDeviceId, botId);
-    if (activeTaskId && !base.some(t => t.id === activeTaskId)) {
-      const explicit = tasks.find(t => t.id === activeTaskId);
-      if (explicit) return [explicit, ...base];
-    }
-    return base;
-  }, [tasks, botDeviceId, botId, activeTaskId]);
-
-  if (!returnTaskId && botTasks.length === 0 && !activeTaskId) {
-    return null;
-  }
-
-  const selectedTask = activeTaskId ? tasks.find(t => t.id === activeTaskId) ?? null : null;
-  const botStepsInTask = selectedTask
-    ? selectedTask.steps.filter(
-        s => s.status !== 'cancelled' && s.deviceId === botDeviceId && s.botId === botId,
-      )
-    : [];
-
-  return (
-    <div className={`tb-scope${variant === 'mobile' ? ' is-mobile' : ''}`}>
-      <div className="chat-topic-bar" aria-label="按事项隔离对话上下文">
-        <div className="topic-pills">
-          {returnTaskId && onReturnToTask ? (
-            <button
-              type="button"
-              className="tb-return-task-btn"
-              onClick={() => onReturnToTask(returnTaskId)}
-            >
-              <ArrowLeft size={14} aria-hidden="true" />
-              <span>返回任务</span>
-            </button>
-          ) : null}
-
-          <span className="topic-label">父任务：</span>
-          {botTasks.map(task => {
-            const isWaitingMe =
-              task.status === 'waiting' &&
-              task.pendingPrompt?.deviceId === botDeviceId &&
-              task.pendingPrompt?.botId === botId;
-            return (
-              <button
-                key={task.id}
-                type="button"
-                className={`topic-pill${activeTaskId === task.id ? ' active' : ''}`}
-                title={task.title}
-                onClick={() => onSelectTaskTopic(task.id)}
-              >
-                {isWaitingMe ? <span className="topic-dot" aria-hidden="true" /> : null}
-                <span>{task.title}</span>
-              </button>
-            );
-          })}
-
-          <button
-            type="button"
-            className={`topic-pill${activeTaskId === null ? ' active' : ''}`}
-            onClick={() => onSelectTaskTopic(null)}
-          >
-            <span>日常对话</span>
-          </button>
-        </div>
-
-        {selectedTask ? (
-          <button
-            type="button"
-            className="quiet-link"
-            onClick={() => onOpenTaskDetail(selectedTask.id)}
-          >
-            查看任务详情 →
-          </button>
-        ) : null}
-      </div>
-
-      {selectedTask && botStepsInTask.length > 0 ? (
-        <div className="chat-subtask-bar" aria-label="当前处理的子任务">
-          <span className="topic-label">当前子项：</span>
-          <button
-            type="button"
-            className={`subtask-pill${!activeStepId ? ' active' : ''}`}
-            onClick={() => onSelectStepFocus(null)}
-          >
-            <span>整体任务</span>
-          </button>
-          {botStepsInTask.map(step => {
-            const stInfo = getStepStatusInfo(selectedTask, step);
-            return (
-              <button
-                key={step.id}
-                type="button"
-                className={`subtask-pill${activeStepId === step.id ? ' active' : ''}`}
-                title={step.text}
-                onClick={() => onSelectStepFocus(step.id)}
-              >
-                <span>
-                  {step.text} · {stInfo.label}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      ) : null}
-    </div>
-  );
+  onClearQuote?: () => void;
+  onCycleWaitingTask?: () => void;
 }
 
 export function TaskChatPromptBanner({
   botDeviceId,
   botId,
-  botName,
-  avatar,
   task,
+  focusedStep = null,
+  showQuoteStrip = false,
+  waitingTasksCount = 0,
+  waitingTaskIndex = 0,
   bots,
   busy = false,
+  variant = 'desktop',
   onConfirmPlan,
-  onOpenTaskEdit,
+  onOpenTaskDetail,
   onAnswerPrompt,
+  onClearQuote,
+  onCycleWaitingTask,
 }: TaskChatPromptBannerProps) {
+  const t = useText();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -184,17 +53,61 @@ export function TaskChatPromptBanner({
     setError(null);
   }, [task?.id, task?.revision]);
 
-  if (
-    !task ||
-    !task.pendingPrompt ||
-    task.pendingPrompt.deviceId !== botDeviceId ||
-    task.pendingPrompt.botId !== botId
-  ) {
-    return null;
+  const hasPrompt = Boolean(
+    task && isTaskWaitingForBot(task, botDeviceId, botId) && task.pendingPrompt,
+  );
+  const isMobile = variant === 'mobile';
+  const dockClass = `tb-scope chat-task-dock${isMobile ? ' is-mobile' : ''}`;
+
+  if (!hasPrompt) {
+    if (!showQuoteStrip || !task) {
+      return null;
+    }
+    const quoteLabel = focusedStep ? `${task.title} · ${focusedStep.text}` : task.title;
+    return (
+      <div className={dockClass}>
+        <div className="chat-quote-strip" role="region" aria-label={t('当前消息关联任务', 'Task linked to this message')}>
+          <span className="chat-quote-arrow" aria-hidden="true">
+            ↳
+          </span>
+          <button
+            type="button"
+            className="chat-quote-main"
+            aria-label={t(`打开关联任务：${quoteLabel}`, `Open linked task: ${quoteLabel}`)}
+            title={isMobile ? undefined : quoteLabel}
+            onClick={() => onOpenTaskDetail(task.id, false)}
+          >
+            <span className="chat-quote-text">{quoteLabel}</span>
+          </button>
+          {waitingTasksCount > 0 && onClearQuote ? (
+            <button
+              type="button"
+              className="chat-prompt-cycle-btn"
+              aria-label={t(`取消当前任务引用并查看 ${waitingTasksCount} 个待回应任务`, `Clear quote and view ${waitingTasksCount} pending task(s)`)}
+              onClick={onClearQuote}
+            >
+              {t(`查看待回应 (${waitingTasksCount})`, `View pending (${waitingTasksCount})`)}
+            </button>
+          ) : null}
+          {onClearQuote ? (
+            <button
+              type="button"
+              className="chat-quote-close"
+              aria-label={t('取消关联任务', 'Unlink task')}
+              title={isMobile ? undefined : t('取消关联任务', 'Unlink task')}
+              onClick={onClearQuote}
+            >
+              <X size={14} aria-hidden="true" />
+            </button>
+          ) : null}
+        </div>
+      </div>
+    );
   }
 
-  const prompt = task.pendingPrompt;
-  const renderedRevision = task.revision;
+  const activeTask = task!;
+  const prompt = activeTask.pendingPrompt!;
+  const renderedRevision = activeTask.revision;
   const disabled = busy || submitting;
 
   const handleConfirm = async () => {
@@ -202,12 +115,13 @@ export function TaskChatPromptBanner({
     setSubmitting(true);
     setError(null);
     try {
-      await onConfirmPlan(task.id, renderedRevision);
+      await onConfirmPlan(activeTask.id, renderedRevision);
+      onClearQuote?.();
     } catch (err) {
       if (isTaskRevisionConflictError(err)) {
-        setError('待确认安排刚刚已更新，请核对最新内容或打开任务详情后再确认。');
+        setError(t('待确认安排刚刚已更新，请核对最新内容或打开任务详情后再确认。', 'The plan awaiting confirmation was just updated. Please review the latest version or open task details before confirming.'));
       } else {
-        setError(err instanceof Error && err.message ? err.message : String(err || '确认执行安排失败'));
+        setError(err instanceof Error && err.message ? err.message : String(err || t('确认执行安排失败', 'Failed to confirm plan')));
       }
     } finally {
       setSubmitting(false);
@@ -219,39 +133,52 @@ export function TaskChatPromptBanner({
     setSubmitting(true);
     setError(null);
     try {
-      await onAnswerPrompt(task.id, answer, renderedRevision);
+      await onAnswerPrompt(activeTask.id, answer, renderedRevision);
+      onClearQuote?.();
     } catch (err) {
       if (isTaskRevisionConflictError(err)) {
-        setError('当前任务问题刚刚已更新，请核对最新内容后再回应。');
+        setError(t('当前任务问题刚刚已更新，请核对最新内容后再回应。', 'This task question was just updated. Please review the latest version before replying.'));
       } else {
-        setError(err instanceof Error && err.message ? err.message : String(err || '提交回应失败'));
+        setError(err instanceof Error && err.message ? err.message : String(err || t('提交回应失败', 'Failed to submit reply')));
       }
     } finally {
       setSubmitting(false);
     }
   };
 
-  const visibleSteps = task.steps.filter(s => s.status !== 'cancelled');
+  const visibleSteps = activeTask.steps.filter(s => s.status !== 'cancelled');
 
   return (
-    <div className="tb-scope">
+    <div className={dockClass}>
       <div
         className="chat-prompt-card"
         role="region"
-        aria-label={prompt.kind === 'plan' ? '待确认计划' : '待回应问题'}
+        aria-label={prompt.kind === 'plan' ? t('待确认计划', 'Plan awaiting confirmation') : t('待回应问题', 'Question awaiting reply')}
       >
         <div className="chat-prompt-head">
-          <GrokBotAvatar
-            preset={asGrokAvatar(avatar)}
-            botKey={`${botDeviceId}:${botId}`}
-            roleName={botName}
-            size={24}
-          />
+          <span className="chat-prompt-dot" aria-hidden="true" />
           <span className="chat-prompt-kicker">
-            {prompt.kind === 'plan'
-              ? '待确认执行安排 · 需明确点击确认才会启动'
-              : '待你回应'}
+            {prompt.kind === 'plan' ? t('待确认安排', 'Confirm plan') : t('待你回应', 'Awaiting reply')}
           </span>
+          <button
+            type="button"
+            className="chat-prompt-task-link"
+            aria-label={t(`查看任务详情：${activeTask.title}`, `View task details: ${activeTask.title}`)}
+            title={isMobile ? undefined : activeTask.title}
+            onClick={() => onOpenTaskDetail(activeTask.id, false)}
+          >
+            <span className="chat-prompt-task-title">{activeTask.title}</span>
+            <span aria-hidden="true">↗</span>
+          </button>
+          {waitingTasksCount > 1 && onCycleWaitingTask ? (
+            <button
+              type="button"
+              className="chat-prompt-cycle-btn"
+              onClick={onCycleWaitingTask}
+            >
+              {t(`切换 (${waitingTaskIndex + 1}/${waitingTasksCount})`, `Switch (${waitingTaskIndex + 1}/${waitingTasksCount})`)}
+            </button>
+          ) : null}
         </div>
 
         <p className="chat-prompt-text">{prompt.text}</p>
@@ -266,11 +193,14 @@ export function TaskChatPromptBanner({
                       b.botId === step.botId,
                   )
                 : undefined;
-              const ownerName = matched?.name || step.botName || step.botId || '待接手';
+              const ownerName =
+                matched?.name ||
+                step.botName ||
+                (step.botId ? t('未知 Bot', 'Unknown Bot') : t('待接手', 'Unassigned'));
               return (
                 <li key={step.id}>
                   {step.text}{' '}
-                  <span className="chat-plan-step-bot">（{ownerName}）</span>
+                  <span className="chat-plan-step-bot">{t(`（${ownerName}）`, `(${ownerName})`)}</span>
                 </li>
               );
             })}
@@ -291,15 +221,15 @@ export function TaskChatPromptBanner({
               disabled={disabled}
               onClick={() => void handleConfirm()}
             >
-              {submitting ? '启动中…' : '确认安排并开始'}
+              {submitting ? t('启动中…', 'Starting…') : t('确认安排并开始', 'Confirm and start')}
             </button>
             <button
               type="button"
               className="tb-secondary-btn"
               disabled={disabled}
-              onClick={() => onOpenTaskEdit(task.id)}
+              onClick={() => onOpenTaskDetail(activeTask.id, true)}
             >
-              回详情编辑步骤
+              {t('编辑步骤', 'Edit steps')}
             </button>
           </div>
         ) : prompt.options && prompt.options.length > 0 ? (

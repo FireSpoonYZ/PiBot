@@ -55,6 +55,12 @@ export function pairingStore(db, transaction) {
       if (!row) fail('NOT_FOUND', 'Pairing code not found');
       return codeValue(row, new Date().toISOString());
     },
+    listActivePairingCodes() {
+      const now = new Date().toISOString();
+      return db.prepare(
+        'SELECT * FROM pairing_codes WHERE redeemed_at IS NULL AND revoked_at IS NULL AND expires_at > ? ORDER BY created_at DESC'
+      ).all(now).map(row => codeValue(row, now));
+    },
     /** Voids a pending code; redeemed or already-void codes are left untouched. */
     revokePairingCode(id) {
       return transaction(() => {

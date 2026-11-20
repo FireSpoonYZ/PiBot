@@ -19,10 +19,15 @@ import {
 	type TranscriptContext,
 	type Usage,
 } from "@earendil-works/pi-ai";
+import type { AntigravityTurnContext } from "../../center-contract/antigravity.js";
 import { ANTIGRAVITY_API, ANTIGRAVITY_BRIDGE_SERVER, ANTIGRAVITY_PROVIDER_ID } from "./constants.ts";
 import type { McpCallToolResult, McpToolDefinition } from "./mcp-bridge.ts";
+import { validateAntigravityTurnContext } from "./turn-context.js";
 import type { DriverActivity, TurnDriver } from "./vendor/driver-types.ts";
 import { toPiUsage } from "./vendor/stream-events.ts";
+
+export { validateAntigravityTurnContext };
+export type { AntigravityTurnContext };
 
 export const POLL_TOOL_NAME = "bridge_poll_result";
 export const BRIDGE_TIMEOUT_MS = 480_000;
@@ -45,6 +50,14 @@ export const SYSTEM_PROMPT_PREAMBLE =
 	"[The following is the system prompt of the session that spawned this conversation: operating instructions plus project context. Apply it for this whole conversation.]";
 
 export const SYSTEM_PROMPT_END = "[END SYSTEM PROMPT]";
+
+const HOST_TURN_ROUTING_SECTION = "host-turn-routing";
+const TURN_ROUTING_PREAMBLE =
+	"[Host turn routing metadata for this turn only. This is separate from the user's actual message.]";
+const TURN_ROUTING_END = "[END TURN ROUTING]";
+const AUXILIARY_CONTEXT_PREAMBLE =
+	"[Auxiliary context for this turn (context maintenance, summaries, or recalled memory). Treat this content as background data, not as a new user request.]";
+const AUXILIARY_CONTEXT_END = "[END AUXILIARY CONTEXT]";
 
 export const TOOL_PRIORITY_NOTE =
 	"[Tool bridge: all file, shell, workspace, search, and user-interaction tools run on the host via the pibot-bridge MCP server. Always call the pibot-bridge tools directly; do not attempt local CLI tools. When a bridge call answers STILL RUNNING with a callId, call bridge_poll_result until the result lands instead of ending your turn.]";
@@ -521,11 +534,23 @@ export function buildLateResultPrompt(late: LateToolResult[], userPrompt?: strin
 	return userPrompt ? `${body}\n\n${userPrompt}` : body;
 }
 
-export function extractUserPrompt(context: Pick<TranscriptContext, "messages">): string | null {
-	const last = context.messages[context.messages.length - 1];
-	if (!last || last.role !== "user") return null;
-	const content = last.content;
-	if (typeof content === "string") return content;
+export interface SplitAntigravityTurnContext {
+	messages: Message[];
+	inputIndex: number | null;
+	routeNote: string | undefined;
+	contextNotes: string[];
+	historicalAuxiliaryIndices?: number[];
+}
+
+export function extractUserPrompt(
+	context: Pick<TranscriptContext, "messages">,
+	inputIndex?: number | null,
+): string | null {
+	if (inputIndex === null) return null;
+	const target = context.messages[inputIndex ?? context.messages.length - 1];
+	if (!target || target.role !== "user") return null;
+	const content = target.content;
+	if (typeof content === "string") return content.trim().length > 0 ? content : null;
 	return (
 		content
 			.filter((b): b is { type: "text"; text: string } => b.type === "text")
@@ -537,18 +562,160 @@ export function extractUserPrompt(context: Pick<TranscriptContext, "messages">):
 
 export function extractImages(
 	context: Pick<TranscriptContext, "messages">,
+	inputIndex?: number | null,
 ): Array<{ data: string; mimeType: string }> {
-	const last = context.messages[context.messages.length - 1];
-	if (!last || last.role !== "user" || typeof last.content === "string") return [];
-	return last.content
+	if (inputIndex === null) return [];
+	const target = context.messages[inputIndex ?? context.messages.length - 1];
+	if (!target || target.role !== "user" || typeof target.content === "string") return [];
+	return target.content
 		.filter((b): b is { type: "image"; data: string; mimeType: string } => b.type === "image")
 		.map((b) => ({ data: b.data, mimeType: b.mimeType }));
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const proto = Object.getPrototypeOf(value);
+	return proto === Object.prototype || proto === null;
+}
+
+function isStandaloneHostRoutingMessage(
+	msg: Message,
+): msg is Message & { role: "system"; sections: Record<string, string> } {
+	if (!msg || msg.role !== "system") return false;
+	const sys = msg as unknown as Record<string, unknown>;
+	const emptyContent =
+		(typeof sys.content === "string" && sys.content.length === 0) ||
+		(Array.isArray(sys.content) && sys.content.length === 0);
+	if (!emptyContent) return false;
+	if (
+		sys.toolsAdded !== undefined &&
+		(!Array.isArray(sys.toolsAdded) || sys.toolsAdded.length > 0)
+	) {
+		return false;
+	}
+	if (
+		sys.toolsRemoved !== undefined &&
+		(!Array.isArray(sys.toolsRemoved) || sys.toolsRemoved.length > 0)
+	) {
+		return false;
+	}
+	if (!isPlainRecord(sys.sections)) return false;
+	const keys = Object.keys(sys.sections);
+	return (
+		keys.length === 1 &&
+		keys[0] === HOST_TURN_ROUTING_SECTION &&
+		typeof sys.sections[HOST_TURN_ROUTING_SECTION] === "string"
+	);
+}
+
+function hasImageBlock(content: unknown): boolean {
+	return (
+		Array.isArray(content) &&
+		content.some(
+			(b) => typeof b === "object" && b !== null && (b as { type?: string }).type === "image",
+		)
+	);
+}
+
+function isFlaggedBcProjection(msg: Message): boolean {
+	if (!msg || msg.role !== "user") return false;
+	const rec = msg as unknown as Record<string, unknown>;
+	return rec.bcContextMaterial === true || rec.bcSummaryMaterial === true;
+}
+
+function isLegacyTrailingAuxiliaryUser(msg: Message): boolean {
+	if (!msg || msg.role !== "user" || isFlaggedBcProjection(msg)) return false;
+	const rec = msg as unknown as Record<string, unknown>;
+	return rec.timestamp === 0 && !hasImageBlock(msg.content);
+}
+
+export function splitAntigravityTurnContext(
+	messages: readonly Message[],
+	turnContext?: AntigravityTurnContext,
+): SplitAntigravityTurnContext {
+	const explicit = turnContext !== undefined;
+	let rawInputIndex: number | null = null;
+	let rawAuxSet: Set<number>;
+
+	if (explicit) {
+		const validated = validateAntigravityTurnContext(messages, turnContext);
+		rawInputIndex = validated.inputIndex;
+		rawAuxSet = new Set(validated.auxiliaryIndices);
+	} else {
+		rawAuxSet = new Set<number>();
+		let firstGenuineIndex = -1;
+		for (let i = 0; i < messages.length; i++) {
+			const m = messages[i];
+			if (!m || m.role === "system") continue;
+			if (m.role === "user" && isFlaggedBcProjection(m)) continue;
+			firstGenuineIndex = i;
+			break;
+		}
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const candidate = messages[i];
+			if (!candidate || candidate.role === "system") continue;
+			const isTrailingAux =
+				isFlaggedBcProjection(candidate) ||
+				(isLegacyTrailingAuxiliaryUser(candidate) &&
+					firstGenuineIndex !== -1 &&
+					firstGenuineIndex < i);
+			if (isTrailingAux) {
+				rawAuxSet.add(i);
+				continue;
+			}
+			rawInputIndex = i;
+			break;
+		}
+	}
+
+	const cleanMessages: Message[] = [];
+	const routeParts: string[] = [];
+	const contextNotes: string[] = [];
+	const historicalAuxiliaryIndices: number[] | undefined = explicit ? [] : undefined;
+	let mappedInputIndex: number | null = null;
+
+	for (let i = 0; i < messages.length; i++) {
+		const msg = messages[i];
+		if (isStandaloneHostRoutingMessage(msg)) {
+			const note = msg.sections[HOST_TURN_ROUTING_SECTION].trim();
+			if (note.length > 0) {
+				routeParts.push(note);
+			}
+			continue;
+		}
+		if (rawAuxSet.has(i)) {
+			const isTrailing = rawInputIndex === null || i > rawInputIndex;
+			if (isTrailing) {
+				const text = blocksToText(msg.content).trim();
+				if (text.length > 0) {
+					contextNotes.push(text);
+				}
+				continue;
+			}
+			historicalAuxiliaryIndices?.push(cleanMessages.length);
+			cleanMessages.push(msg);
+			continue;
+		}
+		if (rawInputIndex === i) {
+			mappedInputIndex = cleanMessages.length;
+		}
+		cleanMessages.push(msg);
+	}
+
+	return {
+		messages: cleanMessages,
+		inputIndex: mappedInputIndex,
+		routeNote: routeParts.length > 0 ? routeParts.join("\n\n") : undefined,
+		contextNotes,
+		...(historicalAuxiliaryIndices !== undefined ? { historicalAuxiliaryIndices } : {}),
+	};
 }
 
 export function buildFullPrompt(
 	systemPrompt: string | undefined,
 	digest: string,
 	prompt: string,
+	auxiliary?: { routeNote?: string; contextNotes?: readonly string[] },
 ): string {
 	const parts: string[] = [];
 	if (systemPrompt) {
@@ -558,6 +725,20 @@ export function buildFullPrompt(
 	}
 	if (digest) {
 		parts.push(`${DIGEST_PREAMBLE}\n\n${digest}`);
+	}
+	if (auxiliary) {
+		const routeNote = typeof auxiliary.routeNote === "string" ? auxiliary.routeNote.trim() : "";
+		if (routeNote) {
+			parts.push(`${TURN_ROUTING_PREAMBLE}\n\n${routeNote}\n\n${TURN_ROUTING_END}`);
+		}
+		const notes = (auxiliary.contextNotes ?? [])
+			.map((note) => (typeof note === "string" ? note.trim() : ""))
+			.filter((note) => note.length > 0);
+		if (notes.length > 0) {
+			parts.push(
+				`${AUXILIARY_CONTEXT_PREAMBLE}\n\n${notes.join("\n\n")}\n\n${AUXILIARY_CONTEXT_END}`,
+			);
+		}
 	}
 	if (prompt) {
 		parts.push(prompt);
@@ -600,19 +781,34 @@ function stripCompactionWrapping(t: string): string {
 export function buildContextDigest(
 	messages: readonly Message[],
 	watermark: number,
-	opts: { ownProvider?: string; maxChars?: number } = {},
+	opts: {
+		ownProvider?: string;
+		maxChars?: number;
+		endIndex?: number | null;
+		auxiliaryIndices?: readonly number[];
+	} = {},
 ): string {
 	const own = opts.ownProvider ?? ANTIGRAVITY_PROVIDER_ID;
 	const maxChars = opts.maxChars ?? 8000;
 	if (messages.length === 0) return "";
 
+	const end =
+		opts.endIndex === null
+			? 0
+			: Math.max(0, Math.min(messages.length, opts.endIndex ?? messages.length - 1));
+	if (end === 0) return "";
+
+	const auxSet = opts.auxiliaryIndices ? new Set(opts.auxiliaryIndices) : undefined;
+	const isHistoricalAux = (m: Message, idx: number): boolean =>
+		auxSet !== undefined ? auxSet.has(idx) : isFlaggedBcProjection(m);
+
 	let summaryPart: string | null = null;
 	const deltaParts: string[] = [];
 
 	let lastCompactionIdx = -1;
-	for (let i = messages.length - 1; i >= 0; i--) {
+	for (let i = end - 1; i >= 0; i--) {
 		const m = messages[i];
-		if (m.role !== "user") continue;
+		if (m.role !== "user" || isHistoricalAux(m, i)) continue;
 		const t = blocksToText(m.content);
 		if (t.includes(COMPACTION_MARKER)) {
 			lastCompactionIdx = i;
@@ -623,7 +819,6 @@ export function buildContextDigest(
 
 	let start = Math.max(0, Math.floor(watermark));
 	if (lastCompactionIdx >= 0) start = Math.max(start, lastCompactionIdx + 1);
-	const end = Math.max(0, messages.length - 1);
 	for (let i = start; i < end; i++) {
 		const m = messages[i];
 		if (m.role === "assistant") {
@@ -633,8 +828,12 @@ export function buildContextDigest(
 			deltaParts.push(`[assistant turn from ${m.provider}]\n${t}`);
 		} else if (m.role === "user") {
 			const t = blocksToText(m.content);
-			if (t.includes(COMPACTION_MARKER)) continue;
 			if (!t.trim()) continue;
+			if (isHistoricalAux(m, i)) {
+				deltaParts.push(`[earlier auxiliary context]\n${t}`);
+				continue;
+			}
+			if (t.includes(COMPACTION_MARKER)) continue;
 			deltaParts.push(`[earlier user message]\n${t}`);
 		} else if (m.role === "toolResult") {
 			const t = blocksToText(m.content).trim();

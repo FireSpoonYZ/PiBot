@@ -471,6 +471,32 @@ export function mobileHide(): Promise<unknown> {
   return request('hide');
 }
 
+export type MobileHapticKind = 'longPress' | 'confirm' | 'reject' | 'tick';
+
+const HAPTIC_KINDS = new Set<string>(['longPress', 'confirm', 'reject', 'tick']);
+const HAPTIC_THROTTLE_MS = 80;
+const hapticLastFired: Partial<Record<MobileHapticKind, number>> = {};
+
+/**
+ * 触发 Android 系统触感反馈（UI-local，经 mobile_host_request('haptic')，不占普通桥槽）。
+ * 非 Tauri 环境或非 coarse 指针时直接返回；同一 kind 80ms 内节流；内部 fire-and-forget，永不抛错。
+ */
+export function mobileHaptic(kind: MobileHapticKind): void {
+  try {
+    if (!HAPTIC_KINDS.has(kind)) return;
+    if ((globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ === undefined) return;
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    if (!window.matchMedia('(pointer: coarse)').matches) return;
+    const now = Date.now();
+    const last = hapticLastFired[kind];
+    if (last !== undefined && now >= last && now - last < HAPTIC_THROTTLE_MS) return;
+    hapticLastFired[kind] = now;
+    void invoke('mobile_host_request', { method: 'haptic', params: { kind } }).catch(() => undefined);
+  } catch {
+    // 触感反馈仅作增强，任何环境或通道异常均静默吞掉。
+  }
+}
+
 /**
  * C7 首启配对：中心 URL + owner 密码由原生换取设备绑定并保存 Host/client 凭据；
  * token 不进入 JS。UI-local 前台动作；connectionRequested 非就绪，仍需 center_status 轮询。

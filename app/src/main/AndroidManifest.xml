@@ -37,7 +37,7 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:label="pibot"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:theme="@style/WebAppTheme">
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"
@@ -65,18 +65,13 @@
         </receiver>
         <service
             android:name=".BotHostService"
-            android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="On-device pibot Host and remote link accompanying the user-started client" />
-        </service>
+            android:exported="false" />
         <service
             android:name=".BotClientService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="User-started pibot client and its background connection and task notifications" />
+                android:value="User-started pibot client, on-device Host, background connection and task notifications" />
         </service>
         <!-- M18 UI 桥：默认进程、同 UID 私有 Binder；绑定本身不启动 Host/模型。 -->
         <service

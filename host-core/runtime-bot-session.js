@@ -5,6 +5,7 @@
 import { LiveDoc } from '@earendil-works/pi-durable';
 import { BotSessionState, WORK_TRIGGER_KIND, USER_MESSAGE_KIND,
   createSessionMessageEntry, senderAttribution } from './bot-session-context.js';
+import { GOOGLE_WORKSPACE_RULE_SOURCE_TYPE, isTrustedDataBoundary } from './google-workspace-privacy.js';
 import { resolveBotIdentity } from './bot-identity.js';
 import { inboxQueryKey } from './message-queries.js';
 import { messageError } from './message-protocol.js';
@@ -14,9 +15,97 @@ const SYNC_PAGE_LIMIT = 200;
 const OWNER_CHAIN_DEPTH = 8;
 // 冻结轮 memo：同一生成任务的重试/重启恢复同一来源，不再重新推导。
 const ORIGIN_MEMO = 'host.turn-origin';
+export const TURN_ROUTING_SECTION = 'host-turn-routing';
 
 function isObj(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function isOrdinaryHumanPrimaryTurn(frozen) {
+  return (
+    frozen?.kind === 'primary' &&
+    (frozen.scopeId === null || frozen.scopeId === undefined) &&
+    frozen.sender?.kind === 'user' &&
+    frozen.sender?.sourceType === undefined &&
+    frozen.replyTarget?.kind === 'primary' &&
+    (frozen.replyTarget?.scopeId === null || frozen.replyTarget?.scopeId === undefined) &&
+    frozen.workNativeId === undefined &&
+    frozen.originRequestId === undefined
+  );
+}
+
+const DIRECT_START = 'Start directly without an opening acknowledgement.';
+
+const DESTINATION_GUIDANCE = {
+  dm: 'Default reply target: DM scope. Deliver with send_to (omit scopeId for this turn\'s verified DM reply target; pass an explicit scopeId only for another scope, or "(pass)" if no reply is needed). Plain assistant text stays local and is not sent to the peer.',
+  room: 'Default reply target: room scope. Publish with send_to (omit scopeId for this turn\'s verified room reply target; pass an explicit scopeId only for another scope, or stay silent / pass "(pass)" if nothing useful to add). Plain assistant text is private scratch, not posted to the room.',
+  primary: 'Default reply target: primary user chat. Your assistant response is the user-facing reply; nothing is published to a scope unless you explicitly call send_to.',
+};
+
+function describeTurnSource(frozen) {
+  const senderKind = frozen?.sender?.kind;
+  const resumed = typeof frozen?.originRequestId === 'string' && frozen.originRequestId.length > 0;
+  const originKind = frozen?.kind;
+
+  if (senderKind === 'host') {
+    const sourceType = frozen?.sender?.sourceType;
+    if (sourceType === GOOGLE_WORKSPACE_RULE_SOURCE_TYPE) {
+      return 'Source: Host Google Workspace rule event (not human chat). Start directly without an opening acknowledgement; stay quiet if no action is needed.';
+    }
+    if (sourceType === 'task_dispatch') {
+      return 'Source: Host task dispatch (not human chat). Start directly without an opening acknowledgement; stay quiet if no action is needed.';
+    }
+    const isWebhook = sourceType === 'webhook';
+    return isWebhook
+      ? 'Source: Host webhook/automation (not human chat). Start directly without an opening acknowledgement; stay quiet if no action is needed.'
+      : 'Source: Host scheduled run or signal (not human chat). Start directly without an opening acknowledgement; stay quiet if nothing changed or no action is needed.';
+  }
+  if (senderKind === 'bot') {
+    const label = resumed
+      ? 'peer Bot reply resuming an earlier turn'
+      : originKind === 'dm' ? 'peer Bot DM'
+        : originKind === 'room' ? 'peer Bot room message' : 'peer Bot';
+    return `Source: ${label} (not human chat). ${DIRECT_START}`;
+  }
+  if (senderKind === 'user') {
+    if (resumed) return `Source: resumed turn. ${DIRECT_START}`;
+    if (originKind === 'room') return `Source: room user message. ${DIRECT_START}`;
+    if (originKind === 'dm') return `Source: DM user message. ${DIRECT_START}`;
+    return 'Source: user turn.';
+  }
+  return `Source: Host signal (not human chat). ${DIRECT_START}`;
+}
+
+function buildTurnRoutingMessage(frozen) {
+  if (isOrdinaryHumanPrimaryTurn(frozen)) return null;
+  const targetKind = frozen?.replyTarget?.kind;
+  const destination = targetKind === 'dm'
+    ? DESTINATION_GUIDANCE.dm
+    : targetKind === 'room'
+      ? DESTINATION_GUIDANCE.room
+      : DESTINATION_GUIDANCE.primary;
+  const note =
+    `${describeTurnSource(frozen)} ${destination} ` +
+    'Execute only the current turn\'s input; earlier requests are context.';
+  return {
+    role: 'system',
+    content: '',
+    sections: { [TURN_ROUTING_SECTION]: note },
+    timestamp: 0,
+  };
+}
+
+export function applySessionResetState(state, resetEntryId = 0, now = new Date().toISOString()) {
+  if (state.activeTurn) {
+    state.completedTurns[state.activeTurn.requestId] = {
+      ...state.activeTurn, finishedAt: now,
+    };
+    state.activeTurn = null;
+  }
+  if (Number.isSafeInteger(resetEntryId) && resetEntryId > (state.clearedThroughEntryId ?? 0)) {
+    state.clearedThroughEntryId = resetEntryId;
+  }
+  state.updatedAt = now;
 }
 
 export function createBotSessionRuntime({ host, getHarness, getMessageLog, context, getPrimary }) {
@@ -59,6 +148,8 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
       sender: origin.sender,
       replyTarget: origin.replyTarget,
       ...(Number.isSafeInteger(origin.stopEpoch) && origin.stopEpoch >= 0 ? { stopEpoch: origin.stopEpoch } : {}),
+      ...(Number.isSafeInteger(origin.resetEpoch) && origin.resetEpoch >= 0 ? { resetEpoch: origin.resetEpoch } : {}),
+      ...(isTrustedDataBoundary(origin.dataBoundary) ? { dataBoundary: origin.dataBoundary } : {}),
       frozenAt: new Date().toISOString(),
     };
   }
@@ -78,6 +169,9 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
     const data = isObj(entry?.data) ? entry.data : null;
     if (entry.kind === USER_MESSAGE_KIND && data) {
       const turn = isObj(data.turn) ? data.turn : {};
+      const dataBoundary = isTrustedDataBoundary(data.dataBoundary)
+        ? data.dataBoundary
+        : isTrustedDataBoundary(turn.dataBoundary) ? turn.dataBoundary : undefined;
       return {
         kind: 'primary', scopeId: null,
         requestId: data.requestId ?? turn.requestId ?? record?.requestId ?? String(entry.id),
@@ -90,6 +184,8 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
           isObj(turn.sender) ? turn.sender : { kind: 'user', deviceId: host.deviceId }),
         replyTarget: isObj(turn.replyTarget) ? turn.replyTarget : { kind: 'primary' },
         ...(Number.isSafeInteger(turn.stopEpoch) && turn.stopEpoch >= 0 ? { stopEpoch: turn.stopEpoch } : {}),
+        ...(Number.isSafeInteger(turn.resetEpoch) && turn.resetEpoch >= 0 ? { resetEpoch: turn.resetEpoch } : {}),
+        ...(dataBoundary !== undefined ? { dataBoundary } : {}),
       };
     }
     if (entry.kind === WORK_TRIGGER_KIND && data) {
@@ -99,6 +195,9 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
       const scopeId = turn !== null ? (turn.scopeId ?? null) : (data.scopeId ?? null);
       const scope = scopeId ? log().getScope(scopeId) : null;
       const kind = turn?.kind ?? (scope?.kind === 'dm' ? 'dm' : scope?.kind === 'room' ? 'room' : 'host');
+      const dataBoundary = isTrustedDataBoundary(data.dataBoundary)
+        ? data.dataBoundary
+        : isTrustedDataBoundary(turn?.dataBoundary) ? turn.dataBoundary : undefined;
       return {
         kind, scopeId,
         workNativeId: data.workNativeId ?? turn?.workNativeId,
@@ -114,6 +213,8 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
         replyTarget: isObj(turn?.replyTarget) ? turn.replyTarget
                                               : defaultReplyTarget(identity, scope),
         ...(Number.isSafeInteger(turn?.stopEpoch) && turn.stopEpoch >= 0 ? { stopEpoch: turn.stopEpoch } : {}),
+        ...(Number.isSafeInteger(turn?.resetEpoch) && turn.resetEpoch >= 0 ? { resetEpoch: turn.resetEpoch } : {}),
+        ...(dataBoundary !== undefined ? { dataBoundary } : {}),
       };
     }
     // 其他输入（含 legacy pi.user）：requestId 用实际提交身份，绝不复用先前轮来源；
@@ -217,9 +318,10 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
   }
 
   /**
-   * beforeRequest(request, api, context)：在真实 SDK run 输入/cutoff 上冻结本轮来源；
-   * memo + 持久 turn 归档保证重试、重启、handoff 与压缩后恢复同一来源。
-   * 保持 {messages} 形状；只在前面追加一条受信路由指引 user 消息，不把 peer 正文当权威。
+   * beforeRequest(request, api, context)：在真实 SDK run 输入/cutoff 上先冻结并归档
+   * 本轮来源；memo + 持久 turn 归档保证重试、重启、handoff 与压缩后恢复同一来源。
+   * 普通人类主聊轮 targeting primary 不生成合成路由消息；其他来源/目标在前面前置
+   * 一条瞬态 SystemMessage（仅含 host-turn-routing section），不把 peer 正文当权威。
    */
   async function beforeRequest(request, api, context) {
     const harness_ = harness();
@@ -247,7 +349,10 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
       // 绝不重新绑定到视图中更旧的 scope 触发。
       const prior = state.completedTurns?.[turn.requestId];
       // 恢复的归档轮保留其原始 originRequestId/scopeId，绝不随新视图重算。
-      const frozen = isObj(prior) ? { ...prior, taskId: String(api.taskId) } : turn;
+      const resetEpoch = Number.isSafeInteger(state.clearedThroughEntryId) && state.clearedThroughEntryId >= 0
+        ? state.clearedThroughEntryId : 0;
+      const baseTurn = isObj(prior) ? { ...prior, taskId: String(api.taskId) } : turn;
+      const frozen = Number.isSafeInteger(baseTurn.resetEpoch) ? baseTurn : { ...baseTurn, resetEpoch };
       if (state.activeTurn && state.activeTurn.requestId !== frozen.requestId) {
         state.completedTurns[state.activeTurn.requestId] = {
           ...state.activeTurn, finishedAt: now,
@@ -259,28 +364,13 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
       state.turnByTask[String(api.taskId)] = frozen.requestId;
       state.updatedAt = now;
       // commit 内必须把 draft 代理分离成普通 JSON：事务结束后 settled overlay
-      // 不可再被 JSON.stringify 读取（续轮 guidance 会崩溃并触发 abortTask）。
+      // 不可再被读取（后续路由投影访问字段会崩溃并触发 abortTask）。
       return JSON.parse(JSON.stringify(frozen));
     }, ctx);
 
-    const guidance = {
-      role: 'user',
-      // Host 本轮控制指引：执行当前冻结输入即可；历史请求只是上下文，
-      // 不自动恢复其它任务（新输入显式要求恢复历史任务时仍按当前指令执行）。
-      content: 'Host turn routing (trusted metadata, not message text): ' + JSON.stringify({
-        requestId: frozen.requestId,
-        kind: frozen.kind,
-        scopeId: frozen.scopeId,
-        replyTarget: frozen.replyTarget,
-        sender: frozen.sender,
-        ...(frozen.triggerMessageId ? { triggerMessageId: frozen.triggerMessageId } : {}),
-        ...(Array.isArray(frozen.triggerMessageIds) && frozen.triggerMessageIds.length > 0
-          ? { triggerMessageIds: [...frozen.triggerMessageIds] } : {}),
-        ...(frozen.originRequestId ? { originRequestId: frozen.originRequestId } : {}),
-      }) + '. Execute only the current frozen input; earlier requests are context, not work to resume.',
-      timestamp: Date.now(),
-    };
-    return { messages: [guidance, ...(request?.messages ?? [])] };
+    const routingMessage = buildTurnRoutingMessage(frozen);
+    if (!routingMessage) return request;
+    return { ...request, messages: [routingMessage, ...(request?.messages ?? [])] };
   }
 
   /**
@@ -462,13 +552,7 @@ export function createBotSessionRuntime({ host, getHarness, getMessageLog, conte
     if (!resolved) return;
     await harness().commit(async (tx) => {
       const state = await sessionStateDoc(tx, resolved.nativeId);
-      if (state.activeTurn) {
-        state.completedTurns[state.activeTurn.requestId] = {
-          ...state.activeTurn, finishedAt: new Date().toISOString(),
-        };
-        state.activeTurn = null;
-      }
-      state.updatedAt = new Date().toISOString();
+      applySessionResetState(state);
     }, ctx);
   }
 

@@ -4,6 +4,7 @@
 // 归属只来自受信账本字段（author/scopeId/envelope），绝不从正文文本推断；
 // scopeMessageAttribution 对未知/畸形 author 一律回退 bot，不采信发送方声称的 user。
 import { defineDoc } from '@earendil-works/pi-durable';
+import { isTrustedHostSourceType } from './google-workspace-privacy.js';
 
 export const SCOPE_MESSAGE_KIND = 'host.scope-message';
 export const WORK_TRIGGER_KIND = 'host.work-trigger';
@@ -15,6 +16,12 @@ const ATTRIBUTION_KINDS = new Set(['user', 'bot', 'host']);
 const ATTRIBUTION_CHANNELS = new Set(['primary', 'dm', 'room']);
 const ATTRIBUTION_CATEGORIES = new Set(['public', 'notice', 'request', 'reply']);
 const ATTRIBUTION_DIRECTIONS = new Set(['incoming', 'outgoing']);
+const PRIVATE_HOST_SOURCE_TYPES = new Set(['schedule', 'task_dispatch']);
+
+/** Host 侧合法的受信事件来源白名单（含 Google Workspace 规则与内部 schedule/task_dispatch）。 */
+export function isAllowedHostSourceType(value) {
+  return isTrustedHostSourceType(value) || PRIVATE_HOST_SOURCE_TYPES.has(value);
+}
 
 export const BOT_SESSION_CHECKPOINT_INTERVAL = 128;
 
@@ -30,6 +37,8 @@ export const BotSessionState = defineDoc({
     // 账本 localId 高水位；reset 时保留（旧账本记录不得再次导入）。
     lastImportedLocalId: 0,
     importedCount: 0,
+    // 最近一次 pi.reset 条目 id；随 reset 原子推进，供 live 投影 O(1) 裁剪与跨压缩保留边界。
+    clearedThroughEntryId: 0,
     // 冻结的活动轮 + generation taskId -> requestId 映射（生成轮换任务/工具时归属不丢）。
     activeTurn: null,
     turnByTask: {},
@@ -67,7 +76,7 @@ export function senderAttribution(author, deviceId) {
   const device = cleanString(deviceId) ?? cleanString(author?.deviceId);
   if (device) sender.deviceId = device;
   if (kind === 'host' && cleanString(author?.name)) sender.name = author.name.slice(0, 200);
-  if (kind === 'host' && ['schedule', 'webhook', 'task_dispatch'].includes(author?.sourceType)) sender.sourceType = author.sourceType;
+  if (kind === 'host' && isAllowedHostSourceType(author?.sourceType)) sender.sourceType = author.sourceType;
   return sender;
 }
 

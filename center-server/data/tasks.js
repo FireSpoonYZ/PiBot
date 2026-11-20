@@ -478,7 +478,7 @@ function buildDispatchInstruction({ kind, task, step = null, bots = [], devices 
       `1. 若需要用户确认方案，请调用 task 工具 action="propose_plan"，传入 { action: "propose_plan", taskId: "${task.id}", planText: "...", steps: [...] }，等待用户明确确认，严禁绕过确认直接执行。`,
       `2. 若需要向用户澄清问题，请调用 task 工具 action="ask_clarification"，传入 { action: "ask_clarification", taskId: "${task.id}", question: "...", options: [...], stepId?: "..." }。`,
       `3. 若可直接执行，请调用 task 工具 action="update"，传入 { action: "update", taskId: "${task.id}", status: "working", steps: [...] }；你自己的步骤请随推进更新，其它 Bot 的步骤将由中心派发。`,
-      `4. 当全部有效步骤完成后，必须由你显式调用 task 工具 action="complete"，传入 { action: "complete", taskId: "${task.id}", summary: "..." } 完成任务。`,
+      `4. 当全部有效步骤完成后，必须由你显式调用 task 工具 action="complete"，传入 { action: "complete", taskId: "${task.id}", summary: "..." } 完成任务，并在当前对话回复正文中直接向用户给出清晰完整的最终结论（不要只调用工具而不回复正文）。`,
     ].join('\n\n');
   }
 
@@ -486,7 +486,7 @@ function buildDispatchInstruction({ kind, task, step = null, bots = [], devices 
     return [
       `你现在是任务「${task.title}」的协调人 (taskId=${task.id}, revision=${task.revision})。`,
       `需求: ${task.requirement}`,
-      `请检查当前步骤与执行进度，通过 task 工具 action="update" 推进你负责的步骤，并在所有有效步骤完成后显式调用 action="complete" 传入 { action: "complete", taskId: "${task.id}", summary: "..." } 完成任务。`,
+      `请检查当前步骤与执行进度，通过 task 工具 action="update" 推进你负责的步骤，并在所有有效步骤完成后显式调用 action="complete" 传入 { action: "complete", taskId: "${task.id}", summary: "..." } 完成任务，随后在当前对话回复正文中直接输出完整结论。`,
     ].join('\n\n');
   }
 
@@ -494,7 +494,7 @@ function buildDispatchInstruction({ kind, task, step = null, bots = [], devices 
     return [
       `用户已确认任务「${task.title}」的计划 (taskId=${task.id}, revision=${task.revision})。`,
       `需求: ${task.requirement}`,
-      `你自己的待办步骤已认领到本轮执行，其它 Bot 的就绪子步骤已进入派发。请开始推进你负责的工作，并在全部有效步骤完成后显式调用 task 工具 action="complete"，传入 { action: "complete", taskId: "${task.id}", summary: "..." } 完成任务。`,
+      `你自己的待办步骤已认领到本轮执行，其它 Bot 的就绪子步骤已进入派发。请开始推进你负责的工作，并在全部有效步骤完成后显式调用 task 工具 action="complete"，传入 { action: "complete", taskId: "${task.id}", summary: "..." } 完成任务，随后在当前对话回复正文中直接输出完整结论。`,
     ].join('\n\n');
   }
 
@@ -506,8 +506,8 @@ function buildDispatchInstruction({ kind, task, step = null, bots = [], devices 
         : `用户已回复任务「${task.title}」的追问 (taskId=${task.id}, revision=${task.revision})，最新进展见任务日志。`,
       step ? `步骤内容: ${step.text}` : '',
       step
-        ? `请结合用户答复继续推进步骤 ${step.id}，并通过 task 工具 action="update" 的 stepPatches 更新该步骤状态与 resultSummary。`
-        : `请结合用户答复继续推进任务，必要时使用 task 工具 action="update" 调整步骤，并在全部完成后调用 action="complete" 传入 { action: "complete", taskId: "${task.id}", summary: "..." }。`,
+        ? `请结合用户答复继续推进步骤 ${step.id}，并通过 task 工具 action="update" 的 stepPatches 更新该步骤状态与 resultSummary，完成后在当前对话回复正文中简要输出结果。`
+        : `请结合用户答复继续推进任务，必要时使用 task 工具 action="update" 调整步骤，并在全部完成后调用 action="complete" 传入 { action: "complete", taskId: "${task.id}", summary: "..." }，随后在当前对话回复正文中直接输出完整结论。`,
     ].filter(Boolean).join('\n\n');
   }
 
@@ -532,7 +532,7 @@ function buildDispatchInstruction({ kind, task, step = null, bots = [], devices 
       `步骤内容: ${step.text}`,
       step.previousResultSummary ? `上一代执行成果参考:\n${step.previousResultSummary}` : '',
       deps ? `前置依赖结果:\n${deps}` : '',
-      `执行过程中请使用 task 工具 action="update" 的 stepPatches（只允许更新你自己的步骤 ${step.id}）反馈 working/done/blocked 与 resultSummary；若需向用户澄清，请调用 action="ask_clarification" 传入 { action: "ask_clarification", taskId: "${task.id}", stepId: "${step.id}", question: "...", options: [...] }。不要修改其他 Bot 的步骤，也不要调用 action="complete"。`,
+      `执行过程中请使用 task 工具 action="update" 的 stepPatches（只允许更新你自己的步骤 ${step.id}）反馈 working/done/blocked 与 resultSummary，并在步骤标为 done 后在当前对话回复正文中简要输出执行结论；若需向用户澄清，请调用 action="ask_clarification" 传入 { action: "ask_clarification", taskId: "${task.id}", stepId: "${step.id}", question: "...", options: [...] }。不要修改其他 Bot 的步骤，也不要调用 action="complete"。`,
     ].filter(Boolean).join('\n\n');
   }
 
@@ -544,7 +544,7 @@ function buildDispatchInstruction({ kind, task, step = null, bots = [], devices 
     return [
       `任务「${task.title}」的所有子步骤均已完成 (taskId=${task.id}, revision=${task.revision})。`,
       `步骤成果汇总:\n${stepResults || '(无步骤)'}`,
-      `请审核并整理最终 summary，然后显式调用 task 工具 action="complete"，传入 { action: "complete", taskId: "${task.id}", summary: "..." } 正式结束任务。`,
+      `请审核并整理最终 summary，显式调用 task 工具 action="complete"，传入 { action: "complete", taskId: "${task.id}", summary: "..." } 正式结束任务，并在当前对话回复正文中直接向用户输出清晰完整的最终结论（不要只调用工具而不回复正文）。`,
     ].join('\n\n');
   }
 
@@ -2171,24 +2171,6 @@ export function createTaskStore({ db, transaction, listBotsSnapshot, listBotCapa
     });
   }
 
-  // Bot deletion already owns the transaction that removes its directory and
-  // capability rows. Keep both dispatch updates in that same transaction so a
-  // later deletion failure rolls back the cancellation as well.
-  function cancelTaskDispatchesForBotInTransaction(deviceId, botId) {
-    if (!deviceId || !botId) return;
-    const now = nowMs();
-    db.prepare(`
-      UPDATE task_dispatches
-      SET status = 'cancelled', updated_at = ?
-      WHERE device_id = ? AND bot_id = ? AND status = 'pending'
-    `).run(now, deviceId, botId);
-    db.prepare(`
-      UPDATE task_dispatches
-      SET cancel_requested = 1, updated_at = ?
-      WHERE device_id = ? AND bot_id = ? AND status IN ('dispatching', 'queued', 'running')
-    `).run(now, deviceId, botId);
-  }
-
   return {
     getActiveTaskDispatcher,
     findExistingDispatcherBot,
@@ -2300,10 +2282,19 @@ export function createTaskStore({ db, transaction, listBotsSnapshot, listBotCapa
 
     cancelTaskDispatchesForBot(deviceId, botId) {
       if (!deviceId || !botId) return;
-      return transaction(() => cancelTaskDispatchesForBotInTransaction(deviceId, botId));
+      const now = nowMs();
+      transaction(() => {
+        db.prepare(`
+          UPDATE task_dispatches
+          SET status = 'cancelled', updated_at = ?
+          WHERE device_id = ? AND bot_id = ? AND status = 'pending'
+        `).run(now, deviceId, botId);
+        db.prepare(`
+          UPDATE task_dispatches
+          SET cancel_requested = 1, updated_at = ?
+          WHERE device_id = ? AND bot_id = ? AND status IN ('dispatching', 'queued', 'running')
+        `).run(now, deviceId, botId);
+      });
     },
-    // Internal composition entry; index.js consumes it without exposing it on
-    // the public store. Callers must already hold this database's transaction.
-    cancelTaskDispatchesForBotInTransaction,
   };
 }

@@ -746,7 +746,6 @@
 .bot-composer .composer-input:focus { outline: none; }
 .bot-composer .composer-send,
 .bot-composer .composer-steer,
-.bot-composer .composer-loading,
 .bot-composer .composer-stop {
   flex: none;
   width: 36px;
@@ -946,14 +945,6 @@
   opacity: 1;
 }
 .bot-composer .composer-send[aria-busy="true"] { background: var(--brand); color: #fff; }
-.bot-composer .composer-loading,
-.bot-composer .composer-loading:disabled {
-  border: 1px solid var(--line);
-  background: var(--surface);
-  color: var(--muted);
-  opacity: 1;
-  cursor: not-allowed;
-}
 .bot-composer .composer-stop {
   border: 0;
   background: var(--danger);
@@ -1066,10 +1057,25 @@
 .inspector-link > svg { flex: none; color: var(--muted); }
 .inspector-link-label { flex: 1; min-width: 0; }
 .inspector-link-value {
-  max-width: 45%;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 48%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.model-summary-warn {
+  color: #b45309;
+  font-weight: 500;
+}
+.inspector-default-pill {
+  flex: none;
+  padding: 1px 6px;
+  font-size: 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
 }
 .inspector-meta-card {
   display: flex;

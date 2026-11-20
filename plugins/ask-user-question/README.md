@@ -11,14 +11,12 @@ protocol instead.
 
 ## What it registers
 
-- **Direct model tool** `ask_user_question` (`replay: 'safe'`):
+- **Model and nested tool** `ask_user_question` (`replay: 'safe'`; SDK-default callers `model` and `tools`):
   1-4 questions, 2-4 options each, `multiSelect` flag, optional per-option
   `preview`. Parameters, limits, reserved labels (`Other`,
   `Type something.`, `Next`), duplicate guards, normalization and the
-  answer formatting match upstream 2.15.0. New questionnaires must be the only
-  tool call in a model response. The Host keeps this direct tool available in
-  Code Mode-only mode; new nested calls and multi-tool rounds return an error
-  without publishing a questionnaire.
+  answer formatting match upstream 2.15.0. Direct standalone calls, multi-tool
+  rounds, and nested/Code Mode calls all remain supported.
 - **Capability action** `answerQuestionnaire`: submits or cancels one pending
   request. Input: `{conversationId, requestId, cancelled, answers[],
   globalNote?}` where `requestId` is the tool task id and each answer is
@@ -28,25 +26,31 @@ protocol instead.
 
 ## State and lifecycle
 
-Version 1.1.0 uses the Host's session-scoped `host.durable-wait` documents.
-Publishing a request ends the current SDK run with `control.terminate`, so the
-same Bot can handle other inputs while the questionnaire is pending. The
-single-tool-round restriction is required by the pinned SDK's termination
-semantics. The Host verifies the stored wait identity before making its card
-interactive; a completed tool task does not expire this external wait.
+Version 1.1.0 uses the Host's session-scoped `host.durable-wait` documents
+**only** when `ask_user_question` is invoked directly as the sole tool call in
+a model response during an eligible unscoped, non-task-dispatch primary turn
+(without `workNativeId`), where `control.terminate` can safely release the SDK
+run so the Bot can handle other inputs while waiting.
 
-The first valid answer commits atomically with immutable continuation text.
-The Host reconciles the existing TurnQueue receipt and submits the same request
-ID only when it is definitively absent. The original stop epoch, task dispatch
-context and reply destination survive restart. Stop, scope Stop, clear history,
-archive and deletion cancel the corresponding waits and continuation handoffs.
+For nested/Code Mode calls, multi-tool rounds, scoped DM/room turns, task
+dispatches, turns with `workNativeId`, and pre-existing live-task (`open`)
+requests, the plugin falls back to the task-scoped `e-launcher.ask-user-question`
+live-task protocol. That fallback waits in-band within the running tool task
+and does not pause or independently release the Bot.
+
+For persisted primary waits, the Host verifies the stored wait identity before
+making its card interactive; a completed tool task does not expire this
+external wait. The first valid answer commits atomically with immutable
+continuation text. The Host reconciles the existing TurnQueue receipt and
+submits the same request ID only when it is definitively absent. Stop, clear
+history, edit/fork, archive and deletion cancel the corresponding waits and
+continuation handoffs. Any pre-existing experimental wait record outside
+deployed eligibility is safely closed/cancelled offline without re-admitting.
 User cancellation is delivered as a refusal; a Host stop does not restart work.
 Presentations remain limited to 48 KiB, including answers.
 
-Existing `e-launcher.ask-user-question` task-scoped requests retain their old
-watch-and-answer protocol. A Bot with a live legacy nested questionnaire keeps
-that caller temporarily for recovery; new nested requests are still rejected.
-Deploy the matching Host, Center and clients together. See
+Existing in-flight live-task (`open`) and deferred (`deferred`) replays remain
+coherent and idempotent across restarts. See
 [architecture and migration](../../docs/always-on-runtime.md) and
 [verification](../../docs/always-on-runtime-validation.md) before rollback.
 

@@ -4,7 +4,7 @@
 
 ## 版本模型
 
-- 根 `package.json` 的 `version`（当前 `0.0.20`）是唯一对外产品版本。
+- 根 `package.json` 的 `version`（当前 `0.0.21`）是唯一对外产品版本。
 - `desktop/src-tauri/tauri.conf.json`、`mobile/src-tauri/tauri.conf.json`、
   `mobile/src-tauri/Cargo.toml`、`desktop/src-tauri/Cargo.toml`、
   `desktop/host-launcher/Cargo.toml` 保存同一字面量；`app/build.gradle` 的
@@ -12,7 +12,7 @@
   Gradle 根即仓库根）。
 - `scripts/release-check.mjs` 核对全部上述字段 + `android.versionCode`
   为正整数；`--tag vX.Y.Z` 额外核对 tag 与产品版本一致。
-- Android `versionCode` 独立于产品版本（当前 `26`，正式 0.0.19 使用 `25`，正式 0.0.18 使用 `24`，正式 0.0.17 使用 `23`，正式 0.0.16 使用 `22`，正式 0.0.15 使用 `21`，正式 0.0.14 使用 `20`，正式 0.0.13 使用 `19`，正式 0.0.12 使用 `18`，正式 0.0.11 使用 `17`，正式 0.0.10 使用 `16`，正式 0.0.9 使用 `15`，正式 0.0.8 使用 `14`，正式 0.0.7 使用 `13`，正式 0.0.6 使用 `12`，正式 0.0.5 使用 `11`，正式 0.0.4 使用 `10`，正式 0.0.3 使用 `9`，首轮 0.0.3 候选使用 `8`，正式 0.0.2 使用 `7`），见
+- Android `versionCode` 独立于产品版本（当前 `39`，正式 0.0.20 使用 `26`，正式 0.0.19 使用 `25`，正式 0.0.18 使用 `24`，正式 0.0.17 使用 `23`，正式 0.0.16 使用 `22`，正式 0.0.15 使用 `21`，正式 0.0.14 使用 `20`，正式 0.0.13 使用 `19`，正式 0.0.12 使用 `18`，正式 0.0.11 使用 `17`，正式 0.0.10 使用 `16`，正式 0.0.9 使用 `15`，正式 0.0.8 使用 `14`，正式 0.0.7 使用 `13`，正式 0.0.6 使用 `12`，正式 0.0.5 使用 `11`，正式 0.0.4 使用 `10`，正式 0.0.3 使用 `9`，首轮 0.0.3 候选使用 `8`，正式 0.0.2 使用 `7`），见
   `gradle.properties` 的 `android.versionCode`，每个已分发 APK 单调递增、
   不复用、不回退。
 
@@ -68,9 +68,9 @@ Secrets（仅 tag/release 构建读取）：
 - `TAURI_SIGNING_PRIVATE_KEY`（可选 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）：
   Tauri updater 签名私钥（`tauri signer generate` 产生）。
 
-Variables（非秘密，编译进客户端的 updater 公钥）：
+Variables（非秘密，公开校验材料）：
 
-- `E_LAUNCHER_UPDATER_PUBLIC_KEY`：与私钥配对的公钥。
+- `E_LAUNCHER_UPDATER_PUBLIC_KEY`：与私钥配对的公钥。桌面 CI 构建时将其写入 Tauri `--config` 的 `plugins.updater.pubkey`（客户端只读取最终合并后的 Tauri 配置 `plugins.updater.pubkey`，不直接读取该构建环境变量）。
 - `ANDROID_RELEASE_CERT_SHA256`：已核实的正式 APK 签名证书摘要；缺失或与实际签名不匹配时发布失败。
 
 Fork/外部贡献者不需要以上任何 secret 即可构建 debug 包。

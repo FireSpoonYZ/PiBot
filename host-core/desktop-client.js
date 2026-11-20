@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { assertId, assertRevision, messageError } from './message-protocol.js';
 import { assertUuid } from './pending-store.js';
 import { openPendingClient } from './pending-client.js';
+import { BROWSER_SETUP_ERROR_CODES } from './browser-setup-protocol.js';
 import { collectBotDirectory } from './bot-directory.js';
 import { createLocalControlAdapter } from './local-control-adapter.js';
 import { openRemoteControl } from './remote-control-client.js';
@@ -48,7 +49,9 @@ export const INTENT_METHODS = new Set([
 ]);
 const MAX_CA_PEM_BYTES = 65536; // 64 KiB
 const MAX_ERROR_MESSAGE_BYTES = 512;
-const STABLE_ERROR_CODES = new Set([...CONTROL_ERROR_CODES, 'REPLACED', 'PENDING_BUSY', 'CERTIFICATE_ERROR']);
+const STABLE_ERROR_CODES = new Set([...CONTROL_ERROR_CODES, 'REPLACED', 'PENDING_BUSY', 'CERTIFICATE_ERROR', 'OAUTH_ACCESS_REVOKED']);
+const BROWSER_SETUP_RESPONDED_CODES = new Set(BROWSER_SETUP_ERROR_CODES);
+const ADMIN_REQUEST_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
 const LOCAL_OFFLINE_OPS = new Set(['pending_enqueue', 'pending_get', 'pending_list', 'pending_cancel', 'ui_get', 'ui_set']);
 const CENTER_LIFECYCLE_OPS = new Set(['center_connect', 'center_status', 'center_disconnect', 'center_store', 'status', 'disconnect', 'unobserve']);
 
@@ -100,12 +103,19 @@ export function normalizeDesktopError(err, fallbackOutcome = 'unconfirmed') {
     outcome = 'not-sent';
   } else if (
     code === 'REQUEST_CONFLICT' ||
+    code === 'REVISION_CONFLICT' ||
     code === 'UNSUPPORTED_SCHEMA' ||
     code === 'STORE_FAILED' ||
     code === 'PENDING_BUSY' ||
     code === 'PRIMARY_BOT_PROTECTED' ||
     code === 'BOT_ARCHIVED' ||
-    code === 'INVALID_STATE'
+    code === 'INVALID_STATE' ||
+    code === 'OAUTH_ACCESS_REVOKED' ||
+    code === 'CONTROL_UNAUTHORIZED' ||
+    code === 'NOT_FOUND' ||
+    code === 'FORBIDDEN' ||
+    code === 'BAD_RESPONSE' ||
+    BROWSER_SETUP_RESPONDED_CODES.has(code)
   ) {
     outcome = 'responded';
   }
@@ -300,6 +310,7 @@ export function openDesktopClient(options) {
         deviceId: parsed.deviceId,
         deviceToken: parsed.deviceToken,
         ca: typeof parsed.ca === 'string' ? parsed.ca : '',
+        ...(typeof parsed.oauthToken === 'string' && parsed.oauthToken !== '' ? { oauthToken: parsed.oauthToken } : {}),
       };
     } catch {
       return null;
@@ -316,10 +327,17 @@ export function openDesktopClient(options) {
       return false;
     };
     if (!persistCenterCredentials) return fail();
+    const toWrite = {
+      url: record.url,
+      deviceId: record.deviceId,
+      deviceToken: record.deviceToken,
+      ca: typeof record.ca === 'string' ? record.ca : '',
+      ...(typeof record.oauthToken === 'string' && record.oauthToken !== '' ? { oauthToken: record.oauthToken } : {}),
+    };
     const tmpFile = credentialsFile + '.' + process.pid + '.' + Date.now() + '.tmp';
     try {
       fs.mkdirSync(resolvedDataRoot, { recursive: true });
-      fs.writeFileSync(tmpFile, JSON.stringify(record), { encoding: 'utf8', mode: 0o600 });
+      fs.writeFileSync(tmpFile, JSON.stringify(toWrite), { encoding: 'utf8', mode: 0o600 });
       fs.renameSync(tmpFile, credentialsFile);
       return true;
     } catch {
@@ -455,7 +473,25 @@ export function openDesktopClient(options) {
         }
         client = await connectCenter({
           centerUrl: credentials.url, deviceId: credentials.deviceId, deviceToken: credentials.deviceToken,
-          ca: credentials.ca || undefined, signal: attempt.controller.signal,
+          ca: credentials.ca || undefined,
+          oauthToken: credentials.oauthToken || undefined,
+          onOAuthToken: (tok) => {
+            if (closed || myGeneration !== centerGeneration) return;
+            const nextToken = typeof tok === 'string' ? tok : '';
+            credentials.oauthToken = nextToken;
+            if (
+              centerCredentials &&
+              centerCredentials.url === credentials.url &&
+              centerCredentials.deviceId === credentials.deviceId &&
+              centerCredentials.deviceToken === credentials.deviceToken
+            ) {
+              centerCredentials.oauthToken = nextToken;
+            }
+            if (centerState === 'ready') {
+              writeSavedCenterCredentials(credentials);
+            }
+          },
+          signal: attempt.controller.signal,
           onDisconnect: (error) => {
             if (myGeneration !== centerGeneration || (centerAttempt !== attempt && centerClient !== client)) return;
             attempt.failure = error;
@@ -508,16 +544,45 @@ export function openDesktopClient(options) {
   }
 
   async function opCenterConnect(params, reqSignal, rec) {
-    rejectUnknownFields(params, new Set(['url', 'deviceId', 'deviceToken', 'ca']), 'center_connect params');
+    rejectUnknownFields(params, new Set(['url', 'deviceId', 'deviceToken', 'ca', 'oauthToken']), 'center_connect params');
+    if (params.oauthToken !== undefined && (typeof params.oauthToken !== 'string' || !params.oauthToken.isWellFormed())) {
+      throw invalid('oauthToken must be a string');
+    }
+    const saved = readSavedCenterCredentials();
+    const sameSavedTarget = Boolean(
+      saved &&
+      saved.url === params.url &&
+      saved.deviceId === params.deviceId &&
+      saved.ca === (params.ca || ''),
+    );
     let effectiveToken = params.deviceToken;
+    const passedNewDeviceToken = effectiveToken !== '' && effectiveToken !== undefined && (!sameSavedTarget || effectiveToken !== saved.deviceToken);
     if (effectiveToken === '' || effectiveToken === undefined) {
-      const saved = readSavedCenterCredentials();
-      if (saved && saved.url === params.url && saved.deviceId === params.deviceId && saved.ca === (params.ca || '') && saved.deviceToken) {
+      if (sameSavedTarget && saved.deviceToken) {
         effectiveToken = saved.deviceToken;
       }
     }
-    const credentials = { url: params.url, deviceId: params.deviceId, deviceToken: effectiveToken, ca: params.ca ?? '' };
-    if (centerCredentials && Object.keys(credentials).every((key) => credentials[key] === centerCredentials[key])) {
+    let effectiveOAuthToken = '';
+    if (typeof params.oauthToken === 'string' && params.oauthToken !== '') {
+      effectiveOAuthToken = params.oauthToken;
+    } else if (!passedNewDeviceToken && sameSavedTarget && saved?.oauthToken) {
+      effectiveOAuthToken = saved.oauthToken;
+    }
+    const credentials = {
+      url: params.url,
+      deviceId: params.deviceId,
+      deviceToken: effectiveToken,
+      ca: params.ca ?? '',
+      oauthToken: effectiveOAuthToken,
+    };
+    if (
+      centerCredentials &&
+      centerCredentials.url === credentials.url &&
+      centerCredentials.deviceId === credentials.deviceId &&
+      centerCredentials.deviceToken === credentials.deviceToken &&
+      centerCredentials.ca === credentials.ca &&
+      (!credentials.oauthToken || centerCredentials.oauthToken === credentials.oauthToken)
+    ) {
       if (centerState === 'ready') return centerStatus();
       if (centerAttempt?.generation === centerGeneration && !centerAttempt.controller.signal.aborted) return centerAttempt.promise;
       if (centerRetryTimer) {
@@ -641,12 +706,27 @@ export function openDesktopClient(options) {
   // previous binding is torn down first so a late success cannot overwrite the
   // new record.
   async function opCenterStore(params) {
-    rejectUnknownFields(params, new Set(['url', 'deviceId', 'deviceToken', 'ca']), 'center_store params');
+    rejectUnknownFields(params, new Set(['url', 'deviceId', 'deviceToken', 'ca', 'oauthToken']), 'center_store params');
+    if (params.oauthToken !== undefined && (typeof params.oauthToken !== 'string' || !params.oauthToken.isWellFormed())) {
+      throw invalid('oauthToken must be a string');
+    }
+    const saved = readSavedCenterCredentials();
+    const sameSavedCredentials = Boolean(
+      saved &&
+      saved.url === params.url &&
+      saved.deviceId === params.deviceId &&
+      saved.deviceToken === params.deviceToken &&
+      saved.ca === (params.ca ?? ''),
+    );
+    const oauthToken = typeof params.oauthToken === 'string' && params.oauthToken !== ''
+      ? params.oauthToken
+      : (params.oauthToken === undefined && sameSavedCredentials && saved?.oauthToken ? saved.oauthToken : '');
     const credentials = {
       url: params.url,
       deviceId: params.deviceId,
       deviceToken: params.deviceToken,
       ca: params.ca ?? '',
+      ...(oauthToken ? { oauthToken } : {}),
     };
     validateCenterUrl(credentials.url);
     try {
@@ -834,6 +914,112 @@ export function openDesktopClient(options) {
         ? client.runtimeStatus(deviceId, reqSignal)
         : client.ownerRequest('/api/devices/' + encodeURIComponent(deviceId) + '/runtime-status', { signal: reqSignal }),
     );
+  }
+
+  function boundErrorMessage(text) {
+    if (typeof text !== 'string' || !text.isWellFormed() || text.trim() === '') return null;
+    if (Buffer.byteLength(text, 'utf8') <= MAX_ERROR_MESSAGE_BYTES) return text;
+    let out = '';
+    for (const ch of text) {
+      const next = out + ch;
+      if (Buffer.byteLength(next, 'utf8') > MAX_ERROR_MESSAGE_BYTES - 3) break;
+      out = next;
+    }
+    return out ? out + '...' : null;
+  }
+
+  async function runAdminAction(action) {
+    requireCenter();
+    const client = centerClient;
+    try {
+      return await action(client);
+    } catch (err) {
+      if (err && typeof err.code === 'string' && !STABLE_ERROR_CODES.has(err.code) && err.code !== 'INTERNAL') {
+        const msg = boundErrorMessage(err.message) ?? err.code;
+        throw brokerError('BAD_RESPONSE', 'responded', msg);
+      }
+      const norm = normalizeDesktopError(err, 'unconfirmed');
+      const bounded = boundErrorMessage(err?.message);
+      throw brokerError(norm.code, norm.outcome, bounded ?? norm.message);
+    }
+  }
+
+  function validateAdminPath(rawPath) {
+    if (
+      typeof rawPath !== 'string' ||
+      !rawPath.isWellFormed() ||
+      rawPath.length === 0 ||
+      rawPath.length > 2048 ||
+      !rawPath.startsWith('/api/') ||
+      rawPath.startsWith('//') ||
+      rawPath.includes('\\') ||
+      /[\s\x00-\x1f\x7f]/.test(rawPath)
+    ) {
+      throw invalid('center_admin_request path must be a valid /api/ path without whitespace or protocol prefixes');
+    }
+    let resolved;
+    try {
+      resolved = new URL(rawPath, 'https://center.invalid');
+    } catch {
+      throw invalid('center_admin_request path must be a valid /api/ path');
+    }
+    if (resolved.origin !== 'https://center.invalid' || !resolved.pathname.startsWith('/api/')) {
+      throw invalid('center_admin_request path must stay under /api/');
+    }
+    if (resolved.pathname === '/api/oauth/google/callback' || resolved.pathname.startsWith('/api/oauth/google/callback/')) {
+      throw invalid('center_admin_request cannot invoke OAuth callback endpoints directly');
+    }
+    return rawPath;
+  }
+
+  async function opCenterAdminRequest(params, reqSignal) {
+    rejectUnknownFields(params, new Set(['method', 'path', 'body']), 'center_admin_request params');
+    if (typeof params.method !== 'string' || !ADMIN_REQUEST_METHODS.has(params.method)) {
+      throw invalid('center_admin_request method must be GET, POST, PUT, PATCH, or DELETE');
+    }
+    const adminPath = validateAdminPath(params.path);
+    if (params.method === 'GET' && params.body !== undefined) {
+      throw invalid('center_admin_request GET request must not include body');
+    }
+    if (params.body !== undefined) {
+      try {
+        JSON.stringify(params.body);
+      } catch {
+        throw invalid('center_admin_request body must be serializable JSON');
+      }
+    }
+    const result = await runAdminAction((client) =>
+      client.adminRequest(adminPath, {
+        method: params.method,
+        ...(params.body !== undefined ? { body: params.body } : {}),
+        signal: reqSignal,
+      }),
+    );
+    return result === undefined ? null : result;
+  }
+
+  async function opCenterQrLoginApprove(params, reqSignal) {
+    rejectUnknownFields(params, new Set(['challengeId', 'qrNonce']), 'center_qr_login_approve params');
+    if (
+      typeof params.challengeId !== 'string' ||
+      !params.challengeId.isWellFormed() ||
+      params.challengeId.trim() === '' ||
+      params.challengeId.length > 128
+    ) {
+      throw invalid('challengeId must be a non-empty string');
+    }
+    if (
+      typeof params.qrNonce !== 'string' ||
+      !params.qrNonce.isWellFormed() ||
+      params.qrNonce.trim() === '' ||
+      params.qrNonce.length > 128
+    ) {
+      throw invalid('qrNonce must be a non-empty string');
+    }
+    await runAdminAction((client) =>
+      client.approveQrLogin({ challengeId: params.challengeId, qrNonce: params.qrNonce }, reqSignal),
+    );
+    return { approved: true };
   }
 
   function dropTransportForCenter() {
@@ -1300,17 +1486,46 @@ export function openDesktopClient(options) {
       }),
       centerState === 'ready' ? centerClient.getBotSync({}, reqSignal) : null,
     ]);
-    if (!central) return directory;
+    if (!central) {
+      directory.bots = directory.bots.map((bot) => {
+        const ref = typeof bot.modelRef === 'string' && bot.modelRef.trim() !== '' ? bot.modelRef : null;
+        const resolvedModel = ref
+          ? {
+              effectiveModelRef: ref,
+              effectiveModelName: ref.split('/').pop() || ref,
+              effectiveProviderName: ref.includes('/') ? ref.split('/')[0] : null,
+              source: 'bot',
+              available: true,
+            }
+          : {
+              effectiveModelRef: null,
+              effectiveModelName: null,
+              effectiveProviderName: null,
+              source: 'unset',
+              available: false,
+            };
+        return {
+          ...bot,
+          resolvedModel,
+        };
+      });
+      return directory;
+    }
     const known = new Map(central.bots.map(bot => [JSON.stringify([bot.deviceId, bot.botId]), bot]));
     directory.bots = directory.bots.map(bot => {
       const shared = known.get(JSON.stringify([bot.deviceId, bot.botId]));
-      // 中心权威字段覆盖 Host 本地报告：avatar 与 cwd 都以中心为准。
-      return shared ? {
+      if (!shared) return bot;
+      const resolvedModel = shared.resolvedModel ?? undefined;
+      const effectiveRef = resolvedModel ? resolvedModel.effectiveModelRef : (shared.modelRef ?? bot.modelRef ?? null);
+      // 中心权威字段覆盖 Host 本地报告：avatar、cwd 与模型真值都以中心为准。
+      return {
         ...bot,
         avatar: shared.avatar ?? null, avatarRevision: shared.avatarRevision ?? 0,
         ...(shared.cwd !== undefined ? { cwd: shared.cwd } : {}),
         cwdRevision: shared.cwdRevision ?? 0,
-      } : bot;
+        modelRef: effectiveRef,
+        ...(resolvedModel ? { resolvedModel } : {}),
+      };
     });
     const unavailable = new Set(directory.devices.filter(device => !device.online).map(device => device.deviceId));
     for (const err of directory.errors) unavailable.add(err.deviceId);
@@ -1318,7 +1533,9 @@ export function openDesktopClient(options) {
       if (!unavailable.has(bot.deviceId)) continue;
       directory.bots.push({
         ...bot, role: bot.name, description: bot.description ?? '', cwd: bot.cwd ?? '',
-        modelRef: bot.modelRef ?? null, primaryConversationId: bot.primaryConversationId ?? '',
+        modelRef: bot.resolvedModel?.effectiveModelRef ?? bot.modelRef ?? null,
+        ...(bot.resolvedModel ? { resolvedModel: bot.resolvedModel } : {}),
+        primaryConversationId: bot.primaryConversationId ?? '',
         createdAt: bot.createdAt ?? '', isPrimary: Boolean(bot.isPrimary),
         lastActivityAt: bot.lastActivityAt ?? null, lastPreview: bot.lastPreview ?? null,
         archivedAt: bot.archivedAt ?? null, deviceName: bot.deviceName || bot.deviceId, online: false,
@@ -1422,7 +1639,10 @@ export function openDesktopClient(options) {
     try {
       let res;
       if (session.kind === 'local') {
-        res = await session.adapter(params.targetDeviceId, normalized.method, normalized.params, { signal: timeout.signal });
+        res = await session.adapter(params.targetDeviceId, normalized.method, normalized.params, {
+          signal: timeout.signal,
+          caller: { transport: 'local', clientId: `local:${clientId}` },
+        });
       } else {
         res = await session.remote.call(params.targetDeviceId, normalized.method, normalized.params, { signal: timeout.signal });
       }
@@ -1794,6 +2014,8 @@ export function openDesktopClient(options) {
     ['center_bot_capabilities_get', opCenterBotCapabilitiesGet],
     ['center_bot_capability_set', opCenterBotCapabilitySet],
     ['center_runtime_status', opCenterRuntimeStatus],
+    ['center_admin_request', opCenterAdminRequest],
+    ['center_qr_login_approve', opCenterQrLoginApprove],
     ['connect', opConnect],
     ['disconnect', opDisconnect],
     ['status', opStatus],

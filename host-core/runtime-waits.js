@@ -21,9 +21,28 @@ const TERMINAL_RECEIPT_STATES = new Set(['done', 'unanswered']);
 const ACTIVE_RESUME_STATES = new Set(['pending', 'accepted', 'cancelling']);
 
 function failure(code, message) { return Object.assign(new Error(message), { code }); }
-function copy(value) { return JSON.parse(JSON.stringify(value)); }
+function copy(value) { return value === undefined ? undefined : JSON.parse(JSON.stringify(value)); }
+function cloneNullable(value) { return value === undefined || value === null ? null : copy(value); }
 function isObject(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 function validEpoch(value) { return Number.isSafeInteger(value) && value >= 0; }
+
+/**
+ * Strict deployed eligibility for detached durable waits: unscoped,
+ * non-task-dispatch primary turns without workNativeId. Shared with Runtime
+ * and TurnQueue so experimental task/room/DM/work records cannot detach or
+ * re-admit.
+ */
+export function canDetachPrimaryWait(turn, dispatchContext = null) {
+  if (!isObject(turn)) return false;
+  if (dispatchContext !== null && dispatchContext !== undefined) return false;
+  if (turn.kind !== 'primary') return false;
+  if (turn.scopeId !== null && turn.scopeId !== undefined) return false;
+  if (turn.workNativeId !== null && turn.workNativeId !== undefined) return false;
+  if (!isObject(turn.replyTarget) || turn.replyTarget.kind !== 'primary') return false;
+  if (turn.replyTarget.scopeId != null || turn.replyTarget.botId != null) return false;
+  if (turn.sender?.sourceType === 'task_dispatch') return false;
+  return true;
+}
 
 function identity(input) {
   if (!isObject(input) || typeof input.installationId !== 'string' || !input.installationId ||
@@ -51,18 +70,35 @@ function receiptAccepted(value, botId, conversationId, requestId) {
  * cancelContinuation resolves only after that exact request is cancelled or
  * confirmed absent/terminal. It must be idempotent and work while offline.
  * getSubmission returns null only for a definitively absent request.
+ * Optional canDetach(turn, dispatchContext) restricts which turns may persist
+ * a detached wait; when out of scope, open() returns null without writing any
+ * wait, and existing experimental records are safely cancelled offline and
+ * never submitted.
  * Call reconcile() after stop epochs have been restored and the Host is ready.
  */
 export function createRuntimeWaits({
   host, getHarness, context, getStopEpoch, captureContext, getSubmission,
   submitContinuation,
   cancelContinuation = async () => { throw failure('INVALID_STATE', 'Continuation cancellation is unavailable.'); },
-  onChange = () => {}, canResume = () => true,
+  onChange = () => {}, canResume = () => true, canDetach = null,
 }) {
+  if (canDetach !== undefined && canDetach !== null && typeof canDetach !== 'function') {
+    throw failure('INVALID_ARGUMENT', 'canDetach must be a function.');
+  }
+  const detachAllowed = typeof canDetach === 'function' ? canDetach : null;
   const pumping = new Map();
   const cancelling = new Map();
   const timers = new Map();
   let closed = false;
+
+  function isDetachable(turn, dispatchContext) {
+    if (!detachAllowed) return true;
+    return Boolean(detachAllowed(cloneNullable(turn), cloneNullable(dispatchContext)));
+  }
+
+  function isSupportedRecord(record) {
+    return isObject(record) && isDetachable(record.turn, record.dispatchContext ?? null);
+  }
 
   function owner(botId, requireActive = false) {
     const bot = host.getBot(botId);
@@ -107,10 +143,19 @@ export function createRuntimeWaits({
     const id = identity({ ...input, conversationId: api.conversationId });
     if (String(api.taskId) !== id.requestId) throw failure('BOT_CONTEXT_REQUIRED', 'Wait must belong to its tool task.');
     const captured = await captureContext(botId, api, ctx);
-    if (!captured?.turn?.requestId || captured.stopEpoch !== epoch) {
+    if (!captured || captured.stopEpoch !== epoch) {
       throw failure('WAIT_CANCELLED', 'The originating run was stopped or its context is unavailable.');
     }
-    const frozen = copy({ turn: captured.turn, dispatchContext: captured.dispatchContext ?? null });
+    const frozen = {
+      turn: cloneNullable(captured.turn),
+      dispatchContext: cloneNullable(captured.dispatchContext),
+    };
+    if (detachAllowed && !isDetachable(frozen.turn, frozen.dispatchContext)) {
+      return null;
+    }
+    if (!frozen.turn?.requestId) {
+      throw failure('WAIT_CANCELLED', 'The originating run was stopped or its context is unavailable.');
+    }
     const waitId = keyFor(bot, id);
     const params = copy(input.params);
     const details = copy(input.details);
@@ -121,6 +166,9 @@ export function createRuntimeWaits({
       if (doc.record) {
         if (doc.record.botId !== botId || JSON.stringify(doc.record.params) !== JSON.stringify(params)) {
           throw failure('INVALID_STATE', 'Durable wait identity already has different questions.');
+        }
+        if (!isSupportedRecord(doc.record)) {
+          throw failure('INVALID_STATE', 'Existing durable wait is not supported.');
         }
         result = copy(doc.record);
         return;
@@ -162,10 +210,48 @@ export function createRuntimeWaits({
     record.resume = { ...(record.resume ?? {}), state: hasContinuation ? 'cancelling' : 'cancelled' };
     const result = { answers: [], cancelled: true };
     record.result = result;
-    record.details = {
-      ...record.details,
-      presentation: { ...record.details.presentation, status: 'cancelled', result },
-    };
+    if (isObject(record.details) && isObject(record.details.presentation)) {
+      record.details = {
+        ...record.details,
+        presentation: { ...record.details.presentation, status: 'cancelled', result },
+      };
+    }
+  }
+
+  async function retireUnsupported(botId, waitId, ctx = context) {
+    const bot = owner(botId);
+    let changedDoc = false;
+    let needsFinish = false;
+    await getHarness().commit(async (tx) => {
+      const doc = await tx.doc(DurableWait, waitId, {});
+      const record = doc.record;
+      const index = await tx.doc(DurableWaitIndex, bot.primaryConversationId, {});
+      if (!record || record.botId !== botId) {
+        if (index.active[waitId] !== undefined) {
+          delete index.active[waitId];
+          changedDoc = true;
+        }
+        return;
+      }
+      if (isSupportedRecord(record)) return;
+      if (record.resume?.state === 'cancelling') {
+        needsFinish = true;
+        return;
+      }
+      if (record.status === 'cancelled' && record.resume?.state === 'cancelled') {
+        if (index.active[waitId] !== undefined) {
+          delete index.active[waitId];
+          changedDoc = true;
+        }
+        return;
+      }
+      cancelRecord(record);
+      changedDoc = true;
+      if (record.resume.state === 'cancelling') needsFinish = true;
+      else delete index.active[waitId];
+    }, ctx);
+    if (changedDoc) changed(botId);
+    if (needsFinish) await finishCancellation(botId, waitId, ctx);
   }
 
   async function answer(botId, input, resolveAnswer, ctx = context) {
@@ -178,9 +264,9 @@ export function createRuntimeWaits({
       const record = doc.record;
       if (!record || record.botId !== botId || record.status !== 'pending') return { status: 'settled' };
       const index = await tx.doc(DurableWaitIndex, bot.primaryConversationId, {});
-      if (stopped(record)) {
+      if (stopped(record) || !isSupportedRecord(record)) {
         cancelRecord(record);
-        delete index.active[waitId];
+        if (record.resume.state !== 'cancelling') delete index.active[waitId];
         return { status: 'settled' };
       }
       // resolveAnswer is a synchronous validator/formatter over stored questions.
@@ -315,8 +401,9 @@ export function createRuntimeWaits({
     const bot = owner(botId);
     const candidates = await list(botId);
     const cancellationErrors = [];
-    // Attempt every persisted cancellation before any new admission. One
-    // failed request must not starve cancellation of unrelated scopes.
+    // Attempt every persisted cancellation (including retiring existing
+    // unsupported experimental waits) before any new admission. One failed
+    // request must not starve cancellation of unrelated scopes.
     for (const candidate of candidates) {
       if (closed) return;
       // A durable cancel is local cleanup, including on archived Bots; it must
@@ -324,12 +411,15 @@ export function createRuntimeWaits({
       if (candidate.resume?.state === 'cancelling') {
         try { await finishCancellation(botId, candidate.waitId); }
         catch (error) { cancellationErrors.push(error); }
+      } else if (!isSupportedRecord(candidate)) {
+        try { await retireUnsupported(botId, candidate.waitId); }
+        catch (error) { cancellationErrors.push(error); }
       }
     }
     if (cancellationErrors.length > 0) throw cancellationErrors[0];
     for (const candidate of candidates) {
       if (closed) return;
-      if (candidate.resume?.state === 'cancelling') continue;
+      if (candidate.resume?.state === 'cancelling' || !isSupportedRecord(candidate)) continue;
       if (bot.archivedAt || !canResume()) continue;
       if (stopped(candidate)) {
         await cancelBot(botId, getStopEpoch(botId) - 1);
@@ -347,6 +437,10 @@ export function createRuntimeWaits({
         // the same guard to close the remaining read-to-admission race.
         const current = (await getHarness().snapshot(DurableWait, candidate.waitId, context))?.record;
         if (current?.botId !== botId || current.reason !== 'user' || current.resume?.state !== 'pending') continue;
+        if (!isSupportedRecord(current)) {
+          await retireUnsupported(botId, candidate.waitId);
+          continue;
+        }
         if (closed || !canResume()) return;
         receipt = await submitContinuation(botId, {
           ...candidate.resume.input,
@@ -356,13 +450,17 @@ export function createRuntimeWaits({
         }, context);
       }
       if (!receiptAccepted(receipt, botId, bot.primaryConversationId, candidate.resumeRequestId)) continue;
+      let needsFinishCancel = false;
       await getHarness().commit(async (tx) => {
         const doc = await tx.doc(DurableWait, candidate.waitId, {});
         const record = doc.record;
         if (!['pending', 'accepted'].includes(record?.resume?.state) || record.reason !== 'user') return;
         const index = await tx.doc(DurableWaitIndex, bot.primaryConversationId, {});
-        if (stopped(record)) cancelRecord(record);
-        else {
+        if (stopped(record) || !isSupportedRecord(record)) {
+          cancelRecord(record);
+          if (record.resume.state === 'cancelling') needsFinishCancel = true;
+          else delete index.active[candidate.waitId];
+        } else {
           record.resume = { ...record.resume, state: 'accepted',
             acceptedAt: record.resume.acceptedAt ?? Date.now(), receiptStatus: receipt.status };
           // Retain accepted work while queued/running so scope Stop can find
@@ -375,6 +473,7 @@ export function createRuntimeWaits({
         }
       }, context);
       changed(botId);
+      if (needsFinishCancel) await finishCancellation(botId, candidate.waitId);
     }
   }
 
@@ -394,7 +493,9 @@ export function createRuntimeWaits({
       pumping.delete(botId);
       if (!closed) {
         try {
-          if ((await list(botId)).some(record => ACTIVE_RESUME_STATES.has(record.resume?.state))) retry(botId);
+          if ((await list(botId)).some(record => ACTIVE_RESUME_STATES.has(record.resume?.state) || !isSupportedRecord(record))) {
+            retry(botId);
+          }
         } catch { /* a later explicit reconcile can reopen unavailable storage */ }
       }
     });
@@ -415,8 +516,9 @@ export function createRuntimeWaits({
     }
   }
 
-  /** Startup barrier: await persisted cancellations before resuming the SDK or
-      nudging admission. This never looks up or submits a pending/accepted
+  /** Startup barrier: await persisted cancellations (and retire existing
+      unsupported experimental waits) before resuming the SDK or nudging
+      admission. This never looks up or submits a pending/accepted
       continuation, does not depend on Center connectivity, and reports errors
       to the caller instead of allowing startup to proceed past them. */
   async function recoverCancellations(botId) {
@@ -428,13 +530,20 @@ export function createRuntimeWaits({
       assertActive();
       let records;
       try { records = await list(bot.botId); }
-      catch (error) { errors.push(error); continue; }
+      catch (error) { errors.push(error); retry(bot.botId); continue; }
+      let botFailed = false;
       for (const record of records) {
-        if (record.resume?.state !== 'cancelling') continue;
-        assertActive();
-        try { await finishCancellation(bot.botId, record.waitId); }
-        catch (error) { errors.push(error); }
+        if (record.resume?.state === 'cancelling') {
+          assertActive();
+          try { await finishCancellation(bot.botId, record.waitId); }
+          catch (error) { errors.push(error); botFailed = true; }
+        } else if (!isSupportedRecord(record)) {
+          assertActive();
+          try { await retireUnsupported(bot.botId, record.waitId); }
+          catch (error) { errors.push(error); botFailed = true; }
+        }
       }
+      if (botFailed) retry(bot.botId);
     }
     if (errors.length > 0) throw errors[0];
   }
@@ -446,12 +555,15 @@ export function createRuntimeWaits({
     try { record = await get(botId, p, ctx); }
     catch (error) { if (error?.code === 'INVALID_ARGUMENT') return null; throw error; }
     if (!record) return null;
-    if (stopped(record) && record.status === 'pending') {
+    const unsupportedActive = !isSupportedRecord(record) &&
+      (record.status === 'pending' ||
+        (record.status !== 'cancelled' && ACTIVE_RESUME_STATES.has(record.resume?.state) && !record.resume?.finishedAt));
+    if ((stopped(record) && record.status === 'pending') || unsupportedActive) {
       const transient = copy(record);
       cancelRecord(transient);
       return { details: transient.details, live: false, status: 'cancelled', waitId: record.waitId };
     }
-    return { details: record.details, live: record.status === 'pending' && !stopped(record),
+    return { details: record.details, live: record.status === 'pending' && !stopped(record) && isSupportedRecord(record),
       status: record.status, waitId: record.waitId };
   }
 

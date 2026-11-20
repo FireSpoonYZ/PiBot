@@ -23,6 +23,13 @@ const MAX_SCALE_PASSES = 3;
 const IMAGE_MAX_PIXELS = 32 * 1024 * 1024;
 
 type ImageMime = ImageAttachment['mimeType'];
+type TranslateFn = (zh: string, en: string) => string;
+
+function defaultImageText(zh: string, en: string): string {
+  const docLang = typeof document !== 'undefined' ? document.documentElement?.lang : '';
+  const lang = docLang || (typeof navigator !== 'undefined' ? navigator.language : '');
+  return lang.toLowerCase().startsWith('en') ? en : zh;
+}
 
 /** 原生选图返回的单张图片（与 web/src/native BotHostImage 同形；这里避免反向依赖 native 入口）。 */
 export interface PickedImageSource {
@@ -79,7 +86,7 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function loadImage(blob: Blob): Promise<HTMLImageElement> {
+function loadImage(blob: Blob, t: TranslateFn): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(blob);
     const img = new Image();
@@ -89,31 +96,31 @@ function loadImage(blob: Blob): Promise<HTMLImageElement> {
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
-      reject(new ImagePickError('IMAGE_DECODE_FAILED', '无法解码所选图片'));
+      reject(new ImagePickError('IMAGE_DECODE_FAILED', t('无法解码所选图片', 'Unable to decode the selected image')));
     };
     img.src = url;
   });
 }
 
-function drawToCanvas(img: CanvasImageSource, width: number, height: number): HTMLCanvasElement {
+function drawToCanvas(img: CanvasImageSource, width: number, height: number, t: TranslateFn): HTMLCanvasElement {
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, Math.round(width));
   canvas.height = Math.max(1, Math.round(height));
   const ctx = canvas.getContext('2d');
-  if (!ctx) throw new ImagePickError('IMAGE_ENCODE_FAILED', '当前环境不支持图片处理');
+  if (!ctx) throw new ImagePickError('IMAGE_ENCODE_FAILED', t('当前环境不支持图片处理', 'Image processing is not supported in this environment'));
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
   return canvas;
 }
 
-function canvasBytes(canvas: HTMLCanvasElement, type: ImageMime, quality?: number): Promise<Uint8Array> {
+function canvasBytes(canvas: HTMLCanvasElement, type: ImageMime, t: TranslateFn, quality?: number): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
     canvas.toBlob(
       (blob) => {
         if (!blob) {
-          reject(new ImagePickError('IMAGE_ENCODE_FAILED', '图片压缩失败'));
+          reject(new ImagePickError('IMAGE_ENCODE_FAILED', t('图片压缩失败', 'Failed to compress image')));
           return;
         }
-        fileToBytes(blob).then(resolve, () => reject(new ImagePickError('IMAGE_ENCODE_FAILED', '图片压缩失败')));
+        fileToBytes(blob).then(resolve, () => reject(new ImagePickError('IMAGE_ENCODE_FAILED', t('图片压缩失败', 'Failed to compress image'))));
       },
       type,
       quality,
@@ -121,10 +128,10 @@ function canvasBytes(canvas: HTMLCanvasElement, type: ImageMime, quality?: numbe
   });
 }
 
-function hasAlphaFast(source: CanvasImageSource, width: number, height: number): boolean {
+function hasAlphaFast(source: CanvasImageSource, width: number, height: number, t: TranslateFn): boolean {
   // 低分辨率采样判断是否存在透明像素；不透明则优先 JPEG 以换取体积。
   const probe = 64;
-  const canvas = drawToCanvas(source, Math.min(probe, Math.max(1, Math.round(width))), Math.min(probe, Math.max(1, Math.round(height))));
+  const canvas = drawToCanvas(source, Math.min(probe, Math.max(1, Math.round(width))), Math.min(probe, Math.max(1, Math.round(height))), t);
   const ctx = canvas.getContext('2d');
   if (!ctx) return true;
   try {
@@ -143,11 +150,15 @@ function hasAlphaFast(source: CanvasImageSource, width: number, height: number):
  * canvas 软像素预算 32Mi px：超预算来源自动缩放进预算（内存保护，不直接报超限）。
  * JPEG 逐步降质；仍超限则等比缩放后重试；仍超限抛 IMAGE_TOO_LARGE，调用方必须可见化且不静默丢弃草稿。
  */
-export async function normalizeImageFile(file: File | Blob, name?: string): Promise<PickedImageSource> {
-  const img = await loadImage(file);
+export async function normalizeImageFile(
+  file: File | Blob,
+  name?: string,
+  t: TranslateFn = defaultImageText,
+): Promise<PickedImageSource> {
+  const img = await loadImage(file, t);
   const sourceW = img.naturalWidth || img.width;
   const sourceH = img.naturalHeight || img.height;
-  if (!sourceW || !sourceH) throw new ImagePickError('IMAGE_DECODE_FAILED', '无法读取图片尺寸');
+  if (!sourceW || !sourceH) throw new ImagePickError('IMAGE_DECODE_FAILED', t('无法读取图片尺寸', 'Unable to read image dimensions'));
 
   // 先按长边，再按 canvas 软像素预算取更严的缩放（防 16384² 级内存峰值）。
   let scale = Math.min(
@@ -156,29 +167,43 @@ export async function normalizeImageFile(file: File | Blob, name?: string): Prom
     Math.sqrt(IMAGE_MAX_PIXELS / (sourceW * sourceH)),
   );
   const preferJpeg = (file.type === 'image/jpeg' || file.type === 'image/jpg' || file.type === 'image/webp' || file.type === '')
-    && !hasAlphaFast(img, sourceW, sourceH);
+    && !hasAlphaFast(img, sourceW, sourceH, t);
 
   for (let pass = 0; pass <= MAX_SCALE_PASSES; pass += 1) {
     const w = Math.max(1, Math.round(sourceW * scale));
     const h = Math.max(1, Math.round(sourceH * scale));
-    const canvas = drawToCanvas(img, w, h);
+    const canvas = drawToCanvas(img, w, h, t);
     const mime: ImageMime = preferJpeg || file.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
     if (mime === 'image/jpeg') {
       for (const q of JPEG_QUALITY_STEPS) {
-        const bytes = await canvasBytes(canvas, 'image/jpeg', q);
+        const bytes = await canvasBytes(canvas, 'image/jpeg', t, q);
         if (bytes.length <= IMAGE_MAX_BYTES) {
           return { name: attachmentFileName(name ?? '', 'image/jpeg'), mimeType: 'image/jpeg', data: bytesToBase64(bytes), size: bytes.length, width: w, height: h };
         }
       }
     } else {
-      const bytes = await canvasBytes(canvas, 'image/png');
+      const bytes = await canvasBytes(canvas, 'image/png', t);
       if (bytes.length <= IMAGE_MAX_BYTES) {
         return { name: attachmentFileName(name ?? '', 'image/png'), mimeType: 'image/png', data: bytesToBase64(bytes), size: bytes.length, width: w, height: h };
       }
     }
     scale *= 0.7;
   }
-  throw new ImagePickError('IMAGE_TOO_LARGE', '图片超出大小限制（16MiB）');
+  throw new ImagePickError('IMAGE_TOO_LARGE', t('图片超出大小限制（16MiB）', 'Image exceeds the 16MiB size limit'));
+}
+
+/** 从剪贴板 DataTransfer 提取所有 image/* File（优先 files，空则回退 items.getAsFile()，不重复添加）。 */
+export function extractPastedImageFiles(clipboardData: DataTransfer | null | undefined): File[] {
+  if (!clipboardData) return [];
+  const fromFiles = Array.from(clipboardData.files ?? []).filter((file) => file.type.startsWith('image/'));
+  if (fromFiles.length > 0) return fromFiles;
+  const fromItems: File[] = [];
+  for (const item of Array.from(clipboardData.items ?? [])) {
+    if (item.kind !== 'file' || !item.type.startsWith('image/')) continue;
+    const file = item.getAsFile();
+    if (file) fromItems.push(file);
+  }
+  return fromItems;
 }
 
 /** 浏览器/桌面选图入口：多选、逐个归一化；任一张失败整体中止并抛错（不上传半成品）。
@@ -214,17 +239,21 @@ export async function attachmentIdOf(dataBase64: string): Promise<string> {
 }
 
 /** 会话内按需取图：attachmentId → dataURL 缓存；不落盘、不进 localStorage。 */
-export function useAttachmentImageCache(fetcher: AttachmentFetcher | null): {
+export function useAttachmentImageCache(fetcher: AttachmentFetcher | null, translate?: TranslateFn): {
   urlFor(attachmentId: string): string | null;
   ensure(attachmentId: string): void;
   errorFor(attachmentId: string): string | null;
 } {
+  const fallbackT = useText();
+  const translateRef = useRef<TranslateFn>(translate ?? fallbackT);
+  translateRef.current = translate ?? fallbackT;
   const cacheRef = useRef(new Map<string, { url: string | null; error: string | null; loading: boolean }>());
   const [, bump] = useState(0);
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
 
   const ensure = useCallback((attachmentId: string) => {
+    const t = translateRef.current;
     const cache = cacheRef.current;
     const cur = cache.get(attachmentId);
     if (!attachmentId || cur?.loading || cur?.url || cur?.error) return;
@@ -232,7 +261,7 @@ export function useAttachmentImageCache(fetcher: AttachmentFetcher | null): {
     bump((v) => v + 1);
     const run = fetcherRef.current;
     if (!run) {
-      cache.set(attachmentId, { url: null, error: '无法读取附件', loading: false });
+      cache.set(attachmentId, { url: null, error: t('无法读取附件', 'Unable to read attachment'), loading: false });
       bump((v) => v + 1);
       return;
     }
@@ -245,7 +274,7 @@ export function useAttachmentImageCache(fetcher: AttachmentFetcher | null): {
       },
       (e) => {
         const message = e instanceof Error ? e.message : String(e);
-        cache.set(attachmentId, { url: null, error: message || '读取失败', loading: false });
+        cache.set(attachmentId, { url: null, error: message || t('读取失败', 'Failed to load'), loading: false });
         bump((v) => v + 1);
       },
     );
@@ -274,7 +303,7 @@ export function ImageAttachmentThumb({ attachment, fetcher, disabled, onRemove, 
   onRemove?: () => void;
   t: (zh: string, en: string) => string;
 }) {
-  const cache = useAttachmentImageCache(fetcher);
+  const cache = useAttachmentImageCache(fetcher, t);
   const [open, setOpen] = useState(false);
   const url = cache.urlFor(attachment.id);
   const error = cache.errorFor(attachment.id);
@@ -312,7 +341,7 @@ export function ImageAttachmentThumb({ attachment, fetcher, disabled, onRemove, 
           onClick={onRemove}
           aria-label={t('移除', 'Remove')}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
             <path d="M6 6l12 12M18 6L6 18" />
           </svg>
         </button>
@@ -328,7 +357,7 @@ export function ImageAttachmentThumb({ attachment, fetcher, disabled, onRemove, 
             {url ? <img src={url} alt={alt} /> : null}
             <Dialog.Close asChild>
               <button type="button" className="image-attachment-viewer-close" aria-label={t('关闭', 'Close')}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
                   <path d="M6 6l12 12M18 6L6 18" />
                 </svg>
               </button>

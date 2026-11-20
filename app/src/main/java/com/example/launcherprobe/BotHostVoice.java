@@ -21,9 +21,40 @@ final class BotHostVoice {
     interface InputListener {
         void onPartial(String text);
 
+        default void onLevel(double value) { }
+
         void onResult(String botId, String requestId, String text);
 
         void onError(String message);
+    }
+
+    /** 音量事件节流间隔：同一捕获每 100ms 最多派发一次 level 事件。 */
+    static final long LEVEL_THROTTLE_MS = 100L;
+
+    /** 纯音量归一化与节流器：将 level 钳制到 [0, 1]（NaN 忽略），在 minIntervalMs 内去重。 */
+    static final class LevelThrottle {
+        private final long minIntervalMs;
+        private long lastEmitMs = Long.MIN_VALUE;
+
+        LevelThrottle() {
+            this(LEVEL_THROTTLE_MS);
+        }
+
+        LevelThrottle(long minIntervalMs) {
+            this.minIntervalMs = minIntervalMs;
+        }
+
+        Double accept(float rawLevel, long nowMs) {
+            if (Float.isNaN(rawLevel)) return null;
+            float clamped = rawLevel == Float.NEGATIVE_INFINITY ? 0f
+                    : rawLevel == Float.POSITIVE_INFINITY ? 1f
+                    : Math.max(0f, Math.min(1f, rawLevel));
+            if (lastEmitMs != Long.MIN_VALUE && nowMs >= lastEmitMs && nowMs - lastEmitMs < minIntervalMs) {
+                return null;
+            }
+            lastEmitMs = nowMs;
+            return Math.round(clamped * 1000.0) / 1000.0;
+        }
     }
 
     private static final String NS_VOICE = "bot_host_voice";
@@ -200,9 +231,14 @@ final class BotHostVoice {
         } catch (RuntimeException failure) { listener.onError("无法启动语音输入"); return; }
         Capture started = new Capture(botId, requestId, listener, input);
         capture = started;
+        final LevelThrottle levelThrottle = new LevelThrottle();
         try {
             input.start(new SpeechInput.Listener() {
-                @Override public void onLevel(float level) { }
+                @Override public void onLevel(float level) {
+                    if (closed.get() || capture != started) return;
+                    Double normalized = levelThrottle.accept(level, android.os.SystemClock.elapsedRealtime());
+                    if (normalized != null) listener.onLevel(normalized);
+                }
                 @Override public void onPartial(String text) { if (!closed.get() && capture == started) listener.onPartial(text); }
                 @Override public void onProcessing() { }
                 @Override public void onResult(String text) {
