@@ -15,18 +15,18 @@ Bot 可通过 `tool_search` 按需加载内置管理工具。Center 可以把同
     "clientId": "gemini-personal",
     "clientSecret": "REPLACE_WITH_AN_INDEPENDENT_RANDOM_SECRET",
     "redirectUris": ["https://client.example.com/oauth/callback"],
-    "scopes": ["pibot:bots:read", "pibot:messages:read", "pibot:messages:write"],
+    "scopes": ["pibot:messages:read", "pibot:messages:write"],
     "botTargets": [{ "deviceId": "your-device-id", "botId": "your-bot-id" }]
   }
 ]
 ```
 
-权限按业务分组（`bots`、`capabilities`、`collaboration`、`automation`、`center`、`messages`），每组有独立 `read` / `write`；写权限不隐含读权限。**除 `messages` 限定到 `botTargets` 外，管理类 scope 可能影响整个 Center**（例如更改全局配置、提交自动化、向真实群发信）。不要给只需要聊天的客户端发管理权限。用户确认、配对、信任证书、密钥和连接授权不在操作目录。
+权限按业务分组（`bots`、`capabilities`、`collaboration`、`automation`、`center`、`messages`），每组有独立 `read` / `write`；写权限不隐含读权限。**除 `messages` 限定到 `botTargets` 外，管理类 scope 可能影响整个 Center**（例如更改全局配置、提交自动化、向真实群发信）。不要给只需要聊天的客户端发管理权限。用户确认、配对、信任证书、密钥和连接授权不在操作目录。安装或更新未经审核的可执行能力、全局启用能力包仍由所有者操作；已全局启用的能力可按 Bot 开关。
 
 ## 发消息和取回复
 
 1. 调用 `dispatch_send_bot_message`，指定已授权的 `deviceId`、`botId`、`message` 和稳定的 `requestId`。回执表示已受理；Host 离线时等待上线，不会由 Center 代跑模型。
-2. 用相同的目标和 `requestId` 调用 `dispatch_get_bot_message`。只有执行成功才返回该请求的答复；查询不返回 Bot 的私聊历史或工具结果。重复提交同一请求不会生成第二次执行。
+2. 用相同的目标和 `requestId` 调用 `dispatch_get_bot_message`。只有执行成功才返回该请求的答复；同一客户端重试同一请求不会生成第二次执行。外部请求使用独立会话，只复用目标 Bot 的模型选择和角色资料，不读取它的私聊、SOUL 或记忆，也不运行它的工具。
 3. Bot 本身在对话中仍用 `send_to` 发送 DM 或群消息，保留发送 Bot 的身份和原始回复关系；MCP 不冒充该 Bot。
 
 开发时在 [操作契约](../center-contract/operations/index.js) 注册名称和 schema，在 [Center 操作服务](../center-server/operations/index.js) 提供实现。不要把 owner 路由或 Host RPC 整体暴露为通用工具。详见 [AGENTS.md](../AGENTS.md#内置能力与授权)。
