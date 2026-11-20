@@ -173,7 +173,7 @@ function assertConfigCredentials(schema, value) {
 }
 
 
-export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault, google, createOperations }) {
+export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault, google, createOperations, listReleases }) {
   const streams = new Map();
   function notify(deviceId, event = 'config-changed') {
     for (const stream of streams.get(deviceId) || []) {
@@ -197,6 +197,7 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   const owner = [requireOwner];
   const mutation = [requireOwner, csrfUnlessOAuth];
   const ownerActions = createOperations ? new Map() : null;
+  if (listReleases) ownerActions?.set('GET /api/client-releases', listReleases);
   const route = (method, path, handler, write = false, bodyLimit) => {
     ownerActions?.set(method + ' ' + path, handler);
     return app.route({ method, url: path, onRequest: write ? mutation : owner, handler, ...(bodyLimit !== undefined ? { bodyLimit } : {}) });

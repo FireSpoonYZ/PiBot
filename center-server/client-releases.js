@@ -272,9 +272,8 @@ export function registerClientReleaseRoutes(app, { store, dataRoot, registry, in
     return registry.authenticate(deviceId, token) ? 'device' : null;
   }
 
-  app.get('/api/client-releases', { onRequest: ownerRead }, async () => ({
-    releases: store.listClientReleases().map((record) => publicRecord(record, base)),
-  }));
+  const listReleases = () => ({ releases: store.listClientReleases().map((record) => publicRecord(record, base)) });
+  app.get('/api/client-releases', { onRequest: ownerRead }, listReleases);
 
   app.post('/api/client-releases', { onRequest: ownerWrite }, async (req, reply) => {
     const contentType = req.headers['content-type'] || '';
@@ -432,4 +431,5 @@ export function registerClientReleaseRoutes(app, { store, dataRoot, registry, in
       sourceCommit: best.sourceCommit,
     };
   });
+  return { listReleases };
 }
