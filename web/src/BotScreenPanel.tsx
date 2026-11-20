@@ -264,6 +264,32 @@ export function BotScreenPanel({
   }, [helpOpen, pushLayout]);
 
   useEffect(() => {
+    if (!open) setHelpOpen(false);
+  }, [open]);
+
+  useEffect(() => {
+    if (!helpOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !event.defaultPrevented) {
+        event.preventDefault();
+        setHelpOpen(false);
+      }
+    };
+    const onAppBack = (event: Event) => {
+      if (event.defaultPrevented) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setHelpOpen(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    window.addEventListener('app-back', onAppBack, true);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('app-back', onAppBack, true);
+    };
+  }, [helpOpen]);
+
+  useEffect(() => {
     const stage = stageRef.current;
     if (!stage || !open) return;
     const observer = new ResizeObserver(() => pushLayout());
@@ -508,7 +534,7 @@ export function BotScreenPanel({
           aria-label={t('返回', 'Back')}
           onClick={onBack}
         >
-          <ChevronLeft size={22} />
+          <ChevronLeft size={22} aria-hidden="true" />
         </button>
 
         <div className="grok-computer-bot-id">
@@ -526,22 +552,20 @@ export function BotScreenPanel({
           aria-expanded={helpOpen}
           onClick={() => setHelpOpen(v => !v)}
         >
-          <CircleHelp size={20} />
+          <CircleHelp size={20} aria-hidden="true" />
         </button>
 
         {helpOpen && (
           <>
-            <div className="grok-computer-popover-backdrop" onClick={() => setHelpOpen(false)} />
+            <div className="grok-computer-popover-backdrop" role="presentation" aria-hidden="true" onClick={() => setHelpOpen(false)} />
             <div className="grok-computer-help-popover" role="dialog" aria-label={t('电脑屏幕状态', 'Computer Status')}>
               <div className="grok-computer-help-title">
                 <span>{t('虚拟电脑状态', 'Virtual Screen Status')}</span>
                 <span className={`grok-computer-status-pill${live ? ' live' : ''}`}>{metaText}</span>
               </div>
               <p className="grok-computer-help-desc">
-                {t(
-                  'Bot 在后台执行应用任务时会在此虚拟屏幕中运行。点击右下角「接管控制」可中断当前任务并由你直接触控操作。',
-                  'The Bot operates apps inside this virtual screen. Tap "Take over" at the bottom-right to interrupt the Bot and interact directly.',
-                )}
+                {t('Bot 在后台执行应用任务时会在此虚拟屏幕中运行。点击右下角「接管控制」可中断当前任务并由你直接触控操作。',
+                  'The Bot operates apps inside this virtual screen. Tap "Take over" at the bottom-right to interrupt the Bot and interact directly.')}
               </p>
               {canControlSession && (
                 <div className="grok-computer-help-actions">
@@ -551,7 +575,7 @@ export function BotScreenPanel({
                     disabled={busy}
                     onClick={() => void handleCreateRpcScreen()}
                   >
-                    <Play size={14} />
+                    <Play size={14} aria-hidden="true" />
                     <span>{live ? t('重置屏幕', 'Reset') : t('启动屏幕', 'Start Screen')}</span>
                   </button>
                   <button
@@ -564,7 +588,7 @@ export function BotScreenPanel({
                       setHelpOpen(false);
                     }}
                   >
-                    <RefreshCw size={14} />
+                    <RefreshCw size={14} aria-hidden="true" />
                     <span>{t('刷新画面', 'Refresh')}</span>
                   </button>
                   {live && (
@@ -574,7 +598,7 @@ export function BotScreenPanel({
                       disabled={busy}
                       onClick={() => void handleReleaseRpcScreen()}
                     >
-                      <Trash2 size={14} />
+                      <Trash2 size={14} aria-hidden="true" />
                       <span>{t('关闭屏幕', 'Close Screen')}</span>
                     </button>
                   )}
@@ -604,7 +628,7 @@ export function BotScreenPanel({
 
         {!live && (
           <div className="grok-computer-empty-status" role="status">
-            <div className="grok-computer-empty-icon">
+            <div className="grok-computer-empty-icon" aria-hidden="true">
               <Monitor size={30} />
             </div>
             <p>{statusText}</p>
@@ -615,7 +639,7 @@ export function BotScreenPanel({
                 disabled={busy}
                 onClick={() => void handleCreateRpcScreen()}
               >
-                <Play size={15} />
+                <Play size={15} aria-hidden="true" />
                 <span>{busy ? t('正在启动…', 'Starting…') : t('启动虚拟屏幕', 'Start Virtual Screen')}</span>
               </button>
             )}

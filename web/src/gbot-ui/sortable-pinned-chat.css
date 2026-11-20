@@ -1,6 +1,5 @@
 /* gbot-ui lane：置顶会话整行拖拽/键盘排序外层样式。
- * 复用仓库既有圆角与颜色变量（--surface / --text / --muted / --accent / --accent-soft / --selection），
- * 提供整行包裹与拖拽浮起/落点指示线。 */
+ * 复用全局设计令牌（附旧令牌与数值回退，兼容桌面端），提供整行包裹与拖拽浮起/落点指示线。 */
 
 .gbot-sortable-pinned-chat {
   position: relative;
@@ -8,9 +7,9 @@
   align-items: center;
   width: 100%;
   min-width: 0;
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-  transition: box-shadow 140ms ease;
+  border-radius: var(--radius-md, 12px);
+  background: color-mix(in srgb, var(--color-primary, var(--brand, var(--accent))) 10%, transparent);
+  transition: box-shadow var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
 }
 
 .gbot-sortable-pinned-chat > :first-child {
@@ -20,8 +19,8 @@
 }
 
 .gbot-sortable-pinned-chat[data-dragging="true"] {
-  z-index: 20;
-  box-shadow: 0 6px 18px rgb(0 0 0 / 0.14);
+  z-index: var(--z-sticky, 10);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--color-text, var(--text)) 16%, transparent);
   opacity: 0.96;
   transition: none;
 }
@@ -37,10 +36,10 @@
   left: 10px;
   right: 10px;
   height: 2px;
-  border-radius: 999px;
-  background: var(--accent, #627565);
+  border-radius: var(--radius-full, 999px);
+  background: var(--color-primary, var(--brand, var(--accent)));
   pointer-events: none;
-  z-index: 21;
+  z-index: var(--z-sticky, 10);
 }
 
 .gbot-sortable-pinned-chat[data-drop-position="before"]::before {
@@ -49,4 +48,10 @@
 
 .gbot-sortable-pinned-chat[data-drop-position="after"]::after {
   bottom: -1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gbot-sortable-pinned-chat {
+    transition: none;
+  }
 }

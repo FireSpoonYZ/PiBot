@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type * as React from 'react';
 import { ExternalLink } from 'lucide-react';
+import { useText } from '../ui';
 import './center-admin.css';
 import { CapabilitiesTab } from './CapabilitiesTab';
 import { DevicesTab } from './DevicesTab';
@@ -51,14 +52,6 @@ export type {
   SetupStatus,
 };
 
-const TABS: readonly { id: CenterAdminTab; label: string }[] = [
-  { id: 'providers', label: '模型' },
-  { id: 'capabilities', label: '技能与扩展' },
-  { id: 'devices', label: '设备' },
-  { id: 'vault', label: '密码库' },
-  { id: 'ops', label: '触发与版本' },
-];
-
 export function CenterAdminPanel({
   transport,
   embedded = false,
@@ -72,6 +65,7 @@ export function CenterAdminPanel({
   onConfigureBot,
   renderQr,
 }: CenterAdminPanelProps): React.JSX.Element {
+  const t = useText();
   const [internalTab, setInternalTab] = useState<CenterAdminTab>(initialTab);
 
   useEffect(() => {
@@ -87,14 +81,25 @@ export function CenterAdminPanel({
     onTabChange?.(next);
   };
 
+  const tabs: readonly { id: CenterAdminTab; label: string }[] = useMemo(
+    () => [
+      { id: 'providers', label: t('模型', 'Models') },
+      { id: 'capabilities', label: t('技能与扩展', 'Skills & Extensions') },
+      { id: 'devices', label: t('设备', 'Devices') },
+      { id: 'vault', label: t('密码库', 'Vault') },
+      { id: 'ops', label: t('触发与版本', 'Triggers & Releases') },
+    ],
+    [t],
+  );
+
   const api = useMemo(() => createCenterApi(transport), [transport]);
 
   return (
     <div className={`ca-root${embedded ? ' is-embedded' : ''}`}>
       <div className="ca-shell">
         <div className="ca-topbar">
-          <nav className="ca-nav" aria-label="中心管理导航">
-            {TABS.map(tab => (
+          <nav className="ca-nav" aria-label={t('中心管理导航', 'Center admin navigation')}>
+            {tabs.map(tab => (
               <button
                 key={tab.id}
                 type="button"
@@ -111,11 +116,11 @@ export function CenterAdminPanel({
             <button
               type="button"
               className="ca-btn ca-btn-ghost ca-btn-sm"
-              title={centerUrl ? `在浏览器打开 ${centerUrl}` : '在浏览器打开'}
+              title={centerUrl ? t(`在浏览器打开 ${centerUrl}`, `Open ${centerUrl} in browser`) : t('在浏览器打开', 'Open in browser')}
               onClick={onOpenExternal}
             >
-              <ExternalLink size={14} />
-              <span>在浏览器打开</span>
+              <ExternalLink size={14} aria-hidden="true" />
+              <span>{t('在浏览器打开', 'Open in browser')}</span>
             </button>
           )}
         </div>

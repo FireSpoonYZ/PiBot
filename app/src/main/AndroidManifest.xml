@@ -37,7 +37,7 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:label="pibot"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:theme="@style/WebAppTheme">
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"

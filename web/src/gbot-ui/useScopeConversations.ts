@@ -11,6 +11,7 @@ import type {
   ScopeListPage,
   StoredMessage,
 } from '../../../host-core/index.js';
+import { useText } from '../ui';
 import { conversationTitle } from './ConversationChat';
 import type { ConversationBot } from './ConversationChat';
 
@@ -191,6 +192,7 @@ async function loadSource(
 function buildItems(
   source: ScopeConversationSource,
   snap: SourceSnapshot,
+  t?: (zh: string, en: string) => string,
 ): ScopeConversation[] {
   const bots = source.bots ?? [];
   return snap.scopes
@@ -202,7 +204,7 @@ function buildItems(
         api: source.api,
         identity: source.identity,
         scope,
-        title: conversationTitle(scope.scope, bots),
+        title: conversationTitle(scope.scope, bots, t),
         lastPreview: h?.preview ?? '',
         lastActivityAt: h?.at,
       };
@@ -251,6 +253,9 @@ export function useScopeConversations(
   pageActive = true,
   kind?: ScopeKind,
 ): UseScopeConversationsResult {
+  const t = useText();
+  const tRef = useRef(t);
+  tRef.current = t;
   // sources/bots 数组可能每次渲染重建：稳定键由内容计算（非引用），
   // ref 持有最新值；只有键/kind/可见性变化才重载，避免请求循环。
   const sourcesKey = sources.map(sourceKey).join('\n');
@@ -301,6 +306,7 @@ export function useScopeConversations(
     const snapshots = snapshotRef.current;
     const all = sourcesRef.current;
     const currentKind = kind;
+    const translate = tRef.current;
     const mergedPool: ScopeConversation[] = [];
     const errors: string[] = [];
     /** 是否有在线来源参与读取：有则 mergedPool 为权威（空列表也覆盖旧快照）。 */
@@ -331,7 +337,7 @@ export function useScopeConversations(
           if (currentKind && item.scope.scope.kind !== currentKind) continue;
           snapPool.push({
             ...item,
-            title: conversationTitle(item.scope.scope, bots),
+            title: conversationTitle(item.scope.scope, bots, translate),
           });
         }
       }
@@ -377,7 +383,7 @@ export function useScopeConversations(
                 }
               }
             }
-            const produced = buildItems(source, snap);
+            const produced = buildItems(source, snap, translate);
             // 成功结果即权威（含空列表），快照替换，不回退旧快照。
             snapshots.set(acc, { items: produced, history: snap.history });
             mergedPool.push(...produced);
@@ -395,7 +401,7 @@ export function useScopeConversations(
                 if (currentKind && item.scope.scope.kind !== currentKind) continue;
                 mergedPool.push({
                   ...item,
-                  title: conversationTitle(item.scope.scope, bots),
+                  title: conversationTitle(item.scope.scope, bots, translate),
                 });
               }
             }
@@ -452,7 +458,7 @@ export function useScopeConversations(
             if (currentKind && item.scope.scope.kind !== currentKind) continue;
             mergedPool.push({
               ...item,
-              title: conversationTitle(item.scope.scope, bots),
+              title: conversationTitle(item.scope.scope, bots, translate),
             });
           }
         }

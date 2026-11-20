@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Lock, Pin } from 'lucide-react';
 import type { Installation, InstallationSkillFilesResponse } from '../../../center-contract/index.js';
 import type { DesktopIdentity, DesktopPanelApi } from '../../../desktop/web/src/types';
 import type { BotSkillReviewInput } from '../../../host-core/index.js';
 import { centerAdminRequest } from '../bot-settings/centerAdminBroker';
+import { ConfirmDialog } from '../components/ui/dialog';
 import { useText } from '../ui';
 import './SkillReviewPanel.css';
 
@@ -107,7 +109,7 @@ function sourceTitle(source: LearningSource | null | undefined, t: Translate) {
 
 function stateLabel(state: string, t: Translate) {
   switch (state) {
-    case 'stale': return t('待观察', 'Stale');
+    case 'stale': return t('待复审', 'Needs review');
     case 'archived': return t('已归档', 'Archived');
     default: return t('生效中', 'Active');
   }
@@ -116,7 +118,7 @@ function stateLabel(state: string, t: Translate) {
 function scopeLabel(scope: string | undefined, t: Translate) {
   switch (scope) {
     case 'global': return t('全局可用', 'Global');
-    case 'assigned': return t('指定共享', 'Shared');
+    case 'assigned': return t('指定 Bot', 'Assigned Bots');
     default: return t('仅本 Bot', 'Private');
   }
 }
@@ -188,6 +190,7 @@ function LearnedSkillsSession({
   const [notice, setNotice] = useState<string | null>(null);
   const [failure, setFailure] = useState<{ error: unknown } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState<LearnedSkillDetail | null>(null);
   const sequence = useRef(0);
   const callRef = useRef(call);
   callRef.current = call;
@@ -209,6 +212,7 @@ function LearnedSkillsSession({
   }, []);
 
   const loadList = useCallback(() => {
+    setConfirmArchive(null);
     setDetail(null);
     setNotice(null);
     run(async () => {
@@ -244,6 +248,7 @@ function LearnedSkillsSession({
   }
 
   function openSkill(skill: LearnedSkillSummary) {
+    setConfirmArchive(null);
     setNotice(null);
     setEditing(false);
     run(async () => {
@@ -423,7 +428,7 @@ function LearnedSkillsSession({
             {([
               ['all', `${t('全部', 'All')} (${counts.all})`],
               ['active', `${t('生效中', 'Active')} (${counts.active})`],
-              ['stale', `${t('待观察', 'Stale')} (${counts.stale})`],
+              ['stale', `${t('待复审', 'Needs review')} (${counts.stale})`],
               ['archived', `${t('已归档', 'Archived')} (${counts.archived})`],
             ] as const).map(([key, label]) => (
               <button
@@ -452,20 +457,20 @@ function LearnedSkillsSession({
               {filteredItems.map(item => (
                 <li key={item.skillId}>
                   <button type="button" className="skill-review-card" disabled={busy} onClick={() => openSkill(item)}>
-                    <div className="skill-review-card-top">
+                    <span className="skill-review-card-top">
                       <strong>{item.name}</strong>
-                      <div className="skill-review-badges">
+                      <span className="skill-review-badges">
                         <span className={`skill-badge is-${item.state}`}>{stateLabel(item.state, t)}</span>
                         <span className="skill-badge">{scopeLabel(item.visibilityScope, t)}</span>
-                        {item.pinned ? <span className="skill-badge is-accent">📌 Pin</span> : null}
-                        {item.locked ? <span className="skill-badge">🔒 Lock</span> : null}
-                      </div>
-                    </div>
-                    {item.description ? <p className="skill-review-desc">{item.description}</p> : null}
-                    <div className="skill-review-card-meta">
+                        {item.pinned ? <span className="skill-badge is-accent"><Pin size={12} aria-hidden="true" />{t('已固定', 'Pinned')}</span> : null}
+                        {item.locked ? <span className="skill-badge"><Lock size={12} aria-hidden="true" />{t('已锁定', 'Locked')}</span> : null}
+                      </span>
+                    </span>
+                    {item.description ? <span className="skill-review-desc">{item.description}</span> : null}
+                    <span className="skill-review-card-meta">
                       <span>{sourceTitle(item.source, t)}</span>
                       <span>{t(`使用 ${item.useCount ?? 0} 次`, `${item.useCount ?? 0} uses`)}</span>
-                    </div>
+                    </span>
                   </button>
                 </li>
               ))}
@@ -538,7 +543,10 @@ function LearnedSkillsSession({
               type="button"
               className={detail.state === 'archived' ? 'skill-review-primary' : ''}
               disabled={busy}
-              onClick={() => toggleArchive(detail)}
+              onClick={() => {
+                if (detail.state === 'archived') toggleArchive(detail);
+                else setConfirmArchive(detail);
+              }}
             >
               {detail.state === 'archived' ? t('恢复启用', 'Restore') : t('归档停用', 'Archive')}
             </button>
@@ -546,11 +554,12 @@ function LearnedSkillsSession({
 
           <div className="skill-review-file">
             {filePaths.length > 1 ? (
-              <div className="skill-review-filters">
+              <div className="skill-review-filters" role="group" aria-label={t('技能文件', 'Skill files')}>
                 {filePaths.map(fp => (
                   <button
                     key={fp}
                     type="button"
+                    aria-pressed={selectedFile === fp}
                     className={selectedFile === fp ? 'is-active' : ''}
                     onClick={() => setSelectedFile(fp)}
                   >
@@ -564,6 +573,7 @@ function LearnedSkillsSession({
               {editing ? (
                 <textarea
                   className="skill-review-editor-textarea"
+                  aria-label={t(`编辑文件 ${selectedFile}`, `Edit file ${selectedFile}`)}
                   value={draftFiles[selectedFile] ?? ''}
                   onChange={e => {
                     const value = e.target.value;
@@ -577,6 +587,18 @@ function LearnedSkillsSession({
           </div>
         </>
       )}
+      <ConfirmDialog
+        open={confirmArchive !== null}
+        title={t('归档技能？', 'Archive skill?')}
+        description={confirmArchive ? t(`归档「${confirmArchive.name}」将从本 Bot 停用并取消共享，后续可随时在此恢复。确认归档吗？`, `Archiving "${confirmArchive.name}" disables it on this Bot and removes sharing. You can restore it here anytime. Continue?`) : ''}
+        danger
+        onCancel={() => setConfirmArchive(null)}
+        onConfirm={() => {
+          const target = confirmArchive;
+          setConfirmArchive(null);
+          if (target) toggleArchive(target);
+        }}
+      />
     </section>
   );
 }

@@ -15,7 +15,7 @@
 .bs-skills-topbar-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2, 8px);
   flex-wrap: wrap;
 }
 
@@ -26,19 +26,38 @@
 }
 
 .bs-skills-learning-meta {
-  padding: 0 14px 12px;
-  font-size: .78rem;
-  color: var(--muted);
+  padding: 0 14px var(--space-3, 12px);
+  font-size: var(--text-xs, .78rem);
+  color: var(--color-text-muted, var(--muted));
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 14px;
+  gap: var(--space-2, 8px) 14px;
 }
 
 .bs-skills-adv-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 10px;
-  padding: 12px 14px;
+  padding: var(--space-3, 12px) 14px;
+}
+
+.bs-skills-adv-footer {
+  padding: 0 14px var(--space-3, 12px);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.bs-skills-consolidate-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  min-height: var(--tap-min, 44px);
+  font-size: var(--text-sm, .84rem);
+  color: var(--color-text, var(--text));
+  cursor: pointer;
 }
 
 .bs-skills-field {
@@ -49,9 +68,9 @@
 
 .bs-skills-field label,
 .bs-skills-label {
-  font-size: .78rem;
-  font-weight: 550;
-  color: var(--muted);
+  font-size: var(--text-xs, .78rem);
+  font-weight: var(--weight-medium, 550);
+  color: var(--color-text-muted, var(--muted));
 }
 
 .bs-skills-toolbar {
@@ -59,36 +78,73 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2, 8px);
+}
+
+.bs-skills-toolbar-search {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+
+.bs-skills-prefix-select {
+  width: 140px;
+  flex: none;
+}
+
+.bs-skills-filename-input {
+  flex: 1 1 160px;
+  min-width: 0;
 }
 
 .bs-skills-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2, 8px);
 }
 
 .bs-skills-item {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 14px;
+  align-items: stretch;
+  gap: 0;
+  min-height: 52px;
+  padding: 0;
   border-radius: var(--bs-radius);
   background: var(--bs-card);
-  cursor: pointer;
-  transition: background 140ms ease;
-}
-
-.bs-skills-item:hover {
-  background: color-mix(in srgb, var(--bs-card) 82%, var(--text) 6%);
 }
 
 .bs-skills-item-main {
   flex: 1;
   min-width: 0;
+  min-height: 52px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  justify-content: center;
+  gap: var(--space-1, 4px);
+  padding: var(--space-3, 12px) var(--space-3, 12px) var(--space-3, 12px) 14px;
+  border: 0;
+  border-radius: var(--bs-radius) 0 0 var(--bs-radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background var(--dur-fast, 140ms) ease;
+}
+
+@media (hover: hover) {
+  .bs-skills-item-main:hover {
+    background: color-mix(in srgb, var(--bs-card) 82%, var(--color-text, var(--text)) 6%);
+  }
+}
+
+.bs-skills-item-main:active {
+  background: color-mix(in srgb, var(--bs-card) 78%, var(--color-text, var(--text)) 9%);
+}
+
+.bs-skills-item-main:focus-visible {
+  outline: 2px solid var(--bs-accent);
+  outline-offset: -2px;
 }
 
 .bs-skills-item-title-row {
@@ -99,16 +155,16 @@
 }
 
 .bs-skills-item-title {
-  font-size: .94rem;
-  font-weight: 600;
-  color: var(--text);
+  font-size: var(--text-md, .94rem);
+  font-weight: var(--weight-semibold, 600);
+  color: var(--color-text, var(--text));
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .bs-skills-item-desc {
-  font-size: .8rem;
-  color: var(--muted);
+  font-size: var(--text-xs, .8rem);
+  color: var(--color-text-muted, var(--muted));
   line-height: 1.45;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -119,14 +175,15 @@
 .bs-skills-item-side {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2, 8px);
   flex-shrink: 0;
+  padding: var(--space-2, 8px) 14px var(--space-2, 8px) 0;
 }
 
 .bs-skills-detail {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3, 12px);
 }
 
 .bs-skills-detail-head {
@@ -134,25 +191,25 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2, 8px);
 }
 
 .bs-skills-detail-title {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
-  font-size: 1rem;
-  font-weight: 650;
-  color: var(--text);
+  gap: var(--space-2, 8px);
+  font-size: var(--text-base, 1rem);
+  font-weight: var(--weight-semibold, 650);
+  color: var(--color-text, var(--text));
 }
 
 .bs-skills-shared-banner {
-  padding: 10px 12px;
-  border-radius: 12px;
+  padding: 10px var(--space-3, 12px);
+  border-radius: var(--radius-md, 12px);
   background: color-mix(in srgb, var(--bs-accent) 10%, var(--bs-card));
-  color: var(--text);
-  font-size: .82rem;
+  color: var(--color-text, var(--text));
+  font-size: var(--text-sm, .82rem);
   line-height: 1.45;
 }
 
@@ -171,7 +228,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2, 8px);
 }
 
 .bs-skills-files-bar {
@@ -182,27 +239,57 @@
 }
 
 .bs-skills-file-tab {
-  min-height: 30px;
+  position: relative;
+  min-height: 32px;
   padding: 0 11px;
-  border-radius: 999px;
-  font-size: .8rem;
-  font-weight: 550;
-  color: var(--muted);
+  border: 0;
+  border-radius: var(--radius-full, 999px);
+  font-size: var(--text-xs, .8rem);
+  font-weight: var(--weight-medium, 550);
+  color: var(--color-text-muted, var(--muted));
   background: var(--bs-card);
   cursor: pointer;
+  touch-action: manipulation;
+  transition: background-color var(--dur-fast, 150ms) ease, color var(--dur-fast, 150ms) ease;
+}
+
+.bs-skills-file-tab::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: max(100%, var(--tap-min, 44px));
+  height: max(100%, var(--tap-min, 44px));
+}
+
+@media (hover: hover) {
+  .bs-skills-file-tab:hover:not(.is-active) {
+    color: var(--color-text, var(--text));
+    background: var(--color-surface-3, var(--line));
+  }
+}
+
+.bs-skills-file-tab:active {
+  opacity: .84;
+}
+
+.bs-skills-file-tab:focus-visible {
+  outline: 2px solid var(--bs-accent);
+  outline-offset: 2px;
 }
 
 .bs-skills-file-tab.is-active {
-  background: var(--text);
-  color: var(--bg);
+  background: var(--color-text, var(--text));
+  color: var(--color-bg, var(--bg));
 }
 
 .bs-skills-code-view {
   margin: 0;
-  padding: 12px 14px;
-  border-radius: 12px;
+  padding: var(--space-3, 12px) 14px;
+  border-radius: var(--radius-md, 12px);
   background: var(--bs-card);
-  color: var(--text);
+  color: var(--color-text, var(--text));
   font: .81rem/1.55 ui-monospace, Consolas, monospace;
   white-space: pre-wrap;
   word-break: break-word;
@@ -219,7 +306,7 @@
 .bs-skills-form {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3, 12px);
   padding: 14px;
   border-radius: var(--bs-radius);
   background: var(--bs-card);
@@ -230,13 +317,24 @@
   flex-direction: column;
   gap: 6px;
   padding: 10px;
-  border-radius: 12px;
-  background: var(--bg);
+  border-radius: var(--radius-md, 12px);
+  background: var(--color-bg, var(--bg));
 }
 
 .bs-skills-extra-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2, 8px);
+}
+
+@media (max-width: 600px) {
+  .bs-skills-adv-grid {
+    grid-template-columns: 1fr;
+  }
+  .bs-skills-prefix-select,
+  .bs-skills-filename-input {
+    width: 100%;
+    flex: 1 1 100%;
+  }
 }

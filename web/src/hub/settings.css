@@ -3,14 +3,14 @@
 /* bs- primitives（bot-settings/primitives.tsx）的 --bs-* 变量只在 .bs-backdrop
    内定义；设置页不在 Sheet 里，这里补一份同名变量。 */
 .hst-settings {
-  --bs-accent: #2b70f6;
+  --bs-accent: var(--color-primary, var(--brand));
   --bs-card: color-mix(in srgb, var(--surface) 62%, var(--bg));
   --bs-hairline: color-mix(in srgb, var(--line) 80%, transparent);
   --bs-radius: 16px;
 }
-:root[data-theme=dark] .hst-settings { --bs-accent: #5b93ff; --bs-card: var(--surface); }
+:root[data-theme=dark] .hst-settings { --bs-card: var(--surface); }
 @media (prefers-color-scheme: dark) {
-  :root[data-theme=system] .hst-settings { --bs-accent: #5b93ff; --bs-card: var(--surface); }
+  :root[data-theme=system] .hst-settings { --bs-card: var(--surface); }
 }
 
 .hst-settings .hst-overview:not([hidden]) { display: contents; }
@@ -28,47 +28,60 @@
 .bs-card :is(.bs-row, .is-split, .hst-input-row, .hst-actions, .hst-device-row, .hst-row-static) + :is(.bs-row, .is-split, .hst-input-row, .hst-actions, .hst-device-row, .hst-row-static)::before {
   content: ''; position: absolute; top: 0; left: 14px; right: 0; height: 1px; background: var(--bs-hairline);
 }
-.hst-input-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 10px 14px; }
-.hst-input-label { flex: none; width: 88px; font-size: .86rem; color: var(--muted); }
-.hst-input { flex: 1; min-width: 0; min-height: 36px; padding: 0; border: 0; background: transparent; color: var(--text); font-size: .92rem; text-align: right; }
+.hst-input-row { display: flex; align-items: center; gap: var(--space-3); width: 100%; min-height: 52px; padding: 10px 14px; }
+.hst-input-label { flex: none; width: 88px; font-size: var(--text-sm); color: var(--color-text-muted); }
+.hst-input { flex: 1; min-width: 0; min-height: 36px; padding: 0; border: 0; background: transparent; color: var(--color-text); font-size: var(--text-md); text-align: right; }
 .hst-input:focus { outline: none; }
-.hst-input::placeholder { color: color-mix(in srgb, var(--muted) 65%, transparent); }
+.hst-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-radius: var(--radius-sm); }
+.hst-input::placeholder { color: color-mix(in srgb, var(--color-text-muted) 65%, transparent); }
 
-.hst-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; min-height: 52px; padding: 8px 14px; }
-.hst-btn { min-height: 36px; padding: 0 16px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-size: .86rem; font-weight: 600; white-space: nowrap; color: var(--text); background: color-mix(in srgb, var(--text) 7%, transparent); }
+.hst-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-2); min-height: 52px; padding: var(--space-2) 14px; }
+.hst-btn { position: relative; min-height: 36px; padding: 0 var(--space-4); border-radius: var(--radius-full); display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-size: var(--text-sm); font-weight: var(--weight-semibold); white-space: nowrap; color: var(--color-text); background: color-mix(in srgb, var(--color-text) 7%, transparent); }
+.hst-btn::before { content: ''; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: max(100%, var(--tap-min)); height: max(100%, var(--tap-min)); }
+@media (hover: hover) {
+  .hst-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--color-text) 12%, transparent); }
+  .hst-btn.is-primary:hover:not(:disabled) { opacity: .9; }
+}
 .hst-btn:active:not(:disabled) { transform: scale(.97); }
+.hst-btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 .hst-btn:disabled { opacity: .35; }
-.hst-btn.is-primary { background: var(--text); color: var(--bg); }
-.hst-btn.is-ghost { background: transparent; color: var(--muted); padding: 0 10px; }
-.hst-btn.is-danger { background: transparent; color: var(--danger); }
+.hst-btn.is-primary { background: var(--color-text); color: var(--color-bg); }
+.hst-btn.is-ghost { background: transparent; color: var(--color-text-muted); padding: 0 10px; }
+.hst-btn.is-danger { background: transparent; color: var(--color-danger); }
 
-.hst-select-wrap { position: relative; flex: none; display: inline-flex; align-items: center; color: var(--muted); }
+.hst-select-wrap { position: relative; flex: none; display: inline-flex; align-items: center; color: var(--color-text-muted); }
 .hst-select-wrap.is-end { margin-left: auto; }
-.hst-select-wrap select { min-height: 36px; padding: 0 26px 0 12px; border: 0; border-radius: 10px; background: color-mix(in srgb, var(--text) 7%, transparent); color: var(--text); font-size: .88rem; -webkit-appearance: none; appearance: none; }
+.hst-select-wrap select { min-height: 36px; padding: 0 26px 0 var(--space-3); border: 0; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--color-text) 7%, transparent); color: var(--color-text); font-size: var(--text-sm); -webkit-appearance: none; appearance: none; }
 .hst-select-wrap select:focus { outline: none; }
+.hst-select-wrap select:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+@media (pointer: coarse) {
+  .hst-select-wrap select { min-height: var(--tap-min); }
+}
 .hst-select-wrap > svg { position: absolute; right: 7px; pointer-events: none; }
 
 /* 设备目录行（徽标 + 名称 + 状态 + 改名） */
-.hst-device-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 52px; padding: 8px 14px; }
-.hst-device-badge { width: 30px; height: 30px; flex: none; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); background: color-mix(in srgb, var(--text) 6%, transparent); }
+.hst-device-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 52px; padding: var(--space-2) 14px; }
+.hst-device-badge { width: 30px; height: 30px; flex: none; border-radius: var(--radius-sm); display: inline-flex; align-items: center; justify-content: center; color: var(--color-text-muted); background: color-mix(in srgb, var(--color-text) 6%, transparent); }
 .hst-device-badge.is-offline { opacity: .45; }
-.hst-device-name { flex: 1; min-width: 0; font-size: .92rem; font-weight: 500; overflow-wrap: anywhere; }
-.hst-device-name-input { flex: 1; min-width: 0; min-height: 36px; padding: 0 10px; border: 0; border-radius: 10px; background: color-mix(in srgb, var(--text) 7%, transparent); color: var(--text); font-size: .9rem; }
+.hst-device-name { flex: 1; min-width: 0; font-size: var(--text-md); font-weight: var(--weight-medium); overflow-wrap: anywhere; }
+.hst-device-name-input { flex: 1; min-width: 0; min-height: 36px; padding: 0 10px; border: 0; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--color-text) 7%, transparent); color: var(--color-text); font-size: var(--text-md); }
 .hst-device-name-input:focus { outline: none; }
+.hst-device-name-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
 /* 静态行（不可点，同 bs-row 外观） */
-.hst-row-static { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 10px 14px; color: var(--text); }
+.hst-row-static { display: flex; align-items: center; gap: var(--space-3); width: 100%; min-height: 52px; padding: 10px 14px; color: var(--color-text); }
 
 /* textarea 在 Disclosure 内 */
-.hst-textarea { width: 100%; min-height: 140px; padding: 10px 12px; border: 0; border-radius: 11px; background: var(--bg); color: var(--text); font: .82rem/1.5 ui-monospace, Consolas, monospace; resize: vertical; }
+.hst-textarea { width: 100%; min-height: 140px; padding: 10px var(--space-3); border: 0; border-radius: var(--radius-md); background: var(--color-bg); color: var(--color-text); font: var(--text-sm)/1.5 ui-monospace, Consolas, monospace; resize: vertical; }
 .hst-textarea:focus { outline: none; }
+.hst-textarea:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 
 .hst-form { display: flex; flex-direction: column; gap: 10px; }
 .hst-form .bs-card { border-radius: var(--bs-radius); background: var(--bs-card); overflow: hidden; display: flex; flex-direction: column; }
 
 /* 顶部返回按钮占位 */
-.hst-topbar-spacer { width: 44px; flex: none; }
+.hst-topbar-spacer { width: var(--tap-min); flex: none; }
 
 /* 底部危险按钮 */
-.hst-exit { margin-top: 8px; }
-.hst-exit .hst-btn { width: 100%; min-height: 44px; }
+.hst-exit { margin-top: var(--space-2); }
+.hst-exit .hst-btn { width: 100%; min-height: var(--tap-min); }

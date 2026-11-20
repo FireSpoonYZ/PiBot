@@ -8,23 +8,29 @@
   background: transparent;
   outline: none;
   text-align: center;
-  color: var(--text);
+  color: var(--color-text);
+}
+.grok-profile-title-input:focus-visible,
+.grok-profile-subtitle-input:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
 }
 .grok-profile-title-input {
-  font-size: 1.42rem;
-  font-weight: 700;
+  font-size: var(--text-xl);
+  font-weight: var(--weight-bold);
 }
 .grok-profile-title-input::placeholder,
 .grok-profile-subtitle-input::placeholder {
-  color: color-mix(in srgb, var(--muted) 55%, transparent);
-  font-weight: 400;
+  color: color-mix(in srgb, var(--color-text-muted) 55%, transparent);
+  font-weight: var(--weight-regular);
 }
 .grok-profile-subtitle-input {
-  font-size: 0.9rem;
-  color: var(--muted);
+  font-size: var(--text-md);
+  color: var(--color-text-muted);
 }
 .grok-profile-subtitle-input::placeholder {
-  font-size: 0.85rem;
+  font-size: var(--text-sm);
 }
 
 /* bot-profile: inline cwd error/hints inside the card. */
