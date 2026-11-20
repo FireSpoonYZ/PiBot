@@ -2270,3 +2270,273 @@ a.ca-btn:focus {
     height: max(100%, var(--tap-min, 44px));
   }
 }
+
+/* Google Workspace Tab */
+@keyframes ca-spin-keyframes {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.ca-spin {
+  animation: ca-spin-keyframes 1s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ca-spin {
+    animation: none;
+  }
+}
+
+.ca-google-subbar {
+  padding: 10px 16px 12px;
+  border-top: 1px solid var(--ca-border);
+  background: var(--ca-surface-2);
+}
+
+.ca-google-redirect-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+}
+
+.ca-google-uri {
+  flex: 1;
+  min-width: 180px;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  color: var(--ca-text);
+}
+
+.ca-google-empty-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.ca-google-account {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--ca-border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ca-google-account:last-child {
+  border-bottom: none;
+}
+
+.ca-google-account-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ca-google-account-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 12px;
+  border-radius: var(--ca-radius-sm);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.ca-google-account-alert.is-danger {
+  background: var(--ca-danger-bg);
+  color: var(--ca-danger);
+}
+
+.ca-google-account-alert.is-warn {
+  background: var(--ca-warn-bg);
+  color: var(--ca-warn);
+}
+
+.ca-google-services {
+  border: 1px solid var(--ca-border);
+  border-radius: var(--ca-radius-sm);
+  background: var(--ca-surface-2);
+  overflow: hidden;
+}
+
+.ca-google-service-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--ca-border);
+}
+
+.ca-google-service-row:last-child {
+  border-bottom: none;
+}
+
+.ca-google-service-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.ca-google-service-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ca-text);
+}
+
+.ca-google-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ca-google-choice {
+  appearance: none;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: var(--ca-text);
+  background: var(--ca-surface);
+  border: 1px solid var(--ca-border-strong);
+  border-radius: var(--ca-radius-sm);
+  padding: 11px 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background var(--dur-fast, 150ms) var(--ease-out, ease),
+    border-color var(--dur-fast, 150ms) var(--ease-out, ease);
+}
+
+@media (hover: hover) {
+  .ca-google-choice:hover:not(:disabled) {
+    background: var(--ca-surface-2);
+  }
+}
+
+.ca-google-choice:focus-visible {
+  outline: 2px solid var(--ca-accent);
+  outline-offset: 2px;
+}
+
+.ca-google-choice.is-selected {
+  border-color: var(--ca-accent);
+  background: var(--ca-info-bg);
+}
+
+.ca-google-choice.is-locked {
+  cursor: default;
+  opacity: 0.88;
+}
+
+.ca-google-checkbox {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  border-radius: 5px;
+  border: 1.5px solid var(--ca-border-strong);
+  background: var(--ca-surface);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--ca-accent-fg);
+}
+
+.ca-google-checkbox.is-checked {
+  background: var(--ca-accent);
+  border-color: var(--ca-accent);
+}
+
+.ca-google-choice-text {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.ca-google-base-scope {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: var(--ca-radius-sm);
+  border: 1px dashed var(--ca-border-strong);
+  background: var(--ca-surface-2);
+  color: var(--ca-text-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.ca-google-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ca-google-radio-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--ca-radius-sm);
+  border: 1px solid var(--ca-border-strong);
+  background: var(--ca-surface);
+  cursor: pointer;
+}
+
+.ca-google-radio-card input[type='radio'] {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+
+.ca-google-radio-card.is-selected {
+  border-color: var(--ca-accent);
+  background: var(--ca-surface-2);
+}
+
+.ca-google-impact-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  color: var(--ca-text);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ca-google-steps {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ca-text);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ca-google-filter-select {
+  width: auto;
+  min-width: 140px;
+  max-width: 220px;
+  padding: 4px 8px;
+  font-size: 12.5px;
+}
+
+@media (max-width: 640px) {
+  .ca-google-subbar,
+  .ca-google-account {
+    padding: 12px;
+  }
+
+  .ca-google-filter-select {
+    flex: 1;
+    max-width: none;
+  }
+}
