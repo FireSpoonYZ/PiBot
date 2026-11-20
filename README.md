@@ -155,6 +155,7 @@ $serial = '<已授权设备序列号>'
 | **桌面客户端** | [desktop/README.md](desktop/README.md) | Windows / Linux / macOS 客户端架构、服务生命周期、数据目录与自动更新 |
 | **Android 客户端** | [mobile/README.md](mobile/README.md) | Android 双进程架构、原生桥、远端设备控制、语音与构建细节 |
 | **Bot 管理与自学习** | [docs/bot-management-learning.md](docs/bot-management-learning.md) | 模型分配、受管 Skill / MCP / 插件与后台学习 |
+| **Google Workspace 与 Bot 浏览器** | [docs/google-workspace-browser.md](docs/google-workspace-browser.md) | Center 共享授权、Google 自动规则、同页接管与敏感步骤 |
 | **Webhook 自动任务** | [docs/webhooks.md](docs/webhooks.md) | Bearer 入口创建、幂等键要求、n8n / curl 触发示例与事件生命周期 |
 | **Shower 虚拟屏** | [docs/shower-cross-platform.md](docs/shower-cross-platform.md) | Windows / Linux / Android 跨平台虚拟屏原理与权限配置 |
 | **发布与版本管理** | [docs/releasing.md](docs/releasing.md) | 版本校验、签名配置、CI 发布流水线与中心客户端分发元数据 |
