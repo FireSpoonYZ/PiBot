@@ -173,7 +173,7 @@ function assertConfigCredentials(schema, value) {
 }
 
 
-export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault, google, createOperations, listReleases }) {
+export function registerRoutes(app, { store, packages, bridge, execution, oauth, linkUrl, turns, skills, learning, botManagement, catalog, providerAuth, antigravity, publicUrl, vault, google, createOperations, listReleases, setReleasePublished }) {
   const streams = new Map();
   function notify(deviceId, event = 'config-changed') {
     for (const stream of streams.get(deviceId) || []) {
@@ -197,7 +197,10 @@ export function registerRoutes(app, { store, packages, bridge, execution, oauth,
   const owner = [requireOwner];
   const mutation = [requireOwner, csrfUnlessOAuth];
   const ownerActions = createOperations ? new Map() : null;
-  if (listReleases) ownerActions?.set('GET /api/client-releases', listReleases);
+  if (ownerActions) {
+    if (listReleases) retainOwnerAction(ownerActions, 'GET', '/api/client-releases', listReleases);
+    if (setReleasePublished) retainOwnerAction(ownerActions, 'POST', '/api/client-releases/:id/publish', setReleasePublished);
+  }
   const route = (method, path, handler, write = false, bodyLimit) => {
     if (ownerActions) retainOwnerAction(ownerActions, method, path, handler);
     return app.route({ method, url: path, onRequest: write ? mutation : owner, handler, ...(bodyLimit !== undefined ? { bodyLimit } : {}) });

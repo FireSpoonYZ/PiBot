@@ -4,6 +4,7 @@ const reusableActions = new Set([
   'GET /api/devices',
   'GET /api/bot-sync',
   'GET /api/client-releases',
+  'POST /api/client-releases/:id/publish',
   'PATCH /api/devices/:deviceId',
   'GET /api/devices/:deviceId/runtime-status',
   'GET /api/devices/:deviceId/bots',

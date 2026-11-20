@@ -5,9 +5,13 @@ import { createHandlers as capabilities } from './capabilities.js';
 import { createHandlers as collaboration } from './collaboration.js';
 import { createHandlers as automation } from './automation.js';
 import { createHandlers as center } from './center-admin.js';
+import { createHandlers as observability } from './observability.js';
 import { createHandlers as messages } from './dispatch.js';
 
-const createGroups = { bots, capabilities, collaboration, automation, center, messages };
+const createGroups = {
+  bots, capabilities, collaboration, automation, messages,
+  center: deps => ({ ...center(deps), ...observability(deps) }),
+};
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 
 export function openOperations(deps) {
