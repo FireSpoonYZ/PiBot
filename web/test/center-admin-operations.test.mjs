@@ -202,15 +202,27 @@ test('provider reads, updates, validate, discover, and model management block up
     }
     if (method === 'POST' && route === '/api/providers/:id/validate') {
       assert.deepEqual(opts.body, {});
+      if (opts.params.id === 'leaky-fail') {
+        return { ok: false, message: 'Failed connecting to https://secret-upstream.internal with Bearer sk-secret-123' };
+      }
+      if (opts.params.id === 'leaky-throw') {
+        throw Object.assign(new Error('Upstream https://secret-upstream.internal rejected Bearer sk-secret-123'), { code: 'INVALID_ARGUMENT' });
+      }
+      if (opts.params.id === 'antigravity') {
+        return { ok: true, message: 'gemini-2.5-pro' };
+      }
       return { ok: true, message: 'gpt-custom', rawConfig: 'must-strip' };
     }
     if (method === 'POST' && route === '/api/providers/:id/discover') {
       assert.deepEqual(opts.body, {});
+      if (opts.params.id === 'leaky-throw') {
+        throw Object.assign(new Error('Upstream https://secret-upstream.internal rejected Bearer sk-secret-123'), { code: 'INVALID_ARGUMENT' });
+      }
       return {
         models: [
           {
-            id: 'discovered-1',
-            name: 'Discovered 1',
+            id: opts.params.id === 'antigravity' ? 'gemini-2.5-pro' : 'discovered-1',
+            name: opts.params.id === 'antigravity' ? 'Gemini 2.5 Pro' : 'Discovered 1',
             baseUrl: 'https://secret.internal',
             headers: { Authorization: 'Bearer nope' },
             contextWindow: 64000,
@@ -288,6 +300,25 @@ test('provider reads, updates, validate, discover, and model management block up
 
   const validated = await handlers.center_validate_provider({ providerId: 'custom-ai' }, BOT_ACTOR);
   assert.deepEqual(validated, { ok: true, message: 'gpt-custom' });
+  const leakyValidated = await handlers.center_validate_provider({ providerId: 'leaky-fail' }, BOT_ACTOR);
+  assert.deepEqual(leakyValidated, { ok: false, message: 'Provider validation failed' });
+  await assert.rejects(
+    () => handlers.center_validate_provider({ providerId: 'leaky-throw' }, BOT_ACTOR),
+    (err) => err?.code === 'INVALID_ARGUMENT' && err.message === 'Provider validation failed',
+  );
+  await assert.rejects(
+    () => handlers.center_discover_provider_models({ providerId: 'leaky-throw' }, BOT_ACTOR),
+    (err) => err?.code === 'INVALID_ARGUMENT' && err.message === 'Provider model discovery failed',
+  );
+  // Antigravity directly reuses owner auth-status, validate, and discover routes.
+  const agyAuth = await handlers.center_get_provider_auth_status({ providerId: 'antigravity' }, BOT_ACTOR);
+  assert.equal(agyAuth.statuses[0].providerId, 'antigravity');
+  assert.equal(agyAuth.statuses[0].method, 'oauth');
+  const agyValidated = await handlers.center_validate_provider({ providerId: 'antigravity' }, BOT_ACTOR);
+  assert.deepEqual(agyValidated, { ok: true, message: 'gemini-2.5-pro' });
+  const agyDiscovered = await handlers.center_discover_provider_models({ providerId: 'antigravity' }, BOT_ACTOR);
+  assert.equal(agyDiscovered.providerId, 'antigravity');
+  assert.equal(agyDiscovered.models[0].id, 'gemini-2.5-pro');
   await assert.rejects(
     () => handlers.center_validate_provider({ providerId: 'custom-ai', deviceId: 'dev-1' }, BOT_ACTOR),
     { code: 'INVALID_ARGUMENT' },
@@ -660,7 +691,8 @@ test('production invokeOwnerAction + real openCenterStore: non-reusable routes u
       createdAt: '2026-11-20T00:00:00.000Z',
     });
 
-    // Register ONLY routes allowed by owner-actions.js; PUT model enforces routes.js minLength:1 for baseUrl/api.
+    // Register routes allowed by integration owner-actions.js; PUT model enforces routes.js minLength:1 for baseUrl/api.
+    const routeCalls = [];
     const actions = new Map([
       ['GET /api/devices', () => [
         { deviceId: 'center-internal', name: 'Center', platform: 'linux', online: true },
@@ -671,6 +703,72 @@ test('production invokeOwnerAction + real openCenterStore: non-reusable routes u
         const provider = store.getProvider(req.params.id);
         if (!provider) throw Object.assign(new Error('Provider not found'), { code: 'NOT_FOUND' });
         return provider;
+      }],
+      ['GET /api/provider-auth-status', () => {
+        routeCalls.push('GET /api/provider-auth-status');
+        return {
+          antigravity: {
+            providerId: 'antigravity',
+            method: 'oauth',
+            oauth: true,
+            apiKey: false,
+            label: '登录 Antigravity',
+            subscription: true,
+          },
+          openai: {
+            providerId: 'openai',
+            method: 'api_key',
+            oauth: false,
+            apiKey: true,
+            label: 'OpenAI',
+            subscription: false,
+          },
+        };
+      }],
+      ['GET /api/providers/:id/auth-status', (req) => {
+        routeCalls.push(`GET /api/providers/${req.params.id}/auth-status`);
+        if (req.params.id === 'antigravity') {
+          return {
+            providerId: 'antigravity',
+            method: 'oauth',
+            oauth: true,
+            apiKey: false,
+            label: '登录 Antigravity',
+            subscription: true,
+          };
+        }
+        return {
+          providerId: req.params.id,
+          method: 'api_key',
+          oauth: false,
+          apiKey: true,
+          label: 'OpenAI',
+          subscription: false,
+        };
+      }],
+      ['POST /api/providers/:id/validate', (req) => {
+        routeCalls.push(`POST /api/providers/${req.params.id}/validate`);
+        if (req.params.id === 'antigravity') return { ok: true, message: 'gemini-2.5-pro' };
+        return { ok: true, message: 'gpt-5-catalog' };
+      }],
+      ['POST /api/providers/:id/discover', (req) => {
+        routeCalls.push(`POST /api/providers/${req.params.id}/discover`);
+        return {
+          models: [
+            {
+              id: req.params.id === 'antigravity' ? 'gemini-2.5-pro' : 'gpt-5-catalog',
+              name: req.params.id === 'antigravity' ? 'Gemini 2.5 Pro' : 'GPT-5 Catalog',
+              baseUrl: 'https://private-upstream.internal/v1',
+              headers: { Authorization: 'Bearer upstream-secret' },
+              contextWindow: 128000,
+              maxTokens: 8192,
+              input: ['text'],
+              reasoning: true,
+              enabled: true,
+              revision: 0,
+            },
+          ],
+        };
       }],
       ['GET /api/providers/:id/models', (req) => store.listModels(req.params.id, { includeRemoved: req.query?.includeRemoved === '1' })],
       ['PUT /api/providers/:id/models/:modelId', (req) => {
@@ -692,7 +790,6 @@ test('production invokeOwnerAction + real openCenterStore: non-reusable routes u
       bridge: { deviceId: 'center-internal' },
       catalog: {
         async apply() { catalogApplyCount += 1; },
-        async runtime() { return { getProvider: () => ({ auth: { apiKey: true, oauth: null } }) }; },
       },
       notifyAll() { notifyAllCount += 1; },
       publicUrl: 'https://center.example.com',
@@ -705,15 +802,32 @@ test('production invokeOwnerAction + real openCenterStore: non-reusable routes u
       { code: 'NOT_FOUND' },
     );
 
-    // Non-reusable routes work in production via deps.store + deps.catalog + deps.publicUrl.
     const sync = await handlers.center_get_bot_sync({}, OAUTH_ACTOR);
     assert.equal(sync.mode, 'snapshot');
     assert.equal(sync.devices.length, 1);
     assert.equal(sync.devices[0].deviceId, 'dev-1');
     assert.equal(sync.bots.length, 1);
 
+    // auth-status, validate, and discover reuse owner callbacks directly (including Antigravity).
     const auth = await handlers.center_get_provider_auth_status({ providerId: 'openai' }, OAUTH_ACTOR);
     assert.equal(auth.statuses[0].method, 'api_key');
+    const agyAuth = await handlers.center_get_provider_auth_status({ providerId: 'antigravity' }, OAUTH_ACTOR);
+    assert.equal(agyAuth.statuses[0].method, 'oauth');
+    const allAuth = await handlers.center_get_provider_auth_status({}, OAUTH_ACTOR);
+    assert.equal(allAuth.statuses.find((item) => item.providerId === 'antigravity')?.method, 'oauth');
+    const agyValidated = await handlers.center_validate_provider({ providerId: 'antigravity' }, OAUTH_ACTOR);
+    assert.deepEqual(agyValidated, { ok: true, message: 'gemini-2.5-pro' });
+    const agyDiscovered = await handlers.center_discover_provider_models({ providerId: 'antigravity' }, OAUTH_ACTOR);
+    assert.equal(agyDiscovered.models[0].id, 'gemini-2.5-pro');
+    assert.equal(JSON.stringify(agyDiscovered).includes('upstream-secret'), false);
+    assert.equal(JSON.stringify(agyDiscovered).includes('private-upstream.internal'), false);
+    assert.deepEqual(routeCalls, [
+      'GET /api/providers/openai/auth-status',
+      'GET /api/providers/antigravity/auth-status',
+      'GET /api/provider-auth-status',
+      'POST /api/providers/antigravity/validate',
+      'POST /api/providers/antigravity/discover',
+    ]);
 
     const updatedProv = await handlers.center_update_provider(
       { providerId: 'openai', expectedRevision: 0, name: 'OpenAI Prod' },

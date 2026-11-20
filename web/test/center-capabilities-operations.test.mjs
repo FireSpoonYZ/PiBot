@@ -344,6 +344,9 @@ test('capabilities contract descriptors align 1-to-1 with handlers and enforce n
   const destructiveNames = operations.filter((op) => op.destructive).map((op) => op.name).sort();
   assert.deepEqual(destructiveNames, ['capability_installation_uninstall', 'capability_skill_delete']);
   assert.equal(names.includes('capability_installation_update'), false);
+  const toggleOp = operations.find((op) => op.name === 'capability_installation_toggle');
+  assert.deepEqual(toggleOp?.inputSchema?.properties?.action?.enum, ['disable']);
+  assert.equal('validationBot' in (toggleOp?.inputSchema?.properties ?? {}), false);
   assert.deepEqual([...SAFE_CAPABILITY_ACTIONS], ['listTools', 'validate', 'probe']);
 });
 

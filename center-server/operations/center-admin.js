@@ -1,7 +1,3 @@
-import { assertPublicCredentialId } from '../auth.js';
-import { ANTIGRAVITY_PROVIDER_ID } from '../../center-contract/antigravity.js';
-import { discoverCenterProviderModels, validateCenterProvider } from '../../host-core/runtime-models.js';
-
 const fail = (code, message) => {
   throw Object.assign(new Error(message), { code });
 };
@@ -520,65 +516,38 @@ function sanitizeDeploymentReceipt(receipt) {
   };
 }
 
+function sanitizeValidateProviderResult(result) {
+  const ok = Boolean(result?.ok);
+  if (!ok) {
+    return { ok: false, message: 'Provider validation failed' };
+  }
+  const rawMessage = typeof result?.message === 'string' ? result.message.trim() : '';
+  const safeMessage = rawMessage.length > 0
+    && rawMessage.length <= 256
+    && rawMessage.isWellFormed()
+    && !CONTROL_CHAR_RE.test(rawMessage)
+    && !/https?:\/\//i.test(rawMessage)
+    && !/\b(?:bearer|token|secret|password|apikey|api_key|authorization)\b/i.test(rawMessage)
+    ? rawMessage
+    : undefined;
+  return {
+    ok: true,
+    ...(safeMessage !== undefined ? { message: safeMessage } : {}),
+  };
+}
+
+function rethrowSafeProviderProbeError(err, fallbackMessage) {
+  if (err?.code === 'NOT_FOUND') fail('NOT_FOUND', 'Provider not found');
+  if (err?.code === 'FORBIDDEN') fail('FORBIDDEN', 'Provider operation forbidden');
+  if (err?.code === 'INVALID_STATE') fail('INVALID_STATE', 'Provider is not ready');
+  fail('INVALID_ARGUMENT', fallbackMessage);
+}
+
 export function createHandlers(deps) {
   if (!deps || typeof deps.owner !== 'function') {
     throw new TypeError('createHandlers requires deps.owner');
   }
   const { owner, store, bridge, catalog, notifyAll, publicUrl } = deps;
-
-  async function buildStoredProviderProbeInput(providerId) {
-    const stored = store.getProvider(providerId);
-    if (!stored) fail('NOT_FOUND', 'Provider not found');
-    const customBaseUrl = typeof stored.custom?.baseUrl === 'string' && stored.custom.baseUrl.trim()
-      ? stored.custom.baseUrl
-      : stored.baseUrl;
-    const customApi = typeof stored.custom?.api === 'string' && stored.custom.api.trim()
-      ? stored.custom.api
-      : stored.api;
-    const customHeaders = isPlainObject(stored.custom?.headers) ? stored.custom.headers : undefined;
-    const provider = {
-      ...stored,
-      baseUrl: customBaseUrl,
-      api: customApi,
-      ...(customHeaders ? { headers: customHeaders } : {}),
-    };
-    const models = store.listModels(providerId).map(({ source: _source, removed: _removed, ...model }) => model);
-    let credential;
-    const ref = stored.credentialRef ? assertPublicCredentialId(stored.credentialRef) : null;
-    if (ref && store.getCredential(ref)?.configured) {
-      credential = store.resolveCredential(ref);
-    } else if (typeof catalog?.hasOAuth === 'function' && catalog.hasOAuth(providerId)) {
-      const runtime = await catalog.runtime();
-      const resolved = await runtime.getAuth(providerId).catch(() => null);
-      credential = resolved?.auth?.apiKey;
-    }
-    return { provider, models, ...(credential === undefined ? {} : { credential }) };
-  }
-
-  function describeStoredProviderAuth(stored, runtimeProvider) {
-    if (stored.id === ANTIGRAVITY_PROVIDER_ID) {
-      return {
-        providerId: stored.id,
-        method: 'none',
-        oauth: true,
-        apiKey: false,
-        label: '登录 Antigravity',
-        subscription: true,
-      };
-    }
-    const secret = store.getCredential('center-internal-pi-oauth-' + stored.id);
-    const configured = Boolean(secret?.configured);
-    const key = stored.credentialRef;
-    const hasKey = Boolean(key && store.getCredential(key)?.configured);
-    return {
-      providerId: stored.id,
-      method: configured ? 'oauth' : hasKey ? 'api_key' : 'none',
-      oauth: Boolean(runtimeProvider?.auth?.oauth),
-      apiKey: !stored.native || Boolean(runtimeProvider?.auth?.apiKey),
-      label: runtimeProvider?.auth?.oauth?.loginLabel ?? runtimeProvider?.auth?.oauth?.name ?? '使用账号登录',
-      subscription: runtimeProvider?.auth?.oauth?.isSubscription === true,
-    };
-  }
 
   return {
     async center_list_devices(args, actor) {
@@ -729,30 +698,6 @@ export function createHandlers(deps) {
       const input = asInputObject(args);
       assertAllowedKeys(input, PROVIDER_ID_KEYS, 'center_get_provider_auth_status');
       const providerId = assertOptionalBoundedText(input.providerId, 'providerId', { min: 1, max: 128 });
-      if (typeof store?.getProvider === 'function' && typeof store?.listProviders === 'function') {
-        if (providerId !== undefined) {
-          const stored = store.getProvider(providerId);
-          if (!stored) fail('NOT_FOUND', 'Provider not found');
-          const runtime = stored.id !== ANTIGRAVITY_PROVIDER_ID && typeof catalog?.runtime === 'function'
-            ? await catalog.runtime().catch(() => null)
-            : null;
-          const sanitized = sanitizeProviderAuthStatus(
-            describeStoredProviderAuth(stored, runtime?.getProvider?.(stored.id)),
-          );
-          return { statuses: sanitized ? [sanitized] : [] };
-        }
-        const nativeProviders = store.listProviders().filter((p) => p.native);
-        const runtime = nativeProviders.some((p) => p.id !== ANTIGRAVITY_PROVIDER_ID) && typeof catalog?.runtime === 'function'
-          ? await catalog.runtime().catch(() => null)
-          : null;
-        const statuses = nativeProviders
-          .map((stored) => sanitizeProviderAuthStatus(
-            describeStoredProviderAuth(stored, runtime?.getProvider?.(stored.id)),
-          ))
-          .filter(Boolean);
-        statuses.sort((a, b) => (a.providerId < b.providerId ? -1 : a.providerId > b.providerId ? 1 : 0));
-        return { statuses };
-      }
       if (providerId !== undefined) {
         const status = await owner('GET', '/api/providers/:id/auth-status', {
           params: { id: providerId },
@@ -794,7 +739,6 @@ export function createHandlers(deps) {
       };
       let updated;
       if (typeof store?.putProvider === 'function') {
-        assertPublicCredentialId(nextValue.credentialRef);
         updated = store.putProvider({ ...nextValue, id: providerId }, expectedRevision);
         if (typeof catalog?.apply === 'function') await catalog.apply();
         if (typeof notifyAll === 'function') notifyAll();
@@ -813,22 +757,15 @@ export function createHandlers(deps) {
       assertAllowedKeys(input, PROVIDER_ID_KEYS, 'center_validate_provider');
       const providerId = assertBoundedText(input.providerId, 'providerId', { min: 1, max: 128 });
       let result;
-      if (typeof store?.getProvider === 'function' && typeof store?.listModels === 'function') {
-        if (providerId === ANTIGRAVITY_PROVIDER_ID) {
-          fail('INVALID_STATE', 'Antigravity provider validation must be triggered from Center UI');
-        }
-        const probeInput = await buildStoredProviderProbeInput(providerId);
-        result = await validateCenterProvider(probeInput);
-      } else {
+      try {
         result = await owner('POST', '/api/providers/:id/validate', {
           params: { id: providerId },
           body: {},
         });
+      } catch (err) {
+        rethrowSafeProviderProbeError(err, 'Provider validation failed');
       }
-      return {
-        ok: Boolean(result?.ok),
-        ...(typeof result?.message === 'string' ? { message: result.message } : {}),
-      };
+      return sanitizeValidateProviderResult(result);
     },
 
     async center_discover_provider_models(args, actor) {
@@ -837,22 +774,13 @@ export function createHandlers(deps) {
       assertAllowedKeys(input, PROVIDER_ID_KEYS, 'center_discover_provider_models');
       const providerId = assertBoundedText(input.providerId, 'providerId', { min: 1, max: 128 });
       let result;
-      if (typeof store?.getProvider === 'function' && typeof store?.listModels === 'function') {
-        if (providerId === ANTIGRAVITY_PROVIDER_ID) {
-          fail('INVALID_STATE', 'Antigravity model discovery must be triggered from Center UI');
-        }
-        const probeInput = await buildStoredProviderProbeInput(providerId);
-        try {
-          result = await discoverCenterProviderModels(probeInput);
-        } catch (err) {
-          if (err?.code === 'NOT_FOUND' || err?.code === 'FORBIDDEN' || err?.code === 'INVALID_STATE') throw err;
-          fail('INVALID_ARGUMENT', 'Provider model discovery failed');
-        }
-      } else {
+      try {
         result = await owner('POST', '/api/providers/:id/discover', {
           params: { id: providerId },
           body: {},
         });
+      } catch (err) {
+        rethrowSafeProviderProbeError(err, 'Provider model discovery failed');
       }
       return {
         providerId,

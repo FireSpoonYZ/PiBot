@@ -20,16 +20,6 @@ const botTargetProps = {
   },
 };
 
-const botRefSchema = {
-  type: 'object',
-  properties: {
-    deviceId: idSchema,
-    botId: idSchema,
-  },
-  required: ['deviceId', 'botId'],
-  additionalProperties: false,
-};
-
 const skillFilesWriteMapSchema = {
   type: 'object',
   additionalProperties: { type: 'string' },
@@ -458,15 +448,11 @@ export const operations = Object.freeze([
   defineOperation({
     name: 'capability_installation_toggle',
     description:
-      'Request async global disable of an already-installed capability (returns an accepted operationId; poll capability_operation_get). Globally enabling an installed capability requires explicit owner approval in Center UI and returns FORBIDDEN; use capability_bot_binding_set to toggle an already globally active capability per Bot.',
+      'Request async global disable of an already-installed capability (returns an accepted operationId; poll capability_operation_get). Globally enabling an installed capability requires explicit owner approval in Center UI; use capability_bot_binding_set to toggle an already globally active capability per Bot.',
     properties: {
       installationId: { ...idSchema, description: 'Target installationId.' },
-      action: { type: 'string', enum: ['enable', 'disable'], description: 'Global lifecycle toggle action ("disable" supported; "enable" requires Center UI approval).' },
+      action: { type: 'string', enum: ['disable'], description: 'Global lifecycle toggle action ("disable" only; global enable requires Center UI approval).' },
       requestId: { ...idSchema, description: 'Required idempotency key for safe retries.' },
-      validationBot: {
-        ...botRefSchema,
-        description: 'Reserved optional validation Bot reference (global enable requires Center UI approval).',
-      },
     },
     required: ['installationId', 'action', 'requestId'],
     readOnly: false,
