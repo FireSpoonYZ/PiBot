@@ -28,6 +28,92 @@ const GENERATION_PATCHED = `            let threshold = compacted === undefined
             }
             if (threshold === "blocking") {`;
 
+const GENERATION_REQUEST_ORIGINAL = `            const message = await streamResponse(runtime, model, messages, options, attempt, context);
+            const request = { attempt, compacted, model: ref, thinkingLevel, cutoff, messages: view.messages };
+            await classify(runtime, request, message, context);`;
+
+const GENERATION_REQUEST_PATCHED = `            let { message, emittedOutput } = await streamResponse(runtime, model, messages, options, attempt, context);
+            if (!runtime.signal.aborted &&
+                !context.abortSignal?.aborted &&
+                compacted === undefined &&
+                !emittedOutput &&
+                message.stopReason === "error" &&
+                isContextOverflow(message)) {
+                let recovered;
+                await runtime.hooks.each("recoverContextOverflow", async (hook) => {
+                    if (recovered !== undefined || runtime.signal.aborted || context.abortSignal?.aborted)
+                        return;
+                    const decision = await hook({ model, messages, error: message, attempt, cutoff }, runtime, context);
+                    if (Array.isArray(decision?.messages))
+                        recovered = decision.messages;
+                });
+                if (recovered !== undefined && !runtime.signal.aborted && !context.abortSignal?.aborted) {
+                    messages = recovered;
+                    ({ message } = await streamResponse(runtime, model, messages, options, attempt, context));
+                }
+            }
+            const request = { attempt, compacted, model: ref, thinkingLevel, cutoff, messages: view.messages };
+            await classify(runtime, request, message, context);`;
+
+const GENERATION_STREAM_ORIGINAL = `    try {
+        const events = runtime.models.streamSimple(model, { messages: [...messages] }, options);
+        for await (const event of events) {
+            // A partial without content, such as pi-ai's opening \`start\` event, shows nothing; a deferred response
+            // never gets past it, so it never leaves a partial.
+            if (event.type === "done" || event.type === "error" || event.partial.content.length === 0)
+                continue;
+            changes.observe(event);
+            pending = event.partial;
+            if (timer === undefined && inFlight === undefined)
+                timer = runtime.setTimer(flush, interval);
+        }
+        return await events.result();
+    }`;
+
+const GENERATION_STREAM_PATCHED = `    let emittedOutput = false;
+    const hasVisibleOutput = (content) => {
+        if (!Array.isArray(content))
+            return false;
+        for (const block of content) {
+            if (!block || typeof block !== "object")
+                continue;
+            if (block.type === "toolCall")
+                return true;
+            if (block.type === "text" && typeof block.text === "string" && block.text.length > 0)
+                return true;
+            if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking.length > 0)
+                return true;
+        }
+        return false;
+    };
+    try {
+        const events = runtime.models.streamSimple(model, { messages: [...messages] }, options);
+        for await (const event of events) {
+            if (event.type === "done" || event.type === "error")
+                continue;
+            if (event.type === "toolcall_start" ||
+                event.type === "toolcall_delta" ||
+                event.type === "toolcall_end" ||
+                (event.type === "text_delta" && typeof event.delta === "string" && event.delta.length > 0) ||
+                (event.type === "thinking_delta" && typeof event.delta === "string" && event.delta.length > 0) ||
+                hasVisibleOutput(event.partial?.content)) {
+                emittedOutput = true;
+            }
+            // A partial without content, such as pi-ai's opening \`start\` event, shows nothing; a deferred response
+            // never gets past it, so it never leaves a partial.
+            if (event.partial.content.length === 0)
+                continue;
+            changes.observe(event);
+            pending = event.partial;
+            if (timer === undefined && inFlight === undefined)
+                timer = runtime.setTimer(flush, interval);
+        }
+        const message = await events.result();
+        if (hasVisibleOutput(message?.content))
+            emittedOutput = true;
+        return { message, emittedOutput };
+    }`;
+
 const TYPES_ORIGINAL = `export interface GenerationHooks {
     /** Before every request attempt, including recovery; the result is used for that request only. */
     beforeRequest(request: {`;
@@ -39,6 +125,37 @@ const TYPES_PATCHED = `export interface GenerationHooks {
     }>;
     /** Before every request attempt, including recovery; the result is used for that request only. */
     beforeRequest(request: {`;
+
+const TYPES_OVERFLOW_ORIGINAL = `    beforeProviderRequest(request: {
+        readonly model: Model<Api>;
+        readonly payload: unknown;
+    }, api: HookApi, context: Context): HookResult<{
+        readonly payload: unknown;
+    }>;
+    /** Every terminal provider message, before classification. */
+    afterResponse(message: AssistantMessage, api: HookApi, context: Context): void | Promise<void>;`;
+
+const TYPES_OVERFLOW_PATCHED = `    beforeProviderRequest(request: {
+        readonly model: Model<Api>;
+        readonly payload: unknown;
+    }, api: HookApi, context: Context): HookResult<{
+        readonly payload: unknown;
+    }>;
+    /**
+     * After a provider request fails with a context overflow before emitting visible output; at most once per request
+     * attempt (and skipped after native compaction), returning replacement messages retries in place at the same cutoff.
+     */
+    recoverContextOverflow(request: {
+        readonly model: Model<Api>;
+        readonly messages: readonly Message[];
+        readonly error: AssistantMessage;
+        readonly attempt: number;
+        readonly cutoff: EntryId;
+    }, api: HookApi, context: Context): HookResult<{
+        readonly messages: readonly Message[];
+    }>;
+    /** Every terminal provider message, before classification. */
+    afterResponse(message: AssistantMessage, api: HookApi, context: Context): void | Promise<void>;`;
 
 const STORAGE_ORIGINAL = `        let value = parseJson(base.content);
         const tail = await executor.all(\`SELECT seq, kind, version, content FROM \${this.schema.tables.documentRevisions}
@@ -72,19 +189,27 @@ function countOccurrences(haystack, needle) {
   return haystack.split(needle).length - 1;
 }
 
-function applyExactPatch(filePath, original, patched) {
-  const source = readFileSync(filePath, 'utf8');
-  const origCount = countOccurrences(source, original);
-  const patchedCount = countOccurrences(source, patched);
-  if (patchedCount === 1 && origCount === 0) return false;
-  if (origCount === 1 && patchedCount === 0) {
-    writeFileSync(filePath, source.replace(original, patched), 'utf8');
-    return true;
+function applyExactPatches(filePath, patches) {
+  let source = readFileSync(filePath, 'utf8');
+  let changed = false;
+  for (const { original, patched } of patches) {
+    const origCount = countOccurrences(source, original);
+    const patchedCount = countOccurrences(source, patched);
+    if (patchedCount === 1 && origCount === 0) continue;
+    if (origCount === 1 && patchedCount === 0) {
+      source = source.replace(original, patched);
+      changed = true;
+      continue;
+    }
+    throw new Error(
+      `${filePath} does not match expected @earendil-works/pi-durable@${PI_DURABLE_VERSION} ` +
+        `source or patched state (original=${origCount}, patched=${patchedCount})`
+    );
   }
-  throw new Error(
-    `${filePath} does not match expected @earendil-works/pi-durable@${PI_DURABLE_VERSION} ` +
-      `source or patched state (original=${origCount}, patched=${patchedCount})`
-  );
+  if (changed) {
+    writeFileSync(filePath, source, 'utf8');
+  }
+  return changed;
 }
 
 export function patchPiDurable(nodeModulesDir = path.join(HERE, 'node_modules')) {
@@ -99,19 +224,24 @@ export function patchPiDurable(nodeModulesDir = path.join(HERE, 'node_modules'))
       `Expected @earendil-works/pi-durable@${PI_DURABLE_VERSION}, found ${pkg.name}@${pkg.version}`
     );
   }
-  const generationChanged = applyExactPatch(
+  const generationChanged = applyExactPatches(
     path.join(pkgDir, 'dist', 'harness', 'generation.js'),
-    GENERATION_ORIGINAL,
-    GENERATION_PATCHED
+    [
+      { original: GENERATION_ORIGINAL, patched: GENERATION_PATCHED },
+      { original: GENERATION_REQUEST_ORIGINAL, patched: GENERATION_REQUEST_PATCHED },
+      { original: GENERATION_STREAM_ORIGINAL, patched: GENERATION_STREAM_PATCHED },
+    ]
   );
   const typesPath = path.join(pkgDir, 'dist', 'harness', 'types.d.ts');
   const typesChanged = existsSync(typesPath)
-    ? applyExactPatch(typesPath, TYPES_ORIGINAL, TYPES_PATCHED)
+    ? applyExactPatches(typesPath, [
+        { original: TYPES_ORIGINAL, patched: TYPES_PATCHED },
+        { original: TYPES_OVERFLOW_ORIGINAL, patched: TYPES_OVERFLOW_PATCHED },
+      ])
     : false;
-  const storageChanged = applyExactPatch(
+  const storageChanged = applyExactPatches(
     path.join(pkgDir, 'dist', 'storage', 'sqlite', 'storage.js'),
-    STORAGE_ORIGINAL,
-    STORAGE_PATCHED
+    [{ original: STORAGE_ORIGINAL, patched: STORAGE_PATCHED }]
   );
   return { generationChanged, typesChanged, storageChanged };
 }

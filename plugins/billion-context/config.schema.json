@@ -1,5 +1,18 @@
 {
   "type": "object",
-  "properties": {},
+  "properties": {
+    "autoFold": {
+      "type": "boolean",
+      "title": "自动增长折叠",
+      "description": "启用后在请求估算达到低于硬预算上限的增长目标时主动预压缩较旧上下文，并在目标可达且未退避时抑制传统压缩提醒。默认关闭。",
+      "default": false
+    },
+    "autoFoldTargetTokens": {
+      "type": "integer",
+      "title": "自动折叠目标 Token 数",
+      "description": "可选。启用 autoFold 时的目标 token 上限；留空时默认取当前有效硬预算的一半，生效值下限为 8192 且必须低于当前硬预算上限。",
+      "minimum": 1
+    }
+  },
   "additionalProperties": false
 }

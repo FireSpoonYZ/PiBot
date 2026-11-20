@@ -11,21 +11,29 @@ export function createPlugin({ installationId, host }) {
   const ContextState = createContextState(host.sdk.defineDoc);
 
   return {
-    async forBot({ botId }) {
-      const manager = createContextManager({ getHarness: host.getHarness, models: host.models, ContextState });
+    async forBot({ botId, effectiveConfig } = {}) {
+      const manager = createContextManager({
+        getHarness: host.getHarness,
+        models: host.models,
+        ContextState,
+        effectiveConfig,
+      });
       let active = false;
       let closed = false;
       const check = () => {
         if (!active || closed) throw Object.assign(new Error('Billion Context is not active.'), { code: 'EXTENSION_DISABLED' });
         host.assertCapabilityAllowed(botId, installationId);
       };
+      const checkOwnership = async (conversationId) => {
+        check();
+        if (await host.resolveConversationBot(conversationId) !== botId) {
+          throw Object.assign(new Error('Conversation does not belong to this Bot.'), { code: 'BOT_CONTEXT_REQUIRED' });
+        }
+        check();
+      };
       const controller = Object.fromEntries(['compress', 'decompress', 'search', 'status'].map((method) => [method,
         async (args, api, context) => {
-          check();
-          if (await host.resolveConversationBot(api.conversationId) !== botId) {
-            throw Object.assign(new Error('Conversation does not belong to this Bot.'), { code: 'BOT_CONTEXT_REQUIRED' });
-          }
-          check();
+          await checkOwnership(api.conversationId);
           return manager[method](args, api, context);
         },
       ]));
@@ -35,13 +43,15 @@ export function createPlugin({ installationId, host }) {
           sections: [host.sdk.section('billion-context', () => buildCompressSystemPrompt())],
         },
         requestContributions: {
-          async prepareContext(request, api, context) {
+          async prepareContext(request, api, context, turnKey, preflightTarget) {
+            await checkOwnership(api.conversationId);
+            return manager.prepare(request, api, context, turnKey, preflightTarget);
+          },
+          async compactContext(options, api, context) {
+            await checkOwnership(api.conversationId);
+            const result = await manager.compact(options, api, context, { assertActive: check });
             check();
-            if (await host.resolveConversationBot(api.conversationId) !== botId) {
-              throw Object.assign(new Error('Conversation does not belong to this Bot.'), { code: 'BOT_CONTEXT_REQUIRED' });
-            }
-            check();
-            return manager.prepare(request, api, context);
+            return result;
           },
         },
         actions: {
@@ -58,11 +68,11 @@ export function createPlugin({ installationId, host }) {
                 const status = binding ? await manager.inspect(binding.nativeId, host.context) : emptyContextStatus();
                 result = { botId, scopeId: input.scopeId, conversationId: binding?.conversationId ?? null, ...status };
               } else {
-                const bot = host.host.getBot(botId);
+                const botRecord = host.host.getBot(botId);
                 const index = await harness.snapshot(host.documents.PrimaryIndex, host.context);
-                const nativeId = index?.byPrimary[bot.primaryConversationId];
+                const nativeId = index?.byPrimary[botRecord.primaryConversationId];
                 const status = nativeId === undefined ? emptyContextStatus() : await manager.inspect(nativeId, host.context);
-                result = { botId, conversationId: bot.primaryConversationId, ...status };
+                result = { botId, conversationId: botRecord.primaryConversationId, ...status };
               }
               invocationContext.abortSignal.throwIfAborted();
               check();

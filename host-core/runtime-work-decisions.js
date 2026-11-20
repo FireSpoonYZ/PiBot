@@ -2435,7 +2435,7 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
     }, WORK_ERRORS, toolContext);
   }
 
-  async function checkBudget(_request, api, toolContext) {
+  async function checkBudget(_request, api, toolContext, allowOverflowRecovery = false) {
     return guarded(async () => {
       const harness = getHarness();
       const coordNativeId = await workCoordinationId(api, toolContext);
@@ -2451,7 +2451,8 @@ export function createWorkDecisionRuntime({ host, getHarness, getWorkContexts, m
         if (!prepared || prepared.taskId !== String(api.taskId)) {
           throw new Error('work context projection does not match the prepared request');
         }
-        if (prepared.tokenCount >= prepared.contextWindow) {
+        // The final provider guard prevents oversized dispatch and allows SDK overflow recovery for managed views.
+        if (!allowOverflowRecovery && prepared.tokenCount >= prepared.contextWindow) {
           const failure = { code: 'CONTEXT_LIMIT', message: 'work context projection reaches the model context window' };
           // 请求级预算失败：只结算本 pending，不落 scope 级 error 闸门
           // （error 闸门会无限阻断后续新请求；reconcile 走 lastError/结算路径）。

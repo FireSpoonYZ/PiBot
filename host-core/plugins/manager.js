@@ -835,6 +835,18 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     });
   }
 
+  const preparedContextBindings = new WeakMap();
+  const BILLION_CONTEXT_MANIFEST_ID = 'e-launcher.billion-context';
+  const COMPACT_CONTEXT_STATUSES = new Set(['compacted', 'unchanged', 'no_range', 'summary_failed', 'still_over_limit']);
+
+  function isBillionContextProvider(provider) {
+    return Boolean(
+      provider &&
+      provider.instance?.manifest?.id === BILLION_CONTEXT_MANIFEST_ID &&
+      provider.instance?.manifest?.kind === 'plugin',
+    );
+  }
+
   function selectContextProviders(botId) {
     return [...instances.values()].flatMap((instance) => {
       const entry = instance.bots.get(botId);
@@ -856,8 +868,9 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     }
     const providers = selectContextProviders(botId);
     if (providers.length !== 1) return false;
-    const { id, instance, entry } = providers[0];
-    if (instance.manifest?.id !== 'e-launcher.billion-context' || instance.manifest?.kind !== 'plugin') {
+    const provider = providers[0];
+    const { id, entry } = provider;
+    if (!isBillionContextProvider(provider)) {
       return false;
     }
     if (!agent.extensions.some((extension) => extension === entry.extension)) return false;
@@ -870,21 +883,84 @@ export function createPluginManager({ host, registry, installer, services, isOnl
     }
   }
 
-  async function prepareContext(request, api, context) {
+  async function prepareContext(request, api, context, turnKey, preflightTarget) {
     const botId = await services.resolveConversationBot(api.conversationId);
     const providers = selectContextProviders(botId);
     if (providers.length > 1) throw error('INVALID_STATE', 'multiple context providers for this Bot');
     if (!providers.length) return request;
-    const { id, hook } = providers[0];
+    const { id, hook, instance, entry } = providers[0];
     return runAccepted(async () => {
       context.abortSignal?.throwIfAborted();
       await checkOwner(botId, id, api.conversationId);
       context.abortSignal?.throwIfAborted();
-      const next = { ...request, ...(await hook(request, api, context)) };
+      const prepared = isBillionContextProvider(providers[0])
+        ? await hook(request, api, context, turnKey, preflightTarget)
+        : await hook(request, api, context);
+      const next = { ...request, ...prepared };
       context.abortSignal?.throwIfAborted();
       await checkOwner(botId, id, api.conversationId);
       context.abortSignal?.throwIfAborted();
+      preparedContextBindings.set(next, { botId, id, instance, entry });
       return next;
+    }, botId);
+  }
+
+  function getBillionContextBinding(requestView) {
+    if (!requestView || typeof requestView !== 'object') return null;
+    const binding = preparedContextBindings.get(requestView);
+    if (!binding || !isBillionContextProvider(binding)) return null;
+    if (typeof binding.entry?.bot?.requestContributions?.compactContext !== 'function') return null;
+    return { ...binding, autoFold: binding.entry.context.effectiveConfig?.autoFold === true };
+  }
+
+  async function compactContext(options, api, context, expectedBinding = null) {
+    context?.abortSignal?.throwIfAborted();
+    if (!active || !accepting || !isOnline()) return null;
+    if (!expectedBinding || !isBillionContextProvider(expectedBinding)) return null;
+    if (!options || (options.reason !== 'preflight' && options.reason !== 'overflow')) {
+      throw error('INVALID_ARGUMENT', 'invalid compactContext reason');
+    }
+    const botId = await services.resolveConversationBot(api.conversationId);
+    if (botId !== expectedBinding.botId) return null;
+    const providers = selectContextProviders(botId);
+    if (providers.length !== 1) return null;
+    const current = providers[0];
+    if (
+      !isBillionContextProvider(current) ||
+      current.id !== expectedBinding.id ||
+      current.instance !== expectedBinding.instance ||
+      current.entry !== expectedBinding.entry
+    ) {
+      return null;
+    }
+    const hook = current.entry?.bot?.requestContributions?.compactContext;
+    if (typeof hook !== 'function') return null;
+    if (!isAuthorized(policy.get(botId)?.get(current.id))) return null;
+    if (typeof api?.agent === 'function') {
+      const agent = await api.agent(context);
+      if (!Array.isArray(agent?.extensions) || !agent.extensions.some((ext) => ext === current.entry.extension)) {
+        return null;
+      }
+    }
+    return runAccepted(async () => {
+      context?.abortSignal?.throwIfAborted();
+      await checkOwner(botId, current.id, api.conversationId);
+      context?.abortSignal?.throwIfAborted();
+      const result = await hook({
+        reason: options.reason,
+        targetTokens: options.targetTokens,
+        estimateTokens: options.estimateTokens,
+        ...(options.turnKey !== undefined ? { turnKey: options.turnKey } : {}),
+      }, api, context);
+      context?.abortSignal?.throwIfAborted();
+      await checkOwner(botId, current.id, api.conversationId);
+      context?.abortSignal?.throwIfAborted();
+      if (!result || typeof result !== 'object') return null;
+      if (!COMPACT_CONTEXT_STATUSES.has(result.status)) return null;
+      return {
+        status: result.status,
+        ...(Array.isArray(result.messages) ? { messages: result.messages } : {}),
+      };
     }, botId);
   }
 
@@ -979,7 +1055,7 @@ export function createPluginManager({ host, registry, installer, services, isOnl
 
   return {
     applyBot, activate, quiesce, close, staleGrants, changedGrants, revoke, dropGrants, notifyGrants, capabilityTaskNames,
-    assertCapabilityAllowed, extensionsFor, prepareContext, shouldDeclineThresholdCompaction, beforeRequest, action, actionByName,
+    assertCapabilityAllowed, extensionsFor, prepareContext, getBillionContextBinding, compactContext, shouldDeclineThresholdCompaction, beforeRequest, action, actionByName,
     isActive: () => active,
     appliedSetId: (botId) => appliedSets.get(botId) ?? null,
     hasActiveExecutions: (botId) => botId === undefined

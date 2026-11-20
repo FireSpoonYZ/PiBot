@@ -31,6 +31,10 @@ import {
   estimateContextTokensHost,
   budgetRequestTokens,
   setRequestBudget,
+  isLocalBudgetOverflowError,
+  createBaseProjectionReplacer,
+  computePreflightTargetTokens,
+  computeOverflowRecoveryBudget,
   createTurnProvenanceStore,
   createTurnProvenanceFromCutoff,
   advanceTurnProvenance,
@@ -405,6 +409,7 @@ export async function openRuntime(options) {
   let coreExtensions = [];
   const botHostExtensionsFor = (botId) => browserSetup?.extensionsForBot(botId) ?? [];
   let online = false;
+  let closing = false;
   let maintenance = false;
   let botModels = {};
   let getBotEntryWatermark;
@@ -720,6 +725,8 @@ export async function openRuntime(options) {
   plugins = createPluginManager({ host, registry, installer: centerRuntime.installer, services, isOnline: () => online, vaultFacade: vault.facade, tasksFacade });
   // 短生命周期每任务 Antigravity 回合归属态（仅内存，绝不写进持久历史或 RequestContext）。
   const antigravityTurnProvenance = createTurnProvenanceStore();
+  // 短生命周期每任务非 AGY 同轮预压/溢出恢复态（仅内存，随任务结束或 abort 自动清理）。
+  const requestRecoveryState = createTurnProvenanceStore();
   registry.install(defineExtension({
     name: 'host.request-context',
     hooks: [hook(GenerationTask, {
@@ -762,10 +769,17 @@ export async function openRuntime(options) {
           const routingCount = Math.max(0, (routed?.messages?.length ?? 0) - sanitizedRequest.messages.length);
           const routingMessages = routingCount > 0 ? routed.messages.slice(0, routingCount) : [];
           await decisions.beforeRequest(routed, api, context);
+          const frozenTurn = !isAntigravity ? await sessions.getTurn(api, context) : null;
+          const turnKey = typeof frozenTurn?.requestId === 'string' && frozenTurn.requestId.length > 0
+            ? frozenTurn.requestId
+            : undefined;
           // prepareContext 收原始 request（不带 Host 注入）：BC 等上下文贡献返回的
           // 完整视图不能覆盖、也不重复计费本轮 Host 控制指引；持久 prepared 预算
           // 仍记真实投影，最终守卫按有序子序列增量把指引只计一次。
-          const requestView = await plugins.prepareContext(sanitizedRequest, api, context);
+          const preflightTarget = !isAntigravity
+            ? computePreflightTargetTokens(model.contextWindow, model.maxTokens, model.api)
+            : undefined;
+          const requestView = await plugins.prepareContext(sanitizedRequest, api, context, turnKey, preflightTarget);
           const { turnProvenance: _sideband, ...cleanRequestView } = requestView ?? {};
           // SDK 同口径预算基线：取 checkpoint.cutoff 的权威上下文视图，
           // 用 estimateContext（最新 assistant usage + 尾部估计）算原始历史，
@@ -773,12 +787,23 @@ export async function openRuntime(options) {
           // 有效请求计入 tokenCount；JSON 克隆内容匹配，BC 整体替换只计投影。
           const baselineMessages = sanitizeLegacyAttachmentPromptMessages(cutoffView.messages, cutoffView);
           const baselineView = baselineMessages === cutoffView.messages ? cutoffView : { ...cutoffView, messages: baselineMessages };
-          const preparedTokens = budgetRequestTokens(baselineView.messages, estimateContextTokensHost(baselineView), requestView.messages);
+          const baselineTokens = estimateContextTokensHost(baselineView);
+          const preparedTokens = budgetRequestTokens(baselineView.messages, baselineTokens, requestView.messages);
           let turnProvenance = null;
           if (isAntigravity) {
             turnProvenance = createTurnProvenanceFromCutoff(cutoffView.messages, baselineMessages, requestView, checkpoint.cutoff);
+            requestRecoveryState.delete(api.taskId);
           } else {
             antigravityTurnProvenance.delete(api.taskId);
+            const bcProvider = plugins.getBillionContextBinding(requestView);
+            if (bcProvider) {
+              requestRecoveryState.set(api.taskId, {
+                cutoff: checkpoint.cutoff, preflightTarget, turnKey, baselineMessages, baselineTokens,
+                baseMessages: requestView.messages, bcProvider,
+              }, context.abortSignal);
+            } else {
+              requestRecoveryState.delete(api.taskId);
+            }
           }
           await harness.commit(async (tx) => {
             const doc = await tx.doc(RequestContext, api.conversationId);
@@ -810,6 +835,7 @@ export async function openRuntime(options) {
             : finalView;
         } catch (err) {
           antigravityTurnProvenance.delete(api.taskId);
+          requestRecoveryState.delete(api.taskId);
           if (!context.abortSignal?.aborted) {
             // Host 侧准备失败：先把安全诊断写入 GenerationFailureState（契约 A，
             // work 对账/LIVE 可凭 taskId 读到具体失败），再中止当前任务。
@@ -826,6 +852,46 @@ export async function openRuntime(options) {
       },
     })],
   }));
+  async function compactModelRequest(messages, recovery, reason, targetTokens, contextWindow, api, context) {
+    const replacer = createBaseProjectionReplacer(messages, recovery.baseMessages);
+    if (!replacer) return null;
+
+    const measure = (projection) => budgetRequestTokens(recovery.baselineMessages, recovery.baselineTokens, projection);
+    const estimateTokens = (candidate) => {
+      const complete = replacer.replace(candidate);
+      return complete ? measure(complete) : Infinity;
+    };
+    let result;
+    try {
+      result = await plugins.compactContext({ reason, targetTokens, estimateTokens, turnKey: recovery.turnKey },
+        api, context, recovery.bcProvider);
+    } catch (err) {
+      if (context.abortSignal?.aborted || err instanceof durable.SessionFailed ||
+          err?.code === 'CENTER_OFFLINE' || err?.code === 'BOT_CONTEXT_REQUIRED') throw err;
+      return { status: 'summary_failed' };
+    }
+    context.abortSignal?.throwIfAborted();
+    if (!online || closing) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+    if (result?.status !== 'compacted') return result ? { status: result.status } : null;
+
+    const projection = replacer.replace(result.messages);
+    if (!projection) return { status: 'no_range' };
+    const total = measure(projection);
+    if (total >= contextWindow || total >= measure(messages) || (reason === 'overflow' && total >= targetTokens)) {
+      return { status: 'still_over_limit' };
+    }
+    const baseTokens = measure(result.messages);
+    const saved = await harness.commit(async (tx) => {
+      const doc = await tx.doc(RequestContext, api.conversationId);
+      if (doc.prepared?.taskId !== String(api.taskId) || doc.prepared.cutoff !== recovery.cutoff) return false;
+      doc.prepared = { ...doc.prepared, contextWindow, tokenCount: baseTokens, messages: result.messages };
+      return true;
+    }, context);
+    if (!saved) return null;
+    recovery.baseMessages = result.messages;
+    return { status: 'compacted', messages: projection, total };
+  }
+
   // Selected after each Bot's plugin hooks, so this check sees their complete request.
   // SDK 已用 estimateContext（权威 usage + 尾部估计）做阈值压缩与溢出重试；这里的
   // 最终守卫在 provider 边界返回标准 overflow，交给 SDK 自动压缩并至多重试一次；
@@ -836,7 +902,7 @@ export async function openRuntime(options) {
   const finalBudgetExtension = defineExtension({ name: 'cap-final-budget', hooks: [hook(GenerationTask, {
     async beforeRequest(request, api, context) {
       try {
-        if (!online) throw errWithCode('center is offline', 'CENTER_OFFLINE');
+        if (!online || closing) throw errWithCode('center is offline', 'CENTER_OFFLINE');
         const prepared = (await harness.snapshot(RequestContext, api.conversationId, context))?.prepared;
         if (!prepared || prepared.taskId !== String(api.taskId)) throw errWithCode('context is not prepared', 'INVALID_STATE');
         const provenance = antigravityTurnProvenance.get(api.taskId);
@@ -847,12 +913,56 @@ export async function openRuntime(options) {
             context.abortSignal,
           );
         }
-        const total = budgetRequestTokens(prepared.messages, prepared.tokenCount, request.messages);
-        // Let the SDK compact/retry an oversized projection without sending it to the provider.
-        setRequestBudget(request.messages, total, prepared.contextWindow);
-        await decisions.checkBudget(request, api, context);
+        let total = budgetRequestTokens(prepared.messages, prepared.tokenCount, request.messages);
+        const recovery = requestRecoveryState.get(api.taskId);
+        const eligible = Boolean(recovery && recovery.cutoff === prepared.cutoff);
+        let compacted;
+        if (eligible) {
+          const target = recovery.preflightTarget;
+          if (total >= target || recovery.bcProvider.autoFold) {
+            compacted = await compactModelRequest(request.messages, recovery, 'preflight', target,
+              prepared.contextWindow, api, context);
+            if (compacted?.messages) total = compacted.total;
+          }
+        }
+        const nextRequest = compacted?.messages ? { ...request, messages: compacted.messages } : request;
+        setRequestBudget(nextRequest.messages, total, prepared.contextWindow, compacted?.status);
+        // Managed oversize requests go through the final guard so Durable can still run its native fallback.
+        await decisions.checkBudget(nextRequest, api, context, eligible);
+        if (nextRequest !== request) return nextRequest;
       } catch (err) {
         antigravityTurnProvenance.delete(api.taskId);
+        requestRecoveryState.delete(api.taskId);
+        if (!context.abortSignal?.aborted) {
+          await recordGenerationFailure(api, err, context);
+          await harness.abortTask(api.taskId, context);
+        }
+        throw err;
+      }
+    },
+    async recoverContextOverflow({ model, messages, error, cutoff }, api, context) {
+      if (context.abortSignal?.aborted || !online || closing || isLocalBudgetOverflowError(error)) return;
+      const recovery = requestRecoveryState.get(api.taskId);
+      if (!recovery || recovery.cutoff !== cutoff || recovery.overflowAttempted) return;
+      recovery.overflowAttempted = true;
+
+      const sentEstimatedTokens = budgetRequestTokens(recovery.baselineMessages, recovery.baselineTokens, messages);
+      const { targetTokens, effectiveContextWindow } = computeOverflowRecoveryBudget({
+        configuredContextWindow: model.contextWindow, modelMaxTokens: model.maxTokens,
+        sentEstimatedTokens, errorMessage: error.errorMessage,
+      });
+      try {
+        const result = await compactModelRequest(messages, recovery, 'overflow', targetTokens,
+          effectiveContextWindow, api, context);
+        if (!result?.messages || !online || closing) return;
+        const nextRequest = { messages: result.messages };
+        await decisions.checkBudget(nextRequest, api, context, true);
+        context.abortSignal?.throwIfAborted();
+        if (!online || closing) return;
+        setRequestBudget(result.messages, result.total, effectiveContextWindow);
+        return nextRequest;
+      } catch (err) {
+        requestRecoveryState.delete(api.taskId);
         if (!context.abortSignal?.aborted) {
           await recordGenerationFailure(api, err, context);
           await harness.abortTask(api.taskId, context);
@@ -885,6 +995,7 @@ export async function openRuntime(options) {
     },
     afterResponse(_message, api) {
       antigravityTurnProvenance.delete(api.taskId);
+      requestRecoveryState.delete(api.taskId);
     },
   })] });
   const codemodeExtension = withCodemodePresentations(createCodemodeExtension({ sandbox: createHostCodemodeSandbox() }));
@@ -1022,6 +1133,7 @@ export async function openRuntime(options) {
     finalBudgetExtension,
     centerRuntime,
     setOnline: (value) => { online = value; },
+    setClosing: (value) => { closing = value; },
     isMaintenance: () => maintenance,
     setMaintenance: (value) => { maintenance = value; },
     setBotModels: (value) => { botModels = value; },
@@ -1098,7 +1210,7 @@ function parseBindingKey(key) {
   }
 }
 
-function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, setBotTurnRunningReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, browserSetup, botHostExtensionsFor, vault, schedules, setTasksBridge, resolveConversationBot, dataPrivacy }) {
+function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseOwner, cleanupEnvs, dropBotEnvs, dropEnvFor, live, workContexts, decisions, sessions, plugins, registry, coreExtensions, codemodeExtension, finalBudgetExtension, centerRuntime, setOnline, setClosing, isMaintenance, setMaintenance, setBotModels, getBotModels, setWatermarkReader, setBotTurnRunningReader, botAdmissions, collaboration, onBotsChanged, onBotsSync, learningIdleSettleMs, shower, browserSetup, botHostExtensionsFor, vault, schedules, setTasksBridge, resolveConversationBot, dataPrivacy }) {
   let closePromise = null;
   let closing = false;
   let centerOnline = false;
@@ -1392,6 +1504,7 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
 
   const close = () => {
     closing = true;
+    setClosing?.(true);
     webhooks.pause();
     taskConsumer?.pause();
     ++epoch;

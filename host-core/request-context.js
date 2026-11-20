@@ -15,13 +15,23 @@ export const RequestContext = defineDoc({
 });
 
 const requestBudgets = new WeakMap();
+const localBudgetErrors = new WeakSet();
+const contextRecoveryMessages = {
+  no_range: '没有足够的旧内容可以压缩。',
+  summary_failed: '自动压缩未能生成可用摘要。',
+  still_over_limit: '自动压缩后仍然超限。',
+};
 
-export function setRequestBudget(messages, tokenCount, contextWindow) {
+export function setRequestBudget(messages, tokenCount, contextWindow, recoveryStatus) {
   // The SDK copies the messages array but preserves its message objects.
   const last = Array.isArray(messages) ? messages.at(-1) : undefined;
   if (last && typeof last === 'object') {
-    requestBudgets.set(last, { tokenCount, contextWindow });
+    requestBudgets.set(last, { tokenCount, contextWindow, recoveryStatus });
   }
+}
+
+export function isLocalBudgetOverflowError(message) {
+  return Boolean(message && typeof message === 'object' && localBudgetErrors.has(message));
 }
 
 export function withRequestBudget(provider) {
@@ -36,9 +46,12 @@ export function withRequestBudget(provider) {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       stopReason: 'error',
       errorMessage: 'context_length_exceeded: 上下文约 ' + budget.tokenCount +
-        ' tokens，达到模型配置的 ' + budget.contextWindow + ' tokens 上限。请压缩对话或调整模型上下文窗口。',
+        ' tokens，达到模型配置的 ' + budget.contextWindow + ' tokens 上限。' +
+        (Object.hasOwn(contextRecoveryMessages, budget.recoveryStatus) ? contextRecoveryMessages[budget.recoveryStatus] : '') +
+        '请缩短输入或手动压缩对话。',
       timestamp: Date.now(),
     };
+    localBudgetErrors.add(error);
     const stream = createAssistantMessageEventStream();
     stream.push({ type: 'error', reason: 'error', error });
     stream.end();
@@ -552,5 +565,241 @@ export function createTurnProvenanceStore() {
     delete(taskId) {
       drop(String(taskId));
     },
+  };
+}
+
+// Protect the latest real user input as well as an active tool exchange, whose results may follow it.
+function currentInput(messages) {
+  const concrete = messages.filter((message) => message.role !== 'system' && !isExplicitAuxiliaryMessage(message));
+  let index = concrete.length - 1;
+  if (index < 0) return [];
+  while (index >= 0 && concrete[index].role === 'toolResult') index--;
+  if (index < 0 || (index < concrete.length - 1 && concrete[index].role !== 'assistant')) return null;
+  const input = concrete.slice(index);
+  const latestUser = concrete.findLast((message) => message.role === 'user');
+  if (latestUser && latestUser !== input[0]) input.unshift(latestUser);
+  return input;
+}
+
+// Replace only one unambiguous contiguous projection. Preserve routing, recall and other plugin contributions.
+export function createBaseProjectionReplacer(finalMessages, baseMessages) {
+  if (!baseMessages.length || baseMessages.length > finalMessages.length) return null;
+  const input = currentInput(baseMessages);
+  if (!input?.length) return null;
+
+  const locate = (matches) => {
+    let found = -1;
+    for (let start = 0; start <= finalMessages.length - baseMessages.length; start++) {
+      if (!baseMessages.every((message, index) => matches(message, finalMessages[start + index]))) continue;
+      if (found !== -1) return null;
+      found = start;
+    }
+    return found;
+  };
+  const refStart = locate((left, right) => left === right);
+  const start = refStart === -1 ? locate(sameMessage) : refStart;
+  if (start === null || start === -1) return null;
+
+  const prefix = finalMessages.slice(0, start);
+  const suffix = finalMessages.slice(start + baseMessages.length);
+  return {
+    replace(candidate) {
+      if (!Array.isArray(candidate) || candidate.some((message) => !isMessageObject(message))) return null;
+      const next = currentInput(candidate);
+      if (next?.length !== input.length || !input.every((message, index) => sameMessage(message, next[index]))) return null;
+      return [...prefix, ...candidate, ...suffix];
+    },
+  };
+}
+
+export function computePreflightTargetTokens(contextWindow, maxTokens = 0, api) {
+  // Anthropic's input window excludes the independent completion budget.
+  if (api === 'anthropic-messages') return contextWindow;
+  if (!Number.isFinite(contextWindow) || contextWindow <= 1) return 1;
+  const windowInt = Math.floor(contextWindow);
+  let reserve;
+  if (Number.isFinite(maxTokens) && maxTokens > 0) {
+    reserve = Math.min(Math.floor(maxTokens), Math.floor(windowInt * 0.25));
+  } else {
+    reserve = Math.floor(windowInt * 0.1);
+  }
+  reserve = Math.max(1, Math.min(reserve, windowInt - 1));
+  return Math.max(1, windowInt - reserve);
+}
+
+function parsePositiveInt(raw) {
+  if (typeof raw !== 'string') return undefined;
+  const cleaned = raw.replace(/,/g, '');
+  if (!/^\d+$/.test(cleaned)) return undefined;
+  const n = Number(cleaned);
+  return Number.isSafeInteger(n) && n > 0 ? n : undefined;
+}
+
+export function parseOverflowLimits(errorMessage) {
+  if (typeof errorMessage !== 'string' || errorMessage.length === 0) {
+    return {};
+  }
+  let contextWindow;
+  let inputLimit;
+  let outputReserve;
+  let actualTokens;
+
+  const setMin = (cur, next) => (next === undefined ? cur : cur === undefined ? next : Math.min(cur, next));
+  const setMax = (cur, next) => (next === undefined ? cur : cur === undefined ? next : Math.max(cur, next));
+
+  // Input/prompt-specific limits (already exclude output reserve)
+  const anthropic = /prompt (?:is )?too long:\s*([\d,]+)\s*tokens?\s*>\s*([\d,]+)\s*maximum/i.exec(errorMessage);
+  if (anthropic) {
+    actualTokens = setMax(actualTokens, parsePositiveInt(anthropic[1]));
+    inputLimit = setMin(inputLimit, parsePositiveInt(anthropic[2]));
+  }
+  const gemini = /input token count\s*\(([\d,]+)\)\s*exceeds the maximum(?: number of tokens)? allowed\s*\(([\d,]+)\)/i.exec(errorMessage);
+  if (gemini) {
+    actualTokens = setMax(actualTokens, parsePositiveInt(gemini[1]));
+    inputLimit = setMin(inputLimit, parsePositiveInt(gemini[2]));
+  }
+  const xai = /maximum prompt length is\s*([\d,]+)(?:.*?contains\s*([\d,]+)\s*tokens?)?/i.exec(errorMessage);
+  if (xai) {
+    inputLimit = setMin(inputLimit, parsePositiveInt(xai[1]));
+    actualTokens = setMax(actualTokens, parsePositiveInt(xai[2]));
+  }
+  const orInput = /input length\s*\(?([\d,]+)\)?\s*exceeds (?:the )?maximum allowed input length of\s*([\d,]+)\s*tokens?/i.exec(errorMessage);
+  if (orInput) {
+    actualTokens = setMax(actualTokens, parsePositiveInt(orInput[1]));
+    inputLimit = setMin(inputLimit, parsePositiveInt(orInput[2]));
+  }
+  const copilot = /prompt token count of\s*([\d,]+)\s*exceeds (?:the )?limit of\s*([\d,]+)/i.exec(errorMessage);
+  if (copilot) {
+    actualTokens = setMax(actualTokens, parsePositiveInt(copilot[1]));
+    inputLimit = setMin(inputLimit, parsePositiveInt(copilot[2]));
+  }
+  const dashscope = /range of input length should be\s*\[\s*[\d,]+\s*,\s*([\d,]+)\s*\]/i.exec(errorMessage);
+  if (dashscope) {
+    inputLimit = setMin(inputLimit, parsePositiveInt(dashscope[1]));
+  }
+
+  // Total context window limits (input + output)
+  const maxCtxIs = /maximum context length is\s*([\d,]+)\s*tokens?/i.exec(errorMessage);
+  if (maxCtxIs) {
+    contextWindow = setMin(contextWindow, parsePositiveInt(maxCtxIs[1]));
+  }
+  const maxCtxOf = /(?:input length\s*\(([\d,]+)\)\s*)?exceeds (?:the )?(?:model'?s )?maximum context length(?:\s+of\s*([\d,]+)\s*tokens?|\s*\(([\d,]+)\))/i.exec(errorMessage);
+  if (maxCtxOf) {
+    actualTokens = setMax(actualTokens, parsePositiveInt(maxCtxOf[1]));
+    contextWindow = setMin(contextWindow, parsePositiveInt(maxCtxOf[2] ?? maxCtxOf[3]));
+  }
+  const together = /input\s*\(([\d,]+)\s*tokens?\)\s*is longer than the model'?s context length\s*\(([\d,]+)\s*tokens?\)/i.exec(errorMessage);
+  if (together) {
+    actualTokens = setMax(actualTokens, parsePositiveInt(together[1]));
+    contextWindow = setMin(contextWindow, parsePositiveInt(together[2]));
+  }
+  const kimi = /exceeded model token limit:\s*([\d,]+)(?:\s*\(requested:\s*([\d,]+)\))?/i.exec(errorMessage);
+  if (kimi) {
+    contextWindow = setMin(contextWindow, parsePositiveInt(kimi[1]));
+    actualTokens = setMax(actualTokens, parsePositiveInt(kimi[2]));
+  }
+  const ds4 = /prompt has\s*([\d,]+)\s*tokens?,?\s*but (?:the )?configured context size is\s*([\d,]+)\s*tokens?/i.exec(errorMessage);
+  if (ds4) {
+    actualTokens = setMax(actualTokens, parsePositiveInt(ds4[1]));
+    contextWindow = setMin(contextWindow, parsePositiveInt(ds4[2]));
+  }
+  const mistral = /prompt contains\s*([\d,]+)\s*tokens?.*?model with\s*([\d,]+)\s*maximum context length/i.exec(errorMessage);
+  if (mistral) {
+    actualTokens = setMax(actualTokens, parsePositiveInt(mistral[1]));
+    contextWindow = setMin(contextWindow, parsePositiveInt(mistral[2]));
+  }
+
+  // Output / completion reserve & input breakdown
+  const inMessages = /([\d,]+)\s+(?:in the messages|in your prompt|of (?:text )?input)/i.exec(errorMessage);
+  if (inMessages) {
+    actualTokens = parsePositiveInt(inMessages[1]) ?? actualTokens;
+  }
+  const inCompletion = /([\d,]+)\s+(?:in|for) the (?:completion|output)/i.exec(errorMessage);
+  if (inCompletion) {
+    outputReserve = setMax(outputReserve, parsePositiveInt(inCompletion[1]));
+  }
+  const maxTokensHint = /(?:max_completion_tokens|max_output_tokens|max_tokens)\s*(?:=|:|is|of)\s*([\d,]+)/i.exec(errorMessage);
+  if (maxTokensHint) {
+    outputReserve = setMax(outputReserve, parsePositiveInt(maxTokensHint[1]));
+  }
+  if (actualTokens === undefined) {
+    const reqTotal = /(?:messages resulted in|you requested(?: about)?)\s*([\d,]+)\s*tokens?/i.exec(errorMessage);
+    if (reqTotal) {
+      const totalReported = parsePositiveInt(reqTotal[1]);
+      if (totalReported !== undefined) {
+        actualTokens = outputReserve !== undefined && totalReported > outputReserve
+          ? totalReported - outputReserve
+          : totalReported;
+      }
+    }
+  }
+
+  return {
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
+    ...(inputLimit !== undefined ? { inputLimit } : {}),
+    ...(outputReserve !== undefined ? { outputReserve } : {}),
+    ...(actualTokens !== undefined ? { actualTokens } : {}),
+  };
+}
+
+export function computeOverflowRecoveryBudget({
+  configuredContextWindow,
+  modelMaxTokens = 0,
+  sentEstimatedTokens,
+  errorMessage,
+}) {
+  const configured = Number.isFinite(configuredContextWindow) && configuredContextWindow > 0
+    ? Math.floor(configuredContextWindow)
+    : 1;
+  const sent = Number.isFinite(sentEstimatedTokens) && sentEstimatedTokens > 0
+    ? Math.floor(sentEstimatedTokens)
+    : 0;
+  const parsed = parseOverflowLimits(errorMessage);
+
+  // Clamp downward for this turn only; never widen and never write back to the model catalog.
+  const reportedBound = parsed.contextWindow !== undefined && parsed.inputLimit !== undefined
+    ? Math.min(parsed.contextWindow, parsed.inputLimit)
+    : (parsed.contextWindow ?? parsed.inputLimit);
+  const effectiveContextWindow = reportedBound !== undefined && reportedBound < configured
+    ? reportedBound
+    : configured;
+
+  let windowTarget;
+  if (parsed.inputLimit !== undefined) {
+    const effectiveInputCap = Math.min(effectiveContextWindow, parsed.inputLimit);
+    windowTarget = effectiveInputCap > 1
+      ? Math.max(1, Math.min(effectiveInputCap - 1, Math.floor(effectiveInputCap * 0.95)))
+      : 1;
+  } else if (parsed.contextWindow !== undefined) {
+    let reserve = 0;
+    if (parsed.outputReserve !== undefined && parsed.outputReserve > 0 && parsed.outputReserve < effectiveContextWindow) {
+      reserve = parsed.outputReserve;
+    } else if (Number.isFinite(modelMaxTokens) && modelMaxTokens > 0 && effectiveContextWindow > 1) {
+      reserve = Math.min(Math.floor(modelMaxTokens), Math.floor(effectiveContextWindow * 0.5));
+    }
+    const available = Math.max(1, effectiveContextWindow - reserve);
+    windowTarget = available > 1
+      ? Math.max(1, Math.min(available - 1, Math.floor(available * 0.95)))
+      : 1;
+  }
+
+  if (windowTarget !== undefined && parsed.actualTokens !== undefined && sent > 0 && parsed.actualTokens > sent) {
+    windowTarget = Math.max(1, Math.floor(windowTarget * (sent / parsed.actualTokens)));
+  }
+
+  // Must strictly shrink below the rejected request (90%, and <= sent - 1 when sent > 1).
+  const shrinkCap = sent > 1
+    ? Math.min(sent - 1, Math.max(1, Math.floor(sent * 0.9)))
+    : (sent === 1 ? 1 : Math.max(1, effectiveContextWindow - 1));
+  const windowCap = effectiveContextWindow > 1 ? effectiveContextWindow - 1 : 1;
+
+  const targetTokens = windowTarget !== undefined
+    ? Math.max(1, Math.min(windowTarget, shrinkCap, windowCap))
+    : Math.max(1, Math.min(shrinkCap, windowCap));
+
+  return {
+    effectiveContextWindow,
+    targetTokens,
+    parsed,
   };
 }
