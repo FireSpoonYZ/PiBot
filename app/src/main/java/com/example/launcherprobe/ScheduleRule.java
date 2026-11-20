@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
+import java.time.format.DateTimeParseException;
 import java.util.Arrays;
 
 /** Wall-clock recurrence; a missing monthly date is skipped, never clamped. */
@@ -17,12 +18,13 @@ final class ScheduleRule {
     final int weekday;
     final int monthDay;
     final int[] weekdays;
+    private final LocalDate onceDate;
 
     ScheduleRule(String repeat, String time, int weekday, int monthDay) {
-        this(repeat, time, new int[]{weekday}, monthDay);
+        this(repeat, time, new int[]{weekday}, monthDay, null);
     }
 
-    private ScheduleRule(String repeat, String time, int[] weekdays, int monthDay) {
+    private ScheduleRule(String repeat, String time, int[] weekdays, int monthDay, LocalDate onceDate) {
         if (!("once".equals(repeat) || "daily".equals(repeat) || "weekly".equals(repeat) || "monthly".equals(repeat)
                 || "statutoryWorkday".equals(repeat) || "statutoryHoliday".equals(repeat)))
             throw new IllegalArgumentException("请选择有效的重复方式");
@@ -42,6 +44,7 @@ final class ScheduleRule {
         this.time = LocalTime.parse(time);
         this.weekday = weekday;
         this.monthDay = monthDay;
+        this.onceDate = onceDate;
     }
 
     static ScheduleRule fromJson(JSONObject value) {
@@ -63,8 +66,21 @@ final class ScheduleRule {
                 }
             } else days = new int[]{integer(value, "weekday")};
         }
+        LocalDate onceDate = null;
+        if (value.has("date")) {
+            if (!"once".equals(repeat)) throw new IllegalArgumentException("只有单次任务可以指定执行日期");
+            String date = text(value, "date");
+            if (!date.matches("[1-9][0-9]{3}-[0-9]{2}-[0-9]{2}")) {
+                throw new IllegalArgumentException("执行日期必须是有效的 YYYY-MM-DD");
+            }
+            try {
+                onceDate = LocalDate.parse(date);
+            } catch (DateTimeParseException failure) {
+                throw new IllegalArgumentException("执行日期必须是有效的 YYYY-MM-DD", failure);
+            }
+        }
         return new ScheduleRule(repeat, time, days,
-                "monthly".equals(repeat) ? integer(value, "monthDay") : 1);
+                "monthly".equals(repeat) ? integer(value, "monthDay") : 1, onceDate);
     }
 
     boolean isStatutory() {
@@ -76,6 +92,11 @@ final class ScheduleRule {
     }
 
     long nextAfter(long after, ZoneId zone, ScheduleCalendar calendar) {
+        if (onceDate != null) {
+            long candidate = onceDate.atTime(time).atZone(zone).toInstant().toEpochMilli();
+            if (candidate <= after) throw new IllegalArgumentException("单次任务的执行时间已过，请选择将来的日期和时间");
+            return candidate;
+        }
         Instant instant = Instant.ofEpochMilli(after);
         for (LocalDate day = instant.atZone(zone).toLocalDate(); ; day = day.plusDays(1)) {
             if ("weekly".equals(repeat) && Arrays.binarySearch(weekdays, day.getDayOfWeek().getValue()) < 0) continue;
@@ -95,6 +116,7 @@ final class ScheduleRule {
             for (int day : weekdays) days.put(day);
             value.put("weekdays", days);
         }
+        if (onceDate != null) value.put("date", onceDate.toString());
         return value;
     }
 

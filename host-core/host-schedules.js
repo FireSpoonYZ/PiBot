@@ -133,6 +133,7 @@ function taskDTO(task, runs) {
     'prompt',
     'repeat',
     'time',
+    'date',
     'weekday',
     'weekdays',
     'monthDay',
@@ -467,6 +468,7 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
       vibrate: Boolean(input.vibrate),
       deleteAfterRun: Boolean(input.deleteAfterRun),
     };
+    if (input.date !== undefined) task.date = input.date;
     if (input.weekday !== undefined) task.weekday = input.weekday;
     if (input.weekdays !== undefined) task.weekdays = input.weekdays.slice();
     if (input.monthDay !== undefined) task.monthDay = input.monthDay;
@@ -839,6 +841,7 @@ export function createScheduleManager({ host, getRuntime, isOnline, nativeBridge
       }
       if (input.weekday !== undefined && input.weekdays === undefined) delete merged.weekdays;
       if (input.weekdays !== undefined && input.weekday === undefined) delete merged.weekday;
+      if (input.date === null || (input.date === undefined && merged.repeat !== 'once')) delete merged.date;
       validateScheduleTaskFields(merged);
       const now = Date.now();
       const zoneId = resolveSystemTimeZone();

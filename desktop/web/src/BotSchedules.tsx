@@ -14,6 +14,7 @@ interface ScheduleTaskItem {
   prompt?: string;
   repeat: ScheduleRepeat;
   time: string;
+  date?: string;
   weekday?: number;
   weekdays?: number[];
   monthDay?: number;
@@ -37,6 +38,7 @@ interface ScheduleDraft {
   prompt: string;
   repeat: ScheduleRepeat;
   time: string;
+  date?: string;
   weekdays: number[];
   monthDay: number;
   alarmMode: 'exact' | 'alarmClock';
@@ -91,11 +93,12 @@ function formatRepeatLabel(task: ScheduleTaskItem): string {
   }
 }
 
-function formatNextRun(nextRunAt: number | undefined, timeZone: string): string | null {
+function formatNextRun(nextRunAt: number | undefined, timeZone: string, includeYear: boolean): string | null {
   if (!nextRunAt || nextRunAt <= 0 || !timeZone) return null;
   try {
     return new Intl.DateTimeFormat('zh-CN', {
       timeZone,
+      year: includeYear ? 'numeric' : undefined,
       month: '2-digit',
       day: '2-digit',
       hour: '2-digit',
@@ -111,6 +114,7 @@ function scheduleRuleFields(draft: ScheduleDraft) {
   return {
     repeat: draft.repeat,
     time: draft.time,
+    ...(draft.repeat === 'once' && draft.date ? { date: draft.date } : {}),
     ...(draft.repeat === 'weekly' ? { weekdays: draft.weekdays.slice().sort((a, b) => a - b) } : {}),
     ...(draft.repeat === 'monthly' ? { monthDay: Math.min(31, Math.max(1, Math.round(draft.monthDay))) } : {}),
   };
@@ -124,7 +128,7 @@ function previewNextRun(draft: ScheduleDraft, now: number | null, timeZone: stri
     const next = rule.nextAfter(now, timeZone, calendar);
     const calendarInfo: ScheduleCalendarDescription = {};
     calendar.describe(calendarInfo, rule, now, next, timeZone);
-    const time = formatNextRun(next, timeZone);
+    const time = formatNextRun(next, timeZone, draft.repeat === 'once' && Boolean(draft.date));
     return time ? { time, ...calendarInfo } : null;
   } catch {
     return null;
@@ -264,6 +268,7 @@ export function BotSchedules({
       prompt: task.prompt ?? '',
       repeat: task.repeat,
       time: task.time || '08:00',
+      date: task.date,
       weekdays: days,
       monthDay: task.monthDay ?? 1,
       alarmMode: task.alarmMode === 'exact' ? 'exact' : 'alarmClock',
@@ -361,6 +366,7 @@ export function BotSchedules({
             id: draft.id,
             revision: draft.revision,
             ...basePayload,
+            ...(draft.repeat === 'once' && draft.date === '' ? { date: null } : {}),
           },
         });
         setNotice(`已更新定时任务「${title}」。`);
@@ -515,6 +521,20 @@ export function BotSchedules({
                 </select>
               </div>
 
+              {draft.repeat === 'once' ? (
+                <label className="bot-sched-row">
+                  <span className="bot-sched-row-label">执行日期（可选）</span>
+                  <input
+                    type="date"
+                    className="bot-sched-time-input"
+                    max="9999-12-31"
+                    value={draft.date ?? ''}
+                    disabled={busy}
+                    onChange={(e) => setDraft((prev) => ({ ...prev, date: e.target.value }))}
+                  />
+                </label>
+              ) : null}
+
               {draft.repeat === 'weekly' && customWeekdays ? (
                 <div className="bot-sched-row bot-sched-weekday-row">
                   {[1, 2, 3, 4, 5, 6, 7].map((day) => {
@@ -659,7 +679,7 @@ export function BotSchedules({
         <div className="bot-sched-list">
           {tasks.map((task) => {
             const isEnabled = task.enabled !== false;
-            const nextRun = formatNextRun(task.nextRunAt, timeZone);
+            const nextRun = formatNextRun(task.nextRunAt, timeZone, Boolean(task.date));
             return (
               <section key={task.id} className={`bot-sched-card${isEnabled ? '' : ' paused'}`}>
                 <div className="bot-sched-card-top">

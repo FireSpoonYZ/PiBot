@@ -1023,7 +1023,7 @@ export function BotSchedulesScreen({
                         <span className="grok-schedule-title">{title}</span>
                         <span className="grok-schedule-next">
                           {isEnabled
-                            ? t('下次执行 · ', 'Next run · ') + formatScheduleNextRun(task.nextRunAt, botScheduleState.timeZone, t)
+                            ? t('下次执行 · ', 'Next run · ') + formatScheduleNextRun(task.nextRunAt, botScheduleState.timeZone, t, Boolean(task.date))
                             : t('已暂停', 'Paused')}
                           {runNotice && <span className="grok-schedule-run-notice">{` · ${runNotice}`}</span>}
                         </span>
@@ -1132,6 +1132,20 @@ export function BotSchedulesScreen({
                 </label>
               </div>
 
+              {scheduleDraft.repeat === 'once' && (
+                <label className="grok-card-row grok-input-row">
+                  <span className="grok-input-label">{t('执行日期（可选）', 'Date (optional)')}</span>
+                  <input
+                    type="date"
+                    className="grok-inline-input grok-time-input"
+                    max="9999-12-31"
+                    value={scheduleDraft.date ?? ''}
+                    disabled={action.busy || scheduleOffline}
+                    onChange={e => setScheduleDraft(prev => ({ ...prev, date: e.target.value }))}
+                  />
+                </label>
+              )}
+
               {scheduleDraft.repeat === 'weekly' && scheduleCustomWeekdays && (
                 <div className="grok-card-row grok-weekday-row">
                   {[
@@ -1185,6 +1199,12 @@ export function BotSchedulesScreen({
                 </label>
               )}
             </section>
+            {scheduleDraft.repeat === 'once' && (
+              <p className="grok-card-footnote">
+                {t('按目标设备时区计算；不选日期则在下一次到点时执行。',
+                  'Uses the target device’s time zone. With no date, runs at the next matching time.')}
+              </p>
+            )}
           </div>
 
           {/* Task Content Section */}

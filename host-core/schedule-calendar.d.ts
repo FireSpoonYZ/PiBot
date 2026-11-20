@@ -28,9 +28,9 @@ export class ScheduleCalendar {
 export function getDefaultScheduleCalendar(): ScheduleCalendar;
 
 export class ScheduleRule {
-  constructor(repeat: ScheduleRepeat, time: string, weekdaysInput: number | number[], monthDay?: number);
+  constructor(repeat: ScheduleRepeat, time: string, weekdaysInput: number | number[], monthDay?: number, date?: string);
   static fromJson(value: unknown): ScheduleRule;
   isStatutory(): boolean;
   nextAfter(afterMs: number, zoneId?: string, calendar?: ScheduleCalendar): number;
-  json(): { repeat: ScheduleRepeat; time: string; weekday: number; monthDay: number; weekdays?: number[] };
+  json(): { repeat: ScheduleRepeat; time: string; weekday: number; monthDay: number; weekdays?: number[]; date?: string };
 }

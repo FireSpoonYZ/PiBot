@@ -330,7 +330,7 @@ export function getDefaultScheduleCalendar() {
 }
 
 export class ScheduleRule {
-  constructor(repeat, time, weekdaysInput, monthDay = 1) {
+  constructor(repeat, time, weekdaysInput, monthDay = 1, date) {
     if (typeof repeat !== 'string' || !REPEATS_SET.has(repeat)) {
       throw new Error('请选择有效的重复方式');
     }
@@ -363,6 +363,15 @@ export class ScheduleRule {
     this.hour = Number(hourStr);
     this.minute = Number(minuteStr);
     this.monthDay = monthDay;
+    if (date !== undefined) {
+      if (repeat !== 'once') throw new Error('只有单次任务可以指定执行日期');
+      const match = typeof date === 'string' ? DATE_RE.exec(date) : null;
+      const [year, month, day] = match ? match.slice(1).map(Number) : [];
+      if (year < 1000 || !isValidLocalDate(year, month, day)) {
+        throw new Error('执行日期必须是有效的 YYYY-MM-DD');
+      }
+      this.onceDate = { year, month, day };
+    }
   }
 
   static fromJson(value) {
@@ -392,7 +401,7 @@ export class ScheduleRule {
       if (!Number.isInteger(value.monthDay)) throw new Error('monthDay 必须是整数');
       monthDay = value.monthDay;
     }
-    return new ScheduleRule(repeat, time, days, monthDay);
+    return new ScheduleRule(repeat, time, days, monthDay, value.date);
   }
 
   isStatutory() {
@@ -400,6 +409,12 @@ export class ScheduleRule {
   }
 
   nextAfter(afterMs, zoneId = 'UTC', calendar = ScheduleCalendar.EMPTY) {
+    if (this.onceDate) {
+      const { year, month, day } = this.onceDate;
+      const candidate = zonedWallTimeToEpochMs(year, month, day, this.hour, this.minute, zoneId);
+      if (candidate <= afterMs) throw new Error('单次任务的执行时间已过，请选择将来的日期和时间');
+      return candidate;
+    }
     const startParts = zonedDatePartsAt(afterMs, zoneId);
     let cur = { year: startParts.year, month: startParts.month, day: startParts.day };
     for (;;) {
@@ -437,6 +452,10 @@ export class ScheduleRule {
     };
     if (this.repeat === 'weekly') {
       out.weekdays = this.weekdays.slice();
+    }
+    if (this.onceDate) {
+      const { year, month, day } = this.onceDate;
+      out.date = formatDateKey(year, month, day);
     }
     return out;
   }

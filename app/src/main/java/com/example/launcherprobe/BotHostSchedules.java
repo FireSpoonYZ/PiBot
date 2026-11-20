@@ -67,9 +67,9 @@ final class BotHostSchedules {
     private static final Set<String> SUBMISSION_TERMINAL = Set.of("done", "unanswered");
     private static final Set<String> SUBMISSION_ACTIVE = Set.of("queued", "placed");
     private static final Set<String> CREATE_FIELDS = Set.of("action", "title", "prompt", "skills", "repeat", "time",
-            "weekday", "weekdays", "monthDay", "alarmMode", "vibrate", "deleteAfterRun");
+            "date", "weekday", "weekdays", "monthDay", "alarmMode", "vibrate", "deleteAfterRun");
     private static final Set<String> UPDATE_FIELDS = Set.of("action", "id", "revision", "title", "prompt", "skills",
-            "repeat", "time", "weekday", "weekdays", "monthDay", "alarmMode", "vibrate", "deleteAfterRun");
+            "repeat", "time", "date", "weekday", "weekdays", "monthDay", "alarmMode", "vibrate", "deleteAfterRun");
     private static final Set<String> MUTATION_ID_FIELDS = Set.of("action", "id", "revision");
     private static final Set<String> ENABLE_FIELDS = Set.of("action", "id", "revision", "enabled");
     private static final Set<String> LIST_FIELDS = Set.of("action", "cursor", "limit");
@@ -557,6 +557,10 @@ final class BotHostSchedules {
             // weekday/weekdays 互斥合并：更新其一须清除另一，避免旧规则静默生效。
             if (input.has("weekday") && !input.has("weekdays")) merged.remove("weekdays");
             if (input.has("weekdays") && !input.has("weekday")) merged.remove("weekday");
+            if (input.opt("date") == JSONObject.NULL
+                    || (!input.has("date") && !"once".equals(merged.optString("repeat")))) {
+                merged.remove("date");
+            }
             validateTaskFields(merged);
             long now = System.currentTimeMillis();
             ZoneId zone = ZoneId.systemDefault();
@@ -1414,6 +1418,7 @@ final class BotHostSchedules {
             task.put("skills", input.has("skills") ? input.get("skills") : new JSONArray());
             copyField(input, task, "repeat");
             copyField(input, task, "time");
+            if (input.has("date")) copyField(input, task, "date");
             if (input.has("weekday")) copyField(input, task, "weekday");
             if (input.has("weekdays")) copyField(input, task, "weekdays");
             if (input.has("monthDay")) copyField(input, task, "monthDay");
@@ -1656,8 +1661,8 @@ final class BotHostSchedules {
     private JSONObject taskDTO(JSONObject task, JSONArray runs) throws JSONException {
         JSONObject dto = new JSONObject();
         dto.put("skills", task.has("skills") ? task.getJSONArray("skills") : new JSONArray());
-        String[] keys = {"id", "revision", "enabled", "title", "prompt", "skills", "repeat", "time", "weekday", "weekdays",
-                "monthDay", "alarmMode", "vibrate", "deleteAfterRun", "nextRunAt", "sourceTaskId",
+        String[] keys = {"id", "revision", "enabled", "title", "prompt", "skills", "repeat", "time", "date",
+                "weekday", "weekdays", "monthDay", "alarmMode", "vibrate", "deleteAfterRun", "nextRunAt", "sourceTaskId",
                 "createdAt", "updatedAt"};
         for (String key : keys) {
             if (task.has(key)) dto.put(key, task.get(key));

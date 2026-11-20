@@ -357,6 +357,7 @@ export interface BotScheduleTask {
   prompt?: string;
   repeat: BotScheduleRepeat;
   time: string;
+  date?: string;
   weekday?: number;
   weekdays?: number[];
   monthDay?: number;
@@ -382,6 +383,7 @@ export interface BotScheduleDraft {
   prompt: string;
   repeat: BotScheduleRepeat;
   time: string;
+  date?: string;
   weekdays: number[];
   monthDay: number;
   alarmMode: 'alarmClock' | 'exact';
@@ -421,11 +423,13 @@ export function formatScheduleNextRun(
   nextRunAt: number,
   timeZone: string,
   t: (zh: string, en: string) => string,
+  includeYear: boolean,
 ): string {
   if (!nextRunAt || nextRunAt <= 0) return t('未计划', 'Not scheduled');
   try {
     return new Intl.DateTimeFormat(t('zh-CN', 'en-US'), {
       timeZone: timeZone || undefined,
+      year: includeYear ? 'numeric' : undefined,
       month: 'numeric',
       day: 'numeric',
       hour: '2-digit',

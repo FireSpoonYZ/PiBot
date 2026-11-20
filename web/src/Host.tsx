@@ -4015,6 +4015,7 @@ ${newer}` : draftSnapshot;
       prompt: task.prompt ?? '',
       repeat: task.repeat,
       time: task.time || '08:00',
+      date: task.date,
       weekdays: days,
       monthDay: task.monthDay ?? 1,
       alarmMode: task.alarmMode === 'exact' ? 'exact' : 'alarmClock',
@@ -4103,6 +4104,8 @@ ${newer}` : draftSnapshot;
         basePayload.weekdays = scheduleDraft.weekdays.slice().sort((a, b) => a - b);
       } else if (scheduleDraft.repeat === 'monthly') {
         basePayload.monthDay = Math.min(31, Math.max(1, Math.round(scheduleDraft.monthDay)));
+      } else if (scheduleDraft.repeat === 'once' && scheduleDraft.date) {
+        basePayload.date = scheduleDraft.date;
       }
 
       if (scheduleEditing === 'edit' && scheduleDraft.id && scheduleDraft.revision) {
@@ -4111,6 +4114,7 @@ ${newer}` : draftSnapshot;
           id: scheduleDraft.id,
           revision: scheduleDraft.revision,
           ...basePayload,
+          ...(scheduleDraft.repeat === 'once' && scheduleDraft.date === '' ? { date: null } : {}),
         });
       } else {
         await executeActiveBotSchedule({
