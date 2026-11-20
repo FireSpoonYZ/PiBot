@@ -699,45 +699,26 @@ test('Host protocol whitelists accept google-workspace-rule only on host senders
     { kind: 'user', deviceId: 'dev-1' },
   );
 
-  const normalized = normalizeLiveSnapshot({
+  const snapshotFor = (kind) => ({
+    type: 'snapshot',
     botId: 'bot-a',
     conversationId: 'conv-1',
-    busy: false,
-    queuedCount: 0,
-    activity: null,
-    historyTruncated: false,
-    history: [{
-      id: 1,
-      kind: 'host.user-message',
-      attribution: {
-        kind: 'host',
-        channel: 'primary',
-        sourceType: GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
-        name: 'Gmail · VIP',
-      },
-      messages: [{ role: 'user', text: 'Rule triggered', truncated: false }],
-    }],
+    sequence: 1,
+    state: {
+      busy: false, queuedCount: 0, historyTruncated: false, toolsTruncated: false,
+      generation: null, lastEntryId: 1, tools: [],
+      history: [{
+        id: 1, kind: 'host.user-message',
+        attribution: { kind, channel: 'primary', sourceType: GOOGLE_WORKSPACE_RULE_SOURCE_TYPE },
+        messages: [{ role: 'user', text: 'Rule triggered', truncated: false }],
+      }],
+    },
   });
-  assert.equal(normalized.history[0].attribution.sourceType, GOOGLE_WORKSPACE_RULE_SOURCE_TYPE);
-
-  assert.throws(() => normalizeLiveSnapshot({
-    botId: 'bot-a',
-    conversationId: 'conv-1',
-    busy: false,
-    queuedCount: 0,
-    activity: null,
-    historyTruncated: false,
-    history: [{
-      id: 2,
-      kind: 'host.user-message',
-      attribution: {
-        kind: 'user',
-        channel: 'primary',
-        sourceType: GOOGLE_WORKSPACE_RULE_SOURCE_TYPE,
-      },
-      messages: [{ role: 'user', text: 'Spoofed', truncated: false }],
-    }],
-  }));
+  const normalized = normalizeLiveSnapshot(snapshotFor('host'));
+  assert.equal(normalized.state.history[0].attribution.sourceType, GOOGLE_WORKSPACE_RULE_SOURCE_TYPE);
+  for (const sender of ['user', 'bot']) {
+    assert.throws(() => normalizeLiveSnapshot(snapshotFor(sender)), /sourceType/);
+  }
 
   // Pure helper filterCleanEntriesForLearning respects compaction persistence & reset recovery.
   const filtered = filterCleanEntriesForLearning(
