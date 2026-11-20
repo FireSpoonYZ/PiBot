@@ -5,6 +5,7 @@ import type { CenterBotModelConfig, CenterModelPicker, CenterModelSelection } fr
 import type { BotSoul, RemoteControlMethodMap } from '../../../host-core/index.js';
 import { toError } from './api';
 import { BotCapabilities } from './BotCapabilities';
+import type { GoogleSetupControlCall } from '../../../web/src/google/types';
 import { BotSchedules } from './BotSchedules';
 import { openCenterManagement } from './CenterGate';
 import type { CenterAdminTab } from './SettingsPanel';
@@ -580,6 +581,8 @@ interface BotSettingsProps {
   open?: boolean;
   onOpenChange?: (next: boolean) => void;
   onOpenCenterAdmin?: (tab?: CenterAdminTab) => void;
+  onOpenBrowser?: () => void;
+  callGoogleSetup?: GoogleSetupControlCall;
   onModelSaved?: (config: CenterBotModelConfig) => void;
 }
 
@@ -598,6 +601,8 @@ function BotSettingsSession({
   tab,
   draftKey: key,
   onOpenCenterAdmin,
+  onOpenBrowser,
+  callGoogleSetup,
   onModelSaved,
 }: BotSettingsProps & { draftKey: string }) {
   const identity = api.identity;
@@ -836,6 +841,10 @@ function BotSettingsSession({
             identity={identity}
             deviceId={identity.targetDeviceId}
             botId={botId}
+            botName={botName}
+            hostPlatform={hostPlatform}
+            callGoogleSetup={callGoogleSetup}
+            onOpenBrowser={onOpenBrowser}
             showTitle={false}
             onOpenCenterAdmin={() => onOpenCenterAdmin?.('capabilities')}
           />

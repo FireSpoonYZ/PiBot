@@ -6,6 +6,7 @@ import {
   ChevronsUpDown,
   Clock,
   Cpu,
+  Globe,
   LockKeyhole,
   Monitor,
   Pencil,
@@ -72,6 +73,7 @@ export interface BotProfileScreenProps {
   onOpenSchedules(): void;
   onOpenVault(): void;
   onOpenComputer(): void;
+  onOpenBrowser?: () => void;
   onOpenManage(): void;
 }
 
@@ -100,6 +102,7 @@ export function BotProfileScreen({
   onOpenSchedules,
   onOpenVault,
   onOpenComputer,
+  onOpenBrowser,
   onOpenManage,
 }: BotProfileScreenProps) {
   const t = useText();
@@ -255,6 +258,18 @@ export function BotProfileScreen({
               <span className="grok-row-value">{isBotBusy ? t('运行中', 'Active') : t('空闲', 'Idle')}</span>
               <ChevronRight size={18} className="grok-row-chevron" />
             </button>
+            {onOpenBrowser ? (
+              <button
+                type="button"
+                className="grok-card-row"
+                onClick={onOpenBrowser}
+              >
+                <Globe size={20} className="grok-row-icon" />
+                <span className="grok-row-label">{t('Bot 浏览器', 'Bot Browser')}</span>
+                <span className="grok-row-value">{t('独立会话', 'Isolated')}</span>
+                <ChevronRight size={18} className="grok-row-chevron" />
+              </button>
+            ) : null}
             <button ref={profileManageTriggerRef} type="button" className="grok-card-row" onClick={onOpenManage}>
               <Settings size={20} className="grok-row-icon" />
               <span className="grok-row-label">{t('管理 Bot', 'Manage bot')}</span>

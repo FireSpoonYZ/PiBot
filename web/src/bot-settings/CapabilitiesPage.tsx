@@ -11,6 +11,9 @@ import {
   type Field,
 } from '../../../desktop/web/src/useBotCapabilities';
 import { openCenterManagement } from '../native';
+import { GoogleCapabilitySection } from '../google/GoogleCapabilitySection';
+import { isSharedGoogleCapabilityEntry } from '../google/googleCopy';
+import type { GoogleSetupControlCall } from '../google/types';
 import { ErrorNotice, errorText, useText } from '../ui';
 import { centerAdminRequest, newRequestId, pollCenterOperation } from './centerAdminBroker';
 import {
@@ -32,7 +35,12 @@ export interface CapabilitiesPageProps {
   identity: DesktopIdentity;
   deviceId: string;
   botId: string;
+  botName?: string;
   mode?: 'tools' | 'all';
+  hostPlatform?: string;
+  isLocalAndroid?: boolean;
+  callGoogleSetup?: GoogleSetupControlCall;
+  onOpenBrowser?: () => void;
   onClose?: () => void;
   onOpenCenterAdmin?: () => void;
 }
@@ -53,7 +61,12 @@ export function CapabilitiesPage({
   identity,
   deviceId,
   botId,
+  botName,
   mode = 'tools',
+  hostPlatform,
+  isLocalAndroid,
+  callGoogleSetup,
+  onOpenBrowser,
   onClose,
   onOpenCenterAdmin,
 }: CapabilitiesPageProps) {
@@ -74,8 +87,9 @@ export function CapabilitiesPage({
   };
 
   const modeEntries = useMemo(() => {
-    if (mode === 'all') return state.entries;
-    return state.entries.filter(entry => entry.installation.kind !== 'skill');
+    const withoutSharedGoogle = state.entries.filter(entry => !isSharedGoogleCapabilityEntry(entry));
+    if (mode === 'all') return withoutSharedGoogle;
+    return withoutSharedGoogle.filter(entry => entry.installation.kind !== 'skill');
   }, [state.entries, mode]);
 
   const filteredEntries = useMemo(() => {
@@ -292,23 +306,47 @@ export function CapabilitiesPage({
     );
   };
 
+  const googleSection = (
+    <GoogleCapabilitySection
+      api={api}
+      identity={identity}
+      deviceId={deviceId}
+      botId={botId}
+      botName={botName}
+      variant="mobile"
+      hostPlatform={hostPlatform}
+      isLocalAndroid={isLocalAndroid}
+      callGoogleSetup={callGoogleSetup}
+      onOpenBrowser={onOpenBrowser}
+      onOpenCenterAdmin={openCenterProviders}
+    />
+  );
+
   const renderList = () => {
     if (!state.loaded && !state.error && !state.needLogin) {
-      return <LoadingState text={t('正在读取工具与插件...', 'Loading tools & plugins...')} />;
+      return (
+        <>
+          {googleSection}
+          <LoadingState text={t('正在读取工具与插件...', 'Loading tools & plugins...')} />
+        </>
+      );
     }
 
     if (modeEntries.length === 0) {
       return (
-        <EmptyState
-          icon={<Plug aria-hidden="true" />}
-          title={mode === 'tools' ? t('尚未安装可用工具或插件', 'No tools or plugins installed yet') : t('暂无可用能力', 'No capabilities installed yet')}
-          hint={t('前往中心管理安装插件或 MCP 工具服务后，可在这里为当前 Bot 按需开启。', 'Install plugins or MCP tools in Center Management, then enable them here.')}
-          action={(
-            <button type="button" className="bs-btn is-primary is-small" onClick={openCenterProviders}>
-              {t('去中心添加插件或 MCP 工具 →', 'Add plugins or MCP tools in Center →')}
-            </button>
-          )}
-        />
+        <>
+          {googleSection}
+          <EmptyState
+            icon={<Plug aria-hidden="true" />}
+            title={mode === 'tools' ? t('尚未安装可用工具或插件', 'No tools or plugins installed yet') : t('暂无可用能力', 'No capabilities installed yet')}
+            hint={t('前往中心管理安装插件或 MCP 工具服务后，可在这里为当前 Bot 按需开启。', 'Install plugins or MCP tools in Center Management, then enable them here.')}
+            action={(
+              <button type="button" className="bs-btn is-primary is-small" onClick={openCenterProviders}>
+                {t('去中心添加插件或 MCP 工具 →', 'Add plugins or MCP tools in Center →')}
+              </button>
+            )}
+          />
+        </>
       );
     }
 
@@ -321,6 +359,7 @@ export function CapabilitiesPage({
 
     return (
       <>
+        {googleSection}
         <div className="bs-cap-toolbar">
           <SearchField
             value={query}

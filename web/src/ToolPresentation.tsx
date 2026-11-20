@@ -8,6 +8,20 @@ import type {
   VaultUnlockPresentation,
 } from '../../host-core/index.js';
 import type { TaskStatus, TaskStepStatus } from './tasks/types';
+import {
+  GoogleAccountSelectCard,
+  GoogleBrowserTakeoverCard,
+  GoogleReadinessCard,
+  GoogleSetupChatCard,
+} from './google/GoogleChatCards';
+import type {
+  GoogleAccountSelectPresentation,
+  GoogleBrowserTakeoverPresentation,
+  GoogleChatCardContext,
+  GoogleReadinessPresentation,
+  GoogleSetupPresentation,
+  GoogleToolPresentation,
+} from './google/types';
 import { useText } from './ui';
 import { VaultUnlockCard } from './vault/VaultUnlockCard';
 import './tool-presentation.css';
@@ -49,9 +63,19 @@ export interface TaskPresentation {
   stepsPreview?: TaskStepPreviewPresentation[];
 }
 
-export type ToolPresentation = HostToolPresentation | TaskPresentation;
+export type ToolPresentation = HostToolPresentation | TaskPresentation | GoogleToolPresentation;
 
-export type { TodoPresentation, QuestionnairePresentation, VaultUnlockPresentation };
+export type {
+  TodoPresentation,
+  QuestionnairePresentation,
+  VaultUnlockPresentation,
+  GoogleChatCardContext,
+  GoogleToolPresentation,
+  GoogleSetupPresentation,
+  GoogleAccountSelectPresentation,
+  GoogleBrowserTakeoverPresentation,
+  GoogleReadinessPresentation,
+};
 
 /** Private vaultControl response only; never submit through questionnaire or chat actions. */
 export type VaultUnlockSubmitPayload =
@@ -187,6 +211,41 @@ export function readToolPresentation(value: unknown): ToolPresentation | null {
     if (value.serverUrl !== undefined && !isNonEmptyString(value.serverUrl)) return null;
     return value as unknown as VaultUnlockPresentation;
   }
+  if (value.kind === 'google-setup') {
+    if (!isOptString(value.botId) || !isOptString(value.runId) || !isOptString(value.card) || !isOptString(value.step)) return null;
+    if (!isOptString(value.mode) || !isOptString(value.state) || !isOptString(value.summary)) return null;
+    if (value.revision !== undefined && !isInt(value.revision)) return null;
+    return value as unknown as GoogleSetupPresentation;
+  }
+  if (value.kind === 'google-account-select') {
+    if (!isOptString(value.requestId) || !isOptString(value.botId) || !isOptString(value.actionLabel)) return null;
+    if (!isOptString(value.toolName) || !isOptString(value.service) || !isOptString(value.reason) || !isOptString(value.selectedEmail)) return null;
+    if (value.conversationId !== undefined && !isInt(value.conversationId)) return null;
+    if (value.status !== undefined && value.status !== 'pending' && value.status !== 'selected' && value.status !== 'cancelled') return null;
+    if (value.accounts !== undefined) {
+      if (!Array.isArray(value.accounts)) return null;
+      const valid = value.accounts.every(item =>
+        isRecord(item) &&
+        isNonEmptyString(item.email) &&
+        isOptString(item.id) &&
+        (item.status === undefined || item.status === 'connected' || item.status === 'reconnect'),
+      );
+      if (!valid) return null;
+    }
+    return value as unknown as GoogleAccountSelectPresentation;
+  }
+  if (value.kind === 'google-browser-takeover') {
+    if (!isOptString(value.botId) || !isOptString(value.pageId) || !isOptString(value.phase)) return null;
+    if (!isOptString(value.reason) || !isOptString(value.url) || !isOptString(value.step)) return null;
+    if (value.canStreamInteract !== undefined && typeof value.canStreamInteract !== 'boolean') return null;
+    return value as unknown as GoogleBrowserTakeoverPresentation;
+  }
+  if (value.kind === 'google-readiness') {
+    if (!isOptString(value.account) || !isOptString(value.service) || !isOptString(value.detail) || !isOptString(value.enableUrl)) return null;
+    if (value.state !== undefined && !['ready', 'needs-permission', 'api-disabled', 'blocked-by-admin', 'error', 'unconfigured', 'disconnected', 'reconnect', 'ambiguous-account'].includes(String(value.state))) return null;
+    if (value.accounts !== undefined && !(Array.isArray(value.accounts) && value.accounts.every(isNonEmptyString))) return null;
+    return value as unknown as GoogleReadinessPresentation;
+  }
   return null;
 }
 
@@ -197,6 +256,7 @@ export interface ToolPresentationCardProps {
   disabled?: boolean;
   variant?: 'desktop';
   requesterName?: string;
+  googleContext?: GoogleChatCardContext;
   onSubmit?: (input: QuestionnaireSubmitPayload) => Promise<unknown>;
   onSubmitVaultUnlock?: (input: VaultUnlockSubmitPayload) => Promise<unknown>;
   onOpenTask?: (taskId: string, openEdit?: boolean) => void;
@@ -210,6 +270,7 @@ export function ToolPresentationCard({
   disabled = false,
   variant,
   requesterName,
+  googleContext,
   onSubmit,
   onSubmitVaultUnlock,
   onOpenTask,
@@ -225,6 +286,18 @@ export function ToolPresentationCard({
   }
   if (presentation.kind === 'vault-unlock') {
     return <VaultUnlockCard presentation={presentation} active={active} disabled={disabled} requesterName={requesterName} onSubmit={onSubmitVaultUnlock} />;
+  }
+  if (presentation.kind === 'google-setup') {
+    return <GoogleSetupChatCard presentation={presentation} active={active} disabled={disabled} googleContext={googleContext} />;
+  }
+  if (presentation.kind === 'google-account-select') {
+    return <GoogleAccountSelectCard presentation={presentation} active={active} disabled={disabled} googleContext={googleContext} />;
+  }
+  if (presentation.kind === 'google-browser-takeover') {
+    return <GoogleBrowserTakeoverCard presentation={presentation} active={active} disabled={disabled} googleContext={googleContext} />;
+  }
+  if (presentation.kind === 'google-readiness') {
+    return <GoogleReadinessCard presentation={presentation} disabled={disabled} googleContext={googleContext} />;
   }
   return (
     <QuestionnaireCard

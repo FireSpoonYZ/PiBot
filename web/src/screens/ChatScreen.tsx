@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, type CSSProperties, type RefObject, typ
 import {
   Archive,
   ArrowLeft,
+  ChevronUp,
+  Globe,
   MessageSquare,
   Mic,
   MoreHorizontal,
@@ -45,7 +47,11 @@ import {
   type UnifiedQueuedStripItem,
 } from '../composerFlowControl';
 import { ComposerEditBanner, PendingQueueStrip } from '../ComposerFlowStrips';
-import type { QuestionnaireSubmitPayload, VaultUnlockSubmitPayload } from '../ToolPresentation';
+import type {
+  GoogleChatCardContext,
+  QuestionnaireSubmitPayload,
+  VaultUnlockSubmitPayload,
+} from '../ToolPresentation';
 import {
   IMAGE_MAX_COUNT,
   ImageAttachmentThumb,
@@ -159,6 +165,9 @@ export interface ChatScreenProps {
   onOpenBubbleActions(state: BubbleActionTurnState): void;
   onSubmitQuestionnaire(installationId: string, input: QuestionnaireSubmitPayload): Promise<unknown>;
   onSubmitVaultUnlock(input: VaultUnlockSubmitPayload): Promise<unknown>;
+  googleContext?: GoogleChatCardContext;
+  onOpenBrowser?: () => void;
+  browserTakeoverHint?: string | null;
 
   // Admission & stop actions
   canStopBot: boolean;
@@ -316,6 +325,9 @@ export function ChatScreen({
   onOpenBubbleActions,
   onSubmitQuestionnaire,
   onSubmitVaultUnlock,
+  googleContext,
+  onOpenBrowser,
+  browserTakeoverHint,
   canStopBot,
   isStoppingBot,
   queueActionBusy,
@@ -516,6 +528,19 @@ export function ChatScreen({
                 <MessageSquare size={19} />
                 <span>{t('查看 Bot 私聊', 'View Bot DMs')}</span>
               </button>
+              {onOpenBrowser ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseChatTopMenu();
+                    onOpenBrowser();
+                  }}
+                >
+                  <Globe size={19} />
+                  <span>{t('Bot 浏览器', 'Bot Browser')}</span>
+                </button>
+              ) : null}
               <button
                 type="button"
                 role="menuitem"
@@ -740,6 +765,7 @@ export function ChatScreen({
                               scopeKey={toolScopeKey}
                               active={isBotBusy}
                               disabled={Boolean(activeBot.archivedAt) || !botPanelConnected}
+                              googleContext={googleContext}
                               onSubmitQuestionnaire={onSubmitQuestionnaire}
                               onSubmitVaultUnlock={onSubmitVaultUnlock}
                               onOpenTask={onOpenTaskDetail}
@@ -767,6 +793,7 @@ export function ChatScreen({
                               scopeKey={toolScopeKey}
                               active={isBotBusy}
                               disabled={Boolean(activeBot.archivedAt) || !botPanelConnected}
+                              googleContext={googleContext}
                               onSubmitQuestionnaire={onSubmitQuestionnaire}
                               onSubmitVaultUnlock={onSubmitVaultUnlock}
                               onOpenTask={onOpenTaskDetail}
@@ -968,6 +995,20 @@ export function ChatScreen({
         onAnswerPrompt={onAnswerTaskPromptFromBanner}
       />
       <footer className="grok-chat-composer-area">
+        {browserTakeoverHint && onOpenBrowser ? (
+          <button
+            type="button"
+            className="gws-browser-strip"
+            onClick={onOpenBrowser}
+            aria-label={t('打开 Bot 浏览器接管页面', 'Open Bot browser to take over')}
+          >
+            <span className="gws-browser-strip-left">
+              <Globe size={16} aria-hidden="true" />
+              <span>{browserTakeoverHint}</span>
+            </span>
+            <ChevronUp size={16} aria-hidden="true" />
+          </button>
+        ) : null}
         {offlineNotice?.botKey === activeBot.key && (
           <FloatingPillToast
             message={offlineNotice.text}

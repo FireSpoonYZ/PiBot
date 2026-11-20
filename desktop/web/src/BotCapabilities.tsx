@@ -7,6 +7,9 @@ import type {
   CenterRuntimeApplyStatus,
 } from '../../../host-core/desktop-client.js';
 import type { DesktopIdentity, DesktopPanelApi } from './types';
+import { GoogleCapabilitySection } from '../../../web/src/google/GoogleCapabilitySection';
+import { isSharedGoogleCapabilityEntry } from '../../../web/src/google/googleCopy';
+import type { GoogleSetupControlCall } from '../../../web/src/google/types';
 import { flatFields, globallyReady, initialOverride, isObject, useBotCapabilities } from './useBotCapabilities';
 import './BotCapabilities.css';
 
@@ -15,6 +18,10 @@ type Props = {
   identity: DesktopIdentity;
   deviceId: string;
   botId: string;
+  botName?: string;
+  hostPlatform?: string;
+  callGoogleSetup?: GoogleSetupControlCall;
+  onOpenBrowser?: () => void;
   t?: (zh: string, en: string) => string;
   /** 外层已有同名标题时可隐藏面板自带标题。 */
   showTitle?: boolean;
@@ -30,6 +37,10 @@ export function BotCapabilities({
   identity,
   deviceId,
   botId,
+  botName,
+  hostPlatform,
+  callGoogleSetup,
+  onOpenBrowser,
   t = identityText,
   showTitle = true,
   onAuthenticated,
@@ -54,8 +65,10 @@ export function BotCapabilities({
     capabilityErrors,
   } = useBotCapabilities({ api, identity, deviceId, botId, t, onAuthenticated, waitForFreshRuntime: true });
 
-  // 技能已拆分至独立「技能」页签；本页仅展示 MCP 与插件工具扩展。
-  const toolEntries = entries.filter((entry) => entry.installation.kind !== 'skill');
+  // 技能已拆分至独立「技能」页签；中心共享 Google Workspace 由上方独立共享卡片呈现，不设逐 Bot 开关。
+  const toolEntries = entries.filter(
+    (entry) => entry.installation.kind !== 'skill' && !isSharedGoogleCapabilityEntry(entry),
+  );
 
   const statusText = (status: CenterRuntimeApplyStatus): string =>
     status === 'applied' ? t('已生效', 'Applied')
@@ -79,6 +92,19 @@ export function BotCapabilities({
   return (
     <section className="bot-cap" aria-label={t('工具扩展（MCP & 插件）', 'Tool extensions (MCP & Plugins)')} style={{ display: 'grid', gap: 10 }}>
       {showTitle ? <h4 className="bot-cap-title" style={{ margin: 0 }}>{t('工具扩展 (MCP & 插件)', 'Tool Extensions (MCP & Plugins)')}</h4> : null}
+
+      <GoogleCapabilitySection
+        api={api}
+        identity={identity}
+        deviceId={deviceId}
+        botId={botId}
+        botName={botName}
+        variant="desktop"
+        hostPlatform={hostPlatform}
+        callGoogleSetup={callGoogleSetup}
+        onOpenBrowser={onOpenBrowser}
+        onOpenCenterAdmin={onOpenCenterAdmin}
+      />
 
       {runtime ? (
         <div className="bot-cap-runtime">
