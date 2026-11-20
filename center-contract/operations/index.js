@@ -11,4 +11,6 @@ export const operationCatalog = Object.freeze(Object.entries({
   ...operation, domain, scope: `pibot:${domain}:${operation.readOnly ? 'read' : 'write'}`,
 }))));
 
-export const operationScopes = Object.freeze([...new Set(operationCatalog.map(operation => operation.scope))]);
+export const operationScopes = Object.freeze([
+  ...new Set(operationCatalog.filter(operation => operation.audiences.includes('oauth')).map(operation => operation.scope)),
+]);

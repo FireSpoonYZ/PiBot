@@ -28,8 +28,10 @@ export function openOperations(deps) {
     }
   }
 
-  const allowed = (actor, operation) => actor?.kind === 'bot'
-    || (actor?.kind === 'oauth' && actor.scopes?.includes(operation.scope));
+  const allowed = (actor, operation) => Boolean(
+    actor && operation.audiences.includes(actor.kind) &&
+    (actor.kind === 'bot' || actor.scopes?.includes(operation.scope)),
+  );
   return {
     list(actor) { return operationCatalog.filter(operation => allowed(actor, operation)); },
     async call(actor, name, args) {

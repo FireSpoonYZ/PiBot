@@ -382,13 +382,14 @@ export const operations = Object.freeze([
     required: ['deviceId', 'scopeId', 'text'],
     readOnly: false,
     destructive: false,
+    audiences: ['oauth'],
   }),
 
-  // ── Primary Session Queue & Edit Controls (OAuth-only) ────────────────────
+  // ── Primary Session Queue & Edit Controls ───────────────────────────────
   defineOperation({
     name: 'collaboration_withdraw_queued',
     description:
-      'Withdraw one queued primary-chat user message (when requestId is provided) or all unplaced queued primary-chat user messages (when requestId is omitted) for a Bot without stopping its currently active turn. Preserves Host checks (already placed/done turns are untouched). Restricted to owner-delegated OAuth callers.',
+      'Withdraw one queued primary-chat user message (when requestId is provided) or all unplaced queued primary-chat user messages (when requestId is omitted) for a Bot without stopping its currently active turn. Preserves Host checks (already placed/done turns are untouched). Allowed for owner-delegated OAuth callers and active Bots on a device with management delegation targeting another Bot (self-targeting is forbidden).',
     properties: {
       deviceId: DEVICE_ID_SCHEMA,
       botId: BOT_ID_SCHEMA,
@@ -405,7 +406,7 @@ export const operations = Object.freeze([
   defineOperation({
     name: 'collaboration_steer_queued',
     description:
-      'Promote an already-queued primary-chat user message (requestId) to steer delivery so the Host injects it at the next post-tools boundary of the active turn without reordering remaining follow-ups. Preserves Host checks (BOT_ARCHIVED, SUBMISSION_NOT_FOUND, already_placed). Restricted to owner-delegated OAuth callers.',
+      'Promote an already-queued primary-chat user message (requestId) to steer delivery so the Host injects it at the next post-tools boundary of the active turn without reordering remaining follow-ups. Preserves Host checks (BOT_ARCHIVED, SUBMISSION_NOT_FOUND, already_placed). Allowed for owner-delegated OAuth callers and active Bots on a device with management delegation targeting another Bot (self-targeting is forbidden).',
     properties: {
       deviceId: DEVICE_ID_SCHEMA,
       botId: BOT_ID_SCHEMA,
@@ -422,7 +423,7 @@ export const operations = Object.freeze([
   defineOperation({
     name: 'collaboration_edit_message',
     description:
-      'Edit a historical primary-chat user message (entryId) of an idle, non-archived Bot, fork the conversation before that entry, and enqueue regeneration as a new turn. Preserves all Host checks (RUNTIME_BUSY, BOT_ARCHIVED, primary user entry only, post-reset only, model vision checks). Optional attachments accept only already-uploaded 64-character SHA-256 Host attachment IDs — arbitrary file paths are rejected. Restricted to owner-delegated OAuth callers.',
+      'Edit a historical primary-chat user message (entryId) of an idle, non-archived Bot, fork the conversation before that entry, and enqueue regeneration as a new turn. Preserves all Host checks (RUNTIME_BUSY, BOT_ARCHIVED, primary user entry only, post-reset only, model vision checks). Optional attachments accept only already-uploaded 64-character SHA-256 Host attachment IDs — arbitrary file paths are rejected. Allowed for owner-delegated OAuth callers and active Bots on a device with management delegation targeting another Bot (self-targeting is forbidden).',
     properties: {
       deviceId: DEVICE_ID_SCHEMA,
       botId: BOT_ID_SCHEMA,

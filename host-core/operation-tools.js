@@ -3,7 +3,9 @@ import { operationCatalog } from '../center-contract/operations/index.js';
 import { resolveBotIdentity } from './bot-identity.js';
 
 export function createOperationTools({ host, getHarness, getCenterClient, dataPrivacy }) {
-  return operationCatalog.map(({ name, description, inputSchema, readOnly }) => defineTool({
+  return operationCatalog
+    .filter(({ audiences }) => audiences.includes('bot'))
+    .map(({ name, description, inputSchema, readOnly }) => defineTool({
     name, description, parameters: inputSchema,
     deferred: true,
     replay: readOnly ? 'safe' : 'unsafe',

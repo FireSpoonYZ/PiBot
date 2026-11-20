@@ -125,6 +125,21 @@ function requireOAuthActor(actor, actionDescription) {
   }
 }
 
+function assertPrimarySessionActor(actor, deviceId, botId, store, actionLabel) {
+  if (actor.kind !== 'bot') return;
+  if (actor.deviceId === deviceId && actor.botId === botId) {
+    fail('FORBIDDEN', `Calling Bot cannot ${actionLabel} itself during its own turn`);
+  }
+  if (
+    typeof store?.isDeviceOAuthGrantEnabled !== 'function' ||
+    !store.isDeviceOAuthGrantEnabled(actor.deviceId) ||
+    typeof store?.listDeviceBots !== 'function' ||
+    !store.listDeviceBots(actor.deviceId).some((bot) => bot.botId === actor.botId && !bot.archivedAt)
+  ) {
+    fail('FORBIDDEN', 'Device management permission and an active local Bot are required');
+  }
+}
+
 function assertTargetDevice(bridge, deviceId) {
   assertId(deviceId, 'deviceId');
   if (isReservedDeviceId(deviceId, bridge)) {
@@ -421,7 +436,7 @@ function normalizeMemberInput(member, label, bridge) {
 }
 
 export function createHandlers(deps = {}) {
-  const { bridge } = deps;
+  const { bridge, store } = deps;
 
   return {
     // ── Scope / Room Queries (read-only) ────────────────────────────────────
@@ -762,13 +777,13 @@ export function createHandlers(deps = {}) {
       };
     },
 
-    // ── Primary Session Queue & Edit Controls (OAuth-only) ──────────────────
+    // ── Primary Session Queue & Edit Controls ───────────────────────────────
     async collaboration_withdraw_queued(rawArgs, rawActor) {
       const actor = assertTrustedActor(rawActor, bridge);
-      requireOAuthActor(actor, 'Withdrawing queued primary user messages');
       const args = assertPlainArgs(rawArgs, ['deviceId', 'botId', 'requestId']);
       assertId(args.deviceId, 'deviceId');
       assertId(args.botId, 'botId');
+      assertPrimarySessionActor(actor, args.deviceId, args.botId, store, 'withdraw queued messages for');
       const params = {
         botId: args.botId,
         ...(args.requestId !== undefined ? { requestId: args.requestId } : {}),
@@ -779,10 +794,10 @@ export function createHandlers(deps = {}) {
 
     async collaboration_steer_queued(rawArgs, rawActor) {
       const actor = assertTrustedActor(rawActor, bridge);
-      requireOAuthActor(actor, 'Steering queued primary user messages');
       const args = assertPlainArgs(rawArgs, ['deviceId', 'botId', 'requestId']);
       assertId(args.deviceId, 'deviceId');
       assertId(args.botId, 'botId');
+      assertPrimarySessionActor(actor, args.deviceId, args.botId, store, 'steer queued messages for');
       assertId(args.requestId, 'requestId');
       const result = await callHost(bridge, args.deviceId, 'steerQueued', {
         botId: args.botId,
@@ -793,7 +808,6 @@ export function createHandlers(deps = {}) {
 
     async collaboration_edit_message(rawArgs, rawActor) {
       const actor = assertTrustedActor(rawActor, bridge);
-      requireOAuthActor(actor, 'Editing primary user messages and regenerating turns');
       const args = assertPlainArgs(rawArgs, [
         'deviceId',
         'botId',
@@ -804,6 +818,7 @@ export function createHandlers(deps = {}) {
       ]);
       assertId(args.deviceId, 'deviceId');
       assertId(args.botId, 'botId');
+      assertPrimarySessionActor(actor, args.deviceId, args.botId, store, 'edit primary messages for');
       if (typeof args.text === 'string' && args.text.length > 262144) {
         fail('INVALID_ARGUMENT', 'text must be at most 262144 characters');
       }

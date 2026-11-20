@@ -43,7 +43,11 @@ test('owner UI, deferred Bot tool and OAuth MCP share actual Center operations w
       clientId: 'test-client', clientSecret: randomBytes(32).toString('base64url'),
       redirectUris: ['https://mcp-client.example.test/callback'], scopes: ['pibot:center:read'],
     };
-    const { authenticate } = registerMcpOAuth(app, { publicUrl, clients: [client], supportedScopes: operationScopes });
+    const collabClient = {
+      clientId: 'collab-client', clientSecret: randomBytes(32).toString('base64url'),
+      redirectUris: ['https://mcp-client.example.test/callback'], scopes: ['pibot:collaboration:write'],
+    };
+    const { authenticate } = registerMcpOAuth(app, { publicUrl, clients: [client, collabClient], supportedScopes: operationScopes });
     registerMcp(app, { publicUrl, authenticate, operations: routes.operations });
     await app.ready();
 
@@ -56,13 +60,24 @@ test('owner UI, deferred Bot tool and OAuth MCP share actual Center operations w
     const hostCall = (name, args = {}, fields = {}, headers = hostHeaders) => app.inject({
       method: 'POST', url: '/api/host/operations/call', headers, payload: { botId, name, args, ...fields },
     });
-    const tool = createOperationTools({}).find(item => item.name === 'center_set_model_config');
+    const botTools = createOperationTools({});
+    const botToolNames = new Set(botTools.map(item => item.name));
+    assert.equal(botToolNames.has('collaboration_publish_room_message'), false);
+    for (const allowed of ['collaboration_withdraw_queued', 'collaboration_steer_queued', 'collaboration_edit_message']) {
+      assert.equal(botToolNames.has(allowed), true);
+    }
+    const botListed = new Set(routes.operations.list({ kind: 'bot', deviceId, botId }).map(item => item.name));
+    assert.equal(botListed.has('collaboration_publish_room_message'), false);
+    assert.equal(botListed.has('collaboration_withdraw_queued'), true);
+    const tool = botTools.find(item => item.name === 'center_set_model_config');
     assert.equal(tool.deferred, true);
     assert.equal(tool.replay, 'unsafe');
 
     const result = await hostCall(tool.name, { expectedRevision: 0, value: { thinkingLevel: 'high' } });
     assert.equal(result.statusCode, 200, result.body);
     assert.equal(result.json().global.thinkingLevel, 'high');
+    assert.equal((await hostCall('collaboration_publish_room_message', { deviceId, scopeId: 'room-1', text: 'hi' })).statusCode, 403);
+    assert.equal((await hostCall('collaboration_withdraw_queued', { deviceId, botId })).statusCode, 403);
     assert.equal((await hostCall(tool.name, { expectedRevision: 0, value: { thinkingLevel: 'low' } })).statusCode, 409);
     assert.equal((await hostCall('center_get_model_config', { path: '/api/oauth/token' })).statusCode, 400);
     assert.equal((await hostCall('center_get_model_config', {}, { botId: 'absent' })).statusCode, 403);
@@ -82,30 +97,34 @@ test('owner UI, deferred Bot tool and OAuth MCP share actual Center operations w
     const observed = await app.inject({ method: 'GET', url: '/api/model-config', headers: owner });
     assert.equal(observed.json().global.thinkingLevel, 'high');
 
-    const verifier = randomBytes(32).toString('base64url');
     const resource = publicUrl + '/mcp';
-    const consent = await app.inject({
-      method: 'GET', url: MCP_OAUTH_PATHS.authorize + '?' + form({
-        response_type: 'code', client_id: client.clientId, redirect_uri: client.redirectUris[0],
-        scope: client.scopes.join(' '), state: 'client-test-state', resource,
-        code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256',
-      }), headers: owner,
-    });
-    assert.equal(consent.statusCode, 200, consent.body);
-    const approved = await app.inject({
-      method: 'POST', url: MCP_OAUTH_PATHS.authorize, headers: { ...owner, 'content-type': 'application/x-www-form-urlencoded' },
-      payload: form({ consent_id: /name="consent_id" value="([^"]+)"/.exec(consent.body)[1],
-        csrf_token: /name="csrf_token" value="([^"]+)"/.exec(consent.body)[1], decision: 'approve' }),
-    });
-    assert.equal(approved.statusCode, 302, approved.body);
-    const grant = await app.inject({
-      method: 'POST', url: MCP_OAUTH_PATHS.token, headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      payload: form({ grant_type: 'authorization_code', code: new URL(approved.headers.location).searchParams.get('code'),
-        code_verifier: verifier, redirect_uri: client.redirectUris[0], client_id: client.clientId,
-        client_secret: client.clientSecret, resource }),
-    });
-    assert.equal(grant.statusCode, 200, grant.body);
-    const token = grant.json().access_token;
+    const issueToken = async (targetClient) => {
+      const verifier = randomBytes(32).toString('base64url');
+      const consent = await app.inject({
+        method: 'GET', url: MCP_OAUTH_PATHS.authorize + '?' + form({
+          response_type: 'code', client_id: targetClient.clientId, redirect_uri: targetClient.redirectUris[0],
+          scope: targetClient.scopes.join(' '), state: 'client-test-state', resource,
+          code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256',
+        }), headers: owner,
+      });
+      assert.equal(consent.statusCode, 200, consent.body);
+      const approved = await app.inject({
+        method: 'POST', url: MCP_OAUTH_PATHS.authorize, headers: { ...owner, 'content-type': 'application/x-www-form-urlencoded' },
+        payload: form({ consent_id: /name="consent_id" value="([^"]+)"/.exec(consent.body)[1],
+          csrf_token: /name="csrf_token" value="([^"]+)"/.exec(consent.body)[1], decision: 'approve' }),
+      });
+      assert.equal(approved.statusCode, 302, approved.body);
+      const grant = await app.inject({
+        method: 'POST', url: MCP_OAUTH_PATHS.token, headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        payload: form({ grant_type: 'authorization_code', code: new URL(approved.headers.location).searchParams.get('code'),
+          code_verifier: verifier, redirect_uri: targetClient.redirectUris[0], client_id: targetClient.clientId,
+          client_secret: targetClient.clientSecret, resource }),
+      });
+      assert.equal(grant.statusCode, 200, grant.body);
+      return grant.json().access_token;
+    };
+    const token = await issueToken(client);
+    const collabToken = await issueToken(collabClient);
     const rpc = (method, params = {}, bearer = token) => app.inject({
       method: 'POST', url: '/mcp', headers: { authorization: `Bearer ${bearer}`, accept: 'application/json, text/event-stream' },
       payload: { jsonrpc: '2.0', id: 1, method, params },
@@ -115,6 +134,10 @@ test('owner UI, deferred Bot tool and OAuth MCP share actual Center operations w
     assert.equal(list.statusCode, 200, list.body);
     assert.ok(list.json().result.tools.some(tool => tool.name === 'center_get_model_config'));
     assert.ok(list.json().result.tools.every(tool => tool.annotations.readOnlyHint));
+    const collabTools = new Set((await rpc('tools/list', {}, collabToken)).json().result.tools.map(item => item.name));
+    for (const expected of ['collaboration_publish_room_message', 'collaboration_withdraw_queued', 'collaboration_steer_queued', 'collaboration_edit_message']) {
+      assert.equal(collabTools.has(expected), true);
+    }
     for (const [name, check] of [
       ['center_get_model_config', value => assert.equal(value.global.thinkingLevel, 'high')],
       ['center_list_client_releases', value => assert.deepEqual(value.releases, [])],

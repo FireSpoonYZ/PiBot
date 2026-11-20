@@ -116,7 +116,16 @@ function createFixture() {
     },
   };
 
-  const handlers = createHandlers({ bridge });
+  const deviceGrants = new Map([[deviceA, true], [deviceB, true]]);
+  const deviceBots = new Map([
+    [deviceA, [botA1, botA2, botA3].map((b) => ({ botId: b.botId, archivedAt: null }))],
+    [deviceB, [{ botId: botB1.botId, archivedAt: null }]],
+  ]);
+  const store = {
+    isDeviceOAuthGrantEnabled: (id) => Boolean(deviceGrants.get(id)),
+    listDeviceBots: (id) => deviceBots.get(id) ?? [],
+  };
+  const handlers = createHandlers({ bridge, store });
 
   return {
     deviceA,
@@ -133,6 +142,9 @@ function createFixture() {
     customOverrides,
     setDeviceBOnline(value) {
       deviceBOnline = value;
+    },
+    setDeviceGrantEnabled(id, value) {
+      deviceGrants.set(id, value);
     },
     replicateOffersAtoB(scopeId) {
       for (const offer of logA.scopeOffers().items) {
@@ -177,6 +189,10 @@ test('collaboration contract descriptors match handlers 1:1 with strict read/wri
 
   const publishOp = operations.find((op) => op.name === 'collaboration_publish_room_message');
   assert.ok(publishOp, 'collaboration_publish_room_message must exist');
+  assert.deepEqual(publishOp.audiences, ['oauth']);
+  for (const op of operations) {
+    if (op.name !== 'collaboration_publish_room_message') assert.deepEqual(op.audiences, ['bot', 'oauth']);
+  }
   assert.match(publishOp.description, /owner-delegated/i);
   assert.match(publishOp.description, /room-only/i);
   assert.match(publishOp.description, /send_to/);
@@ -726,27 +742,26 @@ test('session queue/edit controls and work stop/resume preserve Host checks and 
       ],
     });
 
-    // Primary user session controls are OAuth-only (Bots cannot withdraw/steer/edit user messages)
-    await assert.rejects(
+    // Primary session controls forbid self-targeting and non-delegated Bots, and allow delegated Bots on other Bots
+    for (const call of [
+      () => fx.handlers.collaboration_withdraw_queued({ deviceId: fx.deviceA, botId: fx.botA1.botId }, botA1Actor),
+      () => fx.handlers.collaboration_steer_queued({ deviceId: fx.deviceA, botId: fx.botA1.botId, requestId: 'q-1' }, botA1Actor),
+      () => fx.handlers.collaboration_edit_message({ deviceId: fx.deviceA, botId: fx.botA1.botId, entryId: 1, text: 'self' }, botA1Actor),
+    ]) {
+      await assert.rejects(call, (err) => err?.code === 'FORBIDDEN');
+    }
+    fx.setDeviceGrantEnabled(fx.deviceA, false);
+    for (const call of [
       () => fx.handlers.collaboration_withdraw_queued({ deviceId: fx.deviceA, botId: fx.botA2.botId }, botA1Actor),
-      (err) => err?.code === 'FORBIDDEN',
-    );
-    await assert.rejects(
-      () =>
-        fx.handlers.collaboration_steer_queued(
-          { deviceId: fx.deviceA, botId: fx.botA2.botId, requestId: 'q-1' },
-          botA1Actor,
-        ),
-      (err) => err?.code === 'FORBIDDEN',
-    );
-    await assert.rejects(
-      () =>
-        fx.handlers.collaboration_edit_message(
-          { deviceId: fx.deviceA, botId: fx.botA2.botId, entryId: 1, text: 'forged user text' },
-          botA1Actor,
-        ),
-      (err) => err?.code === 'FORBIDDEN',
-    );
+      () => fx.handlers.collaboration_steer_queued({ deviceId: fx.deviceA, botId: fx.botA2.botId, requestId: 'q-1' }, botA1Actor),
+      () => fx.handlers.collaboration_edit_message({ deviceId: fx.deviceA, botId: fx.botA2.botId, entryId: 1, text: 'denied' }, botA1Actor),
+    ]) {
+      await assert.rejects(call, (err) => err?.code === 'FORBIDDEN');
+    }
+    fx.setDeviceGrantEnabled(fx.deviceA, true);
+    assert.equal((await fx.handlers.collaboration_withdraw_queued({ deviceId: fx.deviceA, botId: fx.botA2.botId, requestId: 'q-b1' }, botA1Actor)).withdrawn.length, 1);
+    assert.equal((await fx.handlers.collaboration_steer_queued({ deviceId: fx.deviceA, botId: fx.botA2.botId, requestId: 'q-b2' }, botA1Actor)).status, 'steered');
+    assert.equal((await fx.handlers.collaboration_edit_message({ deviceId: fx.deviceA, botId: fx.botA2.botId, entryId: 2, text: 'managed' }, botA1Actor)).status, 'queued');
 
     // edit_message rejects arbitrary file-path attachments, accepts canonical 64-hex attachment IDs
     await assert.rejects(
