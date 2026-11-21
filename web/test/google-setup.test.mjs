@@ -226,8 +226,9 @@ test('confirming services opens one embedded account tab and owner resume restor
   }
 });
 
-test('embedded project confirmation reads the setup tab and tolerates a concurrent progress update', async () => {
-  let setupUrl = 'https://console.cloud.google.com/projectcreate';
+test('embedded project confirmation reads the Cloud welcome page and tolerates a concurrent progress update', async () => {
+  const projectId = 'project-12345678-1234-5678-abc';
+  let setupUrl = `https://console.cloud.google.com/projectcreate?project=${projectId}`;
   const env = makeEnv({
     serviceOptions: {
       async browserControl({ action }) {
@@ -260,13 +261,13 @@ test('embedded project confirmation reads the setup tab and tolerates a concurre
     const updated = await env.callBot({ action: 'step', step: 'project', status: 'active' });
     assert.equal(updated.isError, false);
     assert.ok(updated.body.view.revision > project.revision);
-    setupUrl = 'https://console.cloud.google.com/home/dashboard?project=pibot-center';
+    setupUrl = `https://console.cloud.google.com/welcome?project=${projectId}`;
     await assert.rejects(() => control({ ...confirm, kind: 'work' }), { code: 'SETUP_REVISION_CONFLICT' });
 
     const next = await control(confirm);
     assert.equal(next.step, 'apis');
-    assert.equal(next.projectId, 'pibot-center');
-    assert.equal(new URL(next.guidance.consoleUrl).searchParams.get('project'), 'pibot-center');
+    assert.equal(next.projectId, projectId);
+    assert.equal(new URL(next.guidance.consoleUrl).searchParams.get('project'), projectId);
     assert.equal((await control(confirm)).revision, next.revision);
     assert.equal((await control({ ...confirm, runId: 'older-run' })).staleReason, 'STALE_RUN');
   } finally {

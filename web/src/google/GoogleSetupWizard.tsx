@@ -590,7 +590,9 @@ export function GoogleSetupWizard({
               'Enter the Project ID from the project= parameter in the Cloud Console address.')
             : t('还没读到 Project ID。请在内嵌浏览器打开新项目的主页后继续。',
               'The Project ID is not available yet. Open the new project’s dashboard in the in-app browser, then continue.'));
-        } else if (info.conflict) {
+          return null;
+        }
+        if (info.conflict) {
           // Re-sync latest revision on 409 / CAS mismatch; never auto-retry the outdated action.
           await refreshLatestAfterConflict(reqScope);
           if (mountedRef.current && reqScope === activeScopeRef.current && !opts?.silentError) {
