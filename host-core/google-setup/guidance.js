@@ -414,8 +414,9 @@ export function buildSetupCard(ref, run, context = {}) {
             ? {
                 kind: 'policy-consent',
                 botLocked: true,
-                notice:
-                  'Only you may accept the Google API Services: User Data Policy. Take over the page to tick the box and finish, then hand back.',
+                notice: run.mode === 'do-it-for-me'
+                  ? 'Only you may accept the Google API Services: User Data Policy. Finish on Google, then choose Done here so the bot can continue.'
+                  : 'Only you may accept the Google API Services: User Data Policy. Take over the page to tick the box and finish, then hand back.',
               }
             : null;
       const stepNote = run.steps?.[step]?.note;
@@ -850,7 +851,7 @@ function buildStepInstruction(step, {
           run.mode === 'guide-browser'
             ? `Mark branding active so the owner opens ${consoleUrl} and completes Google Auth Platform (app name, support email, the recorded audience, contact email, User Data Policy checkbox, and Finish). Wait for their Done.`
             : allowedBrowserActions === 'drive'
-              ? `Mark branding active, open ${consoleUrl}, click Get started, and fill the non-sensitive fields (app name, support email, audience, and contact email). Use the recorded kind for the audience: work means Internal and personal means External. STOP BEFORE the "Google API Services: User Data Policy" checkbox and call google_setup(action="need_user", step="branding", note="Tick the User Data Policy checkbox under Finish and submit"). Do not click or tick any terms box.`
+              ? `Mark branding active, open ${consoleUrl}, click Get started, and fill the non-sensitive fields (app name, support email, audience, and contact email). Use the recorded kind for the audience: work means Internal and personal means External. STOP BEFORE the "Google API Services: User Data Policy" checkbox and call google_setup(action="need_user", step="branding", note="Review the User Data Policy, finish setup on Google, then choose Done on this card"). Do not click or tick any terms box.`
               : `Mark branding active and open ${consoleUrl} for the owner to complete Google Auth Platform including the User Data Policy checkbox (do not click). Call need_user if needed and wait for owner completion.`,
         doneSignal:
           'Owner ticked the User Data Policy box, finished Auth Platform setup, and overview no longer says not configured.',
@@ -872,7 +873,12 @@ function buildStepInstruction(step, {
           run.mode === 'guide-browser'
             ? `Mark links active so the owner enters ${linksNote} on ${consoleUrl} and saves. Wait for their Done.`
             : allowedBrowserActions === 'drive'
-              ? `Mark links active, open ${consoleUrl}, enter ${linksNote}, click Save, verify all three fields persisted, and mark links done.`
+              ? `Mark links active and open ${consoleUrl} in the existing setup tab. Check the stored values first: ${linksNote}. ` +
+                'If they already match with no unsaved edits, mark links done without clicking Save. Otherwise, fill the missing or different values; add a domain row only if needed and leave the optional terms link alone. ' +
+                'Take a fresh snapshot after editing (use a screenshot if it omits field values or whether Save is enabled). ' +
+                'Click Save yourself when enabled, then reopen the Branding page to verify all three values persisted before marking links done. ' +
+                'If Save is disabled and values are missing, inspect the actual validation message instead of waiting for guessed text. ' +
+                'Do not ask the owner to click Save or Done in this mode; if the browser is still held, ask only for control to be returned.'
               : `Mark links active and open ${consoleUrl} so the owner can enter ${linksNote} and Save (do not click). Verify saved and mark links done.`,
         doneSignal: 'Branding page saved with Center home page, privacy link, and authorized domain.',
       };

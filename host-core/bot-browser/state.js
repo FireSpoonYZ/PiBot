@@ -814,13 +814,13 @@ export function createBotBrowserState({
     }
   }
 
-  function handback({ authority, leaseToken = null }) {
+  function handback({ authority, leaseToken = null, confirmedSetupPolicy = false }) {
     expireLeaseIfNeeded();
     if (closed) throw browserError('BROWSER_CLOSED');
     if (phase === 'taking' || inFlightBotOp !== null) {
       throw browserError('BROWSER_TAKEOVER_PENDING', undefined, { phase });
     }
-    if (phase === 'human') {
+    if (phase === 'human' && !(confirmedSetupPolicy && !lease?.shared && isActiveLeaseHolder(authority))) {
       verifyHumanLease({ authority, leaseToken, renew: false });
     }
 

@@ -37,6 +37,7 @@ import { createControlClient } from '../../host-core/control-client.js';
 import { createLocalControlAdapter } from '../../host-core/local-control-adapter.js';
 import { createHostControlReceiver } from '../../host-core/host-control.js';
 import { openRuntimeBrowserSetup } from '../../host-core/runtime-browser-setup.js';
+import { createBotBrowserService } from '../../host-core/bot-browser/service.js';
 import { createBotManagementSkillSection } from '../../host-core/bot-management-skill.js';
 import { openHost } from '../../host-core/host.js';
 import { PrimaryIndex } from '../../host-core/runtime-docs.js';
@@ -345,8 +346,10 @@ test('runtime assembly observes Google project navigation privately and enforces
 
   const providerTracker = { created: 0, closed: 0, calls: [] };
   let failProviderStatus = false;
+  let browserClock = 10_000;
   let currentConvOwner = botA.botId;
   let centerStatusCalls = 0;
+  let centerClientConfigured = false;
   const setupContinuations = [];
   const browserEvents = [];
 
@@ -379,13 +382,14 @@ test('runtime assembly observes Google project navigation privately and enforces
       getCenterGoogleStatus: async () => {
         centerStatusCalls += 1;
         return {
-          client: { configured: false, redirectUri: 'https://center.example.test/api/oauth/google/callback' },
+          client: { configured: centerClientConfigured, redirectUri: 'https://center.example.test/api/oauth/google/callback' },
           accounts: [],
         };
       },
       abortBotTurn: async () => {},
       context: {},
       onBrowserEvent: (event) => browserEvents.push(event),
+      createBotBrowserService: (options) => createBotBrowserService({ ...options, now: () => browserClock, leaseTtlMs: 1_000 }),
       createBrowserProvider: () => createFakeInteractiveProvider(providerTracker, { shouldFailStatus: () => failProviderStatus }),
     });
 
@@ -528,8 +532,69 @@ test('runtime assembly observes Google project navigation privately and enforces
       [apis, chosen].map(({ id, revision }) => ({ botId: botA.botId, runId: id, revision })),
     );
 
-    // 3. Fail-closed safety gate: triggering sensitive `client` step while browser provider fails
-    // MUST keep the safety lock engaged and block bot_browser tool with PAUSED_FOR_HUMAN
+    const otherOwnerBrowser = (input) => coord.browserControl(
+      { botId: botA.botId, ...input },
+      { clientId: 'local:desktop-2', transport: 'local' },
+    );
+    const authPlatformUrl = (page) => `https://console.cloud.google.com/auth/${page}?project=${projectId}`;
+    for (const handoff of ['expired lease', 'same owner', 'on Audience page', 'other owner', 'still on policy page']) {
+      if (handoff !== 'expired lease') {
+        await setupControl({ action: 'answer', card: 'step', values: ['redo', 'branding'] });
+      }
+      await ownerBrowser({
+        action: 'navigate', pageId: replacement.pageId, url: authPlatformUrl('overview/create'),
+        ...(handoff === 'expired lease' ? { lease: shared.lease } : {}),
+      });
+      const policyReview = await setupTool.execute({
+        action: 'need_user', step: 'branding', note: 'Review the User Data Policy and finish setup.',
+      }, fakeApi, {});
+      assert.notEqual(policyReview.isError, true);
+      const waiting = JSON.parse(policyReview.output[0].text).view;
+      assert.equal(waiting.browserLock.reason, 'policy-consent');
+      assert.equal((await ownerBrowser({ action: 'status' })).phase, 'held', 'setup must not create a substitute owner lease');
+      const reviewingBrowser = handoff === 'other owner' ? otherOwnerBrowser : ownerBrowser;
+      const policyLease = await reviewingBrowser({ action: 'takeover', pageId: replacement.pageId });
+      if (handoff !== 'still on policy page') {
+        await reviewingBrowser({
+          action: 'navigate', pageId: replacement.pageId, lease: policyLease.lease,
+          url: authPlatformUrl(handoff === 'on Audience page' ? 'audience' : 'overview'),
+        });
+      }
+      if (handoff === 'expired lease') {
+        browserClock += 1_001;
+        assert.equal((await ownerBrowser({ action: 'status' })).reason, 'disconnected_hold');
+      } else if (handoff === 'same owner') {
+        await assert.rejects(() => ownerBrowser({ action: 'handback' }), { code: 'BROWSER_LEASE_EXPIRED' });
+      }
+
+      const blocked = await browserTool.execute({ action: 'snapshot' }, fakeApi, {});
+      assert.equal(JSON.parse(blocked.output[0].text).status, 'PAUSED_FOR_HUMAN');
+      const confirmation = { runId: waiting.id, expectedRevision: waiting.revision };
+      const links = await setupControl(handoff === 'same owner'
+        ? { action: 'answer', card: 'step', values: ['done', 'branding'], ...confirmation }
+        : { action: 'advance', step: 'branding', ...confirmation });
+      assert.equal(links.step, 'links');
+      assert.equal(links.guidance.allowedBrowserActions, 'drive');
+      assert.equal(links.resumeQueued, true);
+      assert.equal(links.card.card, 'progress', 'links must not require an owner step card');
+      if (handoff === 'other owner' || handoff === 'still on policy page') {
+        assert.equal((await reviewingBrowser({ action: 'status', lease: policyLease.lease })).isHolder, true);
+        await reviewingBrowser({ action: 'handback', lease: policyLease.lease });
+      } else {
+        assert.equal((await ownerBrowser({ action: 'status' })).phase, 'bot', handoff);
+      }
+      const linksPage = await browserTool.execute({
+        action: 'navigate', pageId: replacement.pageId, url: authPlatformUrl('branding'),
+      }, fakeApi, {});
+      assert.notEqual(linksPage.isError, true, 'Bot can open the links page after the policy handoff');
+    }
+    const linksSaved = await setupTool.execute({ action: 'step', step: 'links', status: 'done' }, fakeApi, {});
+    assert.notEqual(linksSaved.isError, true);
+    const afterLinks = JSON.parse(linksSaved.output[0].text).view;
+    assert.equal(afterLinks.steps.links.by, 'bot');
+    assert.equal(afterLinks.step, 'publish');
+
+    // Private Web OAuth client setup blocks the tool even if the Bot browser provider is unavailable.
     failProviderStatus = true;
     const needUserRes = await setupTool.execute(
       { action: 'need_user', step: 'client', note: 'Create Web OAuth Client Secret directly' },
@@ -537,6 +602,7 @@ test('runtime assembly observes Google project navigation privately and enforces
       {},
     );
     assert.equal(needUserRes.isError, undefined);
+    assert.equal(JSON.parse(needUserRes.output[0].text).view.browserLock.requiresSystemBrowser, true);
 
     const blockedBrowserRes = await browserTool.execute(
       { action: 'open', url: 'https://console.cloud.google.com/auth/clients' },
@@ -548,8 +614,13 @@ test('runtime assembly observes Google project navigation privately and enforces
     assert.equal(blockedBody.status, 'PAUSED_FOR_HUMAN');
     assert.equal(blockedBody.code, 'BROWSER_SENSITIVE_BLOCKED');
 
-    // Handing back ends the browser lease without overriding the wizard's pending owner step.
+    // A Bot browser tab still cannot render Client Secrets, even during an external setup step.
     failProviderStatus = false;
+    const clientPage = await ownerBrowser({ action: 'navigate', url: authPlatformUrl('clients/create') });
+    assert.equal(clientPage.secretRisk, true);
+    await assert.rejects(() => ownerBrowser({ action: 'frame', pageId: clientPage.pageId }), { code: 'BROWSER_SECRET_STEP_BLOCKED' });
+
+    // Handing back ends the browser lease without overriding the wizard's pending owner step.
     const exclusive = await ownerBrowser({ action: 'takeover', force: true });
     const overview = await ownerBrowser({
       action: 'navigate', lease: exclusive.lease,
@@ -558,14 +629,34 @@ test('runtime assembly observes Google project navigation privately and enforces
     const returned = await ownerBrowser({ action: 'handback', pageId: overview.pageId, lease: exclusive.lease });
     assert.equal(returned.phase, 'bot');
     assert.equal(returned.isHolder, false);
+    assert.equal(returned.sensitive, false, 'an external client step does not withhold a normal Cloud Console page');
     assert.equal((await setupControl({ action: 'status' })).browserLock.active, true);
     const stillBlocked = await browserTool.execute({ action: 'snapshot' }, fakeApi, {});
     assert.equal(JSON.parse(stillBlocked.output[0].text).status, 'PAUSED_FOR_HUMAN');
 
+    centerClientConfigured = true;
+    await setupControl({ action: 'advance', step: 'publish' });
+    assert.equal((await setupControl({ action: 'advance', step: 'client' })).step, 'connect');
+    await setupControl({ action: 'resume', mode: 'guide-browser' });
+    const audience = await ownerBrowser({
+      action: 'navigate', pageId: overview.pageId, url: authPlatformUrl('audience'),
+    });
+    const connect = await setupTool.execute({
+      action: 'need_user', step: 'connect', note: 'Authorize in your system browser.',
+    }, fakeApi, {});
+    assert.notEqual(connect.isError, true);
+    assert.equal(JSON.parse(connect.output[0].text).view.browserLock.requiresSystemBrowser, true);
+    const waitingOnOAuth = await ownerBrowser({ action: 'status' });
+    assert.equal(waitingOnOAuth.sensitive, false, 'external OAuth must not mark the Audience tab sensitive');
+    assert.equal(waitingOnOAuth.phase, audience.phase, 'external OAuth must not require a browser takeover');
+    assert.equal((await ownerBrowser({ action: 'frame', pageId: audience.pageId })).pageId, audience.pageId);
+    const oauthBlocked = await browserTool.execute({ action: 'snapshot' }, fakeApi, {});
+    assert.equal(JSON.parse(oauthBlocked.output[0].text).status, 'PAUSED_FOR_HUMAN');
+
     await setupControl({ action: 'cancel' });
     const resumed = await browserTool.execute({ action: 'snapshot' }, fakeApi, {});
     assert.notEqual(resumed.isError, true);
-    assert.equal(JSON.parse(resumed.output[0].text).pageId, overview.pageId);
+    assert.equal(JSON.parse(resumed.output[0].text).pageId, audience.pageId);
 
     await coord.close();
     coordClosed = true;

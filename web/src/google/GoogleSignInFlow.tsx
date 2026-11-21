@@ -350,6 +350,8 @@ export interface GoogleSignInFlowProps {
   identity: DesktopIdentity;
   /** Pre-selected choices (for initial connect or adding/expanding services — Center uses union). */
   initialChoices?: GoogleServiceChoice[];
+  /** Services already chosen in the setup wizard; show them without a second picker. */
+  setupChoices?: GoogleServiceChoice[];
   /** Target account email when reconnecting or expanding permissions on an existing account. */
   targetAccount?: string;
   /** Existing choices on targetAccount so scope expansion always requests the union. */
@@ -373,6 +375,7 @@ export function GoogleSignInFlow({
   api,
   identity,
   initialChoices,
+  setupChoices,
   targetAccount,
   existingChoices,
   mode = 'connect',
@@ -383,7 +386,7 @@ export function GoogleSignInFlow({
   const mountedRef = useRef(true);
   const pollTimerRef = useRef<number | null>(null);
 
-  const [selected, setSelected] = useState<GoogleServiceChoice[]>(() => {
+  const [selectedDraft, setSelected] = useState<GoogleServiceChoice[]>(() => {
     const base = new Set<GoogleServiceChoice>(existingChoices ?? []);
     for (const c of initialChoices ?? []) base.add(c);
     if (base.size === 0) {
@@ -392,6 +395,9 @@ export function GoogleSignInFlow({
     }
     return GOOGLE_SERVICE_CHOICES.filter(c => base.has(c));
   });
+  const confirmedChoices = GOOGLE_SERVICE_CHOICES.filter(choice => mode === 'connect' && setupChoices?.includes(choice));
+  const hasConfirmedChoices = confirmedChoices.length > 0;
+  const selected = hasConfirmedChoices ? confirmedChoices : selectedDraft;
 
   const [starting, setStarting] = useState(false);
   const [flow, setFlow] = useState<GoogleAuthFlowStart | null>(null);
@@ -621,7 +627,9 @@ export function GoogleSignInFlow({
       ? t(`重新连接 ${targetAccount ?? 'Google 账号'}`, `Reconnect ${targetAccount ?? 'Google account'}`)
       : mode === 'expand'
         ? t('管理服务 / 添加服务', 'Add or grant Google services')
-        : t('选择要连接的服务', 'Choose services to connect');
+        : hasConfirmedChoices
+          ? t('连接 Google 账号', 'Connect Google account')
+          : t('选择要连接的服务', 'Choose services to connect');
 
   const ctaLabel =
     mode === 'reconnect'
@@ -637,32 +645,39 @@ export function GoogleSignInFlow({
         <span>{title}</span>
       </div>
 
-      <div className="gws-choice-grid" role="group" aria-label={t('Google 服务组', 'Google service groups')}>
-        {GOOGLE_SERVICE_CHOICES.map(choice => {
-          const checked = selected.includes(choice);
-          const lockedExisting = mode === 'expand' && Boolean(existingChoices?.includes(choice));
-          return (
-            <label
-              key={choice}
-              className={`gws-choice-card${checked ? ' is-selected' : ''}${lockedExisting ? ' is-locked' : ''}`}
-            >
-              <input
-                type="checkbox"
-                checked={checked}
-                disabled={starting || lockedExisting}
-                onChange={() => toggleChoice(choice)}
-              />
-              <span className="gws-choice-body">
-                <span className="gws-choice-title">
-                  {googleChoiceLabel(choice, t)}
-                  {lockedExisting ? <span className="gws-pill is-muted">{t('已包含', 'Included')}</span> : null}
+      {hasConfirmedChoices ? (
+        <p className="gws-muted">
+          {t('本次申请授权：', 'Requested services: ')}
+          {confirmedChoices.map(choice => googleChoiceLabel(choice, t)).join(t('、', ', '))}
+        </p>
+      ) : (
+        <div className="gws-choice-grid" role="group" aria-label={t('Google 服务组', 'Google service groups')}>
+          {GOOGLE_SERVICE_CHOICES.map(choice => {
+            const checked = selected.includes(choice);
+            const lockedExisting = mode === 'expand' && Boolean(existingChoices?.includes(choice));
+            return (
+              <label
+                key={choice}
+                className={`gws-choice-card${checked ? ' is-selected' : ''}${lockedExisting ? ' is-locked' : ''}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  disabled={starting || lockedExisting}
+                  onChange={() => toggleChoice(choice)}
+                />
+                <span className="gws-choice-body">
+                  <span className="gws-choice-title">
+                    {googleChoiceLabel(choice, t)}
+                    {lockedExisting ? <span className="gws-pill is-muted">{t('已包含', 'Included')}</span> : null}
+                  </span>
+                  <span className="gws-choice-desc">{googleChoiceDescription(choice, t)}</span>
                 </span>
-                <span className="gws-choice-desc">{googleChoiceDescription(choice, t)}</span>
-              </span>
-            </label>
-          );
-        })}
-      </div>
+              </label>
+            );
+          })}
+        </div>
+      )}
 
       <p className="gws-base-scope-note">
         {t('基础附带（不可单独取消）：账号识别与联系人联查（People API，用于按姓名查找联系人，将独立探测就绪度）。', 'Base included (always requested): Account identity & People API contacts lookup (probed independently).')}

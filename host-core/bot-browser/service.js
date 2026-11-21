@@ -27,6 +27,7 @@ import {
 import {
   checkBotActionSensitivity,
   classifyPageSensitivity,
+  isGoogleCloudConsoleUrl,
   mergeProviderHints,
   sanitizeSnapshotForBot,
   sanitizeTabsForCaller,
@@ -515,6 +516,38 @@ export function createBotBrowserService(options = {}) {
     } finally {
       entry.presentationChanges -= 1;
     }
+  }
+
+  // Completing the Google policy card can return its own safe tab but never another client's active lease.
+  async function completeSetupPolicyHandoff({ botId, pageId, sessionId }, authority) {
+    assertNotClosedOrMaintenance();
+    const auth = normalizeControlAuthority(authority);
+    if (!auth.canControl || auth.role === 'system') throw browserError('BROWSER_FORBIDDEN');
+    const entry = entries.get(botId);
+    const state = entry?.state;
+    if (!entry?.provider || state.pageId !== pageId || state.sessionId !== sessionId) return;
+    if (!await refreshProviderStatus(entry)) return;
+
+    const canHandBack = () => {
+      state.expireLeaseIfNeeded();
+      if (entry.closing || state.closed || !state.available || state.sensitivity.sensitive ||
+          state.pageId !== pageId || state.sessionId !== sessionId) return false;
+      const url = state.activeTab()?.url;
+      if (!isGoogleCloudConsoleUrl(url) || !/^\/auth\/(?:overview|branding|audience)\/?$/.test(new URL(url).pathname)) return false;
+      return state.phase === 'held'
+        ? state.reason === 'policy-consent' || state.reason === 'disconnected_hold'
+        : !state.sharedInput && state.isActiveLeaseHolder(auth);
+    };
+
+    if (!canHandBack()) return;
+    const revision = state.revision;
+    const giveBack = () => {
+      if (canHandBack() && state.revision === revision) {
+        state.handback({ authority: auth, confirmedSetupPolicy: true });
+      }
+    };
+    if (entry.presentation || entry.dismissing) await changePresentationOwner(entry, giveBack);
+    else giveBack();
   }
 
   async function controlNative(entry, req, auth) {
@@ -1567,5 +1600,6 @@ export function createBotBrowserService(options = {}) {
     cleanupBot,
     releaseBot: cleanupBot,
     setWithheldPagePredicate,
+    completeSetupPolicyHandoff,
   };
 }

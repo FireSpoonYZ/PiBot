@@ -1799,6 +1799,7 @@ export function GoogleSetupWizard({
             identity={identity!}
             mode={signInConfig.mode ?? 'connect'}
             initialChoices={signInConfig.choices ?? setup?.choices}
+            setupChoices={currentStep === 'connect' ? setup?.choices : undefined}
             targetAccount={signInConfig.targetAccount ?? setup?.account}
             onCompleted={(account, snapshot) => {
               if (snapshot) {
@@ -2289,6 +2290,7 @@ export function GoogleSetupWizard({
           identity={identity}
           mode={signInConfig.mode ?? 'connect'}
           initialChoices={signInConfig.choices ?? setup?.choices}
+          setupChoices={currentStep === 'connect' ? setup?.choices : undefined}
           targetAccount={signInConfig.targetAccount ?? setup?.account}
           onCompleted={(account, snapshot) => {
             if (snapshot) {
