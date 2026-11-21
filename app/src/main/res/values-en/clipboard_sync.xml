@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="clipboard_share_title">Send with PiBot</string>
+    <string name="clipboard_share_confirm">Send this text to your current clipboard sync group?\n\n%1$s</string>
+    <string name="clipboard_share_send">Send</string>
+    <string name="clipboard_share_invalid">Only eligible plain text can be shared with PiBot.</string>
+    <string name="clipboard_share_not_ready">Text not sent. Open PiBot and check that clipboard sync is enabled and online.</string>
+    <string name="clipboard_share_queued">Text queued for clipboard sync.</string>
+</resources>

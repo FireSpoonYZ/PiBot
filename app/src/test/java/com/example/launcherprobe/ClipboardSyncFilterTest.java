@@ -21,7 +21,7 @@ import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 
 /**
- * Verifies strict MIME text/plain filtering, sensitive flag rejection, own-clip and Shower
+ * Verifies plain-text extraction, sensitive flag rejection, own-clip and Shower
  * "pibot" label rejection, URI/Intent non-dereference rejection, and action parameter validation.
  */
 @RunWith(RobolectricTestRunner.class)
@@ -84,7 +84,7 @@ public class ClipboardSyncFilterTest {
     }
 
     @Test
-    public void rejectsUriIntentHtmlAndNonPlainMimeWithoutDereference() {
+    public void rejectsUriIntentAndNonTextMimeWithoutDereference() {
         Uri contentUri = Uri.parse("content://com.example.secret.provider/private/1");
         ClipData rawUriClip = ClipData.newRawUri("uri", contentUri);
         assertFalse(ClipboardSyncController.extractSendableText(rawUriClip).ok);
@@ -105,23 +105,49 @@ public class ClipboardSyncFilterTest {
                 new ClipData.Item("visible", intent, null));
         assertFalse(ClipboardSyncController.extractSendableText(spoofedIntentClip).ok);
 
-        ClipData htmlClip = ClipData.newHtmlText("html", "plain", "<b>plain</b>");
-        assertFalse(ClipboardSyncController.extractSendableText(htmlClip).ok);
-
-        // Strict MIME: mixed text/plain + text/html must be rejected.
-        ClipData mixedMime = new ClipData(
-                new ClipDescription("mixed", new String[]{
-                        ClipDescription.MIMETYPE_TEXT_PLAIN,
-                        ClipDescription.MIMETYPE_TEXT_HTML
-                }),
-                new ClipData.Item("plain"));
-        assertFalse(ClipboardSyncController.extractSendableText(mixedMime).ok);
-
-        // Non-text MIME
+        // Plain text paired with a file/image format remains ineligible.
         ClipData imageMime = new ClipData(
-                new ClipDescription("img", new String[]{"image/png"}),
+                new ClipDescription("img", new String[]{ClipDescription.MIMETYPE_TEXT_PLAIN, "image/png"}),
                 new ClipData.Item("ignored"));
         assertFalse(ClipboardSyncController.extractSendableText(imageMime).ok);
+    }
+
+    @Test
+    public void acceptsPlainRepresentationButNeverFallsBackToHtml() {
+        ClipData htmlClip = ClipData.newHtmlText("browser", "plain only", "<b>different text</b>");
+        ClipboardSyncController.ClipReadResult result = ClipboardSyncController.extractSendableText(htmlClip);
+        assertTrue(result.ok);
+        assertEquals("plain only", result.text);
+
+        ClipData bothTypes = new ClipData("browser",
+                new String[]{ClipDescription.MIMETYPE_TEXT_PLAIN, ClipDescription.MIMETYPE_TEXT_HTML},
+                new ClipData.Item("existing plain text", "<b>markup</b>"));
+        assertEquals("existing plain text", ClipboardSyncController.extractSendableText(bothTypes).text);
+        assertFalse(ClipboardSyncController.extractSendableText(
+                ClipData.newHtmlText("html", "", "<b>markup</b>")).ok);
+    }
+
+    @Test
+    public void shareAndSelectionAcceptOnlyEligiblePlainText() {
+        Intent share = new Intent(Intent.ACTION_SEND).setType("text/plain")
+                .putExtra(Intent.EXTRA_TEXT, "shared text")
+                .putExtra(Intent.EXTRA_HTML_TEXT, "<b>not sent</b>");
+        assertEquals("shared text", ClipboardSyncShareActivity.readSharedText(share).text);
+
+        Intent selection = new Intent(Intent.ACTION_PROCESS_TEXT).setType("text/plain")
+                .putExtra(Intent.EXTRA_PROCESS_TEXT, "selected text");
+        assertEquals("selected text", ClipboardSyncShareActivity.readSharedText(selection).text);
+
+        share.setClipData(ClipboardSyncController.buildIncomingClip("remote text"));
+        assertFalse(ClipboardSyncShareActivity.readSharedText(share).ok);
+        share.setClipData(null);
+        share.putExtra(Intent.EXTRA_STREAM, Uri.parse("content://com.example.secret/private"));
+        assertFalse(ClipboardSyncShareActivity.readSharedText(share).ok);
+
+        selection.putExtra(Intent.EXTRA_PROCESS_TEXT, "embedded pibot-clipboard-v1:secret");
+        assertEquals("CLIPBOARD_REJECTED", ClipboardSyncShareActivity.readSharedText(selection).errorCode);
+        selection.putExtra(Intent.EXTRA_PROCESS_TEXT, "broken \ud800 surrogate");
+        assertFalse(ClipboardSyncShareActivity.readSharedText(selection).ok);
     }
 
     @Test

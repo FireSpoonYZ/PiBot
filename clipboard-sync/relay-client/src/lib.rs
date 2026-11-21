@@ -37,6 +37,8 @@ pub enum LinkStatus {
     Unauthorized,
     Unsupported,
     CertificateError,
+    GroupFull,
+    Replaced,
 }
 
 impl LinkStatus {
@@ -48,6 +50,8 @@ impl LinkStatus {
             Self::Unauthorized => "unauthorized",
             Self::Unsupported => "unsupported",
             Self::CertificateError => "certificateError",
+            Self::GroupFull => "groupFull",
+            Self::Replaced => "replaced",
         }
     }
 }
@@ -115,17 +119,22 @@ impl Link {
 
     /// Non-blocking capacity-one publish for the active online generation.
     ///
-    /// Returns `false` if the link is not `Online`, `generation` is superseded,
-    /// the outbound slot is already full, or `text` is ineligible.
+    /// Replaces the previous pending copy. Returns `false` only if the link is no
+    /// longer online for this generation or the text is ineligible.
     pub fn publish(&self, generation: u64, text: &str) -> bool {
         self.shared.publish(generation, text)
+    }
+
+    /// Closes this link and discards pending copies, even when another caller holds the handle.
+    pub fn stop(&self) {
+        self.shared.cancel();
+        self.task.abort();
     }
 }
 
 impl Drop for Link {
     fn drop(&mut self) {
-        self.shared.cancel();
-        self.task.abort();
+        self.stop();
     }
 }
 
@@ -488,6 +497,62 @@ mod tests {
 
         drop(link);
         let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn paced_burst_sends_the_newest_pending_copy() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client_key, server_key) = key_pair();
+        let (first_put_tx, first_put_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            assert!(ws.next().await.unwrap().unwrap().is_text());
+            ws.send(Message::text(json!({
+                "type": "ready",
+                "protocolVersion": 1,
+                "role": "clipboard",
+                "deviceId": "dev-a",
+            }).to_string())).await.unwrap();
+
+            let mut first_put_tx = Some(first_put_tx);
+            for expected in ["first copy", "copy 31"] {
+                let frame = ws.next().await.unwrap().unwrap().into_text().unwrap();
+                let val: Value = serde_json::from_str(&frame).unwrap();
+                assert_eq!(val["type"], "clipboard-put");
+                let clip = clipboard_sync::SealedClip {
+                    nonce: val["nonce"].as_str().unwrap().to_owned(),
+                    sealed: val["sealed"].as_str().unwrap().to_owned(),
+                    sent_at: val["sentAt"].as_u64().unwrap(),
+                };
+                assert_eq!(server_key.decrypt("dev-a", &clip, now_unix()).unwrap(), expected);
+                if let Some(first_put_tx) = first_put_tx.take() {
+                    first_put_tx.send(()).unwrap();
+                }
+            }
+            tokio::time::Instant::now()
+        });
+
+        let link = start(
+            LinkConfig {
+                origin: format!("http://127.0.0.1:{}", addr.port()),
+                device_id: "dev-a".to_owned(),
+                device_token: test_token(),
+                ca_pem: None,
+            },
+            client_key,
+            |_| {},
+        ).unwrap();
+        let snap = wait_for_snapshot(&link, |s| s.status == LinkStatus::Online).await;
+        let first_at = tokio::time::Instant::now();
+        assert!(link.publish(snap.generation, "first copy"));
+        tokio::time::timeout(Duration::from_secs(3), first_put_rx).await.unwrap().unwrap();
+        for i in 0..32 {
+            assert!(link.publish(snap.generation, &format!("copy {i}")));
+        }
+        let second_at = tokio::time::timeout(Duration::from_secs(3), server).await.unwrap().unwrap();
+        assert!(second_at - first_at >= Duration::from_millis(600));
     }
 
     #[tokio::test]

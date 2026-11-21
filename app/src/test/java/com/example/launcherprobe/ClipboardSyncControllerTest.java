@@ -343,7 +343,7 @@ public class ClipboardSyncControllerTest {
         assertTrue(statusReply.getJSONObject("status").getBoolean("configured"));
 
         // joinGroup rejects invalid code without clobbering existing group.
-        assertEquals("INVALID_ARGUMENT", expectBridgeFailure(() ->
+        assertEquals("INVALID_GROUP_CODE", expectBridgeFailure(() ->
                 controller.handleAction(new JSONObject().put("action", "joinGroup").put("code", "BAD-CODE")).join()).code);
 
         // joinGroup persists valid trimmed code, keeps enabled=false, and NEVER echoes code.

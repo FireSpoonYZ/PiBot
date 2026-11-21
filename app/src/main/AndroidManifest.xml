@@ -97,6 +97,18 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".ClipboardSyncShareActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="@string/clipboard_share_title">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
         <!-- 拍照输出：:tauri_ui 私有 cache 的 FileProvider，仅本次相机 Intent 按包名授权读写。 -->
         <provider
             android:name="androidx.core.content.FileProvider"

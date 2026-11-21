@@ -162,7 +162,8 @@ displayName,hostConfigured,connectionRequested,warnings?}`，不返回 token）�
 入口为「设置 → 本机与权限 → 剪贴板同步」。Rust JNI 库运行在客户端默认进程，不依赖 `:tauri_ui` 界面保持打开。
 
 - **交互与加密存储**：采用「一次入组（`pibot-clipboard-v1:...`）+ 每设备独立开关」。开关与组码以独立 AndroidKeyStore 别名 `clipboard_sync.state.v1` 做 AES-GCM 加密并保存在不参与备份的私有文件 `clipboard_sync_state_v1.json`（无明文回退），严格绑定当前 Center 的 origin、deviceId、令牌与 CA 指纹，切换 Center 不跨中心迁移。需先升级 Center 且仅在线实时投递（无离线补发、无历史、无文件、无自动粘贴，不接入 Bot/MCP）。
-- **后台接收与手动发送回退**：后台接收由默认进程依托客户端前台服务 `BotClientService` 维持，自动将远端纯文本（`≤ 64 KiB`）写入系统剪贴板并附带 `EXTRA_OWN_SYNC` 与 `ClipDescription.EXTRA_IS_SENSITIVE`（Android 13+ 抑制预览）。默认工作在 `manual` 模式：用户在真实前台且聚焦的 Activity 点击「立即发送（`sendNow`）」，由 Kotlin 原生校验并读取纯文本经同 UID 私有桥送至默认进程加密发出（明文绝不回传 WebView；拒绝 `coerceToText`、非纯文本、多条目、URI/Intent/HTML、敏感标记、自有标记、Shower `pibot` 剪贴板及含 `pibot1.` / `pibot-clipboard-v1:` 的文本）。
+- **后台接收与手动发送回退**：后台接收由默认进程依托客户端前台服务 `BotClientService` 维持，自动将远端纯文本（`≤ 64 KiB`）写入系统剪贴板并附带 `EXTRA_OWN_SYNC` 与 `ClipDescription.EXTRA_IS_SENSITIVE`（Android 13+ 抑制预览）。默认工作在 `manual` 模式：用户在真实前台且聚焦的 Activity 点击「立即发送（`sendNow`）」，由 Kotlin 原生校验并读取纯文本经同 UID 私有桥送至默认进程加密发出（只取现成纯文本，忽略附带的 HTML，不用 `coerceToText`，明文绝不回传 WebView；拒绝多条目、URI/Intent、敏感标记、自有标记、Shower `pibot` 剪贴板及含 `pibot1.` / `pibot-clipboard-v1:` 的文本）。
+- **系统分享与划词**：在其他应用选择「发送到 PiBot 同步组」，确认后发送所选纯文本，无需回到设置页或授予 Shizuku。仅在本机同步开启且在线时发送，不更改本机剪贴板。
 - **可选 Shizuku 与生命周期边界**：要在其他应用复制后自动发出，先授予 Shizuku 系统权限，再在剪贴板设置里单独同意后台自动发送。不支持或撤销时保留手动发送。不同厂商系统的后台行为需真机验证。**不承诺**设备重启/开机自动恢复剪贴板同步，也**不承诺**暂停/退出 `BotClientService` 后继续后台收发。
 
 完整安全边界、版本策略与三节点验收清单见 [docs/clipboard-sync.md](../docs/clipboard-sync.md)。

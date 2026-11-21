@@ -11,7 +11,7 @@ use rustls::ClientConfig;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::{watch, Notify};
-use tokio::time::{sleep, timeout};
+use tokio::time::{sleep, sleep_until, timeout, Instant as TokioInstant};
 use tokio_rustls::TlsConnector;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
@@ -20,7 +20,8 @@ use tokio_tungstenite::{client_async_with_config, WebSocketStream};
 use crate::config::{ConnectTarget, ValidatedEndpoint};
 use crate::protocol::{
     encode_clipboard_put, encode_hello, is_fresh_sent_at, is_valid_sent_at, parse_clipboard_event,
-    parse_ready, CLOSE_BAD_FRAME, CLOSE_POLICY_VIOLATION, CLOSE_PROTOCOL_ERROR, CLOSE_REVOKED,
+    parse_ready, CLOSE_BAD_FRAME, CLOSE_GROUP_FULL, CLOSE_POLICY_VIOLATION, CLOSE_PROTOCOL_ERROR,
+    CLOSE_REPLACED, CLOSE_REVOKED,
     CLOSE_UNAUTHORIZED, CLOSE_UNSUPPORTED_DATA, MAX_WS_FRAME_BYTES, MAX_WS_WRITE_BUFFER_BYTES,
 };
 use crate::replay::{ReplayCache, DEFAULT_REPLAY_CAPACITY};
@@ -31,6 +32,8 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const READ_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(45);
+// Stay under the relay's 16 writes per 10 seconds while retaining the newest pending copy.
+const MIN_SEND_INTERVAL: Duration = Duration::from_millis(650);
 const BACKOFF_MIN_MS: u64 = 250;
 const BACKOFF_MAX_MS: u64 = 30_000;
 
@@ -85,7 +88,6 @@ impl LinkShared {
             if guard.cancelled
                 || guard.status != LinkStatus::Online
                 || guard.generation != generation
-                || guard.pending_outbound.is_some()
             {
                 return false;
             }
@@ -102,6 +104,7 @@ impl LinkShared {
         {
             let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
             guard.cancelled = true;
+            guard.status = LinkStatus::Offline;
             guard.pending_outbound = None;
         }
         let _ = self.cancel_tx.send(true);
@@ -296,6 +299,8 @@ fn classify_handshake_error(err: WsError) -> ConnectError {
 
 fn classify_pre_ready_close(code: Option<u16>) -> SessionOutcome {
     match code {
+        Some(CLOSE_GROUP_FULL) => SessionOutcome::Terminal(LinkStatus::GroupFull),
+        Some(CLOSE_REPLACED) => SessionOutcome::Terminal(LinkStatus::Replaced),
         Some(CLOSE_UNAUTHORIZED | CLOSE_REVOKED) => {
             SessionOutcome::Terminal(LinkStatus::Unauthorized)
         }
@@ -311,6 +316,7 @@ fn classify_pre_ready_close(code: Option<u16>) -> SessionOutcome {
 
 fn classify_online_close(code: Option<u16>) -> SessionOutcome {
     match code {
+        Some(CLOSE_REPLACED) => SessionOutcome::Terminal(LinkStatus::Replaced),
         Some(CLOSE_UNAUTHORIZED | CLOSE_REVOKED) => {
             SessionOutcome::Terminal(LinkStatus::Unauthorized)
         }
@@ -540,6 +546,7 @@ async fn run_single_attempt<F>(
     cancel_rx: &mut watch::Receiver<bool>,
     on_clip: &F,
     backoff_ms: &mut u64,
+    next_send: &mut TokioInstant,
 ) -> SessionOutcome
 where
     F: Fn(IncomingClip) + Send + Sync + 'static,
@@ -576,11 +583,15 @@ where
             return SessionOutcome::Cancelled;
         }
 
-        if let Some(cmd) = shared.take_outbound(generation) {
-            match send_outbound_clip(&mut ws, key, device_id, cmd, cancel_rx).await {
-                SendResult::Continue => continue,
-                SendResult::Reconnect => return SessionOutcome::Retryable,
-                SendResult::Cancelled => return SessionOutcome::Cancelled,
+        let pacing = TokioInstant::now() < *next_send;
+        if !pacing {
+            if let Some(cmd) = shared.take_outbound(generation) {
+                *next_send = TokioInstant::now() + MIN_SEND_INTERVAL;
+                match send_outbound_clip(&mut ws, key, device_id, cmd, cancel_rx).await {
+                    SendResult::Continue => continue,
+                    SendResult::Reconnect => return SessionOutcome::Retryable,
+                    SendResult::Cancelled => return SessionOutcome::Cancelled,
+                }
             }
         }
 
@@ -589,7 +600,8 @@ where
                 let _ = timeout(CLOSE_TIMEOUT, ws.close(None)).await;
                 return SessionOutcome::Cancelled;
             }
-            _ = shared.outbound_notify.notified() => {}
+            _ = shared.outbound_notify.notified(), if !pacing => {}
+            _ = sleep_until(*next_send), if pacing => {}
             _ = &mut watchdog => {
                 return SessionOutcome::Retryable;
             }
@@ -659,6 +671,7 @@ pub(crate) async fn run_link<F>(
         ReplayCache::new(DEFAULT_REPLAY_CAPACITY, clipboard_sync::MAX_AGE_SECONDS);
     let mut backoff_ms = BACKOFF_MIN_MS;
     let mut attempt: u64 = 0;
+    let mut next_send = TokioInstant::now();
 
     loop {
         if *cancel_rx.borrow() || shared.is_cancelled() {
@@ -680,6 +693,7 @@ pub(crate) async fn run_link<F>(
             &mut cancel_rx,
             &on_clip,
             &mut backoff_ms,
+            &mut next_send,
         )
         .await;
 
@@ -743,9 +757,13 @@ mod tests {
         assert!(!shared.publish(1, ""));
         assert!(!shared.publish(1, &"x".repeat(clipboard_sync::MAX_TEXT_BYTES + 1)));
 
-        // Capacity-one nonblocking slot: first succeeds, second fails while full.
+        // A burst keeps the newest eligible value without growing the queue.
         assert!(shared.publish(1, "clip-1"));
-        assert!(!shared.publish(1, "clip-2"));
+        assert!(shared.publish(1, "clip-2"));
+        assert!(!shared.publish(2, "wrong-generation"));
+        assert_eq!(shared.take_outbound(1).unwrap().text, "clip-2");
+        assert!(shared.take_outbound(1).is_none());
+        assert!(shared.publish(1, "before-disconnect"));
 
         // Disconnect drains queued command and rejects further publishes.
         shared.set_status_and_drain(LinkStatus::Offline);
@@ -771,6 +789,7 @@ mod tests {
         // Cancel drains pending slot and prevents subsequent online entry or publish.
         assert!(shared.publish(2, "to-be-drained"));
         shared.cancel();
+        assert_eq!(shared.snapshot().status, LinkStatus::Offline);
         assert!(shared.take_outbound(2).is_none());
         assert!(!shared.publish(2, "after-cancel"));
         assert!(shared.enter_online().is_none());
@@ -814,6 +833,14 @@ mod tests {
         assert!(matches!(
             classify_pre_ready_close(Some(CLOSE_REVOKED)),
             SessionOutcome::Terminal(LinkStatus::Unauthorized)
+        ));
+        assert!(matches!(
+            classify_pre_ready_close(Some(CLOSE_GROUP_FULL)),
+            SessionOutcome::Terminal(LinkStatus::GroupFull)
+        ));
+        assert!(matches!(
+            classify_online_close(Some(CLOSE_REPLACED)),
+            SessionOutcome::Terminal(LinkStatus::Replaced)
         ));
         assert!(matches!(
             classify_online_close(Some(CLOSE_REVOKED)),

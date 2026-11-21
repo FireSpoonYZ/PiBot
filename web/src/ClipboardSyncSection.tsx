@@ -9,7 +9,8 @@ import './ClipboardSyncSection.css';
 
 type SyncMode = 'automatic' | 'manual' | 'unsupported';
 type SyncConnection =
-  | 'off' | 'notPaired' | 'connecting' | 'online' | 'offline' | 'unauthorized' | 'unsupported' | 'certificateError';
+  | 'off' | 'notPaired' | 'connecting' | 'online' | 'offline' | 'unauthorized' | 'unsupported' | 'certificateError'
+  | 'groupFull' | 'replaced' | 'displayUnsupported';
 
 interface SyncStatus {
   enabled: boolean;
@@ -34,19 +35,31 @@ type SyncRequest =
 type SyncAction = SyncRequest['action'];
 type ErrorKind =
   | 'offline' | 'notPaired' | 'requiresNewCenter' | 'permission' | 'unsupported'
-  | 'unauthorized' | 'certificateError' | 'invalidCode' | 'notConfigured' | 'emptyClipboard' | 'unknown';
+  | 'unauthorized' | 'certificateError' | 'invalidCode' | 'notConfigured' | 'notEnabled'
+  | 'emptyClipboard' | 'clipboardFormat' | 'clipboardSize' | 'clipboardSensitive'
+  | 'clipboardRejected' | 'clipboardUnavailable' | 'unknown';
 type Translate = (zh: string, en: string) => string;
 interface SafeNotice { kind: ErrorKind; tone: 'danger' | 'warning'; title: string; detail: string }
 
 const VALID_MODES = new Set<SyncMode>(['automatic', 'manual', 'unsupported']);
 const VALID_CONNECTIONS = new Set<SyncConnection>([
   'off', 'notPaired', 'connecting', 'online', 'offline', 'unauthorized', 'unsupported', 'certificateError',
+  'groupFull', 'replaced', 'displayUnsupported',
 ]);
 const MOBILE_ONLY = new Set<SyncAction>(['sendNow', 'authorizeBackground', 'revokeBackground']);
 const INVALIDATES_ONLINE = new Set<ErrorKind>([
   'offline', 'notPaired', 'requiresNewCenter', 'unauthorized', 'certificateError', 'unsupported',
 ]);
 const ERROR_PATTERNS: ReadonlyArray<readonly [ErrorKind, RegExp]> = [
+  ['clipboardFormat', /\bclipboard_unsupported\b/],
+  ['clipboardSize', /\bclipboard_too_large\b/],
+  ['clipboardSensitive', /\bclipboard_sensitive\b/],
+  ['clipboardRejected', /\bclipboard_rejected\b/],
+  ['clipboardUnavailable', /\bclipboard_unavailable\b/],
+  ['emptyClipboard', /\bclipboard_empty\b/],
+  ['permission', /\bclipboard_denied\b/],
+  ['offline', /\b(not_online|closed)\b/],
+  ['notEnabled', /\bnot_enabled\b/],
   ['certificateError', /\b(cert|certificate|tls|ssl|x509|untrusted_cert)\b|certificate_error|cert_error/],
   ['unauthorized', /\b(unauthorized|auth_failed|invalid_token|revoked|401)\b/],
   ['notPaired', /not_paired|unpaired|device_not_paired|no_center|center_not_configured|not paired/],
@@ -120,6 +133,12 @@ function safeErrorNotice(kind: ErrorKind, action: SyncAction, t: Translate): Saf
     invalidCode: { tone: 'danger', title: t('邀请码无效', 'Invalid group code'), detail: t('请核对邀请码后重新输入。', 'Check the group code and try again.') },
     notConfigured: { tone: 'warning', title: t('尚未配置同步组', 'No sync group configured'), detail: t('请先创建新的同步组或输入邀请码加入。', 'Create a new sync group or join one with a group code first.') },
     emptyClipboard: { tone: 'warning', title: t('当前剪贴板无纯文本', 'No text in clipboard'), detail: t('系统剪贴板为空或不包含可同步的文本内容。', 'The system clipboard is empty or has no syncable plain text.') },
+    notEnabled: { tone: 'warning', title: t('剪贴板同步已关闭', 'Clipboard sync is off'), detail: t('请先开启本机的剪贴板同步。', 'Turn on clipboard sync on this device first.') },
+    clipboardFormat: { tone: 'warning', title: t('此内容不支持同步', 'Unsupported clipboard content'), detail: t('仅同步纯文本；不发送图片、文件或应用链接对象。', 'Only plain text can be sent, not images, files, or link objects.') },
+    clipboardSize: { tone: 'warning', title: t('剪贴板文本过大', 'Clipboard text is too large'), detail: t('最多支持 64 KiB 的 UTF-8 文本，可以分段复制。', 'Copy a smaller selection. The limit is 64 KiB of UTF-8 text.') },
+    clipboardSensitive: { tone: 'warning', title: t('不会发送敏感内容', 'Sensitive content not sent'), detail: t('此内容被系统或来源应用标记为敏感。', 'The system or source app marked this item as sensitive.') },
+    clipboardRejected: { tone: 'warning', title: t('此文本不会同步', 'Clipboard item not sent'), detail: t('已同步的内容、受控屏幕剪贴板、PiBot 配对码和同步组邀请码不会回传。', 'Received clips, controlled-display clips, and PiBot pairing or group codes are never sent.') },
+    clipboardUnavailable: { tone: 'warning', title: t('无法读取系统剪贴板', 'System clipboard unavailable'), detail: t('请在 PiBot 前台保持页面聚焦，再试一次。', 'Keep PiBot in the foreground and retry.') },
     unknown: { tone: 'danger', title: t('剪贴板同步操作失败', 'Clipboard sync action failed'), detail: t('未能完成该操作，请检查状态后重试。', 'Could not complete the action. Check status and try again.') },
   };
   return { kind, ...map[kind] };
@@ -131,11 +150,14 @@ function describeStatus(status: SyncStatus | null, loading: boolean, error: Safe
     if (error) return { tone: error.tone, label: error.title, detail: error.detail, isOnline: false };
     return { tone: 'neutral', label: t('状态未读取', 'Status unavailable'), detail: t('尚未获取到剪贴板同步状态。', 'Clipboard sync status has not been loaded yet.'), isOnline: false };
   }
+  if (status.connection === 'displayUnsupported') return { tone: 'warning', label: t('当前 Linux 会话不支持', 'Linux session unsupported'), detail: t('请使用原生 X11（需 XFixes），或支持 ext-data-control / wlr-data-control 的 Wayland 会话。不会退回 XWayland。', 'Use native X11 with XFixes, or Wayland with ext-data-control / wlr-data-control. PiBot does not fall back to XWayland.'), isOnline: false };
   if (status.mode === 'unsupported') return { tone: 'warning', label: t('当前设备不支持', 'Unsupported'), detail: t('当前平台或客户端不支持剪贴板同步。', 'Clipboard sync is not supported on this device.'), isOnline: false };
   if (status.connection === 'notPaired') return { tone: 'warning', label: t('未配对', 'Not paired'), detail: status.configured ? t('设备尚未绑定中心，请先在“中心连接”中配对。', 'Pair this device in Center Connection first.') : t('尚未配对中心或尚未加入同步组。', 'Pair with Center and create or join a sync group.'), isOnline: false };
   if (status.connection === 'unsupported') return { tone: 'warning', label: t('需要新版中心', 'Requires newer Center'), detail: t('当前连接的中心不支持剪贴板同步，请升级中心。', 'Upgrade PiBot Center to use clipboard sync.'), isOnline: false };
   if (status.connection === 'certificateError') return { tone: 'danger', label: t('证书校验失败', 'Certificate error'), detail: t('无法验证中心 HTTPS 证书，请检查自定义 CA。', 'Could not verify the Center TLS certificate.'), isOnline: false };
   if (status.connection === 'unauthorized') return { tone: 'danger', label: t('授权无效', 'Unauthorized'), detail: t('中心拒绝了当前设备的剪贴板同步凭据。', 'Center rejected this device’s clipboard sync credentials.'), isOnline: false };
+  if (status.connection === 'groupFull') return { tone: 'warning', label: t('同步组已满', 'Sync group full'), detail: t('最多 16 台设备同时在线。请让一台成员设备关闭同步，再重新开启本机同步。', 'Up to 16 devices can be online. Turn sync off on another member, then turn it back on here.'), isOnline: false };
+  if (status.connection === 'replaced') return { tone: 'warning', label: t('本机连接已被替换', 'Connection replaced'), detail: t('同一设备身份已在别处连接。停止重复客户端，再重新开启本机同步。', 'This device identity connected elsewhere. Stop the duplicate client, then turn sync back on here.'), isOnline: false };
   if (status.connection === 'offline') return { tone: 'warning', label: t('同步离线', 'Sync offline'), detail: t('剪贴板同步通道离线（与本机 Host / Bot 状态相互独立）。', 'Clipboard sync channel is offline (independent of Host/Bot).'), isOnline: false };
   if (!status.enabled) return { tone: 'neutral', label: t('已关闭', 'Off'), detail: status.configured ? t('同步开关关闭；邀请组已保存，开启开关即可连接。', 'Sync is off; group is saved. Turn on the switch to connect.') : t('默认关闭；先创建或加入邀请组，再手动开启开关。', 'Off by default; create or join a group, then turn on the switch.'), isOnline: false };
   if (!status.configured) return { tone: 'neutral', label: t('未配置同步组', 'No sync group'), detail: t('同步开关已开启，但尚未创建或加入同步组。', 'Switch is on, but no sync group is configured yet.'), isOnline: false };
@@ -168,7 +190,8 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<SyncAction | null>(null);
-  const [errorNotice, setErrorNotice] = useState<SafeNotice | null>(null);
+  const [actionError, setActionError] = useState<SafeNotice | null>(null);
+  const [statusError, setStatusError] = useState<SafeNotice | null>(null);
   const [infoNotice, setInfoNotice] = useState('');
   const [revealedCode, setRevealedCode] = useState<string | null>(null);
   const [joinOpen, setJoinOpen] = useState(false);
@@ -179,8 +202,8 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
 
   const mountedRef = useRef(true);
   const mutationRevRef = useRef(0);
-  const statusSeqRef = useRef(0);
-  const appliedSeqRef = useRef(0);
+  const pendingStatusRef = useRef<symbol | null>(null);
+  const mutatingRef = useRef(false);
 
   const clearSecretDraft = useCallback(() => {
     setJoinCode('');
@@ -201,22 +224,29 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
   }, [clearSecretDraft]);
 
   const refreshStatus = useCallback(async (silent = false) => {
+    if (mutatingRef.current || (silent && pendingStatusRef.current !== null)) return;
     const rev = mutationRevRef.current;
-    const seq = ++statusSeqRef.current;
-    if (!silent) { setLoading(true); setErrorNotice(null); }
+    const request = Symbol();
+    pendingStatusRef.current = request;
+    if (!silent) {
+      setLoading(true);
+      setActionError(null);
+      setStatusError(null);
+    }
+    const isCurrent = () => mountedRef.current && rev === mutationRevRef.current
+      && pendingStatusRef.current === request;
     try {
       const res = await callNative(variant, { action: 'status' });
-      if (!mountedRef.current || rev !== mutationRevRef.current || seq < appliedSeqRef.current) return;
-      appliedSeqRef.current = seq;
+      if (!isCurrent()) return;
       applyStatus(res.status);
-      setErrorNotice(null);
+      setStatusError(null);
     } catch (error) {
-      if (!mountedRef.current || rev !== mutationRevRef.current || seq < appliedSeqRef.current) return;
-      appliedSeqRef.current = seq;
-      setStatus(prev => (prev && (prev.connection === 'online' || prev.connection === 'connecting') ? null : prev));
-      setErrorNotice(safeErrorNotice(classifyError(error), 'status', t));
+      if (!isCurrent()) return;
+      setStatus(null);
+      setStatusError(safeErrorNotice(classifyError(error), 'status', t));
     } finally {
-      if (mountedRef.current && rev === mutationRevRef.current) setLoading(false);
+      if (isCurrent()) setLoading(false);
+      if (pendingStatusRef.current === request) pendingStatusRef.current = null;
     }
   }, [applyStatus, t, variant]);
 
@@ -240,21 +270,22 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
   }, [refreshStatus]);
 
   useEffect(() => {
-    if (status?.connection !== 'connecting' || busyAction !== null) return;
-    const timer = setInterval(() => { if (!document.hidden && mountedRef.current) void refreshStatus(true); }, 2500);
+    const timer = setInterval(() => { if (!document.hidden) void refreshStatus(true); }, 2500);
     return () => clearInterval(timer);
-  }, [status?.connection, busyAction, refreshStatus]);
+  }, [refreshStatus]);
 
   const runAction = useCallback(async (request: SyncRequest): Promise<SyncResponse | null> => {
-    if (busyAction !== null) return null;
+    if (mutatingRef.current) return null;
+    mutatingRef.current = true;
     const rev = ++mutationRevRef.current;
     setBusyAction(request.action);
-    setErrorNotice(null);
+    setActionError(null);
     setInfoNotice('');
     try {
       const res = await callNative(variant, request);
       if (!mountedRef.current || rev !== mutationRevRef.current) return null;
       applyStatus(res.status);
+      setStatusError(null);
       return res;
     } catch (error) {
       if (!mountedRef.current || rev !== mutationRevRef.current) return null;
@@ -262,12 +293,13 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
       if (INVALIDATES_ONLINE.has(kind)) {
         setStatus(prev => (prev && (prev.connection === 'online' || prev.connection === 'connecting') ? null : prev));
       }
-      setErrorNotice(safeErrorNotice(kind, request.action, t));
+      setActionError(safeErrorNotice(kind, request.action, t));
       return null;
     } finally {
+      mutatingRef.current = false;
       if (mountedRef.current && rev === mutationRevRef.current) setBusyAction(null);
     }
-  }, [applyStatus, busyAction, t, variant]);
+  }, [applyStatus, t, variant]);
 
   const executeNewGroup = async () => {
     setConfirmNewGroup(false); setRevealedCode(null); clearSecretDraft(); setJoinOpen(false);
@@ -296,7 +328,7 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
     const res = await runAction({ action: 'showCode' });
     if (!res || !mountedRef.current) return;
     if (res.code) setRevealedCode(res.code);
-    else setErrorNotice(safeErrorNotice('notConfigured', 'showCode', t));
+    else setActionError(safeErrorNotice('notConfigured', 'showCode', t));
   };
 
   const handleAuthorizeBg = async () => {
@@ -314,10 +346,11 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
     const res = await runAction({ action: 'revokeBackground' });
     if (!res || !mountedRef.current) return;
     setBgPromptOpen(false); setBgConsent(false);
-    setInfoNotice(t('已撤销后台自动同步授权，后续仅在点击“立即发送当前剪贴板”时发送。', 'Revoked background sync authorization. Sending now requires tapping "Send current clipboard now".'));
+    setInfoNotice(t('已撤销后台自动同步授权。你仍可以手动发送，也能自动接收。', 'Background authorization revoked. You can still send manually and receive automatically.'));
   };
 
-  const presentation = describeStatus(status, loading, errorNotice, t);
+  const errorNotice = actionError ?? statusError;
+  const presentation = describeStatus(status, loading, statusError, t);
   const busy = busyAction !== null;
   const unsupported = status?.mode === 'unsupported';
   const toggleDisabled = busy || loading || status === null || (unsupported && !status.enabled);
@@ -441,10 +474,10 @@ export function ClipboardSyncSection({ variant }: { variant: 'desktop' | 'mobile
 
       <Section title={t('手动发送当前剪贴板', 'Send Current Clipboard')}>
         <div className="cs-pad">
-          <button type="button" className="hst-btn is-primary cs-send-btn" disabled={!canSendNow} onClick={() => void runAction({ action: 'sendNow' }).then(res => { if (res && mountedRef.current) setInfoNotice(t('已发送当前文本剪贴板到同步组。', 'Sent current text clipboard to your sync group.')); })}>
+          <button type="button" className="hst-btn is-primary cs-send-btn" disabled={!canSendNow} onClick={() => void runAction({ action: 'sendNow' }).then(res => { if (res && mountedRef.current) setInfoNotice(t('已将当前文本交给剪贴板同步通道。', 'Current text queued for clipboard sync.')); })}>
             <Upload size={16} aria-hidden="true" /> {busyAction === 'sendNow' ? t('正在发送…', 'Sending…') : t('立即发送当前剪贴板', 'Send current clipboard now')}
           </button>
-          <p className="cs-note">{canSendNow ? t('在前台点击可将当前纯文本剪贴板直接发送到同组设备（自动同步降级时也可随时使用）。', 'Tap in foreground to push current plain text to your group (also works in manual fallback).') : t('开启同步并显示“同步在线”后即可手动发送当前剪贴板。', 'Available once clipboard sync is enabled and online.')}</p>
+          <p className="cs-note">{canSendNow ? t('也可在其他应用的分享或划词菜单选择“发送到 PiBot 同步组”。这两种手动发送方式都不需要 Shizuku。', 'You can also choose “Send with PiBot” from another app’s share or text-selection menu. Neither method requires Shizuku.') : t('开启同步并显示“同步在线”后即可手动发送当前剪贴板。', 'Available once clipboard sync is enabled and online.')}</p>
         </div>
       </Section>
 

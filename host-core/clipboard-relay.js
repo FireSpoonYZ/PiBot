@@ -49,7 +49,7 @@ export const CLIPBOARD_CLOSE = Object.freeze({
   HELLO_TIMEOUT: RELAY_CLOSE.HELLO_TIMEOUT,
   REPLACED: RELAY_CLOSE.REPLACED,
   FRAME_TOO_LARGE: 1009,
-  TRY_AGAIN_LATER: 1013,
+  GROUP_FULL: 4410,
 });
 
 const CLIPBOARD_GROUP_RE = /^[0-9a-f]{64}$/;
@@ -530,7 +530,7 @@ export function createClipboardRelay(options = {}) {
       !targetGroup.has(device.deviceId) &&
       targetGroup.size >= maxGroupDevices
     ) {
-      return closeWith(conn, CLIPBOARD_CLOSE.TRY_AGAIN_LATER);
+      return closeWith(conn, CLIPBOARD_CLOSE.GROUP_FULL);
     }
 
     clearTimeout(conn.helloTimer);
@@ -589,9 +589,8 @@ export function createClipboardRelay(options = {}) {
       return;
     }
 
-    if (!consumeRateLimit(conn.deviceId, Date.now())) {
-      return closeWith(conn, CLIPBOARD_CLOSE.TRY_AGAIN_LATER);
-    }
+    // Drop excess updates, not the live connection (and its incoming traffic).
+    if (!consumeRateLimit(conn.deviceId, Date.now())) return;
 
     const group = groups.get(conn.groupId);
     if (group === undefined || group.size <= 1) {

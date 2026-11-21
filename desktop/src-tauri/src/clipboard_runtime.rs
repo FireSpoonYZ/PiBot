@@ -31,6 +31,9 @@ pub enum ConnectionState {
   Unauthorized,
   Unsupported,
   CertificateError,
+  GroupFull,
+  Replaced,
+  DisplayUnsupported,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -193,9 +196,6 @@ mod imp {
     time::Duration,
   };
 
-  #[cfg(target_os = "linux")]
-  use std::sync::OnceLock;
-
   #[cfg(windows)]
   use base64::{Engine as _, engine::general_purpose::STANDARD};
 
@@ -206,7 +206,7 @@ mod imp {
   use sha2::{Digest, Sha256};
   use tauri::{
     AppHandle, Manager,
-    menu::{MenuBuilder, MenuEvent},
+    menu::{MenuBuilder, MenuEvent, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
   };
   use tokio::sync::Notify;
@@ -239,27 +239,31 @@ mod imp {
   const MAX_CREDENTIALS_FILE_BYTES: u64 = 128 * 1024;
   const MAX_STATE_FILE_BYTES: u64 = 64 * 1024;
   const WRITE_AUTH_VERIFY_TIMEOUT: Duration = Duration::from_secs(2);
-  const MAX_CONSECUTIVE_PUBLISH_DROPS: u32 = 3;
+  const ADAPTER_RETRY_DELAY: Duration = Duration::from_secs(2);
 
   const TRAY_ID: &str = "pibot-clipboard-tray";
   const TRAY_MENU_OPEN_ID: &str = "clipboard_tray_open";
+  const TRAY_MENU_PAUSE_ID: &str = "clipboard_tray_pause";
+  const TRAY_MENU_RESUME_ID: &str = "clipboard_tray_resume";
+  const TRAY_STATUS_INTERVAL: Duration = Duration::from_secs(1);
   const TRAY_MENU_QUIT_ID: &str = "clipboard_tray_quit";
 
   static TEMP_FILE_SEQ: AtomicU64 = AtomicU64::new(1);
-
-  #[cfg(target_os = "linux")]
-  static LINUX_CLIPBOARD_SUPPORTED: OnceLock<bool> = OnceLock::new();
 
   fn storage_error(message: &'static str) -> BridgeError {
     BridgeError::new("STORAGE_ERROR", message, "not-sent")
   }
 
-  fn unsupported_status() -> ClipboardSyncStatus {
+  fn unsupported_status(enabled: bool, configured: bool) -> ClipboardSyncStatus {
     ClipboardSyncStatus {
-      enabled: false,
-      configured: false,
+      enabled,
+      configured,
       mode: ClipboardMode::Unsupported,
-      connection: ConnectionState::Unsupported,
+      connection: if cfg!(target_os = "linux") {
+        ConnectionState::DisplayUnsupported
+      } else {
+        ConnectionState::Unsupported
+      },
     }
   }
 
@@ -467,12 +471,10 @@ mod imp {
     active_clipboard: Option<Arc<SystemClipboard>>,
     os_clipboard_healthy: bool,
     os_unsupported: bool,
-    outbound_drop_streak: u32,
-    outbound_drop_gen: u64,
-    outbound_backpressured_gen: Option<u64>,
     cached_persisted: Option<(String, PersistedState)>,
     should_keep_tray: bool,
-    tray_active: bool,
+    tray_menu: Option<Arc<TrayMenu>>,
+    tray_paused: bool,
     reconcile_queued: bool,
   }
 
@@ -488,14 +490,22 @@ mod imp {
         active_clipboard: None,
         os_clipboard_healthy: false,
         os_unsupported: false,
-        outbound_drop_streak: 0,
-        outbound_drop_gen: 0,
-        outbound_backpressured_gen: None,
         cached_persisted: None,
         should_keep_tray: false,
-        tray_active: false,
+        tray_menu: None,
+        tray_paused: false,
         reconcile_queued: false,
       }
+    }
+
+    fn detach_session(&mut self) -> Option<Arc<SystemClipboard>> {
+      self.epoch = self.epoch.saturating_add(1);
+      self.active = None;
+      self.os_clipboard_healthy = false;
+      if let Some(link) = self.active_link.take() {
+        link.stop();
+      }
+      self.active_clipboard.take()
     }
   }
 
@@ -535,7 +545,7 @@ mod imp {
       if guard.shutting_down
         || guard.allow_exit
         || !guard.should_keep_tray
-        || !guard.tray_active
+        || guard.tray_menu.is_none()
         || guard.os_unsupported
       {
         return false;
@@ -548,6 +558,16 @@ mod imp {
     pub fn handle_tray_menu_event(&self, app: &AppHandle, event: MenuEvent) {
       match event.id().as_ref() {
         TRAY_MENU_OPEN_ID => show_main_window(app),
+        id @ (TRAY_MENU_PAUSE_ID | TRAY_MENU_RESUME_ID) => {
+          let enabled = id == TRAY_MENU_RESUME_ID;
+          let app = app.clone();
+          tauri::async_runtime::spawn(async move {
+            let runtime = app.state::<ClipboardRuntime>();
+            if runtime.action_set_enabled(&app, enabled, true).await.is_err() {
+              show_main_window(&app);
+            }
+          });
+        }
         TRAY_MENU_QUIT_ID => {
           self.begin_explicit_quit(app);
           app.exit(0);
@@ -561,21 +581,21 @@ mod imp {
     pub fn before_broker_request(&self, app: &AppHandle, op: &str) {
       match op {
         "center_disconnect" => {
-          let (link, clip) =
+          let clip =
             detach_active_locked(&self.core, Some(ObservedLifecycle::Disconnected { cleared: true }), true, true);
-          drop_detached_async(link, clip);
+          drop_detached_async(clip);
           remove_tray_on_main_thread(app, true);
         }
         "disconnect" | "center_store" => {
-          let (link, clip) =
+          let clip =
             detach_active_locked(&self.core, Some(ObservedLifecycle::Disconnected { cleared: false }), true, true);
-          drop_detached_async(link, clip);
+          drop_detached_async(clip);
           remove_tray_on_main_thread(app, true);
         }
         "center_connect" | "connect" => {
-          let (link, clip) =
+          let clip =
             detach_active_locked(&self.core, Some(ObservedLifecycle::Connecting), true, false);
-          drop_detached_async(link, clip);
+          drop_detached_async(clip);
         }
         _ => {}
       }
@@ -613,28 +633,28 @@ mod imp {
               schedule_reconcile_if_enabled(Arc::clone(&self.core), app.clone());
             }
             Some("connecting") => {
-              let (link, clip) =
+              let clip =
                 detach_active_locked(&self.core, Some(ObservedLifecycle::Connecting), true, false);
-              drop_detached_async(link, clip);
+              drop_detached_async(clip);
             }
             Some("error") => {
               let code = response.and_then(|v| v.pointer("/error/code").and_then(Value::as_str));
-              let (link, clip) = detach_active_locked(
+              let clip = detach_active_locked(
                 &self.core,
                 Some(ObservedLifecycle::Blocked(map_broker_error_code(code))),
                 true,
                 false,
               );
-              drop_detached_async(link, clip);
+              drop_detached_async(clip);
             }
             _ => {
-              let (link, clip) = detach_active_locked(
+              let clip = detach_active_locked(
                 &self.core,
                 Some(ObservedLifecycle::Disconnected { cleared: false }),
                 true,
                 true,
               );
-              drop_detached_async(link, clip);
+              drop_detached_async(clip);
               remove_tray_on_main_thread(app, true);
             }
           }
@@ -648,27 +668,27 @@ mod imp {
               }
               schedule_reconcile_if_enabled(Arc::clone(&self.core), app.clone());
             } else if val.get("phase").and_then(Value::as_str) == Some("connecting") {
-              let (link, clip) =
+              let clip =
                 detach_active_locked(&self.core, Some(ObservedLifecycle::Connecting), false, false);
-              drop_detached_async(link, clip);
+              drop_detached_async(clip);
             } else {
-              let (link, clip) = detach_active_locked(
+              let clip = detach_active_locked(
                 &self.core,
                 Some(ObservedLifecycle::Disconnected { cleared: false }),
                 false,
                 true,
               );
-              drop_detached_async(link, clip);
+              drop_detached_async(clip);
               remove_tray_on_main_thread(app, true);
             }
           } else {
-            let (link, clip) = detach_active_locked(
+            let clip = detach_active_locked(
               &self.core,
               Some(ObservedLifecycle::Disconnected { cleared: false }),
               false,
               true,
             );
-            drop_detached_async(link, clip);
+            drop_detached_async(clip);
             remove_tray_on_main_thread(app, true);
           }
         }
@@ -687,29 +707,29 @@ mod imp {
               }
             }
             Some("connecting") => {
-              let (link, clip) =
+              let clip =
                 detach_active_locked(&self.core, Some(ObservedLifecycle::Connecting), false, false);
-              drop_detached_async(link, clip);
+              drop_detached_async(clip);
             }
             Some("disconnected") => {
-              let (link, clip) = detach_active_locked(
+              let clip = detach_active_locked(
                 &self.core,
                 Some(ObservedLifecycle::Disconnected { cleared: false }),
                 true,
                 true,
               );
-              drop_detached_async(link, clip);
+              drop_detached_async(clip);
               remove_tray_on_main_thread(app, true);
             }
             Some("error") => {
               let code = val.pointer("/error/code").and_then(Value::as_str);
-              let (link, clip) = detach_active_locked(
+              let clip = detach_active_locked(
                 &self.core,
                 Some(ObservedLifecycle::Blocked(map_broker_error_code(code))),
                 false,
                 false,
               );
-              drop_detached_async(link, clip);
+              drop_detached_async(clip);
             }
             _ => {}
           }
@@ -725,41 +745,31 @@ mod imp {
                 meta.transport_generation != reported_gen
                   || reported_dev.is_some_and(|dev| meta.device_id != dev)
               });
-              let detached = if generation_changed {
-                guard.epoch = guard.epoch.saturating_add(1);
-                guard.active = None;
-                guard.os_clipboard_healthy = false;
-                guard.outbound_drop_streak = 0;
-                guard.outbound_drop_gen = 0;
-                guard.outbound_backpressured_gen = None;
-                (guard.active_link.take(), guard.active_clipboard.take())
-              } else {
-                (None, None)
-              };
+              let detached = if generation_changed { guard.detach_session() } else { None };
               let prev_ready = matches!(guard.lifecycle, ObservedLifecycle::Ready);
               guard.lifecycle = ObservedLifecycle::Ready;
               let needs = generation_changed || !prev_ready || guard.active.is_none();
               (detached, needs)
             };
-            if detached.0.is_some() || detached.1.is_some() {
+            if detached.is_some() {
               self.core.incoming.clear();
-              drop_detached_async(detached.0, detached.1);
+              drop_detached_async(detached);
             }
             if needs_reconcile {
               schedule_reconcile_if_enabled(Arc::clone(&self.core), app.clone());
             }
           } else if val.get("phase").and_then(Value::as_str) == Some("connecting") {
-            let (link, clip) =
+            let clip =
               detach_active_locked(&self.core, Some(ObservedLifecycle::Connecting), false, false);
-            drop_detached_async(link, clip);
+            drop_detached_async(clip);
           } else {
-            let (link, clip) = detach_active_locked(
+            let clip = detach_active_locked(
               &self.core,
               Some(ObservedLifecycle::Disconnected { cleared: false }),
               false,
               true,
             );
-            drop_detached_async(link, clip);
+            drop_detached_async(clip);
             remove_tray_on_main_thread(app, true);
           }
         }
@@ -769,57 +779,46 @@ mod imp {
 
     /// Called by `host_service` before persisting newly paired/adopted credentials.
     pub fn on_center_credentials_changing(&self, app: &AppHandle) {
-      let (link, clip) = detach_active_locked(
+      let clip = detach_active_locked(
         &self.core,
         Some(ObservedLifecycle::Disconnected { cleared: false }),
         true,
         true,
       );
-      drop_detached_async(link, clip);
+      drop_detached_async(clip);
       remove_tray_on_main_thread(app, true);
     }
 
     /// Called from `RunEvent::Exit` on the main thread during application teardown.
     pub fn shutdown(&self, app: &AppHandle) {
-      let (link, clip) = {
+      let clip = {
         let mut guard = self.core.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.shutting_down = true;
         guard.allow_exit = true;
         guard.should_keep_tray = false;
-        guard.tray_active = false;
-        guard.epoch = guard.epoch.saturating_add(1);
-        guard.active = None;
-        guard.os_clipboard_healthy = false;
-        guard.outbound_drop_streak = 0;
-        guard.outbound_drop_gen = 0;
-        guard.outbound_backpressured_gen = None;
-        (guard.active_link.take(), guard.active_clipboard.take())
+        guard.tray_menu = None;
+        guard.tray_paused = false;
+        guard.detach_session()
       };
       self.core.incoming.clear();
       // `RunEvent::Exit` runs on the main thread after the event loop has exited.
       let removed = app.remove_tray_by_id(TRAY_ID);
       drop(removed);
-      drop(link);
       drop(clip);
     }
 
     fn begin_explicit_quit(&self, app: &AppHandle) {
-      let (link, clip) = {
+      let clip = {
         let mut guard = self.core.inner.lock().unwrap_or_else(|e| e.into_inner());
         guard.shutting_down = true;
         guard.allow_exit = true;
         guard.should_keep_tray = false;
-        guard.tray_active = false;
-        guard.epoch = guard.epoch.saturating_add(1);
-        guard.active = None;
-        guard.os_clipboard_healthy = false;
-        guard.outbound_drop_streak = 0;
-        guard.outbound_drop_gen = 0;
-        guard.outbound_backpressured_gen = None;
-        (guard.active_link.take(), guard.active_clipboard.take())
+        guard.tray_menu = None;
+        guard.tray_paused = false;
+        guard.detach_session()
       };
       self.core.incoming.clear();
-      drop_detached_async(link, clip);
+      drop_detached_async(clip);
       remove_tray_on_main_thread(app, false);
     }
 
@@ -830,7 +829,7 @@ mod imp {
     ) -> Result<ClipboardSyncReply, BridgeError> {
       match action {
         ClipboardAction::Status => self.action_status(app).await,
-        ClipboardAction::SetEnabled(enabled) => self.action_set_enabled(app, enabled).await,
+        ClipboardAction::SetEnabled(enabled) => self.action_set_enabled(app, enabled, false).await,
         ClipboardAction::NewGroup => self.action_new_group(app).await,
         ClipboardAction::JoinGroup(code) => self.action_join_group(app, code).await,
         ClipboardAction::ShowCode => self.action_show_code(app).await,
@@ -839,14 +838,7 @@ mod imp {
 
     async fn action_status(&self, app: &AppHandle) -> Result<ClipboardSyncReply, BridgeError> {
       let _guard = self.core.control_lock.lock().await;
-      if !is_platform_supported(&self.core).await {
-        stop_active_on_control(&self.core, app, true).await;
-        return Ok(ClipboardSyncReply {
-          status: unsupported_status(),
-          code: None,
-        });
-      }
-
+      let supported = is_platform_supported(&self.core);
       let (shutting_down, lifecycle) = {
         let inner = self.core.inner.lock().unwrap_or_else(|e| e.into_inner());
         (inner.shutting_down, inner.lifecycle)
@@ -878,15 +870,19 @@ mod imp {
         });
       }
 
-      // Local-only binding check avoids starting the broker just to show notPaired/off state.
+      // Local-only binding check avoids starting the broker to show off/unsupported.
       let Some(disk_binding) = peek_disk_binding_async(app).await? else {
         stop_active_on_control(&self.core, app, true).await;
         return Ok(ClipboardSyncReply {
-          status: ClipboardSyncStatus {
-            enabled: false,
-            configured: false,
-            mode: ClipboardMode::Automatic,
-            connection: ConnectionState::NotPaired,
+          status: if supported {
+            ClipboardSyncStatus {
+              enabled: false,
+              configured: false,
+              mode: ClipboardMode::Automatic,
+              connection: ConnectionState::NotPaired,
+            }
+          } else {
+            unsupported_status(false, false)
           },
           code: None,
         });
@@ -894,10 +890,17 @@ mod imp {
 
       let persisted = read_persisted_cached_or_disk(&self.core, app, &disk_binding).await?;
       let configured = persisted.is_configured();
-
-      // Switch off or unconfigured: never start broker, relay link, OS listener, or tray.
-      if !persisted.enabled || !configured {
+      if !supported {
         stop_active_on_control(&self.core, app, true).await;
+        return Ok(ClipboardSyncReply {
+          status: unsupported_status(persisted.enabled, configured),
+          code: None,
+        });
+      }
+
+      // Keep an already-visible tray only if the user paused sync from that tray.
+      if !persisted.enabled || !configured {
+        stop_active_on_control(&self.core, app, !configured || !is_tray_paused(&self.core)).await;
         return Ok(ClipboardSyncReply {
           status: ClipboardSyncStatus {
             enabled: persisted.enabled,
@@ -958,23 +961,21 @@ mod imp {
       &self,
       app: &AppHandle,
       enabled: bool,
+      from_tray: bool,
     ) -> Result<ClipboardSyncReply, BridgeError> {
-      // Immediately fence callbacks, incoming writes, listener, and tray when turning off.
+      // Fence immediately, even if another action is waiting on Center.
       if !enabled {
-        let (link, clip) = detach_active_locked(&self.core, None, false, true);
-        drop_detached_async(link, clip);
-        remove_tray_on_main_thread(app, true);
+        let clip = detach_active_locked(&self.core, None, false, !from_tray);
+        drop_detached_async(clip);
+        if !from_tray {
+          remove_tray_on_main_thread(app, true);
+        }
       }
 
       let _guard = self.core.control_lock.lock().await;
-      if !is_platform_supported(&self.core).await {
+      let supported = is_platform_supported(&self.core);
+      if enabled && !supported {
         stop_active_on_control(&self.core, app, true).await;
-        if !enabled {
-          return Ok(ClipboardSyncReply {
-            status: unsupported_status(),
-            code: None,
-          });
-        }
         return Err(BridgeError::new(
           "UNSUPPORTED",
           "clipboard sync is not supported on this platform",
@@ -983,7 +984,7 @@ mod imp {
       }
 
       if !enabled {
-        stop_active_on_control(&self.core, app, true).await;
+        stop_active_on_control(&self.core, app, !from_tray || !supported).await;
         let lifecycle = self.core.inner.lock().unwrap_or_else(|e| e.into_inner()).lifecycle;
         if matches!(lifecycle, ObservedLifecycle::Disconnected { cleared: true }) {
           return Ok(ClipboardSyncReply {
@@ -1016,12 +1017,20 @@ mod imp {
           group_code: existing.group_code,
         };
         save_persisted_async(&self.core, app, &binding, &updated).await?;
+        if from_tray && updated.is_configured() {
+          let mut guard = self.core.inner.lock().unwrap_or_else(|e| e.into_inner());
+          guard.tray_paused = guard.tray_menu.is_some();
+        }
         return Ok(ClipboardSyncReply {
-          status: ClipboardSyncStatus {
-            enabled: false,
-            configured: updated.is_configured(),
-            mode: ClipboardMode::Automatic,
-            connection: ConnectionState::Off,
+          status: if supported {
+            ClipboardSyncStatus {
+              enabled: false,
+              configured: updated.is_configured(),
+              mode: ClipboardMode::Automatic,
+              connection: ConnectionState::Off,
+            }
+          } else {
+            unsupported_status(false, updated.is_configured())
           },
           code: None,
         });
@@ -1041,13 +1050,14 @@ mod imp {
         group_code: existing.group_code,
       };
       save_persisted_async(&self.core, app, &binding, &updated).await?;
+      self.core.inner.lock().unwrap_or_else(|e| e.into_inner()).tray_paused = false;
       let status = reconcile_with_auth_on_control(&self.core, app, auth, binding, updated).await;
       Ok(ClipboardSyncReply { status, code: None })
     }
 
     async fn action_new_group(&self, app: &AppHandle) -> Result<ClipboardSyncReply, BridgeError> {
       let _guard = self.core.control_lock.lock().await;
-      if !is_platform_supported(&self.core).await {
+      if !is_platform_supported(&self.core) {
         stop_active_on_control(&self.core, app, true).await;
         return Err(BridgeError::new(
           "UNSUPPORTED",
@@ -1089,7 +1099,7 @@ mod imp {
       raw_code: String,
     ) -> Result<ClipboardSyncReply, BridgeError> {
       let _guard = self.core.control_lock.lock().await;
-      if !is_platform_supported(&self.core).await {
+      if !is_platform_supported(&self.core) {
         stop_active_on_control(&self.core, app, true).await;
         return Err(BridgeError::new(
           "UNSUPPORTED",
@@ -1107,7 +1117,7 @@ mod imp {
       };
       let normalized = raw_code.trim().to_string();
       let _ = GroupKey::from_code(&normalized)
-        .map_err(|_| BridgeError::new("INVALID_ARGUMENT", "invalid clipboard group code", "not-sent"))?;
+        .map_err(|_| BridgeError::new("INVALID_GROUP_CODE", "invalid clipboard group code", "not-sent"))?;
       // Preserve literal current switch; never auto-enable on joinGroup.
       let keep_enabled = read_enabled_for_mutation_async(app, &binding).await;
       // Fence any previous group link immediately before persisting.
@@ -1123,7 +1133,7 @@ mod imp {
 
     async fn action_show_code(&self, app: &AppHandle) -> Result<ClipboardSyncReply, BridgeError> {
       let _guard = self.core.control_lock.lock().await;
-      if !is_platform_supported(&self.core).await {
+      if !is_platform_supported(&self.core) {
         stop_active_on_control(&self.core, app, true).await;
         return Err(BridgeError::new(
           "UNSUPPORTED",
@@ -1158,6 +1168,10 @@ mod imp {
   // ---------- Core Reconcile & Session Lifecycle ----------
 
   fn schedule_reconcile_if_enabled(core: Arc<RuntimeCore>, app: AppHandle) {
+    schedule_reconcile_after(core, app, Duration::ZERO);
+  }
+
+  fn schedule_reconcile_after(core: Arc<RuntimeCore>, app: AppHandle, delay: Duration) {
     {
       let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
       if guard.shutting_down || guard.os_unsupported || guard.reconcile_queued {
@@ -1166,6 +1180,7 @@ mod imp {
       guard.reconcile_queued = true;
     }
     tauri::async_runtime::spawn(async move {
+      tokio::time::sleep(delay).await;
       let _guard = core.control_lock.lock().await;
       {
         let mut inner = core.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1174,7 +1189,7 @@ mod imp {
           return;
         }
       }
-      if !is_platform_supported(&core).await {
+      if !is_platform_supported(&core) {
         stop_active_on_control(&core, &app, true).await;
         return;
       }
@@ -1187,10 +1202,12 @@ mod imp {
         return;
       };
       if !persisted.enabled || !persisted.is_configured() {
-        stop_active_on_control(&core, &app, true).await;
+        stop_active_on_control(&core, &app, !persisted.is_configured() || !is_tray_paused(&core)).await;
         return;
       }
-      let _ = reconcile_enabled_on_control(&core, &app).await;
+      if reconcile_enabled_on_control(&core, &app).await.is_err() {
+        schedule_reconcile_after(Arc::clone(&core), app.clone(), ADAPTER_RETRY_DELAY);
+      }
     });
   }
 
@@ -1220,9 +1237,9 @@ mod imp {
     core: &Arc<RuntimeCore>,
     app: &AppHandle,
   ) -> Result<ClipboardSyncStatus, BridgeError> {
-    if !is_platform_supported(core).await {
+    if !is_platform_supported(core) {
       stop_active_on_control(core, app, true).await;
-      return Ok(unsupported_status());
+      return Ok(unsupported_status(false, false));
     }
 
     let Some((auth, binding)) = resolve_verified_auth(core, app).await? else {
@@ -1238,10 +1255,13 @@ mod imp {
       };
       let persisted = read_persisted_cached_or_disk(core, app, &disk_binding).await?;
       let configured = persisted.is_configured();
-      let clear_tray = !persisted.enabled
+      let clear_tray = (!persisted.enabled && !is_tray_paused(core))
         || !configured
         || matches!(lifecycle, ObservedLifecycle::Disconnected { .. });
       stop_active_on_control(core, app, clear_tray).await;
+      if persisted.enabled && configured && matches!(lifecycle, ObservedLifecycle::Ready) {
+        schedule_reconcile_after(Arc::clone(core), app.clone(), ADAPTER_RETRY_DELAY);
+      }
       let connection = if !persisted.enabled || !configured {
         ConnectionState::Off
       } else {
@@ -1273,7 +1293,7 @@ mod imp {
   ) -> ClipboardSyncStatus {
     let configured = persisted.is_configured();
     if !persisted.enabled || !configured {
-      stop_active_on_control(core, app, true).await;
+      stop_active_on_control(core, app, !configured || !is_tray_paused(core)).await;
       return ClipboardSyncStatus {
         enabled: persisted.enabled,
         configured,
@@ -1309,9 +1329,9 @@ mod imp {
 
     if !already_live {
       if let Err(err_state) = start_session_on_control(core, app, auth, binding, group_code).await {
-        if err_state == ConnectionState::Unsupported {
+        if !is_platform_supported(core) {
           stop_active_on_control(core, app, true).await;
-          return unsupported_status();
+          return unsupported_status(true, true);
         }
         return ClipboardSyncStatus {
           enabled: true,
@@ -1322,14 +1342,10 @@ mod imp {
       }
     }
 
-    sync_tray_enabled_on_control(core, app, true).await;
+    ensure_tray_on_control(core, app).await;
     let connection = live_connection_state(core);
-    if connection == ConnectionState::Unsupported {
-      let os_unsupported = core.inner.lock().unwrap_or_else(|e| e.into_inner()).os_unsupported;
-      if os_unsupported {
-        stop_active_on_control(core, app, true).await;
-        return unsupported_status();
-      }
+    if !is_platform_supported(core) {
+      return unsupported_status(true, true);
     }
     ClipboardSyncStatus {
       enabled: true,
@@ -1362,7 +1378,7 @@ mod imp {
         return Err(ConnectionState::Off);
       }
       if guard.os_unsupported {
-        return Err(ConnectionState::Unsupported);
+        return Err(unsupported_status(true, true).connection);
       }
       guard.epoch = guard.epoch.saturating_add(1);
       guard.epoch
@@ -1370,25 +1386,33 @@ mod imp {
 
     // Start OS clipboard adapter first on a blocking thread so unsupported Wayland
     // or OS errors never open an unnecessary relay socket.
-    let copy_core = Arc::clone(core);
+    let copy_core = Arc::downgrade(core);
+    let stopped_core = Arc::downgrade(core);
+    let stopped_app = app.clone();
     let clipboard_start = tokio::task::spawn_blocking(move || {
-      SystemClipboard::start(move |text| {
-        handle_local_copy(&copy_core, my_epoch, text);
-      })
+      SystemClipboard::start(
+        move |text| {
+          if let Some(core) = copy_core.upgrade() {
+            handle_local_copy(&core, my_epoch, text);
+          }
+        },
+        move || {
+          if let Some(core) = stopped_core.upgrade() {
+            handle_session_loss(&core, &stopped_app, my_epoch, SessionLoss::Retry);
+          }
+        },
+      )
     })
     .await;
 
     let clipboard = match clipboard_start {
       Ok(Ok(cb)) => Arc::new(cb),
       Ok(Err(err)) if err.kind() == io::ErrorKind::Unsupported => {
-        let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.os_unsupported = true;
-        guard.os_clipboard_healthy = false;
-        return Err(ConnectionState::Unsupported);
+        handle_session_loss(core, app, my_epoch, SessionLoss::Unsupported);
+        return Err(unsupported_status(true, true).connection);
       }
       Ok(Err(_)) | Err(_) => {
-        let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.os_clipboard_healthy = false;
+        handle_session_loss(core, app, my_epoch, SessionLoss::Retry);
         return Err(ConnectionState::Offline);
       }
     };
@@ -1410,7 +1434,7 @@ mod imp {
     let transport_generation = parse_transport_generation(&auth.fence);
     let device_id = auth.device_id.clone();
 
-    let clip_core = Arc::clone(core);
+    let clip_core = Arc::downgrade(core);
     let clip_fence = expected_fence.clone();
     let clip_fp = expected_fingerprint.clone();
     let link_res = clipboard_sync_relay_client::start(
@@ -1422,7 +1446,9 @@ mod imp {
       },
       key,
       move |clip| {
-        handle_incoming_clip(&clip_core, my_epoch, &clip_fence, &clip_fp, clip);
+        if let Some(core) = clip_core.upgrade() {
+          handle_incoming_clip(&core, my_epoch, &clip_fence, &clip_fp, clip);
+        }
       },
     );
 
@@ -1452,9 +1478,6 @@ mod imp {
         guard.active_link = Some(Arc::clone(&link));
         guard.active_clipboard = Some(Arc::clone(&clipboard));
         guard.os_clipboard_healthy = true;
-        guard.outbound_drop_streak = 0;
-        guard.outbound_drop_gen = 0;
-        guard.outbound_backpressured_gen = None;
         guard.should_keep_tray = true;
         true
       } else {
@@ -1496,33 +1519,7 @@ mod imp {
       return;
     }
 
-    let sent = link.publish(snap.generation, &text);
-    if sent {
-      let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-      if guard.epoch == expected_epoch {
-        guard.outbound_drop_streak = 0;
-        guard.outbound_drop_gen = 0;
-        guard.outbound_backpressured_gen = None;
-      }
-      return;
-    }
-
-    // If still online on the same generation, outbound slot backpressure dropped the item.
-    let after = link.snapshot();
-    if after.status == LinkStatus::Online && after.generation == snap.generation {
-      let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-      if guard.epoch == expected_epoch {
-        if guard.outbound_drop_gen != snap.generation {
-          guard.outbound_drop_gen = snap.generation;
-          guard.outbound_drop_streak = 1;
-        } else {
-          guard.outbound_drop_streak = guard.outbound_drop_streak.saturating_add(1);
-        }
-        if guard.outbound_drop_streak >= MAX_CONSECUTIVE_PUBLISH_DROPS {
-          guard.outbound_backpressured_gen = Some(snap.generation);
-        }
-      }
-    }
+    link.publish(snap.generation, &text);
   }
 
   fn handle_incoming_clip(
@@ -1612,7 +1609,7 @@ mod imp {
   async fn process_incoming_write(
     app: &AppHandle,
     core: &Arc<RuntimeCore>,
-    pending: PendingIncomingWrite,
+    mut pending: PendingIncomingWrite,
   ) {
     // Recheck #1: fast in-memory state & handles.
     let (link, clipboard) = {
@@ -1650,21 +1647,34 @@ mod imp {
         let binding_ok = CredentialBinding::from_center_auth(&auth)
           .is_some_and(|b| constant_time_eq(b.credential_fingerprint.as_bytes(), pending.binding_fingerprint.as_bytes()));
         if auth.fence != pending.fence || !binding_ok {
-          fence_if_epoch_matches(core, app, pending.epoch, true);
+          handle_session_loss(core, app, pending.epoch, SessionLoss::Retry);
           return;
         }
       }
       Ok(Ok(None)) => {
-        fence_if_epoch_matches(core, app, pending.epoch, true);
+        handle_session_loss(core, app, pending.epoch, SessionLoss::Retry);
         return;
       }
       Ok(Err(err)) if err.code == "NOT_CONNECTED" => {
-        fence_if_epoch_matches(core, app, pending.epoch, true);
+        handle_session_loss(core, app, pending.epoch, SessionLoss::Retry);
         return;
       }
       Ok(Err(_)) | Err(_) => {
         // Fail closed: never write clipboard if live broker auth could not be verified.
         return;
+      }
+    }
+
+    // If a newer value arrived during broker verification, use it under that same fence.
+    {
+      let mut slot = core.incoming.pending.lock().unwrap_or_else(|e| e.into_inner());
+      if slot.as_ref().is_some_and(|next| {
+        next.epoch == pending.epoch
+          && next.link_generation == pending.link_generation
+          && next.fence == pending.fence
+          && next.binding_fingerprint == pending.binding_fingerprint
+      }) {
+        pending = slot.take().unwrap();
       }
     }
 
@@ -1717,48 +1727,49 @@ mod imp {
 
     match write_outcome {
       Ok(None) | Ok(Some(Ok(()))) => {}
+      Ok(Some(Err(err))) if matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+        // A busy clipboard can miss this write without losing the observer or relay.
+      }
       Ok(Some(Err(err))) if err.kind() == io::ErrorKind::Unsupported => {
-        {
-          let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-          guard.os_unsupported = true;
-          guard.os_clipboard_healthy = false;
-        }
-        fence_if_epoch_matches(core, app, pending.epoch, true);
+        handle_session_loss(core, app, pending.epoch, SessionLoss::Unsupported);
       }
       Ok(Some(Err(_))) | Err(_) => {
-        // Handle/write failure must not continue falsely reporting live.
-        fence_if_epoch_matches(core, app, pending.epoch, false);
+        handle_session_loss(core, app, pending.epoch, SessionLoss::Retry);
       }
     }
   }
 
-  fn fence_if_epoch_matches(
+  enum SessionLoss {
+    Retry,
+    Unsupported,
+  }
+
+  fn handle_session_loss(
     core: &Arc<RuntimeCore>,
     app: &AppHandle,
     expected_epoch: u64,
-    clear_tray: bool,
+    loss: SessionLoss,
   ) {
+    let unsupported = matches!(loss, SessionLoss::Unsupported);
     let detached = {
       let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
       if guard.epoch != expected_epoch {
         return;
       }
-      guard.epoch = guard.epoch.saturating_add(1);
-      guard.active = None;
-      guard.os_clipboard_healthy = false;
-      guard.outbound_drop_streak = 0;
-      guard.outbound_drop_gen = 0;
-      guard.outbound_backpressured_gen = None;
-      if clear_tray {
+      if unsupported {
+        guard.os_unsupported = true;
         guard.should_keep_tray = false;
-        guard.tray_active = false;
+        guard.tray_menu = None;
+        guard.tray_paused = false;
       }
-      (guard.active_link.take(), guard.active_clipboard.take())
+      guard.detach_session()
     };
     core.incoming.clear();
-    drop_detached_async(detached.0, detached.1);
-    if clear_tray {
+    drop_detached_async(detached);
+    if unsupported {
       remove_tray_on_main_thread(app, true);
+    } else {
+      schedule_reconcile_after(Arc::clone(core), app.clone(), ADAPTER_RETRY_DELAY);
     }
   }
 
@@ -1767,14 +1778,8 @@ mod imp {
     new_lifecycle: Option<ObservedLifecycle>,
     clear_cache: bool,
     clear_tray: bool,
-  ) -> (Option<Arc<Link>>, Option<Arc<SystemClipboard>>) {
+  ) -> Option<Arc<SystemClipboard>> {
     let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-    guard.epoch = guard.epoch.saturating_add(1);
-    guard.active = None;
-    guard.os_clipboard_healthy = false;
-    guard.outbound_drop_streak = 0;
-    guard.outbound_drop_gen = 0;
-    guard.outbound_backpressured_gen = None;
     if let Some(lifecycle) = new_lifecycle {
       guard.lifecycle = lifecycle;
     }
@@ -1783,17 +1788,17 @@ mod imp {
     }
     if clear_tray {
       guard.should_keep_tray = false;
-      guard.tray_active = false;
+      guard.tray_menu = None;
+      guard.tray_paused = false;
     }
-    let detached = (guard.active_link.take(), guard.active_clipboard.take());
+    let detached = guard.detach_session();
     drop(guard);
     core.incoming.clear();
     detached
   }
 
   async fn stop_active_on_control(core: &Arc<RuntimeCore>, app: &AppHandle, clear_tray: bool) {
-    let (link, clip) = detach_active_locked(core, None, false, clear_tray);
-    drop(link);
+    let clip = detach_active_locked(core, None, false, clear_tray);
     let core = Arc::clone(core);
     let _ = tokio::task::spawn_blocking(move || {
       // A write that already passed its final fence must finish before stop returns.
@@ -1812,8 +1817,7 @@ mod imp {
     .await;
   }
 
-  fn drop_detached_async(link: Option<Arc<Link>>, clipboard: Option<Arc<SystemClipboard>>) {
-    drop(link);
+  fn drop_detached_async(clipboard: Option<Arc<SystemClipboard>>) {
     if let Some(clipboard) = clipboard {
       tauri::async_runtime::spawn_blocking(move || {
         drop(clipboard);
@@ -1822,40 +1826,20 @@ mod imp {
   }
 
   fn live_connection_state(core: &Arc<RuntimeCore>) -> ConnectionState {
-    let (link, unhealthy, os_unsupported, backpressured_gen) = {
+    let link = {
       let guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-      (
-        guard.active_link.clone(),
-        !guard.os_clipboard_healthy
-          || guard.active_clipboard.is_none()
-          || !core.incoming.alive.load(Ordering::Acquire),
-        guard.os_unsupported,
-        guard.outbound_backpressured_gen,
-      )
+      if guard.os_unsupported {
+        return unsupported_status(true, true).connection;
+      }
+      if !guard.os_clipboard_healthy || !core.incoming.alive.load(Ordering::Acquire) {
+        return ConnectionState::Offline;
+      }
+      guard.active_link.clone()
     };
-    if os_unsupported {
-      return ConnectionState::Unsupported;
-    }
     let Some(link) = link else {
       return ConnectionState::Offline;
     };
-    if unhealthy {
-      return ConnectionState::Offline;
-    }
     let snap = link.snapshot();
-    if let Some(bp_gen) = backpressured_gen {
-      if bp_gen == snap.generation && snap.status == LinkStatus::Online {
-        return ConnectionState::Offline;
-      }
-      if bp_gen != snap.generation {
-        let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.outbound_backpressured_gen == Some(bp_gen) {
-          guard.outbound_backpressured_gen = None;
-          guard.outbound_drop_streak = 0;
-          guard.outbound_drop_gen = 0;
-        }
-      }
-    }
     match snap.status {
       LinkStatus::Connecting => ConnectionState::Connecting,
       LinkStatus::Online => ConnectionState::Online,
@@ -1863,6 +1847,8 @@ mod imp {
       LinkStatus::Unauthorized => ConnectionState::Unauthorized,
       LinkStatus::Unsupported => ConnectionState::Unsupported,
       LinkStatus::CertificateError => ConnectionState::CertificateError,
+      LinkStatus::GroupFull => ConnectionState::GroupFull,
+      LinkStatus::Replaced => ConnectionState::Replaced,
     }
   }
 
@@ -1896,7 +1882,7 @@ mod imp {
 
   // ---------- Platform Support Probe ----------
 
-  async fn is_platform_supported(core: &Arc<RuntimeCore>) -> bool {
+  fn is_platform_supported(core: &Arc<RuntimeCore>) -> bool {
     if core.inner.lock().unwrap_or_else(|e| e.into_inner()).os_unsupported {
       return false;
     }
@@ -1906,31 +1892,23 @@ mod imp {
     }
     #[cfg(target_os = "linux")]
     {
-      if let Some(&supported) = LINUX_CLIPBOARD_SUPPORTED.get() {
-        return supported;
-      }
-      let supported = tokio::task::spawn_blocking(probe_linux_clipboard_support)
-        .await
-        .unwrap_or(false);
-      *LINUX_CLIPBOARD_SUPPORTED.get_or_init(|| supported)
+      // Protocol availability is checked by the bounded adapter startup, not by
+      // a second (potentially blocking) Wayland roundtrip on every settings read.
+      SystemClipboard::has_graphical_session()
     }
   }
 
-  #[cfg(target_os = "linux")]
-  fn probe_linux_clipboard_support() -> bool {
-    let is_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
-      || std::env::var("XDG_SESSION_TYPE")
-        .map(|v| v.eq_ignore_ascii_case("wayland"))
-        .unwrap_or(false);
-    if is_wayland {
-      // One-shot protocol check (ext-data-control / wlr-data-control) without installing
-      // a clipboard listener or reading clipboard contents.
-      return wl_clipboard_rs::utils::is_primary_selection_supported().is_ok();
-    }
-    std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty())
+  // ---------- Tray Management (opt-in and only with a visible tray host) ----------
+
+  struct TrayMenu {
+    status: MenuItem<tauri::Wry>,
+    pause: MenuItem<tauri::Wry>,
+    resume: MenuItem<tauri::Wry>,
   }
 
-  // ---------- Tray Management (Windows/Linux only when sync enabled & tray really available) ----------
+  fn is_tray_paused(core: &RuntimeCore) -> bool {
+    core.inner.lock().unwrap_or_else(|e| e.into_inner()).tray_paused
+  }
 
   fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -1943,9 +1921,8 @@ mod imp {
   fn remove_tray_on_main_thread(app: &AppHandle, restore_if_hidden: bool) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
-      let removed = handle.remove_tray_by_id(TRAY_ID);
-      drop(removed);
-      if restore_if_hidden {
+      let removed = handle.remove_tray_by_id(TRAY_ID).is_some();
+      if restore_if_hidden && removed {
         if let Some(window) = handle.get_webview_window("main") {
           if matches!(window.is_visible(), Ok(false)) {
             let _ = window.unminimize();
@@ -1957,67 +1934,92 @@ mod imp {
     });
   }
 
-  async fn sync_tray_enabled_on_control(core: &Arc<RuntimeCore>, app: &AppHandle, enabled: bool) {
-    if !enabled {
-      {
-        let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard.should_keep_tray = false;
-        guard.tray_active = false;
-      }
-      remove_tray_on_main_thread(app, true);
-      return;
-    }
-
-    let already_active = {
+  async fn ensure_tray_on_control(core: &Arc<RuntimeCore>, app: &AppHandle) {
+    {
       let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-      if guard.shutting_down || guard.os_unsupported {
+      if guard.shutting_down || guard.os_unsupported || guard.tray_menu.is_some() {
         return;
       }
       guard.should_keep_tray = true;
-      guard.tray_active
-    };
-    if already_active && app.tray_by_id(TRAY_ID).is_some() {
-      return;
     }
 
-    let app_clone = app.clone();
-    let created = tokio::task::spawn_blocking(move || create_tray_if_available(&app_clone))
+    let tray_app = app.clone();
+    let Ok(Some(menu)) = tokio::task::spawn_blocking(move || create_tray_if_available(&tray_app))
       .await
-      .unwrap_or(false);
-
+    else {
+      return;
+    };
+    let menu = Arc::new(menu);
     let still_wanted = {
       let mut guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
-      if created && guard.should_keep_tray && !guard.shutting_down && !guard.os_unsupported {
-        guard.tray_active = true;
+      if guard.should_keep_tray && !guard.shutting_down && !guard.os_unsupported {
+        guard.tray_menu = Some(Arc::clone(&menu));
         true
       } else {
-        guard.tray_active = false;
         false
       }
     };
-    if created && !still_wanted {
+    if !still_wanted {
       remove_tray_on_main_thread(app, false);
+      return;
     }
+
+    let core = Arc::downgrade(core);
+    tauri::async_runtime::spawn(async move {
+      let mut previous = None;
+      loop {
+        let Some(core) = core.upgrade() else { break };
+        let paused = {
+          let guard = core.inner.lock().unwrap_or_else(|e| e.into_inner());
+          if !guard.tray_menu.as_ref().is_some_and(|active| Arc::ptr_eq(active, &menu)) {
+            break;
+          }
+          guard.tray_paused
+        };
+        let connection = if paused { ConnectionState::Off } else { live_connection_state(&core) };
+        if previous != Some(connection) {
+          previous = Some(connection);
+          let label = match connection {
+            ConnectionState::Off => "Clipboard sync: paused",
+            ConnectionState::Connecting => "Clipboard sync: connecting",
+            ConnectionState::Online => "Clipboard sync: online",
+            ConnectionState::NotPaired | ConnectionState::Unauthorized => "Clipboard sync: not authorized",
+            ConnectionState::CertificateError => "Clipboard sync: certificate error",
+            ConnectionState::Unsupported => "Clipboard sync: upgrade Center",
+            ConnectionState::DisplayUnsupported => "Clipboard sync: unsupported display",
+            ConnectionState::GroupFull => "Clipboard sync: group full",
+            ConnectionState::Replaced => "Clipboard sync: replaced by this device ID",
+            ConnectionState::Offline => "Clipboard sync: offline",
+          };
+          let _ = menu.status.set_text(label);
+          let _ = menu.pause.set_enabled(!paused);
+          let _ = menu.resume.set_enabled(paused);
+        }
+        tokio::time::sleep(TRAY_STATUS_INTERVAL).await;
+      }
+    });
   }
 
-  fn create_tray_if_available(app: &AppHandle) -> bool {
+  fn create_tray_if_available(app: &AppHandle) -> Option<TrayMenu> {
     if app.tray_by_id(TRAY_ID).is_some() {
-      return true;
+      return None;
     }
     #[cfg(target_os = "linux")]
     if !probe_linux_tray_available() {
-      return false;
+      return None;
     }
 
-    let Ok(menu) = MenuBuilder::new(app)
+    let status = MenuItem::new(app, "Clipboard sync: connecting", false, None::<&str>).ok()?;
+    let pause = MenuItem::with_id(app, TRAY_MENU_PAUSE_ID, "Pause clipboard sync", true, None::<&str>).ok()?;
+    let resume = MenuItem::with_id(app, TRAY_MENU_RESUME_ID, "Resume clipboard sync", false, None::<&str>).ok()?;
+    let menu = MenuBuilder::new(app)
       .text(TRAY_MENU_OPEN_ID, "Open PiBot")
+      .items(&[&status, &pause, &resume])
       .text(TRAY_MENU_QUIT_ID, "Quit")
       .build()
-    else {
-      return false;
-    };
+      .ok()?;
 
-    let tray_result = TrayIconBuilder::with_id(TRAY_ID)
+    TrayIconBuilder::with_id(TRAY_ID)
       .icon(tauri::include_image!("../build/icons/icon.png"))
       .tooltip("PiBot")
       .menu(&menu)
@@ -2038,9 +2040,10 @@ mod imp {
           show_main_window(tray.app_handle());
         }
       })
-      .build(app);
+      .build(app)
+      .ok()?;
 
-    tray_result.is_ok()
+    Some(TrayMenu { status, pause, resume })
   }
 
   #[cfg(target_os = "linux")]

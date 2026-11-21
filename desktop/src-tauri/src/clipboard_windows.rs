@@ -23,7 +23,7 @@ use clipboard_sync::{eligible_text, MAX_TEXT_BYTES};
 use windows_sys::core::PCWSTR;
 use windows_sys::w;
 use windows_sys::Win32::Foundation::{
-  GetLastError, GlobalFree, ERROR_CLASS_ALREADY_EXISTS, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT,
+  GetLastError, GlobalFree, ERROR_ACCESS_DENIED, ERROR_CLASS_ALREADY_EXISTS, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT,
   WPARAM,
 };
 use windows_sys::Win32::System::DataExchange::{
@@ -56,8 +56,8 @@ const WM_APP_SHUTDOWN: u32 = WM_APP + 2;
 const WM_APP_WAKE: u32 = WM_APP + 3;
 
 /// Strictly bounded retry backoff for transient `OpenClipboard` contention.
-/// 8 total attempts (~87ms worst-case), interrupted immediately on shutdown.
-const OPEN_CLIPBOARD_BACKOFF_MS: &[u64] = &[2, 4, 8, 12, 16, 20, 25];
+/// Interrupted immediately on shutdown; never wait for another app indefinitely.
+const OPEN_CLIPBOARD_BACKOFF_MS: &[u64] = &[2, 4, 8, 12, 16, 20, 25, 50, 80, 120];
 
 /// Upper bound for a caller waiting on the worker thread to complete `write()`.
 const WRITE_REPLY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -202,6 +202,7 @@ impl WorkerControl {
 impl SystemClipboard {
   pub(crate) fn start(
     on_copy: impl Fn(String) + Send + Sync + 'static,
+    on_stopped: impl FnOnce() + Send + 'static,
   ) -> io::Result<Self> {
     let control = Arc::new(WorkerControl::new());
     let worker_control = Arc::clone(&control);
@@ -211,7 +212,7 @@ impl SystemClipboard {
     let handle = thread::Builder::new()
       .name("pibot-clipboard-win".to_owned())
       .spawn(move || {
-        run_worker(instance_id, worker_control, Box::new(on_copy), startup_tx);
+        run_worker(instance_id, worker_control, Box::new(on_copy), startup_tx, on_stopped);
       })?;
 
     let worker_thread_id = handle.thread().id();
@@ -479,6 +480,9 @@ impl ClipboardGuard {
       last_err = io::Error::last_os_error();
     }
 
+    if last_err.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
+      return Err(io::Error::new(io::ErrorKind::WouldBlock, "Windows clipboard is busy"));
+    }
     Err(last_err)
   }
 }
@@ -652,6 +656,7 @@ fn run_worker(
   control: Arc<WorkerControl>,
   on_copy: Box<dyn Fn(String) + Send + Sync + 'static>,
   startup_tx: mpsc::SyncSender<io::Result<WorkerStartInfo>>,
+  on_stopped: impl FnOnce(),
 ) {
   let _tls_guard = ThreadLocalResetGuard::new();
 
@@ -721,7 +726,10 @@ fn run_worker(
     }
   }
 
-  control.fail_pending_writes();
+  if !control.is_shutdown() {
+    control.request_shutdown();
+    on_stopped();
+  }
 }
 
 struct WorkerState {

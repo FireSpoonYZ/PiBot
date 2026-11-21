@@ -166,6 +166,7 @@ pub(crate) struct X11Clipboard {
 impl X11Clipboard {
   pub(crate) fn start(
     on_copy: Arc<dyn Fn(String) + Send + Sync + 'static>,
+    on_stopped: impl FnOnce() + Send + 'static,
   ) -> io::Result<Self> {
     let wake_pipe = WakePipe::new()?;
     let stop_waker = wake_pipe.waker();
@@ -176,11 +177,15 @@ impl X11Clipboard {
     let handle = thread::Builder::new()
       .name("pibot-clip-x11-watch".to_string())
       .spawn(move || {
+        let Ok(startup) = super::OBSERVER_STARTUP.try_lock() else {
+          let _ = init_tx.send(Err(io::Error::new(io::ErrorKind::WouldBlock, "clipboard observer is starting")));
+          return;
+        };
         let (conn, screen_num) = match RustConnection::connect(None) {
           Ok(pair) => pair,
           Err(_) => {
             let _ = init_tx.send(Err(io::Error::new(
-              io::ErrorKind::Unsupported,
+              io::ErrorKind::NotConnected,
               "unable to connect to X11 display for clipboard access",
             )));
             return;
@@ -252,6 +257,7 @@ impl X11Clipboard {
           return;
         }
 
+        drop(startup);
         if init_tx.send(Ok(())).is_err() {
           let _ = xproto::destroy_window(&conn, window);
           let _ = conn.flush();
@@ -259,6 +265,9 @@ impl X11Clipboard {
         }
 
         observer_loop(&conn, window, &atoms, &wake_pipe, &worker_stop, &on_copy);
+        if !worker_stop.swap(true, Ordering::AcqRel) {
+          on_stopped();
+        }
 
         let _ = xproto::destroy_window(&conn, window);
         let _ = conn.flush();

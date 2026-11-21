@@ -25,6 +25,8 @@ use super::mime::{
   self, MIME_TEXT_PLAIN_UTF8, ORIGIN_MARKER_MIME, ORIGIN_MARKER_VALUE,
 };
 
+static COPY_STARTUP: Mutex<()> = Mutex::new(());
+
 const START_TIMEOUT: Duration = Duration::from_secs(3);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const READ_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -44,6 +46,7 @@ pub(crate) struct WaylandClipboard {
 impl WaylandClipboard {
   pub(crate) fn start(
     on_copy: Arc<dyn Fn(String) + Send + Sync + 'static>,
+    on_stopped: impl FnOnce() + Send + 'static,
   ) -> io::Result<Self> {
     let wake_pipe = WakePipe::new()?;
     let stop_waker = wake_pipe.waker();
@@ -54,6 +57,10 @@ impl WaylandClipboard {
     let handle = thread::Builder::new()
       .name("pibot-clip-wl-watch".to_string())
       .spawn(move || {
+        let Ok(startup) = super::OBSERVER_STARTUP.try_lock() else {
+          let _ = init_tx.send(Err(io::Error::new(io::ErrorKind::WouldBlock, "clipboard observer is starting")));
+          return;
+        };
         let mut watcher =
           match Watcher::new(WatchClipboardType::Regular, PasteSeat::Unspecified) {
             Ok(w) => w,
@@ -63,12 +70,16 @@ impl WaylandClipboard {
             }
           };
 
+        drop(startup);
         let cancel = watcher.cancel_handle();
         if init_tx.send(Ok(cancel)).is_err() {
           return;
         }
 
         watch_loop(&mut watcher, &wake_pipe, &worker_stop, &on_copy);
+        if !worker_stop.swap(true, Ordering::AcqRel) {
+          on_stopped();
+        }
       })
       .map_err(|err| io::Error::new(err.kind(), "failed to spawn Wayland clipboard watcher"))?;
 
@@ -94,7 +105,7 @@ impl WaylandClipboard {
       Err(RecvTimeoutError::Disconnected) => {
         let _ = handle.join();
         Err(io::Error::new(
-          io::ErrorKind::Unsupported,
+          io::ErrorKind::BrokenPipe,
           "Wayland clipboard watcher failed to initialize",
         ))
       }
@@ -125,6 +136,10 @@ impl WaylandClipboard {
     thread::Builder::new()
       .name("pibot-clip-wl-serve".to_string())
       .spawn(move || {
+        let Ok(startup) = COPY_STARTUP.try_lock() else {
+          let _ = tx.send(Err(io::Error::new(io::ErrorKind::WouldBlock, "Wayland clipboard writer is starting")));
+          return;
+        };
         let mut opts = wl_copy::Options::new();
         opts
           .clipboard(wl_copy::ClipboardType::Regular)
@@ -133,7 +148,9 @@ impl WaylandClipboard {
           .serve_requests(wl_copy::ServeRequests::Unlimited)
           .omit_additional_text_mime_types(false);
 
-        match opts.prepare_copy_multi(sources) {
+        let prepared = opts.prepare_copy_multi(sources);
+        drop(startup);
+        match prepared {
           Ok(prepared) => {
             if tx.send(Ok(())).is_ok() {
               // Serves paste requests until the compositor cancels all data sources.
@@ -274,7 +291,7 @@ fn map_paste_error_for_start(err: PasteError) -> io::Error {
       "Wayland compositor does not expose ext-data-control or wlr-data-control clipboard protocol",
     ),
     PasteError::NoSeats | PasteError::SeatNotFound => io::Error::new(
-      io::ErrorKind::Unsupported,
+      io::ErrorKind::NotConnected,
       "Wayland compositor has no active seat for clipboard access",
     ),
     PasteError::PrimarySelectionUnsupported => io::Error::new(
@@ -282,12 +299,12 @@ fn map_paste_error_for_start(err: PasteError) -> io::Error {
       "Wayland clipboard protocol feature is unsupported",
     ),
     PasteError::WaylandConnection(_) | PasteError::SocketOpenError(_) => io::Error::new(
-      io::ErrorKind::Unsupported,
+      io::ErrorKind::NotConnected,
       "unable to connect to Wayland compositor for clipboard access",
     ),
     PasteError::WaylandCommunication(_) => io::Error::new(
-      io::ErrorKind::Unsupported,
-      "Wayland compositor rejected data-control clipboard negotiation",
+      io::ErrorKind::BrokenPipe,
+      "Wayland clipboard communication failed",
     ),
     PasteError::PipeCreation(io_err) => io_err,
     PasteError::ClipboardEmpty | PasteError::NoMimeType => io::Error::new(
@@ -304,7 +321,7 @@ fn map_copy_error(err: CopyError) -> io::Error {
       "Wayland compositor does not expose ext-data-control or wlr-data-control clipboard protocol",
     ),
     CopyError::NoSeats | CopyError::SeatNotFound => io::Error::new(
-      io::ErrorKind::Unsupported,
+      io::ErrorKind::NotConnected,
       "Wayland compositor has no active seat for clipboard write",
     ),
     CopyError::PrimarySelectionUnsupported => io::Error::new(
@@ -312,7 +329,7 @@ fn map_copy_error(err: CopyError) -> io::Error {
       "Wayland clipboard protocol feature is unsupported",
     ),
     CopyError::WaylandConnection(_) | CopyError::SocketOpenError(_) => io::Error::new(
-      io::ErrorKind::Unsupported,
+      io::ErrorKind::NotConnected,
       "unable to connect to Wayland compositor for clipboard write",
     ),
     CopyError::WaylandCommunication(_)

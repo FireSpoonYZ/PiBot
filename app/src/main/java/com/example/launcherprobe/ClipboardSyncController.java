@@ -65,6 +65,8 @@ final class ClipboardSyncController {
     static final String CONNECTION_UNAUTHORIZED = "unauthorized";
     static final String CONNECTION_UNSUPPORTED = "unsupported";
     static final String CONNECTION_CERTIFICATE_ERROR = "certificateError";
+    static final String CONNECTION_GROUP_FULL = "groupFull";
+    static final String CONNECTION_REPLACED = "replaced";
 
     private static final long WATCH_CONNECTING_INTERVAL_MS = 500L;
     private static final long WATCH_ONLINE_INTERVAL_MS = 2_500L;
@@ -448,8 +450,8 @@ final class ClipboardSyncController {
 
     /**
      * Extracts plain text from a {@link ClipData} strictly without dereferencing URI/Intent:
-     * rejects non-text/plain MIME types, sensitive clips, Shower-created label {@code "pibot"},
-     * own sync clips, multi-item clips, URI/Intent/HTML items, and empty text.
+     * Reads only the explicit plain-text representation, even for newHtmlText. Files, intents,
+     * sensitive, own or Shower clips and multi-item clips are not read.
      */
     static ClipReadResult extractSendableText(ClipData clip) {
         if (clip == null || clip.getItemCount() <= 0) {
@@ -473,10 +475,10 @@ final class ClipboardSyncController {
         if (item.getIntent() != null) {
             return ClipReadResult.error("CLIPBOARD_UNSUPPORTED", "不支持发送应用意图剪贴板");
         }
-        if (item.getHtmlText() != null) {
-            return ClipReadResult.error("CLIPBOARD_UNSUPPORTED", "仅支持纯文本剪贴板");
-        }
-        CharSequence rawText = item.getText();
+        return validatePlainText(item.getText());
+    }
+
+    static ClipReadResult validatePlainText(CharSequence rawText) {
         if (rawText == null) {
             return ClipReadResult.error("CLIPBOARD_UNSUPPORTED", "仅支持纯文本剪贴板");
         }
@@ -487,8 +489,15 @@ final class ClipboardSyncController {
             return ClipReadResult.error("CLIPBOARD_TOO_LARGE", "剪贴板文本超过大小限制");
         }
         String text = rawText.toString();
-        if (utf8ByteLength(text) > MAX_TEXT_BYTES) {
+        int utf8Length = utf8ByteLength(text);
+        if (utf8Length < 0) {
+            return ClipReadResult.error("CLIPBOARD_UNSUPPORTED", "剪贴板文本编码无效");
+        }
+        if (utf8Length > MAX_TEXT_BYTES) {
             return ClipReadResult.error("CLIPBOARD_TOO_LARGE", "剪贴板文本超过大小限制");
+        }
+        if (text.indexOf('\0') >= 0 || text.contains("pibot1.") || text.contains("pibot-clipboard-v1:")) {
+            return ClipReadResult.error("CLIPBOARD_REJECTED", "此文本不允许同步");
         }
         return ClipReadResult.ok(text);
     }
@@ -507,6 +516,8 @@ final class ClipboardSyncController {
                     && Character.isLowSurrogate(text.charAt(i + 1))) {
                 bytes += 4;
                 i++;
+            } else if (Character.isSurrogate(c)) {
+                return -1;
             } else {
                 bytes += 3;
             }
@@ -539,11 +550,14 @@ final class ClipboardSyncController {
             }
         }
         int mimeCount = description.getMimeTypeCount();
-        if (mimeCount <= 0) {
+        // Android's newHtmlText advertises only text/html but requires Item.getText().
+        if (mimeCount == 0) {
             return ClipReadResult.error("CLIPBOARD_UNSUPPORTED", "仅支持纯文本剪贴板");
         }
         for (int i = 0; i < mimeCount; i++) {
-            if (!ClipDescription.MIMETYPE_TEXT_PLAIN.equals(description.getMimeType(i))) {
+            String mime = description.getMimeType(i);
+            if (!ClipDescription.MIMETYPE_TEXT_PLAIN.equals(mime)
+                    && !ClipDescription.MIMETYPE_TEXT_HTML.equals(mime)) {
                 return ClipReadResult.error("CLIPBOARD_UNSUPPORTED", "仅支持纯文本剪贴板");
             }
         }
@@ -576,6 +590,8 @@ final class ClipboardSyncController {
             case CONNECTION_UNAUTHORIZED:
             case CONNECTION_UNSUPPORTED:
             case CONNECTION_CERTIFICATE_ERROR:
+            case CONNECTION_GROUP_FULL:
+            case CONNECTION_REPLACED:
                 return raw;
             default:
                 return CONNECTION_OFFLINE;
@@ -735,13 +751,11 @@ final class ClipboardSyncController {
      * in the focused real Activity and never returned to WebView.
      */
     CompletableFuture<JSONObject> sendNow(String text) {
-        if (text == null || text.isEmpty()) {
-            return failed(new BridgeException("CLIPBOARD_EMPTY", "not-sent", "剪贴板为空"));
+        ClipReadResult checked = validatePlainText(text == null ? "" : text);
+        if (!checked.ok) {
+            return failed(new BridgeException(checked.errorCode, "not-sent", checked.errorMessage));
         }
-        if (utf8ByteLength(text) > MAX_TEXT_BYTES) {
-            return failed(new BridgeException("CLIPBOARD_TOO_LARGE", "not-sent", "剪贴板文本超过大小限制"));
-        }
-        return onControl(() -> actionSendNow(text));
+        return onControl(() -> actionSendNow(checked.text));
     }
 
     private CompletableFuture<JSONObject> onControl(ControlAction action) {
@@ -851,7 +865,7 @@ final class ClipboardSyncController {
             if (!nativeBridge.isSupported()) {
                 throw new BridgeException("UNSUPPORTED", "not-sent", "当前设备不支持剪贴板同步");
             }
-            throw new BridgeException("INVALID_ARGUMENT", "not-sent", "同步组码无效");
+            throw new BridgeException("INVALID_GROUP_CODE", "not-sent", "同步组码无效");
         }
         ClipboardSyncStorage.State existing = readStateForMutation(creds.binding);
         // Joining a group persists the code and preserves the independent switch (never implicitly turns on).
@@ -1345,7 +1359,8 @@ final class ClipboardSyncController {
             reconcileQuietly();
             return;
         }
-        if (text == null || text.isEmpty() || utf8ByteLength(text) > MAX_TEXT_BYTES) {
+        ClipReadResult checked = validatePlainText(text);
+        if (!checked.ok) {
             return;
         }
 
@@ -1369,7 +1384,9 @@ final class ClipboardSyncController {
             }
         }
         try {
-            nativeBridge.send(pending.handle, pending.onlineGeneration, text);
+            if (!nativeBridge.send(pending.handle, pending.onlineGeneration, checked.text)) {
+                reconcileQuietly();
+            }
         } catch (Throwable ignored) {
             // Automatic capture never logs plaintext or crashes on transient offline state.
         }

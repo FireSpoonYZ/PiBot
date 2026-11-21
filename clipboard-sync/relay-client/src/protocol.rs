@@ -25,6 +25,8 @@ pub(crate) const CLOSE_POLICY_VIOLATION: u16 = 1008;
 pub(crate) const CLOSE_BAD_FRAME: u16 = 4400;
 pub(crate) const CLOSE_UNAUTHORIZED: u16 = 4401;
 pub(crate) const CLOSE_REVOKED: u16 = 4403;
+pub(crate) const CLOSE_REPLACED: u16 = 4409;
+pub(crate) const CLOSE_GROUP_FULL: u16 = 4410;
 
 const _: () = assert!(SEALED_MAX_BYTES == 65_552);
 

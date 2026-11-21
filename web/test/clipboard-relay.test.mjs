@@ -598,7 +598,7 @@ test('group isolation, no sender echo, authenticated fromDeviceId, replacement (
       token: extraToken,
       clipboardGroup: fullGroup,
     });
-    assert.equal((await extraPeer.waitClose()).code, CLIPBOARD_CLOSE.TRY_AGAIN_LATER);
+    assert.equal((await extraPeer.waitClose()).code, CLIPBOARD_CLOSE.GROUP_FULL);
 
     // Same-device reconnect inside a full group replaces its own slot cleanly.
     const firstCred = fullTokens[0];
@@ -1056,7 +1056,7 @@ test('strict frame and field boundaries, 96 KiB WS cap, and small rate limit', a
     }
     await recv.expectNoMessage(150);
 
-    // Rate limit closes flooding device with 1013 and stops forwarding excess frames.
+    // Rate limit drops excess updates without disconnecting the sender.
     const tFlood = makeToken();
     registry.register({ deviceId: 'dev-flood', token: tFlood });
     const { peer: flooder } = await connectClipboard(relay.url, {
@@ -1083,8 +1083,9 @@ test('strict frame and field boundaries, 96 KiB WS cap, and small rate limit', a
       sealed: validSealed,
       sentAt: nowSec(),
     });
-    assert.equal((await flooder.waitClose()).code, CLIPBOARD_CLOSE.TRY_AGAIN_LATER);
     await recv.expectNoMessage(150);
+    recv.sendJson({ type: 'clipboard-put', nonce: makeNonce(), sealed: validSealed, sentAt: nowSec() });
+    assert.equal((await flooder.nextJson()).fromDeviceId, 'dev-bounds-recv');
   });
 });
 
