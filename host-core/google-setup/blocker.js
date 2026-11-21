@@ -22,6 +22,7 @@ import {
 } from './console.js';
 import {
   currentGoogleSetupStep,
+  googleSetupNeedsKind,
   GOOGLE_SETUP_STEPS,
   personDoesGoogleSetupStep,
 } from './rules.js';
@@ -296,6 +297,7 @@ export function googleSetupBlocker({
     current !== 'connect' &&
     current !== 'client' &&
     !personDoesGoogleSetupStep(run, current) &&
+    !googleSetupNeedsKind(run) &&
     now - run.updatedAt >= GOOGLE_SETUP_PAUSED_AFTER_MS
   ) {
     return {

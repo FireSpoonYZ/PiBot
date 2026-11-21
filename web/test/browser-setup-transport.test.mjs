@@ -342,6 +342,7 @@ test('real createBotBrowserService + createGoogleSetupService runtime assembly e
   let failProviderStatus = false;
   let currentConvOwner = botA.botId;
   let centerStatusCalls = 0;
+  const setupContinuations = [];
 
   let coord = null;
   let coordClosed = false;
@@ -447,6 +448,30 @@ test('real createBotBrowserService + createGoogleSetupService runtime assembly e
     const status = await browserTool.execute({ action: 'status' }, fakeApi, {});
     assert.equal(JSON.parse(status.output[0].text).pausedForHuman, false);
     assert.equal(publishedDetails.length, 1, 'shared input must not open a takeover card');
+
+    const setupControl = (input) => coord.googleSetupControl(
+      { botId: botA.botId, ...input },
+      { clientId: 'local:desktop-1', transport: 'local' },
+      async (request) => {
+        setupContinuations.push(request);
+        return true;
+      },
+    );
+    await setupControl({ action: 'advance', step: 'account', account: 'owner@example.com' });
+    await setupControl({ action: 'advance', step: 'project', projectId: 'test-cloud-project' });
+    const branding = await setupControl({ action: 'advance', step: 'apis' });
+    assert.equal(branding.card.card, 'kind');
+    const answerKind = {
+      action: 'answer', card: 'kind', values: ['personal'], runId: started.id,
+      expectedRevision: branding.revision, cardCopy: branding.card.copy,
+    };
+    const chosen = await setupControl(answerKind);
+    assert.equal(chosen.kind, 'personal');
+    assert.equal(chosen.resumeQueued, true);
+    assert.equal((await setupControl(answerKind)).applied, false);
+    assert.deepEqual(setupContinuations, [{
+      botId: botA.botId, runId: started.id, revision: chosen.revision,
+    }]);
 
     // 3. Fail-closed safety gate: triggering sensitive `client` step while browser provider fails
     // MUST keep the safety lock engaged and block bot_browser tool with PAUSED_FOR_HUMAN

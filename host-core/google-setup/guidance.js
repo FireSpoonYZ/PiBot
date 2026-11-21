@@ -31,6 +31,7 @@ import {
 } from './blocker.js';
 import {
   currentGoogleSetupStep,
+  googleSetupNeedsKind,
   GOOGLE_SETUP_STEPS,
   personDoesGoogleSetupStep,
 } from './rules.js';
@@ -40,6 +41,7 @@ export const GOOGLE_SETUP_CARD_PRESENTATION = 'google-setup';
 export const GOOGLE_SETUP_CARD_KINDS = Object.freeze([
   'path',
   'account',
+  'kind',
   'services',
   'progress',
   'step',
@@ -100,6 +102,7 @@ export function googleSetupCardsDue(prev, next) {
     if (!answered(next, 'path') || next.mode === 'unchosen') {
       return [ref('path')];
     }
+    if (googleSetupWaitingCard(next)?.card === 'kind') return [ref('kind')];
     return [answered(next, 'services') ? ref('progress') : ref('services')];
   }
 
@@ -141,8 +144,14 @@ export function googleSetupCardsDue(prev, next) {
     due.push(ref('account'));
   }
 
+  const kindDue = googleSetupWaitingCard(next)?.card === 'kind';
+  const wasWaitingOnKind = googleSetupWaitingCard(before)?.card === 'kind';
+  if (kindDue && !wasWaitingOnKind) due.push(ref('kind'));
+
   for (const step of GOOGLE_SETUP_STEPS) {
-    if (step !== 'connect' && personsTurn(next, step) && !personsTurn(before, step)) {
+    if (step === 'branding' && kindDue) continue;
+    const wasPersonsTurn = personsTurn(before, step) && !(step === 'branding' && wasWaitingOnKind);
+    if (step !== 'connect' && personsTurn(next, step) && !wasPersonsTurn) {
       // Avoid duplicate client step card when directConfigure already queued it.
       if (!due.some((item) => item.card === 'step' && item.step === step)) {
         due.push(ref('step', step));
@@ -186,6 +195,7 @@ export function googleSetupWaitingCard(run) {
   if ((run.accounts?.length ?? 0) > 1 && !run.account && !answered(run, 'account')) {
     return { ...base, card: 'account' };
   }
+  if (googleSetupNeedsKind(run)) return { ...base, card: 'kind' };
   const handed = GOOGLE_SETUP_STEPS.find((step) => personsTurn(run, step) && step !== 'connect');
   if (handed) {
     return { ...base, card: 'step', step: handed };
@@ -368,6 +378,19 @@ export function buildSetupCard(ref, run, context = {}) {
         allowOther: true,
         answered: run.answers?.account ?? null,
         fallbackText: `Google setup: choose which Google account to use (${(run.accounts ?? []).join(', ') || 'specify account'}).`,
+      };
+    }
+
+    case 'kind': {
+      return {
+        ...base,
+        title: 'Choose the Google OAuth audience',
+        summary: 'Choose who will sign in to this Google OAuth app.',
+        options: [
+          { id: 'personal', label: 'Personal or external users', description: 'Select External in Google Cloud.' },
+          { id: 'work', label: 'Workspace organization only', description: 'Select Internal if the project belongs to that organization and only its members will use the app.' },
+        ],
+        fallbackText: 'Google setup: choose the OAuth audience on the setup card. Select External for personal or external users, or Internal for members of the project’s Workspace organization only.',
       };
     }
 
@@ -721,6 +744,17 @@ export function buildBotGuidance(run, context = {}) {
     };
   }
 
+  if (googleSetupWaitingCard(run)?.card === 'kind') {
+    return {
+      phase: 'awaiting-kind',
+      step,
+      mode: run.mode,
+      allowedBrowserActions: 'none',
+      nextAction: 'End your turn and wait for the owner to select the audience on the Google setup card. If the owner already chose an audience in chat, record it with google_setup(action="record_typed_answer", card="kind", values=["personal"] or ["work"]). Do not open a separate questionnaire.',
+      neverRules,
+    };
+  }
+
   const stepSpec = buildStepInstruction(step, {
     run,
     choices,
@@ -816,9 +850,9 @@ function buildStepInstruction(step, {
       return {
         nextAction:
           run.mode === 'guide-browser'
-            ? `Mark branding active so the owner opens ${consoleUrl} and completes Google Auth Platform (app name, support email, Internal for Workspace or External for personal, contact email, User Data Policy checkbox, and Finish). Wait for their Done and record kind (work vs personal).`
+            ? `Mark branding active so the owner opens ${consoleUrl} and completes Google Auth Platform (app name, support email, the recorded audience, contact email, User Data Policy checkbox, and Finish). Wait for their Done.`
             : allowedBrowserActions === 'drive'
-              ? `Mark branding active, open ${consoleUrl}, click Get started, fill non-sensitive fields (app name, support email, Internal/External audience — confirm kind with set(kind), never assume work purely from email domain — and contact email). STOP BEFORE the "Google API Services: User Data Policy" checkbox and call google_setup(action="need_user", step="branding", note="Tick the User Data Policy checkbox under Finish and submit"). Do not click or tick any terms box.`
+              ? `Mark branding active, open ${consoleUrl}, click Get started, and fill the non-sensitive fields (app name, support email, audience, and contact email). Use the recorded kind for the audience: work means Internal and personal means External. STOP BEFORE the "Google API Services: User Data Policy" checkbox and call google_setup(action="need_user", step="branding", note="Tick the User Data Policy checkbox under Finish and submit"). Do not click or tick any terms box.`
               : `Mark branding active and open ${consoleUrl} for the owner to complete Google Auth Platform including the User Data Policy checkbox (do not click). Call need_user if needed and wait for owner completion.`,
         doneSignal:
           'Owner ticked the User Data Policy box, finished Auth Platform setup, and overview no longer says not configured.',

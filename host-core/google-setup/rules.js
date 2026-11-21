@@ -258,6 +258,12 @@ export function currentGoogleSetupStep(run) {
   );
 }
 
+/** The owner picks the OAuth audience before branding can continue. */
+export function googleSetupNeedsKind(run) {
+  return run?.state === 'running' && !run.kind && !run.browserLock?.active &&
+    run.steps?.branding?.status !== 'needs-user' && currentGoogleSetupStep(run) === 'branding';
+}
+
 export function assertRecordedProjectId(run) {
   if (!isValidGoogleProjectId(run.projectId)) {
     throw setupError('SETUP_PROJECT_ID_REQUIRED', 'Record the Google Cloud project ID before completing the project step.');

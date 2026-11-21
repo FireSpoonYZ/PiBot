@@ -684,7 +684,7 @@ export async function openRuntimeBrowserSetup({
     }
   }
 
-  async function googleSetupControl(rawInput, callerContext = undefined) {
+  async function googleSetupControl(rawInput, callerContext = undefined, enqueueGoogleSetupContinuation = undefined) {
     if (closed || suspended) {
       throw googleSetupError('SETUP_CLOSED');
     }
@@ -692,11 +692,30 @@ export async function openRuntimeBrowserSetup({
     const allowArchived = input.action === 'status' || input.action === 'cancel';
     const authority = await resolveOwnerAuthority(input.botId, input.scopeId, callerContext, { allowArchived });
     const serviceInput = projectGoogleSetupControlForService(input);
+    let result;
     try {
-      return await setupService.control(serviceInput, authority);
+      result = await setupService.control(serviceInput, authority);
     } catch (err) {
       throw safeGoogleSetupError(err);
     }
+    if (
+      typeof enqueueGoogleSetupContinuation === 'function' &&
+      serviceInput.action === 'answer' && serviceInput.card === 'kind' &&
+      result?.applied === true && result.mode === 'do-it-for-me' && result.step === 'branding' &&
+      result.personStep !== 'branding' && !result.browserLock?.active &&
+      result.steps?.branding?.status !== 'needs-user' && !result.blocker
+    ) {
+      try {
+        const resumeQueued = await enqueueGoogleSetupContinuation({
+          botId: input.botId, runId: result.id, revision: result.revision,
+        });
+        return { ...result, resumeQueued: resumeQueued !== false };
+      } catch {
+        // The audience is already saved. A failed continuation does not undo the answer.
+        return { ...result, resumeQueued: false };
+      }
+    }
+    return result;
   }
 
   async function releaseBot(botId) {

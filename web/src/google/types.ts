@@ -206,6 +206,7 @@ export interface GoogleSetupControlState {
   browserPrompt?: string;
   redirectUri?: string;
   applied?: boolean;
+  resumeQueued?: boolean;
   stale?: boolean;
   staleReason?: string;
   error?: string;

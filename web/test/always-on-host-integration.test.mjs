@@ -60,7 +60,7 @@ function pendingLiveQuestionnaires(liveState) {
 
 // Real Host, control protocol, plugin loader, SDK task scheduler and SQLite. Only
 // Center configuration/credentials and the LLM provider are replaced by fixtures.
-async function hostFixture(t, { questionnaire = false, codemode = false, codemodeOnly = false, extraBots = 0 } = {}) {
+async function hostFixture(t, { questionnaire = false, codemode = false, codemodeOnly = false, extraBots = 0, googleSetup = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pibot-always-on-e2e-'));
   const dataRoot = join(root, 'host');
   const cwd = join(root, 'workspace');
@@ -106,6 +106,10 @@ async function hostFixture(t, { questionnaire = false, codemode = false, codemod
   const centerClient = { providerAuth: async () => ({ auth: { apiKey: 'fixture-key' }, source: 'center' }) };
   const centerRuntime = {
     snapshot: { protocol: 1 },
+    ...(googleSetup ? {
+      centerUrl: 'https://center.example.test',
+      getGoogleStatus: async () => ({ reachable: true, isAdmin: true, client: { configured: false }, accounts: [] }),
+    } : {}),
     installer: {
       async getInstalled(id, selector) {
         assert.equal(id, INSTALLATION);
@@ -134,7 +138,22 @@ async function hostFixture(t, { questionnaire = false, codemode = false, codemod
   });
   async function start() {
     const opening = await openControlServer({ port: 0, token, deferResume: true, dataRoot,
-      nativeBridge: async () => ({}), centerRuntime });
+      nativeBridge: async () => ({}), centerRuntime,
+      ...(googleSetup ? { createBrowserProvider: () => {
+        let url = null;
+        return {
+          async perform(input) {
+            if (input.action === 'open') url = input.url;
+            return {
+              available: true, canStreamInteract: true,
+              ...(url ? { pageId: 'fixture-google-page', url } : {}),
+              tabs: url ? [{ id: 'fixture-google-page', url }] : [],
+            };
+          },
+          async close() {},
+        };
+      } } : {}),
+    });
     server = opening;
     try {
       client = createControlClient({ url: opening.url, token });
@@ -277,6 +296,32 @@ test('real Host schedule handoff keeps its Stop fence across restart and private
       botId: f.bot.botId, requestId: 'forged-request', text: 'forged route', ...extra,
     }), { code: 'INVALID_ARGUMENT' });
   }
+});
+
+test('choosing the Google audience queues one automatic branding continuation through the real Host', async t => {
+  const f = await hostFixture(t, { googleSetup: true });
+  const control = input => f.client.googleSetupControl({ botId: f.bot.botId, ...input });
+  const run = await control({ action: 'start', mode: 'do-it-for-me', choices: ['gmail'] });
+  await control({ action: 'advance', step: 'account', account: 'owner@example.com' });
+  await control({ action: 'advance', step: 'project', projectId: 'test-cloud-project' });
+  const branding = await control({ action: 'advance', step: 'apis' });
+  assert.equal(branding.card.card, 'kind');
+  const answer = {
+    action: 'answer', card: 'kind', values: ['personal'], runId: run.id,
+    expectedRevision: branding.revision, cardCopy: branding.card.copy,
+  };
+
+  const chosen = await control(answer);
+  assert.equal(chosen.id, run.id);
+  assert.equal(chosen.kind, 'personal');
+  assert.equal(chosen.resumeQueued, true);
+  const retry = await control(answer);
+  assert.equal(retry.applied, false);
+  const digest = createHash('sha256').update(JSON.stringify([run.id, chosen.revision])).digest('hex');
+  await f.done(`google-setup-kind-${digest}`);
+  assert.equal(f.state.calls.length, 1);
+  assert.ok(f.state.calls[0].messages.some(message =>
+    message.role !== 'system' && JSON.stringify(message.content).includes('按已保存的选择继续')));
 });
 
 test('real questionnaire releases its SDK run, survives restart and resumes its original route exactly once', async t => {

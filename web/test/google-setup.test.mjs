@@ -313,6 +313,42 @@ test('the external project step needs a supplied ID only when the run has none',
   }
 });
 
+test('branding asks for the audience on the same setup card after the Bot stops', async () => {
+  const env = makeEnv({ isBotTurnRunning: () => false });
+  try {
+    const control = (input) => env.service.control({ botId: 'bot-a', ...input }, OWNER);
+    const run = await control({ action: 'start', mode: 'do-it-for-me', choices: ['gmail'] });
+    await control({ action: 'advance', step: 'account', account: 'owner@example.com' });
+    await control({ action: 'advance', step: 'project', projectId: 'existing-cloud-project' });
+    const branding = await control({ action: 'advance', step: 'apis' });
+    assert.equal(branding.step, 'branding');
+    assert.equal(branding.card.card, 'kind');
+    assert.deepEqual(new Set(branding.card.options.map(({ id }) => id)), new Set(['personal', 'work']));
+
+    env.advanceClock(GOOGLE_SETUP_PAUSED_AFTER_MS + 100);
+    const waiting = await control({ action: 'status' });
+    assert.equal(waiting.id, run.id);
+    assert.equal(waiting.card.card, 'kind');
+    assert.equal(waiting.blocker, null);
+    assert.equal(waiting.guidance.phase, 'awaiting-kind');
+
+    const answer = { action: 'answer', card: 'kind', values: ['work'], runId: run.id,
+      expectedRevision: waiting.revision, cardCopy: waiting.card.copy };
+    const selected = await control(answer);
+    assert.equal(selected.kind, 'work');
+    assert.equal(selected.id, run.id);
+    assert.equal(selected.projectId, 'existing-cloud-project');
+    assert.equal(selected.steps.apis.status, 'done');
+    assert.equal(selected.step, 'branding');
+    assert.equal(selected.steps.links.status, 'skipped');
+    assert.equal(selected.steps.publish.status, 'skipped');
+    assert.equal(selected.guidance.phase, 'active-step');
+    assert.equal((await control(answer)).applied, false);
+  } finally {
+    await env.cleanup();
+  }
+});
+
 test('Center Web OAuth links never use Orca domains and preserve People base scopes', () => {
   const valid = deriveCenterBrandingLinks('https://center.acme.example/subpath');
   assert.deepEqual(valid, {

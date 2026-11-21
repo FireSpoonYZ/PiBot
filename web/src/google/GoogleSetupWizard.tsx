@@ -751,6 +751,7 @@ export function GoogleSetupWizard({
   );
   const effectiveReadOnly = readOnly || staleRun || staleCopy;
   const activeMode = normalizeSetupMode(setup?.mode ?? undefined);
+  const kindPending = setup?.state === 'running' && setup.card?.card === 'kind';
 
   const modeAvailMap = setup?.modeAvailability?.modes;
   const doItAvailable = !isLocalAndroid && setup?.canUseEmbeddedBrowser !== false && modeAvailMap?.['do-it-for-me']?.available !== false;
@@ -831,7 +832,7 @@ export function GoogleSetupWizard({
   };
 
   const handleCompleteStep = async (step = currentStep) => {
-    if (!step || effectiveReadOnly || submittingRef.current || !setup?.id || setup.state !== 'running') return;
+    if (!step || kindPending || effectiveReadOnly || submittingRef.current || !setup?.id || setup.state !== 'running') return;
     const projectId = step === 'project' && needsExternalProjectId ? projectIdInput.trim() : undefined;
     if (projectId === '') return;
     await sendControl({
@@ -840,7 +841,7 @@ export function GoogleSetupWizard({
       ...(projectId ? { projectId } : {}),
     });
   };
-  const canCompleteCurrentStep = setup?.state === 'running' && currentStep !== 'connect' && Boolean(currentStep) &&
+  const canCompleteCurrentStep = setup?.state === 'running' && !kindPending && currentStep !== 'connect' && Boolean(currentStep) &&
     (activeMode === 'guide-browser' || activeMode === 'guide-here' || currentStep === 'account' ||
       browserLocked || steps.some(item => item.id === currentStep && item.status === 'needs-user'));
 
@@ -1075,6 +1076,35 @@ export function GoogleSetupWizard({
     (setup?.state === 'done' || setup?.state === 'completed') && clientConfigured && hasConnectedAccount;
   const setupClaimsDoneWithoutCenter =
     (setup?.state === 'done' || setup?.state === 'completed') && (!clientConfigured || !hasConnectedAccount);
+  const canAnswerKind = Boolean(callGoogleSetup && setup?.id && !effectiveReadOnly && !setup.unavailable);
+  const handleChooseKind = async (kind: 'personal' | 'work') => {
+    if (!kindPending || !canAnswerKind || submittingRef.current) return;
+    setNotice('');
+    const updated = await sendCardAnswer('kind', [kind]);
+    if (updated?.resumeQueued === false && updated.applied !== false) {
+      setNotice(t('受众已保存。请在聊天里告诉 Bot「继续当前 Google 配置」。',
+        'Audience saved. In chat, ask the bot to continue the current Google setup.'));
+    }
+  };
+  const kindSelection = kindPending && !nonAdminBlocked && !unavailableReason ? (
+    <div className={compactChat ? 'gws-compact-body' : 'gws-section-block'}>
+      <div className={compactChat ? 'gws-compact-step-title' : 'gws-label-xs'}>
+        {t('选择 Google 应用受众', 'Choose the audience for the Google app')}
+      </div>
+      <p className={compactChat ? 'gws-compact-step-hint' : 'gws-muted'}>
+        {t('只有项目属于对应的 Google Workspace 组织，且应用仅供该组织成员使用时，才选择「内部」。',
+          'Choose Internal only when the project belongs to the Google Workspace organization and the app is for its members only.')}
+      </p>
+      <div className={compactChat ? 'gws-compact-actions' : 'gws-actions'}>
+        <button type="button" className="gws-btn is-sm" disabled={busy || !canAnswerKind} onClick={() => void handleChooseKind('personal')}>
+          {t('个人账号或组织外用户（外部）', 'Personal account or outside users (External)')}
+        </button>
+        <button type="button" className="gws-btn is-sm" disabled={busy || !canAnswerKind} onClick={() => void handleChooseKind('work')}>
+          {t('公司或学校组织内成员（内部）', 'Company or school members (Internal)')}
+        </button>
+      </div>
+    </div>
+  ) : null;
   const activeBlockerActions =
     (Array.isArray(setup?.blocker?.actions) && setup.blocker.actions.length > 0
       ? setup.blocker.actions
@@ -1116,6 +1146,7 @@ export function GoogleSetupWizard({
       !isPathSelection &&
       !isServicesSelection &&
       !isAccountSelection &&
+      !kindPending &&
       !isSignInFlowActive &&
       Boolean(currentStep) &&
       activeMode === 'guide-browser';
@@ -1125,6 +1156,7 @@ export function GoogleSetupWizard({
       !isPathSelection &&
       !isServicesSelection &&
       !isAccountSelection &&
+      !kindPending &&
       !isSignInFlowActive &&
       Boolean(currentStep) &&
       (activeMode === 'do-it-for-me' || activeMode === 'guide-here');
@@ -1545,6 +1577,8 @@ export function GoogleSetupWizard({
             </div>
           </div>
         ) : null}
+
+        {kindSelection}
 
         {/* Sensitive takeover banner (real privacy boundary) */}
         {browserLocked && !setupCompleted ? (
@@ -2021,6 +2055,8 @@ export function GoogleSetupWizard({
         </div>
       ) : null}
 
+      {kindSelection}
+
       {/* Browser lock / sensitive takeover banner */}
       {browserLocked ? (
         <div className="gws-takeover-alert" role="alert">
@@ -2065,7 +2101,7 @@ export function GoogleSetupWizard({
                   <span className="gws-step-title">{item.title || googleStepTitle(item.id, t)}</span>
                   {item.detail ? <span className="gws-muted">{item.detail}</span> : null}
                 </div>
-                {item.url && isCurrent && item.id !== 'project' && !isEmbeddedAccountStep ? (
+                {item.url && isCurrent && item.id !== 'project' && !isEmbeddedAccountStep && !kindPending ? (
                   <button
                     type="button"
                     className="gws-btn is-ghost is-xs"
@@ -2082,7 +2118,7 @@ export function GoogleSetupWizard({
       ) : null}
 
       {/* Current step guidance */}
-      {currentStep && stepInfo && !setupCompleted ? (
+      {currentStep && stepInfo && !setupCompleted && !kindPending ? (
         <div className="gws-step-guide">
           <div className="gws-step-guide-title">{googleStepTitle(currentStep, t)}</div>
           <ul className="gws-guide-list">

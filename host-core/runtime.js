@@ -3429,7 +3429,19 @@ function createRuntime({ host, harness, models, defaultModel, dataRoot, releaseO
     // 统一图形环境（Android/Windows/Linux 同签名）：status/frame 只读，takeover 复用 conversation.abort。
     vaultControl: vault.control,
     browserControl: browserSetup.browserControl,
-    googleSetupControl: browserSetup.googleSetupControl,
+    googleSetupControl(input, callerContext) {
+      const stopEpoch = turns.stopEpoch(input?.botId);
+      return browserSetup.googleSetupControl(input, callerContext, async ({ botId, runId, revision }) => {
+        if (closing || isMaintenance()) return false;
+        const fingerprint = createHash('sha256').update(JSON.stringify([runId, revision])).digest('hex');
+        const receipt = await submitPrimary(botId, {
+          requestId: `google-setup-kind-${fingerprint}`,
+          text: '用户已在 Google 配置卡片选择受众。请调用 google_setup(action="show")。若向导仍在运行且当前为配置应用信息步骤，按已保存的选择继续。',
+          origin: { sender: { kind: 'host', name: 'Google 配置' } },
+        }, stopEpoch);
+        return ['queued', 'placed', 'done'].includes(receipt?.status);
+      });
+    },
     getShowerStatus: showerRuntime.getShowerStatus,
     createShowerSession: showerRuntime.createShowerSession,
     getShowerFrame: showerRuntime.getShowerFrame,
