@@ -52,6 +52,7 @@ import type {
   GoogleStatusSnapshot,
 } from './types';
 import './google-ui.css';
+import type { BrowserDestination } from '../bot-browser/protocol';
 
 export interface GoogleSetupWizardProps {
   api?: DesktopPanelApi | null;
@@ -76,6 +77,7 @@ export interface GoogleSetupWizardProps {
   compactChat?: boolean;
   callGoogleSetup?: GoogleSetupControlCall;
   onOpenBrowser?: () => void;
+  onOpenBrowserDestination?: (destination: BrowserDestination) => void;
   onOpenCapabilities?: () => void;
   onOpenCenterAdmin?: () => void;
   onStatusUpdated?: (snapshot: GoogleStatusSnapshot) => void;
@@ -148,7 +150,7 @@ function compactStepCopy(
         hint: t('在控制台新建项目后回来继续；如需指定项目，可填写非敏感的 Project ID。',
           'Create a project in Cloud Console, then continue. Optionally paste its non-sensitive Project ID.',
         ),
-        openLabel: t('打开 Google Cloud', 'Open Google Cloud'),
+        openLabel: t('打开项目创建页', 'Open project creation page'),
         continueLabel: t('已创建，继续', 'Created, continue'),
       };
     case 'apis':
@@ -334,6 +336,7 @@ export function GoogleSetupWizard({
   compactChat = false,
   callGoogleSetup,
   onOpenBrowser,
+  onOpenBrowserDestination,
   onOpenCapabilities,
   onOpenCenterAdmin,
   onStatusUpdated,
@@ -764,6 +767,11 @@ export function GoogleSetupWizard({
   const handleOpenCurrentBrowser = async () => {
     if (!onOpenBrowser || effectiveReadOnly || submittingRef.current) return;
     if (!isEmbeddedAccountStep) {
+      const destinationUrl = googleSetupConsoleUrl(currentStep, setup ?? undefined);
+      if (activeMode === 'guide-here' && !browserLocked && destinationUrl && onOpenBrowserDestination) {
+        onOpenBrowserDestination({ url: destinationUrl, pageId: setup?.browserPageId });
+        return;
+      }
       onOpenBrowser();
       return;
     }
@@ -773,6 +781,18 @@ export function GoogleSetupWizard({
       setError(t('无法打开 Google 登录页。请重试，或改用外部浏览器。', 'Could not open Google sign-in. Try again or use your system browser.'));
     }
   };
+
+  const handleCompleteStep = async (step = currentStep) => {
+    if (!step || effectiveReadOnly || submittingRef.current || !setup?.id || setup.state !== 'running') return;
+    await sendControl({
+      action: 'advance',
+      step,
+      ...(step === 'project' && projectIdInput.trim() ? { projectId: projectIdInput.trim() } : {}),
+    });
+  };
+  const canCompleteCurrentStep = setup?.state === 'running' && currentStep !== 'connect' && Boolean(currentStep) &&
+    (activeMode === 'guide-browser' || activeMode === 'guide-here' || currentStep === 'account' ||
+      browserLocked || steps.some(item => item.id === currentStep && item.status === 'needs-user'));
 
   const handleSelectMode = async (mode: GoogleSetupMode) => {
     if (effectiveReadOnly || submittingRef.current) return;
@@ -820,6 +840,9 @@ export function GoogleSetupWizard({
     setNotice('');
     setError('');
     switch (action.id) {
+      case 'done':
+        await handleCompleteStep(action.step || currentStep);
+        return;
       case 'open-browser':
       case 'take-over-browser':
       case 'takeover-browser':
@@ -1050,9 +1073,7 @@ export function GoogleSetupWizard({
     const stepCopy = currentStep ? compactStepCopy(currentStep, t) : null;
     const hasPrimaryStepContinue = Boolean(
       canMutateChat &&
-        isExternalStepFlow &&
-        currentStep &&
-        currentStep !== 'connect',
+        (isExternalStepFlow || isEmbeddedStepFlow) && canCompleteCurrentStep,
     );
     const settingsEntryAction = onOpenCapabilities ?? onOpenCenterAdmin;
     const settingsEntryLabel = onOpenCapabilities
@@ -1491,11 +1512,7 @@ export function GoogleSetupWizard({
                     type="button"
                     className="gws-btn is-primary is-sm"
                     disabled={busy}
-                    onClick={() =>
-                      void sendCardAnswer('step', ['done', currentStep], captured =>
-                        sendControl({ action: 'advance', step: currentStep }, { displayedSetup: captured }),
-                      )
-                    }
+                    onClick={() => void handleCompleteStep()}
                   >
                     {stepCopy?.continueLabel || t('已完成，继续', 'Done, continue')}
                   </button>
@@ -1609,15 +1626,7 @@ export function GoogleSetupWizard({
                           : ''
                     }`}
                     disabled={busy || !canMutateChat}
-                    onClick={() =>
-                      void sendControl({
-                        action: 'advance',
-                        step: currentStep!,
-                        ...(currentStep === 'project' && projectIdInput.trim()
-                          ? { projectId: projectIdInput.trim() }
-                          : {}),
-                      })
-                    }
+                    onClick={() => void handleCompleteStep()}
                   >
                     {stepCopy.continueLabel}
                   </button>
@@ -1636,12 +1645,36 @@ export function GoogleSetupWizard({
                 ? t('Bot 正在内置浏览器处理当前步骤，需要你操作时会自动提示。', 'Bot is working on this step in the built-in browser and will prompt you when needed.')
                 : stepCopy.hint}
             </p>
-            {!effectiveReadOnly && onOpenBrowser && embeddedSupported && !browserLocked ? (
+            {currentStep === 'project' && hasPrimaryStepContinue ? (
+              <input
+                type="text"
+                className="gws-input gws-compact-input"
+                value={projectIdInput}
+                disabled={busy}
+                placeholder={t('Project ID（可选，非敏感）', 'Project ID (optional, non-sensitive)')}
+                aria-label={t('Google Cloud Project ID', 'Google Cloud Project ID')}
+                onChange={event => setProjectIdInput(event.target.value)}
+              />
+            ) : null}
+            {!effectiveReadOnly ? (
               <div className="gws-compact-actions">
-                <button type="button" className="gws-btn is-primary is-sm" disabled={busy} onClick={() => void handleOpenCurrentBrowser()}>
-                  <Globe size={13} aria-hidden="true" />
-                  <span>{openBrowserLabel}</span>
-                </button>
+                {onOpenBrowser && embeddedSupported && !browserLocked ? (
+                  <button type="button" className="gws-btn is-primary is-sm" disabled={busy} onClick={() => void handleOpenCurrentBrowser()}>
+                    <Globe size={13} aria-hidden="true" />
+                    <span>{activeMode === 'guide-here' && currentStep !== 'account' ? stepCopy.openLabel : openBrowserLabel}</span>
+                  </button>
+                ) : null}
+                {hasPrimaryStepContinue ? (
+                  <button type="button" className="gws-btn is-sm" disabled={busy} onClick={() => void handleCompleteStep()}>
+                    {stepCopy.continueLabel}
+                  </button>
+                ) : null}
+                {currentStep === 'client' && settingsEntryAction ? (
+                  <button type="button" className="gws-btn is-primary is-sm" disabled={busy} onClick={settingsEntryAction}>
+                    <Lock size={13} aria-hidden="true" />
+                    <span>{settingsEntryLabel}</span>
+                  </button>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -2026,7 +2059,15 @@ export function GoogleSetupWizard({
             </p>
           ) : null}
 
-          {currentStep === 'project' && activeMode === 'guide-browser' && !effectiveReadOnly ? (
+          {activeMode === 'guide-here' && onOpenBrowser && !browserLocked && !effectiveReadOnly ? (
+            <div className="gws-actions">
+              <button type="button" className="gws-btn is-primary is-sm" disabled={busy} onClick={() => void handleOpenCurrentBrowser()}>
+                <Globe size={14} aria-hidden="true" />
+                <span>{compactStepCopy(currentStep, t).openLabel}</span>
+              </button>
+            </div>
+          ) : null}
+          {currentStep === 'project' && canCompleteCurrentStep && !effectiveReadOnly ? (
             <div className="gws-inline-input-row">
               <input
                 type="text"
@@ -2041,14 +2082,7 @@ export function GoogleSetupWizard({
                 type="button"
                 className="gws-btn is-primary is-sm"
                 disabled={busy}
-                onClick={() =>
-                  void sendControl({
-                    action: 'advance',
-                    step: 'project',
-                    ...(projectIdInput.trim() ? { projectId: projectIdInput.trim() } : {}),
-                    ...(setup ? { expectedRevision: setup.revision } : {}),
-                  })
-                }
+                onClick={() => void handleCompleteStep()}
               >
                 {t('已完成', 'Done')}
               </button>
@@ -2058,20 +2092,14 @@ export function GoogleSetupWizard({
           {currentStep !== 'project' &&
           currentStep !== 'client' &&
           currentStep !== 'connect' &&
-          activeMode === 'guide-browser' &&
+          canCompleteCurrentStep &&
           !effectiveReadOnly ? (
             <div className="gws-actions">
               <button
                 type="button"
                 className="gws-btn is-primary is-sm"
                 disabled={busy}
-                onClick={() =>
-                  void sendControl({
-                    action: 'advance',
-                    step: currentStep,
-                    ...(setup ? { expectedRevision: setup.revision } : {}),
-                  })
-                }
+                onClick={() => void handleCompleteStep()}
               >
                 {t('已完成这一步 (Done)', 'Done — next step')}
               </button>
@@ -2089,7 +2117,7 @@ export function GoogleSetupWizard({
           </div>
           {activeBlockerActions.length > 0 && !effectiveReadOnly ? (
             <div className="gws-actions">
-              {activeBlockerActions.map(action => (
+              {activeBlockerActions.filter(action => action.id !== 'done' || !canCompleteCurrentStep || currentStep === 'client').map(action => (
                 <button
                   key={`${action.id}:${action.step ?? ''}:${action.email ?? ''}`}
                   type="button"

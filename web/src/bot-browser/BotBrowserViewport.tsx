@@ -1,57 +1,23 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { KeyboardEvent, PointerEvent, ReactNode } from 'react';
-import {
-  AlertTriangle,
-  ExternalLink,
-  Globe,
-  Loader2,
-  Monitor,
-  Plus,
-  RefreshCw,
-  Shield,
-} from 'lucide-react';
+import type { KeyboardEvent, PointerEvent } from 'react';
 import { useText } from '../ui';
 import {
   ZOOM_STEPS,
-  activeTabOf,
-  classifyPageUrl,
   mapClientPointToNormalized,
   mapKeyboardEventKey,
   normalizeWheelDelta,
   type BrowserFrame,
   type BrowserInputEvent,
-  type BrowserView,
 } from './protocol';
 
 export interface BotBrowserViewportProps {
-  connected: boolean;
-  visible: boolean;
-  view: BrowserView | null;
-  liveFrame: BrowserFrame | null;
-  loadingStatus: boolean;
-  streamDegraded: boolean;
-  frameRedacted: boolean;
-  frameRedactedReason: string | null;
-  isHolder: boolean;
+  liveFrame: BrowserFrame;
+  pageTitle?: string;
   canSendInput: boolean;
-  isSensitive: boolean;
-  externalGuideOpening?: boolean;
-  signInTakeoverAction?: ReactNode;
   zoom: number;
-  hostLabel?: string;
   onZoomChange: (nextZoom: number) => void;
   onInput: (event: BrowserInputEvent) => void;
-  onRetry: () => void;
-  onOpenTab?: () => void;
-  onRequestExternalGuide: () => void;
-  onContinueAfterGoogleSignInRejection: () => void;
   onExitStageFocus?: () => void;
-}
-
-interface TapRipple {
-  id: number;
-  xPct: number;
-  yPct: number;
 }
 
 const TAP_MOVE_THRESHOLD_PX = 10;
@@ -64,27 +30,12 @@ function clampZoom(value: number): number {
 }
 
 export function BotBrowserViewport({
-  connected,
-  visible,
-  view,
   liveFrame,
-  loadingStatus,
-  streamDegraded,
-  frameRedacted,
-  frameRedactedReason,
-  isHolder,
+  pageTitle,
   canSendInput,
-  isSensitive,
-  externalGuideOpening,
-  signInTakeoverAction,
   zoom,
-  hostLabel,
   onZoomChange,
   onInput,
-  onRetry,
-  onOpenTab,
-  onRequestExternalGuide,
-  onContinueAfterGoogleSignInRejection,
   onExitStageFocus,
 }: BotBrowserViewportProps) {
   const t = useText();
@@ -94,9 +45,6 @@ export function BotBrowserViewport({
   const centeredPageRef = useRef<string | undefined>(undefined);
   const frameWrapRef = useRef<HTMLDivElement | null>(null);
   const [imgEl, setImgEl] = useState<HTMLImageElement | null>(null);
-  const [ripple, setRipple] = useState<TapRipple | null>(null);
-  const rippleTimerRef = useRef<number | null>(null);
-  const rippleSeqRef = useRef(0);
 
   const pointerStartRef = useRef<{
     pointerId: number;
@@ -119,8 +67,8 @@ export function BotBrowserViewport({
   const onInputRef = useRef(onInput);
   onInputRef.current = onInput;
 
-  const framePageId = liveFrame?.pageId;
-  const frameRatio = liveFrame ? liveFrame.width / liveFrame.height : 1;
+  const framePageId = liveFrame.pageId;
+  const frameRatio = liveFrame.width / liveFrame.height;
   const renderedWidth = Math.floor(Math.min(stageSize.width, stageSize.height * frameRatio) * zoom);
   const renderedHeight = renderedWidth / frameRatio;
   const zoomed = zoom > MIN_ZOOM + 0.01;
@@ -152,21 +100,6 @@ export function BotBrowserViewport({
     stage.scrollTop += frameRect.top - stageRect.top + center.y * renderedHeight - stage.clientHeight / 2;
   }, [stage, framePageId, renderedWidth, renderedHeight]);
 
-  useEffect(() => {
-    return () => {
-      if (rippleTimerRef.current !== null) window.clearTimeout(rippleTimerRef.current);
-    };
-  }, []);
-
-  const showRipple = useCallback((xPct: number, yPct: number) => {
-    const id = ++rippleSeqRef.current;
-    setRipple({ id, xPct, yPct });
-    if (rippleTimerRef.current !== null) window.clearTimeout(rippleTimerRef.current);
-    rippleTimerRef.current = window.setTimeout(() => {
-      setRipple((curr) => (curr && curr.id === id ? null : curr));
-    }, 360);
-  }, []);
-
   const sendWheel = useCallback((point: { x: number; y: number }, deltaX: number, deltaY: number) => {
     if (deltaX === 0 && deltaY === 0) return;
     onInputRef.current({ kind: 'wheel', ...point, deltaX, deltaY });
@@ -179,7 +112,6 @@ export function BotBrowserViewport({
     const onWheel = (ev: WheelEvent) => {
       if (!canSendInputRef.current) return;
       const frame = liveFrameRef.current;
-      if (!frame) return;
       const rect = el.getBoundingClientRect();
       const point = mapClientPointToNormalized(
         ev.clientX,
@@ -216,7 +148,7 @@ export function BotBrowserViewport({
       }
     }
 
-    if ((!canSendInput && !zoomed) || !liveFrame) return;
+    if (!canSendInput && !zoomed) return;
 
     pointerStartRef.current = {
       pointerId: ev.pointerId,
@@ -254,7 +186,7 @@ export function BotBrowserViewport({
     if (zoomed && stage) {
       stage.scrollLeft += dx;
       stage.scrollTop += dy;
-    } else if (ev.pointerType === 'touch' && canSendInput && liveFrame?.pageId === start.pageId && liveFrame.revision === start.revision) {
+    } else if (ev.pointerType === 'touch' && canSendInput && liveFrame.pageId === start.pageId && liveFrame.revision === start.revision) {
       const rect = ev.currentTarget.getBoundingClientRect();
       const point = mapClientPointToNormalized(start.clientX, start.clientY, rect, liveFrame.width, liveFrame.height);
       if (!point) return;
@@ -281,7 +213,7 @@ export function BotBrowserViewport({
     }
 
     if (!start || start.pointerId !== ev.pointerId || start.dragging || !canSendInput || !imgEl ||
-        liveFrame?.pageId !== start.pageId || liveFrame.revision !== start.revision) {
+        liveFrame.pageId !== start.pageId || liveFrame.revision !== start.revision) {
       return;
     }
 
@@ -299,7 +231,6 @@ export function BotBrowserViewport({
     if (!point) return;
 
     stage?.focus({ preventScroll: true });
-    showRipple(point.x * 100, point.y * 100);
     onInput({ kind: 'click', x: point.x, y: point.y });
   };
 
@@ -336,237 +267,8 @@ export function BotBrowserViewport({
     }
   };
 
-  const currentTab = activeTabOf(view);
-  const urlMeta = classifyPageUrl(currentTab?.url);
-  const safeUrlSummary =
-    !isSensitive && currentTab?.url ? urlMeta.displayHost || currentTab.url : '';
-
-  // 1. Disconnected or hidden tab: never show stale frame as live.
-  if (!connected || !visible) {
-    return (
-      <div className="bb-stage bb-stage--state" role="status" aria-live="polite">
-        <div className="bb-state-card">
-          <div className="bb-state-icon bb-state-icon--muted" aria-hidden="true">
-            <AlertTriangle size={22} />
-          </div>
-          <h3 className="bb-state-title">
-            {!connected
-              ? t('已断开与目标设备的连接', 'Disconnected from target host')
-              : t('页面已切至后台，画面轮询已暂停', 'Paused while view is hidden')}
-          </h3>
-          <p className="bb-state-desc">
-            {!connected
-              ? t('不会把旧截图冒充实时画面；若刚才处于接管中，Bot 会保持停手直到你重新确认。', 'Cached frames are cleared so stale images are never shown. If you were taking over, the Bot remains paused until you confirm.')
-              : t('回到前台后将自动刷新最新页面状态。', 'Live status will refresh automatically when you return.')}
-          </p>
-          {connected ? null : (
-            <div className="bb-state-actions">
-              <button type="button" className="bb-btn bb-btn--secondary" onClick={onRetry}>
-                <RefreshCw size={14} aria-hidden="true" />
-                <span>{t('重新检查', 'Retry')}</span>
-              </button>
-              <button type="button" className="bb-btn bb-btn--ghost" onClick={onRequestExternalGuide}>
-                <ExternalLink size={14} aria-hidden="true" />
-                <span>{t('外部浏览器指导', 'Guide in my browser')}</span>
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // 2. Initial loading before first status arrives.
-  if (!view && loadingStatus) {
-    return (
-      <div className="bb-stage bb-stage--state" role="status" aria-live="polite">
-        <div className="bb-state-card">
-          <div className="bb-state-icon bb-state-icon--muted" aria-hidden="true">
-            <Loader2 size={22} className="bb-spin" />
-          </div>
-          <h3 className="bb-state-title">{t('正在连接 Bot 浏览器…', 'Connecting to Bot browser…')}</h3>
-          <p className="bb-state-desc">
-            {t('正在向目标 Host 读取实时浏览能力与当前标签页。', 'Checking real-time browser capability and active tabs from the target host.')}
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  if (urlMeta.isGoogleSignInRejected) {
-    return (
-      <div className="bb-stage bb-stage--state" role="status" aria-live="polite">
-        <div className="bb-state-card bb-state-card--shield">
-          <div className="bb-state-icon bb-state-icon--shield" aria-hidden="true">
-            <Shield size={22} />
-          </div>
-          <h3 className="bb-state-title">
-            {t('Google 拒绝了内置浏览器登录', 'Google blocked sign-in in the built-in browser')}
-          </h3>
-          <p className="bb-state-desc">
-            {t('请在系统浏览器中登录，再回到 Pi Bot 继续。', 'Sign in using your system browser, then return to Pi Bot.')}
-          </p>
-          <div className="bb-state-actions">
-            <button
-              type="button"
-              className="bb-btn bb-btn--primary"
-              disabled={externalGuideOpening}
-              onClick={onContinueAfterGoogleSignInRejection}
-            >
-              <ExternalLink size={14} aria-hidden="true" />
-              <span>{externalGuideOpening
-                ? t('正在打开…', 'Opening…')
-                : t('在系统浏览器中继续', 'Continue in system browser')}</span>
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // 3. Honest degradation when unavailable, non-interactable, or stream failed for >= 5s.
-  if (!view || !view.available || !view.canStreamInteract || streamDegraded) {
-    const reasonText = streamDegraded
-      ? t('连续 5 秒未收到有效实时画面，已停止交互以避免误操作。', 'No live frame received for 5 seconds. Interaction is disabled to avoid blind clicks.')
-      : view?.reason
-        ? view.reason
-        : !view
-          ? t('暂时无法读取目标设备的浏览器状态。', 'Unable to read browser status from the target host.')
-          : !view.available
-            ? t('当前 Host 未提供可用的 Bot 内置浏览器环境。', 'The target host does not currently have an available Bot browser.')
-            : t('当前 Host 不支持实时画面流与同页接管（例如无头模式或网络受限）。', 'This host cannot stream interactive frames right now (e.g., headless mode or restricted relay).');
-
-    return (
-      <div className="bb-stage bb-stage--state" role="region" aria-label={t('浏览器不可用说明', 'Browser unavailable details')}>
-        <div className="bb-state-card">
-          <div className="bb-state-icon bb-state-icon--warn" aria-hidden="true">
-            <Monitor size={22} />
-          </div>
-          <h3 className="bb-state-title">
-            {t('当前无法实时查看或接管此浏览器', 'Live browser control is unavailable')}
-          </h3>
-          <p className="bb-state-desc">{reasonText}</p>
-
-          {(view?.stepText || safeUrlSummary || currentTab?.title) && !isSensitive ? (
-            <div className="bb-readonly-summary">
-              <div className="bb-readonly-label">
-                {t('文字进度参考（只读，不可直接点击）', 'Text status only (read-only)')}
-              </div>
-              {view?.stepText ? <div className="bb-readonly-line">{view.stepText}</div> : null}
-              {currentTab?.title ? <div className="bb-readonly-line">{currentTab.title}</div> : null}
-              {safeUrlSummary ? <div className="bb-readonly-url">{safeUrlSummary}</div> : null}
-            </div>
-          ) : null}
-
-          <div className="bb-state-actions">
-            <button type="button" className="bb-btn bb-btn--primary" onClick={onRequestExternalGuide}>
-              <ExternalLink size={14} aria-hidden="true" />
-              <span>{t('改用外部系统浏览器指导', 'Guide me in my browser')}</span>
-            </button>
-            <button type="button" className="bb-btn bb-btn--secondary" onClick={onRetry}>
-              <RefreshCw size={14} aria-hidden="true" />
-              <span>{t('重新检查', 'Retry')}</span>
-            </button>
-          </div>
-
-          {hostLabel ? (
-            <p className="bb-state-footnote">
-              {t(`若需保留原表单继续操作，请前往目标设备「${hostLabel}」本机处理。`, `To continue on the original form, open the browser directly on ${hostLabel}.`)}
-            </p>
-          ) : null}
-        </div>
-      </div>
-    );
-  }
-
-  // 4. Privacy Shield: never render private frames to bystanders, or when Host redacted the frame.
-  if ((isSensitive && !isHolder) || frameRedacted) {
-    return (
-      <div className="bb-stage bb-stage--state" role="status" aria-live="polite">
-        <div className="bb-state-card bb-state-card--shield">
-          <div className="bb-state-icon bb-state-icon--shield" aria-hidden="true">
-            <Shield size={22} />
-          </div>
-          {signInTakeoverAction ? (
-            <>
-              <h3 className="bb-state-title">{t('登录 Google', 'Sign in to Google')}</h3>
-              <p className="bb-state-desc">
-                {t('接管后可在这里登录。Bot 会暂停操作。', 'Take over to sign in here. The Bot will pause.')}
-              </p>
-              <div className="bb-state-actions">{signInTakeoverAction}</div>
-            </>
-          ) : (
-            <>
-              <h3 className="bb-state-title">
-                {isHolder
-                  ? t('此步骤受敏感保护，Host 已停止推流', 'Protected sensitive step')
-                  : t('已启用隐私遮罩', 'Privacy shield active')}
-              </h3>
-              <p className="bb-state-desc">
-                {frameRedactedReason || view.sensitiveReason ||
-                  t('实时画面受到隐私保护。', 'Live frames are protected by the privacy shield.')}
-              </p>
-              {view.fallbackToSystemBrowser ? (
-                <div className="bb-state-actions">
-                  <button type="button" className="bb-btn bb-btn--primary" onClick={onRequestExternalGuide}>
-                    <ExternalLink size={14} aria-hidden="true" />
-                    <span>{t('在系统浏览器中继续', 'Open in system browser')}</span>
-                  </button>
-                </div>
-              ) : null}
-            </>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // 5. Available browser with no open tabs yet.
-  if (!view.pageId && view.tabs.length === 0) {
-    return (
-      <div className="bb-stage bb-stage--state" role="status">
-        <div className="bb-state-card">
-          <div className="bb-state-icon bb-state-icon--muted" aria-hidden="true">
-            <Globe size={22} />
-          </div>
-          <h3 className="bb-state-title">{t('当前没有打开的标签页', 'No open browser tab')}</h3>
-          <p className="bb-state-desc">
-            {t('每个 Bot 使用独立的隔离浏览会话。打开新标签页或等待 Bot 发起浏览任务。', 'Each Bot runs in an isolated browsing session. Open a new tab or wait for the Bot to start browsing.')}
-          </p>
-          {onOpenTab ? (
-            <div className="bb-state-actions">
-              <button type="button" className="bb-btn bb-btn--primary" onClick={onOpenTab}>
-                <Plus size={14} aria-hidden="true" />
-                <span>{t('新建标签页', 'New tab')}</span>
-              </button>
-            </div>
-          ) : null}
-        </div>
-      </div>
-    );
-  }
-
-  // 6. Waiting for a bounded live frame that matches the current pageId & revision.
-  if (!liveFrame) {
-    return (
-      <div className="bb-stage bb-stage--state" role="status" aria-live="polite">
-        <div className="bb-state-card">
-          <div className="bb-state-icon bb-state-icon--muted" aria-hidden="true">
-            <Loader2 size={22} className="bb-spin" />
-          </div>
-          <h3 className="bb-state-title">{t('正在获取最新实时画面…', 'Waiting for live frame…')}</h3>
-          <p className="bb-state-desc">
-            {t('收到与当前页面一致的实时画面后才会开放点击与输入。', 'Interaction unlocks only after a verified live frame for the current page arrives.')}
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  // 7. Live interactive (or read-only) frame stage.
   const stageClass = [
     'bb-stage',
-    'bb-stage--page',
     canSendInput ? 'bb-stage--interactive' : '',
     zoomed ? 'bb-stage--zoomed' : '',
   ]
@@ -599,7 +301,6 @@ export function BotBrowserViewport({
       <div className="bb-page-area">
         <div
           ref={frameWrapRef}
-          className="bb-frame-wrap"
           style={{ width: renderedWidth, height: renderedHeight }}
         >
           <img
@@ -607,8 +308,8 @@ export function BotBrowserViewport({
             className={`bb-frame-img ${canSendInput ? 'bb-frame-img--live' : ''}`}
             src={`data:${liveFrame.mimeType};base64,${liveFrame.data}`}
             alt={
-              currentTab?.title
-                ? t(`当前网页画面：${currentTab.title}`, `Live browser page: ${currentTab.title}`)
+              pageTitle
+                ? t(`当前网页画面：${pageTitle}`, `Live browser page: ${pageTitle}`)
                 : t('Bot 浏览器实时画面', 'Live Bot browser page')
             }
             draggable={false}
@@ -621,14 +322,6 @@ export function BotBrowserViewport({
             }}
             onDragStart={(ev) => ev.preventDefault()}
           />
-          {ripple ? (
-            <span
-              key={ripple.id}
-              className="bb-tap-ripple"
-              style={{ left: `${ripple.xPct}%`, top: `${ripple.yPct}%` }}
-              aria-hidden="true"
-            />
-          ) : null}
         </div>
       </div>
     </div>

@@ -1,5 +1,10 @@
 export type BrowserPhase = 'bot' | 'taking' | 'human' | 'held';
 
+export interface BrowserDestination {
+  url: string;
+  pageId?: string;
+}
+
 export type BrowserControlAction =
   | 'status'
   | 'open'

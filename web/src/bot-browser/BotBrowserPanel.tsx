@@ -19,7 +19,6 @@ import {
   Minus,
   Plus,
   RefreshCw,
-  Shield,
   Square,
   Unlock,
   X,
@@ -54,6 +53,7 @@ import {
   reconcileLeaseWithView,
   resolveExternalGuideUrl,
   type BrowserFrame,
+  type BrowserDestination,
   type BrowserInputEvent,
   type BrowserView,
   type FrameCursor,
@@ -75,6 +75,8 @@ export interface BotBrowserPanelProps {
   botId: string;
   deviceId: string;
   request: (input: Record<string, unknown>) => Promise<any>;
+  destination?: BrowserDestination;
+  onDestinationConsumed?: () => void;
   subscribeFrames?: SubscribeBrowserFrames;
   nativePresenter?: NativeBrowserPresenter;
   browserPlacement?: {
@@ -84,7 +86,6 @@ export interface BotBrowserPanelProps {
   };
   onClose?: () => void;
   botName?: string;
-  hostLabel?: string;
   mode?: 'auto' | 'sidebar' | 'fullscreen';
   connected?: boolean;
   onSwitchToExternalGuide?: (
@@ -147,12 +148,13 @@ export function BotBrowserPanel({
   botId,
   deviceId,
   request,
+  destination,
+  onDestinationConsumed,
   subscribeFrames,
   nativePresenter,
   browserPlacement,
   onClose,
   botName,
-  hostLabel,
   mode = 'auto',
   connected = true,
   onSwitchToExternalGuide,
@@ -170,11 +172,16 @@ export function BotBrowserPanel({
   const [ownedLease, setOwnedLease] = useState<OwnedLease | null>(null);
   const [isHolder, setIsHolder] = useState(false);
   const [pendingAction, setPendingActionState] = useState<PendingControlAction>(null);
+  const consumedDestinationRef = useRef<BrowserDestination | null>(null);
+  const [failedDestination, setFailedDestination] = useState<BrowserDestination | null>(null);
+  useEffect(() => {
+    consumedDestinationRef.current = null;
+    setFailedDestination(null);
+  }, [botId, deviceId]);
 
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [streamDegraded, setStreamDegraded] = useState(false);
   const [frameRedacted, setFrameRedacted] = useState(false);
-  const [frameRedactedReason, setFrameRedactedReason] = useState<string | null>(null);
   const [streamAttempt, setStreamAttempt] = useState(0);
   const [streamBlocked, setStreamBlocked] = useState<{
     pageId: string; sessionId: string; revision: number; lease: string | undefined;
@@ -240,8 +247,7 @@ export function BotBrowserPanel({
   const nativeSessionId = view?.sessionId;
   const nativeRendererId = view?.rendererId;
   const canPresentNative = Boolean(nativePresenter && connected && pageVisible && view?.available &&
-    view.nativePresentation && view.phase === 'human' && isHolder &&
-    !classifyPageUrl(activeTabOf(view)?.url).isGoogleSignInRejected);
+    view.nativePresentation && view.phase === 'human' && isHolder);
   const nativeLease = ownedLease && ownedLease.pageId === nativePageId &&
     ownedLease.sessionId === (nativeSessionId ?? null) && ownedLease.revision === view?.revision
     ? ownedLease.lease : undefined;
@@ -338,14 +344,13 @@ export function BotBrowserPanel({
     const currentView = viewRef.current;
     if (!isFrameUsableForView(nextFrame, currentView, lastFrameCursorRef.current)) return false;
     const urlInfo = classifyPageUrl(activeTabOf(currentView)?.url);
-    if (urlInfo.isGoogleSignInRejected || (!isHolderRef.current && (currentView?.sensitive || urlInfo.isKnownSensitiveUrl))) {
+    if (!isHolderRef.current && (currentView?.sensitive || urlInfo.isKnownSensitiveUrl)) {
       return false;
     }
     lastFrameCursorRef.current = { pageId: nextFrame.pageId, revision: nextFrame.revision, seq: nextFrame.seq };
     frameRef.current = nextFrame;
     setFrame(nextFrame);
     setFrameRedacted(false);
-    setFrameRedactedReason(null);
     streamFailSinceRef.current = null;
     if (streamDegradedRef.current) setStreamDegraded(false);
     return true;
@@ -411,8 +416,9 @@ export function BotBrowserPanel({
       const activeTab = activeTabOf(nextView);
       const urlInfo = classifyPageUrl(activeTab?.url);
       const nextSensitive = Boolean(nextView.sensitive || urlInfo.isKnownSensitiveUrl);
-      if (!nextIsHolder || urlInfo.isGoogleSignInRejected || prevView?.pageId !== nextView.pageId ||
-          prevView?.revision !== nextView.revision || prevView?.sessionId !== nextView.sessionId) {
+      const targetChanged = prevView?.pageId !== nextView.pageId || prevView?.revision !== nextView.revision ||
+        prevView?.sessionId !== nextView.sessionId;
+      if (!nextIsHolder || targetChanged) {
         pendingBrowserInputsRef.current = null;
       }
 
@@ -421,10 +427,8 @@ export function BotBrowserPanel({
         !nextView.available ||
         !nextView.canStreamInteract ||
         !nextView.pageId ||
-        urlInfo.isGoogleSignInRejected ||
         (nextSensitive && !nextIsHolder) ||
-        (prevView && (prevView.pageId !== nextView.pageId || prevView.revision !== nextView.revision ||
-          prevView.sessionId !== nextView.sessionId))
+        targetChanged
       ) {
         clearCachedFrame();
       }
@@ -432,7 +436,6 @@ export function BotBrowserPanel({
       if (!nextView.available || !nextView.canStreamInteract) {
         streamFailSinceRef.current = null;
         setFrameRedacted(false);
-        setFrameRedactedReason(null);
       }
 
       if (!urlEditingRef.current) {
@@ -473,7 +476,6 @@ export function BotBrowserPanel({
     setLoadingStatus(true);
     setStreamDegraded(false);
     setFrameRedacted(false);
-    setFrameRedactedReason(null);
     setStreamBlocked(null);
     setErrorBanner(null);
     setNoticeBanner(null);
@@ -522,7 +524,6 @@ export function BotBrowserPanel({
           !nativeReadyRef.current && parsedView.available &&
           parsedView.canStreamInteract &&
           Boolean(parsedView.pageId) &&
-          !urlMeta.isGoogleSignInRejected &&
           !(isSensitiveNow && !nextIsHolder) &&
           (!hasRelayStreamRef.current || !parsedView.sessionId || useLegacyFramesRef.current) &&
           !streamDegradedRef.current;
@@ -543,7 +544,6 @@ export function BotBrowserPanel({
             if (redaction.redacted) {
               clearCachedFrame();
               setFrameRedacted(true);
-              setFrameRedactedReason(redaction.reason ?? null);
               streamFailSinceRef.current = null;
             } else {
               const parsedFrame = parseBrowserFrame(rawFrame);
@@ -563,7 +563,6 @@ export function BotBrowserPanel({
             if (classified.sensitiveBlocked) {
               clearCachedFrame();
               setFrameRedacted(true);
-              setFrameRedactedReason(classified.message || null);
               streamFailSinceRef.current = null;
             } else if (classified.unavailable) {
               clearCachedFrame();
@@ -669,7 +668,6 @@ export function BotBrowserPanel({
   const streamLease = isHolder ? ownedLease?.lease : undefined;
   const streamUrlInfo = classifyPageUrl(activeTabOf(view)?.url);
   const streamAllowed = Boolean(!nativeReady && view?.available && view?.canStreamInteract &&
-    !streamUrlInfo.isGoogleSignInRejected &&
     (!(view.sensitive || streamUrlInfo.isKnownSensitiveUrl) || streamLease) &&
     !(streamBlocked && streamBlocked.sessionId === streamSession && streamBlocked.pageId === streamPage &&
       streamBlocked.lease === streamLease && streamBlocked.revision === view.revision));
@@ -695,7 +693,6 @@ export function BotBrowserPanel({
         setStreamDegraded(false);
       } else if (detail.sensitiveBlocked) {
         setFrameRedacted(true);
-        setFrameRedactedReason(null);
         setStreamBlocked({
           pageId: streamPage, sessionId: streamSession, lease: streamLease, revision: viewRef.current?.revision ?? -1,
         });
@@ -748,7 +745,6 @@ export function BotBrowserPanel({
     streamDegradedRef.current = false;
     setStreamDegraded(false);
     setFrameRedacted(false);
-    setFrameRedactedReason(null);
     streamFailSinceRef.current = null;
     useLegacyFramesRef.current = false;
     setStreamBlocked(null);
@@ -973,6 +969,7 @@ export function BotBrowserPanel({
         const nextView = parseBrowserView(res);
         if (nextView) applyViewState(nextView);
         schedulePoll(100);
+        return nextView;
       } catch (err) {
         if (epoch !== epochRef.current) return;
         const classified = classifyBrowserError(err);
@@ -990,18 +987,44 @@ export function BotBrowserPanel({
     [botId, connected, clearCachedFrame, clearLocalLease, applyViewState, schedulePoll, setPendingAction, t],
   );
 
+  useEffect(() => {
+    const requestedDestination = destination ?? failedDestination;
+    if (!requestedDestination || consumedDestinationRef.current === requestedDestination || !connected || !pageVisible ||
+        !view?.available || viewRef.current !== view || pendingAction !== null ||
+        (view.phase !== 'bot' && !(view.phase === 'human' && isHolder))) return;
+    consumedDestinationRef.current = requestedDestination;
+    onDestinationConsumed?.();
+    const epoch = epochRef.current;
+    const target = view.tabs.find(tab => tab.id === requestedDestination.pageId) ??
+      view.tabs.find(tab => tab.url === requestedDestination.url);
+    void (async () => {
+      let completed = false;
+      if (!target) {
+        completed = Boolean(await runPageAction('tab', 'open', { pageId: null, url: requestedDestination.url }));
+      } else {
+        const selected = view.pageId === target.id ? view : await runPageAction('tab', 'select', { pageId: target.id });
+        if (epoch !== epochRef.current) return;
+        if (selected?.pageId === target.id) {
+          completed = target.url === requestedDestination.url ||
+            Boolean(await runPageAction('navigating', 'navigate', { pageId: target.id, url: requestedDestination.url }));
+        }
+      }
+      if (epoch === epochRef.current) setFailedDestination(completed ? null : requestedDestination);
+    })();
+  }, [destination, failedDestination, connected, pageVisible, view, pendingAction, isHolder, onDestinationConsumed, runPageAction]);
+
   const currentTab = useMemo(() => activeTabOf(view), [view]);
   const urlMeta = useMemo(() => classifyPageUrl(currentTab?.url), [currentTab?.url]);
   const isSensitive = Boolean(view?.sensitive || urlMeta.isKnownSensitiveUrl);
+  const frameRestricted = frameRedacted || (isSensitive && !isHolder);
   const zoomForSignIn = resolvedMode === 'fullscreen' && isMobileViewport && isHolder && urlMeta.isGoogleAuth;
   const zoom = preferredZoom ?? (zoomForSignIn ? 2 : 1);
 
-  const liveFrame = useMemo(
-    () => (isFrameUsableForView(frame, view) ? frame : null),
-    [frame, view],
-  );
+  const canShowStream = !nativeReady && connected && pageVisible && view?.available &&
+    view.canStreamInteract && !streamDegraded && !frameRestricted;
+  const liveFrame = canShowStream && isFrameUsableForView(frame, view) ? frame : null;
 
-  const canSendInput = !nativeReady && !urlMeta.isGoogleSignInRejected && canAcceptManualInput({
+  const canSendInput = canAcceptManualInput({
     connected,
     visible: pageVisible,
     view,
@@ -1020,7 +1043,6 @@ export function BotBrowserPanel({
     const currentFrame = isFrameUsableForView(frameRef.current, currentView) ? frameRef.current : null;
     if (
       !currentView?.pageId || !currentLease ||
-      classifyPageUrl(activeTabOf(currentView)?.url).isGoogleSignInRejected ||
       !canAcceptManualInput({
         connected: context.connected,
         visible: context.pageVisible && readDocumentVisible(),
@@ -1297,6 +1319,10 @@ export function BotBrowserPanel({
   const signInTakeover = isAvailableInteractive && pageVisible && Boolean(view?.pageId) &&
     isSensitive && urlMeta.isGoogleAuth && !urlMeta.isGoogleSignInRejected && !isHolder &&
     !view?.fallbackToSystemBrowser && !frameRedacted;
+  const showExternalRecovery = connected && pageVisible && !externalConfirmOpen &&
+    (urlMeta.isGoogleSignInRejected || (frameRestricted && view?.fallbackToSystemBrowser));
+  const canRetry = connected && !nativeReady &&
+    (view ? !view.available || !view.canStreamInteract || streamDegraded : !loadingStatus);
 
   // Concise, honest status pill label & semantic tone.
   const statusInfo = (() => {
@@ -1331,6 +1357,12 @@ export function BotBrowserPanel({
     }
     if (view.attentionRequested) {
       return { tone: 'warn', text: t('Bot 请求你接管', 'Bot requests takeover'), spinning: false };
+    }
+    if (!view.pageId && view.tabs.length === 0) {
+      return { tone: 'muted', text: t('没有打开的标签页', 'No open tabs'), spinning: false };
+    }
+    if (canShowStream && view.pageId && !liveFrame) {
+      return { tone: 'muted', text: t('正在获取画面…', 'Waiting for live view…'), spinning: true };
     }
     return { tone: 'bot', text: t('Bot 协助中', 'Bot active'), spinning: false };
   })();
@@ -1420,6 +1452,23 @@ export function BotBrowserPanel({
     );
   })();
 
+  const externalRecoveryButton = showExternalRecovery ? (
+    <button
+      type="button"
+      className="bb-btn bb-btn--primary bb-btn--sm"
+      disabled={externalGuideOpening}
+      onClick={() => {
+        if (urlMeta.isGoogleSignInRejected) void handleOpenExternalGuide('google-sign-in-rejected');
+        else handleRequestExternalGuide();
+      }}
+    >
+      <ExternalLink size={14} aria-hidden="true" />
+      <span>{externalGuideOpening
+        ? t('正在打开…', 'Opening…')
+        : t('在系统浏览器中继续', 'Continue in system browser')}</span>
+    </button>
+  ) : null;
+
   return (
     <section
       ref={panelRef}
@@ -1450,17 +1499,34 @@ export function BotBrowserPanel({
               )}
               <span className="bb-status-text">{statusInfo.text}</span>
             </span>
-            {isSensitive && isHolder ? (
-              <span className="bb-shield-chip" title={t('敏感页保护中，Bot 观察与截图已阻断', 'Privacy shield active: Bot observation and screenshots are blocked')}>
-                <Shield size={14} aria-hidden="true" />
-                <span>{t('隐私保护', 'Private')}</span>
-              </span>
-            ) : null}
           </div>
         </div>
 
         <div className="bb-header-right">
-          {!signInTakeover ? primaryActionButton : null}
+          {primaryActionButton}
+          {failedDestination ? (
+            <button
+              type="button"
+              className="bb-btn bb-btn--secondary"
+              disabled={!connected || !pageVisible || !view?.available || pendingAction !== null || (view?.phase !== 'bot' && !isHolder)}
+              onClick={() => {
+                setFailedDestination({ ...failedDestination });
+              }}
+            >
+              {t('重试打开步骤页面', 'Retry opening step page')}
+            </button>
+          ) : null}
+          {canRetry ? (
+            <button
+              type="button"
+              className="bb-icon-btn"
+              aria-label={t('重新检查浏览器', 'Retry browser connection')}
+              title={t('重新检查浏览器', 'Retry browser connection')}
+              onClick={handleRetry}
+            >
+              <RefreshCw size={16} aria-hidden="true" />
+            </button>
+          ) : null}
           <details
             ref={moreRef}
             className="bb-more"
@@ -1499,7 +1565,7 @@ export function BotBrowserPanel({
                   ) : null}
                 </div>
               ) : null}
-              {isHolder && view?.phase === 'human' ? (
+              {(isHolder && view?.phase === 'human') || !connected || canRetry ? (
                 <button
                   type="button"
                   className="bb-btn bb-btn--ghost"
@@ -1560,7 +1626,7 @@ export function BotBrowserPanel({
       {/* Tabs + address bar (only when browser is available) */}
       {view?.available ? (
         <div className="bb-chrome">
-          {view.tabs.length > 0 || isHolder ? (
+          {view.tabs.length > 0 || isHolder || (isAvailableInteractive && !view.pageId && !isOtherHolder) ? (
             <div className="bb-tabs-row">
               <div className="bb-tabs" role="tablist" aria-label={t('浏览器标签页', 'Browser tabs')}>
                 {view.tabs.map((tab) => {
@@ -1657,7 +1723,7 @@ export function BotBrowserPanel({
               />
             </form>
 
-            {liveFrame && !nativeReady ? (
+            {liveFrame ? (
               <div className="bb-zoom-group" role="group" aria-label={t('画面缩放', 'Viewport zoom')}>
                 <button
                   type="button"
@@ -1712,12 +1778,15 @@ export function BotBrowserPanel({
             <AlertTriangle size={15} className="bb-banner-icon" aria-hidden="true" />
             <div className="bb-banner-body">
               <div className="bb-banner-title">
-                {t('刚才接管时连接中断，Bot 仍处于停手状态，不会擅自继续操作。', 'Connection dropped during takeover. The Bot remains paused until you decide.')}
+                {urlMeta.isGoogleSignInRejected
+                  ? t('Google 拒绝了本次登录。', 'Google blocked this sign-in.')
+                  : t('刚才接管时连接中断，Bot 仍处于停手状态，不会擅自继续操作。', 'Connection dropped during takeover. The Bot remains paused until you decide.')}
               </div>
               {currentTab?.url && !isSensitive ? (
                 <div className="bb-banner-sub">{urlMeta.displayHost || currentTab.url}</div>
               ) : null}
               <div className="bb-banner-actions">
+                {externalRecoveryButton}
                 <button
                   type="button"
                   className="bb-btn bb-btn--warn bb-btn--sm"
@@ -1743,6 +1812,17 @@ export function BotBrowserPanel({
                   {t('中止任务', 'Cancel task')}
                 </button>
               </div>
+            </div>
+          </div>
+        ) : null}
+
+        {externalRecoveryButton && !isHeld ? (
+          <div className="bb-banner bb-banner--notice" role="status">
+            <div className="bb-banner-body">
+              {urlMeta.isGoogleSignInRejected ? (
+                <div className="bb-banner-title">{t('Google 拒绝了本次登录。', 'Google blocked this sign-in.')}</div>
+              ) : null}
+              <div className="bb-banner-actions">{externalRecoveryButton}</div>
             </div>
           </div>
         ) : null}
@@ -1836,33 +1916,14 @@ export function BotBrowserPanel({
       </div>
 
       <div className="bb-viewport" ref={setNativeStage} aria-hidden={nativeReady || undefined}>
-        {!nativeReady ? (
+        {liveFrame ? (
           <BotBrowserViewport
-            connected={connected}
-            visible={pageVisible}
-            view={view}
             liveFrame={liveFrame}
-            loadingStatus={loadingStatus}
-            streamDegraded={streamDegraded}
-            frameRedacted={frameRedacted}
-            frameRedactedReason={frameRedactedReason}
-            isHolder={isHolder}
+            pageTitle={currentTab?.title}
             canSendInput={canSendInput}
-            isSensitive={isSensitive}
-            externalGuideOpening={externalGuideOpening}
-            signInTakeoverAction={signInTakeover ? primaryActionButton : null}
             zoom={zoom}
-            hostLabel={hostLabel}
             onZoomChange={setPreferredZoom}
             onInput={handleInput}
-            onRetry={handleRetry}
-            onOpenTab={
-              !isOtherHolder && connected
-                ? () => void runPageAction('tab', 'open', { pageId: null })
-                : undefined
-            }
-            onRequestExternalGuide={handleRequestExternalGuide}
-            onContinueAfterGoogleSignInRejection={() => void handleOpenExternalGuide('google-sign-in-rejected')}
             onExitStageFocus={() => closeBtnRef.current?.focus({ preventScroll: true })}
           />
         ) : null}

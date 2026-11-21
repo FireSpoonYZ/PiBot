@@ -66,6 +66,7 @@ import type {
 import type { ShowerCall } from './ShowerPreview';
 import { BotScreenPanel } from './BotScreenPanel';
 import BotBrowserPanel from './bot-browser/BotBrowserPanel';
+import type { BrowserDestination } from './bot-browser/protocol';
 import { createAndroidNativePresenter } from './bot-browser/androidNativePresenter';
 import { createBrowserFrameSubscriber } from './bot-browser/relayStream';
 import { GoogleSetupWizard } from './google/GoogleSetupWizard';
@@ -5932,6 +5933,16 @@ ${newer}` : draftSnapshot;
     saveCurrentChatAnchor();
     nav.push({ screen: 'bot-browser', botKey: activeBot.key });
   }, [activeBot, nav, saveCurrentChatAnchor]);
+  const [browserDestination, setBrowserDestination] = useState<{ scope: string; value: BrowserDestination } | null>(null);
+  const browserDestinationScope = `${showerPreviewKey}:${browserRelayIdentity?.generation ?? '-'}`;
+  const openBrowserDestination = useCallback((value: BrowserDestination) => {
+    if (!activeBot) return;
+    setBrowserDestination({ scope: browserDestinationScope, value });
+    openBotBrowser();
+  }, [activeBot, browserDestinationScope, openBotBrowser]);
+  useEffect(() => {
+    setBrowserDestination(current => screen === 'bot-browser' && current?.scope === browserDestinationScope ? current : null);
+  }, [screen, browserDestinationScope]);
   const mobileGoogleContext = useMemo<GoogleChatCardContext | undefined>(() => {
     if (!activeBot) return undefined;
     const brokerApi = remoteClientRef.current?.api ?? null;
@@ -5949,6 +5960,7 @@ ${newer}` : draftSnapshot;
       callGoogleSetup,
       callBrowser,
       onOpenBrowser: openBotBrowser,
+      onOpenBrowserDestination: openBrowserDestination,
       onOpenCapabilities: () => {
         if (remoteConnected && remoteIdentity && (activeBot.hostKind !== 'local' || localHost?.deviceId)) {
           openModelPickerSheet('capabilities');
@@ -5967,6 +5979,7 @@ ${newer}` : draftSnapshot;
     callGoogleSetup,
     callBrowser,
     openBotBrowser,
+    openBrowserDestination,
     remoteConnected,
     localHost?.deviceId,
     openInAppCenterAdmin,
@@ -6830,6 +6843,7 @@ ${newer}` : draftSnapshot;
             autoStart
             callGoogleSetup={callGoogleSetup}
             onOpenBrowser={openBotBrowser}
+            onOpenBrowserDestination={openBrowserDestination}
             onOpenCenterAdmin={() => openInAppCenterAdmin('google')}
             onClose={() => { popScreen(); }}
           />
@@ -6843,10 +6857,11 @@ ${newer}` : draftSnapshot;
             botId={activeBot.botId}
             deviceId={activeBot.deviceId}
             botName={activeBot.role}
-            hostLabel={activeBot.hostKind === 'remote' ? `${t('远程', 'Remote')} · ${activeBot.hostLabel}` : activeBot.hostLabel}
             mode="fullscreen"
             connected={botPanelConnected}
             request={callBrowser}
+            destination={browserDestination?.scope === browserDestinationScope ? browserDestination.value : undefined}
+            onDestinationConsumed={() => setBrowserDestination(null)}
             subscribeFrames={subscribeBrowserFrames}
             nativePresenter={androidNativePresenter}
             onSwitchToExternalGuide={async (url, reason, rejection) => {

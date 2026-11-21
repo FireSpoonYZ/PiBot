@@ -223,7 +223,8 @@ export function deriveGoogleSetupAttention(
     Boolean(blocker) ||
     Boolean(personStep) ||
     OPERATOR_ACTION_CARDS.has(card) ||
-    (mode === 'guide-browser' && Boolean(step));
+    ((mode === 'guide-browser' || mode === 'guide-here') && Boolean(step)) ||
+    (mode === 'do-it-for-me' && step === 'account');
 
   return { runId, stepKey, needsOperatorAction };
 }

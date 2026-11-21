@@ -90,6 +90,7 @@ import {
   type VaultUnlockSubmitPayload,
 } from '../../../web/src/ToolPresentation';
 import BotBrowserPanel from '../../../web/src/bot-browser/BotBrowserPanel';
+import type { BrowserDestination } from '../../../web/src/bot-browser/protocol';
 import { desktopNativeBrowser, type DesktopNativeBrowser } from './nativeBrowser';
 import { createBrowserFrameSubscriber } from '../../../web/src/bot-browser/relayStream';
 import { GoogleSetupWizard } from '../../../web/src/google/GoogleSetupWizard';
@@ -2016,6 +2017,15 @@ function PrimaryChatPane({
   const [recOutcome, setRecOutcome] = useState<{ action: string; found: boolean; recordId: string | null; recordState: string | null } | null>(null);
   const lockedRef = useRef(false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab | null>(null);
+  const [browserDestination, setBrowserDestination] = useState<{ scope: string; value: BrowserDestination } | null>(null);
+  const browserDestinationScope = `${sess}:${bot.deviceId}:${bot.botId}`;
+  const openBrowserDestination = useCallback((value: BrowserDestination) => {
+    setBrowserDestination({ scope: browserDestinationScope, value });
+    setInspectorTab('browser');
+  }, [browserDestinationScope]);
+  useEffect(() => {
+    setBrowserDestination(current => inspectorTab === 'browser' && current?.scope === browserDestinationScope ? current : null);
+  }, [inspectorTab, browserDestinationScope]);
   const [chatSearch, setChatSearch] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -2222,6 +2232,7 @@ function PrimaryChatPane({
       callGoogleSetup,
       callBrowser,
       onOpenBrowser: () => setInspectorTab('browser'),
+      onOpenBrowserDestination: openBrowserDestination,
       onOpenCapabilities: () => setInspectorTab('capabilities'),
       onOpenCenterAdmin: onOpenCenterAdmin ? () => onOpenCenterAdmin('google') : undefined,
       onSelectGoogleAccount: selectGoogleAccount,
@@ -2237,6 +2248,7 @@ function PrimaryChatPane({
       online,
       callGoogleSetup,
       callBrowser,
+      openBrowserDestination,
       onOpenCenterAdmin,
       selectGoogleAccount,
     ],
@@ -4667,6 +4679,7 @@ function PrimaryChatPane({
                   isLocalAndroid={devicePlatform?.toLowerCase() === 'android'}
                   autoStart callGoogleSetup={callGoogleSetup}
                   onOpenBrowser={() => setInspectorTab('browser')}
+                  onOpenBrowserDestination={openBrowserDestination}
                   onOpenCenterAdmin={() => onOpenCenterAdmin?.('google')}
                   onClose={() => setInspectorTab(null)}
                 />
@@ -4678,7 +4691,6 @@ function PrimaryChatPane({
 
       <Dialog.Root open={browserOpen} onOpenChange={(open) => { if (!open) setInspectorTab(null); }}>
         <Dialog.Portal>
-          <Dialog.Overlay className="desktop-dialog-overlay" />
           <Dialog.Content
             className="bot-browser-dialog"
             aria-describedby={undefined}
@@ -4699,10 +4711,11 @@ function PrimaryChatPane({
               botId={bot.botId}
               deviceId={bot.deviceId}
               botName={bot.role}
-              hostLabel={deviceName}
               mode="sidebar"
               connected={online && pageActive}
               request={callBrowser}
+              destination={browserDestination?.scope === browserDestinationScope ? browserDestination.value : undefined}
+              onDestinationConsumed={() => setBrowserDestination(null)}
               subscribeFrames={subscribeBrowserFrames}
               nativePresenter={nativeBrowser}
               browserPlacement={nativeBrowser && localBrowser !== nativeBrowser && browserConnectionKind === 'relay' ? {

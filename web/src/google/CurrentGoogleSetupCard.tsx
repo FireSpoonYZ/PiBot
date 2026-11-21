@@ -354,6 +354,7 @@ export function CurrentGoogleSetupCard({
           externalSetup={currentLiveSetup}
           callGoogleSetup={callGoogleSetup}
           onOpenBrowser={googleContext.onOpenBrowser}
+          onOpenBrowserDestination={googleContext.onOpenBrowserDestination}
           onOpenCapabilities={googleContext.onOpenCapabilities}
           onOpenCenterAdmin={googleContext.onOpenCenterAdmin}
           onSetupChange={handleWizardSetupChange}

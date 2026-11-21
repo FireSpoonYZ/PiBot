@@ -339,6 +339,21 @@ test('dock collapse persists across same-step polling, revision bumps, and card 
   assert.equal(dock.scopeKey, 'scope-b');
 });
 
+test('the next step in embedded guidance expands the dock even without a blocker', () => {
+  const signedIn = {
+    id: 'run-1', revision: 4, state: 'running', mode: 'guide-here',
+    step: 'account', card: { card: 'progress', copy: 0 },
+  };
+  const account = deriveGoogleSetupAttention(signedIn, null, 'run-1');
+  const collapsed = setGoogleSetupDockExpanded(reconcileGoogleSetupDockState(null, 'scope-a', account), false);
+  const refreshed = deriveGoogleSetupAttention({ ...signedIn, revision: 5 }, null, 'run-1');
+  assert.equal(reconcileGoogleSetupDockState(collapsed, 'scope-a', refreshed).expanded, false);
+
+  const project = deriveGoogleSetupAttention({ ...signedIn, revision: 6, step: 'project' }, null, 'run-1');
+  assert.equal(project.needsOperatorAction, true);
+  assert.equal(reconcileGoogleSetupDockState(collapsed, 'scope-a', project).expanded, true);
+});
+
 test('response ordering, visibility gating, and status refresh deduplication handle out-of-order and expired data', () => {
   let order = { latestRevision: null, latestSeq: 0 };
 
