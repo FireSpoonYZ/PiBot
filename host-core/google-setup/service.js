@@ -441,6 +441,7 @@ export function createGoogleSetupService(options = {}) {
           pageId,
           step,
           reason,
+          mode: run.mode,
           blockObservation: true,
           blockActions: true,
         });
@@ -481,7 +482,7 @@ export function createGoogleSetupService(options = {}) {
     return lockMeta;
   }
 
-  async function notifyBrowserUnlock(run, step, reason) {
+  async function notifyBrowserUnlock(run, step, reason, confirmingOwner) {
     if (typeof browserUnlockHook !== 'function') return;
     try {
       await browserUnlockHook({
@@ -489,6 +490,8 @@ export function createGoogleSetupService(options = {}) {
         pageId: run.browserPageId,
         step,
         reason,
+        ...(confirmingOwner && step === 'branding' && run.mode === 'do-it-for-me' &&
+          run.steps.branding?.status === 'done' ? { confirmingOwner } : {}),
       });
     } catch {
       // Never block setup progress on advisory unlock notification.
@@ -1089,10 +1092,6 @@ export function createGoogleSetupService(options = {}) {
           }
         }
 
-        if (prevLock?.active && !next.browserLock?.active) {
-          await notifyBrowserUnlock(next, prevLock.step, 'owner-completed');
-        }
-
         next.updatedAt = ts;
         next.revision = current.revision + 1;
         const view = await commitRun(current, next, {
@@ -1101,6 +1100,10 @@ export function createGoogleSetupService(options = {}) {
           prepareBrowser: true,
           extraEvent: { type: 'owner-answer', card, values },
         });
+        if (prevLock?.active && prevLock.step !== next.browserLock?.step) {
+          const confirmsStep = card === 'step' && values[0] === 'done' && values[1] === prevLock.step;
+          await notifyBrowserUnlock(next, prevLock.step, 'owner-completed', confirmsStep ? authority : undefined);
+        }
         return { ...view, applied: true };
       }
 
@@ -1235,14 +1238,14 @@ export function createGoogleSetupService(options = {}) {
           };
         }
 
-        if (prevLock?.active && !next.browserLock?.active) {
-          await notifyBrowserUnlock(next, prevLock.step, 'owner-advanced');
-        }
         next.updatedAt = ts;
         next.revision = current.revision + 1;
         const view = await commitRun(current, next, { centerStatus, modeAvailability, prepareBrowser: true });
         const advancedStep = requestedStep && rawInput.runId === current.id && currentStep === requestedStep &&
           view.step !== requestedStep && view.steps[requestedStep]?.status === 'done' ? requestedStep : null;
+        if (prevLock?.active && prevLock.step !== next.browserLock?.step) {
+          await notifyBrowserUnlock(next, prevLock.step, 'owner-advanced', advancedStep === prevLock.step ? authority : undefined);
+        }
         return { ...view, applied: true, ...(advancedStep ? { advancedStep } : {}) };
       }
 

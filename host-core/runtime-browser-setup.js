@@ -47,13 +47,8 @@ const FORBIDDEN_AGENT_TOOL_NAMES = new Set([
 ]);
 
 const SYSTEM_BROWSER_LOCK_AUTHORITY = Object.freeze({
-  authenticated: true,
-  role: 'owner',
-  actor: 'owner',
-  trustedOwner: true,
-  clientId: 'system:google-setup',
-  holderLabel: 'Google setup sensitive step',
-  transport: 'internal',
+  actor: 'system',
+  trustedSystem: true,
 });
 
 function isPlainObject(value) {
@@ -393,8 +388,7 @@ export async function openRuntimeBrowserSetup({
           action: 'takeover',
           botId: rawInput.botId,
           ...(typeof rawInput.pageId === 'string' && rawInput.pageId ? { pageId: rawInput.pageId } : {}),
-          force: true,
-          holderLabel: 'Google setup sensitive step',
+          reason: rawInput.reason,
         },
         SYSTEM_BROWSER_LOCK_AUTHORITY,
       );
@@ -403,15 +397,16 @@ export async function openRuntimeBrowserSetup({
     return browserService.control(normalized, SYSTEM_BROWSER_LOCK_AUTHORITY);
   }
 
-  async function browserLockForSetup({ botId, pageId, step, reason }) {
-    // Engage fail-closed logical lock BEFORE touching the provider so even a
-    // failed/unavailable browser never leaves the sensitive step unprotected.
-    sensitiveLocksByBot.set(botId, {
-      pageId: pageId ?? null,
-      step: step ?? null,
-      reason: reason ?? 'sensitive-step',
-    });
-    let requiresSystemBrowser = reason === 'oauth-client-secret' || reason === 'google-auth';
+  async function browserLockForSetup({ botId, pageId, step, reason, mode }) {
+    if (mode === 'guide-browser' || reason === 'oauth-client-secret' || reason === 'google-auth') {
+      // The setup gate blocks Bot tools; the private flow never runs in this browser session.
+      return { locked: true, requiresSystemBrowser: true };
+    }
+
+    // Withhold embedded handoffs before probing the provider, including on failure.
+    const lock = { pageId, step, reason };
+    sensitiveLocksByBot.set(botId, lock);
+    let requiresSystemBrowser = false;
     try {
       const status = await browserService.control(
         { action: 'status', botId },
@@ -420,16 +415,11 @@ export async function openRuntimeBrowserSetup({
       if (!status?.available || !status?.canStreamInteract) {
         requiresSystemBrowser = true;
       } else if (status.sessionId || (Array.isArray(status.tabs) && status.tabs.length > 0)) {
-        await browserService.control(
-          {
-            action: 'takeover',
-            botId,
-            ...(typeof pageId === 'string' && pageId ? { pageId } : {}),
-            force: true,
-            holderLabel: 'Google setup sensitive step',
-          },
-          SYSTEM_BROWSER_LOCK_AUTHORITY,
-        );
+        const held = await internalBrowserControlForSetup({ action: 'takeover', botId, pageId, reason });
+        if (reason === 'policy-consent' && status.sessionId && status.pageId === pageId &&
+            held?.sessionId === status.sessionId && held.pageId === pageId) {
+          lock.sessionId = status.sessionId;
+        }
       }
     } catch {
       // Fail-closed: preserve sensitiveLocksByBot entry on any takeover/probe failure.
@@ -438,11 +428,14 @@ export async function openRuntimeBrowserSetup({
     return { locked: true, requiresSystemBrowser };
   }
 
-  async function browserUnlockForSetup({ botId, step, reason }) {
+  async function browserUnlockForSetup({ botId, step, reason, confirmingOwner }) {
     const existing = sensitiveLocksByBot.get(botId);
-    if (!existing) return;
-    if (reason === 'cancelled' || reason === 'setup-done' || !step || existing.step === step) {
-      sensitiveLocksByBot.delete(botId);
+    if (!existing || (step && existing.step !== step && reason !== 'cancelled' && reason !== 'setup-done')) return;
+    sensitiveLocksByBot.delete(botId);
+    if (confirmingOwner && step === 'branding' && existing.reason === 'policy-consent' && existing.sessionId) {
+      await browserService.completeSetupPolicyHandoff?.({
+        botId, pageId: existing.pageId, sessionId: existing.sessionId,
+      }, confirmingOwner);
     }
   }
 
