@@ -90,6 +90,7 @@ import {
   type VaultUnlockSubmitPayload,
 } from '../../../web/src/ToolPresentation';
 import BotBrowserPanel from '../../../web/src/bot-browser/BotBrowserPanel';
+import { createBrowserFrameSubscriber } from '../../../web/src/bot-browser/relayStream';
 import { GoogleSetupWizard } from '../../../web/src/google/GoogleSetupWizard';
 import { openExternalUrl } from '../../../web/src/center-admin/openExternalUrl';
 import {
@@ -2113,6 +2114,17 @@ function PrimaryChatPane({
     () => createBrowserControlRequest(api, identity, bot.botId),
     [api, identity, bot.botId],
   );
+  const browserProfileId = identity?.profileId;
+  const browserDeviceId = identity?.targetDeviceId;
+  const browserGeneration = identity?.generation;
+  const browserConnectionKind = identity?.kind;
+  const subscribeBrowserFrames = useMemo(() => {
+    if (browserConnectionKind !== 'relay' || !browserProfileId || !browserDeviceId || browserGeneration === undefined) return;
+    return createBrowserFrameSubscriber(api, {
+      kind: browserConnectionKind, profileId: browserProfileId,
+      targetDeviceId: browserDeviceId, generation: browserGeneration,
+    }, bot.botId);
+  }, [api, bot.botId, browserProfileId, browserDeviceId, browserGeneration, browserConnectionKind]);
   const callGoogleSetup = useMemo(
     () => createGoogleSetupControlRequest(api, identity, bot.botId),
     [api, identity, bot.botId],
@@ -4632,6 +4644,7 @@ function PrimaryChatPane({
                     mode="sidebar"
                     connected={online && pageActive}
                     request={callBrowser}
+                    subscribeFrames={subscribeBrowserFrames}
                     onSwitchToExternalGuide={(url) => {
                       void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
                       if (url) void openExternalUrl(url).catch(() => {});

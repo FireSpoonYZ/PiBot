@@ -143,7 +143,7 @@ const CONTROL_ACTION_FIELDS = Object.freeze({
   reload: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'ignoreCache'],
   select: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision'],
   closeTab: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision'],
-  frame: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'sinceSeq', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes'],
+  frame: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'sinceSeq', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes', 'stream'],
   takeover: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'force', 'preempt', 'resume', 'holderLabel', 'reason', 'sensitive'],
   input: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'frameSeq', 'event'],
   handback: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'reason'],
@@ -598,6 +598,12 @@ export function normalizeControlInput(input, maxFrameBase64Bytes = BROWSER_MAX_F
   }
   if (action === 'frame') {
     normalized.frameLimits = normalizeFrameLimits(input, maxFrameBase64Bytes);
+    if (input.stream !== undefined) {
+      if (input.stream !== true || !normalized.pageId || !normalized.sessionId) {
+        throw browserError('INVALID_ARGUMENT', 'stream frames require pageId and sessionId');
+      }
+      normalized.stream = true;
+    }
   }
   if (action === 'input') {
     if (!normalized.pageId) throw browserError('INVALID_ARGUMENT', 'input requires pageId');

@@ -13,6 +13,14 @@ import {
   projectLiveSnapshotForPeer,
 } from './remote-live-protocol.js';
 import { CONTROL_ERROR_CODES } from './remote-control-protocol.js';
+import { createHash } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
+import { relayControlCaller } from './host-control.js';
+import { encodeBrowserStreamPacket } from './bot-browser/stream-packet.js';
+import { createBrowserScreencastFrameCredit } from './bot-browser/vendor/orca/browser-screencast-frame-credit.js';
+
+const BROWSER_FRAME_INTERVAL_MS = 100;
+const BROWSER_FRAME_REFRESH_MS = 2000;
 
 const STATE_KEYS = [
   'history',
@@ -54,7 +62,9 @@ function fixedCode(err) {
  * 的订阅与跨 reset 代次的未收尾记录）；inflight 跨代次跟踪所有观察 promise，保证
  * reset/close 不会遗忘。
  */
-export function createHostLiveReceiver({ deviceId, observe, send, liveExtensions = NO_LIVE_EXTENSIONS }) {
+export function createHostLiveReceiver({
+  deviceId, observe, prepareBrowserFrames, sendBrowserFrame, send, liveExtensions = NO_LIVE_EXTENSIONS,
+}) {
   let generation = 0;
   let closed = false;
   let negotiatedExtensions = normalizeLiveExtensions(liveExtensions);
@@ -234,14 +244,72 @@ export function createHostLiveReceiver({ deviceId, observe, send, liveExtensions
     })();
     // 先入 inflight/绑定 rec.promise，再挂 settlement handler 释放 slot，避免
     // 同步失败先 releaseSlot 再 add 已结束 promise 的竞态。
+    track(rec, promise);
+  }
+
+  function track(rec, promise) {
     rec.promise = promise;
     inflight.add(promise);
     promise.finally(() => releaseSlot(rec)).catch(() => {});
   }
 
+  function runBrowserSubscription(rec, frame) {
+    const controller = new AbortController();
+    rec.controller = controller;
+    const { signal } = controller;
+    // The capture cadence controls when resumed credit can be used.
+    const credit = createBrowserScreencastFrameCredit({ onCreditAvailable() {} });
+    rec.credit = credit;
+    track(rec, (async () => {
+      try {
+        const capture = await prepareBrowserFrames(deviceId, frame.target, {
+          signal, caller: relayControlCaller(frame.fromDeviceId),
+        });
+        let lastDigest;
+        let lastRevision;
+        let lastSentAt = 0;
+        while (canSend(rec)) {
+          let interval = BROWSER_FRAME_INTERVAL_MS;
+          if (credit.canSend()) {
+            const captured = await capture();
+            if (!canSend(rec)) return;
+            if (captured?.pageId !== frame.target.pageId) {
+              finish(rec, { reason: 'error', code: 'BROWSER_STALE_PAGE' });
+              return;
+            }
+            const digest = createHash('sha256').update(captured.data).digest('base64');
+            if (captured.revision !== lastRevision || digest !== lastDigest ||
+                Date.now() - lastSentAt >= BROWSER_FRAME_REFRESH_MS) {
+              const bytes = encodeBrowserStreamPacket(rec.routeId, captured);
+              if (!bytes) {
+                finish(rec, { reason: 'error', code: 'BAD_FRAME' });
+                return;
+              }
+              if (sendBrowserFrame(bytes)) {
+                credit.recordSent(captured.seq);
+                rec.prevSequence = captured.seq;
+                lastDigest = digest;
+                lastRevision = captured.revision;
+                lastSentAt = Date.now();
+              } else {
+                interval = 500;
+              }
+            }
+          }
+          await delay(interval, undefined, { signal });
+        }
+      } catch (err) {
+        if (!signal.aborted) finish(rec, { reason: 'error', code: fixedCode(err) });
+      } finally {
+        credit.dispose();
+      }
+    })());
+  }
+
   function handleRequest(frame) {
     if (closed) return;
-    if (!observe) {
+    const isBrowser = frame.target.kind === 'browser';
+    if (isBrowser ? (!negotiatedExtensions.browserScreencast || !prepareBrowserFrames || !sendBrowserFrame) : !observe) {
       send({ type: 'live-end', routeId: frame.routeId, reason: 'error', code: 'CONTROL_UNAVAILABLE' });
       return;
     }
@@ -265,7 +333,8 @@ export function createHostLiveReceiver({ deviceId, observe, send, liveExtensions
       state: null,
     };
     active.set(rec.routeId, rec);
-    runSubscription(rec, frame.target);
+    if (isBrowser) runBrowserSubscription(rec, frame);
+    else runSubscription(rec, frame.target);
   }
 
   function handleCancel(frame) {
@@ -280,6 +349,12 @@ export function createHostLiveReceiver({ deviceId, observe, send, liveExtensions
     if (!frame || typeof frame !== 'object' || typeof frame.type !== 'string') return;
     if (frame.type === 'live-request') handleRequest(frame);
     else if (frame.type === 'live-cancel') handleCancel(frame);
+    else if (frame.type === 'live-ack') {
+      const rec = active.get(frame.routeId);
+      if (rec?.credit && canSend(rec) && rec.prevSequence !== null && frame.seq <= rec.prevSequence) {
+        rec.credit.acknowledge(frame.seq);
+      }
+    }
   }
 
   // 提升代次并 abort 全部；不 clear active，未收尾旧代记录继续计容量，

@@ -60,7 +60,7 @@ const WIRE_BROWSER_FIELDS = Object.freeze({
   reload: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'ignoreCache']),
   select: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
   closeTab: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
-  frame: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes']),
+  frame: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes', 'stream']),
   takeover: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'force', 'preempt', 'resume', 'holderLabel']),
   input: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'frameSeq', 'event']),
   handback: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),

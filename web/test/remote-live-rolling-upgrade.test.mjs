@@ -508,6 +508,9 @@ test('new Host -> old strict Relay -> new Client negotiates legacy downgrade wit
     await waitForOnline(link);
 
     client = await openRemoteControl({ deviceId: clientDeviceId, url: legacyRelay.url, token: clientToken });
+    assert.throws(() => client.live(hostDeviceId, {
+      kind: 'browser', botId: BOT_ID, pageId: 'page-1', sessionId: 'session-1',
+    }), { code: 'CONTROL_UNAVAILABLE' });
     const stream = client.live(hostDeviceId, { kind: 'primary', botId: BOT_ID });
     const first = (await stream.next()).value;
 
@@ -660,6 +663,9 @@ test('old Host -> new Relay -> new Client delivers durableWaits: undefined and r
 
     client = await openRemoteControl({ deviceId: clientDeviceId, url: relay.url, token: clientToken });
     const stream = client.live(oldHostId, { kind: 'primary', botId: BOT_ID });
+    await assert.rejects(client.live(oldHostId, {
+      kind: 'browser', botId: BOT_ID, pageId: 'page-1', sessionId: 'session-1',
+    }).next(), { code: 'CONTROL_UNAVAILABLE' });
     const req = await oldHost.nextFrame();
     assert.equal(req.type, 'live-request');
 

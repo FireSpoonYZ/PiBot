@@ -50,6 +50,7 @@ import {
   projectLiveSnapshotForPeer
 } from './remote-live-protocol.js';
 import { controlMethodTimeoutMs, controlMethodVersion, normalizeControlCall } from './remote-control-protocol.js';
+import { addressBrowserStreamPacket, BROWSER_STREAM_HIGH_WATER_BYTES } from './bot-browser/stream-packet.js';
 
 const DEFAULT_PORT = 8790;
 const DEFAULT_LISTEN_HOST = '127.0.0.1';
@@ -741,6 +742,9 @@ export async function openRelayServer(options = {}) {
       const code = !peer || !peerUsable(peer) ? 'OFFLINE' : 'CONTROL_UNAVAILABLE';
       return sendLiveEndFixed(conn, frame.watchId, frame.targetDeviceId, code);
     }
+    if (frame.target.kind === 'browser' && !peer.liveExtensions.browserScreencast) {
+      return sendLiveEndFixed(conn, frame.watchId, frame.targetDeviceId, 'CONTROL_UNAVAILABLE');
+    }
     if (
       liveRoutes.size() >= LIVE_MAX_SUBSCRIPTIONS ||
       liveRoutes.countClient(conn) >= LIVE_MAX_CLIENT_SUBSCRIPTIONS ||
@@ -780,8 +784,8 @@ export async function openRelayServer(options = {}) {
     }
   }
 
-  function routeLiveFrame(conn, frame) {
-    const record = liveRoutes.findByRoute(frame.routeId);
+  function receiveLiveRoute(conn, routeId) {
+    const record = liveRoutes.findByRoute(routeId);
     // Only the exact host conn a watch was opened against may feed it; stale,
     // late, duplicate or wrong-host frames are ignored.
     if (!record || record.host !== conn) return;
@@ -795,6 +799,43 @@ export async function openRelayServer(options = {}) {
       }
       return;
     }
+    return record;
+  }
+
+  function routeBrowserFrame(conn, packet) {
+    const record = receiveLiveRoute(conn, packet.streamId);
+    if (!record) return;
+    if (record.target.kind !== 'browser' || (record.seq !== null && packet.seq <= record.seq)) {
+      return closeWith(conn, RELAY_CLOSE.BAD_FRAME);
+    }
+    const ws = record.client.ws;
+    if (ws.readyState !== WS_OPEN || ws.bufferedAmount + packet.bytes.length > BROWSER_STREAM_HIGH_WATER_BYTES) {
+      return; // Missing credit ACK lets the Host pace or probe this viewer.
+    }
+    try {
+      ws.send(addressBrowserStreamPacket(packet, record.watchId), { binary: true }, (err) => {
+        if (err) ws.terminate();
+      });
+      record.seq = packet.seq;
+      record.opening = false;
+      delete record.openingDeadline;
+    } catch {
+      ws.terminate();
+    }
+  }
+
+  function routeLiveAck(conn, frame) {
+    const record = liveRoutes.findByClientWatch(conn, frame.watchId);
+    if (!record || record.target.kind !== 'browser' || record.seq === null ||
+        frame.seq > record.seq || frame.seq <= (record.ackedSeq ?? 0) || !peerUsable(record.host)) return;
+    if (writeFrame(record.host.ws, {
+      type: 'live-ack', routeId: record.routeId, seq: frame.seq,
+    }, noop)) record.ackedSeq = frame.seq;
+  }
+
+  function routeLiveFrame(conn, frame) {
+    const record = receiveLiveRoute(conn, frame.routeId);
+    if (!record) return;
     const applied = liveRoutes.applyFrame(record, frame.frame, { liveExtensions: conn.liveExtensions });
     if (!applied.ok) {
       return closeWith(conn, RELAY_CLOSE.BAD_FRAME);
@@ -1005,7 +1046,8 @@ export async function openRelayServer(options = {}) {
       if (frame.type === 'control-call' || frame.type === 'control-cancel') {
         // v1 control: any authenticated client
       } else if (
-        (frame.type === 'live-open' || frame.type === 'live-cancel' || frame.type === 'devices-list' || frame.type === 'device-rename') &&
+        (frame.type === 'live-open' || frame.type === 'live-cancel' || frame.type === 'live-ack' ||
+          frame.type === 'devices-list' || frame.type === 'device-rename') &&
         conn.controlProtocol === 2
       ) {
         // v2 live client frames
@@ -1017,9 +1059,10 @@ export async function openRelayServer(options = {}) {
         return closeWith(conn, RELAY_CLOSE.REVOKED);
       }
     } else if (frame.type === 'control-call' || frame.type === 'control-cancel' ||
-               frame.type === 'live-open' || frame.type === 'live-cancel' || frame.type === 'devices-list' || frame.type === 'device-rename') {
+               frame.type === 'live-open' || frame.type === 'live-cancel' || frame.type === 'live-ack' ||
+               frame.type === 'devices-list' || frame.type === 'device-rename') {
       return closeWith(conn, RELAY_CLOSE.REVOKED);
-    } else if ((frame.type === 'live-frame' || frame.type === 'live-end') && conn.controlProtocol !== 2) {
+    } else if ((frame.type === 'live-frame' || frame.type === 'live-end' || frame.type === 'browser-frame') && conn.controlProtocol !== 2) {
       return closeWith(conn, RELAY_CLOSE.REVOKED);
     }
 
@@ -1068,12 +1111,16 @@ export async function openRelayServer(options = {}) {
         return routeLiveOpen(conn, frame);
       case 'live-cancel':
         return routeLiveCancel(conn, frame);
+      case 'live-ack':
+        return routeLiveAck(conn, frame);
       case 'devices-list':
         return routeDevicesList(conn, frame);
       case 'device-rename':
         return routeDeviceRename(conn, frame);
       case 'live-frame':
         return routeLiveFrame(conn, frame);
+      case 'browser-frame':
+        return routeBrowserFrame(conn, frame);
       case 'live-end':
         return routeLiveEnd(conn, frame);
       default:

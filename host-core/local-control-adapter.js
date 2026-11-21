@@ -173,7 +173,7 @@ function boundedFetch(state, options = {}) {
         const { done, value } = await reader.read();
         if (done) break;
         size += value.byteLength;
-        if (size > MAX_CONTROL_JSON_BYTES) {
+        if (size > (options.maxBytes ?? MAX_CONTROL_JSON_BYTES)) {
           state.tooLarge = true;
           await reader.cancel();
           throw new Error('host control response exceeds size limit');
@@ -376,6 +376,20 @@ function dispatchError(err, state, signal) {
   return controlError('INTERNAL', 'unconfirmed');
 }
 
+async function requireControlIdentity(control, expectedDeviceId, state, signal) {
+  let info;
+  try {
+    info = await control.getHostInfo({ signal });
+  } catch (err) {
+    throw preflightError(err, state, signal);
+  }
+  if (state.tooLarge) throw controlError('RESPONSE_TOO_LARGE', 'not-sent');
+  if (info === null || typeof info !== 'object' || info.deviceId !== expectedDeviceId) {
+    throw controlError('CONTROL_IDENTITY_MISMATCH', 'not-sent');
+  }
+  return info;
+}
+
 async function executeCall(config, expectedDeviceId, method, params, { signal, caller } = {}) {
   requireValidId(expectedDeviceId);
   // 先按协议表规范化（含方法参数形状/未知键/JSON 字节限制）再映射。
@@ -401,16 +415,7 @@ async function executeCall(config, expectedDeviceId, method, params, { signal, c
     controlTransport: caller?.transport ?? 'local',
   });
 
-  let info;
-  try {
-    info = await control.getHostInfo({ signal });
-  } catch (err) {
-    throw preflightError(err, state, signal);
-  }
-  if (state.tooLarge) throw controlError('RESPONSE_TOO_LARGE', 'not-sent');
-  if (info === null || typeof info !== 'object' || info.deviceId !== expectedDeviceId) {
-    throw controlError('CONTROL_IDENTITY_MISMATCH', 'not-sent');
-  }
+  const info = await requireControlIdentity(control, expectedDeviceId, state, signal);
   if (method === 'getHostInfo') return info;
 
   try {
@@ -420,6 +425,32 @@ async function executeCall(config, expectedDeviceId, method, params, { signal, c
   } catch (err) {
     throw dispatchError(err, state, signal);
   }
+}
+
+async function prepareBrowserFrames(config, expectedDeviceId, target, { signal, caller }) {
+  const { botId, pageId, sessionId, lease } = target;
+  const input = {
+    action: 'frame', botId, pageId, sessionId, stream: true,
+    ...(lease ? { lease } : {}),
+    format: 'jpeg',
+  };
+  const state = { tooLarge: false };
+  const control = createControlClient({
+    url: config.url,
+    token: config.token,
+    fetch: boundedFetch(state, { maxBytes: 1024 * 1024 }),
+    clientId: caller.clientId,
+    controlTransport: caller.transport,
+  });
+  await requireControlIdentity(control, expectedDeviceId, state, signal);
+  return async () => {
+    try {
+      const frameSignal = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
+      return await control.browserControl(input, { signal: frameSignal });
+    } catch (err) {
+      throw dispatchError(err, state, signal);
+    }
+  };
 }
 
 /**
@@ -436,22 +467,14 @@ async function* live(config, expectedDeviceId, target, { signal } = {}) {
   } catch {
     throw controlError('INVALID_ARGUMENT', 'not-sent');
   }
+  if (normTarget.kind === 'browser') throw controlError('CONTROL_UNAVAILABLE', 'not-sent');
   const state = { tooLarge: false };
   const control = createControlClient({
     url: config.url,
     token: config.token,
     fetch: boundedFetch(state, { sseOk: true }),
   });
-  let info;
-  try {
-    info = await control.getHostInfo({ signal });
-  } catch (err) {
-    throw preflightError(err, state, signal);
-  }
-  if (state.tooLarge) throw controlError('RESPONSE_TOO_LARGE', 'not-sent');
-  if (info === null || typeof info !== 'object' || info.deviceId !== expectedDeviceId) {
-    throw controlError('CONTROL_IDENTITY_MISMATCH', 'not-sent');
-  }
+  await requireControlIdentity(control, expectedDeviceId, state, signal);
   const iter =
     normTarget.kind === 'work'
       ? control.workLive(normTarget.botId, normTarget.scopeId, { signal })
@@ -607,6 +630,8 @@ export function createLocalControlAdapter(options) {
   };
   execute.live = (expectedDeviceId, target, liveOptions = {}) =>
     live(config, expectedDeviceId, target, liveOptions);
+  execute.prepareBrowserFrames = (expectedDeviceId, target, streamOptions) =>
+    prepareBrowserFrames(config, expectedDeviceId, target, streamOptions);
   execute.getHostInfo = (callOptions = {}) => fetchHostInfo(config, callOptions);
   execute.getSettings = (expectedDeviceId, callOptions = {}) =>
     getSettings(config, expectedDeviceId, callOptions);

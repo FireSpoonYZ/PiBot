@@ -2570,6 +2570,8 @@ export interface BrowserControlInput {
   botId: string;
   scopeId?: string;
   pageId?: string;
+  sessionId?: string;
+  stream?: true;
   lease?: string;
   revision?: number;
   frameSeq?: number;
@@ -2831,7 +2833,21 @@ export interface DevicesDirectoryPage {
 
 export type LiveTarget =
   | { kind: 'primary'; botId: string }
-  | { kind: 'work'; botId: string; scopeId: string };
+  | { kind: 'work'; botId: string; scopeId: string }
+  | BrowserLiveTarget;
+
+export interface BrowserLiveTarget {
+  kind: 'browser';
+  botId: string;
+  pageId: string;
+  sessionId: string;
+  lease?: string;
+}
+
+export interface BrowserLiveFrame {
+  type: 'browser-frame';
+  frame: BrowserControlFrameResult;
+}
 
 /**
  * Remote live snapshot: strictly a primary snapshot (no scopeId, non-null
@@ -2858,7 +2874,9 @@ export interface RemoteControl {
   listDevices(options?: { limit?: number; cursor?: { afterDeviceId: string } | null; signal?: AbortSignal }): Promise<DevicesDirectoryPage>;
   renameDevice(input: { deviceId: string; displayName: string }, options?: { signal?: AbortSignal }): Promise<DevicesDirectoryItem>;
   /** Live preview subscription; error ends throw RemoteControlError instead of being yielded. */
-  live(targetDeviceId: string, target: LiveTarget, options?: { signal?: AbortSignal }): AsyncIterable<RemoteLiveSnapshot | RemoteLiveEnd>;
+  live(targetDeviceId: string, target: Exclude<LiveTarget, BrowserLiveTarget>, options?: { signal?: AbortSignal }): AsyncIterable<RemoteLiveSnapshot | RemoteLiveEnd>;
+  live(targetDeviceId: string, target: BrowserLiveTarget, options?: { signal?: AbortSignal }): AsyncIterable<BrowserLiveFrame | RemoteLiveEnd>;
+  live(targetDeviceId: string, target: LiveTarget, options?: { signal?: AbortSignal }): AsyncIterable<RemoteLiveSnapshot | BrowserLiveFrame | RemoteLiveEnd>;
   close(): void;
 }
 

@@ -66,6 +66,7 @@ import type {
 import type { ShowerCall } from './ShowerPreview';
 import { BotScreenPanel } from './BotScreenPanel';
 import BotBrowserPanel from './bot-browser/BotBrowserPanel';
+import { createBrowserFrameSubscriber } from './bot-browser/relayStream';
 import { GoogleSetupWizard } from './google/GoogleSetupWizard';
 import { selectCurrentGoogleSetup } from './google/currentGoogleSetup';
 import { openExternalUrl } from './center-admin/openExternalUrl';
@@ -5831,10 +5832,33 @@ ${newer}` : draftSnapshot;
     },
     [activeBot, botPanelConnected, showerIdentity],
   );
-  const callBrowser = useCallback<BotBrowserControlCall>(
-    input => callHostVolatile('browserControl', input),
-    [callHostVolatile],
+  // A paired on-device Host uses the same Center caller for both browser input
+  // and frames. Changing transport remounts the panel and discards its lease.
+  const browserApi = remoteClientRef.current?.api;
+  const browserDeviceId = activeBot?.deviceId;
+  const browserRelayProfile = activeBot?.hostKind === 'remote' ? showerIdentity : remoteIdentity;
+  const browserViaRelay = Boolean(remoteConnected && browserRelayProfile?.kind === 'relay' &&
+    (activeBot?.hostKind === 'remote' ? showerRemoteReady :
+      remoteDirectory.identity?.profileId === browserRelayProfile.profileId &&
+      remoteDirectory.identity?.generation === browserRelayProfile.generation &&
+      remoteDevices.some(device => device.deviceId === browserDeviceId && device.online)));
+  const browserProfileId = browserRelayProfile?.profileId;
+  const browserGeneration = browserRelayProfile?.generation;
+  const browserRelayIdentity = useMemo<DesktopIdentity | null>(() => {
+    if (!browserViaRelay || !browserProfileId || !browserDeviceId || browserGeneration === undefined) return null;
+    return { kind: 'relay', profileId: browserProfileId, generation: browserGeneration, targetDeviceId: browserDeviceId };
+  }, [browserViaRelay, browserProfileId, browserGeneration, browserDeviceId]);
+  const subscribeBrowserFrames = useMemo(
+    () => createBrowserFrameSubscriber(browserApi, browserRelayIdentity, showerBotId ?? undefined),
+    [browserApi, browserRelayIdentity, showerBotId],
   );
+  const callBrowser = useCallback<BotBrowserControlCall>(async input => {
+    if (browserRelayIdentity && browserApi && showerBotId && botPanelConnected) {
+      const params = { ...input, botId: showerBotId } as RemoteControlMethodMap['browserControl']['params'];
+      return await browserApi.call(browserRelayIdentity, 'browserControl', params) as unknown as Record<string, unknown>;
+    }
+    return callHostVolatile('browserControl', input);
+  }, [browserApi, browserRelayIdentity, showerBotId, botPanelConnected, callHostVolatile]);
   const callGoogleSetup = useCallback<GoogleSetupControlCall>(
     async input => (await callHostVolatile('googleSetupControl', input)) as unknown as GoogleSetupControlState,
     [callHostVolatile],
@@ -6811,7 +6835,7 @@ ${newer}` : draftSnapshot;
       {screen === 'bot-browser' && activeBot && (
         <div className="gws-mobile-browser-screen">
           <BotBrowserPanel
-            key={`${showerPreviewKey}:browser:${activeBot.botId}`}
+            key={JSON.stringify([showerPreviewKey, browserRelayIdentity, 'browser'])}
             botId={activeBot.botId}
             deviceId={activeBot.deviceId}
             botName={activeBot.role}
@@ -6819,6 +6843,7 @@ ${newer}` : draftSnapshot;
             mode="fullscreen"
             connected={botPanelConnected}
             request={callBrowser}
+            subscribeFrames={subscribeBrowserFrames}
             onSwitchToExternalGuide={url => {
               void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
               if (url) void openExternalUrl(url).catch(() => {});

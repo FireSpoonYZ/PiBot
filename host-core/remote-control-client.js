@@ -539,7 +539,7 @@ export async function openRemoteControl(options) {
       handleDevicesResult(frame);
       return;
     }
-    if (frame.type === 'live-frame' || frame.type === 'live-end') {
+    if (frame.type === 'live-frame' || frame.type === 'live-end' || frame.type === 'browser-frame') {
       liveManager.handleFrame(frame);
       return;
     }

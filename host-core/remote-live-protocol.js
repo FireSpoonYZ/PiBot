@@ -9,6 +9,8 @@
 import { messageError, assertId } from './message-protocol.js';
 import { normalizeDeviceName, normalizeDevicePlatform } from './device-metadata.js';
 import { CONTROL_ERROR_CODES } from './remote-control-protocol.js';
+import { normalizeLeaseToken, normalizePageId } from './bot-browser/protocol.js';
+import { isBrowserStreamId, isBrowserStreamSeq } from './bot-browser/stream-packet.js';
 import { normalizeToolPresentation } from './tool-presentation.js';
 import {
   MAX_NESTED_CALLS, MAX_NESTED_CALLS_BYTES, MAX_NESTED_CALL_ID_UNITS,
@@ -31,9 +33,11 @@ export const LIVE_EXTENSIONS_HEADER = 'x-pibot-live-extensions';
 export const LIVE_EXTENSIONS_HEADER_WIRE = 'X-PiBot-Live-Extensions';
 export const LIVE_EXT_DURABLE_WAITS = 'durable-waits-v1';
 export const LIVE_EXT_HOST_SOURCES = 'host-sources-v1';
+export const LIVE_EXT_BROWSER_SCREENCAST = 'browser-screencast-v1';
 export const SUPPORTED_LIVE_EXTENSIONS = Object.freeze([
   LIVE_EXT_DURABLE_WAITS,
   LIVE_EXT_HOST_SOURCES,
+  LIVE_EXT_BROWSER_SCREENCAST,
 ]);
 export const NO_LIVE_EXTENSIONS = Object.freeze({
   durableWaits: false,
@@ -42,6 +46,7 @@ export const NO_LIVE_EXTENSIONS = Object.freeze({
 export const ALL_LIVE_EXTENSIONS = Object.freeze({
   durableWaits: true,
   hostSources: true,
+  browserScreencast: true,
 });
 
 const MAX_LIVE_EXTENSIONS_HEADER_BYTES = 512;
@@ -51,9 +56,10 @@ export function normalizeLiveExtensions(value) {
   if (!value || typeof value !== 'object') return NO_LIVE_EXTENSIONS;
   const durableWaits = value.durableWaits === true;
   const hostSources = value.hostSources === true;
-  if (!durableWaits && !hostSources) return NO_LIVE_EXTENSIONS;
-  if (durableWaits && hostSources) return ALL_LIVE_EXTENSIONS;
-  return Object.freeze({ durableWaits, hostSources });
+  const browserScreencast = value.browserScreencast === true;
+  if (!durableWaits && !hostSources && !browserScreencast) return NO_LIVE_EXTENSIONS;
+  if (durableWaits && hostSources && browserScreencast) return ALL_LIVE_EXTENSIONS;
+  return Object.freeze({ durableWaits, hostSources, ...(browserScreencast ? { browserScreencast } : {}) });
 }
 
 export function parseLiveExtensionsHeader(raw) {
@@ -71,14 +77,16 @@ export function parseLiveExtensionsHeader(raw) {
   }
   let durableWaits = false;
   let hostSources = false;
+  let browserScreencast = false;
   const parts = joined.split(',');
   if (parts.length > MAX_LIVE_EXTENSIONS_TOKENS) return NO_LIVE_EXTENSIONS;
   for (const part of parts) {
     const token = part.trim();
     if (token === LIVE_EXT_DURABLE_WAITS) durableWaits = true;
     else if (token === LIVE_EXT_HOST_SOURCES) hostSources = true;
+    else if (token === LIVE_EXT_BROWSER_SCREENCAST) browserScreencast = true;
   }
-  return normalizeLiveExtensions({ durableWaits, hostSources });
+  return normalizeLiveExtensions({ durableWaits, hostSources, browserScreencast });
 }
 
 export function formatLiveExtensionsHeader(extensions) {
@@ -86,6 +94,7 @@ export function formatLiveExtensionsHeader(extensions) {
   const tokens = [];
   if (ext.durableWaits) tokens.push(LIVE_EXT_DURABLE_WAITS);
   if (ext.hostSources) tokens.push(LIVE_EXT_HOST_SOURCES);
+  if (ext.browserScreencast) tokens.push(LIVE_EXT_BROWSER_SCREENCAST);
   return tokens.length > 0 ? tokens.join(',') : null;
 }
 
@@ -95,6 +104,7 @@ export function intersectLiveExtensions(local, remote) {
   return normalizeLiveExtensions({
     durableWaits: a.durableWaits && b.durableWaits,
     hostSources: a.hostSources && b.hostSources,
+    browserScreencast: a.browserScreencast && b.browserScreencast,
   });
 }
 
@@ -590,7 +600,19 @@ export function normalizeLiveTarget(target) {
     assertId(target.scopeId, 'target.scopeId');
     return { kind: 'work', botId: target.botId, scopeId: target.scopeId };
   }
-  throw invalid("live target.kind must be 'primary' or 'work'");
+  if (target.kind === 'browser') {
+    rejectUnknownFields(target, new Set(['kind', 'botId', 'pageId', 'sessionId', 'lease']), 'live target');
+    assertId(target.botId, 'target.botId');
+    assertId(target.sessionId, 'target.sessionId');
+    return {
+      kind: 'browser',
+      botId: target.botId,
+      pageId: normalizePageId(target.pageId),
+      sessionId: target.sessionId,
+      ...(target.lease === undefined ? {} : { lease: normalizeLeaseToken(target.lease) }),
+    };
+  }
+  throw invalid("live target.kind must be 'primary', 'work' or 'browser'");
 }
 
 const LEARNING_KEYS = new Set([
@@ -982,6 +1004,7 @@ export function normalizeLiveSnapshot(frame, target, options) {
   };
   if (isWork) snapshot.scopeId = frame.scopeId;
   if (target) {
+    if (target.kind === 'browser') throw invalid('browser routes require browser frame packets');
     if (frame.botId !== target.botId) throw invalid('snapshot botId does not match target');
     if (target.kind === 'work') {
       if (!isWork) throw invalid('work snapshot must carry scopeId');
@@ -1089,11 +1112,29 @@ function normalizeDevicesResult(frame) {
   throw invalid('devices-result ok must be a boolean');
 }
 
+function normalizeBrowserLiveAck(frame, idField, options) {
+  rejectUnknownFields(frame, new Set(['type', idField, 'seq']), 'live-ack frame');
+  if (!resolveValidationExtensions(options).browserScreencast ||
+      !isBrowserStreamId(frame[idField]) || !isBrowserStreamSeq(frame.seq)) {
+    throw invalid('invalid browser live acknowledgement');
+  }
+  return { type: 'live-ack', [idField]: frame[idField], seq: frame.seq };
+}
+
+function normalizeWireLiveTarget(frame, idField, options) {
+  const target = normalizeLiveTarget(frame.target);
+  if (target.kind === 'browser' && (!resolveValidationExtensions(options).browserScreencast ||
+      !isBrowserStreamId(frame[idField]))) {
+    throw invalid('browser screencast extension or stream ID is missing');
+  }
+  return target;
+}
+
 /**
- * Parse a live frame sent by a relay client: live-open, live-cancel(watchId)
- * or devices-list. Throws INVALID_ARGUMENT on any protocol violation.
+ * Parse live subscription and directory frames sent by a relay client.
+ * Throws INVALID_ARGUMENT on any protocol violation.
  */
-export function readLiveClientFrame(parsed) {
+export function readLiveClientFrame(parsed, options) {
   if (!isPlainObject(parsed)) throw invalid('live frame must be an object');
   switch (parsed.type) {
     case 'live-open': {
@@ -1104,7 +1145,7 @@ export function readLiveClientFrame(parsed) {
         type: 'live-open',
         watchId: parsed.watchId,
         targetDeviceId: parsed.targetDeviceId,
-        target: normalizeLiveTarget(parsed.target),
+        target: normalizeWireLiveTarget(parsed, 'watchId', options),
       };
     }
     case 'live-cancel': {
@@ -1112,6 +1153,8 @@ export function readLiveClientFrame(parsed) {
       assertId(parsed.watchId, 'watchId');
       return { type: 'live-cancel', watchId: parsed.watchId };
     }
+    case 'live-ack':
+      return normalizeBrowserLiveAck(parsed, 'watchId', options);
     case 'devices-list': {
       rejectUnknownFields(parsed, new Set(['type', 'callId', 'limit', 'cursor', 'names']), 'devices-list frame');
       assertId(parsed.callId, 'callId');
@@ -1168,7 +1211,7 @@ export function readLiveServerFrame(parsed, options) {
         type: 'live-request',
         routeId: parsed.routeId,
         fromDeviceId: parsed.fromDeviceId,
-        target: normalizeLiveTarget(parsed.target),
+        target: normalizeWireLiveTarget(parsed, 'routeId', options),
       };
     }
     case 'live-cancel': {
@@ -1176,6 +1219,8 @@ export function readLiveServerFrame(parsed, options) {
       assertId(parsed.routeId, 'routeId');
       return { type: 'live-cancel', routeId: parsed.routeId };
     }
+    case 'live-ack':
+      return normalizeBrowserLiveAck(parsed, 'routeId', options);
     case 'live-frame': {
       rejectUnknownFields(parsed, new Set(['type', 'watchId', 'targetDeviceId', 'frame']), 'live-frame frame');
       assertId(parsed.watchId, 'watchId');

@@ -75,9 +75,16 @@ export function installRemoteLive(client, hooks) {
   function consumeNext(sub) {
     if (sub.terminalError) return Promise.reject(sub.terminalError);
     if (sub.finished) return Promise.resolve({ done: true });
+    if (sub.yieldedBrowserSeq !== null) {
+      if (sub.state !== 'ended') {
+        sendFrame({ type: 'live-ack', watchId: sub.watchId, seq: sub.yieldedBrowserSeq });
+      }
+      sub.yieldedBrowserSeq = null;
+    }
     if (sub.pendingSnapshot !== null) {
       const snapshot = sub.pendingSnapshot;
       sub.pendingSnapshot = null;
+      if (snapshot.type === 'browser-frame') sub.yieldedBrowserSeq = snapshot.frame.seq;
       return Promise.resolve({ value: snapshot, done: false });
     }
     if (sub.endPayload !== null) {
@@ -141,6 +148,32 @@ export function installRemoteLive(client, hooks) {
       sub.convId = snapshot.conversationId;
     }
     sub.lastSeq = snapshot.sequence;
+    publish(sub, snapshot);
+  }
+
+  function onBrowserFrame(packet) {
+    const sub = subscriptions.get(packet.streamId);
+    if (!sub) return;
+    if (sub.target.kind !== 'browser' || (sub.lastSeq !== null && packet.seq <= sub.lastSeq)) {
+      protocolViolation();
+      return;
+    }
+    sub.lastSeq = packet.seq;
+    publish(sub, {
+      type: 'browser-frame',
+      frame: {
+        seq: packet.seq,
+        revision: packet.revision,
+        pageId: sub.target.pageId,
+        width: packet.width,
+        height: packet.height,
+        mimeType: packet.mimeType,
+        data: packet.image.toString('base64'),
+      },
+    });
+  }
+
+  function publish(sub, snapshot) {
     if (sub.openTimer) {
       clearTimeout(sub.openTimer);
       sub.openTimer = null;
@@ -152,6 +185,7 @@ export function installRemoteLive(client, hooks) {
       const resolve = sub.waitingResolve;
       sub.waitingResolve = null;
       sub.waitingReject = null;
+      if (snapshot.type === 'browser-frame') sub.yieldedBrowserSeq = snapshot.frame.seq;
       resolve({ value: snapshot, done: false });
     } else {
       // 慢消费者合并：只保留最新一个完整快照。
@@ -171,6 +205,7 @@ export function installRemoteLive(client, hooks) {
       terminateSub(sub, makeError(frame.code, 'unconfirmed'), false);
       return;
     }
+    if (sub.target.kind === 'browser') sub.pendingSnapshot = null;
     if (!sub.receivedSnapshot) {
       terminateSub(sub, makeError('BAD_RESPONSE', 'unconfirmed'), false);
       return;
@@ -225,6 +260,9 @@ export function installRemoteLive(client, hooks) {
     } catch {
       throw makeError('INVALID_ARGUMENT', 'not-sent');
     }
+    if (norm.kind === 'browser' && !client.liveExtensions?.browserScreencast) {
+      throw makeError('CONTROL_UNAVAILABLE', 'not-sent');
+    }
     if (subscriptions.size >= LIVE_MAX_CLIENT_SUBSCRIPTIONS) {
       throw makeError('RPC_BUSY', 'not-sent');
     }
@@ -241,6 +279,7 @@ export function installRemoteLive(client, hooks) {
       endPayload: null,
       receivedSnapshot: false,
       lastSeq: null,
+      yieldedBrowserSeq: null,
       convId: null,
       openTimer: null,
       signal: liveSignal,
@@ -275,6 +314,7 @@ export function installRemoteLive(client, hooks) {
     handleFrame(frame) {
       if (frame.type === 'live-frame') onLiveFrame(frame);
       else if (frame.type === 'live-end') onLiveEnd(frame);
+      else if (frame.type === 'browser-frame') onBrowserFrame(frame);
     },
     terminateAll(err) {
       for (const sub of [...subscriptions.values()]) {

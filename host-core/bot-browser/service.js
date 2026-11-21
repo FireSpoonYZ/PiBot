@@ -220,7 +220,7 @@ export function createBotBrowserService(options = {}) {
       isPageWithheld: checkWithheld,
       onEvent,
     });
-    entry = { state, provider: null, providerPromise: null };
+    entry = { state, provider: null, providerPromise: null, streamCaptures: new Map() };
     entries.set(botId, entry);
     return entry;
   }
@@ -590,6 +590,9 @@ export function createBotBrowserService(options = {}) {
         if (req.pageId) {
           state.assertOwnsPage(req.pageId);
         }
+        if ((req.sessionId && req.sessionId !== state.sessionId) || (req.stream && req.pageId !== state.pageId)) {
+          throw browserError('BROWSER_STALE_PAGE');
+        }
         const targetPageId = req.pageId ?? state.pageId;
         if (!targetPageId) {
           throw browserError('BROWSER_PAGE_NOT_FOUND', 'No active page open in this bot browser.');
@@ -601,9 +604,11 @@ export function createBotBrowserService(options = {}) {
           url: targetTab()?.url ?? '', title: targetTab()?.title ?? '', botId: req.botId,
           pageId: targetPageId, isPageWithheld: checkWithheld,
         });
+        const sensitiveFrameRequiresLease = req.stream || auth.transport === 'relay';
         const mayViewRestricted = () => {
           const holder = state.isActiveLeaseHolder(auth, presentedLease); // also expires stale leases
           if (!auth.canViewSensitive) return false;
+          if (sensitiveFrameRequiresLease) return hasPresentedLease && holder;
           if (state.phase === 'human' || hasPresentedLease) return holder;
           return state.phase !== 'taking' && state.reason !== 'disconnected_hold';
         };
@@ -612,7 +617,7 @@ export function createBotBrowserService(options = {}) {
             throw browserError('BROWSER_SECRET_STEP_BLOCKED', sensitivity.guidance,
               { phase: state.phase, reason: 'secret_risk', fallbackToSystemBrowser: true });
           }
-          if (sensitivity.blockBystanderFrame && !allowed) {
+          if ((sensitivity.blockBystanderFrame || (sensitiveFrameRequiresLease && sensitivity.sensitive)) && !allowed) {
             throw browserError('BROWSER_SENSITIVE_BLOCKED',
               'Sensitive page frames are withheld from bystanders and non-holder viewers.',
               { phase: state.phase, reason: sensitivity.reasons[0] ?? 'sensitive_page' });
@@ -624,18 +629,33 @@ export function createBotBrowserService(options = {}) {
         const sensitivityBefore = targetSensitivity();
         assertMayDeliver(sensitivityBefore, allowedBefore);
 
+        const capture = () => provider.perform({
+          action: 'frame',
+          actor: 'human',
+          viewer: 'human',
+          botId: req.botId,
+          pageId: targetPageId,
+          ...req.frameLimits,
+          limits: req.frameLimits,
+          ...(req.sinceSeq !== undefined ? { afterSeq: req.sinceSeq } : {}),
+        });
         let rawFrame;
         try {
-          rawFrame = await provider.perform({
-            action: 'frame',
-            actor: 'human',
-            viewer: 'human',
-            botId: req.botId,
-            pageId: targetPageId,
-            ...req.frameLimits,
-            limits: req.frameLimits,
-            ...(req.sinceSeq !== undefined ? { afterSeq: req.sinceSeq } : {}),
-          });
+          if (req.stream) {
+            // Share a capture in flight. Each viewer's lease and page are checked
+            // independently on both sides of the await.
+            const key = JSON.stringify([
+              sessionAtStart, targetPageId, state.documentGeneration, leaseAtStart, req.frameLimits, req.sinceSeq,
+            ]);
+            let pending = entry.streamCaptures.get(key);
+            if (!pending) {
+              pending = Promise.resolve(capture()).finally(() => entry.streamCaptures.delete(key));
+              entry.streamCaptures.set(key, pending);
+            }
+            rawFrame = await pending;
+          } else {
+            rawFrame = await capture();
+          }
         } catch (err) {
           throw mapProviderError(err, state);
         }
@@ -687,7 +707,9 @@ export function createBotBrowserService(options = {}) {
         assertMayDeliver(sensitivityAtDelivery, allowedAfter);
         assertMayDeliver(sensitivityBefore, allowedAfter);
         if (!sessionStillCurrent) throw browserError('BROWSER_STREAM_UNAVAILABLE');
-        if (!currentTab || staleDocument) throw browserError('BROWSER_STALE_PAGE');
+        if (!currentTab || staleDocument || (req.stream && state.pageId !== framePageId)) {
+          throw browserError('BROWSER_STALE_PAGE');
+        }
 
         const stamped = state.recordFrame({ pageId: framePageId });
         return {

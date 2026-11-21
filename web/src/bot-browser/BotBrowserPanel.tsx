@@ -27,6 +27,7 @@ import {
 import { openExternalUrl } from '../center-admin/openExternalUrl';
 import { useText } from '../ui';
 import { BotBrowserViewport } from './BotBrowserViewport';
+import type { SubscribeBrowserFrames } from './relayStream';
 import {
   MAX_TEXT_INPUT_LENGTH,
   POLL_INTERVAL_ACTIVE_MS,
@@ -68,6 +69,7 @@ export interface BotBrowserPanelProps {
   botId: string;
   deviceId: string;
   request: (input: Record<string, unknown>) => Promise<any>;
+  subscribeFrames?: SubscribeBrowserFrames;
   onClose?: () => void;
   botName?: string;
   hostLabel?: string;
@@ -107,6 +109,7 @@ export function BotBrowserPanel({
   botId,
   deviceId,
   request,
+  subscribeFrames,
   onClose,
   botName,
   hostLabel,
@@ -132,6 +135,10 @@ export function BotBrowserPanel({
   const [streamDegraded, setStreamDegraded] = useState(false);
   const [frameRedacted, setFrameRedacted] = useState(false);
   const [frameRedactedReason, setFrameRedactedReason] = useState<string | null>(null);
+  const [streamAttempt, setStreamAttempt] = useState(0);
+  const [streamBlocked, setStreamBlocked] = useState<{
+    pageId: string; sessionId: string; revision: number; lease: string | undefined;
+  } | null>(null);
 
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [noticeBanner, setNoticeBanner] = useState<string | null>(null);
@@ -152,6 +159,10 @@ export function BotBrowserPanel({
   const inFlightPollRef = useRef(false);
   const requestRef = useRef(request);
   requestRef.current = request;
+  const hasRelayStreamRef = useRef(false);
+  hasRelayStreamRef.current = Boolean(subscribeFrames);
+  const useLegacyFramesRef = useRef(false);
+  const pendingStreamFrameRef = useRef<{ frame: BrowserFrame; sessionId: string } | null>(null);
 
   const viewRef = useRef<BrowserView | null>(null);
   viewRef.current = view;
@@ -226,8 +237,25 @@ export function BotBrowserPanel({
   }, []);
 
   const clearCachedFrame = useCallback(() => {
+    frameRef.current = null;
     setFrame(null);
     lastFrameCursorRef.current = null;
+  }, []);
+
+  const acceptFrame = useCallback((nextFrame: BrowserFrame): boolean => {
+    const currentView = viewRef.current;
+    if (!isFrameUsableForView(nextFrame, currentView, lastFrameCursorRef.current)) return false;
+    if (!isHolderRef.current && (currentView?.sensitive || classifyPageUrl(activeTabOf(currentView)?.url).isKnownSensitiveUrl)) {
+      return false;
+    }
+    lastFrameCursorRef.current = { pageId: nextFrame.pageId, revision: nextFrame.revision, seq: nextFrame.seq };
+    frameRef.current = nextFrame;
+    setFrame(nextFrame);
+    setFrameRedacted(false);
+    setFrameRedactedReason(null);
+    streamFailSinceRef.current = null;
+    if (streamDegradedRef.current) setStreamDegraded(false);
+    return true;
   }, []);
 
   const clearLocalLease = useCallback(() => {
@@ -297,7 +325,8 @@ export function BotBrowserPanel({
         !nextView.canStreamInteract ||
         !nextView.pageId ||
         (nextSensitive && !nextIsHolder) ||
-        (prevView && (prevView.pageId !== nextView.pageId || prevView.revision !== nextView.revision))
+        (prevView && (prevView.pageId !== nextView.pageId || prevView.revision !== nextView.revision ||
+          prevView.sessionId !== nextView.sessionId))
       ) {
         clearCachedFrame();
       }
@@ -315,9 +344,15 @@ export function BotBrowserPanel({
       viewRef.current = nextView;
       setView(nextView);
       setLoadingStatus(false);
+      const pending = pendingStreamFrameRef.current;
+      if (pending && (pending.sessionId !== nextView.sessionId || pending.frame.pageId !== nextView.pageId ||
+          pending.frame.revision <= nextView.revision)) {
+        pendingStreamFrameRef.current = null;
+        if (pending.sessionId === nextView.sessionId) acceptFrame(pending.frame);
+      }
       return { nextLease, nextIsHolder };
     },
-    [clearCachedFrame, t],
+    [acceptFrame, clearCachedFrame, t],
   );
 
   // Full session reset whenever botId or deviceId changes, or on unmount.
@@ -329,6 +364,8 @@ export function BotBrowserPanel({
     clearCachedFrame();
     clearLocalLease();
     viewRef.current = null;
+    pendingStreamFrameRef.current = null;
+    useLegacyFramesRef.current = false;
     streamFailSinceRef.current = null;
     composingRef.current = false;
     if (remoteInputRef.current) remoteInputRef.current.value = '';
@@ -339,6 +376,7 @@ export function BotBrowserPanel({
     setStreamDegraded(false);
     setFrameRedacted(false);
     setFrameRedactedReason(null);
+    setStreamBlocked(null);
     setErrorBanner(null);
     setNoticeBanner(null);
     setPreemptConfirmOpen(false);
@@ -383,6 +421,7 @@ export function BotBrowserPanel({
           parsedView.canStreamInteract &&
           Boolean(parsedView.pageId) &&
           !(isSensitiveNow && !nextIsHolder) &&
+          (!hasRelayStreamRef.current || !parsedView.sessionId || useLegacyFramesRef.current) &&
           !streamDegradedRef.current;
 
         if (shouldFetchFrame && parsedView.pageId) {
@@ -405,21 +444,7 @@ export function BotBrowserPanel({
               streamFailSinceRef.current = null;
             } else {
               const parsedFrame = parseBrowserFrame(rawFrame);
-              if (
-                parsedFrame &&
-                isFrameUsableForView(parsedFrame, parsedView, lastFrameCursorRef.current)
-              ) {
-                lastFrameCursorRef.current = {
-                  pageId: parsedFrame.pageId,
-                  revision: parsedFrame.revision,
-                  seq: parsedFrame.seq,
-                };
-                setFrame(parsedFrame);
-                setFrameRedacted(false);
-                setFrameRedactedReason(null);
-                streamFailSinceRef.current = null;
-                if (streamDegradedRef.current) setStreamDegraded(false);
-              } else {
+              if (!parsedFrame || !acceptFrame(parsedFrame)) {
                 // Bounded frame missing or mismatched: count toward honest 5s stream degrade.
                 const now = Date.now();
                 if (streamFailSinceRef.current === null) streamFailSinceRef.current = now;
@@ -481,7 +506,7 @@ export function BotBrowserPanel({
         }
       }
     },
-    [botId, applyViewState, clearCachedFrame, t],
+    [botId, acceptFrame, applyViewState, clearCachedFrame, t],
   );
 
   const schedulePoll = useCallback(
@@ -520,6 +545,83 @@ export function BotBrowserPanel({
     };
   }, [botId, deviceId, connected, pageVisible, clearPollTimer, clearCachedFrame, schedulePoll]);
 
+  const streamPage = view?.pageId;
+  const streamSession = view?.sessionId;
+  const streamLease = isHolder ? ownedLease?.lease : undefined;
+  const streamAllowed = Boolean(view?.available && view?.canStreamInteract &&
+    (!(view.sensitive || classifyPageUrl(activeTabOf(view)?.url).isKnownSensitiveUrl) || streamLease) &&
+    !(streamBlocked && streamBlocked.sessionId === streamSession && streamBlocked.pageId === streamPage &&
+      streamBlocked.lease === streamLease && streamBlocked.revision === view.revision));
+
+  useEffect(() => {
+    if (!subscribeFrames || !connected || !pageVisible || !streamAllowed || !streamPage || !streamSession ||
+        useLegacyFramesRef.current) return;
+
+    let active = true;
+    let dispose: (() => void) | undefined;
+    let retry: number | undefined;
+    const epoch = epochRef.current;
+    const onError = (error: unknown) => {
+      if (!active || epoch !== epochRef.current) return;
+      active = false;
+      dispose?.();
+      pendingStreamFrameRef.current = null;
+      clearCachedFrame();
+      const detail = classifyBrowserError(error);
+      if (detail.code === 'CONTROL_UNAVAILABLE') {
+        useLegacyFramesRef.current = true;
+        streamDegradedRef.current = false;
+        setStreamDegraded(false);
+      } else if (detail.sensitiveBlocked) {
+        setFrameRedacted(true);
+        setFrameRedactedReason(null);
+        setStreamBlocked({
+          pageId: streamPage, sessionId: streamSession, lease: streamLease, revision: viewRef.current?.revision ?? -1,
+        });
+      } else {
+        if (!detail.staleState) setStreamDegraded(true);
+        // Retry transient link or navigation changes. No input is replayed.
+        if (detail.staleState || ['BACKPRESSURE', 'DISCONNECTED', 'NETWORK', 'TIMEOUT'].includes(detail.code)) {
+          retry = window.setTimeout(() => setStreamAttempt((attempt) => attempt + 1), detail.staleState ? 400 : 2000);
+        }
+      }
+      schedulePoll(0);
+    };
+
+    try {
+      dispose = subscribeFrames({
+        pageId: streamPage,
+        sessionId: streamSession,
+        ...(streamLease ? { lease: streamLease } : {}),
+      }, {
+        onFrame: (raw) => {
+          const currentView = viewRef.current;
+          if (!active || epoch !== epochRef.current || currentView?.sessionId !== streamSession ||
+              currentView.pageId !== streamPage || (ownedLeaseRef.current?.lease ?? undefined) !== streamLease) return;
+          const nextFrame = parseBrowserFrame(raw);
+          if (!nextFrame || nextFrame.pageId !== streamPage || acceptFrame(nextFrame)) return;
+          if (nextFrame.revision > currentView.revision) {
+            const needsStatus = pendingStreamFrameRef.current?.frame.revision !== nextFrame.revision;
+            pendingStreamFrameRef.current = { frame: nextFrame, sessionId: streamSession };
+            if (needsStatus) schedulePoll(0);
+          }
+        },
+        onError,
+      });
+      if (!active) dispose();
+    } catch (error) {
+      onError(error);
+    }
+
+    return () => {
+      active = false;
+      dispose?.();
+      if (retry !== undefined) window.clearTimeout(retry);
+      pendingStreamFrameRef.current = null;
+    };
+  }, [subscribeFrames, connected, pageVisible, streamAllowed, streamPage, streamSession, streamLease,
+    streamAttempt, acceptFrame, clearCachedFrame, schedulePoll]);
+
   const handleRetry = useCallback(() => {
     setErrorBanner(null);
     streamDegradedRef.current = false;
@@ -527,6 +629,9 @@ export function BotBrowserPanel({
     setFrameRedacted(false);
     setFrameRedactedReason(null);
     streamFailSinceRef.current = null;
+    useLegacyFramesRef.current = false;
+    setStreamBlocked(null);
+    setStreamAttempt((attempt) => attempt + 1);
     schedulePoll(0);
   }, [schedulePoll]);
 

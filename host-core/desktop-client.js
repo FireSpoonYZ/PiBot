@@ -1892,6 +1892,9 @@ export function openDesktopClient(options) {
     if (!connection) await requireTargetReady(params.targetDeviceId);
     requireCenter();
     const session = requireConnectedSession();
+    if (normTarget?.kind === 'browser' && session.kind !== 'relay') {
+      throw brokerError('CONTROL_UNAVAILABLE', 'not-sent', 'browser streaming requires a Center relay session');
+    }
     const sessionGen = session.generation;
     const controller = new AbortController();
     const observationId = params.observationId;
