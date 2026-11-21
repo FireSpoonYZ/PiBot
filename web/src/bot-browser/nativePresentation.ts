@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from 'react';
-import { buildBrowserRequest } from './protocol';
+import { buildBrowserRequest, classifyBrowserError } from './protocol';
 
 export interface NativeBrowserRect {
   x: number;
@@ -42,17 +42,54 @@ interface NativePresentationOptions {
   attempt: number;
 }
 
-const NATIVE_GRANT_HEARTBEAT_MS = 1500;
+interface NativeGrant {
+  grantId: string;
+  expiresAt: number;
+}
 
-function readGrant(value: unknown, rendererId: string | undefined) {
-  if (!value || typeof value !== 'object') return null;
+type ParsedNativeGrant =
+  | { status: 'valid'; grant: NativeGrant }
+  | { status: 'expired' }
+  | { status: 'invalid' };
+
+const NATIVE_GRANT_HEARTBEAT_MS = 1500;
+const NATIVE_RETRY_DELAYS_MS = [500, 1500] as const;
+
+const NON_RETRYABLE_NATIVE_ERROR_CODES = new Set([
+  'FORBIDDEN',
+  'BROWSER_FORBIDDEN',
+  'PERMISSION_DENIED',
+  'ACCESS_DENIED',
+  'UNAUTHORIZED',
+  'NOT_ALLOWED',
+  'UNSUPPORTED',
+  'NOT_SUPPORTED',
+  'BROWSER_UNSUPPORTED',
+  'NATIVE_UNSUPPORTED',
+  'NATIVE_PRESENTATION_UNSUPPORTED',
+  'CONTROL_UNAVAILABLE',
+  'INVALID_ACTION',
+  'UNKNOWN_ACTION',
+  'METHOD_NOT_FOUND',
+]);
+
+function isRetryableNativeError(error: unknown): boolean {
+  const detail = classifyBrowserError(error);
+  if (detail.invalidatesLease || detail.sensitiveBlocked) return false;
+  if (detail.code && NON_RETRYABLE_NATIVE_ERROR_CODES.has(detail.code)) return false;
+  return true;
+}
+
+function readGrant(value: unknown, rendererId: string | undefined): ParsedNativeGrant {
+  if (!value || typeof value !== 'object') return { status: 'invalid' };
   const grant = value as Record<string, unknown>;
   if (grant.supported !== true || typeof grant.grantId !== 'string' || !grant.grantId ||
       typeof grant.expiresAt !== 'number' || !Number.isSafeInteger(grant.expiresAt) ||
-      grant.expiresAt <= Date.now() || grant.rendererId !== rendererId) {
-    return null;
+      grant.rendererId !== rendererId) {
+    return { status: 'invalid' };
   }
-  return { grantId: grant.grantId, expiresAt: grant.expiresAt };
+  if (grant.expiresAt <= Date.now()) return { status: 'expired' };
+  return { status: 'valid', grant: { grantId: grant.grantId, expiresAt: grant.expiresAt } };
 }
 
 function measureStage(stage: HTMLDivElement): NativeBrowserRect | null {
@@ -101,22 +138,33 @@ export function useNativeBrowserPresentation({
     const skippedGrant = Symbol();
     let active = true;
     let failed = false;
+    let retryCount = 0;
+    let retryPending = false;
     let requestedGrant = false;
     let showing = false;
     let layoutGeneration = 0;
     let lastPlacement: NativeBrowserPlacement | null = null;
-    let grant: ReturnType<typeof readGrant> = null;
+    let grant: NativeGrant | null = null;
     let renewGrant = true;
     let syncing = false;
     let needsSync = false;
     let animationFrame: number | undefined;
     let heartbeat: number | undefined;
     let expiry: number | undefined;
+    let retryTimer: number | undefined;
 
     function queueRequest(action: () => Promise<unknown>): Promise<unknown> {
       const operation = requestTail.current.then(action);
       requestTail.current = operation.then(() => {}, () => {});
       return operation;
+    }
+
+    function clearRetry() {
+      if (retryTimer !== undefined) {
+        window.clearTimeout(retryTimer);
+        retryTimer = undefined;
+      }
+      retryPending = false;
     }
 
     function hideLocal() {
@@ -135,17 +183,51 @@ export function useNativeBrowserPresentation({
     }
 
     function stop() {
-      if (animationFrame !== undefined) window.cancelAnimationFrame(animationFrame);
+      if (animationFrame !== undefined) {
+        window.cancelAnimationFrame(animationFrame);
+        animationFrame = undefined;
+      }
       window.clearTimeout(heartbeat);
+      heartbeat = undefined;
       window.clearTimeout(expiry);
+      expiry = undefined;
       hideLocal();
       dismiss();
     }
 
-    function fallback() {
+    function resumeRetry() {
+      if (!active) return;
+      needsSync = false;
+      grant = null;
+      renewGrant = true;
+      lastPlacement = null;
+      failed = false;
+      refresh();
+    }
+
+    function fallback(retryable: boolean) {
+      if (!active || failed) return;
       failed = true;
+      needsSync = false;
+      grant = null;
+      renewGrant = true;
+      lastPlacement = null;
+      clearRetry();
       stop();
       setReadyTarget(current => current === target ? null : current);
+      if (!retryable) return;
+      const delay = NATIVE_RETRY_DELAYS_MS[retryCount];
+      if (delay === undefined) return;
+      retryCount += 1;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = undefined;
+        if (!active) return;
+        if (syncing) {
+          retryPending = true;
+          return;
+        }
+        resumeRetry();
+      }, delay);
     }
 
     function currentRect() {
@@ -187,25 +269,34 @@ export function useNativeBrowserPresentation({
             return request(buildBrowserRequest('nativeGrant', { botId, pageId, lease }));
           });
           if (!active || failed || result === skippedGrant) return;
-          grant = readGrant(result, rendererId);
-          if (!grant) {
-            fallback();
+          const parsedGrant = readGrant(result, rendererId);
+          if (parsedGrant.status !== 'valid') {
+            grant = null;
+            fallback(parsedGrant.status === 'expired');
             return;
           }
+          grant = parsedGrant.grant;
           renewGrant = false;
           window.clearTimeout(heartbeat);
           window.clearTimeout(expiry);
           heartbeat = window.setTimeout(() => {
+            heartbeat = undefined;
+            if (!active || failed) return;
             renewGrant = true;
             refresh();
           }, NATIVE_GRANT_HEARTBEAT_MS);
           expiry = window.setTimeout(() => {
+            expiry = undefined;
             if (!active || failed) return;
             if (currentRect()) {
-              fallback();
+              fallback(true);
             } else {
               grant = null;
+              renewGrant = true;
+              window.clearTimeout(heartbeat);
+              heartbeat = undefined;
               hideLocal();
+              setReadyTarget(current => current === target ? null : current);
             }
           }, Math.max(0, grant.expiresAt - Date.now()));
         }
@@ -213,6 +304,10 @@ export function useNativeBrowserPresentation({
         const rect = currentRect();
         if (!rect || !grant) {
           hideLocal();
+          return;
+        }
+        if (grant.expiresAt <= Date.now()) {
+          fallback(true);
           return;
         }
         const placement: NativeBrowserPlacement = { pageId, ...grant, rect, dpr: window.devicePixelRatio || 1 };
@@ -226,16 +321,22 @@ export function useNativeBrowserPresentation({
           return;
         }
         if (!shown || placement.expiresAt <= Date.now()) {
-          fallback();
+          fallback(true);
           return;
         }
+        retryCount = 0;
         lastPlacement = placement;
         setReadyTarget(target);
-      } catch {
-        if (active && !failed && layoutGeneration === generation && currentRect()) fallback();
+      } catch (error) {
+        if (active && !failed && layoutGeneration === generation && currentRect()) {
+          fallback(isRetryableNativeError(error));
+        }
       } finally {
         syncing = false;
-        if (needsSync) {
+        if (retryPending && active) {
+          retryPending = false;
+          resumeRetry();
+        } else if (needsSync) {
           needsSync = false;
           refresh();
         }
@@ -263,6 +364,7 @@ export function useNativeBrowserPresentation({
       window.removeEventListener('scroll', refresh, true);
       viewport?.removeEventListener('resize', refresh);
       viewport?.removeEventListener('scroll', refresh);
+      clearRetry();
       stop();
     };
   }, [presenter, target, stage, requestRef, attempt]);

@@ -1412,9 +1412,16 @@ export function BotBrowserPanel({
     }
     if (view.phase === 'human' && isHolder) {
       if (view.sharedInput) {
-        return nativeReady || canSendInput
-          ? { tone: 'active', text: t('可直接操作', 'Ready for input'), spinning: false }
-          : { tone: 'muted', text: t('正在获取画面…', 'Waiting for live view…'), spinning: true };
+        if (nativeReady || canSendInput) {
+          return { tone: 'active', text: t('可直接操作', 'Ready for input'), spinning: false };
+        }
+        if (frameRestricted) {
+          return { tone: 'warn', text: t('画面受保护', 'View protected'), spinning: false };
+        }
+        if (streamDegraded) {
+          return { tone: 'warn', text: t('实时浏览不可用', 'Live view unavailable'), spinning: false };
+        }
+        return { tone: 'muted', text: t('正在获取画面…', 'Waiting for live view…'), spinning: true };
       }
       return { tone: 'active', text: t('已接管', 'In control'), spinning: false };
     }
