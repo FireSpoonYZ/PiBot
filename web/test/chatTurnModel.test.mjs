@@ -597,6 +597,29 @@ test('hiding tool output keeps a finished tool\'s authoritative pending question
   assert.deepEqual(chatTurnsWithoutToolOutput([{ ...turn, tools: [{ ...tool, durableWait: false }] }]), []);
 });
 
+test('hiding tool output keeps a running Google setup after its tool call has finished', () => {
+  const setup = {
+    id: 'setup', name: 'google_setup', status: 'done',
+    presentation: { kind: 'google-setup', version: 1, botId: 'bot', runId: 'run', state: 'running', card: 'path' },
+  };
+  const finished = {
+    ...setup, id: 'finished', presentation: { ...setup.presentation, state: 'done', card: 'connected' },
+  };
+  const nestedSetup = { ...setup, id: 'nested-setup', parentCallId: 'script' };
+  const nestedPrompt = {
+    id: 'vault', name: 'vault_unlock', status: 'running', presentationLive: true, parentCallId: 'script',
+    presentation: { kind: 'vault-unlock', status: 'pending' },
+  };
+  const script = { id: 'script', name: 'codemode', status: 'done', children: [nestedPrompt, nestedSetup] };
+  const tools = [setup, finished, script];
+  const turn = { id: 'reply', role: 'assistant', entryId: 5, text: '', tools };
+  const calls = { id: 'calls', kind: 'tools', tools };
+
+  assert.deepEqual(chatTurnsWithoutToolOutput([turn])[0]?.tools, [setup, nestedSetup]);
+  const [visible] = chatTurnsWithoutToolOutput([{ ...turn, blocks: [calls] }]);
+  assert.deepEqual(visible?.blocks, [{ ...calls, tools: [setup, nestedSetup] }]);
+});
+
 test('projectLiveState preserves pi.reset marker across empty, windowed, compacted, and pre-reset failure states', () => {
   const mkUser = (id, text) => ({
     id,

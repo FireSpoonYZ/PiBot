@@ -160,13 +160,16 @@ export function ToolCallCard({
     : undefined;
   const hasDetails = codemode || args !== undefined || tool.output !== undefined || tool.outputTruncated ||
     (tool.parentCallId !== undefined && tool.argSummary !== undefined);
-  const hasLiveChildPresentation = tool.status === 'running' && Boolean(
-    tool.children?.some(child => child.presentationLive === true && Boolean(readToolPresentation(child.presentation))) ||
-    (tool.children && pendingToolPrompts(tool.children).length > 0),
+  const hasVisibleChildPresentation = Boolean(
+    tool.children && (
+      (tool.status === 'running' && tool.children.some(child =>
+        child.presentationLive === true && Boolean(readToolPresentation(child.presentation)))) ||
+      pendingToolPrompts(tool.children, tool.status === 'running').length > 0
+    ),
   );
   useEffect(() => {
-    setCompactExpanded(!collapseOutput || (mobileCompact && hasLiveChildPresentation));
-  }, [collapseOutput, mobileCompact, hasLiveChildPresentation]);
+    setCompactExpanded(!collapseOutput || (mobileCompact && hasVisibleChildPresentation));
+  }, [collapseOutput, mobileCompact, hasVisibleChildPresentation]);
   const hasCompactBody = hasDetails || Boolean(tool.argSummary || tool.error || tool.children?.length ||
     tool.nestedCallsTruncated || (codemode && tool.status !== 'running' && tool.children === undefined));
   const presentationActive = resolveToolPresentationActive(tool, presentation, active, disabled);

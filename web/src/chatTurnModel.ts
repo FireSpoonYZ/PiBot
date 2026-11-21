@@ -1831,23 +1831,26 @@ export function resolveToolPresentationActive(
   );
 }
 
-export function pendingToolPrompts(tools: readonly ChatToolCallItem[]): ChatToolCallItem[] {
+export function pendingToolPrompts(tools: readonly ChatToolCallItem[], parentRunning = true): ChatToolCallItem[] {
   return tools.flatMap(tool => {
-    if (tool.status !== 'running') {
-      return isActiveDurableQuestionnaireTool(tool) ? [tool] : [];
-    }
-    const kind = tool.presentation?.kind;
-    const prompt = tool.presentationLive && tool.presentation?.status === 'pending' &&
-      (kind === 'questionnaire' || kind === 'vault-unlock');
-    const children = tool.children ? pendingToolPrompts(tool.children) : [];
-    return prompt ? [tool, ...children] : children;
+    const presentation = tool.presentation;
+    const running = tool.status === 'running';
+    const prompt = parentRunning && (running
+      ? tool.presentationLive && presentation?.status === 'pending' &&
+        (presentation.kind === 'questionnaire' || presentation.kind === 'vault-unlock')
+      : isActiveDurableQuestionnaireTool(tool));
+    // The Google setup run can await user input after the tool call and its parent finish.
+    const googleSetup = presentation?.kind === 'google-setup' && presentation.state === 'running' &&
+      readString(presentation.runId) !== undefined && readString(presentation.card) !== undefined;
+    const children = tool.children ? pendingToolPrompts(tool.children, parentRunning && running) : [];
+    return prompt || googleSetup ? [tool, ...children] : children;
   });
 }
 
 export function chatTurnsWithoutToolOutput(turns: readonly ChatTurn[]): ChatTurn[] {
   return turns.flatMap(turn => {
     if (turn.role !== 'assistant') return [turn];
-    // Keep live prompts (including nested ones) without showing their tool calls.
+    // Keep pending prompts (including nested ones) without showing their tool calls.
     const blocks = turn.blocks?.flatMap<ChatTurnBlock>(block => {
       if (block.kind === 'text') return [block];
       if (block.kind === 'thinking') return [];
