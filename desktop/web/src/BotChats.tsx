@@ -3679,7 +3679,7 @@ function PrimaryChatPane({
    * - 其余落在抽屉外（遮罩/聊天区）的 Esc 才关闭紧凑浮层；普通宽屏并排不拦截。
    */
   useEffect(() => {
-    if (!inspectorTab || !compactOverlay) return;
+    if (!inspectorTab || inspectorTab === 'browser' || !compactOverlay) return;
     function onEsc(e: KeyboardEvent) {
       if (e.key !== 'Escape' || e.defaultPrevented) return;
       const target = e.target as HTMLElement | null;
@@ -3892,15 +3892,14 @@ function PrimaryChatPane({
         .find(pres => pres?.kind === 'google-browser-takeover') ?? null)
     : null;
   const settingsTab = inspectorPage && inspectorPage.id !== 'management' ? inspectorPage.id : null;
+  const browserOpen = inspectorTab === 'browser';
   const inspectorTitle = inspectorPage?.label ??
     (isProfilePage
       ? '智能体资料'
       : inspectorTab === 'raw'
         ? '诊断与原始记录'
         : inspectorTab === 'google-setup' ? t('Google 配置向导', 'Google setup wizard')
-        : inspectorTab === 'browser'
-          ? 'Bot 内置浏览器'
-          : '虚拟桌面');
+        : '虚拟桌面');
   const deleteConfirmation = confirmDelete && !isPrimary ? (
     <div className="confirm-delete-banner" role="alert" ref={deleteConfirmationRef} tabIndex={isManagementPage ? -1 : undefined}>
       <span>确定要永久删除智能体「{bot.role}」吗？此操作不可撤销。</span>
@@ -4410,7 +4409,7 @@ function PrimaryChatPane({
       </Dialog.Root>
 
       <Dialog.Root
-        open={inspectorTab !== null}
+        open={inspectorTab !== null && !browserOpen}
         modal={compactOverlay}
         onOpenChange={(open) => {
           if (!open) setInspectorTab(null);
@@ -4633,27 +4632,45 @@ function PrimaryChatPane({
                   onClose={() => setInspectorTab(null)}
                 />
               )}
-              {inspectorTab === 'browser' ? (
-                <div className="gws-desktop-browser-pane">
-                  <BotBrowserPanel
-                    key={`browser:${sess}:${bot.botId}`}
-                    botId={bot.botId}
-                    deviceId={bot.deviceId}
-                    botName={bot.role}
-                    hostLabel={deviceName}
-                    mode="sidebar"
-                    connected={online && pageActive}
-                    request={callBrowser}
-                    subscribeFrames={subscribeBrowserFrames}
-                    onSwitchToExternalGuide={(url) => {
-                      void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
-                      if (url) void openExternalUrl(url).catch(() => {});
-                    }}
-                    onClose={() => setInspectorTab(null)}
-                  />
-                </div>
-              ) : null}
             </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={browserOpen} onOpenChange={(open) => { if (!open) setInspectorTab(null); }}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="desktop-dialog-overlay" />
+          <Dialog.Content
+            className="bot-browser-dialog"
+            aria-describedby={undefined}
+            onEscapeKeyDown={(event) => {
+              const target = event.target;
+              if (target instanceof Element && target.closest('.bb-stage--interactive, .bb-remote-input, .bb-more[open]')) {
+                event.preventDefault();
+              }
+            }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              stageRef.current?.querySelector<HTMLButtonElement>('.chat-header-pill')?.focus();
+            }}
+          >
+            <Dialog.Title className="sr-only">{t(`${bot.role} 的浏览器`, `${bot.role} browser`)}</Dialog.Title>
+            <BotBrowserPanel
+              key={`browser:${sess}:${bot.botId}`}
+              botId={bot.botId}
+              deviceId={bot.deviceId}
+              botName={bot.role}
+              hostLabel={deviceName}
+              mode="sidebar"
+              connected={online && pageActive}
+              request={callBrowser}
+              subscribeFrames={subscribeBrowserFrames}
+              onSwitchToExternalGuide={(url) => {
+                void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
+                if (url) void openExternalUrl(url).catch(() => {});
+              }}
+              onClose={() => setInspectorTab(null)}
+            />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>

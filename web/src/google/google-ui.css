@@ -816,13 +816,6 @@
   background: var(--color-bg, var(--bg));
 }
 
-.gws-desktop-browser-pane {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-}
-
 /* Mobile chat takeover status strip above composer (04 Layout B) */
 .gws-browser-strip {
   display: flex;

@@ -94,7 +94,7 @@ export const POLL_INTERVAL_IDLE_MS = 1800;
 export const STREAM_DEGRADE_TIMEOUT_MS = 5000;
 export const MAX_FRAME_BASE64_LENGTH = 4 * 1024 * 1024;
 export const MAX_TEXT_INPUT_LENGTH = 1000;
-export const ZOOM_STEPS: readonly number[] = [1, 1.5, 2, 2.5];
+export const ZOOM_STEPS: readonly number[] = [1, 1.25, 1.5, 2, 2.5, 3];
 
 const ALLOWED_PHASES = new Set<BrowserPhase>(['bot', 'taking', 'human', 'held']);
 const ALLOWED_FRAME_MIMES = new Set<BrowserFrame['mimeType']>([

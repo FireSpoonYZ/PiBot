@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, CompositionEvent, FormEvent, KeyboardEvent } from 'react';
 import {
   AlertTriangle,
+  ArrowLeft,
+  ArrowRight,
   Bot,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   ChevronUp,
-  CornerUpLeft,
+  Delete,
+  Ellipsis,
   ExternalLink,
   Globe,
   Info,
@@ -15,11 +16,10 @@ import {
   Lock,
   Maximize2,
   Minimize2,
-  Play,
+  Minus,
   Plus,
   RefreshCw,
   Shield,
-  ShieldCheck,
   Square,
   Unlock,
   X,
@@ -147,10 +147,11 @@ export function BotBrowserPanel({
 
   const [urlDraft, setUrlDraft] = useState('');
   const [urlEditing, setUrlEditing] = useState(false);
-  const [zoom, setZoom] = useState(1);
+  const [preferredZoom, setPreferredZoom] = useState<number | null>(null);
 
   const panelRef = useRef<HTMLElement | null>(null);
   const closeBtnRef = useRef<HTMLButtonElement | null>(null);
+  const moreRef = useRef<HTMLDetailsElement | null>(null);
   const remoteInputRef = useRef<HTMLInputElement | null>(null);
   const composingRef = useRef(false);
 
@@ -208,6 +209,17 @@ export function BotBrowserPanel({
     document.addEventListener('visibilitychange', onVisibilityChange);
     onVisibilityChange();
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, []);
+
+  useEffect(() => {
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const menu = moreRef.current;
+      if (menu?.open && event.target instanceof Node && !menu.contains(event.target)) {
+        menu.open = false;
+      }
+    };
+    document.addEventListener('pointerdown', closeOnOutsidePointer);
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePointer);
   }, []);
 
   // Accessibility focus management when entering mobile fullscreen dialog.
@@ -288,7 +300,6 @@ export function BotBrowserPanel({
           isHolderRef.current = true;
           nextLease = confirmed;
           nextIsHolder = true;
-          setNoticeBanner(t('已接管当前页面 · Bot 已完全停手', 'You have control · Bot is paused'));
         }
       }
 
@@ -383,7 +394,7 @@ export function BotBrowserPanel({
     setExternalConfirmOpen(false);
     setUrlDraft('');
     setUrlEditing(false);
-    setZoom(1);
+    setPreferredZoom(null);
 
     return () => {
       epochRef.current += 1;
@@ -672,9 +683,6 @@ export function BotBrowserPanel({
             streamDegradedRef.current = false;
             setStreamDegraded(false);
             streamFailSinceRef.current = null;
-            setNoticeBanner(
-              t('已接管当前页面 · Bot 已完全停手', 'You are now in control · Bot is paused'),
-            );
             schedulePoll(0);
             return;
           }
@@ -683,9 +691,6 @@ export function BotBrowserPanel({
             pendingTakeoverLeaseRef.current = rawLease ?? nextView.lease ?? null;
             viewRef.current = nextView;
             setView(nextView);
-            setNoticeBanner(
-              t('正在等待 Bot 完成当前在途动作，确认停手后开放输入…', 'Waiting for the Bot to finish its in-flight action before unlocking input…'),
-            );
             schedulePoll(180);
             return;
           }
@@ -877,6 +882,8 @@ export function BotBrowserPanel({
   const currentTab = useMemo(() => activeTabOf(view), [view]);
   const urlMeta = useMemo(() => classifyPageUrl(currentTab?.url), [currentTab?.url]);
   const isSensitive = Boolean(view?.sensitive || urlMeta.isKnownSensitiveUrl);
+  const zoomForSignIn = resolvedMode === 'fullscreen' && isMobileViewport && isHolder && urlMeta.isGoogleAuth;
+  const zoom = preferredZoom ?? (zoomForSignIn ? 2 : 1);
 
   const liveFrame = useMemo(
     () => (isFrameUsableForView(frame, view) ? frame : null),
@@ -1057,13 +1064,19 @@ export function BotBrowserPanel({
   };
 
   const handlePanelKeyDown = (ev: KeyboardEvent<HTMLElement>) => {
+    if (ev.key === 'Escape' && moreRef.current?.open) {
+      ev.preventDefault();
+      moreRef.current.open = false;
+      moreRef.current.querySelector('summary')?.focus();
+      return;
+    }
     if (ev.key === 'Escape' && resolvedMode === 'fullscreen' && onClose) {
       // Only close fullscreen drawer on Escape when remote canvas/input isn't consuming Escape.
       const target = ev.target as HTMLElement | null;
-      const insideInteractiveCanvas = Boolean(
-        target?.closest('.bb-stage--interactive, .bb-input-dock'),
+      const isRemoteInput = Boolean(
+        target?.closest('.bb-stage--interactive, .bb-remote-input'),
       );
-      if (!insideInteractiveCanvas) {
+      if (!isRemoteInput) {
         ev.preventDefault();
         onClose();
       }
@@ -1071,10 +1084,10 @@ export function BotBrowserPanel({
   };
 
   const stepZoom = (delta: 1 | -1) => {
-    const idx = ZOOM_STEPS.findIndex((z) => z >= zoom - 0.01);
-    const baseIdx = idx === -1 ? ZOOM_STEPS.length - 1 : idx;
-    const nextIdx = Math.min(ZOOM_STEPS.length - 1, Math.max(0, baseIdx + delta));
-    setZoom(ZOOM_STEPS[nextIdx]);
+    const next = delta > 0
+      ? ZOOM_STEPS.find((level) => level > zoom + 0.01)
+      : ZOOM_STEPS.filter((level) => level < zoom - 0.01).at(-1);
+    if (next !== undefined) setPreferredZoom(next);
   };
 
   const isHeld = view?.phase === 'held';
@@ -1102,13 +1115,13 @@ export function BotBrowserPanel({
       return { tone: 'muted', text: t('正在交还…', 'Handing back…'), spinning: true };
     }
     if (isTaking) {
-      return { tone: 'warn', text: t('正在接管 · 等待停手…', 'Taking over · pausing Bot…'), spinning: true };
+      return { tone: 'warn', text: t('正在接管…', 'Taking over…'), spinning: true };
     }
     if (isHeld) {
-      return { tone: 'warn', text: t('连接中断 · Bot 保持停手', 'Hold active · Bot paused'), spinning: false };
+      return { tone: 'warn', text: t('Bot 已暂停', 'Bot paused'), spinning: false };
     }
     if (view.phase === 'human' && isHolder) {
-      return { tone: 'active', text: t('你正在接管 · Bot 已停手', 'In control · Bot paused'), spinning: false };
+      return { tone: 'active', text: t('已接管', 'In control'), spinning: false };
     }
     if (isOtherHolder) {
       const label = view.holderLabel || t('其他设备', 'another device');
@@ -1126,15 +1139,26 @@ export function BotBrowserPanel({
 
   const panelClasses = [
     'bb-panel',
-    resolvedMode === 'fullscreen' ? 'bb-panel--fullscreen' : 'bb-panel--sidebar',
-    isHolder && view?.phase === 'human' ? 'bb-panel--controlling' : '',
+    resolvedMode === 'fullscreen' ? 'bb-panel--fullscreen' : '',
     className ?? '',
   ]
     .filter(Boolean)
     .join(' ');
 
+  const navigationButtons = [
+    { action: 'back', label: t('后退', 'Back'), Icon: ArrowLeft, available: view?.canGoBack !== false },
+    { action: 'forward', label: t('前进', 'Forward'), Icon: ArrowRight, available: view?.canGoForward !== false },
+    { action: 'reload', label: t('刷新', 'Reload'), Icon: RefreshCw, available: true },
+  ] as const;
+  const remoteKeys = [
+    { key: 'Enter', label: t('回车', 'Enter') },
+    { key: 'Tab', label: 'Tab' },
+    { key: 'Backspace', label: t('退格', 'Backspace'), CompactIcon: Delete },
+    { key: 'Escape', label: 'Esc' },
+  ];
+
   const primaryActionButton = (() => {
-    if (!isAvailableInteractive) return null;
+    if (!isAvailableInteractive || isHeld) return null;
 
     if (isTaking) {
       return (
@@ -1156,27 +1180,15 @@ export function BotBrowserPanel({
 
     if (view?.phase === 'human' && isHolder) {
       return (
-        <div className="bb-action-pair">
-          <button
-            type="button"
-            className="bb-btn bb-btn--primary"
-            disabled={pendingAction !== null}
-            onClick={() => void handleHandback()}
-          >
-            <Bot size={14} aria-hidden="true" />
-            <span>{t('交还给 Bot', 'Hand back')}</span>
-          </button>
-          <button
-            type="button"
-            className="bb-btn bb-btn--ghost"
-            disabled={pendingAction !== null}
-            onClick={() => void handleRelease(false)}
-            title={t('释放接管控制权', 'Release control lease')}
-          >
-            <Square size={13} aria-hidden="true" />
-            <span>{t('释放', 'Release')}</span>
-          </button>
-        </div>
+        <button
+          type="button"
+          className="bb-btn bb-btn--primary"
+          disabled={pendingAction !== null}
+          onClick={() => void handleHandback()}
+        >
+          <Bot size={16} aria-hidden="true" />
+          <span>{t('交还给 Bot', 'Hand back')}</span>
+        </button>
       );
     }
 
@@ -1190,20 +1202,6 @@ export function BotBrowserPanel({
         >
           <Unlock size={14} aria-hidden="true" />
           <span>{t('切换到本机接管', 'Take control here')}</span>
-        </button>
-      );
-    }
-
-    if (isHeld) {
-      return (
-        <button
-          type="button"
-          className="bb-btn bb-btn--warn"
-          disabled={pendingAction !== null}
-          onClick={() => void handleTakeover({ force: true })}
-        >
-          <Play size={14} aria-hidden="true" />
-          <span>{t('继续接管', 'Resume control')}</span>
         </button>
       );
     }
@@ -1238,24 +1236,70 @@ export function BotBrowserPanel({
       {/* Top status & primary action header */}
       <header className="bb-header">
         <div className="bb-header-left">
-          <div className={`bb-status-pill bb-status-pill--${statusInfo.tone}`} role="status" aria-live="polite">
-            {statusInfo.spinning ? (
-              <Loader2 size={13} className="bb-spin" aria-hidden="true" />
-            ) : (
-              <span className="bb-status-dot" aria-hidden="true" />
-            )}
-            <span className="bb-status-text">{statusInfo.text}</span>
+          <div className="bb-heading">
+            <h2 className="bb-title">{t('浏览器', 'Browser')}</h2>
+            {botName ? <span className="bb-bot-name" title={botName}>{botName}</span> : null}
           </div>
-          {isSensitive && isHolder ? (
-            <span className="bb-shield-chip" title={t('敏感页保护中，Bot 观察与截图已阻断', 'Privacy shield active: Bot observation and screenshots are blocked')}>
-              <Shield size={12} aria-hidden="true" />
-              <span>{t('隐私保护', 'Private')}</span>
+          <div className="bb-header-context">
+            <span className={`bb-status bb-status--${statusInfo.tone}`} role="status" title={statusInfo.text}>
+              {statusInfo.spinning ? (
+                <Loader2 size={13} className="bb-spin" aria-hidden="true" />
+              ) : (
+                <span className="bb-status-dot" aria-hidden="true" />
+              )}
+              <span className="bb-status-text">{statusInfo.text}</span>
             </span>
-          ) : null}
+            {isSensitive && isHolder ? (
+              <span className="bb-shield-chip" title={t('敏感页保护中，Bot 观察与截图已阻断', 'Privacy shield active: Bot observation and screenshots are blocked')}>
+                <Shield size={14} aria-hidden="true" />
+                <span>{t('隐私保护', 'Private')}</span>
+              </span>
+            ) : null}
+          </div>
         </div>
 
         <div className="bb-header-right">
-          {resolvedMode === 'sidebar' && !signInTakeover ? primaryActionButton : null}
+          {!signInTakeover ? primaryActionButton : null}
+          <details
+            ref={moreRef}
+            className="bb-more"
+            onBlur={(event) => {
+              if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) {
+                event.currentTarget.open = false;
+              }
+            }}
+          >
+            <summary className="bb-icon-btn" aria-label={t('更多浏览器操作', 'More browser actions')} title={t('更多操作', 'More actions')}>
+              <Ellipsis size={20} aria-hidden="true" />
+            </summary>
+            <div className="bb-more-actions">
+              {isHolder && view?.phase === 'human' ? (
+                <button
+                  type="button"
+                  className="bb-btn bb-btn--ghost"
+                  disabled={pendingAction !== null}
+                  onClick={() => {
+                    if (moreRef.current) moreRef.current.open = false;
+                    void handleRelease(false);
+                  }}
+                >
+                  <Square size={16} aria-hidden="true" />
+                  {t('释放控制权', 'Release control')}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="bb-btn bb-btn--ghost"
+                onClick={() => {
+                  if (moreRef.current) moreRef.current.open = false;
+                  setExternalConfirmOpen(true);
+                }}
+              >
+                <ExternalLink size={16} aria-hidden="true" />
+                {t('切换外置引导', 'Use external browser')}
+              </button>
+            </div>
+          </details>
           {mode === 'auto' && !isMobileViewport ? (
             <button
               type="button"
@@ -1290,45 +1334,47 @@ export function BotBrowserPanel({
       {view?.available ? (
         <div className="bb-chrome">
           {view.tabs.length > 0 || isHolder ? (
-            <div className="bb-tabs" role="tablist" aria-label={t('浏览器标签页', 'Browser tabs')}>
-              {view.tabs.map((tab) => {
-                const selected = tab.id === view.pageId;
-                const tabHost = classifyPageUrl(tab.url).displayHost;
-                const label = tab.title.trim() || tabHost || t('新标签页', 'New tab');
-                return (
-                  <div
-                    key={tab.id}
-                    className={`bb-tab ${selected ? 'bb-tab--active' : ''}`}
-                    role="presentation"
-                  >
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={selected}
-                      className="bb-tab-select"
-                      disabled={pendingAction !== null || isOtherHolder}
-                      onClick={() => {
-                        if (!selected) void runPageAction('tab', 'select', { pageId: tab.id });
-                      }}
-                      title={tab.url || label}
+            <div className="bb-tabs-row">
+              <div className="bb-tabs" role="tablist" aria-label={t('浏览器标签页', 'Browser tabs')}>
+                {view.tabs.map((tab) => {
+                  const selected = tab.id === view.pageId;
+                  const tabHost = classifyPageUrl(tab.url).displayHost;
+                  const label = tab.title.trim() || tabHost || t('新标签页', 'New tab');
+                  return (
+                    <div
+                      key={tab.id}
+                      className={`bb-tab ${selected ? 'bb-tab--active' : ''}`}
+                      role="presentation"
                     >
-                      <Globe size={12} aria-hidden="true" className="bb-tab-icon" />
-                      <span className="bb-tab-title">{label}</span>
-                    </button>
-                    {!isOtherHolder ? (
                       <button
                         type="button"
-                        className="bb-tab-close"
-                        disabled={pendingAction !== null}
-                        aria-label={t(`关闭标签页 ${label}`, `Close tab ${label}`)}
-                        onClick={() => void runPageAction('tab', 'closeTab', { pageId: tab.id })}
+                        role="tab"
+                        aria-selected={selected}
+                        className="bb-tab-select"
+                        disabled={pendingAction !== null || isOtherHolder}
+                        onClick={() => {
+                          if (!selected) void runPageAction('tab', 'select', { pageId: tab.id });
+                        }}
+                        title={tab.url || label}
                       >
-                        <X size={11} aria-hidden="true" />
+                        <Globe size={16} aria-hidden="true" className="bb-tab-icon" />
+                        <span className="bb-tab-title">{label}</span>
                       </button>
-                    ) : null}
-                  </div>
-                );
-              })}
+                      {!isOtherHolder ? (
+                        <button
+                          type="button"
+                          className="bb-tab-close"
+                          disabled={pendingAction !== null}
+                          aria-label={t(`关闭标签页 ${label}`, `Close tab ${label}`)}
+                          onClick={() => void runPageAction('tab', 'closeTab', { pageId: tab.id })}
+                        >
+                          <X size={16} aria-hidden="true" />
+                        </button>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
               {!isOtherHolder ? (
                 <button
                   type="button"
@@ -1338,7 +1384,8 @@ export function BotBrowserPanel({
                   title={t('新建标签页', 'New tab')}
                   onClick={() => void runPageAction('tab', 'open', { pageId: null })}
                 >
-                  <Plus size={14} aria-hidden="true" />
+                  <Plus size={18} aria-hidden="true" />
+                  <span>{t('新建', 'New tab')}</span>
                 </button>
               ) : null}
             </div>
@@ -1346,41 +1393,24 @@ export function BotBrowserPanel({
 
           <div className="bb-nav-row">
             <div className="bb-nav-buttons">
-              <button
-                type="button"
-                className="bb-icon-btn"
-                disabled={!canNavigate || view.canGoBack === false}
-                aria-label={t('后退', 'Back')}
-                title={canNavigate ? t('后退', 'Back') : t('接管此页后可操作导航', 'Take over to navigate')}
-                onClick={() => void runPageAction('navigating', 'back')}
-              >
-                <ChevronLeft size={16} aria-hidden="true" />
-              </button>
-              <button
-                type="button"
-                className="bb-icon-btn"
-                disabled={!canNavigate || view.canGoForward === false}
-                aria-label={t('前进', 'Forward')}
-                title={canNavigate ? t('前进', 'Forward') : t('接管此页后可操作导航', 'Take over to navigate')}
-                onClick={() => void runPageAction('navigating', 'forward')}
-              >
-                <ChevronRight size={16} aria-hidden="true" />
-              </button>
-              <button
-                type="button"
-                className="bb-icon-btn"
-                disabled={!canNavigate}
-                aria-label={t('刷新当前页面', 'Reload page')}
-                title={canNavigate ? t('刷新', 'Reload') : t('接管此页后可刷新', 'Take over to reload')}
-                onClick={() => void runPageAction('navigating', 'reload')}
-              >
-                <RefreshCw size={14} aria-hidden="true" />
-              </button>
+              {navigationButtons.map(({ action, label, Icon, available }) => (
+                <button
+                  key={action}
+                  type="button"
+                  className="bb-nav-btn"
+                  disabled={!canNavigate || !available}
+                  title={canNavigate ? label : t('接管后可操作导航', 'Take over to navigate')}
+                  onClick={() => void runPageAction('navigating', action)}
+                >
+                  <Icon size={18} aria-hidden="true" />
+                  <span>{label}</span>
+                </button>
+              ))}
             </div>
 
             <form className="bb-address-form" onSubmit={handleUrlSubmit}>
               <span className="bb-address-lock" aria-hidden="true">
-                {urlMeta.isSecure ? <Lock size={12} /> : <Globe size={12} />}
+                {urlMeta.isSecure ? <Lock size={16} /> : <Globe size={16} />}
               </span>
               <input
                 type="text"
@@ -1405,28 +1435,31 @@ export function BotBrowserPanel({
                 <button
                   type="button"
                   className="bb-zoom-btn"
-                  disabled={zoom <= ZOOM_STEPS[0]}
+                  disabled={zoom <= ZOOM_STEPS[0] + 0.01}
                   aria-label={t('缩小画面', 'Zoom out')}
+                  title={t('缩小画面', 'Zoom out')}
                   onClick={() => stepZoom(-1)}
                 >
-                  −
+                  <Minus size={18} aria-hidden="true" />
                 </button>
                 <button
                   type="button"
                   className="bb-zoom-label"
-                  onClick={() => setZoom(1)}
-                  title={t('重置为 100%', 'Reset zoom to 100%')}
+                  onClick={() => setPreferredZoom(1)}
+                  aria-label={t('适应窗口', 'Fit to window')}
+                  title={t('适应窗口', 'Fit to window')}
                 >
-                  {`${Math.round(zoom * 100)}%`}
+                  {zoom === 1 ? t('适应', 'Fit') : `${Math.round(zoom * 100)}%`}
                 </button>
                 <button
                   type="button"
                   className="bb-zoom-btn"
-                  disabled={zoom >= ZOOM_STEPS[ZOOM_STEPS.length - 1]}
+                  disabled={zoom >= ZOOM_STEPS[ZOOM_STEPS.length - 1] - 0.01}
                   aria-label={t('放大画面', 'Zoom in')}
+                  title={t('放大画面', 'Zoom in')}
                   onClick={() => stepZoom(1)}
                 >
-                  +
+                  <Plus size={18} aria-hidden="true" />
                 </button>
               </div>
             ) : null}
@@ -1436,23 +1469,14 @@ export function BotBrowserPanel({
 
       {/* Contextual banners — shown only when actionable */}
       <div className="bb-banners">
-        {view?.attentionRequested && view.phase === 'bot' && isAvailableInteractive && !signInTakeover ? (
+        {view?.attentionRequested && view.attentionMessage && view.phase === 'bot' && isAvailableInteractive && !signInTakeover ? (
           <div className="bb-banner bb-banner--warn" role="status">
             <AlertTriangle size={15} className="bb-banner-icon" aria-hidden="true" />
             <div className="bb-banner-body">
               <div className="bb-banner-title">
-                {view.attentionMessage ||
-                  t('Bot 请求你接管当前页面以完成需人工确认的步骤。', 'Bot paused and requests you to take over this page.')}
+                {view.attentionMessage}
               </div>
             </div>
-            <button
-              type="button"
-              className="bb-btn bb-btn--warn bb-btn--sm"
-              disabled={pendingAction !== null}
-              onClick={() => void handleTakeover()}
-            >
-              {t('接管此页', 'Take over')}
-            </button>
           </div>
         ) : null}
 
@@ -1557,7 +1581,7 @@ export function BotBrowserPanel({
             <div className="bb-banner-body">{errorBanner}</div>
             <button
               type="button"
-              className="bb-icon-btn bb-icon-btn--sm"
+                className="bb-icon-btn"
               aria-label={t('关闭错误提示', 'Dismiss error')}
               onClick={() => setErrorBanner(null)}
             >
@@ -1572,7 +1596,7 @@ export function BotBrowserPanel({
             <div className="bb-banner-body">{noticeBanner}</div>
             <button
               type="button"
-              className="bb-icon-btn bb-icon-btn--sm"
+                className="bb-icon-btn"
               aria-label={t('关闭提示', 'Dismiss notice')}
               onClick={() => setNoticeBanner(null)}
             >
@@ -1598,7 +1622,7 @@ export function BotBrowserPanel({
         signInTakeoverAction={signInTakeover ? primaryActionButton : null}
         zoom={zoom}
         hostLabel={hostLabel}
-        onZoomChange={setZoom}
+        onZoomChange={setPreferredZoom}
         onInput={handleInput}
         onRetry={handleRetry}
         onOpenTab={
@@ -1620,7 +1644,7 @@ export function BotBrowserPanel({
             autoComplete="off"
             autoCorrect="off"
             spellCheck={false}
-            placeholder={t('向当前网页输入文字（支持中文输入法）…', 'Type into the live page (IME supported)…')}
+            placeholder={t('输入到网页（支持输入法）', 'Type into the page (IME supported)')}
             aria-label={t('向当前网页输入文字', 'Type text into the live webpage')}
             onChange={handleRemoteTextChange}
             onCompositionStart={handleRemoteTextCompositionStart}
@@ -1628,40 +1652,19 @@ export function BotBrowserPanel({
             onKeyDown={handleRemoteTextKeyDown}
           />
           <div className="bb-key-strip">
-            <button
-              type="button"
-              className="bb-key-btn"
-              onClick={() => handleInput({ kind: 'key', key: 'Enter' })}
-              aria-label={t('发送回车键', 'Send Enter key')}
-              title="Enter"
-            >
-              <CornerUpLeft size={13} aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              className="bb-key-btn"
-              onClick={() => handleInput({ kind: 'key', key: 'Tab' })}
-              title="Tab"
-            >
-              Tab
-            </button>
-            <button
-              type="button"
-              className="bb-key-btn"
-              onClick={() => handleInput({ kind: 'key', key: 'Backspace' })}
-              aria-label={t('发送退格键', 'Send Backspace key')}
-              title="Backspace"
-            >
-              ⌫
-            </button>
-            <button
-              type="button"
-              className="bb-key-btn"
-              onClick={() => handleInput({ kind: 'key', key: 'Escape' })}
-              title="Escape"
-            >
-              Esc
-            </button>
+            {remoteKeys.map(({ key, label, CompactIcon }) => (
+              <button
+                key={key}
+                type="button"
+                className="bb-key-btn"
+                aria-label={label}
+                title={label}
+                onClick={() => handleInput({ kind: 'key', key })}
+              >
+                {CompactIcon ? <CompactIcon className="bb-key-compact-icon" size={18} aria-hidden="true" /> : null}
+                <span className="bb-key-label">{label}</span>
+              </button>
+            ))}
             {resolvedMode === 'fullscreen' ? (
               <>
                 <button
@@ -1670,7 +1673,8 @@ export function BotBrowserPanel({
                   onClick={() => handleInput({ kind: 'wheel', x: 0.5, y: 0.5, deltaX: 0, deltaY: -280 })}
                   aria-label={t('向上滚动页面', 'Scroll page up')}
                 >
-                  <ChevronUp size={14} aria-hidden="true" />
+                  <ChevronUp size={18} aria-hidden="true" />
+                  {t('上滚', 'Up')}
                 </button>
                 <button
                   type="button"
@@ -1678,45 +1682,14 @@ export function BotBrowserPanel({
                   onClick={() => handleInput({ kind: 'wheel', x: 0.5, y: 0.5, deltaX: 0, deltaY: 280 })}
                   aria-label={t('向下滚动页面', 'Scroll page down')}
                 >
-                  <ChevronDown size={14} aria-hidden="true" />
+                  <ChevronDown size={18} aria-hidden="true" />
+                  {t('下滚', 'Down')}
                 </button>
               </>
             ) : null}
           </div>
         </div>
       ) : null}
-
-      {/* Footer: mobile thumb action bar OR quiet desktop isolation footer */}
-      <footer className={`bb-footer ${resolvedMode === 'fullscreen' ? 'bb-footer--mobile' : ''}`}>
-        {resolvedMode === 'fullscreen' ? (
-          <div className="bb-footer-mobile-row">
-            {!signInTakeover ? <div className="bb-footer-primary">{primaryActionButton}</div> : null}
-            <button
-              type="button"
-              className="bb-btn bb-btn--ghost bb-btn--sm"
-              onClick={() => setExternalConfirmOpen(true)}
-            >
-              <ExternalLink size={13} aria-hidden="true" />
-              <span>{t('外置引导', 'External')}</span>
-            </button>
-          </div>
-        ) : (
-          <div className="bb-footer-desktop-row">
-            <button
-              type="button"
-              className="bb-link-btn"
-              onClick={() => setExternalConfirmOpen(true)}
-            >
-              <ExternalLink size={12} aria-hidden="true" />
-              <span>{t('切换外置引导', 'Guide in my browser')}</span>
-            </button>
-            <span className="bb-isolation-tag" title={t('该浏览器的 Cookie 与存储按 Bot 独立隔离，不等同于 Google API 授权', 'Cookies and storage are isolated per Bot and separate from Google API grants')}>
-              <ShieldCheck size={12} aria-hidden="true" />
-              <span>{t('仅本 Bot 独立浏览态', 'Isolated per-Bot session')}</span>
-            </span>
-          </div>
-        )}
-      </footer>
     </section>
   );
 }

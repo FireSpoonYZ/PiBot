@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { KeyboardEvent, PointerEvent, ReactNode } from 'react';
 import {
   AlertTriangle,
@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useText } from '../ui';
 import {
+  ZOOM_STEPS,
   activeTabOf,
   classifyPageUrl,
   mapClientPointToNormalized,
@@ -52,8 +53,8 @@ interface TapRipple {
 }
 
 const TAP_MOVE_THRESHOLD_PX = 10;
-const MIN_ZOOM = 1;
-const MAX_ZOOM = 2.5;
+const MIN_ZOOM = ZOOM_STEPS[0];
+const MAX_ZOOM = ZOOM_STEPS[ZOOM_STEPS.length - 1];
 
 function clampZoom(value: number): number {
   if (!Number.isFinite(value)) return MIN_ZOOM;
@@ -83,7 +84,10 @@ export function BotBrowserViewport({
   onExitStageFocus,
 }: BotBrowserViewportProps) {
   const t = useText();
-  const stageRef = useRef<HTMLDivElement | null>(null);
+  const [stage, setStage] = useState<HTMLDivElement | null>(null);
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
+  const viewCenterRef = useRef({ x: 0.5, y: 0.5 });
+  const centeredPageRef = useRef<string | undefined>(undefined);
   const frameWrapRef = useRef<HTMLDivElement | null>(null);
   const [imgEl, setImgEl] = useState<HTMLImageElement | null>(null);
   const [ripple, setRipple] = useState<TapRipple | null>(null);
@@ -94,13 +98,19 @@ export function BotBrowserViewport({
     pointerId: number;
     clientX: number;
     clientY: number;
-    button: number;
+    lastX: number;
+    lastY: number;
+    dragging: boolean;
+    pageId: string;
+    revision: number;
   } | null>(null);
   const activeTouchesRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const pinchRef = useRef<{ startDist: number; startZoom: number } | null>(null);
   const suppressNextClickRef = useRef(false);
 
-  const wheelPendingRef = useRef<{ x: number; y: number; dx: number; dy: number } | null>(null);
+  const wheelPendingRef = useRef<{
+    x: number; y: number; dx: number; dy: number; pageId: string; revision: number;
+  } | null>(null);
   const wheelRafRef = useRef<number | null>(null);
 
   const canSendInputRef = useRef(canSendInput);
@@ -109,6 +119,39 @@ export function BotBrowserViewport({
   liveFrameRef.current = liveFrame;
   const onInputRef = useRef(onInput);
   onInputRef.current = onInput;
+
+  const framePageId = liveFrame?.pageId;
+  const frameRatio = liveFrame ? liveFrame.width / liveFrame.height : 1;
+  const renderedWidth = Math.floor(Math.min(stageSize.width, stageSize.height * frameRatio) * zoom);
+  const renderedHeight = renderedWidth / frameRatio;
+  const zoomed = zoom > MIN_ZOOM + 0.01;
+
+  useLayoutEffect(() => {
+    if (!stage) return;
+    const measure = () => {
+      const { width, height } = stage.getBoundingClientRect();
+      setStageSize((prev) => prev.width === width && prev.height === height ? prev : { width, height });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, [stage]);
+
+  // Keep the same point in the page centered as the frame scales.
+  useLayoutEffect(() => {
+    const wrap = frameWrapRef.current;
+    if (!stage || !wrap || !framePageId || renderedWidth <= 0) return;
+    if (centeredPageRef.current !== framePageId) {
+      centeredPageRef.current = framePageId;
+      viewCenterRef.current = { x: 0.5, y: 0.5 };
+    }
+    const center = viewCenterRef.current;
+    const stageRect = stage.getBoundingClientRect();
+    const frameRect = wrap.getBoundingClientRect();
+    stage.scrollLeft += frameRect.left - stageRect.left + center.x * renderedWidth - stage.clientWidth / 2;
+    stage.scrollTop += frameRect.top - stageRect.top + center.y * renderedHeight - stage.clientHeight / 2;
+  }, [stage, framePageId, renderedWidth, renderedHeight]);
 
   useEffect(() => {
     return () => {
@@ -126,16 +169,24 @@ export function BotBrowserViewport({
     }, 360);
   }, []);
 
-  // Non-passive wheel forwarding: accurately projects cursor position and coalesces trackpad deltas.
-  useEffect(() => {
-    const el = imgEl;
-    if (!el) return;
-
-    const flushWheel = () => {
+  const queueWheel = useCallback((point: { x: number; y: number }, frame: BrowserFrame, dx: number, dy: number) => {
+    if (dx === 0 && dy === 0) return;
+    const previous = wheelPendingRef.current;
+    if (previous?.pageId === frame.pageId && previous.revision === frame.revision) {
+      previous.x = point.x;
+      previous.y = point.y;
+      previous.dx = Math.max(-600, Math.min(600, previous.dx + dx));
+      previous.dy = Math.max(-600, Math.min(600, previous.dy + dy));
+    } else {
+      wheelPendingRef.current = { ...point, dx, dy, pageId: frame.pageId, revision: frame.revision };
+    }
+    if (wheelRafRef.current !== null) return;
+    wheelRafRef.current = window.requestAnimationFrame(() => {
       wheelRafRef.current = null;
       const pending = wheelPendingRef.current;
       wheelPendingRef.current = null;
-      if (!pending || !canSendInputRef.current) return;
+      const live = liveFrameRef.current;
+      if (!pending || !canSendInputRef.current || live?.pageId !== pending.pageId || live.revision !== pending.revision) return;
       if (pending.dx === 0 && pending.dy === 0) return;
       onInputRef.current({
         kind: 'wheel',
@@ -144,8 +195,13 @@ export function BotBrowserViewport({
         deltaX: pending.dx,
         deltaY: pending.dy,
       });
-    };
+    });
+  }, []);
 
+  // Non-passive wheel forwarding for desktop mice and trackpads.
+  useEffect(() => {
+    const el = imgEl;
+    if (!el) return;
     const onWheel = (ev: WheelEvent) => {
       if (!canSendInputRef.current) return;
       const frame = liveFrameRef.current;
@@ -161,27 +217,8 @@ export function BotBrowserViewport({
       if (!point) return;
 
       ev.preventDefault();
-      const normalized = normalizeWheelDelta(ev.deltaX, ev.deltaY, ev.deltaMode);
-      if (normalized.deltaX === 0 && normalized.deltaY === 0) return;
-
-      const prev = wheelPendingRef.current;
-      if (prev) {
-        prev.x = point.x;
-        prev.y = point.y;
-        prev.dx = Math.max(-600, Math.min(600, prev.dx + normalized.deltaX));
-        prev.dy = Math.max(-600, Math.min(600, prev.dy + normalized.deltaY));
-      } else {
-        wheelPendingRef.current = {
-          x: point.x,
-          y: point.y,
-          dx: normalized.deltaX,
-          dy: normalized.deltaY,
-        };
-      }
-
-      if (wheelRafRef.current === null) {
-        wheelRafRef.current = window.requestAnimationFrame(flushWheel);
-      }
+      const { deltaX, deltaY } = normalizeWheelDelta(ev.deltaX, ev.deltaY, ev.deltaMode);
+      queueWheel(point, frame, deltaX, deltaY);
     };
 
     el.addEventListener('wheel', onWheel, { passive: false });
@@ -193,9 +230,13 @@ export function BotBrowserViewport({
       }
       wheelPendingRef.current = null;
     };
-  }, [imgEl]);
+  }, [imgEl, queueWheel]);
 
   const handlePointerDown = (ev: PointerEvent<HTMLImageElement>) => {
+    if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+    if (ev.pointerType === 'touch' || canSendInput || zoomed) {
+      ev.currentTarget.setPointerCapture(ev.pointerId);
+    }
     if (ev.pointerType === 'touch') {
       activeTouchesRef.current.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
       if (activeTouchesRef.current.size === 2) {
@@ -208,14 +249,17 @@ export function BotBrowserViewport({
       }
     }
 
-    if (!canSendInput) return;
-    if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+    if ((!canSendInput && !zoomed) || !liveFrame) return;
 
     pointerStartRef.current = {
       pointerId: ev.pointerId,
       clientX: ev.clientX,
       clientY: ev.clientY,
-      button: ev.button,
+      lastX: ev.clientX,
+      lastY: ev.clientY,
+      dragging: false,
+      pageId: liveFrame.pageId,
+      revision: liveFrame.revision,
     };
     suppressNextClickRef.current = false;
   };
@@ -233,11 +277,23 @@ export function BotBrowserViewport({
     }
 
     const start = pointerStartRef.current;
-    if (start && start.pointerId === ev.pointerId) {
-      const moved = Math.hypot(ev.clientX - start.clientX, ev.clientY - start.clientY);
-      if (moved > TAP_MOVE_THRESHOLD_PX) {
-        pointerStartRef.current = null;
-      }
+    if (start?.pointerId !== ev.pointerId) return;
+    if (!start.dragging && Math.hypot(ev.clientX - start.clientX, ev.clientY - start.clientY) <= TAP_MOVE_THRESHOLD_PX) return;
+    start.dragging = true;
+    const dx = start.lastX - ev.clientX;
+    const dy = start.lastY - ev.clientY;
+    start.lastX = ev.clientX;
+    start.lastY = ev.clientY;
+    if (zoomed && stage) {
+      stage.scrollLeft += dx;
+      stage.scrollTop += dy;
+    } else if (ev.pointerType === 'touch' && canSendInput && liveFrame?.pageId === start.pageId && liveFrame.revision === start.revision) {
+      const rect = ev.currentTarget.getBoundingClientRect();
+      const point = mapClientPointToNormalized(start.clientX, start.clientY, rect, liveFrame.width, liveFrame.height);
+      if (!point) return;
+      const scale = liveFrame.width / rect.width;
+      const { deltaX, deltaY } = normalizeWheelDelta(dx * scale, dy * scale, 0);
+      queueWheel(point, liveFrame, deltaX, deltaY);
     }
   };
 
@@ -257,7 +313,8 @@ export function BotBrowserViewport({
       return;
     }
 
-    if (!start || start.pointerId !== ev.pointerId || !canSendInput || !imgEl || !liveFrame) {
+    if (!start || start.pointerId !== ev.pointerId || start.dragging || !canSendInput || !imgEl ||
+        liveFrame?.pageId !== start.pageId || liveFrame.revision !== start.revision) {
       return;
     }
 
@@ -274,16 +331,8 @@ export function BotBrowserViewport({
     );
     if (!point) return;
 
-    stageRef.current?.focus({ preventScroll: true });
-    const wrapRect = frameWrapRef.current?.getBoundingClientRect();
-    if (wrapRect && wrapRect.width > 0 && wrapRect.height > 0) {
-      showRipple(
-        ((ev.clientX - wrapRect.left) / wrapRect.width) * 100,
-        ((ev.clientY - wrapRect.top) / wrapRect.height) * 100,
-      );
-    } else {
-      showRipple(point.x * 100, point.y * 100);
-    }
+    stage?.focus({ preventScroll: true });
+    showRipple(point.x * 100, point.y * 100);
     onInput({ kind: 'click', x: point.x, y: point.y });
   };
 
@@ -302,7 +351,7 @@ export function BotBrowserViewport({
     // Shift+Escape exits remote keyboard focus without trapping keyboard-only users.
     if (ev.key === 'Escape' && ev.shiftKey) {
       ev.preventDefault();
-      stageRef.current?.blur();
+      stage?.blur();
       onExitStageFocus?.();
       return;
     }
@@ -517,10 +566,10 @@ export function BotBrowserViewport({
   }
 
   // 7. Live interactive (or read-only) frame stage.
-  const zoomed = zoom > 1.01;
   const stageClass = [
     'bb-stage',
-    canSendInput ? 'bb-stage--interactive' : 'bb-stage--readonly',
+    'bb-stage--page',
+    canSendInput ? 'bb-stage--interactive' : '',
     zoomed ? 'bb-stage--zoomed' : '',
   ]
     .filter(Boolean)
@@ -528,7 +577,7 @@ export function BotBrowserViewport({
 
   return (
     <div
-      ref={stageRef}
+      ref={setStage}
       className={stageClass}
       tabIndex={canSendInput ? 0 : -1}
       role={canSendInput ? 'application' : 'region'}
@@ -538,46 +587,51 @@ export function BotBrowserViewport({
           : t('Bot 浏览器只读实时画面', 'Read-only live view of Bot browser')
       }
       onKeyDown={handleStageKeyDown}
+      onScroll={(event) => {
+        const scroller = event.currentTarget;
+        const frameRect = frameWrapRef.current?.getBoundingClientRect();
+        if (!frameRect?.width || !frameRect.height) return;
+        const stageRect = scroller.getBoundingClientRect();
+        viewCenterRef.current = {
+          x: Math.max(0, Math.min(1, (stageRect.left + scroller.clientWidth / 2 - frameRect.left) / frameRect.width)),
+          y: Math.max(0, Math.min(1, (stageRect.top + scroller.clientHeight / 2 - frameRect.top) / frameRect.height)),
+        };
+      }}
     >
-      <div
-        ref={frameWrapRef}
-        className="bb-frame-wrap"
-        style={
-          zoomed
-            ? {
-                width: `${Math.round(zoom * 100)}%`,
-                aspectRatio: `${liveFrame.width} / ${liveFrame.height}`,
-              }
-            : undefined
-        }
-      >
-        <img
-          ref={setImgEl}
-          className={`bb-frame-img ${canSendInput ? 'bb-frame-img--live' : ''}`}
-          src={`data:${liveFrame.mimeType};base64,${liveFrame.data}`}
-          alt={
-            currentTab?.title
-              ? t(`当前网页画面：${currentTab.title}`, `Live browser page: ${currentTab.title}`)
-              : t('Bot 浏览器实时画面', 'Live Bot browser page')
-          }
-          draggable={false}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerCancel}
-          onContextMenu={(ev) => {
-            if (canSendInput) ev.preventDefault();
-          }}
-          onDragStart={(ev) => ev.preventDefault()}
-        />
-        {ripple ? (
-          <span
-            key={ripple.id}
-            className="bb-tap-ripple"
-            style={{ left: `${ripple.xPct}%`, top: `${ripple.yPct}%` }}
-            aria-hidden="true"
+      <div className="bb-page-area">
+        <div
+          ref={frameWrapRef}
+          className="bb-frame-wrap"
+          style={{ width: renderedWidth, height: renderedHeight }}
+        >
+          <img
+            ref={setImgEl}
+            className={`bb-frame-img ${canSendInput ? 'bb-frame-img--live' : ''}`}
+            src={`data:${liveFrame.mimeType};base64,${liveFrame.data}`}
+            alt={
+              currentTab?.title
+                ? t(`当前网页画面：${currentTab.title}`, `Live browser page: ${currentTab.title}`)
+                : t('Bot 浏览器实时画面', 'Live Bot browser page')
+            }
+            draggable={false}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerCancel}
+            onContextMenu={(ev) => {
+              if (canSendInput) ev.preventDefault();
+            }}
+            onDragStart={(ev) => ev.preventDefault()}
           />
-        ) : null}
+          {ripple ? (
+            <span
+              key={ripple.id}
+              className="bb-tap-ripple"
+              style={{ left: `${ripple.xPct}%`, top: `${ripple.yPct}%` }}
+              aria-hidden="true"
+            />
+          ) : null}
+        </div>
       </div>
     </div>
   );
