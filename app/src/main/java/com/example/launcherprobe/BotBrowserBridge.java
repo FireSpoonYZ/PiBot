@@ -15,7 +15,7 @@ import java.util.function.BooleanSupplier;
 final class BotBrowserBridge {
     private static final Set<String> ACTIONS = Set.of(
             "status", "open", "navigate", "back", "forward", "reload",
-            "select", "closeTab", "frame", "snapshot", "act", "input", "release"
+            "select", "closeTab", "frame", "snapshot", "act", "input", "release", "nativeGrant", "nativeRevoke"
     );
     private static final Set<String> SOURCES = Set.of("agent", "human");
 
@@ -75,6 +75,12 @@ final class BotBrowserBridge {
         }
 
         return switch (action) {
+            case "nativeGrant", "nativeRevoke" -> {
+                if (!"human".equals(source) || !BotHostNativeTools.isHumanTaskId(context.opt("taskId"))) {
+                    throw new Failure("INVALID_ARGUMENT", "Native presentation requires a human lease");
+                }
+                yield manager.nativePresentation(deviceId, botId, action, arguments);
+            }
             case "status" -> manager.status(deviceId, botId, source, cancelled);
             case "open" -> manager.open(deviceId, botId, source, arguments, cancelled);
             case "navigate" -> manager.navigate(deviceId, botId, source, arguments, cancelled);

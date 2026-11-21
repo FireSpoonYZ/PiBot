@@ -11,7 +11,7 @@ export function createBrowserFrameSubscriber(
   identity: DesktopIdentity | null | undefined,
   botId: string | undefined,
 ): SubscribeBrowserFrames | undefined {
-  if (!api || identity?.kind !== 'relay' || !botId) return;
+  if (!api || !identity || !botId) return;
 
   return (target, { onFrame, onError }) => {
     let closed = false;

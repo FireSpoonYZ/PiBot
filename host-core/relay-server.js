@@ -9,6 +9,7 @@
 // The relay never persists messages and keeps no business state beyond peers.
 
 import { randomUUID } from 'node:crypto';
+import { createBrowserEgressRelay } from './bot-browser/egress-relay.js';
 import { createServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSecureContext } from 'node:tls';
@@ -190,6 +191,7 @@ export async function openRelayServer(options = {}) {
       perMessageDeflate: false
     });
     wss.on('headers', (headers, req) => {
+      if (req.headers['x-pibot-browser-egress'] === '1') headers.push('X-PiBot-Browser-Egress: 1');
       const negotiated = upgradeLiveExtensions.get(req);
       const value = formatLiveExtensionsHeader(negotiated);
       if (value !== null) {
@@ -213,6 +215,10 @@ export async function openRelayServer(options = {}) {
   }
 
   const deviceMap = new Map(); // deviceId -> host conn (authenticated)
+  const browserEgress = createBrowserEgressRelay({
+    findHost: (deviceId) => deviceMap.get(deviceId), usable: peerUsable,
+    send: (conn, frame) => writeFrame(conn.ws, frame, noop),
+  });
   const allConns = new Set();  // every accepted WS, authenticated or not
   const upgradeSockets = new Set();
   const controlRoutes = openControlRoutes(); // bounded control-call correlation
@@ -231,6 +237,7 @@ export async function openRelayServer(options = {}) {
   }
 
   function connCleanup(conn) {
+    browserEgress.disconnect(conn);
     clearTimeout(conn.helloTimer);
     if (conn.deviceId !== null && deviceMap.get(conn.deviceId) === conn) {
       deviceMap.delete(conn.deviceId);
@@ -1039,6 +1046,10 @@ export async function openRelayServer(options = {}) {
       return closeWith(conn, RELAY_CLOSE.REVOKED);
     }
 
+    if (frame.type === 'browser-egress') {
+      if (conn.controlProtocol !== 2 || !conn.browserEgress) return closeWith(conn, RELAY_CLOSE.REVOKED);
+      return browserEgress.handle(conn, frame);
+    }
     // Roles separate traffic, not credential privilege: clients only
     // place/cancel control calls; hosts only send legacy frames and control
     // results. Role violations close 4403 (REVOKED) without routing.
@@ -1128,7 +1139,7 @@ export async function openRelayServer(options = {}) {
     }
   }
 
-  function onConnection(ws, liveExtensions = NO_LIVE_EXTENSIONS) {
+  function onConnection(ws, liveExtensions = NO_LIVE_EXTENSIONS, browserEgress = false) {
     if (closed) {
       try { ws.terminate(); } catch { /* socket gone */ }
       return;
@@ -1141,6 +1152,7 @@ export async function openRelayServer(options = {}) {
       controlProtocol: 0,
       scopeProtocol: 0,
       liveExtensions,
+      browserEgress,
       helloTimer: null,
       alive: true,
       dead: false,
@@ -1194,7 +1206,7 @@ export async function openRelayServer(options = {}) {
     upgradeLiveExtensions.set(req, liveExtensions);
     try {
       wss.handleUpgrade(req, socket, head, (ws) => {
-        onConnection(ws, liveExtensions);
+        onConnection(ws, liveExtensions, req.headers['x-pibot-browser-egress'] === '1');
       });
     } catch {
       socket.destroy();

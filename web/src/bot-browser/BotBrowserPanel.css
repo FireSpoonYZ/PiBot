@@ -182,6 +182,35 @@
   color: var(--bb-text);
 }
 
+.bb-placement {
+  display: grid;
+  gap: 6px;
+  min-width: 11rem;
+  padding: 8px;
+  border-bottom: 1px solid var(--bb-line);
+}
+
+.bb-placement label {
+  display: grid;
+  gap: 6px;
+  color: var(--bb-text);
+}
+
+.bb-placement select {
+  min-height: var(--bb-control-size);
+  padding: 0 8px;
+  border: 1px solid var(--bb-line);
+  border-radius: var(--bb-radius-sm);
+  background: var(--bb-bg);
+  color: var(--bb-text);
+  font: inherit;
+}
+
+.bb-placement small {
+  max-width: 14rem;
+  color: var(--bb-muted);
+}
+
 /* Buttons */
 .bb-btn {
   display: inline-flex;
@@ -605,6 +634,16 @@
 }
 
 /* Viewport stage */
+.bb-viewport {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bb-surface);
+}
+
 .bb-stage {
   position: relative;
   flex: 1;

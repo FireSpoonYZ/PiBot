@@ -5,6 +5,7 @@
 // 无压缩/maxPayload），但只持有 client 角色 —— 不打开任何本地文件/MessageLog/
 // Runtime/owner 锁；不自动重连、不重试、不记录凭证。
 import { randomUUID } from 'node:crypto';
+import { createBrowserEgressClient } from './bot-browser/egress-client.js';
 import WebSocket from 'ws';
 import {
   parseRelayUrl,
@@ -442,7 +443,7 @@ export async function openRemoteControl(options) {
     if (client.opened) return;
     client.opened = true;
     removeStartAbort();
-    client.openResolve({ deviceId: client.deviceId, call, close, listDevices, renameDevice, live: liveManager.live });
+    client.openResolve({ deviceId: client.deviceId, call, close, listDevices, renameDevice, live: liveManager.live, openBrowserEgress: browserEgress.openBrowserEgress });
   }
 
   function rejectPending(error) {
@@ -469,6 +470,7 @@ export async function openRemoteControl(options) {
     const error = new RemoteControlError('BAD_FRAME', client.ready ? 'unconfirmed' : 'not-sent');
     failOpenOrPending(error);
     liveManager.terminateAll(error);
+    browserEgress.reset();
   }
 
   function armWatchdog(ws) {
@@ -507,6 +509,10 @@ export async function openRemoteControl(options) {
         client.readyTimer = null;
       }
       finishOpen();
+      return;
+    }
+    if (frame.type === 'browser-egress') {
+      browserEgress.handle(frame);
       return;
     }
     if (frame.type === 'control-result') {
@@ -576,6 +582,7 @@ export async function openRemoteControl(options) {
     }
     failOpenOrPending(error);
     liveManager.terminateAll(error);
+    browserEgress.reset();
     if (client.ready && onCloseCallback) {
       try { onCloseCallback(error); } catch { /* consumer exceptions do not affect transport cleanup */ }
     }
@@ -587,7 +594,7 @@ export async function openRemoteControl(options) {
     try {
       ws = new WebSocket(url.href, {
         ...(ca !== undefined ? { ca } : {}),
-        ...(liveExtHeader ? { headers: { [LIVE_EXTENSIONS_HEADER_WIRE]: liveExtHeader } } : {}),
+        headers: { [LIVE_EXTENSIONS_HEADER_WIRE]: liveExtHeader, 'X-PiBot-Browser-Egress': '1' },
         maxPayload: MAX_RELAY_FRAME_BYTES,
         perMessageDeflate: false,
         followRedirects: false,
@@ -602,6 +609,7 @@ export async function openRemoteControl(options) {
 
     ws.on('upgrade', (res) => {
       if (ws !== client.ws || client.closed) return;
+      client.browserEgress = res?.headers?.['x-pibot-browser-egress'] === '1';
       client.liveExtensions = intersectLiveExtensions(
         ALL_LIVE_EXTENSIONS,
         parseLiveExtensionsHeader(res?.headers?.[LIVE_EXTENSIONS_HEADER]),
@@ -665,6 +673,7 @@ export async function openRemoteControl(options) {
     const error = new RemoteControlError('DISCONNECTED', 'unconfirmed');
     rejectPending(error);
     liveManager.terminateAll(error);
+    browserEgress.reset();
   }
 
   const liveManager = installRemoteLive(client, {
@@ -672,6 +681,7 @@ export async function openRemoteControl(options) {
     send: sendFrame,
     violate: protocolViolation,
   });
+  const browserEgress = createBrowserEgressClient({ send: sendFrame, available: () => client.ready && client.browserEgress === true });
 
   if (signal) {
     const onStartAbort = () => {

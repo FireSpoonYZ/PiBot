@@ -30,8 +30,8 @@ export const DESKTOP_BROWSER_MAX_VIEWPORT = Object.freeze({ width: 2560, height:
 // control frame stays well under the 1 MiB transport frame ceiling.
 export const DESKTOP_BROWSER_MAX_FRAME_BASE64_BYTES = 737_280;
 export const DESKTOP_BROWSER_DEFAULT_FRAME_QUALITY = 65;
-export const DESKTOP_BROWSER_MIN_FRAME_INTERVAL_MS = 100;
-export const DESKTOP_BROWSER_FLOOR_FRAME_INTERVAL_MS = 50;
+export const DESKTOP_BROWSER_MIN_FRAME_INTERVAL_MS = 33;
+export const DESKTOP_BROWSER_FLOOR_FRAME_INTERVAL_MS = 16;
 export const DESKTOP_BROWSER_SCREENCAST_IDLE_STOP_MS = 15_000;
 
 export const DESKTOP_BROWSER_MAX_TABS_PER_BOT = 8;

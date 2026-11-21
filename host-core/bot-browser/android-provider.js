@@ -62,6 +62,8 @@ const ALLOWED_ACTIONS = new Set([
   'act',
   'input',
   'release',
+  'nativeGrant',
+  'nativeRevoke',
 ]);
 const ALLOWED_ACT_KINDS = new Set([
   'click',
@@ -1076,6 +1078,15 @@ export function createAndroidBrowserProvider(opts = {}) {
       throw browserError('BROWSER_UNAVAILABLE', reason, { requiresSystemBrowser: true });
     }
 
+    if (action === 'nativeGrant' || action === 'nativeRevoke') {
+      const { pageId, grantId, expiresAt } = input;
+      return callNative(actor, 'human', `human:${randomUUID()}`, {
+        action,
+        ...(pageId !== undefined ? { pageId } : {}),
+        ...(grantId !== undefined ? { grantId } : {}),
+        ...(expiresAt !== undefined ? { expiresAt } : {}),
+      }, signal);
+    }
     const source = resolveSource(action, input);
     const taskId = resolveTaskId(input, source);
 
@@ -1217,6 +1228,7 @@ export function createAndroidBrowserProvider(opts = {}) {
     }
 
     if (action === 'input') {
+      input.beforeInput?.();
       const event = normalizeAndroidBrowserInputEvent(input.event);
       const args = { action: 'input', event };
       if (input.pageId !== undefined && input.pageId !== null) {
@@ -1251,5 +1263,5 @@ export function createAndroidBrowserProvider(opts = {}) {
     }
   }
 
-  return { perform, close };
+  return { perform, close, nativePresentation: Boolean(nativeBridge) };
 }

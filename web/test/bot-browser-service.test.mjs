@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createBotBrowserService } from '../../host-core/bot-browser/service.js';
+import { createClientBrowserRenderer } from '../../host-core/bot-browser/client-renderer.js';
 import {
   BROWSER_ERROR_CODES,
   botBrowserProfileDirectory,
@@ -19,6 +20,43 @@ const VALID_PNG_BASE64 = Buffer.from([
   0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
   0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xde,
 ]).toString('base64');
+
+test('client-rendered pages preserve normalized form input and bounded wait conditions', async (t) => {
+  const renderer = createClientBrowserRenderer({
+    rendererId: 'fixture-renderer-1', clientId: 'fixture-client', maxTabs: 2, maxFrameBytes: 737280,
+  });
+  t.after(() => renderer.close());
+  const page = { url: 'https://example.org/', title: 'Fixture', documentGeneration: 1 };
+  async function reply(operation, result) {
+    const { command } = await renderer.next();
+    assert.equal(command.operation, operation);
+    renderer.reply({ operationId: command.operationId, result });
+    return command;
+  }
+  const opening = renderer.perform({ action: 'open', actor: 'human', url: page.url });
+  await reply('create', page);
+  const { pageId } = await opening;
+
+  const fill = renderer.perform({
+    action: 'act', actor: 'bot', pageId, act: normalizeBotActInput({ kind: 'fill', ref: 'e1', value: 'typed value' }),
+  });
+  await reply('status', page);
+  const fillRequest = await reply('act', { ok: true });
+  assert.equal(fillRequest.text, 'typed value');
+  assert.equal(fillRequest.elementRef, 1);
+  assert.equal(fillRequest.expectedUrl, page.url);
+  await reply('status', page);
+  assert.equal((await fill).ok, true);
+
+  const wait = renderer.perform({
+    action: 'act', actor: 'bot', pageId, act: normalizeBotActInput({ kind: 'wait', selector: '#done' }),
+  });
+  await reply('status', page);
+  const waitRequest = await reply('waitCheck', { ok: true });
+  assert.equal(waitRequest.wait.selector, '#done');
+  await reply('status', page);
+  assert.equal((await wait).ok, true);
+});
 
 function createFakeHost(botIds = ['bot-a', 'bot-b']) {
   const bots = new Map();
@@ -827,7 +865,25 @@ test('Privacy Shield: stops before Policy checkbox and Create Secret, blocks sec
     { code: 'BROWSER_HANDBACK_BLOCKED_SENSITIVE' }
   );
 
-  // 6. Web Gmail login flags webLoginNotApiGrant (Google API grant != web login).
+  // 6. A refused Google sign-in offers a system-browser recovery and strips session URL data.
+  const rejectionPage = 'https://accounts.google.com/v3/signin/rejected';
+  const rejected = await service.control({
+    action: 'navigate',
+    botId: 'bot-a',
+    lease: taken.lease,
+    url: rejectionPage + '?continue=https%3A%2F%2Fconsole.cloud.google.com%2F&dsh=opaque#private',
+  }, desktop);
+  assert.equal(rejected.sensitive, true);
+  assert.equal(rejected.fallbackToSystemBrowser, true);
+  assert.equal(rejected.tabs.find(tab => tab.id === rejected.pageId)?.url, rejectionPage);
+  await assert.rejects(
+    () => service.control({ action: 'frame', botId: 'bot-a' }, phone),
+    { code: 'BROWSER_SENSITIVE_BLOCKED' }
+  );
+  assert.equal(classifyPageSensitivity({ url: 'https://accounts.google.com.example.com/v3/signin/rejected' }).fallbackToSystemBrowser, false);
+  assert.equal(classifyPageSensitivity({ url: rejectionPage + '/other' }).fallbackToSystemBrowser, false);
+
+  // 7. Web Gmail login flags webLoginNotApiGrant (Google API grant != web login).
   const gmailSens = classifyPageSensitivity({ url: 'https://mail.google.com/mail/u/0/#inbox', title: 'Inbox' });
   assert.equal(gmailSens.webLoginNotApiGrant, true);
 

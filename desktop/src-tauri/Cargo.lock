@@ -2592,6 +2592,7 @@ dependencies = [
  "base64 0.22.1",
  "dunce",
  "gtk",
+ "javascriptcore-rs",
  "reqwest",
  "serde",
  "serde_json",
@@ -2602,6 +2603,9 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tokio",
+ "webkit2gtk",
+ "webview2-com",
+ "windows-core",
  "windows-sys 0.61.2",
 ]
 

@@ -66,9 +66,10 @@ import type {
 import type { ShowerCall } from './ShowerPreview';
 import { BotScreenPanel } from './BotScreenPanel';
 import BotBrowserPanel from './bot-browser/BotBrowserPanel';
+import { createAndroidNativePresenter } from './bot-browser/androidNativePresenter';
 import { createBrowserFrameSubscriber } from './bot-browser/relayStream';
 import { GoogleSetupWizard } from './google/GoogleSetupWizard';
-import { selectCurrentGoogleSetup } from './google/currentGoogleSetup';
+import { continueGoogleSetupAfterSignInRejection, selectCurrentGoogleSetup } from './google/currentGoogleSetup';
 import { openExternalUrl } from './center-admin/openExternalUrl';
 import type {
   BotBrowserControlCall,
@@ -1117,6 +1118,14 @@ export function HostPage({
     if (primaryBot && activeBotKey === primaryBot.key) return primaryBot;
     return allBotItems.find(b => b.key === activeBotKey) ?? null;
   }, [activeBotKey, primaryBot, allBotItems]);
+  const nativeBrowserBotId = activeBot?.hostKind === 'local' ? activeBot.botId : null;
+  const nativeBrowserOwner = useMemo(() => ({ botId: nativeBrowserBotId }), [nativeBrowserBotId]);
+  const nativeBrowserOwnerRef = useRef<typeof nativeBrowserOwner | null>(null);
+  nativeBrowserOwnerRef.current = screen === 'bot-browser' ? nativeBrowserOwner : null;
+  const androidNativePresenter = useMemo(() => nativeBrowserBotId
+    ? createAndroidNativePresenter(nativeBrowserBotId, mobileLocalRequest, () => nativeBrowserOwnerRef.current === nativeBrowserOwner)
+    : undefined, [nativeBrowserBotId, nativeBrowserOwner]);
+  useEffect(() => () => { void androidNativePresenter?.clear(); }, [androidNativePresenter]);
 
   // C4: 查找导航栈中最顶层的 chat 条目，并以其 botKey 解析保活 ChatScreen 的目标 Bot，
   // 防止 chat(A) -> bot-profile(A) -> ... -> bot-profile(B) 时误切换隐藏态 ChatScreen 的 Bot 或重挂 RemotePendingComposer。
@@ -5832,16 +5841,11 @@ ${newer}` : draftSnapshot;
     },
     [activeBot, botPanelConnected, showerIdentity],
   );
-  // A paired on-device Host uses the same Center caller for both browser input
-  // and frames. Changing transport remounts the panel and discards its lease.
+  // The on-device Host keeps browser control on its local bridge.
   const browserApi = remoteClientRef.current?.api;
   const browserDeviceId = activeBot?.deviceId;
-  const browserRelayProfile = activeBot?.hostKind === 'remote' ? showerIdentity : remoteIdentity;
-  const browserViaRelay = Boolean(remoteConnected && browserRelayProfile?.kind === 'relay' &&
-    (activeBot?.hostKind === 'remote' ? showerRemoteReady :
-      remoteDirectory.identity?.profileId === browserRelayProfile.profileId &&
-      remoteDirectory.identity?.generation === browserRelayProfile.generation &&
-      remoteDevices.some(device => device.deviceId === browserDeviceId && device.online)));
+  const browserRelayProfile = activeBot?.hostKind === 'remote' ? showerIdentity : null;
+  const browserViaRelay = Boolean(remoteConnected && browserRelayProfile?.kind === 'relay' && showerRemoteReady);
   const browserProfileId = browserRelayProfile?.profileId;
   const browserGeneration = browserRelayProfile?.generation;
   const browserRelayIdentity = useMemo<DesktopIdentity | null>(() => {
@@ -6844,9 +6848,16 @@ ${newer}` : draftSnapshot;
             connected={botPanelConnected}
             request={callBrowser}
             subscribeFrames={subscribeBrowserFrames}
-            onSwitchToExternalGuide={url => {
+            nativePresenter={androidNativePresenter}
+            onSwitchToExternalGuide={async (url, reason, rejection) => {
+              if (reason === 'google-sign-in-rejected') {
+                if (await continueGoogleSetupAfterSignInRejection(callGoogleSetup, openExternalUrl, rejection)) {
+                  if (!popScreen()) nav.push({ screen: 'chat', botKey: activeBot.key });
+                }
+                return;
+              }
               void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
-              if (url) void openExternalUrl(url).catch(() => {});
+              if (url) await openExternalUrl(url);
             }}
             onClose={() => {
               if (!popScreen()) nav.push({ screen: 'chat', botKey: activeBot.key });

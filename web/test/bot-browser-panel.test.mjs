@@ -17,6 +17,7 @@ import {
   parseBrowserFrame,
   parseBrowserView,
   reconcileLeaseWithView,
+  resolveExternalGuideUrl,
 } from '../src/bot-browser/protocol.ts';
 
 test('parseBrowserView normalizes direct and wrapped DTOs and forces canStreamInteract=false when unavailable', () => {
@@ -336,6 +337,27 @@ test('classifyPageUrl and normalizeNavigateUrl enforce Google auth awareness and
     ok: false,
     reason: 'disallowed_scheme',
   });
+});
+
+test('Google sign-in rejection uses a clean Cloud Console URL while other external guides keep their destination', () => {
+  const rejected = 'https://accounts.google.com/v3/signin/rejected?continue=https%3A%2F%2Fexample.com&dsh=opaque#private';
+  const view = parseBrowserView({
+    available: true,
+    pageId: 'page',
+    tabs: [{ id: 'page', url: rejected }],
+    externalUrl: 'https://example.com/untrusted-redirect',
+  });
+  assert.equal(classifyPageUrl(rejected).isGoogleSignInRejected, true);
+  assert.equal(classifyPageUrl('https://accounts.google.com/signin/rejected/').isGoogleSignInRejected, true);
+  assert.equal(classifyPageUrl('https://accounts.google.com/v3/signin/identifier').isGoogleSignInRejected, false);
+  assert.equal(classifyPageUrl('https://accounts.google.com/v3/signin/rejected/other').isGoogleSignInRejected, false);
+  assert.equal(classifyPageUrl('https://accounts.google.com.example.com/v3/signin/rejected').isGoogleSignInRejected, false);
+  assert.equal(classifyPageUrl('https://accounts.google.com:8443/v3/signin/rejected').isGoogleSignInRejected, false);
+  assert.equal(resolveExternalGuideUrl(view), 'https://console.cloud.google.com/');
+
+  const oauth = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=test&state=issued-state';
+  assert.equal(resolveExternalGuideUrl(parseBrowserView({ available: true, externalUrl: oauth })), oauth);
+  assert.equal(resolveExternalGuideUrl(parseBrowserView({ available: true, externalUrl: rejected })), 'https://console.cloud.google.com/');
 });
 
 test('normalizeWheelDelta, mapKeyboardEventKey, classifyBrowserError, and buildBrowserRequest behave cleanly', () => {

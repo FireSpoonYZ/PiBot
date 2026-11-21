@@ -124,6 +124,16 @@ function createFakeInteractiveProvider(tracker, { shouldFailStatus = () => false
       if (input.action === 'input') {
         return { ok: true, pageId: input.pageId || activePageId };
       }
+      if (input.action === 'frame') {
+        return {
+          pageId: activePageId,
+          documentGeneration: docGen,
+          mimeType: 'image/jpeg',
+          data: '/9j/2Q==',
+          width: 1280,
+          height: 800,
+        };
+      }
       if (input.action === 'snapshot') {
         return {
           pageId: activePageId,
@@ -501,7 +511,10 @@ test('real openControlServer + control-client + local-control-adapter + relay ho
     server.resume();
 
     // Two distinct authenticated local control clients + one local adapter for Relay
-    const clientA = createControlClient({ url: server.url, token });
+    const desktopCaller = { clientId: 'local:desktop-a', transport: 'local' };
+    const clientA = createControlClient({
+      url: server.url, token, clientId: desktopCaller.clientId, controlTransport: desktopCaller.transport,
+    });
     const clientB = createControlClient({ url: server.url, token });
     const relayAdapter = createLocalControlAdapter({ url: server.url, token });
 
@@ -550,6 +563,17 @@ test('real openControlServer + control-client + local-control-adapter + relay ho
     assert.equal(takenByA.isLeaseHolder, true);
     assert.equal(typeof takenByA.lease, 'string');
     assert.ok(takenByA.lease.length >= 8);
+    const target = { kind: 'browser', botId, pageId: takenByA.pageId, sessionId: takenByA.sessionId, lease: takenByA.lease };
+    const localFrames = relayAdapter.live(server.deviceId, target, { caller: desktopCaller });
+    try {
+      const firstFrame = await localFrames.next();
+      assert.equal(firstFrame.value.type, 'browser-frame');
+      assert.equal(firstFrame.value.frame.pageId, takenByA.pageId);
+    } finally {
+      await localFrames.return();
+    }
+    const staleFrames = relayAdapter.live(server.deviceId, { ...target, sessionId: 'different-session' }, { caller: desktopCaller });
+    await assert.rejects(() => staleFrames.next(), { code: 'BROWSER_STALE_PAGE' });
 
     // Client B queries status -> MUST NOT receive lease token and MUST NOT be lease holder.
     const statusByB = await clientB.browserControl({ action: 'status', botId });

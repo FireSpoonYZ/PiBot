@@ -6,6 +6,7 @@
 // control adapters, and the real Host services stay strictly in sync.
 
 import { assertId, messageError } from './message-protocol.js';
+import { normalizeNativeBrowserControl } from './bot-browser/native-control.js';
 import {
   BROWSER_CONTROL_ACTIONS,
   BROWSER_ERROR_CODES as RAW_BROWSER_ERROR_CODES,
@@ -60,7 +61,7 @@ const WIRE_BROWSER_FIELDS = Object.freeze({
   reload: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'ignoreCache']),
   select: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
   closeTab: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
-  frame: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes', 'stream']),
+  frame: new Set(['action', 'botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'sinceSeq', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes', 'stream', 'waitMs']),
   takeover: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'force', 'preempt', 'resume', 'holderLabel']),
   input: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision', 'frameSeq', 'event']),
   handback: new Set(['action', 'botId', 'scopeId', 'pageId', 'lease', 'revision']),
@@ -230,6 +231,8 @@ export function normalizeBrowserControl(input, maxFrameBase64Bytes = BROWSER_MAX
   if (!isPlainObject(input)) {
     throw invalid('browserControl params must be a plain object');
   }
+  const native = normalizeNativeBrowserControl(input, maxFrameBase64Bytes);
+  if (native) return native;
   const action = input.action;
   if (typeof action !== 'string' || !Object.hasOwn(WIRE_BROWSER_FIELDS, action)) {
     throw invalid('browserControl action is unsupported');

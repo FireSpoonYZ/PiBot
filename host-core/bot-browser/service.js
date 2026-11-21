@@ -3,6 +3,7 @@
 // lease with real bot queue drain & in-flight confirmation, fail-closed disconnect hold,
 // Privacy Shield sensitive-step isolation, and dual-lane control() vs toolsForBot() dispatch.
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { assertId } from '../message-protocol.js';
 import {
   BROWSER_DEFAULT_IDLE_CLOSE_MS,
@@ -34,6 +35,8 @@ import {
 } from './policy.js';
 import { createBotBrowserState } from './state.js';
 import { createBotBrowserTools } from './tools.js';
+import { normalizeNativeBrowserControl } from './native-control.js';
+import { createClientBrowserRenderer } from './client-renderer.js';
 
 function combineSignals(a, b) {
   if (a && b) return AbortSignal.any([a, b]);
@@ -218,9 +221,19 @@ export function createBotBrowserService(options = {}) {
       takeoverTimeoutMs,
       maxTabsPerBot,
       isPageWithheld: checkWithheld,
-      onEvent,
+      onEvent(event) {
+        const grant = entry?.presentation;
+        if (grant && (state.leaseGeneration !== grant.generation || event.pageId !== grant.pageId ||
+            event.phase !== 'human' || state.sensitivity.blockNormalFrame)) {
+          void dismissPresentation(entry).catch(() => {});
+        }
+        onEvent?.(event);
+      },
     });
-    entry = { state, provider: null, providerPromise: null, streamCaptures: new Map() };
+    entry = {
+      state, provider: null, providerPromise: null, streamCaptures: new Map(),
+      renderer: null, presentation: null, dismissing: null, presentationChanges: 0, opening: 0, closing: false,
+    };
     entries.set(botId, entry);
     return entry;
   }
@@ -241,7 +254,7 @@ export function createBotBrowserService(options = {}) {
   }
 
   async function ensureProvider(entry, { allowUnavailable = false } = {}) {
-    if (closed) throw browserError('BROWSER_CLOSED');
+    if (closed || entry.closing) throw browserError('BROWSER_CLOSED');
     if (entry.provider) return entry.provider;
     if (entry.providerPromise) {
       const existing = await entry.providerPromise;
@@ -281,12 +294,19 @@ export function createBotBrowserService(options = {}) {
 
   async function closeEntryProvider(entry) {
     const provider = entry.provider;
-    entry.provider = null;
     if (!provider) return;
+    entry.closing = true;
     try {
-      await provider.perform({ action: 'release', botId: entry.state.botId }).catch(() => {});
+      // Renderer replies remain routable while an attached client closes its tabs.
+      if (!entry.renderer || (!closed && entries.get(entry.state.botId) === entry)) {
+        await dismissPresentation(entry);
+        await provider.perform({ action: 'release', botId: entry.state.botId }).catch(() => {});
+      }
     } finally {
-      await provider.close();
+      entry.provider = null;
+      entry.renderer = null;
+      entry.presentation = null;
+      try { await provider.close(); } finally { entry.closing = false; }
     }
   }
 
@@ -334,6 +354,7 @@ export function createBotBrowserService(options = {}) {
         ...(pageId ? { pageId } : {}),
         ...(signal ? { signal } : {}),
       });
+      if (entry.provider !== provider) return null;
       entry.state.syncProviderResult(res);
       return res;
     } catch (err) {
@@ -367,6 +388,8 @@ export function createBotBrowserService(options = {}) {
       ? (state.sensitivity.guidance || state.providerSensitiveReason || state.sensitivity.reasons[0] || undefined)
       : undefined;
     const attentionRequested = state.phase === 'held';
+    const entry = entries.get(state.botId);
+    const localRenderer = entry?.renderer?.clientId === authority.clientId;
     const attentionMessage = attentionRequested
       ? (state.sensitivity.guidance || state.providerSensitiveReason || state.reason || undefined)
       : undefined;
@@ -375,6 +398,9 @@ export function createBotBrowserService(options = {}) {
       available: state.available,
       ...(state.reason ? { reason: state.reason } : {}),
       canStreamInteract: state.canStreamInteract,
+      ...(entry?.renderer ? { renderPlacement: 'client' } : {}),
+      ...(localRenderer ? { rendererId: entry.renderer.rendererId, nativePresentation: true } : {}),
+      ...(entry?.provider?.nativePresentation && authority.transport === 'local' ? { nativePresentation: true } : {}),
       canIsolateSensitivePages: state.capabilities.privateSecretIsolation,
       phase: state.phase,
       ...(state.sessionId ? { sessionId: state.sessionId } : {}),
@@ -462,10 +488,119 @@ export function createBotBrowserService(options = {}) {
    * Trusted owner/viewer control RPC entry point (browserControl).
    * Volatile only: never logs frame bytes, input text, secrets, or lease tokens.
    */
+  async function dismissPresentation(entry) {
+    if (entry.dismissing) return entry.dismissing;
+    const grant = entry.presentation;
+    if (!grant) return;
+    entry.presentation = null;
+    entry.dismissing = (async () => {
+      try {
+        if (grant.renderer) await grant.renderer.hide(grant.pageId);
+        else await grant.provider.perform({ action: 'nativeRevoke', grantId: grant.id });
+      } catch {
+        // The presenter enforces its own deadline even if the link is lost.
+        const remaining = grant.expiresAt + 1_000 - Date.now();
+        if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
+      }
+    })().finally(() => { entry.dismissing = null; });
+    return entry.dismissing;
+  }
+
+  async function changePresentationOwner(entry, change) {
+    entry.presentationChanges += 1;
+    try {
+      await dismissPresentation(entry);
+      return await change();
+    } finally {
+      entry.presentationChanges -= 1;
+    }
+  }
+
+  async function controlNative(entry, req, auth) {
+    const { state } = entry;
+    if (!auth.canControl || auth.transport === 'system') throw browserError('BROWSER_FORBIDDEN');
+    const renderer = entry.renderer;
+    if (req.action === 'rendererAttach') {
+      if (entry.closing) return { accepted: false };
+      if (renderer?.clientId === auth.clientId && renderer.rendererId === req.rendererId) {
+        return { accepted: true, rendererId: renderer.rendererId };
+      }
+      if (state.hasActiveSession || state.hasInFlightBotOp || entry.opening || entry.providerPromise ||
+          renderer?.hasTabs() || renderer?.online()) return { accepted: false };
+      const previous = entry.provider;
+      entry.renderer = createClientBrowserRenderer({
+        rendererId: req.rendererId, clientId: auth.clientId, maxTabs: maxTabsPerBot, maxFrameBytes: maxFrameBase64Bytes,
+      });
+      entry.provider = entry.renderer;
+      if (previous) void previous.close().catch(() => {});
+      return { accepted: true, rendererId: req.rendererId };
+    }
+    if (req.action === 'nativeGrant' || req.action === 'nativeDismiss') {
+      if (req.action === 'nativeGrant' && (entry.closing || entry.presentationChanges || entry.dismissing)) {
+        throw browserError('BROWSER_TAKEOVER_PENDING');
+      }
+      state.verifyHumanLease({ authority: auth, leaseToken: req.lease, renew: req.action === 'nativeGrant' });
+      if (state.pageId !== req.pageId) throw browserError('BROWSER_STALE_PAGE');
+      if (req.action === 'nativeDismiss') {
+        await dismissPresentation(entry);
+        return { ok: true };
+      }
+      const provider = entry.provider;
+      if ((!renderer || renderer.clientId !== auth.clientId) && !(provider?.nativePresentation && auth.transport === 'local')) {
+        return { supported: false };
+      }
+      if (state.sensitivity.blockNormalFrame) throw browserError('BROWSER_SECRET_STEP_BLOCKED');
+      const generation = state.leaseGeneration;
+      const expiresAt = Date.now() + 4_000;
+      const previous = entry.presentation;
+      const id = previous?.generation === generation && previous.pageId === req.pageId ? previous.id : randomUUID();
+      const grant = { id, pageId: req.pageId, generation, expiresAt, renderer, provider };
+      entry.presentation = grant;
+      if (!renderer) {
+        try {
+          const result = await provider.perform({ action: 'nativeGrant', pageId: req.pageId, grantId: id, expiresAt });
+          if (result?.supported === false) {
+            if (entry.presentation === grant) entry.presentation = null;
+            return result;
+          }
+        } catch (error) {
+          if (entry.presentation === grant) entry.presentation = null;
+          throw error;
+        }
+      }
+      if (entry.presentation !== grant || state.leaseGeneration !== generation || state.pageId !== req.pageId) {
+        if (!renderer) await provider.perform({ action: 'nativeRevoke', grantId: id }).catch(() => {});
+        throw browserError('BROWSER_LEASE_EXPIRED');
+      }
+      return { supported: true, grantId: id, expiresAt, ...(renderer ? { rendererId: renderer.rendererId } : {}) };
+    }
+    if (!renderer || renderer.rendererId !== req.rendererId || renderer.clientId !== auth.clientId) {
+      throw browserError('BROWSER_FORBIDDEN');
+    }
+    switch (req.action) {
+      case 'rendererNext': return renderer.next();
+      case 'rendererReply': return renderer.reply(req);
+      case 'rendererEgressAuthorize':
+        return { allowed: renderer.online() && auth.transport === 'relay', allowedPorts: renderer.ports() };
+      case 'rendererDetach':
+        if (renderer.hasTabs() || entry.opening || state.hasInFlightBotOp) return { ok: false };
+        await dismissPresentation(entry);
+        // The client closes its own tabs and proxy. Cancel outstanding Host
+        // commands immediately and invalidate the old session and any lease.
+        entry.provider = null;
+        entry.renderer = null;
+        await renderer.close();
+        state.resetAfterRelease();
+        return { ok: true };
+      default: throw browserError('INVALID_ARGUMENT');
+    }
+  }
+
   async function control(input, authority) {
     assertNotClosedOrMaintenance();
     const auth = normalizeControlAuthority(authority);
-    const req = normalizeControlInput(input, maxFrameBase64Bytes);
+    const native = normalizeNativeBrowserControl(input, maxFrameBase64Bytes);
+    const req = native ?? normalizeControlInput(input, maxFrameBase64Bytes);
     assertLocalBot(req.botId);
 
     if (req.scopeId !== undefined && resolveWorkContext) {
@@ -475,6 +610,7 @@ export function createBotBrowserService(options = {}) {
     const entry = getOrCreateEntry(req.botId);
     const { state } = entry;
     state.expireLeaseIfNeeded();
+    if (native) return controlNative(entry, req, auth);
 
     switch (req.action) {
       case 'status': {
@@ -490,14 +626,14 @@ export function createBotBrowserService(options = {}) {
           throw browserError('BROWSER_FORBIDDEN', 'Only the owner or admin can take over the bot browser.');
         }
         if (auth.role === 'system') {
-          await state.holdForSystemLock({
+          await changePresentationOwner(entry, () => state.holdForSystemLock({
             reason: req.reason || 'sensitive_step_lock',
             onTakeoverHook: onTakeover,
-          });
+          }));
           await refreshProviderStatus(entry, { allowUnavailable: true });
           return buildControlViewDto(state, auth, { includeLeaseToken: false });
         }
-        const result = await state.beginTakeover({
+        const take = () => state.beginTakeover({
           authority: auth,
           leaseToken: req.lease ?? null,
           force: req.force === true,
@@ -505,6 +641,7 @@ export function createBotBrowserService(options = {}) {
           holderLabelOverride: req.holderLabel ?? null,
           onTakeoverHook: onTakeover,
         });
+        const result = req.force || req.preempt ? await changePresentationOwner(entry, take) : await take();
         // Sync current page/tabs WITHOUT reloading or creating a new tab.
         await refreshProviderStatus(entry, { allowUnavailable: true });
         return buildControlViewDto(state, auth, {
@@ -527,11 +664,14 @@ export function createBotBrowserService(options = {}) {
         if (entry.provider) {
           await refreshProviderStatus(entry, { allowUnavailable: true, pageId: req.pageId });
         }
-        const summary = state.handback({
+        if (entry.presentation) state.verifyHumanLease({ authority: auth, leaseToken: req.lease, renew: false });
+        const giveBack = () => state.handback({
           authority: auth,
           leaseToken: req.lease ?? null,
           currentSensitivity: state.sensitivity,
         });
+        const summary = entry.presentation || entry.dismissing
+          ? await changePresentationOwner(entry, giveBack) : giveBack();
         if (onHandback) {
           try {
             await onHandback({
@@ -638,6 +778,7 @@ export function createBotBrowserService(options = {}) {
           ...req.frameLimits,
           limits: req.frameLimits,
           ...(req.sinceSeq !== undefined ? { afterSeq: req.sinceSeq } : {}),
+          ...(req.stream ? { stream: true, waitMs: req.waitMs } : {}),
         });
         let rawFrame;
         try {
@@ -645,7 +786,7 @@ export function createBotBrowserService(options = {}) {
             // Share a capture in flight. Each viewer's lease and page are checked
             // independently on both sides of the await.
             const key = JSON.stringify([
-              sessionAtStart, targetPageId, state.documentGeneration, leaseAtStart, req.frameLimits, req.sinceSeq,
+              sessionAtStart, targetPageId, state.documentGeneration, leaseAtStart, req.frameLimits, req.sinceSeq, req.waitMs,
             ]);
             let pending = entry.streamCaptures.get(key);
             if (!pending) {
@@ -664,7 +805,8 @@ export function createBotBrowserService(options = {}) {
           throw browserError('BROWSER_CLOSED');
         }
 
-        const validated = validateFramePayload(rawFrame, req.frameLimits.maxBytes);
+        const frameUnchanged = req.stream && rawFrame?.frameUnchanged === true;
+        const validated = frameUnchanged ? { pageId: rawFrame.pageId } : validateFramePayload(rawFrame, req.frameLimits.maxBytes);
         const framePageId = validated.pageId ?? targetPageId;
         const frameHints = mergeProviderHints(rawFrame, validated.hints);
 
@@ -686,7 +828,7 @@ export function createBotBrowserService(options = {}) {
         });
 
         // Sync metadata/sensitivity only while the same provider session and document are current.
-        if (sessionStillCurrent && !staleDocument && currentTab && framePageId === state.pageId) {
+        if (!frameUnchanged && sessionStillCurrent && !staleDocument && currentTab && framePageId === state.pageId) {
           state.syncProviderResult({
             pageId: framePageId,
             ...(validated.url !== undefined ? { url: validated.url } : {}),
@@ -710,10 +852,13 @@ export function createBotBrowserService(options = {}) {
         if (!currentTab || staleDocument || (req.stream && state.pageId !== framePageId)) {
           throw browserError('BROWSER_STALE_PAGE');
         }
+        if (frameUnchanged) return { frameUnchanged: true, pageId: framePageId };
 
         const stamped = state.recordFrame({ pageId: framePageId });
         return {
           seq: stamped.seq,
+          ...(req.stream && Number.isSafeInteger(rawFrame.captureSeq) && rawFrame.captureSeq > 0
+            ? { captureSeq: rawFrame.captureSeq } : {}),
           mimeType: validated.mimeType,
           data: validated.data,
           width: validated.width,
@@ -757,6 +902,10 @@ export function createBotBrowserService(options = {}) {
               expectedRevision: state.revision,
               ...(Number.isSafeInteger(state.documentGeneration) ? { documentGeneration: state.documentGeneration } : {}),
               expectedDocumentGeneration: state.documentGeneration,
+              beforeInput: () => {
+                state.verifyHumanLease({ authority: auth, leaseToken: req.lease, renew: false });
+                state.assertInputFreshness({ pageId: req.pageId, revision: req.revision, frameSeq: req.frameSeq });
+              },
               event: formatProviderInputEvent(req.event),
             });
           } catch (providerErr) {
@@ -777,30 +926,33 @@ export function createBotBrowserService(options = {}) {
 
       case 'open': {
         assertControlMutationAllowed(state, auth, { ...req, revision: undefined });
-        const safeUrl = req.url !== undefined
-          ? validateNavigationUrl(req.url, { actor: 'human', allowBlank: true })
-          : undefined;
-        if (!state.hasActiveSession) {
-          await reclaimIdleBotSessionsIfNeeded(req.botId);
-        }
-        if (state.tabs.length >= maxTabsPerBot) {
-          throw browserError('BROWSER_TAB_LIMIT', `Tab limit (${maxTabsPerBot}) reached for bot ${req.botId}.`);
-        }
-        const provider = await ensureProvider(entry, { allowUnavailable: false });
-        let res;
+        entry.opening += 1;
         try {
-          res = await provider.perform({
-            action: 'open',
-            actor: 'human',
-            botId: req.botId,
-            ...(safeUrl !== undefined ? { url: safeUrl } : {}),
-          });
-        } catch (err) {
-          throw mapProviderError(err, state);
+          const safeUrl = req.url !== undefined
+            ? validateNavigationUrl(req.url, { actor: 'human', allowBlank: true })
+            : undefined;
+          if (!state.hasActiveSession) await reclaimIdleBotSessionsIfNeeded(req.botId);
+          if (state.tabs.length >= maxTabsPerBot) {
+            throw browserError('BROWSER_TAB_LIMIT', `Tab limit (${maxTabsPerBot}) reached for bot ${req.botId}.`);
+          }
+          const provider = await ensureProvider(entry, { allowUnavailable: false });
+          let res;
+          try {
+            res = await provider.perform({
+              action: 'open',
+              actor: 'human',
+              botId: req.botId,
+              ...(safeUrl !== undefined ? { url: safeUrl } : {}),
+            });
+          } catch (err) {
+            throw mapProviderError(err, state);
+          }
+          state.ensureSessionId();
+          state.syncProviderResult({ available: true, ...res });
+          return buildControlViewDto(state, auth, { includeLeaseToken: false, presentedLease: req.lease });
+        } finally {
+          entry.opening -= 1;
         }
-        state.ensureSessionId();
-        state.syncProviderResult({ available: true, ...res });
-        return buildControlViewDto(state, auth, { includeLeaseToken: false, presentedLease: req.lease });
       }
 
       case 'navigate': {

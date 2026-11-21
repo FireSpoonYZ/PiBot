@@ -2554,6 +2554,8 @@ export type BrowserControlAction =
   | 'select'
   | 'closeTab'
   | 'frame'
+  | 'nativeGrant'
+  | 'nativeDismiss'
   | 'takeover'
   | 'input'
   | 'handback'
@@ -2575,6 +2577,8 @@ export interface BrowserControlInput {
   lease?: string;
   revision?: number;
   frameSeq?: number;
+  afterSeq?: number;
+  waitMs?: number;
   format?: 'png' | 'jpeg' | 'webp';
   maxWidth?: number;
   maxHeight?: number;
@@ -2599,6 +2603,9 @@ export interface BrowserControlStatusResult {
   available: boolean;
   reason?: string;
   canStreamInteract: boolean;
+  nativePresentation?: boolean;
+  renderPlacement?: 'client' | 'server';
+  rendererId?: string;
   phase: 'bot' | 'taking' | 'human' | 'held';
   sessionId?: string | null;
   pageId?: string | null;
@@ -2611,6 +2618,7 @@ export interface BrowserControlStatusResult {
 
 export interface BrowserControlFrameResult {
   seq: number;
+  captureSeq?: number;
   mimeType: string;
   data: string;
   width: number;

@@ -35,6 +35,7 @@ export interface BotBrowserViewportProps {
   isHolder: boolean;
   canSendInput: boolean;
   isSensitive: boolean;
+  externalGuideOpening?: boolean;
   signInTakeoverAction?: ReactNode;
   zoom: number;
   hostLabel?: string;
@@ -43,6 +44,7 @@ export interface BotBrowserViewportProps {
   onRetry: () => void;
   onOpenTab?: () => void;
   onRequestExternalGuide: () => void;
+  onContinueAfterGoogleSignInRejection: () => void;
   onExitStageFocus?: () => void;
 }
 
@@ -73,6 +75,7 @@ export function BotBrowserViewport({
   isHolder,
   canSendInput,
   isSensitive,
+  externalGuideOpening,
   signInTakeoverAction,
   zoom,
   hostLabel,
@@ -81,6 +84,7 @@ export function BotBrowserViewport({
   onRetry,
   onOpenTab,
   onRequestExternalGuide,
+  onContinueAfterGoogleSignInRejection,
   onExitStageFocus,
 }: BotBrowserViewportProps) {
   const t = useText();
@@ -107,11 +111,6 @@ export function BotBrowserViewport({
   const activeTouchesRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const pinchRef = useRef<{ startDist: number; startZoom: number } | null>(null);
   const suppressNextClickRef = useRef(false);
-
-  const wheelPendingRef = useRef<{
-    x: number; y: number; dx: number; dy: number; pageId: string; revision: number;
-  } | null>(null);
-  const wheelRafRef = useRef<number | null>(null);
 
   const canSendInputRef = useRef(canSendInput);
   canSendInputRef.current = canSendInput;
@@ -156,7 +155,6 @@ export function BotBrowserViewport({
   useEffect(() => {
     return () => {
       if (rippleTimerRef.current !== null) window.clearTimeout(rippleTimerRef.current);
-      if (wheelRafRef.current !== null) window.cancelAnimationFrame(wheelRafRef.current);
     };
   }, []);
 
@@ -169,33 +167,9 @@ export function BotBrowserViewport({
     }, 360);
   }, []);
 
-  const queueWheel = useCallback((point: { x: number; y: number }, frame: BrowserFrame, dx: number, dy: number) => {
-    if (dx === 0 && dy === 0) return;
-    const previous = wheelPendingRef.current;
-    if (previous?.pageId === frame.pageId && previous.revision === frame.revision) {
-      previous.x = point.x;
-      previous.y = point.y;
-      previous.dx = Math.max(-600, Math.min(600, previous.dx + dx));
-      previous.dy = Math.max(-600, Math.min(600, previous.dy + dy));
-    } else {
-      wheelPendingRef.current = { ...point, dx, dy, pageId: frame.pageId, revision: frame.revision };
-    }
-    if (wheelRafRef.current !== null) return;
-    wheelRafRef.current = window.requestAnimationFrame(() => {
-      wheelRafRef.current = null;
-      const pending = wheelPendingRef.current;
-      wheelPendingRef.current = null;
-      const live = liveFrameRef.current;
-      if (!pending || !canSendInputRef.current || live?.pageId !== pending.pageId || live.revision !== pending.revision) return;
-      if (pending.dx === 0 && pending.dy === 0) return;
-      onInputRef.current({
-        kind: 'wheel',
-        x: pending.x,
-        y: pending.y,
-        deltaX: pending.dx,
-        deltaY: pending.dy,
-      });
-    });
+  const sendWheel = useCallback((point: { x: number; y: number }, deltaX: number, deltaY: number) => {
+    if (deltaX === 0 && deltaY === 0) return;
+    onInputRef.current({ kind: 'wheel', ...point, deltaX, deltaY });
   }, []);
 
   // Non-passive wheel forwarding for desktop mice and trackpads.
@@ -218,19 +192,12 @@ export function BotBrowserViewport({
 
       ev.preventDefault();
       const { deltaX, deltaY } = normalizeWheelDelta(ev.deltaX, ev.deltaY, ev.deltaMode);
-      queueWheel(point, frame, deltaX, deltaY);
+      sendWheel(point, deltaX, deltaY);
     };
 
     el.addEventListener('wheel', onWheel, { passive: false });
-    return () => {
-      el.removeEventListener('wheel', onWheel);
-      if (wheelRafRef.current !== null) {
-        window.cancelAnimationFrame(wheelRafRef.current);
-        wheelRafRef.current = null;
-      }
-      wheelPendingRef.current = null;
-    };
-  }, [imgEl, queueWheel]);
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [imgEl, sendWheel]);
 
   const handlePointerDown = (ev: PointerEvent<HTMLImageElement>) => {
     if (ev.pointerType === 'mouse' && ev.button !== 0) return;
@@ -293,7 +260,7 @@ export function BotBrowserViewport({
       if (!point) return;
       const scale = liveFrame.width / rect.width;
       const { deltaX, deltaY } = normalizeWheelDelta(dx * scale, dy * scale, 0);
-      queueWheel(point, liveFrame, deltaX, deltaY);
+      sendWheel(point, deltaX, deltaY);
     }
   };
 
@@ -421,6 +388,37 @@ export function BotBrowserViewport({
           <p className="bb-state-desc">
             {t('正在向目标 Host 读取实时浏览能力与当前标签页。', 'Checking real-time browser capability and active tabs from the target host.')}
           </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (urlMeta.isGoogleSignInRejected) {
+    return (
+      <div className="bb-stage bb-stage--state" role="status" aria-live="polite">
+        <div className="bb-state-card bb-state-card--shield">
+          <div className="bb-state-icon bb-state-icon--shield" aria-hidden="true">
+            <Shield size={22} />
+          </div>
+          <h3 className="bb-state-title">
+            {t('Google 拒绝了内置浏览器登录', 'Google blocked sign-in in the built-in browser')}
+          </h3>
+          <p className="bb-state-desc">
+            {t('请在系统浏览器中登录，再回到 Pi Bot 继续。', 'Sign in using your system browser, then return to Pi Bot.')}
+          </p>
+          <div className="bb-state-actions">
+            <button
+              type="button"
+              className="bb-btn bb-btn--primary"
+              disabled={externalGuideOpening}
+              onClick={onContinueAfterGoogleSignInRejection}
+            >
+              <ExternalLink size={14} aria-hidden="true" />
+              <span>{externalGuideOpening
+                ? t('正在打开…', 'Opening…')
+                : t('在系统浏览器中继续', 'Continue in system browser')}</span>
+            </button>
+          </div>
         </div>
       </div>
     );

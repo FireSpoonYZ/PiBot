@@ -25,12 +25,16 @@ import {
   X,
 } from 'lucide-react';
 import { openExternalUrl } from '../center-admin/openExternalUrl';
+import type { GoogleSignInRejectionContext } from '../google/currentGoogleSetup';
 import { useText } from '../ui';
 import { BotBrowserViewport } from './BotBrowserViewport';
+import { useNativeBrowserPresentation } from './nativePresentation';
+import type { NativeBrowserPresenter, NativePresentationTarget } from './nativePresentation';
 import type { SubscribeBrowserFrames } from './relayStream';
 import {
   MAX_TEXT_INPUT_LENGTH,
   POLL_INTERVAL_ACTIVE_MS,
+  POLL_INTERVAL_LOCAL_FRAME_MS,
   POLL_INTERVAL_IDLE_MS,
   POLL_INTERVAL_WATCH_MS,
   STREAM_DEGRADE_TIMEOUT_MS,
@@ -44,9 +48,11 @@ import {
   inspectFrameRedaction,
   isFrameUsableForView,
   normalizeNavigateUrl,
+  normalizeWheelDelta,
   parseBrowserFrame,
   parseBrowserView,
   reconcileLeaseWithView,
+  resolveExternalGuideUrl,
   type BrowserFrame,
   type BrowserInputEvent,
   type BrowserView,
@@ -70,18 +76,50 @@ export interface BotBrowserPanelProps {
   deviceId: string;
   request: (input: Record<string, unknown>) => Promise<any>;
   subscribeFrames?: SubscribeBrowserFrames;
+  nativePresenter?: NativeBrowserPresenter;
+  browserPlacement?: {
+    value: 'client' | 'server';
+    canChange: boolean;
+    set(value: 'client' | 'server'): void;
+  };
   onClose?: () => void;
   botName?: string;
   hostLabel?: string;
   mode?: 'auto' | 'sidebar' | 'fullscreen';
   connected?: boolean;
-  onSwitchToExternalGuide?: (url?: string) => void;
+  onSwitchToExternalGuide?: (
+    url?: string,
+    reason?: 'google-sign-in-rejected',
+    rejection?: GoogleSignInRejectionContext,
+  ) => void | Promise<void>;
   onCancelTask?: () => void | Promise<void>;
   className?: string;
 }
 
 const MOBILE_MEDIA_QUERY = '(max-width: 860px)';
-const FALLBACK_EXTERNAL_URL = 'https://console.cloud.google.com/';
+const MAX_PENDING_BROWSER_INPUTS = 64;
+
+interface BrowserInputTarget {
+  botId: string;
+  deviceId: string;
+  epoch: number;
+  sessionId: BrowserView['sessionId'];
+  pageId: string;
+  revision: number;
+  lease: string;
+}
+
+interface PendingBrowserInputs {
+  target: BrowserInputTarget;
+  events: BrowserInputEvent[];
+}
+
+function sameBrowserInputTarget(current: BrowserInputTarget | null, target: BrowserInputTarget): boolean {
+  return current !== null &&
+    current.botId === target.botId && current.deviceId === target.deviceId &&
+    current.epoch === target.epoch && current.sessionId === target.sessionId &&
+    current.pageId === target.pageId && current.revision === target.revision && current.lease === target.lease;
+}
 
 function readIsMobileViewport(): boolean {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
@@ -110,6 +148,8 @@ export function BotBrowserPanel({
   deviceId,
   request,
   subscribeFrames,
+  nativePresenter,
+  browserPlacement,
   onClose,
   botName,
   hostLabel,
@@ -129,7 +169,7 @@ export function BotBrowserPanel({
   const [frame, setFrame] = useState<BrowserFrame | null>(null);
   const [ownedLease, setOwnedLease] = useState<OwnedLease | null>(null);
   const [isHolder, setIsHolder] = useState(false);
-  const [pendingAction, setPendingAction] = useState<PendingControlAction>(null);
+  const [pendingAction, setPendingActionState] = useState<PendingControlAction>(null);
 
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [streamDegraded, setStreamDegraded] = useState(false);
@@ -144,6 +184,10 @@ export function BotBrowserPanel({
   const [noticeBanner, setNoticeBanner] = useState<string | null>(null);
   const [preemptConfirmOpen, setPreemptConfirmOpen] = useState(false);
   const [externalConfirmOpen, setExternalConfirmOpen] = useState(false);
+  const [externalGuideOpening, setExternalGuideOpening] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [nativeStage, setNativeStage] = useState<HTMLDivElement | null>(null);
+  const [nativeAttempt, setNativeAttempt] = useState(0);
 
   const [urlDraft, setUrlDraft] = useState('');
   const [urlEditing, setUrlEditing] = useState(false);
@@ -154,8 +198,13 @@ export function BotBrowserPanel({
   const moreRef = useRef<HTMLDetailsElement | null>(null);
   const remoteInputRef = useRef<HTMLInputElement | null>(null);
   const composingRef = useRef(false);
+  const externalGuideRequestRef = useRef<symbol | null>(null);
 
   const epochRef = useRef(0);
+  const browserContextRef = useRef({ botId, deviceId, connected, pageVisible });
+  browserContextRef.current = { botId, deviceId, connected, pageVisible };
+  const pendingBrowserInputsRef = useRef<PendingBrowserInputs | null>(null);
+  const sendingBrowserInputsRef = useRef(false);
   const pollTimerRef = useRef<number | null>(null);
   const inFlightPollRef = useRef(false);
   const requestRef = useRef(request);
@@ -174,7 +223,11 @@ export function BotBrowserPanel({
   const isHolderRef = useRef(false);
   isHolderRef.current = isHolder;
   const pendingActionRef = useRef<PendingControlAction>(null);
-  pendingActionRef.current = pendingAction;
+  const setPendingAction = useCallback((action: PendingControlAction) => {
+    pendingActionRef.current = action;
+    if (action !== null) pendingBrowserInputsRef.current = null;
+    setPendingActionState(action);
+  }, []);
   const pendingTakeoverLeaseRef = useRef<string | null>(null);
   const lastFrameCursorRef = useRef<FrameCursor | null>(null);
   const streamFailSinceRef = useRef<number | null>(null);
@@ -182,6 +235,32 @@ export function BotBrowserPanel({
   streamDegradedRef.current = streamDegraded;
   const urlEditingRef = useRef(false);
   urlEditingRef.current = urlEditing;
+
+  const nativePageId = view?.pageId;
+  const nativeSessionId = view?.sessionId;
+  const nativeRendererId = view?.rendererId;
+  const canPresentNative = Boolean(nativePresenter && connected && pageVisible && view?.available &&
+    view.nativePresentation && view.phase === 'human' && isHolder &&
+    !classifyPageUrl(activeTabOf(view)?.url).isGoogleSignInRejected);
+  const nativeLease = ownedLease && ownedLease.pageId === nativePageId &&
+    ownedLease.sessionId === (nativeSessionId ?? null) && ownedLease.revision === view?.revision
+    ? ownedLease.lease : undefined;
+  const nativeTarget = useMemo<NativePresentationTarget | null>(() =>
+    canPresentNative && nativePageId && nativeLease
+      ? { botId, deviceId, sessionId: nativeSessionId, pageId: nativePageId, lease: nativeLease, rendererId: nativeRendererId }
+      : null,
+  [botId, deviceId, canPresentNative, nativePageId, nativeSessionId, nativeRendererId, nativeLease]);
+  const nativeReady = useNativeBrowserPresentation({
+    presenter: nativePresenter,
+    target: nativeTarget,
+    stage: nativeStage,
+    requestRef,
+    suspended: moreOpen || preemptConfirmOpen || externalConfirmOpen || externalGuideOpening || pendingAction !== null,
+    attempt: nativeAttempt,
+  });
+  const nativeReadyRef = useRef(nativeReady);
+  nativeReadyRef.current = nativeReady;
+  const wasNativeReadyRef = useRef(false);
 
   const resolvedMode: 'sidebar' | 'fullscreen' =
     mode === 'auto'
@@ -255,9 +334,11 @@ export function BotBrowserPanel({
   }, []);
 
   const acceptFrame = useCallback((nextFrame: BrowserFrame): boolean => {
+    if (nativeReadyRef.current) return false;
     const currentView = viewRef.current;
     if (!isFrameUsableForView(nextFrame, currentView, lastFrameCursorRef.current)) return false;
-    if (!isHolderRef.current && (currentView?.sensitive || classifyPageUrl(activeTabOf(currentView)?.url).isKnownSensitiveUrl)) {
+    const urlInfo = classifyPageUrl(activeTabOf(currentView)?.url);
+    if (urlInfo.isGoogleSignInRejected || (!isHolderRef.current && (currentView?.sensitive || urlInfo.isKnownSensitiveUrl))) {
       return false;
     }
     lastFrameCursorRef.current = { pageId: nextFrame.pageId, revision: nextFrame.revision, seq: nextFrame.seq };
@@ -271,6 +352,7 @@ export function BotBrowserPanel({
   }, []);
 
   const clearLocalLease = useCallback(() => {
+    pendingBrowserInputsRef.current = null;
     ownedLeaseRef.current = null;
     pendingTakeoverLeaseRef.current = null;
     isHolderRef.current = false;
@@ -329,12 +411,17 @@ export function BotBrowserPanel({
       const activeTab = activeTabOf(nextView);
       const urlInfo = classifyPageUrl(activeTab?.url);
       const nextSensitive = Boolean(nextView.sensitive || urlInfo.isKnownSensitiveUrl);
+      if (!nextIsHolder || urlInfo.isGoogleSignInRejected || prevView?.pageId !== nextView.pageId ||
+          prevView?.revision !== nextView.revision || prevView?.sessionId !== nextView.sessionId) {
+        pendingBrowserInputsRef.current = null;
+      }
 
       // Clear cached frame immediately if unavailable, sensitive bystander, or page/revision changed.
       if (
         !nextView.available ||
         !nextView.canStreamInteract ||
         !nextView.pageId ||
+        urlInfo.isGoogleSignInRejected ||
         (nextSensitive && !nextIsHolder) ||
         (prevView && (prevView.pageId !== nextView.pageId || prevView.revision !== nextView.revision ||
           prevView.sessionId !== nextView.sessionId))
@@ -392,17 +479,21 @@ export function BotBrowserPanel({
     setNoticeBanner(null);
     setPreemptConfirmOpen(false);
     setExternalConfirmOpen(false);
+    setExternalGuideOpening(false);
+    if (moreRef.current) moreRef.current.open = false;
+    setMoreOpen(false);
     setUrlDraft('');
     setUrlEditing(false);
     setPreferredZoom(null);
 
     return () => {
+      externalGuideRequestRef.current = null;
       epochRef.current += 1;
       clearPollTimer();
       clearCachedFrame();
       clearLocalLease();
     };
-  }, [botId, deviceId, clearPollTimer, clearCachedFrame, clearLocalLease]);
+  }, [botId, deviceId, clearPollTimer, clearCachedFrame, clearLocalLease, setPendingAction]);
 
   const scheduleNextPollRef = useRef<(delayMs?: number) => void>(() => {});
 
@@ -428,9 +519,10 @@ export function BotBrowserPanel({
         const urlMeta = classifyPageUrl(currentTab?.url);
         const isSensitiveNow = Boolean(parsedView.sensitive || urlMeta.isKnownSensitiveUrl);
         const shouldFetchFrame =
-          parsedView.available &&
+          !nativeReadyRef.current && parsedView.available &&
           parsedView.canStreamInteract &&
           Boolean(parsedView.pageId) &&
+          !urlMeta.isGoogleSignInRejected &&
           !(isSensitiveNow && !nextIsHolder) &&
           (!hasRelayStreamRef.current || !parsedView.sessionId || useLegacyFramesRef.current) &&
           !streamDegradedRef.current;
@@ -445,7 +537,7 @@ export function BotBrowserPanel({
                 revision: parsedView.revision,
               }),
             );
-            if (epoch !== epochRef.current) return;
+            if (epoch !== epochRef.current || nativeReadyRef.current) return;
 
             const redaction = inspectFrameRedaction(rawFrame);
             if (redaction.redacted) {
@@ -466,7 +558,7 @@ export function BotBrowserPanel({
               }
             }
           } catch (frameErr) {
-            if (epoch !== epochRef.current) return;
+            if (epoch !== epochRef.current || nativeReadyRef.current) return;
             const classified = classifyBrowserError(frameErr);
             if (classified.sensitiveBlocked) {
               clearCachedFrame();
@@ -487,9 +579,9 @@ export function BotBrowserPanel({
           }
         }
 
-        if (parsedView.available && parsedView.canStreamInteract && !streamDegradedRef.current) {
+        if (nativeReadyRef.current || (parsedView.available && parsedView.canStreamInteract && !streamDegradedRef.current)) {
           if (nextIsHolder || parsedView.phase === 'taking') {
-            nextDelay = POLL_INTERVAL_ACTIVE_MS;
+            nextDelay = shouldFetchFrame ? POLL_INTERVAL_LOCAL_FRAME_MS : POLL_INTERVAL_ACTIVE_MS;
           } else if (parsedView.pageId && !(isSensitiveNow && !nextIsHolder)) {
             nextDelay = POLL_INTERVAL_WATCH_MS;
           } else {
@@ -533,10 +625,25 @@ export function BotBrowserPanel({
   );
   scheduleNextPollRef.current = schedulePoll;
 
+  useEffect(() => {
+    if (nativeReady) {
+      pendingBrowserInputsRef.current = null;
+      pendingStreamFrameRef.current = null;
+      streamFailSinceRef.current = null;
+      streamDegradedRef.current = false;
+      setStreamDegraded(false);
+      clearCachedFrame();
+    } else if (wasNativeReadyRef.current && connected && pageVisible) {
+      schedulePoll(0);
+    }
+    wasNativeReadyRef.current = nativeReady;
+  }, [nativeReady, connected, pageVisible, clearCachedFrame, schedulePoll]);
+
   // Start/stop polling strictly with connected + pageVisible; clear cached frame when paused.
   // Never auto-handback on disconnect or background!
   useEffect(() => {
     epochRef.current += 1;
+    pendingBrowserInputsRef.current = null;
     clearPollTimer();
     inFlightPollRef.current = false;
     streamFailSinceRef.current = null;
@@ -552,15 +659,18 @@ export function BotBrowserPanel({
     schedulePoll(0);
     return () => {
       epochRef.current += 1;
+      pendingBrowserInputsRef.current = null;
       clearPollTimer();
     };
-  }, [botId, deviceId, connected, pageVisible, clearPollTimer, clearCachedFrame, schedulePoll]);
+  }, [botId, deviceId, connected, pageVisible, clearPollTimer, clearCachedFrame, schedulePoll, setPendingAction]);
 
   const streamPage = view?.pageId;
   const streamSession = view?.sessionId;
   const streamLease = isHolder ? ownedLease?.lease : undefined;
-  const streamAllowed = Boolean(view?.available && view?.canStreamInteract &&
-    (!(view.sensitive || classifyPageUrl(activeTabOf(view)?.url).isKnownSensitiveUrl) || streamLease) &&
+  const streamUrlInfo = classifyPageUrl(activeTabOf(view)?.url);
+  const streamAllowed = Boolean(!nativeReady && view?.available && view?.canStreamInteract &&
+    !streamUrlInfo.isGoogleSignInRejected &&
+    (!(view.sensitive || streamUrlInfo.isKnownSensitiveUrl) || streamLease) &&
     !(streamBlocked && streamBlocked.sessionId === streamSession && streamBlocked.pageId === streamPage &&
       streamBlocked.lease === streamLease && streamBlocked.revision === view.revision));
 
@@ -573,7 +683,7 @@ export function BotBrowserPanel({
     let retry: number | undefined;
     const epoch = epochRef.current;
     const onError = (error: unknown) => {
-      if (!active || epoch !== epochRef.current) return;
+      if (!active || epoch !== epochRef.current || nativeReadyRef.current) return;
       active = false;
       dispose?.();
       pendingStreamFrameRef.current = null;
@@ -607,7 +717,7 @@ export function BotBrowserPanel({
       }, {
         onFrame: (raw) => {
           const currentView = viewRef.current;
-          if (!active || epoch !== epochRef.current || currentView?.sessionId !== streamSession ||
+          if (!active || epoch !== epochRef.current || nativeReadyRef.current || currentView?.sessionId !== streamSession ||
               currentView.pageId !== streamPage || (ownedLeaseRef.current?.lease ?? undefined) !== streamLease) return;
           const nextFrame = parseBrowserFrame(raw);
           if (!nextFrame || nextFrame.pageId !== streamPage || acceptFrame(nextFrame)) return;
@@ -643,6 +753,7 @@ export function BotBrowserPanel({
     useLegacyFramesRef.current = false;
     setStreamBlocked(null);
     setStreamAttempt((attempt) => attempt + 1);
+    setNativeAttempt((attempt) => attempt + 1);
     schedulePoll(0);
   }, [schedulePoll]);
 
@@ -727,7 +838,7 @@ export function BotBrowserPanel({
         }
       }
     },
-    [botId, connected, applyViewState, schedulePoll, t],
+    [botId, connected, applyViewState, schedulePoll, setPendingAction, t],
   );
 
   const handleHandback = useCallback(async () => {
@@ -788,7 +899,7 @@ export function BotBrowserPanel({
         setPendingAction(null);
       }
     }
-  }, [botId, connected, clearLocalLease, applyViewState, schedulePoll, t]);
+  }, [botId, connected, clearLocalLease, applyViewState, schedulePoll, setPendingAction, t]);
 
   const handleRelease = useCallback(
     async (alsoCancelTask = false) => {
@@ -831,7 +942,7 @@ export function BotBrowserPanel({
         }
       }
     },
-    [botId, connected, clearLocalLease, applyViewState, onCancelTask, schedulePoll, t],
+    [botId, connected, clearLocalLease, applyViewState, onCancelTask, schedulePoll, setPendingAction, t],
   );
 
   const runPageAction = useCallback(
@@ -876,7 +987,7 @@ export function BotBrowserPanel({
         }
       }
     },
-    [botId, connected, clearCachedFrame, clearLocalLease, applyViewState, schedulePoll, t],
+    [botId, connected, clearCachedFrame, clearLocalLease, applyViewState, schedulePoll, setPendingAction, t],
   );
 
   const currentTab = useMemo(() => activeTabOf(view), [view]);
@@ -890,7 +1001,7 @@ export function BotBrowserPanel({
     [frame, view],
   );
 
-  const canSendInput = canAcceptManualInput({
+  const canSendInput = !nativeReady && !urlMeta.isGoogleSignInRejected && canAcceptManualInput({
     connected,
     visible: pageVisible,
     view,
@@ -901,50 +1012,75 @@ export function BotBrowserPanel({
     streamDegraded,
   });
 
-  // Strict single-shot input dispatch: never queues or replays failed/stale inputs.
-  const handleInput = useCallback(
-    (event: BrowserInputEvent) => {
-      const currentView = viewRef.current;
-      const currentLease = ownedLeaseRef.current;
-      const currentFrame = isFrameUsableForView(frameRef.current, currentView)
-        ? frameRef.current
-        : null;
-      if (
-        !canAcceptManualInput({
-          connected,
-          visible: pageVisible,
-          view: currentView,
-          ownedLease: currentLease,
-          isHolder: isHolderRef.current,
-          pendingAction: pendingActionRef.current,
-          liveFrame: currentFrame,
-          streamDegraded: streamDegradedRef.current,
-        }) ||
-        !currentView?.pageId ||
-        !currentLease
-      ) {
-        return;
-      }
+  const readBrowserInputTarget = useCallback((): BrowserInputTarget | null => {
+    if (nativeReadyRef.current) return null;
+    const context = browserContextRef.current;
+    const currentView = viewRef.current;
+    const currentLease = ownedLeaseRef.current;
+    const currentFrame = isFrameUsableForView(frameRef.current, currentView) ? frameRef.current : null;
+    if (
+      !currentView?.pageId || !currentLease ||
+      classifyPageUrl(activeTabOf(currentView)?.url).isGoogleSignInRejected ||
+      !canAcceptManualInput({
+        connected: context.connected,
+        visible: context.pageVisible && readDocumentVisible(),
+        view: currentView,
+        ownedLease: currentLease,
+        isHolder: isHolderRef.current,
+        pendingAction: pendingActionRef.current,
+        liveFrame: currentFrame,
+        streamDegraded: streamDegradedRef.current,
+      })
+    ) {
+      return null;
+    }
+    return {
+      botId: context.botId,
+      deviceId: context.deviceId,
+      epoch: epochRef.current,
+      sessionId: currentView.sessionId,
+      pageId: currentView.pageId,
+      revision: currentView.revision,
+      lease: currentLease.lease,
+    };
+  }, []);
 
-      const epoch = epochRef.current;
-      const payload = buildBrowserRequest('input', {
-        botId,
-        pageId: currentView.pageId,
-        lease: currentLease.lease,
-        revision: currentView.revision,
-        event,
-      });
+  const drainBrowserInputs = useCallback(async () => {
+    if (sendingBrowserInputsRef.current) return;
+    sendingBrowserInputsRef.current = true;
+    try {
+      while (pendingBrowserInputsRef.current) {
+        const batch = pendingBrowserInputsRef.current;
+        const { target, events } = batch;
+        const event = events.shift();
+        if (!event || !sameBrowserInputTarget(readBrowserInputTarget(), target)) {
+          pendingBrowserInputsRef.current = null;
+          continue;
+        }
 
-      void requestRef
-        .current(payload)
-        .then((res) => {
-          if (epoch !== epochRef.current) return;
+        try {
+          const res = await requestRef.current(buildBrowserRequest('input', {
+            botId: target.botId,
+            pageId: target.pageId,
+            lease: target.lease,
+            revision: target.revision,
+            event,
+          }));
+          if (pendingBrowserInputsRef.current !== batch || !sameBrowserInputTarget(readBrowserInputTarget(), target)) {
+            continue;
+          }
           const nextView = parseBrowserView(res);
-          if (nextView) applyViewState(nextView);
-          schedulePoll(120);
-        })
-        .catch((err) => {
-          if (epoch !== epochRef.current) return;
+          if (nextView) {
+            applyViewState(nextView);
+          } else if (res?.ok !== true) {
+            throw new Error(t('Host 未返回有效的输入确认。', 'Host did not return a valid input acknowledgement.'));
+          }
+        } catch (err) {
+          if (pendingBrowserInputsRef.current !== batch || !sameBrowserInputTarget(readBrowserInputTarget(), target)) {
+            continue;
+          }
+          // Later keystrokes or clicks may depend on this input's result. Discard them on failure.
+          pendingBrowserInputsRef.current = null;
           const classified = classifyBrowserError(err);
           if (classified.invalidatesLease) {
             clearLocalLease();
@@ -968,19 +1104,37 @@ export function BotBrowserPanel({
             );
           }
           schedulePoll(100);
-        });
-    },
-    [
-      botId,
-      connected,
-      pageVisible,
-      applyViewState,
-      clearCachedFrame,
-      clearLocalLease,
-      schedulePoll,
-      t,
-    ],
-  );
+        }
+      }
+    } finally {
+      sendingBrowserInputsRef.current = false;
+    }
+  }, [applyViewState, clearCachedFrame, clearLocalLease, readBrowserInputTarget, schedulePoll, t]);
+
+  const handleInput = useCallback((event: BrowserInputEvent) => {
+    const target = readBrowserInputTarget();
+    if (!target) return;
+
+    let batch = pendingBrowserInputsRef.current;
+    if (!batch || !sameBrowserInputTarget(target, batch.target)) {
+      batch = { target, events: [] };
+      pendingBrowserInputsRef.current = batch;
+    }
+    const previous = batch.events.at(-1);
+    if (event.kind === 'wheel' && previous?.kind === 'wheel') {
+      const delta = normalizeWheelDelta(previous.deltaX + event.deltaX, previous.deltaY + event.deltaY, 0);
+      if (delta.deltaX === 0 && delta.deltaY === 0) {
+        batch.events.pop();
+      } else {
+        batch.events[batch.events.length - 1] = { ...event, ...delta };
+      }
+    } else if (batch.events.length < MAX_PENDING_BROWSER_INPUTS) {
+      batch.events.push(event);
+    } else if (event.kind !== 'wheel') {
+      setErrorBanner(t('待发送的输入过多。请等当前输入完成。', 'Too much input pending. Wait for the current inputs to finish.'));
+    }
+    void drainBrowserInputs();
+  }, [drainBrowserInputs, readBrowserInputTarget, t]);
 
   // Uncontrolled IME-safe remote text input dock.
   const commitRemoteText = useCallback(
@@ -1028,7 +1182,7 @@ export function BotBrowserPanel({
     connected &&
     pageVisible &&
     pendingAction === null &&
-    Boolean(view?.available && view?.canStreamInteract && view?.pageId) &&
+    Boolean(view?.available && (view.canStreamInteract || view.nativePresentation) && view.pageId) &&
     view?.phase === 'human' &&
     isHolder;
 
@@ -1049,17 +1203,59 @@ export function BotBrowserPanel({
     void runPageAction('navigating', 'navigate', { url: normalized.url });
   };
 
-  const handleConfirmExternalGuide = () => {
-    setExternalConfirmOpen(false);
-    const candidateUrl =
-      (view?.externalUrl && classifyPageUrl(view.externalUrl).isHttpUrl ? view.externalUrl : '') ||
-      (currentTab?.url && classifyPageUrl(currentTab.url).isHttpUrl ? currentTab.url : '') ||
-      FALLBACK_EXTERNAL_URL;
+  const handleRequestExternalGuide = () => {
+    if (externalGuideRequestRef.current === null) setExternalConfirmOpen(true);
+  };
 
-    if (onSwitchToExternalGuide) {
-      onSwitchToExternalGuide(candidateUrl);
-    } else {
-      void openExternalUrl(candidateUrl);
+  const handleOpenExternalGuide = async (expectedReason?: 'google-sign-in-rejected') => {
+    if (externalGuideRequestRef.current !== null) return;
+    const currentView = expectedReason ? view : viewRef.current;
+    const currentTab = activeTabOf(currentView);
+    const reason = classifyPageUrl(currentTab?.url).isGoogleSignInRejected
+      ? 'google-sign-in-rejected'
+      : undefined;
+    if (expectedReason && reason !== expectedReason) return;
+
+    const openingRequest = Symbol();
+    externalGuideRequestRef.current = openingRequest;
+    const rejection: GoogleSignInRejectionContext | undefined = reason ? {
+      pageId: currentView?.pageId === currentTab?.id ? currentView?.pageId : undefined,
+      isCurrent: () => {
+        const context = browserContextRef.current;
+        const liveView = viewRef.current;
+        const liveTab = activeTabOf(liveView);
+        const pending = pendingActionRef.current;
+        return externalGuideRequestRef.current === openingRequest &&
+          context.botId === botId && context.deviceId === deviceId && context.connected &&
+          pending !== 'navigating' && pending !== 'tab' &&
+          liveView?.sessionId === currentView?.sessionId && liveView?.pageId === currentView?.pageId &&
+          liveView?.revision === currentView?.revision && liveTab?.id === currentTab?.id &&
+          classifyPageUrl(liveTab?.url).isGoogleSignInRejected;
+      },
+    } : undefined;
+    if (rejection && !rejection.isCurrent()) {
+      externalGuideRequestRef.current = null;
+      return;
+    }
+    setExternalConfirmOpen(false);
+    setExternalGuideOpening(true);
+    setErrorBanner(null);
+    try {
+      const candidateUrl = resolveExternalGuideUrl(currentView);
+      if (onSwitchToExternalGuide) {
+        await onSwitchToExternalGuide(candidateUrl, reason, rejection);
+      } else {
+        await openExternalUrl(candidateUrl);
+      }
+    } catch {
+      if (externalGuideRequestRef.current === openingRequest && (!rejection || rejection.isCurrent())) {
+        setErrorBanner(t('无法在系统浏览器中继续。请重试。', 'Could not continue in your system browser. Try again.'));
+      }
+    } finally {
+      if (externalGuideRequestRef.current === openingRequest) {
+        externalGuideRequestRef.current = null;
+        setExternalGuideOpening(false);
+      }
     }
   };
 
@@ -1094,11 +1290,13 @@ export function BotBrowserPanel({
   const isOtherHolder = Boolean(view?.phase === 'human' && !isHolder);
   const isTaking = pendingAction === 'taking' || view?.phase === 'taking';
   const isHandingBack = pendingAction === 'handing-back';
+  const supportsNative = Boolean(nativePresenter && view?.nativePresentation);
   const isAvailableInteractive = Boolean(
-    connected && view?.available && view?.canStreamInteract && !streamDegraded,
+    connected && view?.available && (supportsNative || (view.canStreamInteract && !streamDegraded)),
   );
   const signInTakeover = isAvailableInteractive && pageVisible && Boolean(view?.pageId) &&
-    isSensitive && urlMeta.isGoogleAuth && !isHolder && !view?.fallbackToSystemBrowser && !frameRedacted;
+    isSensitive && urlMeta.isGoogleAuth && !urlMeta.isGoogleSignInRejected && !isHolder &&
+    !view?.fallbackToSystemBrowser && !frameRedacted;
 
   // Concise, honest status pill label & semantic tone.
   const statusInfo = (() => {
@@ -1108,7 +1306,7 @@ export function BotBrowserPanel({
     if (!view && loadingStatus) {
       return { tone: 'muted', text: t('连接中…', 'Connecting…'), spinning: true };
     }
-    if (!view || !view.available || !view.canStreamInteract || streamDegraded) {
+    if (!isAvailableInteractive || !view) {
       return { tone: 'warn', text: t('实时浏览不可用', 'Live view unavailable'), spinning: false };
     }
     if (isHandingBack) {
@@ -1144,6 +1342,9 @@ export function BotBrowserPanel({
   ]
     .filter(Boolean)
     .join(' ');
+  const hasOpenBrowserPage = Boolean(view?.pageId || view?.tabs.length);
+  const canChangeBrowserPlacement = Boolean(browserPlacement?.canChange && connected && view &&
+    !hasOpenBrowserPage && pendingAction === null);
 
   const navigationButtons = [
     { action: 'back', label: t('后退', 'Back'), Icon: ArrowLeft, available: view?.canGoBack !== false },
@@ -1263,6 +1464,7 @@ export function BotBrowserPanel({
           <details
             ref={moreRef}
             className="bb-more"
+            onToggle={event => setMoreOpen(event.currentTarget.open)}
             onBlur={(event) => {
               if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) {
                 event.currentTarget.open = false;
@@ -1273,6 +1475,30 @@ export function BotBrowserPanel({
               <Ellipsis size={20} aria-hidden="true" />
             </summary>
             <div className="bb-more-actions">
+              {browserPlacement ? (
+                <div className="bb-placement">
+                  <label>
+                    <span>{t('网页运行位置', 'Run webpages on')}</span>
+                    <select
+                      value={hasOpenBrowserPage ? view?.renderPlacement ?? 'server' : browserPlacement.value}
+                      disabled={!canChangeBrowserPlacement}
+                      onChange={event => {
+                        if (canChangeBrowserPlacement) browserPlacement.set(event.currentTarget.value === 'client' ? 'client' : 'server');
+                      }}
+                    >
+                      <option value="client">
+                        {hasOpenBrowserPage && view?.renderPlacement === 'client' && !view.rendererId
+                          ? t('其他客户端', 'Another client')
+                          : t('当前客户端', 'This device')}
+                      </option>
+                      <option value="server">{t('Bot 所在设备', 'Bot host')}</option>
+                    </select>
+                  </label>
+                  {hasOpenBrowserPage ? (
+                    <small>{t('关闭所有标签页后可切换。', 'Close all tabs to change this setting.')}</small>
+                  ) : null}
+                </div>
+              ) : null}
               {isHolder && view?.phase === 'human' ? (
                 <button
                   type="button"
@@ -1290,9 +1516,10 @@ export function BotBrowserPanel({
               <button
                 type="button"
                 className="bb-btn bb-btn--ghost"
+                disabled={externalGuideOpening}
                 onClick={() => {
                   if (moreRef.current) moreRef.current.open = false;
-                  setExternalConfirmOpen(true);
+                  handleRequestExternalGuide();
                 }}
               >
                 <ExternalLink size={16} aria-hidden="true" />
@@ -1430,7 +1657,7 @@ export function BotBrowserPanel({
               />
             </form>
 
-            {liveFrame ? (
+            {liveFrame && !nativeReady ? (
               <div className="bb-zoom-group" role="group" aria-label={t('画面缩放', 'Viewport zoom')}>
                 <button
                   type="button"
@@ -1553,13 +1780,15 @@ export function BotBrowserPanel({
             <ExternalLink size={15} className="bb-banner-icon" aria-hidden="true" />
             <div className="bb-banner-body">
               <div className="bb-banner-title">
-                {t('将在你的系统浏览器中打开新页面，不继承当前表单已填内容。确认切换？', 'This opens a fresh session in your system browser and does not carry over filled form fields. Continue?')}
+                {urlMeta.isGoogleSignInRejected
+                  ? t('登录后，返回 Pi Bot 继续当前步骤。', 'After signing in, return to Pi Bot to continue the current step.')
+                  : t('将在你的系统浏览器中打开新页面，不继承当前表单已填内容。确认切换？', 'This opens a fresh session in your system browser and does not carry over filled form fields. Continue?')}
               </div>
               <div className="bb-banner-actions">
                 <button
                   type="button"
                   className="bb-btn bb-btn--primary bb-btn--sm"
-                  onClick={handleConfirmExternalGuide}
+                  onClick={() => void handleOpenExternalGuide()}
                 >
                   {t('打开系统浏览器', 'Open system browser')}
                 </button>
@@ -1606,33 +1835,38 @@ export function BotBrowserPanel({
         ) : null}
       </div>
 
-      {/* Main viewport stage */}
-      <BotBrowserViewport
-        connected={connected}
-        visible={pageVisible}
-        view={view}
-        liveFrame={liveFrame}
-        loadingStatus={loadingStatus}
-        streamDegraded={streamDegraded}
-        frameRedacted={frameRedacted}
-        frameRedactedReason={frameRedactedReason}
-        isHolder={isHolder}
-        canSendInput={canSendInput}
-        isSensitive={isSensitive}
-        signInTakeoverAction={signInTakeover ? primaryActionButton : null}
-        zoom={zoom}
-        hostLabel={hostLabel}
-        onZoomChange={setPreferredZoom}
-        onInput={handleInput}
-        onRetry={handleRetry}
-        onOpenTab={
-          !isOtherHolder && connected
-            ? () => void runPageAction('tab', 'open', { pageId: null })
-            : undefined
-        }
-        onRequestExternalGuide={() => setExternalConfirmOpen(true)}
-        onExitStageFocus={() => closeBtnRef.current?.focus({ preventScroll: true })}
-      />
+      <div className="bb-viewport" ref={setNativeStage} aria-hidden={nativeReady || undefined}>
+        {!nativeReady ? (
+          <BotBrowserViewport
+            connected={connected}
+            visible={pageVisible}
+            view={view}
+            liveFrame={liveFrame}
+            loadingStatus={loadingStatus}
+            streamDegraded={streamDegraded}
+            frameRedacted={frameRedacted}
+            frameRedactedReason={frameRedactedReason}
+            isHolder={isHolder}
+            canSendInput={canSendInput}
+            isSensitive={isSensitive}
+            externalGuideOpening={externalGuideOpening}
+            signInTakeoverAction={signInTakeover ? primaryActionButton : null}
+            zoom={zoom}
+            hostLabel={hostLabel}
+            onZoomChange={setPreferredZoom}
+            onInput={handleInput}
+            onRetry={handleRetry}
+            onOpenTab={
+              !isOtherHolder && connected
+                ? () => void runPageAction('tab', 'open', { pageId: null })
+                : undefined
+            }
+            onRequestExternalGuide={handleRequestExternalGuide}
+            onContinueAfterGoogleSignInRejection={() => void handleOpenExternalGuide('google-sign-in-rejected')}
+            onExitStageFocus={() => closeBtnRef.current?.focus({ preventScroll: true })}
+          />
+        ) : null}
+      </div>
 
       {/* Remote keyboard & touch input dock (visible only when actively holding confirmed lease) */}
       {canSendInput ? (

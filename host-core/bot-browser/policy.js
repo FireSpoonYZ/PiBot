@@ -54,6 +54,7 @@ const PAYMENT_HOSTS = new Set([
 
 const AUTH_PATH_RE = /\/(o\/oauth2|oauth2?\/authorize|oauth\/consent|signin|serviceLogin|v3\/signin|challenge\/|mfa|2fa|two-factor|totp|webauthn|passkey|sso|saml|api\/oauth\/google\/callback)(\/|$|\?)/i;
 const GOOGLE_OAUTH_PATH_RE = /^\/(?:o\/oauth2|signin\/oauth|v\d+\/signin\/oauth|consent)(\/|$)/i;
+const GOOGLE_SIGN_IN_REJECTED_PATH_RE = /^\/(?:v\d+\/)?signin\/rejected\/?$/i;
 const PAYMENT_PATH_RE = /\/(checkout|billing\/pay|payment-method|payments|credit-card|card-details)(\/|$|\?)/i;
 const SECRET_CONSOLE_PATH_RE = /^\/(auth\/clients|apis\/credentials|iam-admin\/serviceaccounts|security\/secret-manager)(\/|$)/i;
 
@@ -151,6 +152,11 @@ export function isGoogleApiOAuthUrl(url) {
   );
 }
 
+function isGoogleSignInRejected(parsed) {
+  return parsed?.origin === 'https://accounts.google.com' &&
+    !parsed.username && !parsed.password && GOOGLE_SIGN_IN_REJECTED_PATH_RE.test(parsed.pathname);
+}
+
 export function isPaymentUrl(url) {
   const parsed = parseUrlSafe(url);
   if (!parsed) return false;
@@ -202,10 +208,14 @@ export function validateNavigationUrl(rawUrl, { actor = 'bot', allowBlank = fals
 
   if (actor === 'bot') {
     if (isAuthOrOAuthUrl(parsed.href)) {
+      const googleSignInRejected = isGoogleSignInRejected(parsed);
       throw browserError(
         'BROWSER_SENSITIVE_BLOCKED',
         'Sign-in, MFA, and OAuth consent require human control.',
-        { reason: 'oauth_auth_page', fallbackToSystemBrowser: isGoogleApiOAuthUrl(parsed.href) }
+        {
+          reason: googleSignInRejected ? 'google_sign_in_rejected' : 'oauth_auth_page',
+          fallbackToSystemBrowser: googleSignInRejected || isGoogleApiOAuthUrl(parsed.href),
+        }
       );
     }
     if (isGoogleClientsPage(parsed.href)) {
@@ -288,6 +298,8 @@ export function classifyPageSensitivity({
   const reasons = [];
 
   const googleApiOAuth = isGoogleApiOAuthUrl(url);
+  const googleSignInRejected = isGoogleSignInRejected(parsed);
+  if (googleSignInRejected) reasons.push('google_sign_in_rejected');
   const requiresSystemBrowser = safeHints.requiresSystemBrowser === true;
   const oauthOrAuth =
     isAuthOrOAuthUrl(url) ||
@@ -364,11 +376,13 @@ export function classifyPageSensitivity({
   const blockHandback = sensitive;
   const blockBystanderFrame = blockBotObserve;
   const blockNormalFrame = secretRisk;
-  const fallbackToSystemBrowser = googleApiOAuth || requiresSystemBrowser || secretRisk;
+  const fallbackToSystemBrowser = googleSignInRejected || googleApiOAuth || requiresSystemBrowser || secretRisk;
 
   let guidance = null;
   if (secretRisk) {
     guidance = 'Client Secret creation/display is isolated from bot observation and normal frames. Complete this step in your system browser and enter credentials via the private Center configuration card.';
+  } else if (googleSignInRejected) {
+    guidance = 'Google denied sign-in in this browser. Sign in to Google Cloud Console in a supported system browser, then return to setup.';
   } else if (googleApiOAuth) {
     guidance = 'Complete Google API authorization in your system browser.';
   } else if (requiresSystemBrowser) {
@@ -547,6 +561,7 @@ export function sanitizeUrlForModel(rawUrl) {
   if (!ALLOWED_SCHEMES.has(parsed.protocol)) return '[redacted-url]';
 
   const clean = new URL(parsed.origin + parsed.pathname);
+  if (isGoogleSignInRejected(parsed)) return clean.href;
   for (const [key, value] of parsed.searchParams.entries()) {
     if (SENSITIVE_QUERY_KEYS.has(key.toLowerCase())) {
       clean.searchParams.set(key, '[redacted]');
@@ -686,7 +701,7 @@ export function sanitizeTabsForCaller(tabs, { isBot = false, canViewSensitive = 
     return {
       id: tab.id,
       title: tab.title,
-      url: isBot ? sanitizeUrlForModel(tab.url) : tab.url,
+      url: isBot || sens.reasons.includes('google_sign_in_rejected') ? sanitizeUrlForModel(tab.url) : tab.url,
     };
   });
 }

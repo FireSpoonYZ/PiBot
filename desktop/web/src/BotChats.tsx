@@ -90,8 +90,10 @@ import {
   type VaultUnlockSubmitPayload,
 } from '../../../web/src/ToolPresentation';
 import BotBrowserPanel from '../../../web/src/bot-browser/BotBrowserPanel';
+import { desktopNativeBrowser, type DesktopNativeBrowser } from './nativeBrowser';
 import { createBrowserFrameSubscriber } from '../../../web/src/bot-browser/relayStream';
 import { GoogleSetupWizard } from '../../../web/src/google/GoogleSetupWizard';
+import { continueGoogleSetupAfterSignInRejection } from '../../../web/src/google/currentGoogleSetup';
 import { openExternalUrl } from '../../../web/src/center-admin/openExternalUrl';
 import {
   createBrowserControlRequest,
@@ -132,7 +134,7 @@ import { BotAvatarStudio } from './BotAvatarStudio';
 import { targetApi } from './targetApi';
 import { HistoryEpochChangedError, readHistoryPage } from './history';
 import { Scopes } from './Scopes';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 import type { RoomApiResolver, ScopeReadApi } from './scope-api';
 import {
   ConversationContextMenu,
@@ -2110,7 +2112,7 @@ function PrimaryChatPane({
   }, [api, identity]);
 
   // Bot 内置浏览器与 Google 建项向导控制：volatile RPC 绑定当前目标设备与 Bot，不经持久 outbox。
-  const callBrowser = useMemo(
+  const fallbackCallBrowser = useMemo(
     () => createBrowserControlRequest(api, identity, bot.botId),
     [api, identity, bot.botId],
   );
@@ -2118,8 +2120,45 @@ function PrimaryChatPane({
   const browserDeviceId = identity?.targetDeviceId;
   const browserGeneration = identity?.generation;
   const browserConnectionKind = identity?.kind;
+  const browserPlacementKey = browserDeviceId && browserProfileId
+    ? `desktop-browser-placement:${JSON.stringify([browserProfileId, browserDeviceId])}`
+    : '';
+  const [browserPreference, setBrowserPreference] = useState<{ key: string; placement: 'client' | 'server' }>();
+  let browserPlacement: 'client' | 'server' = 'client';
+  if (browserPreference?.key === browserPlacementKey) {
+    browserPlacement = browserPreference.placement;
+  } else if (browserPlacementKey) {
+    try { if (localStorage.getItem(browserPlacementKey) === 'server') browserPlacement = 'server'; } catch { /* storage may be unavailable */ }
+  }
+  const setBrowserPlacement = (placement: 'client' | 'server') => {
+    setBrowserPreference({ key: browserPlacementKey, placement });
+    try { if (browserPlacementKey) localStorage.setItem(browserPlacementKey, placement); } catch { /* retain in memory */ }
+  };
+  const nativeBrowser = useMemo(
+    () => identity && isTauri() && !isArchived && /Windows|Linux/.test(navigator.userAgent)
+      ? desktopNativeBrowser(api, identity, bot.botId) : undefined,
+    [api, identity, bot.botId, isArchived],
+  );
+  const [localBrowser, setLocalBrowser] = useState<DesktopNativeBrowser>();
+  useEffect(() => {
+    if (!nativeBrowser) return;
+    let active = true;
+    void nativeBrowser.isLocalHost().then(local => {
+      if (active) setLocalBrowser(local ? nativeBrowser : undefined);
+    });
+    return () => { active = false; };
+  }, [nativeBrowser, online]);
+  useEffect(() => {
+    if (nativeBrowser && online && pageActive) void nativeBrowser.prepare(browserPlacement).catch(() => {});
+  }, [nativeBrowser, online, pageActive, browserPlacement]);
+  const callBrowser = useCallback(
+    (input: Record<string, unknown>) => nativeBrowser
+      ? nativeBrowser.request(input, browserPlacement)
+      : fallbackCallBrowser(input),
+    [nativeBrowser, browserPlacement, fallbackCallBrowser],
+  );
   const subscribeBrowserFrames = useMemo(() => {
-    if (browserConnectionKind !== 'relay' || !browserProfileId || !browserDeviceId || browserGeneration === undefined) return;
+    if (!browserConnectionKind || !browserProfileId || !browserDeviceId || browserGeneration === undefined) return;
     return createBrowserFrameSubscriber(api, {
       kind: browserConnectionKind, profileId: browserProfileId,
       targetDeviceId: browserDeviceId, generation: browserGeneration,
@@ -4665,9 +4704,19 @@ function PrimaryChatPane({
               connected={online && pageActive}
               request={callBrowser}
               subscribeFrames={subscribeBrowserFrames}
-              onSwitchToExternalGuide={(url) => {
+              nativePresenter={nativeBrowser}
+              browserPlacement={nativeBrowser && localBrowser !== nativeBrowser && browserConnectionKind === 'relay' ? {
+                value: browserPlacement, canChange: true, set: setBrowserPlacement,
+              } : undefined}
+              onSwitchToExternalGuide={async (url, reason, rejection) => {
+                if (reason === 'google-sign-in-rejected') {
+                  if (await continueGoogleSetupAfterSignInRejection(callGoogleSetup, openExternalUrl, rejection)) {
+                    setInspectorTab(current => current === 'browser' ? null : current);
+                  }
+                  return;
+                }
                 void callGoogleSetup({ action: 'resume', mode: 'guide-browser' }).catch(() => {});
-                if (url) void openExternalUrl(url).catch(() => {});
+                if (url) await openExternalUrl(url);
               }}
               onClose={() => setInspectorTab(null)}
             />

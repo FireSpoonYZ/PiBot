@@ -2,7 +2,7 @@
 // and wire-safe mutation guard builder for the active Google Setup wizard.
 // Intentionally free of React/CSS runtime imports so it can be unit-tested directly.
 import type { ChatToolCallItem, ChatTurn } from '../chatTurnModel';
-import type { GoogleSetupControlState, GoogleSetupPresentation } from './types';
+import type { GoogleSetupControlCall, GoogleSetupControlState, GoogleSetupPresentation } from './types';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -68,6 +68,41 @@ export function isTerminalGoogleSetupState(state: string | null | undefined): bo
 
 export function isActiveGoogleSetupState(state: string | null | undefined): boolean {
   return state === 'running' || state === 'failed';
+}
+
+export interface GoogleSignInRejectionContext {
+  pageId: string | undefined;
+  isCurrent: () => boolean;
+}
+
+export async function continueGoogleSetupAfterSignInRejection(
+  request: GoogleSetupControlCall,
+  openExternal: (url: string) => Promise<void>,
+  rejection?: GoogleSignInRejectionContext,
+): Promise<boolean> {
+  if (rejection && !rejection.isCurrent()) return false;
+  const current = rejection?.pageId ? await request({ action: 'status' }) : null;
+  if (rejection && !rejection.isCurrent()) return false;
+  if (!current || !rejection || current.browserPageId !== rejection.pageId ||
+      !current.id || !isActiveGoogleSetupState(current.state)) {
+    await openExternal(GOOGLE_CONSOLE_ORIGIN + '/');
+    return false;
+  }
+  if (current.unavailable) throw new Error('Google setup is unavailable');
+
+  const next = await request({
+    action: 'resume',
+    mode: 'guide-browser',
+    runId: current.id,
+    expectedRevision: current.revision,
+  });
+  if (!rejection.isCurrent()) return false;
+  if (next.id !== current.id || next.unavailable || next.mode !== 'guide-browser' || isStaleGoogleSetupResult(next)) {
+    throw new Error('Google setup could not switch to external guidance');
+  }
+  const url = googleSetupConsoleUrl(next.step, next);
+  if (url) await openExternal(url);
+  return rejection.isCurrent();
 }
 
 export function isActiveGoogleSetupPresentation(

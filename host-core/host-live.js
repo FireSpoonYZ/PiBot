@@ -257,8 +257,14 @@ export function createHostLiveReceiver({
     const controller = new AbortController();
     rec.controller = controller;
     const { signal } = controller;
-    // The capture cadence controls when resumed credit can be used.
-    const credit = createBrowserScreencastFrameCredit({ onCreditAvailable() {} });
+    let resume;
+    const wake = () => {
+      const resolve = resume;
+      resume = null;
+      resolve?.();
+    };
+    signal.addEventListener('abort', wake, { once: true });
+    const credit = createBrowserScreencastFrameCredit({ onCreditAvailable: wake });
     rec.credit = credit;
     track(rec, (async () => {
       try {
@@ -268,39 +274,59 @@ export function createHostLiveReceiver({
         let lastDigest;
         let lastRevision;
         let lastSentAt = 0;
+        let nextCaptureAt = 0;
+        let retryLatest = false;
         while (canSend(rec)) {
-          let interval = BROWSER_FRAME_INTERVAL_MS;
-          if (credit.canSend()) {
-            const captured = await capture();
-            if (!canSend(rec)) return;
-            if (captured?.pageId !== frame.target.pageId) {
-              finish(rec, { reason: 'error', code: 'BROWSER_STALE_PAGE' });
+          if (!credit.canSend()) {
+            await new Promise((resolve) => { resume = resolve; });
+            continue;
+          }
+          const remaining = nextCaptureAt - Date.now();
+          if (remaining > 0) await delay(remaining, undefined, { signal });
+          if (!canSend(rec)) return;
+          const captured = await capture({ wait: !retryLatest });
+          if (!canSend(rec)) return;
+          if (captured?.pageId !== frame.target.pageId) {
+            finish(rec, { reason: 'error', code: 'BROWSER_STALE_PAGE' });
+            return;
+          }
+          if (captured.frameUnchanged === true) {
+            nextCaptureAt = Date.now() + BROWSER_FRAME_INTERVAL_MS;
+            continue;
+          }
+          if (typeof captured.data !== 'string') {
+            finish(rec, { reason: 'error', code: 'BAD_FRAME' });
+            return;
+          }
+
+          // Prefer the producer's repaint wakeup. Older hosts and Android retain bounded polling.
+          nextCaptureAt = captured.captureSeq === undefined ? Date.now() + BROWSER_FRAME_INTERVAL_MS : 0;
+          retryLatest = false;
+          const digest = createHash('sha256').update(captured.data).digest('base64');
+          if (captured.revision !== lastRevision || digest !== lastDigest ||
+              Date.now() - lastSentAt >= BROWSER_FRAME_REFRESH_MS) {
+            const bytes = encodeBrowserStreamPacket(rec.routeId, captured);
+            if (!bytes) {
+              finish(rec, { reason: 'error', code: 'BAD_FRAME' });
               return;
             }
-            const digest = createHash('sha256').update(captured.data).digest('base64');
-            if (captured.revision !== lastRevision || digest !== lastDigest ||
-                Date.now() - lastSentAt >= BROWSER_FRAME_REFRESH_MS) {
-              const bytes = encodeBrowserStreamPacket(rec.routeId, captured);
-              if (!bytes) {
-                finish(rec, { reason: 'error', code: 'BAD_FRAME' });
-                return;
-              }
-              if (sendBrowserFrame(bytes)) {
-                credit.recordSent(captured.seq);
-                rec.prevSequence = captured.seq;
-                lastDigest = digest;
-                lastRevision = captured.revision;
-                lastSentAt = Date.now();
-              } else {
-                interval = 500;
-              }
+            if (sendBrowserFrame(bytes)) {
+              credit.recordSent(captured.seq);
+              rec.prevSequence = captured.seq;
+              lastDigest = digest;
+              lastRevision = captured.revision;
+              lastSentAt = Date.now();
+              nextCaptureAt = lastSentAt + BROWSER_FRAME_INTERVAL_MS;
+            } else {
+              nextCaptureAt = Date.now() + 500;
+              retryLatest = true;
             }
           }
-          await delay(interval, undefined, { signal });
         }
       } catch (err) {
         if (!signal.aborted) finish(rec, { reason: 'error', code: fixedCode(err) });
       } finally {
+        signal.removeEventListener('abort', wake);
         credit.dispose();
       }
     })());

@@ -248,11 +248,11 @@ final class BotBrowserManager {
         final String sessionId;
         final ReentrantLock lock = new ReentrantLock();
         final LinkedHashMap<String, TabState> tabs = new LinkedHashMap<>();
-        String activePageId;
+        volatile String activePageId;
         final AtomicLong revision = new AtomicLong(0L);
         final AtomicLong frameSeq = new AtomicLong(0L);
         volatile long lastActiveAtMs;
-        boolean released = false;
+        volatile boolean released = false;
 
         BotSession(String ownerKey, String profileName, long nowMs) {
             this.ownerKey = ownerKey;
@@ -275,6 +275,33 @@ final class BotBrowserManager {
     BotBrowserManager(Backend backend, Clock clock) {
         this.backend = backend;
         this.clock = clock;
+    }
+
+    JSONObject nativePresentation(String deviceId, String botId, String action, JSONObject arguments)
+            throws Exception {
+        ensureOpen();
+        String owner = BotBrowserPolicy.ownerKey(deviceId, botId);
+        String grantId = arguments.optString("grantId", "");
+        if ("nativeRevoke".equals(action)) {
+            BotBrowserPresentation.revoke(owner, grantId);
+            return new JSONObject().put("revoked", true);
+        }
+        if (android.os.Build.VERSION.SDK_INT < 30) {
+            return new JSONObject().put("supported", false);
+        }
+        if (arguments.optString("pageId", "").isEmpty()) throw new IllegalArgumentException("pageId required");
+        BotSession session = requireSession(deviceId, botId);
+        session.lock.lock();
+        try {
+            TabState tab = resolveTargetTab(session, arguments);
+            if (!tab.id.equals(session.activePageId) || !(tab.handle instanceof WebViewTabHandle nativeTab)) {
+                throw new BotBrowserBridge.Failure("BROWSER_PAGE_NOT_FOUND", "Native presentation requires the active native tab");
+            }
+            long expiresAt = arguments.optLong("expiresAt", 0);
+            BotBrowserPresentation.grant(owner, botId, tab.id, nativeTab, grantId, expiresAt,
+                    () -> !session.released && tab.id.equals(session.activePageId));
+            return new JSONObject().put("supported", true).put("grantId", grantId).put("expiresAt", expiresAt);
+        } finally { session.lock.unlock(); }
     }
 
     /** 非创建式状态探测：不打开标签页，不创建 WebView，仅探测平台多 Profile 支持与当前 Bot 会话。 */
@@ -1646,8 +1673,8 @@ final class BotBrowserManager {
 
     static final class WebViewTabHandle implements TabHandle {
         final WebView webView;
-        final int width;
-        final int height;
+        volatile int width;
+        volatile int height;
         volatile boolean canBack;
         volatile boolean canForward;
         volatile boolean destroyed;
@@ -1988,8 +2015,8 @@ final class BotBrowserManager {
 
             Bitmap scaled = captured;
             try {
-                int targetW = wv.width;
-                int targetH = wv.height;
+                int targetW = captured.getWidth();
+                int targetH = captured.getHeight();
                 if (targetW > maxWidth || targetH > maxHeight) {
                     double scale = Math.min((double) maxWidth / targetW, (double) maxHeight / targetH);
                     targetW = Math.max(1, (int) Math.round(targetW * scale));
@@ -2151,6 +2178,7 @@ final class BotBrowserManager {
             wv.destroyed = true;
             Runnable destroyTask = () -> {
                 try {
+                    BotBrowserPresentation.destroy(wv);
                     wv.webView.stopLoading();
                     wv.webView.onPause();
                     wv.webView.loadUrl("about:blank");

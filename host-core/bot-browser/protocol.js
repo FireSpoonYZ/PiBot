@@ -143,7 +143,7 @@ const CONTROL_ACTION_FIELDS = Object.freeze({
   reload: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'ignoreCache'],
   select: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision'],
   closeTab: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision'],
-  frame: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'sinceSeq', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes', 'stream'],
+  frame: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'sinceSeq', 'format', 'quality', 'maxWidth', 'maxHeight', 'maxBytes', 'stream', 'waitMs'],
   takeover: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'force', 'preempt', 'resume', 'holderLabel', 'reason', 'sensitive'],
   input: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'frameSeq', 'event'],
   handback: ['botId', 'scopeId', 'pageId', 'sessionId', 'lease', 'revision', 'expectedRevision', 'reason'],
@@ -603,6 +603,13 @@ export function normalizeControlInput(input, maxFrameBase64Bytes = BROWSER_MAX_F
         throw browserError('INVALID_ARGUMENT', 'stream frames require pageId and sessionId');
       }
       normalized.stream = true;
+    }
+    if (input.waitMs !== undefined) {
+      if (!normalized.stream || normalized.sinceSeq === undefined ||
+          !Number.isSafeInteger(input.waitMs) || input.waitMs < 1 || input.waitMs > 1500) {
+        throw browserError('INVALID_ARGUMENT', 'waitMs requires a stream cursor and must be between 1 and 1500');
+      }
+      normalized.waitMs = input.waitMs;
     }
   }
   if (action === 'input') {

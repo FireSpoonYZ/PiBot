@@ -12,6 +12,7 @@ import { readControlClientFrame, readControlHostFrame, readControlServerFrame } 
 import { readLiveClientFrame, readLiveHostFrame, readLiveServerFrame } from './remote-live-protocol.js';
 import { readScopeClientFrame, readScopeServerFrame } from './scope-wire.js';
 import { readBrowserStreamPacket } from './bot-browser/stream-packet.js';
+import { readBrowserEgress } from './bot-browser/egress-protocol.js';
 
 const INVALID_ARGUMENT = 'INVALID_ARGUMENT';
 
@@ -344,6 +345,7 @@ function readUnavailable(frame) {
 export function readClientFrame(data, isBinary = false, options) {
   if (isBinary) return readRelayBrowserFrame(data, options);
   const frame = parseFrame(data);
+  if (frame.type === 'browser-egress') return readBrowserEgress(frame);
   const scopeFrame = readScopeClientFrame(frame);
   if (scopeFrame !== null) return scopeFrame;
   switch (frame.type) {
@@ -382,6 +384,7 @@ export function readClientFrame(data, isBinary = false, options) {
 export function readServerFrame(data, isBinary = false, options) {
   if (isBinary) return readRelayBrowserFrame(data, options);
   const frame = parseFrame(data);
+  if (frame.type === 'browser-egress') return readBrowserEgress(frame);
   const scopeFrame = readScopeServerFrame(frame);
   if (scopeFrame !== null) return scopeFrame;
   switch (frame.type) {

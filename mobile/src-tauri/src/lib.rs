@@ -56,6 +56,10 @@ const ALLOWED_METHODS: &[&str] = &[
   "screenStatus",
   "screenTakeover",
   "screenClose",
+  "browserNativeOpen",
+  "browserNativeLayout",
+  "browserNativeStatus",
+  "browserNativeClose",
   // C7 配对/引导：Kotlin 侧 UI-local 动作（配对内部复用既有 bridge op，不进桥白名单）
   "pairCenter",
   "pairCenterWithCode",
@@ -98,6 +102,9 @@ const ALLOWED_METHODS: &[&str] = &[
 
 /// 不占普通准入槽的本地 UI 动作：普通槽满时仍可执行，不产生 bridge 请求堆积。
 const CLEANUP_METHODS: &[&str] = &[
+  "browserNativeLayout",
+  "browserNativeStatus",
+  "browserNativeClose",
   "hide",
   "haptic",
   "reconnect",

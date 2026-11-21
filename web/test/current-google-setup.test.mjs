@@ -3,6 +3,7 @@ import test from 'node:test';
 import { normalizeGoogleSetupControl } from '../../host-core/browser-setup-protocol.js';
 import {
   buildGoogleSetupMutationPayload,
+  continueGoogleSetupAfterSignInRejection,
   deriveGoogleSetupAttention,
   googleSetupConsoleUrl,
   isStaleGoogleSetupResult,
@@ -34,6 +35,71 @@ function makeSetupPresentation(overrides = {}) {
     ...overrides,
   };
 }
+
+test('rejected Google login resumes the same guide revision and uses a canonical destination', async () => {
+  const calls = [];
+  const urls = [];
+  const rejection = { pageId: 'setup-page', isCurrent: () => true };
+  const state = {
+    id: 'run-1', revision: 4, state: 'running', step: 'client', projectId: 'test-project',
+    browserPageId: rejection.pageId,
+  };
+  const openExternal = async url => { urls.push(url); };
+  const request = async input => {
+    calls.push(input);
+    if (input.action === 'status') return state;
+    return { ...state, mode: 'guide-browser', revision: 5 };
+  };
+  assert.equal(await continueGoogleSetupAfterSignInRejection(request, openExternal, rejection), true);
+  assert.deepEqual(calls, [
+    { action: 'status' },
+    { action: 'resume', mode: 'guide-browser', runId: 'run-1', expectedRevision: 4 },
+  ]);
+  assert.deepEqual(urls, ['https://console.cloud.google.com/auth/clients/create?project=test-project']);
+
+  urls.length = 0;
+  assert.equal(await continueGoogleSetupAfterSignInRejection(async input => {
+    if (input.action === 'status') return state;
+    return { ...state, mode: 'guide-browser', step: 'connect' };
+  }, openExternal, rejection), true);
+  assert.deepEqual(urls, []);
+});
+
+test('a rejected tab outside the setup opens Cloud Console and leaves the current guide alone', async () => {
+  const urls = [];
+  const request = async input => {
+    assert.deepEqual(input, { action: 'status' });
+    return { id: 'run-1', revision: 4, state: 'running', step: 'project', browserPageId: 'setup-page' };
+  };
+  const rejection = { pageId: 'generic-page', isCurrent: () => true };
+  assert.equal(await continueGoogleSetupAfterSignInRejection(request, async url => { urls.push(url); }, rejection), false);
+  assert.deepEqual(urls, ['https://console.cloud.google.com/']);
+});
+
+test('switching away while reading setup status discards the rejected tab action', async () => {
+  let current = true;
+  const rejection = { pageId: 'setup-page', isCurrent: () => current };
+  const request = async input => {
+    assert.deepEqual(input, { action: 'status' });
+    current = false;
+    return { id: 'run-1', revision: 4, state: 'running', step: 'project', browserPageId: rejection.pageId };
+  };
+  const openExternal = async () => assert.fail('a stale tab must not open Cloud Console');
+  assert.equal(await continueGoogleSetupAfterSignInRejection(request, openExternal, rejection), false);
+});
+
+test('switching away during the mode change suppresses browser launch and panel close', async () => {
+  let current = true;
+  const rejection = { pageId: 'setup-page', isCurrent: () => current };
+  const state = { id: 'run-1', revision: 4, state: 'running', step: 'project', browserPageId: rejection.pageId };
+  const request = async input => {
+    if (input.action === 'status') return state;
+    current = false;
+    return { ...state, mode: 'guide-browser', revision: 5 };
+  };
+  const openExternal = async () => assert.fail('a stale tab must not open the next guide step');
+  assert.equal(await continueGoogleSetupAfterSignInRejection(request, openExternal, rejection), false);
+});
 
 function makeTool(id, presentation, extra = {}) {
   return {
