@@ -37,6 +37,7 @@ export function createBotBrowserState({
   maxTabsPerBot = BROWSER_MAX_TABS_PER_BOT,
   isPageWithheld = null,
   onEvent = null,
+  onPageUrl = null,
 }) {
   let sessionId = null;
   let phase = 'bot'; // 'bot' | 'taking' | 'human' | 'held'
@@ -373,7 +374,8 @@ export function createBotBrowserState({
 
     const prevPageId = pageId;
     const prevDocGen = documentGeneration;
-    const prevActiveUrl = activeTab()?.url ?? '';
+    const prevActive = activeTab();
+    const prevActiveUrl = prevActive?.url ?? '';
 
     if (Array.isArray(result.tabs)) {
       const nextTabs = normalizeTabs(result.tabs, maxTabsPerBot);
@@ -431,7 +433,8 @@ export function createBotBrowserState({
       changed = true;
     }
 
-    const nextActiveUrl = activeTab()?.url ?? (typeof result.url === 'string' ? result.url : '');
+    const active = activeTab();
+    const nextActiveUrl = active?.url ?? (typeof result.url === 'string' ? result.url : '');
     const pageOrNavChanged =
       pageId !== prevPageId ||
       documentGeneration !== prevDocGen ||
@@ -458,6 +461,15 @@ export function createBotBrowserState({
       hints: nextHints !== null || pageOrNavChanged ? nextHints : undefined,
       providerSensitive: result.sensitive !== undefined ? result.sensitive : (pageOrNavChanged ? false : undefined),
     });
+    if (typeof onPageUrl === 'function' && active && active.id === pageId && active.url &&
+        (pageId !== prevActive?.id || pageId !== prevPageId || active.url !== prevActiveUrl)) {
+      // Give the Host URL-only metadata without putting it on the public browser event stream.
+      try {
+        onPageUrl({ botId, pageId, url: active.url, openPageIds: tabs.map(tab => tab.id) });
+      } catch {
+        // Observers must not break browser state.
+      }
+    }
   }
 
   function grantLease(authority, displayLabelOverride = null, shared = false) {

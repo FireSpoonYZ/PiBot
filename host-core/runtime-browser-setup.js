@@ -274,6 +274,19 @@ export async function openRuntimeBrowserSetup({
 
   let setupService = null;
 
+  function observeBrowserPage(event) {
+    if (
+      !closed &&
+      typeof setupService?.syncBrowserUrl === 'function' &&
+      typeof event?.botId === 'string' &&
+      typeof event.url === 'string' &&
+      event.url.trim() !== ''
+    ) {
+      // Browser status can be called from inside setup control and must never await this lane.
+      void setupService.syncBrowserUrl(event.botId, event.url, event.pageId, event.openPageIds).catch(() => {});
+    }
+  }
+
   const browserService = await browserFactory({
     host,
     profileRoot: join(host.dataRoot, 'bot-browser', 'profiles'),
@@ -290,20 +303,20 @@ export async function openRuntimeBrowserSetup({
         await abortBotTurn(botId);
       }
     },
+    onPageUrl: observeBrowserPage,
     onEvent: (event) => {
       if (typeof onBrowserEvent === 'function') {
-        try { onBrowserEvent(event); } catch { /* observer error must not break state */ }
+        try {
+          if (typeof event?.url === 'string') {
+            const { url: _privateUrl, ...publicEvent } = event;
+            onBrowserEvent(publicEvent);
+          } else {
+            onBrowserEvent(event);
+          }
+        } catch { /* observer error must not break state */ }
       }
-      if (
-        !closed &&
-        setupService &&
-        typeof setupService.syncBrowserUrl === 'function' &&
-        typeof event?.botId === 'string' &&
-        typeof event?.url === 'string' &&
-        event.url.trim() !== ''
-      ) {
-        void setupService.syncBrowserUrl(event.botId, event.url).catch(() => {});
-      }
+      // Older injected browser factories may still deliver navigation as a browser event.
+      observeBrowserPage(event);
     },
   });
 

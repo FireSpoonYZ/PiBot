@@ -20,6 +20,7 @@ import {
   isolateChildBrowserEnvironment,
 } from './desktop-discovery.js';
 import { browserError, DESKTOP_BROWSER_DEFAULT_VIEWPORT } from './desktop-policy.js';
+import { unwritableProfileLockLine as findUnwritableProfileLockLine } from './vendor/orca/chromium-profile-lock.js';
 import {
   isWindowsDevToolsProfileInUse,
   readWindowsDevToolsEndpoint,
@@ -78,13 +79,8 @@ export function parseDevToolsListeningUrl(stderrText) {
   return parseLoopbackDevToolsUrl(match[1]);
 }
 
-// Adapted from Orca external-chromium-browser-session.ts (MIT).
 export function unwritableProfileLockLine(stderrText) {
-  if (typeof stderrText !== 'string' || !stderrText) return undefined;
-  return stderrText
-    .split(/\r?\n/)
-    .find((line) => /SingletonLock: (Permission denied|Read-only file system)/.test(line))
-    ?.trim();
+  return typeof stderrText === 'string' ? findUnwritableProfileLockLine(stderrText) : undefined;
 }
 
 /**

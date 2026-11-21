@@ -3,7 +3,7 @@
 //
 // Exports `createGoogleSetupService(options)` ->
 //   { control(input, authority), toolsForBot(context), getAgentBrowserPolicy(botId, url?),
-//     syncBrowserUrl(botId, url), getRun(botId), listRuns(), forgetBot(botId), close() }
+//     syncBrowserUrl(botId, url, pageId, openPageIds), getRun(botId), listRuns(), forgetBot(botId), close() }
 //
 // Design & security invariants (strictly aligned with 04-frontend-interaction.md and integration.md):
 // - Shared Center Google MCP model: configures one Center Web OAuth client + HTTPS callback
@@ -30,6 +30,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { defineTool } from '@earendil-works/pi-durable';
+import { classifyPageSensitivity, isGoogleCloudConsoleUrl } from '../bot-browser/policy.js';
 import { resolveBotIdentity as defaultResolveBotIdentity } from '../bot-identity.js';
 import {
   advanceGoogleConsole,
@@ -54,6 +55,7 @@ import {
 import {
   assertNonEmptyString,
   assertNoSecretMaterial,
+  containsSecretMaterial,
   GoogleSetupError,
   SETUP_ERROR_CODES,
   SETUP_ERROR_CODE_SET,
@@ -419,7 +421,7 @@ export function createGoogleSetupService(options = {}) {
     }
   }
 
-  async function lockBrowserForSensitiveStep(run, step, reason, availability) {
+  async function lockBrowserForSensitiveStep(run, step, reason, availability, pageId = run.browserPageId) {
     const requiresSystemBrowser =
       reason === 'google-auth' ||
       (reason === 'oauth-client-secret' && availability?.clientStepRequiresSystemBrowser === true);
@@ -436,7 +438,7 @@ export function createGoogleSetupService(options = {}) {
       try {
         const result = await browserLockHook({
           botId: run.botId,
-          pageId: run.browserPageId,
+          pageId,
           step,
           reason,
           blockObservation: true,
@@ -455,7 +457,7 @@ export function createGoogleSetupService(options = {}) {
           {
             action: 'takeover',
             botId: run.botId,
-            ...(run.browserPageId ? { pageId: run.browserPageId } : {}),
+            ...(pageId ? { pageId } : {}),
             reason,
             sensitive: true,
           },
@@ -605,6 +607,17 @@ export function createGoogleSetupService(options = {}) {
     }
   }
 
+  function consoleProgressFor(run, pageId) {
+    const previous = consoleProgressByBot.get(run.botId);
+    return previous?.runId === run.id && previous.pageId === pageId ? previous.progress : GOOGLE_CONSOLE_START;
+  }
+
+  function observeConsolePage(run, pageId, url) {
+    const progress = advanceGoogleConsole(consoleProgressFor(run, pageId), url);
+    consoleProgressByBot.set(run.botId, { runId: run.id, pageId, progress });
+    return progress;
+  }
+
   async function captureEmbeddedProjectId(run) {
     if (isValidGoogleProjectId(run.projectId) || !usesEmbeddedSetupBrowser(run.mode) ||
         typeof browserControl !== 'function') return;
@@ -617,10 +630,20 @@ export function createGoogleSetupService(options = {}) {
     }
     if (status?.available === false || !Array.isArray(status?.tabs)) return;
 
-    const tab = status.tabs.find((entry) => entry.id === run.browserPageId) ??
-      status.tabs.find((entry) => entry.id === status.pageId);
-    const { page, projectId } = readGoogleConsoleAddress(tab?.url);
-    if (page === 'project-dashboard' && projectId !== null) run.projectId = projectId;
+    const boundTab = status.tabs.find((entry) => entry.id === run.browserPageId);
+    const activeTab = status.tabs.find((entry) => entry.id === status.pageId);
+    const tab = boundTab ?? (activeTab && (
+      !run.browserPageId || consoleProgressFor(run, activeTab.id).seen.includes('project-create')
+    ) ? activeTab : null);
+    if (typeof tab?.id !== 'string' || typeof tab.url !== 'string' ||
+        classifyGoogleSetupPageSensitivity(tab.url).sensitive || containsSecretMaterial(tab.url)) return;
+
+    const { page, projectId } = readGoogleConsoleAddress(tab.url);
+    const progress = observeConsolePage(run, tab.id, tab.url);
+    if (projectId && page !== 'project-create' && (page === 'project-dashboard' || progress.done.includes('project'))) {
+      run.projectId = projectId;
+      run.browserPageId = tab.id;
+    }
   }
 
   async function commitRun(prev, next, {
@@ -1288,48 +1311,79 @@ export function createGoogleSetupService(options = {}) {
    * Never reads page bodies or cookies. Detects sensitive URLs (locking immediately)
    * and tracks URL-derived `projectId` without ever completing `client` or `connect`.
    */
-  async function syncBrowserUrl(botId, url) {
+  async function syncBrowserUrl(botId, url, pageId, openPageIds) {
     assertOpen();
     const cleanBotId = assertLocalBot(botId);
-    assertNoSecretMaterial(url, 'url');
+    const sensitivity = classifyGoogleSetupPageSensitivity(url);
+    const address = readGoogleConsoleAddress(url);
+    // The browser privacy shield already handles owner-only web sign-in. Setup
+    // should only request a system browser here for OAuth or rejected sign-in.
+    if (sensitivity.reason === 'google-auth' && address.page !== 'sign-in-refused' &&
+        !classifyPageSensitivity({ url }).fallbackToSystemBrowser) {
+      return { sensitivity, locked: true };
+    }
+    if (!sensitivity.sensitive && !isGoogleCloudConsoleUrl(url)) return { sensitivity, locked: false };
+
+    // Match progress only to the run active when this browser update arrived, even if a
+    // restart using the same page is queued ahead of this observation.
+    if (!sensitivity.sensitive) assertNoSecretMaterial(url, 'url');
+    const observedRun = store.get(cleanBotId).catch(() => null);
     return withBotLane(cleanBotId, async () => {
+      const observed = await observedRun;
       const current = await store.get(cleanBotId);
-      const sensitivity = classifyGoogleSetupPageSensitivity(url);
-      if (!current || current.state !== 'running') {
+      if (current?.state !== 'running' || observed?.id !== current.id || !usesEmbeddedSetupBrowser(current.mode)) {
         return { sensitivity, locked: sensitivity.sensitive, run: current };
       }
 
-      const capabilities = await readPlatformCapabilities(cleanBotId);
-      const modeAvailability = evaluateModeAvailability(capabilities);
-      const centerStatus = await readCenterStatus(cleanBotId, { fresh: false });
-
+      const onSetupTab = typeof pageId === 'string' && pageId === current.browserPageId;
       if (sensitivity.sensitive) {
+        // The browser also shields sensitive content in tabs outside this wizard.
+        if (!onSetupTab) return { sensitivity, locked: true, run: current };
         const next = structuredClone(current);
         const step =
           sensitivity.reason === 'oauth-client-secret'
             ? 'client'
             : currentGoogleSetupStep(next) ?? 'account';
-        await lockBrowserForSensitiveStep(next, step, sensitivity.reason, modeAvailability);
+        const currentLock = current.browserLock;
+        if (currentLock?.active && currentLock.step === step && currentLock.reason === sensitivity.reason) {
+          return { sensitivity, locked: true, run: current };
+        }
+        const modeAvailability = evaluateModeAvailability(await readPlatformCapabilities(cleanBotId));
+        await lockBrowserForSensitiveStep(next, step, sensitivity.reason, modeAvailability, pageId);
+        const centerStatus = await readCenterStatus(cleanBotId, { fresh: false });
         next.updatedAt = now();
         next.revision = current.revision + 1;
         const view = await commitRun(current, next, { centerStatus, modeAvailability });
         return { sensitivity, locked: true, view };
       }
 
-      const prevProgress = consoleProgressByBot.get(cleanBotId) ?? GOOGLE_CONSOLE_START;
-      const nextProgress = advanceGoogleConsole(prevProgress, url);
-      consoleProgressByBot.set(cleanBotId, nextProgress);
+      if (currentGoogleSetupStep(current) !== 'project' || isValidGoogleProjectId(current.projectId) ||
+          typeof pageId !== 'string') {
+        return { sensitivity, locked: false, run: current };
+      }
+      // After a renderer reconnect or closed tab, follow a replacement only when
+      // the original tab is gone and the replacement actually visits the create form.
+      const onReplacementTab = !onSetupTab && Array.isArray(openPageIds) && openPageIds.includes(pageId) &&
+        !openPageIds.includes(current.browserPageId) && (address.page === 'project-create' ||
+          consoleProgressFor(current, pageId).seen.includes('project-create'));
+      if (!onSetupTab && !onReplacementTab) {
+        return { sensitivity, locked: false, run: current };
+      }
+      const progress = observeConsolePage(current, pageId, url);
 
-      if (nextProgress.projectId && nextProgress.projectId !== current.projectId) {
+      if (address.projectId && address.page !== 'project-create' && progress.done.includes('project')) {
+        const modeAvailability = evaluateModeAvailability(await readPlatformCapabilities(cleanBotId));
+        const centerStatus = await readCenterStatus(cleanBotId, { fresh: false });
         const next = structuredClone(current);
-        next.projectId = nextProgress.projectId;
+        next.projectId = address.projectId;
+        next.browserPageId = pageId;
         next.updatedAt = now();
         next.revision = current.revision + 1;
         const view = await commitRun(current, next, { centerStatus, modeAvailability });
-        return { sensitivity, locked: false, progress: nextProgress, view };
+        return { sensitivity, locked: false, progress, view };
       }
 
-      return { sensitivity, locked: false, progress: nextProgress };
+      return { sensitivity, locked: false, progress };
     });
   }
 

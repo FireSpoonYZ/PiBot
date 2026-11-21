@@ -362,6 +362,8 @@ trigger matching/checking logic) are vendored and adapted from **Orca**
 - Upstream Git blob IDs and local SHA-256 digests are recorded in
   [`center-server/google-workspace/vendor/orca/MANIFEST.json`](center-server/google-workspace/vendor/orca/MANIFEST.json).
 
+The Host also uses Orca's Google setup rules and Chromium helpers under the same MIT license. Revisions and source digests are recorded in the [Google setup manifest](host-core/google-setup/vendor/orca/MANIFEST.json) and [browser source notes](host-core/bot-browser/vendor/orca/README.md).
+
 ```text
 MIT License
 

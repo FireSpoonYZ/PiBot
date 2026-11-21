@@ -189,11 +189,13 @@ export class DesktopNativeBrowser implements NativeBrowserPresenter {
               await this.closeGuests();
               break;
             }
-            if (++failures >= 8) {
+            if (!this.attached || !this.activeConnection()) break;
+            failures += 1;
+            if (failures === 8) {
               await Promise.allSettled([...this.pages.keys()].map(id => this.hide(id)));
-              break;
             }
-            await new Promise(resolve => window.setTimeout(resolve, 800));
+            const retryDelay = failures < 8 ? 800 : 3_000;
+            await new Promise(resolve => window.setTimeout(resolve, retryDelay));
           }
         }
       } finally {

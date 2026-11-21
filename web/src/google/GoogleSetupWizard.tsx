@@ -118,6 +118,10 @@ function humanizeEmbeddedReason(
     return t('当前设备仅支持外部浏览器', 'Only your system browser is available on this device');
   }
   const trimmed = raw.trim();
+  if (trimmed === 'client_browser_disconnected') {
+    return t('内嵌浏览器连接已断开。可在「浏览器」面板点击「重新检查浏览器」。',
+      'The in-app browser disconnected. Select Retry browser connection in the Browser panel.');
+  }
   if (!trimmed) {
     return t('内置浏览器暂不可用，已使用外部浏览器', 'Built-in browser is unavailable; using system browser');
   }
@@ -1976,10 +1980,12 @@ export function GoogleSetupWizard({
           </div>
           {!embeddedSupported ? (
             <p className="gws-muted">
-              {embeddedUnavailableDetail ||
-                (isLocalAndroid
-                  ? t('Android 本机 Host 不提供桌面级内置自动化浏览器，已默认推荐「外部浏览器指导」。', 'Android local Host does not bundle a desktop automation browser; “Guide me in my browser” is recommended.')
-                  : t('当前 Host 无法提供实时内置浏览器交互，请使用「外部浏览器指导」或直接录入凭据。', 'Embedded interactive browser is unavailable on this Host. Use “Guide me in my browser” or direct credential input.'))}
+              {embeddedUnavailableDetail.trim() === 'client_browser_disconnected'
+                ? humanizeEmbeddedReason(embeddedUnavailableDetail, isLocalAndroid, t)
+                : embeddedUnavailableDetail ||
+                  (isLocalAndroid
+                    ? t('Android 本机 Host 不提供桌面级内置自动化浏览器，已默认推荐「外部浏览器指导」。', 'Android local Host does not bundle a desktop automation browser; “Guide me in my browser” is recommended.')
+                    : t('当前 Host 无法提供实时内置浏览器交互，请使用「外部浏览器指导」或直接录入凭据。', 'Embedded interactive browser is unavailable on this Host. Use “Guide me in my browser” or direct credential input.'))}
             </p>
           ) : null}
         </div>

@@ -121,6 +121,11 @@ function createFakeInteractiveProvider(tracker, { shouldFailStatus = () => false
           tabs,
         };
       }
+      if (input.action === 'closeTab') {
+        tabs = tabs.filter((tab) => tab.id !== input.pageId);
+        if (activePageId === input.pageId) activePageId = tabs.at(-1)?.id ?? null;
+        docGen += 1;
+      }
       if (input.action === 'input') {
         return { ok: true, pageId: input.pageId || activePageId };
       }
@@ -330,7 +335,7 @@ test('volatile RPC registration, slow timeout budgets, real error codes, and out
   assert.match(bridgeRs, /"googleSetupControl"/);
 });
 
-test('real createBotBrowserService + createGoogleSetupService runtime assembly enforces sensitive lock fail-closed, tool identity, and whitelisted tool presentations', async () => {
+test('runtime assembly observes Google project navigation privately and enforces tool identity and sensitive locks', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'pibot-real-browser-setup-'));
   const host = openHost({ dataRoot: join(rootDir, 'host') });
   const installed = [];
@@ -343,6 +348,7 @@ test('real createBotBrowserService + createGoogleSetupService runtime assembly e
   let currentConvOwner = botA.botId;
   let centerStatusCalls = 0;
   const setupContinuations = [];
+  const browserEvents = [];
 
   let coord = null;
   let coordClosed = false;
@@ -379,6 +385,7 @@ test('real createBotBrowserService + createGoogleSetupService runtime assembly e
       },
       abortBotTurn: async () => {},
       context: {},
+      onBrowserEvent: (event) => browserEvents.push(event),
       createBrowserProvider: () => createFakeInteractiveProvider(providerTracker, { shouldFailStatus: () => failProviderStatus }),
     });
 
@@ -403,6 +410,26 @@ test('real createBotBrowserService + createGoogleSetupService runtime assembly e
     assert.equal(started.state, 'running');
     assert.equal(started.mode, 'do-it-for-me');
     assert.equal(started.applied, true);
+    const setupPageId = started.browserPageId;
+    assert.ok(setupPageId);
+    const ownerBrowser = (input) => coord.browserControl(
+      { botId: botA.botId, ...input },
+      { clientId: 'local:desktop-1', transport: 'local' },
+    );
+
+    const signIn = await ownerBrowser({
+      action: 'navigate', pageId: setupPageId,
+      url: 'https://accounts.google.com/v3/signin/identifier?service=cloudconsole',
+    });
+    assert.equal(signIn.sensitive, true);
+    const signingIn = await coord.googleSetupControl(
+      { action: 'status', botId: botA.botId },
+      { clientId: 'local:desktop-1', transport: 'local' },
+    );
+    assert.equal(signingIn.browserLock, undefined, 'ordinary Google web sign-in stays in the embedded browser');
+    await ownerBrowser({
+      action: 'navigate', pageId: setupPageId, url: 'https://console.cloud.google.com/',
+    });
 
     // 2. Real google_setup tool publishes whitelisted ToolPresentation & enforces conversation ownership
     const setupTool = setupExt.tools.find((t) => t.name === 'google_setup');
@@ -457,8 +484,33 @@ test('real createBotBrowserService + createGoogleSetupService runtime assembly e
         return true;
       },
     );
-    await setupControl({ action: 'advance', step: 'account', account: 'owner@example.com' });
-    await setupControl({ action: 'advance', step: 'project', projectId: 'test-cloud-project' });
+    const project = await setupControl({ action: 'advance', step: 'account', account: 'owner@example.com' });
+    const projectId = 'test-cloud-project';
+    const createUrl = `https://console.cloud.google.com/projectcreate?project=${projectId}`;
+    const confirm = {
+      action: 'advance', step: 'project', runId: started.id, expectedRevision: project.revision,
+    };
+    const navigate = (pageId, url) => ownerBrowser({ action: 'navigate', pageId, url, lease: shared.lease });
+    await navigate(setupPageId, createUrl);
+    await assert.rejects(() => setupControl(confirm), { code: 'SETUP_PROJECT_ID_REQUIRED' });
+
+    await navigate(pageId, 'https://console.cloud.google.com/welcome?project=wrong-cloud-project');
+    assert.equal((await setupControl({ action: 'status' })).projectId, undefined);
+    await ownerBrowser({ action: 'closeTab', pageId: setupPageId, lease: shared.lease });
+    await navigate(pageId, 'https://console.cloud.google.com/compute/instances?project=wrong-cloud-project');
+    assert.equal((await setupControl({ action: 'status' })).projectId, undefined);
+
+    const replacement = await ownerBrowser({ action: 'open', url: createUrl, lease: shared.lease });
+    assert.equal((await setupControl({ action: 'status' })).projectId, undefined);
+    await navigate(replacement.pageId, `https://console.cloud.google.com/compute/instances?project=${projectId}`);
+    const detected = await setupControl({ action: 'status' });
+    assert.equal(detected.projectId, projectId);
+    assert.equal(detected.browserPageId, replacement.pageId);
+    assert.ok(detected.revision > project.revision);
+    assert.ok(browserEvents.length > 0);
+    assert.ok(browserEvents.every((event) => !Object.hasOwn(event, 'url')));
+    assert.equal((await setupControl(confirm)).step, 'apis');
+
     const branding = await setupControl({ action: 'advance', step: 'apis' });
     assert.equal(branding.card.card, 'kind');
     const answerKind = {

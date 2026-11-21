@@ -31,12 +31,23 @@ import {
 } from './blocker.js';
 import {
   currentGoogleSetupStep,
+  googleSetupAwaitsClient,
   googleSetupNeedsKind,
   GOOGLE_SETUP_STEPS,
   personDoesGoogleSetupStep,
 } from './rules.js';
+import {
+  GOOGLE_SETUP_CARD_PRESENTATION,
+  googleSetupCardKey as orcaGoogleSetupCardKey,
+  isNewestGoogleSetupCard as orcaIsNewestGoogleSetupCard,
+} from './vendor/orca/google-setup-card.js';
+import {
+  googleSetupCardsDue as orcaGoogleSetupCardsDue,
+  googleSetupWaitingCard as orcaGoogleSetupWaitingCard,
+  personsTurn as orcaPersonsTurn,
+} from './vendor/orca/google-setup-chat-cards.js';
 
-export const GOOGLE_SETUP_CARD_PRESENTATION = 'google-setup';
+export { GOOGLE_SETUP_CARD_PRESENTATION };
 
 export const GOOGLE_SETUP_CARD_KINDS = Object.freeze([
   'path',
@@ -56,19 +67,19 @@ export const GOOGLE_WEB_LOGIN_BOUNDARY_NOTICE =
   'Signing into Google inside the bot browser does not grant Google API access (Google API grant != browser web login). Complete Google API authorization in your system browser.';
 
 export function googleSetupCardKey(ref) {
-  return ref?.step ? `step:${ref.step}` : String(ref?.card ?? '');
+  return String(orcaGoogleSetupCardKey(ref ?? {}) ?? '');
 }
 
 export function isNewestGoogleSetupCard(run, ref) {
   if (!run || !ref || run.id !== ref.runId) return false;
-  return (run.cardCopies?.[googleSetupCardKey(ref)] ?? 0) === (ref.copy ?? 0);
+  return orcaIsNewestGoogleSetupCard(run, ref);
 }
 
 function personsTurn(run, step) {
-  const status = run?.steps?.[step]?.status;
+  if (!run?.steps) return false;
   return (
-    status === 'needs-user' ||
-    (status === 'active' && run !== null && personDoesGoogleSetupStep(run, step))
+    orcaPersonsTurn(run, step) ||
+    (run.steps[step]?.status === 'active' && run.browserLock?.active === true && run.browserLock.step === step)
   );
 }
 
@@ -94,26 +105,15 @@ export function googleSetupCardsDue(prev, next) {
     ...(step ? { step } : {}),
   });
 
+  if (next.state !== 'running') return orcaGoogleSetupCardsDue(before, next);
+
   if (!before) {
-    if (next.state !== 'running') return [];
     if (clientDone(next)) {
       return [answered(next, 'services') ? ref('connect') : ref('services')];
     }
-    if (!answered(next, 'path') || next.mode === 'unchosen') {
-      return [ref('path')];
-    }
+    if (!next.answers) return [ref('path')];
     if (googleSetupWaitingCard(next)?.card === 'kind') return [ref('kind')];
-    return [answered(next, 'services') ? ref('progress') : ref('services')];
-  }
-
-  if (next.state === 'done') {
-    return before.state === 'done' ? [] : [ref('connected')];
-  }
-  if (next.state === 'failed') {
-    return before.state === 'failed' ? [] : [ref('progress')];
-  }
-  if (next.state !== 'running') {
-    return [];
+    return orcaGoogleSetupCardsDue(null, next);
   }
 
   const due = [];
@@ -178,7 +178,7 @@ export function googleSetupCardsDue(prev, next) {
 export function googleSetupWaitingCard(run) {
   if (!run || run.state !== 'running') return null;
   const base = { botId: run.botId, runId: run.id };
-  if (clientDone(run)) {
+  if (!googleSetupAwaitsClient(run)) {
     if (!answered(run, 'services') && !(run.services?.length > 0)) {
       return { ...base, card: 'services' };
     }
@@ -196,14 +196,12 @@ export function googleSetupWaitingCard(run) {
     return { ...base, card: 'account' };
   }
   if (googleSetupNeedsKind(run)) return { ...base, card: 'kind' };
+
+  if (!run.browserLock?.active && run.steps) {
+    return orcaGoogleSetupWaitingCard(run) ?? { ...base, card: 'progress' };
+  }
   const handed = GOOGLE_SETUP_STEPS.find((step) => personsTurn(run, step) && step !== 'connect');
-  if (handed) {
-    return { ...base, card: 'step', step: handed };
-  }
-  if (run.clientMissed) {
-    return { ...base, card: 'progress' };
-  }
-  return { ...base, card: 'progress' };
+  return handed ? { ...base, card: 'step', step: handed } : { ...base, card: 'progress' };
 }
 
 /**
@@ -227,7 +225,7 @@ export function stepTitle(step, choices = []) {
   const servicesText = googleSetupChoicesWords(choices);
   switch (step) {
     case 'account':
-      return 'Choose Google account & audience';
+      return 'Choose Google account';
     case 'project':
       return 'Create Google Cloud project';
     case 'apis':
@@ -534,10 +532,10 @@ export function buildSetupCard(ref, run, context = {}) {
 function stepOwnerSummary(step, { choices, brandingLinks, mode, projectId }) {
   switch (step) {
     case 'account':
-      return 'Confirm which Google account owns this Google Cloud project, and whether it uses a Google Workspace organization (Internal) or personal Gmail (External).';
+      return 'Confirm which Google account owns this Google Cloud project.';
     case 'project':
       if (mode !== 'guide-browser') {
-        return 'Create the project in the built-in browser. PiBot reads the Project ID when the Google Cloud dashboard opens.';
+        return 'Create the project in the built-in browser. PiBot reads the Project ID when the project page opens with project= in the address.';
       }
       return projectId
         ? 'Confirm that the Google Cloud project is ready, then continue.'
@@ -797,8 +795,8 @@ function buildStepInstruction(step, {
       if (run.mode === 'guide-browser') {
         return {
           nextAction:
-            'Ask in one line which Google account the owner will use for Google Cloud. Record it via google_setup(action="set", account=..., kind=...) — gmail.com/googlemail.com is personal, otherwise do not assume Workspace Internal without checking — then mark account done.',
-          doneSignal: 'Owner names the Google account and work/personal audience.',
+            'Ask in one line which Google account the owner will use for Google Cloud. Record it via google_setup(action="set", account=...), then mark account done. The setup card will ask for the OAuth audience if needed.',
+          doneSignal: 'Target Google account recorded on the setup run.',
         };
       }
       if (run.browserPageId) {
@@ -827,9 +825,9 @@ function buildStepInstruction(step, {
       return {
         nextAction:
           allowedBrowserActions === 'drive'
-            ? `Mark project active. Check the setup tab first. If the project has not been created, open ${consoleUrl}, fill a clear project name (e.g., PiBot Center), and click Create. Once /home/dashboard?project=<id> confirms creation, record the ID with google_setup(action="set", projectId=<id>) and mark project done. Read the ID from the built-in browser.`
-            : `Mark project active and check the setup tab. Open ${consoleUrl} if the owner still needs to create the project. Do not click or fill. Once the dashboard URL shows ?project=<id>, record set(projectId=<id>) and mark project done. Read the ID from the built-in browser.`,
-        doneSignal: 'Google Cloud dashboard shows ?project=<id> and projectId is saved.',
+            ? `Mark project active. Check the setup tab first. If the project still needs to be created, open ${consoleUrl}, fill a clear project name (e.g., PiBot Center), and click Create. When the Google Cloud Console opens the project outside the creation form, read project=<id> from the address (for example on /welcome or /home/dashboard). Record the ID with google_setup(action="set", projectId=<id>) and mark project done.`
+            : `Mark project active and check the setup tab. Open ${consoleUrl} if the owner still needs to create the project. Do not click or fill. When the Google Cloud Console opens the project outside the creation form, read project=<id> from the address (for example on /welcome or /home/dashboard). Record set(projectId=<id>) and mark project done.`,
+        doneSignal: 'A Google Cloud Console project page shows a valid project= in the address and projectId is saved.',
       };
 
     case 'apis': {

@@ -221,6 +221,7 @@ export function createBotBrowserService(options = {}) {
       takeoverTimeoutMs,
       maxTabsPerBot,
       isPageWithheld: checkWithheld,
+      onPageUrl: options.onPageUrl,
       onEvent(event) {
         const grant = entry?.presentation;
         if (grant && (state.leaseGeneration !== grant.generation || event.pageId !== grant.pageId ||
@@ -358,6 +359,7 @@ export function createBotBrowserService(options = {}) {
       entry.state.syncProviderResult(res);
       return res;
     } catch (err) {
+      if (entry.provider !== provider) return null;
       if (allowUnavailable) {
         entry.state.setUnavailable(err?.message || 'browser_provider_unavailable');
         return null;
@@ -528,14 +530,24 @@ export function createBotBrowserService(options = {}) {
       if (renderer?.clientId === auth.clientId && renderer.rendererId === req.rendererId) {
         return { accepted: true, rendererId: renderer.rendererId };
       }
-      if (state.hasActiveSession || state.hasInFlightBotOp || entry.opening || entry.providerPromise ||
-          renderer?.hasTabs() || renderer?.online()) return { accepted: false };
+      if (state.hasInFlightBotOp || state.queuedBotOpCount || entry.opening || entry.providerPromise ||
+          entry.presentationChanges || entry.dismissing || renderer?.online()) return { accepted: false };
+
+      const occupied = state.hasActiveSession || renderer?.hasTabs();
+      const replaceExpired = occupied && renderer?.clientId === auth.clientId && entry.provider === renderer &&
+        !state.sensitivity.sensitive && (state.phase === 'bot' || (state.sharedInput && state.isActiveLeaseHolder(auth)));
+      if (occupied && !replaceExpired) return { accepted: false };
+
       const previous = entry.provider;
-      entry.renderer = createClientBrowserRenderer({
+      const replacement = createClientBrowserRenderer({
         rendererId: req.rendererId, clientId: auth.clientId, maxTabs: maxTabsPerBot, maxFrameBytes: maxFrameBase64Bytes,
       });
-      entry.provider = entry.renderer;
+      // Revoke the old presentation while fencing its renderer and tab IDs in this turn.
+      if (replaceExpired) void dismissPresentation(entry).catch(() => {});
+      entry.renderer = replacement;
+      entry.provider = replacement;
       if (previous) void previous.close().catch(() => {});
+      if (replaceExpired) state.resetAfterRelease();
       return { accepted: true, rendererId: req.rendererId };
     }
     if (req.action === 'nativeGrant' || req.action === 'nativeDismiss') {
@@ -588,12 +600,14 @@ export function createBotBrowserService(options = {}) {
       case 'rendererDetach':
         if (renderer.hasTabs() || entry.opening || state.hasInFlightBotOp) return { ok: false };
         await dismissPresentation(entry);
+        if (entry.renderer !== renderer || entry.closing) return { ok: false };
         // The client closes its own tabs and proxy. Cancel outstanding Host
         // commands immediately and invalidate the old session and any lease.
         entry.provider = null;
         entry.renderer = null;
-        await renderer.close();
+        const closing = renderer.close();
         state.resetAfterRelease();
+        await closing;
         return { ok: true };
       default: throw browserError('INVALID_ARGUMENT');
     }

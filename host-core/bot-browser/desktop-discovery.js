@@ -20,22 +20,23 @@
 
 import { createHash } from 'node:crypto';
 import { constants as FS_CONSTANTS } from 'node:fs';
-import { access, chmod, mkdir, readFile, realpath, stat } from 'node:fs/promises';
+import { access, chmod, mkdir, stat } from 'node:fs/promises';
 import { homedir, userInfo } from 'node:os';
-import path, { basename, join, posix, win32 } from 'node:path';
-import { parse as parseYaml } from 'yaml';
+import path, { basename, posix, win32 } from 'node:path';
 import { assertId } from '../message-protocol.js';
 import { browserError, DESKTOP_BROWSER_DEFAULT_VIEWPORT } from './desktop-policy.js';
+import { isolateFromUserAgentBrowserSettings } from './vendor/orca/agent-browser-user-settings-isolation.js';
+import { resolveExternalChromiumProfilePath } from './vendor/orca/external-chromium-profile-path.js';
+
+export { resolveExternalChromiumProfilePath };
 
 export const SUPPORTED_DESKTOP_PLATFORMS = Object.freeze(['win32', 'darwin', 'linux']);
 export const DESKTOP_BROWSER_EXECUTABLE_ENV = 'PIBOT_BOT_BROWSER_EXECUTABLE';
 
 const DEFAULT_SNAP_ROOTS = Object.freeze(['/snap', '/var/lib/snapd/snap']);
 
-// Environment prefixes/keys stripped from child browser processes so user
-// automation configs or Google API credentials never leak into the Bot browser.
+// Additional environment values that Pi Bot keeps out of child browser processes.
 const STRIPPED_ENV_PREFIXES = Object.freeze([
-  'AGENT_BROWSER_',
   'PIBOT_CENTER_',
   'PIBOT_VAULT_',
 ]);
@@ -129,8 +130,9 @@ export function isPersonalBrowserProfilePath(candidatePath, context = {}) {
  * sensitive Google/PiBot environment variables (adapted from Orca MIT).
  */
 export function isolateChildBrowserEnvironment(inheritedEnv = process.env) {
+  const isolated = isolateFromUserAgentBrowserSettings(inheritedEnv, []);
   const clean = {};
-  for (const [key, value] of Object.entries(inheritedEnv)) {
+  for (const [key, value] of Object.entries(isolated)) {
     if (value === undefined) continue;
     const upper = key.toUpperCase();
     if (STRIPPED_ENV_KEYS.has(upper)) continue;
@@ -367,79 +369,6 @@ export async function discoverDesktopBrowser(opts = {}) {
     kind: 'none',
     transport: null,
   };
-}
-
-// --- Linux strict-snap profile relocation (ported from Orca MIT external-chromium-profile-path.ts) ---
-
-async function strictSnapNameUnderRoot(executableTarget, appName, snapRoot) {
-  try {
-    if ((await realpath(join(snapRoot, 'bin', appName))) !== executableTarget) {
-      return null;
-    }
-    const snapName = appName.split('.')[0];
-    const manifest = parseYaml(
-      await readFile(join(snapRoot, snapName, 'current', 'meta', 'snap.yaml'), 'utf8')
-    );
-    const confinement =
-      typeof manifest === 'object' && manifest !== null && 'confinement' in manifest
-        ? manifest.confinement
-        : undefined;
-    // snap.yaml omits confinement for strict snaps; classic and devmode snaps can write anywhere.
-    return confinement === undefined || confinement === 'strict' ? snapName : null;
-  } catch {
-    return null;
-  }
-}
-
-async function strictSnapNameForExecutable(executablePath, environment) {
-  if (environment.platform !== 'linux') {
-    return null;
-  }
-  let executableTarget;
-  try {
-    executableTarget = await realpath(executablePath);
-  } catch {
-    return null;
-  }
-  const appName = basename(executablePath);
-  for (const snapRoot of environment.snapRoots) {
-    const snapName = await strictSnapNameUnderRoot(executableTarget, appName, snapRoot);
-    if (snapName) {
-      return snapName;
-    }
-  }
-  return null;
-}
-
-async function hasChromiumUsedProfile(profilePath) {
-  try {
-    await access(join(profilePath, 'Local State'));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Strict snaps cannot write dot-directories in $HOME, so relocate their private
- * per-Bot profile into the snap's common data directory unless the requested
- * profile already contains `Local State` (adapted from Orca MIT).
- */
-export async function resolveExternalChromiumProfilePath(
-  executablePath,
-  baseProfilePath,
-  sessionIdentity,
-  environment = {
-    platform: process.platform,
-    snapRoots: DEFAULT_SNAP_ROOTS,
-    homePath: () => userInfo().homedir,
-  }
-) {
-  const snapName = await strictSnapNameForExecutable(executablePath, environment);
-  if (!snapName || (await hasChromiumUsedProfile(baseProfilePath))) {
-    return baseProfilePath;
-  }
-  return join(environment.homePath(), 'snap', snapName, 'common', `pibot-browser-${sessionIdentity}`);
 }
 
 export function botProfileIdentity(botId, baseDir) {

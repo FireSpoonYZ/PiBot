@@ -27,6 +27,21 @@
 
 import { randomUUID } from 'node:crypto';
 import {
+  GOOGLE_SETUP_CARDS as ORCA_SETUP_CARDS,
+  GOOGLE_SETUP_MODES as ORCA_SETUP_MODES,
+  GOOGLE_SETUP_RUN_MODES as ORCA_SETUP_RUN_MODES,
+  GOOGLE_SETUP_STEP_STATUSES as ORCA_SETUP_STEP_STATUSES,
+  GOOGLE_SETUP_STEPS as ORCA_SETUP_STEPS,
+  currentGoogleSetupStep as orcaCurrentGoogleSetupStep,
+  googleSetupAwaitsKey,
+  personDoesGoogleSetupStep as orcaPersonDoesGoogleSetupStep,
+} from './vendor/orca/google-setup-run.js';
+import {
+  botClicks as orcaBotClicks,
+  isPersonOwnedStep as orcaIsPersonOwnedStep,
+  recordAnswer as orcaRecordAnswer,
+} from './vendor/orca/google-setup-rules.js';
+import {
   GOOGLE_SERVICE_CHOICES,
   googleChoices,
   isPersonalGmailAddress,
@@ -40,44 +55,11 @@ import {
 } from './errors.js';
 
 /** The setup's steps, in canonical order. */
-export const GOOGLE_SETUP_STEPS = Object.freeze([
-  'account',
-  'project',
-  'apis',
-  'branding',
-  'links',
-  'publish',
-  'client',
-  'connect',
-]);
-
-export const GOOGLE_SETUP_MODES = Object.freeze([
-  'do-it-for-me',
-  'guide-here',
-  'guide-browser',
-]);
-
-export const GOOGLE_SETUP_RUN_MODES = Object.freeze([
-  ...GOOGLE_SETUP_MODES,
-  'unchosen',
-]);
-
-export const GOOGLE_SETUP_STEP_STATUSES = Object.freeze([
-  'pending',
-  'active',
-  'needs-user',
-  'done',
-  'failed',
-  'skipped',
-]);
-
-export const GOOGLE_SETUP_CARDS = Object.freeze([
-  'path',
-  'account',
-  'kind',
-  'services',
-  'step',
-]);
+export const GOOGLE_SETUP_STEPS = Object.freeze([...ORCA_SETUP_STEPS]);
+export const GOOGLE_SETUP_MODES = Object.freeze([...ORCA_SETUP_MODES]);
+export const GOOGLE_SETUP_RUN_MODES = Object.freeze([...ORCA_SETUP_RUN_MODES]);
+export const GOOGLE_SETUP_STEP_STATUSES = Object.freeze([...ORCA_SETUP_STEP_STATUSES]);
+export const GOOGLE_SETUP_CARDS = Object.freeze([...ORCA_SETUP_CARDS]);
 
 export const GOOGLE_SETUP_STATES = Object.freeze([
   'running',
@@ -249,13 +231,7 @@ export function assertModeAvailable(mode, availability) {
 
 /** First step that is not done or skipped; null once all steps are complete. */
 export function currentGoogleSetupStep(run) {
-  if (!run || !run.steps) return GOOGLE_SETUP_STEPS[0];
-  return (
-    GOOGLE_SETUP_STEPS.find((step) => {
-      const status = run.steps[step]?.status ?? 'pending';
-      return status !== 'done' && status !== 'skipped';
-    }) ?? null
-  );
+  return run?.steps ? orcaCurrentGoogleSetupStep(run) : GOOGLE_SETUP_STEPS[0];
 }
 
 /** The owner picks the OAuth audience before branding can continue. */
@@ -275,7 +251,7 @@ export function personDoesGoogleSetupStep(run, step) {
   if (!run) return true;
   if (step === 'connect') return true;
   if (run.browserLock?.active && run.browserLock.step === step) return true;
-  return run.mode !== 'do-it-for-me' || run.personStep === step;
+  return orcaPersonDoesGoogleSetupStep(run, step);
 }
 
 /** Whether a step can only be finished by the owner (or Center verification). */
@@ -283,9 +259,8 @@ export function isPersonOwnedStep(run, step) {
   if (!run) return true;
   return (
     PERSON_ONLY_COMPLETION_STEPS.has(step) ||
-    run.personStep === step ||
-    run.steps?.[step]?.status === 'needs-user' ||
-    (run.browserLock?.active === true && run.browserLock.step === step)
+    (run.browserLock?.active === true && run.browserLock.step === step) ||
+    (run.steps ? orcaIsPersonOwnedStep(run, step) : run.personStep === step)
   );
 }
 
@@ -294,13 +269,12 @@ export function botClicks(run, step) {
   if (!run || run.state !== 'running') return false;
   if (step === 'connect' || step === 'client') return false;
   if (run.browserLock?.active) return false;
-  return !personDoesGoogleSetupStep(run, step);
+  return orcaBotClicks(run, step);
 }
 
 /** Whether the setup is still awaiting Center Web OAuth client configuration. */
 export function googleSetupAwaitsClient(run) {
-  const client = run?.steps?.client?.status;
-  return run?.state === 'running' && client !== 'done' && client !== 'skipped';
+  return run?.steps ? googleSetupAwaitsKey(run) : run?.state === 'running';
 }
 
 /** Determines initial mode enforcing owner/bot privilege separation and availability. */
@@ -445,28 +419,28 @@ export function recordAnswer(run, actor, card, rawValues, now, options = {}) {
           );
         }
         if (first === 'not-now') {
-          run.state = 'cancelled';
+          orcaRecordAnswer(run, actor, card, values, now);
           delete run.browserLock;
-        } else {
-          // Owner already has Web OAuth credentials and will enter them privately into Center.
-          const skipList = centerClientConfigured
-            ? CENTER_CONFIGURED_SKIPPED_STEPS
-            : DIRECT_CONFIGURE_SKIPPED_STEPS;
-          for (const step of skipList) {
-            run.steps[step] = { status: 'skipped', at: now };
-          }
-          if (!centerClientConfigured) {
-            run.steps.client = {
-              status: 'needs-user',
-              at: now,
-              note: 'Enter your Web OAuth Client ID and Client Secret directly in the private Center configuration control.',
-            };
-          }
-          if (run.mode === 'unchosen') {
-            run.mode = 'guide-browser';
-          }
-          delete run.personStep;
+          return;
         }
+        // Owner already has Web OAuth credentials and will enter them privately into Center.
+        const skipList = centerClientConfigured
+          ? CENTER_CONFIGURED_SKIPPED_STEPS
+          : DIRECT_CONFIGURE_SKIPPED_STEPS;
+        for (const step of skipList) {
+          run.steps[step] = { status: 'skipped', at: now };
+        }
+        if (!centerClientConfigured) {
+          run.steps.client = {
+            status: 'needs-user',
+            at: now,
+            note: 'Enter your Web OAuth Client ID and Client Secret directly in the private Center configuration control.',
+          };
+        }
+        if (run.mode === 'unchosen') {
+          run.mode = 'guide-browser';
+        }
+        delete run.personStep;
         break;
       }
       if (!isMode(first)) {
@@ -479,9 +453,7 @@ export function recordAnswer(run, actor, card, rawValues, now, options = {}) {
         throw setupError('SETUP_FORBIDDEN', BOT_CANNOT_TAKE_CLICKS);
       }
       assertModeAvailable(first, availability);
-      run.mode = first;
-      delete run.personStep;
-      break;
+      return orcaRecordAnswer(run, actor, card, values, now);
     }
 
     case 'step': {
@@ -490,16 +462,14 @@ export function recordAnswer(run, actor, card, rawValues, now, options = {}) {
       }
       if (first === 'resume' || first === 'start-over') {
         // State revival is handled by reviveRun; here resume simply records the wake answer.
+        return orcaRecordAnswer(run, actor, card, values, now);
       } else if (first === 'redo' && isStep(second)) {
-        run.steps[second] = { status: 'active', at: now };
+        orcaRecordAnswer(run, actor, card, values, now);
         if (second === 'client') {
-          delete run.steps.connect;
           delete run.clientMissed;
         }
+        return;
       } else if (first === 'take-over') {
-        if (actor === 'bot') {
-          throw setupError('SETUP_FORBIDDEN', BOT_CANNOT_TAKE_CLICKS);
-        }
         if (run.browserLock?.active) {
           throw setupError(
             'SETUP_SENSITIVE_LOCKED',
@@ -520,25 +490,21 @@ export function recordAnswer(run, actor, card, rawValues, now, options = {}) {
           }
         }
       } else if (first === 'let-me' && isStep(second)) {
-        run.personStep = second;
+        return orcaRecordAnswer(run, actor, card, values, now);
       } else if (first === 'done' && isStep(second)) {
-        if (actor === 'bot') {
-          throw setupError('SETUP_FORBIDDEN', PERSON_FINISHES);
-        }
         if (second === 'project') assertRecordedProjectId(run);
         // Note: `client` and `connect` completion are verified against trusted Center
         // status by the service layer before calling recordAnswer.
         const theirs = isPersonOwnedStep(run, second) || !botClicks(run, second);
-        run.steps[second] = { status: 'done', by: theirs ? 'user' : 'bot', at: now };
+        orcaRecordAnswer(run, actor, card, values, now);
+        if (theirs) run.steps[second].by = 'user';
         if (second === 'client') {
           delete run.clientMissed;
-        }
-        if (run.personStep === second) {
-          delete run.personStep;
         }
         if (run.browserLock?.step === second) {
           delete run.browserLock;
         }
+        return;
       } else if (first === 'continue-without') {
         const drop = new Set(values.slice(1).filter(isServiceChoice));
         if (drop.size === 0) {
@@ -551,8 +517,7 @@ export function recordAnswer(run, actor, card, rawValues, now, options = {}) {
             'Cannot drop all selected Google services; keep at least one service or cancel setup.',
           );
         }
-        run.services = remaining;
-        run.answers.services = { values: remaining, at: now };
+        orcaRecordAnswer(run, actor, 'services', remaining, now);
       } else if (first === 'keep-account') {
         const kept = assertNonEmptyString(second, 'account', 320);
         assertNoSecretMaterial(kept, 'account');
@@ -568,37 +533,26 @@ export function recordAnswer(run, actor, card, rawValues, now, options = {}) {
     }
 
     case 'account': {
-      if (first === 'other') {
-        delete run.account;
-        run.steps.account = { status: 'active', at: now };
-      } else {
-        run.account = first;
-        // Personal Gmail addresses are always External; custom domains are never
-        // assumed to have Workspace Internal permission (04 doc §2.2).
-        if (!run.kind && isPersonalGmailAddress(first)) {
-          applyKindBranching(run, 'personal', now);
-        }
+      orcaRecordAnswer(run, actor, card, values, now);
+      // Gmail is External. Custom domains can require a choice on the audience card.
+      if (!run.kind && isPersonalGmailAddress(first)) {
+        applyKindBranching(run, 'personal', now);
       }
-      break;
+      return;
     }
 
     case 'kind': {
       if (first !== 'work' && first !== 'personal') {
         throw setupError('INVALID_ARGUMENT', 'Choose work or personal.');
       }
-      applyKindBranching(run, first, now);
-      break;
+      orcaRecordAnswer(run, actor, card, values, now);
+      applyKindBranching(run, run.kind, now);
+      return;
     }
 
     case 'services': {
       const canonical = normalizeServicesInput(values);
-      run.services = canonical;
-      run.answers[card] = {
-        values: canonical,
-        at: now,
-        ...(actor === 'bot' ? { typed: true } : {}),
-      };
-      return;
+      return orcaRecordAnswer(run, actor, card, canonical, now);
     }
   }
 

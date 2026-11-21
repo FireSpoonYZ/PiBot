@@ -270,6 +270,48 @@ function parseToolJson(res) {
   return JSON.parse(res.output[0].text);
 }
 
+test('the same desktop can replace its disconnected renderer with a tab still registered', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const service = createBotBrowserService({ host: createFakeHost(['bot-a']) });
+  t.after(() => service.close());
+  const desktop = ownerAuth('desktop-1');
+  const otherDesktop = ownerAuth('desktop-2');
+  const original = 'original-renderer';
+  const replacement = 'replacement-renderer';
+  const control = (input, authority = desktop) => service.control({ botId: 'bot-a', ...input }, authority);
+  const attach = (rendererId, authority) => control({ action: 'rendererAttach', rendererId }, authority);
+  const open = async (rendererId) => {
+    const url = 'https://example.org/';
+    const pending = control({ action: 'open', url });
+    const { command } = await control({ action: 'rendererNext', rendererId });
+    assert.equal(command.operation, 'create');
+    await control({
+      action: 'rendererReply', rendererId, operationId: command.operationId,
+      result: { url, title: 'Example', documentGeneration: 1 },
+    });
+    return pending;
+  };
+
+  assert.equal((await attach(original)).accepted, true);
+  const before = await open(original);
+  assert.equal(before.tabs.length, 1);
+  assert.equal((await attach(replacement)).accepted, false);
+  t.mock.timers.setTime(Date.now() + 12_001);
+  const disconnected = await control({ action: 'status' });
+  assert.equal(disconnected.available, false);
+  assert.equal(disconnected.reason, 'client_browser_disconnected');
+  assert.equal(disconnected.pageId, before.pageId);
+  assert.equal((await attach(replacement, otherDesktop)).accepted, false);
+
+  assert.equal((await attach(replacement)).accepted, true);
+  await assert.rejects(() => control({ action: 'rendererNext', rendererId: original }), { code: 'BROWSER_FORBIDDEN' });
+  const after = await open(replacement);
+  assert.equal(after.available, true);
+  assert.equal(after.tabs.length, 1);
+  assert.notEqual(after.sessionId, before.sessionId);
+  assert.notEqual(after.pageId, before.pageId);
+});
+
 test('policy: URL validation blocks file/javascript/chrome/credentialed/internal/OAuth/secret URLs', () => {
   assert.equal(
     validateNavigationUrl('https://console.cloud.google.com/auth/branding', { actor: 'bot' }),
