@@ -3,7 +3,7 @@
 ; Local change: UNINSTKEY and MANUPRODUCTKEY keep the pre-rename productName
 ; "e-助手" so an installed old client is detected as this product's previous
 ; installation (standard upgrade/OldMainBinaryName flow, single HKLM uninstall
-; entry). All visible names still come from ${PRODUCTNAME} (pibot).
+; entry). The displayed name comes from ${PRODUCTNAME} (Pi Bot).
 Unicode true
 ManifestDPIAware true
 ; Add in `dpiAwareness` `PerMonitorV2` to manifest for Windows 10 1607+ (note this should not affect lower versions since they should be able to ignore this and pick up `dpiAware` `true` set by `ManifestDPIAware true`)
@@ -79,6 +79,7 @@ ${StrLoc}
 
 Var PassiveMode
 Var UpdateMode
+Var ShowFinishPage
 Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
@@ -440,10 +441,6 @@ Var AppStartMenuFolder
 !insertmacro MUI_PAGE_INSTFILES
 
 ; 8. Finish page
-;
-; Don't auto jump to finish page after installation page,
-; because the installation page has useful info that can be used debug any issues with the installer.
-!define MUI_FINISHPAGE_NOAUTOCLOSE
 ; Use show readme button in the finish page as a button create a desktop shortcut
 !define MUI_FINISHPAGE_SHOWREADME
 !define MUI_FINISHPAGE_SHOWREADME_TEXT "$(createDesktop)"
@@ -451,11 +448,15 @@ Var AppStartMenuFolder
 ; Show run app after installation.
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_FUNCTION RunMainBinary
-!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
+!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipFinishPage
 !insertmacro MUI_PAGE_FINISH
 
 Function RunMainBinary
-  nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" ""
+  ${GetOptions} $CMDLINE "/ARGS" $R0
+  ${If} ${Errors}
+    StrCpy $R0 ""
+  ${EndIf}
+  nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" "$R0"
 FunctionEnd
 
 ; Uninstaller Pages
@@ -533,6 +534,13 @@ Function .onInit
   ${GetOptions} $CMDLINE "/UPDATE" $UpdateMode
   ${IfNot} ${Errors}
     StrCpy $UpdateMode 1
+  ${EndIf}
+
+  ; The app's updater uses /P /UPDATE to skip setup questions. Keep its launch choice.
+  StrCpy $ShowFinishPage 1
+  ${If} $PassiveMode = 1
+  ${AndIf} $UpdateMode <> 1
+    StrCpy $ShowFinishPage 0
   ${EndIf}
 
   !if "${DISPLAYLANGUAGESELECTOR}" == "true"
@@ -799,21 +807,19 @@ Section Install
     !insertmacro NSIS_HOOK_POSTINSTALL
   !endif
 
-  ; Auto close this page for passive mode
-  ${If} $PassiveMode = 1
+  ; Close unattended passive installs once the files are installed.
+  ${If} $ShowFinishPage = 0
     SetAutoClose true
   ${EndIf}
 SectionEnd
 
 Function .onInstSuccess
-  ; Check for `/R` flag only in silent and passive installers because
-  ; GUI installer has a toggle for the user to (re)start the app
-  ${If} $PassiveMode = 1
-  ${OrIf} ${Silent}
+  ; The Finish checkbox controls launching whenever that page is shown.
+  ${If} ${Silent}
+  ${OrIf} $ShowFinishPage = 0
     ${GetOptions} $CMDLINE "/R" $R0
     ${IfNot} ${Errors}
-      ${GetOptions} $CMDLINE "/ARGS" $R0
-      nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" "$R0"
+      Call RunMainBinary
     ${EndIf}
   ${EndIf}
 FunctionEnd
@@ -971,6 +977,9 @@ FunctionEnd
 
 Function SkipIfPassive
   ${IfThen} $PassiveMode = 1  ${|} Abort ${|}
+FunctionEnd
+Function SkipFinishPage
+  ${IfThen} $ShowFinishPage = 0  ${|} Abort ${|}
 FunctionEnd
 Function un.SkipIfPassive
   ${IfThen} $PassiveMode = 1  ${|} Abort ${|}

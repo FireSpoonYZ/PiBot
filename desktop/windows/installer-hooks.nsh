@@ -101,6 +101,23 @@ Var /GLOBAL EOldInstallDir
   ${EndIf}
 !macroend
 
+!macro E_LAUNCHER_REMOVE_OLD_PIBOT_LINK link
+  ${If} ${FileExists} "${link}"
+    !insertmacro IsShortcutTarget "${link}" "$INSTDIR\${MAINBINARYNAME}.exe"
+    Pop $0
+    ${IfThen} $0 = 1 ${|} Delete "${link}" ${|}
+  ${EndIf}
+!macroend
+
+!macro E_LAUNCHER_MIGRATE_PIBOT_LINK folder
+  ${If} ${FileExists} "${folder}\${PRODUCTNAME}.lnk"
+    !insertmacro E_LAUNCHER_REMOVE_OLD_PIBOT_LINK "${folder}\pibot.lnk"
+    SetShellVarContext current
+    !insertmacro E_LAUNCHER_REMOVE_OLD_PIBOT_LINK "${folder}\pibot.lnk"
+    !insertmacro SetContext
+  ${EndIf}
+!macroend
+
 !macro NSIS_HOOK_POSTINSTALL
   SetOutPath "$INSTDIR"
   ${If} $NoShortcutMode <> 1
@@ -108,9 +125,10 @@ Var /GLOBAL EOldInstallDir
     !insertmacro SetLnkAppUserModelId "$SMPROGRAMS\${PRODUCTNAME}.lnk"
     CreateShortcut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe" "" "$INSTDIR\icons\${E_LAUNCHER_SHELL_ICON}" 0
     !insertmacro SetLnkAppUserModelId "$DESKTOP\${PRODUCTNAME}.lnk"
+    !insertmacro E_LAUNCHER_MIGRATE_PIBOT_LINK "$SMPROGRAMS"
+    !insertmacro E_LAUNCHER_MIGRATE_PIBOT_LINK "$DESKTOP"
   ${EndIf}
-  ; 旧品牌快捷方式清理：旧包可能按 perUser 或 perMachine 安装，两个上下文都只
-  ; 删除已知旧名，新快捷方式（pibot.lnk）不受影响。
+  ; 旧包可能按 perUser 或 perMachine 安装，两个上下文都清理早期品牌的快捷方式。
   SetShellVarContext current
   Delete "$SMPROGRAMS\${E_LAUNCHER_LEGACY_PRODUCT}.lnk"
   Delete "$DESKTOP\${E_LAUNCHER_LEGACY_PRODUCT}.lnk"
