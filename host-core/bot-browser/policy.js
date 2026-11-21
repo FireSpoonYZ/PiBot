@@ -238,16 +238,6 @@ export function validateNavigationUrl(rawUrl, { actor = 'bot', allowBlank = fals
 }
 
 /**
- * Classifies current page sensitivity and Privacy Shield restrictions.
- * Enforces:
- * - OAuth / MFA / sign-in: blocks bot observe/act, blocks handback, blocks bystanders
- * - Cloud Console Client Secret pages / dialogs: blocks bot observe/act, blocks handback, blocks bystanders,
- *   AND blocks normal frame streaming (`blockNormalFrame: true`)
- * - Policy/Terms consent: blocks bot act, blocks handback, allows owner takeover on the same page
- * - Password / OTP / Payment: blocks bot observe/act, blocks handback, blocks bystanders
- * - Web Google login vs Center Google API MCP notice (`webLoginNotApiGrant`)
- */
-/**
  * Synthesizes canonical sensitivity hints from desktop-provider (`sensitiveCategory`,
  * `authUseSystemBrowser`) and android-provider (`requiresSystemBrowser`, `sensitiveReason`)
  * fields alongside any explicit `hints` object.
@@ -261,7 +251,7 @@ export function mergeProviderHints(result, baseHints = null) {
   const cat = typeof result.sensitiveCategory === 'string'
     ? result.sensitiveCategory.trim().toLowerCase()
     : '';
-  if (cat === 'client_secret' || cat === 'secret_dialog' || cat === 'secret_key' || cat === 'secret') {
+  if (cat === 'client_secret' || cat === 'secret_modal' || cat === 'secret_dialog' || cat === 'secret_key' || cat === 'secret') {
     out.secretDialogVisible = true;
   } else if (cat === 'oauth_consent' || cat === 'oauth_login' || cat === 'oauth' || cat === 'mfa' || cat === 'auth') {
     out.isOAuthConsent = true;
@@ -283,6 +273,7 @@ export function mergeProviderHints(result, baseHints = null) {
   return Object.keys(out).length > 0 ? out : null;
 }
 
+/** Classifies Bot access and whether page frames require an active owner or must be withheld. */
 export function classifyPageSensitivity({
   url = '',
   title = '',
@@ -362,7 +353,7 @@ export function classifyPageSensitivity({
     safeHints.sensitive === true;
 
   // Policy consent on Cloud Console allows the owner to view and take over the same form,
-  // while blocking bot clicks and handback. All other sensitive classes block bot observation too.
+  // while blocking bot clicks. All other sensitive classes block bot observation too.
   const blockBotObserve =
     oauthOrAuth ||
     secretRisk ||
@@ -373,7 +364,6 @@ export function classifyPageSensitivity({
     safeHints.sensitive === true;
 
   const blockBotAct = sensitive;
-  const blockHandback = sensitive;
   const blockBystanderFrame = blockBotObserve;
   const blockNormalFrame = secretRisk;
   const fallbackToSystemBrowser = googleSignInRejected || googleApiOAuth || requiresSystemBrowser || secretRisk;
@@ -412,7 +402,6 @@ export function classifyPageSensitivity({
     reasons: Object.freeze(reasons),
     blockBotObserve,
     blockBotAct,
-    blockHandback,
     blockBystanderFrame,
     blockNormalFrame,
     fallbackToSystemBrowser,
@@ -678,11 +667,14 @@ export function sanitizeSnapshotForBot(rawSnapshot, sensitivity) {
 }
 
 /** Redacts sensitive tab titles/URLs for bots and non-privileged bystander viewers. */
-export function sanitizeTabsForCaller(tabs, { isBot = false, canViewSensitive = false, isPageWithheld = null, botId = null } = {}) {
+export function sanitizeTabsForCaller(tabs, {
+  isBot = false, canViewSensitive = false, isPageWithheld = null, botId = null, restrictedPageId = null,
+} = {}) {
   return tabs.map((tab) => {
     const sens = classifyPageSensitivity({
       url: tab.url,
       title: tab.title,
+      providerSensitive: tab.id === restrictedPageId,
       botId,
       pageId: tab.id,
       isPageWithheld,

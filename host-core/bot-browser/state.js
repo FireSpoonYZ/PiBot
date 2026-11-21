@@ -148,7 +148,7 @@ export function createBotBrowserState({
   }
 
   function canBotOperate() {
-    return !closed && (phase === 'bot' || (phase === 'human' && lease?.shared === true && !sensitivity.sensitive));
+    return !closed && !sensitivity.sensitive && (phase === 'bot' || (phase === 'human' && lease?.shared === true));
   }
 
   function recomputeSensitivity(override = {}) {
@@ -180,8 +180,9 @@ export function createBotBrowserState({
     }
     if (lease?.shared && sensitivity.sensitive) {
       holdForSensitive({ reason: sensitivity.reasons[0] ?? 'sensitive_page', guidance: sensitivity.guidance });
-    } else if (sensitivity.sensitive !== prevSensitive || sensitivity.secretRisk !== prevSecret) {
-      bumpRevision(true);
+    } else {
+      if (phase === 'bot' && sensitivity.sensitive) cancelQueuedBotOps(sensitivity.reasons[0] ?? 'sensitive_page');
+      if (sensitivity.sensitive !== prevSensitive || sensitivity.secretRisk !== prevSecret) bumpRevision(true);
     }
     return sensitivity;
   }
@@ -308,10 +309,16 @@ export function createBotBrowserState({
       return Promise.reject(browserError('BROWSER_CLOSED'));
     }
     if (!canBotOperate()) {
+      const guidance = sensitivity.sensitive ? sensitivity.guidance : null;
       const err = browserError(
         'BROWSER_PAUSED_FOR_HUMAN',
-        'Bot browser actions are paused while human takeover or hold is active.',
-        { phase, reason: currentReason(), holderLabel: currentHolderLabel() }
+        guidance || 'Bot browser actions are paused while human takeover or hold is active.',
+        {
+          phase,
+          reason: currentReason() ?? sensitivity.reasons[0],
+          holderLabel: currentHolderLabel(),
+          ...(sensitivity.fallbackToSystemBrowser ? { fallbackToSystemBrowser: true } : {}),
+        }
       );
       err.outcome = 'not-sent';
       return Promise.reject(err);
@@ -448,17 +455,19 @@ export function createBotBrowserState({
       bumpRevision(invalidateFramesOnChange && pageOrNavChanged);
     }
 
-    const nextHints = mergeProviderHints(result, pageOrNavChanged ? null : lastHints);
+    // A full, clean provider status replaces old DOM hints even on the same URL.
+    const resetHints = pageOrNavChanged || (result.available === true && result.sensitive === false);
+    const nextHints = mergeProviderHints(result, resetHints ? null : lastHints);
     if (typeof result.sensitiveReason === 'string' && result.sensitiveReason.trim() !== '') {
       providerSensitiveReason = result.sensitiveReason.trim();
-    } else if (pageOrNavChanged) {
+    } else if (resetHints) {
       providerSensitiveReason = null;
     }
 
     recomputeSensitivity({
       url: typeof result.url === 'string' ? result.url : undefined,
       title: typeof result.title === 'string' ? result.title : undefined,
-      hints: nextHints !== null || pageOrNavChanged ? nextHints : undefined,
+      hints: nextHints,
       providerSensitive: result.sensitive !== undefined ? result.sensitive : (pageOrNavChanged ? false : undefined),
     });
     if (typeof onPageUrl === 'function' && active && active.id === pageId && active.url &&
@@ -805,7 +814,7 @@ export function createBotBrowserState({
     }
   }
 
-  function handback({ authority, leaseToken = null, currentSensitivity = sensitivity }) {
+  function handback({ authority, leaseToken = null }) {
     expireLeaseIfNeeded();
     if (closed) throw browserError('BROWSER_CLOSED');
     if (phase === 'taking' || inFlightBotOp !== null) {
@@ -814,18 +823,8 @@ export function createBotBrowserState({
     if (phase === 'human') {
       verifyHumanLease({ authority, leaseToken, renew: false });
     }
-    if (currentSensitivity?.blockHandback) {
-      throw browserError(
-        'BROWSER_HANDBACK_BLOCKED_SENSITIVE',
-        currentSensitivity.guidance || 'Cannot hand back while on a sensitive, login, MFA, policy, or secret page.',
-        {
-          phase,
-          reason: currentSensitivity.reasons?.[0] ?? 'sensitive_page',
-          fallbackToSystemBrowser: currentSensitivity.fallbackToSystemBrowser === true,
-        }
-      );
-    }
 
+    // Ending the lease does not give the Bot access to a protected page.
     clearLeaseTimer();
     lease = null;
     lastHolderLabel = null;
@@ -836,7 +835,7 @@ export function createBotBrowserState({
       bumpRevision(true);
       emit('handed_back');
     }
-    const tab = activeTab();
+    const tab = sensitivity.sensitive ? null : activeTab();
     return {
       botId,
       sessionId,

@@ -928,7 +928,7 @@ test('disconnect/lease expiry fails closed into held and never auto-hands back t
   await service.close();
 });
 
-test('Privacy Shield: stops before Policy checkbox and Create Secret, blocks secret frames, bystander frames, and sensitive handback', async () => {
+test('Privacy Shield protects policy, secrets and sign-in even after the owner hands back', async () => {
   const host = createFakeHost(['bot-a']);
   const mock = createMockProviderFactory();
   const service = createBotBrowserService({
@@ -973,25 +973,31 @@ test('Privacy Shield: stops before Policy checkbox and Create Secret, blocks sec
   assert.equal(parseToolJson(createClick).fallbackToSystemBrowser, true);
   assert.equal(mock.calls.some((c) => c.action === 'act' && c.act?.ref === 'e-create'), false);
 
-  // 4. Human takes over and navigates to /auth/clients -> secret step blocks normal frames AND blocks handback!
-  const taken = await service.control({ action: 'takeover', botId: 'bot-a' }, desktop);
+  // 4. Handback ends the lease on the same tab but never unlocks a secret page.
+  const secretTakeover = await service.control({ action: 'takeover', botId: 'bot-a' }, desktop);
   await service.control({
     action: 'navigate',
     botId: 'bot-a',
-    lease: taken.lease,
+    lease: secretTakeover.lease,
     url: 'https://console.cloud.google.com/auth/clients',
   }, desktop);
-
   await assert.rejects(
-    () => service.control({ action: 'frame', botId: 'bot-a', lease: taken.lease }, desktop),
+    () => service.control({ action: 'frame', botId: 'bot-a', lease: secretTakeover.lease }, desktop),
     { code: 'BROWSER_SECRET_STEP_BLOCKED' }
   );
-  await assert.rejects(
-    () => service.control({ action: 'handback', botId: 'bot-a', lease: taken.lease }, desktop),
-    { code: 'BROWSER_HANDBACK_BLOCKED_SENSITIVE' }
-  );
+  const handback = { action: 'handback', botId: 'bot-a', lease: secretTakeover.lease };
+  await assert.rejects(() => service.control(handback, phone), { code: 'BROWSER_LEASE_CONFLICT' });
+  const returned = await service.control(handback, desktop);
+  assert.equal(returned.pageId, secretTakeover.pageId);
+  assert.equal(returned.phase, 'bot');
+  assert.equal(returned.isHolder, false);
+  assert.equal(returned.secretRisk, true);
+  const blockedSnapshot = await tool.execute({ action: 'snapshot' }, { conversationId: 1 }, {});
+  assert.equal(parseToolJson(blockedSnapshot).status, 'PAUSED_FOR_HUMAN');
+  assert.equal(mock.calls.filter((call) => call.action === 'snapshot').length, 2);
 
-  // 5. On password/login sensitive page (non-secret-dialog), bystander phone cannot view frame while desktop holds lease.
+  // 5. Only the active holder can view a login page.
+  const taken = await service.control({ action: 'takeover', botId: 'bot-a' }, desktop);
   const login = await service.control({
     action: 'navigate',
     botId: 'bot-a',
@@ -1008,10 +1014,6 @@ test('Privacy Shield: stops before Policy checkbox and Create Secret, blocks sec
   // Active holder CAN view non-secret sensitive page during takeover (e.g. to finish sign-in or navigate away).
   const holderFrame = await service.control({ action: 'frame', botId: 'bot-a', lease: taken.lease }, desktop);
   assert.equal(holderFrame.mimeType, 'image/png');
-  await assert.rejects(
-    () => service.control({ action: 'handback', botId: 'bot-a', lease: taken.lease }, desktop),
-    { code: 'BROWSER_HANDBACK_BLOCKED_SENSITIVE' }
-  );
 
   // 6. A refused Google sign-in offers a system-browser recovery and strips session URL data.
   const rejectionPage = 'https://accounts.google.com/v3/signin/rejected';
@@ -1030,12 +1032,58 @@ test('Privacy Shield: stops before Policy checkbox and Create Secret, blocks sec
   );
   assert.equal(classifyPageSensitivity({ url: 'https://accounts.google.com.example.com/v3/signin/rejected' }).fallbackToSystemBrowser, false);
   assert.equal(classifyPageSensitivity({ url: rejectionPage + '/other' }).fallbackToSystemBrowser, false);
+  const returnedFromSignIn = await service.control({ action: 'handback', botId: 'bot-a', lease: taken.lease }, desktop);
+  assert.equal(returnedFromSignIn.phase, 'bot');
+  assert.equal(returnedFromSignIn.sensitive, true);
+  await assert.rejects(
+    () => service.control({ action: 'frame', botId: 'bot-a' }, phone),
+    { code: 'BROWSER_SENSITIVE_BLOCKED' }
+  );
 
   // 7. Web Gmail login flags webLoginNotApiGrant (Google API grant != web login).
   const gmailSens = classifyPageSensitivity({ url: 'https://mail.google.com/mail/u/0/#inbox', title: 'Inbox' });
   assert.equal(gmailSens.webLoginNotApiGrant, true);
 
   await service.close();
+});
+
+test('handback can resume the same OAuth overview after a transient prompt closes', async (t) => {
+  let sensitive = true;
+  const mock = createMockProviderFactory({
+    onPerform(input) {
+      if (input.action === 'status') {
+        return { available: true, sensitive, sensitiveCategory: sensitive ? 'password_input' : null };
+      }
+    },
+  });
+  const service = createBotBrowserService({
+    host: createFakeHost(['bot-a']),
+    createProvider: mock.factory,
+    resolveConversationBot: async () => 'bot-a',
+  });
+  t.after(() => service.close());
+
+  const owner = ownerAuth();
+  const tab = await service.control({
+    action: 'open', botId: 'bot-a', url: 'https://console.cloud.google.com/auth/overview?project=test-cloud-project',
+  }, owner);
+  const taken = await service.control({ action: 'takeover', botId: 'bot-a' }, owner);
+  assert.equal(taken.sensitive, true);
+  const [tool] = service.toolsForBot();
+  const status = parseToolJson(await tool.execute({ action: 'status' }, { conversationId: 1 }, {}));
+  assert.equal(status.tabs[0].title, '[Sensitive page — hidden from bot]');
+  assert.equal(new URL(status.tabs[0].url).search, '');
+  sensitive = false;
+
+  const returned = await service.control({
+    action: 'handback', botId: 'bot-a', pageId: tab.pageId, lease: taken.lease, revision: taken.revision,
+  }, owner);
+  assert.equal(returned.phase, 'bot');
+  assert.equal(returned.pageId, tab.pageId);
+  assert.equal(returned.sensitive, false);
+  const snapshot = await tool.execute({ action: 'snapshot' }, { conversationId: 1 }, {});
+  assert.notEqual(snapshot.isError, true);
+  assert.equal(parseToolJson(snapshot).pageId, tab.pageId);
 });
 
 test('defense-in-depth: snapshot containing leaked GOCSPX secret is withheld and holds session', async () => {

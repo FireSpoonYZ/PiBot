@@ -375,15 +375,11 @@ export function createBotBrowserService(options = {}) {
       ? state.currentLeaseTokenFor(authority, presentedLease)
       : undefined;
 
-    const canSeeSensitiveTabs =
-      authority.canViewSensitive &&
-      (!state.sensitivity.blockBystanderFrame || state.phase !== 'human' || isLeaseHolder);
-
     const tabs = sanitizeTabsForCaller(state.tabs, {
-      isBot: false,
-      canViewSensitive: canSeeSensitiveTabs,
+      canViewSensitive: authority.canViewSensitive && (isLeaseHolder || state.phase === 'held'),
       isPageWithheld: checkWithheld,
       botId: state.botId,
+      restrictedPageId: state.sensitivity.blockBystanderFrame ? state.pageId : null,
     });
 
     const sensitiveReason = state.sensitivity.sensitive
@@ -431,9 +427,9 @@ export function createBotBrowserService(options = {}) {
     state.expireLeaseIfNeeded();
     const tabs = sanitizeTabsForCaller(state.tabs, {
       isBot: true,
-      canViewSensitive: false,
       isPageWithheld: checkWithheld,
       botId: state.botId,
+      restrictedPageId: state.sensitivity.blockBotObserve ? state.pageId : null,
     });
     return {
       available: state.available,
@@ -695,16 +691,12 @@ export function createBotBrowserService(options = {}) {
             revision: state.revision,
           });
         }
-        // Always inspect the live landing page BEFORE permitting handback.
+        // Refresh the page's access policy independently of who holds control.
         if (entry.provider) {
           await refreshProviderStatus(entry, { allowUnavailable: true, pageId: req.pageId });
         }
         if (entry.presentation) state.verifyHumanLease({ authority: auth, leaseToken: req.lease, renew: false });
-        const giveBack = () => state.handback({
-          authority: auth,
-          leaseToken: req.lease ?? null,
-          currentSensitivity: state.sensitivity,
-        });
+        const giveBack = () => state.handback({ authority: auth, leaseToken: req.lease });
         const summary = entry.presentation || entry.dismissing
           ? await changePresentationOwner(entry, giveBack) : giveBack();
         if (onHandback) {
@@ -785,7 +777,7 @@ export function createBotBrowserService(options = {}) {
           if (!auth.canViewSensitive) return false;
           if (sensitiveFrameRequiresLease) return hasPresentedLease && holder;
           if (state.phase === 'human' || hasPresentedLease) return holder;
-          return state.phase !== 'taking' && state.reason !== 'disconnected_hold';
+          return state.phase === 'held' && state.reason !== 'disconnected_hold';
         };
         const assertMayDeliver = (sensitivity, allowed) => {
           if (sensitivity.blockNormalFrame) {
@@ -1089,6 +1081,9 @@ export function createBotBrowserService(options = {}) {
     }
 
     const reqPageId = rawArgs.pageId !== undefined ? normalizePageId(rawArgs.pageId) : undefined;
+    if (state.phase === 'bot' && state.sensitivity.sensitive) {
+      await refreshProviderStatus(entry, { allowUnavailable: true, signal: callOpts.signal });
+    }
 
     return state.enqueueBotOp(action, async (opSignal) => {
       const signal = combineSignals(opSignal, callOpts.signal);

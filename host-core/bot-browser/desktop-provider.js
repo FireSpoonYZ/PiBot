@@ -874,10 +874,10 @@ export async function createDesktopBrowserProvider(opts = {}) {
     }
     assertFrameReadCurrent(readGeneration);
     const mainFrame = frameTree?.frameTree?.frame;
+    const changedDocument = mainFrame?.loaderId && page.loaderId && mainFrame.loaderId !== page.loaderId;
+    const changedUrl = typeof mainFrame?.url === 'string' && mainFrame.url && page.url && mainFrame.url !== page.url;
     if (mainFrame) {
       if (mainFrame.id) page.frameId = mainFrame.id;
-      const changedDocument = mainFrame.loaderId && page.loaderId && mainFrame.loaderId !== page.loaderId;
-      const changedUrl = typeof mainFrame.url === 'string' && mainFrame.url && page.url && mainFrame.url !== page.url;
       if (changedDocument) {
         page.documentGeneration += 1;
         page.refs.clear();
@@ -929,8 +929,11 @@ export async function createDesktopBrowserProvider(opts = {}) {
       title: page.title,
       domSignals,
     });
-    applySensitiveState(page, classification);
-    return { domSignals, classification };
+    // A missing DOM probe is not proof that a previously detected dialog is gone.
+    if (domSignals || classification.sensitive || changedDocument) {
+      applySensitiveState(page, classification);
+    }
+    return { domSignals };
   }
 
   async function stopPageScreencast(page) {

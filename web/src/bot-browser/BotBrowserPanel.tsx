@@ -898,36 +898,19 @@ export function BotBrowserPanel({
       if (epoch !== epochRef.current) return;
 
       const nextView = parseBrowserView(res);
-      if (nextView) {
-        if (nextView.phase === 'human' && nextView.sensitive) {
-          setErrorBanner(
-            t('当前页面含敏感凭据或登录框，无法交还 Bot，请先完成或离开此页。', 'This page contains sensitive credentials or a login form and cannot be handed back to the Bot yet.'),
-          );
-          return;
-        }
-        clearLocalLease();
-        applyViewState(nextView);
-      } else {
-        clearLocalLease();
-      }
-      setNoticeBanner(
-        t('已交还给 Bot · Bot 正在核对当前页面', 'Handed back · Bot is verifying the current page'),
-      );
+      clearLocalLease();
+      if (nextView) applyViewState(nextView);
       schedulePoll(0);
     } catch (err) {
       if (epoch !== epochRef.current) return;
       const classified = classifyBrowserError(err);
-      if (classified.sensitiveBlocked) {
-        setErrorBanner(
-          t('当前页面含敏感凭据或登录框，无法交还 Bot，请先完成或离开此页。', 'This page contains sensitive credentials or a login form and cannot be handed back to the Bot yet.'),
-        );
-      } else {
-        if (classified.invalidatesLease) clearLocalLease();
-        setErrorBanner(
-          classified.message || t('交还失败，请重试。', 'Failed to hand back control. Please retry.'),
-        );
-        schedulePoll(150);
-      }
+      if (classified.invalidatesLease) clearLocalLease();
+      setErrorBanner(
+        classified.sensitiveBlocked
+          ? t('请更新目标 Host 后再交还。', 'Update the target host before handing back.')
+          : classified.message || t('交还失败，请重试。', 'Failed to hand back control. Please retry.'),
+      );
+      schedulePoll(150);
     } finally {
       if (epoch === epochRef.current) {
         setPendingAction(null);
@@ -1409,7 +1392,7 @@ export function BotBrowserPanel({
     if (isTaking) {
       return { tone: 'warn', text: t('正在接管…', 'Taking over…'), spinning: true };
     }
-    if (isHeld) {
+    if (isHeld || (view.phase === 'bot' && isSensitive)) {
       return { tone: 'warn', text: t('Bot 已暂停', 'Bot paused'), spinning: false };
     }
     if (view.phase === 'human' && isHolder) {

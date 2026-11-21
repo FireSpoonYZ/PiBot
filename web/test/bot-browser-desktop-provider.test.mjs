@@ -304,6 +304,10 @@ function createMockBrowserHarness(options = {}) {
             });
             return;
           }
+          if (page.failDomProbe) {
+            fail('DOM temporarily unavailable');
+            return;
+          }
           reply({
             result: {
               value: {
@@ -1480,7 +1484,11 @@ test('desktop provider supports same-page navigation, bounded frames, input reva
       () => provider.perform({ action: 'input', pageId, event: { kind: 'key', key: 'Enter' } }),
       { code: 'BROWSER_SECRET_INPUT_BLOCKED' }
     );
+    targetState.failDomProbe = true;
+    assert.equal((await provider.perform({ action: 'status' })).sensitive, true);
+    targetState.failDomProbe = false;
     targetState.domSignals.hasClientSecretModal = false;
+    assert.equal((await provider.perform({ action: 'status' })).sensitive, false);
 
     // Max tab ceiling is enforced.
     await provider.perform({ action: 'open', url: 'https://example.com' });

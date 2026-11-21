@@ -548,6 +548,25 @@ test('runtime assembly observes Google project navigation privately and enforces
     assert.equal(blockedBody.status, 'PAUSED_FOR_HUMAN');
     assert.equal(blockedBody.code, 'BROWSER_SENSITIVE_BLOCKED');
 
+    // Handing back ends the browser lease without overriding the wizard's pending owner step.
+    failProviderStatus = false;
+    const exclusive = await ownerBrowser({ action: 'takeover', force: true });
+    const overview = await ownerBrowser({
+      action: 'navigate', lease: exclusive.lease,
+      url: `https://console.cloud.google.com/auth/overview?project=${projectId}`,
+    });
+    const returned = await ownerBrowser({ action: 'handback', pageId: overview.pageId, lease: exclusive.lease });
+    assert.equal(returned.phase, 'bot');
+    assert.equal(returned.isHolder, false);
+    assert.equal((await setupControl({ action: 'status' })).browserLock.active, true);
+    const stillBlocked = await browserTool.execute({ action: 'snapshot' }, fakeApi, {});
+    assert.equal(JSON.parse(stillBlocked.output[0].text).status, 'PAUSED_FOR_HUMAN');
+
+    await setupControl({ action: 'cancel' });
+    const resumed = await browserTool.execute({ action: 'snapshot' }, fakeApi, {});
+    assert.notEqual(resumed.isError, true);
+    assert.equal(JSON.parse(resumed.output[0].text).pageId, overview.pageId);
+
     await coord.close();
     coordClosed = true;
     assert.equal(providerTracker.closed, providerTracker.created);
