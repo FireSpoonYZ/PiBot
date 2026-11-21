@@ -1,0 +1,22 @@
+name: Center Windows preview
+
+on:
+  push:
+    branches:
+      - codex/center-windows-0.0.27-dev.1
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  signed:
+    uses: ./.github/workflows/desktop.yml
+    with:
+      source-ref: ${{ github.sha }}
+      source-sha: ${{ github.sha }}
+      release: true
+      version: 0.0.27-dev.1
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
