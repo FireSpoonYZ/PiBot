@@ -4,7 +4,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Pencil } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import type { BotLiveState, BotRecord, LiveTool } from '../../../host-core/index.js';
 import { Markdown } from '../../../web/src/Markdown';
@@ -458,17 +457,6 @@ export function ChatTranscript({
                 <article
                   className={`bot-chat-bubble ${isWebhookAttribution(turnAttr) ? 'assistant' : turn.role}${turn.role === 'user' && turnAttr?.kind === 'bot' ? ' is-peer' : ''}${turn.isStreaming ? ' streaming' : ''}${isEditingTarget ? ' is-editing-target' : ''}${isAfterEditingTarget ? ' is-editing-after' : ''}`}
                 >
-                  {canEditThisTurn ? (
-                    <button
-                      type="button"
-                      className="desktop-turn-edit-btn"
-                      onClick={() => onEditTurn?.(turn)}
-                      title={t('编辑此消息', 'Edit message')}
-                      aria-label={t('编辑此消息', 'Edit message')}
-                    >
-                      <Pencil size={13} />
-                    </button>
-                  ) : null}
                   {turnAttr ? (
                     <MessageAttributionBadge attribution={turnAttr} />
                   ) : null}
@@ -550,6 +538,7 @@ export function ChatTranscript({
                 timestamp={turn.timestamp}
                 durationMs={showTurnDuration ? turn.durationMs : undefined}
                 copyText={copyText}
+                onEdit={canEditThisTurn ? () => onEditTurn?.(turn) : undefined}
               />
             </div>
           );
