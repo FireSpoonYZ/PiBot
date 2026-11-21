@@ -11,10 +11,13 @@ permissions:
 
 jobs:
   desktop:
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/desktop.yml
     with:
-      source-ref: ${{ github.sha }}
-      source-sha: ${{ github.sha }}
+      source-ref: fb74f16fcfd64067807f0d6a738c5fa2a686352c
+      source-sha: fb74f16fcfd64067807f0d6a738c5fa2a686352c
       release: true
       version: 0.0.27-dev.4
     secrets:
@@ -24,8 +27,8 @@ jobs:
   android:
     uses: ./.github/workflows/apk.yml
     with:
-      source-ref: ${{ github.sha }}
-      source-sha: ${{ github.sha }}
+      source-ref: fb74f16fcfd64067807f0d6a738c5fa2a686352c
+      source-sha: fb74f16fcfd64067807f0d6a738c5fa2a686352c
       release: true
       version: 0.0.27-dev.4
     secrets:
@@ -37,8 +40,8 @@ jobs:
   macos:
     uses: ./.github/workflows/desktop-macos.yml
     with:
-      source-ref: ${{ github.sha }}
-      source-sha: ${{ github.sha }}
+      source-ref: fb74f16fcfd64067807f0d6a738c5fa2a686352c
+      source-sha: fb74f16fcfd64067807f0d6a738c5fa2a686352c
       release: true
       version: 0.0.27-dev.4
     secrets:
