@@ -50,6 +50,7 @@ import {
   projectLiveSnapshotForPeer
 } from './remote-live-protocol.js';
 import { controlMethodTimeoutMs, controlMethodVersion, normalizeControlCall } from './remote-control-protocol.js';
+import { CLIPBOARD_UPGRADE_HEADER, createClipboardRelay } from './clipboard-relay.js';
 
 const DEFAULT_PORT = 8790;
 const DEFAULT_LISTEN_HOST = '127.0.0.1';
@@ -178,6 +179,7 @@ export async function openRelayServer(options = {}) {
   let wss = null;
   let server = null;
   let registry = null;
+  let clipboardRelay = null;
   const upgradeLiveExtensions = new WeakMap();
   // The caller owns the HTTP listener in shared mode: close() cleans WS state
   // and the registry but never closes or reconfigures that server.
@@ -204,7 +206,9 @@ export async function openRelayServer(options = {}) {
       ownsServer = true;
     }
     registry = openRelayRegistry({ dataRoot });
+    clipboardRelay = createClipboardRelay({ registry });
   } catch (err) {
+    try { await clipboardRelay?.close(); } catch { /* ignore */ }
     try { wss?.close(); } catch { /* ignore */ }
     try { if (ownsServer) server?.close(); } catch { /* ignore */ }
     try { registry?.close(); } catch { /* ignore */ }
@@ -1132,6 +1136,9 @@ export async function openRelayServer(options = {}) {
     if (req.headers.origin !== undefined || req.headers['sec-websocket-origin'] !== undefined) {
       return rejectUpgrade(socket, 403, 'Forbidden');
     }
+    if (req.headers[CLIPBOARD_UPGRADE_HEADER] !== undefined) {
+      return clipboardRelay.handleUpgrade(req, socket, head);
+    }
     if (upgradeSockets.size >= MAX_CONNECTIONS) {
       return rejectUpgrade(socket, 503, 'Service Unavailable');
     }
@@ -1259,6 +1266,11 @@ export async function openRelayServer(options = {}) {
           capture(() => socket.destroy());
         }
         upgradeSockets.clear();
+        try {
+          await clipboardRelay.close();
+        } catch (err) {
+          errors.push(err);
+        }
         await new Promise((resolve) => {
           try {
             wss.close(() => resolve());
@@ -1325,6 +1337,7 @@ export async function openRelayServer(options = {}) {
         pending.reject(internalResultError('DISCONNECTED', 'unconfirmed'));
       }
       internalPending.clear();
+      try { await clipboardRelay.close(); } catch { /* ignore */ }
       try { wss.close(); } catch { /* ignore */ }
       try { server.close(); } catch { /* ignore */ }
       try { registry.close(); } catch { /* ignore */ }

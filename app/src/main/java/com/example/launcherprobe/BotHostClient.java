@@ -47,6 +47,9 @@ final class BotHostClient {
     private long centerRevision;
     // 更新代次也随 broker 断线/重连变化，不改变 center_connect 的在途修订号。
     private long updateGeneration;
+    // 剪贴板同步凭据代次：仅随真实中心凭据/断连/永久错误/退出变化，避免暴露认证给 UI。
+    private long clipboardCredentialGeneration;
+    private String centerBlockedErrorCode;
     private long brokerGeneration = -1;
     private boolean brokerReadyObserved;
     private String brokerDeviceId;
@@ -156,6 +159,8 @@ final class BotHostClient {
                         throw new BridgeException("CANCELLED", "not-sent", "界面会话已关闭");
                     revision = ++centerRevision;
                     ++updateGeneration;
+                    ++clipboardCredentialGeneration;
+                    centerBlockedErrorCode = null;
                     brokerGeneration = -1;
                     brokerReadyObserved = false;
                     brokerDeviceId = null;
@@ -165,18 +170,31 @@ final class BotHostClient {
                     pendingCredentials = null;
                     main.removeCallbacks(pendingStatus);
                 }
+                notifyClipboardSyncChanged(false);
                 if ("".equals(input.opt("deviceToken"))) {
                     JSONObject saved;
                     try {
                         synchronized (lock) { saved = credentials.read(); }
                     } catch (Exception failure) {
-                        synchronized (lock) { centerPending = false; centerBlocked = true; }
+                        synchronized (lock) {
+                            ++clipboardCredentialGeneration;
+                            centerPending = false;
+                            centerBlocked = true;
+                            centerBlockedErrorCode = "CREDENTIALS";
+                        }
+                        notifyClipboardSyncChanged(false);
                         throw new BridgeException("CREDENTIALS", "not-sent", "已保存的中心凭据无法读取，请输入新令牌重新连接");
                     }
                     if (saved == null || !saved.getString("url").equals(input.opt("url"))
                             || !saved.getString("deviceId").equals(input.opt("deviceId"))
                             || !saved.getString("ca").equals(input.has("ca") ? input.opt("ca") : "")) {
-                        synchronized (lock) { centerPending = false; centerBlocked = true; }
+                        synchronized (lock) {
+                            ++clipboardCredentialGeneration;
+                            centerPending = false;
+                            centerBlocked = true;
+                            centerBlockedErrorCode = "CREDENTIALS";
+                        }
+                        notifyClipboardSyncChanged(false);
                         throw new BridgeException("CREDENTIALS", "not-sent", "中心地址、设备身份或 CA 不匹配，请输入令牌");
                     }
                     forwarded = new JSONObject(input.toString()).put("deviceToken", saved.getString("deviceToken"));
@@ -188,6 +206,8 @@ final class BotHostClient {
                         throw new BridgeException("CANCELLED", "not-sent", "界面会话已关闭");
                     ++centerRevision;
                     ++updateGeneration;
+                    ++clipboardCredentialGeneration;
+                    centerBlockedErrorCode = null;
                     brokerGeneration = -1;
                     brokerReadyObserved = false;
                     brokerDeviceId = null;
@@ -205,6 +225,7 @@ final class BotHostClient {
                         throw new BridgeException("CREDENTIALS", "not-sent", "无法清除已保存的中心凭据，请重试");
                     }
                 }
+                notifyClipboardSyncChanged(true);
             }
             if ("center_connect".equals(op)) synchronized (lock) {
                 pendingCredentials = new JSONObject(forwarded.toString());
@@ -224,14 +245,18 @@ final class BotHostClient {
             try {
                 reply = process.request("call", new JSONObject().put("method", op).put("params", sent));
             } catch (IOException | JSONException failure) {
-                if ("center_connect".equals(op)) synchronized (lock) {
-                    centerPending = false;
-                    main.postDelayed(pendingStatus, 5000);
+                if ("center_connect".equals(op)) {
+                    synchronized (lock) {
+                        centerPending = false;
+                        main.postDelayed(pendingStatus, 5000);
+                    }
+                    notifyClipboardSyncChanged(false);
                 }
                 return failed(failure);
             }
             if ("center_connect".equals(op)) {
                 return reply.handle((value, failure) -> onControl(() -> {
+                    CompletableFuture<JSONObject> outcome;
                     synchronized (lock) {
                         if (attempt != centerRevision || generation == null || generation.process != process
                                 || generation.closing) {
@@ -240,23 +265,32 @@ final class BotHostClient {
                         centerPending = false;
                         if (failure != null) {
                             String code = BotHostUiProtocol.errorCode(failure);
-                            centerBlocked = centerBlocked || isPermanentCenterError(code);
+                            if (isPermanentCenterError(code)) {
+                                ++clipboardCredentialGeneration;
+                                centerBlocked = true;
+                                centerBlockedErrorCode = code;
+                            }
                             if (centerBlocked) pendingCredentials = null;
                             else main.postDelayed(pendingStatus, 5000);
-                            return failed(failure);
-                        }
-                        JSONObject envelope = valueEnvelope(value);
-                        if ("ready".equals(envelope.getJSONObject("value").optString("state"))) {
-                            persistReady(process);
+                            outcome = failed(failure);
                         } else {
-                            main.postDelayed(pendingStatus, 5000);
+                            JSONObject envelope = valueEnvelope(value);
+                            if ("ready".equals(envelope.getJSONObject("value").optString("state"))) {
+                                persistReady(process);
+                            } else {
+                                main.postDelayed(pendingStatus, 5000);
+                            }
+                            outcome = CompletableFuture.completedFuture(centerMetadata(envelope));
                         }
-                        return CompletableFuture.completedFuture(centerMetadata(envelope));
                     }
+                    notifyClipboardSyncChanged(false);
+                    return outcome;
                 })).thenCompose(future -> future);
             }
             if ("center_status".equals(op) || "center_disconnect".equals(op)) {
                 return reply.thenCompose(value -> onControl(() -> {
+                    boolean notifyClipboard = false;
+                    CompletableFuture<JSONObject> outcome;
                     synchronized (lock) {
                         if (statusRevision != centerRevision || generation == null || generation.process != process
                                 || generation.closing) {
@@ -268,13 +302,19 @@ final class BotHostClient {
                         boolean permanentError = "center_status".equals(op) && error != null
                                 && isPermanentCenterError(error.optString("code"));
                         if (permanentError) {
+                            ++clipboardCredentialGeneration;
                             centerBlocked = true;
+                            centerBlockedErrorCode = error.optString("code");
                             pendingCredentials = null;
                             restoreNeeded = false;
                             main.removeCallbacks(pendingStatus);
+                            notifyClipboard = true;
                         }
                         if ("center_status".equals(op) && !centerBlocked && pendingCredentials != null
-                                && "ready".equals(status.optString("state"))) persistReady(process);
+                                && "ready".equals(status.optString("state"))) {
+                            persistReady(process);
+                            notifyClipboard = true;
+                        }
                         if ((centerPending || centerBlocked) && !permanentError) status.put("state", "disconnected");
                         if ("center_status".equals(op)) {
                             boolean ready = !centerBlocked && !centerPending && "ready".equals(status.optString("state"));
@@ -282,8 +322,10 @@ final class BotHostClient {
                             if (!ready) brokerUnavailableLocked();
                             centerReadyObserved = ready;
                         }
-                        return CompletableFuture.completedFuture(centerMetadata(envelope));
+                        outcome = CompletableFuture.completedFuture(centerMetadata(envelope));
                     }
+                    if (notifyClipboard) notifyClipboardSyncChanged(false);
+                    return outcome;
                 }));
             }
             if ("status".equals(op)) {
@@ -349,7 +391,9 @@ final class BotHostClient {
                     .edit().putBoolean("enabled", true).commit()) throw new IOException("无法保存连接状态");
             new File(new File(context.getFilesDir(), DATA_ROOT), "center-credentials.json").delete();
         } catch (Exception failure) {
+            ++clipboardCredentialGeneration;
             centerBlocked = true;
+            centerBlockedErrorCode = "CREDENTIALS";
             pendingCredentials = null;
             try { process.request("call", new JSONObject().put("method", "center_disconnect")
                     .put("params", new JSONObject())); } catch (Exception ignored) { }
@@ -357,6 +401,8 @@ final class BotHostClient {
         }
         pendingCredentials = null;
         centerBlocked = false;
+        centerBlockedErrorCode = null;
+        ++clipboardCredentialGeneration;
         centerReadyObserved = true;
         restoreNeeded = false;
         main.removeCallbacks(pendingStatus);
@@ -487,13 +533,16 @@ final class BotHostClient {
         return onControl(() -> {
             synchronized (lock) {
                 ++centerRevision;
+                ++clipboardCredentialGeneration;
                 centerPending = false;
                 centerBlocked = true;
+                centerBlockedErrorCode = null;
                 centerReadyObserved = false;
                 restoreNeeded = false;
                 pendingCredentials = null;
                 main.removeCallbacks(pendingStatus);
             }
+            notifyClipboardSyncChanged(false);
             try {
                 credentials.save(record);
             } catch (Exception failure) {
@@ -509,12 +558,98 @@ final class BotHostClient {
             if (!enabled) {
                 throw new BridgeException("CREDENTIALS", "unconfirmed", "无法保存连接状态，请重试");
             }
+            notifyClipboardSyncChanged(false);
             try {
                 return CompletableFuture.completedFuture(CenterClientCredentials.metadata(record));
             } catch (Exception failure) {
                 throw new BridgeException("CREDENTIALS", "unconfirmed", "中心凭据校验失败");
             }
         });
+    }
+
+    /**
+     * 剪贴板同步专用的默认进程凭据快照（仅默认进程包内可见，绝不经 UI 桥或 WebView 暴露）。
+     * generation 随中心凭据变化、断连、永久错误与退出递增，确保旧链接与回调立即可被围栏失效。
+     */
+    static final class ClipboardCredentials {
+        final long generation;
+        final String origin;
+        final String deviceId;
+        final String deviceToken;
+        final String caPem;
+        final ClipboardSyncStorage.Binding binding;
+        final boolean linkAllowed;
+        final boolean connecting;
+        final String blockedErrorCode;
+
+        ClipboardCredentials(long generation, String origin, String deviceId, String deviceToken,
+                             String caPem, ClipboardSyncStorage.Binding binding,
+                             boolean linkAllowed, boolean connecting, String blockedErrorCode) {
+            this.generation = generation;
+            this.origin = origin;
+            this.deviceId = deviceId;
+            this.deviceToken = deviceToken;
+            this.caPem = caPem;
+            this.binding = binding;
+            this.linkAllowed = linkAllowed;
+            this.connecting = connecting;
+            this.blockedErrorCode = blockedErrorCode;
+        }
+    }
+
+    ClipboardCredentials clipboardSyncCredentials() {
+        synchronized (lock) {
+            if (!context.getSharedPreferences("bot_client_connection", Context.MODE_PRIVATE)
+                    .getBoolean("enabled", true)) {
+                return null;
+            }
+            JSONObject saved;
+            try {
+                saved = credentials.read();
+            } catch (Exception failure) {
+                return null;
+            }
+            if (saved == null) {
+                return null;
+            }
+            String origin = ClipboardSyncStorage.normalizeOrigin(saved.optString("url", ""));
+            String deviceId = saved.optString("deviceId", "").trim();
+            String deviceToken = saved.optString("deviceToken", "");
+            String rawCa = saved.optString("ca", "").trim();
+            String caPem = rawCa.isEmpty() ? null : rawCa;
+            if (origin.isEmpty() || deviceId.isEmpty() || deviceToken.isEmpty()) {
+                return null;
+            }
+            ClipboardSyncStorage.Binding binding =
+                    ClipboardSyncStorage.Binding.create(origin, deviceId, deviceToken, caPem);
+            boolean pendingDifferent = pendingCredentials != null
+                    && !sameCenterCredentials(saved, pendingCredentials);
+            boolean linkAllowed = !centerBlocked && !centerPending && !pendingDifferent;
+            boolean connecting = !centerBlocked && (centerPending || pendingDifferent);
+            return new ClipboardCredentials(
+                    clipboardCredentialGeneration,
+                    origin,
+                    deviceId,
+                    deviceToken,
+                    caPem,
+                    binding,
+                    linkAllowed,
+                    connecting,
+                    centerBlocked ? centerBlockedErrorCode : null);
+        }
+    }
+
+    private static boolean sameCenterCredentials(JSONObject a, JSONObject b) {
+        if (a == null || b == null) return false;
+        return ClipboardSyncStorage.normalizeOrigin(a.optString("url", ""))
+                .equals(ClipboardSyncStorage.normalizeOrigin(b.optString("url", "")))
+                && a.optString("deviceId", "").trim().equals(b.optString("deviceId", "").trim())
+                && a.optString("deviceToken", "").equals(b.optString("deviceToken", ""))
+                && a.optString("ca", "").trim().equals(b.optString("ca", "").trim());
+    }
+
+    private void notifyClipboardSyncChanged(boolean disconnected) {
+        ClipboardSyncController.get(context).onCenterStateChanged(disconnected);
     }
 
     void checkConnection() {
@@ -744,6 +879,7 @@ final class BotHostClient {
         synchronized (lock) {
             ++centerRevision;
             ++updateGeneration;
+            ++clipboardCredentialGeneration;
             brokerGeneration = -1;
             brokerReadyObserved = false;
             brokerDeviceId = null;
@@ -753,11 +889,16 @@ final class BotHostClient {
             restoreNeeded = true;
             main.removeCallbacks(pendingStatus);
             closing = generation;
-            if (closing == null) return CompletableFuture.completedFuture(null);
-            closing.closing = true;
-            closing.current = false;
-            process = closing.process;
+            if (closing == null) {
+                process = null;
+            } else {
+                closing.closing = true;
+                closing.current = false;
+                process = closing.process;
+            }
         }
+        notifyClipboardSyncChanged(false);
+        if (closing == null) return CompletableFuture.completedFuture(null);
         if (process != null) closeGeneration(closing, process);
         return closing.closeDone;
     }

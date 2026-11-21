@@ -94,6 +94,8 @@ const ALLOWED_METHODS: &[&str] = &[
   "updateDownload",
   "updateInstall",
   "updateCancel",
+  // 剪贴板同步：固定入口（sendNow 仅在 Kotlin 侧聚焦 Activity 原生读取并经私有桥送达默认进程）。
+  "clipboardSync",
 ];
 
 /// 不占普通准入槽的本地 UI 动作：普通槽满时仍可执行，不产生 bridge 请求堆积。

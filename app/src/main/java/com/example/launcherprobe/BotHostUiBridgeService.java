@@ -412,6 +412,14 @@ public final class BotHostUiBridgeService extends Service {
                 case "updateInstall":
                     validateUpdateParams(params, "updateCheck".equals(op) ? "automatic" : "stopActive");
                     return ClientUpdater.get(BotHostUiBridgeService.this).request(op, params);
+                case "clipboardSync":
+                    return ClipboardSyncController.get(BotHostUiBridgeService.this).handleAction(params);
+                case "clipboardSyncSend":
+                    if (params == null || params.length() != 1) {
+                        throw new BridgeException("INVALID_ARGUMENT", "not-sent", "剪贴板发送参数无效");
+                    }
+                    return ClipboardSyncController.get(BotHostUiBridgeService.this)
+                            .sendNow(required(params, "text"));
                 case "clientChatVisibility":
                     String deviceId = required(params, "deviceId");
                     String botId = required(params, "botId");
