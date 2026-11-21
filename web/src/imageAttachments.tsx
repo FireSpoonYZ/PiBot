@@ -387,8 +387,10 @@ export function ImageAttachmentThumb({ attachment, fetcher, disabled, onRemove, 
       <button
         type="button"
         className="image-attachment-open"
+        data-loaded={url ? 'true' : undefined}
         onClick={() => url && setOpen(true)}
         aria-label={alt}
+        title={url ? t('点击查看大图', 'Click to view full image') : alt}
       >
         {url ? (
           <img
@@ -413,10 +415,23 @@ export function ImageAttachmentThumb({ attachment, fetcher, disabled, onRemove, 
           type="button"
           className="remove-attachment"
           disabled={disabled}
-          onClick={onRemove}
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
           aria-label={t('移除', 'Remove')}
+          title={t('移除', 'Remove')}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            aria-hidden="true"
+          >
             <path d="M6 6l12 12M18 6L6 18" />
           </svg>
         </button>
@@ -427,12 +442,29 @@ export function ImageAttachmentThumb({ attachment, fetcher, disabled, onRemove, 
           <Dialog.Content
             className="image-attachment-viewer-content"
             aria-describedby={undefined}
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setOpen(false);
+            }}
           >
             <Dialog.Title className="sr-only">{alt}</Dialog.Title>
             {url ? <img src={url} alt={alt} /> : null}
             <Dialog.Close asChild>
-              <button type="button" className="image-attachment-viewer-close" aria-label={t('关闭', 'Close')}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+              <button
+                type="button"
+                className="image-attachment-viewer-close"
+                aria-label={t('关闭', 'Close')}
+                title={t('关闭', 'Close')}
+              >
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                  strokeLinecap="round"
+                  aria-hidden="true"
+                >
                   <path d="M6 6l12 12M18 6L6 18" />
                 </svg>
               </button>
