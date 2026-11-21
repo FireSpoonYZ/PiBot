@@ -5,7 +5,9 @@ import type { DesktopClientStatus } from '../../../host-core/desktop-client';
 import { HashRouter } from 'react-router-dom';
 import { HostPage } from '../../../web/src/Host';
 import { CenterGate, isTransientCenterError, useCenterConnection, type CenterStatus } from '../../../web/src/native/CenterGate';
-import { ErrorNotice, LanguageOverride, errorText, useText } from '../../../web/src/ui';
+import { LanguageOverride, errorText, humanizeError, useText } from '../../../web/src/ui';
+import { NoticeProvider, useNotice } from '../../../web/src/notice';
+import { ConnectionPhaseProvider } from '../../../web/src/connection';
 import { ClientUpdateProvider } from '../../../web/src/ClientUpdateProvider';
 import type { ClientUpdateOp, ClientUpdateParams, ClientUpdateStatus } from '../../../web/src/ClientUpdate';
 import {
@@ -23,11 +25,53 @@ import './mobile.css';
 import '../../../web/src/hub/lanes.css';
 
 const DARK_SCHEME_QUERY = '(prefers-color-scheme: dark)';
+const UI_THEME_STORAGE_KEY = 'pibot.ui-theme.v1';
+const UI_LANGUAGE_STORAGE_KEY = 'pibot.ui-language.v1';
+const SAFE_AREA_STORAGE_KEY = 'pibot.safe-area-insets.v1';
+const REMOTE_BOTS_CACHE_KEY = 'bot-hub-remote-bots-cache-v1';
+const MOBILE_SHELL_NOTICE_ID = 'mobile-shell-notice';
 
 const darkMediaQuery = (): MediaQueryList | null =>
   typeof window !== 'undefined' && typeof window.matchMedia === 'function'
     ? window.matchMedia(DARK_SCHEME_QUERY)
     : null;
+
+const normalizeAppearance = (value: unknown): MobileUiSettings['appearance'] =>
+  value === 'light' || value === 'dark' || value === 'system' ? value : 'system';
+
+const normalizeLanguage = (value: unknown): MobileUiSettings['language'] =>
+  value === 'zh' || value === 'en' || value === 'system' ? value : 'system';
+
+const readCachedUiSettings = (): MobileUiSettings => {
+  try {
+    return {
+      language: normalizeLanguage(localStorage.getItem(UI_LANGUAGE_STORAGE_KEY)),
+      appearance: normalizeAppearance(localStorage.getItem(UI_THEME_STORAGE_KEY)),
+    };
+  } catch {
+    return { language: 'system', appearance: 'system' };
+  }
+};
+
+const writeCachedUiSettings = (ui: MobileUiSettings) => {
+  try {
+    localStorage.setItem(UI_THEME_STORAGE_KEY, ui.appearance);
+    localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, ui.language);
+  } catch {
+    // Ignore storage quota / privacy mode errors.
+  }
+};
+
+const readHasCachedRemoteBots = (): boolean => {
+  try {
+    const raw = localStorage.getItem(REMOTE_BOTS_CACHE_KEY);
+    if (!raw) return false;
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.length > 0;
+  } catch {
+    return false;
+  }
+};
 
 const resolveTheme = (appearance: MobileUiSettings['appearance']): 'light' | 'dark' => {
   if (appearance === 'dark' || appearance === 'light') return appearance;
@@ -35,8 +79,10 @@ const resolveTheme = (appearance: MobileUiSettings['appearance']): 'light' | 'da
 };
 
 const applyTheme = (appearance: MobileUiSettings['appearance']) => {
+  const resolved = resolveTheme(appearance);
   document.documentElement.dataset.themePref = appearance;
-  document.documentElement.dataset.theme = resolveTheme(appearance);
+  document.documentElement.dataset.theme = resolved;
+  document.documentElement.style.colorScheme = resolved;
 };
 
 const applyUi = (ui: MobileUiSettings) => {
@@ -44,20 +90,213 @@ const applyUi = (ui: MobileUiSettings) => {
   document.documentElement.lang = ui.language === 'system' ? navigator.language : ui.language;
 };
 
-// 模块顶层同步解析一次 system 主题，避免首帧浅色闪烁（不写 inline script 以满足 CSP）。
-applyTheme('system');
+const hydrateCachedSafeArea = () => {
+  if (typeof document === 'undefined') return;
+  const root = document.documentElement;
+  if (root.dataset.insetsReady === '1') return;
+  try {
+    const raw = localStorage.getItem(SAFE_AREA_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as { top?: unknown; bottom?: unknown };
+    if (
+      typeof parsed?.top === 'number' &&
+      Number.isFinite(parsed.top) &&
+      parsed.top >= 0 &&
+      typeof parsed?.bottom === 'number' &&
+      Number.isFinite(parsed.bottom) &&
+      parsed.bottom >= 0
+    ) {
+      root.style.setProperty('--safe-area-inset-top', `${Math.round(parsed.top)}px`);
+      root.style.setProperty('--safe-area-inset-bottom', `${Math.round(parsed.bottom)}px`);
+      root.style.setProperty('--ime-bottom', '0px');
+      root.dataset.insetsReady = '1';
+    }
+  } catch {
+    // Ignore malformed or inaccessible safe-area cache.
+  }
+};
 
-function ReconnectingNotice() {
+// 模块顶层同步兜底应用缓存主题、语言与安全区，与 index.html 同步启动脚本互补。
+applyUi(readCachedUiSettings());
+hydrateCachedSafeArea();
+
+const readImeBottomCssPx = (): number => {
+  if (typeof document === 'undefined') return 0;
+  const raw = document.documentElement.style.getPropertyValue('--ime-bottom').trim();
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+};
+
+const isEditableField = (el: Element | null): el is HTMLElement => {
+  if (!(el instanceof HTMLElement)) return false;
+  const tag = el.tagName;
+  if (tag === 'TEXTAREA') return true;
+  if (tag === 'INPUT') {
+    const type = (el as HTMLInputElement).type.toLowerCase();
+    return (
+      type !== 'checkbox' &&
+      type !== 'radio' &&
+      type !== 'button' &&
+      type !== 'submit' &&
+      type !== 'reset' &&
+      type !== 'range' &&
+      type !== 'file' &&
+      type !== 'hidden'
+    );
+  }
+  return el.isContentEditable;
+};
+
+/** F3：WebView 不再随软键盘缩放后，监听 --ime-bottom 增长与 focusin，确保表单输入框滚入可视区。 */
+function useImeFocusScrollIntoView() {
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    let lastImeBottom = readImeBottomCssPx();
+    let rafId = 0;
+
+    const scheduleScroll = (preferredTarget?: Element | null) => {
+      if (rafId !== 0) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        rafId = 0;
+        const activeEl =
+          preferredTarget && preferredTarget.isConnected
+            ? preferredTarget
+            : document.activeElement;
+        if (!isEditableField(activeEl)) return;
+        // 聊天输入区已紧贴 #root 的 --ime-bottom 底部让位上方，无需 scrollIntoView。
+        if (activeEl.closest('.grok-chat-composer-area')) return;
+        if (typeof activeEl.scrollIntoView === 'function') {
+          activeEl.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+        }
+      });
+    };
+
+    const onImeChange = (event: Event) => {
+      const detail = (event as CustomEvent<{ imeBottom?: unknown }>).detail;
+      const nextIme =
+        typeof detail?.imeBottom === 'number' && Number.isFinite(detail.imeBottom)
+          ? Math.max(0, detail.imeBottom)
+          : readImeBottomCssPx();
+      const increased = nextIme > lastImeBottom;
+      lastImeBottom = nextIme;
+      if (increased && nextIme > 0) {
+        scheduleScroll();
+      }
+    };
+
+    const onInsetsReady = (event: Event) => {
+      const detail = (event as CustomEvent<{ imeBottom?: unknown }>).detail;
+      if (typeof detail?.imeBottom === 'number' && Number.isFinite(detail.imeBottom)) {
+        lastImeBottom = Math.max(0, detail.imeBottom);
+      } else {
+        lastImeBottom = readImeBottomCssPx();
+      }
+    };
+
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target instanceof Element ? event.target : document.activeElement;
+      const currentIme = Math.max(lastImeBottom, readImeBottomCssPx());
+      if (currentIme > 0 && isEditableField(target)) {
+        scheduleScroll(target);
+      }
+    };
+
+    window.addEventListener('pibot:ime-change', onImeChange);
+    window.addEventListener('pibot:insets-ready', onInsetsReady);
+    document.addEventListener('focusin', onFocusIn);
+    return () => {
+      if (rafId !== 0) cancelAnimationFrame(rafId);
+      window.removeEventListener('pibot:ime-change', onImeChange);
+      window.removeEventListener('pibot:insets-ready', onInsetsReady);
+      document.removeEventListener('focusin', onFocusIn);
+    };
+  }, []);
+}
+
+/** G1 桥接：把外壳级错误路由到 F1 浮层 NoticeLayer（同 id 原地更新，零布局位移）。 */
+function MobileShellNoticeBridge({ text, seq }: { text: string; seq: number }) {
+  const { notify, dismiss } = useNotice();
   const t = useText();
-  return <ErrorNotice tone="progress" title={t('正在重连…', 'Reconnecting…')} compact />;
+  const tRef = useRef(t);
+  tRef.current = t;
+
+  useEffect(() => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      dismiss(MOBILE_SHELL_NOTICE_ID);
+      return;
+    }
+    const humanized = humanizeError(trimmed, tRef.current);
+    const title = humanized?.title || trimmed;
+    const detailParts = [humanized?.description, humanized?.detail].filter(Boolean);
+    notify({
+      id: MOBILE_SHELL_NOTICE_ID,
+      tone: 'error',
+      title,
+      detail: detailParts.length > 0 ? detailParts.join('\n') : undefined,
+    });
+  }, [text, seq, notify, dismiss]);
+
+  useEffect(() => () => { dismiss(MOBILE_SHELL_NOTICE_ID); }, [dismiss]);
+
+  return null;
+}
+
+/** F2：在 CenterGate 内挂载统一连接状态机，合并 IPC/中心/远端状态供 HostPage 及子页读取。 */
+function MobileConnectionPhaseBoundary({
+  ipcReconnecting,
+  centerReconnecting,
+  remoteConnected,
+  detail,
+  children,
+}: {
+  ipcReconnecting: boolean;
+  centerReconnecting: boolean;
+  remoteConnected: boolean;
+  detail: string | null;
+  children: ReactNode;
+}) {
+  const conn = useCenterConnection();
+  const [hasCachedRemoteBots, setHasCachedRemoteBots] = useState<boolean>(() => readHasCachedRemoteBots());
+
+  useEffect(() => {
+    setHasCachedRemoteBots(readHasCachedRemoteBots());
+  }, [conn.ready, conn.hasSavedCenter, remoteConnected]);
+
+  return (
+    <ConnectionPhaseProvider
+      ipcReconnecting={ipcReconnecting}
+      centerReconnecting={centerReconnecting || conn.reconnecting}
+      centerConnecting={conn.connecting}
+      centerReady={conn.ready}
+      centerError={conn.error || null}
+      hasConfiguredCenter={conn.hasSavedCenter}
+      hasCachedRemoteBots={hasCachedRemoteBots}
+      remoteConnected={remoteConnected}
+      detail={conn.error || detail}
+    >
+      {children}
+    </ConnectionPhaseProvider>
+  );
 }
 
 function MobileShell() {
-  const [ui, setUi] = useState<MobileUiSettings>({ language: 'system', appearance: 'system' });
-  const [notice, setNotice] = useState('');
+  useImeFocusScrollIntoView();
+  const [ui, setUi] = useState<MobileUiSettings>(() => readCachedUiSettings());
+  const [noticeState, setNoticeState] = useState<{ text: string; seq: number }>({ text: '', seq: 0 });
+  const noticeSeqRef = useRef(0);
+  const setNotice = useCallback((text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      setNoticeState(prev => (prev.text ? { text: '', seq: 0 } : prev));
+      return;
+    }
+    noticeSeqRef.current += 1;
+    setNoticeState({ text: trimmed, seq: noticeSeqRef.current });
+  }, []);
   const [ipcReconnecting, setIpcReconnecting] = useState(false);
   const [centerReconnecting, setCenterReconnecting] = useState(false);
-  const reconnecting = ipcReconnecting || centerReconnecting;
+  const [remoteConnected, setRemoteConnected] = useState(false);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [adoptEpoch, setAdoptEpoch] = useState(0);
   const adopting = useRef<Promise<void> | null>(null);
@@ -74,6 +313,7 @@ function MobileShell() {
     connectionRevision.current += 1;
     adoptedGeneration.current = undefined;
     remoteRef.current?.invalidate();
+    setRemoteConnected(false);
     setCenterReconnecting(false);
   }, []);
 
@@ -81,7 +321,10 @@ function MobileShell() {
     if (!remoteRef.current) {
       remoteRef.current = createMobileRemoteClient();
       const api = remoteRef.current.api;
-      unsubscribeRemote.current = api.subscribe(() => { if (!api.transportConnected && !adopting.current) scheduleAdopt.current(); });
+      unsubscribeRemote.current = api.subscribe(() => {
+        setRemoteConnected(api.transportConnected);
+        if (!api.transportConnected && !adopting.current) scheduleAdopt.current();
+      });
     }
     return remoteRef.current;
   }, []);
@@ -125,7 +368,7 @@ function MobileShell() {
       if (remoteRef.current && !remoteRef.current.api.transportConnected) scheduleAdopt.current();
     }, settled);
     return run;
-  }, [getOrCreateRemoteClient]);
+  }, [getOrCreateRemoteClient, setNotice]);
 
   useEffect(() => {
     applyTheme(ui.appearance);
@@ -147,8 +390,13 @@ function MobileShell() {
     const syncUi = (reportError: boolean) => {
       const current = ++seq;
       mobileUiSettings().then(
-        next => {
+        raw => {
           if (!live || current !== seq) return;
+          const next: MobileUiSettings = {
+            language: normalizeLanguage(raw?.language),
+            appearance: normalizeAppearance(raw?.appearance),
+          };
+          writeCachedUiSettings(next);
           applyUi(next);
           setUi(prev =>
             prev.language === next.language && prev.appearance === next.appearance ? prev : next,
@@ -170,7 +418,7 @@ function MobileShell() {
       live = false;
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [connectionEpoch]);
+  }, [connectionEpoch, setNotice]);
 
   useEffect(() => {
     let live = true;
@@ -214,7 +462,7 @@ function MobileShell() {
     };
     const stop = onMobileStreamFailure(recover);
     return () => { live = false; repairIpc.current = null; stop(); if (timer) clearTimeout(timer); };
-  }, [centerDisconnected]);
+  }, [centerDisconnected, setNotice]);
   useEffect(() => {
     let live = true;
     let flight: Promise<void> | null = null;
@@ -286,30 +534,38 @@ function MobileShell() {
       document.removeEventListener('visibilitychange', foreground);
       if (timer) clearTimeout(timer);
     };
-  }, [centerReady, centerDisconnected]);
+  }, [centerReady, centerDisconnected, setNotice]);
   useEffect(() => () => { unsubscribeRemote.current?.(); remoteRef.current?.dispose(); }, []);
 
   return (
     <LanguageOverride.Provider value={ui.language}>
-      <div className="mobile-shell">
-        <div className="mobile-body">
-          <CenterGate onDisconnected={centerDisconnected} onReady={centerReady} recoveryEpoch={connectionEpoch + adoptEpoch}>
-            <MobileUpdateBoundary>
-              <HostPage
-                onBack={() => void mobileHide()}
-                persistentPending
-                connectionEpoch={connectionEpoch}
-                active
-                getOrCreateRemoteClient={getOrCreateRemoteClient}
-                onRefreshConnection={checkConnection}
-                onOpenSystemSettings={() => void mobileLocalRequest('openSystemSettings').catch(error => setNotice(errorText(error)))}
-              />
-            </MobileUpdateBoundary>
-          </CenterGate>
+      <NoticeProvider>
+        <MobileShellNoticeBridge text={noticeState.text} seq={noticeState.seq} />
+        <div className="mobile-shell">
+          <div className="mobile-body">
+            <CenterGate onDisconnected={centerDisconnected} onReady={centerReady} recoveryEpoch={connectionEpoch + adoptEpoch}>
+              <MobileConnectionPhaseBoundary
+                ipcReconnecting={ipcReconnecting}
+                centerReconnecting={centerReconnecting}
+                remoteConnected={remoteConnected}
+                detail={noticeState.text || null}
+              >
+                <MobileUpdateBoundary>
+                  <HostPage
+                    onBack={() => void mobileHide()}
+                    persistentPending
+                    connectionEpoch={connectionEpoch}
+                    active
+                    getOrCreateRemoteClient={getOrCreateRemoteClient}
+                    onRefreshConnection={checkConnection}
+                    onOpenSystemSettings={() => void mobileLocalRequest('openSystemSettings').catch(error => setNotice(errorText(error)))}
+                  />
+                </MobileUpdateBoundary>
+              </MobileConnectionPhaseBoundary>
+            </CenterGate>
+          </div>
         </div>
-        {reconnecting && <ReconnectingNotice />}
-        <ErrorNotice error={notice} compact onDismiss={() => setNotice('')} />
-      </div>
+      </NoticeProvider>
     </LanguageOverride.Provider>
   );
 }

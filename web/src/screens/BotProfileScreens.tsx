@@ -34,6 +34,7 @@ import {
 } from '../GrokBotAvatar';
 import { botAvatarKey } from '../botAvatarSync';
 import { ErrorNotice, useText } from '../ui';
+import { LabelStack, ReservedSlot, Skeleton } from '../layout';
 import {
   PlatformLogoIcon,
   SOUL_MAX_BYTES,
@@ -127,7 +128,10 @@ export function BotProfileScreen({
           disabled={actionBusy || !editName.trim()}
           onClick={onSave}
         >
-          {actionBusy ? t('保存中', 'Saving') : t('保存', 'Save')}
+          <LabelStack
+            active={actionBusy ? t('保存中', 'Saving') : t('保存', 'Save')}
+            labels={[t('保存中', 'Saving'), t('保存', 'Save')]}
+          />
         </button>
       </header>
 
@@ -166,7 +170,9 @@ export function BotProfileScreen({
           />
         </section>
 
-        <ErrorNotice error={profileError} onDismiss={onDismissProfileError} />
+        <ReservedSlot minHeight={44} align="start">
+          <ErrorNotice error={profileError} stale={actionBusy} compact onDismiss={onDismissProfileError} />
+        </ReservedSlot>
         <section className="grok-field-section">
           <h3 className="grok-section-label">{t('常用设置', 'Common settings')}</h3>
           <div className="grok-card-group">
@@ -386,18 +392,24 @@ export function BotProfileManageScreen({
                     </button>
                   </div>
                 )}
-                {!editCwdError && editCwdRevision === null && (
-                  <p className="secondary profile-card-hint">
-                    {t('正在读取目录…', 'Loading directory…')}
-                  </p>
-                )}
                 <p className="secondary profile-card-hint">
                   {t('保存到中心后在该 Bot 空闲时生效；运行中的任务保持原目录，不会移动文件。',
                     'Saved to the center and applied when this Bot is idle; running work keeps its directory and no files are moved.')}
                 </p>
-                {editCwdSaved && (
-                  <p className="secondary profile-card-hint" role="status">{t('工作目录已保存', 'Working directory saved')}</p>
-                )}
+                <ReservedSlot
+                  minHeight={20}
+                  align="center"
+                  className="profile-card-hint"
+                  role="status"
+                  aria-live="polite"
+                  contentKey={!editCwdError && editCwdRevision === null ? 'loading' : editCwdSaved ? 'saved' : 'idle'}
+                >
+                  {!editCwdError && editCwdRevision === null ? (
+                    <Skeleton variant="text" width={120} height={12} inline label={t('正在读取目录…', 'Loading directory…')} />
+                  ) : editCwdSaved ? (
+                    <span className="secondary">{t('工作目录已保存', 'Working directory saved')}</span>
+                  ) : null}
+                </ReservedSlot>
                 <div className="profile-directory-actions">
                   <button
                     type="button"
@@ -411,7 +423,9 @@ export function BotProfileManageScreen({
               </>
             )}
           </div>
-          <ErrorNotice error={cwdSaveError} onDismiss={onDismissCwdSaveError} />
+          <ReservedSlot minHeight={44} align="start">
+            <ErrorNotice error={cwdSaveError} stale={action.errorStale} compact onDismiss={onDismissCwdSaveError} />
+          </ReservedSlot>
         </section>
 
         <section className="grok-field-section">
@@ -478,7 +492,9 @@ export function BotProfileManageScreen({
               </>
             )}
           </section>
-          <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
+          <ReservedSlot minHeight={52} align="start">
+            <ErrorNotice error={action.error} stale={action.errorStale} onDismiss={() => action.setError('')} />
+          </ReservedSlot>
         </section>
       </div>
     </main>
@@ -531,7 +547,6 @@ export function BotAvatarScreen({
       </header>
 
       <div className="grok-subpage-scroll">
-        <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
         {/* Top Segmented Tabs (15848.jpg) */}
         <div className="grok-segmented-tabs" role="tablist">
           <button
@@ -661,6 +676,9 @@ export function BotAvatarScreen({
             </button>
           </div>
         </section>
+        <ReservedSlot minHeight={52} align="start">
+          <ErrorNotice error={action.error} stale={action.errorStale} onDismiss={() => action.setError('')} />
+        </ReservedSlot>
       </div>
     </main>
   );
@@ -715,7 +733,10 @@ export function BotSoulScreen({
           disabled={action.busy || soulDraftBytes > SOUL_MAX_BYTES}
           onClick={onSave}
         >
-          {action.busy ? t('保存中', 'Saving') : t('保存', 'Save')}
+          <LabelStack
+            active={action.busy ? t('保存中', 'Saving') : t('保存', 'Save')}
+            labels={[t('保存中', 'Saving'), t('保存', 'Save')]}
+          />
         </button>
       </header>
 
@@ -805,7 +826,9 @@ export function BotSoulScreen({
           </section>
         )}
 
-        <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
+        <ReservedSlot minHeight={52} align="start">
+          <ErrorNotice error={action.error} stale={action.errorStale} onDismiss={() => action.setError('')} />
+        </ReservedSlot>
       </div>
     </main>
   );
@@ -898,7 +921,10 @@ export function BotSchedulesScreen({
             disabled={action.busy || scheduleOffline || !scheduleDraft.prompt.trim()}
             onClick={onSaveSchedule}
           >
-            {action.busy ? t('保存中', 'Saving') : t('保存', 'Save')}
+            <LabelStack
+              active={action.busy ? t('保存中', 'Saving') : t('保存', 'Save')}
+              labels={[t('保存中', 'Saving'), t('保存', 'Save')]}
+            />
           </button>
         ) : (
           <button
@@ -1043,10 +1069,13 @@ export function BotSchedulesScreen({
             );
           })()}
 
-          <ErrorNotice
-            error={action.error || scheduleError}
-            onDismiss={action.error ? () => action.setError('') : undefined}
-          />
+          <ReservedSlot minHeight={52} align="start">
+            <ErrorNotice
+              error={action.error || scheduleError}
+              stale={Boolean(action.error && action.errorStale)}
+              onDismiss={action.error ? () => action.setError('') : undefined}
+            />
+          </ReservedSlot>
         </div>
       ) : (
         <div className="grok-subpage-scroll">
@@ -1232,9 +1261,11 @@ export function BotSchedulesScreen({
                   placeholder={t('到点后发送给该 Bot 执行的指令内容，例如：汇总今天的日程与待办事项，并生成简短提醒。',
                     'Prompt sent to this Bot when triggered, e.g. Summarize my agenda and key tasks for today.')}
                 />
-                {!scheduleDraft.prompt.trim() && (
-                  <div className="grok-schedule-prompt-hint">{t('填写指令后才能保存', 'Fill in the prompt to save')}</div>
-                )}
+                <ReservedSlot minHeight={20} align="start">
+                  {!scheduleDraft.prompt.trim() && (
+                    <div className="grok-schedule-prompt-hint">{t('填写指令后才能保存', 'Fill in the prompt to save')}</div>
+                  )}
+                </ReservedSlot>
               </div>
             </section>
           </div>
@@ -1301,10 +1332,13 @@ export function BotSchedulesScreen({
             </section>
           )}
 
-          <ErrorNotice
-            error={scheduleDeleteTarget ? '' : action.error || scheduleError}
-            onDismiss={action.error ? () => action.setError('') : undefined}
-          />
+          <ReservedSlot minHeight={52} align="start">
+            <ErrorNotice
+              error={scheduleDeleteTarget ? '' : action.error || scheduleError}
+              stale={Boolean(!scheduleDeleteTarget && action.error && action.errorStale)}
+              onDismiss={action.error ? () => action.setError('') : undefined}
+            />
+          </ReservedSlot>
         </div>
       )}
       <Dialog
@@ -1313,7 +1347,9 @@ export function BotSchedulesScreen({
         title={t('删除定时任务', 'Delete schedule')}
       >
         <p className="secondary">{t('确定删除这个定时任务？', 'Delete this scheduled task?')}</p>
-        <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
+        <ReservedSlot minHeight={48} align="start">
+          <ErrorNotice error={action.error} stale={action.errorStale} compact onDismiss={() => action.setError('')} />
+        </ReservedSlot>
         <div className="dialog-actions">
           <button type="button" className="button secondary-button" disabled={action.busy} onClick={() => setScheduleDeleteTarget(null)}>
             {t('取消', 'Cancel')}
@@ -1329,7 +1365,10 @@ export function BotSchedulesScreen({
               }
             }}
           >
-            {action.busy ? t('删除中…', 'Deleting…') : t('确认删除', 'Delete schedule')}
+            <LabelStack
+              active={action.busy ? t('删除中…', 'Deleting…') : t('确认删除', 'Delete schedule')}
+              labels={[t('删除中…', 'Deleting…'), t('确认删除', 'Delete schedule')]}
+            />
           </button>
         </div>
       </Dialog>

@@ -1,7 +1,10 @@
-import { useContext, useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Check, ChevronRight, Copy, MoreHorizontal, X } from 'lucide-react';
+import { LabelStack, Skeleton, SkeletonRow } from '../layout';
+import { useNotice } from '../notice';
+import type { NoticeAction, NoticeTone } from '../notice';
 import { LanguageOverride, useText } from '../ui';
 import { openExternalUrl } from './openExternalUrl';
 import { QrSvg } from './qrSvg';
@@ -289,12 +292,191 @@ export function CaChips<T extends string>({
   );
 }
 
+export type CaNoticeTone = 'ok' | 'warn' | 'danger' | 'info';
+
+export interface CaTabNoticeOptions {
+  tone?: CaNoticeTone;
+  detail?: string;
+  action?: NoticeAction;
+  sticky?: boolean;
+  durationMs?: number;
+}
+
+export function mapCaNoticeTone(tone: CaNoticeTone): NoticeTone {
+  switch (tone) {
+    case 'ok':
+      return 'success';
+    case 'warn':
+      return 'warning';
+    case 'danger':
+      return 'error';
+    default:
+      return 'info';
+  }
+}
+
+export interface CaTabNotices {
+  showNotice: (key: string, title: string, opts?: CaTabNoticeOptions) => void;
+  clearNotice: (key: string) => void;
+  clearAllNotices: () => void;
+}
+
+export function useCaTabNotices(scope: string, active = true): CaTabNotices {
+  const { notify, dismiss } = useNotice();
+  const trackedRef = useRef<Map<string, boolean>>(new Map());
+
+  const showNotice = useCallback(
+    (key: string, title: string, opts?: CaTabNoticeOptions) => {
+      const id = `ca:${scope}:${key}`;
+      const trimmed = title.trim();
+      if (!trimmed) {
+        trackedRef.current.delete(id);
+        dismiss(id);
+        return;
+      }
+      const tone = mapCaNoticeTone(opts?.tone ?? 'info');
+      const dismissOnHide = Boolean(opts?.sticky) || tone === 'error';
+      trackedRef.current.set(id, dismissOnHide);
+      notify({
+        id,
+        tone,
+        title: trimmed,
+        detail: opts?.detail,
+        action: opts?.action,
+        sticky: opts?.sticky,
+        durationMs: opts?.durationMs,
+      });
+    },
+    [dismiss, notify, scope],
+  );
+
+  const clearNotice = useCallback(
+    (key: string) => {
+      const id = `ca:${scope}:${key}`;
+      trackedRef.current.delete(id);
+      dismiss(id);
+    },
+    [dismiss, scope],
+  );
+
+  const clearAllNotices = useCallback(() => {
+    for (const id of trackedRef.current.keys()) {
+      dismiss(id);
+    }
+    trackedRef.current.clear();
+  }, [dismiss]);
+
+  useEffect(() => {
+    if (active) return;
+    for (const [id, dismissOnHide] of Array.from(trackedRef.current.entries())) {
+      if (dismissOnHide) {
+        trackedRef.current.delete(id);
+        dismiss(id);
+      }
+    }
+  }, [active, dismiss]);
+
+  useEffect(() => () => clearAllNotices(), [clearAllNotices]);
+
+  return useMemo(
+    () => ({ showNotice, clearNotice, clearAllNotices }),
+    [clearAllNotices, clearNotice, showNotice],
+  );
+}
+
+export function CaRefreshBar({ active }: { active: boolean }): React.JSX.Element {
+  return <div className={`ca-refresh-bar${active ? ' is-active' : ''}`} aria-hidden="true" />;
+}
+
+export function CaToolbarSkeleton({
+  leftWidth = 180,
+  rightWidth = 132,
+}: {
+  leftWidth?: number;
+  rightWidth?: number;
+}): React.JSX.Element {
+  return (
+    <div className="ca-toolbar" aria-hidden="true">
+      <Skeleton variant="pill" width={leftWidth} height={30} />
+      <Skeleton variant="pill" width={rightWidth} height={30} />
+    </div>
+  );
+}
+
+export function CaCardSkeleton({
+  height = 58,
+  subbar = false,
+  label,
+}: {
+  height?: number;
+  subbar?: boolean;
+  label?: string;
+}): React.JSX.Element {
+  return (
+    <section
+      className="ca-section ca-skeleton-card"
+      role={label ? 'status' : undefined}
+      aria-busy={label ? true : undefined}
+      aria-label={label}
+      aria-hidden={label ? undefined : true}
+    >
+      <div className="ca-skeleton-card-main">
+        <SkeletonRow variant="settings" height={height} showAvatar={false} showTrailing lines={2} />
+      </div>
+      {subbar && (
+        <div className="ca-skeleton-subbar">
+          <Skeleton variant="text" width="64%" height={13} />
+        </div>
+      )}
+    </section>
+  );
+}
+
+export function CaSectionSkeleton({
+  rows = 4,
+  lines = 2,
+  headWidth = 136,
+  trailingWidth = 96,
+  label,
+}: {
+  rows?: number;
+  lines?: number;
+  headWidth?: number;
+  trailingWidth?: number;
+  label?: string;
+}): React.JSX.Element {
+  return (
+    <section
+      className="ca-section ca-skeleton-card"
+      role={label ? 'status' : undefined}
+      aria-busy={label ? true : undefined}
+      aria-label={label}
+      aria-hidden={label ? undefined : true}
+    >
+      <div className="ca-section-head">
+        <Skeleton variant="text" width={headWidth} height={16} />
+        <Skeleton variant="pill" width={trailingWidth} height={26} />
+      </div>
+      <div className="ca-list">
+        <SkeletonRow
+          variant="settings"
+          height={lines > 1 ? 58 : 52}
+          count={rows}
+          showAvatar={false}
+          showTrailing
+          lines={lines}
+        />
+      </div>
+    </section>
+  );
+}
+
 export function CaNotice({
   tone = 'info',
   children,
   action,
 }: {
-  tone?: 'ok' | 'warn' | 'danger' | 'info';
+  tone?: CaNoticeTone;
   children: React.ReactNode;
   action?: React.ReactNode;
 }): React.JSX.Element {
@@ -365,7 +547,7 @@ export function CaDisclosure({
       >
         <span>{open ? '▾' : '▸'} {title}</span>
       </button>
-      {open && <div className="ca-disclosure-body">{children}</div>}
+      {open && <div className="ca-disclosure-body smooth-expand-mount">{children}</div>}
     </div>
   );
 }
@@ -400,7 +582,7 @@ export function CaCardDisclosure({
           className={`ca-card-disclosure-chevron${open ? ' is-open' : ''}`}
         />
       </button>
-      {open && <div className="ca-card-disclosure-body">{children}</div>}
+      {open && <div className="ca-card-disclosure-body smooth-expand-mount">{children}</div>}
     </div>
   );
 }
@@ -445,7 +627,10 @@ export function CopyButton({
   return (
     <button type="button" className="ca-btn ca-btn-secondary ca-btn-sm" onClick={() => void handleCopy()}>
       {copied ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}
-      <span>{copied ? resolvedCopiedLabel : resolvedLabel}</span>
+      <LabelStack
+        active={copied ? resolvedCopiedLabel : resolvedLabel}
+        labels={[resolvedLabel, resolvedCopiedLabel]}
+      />
     </button>
   );
 }

@@ -546,6 +546,7 @@ export function ChatTranscript({
                 />
               ) : null}
               <ChatTurnMeta
+                role={turn.role}
                 timestamp={turn.timestamp}
                 durationMs={showTurnDuration ? turn.durationMs : undefined}
                 copyText={copyText}

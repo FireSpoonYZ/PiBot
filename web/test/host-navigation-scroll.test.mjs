@@ -235,7 +235,8 @@ test('decideChatAutoScroll preserves restored scroll, forces bottom on entry, an
   assert.equal(entryDecision.nextStickToBottom, true);
   assert.equal(entryDecision.showNewContentPill, false);
 
-  // Sticking to bottom follows incoming streaming messages automatically.
+  // Under F6, size-change sticking is owned by useStickToBottom ResizeObserver,
+  // so decideChatAutoScroll returns 'noop' when already stuck to bottom.
   const followDecision = decideChatAutoScroll({
     restorePending: false,
     justEntered: false,
@@ -249,7 +250,8 @@ test('decideChatAutoScroll preserves restored scroll, forces bottom on entry, an
     scrollTop: 1450,
     clientHeight: 600,
   });
-  assert.equal(followDecision.action, 'scroll-bottom');
+  assert.equal(followDecision.action, 'noop');
+  assert.equal(followDecision.nextStickToBottom, true);
   assert.equal(followDecision.showNewContentPill, false);
 
   // Scrolled up (> 80px away) with new content shows jump pill without yanking scroll.
@@ -286,4 +288,162 @@ test('decideChatAutoScroll preserves restored scroll, forces bottom on entry, an
   });
   assert.equal(searchDecision.action, 'noop');
   assert.equal(searchDecision.showNewContentPill, false);
+});
+
+test('decideChatAutoScroll F6 simplified contract handles entering, targetChanged, restorePending, and explicit hasIncomingContent', () => {
+  // 1. restorePending always takes precedence over entering/targetChanged and preserves stickToBottom.
+  assert.deepEqual(
+    decideChatAutoScroll({
+      restorePending: true,
+      entering: true,
+      targetChanged: true,
+      stickToBottom: true,
+      searchOpen: false,
+      hasIncomingContent: true,
+    }),
+    {
+      action: 'skip-restore',
+      nextStickToBottom: true,
+      nextJumpingToBottom: false,
+      showNewContentPill: false,
+    },
+  );
+
+  // 2. entering (preferred prop) and targetChanged both force bottom and clear the jump pill.
+  assert.deepEqual(
+    decideChatAutoScroll({
+      entering: true,
+      targetChanged: false,
+      stickToBottom: false,
+      searchOpen: false,
+    }),
+    {
+      action: 'force-bottom',
+      nextStickToBottom: true,
+      nextJumpingToBottom: false,
+      showNewContentPill: false,
+    },
+  );
+  assert.deepEqual(
+    decideChatAutoScroll({
+      entering: false,
+      justEntered: true,
+      targetChanged: false,
+      stickToBottom: false,
+      searchOpen: false,
+      hasIncomingContent: false,
+    }),
+    {
+      action: 'noop',
+      nextStickToBottom: false,
+      nextJumpingToBottom: false,
+      showNewContentPill: false,
+    },
+  );
+  assert.deepEqual(
+    decideChatAutoScroll({
+      entering: false,
+      targetChanged: true,
+      stickToBottom: false,
+      searchOpen: true,
+    }),
+    {
+      action: 'force-bottom',
+      nextStickToBottom: true,
+      nextJumpingToBottom: false,
+      showNewContentPill: false,
+    },
+  );
+
+  // 3. !stickToBottom + explicit hasIncomingContent + !searchOpen shows jump pill without geometry inputs.
+  assert.deepEqual(
+    decideChatAutoScroll({
+      entering: false,
+      targetChanged: false,
+      stickToBottom: false,
+      searchOpen: false,
+      hasIncomingContent: true,
+    }),
+    {
+      action: 'show-jump-pill',
+      nextStickToBottom: false,
+      nextJumpingToBottom: false,
+      showNewContentPill: true,
+    },
+  );
+
+  // 4. searchOpen suppresses jump pill even with explicit hasIncomingContent: true.
+  assert.deepEqual(
+    decideChatAutoScroll({
+      entering: false,
+      targetChanged: false,
+      stickToBottom: false,
+      searchOpen: true,
+      hasIncomingContent: true,
+    }),
+    {
+      action: 'noop',
+      nextStickToBottom: false,
+      nextJumpingToBottom: false,
+      showNewContentPill: false,
+    },
+  );
+
+  // 5. Explicit hasIncomingContent: false suppresses jump pill and stickToBottom: true returns noop.
+  assert.deepEqual(
+    decideChatAutoScroll({
+      entering: false,
+      targetChanged: false,
+      stickToBottom: true,
+      searchOpen: false,
+      hasIncomingContent: true,
+    }),
+    {
+      action: 'noop',
+      nextStickToBottom: true,
+      nextJumpingToBottom: false,
+      showNewContentPill: false,
+    },
+  );
+  assert.deepEqual(
+    decideChatAutoScroll({
+      entering: false,
+      targetChanged: false,
+      stickToBottom: false,
+      searchOpen: false,
+      hasIncomingContent: false,
+    }),
+    {
+      action: 'noop',
+      nextStickToBottom: false,
+      nextJumpingToBottom: false,
+      showNewContentPill: false,
+    },
+  );
+
+  // 6. Empty chat metrics reset stickToBottom to true with noop action.
+  const emptyMetrics = {
+    turnsCount: 0,
+    latestTurnId: '',
+    latestTurnLen: 0,
+    latestTurnTools: 0,
+    generatingLen: 0,
+    liveToolName: '',
+    failureNotice: '',
+  };
+  assert.deepEqual(
+    decideChatAutoScroll({
+      entering: false,
+      targetChanged: false,
+      stickToBottom: false,
+      searchOpen: false,
+      currentMetrics: emptyMetrics,
+    }),
+    {
+      action: 'noop',
+      nextStickToBottom: true,
+      nextJumpingToBottom: false,
+      showNewContentPill: false,
+    },
+  );
 });

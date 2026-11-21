@@ -11,6 +11,7 @@ import { SkillReviewPanel, type SkillReviewCall } from '../learning/SkillReviewP
 import { GrokBotAvatar, resolveBotAvatarPreset } from '../GrokBotAvatar';
 import { botAvatarKey } from '../botAvatarSync';
 import { ErrorNotice, useText } from '../ui';
+import { ReservedSlot } from '../layout';
 import {
   PlatformLogoIcon,
   formatArchivedRemainingDays,
@@ -327,7 +328,9 @@ export function ArchivedBotsScreen({
           {t('已归档的 Bot 保留 14 天，到期后自动清理。点击条目可查看只读历史对话，也可随时恢复或永久删除。',
             'Archived bots are retained for 14 days before auto-deletion. Tap a bot to view read-only history, restore, or permanently delete.')}
         </p>
-        <ErrorNotice error={action.error} onDismiss={() => action.setError('')} />
+        <ReservedSlot minHeight={48} align="start">
+          <ErrorNotice error={action.error} stale={action.errorStale} compact onDismiss={() => action.setError('')} />
+        </ReservedSlot>
 
         {archivedBots.length === 0 ? (
           <section className="grok-card-group grok-schedule-empty">

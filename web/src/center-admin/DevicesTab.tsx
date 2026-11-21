@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
-import { Archive, Check, Pencil, Plus, QrCode, Shield, Trash2, X } from 'lucide-react';
+import { Archive, Check, Pencil, Plus, QrCode, RefreshCw, Shield, Trash2, X } from 'lucide-react';
+import { LabelStack } from '../layout';
 import { useText } from '../ui';
+import { readTabCache, writeTabCache } from './cache';
 import { RemoveDeviceDialog } from './RemoveDeviceDialog';
 import { errorMessage } from './transport';
 import type { CenterApi } from './transport';
@@ -11,12 +13,16 @@ import {
   CaModal,
   CaNotice,
   CaQrBox,
+  CaRefreshBar,
+  CaSectionSkeleton,
   CaSegmented,
   CaSwitch,
+  CaToolbarSkeleton,
   CopyButton,
   formatCountdown,
   formatTime,
   platformLabel,
+  useCaTabNotices,
   useUiLocale,
 } from './primitives';
 import type {
@@ -39,26 +45,100 @@ interface PendingPairingState {
   target: { deviceId: string; name: string } | null;
 }
 
+interface DevicesCacheData {
+  devices: CenterDevice[];
+  bots: CenterBotRef[];
+  picker: ModelPickerResponse | null;
+  pendingPairing: PendingPairingState | null;
+}
+
 export function DevicesTab({
   api,
+  active = true,
+  cacheKey = 'default',
   onConfigureBot,
   renderQr,
 }: {
   api: CenterApi;
+  active?: boolean;
+  cacheKey?: string;
   onConfigureBot?: (deviceId: string, botId: string) => void;
   renderQr?: (value: string, label: string) => React.ReactNode;
 }): React.JSX.Element {
   const t = useText();
   const locale = useUiLocale();
 
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  const initialCache = useMemo(
+    () => readTabCache<DevicesCacheData>(cacheKey, 'devices')?.data ?? null,
+    [cacheKey],
+  );
+  const [hasLoaded, setHasLoaded] = useState<boolean>(() => initialCache !== null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [initialError, setInitialError] = useState('');
 
-  const [devices, setDevices] = useState<CenterDevice[]>([]);
-  const [bots, setBots] = useState<CenterBotRef[]>([]);
-  const [picker, setPicker] = useState<ModelPickerResponse | null>(null);
+  const [devices, setDevices] = useState<CenterDevice[]>(() => initialCache?.devices ?? []);
+  const [bots, setBots] = useState<CenterBotRef[]>(() => initialCache?.bots ?? []);
+  const [picker, setPicker] = useState<ModelPickerResponse | null>(() => initialCache?.picker ?? null);
   const [nowMs, setNowMs] = useState(() => Date.now());
+
+  const hasLoadedRef = useRef(hasLoaded);
+  const cacheKeyRef = useRef(cacheKey);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const prevActiveRef = useRef(active);
+  const tRef = useRef(t);
+  tRef.current = t;
+  const loadGenRef = useRef(0);
+
+  const { showNotice, clearNotice } = useCaTabNotices('devices', active);
+
+  const setError = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('error', msg, { tone: 'danger' });
+      else clearNotice('error');
+    },
+    [clearNotice, showNotice],
+  );
+
+  const setNotice = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('notice', msg, { tone: 'ok' });
+      else clearNotice('notice');
+    },
+    [clearNotice, showNotice],
+  );
+
+  const setCaError = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('ca-error', msg, { tone: 'danger' });
+      else clearNotice('ca-error');
+    },
+    [clearNotice, showNotice],
+  );
+
+  const setCreateBotError = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('create-bot-error', msg, { tone: 'danger' });
+      else clearNotice('create-bot-error');
+    },
+    [clearNotice, showNotice],
+  );
+
+  const setCfgError = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('cfg-error', msg, { tone: 'danger' });
+      else clearNotice('cfg-error');
+    },
+    [clearNotice, showNotice],
+  );
+
+  const setCfgNotice = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('cfg-notice', msg, { tone: 'ok' });
+      else clearNotice('cfg-notice');
+    },
+    [clearNotice, showNotice],
+  );
 
   // Inline device rename
   const [renamingDeviceId, setRenamingDeviceId] = useState<string | null>(null);
@@ -67,7 +147,11 @@ export function DevicesTab({
   const [deviceToRemove, setDeviceToRemove] = useState<CenterDevice | null>(null);
 
   // Pairing code state (NEVER deleted on modal close!)
-  const [pendingPairing, setPendingPairing] = useState<PendingPairingState | null>(null);
+  const [pendingPairing, setPendingPairing] = useState<PendingPairingState | null>(() => {
+    const cached = initialCache?.pendingPairing ?? null;
+    if (cached && new Date(cached.expiresAt).getTime() > Date.now()) return cached;
+    return null;
+  });
   const [pairingModalOpen, setPairingModalOpen] = useState(false);
   const [pairingBusy, setPairingBusy] = useState(false);
 
@@ -76,7 +160,6 @@ export function DevicesTab({
   const [caState, setCaState] = useState<PairingCaState | null>(null);
   const [caDraft, setCaDraft] = useState('');
   const [caBusy, setCaBusy] = useState(false);
-  const [caError, setCaError] = useState('');
 
   // Create Bot modal
   const [createBotDevice, setCreateBotDevice] = useState<CenterDevice | null>(null);
@@ -86,14 +169,11 @@ export function DevicesTab({
   const [newBotPrimary, setNewBotPrimary] = useState(false);
   const [newBotModelRef, setNewBotModelRef] = useState('');
   const [createBotBusy, setCreateBotBusy] = useState(false);
-  const [createBotError, setCreateBotError] = useState('');
 
   // Built-in aggregated Bot Config drawer (used when onConfigureBot is not supplied)
   const [cfgBot, setCfgBot] = useState<CenterBotRef | null>(null);
   const [cfgTab, setCfgTab] = useState<'basic' | 'caps' | 'learning'>('basic');
   const [cfgBusy, setCfgBusy] = useState(false);
-  const [cfgError, setCfgError] = useState('');
-  const [cfgNotice, setCfgNotice] = useState('');
   const [cfgName, setCfgName] = useState('');
   const [cfgDesc, setCfgDesc] = useState('');
   const [cfgCwd, setCfgCwd] = useState('');
@@ -136,32 +216,79 @@ export function DevicesTab({
         });
       }
     }
-  }, [api]);
+    hasLoadedRef.current = true;
+    cacheKeyRef.current = cacheKey;
+    setHasLoaded(true);
+    setInitialError('');
+    clearNotice('load-error');
+  }, [api, cacheKey, clearNotice]);
+
+  const runLoad = useCallback(async () => {
+    const gen = ++loadGenRef.current;
+    if (hasLoadedRef.current) setRefreshing(true);
+    try {
+      await loadAll();
+    } catch (err) {
+      if (gen !== loadGenRef.current) return;
+      const t = tRef.current;
+      const msg = errorMessage(err, t('加载设备与 Bot 失败', 'Failed to load devices and Bots'));
+      if (hasLoadedRef.current) {
+        if (activeRef.current) {
+          showNotice('load-error', msg, {
+            tone: 'danger',
+            action: {
+              label: t('重试', 'Retry'),
+              onClick: () => void runLoad(),
+            },
+          });
+        }
+      } else {
+        setInitialError(msg);
+      }
+    } finally {
+      if (gen === loadGenRef.current) setRefreshing(false);
+    }
+  }, [loadAll, showNotice]);
 
   useEffect(() => {
-    let active = true;
-    setLoading(true);
-    loadAll()
-      .catch(err => {
-        if (active) setError(errorMessage(err, t('加载设备与 Bot 失败', 'Failed to load devices and Bots')));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
+    void runLoad();
+  }, [runLoad]);
+
+  useEffect(() => {
+    const wasActive = prevActiveRef.current;
+    prevActiveRef.current = active;
+    if (!wasActive && active && (hasLoadedRef.current || initialError)) {
+      setNowMs(Date.now());
+      void runLoad();
+    }
+  }, [active, initialError, runLoad]);
+
+  useEffect(() => {
     return () => {
-      active = false;
+      loadGenRef.current += 1;
     };
-  }, [loadAll, t]);
+  }, []);
 
-  // Countdown tick & pairing status poll
   useEffect(() => {
-    if (!pendingPairing) return;
-    const tickTimer = window.setInterval(() => setNowMs(Date.now()), 1000);
-    const pollTimer = window.setInterval(() => {
+    if (!hasLoaded || cacheKeyRef.current !== cacheKey) return;
+    writeTabCache<DevicesCacheData>(cacheKey, 'devices', {
+      devices,
+      bots,
+      picker,
+      pendingPairing,
+    });
+  }, [bots, cacheKey, devices, hasLoaded, pendingPairing, picker]);
+
+  // Countdown tick & pairing status poll (paused when tab is hidden)
+  useEffect(() => {
+    if (!active || !pendingPairing) return;
+    setNowMs(Date.now());
+    const checkPairing = () => {
       void api
         .getPairingCode(pendingPairing.id)
         .then(state => {
           if (state.status === 'redeemed') {
+            const t = tRef.current;
             setPendingPairing(null);
             setPairingModalOpen(false);
             const deviceName = state.device?.name || t('新设备', 'New device');
@@ -174,13 +301,15 @@ export function DevicesTab({
         .catch(() => {
           // Ignore transient poll errors
         });
-    }, 2000);
+    };
+    const tickTimer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    const pollTimer = window.setInterval(checkPairing, 2000);
 
     return () => {
       window.clearInterval(tickTimer);
       window.clearInterval(pollTimer);
     };
-  }, [api, loadAll, pendingPairing, t]);
+  }, [active, api, loadAll, pendingPairing, setNotice]);
 
   // Clear expired local banner
   useEffect(() => {
@@ -597,61 +726,77 @@ export function DevicesTab({
     return { label: t('未配置模型', 'Model not set'), unset: true };
   };
 
-  if (loading) {
-    return <div className="ca-empty">{t('正在加载设备与 Bot…', 'Loading devices and Bots…')}</div>;
+  if (!hasLoaded && !initialError) {
+    return (
+      <div className="ca-form-stack">
+        <CaToolbarSkeleton leftWidth={168} rightWidth={152} />
+        <CaSectionSkeleton rows={2} headWidth={144} trailingWidth={136} label={t('正在加载设备与 Bot…', 'Loading devices and Bots…')} />
+        <CaSectionSkeleton rows={2} headWidth={132} trailingWidth={136} />
+      </div>
+    );
+  }
+
+  if (!hasLoaded && initialError) {
+    return (
+      <section className="ca-section">
+        <div className="ca-section-body">
+          <CaNotice
+            tone="danger"
+            action={
+              <button type="button" className="ca-btn ca-btn-sm" onClick={() => void runLoad()}>
+                <RefreshCw size={13} aria-hidden="true" />
+                <span>{t('重试', 'Retry')}</span>
+              </button>
+            }
+          >
+            {initialError}
+          </CaNotice>
+        </div>
+      </section>
+    );
   }
 
   const activeBotCount = bots.filter(b => !b.archivedAt).length;
 
   return (
     <div>
-      {error && <CaNotice tone="danger">{error}</CaNotice>}
-      {notice && (
-        <CaNotice
-          tone="ok"
-          action={
-            <button type="button" className="ca-btn ca-btn-ghost ca-btn-sm" onClick={() => setNotice('')}>
-              {t('关闭', 'Close')}
-            </button>
-          }
-        >
-          {notice}
-        </CaNotice>
-      )}
+      <CaRefreshBar active={refreshing} />
 
-      {/* 顶部未核销配对码状态条（关闭弹窗不作废，仅点「作废」或绑定完成核销） */}
+      {/* Active unredeemed pairing code bar (closing modal does not revoke it) */}
       {pendingPairing && (
-        <CaNotice
-          tone="info"
-          action={
-            <>
-              <button
-                type="button"
-                className="ca-btn ca-btn-sm"
-                onClick={() => setPairingModalOpen(true)}
-              >
-                {t('查看二维码', 'View QR Code')}
-              </button>
-              <CopyButton value={pendingPairing.code} label={t('复制配对码', 'Copy Code')} />
-              <button
-                type="button"
-                className="ca-btn ca-btn-danger ca-btn-sm"
-                onClick={() => void handleRevokePendingPairing()}
-              >
-                {t('作废', 'Revoke')}
-              </button>
-            </>
-          }
-        >
-          <span className="ca-num">
-            {pendingPairing.target
-              ? t(`设备「${pendingPairing.target.name}」待重绑配对码生效中（剩余 ${formatCountdown(pendingPairing.expiresAt, nowMs)}）`, `Re-pairing code active for "${pendingPairing.target.name}" (${formatCountdown(pendingPairing.expiresAt, nowMs)} left)`)
-              : t(`新设备待绑定配对码生效中（剩余 ${formatCountdown(pendingPairing.expiresAt, nowMs)}）`, `New device pairing code active (${formatCountdown(pendingPairing.expiresAt, nowMs)} left)`)}
-          </span>
-        </CaNotice>
+        <div className="smooth-expand-mount">
+          <CaNotice
+            tone="info"
+            action={
+              <>
+                <button
+                  type="button"
+                  className="ca-btn ca-btn-sm"
+                  onClick={() => setPairingModalOpen(true)}
+                >
+                  {t('查看二维码', 'View QR Code')}
+                </button>
+                <CopyButton value={pendingPairing.code} label={t('复制配对码', 'Copy Code')} />
+                <button
+                  type="button"
+                  className="ca-btn ca-btn-danger ca-btn-sm"
+                  onClick={() => void handleRevokePendingPairing()}
+                >
+                  {t('作废', 'Revoke')}
+                </button>
+              </>
+            }
+          >
+            <span className="ca-num">
+              {pendingPairing.target
+                ? t(`设备「${pendingPairing.target.name}」待重绑配对码生效中（剩余 ${formatCountdown(pendingPairing.expiresAt, nowMs)}）`, `Re-pairing code active for "${pendingPairing.target.name}" (${formatCountdown(pendingPairing.expiresAt, nowMs)} left)`)
+                : t(`新设备待绑定配对码生效中（剩余 ${formatCountdown(pendingPairing.expiresAt, nowMs)}）`, `New device pairing code active (${formatCountdown(pendingPairing.expiresAt, nowMs)} left)`)}
+            </span>
+          </CaNotice>
+        </div>
       )}
 
-      {/* 工具栏 */}
+      {/* Toolbar */}
       <div className="ca-toolbar">
         <div className="ca-muted ca-num">
           {t(`共 ${devices.length} 台设备 · ${activeBotCount} 个活跃 Bot`, `${devices.length} ${devices.length === 1 ? 'device' : 'devices'} · ${activeBotCount} active ${activeBotCount === 1 ? 'Bot' : 'Bots'}`)}
@@ -668,7 +813,10 @@ export function DevicesTab({
             onClick={() => void handleOpenPairing()}
           >
             <QrCode size={14} aria-hidden="true" />
-            <span>{pairingBusy ? t('生成中…', 'Generating…') : t('扫码添加设备', 'Pair Device')}</span>
+            <LabelStack
+              active={pairingBusy ? t('生成中…', 'Generating…') : t('扫码添加设备', 'Pair Device')}
+              labels={[t('扫码添加设备', 'Pair Device'), t('生成中…', 'Generating…')]}
+            />
           </button>
         </div>
       </div>
@@ -946,16 +1094,18 @@ export function DevicesTab({
         )}
       </CaModal>
 
-      {/* 私有 CA 证书设置抽屉 */}
+      {/* Private CA certificate drawer */}
       <CaModal
         open={caOpen}
-        onOpenChange={setCaOpen}
+        onOpenChange={open => {
+          if (!open) setCaError('');
+          setCaOpen(open);
+        }}
         title={t('私有 CA 证书设置', 'Private CA Certificate Settings')}
         description={t('若中心使用自签或内网 HTTPS 证书，可在此配置信任根证书（新配对码将自动携带）', 'Configure a trusted root CA if the center uses a self-signed or private HTTPS certificate (embedded in new pairing codes)')}
         variant="drawer"
       >
         <div className="ca-form-stack">
-          {caError && <CaNotice tone="danger">{caError}</CaNotice>}
           {caState && caState.certificates.length > 0 && (
             <div className="ca-cred-box">
               <div className="ca-field-label ca-mb-1">
@@ -998,23 +1148,28 @@ export function DevicesTab({
               disabled={caBusy || !caDraft.trim()}
               onClick={() => void handleSaveCa(caDraft)}
             >
-              {caBusy ? t('保存中…', 'Saving…') : t('保存证书', 'Save Certificate')}
+              <LabelStack
+                active={caBusy ? t('保存中…', 'Saving…') : t('保存证书', 'Save Certificate')}
+                labels={[t('保存证书', 'Save Certificate'), t('保存中…', 'Saving…')]}
+              />
             </button>
           </div>
         </div>
       </CaModal>
 
-      {/* 新建 Bot 弹窗（直接支持选模型） */}
+      {/* Create Bot modal */}
       <CaModal
         open={Boolean(createBotDevice)}
         onOpenChange={open => {
-          if (!open) setCreateBotDevice(null);
+          if (!open) {
+            setCreateBotDevice(null);
+            setCreateBotError('');
+          }
         }}
         title={t(`在「${createBotDevice?.name ?? ''}」新建 Bot`, `New Bot on "${createBotDevice?.name ?? ''}"`)}
         variant="modal"
       >
         <form className="ca-form-stack" onSubmit={e => void handleCreateBot(e)}>
-          {createBotError && <CaNotice tone="danger">{createBotError}</CaNotice>}
           <div className="ca-field">
             <label className="ca-field-label">
               {t('Bot 名称', 'Bot Name')} <span className="ca-req">*</span>
@@ -1081,17 +1236,24 @@ export function DevicesTab({
               {t('取消', 'Cancel')}
             </button>
             <button type="submit" className="ca-btn ca-btn-primary" disabled={createBotBusy}>
-              {createBotBusy ? t('创建中…', 'Creating…') : t('创建 Bot', 'Create Bot')}
+              <LabelStack
+                active={createBotBusy ? t('创建中…', 'Creating…') : t('创建 Bot', 'Create Bot')}
+                labels={[t('创建 Bot', 'Create Bot'), t('创建中…', 'Creating…')]}
+              />
             </button>
           </div>
         </form>
       </CaModal>
 
-      {/* 内置聚合 Bot 配置抽屉（未传外部 onConfigureBot 时使用） */}
+      {/* Built-in Bot configuration drawer (used when onConfigureBot is not provided) */}
       <CaModal
         open={Boolean(cfgBot)}
         onOpenChange={open => {
-          if (!open) setCfgBot(null);
+          if (!open) {
+            setCfgBot(null);
+            setCfgError('');
+            setCfgNotice('');
+          }
         }}
         title={t(`配置 Bot · ${cfgBot?.name ?? ''}`, `Configure Bot · ${cfgBot?.name ?? ''}`)}
         description={cfgBot?.deviceName || cfgBot?.deviceId}
@@ -1100,9 +1262,6 @@ export function DevicesTab({
       >
         {cfgBot && (
           <div className="ca-form-stack">
-            {cfgError && <CaNotice tone="danger">{cfgError}</CaNotice>}
-            {cfgNotice && <CaNotice tone="ok">{cfgNotice}</CaNotice>}
-
             <CaSegmented
               ariaLabel={t('Bot 配置分区', 'Bot configuration sections')}
               value={cfgTab}

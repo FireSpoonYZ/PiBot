@@ -1,16 +1,22 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
 import { KeyRound, Lock, RefreshCw, Settings2, Unlock } from 'lucide-react';
+import { LabelStack } from '../layout';
 import { useText } from '../ui';
+import { readTabCache, writeTabCache } from './cache';
 import { errorMessage } from './transport';
 import type { CenterApi } from './transport';
 import {
   BotTreeSelector,
+  CaCardSkeleton,
   CaModal,
   CaNotice,
+  CaRefreshBar,
+  CaSectionSkeleton,
   CaSegmented,
   botKey,
   formatTime,
+  useCaTabNotices,
   useUiLocale,
 } from './primitives';
 import type {
@@ -26,26 +32,52 @@ import type {
   VaultSource,
 } from './types';
 
-export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
+interface VaultCacheData {
+  status: ExternalVaultStatus;
+  items: ExternalVaultItemMeta[];
+  listRevision: number;
+  devices: CenterDevice[];
+  bots: CenterBotRef[];
+  vaultInstall: Installation | null;
+  vaultCapBindings: Array<[string, BotCapabilityConfig]>;
+}
+
+export function VaultTab({
+  api,
+  active = true,
+  cacheKey = 'default',
+}: {
+  api: CenterApi;
+  active?: boolean;
+  cacheKey?: string;
+}): React.JSX.Element {
   const t = useText();
   const locale = useUiLocale();
 
-  const [loading, setLoading] = useState(true);
+  const initialCache = useMemo(
+    () => readTabCache<VaultCacheData>(cacheKey, 'vault')?.data ?? null,
+    [cacheKey],
+  );
+  const [hasLoaded, setHasLoaded] = useState<boolean>(() => initialCache !== null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [initialError, setInitialError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
 
-  const [status, setStatus] = useState<ExternalVaultStatus | null>(null);
-  const [items, setItems] = useState<ExternalVaultItemMeta[]>([]);
-  const [listRevision, setListRevision] = useState(0);
+  const [status, setStatus] = useState<ExternalVaultStatus | null>(() => initialCache?.status ?? null);
+  const [items, setItems] = useState<ExternalVaultItemMeta[]>(() => initialCache?.items ?? []);
+  const [listRevision, setListRevision] = useState(() => initialCache?.listRevision ?? 0);
   const [query, setQuery] = useState('');
 
-  const [devices, setDevices] = useState<CenterDevice[]>([]);
-  const [bots, setBots] = useState<CenterBotRef[]>([]);
+  const [devices, setDevices] = useState<CenterDevice[]>(() => initialCache?.devices ?? []);
+  const [bots, setBots] = useState<CenterBotRef[]>(() => initialCache?.bots ?? []);
 
   // Local vault capability (`e-launcher.vault`) if installed
-  const [vaultInstall, setVaultInstall] = useState<Installation | null>(null);
-  const [vaultCapBindings, setVaultCapBindings] = useState<Map<string, BotCapabilityConfig>>(new Map());
+  const [vaultInstall, setVaultInstall] = useState<Installation | null>(
+    () => initialCache?.vaultInstall ?? null,
+  );
+  const [vaultCapBindings, setVaultCapBindings] = useState<Map<string, BotCapabilityConfig>>(
+    () => new Map(initialCache?.vaultCapBindings ?? []),
+  );
   const [capBusyKeys, setCapBusyKeys] = useState<Set<string>>(new Set());
 
   // Unlock form
@@ -53,14 +85,50 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
 
   // Service settings drawer
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [sourceDraft, setSourceDraft] = useState<VaultSource>('local');
-  const [serverUrlDraft, setServerUrlDraft] = useState('');
-  const [emailDraft, setEmailDraft] = useState('');
-  const [settingsError, setSettingsError] = useState('');
+  const settingsOpenRef = useRef(settingsOpen);
+  settingsOpenRef.current = settingsOpen;
+  const [sourceDraft, setSourceDraft] = useState<VaultSource>(() => initialCache?.status.source ?? 'local');
+  const [serverUrlDraft, setServerUrlDraft] = useState(() => initialCache?.status.serverUrl ?? '');
+  const [emailDraft, setEmailDraft] = useState(() => initialCache?.status.email ?? '');
 
   // Grant drawer for a Vaultwarden item
   const [grantItem, setGrantItem] = useState<ExternalVaultItemMeta | null>(null);
   const [grantBusyKeys, setGrantBusyKeys] = useState<Set<string>>(new Set());
+
+  const hasLoadedRef = useRef(hasLoaded);
+  const cacheKeyRef = useRef(cacheKey);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const prevActiveRef = useRef(active);
+  const tRef = useRef(t);
+  tRef.current = t;
+  const loadGenRef = useRef(0);
+
+  const { showNotice, clearNotice } = useCaTabNotices('vault', active);
+
+  const setError = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('error', msg, { tone: 'danger' });
+      else clearNotice('error');
+    },
+    [clearNotice, showNotice],
+  );
+
+  const setNotice = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('notice', msg, { tone: 'ok' });
+      else clearNotice('notice');
+    },
+    [clearNotice, showNotice],
+  );
+
+  const setSettingsError = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('settings-error', msg, { tone: 'danger' });
+      else clearNotice('settings-error');
+    },
+    [clearNotice, showNotice],
+  );
 
   const loadAll = useCallback(async () => {
     const [st, sync, caps] = await Promise.all([
@@ -69,9 +137,11 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
       api.listCapabilities().catch(() => [] as Installation[]),
     ]);
     setStatus(st);
-    setSourceDraft(st.source);
-    setServerUrlDraft(st.serverUrl ?? '');
-    setEmailDraft(st.email ?? '');
+    if (!settingsOpenRef.current) {
+      setSourceDraft(st.source);
+      setServerUrlDraft(st.serverUrl ?? '');
+      setEmailDraft(st.email ?? '');
+    }
     setDevices(sync.devices);
     setBots(sync.bots ?? []);
 
@@ -110,22 +180,70 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
     } else {
       setVaultCapBindings(new Map());
     }
-  }, [api]);
+    hasLoadedRef.current = true;
+    cacheKeyRef.current = cacheKey;
+    setHasLoaded(true);
+    setInitialError('');
+    clearNotice('load-error');
+  }, [api, cacheKey, clearNotice]);
+
+  const runLoad = useCallback(async () => {
+    const gen = ++loadGenRef.current;
+    if (hasLoadedRef.current) setRefreshing(true);
+    try {
+      await loadAll();
+    } catch (err) {
+      if (gen !== loadGenRef.current) return;
+      const t = tRef.current;
+      const msg = errorMessage(err, t('加载密码库状态失败', 'Failed to load vault status'));
+      if (hasLoadedRef.current) {
+        if (activeRef.current) {
+          showNotice('load-error', msg, {
+            tone: 'danger',
+            action: {
+              label: t('重试', 'Retry'),
+              onClick: () => void runLoad(),
+            },
+          });
+        }
+      } else {
+        setInitialError(msg);
+      }
+    } finally {
+      if (gen === loadGenRef.current) setRefreshing(false);
+    }
+  }, [loadAll, showNotice]);
 
   useEffect(() => {
-    let active = true;
-    setLoading(true);
-    loadAll()
-      .catch(err => {
-        if (active) setError(errorMessage(err, t('加载密码库状态失败', 'Failed to load vault status')));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
+    void runLoad();
+  }, [runLoad]);
+
+  useEffect(() => {
+    const wasActive = prevActiveRef.current;
+    prevActiveRef.current = active;
+    if (!wasActive && active && (hasLoadedRef.current || initialError)) {
+      void runLoad();
+    }
+  }, [active, initialError, runLoad]);
+
+  useEffect(() => {
     return () => {
-      active = false;
+      loadGenRef.current += 1;
     };
-  }, [loadAll, t]);
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoaded || !status || cacheKeyRef.current !== cacheKey) return;
+    writeTabCache<VaultCacheData>(cacheKey, 'vault', {
+      status,
+      items,
+      listRevision,
+      devices,
+      bots,
+      vaultInstall,
+      vaultCapBindings: Array.from(vaultCapBindings.entries()),
+    });
+  }, [bots, cacheKey, devices, hasLoaded, items, listRevision, status, vaultCapBindings, vaultInstall]);
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -342,27 +460,40 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
     return set;
   }, [vaultCapBindings]);
 
-  if (loading || !status) {
-    return <div className="ca-empty">{t('正在加载密码库…', 'Loading vault…')}</div>;
+  if (!hasLoaded && !initialError) {
+    return (
+      <div className="ca-form-stack">
+        <CaCardSkeleton height={58} label={t('正在加载密码库…', 'Loading vault…')} />
+        <CaSectionSkeleton rows={4} headWidth={148} trailingWidth={132} />
+      </div>
+    );
+  }
+
+  if (!status) {
+    return (
+      <section className="ca-section">
+        <div className="ca-section-body">
+          <CaNotice
+            tone="danger"
+            action={
+              <button type="button" className="ca-btn ca-btn-sm" onClick={() => void runLoad()}>
+                <RefreshCw size={13} aria-hidden="true" />
+                <span>{t('重试', 'Retry')}</span>
+              </button>
+            }
+          >
+            {initialError || t('加载密码库状态失败', 'Failed to load vault status')}
+          </CaNotice>
+        </div>
+      </section>
+    );
   }
 
   return (
     <div>
-      {error && <CaNotice tone="danger">{error}</CaNotice>}
-      {notice && (
-        <CaNotice
-          tone="ok"
-          action={
-            <button type="button" className="ca-btn ca-btn-ghost ca-btn-sm" onClick={() => setNotice('')}>
-              {t('关闭', 'Close')}
-            </button>
-          }
-        >
-          {notice}
-        </CaNotice>
-      )}
+      <CaRefreshBar active={refreshing} />
 
-      {/* 顶部密码源与状态卡片 */}
+      {/* Top vault source & status card */}
       <section className="ca-section">
         <div className="ca-default-card ca-wrap">
           <div className="ca-row-main">
@@ -461,7 +592,10 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
                   <div className="ca-inline-row">
                     <button type="submit" className="ca-btn ca-btn-primary ca-btn-sm" disabled={busy}>
                       <Unlock size={13} aria-hidden="true" />
-                      <span>{busy ? t('解锁中…', 'Unlocking…') : t('解锁并同步凭据', 'Unlock & Sync')}</span>
+                      <LabelStack
+                        active={busy ? t('解锁中…', 'Unlocking…') : t('解锁并同步凭据', 'Unlock & Sync')}
+                        labels={[t('解锁并同步凭据', 'Unlock & Sync'), t('解锁中…', 'Unlocking…')]}
+                      />
                     </button>
                   </div>
                 </>
@@ -560,16 +694,18 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
         </section>
       )}
 
-      {/* 切换服务 / 设置抽屉 */}
+      {/* Switch Service / Settings drawer */}
       <CaModal
         open={settingsOpen}
-        onOpenChange={setSettingsOpen}
+        onOpenChange={open => {
+          if (!open) setSettingsError('');
+          setSettingsOpen(open);
+        }}
         title={t('密码库服务设置', 'Vault Service Settings')}
         description={t('选择中心协同使用的密码库后端', 'Choose the vault backend coordinated by the center')}
         variant="drawer"
       >
         <form className="ca-form-stack" onSubmit={e => void handleSaveSettings(e)}>
-          {settingsError && <CaNotice tone="danger">{settingsError}</CaNotice>}
           <div className="ca-field">
             <label className="ca-field-label">{t('密码库模式', 'Vault Mode')}</label>
             <CaSegmented
@@ -640,7 +776,10 @@ export function VaultTab({ api }: { api: CenterApi }): React.JSX.Element {
               {t('取消', 'Cancel')}
             </button>
             <button type="submit" className="ca-btn ca-btn-primary" disabled={busy}>
-              {busy ? t('保存中…', 'Saving…') : t('保存设置', 'Save Settings')}
+              <LabelStack
+                active={busy ? t('保存中…', 'Saving…') : t('保存设置', 'Save Settings')}
+                labels={[t('保存设置', 'Save Settings'), t('保存中…', 'Saving…')]}
+              />
             </button>
           </div>
         </form>

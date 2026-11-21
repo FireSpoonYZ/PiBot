@@ -3,6 +3,7 @@
 // 仅在显式置顶/取消置顶/拖拽或键盘重排/移除时写入 localStorage，换分区绝不将旧分区值写入新分区。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useText } from '../ui';
+import { normalizePartitionKey } from './scopeCache';
 
 const STORAGE_KEY_PREFIX = 'gbot-chat-pins:v1:';
 
@@ -27,24 +28,7 @@ export function roomPinKey(scopeId: string): string {
  * 规范化存储分区键：剥离可能混入的连接 generation 段，保证重连或刷新不会产生新分区。
  */
 export function normalizePinStorageScope(storageScope: string): string {
-  const trimmed = (storageScope ?? '').trim();
-  if (!trimmed) return 'default';
-  const parts = trimmed
-    .split('|')
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0 && !/^(?:generation|gen)[:=]\d+$/i.test(part));
-
-  if (
-    parts.length >= 3 &&
-    (parts[1] === 'local' || parts[1] === 'relay') &&
-    /^\d+$/.test(parts[2]!)
-  ) {
-    parts.splice(2, 1);
-  } else if (parts.length >= 2 && /^\d+$/.test(parts[1]!)) {
-    parts.splice(1, 1);
-  }
-
-  return parts.join('|') || 'default';
+  return normalizePartitionKey(storageScope);
 }
 
 function storageKeyForScope(scope: string): string {

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
-import { ExternalLink, FileCode2, Plus, RefreshCw, Sparkles, Trash2, Upload, Wrench } from 'lucide-react';
+import { FileCode2, Plus, RefreshCw, Sparkles, Trash2, Upload, Wrench } from 'lucide-react';
+import { LabelStack } from '../layout';
 import { useText } from '../ui';
+import { readTabCache, writeTabCache } from './cache';
 import { CenterApiError, errorMessage } from './transport';
 import type { CenterApi } from './transport';
 import {
@@ -11,10 +13,14 @@ import {
   CaExternalUrlBox,
   CaModal,
   CaNotice,
+  CaRefreshBar,
+  CaSectionSkeleton,
   CaSegmented,
   CaSwitch,
+  CaToolbarSkeleton,
   botKey,
   newRequestId,
+  useCaTabNotices,
 } from './primitives';
 import { SchemaConfigForm } from './SchemaConfigForm';
 import type {
@@ -35,6 +41,12 @@ import type {
 } from './types';
 
 type TranslateFn = (zh: string, en: string) => string;
+
+interface CapabilitiesCacheData {
+  installations: Installation[];
+  devices: CenterDevice[];
+  bots: CenterBotRef[];
+}
 
 function activationLabel(item: Installation, t: TranslateFn): { text: string; tone: 'ok' | 'warn' | 'danger' | 'muted' } {
   const st = item.activation?.status;
@@ -75,28 +87,63 @@ function normalizeInlineSkillMarkdown(name: string, body: string): string {
 
 export function CapabilitiesTab({
   api,
+  active = true,
+  cacheKey = 'default',
   onOpenExternal,
   onOpenExternalUrl,
 }: {
   api: CenterApi;
+  active?: boolean;
+  cacheKey?: string;
   onOpenExternal?: () => void;
   onOpenExternalUrl?: (url: string) => void | Promise<unknown>;
 }): React.JSX.Element {
   const t = useText();
   const defaultSkillMarkdown = t('# 技能说明\n\n描述此技能的目标、触发时机与执行步骤。\n', '# Skill Guide\n\nDescribe the goal, triggers, and execution steps for this skill.\n');
 
+  const initialCache = useMemo(
+    () => readTabCache<CapabilitiesCacheData>(cacheKey, 'capabilities')?.data ?? null,
+    [cacheKey],
+  );
   const [segment, setSegment] = useState<'skills' | 'tools'>('skills');
   const [skillFilter, setSkillFilter] = useState<'all' | 'shared' | 'learned'>('all');
   const [query, setQuery] = useState('');
 
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  const [hasLoaded, setHasLoaded] = useState<boolean>(() => initialCache !== null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [initialError, setInitialError] = useState('');
 
-  const [installations, setInstallations] = useState<Installation[]>([]);
-  const [devices, setDevices] = useState<CenterDevice[]>([]);
-  const [bots, setBots] = useState<CenterBotRef[]>([]);
+  const [installations, setInstallations] = useState<Installation[]>(() => initialCache?.installations ?? []);
+  const [devices, setDevices] = useState<CenterDevice[]>(() => initialCache?.devices ?? []);
+  const [bots, setBots] = useState<CenterBotRef[]>(() => initialCache?.bots ?? []);
   const [togglingId, setTogglingId] = useState<string | null>(null);
+
+  const hasLoadedRef = useRef(hasLoaded);
+  const cacheKeyRef = useRef(cacheKey);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const prevActiveRef = useRef(active);
+  const tRef = useRef(t);
+  tRef.current = t;
+  const loadGenRef = useRef(0);
+
+  const { showNotice, clearNotice } = useCaTabNotices('capabilities', active);
+
+  const setError = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('error', msg, { tone: 'danger' });
+      else clearNotice('error');
+    },
+    [clearNotice, showNotice],
+  );
+
+  const setNotice = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('notice', msg, { tone: 'ok' });
+      else clearNotice('notice');
+    },
+    [clearNotice, showNotice],
+  );
 
   // Create inline skill modal
   const [createSkillOpen, setCreateSkillOpen] = useState(false);
@@ -108,7 +155,14 @@ export function CapabilitiesTab({
   const [newSkillActiveFile, setNewSkillActiveFile] = useState('SKILL.md');
   const [newSkillAddPath, setNewSkillAddPath] = useState('');
   const [createSkillBusy, setCreateSkillBusy] = useState(false);
-  const [createSkillError, setCreateSkillError] = useState('');
+
+  const setCreateSkillError = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('create-error', msg, { tone: 'danger' });
+      else clearNotice('create-error');
+    },
+    [clearNotice, showNotice],
+  );
 
   // Import package modal (skill archive / URL / npm OR MCP/plugin install)
   const [importOpen, setImportOpen] = useState(false);
@@ -121,7 +175,24 @@ export function CapabilitiesTab({
   const [importTarget, setImportTarget] = useState<'center' | 'host'>('host');
   const [importAutoEnable, setImportAutoEnable] = useState(true);
   const [importBusy, setImportBusy] = useState(false);
-  const [importError, setImportError] = useState('');
+
+  const setImportError = useCallback(
+    (msg: string, withBrowserAction = false) => {
+      if (msg) {
+        const t = tRef.current;
+        showNotice('import-error', msg, {
+          tone: 'danger',
+          action:
+            withBrowserAction && onOpenExternal
+              ? { label: t('在浏览器打开', 'Open in browser'), onClick: onOpenExternal }
+              : undefined,
+        });
+      } else {
+        clearNotice('import-error');
+      }
+    },
+    [clearNotice, onOpenExternal, showNotice],
+  );
 
   // Unified Detail Drawer (Skill editor OR MCP/Plugin configurator)
   const [detailOpen, setDetailOpen] = useState(false);
@@ -138,8 +209,34 @@ export function CapabilitiesTab({
   const [botBindings, setBotBindings] = useState<Map<string, BotCapabilityConfig>>(new Map());
   const [bindingBusyKeys, setBindingBusyKeys] = useState<Set<string>>(new Set());
   const [detailBusy, setDetailBusy] = useState(false);
-  const [detailError, setDetailError] = useState('');
-  const [detailNotice, setDetailNotice] = useState('');
+  const [oauthHintNeeded, setOauthHintNeeded] = useState(false);
+
+  const setDetailError = useCallback(
+    (msg: string, withBrowserAction = false) => {
+      if (msg) {
+        const t = tRef.current;
+        if (msg.includes('OAuth')) setOauthHintNeeded(true);
+        showNotice('detail-error', msg, {
+          tone: 'danger',
+          action:
+            withBrowserAction && onOpenExternal
+              ? { label: t('在浏览器打开', 'Open in browser'), onClick: onOpenExternal }
+              : undefined,
+        });
+      } else {
+        clearNotice('detail-error');
+      }
+    },
+    [clearNotice, onOpenExternal, showNotice],
+  );
+
+  const setDetailNotice = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('detail-notice', msg, { tone: 'ok' });
+      else clearNotice('detail-notice');
+    },
+    [clearNotice, showNotice],
+  );
 
   // Per-Bot Override Modal (for MCP/Plugin)
   const [overrideBot, setOverrideBot] = useState<CenterBotRef | null>(null);
@@ -159,7 +256,6 @@ export function CapabilitiesTab({
   const [updates, setUpdates] = useState<PackageVersion[] | null>(null);
   const [updateArtifactFile, setUpdateArtifactFile] = useState<File | null>(null);
   const [updateArtifactInputKey, setUpdateArtifactInputKey] = useState(0);
-  const [detailErrorNeedsBrowser, setDetailErrorNeedsBrowser] = useState(false);
   const [operation, setOperation] = useState<Operation | null>(null);
 
   const oauthTimerRef = useRef<number | null>(null);
@@ -178,27 +274,82 @@ export function CapabilitiesTab({
 
   useEffect(() => () => stopTimers(), [stopTimers]);
 
+  useEffect(() => {
+    if (detailOpen && operation?.phase === 'failed' && operation.error?.message) {
+      const msg = operation.error.code
+        ? `${operation.error.code}: ${operation.error.message}`
+        : operation.error.message;
+      showNotice('op-error', msg, { tone: 'danger' });
+    } else {
+      clearNotice('op-error');
+    }
+  }, [clearNotice, detailOpen, operation, showNotice]);
+
   const loadAll = useCallback(async () => {
     const [caps, sync] = await Promise.all([api.listCapabilities(), api.getBotSync()]);
     setInstallations(caps);
     setDevices(sync.devices);
     setBots(sync.bots ?? []);
-  }, [api]);
+    hasLoadedRef.current = true;
+    cacheKeyRef.current = cacheKey;
+    setHasLoaded(true);
+    setInitialError('');
+    clearNotice('load-error');
+  }, [api, cacheKey, clearNotice]);
+
+  const runLoad = useCallback(async () => {
+    const gen = ++loadGenRef.current;
+    if (hasLoadedRef.current) setRefreshing(true);
+    try {
+      await loadAll();
+    } catch (err) {
+      if (gen !== loadGenRef.current) return;
+      const t = tRef.current;
+      const msg = errorMessage(err, t('加载技能与扩展失败', 'Failed to load skills and extensions'));
+      if (hasLoadedRef.current) {
+        if (activeRef.current) {
+          showNotice('load-error', msg, {
+            tone: 'danger',
+            action: {
+              label: t('重试', 'Retry'),
+              onClick: () => void runLoad(),
+            },
+          });
+        }
+      } else {
+        setInitialError(msg);
+      }
+    } finally {
+      if (gen === loadGenRef.current) setRefreshing(false);
+    }
+  }, [loadAll, showNotice]);
 
   useEffect(() => {
-    let active = true;
-    setLoading(true);
-    loadAll()
-      .catch(err => {
-        if (active) setError(errorMessage(err, t('加载技能与扩展失败', 'Failed to load skills and extensions')));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
+    void runLoad();
+  }, [runLoad]);
+
+  useEffect(() => {
+    const wasActive = prevActiveRef.current;
+    prevActiveRef.current = active;
+    if (!wasActive && active && (hasLoadedRef.current || initialError)) {
+      void runLoad();
+    }
+  }, [active, initialError, runLoad]);
+
+  useEffect(() => {
     return () => {
-      active = false;
+      loadGenRef.current += 1;
     };
-  }, [loadAll, t]);
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoaded || cacheKeyRef.current !== cacheKey) return;
+    writeTabCache<CapabilitiesCacheData>(cacheKey, 'capabilities', {
+      installations,
+      devices,
+      bots,
+    });
+  }, [bots, cacheKey, devices, hasLoaded, installations]);
 
   const activeBots = useMemo(() => bots.filter(b => !b.archivedAt), [bots]);
   const onlineBots = useMemo(
@@ -281,7 +432,7 @@ export function CapabilitiesTab({
     setDetailScopeDraft(inst.visibilityScope ?? (inst.ownerBot ? 'private' : 'global'));
     setDetailNotice('');
     setDetailError('');
-    setDetailErrorNeedsBrowser(false);
+    setOauthHintNeeded(false);
     setOauthFlow(null);
     setOauthStatus('');
     setProbeResult('');
@@ -452,7 +603,7 @@ export function CapabilitiesTab({
           : t(`已提交「${name}」安装任务`, `Submitted install task for "${name}"`),
       );
     } catch (err) {
-      setImportError(errorMessage(err, t('安装失败', 'Installation failed')));
+      setImportError(errorMessage(err, t('安装失败', 'Installation failed')), importSource === 'artifact');
     } finally {
       setImportBusy(false);
     }
@@ -743,7 +894,6 @@ export function CapabilitiesTab({
     if (!detailInst) return;
     setDetailBusy(true);
     setDetailError('');
-    setDetailErrorNeedsBrowser(false);
     setDetailNotice('');
     try {
       const list = await api.checkUpdates(detailInst.installationId);
@@ -760,7 +910,6 @@ export function CapabilitiesTab({
     if (!detailInst) return;
     setDetailBusy(true);
     setDetailError('');
-    setDetailErrorNeedsBrowser(false);
     setDetailNotice('');
     setOperation(null);
     try {
@@ -785,7 +934,6 @@ export function CapabilitiesTab({
     }
     setDetailBusy(true);
     setDetailError('');
-    setDetailErrorNeedsBrowser(false);
     setDetailNotice('');
     setOperation(null);
     try {
@@ -799,10 +947,8 @@ export function CapabilitiesTab({
       setDetailNotice(t('已上传制品并发起原地更新（保留原实例与 Bot 绑定）', 'Artifact uploaded; in-place update started (preserving installation and Bot bindings)'));
       watchOperation(accepted.operationId);
     } catch (err) {
-      if (err instanceof CenterApiError && err.code === 'UNSUPPORTED_FORM_DATA') {
-        setDetailErrorNeedsBrowser(true);
-      }
-      setDetailError(errorMessage(err, t('制品更新失败', 'Artifact update failed')));
+      const needsBrowser = err instanceof CenterApiError && err.code === 'UNSUPPORTED_FORM_DATA';
+      setDetailError(errorMessage(err, t('制品更新失败', 'Artifact update failed')), needsBrowser);
     } finally {
       setDetailBusy(false);
     }
@@ -853,25 +999,38 @@ export function CapabilitiesTab({
     return set;
   }, [botBindings]);
 
-  if (loading) {
-    return <div className="ca-empty">{t('正在加载技能与扩展…', 'Loading skills and extensions…')}</div>;
+  if (!hasLoaded && !initialError) {
+    return (
+      <div className="ca-form-stack">
+        <CaToolbarSkeleton leftWidth={210} rightWidth={172} />
+        <CaSectionSkeleton rows={5} headWidth={176} trailingWidth={48} label={t('正在加载技能与扩展…', 'Loading skills and extensions…')} />
+      </div>
+    );
+  }
+
+  if (!hasLoaded && initialError) {
+    return (
+      <section className="ca-section">
+        <div className="ca-section-body">
+          <CaNotice
+            tone="danger"
+            action={
+              <button type="button" className="ca-btn ca-btn-sm" onClick={() => void runLoad()}>
+                <RefreshCw size={13} aria-hidden="true" />
+                <span>{t('重试', 'Retry')}</span>
+              </button>
+            }
+          >
+            {initialError}
+          </CaNotice>
+        </div>
+      </section>
+    );
   }
 
   return (
     <div>
-      {error && <CaNotice tone="danger">{error}</CaNotice>}
-      {notice && (
-        <CaNotice
-          tone="ok"
-          action={
-            <button type="button" className="ca-btn ca-btn-ghost ca-btn-sm" onClick={() => setNotice('')}>
-              {t('关闭', 'Close')}
-            </button>
-          }
-        >
-          {notice}
-        </CaNotice>
-      )}
+      <CaRefreshBar active={refreshing} />
 
       <div className="ca-toolbar">
         <CaSegmented
@@ -1085,17 +1244,19 @@ export function CapabilitiesTab({
         </section>
       )}
 
-      {/* 1 步新建多文件 Inline Skill 抽屉 */}
+      {/* Create inline skill drawer */}
       <CaModal
         open={createSkillOpen}
-        onOpenChange={setCreateSkillOpen}
+        onOpenChange={open => {
+          if (!open) setCreateSkillError('');
+          setCreateSkillOpen(open);
+        }}
         title={t('新建技能', 'New skill')}
         description={t('支持多文件 Markdown 与脚本目录，创建后默认立即可用', 'Supports multi-file Markdown and scripts; enabled immediately on creation')}
         variant="drawer"
         wide
       >
         <form className="ca-form-stack" onSubmit={e => void handleCreateInlineSkill(e)}>
-          {createSkillError && <CaNotice tone="danger">{createSkillError}</CaNotice>}
           <div className="ca-grid-2">
             <div className="ca-field">
               <label className="ca-field-label">
@@ -1192,36 +1353,26 @@ export function CapabilitiesTab({
               {t('取消', 'Cancel')}
             </button>
             <button type="submit" className="ca-btn ca-btn-primary" disabled={createSkillBusy}>
-              {createSkillBusy ? t('创建中…', 'Creating…') : t('创建并启用', 'Create & enable')}
+              <LabelStack
+                active={createSkillBusy ? t('创建中…', 'Creating…') : t('创建并启用', 'Create & enable')}
+                labels={[t('创建并启用', 'Create & enable'), t('创建中…', 'Creating…')]}
+              />
             </button>
           </div>
         </form>
       </CaModal>
 
-      {/* 导入技能包 / 安装 MCP & 插件弹窗 */}
+      {/* Import skill package / install MCP or plugin modal */}
       <CaModal
         open={importOpen}
-        onOpenChange={setImportOpen}
+        onOpenChange={open => {
+          if (!open) setImportError('');
+          setImportOpen(open);
+        }}
         title={importKind === 'skill' ? t('导入技能包', 'Import skill package') : t('安装工具扩展', 'Install extension')}
         variant="modal"
       >
         <form className="ca-form-stack" onSubmit={e => void handleSubmitImport(e)}>
-          {importError && (
-            <CaNotice
-              tone="danger"
-              action={
-                importSource === 'artifact' && onOpenExternal ? (
-                  <button type="button" className="ca-btn ca-btn-sm" onClick={onOpenExternal}>
-                    <ExternalLink size={13} />
-                    <span>{t('在浏览器打开', 'Open in browser')}</span>
-                  </button>
-                ) : undefined
-              }
-            >
-              {importError}
-            </CaNotice>
-          )}
-
           {importKind !== 'skill' && (
             <div className="ca-grid-2">
               <div className="ca-field">
@@ -1341,17 +1492,25 @@ export function CapabilitiesTab({
               {t('取消', 'Cancel')}
             </button>
             <button type="submit" className="ca-btn ca-btn-primary" disabled={importBusy}>
-              {importBusy ? t('安装中…', 'Installing…') : t('开始安装', 'Install')}
+              <LabelStack
+                active={importBusy ? t('安装中…', 'Installing…') : t('开始安装', 'Install')}
+                labels={[t('开始安装', 'Install'), t('安装中…', 'Installing…')]}
+              />
             </button>
           </div>
         </form>
       </CaModal>
 
-      {/* 技能 / 工具扩展统一详情抽屉 */}
+      {/* Unified detail drawer for skills & extensions */}
       <CaModal
         open={detailOpen}
         onOpenChange={open => {
-          if (!open) stopTimers();
+          if (!open) {
+            stopTimers();
+            setDetailError('');
+            setDetailNotice('');
+            clearNotice('op-error');
+          }
           setDetailOpen(open);
         }}
         title={detailInst?.displayName || t('扩展配置', 'Extension settings')}
@@ -1367,29 +1526,7 @@ export function CapabilitiesTab({
       >
         {detailInst && (
           <div className="ca-form-stack">
-            {detailError && (
-              <CaNotice
-                tone="danger"
-                action={
-                  detailErrorNeedsBrowser && onOpenExternal ? (
-                    <button type="button" className="ca-btn ca-btn-sm" onClick={onOpenExternal}>
-                      <ExternalLink size={13} />
-                      <span>{t('在浏览器打开', 'Open in browser')}</span>
-                    </button>
-                  ) : undefined
-                }
-              >
-                {detailError}
-              </CaNotice>
-            )}
-            {operation?.phase === 'failed' && operation.error?.message && (
-              <CaNotice tone="danger">
-                {operation.error.code ? `${operation.error.code}: ${operation.error.message}` : operation.error.message}
-              </CaNotice>
-            )}
-            {detailNotice && <CaNotice tone="ok">{detailNotice}</CaNotice>}
-
-            {/* 唯一全局启停状态栏 */}
+            {/* Global enable/disable status card */}
             <div className="ca-section ca-section-pad">
               <div className="ca-inline-between">
                 <div>
@@ -1411,8 +1548,8 @@ export function CapabilitiesTab({
               </div>
             </div>
 
-            {/* OAuth MCP 一键解锁与授权（消除 OAuth 死锁） */}
-            {(needsOAuth || detailInst.activation?.error?.code?.includes('OAUTH') || detailError.includes('OAuth')) && (
+            {/* OAuth MCP one-click unlock & authorization */}
+            {(needsOAuth || detailInst.activation?.error?.code?.includes('OAUTH') || oauthHintNeeded) && (
               <div className="ca-section ca-section-pad">
                 <div className="ca-field-label ca-mb-2">
                   {t('OAuth 身份授权（选择任意可用 Bot 完成授权即可启用）', 'OAuth authorization (choose any available Bot to authorize and enable)')}
@@ -1687,7 +1824,10 @@ export function CapabilitiesTab({
                       disabled={probeBusy || !selectedValidationBotKey}
                       onClick={() => void handleCheckAndListTools()}
                     >
-                      {probeBusy ? t('探测中…', 'Probing…') : t('检查连接与工具列表', 'Check connection & tools')}
+                      <LabelStack
+                        active={probeBusy ? t('探测中…', 'Probing…') : t('检查连接与工具列表', 'Check connection & tools')}
+                        labels={[t('检查连接与工具列表', 'Check connection & tools'), t('探测中…', 'Probing…')]}
+                      />
                     </button>
                   </div>
                 </div>

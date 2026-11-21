@@ -2,19 +2,25 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
 import { Check, Plus, RefreshCw, RotateCcw, Search, Star, Trash2 } from 'lucide-react';
 import { ANTIGRAVITY_PROVIDER_ID } from '../../../center-contract/antigravity.js';
+import { LabelStack } from '../layout';
 import { useText } from '../ui';
+import { readTabCache, writeTabCache } from './cache';
 import { CenterApiError, errorMessage } from './transport';
 import type { CenterApi } from './transport';
 import { openExternalUrl } from './openExternalUrl';
 import {
+  CaCardSkeleton,
   CaChips,
   CaDisclosure,
   CaModal,
   CaNotice,
+  CaRefreshBar,
+  CaSectionSkeleton,
   CaSegmented,
   CaSwitch,
   CopyButton,
   formatTime,
+  useCaTabNotices,
   useUiLocale,
 } from './primitives';
 import type {
@@ -134,11 +140,23 @@ function providerSortRank(p: Provider): number {
   return p.native ? 100 : 200;
 }
 
+interface ProvidersCacheData {
+  providers: Provider[];
+  picker: ModelPickerResponse | null;
+  modelConfig: ModelConfig | null;
+  authByProvider: Record<string, ProviderAuthStatus>;
+  modelCountByProvider: Record<string, number>;
+}
+
 export function ProvidersTab({
   api,
+  active = true,
+  cacheKey = 'default',
   onOpenExternalUrl,
 }: {
   api: CenterApi;
+  active?: boolean;
+  cacheKey?: string;
   onOpenExternalUrl?: (url: string) => void | Promise<unknown>;
 }): React.JSX.Element {
   const t = useText();
@@ -146,15 +164,82 @@ export function ProvidersTab({
   const thinkingOptions = useMemo(() => getThinkingOptions(t), [t]);
   const codeModeOptions = useMemo(() => getCodeModeOptions(t), [t]);
 
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  const initialCache = useMemo(
+    () => readTabCache<ProvidersCacheData>(cacheKey, 'providers')?.data ?? null,
+    [cacheKey],
+  );
+  const [hasLoaded, setHasLoaded] = useState<boolean>(() => initialCache !== null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [initialError, setInitialError] = useState('');
 
-  const [providers, setProviders] = useState<Provider[]>([]);
-  const [picker, setPicker] = useState<ModelPickerResponse | null>(null);
-  const [modelConfig, setModelConfig] = useState<ModelConfig | null>(null);
-  const [authByProvider, setAuthByProvider] = useState<Record<string, ProviderAuthStatus>>({});
-  const [modelCountByProvider, setModelCountByProvider] = useState<Record<string, number>>({});
+  const [providers, setProviders] = useState<Provider[]>(() => initialCache?.providers ?? []);
+  const [picker, setPicker] = useState<ModelPickerResponse | null>(() => initialCache?.picker ?? null);
+  const [modelConfig, setModelConfig] = useState<ModelConfig | null>(() => initialCache?.modelConfig ?? null);
+  const [authByProvider, setAuthByProvider] = useState<Record<string, ProviderAuthStatus>>(
+    () => initialCache?.authByProvider ?? {},
+  );
+  const [modelCountByProvider, setModelCountByProvider] = useState<Record<string, number>>(
+    () => initialCache?.modelCountByProvider ?? {},
+  );
+
+  const hasLoadedRef = useRef(hasLoaded);
+  const cacheKeyRef = useRef(cacheKey);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const prevActiveRef = useRef(active);
+  const tRef = useRef(t);
+  tRef.current = t;
+  const loadGenRef = useRef(0);
+
+  const { showNotice, clearNotice } = useCaTabNotices('providers', active);
+
+  const setError = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('error', msg, { tone: 'danger' });
+      else clearNotice('error');
+    },
+    [clearNotice, showNotice],
+  );
+
+  const setNotice = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('notice', msg, { tone: 'ok' });
+      else clearNotice('notice');
+    },
+    [clearNotice, showNotice],
+  );
+
+  const setDrawerError = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('drawer-error', msg, { tone: 'danger' });
+      else clearNotice('drawer-error');
+    },
+    [clearNotice, showNotice],
+  );
+
+  const setDrawerNotice = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('drawer-notice', msg, { tone: 'ok' });
+      else clearNotice('drawer-notice');
+    },
+    [clearNotice, showNotice],
+  );
+
+  const setModelError = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('model-error', msg, { tone: 'danger' });
+      else clearNotice('model-error');
+    },
+    [clearNotice, showNotice],
+  );
+
+  const setDiscoverError = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('discover-error', msg, { tone: 'danger' });
+      else clearNotice('discover-error');
+    },
+    [clearNotice, showNotice],
+  );
 
   // Global model selector modal
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -182,8 +267,6 @@ export function ProvidersTab({
   const [modelQuery, setModelQuery] = useState('');
   const [savingProvider, setSavingProvider] = useState(false);
   const [validatingProvider, setValidatingProvider] = useState(false);
-  const [drawerError, setDrawerError] = useState('');
-  const [drawerNotice, setDrawerNotice] = useState('');
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
   // OAuth flow state
@@ -199,7 +282,6 @@ export function ProvidersTab({
   const [modelDraft, setModelDraft] = useState<Model | null>(null);
   const [modelExtraJson, setModelExtraJson] = useState('{}');
   const [modelSaving, setModelSaving] = useState(false);
-  const [modelError, setModelError] = useState('');
 
   // Discover / Restore models modal
   const [discoverOpen, setDiscoverOpen] = useState(false);
@@ -210,7 +292,6 @@ export function ProvidersTab({
   const [discoverDeviceId, setDiscoverDeviceId] = useState('');
   const [devices, setDevices] = useState<CenterDevice[]>([]);
   const [discoverBusy, setDiscoverBusy] = useState(false);
-  const [discoverError, setDiscoverError] = useState('');
 
   const refreshPageData = useCallback(async () => {
     const [provList, pickerRes, cfgRes, batchAuth] = await Promise.all([
@@ -241,22 +322,68 @@ export function ProvidersTab({
         .then(next => setAuthByProvider(next))
         .catch(() => {});
     }
-  }, [api]);
+    hasLoadedRef.current = true;
+    cacheKeyRef.current = cacheKey;
+    setHasLoaded(true);
+    setInitialError('');
+    clearNotice('load-error');
+  }, [api, cacheKey, clearNotice]);
+
+  const runLoad = useCallback(async () => {
+    const gen = ++loadGenRef.current;
+    if (hasLoadedRef.current) setRefreshing(true);
+    try {
+      await refreshPageData();
+    } catch (err) {
+      if (gen !== loadGenRef.current) return;
+      const t = tRef.current;
+      const msg = errorMessage(err, t('加载模型配置失败', 'Failed to load model settings'));
+      if (hasLoadedRef.current) {
+        if (activeRef.current) {
+          showNotice('load-error', msg, {
+            tone: 'danger',
+            action: {
+              label: t('重试', 'Retry'),
+              onClick: () => void runLoad(),
+            },
+          });
+        }
+      } else {
+        setInitialError(msg);
+      }
+    } finally {
+      if (gen === loadGenRef.current) setRefreshing(false);
+    }
+  }, [refreshPageData, showNotice]);
 
   useEffect(() => {
-    let active = true;
-    setLoading(true);
-    refreshPageData()
-      .catch(err => {
-        if (active) setError(errorMessage(err, t('加载模型配置失败', 'Failed to load model settings')));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
+    void runLoad();
+  }, [runLoad]);
+
+  useEffect(() => {
+    const wasActive = prevActiveRef.current;
+    prevActiveRef.current = active;
+    if (!wasActive && active && (hasLoadedRef.current || initialError)) {
+      void runLoad();
+    }
+  }, [active, initialError, runLoad]);
+
+  useEffect(() => {
     return () => {
-      active = false;
+      loadGenRef.current += 1;
     };
-  }, [refreshPageData, t]);
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoaded || cacheKeyRef.current !== cacheKey) return;
+    writeTabCache<ProvidersCacheData>(cacheKey, 'providers', {
+      providers,
+      picker,
+      modelConfig,
+      authByProvider,
+      modelCountByProvider,
+    });
+  }, [authByProvider, cacheKey, hasLoaded, modelConfig, modelCountByProvider, picker, providers]);
 
   const stopFlowPoll = useCallback(() => {
     if (flowTimerRef.current !== null) {
@@ -942,27 +1069,40 @@ export function ProvidersTab({
     return parts.join(' · ');
   };
 
-  if (loading) {
-    return <div className="ca-empty">{t('正在加载模型与服务商配置…', 'Loading models and providers…')}</div>;
+  if (!hasLoaded && !initialError) {
+    return (
+      <div className="ca-form-stack">
+        <CaCardSkeleton height={58} subbar label={t('正在加载模型与服务商配置…', 'Loading models and providers…')} />
+        <CaSectionSkeleton rows={5} headWidth={128} trailingWidth={112} />
+      </div>
+    );
+  }
+
+  if (!hasLoaded && initialError) {
+    return (
+      <section className="ca-section">
+        <div className="ca-section-body">
+          <CaNotice
+            tone="danger"
+            action={
+              <button type="button" className="ca-btn ca-btn-sm" onClick={() => void runLoad()}>
+                <RefreshCw size={13} aria-hidden="true" />
+                <span>{t('重试', 'Retry')}</span>
+              </button>
+            }
+          >
+            {initialError}
+          </CaNotice>
+        </div>
+      </section>
+    );
   }
 
   return (
     <div>
-      {error && <CaNotice tone="danger">{error}</CaNotice>}
-      {notice && (
-        <CaNotice
-          tone="ok"
-          action={
-            <button type="button" className="ca-btn ca-btn-ghost ca-btn-sm" onClick={() => setNotice('')}>
-              {t('关闭', 'Close')}
-            </button>
-          }
-        >
-          {notice}
-        </CaNotice>
-      )}
+      <CaRefreshBar active={refreshing} />
 
-      {/* 1. 顶部单行全局默认模型卡片 */}
+      {/* 1. Top single-row global default model card */}
       <section className="ca-section">
         <div className="ca-default-card">
           <div className="ca-row-main">
@@ -992,12 +1132,15 @@ export function ProvidersTab({
                 setPickerOpen(true);
               }}
             >
-              {currentGlobalModelRef ? t('更换默认模型', 'Change default model') : t('选择默认模型', 'Select default model')}
+              <LabelStack
+                active={currentGlobalModelRef ? t('更换默认模型', 'Change default model') : t('选择默认模型', 'Select default model')}
+                labels={[t('选择默认模型', 'Select default model'), t('更换默认模型', 'Change default model')]}
+              />
             </button>
           </div>
         </div>
 
-        {/* 仅在当前默认模型支持推理时展示思考强度胶囊 */}
+        {/* Show thinking effort chips only when current default model supports reasoning */}
         {currentDefaultItem?.reasoning && (
           <div className="ca-default-subbar">
             <span className="ca-field-label">{t('思考强度', 'Thinking effort')}</span>
@@ -1010,7 +1153,7 @@ export function ProvidersTab({
           </div>
         )}
 
-        {/* 高级工具调用方式 & 目录同步折叠区 */}
+        {/* Advanced tool calling & model catalog sync disclosure */}
         <div className="ca-default-disclosure-wrap">
           <CaDisclosure title={t('高级设置（工具调用方式 / 模型目录同步）', 'Advanced (Tool calling / Model catalog sync)')}>
             <div className="ca-form-stack">
@@ -1050,8 +1193,11 @@ export function ProvidersTab({
                   disabled={syncBusy}
                   onClick={() => void handleSyncCatalog()}
                 >
-                  <RefreshCw size={13} />
-                  <span>{syncBusy ? t('同步中…', 'Syncing…') : t('同步目录', 'Sync catalog')}</span>
+                  <RefreshCw size={13} className={syncBusy ? 'ca-spin' : undefined} aria-hidden="true" />
+                  <LabelStack
+                    active={syncBusy ? t('同步中…', 'Syncing…') : t('同步目录', 'Sync catalog')}
+                    labels={[t('同步目录', 'Sync catalog'), t('同步中…', 'Syncing…')]}
+                  />
                 </button>
               </div>
             </div>
@@ -1217,7 +1363,11 @@ export function ProvidersTab({
       <CaModal
         open={drawerOpen}
         onOpenChange={open => {
-          if (!open) stopFlowPoll();
+          if (!open) {
+            stopFlowPoll();
+            setDrawerError('');
+            setDrawerNotice('');
+          }
           setDrawerOpen(open);
         }}
         title={creating ? t('添加自定义服务商', 'Add custom provider') : edit?.name || edit?.id || t('服务商设置', 'Provider settings')}
@@ -1312,7 +1462,10 @@ export function ProvidersTab({
                     disabled={savingProvider || validatingProvider}
                     onClick={() => void handleValidateOnly()}
                   >
-                    {validatingProvider ? t('验证中…', 'Verifying…') : t('验证连接', 'Verify connection')}
+                    <LabelStack
+                      active={validatingProvider ? t('验证中…', 'Verifying…') : t('验证连接', 'Verify connection')}
+                      labels={[t('验证连接', 'Verify connection'), t('验证中…', 'Verifying…')]}
+                    />
                   </button>
                 )}
                 <button
@@ -1321,7 +1474,10 @@ export function ProvidersTab({
                   disabled={savingProvider || validatingProvider}
                   onClick={() => void persistProvider(true)}
                 >
-                  {savingProvider ? t('保存中…', 'Saving…') : t('保存并验证', 'Save & verify')}
+                  <LabelStack
+                    active={savingProvider ? t('保存中…', 'Saving…') : t('保存并验证', 'Save & verify')}
+                    labels={[t('保存并验证', 'Save & verify'), t('保存中…', 'Saving…')]}
+                  />
                 </button>
               </div>
             </div>
@@ -1508,10 +1664,7 @@ export function ProvidersTab({
 
           return (
             <div className="ca-form-stack">
-              {drawerError && <CaNotice tone="danger">{drawerError}</CaNotice>}
-              {drawerNotice && <CaNotice tone="ok">{drawerNotice}</CaNotice>}
-
-              {/* OAuth / Antigravity 授权流程 */}
+              {/* OAuth / Antigravity authorization flow */}
               {supportsOAuth && (
                 <div className="ca-section ca-oauth-card">
                   <div className="ca-oauth-head">
@@ -1734,7 +1887,10 @@ export function ProvidersTab({
       {/* 新增 / 编辑自定义模型弹窗（极简直观字段 + 折叠高级项） */}
       <CaModal
         open={modelModalOpen}
-        onOpenChange={setModelModalOpen}
+        onOpenChange={open => {
+          if (!open) setModelError('');
+          setModelModalOpen(open);
+        }}
         title={
           modelCreating
             ? t('新增模型', 'Add model')
@@ -1744,7 +1900,6 @@ export function ProvidersTab({
       >
         {modelDraft && (
           <form className="ca-form-stack" onSubmit={e => void handleSaveModel(e)}>
-            {modelError && <CaNotice tone="danger">{modelError}</CaNotice>}
             <div className="ca-field">
               <label className="ca-field-label">
                 {t('模型 ID', 'Model ID')} <span className="ca-req">*</span>
@@ -1864,7 +2019,10 @@ export function ProvidersTab({
                   {t('取消', 'Cancel')}
                 </button>
                 <button type="submit" className="ca-btn ca-btn-primary" disabled={modelSaving}>
-                  {modelSaving ? t('保存中…', 'Saving…') : t('保存模型', 'Save model')}
+                  <LabelStack
+                    active={modelSaving ? t('保存中…', 'Saving…') : t('保存模型', 'Save model')}
+                    labels={[t('保存模型', 'Save model'), t('保存中…', 'Saving…')]}
+                  />
                 </button>
               </div>
             </div>
@@ -1872,15 +2030,17 @@ export function ProvidersTab({
         )}
       </CaModal>
 
-      {/* 拉取 / 恢复模型弹窗 */}
+      {/* Fetch / Restore models modal */}
       <CaModal
         open={discoverOpen}
-        onOpenChange={setDiscoverOpen}
+        onOpenChange={open => {
+          if (!open) setDiscoverError('');
+          setDiscoverOpen(open);
+        }}
         title={discoverMode === 'restore' ? t('恢复已移除的模型', 'Restore removed models') : t('从 /v1/models 拉取模型', 'Fetch models from /v1/models')}
         variant="modal"
       >
         <div className="ca-form-stack">
-          {discoverError && <CaNotice tone="danger">{discoverError}</CaNotice>}
           <div className="ca-inline-row ca-wrap ca-discover-bar">
             <input
               type="search"
@@ -1915,7 +2075,10 @@ export function ProvidersTab({
                   disabled={discoverBusy || !edit}
                   onClick={() => edit && void runDiscoverFetch(edit, discoverDeviceId)}
                 >
-                  {discoverBusy ? t('拉取中…', 'Fetching…') : t('重新拉取', 'Refetch')}
+                  <LabelStack
+                    active={discoverBusy ? t('拉取中…', 'Fetching…') : t('重新拉取', 'Refetch')}
+                    labels={[t('重新拉取', 'Refetch'), t('拉取中…', 'Fetching…')]}
+                  />
                 </button>
               </>
             )}

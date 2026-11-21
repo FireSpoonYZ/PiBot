@@ -2,13 +2,16 @@
 // 密码只在本组件内存，提交即清；token 不离开原生。沿用 .hst-/.bs- 既有原语，少量 .ob- 补充样式。
 // 配对结果只表示“已登记/已请求连接”，就绪与否始终由 CenterGate 的 center_status/broker 轮询判定。
 import { useCallback, useEffect, useRef, useState, type FormEvent, type MouseEvent } from 'react';
-import { BatteryCharging, Bell, CheckCircle2, ScanLine, Server, ShieldCheck } from 'lucide-react';
+import { BatteryCharging, Bell, CheckCircle2, Loader2, ScanLine, Server, ShieldCheck } from 'lucide-react';
 import { useCenterConnection } from './CenterGate';
 import { mobileClientRequest, mobileHaptic, onboardingAction, onboardingStatus, scanPairingCode } from './tauri-host';
 import { BotHost, type HostSnapshot, type OnboardingActionName, type OnboardingStatus, type PairCenterResult } from './index';
 import { Badge, Disclosure, Row, Section, SettingsSheet, StatusLine } from '../bot-settings/primitives';
 import { readScannedCode } from '../pairingCode';
 import { ErrorNotice, errorText, splitErrorCode, useText } from '../ui';
+import { useConnectionPhaseContext } from '../connection';
+import { useNotice } from '../notice';
+import { LabelStack, ReservedSlot, Skeleton } from '../layout';
 import './onboarding.css';
 
 type ScannedWebLogin = {
@@ -52,9 +55,28 @@ function WebLoginConfirmView({
 }) {
   const t = useText();
   const centerConn = useCenterConnection();
+  const { notify, dismiss } = useNotice();
   const [submitting, setSubmitting] = useState(false);
   const [approved, setApproved] = useState(false);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!error) {
+      dismiss('onboarding:web-login-error');
+      return;
+    }
+    notify({
+      id: 'onboarding:web-login-error',
+      tone: 'error',
+      title: error,
+    });
+  }, [error, notify, dismiss]);
+
+  useEffect(() => {
+    return () => {
+      dismiss('onboarding:web-login-error');
+    };
+  }, [dismiss]);
 
   const boundUrl = centerConn.status?.centerUrl || centerConn.saved?.url || '';
   const boundOrigin = normalizeCenterOrigin(boundUrl);
@@ -143,45 +165,58 @@ function WebLoginConfirmView({
           />
         </div>
       )}
-      {error && (
-        <div className="hst-row-static">
-          <ErrorNotice error={error} compact onDismiss={() => setError('')} />
-        </div>
-      )}
       <div className="hst-actions">
         <button type="button" className="hst-btn" disabled={submitting} onClick={onCancel}>
           {t('取消', 'Cancel')}
         </button>
         <button type="button" className="hst-btn is-primary" disabled={!canApprove || submitting} onClick={approve}>
-          {submitting ? t('确认中…', 'Confirming…') : t('确认登录', 'Confirm Login')}
+          <LabelStack
+            active={submitting ? t('确认中…', 'Confirming…') : t('确认登录', 'Confirm Login')}
+            labels={[t('确认中…', 'Confirming…'), t('确认登录', 'Confirm Login')]}
+          />
         </button>
       </div>
     </>
   );
 }
 
-/** 中心连接状态提示：重连态走 progress，真实错误仅将 message 放标题、code 放 detail 折叠区。 */
+/** 中心连接状态提示：重连态改用 F2 状态与常驻固定槽，错误走 F1 NoticeLayer，绝不在按钮上方插入文档流横幅。 */
 function CenterStatusNotice() {
   const t = useText();
   const centerConn = useCenterConnection();
-  if (centerConn.reconnecting) {
-    return (
-      <div className="hst-row-static">
-        <ErrorNotice tone="progress" title={t('正在重连…', 'Reconnecting…')} compact />
-      </div>
-    );
-  }
-  if (!centerConn.error) return null;
+  const connPhase = useConnectionPhaseContext();
+  const { notify, dismiss } = useNotice();
+  const isReconnecting = connPhase.phase === 'connecting';
+
+  useEffect(() => {
+    if (!centerConn.error) {
+      dismiss('center:connection-error');
+      return;
+    }
+    notify({
+      id: 'center:connection-error',
+      tone: 'error',
+      title: centerConn.error,
+      detail: centerConn.errorCode || undefined,
+    });
+  }, [centerConn.error, centerConn.errorCode, notify, dismiss]);
+
   return (
-    <div className="hst-row-static">
-      <ErrorNotice
-        tone="danger"
-        title={centerConn.error}
-        detail={centerConn.errorCode || undefined}
-        compact
-        onDismiss={() => centerConn.setError('')}
-      />
-    </div>
+    <ReservedSlot
+      minHeight={20}
+      align="center"
+      className="ob-conn-status-slot"
+      role="status"
+      aria-live="polite"
+      contentKey={isReconnecting ? 'reconnecting' : 'idle'}
+    >
+      {isReconnecting ? (
+        <span className="ob-status-text">
+          <Loader2 size={13} className="ob-spin" aria-hidden="true" />
+          <span>{t('正在重连…', 'Reconnecting…')}</span>
+        </span>
+      ) : null}
+    </ReservedSlot>
   );
 }
 
@@ -306,11 +341,20 @@ function ManualCenterConnect({ onDone }: { onDone?: () => void }) {
               })
           }
         >
-          {centerConn.preparing
-            ? t('正在启动本机节点…', 'Starting Host…')
-            : centerConn.busy
-              ? t('连接中…', 'Connecting…')
-              : t('连接中心', 'Connect Center')}
+          <LabelStack
+            active={
+              centerConn.preparing
+                ? t('正在启动本机节点…', 'Starting Host…')
+                : centerConn.busy
+                  ? t('连接中…', 'Connecting…')
+                  : t('连接中心', 'Connect Center')
+            }
+            labels={[
+              t('正在启动本机节点…', 'Starting Host…'),
+              t('连接中…', 'Connecting…'),
+              t('连接中心', 'Connect Center'),
+            ]}
+          />
         </button>
       </div>
     </>
@@ -498,7 +542,10 @@ function PairCenterForm({ onDone }: { onDone?: () => void }) {
           className="hst-btn is-primary"
           disabled={centerConn.busy || !centerConn.url.trim() || !password}
         >
-          {centerConn.busy ? t('配对中…', 'Pairing…') : t('配对并连接', 'Pair & Connect')}
+          <LabelStack
+            active={centerConn.busy ? t('配对中…', 'Pairing…') : t('配对并连接', 'Pair & Connect')}
+            labels={[t('配对中…', 'Pairing…'), t('配对并连接', 'Pair & Connect')]}
+          />
         </button>
       </div>
     </form>
@@ -521,6 +568,7 @@ function PairCodeForm({
 }) {
   const t = useText();
   const centerConn = useCenterConnection();
+  const { notify, dismiss } = useNotice();
   const [text, setText] = useState(() => {
     if (!initialCode) return '';
     return readPaste(initialCode).kind === 'web-login' ? '' : initialCode;
@@ -610,6 +658,30 @@ function PairCodeForm({
       .finally(() => setScanning(false));
   };
 
+  useEffect(() => {
+    if (!failure) {
+      dismiss('onboarding:pair-code-failure');
+      return;
+    }
+    const titlePrefix = failure.code === 'CAMERA_DENIED'
+      ? t('无法扫码', 'Cannot scan')
+      : t('配对失败', 'Pairing failed');
+    const desc = failureText(failure, t);
+    notify({
+      id: 'onboarding:pair-code-failure',
+      tone: 'error',
+      title: desc ? `${titlePrefix} — ${desc}` : titlePrefix,
+      detail: failure.code || undefined,
+      sticky: true,
+    });
+  }, [failure, t, notify, dismiss]);
+
+  useEffect(() => {
+    return () => {
+      dismiss('onboarding:pair-code-failure');
+    };
+  }, [dismiss]);
+
   if (webLogin) {
     return (
       <WebLoginConfirmView
@@ -643,6 +715,17 @@ function PairCodeForm({
           ? t('此配对码来自更新版本的中心，请先更新 pibot。', 'This pairing code comes from a newer center. Update pibot first.')
           : '';
 
+  const failureHelperText = failure
+    ? (failure.code === 'CAMERA_DENIED' ? t('无法扫码', 'Cannot scan') : t('配对失败', 'Pairing failed'))
+    : '';
+  const helperText = hint || failureHelperText;
+  const helperTone: 'neutral' | 'warn' | 'error' = hint
+    ? (paste.kind !== 'code' && paste.kind !== 'empty' ? 'warn' : 'neutral')
+    : failure
+      ? 'error'
+      : 'neutral';
+  const helperKey = hint ? `hint:${paste.kind}:${mayAutoSubmit ? 'auto' : 'force'}` : failure ? `err:${failure.code}` : 'empty';
+
   return (
     <>
       <div className="hst-row-static">
@@ -654,10 +737,13 @@ function PairCodeForm({
       <div className="hst-actions">
         <button type="button" className="hst-btn is-primary" disabled={working} onClick={scan}>
           <ScanLine size={16} aria-hidden="true" />
-          {scanning ? t('正在扫码…', 'Scanning…') : t('扫码配对 / 登录', 'Scan QR')}
+          <LabelStack
+            active={scanning ? t('正在扫码…', 'Scanning…') : t('扫码配对 / 登录', 'Scan QR')}
+            labels={[t('正在扫码…', 'Scanning…'), t('扫码配对 / 登录', 'Scan QR')]}
+          />
         </button>
       </div>
-      <div className="hst-row-static">
+      <div className="hst-row-static ob-code-row">
         <textarea
           className="ob-code"
           rows={3}
@@ -670,12 +756,21 @@ function PairCodeForm({
           placeholder={t('或在这里粘贴配对码', 'Or paste the pairing code here')}
           onChange={event => onPaste(event.target.value)}
         />
+        <ReservedSlot
+          minHeight={20}
+          align="center"
+          className="ob-helper-slot"
+          role="status"
+          aria-live="polite"
+          contentKey={helperKey}
+        >
+          {helperText ? (
+            <span className={`ob-note${helperTone === 'error' ? ' is-error' : helperTone === 'warn' ? ' is-warn' : ''}`}>
+              {helperText}
+            </span>
+          ) : null}
+        </ReservedSlot>
       </div>
-      {hint && (
-        <div className="hst-row-static">
-          <span className={`ob-note${paste.kind !== 'code' && paste.kind !== 'empty' ? ' is-warn' : ''}`}>{hint}</span>
-        </div>
-      )}
       {showForce && (
         <label className="hst-row-static ob-check-row">
           <span className="ob-check-hit">
@@ -690,18 +785,6 @@ function PairCodeForm({
           <span>{t('替换本机已保存的绑定', 'Replace the binding saved on this device')}</span>
         </label>
       )}
-      {failure && (
-        <div className="hst-row-static">
-          <ErrorNotice
-            tone="danger"
-            title={failure.code === 'CAMERA_DENIED' ? t('无法扫码', 'Cannot scan') : t('配对失败', 'Pairing failed')}
-            description={failureText(failure, t)}
-            detail={failure.code || undefined}
-            compact
-            onDismiss={() => setFailure(undefined)}
-          />
-        </div>
-      )}
       <div className="hst-actions">
         <button
           type="button"
@@ -709,7 +792,10 @@ function PairCodeForm({
           disabled={working || paste.kind !== 'code' || !mayAutoSubmit}
           onClick={() => submit(text)}
         >
-          {centerConn.busy ? t('配对中…', 'Pairing…') : t('配对并连接', 'Pair & Connect')}
+          <LabelStack
+            active={centerConn.busy ? t('配对中…', 'Pairing…') : t('配对并连接', 'Pair & Connect')}
+            labels={[t('配对中…', 'Pairing…'), t('配对并连接', 'Pair & Connect')]}
+          />
         </button>
       </div>
     </>
@@ -839,7 +925,10 @@ export function QuickQrScanButton({
     <>
       <button type="button" className={className} disabled={disabled || scanning} onClick={startScan}>
         <ScanLine size={15} aria-hidden="true" />
-        <span>{scanning ? t('扫码中…', 'Scanning…') : t('扫一扫', 'Scan QR')}</span>
+        <LabelStack
+          active={scanning ? t('扫码中…', 'Scanning…') : t('扫一扫', 'Scan QR')}
+          labels={[t('扫码中…', 'Scanning…'), t('扫一扫', 'Scan QR')]}
+        />
       </button>
       {modalState && (
         <SettingsSheet
@@ -889,6 +978,7 @@ function hostPhaseLabel(phase: HostSnapshot['phase'], t: Translate): string {
 export function OnboardingPermissions() {
   const t = useText();
   const centerConn = useCenterConnection();
+  const { notify, dismiss } = useNotice();
   const [status, setStatus] = useState<OnboardingStatus>();
   const [host, setHost] = useState<HostSnapshot>();
   const [statusFailed, setStatusFailed] = useState(false);
@@ -1005,7 +1095,45 @@ export function OnboardingPermissions() {
           : { tone: 'success', label: t('已授权', 'Granted') }
     : undefined;
 
-  const hostLabel = host ? hostPhaseLabel(host.phase, t) : t('读取中…', 'Checking…');
+  useEffect(() => {
+    if (!actionError) {
+      dismiss('onboarding:permissions-action-error');
+      return;
+    }
+    notify({
+      id: 'onboarding:permissions-action-error',
+      tone: 'error',
+      title: actionError,
+    });
+  }, [actionError, notify, dismiss]);
+
+  useEffect(() => {
+    if (!statusFailed || !status) {
+      dismiss('onboarding:permissions-stale');
+      return;
+    }
+    notify({
+      id: 'onboarding:permissions-stale',
+      tone: 'warning',
+      title: t('上次查询失败，以下状态可能不是最新', 'Last check failed — status below may be stale'),
+      action: { label: t('重试', 'Retry'), onClick: refresh },
+    });
+  }, [statusFailed, status, refresh, t, notify, dismiss]);
+
+  useEffect(() => {
+    return () => {
+      dismiss('onboarding:permissions-action-error');
+      dismiss('onboarding:permissions-stale');
+    };
+  }, [dismiss]);
+
+  const hostPhaseLabels = [
+    t('运行中', 'Running'),
+    t('启动中', 'Starting'),
+    t('停止中', 'Stopping'),
+    t('失败', 'Failed'),
+    t('已停止', 'Stopped'),
+  ];
 
   return (
     <Section
@@ -1018,24 +1146,16 @@ export function OnboardingPermissions() {
       hint={t('通知与电池优化影响消息提醒与后台连接；Shizuku 重启后需在管理器中重新启动，权限只影响对应功能，可先完成聊天连接再处理。',
         'Notifications and battery affect alerts and background connection; after a reboot Shizuku must be started in its manager again. Permissions only affect their own features — chat works without them.')}
     >
-      {actionError && (
-        <div className="hst-row-static">
-          <ErrorNotice error={actionError} compact onDismiss={() => setActionError('')} />
-        </div>
-      )}
-      {statusFailed && status && (
-        <div className="hst-row-static">
-          <span className="ob-note">{t('上次查询失败，以下状态可能不是最新', 'Last check failed — status below may be stale')}</span>
-        </div>
-      )}
       {statusFailed && !status ? (
         <Row
           icon={<ShieldCheck />}
           title={t('无法读取权限状态', 'Cannot read permission status')}
           trailing={
-            <button type="button" className="hst-btn" onClick={refresh}>
-              {t('重试', 'Retry')}
-            </button>
+            <span className="ob-perm-trailing is-compact">
+              <button type="button" className="hst-btn" onClick={refresh}>
+                {t('重试', 'Retry')}
+              </button>
+            </span>
           }
         />
       ) : (
@@ -1043,93 +1163,128 @@ export function OnboardingPermissions() {
           <Row
             icon={<Bell />}
             title={t('通知', 'Notifications')}
-            subtitle={status ? undefined : t('读取中…', 'Checking…')}
+            subtitle={
+              <ReservedSlot minHeight={18} inline align="center" className="ob-perm-sub">
+                {!status ? <Skeleton variant="text" width={76} height={12} inline /> : null}
+              </ReservedSlot>
+            }
             trailing={
-              status?.notificationsGranted ? (
-                <Badge tone="success">{t('已开启', 'On')}</Badge>
-              ) : (
-                <button
-                  type="button"
-                  className="hst-btn"
-                  disabled={!status || pending !== null}
-                  onClick={() => run('notifications')}
-                >
-                  {t('开启', 'Enable')}
-                </button>
-              )
+              <span className="ob-perm-trailing is-compact">
+                {!status ? (
+                  <Skeleton variant="pill" width={64} height={24} />
+                ) : status.notificationsGranted ? (
+                  <Badge tone="success">{t('已开启', 'On')}</Badge>
+                ) : (
+                  <button
+                    type="button"
+                    className="hst-btn"
+                    disabled={pending !== null}
+                    onClick={() => run('notifications')}
+                  >
+                    {t('开启', 'Enable')}
+                  </button>
+                )}
+              </span>
             }
           />
           <Row
             icon={<BatteryCharging />}
             title={t('后台运行', 'Background run')}
             subtitle={
-              status && !status.batteryUnrestricted
-                ? t('受系统电池优化限制', 'Restricted by battery optimization')
-                : undefined
+              <ReservedSlot minHeight={18} inline align="center" className="ob-perm-sub">
+                {!status ? (
+                  <Skeleton variant="text" width={96} height={12} inline />
+                ) : !status.batteryUnrestricted ? (
+                  t('受系统电池优化限制', 'Restricted by battery optimization')
+                ) : null}
+              </ReservedSlot>
             }
             trailing={
-              status?.batteryUnrestricted ? (
-                <Badge tone="success">{t('不受限制', 'Unrestricted')}</Badge>
-              ) : (
-                <button
-                  type="button"
-                  className="hst-btn"
-                  disabled={!status || pending !== null}
-                  onClick={() => run('battery-settings')}
-                >
-                  {t('去设置', 'Open settings')}
-                </button>
-              )
+              <span className="ob-perm-trailing">
+                {!status ? (
+                  <Skeleton variant="pill" width={72} height={24} />
+                ) : status.batteryUnrestricted ? (
+                  <Badge tone="success">{t('不受限制', 'Unrestricted')}</Badge>
+                ) : (
+                  <button
+                    type="button"
+                    className="hst-btn"
+                    disabled={pending !== null}
+                    onClick={() => run('battery-settings')}
+                  >
+                    {t('去设置', 'Open settings')}
+                  </button>
+                )}
+              </span>
             }
           />
           <Row
             icon={<ShieldCheck />}
             title="Shizuku"
             subtitle={
-              status?.shizukuInstalled && !status.shizukuRunning
-                ? t('需在 Shizuku 管理器中启动', 'Start it in the Shizuku manager')
-                : undefined
+              <ReservedSlot minHeight={18} inline align="center" className="ob-perm-sub">
+                {!status ? (
+                  <Skeleton variant="text" width={96} height={12} inline />
+                ) : status.shizukuInstalled && !status.shizukuRunning ? (
+                  t('需在 Shizuku 管理器中启动', 'Start it in the Shizuku manager')
+                ) : null}
+              </ReservedSlot>
             }
             trailing={
-              shizuku && shizuku.action ? (
-                <>
+              <span className="ob-perm-trailing">
+                {!shizuku ? (
+                  <Skeleton variant="pill" width={64} height={24} />
+                ) : shizuku.action ? (
+                  <>
+                    <Badge tone={shizuku.tone}>{shizuku.label}</Badge>
+                    <button
+                      type="button"
+                      className="hst-btn"
+                      disabled={pending !== null}
+                      onClick={() => run(shizuku.action!)}
+                    >
+                      {shizuku.button}
+                    </button>
+                  </>
+                ) : (
                   <Badge tone={shizuku.tone}>{shizuku.label}</Badge>
-                  <button
-                    type="button"
-                    className="hst-btn"
-                    disabled={pending !== null}
-                    onClick={() => run(shizuku.action!)}
-                  >
-                    {shizuku.button}
-                  </button>
-                </>
-              ) : (
-                <Badge tone={shizuku?.tone ?? 'neutral'}>{shizuku?.label ?? t('读取中…', 'Checking…')}</Badge>
-              )
+                )}
+              </span>
             }
           />
           <Row
             icon={<Server />}
             title={t('本机节点', 'Local host')}
-            subtitle={host?.deviceId ?? undefined}
+            subtitle={
+              <ReservedSlot minHeight={18} inline align="center" className="ob-perm-sub">
+                {!host ? <Skeleton variant="text" width={110} height={12} inline /> : (host.deviceId ?? null)}
+              </ReservedSlot>
+            }
             trailing={
-              <>
+              <span className="ob-perm-trailing">
                 {host?.restartRequired && <Badge tone="warning">{t('需重启', 'Restart required')}</Badge>}
-                <Badge tone={host?.phase === 'running' ? 'success' : host?.phase === 'failed' ? 'danger' : 'neutral'}>
-                  {hostLabel}
-                </Badge>
+                {host ? (
+                  <Badge tone={host.phase === 'running' ? 'success' : host.phase === 'failed' ? 'danger' : 'neutral'}>
+                    <LabelStack active={hostPhaseLabel(host.phase, t)} labels={hostPhaseLabels} />
+                  </Badge>
+                ) : (
+                  <Skeleton variant="pill" width={58} height={22} />
+                )}
                 {/* 客户端 ready 也可能 Host 保存失败：有已存绑定即可显式修复。 */}
-                {centerConn.saved?.url && (
+                {centerConn.hasSavedCenter && (
                   <button
                     type="button"
                     className="hst-btn"
-                    disabled={pending !== null || centerConn.busy}
+                    disabled={!centerConn.saved?.url || pending !== null || centerConn.busy}
                     onClick={repair}
                   >
-                    {t('修复绑定', 'Repair binding')}
+                    <LabelStack
+                      active={pending === 'repair' ? t('修复中…', 'Repairing…') : t('修复绑定', 'Repair binding')}
+                      labels={[t('修复中…', 'Repairing…'), t('修复绑定', 'Repair binding')]}
+                    />
                   </button>
                 )}
-              </>
+              </span>
             }
           />
           {repairResult && !repairResult.hostConfigured && (

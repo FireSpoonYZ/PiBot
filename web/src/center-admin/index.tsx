@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type * as React from 'react';
 import { ExternalLink } from 'lucide-react';
 import { useText } from '../ui';
 import './center-admin.css';
+import { clearCenterAdminCache, getCenterAdminScopeKey } from './cache';
 import { CapabilitiesTab } from './CapabilitiesTab';
 import { DevicesTab } from './DevicesTab';
 import { GoogleTab } from './GoogleTab';
@@ -52,6 +53,7 @@ import { QrSvg } from './qrSvg';
 export {
   CenterApiError,
   QrSvg,
+  clearCenterAdminCache,
   createBrokerCenterTransport,
   createCenterApi,
   createFetchCenterTransport,
@@ -136,6 +138,48 @@ export function CenterAdminPanel({
   );
 
   const api = useMemo(() => createCenterApi(transport), [transport]);
+  const scopeKey = useMemo(() => getCenterAdminScopeKey(transport, centerUrl), [transport, centerUrl]);
+
+  const prevScopeRef = useRef(scopeKey);
+  const [visitedByScope, setVisitedByScope] = useState<{
+    scopeKey: string;
+    tabs: CenterAdminTab[];
+  }>(() => ({ scopeKey, tabs: [currentTab] }));
+
+  useEffect(() => {
+    const prev = prevScopeRef.current;
+    if (prev !== scopeKey) {
+      clearCenterAdminCache(prev);
+      prevScopeRef.current = scopeKey;
+    }
+  }, [scopeKey]);
+
+  useEffect(() => {
+    setVisitedByScope(prev => {
+      if (prev.scopeKey !== scopeKey) {
+        return { scopeKey, tabs: [currentTab] };
+      }
+      if (prev.tabs.includes(currentTab)) return prev;
+      return { scopeKey, tabs: [...prev.tabs, currentTab] };
+    });
+  }, [currentTab, scopeKey]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleUnauth = () => {
+      clearCenterAdminCache(scopeKey);
+    };
+    window.addEventListener('center-unauthenticated', handleUnauth);
+    return () => window.removeEventListener('center-unauthenticated', handleUnauth);
+  }, [scopeKey]);
+
+  const mountedTabs = useMemo(() => {
+    const set = new Set<CenterAdminTab>(
+      visitedByScope.scopeKey === scopeKey ? visitedByScope.tabs : [],
+    );
+    set.add(currentTab);
+    return set;
+  }, [currentTab, scopeKey, visitedByScope]);
 
   return (
     <div className={`ca-root${embedded ? ' is-embedded' : ''}`}>
@@ -168,31 +212,85 @@ export function CenterAdminPanel({
           )}
         </div>
 
-        <main>
-          {currentTab === 'providers' && (
-            <ProvidersTab api={api} onOpenExternalUrl={onOpenExternalUrl} />
+        <main key={scopeKey}>
+          {mountedTabs.has('providers') && (
+            <div
+              className={`ca-tab-pane${currentTab === 'providers' ? '' : ' is-hidden'}`}
+              aria-hidden={currentTab !== 'providers' || undefined}
+            >
+              <ProvidersTab
+                api={api}
+                active={currentTab === 'providers'}
+                cacheKey={scopeKey}
+                onOpenExternalUrl={onOpenExternalUrl}
+              />
+            </div>
           )}
-          {currentTab === 'capabilities' && (
-            <CapabilitiesTab
-              api={api}
-              onOpenExternal={onOpenExternal}
-              onOpenExternalUrl={onOpenExternalUrl}
-            />
+          {mountedTabs.has('capabilities') && (
+            <div
+              className={`ca-tab-pane${currentTab === 'capabilities' ? '' : ' is-hidden'}`}
+              aria-hidden={currentTab !== 'capabilities' || undefined}
+            >
+              <CapabilitiesTab
+                api={api}
+                active={currentTab === 'capabilities'}
+                cacheKey={scopeKey}
+                onOpenExternal={onOpenExternal}
+                onOpenExternalUrl={onOpenExternalUrl}
+              />
+            </div>
           )}
-          {currentTab === 'google' && (
-            <GoogleTab
-              api={api}
-              centerUrl={centerUrl}
-              onOpenExternalUrl={onOpenExternalUrl}
-              onConfigureBot={onConfigureBot}
-              onStartGoogleSetupWizard={onStartGoogleSetupWizard}
-            />
+          {mountedTabs.has('google') && (
+            <div
+              className={`ca-tab-pane${currentTab === 'google' ? '' : ' is-hidden'}`}
+              aria-hidden={currentTab !== 'google' || undefined}
+            >
+              <GoogleTab
+                api={api}
+                active={currentTab === 'google'}
+                cacheKey={scopeKey}
+                centerUrl={centerUrl}
+                onOpenExternalUrl={onOpenExternalUrl}
+                onConfigureBot={onConfigureBot}
+                onStartGoogleSetupWizard={onStartGoogleSetupWizard}
+              />
+            </div>
           )}
-          {currentTab === 'devices' && (
-            <DevicesTab api={api} onConfigureBot={onConfigureBot} renderQr={renderQr} />
+          {mountedTabs.has('devices') && (
+            <div
+              className={`ca-tab-pane${currentTab === 'devices' ? '' : ' is-hidden'}`}
+              aria-hidden={currentTab !== 'devices' || undefined}
+            >
+              <DevicesTab
+                api={api}
+                active={currentTab === 'devices'}
+                cacheKey={scopeKey}
+                onConfigureBot={onConfigureBot}
+                renderQr={renderQr}
+              />
+            </div>
           )}
-          {currentTab === 'vault' && <VaultTab api={api} />}
-          {currentTab === 'ops' && <OpsTab api={api} onOpenExternal={onOpenExternal} />}
+          {mountedTabs.has('vault') && (
+            <div
+              className={`ca-tab-pane${currentTab === 'vault' ? '' : ' is-hidden'}`}
+              aria-hidden={currentTab !== 'vault' || undefined}
+            >
+              <VaultTab api={api} active={currentTab === 'vault'} cacheKey={scopeKey} />
+            </div>
+          )}
+          {mountedTabs.has('ops') && (
+            <div
+              className={`ca-tab-pane${currentTab === 'ops' ? '' : ' is-hidden'}`}
+              aria-hidden={currentTab !== 'ops' || undefined}
+            >
+              <OpsTab
+                api={api}
+                active={currentTab === 'ops'}
+                cacheKey={scopeKey}
+                onOpenExternal={onOpenExternal}
+              />
+            </div>
+          )}
         </main>
       </div>
     </div>

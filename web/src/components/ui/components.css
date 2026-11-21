@@ -20,8 +20,8 @@
 }
 
 @keyframes ui-pop-in {
-  from { opacity: 0; transform: translate(-50%, -50%) scale(.96); }
-  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  from { opacity: 0; transform: translateX(-50%) scale(.96); }
+  to { opacity: 1; transform: translateX(-50%) scale(1); }
 }
 
 @keyframes ui-toast-in {
@@ -543,10 +543,10 @@
 
 .ui-overlay-content.is-center {
   left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
+  top: calc(var(--top, 0px) + min(14vh, 96px));
+  transform: translateX(-50%);
   width: min(520px, calc(100% - var(--space-8, 32px)));
-  max-height: calc(var(--viewport-height, 100dvh) - var(--top, 0px) - var(--space-8, 32px));
+  max-height: calc(var(--viewport-height, 100dvh) - var(--top, 0px) - min(14vh, 96px) - max(var(--bottom, env(safe-area-inset-bottom, 0px)), var(--ime-bottom, 0px)) - var(--space-4, 16px));
   border-radius: var(--radius-lg, 20px);
   border: 1px solid var(--color-line, var(--line));
   animation: ui-pop-in var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
@@ -555,13 +555,16 @@
 .ui-overlay-content.is-sheet {
   z-index: var(--z-sheet, 200);
   left: 50%;
-  bottom: 0;
+  bottom: var(--ime-bottom, 0px);
   transform: translateX(-50%);
   width: min(640px, 100%);
-  max-height: calc(var(--viewport-height, 100dvh) - var(--top, 0px) - var(--space-5, 20px));
+  height: auto;
+  max-height: calc(var(--viewport-height, 100dvh) - var(--top, 0px) - var(--ime-bottom, 0px) - var(--space-5, 20px));
   border-radius: var(--radius-xl, 26px) var(--radius-xl, 26px) 0 0;
-  padding-bottom: var(--bottom, 0px);
+  padding-bottom: max(calc(var(--bottom, env(safe-area-inset-bottom, 0px)) - var(--ime-bottom, 0px)), 0px);
   animation: ui-sheet-in var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
+  transition: height var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)),
+    max-height var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
 }
 
 .ui-overlay-content.is-drawer {
@@ -1135,6 +1138,7 @@ button.ui-list-row-main:disabled {
   .ui-switch-knob,
   .ui-segmented-item,
   .ui-chip,
+  .ui-overlay-content.is-sheet,
   .ui-action-sheet-item,
   .ui-action-sheet-cancel,
   .ui-toast-action,

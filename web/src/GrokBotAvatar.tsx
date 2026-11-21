@@ -512,6 +512,51 @@ export type GrokWorkingFailure = {
   detail?: string | null;
 };
 
+export interface GrokWorkingSlotNoticeAction {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  tone?: 'default' | 'danger';
+}
+
+export interface GrokWorkingSlotNotice {
+  id?: string;
+  tone?: 'info' | 'warning' | 'danger';
+  text: string;
+  actions?: readonly GrokWorkingSlotNoticeAction[];
+}
+
+export interface GrokBotWorkingSlotProps {
+  botKey: string;
+  preset: GrokAvatarPreset;
+  isBusy: boolean;
+  isStreaming: boolean;
+  activeToolName?: string | null;
+  hasThinking?: boolean;
+  queuedCount?: number;
+  hasError?: boolean;
+  isSending?: boolean;
+  isRecovering?: boolean;
+  startedAt?: number | null;
+  activity?: BotActivity;
+  learning?: BotLearningLiveState | null;
+  onOpenLearnedSkills?: () => void;
+  failure?: GrokWorkingFailure | null;
+  /** C7：在 D2 固定 44px 状态槽内就地展示 admission 失败或 clear 提示，避免往消息流插拔节点。 */
+  slotNotice?: GrokWorkingSlotNotice | null;
+  /** D2：空闲时保留固定 44px 占位槽，防止每轮结束时列表内容下跳 50-60px（默认 true）。 */
+  reserveSlot?: boolean;
+  t: (zh: string, en: string) => string;
+}
+
+const PERMANENT_SLOT_STYLE = {
+  minHeight: 44,
+  padding: '4px 2px',
+  boxSizing: 'border-box' as const,
+  justifyContent: 'center' as const,
+  animation: 'none',
+};
+
 export function GrokBotFailureRow({
   botKey,
   preset,
@@ -537,6 +582,7 @@ export function GrokBotFailureRow({
   return (
     <div
       className={`sand-activity-slot is-failed${inline ? ' is-inline' : ''}`}
+      style={inline ? undefined : PERMANENT_SLOT_STYLE}
       aria-live={inline ? undefined : 'polite'}
       data-role="assistant"
       data-grok-state="idle"
@@ -597,30 +643,16 @@ export function GrokBotWorkingSlot({
   learning,
   onOpenLearnedSkills,
   failure = null,
+  slotNotice = null,
+  reserveSlot = true,
   t,
-}: {
-  botKey: string;
-  preset: GrokAvatarPreset;
-  isBusy: boolean;
-  isStreaming: boolean;
-  activeToolName?: string | null;
-  hasThinking?: boolean;
-  queuedCount?: number;
-  hasError?: boolean;
-  isSending?: boolean;
-  isRecovering?: boolean;
-  startedAt?: number | null;
-  activity?: BotActivity;
-  learning?: BotLearningLiveState | null;
-  onOpenLearnedSkills?: () => void;
-  failure?: GrokWorkingFailure | null;
-  t: (zh: string, en: string) => string;
-}) {
+}: GrokBotWorkingSlotProps) {
   const reducedMotion = useReducedMotion();
   const isPreLlmWaiting =
     isBusy &&
     (isBotPreLlmPhase(activity?.phase) ||
       (Boolean(isSending) && !isBotLlmRunningPhase(activity?.phase) && activity?.phase !== 'stopping'));
+  const activeBusy = isBusy && !isPreLlmWaiting;
 
   const resolveStartMs = () => {
     if (typeof startedAt === 'number' && Number.isFinite(startedAt) && startedAt > 0) {
@@ -633,36 +665,81 @@ export function GrokBotWorkingSlot({
       return cached;
     }
     const now = Date.now();
-    if (isBusy && !isPreLlmWaiting) workingStartMsByBotKey.set(botKey, now);
+    if (activeBusy) workingStartMsByBotKey.set(botKey, now);
     return now;
   };
 
   const elapsedRef = useRef<HTMLSpanElement | null>(null);
   const elapsedSecRef = useRef<number>(
-    isBusy && !isPreLlmWaiting ? Math.max(0, Math.floor((Date.now() - resolveStartMs()) / 1000)) : 0,
+    activeBusy ? Math.max(0, Math.floor((Date.now() - resolveStartMs()) / 1000)) : 0,
   );
   const [finalElapsedSec, setFinalElapsedSec] = useState(0);
   const [settlementOutcome, setSettlementOutcome] = useState<'success' | 'stopped' | null>(null);
+  const [settlementSeq, setSettlementSeq] = useState(0);
+  const [settlingFadingOut, setSettlingFadingOut] = useState(false);
   const [learningOutcome, setLearningOutcome] = useState<BotLearningOutcomeSummary | null>(null);
   const [reflectionReadingPhase, setReflectionReadingPhase] = useState(false);
   const [emphasized, setEmphasized] = useState(false);
   const [pulseThinkingMorph, setPulseThinkingMorph] = useState(false);
-  const wasBusyRef = useRef(isBusy && !isPreLlmWaiting);
+  const [prevTrack, setPrevTrack] = useState<{ botKey: string; wasActiveBusy: boolean }>(() => ({
+    botKey,
+    wasActiveBusy: activeBusy,
+  }));
   const activeFailure = !isBusy && failure ? failure : null;
   const hasActiveFailure = Boolean(activeFailure);
+
+  // C2：在渲染期同步比较上一帧的 activeBusy 推导 settlementOutcome，
+  // 彻底消除 isBusy 变 false 后等待 useEffect 触发造成的那一帧空白闪烁。
+  if (prevTrack.botKey !== botKey) {
+    setPrevTrack({ botKey, wasActiveBusy: activeBusy });
+    setSettlementOutcome(null);
+    setFinalElapsedSec(0);
+    setSettlingFadingOut(false);
+    setLearningOutcome(null);
+  } else if (prevTrack.wasActiveBusy !== activeBusy) {
+    setPrevTrack({ botKey, wasActiveBusy: activeBusy });
+    if (activeBusy) {
+      setSettlementOutcome(null);
+      setFinalElapsedSec(0);
+      setSettlingFadingOut(false);
+      setLearningOutcome(null);
+    } else if (
+      !isPreLlmWaiting &&
+      !isRecovering &&
+      !hasActiveFailure &&
+      !hasError &&
+      activity?.phase !== 'failed'
+    ) {
+      const finalStartMs = workingStartMsByBotKey.get(botKey);
+      const finalSec =
+        typeof finalStartMs === 'number' && Number.isFinite(finalStartMs) && finalStartMs > 0
+          ? Math.max(0, Math.floor((Date.now() - finalStartMs) / 1000))
+          : elapsedSecRef.current;
+      setFinalElapsedSec(finalSec);
+      setSettlementOutcome(activity?.phase === 'stopped' ? 'stopped' : 'success');
+      setSettlingFadingOut(false);
+      setSettlementSeq((seq) => seq + 1);
+    } else {
+      setSettlementOutcome(null);
+      setFinalElapsedSec(0);
+      setSettlingFadingOut(false);
+    }
+  } else if (
+    settlementOutcome !== null &&
+    (isPreLlmWaiting || isRecovering || hasActiveFailure || hasError || activity?.phase === 'failed')
+  ) {
+    setSettlementOutcome(null);
+    setFinalElapsedSec(0);
+    setSettlingFadingOut(false);
+  }
 
   useEffect(() => {
     if (isPreLlmWaiting) {
       workingStartMsByBotKey.delete(botKey);
       elapsedSecRef.current = 0;
-      setSettlementOutcome(null);
-      setFinalElapsedSec(0);
       return undefined;
     }
     if (isBusy) {
-      wasBusyRef.current = true;
-      setSettlementOutcome(null);
-      setLearningOutcome(null);
       const startMs = resolveStartMs();
       const update = () => {
         const nextSec = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
@@ -676,42 +753,32 @@ export function GrokBotWorkingSlot({
       const timer = window.setInterval(update, 250);
       return () => window.clearInterval(timer);
     }
-    if (isRecovering) {
-      wasBusyRef.current = false;
-      setSettlementOutcome(null);
-      return undefined;
-    }
-    if (wasBusyRef.current) {
-      wasBusyRef.current = false;
-      const finalStartMs = workingStartMsByBotKey.get(botKey);
-      const finalSec =
-        typeof finalStartMs === 'number' && Number.isFinite(finalStartMs) && finalStartMs > 0
-          ? Math.max(0, Math.floor((Date.now() - finalStartMs) / 1000))
-          : elapsedSecRef.current;
-      workingStartMsByBotKey.delete(botKey);
-      // 'failed' 由 activeFailure 或轮次内嵌失败行持续渲染，不走 1.45s 自动清除的 error 结算，避免闪跳或重复。
-      if (hasActiveFailure || hasError || activity?.phase === 'failed') {
-        elapsedSecRef.current = 0;
-        setSettlementOutcome(null);
-        setFinalElapsedSec(0);
-        return undefined;
-      }
-      elapsedSecRef.current = finalSec;
-      setFinalElapsedSec(finalSec);
-      setSettlementOutcome(
-        activity?.phase === 'stopped' ? 'stopped' : 'success',
-      );
-      const settleTimer = window.setTimeout(() => {
-        elapsedSecRef.current = 0;
-        setSettlementOutcome(null);
-        setFinalElapsedSec(0);
-      }, 1450);
-      return () => window.clearTimeout(settleTimer);
-    }
     workingStartMsByBotKey.delete(botKey);
+    if (!settlementOutcome) {
+      elapsedSecRef.current = 0;
+    }
     return undefined;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isBusy, isPreLlmWaiting, startedAt, botKey, hasError, hasActiveFailure, isRecovering, activity?.phase]);
+  }, [isBusy, isPreLlmWaiting, startedAt, botKey, settlementOutcome]);
+
+  useEffect(() => {
+    if (!settlementOutcome) return undefined;
+    const fadeTimer = reducedMotion
+      ? undefined
+      : window.setTimeout(() => {
+          setSettlingFadingOut(true);
+        }, 1200);
+    const settleTimer = window.setTimeout(() => {
+      elapsedSecRef.current = 0;
+      setSettlementOutcome(null);
+      setFinalElapsedSec(0);
+      setSettlingFadingOut(false);
+    }, 1450);
+    return () => {
+      if (fadeTimer !== undefined) window.clearTimeout(fadeTimer);
+      window.clearTimeout(settleTimer);
+    };
+  }, [settlementOutcome, settlementSeq, reducedMotion]);
 
   // 跟踪静默自学习结果：仅在真正保存了新技能、归档了过期技能或更新记忆时短暂展示 'proud' 气泡，
   // "Nothing to save" 或被抢占/取消则静默收起，绝不打扰前台用户。
@@ -748,10 +815,13 @@ export function GrokBotWorkingSlot({
     !isBusy && (activity?.phase === 'stopped' || (activity?.webhookStopPending && activity?.phase !== 'failed'))
       ? activity : null;
 
+  const cleanNoticeText = slotNotice?.text?.trim() ?? '';
+  const showSlotNotice = !isBusy && !activeFailure && cleanNoticeText.length > 0;
+
   const isReflecting =
-    !isBusy && !isRecovering && !settlementOutcome && !settledActivity && !activeFailure && Boolean(learning?.active);
+    !isBusy && !isRecovering && !showSlotNotice && !settlementOutcome && !settledActivity && !activeFailure && Boolean(learning?.active);
   const showLearningOutcome =
-    !isBusy && !isRecovering && !settlementOutcome && !settledActivity && !activeFailure && !isReflecting && Boolean(learningOutcome);
+    !isBusy && !isRecovering && !showSlotNotice && !settlementOutcome && !settledActivity && !activeFailure && !isReflecting && Boolean(learningOutcome);
 
   useEffect(() => {
     if (!isReflecting || learning?.phase === 'writing') {
@@ -776,12 +846,75 @@ export function GrokBotWorkingSlot({
     return () => window.clearInterval(cycle);
   }, [isBusy, isStreaming, activeToolName, isPhaseLed]);
 
-  if (!isBusy && (isRecovering || (!settlementOutcome && !settledActivity && !activeFailure && !isReflecting && !showLearningOutcome))) {
-    return null;
-  }
-
   if (activeFailure) {
     return <GrokBotFailureRow botKey={botKey} preset={preset} {...activeFailure} t={t} />;
+  }
+
+  if (showSlotNotice && slotNotice) {
+    const isDangerNotice = slotNotice.tone === 'danger';
+    return (
+      <div
+        className="sand-activity-slot is-notice"
+        style={{
+          ...PERMANENT_SLOT_STYLE,
+          transition: reducedMotion ? 'none' : 'opacity 200ms ease',
+        }}
+        data-role="assistant"
+        data-grok-state="idle"
+        data-slot-notice-id={slotNotice.id}
+      >
+        <div
+          className="bot-chat-system-notice"
+          role={isDangerNotice ? 'alert' : 'status'}
+          style={{
+            alignSelf: 'flex-start',
+            minHeight: 34,
+            padding: '4px 12px',
+            ...(isDangerNotice
+              ? {
+                  borderColor: 'color-mix(in srgb, var(--color-danger, var(--danger)) 36%, var(--color-line, var(--line)))',
+                  color: 'var(--color-danger, var(--danger))',
+                }
+              : {}),
+          }}
+        >
+          <span>{cleanNoticeText}</span>
+          {slotNotice.actions?.map((action, idx) => (
+            <button
+              key={`${action.label}-${idx}`}
+              type="button"
+              className={`hub-outline-btn${action.tone === 'danger' ? ' danger' : ''}`}
+              disabled={action.disabled}
+              onClick={action.onClick}
+            >
+              {action.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  const isIdle =
+    !isBusy && (isRecovering || (!settlementOutcome && !settledActivity && !isReflecting && !showLearningOutcome));
+
+  if (isIdle) {
+    if (!reserveSlot) return null;
+    return (
+      <div
+        className="sand-activity-slot is-idle"
+        style={{
+          ...PERMANENT_SLOT_STYLE,
+          height: 44,
+          opacity: 0,
+          pointerEvents: 'none',
+          transition: reducedMotion ? 'none' : 'opacity 200ms ease',
+        }}
+        data-role="assistant"
+        data-grok-state="idle"
+        aria-hidden="true"
+      />
+    );
   }
 
   const baseState = resolveGrokMascotState({
@@ -898,6 +1031,12 @@ export function GrokBotWorkingSlot({
   return (
     <div
       className={`sand-activity-slot${!isBusy && (settlementOutcome || settledActivity) ? ' is-settling' : ''}${isReflecting || showLearningOutcome ? ' is-reflecting' : ''}`}
+      style={{
+        ...PERMANENT_SLOT_STYLE,
+        height: 44,
+        opacity: settlingFadingOut ? 0 : 1,
+        transition: reducedMotion ? 'none' : 'opacity 220ms ease',
+      }}
       data-role="assistant"
       data-grok-state={mascotState}
       aria-live="polite"

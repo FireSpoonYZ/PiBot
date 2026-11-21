@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { createPortal } from 'react-dom';
 import { Mic, Plus, RefreshCw, Square, Trash2, X, Zap } from 'lucide-react';
 import {
   BotHost,
@@ -44,7 +45,9 @@ import {
   type ImageAttachmentData,
   type PickedImageSource,
 } from '../imageAttachments';
-import { ErrorNotice, FloatingPillToast, errorText, useText } from '../ui';
+import { errorText, useText } from '../ui';
+import { LabelStack, SmoothExpand } from '../layout';
+import { useNotice, type NoticeTone } from '../notice';
 import { SendButtonIcon } from '../SendButtonIcon';
 import {
   parseSlashCommand,
@@ -60,6 +63,82 @@ import {
   type ChatPending,
   type RemoteTaskContext,
 } from './types';
+
+type FieldSizingCSSProperties = CSSProperties & {
+  fieldSizing?: 'content' | 'fixed';
+};
+
+function supportsFieldSizingContent(): boolean {
+  return (
+    typeof CSS !== 'undefined' &&
+    typeof CSS.supports === 'function' &&
+    CSS.supports('field-sizing', 'content')
+  );
+}
+
+const FLOATING_ANCHOR_STYLE: CSSProperties = {
+  position: 'relative',
+  height: 0,
+};
+
+const FLOATING_STACK_STYLE: CSSProperties = {
+  position: 'absolute',
+  left: 0,
+  right: 0,
+  bottom: 12,
+  zIndex: 12,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  pointerEvents: 'none',
+};
+
+const FLOATING_CARD_STYLE: CSSProperties = {
+  pointerEvents: 'auto',
+  padding: '10px 14px',
+  gap: 8,
+  maxHeight: 'min(26vh, 180px)',
+  overflowY: 'auto',
+  backdropFilter: 'blur(12px)',
+  boxShadow: '0 8px 24px color-mix(in srgb, var(--color-scrim) 20%, transparent)',
+  animation: 'grok-pop-up 180ms var(--ease-out) both',
+};
+
+const FLOATING_CONFLICT_CARD_STYLE: CSSProperties = {
+  pointerEvents: 'auto',
+  padding: '12px 14px',
+  gap: 8,
+  maxHeight: 'min(42vh, 320px)',
+  overflowY: 'auto',
+  backdropFilter: 'blur(12px)',
+  boxShadow: '0 10px 28px color-mix(in srgb, var(--color-scrim) 24%, transparent)',
+  animation: 'grok-pop-up 180ms var(--ease-out) both',
+};
+
+const FLOATING_FILES_ROW_STYLE: CSSProperties = {
+  pointerEvents: 'auto',
+  marginBottom: 0,
+  padding: '6px 10px',
+  maxHeight: 88,
+  overflowY: 'auto',
+  borderRadius: 'var(--radius-md, 14px)',
+  border: '1px solid var(--line)',
+  background: 'color-mix(in srgb, var(--color-surface-2, var(--surface)) 92%, var(--bg))',
+  backdropFilter: 'blur(12px)',
+  boxShadow: '0 4px 14px color-mix(in srgb, var(--color-scrim) 14%, transparent)',
+  animation: 'grok-pop-up 180ms var(--ease-out) both',
+};
+
+const FLOATING_QUEUE_WRAP_STYLE: CSSProperties = {
+  pointerEvents: 'auto',
+  marginBottom: -6,
+  animation: 'grok-pop-up 180ms var(--ease-out) both',
+};
+
+const PORTALED_QUEUE_WRAP_STYLE: CSSProperties = {
+  pointerEvents: 'auto',
+  animation: 'grok-pop-up 180ms var(--ease-out) both',
+};
 
 export interface RemotePendingComposerProps {
   api: DesktopPanelApi;
@@ -103,6 +182,7 @@ export interface RemotePendingComposerProps {
   onConsumedQuote?: () => void;
   taskContext?: RemoteTaskContext;
   onTaskMessageSent?: (rawText: string, capturedContext?: RemoteTaskContext) => void;
+  floatingDockContainer?: HTMLElement | null;
 }
 
 export function RemotePendingComposer({
@@ -142,14 +222,45 @@ export function RemotePendingComposer({
   onConsumedQuote,
   taskContext,
   onTaskMessageSent,
+  floatingDockContainer,
 }: RemotePendingComposerProps) {
   const t = useText();
+  const { notify, dismiss } = useNotice();
   const coarsePointer = useIsCoarsePointer();
+  const supportsFieldSizing = useMemo(() => supportsFieldSizingContent(), []);
+  const textareaStyle = useMemo<FieldSizingCSSProperties | undefined>(() => {
+    if (!supportsFieldSizing) return undefined;
+    return {
+      fieldSizing: 'content',
+      height: 'auto',
+      minHeight: '36px',
+      maxHeight: '110px',
+    };
+  }, [supportsFieldSizing]);
   const target = useMemo(() => ({ kind: 'primary' as const, id: botId }), [botId]);
   const drafts = useDrafts({ api, identity, target });
-  const [notice, setNotice] = useState('');
-  const [unsupportedNotice, setUnsupportedNotice] = useState('');
-  const [imageError, setImageError] = useState('');
+  const [noticeState, setNoticeState] = useState<{ text: string; tone: NoticeTone; seq: number }>({
+    text: '',
+    tone: 'error',
+    seq: 0,
+  });
+  const setNotice = useCallback((text: string, tone: NoticeTone = 'error') => {
+    setNoticeState(prev => ({ text, tone, seq: text ? prev.seq + 1 : prev.seq }));
+  }, []);
+  const [imageErrorState, setImageErrorState] = useState<{ text: string; seq: number }>({
+    text: '',
+    seq: 0,
+  });
+  const setImageError = useCallback((text: string) => {
+    setImageErrorState(prev => ({ text, seq: text ? prev.seq + 1 : prev.seq }));
+  }, []);
+  const [stopErrorState, setStopErrorState] = useState<{ text: string; seq: number }>({
+    text: '',
+    seq: 0,
+  });
+  const setStopError = useCallback((text: string) => {
+    setStopErrorState(prev => ({ text, seq: text ? prev.seq + 1 : prev.seq }));
+  }, []);
   const [queueBusy, setQueueBusy] = useState(false);
   const [outboxPendingItems, setOutboxPendingItems] = useState<PendingRecord[]>([]);
   /** 选图/上传在途：禁重复选择与发送（state 驱动 UI disabled）；归属冻结到发起时的 identity/botId/draftKey。 */
@@ -158,16 +269,91 @@ export function RemotePendingComposer({
     return async (attachmentId) => api.call(identity, 'getAttachment', { botId, attachmentId }) as Promise<ImageAttachmentData>;
   }, [api, identity, botId]);
 
+  const botNoticeKey = taskContext?.botKey || `${identity.profileId}:${identity.targetDeviceId}:${botId}`;
+  const errorNoticeId = `remote-composer-error:${botNoticeKey}`;
+  const imageErrorNoticeId = `remote-composer-image-error:${botNoticeKey}`;
+  const savePausedNoticeId = `remote-composer-save-paused:${botNoticeKey}`;
+  const unsupportedNoticeId = `remote-composer-unsupported:${botNoticeKey}`;
+  const retrySaveRef = useRef(drafts.retrySave);
+  retrySaveRef.current = drafts.retrySave;
+
   const effectiveText = editingTurn ? editingTurn.text : drafts.text;
   const effectiveAttachments = editingTurn ? editingTurn.attachments : drafts.attachments;
   const editingTurnRef = useRef(editingTurn);
   editingTurnRef.current = editingTurn;
+  const [editBannerMounted, setEditBannerMounted] = useState(Boolean(editingTurn));
 
   useEffect(() => {
-    if (!unsupportedNotice) return;
-    const timer = window.setTimeout(() => setUnsupportedNotice(''), 3000);
+    if (editingTurn) {
+      setEditBannerMounted(true);
+      return;
+    }
+    const timer = window.setTimeout(() => setEditBannerMounted(false), 240);
     return () => window.clearTimeout(timer);
-  }, [unsupportedNotice]);
+  }, [editingTurn]);
+
+  const nonPausedDraftError = drafts.savePaused ? '' : (drafts.error || '');
+  const primaryErrorText = nonPausedDraftError || noticeState.text || stopErrorState.text;
+  const primaryErrorTone: NoticeTone = nonPausedDraftError
+    ? 'error'
+    : noticeState.text
+      ? noticeState.tone
+      : 'error';
+  const primaryErrorSeq = nonPausedDraftError
+    ? 0
+    : noticeState.text
+      ? noticeState.seq
+      : stopErrorState.seq;
+
+  useEffect(() => {
+    if (primaryErrorText) {
+      notify({
+        id: errorNoticeId,
+        tone: primaryErrorTone,
+        title: primaryErrorText,
+      });
+    } else {
+      dismiss(errorNoticeId);
+    }
+  }, [primaryErrorText, primaryErrorTone, primaryErrorSeq, errorNoticeId, notify, dismiss]);
+
+  useEffect(() => {
+    if (imageErrorState.text) {
+      notify({
+        id: imageErrorNoticeId,
+        tone: 'error',
+        title: imageErrorState.text,
+      });
+    } else {
+      dismiss(imageErrorNoticeId);
+    }
+  }, [imageErrorState.text, imageErrorState.seq, imageErrorNoticeId, notify, dismiss]);
+
+  useEffect(() => {
+    if (drafts.savePaused) {
+      notify({
+        id: savePausedNoticeId,
+        tone: 'warning',
+        title: drafts.error || t('草稿自动保存已暂停，本地输入已保留。', 'Draft autosave paused; local input retained.'),
+        sticky: true,
+        action: {
+          label: t('重试保存草稿', 'Retry draft save'),
+          onClick: () => retrySaveRef.current(),
+        },
+      });
+    } else {
+      dismiss(savePausedNoticeId);
+    }
+  }, [drafts.savePaused, drafts.error, savePausedNoticeId, notify, dismiss, t]);
+
+  useEffect(() => {
+    return () => {
+      dismiss(errorNoticeId);
+      dismiss(imageErrorNoticeId);
+      dismiss(savePausedNoticeId);
+      dismiss(unsupportedNoticeId);
+    };
+  }, [errorNoticeId, imageErrorNoticeId, savePausedNoticeId, unsupportedNoticeId, dismiss]);
 
   useEffect(() => {
     if (!pendingQuote) return;
@@ -311,14 +497,13 @@ export function RemotePendingComposer({
       },
       onSettled: release,
     });
-  }, [imageUploading, drafts.key, drafts.attempt, blocked, commandBusy, editSubmitting, inTauriUi, uploadRemoteImages]);
+  }, [imageUploading, drafts.key, drafts.attempt, blocked, commandBusy, editSubmitting, inTauriUi, uploadRemoteImages, setImageError]);
   const [confirmedConflict, setConfirmedConflict] = useState<{ requestId: string; pendingId: string; original: DesktopDraftEntry; handle?: { key: string; attemptId: string } }>();
   const [resolvingConflict, setResolvingConflict] = useState(false);
   const [slashBusy, setSlashBusy] = useState<SlashCommandName>();
   const slashBusyRef = useRef(false);
   const sending = useRef(false);
   const [sendingNow, setSendingNow] = useState(false);
-  const [stopError, setStopError] = useState('');
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   /** 停止与发送并存、独立：不被 attempt/上传/草稿/action.busy 锁禁，只防重复。 */
@@ -337,7 +522,7 @@ export function RemotePendingComposer({
   const recallRemoteQueuedItem = async (item: UnifiedQueuedStripItem, mergeIntoDraft = true) => {
     if (queueBusy) return;
     if (mergeIntoDraft && (drafts.attempt || blocked || fallbackDraft)) {
-      setNotice(t('当前存在未确认草稿，请先处理后再撤回排队消息。', 'Resolve the unconfirmed draft before recalling queued messages.'));
+      setNotice(t('当前存在未确认草稿，请先处理后再撤回排队消息。', 'Resolve the unconfirmed draft before recalling queued messages.'), 'warning');
       return;
     }
     setQueueBusy(true);
@@ -389,7 +574,7 @@ export function RemotePendingComposer({
   const recallAllRemoteQueued = async () => {
     if (queueBusy) return;
     if (drafts.attempt || blocked || fallbackDraft) {
-      setNotice(t('当前存在未确认草稿，请先处理后再撤回排队消息。', 'Resolve the unconfirmed draft before recalling queued messages.'));
+      setNotice(t('当前存在未确认草稿，请先处理后再撤回排队消息。', 'Resolve the unconfirmed draft before recalling queued messages.'), 'warning');
       return;
     }
     setQueueBusy(true);
@@ -459,7 +644,8 @@ export function RemotePendingComposer({
     }
   };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (supportsFieldSizing) return;
     const el = textareaRef.current;
     if (!el) return;
     if (!effectiveText) {
@@ -468,7 +654,7 @@ export function RemotePendingComposer({
       el.style.height = 'auto';
       el.style.height = `${Math.min(el.scrollHeight, 110)}px`;
     }
-  }, [effectiveText]);
+  }, [effectiveText, supportsFieldSizing]);
 
   const [transfer, setTransfer] = useState<{ source: string; text: string }>();
   useEffect(() => {
@@ -542,7 +728,7 @@ export function RemotePendingComposer({
               }
             }
             onNotSent(input.requestId);
-            setNotice(t('请求未发送，草稿已恢复。', 'Request not sent; draft restored.'));
+            setNotice(t('请求未发送，草稿已恢复。', 'Request not sent; draft restored.'), 'info');
             return;
           }
         }
@@ -606,7 +792,7 @@ export function RemotePendingComposer({
         if (!drafts.files.length) draft.files.forEach(file => drafts.addFile(file));
         (draft.attachments ?? []).forEach(att => drafts.addAttachment(att));
         onNotSent(pending.requestId);
-        setNotice(t('请求未发送，草稿已恢复。', 'Request not sent; draft restored.'));
+        setNotice(t('请求未发送，草稿已恢复。', 'Request not sent; draft restored.'), 'info');
       } catch { /* preserve the original request when reconciliation fails */ }
       finally { reading = false; }
     };
@@ -643,7 +829,7 @@ export function RemotePendingComposer({
       if (!adopted.ok) throw new Error(adopted.error || t('无法读取新版草稿', 'Unable to read newer draft'));
       onNotSent(conflict.requestId);
       setConfirmedConflict(undefined);
-      setNotice(t('已保留新版草稿，旧请求已取消。', 'Kept the newer draft; the original request was cancelled.'));
+      setNotice(t('已保留新版草稿，旧请求已取消。', 'Kept the newer draft; the original request was cancelled.'), 'success');
     } catch (error) {
       setNotice(errorText(error));
     } finally {
@@ -837,25 +1023,41 @@ export function RemotePendingComposer({
     }
   };
 
-  return (
+  const hasFloatingStrips = Boolean(
+    fallbackDraft ||
+    confirmedConflict ||
+    (!editingTurn && drafts.files.length > 0) ||
+    (!editingTurn && queuedStripItems.length > 0),
+  );
+  const mergeIdleLabel = t('合并到草稿', 'Merge into draft');
+  const mergeBusyLabel = t('合并中…', 'Merging…');
+  const keepNewerIdleLabel = t('保留新版草稿，结束旧尝试', 'Keep newer draft and end original attempt');
+  const keepNewerBusyLabel = t('正在处理…', 'Resolving…');
+
+  const floatingStripItems = hasFloatingStrips ? (
     <>
-      <ErrorNotice
-        error={drafts.error || notice || stopError}
-        compact
-        onDismiss={notice && !drafts.error ? () => setNotice('') : undefined}
-      />
       {fallbackDraft && (
-        <section className="grok-card-group" role="status">
+        <section className="grok-card-group" role="status" style={FLOATING_CARD_STYLE}>
           <p>{t('离线输入已保留：', 'Offline draft retained:')} {fallbackDraft}</p>
-          <button type="button" className="hub-outline-btn" disabled={!drafts.key || Boolean(drafts.attempt) || Boolean(transfer)} onClick={() => {
-            const text = drafts.text === fallbackDraft ? drafts.text : [drafts.text, fallbackDraft].filter(Boolean).join('\n');
-            setTransfer({ source: fallbackDraft, text });
-            drafts.editText(text);
-          }}>{t('合并到草稿', 'Merge into draft')}</button>
+          <button
+            type="button"
+            className="hub-outline-btn"
+            disabled={!drafts.key || Boolean(drafts.attempt) || Boolean(transfer)}
+            onClick={() => {
+              const text = drafts.text === fallbackDraft ? drafts.text : [drafts.text, fallbackDraft].filter(Boolean).join('\n');
+              setTransfer({ source: fallbackDraft, text });
+              drafts.editText(text);
+            }}
+          >
+            <LabelStack
+              active={transfer ? mergeBusyLabel : mergeIdleLabel}
+              labels={[mergeIdleLabel, mergeBusyLabel]}
+            />
+          </button>
         </section>
       )}
       {confirmedConflict && (
-        <section className="grok-card-group" aria-label={t('草稿冲突', 'Draft conflict')}>
+        <section className="grok-card-group" aria-label={t('草稿冲突', 'Draft conflict')} style={FLOATING_CONFLICT_CARD_STYLE}>
           <p>{t('原请求已确认未发送。请先查看或复制原文，再选择保留新版草稿。', 'The original request was not sent. Review or copy it before keeping the newer draft.')}</p>
           {confirmedConflict.original.attachments?.length ? (
             <SentAttachments attachments={confirmedConflict.original.attachments} fetcher={remoteFetcher} />
@@ -863,13 +1065,15 @@ export function RemotePendingComposer({
           <textarea readOnly rows={4} value={confirmedConflict.original.text} aria-label={t('原草稿，可选择复制', 'Original draft, selectable for copying')} style={{ width: '100%' }} />
           {confirmedConflict.original.files.map((file, index) => <div key={`${file.path}:${index}`} className="pre-wrap">{file.name}: {file.path}</div>)}
           <button type="button" className="hub-outline-btn" disabled={resolvingConflict} onClick={() => void keepNewerDraft()}>
-            {t('保留新版草稿，结束旧尝试', 'Keep newer draft and end original attempt')}
+            <LabelStack
+              active={resolvingConflict ? keepNewerBusyLabel : keepNewerIdleLabel}
+              labels={[keepNewerIdleLabel, keepNewerBusyLabel]}
+            />
           </button>
         </section>
       )}
-
       {!editingTurn && drafts.files.length > 0 && (
-        <div className="grok-composer-files-row">
+        <div className="grok-composer-files-row" style={FLOATING_FILES_ROW_STYLE}>
           {drafts.files.map((file, index) => (
             <span key={`${file.path}:${index}`} className="grok-model-quick-chip active">
               <span>{file.name}</span>
@@ -885,14 +1089,39 @@ export function RemotePendingComposer({
           ))}
         </div>
       )}
-
-      {drafts.savePaused && (
-        <div style={{ marginBottom: 6 }}>
-          <button type="button" className="hub-outline-btn" onClick={drafts.retrySave}>
-            {t('重试保存草稿', 'Retry draft save')}
-          </button>
+      {!editingTurn && queuedStripItems.length > 0 ? (
+        <div
+          className="remote-composer-queue-float"
+          style={floatingDockContainer ? PORTALED_QUEUE_WRAP_STYLE : FLOATING_QUEUE_WRAP_STYLE}
+        >
+          <PendingQueueStrip
+            items={queuedStripItems}
+            disabled={queueBusy || stopBusy}
+            canSteer={canSteerRemote}
+            onRecall={item => void recallRemoteQueuedItem(item, true)}
+            onRecallAll={() => void recallAllRemoteQueued()}
+            onDiscard={item => void recallRemoteQueuedItem(item, false)}
+            onSteer={canSteerRemote ? (item => void steerRemoteQueuedItem(item)) : undefined}
+            tr={t}
+          />
         </div>
-      )}
+      ) : null}
+    </>
+  ) : null;
+
+  return (
+    <>
+      {floatingStripItems
+        ? floatingDockContainer
+          ? createPortal(floatingStripItems, floatingDockContainer)
+          : (
+              <div className="remote-composer-float-anchor" style={FLOATING_ANCHOR_STYLE}>
+                <div className="remote-composer-floating-stack" style={FLOATING_STACK_STYLE}>
+                  {floatingStripItems}
+                </div>
+              </div>
+            )
+        : null}
 
       {slash.open && (
         <div id={slash.listboxId} className="bot-slash-popover" role="listbox" aria-label={t('斜杠命令', 'Slash commands')}>
@@ -961,53 +1190,37 @@ export function RemotePendingComposer({
         </div>
       )}
 
-      {unsupportedNotice ? (
-        <FloatingPillToast
-          message={unsupportedNotice}
-          tone="warning"
-          onDismiss={() => setUnsupportedNotice('')}
-        />
-      ) : null}
-      {imageError ? <ErrorNotice compact error={imageError} onDismiss={() => setImageError('')} /> : null}
-      {!editingTurn && queuedStripItems.length > 0 ? (
-        <PendingQueueStrip
-          items={queuedStripItems}
-          disabled={queueBusy || stopBusy}
-          canSteer={canSteerRemote}
-          onRecall={item => void recallRemoteQueuedItem(item, true)}
-          onRecallAll={() => void recallAllRemoteQueued()}
-          onDiscard={item => void recallRemoteQueuedItem(item, false)}
-          onSteer={canSteerRemote ? (item => void steerRemoteQueuedItem(item)) : undefined}
-          tr={t}
-        />
-      ) : null}
-      {editingTurn ? (
-        <ComposerEditBanner
-          disabled={Boolean(editSubmitting)}
-          onCancel={() => onCancelEditTurn?.()}
-          tr={t}
-        />
-      ) : null}
-      {effectiveAttachments.length > 0 ? (
-        <div className="attachments" role="group" aria-label={t('附件', 'Attachments')}>
-          {effectiveAttachments.map((att, index) => (
-            <ImageAttachmentThumb
-              key={att.id}
-              attachment={att}
-              fetcher={remoteFetcher}
-              disabled={Boolean(drafts.attempt) || blocked || commandLocked || Boolean(editSubmitting)}
-              onRemove={() => {
-                if (editingTurn) {
-                  onChangeEditTurn?.({ attachments: editingTurn.attachments.filter((_, i) => i !== index) });
-                } else {
-                  drafts.removeAttachment(index);
-                }
-              }}
-              t={t}
-            />
-          ))}
-        </div>
-      ) : null}
+      <SmoothExpand open={Boolean(editingTurn)}>
+        {editingTurn || editBannerMounted ? (
+          <ComposerEditBanner
+            disabled={!editingTurn || Boolean(editSubmitting)}
+            onCancel={() => onCancelEditTurn?.()}
+            tr={t}
+          />
+        ) : null}
+      </SmoothExpand>
+      <SmoothExpand open={effectiveAttachments.length > 0}>
+        {effectiveAttachments.length > 0 ? (
+          <div className="attachments" role="group" aria-label={t('附件', 'Attachments')}>
+            {effectiveAttachments.map((att, index) => (
+              <ImageAttachmentThumb
+                key={att.id}
+                attachment={att}
+                fetcher={remoteFetcher}
+                disabled={Boolean(drafts.attempt) || blocked || commandLocked || Boolean(editSubmitting)}
+                onRemove={() => {
+                  if (editingTurn) {
+                    onChangeEditTurn?.({ attachments: editingTurn.attachments.filter((_, i) => i !== index) });
+                  } else {
+                    drafts.removeAttachment(index);
+                  }
+                }}
+                t={t}
+              />
+            ))}
+          </div>
+        ) : null}
+      </SmoothExpand>
 
       <div className="grok-composer-row">
         <button
@@ -1024,6 +1237,7 @@ export function RemotePendingComposer({
           <textarea
             ref={textareaRef}
             rows={1}
+            style={textareaStyle}
             className={effectiveText ? 'has-text' : 'is-empty'}
             value={effectiveText}
             disabled={Boolean(drafts.attempt) || blocked || commandLocked || Boolean(editSubmitting)}
@@ -1083,7 +1297,14 @@ export function RemotePendingComposer({
               aria-disabled="true"
               aria-label={t('仅本机 Bot 支持语音/图片', 'Voice / images are only available for local Bots')}
               title={t('仅本机 Bot 支持语音/图片', 'Voice / images are only available for local Bots')}
-              onClick={() => setUnsupportedNotice(t('仅本机 Bot 支持语音/图片', 'Voice / images are only available for local Bots'))}
+              onClick={() =>
+                notify({
+                  id: unsupportedNoticeId,
+                  tone: 'warning',
+                  title: t('仅本机 Bot 支持语音/图片', 'Voice / images are only available for local Bots'),
+                  durationMs: 3000,
+                })
+              }
             >
               <Mic size={19} />
             </button>

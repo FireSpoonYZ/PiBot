@@ -914,69 +914,82 @@ export function TurnToolCallsSection({
       Boolean(readToolPresentation(tool.presentation)) ||
       (!tool.parentCallId && tool.name === 'send_to' && Boolean(tool.sendTo && (tool.sendTo.text || tool.sendTo.silentPass))),
   ) || pendingToolPrompts(tools).length > 0;
-  const shouldAggregate = tools.length >= 3 || (collapseOutput && !hasPresentationOrSendTo);
-  const defaultOpen = !collapseOutput || hasPresentationOrSendTo;
-  const [groupOpen, setGroupOpen] = useState(defaultOpen);
-  useEffect(() => setGroupOpen(defaultOpen), [collapseOutput, defaultOpen]);
+  const shouldAggregate = !presentationOnly && (tools.length >= 3 || (collapseOutput && !hasPresentationOrSendTo));
+  // 初始展开态与自动展开均在渲染期同步推导，不再使用 post-paint useEffect；
+  // 用户手动点击分组标题后锁定其选择，后续工具追加或完成不再自动覆盖。
+  const [initialOpen] = useState<boolean>(() => !collapseOutput || hasPresentationOrSendTo);
+  const [userGroupOpen, setUserGroupOpen] = useState<boolean | null>(null);
+  const [autoExpanded, setAutoExpanded] = useState<boolean>(hasPresentationOrSendTo);
+  if (hasPresentationOrSendTo && !autoExpanded && userGroupOpen === null) {
+    setAutoExpanded(true);
+  }
+  const groupOpen = userGroupOpen ?? (initialOpen || autoExpanded);
+  const showCards = !shouldAggregate || groupOpen;
 
   const renderCards = () => tools.map(tool => (
     <ToolCallCard key={tool.id} tool={tool} collapseOutput={collapseOutput} presentationOnly={presentationOnly} {...cardProps} />
   ));
 
-  if (presentationOnly) return <div className="bot-chat-tools">{renderCards()}</div>;
-  if (!shouldAggregate) {
-    return (
-      <div className="bot-chat-tools" role="list" aria-label={t('工具调用', 'Tool calls')}>
-        {renderCards()}
-      </div>
-    );
-  }
-
-  const totalDurationMs = tools.reduce(
-    (sum, item) => sum + (typeof item.durationMs === 'number' && item.durationMs > 0 ? item.durationMs : 0), 0,
-  );
-  const runningTool = tools.find(item => item.status === 'running');
-  const errorCount = tools.filter(item => item.status === 'error').length;
+  const totalDurationMs = shouldAggregate
+    ? tools.reduce(
+        (sum, item) => sum + (typeof item.durationMs === 'number' && item.durationMs > 0 ? item.durationMs : 0),
+        0,
+      )
+    : 0;
+  const runningTool = shouldAggregate ? tools.find(item => item.status === 'running') : undefined;
+  const errorCount = shouldAggregate ? tools.filter(item => item.status === 'error').length : 0;
   const showGroupError = errorCount > 0 && (!collapseOutput || groupOpen);
 
-  const groupTitle = runningTool
-    ? tools.length === 1
-      ? t(`正在调用 ${runningTool.name}`, `Running ${runningTool.name}`)
-      : t(`正在调用 ${runningTool.name} (${tools.length} 个工具)`, `Running ${runningTool.name} (${tools.length} tools)`)
-    : tools.length === 1
-      ? t(`已调用 ${tools[0].name}`, `Used ${tools[0].name}`)
-      : t(`已使用 ${tools.length} 个工具`, `Used ${tools.length} tools`);
+  const groupTitle = !shouldAggregate
+    ? ''
+    : runningTool
+      ? tools.length === 1
+        ? t(`正在调用 ${runningTool.name}`, `Running ${runningTool.name}`)
+        : t(`正在调用 ${runningTool.name} (${tools.length} 个工具)`, `Running ${runningTool.name} (${tools.length} tools)`)
+      : tools.length === 1
+        ? t(`已调用 ${tools[0].name}`, `Used ${tools[0].name}`)
+        : t(`已使用 ${tools.length} 个工具`, `Used ${tools.length} tools`);
 
+  // 1-2 个工具与 3+ 工具始终共用同一个 .bot-chat-tools-group 根与 tools-list 容器，
+  // 仅按 shouldAggregate 显隐分组标题，避免 2→3 工具切换父节点导致已有 ToolCallCard 重挂。
   return (
-    <div className="bot-chat-tools-group">
-      <button
-        type="button"
-        className={`bot-chat-tools-group-bar${runningTool ? ' is-running' : showGroupError ? ' is-error' : ''}`}
-        aria-expanded={groupOpen}
-        onClick={() => setGroupOpen(v => !v)}
-      >
-        <span className="bot-tool-step-icon" aria-hidden="true">
-          {renderToolStepIcon(runningTool ? 'running' : showGroupError ? 'error' : 'done')}
-        </span>
-        <span className="bot-tools-group-title">{groupTitle}</span>
-        {totalDurationMs > 0 && !runningTool ? (
-          <span className="bot-tools-group-meta">
-            {t(`耗时 ${formatToolStepDuration(totalDurationMs)}`, formatToolStepDuration(totalDurationMs))}
+    <div className={`bot-chat-tools-group${shouldAggregate ? ' is-aggregated' : ''}`}>
+      {shouldAggregate ? (
+        <button
+          key="group-bar"
+          type="button"
+          className={`bot-chat-tools-group-bar${runningTool ? ' is-running' : showGroupError ? ' is-error' : ''}`}
+          aria-expanded={groupOpen}
+          onClick={() => setUserGroupOpen(!groupOpen)}
+        >
+          <span className="bot-tool-step-icon" aria-hidden="true">
+            {renderToolStepIcon(runningTool ? 'running' : showGroupError ? 'error' : 'done')}
           </span>
-        ) : null}
-        {showGroupError ? (
-          <span className="bot-tools-group-error">
-            {t(`${errorCount} 失败`, `${errorCount} failed`)}
-          </span>
-        ) : null}
-        <ChevronDown size={14} className={`bot-tool-step-chevron${groupOpen ? ' is-open' : ''}`} aria-hidden="true" />
-      </button>
+          <span className="bot-tools-group-title">{groupTitle}</span>
+          {totalDurationMs > 0 && !runningTool ? (
+            <span className="bot-tools-group-meta">
+              {t(`耗时 ${formatToolStepDuration(totalDurationMs)}`, formatToolStepDuration(totalDurationMs))}
+            </span>
+          ) : null}
+          {showGroupError ? (
+            <span className="bot-tools-group-error">
+              {t(`${errorCount} 失败`, `${errorCount} failed`)}
+            </span>
+          ) : null}
+          <ChevronDown size={14} className={`bot-tool-step-chevron${groupOpen ? ' is-open' : ''}`} aria-hidden="true" />
+        </button>
+      ) : null}
 
-      {groupOpen && (
-        <div className="bot-chat-tools is-grouped" role="list" aria-label={t('工具调用', 'Tool calls')}>
+      {showCards ? (
+        <div
+          key="tools-list"
+          className={`bot-chat-tools${shouldAggregate ? ' is-grouped' : ''}`}
+          role={presentationOnly ? undefined : 'list'}
+          aria-label={presentationOnly ? undefined : t('工具调用', 'Tool calls')}
+        >
           {renderCards()}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

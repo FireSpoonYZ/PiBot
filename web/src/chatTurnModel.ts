@@ -1105,33 +1105,64 @@ export function parseHistoryEntries(
     acc.turn.thinking = acc.thinkingParts.length > 0 ? acc.thinkingParts.join('\n\n') : undefined;
     acc.turn.tools = acc.tools.length > 0 ? acc.tools : undefined;
     acc.turn.toolSummary = acc.tools.length > 0 ? acc.tools.map((tool) => tool.name) : undefined;
+    // 稳定的块 key：
+    // - 按类型独立编号且空块照样占位递增，避免空块转非空或 raw 历史补入 thinking 时
+    //   导致后续 text/tools 块的 key 漂移与 React 重挂；
+    // - tools 块优先锚定组内首个工具的稳定 callId，跨流式/补入/2→3 合并全程不变。
     const out: ChatTurnBlock[] = [];
-    let blockSeq = 0;
+    const usedBlockIds = new Set<string>();
+    const claimBlockId = (baseId: string): string => {
+      if (!usedBlockIds.has(baseId)) {
+        usedBlockIds.add(baseId);
+        return baseId;
+      }
+      let suffix = 2;
+      while (usedBlockIds.has(`${baseId}-${suffix}`)) suffix += 1;
+      const unique = `${baseId}-${suffix}`;
+      usedBlockIds.add(unique);
+      return unique;
+    };
+    let textSeq = 0;
+    let thinkingSeq = 0;
+    let toolsSeq = 0;
     for (const block of acc.blocks) {
       if (block.kind === 'tools') {
+        toolsSeq += 1;
         if (block.tools.length === 0) continue;
-        blockSeq += 1;
-        out.push({ id: acc.turn.id + '-b' + blockSeq, kind: 'tools', tools: block.tools });
-      } else {
+        const anchorToolId = block.tools[0]?.id;
+        const baseId = anchorToolId
+          ? `${acc.turn.id}-tools-${anchorToolId}`
+          : `${acc.turn.id}-tools-${toolsSeq}`;
+        out.push({ id: claimBlockId(baseId), kind: 'tools', tools: block.tools });
+      } else if (block.kind === 'thinking') {
+        thinkingSeq += 1;
         const text = block.text.trim();
         if (!text) continue;
-        blockSeq += 1;
         out.push({
-          id: acc.turn.id + '-b' + blockSeq,
-          kind: block.kind,
+          id: claimBlockId(`${acc.turn.id}-thinking-${thinkingSeq}`),
+          kind: 'thinking',
           text,
-          ...(block.kind === 'text' && block.entryId !== undefined ? { entryId: block.entryId } : {}),
+        });
+      } else {
+        textSeq += 1;
+        const text = block.text.trim();
+        if (!text) continue;
+        out.push({
+          id: claimBlockId(`${acc.turn.id}-b${textSeq}`),
+          kind: 'text',
+          text,
+          ...(block.entryId !== undefined ? { entryId: block.entryId } : {}),
         });
       }
     }
     if (synthesizedReply) {
-      blockSeq += 1;
+      textSeq += 1;
       const entryId =
         options?.trackAssistantTextEntries && acc.turn.entryId > 0
           ? String(acc.turn.entryId)
           : undefined;
       out.push({
-        id: acc.turn.id + '-b' + blockSeq,
+        id: claimBlockId(`${acc.turn.id}-b${textSeq}`),
         kind: 'text',
         text: synthesizedReply,
         ...(entryId !== undefined ? { entryId } : {}),

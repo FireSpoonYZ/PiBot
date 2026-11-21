@@ -1,29 +1,296 @@
 /* 客户端更新区共享样式：仅 .cu- 前缀，桌面/Android 设置页共用。 */
-.cu-row { display: flex; flex-direction: column; gap: var(--space-2, 8px); padding: 10px 0; }
-.cu-row + .cu-row { border-top: 1px solid var(--color-line, var(--line)); }
-.cu-line { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: var(--text-md, .9rem); }
-.cu-label { color: var(--color-text-muted, var(--muted)); flex: none; }
-.cu-value { min-width: 0; overflow-wrap: anywhere; text-align: right; }
-.cu-notes {
-  max-height: 140px; overflow-y: auto; padding: 10px var(--space-3, 12px); border-radius: var(--radius-md, 12px);
-  background: color-mix(in srgb, var(--color-surface-1, var(--surface)) 70%, transparent);
-  border: 1px solid var(--color-line, var(--line)); font-size: var(--text-sm, .82rem); line-height: 1.5;
-  color: var(--color-text, var(--text)); white-space: pre-wrap; overflow-wrap: anywhere;
+.cu-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
-.cu-progress { height: var(--space-2, 8px); border-radius: var(--radius-full, 999px); background: var(--color-line, var(--line)); overflow: hidden; }
-.cu-progress > span { display: block; height: 100%; border-radius: var(--radius-full, 999px); background: var(--color-primary, var(--brand, var(--accent))); transition: width .3s ease; }
-.cu-actions { display: flex; flex-wrap: wrap; gap: var(--space-2, 8px); align-items: center; }
-.cu-message { font-size: var(--text-sm, .82rem); color: var(--color-text-muted, var(--muted)); overflow-wrap: anywhere; }
-.cu-message.is-error { color: var(--color-danger, var(--danger)); }
-.cu-meta { font-size: var(--text-xs, .78rem); color: var(--color-text-muted, var(--muted)); overflow-wrap: anywhere; }
 
-.cu-desktop .cu-message { margin: var(--space-2, 8px) 0 0; }
-.cu-desktop-progress { width: 100%; height: 10px; accent-color: var(--color-primary, var(--brand, var(--accent))); }
+.cu-mobile {
+  padding: 4px 14px 12px;
+}
+
+.cu-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+  padding: 10px 0 0;
+}
+
+.cu-row + .cu-row {
+  border-top: 1px solid var(--color-line, var(--line));
+}
+
+.cu-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 24px;
+  font-size: var(--text-md, .9rem);
+  line-height: 1.4;
+}
+
+.cu-label {
+  color: var(--color-text-muted, var(--muted));
+  flex: none;
+}
+
+.cu-value-slot {
+  min-width: 0;
+  max-width: 72%;
+  flex: 0 1 auto;
+}
+
+.cu-value-slot .ls-reserved-slot-inner {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.cu-value {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.cu-value.is-muted {
+  color: var(--color-text-muted, var(--muted));
+}
+
+.cu-value.is-error {
+  color: var(--color-danger, var(--danger));
+}
+
+/* 进度轨道常驻布局，空闲时仅淡出透明，保持零高度差。 */
+.cu-progress {
+  position: relative;
+  width: 100%;
+  height: var(--space-2, 8px);
+  flex: none;
+  border-radius: var(--radius-full, 999px);
+  background: var(--color-line, var(--line));
+  overflow: hidden;
+  opacity: 1;
+  transition: opacity var(--dur-fast, 150ms) ease;
+}
+
+.cu-progress.is-idle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.cu-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-full, 999px);
+  background: var(--color-primary, var(--brand, var(--accent)));
+  transition: width var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
+}
+
+.cu-progress.is-indeterminate .cu-progress-fill {
+  width: 40%;
+  transition: none;
+  animation: cu-progress-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes cu-progress-slide {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(260%); }
+}
+
+/* 固定高度状态槽：承载进度明细、引导提示与紧凑错误，长错误不撑开布局。 */
+.cu-status-slot {
+  height: 58px;
+  min-height: 58px;
+  overflow: hidden;
+}
+
+.cu-status-text {
+  margin: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  font-size: var(--text-sm, .82rem);
+  line-height: 1.42;
+  color: var(--color-text-muted, var(--muted));
+  overflow-wrap: anywhere;
+}
+
+.cu-status-text.is-meta {
+  font-size: var(--text-xs, .78rem);
+  font-variant-numeric: tabular-nums;
+}
+
+.cu-status-text.is-error {
+  color: var(--color-danger, var(--danger));
+}
+
+.cu-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2, 8px);
+  align-items: center;
+  min-height: 40px;
+}
+
+.cu-desktop .cu-action-btn {
+  padding: 8px 18px;
+  border: 1px solid transparent;
+  font-weight: 600;
+}
+
+.cu-desktop .secondary-button.cu-action-btn {
+  border-color: var(--color-line, var(--line));
+}
+
+.cu-mobile .cu-action-btn {
+  padding: 0 var(--space-3, 12px);
+}
+
+.cu-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.cu-spin {
+  animation: cu-spin 900ms linear infinite;
+}
+
+@keyframes cu-spin {
+  to { transform: rotate(360deg); }
+}
+
+.cu-secondary-action {
+  animation: cu-fade-in var(--dur-fast, 150ms) ease;
+}
+
+@keyframes cu-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* 更新说明开关常驻槽与用户主动展开面板。 */
+.cu-notes-slot {
+  height: 32px;
+  min-height: 32px;
+}
+
+.cu-notes-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px 2px;
+  border: 0;
+  border-radius: var(--radius-sm, 8px);
+  background: transparent;
+  color: var(--color-text-muted, var(--muted));
+  font-size: var(--text-sm, .82rem);
+  font-weight: var(--weight-medium, 500);
+  cursor: pointer;
+  transition: color var(--dur-fast, 150ms) ease;
+}
+
+.cu-notes-toggle:hover,
+.cu-notes-toggle:active:not(:disabled) {
+  background: transparent;
+  color: var(--color-text, var(--text));
+}
+
+.cu-notes-toggle:focus-visible {
+  outline: 2px solid var(--color-primary, var(--brand, var(--accent)));
+  outline-offset: 2px;
+}
+
+.cu-notes-chevron {
+  flex: none;
+  transition: transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
+}
+
+.cu-notes-toggle.is-open .cu-notes-chevron {
+  transform: rotate(180deg);
+}
+
+.cu-expand-region {
+  width: 100%;
+}
+
+.cu-notes-panel {
+  padding-top: var(--space-2, 8px);
+}
+
+.cu-notes {
+  margin: 0;
+  max-height: 140px;
+  overflow-y: auto;
+  padding: 10px var(--space-3, 12px);
+  border-radius: var(--radius-md, 12px);
+  background: color-mix(in srgb, var(--color-surface-1, var(--surface)) 70%, transparent);
+  border: 1px solid var(--color-line, var(--line));
+  font-size: var(--text-sm, .82rem);
+  line-height: 1.5;
+  color: var(--color-text, var(--text));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cu-message {
+  font-size: var(--text-sm, .82rem);
+  color: var(--color-text-muted, var(--muted));
+  overflow-wrap: anywhere;
+}
+
+.cu-message.is-error {
+  color: var(--color-danger, var(--danger));
+}
+
+.cu-meta {
+  font-size: var(--text-xs, .78rem);
+  color: var(--color-text-muted, var(--muted));
+  overflow-wrap: anywhere;
+}
+
+.cu-stop-confirm-wrap {
+  padding-top: var(--space-2, 8px);
+}
+
 .cu-stop-confirm {
-  margin-top: 10px;
   padding: 10px var(--space-3, 12px);
   border: 1px solid var(--color-line, var(--line));
   border-radius: var(--radius-md, 12px);
   background: var(--color-surface-1, var(--surface));
 }
-.cu-stop-confirm .cu-message { margin: 0 0 var(--space-2, 8px); }
+
+.cu-stop-confirm .cu-message {
+  margin: 0 0 var(--space-2, 8px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cu-progress,
+  .cu-progress-fill,
+  .cu-notes-toggle,
+  .cu-notes-chevron {
+    transition: none;
+  }
+
+  .cu-spin,
+  .cu-secondary-action {
+    animation: none;
+  }
+
+  .cu-progress.is-indeterminate .cu-progress-fill {
+    width: 100%;
+    opacity: .55;
+    transform: none;
+    animation: none;
+  }
+}

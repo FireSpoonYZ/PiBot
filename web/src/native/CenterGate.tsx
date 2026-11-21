@@ -9,6 +9,27 @@ const permanentCenterErrors = new Set(['UNAUTHENTICATED', 'UNAUTHORIZED', 'CONTR
 const transientCenterErrors = new Set(['NOT_CONNECTED', 'DISCONNECTED', 'EVENT_STREAM_CLOSED', 'RPC_BUSY', 'BUSY', 'TIMEOUT', 'TRANSPORT_RESET', 'CENTER_OFFLINE', 'CENTER_REQUEST_FAILED']);
 const centerErrorCode = (error: unknown) => typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : '';
 export const isTransientCenterError = (error: unknown) => transientCenterErrors.has(centerErrorCode(error));
+export const isPermanentCenterError = (error: unknown): boolean => {
+  const direct = centerErrorCode(error);
+  if (direct && permanentCenterErrors.has(direct)) return true;
+  const parsed = splitErrorCode(error).code;
+  return Boolean(parsed && permanentCenterErrors.has(parsed));
+};
+const normalizeCenterUrlKey = (raw: string | undefined): string => {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return '';
+  try {
+    return new URL(trimmed).origin.toLowerCase();
+  } catch {
+    return trimmed.replace(/\/+$/, '').toLowerCase();
+  }
+};
+type ReadyCenterConfig = {
+  urlKey: string;
+  deviceId: string;
+  ca: string;
+  hasSaved: boolean;
+};
 /** RPC 拥塞：host 忙不是断线，轮询应保留已确认状态继续等待，不得当离线处理。 */
 const isBusyCenterError = (error: unknown) => { const code = centerErrorCode(error); return code === 'RPC_BUSY' || code === 'BUSY'; };
 
@@ -33,6 +54,12 @@ export interface CenterConnectionContextValue {
   connecting: boolean;
   reconnecting: boolean;
   ready: boolean;
+  /** 仅用于界面展示的派生就绪态：曾经 ready 过即保持为真，跨过暂态轮询失败/重连/broker 重启；
+      仅在永久鉴权/证书/配置错误、中心配置变更或用户断开/清除中心时重置为 false。
+      授权、调用门槛与业务逻辑仍一律使用 `ready`。 */
+  displayReady: boolean;
+  /** 仅用于界面展示：当前是否存在已保存的中心连接（首次状态读回前同步回退缓存，读回后以 saved 为准）。 */
+  hasSavedCenter: boolean;
   matchesSaved: boolean;
   error: string;
   errorCode: string;
@@ -68,6 +95,8 @@ const defaultCenterContext: CenterConnectionContextValue = {
   connecting: false,
   reconnecting: false,
   ready: false,
+  displayReady: false,
+  hasSavedCenter: false,
   matchesSaved: false,
   error: '',
   errorCode: '',
@@ -109,6 +138,21 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
   const [preparedCenter, setPreparedCenter] = useState('');
   const [preparing, setPreparing] = useState(false);
   const [prepareRetry, setPrepareRetry] = useState(0);
+  const [displayReadyState, setDisplayReadyState] = useState(false);
+  const readyConfigRef = useRef<ReadyCenterConfig | null>(null);
+  const [statusLoadedOnce, setStatusLoadedOnce] = useState(false);
+  const [initialCachedCenterUrl] = useState(() => {
+    try {
+      return (localStorage.getItem('active-center-url') ?? '').trim();
+    } catch {
+      return '';
+    }
+  });
+
+  const resetDisplayReady = useCallback(() => {
+    readyConfigRef.current = null;
+    setDisplayReadyState(false);
+  }, []);
 
   const clearError = useCallback(() => {
     setErrorState('');
@@ -132,8 +176,33 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
   }, [clearError, reportError]);
 
   const updateStatus = (next: CenterStatus) => {
+    setStatusLoadedOnce(true);
     setStatus(next);
     setSaved(next.savedConnection);
+    const hasPermanentError = Boolean(
+      next.savedConnectionError || (next.error && isPermanentCenterError(next.error)),
+    );
+    const unpaired = !next.savedConnection && next.state !== 'ready';
+    const prevConfig = readyConfigRef.current;
+    let configChanged = false;
+    if (prevConfig) {
+      const nextUrlKey = normalizeCenterUrlKey(next.savedConnection?.url || next.centerUrl);
+      const urlChanged = Boolean(nextUrlKey && prevConfig.urlKey && nextUrlKey !== prevConfig.urlKey);
+      const deviceChanged = Boolean(
+        next.savedConnection?.deviceId &&
+        prevConfig.deviceId &&
+        next.savedConnection.deviceId.trim() !== prevConfig.deviceId,
+      );
+      const caChanged = Boolean(
+        next.savedConnection &&
+        prevConfig.hasSaved &&
+        (next.savedConnection.ca ?? '').trim() !== prevConfig.ca,
+      );
+      configChanged = urlChanged || deviceChanged || caChanged;
+    }
+    if (hasPermanentError || unpaired || configChanged) {
+      resetDisplayReady();
+    }
     if (next.savedConnectionError) {
       setAutoReconnecting(false);
       reportError(next.savedConnectionError, t('已保存的连接凭据异常，请重新配置。', 'Saved connection credentials are invalid. Please reconfigure.'));
@@ -167,7 +236,10 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
         if (live && issued === epoch.current) updateStatus(next);
       } catch (failure) {
         // BUSY/RPC_BUSY 只是 host 通道拥塞：保留上次已确认 status 继续轮询，不误判断线。
-        if (!isBusyCenterError(failure) && live && issued === epoch.current) setStatus(undefined);
+        if (!isBusyCenterError(failure) && live && issued === epoch.current) {
+          setStatus(undefined);
+          if (isPermanentCenterError(failure)) resetDisplayReady();
+        }
       }
       if (live) timer = setTimeout(poll, 1000);
     };
@@ -209,6 +281,7 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
               if (live && attempt === epoch.current) updateStatus(connected);
             } catch (failure) {
               if (live && attempt === epoch.current) {
+                if (isPermanentCenterError(failure)) resetDisplayReady();
                 if (permanentCenterErrors.has(centerErrorCode(failure))) {
                   setAutoReconnecting(false);
                   reportError(failure, t('自动连接失败，请检查中心设置。', 'Auto-connect failed. Check center settings.'));
@@ -269,6 +342,7 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
     }, failure => {
       if (live && issued === epoch.current) {
         setPreparedCenter('');
+        if (isPermanentCenterError(failure)) resetDisplayReady();
         const permanent = !isTransientCenterError(failure);
         if (permanent) {
           setPrepareReconnecting(false);
@@ -287,6 +361,19 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
   const connect = async (event?: FormEvent) => {
     event?.preventDefault();
     const issued = ++epoch.current;
+    const prevConfig = readyConfigRef.current;
+    if (prevConfig) {
+      const targetUrlKey = normalizeCenterUrlKey(url);
+      const targetDeviceId = deviceId.trim();
+      const targetCa = ca.trim();
+      if (
+        targetUrlKey !== prevConfig.urlKey ||
+        (prevConfig.deviceId && targetDeviceId !== prevConfig.deviceId) ||
+        (prevConfig.hasSaved && targetCa !== prevConfig.ca)
+      ) {
+        resetDisplayReady();
+      }
+    }
     setBusy(true);
     clearError();
     setAutoReconnecting(false);
@@ -307,12 +394,21 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
       if (issued !== epoch.current) return;
       localStorage.setItem('center-client-device-id', deviceId.trim());
       localStorage.setItem('active-center-url', url.trim());
+      setStatusLoadedOnce(true);
       setSaved(next.savedConnection);
+      if (
+        next.savedConnectionError ||
+        (next.error && isPermanentCenterError(next.error)) ||
+        (!next.savedConnection && next.state !== 'ready')
+      ) {
+        resetDisplayReady();
+      }
       const broker = next.state === 'ready' ? await mobileClientRequest<{ phase: string; generation: number }>('status', {}) : undefined;
       if (issued !== epoch.current) return;
       setStatus(broker ? { ...next, state: broker.phase === 'connected' ? 'ready' : 'connecting', brokerGeneration: broker.generation } : next);
     } catch (failure) {
       if (issued === epoch.current) {
+        if (isPermanentCenterError(failure)) resetDisplayReady();
         reportError(failure, t('连接失败，请检查中心设置。', 'Connection failed. Check center settings.'));
       }
     } finally {
@@ -377,6 +473,14 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
   // pair/repair 共用的结果回填：只写身份与既有 localStorage 键，并立即读一次真实 status；
   // connectionRequested 非就绪，连接建立仍交给既有轮询与状态效果处理。
   const adoptPairResult = async (result: PairCenterResult, issued: number) => {
+    const prevConfig = readyConfigRef.current;
+    if (
+      prevConfig &&
+      (normalizeCenterUrlKey(result.centerUrl) !== prevConfig.urlKey ||
+        (prevConfig.deviceId && result.deviceId.trim() !== prevConfig.deviceId))
+    ) {
+      resetDisplayReady();
+    }
     setUrl(result.centerUrl);
     setDeviceId(result.deviceId);
     localStorage.setItem('center-client-device-id', result.deviceId);
@@ -421,8 +525,15 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
     const request = mobileClientRequest<CenterStatus>('center_disconnect', {});
     void request.then(next => {
       if (issued !== epoch.current) return;
+      try {
+        localStorage.removeItem('active-center-url');
+      } catch {
+        // Ignore storage errors in restricted environments.
+      }
+      setStatusLoadedOnce(true);
       setSaved(undefined);
       setStatus(next);
+      resetDisplayReady();
     }).catch(failure => {
       if (issued === epoch.current) {
         reportError(failure, t('断开连接失败，请重试。', 'Failed to disconnect. Please retry.'));
@@ -448,6 +559,26 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
   const connecting = Boolean(!initialized || busy || preparing || reconnecting || status?.state === 'connecting');
   const activeCenterUrl = ready && status ? status.centerUrl : '';
 
+  const statusCenterUrl = status?.centerUrl ?? '';
+  const savedUrl = saved?.url ?? '';
+  const savedDeviceId = saved?.deviceId ?? '';
+  const savedCa = saved?.ca ?? '';
+  const hasSavedObject = Boolean(saved);
+
+  useEffect(() => {
+    if (!ready) return;
+    readyConfigRef.current = {
+      urlKey: normalizeCenterUrlKey(savedUrl || statusCenterUrl),
+      deviceId: savedDeviceId.trim(),
+      ca: savedCa.trim(),
+      hasSaved: hasSavedObject,
+    };
+    setDisplayReadyState(true);
+  }, [ready, statusCenterUrl, savedUrl, savedDeviceId, savedCa, hasSavedObject]);
+
+  const displayReady = ready || displayReadyState;
+  const hasSavedCenter = Boolean(saved?.url || (!statusLoadedOnce && initialCachedCenterUrl));
+
   const contextValue: CenterConnectionContextValue = {
     url,
     setUrl,
@@ -467,6 +598,8 @@ export function CenterGate({ children, onDisconnected, onReady, recoveryEpoch = 
     connecting,
     reconnecting,
     ready,
+    displayReady,
+    hasSavedCenter,
     matchesSaved,
     error,
     errorCode,

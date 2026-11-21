@@ -2,7 +2,7 @@
 // - 浏览器侧选图（input type=file）+ canvas 归一化为 PNG/JPEG，最长边与文件大小遵守合同上限；
 // - 预览/历史缩略图只存 ImageAttachment 元数据 + 内存 dataURL，绝不把 base64 写进草稿或 pending；
 // - 获取已提交附件内容统一走 fetcher（本机 BotHost.call、远端 api.call），按 attachmentId 缓存。
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import type { ImageAttachment, ImageAttachmentData } from '../../host-core/index.js';
 import { useText } from './ui';
@@ -295,12 +295,74 @@ export function useAttachmentImageCache(fetcher: AttachmentFetcher | null, trans
   return useMemo(() => ({ urlFor, ensure, errorFor }), [urlFor, ensure, errorFor]);
 }
 
+const SENT_IMAGE_MAX_HEIGHT = 'var(--sent-image-max-h, min(70vh, 600px))';
+const SENT_IMAGE_FALLBACK_MAX_WIDTH = '320px';
+
+function hasValidImageDimensions(width: unknown, height: unknown): boolean {
+  return (
+    typeof width === 'number' &&
+    typeof height === 'number' &&
+    Number.isFinite(width) &&
+    Number.isFinite(height) &&
+    width > 0 &&
+    height > 0
+  );
+}
+
+/**
+ * 为已发送图片占位与加载后的 <img> 计算完全一致的容器尺寸约束：
+ * - 有元数据时使用 aspect-ratio: width / height 与同一套 width / max-width / max-height
+ *   （max-width 同时受 max-height * (width / height) 与原图宽度限制，保证竖图/小图加载前后尺寸完全一致）；
+ * - 缺少元数据时回退到 4 / 3 占位比例。
+ */
+export function resolveSentAttachmentBoxStyle(
+  width: number | undefined,
+  height: number | undefined,
+  options?: { forLoadedImage?: boolean },
+): CSSProperties {
+  if (hasValidImageDimensions(width, height)) {
+    const w = Math.round(width as number);
+    const h = Math.round(height as number);
+    const ratio = Number((w / h).toFixed(6));
+    return {
+      aspectRatio: `${w} / ${h}`,
+      width: '100%',
+      maxWidth: `min(100%, ${w}px, calc(${SENT_IMAGE_MAX_HEIGHT} * ${ratio}))`,
+      height: 'auto',
+      maxHeight: SENT_IMAGE_MAX_HEIGHT,
+      marginInline: 'auto',
+      ...(options?.forLoadedImage ? { display: 'block', objectFit: 'contain' } : {}),
+    };
+  }
+  if (options?.forLoadedImage) {
+    return {
+      display: 'block',
+      width: 'auto',
+      height: 'auto',
+      maxWidth: '100%',
+      maxHeight: SENT_IMAGE_MAX_HEIGHT,
+      objectFit: 'contain',
+      marginInline: 'auto',
+    };
+  }
+  return {
+    aspectRatio: '4 / 3',
+    width: '100%',
+    maxWidth: `min(100%, ${SENT_IMAGE_FALLBACK_MAX_WIDTH}, calc(${SENT_IMAGE_MAX_HEIGHT} * 1.333333))`,
+    height: 'auto',
+    maxHeight: SENT_IMAGE_MAX_HEIGHT,
+    marginInline: 'auto',
+  };
+}
+
 /** 缩略图：上传后/历史中的 ImageAttachment 元数据，点击放大；失败显示可读错误。 */
-export function ImageAttachmentThumb({ attachment, fetcher, disabled, onRemove, t }: {
+export function ImageAttachmentThumb({ attachment, fetcher, disabled, onRemove, sent = false, t }: {
   attachment: ImageAttachment;
   fetcher: AttachmentFetcher | null;
   disabled?: boolean;
   onRemove?: () => void;
+  /** 消息流已发送附件：占位与加载后图片使用完全一致的 aspect-ratio / width / max-height 约束。 */
+  sent?: boolean;
   t: (zh: string, en: string) => string;
 }) {
   const cache = useAttachmentImageCache(fetcher, t);
@@ -313,6 +375,13 @@ export function ImageAttachmentThumb({ attachment, fetcher, disabled, onRemove, 
   }, [cache, attachment.id]);
 
   const alt = attachment.name || t('图片附件', 'Image attachment');
+  const validDims = hasValidImageDimensions(attachment.width, attachment.height);
+  const placeholderStyle = sent
+    ? resolveSentAttachmentBoxStyle(attachment.width, attachment.height)
+    : undefined;
+  const loadedImageStyle = sent
+    ? resolveSentAttachmentBoxStyle(attachment.width, attachment.height, { forLoadedImage: true })
+    : undefined;
   return (
     <span className="image-attachment" data-attachment-id={attachment.id}>
       <button
@@ -322,13 +391,19 @@ export function ImageAttachmentThumb({ attachment, fetcher, disabled, onRemove, 
         aria-label={alt}
       >
         {url ? (
-          <img src={url} alt={alt} width={attachment.width} height={attachment.height} />
+          <img
+            src={url}
+            alt={alt}
+            width={validDims ? attachment.width : undefined}
+            height={validDims ? attachment.height : undefined}
+            style={loadedImageStyle}
+          />
         ) : error ? (
-          <span className="image-attachment-error" role="status">
+          <span className="image-attachment-error" role="status" style={placeholderStyle}>
             {t('图片读取失败', 'Failed to load image')}
           </span>
         ) : (
-          <span className="image-attachment-loading" role="status">
+          <span className="image-attachment-loading" role="status" style={placeholderStyle}>
             {t('加载中…', 'Loading…')}
           </span>
         )}
@@ -379,7 +454,7 @@ export function SentAttachments({ attachments, fetcher }: {
   return (
     <div className="attachments sent" role="group" aria-label={t('附件', 'Attachments')}>
       {attachments.map((att) => (
-        <ImageAttachmentThumb key={att.id} attachment={att} fetcher={fetcher} t={t} />
+        <ImageAttachmentThumb key={att.id} attachment={att} fetcher={fetcher} sent t={t} />
       ))}
     </div>
   );

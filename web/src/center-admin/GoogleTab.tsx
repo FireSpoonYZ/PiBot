@@ -21,15 +21,20 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react';
+import { LabelStack, ReservedSlot } from '../layout';
 import { useText } from '../ui';
+import { readTabCache, writeTabCache } from './cache';
 import { CenterApiError, errorMessage } from './transport';
 import type { CenterApi } from './transport';
 import {
   ActionMenu,
+  CaCardSkeleton,
   CaDisclosure,
   CaExternalUrlBox,
   CaModal,
   CaNotice,
+  CaRefreshBar,
+  CaSectionSkeleton,
   CaSegmented,
   CaSwitch,
   CopyButton,
@@ -39,6 +44,7 @@ import {
   formatTime,
   openExternalUrl,
   platformLabel,
+  useCaTabNotices,
   useUiLocale,
 } from './primitives';
 import {
@@ -114,14 +120,28 @@ function isTransientNetworkError(err: unknown): boolean {
   return true;
 }
 
+interface GoogleCacheData {
+  status: GoogleStatusResponse | null;
+  unavailableReason: string | null;
+  forbiddenReason: string | null;
+  devices: CenterDevice[];
+  bots: CenterBotRef[];
+  rules: GoogleRule[];
+  rulesUnavailable: boolean;
+}
+
 export function GoogleTab({
   api,
+  active = true,
+  cacheKey = 'default',
   centerUrl,
   onOpenExternalUrl,
   onConfigureBot,
   onStartGoogleSetupWizard,
 }: {
   api: CenterApi;
+  active?: boolean;
+  cacheKey?: string;
   centerUrl?: string;
   onOpenExternalUrl?: (url: string) => void | Promise<unknown>;
   onConfigureBot?: (deviceId: string, botId: string) => void;
@@ -130,24 +150,88 @@ export function GoogleTab({
   const t = useText();
   const locale = useUiLocale();
 
-  // Primary status & directory data
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [unavailableReason, setUnavailableReason] = useState<string | null>(null);
-  const [forbiddenReason, setForbiddenReason] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState('');
-  const [banner, setBanner] = useState<NoticeBanner | null>(null);
+  const initialCache = useMemo(
+    () => readTabCache<GoogleCacheData>(cacheKey, 'google')?.data ?? null,
+    [cacheKey],
+  );
 
-  const [status, setStatus] = useState<GoogleStatusResponse | null>(null);
-  const [devices, setDevices] = useState<CenterDevice[]>([]);
-  const [bots, setBots] = useState<CenterBotRef[]>([]);
+  // Primary status & directory data
+  const [hasLoaded, setHasLoaded] = useState<boolean>(() => initialCache !== null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [unavailableReason, setUnavailableReason] = useState<string | null>(
+    () => initialCache?.unavailableReason ?? null,
+  );
+  const [forbiddenReason, setForbiddenReason] = useState<string | null>(
+    () => initialCache?.forbiddenReason ?? null,
+  );
+  const [loadError, setLoadError] = useState('');
+
+  const [status, setStatus] = useState<GoogleStatusResponse | null>(() => initialCache?.status ?? null);
+  const [devices, setDevices] = useState<CenterDevice[]>(() => initialCache?.devices ?? []);
+  const [bots, setBots] = useState<CenterBotRef[]>(() => initialCache?.bots ?? []);
 
   // Rules state
-  const [rules, setRules] = useState<GoogleRule[]>([]);
-  const [rulesUnavailable, setRulesUnavailable] = useState(false);
-  const [rulesError, setRulesError] = useState('');
+  const [rules, setRules] = useState<GoogleRule[]>(() => initialCache?.rules ?? []);
+  const [rulesUnavailable, setRulesUnavailable] = useState<boolean>(
+    () => initialCache?.rulesUnavailable ?? false,
+  );
   const [ruleBotFilter, setRuleBotFilter] = useState<string>('all');
   const [togglingRuleId, setTogglingRuleId] = useState<string | null>(null);
+
+  const hasLoadedRef = useRef(hasLoaded);
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  const cacheKeyRef = useRef(cacheKey);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const prevActiveRef = useRef(active);
+  const tRef = useRef(t);
+  tRef.current = t;
+  const loadGenRef = useRef(0);
+
+  const { showNotice, clearNotice } = useCaTabNotices('google', active);
+
+  const setBanner = useCallback(
+    (next: NoticeBanner | null) => {
+      if (!next) {
+        clearNotice('banner');
+        return;
+      }
+      let action: { label: string; onClick: () => void } | undefined;
+      if (next.actionLabel && next.onAction) {
+        const handler = next.onAction;
+        action = {
+          label: next.actionLabel,
+          onClick: () => {
+            clearNotice('banner');
+            handler();
+          },
+        };
+      } else if (next.linkUrl) {
+        const t = tRef.current;
+        const url = next.linkUrl;
+        action = {
+          label: next.linkLabel || t('打开链接', 'Open link'),
+          onClick: () => void openExternalUrl(url, onOpenExternalUrl),
+        };
+      }
+      showNotice('banner', next.text, {
+        tone: next.tone,
+        action,
+        sticky: Boolean(action),
+        durationMs: next.tone === 'warn' || next.tone === 'danger' ? 7500 : undefined,
+      });
+    },
+    [clearNotice, onOpenExternalUrl, showNotice],
+  );
+
+  const setRulesError = useCallback(
+    (msg: string) => {
+      if (msg) showNotice('rules-error', msg, { tone: 'danger' });
+      else clearNotice('rules-error');
+    },
+    [clearNotice, showNotice],
+  );
 
   // Per-account transient UI state (never mutates server grant state)
   const [checkingAccounts, setCheckingAccounts] = useState<Set<string>>(new Set());
@@ -170,7 +254,10 @@ export function GoogleTab({
 
   // Target Bot setup wizard / manual mode drawer
   const [wizardOpen, setWizardOpen] = useState(false);
-  const [wizardTargetBotKey, setWizardTargetBotKey] = useState('');
+  const [wizardTargetBotKey, setWizardTargetBotKey] = useState(() => {
+    const first = (initialCache?.bots ?? []).find(b => !b.archivedAt);
+    return first ? botKey(first.deviceId, first.botId) : '';
+  });
 
   // Connect / Add Services modal
   const [connectOpen, setConnectOpen] = useState(false);
@@ -320,37 +407,53 @@ export function GoogleTab({
             setRules(Array.from(merged.values()));
             return;
           } catch (fallbackErr) {
-            setRulesError(errorMessage(fallbackErr, t('加载自动规则失败', 'Failed to load rules')));
+            if (activeRef.current) {
+              const t = tRef.current;
+              setRulesError(errorMessage(fallbackErr, t('加载自动规则失败', 'Failed to load rules')));
+            }
             return;
           }
         }
-        setRulesError(errorMessage(err, t('加载自动规则失败', 'Failed to load rules')));
+        if (activeRef.current) {
+          const t = tRef.current;
+          setRulesError(errorMessage(err, t('加载自动规则失败', 'Failed to load rules')));
+        }
       }
     },
-    [api, t],
+    [api, setRulesError],
   );
 
   const loadAll = useCallback(
     async (opts?: { silent?: boolean }) => {
-      if (opts?.silent) setRefreshing(true);
-      else setLoading(true);
-      setLoadError('');
-      setUnavailableReason(null);
-      setForbiddenReason(null);
+      const gen = ++loadGenRef.current;
+      const isBackground = Boolean(opts?.silent) || hasLoadedRef.current;
+      if (isBackground) setRefreshing(true);
+      if (!isBackground) {
+        setLoadError('');
+        setUnavailableReason(null);
+        setForbiddenReason(null);
+      }
 
       try {
         const [googleRes, syncRes] = await Promise.all([
           api.getGoogleStatus(),
           api.getBotSync().catch(() => null),
         ]);
+        if (gen !== loadGenRef.current) return;
+
+        setLoadError('');
+        clearNotice('load-error');
+        setForbiddenReason(null);
 
         if (googleRes.available === false) {
+          const t = tRef.current;
           setUnavailableReason(
             googleRes.reason ||
               t('当前中心未启用 Google Workspace 功能模块', 'Google Workspace is not enabled on this Center server.'),
           );
           setStatus(null);
         } else {
+          setUnavailableReason(null);
           setStatus(googleRes);
         }
 
@@ -359,53 +462,120 @@ export function GoogleTab({
         setDevices(nextDevices);
         setBots(nextBots);
 
-        const active = nextBots.filter(b => !b.archivedAt);
-        if (active.length > 0) {
+        const activeList = nextBots.filter(b => !b.archivedAt);
+        if (activeList.length > 0) {
           setWizardTargetBotKey(prev =>
-            prev && active.some(b => botKey(b.deviceId, b.botId) === prev)
+            prev && activeList.some(b => botKey(b.deviceId, b.botId) === prev)
               ? prev
-              : botKey(active[0].deviceId, active[0].botId),
+              : botKey(activeList[0].deviceId, activeList[0].botId),
           );
         }
 
         if (googleRes.available !== false) {
-          await loadRules(active);
+          await loadRules(activeList);
         }
+        if (gen !== loadGenRef.current) return;
+        hasLoadedRef.current = true;
+        cacheKeyRef.current = cacheKey;
+        setHasLoaded(true);
       } catch (err) {
+        if (gen !== loadGenRef.current) return;
+        const t = tRef.current;
         if (err instanceof CenterApiError && (err.status === 404 || err.status === 501)) {
           setUnavailableReason(
             t('当前中心服务端尚未提供 Google Workspace 接口（/api/google/status 不可用）。请升级或启用中心 Google 模块后重试。', 'This Center server does not expose the Google Workspace endpoints yet (/api/google/status unavailable).'),
           );
           setStatus(null);
+          hasLoadedRef.current = true;
+          cacheKeyRef.current = cacheKey;
+          setHasLoaded(true);
         } else if (err instanceof CenterApiError && err.status === 403) {
-          setForbiddenReason(
+          const msg =
             err.message ||
-              t('当前会话无权管理中心 Google 应用配置，请联系中心管理员或使用所有者会话登录中心管理页。', 'This session cannot manage Center Google settings. Contact the Center administrator or sign in as the owner.'),
-          );
+            t('当前会话无权管理中心 Google 应用配置，请联系中心管理员或使用所有者会话登录中心管理页。', 'This session cannot manage Center Google settings. Contact the Center administrator or sign in as the owner.');
+          if (statusRef.current) {
+            if (activeRef.current) {
+              showNotice('load-error', msg, {
+                tone: 'danger',
+                action: {
+                  label: t('重试', 'Retry'),
+                  onClick: () => void loadAll({ silent: true }),
+                },
+              });
+            }
+          } else {
+            setForbiddenReason(msg);
+            hasLoadedRef.current = true;
+            cacheKeyRef.current = cacheKey;
+            setHasLoaded(true);
+          }
         } else {
-          setLoadError(
-            errorMessage(err, t('暂时无法获取中心 Google 状态', 'Unable to load Center Google status')),
+          const msg = errorMessage(
+            err,
+            t('暂时无法获取中心 Google 状态', 'Unable to load Center Google status'),
           );
+          if (statusRef.current) {
+            if (activeRef.current) {
+              showNotice('load-error', msg, {
+                tone: 'danger',
+                action: {
+                  label: t('重试', 'Retry'),
+                  onClick: () => void loadAll({ silent: true }),
+                },
+              });
+            }
+          } else {
+            setLoadError(msg);
+          }
         }
       } finally {
-        setLoading(false);
-        setRefreshing(false);
+        if (gen === loadGenRef.current) {
+          setRefreshing(false);
+        }
       }
     },
-    [api, loadRules, t],
+    [api, cacheKey, clearNotice, loadRules, showNotice],
   );
 
   useEffect(() => {
-    void loadAll();
+    void loadAll({ silent: hasLoadedRef.current });
   }, [loadAll]);
 
-  // Countdown tick while waiting for system browser OAuth
   useEffect(() => {
-    if (!activeFlow || activeFlow.phase !== 'pending') return;
+    const wasActive = prevActiveRef.current;
+    prevActiveRef.current = active;
+    if (!wasActive && active && (hasLoadedRef.current || Boolean(loadError))) {
+      void loadAll({ silent: hasLoadedRef.current });
+    }
+  }, [active, loadAll, loadError]);
+
+  useEffect(() => {
+    return () => {
+      loadGenRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoaded || cacheKeyRef.current !== cacheKey) return;
+    if (!status && !unavailableReason && !forbiddenReason) return;
+    writeTabCache<GoogleCacheData>(cacheKey, 'google', {
+      status,
+      unavailableReason,
+      forbiddenReason,
+      devices,
+      bots,
+      rules,
+      rulesUnavailable,
+    });
+  }, [bots, cacheKey, devices, forbiddenReason, hasLoaded, rules, rulesUnavailable, status, unavailableReason]);
+
+  // Countdown tick while waiting for system browser OAuth (paused when tab hidden)
+  useEffect(() => {
+    if (!active || !activeFlow || activeFlow.phase !== 'pending') return;
     setNowMs(Date.now());
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [activeFlow]);
+  }, [active, activeFlow]);
 
   const handleFlowCompleted = useCallback(
     async (account: GoogleAccountStatus | undefined, flow: ActiveAuthFlow) => {
@@ -437,12 +607,12 @@ export function GoogleTab({
         });
       }
     },
-    [loadAll, t],
+    [loadAll, setBanner, t],
   );
 
-  // Poll POST /api/google/flow while pending, plus immediate check on window focus / visibility
+  // Poll POST /api/google/flow while pending and tab active, plus immediate check on window focus / visibility
   useEffect(() => {
-    if (!activeFlow || activeFlow.phase !== 'pending') return;
+    if (!active || !activeFlow || activeFlow.phase !== 'pending') return;
     const gen = flowGenRef.current;
     const currentFlow = activeFlow;
 
@@ -489,6 +659,7 @@ export function GoogleTab({
       }
     };
 
+    void pollOnce();
     const timer = window.setInterval(() => {
       void pollOnce();
     }, 1500);
@@ -506,7 +677,7 @@ export function GoogleTab({
       window.removeEventListener('focus', onReturn);
       document.removeEventListener('visibilitychange', onReturn);
     };
-  }, [activeFlow, api, handleFlowCompleted, t]);
+  }, [active, activeFlow, api, handleFlowCompleted, t]);
 
   // Open private configure drawer
   const openConfigureDrawer = useCallback(() => {
@@ -967,9 +1138,15 @@ export function GoogleTab({
     }
   };
 
-  // Early states: loading / unavailable / forbidden / hard load failure
-  if (loading) {
-    return <div className="ca-empty">{t('正在加载 Google Workspace…', 'Loading Google Workspace…')}</div>;
+  // Early states: cold initial load skeleton / unavailable / forbidden / hard load failure
+  if (!hasLoaded && !loadError) {
+    return (
+      <div className="ca-form-stack">
+        <CaCardSkeleton height={60} subbar label={t('正在加载 Google Workspace…', 'Loading Google Workspace…')} />
+        <CaSectionSkeleton rows={2} headWidth={156} trailingWidth={104} />
+        <CaSectionSkeleton rows={2} headWidth={184} trailingWidth={96} />
+      </div>
+    );
   }
 
   if (unavailableReason) {
@@ -1062,56 +1239,7 @@ export function GoogleTab({
 
   return (
     <div>
-      {loadError && (
-        <CaNotice
-          tone="danger"
-          action={
-            <button type="button" className="ca-btn ca-btn-sm" onClick={() => void loadAll({ silent: true })}>
-              {t('重试', 'Retry')}
-            </button>
-          }
-        >
-          {loadError}
-        </CaNotice>
-      )}
-
-      {banner && (
-        <CaNotice
-          tone={banner.tone}
-          action={
-            <>
-              {banner.linkUrl && (
-                <button
-                  type="button"
-                  className="ca-btn ca-btn-sm"
-                  onClick={() => void openExternalUrl(banner.linkUrl!, onOpenExternalUrl)}
-                >
-                  <ExternalLink size={13} aria-hidden="true" />
-                  <span>{banner.linkLabel || t('打开链接', 'Open link')}</span>
-                </button>
-              )}
-              {banner.actionLabel && banner.onAction && (
-                <button
-                  type="button"
-                  className="ca-btn ca-btn-primary ca-btn-sm"
-                  onClick={banner.onAction}
-                >
-                  {banner.actionLabel}
-                </button>
-              )}
-              <button
-                type="button"
-                className="ca-btn ca-btn-ghost ca-btn-sm"
-                onClick={() => setBanner(null)}
-              >
-                {t('关闭', 'Dismiss')}
-              </button>
-            </>
-          }
-        >
-          {banner.text}
-        </CaNotice>
-      )}
+      <CaRefreshBar active={refreshing} />
 
       {/* 1. Center Web OAuth Application Card */}
       <section className="ca-section" aria-labelledby="ca-google-app-heading">
@@ -1191,7 +1319,7 @@ export function GoogleTab({
                   title={t('刷新', 'Refresh')}
                   onClick={() => void loadAll({ silent: true })}
                 >
-                  <RefreshCw size={15} aria-hidden="true" />
+                  <RefreshCw size={15} className={refreshing ? 'ca-spin' : undefined} aria-hidden="true" />
                 </button>
               </>
             )}
@@ -1219,7 +1347,7 @@ export function GoogleTab({
 
       {/* 2. Active System Browser Authorization Flow Banner */}
       {activeFlow && (
-        <section className="ca-section ca-oauth-card" aria-live="polite">
+        <section className="ca-section ca-oauth-card smooth-expand-mount" aria-live="polite">
           <div className="ca-oauth-head">
             <div className="ca-oauth-head-main">
               <div className="ca-row-title">
@@ -1273,7 +1401,10 @@ export function GoogleTab({
                     disabled={cancellingFlow}
                     onClick={() => void handleCancelFlow()}
                   >
-                    {cancellingFlow ? t('正在取消…', 'Cancelling…') : t('取消', 'Cancel')}
+                    <LabelStack
+                      active={cancellingFlow ? t('正在取消…', 'Cancelling…') : t('取消', 'Cancel')}
+                      labels={[t('取消', 'Cancel'), t('正在取消…', 'Cancelling…')]}
+                    />
                   </button>
                 </>
               ) : (
@@ -1464,8 +1595,11 @@ export function GoogleTab({
                           disabled={checking}
                           onClick={() => void handleCheckAccount(account)}
                         >
-                          <RefreshCw size={13} aria-hidden="true" />
-                          <span>{checking ? t('检查中…', 'Checking…') : t('重试检查', 'Retry check')}</span>
+                          <RefreshCw size={13} className={checking ? 'ca-spin' : undefined} aria-hidden="true" />
+                          <LabelStack
+                            active={checking ? t('检查中…', 'Checking…') : t('重试检查', 'Retry check')}
+                            labels={[t('重试检查', 'Retry check'), t('检查中…', 'Checking…')]}
+                          />
                         </button>
                       ) : (
                         <>
@@ -1486,8 +1620,11 @@ export function GoogleTab({
                             disabled={checking}
                             onClick={() => void handleCheckAccount(account)}
                           >
-                            <RefreshCw size={13} aria-hidden="true" />
-                            <span>{checking ? t('检查中…', 'Checking…') : t('重新检查', 'Check')}</span>
+                            <RefreshCw size={13} className={checking ? 'ca-spin' : undefined} aria-hidden="true" />
+                            <LabelStack
+                              active={checking ? t('检查中…', 'Checking…') : t('重新检查', 'Check')}
+                              labels={[t('重新检查', 'Check'), t('检查中…', 'Checking…')]}
+                            />
                           </button>
                         </>
                       )}
@@ -1636,11 +1773,14 @@ export function GoogleTab({
                                   ) : (
                                     <Shield size={12} aria-hidden="true" />
                                   )}
-                                  <span>
-                                    {copiedKey === copyId
-                                      ? t('已复制', 'Copied')
-                                      : t('复制给管理员', 'Copy for admin')}
-                                  </span>
+                                  <LabelStack
+                                    active={
+                                      copiedKey === copyId
+                                        ? t('已复制', 'Copied')
+                                        : t('复制给管理员', 'Copy for admin')
+                                    }
+                                    labels={[t('复制给管理员', 'Copy for admin'), t('已复制', 'Copied')]}
+                                  />
                                 </button>
                               )}
 
@@ -1714,12 +1854,6 @@ export function GoogleTab({
             </div>
           )}
         </div>
-
-        {rulesError && (
-          <div className="ca-section-body">
-            <CaNotice tone="danger">{rulesError}</CaNotice>
-          </div>
-        )}
 
         {rulesUnavailable ? (
           <div className="ca-empty">
@@ -1975,11 +2109,13 @@ export function GoogleTab({
             </>
           )}
 
-          {configError && (
-            <p className="ca-error-text" role="alert">
-              {configError}
-            </p>
-          )}
+          <ReservedSlot minHeight={20} align="start" className="ca-inline-error-slot">
+            {configError ? (
+              <p className="ca-error-text" role="alert">
+                {configError}
+              </p>
+            ) : null}
+          </ReservedSlot>
 
           <CaDisclosure title={t('还没有 Web OAuth 应用？查看手动创建步骤', 'Need to create a Web OAuth app? Manual steps')}>
             <ol className="ca-google-steps">
@@ -2090,7 +2226,10 @@ export function GoogleTab({
                     : !clientIdDraft.trim() || !clientSecretDraft.trim())
                 }
               >
-                {configBusy ? t('加密保存中…', 'Saving…') : t('加密保存', 'Save encrypted')}
+                <LabelStack
+                  active={configBusy ? t('加密保存中…', 'Saving…') : t('加密保存', 'Save encrypted')}
+                  labels={[t('加密保存', 'Save encrypted'), t('加密保存中…', 'Saving…')]}
+                />
               </button>
             </div>
           </div>
@@ -2280,11 +2419,13 @@ export function GoogleTab({
             {t('连接后，本中心现在和以后创建的所有 Bot 都能以你的身份使用你同意的 Google 服务；能向这些 Bot 发起任务的人也可能通过它们访问数据。', 'Once connected, all current and future Bots on this Center can use the approved Google services as you; anyone allowed to message those Bots may access data through them.')}
           </CaNotice>
 
-          {connectError && (
-            <p className="ca-error-text" role="alert">
-              {connectError}
-            </p>
-          )}
+          <ReservedSlot minHeight={20} align="start" className="ca-inline-error-slot">
+            {connectError ? (
+              <p className="ca-error-text" role="alert">
+                {connectError}
+              </p>
+            ) : null}
+          </ReservedSlot>
 
           <div className="ca-form-actions">
             <button
@@ -2307,13 +2448,21 @@ export function GoogleTab({
               }}
             >
               <ExternalLink size={14} aria-hidden="true" />
-              <span>
-                {connectBusy
-                  ? t('正在发起授权…', 'Starting sign-in…')
-                  : connectTargetAccount
+              <LabelStack
+                active={
+                  connectBusy
+                    ? t('正在发起授权…', 'Starting sign-in…')
+                    : connectTargetAccount
+                      ? t('前往 Google 补充授权', 'Continue to Google consent')
+                      : t('前往 Google 登录', 'Sign in to Google')
+                }
+                labels={[
+                  connectTargetAccount
                     ? t('前往 Google 补充授权', 'Continue to Google consent')
-                    : t('前往 Google 登录', 'Sign in to Google')}
-              </span>
+                    : t('前往 Google 登录', 'Sign in to Google'),
+                  t('正在发起授权…', 'Starting sign-in…'),
+                ]}
+              />
             </button>
           </div>
         </div>
@@ -2399,11 +2548,13 @@ export function GoogleTab({
               </label>
             </div>
 
-            {removeError && (
-              <p className="ca-error-text" role="alert">
-                {removeError}
-              </p>
-            )}
+            <ReservedSlot minHeight={20} align="start" className="ca-inline-error-slot">
+              {removeError ? (
+                <p className="ca-error-text" role="alert">
+                  {removeError}
+                </p>
+              ) : null}
+            </ReservedSlot>
 
             <div className="ca-form-actions">
               <button
@@ -2420,11 +2571,16 @@ export function GoogleTab({
                 disabled={removeBusy}
                 onClick={() => void handleConfirmRemove()}
               >
-                {removeBusy
-                  ? t('正在移除…', 'Removing…')
-                  : removeRevoke
-                    ? t('移除并撤权', 'Remove & revoke')
-                    : t('仅移除本地凭据', 'Remove locally')}
+                <LabelStack
+                  active={
+                    removeBusy
+                      ? t('正在移除…', 'Removing…')
+                      : removeRevoke
+                        ? t('移除并撤权', 'Remove & revoke')
+                        : t('仅移除本地凭据', 'Remove locally')
+                  }
+                  labels={[t('移除并撤权', 'Remove & revoke'), t('仅移除本地凭据', 'Remove locally'), t('正在移除…', 'Removing…')]}
+                />
               </button>
             </div>
           </div>
@@ -2614,11 +2770,13 @@ export function GoogleTab({
             />
           </div>
 
-          {ruleFormError && (
-            <p className="ca-error-text" role="alert">
-              {ruleFormError}
-            </p>
-          )}
+          <ReservedSlot minHeight={20} align="start" className="ca-inline-error-slot">
+            {ruleFormError ? (
+              <p className="ca-error-text" role="alert">
+                {ruleFormError}
+              </p>
+            ) : null}
+          </ReservedSlot>
 
           <div className="ca-form-actions">
             <button
@@ -2630,7 +2788,10 @@ export function GoogleTab({
               {t('取消', 'Cancel')}
             </button>
             <button type="submit" className="ca-btn ca-btn-primary" disabled={ruleBusy}>
-              {ruleBusy ? t('保存中…', 'Saving…') : t('保存规则', 'Save rule')}
+              <LabelStack
+                active={ruleBusy ? t('保存中…', 'Saving…') : t('保存规则', 'Save rule')}
+                labels={[t('保存规则', 'Save rule'), t('保存中…', 'Saving…')]}
+              />
             </button>
           </div>
         </form>

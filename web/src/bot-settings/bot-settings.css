@@ -12,6 +12,7 @@
 .bs-backdrop {
   position: fixed; inset: 0; z-index: var(--z-sheet, 200);
   display: flex; align-items: flex-end; justify-content: center;
+  padding-bottom: var(--ime-bottom, 0px);
   background: var(--color-scrim, color-mix(in srgb, var(--text) 38%, transparent));
   animation: bs-fade-in var(--dur-fast, 180ms) ease both;
 }
@@ -55,9 +56,11 @@
 }
 
 .bs-sheet {
-  --bs-sheet-max: min(90dvh, calc(var(--viewport-height, 100dvh) - var(--top, 0px) - var(--space-6, 24px)));
+  --bs-safe-bottom: max(calc(var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)) - var(--ime-bottom, 0px)), 0px);
+  --bs-sheet-max: min(90dvh, calc(var(--viewport-height, 100dvh) - var(--top, 0px) - var(--ime-bottom, 0px) - var(--space-6, 24px)));
   position: relative;
   width: 100%; max-width: 560px;
+  height: auto;
   /* 内容少时不撑满，内容多时滚动；最小高度避免加载前后跳动过大。 */
   max-height: var(--bs-sheet-max);
   min-height: min(60dvh, var(--bs-sheet-max));
@@ -66,6 +69,7 @@
   border-radius: var(--radius-xl, 24px) var(--radius-xl, 24px) 0 0;
   box-shadow: 0 -8px 32px color-mix(in srgb, var(--color-text, var(--text)) 14%, transparent);
   animation: bs-sheet-in var(--dur-base, 260ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)) both;
+  transition: height var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1)), max-height var(--dur-base, 220ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
 }
 .bs-sheet svg { width: 18px; height: 18px; stroke-width: 1.9; }
 .bs-grabber { position: absolute; top: 7px; left: 50%; width: 36px; height: var(--space-1, 4px); margin-left: -18px; border-radius: var(--radius-full, 999px); background: var(--color-line, var(--line)); }
@@ -96,8 +100,9 @@
 
 /* Body / footer */
 .bs-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 6px var(--space-4, 16px) 28px; display: flex; flex-direction: column; gap: 22px; }
+.bs-body:last-child { padding-bottom: calc(28px + var(--bs-safe-bottom, 0px)); }
 .bs-body > * { flex-shrink: 0; }
-.bs-footer { flex: none; padding: 10px var(--space-4, 16px) calc(10px + var(--bottom, 0px)); background: var(--color-bg, var(--bg)); border-top: 1px solid var(--bs-hairline); }
+.bs-footer { flex: none; padding: 10px var(--space-4, 16px) calc(10px + var(--bs-safe-bottom, 0px)); background: var(--color-bg, var(--bg)); border-top: 1px solid var(--bs-hairline); }
 
 /* Section */
 .bs-section { display: flex; flex-direction: column; gap: var(--space-2, 8px); }
@@ -285,6 +290,7 @@ button.bs-row:focus-visible, .bs-row-main:focus-visible { outline: 2px solid var
 
 @keyframes bs-fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes bs-sheet-in { from { transform: translateY(32px); opacity: .4; } to { transform: translateY(0); opacity: 1; } }
+@keyframes bs-dialog-top-pop-in { from { opacity: 0; transform: translateX(-50%) scale(.96); } to { opacity: 1; transform: translateX(-50%) scale(1); } }
 
 .bs-disclosure-right { display: inline-flex; align-items: center; gap: var(--space-2, 8px); min-width: 0; }
 .bs-disclosure-summary { font-size: var(--text-xs, .8rem); font-weight: var(--weight-regular, 450); color: var(--color-text-muted, var(--muted)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
@@ -302,10 +308,10 @@ button.bs-row:focus-visible, .bs-row-main:focus-visible { outline: 2px solid var
   position: fixed;
   z-index: var(--z-dialog, 300);
   left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
+  top: calc(var(--top, 0px) + min(14vh, 96px));
+  transform: translateX(-50%);
   width: min(440px, calc(100% - var(--space-8, 32px)));
-  max-height: calc(var(--viewport-height, 100dvh) - var(--top, 0px) - var(--space-8, 32px));
+  max-height: calc(var(--viewport-height, 100dvh) - var(--top, 0px) - min(14vh, 96px) - max(var(--bottom, env(safe-area-inset-bottom, 0px)), var(--ime-bottom, 0px)) - var(--space-4, 16px));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -315,6 +321,7 @@ button.bs-row:focus-visible, .bs-row-main:focus-visible { outline: 2px solid var
   background: var(--color-bg, var(--bg));
   color: var(--color-text, var(--text));
   box-shadow: 0 14px 60px color-mix(in srgb, var(--color-text, var(--text)) 22%, transparent);
+  animation: bs-dialog-top-pop-in var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(.22, 1, .36, 1));
 }
 .dialog-content.bs-confirm-dialog:focus-visible {
   outline: 2px solid var(--bs-accent);
@@ -391,4 +398,16 @@ button.bs-row:focus-visible, .bs-row-main:focus-visible { outline: 2px solid var
 .bs-confirm-dialog .danger-button:active:not(:disabled) {
   background: var(--color-danger, var(--danger));
   opacity: .85;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bs-backdrop,
+  .bs-sheet,
+  .dialog-overlay.bs-confirm-overlay,
+  .dialog-content.bs-confirm-dialog {
+    animation: none;
+  }
+  .bs-sheet {
+    transition: none;
+  }
 }

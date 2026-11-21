@@ -3,12 +3,14 @@
 /* Hub 主屏在 conversation/dm 子页打开时保持 DOM（隐藏不卸载），返回不丢滚动位置。 */
 .hub-hidden { display: none; }
 
-/* 主 Bot Hero：横向紧凑卡片（头像左、名称+节点徽章右），高度显著低于原纵向大卡。 */
+/* 主 Bot Hero：横向紧凑卡片（头像左、名称+节点徽章右），真实卡片/占位卡片/骨架卡片严格等高（82px）。 */
 .hub-hero-section { padding: 8px 16px 10px; display: flex; }
 .hub-hero-section::before, .hub-hero-section::after { content: none; }
 .hub-hero-button.hub-hero-card {
   flex: 1 1 auto;
   max-width: 100%;
+  min-height: 82px;
+  box-sizing: border-box;
   flex-direction: row;
   align-items: center;
   gap: 12px;
@@ -18,8 +20,66 @@
   border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
   filter: none;
 }
+.hub-hero-button.hub-hero-card.hub-hero-placeholder {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--color-primary) 34%, var(--color-line));
+}
+.hub-hero-button.hub-hero-card.hub-hero-skeleton {
+  cursor: default;
+  pointer-events: none;
+}
 .hub-hero-card-text { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .hub-hero-card .hub-hero-name { font-size: .95rem; font-weight: 600; color: var(--text); }
+
+/* H5 FLIP 列表容器与项：ul > li 兼容 SortablePinnedChat 同容器检索 */
+.hub-bot-list-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.hub-bot-list-item {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* H1: 列表行头像右下角在线状态小圆点（绝对定位，不改变 62px 行高） */
+.hub-bot-avatar-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex: none;
+}
+.hub-bot-status-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-full);
+  border: 2px solid var(--color-bg);
+  background: var(--color-text-subtle);
+  pointer-events: none;
+  transition: background-color var(--dur-fast) ease, opacity var(--dur-fast) ease;
+}
+.hub-bot-status-dot.is-online {
+  background: var(--color-success);
+  opacity: 1;
+}
+.hub-bot-status-dot.is-connecting {
+  background: var(--color-text-subtle);
+  opacity: 0.72;
+}
+.hub-bot-status-dot.is-offline {
+  background: var(--color-text-subtle);
+  opacity: 0.5;
+}
 
 /* 列表顶部筛选 Chips（复用 bot-settings 原语 .bs-chips/.bs-chip）。 */
 .hub-filter-chips { padding: 2px 0 8px; }

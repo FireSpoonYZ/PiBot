@@ -33,15 +33,26 @@ function useIsCoarsePointer(): boolean {
   return coarse;
 }
 
+export interface ChatTurnMetaProps {
+  timestamp?: number;
+  durationMs?: number;
+  copyText?: string;
+  /** 轮次角色；assistant 始终预留固定最小高度，避免首个 token 到达时行高从 0 跳变。 */
+  role?: 'user' | 'assistant';
+  /** 显式控制是否预留最小高度；默认在 role === 'assistant' 时为 true。 */
+  reserveHeight?: boolean;
+  /** 是否在非粗指针端展示「复制 / 已复制」固定宽度文案栈（默认沿用纯图标按钮）。 */
+  showCopyLabel?: boolean;
+}
+
 export function ChatTurnMeta({
   timestamp,
   durationMs,
   copyText,
-}: {
-  timestamp?: number;
-  durationMs?: number;
-  copyText?: string;
-}) {
+  role,
+  reserveHeight,
+  showCopyLabel = false,
+}: ChatTurnMetaProps) {
   const t = useText();
   const isCoarse = useIsCoarsePointer();
   const mountedRef = useRef(true);
@@ -63,14 +74,29 @@ export function ChatTurnMeta({
   const date = new Date(timestamp ?? NaN);
   const hasDate = Number.isFinite(date.getTime());
   const textToCopy = copyText && copyText.trim().length > 0 ? copyText : '';
-  if (!hasDate && durationMs === undefined && !textToCopy) return null;
+  const shouldReserve = reserveHeight ?? (role === 'assistant');
+  const reservedMinHeight = isCoarse ? 32 : 24;
 
+  if (!hasDate && durationMs === undefined && !textToCopy) {
+    if (!shouldReserve) return null;
+    return (
+      <div
+        className="bot-chat-turn-meta is-empty"
+        style={{ minHeight: reservedMinHeight }}
+        aria-hidden="true"
+      />
+    );
+  }
+
+  const idleCopyText = t('复制', 'Copy');
+  const copiedText = t('已复制', 'Copied');
+  const errorShortText = t('失败', 'Failed');
   const copyLabel =
     copyState === 'copied'
-      ? t('已复制', 'Copied')
+      ? copiedText
       : copyState === 'error'
         ? t('复制失败', 'Copy failed')
-        : t('复制', 'Copy');
+        : idleCopyText;
 
   const handleCopy = () => {
     if (!textToCopy || !navigator.clipboard?.writeText) {
@@ -96,7 +122,10 @@ export function ChatTurnMeta({
   );
 
   return (
-    <div className="bot-chat-turn-meta">
+    <div
+      className="bot-chat-turn-meta"
+      style={shouldReserve ? { minHeight: reservedMinHeight } : undefined}
+    >
       {hasDate && <time dateTime={date.toISOString()}>{dateTimeFormat.format(date)}</time>}
       {durationMs !== undefined && (
         <span className="bot-chat-turn-duration">
@@ -115,6 +144,31 @@ export function ChatTurnMeta({
           onClick={handleCopy}
         >
           {copyIcon}
+          {showCopyLabel && !isCoarse ? (
+            <span
+              className="bot-chat-turn-copy-label"
+              style={{ display: 'inline-grid', alignItems: 'center', marginLeft: 4 }}
+            >
+              <span
+                style={{ gridArea: '1 / 1', visibility: copyState === 'idle' ? 'visible' : 'hidden' }}
+                aria-hidden={copyState !== 'idle' || undefined}
+              >
+                {idleCopyText}
+              </span>
+              <span
+                style={{ gridArea: '1 / 1', visibility: copyState === 'copied' ? 'visible' : 'hidden' }}
+                aria-hidden={copyState !== 'copied' || undefined}
+              >
+                {copiedText}
+              </span>
+              <span
+                style={{ gridArea: '1 / 1', visibility: copyState === 'error' ? 'visible' : 'hidden' }}
+                aria-hidden={copyState !== 'error' || undefined}
+              >
+                {errorShortText}
+              </span>
+            </span>
+          ) : null}
         </button>
       ) : null}
     </div>

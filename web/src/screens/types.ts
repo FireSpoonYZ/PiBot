@@ -135,3 +135,7 @@ export interface BubbleActionTurnState {
   editable: boolean;
   canRetry: boolean;
 }
+
+export type ChatScrollAnchor =
+  | { atBottom: true }
+  | { atBottom: false; turnId?: string; offsetTop?: number; scrollTop: number };
