@@ -744,6 +744,35 @@ export function GoogleSetupWizard({
     setup?.center?.isAdmin === false || setup?.blocker?.kind === 'admin-required';
   const browserLocked = Boolean(setup?.browserLock?.active || setup?.browserTakeoverRequired);
   const lockRequiresSystemBrowser = Boolean(setup?.browserLock?.requiresSystemBrowser);
+  const isEmbeddedAccountStep = setup?.state === 'running' && currentStep === 'account' &&
+    (activeMode === 'do-it-for-me' || activeMode === 'guide-here') &&
+    setup.card?.card !== 'path' && setup.card?.card !== 'services';
+  const embeddedAccountHint = t('如果 Google 要求登录，请接管页面后登录。', 'If Google asks you to sign in, take over the page and sign in.');
+  const openBrowserLabel = isEmbeddedAccountStep
+    ? t('打开 Google 登录页', 'Open Google sign-in page')
+    : t('查看内置浏览器', 'Open built-in browser');
+
+  const openPreparedBrowser = (updated: GoogleSetupControlState | null) => {
+    if (!onOpenBrowser || !updated?.browserPageId || updated.unavailable || updated.state !== 'running' ||
+        (updated.mode !== 'do-it-for-me' && updated.mode !== 'guide-here') || updated.browserLock?.requiresSystemBrowser) {
+      return false;
+    }
+    onOpenBrowser();
+    return true;
+  };
+
+  const handleOpenCurrentBrowser = async () => {
+    if (!onOpenBrowser || effectiveReadOnly || submittingRef.current) return;
+    if (!isEmbeddedAccountStep) {
+      onOpenBrowser();
+      return;
+    }
+    if (lockRequiresSystemBrowser) return;
+    const updated = browserLocked ? setup : await sendControl({ action: 'resume' });
+    if (updated && !openPreparedBrowser(updated)) {
+      setError(t('无法打开 Google 登录页。请重试，或改用外部浏览器。', 'Could not open Google sign-in. Try again or use your system browser.'));
+    }
+  };
 
   const handleSelectMode = async (mode: GoogleSetupMode) => {
     if (effectiveReadOnly || submittingRef.current) return;
@@ -761,15 +790,7 @@ export function GoogleSetupWizard({
     } else {
       updated = await sendControl({ action: 'resume', mode }, { displayedSetup: snapshot });
     }
-    if (
-      updated &&
-      updated.applied !== false &&
-      !isStaleGoogleSetupResult(updated) &&
-      (mode === 'do-it-for-me' || mode === 'guide-here') &&
-      onOpenBrowser
-    ) {
-      onOpenBrowser();
-    }
+    if (updated?.applied !== false) openPreparedBrowser(updated);
   };
 
   const handleSaveServiceChoices = async () => {
@@ -780,7 +801,7 @@ export function GoogleSetupWizard({
       await sendControl({ action: 'start', choices: serviceDraft });
       return;
     }
-    await sendCardAnswer('services', serviceDraft, captured =>
+    const updated = await sendCardAnswer('services', serviceDraft, captured =>
       sendControl(
         {
           action: 'advance',
@@ -790,6 +811,7 @@ export function GoogleSetupWizard({
         { displayedSetup: captured },
       ),
     );
+    if (updated?.applied !== false) openPreparedBrowser(updated);
   };
 
   const handleBlockerAction = async (action: GoogleSetupAction) => {
@@ -801,11 +823,11 @@ export function GoogleSetupWizard({
       case 'open-browser':
       case 'take-over-browser':
       case 'takeover-browser':
-        onOpenBrowser?.();
+        await handleOpenCurrentBrowser();
         return;
       case 'take-over':
         if (browserLocked && onOpenBrowser) {
-          onOpenBrowser();
+          await handleOpenCurrentBrowser();
           return;
         }
         await sendCardAnswer('step', ['take-over'], captured =>
@@ -1166,19 +1188,20 @@ export function GoogleSetupWizard({
               </button>
               {openMenu === 'more' ? (
                 <div className="gws-popover is-compact-menu" role="menu" aria-label={t('更多操作', 'More actions')}>
-                  {onOpenBrowser && embeddedSupported && (activeMode === 'do-it-for-me' || activeMode === 'guide-here') ? (
+                  {onOpenBrowser && !effectiveReadOnly && embeddedSupported && !lockRequiresSystemBrowser &&
+                    setup?.card?.card !== 'services' && (activeMode === 'do-it-for-me' || activeMode === 'guide-here') ? (
                     <button
                       type="button"
                       role="menuitem"
                       className="gws-popover-item"
                       onClick={() => {
                         setOpenMenu('none');
-                        onOpenBrowser();
+                        void handleOpenCurrentBrowser();
                       }}
                     >
                       <span className="gws-popover-item-row">
                         <Globe size={13} aria-hidden="true" />
-                        <span className="gws-popover-item-title">{t('打开内置浏览器', 'Open built-in browser')}</span>
+                        <span className="gws-popover-item-title">{openBrowserLabel}</span>
                       </span>
                     </button>
                   ) : null}
@@ -1458,7 +1481,7 @@ export function GoogleSetupWizard({
             {!effectiveReadOnly ? (
               <div className="gws-compact-actions">
                 {onOpenBrowser && embeddedSupported && !lockRequiresSystemBrowser ? (
-                  <button type="button" className="gws-btn is-warn is-sm" onClick={onOpenBrowser}>
+                  <button type="button" className="gws-btn is-warn is-sm" onClick={() => void handleOpenCurrentBrowser()}>
                     <Globe size={13} aria-hidden="true" />
                     <span>{t('接管当前页面', 'Take over page')}</span>
                   </button>
@@ -1609,15 +1632,15 @@ export function GoogleSetupWizard({
           <div className="gws-compact-body">
             <div className="gws-compact-step-title">{stepCopy.title}</div>
             <p className="gws-compact-step-hint">
-              {activeMode === 'do-it-for-me'
+              {isEmbeddedAccountStep ? embeddedAccountHint : activeMode === 'do-it-for-me'
                 ? t('Bot 正在内置浏览器处理当前步骤，需要你操作时会自动提示。', 'Bot is working on this step in the built-in browser and will prompt you when needed.')
                 : stepCopy.hint}
             </p>
             {!effectiveReadOnly && onOpenBrowser && embeddedSupported && !browserLocked ? (
               <div className="gws-compact-actions">
-                <button type="button" className="gws-btn is-primary is-sm" onClick={onOpenBrowser}>
+                <button type="button" className="gws-btn is-primary is-sm" disabled={busy} onClick={() => void handleOpenCurrentBrowser()}>
                   <Globe size={13} aria-hidden="true" />
-                  <span>{t('查看内置浏览器', 'Open built-in browser')}</span>
+                  <span>{openBrowserLabel}</span>
                 </button>
               </div>
             ) : null}
@@ -1936,7 +1959,7 @@ export function GoogleSetupWizard({
           </div>
           <div className="gws-actions">
             {onOpenBrowser && embeddedSupported && !lockRequiresSystemBrowser ? (
-              <button type="button" className="gws-btn is-warn is-sm" onClick={onOpenBrowser}>
+              <button type="button" className="gws-btn is-warn is-sm" onClick={() => void handleOpenCurrentBrowser()}>
                 <Globe size={14} aria-hidden="true" />
                 <span>{t('接管当前页面', 'Take over page')}</span>
               </button>
@@ -1971,7 +1994,7 @@ export function GoogleSetupWizard({
                   <span className="gws-step-title">{item.title || googleStepTitle(item.id, t)}</span>
                   {item.detail ? <span className="gws-muted">{item.detail}</span> : null}
                 </div>
-                {item.url && isCurrent ? (
+                {item.url && isCurrent && !isEmbeddedAccountStep ? (
                   <button
                     type="button"
                     className="gws-btn is-ghost is-xs"
@@ -1992,7 +2015,7 @@ export function GoogleSetupWizard({
         <div className="gws-step-guide">
           <div className="gws-step-guide-title">{googleStepTitle(currentStep, t)}</div>
           <ul className="gws-guide-list">
-            {stepInfo.lines.map((line, i) => (
+            {(isEmbeddedAccountStep ? [embeddedAccountHint] : stepInfo.lines).map((line, i) => (
               <li key={i}>{line}</li>
             ))}
           </ul>
@@ -2146,10 +2169,11 @@ export function GoogleSetupWizard({
       {/* Footer actions */}
       {!effectiveReadOnly ? (
         <div className="gws-footer-bar">
-          {onOpenBrowser && embeddedSupported && (activeMode === 'do-it-for-me' || activeMode === 'guide-here') ? (
-            <button type="button" className="gws-btn is-ghost is-sm" onClick={onOpenBrowser}>
+          {onOpenBrowser && embeddedSupported && !lockRequiresSystemBrowser &&
+            setup?.card?.card !== 'services' && (activeMode === 'do-it-for-me' || activeMode === 'guide-here') ? (
+            <button type="button" className="gws-btn is-ghost is-sm" disabled={busy} onClick={() => void handleOpenCurrentBrowser()}>
               <Globe size={14} aria-hidden="true" />
-              <span>{t('打开 Bot 浏览器', 'Open Bot Browser')}</span>
+              <span>{openBrowserLabel}</span>
             </button>
           ) : null}
           {onOpenCenterAdmin ? (

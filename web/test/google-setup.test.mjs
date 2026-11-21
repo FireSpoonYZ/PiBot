@@ -175,6 +175,57 @@ test('three-mode availability matrix degrades honestly on headless and Android l
   }
 });
 
+test('confirming services opens one embedded account tab and owner resume restores a closed tab', async () => {
+  const openedUrls = [];
+  let tabs = [];
+  let failOpen = false;
+  const env = makeEnv({
+    serviceOptions: {
+      async browserControl({ action, url }) {
+        if (action === 'status') return { available: true, canStreamInteract: true, tabs };
+        assert.equal(action, 'open');
+        openedUrls.push(url);
+        if (failOpen) throw new Error('simulated startup failure');
+        const pageId = `page-${openedUrls.length}`;
+        tabs = [...tabs, { id: pageId }];
+        return { pageId };
+      },
+    },
+  });
+  try {
+    const control = (input) => env.service.control({ botId: 'bot-a', ...input }, OWNER);
+    const started = await control({ action: 'start' });
+    const mode = await control({ action: 'answer', card: 'path', values: ['guide-here'], runId: started.id });
+    assert.equal(mode.card.card, 'services');
+    assert.deepEqual(openedUrls, []);
+
+    const account = await control({ action: 'answer', card: 'services', values: ['gmail'], runId: mode.id });
+    assert.equal(account.step, 'account');
+    assert.equal(account.browserPageId, 'page-1');
+    assert.equal(env.events.find(event => event.type === 'owner-answer' && event.card === 'services').view.browserPageId, 'page-1');
+    assert.equal((await control({ action: 'status' })).browserPageId, 'page-1');
+    assert.equal((await control({ action: 'resume', runId: account.id })).browserPageId, 'page-1');
+    assert.deepEqual(openedUrls, [googleConsoleStepUrl('account')]);
+
+    tabs = [];
+    const stale = await control({ action: 'resume', runId: 'older-run' });
+    assert.equal(stale.staleReason, 'STALE_RUN');
+    assert.equal(openedUrls.length, 1);
+
+    failOpen = true;
+    const failed = await control({ action: 'resume', runId: account.id });
+    assert.equal(failed.state, 'running');
+    assert.equal(failed.browserPageId, undefined);
+    failOpen = false;
+    const recovered = await control({ action: 'resume', runId: account.id, expectedRevision: failed.revision });
+    assert.equal(recovered.browserPageId, 'page-3');
+    await control({ botId: 'bot-b', action: 'start', mode: 'guide-browser', choices: ['gmail'] });
+    assert.deepEqual(openedUrls, Array(3).fill(googleConsoleStepUrl('account')));
+  } finally {
+    await env.cleanup();
+  }
+});
+
 test('Center Web OAuth links never use Orca domains and preserve People base scopes', () => {
   const valid = deriveCenterBrandingLinks('https://center.acme.example/subpath');
   assert.deepEqual(valid, {

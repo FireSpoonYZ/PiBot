@@ -759,9 +759,17 @@ function buildStepInstruction(step, {
           doneSignal: 'Owner names the Google account and work/personal audience.',
         };
       }
+      if (run.browserPageId) {
+        return {
+          browserPageId: run.browserPageId,
+          nextAction:
+            `Reuse the Google Cloud Console tab (pageId=${run.browserPageId}). If it has been closed, ask the owner to reopen it from the current card. If Google asks to sign in, stop and let the owner take over or switch to guide-browser. Once they return to Cloud Console, read the Account label on that tab: record one account with set(account), or use set(accounts=[...]) so the owner picks.`,
+          doneSignal: 'Target Google account recorded on the setup run.',
+        };
+      }
       return {
         nextAction:
-          `Open ${consoleUrl} in the bot browser (save its pageId with google_setup(action="set", browserPageId=...)). If Google asks to sign in, STOP immediately (accounts.google.com is sensitive) and let the owner sign in via takeover or switch to guide-browser. Once signed in on Cloud Console, read the Account label: if one account, record it with set(account); if multiple, record set(accounts=[...]) so the owner picks on the account card.`,
+          'The wizard has not opened a Google Cloud tab yet. Ask the owner to open the Google sign-in page from the current card or switch to guide-browser, then end your turn.',
         doneSignal: 'Target Google account recorded on the setup run.',
       };
 

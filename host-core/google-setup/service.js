@@ -40,6 +40,7 @@ import {
   GOOGLE_SERVICE_CHOICES,
   GOOGLE_SERVICES,
   googleChoices,
+  googleConsoleStepUrl,
   isValidGoogleProjectId,
 } from './console.js';
 import {
@@ -561,7 +562,47 @@ export function createGoogleSetupService(options = {}) {
     };
   }
 
-  async function commitRun(prev, next, { centerStatus, modeAvailability, extraEvent = null }) {
+  function needsEmbeddedAccountPage(run) {
+    return run?.state === 'running' &&
+      (run.mode === 'do-it-for-me' || run.mode === 'guide-here') &&
+      run.answers?.path?.values?.[0] === run.mode &&
+      Boolean(run.services?.length) &&
+      !run.browserLock?.active &&
+      currentGoogleSetupStep(run) === 'account';
+  }
+
+  async function prepareAccountPage(run, modeAvailability) {
+    if (typeof browserControl !== 'function' || !modeAvailability.modes[run.mode]?.available) return false;
+
+    const botId = run.botId;
+    try {
+      const status = await browserControl({ action: 'status', botId }, SYSTEM_SENSITIVE_LOCK_AUTHORITY);
+      if (!status?.available || !status.canStreamInteract) return false;
+      if (run.browserPageId && status.tabs?.some(tab => tab.id === run.browserPageId)) return true;
+      delete run.browserPageId;
+
+      // The normal owner navigation rules also protect any active takeover.
+      const opened = await browserControl({
+        action: 'open',
+        botId,
+        url: googleConsoleStepUrl('account'),
+      }, SYSTEM_SENSITIVE_LOCK_AUTHORITY);
+      if (!opened?.pageId) return false;
+      run.browserPageId = opened.pageId;
+      return true;
+    } catch {
+      // A browser failure must leave the wizard available for retry or external guidance.
+      return false;
+    }
+  }
+
+  async function commitRun(prev, next, {
+    centerStatus, modeAvailability, extraEvent = null, prepareBrowser = false,
+  }) {
+    if (prepareBrowser && needsEmbeddedAccountPage(next) &&
+        (prev?.id !== next.id || !needsEmbeddedAccountPage(prev) || !next.browserPageId)) {
+      await prepareAccountPage(next, modeAvailability);
+    }
     const dueRefs = googleSetupCardsDue(prev, next);
     const stampedRefs = dueRefs.length > 0 ? stampCardRefs(next, dueRefs) : [];
     const saved = await store.save(next);
@@ -745,7 +786,7 @@ export function createGoogleSetupService(options = {}) {
           }
         }
 
-        const view = await commitRun(current, next, { centerStatus, modeAvailability });
+        const view = await commitRun(current, next, { centerStatus, modeAvailability, prepareBrowser: true });
         return { ...view, applied: true };
       }
 
@@ -819,26 +860,33 @@ export function createGoogleSetupService(options = {}) {
           }
           assertModeAvailable(requestedMode, modeAvailability);
         }
-        if (current.state === 'running' && (requestedMode === undefined || requestedMode === current.mode)) {
-          if (rawInput.expectedRevision !== undefined && rawInput.expectedRevision !== current.revision) {
-            throw setupError(
-              'SETUP_REVISION_CONFLICT',
-              `Setup revision mismatch: expected ${rawInput.expectedRevision}, current is ${current.revision}.`,
-              { expectedRevision: rawInput.expectedRevision, currentRevision: current.revision },
-            );
-          }
-          return {
-            ...buildView(botId, current, { centerStatus, modeAvailability }),
-            applied: false,
-            idempotent: true,
-          };
-        }
         if (rawInput.expectedRevision !== undefined && rawInput.expectedRevision !== current.revision) {
           throw setupError(
             'SETUP_REVISION_CONFLICT',
             `Setup revision mismatch: expected ${rawInput.expectedRevision}, current is ${current.revision}.`,
             { expectedRevision: rawInput.expectedRevision, currentRevision: current.revision },
           );
+        }
+        if (current.state === 'running' && (requestedMode === undefined || requestedMode === current.mode)) {
+          if (needsEmbeddedAccountPage(current)) {
+            const next = structuredClone(current);
+            const pageReady = await prepareAccountPage(next, modeAvailability);
+            if (next.browserPageId !== current.browserPageId) {
+              next.updatedAt = now();
+              next.revision = current.revision + 1;
+              const view = await commitRun(current, next, { centerStatus, modeAvailability });
+              return { ...view, applied: true };
+            }
+            if (!pageReady) {
+              const { browserPageId: _unconfirmedPage, ...view } = buildView(botId, current, { centerStatus, modeAvailability });
+              return { ...view, applied: false, idempotent: true };
+            }
+          }
+          return {
+            ...buildView(botId, current, { centerStatus, modeAvailability }),
+            applied: false,
+            idempotent: true,
+          };
         }
         const ts = now();
         let next = reviveRun(current, 'owner', { action: 'resume' }, ts);
@@ -858,7 +906,7 @@ export function createGoogleSetupService(options = {}) {
           delete next.personStep;
           next.answers.path = { values: [requestedMode], at: ts };
         }
-        const view = await commitRun(current, next, { centerStatus, modeAvailability });
+        const view = await commitRun(current, next, { centerStatus, modeAvailability, prepareBrowser: true });
         return { ...view, applied: true };
       }
 
@@ -903,6 +951,7 @@ export function createGoogleSetupService(options = {}) {
           const view = await commitRun(current, revived, {
             centerStatus,
             modeAvailability,
+            prepareBrowser: true,
             extraEvent: { type: 'owner-answer', card, values },
           });
           return { ...view, applied: true };
@@ -995,6 +1044,7 @@ export function createGoogleSetupService(options = {}) {
         const view = await commitRun(current, next, {
           centerStatus,
           modeAvailability,
+          prepareBrowser: true,
           extraEvent: { type: 'owner-answer', card, values },
         });
         return { ...view, applied: true };
@@ -1113,7 +1163,7 @@ export function createGoogleSetupService(options = {}) {
         }
         next.updatedAt = ts;
         next.revision = current.revision + 1;
-        const view = await commitRun(current, next, { centerStatus, modeAvailability });
+        const view = await commitRun(current, next, { centerStatus, modeAvailability, prepareBrowser: true });
         return { ...view, applied: true };
       }
 
